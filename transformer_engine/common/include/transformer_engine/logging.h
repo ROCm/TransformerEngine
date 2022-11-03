@@ -34,9 +34,15 @@ inline void check_cuda_(cudaError_t status) {
 }
 
 inline void check_cublas_(cublasStatus_t status) {
+    #ifdef USE_ROCM
+    if ( status != rocblas_status_success ) {
+        NVTE_ERROR("ROCBLAS Error: " + std::string(rocblas_status_to_string(status)));
+    }
+    #else
     if ( status != CUBLAS_STATUS_SUCCESS ) {
         NVTE_ERROR("CUBLAS Error: " + std::string(cublasGetStatusString(status)));
     }
+    #endif
 }
 
 }  // namespace

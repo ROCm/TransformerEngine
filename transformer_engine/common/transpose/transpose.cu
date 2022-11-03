@@ -273,9 +273,11 @@ void transpose(const Tensor &input,
                            num_rows % (nvec_out * THREADS_PER_WARP) == 0;
 
     if (full_tile) {
+      #ifndef USE_ROCM
       cudaFuncSetAttribute(transpose_kernel<nvec_in, nvec_out, fp32, Type, Type>,
                            cudaFuncAttributePreferredSharedMemoryCarveout,
                            100);
+      #endif
       transpose_kernel<nvec_in, nvec_out, fp32, Type, Type>
         <<<n_blocks,
            cast_transpose_num_threads,
@@ -286,9 +288,11 @@ void transpose(const Tensor &input,
             reinterpret_cast<Type *>(transposed_output->dptr),
             row_length, num_rows, n_tiles);
     } else {
+      #ifndef USE_ROCM
       cudaFuncSetAttribute(transpose_kernel_notaligned<nvec_in, nvec_out, fp32, Type, Type>,
                            cudaFuncAttributePreferredSharedMemoryCarveout,
                            100);
+      #endif
       transpose_kernel_notaligned<nvec_in, nvec_out, fp32, Type, Type>
         <<<n_blocks,
            cast_transpose_num_threads,

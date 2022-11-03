@@ -14,7 +14,7 @@ from setuptools import setup, find_packages, Extension
 from setuptools.command.build_ext import build_ext
 from distutils.version import LooseVersion
 from distutils.file_util import copy_file
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME, ROCM_HOME
 
 path = os.path.dirname(os.path.realpath(__file__))
 
@@ -23,10 +23,10 @@ with open(path + "/VERSION", "r") as f:
 
 def get_cuda_bare_metal_version(cuda_dir):
     raw_output = subprocess.check_output(
-        [cuda_dir + "/bin/nvcc", "-V"], universal_newlines=True
+        [cuda_dir + "/bin/hipcc", "--version"], universal_newlines=True
     )
     output = raw_output.split()
-    release_idx = output.index("release") + 1
+    release_idx = output.index("version:") + 1
     release = output[release_idx].split(".")
     bare_metal_major = release[0]
     bare_metal_minor = release[1][0]
@@ -34,14 +34,14 @@ def get_cuda_bare_metal_version(cuda_dir):
 
 
 def append_nvcc_threads(nvcc_extra_args):
-    _, bare_metal_major, bare_metal_minor = get_cuda_bare_metal_version(CUDA_HOME)
+    _, bare_metal_major, bare_metal_minor = get_cuda_bare_metal_version(ROCM_HOME)
     if int(bare_metal_major) >= 11 and int(bare_metal_minor) >= 2:
         return nvcc_extra_args + ["--threads", "4"]
     return nvcc_extra_args
 
 
 def extra_gencodes(cc_flag):
-    _, bare_metal_major, bare_metal_minor = get_cuda_bare_metal_version(CUDA_HOME)
+    _, bare_metal_major, bare_metal_minor = get_cuda_bare_metal_version(ROCM_HOME)
     if int(bare_metal_major) >= 11:
         cc_flag.append("-gencode")
         cc_flag.append("arch=compute_80,code=sm_80")
@@ -53,8 +53,8 @@ def extra_gencodes(cc_flag):
 def extra_compiler_flags():
     return [
         "-O3",
-        "-gencode",
-        "arch=compute_70,code=sm_70",
+        #"-gencode",
+        #"arch=compute_70,code=sm_70",
         "-U__CUDA_NO_HALF_OPERATORS__",
         "-U__CUDA_NO_HALF_CONVERSIONS__",
         "-U__CUDA_NO_BFLOAT16_OPERATORS__",
@@ -62,9 +62,9 @@ def extra_compiler_flags():
         "-U__CUDA_NO_BFLOAT162_OPERATORS__",
         "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
         "-I./transformer_engine/common/layer_norm/",
-        "--expt-relaxed-constexpr",
-        "--expt-extended-lambda",
-        "--use_fast_math",
+        #"--expt-relaxed-constexpr",
+        #"--expt-extended-lambda",
+        #"--use_fast_math",
     ]
 
 

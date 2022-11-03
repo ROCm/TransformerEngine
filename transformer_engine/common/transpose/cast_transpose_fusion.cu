@@ -56,7 +56,11 @@ inline __device__ void cast_and_transpose_regs_partial_dbias(const IVec (&in)[nv
 #pragma unroll
   for (unsigned int j = 0; j < nvec_in; ++j) {
     CType elt = step_dbias.data.elt[j];
+    #ifdef USE_ROCM
+    elt = __shfl(elt, dbias_shfl_src_lane, 32);  // shuffle data in warp
+    #else
     elt = __shfl_sync(0xffffffff, elt, dbias_shfl_src_lane);  // shuffle data in warp
+    #endif
     out_dbias.data.elt[j] += elt;
   }
 }
@@ -574,18 +578,22 @@ void cast_transpose_dbias(const Tensor &input,
       param.workspace = reinterpret_cast<ComputeType *>(workspace->dptr);
 
       if (full_tile) {
+	#ifndef USE_ROCM
         cudaFuncSetAttribute(cast_transpose_dbias_kernel<nvec_in, nvec_out, Param>,
                              cudaFuncAttributePreferredSharedMemoryCarveout,
                              100);
+	#endif
         cast_transpose_dbias_kernel<nvec_in, nvec_out, Param>
           <<<n_blocks,
              cast_transpose_num_threads,
              shared_size_transpose,
              stream>>>(param, row_length, num_rows, n_tiles);
       } else {
+	#ifndef USE_ROCM
         cudaFuncSetAttribute(cast_transpose_dbias_kernel_notaligned<nvec_in, nvec_out, Param>,
                              cudaFuncAttributePreferredSharedMemoryCarveout,
                              100);
+	#endif
         cast_transpose_dbias_kernel_notaligned<nvec_in, nvec_out, Param>
           <<<n_blocks,
              cast_transpose_num_threads,
@@ -1053,18 +1061,22 @@ void cast_transpose_dbias_dgelu(const Tensor &input,
       param.scale_inv = reinterpret_cast<ComputeType *>(scale_inv->dptr);
       param.workspace = reinterpret_cast<ComputeType *>(workspace->dptr);
       if (full_tile) {
+	#ifndef USE_ROCM
         cudaFuncSetAttribute(cast_transpose_dbias_dgelu_kernel<nvec_in, nvec_out, Param>,
                              cudaFuncAttributePreferredSharedMemoryCarveout,
                              100);
+	#endif
         cast_transpose_dbias_dgelu_kernel<nvec_in, nvec_out, Param>
           <<<n_blocks,
           cast_transpose_num_threads,
           shared_size_transpose,
           stream>>>(param, row_length, num_rows, n_tiles);
       } else {
+	#ifndef USE_ROCM
         cudaFuncSetAttribute(cast_transpose_dbias_dgelu_kernel_notaligned<nvec_in, nvec_out, Param>,
                              cudaFuncAttributePreferredSharedMemoryCarveout,
                              100);
+	#endif
         cast_transpose_dbias_dgelu_kernel_notaligned<nvec_in, nvec_out, Param>
           <<<n_blocks,
           cast_transpose_num_threads,

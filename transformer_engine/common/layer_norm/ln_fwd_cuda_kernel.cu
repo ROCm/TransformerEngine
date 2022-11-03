@@ -39,7 +39,7 @@ void launch_tuned_(LaunchParams<FwdParams> &launch_params, const bool configure_
 
     if ( configure_params ) {
         int ctas_per_sm;
-        cudaError status_ = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        cudaError_t status_ = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
             &ctas_per_sm, kernel, Kernel_traits::THREADS_PER_CTA, Kernel_traits::SMEM_BYTES_FWD);
         launch_params.params.ctas_per_row = CTAS_PER_ROW;
         launch_params.params.ctas_per_col = launch_params.multiprocessorCount *
@@ -58,8 +58,10 @@ void launch_tuned_(LaunchParams<FwdParams> &launch_params, const bool configure_
     }
 
     if ( Kernel_traits::SMEM_BYTES_FWD >= 48 * 1024 ) {
+        #ifndef USE_ROCM
         NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                         Kernel_traits::SMEM_BYTES_FWD));
+	#endif
     }
     auto stream = launch_params.stream;
     auto ctas_per_col = launch_params.params.ctas_per_col;
@@ -110,7 +112,7 @@ void launch_general_(LaunchParams<FwdParams> &launch_params, const bool configur
     int ctas_per_row = launch_params.params.ctas_per_row;
     if ( configure_params ) {
         int ctas_per_sm;
-        cudaError status_ = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        cudaError_t status_ = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
             &ctas_per_sm, kernel, Kernel_traits::THREADS_PER_CTA, 0);
         const int max_ctas = launch_params.multiprocessorCount * ctas_per_sm;
         ctas_per_row = ceil_div(cols, HIDDEN_SIZE);
@@ -152,6 +154,7 @@ void launch_general_(LaunchParams<FwdParams> &launch_params, const bool configur
 // Create tuned launch function and register. Macro signature:
 //  HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, CTAS_PER_ROW, WARPS_M, WARPS_N, BYTES_PER_LDG
 
+#ifndef USE_ROCM
 REGISTER_FWD_TUNED_LAUNCHER(768, bf16, bf16, fp8e4m3, fp32, 1, 4, 1, 16);
 REGISTER_FWD_TUNED_LAUNCHER(1024, bf16, bf16, fp8e4m3, fp32, 1, 4, 1, 16);
 REGISTER_FWD_TUNED_LAUNCHER(1536, bf16, bf16, fp8e4m3, fp32, 1, 4, 1, 16);
@@ -177,6 +180,7 @@ REGISTER_FWD_TUNED_LAUNCHER(32768, bf16, bf16, fp8e4m3, fp32, 4, 1, 4, 16);
 REGISTER_FWD_TUNED_LAUNCHER(40960, bf16, bf16, fp8e4m3, fp32, 4, 1, 4, 16);
 REGISTER_FWD_TUNED_LAUNCHER(49152, bf16, bf16, fp8e4m3, fp32, 4, 1, 4, 16);
 REGISTER_FWD_TUNED_LAUNCHER(65536, bf16, bf16, fp8e4m3, fp32, 8, 1, 4, 16);
+#endif
 
 REGISTER_FWD_TUNED_LAUNCHER(768, fp16, fp16, fp8e4m3, fp32, 1, 4, 1, 16);
 REGISTER_FWD_TUNED_LAUNCHER(1024, fp16, fp16, fp8e4m3, fp32, 1, 4, 1, 16);

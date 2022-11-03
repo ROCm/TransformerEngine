@@ -7,7 +7,10 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_UTILS_CUH_
 #define TRANSFORMER_ENGINE_COMMON_UTILS_CUH_
 
+#ifndef USE_ROCM
 #include <cuda_bf16.h>
+#endif
+
 #include <cuda_fp16.h>
 #include <cstdint>
 #include <cassert>
@@ -121,22 +124,39 @@ struct Sum {
 
 template<typename T>
 inline __device__ T warp_shuffle_xor(const T & x, uint32_t idx) {
+    #ifdef USE_ROCM
+    return __shfl_xor(x, idx, 32);
+    #else
     return __shfl_xor_sync(uint32_t(-1), x, idx);
+    #endif
 }
 
 template<>
 inline __device__ float2 warp_shuffle_xor<float2>(const float2 & x, uint32_t idx) {
+    #ifdef USE_ROCM
+    return { warp_shuffle_xor<float>(x.x, idx), warp_shuffle_xor<float>(x.y, idx) };
+    #else
     return { warp_shuffle_xor(x.x, idx), warp_shuffle_xor(x.y, idx) };
+    #endif
 }
 
 template<typename T>
 inline __device__ T warp_shuffle_down(const T & x, uint32_t idx) {
+    #ifdef USE_ROCM
+    return __shfl_down(x, idx, 32);
+    #else
     return __shfl_down_sync(uint32_t(-1), x, idx);
+    #endif
 }
 
 template<>
 inline __device__ float2 warp_shuffle_down<float2>(const float2 & x, uint32_t idx) {
+    #ifdef USE_ROCM
+    return { warp_shuffle_down<float>(x.x, idx), warp_shuffle_down<float>(x.y, idx) };
+    #else
     return { warp_shuffle_down(x.x, idx), warp_shuffle_down(x.y, idx) };
+    #endif
+
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -221,10 +241,12 @@ struct TypeToVec2<half> {
     using Type = half2;
 };
 
+#ifndef USE_ROCM
 template<>
 struct TypeToVec2<nv_bfloat16> {
     using Type = nv_bfloat162;
 };
+#endif
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -274,6 +296,7 @@ struct Converter<float2, half2>{
     }
 };
 
+#ifndef USE_ROCM
 template<>
 struct Converter<float2, nv_bfloat162>{
     static inline __device__ nv_bfloat162 convert(const float2 &x) {
@@ -290,6 +313,7 @@ struct Converter<float2, nv_bfloat162>{
 #endif
     }
 };
+#endif
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -322,6 +346,14 @@ struct Vec {
     };
 
     Alias_type data;
+
+    #ifdef USE_ROCM
+    __HOST_DEVICE__
+    Vec& operator=(const Vec& rhs) {
+	data.vec = rhs.data.vec;
+	return *this;
+    }
+    #endif
 
     template<typename S>
     inline __device__ void to(Vec<S, NUM_ELT> &other) {  // NOLINT(*)
@@ -408,10 +440,12 @@ struct InterCTASync {
     }
 
     inline __device__ void spin_wait_(int *barrier, int step, int expected) {
+	#ifndef USE_ROCM
         asm volatile("red.release.gpu.global.add.s32 [%0], %1;" ::"l"(barrier), "r"(step));
         for ( int found = -1; found != expected; ) {
             asm volatile("ld.global.acquire.gpu.b32 %0, [%1];" : "=r"(found) : "l"(barrier));
         }
+	#endif
     }
 
     inline __device__ void sync() {
@@ -682,8 +716,13 @@ inline __device__ void warp_chan_upd_dynamic(T &m_a, T &m2_a, T &n_a, int num_ac
         m2_a = m2_ab;
     }
     // Intra-warp broadcast (only lane 0 has valid stats).
+    #ifdef USE_ROCM
+    m_a = __shfl(m_a, 0, 32);
+    m2_a = __shfl(m2_a, 0, 32);
+    #else
     m_a = __shfl_sync(uint32_t(-1), m_a, 0);
     m2_a = __shfl_sync(uint32_t(-1), m2_a, 0);
+    #endif
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -859,7 +898,11 @@ __device__ __forceinline__ float warp_reduce_max(const float m) {
     float tmp = m;
 #pragma unroll
     for (int delta = num_elems/2; delta > 0; delta /= 2) {
+	#ifdef USE_ROCM
+        const float other_m = __shfl_down(tmp, delta, 32);
+        #else
         const float other_m = __shfl_down_sync(0xFFFFFFFF, tmp, delta);
+	#endif
         __builtin_assume(tmp >= 0);
         __builtin_assume(other_m >= 0);
         tmp = fmaxf(tmp, other_m);
