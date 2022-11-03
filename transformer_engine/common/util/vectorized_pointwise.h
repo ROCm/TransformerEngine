@@ -194,12 +194,14 @@ __global__ void unary_kernel(const InputType *input,
   VectorizedStorer<OutputType, nvec, aligned> storer(output, N);
   ComputeType max = 0;
   ComputeType s = 0;
+  /*
   if constexpr (is_fp8<OutputType>::value) {
       if (scale != nullptr) s = *scale;
       if (blockIdx.x == 0 && threadIdx.x == 0 && scale_inv != nullptr) {
         reciprocal<ComputeType>(scale_inv, s);
       }
   }
+  */
   const int warp_id = threadIdx.x / THREADS_PER_WARP;
 
   const size_t M = num_aligned_elements;
@@ -212,17 +214,20 @@ __global__ void unary_kernel(const InputType *input,
     for (int i = 0; i < nvec; ++i) {
       const ComputeType val = static_cast<ComputeType>(loader.separate()[i]);
       ComputeType temp = OP(val, p);
+      /*
       if constexpr (is_fp8<OutputType>::value) {
         __builtin_assume(max >= 0);
         max = fmaxf(fabsf(temp), max);
 
         temp = temp * s;
       }
+      */
 
       storer.separate()[i] = static_cast<OutputType>(temp);
     }
     storer.store(tid, N);
   }
+#if 0
   if constexpr (is_fp8<OutputType>::value) {
     /* warp tile amax reduce*/
     max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
@@ -232,6 +237,7 @@ __global__ void unary_kernel(const InputType *input,
         atomicMaxFloat(amax, max);
     }
   }
+#endif
 }
 
 namespace {

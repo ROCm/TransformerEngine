@@ -172,7 +172,7 @@ std::vector<at::Tensor> fused_cast_transpose_bgrad_dgelu(at::Tensor grad_output,
   return {grad_bias, dgelu, dgelu_transpose};
 }
 
-
+#if 0
 at::Tensor fp8_transpose(at::Tensor input,
                          transformer_engine::DType otype
 ) {
@@ -218,7 +218,7 @@ at::Tensor fp8_gelu(at::Tensor input,
 
   return output;
 }
-
+#endif
 
 std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
                                       const at::Tensor &x,
@@ -275,7 +275,7 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
     return { dx, dgamma, dbeta };
 }
 
-
+#if 0
 std::vector<at::Tensor> layernorm_fwd_fp8(const at::Tensor &input,
                                           const at::Tensor &weight,
                                           const at::Tensor &bias,
@@ -311,7 +311,7 @@ std::vector<at::Tensor> layernorm_fwd_fp8(const at::Tensor &input,
 
     return {ln_out, mu, rsigma};
 }
-
+#endif
 
 std::vector<at::Tensor> layernorm_fwd(const at::Tensor &input,
                                       const at::Tensor &weight,
@@ -344,7 +344,7 @@ std::vector<at::Tensor> layernorm_fwd(const at::Tensor &input,
     return {ln_out, mu, rsigma};
 }
 
-
+#if 0
 at::Tensor cast_to_fp8(const at::Tensor &input,
                        const at::Tensor &scale,
                        at::Tensor amax,
@@ -391,11 +391,11 @@ at::Tensor cast_from_fp8(const at::Tensor &input,
 
     return output;
 }
-
+#endif
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Granular functions
-  m.def("layernorm_fwd_fp8", &layernorm_fwd_fp8, "LN FWD FP8");
+  //m.def("layernorm_fwd_fp8", &layernorm_fwd_fp8, "LN FWD FP8");
   m.def("layernorm_bwd", &layernorm_bwd, "LN BWD");
   m.def("layernorm_fwd", &layernorm_fwd, "LN FWD");
   m.def("fused_cast_transpose", &fused_cast_transpose, "Fused Cast + Transpose");
@@ -403,28 +403,29 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                                               "Fused Cast + Transpose + BGRAD");
   m.def("fused_cast_transpose_bgrad_dgelu", &fused_cast_transpose_bgrad_dgelu,
                                               "Fused Cast + Transpose + BGRAD + DGELU");
-  m.def("cast_to_fp8", &cast_to_fp8, "Cast to FP8");
-  m.def("cast_from_fp8", &cast_from_fp8, "Cast from FP8");
+  //m.def("cast_to_fp8", &cast_to_fp8, "Cast to FP8");
+  //m.def("cast_from_fp8", &cast_from_fp8, "Cast from FP8");
   m.def("te_gemm", &te_gemm, "CublasLt GEMM");
-  m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O");
-  m.def("fp8_gelu", &fp8_gelu, "GeLU with FP8 output");
+  //m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O");
+  //m.def("fp8_gelu", &fp8_gelu, "GeLU with FP8 output");
 
   // Data structures
+  /*
   py::class_<transformer_engine::FP8TensorMeta>(m, "FP8TensorMeta")
     .def(py::init<>())
     .def_readwrite("scale", &transformer_engine::FP8TensorMeta::scale)
     .def_readwrite("scale_inv", &transformer_engine::FP8TensorMeta::scale_inv)
-    .def_readwrite("amax_history", &transformer_engine::FP8TensorMeta::amax_history);
+    .def_readwrite("amax_history", &transformer_engine::FP8TensorMeta::amax_history);*/
 
   py::enum_<transformer_engine::DType>(m, "DType")
     .value("kByte", transformer_engine::DType::kByte)
     .value("kInt32", transformer_engine::DType::kInt32)
     .value("kFloat32", transformer_engine::DType::kFloat32)
     .value("kFloat16", transformer_engine::DType::kFloat16)
-    .value("kBFloat16", transformer_engine::DType::kBFloat16)
-    .value("kFloat8E4M3", transformer_engine::DType::kFloat8E4M3)
-    .value("kFloat8E5M2", transformer_engine::DType::kFloat8E5M2);
-
+    .value("kBFloat16", transformer_engine::DType::kBFloat16);
+    //.value("kFloat8E4M3", transformer_engine::DType::kFloat8E4M3)
+    //.value("kFloat8E5M2", transformer_engine::DType::kFloat8E5M2);
+  /*
   py::enum_<transformer_engine::FP8FwdTensors>(m, "FP8FwdTensors")
     .value("GEMM1_INPUT", transformer_engine::FP8FwdTensors::GEMM1_INPUT)
     .value("GEMM1_WEIGHT", transformer_engine::FP8FwdTensors::GEMM1_WEIGHT)
@@ -433,5 +434,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   py::enum_<transformer_engine::FP8BwdTensors>(m, "FP8BwdTensors")
     .value("GRAD_OUTPUT1", transformer_engine::FP8BwdTensors::GRAD_OUTPUT1)
-    .value("GRAD_OUTPUT2", transformer_engine::FP8BwdTensors::GRAD_OUTPUT2);
+    .value("GRAD_OUTPUT2", transformer_engine::FP8BwdTensors::GRAD_OUTPUT2);*/
 }

@@ -89,6 +89,15 @@ Clone the repository and inside it type:
 
   pip install .
 
+Manual build
+
+.. code-block:: bash
+
+  mkdir -p transformer_engine/common/build
+  cd transformer_engine/common/build
+  PYTORCH_ROCM_ARCH='gfx908;gfx90a' cmake ..
+  make
+
 User Guide
 ----------
 

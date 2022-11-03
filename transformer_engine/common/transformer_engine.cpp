@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <transformer_engine/transformer_engine.h>
-#include "common.h"
+#include <transformer_engine/transformer_engine_hip.h>
+#include "common_hip.h"
 
 namespace transformer_engine {
 
