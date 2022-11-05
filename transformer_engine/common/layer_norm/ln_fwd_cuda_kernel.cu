@@ -39,7 +39,7 @@ void launch_tuned_(LaunchParams<FwdParams> &launch_params, const bool configure_
 
     if ( configure_params ) {
         int ctas_per_sm;
-        cudaError_t status_ = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        cudaError status_ = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
             &ctas_per_sm, kernel, Kernel_traits::THREADS_PER_CTA, Kernel_traits::SMEM_BYTES_FWD);
         launch_params.params.ctas_per_row = CTAS_PER_ROW;
         launch_params.params.ctas_per_col = launch_params.multiprocessorCount *
@@ -112,7 +112,7 @@ void launch_general_(LaunchParams<FwdParams> &launch_params, const bool configur
     int ctas_per_row = launch_params.params.ctas_per_row;
     if ( configure_params ) {
         int ctas_per_sm;
-        cudaError_t status_ = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        cudaError status_ = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
             &ctas_per_sm, kernel, Kernel_traits::THREADS_PER_CTA, 0);
         const int max_ctas = launch_params.multiprocessorCount * ctas_per_sm;
         ctas_per_row = ceil_div(cols, HIDDEN_SIZE);

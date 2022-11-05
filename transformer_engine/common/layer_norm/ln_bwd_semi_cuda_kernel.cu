@@ -40,7 +40,7 @@ void launch_tuned_(LaunchParams<BwdParams> &launch_params, const bool configure_
 
     if ( configure_params ) {
         int ctas_per_sm;
-        cudaError_t status_ = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        cudaError status_ = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
             &ctas_per_sm, kernel, Kernel_traits::THREADS_PER_CTA, Kernel_traits::SMEM_BYTES);
         launch_params.params.ctas_per_row = CTAS_PER_ROW;
         launch_params.params.ctas_per_col = launch_params.multiprocessorCount
