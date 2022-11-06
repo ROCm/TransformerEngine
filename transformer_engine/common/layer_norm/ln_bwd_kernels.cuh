@@ -130,6 +130,7 @@ void ln_bwd_tuned_kernel(layer_norm::BwdParams params) {
                 compute_t dy_tmp = dy[it * NUM_ELTS + jt];
                 compute_t y_tmp = y[it * NUM_ELTS + jt];
                 compute_t dx_tmp = rs_r * (dy_tmp - (mdyy_local * y_tmp + mdy_local));
+		// HIP-TODO: dx[it].data.elt[jt] = Converter<float, hip_bfloat16>::convert(dx_tmp);
                 dx[it].data.elt[jt] = dx_tmp;
             }
             dx[it].store_to(params.dx, idx);

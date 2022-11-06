@@ -58,8 +58,10 @@ void launch_tuned_(LaunchParams<FwdParams> &launch_params, const bool configure_
     }
 
     if ( Kernel_traits::SMEM_BYTES_FWD >= 48 * 1024 ) {
+    #ifndef __HIP_PLATFORM_HCC__
         NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                         Kernel_traits::SMEM_BYTES_FWD));
+    #endif
     }
     auto stream = launch_params.stream;
     auto ctas_per_col = launch_params.params.ctas_per_col;
