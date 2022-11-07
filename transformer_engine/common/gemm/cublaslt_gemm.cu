@@ -7,12 +7,41 @@
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/logging.h>
 #include <transformer_engine/gemm.h>
+#ifndef __HIP_PLATFORM_HCC__
 #include <cublasLt.h>
+#endif
 #include <cublas_v2.h>
 #include "../common.h"
 
 namespace transformer_engine {
-
+#ifdef __HIP_PLATFORM_HCC__
+void cublas_gemm(void* A,
+                 void* A_scale_inverse,
+                 void* B,
+                 void *B_scale_inverse,
+                 void* D,
+                 void* bias_ptr,
+                 void* pre_gelu_out,
+                 int m, int n, int k,
+                 int lda, int ldb, int ldd,
+                 rocblas_datatype A_type,
+                 rocblas_datatype B_type,
+                 rocblas_datatype D_type,
+                 rocblas_datatype bias_type,
+                 rocblas_operation transa,
+                 rocblas_operation transb,
+                 bool bias,
+                 bool gelu,
+                 bool grad,
+                 void* workspace,
+                 size_t workspaceSize,
+                 bool use_fp8,
+                 bool accumulate,
+                 bool use_split_accumulator,
+                 cudaStream_t stream
+) { // HIP-TODO
+}
+#else
 void cublas_gemm(void* A,
                  void* A_scale_inverse,
                  void* B,
@@ -187,11 +216,31 @@ void cublas_gemm(void* A,
     NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Adesc));
     NVTE_CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
 }
-
+#endif
 }  // namespace transformer_engine
 
 namespace {
-
+#ifdef __HIP_PLATFORM_HCC__
+rocblas_datatype get_cuda_dtype(const transformer_engine::DType t) {
+  using namespace transformer_engine;
+  switch (t) {
+    case DType::kFloat16:
+      return rocblas_datatype_f16_r;
+    case DType::kFloat32:
+      return rocblas_datatype_f32_r;
+    case DType::kBFloat16:
+      return rocblas_datatype_bf16_r;
+    /* HIP-TODO: Add back after installing rocblas with FP8 types
+    case DType::kFloat8E4M3:
+      return CUDA_R_8F_E4M3;
+    case DType::kFloat8E5M2:
+      return CUDA_R_8F_E5M2;
+    */
+    default:
+      NVTE_ERROR("Invalid type");
+  }
+}
+#else
 cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
   using namespace transformer_engine;
   switch (t) {
@@ -209,7 +258,7 @@ cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
       NVTE_ERROR("Invalid type");
   }
 }
-
+#endif
 bool is_fp8_dtype(const transformer_engine::DType t) {
   return t == transformer_engine::DType::kFloat8E4M3 ||
          t == transformer_engine::DType::kFloat8E5M2;

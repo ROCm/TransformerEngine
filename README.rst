@@ -89,6 +89,21 @@ Clone the repository and inside it type:
 
   pip install .
 
+Build libtransformer_engine.so
+
+.. code-block:: bash
+  git clone https://github.com/ROCmSoftwarePlatform/TransformerEngine-private.git
+  cd TransformerEngine-private
+  git checkout <branch>
+  git submodule sync
+  git submodule update --init --recursive
+
+  export PYTORCH_ROCM_ARCH='gfx908;gfx90a'
+  mkdir -p transformer_engine/common/build
+  cd transformer_engine/common/build
+  cmake ..
+  make
+
 User Guide
 ----------
 
