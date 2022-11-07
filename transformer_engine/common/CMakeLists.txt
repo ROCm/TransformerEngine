@@ -53,18 +53,18 @@ else()
   endif()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CMAKE_HIP_FLAGS}")
 
-  add_definitions(-D__HIP_NO_HALF_OPERATORS__=1)
-  #add_definitions(-D__HIP_NO_HALF_CONVERSIONS__=1)
-  add_definitions(-D__HIP_NO_BFLOAT16_CONVERSIONS__=1)
-  add_definitions(-D__HIP_NO_HALF2_OPERATORS__=1)
+  # add_definitions(-D__HIP_NO_HALF_OPERATORS__=1)
+  # add_definitions(-D__HIP_NO_HALF_CONVERSIONS__=1)
+  # add_definitions(-D__HIP_NO_BFLOAT16_CONVERSIONS__=1)
+  # add_definitions(-D__HIP_NO_HALF2_OPERATORS__=1)
 
   set(HIP_HCC_FLAGS "${CMAKE_HIP_FLAGS} -mavx2 -mf16c -mfma -std=c++17")
   # Ask hcc to generate device code during compilation so we can use
   # host linker to link.
   set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} -fno-gpu-rdc -Wno-defaulted-function-deleted")
-  foreach(fbgemm_rocm_arch ${TE_ROCM_ARCH})
+  foreach(rocm_arch ${TE_ROCM_ARCH})
     # if CMAKE_CXX_FLAGS has --offload-arch set already, better to rm first
-    set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} --offload-arch=${fbgemm_rocm_arch}")
+    set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} --offload-arch=${rocm_arch}")
   endforeach()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${HIP_HCC_FLAGS}")
 endif()
