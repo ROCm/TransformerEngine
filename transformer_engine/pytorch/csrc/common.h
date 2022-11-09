@@ -21,7 +21,13 @@
 #include <torch/torch.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
+
+#ifndef USE_ROCM
 #include <cuda_bf16.h>
+#else
+#include <hip/hip_bfloat16.h>
+#endif
+
 #include <stdexcept>
 #include <memory>
 #include <iomanip>
