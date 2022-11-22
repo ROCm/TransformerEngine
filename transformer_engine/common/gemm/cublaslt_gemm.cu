@@ -97,12 +97,12 @@ float gelu_backward(float x, float dy)
 
 template <typename Tin, typename T>
 __global__ 
-void gelu_backward_kernel(const Tin* in, T* out, const T* __restrict pre_gelu_out, int m, int n) {
+void gelu_backward_kernel(const Tin* dy, T* out, const T* __restrict pre_gelu_out, int m, int n) {
   for(int id = blockIdx.x * blockDim.x + threadIdx.x; id < m * n; id += blockDim.x * gridDim.x)
   {
     Tin x = (Tin)(__ldg(&pre_gelu_out[id]));
-    Tin val = gelu_backward(x, in[id]); 
-    out[id] = (T)(val);
+    Tin dx = gelu_backward(x, dy[id]); 
+    out[id] = (T)(dx);
   }
 }
 
@@ -157,11 +157,10 @@ void add_bias_gelu_kernelLauncher(const Tin* in, T* out, T* pre_gelu_out, const 
   hipLaunchKernelGGL(( add_bias_gelu_kernel<Tin, T>), dim3(grid), dim3(block), 0, stream, in, out, pre_gelu_out, bias, m, n );
 
 }
-
+/*
 template <typename Tin, int THREADS_PER_BLOCK>
 __global__
 void bias_gradient_kernel(const Tin* in, float* out, int m, int n) {
-  //Size of workspace is sizeof(float)*m*BLOCKS_PER_ROW
   typedef hipcub::BlockReduce<float, THREADS_PER_BLOCK> BlockReduce;
   __shared__ typename BlockReduce::TempStorage block_temp_storage;
 
@@ -180,12 +179,36 @@ void bias_gradient_kernel(const Tin* in, float* out, int m, int n) {
   else {
     local_sum = BlockReduce(block_temp_storage).Sum(thread_data, n-(BLOCKS_PER_ROW-1)*THREADS_PER_BLOCK);
   }
-  // TODO: If T==fp16, better to first reduce in fp32 and then store into out[row_idx]
-  //if (col_idx % THREADS_PER_BLOCK == 0)
-    //atomicAdd(&out[row_idx], (T)local_sum);
-  // workspace[BLOCKS_PER_ROW][m];
   if (threadIdx.x == 0)
     atomicAdd(&out[row_idx], local_sum);
+
+
+}
+*/
+
+template <typename Tin, int THREADS_PER_BLOCK>
+__global__
+void bias_gradient_kernel(const Tin* in, float* out, int m, int n) {
+  typedef hipcub::BlockReduce<float, THREADS_PER_BLOCK> BlockReduce;
+  __shared__ typename BlockReduce::TempStorage block_temp_storage;
+
+  int BLOCKS_PER_COL = ceil(float(m)/THREADS_PER_BLOCK);
+  int THREADS_PER_COL = BLOCKS_PER_COL * THREADS_PER_BLOCK;
+  int idx = threadIdx.x + blockIdx.x * blockDim.x;
+  int col_idx = idx / THREADS_PER_COL;
+  int row_idx = idx % THREADS_PER_COL;
+  float thread_data;
+  if (row_idx < m)
+    thread_data = (float)in[row_idx * n + col_idx];
+  float local_sum;
+  if (row_idx < (BLOCKS_PER_COL-1) * THREADS_PER_BLOCK) {
+    local_sum = BlockReduce(block_temp_storage).Sum(thread_data);
+  }
+  else {
+    local_sum = BlockReduce(block_temp_storage).Sum(thread_data, m-(BLOCKS_PER_COL-1)*THREADS_PER_BLOCK);
+  }
+  if (threadIdx.x == 0)
+    atomicAdd(&out[col_idx], local_sum);
 
 
 }
@@ -194,8 +217,9 @@ template <typename Tin>
 void bias_gradient_kernelLauncher(const Tin* in, float* out, int m, int n, hipStream_t stream) { 
   dim3 block, grid;
   constexpr int THREADS_PER_BLOCK = 1024;
+  int BLOCKS_PER_COL = ceil(float(m)/THREADS_PER_BLOCK);
   block.x = THREADS_PER_BLOCK;
-  grid.x = ceil(m * n / 1024.);
+  grid.x = BLOCKS_PER_COL*n;
   hipLaunchKernelGGL(( bias_gradient_kernel<Tin, THREADS_PER_BLOCK>), dim3(grid), dim3(block), 0, stream, in, out, m, n);
 }
 
@@ -276,7 +300,7 @@ void cublas_gemm(void* A,
 
     void* D_temp;
     if ((bias || gelu) && (A_type==rocblas_datatype_f16_r && B_type==rocblas_datatype_f16_r && D_type==rocblas_datatype_f16_r)) {
-	hipMalloc(&D_temp, sizeof(float)*m*n);
+	NVTE_CHECK_CUDA( hipMalloc(&D_temp, sizeof(float)*m*n) );
     }
     else {
 	D_temp = D;
@@ -295,10 +319,12 @@ void cublas_gemm(void* A,
         if (grad) {
             // epilogue = CUBLASLT_EPILOGUE_DGELU_BGRAD;
 	    // Apply bias gradient to D_temp and store in bias_ptr; Apply GELU gradient to D_temp and store in D	
-	    // D_temp is transposed (TT), so shape is (n, m) in column major. So it will be reduced along axis=1
+	    // This case is NN
+	    // D_temp is of shape is (m, n) in column major and thus is of shape (n, m) in row major
+	    // The bias vector length is m. So it will be reduced along axis 0 in row major
 	    void* bias_tmp;
 	    if (D_type == rocblas_datatype_f16_r) {
-	      hipMalloc(&bias_tmp, sizeof(float)*m);
+	      NVTE_CHECK_CUDA( hipMalloc(&bias_tmp, sizeof(float)*m) );
 	    }
 	    else {
 	      bias_tmp = bias_ptr;
@@ -309,8 +335,8 @@ void cublas_gemm(void* A,
             TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
 		detail::bias_gradient_kernelLauncher<IType>(reinterpret_cast<const IType*>(D_temp), 
 					       reinterpret_cast<float*>(bias_tmp), 
-					       m, 
-					       n,
+					       n, 
+					       m,
 					       0);
             );
 
@@ -329,22 +355,23 @@ void cublas_gemm(void* A,
 			    0);
 		);  
 	      ); 
-	      hipDeviceSynchronize();
-	      hipFree(bias_tmp); 
+	      NVTE_CHECK_CUDA( hipDeviceSynchronize() );
+	      NVTE_CHECK_CUDA( hipFree(bias_tmp) ); 
 	    }
             TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
 	      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
 		detail::gelu_backward_kernelLauncher<IType, OType>(reinterpret_cast<const IType*>(D_temp), 
 					       reinterpret_cast<OType*>(D), 
 					       reinterpret_cast<const OType*>(pre_gelu_out), 
-					       m, 
-					       n,
+					       n, 
+					       m,
 					       0);
 	      );  
 	    ); 
         } else {
             // epilogue = CUBLASLT_EPILOGUE_GELU_AUX_BIAS;
 	    // Add bias_ptr to D_temp and store in pre_gelu_out, and apply GELU to the pre_gelu_output and then store in D
+	    // D_temp is of shape is (m, n) in column major and thus is of shape (n, m) in row major
 	    DType input_dtype = get_transformer_engine_dtype(rocblas_datatype_f32_r);
 	    DType output_dtype = get_transformer_engine_dtype(D_type);
             TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
@@ -353,8 +380,8 @@ void cublas_gemm(void* A,
 					       reinterpret_cast<OType*>(D), 
 					       reinterpret_cast<OType*>(pre_gelu_out), 
 					       reinterpret_cast<const OType*>(bias_ptr), 
-					       m, 
-					       n,
+					       n, 
+					       m,
 					       0);
               );
             );
@@ -364,10 +391,11 @@ void cublas_gemm(void* A,
             // grad output is always input B
             // epilogue = CUBLASLT_EPILOGUE_BGRADB;
 	    // Apply bias gradient to matrix B and store in bias_ptr, reduce along the k dimension, output bias length is n
-	    // As B is transposed, is shape (n, k). So it will be reduced with axis=1
+	    // As B is transposed, is of shape (n, k) in column major, and is of shape (k, n) in row major.
+	    // bias gradient vector length is n. So it will be reduced along axis 0 in row major.
 	    void * bias_tmp;
 	    if (B_type == rocblas_datatype_f16_r) {
-	      hipMalloc(&bias_tmp, sizeof(float)*k);
+	      NVTE_CHECK_CUDA( hipMalloc(&bias_tmp, sizeof(float)*n) );
 	    }
 	    else {
 	      bias_tmp = bias_ptr;
@@ -392,17 +420,18 @@ void cublas_gemm(void* A,
 			    reinterpret_cast<const fp32*>(0),
 			    reinterpret_cast<fp32*>(0),
 			    reinterpret_cast<fp32*>(0),
-			    k,
+			    n,
 			    {},
 			    0);
 		);  
 	      ); 
-	      hipDeviceSynchronize();
-	      hipFree(bias_tmp); 
+	      NVTE_CHECK_CUDA( hipDeviceSynchronize() );
+	      NVTE_CHECK_CUDA( hipFree(bias_tmp) ); 
 	    }
         } else {
             // epilogue = CUBLASLT_EPILOGUE_BIAS;
-	    // Broadcast bias and add it to D. The bias vector length is m 
+	    // Broadcast bias and add it to D_temp and store in D. The bias vector length is m 
+	    // D_temp is of shape is (m, n) in column major and thus is of shape (n, m) in row major
 	    DType input_dtype = get_transformer_engine_dtype(rocblas_datatype_f32_r);
 	    DType output_dtype = get_transformer_engine_dtype(D_type);
             TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
@@ -410,8 +439,8 @@ void cublas_gemm(void* A,
 		detail::add_bias_kernelLauncher<IType, OType>(reinterpret_cast<const IType*>(D_temp), 
 					       reinterpret_cast<OType*>(D), 
 					       reinterpret_cast<const OType*>(bias_ptr), 
-					       m, 
-					       n,
+					       n, 
+					       m,
 					       0);
               );
             );
@@ -420,6 +449,7 @@ void cublas_gemm(void* A,
         if (grad) {
             // epilogue = CUBLASLT_EPILOGUE_DGELU;
 	    // Take input from pre_gelu_out and apply GELU gradients to D_temp and store result in D
+	    // D_temp is of shape is (m, n) in column major and thus is of shape (n, m) in row major
 	    DType input_dtype = get_transformer_engine_dtype(rocblas_datatype_f32_r);
 	    DType output_dtype = get_transformer_engine_dtype(D_type);
             TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
@@ -427,14 +457,15 @@ void cublas_gemm(void* A,
 		detail::gelu_backward_kernelLauncher<IType, OType>(reinterpret_cast<const IType*>(D_temp), 
 					       reinterpret_cast<OType*>(D), 
 					       reinterpret_cast<const OType*>(pre_gelu_out), 
-					       m, 
-					       n,
+					       n, 
+					       m,
 					       0);
 	      );  
 	    ); 
         } else {
             // epilogue = CUBLASLT_EPILOGUE_GELU_AUX;
 	    // Store (quantized) D_temp in pre_gelu_out, and apply GELU to D_temp then store in D
+	    // D_temp is of shape is (m, n) in column major and thus is of shape (n, m) in row major
 	    constexpr int nvec = 32 / sizeof(float);
 	    DType input_dtype = get_transformer_engine_dtype(rocblas_datatype_f32_r);
 	    DType output_dtype = get_transformer_engine_dtype(D_type);
@@ -467,7 +498,7 @@ void cublas_gemm(void* A,
         }
     }
     if ((bias || gelu) && (A_type==rocblas_datatype_f16_r && B_type==rocblas_datatype_f16_r && D_type==rocblas_datatype_f16_r)) {
-      	hipFree(D_temp);
+      	NVTE_CHECK_CUDA( hipFree(D_temp) );
     }
 /*
     NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceDestroy(preference));
