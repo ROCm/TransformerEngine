@@ -306,12 +306,19 @@ void cublas_gemm(void* A,
 	D_temp = D;
     }
 
+    // When Ti=To=fp16 and there is no bias or gelu, D_temp points to D and we would like it to be fp16
+    rocblas_datatype D_temp_type = rocblas_datatype_f32_r;
+    if (!(bias || gelu) && (A_type==rocblas_datatype_f16_r && B_type==rocblas_datatype_f16_r && D_type==rocblas_datatype_f16_r)) {
+        D_temp_type = rocblas_datatype_f16_r;
+    }
+
+
     // D = alpha * (A * B) + beta * C
     // TODO: Can we search for rocblas_gemm_algo??
     NVTE_CHECK_CUBLAS(rocblas_gemm_ex(handle, transa, transb, m, n, k, &one,
                                   A, A_type, lda,
                                   B, B_type, ldb,
-                                  &beta, D_temp, rocblas_datatype_f32_r, ldd, D_temp, rocblas_datatype_f32_r, ldd,
+                                  &beta, D_temp, D_temp_type, ldd, D_temp, D_temp_type, ldd,
 				  computeType, rocblas_gemm_algo::rocblas_gemm_algo_standard,0,0));
     NVTE_CHECK_CUBLAS(rocblas_destroy_handle(handle));
 
