@@ -18,6 +18,7 @@
 #include<iostream>
 #endif
 
+
 namespace transformer_engine {
 
 
@@ -157,6 +158,25 @@ void add_bias_gelu_kernelLauncher(const Tin* in, T* out, T* pre_gelu_out, const 
   hipLaunchKernelGGL(( add_bias_gelu_kernel<Tin, T>), dim3(grid), dim3(block), 0, stream, in, out, pre_gelu_out, bias, m, n );
 
 }
+
+template <typename Tin, typename T>
+__global__ 
+void identity_kernel(const Tin* in, T* out, int n) {
+  for(int id = blockIdx.x * blockDim.x + threadIdx.x; id < n; id += blockDim.x * gridDim.x)
+  {
+    Tin val = in[id];
+    out[id] = (T)(val);
+  }
+}
+
+
+template <typename Tin, typename T>
+void identity_kernelLauncher(const Tin* in, T* out, int n, hipStream_t stream) {
+  dim3 block, grid;
+  block.x = 1024;
+  grid.x = ceil( n / 1024.);
+  hipLaunchKernelGGL(( identity_kernel<Tin, T>), dim3(grid), dim3(block), 0, stream, in, out, n );
+}
 /*
 template <typename Tin, int THREADS_PER_BLOCK>
 __global__
@@ -220,6 +240,7 @@ void bias_gradient_kernelLauncher(const Tin* in, float* out, int m, int n, hipSt
   int BLOCKS_PER_COL = ceil(float(m)/THREADS_PER_BLOCK);
   block.x = THREADS_PER_BLOCK;
   grid.x = BLOCKS_PER_COL*n;
+  NVTE_CHECK_CUDA( hipMemset(out, 0, n*sizeof(float)) );
   hipLaunchKernelGGL(( bias_gradient_kernel<Tin, THREADS_PER_BLOCK>), dim3(grid), dim3(block), 0, stream, in, out, m, n);
 }
 
@@ -329,6 +350,10 @@ void cublas_gemm(void* A,
 	    // This case is NN
 	    // D_temp is of shape is (m, n) in column major and thus is of shape (n, m) in row major
 	    // The bias vector length is m. So it will be reduced along axis 0 in row major
+	    // (TODO): The cuccrent bias gradient is applied to D_temp. It might need to go through GELU backward
+	    // first.
+	    // (TODO): The VectorziedUnaryKernelLauncher seems to be problematic. May need to replace with my
+	    // own kernel.
 	    void* bias_tmp;
 	    if (D_type == rocblas_datatype_f16_r) {
 	      NVTE_CHECK_CUDA( hipMalloc(&bias_tmp, sizeof(float)*m) );
@@ -347,10 +372,10 @@ void cublas_gemm(void* A,
 					       0);
             );
 
-	    constexpr int nvec = 32 / sizeof(float);
 	    if (D_type == rocblas_datatype_f16_r) {
 	      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
 		TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
+	          constexpr int nvec = 32 / sizeof(OType);
 		  VectorizedUnaryKernelLauncher<nvec, detail::Empty, detail::identity>(
 			    reinterpret_cast<const IType*>(bias_tmp),
 			    reinterpret_cast<OType*>(bias_ptr),
@@ -418,39 +443,16 @@ void cublas_gemm(void* A,
 					       0);
             );
 	    if (B_type == rocblas_datatype_f16_r) {
-	      constexpr int nvec = 32 / sizeof(float);
-	      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
 		TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
-		  VectorizedUnaryKernelLauncher<nvec, detail::Empty, detail::identity>(
-			    reinterpret_cast<const IType*>(bias_tmp),
-			    reinterpret_cast<OType*>(bias_ptr),
-			    reinterpret_cast<const fp32*>(0),
-			    reinterpret_cast<fp32*>(0),
-			    reinterpret_cast<fp32*>(0),
-			    n,
-			    {},
-			    0);
+		  detail::identity_kernelLauncher<float, OType>(reinterpret_cast<const float*>(bias_tmp), 
+			 reinterpret_cast<OType*>(bias_ptr),
+			 n,
+			 0);
 		);  
-	      ); 
 	      NVTE_CHECK_CUDA( hipDeviceSynchronize() );
 	      NVTE_CHECK_CUDA( hipFree(bias_tmp) ); 
 	    }
         } else {
-            // epilogue = CUBLASLT_EPILOGUE_BIAS;
-	    // Broadcast bias and add it to D_temp and store in D. The bias vector length is m 
-	    // D_temp is of shape is (m, n) in column major and thus is of shape (n, m) in row major
-	    DType input_dtype = get_transformer_engine_dtype(rocblas_datatype_f32_r);
-	    DType output_dtype = get_transformer_engine_dtype(D_type);
-            TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
-	      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
-		detail::add_bias_kernelLauncher<IType, OType>(reinterpret_cast<const IType*>(D_temp), 
-					       reinterpret_cast<OType*>(D), 
-					       reinterpret_cast<const OType*>(bias_ptr), 
-					       n, 
-					       m,
-					       0);
-              );
-            );
         }
     } else if (gelu) {
         if (grad) {
@@ -473,11 +475,13 @@ void cublas_gemm(void* A,
             // epilogue = CUBLASLT_EPILOGUE_GELU_AUX;
 	    // Store (quantized) D_temp in pre_gelu_out, and apply GELU to D_temp then store in D
 	    // D_temp is of shape is (m, n) in column major and thus is of shape (n, m) in row major
-	    constexpr int nvec = 32 / sizeof(float);
+	    // (TODO): The VectorziedUnaryKernelLauncher seems to be problematic. May need to replace with my
+	    // own kernel.
 	    DType input_dtype = get_transformer_engine_dtype(rocblas_datatype_f32_r);
 	    DType output_dtype = get_transformer_engine_dtype(D_type);
             TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
 	      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
+		constexpr int nvec = 32 / sizeof(OType);
 		VectorizedUnaryKernelLauncher<nvec, detail::Empty, detail::gelu>(
 			  reinterpret_cast<const IType*>(D_temp),
 			  reinterpret_cast<OType*>(D),
@@ -491,9 +495,10 @@ void cublas_gemm(void* A,
 	    ); 
             TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
 	      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
+		constexpr int nvec = 32 / sizeof(OType);
 		VectorizedUnaryKernelLauncher<nvec, detail::Empty, detail::identity>(
 			  reinterpret_cast<const IType*>(D_temp),
-			  reinterpret_cast<OType*>(D),
+			  reinterpret_cast<OType*>(pre_gelu_out),
 			  reinterpret_cast<const fp32*>(0),
 			  reinterpret_cast<fp32*>(0),
 			  reinterpret_cast<fp32*>(0),
@@ -793,6 +798,7 @@ void nvte_cublas_gemm(const NVTETensor A,
 	    << " grad=" << grad
 	    << " bias=" << (biasTensor->dptr != nullptr)
 	    << " gelu=" << (outputGelu->dptr != nullptr)
+	    << " accumulate=" << accumulate
 	    << std::endl;
 
   cublas_gemm(inputA->dptr, Ainvscale->dptr,
