@@ -8,7 +8,12 @@
 #include <transformer_engine/transformer_engine.h>
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
+#ifndef __HIP_PLATFORM_HCC__
 #include <cuda_bf16.h>
+#else
+#include <hip/hip_bfloat16.h>
+#include <cmath>
+#endif
 #include <memory>
 #include <iostream>
 #include <iomanip>
@@ -40,7 +45,11 @@ void compute_ref_stats(const InputType *data, float *mu, float *rsigma,
       sum += (current - m) * (current - m);
     }
     sum = sum / H;
+    #ifdef __HIP_PLATFORM_HCC__
+    compute_t rs = 1.0 / sqrtf(sum + epsilon);
+    #else
     compute_t rs = rsqrtf(sum + epsilon);
+    #endif
     rsigma[i] = rs;
   }
 }

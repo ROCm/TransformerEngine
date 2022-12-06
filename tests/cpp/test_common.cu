@@ -118,8 +118,13 @@ void compareResults(const std::string &name, const Tensor &test, const void *ref
     const T *test_data = test.cpu_dptr<T>();
     const T *ref_data = reinterpret_cast<const T*>(ref);
     for (size_t i = 0; i < N; ++i) {
+      #ifndef __HIP_PLATFORM_HCC__
       double t = static_cast<double>(test_data[i]);
       double r = static_cast<double>(ref_data[i]);
+      #else
+      double t = static_cast<double>(static_cast<float>(test_data[i]));
+      double r = static_cast<double>(static_cast<float>(ref_data[i]));
+      #endif
       bool mismatch = fabs(t - r) > atol && (r == 0 || fabs((t - r) / r) > rtol);
       /* For Float32 the floating point comparison is enough to error out */
       bool assertion = mismatch && test.dtype() == DType::kFloat32;
@@ -129,8 +134,13 @@ void compareResults(const std::string &name, const Tensor &test, const void *ref
         const double mean = (t + r) / 2;
         const double mean_p = mean >= 0 ? mean * (1 + 1e-6) : mean * (1 - 1e-6);
         const double mean_m = mean >= 0 ? mean * (1 - 1e-6) : mean * (1 + 1e-6);
+        #ifndef __HIP_PLATFORM_HCC__
         const double cast_mean_p = static_cast<double>(static_cast<T>(mean_p));
         const double cast_mean_m = static_cast<double>(static_cast<T>(mean_m));
+        #else
+        const double cast_mean_p = static_cast<double>(static_cast<float>(static_cast<T>(static_cast<float>(mean_p))));
+        const double cast_mean_m = static_cast<double>(static_cast<float>(static_cast<T>(static_cast<float>(mean_m))));
+        #endif
         assertion = !(cast_mean_m == std::min(t,r) && cast_mean_p == std::max(t,r));
       }
       ASSERT_FALSE(assertion) << "Error in tensor " << name << std::endl
@@ -165,7 +175,7 @@ void fillUniform(const Tensor &t) {
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(t.dtype(), T, {
       T *data = t.cpu_dptr<T>();
       for (size_t i = 0; i < size; ++i) {
-          data[i] = T(dis(gen));
+          data[i] = T(static_cast<float>(dis(gen)));
       }
   });
   t.from_cpu();
