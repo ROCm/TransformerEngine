@@ -4,3 +4,7 @@
 [submodule "3rdparty/hipify_torch"]
 	path = 3rdparty/hipify_torch
 	url = https://github.com/ROCmSoftwarePlatform/hipify_torch.git
+[submodule "examples/pytorch/minGPT"]
+	path = examples/pytorch/minGPT
+	url = https://github.com/HaiShaw/minGPT.git
+	branch = transformer-engine
