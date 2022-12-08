@@ -141,7 +141,15 @@ void compareResults(const std::string &name, const Tensor &test, const void *ref
         const double cast_mean_p = static_cast<double>(static_cast<float>(static_cast<T>(static_cast<float>(mean_p))));
         const double cast_mean_m = static_cast<double>(static_cast<float>(static_cast<T>(static_cast<float>(mean_m))));
         #endif
+        #ifdef __HIP_PLATFORM_HCC__
+	// Somehow, if I don't put explicit type instantiation here, std::min and std::max would
+	// behave weirdly (returning 0). It seems that the implicit type instantiation was not
+	// done correctly.
+	// More strangely, this behavior could not be reproduced in a standalone reproducer...
+        assertion = !(cast_mean_m == std::min<double>(t,r) && cast_mean_p == std::max<double>(t,r));
+        #else
         assertion = !(cast_mean_m == std::min(t,r) && cast_mean_p == std::max(t,r));
+        #endif
       }
       ASSERT_FALSE(assertion) << "Error in tensor " << name << std::endl
                               << "Mismatch at place " << to_string(unravel(i, test.shape()))
