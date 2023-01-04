@@ -366,6 +366,7 @@ void cublas_gemm(void* A,
 				  computeType, rocblas_gemm_algo::rocblas_gemm_algo_standard,0,0));
     NVTE_CHECK_CUBLAS(rocblas_destroy_handle(handle));
 
+    int batch_size, input_dim, output_dim;
     if (bias && gelu) {
         if (grad) {
             // epilogue = CUBLASLT_EPILOGUE_DGELU_BGRAD;
@@ -380,6 +381,12 @@ void cublas_gemm(void* A,
 	    // the GELU gradient result in lower precision (D). It might be better to take the GELU
 	    // gradient result in fp32 but as it requires some kernel changes I would only do that
 	    // once we confirm that this is the right form of the epilogue.
+	    // This is for linear1 -> gelu -> linear2 
+	    // compute dX = dY * W for linear2
+	    // gemm_ex(A=W, B=dY)
+	    batch_size = n;
+	    input_dim = m; // input dimension of the second linear layer is the output dimension of the first linear layer
+	    output_dim = k;
 	    DType input_dtype = get_transformer_engine_dtype(rocblas_datatype_f32_r);
 	    DType output_dtype = get_transformer_engine_dtype(D_type);
             TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
@@ -387,15 +394,15 @@ void cublas_gemm(void* A,
 		detail::gelu_backward_kernelLauncher<IType, OType>(reinterpret_cast<const IType*>(D_temp), 
 					       reinterpret_cast<OType*>(D), 
 					       reinterpret_cast<const OType*>(pre_gelu_out), 
-					       n, 
-					       m,
+					       batch_size, 
+					       input_dim,
 					       0);
 	      );  
 	    ); 
 
 	    void* bias_tmp;
 	    if (D_type == rocblas_datatype_f16_r) {
-	      NVTE_CHECK_CUDA( hipMalloc(&bias_tmp, sizeof(float)*m) );
+	      NVTE_CHECK_CUDA( hipMalloc(&bias_tmp, sizeof(float)*input_dim) ); // The bias gradient is for the first linear layer
 	    }
 	    else {
 	      bias_tmp = bias_ptr;
@@ -404,8 +411,8 @@ void cublas_gemm(void* A,
 	    TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
 		detail::bias_gradient_kernelLauncher<OType>(reinterpret_cast<const OType*>(D), 
 					       reinterpret_cast<float*>(bias_tmp), 
-					       n, 
-					       m,
+					       batch_size, 
+					       input_dim,
 					       0);
             );
 
@@ -413,7 +420,7 @@ void cublas_gemm(void* A,
 	      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
 		detail::identity_kernelLauncher<float, OType>(reinterpret_cast<const float*>(bias_tmp), 
 		       reinterpret_cast<OType*>(bias_ptr),
-		       n,
+		       input_dim,
 		       0);
 	      );  
 	      NVTE_CHECK_CUDA( hipDeviceSynchronize() );
@@ -424,6 +431,10 @@ void cublas_gemm(void* A,
             // epilogue = CUBLASLT_EPILOGUE_GELU_AUX_BIAS;
 	    // Add bias_ptr to D_temp and store in pre_gelu_out, and apply GELU to the pre_gelu_output and then store in D
 	    // D_temp is of shape is (m, n) in column major and thus is of shape (n, m) in row major
+	    // gemm_ex(A=W, B=X, transA=T)
+	    batch_size = n;
+	    input_dim = k;
+	    output_dim = m;
 	    DType input_dtype = get_transformer_engine_dtype(rocblas_datatype_f32_r);
 	    DType output_dtype = get_transformer_engine_dtype(D_type);
             TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
@@ -432,8 +443,8 @@ void cublas_gemm(void* A,
 					       reinterpret_cast<OType*>(D), 
 					       reinterpret_cast<OType*>(pre_gelu_out), 
 					       reinterpret_cast<const OType*>(bias_ptr), 
-					       n, 
-					       m,
+					       batch_size, 
+					       output_dim,
 					       0);
               );
             );
@@ -445,9 +456,14 @@ void cublas_gemm(void* A,
 	    // Apply bias gradient to matrix B and store in bias_ptr, reduce along the k dimension, output bias length is n
 	    // As B is transposed, is of shape (n, k) in column major, and is of shape (k, n) in row major.
 	    // bias gradient vector length is n. So it will be reduced along axis 0 in row major.
+	    // The backward pass calculate the bias gradient along with dW = dY^T * X
+	    // gemm_ex(A=X, B = dY, transB=T)
+	    batch_size = k;
+	    input_dim = m;
+	    output_dim = n;
 	    void * bias_tmp;
 	    if (B_type == rocblas_datatype_f16_r) {
-	      NVTE_CHECK_CUDA( hipMalloc(&bias_tmp, sizeof(float)*n) );
+	      NVTE_CHECK_CUDA( hipMalloc(&bias_tmp, sizeof(float)*output_dim) );
 	    }
 	    else {
 	      bias_tmp = bias_ptr;
@@ -458,15 +474,15 @@ void cublas_gemm(void* A,
             TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
 		detail::bias_gradient_kernelLauncher<IType>(reinterpret_cast<const IType*>(B), 
 					       reinterpret_cast<float*>(bias_tmp), 
-					       k, 
-					       n,
+					       batch_size, 
+					       output_dim,
 					       0);
             );
 	    if (B_type == rocblas_datatype_f16_r) {
 		TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
 		  detail::identity_kernelLauncher<float, OType>(reinterpret_cast<const float*>(bias_tmp), 
 			 reinterpret_cast<OType*>(bias_ptr),
-			 n,
+			 output_dim,
 			 0);
 		);  
 	      NVTE_CHECK_CUDA( hipDeviceSynchronize() );
@@ -476,7 +492,7 @@ void cublas_gemm(void* A,
 		TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
 		  detail::identity_kernelLauncher<float, OType>(reinterpret_cast<const float*>(D_temp), 
 			 reinterpret_cast<OType*>(D),
-			 m*n,
+			 input_dim*output_dim,
 			 0);
 		);  
 	    }
@@ -484,6 +500,10 @@ void cublas_gemm(void* A,
             // epilogue = CUBLASLT_EPILOGUE_BIAS;
 	    // Broadcast bias and add it to D_temp and store in D. The bias vector length is m 
 	    // D_temp is of shape is (m, n) in column major and thus is of shape (n, m) in row major
+	    // gemm_ex(A=W, B=X, transA=T)
+	    batch_size = n;
+	    input_dim = k;
+	    output_dim = m;
 	    DType input_dtype = get_transformer_engine_dtype(rocblas_datatype_f32_r);
 	    DType output_dtype = get_transformer_engine_dtype(D_type);
             TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
@@ -491,8 +511,8 @@ void cublas_gemm(void* A,
 		detail::add_bias_kernelLauncher<IType, OType>(reinterpret_cast<const IType*>(D_temp), 
 					       reinterpret_cast<OType*>(D), 
 					       reinterpret_cast<const OType*>(bias_ptr), 
-					       n, 
-					       m,
+					       batch_size, 
+					       output_dim,
 					       0);
               );
             );
@@ -502,6 +522,10 @@ void cublas_gemm(void* A,
             // epilogue = CUBLASLT_EPILOGUE_DGELU;
 	    // Take input from pre_gelu_out and apply GELU gradients to D_temp and store result in D
 	    // D_temp is of shape is (m, n) in column major and thus is of shape (n, m) in row major
+	    // gemm_ex(A=W, B=dY) 
+	    batch_size = n;
+	    input_dim = m;
+	    output_dim = k;
 	    DType input_dtype = get_transformer_engine_dtype(rocblas_datatype_f32_r);
 	    DType output_dtype = get_transformer_engine_dtype(D_type);
             TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
@@ -509,8 +533,8 @@ void cublas_gemm(void* A,
 		detail::gelu_backward_kernelLauncher<IType, OType>(reinterpret_cast<const IType*>(D_temp), 
 					       reinterpret_cast<OType*>(D), 
 					       reinterpret_cast<const OType*>(pre_gelu_out), 
-					       n, 
-					       m,
+					       batch_size, 
+					       input_dim,
 					       0);
 	      );  
 	    ); 
@@ -518,14 +542,18 @@ void cublas_gemm(void* A,
             // epilogue = CUBLASLT_EPILOGUE_GELU_AUX;
 	    // Store (quantized) D_temp in pre_gelu_out, and apply GELU to D_temp then store in D
 	    // D_temp is of shape is (m, n) in column major and thus is of shape (n, m) in row major
+	    // gemm_ex(A=W, B=X, transA=T)
+	    batch_size = n;
+	    input_dim = k;
+	    output_dim = m;
 	    DType input_dtype = get_transformer_engine_dtype(rocblas_datatype_f32_r);
 	    DType output_dtype = get_transformer_engine_dtype(D_type);
             TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
 	      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
 		detail::gelu_forward_kernelLauncher<IType, OType>(reinterpret_cast<const IType*>(D_temp), 
 					       reinterpret_cast<OType*>(D), 
-					       n, 
-					       m,
+					       batch_size,
+					       output_dim, 
 					       0);
 	      );  
 	    ); 
@@ -533,7 +561,7 @@ void cublas_gemm(void* A,
 	      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
 		detail::identity_kernelLauncher<IType, OType>(reinterpret_cast<const IType*>(D_temp), 
 					       reinterpret_cast<OType*>(pre_gelu_out), 
-					       m*n, 
+					       batch_size*output_dim, 
 					       0);
 	      );  
 	    ); 
