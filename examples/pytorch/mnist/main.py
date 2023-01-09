@@ -9,7 +9,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torchvision import datasets, transforms
 from torch.optim.lr_scheduler import StepLR
-
+from torch import autocast
 from transformer_engine import pytorch as te
 
 
@@ -46,14 +46,18 @@ class Net(nn.Module):
         return output
 
 
-def train(args, model, device, train_loader, optimizer, epoch, use_fp8):
+def train(args, model, device, train_loader, optimizer, epoch, use_amp, use_fp8):
     """Training function."""
     model.train()
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
-        with te.fp8_autocast(enabled=use_fp8):
-            output = model(data)
+        if use_amp:
+            with autocast(device_type='cuda', dtype=torch.float16):
+                output = model(data)
+        else:
+            with te.fp8_autocast(enabled=use_fp8):
+                output = model(data)
         loss = F.nll_loss(output, target)
         loss.backward()
         optimizer.step()
@@ -68,7 +72,7 @@ def train(args, model, device, train_loader, optimizer, epoch, use_fp8):
                 break
 
 
-def test(model, device, test_loader, use_fp8):
+def test(model, device, test_loader, use_amp, use_fp8):
     """Testing function."""
     model.eval()
     test_loss = 0
@@ -76,8 +80,12 @@ def test(model, device, test_loader, use_fp8):
     with torch.no_grad():
         for data, target in test_loader:
             data, target = data.to(device), target.to(device)
-            with te.fp8_autocast(enabled=use_fp8):
-                output = model(data)
+            if use_amp:
+                with autocast(device_type='cuda', dtype=torch.float16):
+                    output = model(data)
+            else:
+                with te.fp8_autocast(enabled=use_fp8):
+                    output = model(data)
             test_loss += F.nll_loss(
                 output, target, reduction="sum"
             ).item()  # sum up batch loss
@@ -156,6 +164,9 @@ def main():
         help="For Saving the current Model",
     )
     parser.add_argument(
+        "--use-amp", action="store_true", default=False, help="Use AMP training"
+    )
+    parser.add_argument(
         "--use-fp8", action="store_true", default=False, help="Use FP8 training"
     )
     parser.add_argument(
@@ -163,6 +174,10 @@ def main():
     )
     args = parser.parse_args()
     use_cuda = torch.cuda.is_available()
+
+    if args.use_amp:
+        assert use_cuda, "CUDA needed for AMP execution. And use_fp8 is set OFF"
+        args.use_fp8 = False
 
     if args.use_fp8:
         assert use_cuda, "CUDA needed for FP8 execution."
@@ -192,8 +207,8 @@ def main():
 
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
     for epoch in range(1, args.epochs + 1):
-        train(args, model, device, train_loader, optimizer, epoch, args.use_fp8)
-        test(model, device, test_loader, args.use_fp8)
+        train(args, model, device, train_loader, optimizer, epoch, args.use_amp, args.use_fp8)
+        test(model, device, test_loader, args.use_amp, args.use_fp8)
         scheduler.step()
 
     if args.save_model:
