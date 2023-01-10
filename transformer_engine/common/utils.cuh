@@ -452,7 +452,7 @@ struct InterCTASync {
 
 #ifdef __HIP_PLATFORM_HCC__
     inline __device__ void spin_wait_(int *barrier, int step, int expected) {
-        __hip_atomic_store(barrier, step, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT);
+        __hip_atomic_fetch_add(barrier, step, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT);
         for (int found = -1; found != expected; ) {
             found = __hip_atomic_load(barrier, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT);
         }

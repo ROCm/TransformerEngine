@@ -2,7 +2,8 @@
 #
 # See LICENSE for license information.
 
-add_executable(test_operator test_qdq.cu
+list(APPEND test_cuda_sources
+			     test_qdq.cu
                              test_cast_transpose.cu
                              test_transpose.cu
                              test_cast_transpose_dbias.cu
@@ -10,8 +11,40 @@ add_executable(test_operator test_qdq.cu
                              test_gelu.cu
                              test_layernorm.cu
                              ../test_common.cu)
+if(USE_CUDA)
+  add_executable(test_operator ${test_cuda_sources})
+else()
+  message("${message_line}")
+  message(STATUS "CMAKE_CURRENT_SOURCE_DIR: ${CMAKE_CURRENT_SOURCE_DIR}")
+  message(STATUS "PROJECT_SOURCE_DIR: ${PROJECT_SOURCE_DIR}")
 
-target_link_libraries(test_operator PUBLIC CUDA::cudart GTest::gtest_main ${TE_LIB})
+  set(TE ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
+  set(THIRDPARTY ${TE}/3rdparty)
+  list(APPEND CMAKE_MODULE_PATH "${THIRDPARTY}/hipify_torch/cmake")
+  include(Hipify)
+  message(STATUS "CMAKE_MODULE_PATH: ${CMAKE_MODULE_PATH}")
+
+  file(REAL_PATH ../../../transformer_engine/common/include header_include_dir1)
+  file(REAL_PATH ../../../transformer_engine/common header_include_dir2)
+  set(header_include_dir ${header_include_dir1} ${header_include_dir2})
+
+  message(STATUS "CUDA_SOURCE_DIR: ${PROJECT_SOURCE_DIR}")
+  message(STATUS "HEADER_INCLUDE_DIR: ${header_include_dir}")
+  set(cuda_source_dir ${PROJECT_SOURCE_DIR} )
+  hipify(CUDA_SOURCE_DIR ${cuda_source_dir} 
+	  HEADER_INCLUDE_DIR ${header_include_dir}) 
+  get_hipified_list("${test_cuda_sources}" test_hip_sources)
+  message("${message_line}")
+  message(STATUS "nvte tests hipified sources: ${test_hip_sources}")
+
+  add_executable(test_operator ${test_hip_sources})
+endif()
+
+if(USE_CUDA)
+  target_link_libraries(test_operator PUBLIC CUDA::cudart GTest::gtest_main ${TE_LIB})
+else()
+  target_link_libraries(test_operator PUBLIC hip::host hip::device GTest::gtest_main ${TE_LIB})
+endif()
 
 include(GoogleTest)
 gtest_discover_tests(test_operator)
