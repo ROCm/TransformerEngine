@@ -14,7 +14,7 @@ from setuptools import setup, find_packages, Extension
 from setuptools.command.build_ext import build_ext
 from distutils.version import LooseVersion
 from distutils.file_util import copy_file
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME, ROCM_HOME, IS_HIP_EXTENSION
 
 path = os.path.dirname(os.path.realpath(__file__))
 
@@ -22,11 +22,19 @@ with open(path + "/VERSION", "r") as f:
     te_version = f.readline()
 
 def get_cuda_bare_metal_version(cuda_dir):
-    raw_output = subprocess.check_output(
-        [cuda_dir + "/bin/nvcc", "-V"], universal_newlines=True
-    )
+    if IS_HIP_EXTENSION:
+        raw_output = subprocess.check_output(
+            [cuda_dir + "/bin/hipcc", "--version"], universal_newlines=True
+        )
+    else:
+        raw_output = subprocess.check_output(
+            [cuda_dir + "/bin/nvcc", "-V"], universal_newlines=True
+        )
     output = raw_output.split()
-    release_idx = output.index("release") + 1
+    if IS_HIP_EXTENSION:
+        release_idx = output.index("version:") + 1
+    else:
+        release_idx = output.index("release") + 1
     release = output[release_idx].split(".")
     bare_metal_major = release[0]
     bare_metal_minor = release[1][0]
@@ -34,13 +42,20 @@ def get_cuda_bare_metal_version(cuda_dir):
 
 
 def append_nvcc_threads(nvcc_extra_args):
-    _, bare_metal_major, bare_metal_minor = get_cuda_bare_metal_version(CUDA_HOME)
-    if int(bare_metal_major) >= 11 and int(bare_metal_minor) >= 2:
-        return nvcc_extra_args + ["--threads", "4"]
+    if IS_HIP_EXTENSION:
+        _, bare_metal_major, bare_metal_minor = get_cuda_bare_metal_version(ROCM_HOME)
+        ##TODO: Figure out which hipcc version starts to support this parallel compilation
+        return nvcc_extra_args + ["-parallel-jobs=4"]
+    else:
+        _, bare_metal_major, bare_metal_minor = get_cuda_bare_metal_version(CUDA_HOME)
+        if int(bare_metal_major) >= 11 and int(bare_metal_minor) >= 2:
+            return nvcc_extra_args + ["--threads", "4"]
     return nvcc_extra_args
 
 
 def extra_gencodes(cc_flag):
+    if IS_HIP_EXTENSION:
+        return
     _, bare_metal_major, bare_metal_minor = get_cuda_bare_metal_version(CUDA_HOME)
     if int(bare_metal_major) >= 11:
         cc_flag.append("-gencode")
@@ -51,21 +66,38 @@ def extra_gencodes(cc_flag):
 
 
 def extra_compiler_flags():
-    return [
-        "-O3",
-        "-gencode",
-        "arch=compute_70,code=sm_70",
-        "-U__CUDA_NO_HALF_OPERATORS__",
-        "-U__CUDA_NO_HALF_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-        "-I./transformer_engine/common/layer_norm/",
-        "--expt-relaxed-constexpr",
-        "--expt-extended-lambda",
-        "--use_fast_math",
-    ]
+    if IS_HIP_EXTENSION:
+        return [
+            "-O3",
+            #"-gencode",
+            #"arch=compute_70,code=sm_70",
+            "-U__CUDA_NO_HALF_OPERATORS__",
+            "-U__CUDA_NO_HALF_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+            "-I./transformer_engine/common/layer_norm/",
+            #"--expt-relaxed-constexpr",
+            #"--expt-extended-lambda",
+            #"--use_fast_math",
+        ]
+    else:
+        return [
+            "-O3",
+            "-gencode",
+            "arch=compute_70,code=sm_70",
+            "-U__CUDA_NO_HALF_OPERATORS__",
+            "-U__CUDA_NO_HALF_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+            "-I./transformer_engine/common/layer_norm/",
+            "--expt-relaxed-constexpr",
+            "--expt-extended-lambda",
+            "--use_fast_math",
+        ]
 
 
 cc_flag = []
@@ -137,75 +169,184 @@ if framework in ("all", "pytorch"):
         )
     )
 
-    ext_modules.append(
-        CUDAExtension(
-            name="scaled_upper_triang_masked_softmax_cuda",
-            sources=[
-                os.path.join(
-                    path,
-                    "transformer_engine/pytorch/csrc/fused_softmax/scaled_upper_triang_masked_softmax.cpp",
-                ),
-                os.path.join(
-                    path,
-                    "transformer_engine/pytorch/csrc/fused_softmax/scaled_upper_triang_masked_softmax_cuda.cu",
-                ),
-            ],
-            extra_compile_args={
-                "cxx": ["-O3"],
-                "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
-            },
-            include_dirs=[
-                os.path.join(path, "transformer_engine/pytorch/csrc/fused_softmax")
-            ],
+    if IS_HIP_EXTENSION:
+        ## This is a workaround for the issue of hipify causing duplicated object file name
+        ## scaled_upper_triang_masked_softmax_cuda.cu --> scaled_upper_triang_masked_softmax_hip.hip
+        ## scaled_upper_triang_masked_softmax.cpp --> scaled_upper_triang_masked_softmax_hip.cpp
+        ## CMake or Ninja will automatically generate build rules using scale_upper_triang_masked_softmax_hip.o
+        ## as the object file name for both source files, resulting in a conflict.
+        ## Currently, I don't know a way to let CMake or Ninja use more unique names. Thus changed one source file
+        ## name to work around this issue.
+        os.system('cp %s %s' %(   
+                    os.path.join(
+                        path,
+                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_upper_triang_masked_softmax_cuda.cu",
+                    ),
+                    os.path.join(
+                        path,
+                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_upper_triang_masked_softmax_cuda_cuda.cu",
+                    )
+                  )
+                 )
+        ext_modules.append(
+            CUDAExtension(
+                name="scaled_upper_triang_masked_softmax_cuda",
+                sources=[
+                    os.path.join(
+                        path,
+                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_upper_triang_masked_softmax.cpp",
+                    ),
+                    os.path.join(
+                        path,
+                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_upper_triang_masked_softmax_cuda_cuda.cu",
+                    ),
+                ],
+                extra_compile_args={
+                    "cxx": ["-O3"],
+                    "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
+                },
+                include_dirs=[
+                    os.path.join(path, "transformer_engine/pytorch/csrc/fused_softmax")
+                ],
+            )
         )
-    )
 
-    ext_modules.append(
-        CUDAExtension(
-            name="scaled_masked_softmax_cuda",
-            sources=[
-                os.path.join(
-                    path,
-                    "transformer_engine/pytorch/csrc/fused_softmax/scaled_masked_softmax.cpp",
-                ),
-                os.path.join(
-                    path,
-                    "transformer_engine/pytorch/csrc/fused_softmax/scaled_masked_softmax_cuda.cu",
-                ),
-            ],
-            extra_compile_args={
-                "cxx": ["-O3"],
-                "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
-            },
-            include_dirs=[
-                os.path.join(path, "transformer_engine/pytorch/csrc/fused_softmax")
-            ],
+        os.system('cp %s %s' %(   
+                    os.path.join(
+                        path,
+                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_masked_softmax_cuda.cu",
+                    ),
+                    os.path.join(
+                        path,
+                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_masked_softmax_cuda_cuda.cu",
+                    )
+                  )
+                 )
+        ext_modules.append(
+            CUDAExtension(
+                name="scaled_masked_softmax_cuda",
+                sources=[
+                    os.path.join(
+                        path,
+                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_masked_softmax.cpp",
+                    ),
+                    os.path.join(
+                        path,
+                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_masked_softmax_cuda_cuda.cu",
+                    ),
+                ],
+                extra_compile_args={
+                    "cxx": ["-O3"],
+                    "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
+                },
+                include_dirs=[
+                    os.path.join(path, "transformer_engine/pytorch/csrc/fused_softmax")
+                ],
+            )
         )
-    )
 
-    ext_modules.append(
-        CUDAExtension(
-            name="scaled_softmax_cuda",
-            sources=[
-                os.path.join(
-                    path,
-                    "transformer_engine/pytorch/csrc/fused_softmax/scaled_softmax.cpp",
-                ),
-                os.path.join(
-                    path,
-                    "transformer_engine/pytorch/csrc/fused_softmax/scaled_softmax_cuda.cu",
-                ),
-            ],
-            extra_compile_args={
-                "cxx": ["-O3"],
-                "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
-            },
-            include_dirs=[
-                os.path.join(path, "transformer_engine/pytorch/csrc/fused_softmax")
-            ],
+        os.system('cp %s %s' %(   
+                    os.path.join(
+                        path,
+                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_softmax_cuda.cu",
+                    ),
+                    os.path.join(
+                        path,
+                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_softmax_cuda_cuda.cu",
+                    )
+                  )
+                 )
+        ext_modules.append(
+            CUDAExtension(
+                name="scaled_softmax_cuda",
+                sources=[
+                    os.path.join(
+                        path,
+                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_softmax.cpp",
+                    ),
+                    os.path.join(
+                        path,
+                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_softmax_cuda_cuda.cu",
+                    ),
+                ],
+                extra_compile_args={
+                    "cxx": ["-O3"],
+                    "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
+                },
+                include_dirs=[
+                    os.path.join(path, "transformer_engine/pytorch/csrc/fused_softmax")
+                ],
+            )
         )
-    )
+    else:
+        ext_modules.append(
+            CUDAExtension(
+                name="scaled_upper_triang_masked_softmax_cuda",
+                sources=[
+                    os.path.join(
+                        path,
+                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_upper_triang_masked_softmax.cpp",
+                    ),
+                    os.path.join(
+                        path,
+                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_upper_triang_masked_softmax_cuda.cu",
+                    ),
+                ],
+                extra_compile_args={
+                    "cxx": ["-O3"],
+                    "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
+                },
+                include_dirs=[
+                    os.path.join(path, "transformer_engine/pytorch/csrc/fused_softmax")
+                ],
+            )
+        )
 
+        ext_modules.append(
+            CUDAExtension(
+                name="scaled_masked_softmax_cuda",
+                sources=[
+                    os.path.join(
+                        path,
+                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_masked_softmax.cpp",
+                    ),
+                    os.path.join(
+                        path,
+                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_masked_softmax_cuda.cu",
+                    ),
+                ],
+                extra_compile_args={
+                    "cxx": ["-O3"],
+                    "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
+                },
+                include_dirs=[
+                    os.path.join(path, "transformer_engine/pytorch/csrc/fused_softmax")
+                ],
+            )
+        )
+
+        ext_modules.append(
+            CUDAExtension(
+                name="scaled_softmax_cuda",
+                sources=[
+                    os.path.join(
+                        path,
+                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_softmax.cpp",
+                    ),
+                    os.path.join(
+                        path,
+                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_softmax_cuda.cu",
+                    ),
+                ],
+                extra_compile_args={
+                    "cxx": ["-O3"],
+                    "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
+                },
+                include_dirs=[
+                    os.path.join(path, "transformer_engine/pytorch/csrc/fused_softmax")
+                ],
+            )
+        )
 
 def get_cmake_bin():
     cmake_bin = "cmake"

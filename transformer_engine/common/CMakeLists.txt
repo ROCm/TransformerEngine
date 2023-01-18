@@ -4,39 +4,122 @@
 
 cmake_minimum_required(VERSION 3.18)
 
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 70 80 90)
+option(USE_CUDA "Use CUDA" ON)
+option(USE_ROCM "Use ROCm" OFF)
+
+if(((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) AND NOT (EXISTS "/bin/nvcc"))
+  message("AMD GPU detected.")
+  set(USE_ROCM ON)
+  set(USE_CUDA OFF)
+
+  # Add HIP to the CMAKE Module Path
+  # set(CMAKE_MODULE_PATH ${HIP_PATH}/cmake ${CMAKE_MODULE_PATH})
+  # Disable Asserts In Code (Can't use asserts on HIP stack.)
+  add_definitions(-DNDEBUG)
+  add_definitions(-DUSE_ROCM)
+  if(NOT DEFINED ENV{PYTORCH_ROCM_ARCH})
+    SET(TE_ROCM_ARCH gfx900;gfx906;gfx908;gfx90a)
+  else()
+    SET(TE_ROCM_ARCH $ENV{PYTORCH_ROCM_ARCH})
+  endif()
+ 
 endif()
 
+set(message_line
+	"-------------------------------------------------------------")
+message("${message_line}")
+message(STATUS "USE_CUDA ${USE_CUDA}")
+message(STATUS "USE_ROCM ${USE_ROCM}")
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CUDA_STANDARD 17)
-set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+if(USE_CUDA)
+  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES 70 80 90)
+  endif()
+  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CUDA_STANDARD 17)
+  set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+  project(transformer_engine LANGUAGES CUDA CXX)
+  list(APPEND CMAKE_CUDA_FLAGS "--threads 4")
+  if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    list(APPEND CMAKE_CUDA_FLAGS "-G -g")
+  endif()
+else()
+  set(CMAKE_CXX_STANDARD 17)
+  project(transformer_engine LANGUAGES HIP CXX)
+  # build error will be dup-ed parallel-jobs times
+  # list(APPEND CMAKE_HIP_FLAGS "-parallel-jobs=4")
+  if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    list(APPEND CMAKE_HIP_FLAGS "-g")
+  endif()
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CMAKE_HIP_FLAGS}")
 
-project(transformer_engine LANGUAGES CUDA CXX)
+  # add_definitions(-D__HIP_NO_HALF_OPERATORS__=1)
+  # add_definitions(-D__HIP_NO_HALF_CONVERSIONS__=1)
+  # add_definitions(-D__HIP_NO_BFLOAT16_CONVERSIONS__=1)
+  # add_definitions(-D__HIP_NO_HALF2_OPERATORS__=1)
 
-list(APPEND CMAKE_CUDA_FLAGS "--threads 4")
-if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-  list(APPEND CMAKE_CUDA_FLAGS "-G")
+  set(HIP_HCC_FLAGS "${CMAKE_HIP_FLAGS} -mavx2 -mf16c -mfma -std=c++17")
+  # Ask hcc to generate device code during compilation so we can use
+  # host linker to link.
+  set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} -fno-gpu-rdc -Wno-defaulted-function-deleted")
+  foreach(rocm_arch ${TE_ROCM_ARCH})
+    # if CMAKE_CXX_FLAGS has --offload-arch set already, better to rm first
+    set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} --offload-arch=${rocm_arch}")
+  endforeach()
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${HIP_HCC_FLAGS}")
 endif()
 
-add_library(transformer_engine SHARED
-                               transformer_engine.cpp
-                               transpose/cast_transpose.cu
-                               transpose/transpose.cu
-                               transpose/cast_transpose_fusion.cu
-                               activation/gelu.cu
-                               gemm/cublaslt_gemm.cu
-                               layer_norm/ln_api.cpp
-                               layer_norm/ln_bwd_semi_cuda_kernel.cu
-                               layer_norm/ln_fwd_cuda_kernel.cu
-                               util/cast.cu)
+list(APPEND te_cuda_sources
+	transformer_engine.cpp
+	transpose/cast_transpose.cu
+	transpose/transpose.cu
+	transpose/cast_transpose_fusion.cu
+	activation/gelu.cu
+	gemm/cublaslt_gemm.cu
+	layer_norm/ln_api.cpp
+	layer_norm/ln_bwd_semi_cuda_kernel.cu
+	layer_norm/ln_fwd_cuda_kernel.cu
+	util/cast.cu)
+
+if(USE_CUDA)
+  add_library(transformer_engine SHARED ${te_cuda_sources})
+else()
+  message("${message_line}")
+  message(STATUS "CMAKE_CURRENT_SOURCE_DIR: ${CMAKE_CURRENT_SOURCE_DIR}")
+  message(STATUS "PROJECT_SOURCE_DIR: ${PROJECT_SOURCE_DIR}")
+
+  set(TE ${CMAKE_CURRENT_SOURCE_DIR}/../..)
+  set(THIRDPARTY ${TE}/3rdparty)
+  list(APPEND CMAKE_MODULE_PATH "${THIRDPARTY}/hipify_torch/cmake")
+  include(Hipify)
+  message(STATUS "CMAKE_MODULE_PATH: ${CMAKE_MODULE_PATH}")
+
+  set(header_include_dir
+      ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/util
+      ${CMAKE_CURRENT_SOURCE_DIR}/layer_norm ${CMAKE_CURRENT_SOURCE_DIR})
+  hipify(CUDA_SOURCE_DIR ${PROJECT_SOURCE_DIR}
+      HEADER_INCLUDE_DIR ${header_include_dir})
+  get_hipified_list("${te_cuda_sources}" te_hip_sources)
+  message("${message_line}")
+  message(STATUS "nvte hipified sources: ${te_hip_sources}")
+
+  add_library(transformer_engine SHARED ${te_hip_sources})
+endif()
 
 target_include_directories(transformer_engine PUBLIC "${PROJECT_SOURCE_DIR}/include")
+if(USE_CUDA)
+  find_package(CUDAToolkit REQUIRED cublas)
+  list(APPEND transformer_engine_LINKER_LIBS CUDA::cublas CUDA::cudart)
+else()
+  find_package(hip)
+  find_package(rocblas)
+  list(APPEND transformer_engine_LINKER_LIBS roc::rocblas hip::host hip::device)
+endif()
 
-find_package(CUDAToolkit REQUIRED cublas)
-
-list(APPEND transformer_engine_LINKER_LIBS CUDA::cublas CUDA::cudart)
 target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS})
 
-target_include_directories(transformer_engine PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+if(USE_CUDA)
+  target_include_directories(transformer_engine PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+else()
+
+endif()
