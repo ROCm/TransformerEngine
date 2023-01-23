@@ -1,5 +1,5 @@
 ..
-    Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    Copyright (c) 2023, AMD. All rights reserved.
 
     See LICENSE for license information.
 
@@ -10,7 +10,7 @@ Transformer Engine
 
 .. overview-begin-marker-do-not-remove
 
-Transformer Engine (TE) is a library for accelerating Transformer models on NVIDIA GPUs, including
+Transformer Engine (TE) is a library for accelerating Transformer models on AMD GPUs, including
 using 8-bit floating point (FP8) precision on Hopper GPUs, to provide better performance with lower
 memory utilization in both training and inference. TE provides a collection of highly optimized
 building blocks for popular Transformer architectures and an automatic mixed precision-like API that
@@ -64,21 +64,27 @@ Transformer Engine in action:
 Highlights
 ----------
 
-* Easy-to-use pyTorch modules enabling building of the Transformer layers with FP8 support on H100
+* Easy-to-use pyTorch modules enabling building of the Transformer layers with FP8 support on AMD
   GPUs.
-* Optimizations (e.g. fused kernels) for Transformer models across all precisions and NVIDIA GPU
+* Optimizations (e.g. fused kernels) for Transformer models across all precisions and AMD GPU
   architecures.
+* Layers and modules supported in Transformer Engine (TE), and their enabling status in FP8
+
+
+| Layers (Modules)      | TE Supported | TE FP8 Supported (upstream)  | ROCm FP32/FP16 Enabled | ROCm FP8 Enabled (status) |
+| --------------------- | ------------ | ---------------------------- | ---------------------- | ------------------------- |
+| Linear                | Yes          | Yes                          | Yes                    | Pending                   |
+| LayerNormLinear       | Yes          | Yes                          | Yes                    | Pending                   |
+| LayerNormMLP          | Yes          | Yes                          | Yes                    | Pending                   |
+| MHA                   | Pending      | N/A                          | N/A                    | N/A                       |
+| Convolution           | N/A          | N/A                          | N/A                    | N/A                       |
+
 
 .. overview-end-marker-do-not-remove
 
 Installation
 ------------
 
-In the NGC container
-^^^^^^^^^^^^^^^^^^^^
-
-Transformer Engine comes preinstalled in the pyTorch container on
-`NVIDIA GPU Cloud <https://ngc.nvidia.com>`_ (versions 22.09 and later).
 
 From source
 ^^^^^^^^^^^
