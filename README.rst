@@ -71,13 +71,8 @@ Highlights
 * Layers and modules supported in Transformer Engine (TE), and their enabling status in FP8
 
 
-| Layers (Modules)      | TE Supported | TE FP8 Supported (upstream)  | ROCm FP32/FP16 Enabled | ROCm FP8 Enabled (status) |
-| --------------------- | ------------ | ---------------------------- | ---------------------- | ------------------------- |
-| Linear                | Yes          | Yes                          | Yes                    | Pending                   |
-| LayerNormLinear       | Yes          | Yes                          | Yes                    | Pending                   |
-| LayerNormMLP          | Yes          | Yes                          | Yes                    | Pending                   |
-| MHA                   | Pending      | N/A                          | N/A                    | N/A                       |
-| Convolution           | N/A          | N/A                          | N/A                    | N/A                       |
+.. image:: te-fp8-layers.png
+   :width: 600
 
 
 .. overview-end-marker-do-not-remove
