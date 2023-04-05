@@ -49,8 +49,8 @@ enum class hip_f8_rounding_mode {
 //    => bias = 15 for 152, 7 for 143
 //    => NAN/INF are represented as per IEEE conventions
 
-static __device__ bool hip_f8_bias_mode_bit_device;
-static bool hip_f8_bias_mode_bit_host;
+static __device__ bool hip_f8_bias_mode_bit_device = true;
+static bool hip_f8_bias_mode_bit_host = true;
 
 static __global__ void set_hip_f8_bias_mode_bit(bool v) {
   hip_f8_bias_mode_bit_device = v;

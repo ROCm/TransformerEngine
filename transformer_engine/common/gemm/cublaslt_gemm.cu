@@ -9,8 +9,11 @@
 #include <transformer_engine/gemm.h>
 #ifndef __HIP_PLATFORM_HCC__
 #include <cublasLt.h>
-#endif
 #include <cublas_v2.h>
+#else
+#define ROCBLAS_BETA_FEATURES_API 
+#include <rocblas/rocblas.h>
+#endif
 #include "../common.h"
 #include "../util/vectorized_pointwise.h"
 #ifdef __HIP_PLATFORM_HCC__
@@ -278,12 +281,10 @@ transformer_engine::DType get_transformer_engine_dtype(const rocblas_datatype t)
       return DType::kFloat32;
     case rocblas_datatype_bf16_r:
       return DType::kBFloat16;
-    /* HIP-TODO: Add back after installing rocblas with FP8 types
-    case DType::kFloat8E4M3:
-      return CUDA_R_8F_E4M3;
-    case DType::kFloat8E5M2:
-      return CUDA_R_8F_E5M2;
-    */
+    case rocblas_datatype_f8_r:
+      return DType::kFloat8E4M3;
+    case rocblas_datatype_bf8_r:
+      return DType::kFloat8E5M2;
     default:
       NVTE_ERROR("Invalid type");
   }
@@ -326,24 +327,34 @@ void cublas_gemm(void* A,
     float zero = 0.0;
     float beta = (accumulate) ? one : zero;
 
+    float alpha = 1.0;
+    if (use_fp8) {
+       float A_scale_inv, B_scale_inv;
+       hipMemcpy(&A_scale_inv, A_scale_inverse, sizeof(float), hipMemcpyDeviceToHost);
+       hipMemcpy(&B_scale_inv, B_scale_inverse, sizeof(float), hipMemcpyDeviceToHost);
+       alpha = A_scale_inv * B_scale_inv;
+    }
 
     rocblas_handle handle;
     NVTE_CHECK_CUBLAS(rocblas_create_handle(&handle));
-    rocblas_datatype computeType =  rocblas_datatype_f32_r;
 
     int64_t ld_gelumat = (int64_t) ldd;
 
 
-    // We don't deal with fp8 for now
-    NVTE_CHECK(!use_fp8, "fp8 gemm  is unavailable right now!");
-
     NVTE_CHECK((A_type==rocblas_datatype_f16_r && B_type==rocblas_datatype_f16_r && D_type==rocblas_datatype_f16_r) || 
-	       (A_type==rocblas_datatype_f32_r && B_type==rocblas_datatype_f32_r && D_type==rocblas_datatype_f32_r),
+	       (A_type==rocblas_datatype_f32_r && B_type==rocblas_datatype_f32_r && D_type==rocblas_datatype_f32_r) ||
+	       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_f32_r) ||
+	       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_bf8_r && D_type==rocblas_datatype_f32_r) ||
+	       (A_type==rocblas_datatype_bf8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_f32_r) ||
+	       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_f8_r) ||
+	       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_bf8_r && D_type==rocblas_datatype_bf8_r) ||
+	       (A_type==rocblas_datatype_bf8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_bf8_r),
 		    "Only fp32 and fp16 GEMMs are available now!");
 
 
+    //If D is not fp32, then we need a temp buffer for GEMM result before applying epilogues. Otherwise, we can apply epilogues in-place.
     void* D_temp;
-    if ((bias || gelu) && (A_type==rocblas_datatype_f16_r && B_type==rocblas_datatype_f16_r && D_type==rocblas_datatype_f16_r)) {
+    if ((bias || gelu) && (D_type==rocblas_datatype_f16_r || D_type==rocblas_datatype_f8_r || D_type==rocblas_datatype_bf8_r)) {
 	NVTE_CHECK_CUDA( hipMalloc(&D_temp, sizeof(float)*m*n) );
     }
     else {
@@ -356,16 +367,31 @@ void cublas_gemm(void* A,
         D_temp_type = rocblas_datatype_f16_r;
     }
 
+     
 
     // D = alpha * (A * B) + beta * C
     // TODO: Can we search for rocblas_gemm_algo??
-    NVTE_CHECK_CUBLAS(rocblas_gemm_ex(handle, transa, transb, m, n, k, &one,
+    if (use_fp8) {
+      rocblas_computetype computeType = rocblas_compute_type_f32;
+      NVTE_CHECK_CUBLAS(rocblas_gemm_ex3(handle, transa, transb, m, n, k, &alpha,
                                   A, A_type, lda,
                                   B, B_type, ldb,
                                   &beta, D_temp, D_temp_type, ldd, D_temp, D_temp_type, ldd,
 				  computeType, rocblas_gemm_algo::rocblas_gemm_algo_standard,0,0));
+    }
+    else {
+      rocblas_datatype computeType = rocblas_datatype_f32_r;
+      NVTE_CHECK_CUBLAS(rocblas_gemm_ex(handle, transa, transb, m, n, k, &alpha,
+                                  A, A_type, lda,
+                                  B, B_type, ldb,
+                                  &beta, D_temp, D_temp_type, ldd, D_temp, D_temp_type, ldd,
+				  computeType, rocblas_gemm_algo::rocblas_gemm_algo_standard,0,0));
+    }
+
+
     NVTE_CHECK_CUBLAS(rocblas_destroy_handle(handle));
 
+    /*
     int batch_size, input_dim, output_dim;
     if (bias && gelu) {
         if (grad) {
@@ -567,7 +593,8 @@ void cublas_gemm(void* A,
 	    ); 
         }
     }
-    if ((bias || gelu) && (A_type==rocblas_datatype_f16_r && B_type==rocblas_datatype_f16_r && D_type==rocblas_datatype_f16_r)) {
+*/
+    if ((bias || gelu) && (D_type==rocblas_datatype_f16_r || D_type==rocblas_datatype_f8_r || D_type==rocblas_datatype_bf8_r)) {
       	NVTE_CHECK_CUDA( hipFree(D_temp) );
     }
 /*
@@ -767,12 +794,10 @@ rocblas_datatype get_cuda_dtype(const transformer_engine::DType t) {
       return rocblas_datatype_f32_r;
     case DType::kBFloat16:
       return rocblas_datatype_bf16_r;
-    /* HIP-TODO: Add back after installing rocblas with FP8 types
     case DType::kFloat8E4M3:
-      return CUDA_R_8F_E4M3;
+      return rocblas_datatype_f8_r;
     case DType::kFloat8E5M2:
-      return CUDA_R_8F_E5M2;
-    */
+      return rocblas_datatype_bf8_r;
     default:
       NVTE_ERROR("Invalid type");
   }
@@ -853,18 +878,26 @@ void nvte_cublas_gemm(const NVTETensor A,
       nvte_log_gemm_config = true;
   }
 
-  if (nvte_log_gemm_config) 
+  if (nvte_log_gemm_config) {
+    float A_scale_inv, B_scale_inv;
+    hipMemcpy(&A_scale_inv, Ainvscale->dptr, sizeof(float), hipMemcpyDeviceToHost);
+    hipMemcpy(&B_scale_inv, Binvscale->dptr, sizeof(float), hipMemcpyDeviceToHost);
     std::cout << "m=" << m << " k=" << k << " n=" << n 
 	      << " transa=" << (transa?"T":"N")
 	      << " transb=" << (transb?"T":"N")
 	      << " A_type=" << (int)inputA->dtype
 	      << " B_type=" << (int)inputB->dtype
 	      << " D_type=" << (int)outputD->dtype
+	      << " bias_type=" << (int)biasTensor->dtype
 	      << " grad=" << grad
 	      << " bias=" << (biasTensor->dptr != nullptr)
 	      << " gelu=" << (outputGelu->dptr != nullptr)
+	      << " use_fp8=" << ( is_fp8_dtype(inputA->dtype) || is_fp8_dtype(inputB->dtype) )
+              << " A_scale_inverse = " <<  A_scale_inv
+	      << " B_scale_inverse = " <<  B_scale_inv
 	      << " accumulate=" << accumulate
 	      << std::endl;
+  }
 
   cublas_gemm(inputA->dptr, Ainvscale->dptr,
               inputB->dptr, Binvscale->dptr,
