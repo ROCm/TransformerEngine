@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <type_traits>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/logging.h>
 #include <transformer_engine/gemm.h>
@@ -46,10 +47,15 @@ namespace transformer_engine {
             } \
         break; \
         case DType::kBFloat16: \
+            { \
+                using type = bf16; \
+                {__VA_ARGS__} \
+            } \
+        break; \
         case DType::kFloat8E5M2: \
         case DType::kFloat8E4M3: \
             { \
-                NVTE_ERROR("Bfloat16 and FP8 type not instantiated"); \
+                NVTE_ERROR("FP8 type not instantiated"); \
             } \
         break; \
         default: \
@@ -80,17 +86,19 @@ float gelu_forward(float x)
   return x * cdf;
 }
 
+
 template <typename Tin, typename T>
 __global__
 void gelu_forward_kernel(const Tin* in, T* out, int m, int n) {
   for(int id = blockIdx.x * blockDim.x + threadIdx.x; id < m * n; id += blockDim.x * gridDim.x)
   {
-    Tin x = (Tin)(__ldg(&in[id]));
+    Tin x = in[id];
     float y = gelu_forward((float)x); 
     out[id] = (T)(y);
   }
 
 }
+
 
 template <typename Tin, typename T>
 void gelu_forward_kernelLauncher(const Tin* in, T* out, int m, int n, hipStream_t stream) {
@@ -127,8 +135,8 @@ __global__
 void gelu_backward_kernel(const Tin* dy, T* out, const T* __restrict pre_gelu_out, int m, int n) {
   for(int id = blockIdx.x * blockDim.x + threadIdx.x; id < m * n; id += blockDim.x * gridDim.x)
   {
-    Tin x = (Tin)(__ldg(&pre_gelu_out[id]));
-    Tin dx = gelu_backward((float)x, (float)dy[id]); 
+    Tin x = (Tin)pre_gelu_out[id];
+    Tin dx = (Tin)gelu_backward((float)x, (float)dy[id]); 
     out[id] = (T)(dx);
   }
 }
@@ -141,47 +149,47 @@ void gelu_backward_kernelLauncher(const Tin* in, T* out, const T* pre_gelu_out, 
   hipLaunchKernelGGL(( gelu_backward_kernel<Tin, T>), dim3(grid), dim3(block), 0, stream, in, out, pre_gelu_out, m, n);
 }
 
-template <typename Tin, typename T>
+template <typename Tin, typename T, typename Tb>
 __global__ 
-void add_bias_kernel(const Tin* in, T* out, const T* __restrict bias, int m, int n)
+void add_bias_kernel(const Tin* in, T* out, const Tb* __restrict bias, int m, int n)
 {
   for(int id = blockIdx.x * blockDim.x + threadIdx.x; id < m * n; id += blockDim.x * gridDim.x)
   {
-    Tin reg_bias = (Tin)(__ldg(&bias[id % n]));
+    Tin reg_bias = (Tin)bias[id % n];
     Tin val = in[id] + reg_bias;
     out[id] = (T)(val);
   }
 }
 
 
-template <typename Tin, typename T>
-void add_bias_kernelLauncher(const Tin* in, T* out, const T* __restrict bias, int m, int n, hipStream_t stream) {
+template <typename Tin, typename T, typename Tb>
+void add_bias_kernelLauncher(const Tin* in, T* out, const Tb* __restrict bias, int m, int n, hipStream_t stream) {
   dim3 block, grid;
   block.x = 1024;
   grid.x = ceil(m * n / 1024.);
-  hipLaunchKernelGGL(( add_bias_kernel<Tin, T>), dim3(grid), dim3(block), 0, stream, in, out, bias, m, n);
+  hipLaunchKernelGGL(( add_bias_kernel<Tin, T, Tb>), dim3(grid), dim3(block), 0, stream, in, out, bias, m, n);
 
 }
 
-template <typename Tin, typename T>
+template <typename Tin, typename T, typename Tb>
 __global__ 
-void add_bias_gelu_kernel(const Tin* in, T* out, T* pre_gelu_out, const T* __restrict bias, int m, int n)
+void add_bias_gelu_kernel(const Tin* in, T* out, T* pre_gelu_out, const Tb* __restrict bias, int m, int n)
 {
   for(int id = blockIdx.x * blockDim.x + threadIdx.x; id < m * n; id += blockDim.x * gridDim.x)
   {
-    Tin reg_bias = (Tin)(__ldg(&bias[id % n]));
+    Tin reg_bias = (Tin)bias[id % n];
     Tin val = in[id] + reg_bias;
     pre_gelu_out[id] = (T)(val);
     out[id] = (T)(gelu_forward(val));
   }
 }
 
-template <typename Tin, typename T>
-void add_bias_gelu_kernelLauncher(const Tin* in, T* out, T* pre_gelu_out, const T* __restrict bias, int m, int n, hipStream_t stream) {
+template <typename Tin, typename T, typename Tb>
+void add_bias_gelu_kernelLauncher(const Tin* in, T* out, T* pre_gelu_out, const Tb* __restrict bias, int m, int n, hipStream_t stream) {
   dim3 block, grid;
   block.x = 1024;
   grid.x = ceil(m * n / 1024.);
-  hipLaunchKernelGGL(( add_bias_gelu_kernel<Tin, T>), dim3(grid), dim3(block), 0, stream, in, out, pre_gelu_out, bias, m, n );
+  hipLaunchKernelGGL(( add_bias_gelu_kernel<Tin, T, Tb>), dim3(grid), dim3(block), 0, stream, in, out, pre_gelu_out, bias, m, n );
 
 }
 
@@ -345,11 +353,15 @@ void cublas_gemm(void* A,
 	       (A_type==rocblas_datatype_f32_r && B_type==rocblas_datatype_f32_r && D_type==rocblas_datatype_f32_r) ||
 	       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_f32_r) ||
 	       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_bf8_r && D_type==rocblas_datatype_f32_r) ||
-	       (A_type==rocblas_datatype_bf8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_f32_r) ||
+	       (A_type==rocblas_datatype_bf8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_f32_r),
+	       /*
 	       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_f8_r) ||
 	       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_bf8_r && D_type==rocblas_datatype_bf8_r) ||
 	       (A_type==rocblas_datatype_bf8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_bf8_r),
-		    "Only fp32 and fp16 GEMMs are available now!");
+	       */
+	       //Currently does not support output of fp8 tensors
+		    "Only the following combinations of data types are enabled now!\n 1. input: fp16, output: fp16.\n \
+		    2. input: fp32, output: fp32.\n 3. input: fp8, output: fp32");
 
 
     //If D is not fp32, then we need a temp buffer for GEMM result before applying epilogues. Otherwise, we can apply epilogues in-place.
@@ -391,7 +403,6 @@ void cublas_gemm(void* A,
 
     NVTE_CHECK_CUBLAS(rocblas_destroy_handle(handle));
 
-    /*
     int batch_size, input_dim, output_dim;
     if (bias && gelu) {
         if (grad) {
@@ -415,6 +426,7 @@ void cublas_gemm(void* A,
 	    output_dim = k;
 	    DType input_dtype = get_transformer_engine_dtype(rocblas_datatype_f32_r);
 	    DType output_dtype = get_transformer_engine_dtype(D_type);
+	    DType bias_dtype = get_transformer_engine_dtype(bias_type);
             TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
 	      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
 		detail::gelu_backward_kernelLauncher<IType, OType>(reinterpret_cast<const IType*>(D_temp), 
@@ -427,7 +439,8 @@ void cublas_gemm(void* A,
 	    ); 
 
 	    void* bias_tmp;
-	    if (D_type == rocblas_datatype_f16_r) {
+	    //if (D_type == rocblas_datatype_f16_r) {
+	    if (bias_type != rocblas_datatype_f32_r) {
 	      NVTE_CHECK_CUDA( hipMalloc(&bias_tmp, sizeof(float)*input_dim) ); // The bias gradient is for the first linear layer
 	    }
 	    else {
@@ -442,8 +455,9 @@ void cublas_gemm(void* A,
 					       0);
             );
 
-	    if (D_type == rocblas_datatype_f16_r) {
-	      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
+	    //if (D_type == rocblas_datatype_f16_r) {
+	    if (bias_type != rocblas_datatype_f32_r) {
+	      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(bias_dtype, OType,
 		detail::identity_kernelLauncher<float, OType>(reinterpret_cast<const float*>(bias_tmp), 
 		       reinterpret_cast<OType*>(bias_ptr),
 		       input_dim,
@@ -463,15 +477,18 @@ void cublas_gemm(void* A,
 	    output_dim = m;
 	    DType input_dtype = get_transformer_engine_dtype(rocblas_datatype_f32_r);
 	    DType output_dtype = get_transformer_engine_dtype(D_type);
+	    DType bias_dtype = get_transformer_engine_dtype(bias_type);
             TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
 	      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
+	        TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(bias_dtype, BType,
 		detail::add_bias_gelu_kernelLauncher<IType, OType>(reinterpret_cast<const IType*>(D_temp), 
 					       reinterpret_cast<OType*>(D), 
 					       reinterpret_cast<OType*>(pre_gelu_out), 
-					       reinterpret_cast<const OType*>(bias_ptr), 
+					       reinterpret_cast<const BType*>(bias_ptr), 
 					       batch_size, 
 					       output_dim,
 					       0);
+                );
               );
             );
         }
@@ -488,7 +505,8 @@ void cublas_gemm(void* A,
 	    input_dim = m;
 	    output_dim = n;
 	    void * bias_tmp;
-	    if (B_type == rocblas_datatype_f16_r) {
+	    //if (B_type == rocblas_datatype_f16_r) {
+	    if (bias_type != rocblas_datatype_f32_r) {
 	      NVTE_CHECK_CUDA( hipMalloc(&bias_tmp, sizeof(float)*output_dim) );
 	    }
 	    else {
@@ -497,6 +515,7 @@ void cublas_gemm(void* A,
 
 	    DType input_dtype = get_transformer_engine_dtype(B_type);
 	    DType output_dtype = get_transformer_engine_dtype(D_type);
+	    DType bias_dtype = get_transformer_engine_dtype(bias_type);
             TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
 		detail::bias_gradient_kernelLauncher<IType>(reinterpret_cast<const IType*>(B), 
 					       reinterpret_cast<float*>(bias_tmp), 
@@ -504,8 +523,8 @@ void cublas_gemm(void* A,
 					       output_dim,
 					       0);
             );
-	    if (B_type == rocblas_datatype_f16_r) {
-		TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
+	    if (bias_type != rocblas_datatype_f32_r) {
+		TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(bias_dtype, OType,
 		  detail::identity_kernelLauncher<float, OType>(reinterpret_cast<const float*>(bias_tmp), 
 			 reinterpret_cast<OType*>(bias_ptr),
 			 output_dim,
@@ -532,14 +551,17 @@ void cublas_gemm(void* A,
 	    output_dim = m;
 	    DType input_dtype = get_transformer_engine_dtype(rocblas_datatype_f32_r);
 	    DType output_dtype = get_transformer_engine_dtype(D_type);
+	    DType bias_dtype = get_transformer_engine_dtype(bias_type);
             TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
 	      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
-		detail::add_bias_kernelLauncher<IType, OType>(reinterpret_cast<const IType*>(D_temp), 
+	        TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(bias_dtype, BType,
+		detail::add_bias_kernelLauncher<IType, OType, BType>(reinterpret_cast<const IType*>(D_temp), 
 					       reinterpret_cast<OType*>(D), 
-					       reinterpret_cast<const OType*>(bias_ptr), 
+					       reinterpret_cast<const BType*>(bias_ptr), 
 					       batch_size, 
 					       output_dim,
 					       0);
+                );
               );
             );
         }
@@ -593,17 +615,9 @@ void cublas_gemm(void* A,
 	    ); 
         }
     }
-*/
     if ((bias || gelu) && (D_type==rocblas_datatype_f16_r || D_type==rocblas_datatype_f8_r || D_type==rocblas_datatype_bf8_r)) {
       	NVTE_CHECK_CUDA( hipFree(D_temp) );
     }
-/*
-    NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceDestroy(preference));
-    NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Ddesc));
-    NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Bdesc));
-    NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Adesc));
-    NVTE_CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
-    */
 }
 #else
 void cublas_gemm(void* A,
