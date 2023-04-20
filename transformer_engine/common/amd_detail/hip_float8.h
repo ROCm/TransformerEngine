@@ -2,6 +2,11 @@
 // FP8 header version 0.3, 2021/05/11
 
 #define HIP_HOST_DEVICE __host__ __device__
+#define HIP_DEVICE  __device__
+#define HIP_HOST __host__ 
+
+#define E5M2_AMAX 57344.0
+#define E4M3_AMAX 240.0
 
 namespace hip_f8_impl {
 
@@ -69,7 +74,6 @@ static void set_hip_f8_bias_mode_optimal() {
 static inline HIP_HOST_DEVICE bool get_hip_f8_bias_mode() {
 #if defined(__HIP_DEVICE_COMPILE__)
   return hip_f8_bias_mode_bit_device;
-
 #else
   return hip_f8_bias_mode_bit_host;
 #endif
@@ -89,7 +93,53 @@ struct hip_f8 {
   }
 
   // constructor from float
-  explicit HIP_HOST_DEVICE hip_f8(float v, hip_f8_rounding_mode rm=hip_f8_rounding_mode::standard, uint32_t rng=0) {
+#if defined(__gfx940__)
+  explicit HIP_DEVICE hip_f8(float v, hip_f8_rounding_mode rm=hip_f8_rounding_mode::standard, uint32_t rng=0) {
+    union {
+      float fval;
+      uint32_t i32val;
+      uint8_t i8val[4];
+    } val;
+    uint32_t ival = 0;
+    val.fval = v;
+
+    if (T == hip_f8_type::bf8) { // bf8
+      if ((val.i32val & 0x7F800000) != 0x7F800000) // propagate NAN/INF, no clipping
+	val.fval = __builtin_amdgcn_fmed3f(val.fval, E5M2_AMAX, -E5M2_AMAX);
+      if (rm == hip_f8_rounding_mode::standard) { // RNE rounding
+	ival = __builtin_amdgcn_cvt_pk_bf8_f32(
+	    val.fval, val.fval, ival, false); // false -> WORD0
+	val.i32val = ival;
+	data     = val.i8val[0];
+      }
+      else { //stochastic rounding
+	ival       = __builtin_amdgcn_cvt_sr_bf8_f32(val.fval, rng, ival, 0); // 0 pos
+	val.i32val = ival;
+	data     = val.i8val[0]; // little endian
+      }
+    } 
+    else { // fp8
+      if ((val.i32val & 0x7F800000) != 0x7F800000) /// propagate NAN/INF, no clipping
+	val.fval = __builtin_amdgcn_fmed3f(val.fval, E4M3_AMAX, -E4M3_AMAX);
+      if (rm == hip_f8_rounding_mode::standard) { // RNE rounding
+	ival = __builtin_amdgcn_cvt_pk_fp8_f32(
+	    val.fval, val.fval, ival, false); // false -> WORD0
+	val.i32val = ival;
+	data     = val.i8val[0];
+      }
+      else { //stochastic rounding
+	ival       = __builtin_amdgcn_cvt_sr_fp8_f32(val.fval, rng, ival, 0); // 0 pos
+	val.i32val = ival;
+	data     = val.i8val[0]; // little endian
+      }
+    }
+  }
+
+  explicit HIP_HOST //Code host still uses SW simulated conversion on gfx940
+#else // #if defined(__gfx940__)
+  explicit HIP_HOST_DEVICE // On architectures other than gfx940, both host and device still use SW simulated conversion
+#endif // #if defined(__gfx940__)
+  hip_f8(float v, hip_f8_rounding_mode rm=hip_f8_rounding_mode::standard, uint32_t rng=0) {
     if (T == hip_f8_type::bf8) {
       if (get_hip_f8_bias_mode()) {
 	data = hip_f8_impl::cast_to_f8<2, 5, float, true/*negative_zero_nan*/, true/*clip*/>(v, (rm == hip_f8_rounding_mode::stochastic), rng);
@@ -106,7 +156,16 @@ struct hip_f8 {
   }
 
   // constructor from half
-  explicit HIP_HOST_DEVICE hip_f8(half v, hip_f8_rounding_mode rm=hip_f8_rounding_mode::standard, uint32_t rng=0) {
+#if defined(__gfx940__)
+  explicit HIP_DEVICE hip_f8(half v, hip_f8_rounding_mode rm=hip_f8_rounding_mode::standard, uint32_t rng=0) 
+	  : hip_f8((float)v, rm, rng)
+  {
+  }
+  explicit HIP_HOST //Code host still uses SW simulated conversion on gfx940
+#else // #if defined(__gfx940__)
+  explicit HIP_HOST_DEVICE // On architectures other than gfx940, both host and device still use SW simulated conversion
+#endif // #if defined(__gfx940__)
+  hip_f8(half v, hip_f8_rounding_mode rm=hip_f8_rounding_mode::standard, uint32_t rng=0) {
     if (T == hip_f8_type::bf8) {
       if (get_hip_f8_bias_mode()) {
 	data = hip_f8_impl::cast_to_f8<2, 5, half, true/*negative_zero_nan*/, true/*clip*/>(v, (rm == hip_f8_rounding_mode::stochastic), rng);
@@ -126,7 +185,32 @@ struct hip_f8 {
   explicit HIP_HOST_DEVICE hip_f8(hip_bfloat16 v, hip_f8_rounding_mode r=hip_f8_rounding_mode::standard, uint32_t rng=0);
 
   // convert to float
-  explicit inline HIP_HOST_DEVICE operator float() const {
+#if defined(__gfx940__)
+  HIP_DEVICE operator float() const {
+    union
+    {
+      float    fval;
+      uint32_t i32val;
+      uint8_t  i8val[4]; // dependent of endian
+    } val;
+
+   // assign 8bit data in position [7:0]
+   val.i32val   = 0;
+   val.i8val[0] = data; // little endian
+
+   // upcast
+   if(T == hip_f8_type::bf8)
+     val.i32val = __builtin_amdgcn_cvt_f32_bf8(val.i32val, 0); // 0 pos
+   else // fp8
+     val.i32val = __builtin_amdgcn_cvt_f32_fp8(val.i32val, 0); // 0 pos
+
+   return val.fval;
+  }
+  explicit inline HIP_HOST //Code host still uses SW simulated conversion on gfx940
+#else // #if defined(__gfx940__)
+  explicit inline HIP_HOST_DEVICE // On architectures other than gfx940, both host and device still use SW simulated conversion
+#endif // #if defined(__gfx940__)
+  operator float() const {
     if (T == hip_f8_type::bf8) {
       if (get_hip_f8_bias_mode()) {
 	return hip_f8_impl::cast_from_f8<2, 5, float, true/*negative_zero_nan*/>(data);
@@ -143,7 +227,15 @@ struct hip_f8 {
   }
 
   // convert to half
-  explicit inline HIP_HOST_DEVICE operator half() const {
+#if defined(__gfx940__)
+  explicit HIP_DEVICE inline operator half() const {
+    return __half(float(*this));
+  }
+  explicit inline HIP_HOST //Code host still uses SW simulated conversion on gfx940
+#else // #if defined(__gfx940__)
+  explicit inline HIP_HOST_DEVICE // On architectures other than gfx940, both host and device still use SW simulated conversion
+#endif // #if defined(__gfx940__)
+  operator half() const {
     if (T == hip_f8_type::bf8) {
       if (get_hip_f8_bias_mode()) {
 	return hip_f8_impl::cast_from_f8<2, 5, half, true/*negative_zero_nan*/>(data);
