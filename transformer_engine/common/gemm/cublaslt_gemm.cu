@@ -343,8 +343,10 @@ void cublas_gemm(void* A,
        alpha = A_scale_inv * B_scale_inv;
     }
 
-    rocblas_handle handle;
-    NVTE_CHECK_CUBLAS(rocblas_create_handle(&handle));
+    static rocblas_handle handle = nullptr;
+    if (handle == nullptr) {
+      NVTE_CHECK_CUBLAS(rocblas_create_handle(&handle));
+    }
 
     int64_t ld_gelumat = (int64_t) ldd;
 
@@ -401,7 +403,7 @@ void cublas_gemm(void* A,
     }
 
 
-    NVTE_CHECK_CUBLAS(rocblas_destroy_handle(handle));
+    //NVTE_CHECK_CUBLAS(rocblas_destroy_handle(handle));
 
     int batch_size, input_dim, output_dim;
     if (bias && gelu) {
