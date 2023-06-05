@@ -367,9 +367,23 @@ void cublas_gemm(void* A,
 
 
     //If D is not fp32, then we need a temp buffer for GEMM result before applying epilogues. Otherwise, we can apply epilogues in-place.
+    // Here we need D_temp to point to D if we don't need the buffer and D_temp to point to the buffer when we need the buffer and
+    // in one application, these two cases could be alternating.
+    // And to avoid the overhead of allocating and deallocating memory for each call of this function, we keep track of the buffer size
+    // and would only deallocate and allocate when the current buffer size is not big enough. When it is stable, the buffer size would
+    // not need to increase any more in one application run.
     void* D_temp;
+    static void* D_temp_buffer = nullptr;
+    static size_t D_temp_size = 0;
     if ((bias || gelu) && (D_type==rocblas_datatype_f16_r || D_type==rocblas_datatype_f8_r || D_type==rocblas_datatype_bf8_r)) {
-	NVTE_CHECK_CUDA( hipMalloc(&D_temp, sizeof(float)*m*n) );
+	if (D_temp_size < sizeof(float)*m*n) {
+	  D_temp_size = sizeof(float)*m*n;
+	  if (D_temp_buffer != nullptr) {
+      	    NVTE_CHECK_CUDA( hipFree(D_temp_buffer) );
+	  }	  
+	  NVTE_CHECK_CUDA( hipMalloc(&D_temp_buffer, D_temp_size) );
+	}
+	D_temp = D_temp_buffer;
     }
     else {
 	D_temp = D;
@@ -403,7 +417,9 @@ void cublas_gemm(void* A,
     }
 
 
-    //NVTE_CHECK_CUBLAS(rocblas_destroy_handle(handle));
+
+    static void* bias_tmp = nullptr;
+    static size_t bias_tmp_size = 0;
 
     int batch_size, input_dim, output_dim;
     if (bias && gelu) {
@@ -440,10 +456,14 @@ void cublas_gemm(void* A,
 	      );  
 	    ); 
 
-	    void* bias_tmp;
-	    //if (D_type == rocblas_datatype_f16_r) {
 	    if (bias_type != rocblas_datatype_f32_r) {
-	      NVTE_CHECK_CUDA( hipMalloc(&bias_tmp, sizeof(float)*input_dim) ); // The bias gradient is for the first linear layer
+	      if (bias_tmp_size < sizeof(float)*input_dim) {
+	        if (bias_tmp != nullptr) {
+	          NVTE_CHECK_CUDA( hipFree(bias_tmp) ); 
+		}
+		bias_tmp_size = sizeof(float)*input_dim;
+	        NVTE_CHECK_CUDA( hipMalloc(&bias_tmp, bias_tmp_size) ); // The bias gradient is for the first linear layer
+	      }
 	    }
 	    else {
 	      bias_tmp = bias_ptr;
@@ -457,7 +477,6 @@ void cublas_gemm(void* A,
 					       0);
             );
 
-	    //if (D_type == rocblas_datatype_f16_r) {
 	    if (bias_type != rocblas_datatype_f32_r) {
 	      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(bias_dtype, OType,
 		detail::identity_kernelLauncher<float, OType>(reinterpret_cast<const float*>(bias_tmp), 
@@ -465,8 +484,6 @@ void cublas_gemm(void* A,
 		       input_dim,
 		       0);
 	      );  
-	      NVTE_CHECK_CUDA( hipDeviceSynchronize() );
-	      NVTE_CHECK_CUDA( hipFree(bias_tmp) ); 
 	    }
 
         } else {
@@ -506,10 +523,14 @@ void cublas_gemm(void* A,
 	    batch_size = k;
 	    input_dim = m;
 	    output_dim = n;
-	    void * bias_tmp;
-	    //if (B_type == rocblas_datatype_f16_r) {
 	    if (bias_type != rocblas_datatype_f32_r) {
-	      NVTE_CHECK_CUDA( hipMalloc(&bias_tmp, sizeof(float)*output_dim) );
+	      if (bias_tmp_size < sizeof(float)*output_dim) {
+	        if (bias_tmp != nullptr) {
+	          NVTE_CHECK_CUDA( hipFree(bias_tmp) ); 
+		}
+		bias_tmp_size = sizeof(float)*output_dim;
+	        NVTE_CHECK_CUDA( hipMalloc(&bias_tmp, bias_tmp_size) ); // The bias gradient is for the first linear layer
+	      }
 	    }
 	    else {
 	      bias_tmp = bias_ptr;
@@ -532,8 +553,6 @@ void cublas_gemm(void* A,
 			 output_dim,
 			 0);
 		);  
-	      NVTE_CHECK_CUDA( hipDeviceSynchronize() );
-	      NVTE_CHECK_CUDA( hipFree(bias_tmp) ); 
 	    }
 	    if (D_type == rocblas_datatype_f16_r) {
 		TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
@@ -616,9 +635,6 @@ void cublas_gemm(void* A,
 	      );  
 	    ); 
         }
-    }
-    if ((bias || gelu) && (D_type==rocblas_datatype_f16_r || D_type==rocblas_datatype_f8_r || D_type==rocblas_datatype_bf8_r)) {
-      	NVTE_CHECK_CUDA( hipFree(D_temp) );
     }
 }
 #else
