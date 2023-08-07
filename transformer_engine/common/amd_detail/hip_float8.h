@@ -196,13 +196,13 @@ struct hip_f8 {
 
    // assign 8bit data in position [7:0]
    val.i32val   = 0;
-   val.i8val[0] = data; // little endian
+   val.i8val[3] = data; // little endian
 
    // upcast
    if(T == hip_f8_type::bf8)
-     val.i32val = __builtin_amdgcn_cvt_f32_bf8(val.i32val, 0); // 0 pos
+     val.fval = __builtin_amdgcn_cvt_f32_bf8(val.i32val, 3); // 0 pos
    else // fp8
-     val.i32val = __builtin_amdgcn_cvt_f32_fp8(val.i32val, 0); // 0 pos
+     val.fval = __builtin_amdgcn_cvt_f32_fp8(val.i32val, 3); // 0 pos
 
    return val.fval;
   }
