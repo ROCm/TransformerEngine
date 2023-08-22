@@ -8,7 +8,12 @@
 #define TRANSFORMER_ENGINE_LOGGING_H_
 
 #include <cuda_runtime_api.h>
+#ifdef __HIP_PLATFORM_HCC__
+#define ROCBLAS_BETA_FEATURES_API
+#include <rocblas/rocblas.h>
+#else
 #include <cublas_v2.h>
+#endif
 #include <string>
 #include <stdexcept>
 
