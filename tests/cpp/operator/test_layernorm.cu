@@ -249,7 +249,8 @@ void performTest(const size_t N, const size_t H) {
   compareResults("dbeta", dbeta, ref_dbeta.get(), atol_bwd, rtol_bwd);
 }
 
-std::vector<std::pair<size_t, size_t>> test_cases = {{2048, 12288},
+std::vector<std::pair<size_t, size_t>> test_cases = {{4096, 1280},
+                                                     {2048, 12288},
                                                      {768, 1024},
                                                      {256, 65536},
                                                      {128, 6144},

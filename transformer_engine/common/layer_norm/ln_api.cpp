@@ -6,6 +6,7 @@
 
 #include <transformer_engine/layer_norm.h>
 #include <vector>
+#include <string>
 #include "ln.h"
 #include "../common.h"
 
@@ -56,6 +57,19 @@ uint32_t get_type_id(DType dtype) {
     }
 }
 
+std::string get_type_string(DType dtype) {
+    if ( dtype == DType::kFloat16 ) {
+        return "Float16";
+    } else if ( dtype == DType::kBFloat16 ) {
+        return "BFloat16";
+    } else if ( dtype == DType::kFloat32 ) {
+        return "Float32";
+    } else if ( dtype == DType::kFloat8E4M3 ) {
+        return "Float8E4M3";
+    } else {
+        return "Type not supported";
+    }
+}
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 uint64_t get_key(DType wtype, DType itype, DType otype, DType ctype, uint64_t hidden_size) {
@@ -282,6 +296,7 @@ void layernorm_bwd(const Tensor& dz,
     auto wtype = gamma.dtype;
     auto otype = wtype;
     auto ctype = DType::kFloat32;
+    printf("in layernorm_bwd, itype: %s, wtype: %s, otype: %s, ctype: %s\n", layer_norm::get_type_string(itype).c_str(), layer_norm::get_type_string(wtype).c_str(), layer_norm::get_type_string(otype).c_str(), layer_norm::get_type_string(ctype).c_str());
 
     NVTE_CHECK(dz.dtype == otype);
     NVTE_CHECK(mu.dtype == ctype);
@@ -293,6 +308,7 @@ void layernorm_bwd(const Tensor& dz,
     auto cols = x.shape[1];
 
     auto hidden_size = gamma.shape[0];
+    printf("in layernorm_bwd, rows: %d, cols: %d, hidden_size: %d\n", rows, cols, hidden_size);
 
     NVTE_CHECK(mu.shape[0] == rows);
     NVTE_CHECK(mu.shape == rsigma.shape);

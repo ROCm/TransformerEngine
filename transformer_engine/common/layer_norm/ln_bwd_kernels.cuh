@@ -327,6 +327,10 @@ void ln_bwd_finalize_tuned_kernel(BwdParams params) {
 template<typename Ktraits>
 __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA)
 void ln_bwd_general_kernel(layer_norm::BwdParams params) {
+    bool debug = false;
+    if(blockIdx.x==0 and threadIdx.x==0){
+      debug = true;
+    }
     enum { LDGS = Ktraits::LDGS };
     enum { NUM_ELTS = Ktraits::ELTS_PER_LDG };
     enum { WARPS_M = Ktraits::WARPS_M };
@@ -359,12 +363,15 @@ void ln_bwd_general_kernel(layer_norm::BwdParams params) {
     const index_t gidn = (bidn * THREADS_PER_WARP
                           + warp_n * params.ctas_per_row * THREADS_PER_WARP
                           + lane);  // Order threads by warp x cta x lane
-
+    if(debug){
+      printf("in ln_bwd_general_kernel, LDGS: %d, NUM_ELTS: %d, WARPS_M: %d, WARPS_N: %d, THREADS_PER_WARP: %d\n", LDGS, NUM_ELTS, WARPS_M, WARPS_N, THREADS_PER_WARP);
+    }
     // Objects for weight grads
     Cvec dzy_sum[LDGS];
     Cvec dz_sum[LDGS];
     memset(dzy_sum, 0, sizeof(dzy_sum));
     memset(dz_sum, 0, sizeof(dz_sum));
+    printf("in ln_bwd_general_kernel<%d, %d>, finish memset dzy_sum, dz_sum\n", (uint32_t)blockIdx.x, (uint32_t)threadIdx.x);
 
     // Objects for stats reductions
     using reduce_t = typename Ktraits::Reducer::Type;
@@ -385,6 +392,7 @@ void ln_bwd_general_kernel(layer_norm::BwdParams params) {
         gamma_in.load_from_elts(params.gamma, col, params.cols - col);
         gamma_in.to(gamma[it]);
     }
+    printf("in ln_bwd_general_kernel<%d, %d>, finish load gamma\n", (uint32_t)blockIdx.x, (uint32_t)threadIdx.x);
 
     for ( int cta_row = bidm * bdimm;
           cta_row < params.rows;
@@ -425,10 +433,12 @@ void ln_bwd_general_kernel(layer_norm::BwdParams params) {
             }
         }
 
+        //printf("in ln_bwd_general_kernel<%d, %d>, in loop cta_row: %d, will run reducer\n", (uint32_t)blockIdx.x, (uint32_t)threadIdx.x, cta_row);
         // Reduce over row
         reduce_t result = reducer.allreduce({mdy, mdyy}, sum);
         mdy = layer_norm::Get<0>::of<reduce_t, compute_t>(result) * rn;
         mdyy = layer_norm::Get<1>::of<reduce_t, compute_t>(result) * rn;
+        //printf("in ln_bwd_general_kernel<%d, %d>, in loop cta_row: %d, finish reducer results\n", (uint32_t)blockIdx.x, (uint32_t)threadIdx.x, cta_row);
 
         // Compute dx
         #pragma unroll
@@ -444,7 +454,9 @@ void ln_bwd_general_kernel(layer_norm::BwdParams params) {
             }
             dx.store_to_elts(params.dx, row * params.cols + col, params.cols - col);
         }
+        //printf("in ln_bwd_general_kernel<%d, %d>, in loop cta_row: %d, finish compute dx\n", (uint32_t)blockIdx.x, (uint32_t)threadIdx.x, cta_row);
     }
+    printf("in ln_bwd_general_kernel<%d, %d>, finish compute dx\n", (uint32_t)blockIdx.x, (uint32_t)threadIdx.x);
 
     if constexpr ( WARPS_M == 1 ) {
         // Write out local weight grad contributions
@@ -520,6 +532,7 @@ void ln_bwd_general_kernel(layer_norm::BwdParams params) {
                                       params.cols - col);
         }
     }
+    printf("in ln_bwd_general_kernel<%d, %d>, finish compute dzy\n", (uint32_t)blockIdx.x, (uint32_t)threadIdx.x);
 }
 
 template<

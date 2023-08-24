@@ -110,6 +110,7 @@ template<
     int BYTES_PER_LDG_FINAL
 >
 void launch_general_(LaunchParams<BwdParams> &launch_params, const bool configure_params) {  // NOLINT(*)
+    printf("in launch_general_, HIDDEN_SIZE: %d, WARPS_M: %d, WARPS_N: %d, BYTES_PER_LDG_MAIN: %d, BYTES_PER_LDG_FINAL: %d\n", HIDDEN_SIZE, WARPS_M, WARPS_N, BYTES_PER_LDG_MAIN, BYTES_PER_LDG_FINAL);
     auto ceil_div = [](int x, int y) -> int { return (x + y - 1) / y; };
 
     // Instantiate kernel
@@ -131,10 +132,14 @@ void launch_general_(LaunchParams<BwdParams> &launch_params, const bool configur
     const int cols = launch_params.params.cols;
     int ctas_per_col = launch_params.params.ctas_per_col;
     int ctas_per_row = launch_params.params.ctas_per_row;
+    printf("in launch_general_, rows: %d, cols: %d, ctas_per_col: %d, ctas_per_row: %d\n", rows, cols, ctas_per_col, ctas_per_row);
     if ( configure_params ) {
+        printf("in launch_general_, in branch configure_params true\n");
         int ctas_per_sm;
         cudaOccupancyMaxActiveBlocksPerMultiprocessor(
             &ctas_per_sm, kernel, Kernel_traits::THREADS_PER_CTA, 0);
+        //ctas_per_sm = 16;
+        //printf("force the ctas_per_sm to be 16 to try to reproduce the hang\n");
         const int max_ctas = launch_params.multiprocessorCount * ctas_per_sm;
         ctas_per_row = ceil_div(cols, HIDDEN_SIZE);
         ctas_per_col = std::min(ceil_div(rows, WARPS_M),
@@ -144,6 +149,7 @@ void launch_general_(LaunchParams<BwdParams> &launch_params, const bool configur
 
         launch_params.barrier_size = 0;
         launch_params.workspace_bytes = 0;
+        printf("in launch_general_, ctas_per_sm: %d, max_ctas: %d, ctas_per_row: %d, ctas_per_col: %d\n", ctas_per_sm, max_ctas, ctas_per_row, ctas_per_col);
         if (launch_params.params.ctas_per_row > 1) {
             launch_params.barrier_size = 2 * ctas_per_col;
             launch_params.workspace_bytes = (ctas_per_col
@@ -151,6 +157,7 @@ void launch_general_(LaunchParams<BwdParams> &launch_params, const bool configur
                                              * ctas_per_row
                                              * sizeof(typename Kernel_traits::reduce_t)
                                              * 2);
+            printf("in launch_general_, launch_params.barrier_size: %d, launch_params.workspace_bytes: %d\n", launch_params.barrier_size, launch_params.workspace_bytes);
         }
         return;
     }
@@ -159,9 +166,21 @@ void launch_general_(LaunchParams<BwdParams> &launch_params, const bool configur
     auto stream = launch_params.stream;
     dim3 grid(ctas_per_row * ctas_per_col);
     dim3 block(Kernel_traits::THREADS_PER_CTA);
+    printf("in launch_general_, grid: %d, block: %d\n", ctas_per_row * ctas_per_col, Kernel_traits::THREADS_PER_CTA);
     if ( ctas_per_row == 1 ) {
+        printf("in launch_general_, ctas_per_row==1 true\n");
+#ifdef __HIP_PLATFORM_HCC__
+        hipError_t hip_error = hipGetLastError();
+        printf("hipError_t before launch kernel: %s\n", hipGetErrorString(hip_error));
+#endif
         kernel<<<grid, block, 0, stream>>>(launch_params.params);
+#ifdef __HIP_PLATFORM_HCC__
+        hip_error = hipGetLastError();
+        printf("hipError_t after launch kernel: %s\n", hipGetErrorString(hip_error));
+#endif 
+        printf("in launch_general_, ctas_per_row==1 true, finish kernel<<<grid, block, 0, stream>>>(launch_params.params)\n");
     } else {
+        printf("in launch_general_, ctas_per_row==1 false\n");
         void *params_ = reinterpret_cast<void *>(&launch_params.params);
         cudaLaunchCooperativeKernel(reinterpret_cast<void *>(kernel),
                                     grid,
@@ -169,6 +188,7 @@ void launch_general_(LaunchParams<BwdParams> &launch_params, const bool configur
                                     reinterpret_cast<void **>(&params_),
                                     0,
                                     stream);
+        printf("in launch_general_, ctas_per_row==1 false, finish cudaLaunchCooperativeKernel\n");
     }
 
     // Launch finalization kernel
@@ -178,6 +198,7 @@ void launch_general_(LaunchParams<BwdParams> &launch_params, const bool configur
                                                * WARPS_N_FINAL
                                                * BYTES_PER_LDG_FINAL
                                                / sizeof(compute_t));
+    printf("in launch_general_, WARPS_M_FINAL: %d, WARPS_N_FINAL: %d, ELTS_N_PER_CTA_FINAL: %d\n", WARPS_M_FINAL, WARPS_N_FINAL, ELTS_N_PER_CTA_FINAL);
     auto kernel_final = &ln_bwd_finalize_general_kernel<weight_t,
                                                         compute_t,
                                                         WARPS_M_FINAL,
@@ -186,7 +207,9 @@ void launch_general_(LaunchParams<BwdParams> &launch_params, const bool configur
                                                         Kernel_traits::THREADS_PER_WARP>;
     dim3 block_final(Kernel_traits::THREADS_PER_WARP * WARPS_N_FINAL, WARPS_M_FINAL);
     dim3 grid_final(ceil_div(cols, ELTS_N_PER_CTA_FINAL), 1);
+    printf("in launch_general_, block_final: %d, %d, grid_final: %d, %d\n", Kernel_traits::THREADS_PER_WARP * WARPS_N_FINAL, WARPS_M_FINAL, ceil_div(cols, ELTS_N_PER_CTA_FINAL), 1);
     kernel_final<<<grid_final, block_final, 0, stream>>>(launch_params.params);
+    printf("in launch_general, finish kernel_final\n");
 }
 
 // Create tuned launch function and register. Macro signature:
