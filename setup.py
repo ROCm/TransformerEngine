@@ -12,11 +12,31 @@ import copy
 import tempfile
 from setuptools import setup, find_packages, Extension
 from setuptools.command.build_ext import build_ext
+from setuptools.command.install import install
 from distutils.version import LooseVersion
 from distutils.file_util import copy_file
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME, ROCM_HOME, IS_HIP_EXTENSION
 
 path = os.path.dirname(os.path.realpath(__file__))
+use_hipblaslt = None
+
+class InstallCommand(install):
+    user_options = install.user_options + [
+        ('use-hipblaslt', None, "a flag option to use hipblaslt"), 
+    ]
+
+    def initialize_options(self):
+        install.initialize_options(self)
+        self.use_hipblaslt = None
+
+    def finalize_options(self):
+        print("value of use_hipblaslt", self.use_hipblaslt)
+        install.finalize_options(self)
+
+    def run(self):
+        global use_hipblaslt
+        use_hipblaslt = self.use_hipblaslt
+        install.run(self)
 
 with open(path + "/VERSION", "r") as f:
     te_version = f.readline()
@@ -408,6 +428,9 @@ class CMakeBuildExtension(build_ext, object):
             "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY_{}={}".format(config.upper(), build_dir),
         ]
 
+        if IS_HIP_EXTENSION and use_hipblaslt:
+          cmake_args.append("-DUSE_HIPBLASLT=ON")
+
         cmake_build_args = ["--config", config]
 
         cmake_build_dir = os.path.join(self.build_temp, config)
@@ -521,6 +544,9 @@ setup(
     ),
     description="Transformer acceleration library",
     ext_modules=ext_modules,
-    cmdclass={"build_ext": TEBuildExtension},
+    cmdclass={
+      "build_ext": TEBuildExtension, 
+      'install': InstallCommand,
+    },
     license_files=("LICENSE",),
 )

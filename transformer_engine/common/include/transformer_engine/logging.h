@@ -11,8 +11,9 @@
 #ifdef __HIP_PLATFORM_HCC__
 #define ROCBLAS_BETA_FEATURES_API
 #include <rocblas/rocblas.h>
-#define USE_HIPBLASLT
+#ifdef USE_HIPBLASLT
 #include <hipblaslt/hipblaslt.h>
+#endif // #ifdef USE_HIPBLASLT
 #else
 #include <cublas_v2.h>
 #endif
