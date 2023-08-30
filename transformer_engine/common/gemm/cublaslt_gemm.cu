@@ -14,8 +14,9 @@
 #else
 #define ROCBLAS_BETA_FEATURES_API 
 #include <rocblas/rocblas.h>
-#define USE_HIPBLASLT
+#ifdef USE_HIPBLASLT
 #include <hipblaslt/hipblaslt.h>
+#endif // #ifdef USE_HIPBLASLT
 #endif
 #include "../common.h"
 #include "../util/vectorized_pointwise.h"
