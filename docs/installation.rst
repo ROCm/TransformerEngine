@@ -1,5 +1,5 @@
 ..
-    Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
     See LICENSE for license information.
 
@@ -14,7 +14,12 @@ Prerequisites
 1. Linux x86_64
 2. `CUDA 11.8 <https://developer.nvidia.com/cuda-downloads>`__
 3. |driver link|_ supporting CUDA 11.8 or later.
+4. `cuDNN 8.1 <https://developer.nvidia.com/cudnn>`__ or later.
+5. For FP8/FP16/BF16 fused attention, `CUDA 12.1 <https://developer.nvidia.com/cuda-downloads>`__ or later, |driver link|_ supporting CUDA 12.1 or later, and `cuDNN 8.9.1 <https://developer.nvidia.com/cudnn>`__ or later.
 
+If the CUDA Toolkit headers are not available at runtime in a standard
+installation path, e.g. within `CUDA_HOME`, set
+`NVTE_CUDA_INCLUDE_PATH` in the environment.
 
 Transformer Engine in NGC Containers
 ------------------------------------
@@ -29,9 +34,9 @@ pip - from GitHub
 Additional Prerequisites
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
-1. `CMake <https://cmake.org/>`__ version 3.18 or later
-2. `pyTorch <https://pytorch.org/>`__ with GPU support
-3. `Ninja <https://ninja-build.org/>`__
+1. [For PyTorch support] `PyTorch <https://pytorch.org/>`__ with GPU support.
+2. [For JAX support] `JAX <https://github.com/google/jax/>`__ with GPU support, version >= 0.4.7.
+3. [For TensorFlow support] `TensorFlow <https://www.tensorflow.org/>`__ with GPU support.
 
 Installation (stable release)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -40,7 +45,9 @@ Execute the following command to install the latest stable version of Transforme
 
 .. code-block:: bash
 
-   pip install --upgrade git+https://github.com/NVIDIA/TransformerEngine.git@stable
+  pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
+
+This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable `NVTE_FRAMEWORK` to a comma-separated list (e.g. `NVTE_FRAMEWORK=jax,tensorflow`).
 
 Installation (development build)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -55,5 +62,38 @@ Execute the following command to install the latest development build of Transfo
 
 .. code-block:: bash
 
-   pip install --upgrade git+https://github.com/NVIDIA/TransformerEngine.git@main
+  pip install git+https://github.com/NVIDIA/TransformerEngine.git@main
 
+This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable `NVTE_FRAMEWORK` to a comma-separated list (e.g. `NVTE_FRAMEWORK=jax,tensorflow`).
+
+Installation (from source)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Execute the following commands to install Transformer Engine from source:
+
+.. code-block:: bash
+
+  # Clone repository, checkout stable branch, clone submodules
+  git clone --branch stable --recursive https://github.com/NVIDIA/TransformerEngine.git
+
+  cd TransformerEngine
+  export NVTE_FRAMEWORK=pytorch   # Optionally set framework
+  pip install .                   # Build and install
+
+If the Git repository has already been cloned, make sure to also clone the submodules:
+
+.. code-block:: bash
+
+  git submodule update --init --recursive
+
+Extra dependencies for testing can be installed by setting the "test" option:
+
+.. code-block:: bash
+
+  pip install .[test]
+
+To build the C++ extensions with debug symbols, e.g. with the `-g` flag:
+
+.. code-block:: bash
+
+  pip install . --global-option=--debug

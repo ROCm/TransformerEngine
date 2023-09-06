@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -69,6 +69,7 @@ def get_file_type(path):
            "txt": ["txt"],
            "cfg": ["cfg"],
            "sh":  ["sh"],
+           "md":  ["md"],
           }
     tmp = path.split(".")
     for filetype, ext_list in ext.items():

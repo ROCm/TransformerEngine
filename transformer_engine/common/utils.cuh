@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -13,11 +13,25 @@
 #include <cuda_bf16.h>
 #endif
 #include <cuda_fp16.h>
-#include <cstdint>
-#include <cassert>
+#include <cuda_fp8.h>
 
+<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_HCC__
 typedef uint16_t hip_bfloat16x2 __attribute__((ext_vector_type(2)));
+=======
+#if !defined(__CUDACC_RTC__)
+#include <cstdint>
+#else
+// Importing C++ standard headers is a pain with NVRTC
+using uint8_t = unsigned char;
+using uint16_t = unsigned short int;  // NOLINT(*)
+using uint32_t = unsigned int;
+using uint64_t = unsigned long long int;  // NOLINT(*)
+static_assert(sizeof(uint8_t) == 1);
+static_assert(sizeof(uint16_t) == 2);
+static_assert(sizeof(uint32_t) == 4);
+static_assert(sizeof(uint64_t) == 8);
+>>>>>>> upstream/main
 #endif
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -26,6 +40,7 @@ constexpr uint32_t THREADS_PER_WARP = 32;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+<<<<<<< HEAD
 #define REGISTER_FWD_TUNED_LAUNCHER(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE,                       \
                               CTAS_PER_ROW, WARPS_M, WARPS_N, BYTES_PER_LDG)                       \
     void ln_fwd_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                       \
@@ -103,6 +118,8 @@ constexpr uint32_t THREADS_PER_WARP = 32;
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // NOLINTEND
 #ifndef USE_HIPBLASLT
+=======
+>>>>>>> upstream/main
 inline __device__ float2 operator+(const float2 & a, const float2 & b) {  // NOLINT(*)
     return {a.x + b.x, a.y + b.y};
 }
@@ -129,11 +146,15 @@ struct Sum {
 
 template<typename T>
 inline __device__ T warp_shuffle_xor(const T & x, uint32_t idx) {
+<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_HCC__
     return __shfl_xor(x, idx, THREADS_PER_WARP);
 #else
     return __shfl_xor_sync(uint32_t(-1), x, idx);
 #endif
+=======
+    return __shfl_xor_sync(static_cast<uint32_t>(-1), x, idx);
+>>>>>>> upstream/main
 }
 
 template<>
@@ -143,11 +164,15 @@ inline __device__ float2 warp_shuffle_xor<float2>(const float2 & x, uint32_t idx
 
 template<typename T>
 inline __device__ T warp_shuffle_down(const T & x, uint32_t idx) {
+<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_HCC__
     return __shfl_down(x, idx, THREADS_PER_WARP);
 #else
     return __shfl_down_sync(uint32_t(-1), x, idx);
 #endif
+=======
+    return __shfl_down_sync(static_cast<uint32_t>(-1), x, idx);
+>>>>>>> upstream/main
 }
 
 template<>
@@ -735,6 +760,7 @@ inline __device__ void warp_chan_upd_dynamic(T &m_a, T &m2_a, T &n_a, int num_ac
         m2_a = m2_ab;
     }
     // Intra-warp broadcast (only lane 0 has valid stats).
+<<<<<<< HEAD
     #ifdef __HIP_PLATFORM_HCC__
     m_a = __shfl(m_a, 0, THREADS_PER_WARP);
     m2_a = __shfl(m2_a, 0, THREADS_PER_WARP);
@@ -742,6 +768,10 @@ inline __device__ void warp_chan_upd_dynamic(T &m_a, T &m2_a, T &n_a, int num_ac
     m_a = __shfl_sync(uint32_t(-1), m_a, 0);
     m2_a = __shfl_sync(uint32_t(-1), m2_a, 0);
     #endif
+=======
+    m_a = __shfl_sync(static_cast<uint32_t>(-1), m_a, 0);
+    m2_a = __shfl_sync(static_cast<uint32_t>(-1), m2_a, 0);
+>>>>>>> upstream/main
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

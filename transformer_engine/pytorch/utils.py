@@ -1,4 +1,4 @@
-# Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -6,6 +6,13 @@
 import math
 from typing import Any, Callable, Optional, Tuple
 import torch
+
+
+def get_device_compute_capability() -> float:
+    """Returns the cuda compute capability of current GPU"""
+    major = torch.cuda.get_device_properties(torch.cuda.current_device()).major
+    minor = torch.cuda.get_device_properties(torch.cuda.current_device()).minor
+    return major + minor / 10
 
 
 def attention_mask_func(
@@ -78,8 +85,8 @@ def divide(numerator: int, denominator: int) -> int:
     return numerator // denominator
 
 
-def split_tensor_along_last_dim(
-    tensor: torch.Tensor, num_partitions: int, contiguous_split_chunks: bool = False
+def split_tensor_along_dim(
+    tensor: torch.Tensor, dim: int, num_partitions: int, contiguous_split_chunks: bool = False
 ) -> Tuple[torch.Tensor, ...]:
     """Split a tensor along its last dimension.
     Arguments:
@@ -89,10 +96,9 @@ def split_tensor_along_last_dim(
                                  in memory.
     """
     # Get the size and dimension.
-    last_dim = tensor.dim() - 1
-    last_dim_size = divide(tensor.size()[last_dim], num_partitions)
+    split_size = divide(tensor.size()[dim], num_partitions)
     # Split.
-    tensor_list = torch.split(tensor, last_dim_size, dim=last_dim)
+    tensor_list = torch.split(tensor, split_size, dim=dim)
     # Note: torch.split does not create contiguous tensors by default.
     if contiguous_split_chunks:
         return tuple(chunk.contiguous() for chunk in tensor_list)
@@ -169,4 +175,23 @@ def safely_set_viewless_tensor_data(
 
 def cast_if_needed(tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     """Cast tensor to dtype"""
-    return tensor if tensor is None or tensor.dtype == dtype else tensor.to(dtype)
+    with torch.enable_grad():
+        return tensor if tensor is None or tensor.dtype == dtype else tensor.to(dtype)
+
+
+def check_dim_for_fp8_exec(tensor: torch.Tensor) -> bool:
+    """For fp8 fprop (TN layout), inputs and weights must be such
+       that dim0 is divisible by 8 and dim1 is divisible by 16.
+    """
+    return not tensor.shape[0] % 8 and not tensor.shape[1] % 16
+
+
+def assert_dim_for_fp8_exec(tensor: torch.Tensor) -> None:
+    """For fp8 fprop (TN layout), inputs and weights must be such
+       that dim0 is divisible by 8 and dim1 is divisible by 16.
+    """
+    # single tensor check so it's clear which tensor is triggering the assertion
+    assert check_dim_for_fp8_exec(tensor), (
+        "Tensor dimensions are not compatible for FP8 execution: "
+        f"({tensor.shape[0]} % 8 != 0, {tensor.shape[1]} % 16 != 0)"
+    )

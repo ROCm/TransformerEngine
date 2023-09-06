@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -25,12 +25,10 @@ extern "C" {
  *  - `D = GELU(AB + bias)` if both `bias` and `pre_gelu_out` are not empty tensors
  *
  *  \param[in]     A                     The A matrix.
- *  \param[in]     A_scale_inverse       The inverse of A matrix' scaling factor.
  *  \param[in]     B                     The B matrix.
- *  \param[in]     B_scale_inverse       The inverse of B matrix' scaling factor.
- *  \param[out]    D                     Output matrix.
+ *  \param[in,out] D                     Output matrix.
  *  \param[in]     bias                  Bias tensor.
- *  \param[out]    pre_gelu_out          Output matrix before GELU activation.
+ *  \param[in,out] pre_gelu_out          Output matrix before GELU activation.
  *  \param[in]     transa                Whether A matrix is transposed.
  *  \param[in]     transb                Whether B matrix is transposed.
  *  \param[in]     grad                  Whether this operation is part of the
@@ -38,12 +36,11 @@ extern "C" {
  *  \param[out]    workspace             Workspace tensor.
  *  \param[in]     accumulate            Whether to accumulate the result into the D matrix.
  *  \param[in]     use_split_accumulator Whether to use split accumulator in the FP8 GEMM.
+ *  \param[in]     math_sm_count         Number of GPU SMs to use (default=0: use cuBLAS heuristics)
  *  \param[in]     stream                CUDA stream used for the operation.
  */
 void nvte_cublas_gemm(const NVTETensor A,
-                      const NVTETensor A_scale_inverse,
                       const NVTETensor B,
-                      const NVTETensor B_scale_inverse,
                       NVTETensor D,
                       const NVTETensor bias,
                       NVTETensor pre_gelu_out,
@@ -53,6 +50,7 @@ void nvte_cublas_gemm(const NVTETensor A,
                       NVTETensor workspace,
                       bool accumulate,
                       bool use_split_accumulator,
+                      int math_sm_count,
                       cudaStream_t stream
 );
 

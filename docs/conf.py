@@ -1,4 +1,4 @@
-# Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -18,7 +18,7 @@ from datetime import date
 te_path = os.path.dirname(os.path.realpath(__file__))
 
 with open(te_path + "/../VERSION", "r") as f:
-    te_version = f.readline()
+    te_version = f.readline().strip()
 
 release_year = 2022
 
@@ -54,7 +54,7 @@ option_nr = 0
 version = version + """<br/>
 Version select: <select onChange="window.location.href = this.value" onFocus="this.selectedIndex = {0}">
     <option value="https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/index.html"{1}>Current release</option>
-    <option value="https://docs.nvidia.com/deeplearning/transformer-engine/archives/index.html">Older releases</option>
+    <option value="https://docs.nvidia.com/deeplearning/transformer-engine/documentation-archive.html">Older releases</option>
 </select>""".format(option_nr, release_opt)
 
 # -- General configuration ---------------------------------------------------
@@ -64,8 +64,11 @@ extensions = [
         'sphinx.ext.autodoc',
         'sphinx.ext.mathjax',
         'sphinx.ext.napoleon',
+        'sphinx.ext.ifconfig',
         'nbsphinx',
-        'breathe']
+        'breathe',
+        'autoapi.extension',
+]
 
 templates_path = ['_templates']
 exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
@@ -85,6 +88,10 @@ html_theme = 'sphinx_rtd_theme'
 html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
 html_static_path = ['_static']
 
+html_css_files = [
+        'css/nvidia_font.css',
+]
+
 html_theme_options = {
         'display_version': True,
         'collapse_navigation': False,
@@ -97,3 +104,6 @@ napoleon_custom_sections = [('Parallelism parameters', 'params_style'),
 
 breathe_projects = {"TransformerEngine": os.path.abspath("doxygen/xml/")}
 breathe_default_project = "TransformerEngine"
+
+autoapi_generate_api_docs = False
+autoapi_dirs = ["../transformer_engine"]

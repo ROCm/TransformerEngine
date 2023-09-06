@@ -1,4 +1,4 @@
-# Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -68,10 +68,10 @@ class DelayedScaling:
     fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.HYBRID
                 Controls the FP8 data format used during forward and backward
                 pass.
-    amax_history_len : int, default = 1
+    amax_history_len : int, default = 1024
                       The length of the amax history window used for
                       scaling factor computation.
-    amax_compute_algo : {'max', 'most_recent', Callable}, default = 'most_recent'
+    amax_compute_algo : {'max', 'most_recent', Callable}, default = 'max'
                        Algorithm used for choosing the `amax` value for the
                        scaling factor computation. There are 2 predefined
                        choices: `max` chooses the largest `amax` in the history
@@ -100,6 +100,14 @@ class DelayedScaling:
     override_linear_precision: Tuple(bool, bool, bool), default=(False, False, False)
                               Whether or not the execute the `fprop`, `dgrad`, and `wgrad`
                               GEMMs (respectively) in higher precision when using FP8.
+    reduce_amax: bool, default = `True`
+                By default, if `torch.distributed` is initialized, the `amax` value for FP8
+                tensors is reduced across the `fp8_group` (specified in the `fp8_autocast`
+                call). This keeps the amaxes and scaling factors synced across the given
+                distributed group. If set to `False`, this reduction is skipped and every
+                GPU maintains local amaxes and scaling factors. To ensure results are
+                numerically identical across checkpointing boundaries in this case, all
+                ranks must checkpoint in order to store the local tensors.
 
     Notes
     -----
@@ -119,10 +127,11 @@ class DelayedScaling:
     margin: int = 0
     interval: int = 1
     fp8_format: Format = Format.HYBRID
-    amax_history_len: int = 1
-    amax_compute_algo: Union[Literal["max", "most_recent"], Callable] = "most_recent"
+    amax_history_len: int = 1024
+    amax_compute_algo: Union[Literal["max", "most_recent"], Callable] = "max"
     override_linear_precision: _OverrideLinearPrecision = _OverrideLinearPrecision()
     scaling_factor_compute_algo: Optional[Callable] = None
+    reduce_amax: bool = True
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."

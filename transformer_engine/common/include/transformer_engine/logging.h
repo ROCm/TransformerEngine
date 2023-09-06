@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -16,7 +16,12 @@
 #endif // #ifdef USE_HIPBLASLT
 #else
 #include <cublas_v2.h>
+<<<<<<< HEAD
 #endif
+=======
+#include <cudnn.h>
+#include <nvrtc.h>
+>>>>>>> upstream/main
 #include <string>
 #include <stdexcept>
 
@@ -63,10 +68,34 @@ inline void check_cublas_(cublasStatus_t status) {
 }
 #endif
 
+inline void check_cudnn_(cudnnStatus_t status) {
+    if ( status != CUDNN_STATUS_SUCCESS ) {
+        std::string message;
+        message.reserve(1024);
+        message += "CUDNN Error: ";
+        message += cudnnGetErrorString(status);
+        message += (". "
+                    "For more information, enable cuDNN error logging "
+                    "by setting CUDNN_LOGERR_DBG=1 and "
+                    "CUDNN_LOGDEST_DBG=stderr in the environment.");
+        NVTE_ERROR(message);
+    }
+}
+
+inline void check_nvrtc_(nvrtcResult status) {
+    if ( status != NVRTC_SUCCESS ) {
+        NVTE_ERROR("NVRTC Error: " + std::string(nvrtcGetErrorString(status)));
+    }
+}
+
 }  // namespace
 
 #define NVTE_CHECK_CUDA(ans) { check_cuda_(ans); }
 
 #define NVTE_CHECK_CUBLAS(ans) { check_cublas_(ans); }
+
+#define NVTE_CHECK_CUDNN(ans) { check_cudnn_(ans); }
+
+#define NVTE_CHECK_NVRTC(ans) { check_nvrtc_(ans); }
 
 #endif  // TRANSFORMER_ENGINE_LOGGING_H_

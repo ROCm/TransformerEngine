@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -9,14 +9,22 @@
 
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/layer_norm.h>
+#include <transformer_engine/rmsnorm.h>
 #include <transformer_engine/transpose.h>
 #include <transformer_engine/activation.h>
 #include <transformer_engine/logging.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/cast.h>
+#include <transformer_engine/softmax.h>
+#include <transformer_engine/fused_attn.h>
 #include <ATen/ATen.h>
 #include <ATen/cudnn/Handle.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/macros/Macros.h>
+#include <ATen/Dispatch.h>
+#include <ATen/native/DispatchStub.h>
+#include <ATen/cuda/CUDAGeneratorImpl.h>
+#include <ATen/cuda/CUDAGraphsUtils.cuh>
 #include <torch/extension.h>
 #include <torch/torch.h>
 #include <cuda.h>
@@ -24,10 +32,14 @@
 
 #ifndef USE_ROCM
 #include <cuda_bf16.h>
+<<<<<<< HEAD
 #else
 #include <hip/hip_bfloat16.h>
 #endif
 
+=======
+#include <cublasLt.h>
+>>>>>>> upstream/main
 #include <stdexcept>
 #include <memory>
 #include <iomanip>
@@ -53,15 +65,24 @@ class FP8TensorMeta {
 enum FP8FwdTensors {
     GEMM1_INPUT  = 0,
     GEMM1_WEIGHT = 1,
-    GEMM2_INPUT  = 2,
-    GEMM2_WEIGHT = 3
+    GEMM1_OUTPUT = 2,
+    GEMM2_INPUT  = 3,
+    GEMM2_WEIGHT = 4,
+    GEMM2_OUTPUT = 5,
+    GEMM3_INPUT  = 6,
+    GEMM3_WEIGHT = 7,
+    GEMM3_OUTPUT = 8
 };
 
 // Used as named indices on the `scale`, `scale_inv`,
 // and `amax` tensors in the `FP8TensorMeta` class.
 enum FP8BwdTensors {
     GRAD_OUTPUT1 = 0,
-    GRAD_OUTPUT2 = 1
+    GRAD_INPUT1 = 1,
+    GRAD_OUTPUT2 = 2,
+    GRAD_INPUT2 = 3,
+    GRAD_OUTPUT3 = 4,
+    GRAD_INPUT3 = 5
 };
 
 
@@ -75,6 +96,9 @@ transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
 inline at::ScalarType GetATenDType(transformer_engine::DType t) {
     switch (t) {
         case transformer_engine::DType::kInt32:
+            return torch::kInt32;
+        case transformer_engine::DType::kInt64:
+            return torch::kInt64;
         case transformer_engine::DType::kFloat32:
             return at::kFloat;
         case transformer_engine::DType::kFloat16:
@@ -99,6 +123,14 @@ inline transformer_engine::DType GetTransformerEngineDType(at::ScalarType t) {
             return transformer_engine::DType::kFloat32;
         case at::kBFloat16:
             return transformer_engine::DType::kBFloat16;
+        case at::kBool:
+            return transformer_engine::DType::kByte;
+        case torch::kByte:
+            return transformer_engine::DType::kByte;
+        case torch::kInt32:
+            return transformer_engine::DType::kInt32;
+        case torch::kInt64:
+            return transformer_engine::DType::kInt64;
         default:
             NVTE_ERROR("Invalid type");
     }
@@ -114,6 +146,14 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
                                                               const transformer_engine::DType type
 );
 
+transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
+                                                              const std::vector<size_t>& shape,
+                                                              const transformer_engine::DType type,
+                                                              void* amax_ptr,
+                                                              void* scale_ptr,
+                                                              void* scale_inv_ptr
+);
+
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
                                                               const NVTEShape& shape,
@@ -123,9 +163,17 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor);
 
+transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor,
+                                                              at::Tensor amax,
+                                                              const at::Tensor scale,
+                                                              at::Tensor scale_inv);
+
 
 size_t product(const std::vector<size_t> &shape);
 
+at::Tensor allocateSpace(const std::vector<size_t>& shape,
+                         const transformer_engine::DType type,
+                         bool init_to_zeros);
 
 at::Tensor allocateSpace(const NVTEShape &shape,
                          const transformer_engine::DType type,
@@ -142,137 +190,6 @@ at::Tensor allocateTorchTensor(int M,
                                transformer_engine::DType dtype
 );
 
-
-void dispatch_layernorm(void* input,                                    // i
-                        const std::vector<size_t>& input_shape,
-                        const transformer_engine::DType input_type,
-                        void* gamma,                                    // i
-                        const std::vector<size_t>& gamma_shape,
-                        const transformer_engine::DType gamma_type,
-                        void* beta,                                     // i
-                        const std::vector<size_t>& beta_shape,
-                        const transformer_engine::DType beta_type,
-                        void* scale,                                    // i
-                        const std::vector<size_t>& scale_shape,
-                        const transformer_engine::DType scale_type,
-                        const float epsilon,                            // i
-                        void* z,                                        // o
-                        const std::vector<size_t>& z_shape,
-                        const transformer_engine::DType z_type,
-                        void* mu,                                       // o
-                        const std::vector<size_t>& mu_shape,
-                        const transformer_engine::DType mu_type,
-                        void* rsigma,                                   // o
-                        const std::vector<size_t>& rsigma_shape,
-                        const transformer_engine::DType rsigma_type,
-                        void* amax,                                     // o
-                        const std::vector<size_t>& amax_shape,
-                        const transformer_engine::DType amax_type,
-                        void* scale_inv,                                // o
-                        const std::vector<size_t>& scale_inv_shape,
-                        const transformer_engine::DType scale_inv_type,
-                        const int multiProcessorCount
-);
-
-
-void dispatch_cast_transpose_fusion(void* input,                                            // i
-                                    const std::vector<size_t>& input_shape,
-                                    const transformer_engine::DType input_type,
-                                    void* scale,                                            // i
-                                    const std::vector<size_t>& scale_shape,
-                                    const transformer_engine::DType scale_type,
-                                    void* output_cast,                                      // o
-                                    const std::vector<size_t>& output_cast_shape,
-                                    const transformer_engine::DType output_cast_type,
-                                    void* output_transpose,                                 // o
-                                    const std::vector<size_t>& output_transpose_shape,
-                                    const transformer_engine::DType output_transpose_type,
-                                    void* amax,                                             // o
-                                    const std::vector<size_t>& amax_shape,
-                                    const transformer_engine::DType amax_type,
-                                    void* scale_inv,                                        // o
-                                    const std::vector<size_t>& scale_inv_shape,
-                                    const transformer_engine::DType scale_inv_type
-);
-
-
-void dispatch_gelu(void* input,                                            // i
-                   const std::vector<size_t>& input_shape,
-                   const transformer_engine::DType input_type,
-                   void* scale,                                            // i
-                   const std::vector<size_t>& scale_shape,
-                   const transformer_engine::DType scale_type,
-                   void* output,                                           // o
-                   const std::vector<size_t>& output_shape,
-                   const transformer_engine::DType output_type,
-                   void* amax,                                             // o
-                   const std::vector<size_t>& amax_shape,
-                   const transformer_engine::DType amax_type,
-                   void* scale_inv,                                        // o
-                   const std::vector<size_t>& scale_inv_shape,
-                   const transformer_engine::DType scale_inv_type
-);
-
-
-void dispatch_transpose(void* input,                                            // i
-                        const std::vector<size_t>& input_shape,
-                        const transformer_engine::DType input_type,
-                        void* output,                                           // o
-                        const std::vector<size_t>& output_shape,
-                        const transformer_engine::DType output_type
-);
-
-
-void dispatch_bgrad_cast_transpose_fusion(void* input,                                          // i
-                                          const std::vector<size_t>& input_shape,
-                                          const transformer_engine::DType input_type,
-                                          void* scale,                                          // i
-                                          const std::vector<size_t>& scale_shape,
-                                          const transformer_engine::DType scale_type,
-                                          void* cast_output,                                    // o
-                                          const std::vector<size_t>& cast_output_shape,
-                                          const transformer_engine::DType cast_output_type,
-                                          void* transposed_output,                              // o
-                                          const std::vector<size_t>& transposed_output_shape,
-                                          const transformer_engine::DType transposed_output_type,
-                                          void* amax,                                           // o
-                                          const std::vector<size_t>& amax_shape,
-                                          const transformer_engine::DType amax_type,
-                                          void* dbias,                                          // o
-                                          const std::vector<size_t>& dbias_shape,
-                                          const transformer_engine::DType dbias_type,
-                                          void* scale_inv,                                      // o
-                                          const std::vector<size_t>& scale_inv_shape,
-                                          const transformer_engine::DType scale_inv_type
-);
-
-
-void dispatch_bgrad_dgelu_cast_transpose_fusion(
-        void* input,                                            // i
-        const std::vector<size_t>& input_shape,
-        const transformer_engine::DType input_type,
-        void* gelu_input,                                       // i
-        const std::vector<size_t>& gelu_input_shape,
-        const transformer_engine::DType gelu_input_type,
-        void* scale,                                            // i
-        const std::vector<size_t>& scale_shape,
-        const transformer_engine::DType scale_type,
-        void* cast_output,                                      // o
-        const std::vector<size_t>& cast_output_shape,
-        const transformer_engine::DType cast_output_type,
-        void* transposed_output,                                // o
-        const std::vector<size_t>& transposed_output_shape,
-        const transformer_engine::DType transposed_output_type,
-        void* amax,                                             // o
-        const std::vector<size_t>& amax_shape,
-        const transformer_engine::DType amax_type,
-        void* dbias,                                            // o
-        const std::vector<size_t>& dbias_shape,
-        const transformer_engine::DType dbias_type,
-        void* scale_inv,                                        // o
-        const std::vector<size_t>& scale_inv_shape,
-        const transformer_engine::DType scale_inv_type
-);
-
+void *getDataPtr(at::Tensor t);
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_COMMON_H_
