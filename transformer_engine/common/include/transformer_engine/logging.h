@@ -11,6 +11,9 @@
 #ifdef __HIP_PLATFORM_HCC__
 #define ROCBLAS_BETA_FEATURES_API
 #include <rocblas/rocblas.h>
+#ifdef USE_HIPBLASLT
+#include <hipblaslt/hipblaslt.h>
+#endif // #ifdef USE_HIPBLASLT
 #else
 #include <cublas_v2.h>
 #endif
@@ -38,17 +41,27 @@ inline void check_cuda_(cudaError_t status) {
     }
 }
 
-inline void check_cublas_(cublasStatus_t status) {
 #ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_HIPBLASLT
+inline void check_cublas_(hipblasStatus_t status) {
+    if ( status != HIPBLAS_STATUS_SUCCESS ) {
+        NVTE_ERROR("HIPBLASLT Error: " + std::to_string((int)status) );
+    }
+}
+#else
+inline void check_cublas_(cublasStatus_t status) {
     if ( status != rocblas_status_success ) {
         NVTE_ERROR("ROCBLAS Error: " + std::string(rocblas_status_to_string(status)));
     }
+}
+#endif
 #else
+inline void check_cublas_(cublasStatus_t status) {
     if ( status != CUBLAS_STATUS_SUCCESS ) {
         NVTE_ERROR("CUBLAS Error: " + std::string(cublasGetStatusString(status)));
     }
-#endif
 }
+#endif
 
 }  // namespace
 

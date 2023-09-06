@@ -14,6 +14,9 @@
 #else
 #define ROCBLAS_BETA_FEATURES_API 
 #include <rocblas/rocblas.h>
+#ifdef USE_HIPBLASLT
+#include <hipblaslt/hipblaslt.h>
+#endif // #ifdef USE_HIPBLASLT
 #endif
 #include "../common.h"
 #include "../util/vectorized_pointwise.h"
@@ -298,6 +301,188 @@ transformer_engine::DType get_transformer_engine_dtype(const rocblas_datatype t)
   }
 }
 
+#ifdef USE_HIPBLASLT
+void cublas_gemm(void* A,
+                 void* A_scale_inverse,
+                 void* B,
+                 void *B_scale_inverse,
+                 void* D,
+                 void* bias_ptr,
+                 void* pre_gelu_out,
+                 int m, int n, int k,
+                 int lda, int ldb, int ldd,
+                 hipblasltDatatype_t A_type,
+                 hipblasltDatatype_t B_type,
+                 hipblasltDatatype_t D_type,
+                 hipblasltDatatype_t bias_type,
+                 hipblasOperation_t transa,
+                 hipblasOperation_t transb,
+                 bool bias,
+                 bool gelu,
+                 bool grad,
+                 void* workspace,
+                 size_t workspaceSize,
+                 bool use_fp8,
+                 bool accumulate,
+                 bool use_split_accumulator,
+                 hipStream_t stream
+) {
+    // check consistency of arguments:
+    // if fp8 is desired, context cannot be null
+    // fp8 + gelu fusion is unavailable right now.
+    if (use_fp8) {
+      NVTE_CHECK(!gelu, "fp8 gemm + gelu fusion is unavailable right now!");
+    }
+
+    float one = 1.0;
+    float zero = 0.0;
+    float beta = (accumulate) ? one : zero;
+
+    hipblasLtHandle_t handle;
+    NVTE_CHECK_CUBLAS(hipblasLtCreate(&handle));
+
+    hipblasLtMatmulDesc_t       operationDesc = nullptr;
+    hipblasLtMatrixLayout_t     Adesc = nullptr, Bdesc = nullptr, Ddesc = nullptr;
+    hipblasLtMatmulPreference_t preference = nullptr;
+    int                             returnedResults = 0;
+    hipblasLtMatmulHeuristicResult_t heuristicResult = {}; //TODO: Is this Okay?
+    hipblasLtEpilogue_t epilogue = HIPBLASLT_EPILOGUE_DEFAULT;
+
+    int64_t ld_gelumat = (int64_t) ldd;
+
+    // default to tf32 except for e5m2 inputs where the config is not supported
+    /*
+    hipblasLtComputeType_t gemm_compute_type = (A_type == HIPBLASLT_R_8F_E5M2 || B_type == HIPBLASLT_R_8F_E5M2)
+                                            ? HIPBLASLT_COMPUTE_F32
+                                            : HIPBLASLT_COMPUTE_32F_FAST_TF32; //We don't have TF32 yet
+					    */
+    hipblasLtComputeType_t gemm_compute_type = HIPBLASLT_COMPUTE_F32;
+
+    // Create matrix descriptors. Not setting any extra attributes.
+    NVTE_CHECK_CUBLAS(hipblasLtMatrixLayoutCreate(&Adesc, A_type,
+                                                 transa == HIPBLAS_OP_N ? m : k,
+                                                 transa == HIPBLAS_OP_N ? k : m,
+                                                 lda));
+    NVTE_CHECK_CUBLAS(hipblasLtMatrixLayoutCreate(&Bdesc, B_type,
+                                                 transb == HIPBLAS_OP_N ? k : n,
+                                                 transb == HIPBLAS_OP_N ? n : k,
+                                                 ldb));
+    NVTE_CHECK_CUBLAS(hipblasLtMatrixLayoutCreate(&Ddesc, D_type, m, n, ldd));
+
+    NVTE_CHECK_CUBLAS(hipblasLtMatmulDescCreate(&operationDesc, gemm_compute_type, HIPBLASLT_R_32F));
+    NVTE_CHECK_CUBLAS(hipblasLtMatmulDescSetAttribute(operationDesc, HIPBLASLT_MATMUL_DESC_TRANSA,
+                                                     &transa, sizeof(transa)));
+    NVTE_CHECK_CUBLAS(hipblasLtMatmulDescSetAttribute(operationDesc, HIPBLASLT_MATMUL_DESC_TRANSB,
+                                                     &transb, sizeof(transb)));
+
+    // set fp8 attributes -- input and output types should already be set to fp8 as appropriate
+    // Note: gelu fusion isn't available right now, and we don't need
+    // amax(D) either (next op is high precision).
+    if (use_fp8) {
+        // Split accumulator.
+        /*
+        const int8_t fastAccuMode = (use_split_accumulator) ? 0 : 1;
+        NVTE_CHECK_CUBLAS(hipblasLtMatmulDescSetAttribute(operationDesc,
+                                                         HIPBLASLT_MATMUL_DESC_FAST_ACCUM, //TODO: We don't have fast accum mode yet
+                                                         &fastAccuMode,
+                                                         sizeof(fastAccuMode)));
+	 */
+        NVTE_CHECK_CUBLAS(hipblasLtMatmulDescSetAttribute(operationDesc,
+                                                         HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                                                         &A_scale_inverse,
+                                                         sizeof(A_scale_inverse)));
+        NVTE_CHECK_CUBLAS(hipblasLtMatmulDescSetAttribute(operationDesc,
+                                                         HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                                                         &B_scale_inverse,
+                                                         sizeof(B_scale_inverse)));
+        if (bias) {
+            NVTE_CHECK_CUBLAS(hipblasLtMatmulDescSetAttribute(operationDesc,
+                                                             HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE,
+                                                             &bias_type, sizeof(bias_type)));
+        }
+    }
+
+    if (bias && gelu) {
+        if (grad) {
+            epilogue = HIPBLASLT_EPILOGUE_DGELU_BGRAD;
+        } else {
+            epilogue = HIPBLASLT_EPILOGUE_GELU_AUX_BIAS;
+        }
+        NVTE_CHECK_CUBLAS(hipblasLtMatmulDescSetAttribute(operationDesc,
+                                                         HIPBLASLT_MATMUL_DESC_BIAS_POINTER,
+                                                         &bias_ptr, sizeof(bias_ptr)));
+        NVTE_CHECK_CUBLAS(hipblasLtMatmulDescSetAttribute(
+                                operationDesc, HIPBLASLT_MATMUL_DESC_EPILOGUE_AUX_POINTER,
+                                &pre_gelu_out, sizeof(pre_gelu_out)));
+        NVTE_CHECK_CUBLAS(hipblasLtMatmulDescSetAttribute(operationDesc,
+                                                         HIPBLASLT_MATMUL_DESC_EPILOGUE_AUX_LD,
+                                                         &ld_gelumat, sizeof(ld_gelumat)));
+    } else if (bias) {
+        if (grad) {
+            // grad output is always input B
+            epilogue = HIPBLASLT_EPILOGUE_BGRADB;
+        } else {
+            epilogue = HIPBLASLT_EPILOGUE_BIAS;
+        }
+        NVTE_CHECK_CUBLAS(hipblasLtMatmulDescSetAttribute(operationDesc,
+                                                         HIPBLASLT_MATMUL_DESC_BIAS_POINTER,
+                                                         &bias_ptr, sizeof(bias_ptr)));
+    } else if (gelu) {
+        if (grad) {
+            epilogue = HIPBLASLT_EPILOGUE_DGELU;
+        } else {
+            epilogue = HIPBLASLT_EPILOGUE_GELU_AUX;
+        }
+        NVTE_CHECK_CUBLAS(hipblasLtMatmulDescSetAttribute(
+                                operationDesc, HIPBLASLT_MATMUL_DESC_EPILOGUE_AUX_POINTER,
+                                &pre_gelu_out, sizeof(pre_gelu_out)));
+        NVTE_CHECK_CUBLAS(hipblasLtMatmulDescSetAttribute(operationDesc,
+                                                         HIPBLASLT_MATMUL_DESC_EPILOGUE_AUX_LD,
+                                                         &ld_gelumat, sizeof(ld_gelumat)));
+    }
+
+    NVTE_CHECK_CUBLAS(hipblasLtMatmulDescSetAttribute(operationDesc,
+                                                     HIPBLASLT_MATMUL_DESC_EPILOGUE,
+                                                     &epilogue, sizeof(epilogue)));
+
+    NVTE_CHECK_CUBLAS(hipblasLtMatmulPreferenceCreate(&preference));
+    NVTE_CHECK_CUBLAS(hipblasLtMatmulPreferenceSetAttribute(
+                            preference, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                            &workspaceSize, sizeof(workspaceSize)));
+
+    NVTE_CHECK_CUBLAS(hipblasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Ddesc,
+                                                     Ddesc, preference, 1, &heuristicResult,
+                                                     &returnedResults));
+
+    if (returnedResults == 0) throw std::runtime_error("Unable to find any suitable algorithms");
+
+    // D = alpha * (A * B) + beta * C
+    NVTE_CHECK_CUBLAS(hipblasLtMatmul(handle,
+                                     operationDesc,
+                                     static_cast<const void*>(&one),         /* alpha */
+                                     A,                                      /* A */
+                                     Adesc,
+                                     B,                                      /* B */
+                                     Bdesc,
+                                     static_cast<const void*>(&beta),        /* beta */
+                                     D,                                      /* C */
+                                     Ddesc,
+                                     D,                                      /* D */
+                                     Ddesc,
+                                     &heuristicResult.algo,                  /* algo */
+                                     workspace,                              /* workspace */
+                                     workspaceSize,
+                                     stream));                               /* stream */
+
+
+    NVTE_CHECK_CUBLAS(hipblasLtMatmulPreferenceDestroy(preference));
+    NVTE_CHECK_CUBLAS(hipblasLtMatrixLayoutDestroy(Ddesc));
+    NVTE_CHECK_CUBLAS(hipblasLtMatrixLayoutDestroy(Bdesc));
+    NVTE_CHECK_CUBLAS(hipblasLtMatrixLayoutDestroy(Adesc));
+    NVTE_CHECK_CUBLAS(hipblasLtMatmulDescDestroy(operationDesc));
+    NVTE_CHECK_CUBLAS(hipblasLtDestroy(handle));
+}
+#else // Use rocblas + kernel, no fusion
 void cublas_gemm(void* A,
                  void* A_scale_inverse,
                  void* B,
@@ -619,7 +804,8 @@ void cublas_gemm(void* A,
       	NVTE_CHECK_CUDA( hipFree(D_temp) );
     }
 }
-#else
+#endif // #ifdef USE_HIPBLASLT
+#else // Use cublasLt
 void cublas_gemm(void* A,
                  void* A_scale_inverse,
                  void* B,
@@ -760,7 +946,7 @@ void cublas_gemm(void* A,
 
     NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceCreate(&preference));
     NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
-                            preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                            preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, //TODO: Check if this is available
                             &workspaceSize, sizeof(workspaceSize)));
 
     NVTE_CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Ddesc,
@@ -799,6 +985,25 @@ void cublas_gemm(void* A,
 
 namespace {
 #ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_HIPBLASLT
+hipblasltDatatype_t get_cuda_dtype(const transformer_engine::DType t) {
+  using namespace transformer_engine;
+  switch (t) {
+    case DType::kFloat16:
+      return HIPBLASLT_R_16F;
+    case DType::kFloat32:
+      return HIPBLASLT_R_32F;
+    case DType::kBFloat16:
+      return HIPBLASLT_R_16B;
+    case DType::kFloat8E4M3:
+      return HIPBLASLT_R_8F_E4M3;
+    case DType::kFloat8E5M2:
+      return HIPBLASLT_R_8F_E5M2;
+    default:
+      NVTE_ERROR("Invalid type");
+  }
+}
+#else
 rocblas_datatype get_cuda_dtype(const transformer_engine::DType t) {
   using namespace transformer_engine;
   switch (t) {
@@ -816,6 +1021,7 @@ rocblas_datatype get_cuda_dtype(const transformer_engine::DType t) {
       NVTE_ERROR("Invalid type");
   }
 }
+#endif
 #else
 cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
   using namespace transformer_engine;
@@ -912,7 +1118,27 @@ void nvte_cublas_gemm(const NVTETensor A,
 	      << " accumulate=" << accumulate
 	      << std::endl;
   }
-
+#ifdef USE_HIPBLASLT
+  cublas_gemm(inputA->dptr, Ainvscale->dptr,
+              inputB->dptr, Binvscale->dptr,
+              outputD->dptr, biasTensor->dptr,
+              outputGelu->dptr,
+              m, n, k,
+              lda, ldb, ldd,
+              get_cuda_dtype(inputA->dtype),
+              get_cuda_dtype(inputB->dtype),
+              get_cuda_dtype(outputD->dtype),
+              get_cuda_dtype(biasTensor->dtype),
+              (transa) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
+              (transb) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
+              biasTensor->dptr != nullptr,
+              outputGelu->dptr != nullptr,
+              grad, wspace->dptr,
+              wspace->shape[0],
+              is_fp8_dtype(inputA->dtype) || is_fp8_dtype(inputB->dtype),
+              accumulate, use_split_accumulator,
+              stream);
+#else
   cublas_gemm(inputA->dptr, Ainvscale->dptr,
               inputB->dptr, Binvscale->dptr,
               outputD->dptr, biasTensor->dptr,
@@ -932,4 +1158,5 @@ void nvte_cublas_gemm(const NVTETensor A,
               is_fp8_dtype(inputA->dtype) || is_fp8_dtype(inputB->dtype),
               accumulate, use_split_accumulator,
               stream);
+#endif
 }

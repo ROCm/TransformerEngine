@@ -102,7 +102,7 @@ constexpr uint32_t THREADS_PER_WARP = 32;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // NOLINTEND
-
+#ifndef USE_HIPBLASLT
 inline __device__ float2 operator+(const float2 & a, const float2 & b) {  // NOLINT(*)
     return {a.x + b.x, a.y + b.y};
 }
@@ -113,6 +113,7 @@ inline __device__ void operator+=(float2 & a, const float2 & b) {  // NOLINT(*)
     a.x += b.x;
     a.y += b.y;
 }
+#endif
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
