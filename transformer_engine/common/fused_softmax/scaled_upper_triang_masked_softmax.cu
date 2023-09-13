@@ -97,11 +97,15 @@ struct Max {
 template <typename T>
 __device__ __forceinline__ T WARP_SHFL_XOR_NATIVE(T value, int laneMask, int width = warpSize,
                                                   unsigned int mask = 0xffffffff) {
+#ifdef __HIP_PLATFORM_HCC__
+    return __shfl_xor(value, laneMask, width);
+#else
 #if CUDA_VERSION >= 9000
     return __shfl_xor_sync(mask, value, laneMask, width);
 #else
     return __shfl_xor(value, laneMask, width);
 #endif
+#endif//#ifdef __HIP_PLATFORM_HCC__
 }
 
 template <typename acc_t, int WARP_BATCH, int WARP_SIZE, template<typename> class ReduceOp>
@@ -360,7 +364,7 @@ template<typename input_t, typename output_t, typename acc_t>
 void dispatch_scaled_upper_triang_masked_softmax_forward(
     output_t *dst,
     const input_t *src,
-    const input_t scale,
+    const acc_t scale,
     int softmax_elements,
     int softmax_elements_stride,
     int attn_batches,

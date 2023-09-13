@@ -43,7 +43,11 @@ inline __device__ void transpose_regs_partial_dbias(const IVec (&in)[nvec_out],
 #pragma unroll
   for (unsigned int j = 0; j < nvec_in; ++j) {
     CType elt = step_dbias.data.elt[j];
+#ifdef __HIP_PLATFORM_HCC__
+    elt = __shfl(elt, dbias_shfl_src_lane, THREADS_PER_WARP);
+#else
     elt = __shfl_sync(0xffffffff, elt, dbias_shfl_src_lane);  // shuffle data in warp
+#endif //#ifdef __HIP_PLATFORM_HCC__
     out_dbias.data.elt[j] += elt;
   }
 }
@@ -488,18 +492,22 @@ void fp8_transpose_dbias(const Tensor &input,
       param.workspace = reinterpret_cast<ComputeType *>(workspace->data.dptr);
 
       if (full_tile) {
+#ifndef __HIP_PLATFORM_HCC__
         cudaFuncSetAttribute(transpose_dbias_kernel<nvec_in, nvec_out, Param>,
                              cudaFuncAttributePreferredSharedMemoryCarveout,
                              100);
+#endif //#ifndef __HIP_PLATFORM_HCC__
         transpose_dbias_kernel<nvec_in, nvec_out, Param>
           <<<n_blocks,
              cast_transpose_num_threads,
              shared_size_transpose,
              stream>>>(param, row_length, num_rows, n_tiles);
       } else {
+#ifndef __HIP_PLATFORM_HCC__
         cudaFuncSetAttribute(transpose_dbias_kernel_notaligned<nvec_in, nvec_out, Param>,
                              cudaFuncAttributePreferredSharedMemoryCarveout,
                              100);
+#endif //#ifndef __HIP_PLATFORM_HCC__
         transpose_dbias_kernel_notaligned<nvec_in, nvec_out, Param>
           <<<n_blocks,
              cast_transpose_num_threads,
@@ -520,7 +528,9 @@ void nvte_fp8_transpose_dbias(const NVTETensor input,
                                NVTETensor dbias,
                                NVTETensor workspace,
                                cudaStream_t stream) {
+#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_fp8_transpose_dbias);
+#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   fp8_transpose_dbias(*reinterpret_cast<const Tensor*>(input),
                        reinterpret_cast<Tensor*>(transposed_output),

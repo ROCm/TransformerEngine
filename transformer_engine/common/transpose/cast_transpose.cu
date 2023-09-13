@@ -320,6 +320,7 @@ void cast_transpose(const Tensor &input,
              "C and T outputs need to share scale tensor.");
 
 // Launch specific cast-transpose kernel
+#ifndef __HIP_PLATFORM_HCC__
 #define LAUNCH_KERNEL(kernel, nvec_in, nvec_out, n_tiles, n_blocks, InputType, OutputType) \
   do {                                                                  \
     cudaFuncSetAttribute(kernel<nvec_in, nvec_out, fp32, InputType, OutputType>, \
@@ -338,6 +339,23 @@ void cast_transpose(const Tensor &input,
           reinterpret_cast<fp32 *>(cast_output->amax.dptr),             \
           row_length, num_rows, n_tiles);                               \
   } while (false)
+#else
+#define LAUNCH_KERNEL(kernel, nvec_in, nvec_out, n_tiles, n_blocks, InputType, OutputType) \
+  do {                                                                  \
+    kernel<nvec_in, nvec_out, fp32, InputType, OutputType>              \
+      <<<n_blocks,                                                      \
+         cast_transpose_num_threads,                                    \
+         cast_transpose_num_threads / n_warps_per_tile *                \
+         (THREADS_PER_WARP + 1) * sizeof(Vec<OutputType, nvec_out>),    \
+         stream>>>(                                                     \
+          reinterpret_cast<const InputType *>(input.data.dptr),         \
+          reinterpret_cast<OutputType *>(cast_output->data.dptr),       \
+          reinterpret_cast<OutputType *>(transposed_output->data.dptr), \
+          reinterpret_cast<const fp32 *>(cast_output->scale.dptr),      \
+          reinterpret_cast<fp32 *>(cast_output->amax.dptr),             \
+          row_length, num_rows, n_tiles);                               \
+  } while (false)
+#endif //#ifndef __HIP_PLATFORM_HCC__
 
 // Launch cast-transpose kernel for given vector sizes
 #define LAUNCH_KERNEL_VEC_SIZES(load_size, store_size, InputType, OutputType) \
@@ -389,48 +407,6 @@ void cast_transpose(const Tensor &input,
         return n_blocks;
       };
 
-<<<<<<< HEAD
-      if (full_tile) {
-        #ifndef __HIP_PLATFORM_HCC__
-        cudaFuncSetAttribute(cast_transpose_kernel<nvec_in, nvec_out, fp32,
-                                                   InputType, OutputType>,
-                             cudaFuncAttributePreferredSharedMemoryCarveout,
-                             100);
-        #endif
-        cast_transpose_kernel<nvec_in, nvec_out, fp32, InputType, OutputType>
-            <<<n_blocks,
-               cast_transpose_num_threads,
-               cast_transpose_num_threads / n_warps_per_tile *
-               (THREADS_PER_WARP + 1) * sizeof(Vec<OutputType, nvec_out>),
-               stream>>>(
-                reinterpret_cast<const InputType *>(input.dptr),
-                reinterpret_cast<OutputType *>(cast_output->dptr),
-                reinterpret_cast<OutputType *>(transposed_output->dptr),
-                reinterpret_cast<const fp32 *>(scale.dptr),
-                reinterpret_cast<fp32 *>(amax->dptr),
-                reinterpret_cast<fp32 *>(scale_inv->dptr),
-                row_length, num_rows, n_tiles);
-      } else {
-        #ifndef __HIP_PLATFORM_HCC__
-        cudaFuncSetAttribute(cast_transpose_kernel_notaligned<nvec_in, nvec_out, fp32,
-                                                              InputType, OutputType>,
-                             cudaFuncAttributePreferredSharedMemoryCarveout,
-                             100);
-        #endif
-        cast_transpose_kernel_notaligned<nvec_in, nvec_out, fp32, InputType, OutputType>
-            <<<n_blocks,
-               cast_transpose_num_threads,
-               cast_transpose_num_threads / n_warps_per_tile *
-               (THREADS_PER_WARP + 1) * sizeof(Vec<OutputType, nvec_out>),
-               stream>>>(
-                reinterpret_cast<const InputType *>(input.dptr),
-                reinterpret_cast<OutputType *>(cast_output->dptr),
-                reinterpret_cast<OutputType *>(transposed_output->dptr),
-                reinterpret_cast<const fp32 *>(scale.dptr),
-                reinterpret_cast<fp32 *>(amax->dptr),
-                reinterpret_cast<fp32 *>(scale_inv->dptr),
-                row_length, num_rows, n_tiles);
-=======
       // Estimate optimal vector sizes and run
       // Note: Consider reducing to 2B or 1B loads/stores for
       // sufficiently small matrices. Need to consider whether reduced
@@ -442,7 +418,6 @@ void cast_transpose(const Tensor &input,
         LAUNCH_KERNEL_VEC_SIZES(8, 8, InputType, OutputType);
       } else {
         LAUNCH_KERNEL_VEC_SIZES(4, 4, InputType, OutputType);
->>>>>>> upstream/main
       }
 
     );  // NOLINT(*)
@@ -458,7 +433,9 @@ void nvte_cast_transpose(const NVTETensor input,
                          NVTETensor cast_output,
                          NVTETensor transposed_output,
                          cudaStream_t stream) {
+#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_cast_transpose);
+#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   cast_transpose(*reinterpret_cast<const Tensor*>(input),
                  reinterpret_cast<Tensor*>(cast_output),

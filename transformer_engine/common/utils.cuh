@@ -7,18 +7,19 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_UTILS_CUH_
 #define TRANSFORMER_ENGINE_COMMON_UTILS_CUH_
 
+#include <cuda_fp16.h>
 #ifdef __HIP_PLATFORM_HCC__
 #include <hip/hip_bfloat16.h>
+#include "amd_detail/hip_float8.h"
 #else
 #include <cuda_bf16.h>
-#endif
-#include <cuda_fp16.h>
 #include <cuda_fp8.h>
+#endif
 
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_HCC__
 typedef uint16_t hip_bfloat16x2 __attribute__((ext_vector_type(2)));
-=======
+#endif
+
 #if !defined(__CUDACC_RTC__)
 #include <cstdint>
 #else
@@ -31,7 +32,6 @@ static_assert(sizeof(uint8_t) == 1);
 static_assert(sizeof(uint16_t) == 2);
 static_assert(sizeof(uint32_t) == 4);
 static_assert(sizeof(uint64_t) == 8);
->>>>>>> upstream/main
 #endif
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -40,86 +40,8 @@ constexpr uint32_t THREADS_PER_WARP = 32;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-<<<<<<< HEAD
-#define REGISTER_FWD_TUNED_LAUNCHER(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE,                       \
-                              CTAS_PER_ROW, WARPS_M, WARPS_N, BYTES_PER_LDG)                       \
-    void ln_fwd_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                       \
-            LaunchParams<FwdParams> &launch_params,                                                \
-            const bool configure_params) {                                                         \
-        launch_tuned_<WTYPE, ITYPE, OTYPE, CTYPE, uint32_t, HIDDEN_SIZE, CTAS_PER_ROW,             \
-        WARPS_M, WARPS_N, BYTES_PER_LDG>(                                                          \
-            launch_params, configure_params);                                                      \
-    }                                                                                              \
-    static FwdTunedRegistrar<WTYPE, ITYPE, OTYPE, CTYPE, HIDDEN_SIZE>                              \
-           reg_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                        \
-        ln_fwd_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE)
 
-#define REGISTER_FWD_GENERAL_LAUNCHER(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE,                     \
-                              WARPS_M, WARPS_N, BYTES_PER_LDG)                                     \
-    void ln_fwd_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                     \
-            LaunchParams<FwdParams> &launch_params,                                                \
-            const bool configure_params) {                                                         \
-        launch_general_<WTYPE, ITYPE, OTYPE, CTYPE, uint32_t, HIDDEN_SIZE,                         \
-        WARPS_M, WARPS_N, BYTES_PER_LDG>(                                                          \
-            launch_params, configure_params);                                                      \
-    }                                                                                              \
-    static FwdGeneralRegistrar<WTYPE, ITYPE, OTYPE, CTYPE, HIDDEN_SIZE>                            \
-           reg_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                      \
-        ln_fwd_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE)
-
-// NOLINTBEGIN
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-#define REGISTER_BWD_TUNED_LAUNCHER(                                                               \
-    HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, CTAS_PER_ROW, WARPS_M, WARPS_N, BYTES_PER_LDG,        \
-                                                                BYTES_PER_LDG_FINALIZE)            \
-    void ln_bwd_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                       \
-            LaunchParams<BwdParams>                                                                \
-            &launch_params,                                                                        \
-            const bool configure_params) {                                                         \
-        launch_tuned_<WTYPE,                                                                       \
-                ITYPE,                                                                             \
-                OTYPE,                                                                             \
-                CTYPE,                                                                             \
-                uint32_t,                                                                          \
-                HIDDEN_SIZE,                                                                       \
-                CTAS_PER_ROW,                                                                      \
-                WARPS_M,                                                                           \
-                WARPS_N,                                                                           \
-                BYTES_PER_LDG,                                                                     \
-                BYTES_PER_LDG_FINALIZE>(launch_params, configure_params);                          \
-    }                                                                                              \
-    static BwdTunedRegistrar<WTYPE, ITYPE, OTYPE, CTYPE, HIDDEN_SIZE>                              \
-                reg_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                   \
-                ln_bwd_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE)
-
-#define REGISTER_BWD_GENERAL_LAUNCHER(                                                             \
-    HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, WARPS_M, WARPS_N, BYTES_PER_LDG,                      \
-                                                                BYTES_PER_LDG_FINALIZE)            \
-    void ln_bwd_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                     \
-            LaunchParams<BwdParams>                                                                \
-            &launch_params,                                                                        \
-            const bool configure_params) {                                                         \
-        launch_general_<WTYPE,                                                                     \
-                ITYPE,                                                                             \
-                OTYPE,                                                                             \
-                CTYPE,                                                                             \
-                uint32_t,                                                                          \
-                HIDDEN_SIZE,                                                                       \
-                WARPS_M,                                                                           \
-                WARPS_N,                                                                           \
-                BYTES_PER_LDG,                                                                     \
-                BYTES_PER_LDG_FINALIZE>(launch_params, configure_params);                          \
-    }                                                                                              \
-    static BwdGeneralRegistrar<WTYPE, ITYPE, OTYPE, CTYPE, HIDDEN_SIZE>                            \
-                reg_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                 \
-                ln_bwd_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE)
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-// NOLINTEND
 #ifndef USE_HIPBLASLT
-=======
->>>>>>> upstream/main
 inline __device__ float2 operator+(const float2 & a, const float2 & b) {  // NOLINT(*)
     return {a.x + b.x, a.y + b.y};
 }
@@ -146,15 +68,11 @@ struct Sum {
 
 template<typename T>
 inline __device__ T warp_shuffle_xor(const T & x, uint32_t idx) {
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_HCC__
     return __shfl_xor(x, idx, THREADS_PER_WARP);
 #else
-    return __shfl_xor_sync(uint32_t(-1), x, idx);
-#endif
-=======
     return __shfl_xor_sync(static_cast<uint32_t>(-1), x, idx);
->>>>>>> upstream/main
+#endif
 }
 
 template<>
@@ -164,15 +82,11 @@ inline __device__ float2 warp_shuffle_xor<float2>(const float2 & x, uint32_t idx
 
 template<typename T>
 inline __device__ T warp_shuffle_down(const T & x, uint32_t idx) {
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_HCC__
     return __shfl_down(x, idx, THREADS_PER_WARP);
 #else
-    return __shfl_down_sync(uint32_t(-1), x, idx);
-#endif
-=======
     return __shfl_down_sync(static_cast<uint32_t>(-1), x, idx);
->>>>>>> upstream/main
+#endif
 }
 
 template<>
@@ -760,18 +674,13 @@ inline __device__ void warp_chan_upd_dynamic(T &m_a, T &m2_a, T &n_a, int num_ac
         m2_a = m2_ab;
     }
     // Intra-warp broadcast (only lane 0 has valid stats).
-<<<<<<< HEAD
     #ifdef __HIP_PLATFORM_HCC__
     m_a = __shfl(m_a, 0, THREADS_PER_WARP);
     m2_a = __shfl(m2_a, 0, THREADS_PER_WARP);
     #else
-    m_a = __shfl_sync(uint32_t(-1), m_a, 0);
-    m2_a = __shfl_sync(uint32_t(-1), m2_a, 0);
-    #endif
-=======
     m_a = __shfl_sync(static_cast<uint32_t>(-1), m_a, 0);
     m2_a = __shfl_sync(static_cast<uint32_t>(-1), m2_a, 0);
->>>>>>> upstream/main
+    #endif
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

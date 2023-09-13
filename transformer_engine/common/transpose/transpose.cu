@@ -10,15 +10,19 @@
 #include <cfloat>
 #include "../common.h"
 #include "../utils.cuh"
+#ifndef __HIP_PLATFORM_HCC__
 #include "../util/string.h"
 #include "../util/rtc.h"
+#endif //#ifndef __HIP_PLATFORM_HCC__
 
 namespace transformer_engine {
 
 namespace {
 
+#ifndef __HIP_PLATFORM_HCC__
 // String with RTC kernel implementation
 #include "string_code_transpose_rtc_transpose_cu.h"
+#endif //#ifndef __HIP_PLATFORM_HCC__
 
 // Hard-coded kernel parameters
 constexpr size_t warps_per_tile = 4;
@@ -141,12 +145,15 @@ void transpose(const Tensor &input,
              "Input and output type must match.");
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(input.data.dtype, Type,
+#ifndef __HIP_PLATFORM_HCC__
     constexpr const char *type_name = TypeInfo<Type>::name;
+#endif //#ifndef __HIP_PLATFORM_HCC__
     constexpr size_t type_size = sizeof(Type);
 
     // Choose between runtime-compiled or statically-compiled kernel
     const bool aligned = (row_length % THREADS_PER_WARP == 0
                           && num_rows % THREADS_PER_WARP == 0);
+#ifndef __HIP_PLATFORM_HCC__
     if (aligned && rtc::is_enabled()) {  // Runtime-compiled tuned kernel
       // Determine kernel config
       size_t load_size = 8;
@@ -218,38 +225,6 @@ void transpose(const Tensor &input,
       NVTE_CHECK(is_tile_aligned(load_size, store_size),
                  "memory accesses are not properly aligned");
 
-<<<<<<< HEAD
-    if (full_tile) {
-      #ifndef __HIP_PLATFORM_HCC__
-      cudaFuncSetAttribute(transpose_kernel<nvec_in, nvec_out, fp32, Type, Type>,
-                           cudaFuncAttributePreferredSharedMemoryCarveout,
-                           100);
-      #endif
-      transpose_kernel<nvec_in, nvec_out, fp32, Type, Type>
-        <<<n_blocks,
-           cast_transpose_num_threads,
-           cast_transpose_num_threads / n_warps_per_tile *
-             (THREADS_PER_WARP + 1) * sizeof(Vec<Type, nvec_out>),
-           stream>>>(
-            reinterpret_cast<const Type *>(input.dptr),
-            reinterpret_cast<Type *>(transposed_output->dptr),
-            row_length, num_rows, n_tiles);
-    } else {
-      #ifndef __HIP_PLATFORM_HCC__
-      cudaFuncSetAttribute(transpose_kernel_notaligned<nvec_in, nvec_out, fp32, Type, Type>,
-                           cudaFuncAttributePreferredSharedMemoryCarveout,
-                           100);
-      #endif
-      transpose_kernel_notaligned<nvec_in, nvec_out, fp32, Type, Type>
-        <<<n_blocks,
-           cast_transpose_num_threads,
-           cast_transpose_num_threads / n_warps_per_tile *
-             (THREADS_PER_WARP + 1) * sizeof(Vec<Type, nvec_out>),
-           stream>>>(
-            reinterpret_cast<const Type *>(input.dptr),
-            reinterpret_cast<Type *>(transposed_output->dptr),
-            row_length, num_rows, n_tiles);
-=======
       // Compile NVRTC kernel if needed and launch
       auto& rtc_manager = rtc::KernelManager::instance();
       const std::string kernel_label = concat_strings("transpose"
@@ -274,6 +249,7 @@ void transpose(const Tensor &input,
                          static_cast<Type*>(output.data.dptr),
                          row_length, num_rows);
     } else {  // Statically-compiled general kernel
+#endif //#ifndef __HIP_PLATFORM_HCC__
       constexpr size_t load_size = 4;
       constexpr size_t store_size = 4;
       constexpr size_t row_tile_size = load_size / type_size * THREADS_PER_WARP;
@@ -284,8 +260,9 @@ void transpose(const Tensor &input,
         static_cast<const Type *>(input.data.dptr),
         static_cast<Type *>(output.data.dptr),
         row_length, num_rows);
->>>>>>> upstream/main
+#ifndef __HIP_PLATFORM_HCC__
     }
+#endif //#ifndef __HIP_PLATFORM_HCC__
   );  // NOLINT(*)
 }
 
@@ -294,7 +271,9 @@ void transpose(const Tensor &input,
 void nvte_transpose(const NVTETensor input,
                     NVTETensor output,
                     cudaStream_t stream) {
+#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_transpose);
+#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   transpose(*reinterpret_cast<const Tensor*>(input),
             reinterpret_cast<Tensor*>(output),

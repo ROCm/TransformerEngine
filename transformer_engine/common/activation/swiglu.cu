@@ -78,7 +78,9 @@ void dswiglu(const Tensor &grad,
 void nvte_swiglu(const NVTETensor input,
                  NVTETensor output,
                  cudaStream_t stream) {
+#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_swiglu);
+#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   swiglu(*reinterpret_cast<const Tensor*>(input),
          reinterpret_cast<Tensor*>(output),
@@ -89,7 +91,9 @@ void nvte_dswiglu(const NVTETensor grad,
                   const NVTETensor input,
                   NVTETensor output,
                   cudaStream_t stream) {
+#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_dswiglu);
+#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   dswiglu(*reinterpret_cast<const Tensor*>(grad),
           *reinterpret_cast<const Tensor*>(input),

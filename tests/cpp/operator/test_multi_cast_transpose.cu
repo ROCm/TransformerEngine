@@ -8,7 +8,7 @@
 #include <transformer_engine/logging.h>
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
-#include <cuda_bf16.h>
+//#include <cuda_bf16.h>
 #include <cstring>
 #include <iostream>
 #include <iomanip>

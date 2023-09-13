@@ -8,7 +8,11 @@
 #define TRANSFORMER_ENGINE_SOFTMAX_H_
 
 #include <cuda_fp16.h>
+#ifdef __HIP_PLATFORM_HCC__
+#include <hip/hip_bfloat16.h>
+#else
 #include <cuda_bf16.h>
+#endif //#ifdef __HIP_PLATFORM_HCC__
 #include "transformer_engine.h"
 
 #ifdef __cplusplus

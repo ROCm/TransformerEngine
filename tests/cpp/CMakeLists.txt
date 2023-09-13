@@ -80,4 +80,7 @@ else()
 endif()
 
 add_subdirectory(operator)
+
+if(USE_CUDA)
 add_subdirectory(util)
+endif()

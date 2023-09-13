@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <cuda_bf16.h>
+//#include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 #include <transformer_engine/logging.h>

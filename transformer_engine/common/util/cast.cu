@@ -93,7 +93,9 @@ void fp8_dequantize(const Tensor &input,
 void nvte_fp8_quantize(const NVTETensor input,
                        NVTETensor output,
                        cudaStream_t stream) {
+#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_fp8_quantize);
+#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   fp8_quantize(*reinterpret_cast<const Tensor*>(input),
                reinterpret_cast<Tensor*>(output),
@@ -103,7 +105,9 @@ void nvte_fp8_quantize(const NVTETensor input,
 void nvte_fp8_dequantize(const NVTETensor input,
                          NVTETensor output,
                          cudaStream_t stream) {
+#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_fp8_dequantize);
+#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   fp8_dequantize(*reinterpret_cast<const Tensor*>(input),
                  reinterpret_cast<Tensor*>(output),

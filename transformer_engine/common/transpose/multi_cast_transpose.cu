@@ -332,7 +332,9 @@ void nvte_multi_cast_transpose(size_t num_tensors,
                                NVTETensor* cast_output_list,
                                NVTETensor* transposed_output_list,
                                cudaStream_t stream) {
+#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_multi_cast_transpose);
+#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   std::vector<Tensor*> input_list_,
     cast_output_list_, transposed_output_list_;

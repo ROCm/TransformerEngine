@@ -598,22 +598,22 @@ void cast_transpose_dbias(const Tensor &input,
       param.workspace = reinterpret_cast<ComputeType *>(workspace->data.dptr);
 
       if (full_tile) {
-        #ifndef __HIP_PLATFORM_HCC__
+#ifndef __HIP_PLATFORM_HCC__
         cudaFuncSetAttribute(cast_transpose_dbias_kernel<nvec_in, nvec_out, Param>,
                              cudaFuncAttributePreferredSharedMemoryCarveout,
                              100);
-        #endif
+#endif //#ifndef __HIP_PLATFORM_HCC__
         cast_transpose_dbias_kernel<nvec_in, nvec_out, Param>
           <<<n_blocks,
              cast_transpose_num_threads,
              shared_size_transpose,
              stream>>>(param, row_length, num_rows, n_tiles);
       } else {
-        #ifndef __HIP_PLATFORM_HCC__
+#ifndef __HIP_PLATFORM_HCC__
         cudaFuncSetAttribute(cast_transpose_dbias_kernel_notaligned<nvec_in, nvec_out, Param>,
                              cudaFuncAttributePreferredSharedMemoryCarveout,
                              100);
-        #endif
+#endif //#ifndef __HIP_PLATFORM_HCC__
         cast_transpose_dbias_kernel_notaligned<nvec_in, nvec_out, Param>
           <<<n_blocks,
              cast_transpose_num_threads,
@@ -1431,22 +1431,22 @@ void cast_transpose_dbias_dgelu(const Tensor &input,
       param.amax = reinterpret_cast<ComputeType *>(cast_output->amax.dptr);
       param.workspace = reinterpret_cast<ComputeType *>(workspace->data.dptr);
       if (full_tile) {
-        #ifndef __HIP_PLATFORM_HCC__
+#ifndef __HIP_PLATFORM_HCC__
         cudaFuncSetAttribute(cast_transpose_dbias_dgelu_kernel<nvec_in, nvec_out, Param>,
                              cudaFuncAttributePreferredSharedMemoryCarveout,
                              100);
-        #endif
+#endif //#ifndef __HIP_PLATFORM_HCC__
         cast_transpose_dbias_dgelu_kernel<nvec_in, nvec_out, Param>
           <<<n_blocks,
           cast_transpose_num_threads,
           shared_size_transpose,
           stream>>>(param, row_length, num_rows, n_tiles);
       } else {
-        #ifndef __HIP_PLATFORM_HCC__
+#ifndef __HIP_PLATFORM_HCC__
         cudaFuncSetAttribute(cast_transpose_dbias_dgelu_kernel_notaligned<nvec_in, nvec_out, Param>,
                              cudaFuncAttributePreferredSharedMemoryCarveout,
                              100);
-        #endif
+#endif //#ifndef __HIP_PLATFORM_HCC__
         cast_transpose_dbias_dgelu_kernel_notaligned<nvec_in, nvec_out, Param>
           <<<n_blocks,
           cast_transpose_num_threads,
@@ -1516,10 +1516,12 @@ void dgeglu_cast_transpose(const Tensor &input,
       const bool full_tile = row_length % (nvec_in * THREADS_PER_WARP) == 0 &&
                              num_rows % (nvec_out * THREADS_PER_WARP) == 0;
       if (full_tile) {
+#ifndef __HIP_PLATFORM_HCC__
         cudaFuncSetAttribute(dgeglu_cast_transpose_kernel<nvec_in, nvec_out, fp32,
                                                    InputType, OutputType>,
                              cudaFuncAttributePreferredSharedMemoryCarveout,
                              100);
+#endif //#ifndef __HIP_PLATFORM_HCC__
         dgeglu_cast_transpose_kernel<nvec_in, nvec_out, fp32, InputType, OutputType>
             <<<n_blocks,
                cast_transpose_num_threads,
@@ -1535,10 +1537,12 @@ void dgeglu_cast_transpose(const Tensor &input,
                 reinterpret_cast<fp32 *>(cast_output->scale_inv.dptr),
                 row_length, num_rows, n_tiles);
       } else {
+#ifndef __HIP_PLATFORM_HCC__
         cudaFuncSetAttribute(dgeglu_cast_transpose_kernel_notaligned<nvec_in, nvec_out, fp32,
                                                               InputType, OutputType>,
                              cudaFuncAttributePreferredSharedMemoryCarveout,
                              100);
+#endif //#ifndef __HIP_PLATFORM_HCC__
         dgeglu_cast_transpose_kernel_notaligned<nvec_in, nvec_out, fp32, InputType, OutputType>
             <<<n_blocks,
                cast_transpose_num_threads,
@@ -1566,7 +1570,9 @@ void nvte_cast_transpose_dbias(const NVTETensor input,
                                NVTETensor dbias,
                                NVTETensor workspace,
                                cudaStream_t stream) {
+#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_cast_transpose_dbias);
+#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   cast_transpose_dbias(*reinterpret_cast<const Tensor*>(input),
                        reinterpret_cast<Tensor*>(cast_output),
@@ -1583,7 +1589,9 @@ void nvte_cast_transpose_dbias_dgelu(const NVTETensor input,
                                      NVTETensor dbias,
                                      NVTETensor workspace,
                                      cudaStream_t stream) {
+#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_cast_transpose_dbias_dgelu);
+#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   cast_transpose_dbias_dgelu(*reinterpret_cast<const Tensor*>(input),
                              *reinterpret_cast<const Tensor*>(gelu_input),
@@ -1599,7 +1607,9 @@ void nvte_dgeglu_cast_transpose(const NVTETensor input,
                                 NVTETensor cast_output,
                                 NVTETensor transposed_output,
                                 cudaStream_t stream) {
+#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_dgeglu_cast_transpose);
+#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   dgeglu_cast_transpose(*reinterpret_cast<const Tensor*>(input),
                         *reinterpret_cast<const Tensor*>(geglu_input),

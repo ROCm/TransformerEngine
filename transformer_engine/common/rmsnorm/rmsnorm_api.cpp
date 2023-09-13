@@ -286,7 +286,9 @@ void nvte_rmsnorm_fwd(const NVTETensor x,      // Nxhidden_size
                       const NVTETensor gamma,  // hidden_size
                       const float epsilon, NVTETensor z, NVTETensor rsigma, cudaStream_t stream,
                       const int multiprocessorCount, NVTETensor workspace, NVTETensor barrier) {
+#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_rmsnorm_fwd);
+#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   rmsnorm_fwd(*reinterpret_cast<const Tensor *>(x), *reinterpret_cast<const Tensor *>(gamma),
               epsilon, reinterpret_cast<Tensor *>(z), reinterpret_cast<Tensor *>(rsigma), stream,
@@ -300,7 +302,9 @@ void nvte_rmsnorm_bwd(const NVTETensor dz,      // Nxhidden_size
                       const NVTETensor gamma,   // hidden_size
                       NVTETensor dx, NVTETensor dgamma, NVTETensor dgamma_part, cudaStream_t stream,
                       const int multiprocessorCount, NVTETensor workspace, NVTETensor barrier) {
+#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_rmsnorm_bwd);
+#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   rmsnorm_bwd(*reinterpret_cast<const Tensor *>(dz), *reinterpret_cast<const Tensor *>(x),
               *reinterpret_cast<const Tensor *>(rsigma), *reinterpret_cast<const Tensor *>(gamma),

@@ -25,7 +25,9 @@
 #include <string>
 #include <tuple>
 #include <vector>
+#ifndef USE_ROCM
 #include "nvtx.h"
+#endif
 
 namespace transformer_engine {
 
@@ -64,14 +66,13 @@ using fp16 = half;
 using bf16 = nv_bfloat16;
 using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
-<<<<<<< HEAD
 #else
 using bf16 = hip_bfloat16;
 using fp8e4m3 = hip_f8<hip_f8_type::fp8>;
 using fp8e5m2 = hip_f8<hip_f8_type::bf8>;
 #endif
-=======
 
+#ifndef USE_ROCM
 namespace detail {
 
 template <typename T>
@@ -88,7 +89,7 @@ TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e5m2)
 #undef TRANSFORMER_ENGINE_TYPE_NAME
 
 }  // namespace detail
->>>>>>> upstream/main
+#endif //#ifndef USE_ROCM
 
 template <typename T>
 struct TypeInfo{
@@ -126,7 +127,9 @@ struct TypeInfo{
 
     constexpr static DType dtype = getType<T>();
     constexpr static size_t size = sizeof(T);
+#ifndef USE_ROCM
     constexpr static const char *name = detail::type_name<T>();
+#endif //#ifndef USE_ROCM
 };
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(dtype, type, ...) \
@@ -317,8 +320,10 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
 
 bool is_fp8_dtype(const DType t);
 
+#ifndef USE_ROCM
 #define NVTE_API_CALL(api_name) \
   transformer_engine::nvtx::NVTXWrapper _ ## api_name ## _nvtx_wrapper(#api_name);
+#endif
 
 }  // namespace transformer_engine
 

@@ -16,12 +16,9 @@
 #endif // #ifdef USE_HIPBLASLT
 #else
 #include <cublas_v2.h>
-<<<<<<< HEAD
-#endif
-=======
 #include <cudnn.h>
 #include <nvrtc.h>
->>>>>>> upstream/main
+#endif //#ifdef __HIP_PLATFORM_HCC__
 #include <string>
 #include <stdexcept>
 
@@ -68,6 +65,7 @@ inline void check_cublas_(cublasStatus_t status) {
 }
 #endif
 
+#ifndef __HIP_PLATFORM_HCC__
 inline void check_cudnn_(cudnnStatus_t status) {
     if ( status != CUDNN_STATUS_SUCCESS ) {
         std::string message;
@@ -87,6 +85,9 @@ inline void check_nvrtc_(nvrtcResult status) {
         NVTE_ERROR("NVRTC Error: " + std::string(nvrtcGetErrorString(status)));
     }
 }
+#endif //#ifndef __HIP_PLATFORM_HCC__
+//TODO: check_miopen
+//TODO: check_nvrtc
 
 }  // namespace
 
@@ -94,8 +95,10 @@ inline void check_nvrtc_(nvrtcResult status) {
 
 #define NVTE_CHECK_CUBLAS(ans) { check_cublas_(ans); }
 
+#ifndef __HIP_PLATFORM_HCC__
 #define NVTE_CHECK_CUDNN(ans) { check_cudnn_(ans); }
 
 #define NVTE_CHECK_NVRTC(ans) { check_nvrtc_(ans); }
+#endif //#ifndef __HIP_PLATFORM_HCC__
 
 #endif  // TRANSFORMER_ENGINE_LOGGING_H_

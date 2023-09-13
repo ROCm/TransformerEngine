@@ -78,10 +78,14 @@ struct Max {
 template <typename T>
 __device__ __forceinline__ T WARP_SHFL_XOR_NATIVE(T value, int laneMask, int width = warpSize,
                                                   unsigned int mask = 0xffffffff) {
+#ifdef __HIP_PLATFORM_HCC__
+    return __shfl_xor(value, laneMask, width);
+#else
 #if CUDA_VERSION >= 9000
     return __shfl_xor_sync(mask, value, laneMask, width);
 #else
     return __shfl_xor(value, laneMask, width);
+#endif
 #endif
 }
 
@@ -457,7 +461,7 @@ template<typename input_t, typename output_t, typename acc_t>
 void dispatch_scaled_softmax_forward(
     output_t *dst,
     const input_t *src,
-    const input_t scale,
+    const acc_t scale,
     int query_seq_len,
     int key_seq_len,
     int batches,
@@ -605,7 +609,7 @@ void dispatch_scaled_masked_softmax_forward(
     output_t *dst,
     const input_t *src,
     const uint8_t *mask,
-    const input_t scale,
+    const acc_t scale,
     int query_seq_len,
     int key_seq_len,
     int batches,
@@ -1065,7 +1069,9 @@ void nvte_scaled_softmax_forward(
     float scale_factor,
     cudaStream_t stream
 ) {
+#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_scaled_softmax_forward);
+#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   scaled_softmax_forward(
       *reinterpret_cast<const Tensor*>(input),
@@ -1082,7 +1088,9 @@ void nvte_scaled_softmax_backward(
     float scale_factor,
     cudaStream_t stream
 ) {
+#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_scaled_softmax_backward);
+#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   scaled_softmax_backward(
       *reinterpret_cast<Tensor*>(output_grads),
@@ -1100,7 +1108,9 @@ void nvte_scaled_masked_softmax_forward(
     float scale_factor,
     cudaStream_t stream
 ) {
+#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_scaled_masked_softmax_forward);
+#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   scaled_masked_softmax_forward(
       *reinterpret_cast<const Tensor*>(input),
@@ -1118,7 +1128,9 @@ void nvte_scaled_masked_softmax_backward(
     float scale_factor,
     cudaStream_t stream
 ) {
+#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_scaled_masked_softmax_backward);
+#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   scaled_masked_softmax_backward(
       *reinterpret_cast<Tensor*>(output_grads),
