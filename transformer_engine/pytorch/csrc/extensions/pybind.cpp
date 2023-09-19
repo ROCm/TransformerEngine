@@ -48,6 +48,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("cast_to_fp8_noalloc", &cast_to_fp8_noalloc, "Cast to FP8");
   m.def("cast_from_fp8", &cast_from_fp8, "Cast from FP8");
   m.def("te_gemm", &te_gemm, "CublasLt GEMM");
+#ifndef USE_ROCM
   m.def("fused_attn_fwd_qkvpacked", &fused_attn_fwd_qkvpacked,
                   "Fused Attention FP8/BF16/FP16 FWD with packed QKV");
   m.def("fused_attn_bwd_qkvpacked", &fused_attn_bwd_qkvpacked,
@@ -56,6 +57,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                   "Fused Attention FP8/BF16/FP16 FWD with packed KV");
   m.def("fused_attn_bwd_kvpacked", &fused_attn_bwd_kvpacked,
                   "Fused Attention FP8/BF16/FP16 BWD with packed KV");
+#endif
   m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O");
   m.def("gelu", &gelu, "GeLU with FP8 output");
   m.def("relu", &relu, "ReLU with FP8 output");
@@ -67,13 +69,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("dgeglu", &dgeglu, "Backward of GeGLU");
   m.def("dreglu", &dreglu, "Backward of ReGLU");
   m.def("dswiglu", &dswiglu, "Backward of SwiGLU");
+#ifndef USE_ROCM
   m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention");
   m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention");
   m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend");
+#endif
 
   // Misc
+#ifndef USE_ROCM
   m.def("get_cublasLt_version", &get_cublasLt_version, "Get cublasLt version");
   m.def("userbuf_comm_available", &userbuf_comm_available, "If userbuf backend is available");
+#endif
 
   // Data structures
   py::class_<transformer_engine::FP8TensorMeta>(m, "FP8TensorMeta")

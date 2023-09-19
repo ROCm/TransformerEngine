@@ -32,14 +32,10 @@
 
 #ifndef USE_ROCM
 #include <cuda_bf16.h>
-<<<<<<< HEAD
+#include <cublasLt.h>
 #else
 #include <hip/hip_bfloat16.h>
 #endif
-
-=======
-#include <cublasLt.h>
->>>>>>> upstream/main
 #include <stdexcept>
 #include <memory>
 #include <iomanip>

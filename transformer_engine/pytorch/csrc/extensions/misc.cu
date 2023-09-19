@@ -9,10 +9,10 @@
 #include "comm_gemm_overlap.h"
 #endif  // NVTE_WITH_USERBUFFERS
 
+#ifndef USE_ROCM
 size_t get_cublasLt_version() {
     return cublasLtGetVersion();
 }
-
 
 bool userbuf_comm_available() {  // TODO(ksivamani) check on python side
 #ifdef NVTE_WITH_USERBUFFERS
@@ -21,5 +21,6 @@ bool userbuf_comm_available() {  // TODO(ksivamani) check on python side
     return false;
 #endif
 }
+#endif
 
 void placeholder() {}  // TODO(ksivamani) clean this up

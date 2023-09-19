@@ -5,8 +5,12 @@
  ************************************************************************/
 
 #include "common.h"
+#ifndef USE_ROCM
 #include "../common.h"
+#endif
 
+//TODO: support fused attn and flash attn for ROCm
+#ifndef USE_ROCM
 NVTE_Fused_Attn_Backend get_fused_attn_backend(
                 const transformer_engine::DType q_dtype,
                 const transformer_engine::DType kv_dtype,
@@ -109,6 +113,7 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
+#endif
 
 void te_gemm(at::Tensor A,
              at::Tensor A_scale_inverse,
@@ -450,8 +455,11 @@ at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
                                                        float scale_factor
 );
 
+//TODO: support user buffer for ROCm
+#ifndef USE_ROCM
 size_t get_cublasLt_version();
 
 bool userbuf_comm_available();
+#endif
 
 void placeholder();

@@ -13,376 +13,16 @@ from subprocess import CalledProcessError
 import sys
 import tempfile
 from typing import List, Optional, Tuple, Union
-
 import setuptools
 from setuptools.command.build_ext import build_ext
-<<<<<<< HEAD
-from setuptools.command.install import install
-from distutils.version import LooseVersion
-from distutils.file_util import copy_file
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME, ROCM_HOME, IS_HIP_EXTENSION
-
-path = os.path.dirname(os.path.realpath(__file__))
-use_hipblaslt = None
-
-class InstallCommand(install):
-    user_options = install.user_options + [
-        ('use-hipblaslt', None, "a flag option to use hipblaslt"), 
-    ]
-
-    def initialize_options(self):
-        install.initialize_options(self)
-        self.use_hipblaslt = None
-
-    def finalize_options(self):
-        print("value of use_hipblaslt", self.use_hipblaslt)
-        install.finalize_options(self)
-
-    def run(self):
-        global use_hipblaslt
-        use_hipblaslt = self.use_hipblaslt
-        install.run(self)
-=======
+from torch.utils.cpp_extension import CUDAExtension, CUDA_HOME, ROCM_HOME, IS_HIP_EXTENSION
 
 # Project directory root
 root_path: Path = Path(__file__).resolve().parent
->>>>>>> upstream/main
 
 @lru_cache(maxsize=1)
 def te_version() -> str:
     """Transformer Engine version string
-
-<<<<<<< HEAD
-def get_cuda_bare_metal_version(cuda_dir):
-    if IS_HIP_EXTENSION:
-        raw_output = subprocess.check_output(
-            [cuda_dir + "/bin/hipcc", "--version"], universal_newlines=True
-        )
-    else:
-        raw_output = subprocess.check_output(
-            [cuda_dir + "/bin/nvcc", "-V"], universal_newlines=True
-        )
-    output = raw_output.split()
-    if IS_HIP_EXTENSION:
-        release_idx = output.index("version:") + 1
-    else:
-        release_idx = output.index("release") + 1
-    release = output[release_idx].split(".")
-    bare_metal_major = release[0]
-    bare_metal_minor = release[1][0]
-    return raw_output, bare_metal_major, bare_metal_minor
-
-
-def append_nvcc_threads(nvcc_extra_args):
-    if IS_HIP_EXTENSION:
-        _, bare_metal_major, bare_metal_minor = get_cuda_bare_metal_version(ROCM_HOME)
-        ##TODO: Figure out which hipcc version starts to support this parallel compilation
-        return nvcc_extra_args + ["-parallel-jobs=4"]
-    else:
-        _, bare_metal_major, bare_metal_minor = get_cuda_bare_metal_version(CUDA_HOME)
-        if int(bare_metal_major) >= 11 and int(bare_metal_minor) >= 2:
-            return nvcc_extra_args + ["--threads", "4"]
-    return nvcc_extra_args
-
-
-def extra_gencodes(cc_flag):
-    if IS_HIP_EXTENSION:
-        return
-    _, bare_metal_major, bare_metal_minor = get_cuda_bare_metal_version(CUDA_HOME)
-    if int(bare_metal_major) >= 11:
-        cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_80,code=sm_80")
-        if int(bare_metal_minor) >= 8:
-            cc_flag.append("-gencode")
-            cc_flag.append("arch=compute_90,code=sm_90")
-
-
-def extra_compiler_flags():
-    if IS_HIP_EXTENSION:
-        return [
-            "-O3",
-            #"-gencode",
-            #"arch=compute_70,code=sm_70",
-            "-U__CUDA_NO_HALF_OPERATORS__",
-            "-U__CUDA_NO_HALF_CONVERSIONS__",
-            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-            "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-            "-I./transformer_engine/common/layer_norm/",
-            #"--expt-relaxed-constexpr",
-            #"--expt-extended-lambda",
-            #"--use_fast_math",
-        ]
-    else:
-        return [
-            "-O3",
-            "-gencode",
-            "arch=compute_70,code=sm_70",
-            "-U__CUDA_NO_HALF_OPERATORS__",
-            "-U__CUDA_NO_HALF_CONVERSIONS__",
-            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-            "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-            "-I./transformer_engine/common/layer_norm/",
-            "--expt-relaxed-constexpr",
-            "--expt-extended-lambda",
-            "--use_fast_math",
-        ]
-
-
-cc_flag = []
-extra_gencodes(cc_flag)
-
-
-def make_abs_path(l):
-    return [os.path.join(path, p) for p in l]
-
-
-include_dirs = [
-    "transformer_engine/common/include",
-    "transformer_engine/pytorch/csrc",
-]
-include_dirs = make_abs_path(include_dirs)
-
-pytorch_sources = [
-    "transformer_engine/pytorch/csrc/extensions.cu",
-    "transformer_engine/pytorch/csrc/common.cu",
-]
-pytorch_sources = make_abs_path(pytorch_sources)
-
-all_sources = pytorch_sources
-
-supported_frameworks = {
-    "all": all_sources,
-    "pytorch": pytorch_sources,
-}
-
-framework = "all"
-
-args = sys.argv.copy()
-for s in args:
-    if s.startswith("--framework="):
-        framework = s.replace("--framework=", "")
-        sys.argv.remove(s)
-
-if framework not in supported_frameworks.keys():
-    raise ValueError("Unsupported framework " + framework)
-
-
-class CMakeExtension(Extension):
-    def __init__(self, name, cmake_path, sources, **kwargs):
-        super(CMakeExtension, self).__init__(name, sources=sources, **kwargs)
-        self.cmake_path = cmake_path
-
-
-ext_modules = []
-
-ext_modules.append(
-    CMakeExtension(
-        name="transformer_engine",
-        cmake_path=os.path.join(path, "transformer_engine/common"),
-        sources=[],
-        include_dirs=include_dirs,
-    )
-)
-
-if framework in ("all", "pytorch"):
-    ext_modules.append(
-        CUDAExtension(
-            name="transformer_engine_extensions",
-            sources=supported_frameworks[framework],
-            extra_compile_args={
-                "cxx": ["-O3"],
-                "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
-            },
-            include_dirs=include_dirs,
-        )
-    )
-
-    if IS_HIP_EXTENSION:
-        ## This is a workaround for the issue of hipify causing duplicated object file name
-        ## scaled_upper_triang_masked_softmax_cuda.cu --> scaled_upper_triang_masked_softmax_hip.hip
-        ## scaled_upper_triang_masked_softmax.cpp --> scaled_upper_triang_masked_softmax_hip.cpp
-        ## CMake or Ninja will automatically generate build rules using scale_upper_triang_masked_softmax_hip.o
-        ## as the object file name for both source files, resulting in a conflict.
-        ## Currently, I don't know a way to let CMake or Ninja use more unique names. Thus changed one source file
-        ## name to work around this issue.
-        os.system('cp %s %s' %(   
-                    os.path.join(
-                        path,
-                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_upper_triang_masked_softmax_cuda.cu",
-                    ),
-                    os.path.join(
-                        path,
-                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_upper_triang_masked_softmax_cuda_cuda.cu",
-                    )
-                  )
-                 )
-        ext_modules.append(
-            CUDAExtension(
-                name="scaled_upper_triang_masked_softmax_cuda",
-                sources=[
-                    os.path.join(
-                        path,
-                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_upper_triang_masked_softmax.cpp",
-                    ),
-                    os.path.join(
-                        path,
-                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_upper_triang_masked_softmax_cuda_cuda.cu",
-                    ),
-                ],
-                extra_compile_args={
-                    "cxx": ["-O3"],
-                    "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
-                },
-                include_dirs=[
-                    os.path.join(path, "transformer_engine/pytorch/csrc/fused_softmax")
-                ],
-            )
-        )
-
-        os.system('cp %s %s' %(   
-                    os.path.join(
-                        path,
-                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_masked_softmax_cuda.cu",
-                    ),
-                    os.path.join(
-                        path,
-                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_masked_softmax_cuda_cuda.cu",
-                    )
-                  )
-                 )
-        ext_modules.append(
-            CUDAExtension(
-                name="scaled_masked_softmax_cuda",
-                sources=[
-                    os.path.join(
-                        path,
-                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_masked_softmax.cpp",
-                    ),
-                    os.path.join(
-                        path,
-                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_masked_softmax_cuda_cuda.cu",
-                    ),
-                ],
-                extra_compile_args={
-                    "cxx": ["-O3"],
-                    "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
-                },
-                include_dirs=[
-                    os.path.join(path, "transformer_engine/pytorch/csrc/fused_softmax")
-                ],
-            )
-        )
-
-        os.system('cp %s %s' %(   
-                    os.path.join(
-                        path,
-                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_softmax_cuda.cu",
-                    ),
-                    os.path.join(
-                        path,
-                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_softmax_cuda_cuda.cu",
-                    )
-                  )
-                 )
-        ext_modules.append(
-            CUDAExtension(
-                name="scaled_softmax_cuda",
-                sources=[
-                    os.path.join(
-                        path,
-                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_softmax.cpp",
-                    ),
-                    os.path.join(
-                        path,
-                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_softmax_cuda_cuda.cu",
-                    ),
-                ],
-                extra_compile_args={
-                    "cxx": ["-O3"],
-                    "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
-                },
-                include_dirs=[
-                    os.path.join(path, "transformer_engine/pytorch/csrc/fused_softmax")
-                ],
-            )
-        )
-    else:
-        ext_modules.append(
-            CUDAExtension(
-                name="scaled_upper_triang_masked_softmax_cuda",
-                sources=[
-                    os.path.join(
-                        path,
-                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_upper_triang_masked_softmax.cpp",
-                    ),
-                    os.path.join(
-                        path,
-                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_upper_triang_masked_softmax_cuda.cu",
-                    ),
-                ],
-                extra_compile_args={
-                    "cxx": ["-O3"],
-                    "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
-                },
-                include_dirs=[
-                    os.path.join(path, "transformer_engine/pytorch/csrc/fused_softmax")
-                ],
-            )
-        )
-
-        ext_modules.append(
-            CUDAExtension(
-                name="scaled_masked_softmax_cuda",
-                sources=[
-                    os.path.join(
-                        path,
-                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_masked_softmax.cpp",
-                    ),
-                    os.path.join(
-                        path,
-                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_masked_softmax_cuda.cu",
-                    ),
-                ],
-                extra_compile_args={
-                    "cxx": ["-O3"],
-                    "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
-                },
-                include_dirs=[
-                    os.path.join(path, "transformer_engine/pytorch/csrc/fused_softmax")
-                ],
-            )
-        )
-
-        ext_modules.append(
-            CUDAExtension(
-                name="scaled_softmax_cuda",
-                sources=[
-                    os.path.join(
-                        path,
-                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_softmax.cpp",
-                    ),
-                    os.path.join(
-                        path,
-                        "transformer_engine/pytorch/csrc/fused_softmax/scaled_softmax_cuda.cu",
-                    ),
-                ],
-                extra_compile_args={
-                    "cxx": ["-O3"],
-                    "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
-                },
-                include_dirs=[
-                    os.path.join(path, "transformer_engine/pytorch/csrc/fused_softmax")
-                ],
-            )
-        )
-
-def get_cmake_bin():
-    cmake_bin = "cmake"
-=======
     Includes Git commit as local version, unless suppressed with
     NVTE_NO_LOCAL_VERSION environment variable.
 
@@ -513,41 +153,53 @@ def found_pybind11() -> bool:
         return True
     return False
 
-def cuda_version() -> Tuple[int, ...]:
-    """CUDA Toolkit version as a (major, minor) tuple
-
-    Throws FileNotFoundError if NVCC is not found.
-
-    """
-
-    # Try finding NVCC
-    nvcc_bin: Optional[Path] = None
-    if nvcc_bin is None and os.getenv("CUDA_HOME"):
-        # Check in CUDA_HOME
-        cuda_home = Path(os.getenv("CUDA_HOME"))
-        nvcc_bin = cuda_home / "bin" / "nvcc"
-    if nvcc_bin is None:
-        # Check if nvcc is in path
-        nvcc_bin = shutil.which("nvcc")
-        if nvcc_bin is not None:
-            nvcc_bin = Path(nvcc_bin)
-    if nvcc_bin is None:
-        # Last-ditch guess in /usr/local/cuda
-        cuda_home = Path("/usr/local/cuda")
-        nvcc_bin = cuda_home / "bin" / "nvcc"
-    if not nvcc_bin.is_file():
-        raise FileNotFoundError(f"Could not find NVCC at {nvcc_bin}")
-
-    # Query NVCC for version info
-    output = subprocess.run(
-        [nvcc_bin, "-V"],
-        capture_output=True,
-        check=True,
-        universal_newlines=True,
+if IS_HIP_EXTENSION:
+  def cuda_version() -> Tuple[int, ...]:
+    raw_output = subprocess.check_output(
+        [ROCM_HOME + "/bin/hipcc", "--version"], universal_newlines=True
     )
-    match = re.search(r"release\s*([\d.]+)", output.stdout)
-    version = match.group(1).split('.')
-    return tuple(int(v) for v in version)
+    output = raw_output.split()
+    release_idx = output.index("version:") + 1
+    release = output[release_idx].split(".")
+    bare_metal_major = int(release[0])
+    bare_metal_minor = int(release[1][0])
+    return (bare_metal_major, bare_metal_minor)
+else:
+  def cuda_version() -> Tuple[int, ...]:
+      """CUDA Toolkit version as a (major, minor) tuple
+  
+      Throws FileNotFoundError if NVCC is not found.
+  
+      """
+  
+      # Try finding NVCC
+      nvcc_bin: Optional[Path] = None
+      if nvcc_bin is None and os.getenv("CUDA_HOME"):
+          # Check in CUDA_HOME
+          cuda_home = Path(os.getenv("CUDA_HOME"))
+          nvcc_bin = cuda_home / "bin" / "nvcc"
+      if nvcc_bin is None:
+          # Check if nvcc is in path
+          nvcc_bin = shutil.which("nvcc")
+          if nvcc_bin is not None:
+              nvcc_bin = Path(nvcc_bin)
+      if nvcc_bin is None:
+          # Last-ditch guess in /usr/local/cuda
+          cuda_home = Path("/usr/local/cuda")
+          nvcc_bin = cuda_home / "bin" / "nvcc"
+      if not nvcc_bin.is_file():
+          raise FileNotFoundError(f"Could not find NVCC at {nvcc_bin}")
+  
+      # Query NVCC for version info
+      output = subprocess.run(
+          [nvcc_bin, "-V"],
+          capture_output=True,
+          check=True,
+          universal_newlines=True,
+      )
+      match = re.search(r"release\s*([\d.]+)", output.stdout)
+      version = match.group(1).split('.')
+      return tuple(int(v) for v in version)
 
 @lru_cache(maxsize=1)
 def with_userbuffers() -> bool:
@@ -648,9 +300,10 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
         add_unique(setup_reqs, "ninja")
 
     # Framework-specific requirements
-    if "pytorch" in frameworks():
-        add_unique(install_reqs, ["torch", "flash-attn>=1.0.6, <=2.0.4"])
-        add_unique(test_reqs, ["numpy", "onnxruntime", "torchvision"])
+    if not IS_HIP_EXTENSION:
+      if "pytorch" in frameworks():
+          add_unique(install_reqs, ["torch", "flash-attn>=1.0.6, <=2.0.4"])
+          add_unique(test_reqs, ["numpy", "onnxruntime", "torchvision"])
     if "jax" in frameworks():
         if not found_pybind11():
             add_unique(setup_reqs, "pybind11")
@@ -808,6 +461,10 @@ def setup_common_extension() -> CMakeExtension:
 
     """
     cmake_flags = []
+    if IS_HIP_EXTENSION:
+      if os.getenv("NVTE_USE_HIPBLASLT") is not None:
+        cmake_flags.append("-DUSE_HIPBLASLT=ON")
+
     if "jax" in frameworks():
         cmake_flags.append("-DENABLE_JAX=ON")
     if "tensorflow" in frameworks():
@@ -832,46 +489,79 @@ def setup_pytorch_extension() -> setuptools.Extension:
     sources = [
         src_dir / "common.cu",
         src_dir / "ts_fp8_op.cpp",
-    ] + \
-    _all_files_in_dir(extensions_dir)
+    ]
+    if IS_HIP_EXTENSION:
+      sources.extend([ 
+        extensions_dir/"transpose.cu",
+        extensions_dir/"softmax.cu",
+        extensions_dir/"normalization.cu",
+        extensions_dir/"misc.cu",
+        extensions_dir/"gemm.cu",
+        extensions_dir/"cast.cu",
+        extensions_dir/"activation.cu",
+        extensions_dir/"pybind.cpp",
+      ])
+    else:
+      sources.extend(_all_files_in_dir(extensions_dir))
 
     # Header files
-    include_dirs = [
-        root_path / "transformer_engine" / "common" / "include",
-        root_path / "transformer_engine" / "pytorch" / "csrc",
-        root_path / "3rdparty" / "cudnn-frontend" / "include",
-    ]
+    if IS_HIP_EXTENSION:
+      include_dirs = [
+          root_path / "transformer_engine" / "common" / "include",
+          root_path / "transformer_engine" / "pytorch" / "csrc",
+      ]
+    else:
+      include_dirs = [
+          root_path / "transformer_engine" / "common" / "include",
+          root_path / "transformer_engine" / "pytorch" / "csrc",
+          root_path / "3rdparty" / "cudnn-frontend" / "include",
+      ]
 
     # Compiler flags
     cxx_flags = ["-O3"]
-    nvcc_flags = [
-        "-O3",
-        "-gencode",
-        "arch=compute_70,code=sm_70",
-        "-U__CUDA_NO_HALF_OPERATORS__",
-        "-U__CUDA_NO_HALF_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-        "--expt-relaxed-constexpr",
-        "--expt-extended-lambda",
-        "--use_fast_math",
-    ]
+    if IS_HIP_EXTENSION:
+      nvcc_flags = [
+          "-O3",
+          "-U__CUDA_NO_HALF_OPERATORS__",
+          "-U__CUDA_NO_HALF_CONVERSIONS__",
+          "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+          "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+          "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+          "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+      ]
+    else:
+      nvcc_flags = [
+          "-O3",
+          "-gencode",
+          "arch=compute_70,code=sm_70",
+          "-U__CUDA_NO_HALF_OPERATORS__",
+          "-U__CUDA_NO_HALF_CONVERSIONS__",
+          "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+          "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+          "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+          "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+          "--expt-relaxed-constexpr",
+          "--expt-extended-lambda",
+          "--use_fast_math",
+      ]
 
     # Version-dependent CUDA options
->>>>>>> upstream/main
-    try:
-        version = cuda_version()
-    except FileNotFoundError:
-        print("Could not determine CUDA Toolkit version")
+    if IS_HIP_EXTENSION:
+      version = cuda_version()
+      ##TODO: Figure out which hipcc version starts to support this parallel compilation
+      nvcc_flags.extend(["-parallel-jobs=4"])
     else:
-        if version >= (11, 2):
-            nvcc_flags.extend(["--threads", "4"])
-        if version >= (11, 0):
-            nvcc_flags.extend(["-gencode", "arch=compute_80,code=sm_80"])
-        if version >= (11, 8):
-            nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
+      try:
+          version = cuda_version()
+      except FileNotFoundError:
+          print("Could not determine CUDA Toolkit version")
+      else:
+          if version >= (11, 2):
+              nvcc_flags.extend(["--threads", "4"])
+          if version >= (11, 0):
+              nvcc_flags.extend(["-gencode", "arch=compute_80,code=sm_80"])
+          if version >= (11, 8):
+              nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
 
     # userbuffers support
     if with_userbuffers():
@@ -944,12 +634,6 @@ def setup_paddle_extension() -> setuptools.Extension:
         if version >= (11, 8):
             nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
 
-<<<<<<< HEAD
-        if IS_HIP_EXTENSION and use_hipblaslt:
-          cmake_args.append("-DUSE_HIPBLASLT=ON")
-
-        cmake_build_args = ["--config", config]
-=======
     # Construct Paddle CUDA extension
     sources = [str(path) for path in sources]
     include_dirs = [str(path) for path in include_dirs]
@@ -965,7 +649,6 @@ def setup_paddle_extension() -> setuptools.Extension:
     )
     ext.name = "transformer_engine_paddle_pd_"
     return ext
->>>>>>> upstream/main
 
 def main():
 
@@ -1000,102 +683,5 @@ def main():
     )
 
 
-<<<<<<< HEAD
-class TEBuildExtension(build_ext, object):
-    def __init__(self, *args, **kwargs) -> None:
-        cmake_args = copy.deepcopy(args)
-        cmake_kwargs = copy.deepcopy(kwargs)
-        pytorch_args = copy.deepcopy(args)
-        pytorch_kwargs = copy.deepcopy(kwargs)
-        self.cmake_build_extensions = CMakeBuildExtension(*cmake_args, **cmake_kwargs)
-        self.pytorch_build_extensions = BuildExtension(*pytorch_args, **pytorch_kwargs)
-        self.all_outputs = None
-        super(TEBuildExtension, self).__init__(*args, **kwargs)
-
-    def initialize_options(self):
-        self.cmake_build_extensions.initialize_options()
-        self.pytorch_build_extensions.initialize_options()
-        super(TEBuildExtension, self).initialize_options()
-
-    def finalize_options(self):
-        self.cmake_build_extensions.finalize_options()
-        self.pytorch_build_extensions.finalize_options()
-        super(TEBuildExtension, self).finalize_options()
-
-    def run(self) -> None:
-        old_inplace, self.inplace = self.inplace, 0
-        cmake_ext = [ext for ext in self.extensions if isinstance(ext, CMakeExtension)]
-        self.cmake_build_extensions.extensions = cmake_ext
-        self.cmake_build_extensions.run()
-        other_ext = [
-            ext for ext in self.extensions if not isinstance(ext, CMakeExtension)
-        ]
-        self.pytorch_build_extensions.extensions = other_ext
-        print("Building pyTorch extensions!")
-        self.pytorch_build_extensions.run()
-
-        self.all_outputs = []
-        for f in os.scandir(self.build_lib):
-            if f.is_file():
-                self.all_outputs.append(f.path)
-
-        self.inplace = old_inplace
-        if old_inplace:
-            self.copy_extensions_to_source()
-
-    def copy_extensions_to_source(self):
-        ext = self.extensions[0]
-        build_py = self.get_finalized_command("build_py")
-        fullname = self.get_ext_fullname(ext.name)
-        modpath = fullname.split(".")
-        package = ".".join(modpath[:-1])
-        package_dir = build_py.get_package_dir(package)
-
-        for f in os.scandir(self.build_lib):
-            if f.is_file():
-                src_filename = f.path
-                dest_filename = os.path.join(
-                    package_dir, os.path.basename(src_filename)
-                )
-                # Always copy, even if source is older than destination, to ensure
-                # that the right extensions for the current Python/platform are
-                # used.
-                copy_file(
-                    src_filename,
-                    dest_filename,
-                    verbose=self.verbose,
-                    dry_run=self.dry_run,
-                )
-
-    def get_outputs(self):
-        return self.all_outputs
-
-
-setup(
-    name="transformer_engine",
-    version=te_version,
-    packages=find_packages(
-        exclude=(
-            "build",
-            "csrc",
-            "include",
-            "tests",
-            "dist",
-            "docs",
-            "tests",
-            "examples",
-            "transformer_engine.egg-info",
-        )
-    ),
-    description="Transformer acceleration library",
-    ext_modules=ext_modules,
-    cmdclass={
-      "build_ext": TEBuildExtension, 
-      'install': InstallCommand,
-    },
-    license_files=("LICENSE",),
-)
-=======
 if __name__ == "__main__":
     main()
->>>>>>> upstream/main
