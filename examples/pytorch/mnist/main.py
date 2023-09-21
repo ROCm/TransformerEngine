@@ -72,9 +72,6 @@ def train(args, model, device, train_loader, optimizer, epoch, use_amp, use_fp8)
                 break
 
 
-<<<<<<< HEAD
-def test(model, device, test_loader, use_amp, use_fp8):
-=======
 def calibrate(model, device, test_loader, fp8):
     """Calibration function."""
     model.eval()
@@ -86,8 +83,7 @@ def calibrate(model, device, test_loader, fp8):
             with te.fp8_autocast(enabled=fp8, calibrating=True):
                 output = model(data)
 
-def test(model, device, test_loader, use_fp8):
->>>>>>> upstream/main
+def test(model, device, test_loader, use_amp, use_fp8):
     """Testing function."""
     model.eval()
     test_loss = 0
@@ -179,17 +175,13 @@ def main():
         help="For Saving the current Model",
     )
     parser.add_argument(
-<<<<<<< HEAD
         "--use-amp", action="store_true", default=False, help="Use AMP training"
     )
     parser.add_argument(
-        "--use-fp8", action="store_true", default=False, help="Use FP8 training"
-=======
         "--use-fp8", action="store_true", default=False, help="Use FP8 for inference and training without recalibration"
     )
     parser.add_argument(
         "--use-fp8-infer", action="store_true", default=False, help="Use FP8 inference only"
->>>>>>> upstream/main
     )
     parser.add_argument(
         "--use-te", action="store_true", default=False, help="Use Transformer Engine"
@@ -197,15 +189,12 @@ def main():
     args = parser.parse_args()
     use_cuda = torch.cuda.is_available()
 
-<<<<<<< HEAD
     if args.use_amp:
         assert use_cuda, "CUDA needed for AMP execution. And use_fp8 is set OFF"
         args.use_fp8 = False
+        args.use_fp8_infer = False
 
-    if args.use_fp8:
-=======
     if args.use_fp8 or args.use_fp8_infer:
->>>>>>> upstream/main
         assert use_cuda, "CUDA needed for FP8 execution."
         args.use_te = True
 
