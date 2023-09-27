@@ -102,7 +102,8 @@ def gemm(
         return_output = True
 
     if gelu and not grad:
-        gelu_input = torch.empty_like(out, dtype=dtype)
+        # temporary workaround as hipblaslt treat gelu_input as fp32 in amp mode
+        gelu_input = torch.empty_like(out, dtype=torch.float32)
     elif not gelu:
         gelu_input = empty_tensor
 
@@ -134,6 +135,9 @@ def gemm(
         accumulate,
         False,  # use_split_accumulator
     )
+    # temporary workaround as hipblaslt treat gelu_input as fp32 in amp mode
+    if gelu and not grad:
+      gelu_input = gelu_input.to(dtype)
 
     if return_output:
         return out, grad_bias, gelu_input

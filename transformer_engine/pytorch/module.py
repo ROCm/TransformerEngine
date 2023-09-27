@@ -1945,6 +1945,9 @@ class _LayerNormMLP(torch.autograd.Function):
             )
         else:
             # FC2 DGRAD
+            # temporary workaround as hipbalslt treats gelu_input as fp32 in amp mode
+            fc1_out_dtype = fc1_out.dtype
+            fc1_out = fc1_out.to(torch.float32)
             fc2_dgrad, _, _ = gemm(
                 fc2_weight,
                 grad_output,
@@ -1955,6 +1958,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 grad=True,
                 gelu_input=fc1_out,
             )
+            fc1_out = fc1_out.to(fc1_out_dtype)
 
             # FC2 WGRAD
             fc2_wgrad, fc2_bias_grad, _ = gemm(
