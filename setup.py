@@ -15,7 +15,22 @@ import tempfile
 from typing import List, Optional, Tuple, Union
 import setuptools
 from setuptools.command.build_ext import build_ext
-from torch.utils.cpp_extension import CUDAExtension, CUDA_HOME, ROCM_HOME, IS_HIP_EXTENSION
+
+import importlib.util
+#default to use cuda
+use_cuda = True
+use_rocm = False
+if importlib.util.find_spec("torch") is not None:
+  from torch.utils.cpp_extension import IS_HIP_EXTENSION
+  if IS_HIP_EXTENSION:
+    use_cuda = False
+    use_rocm = True
+if importlib.util.find_spec("tensorflow") is not None:
+  from tensorflow.python.platform import sysconfig
+  sys_details = sysconfig.get_build_info()
+  if sys_details["is_rocm_build"]:
+    use_cuda = False
+    use_rocm = True
 
 # Project directory root
 root_path: Path = Path(__file__).resolve().parent
@@ -153,18 +168,7 @@ def found_pybind11() -> bool:
         return True
     return False
 
-if IS_HIP_EXTENSION:
-  def cuda_version() -> Tuple[int, ...]:
-    raw_output = subprocess.check_output(
-        [ROCM_HOME + "/bin/hipcc", "--version"], universal_newlines=True
-    )
-    output = raw_output.split()
-    release_idx = output.index("version:") + 1
-    release = output[release_idx].split(".")
-    bare_metal_major = int(release[0])
-    bare_metal_minor = int(release[1][0])
-    return (bare_metal_major, bare_metal_minor)
-else:
+if use_cuda:
   def cuda_version() -> Tuple[int, ...]:
       """CUDA Toolkit version as a (major, minor) tuple
   
@@ -300,7 +304,7 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
         add_unique(setup_reqs, "ninja")
 
     # Framework-specific requirements
-    if not IS_HIP_EXTENSION:
+    if use_cuda:
       if "pytorch" in frameworks():
           add_unique(install_reqs, ["torch", "flash-attn>=1.0.6, <=2.0.4"])
           add_unique(test_reqs, ["numpy", "onnxruntime", "torchvision"])
@@ -312,7 +316,9 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     if "tensorflow" in frameworks():
         if not found_pybind11():
             add_unique(setup_reqs, "pybind11")
-        add_unique(install_reqs, "tensorflow")
+        if use_cuda:
+          # assume tensorflow is already installed on rocm machines
+          add_unique(install_reqs, "tensorflow")
         add_unique(test_reqs, ["keras", "tensorflow_datasets"])
     if "paddle" in frameworks():
         add_unique(install_reqs, "paddlepaddle-gpu")
@@ -461,7 +467,7 @@ def setup_common_extension() -> CMakeExtension:
 
     """
     cmake_flags = []
-    if IS_HIP_EXTENSION:
+    if use_rocm:
       if os.getenv("NVTE_USE_HIPBLASLT") is not None:
         cmake_flags.append("-DUSE_HIPBLASLT=ON")
 
@@ -469,6 +475,8 @@ def setup_common_extension() -> CMakeExtension:
         cmake_flags.append("-DENABLE_JAX=ON")
     if "tensorflow" in frameworks():
         cmake_flags.append("-DENABLE_TENSORFLOW=ON")
+        if use_rocm:
+          cmake_flags.append("-DCMAKE_PREFIX_PATH=/opt/rocm")
     if with_userbuffers():
         cmake_flags.append("-DNVTE_WITH_USERBUFFERS=ON")
     return CMakeExtension(
@@ -490,7 +498,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
         src_dir / "common.cu",
         src_dir / "ts_fp8_op.cpp",
     ]
-    if IS_HIP_EXTENSION:
+    if use_rocm:
       sources.extend([ 
         extensions_dir/"transpose.cu",
         extensions_dir/"softmax.cu",
@@ -505,7 +513,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
       sources.extend(_all_files_in_dir(extensions_dir))
 
     # Header files
-    if IS_HIP_EXTENSION:
+    if use_rocm:
       include_dirs = [
           root_path / "transformer_engine" / "common" / "include",
           root_path / "transformer_engine" / "pytorch" / "csrc",
@@ -519,7 +527,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
 
     # Compiler flags
     cxx_flags = ["-O3"]
-    if IS_HIP_EXTENSION:
+    if use_rocm:
       nvcc_flags = [
           "-O3",
           "-U__CUDA_NO_HALF_OPERATORS__",
@@ -546,8 +554,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
       ]
 
     # Version-dependent CUDA options
-    if IS_HIP_EXTENSION:
-      version = cuda_version()
+    if use_rocm:
       ##TODO: Figure out which hipcc version starts to support this parallel compilation
       nvcc_flags.extend(["-parallel-jobs=4"])
     else:

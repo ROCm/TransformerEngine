@@ -7,6 +7,7 @@
 
 #include <string>
 
+#ifndef USE_ROCM
 #include "common/include/transformer_engine/activation.h"
 #include "common/include/transformer_engine/cast.h"
 #include "common/include/transformer_engine/gemm.h"
@@ -14,6 +15,15 @@
 #include "common/include/transformer_engine/softmax.h"
 #include "common/include/transformer_engine/transformer_engine.h"
 #include "common/include/transformer_engine/transpose.h"
+#else
+#include "common/include/transformer_engine/activation_hip.h"
+#include "common/include/transformer_engine/cast_hip.h"
+#include "common/include/transformer_engine/gemm_hip.h"
+#include "common/include/transformer_engine/layer_norm_hip.h"
+#include "common/include/transformer_engine/softmax_hip.h"
+#include "common/include/transformer_engine/transformer_engine_hip.h"
+#include "common/include/transformer_engine/transpose_hip.h"
+#endif
 #include "tensorflow/c/eager/c_api_experimental.h"
 #include "tensorflow/c/eager/c_api_internal.h"
 #include "tensorflow/c/eager/immediate_execution_tensor_handle.h"
