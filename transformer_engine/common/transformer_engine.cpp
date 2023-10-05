@@ -81,14 +81,15 @@ NVTETensor nvte_create_tensor(void *dptr,
                               float *scale_inv) {
   transformer_engine::Tensor *ret = new transformer_engine::Tensor;
   ret->data.dptr = dptr;
-  ret->data.shape = std::vector<size_t>(shape.data, shape.data + shape.ndim);
+  if(shape.data!=nullptr and shape.ndim>0){
+    ret->data.shape = std::vector<size_t>(shape.data, shape.data + shape.ndim);
+  }
   ret->data.dtype = static_cast<transformer_engine::DType>(dtype);
   ret->amax.dptr = amax;
   ret->scale.dptr = scale;
   ret->scale_inv.dptr = scale_inv;
   return ret;
 }
-
 void nvte_destroy_tensor(NVTETensor tensor) {
   if (tensor == nullptr) return;
   auto *t = reinterpret_cast<transformer_engine::Tensor *>(tensor);

@@ -544,7 +544,6 @@ py::object TFE_Py_TeGemm_wrapper(
     const bool use_split_accumulate, const transformer_engine::DType otype,
     const int64_t stream_id) {
   using namespace transformer_engine;
-
   std::vector<size_t> a_shape = GetShape(a_mat);
   std::vector<size_t> b_shape = GetShape(b_mat);
   CHECK_EQ(a_shape.size(), 2);
@@ -556,15 +555,16 @@ py::object TFE_Py_TeGemm_wrapper(
   auto a_tensor =
       MakeNVTETensor(GetDevicePtr(a_mat), a_shape, atype, nullptr,
                      nullptr, GetDevicePtr(a_scale_inv, a_offset));
-
+  
   auto b_tensor =
       MakeNVTETensor(GetDevicePtr(b_mat), b_shape, btype, nullptr,
                      nullptr, GetDevicePtr(b_scale_inv, b_offset));
 
-  NVTEShape empty_shape;
+  NVTEShape empty_shape{nullptr, 0};
   TensorWrapper bias_tensor(nullptr, empty_shape, DType::kBFloat16);
   if (use_bias) {
-    bias_tensor = MakeNVTETensor(GetDevicePtr(bias), GetShape(bias),
+    std::vector<size_t> bias_shape = GetShape(bias);
+    bias_tensor = MakeNVTETensor(GetDevicePtr(bias), bias_shape,
                                  GetDataType(bias));
   }
 
@@ -574,13 +574,15 @@ py::object TFE_Py_TeGemm_wrapper(
     gelu_input_ptr = AllocateSpace(d_shape, otype);
     gelu_input_tensor = MakeNVTETensor(gelu_input_ptr, d_shape, otype);
   } else if (use_gelu) {
+    std::vector<size_t> gelu_input_shape = GetShape(gelu_input);
     gelu_input_tensor =
-        MakeNVTETensor(GetDevicePtr(gelu_input), GetShape(gelu_input),
+        MakeNVTETensor(GetDevicePtr(gelu_input), gelu_input_shape,
                        GetDataType(gelu_input));
   }
-
+  
+  std::vector<size_t> workspace_shape = GetShape(workspace);
   auto workspace_tensor =
-      MakeNVTETensor(GetDevicePtr(workspace), GetShape(workspace),
+      MakeNVTETensor(GetDevicePtr(workspace), workspace_shape,
                      GetDataType(workspace));
 
   void* d_ptr = AllocateSpace(d_shape, otype);
