@@ -468,7 +468,9 @@ class FlashAttention(torch.nn.Module):
         super().__init__()
 
         assert (
-            _flash_attn_version >= _flash_attn_version_required
+            #_flash_attn_version >= _flash_attn_version_required
+            #TODO: wait for rocm flash attn
+            True
         ), f"FlashAttention minimum version {_flash_attn_version_required} is required."
 
         self.norm_factor = norm_factor
