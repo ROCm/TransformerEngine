@@ -556,8 +556,7 @@ void cublas_gemm(const Tensor *inputA,
   const rocblas_datatype B_type = get_cuda_dtype(inputB->data.dtype);
   const rocblas_datatype D_type = get_cuda_dtype(outputD->data.dtype);
   const rocblas_datatype bias_type = get_cuda_dtype(inputBias->data.dtype);
-
-
+  
   // check consistency of arguments:
   // if fp8 is desired, context cannot be null
   // fp8 + gelu fusion + fp8 aux is unavailable right now.
@@ -619,8 +618,10 @@ void cublas_gemm(const Tensor *inputA,
   if (!(bias || gelu) && (A_type==rocblas_datatype_f16_r && B_type==rocblas_datatype_f16_r && D_type==rocblas_datatype_f16_r)) {
     D_temp_type = rocblas_datatype_f16_r;
   }
-
-     
+  // When Ti in fp8 or bf8, To=fp16, there is no bias or gelu, D_temp points to D and we would like it to be fp16
+  if ((!(bias||gelu))&& ((A_type==rocblas_datatype_f8_r or A_type==rocblas_datatype_bf8_r) && (B_type==rocblas_datatype_f8_r or B_type==rocblas_datatype_bf8_r)&& D_type==rocblas_datatype_f16_r)) {
+    D_temp_type = rocblas_datatype_f16_r;
+  }
 
   // D = alpha * (A * B) + beta * C
   // TODO: Can we search for rocblas_gemm_algo??
