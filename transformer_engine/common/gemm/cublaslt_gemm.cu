@@ -301,13 +301,21 @@ void bias_gradient_kernel(const Tin* in, float* out, int m, int n) {
 }
 
 template <typename Tin>
-void bias_gradient_kernelLauncher(const Tin* in, float* out, int m, int n, hipStream_t stream) { 
+void bias_gradient_kernelLauncher(const Tin* in, float* out, int m, int n, bool stream_order_alloc, hipStream_t stream) { 
   dim3 block, grid;
   constexpr int THREADS_PER_BLOCK = 1024;
   int BLOCKS_PER_COL = ceil(float(m)/THREADS_PER_BLOCK);
   block.x = THREADS_PER_BLOCK;
   grid.x = BLOCKS_PER_COL*n;
-  NVTE_CHECK_CUDA( hipMemset(out, 0, n*sizeof(float)) );
+  if(! stream_order_alloc){
+    NVTE_CHECK_CUDA( hipMemset(out, 0, n*sizeof(float)) );
+  }else{
+#if HIP_VERSION >= 50300000
+    NVTE_CHECK_CUDA( hipMemsetAsync(out, 0, n*sizeof(float), stream) );
+#else
+    NVTE_ERROR("Stream order allocation is supported on ROCm 5.3 and above.");
+#endif
+  }
   hipLaunchKernelGGL(( bias_gradient_kernel<Tin, THREADS_PER_BLOCK>), dim3(grid), dim3(block), 0, stream, in, out, m, n);
 }
 
@@ -714,6 +722,7 @@ void cublas_gemm(const Tensor *inputA,
                                                     reinterpret_cast<float*>(bias_tmp), 
                                                     batch_size, 
                                                     input_dim,
+                                                    stream_order_alloc,
                                                     stream);
       );
 
@@ -796,6 +805,7 @@ void cublas_gemm(const Tensor *inputA,
                                                     reinterpret_cast<float*>(bias_tmp), 
                                                     batch_size, 
                                                     output_dim,
+                                                    stream_order_alloc,
                                                     stream);
       );
       if (bias_type != rocblas_datatype_f32_r) {
