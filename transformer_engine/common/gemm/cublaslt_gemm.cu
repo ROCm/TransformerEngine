@@ -583,6 +583,14 @@ void cublas_gemm(const Tensor *inputA,
 
   rocblas_handle handle;
   NVTE_CHECK_CUBLAS(rocblas_create_handle(&handle));
+  NVTE_CHECK_CUBLAS(rocblas_set_stream(handle, stream));
+
+  // extract the stream order alloc env
+  bool stream_order_alloc = false;
+  if (const char* env_p = std::getenv("ROCBLAS_STREAM_ORDER_ALLOC") ) {
+    if (env_p != nullptr && std::string(env_p) == "1")
+      stream_order_alloc = true;
+  }
 
   int64_t ld_gelumat = (int64_t) ldd;
 
@@ -608,7 +616,15 @@ void cublas_gemm(const Tensor *inputA,
   //If D is not fp32, then we need a temp buffer for GEMM result before applying epilogues. Otherwise, we can apply epilogues in-place.
   void* D_temp;
   if ((bias || gelu) && (D_type==rocblas_datatype_f16_r || D_type==rocblas_datatype_f8_r || D_type==rocblas_datatype_bf8_r)) {
-    NVTE_CHECK_CUDA( hipMalloc(&D_temp, sizeof(float)*m*n) );
+    if(! stream_order_alloc){
+      NVTE_CHECK_CUDA( hipMalloc(&D_temp, sizeof(float)*m*n) );
+    }else{
+#if HIP_VERSION >= 50300000
+      NVTE_CHECK_CUDA( hipMallocAsync(&D_temp, sizeof(float)*m*n, stream) );
+#else
+      NVTE_ERROR("Stream order allocation is supported on ROCm 5.3 and above.");
+#endif  
+    }
   }else {
     D_temp = D;
   }
@@ -674,13 +690,21 @@ void cublas_gemm(const Tensor *inputA,
                                                              reinterpret_cast<const OType*>(pre_gelu_out), 
                                                              batch_size, 
                                                              input_dim,
-                                                             0);
+                                                             stream);
         );  
       ); 
 
       void* bias_tmp;
       if (bias_type != rocblas_datatype_f32_r) {
-        NVTE_CHECK_CUDA( hipMalloc(&bias_tmp, sizeof(float)*input_dim) ); // The bias gradient is for the first linear layer
+        if(! stream_order_alloc){
+          NVTE_CHECK_CUDA( hipMalloc(&bias_tmp, sizeof(float)*input_dim) ); // The bias gradient is for the first linear layer
+        }else{
+#if HIP_VERSION >= 50300000
+          NVTE_CHECK_CUDA( hipMallocAsync(&bias_tmp, sizeof(float)*input_dim, stream) );
+#else
+          NVTE_ERROR("Stream order allocation is supported on ROCm 5.3 and above.");
+#endif  
+        }
       }else {
         bias_tmp = bias_ptr;
       }
@@ -690,7 +714,7 @@ void cublas_gemm(const Tensor *inputA,
                                                     reinterpret_cast<float*>(bias_tmp), 
                                                     batch_size, 
                                                     input_dim,
-                                                    0);
+                                                    stream);
       );
 
       if (bias_type != rocblas_datatype_f32_r) {
@@ -698,10 +722,18 @@ void cublas_gemm(const Tensor *inputA,
           detail::identity_kernelLauncher<float, OType>(reinterpret_cast<const float*>(bias_tmp), 
                                                         reinterpret_cast<OType*>(bias_ptr),
                                                         input_dim,
-                                                        0);
+                                                        stream);
         );  
-        NVTE_CHECK_CUDA( hipDeviceSynchronize() );
-        NVTE_CHECK_CUDA( hipFree(bias_tmp) ); 
+        NVTE_CHECK_CUDA( hipStreamSynchronize(stream) );
+        if(! stream_order_alloc){
+          NVTE_CHECK_CUDA( hipFree(bias_tmp) ); 
+        }else{
+#if HIP_VERSION >= 50300000
+          NVTE_CHECK_CUDA( hipFreeAsync(bias_tmp, stream) );
+#else
+          NVTE_ERROR("Stream order allocation is supported on ROCm 5.3 and above.");
+#endif
+        }
       }
 
     } else {
@@ -724,7 +756,7 @@ void cublas_gemm(const Tensor *inputA,
                                                                reinterpret_cast<const BType*>(bias_ptr), 
                                                                batch_size, 
                                                                output_dim,
-                                                               0);
+                                                               stream);
           );
         );
       );
@@ -743,7 +775,15 @@ void cublas_gemm(const Tensor *inputA,
       output_dim = n;
       void * bias_tmp;
       if (bias_type != rocblas_datatype_f32_r) {
-        NVTE_CHECK_CUDA( hipMalloc(&bias_tmp, sizeof(float)*output_dim) );
+        if(! stream_order_alloc){
+          NVTE_CHECK_CUDA( hipMalloc(&bias_tmp, sizeof(float)*output_dim) );
+        }else{
+#if HIP_VERSION >= 50300000
+          NVTE_CHECK_CUDA( hipMallocAsync(&bias_tmp, sizeof(float)*output_dim, stream) );
+#else
+          NVTE_ERROR("Stream order allocation is supported on ROCm 5.3 and above.");
+#endif  
+        }
       }else {
         bias_tmp = bias_ptr;
       }
@@ -756,24 +796,32 @@ void cublas_gemm(const Tensor *inputA,
                                                     reinterpret_cast<float*>(bias_tmp), 
                                                     batch_size, 
                                                     output_dim,
-                                                    0);
+                                                    stream);
       );
       if (bias_type != rocblas_datatype_f32_r) {
         TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(bias_dtype, OType,
           detail::identity_kernelLauncher<float, OType>(reinterpret_cast<const float*>(bias_tmp), 
                                                         reinterpret_cast<OType*>(bias_ptr),
                                                         output_dim,
-                                                        0);
+                                                        stream);
         );  
-        NVTE_CHECK_CUDA( hipDeviceSynchronize() );
-        NVTE_CHECK_CUDA( hipFree(bias_tmp) ); 
+        NVTE_CHECK_CUDA( hipStreamSynchronize(stream) );
+        if(! stream_order_alloc){
+          NVTE_CHECK_CUDA( hipFree(bias_tmp) ); 
+        }else{
+#if HIP_VERSION >= 50300000
+          NVTE_CHECK_CUDA( hipFreeAsync(bias_tmp, stream) );
+#else
+          NVTE_ERROR("Stream order allocation is supported on ROCm 5.3 and above.");
+#endif
+        }
       }
       if (D_type == rocblas_datatype_f16_r) {
         TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
           detail::identity_kernelLauncher<float, OType>(reinterpret_cast<const float*>(D_temp), 
                                                         reinterpret_cast<OType*>(D),
                                                         input_dim*output_dim,
-                                                        0);
+                                                        stream);
         );  
       }
     } else {
@@ -795,7 +843,7 @@ void cublas_gemm(const Tensor *inputA,
                                                                  reinterpret_cast<const BType*>(bias_ptr), 
                                                                  batch_size, 
                                                                  output_dim,
-                                                                 0);
+                                                                 stream);
           );
         );
       );
@@ -818,7 +866,7 @@ void cublas_gemm(const Tensor *inputA,
                                                              reinterpret_cast<const OType*>(pre_gelu_out), 
                                                              batch_size, 
                                                              input_dim,
-                                                             0);
+                                                             stream);
         );  
       ); 
     } else {
@@ -837,7 +885,7 @@ void cublas_gemm(const Tensor *inputA,
                                                             reinterpret_cast<OType*>(D), 
                                                             batch_size,
                                                             output_dim, 
-                                                            0);
+                                                            stream);
         );  
       ); 
       TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
@@ -845,13 +893,21 @@ void cublas_gemm(const Tensor *inputA,
           detail::identity_kernelLauncher<IType, OType>(reinterpret_cast<const IType*>(D_temp), 
                                                         reinterpret_cast<OType*>(pre_gelu_out), 
                                                         batch_size*output_dim, 
-                                                        0);
+                                                        stream);
         );  
       ); 
     }
   }
   if ((bias || gelu) && (D_type==rocblas_datatype_f16_r || D_type==rocblas_datatype_f8_r || D_type==rocblas_datatype_bf8_r)) {
-    NVTE_CHECK_CUDA( hipFree(D_temp) );
+    if(! stream_order_alloc){
+      NVTE_CHECK_CUDA( hipFree(D_temp) );
+    }else{
+#if HIP_VERSION >= 50300000
+      NVTE_CHECK_CUDA( hipFreeAsync(D_temp, stream) );
+#else
+      NVTE_ERROR("Stream order allocation is supported on ROCm 5.3 and above.");
+#endif
+    }
   }
 }
 
