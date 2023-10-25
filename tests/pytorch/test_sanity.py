@@ -4,6 +4,7 @@
 
 import torch
 import pytest
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from transformer_engine.pytorch.fp8 import fp8_autocast, FP8GlobalStateManager
 from transformer_engine.pytorch.utils import (
@@ -115,6 +116,7 @@ def _test_sanity_e2e_cuda_graph(block, bs, dtype, config, fp8_recipe, skip_wgrad
 
     real_input = torch.rand_like(static_input)
     real_target = torch.rand_like(static_target)
+
 
     use_fp8 = fp8_recipe is not None
     if skip_wgrad:
@@ -754,6 +756,9 @@ def test_sanity_gradient_accumulation_fusion(dtype, bs, fp8_recipe, model, skip_
 @pytest.mark.parametrize("normalization", all_normalizations)
 def test_gpt_cuda_graph(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma,
                         normalization):
+    if IS_HIP_EXTENSION:
+        pytest.skip("hipGraph is not ready yet")
+ 
     if fp8_recipe is not None and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
