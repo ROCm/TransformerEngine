@@ -733,7 +733,6 @@ void cublas_gemm(const Tensor *inputA,
                                                         input_dim,
                                                         stream);
         );  
-        NVTE_CHECK_CUDA( hipStreamSynchronize(stream) );
         if(! stream_order_alloc){
           NVTE_CHECK_CUDA( hipFree(bias_tmp) ); 
         }else{
@@ -815,7 +814,6 @@ void cublas_gemm(const Tensor *inputA,
                                                         output_dim,
                                                         stream);
         );  
-        NVTE_CHECK_CUDA( hipStreamSynchronize(stream) );
         if(! stream_order_alloc){
           NVTE_CHECK_CUDA( hipFree(bias_tmp) ); 
         }else{
