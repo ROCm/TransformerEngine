@@ -14,6 +14,7 @@ import torch.nn as nn
 from torch.nn import Parameter
 from torch import _C
 from torch.cuda import _lazy_call, device as device_ctx_manager
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from transformer_engine.pytorch.utils import (
     init_method_normal,
@@ -674,7 +675,11 @@ def test_gpt_checkpointing(dtype, bs, model):
     config = model_configs[model]
     outputs = _test_e2e_checkpointing(bs, dtype, config, checkpoint=False)
     outputs_recompute = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
-    assert_all_equal(outputs, outputs_recompute)
+    if IS_HIP_EXTENSION:
+      #relax to all close for rocm
+      assert_allclose(outputs, outputs_recompute, 5e-5)
+    else: 
+      assert_all_equal(outputs, outputs_recompute)
 
 
 def _test_e2e_gpt_accuracy(block, bs, dtype, config):
@@ -1124,7 +1129,7 @@ def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
         loss.backward()
         optimizer.step()
         return out
-
+  
     # Warmup steps in a separate stream.
     s = torch.cuda.Stream()
     s.wait_stream(torch.cuda.current_stream())
