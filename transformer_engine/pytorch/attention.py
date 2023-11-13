@@ -46,16 +46,18 @@ from transformer_engine.pytorch.distributed import (
 )
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
-_flash_attn_version = packaging.version.Version(version("flash-attn"))
-_flash_attn_version_required = packaging.version.Version("1.0.6")
-_flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
-
-if _flash_attn_2_available:
-    from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_forward_func # pylint: disable=no-name-in-module
-    from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd # pylint: disable=no-name-in-module
+if int(os.getenv("NVTE_FLASH_ATTN", "0")) > 0:
+  _flash_attn_version = packaging.version.Version(version("flash-attn"))
+  _flash_attn_version_required = packaging.version.Version("1.0.6")
+  _flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
+  
+  if _flash_attn_2_available:
+      from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_forward_func # pylint: disable=no-name-in-module
+      from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd # pylint: disable=no-name-in-module
+  else:
+      from flash_attn.flash_attn_interface import flash_attn_unpadded_func as flash_attn_forward_func # pylint: disable=no-name-in-module,ungrouped-imports
 else:
-    from flash_attn.flash_attn_interface import flash_attn_unpadded_func as flash_attn_forward_func # pylint: disable=no-name-in-module,ungrouped-imports
-
+  _flash_attn_2_available = False
 
 __all__ = ["DotProductAttention", "MultiheadAttention"]
 
