@@ -1,3 +1,11 @@
+/*************************************************************************
+ * Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
+ *
+ * See LICENSE for license information.
+ ************************************************************************/
+#if 0
+#include "hip/hip_runtime.h" //Add it statically so it is not added by hipify
+#endif
 #pragma once
 // FP8 header version 0.3, 2021/05/11
 

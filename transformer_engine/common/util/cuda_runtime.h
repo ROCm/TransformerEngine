@@ -1,5 +1,6 @@
 /*************************************************************************
  * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *                    2023 Advanced Micro Devices, Inc. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -29,6 +30,16 @@ int current_device();
  */
 int sm_arch(int device_id = -1);
 
+#ifdef __HIP_PLATFORM_AMD__
+/* \brief Compute capability of device
+ *
+ * \param[in] device_id HIP device (default is current device)
+ *
+ * \return GPU arch name and compute capabilities string.
+ */
+const std::string &sm_arch_name(int device_id = -1);
+#endif
+
 /* \brief Number of multiprocessors on a device
  *
  * \param[in] device_id CUDA device (default is current device)
@@ -37,6 +48,7 @@ int sm_arch(int device_id = -1);
  */
 int sm_count(int device_id = -1);
 
+#ifndef __HIP_PLATFORM_AMD__
 /* \brief Path to CUDA Toolkit headers
  *
  * The path can be configured by setting NVTE_CUDA_INCLUDE_DIR in the
@@ -47,6 +59,7 @@ int sm_count(int device_id = -1);
  * \return Path to include directory, or an empty string if not found
  */
 const std::string &include_directory(bool required = false);
+#endif
 
 }  // namespace cuda
 

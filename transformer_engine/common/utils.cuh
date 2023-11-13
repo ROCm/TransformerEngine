@@ -1,5 +1,6 @@
 /*************************************************************************
  * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *                    2023 Advanced Micro Devices, Inc. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -10,16 +11,21 @@
 #include <cuda_fp16.h>
 #ifdef __HIP_PLATFORM_HCC__
 #include <hip/hip_bfloat16.h>
-#include "amd_detail/hip_float8.h"
+//#include "amd_detail/hip_float8.h"
 #else
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #endif
 
 #ifdef __HIP_PLATFORM_HCC__
-typedef uint16_t hip_bfloat16x2 __attribute__((ext_vector_type(2)));
+#ifndef __HIPCC_RTC__
+#include <cstdint>
+#else
+using namespace __hip_internal;
 #endif
+typedef uint16_t hip_bfloat16x2 __attribute__((ext_vector_type(2)));
 
+#else
 #if !defined(__CUDACC_RTC__)
 #include <cstdint>
 #else
@@ -33,6 +39,8 @@ static_assert(sizeof(uint16_t) == 2);
 static_assert(sizeof(uint32_t) == 4);
 static_assert(sizeof(uint64_t) == 8);
 #endif
+
+#endif // __HIP_PLATFORM_HCC__
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
