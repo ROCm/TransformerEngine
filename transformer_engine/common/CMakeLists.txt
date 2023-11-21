@@ -128,6 +128,10 @@ else()
                                string_code_utils_cuh)
   make_string_header_from_file(transpose/rtc/transpose.hip
                                string_code_transpose_rtc_transpose_cu)
+  make_string_header_from_file(amd_detail/hip_float8.h
+                               string_code_amd_detail_hip_float8_h)
+  make_string_header_from_file(amd_detail/hip_f8_impl.h
+                               string_code_amd_detail_hip_f8_impl_h)
   target_include_directories(transformer_engine PRIVATE
                              "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
 endif()
