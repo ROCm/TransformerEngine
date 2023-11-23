@@ -1,4 +1,5 @@
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#                    2023 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -53,6 +54,10 @@ list(APPEND transformer_engine_SOURCES
      rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
      rmsnorm/rmsnorm_fwd_cuda_kernel.cu
      util/cast.cu
+     util/cuda_driver.cpp
+     util/cuda_runtime.cpp
+     util/rtc.cpp
+     util/system.cpp
      fused_softmax/scaled_masked_softmax.cu
      fused_softmax/scaled_upper_triang_masked_softmax.cu)
 endif()
@@ -90,23 +95,25 @@ endif()
 # process include header files
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
+
+# Make header files with C++ strings
+function(make_string_header STRING STRING_NAME)
+    configure_file(util/string_header.h.in
+                    "string_headers/${STRING_NAME}.h"
+                    @ONLY)
+endfunction()
+function(make_string_header_from_file file_ STRING_NAME)
+    file(READ "${file_}" STRING)
+    configure_file(util/string_header.h.in
+                    "string_headers/${STRING_NAME}.h"
+                    @ONLY)
+endfunction()
+
 if(USE_CUDA)
   target_include_directories(transformer_engine PRIVATE
                              ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
   
-  # Make header files with C++ strings
-  function(make_string_header STRING STRING_NAME)
-      configure_file(util/string_header.h.in
-                     "string_headers/${STRING_NAME}.h"
-                     @ONLY)
-  endfunction()
-  function(make_string_header_from_file file_ STRING_NAME)
-      file(READ "${file_}" STRING)
-      configure_file(util/string_header.h.in
-                     "string_headers/${STRING_NAME}.h"
-                     @ONLY)
-  endfunction()
   list(GET CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES 0 cuda_include_path)
   make_string_header("${cuda_include_path}"
                      string_path_cuda_include)
@@ -117,7 +124,12 @@ if(USE_CUDA)
   target_include_directories(transformer_engine PRIVATE
                              "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
 else()
-
+  make_string_header_from_file(utils_hip.cuh
+                               string_code_utils_cuh)
+  make_string_header_from_file(transpose/rtc/transpose.hip
+                               string_code_transpose_rtc_transpose_cu)
+  target_include_directories(transformer_engine PRIVATE
+                             "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
 endif()
 
 # find and process package dependency
@@ -143,12 +155,11 @@ if(USE_CUDA)
 else()
   find_package(hip)
   find_package(rocblas)
+  list(APPEND transformer_engine_LINKER_LIBS roc::rocblas hip::host hip::device)
   if(USE_HIPBLASLT)
     find_package(hipblaslt)
     target_compile_definitions(transformer_engine PUBLIC USE_HIPBLASLT)
-    list(APPEND transformer_engine_LINKER_LIBS roc::rocblas hip::host hip::device roc::hipblaslt)
-  else()
-    list(APPEND transformer_engine_LINKER_LIBS roc::rocblas hip::host hip::device)
+    list(APPEND transformer_engine_LINKER_LIBS roc::hipblaslt)
   endif()
 endif()
 

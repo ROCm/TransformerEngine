@@ -1,4 +1,5 @@
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#                    2023 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -75,12 +76,9 @@ include_directories(${CMAKE_SOURCE_DIR})
 if(USE_CUDA)
   find_package(CUDAToolkit REQUIRED)
 else()
-  find_package(hip)
+  find_package(hip REQUIRED)
   find_package(rocblas)
 endif()
 
 add_subdirectory(operator)
-
-if(USE_CUDA)
 add_subdirectory(util)
-endif()

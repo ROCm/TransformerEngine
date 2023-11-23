@@ -1,5 +1,6 @@
 /*************************************************************************
  * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *                    2023 Advanced Micro Devices, Inc. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -16,12 +17,14 @@ namespace transformer_engine {
 
 namespace cuda {
 
+#ifndef __HIP_PLATFORM_AMD__
 namespace {
 
 // String with build-time CUDA include path
 #include "string_path_cuda_include.h"
 
 }  // namespace
+#endif // __HIP_PLATFORM_AMD__
 
 int num_devices() {
   auto query_num_devices = [] () -> int {
@@ -63,6 +66,24 @@ int sm_arch(int device_id) {
   return cache[device_id];
 }
 
+#ifdef __HIP_PLATFORM_AMD__
+const std::string &sm_arch_name(int device_id) {
+  static std::vector<std::string> cache(num_devices(), "");
+  static std::vector<std::once_flag> flags(num_devices());
+  if (device_id < 0) {
+    device_id = current_device();
+  }
+  NVTE_CHECK(0 <= device_id && device_id < num_devices(), "invalid HIP device ID");
+  auto init = [&] () {
+    cudaDeviceProp prop;
+    NVTE_CHECK_CUDA(cudaGetDeviceProperties(&prop, device_id));
+    cache[device_id] = prop.gcnArchName;
+  };
+  std::call_once(flags[device_id], init);
+  return cache[device_id];
+}
+#endif // __HIP_PLATFORM_AMD__
+
 int sm_count(int device_id) {
   static std::vector<int> cache(num_devices(), -1);
   static std::vector<std::once_flag> flags(num_devices());
@@ -79,6 +100,7 @@ int sm_count(int device_id) {
   return cache[device_id];
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 const std::string &include_directory(bool required) {
   static std::string path;
 
@@ -143,6 +165,7 @@ const std::string &include_directory(bool required) {
   // Return cached path
   return path;
 }
+#endif // __HIP_PLATFORM_AMD__
 
 }  // namespace cuda
 

@@ -1,5 +1,6 @@
 /*************************************************************************
  * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *                    2023 Advanced Micro Devices, Inc. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -69,7 +70,7 @@ class Library {
     NVTE_ERROR("Shared library initialization is not supported with Windows");
 #else
     void *ptr = dlsym(handle_, symbol);
-    NVTE_CHECK(ptr != nullptr, "Could not find symbol in lazily-initialized library");
+    NVTE_CHECK(ptr != nullptr, std::string("Could not find symbol in lazily-initialized library: ").append(symbol));
     return ptr;
 #endif  // _WIN32 or _WIN64 or __WINDOW__
   }
@@ -85,11 +86,19 @@ void swap(Library& first, Library& second) noexcept {
 
 /*! \brief Lazily-initialized shared library for CUDA driver */
 Library& cuda_driver_lib() {
+#ifdef __HIP_PLATFORM_AMD__
+#if defined(_WIN32) || defined(_WIN64) || defined(__WINDOWS__)
+  constexpr char lib_name[] = "libamdhip64.dll";
+#else
+  constexpr char lib_name[] = "libamdhip64.so";
+#endif
+#else // __HIP_PLATFORM_AMD__
 #if defined(_WIN32) || defined(_WIN64) || defined(__WINDOWS__)
   constexpr char lib_name[] = "nvcuda.dll";
 #else
   constexpr char lib_name[] = "libcuda.so.1";
 #endif
+#endif // __HIP_PLATFORM_AMD__
   static Library lib(lib_name);
   return lib;
 }

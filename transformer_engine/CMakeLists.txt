@@ -1,4 +1,5 @@
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#                    2023 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -25,6 +26,7 @@ if(((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) AND NOT (EXISTS "/bin/nvc
     SET(CMAKE_HIP_ARCHITECTURES gfx940)
   else()
     SET(TE_ROCM_ARCH $ENV{PYTORCH_ROCM_ARCH})
+    SET(CMAKE_HIP_ARCHITECTURES ${TE_ROCM_ARCH})
   endif()
   message(STATUS "TE_ROCM_ARCH: ${TE_ROCM_ARCH}")
  
