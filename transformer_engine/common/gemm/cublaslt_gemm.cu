@@ -608,12 +608,12 @@ void cublas_gemm(const Tensor *inputA,
        (A_type==rocblas_datatype_f32_r && B_type==rocblas_datatype_f32_r && D_type==rocblas_datatype_f32_r) ||
        (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_f32_r) ||
        (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_f16_r) ||
+       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_bf16_r) ||
        (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_bf8_r && D_type==rocblas_datatype_f32_r) ||
        (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_bf8_r && D_type==rocblas_datatype_f16_r) ||
+       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_bf8_r && D_type==rocblas_datatype_bf16_r) ||
        (A_type==rocblas_datatype_bf8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_f32_r) ||
        (A_type==rocblas_datatype_bf8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_f16_r) ||
-       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_bf16_r) ||
-       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_bf8_r && D_type==rocblas_datatype_bf16_r) ||
        (A_type==rocblas_datatype_bf8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_bf16_r),
        /*
        (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_f8_r) ||
@@ -630,10 +630,10 @@ void cublas_gemm(const Tensor *inputA,
 
   //If D is not fp32, then we need a temp buffer for GEMM result before applying epilogues. Otherwise, we can apply epilogues in-place.
   // with bias or gelu, allocate fp32 D_temp if the output is not fp32
-  // with input fp8/bf8 (use_fp8) and output bf16, also need allocate fp32 D_temp
+  // with input fp8/bf8 (use_fp8) and bf16 output,  also need allocate fp32 D_temp, as rocblas does not support this case
   void* D_temp;
   if (((bias || gelu) && (D_type==rocblas_datatype_f16_r ||D_type==rocblas_datatype_bf16_r || D_type==rocblas_datatype_f8_r || D_type==rocblas_datatype_bf8_r))|| 
-      ((A_type==rocblas_datatype_f8_r or A_type==rocblas_datatype_bf8_r) && (B_type==rocblas_datatype_f8_r or B_type==rocblas_datatype_bf8_r)&& (D_type==rocblas_datatype_bf16_r))) {
+      ((A_type==rocblas_datatype_f8_r || A_type==rocblas_datatype_bf8_r) && (B_type==rocblas_datatype_f8_r || B_type==rocblas_datatype_bf8_r)&& (D_type==rocblas_datatype_bf16_r))) {
     if(! stream_order_alloc){
       NVTE_CHECK_CUDA( hipMalloc(&D_temp, sizeof(float)*m*n) );
     }else{
@@ -652,17 +652,16 @@ void cublas_gemm(const Tensor *inputA,
   if (!(bias || gelu) && (A_type==rocblas_datatype_f16_r && B_type==rocblas_datatype_f16_r && D_type==rocblas_datatype_f16_r)) {
     D_temp_type = rocblas_datatype_f16_r;
   }
-  // When Ti=To=fp16 and there is no bias or gelu, D_temp points to D and we would like it to be fp16
+  // When Ti=To=bf16 and there is no bias or gelu, D_temp points to D and we would like it to be bf16
   if (!(bias || gelu) && (A_type==rocblas_datatype_bf16_r && B_type==rocblas_datatype_bf16_r && D_type==rocblas_datatype_bf16_r)) {
     D_temp_type = rocblas_datatype_bf16_r;
   }
-  // When Ti in fp8 or bf8, To=fp16, there is no bias or gelu, D_temp points to D and we would like it to be fp16
-  if ((!(bias||gelu))&& ((A_type==rocblas_datatype_f8_r or A_type==rocblas_datatype_bf8_r) && (B_type==rocblas_datatype_f8_r or B_type==rocblas_datatype_bf8_r)&& D_type==rocblas_datatype_f16_r)) {
+  // When Ti in fp8 or bf8, To=fp16, there is no bias or gelu, D_temp points to D and we would like it to be fp16, as rocblas support this case.
+  if ((!(bias||gelu))&& ((A_type==rocblas_datatype_f8_r || A_type==rocblas_datatype_bf8_r) && (B_type==rocblas_datatype_f8_r || B_type==rocblas_datatype_bf8_r)&& D_type==rocblas_datatype_f16_r)) {
     D_temp_type = rocblas_datatype_f16_r;
   }
 
   // D = alpha * (A * B) + beta * C
-  // TODO: Can we search for rocblas_gemm_algo??
   if (use_fp8) {
     rocblas_computetype computeType = rocblas_compute_type_f32;
     NVTE_CHECK_CUBLAS(rocblas_gemm_ex3(handle, transa, transb, m, n, k, &alpha,
@@ -838,7 +837,7 @@ void cublas_gemm(const Tensor *inputA,
 #endif
         }
       }
-      if (D_type == rocblas_datatype_f16_r) {
+      if (D_type == rocblas_datatype_f16_r || D_type == rocblas_datatype_bf16_r) {
         TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
           detail::identity_kernelLauncher<float, OType>(reinterpret_cast<const float*>(D_temp), 
                                                         reinterpret_cast<OType*>(D),
@@ -919,9 +918,20 @@ void cublas_gemm(const Tensor *inputA,
         );  
       ); 
     }
+  } else { // No epilogue - !(bias || gelu)
+      if ((A_type==rocblas_datatype_f8_r || A_type==rocblas_datatype_bf8_r) && (B_type==rocblas_datatype_f8_r || B_type==rocblas_datatype_bf8_r)&& (D_type==rocblas_datatype_bf16_r)) {
+	DType output_dtype = get_transformer_engine_dtype(D_type);
+        TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
+          detail::identity_kernelLauncher<float, OType>(reinterpret_cast<const float*>(D_temp), 
+                                                        reinterpret_cast<OType*>(D),
+                                                        m*n,
+                                                        stream);
+        );  
+      }
   }
+  
   if (((bias || gelu) && (D_type==rocblas_datatype_f16_r ||D_type==rocblas_datatype_bf16_r || D_type==rocblas_datatype_f8_r || D_type==rocblas_datatype_bf8_r))||
-      ((A_type==rocblas_datatype_f8_r or A_type==rocblas_datatype_bf8_r) && (B_type==rocblas_datatype_f8_r or B_type==rocblas_datatype_bf8_r)&& (D_type==rocblas_datatype_bf16_r))) {
+      ((A_type==rocblas_datatype_f8_r || A_type==rocblas_datatype_bf8_r) && (B_type==rocblas_datatype_f8_r || B_type==rocblas_datatype_bf8_r)&& (D_type==rocblas_datatype_bf16_r))) {
     if(! stream_order_alloc){
       NVTE_CHECK_CUDA( hipFree(D_temp) );
     }else{

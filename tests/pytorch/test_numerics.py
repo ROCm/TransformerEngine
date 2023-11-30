@@ -676,7 +676,9 @@ def test_gpt_checkpointing(dtype, bs, model):
     outputs = _test_e2e_checkpointing(bs, dtype, config, checkpoint=False)
     outputs_recompute = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
     if IS_HIP_EXTENSION:
-      #relax to all close for rocm
+      # Relax to all close for rocm. We don't have bit-to-bit reproducibility
+      # when running rocblas path mainly due to the usage of atomics
+      # Need to check whether hipBlasLt path has reproducibility
       assert_allclose(outputs, outputs_recompute, 5e-5)
     else: 
       assert_all_equal(outputs, outputs_recompute)
