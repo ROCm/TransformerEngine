@@ -1,5 +1,6 @@
 /*************************************************************************
  * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *                    2023 Advanced Micro Devices, Inc. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -10,19 +11,15 @@
 #include <cfloat>
 #include "../common.h"
 #include "../utils.cuh"
-#ifndef __HIP_PLATFORM_HCC__
 #include "../util/string.h"
 #include "../util/rtc.h"
-#endif //#ifndef __HIP_PLATFORM_HCC__
 
 namespace transformer_engine {
 
 namespace {
 
-#ifndef __HIP_PLATFORM_HCC__
 // String with RTC kernel implementation
 #include "string_code_transpose_rtc_transpose_cu.h"
-#endif //#ifndef __HIP_PLATFORM_HCC__
 
 // Hard-coded kernel parameters
 constexpr size_t warps_per_tile = 4;
@@ -145,15 +142,12 @@ void transpose(const Tensor &input,
              "Input and output type must match.");
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(input.data.dtype, Type,
-#ifndef __HIP_PLATFORM_HCC__
     constexpr const char *type_name = TypeInfo<Type>::name;
-#endif //#ifndef __HIP_PLATFORM_HCC__
     constexpr size_t type_size = sizeof(Type);
 
     // Choose between runtime-compiled or statically-compiled kernel
     const bool aligned = (row_length % THREADS_PER_WARP == 0
                           && num_rows % THREADS_PER_WARP == 0);
-#ifndef __HIP_PLATFORM_HCC__
     if (aligned && rtc::is_enabled()) {  // Runtime-compiled tuned kernel
       // Determine kernel config
       size_t load_size = 8;
@@ -249,7 +243,6 @@ void transpose(const Tensor &input,
                          static_cast<Type*>(output.data.dptr),
                          row_length, num_rows);
     } else {  // Statically-compiled general kernel
-#endif //#ifndef __HIP_PLATFORM_HCC__
       constexpr size_t load_size = 4;
       constexpr size_t store_size = 4;
       constexpr size_t row_tile_size = load_size / type_size * THREADS_PER_WARP;
@@ -260,9 +253,7 @@ void transpose(const Tensor &input,
         static_cast<const Type *>(input.data.dptr),
         static_cast<Type *>(output.data.dptr),
         row_length, num_rows);
-#ifndef __HIP_PLATFORM_HCC__
     }
-#endif //#ifndef __HIP_PLATFORM_HCC__
   );  // NOLINT(*)
 }
 
@@ -271,9 +262,7 @@ void transpose(const Tensor &input,
 void nvte_transpose(const NVTETensor input,
                     NVTETensor output,
                     cudaStream_t stream) {
-#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_transpose);
-#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   transpose(*reinterpret_cast<const Tensor*>(input),
             reinterpret_cast<Tensor*>(output),

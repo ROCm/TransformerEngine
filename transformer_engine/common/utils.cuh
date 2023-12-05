@@ -10,19 +10,19 @@
 
 #include <cuda_fp16.h>
 #ifdef __HIP_PLATFORM_HCC__
+#ifndef __HIPCC_RTC__
+#include <cstdint>
+#else
+using namespace __hip_internal;
+#endif
 #include <hip/hip_bfloat16.h>
-//#include "amd_detail/hip_float8.h"
+#include "amd_detail/hip_float8.h"
 #else
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #endif
 
 #ifdef __HIP_PLATFORM_HCC__
-#ifndef __HIPCC_RTC__
-#include <cstdint>
-#else
-using namespace __hip_internal;
-#endif
 typedef uint16_t hip_bfloat16x2 __attribute__((ext_vector_type(2)));
 
 #else

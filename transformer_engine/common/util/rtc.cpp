@@ -24,6 +24,8 @@ namespace {
 
 // Strings with headers for RTC kernels
 #include "string_code_utils_cuh.h"
+#include "string_code_amd_detail_hip_float8_h.h"
+#include "string_code_amd_detail_hip_f8_impl_h.h"
 
 #ifndef __HIP_PLATFORM_AMD__
 /*! \brief Latest compute capability that NVRTC supports
@@ -181,11 +183,12 @@ void KernelManager::compile(const std::string &kernel_label,
 
   // Compile source
   nvrtcProgram program;
-  constexpr int num_headers = 1;
 #ifdef __HIP_PLATFORM_AMD__
-  const char* headers[num_headers] = {string_code_utils_cuh};
-  const char* include_names[num_headers] = {"utils_hip.cuh"};
+  constexpr int num_headers = 3;
+  const char* headers[num_headers] = {string_code_utils_cuh, string_code_amd_detail_hip_float8_h, string_code_amd_detail_hip_f8_impl_h};
+  const char* include_names[num_headers] = {"utils_hip.cuh", "amd_detail/hip_float8.h", "amd_detail/hip_f8_impl.h"};
 #else
+  constexpr int num_headers = 1;
   constexpr const char* headers[num_headers] = {string_code_utils_cuh};
   constexpr const char* include_names[num_headers] = {"utils.cuh"};
 #endif // __HIP_PLATFORM_AMD__

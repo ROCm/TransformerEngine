@@ -1,5 +1,6 @@
 /*************************************************************************
  * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *                    2023 Advanced Micro Devices, Inc. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -10,7 +11,7 @@
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/logging.h>
 #include <cuda_fp16.h>
-#ifndef USE_ROCM
+#ifndef __HIP_PLATFORM_AMD__
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #else
@@ -25,7 +26,7 @@
 #include <string>
 #include <tuple>
 #include <vector>
-#ifndef USE_ROCM
+#ifndef __HIP_PLATFORM_AMD__
 #include "nvtx.h"
 #endif
 
@@ -62,7 +63,7 @@ using byte = uint8_t;
 using int32 = int32_t;
 using fp32 = float;
 using fp16 = half;
-#ifndef USE_ROCM
+#ifndef __HIP_PLATFORM_AMD__
 using bf16 = nv_bfloat16;
 using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
@@ -72,7 +73,6 @@ using fp8e4m3 = hip_f8<hip_f8_type::fp8>;
 using fp8e5m2 = hip_f8<hip_f8_type::bf8>;
 #endif
 
-#ifndef USE_ROCM
 namespace detail {
 
 template <typename T>
@@ -83,13 +83,18 @@ TRANSFORMER_ENGINE_TYPE_NAME(uint8_t)
 TRANSFORMER_ENGINE_TYPE_NAME(int32_t)
 TRANSFORMER_ENGINE_TYPE_NAME(float)
 TRANSFORMER_ENGINE_TYPE_NAME(half)
+#ifdef __HIP_PLATFORM_AMD__
+TRANSFORMER_ENGINE_TYPE_NAME(hip_bfloat16)
+TRANSFORMER_ENGINE_TYPE_NAME(hip_f8<hip_f8_type::fp8>)
+TRANSFORMER_ENGINE_TYPE_NAME(hip_f8<hip_f8_type::bf8>)
+#else
 TRANSFORMER_ENGINE_TYPE_NAME(nv_bfloat16)
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e4m3)
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e5m2)
+#endif
 #undef TRANSFORMER_ENGINE_TYPE_NAME
 
 }  // namespace detail
-#endif //#ifndef USE_ROCM
 
 template <typename T>
 struct TypeInfo{
@@ -127,9 +132,7 @@ struct TypeInfo{
 
     constexpr static DType dtype = getType<T>();
     constexpr static size_t size = sizeof(T);
-#ifndef USE_ROCM
     constexpr static const char *name = detail::type_name<T>();
-#endif //#ifndef USE_ROCM
 };
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(dtype, type, ...) \
@@ -320,9 +323,11 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
 
 bool is_fp8_dtype(const DType t);
 
-#ifndef USE_ROCM
+#ifndef __HIP_PLATFORM_AMD__
 #define NVTE_API_CALL(api_name) \
   transformer_engine::nvtx::NVTXWrapper _ ## api_name ## _nvtx_wrapper(#api_name);
+#else
+#define NVTE_API_CALL(api_name)
 #endif
 
 }  // namespace transformer_engine
