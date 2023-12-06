@@ -1,9 +1,5 @@
 ..
-<<<<<<< HEAD
     Copyright (c) 2023, AMD. All rights reserved.
-=======
-    Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
->>>>>>> upstream/main
 
     See LICENSE for license information.
 
@@ -50,10 +46,9 @@ simplifying mixed precision training for users.
 Highlights
 ----------
 
-* Easy-to-use modules for building Transformer layers with FP8 support 
-* Optimizations (e.g. fused kernels) for Transformer models 
-* Support for FP8 on NVIDIA Hopper and NVIDIA Ada GPUs
-* Support for optimizations across all precisions (FP16, BF16) on NVIDIA Ampere GPU architecture generations and later
+* Easy-to-use pyTorch modules enabling building of the Transformer layers with FP8 support on AMD GPUs.
+* Optimizations (e.g. fused kernels) for Transformer models across all precisions and AMD GPU architecures.
+* Layers and modules supported in Transformer Engine (TE), and their enabling status in FP8
 
 Examples
 ----------
@@ -87,18 +82,10 @@ PyTorch
   loss.backward()
 
 
-<<<<<<< HEAD
-* Easy-to-use pyTorch modules enabling building of the Transformer layers with FP8 support on AMD
-  GPUs.
-* Optimizations (e.g. fused kernels) for Transformer models across all precisions and AMD GPU
-  architecures.
-* Layers and modules supported in Transformer Engine (TE), and their enabling status in FP8
-
 
 .. image:: te-fp8-layers.png
    :width: 600
 
-=======
 JAX
 ^^^
 
@@ -175,7 +162,6 @@ TensorFlow
       loss = tf.reduce_sum(out)
   grads = tape.gradient(loss, model.trainable_variables)
   optimizer.apply_gradients(zip(grads, model.trainable_variables))
->>>>>>> upstream/main
 
 .. overview-end-marker-do-not-remove
 
@@ -183,8 +169,6 @@ Installation
 ----------
 .. installation
 
-<<<<<<< HEAD
-=======
 In the NGC container
 ^^^^^^^^^^^^^^^^^^^^
 
@@ -204,7 +188,6 @@ Pre-requisites
 * NVIDIA Driver supporting CUDA 11.8 or later
 * cuDNN 8.1 or later
 * For fused attention, CUDA 12.1 or later, NVIDIA Driver supporting CUDA 12.1 or later, and cuDNN 8.9 or later.
->>>>>>> upstream/main
 
 From source
 ^^^^^^^^^^^
@@ -219,7 +202,6 @@ resource intensive and requires a large amount of RAM (see `bug <https://github.
 errors during the installation of TransformerEngine. To circumvent the issue, please try setting **MAX_JOBS=1** in the environment. If the errors persist, then
 proceed to install a supported version of Flash Attention 1 (v1.0.6 to v1.0.9).
 
-<<<<<<< HEAD
 Build libtransformer_engine.so
 
 .. code-block:: bash
@@ -236,9 +218,8 @@ Build libtransformer_engine.so
   make
 
 User Guide
-=======
+
 Model Support
->>>>>>> upstream/main
 ----------
 
 While the more granular modules in Transformer Engine allow building any Transformer architecture,
