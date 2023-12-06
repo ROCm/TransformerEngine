@@ -1190,9 +1190,7 @@ void nvte_cublas_gemm(const NVTETensor A,
                       bool use_split_accumulator,
                       int math_sm_count,
                       cudaStream_t stream) {
-#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_cublas_gemm);
-#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   const Tensor *inputA = reinterpret_cast<const Tensor*>(A);
   const Tensor *inputB = reinterpret_cast<const Tensor*>(B);

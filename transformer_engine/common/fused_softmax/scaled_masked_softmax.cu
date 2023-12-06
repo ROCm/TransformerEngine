@@ -1069,9 +1069,7 @@ void nvte_scaled_softmax_forward(
     float scale_factor,
     cudaStream_t stream
 ) {
-#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_scaled_softmax_forward);
-#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   scaled_softmax_forward(
       *reinterpret_cast<const Tensor*>(input),
@@ -1088,9 +1086,7 @@ void nvte_scaled_softmax_backward(
     float scale_factor,
     cudaStream_t stream
 ) {
-#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_scaled_softmax_backward);
-#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   scaled_softmax_backward(
       *reinterpret_cast<Tensor*>(output_grads),
@@ -1108,9 +1104,7 @@ void nvte_scaled_masked_softmax_forward(
     float scale_factor,
     cudaStream_t stream
 ) {
-#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_scaled_masked_softmax_forward);
-#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   scaled_masked_softmax_forward(
       *reinterpret_cast<const Tensor*>(input),
@@ -1128,9 +1122,7 @@ void nvte_scaled_masked_softmax_backward(
     float scale_factor,
     cudaStream_t stream
 ) {
-#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_scaled_masked_softmax_backward);
-#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   scaled_masked_softmax_backward(
       *reinterpret_cast<Tensor*>(output_grads),

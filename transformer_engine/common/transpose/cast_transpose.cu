@@ -433,9 +433,7 @@ void nvte_cast_transpose(const NVTETensor input,
                          NVTETensor cast_output,
                          NVTETensor transposed_output,
                          cudaStream_t stream) {
-#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_cast_transpose);
-#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   cast_transpose(*reinterpret_cast<const Tensor*>(input),
                  reinterpret_cast<Tensor*>(cast_output),

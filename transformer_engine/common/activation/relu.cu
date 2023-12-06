@@ -129,9 +129,7 @@ void dreglu(const Tensor &grad,
 void nvte_relu(const NVTETensor input,
                NVTETensor output,
                cudaStream_t stream) {
-#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_relu);
-#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   relu(*reinterpret_cast<const Tensor*>(input),
        reinterpret_cast<Tensor*>(output),
@@ -142,9 +140,7 @@ void nvte_drelu(const NVTETensor grad,
                 const NVTETensor input,
                 NVTETensor output,
                 cudaStream_t stream) {
-#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_drelu);
-#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   drelu(*reinterpret_cast<const Tensor*>(grad),
         *reinterpret_cast<const Tensor*>(input),
@@ -155,9 +151,7 @@ void nvte_drelu(const NVTETensor grad,
 void nvte_reglu(const NVTETensor input,
                 NVTETensor output,
                 cudaStream_t stream) {
-#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_reglu);
-#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   reglu(*reinterpret_cast<const Tensor*>(input),
         reinterpret_cast<Tensor*>(output),
@@ -168,9 +162,7 @@ void nvte_dreglu(const NVTETensor grad,
                  const NVTETensor input,
                  NVTETensor output,
                  cudaStream_t stream) {
-#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_dreglu);
-#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   dreglu(*reinterpret_cast<const Tensor*>(grad),
          *reinterpret_cast<const Tensor*>(input),

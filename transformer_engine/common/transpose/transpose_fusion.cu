@@ -528,9 +528,7 @@ void nvte_fp8_transpose_dbias(const NVTETensor input,
                                NVTETensor dbias,
                                NVTETensor workspace,
                                cudaStream_t stream) {
-#ifndef __HIP_PLATFORM_HCC__
   NVTE_API_CALL(nvte_fp8_transpose_dbias);
-#endif //#ifndef __HIP_PLATFORM_HCC__
   using namespace transformer_engine;
   fp8_transpose_dbias(*reinterpret_cast<const Tensor*>(input),
                        reinterpret_cast<Tensor*>(transposed_output),
