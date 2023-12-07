@@ -20,14 +20,11 @@ if(((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) AND NOT (EXISTS "/bin/nvc
   add_definitions(-DNDEBUG)
   add_definitions(-DUSE_ROCM)
   if(NOT DEFINED ENV{PYTORCH_ROCM_ARCH})
-    #save runtime on mi300 dev node
-    #SET(TE_ROCM_ARCH gfx900;gfx906;gfx908;gfx90a)
-    SET(TE_ROCM_ARCH gfx940)
-    SET(CMAKE_HIP_ARCHITECTURES gfx940)
+    SET(TE_ROCM_ARCH gfx90a;gfx940;gfx941;gfx942)
   else()
     SET(TE_ROCM_ARCH $ENV{PYTORCH_ROCM_ARCH})
-    SET(CMAKE_HIP_ARCHITECTURES ${TE_ROCM_ARCH})
   endif()
+  SET(CMAKE_HIP_ARCHITECTURES ${TE_ROCM_ARCH})
   message(STATUS "TE_ROCM_ARCH: ${TE_ROCM_ARCH}")
  
 endif()

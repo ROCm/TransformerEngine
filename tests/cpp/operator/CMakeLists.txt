@@ -50,6 +50,7 @@ if(USE_CUDA)
   target_compile_options(test_operator PRIVATE -O2)
 else()
   target_link_libraries(test_operator PUBLIC hip::host hip::device GTest::gtest_main ${TE_LIB})
+  target_compile_options(test_operator PRIVATE -O2)
 endif()
 
 include(GoogleTest)

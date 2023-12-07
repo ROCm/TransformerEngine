@@ -170,14 +170,15 @@ endif()
 target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS})
 
 # Compiler options
+set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
+                            fused_softmax/scaled_upper_triang_masked_softmax.cu
+                            PROPERTIES
+                            COMPILE_OPTIONS "--use_fast_math")
 if(USE_CUDA)
-  set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
-                              fused_softmax/scaled_upper_triang_masked_softmax.cu
-                              PROPERTIES
-                              COMPILE_OPTIONS "--use_fast_math")
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 else()
+  set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -O3")
 endif()
 
 # Install library
