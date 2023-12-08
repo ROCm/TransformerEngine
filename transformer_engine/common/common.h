@@ -26,9 +26,7 @@
 #include <string>
 #include <tuple>
 #include <vector>
-#ifndef __HIP_PLATFORM_AMD__
 #include "nvtx.h"
-#endif
 
 namespace transformer_engine {
 
@@ -323,12 +321,8 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
 
 bool is_fp8_dtype(const DType t);
 
-#ifndef __HIP_PLATFORM_AMD__
 #define NVTE_API_CALL(api_name) \
   transformer_engine::nvtx::NVTXWrapper _ ## api_name ## _nvtx_wrapper(#api_name);
-#else
-#define NVTE_API_CALL(api_name)
-#endif
 
 }  // namespace transformer_engine
 
