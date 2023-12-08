@@ -1,3 +1,11 @@
+/*************************************************************************
+ * Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
+ *
+ * See LICENSE for license information.
+ ************************************************************************/
+#if 0
+#include "hip/hip_runtime.h" //Add it statically so it is not added by hipify
+#endif
 #pragma once
 // FP8 header version 0.3, 2021/05/11
 
@@ -55,11 +63,13 @@ enum class hip_f8_rounding_mode {
 //    => NAN/INF are represented as per IEEE conventions
 
 static __device__ bool hip_f8_bias_mode_bit_device = true;
-static bool hip_f8_bias_mode_bit_host = true;
 
 static __global__ void set_hip_f8_bias_mode_bit(bool v) {
   hip_f8_bias_mode_bit_device = v;
 }
+
+#ifndef __HIPCC_RTC__
+static bool hip_f8_bias_mode_bit_host = true;
 
 static void set_hip_f8_bias_mode_ieee() {
   hipLaunchKernelGGL(set_hip_f8_bias_mode_bit, dim3(1), dim3(1), 0, 0, false);
@@ -70,6 +80,7 @@ static void set_hip_f8_bias_mode_optimal() {
   hipLaunchKernelGGL(set_hip_f8_bias_mode_bit, dim3(1), dim3(1), 0, 0, true);
   hip_f8_bias_mode_bit_host = true;
 }
+#endif // __HIPCC_RTC__
 
 static inline HIP_HOST_DEVICE bool get_hip_f8_bias_mode() {
 #if defined(__HIP_DEVICE_COMPILE__)

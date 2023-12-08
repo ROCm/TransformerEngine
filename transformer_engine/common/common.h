@@ -1,5 +1,6 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *                    2023 Advanced Micro Devices, Inc. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -10,7 +11,7 @@
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/logging.h>
 #include <cuda_fp16.h>
-#ifndef USE_ROCM
+#ifndef __HIP_PLATFORM_AMD__
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #else
@@ -25,15 +26,32 @@
 #include <string>
 #include <tuple>
 #include <vector>
+#ifndef __HIP_PLATFORM_AMD__
+#include "nvtx.h"
+#endif
 
 namespace transformer_engine {
 
-struct Tensor {
-    void* dptr;
-    std::vector<size_t> shape;
-    DType dtype;
+struct SimpleTensor {
+  void *dptr;
+  std::vector<size_t> shape;
+  DType dtype;
 
-    Tensor() : dptr(nullptr), shape(), dtype(DType::kFloat32) {}
+  SimpleTensor(void *dptr, const std::vector<size_t> &shape, DType dtype) :
+    dptr(dptr), shape(shape), dtype(dtype) {}
+  SimpleTensor() : SimpleTensor(nullptr, {}, DType::kFloat32) {}
+};
+
+struct Tensor {
+  SimpleTensor data;
+  SimpleTensor amax;
+  SimpleTensor scale;
+  SimpleTensor scale_inv;
+
+  Tensor() : data(),
+             amax(nullptr, {1}, DType::kFloat32),
+             scale(nullptr, {1}, DType::kFloat32),
+             scale_inv(nullptr, {1}, DType::kFloat32) {}
 };
 
 template <typename T>
@@ -45,7 +63,7 @@ using byte = uint8_t;
 using int32 = int32_t;
 using fp32 = float;
 using fp16 = half;
-#ifndef USE_ROCM
+#ifndef __HIP_PLATFORM_AMD__
 using bf16 = nv_bfloat16;
 using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
@@ -54,6 +72,29 @@ using bf16 = hip_bfloat16;
 using fp8e4m3 = hip_f8<hip_f8_type::fp8>;
 using fp8e5m2 = hip_f8<hip_f8_type::bf8>;
 #endif
+
+namespace detail {
+
+template <typename T>
+constexpr inline const char *type_name() noexcept;
+#define TRANSFORMER_ENGINE_TYPE_NAME(T) \
+  template <> inline constexpr const char *type_name<T>() noexcept { return #T; }
+TRANSFORMER_ENGINE_TYPE_NAME(uint8_t)
+TRANSFORMER_ENGINE_TYPE_NAME(int32_t)
+TRANSFORMER_ENGINE_TYPE_NAME(float)
+TRANSFORMER_ENGINE_TYPE_NAME(half)
+#ifdef __HIP_PLATFORM_AMD__
+TRANSFORMER_ENGINE_TYPE_NAME(hip_bfloat16)
+TRANSFORMER_ENGINE_TYPE_NAME(hip_f8<hip_f8_type::fp8>)
+TRANSFORMER_ENGINE_TYPE_NAME(hip_f8<hip_f8_type::bf8>)
+#else
+TRANSFORMER_ENGINE_TYPE_NAME(nv_bfloat16)
+TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e4m3)
+TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e5m2)
+#endif
+#undef TRANSFORMER_ENGINE_TYPE_NAME
+
+}  // namespace detail
 
 template <typename T>
 struct TypeInfo{
@@ -91,6 +132,7 @@ struct TypeInfo{
 
     constexpr static DType dtype = getType<T>();
     constexpr static size_t size = sizeof(T);
+    constexpr static const char *name = detail::type_name<T>();
 };
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(dtype, type, ...) \
@@ -229,61 +271,27 @@ struct TypeInfo{
             NVTE_ERROR("Invalid type."); \
     }
 
-template<typename T>
-struct TypeId{};
-
-template<>
-struct TypeId<fp16>{
-    constexpr static uint32_t Value = 0;
-};
-
-template<>
-struct TypeId<bf16>{
-    constexpr static uint32_t Value = 1;
-};
-
-template<>
-struct TypeId<fp32>{
-    constexpr static uint32_t Value = 2;
-};
-
-template<>
-struct TypeId<fp8e4m3>{
-    constexpr static uint32_t Value = 3;
-};
+#define TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(dtype, type, ...)                 \
+  switch (dtype)                                                               \
+    {                                                                          \
+    using namespace transformer_engine;                                        \
+    case DType::kFloat16:                                                      \
+      {                                                                        \
+          using type = fp16;                                                   \
+          __VA_ARGS__;                                                         \
+          break;                                                               \
+      }                                                                        \
+    case DType::kBFloat16:                                                     \
+      {                                                                        \
+          using type = bf16;                                                   \
+          __VA_ARGS__;                                                         \
+          break;                                                               \
+      }                                                                        \
+    default:                                                                   \
+          NVTE_ERROR("Invalid type for 16 bit.");                              \
+      }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-
-template<typename T, int S>
-struct Type2Key{
-    constexpr static uint32_t Value = TypeId<T>::Value << S;
-};
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-template<typename T>
-struct WeightType2Key : public Type2Key<T, 0>{};
-
-template<typename T>
-struct InputType2Key : public Type2Key<T, 2>{};
-
-template<typename T>
-struct OutputType2Key : public Type2Key<T, 4>{};
-
-template<typename T>
-struct ComputeType2Key : public Type2Key<T, 6>{};
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-template<typename W, typename I, typename O, typename C>
-struct Types2Key{
-    constexpr static uint32_t Value = WeightType2Key<W>::Value | InputType2Key<I>::Value |
-                                      OutputType2Key<O>::Value | ComputeType2Key<C>::Value;
-    constexpr static inline uint64_t get(const uint64_t hidden_size){
-        constexpr uint64_t type_key = Value;
-        return (type_key << 32) | hidden_size;
-    }
-};
 
 inline size_t product(const std::vector<size_t> &shape) {
     size_t ret = 1;
@@ -291,6 +299,12 @@ inline size_t product(const std::vector<size_t> &shape) {
         ret *= elem;
     }
     return ret;
+}
+
+inline int log2_ceil(int value) {
+    int log2_value = 0;
+    while ((1 << log2_value) < value) ++log2_value;
+    return log2_value;
 }
 
 template <typename T>
@@ -303,6 +317,18 @@ template <>
 struct is_fp8<fp8e5m2> : std::true_type {};
 
 size_t typeToSize(const DType type);
+
+void CheckInputTensor(const Tensor &t, const std::string &name);
+void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty = false);
+
+bool is_fp8_dtype(const DType t);
+
+#ifndef __HIP_PLATFORM_AMD__
+#define NVTE_API_CALL(api_name) \
+  transformer_engine::nvtx::NVTXWrapper _ ## api_name ## _nvtx_wrapper(#api_name);
+#else
+#define NVTE_API_CALL(api_name)
+#endif
 
 }  // namespace transformer_engine
 

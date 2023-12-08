@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -47,8 +47,6 @@ inline __device__ void cast_and_transpose_regs(const IVec (&in)[nvec_out],
 
 // STUFF TO TUNE
 constexpr unsigned int n_warps_per_tile = 4;
-constexpr int desired_load_size = 8;
-constexpr int desired_store_size = 8;
 
 constexpr unsigned int max_threads_per_block = 256;
 static_assert(n_warps_per_tile * THREADS_PER_WARP <= max_threads_per_block);
@@ -62,7 +60,6 @@ cast_transpose_kernel(const IType * const input,
                       OType * const output_t,
                       const CType * const scale_ptr,
                       CType * const amax,
-                      CType * const scale_inv,
                       const size_t row_length,
                       const size_t num_rows,
                       const size_t num_tiles) {
@@ -105,7 +102,7 @@ cast_transpose_kernel(const IType * const input,
                            warp_id_in_tile * n_iterations) %
                          THREADS_PER_WARP;
   CType max = 0;
-  const CType scale = *scale_ptr;
+  const CType scale = scale_ptr != nullptr ? *scale_ptr : 1;
 #pragma unroll
   for (unsigned int i = 0; i < nvec_out; ++i) {
     in[0][i].load_from(my_input_tile, current_stride + my_place + stride * i);
@@ -158,8 +155,7 @@ cast_transpose_kernel(const IType * const input,
 
   if (threadIdx.x == 0) {
     static_assert(std::is_same<CType, float>::value);
-    atomicMaxFloat(amax, max);
-    reciprocal<float>(scale_inv, scale);
+    if (amax != nullptr) atomicMaxFloat(amax, max);
   }
 }
 
@@ -171,7 +167,6 @@ cast_transpose_kernel_notaligned(const IType * const input,
                                  OType * const output_t,
                                  const CType * const scale_ptr,
                                  CType * const amax,
-                                 CType * const scale_inv,
                                  const size_t row_length,
                                  const size_t num_rows,
                                  const size_t num_tiles) {
@@ -222,7 +217,7 @@ cast_transpose_kernel_notaligned(const IType * const input,
                            warp_id_in_tile * n_iterations) %
                           THREADS_PER_WARP;
   CType max = 0;
-  const CType scale = *scale_ptr;
+  const CType scale = scale_ptr != nullptr ? *scale_ptr : 1;
   {
     const bool valid_load = my_place < tile_length &&
                             warp_id_in_tile * n_iterations < tile_height;
@@ -294,124 +289,154 @@ cast_transpose_kernel_notaligned(const IType * const input,
 
   if (threadIdx.x == 0) {
     static_assert(std::is_same<CType, float>::value);
-    atomicMaxFloat(amax, max);
-    reciprocal<float>(scale_inv, scale);
+    if (amax != nullptr) atomicMaxFloat(amax, max);
   }
 }
 
 void cast_transpose(const Tensor &input,
-                    const Tensor &scale,
                     Tensor *cast_output,
                     Tensor *transposed_output,
-                    Tensor *amax,
-                    Tensor *scale_inv,
                     cudaStream_t stream) {
-  NVTE_CHECK(input.shape.size() == 2, "Input must have 2 dimensions.");
-  NVTE_CHECK(cast_output->shape.size() == 2, "C output must have 2 dimensions.");
-  NVTE_CHECK(transposed_output->shape.size() == 2, "T output must have 2 dimensions.");
-  NVTE_CHECK(input.shape == cast_output->shape, "Input and C output must have the same shape.");
-  const size_t row_length = input.shape[1];
-  const size_t num_rows = input.shape[0];
+  CheckInputTensor(input, "cast_transpose_input");
+  CheckOutputTensor(*cast_output, "cast_output");
+  CheckOutputTensor(*transposed_output, "transposed_output");
 
-  NVTE_CHECK(transposed_output->shape[0] == row_length, "Wrong dimension of T output.");
-  NVTE_CHECK(transposed_output->shape[1] == num_rows, "Wrong dimension of T output.");
+  NVTE_CHECK(input.data.shape.size() == 2, "Input must have 2 dimensions.");
+  NVTE_CHECK(cast_output->data.shape.size() == 2, "C output must have 2 dimensions.");
+  NVTE_CHECK(transposed_output->data.shape.size() == 2, "T output must have 2 dimensions.");
+  NVTE_CHECK(input.data.shape == cast_output->data.shape,
+             "Input and C output must have the same shape.");
+  const size_t row_length = input.data.shape[1];
+  const size_t num_rows = input.data.shape[0];
 
-  NVTE_CHECK(cast_output->dtype == transposed_output->dtype,
-        "Both C and T outputs need to have the same type.");
+  NVTE_CHECK(transposed_output->data.shape[0] == row_length, "Wrong dimension of T output.");
+  NVTE_CHECK(transposed_output->data.shape[1] == num_rows, "Wrong dimension of T output.");
 
-  NVTE_CHECK(amax->shape == std::vector<size_t>{ 1 }, "AMAX tensor must have 1 element.");
-  NVTE_CHECK(amax->dtype == DType::kFloat32, "AMAX tensor must have Float32 type.");
-  NVTE_CHECK(scale_inv->shape == std::vector<size_t>{ 1 },
-                                                    "scale_inv tensor must have 1 element.");
-  NVTE_CHECK(scale_inv->dtype == DType::kFloat32, "scale_inv tensor must have Float32 type.");
-  NVTE_CHECK(scale.shape == std::vector<size_t>{ 1 }, "Scale tensor must have 1 element.");
-  NVTE_CHECK(scale.dtype == DType::kFloat32, "Scale tensor must have Float32 type.");
+  NVTE_CHECK(cast_output->data.dtype == transposed_output->data.dtype,
+             "C and T outputs need to have the same type.");
+  NVTE_CHECK(cast_output->amax.dptr == transposed_output->amax.dptr,
+             "C and T outputs need to share amax tensor.");
+  NVTE_CHECK(cast_output->scale.dptr == transposed_output->scale.dptr,
+             "C and T outputs need to share scale tensor.");
 
-  NVTE_CHECK(input.dptr != nullptr, "Input is not allocated.");
-  NVTE_CHECK(scale.dptr != nullptr, "Scale is not allocated.");
-  NVTE_CHECK(transposed_output->dptr != nullptr, "T output is not allocated.");
-  NVTE_CHECK(cast_output->dptr != nullptr, "C output is not allocated.");
-  NVTE_CHECK(amax->dptr != nullptr, "AMAX output is not allocated.");
-  NVTE_CHECK(scale_inv->dptr != nullptr, "scale_inv output is not allocated.");
+// Launch specific cast-transpose kernel
+#ifndef __HIP_PLATFORM_HCC__
+#define LAUNCH_KERNEL(kernel, nvec_in, nvec_out, n_tiles, n_blocks, InputType, OutputType) \
+  do {                                                                  \
+    cudaFuncSetAttribute(kernel<nvec_in, nvec_out, fp32, InputType, OutputType>, \
+                         cudaFuncAttributePreferredSharedMemoryCarveout, \
+                         100);                                          \
+    kernel<nvec_in, nvec_out, fp32, InputType, OutputType>              \
+      <<<n_blocks,                                                      \
+         cast_transpose_num_threads,                                    \
+         cast_transpose_num_threads / n_warps_per_tile *                \
+         (THREADS_PER_WARP + 1) * sizeof(Vec<OutputType, nvec_out>),    \
+         stream>>>(                                                     \
+          reinterpret_cast<const InputType *>(input.data.dptr),         \
+          reinterpret_cast<OutputType *>(cast_output->data.dptr),       \
+          reinterpret_cast<OutputType *>(transposed_output->data.dptr), \
+          reinterpret_cast<const fp32 *>(cast_output->scale.dptr),      \
+          reinterpret_cast<fp32 *>(cast_output->amax.dptr),             \
+          row_length, num_rows, n_tiles);                               \
+  } while (false)
+#else
+#define LAUNCH_KERNEL(kernel, nvec_in, nvec_out, n_tiles, n_blocks, InputType, OutputType) \
+  do {                                                                  \
+    kernel<nvec_in, nvec_out, fp32, InputType, OutputType>              \
+      <<<n_blocks,                                                      \
+         cast_transpose_num_threads,                                    \
+         cast_transpose_num_threads / n_warps_per_tile *                \
+         (THREADS_PER_WARP + 1) * sizeof(Vec<OutputType, nvec_out>),    \
+         stream>>>(                                                     \
+          reinterpret_cast<const InputType *>(input.data.dptr),         \
+          reinterpret_cast<OutputType *>(cast_output->data.dptr),       \
+          reinterpret_cast<OutputType *>(transposed_output->data.dptr), \
+          reinterpret_cast<const fp32 *>(cast_output->scale.dptr),      \
+          reinterpret_cast<fp32 *>(cast_output->amax.dptr),             \
+          row_length, num_rows, n_tiles);                               \
+  } while (false)
+#endif //#ifndef __HIP_PLATFORM_HCC__
 
-  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(input.dtype, InputType,
-    TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(cast_output->dtype, OutputType,
-      constexpr int itype_size = sizeof(InputType);
-      constexpr int otype_size = sizeof(OutputType);
-      constexpr int nvec_in = desired_load_size / itype_size;
-      constexpr int nvec_out = desired_store_size / otype_size;
+// Launch cast-transpose kernel for given vector sizes
+#define LAUNCH_KERNEL_VEC_SIZES(load_size, store_size, InputType, OutputType) \
+  do {                                                                  \
+    constexpr int nvec_in = load_size / sizeof(InputType);              \
+    constexpr int nvec_out = store_size / sizeof(OutputType);           \
+                                                                        \
+    NVTE_CHECK(row_length % nvec_in  == 0, "Unsupported shape.");       \
+    NVTE_CHECK(num_rows   % nvec_out == 0, "Unsupported shape.");       \
+                                                                        \
+    const size_t n_tiles = get_n_tiles(load_size, store_size);          \
+    const size_t n_blocks = get_n_blocks(n_tiles);                      \
+                                                                        \
+    const bool full_tile = row_length % (nvec_in * THREADS_PER_WARP) == 0 && \
+                           num_rows % (nvec_out * THREADS_PER_WARP) == 0; \
+                                                                        \
+    if (full_tile) {                                                    \
+      LAUNCH_KERNEL(cast_transpose_kernel,                              \
+                    nvec_in, nvec_out, n_tiles, n_blocks,               \
+                    InputType, OutputType);                             \
+    } else {                                                            \
+      LAUNCH_KERNEL(cast_transpose_kernel_notaligned,                   \
+                    nvec_in, nvec_out, n_tiles, n_blocks,               \
+                    InputType, OutputType);                             \
+    }                                                                   \
+  } while (false)
 
-      NVTE_CHECK(row_length % nvec_in  == 0, "Unsupported shape.");
-      NVTE_CHECK(num_rows   % nvec_out == 0, "Unsupported shape.");
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(input.data.dtype, InputType,
+    TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(cast_output->data.dtype, OutputType,
 
-      const size_t n_tiles = DIVUP(row_length, static_cast<size_t>(nvec_in * THREADS_PER_WARP)) *
-                             DIVUP(num_rows, static_cast<size_t>(nvec_out * THREADS_PER_WARP));
-      const size_t n_warps_per_block = cast_transpose_num_threads / THREADS_PER_WARP;
-      const size_t n_blocks = DIVUP(n_tiles * n_warps_per_tile, n_warps_per_block);
+      // Estimate number of SMs
+      // Note: H100 has 132 SMs, A100 has 108 SMs.
+      // Note: Directly querying number of SMs with cudaGetDeviceProperties is
+      // slow (>1 ms). Consider querying once and caching.
+      const int n_sms = 128;
 
-      const bool full_tile = row_length % (nvec_in * THREADS_PER_WARP) == 0 &&
-                             num_rows % (nvec_out * THREADS_PER_WARP) == 0;
+      // Helper functions to get kernel configuration
+      auto get_n_tiles = [=] (size_t load_size, size_t store_size) -> int {
+        constexpr size_t threads_per_warp = static_cast<size_t>(THREADS_PER_WARP);
+        size_t nvec_in = load_size / sizeof(InputType);
+        size_t nvec_out = store_size / sizeof(OutputType);
+        size_t n_tiles = DIVUP(row_length, nvec_in * threads_per_warp) *
+                         DIVUP(num_rows, nvec_out * threads_per_warp);
+        return n_tiles;
+      };
+      auto get_n_blocks = [=] (size_t n_tiles) -> int {
+        size_t n_warps_per_block = cast_transpose_num_threads / THREADS_PER_WARP;
+        size_t n_blocks = DIVUP(n_tiles * n_warps_per_tile, n_warps_per_block);
+        return n_blocks;
+      };
 
-      if (full_tile) {
-        #ifndef __HIP_PLATFORM_HCC__
-        cudaFuncSetAttribute(cast_transpose_kernel<nvec_in, nvec_out, fp32,
-                                                   InputType, OutputType>,
-                             cudaFuncAttributePreferredSharedMemoryCarveout,
-                             100);
-        #endif
-        cast_transpose_kernel<nvec_in, nvec_out, fp32, InputType, OutputType>
-            <<<n_blocks,
-               cast_transpose_num_threads,
-               cast_transpose_num_threads / n_warps_per_tile *
-               (THREADS_PER_WARP + 1) * sizeof(Vec<OutputType, nvec_out>),
-               stream>>>(
-                reinterpret_cast<const InputType *>(input.dptr),
-                reinterpret_cast<OutputType *>(cast_output->dptr),
-                reinterpret_cast<OutputType *>(transposed_output->dptr),
-                reinterpret_cast<const fp32 *>(scale.dptr),
-                reinterpret_cast<fp32 *>(amax->dptr),
-                reinterpret_cast<fp32 *>(scale_inv->dptr),
-                row_length, num_rows, n_tiles);
+      // Estimate optimal vector sizes and run
+      // Note: Consider reducing to 2B or 1B loads/stores for
+      // sufficiently small matrices. Need to consider whether reduced
+      // cache efficiency is worth increased SM utilization. Also need
+      // to keep in mind whether datatype can fit.
+      const size_t estimated_n_tiles = get_n_tiles(8, 8);
+      const size_t estimated_n_blocks = get_n_blocks(estimated_n_tiles);
+      if (estimated_n_blocks >= n_sms) {
+        LAUNCH_KERNEL_VEC_SIZES(8, 8, InputType, OutputType);
       } else {
-        #ifndef __HIP_PLATFORM_HCC__
-        cudaFuncSetAttribute(cast_transpose_kernel_notaligned<nvec_in, nvec_out, fp32,
-                                                              InputType, OutputType>,
-                             cudaFuncAttributePreferredSharedMemoryCarveout,
-                             100);
-        #endif
-        cast_transpose_kernel_notaligned<nvec_in, nvec_out, fp32, InputType, OutputType>
-            <<<n_blocks,
-               cast_transpose_num_threads,
-               cast_transpose_num_threads / n_warps_per_tile *
-               (THREADS_PER_WARP + 1) * sizeof(Vec<OutputType, nvec_out>),
-               stream>>>(
-                reinterpret_cast<const InputType *>(input.dptr),
-                reinterpret_cast<OutputType *>(cast_output->dptr),
-                reinterpret_cast<OutputType *>(transposed_output->dptr),
-                reinterpret_cast<const fp32 *>(scale.dptr),
-                reinterpret_cast<fp32 *>(amax->dptr),
-                reinterpret_cast<fp32 *>(scale_inv->dptr),
-                row_length, num_rows, n_tiles);
+        LAUNCH_KERNEL_VEC_SIZES(4, 4, InputType, OutputType);
       }
+
     );  // NOLINT(*)
   );  // NOLINT(*)
+
+#undef LAUNCH_KERNEL
+#undef LAUNCH_KERNEL_VEC_SIZES
 }
 
 }  // namespace transformer_engine
 
 void nvte_cast_transpose(const NVTETensor input,
-                         const NVTETensor scale,
                          NVTETensor cast_output,
                          NVTETensor transposed_output,
-                         NVTETensor amax,
-                         NVTETensor scale_inv,
                          cudaStream_t stream) {
+  NVTE_API_CALL(nvte_cast_transpose);
   using namespace transformer_engine;
   cast_transpose(*reinterpret_cast<const Tensor*>(input),
-                 *reinterpret_cast<const Tensor*>(scale),
                  reinterpret_cast<Tensor*>(cast_output),
                  reinterpret_cast<Tensor*>(transposed_output),
-                 reinterpret_cast<Tensor*>(amax),
-                 reinterpret_cast<Tensor*>(scale_inv),
                  stream);
 }

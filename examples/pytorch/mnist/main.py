@@ -1,4 +1,4 @@
-# Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -71,6 +71,17 @@ def train(args, model, device, train_loader, optimizer, epoch, use_amp, use_fp8)
             if args.dry_run:
                 break
 
+
+def calibrate(model, device, test_loader, fp8):
+    """Calibration function."""
+    model.eval()
+    test_loss = 0
+    correct = 0
+    with torch.no_grad():
+        for data, target in test_loader:
+            data, target = data.to(device), target.to(device)
+            with te.fp8_autocast(enabled=fp8, calibrating=True):
+                output = model(data)
 
 def test(model, device, test_loader, use_amp, use_fp8):
     """Testing function."""
@@ -167,7 +178,10 @@ def main():
         "--use-amp", action="store_true", default=False, help="Use AMP training"
     )
     parser.add_argument(
-        "--use-fp8", action="store_true", default=False, help="Use FP8 training"
+        "--use-fp8", action="store_true", default=False, help="Use FP8 for inference and training without recalibration"
+    )
+    parser.add_argument(
+        "--use-fp8-infer", action="store_true", default=False, help="Use FP8 inference only"
     )
     parser.add_argument(
         "--use-te", action="store_true", default=False, help="Use Transformer Engine"
@@ -178,8 +192,9 @@ def main():
     if args.use_amp:
         assert use_cuda, "CUDA needed for AMP execution. And use_fp8 is set OFF"
         args.use_fp8 = False
+        args.use_fp8_infer = False
 
-    if args.use_fp8:
+    if args.use_fp8 or args.use_fp8_infer:
         assert use_cuda, "CUDA needed for FP8 execution."
         args.use_te = True
 
@@ -211,8 +226,15 @@ def main():
         test(model, device, test_loader, args.use_amp, args.use_fp8)
         scheduler.step()
 
-    if args.save_model:
+    if args.use_fp8_infer and not args.use_fp8:
+        calibrate(model, device, test_loader, args.use_fp8)
+
+    if args.save_model or args.use_fp8_infer:
         torch.save(model.state_dict(), "mnist_cnn.pt")
+        print('Eval with reloaded checkpoint : fp8='+str(args.use_fp8_infer))
+        weights = torch.load("mnist_cnn.pt")
+        model.load_state_dict(weights)
+        test(model, device, test_loader, args.use_fp8_infer)
 
 
 if __name__ == "__main__":

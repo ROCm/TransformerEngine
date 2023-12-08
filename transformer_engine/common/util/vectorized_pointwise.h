@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -185,7 +185,6 @@ __launch_bounds__(unary_kernel_threads)
 __global__ void unary_kernel(const InputType *input,
                              OutputType *output,
                              const ComputeType *scale,
-                             ComputeType *scale_inv,
                              ComputeType *amax,
                              Param p,
                              const size_t N,
@@ -196,9 +195,6 @@ __global__ void unary_kernel(const InputType *input,
   ComputeType s = 0;
   if constexpr (is_fp8<OutputType>::value) {
       if (scale != nullptr) s = *scale;
-      if (blockIdx.x == 0 && threadIdx.x == 0 && scale_inv != nullptr) {
-        reciprocal<ComputeType>(scale_inv, s);
-      }
   }
   const int warp_id = threadIdx.x / THREADS_PER_WARP;
 
@@ -212,6 +208,66 @@ __global__ void unary_kernel(const InputType *input,
     for (int i = 0; i < nvec; ++i) {
       const ComputeType val = static_cast<ComputeType>(loader.separate()[i]);
       ComputeType temp = OP(val, p);
+      if constexpr (is_fp8<OutputType>::value) {
+        __builtin_assume(max >= 0);
+        max = fmaxf(fabsf(temp), max);
+
+        temp = temp * s;
+      }
+
+      storer.separate()[i] = static_cast<OutputType>(temp);
+    }
+    storer.store(tid, N);
+  }
+  if constexpr (is_fp8<OutputType>::value) {
+    /* warp tile amax reduce*/
+    max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
+
+    if (threadIdx.x == 0 && amax != nullptr) {
+        static_assert(std::is_same<ComputeType, float>::value);
+        atomicMaxFloat(amax, max);
+    }
+  }
+}
+
+template <int nvec, bool aligned,
+          typename ComputeType,
+          typename Param,
+          ComputeType (*OP)(ComputeType, const Param&),
+          typename InputType,
+          typename InputTypeGrad,
+          typename OutputType>
+__launch_bounds__(unary_kernel_threads)
+__global__ void unary_grad_kernel(const InputTypeGrad *grad,
+                                  const InputType *input,
+                                  OutputType *output,
+                                  const ComputeType *scale,
+                                  ComputeType *amax,
+                                  Param p,
+                                  const size_t N,
+                                  const size_t num_aligned_elements) {
+  VectorizedLoader<InputType, nvec, aligned> loader(input, N);
+  VectorizedLoader<InputTypeGrad, nvec, aligned> grad_loader(grad, N);
+  VectorizedStorer<OutputType, nvec, aligned> storer(output, N);
+  ComputeType max = 0;
+  ComputeType s = 0;
+  if constexpr (is_fp8<OutputType>::value) {
+      if (scale != nullptr) s = *scale;
+  }
+  const int warp_id = threadIdx.x / THREADS_PER_WARP;
+
+  const size_t M = num_aligned_elements;
+
+  for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+       tid < M;
+       tid += gridDim.x * blockDim.x) {
+    loader.load(tid, N);
+    grad_loader.load(tid, N);
+#pragma unroll
+    for (int i = 0; i < nvec; ++i) {
+      const ComputeType val = static_cast<ComputeType>(loader.separate()[i]);
+      const ComputeType g = static_cast<ComputeType>(grad_loader.separate()[i]);
+      ComputeType temp = OP(val, p) * g;
       if constexpr (is_fp8<OutputType>::value) {
         __builtin_assume(max >= 0);
         max = fmaxf(fabsf(temp), max);
@@ -258,40 +314,28 @@ inline int CalcAlignment(const void *ptr, const int size) {
    \param lead_dim Leading dimension of the tensors.
    \param other_dim The size of the other dimensions of the tensors.
    \param nvec Length of the vector.
-   \param inputs Inputs to the operator.
-   \param outputs Outputs of the operator.
+   \param ptrs Inputs and Outputs to the operator.
 */
-template <typename InputType, typename OutputType>
+template <typename... T>
 Alignment CheckAlignment(const size_t lead_dim,
                          const int nvec,
-                         const InputType *input,
-                         const OutputType *output) {
-  int align = -1;
+                         const T... ptrs
+                        ) {
+  std::vector<int> alignments;
+  alignments.reserve(sizeof...(T));
 
-  if (input != nullptr) {
-    int new_align = CalcAlignment(input, sizeof(InputType) * nvec);
-    if (align == -1) {
-      align = new_align;
-    } else {
-      if (align != new_align) {
-        return Alignment::DIFFERENT;
-      }
-    }
+  // calculate the alignments of all ptrs and store them into alignments
+  (..., alignments.push_back(CalcAlignment(ptrs, sizeof(*ptrs) * nvec)));
+
+  bool all_same = std::all_of(alignments.cbegin(), alignments.cend(),
+    [alignments](int val) {return val == alignments.front();});
+  if (!all_same) {
+    return Alignment::DIFFERENT;
   }
 
-  if (output != nullptr) {
-    int new_align = CalcAlignment(output, sizeof(OutputType) * nvec);
-    if (align == -1) {
-      align = new_align;
-    } else {
-      if (align != new_align) {
-        return Alignment::DIFFERENT;
-      }
-    }
-  }
-
-  if ((align == 0) &&
-      (lead_dim % nvec == 0)) {
+  if (alignments.front() == 0 &&
+      lead_dim % nvec == 0) {
+    // all alignment are 0
     return Alignment::SAME_ALIGNED;
   } else {
     return Alignment::SAME_UNALIGNED;
@@ -301,13 +345,12 @@ Alignment CheckAlignment(const size_t lead_dim,
 }  // namespace
 
 template <int nvec, typename Param,
-          fp32 (*OP)(fp32, const Param&),
+          fp32 (*OP)(const fp32, const Param&),
           typename InputType,
           typename OutputType>
 void VectorizedUnaryKernelLauncher(const InputType *input,
                                    OutputType *output,
                                    const fp32 *scale,
-                                   fp32 *scale_inv,
                                    fp32 *amax,
                                    const size_t N,
                                    const Param params,
@@ -325,16 +368,249 @@ void VectorizedUnaryKernelLauncher(const InputType *input,
     switch (align) {
       case Alignment::SAME_ALIGNED:
         unary_kernel<nvec, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
-            input, output, scale, scale_inv, amax, params, N, num_aligned_elements);
+            input, output, scale, amax, params, N, num_aligned_elements);
         break;
       case Alignment::SAME_UNALIGNED:
         unary_kernel<nvec, false, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
-            input, output, scale, scale_inv, amax, params, N, num_aligned_elements);
+            input, output, scale, amax, params, N, num_aligned_elements);
         break;
       case Alignment::DIFFERENT: {
         // If the pointers are aligned differently we cannot vectorize
         unary_kernel<1, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
-            input, output, scale, scale_inv, amax, params, N, N);
+            input, output, scale, amax, params, N, N);
+        break;
+      }
+    }
+  }
+}
+
+template <int nvec, typename Param,
+          fp32 (*OP)(fp32, const Param&),
+          typename InputType,
+          typename InputTypeGrad,
+          typename OutputType>
+void VectorizedUnaryGradKernelLauncher(const InputTypeGrad *grad,
+                                       const InputType *input,
+                                       OutputType *output,
+                                       const fp32 *scale,
+                                       fp32 *amax,
+                                       const size_t N,
+                                       const Param params,
+                                       cudaStream_t stream) {
+  if (N != 0) {
+    auto align = CheckAlignment(N, nvec, input, grad, output);
+
+    size_t num_aligned_elements = get_num_aligned_elements(input, N, nvec,
+                                                           sizeof(InputType));
+    constexpr size_t threads = unary_kernel_threads;
+    size_t num_blocks = DIVUP(num_aligned_elements, threads);
+    constexpr size_t max_blocks = 65535;
+    num_blocks = std::min(num_blocks, max_blocks);
+
+    switch (align) {
+      case Alignment::SAME_ALIGNED:
+        unary_grad_kernel<nvec, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
+            grad, input, output, scale, amax, params, N, num_aligned_elements);
+        break;
+      case Alignment::SAME_UNALIGNED:
+        unary_grad_kernel<nvec, false, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
+            grad, input, output, scale, amax, params, N, num_aligned_elements);
+        break;
+      case Alignment::DIFFERENT: {
+        // If the pointers are aligned differently we cannot vectorize
+        unary_grad_kernel<1, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
+            grad, input, output, scale, amax, params, N, N);
+        break;
+      }
+    }
+  }
+}
+
+template <int nvec, bool aligned,
+          typename ComputeType,
+          typename Param,
+          ComputeType (*Activation)(const ComputeType, const Param&),
+          typename InputType,
+          typename OutputType>
+__launch_bounds__(unary_kernel_threads)
+__global__ void gated_act_kernel(const InputType *input,
+                                 OutputType *output,
+                                 const ComputeType *scale,
+                                 ComputeType *amax,
+                                 const size_t m,
+                                 const size_t n,
+                                 const Param p,
+                                 const size_t num_aligned_elements) {
+  const size_t M = num_aligned_elements * m;
+  for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+      tid < M;
+      tid += gridDim.x * blockDim.x) {
+    const size_t id_x = tid % num_aligned_elements;
+    const size_t id_y = tid / num_aligned_elements;
+    VectorizedLoader<InputType, nvec, aligned> loader0(input + id_y * n * 2, n);
+    VectorizedLoader<InputType, nvec, aligned> loader1(input + id_y * n * 2 + n, n);
+    VectorizedStorer<OutputType, nvec, aligned> storer(output + id_y * n, n);
+    ComputeType max = 0;
+    ComputeType s = 0;
+    if constexpr (is_fp8<OutputType>::value) {
+        if (scale != nullptr) s = *scale;
+    }
+    const int warp_id = threadIdx.x / THREADS_PER_WARP;
+
+    loader0.load(id_x, n);
+    loader1.load(id_x, n);
+#pragma unroll
+    for (int i = 0; i < nvec; ++i) {
+      const ComputeType val = static_cast<ComputeType>(loader0.separate()[i]);
+      const ComputeType val2 = static_cast<ComputeType>(loader1.separate()[i]);
+      ComputeType temp = static_cast<ComputeType>(Activation(val, p) * val2);
+      if constexpr (is_fp8<OutputType>::value) {
+        __builtin_assume(max >= 0);
+        max = fmaxf(fabsf(temp), max);
+        temp = temp * s;
+      }
+      storer.separate()[i] = static_cast<OutputType>(static_cast<ComputeType>(temp));
+    }
+    storer.store(id_x, n);
+
+    if constexpr (is_fp8<OutputType>::value) {
+      /* warp tile amax reduce*/
+      max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
+
+      if (threadIdx.x == 0 && amax != nullptr) {
+          static_assert(std::is_same<ComputeType, float>::value);
+          atomicMaxFloat(amax, max);
+      }
+    }
+  }
+}
+
+template <int nvec,
+          typename ComputeType,
+          typename Param,
+          ComputeType (*Activation)(const ComputeType, const Param&),
+          typename InputType,
+          typename OutputType>
+void GatedActivationKernelLauncher(const InputType *input,
+                                   OutputType *output,
+                                   const fp32 *scale,
+                                   fp32 *amax,
+                                   const size_t m,
+                                   const size_t n,
+                                   const Param &p,
+                                   cudaStream_t stream) {
+  if (m != 0 && n != 0) {
+    size_t num_aligned_elements = get_num_aligned_elements(input, n, nvec, sizeof(InputType));
+    constexpr size_t threads = unary_kernel_threads;
+    size_t num_blocks = DIVUP(num_aligned_elements * m, threads);
+    constexpr size_t max_blocks = 65535;
+    num_blocks = std::min(num_blocks, max_blocks);
+
+    switch (auto align = CheckAlignment(n, nvec, input, input + n, output)) {
+      case Alignment::SAME_ALIGNED:
+        gated_act_kernel<nvec, true, ComputeType, Param, Activation>
+                        <<<num_blocks, threads, 0, stream>>>(
+                        input, output, scale, amax, m, n, p, num_aligned_elements);
+        break;
+      case Alignment::SAME_UNALIGNED:
+        gated_act_kernel<nvec, false, ComputeType, Param, Activation>
+                        <<<num_blocks, threads, 0, stream>>>(
+                        input, output, scale, amax, m, n, p, num_aligned_elements);
+        break;
+      case Alignment::DIFFERENT: {
+        // If the pointers are aligned differently we cannot vectorize
+        gated_act_kernel<1, true, ComputeType, Param, Activation>
+                        <<<num_blocks, threads, 0, stream>>>(
+                        input, output, scale, amax, m, n, p, n);
+        break;
+      }
+    }
+  }
+}
+
+template <int nvec, bool aligned,
+          typename ComputeType,
+          typename Param,
+          ComputeType (*Activation)(const ComputeType, const Param&),
+          ComputeType (*Dactivation)(const ComputeType, const Param&),
+          typename InputType,
+          typename OutputType>
+__launch_bounds__(unary_kernel_threads)
+__global__ void dgated_act_kernel(const InputType *grad,
+                                  const InputType *input,
+                                  OutputType *output,
+                                  const size_t m,
+                                  const size_t n,
+                                  const Param p,
+                                  const size_t num_aligned_elements) {
+  const size_t M = num_aligned_elements * m;
+  for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+      tid < M;
+      tid += gridDim.x * blockDim.x) {
+    const size_t id_x = tid % num_aligned_elements;
+    const size_t id_y = tid / num_aligned_elements;
+    VectorizedLoader<InputType, nvec, aligned> grad_loader(grad + id_y * n, n);
+    VectorizedLoader<InputType, nvec, aligned> input_loader0(input + id_y * n * 2, n);
+    VectorizedLoader<InputType, nvec, aligned> input_loader1(input + id_y * n * 2 + n, n);
+    VectorizedStorer<OutputType, nvec, aligned> storer0(output + id_y * n * 2, n);
+    VectorizedStorer<OutputType, nvec, aligned> storer1(output + id_y * n * 2 + n, n);
+
+    grad_loader.load(id_x, n);
+    input_loader0.load(id_x, n);
+    input_loader1.load(id_x, n);
+
+#pragma unroll
+    for (int i = 0; i < nvec; ++i) {
+      const ComputeType grad_val = static_cast<ComputeType>(grad_loader.separate()[i]);
+      const ComputeType gelu_in = static_cast<ComputeType>(input_loader0.separate()[i]);
+      const ComputeType gate_in = static_cast<ComputeType>(input_loader1.separate()[i]);
+
+      ComputeType after_dgelu = Dactivation(gelu_in, p) * grad_val * gate_in;
+      ComputeType after_dgate = grad_val * Activation(gelu_in, p);
+
+      storer0.separate()[i] = static_cast<OutputType>(after_dgelu);
+      storer1.separate()[i] = static_cast<OutputType>(after_dgate);
+    }
+    storer0.store(id_x, n);
+    storer1.store(id_x, n);
+  }
+}
+
+template <int nvec,
+          typename ComputeType,
+          typename Param,
+          ComputeType (*Activation)(const ComputeType, const Param&),
+          ComputeType (*Dactivation)(const ComputeType, const Param&),
+          typename InputType,
+          typename OutputType>
+void DGatedActivationKernelLauncher(const InputType *grad,
+                                    const InputType *input,
+                                    OutputType *output,
+                                    const size_t m,
+                                    const size_t n,
+                                    const Param &p,
+                                    cudaStream_t stream) {
+  if (m != 0 && n != 0) {
+    size_t num_aligned_elements = get_num_aligned_elements(grad, n, nvec,
+                                                           sizeof(InputType));
+    constexpr size_t threads = unary_kernel_threads;
+    size_t num_blocks = DIVUP(num_aligned_elements * m, threads);
+    constexpr size_t max_blocks = 65535;
+    num_blocks = std::min(num_blocks, max_blocks);
+
+    switch (auto align = CheckAlignment(n, nvec, input, input + n, output, output + n)) {
+      case Alignment::SAME_ALIGNED:
+        dgated_act_kernel<nvec, true, ComputeType, Param, Activation, Dactivation>
+          <<<num_blocks, threads, 0, stream>>>(grad, input, output, m, n, p, num_aligned_elements);
+        break;
+      case Alignment::SAME_UNALIGNED:
+        dgated_act_kernel<nvec, false, ComputeType, Param, Activation, Dactivation>
+          <<<num_blocks, threads, 0, stream>>>(grad, input, output, m, n, p, num_aligned_elements);
+        break;
+      case Alignment::DIFFERENT: {
+        // If the pointers are aligned differently we cannot vectorize
+        dgated_act_kernel<1, true, ComputeType, Param, Activation, Dactivation>
+          <<<num_blocks, threads, 0, stream>>>(grad, input, output, m, n, p, n);
         break;
       }
     }

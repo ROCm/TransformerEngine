@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -45,7 +45,7 @@ void performTest(const size_t N, const size_t H) {
 
   std::unique_ptr<Type[]> ref_output = std::make_unique<Type[]>(N * H);
 
-  fillUniform(input);
+  fillUniform(&input);
 
   nvte_transpose(input.data(), output.data(), 0);
 
@@ -64,7 +64,10 @@ std::vector<std::pair<size_t, size_t>> test_cases = {{2048, 12288},
                                                      {65536, 128},
                                                      {256, 256},
                                                      {120, 2080},
-                                                     {8, 8}};
+                                                     {8, 8},
+                                                     {1223, 1583}, // Primes 200, 250
+                                                     {1, 541},     // Prime 100
+                                                     {1987, 1}};   // Prime 300
 }  // namespace
 
 class TTestSuite : public ::testing::TestWithParam<std::tuple<transformer_engine::DType,

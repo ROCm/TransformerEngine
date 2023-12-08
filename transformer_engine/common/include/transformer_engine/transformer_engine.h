@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -24,11 +24,12 @@ extern "C" {
 enum NVTEDType {
     kNVTEByte       = 0,  /*!< Byte */
     kNVTEInt32      = 1,  /*!< 32-bit integer */
-    kNVTEFloat32    = 2,  /*!< 32-bit float */
-    kNVTEFloat16    = 3,  /*!< 16-bit float (E5M10) */
-    kNVTEBFloat16   = 4,  /*!< 16-bit bfloat (E8M7) */
-    kNVTEFloat8E4M3 = 5,  /*!< 8-bit float (E4M3) */
-    kNVTEFloat8E5M2 = 6,  /*!< 8-bit float (E5M2) */
+    kNVTEInt64      = 2,  /*!< 32-bit integer */
+    kNVTEFloat32    = 3,  /*!< 32-bit float */
+    kNVTEFloat16    = 4,  /*!< 16-bit float (E5M10) */
+    kNVTEBFloat16   = 5,  /*!< 16-bit bfloat (E8M7) */
+    kNVTEFloat8E4M3 = 6,  /*!< 8-bit float (E4M3) */
+    kNVTEFloat8E5M2 = 7,  /*!< 8-bit float (E5M2) */
     kNVTENumTypes         /*!< Number of supported types */
 };
 
@@ -56,15 +57,21 @@ typedef void* NVTETensor;
  * TE tensors are just wrappers on top of raw data and do not
  * own memory.
  *
- *  \param[in] dptr  Pointer to the tensor data.
- *  \param[in] shape Shape of the tensor.
- *  \param[in] dtype Data type of the tensor.
+ *  \param[in] dptr            Pointer to the tensor data.
+ *  \param[in] shape           Shape of the tensor.
+ *  \param[in] dtype           Data type of the tensor.
+ *  \param[in] amax_dptr       Pointer to the AMAX value.
+ *  \param[in] scale_dptr      Pointer to the scale value.
+ *  \param[in] scale_inv_dptr  Pointer to the inverse of scale value.
  *
  *  \return A new TE tensor.
  */
 NVTETensor nvte_create_tensor(void *dptr,
                               const NVTEShape shape,
-                              const NVTEDType dtype);
+                              const NVTEDType dtype,
+                              float *amax_dptr,
+                              float *scale_dptr,
+                              float *scale_inv_dptr);
 
 /*! \brief Destroy a TE tensor.
  *
@@ -99,6 +106,49 @@ NVTEShape nvte_tensor_shape(const NVTETensor tensor);
  */
 void *nvte_tensor_data(const NVTETensor tensor);
 
+/*! \brief Get a pointer to the tensor's amax data.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return A pointer to tensor's amax data.
+ */
+float *nvte_tensor_amax(const NVTETensor tensor);
+
+/*! \brief Get a pointer to the tensor's scale data.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return A pointer to tensor's scale data.
+ */
+float *nvte_tensor_scale(const NVTETensor tensor);
+
+/*! \brief Get a pointer to the tensor's inverse of scale data.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return A pointer to tensor's inverse of scale data.
+ */
+float *nvte_tensor_scale_inv(const NVTETensor tensor);
+
+/*! \struct NVTETensorPack
+    \brief Pack of tensors, generally used for auxiliary outputs.
+ */
+struct NVTETensorPack {
+  /*! Max number of tensors in the pack. Assumed <= 10. */
+  static const int MAX_SIZE = 10;
+  /*! Wrappers of tensors. They do not hold the associated memory. */
+  NVTETensor tensors[MAX_SIZE];
+  /*! Actual number of tensors in the pack, 0 <= size <= MAX_SIZE. */
+  size_t size = 0;
+};
+
+/*! \brief Create `tensors` in NVTETensorPack.
+ */
+void nvte_tensor_pack_create(NVTETensorPack* pack);
+
+/*! \brief Destroy `tensors` in NVTETensorPack.
+ */
+void nvte_tensor_pack_destroy(NVTETensorPack* pack);
 
 #ifdef __cplusplus
 }  // extern "C"
@@ -116,11 +166,12 @@ namespace transformer_engine {
 enum class DType {
   kByte       = 0,
   kInt32      = 1,
-  kFloat32    = 2,
-  kFloat16    = 3,
-  kBFloat16   = 4,
-  kFloat8E4M3 = 5,
-  kFloat8E5M2 = 6,
+  kInt64      = 2,
+  kFloat32    = 3,
+  kFloat16    = 4,
+  kBFloat16   = 5,
+  kFloat8E4M3 = 6,
+  kFloat8E5M2 = 7,
   kNumTypes
 };
 
@@ -138,9 +189,15 @@ class TensorWrapper {
    *  \param[in] dptr  Pointer to the tensor data.
    *  \param[in] shape Shape of the tensor.
    *  \param[in] dtype Data type of the tensor.
+   *  \param[in] amax_dptr       Pointer to the AMAX value.
+   *  \param[in] scale_dptr      Pointer to the scale value.
+   *  \param[in] scale_inv_dptr  Pointer to the inverse of scale value.
    */
-  TensorWrapper(void *dptr, const NVTEShape &shape, const DType dtype) :
-    tensor_(nvte_create_tensor(dptr, shape, static_cast<NVTEDType>(dtype))) {}
+  TensorWrapper(void *dptr, const NVTEShape &shape, const DType dtype,
+                float *amax_dptr = nullptr, float *scale_dptr = nullptr,
+                float *scale_inv_dptr = nullptr) :
+    tensor_(nvte_create_tensor(dptr, shape, static_cast<NVTEDType>(dtype),
+                               amax_dptr, scale_dptr, scale_inv_dptr)) {}
 
   /*! \brief Constructs new TensorWrapper.
    *
@@ -151,9 +208,15 @@ class TensorWrapper {
    *  \param[in] dptr  Pointer to the tensor data.
    *  \param[in] shape Shape of the tensor.
    *  \param[in] dtype Data type of the tensor.
+   *  \param[in] amax_dptr       Pointer to the AMAX value.
+   *  \param[in] scale_dptr      Pointer to the scale value.
+   *  \param[in] scale_inv_dptr  Pointer to the inverse of scale value.
    */
-  TensorWrapper(void *dptr, const std::vector<size_t> &shape, const DType dtype) :
-    TensorWrapper(dptr, NVTEShape{shape.data(), shape.size()}, dtype) {}
+  TensorWrapper(void *dptr, const std::vector<size_t> &shape, const DType dtype,
+                float *amax_dptr = nullptr, float *scale_dptr = nullptr,
+                float *scale_inv_dptr = nullptr) :
+    TensorWrapper(dptr, NVTEShape{shape.data(), shape.size()}, dtype,
+                  amax_dptr, scale_dptr, scale_inv_dptr) {}
 
   /*! \brief Constructs new empty TensorWrapper.
    *
@@ -227,6 +290,33 @@ class TensorWrapper {
   void *dptr() const noexcept {
     if (tensor_ == nullptr) return nullptr;
     return nvte_tensor_data(tensor_);
+  }
+
+  /*! \brief Get a pointer to the tensor's amax data.
+   *
+   *  \return A pointer to tensor's amax data.
+   */
+  float *amax() const noexcept {
+    if (tensor_ == nullptr) return nullptr;
+    return nvte_tensor_amax(tensor_);
+  }
+
+  /*! \brief Get a pointer to the tensor's scale data.
+   *
+   *  \return A pointer to tensor's scale data.
+   */
+  float *scale() const noexcept {
+    if (tensor_ == nullptr) return nullptr;
+    return nvte_tensor_scale(tensor_);
+  }
+
+  /*! \brief Get a pointer to the tensor's inverse of scale data.
+   *
+   *  \return A pointer to tensor's inverse of scale data.
+   */
+  float *scale_inv() const noexcept {
+    if (tensor_ == nullptr) return nullptr;
+    return nvte_tensor_scale_inv(tensor_);
   }
 
  private:

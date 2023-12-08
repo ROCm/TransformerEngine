@@ -1,3 +1,8 @@
+/*************************************************************************
+ * Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
+ *
+ * See LICENSE for license information.
+ ************************************************************************/
 //
 //
 //   Implementations
@@ -224,6 +229,12 @@ uint8_t cast_to_f8(T _x, bool stoch, uint32_t rng) {
    
 }
 
+/* RTC does not have std::conditional so implement it here*/
+template<bool B, class T, class F>
+struct conditional { typedef T type; };
+template<class T, class F>
+struct conditional<false, T, F> { typedef F type; };
+
 template <int wm, int we, typename T, bool negative_zero_nan>
 HIP_HOST_DEVICE
 T cast_from_f8(uint8_t x) {
@@ -271,7 +282,7 @@ T cast_from_f8(uint8_t x) {
     if(exponent == ((1<<we)-1))
        return (mantissa == 0) ? (sign ? fNegInf : fInf) : fNaN;
   }
-  typename std::conditional<sizeof(T)==2, uint16_t, uint32_t>::type retval;
+  typename conditional<sizeof(T)==2, uint16_t, uint32_t>::type retval;
   if(we==5 && is_half && !negative_zero_nan) {
      retval = x<<8;
      return reinterpret_cast<const T&>(retval);

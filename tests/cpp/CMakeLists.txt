@@ -1,4 +1,5 @@
-# Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#                    2023 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -58,7 +59,7 @@ add_subdirectory(../../3rdparty/googletest ${PROJECT_BINARY_DIR}/googletest)
 
 enable_testing()
 
-include_directories(${gtest_SOURCE_DIR}/include ${gtest_SOURCE_DIR}) 
+include_directories(${gtest_SOURCE_DIR}/include ${gtest_SOURCE_DIR})
 
 if(NOT DEFINED TE_LIB_PATH)
     execute_process(COMMAND bash -c "pip show transformer-engine | grep Location | cut -d ' ' -f 2 | tr -d '\n'"
@@ -66,6 +67,7 @@ if(NOT DEFINED TE_LIB_PATH)
 endif()
 
 find_library(TE_LIB NAMES transformer_engine PATHS ${TE_LIB_PATH} ENV TE_LIB_PATH REQUIRED)
+
 message(STATUS "Found transformer_engine library: ${TE_LIB}")
 include_directories(../../transformer_engine/common/include)
 include_directories(../../transformer_engine/common)
@@ -74,8 +76,9 @@ include_directories(${CMAKE_SOURCE_DIR})
 if(USE_CUDA)
   find_package(CUDAToolkit REQUIRED)
 else()
-  find_package(hip)
+  find_package(hip REQUIRED)
   find_package(rocblas)
 endif()
 
 add_subdirectory(operator)
+add_subdirectory(util)

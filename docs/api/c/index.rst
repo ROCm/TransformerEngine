@@ -1,5 +1,5 @@
 ..
-    Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
     See LICENSE for license information.
 
@@ -17,6 +17,9 @@ directly from C/C++, without Python.
    activation.h <activation>
    cast.h <cast>
    gemm.h <gemm>
+   fused_attn.h <fused_attn>
    layer_norm.h <layer_norm>
+   rmsnorm.h <rmsnorm>
+   softmax.h <softmax>
    transformer_engine.h <transformer_engine>
    transpose.h <transpose>

@@ -8,3 +8,6 @@
 	path = examples/pytorch/minGPT
 	url = https://github.com/HaiShaw/minGPT.git
 	branch = transformer-engine
+[submodule "3rdparty/cudnn-frontend"]
+	path = 3rdparty/cudnn-frontend
+	url = https://github.com/NVIDIA/cudnn-frontend.git

@@ -8,6 +8,7 @@
 *.nsys-rep
 *.ncu-rep
 *.sqlite
+*.onnx
 .eggs
 build/
 *.so
@@ -15,7 +16,18 @@ build/
 __pycache__
 .ycm_extra_conf.py
 .vimrc
+.vs
+.vscode
+.cache
+.hypothesis
+.devcontainer.json
 tests/cpp/build/
 docs/_build
 .ipynb_checkpoints
 docs/doxygen
+CMakeCache.txt
+CMakeFiles
+build.ninja
+cuda_to_hip_list_tmp_*.txt
+hipify_output_dict_dump.txt
+cmake_install.cmake

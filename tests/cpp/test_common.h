@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -49,6 +49,7 @@ struct BytesToType<8> {
 
 using byte = uint8_t;
 using int32 = int32_t;
+using int64 = int64_t;
 using fp32 = float;
 using fp16 = half;
 #ifndef USE_ROCM
@@ -65,6 +66,7 @@ template <typename T>
 struct TypeInfo{
     using types = std::tuple<byte,
                              int32,
+                             int64,
                              fp32,
                              fp16,
                              bf16,
@@ -141,12 +143,45 @@ class Tensor {
     return reinterpret_cast<T *>(cpu_data_.get());
   }
 
+  float amax() const {
+    if(amax_cpu_data_) {
+      to_cpu();
+      return *amax_cpu_data_;
+    } else {
+      return 0;
+    }
+  }
+
+  float scale() const {
+    if(scale_cpu_data_) {
+      to_cpu();
+      return *scale_cpu_data_;
+    } else {
+      return 1;
+    }
+  }
+
+  float scale_inv() const {
+    if(scale_inv_cpu_data_) {
+      to_cpu();
+      return *scale_inv_cpu_data_;
+    } else {
+      return 1;
+    }
+  }
+
   void to_cpu() const;
   void from_cpu() const;
+  void set_scale(float scale);
+  void set_scale_inv(float scale_inv);
+  void shareFP8Meta(const Tensor &other);
 
  private:
   TensorWrapper tensor_;
   std::unique_ptr<unsigned char[]> cpu_data_;
+  std::shared_ptr<float> amax_cpu_data_;
+  std::shared_ptr<float> scale_cpu_data_;
+  std::shared_ptr<float> scale_inv_cpu_data_;
 };
 
 size_t typeToSize(DType type);
@@ -156,10 +191,13 @@ bool areShapesEqual(const NVTEShape &s1, const NVTEShape &s2);
 
 void compareResults(const std::string &name, const Tensor &test, const void *ref,
                     double atol = 1e-5, double rtol = 1e-8);
+void compareResults(const std::string &name, const float test, const float ref,
+                    double atol = 1e-5, double rtol = 1e-8);
 
 std::pair<double, double> getTolerances(const DType type);
 
-void fillUniform(const Tensor &t);
+void fillUniform(Tensor *t);
+void setRandomScale(Tensor *t);
 
 constexpr int THREADS_PER_WARP = 32;
 
@@ -183,6 +221,12 @@ bool isFp8Type(DType type);
         case DType::kInt32: \
             { \
                 using type = int32; \
+                {__VA_ARGS__} \
+            } \
+        break; \
+        case DType::kInt64: \
+            { \
+                using type = int64; \
                 {__VA_ARGS__} \
             } \
         break; \
