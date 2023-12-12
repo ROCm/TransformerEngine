@@ -1,9 +1,80 @@
 ..
-    Copyright (c) 2023, AMD. All rights reserved.
+    Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
     See LICENSE for license information.
 
 |License|
+
+Transformer Engine On ROCm and AMDGPU
+=====================================
+
+Feature Support Status
+----------------------
+
+* Activation, cast, fused softmax, layernorm, rmsnorm, transpose: fully supported 
+* GEMM: partially supported with following input/output types: (fp32/fp32), (fp16/fp16), (bf16/bf16), (fp8, bf8/fp16, bf16, fp32)
+* Attention (Flash Attention, Fused Multihead Attention): not supported
+* HipGraph, HipTX, HipRTC: partially supported
+
+Installation
+------------
+Execute the following commands to install ROCm Transformer Engine from source on AMDGPUs:
+
+.. code-block:: bash
+
+  # Clone TE repo and submodules
+  git clone --recursive https://github.com/ROCmSoftwarePlatform/TransformerEngine-private.git
+  
+  cd TransformerEngine
+  export NVTE_FRAMEWORK=pytorch #optionally set framework, currently only support pytorch and tensorflow
+  pip install .
+
+
+The default installation above will use rocblas in GEMM computation. The hipBlasLt alternative can be selected by setting the environment variable `NVTE_USE_HIPBLASLT` before the `pip install` as:
+
+.. code-block:: bash
+
+  export NVTE_USE_HIPBLASLT=1
+
+Test
+----
+
+Framework Agnostic C++ library unittests
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+After a successful Transformer Engine installation via `pip install`, execute the following commands to build and test the framework agnostic C++ library:
+
+.. code-block:: bash
+
+  cd tests/cpp
+  cmake .
+  make
+  NVTE_DISABLE_NVRTC=1 make test
+
+In the commands above, env `NVTE_DISABLE_NVRTC=1` can be dropped once HIPRTC is fully supported on AMDGPUs.
+
+Framework Integration pytests
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The following two Pytorch integration pytests are supported: 
+
+.. code-block:: bash
+
+  tests/pytorch/test_sanity.py
+  tests/pytorch/test_numerics.py
+
+Execute the following command to test them after a successfuly installation with Pytorch. 
+
+.. code-block:: bash
+
+  ROCBLAS_STREAM_ORDER_ALLOC=1 NVTE_BIAS_GELU_NVFUSION=0 NVTE_FUSED_ATTN=0 NVTE_FLASH_ATTN=0 pytest tests/pytorch/<testname>
+
+`ROCBLAS_STREAM_ORDER_ALLOC=1` can be dropped when the hipGraph feature is fully supported in Pytorch on AMDGPUs. 
+The other environmental variables are required since our ROCm Transformer Engine has not supported bias gelu nv fusion, fused attention, or flash attention yet. 
+
+Examples
+--------
+
 
 Transformer Engine
 ==================
@@ -20,7 +91,7 @@ What is Transformer Engine?
 ==================
 .. overview-begin-marker-do-not-remove
 
-Transformer Engine (TE) is a library for accelerating Transformer models on AMD GPUs, including
+Transformer Engine (TE) is a library for accelerating Transformer models on NVIDIA GPUs, including
 using 8-bit floating point (FP8) precision on Hopper GPUs, to provide better performance with lower
 memory utilization in both training and inference. TE provides a collection of highly optimized
 building blocks for popular Transformer architectures and an automatic mixed precision-like API that
@@ -46,9 +117,10 @@ simplifying mixed precision training for users.
 Highlights
 ----------
 
-* Easy-to-use pyTorch modules enabling building of the Transformer layers with FP8 support on AMD GPUs.
-* Optimizations (e.g. fused kernels) for Transformer models across all precisions and AMD GPU architecures.
-* Layers and modules supported in Transformer Engine (TE), and their enabling status in FP8
+* Easy-to-use modules for building Transformer layers with FP8 support 
+* Optimizations (e.g. fused kernels) for Transformer models 
+* Support for FP8 on NVIDIA Hopper and NVIDIA Ada GPUs
+* Support for optimizations across all precisions (FP16, BF16) on NVIDIA Ampere GPU architecture generations and later
 
 Examples
 ----------
@@ -81,10 +153,6 @@ PyTorch
   loss = out.sum()
   loss.backward()
 
-
-
-.. image:: te-fp8-layers.png
-   :width: 600
 
 JAX
 ^^^
@@ -201,23 +269,6 @@ TransformerEngine release v0.11.0 adds support for Flash Attention 2.0 for impro
 resource intensive and requires a large amount of RAM (see `bug <https://github.com/Dao-AILab/flash-attention/issues/358>`_), which may lead to out of memory
 errors during the installation of TransformerEngine. To circumvent the issue, please try setting **MAX_JOBS=1** in the environment. If the errors persist, then
 proceed to install a supported version of Flash Attention 1 (v1.0.6 to v1.0.9).
-
-Build libtransformer_engine.so
-
-.. code-block:: bash
-  git clone https://github.com/ROCmSoftwarePlatform/TransformerEngine-private.git
-  cd TransformerEngine-private
-  git checkout <branch>
-  git submodule sync
-  git submodule update --init --recursive
-
-  export PYTORCH_ROCM_ARCH='gfx908;gfx90a'
-  mkdir -p transformer_engine/common/build
-  cd transformer_engine/common/build
-  cmake ..
-  make
-
-User Guide
 
 Model Support
 ----------
