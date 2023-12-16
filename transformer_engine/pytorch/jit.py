@@ -9,14 +9,10 @@ from typing import Callable, Optional, Tuple
 import torch
 
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
-if IS_HIP_EXTENSION:
-  def identity(ob):
-    return ob
-  jit_fuser = identity
-else:
-  jit_fuser = torch.jit.script
-  if torch.__version__ >= "2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
-    jit_fuser = torch.compile
+
+jit_fuser = torch.jit.script
+if torch.__version__ >= "2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
+  jit_fuser = torch.compile
 
 # Decorator to disable Torch Dynamo
 # See: https://github.com/NVIDIA/TransformerEngine/issues/308
@@ -27,7 +23,6 @@ if torch.__version__ >= "2":
 
 
 def set_jit_fusion_options() -> None:
-  # skip jit fusion under HIP env
   if not IS_HIP_EXTENSION:
     """Set PyTorch JIT layer fusion options."""
     # flags required to enable jit fusion kernels
