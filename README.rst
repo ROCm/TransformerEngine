@@ -8,6 +8,10 @@
 Transformer Engine On ROCm and AMDGPU
 =====================================
 
+This repository enables Transformer Engine (TE) on ROCm as a library to accelerate Transformer models on AMD GPUs, including using 8-bit floating point (FP8) precision on MI300 GPUs, to provide better performance with lower memory utilization in both training and inference. 
+One of the missions is to provide an alternative to accelerate Transformer models that were previously run on NVIDIA GPUs like Hopper with best efforts to make the migration frictionless. 
+Moreover, we add optimizations specific to AMD GPUs to get the best performance benefits out of AMD GPUs.
+
 Feature Support Status
 ----------------------
 
@@ -25,7 +29,7 @@ Execute the following commands to install ROCm Transformer Engine from source on
   # Clone TE repo and submodules
   git clone --recursive https://github.com/ROCmSoftwarePlatform/TransformerEngine-private.git
   
-  cd TransformerEngine
+  cd TransformerEngine-private
   export NVTE_FRAMEWORK=pytorch #optionally set framework, currently only support pytorch and tensorflow
   pip install .
 
@@ -74,6 +78,24 @@ The other environmental variables are required since our ROCm Transformer Engine
 
 Examples
 --------
+
+MNIST with optional FP8
+^^^^^^^^^^^^^^^^^^^^^^^
+.. code-block:: bash
+  
+  cd /examples/pytorch/mnist
+  python main.py
+  python main.py --use-te   # Linear layers from TransformerEngine
+  python main.py --use-fp8  # FP8 + TransformerEngine for Linear layers
+
+Sort with minGPT
+^^^^^^^^^^^^^^^^
+.. code-block:: bash
+  
+  cd /examples/pytorch/minGPT
+  python gptSort.py --use-te # Linear and layernorm from TransformerEngine
+  python gptSort.py --use-te --ln-mlp # In addition, use LayernormMLP from transformer engine
+  python gptSort.py --use-te --ln-mlp --use-fp8 # In addition, use fp8
 
 
 Transformer Engine
