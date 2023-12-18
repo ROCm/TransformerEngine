@@ -71,10 +71,10 @@ Execute the following command to test them after a successfuly installation with
 
 .. code-block:: bash
 
-  ROCBLAS_STREAM_ORDER_ALLOC=1 NVTE_BIAS_GELU_NVFUSION=0 NVTE_FUSED_ATTN=0 NVTE_FLASH_ATTN=0 pytest tests/pytorch/<testname>
+  ROCBLAS_STREAM_ORDER_ALLOC=1 NVTE_FUSED_ATTN=0 NVTE_FLASH_ATTN=0 pytest tests/pytorch/<testname>
 
 `ROCBLAS_STREAM_ORDER_ALLOC=1` can be dropped when the hipGraph feature is fully supported in Pytorch on AMDGPUs. 
-The other environmental variables are required since our ROCm Transformer Engine has not supported bias gelu nv fusion, fused attention, or flash attention yet. 
+The other environmental variables are required since our ROCm Transformer Engine has not supported fused attention or flash attention yet. 
 
 Examples
 --------
