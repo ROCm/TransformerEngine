@@ -58,6 +58,7 @@ else()
   endif()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CMAKE_HIP_FLAGS}")
 
+  add_definitions(-D__HIP_PLATFORM_HCC__=1)
   # add_definitions(-D__HIP_NO_HALF_OPERATORS__=1)
   # add_definitions(-D__HIP_NO_HALF_CONVERSIONS__=1)
   # add_definitions(-D__HIP_NO_BFLOAT16_CONVERSIONS__=1)
