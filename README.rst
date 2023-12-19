@@ -40,6 +40,8 @@ The default installation above will use rocblas in GEMM computation. The hipBlas
 
   export NVTE_USE_HIPBLASLT=1
 
+The hipBlasLt alternative has not yet supported all the GEMM configurations in the pytorch unit tests. When hipBlasLt is fully support, we will switch to hipBlasLt as the default path for GEMM computation.
+
 Test
 ----
 
@@ -71,8 +73,9 @@ Execute the following command to test them after a successfuly installation with
 
 .. code-block:: bash
 
-  ROCBLAS_STREAM_ORDER_ALLOC=1 NVTE_FUSED_ATTN=0 NVTE_FLASH_ATTN=0 pytest tests/pytorch/<testname>
+  ROCBLAS_STREAM_ORDER_ALLOC=1 NVTE_DISABLE_NVRTC=1 NVTE_FUSED_ATTN=0 NVTE_FLASH_ATTN=0 pytest tests/pytorch/<testname>
 
+`NVTE_DISABLE_NVRTC=1` can be dropped once HIPRTC is fully supported on AMDGPUs.
 `ROCBLAS_STREAM_ORDER_ALLOC=1` can be dropped when the hipGraph feature is fully supported in Pytorch on AMDGPUs. 
 The other environmental variables are required since our ROCm Transformer Engine has not supported fused attention or flash attention yet. 
 
@@ -83,7 +86,7 @@ MNIST with optional FP8
 ^^^^^^^^^^^^^^^^^^^^^^^
 .. code-block:: bash
   
-  cd /examples/pytorch/mnist
+  cd examples/pytorch/mnist
   python main.py
   python main.py --use-te   # Linear layers from TransformerEngine
   python main.py --use-fp8  # FP8 + TransformerEngine for Linear layers
@@ -92,7 +95,7 @@ Sort with minGPT
 ^^^^^^^^^^^^^^^^
 .. code-block:: bash
   
-  cd /examples/pytorch/minGPT
+  cd examples/pytorch/minGPT
   python gptSort.py --use-te # Linear and layernorm from TransformerEngine
   python gptSort.py --use-te --ln-mlp # In addition, use LayernormMLP from transformer engine
   python gptSort.py --use-te --ln-mlp --use-fp8 # In addition, use fp8
