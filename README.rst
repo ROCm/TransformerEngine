@@ -98,7 +98,7 @@ Sort with minGPT
   cd examples/pytorch/minGPT
   python gptSort.py --use-te # Linear and layernorm from TransformerEngine
   python gptSort.py --use-te --ln-mlp # In addition, use LayernormMLP from transformer engine
-  python gptSort.py --use-te --ln-mlp --use-fp8 # In addition, use fp8
+  NVTE_DISABLE_NVRTC=1 python gptSort.py --use-te --ln-mlp --use-fp8 # In addition, use fp8
 
 
 Transformer Engine
