@@ -31,6 +31,18 @@ namespace {
 
 #ifdef __HIP_PLATFORM_HCC__
 #ifdef USE_HIPBLASLT
+
+#if HIP_VERSION >= 60000000
+typedef hipDataType hipblasltDatatype_t;
+typedef hipblasComputeType_t hipblasLtComputeType_t;
+#define HIPBLASLT_R_16F HIP_R_16F
+#define HIPBLASLT_R_32F HIP_R_32F
+#define HIPBLASLT_R_16B HIP_R_16BF
+#define HIPBLASLT_R_8F_E4M3 HIP_R_8F_E4M3_FNUZ
+#define HIPBLASLT_R_8F_E5M2 HIP_R_8F_E5M2_FNUZ
+#define HIPBLASLT_COMPUTE_F32 HIPBLAS_COMPUTE_32F
+#endif // #if HIP_VERSION >= 60000000
+
 hipblasltDatatype_t get_cuda_dtype(const transformer_engine::DType t) {
   using namespace transformer_engine;
   switch (t) {
