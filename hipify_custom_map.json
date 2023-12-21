@@ -1,0 +1,7 @@
+{
+ "custom_map" : {
+        "<cuda_bf16.h>" : "<hip/hip_bfloat16.h>",
+        "<cuda_fp8.h>" : "\"amd_detail/hip_float8.h\""
+ }
+}
+

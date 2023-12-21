@@ -1,4 +1,5 @@
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#                    2023 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -36,7 +37,9 @@ else()
   message(STATUS "HEADER_INCLUDE_DIR: ${header_include_dir}")
   set(cuda_source_dir ${PROJECT_SOURCE_DIR} )
   hipify(CUDA_SOURCE_DIR ${cuda_source_dir} 
-    HEADER_INCLUDE_DIR ${header_include_dir}) 
+    HEADER_INCLUDE_DIR ${header_include_dir}
+    CUSTOM_MAP_FILE "${TE}/hipify_custom_map.json"
+  )
   get_hipified_list("${test_cuda_sources}" test_hip_sources)
   message("${message_line}")
   message(STATUS "nvte tests hipified sources: ${test_hip_sources}")
