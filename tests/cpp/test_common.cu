@@ -1,5 +1,6 @@
 /*************************************************************************
  * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *                    2023 Advanced Micro Devices, Inc. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -182,7 +183,7 @@ void compareResults(const std::string &name, const Tensor &test, const void *ref
     const T *test_data = test.cpu_dptr<T>();
     const T *ref_data = reinterpret_cast<const T*>(ref);
     for (size_t i = 0; i < N; ++i) {
-      #ifndef __HIP_PLATFORM_HCC__
+      #ifndef __HIP_PLATFORM_AMD__
       double t = static_cast<double>(test_data[i]);
       double r = static_cast<double>(ref_data[i]);
       #else
@@ -198,14 +199,14 @@ void compareResults(const std::string &name, const Tensor &test, const void *ref
         const double mean = (t + r) / 2;
         const double mean_p = mean >= 0 ? mean * (1 + 1e-6) : mean * (1 - 1e-6);
         const double mean_m = mean >= 0 ? mean * (1 - 1e-6) : mean * (1 + 1e-6);
-        #ifndef __HIP_PLATFORM_HCC__
+        #ifndef __HIP_PLATFORM_AMD__
         const double cast_mean_p = static_cast<double>(static_cast<T>(mean_p));
         const double cast_mean_m = static_cast<double>(static_cast<T>(mean_m));
         #else
         const double cast_mean_p = static_cast<double>(static_cast<float>(static_cast<T>(static_cast<float>(mean_p))));
         const double cast_mean_m = static_cast<double>(static_cast<float>(static_cast<T>(static_cast<float>(mean_m))));
         #endif
-        #ifdef __HIP_PLATFORM_HCC__
+        #ifdef __HIP_PLATFORM_AMD__
 	// Somehow, if I don't put explicit type instantiation here, std::min and std::max would
 	// behave weirdly (returning 0). It seems that the implicit type instantiation was not
 	// done correctly.

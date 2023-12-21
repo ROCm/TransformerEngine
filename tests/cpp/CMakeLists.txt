@@ -23,6 +23,7 @@ if(((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) AND NOT (EXISTS "/bin/nvc
   else()
     SET(TE_ROCM_ARCH $ENV{PYTORCH_ROCM_ARCH})
   endif()
+  SET(CMAKE_HIP_ARCHITECTURES ${TE_ROCM_ARCH})
 else()
   if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     set(CMAKE_CUDA_ARCHITECTURES 70 80 90)
@@ -45,7 +46,6 @@ if(USE_CUDA)
 else()
   set(CMAKE_CXX_STANDARD 17)
   project(transformer_engine_tests LANGUAGES HIP CXX)
-  add_definitions(-D__HIP_PLATFORM_HCC__=1)
   # Ask hcc to generate device code during compilation so we can use
   # host linker to link.
   set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} -fno-gpu-rdc -Wno-defaulted-function-deleted")

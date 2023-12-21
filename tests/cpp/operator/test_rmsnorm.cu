@@ -1,16 +1,12 @@
 /*************************************************************************
  * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *                    2023 Advanced Micro Devices, Inc. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
 #include <cuda_runtime.h>
-#ifndef __HIP_PLATFORM_HCC__
 #include <cuda_bf16.h>
-#else
-#include <hip/hip_bfloat16.h>
-#include <cmath>
-#endif
 #include <gtest/gtest.h>
 #include <transformer_engine/rmsnorm.h>
 #include <transformer_engine/transformer_engine.h>
@@ -38,7 +34,7 @@ void compute_ref_stats(const InputType *data, float *rsigma, const size_t N, con
       sum += (current) * (current);
     }
     sum = sum / H;
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef __HIP_PLATFORM_AMD__
     compute_t rs = 1.0/sqrtf(sum + epsilon);
 #else
     compute_t rs = rsqrtf(sum + epsilon);
