@@ -37,7 +37,7 @@ void launch_tuned_(LaunchParams<BwdParams> &launch_params, const bool configure_
         return;
     }
 
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef __HIP_PLATFORM_AMD__
     if (Kernel_traits::SMEM_BYTES >= 48 * 1024) {
         NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                              Kernel_traits::SMEM_BYTES));

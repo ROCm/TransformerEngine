@@ -1,5 +1,6 @@
 /*************************************************************************
  * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *                    2023 Advanced Micro Devices, Inc. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -78,7 +79,7 @@ struct Max {
 template <typename T>
 __device__ __forceinline__ T WARP_SHFL_XOR_NATIVE(T value, int laneMask, int width = warpSize,
                                                   unsigned int mask = 0xffffffff) {
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef __HIP_PLATFORM_ADD__
     return __shfl_xor(value, laneMask, width);
 #else
 #if CUDA_VERSION >= 9000

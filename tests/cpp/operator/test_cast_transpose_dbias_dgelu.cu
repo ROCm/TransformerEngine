@@ -8,11 +8,7 @@
 #include <transformer_engine/logging.h>
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
-#ifndef __HIP_PLATFORM_HCC__
 #include <cuda_bf16.h>
-#else
-#include <hip/hip_bfloat16.h>
-#endif
 #include <memory>
 #include <iostream>
 #include <iomanip>

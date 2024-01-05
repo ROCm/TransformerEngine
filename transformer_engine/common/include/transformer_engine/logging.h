@@ -9,7 +9,7 @@
 #define TRANSFORMER_ENGINE_LOGGING_H_
 
 #include <cuda_runtime_api.h>
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef __HIP_PLATFORM_AMD__
 #define ROCBLAS_BETA_FEATURES_API
 #include <rocblas/rocblas.h>
 #ifdef USE_HIPBLASLT
@@ -20,7 +20,7 @@
 #include <cublas_v2.h>
 #include <cudnn.h>
 #include <nvrtc.h>
-#endif //#ifdef __HIP_PLATFORM_HCC__
+#endif // __HIP_PLATFORM_AMD__
 #include <string>
 #include <stdexcept>
 
@@ -45,7 +45,7 @@ inline void check_cuda_(cudaError_t status) {
     }
 }
 
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef __HIP_PLATFORM_AMD__
 #ifdef USE_HIPBLASLT
 inline void check_cublas_(hipblasStatus_t status) {
     if ( status != HIPBLAS_STATUS_SUCCESS ) {
@@ -67,7 +67,7 @@ inline void check_cublas_(cublasStatus_t status) {
 }
 #endif
 
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef __HIP_PLATFORM_AMD__
 inline void check_cudnn_(cudnnStatus_t status) {
     if ( status != CUDNN_STATUS_SUCCESS ) {
         std::string message;
@@ -81,7 +81,7 @@ inline void check_cudnn_(cudnnStatus_t status) {
         NVTE_ERROR(message);
     }
 }
-#endif // __HIP_PLATFORM_HCC__
+#endif // __HIP_PLATFORM_AMD__
 
 inline void check_nvrtc_(nvrtcResult status) {
     if ( status != NVRTC_SUCCESS ) {
@@ -96,9 +96,9 @@ inline void check_nvrtc_(nvrtcResult status) {
 
 #define NVTE_CHECK_CUBLAS(ans) { check_cublas_(ans); }
 
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef __HIP_PLATFORM_AMD__
 #define NVTE_CHECK_CUDNN(ans) { check_cudnn_(ans); }
-#endif // __HIP_PLATFORM_HCC__
+#endif // __HIP_PLATFORM_AMD__
 
 #define NVTE_CHECK_NVRTC(ans) { check_nvrtc_(ans); }
 

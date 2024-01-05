@@ -1,5 +1,6 @@
 /*************************************************************************
  * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *                    2023 Advanced Micro Devices, Inc. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -8,7 +9,7 @@
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/logging.h>
 #include <transformer_engine/gemm.h>
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef __HIP_PLATFORM_AMD__
 #include <cublasLt.h>
 #include <cublas_v2.h>
 #else
@@ -20,7 +21,7 @@
 #endif
 #include "../common.h"
 #include "../util/vectorized_pointwise.h"
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef __HIP_PLATFORM_AMD__
 #include <hipcub/hipcub.hpp>
 #include <iostream>
 #include <cstdlib>
@@ -29,7 +30,7 @@
 
 namespace {
 
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef __HIP_PLATFORM_AMD__
 #ifdef USE_HIPBLASLT
 
 #if HIP_VERSION >= 60000000
@@ -97,13 +98,13 @@ cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
       NVTE_ERROR("Invalid type");
   }
 }
-#endif //#ifdef __HIP_PLATFORM_HCC__
+#endif // __HIP_PLATFORM_AMD__
 }  // namespace
 
 
 namespace transformer_engine {
 
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef __HIP_PLATFORM_AMD__
 #ifndef USE_HIPBLASLT
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(dtype, type, ...) \
@@ -1185,7 +1186,7 @@ void cublas_gemm(const Tensor *inputA,
   NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Adesc));
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
 }
-#endif //#ifdef __HIP_PLATFORM_HCC__
+#endif // __HIP_PLATFORM_AMD__
 
 }  // namespace transformer_engine
 

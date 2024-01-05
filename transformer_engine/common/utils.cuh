@@ -9,20 +9,19 @@
 #define TRANSFORMER_ENGINE_COMMON_UTILS_CUH_
 
 #include <cuda_fp16.h>
-#ifdef __HIP_PLATFORM_HCC__
+
+#ifdef __HIP_PLATFORM_AMD__
 #ifndef __HIPCC_RTC__
 #include <cstdint>
 #else
 using namespace __hip_internal;
 #endif
-#include <hip/hip_bfloat16.h>
-#include "amd_detail/hip_float8.h"
-#else
-#include <cuda_bf16.h>
-#include <cuda_fp8.h>
 #endif
 
-#ifdef __HIP_PLATFORM_HCC__
+#include <cuda_bf16.h>
+#include <cuda_fp8.h>
+
+#ifdef __HIP_PLATFORM_AMD__
 typedef uint16_t hip_bfloat16x2 __attribute__((ext_vector_type(2)));
 
 #else
@@ -40,7 +39,7 @@ static_assert(sizeof(uint32_t) == 4);
 static_assert(sizeof(uint64_t) == 8);
 #endif
 
-#endif // __HIP_PLATFORM_HCC__
+#endif // __HIP_PLATFORM_AMD__
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -49,7 +48,7 @@ constexpr uint32_t THREADS_PER_WARP = 32;
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 
-#ifndef USE_HIPBLASLT
+#if !defined(USE_HIPBLASLT) && !defined(__HIPCC_RTC__)
 inline __device__ float2 operator+(const float2 & a, const float2 & b) {  // NOLINT(*)
     return {a.x + b.x, a.y + b.y};
 }
@@ -76,7 +75,7 @@ struct Sum {
 
 template<typename T>
 inline __device__ T warp_shuffle_xor(const T & x, uint32_t idx) {
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef __HIP_PLATFORM_AMD__
     return __shfl_xor(x, idx, THREADS_PER_WARP);
 #else
     return __shfl_xor_sync(static_cast<uint32_t>(-1), x, idx);
@@ -90,7 +89,7 @@ inline __device__ float2 warp_shuffle_xor<float2>(const float2 & x, uint32_t idx
 
 template<typename T>
 inline __device__ T warp_shuffle_down(const T & x, uint32_t idx) {
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef __HIP_PLATFORM_AMD__
     return __shfl_down(x, idx, THREADS_PER_WARP);
 #else
     return __shfl_down_sync(static_cast<uint32_t>(-1), x, idx);
@@ -184,7 +183,7 @@ struct TypeToVec2<half> {
     using Type = half2;
 };
 
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef __HIP_PLATFORM_AMD__
 template<>
 struct TypeToVec2<hip_bfloat16> {
     using Type = hip_bfloat16x2;
@@ -244,7 +243,7 @@ struct Converter<float2, half2>{
     }
 };
 
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef __HIP_PLATFORM_AMD__
 template<>
 struct Converter<float2, hip_bfloat16x2>{
     static inline __device__ hip_bfloat16x2 convert(const float2 &x) {
@@ -307,7 +306,7 @@ struct Vec {
     };
 
     Alias_type data;
-    #ifdef __HIP_PLATFORM_HCC__
+    #ifdef __HIP_PLATFORM_AMD__
     __HOST_DEVICE__ Vec& operator=(const Vec& rhs) {
         data.vec = rhs.data.vec;
         return *this;
@@ -398,7 +397,7 @@ struct InterCTASync {
         // BARRIERS ARE ASSUMED TO BE INITIALIZED TO 0!
     }
 
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef __HIP_PLATFORM_AMD__
     inline __device__ void spin_wait_(int *barrier, int step, int expected) {
         __hip_atomic_fetch_add(barrier, step, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT);
         for (int found = -1; found != expected; ) {
@@ -682,7 +681,7 @@ inline __device__ void warp_chan_upd_dynamic(T &m_a, T &m2_a, T &n_a, int num_ac
         m2_a = m2_ab;
     }
     // Intra-warp broadcast (only lane 0 has valid stats).
-    #ifdef __HIP_PLATFORM_HCC__
+    #ifdef __HIP_PLATFORM_AMD__
     m_a = __shfl(m_a, 0, THREADS_PER_WARP);
     m2_a = __shfl(m2_a, 0, THREADS_PER_WARP);
     #else
@@ -864,7 +863,7 @@ __device__ __forceinline__ float warp_reduce_max(const float m) {
     float tmp = m;
 #pragma unroll
     for (int delta = num_elems/2; delta > 0; delta /= 2) {
-    #ifdef __HIP_PLATFORM_HCC__
+    #ifdef __HIP_PLATFORM_AMD__
         const float other_m = __shfl_down(tmp, delta, THREADS_PER_WARP);
     #else
         const float other_m = __shfl_down_sync(0xFFFFFFFF, tmp, delta);

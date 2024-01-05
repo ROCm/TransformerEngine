@@ -1,5 +1,6 @@
 /*************************************************************************
  * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *                    2023 Advanced Micro Devices, Inc. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -320,7 +321,7 @@ void cast_transpose(const Tensor &input,
              "C and T outputs need to share scale tensor.");
 
 // Launch specific cast-transpose kernel
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef __HIP_PLATFORM_AMD__
 #define LAUNCH_KERNEL(kernel, nvec_in, nvec_out, n_tiles, n_blocks, InputType, OutputType) \
   do {                                                                  \
     cudaFuncSetAttribute(kernel<nvec_in, nvec_out, fp32, InputType, OutputType>, \
@@ -355,7 +356,7 @@ void cast_transpose(const Tensor &input,
           reinterpret_cast<fp32 *>(cast_output->amax.dptr),             \
           row_length, num_rows, n_tiles);                               \
   } while (false)
-#endif //#ifndef __HIP_PLATFORM_HCC__
+#endif // __HIP_PLATFORM_AMD__
 
 // Launch cast-transpose kernel for given vector sizes
 #define LAUNCH_KERNEL_VEC_SIZES(load_size, store_size, InputType, OutputType) \

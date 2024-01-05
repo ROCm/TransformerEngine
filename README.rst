@@ -15,10 +15,10 @@ Moreover, we add optimizations specific to AMD GPUs to get the best performance 
 Feature Support Status
 ----------------------
 
-* Activation, cast, fused softmax, layernorm, rmsnorm, transpose: fully supported 
+* Activation, cast, fused softmax, layernorm, rmsnorm, transpose, HipRTC: fully supported
 * GEMM: partially supported with following input/output types: (fp32/fp32), (fp16/fp16), (bf16/bf16), (fp8, bf8/fp16, bf16, fp32)
 * Attention (Flash Attention, Fused Multihead Attention): not supported
-* HipGraph, HipTX, HipRTC: partially supported
+* HipGraph, HipTX: partially supported
 
 Installation
 ------------
@@ -55,9 +55,7 @@ After a successful Transformer Engine installation via `pip install`, execute th
   cd tests/cpp
   cmake .
   make
-  NVTE_DISABLE_NVRTC=1 make test
-
-In the commands above, env `NVTE_DISABLE_NVRTC=1` can be dropped once HIPRTC is fully supported on AMDGPUs.
+  make test
 
 Framework Integration pytests
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -73,9 +71,8 @@ Execute the following command to test them after a successfuly installation with
 
 .. code-block:: bash
 
-  ROCBLAS_STREAM_ORDER_ALLOC=1 NVTE_DISABLE_NVRTC=1 NVTE_FUSED_ATTN=0 NVTE_FLASH_ATTN=0 pytest tests/pytorch/<testname>
+  ROCBLAS_STREAM_ORDER_ALLOC=1 NVTE_FUSED_ATTN=0 NVTE_FLASH_ATTN=0 pytest tests/pytorch/<testname>
 
-`NVTE_DISABLE_NVRTC=1` can be dropped once HIPRTC is fully supported on AMDGPUs.
 `ROCBLAS_STREAM_ORDER_ALLOC=1` can be dropped when the hipGraph feature is fully supported in Pytorch on AMDGPUs. 
 The other environmental variables are required since our ROCm Transformer Engine has not supported fused attention or flash attention yet. 
 
@@ -98,7 +95,7 @@ Sort with minGPT
   cd examples/pytorch/minGPT
   python gptSort.py --use-te # Linear and layernorm from TransformerEngine
   python gptSort.py --use-te --ln-mlp # In addition, use LayernormMLP from transformer engine
-  NVTE_DISABLE_NVRTC=1 python gptSort.py --use-te --ln-mlp --use-fp8 # In addition, use fp8
+  python gptSort.py --use-te --ln-mlp --use-fp8 # In addition, use fp8
 
 
 Transformer Engine

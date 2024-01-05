@@ -528,6 +528,8 @@ def setup_pytorch_extension() -> setuptools.Extension:
     # Compiler flags
     cxx_flags = ["-O3"]
     if use_rocm:
+      ##TODO: Remove after moving to PyTorch 2.2
+      cxx_flags.extend(['-D__HIP_PLATFORM_AMD__=1'])
       nvcc_flags = [
           "-O3",
           "-U__CUDA_NO_HALF_OPERATORS__",
@@ -556,8 +558,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
     # Version-dependent CUDA options
     if use_rocm:
       ##TODO: Figure out which hipcc version starts to support this parallel compilation
-      nvcc_flags.extend(["-parallel-jobs=4", "-D__HIP_PLATFORM_HCC__=1"])
-      cxx_flags.extend(["-D__HIP_PLATFORM_HCC__=1"])
+      nvcc_flags.extend(["-parallel-jobs=4"])
     else:
       try:
           version = cuda_version()
