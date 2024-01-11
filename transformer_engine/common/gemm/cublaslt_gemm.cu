@@ -128,10 +128,16 @@ namespace transformer_engine {
                 {__VA_ARGS__} \
             } \
         break; \
-        case DType::kFloat8E5M2: \
         case DType::kFloat8E4M3: \
             { \
-                NVTE_ERROR("FP8 type not instantiated"); \
+                using type = fp8e4m3; \
+                {__VA_ARGS__} \
+            } \
+        break; \
+        case DType::kFloat8E5M2: \
+            { \
+                using type = fp8e5m2; \
+                {__VA_ARGS__} \
             } \
         break; \
         default: \
@@ -622,31 +628,28 @@ void cublas_gemm(const Tensor *inputA,
        (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_f32_r) ||
        (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_f16_r) ||
        (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_bf16_r) ||
+       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_f8_r) ||
        (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_bf8_r && D_type==rocblas_datatype_f32_r) ||
        (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_bf8_r && D_type==rocblas_datatype_f16_r) ||
        (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_bf8_r && D_type==rocblas_datatype_bf16_r) ||
+       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_bf8_r && D_type==rocblas_datatype_bf8_r) ||
        (A_type==rocblas_datatype_bf8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_f32_r) ||
        (A_type==rocblas_datatype_bf8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_f16_r) ||
-       (A_type==rocblas_datatype_bf8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_bf16_r),
-       /*
-       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_f8_r) ||
-       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_bf8_r && D_type==rocblas_datatype_bf8_r) ||
+       (A_type==rocblas_datatype_bf8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_bf16_r)||
        (A_type==rocblas_datatype_bf8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_bf8_r),
-       */
-       //Currently does not support output of fp8 tensors
       "Only the following combinations of data types are enabled now!\n\
 1. input: fp32, output: fp32.\n\
 2. input: fp16, output: fp16.\n\
 3. input: bf16, output: bf16.\n\
-4. input: fp8/bf8, output: fp16/bf16, fp32");
+4. input: fp8/bf8, output: fp8/bf8, fp16/bf16, fp32");
 
 
   //If D is not fp32, then we need a temp buffer for GEMM result before applying epilogues. Otherwise, we can apply epilogues in-place.
   // with bias or gelu, allocate fp32 D_temp if the output is not fp32
-  // with input fp8/bf8 (use_fp8) and bf16 output,  also need allocate fp32 D_temp, as rocblas does not support this case
+  // with input fp8/bf8 (use_fp8) and fp8/bf16 output,  also need allocate fp32 D_temp, as rocblas does not support this case
   void* D_temp;
   if (((bias || gelu) && (D_type==rocblas_datatype_f16_r ||D_type==rocblas_datatype_bf16_r || D_type==rocblas_datatype_f8_r || D_type==rocblas_datatype_bf8_r))|| 
-      ((A_type==rocblas_datatype_f8_r || A_type==rocblas_datatype_bf8_r) && (B_type==rocblas_datatype_f8_r || B_type==rocblas_datatype_bf8_r)&& (D_type==rocblas_datatype_bf16_r))) {
+      ((A_type==rocblas_datatype_f8_r || A_type==rocblas_datatype_bf8_r) && (B_type==rocblas_datatype_f8_r || B_type==rocblas_datatype_bf8_r)&& (D_type==rocblas_datatype_bf16_r || D_type==rocblas_datatype_f8_r))) {
     if(! stream_order_alloc){
       NVTE_CHECK_CUDA( hipMalloc(&D_temp, sizeof(float)*m*n) );
     }else{
@@ -672,6 +675,10 @@ void cublas_gemm(const Tensor *inputA,
   // When Ti in fp8 or bf8, To=fp16, there is no bias or gelu, D_temp points to D and we would like it to be fp16, as rocblas support this case.
   if ((!(bias||gelu))&& ((A_type==rocblas_datatype_f8_r || A_type==rocblas_datatype_bf8_r) && (B_type==rocblas_datatype_f8_r || B_type==rocblas_datatype_bf8_r)&& D_type==rocblas_datatype_f16_r)) {
     D_temp_type = rocblas_datatype_f16_r;
+  }
+  // When Ti in fp8 or bf8, To=bf8, there is no bias or gelu, D_temp points to D and we would like it to be bf8, as rocblas support this case.
+  if ((!(bias||gelu))&& ((A_type==rocblas_datatype_f8_r || A_type==rocblas_datatype_bf8_r) && (B_type==rocblas_datatype_f8_r || B_type==rocblas_datatype_bf8_r)&& D_type==rocblas_datatype_bf8_r)) {
+    D_temp_type = rocblas_datatype_bf8_r;
   }
 
   // D = alpha * (A * B) + beta * C
@@ -714,19 +721,15 @@ void cublas_gemm(const Tensor *inputA,
       batch_size = n;
       input_dim = m; // input dimension of the second linear layer is the output dimension of the first linear layer
       output_dim = k;
-      DType input_dtype = get_transformer_engine_dtype(rocblas_datatype_f32_r);
       DType output_dtype = get_transformer_engine_dtype(D_type);
-      DType bias_dtype = get_transformer_engine_dtype(bias_type);
-      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
-        TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType, 
-          detail::gelu_backward_kernelLauncher<IType, OType>(reinterpret_cast<const IType*>(D_temp), 
-                                                             reinterpret_cast<OType*>(D), 
-                                                             reinterpret_cast<const OType*>(pre_gelu_out), 
-                                                             batch_size, 
-                                                             input_dim,
-                                                             stream);
-        );  
-      ); 
+      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType, 
+        detail::gelu_backward_kernelLauncher<float, OType>(reinterpret_cast<const float*>(D_temp), 
+                                                           reinterpret_cast<OType*>(D), 
+                                                           reinterpret_cast<const OType*>(pre_gelu_out), 
+                                                           batch_size, 
+                                                           input_dim,
+                                                           stream);
+      );  
 
       void* bias_tmp;
       if (bias_type != rocblas_datatype_f32_r) {
@@ -753,6 +756,7 @@ void cublas_gemm(const Tensor *inputA,
       );
 
       if (bias_type != rocblas_datatype_f32_r) {
+        DType bias_dtype = get_transformer_engine_dtype(bias_type);
         TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(bias_dtype, OType,
           detail::identity_kernelLauncher<float, OType>(reinterpret_cast<const float*>(bias_tmp), 
                                                         reinterpret_cast<OType*>(bias_ptr),
@@ -778,20 +782,17 @@ void cublas_gemm(const Tensor *inputA,
       batch_size = n;
       input_dim = k;
       output_dim = m;
-      DType input_dtype = get_transformer_engine_dtype(rocblas_datatype_f32_r);
       DType output_dtype = get_transformer_engine_dtype(D_type);
       DType bias_dtype = get_transformer_engine_dtype(bias_type);
-      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
-        TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
-          TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(bias_dtype, BType,
-            detail::add_bias_gelu_kernelLauncher<IType, OType>(reinterpret_cast<const IType*>(D_temp), 
-                                                               reinterpret_cast<OType*>(D), 
-                                                               reinterpret_cast<OType*>(pre_gelu_out), 
-                                                               reinterpret_cast<const BType*>(bias_ptr), 
-                                                               batch_size, 
-                                                               output_dim,
-                                                               stream);
-          );
+      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
+        TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(bias_dtype, BType,
+          detail::add_bias_gelu_kernelLauncher<float, OType>(reinterpret_cast<const float*>(D_temp), 
+                                                             reinterpret_cast<OType*>(D), 
+                                                             reinterpret_cast<OType*>(pre_gelu_out), 
+                                                             reinterpret_cast<const BType*>(bias_ptr), 
+                                                             batch_size, 
+                                                             output_dim,
+                                                             stream);
         );
       );
     }
@@ -850,7 +851,7 @@ void cublas_gemm(const Tensor *inputA,
 #endif
         }
       }
-      if (D_type == rocblas_datatype_f16_r || D_type == rocblas_datatype_bf16_r) {
+      if (D_type == rocblas_datatype_f16_r || D_type == rocblas_datatype_bf16_r || D_type == rocblas_datatype_f8_r || D_type==rocblas_datatype_bf8_r) {
         TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
           detail::identity_kernelLauncher<float, OType>(reinterpret_cast<const float*>(D_temp), 
                                                         reinterpret_cast<OType*>(D),
@@ -866,19 +867,16 @@ void cublas_gemm(const Tensor *inputA,
       batch_size = n;
       input_dim = k;
       output_dim = m;
-      DType input_dtype = get_transformer_engine_dtype(rocblas_datatype_f32_r);
       DType output_dtype = get_transformer_engine_dtype(D_type);
       DType bias_dtype = get_transformer_engine_dtype(bias_type);
-      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
-        TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
-          TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(bias_dtype, BType,
-            detail::add_bias_kernelLauncher<IType, OType, BType>(reinterpret_cast<const IType*>(D_temp), 
-                                                                 reinterpret_cast<OType*>(D), 
-                                                                 reinterpret_cast<const BType*>(bias_ptr), 
-                                                                 batch_size, 
-                                                                 output_dim,
-                                                                 stream);
-          );
+      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
+        TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(bias_dtype, BType,
+          detail::add_bias_kernelLauncher<float, OType, BType>(reinterpret_cast<const float*>(D_temp), 
+                                                               reinterpret_cast<OType*>(D), 
+                                                               reinterpret_cast<const BType*>(bias_ptr), 
+                                                               batch_size, 
+                                                               output_dim,
+                                                               stream);
         );
       );
     }
@@ -891,18 +889,15 @@ void cublas_gemm(const Tensor *inputA,
       batch_size = n;
       input_dim = m;
       output_dim = k;
-      DType input_dtype = get_transformer_engine_dtype(rocblas_datatype_f32_r);
       DType output_dtype = get_transformer_engine_dtype(D_type);
-      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
-        TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
-          detail::gelu_backward_kernelLauncher<IType, OType>(reinterpret_cast<const IType*>(D_temp), 
-                                                             reinterpret_cast<OType*>(D), 
-                                                             reinterpret_cast<const OType*>(pre_gelu_out), 
-                                                             batch_size, 
-                                                             input_dim,
-                                                             stream);
-        );  
-      ); 
+      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
+        detail::gelu_backward_kernelLauncher<float, OType>(reinterpret_cast<const float*>(D_temp), 
+                                                           reinterpret_cast<OType*>(D), 
+                                                           reinterpret_cast<const OType*>(pre_gelu_out), 
+                                                           batch_size, 
+                                                           input_dim,
+                                                           stream);
+      );  
     } else {
       // epilogue = CUBLASLT_EPILOGUE_GELU_AUX;
       // Store (quantized) D_temp in pre_gelu_out, and apply GELU to D_temp then store in D
@@ -911,29 +906,24 @@ void cublas_gemm(const Tensor *inputA,
       batch_size = n;
       input_dim = k;
       output_dim = m;
-      DType input_dtype = get_transformer_engine_dtype(rocblas_datatype_f32_r);
       DType output_dtype = get_transformer_engine_dtype(D_type);
-      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
-        TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
-          detail::gelu_forward_kernelLauncher<IType, OType>(reinterpret_cast<const IType*>(D_temp), 
-                                                            reinterpret_cast<OType*>(D), 
-                                                            batch_size,
-                                                            output_dim, 
-                                                            stream);
-        );  
-      ); 
-      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(input_dtype, IType,
-        TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
-          detail::identity_kernelLauncher<IType, OType>(reinterpret_cast<const IType*>(D_temp), 
-                                                        reinterpret_cast<OType*>(pre_gelu_out), 
-                                                        batch_size*output_dim, 
-                                                        stream);
-        );  
-      ); 
+      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
+        detail::gelu_forward_kernelLauncher<float, OType>(reinterpret_cast<const float*>(D_temp), 
+                                                          reinterpret_cast<OType*>(D), 
+                                                          batch_size,
+                                                          output_dim, 
+                                                          stream);
+      );  
+      TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
+        detail::identity_kernelLauncher<float, OType>(reinterpret_cast<const float*>(D_temp), 
+                                                      reinterpret_cast<OType*>(pre_gelu_out), 
+                                                      batch_size*output_dim, 
+                                                      stream);
+      );  
     }
   } else { // No epilogue - !(bias || gelu)
-      if ((A_type==rocblas_datatype_f8_r || A_type==rocblas_datatype_bf8_r) && (B_type==rocblas_datatype_f8_r || B_type==rocblas_datatype_bf8_r)&& (D_type==rocblas_datatype_bf16_r)) {
-	DType output_dtype = get_transformer_engine_dtype(D_type);
+      if ((A_type==rocblas_datatype_f8_r || A_type==rocblas_datatype_bf8_r) && (B_type==rocblas_datatype_f8_r || B_type==rocblas_datatype_bf8_r)&& (D_type==rocblas_datatype_bf16_r || D_type == rocblas_datatype_f8_r )) {
+        DType output_dtype = get_transformer_engine_dtype(D_type);
         TRANSFORMER_ENGINE_TYPE_SWITCH_ROCM_SIM(output_dtype, OType,
           detail::identity_kernelLauncher<float, OType>(reinterpret_cast<const float*>(D_temp), 
                                                         reinterpret_cast<OType*>(D),
@@ -944,7 +934,7 @@ void cublas_gemm(const Tensor *inputA,
   }
   
   if (((bias || gelu) && (D_type==rocblas_datatype_f16_r ||D_type==rocblas_datatype_bf16_r || D_type==rocblas_datatype_f8_r || D_type==rocblas_datatype_bf8_r))||
-      ((A_type==rocblas_datatype_f8_r || A_type==rocblas_datatype_bf8_r) && (B_type==rocblas_datatype_f8_r || B_type==rocblas_datatype_bf8_r)&& (D_type==rocblas_datatype_bf16_r))) {
+      ((A_type==rocblas_datatype_f8_r || A_type==rocblas_datatype_bf8_r) && (B_type==rocblas_datatype_f8_r || B_type==rocblas_datatype_bf8_r)&& (D_type==rocblas_datatype_bf16_r || D_type==rocblas_datatype_f8_r))) {
     if(! stream_order_alloc){
       NVTE_CHECK_CUDA( hipFree(D_temp) );
     }else{
