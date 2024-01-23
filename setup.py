@@ -1,4 +1,5 @@
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2023-2024  Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -114,10 +115,11 @@ def cmake_bin() -> Path:
     except ImportError:
         pass
     else:
-        cmake_dir = Path(cmake.__file__).resolve().parent
-        _cmake_bin = cmake_dir / "data" / "bin" / "cmake"
-        if not _cmake_bin.is_file():
-            _cmake_bin = None
+        if (cmake.__file__ is not None):
+            cmake_dir = Path(cmake.__file__).resolve().parent
+            _cmake_bin = cmake_dir / "data" / "bin" / "cmake"
+            if not _cmake_bin.is_file():
+                _cmake_bin = None
 
     # Search in path
     if _cmake_bin is None:
