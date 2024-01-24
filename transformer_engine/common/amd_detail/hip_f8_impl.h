@@ -1,73 +1,14 @@
 /*************************************************************************
- * Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
  *
- * See LICENSE for license information.
+ * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
-//
-//
-//   Implementations
-//   TODO: bfloat16
-//
+
 namespace hip_f8_impl {
 
 __host__ inline int clz(uint32_t x) { return __builtin_clz(x); }
 __device__ inline int clz(uint32_t x) { return __clz(x); }
 
-//It seems that we don't need this special treatment anymore. But still keep it
-//in case I am wrong.
-#if 0
-template <int wm, int we, typename T>
-HIP_HOST_DEVICE 
-uint8_t cast_to_f8_no_range_reduce(T _x, bool stoch = false, uint32_t rng = 0) {
-  static_assert(we==5, "we==5");
-  static_assert(sizeof(T)==2, "no_range_reduce only works for float16");
-
-  uint32_t x = reinterpret_cast<uint16_t&>(_x);
-
-  uint32_t y, head, mantissa, exponent;
-  uint32_t sign;
-
-  const int mfmt = 10;
-  head = x & 0xFC00;
-  mantissa = x & 0x3FF;
-  exponent = (head>>10) & 0x1F;
-  sign = head >> 15;
-  uint32_t signed_inf = (sign<<7) + (((1<<we)-1)<<wm);
-
-  if((x & 0x7FFF)==0x7C00)
-    return signed_inf;
-  if((x & 0x7C00)==0x7C00)
-    return signed_inf+1;
-  if(x==0)
-    return 0;
-  if(x==0x8000)
-    return 0x80;
-
-//  uint32_t nextbit = 1<<(mfmt-wm-1);
-  uint32_t drop_mask =  (1 << (mfmt-wm)) - 1;
-
-  int new_exponent = 0, new_mantissa = 0;
-  //const int max_exp = (1<<we)-(negative_zero_nan ? 1 : 2);
-  mantissa += (stoch ? rng : mantissa) & drop_mask;
-  if(exponent!=0)
-    mantissa += 1<<mfmt;
-  if(mantissa >= (2<<mfmt)) {
-    mantissa >>= 1;
-    exponent++;
-  }
-  else if(mantissa>=(1<<mfmt) && exponent==0) {
-    exponent++;
-  }
-  mantissa >>= (mfmt-wm);
-  mantissa &= (1<<wm) - 1;
-  
-  if(exponent == 0 && mantissa == 0)
-    return 0;
-  if(exponent == 31)
-    return (sign << 7) | 0x7B;
-  return (sign << 7) | (exponent << wm) | mantissa;
-}
-#endif
 
 template <int wm, int we, typename T, bool negative_zero_nan, bool clip>
 HIP_HOST_DEVICE
