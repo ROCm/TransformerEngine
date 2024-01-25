@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -23,9 +25,12 @@ from jax import lax, vmap
 
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
-from ..fused_attn import AttnBiasType, AttnMaskType
-from ..fused_attn import is_fused_attn_kernel_available
-from ..fused_attn import self_fused_attn, cross_fused_attn
+from ..util import is_hip_extension
+
+if not is_hip_extension():
+  from ..fused_attn import AttnBiasType, AttnMaskType
+  from ..fused_attn import is_fused_attn_kernel_available
+  from ..fused_attn import self_fused_attn, cross_fused_attn
 from ..softmax import SoftmaxType
 from ..sharding import infer_major_sharding_type, infer_sharding_type
 from ..sharding import global_shard_resource, with_sharding_constraint
@@ -414,21 +419,22 @@ class MultiHeadAttention(nn.Module):
 
             return jnp.stack([k_kernel, v_kernel], axis=-2, dtype=dtype)
 
-        # TODO(rewang): make it configurable for pre_scale_bias
-        attn_bias_type = AttnBiasType.NO_BIAS if bias is None else AttnBiasType.POST_SCALE_BIAS
+        if not is_hip_extension():
+            # TODO(rewang): make it configurable for pre_scale_bias
+            attn_bias_type = AttnBiasType.NO_BIAS if bias is None else AttnBiasType.POST_SCALE_BIAS
 
-        def canonicalize_attn_mask_type(attn_mask_type):
-            """
-            Convert the string to AttnMaskType
-            """
-            if attn_mask_type == 'causal':
-                return AttnMaskType.CAUSAL_MASK
-            if attn_mask_type == 'padding':
-                return AttnMaskType.PADDING_MASK
-            raise ValueError(f"Unsupported {attn_mask_type=}, "
-                             "supported attn_mask_type = {'causal', 'padding'}")
+            def canonicalize_attn_mask_type(attn_mask_type):
+                """
+                Convert the string to AttnMaskType
+                """
+                if attn_mask_type == 'causal':
+                    return AttnMaskType.CAUSAL_MASK
+                if attn_mask_type == 'padding':
+                    return AttnMaskType.PADDING_MASK
+                raise ValueError(f"Unsupported {attn_mask_type=}, "
+                                 "supported attn_mask_type = {'causal', 'padding'}")
 
-        attn_mask_type = canonicalize_attn_mask_type(self.attn_mask_type)
+            attn_mask_type = canonicalize_attn_mask_type(self.attn_mask_type)
 
         canonicalize_dtype = dtypes.canonicalize_dtype(self.dtype)
         q_seqlen = inputs_q.shape[0] if self.transpose_batch_sequence else inputs_q.shape[1]
@@ -440,11 +446,15 @@ class MultiHeadAttention(nn.Module):
 
         def _check_head_dim(head_dim):
             return head_dim in [64, 128]
-
-        has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype,
-                                                               attn_bias_type, attn_mask_type,
-                                                               self.dropout_rate, q_seqlen,
-                                                               kv_seqlen, self.head_dim)
+        
+        #TODO: add back once fused_attn is supported in rocm
+        if not is_hip_extension():
+            has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype,
+                                                                   attn_bias_type, attn_mask_type,
+                                                                   self.dropout_rate, q_seqlen,
+                                                                   kv_seqlen, self.head_dim)
+        else:
+            has_fused_attn_kernel = False
 
         use_fused_attn = not decode and not self.transpose_batch_sequence and self.fuse_qkv and \
             canonicalize_dtype in [jnp.bfloat16, jnp.float16] and \

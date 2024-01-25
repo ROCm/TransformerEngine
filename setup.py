@@ -18,22 +18,91 @@ from typing import List, Optional, Tuple, Union
 import setuptools
 from setuptools.command.build_ext import build_ext
 
+@lru_cache(maxsize=1)
+def frameworks() -> List[str]:
+    """DL frameworks to build support for"""
+    _frameworks: List[str] = []
+    supported_frameworks = ["pytorch", "jax", "tensorflow", "paddle"]
+
+    # Check environment variable
+    if os.getenv("NVTE_FRAMEWORK"):
+        _frameworks.extend(os.getenv("NVTE_FRAMEWORK").split(","))
+
+    # Check command-line arguments
+    for arg in sys.argv.copy():
+        if arg.startswith("--framework="):
+            _frameworks.extend(arg.replace("--framework=", "").split(","))
+            sys.argv.remove(arg)
+
+    # Detect installed frameworks if not explicitly specified
+    if not _frameworks:
+        try:
+            import torch
+        except ImportError:
+            pass
+        else:
+            _frameworks.append("pytorch")
+        try:
+            import jax
+        except ImportError:
+            pass
+        else:
+            _frameworks.append("jax")
+        try:
+            import tensorflow
+        except ImportError:
+            pass
+        else:
+            _frameworks.append("tensorflow")
+        try:
+            import paddle
+        except ImportError:
+            pass
+        else:
+            _frameworks.append("paddle")
+
+    # Special framework names
+    if "all" in _frameworks:
+        _frameworks = supported_frameworks.copy()
+    if "none" in _frameworks:
+        _frameworks = []
+
+    # Check that frameworks are valid
+    _frameworks = [framework.lower() for framework in _frameworks]
+    for framework in _frameworks:
+        if framework not in supported_frameworks:
+            raise ValueError(
+                f"Transformer Engine does not support framework={framework}"
+            )
+
+    return _frameworks
+
+# Call once in global scope since this function manipulates the
+# command-line arguments. Future calls will use a cached value.
+frameworks()
+
 import importlib.util
 #default to use cuda
 use_cuda = True
 use_rocm = False
-if importlib.util.find_spec("torch") is not None:
+if ("pytorch" in frameworks()) and (importlib.util.find_spec("torch") is not None):
   from torch.utils.cpp_extension import IS_HIP_EXTENSION
   if IS_HIP_EXTENSION:
     use_cuda = False
     use_rocm = True
-if importlib.util.find_spec("tensorflow") is not None:
+elif ("tensorflow" in frameworks()) and (importlib.util.find_spec("tensorflow") is not None):
   from tensorflow.python.platform import sysconfig
   sys_details = sysconfig.get_build_info()
   if sys_details["is_rocm_build"]:
     use_cuda = False
     use_rocm = True
-
+elif ("jax" in frameworks()) and (importlib.util.find_spec("jax") is not None):
+  import jax
+  for dev in jax.devices():
+    if "rocm" in dev.client.platform_version:
+      use_cuda = False
+      use_rocm = True
+      break
 # Project directory root
 root_path: Path = Path(__file__).resolve().parent
 
@@ -217,69 +286,6 @@ def with_userbuffers() -> bool:
         return True
     return False
 
-@lru_cache(maxsize=1)
-def frameworks() -> List[str]:
-    """DL frameworks to build support for"""
-    _frameworks: List[str] = []
-    supported_frameworks = ["pytorch", "jax", "tensorflow", "paddle"]
-
-    # Check environment variable
-    if os.getenv("NVTE_FRAMEWORK"):
-        _frameworks.extend(os.getenv("NVTE_FRAMEWORK").split(","))
-
-    # Check command-line arguments
-    for arg in sys.argv.copy():
-        if arg.startswith("--framework="):
-            _frameworks.extend(arg.replace("--framework=", "").split(","))
-            sys.argv.remove(arg)
-
-    # Detect installed frameworks if not explicitly specified
-    if not _frameworks:
-        try:
-            import torch
-        except ImportError:
-            pass
-        else:
-            _frameworks.append("pytorch")
-        try:
-            import jax
-        except ImportError:
-            pass
-        else:
-            _frameworks.append("jax")
-        try:
-            import tensorflow
-        except ImportError:
-            pass
-        else:
-            _frameworks.append("tensorflow")
-        try:
-            import paddle
-        except ImportError:
-            pass
-        else:
-            _frameworks.append("paddle")
-
-    # Special framework names
-    if "all" in _frameworks:
-        _frameworks = supported_frameworks.copy()
-    if "none" in _frameworks:
-        _frameworks = []
-
-    # Check that frameworks are valid
-    _frameworks = [framework.lower() for framework in _frameworks]
-    for framework in _frameworks:
-        if framework not in supported_frameworks:
-            raise ValueError(
-                f"Transformer Engine does not support framework={framework}"
-            )
-
-    return _frameworks
-
-# Call once in global scope since this function manipulates the
-# command-line arguments. Future calls will use a cached value.
-frameworks()
-
 def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     """Setup Python dependencies
 
@@ -314,7 +320,11 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     if "jax" in frameworks():
         if not found_pybind11():
             add_unique(setup_reqs, "pybind11")
-        add_unique(install_reqs, ["jax", "flax>=0.7.1"])
+        if use_cuda:
+          add_unique(install_reqs, ["jax", "flax>=0.7.1"])
+        if use_rocm:
+          # assume jax is already installed on rocm machines
+          add_unique(install_reqs, ["flax>=0.7.1"])
         add_unique(test_reqs, ["numpy", "praxis"])
     if "tensorflow" in frameworks():
         if not found_pybind11():
@@ -476,6 +486,8 @@ def setup_common_extension() -> CMakeExtension:
 
     if "jax" in frameworks():
         cmake_flags.append("-DENABLE_JAX=ON")
+        if use_rocm:
+          cmake_flags.append("-DCMAKE_PREFIX_PATH=/opt/rocm")
     if "tensorflow" in frameworks():
         cmake_flags.append("-DENABLE_TENSORFLOW=ON")
         if use_rocm:
@@ -512,7 +524,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
         extensions_dir/"activation.cu",
         extensions_dir/"pybind.cpp",
       ])
-    else:
+    if use_cuda:
       sources.extend(_all_files_in_dir(extensions_dir))
 
     # Header files
@@ -521,7 +533,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
           root_path / "transformer_engine" / "common" / "include",
           root_path / "transformer_engine" / "pytorch" / "csrc",
       ]
-    else:
+    if use_cuda:
       include_dirs = [
           root_path / "transformer_engine" / "common" / "include",
           root_path / "transformer_engine" / "pytorch" / "csrc",
@@ -542,7 +554,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
           "-U__CUDA_NO_BFLOAT162_OPERATORS__",
           "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
       ]
-    else:
+    if use_cuda:
       nvcc_flags = [
           "-O3",
           "-gencode",
@@ -562,7 +574,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
     if use_rocm:
       ##TODO: Figure out which hipcc version starts to support this parallel compilation
       nvcc_flags.extend(["-parallel-jobs=4"])
-    else:
+    if use_cuda:
       try:
           version = cuda_version()
       except FileNotFoundError:
