@@ -878,6 +878,14 @@ void cublas_gemm(const Tensor *inputA,
       batch_size = n;
       input_dim = k;
       output_dim = m;
+
+      DType gelu_dtype = get_transformer_engine_dtype(gelu_type);
+      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(gelu_dtype, GType, 
+        detail::identity_kernelLauncher<float, GType>(reinterpret_cast<const float*>(D_temp), 
+                                                      reinterpret_cast<GType*>(pre_gelu_out), 
+                                                      batch_size*output_dim, 
+                                                      stream);
+      );  
       DType output_dtype = get_transformer_engine_dtype(D_type);
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(output_dtype, OType,
         detail::gelu_forward_kernelLauncher<OType>(reinterpret_cast<const float*>(D_temp), 
@@ -887,13 +895,6 @@ void cublas_gemm(const Tensor *inputA,
                                                    batch_size,
                                                    output_dim, 
                                                    stream);
-      );  
-      DType gelu_dtype = get_transformer_engine_dtype(gelu_type);
-      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(gelu_dtype, GType, 
-        detail::identity_kernelLauncher<float, GType>(reinterpret_cast<const float*>(D_temp), 
-                                                      reinterpret_cast<GType*>(pre_gelu_out), 
-                                                      batch_size*output_dim, 
-                                                      stream);
       );  
     }
   } else { // No epilogue - !(bias || gelu)
@@ -925,3 +926,4 @@ void cublas_gemm(const Tensor *inputA,
 }
 
 #endif // #ifdef USE_HIPBLASLT
+
