@@ -4,19 +4,37 @@
 #
 # See LICENSE for license information.
 
-list(APPEND test_cuda_sources
-            test_qdq.cu
-            test_cast_transpose.cu
-            test_transpose.cu
-            test_cast_transpose_dbias.cu
-            test_cast_transpose_dbias_dgelu.cu
-            test_cast_transpose_dgeglu.cu
-            test_gelu.cu
-            test_dgeglu.cu
-            test_layernorm.cu
-            test_rmsnorm.cu
-            test_multi_cast_transpose.cu
-            ../test_common.cu)
+if(USE_CUDA)
+  list(APPEND test_cuda_sources
+              test_qdq.cu
+              test_cast_transpose.cu
+              test_transpose.cu
+              test_cast_transpose_dbias.cu
+              test_cast_transpose_dbias_dgelu.cu
+              test_cast_transpose_dgeglu.cu
+              test_gelu.cu
+              test_dgeglu.cu
+              test_layernorm.cu
+              test_rmsnorm.cu
+              test_multi_cast_transpose.cu
+              ../test_common.cu)
+else()
+  list(APPEND test_cuda_sources
+              test_qdq.cu
+              test_cast_transpose.cu
+              test_transpose.cu
+              test_cast_transpose_dbias.cu
+              test_cast_transpose_dbias_dgelu.cu
+              test_cast_transpose_dgeglu.cu
+              test_gelu.cu
+              test_dgeglu.cu
+              test_layernorm.cu
+              test_rmsnorm.cu
+              test_multi_cast_transpose.cu
+              test_cublaslt_gemm.cu
+              ../test_common.cu)
+endif()
+
 if(USE_CUDA)
   add_executable(test_operator ${test_cuda_sources})
 else()

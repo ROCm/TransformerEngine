@@ -100,12 +100,12 @@ void Tensor::to_cpu() const {
   const size_t size = product(s) * typeToSize(tensor_.dtype());
   cudaMemcpy(cpu_data_.get(), tensor_.dptr(), size, cudaMemcpyDeviceToHost);
   if (isFp8Type(dtype())) {
-  cudaMemcpy(amax_cpu_data_.get(), tensor_.amax(), sizeof(float),
-             cudaMemcpyDeviceToHost);
-  cudaMemcpy(scale_cpu_data_.get(), tensor_.scale(), sizeof(float),
-             cudaMemcpyDeviceToHost);
-  cudaMemcpy(scale_inv_cpu_data_.get(), tensor_.scale_inv(), sizeof(float),
-             cudaMemcpyDeviceToHost);
+    cudaMemcpy(amax_cpu_data_.get(), tensor_.amax(), sizeof(float),
+               cudaMemcpyDeviceToHost);
+    cudaMemcpy(scale_cpu_data_.get(), tensor_.scale(), sizeof(float),
+               cudaMemcpyDeviceToHost);
+    cudaMemcpy(scale_inv_cpu_data_.get(), tensor_.scale_inv(), sizeof(float),
+               cudaMemcpyDeviceToHost);
   }
 }
 
