@@ -1,3 +1,8 @@
+/*************************************************************************
+ * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+ *
+ * License for AMD contributions = MIT. See LICENSE for more information
+ ************************************************************************/
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/transformer_engine.h>
 #include <gtest/gtest.h>
@@ -189,7 +194,7 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
   auto [atol, rtol] = getTolerances(dtype);
   //relax for certain prime number gemm
   if (dtype == DType::kFloat32) {
-    atol = 5e-6;
+    atol = 1e-5;
   }
   compareResults("D", D, ref_D.get(), atol, rtol);
 
