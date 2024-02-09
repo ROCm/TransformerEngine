@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -23,6 +25,7 @@ from transformer_engine.jax.fp8 import DType, FP8GemmPackage, FP8Helper, _format
 from transformer_engine.jax.fp8 import is_fp8_available
 from transformer_engine.jax.layernorm import layernorm
 from transformer_engine.jax.mlp import fp8_ln_mlp
+from transformer_engine.jax import is_hip_extension
 
 GEMM_CASES = [(256, 256, 512), (32, 32, 32), (16384, 1024, 2816), (16384, 2816, 1024),
               (16384, 1024, 1024)]
@@ -37,6 +40,8 @@ class TestFP8Dot:
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     def test_qdq(self):
         FP8_E4M3_MAX = 448
+        if is_hip_extension():
+          FP8_E4M3_MAX = 240
         x = jnp.asarray([[-1, 0.1], [2, 3]], jnp.float32)
         amax = jnp.max(jnp.abs(x)).reshape(1)
         scale = jnp.asarray(FP8_E4M3_MAX / amax, jnp.float32).reshape(1)
@@ -114,8 +119,11 @@ class TestFP8Dot:
                                       fp8_metas_scale_inv)
         primitive_out = fp8_dot(fp8_gemm_pkg, *_format2dtypes(None))
         ref_out = jnp.dot(a, b)
-
-        assert_allclose(primitive_out, ref_out)
+        if is_hip_extension():
+          # rocblas path is using fp32 as compute type
+          assert_allclose(primitive_out, ref_out, rtol=2e-2, atol=5e-5)
+        else:
+          assert_allclose(primitive_out, ref_out)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('m,n,k', GEMM_CASES)
@@ -366,9 +374,15 @@ class TestFP8Dot:
                         primitive_k2_grad) = value_n_grad_primitive_func(a, s, k1, k2, fp8_meta)
 
         assert_allclose(primitive_out, ref_out, rtol=1e-2)
-        assert_allclose(jnp.asarray(primitive_a_grad, np.float32),
-                        jnp.asarray(ref_a_grad, np.float32),
-                        rtol=1e-2)
+        if is_hip_extension():
+          # rocblas path has compute type as fp32
+          assert_allclose(jnp.asarray(primitive_a_grad, np.float32),
+                          jnp.asarray(ref_a_grad, np.float32),
+                          rtol=5e-2, atol=5e-2)
+        else:
+          assert_allclose(jnp.asarray(primitive_a_grad, np.float32),
+                          jnp.asarray(ref_a_grad, np.float32),
+                          rtol=1e-2)
         assert_allclose(jnp.asarray(primitive_k1_grad, np.float32),
                         jnp.asarray(ref_k1_grad, np.float32),
                         rtol=1e-2)
