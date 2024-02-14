@@ -34,7 +34,7 @@ Execute the following commands to install ROCm Transformer Engine from source on
   git clone --recursive https://github.com/ROCmSoftwarePlatform/TransformerEngine-private.git
   
   cd TransformerEngine-private
-  export NVTE_FRAMEWORK=pytorch #optionally set framework, currently only support pytorch and tensorflow
+  export NVTE_FRAMEWORK=pytorch #optionally set framework, currently only support pytorch, jax, and tensorflow
   pip install .
 
 
@@ -63,6 +63,7 @@ After a successful Transformer Engine installation via `pip install`, execute th
 
 Framework Integration pytests
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Pytorch
 
 The following two Pytorch integration pytests are supported: 
 
@@ -80,11 +81,16 @@ Execute the following command to test them after a successfuly installation with
 `ROCBLAS_STREAM_ORDER_ALLOC=1` can be dropped when the hipGraph feature is fully supported in Pytorch on AMDGPUs. 
 The other environmental variables are required since our ROCm Transformer Engine has not supported fused attention or flash attention yet. 
 
+Jax
+
+All jax pytests except for test_fused_attn.py are supported. 
+
 Examples
 --------
-
+Pytorch
+^^^^^^^
 MNIST with optional FP8
-^^^^^^^^^^^^^^^^^^^^^^^
+
 .. code-block:: bash
   
   cd examples/pytorch/mnist
@@ -93,7 +99,7 @@ MNIST with optional FP8
   python main.py --use-fp8  # FP8 + TransformerEngine for Linear layers
 
 Sort with minGPT
-^^^^^^^^^^^^^^^^
+
 .. code-block:: bash
   
   cd examples/pytorch/minGPT
@@ -101,6 +107,66 @@ Sort with minGPT
   python gptSort.py --use-te --ln-mlp # In addition, use LayernormMLP from transformer engine
   python gptSort.py --use-te --ln-mlp --use-fp8 # In addition, use fp8
 
+Jax
+^^^
+Flax
+
+.. code-block:: python
+
+  import jax
+  import jax.numpy as jnp
+  import transformer_engine.jax as te
+  import transformer_engine.jax.flax as te_flax
+  from transformer_engine.common import recipe
+
+  BATCH = 32
+  SEQLEN = 128
+  HIDDEN = 1024
+
+  # Initialize RNG and inputs.
+  rng = jax.random.PRNGKey(0)
+  init_rng, data_rng = jax.random.split(rng)
+  inp = jax.random.normal(data_rng, [BATCH, SEQLEN, HIDDEN], jnp.float32)
+
+  # Create an FP8 recipe. Note: All input args are optional.
+  fp8_recipe = recipe.DelayedScaling(margin=0, interval=1, fp8_format=recipe.Format.HYBRID)
+
+  # Enable autocasting for the forward pass
+  with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+      model = te_flax.DenseGeneral(features=HIDDEN)
+
+      def loss_fn(params, other_vars, inp):
+        out = model.apply({'params':params, **other_vars}, inp)
+        return jnp.mean(out)
+
+      # Initialize models.
+      variables = model.init(init_rng, inp)
+      other_variables, params = variables.pop('params')
+
+      # Construct the forward and backward function
+      fwd_bwd_fn = jax.value_and_grad(loss_fn, argnums=(0, 1))
+
+      for _ in range(10):
+        loss, (param_grads, other_grads) = fwd_bwd_fn(params, other_variables, inp)
+        # Update FP8 metas
+        other_variables = te.update_fp8_metas(other_grads)
+
+MNIST
+
+.. code-block:: bash
+  
+  cd examples/jax/mnist
+  python test_single_gpu_mnist.py # Use Flax to train MNIST with BF16 as usual
+  python test_single_gpu_mnist.py --use-te # Use `te.DenseGeneral` provided by Transformer Engine to train MNIST with BF16
+  python test_single_gpu_mnist.py --use-fp8 # Use `te.DenseGeneral` provided by Transformer Engine to train MNIST and enable FP8 training and evaluation.
+
+Encoder
+
+.. code-block:: bash
+  
+  cd examples/jax/encoder
+  python test_single_gpu_encoder.py
+  python test_single_gpu_encoder.py --use-fp8
 
 Transformer Engine
 ==================
