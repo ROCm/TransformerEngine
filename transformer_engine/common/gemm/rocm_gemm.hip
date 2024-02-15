@@ -583,11 +583,15 @@ void cublas_gemm(const Tensor *inputA,
                                        computeType, rocblas_gemm_algo::rocblas_gemm_algo_standard,0,0));
   }else {
     rocblas_datatype computeType = rocblas_datatype_f32_r;
+    uint32_t flags = rocblas_gemm_flags_none;
+    if((A_type==rocblas_datatype_f16_r && B_type==rocblas_datatype_f16_r) && grad){
+      flags = rocblas_gemm_flags_fp16_alt_impl; 
+    }
     NVTE_CHECK_CUBLAS(rocblas_gemm_ex(handle, transa, transb, m, n, k, &alpha,
                                       A, A_type, lda,
                                       B, B_type, ldb,
                                       &beta, D_temp, D_temp_type, ldd, D_temp, D_temp_type, ldd,
-                                      computeType, rocblas_gemm_algo::rocblas_gemm_algo_standard,0,0));
+                                      computeType, rocblas_gemm_algo::rocblas_gemm_algo_standard,0,flags));
   }
 
   NVTE_CHECK_CUBLAS(rocblas_destroy_handle(handle));

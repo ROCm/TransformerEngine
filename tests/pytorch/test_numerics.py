@@ -232,6 +232,10 @@ class TorchScaledMaskedSoftmax(nn.Module):
         probs = probs.to(dtype)
         return probs
 
+def is_mi200():
+  """check whether this machine is mi200/210/250"""
+  import re
+  return (re.search('AMD Instinct MI2.0', torch.cuda.get_device_name(torch.cuda.current_device())) is not None)
 
 class TorchDotProductAttention(torch.nn.Module):
     def __init__(
@@ -510,7 +514,10 @@ def test_gpt_selective_activation_recompute(dtype, bs, model):
 
     outputs = _test_e2e_selective_recompute(block, bs, dtype, config, recompute=False)
     outputs_recompute = _test_e2e_selective_recompute(block, bs, dtype, config, recompute=True)
-    assert_all_equal(outputs, outputs_recompute)
+    if IS_HIP_EXTENSION and dtype==torch.float16 and is_mi200():
+        assert_allclose(outputs, outputs_recompute, 1e-2)
+    else:
+        assert_all_equal(outputs, outputs_recompute)
 
 
 def _test_e2e_full_recompute(block, bs, dtype, config, recompute=False):
@@ -581,7 +588,10 @@ def test_gpt_full_activation_recompute(dtype, bs, model):
 
     outputs = _test_e2e_full_recompute(block, bs, dtype, config, recompute=False)
     outputs_recompute = _test_e2e_full_recompute(block, bs, dtype, config, recompute=True)
-    assert_all_equal(outputs, outputs_recompute)
+    if IS_HIP_EXTENSION and dtype==torch.float16 and is_mi200():
+        assert_allclose(outputs, outputs_recompute, 1e-2)
+    else:
+        assert_all_equal(outputs, outputs_recompute)
 
 
 def _test_e2e_checkpointing_get_model(config, dtype):
