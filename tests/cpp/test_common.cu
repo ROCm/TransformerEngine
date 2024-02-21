@@ -1,19 +1,26 @@
 /*************************************************************************
+<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+=======
+ * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+>>>>>>> upstream/main
  *
  * See LICENSE for license information.
  ************************************************************************/
 
 
 #include "test_common.h"
-#include "transformer_engine/logging.h"
-#include "transformer_engine/transformer_engine.h"
-#include <gtest/gtest.h>
+
 #include <algorithm>
 #include <memory>
 #include <random>
+
+#include <gtest/gtest.h>
+
+#include <transformer_engine/transformer_engine.h>
+#include "util/logging.h"
 
 namespace test {
 

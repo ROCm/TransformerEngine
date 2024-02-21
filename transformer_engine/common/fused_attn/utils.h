@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -12,6 +12,7 @@
 
 #include <cudnn.h>
 #include <cudnn_frontend.h>
+#include <cudnn_frontend_utils.h>
 
 #include <cstdint>
 #include <mutex>
@@ -80,16 +81,46 @@ struct FADescriptor {
   NVTE_Bias_Type bias_type;
   NVTE_Mask_Type mask_type;
   cudnnDataType_t tensor_type;
+  bool use_workspace_opt;
 
   bool operator<(const FADescriptor &rhs) const {
     return std::tie(b, h, s_q, s_kv, d,
                     attnScale, isTraining, dropoutProbability,
-                    layout, mask_type, bias_type, tensor_type)
+                    layout, mask_type, bias_type, tensor_type, use_workspace_opt)
                     < std::tie(
                       rhs.b, rhs.h, rhs.s_q, rhs.s_kv, rhs.d,
                       rhs.attnScale, rhs.isTraining,
                       rhs.dropoutProbability, rhs.layout,
-                      rhs.mask_type, rhs.bias_type, rhs.tensor_type);
+                      rhs.mask_type, rhs.bias_type,
+                      rhs.tensor_type, rhs.use_workspace_opt);
+  }
+};
+
+struct FADescriptor_v1 {
+  std::int64_t b;
+  std::int64_t h;
+  std::int64_t hg;
+  std::int64_t s_q;
+  std::int64_t s_kv;
+  std::int64_t d;
+  float attnScale;
+  bool isTraining;
+  float dropoutProbability;
+  NVTE_QKV_Layout layout;
+  NVTE_Bias_Type bias_type;
+  NVTE_Mask_Type mask_type;
+  cudnn_frontend::DataType_t tensor_type;
+
+  bool operator<(const FADescriptor_v1 &rhs) const {
+    return std::tie(b, h, hg, s_q, s_kv, d,
+                    attnScale, isTraining, dropoutProbability,
+                    layout, mask_type, bias_type, tensor_type)
+                    < std::tie(
+                      rhs.b, rhs.h, rhs.hg, rhs.s_q, rhs.s_kv, rhs.d,
+                      rhs.attnScale, rhs.isTraining,
+                      rhs.dropoutProbability, rhs.layout,
+                      rhs.mask_type, rhs.bias_type,
+                      rhs.tensor_type);
   }
 };
 
@@ -105,6 +136,7 @@ __global__ void cu_seqlens_to_actual_seqlens(size_t b,
 }  // namespace fused_attn
 
 cudnnDataType_t get_cudnn_dtype(const transformer_engine::DType t);
+cudnn_frontend::DataType_t get_cudnn_fe_dtype(const transformer_engine::DType t);
 
 class cudnnExecutionPlanManager {
  public:
@@ -120,11 +152,6 @@ class cudnnExecutionPlanManager {
     }
 
     ~cudnnExecutionPlanManager() {
-        static thread_local std::once_flag flag;
-        std::call_once(flag, [&] {
-                        if (handle_ != nullptr) {
-                          cudnnDestroy(handle_);
-                        }});
     }
 
  private:

@@ -1,22 +1,28 @@
 /*************************************************************************
+<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+=======
+ * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+>>>>>>> upstream/main
  *
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cmath>
+#include <cstring>
+#include <memory>
+#include <iomanip>
+#include <iostream>
+#include <random>
+
+#include <cuda_bf16.h>
+#include <cuda_runtime.h>
+#include <gtest/gtest.h>
+
 #include <transformer_engine/layer_norm.h>
 #include <transformer_engine/transformer_engine.h>
-#include <gtest/gtest.h>
-#include <cuda_runtime.h>
-#include <cuda_bf16.h>
-#include <memory>
-#include <iostream>
-#include <iomanip>
-#include <random>
-#include <cstring>
-#include <cmath>
 #include "../test_common.h"
 
 using namespace transformer_engine;

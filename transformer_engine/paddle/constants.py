@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Constants"""
@@ -50,3 +50,23 @@ LayerTypes = ("encoder", "decoder")
 GemmParallelModes = ("row", "column", None)
 
 dist_group_type = paddle.distributed.collective.Group
+
+RecomputeFunctionNames = ('unpack', 'backward')
+
+AttnBiasType = {
+    "no_bias": tex.NVTE_Bias_Type.NVTE_NO_BIAS,
+    "pre_scale_bias": tex.NVTE_Bias_Type.NVTE_PRE_SCALE_BIAS,
+    "post_scale_bias": tex.NVTE_Bias_Type.NVTE_POST_SCALE_BIAS,
+}
+
+AttnMaskType = {
+    "no_mask": tex.NVTE_Mask_Type.NVTE_NO_MASK,
+    "padding": tex.NVTE_Mask_Type.NVTE_PADDING_MASK,
+    "causal": tex.NVTE_Mask_Type.NVTE_CAUSAL_MASK,
+}
+
+FusedAttnBackend = {
+    "F16_max512_seqlen": tex.NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen,
+    "F16_arbitrary_seqlen": tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+    "No_Backend": tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend,
+}

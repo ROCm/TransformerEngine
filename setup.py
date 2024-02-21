@@ -1,6 +1,10 @@
+<<<<<<< HEAD
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+=======
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+>>>>>>> upstream/main
 #
 # See LICENSE for license information.
 
@@ -13,6 +17,7 @@ import shutil
 import subprocess
 from subprocess import CalledProcessError
 import sys
+import sysconfig
 import tempfile
 from typing import List, Optional, Tuple, Union
 import setuptools
@@ -221,7 +226,7 @@ def with_userbuffers() -> bool:
 def frameworks() -> List[str]:
     """DL frameworks to build support for"""
     _frameworks: List[str] = []
-    supported_frameworks = ["pytorch", "jax", "tensorflow", "paddle"]
+    supported_frameworks = ["pytorch", "jax", "paddle"]
 
     # Check environment variable
     if os.getenv("NVTE_FRAMEWORK"):
@@ -247,12 +252,6 @@ def frameworks() -> List[str]:
             pass
         else:
             _frameworks.append("jax")
-        try:
-            import tensorflow
-        except ImportError:
-            pass
-        else:
-            _frameworks.append("tensorflow")
         try:
             import paddle
         except ImportError:
@@ -307,15 +306,22 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
         add_unique(setup_reqs, "ninja")
 
     # Framework-specific requirements
+<<<<<<< HEAD
     if use_cuda:
       if "pytorch" in frameworks():
           add_unique(install_reqs, ["torch", "flash-attn>=1.0.6, <=2.0.4"])
           add_unique(test_reqs, ["numpy", "onnxruntime", "torchvision"])
+=======
+    if "pytorch" in frameworks():
+        add_unique(install_reqs, ["torch", "flash-attn>=2.0.6,<=2.4.2,!=2.0.9,!=2.1.0"])
+        add_unique(test_reqs, ["numpy", "onnxruntime", "torchvision"])
+>>>>>>> upstream/main
     if "jax" in frameworks():
         if not found_pybind11():
             add_unique(setup_reqs, "pybind11")
         add_unique(install_reqs, ["jax", "flax>=0.7.1"])
         add_unique(test_reqs, ["numpy", "praxis"])
+<<<<<<< HEAD
     if "tensorflow" in frameworks():
         if not found_pybind11():
             add_unique(setup_reqs, "pybind11")
@@ -323,6 +329,8 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
           # assume tensorflow is already installed on rocm machines
           add_unique(install_reqs, "tensorflow")
         add_unique(test_reqs, ["keras", "tensorflow_datasets"])
+=======
+>>>>>>> upstream/main
     if "paddle" in frameworks():
         add_unique(install_reqs, "paddlepaddle-gpu")
         add_unique(test_reqs, "numpy")
@@ -359,6 +367,8 @@ class CMakeExtension(setuptools.Extension):
             cmake_path,
             "-B",
             build_dir,
+            f"-DPython_EXECUTABLE={sys.executable}",
+            f"-DPython_INCLUDE_DIR={sysconfig.get_path('include')}",
             f"-DCMAKE_BUILD_TYPE={build_type}",
             f"-DCMAKE_INSTALL_PREFIX={install_dir}",
         ]
@@ -466,7 +476,7 @@ class CMakeBuildExtension(BuildExtension):
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library
 
-    Also builds JAX, TensorFlow, and userbuffers support if needed.
+    Also builds JAX or userbuffers support if needed.
 
     """
     cmake_flags = []
@@ -476,10 +486,13 @@ def setup_common_extension() -> CMakeExtension:
 
     if "jax" in frameworks():
         cmake_flags.append("-DENABLE_JAX=ON")
+<<<<<<< HEAD
     if "tensorflow" in frameworks():
         cmake_flags.append("-DENABLE_TENSORFLOW=ON")
         if use_rocm:
           cmake_flags.append("-DCMAKE_PREFIX_PATH=/opt/rocm")
+=======
+>>>>>>> upstream/main
     if with_userbuffers():
         cmake_flags.append("-DNVTE_WITH_USERBUFFERS=ON")
     return CMakeExtension(
@@ -516,6 +529,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
       sources.extend(_all_files_in_dir(extensions_dir))
 
     # Header files
+<<<<<<< HEAD
     if use_rocm:
       include_dirs = [
           root_path / "transformer_engine" / "common" / "include",
@@ -527,6 +541,14 @@ def setup_pytorch_extension() -> setuptools.Extension:
           root_path / "transformer_engine" / "pytorch" / "csrc",
           root_path / "3rdparty" / "cudnn-frontend" / "include",
       ]
+=======
+    include_dirs = [
+        root_path / "transformer_engine" / "common" / "include",
+        root_path / "transformer_engine" / "pytorch" / "csrc",
+        root_path / "transformer_engine",
+        root_path / "3rdparty" / "cudnn-frontend" / "include",
+    ]
+>>>>>>> upstream/main
 
     # Compiler flags
     cxx_flags = ["-O3"]
@@ -614,6 +636,7 @@ def setup_paddle_extension() -> setuptools.Extension:
     include_dirs = [
         root_path / "transformer_engine" / "common" / "include",
         root_path / "transformer_engine" / "paddle" / "csrc",
+        root_path / "transformer_engine",
     ]
 
     # Compiler flags

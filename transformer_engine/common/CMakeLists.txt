@@ -1,6 +1,10 @@
+<<<<<<< HEAD
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2022-2023, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+=======
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+>>>>>>> upstream/main
 #
 # See LICENSE for license information.
 
@@ -35,6 +39,7 @@ list(APPEND transformer_engine_SOURCES
      util/rtc.cpp
      util/system.cpp
      fused_softmax/scaled_masked_softmax.cu
+<<<<<<< HEAD
      fused_softmax/scaled_upper_triang_masked_softmax.cu)
 else()
 list(APPEND transformer_engine_SOURCES
@@ -61,6 +66,24 @@ list(APPEND transformer_engine_SOURCES
      util/system.cpp
      fused_softmax/scaled_masked_softmax.cu
      fused_softmax/scaled_upper_triang_masked_softmax.cu)
+=======
+     fused_softmax/scaled_upper_triang_masked_softmax.cu
+     fused_softmax/scaled_aligned_causal_masked_softmax.cu
+     fused_rope/fused_rope.cu
+     recipe/delayed_scaling.cu)
+add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
+target_include_directories(transformer_engine PUBLIC
+                           "${CMAKE_CURRENT_SOURCE_DIR}/include")
+
+# Check for cuDNN frontend API
+set(CUDNN_FRONTEND_INCLUDE_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
+if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
+    message(FATAL_ERROR
+            "Could not find cuDNN frontend API. "
+            "Try running 'git submodule update --init --recursive' "
+            "within the Transformer Engine source.")
+>>>>>>> upstream/main
 endif()
 
 if(USE_CUDA)
@@ -176,6 +199,7 @@ target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS
 # Compiler options
 set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
                             fused_softmax/scaled_upper_triang_masked_softmax.cu
+                            fused_softmax/scaled_aligned_causal_masked_softmax.cu
                             PROPERTIES
                             COMPILE_OPTIONS "--use_fast_math")
 if(USE_CUDA)

@@ -1,23 +1,28 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Test TE Paddle Layer-level APIs"""
 
-import math
 import os
-import pytest
-from utils import assert_allclose
+from utils import assert_allclose, is_fused_attention_supported
 
 import paddle
+import pytest
 
+from transformer_engine.common.recipe import DelayedScaling
 import transformer_engine.paddle as te
 from transformer_engine.paddle.fp8 import is_fp8_available, fp8_autocast
-from transformer_engine.common.recipe import DelayedScaling
 
-paddle.seed(10)
 is_fp8_supported, reason = is_fp8_available()
 LINEAR_CASES = [(16, 16, 32), (32, 32, 64)]
 NORM_CASES = [(16, 32), (256, 1024)]
+
+
+@pytest.fixture(autouse=True)
+def setup():
+    """Setup random seed before each test"""
+    paddle.seed(10)
+    yield
 
 
 @pytest.mark.skipif(not is_fp8_supported, reason=reason)
@@ -191,6 +196,50 @@ class TestLinear:
             assert_allclose(layer_te.bias.grad, layer_pd.bias.grad, rtol=rtol, atol=atol)
         if do_calibration:
             assert paddle.count_nonzero(layer_te.fp8_meta["scaling_fwd"].amax_history).item() > 0
+
+    @staticmethod
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest.mark.parametrize('bs,in_features,out_features', LINEAR_CASES)
+    @pytest.mark.parametrize('activation_dtype', ['bfloat16'])
+    @pytest.mark.parametrize('num_microbatch', [8])
+    def test_linear_fp8_microbatch(bs, in_features, out_features, activation_dtype, num_microbatch):
+        """
+        Test FP8 Linear
+        """
+        rtol = 0.1
+        atol = 0.1
+
+        recipe = DelayedScaling()
+
+        paddle.set_default_dtype(activation_dtype)
+        layer_cached = te.Linear(
+            in_features=in_features,
+            out_features=out_features,
+        )
+        layer_normal = te.Linear(
+            in_features=in_features,
+            out_features=out_features,
+        )
+        layer_cached.weight.copy_(layer_normal.weight, True)
+        layer_cached.bias.copy_(layer_normal.bias, True)
+
+        for iteration in range(num_microbatch):
+            input_tensor = paddle.uniform(shape=(bs, in_features), dtype=activation_dtype)
+            grad_out = paddle.uniform(shape=(bs, out_features), dtype=activation_dtype)
+
+            with fp8_autocast(enabled=True, fp8_recipe=recipe):
+                out = layer_cached(input_tensor, is_first_microbatch=(iteration == 0))
+                out.backward(grad_out)
+
+            with fp8_autocast(enabled=True, fp8_recipe=recipe):
+                out_ref = layer_normal(input_tensor)
+                out_ref.backward(grad_out)
+
+            assert_allclose(out, out_ref, rtol=rtol, atol=atol)
+            assert_allclose(layer_cached.weight.grad,
+                            layer_normal.weight.grad,
+                            rtol=rtol,
+                            atol=atol)
 
 
 @pytest.mark.parametrize('bs,hidden_size', NORM_CASES)
@@ -403,6 +452,62 @@ class TestLayerNormLinear:
         if do_calibration:
             assert paddle.count_nonzero(layer_te.fp8_meta["scaling_fwd"].amax_history).item() > 0
 
+    @staticmethod
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest.mark.parametrize('bs,in_features,out_features', LINEAR_CASES)
+    @pytest.mark.parametrize('activation_dtype', ['bfloat16'])
+    @pytest.mark.parametrize('num_microbatch', [8])
+    def test_layernorm_linear_fp8_microbatch(bs, in_features, out_features, activation_dtype,
+                                             num_microbatch):
+        """
+        Test FP8 LayerNormLinear Layer
+        """
+        paddle.set_default_dtype(activation_dtype)
+        eps = 1e-3
+        rtol = 0.5
+        atol = 0.5
+
+        recipe = DelayedScaling()
+
+        layer_cached = te.LayerNormLinear(
+            in_features=in_features,
+            out_features=out_features,
+            eps=eps,
+        )
+
+        layer_normal = te.LayerNormLinear(
+            in_features=in_features,
+            out_features=out_features,
+            eps=eps,
+        )
+
+        layer_cached.ln_weight.copy_(layer_normal.ln_weight, True)
+        layer_cached.ln_bias.copy_(layer_normal.ln_bias, True)
+        layer_cached.weight.copy_(layer_normal.weight, True)
+        layer_cached.bias.copy_(layer_normal.bias, True)
+
+        for iteration in range(num_microbatch):
+            input_tensor = paddle.uniform(shape=(bs, in_features), dtype=activation_dtype)
+            grad_out = paddle.uniform(shape=(bs, out_features), dtype=activation_dtype)
+
+            with fp8_autocast(enabled=True, fp8_recipe=recipe):
+                out = layer_cached(input_tensor, is_first_microbatch=(iteration == 0))
+                out.backward(grad_out)
+
+            with fp8_autocast(enabled=True, fp8_recipe=recipe):
+                out_ref = layer_normal(input_tensor)
+                out_ref.backward(grad_out)
+
+            assert_allclose(out, out_ref, rtol=rtol, atol=atol)
+            assert_allclose(layer_cached.weight.grad,
+                            layer_normal.weight.grad,
+                            rtol=rtol,
+                            atol=atol)
+            assert_allclose(layer_cached.ln_weight.grad,
+                            layer_normal.ln_weight.grad,
+                            rtol=rtol,
+                            atol=atol)
+
 
 class TestLayerNormMLP:
     """
@@ -607,12 +712,79 @@ class TestLayerNormMLP:
         if do_calibration:
             assert paddle.count_nonzero(layer_te.fp8_meta["scaling_fwd"].amax_history).item() > 0
 
+    @staticmethod
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest.mark.parametrize('bs,hidden_size,ffn_hidden_size', LINEAR_CASES)
+    @pytest.mark.parametrize('activation_dtype', ['bfloat16'])
+    @pytest.mark.parametrize('num_microbatch', [8])
+    def test_layernorm_mlp_fp8_microbatch(bs, hidden_size, ffn_hidden_size, activation_dtype,
+                                          num_microbatch):
+        """
+        Test FP8 LayerNormMLP Layer
+        """
+        paddle.set_default_dtype(activation_dtype)
+        rtol = 1e-5
+        atol = 1e-5
+        eps = 1e-3
 
-@pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
-                    reason="cuDNN fMHA requires Ampere+ GPU")
+        recipe = DelayedScaling()
+
+        layer_cached = te.LayerNormMLP(
+            hidden_size=hidden_size,
+            ffn_hidden_size=ffn_hidden_size,
+            eps=eps,
+        )
+
+        layer_normal = te.LayerNormMLP(
+            hidden_size=hidden_size,
+            ffn_hidden_size=ffn_hidden_size,
+            eps=eps,
+        )
+        layer_normal.ln_weight.copy_(layer_cached.ln_weight, True)
+        layer_normal.ln_bias.copy_(layer_cached.ln_bias, True)
+        layer_normal.fc1_weight.copy_(layer_cached.fc1_weight, True)
+        layer_normal.fc2_weight.copy_(layer_cached.fc2_weight, True)
+        layer_normal.fc1_bias.copy_(layer_cached.fc1_bias, True)
+        layer_normal.fc2_bias.copy_(layer_cached.fc2_bias, True)
+
+        # Calibration to make sure weight scale is the same
+        input_tensor = paddle.uniform(shape=(bs, hidden_size), dtype=activation_dtype)
+        with fp8_autocast(enabled=False, calibrating=True, fp8_recipe=recipe):
+            _ = layer_cached(input_tensor)
+
+        with fp8_autocast(enabled=False, calibrating=True, fp8_recipe=recipe):
+            _ = layer_normal(input_tensor)
+
+        for iteration in range(num_microbatch):
+            input_tensor = paddle.uniform(shape=(bs, hidden_size), dtype=activation_dtype)
+            grad_out = paddle.uniform(shape=(bs, hidden_size), dtype=activation_dtype)
+
+            with fp8_autocast(enabled=True, fp8_recipe=recipe):
+                out = layer_cached(input_tensor, is_first_microbatch=(iteration == 0))
+                out.backward(grad_out)
+
+            with fp8_autocast(enabled=True, fp8_recipe=recipe):
+                out_ref = layer_normal(input_tensor)
+                out_ref.backward(grad_out)
+
+            assert_allclose(out, out_ref, rtol=rtol, atol=atol)
+            assert_allclose(layer_cached.ln_weight.grad,
+                            layer_normal.ln_weight.grad,
+                            rtol=rtol,
+                            atol=atol)
+            assert_allclose(layer_cached.fc1_weight.grad,
+                            layer_normal.fc1_weight.grad,
+                            rtol=rtol,
+                            atol=atol)
+            assert_allclose(layer_cached.fc2_weight.grad,
+                            layer_normal.fc2_weight.grad,
+                            rtol=rtol,
+                            atol=atol)
+
+
 @pytest.mark.parametrize('bs', [1, 2, 8])
 @pytest.mark.parametrize('hidden_size, num_heads', [[1024, 16], [768, 12]])
-@pytest.mark.parametrize('q_seqlen, kv_seqlen', [[128, 128], [512, 512]])
+@pytest.mark.parametrize('q_seqlen, kv_seqlen', [[512, 512], [1024, 1024]])
 @pytest.mark.parametrize('attn_type', ['self', 'cross'])
 @pytest.mark.parametrize('mask_type', ['causal', 'padding'])
 @pytest.mark.parametrize('math_dtype', ['bfloat16', 'float16'])
@@ -624,20 +796,29 @@ def test_dot_product_attention(bs, hidden_size, num_heads, q_seqlen, kv_seqlen, 
     paddle.set_default_dtype(math_dtype)
     rtol = 1e-4
     atol = 2e-2
-
     head_size = hidden_size // num_heads
-    self_attn_qkv_input = paddle.normal(mean=0.0,
-                                        std=0.02,
-                                        shape=(bs, q_seqlen, 3, num_heads,
-                                               head_size)).astype(math_dtype)
-    cross_attn_q_input = paddle.normal(mean=0.0,
-                                       std=0.02,
-                                       shape=(bs, q_seqlen, num_heads,
-                                              head_size)).astype(math_dtype)
-    cross_attn_kv_input = paddle.normal(mean=0.0,
-                                        std=0.02,
-                                        shape=(bs, kv_seqlen, 2, num_heads,
-                                               head_size)).astype(math_dtype)
+
+    # Skip if cuDNN fused attention is not supported
+    if not is_fused_attention_supported(
+            num_heads=num_heads,
+            num_gqa_groups=num_heads,
+            q_seqlen=q_seqlen,
+            kv_seqlen=kv_seqlen,
+            head_size=head_size,
+            dtype=math_dtype,
+            dropout=0.0,
+            qkv_layout="bshd_bshd_bshd",
+            bias_type="no_bias",
+            mask_type=mask_type,
+    ):
+        pytest.skip("cuDNN fused attention is not supported")
+
+    attn_q_input = paddle.normal(mean=0.0, std=0.02,
+                                 shape=(bs, q_seqlen, num_heads, head_size)).astype(math_dtype)
+    attn_k_input = paddle.normal(mean=0.0, std=0.02,
+                                 shape=(bs, kv_seqlen, num_heads, head_size)).astype(math_dtype)
+    attn_v_input = paddle.normal(mean=0.0, std=0.02,
+                                 shape=(bs, kv_seqlen, num_heads, head_size)).astype(math_dtype)
 
     q_actual_seqlen = paddle.randint(low=20, high=q_seqlen, shape=(bs,), dtype='int32')
     kv_actual_seqlen = paddle.randint(low=20, high=kv_seqlen, shape=(bs,),
@@ -653,57 +834,36 @@ def test_dot_product_attention(bs, hidden_size, num_heads, q_seqlen, kv_seqlen, 
     for i in range(0, bs):
         attn_mask[i, 0, 0:q_actual_seqlen[i], 0:kv_actual_seqlen[i]] = False
 
-    norm_factor = math.sqrt(hidden_size // num_heads)
-    layer_te = te.DotProductAttention(norm_factor,
+    head_size = hidden_size // num_heads
+    layer_te = te.DotProductAttention(num_heads,
+                                      head_size,
                                       attention_dropout=0.0,
                                       attn_mask_type=mask_type,
                                       attention_type=attn_type,
                                       backend='transformer_engine')
-    layer_pd = te.DotProductAttention(norm_factor,
+    layer_pd = te.DotProductAttention(num_heads,
+                                      head_size,
                                       attention_dropout=0.0,
                                       attn_mask_type=mask_type,
                                       attention_type=attn_type,
                                       backend='paddle')
 
-    def calc_attn_output_and_grad(layer, q, kv, mask, dout):
+    def calc_attn_output_and_grad(layer, q, k, v, mask, dout):
         _q = paddle.to_tensor(q, stop_gradient=False)
-        _kv = paddle.to_tensor(kv, stop_gradient=False) if kv is not None else None
+        _k = paddle.to_tensor(k, stop_gradient=False)
+        _v = paddle.to_tensor(v, stop_gradient=False)
 
-        out = layer(_q, _kv, mask)
+        out = layer(_q, _k, _v, mask)
         out.backward(dout)
-        return out, _q.grad, _kv.grad if _kv is not None else None
+        return out, _q.grad, _k.grad, _v.grad
 
-    if attn_type == 'self':
-        out, qkv_grad, _ = calc_attn_output_and_grad(layer_te, self_attn_qkv_input, None, attn_mask,
-                                                     grad_out)
-        out_ref, qkv_grad_ref, _ = calc_attn_output_and_grad(layer_pd, self_attn_qkv_input, None,
-                                                             attn_mask, grad_out)
-        valid_out_ref = paddle.full_like(out_ref, 0)
-        for i in range(0, bs):
-            valid_out_ref[i, 0:q_actual_seqlen[i], :, :] = out_ref[i, 0:q_actual_seqlen[i], :, :]
-
-        q_grad = qkv_grad[:, :, 0]
-        k_grad = qkv_grad[:, :, 1]
-        v_grad = qkv_grad[:, :, 2]
-        q_grad_ref = qkv_grad_ref[:, :, 0]
-        k_grad_ref = qkv_grad_ref[:, :, 1]
-        v_grad_ref = qkv_grad_ref[:, :, 2]
-
-    else:
-        out, q_grad, kv_grad = calc_attn_output_and_grad(layer_te, cross_attn_q_input,
-                                                         cross_attn_kv_input, attn_mask, grad_out)
-        out_ref, q_grad_ref, kv_grad_ref = calc_attn_output_and_grad(layer_pd, cross_attn_q_input,
-                                                                     cross_attn_kv_input, attn_mask,
-                                                                     grad_out)
-
-        valid_out_ref = paddle.full_like(out_ref, 0)
-        for i in range(0, bs):
-            valid_out_ref[i, 0:q_actual_seqlen[i], :, :] = out_ref[i, 0:q_actual_seqlen[i], :, :]
-
-        k_grad = kv_grad[:, :, 0]
-        v_grad = kv_grad[:, :, 1]
-        k_grad_ref = kv_grad_ref[:, :, 0]
-        v_grad_ref = kv_grad_ref[:, :, 1]
+    out, q_grad, k_grad, v_grad = calc_attn_output_and_grad(layer_te, attn_q_input, attn_k_input,
+                                                            attn_v_input, attn_mask, grad_out)
+    out_ref, q_grad_ref, k_grad_ref, v_grad_ref = calc_attn_output_and_grad(
+        layer_pd, attn_q_input, attn_k_input, attn_v_input, attn_mask, grad_out)
+    valid_out_ref = paddle.full_like(out_ref, 0)
+    for i in range(0, bs):
+        valid_out_ref[i, 0:q_actual_seqlen[i], :, :] = out_ref[i, 0:q_actual_seqlen[i], :, :]
 
     valid_q_grad_ref = paddle.full_like(q_grad_ref, 0)
     valid_k_grad_ref = paddle.full_like(k_grad_ref, 0)
@@ -721,20 +881,19 @@ def test_dot_product_attention(bs, hidden_size, num_heads, q_seqlen, kv_seqlen, 
     assert_allclose(v_grad, valid_v_grad_ref, rtol=rtol, atol=atol)
 
 
-@pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
-                    reason="cuDNN fMHA requires Ampere+ GPU")
 @pytest.mark.parametrize('bs', [1, 2, 8])
+@pytest.mark.parametrize('num_gqa_groups', [1, 4, 16])
 @pytest.mark.parametrize('hidden_size, num_heads, ffn_hidden_size', [[1024, 16, 4096]])
-@pytest.mark.parametrize('q_seqlen, kv_seqlen', [[128, 128], [512, 512]])
+@pytest.mark.parametrize('q_seqlen, kv_seqlen', [[512, 512], [1024, 1024]])
 @pytest.mark.parametrize('has_bias, no_dbias', [[False, True], [True, True], [True, False]])
 @pytest.mark.parametrize('no_wgrad', [True, False])
 @pytest.mark.parametrize('mask_type', ['causal', 'padding'])
 @pytest.mark.parametrize('math_dtype', ['bfloat16', 'float16'])
 @pytest.mark.parametrize('output_layernorm', [True, False])
 @pytest.mark.parametrize('return_layernorm_output', [True, False])
-def test_transformer_encoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, has_bias, no_dbias,
-                                   no_wgrad, q_seqlen, kv_seqlen, mask_type, math_dtype,
-                                   output_layernorm, return_layernorm_output):
+def test_transformer_encoder_layer(bs, hidden_size, num_heads, num_gqa_groups, ffn_hidden_size,
+                                   has_bias, no_dbias, no_wgrad, q_seqlen, kv_seqlen, mask_type,
+                                   math_dtype, output_layernorm, return_layernorm_output):
     """
     Test Transformer Encoder Layer
     """
@@ -742,6 +901,21 @@ def test_transformer_encoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
     rtol = 5e-2
     atol = 5e-2
     eps = 1e-3
+
+    # Skip if cuDNN fused attention is not supported
+    if not is_fused_attention_supported(
+            num_heads=num_heads,
+            num_gqa_groups=num_gqa_groups,
+            q_seqlen=q_seqlen,
+            kv_seqlen=kv_seqlen,
+            head_size=hidden_size // num_heads,
+            dtype=math_dtype,
+            dropout=0.0,
+            qkv_layout="bshd_bshd_bshd",
+            bias_type="no_bias",
+            mask_type=mask_type,
+    ):
+        pytest.skip("cuDNN fused attention is not supported")
 
     encoder_input = paddle.uniform(shape=(bs, q_seqlen, hidden_size), dtype=math_dtype)
 
@@ -761,6 +935,7 @@ def test_transformer_encoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
     layer_te = te.TransformerLayer(hidden_size,
                                    ffn_hidden_size,
                                    num_heads,
+                                   num_gqa_groups=num_gqa_groups,
                                    layernorm_epsilon=eps,
                                    hidden_dropout=0.0,
                                    attention_dropout=0.0,
@@ -774,6 +949,7 @@ def test_transformer_encoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
     layer_pd = te.TransformerLayer(hidden_size,
                                    ffn_hidden_size,
                                    num_heads,
+                                   num_gqa_groups=num_gqa_groups,
                                    layernorm_epsilon=eps,
                                    hidden_dropout=0.0,
                                    attention_dropout=0.0,
@@ -886,20 +1062,21 @@ def test_transformer_encoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
                             atol=0.5)
 
 
-@pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
-                    reason="cuDNN fMHA requires Ampere+ GPU")
 @pytest.mark.parametrize('bs', [1, 2, 8])
+@pytest.mark.parametrize('num_gqa_groups', [1, 4, 16])
 @pytest.mark.parametrize('hidden_size, num_heads, ffn_hidden_size', [[1024, 16, 4096]])
-@pytest.mark.parametrize('q_seqlen, kv_seqlen', [[128, 128], [512, 512]])
+@pytest.mark.parametrize('q_seqlen, kv_seqlen', [[512, 512], [1024, 1024]])
 @pytest.mark.parametrize('has_bias, no_dbias', [[False, True], [True, True], [True, False]])
 @pytest.mark.parametrize('no_wgrad', [True, False])
 @pytest.mark.parametrize('mask_type', ['causal', 'padding'])
 @pytest.mark.parametrize('math_dtype', ['bfloat16', 'float16'])
 @pytest.mark.parametrize('output_layernorm', [True, False])
 @pytest.mark.parametrize('return_layernorm_output', [True, False])
-def test_transformer_decoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, has_bias, no_dbias,
-                                   no_wgrad, q_seqlen, kv_seqlen, mask_type, math_dtype,
-                                   output_layernorm, return_layernorm_output):
+@pytest.mark.parametrize('recompute_core_attention', [True, False])
+def test_transformer_decoder_layer(bs, hidden_size, num_heads, num_gqa_groups, ffn_hidden_size,
+                                   has_bias, no_dbias, no_wgrad, q_seqlen, kv_seqlen, mask_type,
+                                   math_dtype, output_layernorm, return_layernorm_output,
+                                   recompute_core_attention):
     """
     Test Transformer Decoder Layer
     """
@@ -908,14 +1085,38 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
     atol = 6e-2
     eps = 1e-3
 
-    encoder_input = paddle.uniform(shape=(bs, q_seqlen, hidden_size), dtype=math_dtype)
-    encoder_output = paddle.uniform(shape=(bs, kv_seqlen, hidden_size), dtype=math_dtype)
+    # Skip if cuDNN fused attention is not supported
+    if not is_fused_attention_supported(
+            num_heads=num_heads,
+            num_gqa_groups=num_gqa_groups,
+            q_seqlen=q_seqlen,
+            kv_seqlen=kv_seqlen,
+            head_size=hidden_size // num_heads,
+            dtype=math_dtype,
+            dropout=0.0,
+            qkv_layout="bshd_bshd_bshd",
+            bias_type="no_bias",
+            mask_type=mask_type,
+    ):
+        pytest.skip("cuDNN fused attention is not supported")
+
+    encoder_input = paddle.normal(mean=0.0, std=0.1,
+                                  shape=(bs, q_seqlen, hidden_size)).astype(math_dtype)
+    encoder_output = paddle.normal(mean=0.0, std=0.1,
+                                   shape=(bs, kv_seqlen, hidden_size)).astype(math_dtype)
 
     q_actual_seqlen = paddle.ones(shape=(bs,), dtype='int32') * q_seqlen
     kv_actual_seqlen = q_actual_seqlen
     attn_mask = paddle.ones(shape=(bs, 1, q_seqlen, kv_seqlen), dtype='bool')
 
-    grad_out = paddle.normal(mean=0.0, std=0.2, shape=(bs, q_seqlen, hidden_size)).astype('float32')
+    grad_out = paddle.normal(mean=0.0, std=0.01,
+                             shape=(bs, q_seqlen, hidden_size)).astype('float32')
+
+    # rounding to avoid numerical issues
+    encoder_input = paddle.round(encoder_input * 1000) / 1000
+    encoder_output = paddle.round(encoder_output * 1000) / 1000
+    grad_out = paddle.round(grad_out * 1000) / 1000
+
     for i in range(0, bs):
         grad_out[i, q_actual_seqlen[i]:, :] = 0
     grad_out = grad_out.astype(math_dtype)
@@ -926,6 +1127,7 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
     layer_te = te.TransformerLayer(hidden_size,
                                    ffn_hidden_size,
                                    num_heads,
+                                   num_gqa_groups=num_gqa_groups,
                                    layernorm_epsilon=eps,
                                    hidden_dropout=0.0,
                                    attention_dropout=0.0,
@@ -939,6 +1141,7 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
     layer_pd = te.TransformerLayer(hidden_size,
                                    ffn_hidden_size,
                                    num_heads,
+                                   num_gqa_groups=num_gqa_groups,
                                    layernorm_epsilon=eps,
                                    hidden_dropout=0.0,
                                    attention_dropout=0.0,
@@ -1049,18 +1252,33 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
         layer_te.layernorm.weight.stop_gradient = no_wgrad
         layer_te.layernorm.bias.stop_gradient = no_dbias
 
-    def calc_transformer_output_and_grad(layer, encoder_input, mask, encoder_output,
-                                         enc_dec_attn_mask, dout):
+    def calc_transformer_output_and_grad(layer,
+                                         encoder_input,
+                                         mask,
+                                         encoder_output,
+                                         enc_dec_attn_mask,
+                                         dout,
+                                         recompute_core_attention=False):
         _encoder_input = paddle.to_tensor(encoder_input, stop_gradient=False)
         _encoder_output = paddle.to_tensor(encoder_output, stop_gradient=False)
-        out = layer(_encoder_input, mask, _encoder_output, enc_dec_attn_mask)
+        out = layer(_encoder_input,
+                    mask,
+                    _encoder_output,
+                    enc_dec_attn_mask,
+                    recompute_core_attention=recompute_core_attention)
         out.backward(dout)
         return out, _encoder_input.grad, _encoder_output.grad
 
     out_ref, grad_encoder_input_ref, grad_encoder_output_ref = calc_transformer_output_and_grad(
         layer_pd, encoder_input, attn_mask, encoder_output, attn_mask, grad_out)
     out, grad_encoder_input, grad_encoder_output = calc_transformer_output_and_grad(
-        layer_te, encoder_input, attn_mask, encoder_output, attn_mask, grad_out)
+        layer_te,
+        encoder_input,
+        attn_mask,
+        encoder_output,
+        attn_mask,
+        grad_out,
+        recompute_core_attention=recompute_core_attention)
 
     assert_allclose(out, out_ref, rtol=rtol, atol=atol)
     assert_allclose(grad_encoder_input, grad_encoder_input_ref, rtol=rtol, atol=atol)
@@ -1075,7 +1293,7 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
             assert_allclose(layer_te.self_attention.layernorm_qkv.weight.grad,
                             layer_pd.self_attention.layernorm_qkv.weight.grad.T,
                             rtol=rtol,
-                            atol=0.1)
+                            atol=atol)
             assert_allclose(layer_te.inter_attention.layernorm_query.weight.grad,
                             layer_pd.inter_attention.layernorm_query.weight.grad.T,
                             rtol=rtol,
@@ -1084,7 +1302,7 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
         if output_layernorm:
             assert_allclose(layer_te.self_attention.qkv.bias.grad,
                             layer_pd.self_attention.qkv.bias.grad,
-                            rtol=0.01,
+                            rtol=0.5,
                             atol=0.6)
         else:
             assert_allclose(layer_te.self_attention.layernorm_qkv.bias.grad,
@@ -1095,3 +1313,122 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
                             layer_pd.inter_attention.layernorm_query.bias.grad,
                             rtol=rtol,
                             atol=atol)
+
+
+@pytest.mark.skipif(not is_fp8_supported, reason=reason)
+@pytest.mark.parametrize('bs', [8])
+@pytest.mark.parametrize('hidden_size, num_heads, ffn_hidden_size', [[1024, 16, 4096]])
+@pytest.mark.parametrize('q_seqlen, kv_seqlen', [[128, 128]])
+@pytest.mark.parametrize('mask_type', ['causal'])
+@pytest.mark.parametrize('math_dtype', ['bfloat16'])
+@pytest.mark.parametrize('num_microbatch', [8])
+def test_transformer_encoder_layer_microbatch(bs, hidden_size, num_heads, ffn_hidden_size, q_seqlen,
+                                              kv_seqlen, mask_type, math_dtype, num_microbatch):
+    """
+    Test Transformer Encoder Layer with FP8 weight caching
+    """
+    paddle.set_default_dtype(math_dtype)
+    rtol = 1e-5
+    atol = 1e-5
+    eps = 1e-3
+
+    # Skip if cuDNN fused attention is not supported
+    if not is_fused_attention_supported(
+            num_heads=num_heads,
+            num_gqa_groups=num_heads,
+            q_seqlen=q_seqlen,
+            kv_seqlen=kv_seqlen,
+            head_size=hidden_size // num_heads,
+            dtype=math_dtype,
+            dropout=0.0,
+            qkv_layout="bs3hd",
+            bias_type="no_bias",
+            mask_type=mask_type,
+    ):
+        pytest.skip("cuDNN fused attention is not supported")
+
+    layer_cached = te.TransformerLayer(hidden_size,
+                                       ffn_hidden_size,
+                                       num_heads,
+                                       layernorm_epsilon=eps,
+                                       hidden_dropout=0.0,
+                                       attention_dropout=0.0,
+                                       weight_attr=None,
+                                       bias_attr=None,
+                                       self_attn_mask_type=mask_type,
+                                       layer_type='encoder')
+    layer_normal = te.TransformerLayer(hidden_size,
+                                       ffn_hidden_size,
+                                       num_heads,
+                                       layernorm_epsilon=eps,
+                                       hidden_dropout=0.0,
+                                       attention_dropout=0.0,
+                                       weight_attr=None,
+                                       bias_attr=None,
+                                       self_attn_mask_type=mask_type,
+                                       layer_type='encoder')
+
+    layer_normal.self_attention.layernorm_qkv.ln_weight.copy_(
+        layer_cached.self_attention.layernorm_qkv.ln_weight, True)
+    layer_normal.self_attention.layernorm_qkv.ln_bias.copy_(
+        layer_cached.self_attention.layernorm_qkv.ln_bias, True)
+    layer_normal.self_attention.layernorm_qkv.weight.copy_(
+        layer_cached.self_attention.layernorm_qkv.weight, True)
+    layer_normal.self_attention.layernorm_qkv.bias.copy_(
+        layer_cached.self_attention.layernorm_qkv.bias, True)
+
+    layer_normal.self_attention.proj.weight.copy_(layer_cached.self_attention.proj.weight, True)
+    layer_normal.self_attention.proj.bias.copy_(layer_cached.self_attention.proj.bias, True)
+
+    # LayerNorm MLP params
+    layer_normal.layernorm_mlp.ln_weight.copy_(layer_cached.layernorm_mlp.ln_weight, True)
+    layer_normal.layernorm_mlp.ln_bias.copy_(layer_cached.layernorm_mlp.ln_bias, True)
+    layer_normal.layernorm_mlp.fc1_weight.copy_(layer_cached.layernorm_mlp.fc1_weight, True)
+    layer_normal.layernorm_mlp.fc2_weight.copy_(layer_cached.layernorm_mlp.fc2_weight, True)
+    layer_normal.layernorm_mlp.fc1_bias.copy_(layer_cached.layernorm_mlp.fc1_bias, True)
+    layer_normal.layernorm_mlp.fc2_bias.copy_(layer_cached.layernorm_mlp.fc2_bias, True)
+
+    recipe = DelayedScaling()
+
+    def generate_input():
+        encoder_input = paddle.uniform(shape=(bs, q_seqlen, hidden_size), dtype=math_dtype)
+
+        q_actual_seqlen = paddle.ones(shape=(bs,), dtype='int32') * q_seqlen
+        kv_actual_seqlen = q_actual_seqlen
+        attn_mask = paddle.ones(shape=(bs, 1, q_seqlen, kv_seqlen), dtype='bool')
+
+        grad_out = paddle.normal(mean=0.0, std=0.02,
+                                 shape=(bs, q_seqlen, hidden_size)).astype('float32')
+        for i in range(0, bs):
+            grad_out[i, q_actual_seqlen[i]:, :] = 0
+        grad_out = grad_out.astype(math_dtype)
+
+        for i in range(0, bs):
+            attn_mask[i, 0, 0:q_actual_seqlen[i], 0:kv_actual_seqlen[i]] = False
+
+        return encoder_input, attn_mask, grad_out
+
+    # Calibration to make sure weight scale is the same
+    encoder_input, mask, _ = generate_input()
+    with fp8_autocast(enabled=False, calibrating=True, fp8_recipe=recipe):
+        _ = layer_cached(encoder_input, mask)
+
+    with fp8_autocast(enabled=False, calibrating=True, fp8_recipe=recipe):
+        _ = layer_normal(encoder_input, mask)
+
+    for iteration in range(num_microbatch):
+        encoder_input, mask, grad_out = generate_input()
+
+        with fp8_autocast(enabled=True, fp8_recipe=recipe):
+            out = layer_cached(encoder_input, mask, is_first_microbatch=(iteration == 0))
+            out.backward(grad_out)
+
+        with fp8_autocast(enabled=True, fp8_recipe=recipe):
+            out_ref = layer_normal(encoder_input, mask)
+            out_ref.backward(grad_out)
+
+        assert_allclose(out, out_ref, rtol=rtol, atol=atol)
+        assert_allclose(layer_cached.self_attention.layernorm_qkv.weight.grad,
+                        layer_normal.self_attention.layernorm_qkv.weight.grad,
+                        rtol=rtol,
+                        atol=atol)

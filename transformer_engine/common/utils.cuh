@@ -1,7 +1,11 @@
 /*************************************************************************
+<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+=======
+ * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+>>>>>>> upstream/main
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -346,7 +350,8 @@ struct Vec {
                                           size_t idx = 0,
                                           size_t count = NUM_ELT) {
         const Elt_type *elt_ptr = static_cast<const Elt_type *>(base_ptr) + idx;
-        if ( count < NUM_ELT || idx % NUM_ELT != 0 ) {
+        if ( count < NUM_ELT
+             || reinterpret_cast<uint64_t>(elt_ptr) % BYTES != 0 ) {
             #pragma unroll
             for ( int it = 0; it < NUM_ELT; it++ ) {
                 this->data.elt[it] = (it < count
@@ -364,7 +369,8 @@ struct Vec {
                                          size_t idx = 0,
                                          size_t count = NUM_ELT) const {
         Elt_type *elt_ptr = static_cast<Elt_type *>(base_ptr) + idx;
-        if ( count < NUM_ELT || idx % NUM_ELT != 0 ) {
+        if ( count < NUM_ELT
+             || reinterpret_cast<uint64_t>(elt_ptr) % BYTES != 0 ) {
             #pragma unroll
             for ( int it = 0; it < NUM_ELT; it++ ) {
                 if ( it < count ) {
@@ -655,6 +661,19 @@ struct DynamicReducer : public Reducer<T, 1, WARPS_M, WARPS_N> {
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+
+/*
+This is an implementation of the parallel Welford algorithm for incrementally computing variance
+
+This algorithm is known as Chan's update formulae (Chat et al '79):
+http://i.stanford.edu/pub/cstr/reports/cs/tr/79/773/CS-TR-79-773.pdf
+
+An introduction is provided by Wikipedia here:
+https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance?section=5#Parallel_algorithm
+
+A detailed reference on the exact version implemented (with better numerical stability) is provided here:
+https://dbs.ifi.uni-heidelberg.de/files/Team/eschubert/publications/SSDBM18-covariance-authorcopy.pdf
+*/
 
 template<typename T>
 inline __device__ void warp_chan_upd_dynamic(T &m_a, T &m2_a, T &n_a, int num_active) { // NOLINT(*)

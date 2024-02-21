@@ -1,23 +1,30 @@
 /*************************************************************************
+<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+=======
+ * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+>>>>>>> upstream/main
  *
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <transformer_engine/softmax.h>
-#include <transformer_engine/logging.h>
 #include <assert.h>
 #include <stdint.h>
+
 #include <cfloat>
 #include <limits>
+
 #include <cuda.h>
-#include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_profiler_api.h>
-#include "../utils.cuh"
+#include <cuda_runtime.h>
+
+#include <transformer_engine/softmax.h>
 #include "../common.h"
+#include "../utils.cuh"
+#include "../util/logging.h"
 
 
 namespace transformer_engine {
@@ -469,7 +476,7 @@ void dispatch_scaled_softmax_forward(
     int batches,
     int attn_heads,
     cudaStream_t stream) {
-    NVTE_CHECK(key_seq_len >= 0 && key_seq_len <= 4096, "Unsupported shape.");
+    NVTE_CHECK(key_seq_len >= 0 && key_seq_len <= 16384, "Unsupported shape.");
     if (key_seq_len == 0) {
         return;
     } else {
@@ -600,6 +607,22 @@ void dispatch_scaled_softmax_forward(
                                                      batch_count,
                                                      key_seq_len);
                 break;
+            case 13:  // 8192
+                scaled_softmax_warp_forward<input_t, output_t, acc_t, 13>
+                    <<<blocks, threads, 0, stream>>>(dst,
+                                                     src,
+                                                     scale,
+                                                     batch_count,
+                                                     key_seq_len);
+                break;
+            case 14:  // 16384
+                scaled_softmax_warp_forward<input_t, output_t, acc_t, 14>
+                    <<<blocks, threads, 0, stream>>>(dst,
+                                                     src,
+                                                     scale,
+                                                     batch_count,
+                                                     key_seq_len);
+                break;
             default:
                 break;
         }
@@ -618,7 +641,7 @@ void dispatch_scaled_masked_softmax_forward(
     int attn_heads,
     int pad_batches,
     cudaStream_t stream) {
-    NVTE_CHECK(key_seq_len >= 0 && key_seq_len <= 4096, "Unsupported shape.");
+    NVTE_CHECK(key_seq_len >= 0 && key_seq_len <= 16384, "Unsupported shape.");
     if (key_seq_len == 0) {
         return;
     } else {
@@ -775,6 +798,26 @@ void dispatch_scaled_masked_softmax_forward(
                                                      key_seq_len,
                                                      pad_batches);
                 break;
+            case 13:  // 8192
+                scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 13>
+                    <<<blocks, threads, 0, stream>>>(dst,
+                                                     src,
+                                                     mask,
+                                                     scale,
+                                                     batch_count,
+                                                     key_seq_len,
+                                                     pad_batches);
+                break;
+            case 14:  // 16384
+                scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 14>
+                    <<<blocks, threads, 0, stream>>>(dst,
+                                                     src,
+                                                     mask,
+                                                     scale,
+                                                     batch_count,
+                                                     key_seq_len,
+                                                     pad_batches);
+                break;
             default:
                 break;
         }
@@ -792,7 +835,7 @@ void dispatch_scaled_masked_softmax_backward(
     int batches,
     int attn_heads,
     cudaStream_t stream) {
-    NVTE_CHECK(key_seq_len >= 0 && key_seq_len <= 4096, "Unsupported shape.");
+    NVTE_CHECK(key_seq_len >= 0 && key_seq_len <= 16384, "Unsupported shape.");
     if (key_seq_len == 0) {
        return;
     } else {
@@ -836,7 +879,6 @@ void dispatch_scaled_masked_softmax_backward(
                                                      batch_count,
                                                      key_seq_len);
                 break;
-                break;
             case 2:  // 4
                 scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 2>
                     <<<blocks, threads, 0, stream>>>(grad_input,
@@ -845,7 +887,6 @@ void dispatch_scaled_masked_softmax_backward(
                                                      scale,
                                                      batch_count,
                                                      key_seq_len);
-                break;
                 break;
             case 3:  // 8
                 scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 3>
@@ -856,7 +897,6 @@ void dispatch_scaled_masked_softmax_backward(
                                                      batch_count,
                                                      key_seq_len);
                 break;
-                break;
             case 4:  // 16
                 scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 4>
                     <<<blocks, threads, 0, stream>>>(grad_input,
@@ -865,7 +905,6 @@ void dispatch_scaled_masked_softmax_backward(
                                                      scale,
                                                      batch_count,
                                                      key_seq_len);
-                break;
                 break;
             case 5:  // 32
                 scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 5>
@@ -876,7 +915,6 @@ void dispatch_scaled_masked_softmax_backward(
                                                      batch_count,
                                                      key_seq_len);
                 break;
-                break;
             case 6:  // 64
                 scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 6>
                     <<<blocks, threads, 0, stream>>>(grad_input,
@@ -885,7 +923,6 @@ void dispatch_scaled_masked_softmax_backward(
                                                      scale,
                                                      batch_count,
                                                      key_seq_len);
-                break;
                 break;
             case 7:  // 128
                 scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 7>
@@ -896,7 +933,6 @@ void dispatch_scaled_masked_softmax_backward(
                                                      batch_count,
                                                      key_seq_len);
                 break;
-                break;
             case 8:  // 256
                 scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 8>
                     <<<blocks, threads, 0, stream>>>(grad_input,
@@ -905,7 +941,6 @@ void dispatch_scaled_masked_softmax_backward(
                                                      scale,
                                                      batch_count,
                                                      key_seq_len);
-                break;
                 break;
             case 9:  // 512
                 scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 9>
@@ -916,7 +951,6 @@ void dispatch_scaled_masked_softmax_backward(
                                                      batch_count,
                                                      key_seq_len);
                 break;
-                break;
             case 10:  // 1024
                 scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 10>
                     <<<blocks, threads, 0, stream>>>(grad_input,
@@ -925,7 +959,6 @@ void dispatch_scaled_masked_softmax_backward(
                                                      scale,
                                                      batch_count,
                                                      key_seq_len);
-                break;
                 break;
             case 11:  // 2048
                 scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 11>
@@ -936,7 +969,6 @@ void dispatch_scaled_masked_softmax_backward(
                                                      batch_count,
                                                      key_seq_len);
                 break;
-                break;
             case 12:  // 4096
                 scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 12>
                     <<<blocks, threads, 0, stream>>>(grad_input,
@@ -946,8 +978,24 @@ void dispatch_scaled_masked_softmax_backward(
                                                      batch_count,
                                                      key_seq_len);
                 break;
+            case 13:  // 8192
+                scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 13>
+                    <<<blocks, threads, 0, stream>>>(grad_input,
+                                                     grad,
+                                                     output,
+                                                     scale,
+                                                     batch_count,
+                                                     key_seq_len);
                 break;
-
+            case 14:  // 16384
+                scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 14>
+                    <<<blocks, threads, 0, stream>>>(grad_input,
+                                                     grad,
+                                                     output,
+                                                     scale,
+                                                     batch_count,
+                                                     key_seq_len);
+                break;
             default:
                 break;
         }

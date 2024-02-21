@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -22,5 +22,5 @@ then
   cp $TE_PATH/qa/L0_paddle_lint/pylintrc $TE_PATH
   cd $TE_PATH
   echo "Checking Python files"
-  pylint --recursive=y transformer_engine/common transformer_engine/paddle
+  python -m pylint --recursive=y transformer_engine/common transformer_engine/paddle
 fi

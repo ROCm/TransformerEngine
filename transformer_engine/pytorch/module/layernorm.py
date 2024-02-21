@@ -1,10 +1,11 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 """LayerNorm API"""
 import os
-from typing import Union, Tuple, Any, Mapping, Optional
+import warnings
+from typing import Union, Tuple, Optional
 
 import torch
 from torch.nn.parameter import Parameter
@@ -137,9 +138,9 @@ class LayerNorm(torch.nn.Module):
                 dtype=params_dtype,
             )
         )
-        setattr(self.weight, "sequence_parallel", sequence_parallel)
-        setattr(self.bias, "sequence_parallel", sequence_parallel)
-        self.reset_layer_norm_parameters()
+        self.sequence_parallel = sequence_parallel
+
+        self.reset_parameters(defer_init=(device == 'meta'))
 
         # These many SMs are subtracted from the total SM count when calling forward
         # and backward LayerNorm C APIs. These envvars can be used to prevent the LN
@@ -148,41 +149,38 @@ class LayerNorm(torch.nn.Module):
         self.fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
 
-    def load_state_dict(
-        self,
-        state_dict: Mapping[str, Any],
-        strict: bool = True,
-    ) -> None:
-        """Override PyTorch loader to maintain backward compatibility
-        with previous version of LayerNorm parameter names.
-        """
-        if "layer_norm_weight" in state_dict:
-            state_dict["weight"] = state_dict["layer_norm_weight"]
-            del state_dict["layer_norm_weight"]
-        if "layer_norm_bias" in state_dict:
-            state_dict["bias"] = state_dict["layer_norm_bias"]
-            del state_dict["layer_norm_bias"]
-
-        super().load_state_dict(state_dict, strict)
-
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
+        warnings.warn(
+            ("This method will be deprecated in an upcoming release. "
+             "Update your code to use LayerNorm.reset_parameters() instead."),
+            DeprecationWarning,
+            stacklevel=2
+        )
         if not self.zero_centered_gamma:
             init.ones_(self.weight)
         else:
             init.zeros_(self.weight)
         init.zeros_(self.bias)
 
+    def reset_parameters(self, defer_init=False) -> None:
+        """Init LayerNorm parameters"""
+        if defer_init:
+            return
 
-    @no_torch_dynamo
+        if self.weight.device == torch.device('meta'):
+            self.weight = torch.nn.Parameter(torch.empty_like(self.weight, device='cuda'))
+        setattr(self.weight, "sequence_parallel", self.sequence_parallel)
+        init.constant_(self.weight, float(not self.zero_centered_gamma))
+
+        if self.bias.device == torch.device('meta'):
+            self.bias = torch.nn.Parameter(torch.empty_like(self.bias, device='cuda'))
+        setattr(self.bias, "sequence_parallel", self.sequence_parallel)
+        init.zeros_(self.bias)
+
+    @no_torch_dynamo()
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
         """LayerNorm FWD"""
-        # Maintain backward compatibility.
-        if hasattr(self, "layer_norm_weight"):
-            setattr(self, "weight", self.layer_norm_weight)
-        if hasattr(self, "layer_norm_bias"):
-            setattr(self, "bias", self.layer_norm_bias)
-
         # Set the activation type for AMP.
         TransformerEngineBaseModule.set_activation_dtype(self, inp)
 
