@@ -1,27 +1,19 @@
 /*************************************************************************
-<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-=======
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
->>>>>>> upstream/main
  *
  * See LICENSE for license information.
  ************************************************************************/
 
 #include "common.h"
-<<<<<<< HEAD
 #ifndef USE_ROCM
-#include "../common.h"
-#endif
-=======
 #include "common/common.h"
+#endif
 
 /***************************************************************************************************
  * Attention
  **************************************************************************************************/
->>>>>>> upstream/main
 
 //TODO: support fused attn and flash attn for ROCm
 #ifndef USE_ROCM
@@ -559,10 +551,6 @@ at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
                                                        float scale_factor
 );
 
-<<<<<<< HEAD
-//TODO: support user buffer for ROCm
-#ifndef USE_ROCM
-=======
 
 at::Tensor scaled_aligned_causal_masked_softmax_forward(at::Tensor input,
                                                         float scale_factor
@@ -617,7 +605,8 @@ at::Tensor fused_rope_thd_backward(const at::Tensor &output_grads,
  * Miscellaneous
  **************************************************************************************************/
 
->>>>>>> upstream/main
+//TODO: support user buffer for ROCm
+#ifndef USE_ROCM
 size_t get_cublasLt_version();
 
 size_t get_cudnn_version();

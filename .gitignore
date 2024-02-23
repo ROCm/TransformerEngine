@@ -25,14 +25,11 @@ tests/cpp/build/
 docs/_build
 .ipynb_checkpoints
 docs/doxygen
-<<<<<<< HEAD
 CMakeCache.txt
 CMakeFiles
 build.ninja
 cuda_to_hip_list_tmp_*.txt
 hipify_output_dict_dump.txt
 cmake_install.cmake
-=======
 *.log
 CMakeFiles/CMakeSystem.cmake
->>>>>>> upstream/main

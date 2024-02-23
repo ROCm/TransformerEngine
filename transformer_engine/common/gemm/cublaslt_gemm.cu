@@ -1,49 +1,34 @@
 /*************************************************************************
-<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-=======
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
->>>>>>> upstream/main
  *
  * See LICENSE for license information.
  ************************************************************************/
 
-<<<<<<< HEAD
 #include <type_traits>
-#include <transformer_engine/transformer_engine.h>
-#include <transformer_engine/logging.h>
 #include <transformer_engine/gemm.h>
 #ifndef __HIP_PLATFORM_AMD__
 #include <cublasLt.h>
 #include <cublas_v2.h>
+#include <cuda.h>
 #else
 #define ROCBLAS_BETA_FEATURES_API 
 #include <rocblas/rocblas.h>
 #ifdef USE_HIPBLASLT
 #include <hipblaslt/hipblaslt.h>
 #endif // #ifdef USE_HIPBLASLT
-#endif
-#include "../common.h"
-#include "../util/vectorized_pointwise.h"
+#endif // #ifndef __HIP_PLATFORM_AMD__
 #ifdef __HIP_PLATFORM_AMD__
 #include <hipcub/hipcub.hpp>
 #include <iostream>
 #include <cstdlib>
 #include <string>
-#endif
-=======
-#include <transformer_engine/gemm.h>
-
-#include <cublasLt.h>
-#include <cublas_v2.h>
-#include <cuda.h>
+#endif //__HIP_PLATFORM_AMD__
 
 #include <transformer_engine/transformer_engine.h>
 #include "../common.h"
 #include "../util/logging.h"
->>>>>>> upstream/main
 
 namespace {
 
@@ -454,22 +439,6 @@ void nvte_cublas_gemm(const NVTETensor A,
         << " accumulate=" << accumulate
         << std::endl;
   }
-#ifdef USE_HIPBLASLT
-  cublas_gemm(inputA,
-              inputB,
-              outputD, 
-              biasTensor,
-              outputGelu,
-              m, n, k,
-              lda, ldb, ldd,
-              (transa) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
-              (transb) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
-              grad, wspace->data.dptr,
-              wspace->data.shape[0],
-              accumulate, use_split_accumulator,
-              math_sm_count,
-              stream);
-#else
   cublas_gemm(inputA,
               inputB,
               outputD,
@@ -477,8 +446,13 @@ void nvte_cublas_gemm(const NVTETensor A,
               outputGelu,
               m, n, k,
               lda, ldb, ldd,
+#ifdef USE_HIPBLASLT
+              (transa) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
+              (transb) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
+#else
               (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
               (transb) ? CUBLAS_OP_T : CUBLAS_OP_N,
+#endif
               grad, wspace->data.dptr,
               wspace->data.shape[0],
               accumulate, use_split_accumulator,
@@ -509,10 +483,12 @@ void nvte_cublas_atomic_gemm(const NVTETensor A,
                              cudaStream_t stream) {
   NVTE_API_CALL(nvte_cublas_atomic_gemm);
 
+#ifndef __HIP_PLATFORM_AMD__
   int cudart_version;
   NVTE_CHECK_CUDA(cudaRuntimeGetVersion(&cudart_version));
   NVTE_CHECK(cudart_version >= 12020, "Cuda version 12.2 is required for atomic gemm.");
   NVTE_CHECK(cublasLtGetVersion() >= 120205, "Cublas version 12.2.5 is required for atomic gemm.");
+#endif
 
   using namespace transformer_engine;
   const Tensor *inputA = reinterpret_cast<const Tensor*>(A);
@@ -550,8 +526,13 @@ void nvte_cublas_atomic_gemm(const NVTETensor A,
               outputGelu,
               m, n, k,
               lda, ldb, ldd,
+#ifdef USE_HIPBLASLT
+              (transa) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
+              (transb) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
+#else
               (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
               (transb) ? CUBLAS_OP_T : CUBLAS_OP_N,
+#endif
               grad, wspace->data.dptr,
               wspace->data.shape[0],
               accumulate, use_split_accumulator,
@@ -561,5 +542,4 @@ void nvte_cublas_atomic_gemm(const NVTETensor A,
               gemm_producer,
               inputCounter,
               stream);
-#endif
 }

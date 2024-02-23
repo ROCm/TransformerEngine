@@ -1,10 +1,6 @@
-<<<<<<< HEAD:transformer_engine/common/recipe.py
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2022-2023, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-=======
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
->>>>>>> upstream/main:transformer_engine/common/recipe/__init__.py
 #
 # See LICENSE for license information.
 
@@ -41,6 +37,7 @@ class Format(Enum):
             FP8 tensors in the backward pass are in e5m2 format
     """
 
+    #TODO: check NV H100 or AMD MI300 first
     E4M3 = _FormatHelper(max_fwd=240, max_bwd=240)
     E5M2 = _FormatHelper(max_fwd=57344, max_bwd=57344)
     HYBRID = _FormatHelper(max_fwd=E4M3.max_fwd, max_bwd=E5M2.max_bwd)

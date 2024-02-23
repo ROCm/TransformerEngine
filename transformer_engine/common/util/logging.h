@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -7,12 +9,22 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_
 #define TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_
 
+#include <string>
 #include <stdexcept>
 
-#include <cublas_v2.h>
 #include <cuda_runtime_api.h>
+#ifdef __HIP_PLATFORM_AMD__
+#define ROCBLAS_BETA_FEATURES_API
+#include <rocblas/rocblas.h>
+#ifdef USE_HIPBLASLT
+#include <hipblaslt/hipblaslt.h>
+#endif // #ifdef USE_HIPBLASLT
+#include <hip/hiprtc.h>
+#else
+#include <cublas_v2.h>
 #include <cudnn.h>
 #include <nvrtc.h>
+#endif // __HIP_PLATFORM_AMD__
 
 #include "../util/string.h"
 
@@ -42,6 +54,27 @@
     }                                                                   \
   } while (false)
 
+#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_HIPBLASLT //hipblaslt
+#define NVTE_CHECK_CUBLAS(expr)                                         \
+  do {                                                                  \
+    const hipblasStatus_t status_NVTE_CHECK_CUBLAS = (expr);             \
+    if (status_NVTE_CHECK_CUBLAS != CUBLAS_STATUS_SUCCESS) {            \
+      NVTE_ERROR("HIPBLASLT Error: ",                                   \
+                 std::to_string((int)status_NVTE_CHECK_CUBLAS));        \
+    }                                                                   \
+  } while (false)
+#else //rocblas
+#define NVTE_CHECK_CUBLAS(expr)                                         \
+  do {                                                                  \
+    const cublasStatus_t status_NVTE_CHECK_CUBLAS = (expr);             \
+    if (status_NVTE_CHECK_CUBLAS != CUBLAS_STATUS_SUCCESS) {            \
+      NVTE_ERROR("ROCBLAS Error: " +                                    \
+                 std::string(rocblas_status_to_string(status_NVTE_CHECK_CUBLAS)));      \
+    }                                                                   \
+  } while (false)
+#endif
+#else //cublas
 #define NVTE_CHECK_CUBLAS(expr)                                         \
   do {                                                                  \
     const cublasStatus_t status_NVTE_CHECK_CUBLAS = (expr);             \
@@ -50,6 +83,7 @@
                  cublasGetStatusString(status_NVTE_CHECK_CUBLAS));      \
     }                                                                   \
   } while (false)
+#endif
 
 #define NVTE_CHECK_CUDNN(expr)                                          \
   do {                                                                  \

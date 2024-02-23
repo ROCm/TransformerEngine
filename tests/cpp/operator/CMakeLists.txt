@@ -1,7 +1,6 @@
-<<<<<<< HEAD
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -13,10 +12,12 @@ list(APPEND test_cuda_sources
             test_cast_transpose_dbias_dgelu.cu
             test_cast_transpose_dgeglu.cu
             test_gelu.cu
+            test_geglu.cu
             test_dgeglu.cu
             test_layernorm.cu
             test_rmsnorm.cu
             test_multi_cast_transpose.cu
+            test_causal_softmax.cu
             ../test_common.cu)
 if(USE_CUDA)
   add_executable(test_operator ${test_cuda_sources})
@@ -24,27 +25,6 @@ else()
   message("${message_line}")
   message(STATUS "CMAKE_CURRENT_SOURCE_DIR: ${CMAKE_CURRENT_SOURCE_DIR}")
   message(STATUS "PROJECT_SOURCE_DIR: ${PROJECT_SOURCE_DIR}")
-=======
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
-# See LICENSE for license information.
-
-add_executable(test_operator
-               test_qdq.cu
-               test_cast_transpose.cu
-               test_transpose.cu
-               test_cast_transpose_dbias.cu
-               test_cast_transpose_dbias_dgelu.cu
-               test_cast_transpose_dgeglu.cu
-               test_gelu.cu
-               test_geglu.cu
-               test_dgeglu.cu
-               test_layernorm.cu
-               test_rmsnorm.cu
-               test_multi_cast_transpose.cu
-               test_causal_softmax.cu
-               ../test_common.cu)
->>>>>>> upstream/main
 
   set(TE ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
   set(THIRDPARTY ${TE}/3rdparty)

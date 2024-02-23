@@ -1,11 +1,7 @@
 /*************************************************************************
-<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-=======
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
->>>>>>> upstream/main
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -14,17 +10,10 @@
 
 #include <iostream>
 #include <memory>
-<<<<<<< HEAD
-#include <transformer_engine/transformer_engine.h>
-#include <transformer_engine/logging.h>
+#include <vector>
 #include <cuda_fp16.h>
 #ifndef USE_ROCM
-=======
-#include <vector>
-
->>>>>>> upstream/main
 #include <cuda_bf16.h>
-#include <cuda_fp16.h>
 #include <cuda_fp8.h>
 #else
 #include <hip/hip_bfloat16.h>

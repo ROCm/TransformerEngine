@@ -1,10 +1,6 @@
-<<<<<<< HEAD
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-=======
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
->>>>>>> upstream/main
 #
 # See LICENSE for license information.
 
@@ -19,8 +15,6 @@ if(((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) AND NOT (EXISTS "/bin/nvc
   set(USE_ROCM ON)
   set(USE_CUDA OFF)
 
-  # Add HIP to the CMAKE Module Path
-  # set(CMAKE_MODULE_PATH ${HIP_PATH}/cmake ${CMAKE_MODULE_PATH})
   # Disable Asserts In Code (Can't use asserts on HIP stack.)
   add_definitions(-DNDEBUG)
   add_definitions(-DUSE_ROCM)
@@ -49,8 +43,8 @@ if(USE_CUDA)
   set(CMAKE_CUDA_STANDARD 17)
   set(CMAKE_CUDA_STANDARD_REQUIRED ON)
   project(transformer_engine LANGUAGES CUDA CXX)
-  list(APPEND CMAKE_CUDA_FLAGS "--threads 4")
-  if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --threads 4")
+  if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
   endif()
 else()
@@ -62,12 +56,6 @@ else()
     list(APPEND CMAKE_HIP_FLAGS "-g")
   endif()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CMAKE_HIP_FLAGS}")
-
-<<<<<<< HEAD
-  # add_definitions(-D__HIP_NO_HALF_OPERATORS__=1)
-  # add_definitions(-D__HIP_NO_HALF_CONVERSIONS__=1)
-  # add_definitions(-D__HIP_NO_BFLOAT16_CONVERSIONS__=1)
-  # add_definitions(-D__HIP_NO_HALF2_OPERATORS__=1)
 
   set(HIP_HCC_FLAGS "${CMAKE_HIP_FLAGS} -mavx2 -mf16c -mfma -std=c++17")
   # Ask hcc to generate device code during compilation so we can use
@@ -81,23 +69,12 @@ else()
   list(APPEND CMAKE_MODULE_PATH "/opt/rocm")
 endif()
 
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/")
+list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/")
 if(USE_CUDA)
   find_package(CUDAToolkit REQUIRED cublas nvToolsExt)
   find_package(CUDNN REQUIRED cudnn)
 endif()
-find_package(Python COMPONENTS Interpreter Development REQUIRED)
-=======
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --threads 4")
-if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-  set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
-endif()
-
-list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/")
-find_package(CUDAToolkit REQUIRED cublas nvToolsExt)
-find_package(CUDNN REQUIRED cudnn)
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
->>>>>>> upstream/main
 
 include_directories(${PROJECT_SOURCE_DIR})
 

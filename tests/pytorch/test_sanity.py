@@ -1,10 +1,6 @@
-<<<<<<< HEAD
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-=======
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
->>>>>>> upstream/main
 #
 # See LICENSE for license information.
 
@@ -466,6 +462,9 @@ def test_sanity_gpt(dtype, fp8_recipe, model, skip_wgrad,
                     zero_centered_gamma, bias, activation,
                     normalization, parallel_attention_mlp,
                     cpu_offload):
+    if IS_HIP_EXTENSION and cpu_offload:
+      pytest.skip("cpu_offloading not supported in rocm TE")
+
     config = model_configs[model]
 
     if fp8_recipe is not None:
@@ -809,18 +808,9 @@ def test_sanity_gradient_accumulation_fusion(dtype, fp8_recipe, model, skip_wgra
 @pytest.mark.parametrize("normalization", all_normalizations)
 def test_gpt_cuda_graph(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma,
                         normalization):
-<<<<<<< HEAD
     if IS_HIP_EXTENSION:
         pytest.skip("hipGraph is not ready yet")
  
-    if fp8_recipe is not None and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-
-    if normalization == "RMSNorm" and zero_centered_gamma:
-        pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
-
-=======
->>>>>>> upstream/main
     config = model_configs[model]
 
     if fp8_recipe is not None:

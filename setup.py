@@ -1,10 +1,6 @@
-<<<<<<< HEAD
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-=======
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
->>>>>>> upstream/main
 #
 # See LICENSE for license information.
 
@@ -30,12 +26,6 @@ use_rocm = False
 if importlib.util.find_spec("torch") is not None:
   from torch.utils.cpp_extension import IS_HIP_EXTENSION
   if IS_HIP_EXTENSION:
-    use_cuda = False
-    use_rocm = True
-if importlib.util.find_spec("tensorflow") is not None:
-  from tensorflow.python.platform import sysconfig
-  sys_details = sysconfig.get_build_info()
-  if sys_details["is_rocm_build"]:
     use_cuda = False
     use_rocm = True
 
@@ -306,31 +296,15 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
         add_unique(setup_reqs, "ninja")
 
     # Framework-specific requirements
-<<<<<<< HEAD
     if use_cuda:
       if "pytorch" in frameworks():
-          add_unique(install_reqs, ["torch", "flash-attn>=1.0.6, <=2.0.4"])
-          add_unique(test_reqs, ["numpy", "onnxruntime", "torchvision"])
-=======
-    if "pytorch" in frameworks():
         add_unique(install_reqs, ["torch", "flash-attn>=2.0.6,<=2.4.2,!=2.0.9,!=2.1.0"])
         add_unique(test_reqs, ["numpy", "onnxruntime", "torchvision"])
->>>>>>> upstream/main
     if "jax" in frameworks():
         if not found_pybind11():
             add_unique(setup_reqs, "pybind11")
         add_unique(install_reqs, ["jax", "flax>=0.7.1"])
         add_unique(test_reqs, ["numpy", "praxis"])
-<<<<<<< HEAD
-    if "tensorflow" in frameworks():
-        if not found_pybind11():
-            add_unique(setup_reqs, "pybind11")
-        if use_cuda:
-          # assume tensorflow is already installed on rocm machines
-          add_unique(install_reqs, "tensorflow")
-        add_unique(test_reqs, ["keras", "tensorflow_datasets"])
-=======
->>>>>>> upstream/main
     if "paddle" in frameworks():
         add_unique(install_reqs, "paddlepaddle-gpu")
         add_unique(test_reqs, "numpy")
@@ -486,13 +460,6 @@ def setup_common_extension() -> CMakeExtension:
 
     if "jax" in frameworks():
         cmake_flags.append("-DENABLE_JAX=ON")
-<<<<<<< HEAD
-    if "tensorflow" in frameworks():
-        cmake_flags.append("-DENABLE_TENSORFLOW=ON")
-        if use_rocm:
-          cmake_flags.append("-DCMAKE_PREFIX_PATH=/opt/rocm")
-=======
->>>>>>> upstream/main
     if with_userbuffers():
         cmake_flags.append("-DNVTE_WITH_USERBUFFERS=ON")
     return CMakeExtension(
@@ -518,38 +485,32 @@ def setup_pytorch_extension() -> setuptools.Extension:
       sources.extend([ 
         extensions_dir/"transpose.cu",
         extensions_dir/"softmax.cu",
+        extensions_dir/"recipe.cu",
         extensions_dir/"normalization.cu",
         extensions_dir/"misc.cu",
         extensions_dir/"gemm.cu",
         extensions_dir/"cast.cu",
         extensions_dir/"activation.cu",
+        extensions_dir/"apply_rope.cu",
         extensions_dir/"pybind.cpp",
       ])
     else:
       sources.extend(_all_files_in_dir(extensions_dir))
 
     # Header files
-<<<<<<< HEAD
     if use_rocm:
       include_dirs = [
           root_path / "transformer_engine" / "common" / "include",
           root_path / "transformer_engine" / "pytorch" / "csrc",
+          root_path / "transformer_engine",
       ]
     else:
       include_dirs = [
           root_path / "transformer_engine" / "common" / "include",
           root_path / "transformer_engine" / "pytorch" / "csrc",
+          root_path / "transformer_engine",
           root_path / "3rdparty" / "cudnn-frontend" / "include",
       ]
-=======
-    include_dirs = [
-        root_path / "transformer_engine" / "common" / "include",
-        root_path / "transformer_engine" / "pytorch" / "csrc",
-        root_path / "transformer_engine",
-        root_path / "3rdparty" / "cudnn-frontend" / "include",
-    ]
->>>>>>> upstream/main
-
     # Compiler flags
     cxx_flags = ["-O3"]
     if use_rocm:

@@ -1,11 +1,7 @@
 /*************************************************************************
-<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-=======
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
->>>>>>> upstream/main
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -69,14 +65,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                   "Fused Attention FP8/BF16/FP16 FWD with packed KV");
   m.def("fused_attn_bwd_kvpacked", &fused_attn_bwd_kvpacked,
                   "Fused Attention FP8/BF16/FP16 BWD with packed KV");
-<<<<<<< HEAD
-#endif
-=======
   m.def("fused_attn_fwd", &fused_attn_fwd,
                   "Fused Attention FP8/BF16/FP16 FWD with separate Q, K and V");
   m.def("fused_attn_bwd", &fused_attn_bwd,
                   "Fused Attention FP8/BF16/FP16 BWD with separate Q, K and V");
->>>>>>> upstream/main
+  m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention");
+  m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention");
+  m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend");
+#endif
   m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O");
   m.def("gelu", &gelu, "GeLU with FP8 output");
   m.def("relu", &relu, "ReLU with FP8 output");
@@ -89,17 +85,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("dgeglu", &dgeglu, "Backward of GeGLU");
   m.def("dreglu", &dreglu, "Backward of ReGLU");
   m.def("dswiglu", &dswiglu, "Backward of SwiGLU");
-<<<<<<< HEAD
-#ifndef USE_ROCM
-  m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention");
-  m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention");
-  m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend");
-#endif
-=======
   m.def("dqgelu", &dqgelu, "Backward of QuickGELU");
-  m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention");
-  m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention");
-  m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend");
   m.def("fused_amax_and_scale_update",
         &fused_amax_and_scale_update,
         "Update amax history and FP8 scale");
@@ -109,7 +95,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fused_rope_backward", &fused_rope_backward, "Fused Apply RoPE BWD");
   m.def("fused_rope_thd_forward", &fused_rope_thd_forward, "Fused Apply RoPE FWD for thd format");
   m.def("fused_rope_thd_backward", &fused_rope_thd_backward, "Fused Apply RoPE BWD for thd format");
->>>>>>> upstream/main
 
   // Misc
 #ifndef USE_ROCM
@@ -184,6 +169,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .value("GRAD_OUTPUT3", transformer_engine::FP8BwdTensors::GRAD_OUTPUT3)
     .value("GRAD_INPUT3", transformer_engine::FP8BwdTensors::GRAD_INPUT3);
 
+#ifndef USE_ROCM
   py::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type")
       .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)
       .value("NVTE_PRE_SCALE_BIAS", NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS)
@@ -218,4 +204,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)
       .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8)
       .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend);
+#endif
 }

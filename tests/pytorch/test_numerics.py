@@ -1,10 +1,6 @@
-<<<<<<< HEAD
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-=======
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
->>>>>>> upstream/main
 #
 # See LICENSE for license information.
 
@@ -17,12 +13,7 @@ import copy
 import torch
 import torch.nn as nn
 from torch.nn import Parameter
-<<<<<<< HEAD
-from torch import _C
-from torch.cuda import _lazy_call, device as device_ctx_manager
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
-=======
->>>>>>> upstream/main
 
 from transformer_engine.pytorch.fp8 import fp8_autocast, FP8GlobalStateManager, fp8_model_init
 from transformer_engine.pytorch.utils import (
@@ -651,19 +642,14 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
 def test_gpt_checkpointing(dtype, bs, model):
     config = model_configs[model]
     outputs = _test_e2e_checkpointing(bs, dtype, config, checkpoint=False)
-<<<<<<< HEAD
-    outputs_recompute = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
+    outputs_checkpoint = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
     if IS_HIP_EXTENSION:
       # Relax to all close for rocm. We don't have bit-to-bit reproducibility
       # when running rocblas path mainly due to the usage of atomics
       # Need to check whether hipBlasLt path has reproducibility
-      assert_allclose(outputs, outputs_recompute, 5e-5)
+      assert_allclose(outputs, outputs_checkpoint, 5e-5)
     else: 
-      assert_all_equal(outputs, outputs_recompute)
-=======
-    outputs_checkpoint = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
-    assert_all_equal(outputs, outputs_checkpoint)
->>>>>>> upstream/main
+      assert_all_equal(outputs, outputs_checkpoint)
 
 
 def _test_e2e_gpt_accuracy(block, bs, dtype, config):

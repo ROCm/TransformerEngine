@@ -1,23 +1,11 @@
 /*************************************************************************
-<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-=======
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
->>>>>>> upstream/main
  *
  * See LICENSE for license information.
  ************************************************************************/
 
-<<<<<<< HEAD
-#include <cuda_runtime.h>
-#include <cuda_bf16.h>
-#include <gtest/gtest.h>
-#include <transformer_engine/rmsnorm.h>
-#include <transformer_engine/transformer_engine.h>
-=======
->>>>>>> upstream/main
 #include <cmath>
 #include <cstring>
 #include <iomanip>

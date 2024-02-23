@@ -1,11 +1,7 @@
 /*************************************************************************
-<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-=======
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
->>>>>>> upstream/main
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -13,22 +9,6 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_COMMON_H_
 #define TRANSFORMER_ENGINE_COMMON_COMMON_H_
 
-<<<<<<< HEAD
-#include <transformer_engine/transformer_engine.h>
-#include <transformer_engine/logging.h>
-#include <cuda_fp16.h>
-#ifndef __HIP_PLATFORM_AMD__
-#include <cuda_bf16.h>
-#include <cuda_fp8.h>
-#else
-#include <hip/hip_bfloat16.h>
-#include "amd_detail/hip_float8.h"
-#endif
-#include <cuda_runtime_api.h>
-#include <type_traits>
-#include <unordered_map>
-=======
->>>>>>> upstream/main
 #include <functional>
 #include <stdexcept>
 #include <string>
@@ -37,9 +17,14 @@
 #include <unordered_map>
 #include <vector>
 
-#include <cuda_bf16.h>
 #include <cuda_fp16.h>
+#ifndef __HIP_PLATFORM_AMD__
+#include <cuda_bf16.h>
 #include <cuda_fp8.h>
+#else
+#include <hip/hip_bfloat16.h>
+#include "amd_detail/hip_float8.h"
+#endif // __HIP_PLATFORM_AMD__
 #include <cuda_runtime_api.h>
 
 #include <transformer_engine/transformer_engine.h>

@@ -1,11 +1,7 @@
 /*************************************************************************
-<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-=======
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
->>>>>>> upstream/main
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -29,32 +25,17 @@
 #include <ATen/cudnn/Handle.h>
 #include <ATen/native/DispatchStub.h>
 #include <c10/macros/Macros.h>
-#include <cublasLt.h>
-#include <cuda.h>
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
-#include <cudnn.h>
 #include <torch/extension.h>
 #include <torch/torch.h>
-<<<<<<< HEAD
-#include <cuda.h>
 #include <cuda_runtime.h>
-
 #ifndef USE_ROCM
 #include <cuda_bf16.h>
 #include <cublasLt.h>
+#include <cuda.h>
+#include <cudnn.h>
 #else
 #include <hip/hip_bfloat16.h>
 #endif
-#include <stdexcept>
-#include <memory>
-#include <iomanip>
-#include <random>
-#include <cstring>
-#include <vector>
-#include <iostream>
-=======
->>>>>>> upstream/main
 
 #include "common/util/logging.h"
 #include <transformer_engine/activation.h>

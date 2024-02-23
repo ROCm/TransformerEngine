@@ -99,10 +99,14 @@ struct Max {
 template<typename T>
 __device__ __forceinline__ T WARP_SHFL_XOR_NATIVE(T value, int laneMask, int width = warpSize,
                                                   unsigned int mask = 0xffffffff) {
+#ifdef __HIP_PLATFORM_HCC__
+    return __shfl_xor(value, laneMask, width);
+#else
 #if CUDA_VERSION >= 9000
     return __shfl_xor_sync(mask, value, laneMask, width);
 #else
     return __shfl_xor(value, laneMask, width);
+#endif
 #endif
 }
 
@@ -222,8 +226,10 @@ __global__ void scaled_aligned_causal_masked_softmax_warp_forward(
         }
     }
     warp_reduce<acc_t, WARP_ROWS, WARP_WIDTH, Add>(sum);
-
-    output_t out[ELEMENTS_PER_LDG_STG] { 0.0f };
+    
+    //output_t out[ELEMENTS_PER_LDG_STG] { 0.0f };
+    output_t zero_output_t(0.0f);
+    output_t out[ELEMENTS_PER_LDG_STG] { zero_output_t };
     // store result
     #pragma unroll
     for (int w = 0;  w < WARP_ROWS;  ++w) {
@@ -482,7 +488,7 @@ template<typename input_t, typename output_t, typename acc_t>
 void dispatch_scaled_aligned_causal_masked_softmax_forward(
     output_t *dst,
     const input_t *src,
-    const input_t scale,
+    const acc_t scale,
     int query_seq_len,
     int key_seq_len,
     int batches,

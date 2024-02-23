@@ -1,91 +1,87 @@
-<<<<<<< HEAD
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2022-2023, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-=======
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
->>>>>>> upstream/main
 #
 # See LICENSE for license information.
 
 # process source code files
 set(transformer_engine_SOURCES)
 if(USE_CUDA)
-list(APPEND transformer_engine_SOURCES
-     transformer_engine.cpp
-     transpose/cast_transpose.cu
-     transpose/transpose.cu
-     transpose/cast_transpose_fusion.cu
-     transpose/transpose_fusion.cu
-     transpose/multi_cast_transpose.cu
-     activation/gelu.cu
-     fused_attn/fused_attn_f16_max512_seqlen.cu
-     fused_attn/fused_attn_f16_arbitrary_seqlen.cu
-     activation/relu.cu
-     activation/swiglu.cu
-     fused_attn/fused_attn_fp8.cu
-     fused_attn/fused_attn.cpp
-     fused_attn/utils.cu
-     gemm/cublaslt_gemm.cu
-     layer_norm/ln_api.cpp
-     layer_norm/ln_bwd_semi_cuda_kernel.cu
-     layer_norm/ln_fwd_cuda_kernel.cu
-     rmsnorm/rmsnorm_api.cpp
-     rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
-     rmsnorm/rmsnorm_fwd_cuda_kernel.cu
-     util/cast.cu
-     util/cuda_driver.cpp
-     util/cuda_runtime.cpp
-     util/rtc.cpp
-     util/system.cpp
-     fused_softmax/scaled_masked_softmax.cu
-<<<<<<< HEAD
-     fused_softmax/scaled_upper_triang_masked_softmax.cu)
+  list(APPEND transformer_engine_SOURCES
+       transformer_engine.cpp
+       transpose/cast_transpose.cu
+       transpose/transpose.cu
+       transpose/cast_transpose_fusion.cu
+       transpose/transpose_fusion.cu
+       transpose/multi_cast_transpose.cu
+       activation/gelu.cu
+       fused_attn/fused_attn_f16_max512_seqlen.cu
+       fused_attn/fused_attn_f16_arbitrary_seqlen.cu
+       activation/relu.cu
+       activation/swiglu.cu
+       fused_attn/fused_attn_fp8.cu
+       fused_attn/fused_attn.cpp
+       fused_attn/utils.cu
+       gemm/cublaslt_gemm.cu
+       layer_norm/ln_api.cpp
+       layer_norm/ln_bwd_semi_cuda_kernel.cu
+       layer_norm/ln_fwd_cuda_kernel.cu
+       rmsnorm/rmsnorm_api.cpp
+       rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
+       rmsnorm/rmsnorm_fwd_cuda_kernel.cu
+       util/cast.cu
+       util/cuda_driver.cpp
+       util/cuda_runtime.cpp
+       util/rtc.cpp
+       util/system.cpp
+       fused_softmax/scaled_masked_softmax.cu
+       fused_softmax/scaled_upper_triang_masked_softmax.cu
+       fused_softmax/scaled_aligned_causal_masked_softmax.cu
+       fused_rope/fused_rope.cu
+       recipe/delayed_scaling.cu)
 else()
-list(APPEND transformer_engine_SOURCES
-     transformer_engine.cpp
-     transpose/cast_transpose.cu
-     transpose/transpose.cu
-     transpose/cast_transpose_fusion.cu
-     transpose/transpose_fusion.cu
-     transpose/multi_cast_transpose.cu
-     activation/gelu.cu
-     activation/relu.cu
-     activation/swiglu.cu
-     gemm/cublaslt_gemm.cu
-     layer_norm/ln_api.cpp
-     layer_norm/ln_bwd_semi_cuda_kernel.cu
-     layer_norm/ln_fwd_cuda_kernel.cu
-     rmsnorm/rmsnorm_api.cpp
-     rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
-     rmsnorm/rmsnorm_fwd_cuda_kernel.cu
-     util/cast.cu
-     util/cuda_driver.cpp
-     util/cuda_runtime.cpp
-     util/rtc.cpp
-     util/system.cpp
-     fused_softmax/scaled_masked_softmax.cu
-     fused_softmax/scaled_upper_triang_masked_softmax.cu)
-=======
-     fused_softmax/scaled_upper_triang_masked_softmax.cu
-     fused_softmax/scaled_aligned_causal_masked_softmax.cu
-     fused_rope/fused_rope.cu
-     recipe/delayed_scaling.cu)
-add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
-target_include_directories(transformer_engine PUBLIC
-                           "${CMAKE_CURRENT_SOURCE_DIR}/include")
-
-# Check for cuDNN frontend API
-set(CUDNN_FRONTEND_INCLUDE_DIR
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
-if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
-    message(FATAL_ERROR
-            "Could not find cuDNN frontend API. "
-            "Try running 'git submodule update --init --recursive' "
-            "within the Transformer Engine source.")
->>>>>>> upstream/main
+  list(APPEND transformer_engine_SOURCES
+       transformer_engine.cpp
+       transpose/cast_transpose.cu
+       transpose/transpose.cu
+       transpose/cast_transpose_fusion.cu
+       transpose/transpose_fusion.cu
+       transpose/multi_cast_transpose.cu
+       activation/gelu.cu
+       activation/relu.cu
+       activation/swiglu.cu
+       gemm/cublaslt_gemm.cu
+       layer_norm/ln_api.cpp
+       layer_norm/ln_bwd_semi_cuda_kernel.cu
+       layer_norm/ln_fwd_cuda_kernel.cu
+       rmsnorm/rmsnorm_api.cpp
+       rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
+       rmsnorm/rmsnorm_fwd_cuda_kernel.cu
+       util/cast.cu
+       util/cuda_driver.cpp
+       util/cuda_runtime.cpp
+       util/rtc.cpp
+       util/system.cpp
+       fused_softmax/scaled_masked_softmax.cu
+       fused_softmax/scaled_upper_triang_masked_softmax.cu
+       fused_softmax/scaled_aligned_causal_masked_softmax.cu
+       fused_rope/fused_rope.cu
+       recipe/delayed_scaling.cu)
 endif()
 
+if(USE_CUDA)
+  # Check for cuDNN frontend API
+  set(CUDNN_FRONTEND_INCLUDE_DIR
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
+  if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
+      message(FATAL_ERROR
+              "Could not find cuDNN frontend API. "
+              "Try running 'git submodule update --init --recursive' "
+              "within the Transformer Engine source.")
+  endif()
+endif()
+
+# process source code files
 if(USE_CUDA)
   add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 else()
@@ -165,17 +161,6 @@ endif()
 
 # find and process package dependency
 if(USE_CUDA)
-  find_package(CUDAToolkit REQUIRED cublas)
-  # Check for cuDNN frontend API
-  set(CUDNN_FRONTEND_INCLUDE_DIR
-      "${CMAKE_SOURCE_DIR}/../3rdparty/cudnn-frontend/include")
-  if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
-      message(FATAL_ERROR
-              "Could not find cuDNN frontend API. "
-              "Try running 'git submodule update --init --recursive' "
-              "within the Transformer Engine source.")
-  endif()
-
   list(APPEND transformer_engine_LINKER_LIBS 
        CUDA::cublas
        CUDA::cuda_driver

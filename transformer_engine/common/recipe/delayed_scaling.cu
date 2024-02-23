@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -30,7 +32,11 @@ const char* dtype_name(DType dtype) {
 // Maximum representable value of an FP8 dtype
 inline float fp8_dtype_max(DType dtype) {
   switch (dtype) {
+#ifndef __HIP_PLATFORM_AMD__
   case DType::kFloat8E4M3: return 448;
+#else
+  case DType::kFloat8E4M3: return 240;
+#endif
   case DType::kFloat8E5M2: return 57344;
   default:
     NVTE_ERROR("Expected FP8 dtype, but got ", dtype_name(dtype));

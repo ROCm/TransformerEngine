@@ -1,13 +1,9 @@
 ..
-<<<<<<< HEAD
 		This file was modified to include portability information to AMDGPU.
 
     Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
 
-    Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-=======
     Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
->>>>>>> upstream/main
 
     See LICENSE for license information.
 
@@ -23,10 +19,11 @@ Moreover, we add optimizations specific to AMD GPUs to get the best performance 
 Feature Support Status
 ----------------------
 
-* Activation, cast, fused softmax, layernorm, rmsnorm, transpose, HipRTC: fully supported
+* Activation, cast, fused softmax, layernorm, rmsnorm, transpose, fused rope, fp8 recipe, HipRTC: fully supported
 * GEMM: partially supported with following input/output types: (fp32/fp32), (fp16/fp16), (bf16/bf16), (fp8, bf8/fp16, bf16, fp32)
 * Attention (Flash Attention, Fused Multihead Attention): not supported
 * HipGraph, HipTX: partially supported
+* Tensor Parallism: not supported
 
 Installation
 ------------
@@ -61,19 +58,28 @@ After a successful Transformer Engine installation via `pip install`, execute th
 .. code-block:: bash
 
   cd tests/cpp
-  cmake .
+  mkdir build
+  cd build
+  cmake ../
   make
   make test
 
 Framework Integration pytests
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The following two Pytorch integration pytests are supported: 
+The following Pytorch integration pytests are supported: 
 
 .. code-block:: bash
 
   tests/pytorch/test_sanity.py
+  tests/pytorch/test_sanity_import.py
   tests/pytorch/test_numerics.py
+  tests/pytorch/test_recipe.py
+  tests/pytorch/test_float8tensor.py
+  tests/pytorch/test_jit.py
+  tests/pytorch/test_torch_save_load.py
+  tests/pytorch/test_fused_rope.py
+  tests/pytorch/test_deferred_init.py
 
 Execute the following command to test them after a successfuly installation with Pytorch. 
 
