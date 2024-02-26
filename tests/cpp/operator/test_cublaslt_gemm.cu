@@ -10,6 +10,7 @@
 #include <cuda_bf16.h>
 #include <memory>
 #include <iostream>
+#include <fstream>
 #include <iomanip>
 #include <random>
 #include <cstring>
@@ -194,9 +195,20 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
   auto [atol, rtol] = getTolerances(dtype);
   //relax for certain prime number gemm
   if (dtype == DType::kFloat32) {
-    atol = 1e-5;
+    atol = 1e-6;
   }
   compareResults("D", D, ref_D.get(), atol, rtol);
+
+  //print out binary A file, B file, and D file
+  std::ofstream AFile("A.bin", std::ofstream::binary);
+  std::ofstream BFile("B.bin", std::ofstream::binary);
+  std::ofstream DFile("D.bin", std::ofstream::binary);
+  AFile.write(reinterpret_cast<const char*>(A.cpu_dptr<A_Type>()), sizeof(float)*m*k);
+  BFile.write(reinterpret_cast<const char*>(B.cpu_dptr<B_Type>()), sizeof(float)*k*n);
+  DFile.write(reinterpret_cast<const char*>(ref_D.get()), sizeof(float)*m*n);
+  AFile.close();
+  BFile.close();
+  DFile.close();
 
   if(use_gelu){
     auto [atol, rtol] = getTolerances(gelu_type);
