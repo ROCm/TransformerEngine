@@ -137,10 +137,15 @@ def _test_sanity_e2e_cuda_graph(block, bs, dtype, config, fp8_recipe, skip_wgrad
             optimizer.step()
     torch.cuda.current_stream().wait_stream(s)
 
+    # ROCm transformer layer with enabled wgrad requires re-using of warm up
+    # stream for capturing
+    if not IS_HIP_EXTENSION or skip_wgrad:
+        s = None
+
     # Capture.
     g = torch.cuda.CUDAGraph()
     optimizer.zero_grad(set_to_none=True)
-    with torch.cuda.graph(g):
+    with torch.cuda.graph(g, stream=s):
         with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
             static_output = block(static_input)
         static_loss = loss_fn(static_output, static_target)
@@ -758,9 +763,6 @@ def test_sanity_gradient_accumulation_fusion(dtype, bs, fp8_recipe, model, skip_
 @pytest.mark.parametrize("normalization", all_normalizations)
 def test_gpt_cuda_graph(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma,
                         normalization):
-    if IS_HIP_EXTENSION:
-        pytest.skip("hipGraph is not ready yet")
- 
     if fp8_recipe is not None and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
