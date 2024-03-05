@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved. 
  * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -6,7 +8,11 @@
 #include <cuda_runtime_api.h>
 #include <cassert>
 
+#ifndef USE_ROCM
 #include "common/util/cuda_runtime.h"
+#else
+#include "common/util/hip_runtime.h"
+#endif
 #include "utils.h"
 
 namespace transformer_engine {
@@ -28,6 +34,7 @@ __global__ void populate_rng_state_kernel(int64_t *rng_state_dst, const int64_t 
     rng_state_dst[1] = offset;
 }
 
+#ifndef USE_ROCM
 void PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t q_max_seqlen,
                            size_t kv_max_seqlen, NVTE_Fused_Attn_Backend backend,
                            cudaStream_t stream) {
@@ -43,6 +50,7 @@ void PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t q
                                                    reinterpret_cast<const int64_t *>(seed), offset);
     NVTE_CHECK_CUDA(cudaGetLastError());
 }
+#endif
 
 }  // namespace jax
 }  // namespace transformer_engine

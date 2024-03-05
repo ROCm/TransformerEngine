@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved. 
  * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -17,7 +19,9 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#ifndef USE_ROCM
 #include "transformer_engine/fused_attn.h"
+#endif
 #include "transformer_engine/logging.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -95,6 +99,7 @@ pybind11::bytes PackCustomCallSoftmaxDescriptor(size_t batch, size_t pad_batch, 
                                                 size_t q_seqlen, size_t k_seqlen, DType dtype,
                                                 float scale_factor);
 
+#ifndef USE_ROCM
 struct CustomCallFusedAttnDescriptor {
     size_t batch;
     size_t num_head;
@@ -119,6 +124,7 @@ NVTE_Fused_Attn_Backend GetFusedAttnBackend(DType q_dtype, DType kv_dtype,
                                             NVTE_Mask_Type mask_type, float dropout_probability,
                                             size_t q_max_seqlen, size_t kv_max_seqlen,
                                             size_t head_dim);
+#endif
 
 void Transpose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
@@ -170,6 +176,7 @@ void ScaledUpperTriangMaskedSoftmaxForward(cudaStream_t stream, void **buffers, 
 void ScaledUpperTriangMaskedSoftmaxBackward(cudaStream_t stream, void **buffers, const char *opaque,
                                             std::size_t opaque_len);
 
+#ifndef USE_ROCM
 void SelfFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque,
                           size_t opaque_len);
 
@@ -181,6 +188,7 @@ void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaq
 
 void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque,
                             size_t opaque_len);
+#endif
 
 }  // namespace jax
 }  // namespace transformer_engine

@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -13,8 +15,13 @@ import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
 
 from transformer_engine_jax import DType
-from transformer_engine_jax import get_cublasLt_version
-from transformer_engine_jax import get_cuda_version, get_device_compute_capability
+from .util import is_hip_extension
+
+if not is_hip_extension():
+  from transformer_engine_jax import get_cublasLt_version
+  from transformer_engine_jax import get_cuda_version, get_device_compute_capability
+else:
+  from transformer_engine_jax import get_device_compute_capability
 from transformer_engine.common.recipe import DelayedScaling, Format
 from transformer_engine.jax.sharding import global_shard_guard
 from transformer_engine.jax.sharding import ShardingResource
