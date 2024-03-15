@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -18,6 +20,7 @@ from jax import nn as jax_nn
 from jax import random as jax_random
 
 from transformer_engine.jax.fp8 import DType as TEDType
+from transformer_engine.jax import jnp_float8_e4m3_type, jnp_float8_e5m2_type
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
@@ -1189,8 +1192,8 @@ def dtype_tols(
             TEDType.kFloat32: jnp.float32,
             TEDType.kFloat16: jnp.float16,
             TEDType.kBFloat16: jnp.bfloat16,
-            TEDType.kFloat8E4M3: jnp.float8_e4m3fn,
-            TEDType.kFloat8E5M2: jnp.float8_e5m2,
+            TEDType.kFloat8E4M3: jnp_float8_e4m3_type,
+            TEDType.kFloat8E5M2: jnp_float8_e5m2_type,
         }[dtype]
     elif isinstance(dtype, np.dtype):
         dtype = jnp.dtype(dtype)

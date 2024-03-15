@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -23,9 +25,12 @@ from jax.ad_checkpoint import checkpoint_name
 
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
-from ..fused_attn import AttnBiasType, AttnMaskType, QKVLayout
-from ..fused_attn import is_fused_attn_kernel_available
-from ..fused_attn import self_fused_attn, cross_fused_attn
+from ..util import is_hip_extension
+
+if not is_hip_extension():
+    from ..fused_attn import AttnBiasType, AttnMaskType, QKVLayout
+    from ..fused_attn import is_fused_attn_kernel_available
+    from ..fused_attn import self_fused_attn, cross_fused_attn
 from ..softmax import SoftmaxType
 from ..sharding import num_of_devices
 from ..sharding import get_sharding_map_logic_axis_to_mesh_axis
@@ -450,35 +455,42 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
 
             return jnp.stack([k_kernel, v_kernel], axis=-2, dtype=dtype)
 
-        # TODO(rewang): make it configurable for pre_scale_bias
-        attn_bias_type = AttnBiasType.NO_BIAS if bias is None else AttnBiasType.POST_SCALE_BIAS
+        if not is_hip_extension():
+            # TODO(rewang): make it configurable for pre_scale_bias
+            attn_bias_type = AttnBiasType.NO_BIAS if bias is None else AttnBiasType.POST_SCALE_BIAS
 
-        def canonicalize_attn_mask_type(attn_mask_type):
-            """
-            Convert the string to AttnMaskType
-            """
-            if attn_mask_type == 'causal':
-                return AttnMaskType.PADDING_CAUSAL_MASK
-            if attn_mask_type == 'padding':
-                return AttnMaskType.PADDING_MASK
-            raise ValueError(f"Unsupported {attn_mask_type=}, "
-                             "supported attn_mask_type = {'causal', 'padding'}")
+            def canonicalize_attn_mask_type(attn_mask_type):
+                """
+                Convert the string to AttnMaskType
+                """
+                if attn_mask_type == 'causal':
+                    return AttnMaskType.PADDING_CAUSAL_MASK
+                if attn_mask_type == 'padding':
+                    return AttnMaskType.PADDING_MASK
+                raise ValueError(f"Unsupported {attn_mask_type=}, "
+                                 "supported attn_mask_type = {'causal', 'padding'}")
+
+            qkv_layout = QKVLayout.BS3HD if is_self_attn else QKVLayout.BSHD_BS2HD
+            attn_mask_type = canonicalize_attn_mask_type(self.attn_mask_type)
 
         is_self_attn = (inputs_q is inputs_kv)
         is_gqa = (self.num_heads != self.num_gqa_groups)
         is_qkvpack = (is_self_attn and not is_gqa)
-        qkv_layout = QKVLayout.BS3HD if is_self_attn else QKVLayout.BSHD_BS2HD
-        attn_mask_type = canonicalize_attn_mask_type(self.attn_mask_type)
 
         q_seqlen = inputs_q.shape[0] if self.transpose_batch_sequence else inputs_q.shape[1]
         kv_seqlen = inputs_kv.shape[0] if self.transpose_batch_sequence else inputs_kv.shape[1]
         enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "0"))
 
-        has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype, qkv_layout,
-                                                               attn_bias_type, attn_mask_type,
-                                                               self.dropout_rate, self.num_heads,
-                                                               self.num_gqa_groups, q_seqlen,
-                                                               kv_seqlen, self.head_dim)
+        #TODO: add back once fused_attn is supported in rocm
+        if not is_hip_extension():
+            has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype, qkv_layout,
+                                                                   attn_bias_type, attn_mask_type,
+                                                                   self.dropout_rate, self.num_heads,
+                                                                   self.num_gqa_groups, q_seqlen,
+                                                                   kv_seqlen, self.head_dim)
+                                                                   
+        else:
+            has_fused_attn_kernel = False
 
         use_fused_attn = not decode and not self.transpose_batch_sequence and self.fuse_qkv and \
             has_fused_attn_kernel and \

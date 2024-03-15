@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -13,12 +15,24 @@ import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
 
 from transformer_engine_jax import DType
-from transformer_engine_jax import get_cublasLt_version
-from transformer_engine_jax import get_cuda_version, get_device_compute_capability
+from .util import is_hip_extension
+
+if not is_hip_extension():
+  from transformer_engine_jax import get_cublasLt_version
+  from transformer_engine_jax import get_cuda_version, get_device_compute_capability
+else:
+  from transformer_engine_jax import get_device_compute_capability
 from transformer_engine.common.recipe import DelayedScaling, Format
 from transformer_engine.jax.sharding import global_shard_guard
 from transformer_engine.jax.sharding import MeshResource
 
+if not is_hip_extension():
+    jnp_float8_e4m3_type = jnp.float8_e4m3fn
+    jnp_float8_e5m2_type = jnp.float8_e5m2
+else:
+    jnp_float8_e4m3_type = jnp.float8_e4m3fnuz
+    jnp_float8_e5m2_type = jnp.float8_e5m2fnuz
+ 
 _is_fp8_available = None
 _reason_for_no_fp8 = ""
 Collection = Union[Dict, FrozenDict]
@@ -59,11 +73,11 @@ def is_fp8_available(gpu_id=None) -> Tuple[bool, str]:
 
 def _format2dtypes(format_: Format):
     if format_ == Format.E4M3:
-        return jnp.float8_e4m3fn, jnp.float8_e4m3fn
+        return jnp_float8_e4m3_type, jnp_float8_e4m3_type
     if format_ == Format.E5M2:
-        return jnp.float8_e5m2, jnp.float8_e5m2
+        return jnp_float8_e5m2_type, jnp_float8_e5m2_type
     if format_ == Format.HYBRID:
-        return jnp.float8_e4m3fn, jnp.float8_e5m2
+        return jnp_float8_e4m3_type, jnp_float8_e5m2_type
     return jnp.bfloat16, jnp.bfloat16
 
 

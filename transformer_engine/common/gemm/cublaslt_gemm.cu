@@ -19,6 +19,8 @@
 #include <hipblaslt/hipblaslt.h>
 #endif // #ifdef USE_HIPBLASLT
 #endif // #ifndef __HIP_PLATFORM_AMD__
+#include "../common.h"
+#include "../util/vectorized_pointwise.h"
 #ifdef __HIP_PLATFORM_AMD__
 #include <hipcub/hipcub.hpp>
 #include <iostream>

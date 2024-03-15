@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved. 
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -6,12 +8,14 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+//TODO: add back once fused_attn is supported
+#ifndef USE_ROCM
 #include <cublasLt.h>
-
-#include "common/include/transformer_engine/fused_attn.h"
-#include "common/include/transformer_engine/transformer_engine.h"
-#include "jax/csrc/modules.h"
-#include "jax/csrc/utils.h"
+#include "transformer_engine/fused_attn.h"
+#endif
+#include "transformer_engine/transformer_engine.h"
+#include "modules.h"
+#include "utils.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -49,10 +53,13 @@ pybind11::dict Registrations() {
         EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxForward);
     dict["te_scaled_upper_triang_masked_softmax_backward"] =
         EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxBackward);
+    //TODO: add back once fused_attn is available on ROCm
+#ifndef USE_ROCM
     dict["te_self_fused_attn_forward"] = EncapsulateFunction(SelfFusedAttnForward);
     dict["te_self_fused_attn_backward"] = EncapsulateFunction(SelfFusedAttnBackward);
     dict["te_cross_fused_attn_forward"] = EncapsulateFunction(CrossFusedAttnForward);
     dict["te_cross_fused_attn_backward"] = EncapsulateFunction(CrossFusedAttnBackward);
+#endif
     return dict;
 }
 
@@ -62,18 +69,21 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
     m.def("pack_common_wk_descriptor", &PackCustomCallCommonWkDescriptor);
     m.def("pack_norm_descriptor", &PackCustomCallNormDescriptor);
     m.def("pack_softmax_descriptor", &PackCustomCallSoftmaxDescriptor);
-    m.def("pack_fused_attn_descriptor", &PackCustomCallFusedAttnDescriptor);
-    m.def("get_fused_attn_backend", &GetFusedAttnBackend);
-    m.def("get_cuda_version", &GetCudaRuntimeVersion);
     m.def("get_device_compute_capability", &GetDeviceComputeCapability);
-    m.def("get_cublasLt_version", &cublasLtGetVersion);
     m.def("get_dgelu_dbias_ct_workspace_sizes", &GetDGeluDBiasCastTransposeWorkspaceSizes);
     m.def("get_layernorm_fwd_workspace_sizes", &GetLayerNormForwardWorkspaceSizes);
     m.def("get_layernorm_bwd_workspace_sizes", &GetLayerNormBackwardWorkspaceSizes);
+#ifndef USE_ROCM
+    m.def("get_cublasLt_version", &cublasLtGetVersion);
+    m.def("get_cuda_version", &GetCudaRuntimeVersion);
+    //TODO: add back once fused_attn is available on ROCm
+    m.def("pack_fused_attn_descriptor", &PackCustomCallFusedAttnDescriptor);
+    m.def("get_fused_attn_backend", &GetFusedAttnBackend);
     m.def("get_self_fused_attn_fwd_workspace_sizes", &GetSelfFusedAttnForwardWorkspaceSizes);
     m.def("get_self_fused_attn_bwd_workspace_sizes", &GetSelfFusedAttnBackwardWorkspaceSizes);
     m.def("get_cross_fused_attn_fwd_workspace_sizes", &GetCrossFusedAttnForwardWorkspaceSizes);
     m.def("get_cross_fused_attn_bwd_workspace_sizes", &GetCrossFusedAttnBackwardWorkspaceSizes);
+#endif
 
     pybind11::enum_<DType>(m, "DType", pybind11::module_local())
         .value("kByte", DType::kByte)
@@ -85,6 +95,8 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
         .value("kFloat8E4M3", DType::kFloat8E4M3)
         .value("kFloat8E5M2", DType::kFloat8E5M2);
 
+    //TODO: add back once fused_attn is available on ROCm
+#ifndef USE_ROCM
     pybind11::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type", pybind11::module_local())
         .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)
         .value("NVTE_PRE_SCALE_BIAS", NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS)
@@ -105,6 +117,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
         .value("NVTE_F16_max512_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen)
         .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)
         .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8);
+#endif
 }
 
 }  // namespace jax

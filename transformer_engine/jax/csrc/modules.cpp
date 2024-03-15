@@ -1,15 +1,19 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "jax/csrc/modules.h"
 
+#ifndef USE_ROCM
 #include <cublasLt.h>
 #include <cublas_v2.h>
-#include <cuda_runtime_api.h>
 #include <cudnn.h>
+#else
+#include <rocblas/rocblas.h>
+#endif
 
 #include <functional>
 #include <numeric>
@@ -17,17 +21,26 @@
 #include <string>
 #include <vector>
 
+#ifndef USE_ROCM
 #include "common/common.h"
 #include "common/util/cuda_runtime.h"
+#else
+#include "common/common_hip.h"
+#include "common/util/hip_runtime.h"
+#endif
 #include "transformer_engine/activation.h"
 #include "transformer_engine/cast.h"
+//TODO: add back once fused_attn is supported
+#ifndef USE_ROCM
 #include "transformer_engine/fused_attn.h"
+#endif
 #include "transformer_engine/layer_norm.h"
 #include "transformer_engine/rmsnorm.h"
 #include "transformer_engine/softmax.h"
 #include "transformer_engine/transformer_engine.h"
 #include "transformer_engine/transpose.h"
 #include "utils.h"
+#include "modules.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -93,6 +106,7 @@ pybind11::bytes PackCustomCallSoftmaxDescriptor(size_t batch_size, size_t paddin
                                         dtype, scale_factor});
 }
 
+#ifndef USE_ROCM
 pybind11::bytes PackCustomCallFusedAttnDescriptor(
     size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
     size_t num_gqa_groups, size_t head_dim, size_t wkspace_size, float scaling_factor,
@@ -103,6 +117,7 @@ pybind11::bytes PackCustomCallFusedAttnDescriptor(
         scaling_factor, dropout_probability, bias_type, mask_type, dtype, wkspace_dtype,
         is_training});
 }
+#endif
 
 void TransposeImpl(void *input, size_t rows, size_t cols, DType dtype, cudaStream_t stream,
                    void *output) {
@@ -938,6 +953,7 @@ void ScaledUpperTriangMaskedSoftmaxBackward(cudaStream_t stream, void **buffers,
         desc.scale_factor, stream);
 }
 
+#ifndef USE_ROCM
 NVTE_Fused_Attn_Backend GetFusedAttnBackend(DType q_dtype, DType kv_dtype,
                                             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
                                             NVTE_Mask_Type mask_type, float dropout_probability,
@@ -1487,6 +1503,7 @@ void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opa
 
     nvte_tensor_pack_destroy(&aux_input_tensors);
 }
+#endif
 
 }  // namespace jax
 }  // namespace transformer_engine

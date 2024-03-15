@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -24,6 +26,8 @@ from transformer_engine.jax.fp8 import is_fp8_available
 from transformer_engine.jax.layernorm import layernorm
 from transformer_engine.jax.mlp import layernorm_geglu_fp8_mlp
 from transformer_engine.jax.mlp import layernorm_gelu_fp8_mlp
+from transformer_engine.jax import is_hip_extension
+from transformer_engine.jax import jnp_float8_e4m3_type, jnp_float8_e5m2_type
 
 GEMM_CASES = [
     (256, 256, 512),
@@ -32,7 +36,9 @@ GEMM_CASES = [
     (2048, 2048, 1024),
     (2048, 1024, 1024),
 ]
-FP8_COMPUTE_TYPE = [jnp.float8_e4m3fn, jnp.float8_e5m2]
+
+FP8_COMPUTE_TYPE = [jnp_float8_e4m3_type, jnp_float8_e5m2_type]
+    
 LN_CASES = [(512, 1024)]
 DTYPES = [jnp.bfloat16, jnp.float32]
 is_fp8_supported, reason = is_fp8_available()
@@ -52,16 +58,18 @@ class TestFP8Dot:
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     def test_qdq(self):
-        FP8_E4M3_MAX = (jnp.finfo(jnp.float8_e4m3fn).max).astype(jnp.float32)
+        FP8_E4M3_MAX = (jnp.finfo(jnp_float8_e4m3_type).max).astype(jnp.float32)
+
         x = jnp.asarray([[-1, 0.1], [2, 3]], jnp.float32)
         amax = jnp.max(jnp.abs(x)).reshape(1)
         scale = jnp.asarray(FP8_E4M3_MAX / amax, jnp.float32).reshape(1)
         scale_inv = (1 / scale).reshape(1)
 
-        y, _ = quantize(x, q_dtype=jnp.float8_e4m3fn, scale=scale)
+        y, _ = quantize(x, q_dtype=jnp_float8_e4m3_type, scale=scale)
+
         z = dequantize(y, dq_dtype=jnp.float32, scale_inv=scale_inv)
 
-        assert_allclose(z, x, dtype=jnp.float8_e4m3fn)
+        assert_allclose(z, x, dtype=jnp_float8_e4m3_type)
 
     @pytest.mark.parametrize('m,n,k', GEMM_CASES)
     def test_forward_bf16(self, m, n, k):
@@ -72,8 +80,14 @@ class TestFP8Dot:
 
         primitive_out = type_safe_dot_general(a, b)
         ref_out = jnp.dot(a, b)
-
+        
+        #TODO: try whether assert_allclose is okay for rocm TE
         assert_allclose(primitive_out, ref_out, dtype=jnp.bfloat16)
+        #if is_hip_extension():
+        #    # rocblas path is using fp32 as compute type
+        #    assert_allclose(primitive_out, ref_out, rtol=2e-2, atol=5e-5)
+        #else:
+        #    assert_allclose(primitive_out, ref_out, dtype=jnp.bfloat16)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('m,n,k', GEMM_CASES)
@@ -144,6 +158,7 @@ class TestFP8Dot:
         a = jax.random.normal(subkeys[0], (m, k)).astype(jnp.bfloat16)
         b = jax.random.normal(subkeys[1], (k, n)).astype(jnp.bfloat16)
 
+
         fp8_max = FP8Helper.generate_fp8_max_array(FP8Helper.NUM_META_PER_GEMM)
         fp8_metas_amax = jnp.zeros((FP8Helper.NUM_META_PER_GEMM, FP8Helper.AMAX_HISTORY_LEN),
                                    jnp.float32)
@@ -168,7 +183,6 @@ class TestFP8Dot:
             primitive_out, (primitive_a_grad, primitive_b_grad, fp8_max, fp8_metas_amax,
                             fp8_metas_scale, fp8_metas_scale_inv) = value_n_grad_primitive_func(
                                 a, b, fp8_max, fp8_metas_amax, fp8_metas_scale, fp8_metas_scale_inv)
-
         assert_allclose(primitive_out, ref_out, dtype=FP8Helper.FWD_DTYPE)
         assert_allclose(primitive_a_grad, ref_a_grad, dtype=FP8Helper.BWD_DTYPE)
         assert_allclose(primitive_b_grad, ref_b_grad, dtype=FP8Helper.BWD_DTYPE)
@@ -278,6 +292,17 @@ class TestFP8Dot:
         assert_allclose(jnp.asarray(primitive_a_grad, np.float32),
                         jnp.asarray(ref_a_grad, np.float32),
                         dtype=FP8Helper.BWD_DTYPE)
+        #TODO: just try whether the updated NV tol can work
+        #assert_allclose(primitive_out, ref_out, rtol=1e-2)
+        #if is_hip_extension():
+        #  # rocblas path has compute type as fp32
+        #  assert_allclose(jnp.asarray(primitive_a_grad, np.float32),
+        #                  jnp.asarray(ref_a_grad, np.float32),
+        #                  rtol=5e-2, atol=5e-2)
+        #else:
+        #  assert_allclose(jnp.asarray(primitive_a_grad, np.float32),
+        #                  jnp.asarray(ref_a_grad, np.float32),
+        #                  rtol=1e-2)
         assert_allclose(jnp.asarray(primitive_k1_grad, np.float32),
                         jnp.asarray(ref_k1_grad, np.float32),
                         dtype=FP8Helper.BWD_DTYPE)
@@ -469,7 +494,8 @@ class TestGeLuFP8(TestGeLu):
             return out
 
         def primitive_fwd(x, y, z, w):
-            out, _ = gelu_fp8(x, amax, scale, scale_inv, jnp.float8_e4m3fn)
+            out, _ = gelu_fp8(x, amax, scale, scale_inv, jnp_float8_e4m3_type)
+
             out = dequantize(out, x.dtype, scale_inv)
             ctx = x
             return out, ctx
@@ -477,7 +503,7 @@ class TestGeLuFP8(TestGeLu):
         def primitive_bwd(ctx, g):
             x = ctx
             dgelu, dgelu_trans, dbias, amax_out = dgelu_dbias_cast_transpose(
-                g, x, amax, scale, scale_inv, jnp.float8_e5m2, -1)
+                g, x, amax, scale, scale_inv, jnp_float8_e5m2_type, -1)
             dgelu = dequantize(dgelu, x.dtype, scale_inv)
             dgelu_trans = dequantize(dgelu_trans, x.dtype, scale_inv)
             return dgelu, dgelu_trans, dbias, amax_out
@@ -566,7 +592,8 @@ class TestGatedGeLuFP8(TestGatedGeLu):
             return out
 
         def primitive_fwd(x, y, z):
-            out, _ = gated_gelu_fp8(x, amax, scale, scale_inv, jnp.float8_e4m3fn)
+            out, _ = gated_gelu_fp8(x, amax, scale, scale_inv, jnp_float8_e4m3_type)
+                
             out = dequantize(out, x.dtype, scale_inv)
             ctx = x
             return out, ctx
@@ -574,7 +601,7 @@ class TestGatedGeLuFP8(TestGatedGeLu):
         def primitive_bwd(ctx, g):
             x = ctx
             dgelu, dgelu_trans, amax_out = dgated_gelu_cast_transpose(g, x, amax, scale, scale_inv,
-                                                                      jnp.float8_e5m2, -1)
+                                                                      jnp_float8_e5m2_type, -1)
             dgelu = dequantize(dgelu, x.dtype, scale_inv)
             dgelu_trans = dequantize(dgelu_trans, x.dtype, scale_inv)
             return dgelu, dgelu_trans, amax_out

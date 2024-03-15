@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -6,8 +8,10 @@
 from . import flax
 from .fp8 import fp8_autocast, update_collections, update_fp8_metas, get_delayed_scaling
 from .fp8 import NVTE_FP8_COLLECTION_NAME
+from .fp8 import jnp_float8_e4m3_type, jnp_float8_e5m2_type
 from .sharding import MeshResource
 from .sharding import MajorShardingType, ShardingResource, ShardingType
+from .util import is_hip_extension
 
 from ..common.utils import deprecate_wrapper
 from ..common.utils import DeprecatedEnum

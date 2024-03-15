@@ -19,6 +19,11 @@ list(APPEND test_cuda_sources
             test_multi_cast_transpose.cu
             test_causal_softmax.cu
             ../test_common.cu)
+if(USE_ROCM)
+  list(APPEND test_cuda_sources
+              test_cublaslt_gemm.cu)
+endif()
+
 if(USE_CUDA)
   add_executable(test_operator ${test_cuda_sources})
 else()
