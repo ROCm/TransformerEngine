@@ -22,6 +22,9 @@ from transformer_engine.pytorch.utils import (
     attention_mask_func,
     is_bf16_compatible,
 )
+if IS_HIP_EXTENSION:
+    from transformer_engine.pytorch.utils import is_mi200
+
 from transformer_engine.pytorch import (
     DotProductAttention, LayerNormLinear, LayerNormMLP, Linear,
     MultiheadAttention, RMSNorm, TransformerLayer, LayerNorm
@@ -128,11 +131,6 @@ class TorchScaledMaskedSoftmax(nn.Module):
         probs = torch.nn.Softmax(dim=-1)(mask_output)
         probs = probs.to(dtype)
         return probs
-
-def is_mi200():
-  """check whether this machine is mi200/210/250"""
-  import re
-  return (re.search('AMD Instinct MI2.0', torch.cuda.get_device_name(torch.cuda.current_device())) is not None)
 
 class TorchDotProductAttention(torch.nn.Module):
     def __init__(

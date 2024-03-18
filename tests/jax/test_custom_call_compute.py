@@ -81,13 +81,7 @@ class TestFP8Dot:
         primitive_out = type_safe_dot_general(a, b)
         ref_out = jnp.dot(a, b)
         
-        #TODO: try whether assert_allclose is okay for rocm TE
         assert_allclose(primitive_out, ref_out, dtype=jnp.bfloat16)
-        #if is_hip_extension():
-        #    # rocblas path is using fp32 as compute type
-        #    assert_allclose(primitive_out, ref_out, rtol=2e-2, atol=5e-5)
-        #else:
-        #    assert_allclose(primitive_out, ref_out, dtype=jnp.bfloat16)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('m,n,k', GEMM_CASES)
@@ -292,17 +286,6 @@ class TestFP8Dot:
         assert_allclose(jnp.asarray(primitive_a_grad, np.float32),
                         jnp.asarray(ref_a_grad, np.float32),
                         dtype=FP8Helper.BWD_DTYPE)
-        #TODO: just try whether the updated NV tol can work
-        #assert_allclose(primitive_out, ref_out, rtol=1e-2)
-        #if is_hip_extension():
-        #  # rocblas path has compute type as fp32
-        #  assert_allclose(jnp.asarray(primitive_a_grad, np.float32),
-        #                  jnp.asarray(ref_a_grad, np.float32),
-        #                  rtol=5e-2, atol=5e-2)
-        #else:
-        #  assert_allclose(jnp.asarray(primitive_a_grad, np.float32),
-        #                  jnp.asarray(ref_a_grad, np.float32),
-        #                  rtol=1e-2)
         assert_allclose(jnp.asarray(primitive_k1_grad, np.float32),
                         jnp.asarray(ref_k1_grad, np.float32),
                         dtype=FP8Helper.BWD_DTYPE)

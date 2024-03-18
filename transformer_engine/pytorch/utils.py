@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -6,6 +8,7 @@
 import math
 from typing import Any, Callable, Optional, Tuple
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 
 def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
@@ -223,8 +226,21 @@ def assert_dim_for_fp8_exec(tensor: torch.Tensor) -> None:
         f"({tensor.shape[0]} % 8 != 0, {tensor.shape[1]} % 16 != 0)"
     )
 
+if IS_HIP_EXTENSION:
+    def is_mi200():
+      """check whether this machine is mi200/210/250"""
+      import re
+      return (re.search('AMD Instinct MI2.0', torch.cuda.get_device_name(torch.cuda.current_device())) is not None)
+    
 def is_bf16_compatible() -> None:
-    """Replaces torch.cuda.is_bf16_compatible() with an explicit
-       check on device compute capability to enforce sm_80 or higher.
-    """
-    return torch.cuda.get_device_capability()[0] >= 8
+    if IS_HIP_EXTENSION:
+        # only MI200 and MI300 machines support bf16
+        if get_device_compute_capability() == (9, 4) or is_mi200():
+            return True
+        else:
+            return False
+    else:
+        """Replaces torch.cuda.is_bf16_compatible() with an explicit
+           check on device compute capability to enforce sm_80 or higher.
+        """
+        return torch.cuda.get_device_capability()[0] >= 8
