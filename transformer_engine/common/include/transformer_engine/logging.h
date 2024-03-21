@@ -1,6 +1,6 @@
 /*************************************************************************
  * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- *                    2023 Advanced Micro Devices, Inc. All rights reserved.
+ *               2023-2024 Advanced Micro Devices, Inc. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -53,7 +53,7 @@ inline void check_cublas_(hipblasStatus_t status) {
     }
 }
 #else
-inline void check_cublas_(cublasStatus_t status) {
+inline void check_cublas_(rocblas_status status) {
     if ( status != rocblas_status_success ) {
         NVTE_ERROR("ROCBLAS Error: " + std::string(rocblas_status_to_string(status)));
     }

@@ -554,6 +554,9 @@ def setup_pytorch_extension() -> setuptools.Extension:
           "-U__CUDA_NO_BFLOAT162_OPERATORS__",
           "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
       ]
+      if os.getenv("NVTE_USE_HIPBLASLT") is not None:
+          cxx_flags.append("-DUSE_HIPBLASLT")
+          nvcc_flags.append("-DUSE_HIPBLASLT")
     if use_cuda:
       nvcc_flags = [
           "-O3",

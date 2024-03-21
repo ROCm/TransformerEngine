@@ -407,6 +407,7 @@ void nvte_cublas_gemm(const NVTETensor A,
         << " accumulate=" << accumulate
         << std::endl;
   }
+#ifdef __HIP_PLATFORM_AMD__
 #ifdef USE_HIPBLASLT
   cublas_gemm(inputA,
               inputB,
@@ -430,6 +431,22 @@ void nvte_cublas_gemm(const NVTETensor A,
               outputGelu,
               m, n, k,
               lda, ldb, ldd,
+              (transa) ? rocblas_operation_transpose : rocblas_operation_none,
+              (transb) ? rocblas_operation_transpose : rocblas_operation_none,
+              grad, wspace->data.dptr,
+              wspace->data.shape[0],
+              accumulate, use_split_accumulator,
+              math_sm_count,
+              stream);
+#endif //USE_HIPBLASLT
+#else
+  cublas_gemm(inputA,
+              inputB,
+              outputD,
+              biasTensor,
+              outputGelu,
+              m, n, k,
+              lda, ldb, ldd,
               (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
               (transb) ? CUBLAS_OP_T : CUBLAS_OP_N,
               grad, wspace->data.dptr,
@@ -437,5 +454,5 @@ void nvte_cublas_gemm(const NVTETensor A,
               accumulate, use_split_accumulator,
               math_sm_count,
               stream);
-#endif
+#endif //__HIP_PLATFORM_AMD__
 }

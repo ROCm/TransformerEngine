@@ -8,6 +8,7 @@ cmake_minimum_required(VERSION 3.18)
 
 option(USE_CUDA "Use CUDA" ON)
 option(USE_ROCM "Use ROCm" OFF)
+option(USE_HIPBLASLT "Use HIPBLASLT" OFF)
 
 if(((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) AND NOT (EXISTS "/bin/nvcc"))
   message("AMD GPU detected.")
@@ -36,7 +37,7 @@ set(message_line
 message("${message_line}")
 message(STATUS "USE_CUDA ${USE_CUDA}")
 message(STATUS "USE_ROCM ${USE_ROCM}")
-
+message(STATUS "USE_HIPBLASLT ${USE_HIPBLASLT}")
 
 
 if(USE_CUDA)
@@ -79,7 +80,12 @@ if(USE_CUDA)
   find_package(CUDAToolkit REQUIRED)
 else()
   find_package(hip REQUIRED)
-  find_package(rocblas)
+  if(USE_HIPBLASLT)
+    find_package(hipblaslt)
+    add_definitions(-DUSE_HIPBLASLT)
+  else()
+    find_package(rocblas)
+  endif()
 endif()
 
 add_subdirectory(operator)
