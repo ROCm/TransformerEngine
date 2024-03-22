@@ -15,12 +15,11 @@
 #ifdef USE_HIPBLASLT
 #include <hipblaslt/hipblaslt.h>
 #endif // #ifdef USE_HIPBLASLT
-#include <hip/hiprtc.h>
 #else
 #include <cublas_v2.h>
 #include <cudnn.h>
-#include <nvrtc.h>
 #endif // __HIP_PLATFORM_AMD__
+#include <nvrtc.h>
 #include <string>
 #include <stdexcept>
 
