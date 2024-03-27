@@ -1,6 +1,6 @@
 /*************************************************************************
+ * Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- *                    2023 Advanced Micro Devices, Inc. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -15,12 +15,11 @@
 #ifdef USE_HIPBLASLT
 #include <hipblaslt/hipblaslt.h>
 #endif // #ifdef USE_HIPBLASLT
-#include <hip/hiprtc.h>
 #else
 #include <cublas_v2.h>
 #include <cudnn.h>
-#include <nvrtc.h>
 #endif // __HIP_PLATFORM_AMD__
+#include <nvrtc.h>
 #include <string>
 #include <stdexcept>
 
@@ -53,7 +52,7 @@ inline void check_cublas_(hipblasStatus_t status) {
     }
 }
 #else
-inline void check_cublas_(cublasStatus_t status) {
+inline void check_cublas_(rocblas_status status) {
     if ( status != rocblas_status_success ) {
         NVTE_ERROR("ROCBLAS Error: " + std::string(rocblas_status_to_string(status)));
     }
