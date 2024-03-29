@@ -58,7 +58,7 @@
 #ifdef USE_HIPBLASLT //hipblaslt
 #define NVTE_CHECK_CUBLAS(expr)                                         \
   do {                                                                  \
-    const hipblasStatus_t status_NVTE_CHECK_CUBLAS = (expr);             \
+    const hipblasStatus_t status_NVTE_CHECK_CUBLAS = (expr);            \
     if (status_NVTE_CHECK_CUBLAS != CUBLAS_STATUS_SUCCESS) {            \
       NVTE_ERROR("HIPBLASLT Error: ",                                   \
                  std::to_string((int)status_NVTE_CHECK_CUBLAS));        \
@@ -67,8 +67,8 @@
 #else //rocblas
 #define NVTE_CHECK_CUBLAS(expr)                                         \
   do {                                                                  \
-    const cublasStatus_t status_NVTE_CHECK_CUBLAS = (expr);             \
-    if (status_NVTE_CHECK_CUBLAS != CUBLAS_STATUS_SUCCESS) {            \
+    const rocblas_status status_NVTE_CHECK_CUBLAS = (expr);             \
+    if (status_NVTE_CHECK_CUBLAS != rocblas_status_success) {           \
       NVTE_ERROR("ROCBLAS Error: " +                                    \
                  std::string(rocblas_status_to_string(status_NVTE_CHECK_CUBLAS)));      \
     }                                                                   \

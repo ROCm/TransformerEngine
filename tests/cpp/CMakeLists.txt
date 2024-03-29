@@ -79,7 +79,6 @@ if(USE_CUDA)
   find_package(CUDAToolkit REQUIRED)
 else()
   find_package(hip REQUIRED)
-  find_package(rocblas)
 endif()
 
 add_subdirectory(operator)

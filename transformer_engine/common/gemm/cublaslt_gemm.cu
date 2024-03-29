@@ -441,20 +441,26 @@ void nvte_cublas_gemm(const NVTETensor A,
         << " accumulate=" << accumulate
         << std::endl;
   }
+
   cublas_gemm(inputA,
               inputB,
-              outputD,
+              outputD, 
               biasTensor,
               outputGelu,
               m, n, k,
               lda, ldb, ldd,
+#ifdef __HIP_PLATFORM_AMD__
 #ifdef USE_HIPBLASLT
               (transa) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
               (transb) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
 #else
+              (transa) ? rocblas_operation_transpose : rocblas_operation_none,
+              (transb) ? rocblas_operation_transpose : rocblas_operation_none,
+#endif //USE_HIPBLASLT
+#else
               (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
               (transb) ? CUBLAS_OP_T : CUBLAS_OP_N,
-#endif
+#endif //__HIP_PLATFORM_AMD__
               grad, wspace->data.dptr,
               wspace->data.shape[0],
               accumulate, use_split_accumulator,
@@ -528,13 +534,18 @@ void nvte_cublas_atomic_gemm(const NVTETensor A,
               outputGelu,
               m, n, k,
               lda, ldb, ldd,
+#ifdef __HIP_PLATFORM_AMD__
 #ifdef USE_HIPBLASLT
               (transa) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
               (transb) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
 #else
+              (transa) ? rocblas_operation_transpose : rocblas_operation_none,
+              (transb) ? rocblas_operation_transpose : rocblas_operation_none,
+#endif //USE_HIPBLASLT
+#else
               (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
               (transb) ? CUBLAS_OP_T : CUBLAS_OP_N,
-#endif
+#endif //__HIP_PLATFORM_AMD__
               grad, wspace->data.dptr,
               wspace->data.shape[0],
               accumulate, use_split_accumulator,

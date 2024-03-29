@@ -141,6 +141,16 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
   cudaDeviceProp prop;
   cudaGetDeviceProperties(&prop, 0);
 
+#ifdef __HIP_PLATFORM_AMD__
+  if ((isFp8Type(atype) || isFp8Type(btype)) && 
+    !(prop.major == 9 && prop.minor >= 4))
+  {
+    GTEST_SKIP() << "FP8 is not supported on this HW";
+  }
+#endif
+
+  Tensor Workspace({ 33554432 }, DType::kByte);
+
   //perform the gemm in GPU
   nvte_cublas_gemm(A.data(),
                    B.data(),
@@ -150,7 +160,7 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
                    transa,
                    transb,
                    grad,
-                   nullptr,
+                   Workspace.data(),
                    accumulate,
                    false,
                    prop.multiProcessorCount,
