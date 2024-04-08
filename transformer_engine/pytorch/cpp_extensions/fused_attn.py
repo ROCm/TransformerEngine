@@ -924,9 +924,14 @@ def fused_attn_fwd(
             o = torch.transpose(o, 1, 2)
         # allocate buffer for softmax_lse
         M = torch.empty((q.shape[0] * q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
-        # TODO: extract philox seed and offset from pytorch cuda rng
-        philox_seed = 114514
-        philox_offset = 1919810
+        # extract philox seed and offset from pytorch cuda rng
+        torch_cuda_rng_state = torch.cuda.get_rng_state()
+        philox_seed = torch.cuda.initial_seed()
+        philox_offset = torch.cuda._get_rng_state_offset()
+        if dropout > 0 and is_training:
+            #allocate the size for the mask tensor to offsets
+            mask_size = q.shape[0]*q.shape[1]*q.shape[2]*k.shape[2]
+            torch.cuda._set_rng_state_offset(philox_offset + mask_size)
         encoded_softmax = None
         # run aotriton fused_attn
         aotrition_attn_fwd(q, 
