@@ -81,14 +81,7 @@ def get_causal_attn_mask(sq: int) -> torch.Tensor:
 def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor]) -> bool:
     """Ensures two lists are equal."""
     assert len(l1) == len(l2), "Unequal number of outputs."
-    #print("len: ", len(l1))
     for t1, t2 in zip(l1, l2):
-        #print("t1: ", t1)
-        #print("t2: ", t2)
-        #max_diff = torch.max(torch.abs(t1-t2))
-        #max_diff_idx = torch.argmax(torch.abs(t1-t2))
-        #print("max(abs(t1-t2)), argmax(abs(t1-t2)): ", max_diff, max_diff_idx)
-        #print("t1[idx], t2[idx]: ", torch.take_along_dim(t1, max_diff_idx), torch.take_along_dim(t2, max_diff_idx))
         assert torch.equal(t1, t2), "Output mismatch."
 
 
