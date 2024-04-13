@@ -1,6 +1,6 @@
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -19,28 +19,27 @@ from .utils import get_device_compute_capability
 from .jit import jit_fuser
 
 
-__all__ = ["fp8_autocast"]
+__all__ = ["fp8_autocast", "fp8_model_init"]
 
 
 def check_fp8_support() -> Tuple[bool, str]:
     from torch.utils.cpp_extension import IS_HIP_EXTENSION
     if IS_HIP_EXTENSION:
-        if get_device_compute_capability() == 9.4:
+        if get_device_compute_capability() == (9, 4):
             return True, ""
         else:
             return False, "Only MI300 machines support fp8"
     else:
         """Return if fp8 support is available"""
-        if get_device_compute_capability() >= 9.0: # hopper and above
+        if get_device_compute_capability() >= (9, 0): # hopper and above
             return True, ""
-        if get_device_compute_capability() < 8.9: # pre-ada
+        if get_device_compute_capability() < (8, 9): # pre-ada
             return False, "Device compute capability 8.9 or higher required for FP8 execution."
         if tex.get_cublasLt_version() < 120103:
             return False, "CublasLt version 12.1.3.x or higher required for FP8 execution on Ada."
         if float(torch.version.cuda) < 12.1:
             return False, "Cuda version 12.1 or higher required for FP8 execution on Ada."
         return True, ""
-
 
 def get_default_fp8_recipe() -> DelayedScaling:
     """FP8 recipe if not provided by user
@@ -68,6 +67,7 @@ class FP8GlobalStateManager:
     FP8_CALIBRATION = False
     FP8_RECIPE = None
     FP8_DISTRIBUTED_GROUP = None
+    FP8_PARAMETERS = False
     IS_FIRST_FP8_MODULE = False
     FP8_AUTOCAST_COUNTER = 0
     FP8_CURRENT_CONTEXT_ID = 0
@@ -83,6 +83,29 @@ class FP8GlobalStateManager:
     dp_amax_reduce_interval = None
     dp_amax_reduce_forward_idx = 0
     dp_amax_reduce_backward_idx = 0
+
+    @classmethod
+    def reset(cls) -> None:
+        """Reset the global state"""
+        cls.FP8_ENABLED = False
+        cls.FP8_CALIBRATION = False
+        cls.FP8_RECIPE = None
+        cls.FP8_DISTRIBUTED_GROUP = None
+        cls.IS_FIRST_FP8_MODULE = False
+        cls.FP8_AUTOCAST_COUNTER = 0
+        cls.FP8_CURRENT_CONTEXT_ID = 0
+        cls.FP8_AUTOCAST_DEPTH = 0
+        cls.global_fp8_buffer = {}
+        cls.fp8_tensors_recompute_buffer = []
+        cls.amax_forward_global_reduce_func = None
+        cls.buffer_delete_key_fwd = None
+        cls.buffer_delete_key_bwd = None
+        cls.amax_reduce_handle_fwd = None
+        cls.fp8_available = None
+        cls.reason_for_no_fp8 = ""
+        cls.dp_amax_reduce_interval = None
+        cls.dp_amax_reduce_forward_idx = 0
+        cls.dp_amax_reduce_backward_idx = 0
 
     @classmethod
     def is_fp8_available(cls) -> Tuple[bool, str]:
@@ -264,6 +287,11 @@ class FP8GlobalStateManager:
         return cls.FP8_CALIBRATION
 
     @classmethod
+    def with_fp8_parameters(cls) -> bool:
+        """Should the parameters be stored as FP8"""
+        return cls.FP8_PARAMETERS
+
+    @classmethod
     def is_first_fp8_module(cls):
         """Returns `True` only the first time when called multiple
         times from within the same `fp8_autocast` context.
@@ -335,24 +363,29 @@ class FP8GlobalStateManager:
             return None
 
         # Reduce AMAX in DP-domain at an interval.
+        # `NVTE_DP_AMAX_REDUCE_INTERVAL` should be set as an integer value larger than 0. If
+        # `NVTE_DP_AMAX_REDUCE_INTERVAL` is set to 0, AMAX is reduced only in TP domain.
         if cls.dp_amax_reduce_interval is None:
             cls.dp_amax_reduce_interval = int(os.getenv("NVTE_DP_AMAX_REDUCE_INTERVAL", "1"))
 
-        tp_amax_reduce = False
-        if forward:
-            if cls.dp_amax_reduce_forward_idx == 0:
-                reduce_group = fp8_meta["fp8_group"]
-            else:
-                tp_amax_reduce = True
-            cls.dp_amax_reduce_forward_idx = (
-                (cls.dp_amax_reduce_forward_idx + 1) % cls.dp_amax_reduce_interval)
+        if cls.dp_amax_reduce_interval == 0:
+            tp_amax_reduce = True
         else:
-            if cls.dp_amax_reduce_backward_idx == 0:
-                reduce_group = fp8_meta["fp8_group"]
+            tp_amax_reduce = False
+            if forward:
+                if cls.dp_amax_reduce_forward_idx == 0:
+                    reduce_group = fp8_meta["fp8_group"]
+                else:
+                    tp_amax_reduce = True
+                cls.dp_amax_reduce_forward_idx = (
+                    (cls.dp_amax_reduce_forward_idx + 1) % cls.dp_amax_reduce_interval)
             else:
-                tp_amax_reduce = True
-            cls.dp_amax_reduce_backward_idx = (
-                (cls.dp_amax_reduce_backward_idx + 1) % cls.dp_amax_reduce_interval)
+                if cls.dp_amax_reduce_backward_idx == 0:
+                    reduce_group = fp8_meta["fp8_group"]
+                else:
+                    tp_amax_reduce = True
+                cls.dp_amax_reduce_backward_idx = (
+                    (cls.dp_amax_reduce_backward_idx + 1) % cls.dp_amax_reduce_interval)
 
         if tp_amax_reduce:
             if tp_size > 1:
@@ -381,6 +414,11 @@ class FP8GlobalStateManager:
         fp8_group: Optional[dist_group_type] = None,
     ) -> None:
         """Set state and tracking variables for entry into FP8 region."""
+        if cls.FP8_AUTOCAST_DEPTH == 0:
+            if callable(cls.amax_forward_global_reduce_func):
+                cls.amax_reduce_handle_fwd = cls.amax_forward_global_reduce_func() # pylint: disable=not-callable
+            cls.delete_key_from_amax_buffer(forward=True)
+
         cls.FP8_ENABLED = enabled
         cls.FP8_CALIBRATION = calibrating
         cls.FP8_RECIPE = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
@@ -399,11 +437,6 @@ class FP8GlobalStateManager:
     def fp8_autocast_exit(cls):
         """Set state and tracking variables for exit from FP8 region."""
         cls.FP8_AUTOCAST_DEPTH -= 1
-
-        if cls.FP8_AUTOCAST_DEPTH == 0:
-            if callable(cls.amax_forward_global_reduce_func):
-                cls.amax_reduce_handle_fwd = cls.amax_forward_global_reduce_func() # pylint: disable=not-callable
-            cls.delete_key_from_amax_buffer(forward=True)
 
     @classmethod
     def copy_forward_fp8_meta_tensors_for_recompute(cls, fp8_meta: Dict[str, Any]) -> None:
@@ -459,8 +492,44 @@ class FP8GlobalStateManager:
 
 
 @contextmanager
+def fp8_model_init(enabled: bool = True) -> None:
+    """
+    Context manager for FP8 initialization of parameters.
+
+    Example usage:
+
+    .. code-block:: python
+
+        with fp8_model_init(enabled=True):
+            model = transformer_engine.pytorch.Linear(768, 768)
+
+    Parameters
+    ----------
+    enabled: bool, default = `True`
+             when enabled, Transformer Engine modules created inside this `fp8_model_init`
+             region will hold only FP8 copies of its parameters, as opposed to the default
+             behavior where both higher precision and FP8 copies are present. Setting this
+             option to `True` may result in lower memory consumption and is especially
+             useful for scenarios like:
+
+             * full model training using optimizer with master weights, where the high
+               precision copies of weights are already present in the optimizer.
+             * inference, where only the FP8 copies of the parameters are used.
+             * LoRA-like fine-tuning, where the main parameters of the model do not change.
+
+             This functionality is *EXPERIMENTAL*.
+    """
+    try:
+        _fp8_parameters = FP8GlobalStateManager.FP8_PARAMETERS
+        FP8GlobalStateManager.FP8_PARAMETERS = enabled
+        yield
+    finally:
+        FP8GlobalStateManager.FP8_PARAMETERS = _fp8_parameters # pylint: disable=used-before-assignment
+
+
+@contextmanager
 def fp8_autocast(
-    enabled: bool = False,
+    enabled: bool = True,
     calibrating: bool = False,
     fp8_recipe: Optional[DelayedScaling] = None,
     fp8_group: Optional[dist_group_type] = None,
@@ -489,7 +558,7 @@ def fp8_autocast(
 
     Parameters
     ----------
-    enabled: bool, default = `False`
+    enabled: bool, default = `True`
              whether or not to enable fp8
     calibrating: bool, default = `False`
                  calibration mode allows collecting statistics such as amax and scale
@@ -504,7 +573,10 @@ def fp8_autocast(
     """
     try:
         fp8_state = FP8GlobalStateManager.get_fp8_autocast_state()
-        FP8GlobalStateManager.fp8_autocast_enter(enabled, calibrating, fp8_recipe, fp8_group)
+        FP8GlobalStateManager.fp8_autocast_enter(enabled=enabled,
+                                                 calibrating=calibrating,
+                                                 fp8_recipe=fp8_recipe,
+                                                 fp8_group=fp8_group)
         yield
     finally:
         FP8GlobalStateManager.set_fp8_autocast_state(fp8_state) # pylint: disable=used-before-assignment
@@ -519,7 +591,7 @@ def _update_amax_history(amax_history: torch.Tensor) -> torch.Tensor:
     return amax_history
 
 
-@jit_fuser
+@torch.jit.script
 def _default_get_amax(
     amax_history: torch.Tensor,
     amax_compute_algo: str,
@@ -542,12 +614,9 @@ def _default_sf_compute(
     margin: int,
 ) -> torch.Tensor:
     """Default function to convert amax to scaling factor."""
-    exp = torch.floor(torch.log2(fp8_max / amax)) - margin
-    sf = torch.round(torch.pow(2, torch.abs(exp)))
+    sf = (fp8_max / amax) / (2 ** margin)
     sf = torch.where(amax > 0.0, sf, scale)
     sf = torch.where(torch.isfinite(amax), sf, scale)
-    sf = torch.where(exp < 0, 1 / sf, sf)
-
     return sf
 
 
@@ -564,41 +633,31 @@ def _compute_scaling_factor_inverse(
     return torch.where(non_weight_mask, 1.0 / scale, scale_inv)
 
 
-@jit_fuser
 def _fused_amax_and_scale_update(
     amax_history: torch.Tensor,
     scale: torch.Tensor,
     scale_inv: torch.Tensor,
-    fp8_max: float,
+    fp8_dtype: tex.DType,
     margin: int,
     amax_compute_algo: str,
     non_weight_mask: torch.Tensor,
     update_weight_scale_inv: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Amax to scale conversion."""
-
-    # Get amax from history.
-    amax_history, amax = _default_get_amax(
+    """Update amax history and FP8 scaling factors"""
+    if update_weight_scale_inv:
+        non_weight_mask = torch.Tensor()
+    tex.fused_amax_and_scale_update(
         amax_history,
-        amax_compute_algo,
-    )
-
-    # Calculate new scaling factor.
-    scale = _default_sf_compute(
-        amax,
-        scale,
-        fp8_max,
-        margin,
-    )
-
-    # Calculate new inverse of scaling factor.
-    scale_inv = _compute_scaling_factor_inverse(
         scale,
         scale_inv,
         non_weight_mask,
-        update_weight_scale_inv,
+        amax_history,
+        scale,
+        scale_inv,
+        amax_compute_algo,
+        fp8_dtype,
+        margin,
     )
-
     return amax_history, scale, scale_inv
 
 
@@ -656,7 +715,7 @@ def amax_and_scale_update(
             fp8_meta[fp8_meta_tensor_key].amax_history,
             fp8_meta[fp8_meta_tensor_key].scale,
             fp8_meta[fp8_meta_tensor_key].scale_inv,
-            fp8_meta[fp8_max_key],
+            get_fp8_te_dtype(fp8_meta["recipe"], fwd_update),
             fp8_meta["recipe"].margin,
             fp8_meta["recipe"].amax_compute_algo,
             fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"],

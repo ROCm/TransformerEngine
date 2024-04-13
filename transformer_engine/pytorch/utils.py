@@ -1,4 +1,6 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -6,13 +8,26 @@
 import math
 from typing import Any, Callable, Optional, Tuple
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 
-def get_device_compute_capability() -> float:
-    """Returns the cuda compute capability of current GPU"""
-    major = torch.cuda.get_device_properties(torch.cuda.current_device()).major
-    minor = torch.cuda.get_device_properties(torch.cuda.current_device()).minor
-    return major + minor / 10
+def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
+    """
+    Trick to deallocate tensor memory when delete operation does not
+    release the tensor due to PyTorch override.
+
+    Must be used carefully.
+    """
+    for t in tensors:
+        if t is not None:
+            t.data = torch.Tensor()
+            del t
+
+
+def get_device_compute_capability() -> Tuple[int, int]:
+    """CUDA compute capability of current GPU"""
+    props = torch.cuda.get_device_properties(torch.cuda.current_device())
+    return (props.major, props.minor)
 
 
 def attention_mask_func(
@@ -26,6 +41,21 @@ def attention_mask_func(
 def get_default_init_method() -> Callable:
     """Weight initialization method if not provided by user"""
     return init_method_normal(0.023)
+
+
+def init_method_constant(val: float) -> Callable:
+    """Init method to set all tensor elements to a constant value."""
+    if val == 1.0:
+        def init_(tensor: torch.Tensor) -> Callable:
+            return torch.nn.init.ones_(tensor)
+    elif val == 0.0:
+        def init_(tensor: torch.Tensor) -> Callable:
+            return torch.nn.init.zeros_(tensor)
+    else:
+        def init_(tensor: torch.Tensor) -> Callable:
+            return torch.nn.init.constant_(tensor, val)
+
+    return init_
 
 
 def init_method_normal(sigma: float) -> Callable:
@@ -195,3 +225,22 @@ def assert_dim_for_fp8_exec(tensor: torch.Tensor) -> None:
         "Tensor dimensions are not compatible for FP8 execution: "
         f"({tensor.shape[0]} % 8 != 0, {tensor.shape[1]} % 16 != 0)"
     )
+
+if IS_HIP_EXTENSION:
+    def is_mi200():
+      """check whether this machine is mi200/210/250"""
+      import re
+      return (re.search('AMD Instinct MI2.0', torch.cuda.get_device_name(torch.cuda.current_device())) is not None)
+    
+def is_bf16_compatible() -> None:
+    if IS_HIP_EXTENSION:
+        # only MI200 and MI300 machines support bf16
+        if get_device_compute_capability() == (9, 4) or is_mi200():
+            return True
+        else:
+            return False
+    else:
+        """Replaces torch.cuda.is_bf16_compatible() with an explicit
+           check on device compute capability to enforce sm_80 or higher.
+        """
+        return torch.cuda.get_device_capability()[0] >= 8

@@ -1,6 +1,6 @@
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -21,6 +21,7 @@ else()
   list(APPEND CMAKE_MODULE_PATH "${THIRDPARTY}/hipify_torch/cmake")
   include(Hipify)
   set(header_include_dir
+      ${CMAKE_CURRENT_SOURCE_DIR}/..
       ${CMAKE_CURRENT_SOURCE_DIR}/../common
       ${CMAKE_CURRENT_SOURCE_DIR}/../common/include
       ${CMAKE_CURRENT_SOURCE_DIR}/../common/util

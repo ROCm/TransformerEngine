@@ -1,11 +1,14 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Utils for profiling"""
 
 from contextlib import contextmanager
 
-from paddle.fluid import core
+try:
+    from paddle.base import core
+except ImportError:
+    from paddle.fluid import core
 
 
 @contextmanager

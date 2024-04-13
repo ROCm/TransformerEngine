@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -232,14 +232,6 @@ struct BwdGeneralRegistrar{
         BWD_GENERAL_FUNCS[key].insert({ HIDDEN_SIZE, f });
     }
 };
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-layer_norm::BwdFunction & get_bwd_launcher(DType wtype,
-                                           DType itype,
-                                           DType otype,
-                                           DType ctype,
-                                           uint32_t hidden_size);
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
 

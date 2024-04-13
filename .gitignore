@@ -25,8 +25,9 @@ tests/cpp/build/
 docs/_build
 .ipynb_checkpoints
 docs/doxygen
-CMakeCache.txt
+*.log
 CMakeFiles
+CMakeCache.txt
 build.ninja
 cuda_to_hip_list_tmp_*.txt
 hipify_output_dict_dump.txt

@@ -1,7 +1,7 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -9,8 +9,14 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_COMMON_H_
 #define TRANSFORMER_ENGINE_COMMON_COMMON_H_
 
-#include <transformer_engine/transformer_engine.h>
-#include <transformer_engine/logging.h>
+#include <functional>
+#include <stdexcept>
+#include <string>
+#include <tuple>
+#include <type_traits>
+#include <unordered_map>
+#include <vector>
+
 #include <cuda_fp16.h>
 #ifndef __HIP_PLATFORM_AMD__
 #include <cuda_bf16.h>
@@ -18,16 +24,12 @@
 #else
 #include <hip/hip_bfloat16.h>
 #include "amd_detail/hip_float8.h"
-#endif
+#endif // __HIP_PLATFORM_AMD__
 #include <cuda_runtime_api.h>
-#include <type_traits>
-#include <unordered_map>
-#include <functional>
-#include <stdexcept>
-#include <string>
-#include <tuple>
-#include <vector>
-#include "nvtx.h"
+
+#include <transformer_engine/transformer_engine.h>
+#include "./nvtx.h"
+#include "./util/logging.h"
 
 namespace transformer_engine {
 
@@ -139,7 +141,7 @@ struct TypeInfo{
         using namespace transformer_engine; \
         case DType::kByte: \
             { \
-                using type = float; \
+                using type = unsigned char; \
                 {__VA_ARGS__} \
             } \
         break; \

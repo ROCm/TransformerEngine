@@ -1,7 +1,7 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -25,6 +25,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("scaled_upper_triang_masked_softmax_backward",
             &scaled_upper_triang_masked_softmax_backward,
             "Scaled Upper-Triangular Masked Softmax BWD");
+  m.def("scaled_aligned_causal_masked_softmax_forward",
+            &scaled_aligned_causal_masked_softmax_forward,
+            "Scaled Bottom-Right Corner Aligned Masked Softmax FWD");
+  m.def("scaled_aligned_causal_masked_softmax_backward",
+            &scaled_aligned_causal_masked_softmax_backward,
+            "Scaled Bottom-Right Corner Aligned Masked Softmax BWD");
 
   // Other granular functions
   m.def("layernorm_fwd_fp8", &layernorm_fwd_fp8, "LN FWD FP8");
@@ -59,6 +65,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                   "Fused Attention FP8/BF16/FP16 FWD with packed KV");
   m.def("fused_attn_bwd_kvpacked", &fused_attn_bwd_kvpacked,
                   "Fused Attention FP8/BF16/FP16 BWD with packed KV");
+  m.def("fused_attn_fwd", &fused_attn_fwd,
+                  "Fused Attention FP8/BF16/FP16 FWD with separate Q, K and V");
+  m.def("fused_attn_bwd", &fused_attn_bwd,
+                  "Fused Attention FP8/BF16/FP16 BWD with separate Q, K and V");
+  m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention");
+  m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention");
+  m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend");
 #endif
   m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O");
   m.def("gelu", &gelu, "GeLU with FP8 output");
@@ -66,20 +79,27 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("geglu", &geglu, "GeGLU with FP8 output");
   m.def("reglu", &reglu, "ReGLU with FP8 output");
   m.def("swiglu", &swiglu, "SwiGLU with FP8 output");
+  m.def("qgelu", &qgelu, "QuickGELU with FP8 output");
   m.def("dgelu", &dgelu, "Backward of GeLU");
   m.def("drelu", &drelu, "Backward of ReLU");
   m.def("dgeglu", &dgeglu, "Backward of GeGLU");
   m.def("dreglu", &dreglu, "Backward of ReGLU");
   m.def("dswiglu", &dswiglu, "Backward of SwiGLU");
-#ifndef USE_ROCM
-  m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention");
-  m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention");
-  m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend");
-#endif
+  m.def("dqgelu", &dqgelu, "Backward of QuickGELU");
+  m.def("fused_amax_and_scale_update",
+        &fused_amax_and_scale_update,
+        "Update amax history and FP8 scale");
+
+  // fused apply rope
+  m.def("fused_rope_forward", &fused_rope_forward, "Fused Apply RoPE FWD");
+  m.def("fused_rope_backward", &fused_rope_backward, "Fused Apply RoPE BWD");
+  m.def("fused_rope_thd_forward", &fused_rope_thd_forward, "Fused Apply RoPE FWD for thd format");
+  m.def("fused_rope_thd_backward", &fused_rope_thd_backward, "Fused Apply RoPE BWD for thd format");
 
   // Misc
 #ifndef USE_ROCM
   m.def("get_cublasLt_version", &get_cublasLt_version, "Get cublasLt version");
+  m.def("get_cudnn_version", &get_cudnn_version, "Get cuDNN version");
   m.def("userbuf_comm_available", &userbuf_comm_available, "If userbuf backend is available");
 #endif
 
@@ -95,18 +115,24 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .value("BULK_OVERLAP_AG", ubuf::UBOverlapAlgo::BULK_OVERLAP_AG)
     .value("BULK_OVERLAP_RS", ubuf::UBOverlapAlgo::BULK_OVERLAP_RS)
     .value("SPLIT_PIPELINED_RS", ubuf::UBOverlapAlgo::SPLIT_PIPELINED_RS)
-    .value("SPLIT_PIPELINED_AG", ubuf::UBOverlapAlgo::SPLIT_PIPELINED_AG);
+    .value("SPLIT_PIPELINED_AG", ubuf::UBOverlapAlgo::SPLIT_PIPELINED_AG)
+    .value("ATOMIC_GEMM_RS", ubuf::UBOverlapAlgo::ATOMIC_GEMM_RS)
+    .value("ATOMIC_GEMM_AG", ubuf::UBOverlapAlgo::ATOMIC_GEMM_AG);
 
   py::class_<ubuf::UbufCommOverlap>(m, "UbufCommOverlap")
-    .def(py::init<torch::Tensor&, int, int, int, int, int, bool, int>())
+    .def(py::init<torch::Tensor&, int, int, int, int, int, bool, int, torch::Tensor>())
     .def("bulk_overlap", &ubuf::UbufCommOverlap::bulk_overlap)
     .def("split_overlap_rs", &ubuf::UbufCommOverlap::split_overlap_rs)
+    .def("set_ubuf_scale_inv", &ubuf::UbufCommOverlap::set_ubuf_scale_inv)
+    .def("atomic_gemm_overlap_rs", &ubuf::UbufCommOverlap::atomic_gemm_overlap_rs)
+    .def("is_fp8_ubuf", &ubuf::UbufCommOverlap::is_fp8_ubuf)
     .def("copy_input_to_ubuf", &ubuf::UbufCommOverlap::copy_input_to_ubuf)
     .def("get_ubuf_output", &ubuf::UbufCommOverlap::get_ubuf_output);
 
   py::class_<ubuf::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap")
-    .def(py::init<torch::Tensor&, int, int, bool, int>())
+    .def(py::init<torch::Tensor&, int, int, int, int, bool, bool, int, torch::Tensor>())
     .def("split_overlap_ag", &ubuf::UbufP2PCommOverlap::split_overlap_ag)
+    .def("atomic_gemm_overlap_ag", &ubuf::UbufP2PCommOverlap::atomic_gemm_overlap_ag)
     .def("copy_input_to_ubuf", &ubuf::UbufP2PCommOverlap::copy_input_to_ubuf)
     .def("get_ubuf_output", &ubuf::UbufP2PCommOverlap::get_ubuf_output);
 #else  // NVTE_WITH_USERBUFFERS
@@ -143,24 +169,40 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .value("GRAD_OUTPUT3", transformer_engine::FP8BwdTensors::GRAD_OUTPUT3)
     .value("GRAD_INPUT3", transformer_engine::FP8BwdTensors::GRAD_INPUT3);
 
+#ifndef USE_ROCM
   py::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type")
       .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)
       .value("NVTE_PRE_SCALE_BIAS", NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS)
-      .value("NVTE_POST_SCALE_BIAS", NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
+      .value("NVTE_POST_SCALE_BIAS", NVTE_Bias_Type::NVTE_POST_SCALE_BIAS)
+      .value("NVTE_ALIBI", NVTE_Bias_Type::NVTE_ALIBI);
 
   py::enum_<NVTE_Mask_Type>(m, "NVTE_Mask_Type")
       .value("NVTE_NO_MASK", NVTE_Mask_Type::NVTE_NO_MASK)
       .value("NVTE_PADDING_MASK", NVTE_Mask_Type::NVTE_PADDING_MASK)
-      .value("NVTE_CAUSAL_MASK", NVTE_Mask_Type::NVTE_CAUSAL_MASK);
+      .value("NVTE_CAUSAL_MASK", NVTE_Mask_Type::NVTE_CAUSAL_MASK)
+      .value("NVTE_PADDING_CAUSAL_MASK", NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK);
 
   py::enum_<NVTE_QKV_Layout>(m, "NVTE_QKV_Layout")
-      .value("NVTE_NOT_INTERLEAVED", NVTE_QKV_Layout::NVTE_NOT_INTERLEAVED)
-      .value("NVTE_QKV_INTERLEAVED", NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED)
-      .value("NVTE_KV_INTERLEAVED", NVTE_QKV_Layout::NVTE_KV_INTERLEAVED);
+      .value("NVTE_SB3HD", NVTE_QKV_Layout::NVTE_SB3HD)
+      .value("NVTE_SBH3D", NVTE_QKV_Layout::NVTE_SBH3D)
+      .value("NVTE_SBHD_SB2HD", NVTE_QKV_Layout::NVTE_SBHD_SB2HD)
+      .value("NVTE_SBHD_SBH2D", NVTE_QKV_Layout::NVTE_SBHD_SBH2D)
+      .value("NVTE_SBHD_SBHD_SBHD", NVTE_QKV_Layout::NVTE_SBHD_SBHD_SBHD)
+      .value("NVTE_BS3HD", NVTE_QKV_Layout::NVTE_BS3HD)
+      .value("NVTE_BSH3D", NVTE_QKV_Layout::NVTE_BSH3D)
+      .value("NVTE_BSHD_BS2HD", NVTE_QKV_Layout::NVTE_BSHD_BS2HD)
+      .value("NVTE_BSHD_BSH2D", NVTE_QKV_Layout::NVTE_BSHD_BSH2D)
+      .value("NVTE_BSHD_BSHD_BSHD", NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD)
+      .value("NVTE_T3HD", NVTE_QKV_Layout::NVTE_T3HD)
+      .value("NVTE_TH3D", NVTE_QKV_Layout::NVTE_TH3D)
+      .value("NVTE_THD_T2HD", NVTE_QKV_Layout::NVTE_THD_T2HD)
+      .value("NVTE_THD_TH2D", NVTE_QKV_Layout::NVTE_THD_TH2D)
+      .value("NVTE_THD_THD_THD", NVTE_QKV_Layout::NVTE_THD_THD_THD);
 
   py::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend")
       .value("NVTE_F16_max512_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen)
       .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)
       .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8)
       .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend);
+#endif
 }

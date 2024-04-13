@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -37,6 +37,19 @@ __device__ inline OType dsigmoid(const IType val, const Empty& e) {
     const float cval = val;
     const float s = sigmoid<float, float>(cval, e);
     return s * (1.f - s);
+}
+
+template <typename OType, typename IType>
+__device__ inline OType qgelu(const IType val, const Empty& e) {
+    const float cval = val;
+    return cval * sigmoid<float, float>(1.702f * cval, e);
+}
+
+template <typename OType, typename IType>
+__device__ inline OType dqgelu(const IType val, const Empty& e) {
+    const float cval = val;
+    return cval * dsigmoid<float, float>(1.702f * cval, e) +
+                   sigmoid<float, float>(1.702f * cval, e);
 }
 
 template <typename OType, typename IType>

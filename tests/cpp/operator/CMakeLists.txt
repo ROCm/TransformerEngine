@@ -1,38 +1,27 @@
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
-if(USE_CUDA)
+list(APPEND test_cuda_sources
+            test_qdq.cu
+            test_cast_transpose.cu
+            test_transpose.cu
+            test_cast_transpose_dbias.cu
+            test_cast_transpose_dbias_dgelu.cu
+            test_cast_transpose_dgeglu.cu
+            test_gelu.cu
+            test_geglu.cu
+            test_dgeglu.cu
+            test_layernorm.cu
+            test_rmsnorm.cu
+            test_multi_cast_transpose.cu
+            test_causal_softmax.cu
+            ../test_common.cu)
+if(USE_ROCM)
   list(APPEND test_cuda_sources
-              test_qdq.cu
-              test_cast_transpose.cu
-              test_transpose.cu
-              test_cast_transpose_dbias.cu
-              test_cast_transpose_dbias_dgelu.cu
-              test_cast_transpose_dgeglu.cu
-              test_gelu.cu
-              test_dgeglu.cu
-              test_layernorm.cu
-              test_rmsnorm.cu
-              test_multi_cast_transpose.cu
-              ../test_common.cu)
-else()
-  list(APPEND test_cuda_sources
-              test_qdq.cu
-              test_cast_transpose.cu
-              test_transpose.cu
-              test_cast_transpose_dbias.cu
-              test_cast_transpose_dbias_dgelu.cu
-              test_cast_transpose_dgeglu.cu
-              test_gelu.cu
-              test_dgeglu.cu
-              test_layernorm.cu
-              test_rmsnorm.cu
-              test_multi_cast_transpose.cu
-              test_cublaslt_gemm.cu
-              ../test_common.cu)
+              test_cublaslt_gemm.cu)
 endif()
 
 if(USE_CUDA)

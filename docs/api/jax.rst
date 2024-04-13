@@ -1,15 +1,28 @@
 ..
-    Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
     See LICENSE for license information.
 
 Jax
 =======
 
-.. autoapiclass:: transformer_engine.jax.MajorShardingType
-.. autoapiclass:: transformer_engine.jax.ShardingType
+Pre-defined Variable of Logical Axes
+------------------------------------
+Variables are available in `transformer_engine.jax.sharding`.
+
+* BATCH_AXES: The logical axis of batch dimension. It is usually sharded along DP + FSDP on Mesh.
+* SEQLEN_AXES: The logical axis of sequence length dimension. It is usually not sharded.
+* SEQLEN_TP_AXES: The logical axis of sequence length dimension. It is usually sharded along TP on Mesh.
+* HEAD_AXES: The logical axis of head dimension of MHA. It is usually sharded along TP on Mesh.
+* HIDDEN_AXES: The logical axis of hidden dimension. It is usually not sharded.
+* HIDDEN_TP_AXES: The logical axis of hidden dimension. It is usually sharded along TP on Mesh.
+* JOINED_AXES: The logical axis of non-defined dimension. It is usually not sharded.
+
+
+Modules
+------------------------------------
 .. autoapiclass:: transformer_engine.jax.flax.TransformerLayerType
-.. autoapiclass:: transformer_engine.jax.ShardingResource(dp_resource=None, tp_resource=None)
+.. autoapiclass:: transformer_engine.jax.MeshResource()
 
 
 .. autoapifunction:: transformer_engine.jax.fp8_autocast

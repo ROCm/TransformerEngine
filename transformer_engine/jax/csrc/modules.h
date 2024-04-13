@@ -1,7 +1,7 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved. 
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -9,20 +9,19 @@
 #ifndef TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_
 #define TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_
 
-#include <cuda_runtime_api.h>
-
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
 
+#include <cuda_runtime_api.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
 #ifndef USE_ROCM
 #include "transformer_engine/fused_attn.h"
 #endif
-#include "transformer_engine/logging.h"
+#include "common/util/logging.h"
 #include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
@@ -57,71 +56,86 @@ struct CustomCallCommonDescriptor {
 pybind11::bytes PackCustomCallCommonDescriptor(const std::vector<size_t> &shape, DType in_dtype,
                                                DType out_dtype);
 
-struct CustomCallGemmDescriptor {
-    size_t m;
-    size_t n;
-    size_t k;
-    DType A_dtype;
-    DType B_dtype;
-    DType D_dtype;
-    bool transa;
-    bool transb;
-    bool use_split_accumulator;
+struct CustomCallCommonWkDescriptor {
+    Shape shape;
+    Shape wkshape;
+    DType in_dtype;
+    DType out_dtype;
+    DType wk_dtype;
 };
 
-pybind11::bytes PackCustomCallGemmDescriptor(size_t m, size_t n, size_t k, DType A_dtype,
-                                             DType B_dtype, DType D_dtype, bool transa, bool transb,
-                                             bool use_split_accumulator);
+pybind11::bytes PackCustomCallCommonWkDescriptor(const std::vector<size_t> &shape,
+                                                 const std::vector<size_t> &wkshape, DType in_dtype,
+                                                 DType out_dtype, DType wk_dtype);
 
 struct CustomCallNormDescriptor {
-    size_t n;
-    size_t hidden;
+    size_t batch_size;
+    size_t hidden_size;
+    size_t wkspace_size;
+    size_t barrier_size;
+    size_t *dgamma_part_sizes;  // 2D tensor
+    size_t *dbeta_part_sizes;   // 2D tensor
     DType x_dtype;
     DType w_dtype;
+    DType wkspace_dtype;
+    DType barrier_dtype;
+    DType dgamma_part_dtype;
+    DType dbeta_part_dtype;
     bool zero_centered_gamma;
     float eps;
+    int sm_margin;
 };
 
-pybind11::bytes PackCustomCallNormDescriptor(size_t n, size_t hidden, DType x_dtype, DType w_dtype,
-                                             bool zero_centered_gamma, float eps);
+pybind11::bytes PackCustomCallNormDescriptor(size_t batch_size, size_t hidden_size,
+                                             size_t wkspace_size, size_t barrier_size,
+                                             size_t *dgamma_part_sizes, size_t *dbeta_part_sizes,
+                                             DType x_dtype, DType w_dtype, DType wkspace_dtype,
+                                             DType barrier_dtype, DType dgamma_part_dtype,
+                                             DType dbeta_part_dtype, bool zero_centered_gamma,
+                                             float eps, int sm_margin);
 
 struct SoftmaxDescriptor {
-    size_t batch;
-    size_t pad_batch;
-    size_t heads;
+    size_t batch_size;
+    size_t padding_size;
+    size_t head_dim;
     size_t q_seqlen;
     size_t k_seqlen;
     DType dtype;
     float scale_factor;
 };
 
-pybind11::bytes PackCustomCallSoftmaxDescriptor(size_t batch, size_t pad_batch, size_t heads,
-                                                size_t q_seqlen, size_t k_seqlen, DType dtype,
-                                                float scale_factor);
+pybind11::bytes PackCustomCallSoftmaxDescriptor(size_t batch_size, size_t padding_size,
+                                                size_t head_dim, size_t q_seqlen, size_t k_seqlen,
+                                                DType dtype, float scale_factor);
 
 #ifndef USE_ROCM
 struct CustomCallFusedAttnDescriptor {
-    size_t batch;
-    size_t num_head;
+    size_t batch_size;
     size_t q_max_seqlen;
     size_t kv_max_seqlen;
+    size_t num_heads;
+    size_t num_gqa_groups;
     size_t head_dim;
+    size_t wkspace_size;
     float scaling_factor;
     float dropout_probability;
     NVTE_Bias_Type bias_type;
     NVTE_Mask_Type mask_type;
     DType dtype;
+    DType wkspace_dtype;
     bool is_training;
 };
 
 pybind11::bytes PackCustomCallFusedAttnDescriptor(
-    size_t batch, size_t num_head, size_t q_max_seqlen, size_t kv_max_seqlen, size_t head_dim,
-    float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type mask_type, DType dtype, bool is_training);
+    size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
+    size_t num_gqa_groups, size_t head_dim, size_t wkspace_size, float scaling_factor,
+    float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype,
+    DType wkspace_dtype, bool is_training);
 
 NVTE_Fused_Attn_Backend GetFusedAttnBackend(DType q_dtype, DType kv_dtype,
                                             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
                                             NVTE_Mask_Type mask_type, float dropout_probability,
+                                            size_t q_num_heads, size_t kv_num_heads,
                                             size_t q_max_seqlen, size_t kv_max_seqlen,
                                             size_t head_dim);
 #endif
@@ -129,6 +143,18 @@ NVTE_Fused_Attn_Backend GetFusedAttnBackend(DType q_dtype, DType kv_dtype,
 void Transpose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+void Gelu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+void GeluFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+void DGelu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+pybind11::tuple GetDGeluDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
+                                                         DType in_dtype, DType out_dtype);
+
+void DGeluDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
+                             size_t opaque_len);
 
 void GatedGelu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
@@ -139,12 +165,20 @@ void DGatedGelu(cudaStream_t stream, void **buffers, const char *opaque, size_t 
 void DGatedGeluCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
                              size_t opaque_len);
 
-void Gemm(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+pybind11::tuple GetLayerNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_size,
+                                                  DType in_dtype, DType w_dtype, DType out_dtype,
+                                                  bool is_layer_norm, bool zero_centered_gamma,
+                                                  float eps);
 
 void LayerNormForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 void LayerNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque,
                          size_t opaque_len);
+
+pybind11::tuple GetLayerNormBackwardWorkspaceSizes(size_t batch_size, size_t hidden_size,
+                                                   DType in_dtype, DType w_dtype,
+                                                   bool is_layer_norm, bool zero_centered_gamma,
+                                                   float eps);
 
 void LayerNormBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
@@ -177,14 +211,34 @@ void ScaledUpperTriangMaskedSoftmaxBackward(cudaStream_t stream, void **buffers,
                                             std::size_t opaque_len);
 
 #ifndef USE_ROCM
+pybind11::tuple GetSelfFusedAttnForwardWorkspaceSizes(
+    size_t batch_size, size_t max_seqlen, size_t num_heads, size_t head_dim, float scaling_factor,
+    float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype,
+    bool is_training);
+
 void SelfFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque,
                           size_t opaque_len);
+
+pybind11::tuple GetSelfFusedAttnBackwardWorkspaceSizes(
+    size_t batch_size, size_t max_seqlen, size_t num_heads, size_t head_dim, float scaling_factor,
+    float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype,
+    bool is_training);
 
 void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque,
                            size_t opaque_len);
 
+pybind11::tuple GetCrossFusedAttnForwardWorkspaceSizes(
+    size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
+    size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype, bool is_training);
+
 void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque,
                            size_t opaque_len);
+
+pybind11::tuple GetCrossFusedAttnBackwardWorkspaceSizes(
+    size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
+    size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype, bool is_training);
 
 void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque,
                             size_t opaque_len);

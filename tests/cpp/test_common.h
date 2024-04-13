@@ -1,16 +1,16 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
 #pragma once
 
+#include <iostream>
 #include <memory>
-#include <transformer_engine/transformer_engine.h>
-#include <transformer_engine/logging.h>
+#include <vector>
 #include <cuda_fp16.h>
 #ifndef USE_ROCM
 #include <cuda_bf16.h>
@@ -20,8 +20,9 @@
 #include "amd_detail/hip_float8.h"
 #endif
 #include <cuda_runtime_api.h>
-#include <vector>
-#include <iostream>
+
+#include <transformer_engine/transformer_engine.h>
+#include "util/logging.h"
 
 namespace test {
 using namespace transformer_engine;
@@ -265,4 +266,3 @@ bool isFp8Type(DType type);
         default: \
             NVTE_ERROR("Invalid type."); \
     }
-

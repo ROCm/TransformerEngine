@@ -1,7 +1,7 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved. 
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -9,18 +9,17 @@
 #ifndef TRANSFORMER_ENGINE_JAX_CSRC_UTILS_H_
 #define TRANSFORMER_ENGINE_JAX_CSRC_UTILS_H_
 
-#include <pybind11/pybind11.h>
-
 #include <cstdint>
 #include <numeric>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <pybind11/pybind11.h>
 //TODO: add back once fused_attn is supported
 #ifndef USE_ROCM
 #include "transformer_engine/fused_attn.h"
 #endif
-#include "transformer_engine/logging.h"
+#include "common/util/logging.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -33,66 +32,6 @@ void PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t q
                            size_t kv_max_seqlen, NVTE_Fused_Attn_Backend backend,
                            cudaStream_t stream);
 #endif
-
-class WorkspaceManager {
- public:
-    static WorkspaceManager &Instance() {
-        static thread_local WorkspaceManager instance;
-        return instance;
-    }
-
-    WorkspaceManager() {}
-    ~WorkspaceManager() { Clear_(); }
-
-    void *GetWorkspace(size_t size = 4194304) {
-        ReallocateIfNeed_(size);
-        return workspace_;
-    }
-
-    template <typename... Args>
-    inline auto GetWorkspace(Args... args) {
-        auto asks = std::array<size_t, sizeof...(Args)>{args...};
-        std::array<size_t, sizeof...(Args) + 1> offsets = {0};
-        std::array<void *, sizeof...(Args)> workspaces = {nullptr};
-        std::transform_inclusive_scan(
-            asks.cbegin(), asks.cend(), offsets.begin() + 1, std::plus<size_t>{},
-            [=](auto x) { return PadSize_(x); }, 0);
-        auto *workspace = GetWorkspace(offsets.back());
-        std::transform(offsets.cbegin(), offsets.cend() - 1, workspaces.begin(),
-                       [workspace](auto x) { return static_cast<char *>(workspace) + x; });
-        return workspaces;
-    }
-
- private:
-    void *workspace_ = nullptr;
-    size_t size_ = 0;
-
-    size_t PadSize_(size_t size) {
-        constexpr size_t alignment = 128;
-        return ((size + alignment - 1) / alignment) * alignment;
-    }
-
-    void Clear_() {
-        if (workspace_ != nullptr) {
-            NVTE_CHECK_CUDA(cudaFree(workspace_));
-        }
-        workspace_ = nullptr;
-        size_ = 0;
-    }
-
-    void Allocate_(size_t new_size) {
-        new_size = PadSize_(new_size);
-        NVTE_CHECK_CUDA(cudaMalloc(&workspace_, new_size));
-        size_ = new_size;
-    }
-
-    void ReallocateIfNeed_(size_t new_size) {
-        if (new_size > size_) {
-            Clear_();
-            Allocate_(new_size);
-        }
-    }
-};
 
 class cudaDevicePropertiesManager {
  public:

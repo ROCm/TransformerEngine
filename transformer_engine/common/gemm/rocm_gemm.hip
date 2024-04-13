@@ -327,6 +327,10 @@ void cublas_gemm(const Tensor *inputA,
                  bool accumulate,
                  bool use_split_accumulator,
                  int math_sm_count,
+                 int m_split,
+                 int n_split,
+                 bool gemm_producer,
+                 const Tensor *inputCounter,
                  hipStream_t stream
 ) {
   void *A = inputA->data.dptr;
@@ -515,6 +519,10 @@ void cublas_gemm(const Tensor *inputA,
                  bool accumulate,
                  bool use_split_accumulator,
                  int math_sm_count,
+                 int m_split,
+                 int n_split,
+                 bool gemm_producer,
+                 const Tensor *inputCounter,
                  hipStream_t stream
 ) { 
   void *A = inputA->data.dptr;
