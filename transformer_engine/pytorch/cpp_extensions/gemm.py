@@ -1,13 +1,17 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 """Python interface for GEMM extensions"""
+import os
 from typing import Optional, Tuple, Union
 import torch
 import transformer_engine_extensions as tex
 from ..constants import TE_DType
 from ..utils import assert_dim_for_fp8_exec
+from ..gemm_triton import te_gemm_triton
 
 
 __all__ = ['gemm', 'fp8_gemm']
@@ -86,7 +90,11 @@ def fp8_gemm(
         workspace.shape[0],
         accumulate,
         use_split_accumulator)
-    fn = torch.ops.tex_ts.te_gemm_ts
+    use_gemm_triton = bool( int(os.environ.get('NVTE_USE_GEMM_TRITON', '0')) )
+    if use_gemm_triton:
+        fn = te_gemm_triton
+    else:
+        fn = torch.ops.tex_ts.te_gemm_ts
     if ub_algo is not None:
         assert ub is not None, 'ub object is None!'
         if ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_AG:
@@ -208,7 +216,11 @@ def gemm(
         accumulate,
         False,  # use_split_accumulator
     )
-    fn = torch.ops.tex_ts.te_gemm_ts
+    use_gemm_triton = bool( int(os.environ.get('NVTE_USE_GEMM_TRITON', '0')) )
+    if use_gemm_triton:
+        fn = te_gemm_triton
+    else:
+        fn = torch.ops.tex_ts.te_gemm_ts
     if ub_algo is not None:
         assert ub is not None, 'ub object is None!'
         if ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_AG:
