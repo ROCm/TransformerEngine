@@ -34,6 +34,7 @@ else()
   hipify(CUDA_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}
       HEADER_INCLUDE_DIR ${header_include_dir}
       IGNORES "*/amd_detail/*"
+      IGNORES "*/aotriton/*"
       CUSTOM_MAP_FILE "${TE}/hipify_custom_map.json"
   )
   get_hipified_list("${transformer_engine_SOURCES}" te_hip_sources)

@@ -50,6 +50,7 @@ else()
        activation/gelu.cu
        activation/relu.cu
        activation/swiglu.cu
+       fused_attn_aotriton/fused_attn.cpp
        gemm/cublaslt_gemm.cu
        layer_norm/ln_api.cpp
        layer_norm/ln_bwd_semi_cuda_kernel.cu
@@ -79,6 +80,12 @@ if(USE_CUDA)
               "Try running 'git submodule update --init --recursive' "
               "within the Transformer Engine source.")
   endif()
+else()
+  # Install aotriton fused attn
+  set(AOTRITON_NO_PYTHON ON)
+  set(AOTRITON_COMPRESS_KERNEL OFF)
+  set(AOTRITON_NO_SHARED ON)
+  add_subdirectory(../../3rdparty/aotriton ${CMAKE_CURRENT_BINARY_DIR}/aotriton)
 endif()
 
 # process source code files
@@ -106,6 +113,7 @@ else()
   hipify(CUDA_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}
       HEADER_INCLUDE_DIR ${header_include_dir}
       IGNORES "*/amd_detail/*"
+      IGNORES "*/aotriton/*"
       CUSTOM_MAP_FILE "${TE}/hipify_custom_map.json"
   )
   get_hipified_list("${transformer_engine_SOURCES}" te_hip_sources)
@@ -171,7 +179,7 @@ if(USE_CUDA)
 else()
   find_package(hip)
   find_package(rocblas)
-  list(APPEND transformer_engine_LINKER_LIBS roc::rocblas hip::host hip::device roctx64)
+  list(APPEND transformer_engine_LINKER_LIBS roc::rocblas hip::host hip::device roctx64 aotriton)
   if(USE_HIPBLASLT)
     find_package(hipblaslt)
     target_compile_definitions(transformer_engine PUBLIC USE_HIPBLASLT)
