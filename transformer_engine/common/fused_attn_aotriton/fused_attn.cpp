@@ -12,6 +12,8 @@
 #include <aotriton/flash.h>
 #include <aotriton/runtime.h>
 #include <aotriton/util.h>
+#include <iostream>
+#include <string>
 
 aotriton::DType nvte_to_aotriton_dtype(NVTEDType t_dtype){
 #define CAST_TYPE(aname, dtname) if (t_dtype == NVTEDType::aname) return aotriton::DType::dtname
@@ -94,7 +96,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   const int device_id = cuda::current_device();
   const std::string sm_arch_name_ = cuda::sm_arch_name(device_id);
   //only MI250 or MI300X supported
-  if(!((sm_arch_name_=="gfx942") || (sm_arch_name_=="gfx90a"))){
+  if(!((sm_arch_name_.find("gfx942")!=std::string::npos) || (sm_arch_name_.find("gfx90a")!=std::string::npos))){
     return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   }
   

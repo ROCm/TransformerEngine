@@ -19,8 +19,14 @@ from jax import Array
 from jax import value_and_grad, jit
 from jax.typing import ArrayLike, DTypeLike
 
+from transformer_engine.jax import is_hip_extension
 from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType, QKVLayout
-from transformer_engine.jax.fused_attn import self_fused_attn, cross_fused_attn, fused_attn
+
+if not is_hip_extension():
+    from transformer_engine.jax.fused_attn import self_fused_attn, cross_fused_attn, fused_attn
+else:
+    from transformer_engine.jax.fused_attn import fused_attn
+
 from transformer_engine.jax.fused_attn import is_fused_attn_kernel_available
 
 
@@ -327,53 +333,98 @@ class FusedAttnRunner:
                 jnp.zeros_like(primitive_dbias[..., self.valid_len_q:, self.valid_len_kv:]))
 
 
-@pytest.mark.parametrize('attn_bias_type', [
-    pytest.param(AttnBiasType.NO_BIAS, id='NO_BIAS'),
-    pytest.param(AttnBiasType.POST_SCALE_BIAS, id='POST_SCALE_BIAS'),
-])
-@pytest.mark.parametrize('attn_mask_type', [
-    pytest.param(AttnMaskType.NO_MASK, id='NO_MASK'),
-    pytest.param(AttnMaskType.PADDING_MASK, id='PADDING'),
-    pytest.param(AttnMaskType.CAUSAL_MASK, id='CAUSAL'),
-    pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id='PADDING_CAUSAL'),
-])
-@pytest.mark.parametrize('qkv_layout', [
-    pytest.param(QKVLayout.BS3HD, id='qkvpacked'),
-    pytest.param(QKVLayout.BSHD_BS2HD, id='kvpacked'),
-    pytest.param(QKVLayout.BSHD_BSHD_BSHD, id='separate'),
-])
-@pytest.mark.parametrize('dropout_prob', [0., 0.1])
-@pytest.mark.parametrize('is_training',
-                         [pytest.param(True, id='training'),
-                          pytest.param(False, id='inference')])
-@pytest.mark.parametrize(
-    'dtype', [pytest.param(jnp.bfloat16, id="BF16"),
-              pytest.param(jnp.float16, id="FP16")])
-@pytest.mark.parametrize('b, s_q, s_kv, h_q, h_kv, d',
-                         [(32, 128, 128, 16, 16, 64), (4, 2048, 2048, 12, 12, 64),
-                          pytest.param(32, 512, 128, 16, 16, 64, id='32-512-128-16-16-64-cross'),
-                          pytest.param(4, 2048, 2048, 12, 6, 64, id='4-2048-2048-12-6-64-GQA')])
-class TestFusedAttn:
-    """
-    Fused attention tester
-    """
-
-    @staticmethod
-    def test_forward(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type, dropout_prob,
-                     dtype, is_training, qkv_layout):
+if not is_hip_extension():
+    @pytest.mark.parametrize('attn_bias_type', [
+        pytest.param(AttnBiasType.NO_BIAS, id='NO_BIAS'),
+        pytest.param(AttnBiasType.POST_SCALE_BIAS, id='POST_SCALE_BIAS'),
+    ])
+    @pytest.mark.parametrize('attn_mask_type', [
+        pytest.param(AttnMaskType.NO_MASK, id='NO_MASK'),
+        pytest.param(AttnMaskType.PADDING_MASK, id='PADDING'),
+        pytest.param(AttnMaskType.CAUSAL_MASK, id='CAUSAL'),
+        pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id='PADDING_CAUSAL'),
+    ])
+    @pytest.mark.parametrize('qkv_layout', [
+        pytest.param(QKVLayout.BS3HD, id='qkvpacked'),
+        pytest.param(QKVLayout.BSHD_BS2HD, id='kvpacked'),
+        pytest.param(QKVLayout.BSHD_BSHD_BSHD, id='separate'),
+    ])
+    @pytest.mark.parametrize('dropout_prob', [0., 0.1])
+    @pytest.mark.parametrize('is_training',
+                             [pytest.param(True, id='training'),
+                              pytest.param(False, id='inference')])
+    @pytest.mark.parametrize(
+        'dtype', [pytest.param(jnp.bfloat16, id="BF16"),
+                  pytest.param(jnp.float16, id="FP16")])
+    @pytest.mark.parametrize('b, s_q, s_kv, h_q, h_kv, d',
+                             [(32, 128, 128, 16, 16, 64), (4, 2048, 2048, 12, 12, 64),
+                              pytest.param(32, 512, 128, 16, 16, 64, id='32-512-128-16-16-64-cross'),
+                              pytest.param(4, 2048, 2048, 12, 6, 64, id='4-2048-2048-12-6-64-GQA')])
+    class TestFusedAttn:
         """
-        Test forward with parameterized configs
+        Fused attention tester
         """
-        runner = FusedAttnRunner(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type,
-                                 dropout_prob, dtype, is_training, qkv_layout)
-        runner.test_forward()
-
-    @staticmethod
-    def test_backward(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type, dropout_prob,
-                      dtype, is_training, qkv_layout):
+    
+        @staticmethod
+        def test_forward(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type, dropout_prob,
+                         dtype, is_training, qkv_layout):
+            """
+            Test forward with parameterized configs
+            """
+            runner = FusedAttnRunner(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type,
+                                     dropout_prob, dtype, is_training, qkv_layout)
+            runner.test_forward()
+    
+        @staticmethod
+        def test_backward(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type, dropout_prob,
+                          dtype, is_training, qkv_layout):
+            """
+            Test backward with parameterized configs
+            """
+            runner = FusedAttnRunner(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type,
+                                     dropout_prob, dtype, is_training, qkv_layout)
+            runner.test_backward()
+else:
+    @pytest.mark.parametrize('attn_bias_type', [
+        pytest.param(AttnBiasType.NO_BIAS, id='NO_BIAS'),
+    ])
+    @pytest.mark.parametrize('attn_mask_type', [
+        pytest.param(AttnMaskType.NO_MASK, id='NO_MASK'),
+        pytest.param(AttnMaskType.CAUSAL_MASK, id='CAUSAL'),
+    ])
+    @pytest.mark.parametrize('qkv_layout', [
+        pytest.param(QKVLayout.BSHD_BSHD_BSHD, id='separate'),
+    ])
+    @pytest.mark.parametrize('dropout_prob', [0., 0.1])
+    @pytest.mark.parametrize('is_training',
+                             [pytest.param(True, id='training'),
+                              pytest.param(False, id='inference')])
+    @pytest.mark.parametrize(
+        'dtype', [pytest.param(jnp.bfloat16, id="BF16"),
+                  pytest.param(jnp.float16, id="FP16")])
+    @pytest.mark.parametrize('b, s_q, s_kv, h_q, h_kv, d',
+                             [(32, 128, 128, 16, 16, 64), (4, 2048, 2048, 12, 12, 64),])
+    class TestFusedAttn:
         """
-        Test backward with parameterized configs
+        Fused attention tester
         """
-        runner = FusedAttnRunner(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type,
-                                 dropout_prob, dtype, is_training, qkv_layout)
-        runner.test_backward()
+    
+        @staticmethod
+        def test_forward(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type, dropout_prob,
+                         dtype, is_training, qkv_layout):
+            """
+            Test forward with parameterized configs
+            """
+            runner = FusedAttnRunner(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type,
+                                     dropout_prob, dtype, is_training, qkv_layout)
+            runner.test_forward()
+    
+        @staticmethod
+        def test_backward(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type, dropout_prob,
+                          dtype, is_training, qkv_layout):
+            """
+            Test backward with parameterized configs
+            """
+            runner = FusedAttnRunner(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type,
+                                     dropout_prob, dtype, is_training, qkv_layout)
+            runner.test_backward()
