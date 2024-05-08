@@ -22,10 +22,7 @@ from jax.typing import ArrayLike, DTypeLike
 from transformer_engine.jax import is_hip_extension
 from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType, QKVLayout
 
-if not is_hip_extension():
-    from transformer_engine.jax.fused_attn import self_fused_attn, cross_fused_attn, fused_attn
-else:
-    from transformer_engine.jax.fused_attn import fused_attn
+from transformer_engine.jax.fused_attn import self_fused_attn, cross_fused_attn, fused_attn
 
 from transformer_engine.jax.fused_attn import is_fused_attn_kernel_available
 
@@ -393,6 +390,8 @@ else:
         pytest.param(AttnMaskType.CAUSAL_MASK, id='CAUSAL'),
     ])
     @pytest.mark.parametrize('qkv_layout', [
+        pytest.param(QKVLayout.BS3HD, id='qkvpacked'),
+        pytest.param(QKVLayout.BSHD_BS2HD, id='kvpacked'),
         pytest.param(QKVLayout.BSHD_BSHD_BSHD, id='separate'),
     ])
     @pytest.mark.parametrize('dropout_prob', [0., 0.1])
@@ -403,7 +402,8 @@ else:
         'dtype', [pytest.param(jnp.bfloat16, id="BF16"),
                   pytest.param(jnp.float16, id="FP16")])
     @pytest.mark.parametrize('b, s_q, s_kv, h_q, h_kv, d',
-                             [(32, 128, 128, 16, 16, 64), (4, 2048, 2048, 12, 12, 64),])
+                             [(32, 128, 128, 16, 16, 64), (4, 2048, 2048, 12, 12, 64),
+                              pytest.param(32, 512, 128, 16, 16, 64, id='32-512-128-16-16-64-cross'),])
     class TestFusedAttn:
         """
         Fused attention tester
