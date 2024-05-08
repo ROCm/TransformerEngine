@@ -1110,6 +1110,15 @@ pybind11::tuple GetSelfFusedAttnForwardWorkspaceSizes(
     auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
     return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
+#else
+pybind11::tuple GetSelfFusedAttnForwardWorkspaceSizes(
+    size_t batch_size, size_t max_seqlen, size_t num_heads, size_t head_dim, float scaling_factor,
+    float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype,
+    bool is_training) {
+
+    return pybind11::make_tuple(std::vector<size_t>(2, 0), DType::kBFloat16);
+}
+#endif
 
 void SelfFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque,
                           size_t opaque_len) {
@@ -1158,7 +1167,11 @@ void SelfFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaqu
     auto backend = nvte_get_fused_attn_backend(
         static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
         mask_type, dropout_probability, num_heads, num_heads, max_seqlen, max_seqlen, head_dim);
+#ifndef USE_ROCM
     PopulateRngStateAsync(rng_state, seed, max_seqlen, max_seqlen, backend, stream);
+#else
+    PopulateRngStateAsync(rng_state, seed, batch_size, num_heads, max_seqlen, max_seqlen, stream);
+#endif
 
     // auxiliary tensors (to be propagated to the backward pass later)
     NVTETensorPack aux_output_tensors;
@@ -1180,6 +1193,7 @@ void SelfFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaqu
     nvte_tensor_pack_destroy(&aux_output_tensors);
 }
 
+#ifndef USE_ROCM
 pybind11::tuple GetSelfFusedAttnBackwardWorkspaceSizes(
     size_t batch_size, size_t max_seqlen, size_t num_heads, size_t head_dim, float scaling_factor,
     float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype,
@@ -1217,6 +1231,16 @@ pybind11::tuple GetSelfFusedAttnBackwardWorkspaceSizes(
     auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
     return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
+#else
+pybind11::tuple GetSelfFusedAttnBackwardWorkspaceSizes(
+    size_t batch_size, size_t max_seqlen, size_t num_heads, size_t head_dim, float scaling_factor,
+    float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype,
+    bool is_training) {
+
+    std::vector<size_t> work_shape = {batch_size * num_heads, max_seqlen};
+    return pybind11::make_tuple(work_shape, DType::kFloat32);
+} 
+#endif
 
 void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque,
                            size_t opaque_len) {
@@ -1290,6 +1314,7 @@ void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaq
     nvte_tensor_pack_destroy(&aux_input_tensors);
 }
 
+#ifndef USE_ROCM
 pybind11::tuple GetCrossFusedAttnForwardWorkspaceSizes(
     size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
     size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
@@ -1330,6 +1355,15 @@ pybind11::tuple GetCrossFusedAttnForwardWorkspaceSizes(
     auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
     return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
+#else
+pybind11::tuple GetCrossFusedAttnForwardWorkspaceSizes(
+    size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
+    size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype, bool is_training) {
+
+    return pybind11::make_tuple(std::vector<size_t>(2, 0), DType::kBFloat16);
+}
+#endif
 
 void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque,
                            size_t opaque_len) {
@@ -1387,7 +1421,11 @@ void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaq
         static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
         mask_type, dropout_probability, num_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
         head_dim);
+#ifndef USE_ROCM
     PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
+#else
+    PopulateRngStateAsync(rng_state, seed, batch_size, num_heads, q_max_seqlen, kv_max_seqlen, stream);
+#endif
 
     // auxiliary tensors (to be propagated to the backward pass later)
     NVTETensorPack aux_output_tensors;
@@ -1409,6 +1447,7 @@ void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaq
     nvte_tensor_pack_destroy(&aux_output_tensors);
 }
 
+#ifndef USE_ROCM
 pybind11::tuple GetCrossFusedAttnBackwardWorkspaceSizes(
     size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
     size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
@@ -1452,6 +1491,16 @@ pybind11::tuple GetCrossFusedAttnBackwardWorkspaceSizes(
     auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
     return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
+#else
+pybind11::tuple GetCrossFusedAttnBackwardWorkspaceSizes(
+    size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
+    size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype, bool is_training) {
+
+    std::vector<size_t> work_shape = {batch_size * num_heads, q_max_seqlen};
+    return pybind11::make_tuple(work_shape, DType::kFloat32);
+}
+#endif
 
 void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque,
                             size_t opaque_len) {
@@ -1536,7 +1585,6 @@ void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opa
 
     nvte_tensor_pack_destroy(&aux_input_tensors);
 }
-#endif
 
 #ifndef USE_ROCM
 pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
@@ -1651,7 +1699,6 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
         static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
         mask_type, dropout_probability, num_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
         head_dim);
-    //TODO: aotriton need different increment for rng_state
 #ifndef USE_ROCM
     PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 #else

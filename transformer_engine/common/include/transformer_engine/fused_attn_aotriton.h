@@ -185,7 +185,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in]     workspace                Workspace tensor.
  *  \param[in]     stream                   CUDA stream used for this operation.
  */
- /*
 void nvte_fused_attn_fwd_qkvpacked(
             const NVTETensor QKV,
             const NVTETensor Bias,
@@ -200,7 +199,6 @@ void nvte_fused_attn_fwd_qkvpacked(
             NVTE_Mask_Type attn_mask_type,
             NVTETensor workspace,
             cudaStream_t stream);
-*/
 /*! \brief Compute the backward of the dot product attention with packed QKV input.
  *
  * Support Matrix:
@@ -231,7 +229,6 @@ void nvte_fused_attn_fwd_qkvpacked(
  *  \param[in]     workspace                Workspace tensor.
  *  \param[in]     stream                   CUDA stream used for this operation.
  */
- /*
 void nvte_fused_attn_bwd_qkvpacked(
             const NVTETensor QKV,
             const NVTETensor O,
@@ -248,7 +245,6 @@ void nvte_fused_attn_bwd_qkvpacked(
             NVTE_Mask_Type attn_mask_type,
             NVTETensor workspace,
             cudaStream_t stream);
-*/
 
 /*! \brief Compute dot product attention with packed KV input.
  *
@@ -288,7 +284,6 @@ void nvte_fused_attn_bwd_qkvpacked(
  *  \param[in]     workspace                Workspace tensor.
  *  \param[in]     stream                   CUDA stream used for this operation.
  */
-/*
 void nvte_fused_attn_fwd_kvpacked(
             const NVTETensor Q,
             const NVTETensor KV,
@@ -305,7 +300,6 @@ void nvte_fused_attn_fwd_kvpacked(
             NVTE_Mask_Type attn_mask_type,
             NVTETensor workspace,
             cudaStream_t stream);
-*/
 /*! \brief Compute the backward of the dot product attention with packed KV input.
  *
  * Support Matrix:
@@ -340,7 +334,6 @@ void nvte_fused_attn_fwd_kvpacked(
  *  \param[in]     workspace                Workspace tensor.
  *  \param[in]     stream                   CUDA stream used for this operation.
  */
-/*
 void nvte_fused_attn_bwd_kvpacked(
             const NVTETensor Q,
             const NVTETensor KV,
@@ -360,7 +353,6 @@ void nvte_fused_attn_bwd_kvpacked(
             NVTE_Mask_Type attn_mask_type,
             NVTETensor workspace,
             cudaStream_t stream);
-*/
 /*! \brief Compute dot product attention with separate Q, K and V.
  *
  * Computes:

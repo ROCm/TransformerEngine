@@ -55,12 +55,10 @@ pybind11::dict Registrations() {
     dict["te_scaled_upper_triang_masked_softmax_backward"] =
         EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxBackward);
     //TODO: add back once fused_attn is available on ROCm
-#ifndef USE_ROCM
     dict["te_self_fused_attn_forward"] = EncapsulateFunction(SelfFusedAttnForward);
     dict["te_self_fused_attn_backward"] = EncapsulateFunction(SelfFusedAttnBackward);
     dict["te_cross_fused_attn_forward"] = EncapsulateFunction(CrossFusedAttnForward);
     dict["te_cross_fused_attn_backward"] = EncapsulateFunction(CrossFusedAttnBackward);
-#endif
     dict["te_fused_attn_forward"] = EncapsulateFunction(FusedAttnForward);
     dict["te_fused_attn_backward"] = EncapsulateFunction(FusedAttnBackward);
     return dict;
@@ -83,12 +81,10 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
     //TODO: add back once fused_attn is available on ROCm
     m.def("pack_fused_attn_descriptor", &PackCustomCallFusedAttnDescriptor);
     m.def("get_fused_attn_backend", &GetFusedAttnBackend);
-#ifndef USE_ROCM
     m.def("get_self_fused_attn_fwd_workspace_sizes", &GetSelfFusedAttnForwardWorkspaceSizes);
     m.def("get_self_fused_attn_bwd_workspace_sizes", &GetSelfFusedAttnBackwardWorkspaceSizes);
     m.def("get_cross_fused_attn_fwd_workspace_sizes", &GetCrossFusedAttnForwardWorkspaceSizes);
     m.def("get_cross_fused_attn_bwd_workspace_sizes", &GetCrossFusedAttnBackwardWorkspaceSizes);
-#endif
     m.def("get_fused_attn_fwd_workspace_sizes", &GetFusedAttnForwardWorkspaceSizes);
     m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
 
