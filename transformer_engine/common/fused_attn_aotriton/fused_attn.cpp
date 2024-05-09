@@ -115,6 +115,11 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         size_t head_dim) {
   using namespace transformer_engine;
   NVTE_Fused_Attn_Backend backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
+  
+  //aotriton fused attn does not support gqa mode now
+  if(num_attn_heads!=num_gqa_groups){
+    return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
+  }
 
   const int device_id = cuda::current_device();
   const std::string sm_arch_name_ = cuda::sm_arch_name(device_id);
@@ -400,9 +405,6 @@ void nvte_fused_attn_fwd_kvpacked(
   //TODO: support NVTE_HD_H2D layout group
   size_t h_kv = input_KV->data.shape[ndim_kv - 2];
   
-  //TODO: support GQA
-  NVTE_CHECK(h_q==h_kv, "aotriton does not support GQA");
-
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_KV->data.dtype);
 
@@ -514,9 +516,6 @@ void nvte_fused_attn_bwd_kvpacked(
   auto ndim_kv = input_KV->data.shape.size();
   //TODO: support NVTE_HD_H2D layout group
   size_t h_kv = input_KV->data.shape[ndim_kv - 2];
-
-  //TODO: support GQA
-  NVTE_CHECK(h_q==h_kv, "aotriton does not support GQA");
 
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_KV->data.dtype);
@@ -630,9 +629,6 @@ void nvte_fused_attn_fwd(
   size_t h_kv = input_K->data.shape[ndim - 2];
   size_t d = input_Q->data.shape[ndim - 1];
 
-  //TODO: support GQA
-  NVTE_CHECK(h_q==h_kv, "aotriton does not support GQA");
-
   //auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
@@ -742,9 +738,6 @@ void nvte_fused_attn_bwd(
   size_t h_q = input_Q->data.shape[ndim - 2];
   size_t h_kv = input_K->data.shape[ndim - 2];
   size_t d = input_Q->data.shape[ndim - 1];
-
-  //TODO: support GQA
-  NVTE_CHECK(h_q==h_kv, "aotriton does not support GQA");
 
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
