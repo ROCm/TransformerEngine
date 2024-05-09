@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2023, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -170,12 +170,14 @@ if(USE_CUDA)
        CUDNN::cudnn)
 else()
   find_package(hip)
-  find_package(rocblas)
-  list(APPEND transformer_engine_LINKER_LIBS roc::rocblas hip::host hip::device roctx64)
+  list(APPEND transformer_engine_LINKER_LIBS hip::host hip::device roctx64)
   if(USE_HIPBLASLT)
     find_package(hipblaslt)
     target_compile_definitions(transformer_engine PUBLIC USE_HIPBLASLT)
     list(APPEND transformer_engine_LINKER_LIBS roc::hipblaslt)
+  else()
+    find_package(rocblas)
+    list(APPEND transformer_engine_LINKER_LIBS roc::rocblas)
   endif()
 endif()
 

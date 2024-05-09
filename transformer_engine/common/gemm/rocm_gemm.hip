@@ -312,6 +312,24 @@ transformer_engine::DType get_transformer_engine_dtype(const rocblas_datatype t)
 #endif //#ifndef USE_HIPBLASLT
 
 #ifdef USE_HIPBLASLT
+
+#include <vector>
+
+thread_local struct HandleCache {
+  std::vector<hipblasLtHandle_t> d;
+  ~HandleCache()
+  {
+    for (auto & handle : d)
+    {
+      if (handle != nullptr)
+      {
+        NVTE_CHECK_CUBLAS(hipblasLtDestroy(handle));
+      }
+    }
+  }
+  hipblasLtHandle_t & operator[](int idx) { return d[idx]; }
+} cached_handles;
+
 void cublas_gemm(const Tensor *inputA,
                  const Tensor *inputB,
                  Tensor *outputD,
@@ -364,8 +382,26 @@ void cublas_gemm(const Tensor *inputA,
   float zero = 0.0;
   float beta = (accumulate) ? one : zero;
 
-  hipblasLtHandle_t handle;
-  NVTE_CHECK_CUBLAS(hipblasLtCreate(&handle));
+  hipblasLtHandle_t handle = nullptr;
+  int device_id;
+
+  NVTE_CHECK_CUDA(hipGetDevice(&device_id));
+  if (cached_handles.d.empty())
+  {
+    int device_count = 0;
+    NVTE_CHECK_CUDA(hipGetDeviceCount(&device_count));
+    cached_handles.d.resize(device_count);
+  }
+  else
+  {
+    handle = cached_handles[device_id];
+  }
+
+  if (handle == nullptr)
+  {
+    NVTE_CHECK_CUBLAS(hipblasLtCreate(&handle));
+    cached_handles[device_id] = handle;
+  }
 
   hipblasLtMatmulDesc_t       operationDesc = nullptr;
   hipblasLtMatrixLayout_t     Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr, Ddesc = nullptr;
@@ -501,7 +537,6 @@ void cublas_gemm(const Tensor *inputA,
   NVTE_CHECK_CUBLAS(hipblasLtMatrixLayoutDestroy(Bdesc));
   NVTE_CHECK_CUBLAS(hipblasLtMatrixLayoutDestroy(Adesc));
   NVTE_CHECK_CUBLAS(hipblasLtMatmulDescDestroy(operationDesc));
-  NVTE_CHECK_CUBLAS(hipblasLtDestroy(handle));
 }
 #else // Use rocblas + kernel, no fusion
 void cublas_gemm(const Tensor *inputA,
