@@ -10,6 +10,9 @@ import numpy as np
 from flax.linen import dot_product_attention
 from jax import random
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jax import Array
+from jax.typing import ArrayLike, DTypeLike
+from flax.linen.dtypes import promote_dtype
 
 from distributed_test_base import generate_configs, generate_collectives_count
 from distributed_test_base import compare_ops
@@ -20,6 +23,50 @@ from transformer_engine.jax.fused_attn import self_fused_attn, cross_fused_attn
 from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType, QKVLayout
 
 DTYPES = [jnp.float16, jnp.bfloat16]
+
+def general_dot_product_attention(query: ArrayLike, key: ArrayLike, value: ArrayLike,
+                                  bias: ArrayLike, mask: ArrayLike, deterministic: bool,
+                                  dropout_rate: float, dropout_rng: ArrayLike,
+                                  dtype: DTypeLike) -> Array:
+    """
+    Similar to flax.linen.dot_product_attention but with GQA support
+    """
+    query, key, value, bias = promote_dtype(query, key, value, bias, dtype=dtype)
+    dtype = query.dtype
+
+    depth = query.shape[-1]
+    query = query / jnp.sqrt(depth).astype(dtype)
+
+    b, s_q, h_q, d = query.shape
+    _, _, h_kv, _ = key.shape
+    assert (h_q % h_kv == 0) and (h_q >= h_kv)
+    num_groups = h_q // h_kv
+    grouped_query = jnp.reshape(query, (b, s_q, h_kv, num_groups, d))
+    # logits with shape (b, h_kv, num_groups, s_q, s_kv)
+    logits = jnp.einsum('...qhgd,...khd->...hgqk', grouped_query, key)
+
+    if bias is not None:
+        if bias.ndim != logits.ndim:
+            bias = bias.reshape((1, *logits.shape[1:]))
+        logits = logits + bias
+
+    if mask is not None:
+        if mask.ndim != logits.ndim:
+            mask = jnp.expand_dims(mask, axis=-3)
+        logits = jnp.where(mask, logits, jnp.finfo(dtype).min)
+
+    softmax_out = jax.nn.softmax(logits).astype(dtype)
+
+    if not deterministic and dropout_rate > 0.:
+        keep_prob = 1.0 - dropout_rate
+        keep = jax.random.bernoulli(dropout_rng, keep_prob, softmax_out.shape)
+        multiplier = keep.astype(dtype) / jnp.asarray(keep_prob, dtype=dtype)
+        softmax_out = softmax_out * multiplier
+
+    context = jnp.einsum('...hgqk,...khd->...qhgd', softmax_out, value)
+    context = jnp.reshape(context, query.shape)
+    return context
+
 
 
 class TestDistributedSelfAttn:
@@ -49,10 +96,12 @@ class TestDistributedSelfAttn:
                 if with_bias else None
 
         mask = None
-        if attn_mask_type == AttnMaskType.PADDING_MASK:
+        if attn_mask_type == AttnMaskType.CAUSAL_MASK:
             mask = make_causal_mask(batch, seqlen)
-        elif attn_mask_type == AttnMaskType.CAUSAL_MASK:
-            mask = make_self_mask(batch, seqlen)
+
+        #print("in generate inputs, qkv: ", qkv)
+        #print("in generate inputs, bias: ", bias)
+        #print("in generate inputs, mask: ", mask)
 
         qkv_pspec = PartitionSpec(mesh_resource.dp_resource, None, None, mesh_resource.tp_resource,
                                   None)
@@ -64,12 +113,12 @@ class TestDistributedSelfAttn:
         return (qkv, bias, mask), (qkv_pspec, bias_pspec, mask_pspec)
 
     @pytest.mark.parametrize('device_count,mesh_shape,mesh_axes,mesh_resource', generate_configs())
-    @pytest.mark.parametrize('data_shape', [[32, 512, 3, 12, 64], [32, 1024, 3, 16, 128]])
+    @pytest.mark.parametrize('data_shape', [[4, 4, 3, 4, 4], [32, 512, 3, 12, 64], [32, 1024, 3, 16, 128]])
     @pytest.mark.parametrize(
         'attn_bias_type',
         [AttnBiasType.NO_BIAS, AttnBiasType.PRE_SCALE_BIAS, AttnBiasType.POST_SCALE_BIAS])
     @pytest.mark.parametrize('attn_mask_type',
-                             [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK])
+                             [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK])
     @pytest.mark.parametrize('dtype', DTYPES)
     def test_self_attn(self, device_count, mesh_shape, mesh_axes, mesh_resource, data_shape,
                        attn_bias_type, attn_mask_type, dtype):
@@ -84,19 +133,24 @@ class TestDistributedSelfAttn:
                                               seqlen, seqlen, hidden):
             pytest.skip(f"No FusedAttn backwend found")
 
+        print("debug")
         def target_func(qkv, bias, mask):
-            return jnp.mean(
-                self_fused_attn(qkv,
-                                bias,
-                                mask,
-                                None,
-                                attn_bias_type=attn_bias_type,
-                                attn_mask_type=attn_mask_type,
-                                scaling_factor=scaling_factor,
-                                dropout_probability=dropout_prob,
-                                is_training=is_training))
+            #jax.debug.print("qkv in fused attn: {qkv}", qkv=qkv)
+            output = self_fused_attn(qkv,
+                                     bias,
+                                     mask,
+                                     None,
+                                     attn_bias_type=attn_bias_type,
+                                     attn_mask_type=attn_mask_type,
+                                     scaling_factor=scaling_factor,
+                                     dropout_probability=dropout_prob,
+                                     is_training=is_training)
+            jax.debug.print("output in fused attn sharded: {output}", output=output)
+            return jnp.mean(output).astype(dtype)
 
         def ref_func(qkv, bias, mask):
+            #jax.debug.print("qkv in ref attn: {qkv}", qkv=qkv)
+            #jax.debug.inspect_array_sharding(qkv, callback=print)
             query, key, value = jnp.split(qkv, [1, 2], axis=-3)
             query = jnp.squeeze(query)
             key = jnp.squeeze(key)
@@ -111,18 +165,53 @@ class TestDistributedSelfAttn:
                                            dropout_rate=dropout_prob,
                                            dropout_rng=None,
                                            dtype=jnp.float32)
-
+            #jax.debug.print("output in ref attn sharded: {output}", output=output)
             return jnp.mean(output).astype(dtype)
+
+        def ref_dpa_single_shard(qkv, bias, mask):
+            #jax.debug.print("qkv in ref attn: {qkv}", qkv=qkv)
+            #jax.debug.inspect_array_sharding(qkv, callback=print)
+            query, key, value = jnp.split(qkv, [1, 2], axis=-3)
+            query = jnp.squeeze(query)
+            key = jnp.squeeze(key)
+            value = jnp.squeeze(value)
+
+            output = general_dot_product_attention(query,
+                                                   key,
+                                                   value,
+                                                   bias=bias,
+                                                   mask=mask,
+                                                   deterministic=is_training,
+                                                   dropout_rate=dropout_prob,
+                                                   dropout_rng=None,
+                                                   dtype=jnp.float32)
+            return output
+
+        def target_dpa_single_shard(qkv, bias, mask):
+            output = self_fused_attn(qkv,
+                                     bias,
+                                     mask,
+                                     None,
+                                     attn_bias_type=attn_bias_type,
+                                     attn_mask_type=attn_mask_type,
+                                     scaling_factor=scaling_factor,
+                                     dropout_probability=dropout_prob,
+                                     is_training=is_training)
+            return output
+
 
         with_bias = attn_bias_type != AttnBiasType.NO_BIAS
         (qkv, bias, mask), (qkv_pspec, bias_pspec, mask_pspec) = \
                 self.generate_inputs(data_shape, mesh_resource, with_bias,
                                      attn_mask_type, dtype)
+        #print("qkv_pspec: ", qkv_pspec)
         collective_count_ref = self.generate_collectives_count_ref(mesh_shape, mesh_axes,
                                                                    mesh_resource, with_bias,
                                                                    data_shape, dtype)
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
+        #print("target output without sharding: ", target_dpa_single_shard(jnp.zeros_like(qkv), bias, mask))
+        #print("ref output without sharding: ", ref_dpa_single_shard(qkv, bias, mask))
         with mesh, fp8_autocast(mesh_resource=mesh_resource):
             qkv_ = jax.device_put(qkv, NamedSharding(mesh, qkv_pspec))
             bias_ = jax.device_put(bias, NamedSharding(mesh, bias_pspec)) \
@@ -174,7 +263,7 @@ class TestDistributedCrossAttn:
     @pytest.mark.parametrize('device_count,mesh_shape,mesh_axes,mesh_resource', generate_configs())
     @pytest.mark.parametrize('data_shape', [[32, 128, 12, 64], [32, 512, 16, 64]])
     @pytest.mark.parametrize('attn_mask_type',
-                             [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK])
+                             [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK])
     @pytest.mark.parametrize('dtype', DTYPES)
     def test_cross_attn(self, device_count, mesh_shape, mesh_axes, mesh_resource, data_shape,
                         attn_mask_type, dtype):
