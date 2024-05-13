@@ -242,20 +242,20 @@ void nvte_fused_attn_fwd_qkvpacked(
   Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
   output_rng_state->data.dptr = input_rng_state->data.dptr;
 
-  hipError_t err; // TODO: Error handling
   using aotriton::v2::flash::attn_fwd;
-  err = attn_fwd(q_tensor,
-                 k_tensor,
-                 v_tensor,
-                 attn_scale,
-                 M_tensor,
-                 o_tensor,
-                 is_training? dropout:0,
-                 philox_seed,
-                 philox_offset,
-                 encoded_softmax_tensor,
-                 attn_mask_type==NVTE_CAUSAL_MASK,
-                 stream);
+  NVTE_CHECK_CUDA(attn_fwd(q_tensor,
+                           k_tensor,
+                           v_tensor,
+                           attn_scale,
+                           M_tensor,
+                           o_tensor,
+                           is_training? dropout:0,
+                           philox_seed,
+                           philox_offset,
+                           encoded_softmax_tensor,
+                           attn_mask_type==NVTE_CAUSAL_MASK,
+                           stream));
+ 
 }
 // NVTE fused attention BWD with packed QKV
 void nvte_fused_attn_bwd_qkvpacked(
@@ -349,23 +349,22 @@ void nvte_fused_attn_bwd_qkvpacked(
   uint64_t philox_offset = *(reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1);
 
   using aotriton::v2::flash::attn_bwd;
-  hipError_t err; // TODO: Error handling
-  err = attn_bwd(q_tensor,
-                 k_tensor,
-                 v_tensor,
-                 attn_scale,
-                 o_tensor,
-                 do_tensor,
-                 dq_tensor,
-                 dk_tensor,
-                 dv_tensor,
-                 M_tensor,
-                 wkspace_tensor,
-                 dropout,
-                 philox_seed,
-                 philox_offset,
-                 attn_mask_type==NVTE_CAUSAL_MASK,
-                 stream);
+  NVTE_CHECK_CUDA(attn_bwd(q_tensor,
+                           k_tensor,
+                           v_tensor,
+                           attn_scale,
+                           o_tensor,
+                           do_tensor,
+                           dq_tensor,
+                           dk_tensor,
+                           dv_tensor,
+                           M_tensor,
+                           wkspace_tensor,
+                           dropout,
+                           philox_seed,
+                           philox_offset,
+                           attn_mask_type==NVTE_CAUSAL_MASK,
+                           stream));
 }
 
 // NVTE fused attention FWD with packed KV
@@ -458,20 +457,19 @@ void nvte_fused_attn_fwd_kvpacked(
   Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
   output_rng_state->data.dptr = input_rng_state->data.dptr;
 
-  hipError_t err; // TODO: Error handling
   using aotriton::v2::flash::attn_fwd;
-  err = attn_fwd(q_tensor,
-                 k_tensor,
-                 v_tensor,
-                 attn_scale,
-                 M_tensor,
-                 o_tensor,
-                 is_training? dropout:0,
-                 philox_seed,
-                 philox_offset,
-                 encoded_softmax_tensor,
-                 attn_mask_type==NVTE_CAUSAL_MASK,
-                 stream);
+  NVTE_CHECK_CUDA(attn_fwd(q_tensor,
+                           k_tensor,
+                           v_tensor,
+                           attn_scale,
+                           M_tensor,
+                           o_tensor,
+                           is_training? dropout:0,
+                           philox_seed,
+                           philox_offset,
+                           encoded_softmax_tensor,
+                           attn_mask_type==NVTE_CAUSAL_MASK,
+                           stream));
 
 }
 // NVTE fused attention BWD with packed KV
@@ -573,23 +571,22 @@ void nvte_fused_attn_bwd_kvpacked(
   uint64_t philox_offset = *(reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1);
 
   using aotriton::v2::flash::attn_bwd;
-  hipError_t err; // TODO: Error handling
-  err = attn_bwd(q_tensor,
-                 k_tensor,
-                 v_tensor,
-                 attn_scale,
-                 o_tensor,
-                 do_tensor,
-                 dq_tensor,
-                 dk_tensor,
-                 dv_tensor,
-                 M_tensor,
-                 wkspace_tensor,
-                 dropout,
-                 philox_seed,
-                 philox_offset,
-                 attn_mask_type==NVTE_CAUSAL_MASK,
-                 stream);
+  NVTE_CHECK_CUDA(attn_bwd(q_tensor,
+                           k_tensor,
+                           v_tensor,
+                           attn_scale,
+                           o_tensor,
+                           do_tensor,
+                           dq_tensor,
+                           dk_tensor,
+                           dv_tensor,
+                           M_tensor,
+                           wkspace_tensor,
+                           dropout,
+                           philox_seed,
+                           philox_offset,
+                           attn_mask_type==NVTE_CAUSAL_MASK,
+                           stream));
 }
 
 // NVTE fused attention FWD with separate Q, K and V
@@ -679,20 +676,19 @@ void nvte_fused_attn_fwd(
   Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
   output_rng_state->data.dptr = input_rng_state->data.dptr;
 
-  hipError_t err; // TODO: Error handling
   using aotriton::v2::flash::attn_fwd;
-  err = attn_fwd(q_tensor,
-                 k_tensor,
-                 v_tensor,
-                 attn_scale,
-                 M_tensor,
-                 o_tensor,
-                 is_training? dropout:0,
-                 philox_seed,
-                 philox_offset,
-                 encoded_softmax_tensor,
-                 attn_mask_type==NVTE_CAUSAL_MASK,
-                 stream);
+  NVTE_CHECK_CUDA(attn_fwd(q_tensor,
+                           k_tensor,
+                           v_tensor,
+                           attn_scale,
+                           M_tensor,
+                           o_tensor,
+                           is_training? dropout:0,
+                           philox_seed,
+                           philox_offset,
+                           encoded_softmax_tensor,
+                           attn_mask_type==NVTE_CAUSAL_MASK,
+                           stream));
 }
 // NVTE fused attention BWD with separate Q, K and V
 void nvte_fused_attn_bwd(
@@ -789,21 +785,20 @@ void nvte_fused_attn_bwd(
   uint64_t philox_offset = *(reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1);
 
   using aotriton::v2::flash::attn_bwd;
-  hipError_t err; // TODO: Error handling
-  err = attn_bwd(q_tensor,
-                 k_tensor,
-                 v_tensor,
-                 attn_scale,
-                 o_tensor,
-                 do_tensor,
-                 dq_tensor,
-                 dk_tensor,
-                 dv_tensor,
-                 M_tensor,
-                 wkspace_tensor,
-                 dropout,
-                 philox_seed,
-                 philox_offset,
-                 attn_mask_type==NVTE_CAUSAL_MASK,
-                 stream);
+  NVTE_CHECK_CUDA(attn_bwd(q_tensor,
+                           k_tensor,
+                           v_tensor,
+                           attn_scale,
+                           o_tensor,
+                           do_tensor,
+                           dq_tensor,
+                           dk_tensor,
+                           dv_tensor,
+                           M_tensor,
+                           wkspace_tensor,
+                           dropout,
+                           philox_seed,
+                           philox_offset,
+                           attn_mask_type==NVTE_CAUSAL_MASK,
+                           stream));
 }
