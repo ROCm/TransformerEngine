@@ -69,7 +69,7 @@ class TestDistributedSelfAttn:
         'attn_bias_type',
         [AttnBiasType.NO_BIAS, AttnBiasType.PRE_SCALE_BIAS, AttnBiasType.POST_SCALE_BIAS])
     @pytest.mark.parametrize('attn_mask_type',
-                             [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK])
+                             [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK])
     @pytest.mark.parametrize('dtype', DTYPES)
     def test_self_attn(self, device_count, mesh_shape, mesh_axes, mesh_resource, data_shape,
                        attn_bias_type, attn_mask_type, dtype):
