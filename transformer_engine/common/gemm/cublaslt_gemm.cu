@@ -15,6 +15,9 @@
 #include <cuda.h>
 #else
 #ifdef USE_HIPBLASLT
+#include <vector>
+#include <forward_list>
+#include <mutex>
 #include <hipblaslt/hipblaslt.h>
 #else
 #define ROCBLAS_BETA_FEATURES_API 
