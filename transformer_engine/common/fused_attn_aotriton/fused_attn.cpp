@@ -50,58 +50,231 @@ size_t nvte_dtype_size(NVTEDType t_dtype){
 
 // map NVTE_QKV_Layout to NVTE_QKV_Layout_Group
 NVTE_QKV_Layout_Group nvte_get_qkv_layout_group(NVTE_QKV_Layout qkv_layout) {
-    switch (qkv_layout) {
-        case NVTE_QKV_Layout::NVTE_SB3HD:
-        case NVTE_QKV_Layout::NVTE_BS3HD:
-        case NVTE_QKV_Layout::NVTE_T3HD:
-            return NVTE_QKV_Layout_Group::NVTE_3HD;
-        case NVTE_QKV_Layout::NVTE_SBH3D:
-        case NVTE_QKV_Layout::NVTE_BSH3D:
-        case NVTE_QKV_Layout::NVTE_TH3D:
-            return NVTE_QKV_Layout_Group::NVTE_H3D;
-        case NVTE_QKV_Layout::NVTE_SBHD_SB2HD:
-        case NVTE_QKV_Layout::NVTE_BSHD_BS2HD:
-        case NVTE_QKV_Layout::NVTE_THD_T2HD:
-            return NVTE_QKV_Layout_Group::NVTE_HD_2HD;
-        case NVTE_QKV_Layout::NVTE_SBHD_SBH2D:
-        case NVTE_QKV_Layout::NVTE_BSHD_BSH2D:
-        case NVTE_QKV_Layout::NVTE_THD_TH2D:
-            return NVTE_QKV_Layout_Group::NVTE_HD_H2D;
-        case NVTE_QKV_Layout::NVTE_SBHD_SBHD_SBHD:
-        case NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD:
-        case NVTE_QKV_Layout::NVTE_THD_THD_THD:
-            return NVTE_QKV_Layout_Group::NVTE_HD_HD_HD;
-        default:
-            NVTE_ERROR("qkv_layout not supported!");
-    }
+  switch (qkv_layout) {
+    case NVTE_QKV_Layout::NVTE_SB3HD:
+    case NVTE_QKV_Layout::NVTE_BS3HD:
+    case NVTE_QKV_Layout::NVTE_T3HD:
+      return NVTE_QKV_Layout_Group::NVTE_3HD;
+    case NVTE_QKV_Layout::NVTE_SBH3D:
+    case NVTE_QKV_Layout::NVTE_BSH3D:
+    case NVTE_QKV_Layout::NVTE_TH3D:
+      return NVTE_QKV_Layout_Group::NVTE_H3D;
+    case NVTE_QKV_Layout::NVTE_SBHD_SB2HD:
+    case NVTE_QKV_Layout::NVTE_BSHD_BS2HD:
+    case NVTE_QKV_Layout::NVTE_THD_T2HD:
+      return NVTE_QKV_Layout_Group::NVTE_HD_2HD;
+    case NVTE_QKV_Layout::NVTE_SBHD_SBH2D:
+    case NVTE_QKV_Layout::NVTE_BSHD_BSH2D:
+    case NVTE_QKV_Layout::NVTE_THD_TH2D:
+      return NVTE_QKV_Layout_Group::NVTE_HD_H2D;
+    case NVTE_QKV_Layout::NVTE_SBHD_SBHD_SBHD:
+    case NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD:
+    case NVTE_QKV_Layout::NVTE_THD_THD_THD:
+      return NVTE_QKV_Layout_Group::NVTE_HD_HD_HD;
+    default:
+      NVTE_ERROR("qkv_layout not supported!");
+  }
 }
 
 // map NVTE_QKV_Layout to NVTE_QKV_Format
 NVTE_QKV_Format nvte_get_qkv_format(NVTE_QKV_Layout qkv_layout) {
-    switch (qkv_layout) {
-        case NVTE_QKV_Layout::NVTE_SB3HD:
-        case NVTE_QKV_Layout::NVTE_SBH3D:
-        case NVTE_QKV_Layout::NVTE_SBHD_SB2HD:
-        case NVTE_QKV_Layout::NVTE_SBHD_SBH2D:
-        case NVTE_QKV_Layout::NVTE_SBHD_SBHD_SBHD:
-            return NVTE_QKV_Format::NVTE_SBHD;
-        case NVTE_QKV_Layout::NVTE_BS3HD:
-        case NVTE_QKV_Layout::NVTE_BSH3D:
-        case NVTE_QKV_Layout::NVTE_BSHD_BS2HD:
-        case NVTE_QKV_Layout::NVTE_BSHD_BSH2D:
-        case NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD:
-            return NVTE_QKV_Format::NVTE_BSHD;
-        case NVTE_QKV_Layout::NVTE_T3HD:
-        case NVTE_QKV_Layout::NVTE_TH3D:
-        case NVTE_QKV_Layout::NVTE_THD_T2HD:
-        case NVTE_QKV_Layout::NVTE_THD_TH2D:
-        case NVTE_QKV_Layout::NVTE_THD_THD_THD:
-            return NVTE_QKV_Format::NVTE_THD;
-        default:
-            NVTE_ERROR("qkv_layout not supported!");
-    }
+  switch (qkv_layout) {
+    case NVTE_QKV_Layout::NVTE_SB3HD:
+    case NVTE_QKV_Layout::NVTE_SBH3D:
+    case NVTE_QKV_Layout::NVTE_SBHD_SB2HD:
+    case NVTE_QKV_Layout::NVTE_SBHD_SBH2D:
+    case NVTE_QKV_Layout::NVTE_SBHD_SBHD_SBHD:
+      return NVTE_QKV_Format::NVTE_SBHD;
+    case NVTE_QKV_Layout::NVTE_BS3HD:
+    case NVTE_QKV_Layout::NVTE_BSH3D:
+    case NVTE_QKV_Layout::NVTE_BSHD_BS2HD:
+    case NVTE_QKV_Layout::NVTE_BSHD_BSH2D:
+    case NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD:
+      return NVTE_QKV_Format::NVTE_BSHD;
+    case NVTE_QKV_Layout::NVTE_T3HD:
+    case NVTE_QKV_Layout::NVTE_TH3D:
+    case NVTE_QKV_Layout::NVTE_THD_T2HD:
+    case NVTE_QKV_Layout::NVTE_THD_TH2D:
+    case NVTE_QKV_Layout::NVTE_THD_THD_THD:
+      return NVTE_QKV_Format::NVTE_THD;
+    default:
+      NVTE_ERROR("qkv_layout not supported!");
+  }
 }
 
+enum NVTE_QKV_Matrix {
+  NVTE_Q_Matrix            = 0,  // queries
+  NVTE_K_Matrix            = 1,  // keys
+  NVTE_V_Matrix            = 2,  // values
+  NVTE_O_Matrix            = 3,  // final output
+};
+
+// get matrix strides based on matrix type
+void generateMatrixStrides(
+            uint64_t b, uint64_t h,
+            uint64_t s_q, uint64_t s_kv,
+            uint64_t d, uint64_t* stride,
+            NVTE_QKV_Layout layout, NVTE_QKV_Matrix matrix) {
+    // AOTriton internally takes BHSD for implementation
+    constexpr int batch_dim_idx   = 0;
+    constexpr int head_dim_idx    = 1;
+    constexpr int seqlen_dim_idx  = 2;
+    constexpr int hidden_dim_idx  = 3;
+
+    switch (layout) {
+        case NVTE_QKV_Layout::NVTE_SB3HD:
+            if ((matrix == NVTE_QKV_Matrix::NVTE_Q_Matrix)
+                || (matrix == NVTE_QKV_Matrix::NVTE_K_Matrix)
+                || (matrix == NVTE_QKV_Matrix::NVTE_V_Matrix)) {
+                    stride[batch_dim_idx] = 3 * h * d;
+                    stride[head_dim_idx] = d;
+                    stride[seqlen_dim_idx] = b * 3 * h * d;
+                    stride[hidden_dim_idx] = 1;
+            } else if (matrix == NVTE_QKV_Matrix::NVTE_O_Matrix) {
+                    stride[batch_dim_idx] = h * d;
+                    stride[head_dim_idx] = d;
+                    stride[seqlen_dim_idx] = b * h * d;
+                    stride[hidden_dim_idx] = 1;
+            }
+            break;
+        case NVTE_QKV_Layout::NVTE_SBH3D:
+            if ((matrix == NVTE_QKV_Matrix::NVTE_Q_Matrix)
+                || (matrix == NVTE_QKV_Matrix::NVTE_K_Matrix)
+                || (matrix == NVTE_QKV_Matrix::NVTE_V_Matrix)) {
+                    stride[batch_dim_idx] = 3 * h * d;
+                    stride[head_dim_idx] = 3 * d;
+                    stride[seqlen_dim_idx] = b * 3 * h * d;
+                    stride[hidden_dim_idx] = 1;
+            } else if (matrix == NVTE_QKV_Matrix::NVTE_O_Matrix) {
+                    stride[batch_dim_idx] = h * d;
+                    stride[head_dim_idx] = d;
+                    stride[seqlen_dim_idx] = b * h * d;
+                    stride[hidden_dim_idx] = 1;
+            }
+            break;
+        case NVTE_QKV_Layout::NVTE_SBHD_SB2HD:
+            if ((matrix == NVTE_QKV_Matrix::NVTE_K_Matrix)
+                || (matrix == NVTE_QKV_Matrix::NVTE_V_Matrix)) {
+                    stride[batch_dim_idx] = 2 * h * d;
+                    stride[head_dim_idx] = d;
+                    stride[seqlen_dim_idx] = b * 2 * h * d;
+                    stride[hidden_dim_idx] = 1;
+            } else if ((matrix == NVTE_QKV_Matrix::NVTE_Q_Matrix)
+                || (matrix == NVTE_QKV_Matrix::NVTE_O_Matrix)) {
+                    stride[batch_dim_idx] = h * d;
+                    stride[head_dim_idx] = d;
+                    stride[seqlen_dim_idx] = b * h * d;
+                    stride[hidden_dim_idx] = 1;
+            }
+            break;
+        case NVTE_QKV_Layout::NVTE_SBHD_SBH2D:
+            if ((matrix == NVTE_QKV_Matrix::NVTE_K_Matrix)
+                || (matrix == NVTE_QKV_Matrix::NVTE_V_Matrix)) {
+                    stride[batch_dim_idx] = 2 * h * d;
+                    stride[head_dim_idx] = 2 * d;
+                    stride[seqlen_dim_idx] = b * 2 * h * d;
+                    stride[hidden_dim_idx] = 1;
+            } else if ((matrix == NVTE_QKV_Matrix::NVTE_Q_Matrix)
+                || (matrix == NVTE_QKV_Matrix::NVTE_O_Matrix)) {
+                    stride[batch_dim_idx] = h * d;
+                    stride[head_dim_idx] = d;
+                    stride[seqlen_dim_idx] = b * h * d;
+                    stride[hidden_dim_idx] = 1;
+            }
+            break;
+        case NVTE_QKV_Layout::NVTE_SBHD_SBHD_SBHD:
+            if ((matrix == NVTE_QKV_Matrix::NVTE_Q_Matrix)
+                || (matrix == NVTE_QKV_Matrix::NVTE_K_Matrix)
+                || (matrix == NVTE_QKV_Matrix::NVTE_V_Matrix)
+                || (matrix == NVTE_QKV_Matrix::NVTE_O_Matrix)) {
+                    stride[batch_dim_idx] = h * d;
+                    stride[head_dim_idx] = d;
+                    stride[seqlen_dim_idx] = b * h * d;
+                    stride[hidden_dim_idx] = 1;
+            }
+            break;
+        case NVTE_QKV_Layout::NVTE_BS3HD:
+        case NVTE_QKV_Layout::NVTE_T3HD:
+            if ((matrix == NVTE_QKV_Matrix::NVTE_Q_Matrix)
+                || (matrix == NVTE_QKV_Matrix::NVTE_K_Matrix)
+                || (matrix == NVTE_QKV_Matrix::NVTE_V_Matrix)) {
+                    stride[batch_dim_idx] = s_q * 3 * h * d;
+                    stride[head_dim_idx] = d;
+                    stride[seqlen_dim_idx] = 3 * h * d;
+                    stride[hidden_dim_idx] = 1;
+            } else if (matrix == NVTE_QKV_Matrix::NVTE_O_Matrix) {
+                    stride[batch_dim_idx] = s_q * h * d;
+                    stride[head_dim_idx] = d;
+                    stride[seqlen_dim_idx] = h * d;
+                    stride[hidden_dim_idx] = 1;
+            }
+            break;
+        case NVTE_QKV_Layout::NVTE_BSH3D:
+        case NVTE_QKV_Layout::NVTE_TH3D:
+            if ((matrix == NVTE_QKV_Matrix::NVTE_Q_Matrix)
+                 || (matrix == NVTE_QKV_Matrix::NVTE_K_Matrix)
+                 || (matrix == NVTE_QKV_Matrix::NVTE_V_Matrix)) {
+                     stride[batch_dim_idx] = s_q * 3 * h * d;
+                     stride[head_dim_idx] = 3 * d;
+                     stride[seqlen_dim_idx] = 3 * h * d;
+                     stride[hidden_dim_idx] = 1;
+             } else if (matrix == NVTE_QKV_Matrix::NVTE_O_Matrix) {
+                     stride[batch_dim_idx] = s_q * h * d;
+                     stride[head_dim_idx] = d;
+                     stride[seqlen_dim_idx] = h * d;
+                     stride[hidden_dim_idx] = 1;
+             }
+             break;
+        case NVTE_QKV_Layout::NVTE_BSHD_BS2HD:
+        case NVTE_QKV_Layout::NVTE_THD_T2HD:
+            if ((matrix == NVTE_QKV_Matrix::NVTE_K_Matrix)
+                 || (matrix == NVTE_QKV_Matrix::NVTE_V_Matrix)) {
+                     stride[batch_dim_idx] = s_kv * 2 * h * d;
+                     stride[head_dim_idx] = d;
+                     stride[seqlen_dim_idx] = 2 * h * d;
+                     stride[hidden_dim_idx] = 1;
+             } else if ((matrix == NVTE_QKV_Matrix::NVTE_Q_Matrix)
+                 || (matrix == NVTE_QKV_Matrix::NVTE_O_Matrix)) {
+                     stride[batch_dim_idx] = s_q * h * d;
+                     stride[head_dim_idx] = d;
+                     stride[seqlen_dim_idx] = h * d;
+                     stride[hidden_dim_idx] = 1;
+             }
+             break;
+        case NVTE_QKV_Layout::NVTE_BSHD_BSH2D:
+        case NVTE_QKV_Layout::NVTE_THD_TH2D:
+            if ((matrix == NVTE_QKV_Matrix::NVTE_K_Matrix)
+                 || (matrix == NVTE_QKV_Matrix::NVTE_V_Matrix)) {
+                     stride[batch_dim_idx] = s_kv * 2 * h * d;
+                     stride[head_dim_idx] = 2 * d;
+                     stride[seqlen_dim_idx] = 2 * h * d;
+                     stride[hidden_dim_idx] = 1;
+             } else if ((matrix == NVTE_QKV_Matrix::NVTE_Q_Matrix)
+                 || (matrix == NVTE_QKV_Matrix::NVTE_O_Matrix)) {
+                     stride[batch_dim_idx] = s_q * h * d;
+                     stride[head_dim_idx] = d;
+                     stride[seqlen_dim_idx] = h * d;
+                     stride[hidden_dim_idx] = 1;
+             }
+             break;
+        case NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD:
+        case NVTE_QKV_Layout::NVTE_THD_THD_THD:
+            if ((matrix == NVTE_QKV_Matrix::NVTE_Q_Matrix)
+                || (matrix == NVTE_QKV_Matrix::NVTE_O_Matrix)) {
+                    stride[batch_dim_idx] = s_q * h * d;
+                    stride[head_dim_idx] = d;
+                    stride[seqlen_dim_idx] = h * d;
+                    stride[hidden_dim_idx] = 1;
+            } else if ((matrix == NVTE_QKV_Matrix::NVTE_K_Matrix)
+                || (matrix == NVTE_QKV_Matrix::NVTE_V_Matrix)) {
+                    stride[batch_dim_idx] = s_kv * h * d;
+                    stride[head_dim_idx] = d;
+                    stride[seqlen_dim_idx] = h * d;
+                    stride[hidden_dim_idx] = 1;
+            }
+            break;
+    }
+}
 // select a backend for fused attention
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         NVTEDType q_dtype,
@@ -114,7 +287,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         size_t max_seqlen_q, size_t max_seqlen_kv,
         size_t head_dim) {
   using namespace transformer_engine;
-  NVTE_Fused_Attn_Backend backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   
   //aotriton fused attn does not support gqa mode now
   if(num_attn_heads!=num_gqa_groups){
@@ -133,10 +305,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   }
   
-  //Only BSHD layout supported
-  if(!((qkv_layout==NVTE_QKV_Layout::NVTE_BS3HD)||
-    (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BS2HD)||
-    (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD))){
+  //Only BSHD, SBHD style layouts supported
+  if(!((nvte_get_qkv_format(qkv_layout)!= NVTE_QKV_Format::NVTE_SBHD)||
+    (nvte_get_qkv_format(qkv_layout)!= NVTE_QKV_Format::NVTE_BSHD))){
     return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   }
   
@@ -154,6 +325,190 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   return NVTE_Fused_Attn_Backend::NVTE_AOTriton;
 }
 
+// actual fwd implementation, calling aotriton api directly
+void fused_attn_fwd_impl(
+  uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d,
+  bool is_training, float scaling_factor, float dropout_probability,
+  NVTE_QKV_Layout layout,
+  NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+  void *devPtrQ, void *devPtrK, void *devPtrV, 
+  void *devPtrSoftmaxAux, void *devPtrO,
+  const uint64_t* devPtrDropoutSeed, const uint64_t* devPtrDropoutOffset,
+  //void* devPtrCuSeqlensQ, void* devPtrCuSeqlensKV,
+  aotriton::DType dtype,
+  //void *workspace, size_t *workspace_size,
+  cudaStream_t stream){
+
+  std::array<uint64_t, 4> q_stride;
+  std::array<uint64_t, 4> k_stride;
+  std::array<uint64_t, 4> v_stride;
+  generateMatrixStrides(b, h, s_q, s_kv, d, q_stride.data(),
+                        layout, NVTE_QKV_Matrix::NVTE_Q_Matrix);
+  generateMatrixStrides(b, hg, s_q, s_kv, d, k_stride.data(),
+                        layout, NVTE_QKV_Matrix::NVTE_K_Matrix);
+  generateMatrixStrides(b, hg, s_q, s_kv, d, v_stride.data(),
+                        layout, NVTE_QKV_Matrix::NVTE_V_Matrix);
+
+  std::array<uint64_t, 4> q_shape{b, h, s_q, d};
+  std::array<uint64_t, 4> kv_shape{b, hg, s_kv, d};
+
+  auto q_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrQ), q_shape, q_stride, dtype);
+  auto k_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrK), kv_shape, k_stride, dtype);
+  auto v_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrV), kv_shape, v_stride, dtype);
+
+
+  std::array<uint64_t, 4> o_stride;
+  generateMatrixStrides(b, h, s_q, s_kv, d, o_stride.data(),
+                        layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
+
+  auto o_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrO), q_shape, o_stride, dtype);
+  auto M_tensor = aotriton::TensorView<2>(
+    reinterpret_cast<intptr_t>(devPtrSoftmaxAux), 
+    std::array<uint64_t, 2>{b * h, s_q}, 
+    std::array<uint64_t, 2>{s_q, 1}, 
+    aotriton::DType::kFloat32);
+  auto encoded_softmax_tensor = aotriton::TensorView<4>(
+    reinterpret_cast<intptr_t>(nullptr), 
+    std::array<uint64_t, 4>{0, 0, 0, 0}, 
+    std::array<uint64_t, 4>{1, 1, 1, 1}, 
+    dtype);
+
+  uint64_t philox_seed = *devPtrDropoutSeed;
+  uint64_t philox_offset = *devPtrDropoutOffset;
+
+  bool nvte_log_aotriton_config = false;
+  if (const char* env_p = std::getenv("NVTE_LOG_AOTRITON_CONFIG") ) {
+    if (env_p != nullptr && std::string(env_p) == "1")
+      nvte_log_aotriton_config = true;
+  }
+  if (nvte_log_aotriton_config) {
+    std::cout<<std::endl<<"attn_fwd: ";
+    std::cout<<"q_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d<<"), ";
+    std::cout<<"q_stride: ("<<q_stride[0]<<", "<<q_stride[1]<<", "<<q_stride[2]<<", "<<q_stride[3]<<"), ";
+    std::cout<<"kv_shape: ("<<b<<", "<<hg<<", "<<s_kv<<", "<<d<<"), ";
+    std::cout<<"k_stride: ("<<k_stride[0]<<", "<<k_stride[1]<<", "<<k_stride[2]<<", "<<k_stride[3]<<"), ";
+    std::cout<<"v_stride: ("<<v_stride[0]<<", "<<v_stride[1]<<", "<<v_stride[2]<<", "<<v_stride[3]<<"), ";
+    std::cout<<"scaling_factor: "<<scaling_factor<<", ";
+    std::cout<<"M_shape: ("<<b*h<<", "<<s_q<<"), ";
+    std::cout<<"M_stride: ("<<s_q<<", "<<1<<"), ";
+    std::cout<<"o_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d<<"), ";
+    std::cout<<"o_stride: ("<<o_stride[0]<<", "<<o_stride[1]<<", "<<o_stride[2]<<", "<<o_stride[3]<<"), ";
+    std::cout<<"is_training: "<<is_training<<", ";
+    std::cout<<"dropout_p: "<<dropout_probability<<", ";
+    std::cout<<"philox_seed: "<<philox_seed<<", philox_offset: "<<philox_offset<<", ";
+    std::cout<<"causal mask: "<<(mask_type==NVTE_CAUSAL_MASK)<<std::endl;
+  }
+  using aotriton::v2::flash::attn_fwd;
+  NVTE_CHECK_CUDA(attn_fwd(q_tensor,
+                           k_tensor,
+                           v_tensor,
+                           scaling_factor,
+                           M_tensor,
+                           o_tensor,
+                           is_training? dropout_probability:0,
+                           philox_seed,
+                           philox_offset,
+                           encoded_softmax_tensor,
+                           mask_type==NVTE_CAUSAL_MASK,
+                           stream));
+}
+
+void fused_attn_bwd_impl(
+  uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d,
+  float scaling_factor, float dropout_probability, 
+  NVTE_QKV_Layout layout,
+  NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+  void* devPtrQ, void* devPtrK, void* devPtrV,
+  void* devPtrO, void* devPtrSoftmaxAux, 
+  void* devPtrdQ, void* devPtrdK, void* devPtrdV, 
+  void* devPtrdO, 
+  const uint64_t* devPtrDropoutSeed, 
+  const uint64_t* devPtrDropoutOffset,
+  aotriton::DType dtype,
+  void *workspace,
+  cudaStream_t stream) {
+
+  std::array<uint64_t, 4> q_stride;
+  std::array<uint64_t, 4> k_stride;
+  std::array<uint64_t, 4> v_stride;
+  std::array<uint64_t, 4> o_stride;
+  generateMatrixStrides(b, h, s_q, s_kv, d, q_stride.data(),
+                        layout, NVTE_QKV_Matrix::NVTE_Q_Matrix);
+  generateMatrixStrides(b, hg, s_q, s_kv, d, k_stride.data(),
+                        layout, NVTE_QKV_Matrix::NVTE_K_Matrix);
+  generateMatrixStrides(b, hg, s_q, s_kv, d, v_stride.data(),
+                        layout, NVTE_QKV_Matrix::NVTE_V_Matrix);
+  generateMatrixStrides(b, h, s_q, s_kv, d, o_stride.data(),
+                        layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
+
+  //q and o are having the same shape
+  //k and v are having the same shape
+  //x and dx are having the same shape and stride
+  std::array<uint64_t, 4> q_shape{b, h, s_q, d};
+  std::array<uint64_t, 4> kv_shape{b, hg, s_kv, d};
+  
+  // m and wkspace are of the same shape and stride
+  std::array<uint64_t, 2> m_shape{b * h, s_q};
+  std::array<uint64_t, 2> m_stride{s_q, 1};
+
+  // input tensors
+  auto q_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrQ), q_shape, q_stride, dtype);
+  auto k_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrK), kv_shape, k_stride, dtype);
+  auto v_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrV), kv_shape, v_stride, dtype);
+  auto o_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrO), q_shape, o_stride, dtype);
+  auto do_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrdO), q_shape, o_stride, dtype);
+  
+  // output tensors
+  auto dq_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrdQ), q_shape, q_stride, dtype);
+  auto dk_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrdK), kv_shape, k_stride, dtype);
+  auto dv_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrdV), kv_shape, v_stride, dtype);
+  
+  // auxilary tensors
+  auto M_tensor = aotriton::TensorView<2>(reinterpret_cast<intptr_t>(devPtrSoftmaxAux), m_shape, m_stride, aotriton::DType::kFloat32);
+  auto wkspace_tensor = aotriton::TensorView<2>(reinterpret_cast<intptr_t>(workspace), m_shape, m_stride, aotriton::DType::kFloat32);
+
+  uint64_t philox_seed = *devPtrDropoutSeed;
+  uint64_t philox_offset = *devPtrDropoutOffset;
+
+  bool nvte_log_aotriton_config = false;
+  if (const char* env_p = std::getenv("NVTE_LOG_AOTRITON_CONFIG") ) {
+    if (env_p != nullptr && std::string(env_p) == "1")
+      nvte_log_aotriton_config = true;
+  }
+  if (nvte_log_aotriton_config) {
+    std::cout<<std::endl<<"attn_bwd: ";
+    std::cout<<"q_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d<<"), ";
+    std::cout<<"q_stride: ("<<q_stride[0]<<", "<<q_stride[1]<<", "<<q_stride[2]<<", "<<q_stride[3]<<"), ";
+    std::cout<<"kv_shape: ("<<b<<", "<<hg<<", "<<s_kv<<", "<<d<<"), ";
+    std::cout<<"k_stride: ("<<k_stride[0]<<", "<<k_stride[1]<<", "<<k_stride[2]<<", "<<k_stride[3]<<"), ";
+    std::cout<<"v_stride: ("<<v_stride[0]<<", "<<v_stride[1]<<", "<<v_stride[2]<<", "<<v_stride[3]<<"), ";
+    std::cout<<"scaling_factor: "<<scaling_factor<<", ";
+    std::cout<<"M_shape: ("<<b*h<<", "<<s_q<<"), ";
+    std::cout<<"M_stride: ("<<s_q<<", "<<1<<"), ";
+    std::cout<<"o_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d<<"), ";
+    std::cout<<"o_stride: ("<<o_stride[0]<<", "<<o_stride[1]<<", "<<o_stride[2]<<", "<<o_stride[3]<<"), ";
+    std::cout<<"dropout_p: "<<dropout_probability<<", ";
+    std::cout<<"philox_seed: "<<philox_seed<<", philox_offset: "<<philox_offset<<", ";
+    std::cout<<"causal mask: "<<(mask_type==NVTE_CAUSAL_MASK)<<std::endl;
+  }
+  using aotriton::v2::flash::attn_bwd;
+  NVTE_CHECK_CUDA(attn_bwd(q_tensor,
+                           k_tensor,
+                           v_tensor,
+                           scaling_factor,
+                           o_tensor,
+                           do_tensor,
+                           dq_tensor,
+                           dk_tensor,
+                           dv_tensor,
+                           M_tensor,
+                           wkspace_tensor,
+                           dropout_probability,
+                           philox_seed,
+                           philox_offset,
+                           mask_type==NVTE_CAUSAL_MASK,
+                           stream));
+}
 // NVTE fused attention FWD with packed QKV
 void nvte_fused_attn_fwd_qkvpacked(
             const NVTETensor QKV,
@@ -175,15 +530,22 @@ void nvte_fused_attn_fwd_qkvpacked(
   const Tensor *input_cu_seqlens = reinterpret_cast<const Tensor*>(cu_seqlens);
   const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(rng_state);
   const Tensor *input_QKV = reinterpret_cast<const Tensor*>(QKV);
-  const Tensor *input_Bias = reinterpret_cast<const Tensor*>(Bias);
   Tensor *input_output_S = reinterpret_cast<Tensor*>(S);
   Tensor *output_O = reinterpret_cast<Tensor*>(O);
-  Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
+  Tensor *output_M = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+  Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
 
   auto ndim = input_QKV->data.shape.size();
   size_t b = input_cu_seqlens->data.shape[0] - 1;
-  //TODO: support NVTE_H3D layout group
-  size_t h = input_QKV->data.shape[ndim - 2];
+  size_t h = 0;
+  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+  if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
+    h = input_QKV->data.shape[ndim - 2];
+  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
+    h = input_QKV->data.shape[ndim - 3];
+  } else {
+    NVTE_ERROR("nvte_fused_attn_fwd_qkvpacked only supports H3D and 3HD layouts!");
+  }
   size_t d = input_QKV->data.shape[ndim - 1];
 
   const NVTEDType QKV_type = static_cast<NVTEDType>(input_QKV->data.dtype);
@@ -198,65 +560,34 @@ void nvte_fused_attn_fwd_qkvpacked(
     NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
   }
 
-  // aotriton takes qkv layout BHSD but upstream layout is BS3HD
-  std::array<uint64_t, 4> qkv_shape{b, h, max_seqlen, d};
-  std::array<uint64_t, 4> qkv_stride{3*h*max_seqlen*d, d, 3*h*d, 1};
-
-  aotriton::DType dtype = nvte_to_aotriton_dtype(QKV_type);
-  
-  //input tensor
+  // write input into q, k, v
   void *devPtrQKV = input_QKV->data.dptr;
-  const auto stride = nvte_dtype_size(QKV_type)*h*d;
+  size_t stride = 0;
+  if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
+    stride = nvte_dtype_size(QKV_type) * h * d;
+  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
+    stride = nvte_dtype_size(QKV_type) * d;
+  }
   void *devPtrQ = static_cast<void *>(devPtrQKV);
   void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride);
   void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + 2 * stride);
 
-  auto q_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrQ), qkv_shape, qkv_stride, dtype);
-  auto k_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrK), qkv_shape, qkv_stride, dtype);
-  auto v_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrV), qkv_shape, qkv_stride, dtype);
-
-  // output tensors
-  // actual shape of o_tensor is BSHD required from upstream, but aotriton needs BHSD
-  auto o_tensor = aotriton::TensorView<4>(
-    reinterpret_cast<intptr_t>(output_O->data.dptr), 
-    qkv_shape, 
-    std::array<uint64_t, 4>{h*max_seqlen*d, d, h*d, 1}, 
-    dtype);
-
-  // auxiliary tensors (to be propagated to the backward pass later)
-  Tensor *output_M = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
-  auto M_tensor = aotriton::TensorView<2>(
-    reinterpret_cast<intptr_t>(output_M->data.dptr), 
-    std::array<uint64_t, 2>{b * h, max_seqlen}, 
-    std::array<uint64_t, 2>{max_seqlen, 1}, 
-    aotriton::DType::kFloat32);
-  auto encoded_softmax_tensor = aotriton::TensorView<4>(
-    reinterpret_cast<intptr_t>(nullptr), 
-    std::array<uint64_t, 4>{0, 0, 0, 0}, 
-    std::array<uint64_t, 4>{1, 1, 1, 1}, 
-    dtype);
-
-  uint64_t philox_seed = *(reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr));
-  uint64_t philox_offset = *(reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1);
   //save the input rng state to Aux_CTX_Tensors
-  Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
   output_rng_state->data.dptr = input_rng_state->data.dptr;
 
-  using aotriton::v2::flash::attn_fwd;
-  NVTE_CHECK_CUDA(attn_fwd(q_tensor,
-                           k_tensor,
-                           v_tensor,
-                           attn_scale,
-                           M_tensor,
-                           o_tensor,
-                           is_training? dropout:0,
-                           philox_seed,
-                           philox_offset,
-                           encoded_softmax_tensor,
-                           attn_mask_type==NVTE_CAUSAL_MASK,
-                           stream));
- 
+  fused_attn_fwd_impl(
+    b, h, h, max_seqlen, max_seqlen, d,
+    is_training, attn_scale, dropout, 
+    qkv_layout,
+    bias_type, attn_mask_type,
+    devPtrQ, devPtrK, devPtrV, 
+    output_M->data.dptr, output_O->data.dptr,
+    reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
+    reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1,
+    nvte_to_aotriton_dtype(QKV_type),
+    stream); 
 }
+
 // NVTE fused attention BWD with packed QKV
 void nvte_fused_attn_bwd_qkvpacked(
             const NVTETensor QKV,
@@ -281,16 +612,20 @@ void nvte_fused_attn_bwd_qkvpacked(
   const Tensor *input_QKV = reinterpret_cast<const Tensor*>(QKV);
   const Tensor *input_O = reinterpret_cast<const Tensor*>(O);
   const Tensor *input_dO = reinterpret_cast<const Tensor*>(dO);
-  const Tensor *input_S = reinterpret_cast<const Tensor*>(S);
-  Tensor *input_output_dP = reinterpret_cast<Tensor*>(dP);
   Tensor *output_dQKV = reinterpret_cast<Tensor*>(dQKV);
-  Tensor *output_dBias = reinterpret_cast<Tensor*>(dBias);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
 
   auto ndim = input_QKV->data.shape.size();
   size_t b = input_cu_seqlens->data.shape[0] - 1;
-  //TODO: support NVTE_H3D layout group
-  size_t h = input_QKV->data.shape[ndim - 2];
+  size_t h = 0;
+  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+  if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
+    h = input_QKV->data.shape[ndim - 2];
+  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
+    h = input_QKV->data.shape[ndim - 3];
+  } else {
+    NVTE_ERROR("nvte_fused_attn_fwd_qkvpacked only supports H3D and 3HD layouts!");
+  }
   size_t d = input_QKV->data.shape[ndim - 1];
 
   const NVTEDType QKV_type = static_cast<NVTEDType>(input_QKV->data.dtype);
@@ -301,70 +636,47 @@ void nvte_fused_attn_bwd_qkvpacked(
                           qkv_layout, bias_type, attn_mask_type,
                           dropout, h, h, max_seqlen, max_seqlen, d);
 
-  // aotriton takes qkv layout BHSD but upstream layout is BS3HD
-  std::array<uint64_t, 4> qkv_shape{b, h, max_seqlen, d};
-  std::array<uint64_t, 4> qkv_stride{3*h*max_seqlen*d, d, 3*h*d, 1};
-  std::array<uint64_t, 4> o_stride{h*max_seqlen*d, d, h*d, 1};
-
-  aotriton::DType dtype = nvte_to_aotriton_dtype(QKV_type);
-
+  if (fused_attention_backend != NVTE_Fused_Attn_Backend::NVTE_AOTriton){
+    NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
+  }
   //input tensor
   void *devPtrQKV = input_QKV->data.dptr;
-  const auto stride = nvte_dtype_size(QKV_type)*h*d;
+  size_t stride = 0;
+  if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
+    stride = nvte_dtype_size(QKV_type) * h * d;
+  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
+    stride = nvte_dtype_size(QKV_type) * d;
+  }
   void *devPtrQ = static_cast<void *>(devPtrQKV);
   void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride);
   void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + 2 * stride);
-
-  auto q_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrQ), qkv_shape, qkv_stride, dtype);
-  auto k_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrK), qkv_shape, qkv_stride, dtype);
-  auto v_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrV), qkv_shape, qkv_stride, dtype);
-
-  auto o_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(input_O->data.dptr), qkv_shape, o_stride, dtype);
-  auto do_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(input_dO->data.dptr), qkv_shape, o_stride, dtype);
-
 
   // output tensor
   void *devPtrdQKV = output_dQKV->data.dptr;
   void *devPtrdQ = static_cast<void *>(devPtrdQKV);
   void *devPtrdK = static_cast<void *>(static_cast<int8_t *>(devPtrdQKV) + stride);
   void *devPtrdV = static_cast<void *>(static_cast<int8_t *>(devPtrdQKV) + 2 * stride);
-
-  auto dq_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrdQ), qkv_shape, qkv_stride, dtype);
-  auto dk_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrdK), qkv_shape, qkv_stride, dtype);
-  auto dv_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrdV), qkv_shape, qkv_stride, dtype);
-
-  // auxiliary tensors (to be propagated to the backward pass later)
-  // M tensor, also known as softmax lse
-  std::array<uint64_t, 2> m_shape{b * h, max_seqlen};
-  std::array<uint64_t, 2> m_stride{max_seqlen, 1};
+  
+  // auxiliary tensors
   const Tensor *input_M = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]); //softmax lse
-  auto M_tensor = aotriton::TensorView<2>(reinterpret_cast<intptr_t>(input_M->data.dptr), m_shape, m_stride, aotriton::DType::kFloat32);
-  // aotriton requires wkspace tensor same size as softmax lse
-  auto wkspace_tensor = aotriton::TensorView<2>(reinterpret_cast<intptr_t>(wkspace->data.dptr), m_shape, m_stride, aotriton::DType::kFloat32);
-
   //extract the saved rng state from aux_ctx_tensor
   const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[1]);
-  //extract the philox seed and offset
-  uint64_t philox_seed = *(reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr));
-  uint64_t philox_offset = *(reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1);
 
-  using aotriton::v2::flash::attn_bwd;
-  NVTE_CHECK_CUDA(attn_bwd(q_tensor,
-                           k_tensor,
-                           v_tensor,
-                           attn_scale,
-                           o_tensor,
-                           do_tensor,
-                           dq_tensor,
-                           dk_tensor,
-                           dv_tensor,
-                           M_tensor,
-                           wkspace_tensor,
-                           dropout,
-                           philox_seed,
-                           philox_offset,
-                           attn_mask_type==NVTE_CAUSAL_MASK,
-                           stream));
+  fused_attn_bwd_impl(
+    b, h, h, max_seqlen, max_seqlen, d,
+    attn_scale, dropout, 
+    qkv_layout,
+    bias_type, attn_mask_type,
+    devPtrQ, devPtrK, devPtrV, 
+    input_O->data.dptr, input_M->data.dptr,
+    devPtrdQ, devPtrdK, devPtrdV, 
+    input_dO->data.dptr,
+    reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
+    reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1,
+    nvte_to_aotriton_dtype(QKV_type),
+    wkspace->data.dptr,
+    stream);
+
 }
 
 // NVTE fused attention FWD with packed KV
@@ -391,18 +703,24 @@ void nvte_fused_attn_fwd_kvpacked(
   const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(rng_state);
   const Tensor *input_Q = reinterpret_cast<const Tensor*>(Q);
   const Tensor *input_KV = reinterpret_cast<const Tensor*>(KV);
-  const Tensor *input_Bias = reinterpret_cast<const Tensor*>(Bias);
-  Tensor *input_output_S = reinterpret_cast<Tensor*>(S);
   Tensor *output_O = reinterpret_cast<Tensor*>(O);
-  Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
+  Tensor *output_M = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+  Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
 
   size_t b = input_cu_seqlens_q->data.shape[0] - 1;
   auto ndim = input_Q->data.shape.size();
   size_t h_q = input_Q->data.shape[ndim - 2];
   size_t d = input_Q->data.shape[ndim - 1];
   auto ndim_kv = input_KV->data.shape.size();
-  //TODO: support NVTE_HD_H2D layout group
-  size_t h_kv = input_KV->data.shape[ndim_kv - 2];
+  size_t h_kv = 0;
+  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+  if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
+    h_kv = input_KV->data.shape[ndim_kv - 2];
+  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
+    h_kv = input_KV->data.shape[ndim_kv - 3];
+  } else {
+    NVTE_ERROR("nvte_fused_attn_fwd_kvpacked only supports HD_H2D and HD_2HD layouts!");
+  }
   
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_KV->data.dtype);
@@ -416,61 +734,31 @@ void nvte_fused_attn_fwd_kvpacked(
     NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
   }
 
-  // aotriton takes qkv layout BHSD
-  std::array<uint64_t, 4> q_shape{b, h_q, max_seqlen_q, d};
-  std::array<uint64_t, 4> q_stride{h_q*max_seqlen_q*d, d, h_q*d, 1};
-
-  std::array<uint64_t, 4> kv_shape{b, h_kv, max_seqlen_kv, d};
-  std::array<uint64_t, 4> kv_stride{2*h_kv*max_seqlen_kv*d, d, 2*h_kv*d, 1};
-
-  aotriton::DType dtype = nvte_to_aotriton_dtype(Q_type);
-
   //input tensor
   void *devPtrKV = input_KV->data.dptr;
-  const auto stride = nvte_dtype_size(Q_type)*h_kv*d;
+  size_t stride = 0;
+  if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
+    stride = nvte_dtype_size(Q_type)*h_kv*d;
+  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
+    stride = nvte_dtype_size(Q_type) * d;
+  }
   void *devPtrK = devPtrKV;
   void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrKV) + stride);
 
-  auto q_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(input_Q->data.dptr), q_shape, q_stride, dtype);
-  auto k_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrK), kv_shape, kv_stride, dtype);
-  auto v_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrV), kv_shape, kv_stride, dtype);
-
-  // output tensors
-  auto o_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(output_O->data.dptr), q_shape, q_stride, dtype);
-
-  // auxiliary tensors (to be propagated to the backward pass later)
-  Tensor *output_M = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
-  auto M_tensor = aotriton::TensorView<2>(
-    reinterpret_cast<intptr_t>(output_M->data.dptr), 
-    std::array<uint64_t, 2>{b * h_q, max_seqlen_q}, 
-    std::array<uint64_t, 2>{max_seqlen_q, 1}, 
-    aotriton::DType::kFloat32);
-  auto encoded_softmax_tensor = aotriton::TensorView<4>(
-    reinterpret_cast<intptr_t>(nullptr), 
-    std::array<uint64_t, 4>{0, 0, 0, 0}, 
-    std::array<uint64_t, 4>{1, 1, 1, 1}, 
-    dtype);
-
-  uint64_t philox_seed = *(reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr));
-  uint64_t philox_offset = *(reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1);
   //save the input rng state to Aux_CTX_Tensors
-  Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
   output_rng_state->data.dptr = input_rng_state->data.dptr;
 
-  using aotriton::v2::flash::attn_fwd;
-  NVTE_CHECK_CUDA(attn_fwd(q_tensor,
-                           k_tensor,
-                           v_tensor,
-                           attn_scale,
-                           M_tensor,
-                           o_tensor,
-                           is_training? dropout:0,
-                           philox_seed,
-                           philox_offset,
-                           encoded_softmax_tensor,
-                           attn_mask_type==NVTE_CAUSAL_MASK,
-                           stream));
-
+  fused_attn_fwd_impl(
+    b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
+    is_training, attn_scale, dropout, 
+    qkv_layout,
+    bias_type, attn_mask_type,
+    input_Q->data.dptr, devPtrK, devPtrV, 
+    output_M->data.dptr, output_O->data.dptr,
+    reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
+    reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1,
+    nvte_to_aotriton_dtype(Q_type),
+    stream); 
 }
 // NVTE fused attention BWD with packed KV
 void nvte_fused_attn_bwd_kvpacked(
@@ -500,11 +788,8 @@ void nvte_fused_attn_bwd_kvpacked(
   const Tensor *input_KV = reinterpret_cast<const Tensor*>(KV);
   const Tensor *input_O = reinterpret_cast<const Tensor*>(O);
   const Tensor *input_dO = reinterpret_cast<const Tensor*>(dO);
-  const Tensor *input_S = reinterpret_cast<const Tensor*>(S);
-  Tensor *input_output_dP = reinterpret_cast<Tensor*>(dP);
   Tensor *output_dQ = reinterpret_cast<Tensor*>(dQ);
   Tensor *output_dKV = reinterpret_cast<Tensor*>(dKV);
-  Tensor *output_dBias = reinterpret_cast<Tensor*>(dBias);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
 
   size_t b = input_cu_seqlens_q->data.shape[0] - 1;
@@ -512,8 +797,15 @@ void nvte_fused_attn_bwd_kvpacked(
   size_t h_q = input_Q->data.shape[ndim - 2];
   size_t d = input_Q->data.shape[ndim - 1];
   auto ndim_kv = input_KV->data.shape.size();
-  //TODO: support NVTE_HD_H2D layout group
-  size_t h_kv = input_KV->data.shape[ndim_kv - 2];
+  size_t h_kv = 0;
+  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+  if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
+    h_kv = input_KV->data.shape[ndim_kv - 2];
+  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
+    h_kv = input_KV->data.shape[ndim_kv - 3];
+  } else {
+    NVTE_ERROR("nvte_fused_attn_fwd_kvpacked only supports HD_H2D and HD_2HD layouts!");
+  }
 
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_KV->data.dtype);
@@ -524,69 +816,44 @@ void nvte_fused_attn_bwd_kvpacked(
                           qkv_layout, bias_type, attn_mask_type,
                           dropout, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d);
 
-  // aotriton takes qkv layout BHSD
-  std::array<uint64_t, 4> q_shape{b, h_q, max_seqlen_q, d};
-  std::array<uint64_t, 4> q_stride{h_q*max_seqlen_q*d, d, h_q*d, 1};
-
-  std::array<uint64_t, 4> kv_shape{b, h_kv, max_seqlen_kv, d};
-  std::array<uint64_t, 4> kv_stride{2*h_kv*max_seqlen_kv*d, d, 2*h_kv*d, 1};
-
-  aotriton::DType dtype = nvte_to_aotriton_dtype(Q_type);
+  if (fused_attention_backend != NVTE_Fused_Attn_Backend::NVTE_AOTriton){
+    NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
+  }
 
   //input tensor
   void *devPtrKV = input_KV->data.dptr;
-  const auto stride = nvte_dtype_size(Q_type)*h_kv*d;
+  size_t stride = 0;
+  if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
+    stride = nvte_dtype_size(Q_type) * h_kv * d;
+  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
+    stride = nvte_dtype_size(Q_type) * d;
+  }
   void *devPtrK = devPtrKV;
   void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrKV) + stride);
-
-  auto q_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(input_Q->data.dptr), q_shape, q_stride, dtype);
-  auto k_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrK), kv_shape, kv_stride, dtype);
-  auto v_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrV), kv_shape, kv_stride, dtype);
-
-  auto o_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(input_O->data.dptr), q_shape, q_stride, dtype);
-  auto do_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(input_dO->data.dptr), q_shape, q_stride, dtype);
 
   // output tensor
   void *devPtrdKV = output_dKV->data.dptr;
   void *devPtrdK = devPtrdKV;
   void *devPtrdV = static_cast<void *>(static_cast<int8_t *>(devPtrdKV) + stride);
 
-  auto dq_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(output_dQ->data.dptr), q_shape, q_stride, dtype);
-  auto dk_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrdK), kv_shape, kv_stride, dtype);
-  auto dv_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrdV), kv_shape, kv_stride, dtype);
-
   // auxiliary tensors (to be propagated to the backward pass later)
-  // M tensor, also known as softmax lse
-  std::array<uint64_t, 2> m_shape{b * h_q, max_seqlen_q};
-  std::array<uint64_t, 2> m_stride{max_seqlen_q, 1};
   const Tensor *input_M = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]); //softmax lse
-  auto M_tensor = aotriton::TensorView<2>(reinterpret_cast<intptr_t>(input_M->data.dptr), m_shape, m_stride, aotriton::DType::kFloat32);
-  // aotriton requires wkspace tensor same size as softmax lse
-  auto wkspace_tensor = aotriton::TensorView<2>(reinterpret_cast<intptr_t>(wkspace->data.dptr), m_shape, m_stride, aotriton::DType::kFloat32);
-
-  //extract the saved rng state from aux_ctx_tensor
   const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[1]);
-  //extract the philox seed and offset
-  uint64_t philox_seed = *(reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr));
-  uint64_t philox_offset = *(reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1);
 
-  using aotriton::v2::flash::attn_bwd;
-  NVTE_CHECK_CUDA(attn_bwd(q_tensor,
-                           k_tensor,
-                           v_tensor,
-                           attn_scale,
-                           o_tensor,
-                           do_tensor,
-                           dq_tensor,
-                           dk_tensor,
-                           dv_tensor,
-                           M_tensor,
-                           wkspace_tensor,
-                           dropout,
-                           philox_seed,
-                           philox_offset,
-                           attn_mask_type==NVTE_CAUSAL_MASK,
-                           stream));
+  fused_attn_bwd_impl(
+    b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
+    attn_scale, dropout, 
+    qkv_layout,
+    bias_type, attn_mask_type,
+    input_Q->data.dptr, devPtrK, devPtrV, 
+    input_O->data.dptr, input_M->data.dptr,
+    output_dQ->data.dptr, devPtrdK, devPtrdV, 
+    input_dO->data.dptr,
+    reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
+    reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1,
+    nvte_to_aotriton_dtype(Q_type),
+    wkspace->data.dptr,
+    stream);
 }
 
 // NVTE fused attention FWD with separate Q, K and V
@@ -615,10 +882,9 @@ void nvte_fused_attn_fwd(
   const Tensor *input_Q = reinterpret_cast<const Tensor*>(Q);
   const Tensor *input_K = reinterpret_cast<const Tensor*>(K);
   const Tensor *input_V = reinterpret_cast<const Tensor*>(V);
-  //const Tensor *input_Bias = reinterpret_cast<const Tensor*>(Bias);
-  //Tensor *input_output_S = reinterpret_cast<Tensor*>(S);
   Tensor *output_O = reinterpret_cast<Tensor*>(O);
-  //Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
+  Tensor *output_M = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+  Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
 
   auto ndim = input_Q->data.shape.size();
   size_t b = input_cu_seqlens_q->data.shape[0] - 1;
@@ -640,56 +906,22 @@ void nvte_fused_attn_fwd(
     NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
   }
 
-  // aotriton takes qkv layout BHSD
-  std::array<uint64_t, 4> q_shape{b, h_q, max_seqlen_q, d};
-  std::array<uint64_t, 4> q_stride{h_q*max_seqlen_q*d, d, h_q*d, 1};
-
-  std::array<uint64_t, 4> kv_shape{b, h_kv, max_seqlen_kv, d};
-  std::array<uint64_t, 4> kv_stride{h_kv*max_seqlen_kv*d, d, h_kv*d, 1};
-
-  aotriton::DType dtype = nvte_to_aotriton_dtype(Q_type);
-  
-  //input tensor
-  auto q_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(input_Q->data.dptr), q_shape, q_stride, dtype);
-  auto k_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(input_K->data.dptr), kv_shape, kv_stride, dtype);
-  auto v_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(input_V->data.dptr), kv_shape, kv_stride, dtype);
-
-  // output tensors
-  auto o_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(output_O->data.dptr), q_shape, q_stride, dtype);
-
-  // auxiliary tensors (to be propagated to the backward pass later)
-  Tensor *output_M = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
-  auto M_tensor = aotriton::TensorView<2>(
-    reinterpret_cast<intptr_t>(output_M->data.dptr), 
-    std::array<uint64_t, 2>{b * h_q, max_seqlen_q}, 
-    std::array<uint64_t, 2>{max_seqlen_q, 1}, 
-    aotriton::DType::kFloat32);
-  auto encoded_softmax_tensor = aotriton::TensorView<4>(
-    reinterpret_cast<intptr_t>(nullptr), 
-    std::array<uint64_t, 4>{0, 0, 0, 0}, 
-    std::array<uint64_t, 4>{1, 1, 1, 1}, 
-    dtype);
-
-  uint64_t philox_seed = *(reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr));
-  uint64_t philox_offset = *(reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1);
   //save the input rng state to Aux_CTX_Tensors
-  Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
   output_rng_state->data.dptr = input_rng_state->data.dptr;
 
-  using aotriton::v2::flash::attn_fwd;
-  NVTE_CHECK_CUDA(attn_fwd(q_tensor,
-                           k_tensor,
-                           v_tensor,
-                           attn_scale,
-                           M_tensor,
-                           o_tensor,
-                           is_training? dropout:0,
-                           philox_seed,
-                           philox_offset,
-                           encoded_softmax_tensor,
-                           attn_mask_type==NVTE_CAUSAL_MASK,
-                           stream));
+  fused_attn_fwd_impl(
+    b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
+    is_training, attn_scale, dropout, 
+    qkv_layout,
+    bias_type, attn_mask_type,
+    input_Q->data.dptr, input_K->data.dptr, input_V->data.dptr, 
+    output_M->data.dptr, output_O->data.dptr,
+    reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
+    reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1,
+    nvte_to_aotriton_dtype(Q_type),
+    stream);
 }
+
 // NVTE fused attention BWD with separate Q, K and V
 void nvte_fused_attn_bwd(
             const NVTETensor Q,
@@ -721,12 +953,11 @@ void nvte_fused_attn_bwd(
   const Tensor *input_V = reinterpret_cast<const Tensor*>(V);
   const Tensor *input_O = reinterpret_cast<const Tensor*>(O);
   const Tensor *input_dO = reinterpret_cast<const Tensor*>(dO);
-  //const Tensor *input_S = reinterpret_cast<const Tensor*>(S);
-  //Tensor *input_output_dP = reinterpret_cast<Tensor*>(dP);
   Tensor *output_dQ = reinterpret_cast<Tensor*>(dQ);
   Tensor *output_dK = reinterpret_cast<Tensor*>(dK);
   Tensor *output_dV = reinterpret_cast<Tensor*>(dV);
-  //Tensor *output_dBias = reinterpret_cast<Tensor*>(dBias);
+  const Tensor *input_M = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]); //softmax lse
+  const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[1]);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
 
   auto ndim = input_Q->data.shape.size();
@@ -748,57 +979,18 @@ void nvte_fused_attn_bwd(
     NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
   }
 
-  // aotriton takes qkv layout BHSD
-  std::array<uint64_t, 4> q_shape{b, h_q, max_seqlen_q, d};
-  std::array<uint64_t, 4> q_stride{h_q*max_seqlen_q*d, d, h_q*d, 1};
-
-  std::array<uint64_t, 4> kv_shape{b, h_kv, max_seqlen_kv, d};
-  std::array<uint64_t, 4> kv_stride{h_kv*max_seqlen_kv*d, d, h_kv*d, 1};
-
-  aotriton::DType dtype = nvte_to_aotriton_dtype(Q_type);
-
-  // input tensor
-  auto q_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(input_Q->data.dptr), q_shape, q_stride, dtype);
-  auto k_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(input_K->data.dptr), kv_shape, kv_stride, dtype);
-  auto v_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(input_V->data.dptr), kv_shape, kv_stride, dtype);
-  auto o_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(input_O->data.dptr), q_shape, q_stride, dtype);
-  auto do_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(input_dO->data.dptr), q_shape, q_stride, dtype);
-
-  // output tensor
-  auto dq_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(output_dQ->data.dptr), q_shape, q_stride, dtype);
-  auto dk_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(output_dK->data.dptr), kv_shape, kv_stride, dtype);
-  auto dv_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(output_dV->data.dptr), kv_shape, kv_stride, dtype);
-
-  // auxiliary tensors (to be propagated to the backward pass later)
-  // M tensor, also known as softmax lse
-  std::array<uint64_t, 2> m_shape{b * h_q, max_seqlen_q};
-  std::array<uint64_t, 2> m_stride{max_seqlen_q, 1};
-  const Tensor *input_M = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]); //softmax lse
-  auto M_tensor = aotriton::TensorView<2>(reinterpret_cast<intptr_t>(input_M->data.dptr), m_shape, m_stride, aotriton::DType::kFloat32);
-  // aotriton requires wkspace tensor same size as softmax lse
-  auto wkspace_tensor = aotriton::TensorView<2>(reinterpret_cast<intptr_t>(wkspace->data.dptr), m_shape, m_stride, aotriton::DType::kFloat32);
-
-  //extract the saved rng state from aux_ctx_tensor
-  const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[1]);
-  //extract the philox seed and offset
-  uint64_t philox_seed = *(reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr));
-  uint64_t philox_offset = *(reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1);
-
-  using aotriton::v2::flash::attn_bwd;
-  NVTE_CHECK_CUDA(attn_bwd(q_tensor,
-                           k_tensor,
-                           v_tensor,
-                           attn_scale,
-                           o_tensor,
-                           do_tensor,
-                           dq_tensor,
-                           dk_tensor,
-                           dv_tensor,
-                           M_tensor,
-                           wkspace_tensor,
-                           dropout,
-                           philox_seed,
-                           philox_offset,
-                           attn_mask_type==NVTE_CAUSAL_MASK,
-                           stream));
+  fused_attn_bwd_impl(
+    b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
+    attn_scale, dropout, 
+    qkv_layout,
+    bias_type, attn_mask_type,
+    input_Q->data.dptr, input_K->data.dptr, input_V->data.dptr, 
+    input_O->data.dptr, input_M->data.dptr,
+    output_dQ->data.dptr, output_dK->data.dptr, output_dV->data.dptr, 
+    input_dO->data.dptr,
+    reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
+    reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1,
+    nvte_to_aotriton_dtype(Q_type),
+    wkspace->data.dptr,
+    stream);
 }

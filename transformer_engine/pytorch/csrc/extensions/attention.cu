@@ -109,6 +109,7 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
   auto qkv_sizes = QKV.sizes().vec();
   std::vector<size_t> qkv_shape{qkv_sizes.begin(), qkv_sizes.end()};
   std::vector<size_t> q_shape;
+  //TODO: we can have 3 as in B, S, H, or D
   for (auto i : qkv_shape) {
     if (i != 3) {
       q_shape.push_back(i);
@@ -165,11 +166,23 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
   std::vector<size_t> cu_seqlens_shape{cu_seqlens_sizes.begin(), cu_seqlens_sizes.end()};
   te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens.data_ptr(), cu_seqlens_shape,
                     DType::kInt32, nullptr, nullptr, nullptr);
-
+  
+#ifdef USE_ROCM
+  const transformer_engine::Tensor *input_cu_seqlens = reinterpret_cast<const transformer_engine::Tensor*>(te_cu_seqlens.data());
+  size_t batch_size = input_cu_seqlens->data.shape[0]-1;
+  const transformer_engine::Tensor *input_QKV = reinterpret_cast<const transformer_engine::Tensor*>(te_QKV.data());
+  size_t ndim = input_QKV->data.shape.size();
+  size_t num_attn_heads = input_QKV->data.shape[ndim-2];
+#endif
   // extract random number generator seed and offset
   auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
                   rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
+#ifndef USE_ROCM
   at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
+#else
+  //AOTriton has increment of size batch_sizexnum_headsxmaxseqlenkxmaxseqlenq
+  at::PhiloxCudaState philox_args = init_philox_state(gen, batch_size*num_attn_heads*max_seqlen*max_seqlen);
+#endif
   auto rng_state = torch::empty({2}, options.dtype(torch::kInt64));
   unpack<<<1, 1, 0, at::cuda::getCurrentCUDAStream()>>>(
                   philox_args, static_cast<int64_t*>(rng_state.data_ptr()));
@@ -179,6 +192,7 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
   NVTETensorPack nvte_aux_tensor_pack;
   nvte_tensor_pack_create(&nvte_aux_tensor_pack);
 
+#ifndef USE_ROCM
   // create workspace
   TensorWrapper workspace;
 
@@ -202,10 +216,15 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
   workspace = makeTransformerEngineTensor(
                   workspace_data.data_ptr(),
                   workspace.shape(), workspace.dtype());
+#else
+  // AOTriton does not need workspace for fwd pass
+  TensorWrapper workspace;
+#endif
 
   // output_tensors = [O, nvte_aux_tensor_pack.tensors]
   std::vector<at::Tensor> output_tensors;
   output_tensors.push_back(O);
+#ifndef USE_ROCM
   for (size_t i = 0; i < nvte_aux_tensor_pack.size; ++i) {
     auto tensor = reinterpret_cast<transformer_engine::Tensor*>(nvte_aux_tensor_pack.tensors[i]);
     // allocate memory for nvte_aux_tensor_pack.tensors
@@ -229,6 +248,25 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
     output_tensors.push_back(output_tensor);
     tensor->data.dptr = output_tensor.data_ptr();
   }
+#else
+  //prepare the aux tensors
+  nvte_aux_tensor_pack.size = 2;
+  transformer_engine::Tensor* softmax_aux = reinterpret_cast<transformer_engine::Tensor*>(nvte_aux_tensor_pack.tensors[0]);
+  softmax_aux->data.dptr = nullptr;
+  softmax_aux->data.shape = {batch_size, num_attn_heads, max_seqlen, 1};
+  softmax_aux->data.dtype = transformer_engine::DType::kFloat32;
+  at::Tensor softmax_at_tensor;
+  softmax_at_tensor = allocateSpace(softmax_aux->data.shape, softmax_aux->data.dtype, false);
+  softmax_aux->data.dptr = softmax_at_tensor.data_ptr();
+  output_tensors.push_back(softmax_at_tensor);
+
+  
+  transformer_engine::Tensor* rng_state_aux = reinterpret_cast<transformer_engine::Tensor*>(nvte_aux_tensor_pack.tensors[1]);
+  rng_state_aux->data.dptr = rng_state.data_ptr();
+  rng_state_aux->data.shape = std::vector<size_t>{2};
+  rng_state_aux->data.dtype = transformer_engine::DType::kInt64;
+  output_tensors.push_back(rng_state);
+#endif
 
   // execute the kernel
   nvte_fused_attn_fwd_qkvpacked(
@@ -373,9 +411,10 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
   TensorWrapper te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens.data_ptr(), cu_seqlens_shape,
                     DType::kInt32, nullptr, nullptr, nullptr);
 
-  // create workspace
-  TensorWrapper workspace;
 
+  // create workspace
+#ifndef USE_ROCM
+  TensorWrapper workspace;
   // populate tensors with appropriate shapes and dtypes
   nvte_fused_attn_bwd_qkvpacked(
                   te_QKV.data(),
@@ -398,6 +437,18 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
   workspace = makeTransformerEngineTensor(
                   workspace_data.data_ptr(),
                   workspace.shape(), workspace.dtype());
+#else
+  const transformer_engine::Tensor *input_cu_seqlens = reinterpret_cast<const transformer_engine::Tensor*>(te_cu_seqlens.data());
+  size_t batch_size = input_cu_seqlens->data.shape[0]-1;
+  const transformer_engine::Tensor *input_QKV = reinterpret_cast<const transformer_engine::Tensor*>(te_QKV.data());
+  size_t ndim = input_QKV->data.shape.size();
+  size_t num_attn_heads = input_QKV->data.shape[ndim-2];
+  TensorWrapper workspace(nullptr, std::vector<size_t>({batch_size*num_attn_heads, max_seqlen}), transformer_engine::DType::kFloat32);
+  auto workspace_data = allocateSpace(std::vector<size_t>({batch_size*num_attn_heads, max_seqlen}), transformer_engine::DType::kFloat32, false);
+  workspace = makeTransformerEngineTensor(
+                  workspace_data.data_ptr(),
+                  workspace.shape(), workspace.dtype());
+#endif
 
   // execute kernel
   nvte_fused_attn_bwd_qkvpacked(
@@ -505,11 +556,21 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
                     DType::kInt32, nullptr, nullptr, nullptr);
   te_cu_seqlens_kv = makeTransformerEngineTensor(cu_seqlens_kv.data_ptr(), cu_seqlens_kv_shape,
                     DType::kInt32, nullptr, nullptr, nullptr);
-
+#ifdef USE_ROCM
+  const transformer_engine::Tensor *input_cu_seqlens_q = reinterpret_cast<const transformer_engine::Tensor*>(te_cu_seqlens_q.data());
+  size_t batch_size = input_cu_seqlens_q->data.shape[0]-1;
+  const transformer_engine::Tensor *input_Q = reinterpret_cast<const transformer_engine::Tensor*>(te_Q.data());
+  size_t ndim = input_Q->data.shape.size();
+  size_t num_attn_heads = input_Q->data.shape[ndim-2];
+#endif
   // extract rng seed and offset
   auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
                   rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
+#ifndef USE_ROCM
   at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
+#else
+  at::PhiloxCudaState philox_args = init_philox_state(gen, batch_size*num_attn_heads*max_seqlen_q*max_seqlen_kv);
+#endif
   auto rng_state = torch::empty({2}, options.dtype(torch::kInt64));
   unpack<<<1, 1, 0, at::cuda::getCurrentCUDAStream()>>>(
                   philox_args, static_cast<int64_t*>(rng_state.data_ptr()));
@@ -522,6 +583,8 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
   // create workspace
   TensorWrapper workspace;
 
+  // AOTriton does not need workspace for fwd pass
+#ifndef USE_ROCM
   // populate tensors with appropriate shapes and dtypes
   nvte_fused_attn_fwd_kvpacked(
                   te_Q.data(),
@@ -544,10 +607,12 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
   workspace = makeTransformerEngineTensor(
                   workspace_data.data_ptr(),
                   workspace.shape(), workspace.dtype());
+#endif
 
   // output_tensors = [O, nvte_aux_tensor_pack.tensors]
   std::vector<at::Tensor> output_tensors;
   output_tensors.push_back(O);
+#ifndef USE_ROCM
   for (size_t i = 0; i < nvte_aux_tensor_pack.size; ++i) {
     auto tensor = reinterpret_cast<transformer_engine::Tensor*>(nvte_aux_tensor_pack.tensors[i]);
     // allocate memory for nvte_aux_tensor_pack.tensors
@@ -571,6 +636,24 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
     output_tensors.push_back(output_tensor);
     tensor->data.dptr = output_tensor.data_ptr();
   }
+#else
+  nvte_aux_tensor_pack.size = 2;
+  transformer_engine::Tensor* softmax_aux = reinterpret_cast<transformer_engine::Tensor*>(nvte_aux_tensor_pack.tensors[0]);
+  softmax_aux->data.dptr = nullptr;
+  softmax_aux->data.shape = {batch_size, num_attn_heads, max_seqlen_q, 1};
+  softmax_aux->data.dtype = transformer_engine::DType::kFloat32;
+  at::Tensor softmax_at_tensor;
+  softmax_at_tensor = allocateSpace(softmax_aux->data.shape, softmax_aux->data.dtype, false);
+  softmax_aux->data.dptr = softmax_at_tensor.data_ptr();
+  output_tensors.push_back(softmax_at_tensor);
+
+  
+  transformer_engine::Tensor* rng_state_aux = reinterpret_cast<transformer_engine::Tensor*>(nvte_aux_tensor_pack.tensors[1]);
+  rng_state_aux->data.dptr = rng_state.data_ptr();
+  rng_state_aux->data.shape = std::vector<size_t>{2};
+  rng_state_aux->data.dtype = transformer_engine::DType::kInt64;
+  output_tensors.push_back(rng_state);
+#endif
 
   // execute the kernel
   nvte_fused_attn_fwd_kvpacked(
@@ -740,6 +823,7 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
   }
 
   // create workspace
+#ifndef USE_ROCM
   TensorWrapper workspace;
 
   // populate tensors with appropriate shapes and dtypes
@@ -767,6 +851,18 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
   workspace = makeTransformerEngineTensor(
                   workspace_data.data_ptr(),
                   workspace.shape(), workspace.dtype());
+#else
+  const transformer_engine::Tensor *input_cu_seqlens_q = reinterpret_cast<const transformer_engine::Tensor*>(te_cu_seqlens_q.data());
+  size_t batch_size = input_cu_seqlens_q->data.shape[0]-1;
+  const transformer_engine::Tensor *input_Q = reinterpret_cast<const transformer_engine::Tensor*>(te_Q.data());
+  size_t ndim = input_Q->data.shape.size();
+  size_t num_attn_heads = input_Q->data.shape[ndim-2];
+  TensorWrapper workspace(nullptr, std::vector<size_t>({batch_size*num_attn_heads, max_seqlen_q}), transformer_engine::DType::kFloat32);
+  auto workspace_data = allocateSpace(std::vector<size_t>({batch_size*num_attn_heads, max_seqlen_q}), transformer_engine::DType::kFloat32, false);
+  workspace = makeTransformerEngineTensor(
+                  workspace_data.data_ptr(),
+                  workspace.shape(), workspace.dtype());
+#endif
 
   // execute kernel
   nvte_fused_attn_bwd_kvpacked(
@@ -884,10 +980,21 @@ std::vector<at::Tensor> fused_attn_fwd(
   te_cu_seqlens_kv = makeTransformerEngineTensor(cu_seqlens_kv.data_ptr(), cu_seqlens_kv_shape,
                     DType::kInt32, nullptr, nullptr, nullptr);
 
+#ifdef USE_ROCM
+  const transformer_engine::Tensor *input_cu_seqlens_q = reinterpret_cast<const transformer_engine::Tensor*>(te_cu_seqlens_q.data());
+  size_t batch_size = input_cu_seqlens_q->data.shape[0]-1;
+  const transformer_engine::Tensor *input_Q = reinterpret_cast<const transformer_engine::Tensor*>(te_Q.data());
+  size_t ndim = input_Q->data.shape.size();
+  size_t num_attn_heads = input_Q->data.shape[ndim-2];
+#endif
   // extract rng seed and offset
   auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
                   rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
+#ifndef USE_ROCM
   at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
+#else
+  at::PhiloxCudaState philox_args = init_philox_state(gen, batch_size*num_attn_heads*max_seqlen_q*max_seqlen_kv);
+#endif
   auto options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
   auto rng_state = torch::empty({2}, options);
   unpack<<<1, 1, 0, at::cuda::getCurrentCUDAStream()>>>(
@@ -901,6 +1008,8 @@ std::vector<at::Tensor> fused_attn_fwd(
   // create workspace
   TensorWrapper workspace;
 
+  // AOTriton does not need workspace for fwd pass
+#ifndef USE_ROCM
   // populate tensors with appropriate shapes and dtypes
   nvte_fused_attn_fwd(
                   te_Q.data(),
@@ -924,10 +1033,12 @@ std::vector<at::Tensor> fused_attn_fwd(
   workspace = makeTransformerEngineTensor(
                   workspace_data.data_ptr(),
                   workspace.shape(), workspace.dtype());
+#endif
 
   // output_tensors = [O, nvte_aux_tensor_pack.tensors]
   std::vector<at::Tensor> output_tensors;
   output_tensors.push_back(O);
+#ifndef USE_ROCM
   for (size_t i = 0; i < nvte_aux_tensor_pack.size; ++i) {
     auto tensor = reinterpret_cast<transformer_engine::Tensor*>(nvte_aux_tensor_pack.tensors[i]);
     // allocate memory for nvte_aux_tensor_pack.tensors
@@ -951,6 +1062,24 @@ std::vector<at::Tensor> fused_attn_fwd(
     output_tensors.push_back(output_tensor);
     tensor->data.dptr = output_tensor.data_ptr();
   }
+#else
+  nvte_aux_tensor_pack.size = 2;
+  transformer_engine::Tensor* softmax_aux = reinterpret_cast<transformer_engine::Tensor*>(nvte_aux_tensor_pack.tensors[0]);
+  softmax_aux->data.dptr = nullptr;
+  softmax_aux->data.shape = {batch_size, num_attn_heads, max_seqlen_q, 1};
+  softmax_aux->data.dtype = transformer_engine::DType::kFloat32;
+  at::Tensor softmax_at_tensor;
+  softmax_at_tensor = allocateSpace(softmax_aux->data.shape, softmax_aux->data.dtype, false);
+  softmax_aux->data.dptr = softmax_at_tensor.data_ptr();
+  output_tensors.push_back(softmax_at_tensor);
+
+  
+  transformer_engine::Tensor* rng_state_aux = reinterpret_cast<transformer_engine::Tensor*>(nvte_aux_tensor_pack.tensors[1]);
+  rng_state_aux->data.dptr = rng_state.data_ptr();
+  rng_state_aux->data.shape = std::vector<size_t>{2};
+  rng_state_aux->data.dtype = transformer_engine::DType::kInt64;
+  output_tensors.push_back(rng_state);
+#endif
 
   // execute the kernel
   nvte_fused_attn_fwd(
@@ -1192,6 +1321,7 @@ std::vector<at::Tensor> fused_attn_bwd(
   }
 
   // create workspace
+#ifndef USE_ROCM
   TensorWrapper workspace;
 
   // populate tensors with appropriate shapes and dtypes
@@ -1221,6 +1351,18 @@ std::vector<at::Tensor> fused_attn_bwd(
   workspace = makeTransformerEngineTensor(
                   workspace_data.data_ptr(),
                   workspace.shape(), workspace.dtype());
+#else
+  const transformer_engine::Tensor *input_cu_seqlens_q = reinterpret_cast<const transformer_engine::Tensor*>(te_cu_seqlens_q.data());
+  size_t batch_size = input_cu_seqlens_q->data.shape[0]-1;
+  const transformer_engine::Tensor *input_Q = reinterpret_cast<const transformer_engine::Tensor*>(te_Q.data());
+  size_t ndim = input_Q->data.shape.size();
+  size_t num_attn_heads = input_Q->data.shape[ndim-2];
+  TensorWrapper workspace(nullptr, std::vector<size_t>({batch_size*num_attn_heads, max_seqlen_q}), transformer_engine::DType::kFloat32);
+  auto workspace_data = allocateSpace(std::vector<size_t>({batch_size*num_attn_heads, max_seqlen_q}), transformer_engine::DType::kFloat32, false);
+  workspace = makeTransformerEngineTensor(
+                  workspace_data.data_ptr(),
+                  workspace.shape(), workspace.dtype());
+#endif
 
   // execute kernel
   nvte_fused_attn_bwd(
@@ -1250,6 +1392,7 @@ std::vector<at::Tensor> fused_attn_bwd(
   return {dQ, dK, dV, dBias};
 }
 
+#ifndef USE_ROCM
 namespace flash_attention {
 
 constexpr int warp_size = 32;
@@ -1419,3 +1562,5 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v) {
 
     return qkv;
 }
+
+#endif //ifndef USE_ROCM
