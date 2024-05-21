@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include "extensions.h"
+#include "common/common.h"
 
 constexpr int block_size = 512;
 constexpr int ctas_per_sm = 4;

@@ -818,7 +818,6 @@ def fused_attn_fwd(
                     + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1)//BACKEND_F16m512_FP8_THREADS_PER_CTA
     else:
         rng_elts_per_thread = 0
-
     # execute kernel
     output_tensors = tex.fused_attn_fwd(
             max_seqlen_q, max_seqlen_kv, is_training, attn_scale, dropout, fast_zero_fill,

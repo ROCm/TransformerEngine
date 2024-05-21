@@ -372,9 +372,11 @@ void fused_attn_fwd_impl(
     std::array<uint64_t, 4>{0, 0, 0, 0}, 
     std::array<uint64_t, 4>{1, 1, 1, 1}, 
     dtype);
-
-  uint64_t philox_seed = *devPtrDropoutSeed;
-  uint64_t philox_offset = *devPtrDropoutOffset;
+  
+  //devPtrDropoutSeed and devPtrDropoutOffset are actually device ptrs
+  uint64_t philox_seed, philox_offset;
+  cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
+  cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
 
   bool nvte_log_aotriton_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_AOTRITON_CONFIG") ) {
@@ -467,9 +469,10 @@ void fused_attn_bwd_impl(
   auto M_tensor = aotriton::TensorView<2>(reinterpret_cast<intptr_t>(devPtrSoftmaxAux), m_shape, m_stride, aotriton::DType::kFloat32);
   auto wkspace_tensor = aotriton::TensorView<2>(reinterpret_cast<intptr_t>(workspace), m_shape, m_stride, aotriton::DType::kFloat32);
 
-  uint64_t philox_seed = *devPtrDropoutSeed;
-  uint64_t philox_offset = *devPtrDropoutOffset;
+  uint64_t philox_seed, philox_offset;
 
+  cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
+  cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
   bool nvte_log_aotriton_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_AOTRITON_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
