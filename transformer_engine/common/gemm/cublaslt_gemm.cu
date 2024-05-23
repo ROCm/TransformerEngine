@@ -18,6 +18,7 @@
 #include <vector>
 #include <forward_list>
 #include <mutex>
+#include <unordered_map>
 #include <hipblaslt/hipblaslt.h>
 #else
 #define ROCBLAS_BETA_FEATURES_API 

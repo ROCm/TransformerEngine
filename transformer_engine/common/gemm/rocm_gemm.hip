@@ -414,6 +414,80 @@ private:
 } cached_handles;
 
 
+
+
+static class GemmAlgoCache {
+public:
+  struct Key {
+    int hipDevice;
+    hipblasltDatatype_t a_type, b_type, d_type, bias_type;
+    int m, n, k;
+    int lda, ldb, ldd;
+    hipblasOperation_t transa, transb;
+    hipblasLtEpilogue_t epilogue;
+    size_t workspaceSize;
+
+    Key(int hipDevice_,
+        hipblasltDatatype_t a_type_, hipblasltDatatype_t b_type_,
+        hipblasltDatatype_t d_type_, hipblasltDatatype_t bias_type_,
+        int m_, int n_, int k_, int lda_, int ldb_, int ldd_,
+        hipblasOperation_t transa_, hipblasOperation_t transb_,
+        hipblasLtEpilogue_t epilogue_, size_t workspaceSize_):
+        hipDevice(hipDevice_),
+        a_type(a_type_), b_type(b_type_),
+        d_type(d_type_), bias_type(bias_type_),
+        m(m_), n(n_), k(k_), lda(lda_), ldb(ldb_), ldd(ldd_),
+        transa(transa_), transb(transb_),
+        epilogue(epilogue_), workspaceSize(workspaceSize_) {}
+
+    bool operator==(const Key &val) const
+    {
+      return ((hipDevice == val.hipDevice)
+      && (a_type == val.a_type) && (b_type == val.b_type)
+      && (d_type == val.d_type) && (bias_type == val.bias_type)
+      && (m == val.m) && (n == val.n) && (k == val.k)
+      && (lda == val.lda) && (ldb == val.ldb) && (ldd == val.ldd)
+      && (transa == val.transa) && (transb == val.transb)
+      && (workspaceSize == val.workspaceSize)
+      && (epilogue == val.epilogue) );
+    }
+
+    struct Hash
+    {
+      ::std::size_t operator()(const Key& val) const
+      {
+        // For simplicity represent the struct as string_view and use std hash
+        return ::std::hash<::std::string_view>{}(::std::string_view((const char*)&val, sizeof(val)));
+      }
+    };
+  };
+
+  struct Algo {
+    hipblasLtMatmulAlgo_t algo;
+  };
+
+  int find(Key &cfg, Algo *algo)
+  {
+    std::lock_guard<std::mutex> lock(mt);
+    if (auto i = d.find(cfg); i != d.end())
+    {
+      algo[0] = i->second;
+      return 1;
+    }
+    return 0;
+  }
+  void store(Key &cfg, const Algo *algo)
+  {
+    std::lock_guard<std::mutex> lock(mt);
+    d[cfg] = algo[0];
+  }
+
+private:
+  std::mutex mt;
+  std::unordered_map<Key, Algo, Key::Hash> d;
+} algoCache;
+
+
 void cublas_gemm(const Tensor *inputA,
                  const Tensor *inputB,
                  Tensor *outputD,
@@ -575,16 +649,34 @@ void cublas_gemm(const Tensor *inputA,
                                                    HIPBLASLT_MATMUL_DESC_EPILOGUE,
                                                    &epilogue, sizeof(epilogue)));
 
-  NVTE_CHECK_CUBLAS(hipblasLtMatmulPreferenceCreate(&preference));
-  NVTE_CHECK_CUBLAS(hipblasLtMatmulPreferenceSetAttribute(
-                          preference, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-                          &workspaceSize, sizeof(workspaceSize)));
+  GemmAlgoCache::Key gemm_cfg(device_id, A_type, B_type, D_type, 
+    use_fp8 ? bias_type : (hipblasltDatatype_t)0,
+    m, n, k, lda, ldb, ldd, transa, transb, epilogue, workspaceSize );
+  GemmAlgoCache::Algo cached_algo{};
+  if (algoCache.find(gemm_cfg, &cached_algo) == 0)
+  {
+    NVTE_CHECK_CUBLAS(hipblasLtMatmulPreferenceCreate(&preference));
+    NVTE_CHECK_CUBLAS(hipblasLtMatmulPreferenceSetAttribute(
+                            preference, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                            &workspaceSize, sizeof(workspaceSize)));
 
-  NVTE_CHECK_CUBLAS(hipblasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Ddesc,
-                                                   Ddesc, preference, 1, &heuristicResult,
-                                                   &returnedResults));
+    NVTE_CHECK_CUBLAS(hipblasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Ddesc,
+                                                    Ddesc, preference, 1, &heuristicResult,
+                                                    &returnedResults));
 
-  if (returnedResults == 0) throw std::runtime_error("Unable to find any suitable algorithms");
+    NVTE_CHECK_CUBLAS(hipblasLtMatmulPreferenceDestroy(preference));
+
+    if (returnedResults == 0) {
+      NVTE_CHECK_CUBLAS(hipblasLtMatrixLayoutDestroy(Ddesc));
+      NVTE_CHECK_CUBLAS(hipblasLtMatrixLayoutDestroy(Bdesc));
+      NVTE_CHECK_CUBLAS(hipblasLtMatrixLayoutDestroy(Adesc));
+      NVTE_CHECK_CUBLAS(hipblasLtMatmulDescDestroy(operationDesc));
+      throw std::runtime_error("Unable to find any suitable algorithms");
+    }
+
+    cached_algo.algo = heuristicResult.algo;
+    algoCache.store(gemm_cfg, &cached_algo);
+  }
 
   // D = alpha * (A * B) + beta * C
   NVTE_CHECK_CUBLAS(hipblasLtMatmul(handle,
@@ -599,13 +691,12 @@ void cublas_gemm(const Tensor *inputA,
                                    Ddesc,
                                    D,                                      /* D */
                                    Ddesc,
-                                   &heuristicResult.algo,                  /* algo */
+                                   &cached_algo.algo,                      /* algo */
                                    workspace,                              /* workspace */
                                    workspaceSize,
                                    stream));                               /* stream */
 
 
-  NVTE_CHECK_CUBLAS(hipblasLtMatmulPreferenceDestroy(preference));
   NVTE_CHECK_CUBLAS(hipblasLtMatrixLayoutDestroy(Ddesc));
   NVTE_CHECK_CUBLAS(hipblasLtMatrixLayoutDestroy(Bdesc));
   NVTE_CHECK_CUBLAS(hipblasLtMatrixLayoutDestroy(Adesc));
