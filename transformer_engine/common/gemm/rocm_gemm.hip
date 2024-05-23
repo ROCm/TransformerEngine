@@ -312,6 +312,108 @@ transformer_engine::DType get_transformer_engine_dtype(const rocblas_datatype t)
 #endif //#ifndef USE_HIPBLASLT
 
 #ifdef USE_HIPBLASLT
+
+static class HandlePool {
+public:
+  hipblasLtHandle_t get(int device_id) 
+  {
+    std::lock_guard<std::mutex> lock(mt);
+
+    if (d.empty())
+    {
+      int device_count = 0; 
+      NVTE_CHECK_CUDA(hipGetDeviceCount(&device_count));
+      d.resize(device_count);
+      return nullptr;
+    }
+
+    if (!d[device_id].empty())
+    {
+      hipblasLtHandle_t h = d[device_id].front();
+      d[device_id].pop_front();
+      return h;
+    }
+
+    return nullptr;
+  }
+
+  hipblasLtHandle_t obtain(int device_id) 
+  {
+    hipblasLtHandle_t h = get(device_id);
+    if (h == nullptr)
+    {
+      NVTE_CHECK_CUBLAS(hipblasLtCreate(&h));
+    }
+    return h;
+  }
+
+  void store(int device_id, hipblasLtHandle_t h)
+  {
+    std::lock_guard<std::mutex> lock(mt);
+    d[device_id].push_front(h);
+  }
+
+  void store(std::vector<hipblasLtHandle_t> h)
+  {
+    std::lock_guard<std::mutex> lock(mt);
+    for (size_t i=0; i<d.size(); i++)
+    {
+      if (h[i] != nullptr)
+      {
+        d[i].push_front(h[i]);
+      }
+    }
+  }
+
+  ~HandlePool() {
+    for (auto & hlist : d)
+    {
+      for (auto & h : hlist)
+      {
+        hipblasLtDestroy(h);
+      }
+    }
+  }
+
+  inline size_t get_size() const
+  {
+    return d.size();
+  }
+
+private:
+  std::mutex mt;
+  std::vector<std::forward_list<hipblasLtHandle_t>> d;
+} handle_pool;
+
+thread_local class HandleCache {
+public:
+  hipblasLtHandle_t get(int device_id) const
+  {
+    return d.empty() ? nullptr : d[device_id];
+  }
+
+  void set(int device_id, hipblasLtHandle_t h) 
+  { 
+    if (d.empty())
+    {
+      d.resize(handle_pool.get_size());
+    }
+    d[device_id] = h; 
+  }
+
+  ~HandleCache()
+  {
+    if (!d.empty())
+    {
+      handle_pool.store(d);
+    }
+  }
+
+private:
+  std::vector<hipblasLtHandle_t> d;
+} cached_handles;
+
+
 void cublas_gemm(const Tensor *inputA,
                  const Tensor *inputB,
                  Tensor *outputD,
@@ -364,8 +466,15 @@ void cublas_gemm(const Tensor *inputA,
   float zero = 0.0;
   float beta = (accumulate) ? one : zero;
 
-  hipblasLtHandle_t handle;
-  NVTE_CHECK_CUBLAS(hipblasLtCreate(&handle));
+  int device_id;
+  NVTE_CHECK_CUDA(hipGetDevice(&device_id));
+
+  hipblasLtHandle_t handle = cached_handles.get(device_id);
+  if (handle == nullptr)
+  {
+    handle = handle_pool.obtain(device_id);
+    cached_handles.set(device_id, handle);
+  }
 
   hipblasLtMatmulDesc_t       operationDesc = nullptr;
   hipblasLtMatrixLayout_t     Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr, Ddesc = nullptr;
@@ -501,7 +610,6 @@ void cublas_gemm(const Tensor *inputA,
   NVTE_CHECK_CUBLAS(hipblasLtMatrixLayoutDestroy(Bdesc));
   NVTE_CHECK_CUBLAS(hipblasLtMatrixLayoutDestroy(Adesc));
   NVTE_CHECK_CUBLAS(hipblasLtMatmulDescDestroy(operationDesc));
-  NVTE_CHECK_CUBLAS(hipblasLtDestroy(handle));
 }
 #else // Use rocblas + kernel, no fusion
 void cublas_gemm(const Tensor *inputA,

@@ -8,28 +8,29 @@
 
 #include <type_traits>
 #include <transformer_engine/gemm.h>
+#include <transformer_engine/transformer_engine.h>
 #ifndef __HIP_PLATFORM_AMD__
 #include <cublasLt.h>
 #include <cublas_v2.h>
 #include <cuda.h>
 #else
+#ifdef USE_HIPBLASLT
+#include <vector>
+#include <forward_list>
+#include <mutex>
+#include <hipblaslt/hipblaslt.h>
+#else
 #define ROCBLAS_BETA_FEATURES_API 
 #include <rocblas/rocblas.h>
-#ifdef USE_HIPBLASLT
-#include <hipblaslt/hipblaslt.h>
 #endif // #ifdef USE_HIPBLASLT
-#endif // #ifndef __HIP_PLATFORM_AMD__
-#include "../common.h"
-#include "../util/vectorized_pointwise.h"
-#ifdef __HIP_PLATFORM_AMD__
 #include <hipcub/hipcub.hpp>
 #include <iostream>
 #include <cstdlib>
 #include <string>
-#endif //__HIP_PLATFORM_AMD__
+#endif // #ifndef __HIP_PLATFORM_AMD__
 
-#include <transformer_engine/transformer_engine.h>
 #include "../common.h"
+#include "../util/vectorized_pointwise.h"
 #include "../util/logging.h"
 
 namespace {
