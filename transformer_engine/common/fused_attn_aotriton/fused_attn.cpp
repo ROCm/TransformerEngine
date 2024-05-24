@@ -321,6 +321,11 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK))){
     return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   } 
+  
+  // causal does not work with s_q != s_kv
+  if((max_seqlen_q!=max_seqlen_kv)&&(attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)){
+    return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
+  }
 
   return NVTE_Fused_Attn_Backend::NVTE_AOTriton;
 }
@@ -400,10 +405,12 @@ void fused_attn_fwd_impl(
     std::cout<<"philox_seed: "<<philox_seed<<", philox_offset: "<<philox_offset<<", ";
     std::cout<<"causal mask: "<<(mask_type==NVTE_CAUSAL_MASK)<<std::endl;
   }
+  aotriton::TensorView<4> empty_bias(0, {0,0,0,0}, {0,0,0,0}, dtype);
   using aotriton::v2::flash::attn_fwd;
   NVTE_CHECK_CUDA(attn_fwd(q_tensor,
                            k_tensor,
                            v_tensor,
+                           empty_bias,
                            scaling_factor,
                            M_tensor,
                            o_tensor,
@@ -494,16 +501,19 @@ void fused_attn_bwd_impl(
     std::cout<<"philox_seed: "<<philox_seed<<", philox_offset: "<<philox_offset<<", ";
     std::cout<<"causal mask: "<<(mask_type==NVTE_CAUSAL_MASK)<<std::endl;
   }
+  aotriton::TensorView<4> empty_bias(0, {0,0,0,0}, {0,0,0,0}, dtype);
   using aotriton::v2::flash::attn_bwd;
   NVTE_CHECK_CUDA(attn_bwd(q_tensor,
                            k_tensor,
                            v_tensor,
+                           empty_bias,
                            scaling_factor,
                            o_tensor,
                            do_tensor,
                            dq_tensor,
                            dk_tensor,
                            dv_tensor,
+                           empty_bias,
                            M_tensor,
                            wkspace_tensor,
                            dropout_probability,
