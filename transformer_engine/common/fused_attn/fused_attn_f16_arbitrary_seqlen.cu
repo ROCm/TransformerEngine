@@ -6,10 +6,12 @@
 
 #include "fused_attn_f16_arbitrary_seqlen.h"
 
+#ifndef __HIP_PLATFORM_AMD__
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cudnn_frontend.h>
 #include <cudnn_frontend_utils.h>
+#endif
 #include <map>
 #include <vector>
 
@@ -17,7 +19,545 @@
 #include "utils.h"
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
+#ifdef __HIP_PLATFORM_AMD__
+#define DISPATCH_BF16_AND_F16_TYPES(DATATYPE, NAME, ...)                       \
+    switch (DATATYPE) {                                                        \
+    case transformer_engine::DType::kBFloat16: {                               \
+        using scalar_t = ck_tile::bf16_t;                                      \
+        __VA_ARGS__;                                                           \
+    } break;                                                                   \
+    case transformer_engine::DType::kFloat16: {                                \
+        using scalar_t = ck_tile::half_t;                                      \
+        __VA_ARGS__;                                                           \
+    } break;                                                                   \
+    default:                                                                   \
+        break;                                                                 \
+    }
 
+const std::unordered_map<transformer_engine::DType, std::string> dtype_mapping =
+    {{transformer_engine::DType::kBFloat16, "bf16"},
+     {transformer_engine::DType::kFloat16, "fp16"}};
+
+namespace transformer_engine {
+namespace fused_attn {
+
+template <typename DataType>
+void fused_attn_arbitrary_seqlen_fwd_impl(
+    int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d,
+    int64_t bias_b, int64_t bias_h, bool is_training, float scaling_factor,
+    float dropout_probability, uint64_t drop_seed, uint64_t drop_offset,
+    NVTE_QKV_Layout layout, NVTE_Bias_Type bias_value,
+    NVTE_Mask_Type mask_value, void* devPtrQ, void* devPtrK, void* devPtrV,
+    void* devPtrBias, void* devPtrSoftmaxStats, void* devPtrO,
+    void* devPtrCuSeqlensQ, void* devPtrCuSeqlensKV,
+    const std::string& data_type, hipStream_t stream) {
+    using TypeConfig = FmhaFwdTypeConfig<DataType>;
+    using QDataType = typename TypeConfig::QDataType;
+    using KDataType = typename TypeConfig::KDataType;
+    using VDataType = typename TypeConfig::VDataType;
+    using BiasDataType = typename TypeConfig::BiasDataType;
+    using RandValOutputDataType = typename TypeConfig::RandValOutputDataType;
+    using LSEDataType = typename TypeConfig::LSEDataType;
+    using SaccDataType = typename TypeConfig::SaccDataType;
+    using SMPLComputeDataType = typename TypeConfig::SMPLComputeDataType;
+    using PDataType = typename TypeConfig::PDataType;
+    using OaccDataType = typename TypeConfig::OaccDataType;
+    using ODataType = typename TypeConfig::ODataType;
+
+    bool has_dropout = (is_training && dropout_probability > 0.f);
+    bool has_lse = (devPtrSoftmaxStats != nullptr);
+
+    /* CK input parameters */
+    ck_tile::index_t batch = b;
+    ck_tile::index_t seqlen_q = s_q;
+    ck_tile::index_t nhead = h;
+    ck_tile::index_t hdim_q = d;
+    ck_tile::index_t seqlen_k = s_kv;
+    ck_tile::index_t nhead_k = hg;
+    ck_tile::index_t hdim_v = d;
+    ck_tile::index_t max_seqlen_q = s_q;
+    ck_tile::index_t max_seqlen_k = s_kv;
+    float scale_s = scaling_factor;
+    float scale_p = 1.f;
+    float scale_o = 1.f;
+    float p_drop = dropout_probability;
+    bool is_group_mode = false;
+    bool is_v_rowmajor = true;
+    bool do_fp8_static_quant = false;
+
+    bias_enum bias_type;
+    mask_enum mask_type;
+    ck_tile::index_t left, right;
+    ck_tile::stream_config stream_config{stream};
+    if (bias_value == NVTE_Bias_Type::NVTE_NO_BIAS) {
+        bias_type = bias_enum::no_bias;
+    } else {
+        NVTE_ERROR("Unsupported bias type");
+    }
+
+   if (mask_value == NVTE_Mask_Type::NVTE_NO_MASK) {
+        mask_type = mask_enum::no_mask;
+    } else if (mask_value == NVTE_Mask_Type::NVTE_CAUSAL_MASK) {
+        mask_type = mask_enum::mask_top_left;
+        left = -1;
+        right = 0;
+    } else {
+        mask_type = mask_enum::mask_bottom_right;
+        left = -1;
+        right = 0;
+    }
+
+    ck_tile::index_t shape_batch = batch;
+    ck_tile::index_t shape_seqlen_q = seqlen_q;
+    ck_tile::index_t shape_seqlen_k = seqlen_k;
+    RandValOutputDataType* devPtrRandVal = nullptr;
+    bool s_randval = false;
+    if (has_dropout) {
+        hipMalloc(&devPtrRandVal, sizeof(RandValOutputDataType) * shape_batch *
+                                      nhead * shape_seqlen_q * max_seqlen_k);
+    } else {
+        hipMalloc(&devPtrRandVal, sizeof(RandValOutputDataType));
+    }
+
+    auto fmha_traits = fmha_fwd_traits{
+        hdim_q,    hdim_v,    data_type, is_group_mode, is_v_rowmajor,
+        mask_type, bias_type, has_lse,   has_dropout,   do_fp8_static_quant};
+
+    auto fmha_args = [&]() {
+        // setup stride_* arguments
+        const ck_tile::index_t stride_q = nhead * hdim_q;
+        const ck_tile::index_t stride_k = nhead_k * hdim_q;
+        const ck_tile::index_t stride_v = nhead_k * hdim_v;
+        const ck_tile::index_t stride_bias = shape_seqlen_k;
+        const ck_tile::index_t stride_randval = max_seqlen_k;
+        const ck_tile::index_t stride_o = nhead * hdim_v;
+        // setup nhead_stride_* arguments
+        const ck_tile::index_t nhead_stride_q = hdim_q;
+        const ck_tile::index_t nhead_stride_k = hdim_q;
+        const ck_tile::index_t nhead_stride_v = hdim_v;
+        const ck_tile::index_t nhead_stride_bias = 0;
+        const ck_tile::index_t nhead_stride_randval =
+            shape_seqlen_q * max_seqlen_k;
+        const ck_tile::index_t nhead_stride_lse = shape_seqlen_q;
+        const ck_tile::index_t nhead_stride_o = hdim_v;
+        // setup batch_stride_* arguments
+        const ck_tile::index_t batch_stride_q = nhead * shape_seqlen_q * hdim_q;
+        const ck_tile::index_t batch_stride_k =
+            nhead_k * shape_seqlen_k * hdim_q;
+        const ck_tile::index_t batch_stride_v =
+            nhead_k * shape_seqlen_k * hdim_v;
+        const ck_tile::index_t batch_stride_bias = 0;
+        const ck_tile::index_t batch_stride_randval =
+            nhead * shape_seqlen_q * max_seqlen_k;
+        const ck_tile::index_t batch_stride_lse = nhead * shape_seqlen_q;
+        const ck_tile::index_t batch_stride_o = nhead * shape_seqlen_q * hdim_v;
+
+        return fmha_fwd_args{devPtrQ,
+                             devPtrK,
+                             devPtrV,
+                             devPtrBias,
+                             devPtrRandVal,
+                             devPtrSoftmaxStats,
+                             devPtrO,
+                             devPtrCuSeqlensQ,
+                             devPtrCuSeqlensKV,
+                             nullptr, /* seqlen_k_ptr */
+                             shape_seqlen_q,
+                             shape_seqlen_k,
+                             batch,
+                             max_seqlen_q,
+                             hdim_q,
+                             hdim_v,
+                             nhead,
+                             nhead_k,
+                             scale_s,
+                             scale_p,
+                             scale_o,
+                             stride_q,
+                             stride_k,
+                             stride_v,
+                             stride_bias,
+                             stride_randval,
+                             stride_o,
+                             nhead_stride_q,
+                             nhead_stride_k,
+                             nhead_stride_v,
+                             nhead_stride_bias,
+                             nhead_stride_randval,
+                             nhead_stride_lse,
+                             nhead_stride_o,
+                             batch_stride_q,
+                             batch_stride_k,
+                             batch_stride_v,
+                             batch_stride_bias,
+                             batch_stride_randval,
+                             batch_stride_lse,
+                             batch_stride_o,
+                             left,
+                             right,
+                             static_cast<ck_tile::index_t>(mask_type),
+                             p_drop,
+                             s_randval,
+                             {drop_seed, drop_offset}};
+    }();
+
+    fmha_fwd(fmha_traits, fmha_args, stream_config);
+}
+
+template <typename DataType>
+void fused_attn_arbitrary_seqlen_bwd_impl(
+    int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d,
+    int64_t bias_b, int64_t bias_h, float scaling_factor,
+    float dropout_probability, uint64_t drop_seed, uint64_t drop_offset,
+    NVTE_QKV_Layout layout, NVTE_Bias_Type bias_value,
+    NVTE_Mask_Type mask_value, void* devPtrQ, void* devPtrKTranspose,
+    void* devPtrVTranspose, void* devPtrO, void* devPtrSoftmaxStats,
+    void* devPtrBias, void* devPtrdQ, void* devPtrdK, void* devPtrdV,
+    void* devPtrdO, void* devPtrdBias, void* devPtrCuSeqlensQ,
+    void* devPtrCuSeqlensKV, const std::string& data_type, hipStream_t stream) {
+    using TypeConfig = FmhaBwdTypeConfig<DataType>;
+    using QDataType = typename TypeConfig::QDataType;
+    using KDataType = typename TypeConfig::KDataType;
+    using VDataType = typename TypeConfig::VDataType;
+    using GemmDataType = typename TypeConfig::GemmDataType;
+    using BiasDataType = typename TypeConfig::BiasDataType;
+    using LSEDataType = typename TypeConfig::LSEDataType;
+    using AccDataType = typename TypeConfig::AccDataType;
+    using DDataType = typename TypeConfig::DDataType;
+    using RandValOutputDataType = typename TypeConfig::RandValOutputDataType;
+    using ODataType = typename TypeConfig::ODataType;
+    using OGradDataType = typename TypeConfig::OGradDataType;
+    using QGradDataType = typename TypeConfig::QGradDataType;
+    using KGradDataType = typename TypeConfig::KGradDataType;
+    using VGradDataType = typename TypeConfig::VGradDataType;
+    using BiasGradDataType = typename TypeConfig::BiasGradDataType;
+
+    bool has_dropout = (dropout_probability > 0.f);
+    bool has_dbias = (devPtrdBias != nullptr);
+
+    /* CK input parameters */
+    ck_tile::index_t batch = b;
+    ck_tile::index_t seqlen_q = s_q;
+    ck_tile::index_t nhead = h;
+    ck_tile::index_t hdim_q = d;
+    ck_tile::index_t seqlen_k = s_kv;
+    ck_tile::index_t nhead_k = hg;
+    ck_tile::index_t hdim_v = d;
+    ck_tile::index_t max_seqlen_q = s_q;
+    ck_tile::index_t max_seqlen_k = s_kv;
+    float scale_s = scaling_factor;
+    float scale_p = 1.f;
+    float scale_o = 1.f;
+    float p_drop = dropout_probability;
+    float p_undrop = 1.0 - p_drop;
+    float rp_undrop = 1.0 / p_undrop;
+    bool is_group_mode = false;
+    bool is_v_rowmajor = true;
+    bool do_fp8_static_quant = false;
+
+    bias_enum bias_type;
+    mask_enum mask_type;
+    int32_t left, right;
+    ck_tile::stream_config stream_config{stream};
+    if (bias_value == NVTE_Bias_Type::NVTE_NO_BIAS) {
+        bias_type = bias_enum::no_bias;
+    } else {
+        NVTE_ERROR("Unsupported bias type");
+    }
+
+    if (mask_value == NVTE_Mask_Type::NVTE_NO_MASK) {
+        mask_type = mask_enum::no_mask;
+    } else if (mask_value == NVTE_Mask_Type::NVTE_CAUSAL_MASK) {
+        mask_type = mask_enum::mask_top_left;
+        left = -1;
+        right = 0;
+    } else {
+        mask_type = mask_enum::mask_bottom_right;
+        left = -1;
+        right = 0;
+    }
+
+    ck_tile::index_t shape_batch = batch;
+    ck_tile::index_t shape_seqlen_q = seqlen_q;
+    ck_tile::index_t shape_seqlen_k = seqlen_k;
+    DDataType* devPtrD = nullptr;
+    RandValOutputDataType* devPtrRandVal = nullptr;
+    bool s_randval = false;
+    hipMalloc(&devPtrD, sizeof(DDataType) * batch * nhead * max_seqlen_q);
+    if (has_dropout) {
+        hipMalloc(&devPtrRandVal, sizeof(RandValOutputDataType) * shape_batch *
+                                      nhead * shape_seqlen_q * max_seqlen_k);
+    } else {
+        hipMalloc(&devPtrRandVal, sizeof(RandValOutputDataType));
+    }
+
+    auto fmha_traits =
+        fmha_bwd_traits{hdim_q,    hdim_v,    data_type, is_group_mode,
+                        mask_type, bias_type, has_dbias, has_dropout};
+
+    auto fmha_args = [&]() {
+        // setup stride_* arguments
+        const ck_tile::index_t stride_q = nhead * hdim_q;
+        const ck_tile::index_t stride_k = nhead_k * hdim_q;
+        const ck_tile::index_t stride_v = nhead_k * hdim_v;
+        const ck_tile::index_t stride_bias = max_seqlen_k;
+        const ck_tile::index_t stride_o = nhead * hdim_v;
+        const ck_tile::index_t stride_randval = max_seqlen_k;
+        const ck_tile::index_t stride_do = nhead * hdim_v;
+        const ck_tile::index_t stride_dk = nhead * hdim_q;
+        const ck_tile::index_t stride_dv = nhead * hdim_v;
+        const ck_tile::index_t stride_dbias = nhead * max_seqlen_k;
+        // setup nhead_stride_* arguments
+        const ck_tile::index_t nhead_stride_q = hdim_q;
+        const ck_tile::index_t nhead_stride_k = hdim_q;
+        const ck_tile::index_t nhead_stride_v = hdim_v;
+        const ck_tile::index_t nhead_stride_bias = 0;
+        const ck_tile::index_t nhead_stride_o = hdim_v;
+        const ck_tile::index_t nhead_stride_randval =
+            shape_seqlen_q * max_seqlen_k;
+        const ck_tile::index_t nhead_stride_do = hdim_v;
+        const ck_tile::index_t nhead_stride_lsed = max_seqlen_q;
+        const ck_tile::index_t nhead_stride_dbias = max_seqlen_k;
+        // setup batch_stride_* arguments
+        const ck_tile::index_t batch_stride_q = nhead * shape_seqlen_q * hdim_q;
+        const ck_tile::index_t batch_stride_k =
+            nhead_k * shape_seqlen_k * hdim_q;
+        const ck_tile::index_t batch_stride_v =
+            nhead_k * shape_seqlen_k * hdim_v;
+        const ck_tile::index_t batch_stride_bias = 0;
+        const ck_tile::index_t batch_stride_o = nhead * shape_seqlen_q * hdim_v;
+        const ck_tile::index_t batch_stride_randval =
+            nhead * shape_seqlen_q * max_seqlen_k;
+        const ck_tile::index_t batch_stride_do =
+            nhead * shape_seqlen_q * hdim_v;
+        const ck_tile::index_t batch_stride_lsed = nhead * max_seqlen_q;
+        const ck_tile::index_t batch_stride_dk =
+            nhead * shape_seqlen_k * hdim_q;
+        const ck_tile::index_t batch_stride_dv =
+            nhead * shape_seqlen_k * hdim_v;
+        const ck_tile::index_t batch_stride_dbias =
+            nhead * shape_seqlen_q * max_seqlen_k;
+
+        return fmha_bwd_args{devPtrQ,
+                             devPtrKTranspose,
+                             devPtrVTranspose,
+                             devPtrBias,
+                             devPtrO,
+                             devPtrSoftmaxStats,
+                             devPtrdO,
+                             devPtrD,
+                             devPtrRandVal,
+                             devPtrdQ,
+                             devPtrdK,
+                             devPtrdV,
+                             devPtrdBias,
+                             devPtrCuSeqlensQ,
+                             devPtrCuSeqlensKV,
+                             nullptr, /* seqlen_k_ptr */
+                             shape_seqlen_q,
+                             shape_seqlen_k,
+                             batch,
+                             max_seqlen_q,
+                             max_seqlen_k,
+                             hdim_q,
+                             hdim_v,
+                             nhead,
+                             nhead_k,
+                             scale_s,
+                             stride_q,
+                             stride_k,
+                             stride_v,
+                             stride_bias,
+                             stride_o,
+                             stride_randval,
+                             stride_do,
+                             stride_dk,
+                             stride_dv,
+                             stride_dbias,
+                             nhead_stride_q,
+                             nhead_stride_k,
+                             nhead_stride_v,
+                             nhead_stride_bias,
+                             nhead_stride_o,
+                             nhead_stride_randval,
+                             nhead_stride_do,
+                             nhead_stride_lsed,
+                             nhead_stride_dbias,
+                             batch_stride_q,
+                             batch_stride_k,
+                             batch_stride_v,
+                             batch_stride_bias,
+                             batch_stride_o,
+                             batch_stride_randval,
+                             batch_stride_do,
+                             batch_stride_lsed,
+                             batch_stride_dk,
+                             batch_stride_dv,
+                             batch_stride_dbias,
+                             left,
+                             right,
+                             static_cast<ck_tile::index_t>(mask_type),
+                             p_drop,
+                             p_undrop,
+                             s_randval,
+                             {drop_seed, drop_offset}};
+    }();
+
+    fmha_bwd(fmha_traits, fmha_args, stream_config);
+}
+} // namespace fused_attn
+
+using namespace transformer_engine::fused_attn;
+void fused_attn_arbitrary_seqlen_fwd(
+    size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
+    size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim,
+    bool is_training, float attn_scale, float p_dropout,
+    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+    NVTE_Mask_Type mask_type, const Tensor* input_Q, const Tensor* input_K,
+    const Tensor* input_V, const Tensor* input_Bias, Tensor* output_O,
+    NVTETensorPack* Aux_CTX_Tensors, const Tensor* cu_seqlens_q,
+    const Tensor* cu_seqlens_kv, const Tensor* rng_state,
+    hipStream_t stream) {
+    using namespace transformer_engine;
+
+    const auto QKV_type = input_Q->data.dtype;
+    void* devPtrQ = input_Q->data.dptr;
+    void* devPtrK = input_K->data.dptr;
+    void* devPtrV = input_V->data.dptr;
+    void* devPtrO = output_O->data.dptr;
+    void* devPtrS = nullptr;
+    void* devPtrBias = nullptr;
+    size_t bias_b = 0;
+    size_t bias_h = 0;
+    void* devPtrCuSeqlensQ = cu_seqlens_q->data.dptr;
+    void* devPtrCuSeqlensKV = cu_seqlens_kv->data.dptr;
+
+    if (Aux_CTX_Tensors->size == 0) {
+        Aux_CTX_Tensors->size = 2;
+        Tensor* output_S =
+            reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
+        output_S->data.dptr = nullptr;
+        output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
+        output_S->data.dtype = DType::kFloat32;
+        Tensor* output_rng_state =
+            reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
+        output_rng_state->data.dptr = nullptr;
+        output_rng_state->data.shape = {2};
+        output_rng_state->data.dtype = DType::kInt64;
+    } else if (Aux_CTX_Tensors->size == 2) {
+        Tensor* output_S =
+            reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
+        devPtrS = output_S->data.dptr;
+        Tensor* output_rng_state =
+            reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
+        output_rng_state->data.dptr = rng_state->data.dptr;
+    } else if (Aux_CTX_Tensors->size == 3) {
+        Tensor* output_S =
+            reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
+        devPtrS = output_S->data.dptr;
+        Tensor* output_rng_state =
+            reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
+        output_rng_state->data.dptr = rng_state->data.dptr;
+        Tensor* output_bias =
+            reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
+        output_bias->data.dptr = devPtrBias;
+    } else {
+        NVTE_ERROR("Unexpected Aux_CTX_Tensors->size");
+    }
+
+    void* devPtrRngState = rng_state->data.dptr;
+    uint64_t* host_rng_state = new uint64_t[2];
+    hipMemcpy(host_rng_state, devPtrRngState, 2 * sizeof(uint64_t),
+              hipMemcpyDeviceToHost);
+    uint64_t drop_seed = host_rng_state[0];
+    uint64_t drop_offset = host_rng_state[1];
+    delete[] host_rng_state;
+
+    /*
+    void* devPtrDropoutSeed = rng_state->data.dptr;
+    void* devPtrDropoutOffset = reinterpret_cast<void *>(
+                    reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
+    */
+
+    auto iter = dtype_mapping.find(QKV_type);
+    if (iter == dtype_mapping.cend()) {
+        NVTE_ERROR("Unexpected QKV_type");
+    }
+    DISPATCH_BF16_AND_F16_TYPES(
+        QKV_type, "fused_attn_arbitrary_seqlen_fwd_impl",
+        fused_attn_arbitrary_seqlen_fwd_impl<scalar_t>(
+            batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv,
+            head_dim, bias_b, bias_h, is_training, attn_scale, p_dropout,
+            drop_seed, drop_offset, qkv_layout, bias_type, mask_type, devPtrQ,
+            devPtrK, devPtrV, devPtrBias, devPtrS, devPtrO, devPtrCuSeqlensQ,
+            devPtrCuSeqlensKV, iter->second, stream);)
+}
+
+void fused_attn_arbitrary_seqlen_bwd(
+    size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
+    size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim,
+    float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, const Tensor* input_Q,
+    const Tensor* input_K, const Tensor* input_V, const Tensor* input_O,
+    const Tensor* input_dO, const Tensor* input_Bias, Tensor* output_S,
+    Tensor* output_dQ, Tensor* output_dK, Tensor* output_dV,
+    Tensor* output_dBias, const Tensor* cu_seqlens_q,
+    const Tensor* cu_seqlens_kv, const Tensor* rng_state,
+    hipStream_t stream) {
+    using namespace transformer_engine;
+
+    const auto QKV_type = input_Q->data.dtype;
+    void* devPtrQ = input_Q->data.dptr;
+    void* devPtrK = input_K->data.dptr;
+    void* devPtrV = input_V->data.dptr;
+    void* devPtrO = input_O->data.dptr;
+    void* devPtrdO = input_dO->data.dptr;
+    void* devPtrBias = nullptr;
+    void* devPtrdBias = nullptr;
+    size_t bias_b = 0;
+    size_t bias_h = 0;
+    if ((bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) &&
+        (bias_type != NVTE_Bias_Type::NVTE_ALIBI)) {
+        devPtrBias = input_Bias->data.dptr;
+        devPtrdBias = output_dBias->data.dptr;
+        bias_b = output_dBias->data.shape[0];
+        bias_h = output_dBias->data.shape[1];
+    }
+
+    void* devPtrdQ = output_dQ->data.dptr;
+    void* devPtrdK = output_dK->data.dptr;
+    void* devPtrdV = output_dV->data.dptr;
+    void* devPtrSoftmaxStats = output_S->data.dptr;
+    void* devPtrCuSeqlensQ = cu_seqlens_q->data.dptr;
+    void* devPtrCuSeqlensKV = cu_seqlens_kv->data.dptr;
+    void* devPtrDropoutSeed = rng_state->data.dptr;
+    void* devPtrDropoutOffset = reinterpret_cast<void*>(
+        reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
+
+    void* devPtrRngState = rng_state->data.dptr;
+    uint64_t* host_rng_state = new uint64_t[2];
+    hipMemcpy(host_rng_state, devPtrRngState, 2 * sizeof(uint64_t),
+              hipMemcpyDeviceToHost);
+    uint64_t drop_seed = host_rng_state[0];
+    uint64_t drop_offset = host_rng_state[1];
+    delete[] host_rng_state;
+
+    auto iter = dtype_mapping.find(QKV_type);
+    if (iter == dtype_mapping.cend()) {
+        NVTE_ERROR("Unexpected QKV_type");
+    }
+    DISPATCH_BF16_AND_F16_TYPES(
+        QKV_type, "fused_attn_arbitrary_seqlen_bwd_impl",
+        fused_attn_arbitrary_seqlen_bwd_impl<scalar_t>(
+            batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv,
+            head_dim, bias_b, bias_h, attn_scale, p_dropout, drop_seed,
+            drop_offset, qkv_layout, bias_type, mask_type, devPtrQ, devPtrK,
+            devPtrV, devPtrO, devPtrSoftmaxStats, devPtrBias, devPtrdQ,
+            devPtrdK, devPtrdV, devPtrdO, devPtrdBias, devPtrCuSeqlensQ,
+            devPtrCuSeqlensKV, iter->second, stream);)
+}
+} // namespace transformer_engine
+#else
 #if (CUDNN_VERSION >= 8900)
 #define Q_ID 1
 #define K_ID 2
@@ -1129,3 +1669,4 @@ void fused_attn_arbitrary_seqlen_bwd(size_t batch, size_t num_attn_heads, size_t
 }
 }  // namespace transformer_engine
 #endif  // CUDNN_VERSION >= 8900
+#endif  // __HIP_PLATFORM_AMD__ 

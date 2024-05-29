@@ -16,9 +16,7 @@
 #include <type_traits>
 #include <pybind11/pybind11.h>
 //TODO: add back once fused_attn is supported
-#ifndef USE_ROCM
 #include "transformer_engine/fused_attn.h"
-#endif
 #include "common/util/logging.h"
 
 namespace transformer_engine {
@@ -27,11 +25,9 @@ namespace jax {
 int GetCudaRuntimeVersion();
 int GetDeviceComputeCapability(int gpu_id);
 
-#ifndef USE_ROCM
 void PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t q_max_seqlen,
                            size_t kv_max_seqlen, NVTE_Fused_Attn_Backend backend,
                            cudaStream_t stream);
-#endif
 
 class cudaDevicePropertiesManager {
  public:
@@ -65,7 +61,6 @@ class cudaDevicePropertiesManager {
     cudaDeviceProp prop_;
 };
 
-#ifndef USE_ROCM
 class FusedAttnOffsetManager {
  public:
     static FusedAttnOffsetManager &Instance() {
@@ -86,7 +81,6 @@ class FusedAttnOffsetManager {
     FusedAttnOffsetManager() {}
     size_t offset_ = 0;
 };
-#endif
 
 }  // namespace jax
 }  // namespace transformer_engine

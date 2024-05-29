@@ -32,3 +32,9 @@ build.ninja
 cuda_to_hip_list_tmp_*.txt
 hipify_output_dict_dump.txt
 cmake_install.cmake
+
+fwd_blob_list.txt
+bwd_blob_list.txt
+fmha_fwd_*.cpp
+fmha_bwd_*.cpp
+

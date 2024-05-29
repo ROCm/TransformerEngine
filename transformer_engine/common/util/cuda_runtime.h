@@ -9,7 +9,11 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_UTIL_CUDA_RUNTIME_H_
 #define TRANSFORMER_ENGINE_COMMON_UTIL_CUDA_RUNTIME_H_
 
+#ifdef __HIP_PLATFORM_AMD__
+#include <hip/hip_runtime.h>
+#else
 #include <cuda_runtime_api.h>
+#endif
 #include <string>
 
 namespace transformer_engine {

@@ -154,6 +154,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                 size_t max_seqlen_q, size_t max_seqlen_kv,
                 size_t head_dim);
 
+#ifndef __HIP_PLATFORM_AMD__
 /*! \brief Compute dot product attention with packed QKV input.
  *
  * Computes:
@@ -480,6 +481,124 @@ void nvte_fused_attn_bwd(
             NVTE_Mask_Type attn_mask_type,
             NVTETensor workspace,
             cudaStream_t stream);
+#else
+/*! \brief Compute dot product attention with separate Q, K and V.
+ *
+ * Computes:
+ *  - P = Q * Transpose(K) + Bias
+ *  - S = ScaleMaskSoftmax(P)
+ *  - D = Dropout(S)
+ *  - O = D * Transpose(V)
+ *
+ * Support Matrix:
+   \verbatim
+   | backend | precision |                qkv layout                   |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
+   |   0     | FP16/BF16 |     BS3HD,SB3HD,BSHD_BS2HD,SBHD_SB2HD       |   NO/POST_SCALE_BIAS     | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   | <= 512, % 64 == 0 |    64            |
+   |   1     | FP16/BF16 |          BS3HD,SB3HD,BSH3D,SBH3D            | NO/POST_SCALE_BIAS/ALIBI | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   |  > 512, % 64 == 0 | <= 128, % 8 == 0 |
+   |         |           | BSHD_BS2HD,BSHD_BSH2D,SBHD_SB2HD,SBHD_SBH2D |                          |                                       |         |                   |                  |
+   |         |           |       BSHD_BSHD_BSHD,SBHD_SBHD_SBHD         |                          |                                       |         |                   |                  |
+   |   2     |   FP8     |                 T3HD                        |          NO_BIAS         |               PADDING_MASK            |   Yes   | <= 512, % 64 == 0 |    64            |
+   \endverbatim
+ *
+ *  \param[in]     Q                        The Q tensor.
+ *  \param[in]     K                        The K tensor.
+ *  \param[in]     V                        The V tensor.
+ *  \param[in]     Bias                     The Bias tensor.
+ *  \param[in,out] S                        The S tensor.
+ *  \param[out]    O                        The output O tensor.
+ *  \param[out]    Aux_CTX_Tensors          Auxiliary output tensors when training,
+ *                                          e.g. M, ZInv, rng_state.
+ *  \param[in]     cu_seqlens_q             Cumulative sequence lengths for Q, [batch_size + 1].
+ *  \param[in]     cu_seqlens_kv            Cumulative sequence lengths for K and V, [batch_size + 1].
+ *  \param[in]     rng_state                Seed and offset of CUDA random number generator.
+ *  \param[in]     max_seqlen_q             Max sequence length used for computing for Q.
+ *                                          it may be >= max(seqlen_q_i) for i=0,...batch_size-1.
+ *  \param[in]     max_seqlen_kv            Max sequence length used for computing for K and V.
+ *                                          it may be >= max(seqlen_kv_i) for i=0,...batch_size-1.
+ *  \param[in]     is_training              Whether this is in training mode or inference.
+ *  \param[in]     attn_scale               Scaling factor for Q * K.T.
+ *  \param[in]     dropout                  Dropout probability.
+ *  \param[in]     qkv_layout               QKV tensors' layout.
+ *  \param[in]     bias_type                Bias type.
+ *  \param[in]     attn_mask_type           Attention mask type.
+ *  \param[in]     stream                   CUDA stream used for this operation.
+ */
+void nvte_fused_attn_fwd(
+            const NVTETensor Q,
+            const NVTETensor K,
+            const NVTETensor V,
+            const NVTETensor Bias,
+            NVTETensor S,
+            NVTETensor O,
+            NVTETensorPack* Aux_CTX_Tensors,
+            const NVTETensor cu_seqlens_q,
+            const NVTETensor cu_seqlens_kv,
+            const NVTETensor rng_state,
+            size_t max_seqlen_q, size_t max_seqlen_kv,
+            bool is_training, float attn_scale, float dropout,
+            NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+            NVTE_Mask_Type attn_mask_type,
+            cudaStream_t stream);
+
+/*! \brief Compute the backward of the dot product attention with separate Q, K and V.
+ *
+ * Support Matrix:
+   \verbatim
+   | backend | precision |                qkv layout                   |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
+   |   0     | FP16/BF16 |     BS3HD,SB3HD,BSHD_BS2HD,SBHD_SB2HD       |   NO/POST_SCALE_BIAS     | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   | <= 512, % 64 == 0 |    64            |
+   |   1     | FP16/BF16 |          BS3HD,SB3HD,BSH3D,SBH3D            | NO/POST_SCALE_BIAS/ALIBI | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   |  > 512, % 64 == 0 | <= 128, % 8 == 0 |
+   |         |           | BSHD_BS2HD,BSHD_BSH2D,SBHD_SB2HD,SBHD_SBH2D |                          |                                       |         |                   |                  |
+   |         |           |       BSHD_BSHD_BSHD,SBHD_SBHD_SBHD         |                          |                                       |         |                   |                  |
+   |   2     |   FP8     |                 T3HD                        |          NO_BIAS         |               PADDING_MASK            |   Yes   | <= 512, % 64 == 0 |    64            |
+   \endverbatim
+ *
+ *  \param[in]     Q                        The Q tensor.
+ *  \param[in]     K                        The K tensor.
+ *  \param[in]     V                        The V tensor.
+ *  \param[in]     O                        The O tensor from forward.
+ *  \param[in]     dO                       The gradient of the O tensor.
+ *  \param[in]     S                        The S tensor.
+ *  \param[in,out] dP                       The gradient of the P tensor.
+ *  \param[in]     Aux_CTX_Tensors          Auxiliary tensors from context when in training mode,
+ *                                          e.g. M, ZInv, rng_state.
+ *  \param[out]    dQ                       The gradient of the Q tensor.
+ *  \param[out]    dK                       The gradient of the K tensor.
+ *  \param[out]    dV                       The gradient of the V tensor.
+ *  \param[out]    dBias                    The gradient of the Bias tensor.
+ *  \param[in]     cu_seqlens_q             Cumulative sequence lengths for Q, [batch_size + 1].
+ *  \param[in]     cu_seqlens_kv            Cumulative sequence lengths for K and V, [batch_size + 1].
+ *  \param[in]     max_seqlen_q             Max sequence length used for computing for Q.
+ *                                          it may be >= max(seqlen_q_i) for i=0,...batch_size-1.
+ *  \param[in]     max_seqlen_kv            Max sequence length used for computing for K and V.
+ *                                          it may be >= max(seqlen_kv_i) for i=0,...batch_size-1.
+ *  \param[in]     attn_scale               Scaling factor for Q * K.T.
+ *  \param[in]     dropout                  Dropout probability.
+ *  \param[in]     qkv_layout               QKV tensors' layout.
+ *  \param[in]     bias_type                Bias type.
+ *  \param[in]     attn_mask_type           Attention mask type.
+ *  \param[in]     stream                   CUDA stream used for this operation.
+ */
+void nvte_fused_attn_bwd(
+            const NVTETensor Q,
+            const NVTETensor K,
+            const NVTETensor V,
+            const NVTETensor O,
+            const NVTETensor dO,
+            const NVTETensor S,
+            NVTETensor dP,
+            const NVTETensorPack* Aux_CTX_Tensors,
+            NVTETensor dQ,
+            NVTETensor dK,
+            NVTETensor dV,
+            NVTETensor dBias,
+            const NVTETensor cu_seqlens_q,
+            const NVTETensor cu_seqlens_kv,
+            size_t max_seqlen_q, size_t max_seqlen_kv,
+            float attn_scale, float dropout,
+            NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+            NVTE_Mask_Type attn_mask_type,
+            cudaStream_t stream);
+#endif
 #ifdef __cplusplus
 }  // extern "C"
 #endif

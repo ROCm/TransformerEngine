@@ -15,10 +15,10 @@ if(USE_CUDA)
        transpose/transpose_fusion.cu
        transpose/multi_cast_transpose.cu
        activation/gelu.cu
-       fused_attn/fused_attn_f16_max512_seqlen.cu
-       fused_attn/fused_attn_f16_arbitrary_seqlen.cu
        activation/relu.cu
        activation/swiglu.cu
+       fused_attn/fused_attn_f16_max512_seqlen.cu
+       fused_attn/fused_attn_f16_arbitrary_seqlen.cu
        fused_attn/fused_attn_fp8.cu
        fused_attn/fused_attn.cpp
        fused_attn/utils.cu
@@ -40,7 +40,7 @@ if(USE_CUDA)
        fused_rope/fused_rope.cu
        recipe/delayed_scaling.cu)
 else()
-  list(APPEND transformer_engine_SOURCES
+       list(APPEND transformer_engine_SOURCES
        transformer_engine.cpp
        transpose/cast_transpose.cu
        transpose/transpose.cu
@@ -50,6 +50,8 @@ else()
        activation/gelu.cu
        activation/relu.cu
        activation/swiglu.cu
+       fused_attn/fused_attn_f16_arbitrary_seqlen.cu
+       fused_attn/utils.cu
        gemm/cublaslt_gemm.cu
        layer_norm/ln_api.cpp
        layer_norm/ln_bwd_semi_cuda_kernel.cu
@@ -67,6 +69,12 @@ else()
        fused_softmax/scaled_aligned_causal_masked_softmax.cu
        fused_rope/fused_rope.cu
        recipe/delayed_scaling.cu)
+  file(GLOB_RECURSE CK_FA_FILES "fused_attn/*.cpp")
+  list(APPEND transformer_engine_SOURCES ${CK_FA_FILES})
+  message(STATUS "Found the following CK fused attention files:")
+  foreach(file ${CK_FA_FILES})
+    message(STATUS " ${file}")
+  endforeach()
 endif()
 
 if(USE_CUDA)
@@ -76,6 +84,16 @@ if(USE_CUDA)
   if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
       message(FATAL_ERROR
               "Could not find cuDNN frontend API. "
+              "Try running 'git submodule update --init --recursive' "
+              "within the Transformer Engine source.")
+  endif()
+else()
+  # Check for CK API
+  set(CK_INCLUDE_DIR
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/composable_kernel/include")
+  if(NOT EXISTS "${CK_INCLUDE_DIR}")
+      message(FATAL_ERROR
+              "Could not find CK API. "
               "Try running 'git submodule update --init --recursive' "
               "within the Transformer Engine source.")
   endif()
@@ -147,6 +165,7 @@ if(USE_CUDA)
   target_include_directories(transformer_engine PRIVATE
                              "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
 else()
+  target_include_directories(transformer_engine PRIVATE "${CK_INCLUDE_DIR}")
   make_string_header_from_file(utils_hip.cuh
                                string_code_utils_cuh)
   make_string_header_from_file(transpose/rtc/transpose.hip

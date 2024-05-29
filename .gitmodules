@@ -4,6 +4,7 @@
 [submodule "3rdparty/hipify_torch"]
 	path = 3rdparty/hipify_torch
 	url = https://github.com/ROCmSoftwarePlatform/hipify_torch.git
+	branch = ck_hipify
 [submodule "examples/pytorch/minGPT"]
 	path = examples/pytorch/minGPT
 	url = https://github.com/HaiShaw/minGPT.git
@@ -11,3 +12,7 @@
 [submodule "3rdparty/cudnn-frontend"]
 	path = 3rdparty/cudnn-frontend
 	url = https://github.com/NVIDIA/cudnn-frontend.git
+[submodule "3rdparty/composable_kernel"]
+	path = 3rdparty/composable_kernel
+	url = https://github.com/ROCm/composable_kernel.git
+	branch = ck_tile/fa_train

@@ -19,12 +19,12 @@ import sysconfig
 import tempfile
 from typing import List, Optional, Tuple, Union
 import setuptools
-from setuptools.command.build_ext import build_ext
 
 from te_version import te_version
 
 # Project directory root
 root_path: Path = Path(__file__).resolve().parent
+
 
 @lru_cache(maxsize=1)
 def frameworks() -> List[str]:
@@ -94,11 +94,9 @@ if ("pytorch" in frameworks()) and (importlib.util.find_spec("torch") is not Non
     use_rocm = True
 elif ("jax" in frameworks()) and (importlib.util.find_spec("jax") is not None):
   import jax
-  for dev in jax.devices():
-    if "rocm" in dev.client.platform_version:
-      use_cuda = False
-      use_rocm = True
-      break
+  if jax.lib.xla_bridge.get_backend().platform_version.split(maxsplit=1)[0] == "rocm":
+    use_cuda = False
+    use_rocm = True
 
 @lru_cache(maxsize=1)
 def with_debug_build() -> bool:
@@ -140,6 +138,7 @@ def found_cmake() -> bool:
     version = tuple(int(v) for v in version)
     return version >= (3, 18)
 
+
 def cmake_bin() -> Path:
     """Get CMake executable
 
@@ -171,9 +170,11 @@ def cmake_bin() -> Path:
         raise FileNotFoundError("Could not find CMake executable")
     return _cmake_bin
 
+
 def found_ninja() -> bool:
     """"Check if Ninja is available"""
     return shutil.which("ninja") is not None
+
 
 def found_pybind11() -> bool:
     """"Check if pybind11 is available"""
@@ -209,42 +210,63 @@ def found_pybind11() -> bool:
         return True
     return False
 
-if use_cuda:
-  def cuda_version() -> Tuple[int, ...]:
-      """CUDA Toolkit version as a (major, minor) tuple
+
+def cuda_version() -> Tuple[int, ...]:
+    """CUDA Toolkit version as a (major, minor) tuple
   
-      Throws FileNotFoundError if NVCC is not found.
+    Throws FileNotFoundError if NVCC is not found.
   
-      """
+    """
   
-      # Try finding NVCC
-      nvcc_bin: Optional[Path] = None
-      if nvcc_bin is None and os.getenv("CUDA_HOME"):
-          # Check in CUDA_HOME
-          cuda_home = Path(os.getenv("CUDA_HOME"))
-          nvcc_bin = cuda_home / "bin" / "nvcc"
-      if nvcc_bin is None:
-          # Check if nvcc is in path
-          nvcc_bin = shutil.which("nvcc")
-          if nvcc_bin is not None:
-              nvcc_bin = Path(nvcc_bin)
-      if nvcc_bin is None:
-          # Last-ditch guess in /usr/local/cuda
-          cuda_home = Path("/usr/local/cuda")
-          nvcc_bin = cuda_home / "bin" / "nvcc"
-      if not nvcc_bin.is_file():
-          raise FileNotFoundError(f"Could not find NVCC at {nvcc_bin}")
+    # Try finding NVCC
+    nvcc_bin: Optional[Path] = None
+    if nvcc_bin is None and os.getenv("CUDA_HOME"):
+        # Check in CUDA_HOME
+        cuda_home = Path(os.getenv("CUDA_HOME"))
+        nvcc_bin = cuda_home / "bin" / "nvcc"
+    if nvcc_bin is None:
+        # Check if nvcc is in path
+        nvcc_bin = shutil.which("nvcc")
+        if nvcc_bin is not None:
+            nvcc_bin = Path(nvcc_bin)
+    if nvcc_bin is None:
+        # Last-ditch guess in /usr/local/cuda
+        cuda_home = Path("/usr/local/cuda")
+        nvcc_bin = cuda_home / "bin" / "nvcc"
+    if not nvcc_bin.is_file():
+        raise FileNotFoundError(f"Could not find NVCC at {nvcc_bin}")
   
-      # Query NVCC for version info
-      output = subprocess.run(
-          [nvcc_bin, "-V"],
-          capture_output=True,
-          check=True,
-          universal_newlines=True,
-      )
-      match = re.search(r"release\s*([\d.]+)", output.stdout)
-      version = match.group(1).split('.')
-      return tuple(int(v) for v in version)
+    # Query NVCC for version info
+    output = subprocess.run(
+        [nvcc_bin, "-V"],
+        capture_output=True,
+        check=True,
+        universal_newlines=True,
+    )
+    match = re.search(r"release\s*([\d.]+)", output.stdout)
+    version = match.group(1).split('.')
+    return tuple(int(v) for v in version)
+
+
+def rocm_generate_ck_files():
+    fa_dir = root_path / "transformer_engine" / "common" / "fused_attn"
+    gen_py= fa_dir / "generate.py"
+    fwd_blob_txt = fa_dir / "fwd_blob_list.txt"
+    bwd_blob_txt = fa_dir / "bwd_blob_list.txt"
+    
+    fa_dir = str(fa_dir)
+    gen_py = str(gen_py)
+    fwd_blob_txt = str(fwd_blob_txt)
+    bwd_blob_txt = str(bwd_blob_txt) 
+
+    # Forward pass
+    subprocess.run(["python3", gen_py, "--list_blobs", fwd_blob_txt], check=True)
+    subprocess.run(["python3", gen_py, "-d", "fwd", "--output_dir", fa_dir], check=True)
+    
+    # Backward pass
+    subprocess.run(["python3", gen_py, "--list_blobs", bwd_blob_txt], check=True)
+    subprocess.run(["python3", gen_py, "-d", "bwd", "--output_dir", fa_dir], check=True)
+
 
 @lru_cache(maxsize=1)
 def with_userbuffers() -> bool:
@@ -285,19 +307,21 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
         add_unique(setup_reqs, "ninja")
 
     # Framework-specific requirements
-    if use_cuda:
-      if "pytorch" in frameworks():
-        add_unique(install_reqs, ["torch", "flash-attn>=2.0.6,<=2.4.2,!=2.0.9,!=2.1.0"])
-        add_unique(test_reqs, ["numpy", "onnxruntime", "torchvision"])
+    if "pytorch" in frameworks():
+        if use_cuda:
+            add_unique(install_reqs, ["torch", "flash-attn>=2.0.6,<=2.4.2,!=2.0.9,!=2.1.0"])
+            add_unique(test_reqs, ["numpy", "onnxruntime", "torchvision"])
+    
     if "jax" in frameworks():
         if not found_pybind11():
             add_unique(setup_reqs, "pybind11")
         if use_cuda:
-          add_unique(install_reqs, ["jax", "flax>=0.7.1"])
+            add_unique(install_reqs, ["jax", "flax>=0.7.1"])
         if use_rocm:
-          # assume jax is already installed on rocm machines
-          add_unique(install_reqs, ["flax>=0.7.1"])
+           # Assume jax is already installed on rocm machines
+           add_unique(install_reqs, ["flax>=0.7.1"])
         add_unique(test_reqs, ["numpy", "praxis"])
+
     if "paddle" in frameworks():
         add_unique(install_reqs, "paddlepaddle-gpu")
         add_unique(test_reqs, "numpy")
@@ -446,15 +470,19 @@ def setup_common_extension() -> CMakeExtension:
     Also builds JAX or userbuffers support if needed.
 
     """
+
     cmake_flags = []
     if use_rocm:
-      if os.getenv("NVTE_USE_HIPBLASLT") is not None:
-        cmake_flags.append("-DUSE_HIPBLASLT=ON")
+        if os.getenv("NVTE_USE_HIPBLASLT") is not None:
+            cmake_flags.append("-DUSE_HIPBLASLT=ON")
 
     if "jax" in frameworks():
         cmake_flags.append("-DENABLE_JAX=ON")
         if use_rocm:
-          cmake_flags.append("-DCMAKE_PREFIX_PATH=/opt/rocm")
+            rocm_generate_ck_files()
+            rocm_path = os.getenv("ROCM_PATH", "/opt/rocm")
+            cmake_flags.append(f"-DCMAKE_PREFIX_PATH={rocm_path}")
+
     if with_userbuffers():
         cmake_flags.append("-DNVTE_WITH_USERBUFFERS=ON")
     return CMakeExtension(
@@ -641,8 +669,8 @@ def setup_paddle_extension() -> setuptools.Extension:
     ext.name = "transformer_engine_paddle_pd_"
     return ext
 
-def main():
 
+def main():
     # Submodules to install
     packages = setuptools.find_packages(
         include=["transformer_engine", "transformer_engine.*"],

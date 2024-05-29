@@ -34,7 +34,6 @@ __global__ void populate_rng_state_kernel(int64_t *rng_state_dst, const int64_t 
     rng_state_dst[1] = offset;
 }
 
-#ifndef USE_ROCM
 void PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t q_max_seqlen,
                            size_t kv_max_seqlen, NVTE_Fused_Attn_Backend backend,
                            cudaStream_t stream) {
@@ -50,7 +49,6 @@ void PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t q
                                                    reinterpret_cast<const int64_t *>(seed), offset);
     NVTE_CHECK_CUDA(cudaGetLastError());
 }
-#endif
 
 }  // namespace jax
 }  // namespace transformer_engine

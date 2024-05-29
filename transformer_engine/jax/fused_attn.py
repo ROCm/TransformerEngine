@@ -14,8 +14,10 @@ from transformer_engine_jax import NVTE_Mask_Type
 from transformer_engine_jax import NVTE_QKV_Layout
 
 from .cpp_extensions import FusedAttnHelper
-from .cpp_extensions import cross_fused_attn_fwd, cross_fused_attn_bwd
-from .cpp_extensions import self_fused_attn_fwd, self_fused_attn_bwd
+from .util import is_hip_extension
+if not is_hip_extension():
+    from .cpp_extensions import cross_fused_attn_fwd, cross_fused_attn_bwd
+    from .cpp_extensions import self_fused_attn_fwd, self_fused_attn_bwd
 from .cpp_extensions import fused_attn_fwd, fused_attn_bwd
 
 
