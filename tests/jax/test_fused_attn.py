@@ -20,9 +20,7 @@ from jax import value_and_grad, jit
 from jax.typing import ArrayLike, DTypeLike
 
 from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType, QKVLayout
-
 from transformer_engine.jax.fused_attn import self_fused_attn, cross_fused_attn, fused_attn
-
 from transformer_engine.jax.fused_attn import is_fused_attn_kernel_available
 
 
@@ -379,4 +377,3 @@ class TestFusedAttn:
         runner = FusedAttnRunner(b, s_q, s_kv, h_q, h_kv, d, attn_bias_type, attn_mask_type,
                                  dropout_prob, dtype, is_training, qkv_layout)
         runner.test_backward()
-

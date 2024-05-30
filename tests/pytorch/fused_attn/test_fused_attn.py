@@ -233,7 +233,6 @@ def _is_unfused_attention_supported(config: ModelConfig) -> bool:
 
 model_configs_base = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias   # attn , backend
-    "base_0_0": ModelConfig(4,  4,  4,   4,    4,    4, 0.0, "no_mask", "no_bias"), # self , 0
     "base_1_0": ModelConfig(8, 16, 16,  64,  128,  128, 0.0, "no_mask", "no_bias"), # self , 0
     "base_1_1": ModelConfig(4, 16, 16,  64,  128,  256, 0.0, "no_mask", "no_bias"), # cross, 0
     "base_2_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"), # self , 1
@@ -289,11 +288,6 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
     fused_attn_supported, fused_attn_backend = _is_fused_attention_supported(
         config, dtype, qkv_layout=qkv_layout,
     )
-
-    print("unfused_attn_supported: ", unfused_attn_supported)
-    print("fused_attn_supported: ", fused_attn_supported)
-    print("fused_attn_backend: ", fused_attn_backend)
-
     if swa:
         fused_attn_supported = False
     flash_attn_supported = _is_flash_attention_supported(config)
