@@ -14,17 +14,17 @@
 
 #include <cuda_runtime_api.h>
 #ifdef __HIP_PLATFORM_AMD__
-#define ROCBLAS_BETA_FEATURES_API
-#include <rocblas/rocblas.h>
 #ifdef USE_HIPBLASLT
 #include <hipblaslt/hipblaslt.h>
+#else
+#define ROCBLAS_BETA_FEATURES_API
+#include <rocblas/rocblas.h>
 #endif // #ifdef USE_HIPBLASLT
-#include <hip/hiprtc.h>
 #else
 #include <cublas_v2.h>
 #include <cudnn.h>
-#include <nvrtc.h>
 #endif // __HIP_PLATFORM_AMD__
+#include <nvrtc.h>
 
 #include "../util/string.h"
 

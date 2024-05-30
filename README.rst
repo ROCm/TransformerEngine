@@ -51,7 +51,7 @@ Test
 ----
 
 Framework Agnostic C++ library unittests
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 After a successful Transformer Engine installation via `pip install`, execute the following commands to build and test the framework agnostic C++ library:
 
