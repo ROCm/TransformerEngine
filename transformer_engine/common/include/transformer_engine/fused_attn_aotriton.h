@@ -1,10 +1,10 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
-/*! \file fused_attn.h
+/*! \file fused_attn_aotriton.h
  *  \brief Enums and functions for fused attention.
  */
 
@@ -150,6 +150,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                 size_t max_seqlen_q, size_t max_seqlen_kv,
                 size_t head_dim);
 
+//TODO: add support matrix for aotriton fused attn
 /*! \brief Compute dot product attention with packed QKV input.
  *
  * Computes:
