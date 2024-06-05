@@ -21,22 +21,8 @@ from ..flax.transformer import DotProductAttention as flax_DotProductAttention
 from ..flax.transformer import MultiHeadAttention as flax_MultiHeadAttention
 from ..flax.transformer import RelativePositionBiases as flax_RelativePositionBiases
 from ..flax.transformer import TransformerLayer as flax_TransformerLayer
-from ..util import is_hip_extension
-if not is_hip_extension():
-    from ..fused_attn import AttnBiasType, AttnMaskType
-else:
-    class AttnBiasType(Enum):
-        """Attention Bias Type."""
-        NO_BIAS = "no_bias"
-        PRE_SCALE_BIAS = "pre_scale_bias"
-        POST_SCALE_BIAS = "post_scale_bias"
+from ..fused_attn import AttnBiasType, AttnMaskType
 
-    class AttnMaskType(Enum):
-        """Attention Mask Type."""
-        NO_MASK = "no_mask"
-        PADDING_MASK = "padding"
-        CAUSAL_MASK = "causal"
-        PADDING_CAUSAL_MASK = "padding_causal"
 
 class RelativePositionBiases(TransformerEngineBaseLayer):
     """RelativePositionBiases"""

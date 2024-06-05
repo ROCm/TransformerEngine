@@ -20,6 +20,15 @@
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
 #ifdef __HIP_PLATFORM_AMD__
+
+#define CHECK_HIP_ERROR(call)                                                                 \
+    do {                                                                                      \
+        hipError_t result = (call);                                                           \
+        if (result != hipSuccess) {                                                           \
+            throw std::runtime_error("HIP error: " + std::string(hipGetErrorString(result))); \
+        }                                                                                     \
+    } while (false)
+
 #define DISPATCH_BF16_AND_F16_TYPES(DATATYPE, NAME, ...)                       \
     switch (DATATYPE) {                                                        \
     case transformer_engine::DType::kBFloat16: {                               \
@@ -91,117 +100,122 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     ck_tile::stream_config stream_config{stream};
     if (bias_value == NVTE_Bias_Type::NVTE_NO_BIAS) {
         bias_type = bias_enum::no_bias;
+    } else if (bias_value == NVTE_Bias_Type::NVTE_ALIBI) {
+        bias_type = bias_enum::alibi;
     } else {
         NVTE_ERROR("Unsupported bias type");
     }
 
-   if (mask_value == NVTE_Mask_Type::NVTE_NO_MASK) {
+    if (mask_value == NVTE_Mask_Type::NVTE_NO_MASK) {
         mask_type = mask_enum::no_mask;
-    } else if (mask_value == NVTE_Mask_Type::NVTE_CAUSAL_MASK) {
+    } else if (mask_value == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+               mask_value == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) {
         mask_type = mask_enum::mask_top_left;
         left = -1;
         right = 0;
     } else {
-        mask_type = mask_enum::mask_bottom_right;
-        left = -1;
-        right = 0;
+        mask_type = mask_enum::no_mask;
     }
 
-    ck_tile::index_t shape_batch = batch;
-    ck_tile::index_t shape_seqlen_q = seqlen_q;
-    ck_tile::index_t shape_seqlen_k = seqlen_k;
-    RandValOutputDataType* devPtrRandVal = nullptr;
-    bool s_randval = false;
-    if (has_dropout) {
-        hipMalloc(&devPtrRandVal, sizeof(RandValOutputDataType) * shape_batch *
-                                      nhead * shape_seqlen_q * max_seqlen_k);
-    } else {
-        hipMalloc(&devPtrRandVal, sizeof(RandValOutputDataType));
+    try {
+        ck_tile::index_t shape_batch = batch;
+        ck_tile::index_t shape_seqlen_q = seqlen_q;
+        ck_tile::index_t shape_seqlen_k = seqlen_k;
+        RandValOutputDataType* devPtrRandVal = nullptr;
+        bool s_randval = false;
+        if (has_dropout) {
+            CHECK_HIP_ERROR(hipMalloc(&devPtrRandVal, sizeof(RandValOutputDataType) *
+                                shape_batch * nhead * shape_seqlen_q * max_seqlen_k));
+        } else {
+            CHECK_HIP_ERROR(hipMalloc(&devPtrRandVal, sizeof(RandValOutputDataType)));
+        }
+
+        auto fmha_traits = fmha_fwd_traits{
+            hdim_q,    hdim_v,    data_type, is_group_mode, is_v_rowmajor,
+            mask_type, bias_type, has_lse,   has_dropout,   do_fp8_static_quant};
+
+        auto fmha_args = [&]() {
+            // setup stride_* arguments
+            const ck_tile::index_t stride_q = nhead * hdim_q;
+            const ck_tile::index_t stride_k = nhead_k * hdim_q;
+            const ck_tile::index_t stride_v = nhead_k * hdim_v;
+            const ck_tile::index_t stride_bias = shape_seqlen_k;
+            const ck_tile::index_t stride_randval = max_seqlen_k;
+            const ck_tile::index_t stride_o = nhead * hdim_v;
+            // setup nhead_stride_* arguments
+            const ck_tile::index_t nhead_stride_q = hdim_q;
+            const ck_tile::index_t nhead_stride_k = hdim_q;
+            const ck_tile::index_t nhead_stride_v = hdim_v;
+            const ck_tile::index_t nhead_stride_bias = 0;
+            const ck_tile::index_t nhead_stride_randval =
+                shape_seqlen_q * max_seqlen_k;
+            const ck_tile::index_t nhead_stride_lse = shape_seqlen_q;
+            const ck_tile::index_t nhead_stride_o = hdim_v;
+            // setup batch_stride_* arguments
+            const ck_tile::index_t batch_stride_q = nhead * shape_seqlen_q * hdim_q;
+            const ck_tile::index_t batch_stride_k =
+                nhead_k * shape_seqlen_k * hdim_q;
+            const ck_tile::index_t batch_stride_v =
+                nhead_k * shape_seqlen_k * hdim_v;
+            const ck_tile::index_t batch_stride_bias = 0;
+            const ck_tile::index_t batch_stride_randval =
+                nhead * shape_seqlen_q * max_seqlen_k;
+            const ck_tile::index_t batch_stride_lse = nhead * shape_seqlen_q;
+            const ck_tile::index_t batch_stride_o = nhead * shape_seqlen_q * hdim_v;
+
+            return fmha_fwd_args{devPtrQ,
+                                 devPtrK,
+                                 devPtrV,
+                                 devPtrBias,
+                                 devPtrRandVal,
+                                 devPtrSoftmaxStats,
+                                 devPtrO,
+                                 devPtrCuSeqlensQ,
+                                 devPtrCuSeqlensKV,
+                                 nullptr, /* seqlen_k_ptr */
+                                 shape_seqlen_q,
+                                 shape_seqlen_k,
+                                 batch,
+                                 max_seqlen_q,
+                                 hdim_q,
+                                 hdim_v,
+                                 nhead,
+                                 nhead_k,
+                                 scale_s,
+                                 scale_p,
+                                 scale_o,
+                                 stride_q,
+                                 stride_k,
+                                 stride_v,
+                                 stride_bias,
+                                 stride_randval,
+                                 stride_o,
+                                 nhead_stride_q,
+                                 nhead_stride_k,
+                                 nhead_stride_v,
+                                 nhead_stride_bias,
+                                 nhead_stride_randval,
+                                 nhead_stride_lse,
+                                 nhead_stride_o,
+                                 batch_stride_q,
+                                 batch_stride_k,
+                                 batch_stride_v,
+                                 batch_stride_bias,
+                                 batch_stride_randval,
+                                 batch_stride_lse,
+                                 batch_stride_o,
+                                 left,
+                                 right,
+                                 static_cast<ck_tile::index_t>(mask_type),
+                                 p_drop,
+                                 s_randval,
+                                 {drop_seed, drop_offset}};
+        }();
+
+        fmha_fwd(fmha_traits, fmha_args, stream_config);
+    } catch (std::runtime_error &e) {
+        NVTE_ERROR(e.what());
     }
-
-    auto fmha_traits = fmha_fwd_traits{
-        hdim_q,    hdim_v,    data_type, is_group_mode, is_v_rowmajor,
-        mask_type, bias_type, has_lse,   has_dropout,   do_fp8_static_quant};
-
-    auto fmha_args = [&]() {
-        // setup stride_* arguments
-        const ck_tile::index_t stride_q = nhead * hdim_q;
-        const ck_tile::index_t stride_k = nhead_k * hdim_q;
-        const ck_tile::index_t stride_v = nhead_k * hdim_v;
-        const ck_tile::index_t stride_bias = shape_seqlen_k;
-        const ck_tile::index_t stride_randval = max_seqlen_k;
-        const ck_tile::index_t stride_o = nhead * hdim_v;
-        // setup nhead_stride_* arguments
-        const ck_tile::index_t nhead_stride_q = hdim_q;
-        const ck_tile::index_t nhead_stride_k = hdim_q;
-        const ck_tile::index_t nhead_stride_v = hdim_v;
-        const ck_tile::index_t nhead_stride_bias = 0;
-        const ck_tile::index_t nhead_stride_randval =
-            shape_seqlen_q * max_seqlen_k;
-        const ck_tile::index_t nhead_stride_lse = shape_seqlen_q;
-        const ck_tile::index_t nhead_stride_o = hdim_v;
-        // setup batch_stride_* arguments
-        const ck_tile::index_t batch_stride_q = nhead * shape_seqlen_q * hdim_q;
-        const ck_tile::index_t batch_stride_k =
-            nhead_k * shape_seqlen_k * hdim_q;
-        const ck_tile::index_t batch_stride_v =
-            nhead_k * shape_seqlen_k * hdim_v;
-        const ck_tile::index_t batch_stride_bias = 0;
-        const ck_tile::index_t batch_stride_randval =
-            nhead * shape_seqlen_q * max_seqlen_k;
-        const ck_tile::index_t batch_stride_lse = nhead * shape_seqlen_q;
-        const ck_tile::index_t batch_stride_o = nhead * shape_seqlen_q * hdim_v;
-
-        return fmha_fwd_args{devPtrQ,
-                             devPtrK,
-                             devPtrV,
-                             devPtrBias,
-                             devPtrRandVal,
-                             devPtrSoftmaxStats,
-                             devPtrO,
-                             devPtrCuSeqlensQ,
-                             devPtrCuSeqlensKV,
-                             nullptr, /* seqlen_k_ptr */
-                             shape_seqlen_q,
-                             shape_seqlen_k,
-                             batch,
-                             max_seqlen_q,
-                             hdim_q,
-                             hdim_v,
-                             nhead,
-                             nhead_k,
-                             scale_s,
-                             scale_p,
-                             scale_o,
-                             stride_q,
-                             stride_k,
-                             stride_v,
-                             stride_bias,
-                             stride_randval,
-                             stride_o,
-                             nhead_stride_q,
-                             nhead_stride_k,
-                             nhead_stride_v,
-                             nhead_stride_bias,
-                             nhead_stride_randval,
-                             nhead_stride_lse,
-                             nhead_stride_o,
-                             batch_stride_q,
-                             batch_stride_k,
-                             batch_stride_v,
-                             batch_stride_bias,
-                             batch_stride_randval,
-                             batch_stride_lse,
-                             batch_stride_o,
-                             left,
-                             right,
-                             static_cast<ck_tile::index_t>(mask_type),
-                             p_drop,
-                             s_randval,
-                             {drop_seed, drop_offset}};
-    }();
-
-    fmha_fwd(fmha_traits, fmha_args, stream_config);
 }
 
 template <typename DataType>
@@ -246,13 +260,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     ck_tile::index_t max_seqlen_q = s_q;
     ck_tile::index_t max_seqlen_k = s_kv;
     float scale_s = scaling_factor;
-    float scale_p = 1.f;
-    float scale_o = 1.f;
     float p_drop = dropout_probability;
     float p_undrop = 1.0 - p_drop;
     float rp_undrop = 1.0 / p_undrop;
     bool is_group_mode = false;
-    bool is_v_rowmajor = true;
     bool do_fp8_static_quant = false;
 
     bias_enum bias_type;
@@ -261,149 +272,147 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     ck_tile::stream_config stream_config{stream};
     if (bias_value == NVTE_Bias_Type::NVTE_NO_BIAS) {
         bias_type = bias_enum::no_bias;
+    } else if (bias_value == NVTE_Bias_Type::NVTE_ALIBI) {
+        bias_type = bias_enum::alibi;
     } else {
         NVTE_ERROR("Unsupported bias type");
     }
 
     if (mask_value == NVTE_Mask_Type::NVTE_NO_MASK) {
         mask_type = mask_enum::no_mask;
-    } else if (mask_value == NVTE_Mask_Type::NVTE_CAUSAL_MASK) {
+    } else if (mask_value == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+               mask_value == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) {
         mask_type = mask_enum::mask_top_left;
         left = -1;
         right = 0;
     } else {
-        mask_type = mask_enum::mask_bottom_right;
-        left = -1;
-        right = 0;
+        NVTE_ERROR("Unsupported mask type");
     }
 
-    ck_tile::index_t shape_batch = batch;
-    ck_tile::index_t shape_seqlen_q = seqlen_q;
-    ck_tile::index_t shape_seqlen_k = seqlen_k;
-    DDataType* devPtrD = nullptr;
-    RandValOutputDataType* devPtrRandVal = nullptr;
-    bool s_randval = false;
-    hipMalloc(&devPtrD, sizeof(DDataType) * batch * nhead * max_seqlen_q);
-    if (has_dropout) {
-        hipMalloc(&devPtrRandVal, sizeof(RandValOutputDataType) * shape_batch *
-                                      nhead * shape_seqlen_q * max_seqlen_k);
-    } else {
-        hipMalloc(&devPtrRandVal, sizeof(RandValOutputDataType));
+    try {
+        ck_tile::index_t shape_batch = batch;
+        ck_tile::index_t shape_seqlen_q = seqlen_q;
+        ck_tile::index_t shape_seqlen_k = seqlen_k;
+        DDataType* devPtrD = nullptr;
+        RandValOutputDataType* devPtrRandVal = nullptr;
+        bool s_randval = false;
+        CHECK_HIP_ERROR(hipMalloc(&devPtrD, sizeof(DDataType) * batch * nhead * max_seqlen_q));
+        if (has_dropout) {
+            CHECK_HIP_ERROR(hipMalloc(&devPtrRandVal, sizeof(RandValOutputDataType) *
+                                shape_batch * nhead * shape_seqlen_q * max_seqlen_k));
+        } else {
+            CHECK_HIP_ERROR(hipMalloc(&devPtrRandVal, sizeof(RandValOutputDataType)));
+        }
+        CHECK_HIP_ERROR(hipMemset(devPtrdQ, 0, sizeof(QGradDataType) *
+                            batch * max_seqlen_q * nhead * hdim_q));
+        auto fmha_traits =
+            fmha_bwd_traits{hdim_q,    hdim_v,    data_type, is_group_mode,
+                            mask_type, bias_type, has_dbias, has_dropout};
+
+        auto fmha_args = [&]() {
+            // setup stride_* arguments
+            const ck_tile::index_t stride_q = nhead * hdim_q;
+            const ck_tile::index_t stride_k = nhead_k * hdim_q;
+            const ck_tile::index_t stride_v = nhead_k * hdim_v;
+            const ck_tile::index_t stride_bias = max_seqlen_k;
+            const ck_tile::index_t stride_o = nhead * hdim_v;
+            const ck_tile::index_t stride_randval = max_seqlen_k;
+            const ck_tile::index_t stride_do = nhead * hdim_v;
+            const ck_tile::index_t stride_dk = nhead * hdim_q;
+            const ck_tile::index_t stride_dv = nhead * hdim_v;
+            const ck_tile::index_t stride_dbias = nhead * max_seqlen_k;
+            // setup nhead_stride_* arguments
+            const ck_tile::index_t nhead_stride_q = hdim_q;
+            const ck_tile::index_t nhead_stride_k = hdim_q;
+            const ck_tile::index_t nhead_stride_v = hdim_v;
+            const ck_tile::index_t nhead_stride_bias = 0;
+            const ck_tile::index_t nhead_stride_o = hdim_v;
+            const ck_tile::index_t nhead_stride_randval = shape_seqlen_q * max_seqlen_k;
+            const ck_tile::index_t nhead_stride_do = hdim_v;
+            const ck_tile::index_t nhead_stride_lsed = max_seqlen_q;
+            const ck_tile::index_t nhead_stride_dbias = max_seqlen_k;
+            // setup batch_stride_* arguments
+            const ck_tile::index_t batch_stride_q = nhead * shape_seqlen_q * hdim_q;
+            const ck_tile::index_t batch_stride_k = nhead_k * shape_seqlen_k * hdim_q;
+            const ck_tile::index_t batch_stride_v = nhead_k * shape_seqlen_k * hdim_v;
+            const ck_tile::index_t batch_stride_bias = 0;
+            const ck_tile::index_t batch_stride_o = nhead * shape_seqlen_q * hdim_v;
+            const ck_tile::index_t batch_stride_randval = nhead * shape_seqlen_q * max_seqlen_k;
+            const ck_tile::index_t batch_stride_do = nhead * shape_seqlen_q * hdim_v;
+            const ck_tile::index_t batch_stride_lsed = nhead * max_seqlen_q;
+            const ck_tile::index_t batch_stride_dk = nhead * shape_seqlen_k * hdim_q;
+            const ck_tile::index_t batch_stride_dv = nhead * shape_seqlen_k * hdim_v;
+            const ck_tile::index_t batch_stride_dbias = nhead * shape_seqlen_q * max_seqlen_k;
+
+            return fmha_bwd_args{devPtrQ,
+                                 devPtrKTranspose,
+                                 devPtrVTranspose,
+                                 devPtrBias,
+                                 devPtrO,
+                                 devPtrSoftmaxStats,
+                                 devPtrdO,
+                                 devPtrD,
+                                 devPtrRandVal,
+                                 devPtrdQ,
+                                 devPtrdK,
+                                 devPtrdV,
+                                 devPtrdBias,
+                                 devPtrCuSeqlensQ,
+                                 devPtrCuSeqlensKV,
+                                 nullptr, /* seqlen_k_ptr */
+                                 shape_seqlen_q,
+                                 shape_seqlen_k,
+                                 batch,
+                                 max_seqlen_q,
+                                 max_seqlen_k,
+                                 hdim_q,
+                                 hdim_v,
+                                 nhead,
+                                 nhead_k,
+                                 scale_s,
+                                 stride_q,
+                                 stride_k,
+                                 stride_v,
+                                 stride_bias,
+                                 stride_o,
+                                 stride_randval,
+                                 stride_do,
+                                 stride_dk,
+                                 stride_dv,
+                                 stride_dbias,
+                                 nhead_stride_q,
+                                 nhead_stride_k,
+                                 nhead_stride_v,
+                                 nhead_stride_bias,
+                                 nhead_stride_o,
+                                 nhead_stride_randval,
+                                 nhead_stride_do,
+                                 nhead_stride_lsed,
+                                 nhead_stride_dbias,
+                                 batch_stride_q,
+                                 batch_stride_k,
+                                 batch_stride_v,
+                                 batch_stride_bias,
+                                 batch_stride_o,
+                                 batch_stride_randval,
+                                 batch_stride_do,
+                                 batch_stride_lsed,
+                                 batch_stride_dk,
+                                 batch_stride_dv,
+                                 batch_stride_dbias,
+                                 left,
+                                 right,
+                                 static_cast<ck_tile::index_t>(mask_type),
+                                 p_drop,
+                                 p_undrop,
+                                 s_randval,
+                                 {drop_seed, drop_offset}};
+        }();
+
+        fmha_bwd(fmha_traits, fmha_args, stream_config);
+    } catch (std::runtime_error &e) {
+        NVTE_ERROR(e.what());
     }
-
-    auto fmha_traits =
-        fmha_bwd_traits{hdim_q,    hdim_v,    data_type, is_group_mode,
-                        mask_type, bias_type, has_dbias, has_dropout};
-
-    auto fmha_args = [&]() {
-        // setup stride_* arguments
-        const ck_tile::index_t stride_q = nhead * hdim_q;
-        const ck_tile::index_t stride_k = nhead_k * hdim_q;
-        const ck_tile::index_t stride_v = nhead_k * hdim_v;
-        const ck_tile::index_t stride_bias = max_seqlen_k;
-        const ck_tile::index_t stride_o = nhead * hdim_v;
-        const ck_tile::index_t stride_randval = max_seqlen_k;
-        const ck_tile::index_t stride_do = nhead * hdim_v;
-        const ck_tile::index_t stride_dk = nhead * hdim_q;
-        const ck_tile::index_t stride_dv = nhead * hdim_v;
-        const ck_tile::index_t stride_dbias = nhead * max_seqlen_k;
-        // setup nhead_stride_* arguments
-        const ck_tile::index_t nhead_stride_q = hdim_q;
-        const ck_tile::index_t nhead_stride_k = hdim_q;
-        const ck_tile::index_t nhead_stride_v = hdim_v;
-        const ck_tile::index_t nhead_stride_bias = 0;
-        const ck_tile::index_t nhead_stride_o = hdim_v;
-        const ck_tile::index_t nhead_stride_randval =
-            shape_seqlen_q * max_seqlen_k;
-        const ck_tile::index_t nhead_stride_do = hdim_v;
-        const ck_tile::index_t nhead_stride_lsed = max_seqlen_q;
-        const ck_tile::index_t nhead_stride_dbias = max_seqlen_k;
-        // setup batch_stride_* arguments
-        const ck_tile::index_t batch_stride_q = nhead * shape_seqlen_q * hdim_q;
-        const ck_tile::index_t batch_stride_k =
-            nhead_k * shape_seqlen_k * hdim_q;
-        const ck_tile::index_t batch_stride_v =
-            nhead_k * shape_seqlen_k * hdim_v;
-        const ck_tile::index_t batch_stride_bias = 0;
-        const ck_tile::index_t batch_stride_o = nhead * shape_seqlen_q * hdim_v;
-        const ck_tile::index_t batch_stride_randval =
-            nhead * shape_seqlen_q * max_seqlen_k;
-        const ck_tile::index_t batch_stride_do =
-            nhead * shape_seqlen_q * hdim_v;
-        const ck_tile::index_t batch_stride_lsed = nhead * max_seqlen_q;
-        const ck_tile::index_t batch_stride_dk =
-            nhead * shape_seqlen_k * hdim_q;
-        const ck_tile::index_t batch_stride_dv =
-            nhead * shape_seqlen_k * hdim_v;
-        const ck_tile::index_t batch_stride_dbias =
-            nhead * shape_seqlen_q * max_seqlen_k;
-
-        return fmha_bwd_args{devPtrQ,
-                             devPtrKTranspose,
-                             devPtrVTranspose,
-                             devPtrBias,
-                             devPtrO,
-                             devPtrSoftmaxStats,
-                             devPtrdO,
-                             devPtrD,
-                             devPtrRandVal,
-                             devPtrdQ,
-                             devPtrdK,
-                             devPtrdV,
-                             devPtrdBias,
-                             devPtrCuSeqlensQ,
-                             devPtrCuSeqlensKV,
-                             nullptr, /* seqlen_k_ptr */
-                             shape_seqlen_q,
-                             shape_seqlen_k,
-                             batch,
-                             max_seqlen_q,
-                             max_seqlen_k,
-                             hdim_q,
-                             hdim_v,
-                             nhead,
-                             nhead_k,
-                             scale_s,
-                             stride_q,
-                             stride_k,
-                             stride_v,
-                             stride_bias,
-                             stride_o,
-                             stride_randval,
-                             stride_do,
-                             stride_dk,
-                             stride_dv,
-                             stride_dbias,
-                             nhead_stride_q,
-                             nhead_stride_k,
-                             nhead_stride_v,
-                             nhead_stride_bias,
-                             nhead_stride_o,
-                             nhead_stride_randval,
-                             nhead_stride_do,
-                             nhead_stride_lsed,
-                             nhead_stride_dbias,
-                             batch_stride_q,
-                             batch_stride_k,
-                             batch_stride_v,
-                             batch_stride_bias,
-                             batch_stride_o,
-                             batch_stride_randval,
-                             batch_stride_do,
-                             batch_stride_lsed,
-                             batch_stride_dk,
-                             batch_stride_dv,
-                             batch_stride_dbias,
-                             left,
-                             right,
-                             static_cast<ck_tile::index_t>(mask_type),
-                             p_drop,
-                             p_undrop,
-                             s_randval,
-                             {drop_seed, drop_offset}};
-    }();
-
-    fmha_bwd(fmha_traits, fmha_args, stream_config);
 }
 } // namespace fused_attn
 
