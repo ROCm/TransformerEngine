@@ -50,6 +50,20 @@ void PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t q
                                                    reinterpret_cast<const int64_t *>(seed), offset);
     NVTE_CHECK_CUDA(cudaGetLastError());
 }
+#else
+void PopulateRngStateAsync(void *rng_state_dst, 
+                           const void *const seed,
+                           size_t batch_size, 
+                           size_t num_heads, 
+                           size_t q_max_seqlen, 
+                           size_t kv_max_seqlen,
+                           cudaStream_t stream) {
+    size_t increment = batch_size*num_heads*q_max_seqlen*kv_max_seqlen;
+    auto offset = FusedAttnOffsetManager::Instance().GetAndUpdateOffset(increment);
+    populate_rng_state_kernel<<<1, 1, 0, stream>>>(reinterpret_cast<int64_t *>(rng_state_dst),
+                                                   reinterpret_cast<const int64_t *>(seed), offset);
+    NVTE_CHECK_CUDA(cudaGetLastError());
+}
 #endif
 
 }  // namespace jax

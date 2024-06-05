@@ -1,12 +1,9 @@
-# This file was modified for portability to AMDGPU
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """
 Praxis Modules related Transformer
 """
-from enum import Enum
 from functools import partial
 from typing import Optional, Sequence, Tuple
 import warnings
@@ -21,22 +18,8 @@ from ..flax.transformer import DotProductAttention as flax_DotProductAttention
 from ..flax.transformer import MultiHeadAttention as flax_MultiHeadAttention
 from ..flax.transformer import RelativePositionBiases as flax_RelativePositionBiases
 from ..flax.transformer import TransformerLayer as flax_TransformerLayer
-from ..util import is_hip_extension
-if not is_hip_extension():
-    from ..fused_attn import AttnBiasType, AttnMaskType
-else:
-    class AttnBiasType(Enum):
-        """Attention Bias Type."""
-        NO_BIAS = "no_bias"
-        PRE_SCALE_BIAS = "pre_scale_bias"
-        POST_SCALE_BIAS = "post_scale_bias"
+from ..fused_attn import AttnBiasType, AttnMaskType
 
-    class AttnMaskType(Enum):
-        """Attention Mask Type."""
-        NO_MASK = "no_mask"
-        PADDING_MASK = "padding"
-        CAUSAL_MASK = "causal"
-        PADDING_CAUSAL_MASK = "padding_causal"
 
 class RelativePositionBiases(TransformerEngineBaseLayer):
     """RelativePositionBiases"""

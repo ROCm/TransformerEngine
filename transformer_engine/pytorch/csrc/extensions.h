@@ -15,8 +15,6 @@
  * Attention
  **************************************************************************************************/
 
-//TODO: support fused attn and flash attn for ROCm
-#ifndef USE_ROCM
 NVTE_Fused_Attn_Backend get_fused_attn_backend(
                 const transformer_engine::DType q_dtype,
                 const transformer_engine::DType kv_dtype,
@@ -160,7 +158,6 @@ std::vector<at::Tensor> fused_attn_bwd(
 
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
-#endif
 
 /***************************************************************************************************
  * GEMM

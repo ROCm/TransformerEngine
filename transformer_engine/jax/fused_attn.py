@@ -47,12 +47,17 @@ def canonicalize_attn_mask_type(attn_mask_type: str):
     The overhead between padding and non-padding version should be small.
     However, we will lease this limitation in the near feature.
     """
-    if attn_mask_type in ['causal', 'padding_causal']:
-        return AttnMaskType.PADDING_CAUSAL_MASK
-    if attn_mask_type in ['no_mask', 'padding']:
-        return AttnMaskType.PADDING_MASK
-    raise ValueError(f"Unsupported {attn_mask_type=}, "
-                     "supported attn_mask_type={'no_mask', 'padding', 'causal', 'padding_causal'}")
+    match attn_mask_type:
+        case 'no_mask':
+            return AttnMaskType.NO_MASK
+        case 'padding':
+            return AttnMaskType.PADDING_MASK
+        case 'causal':
+            return AttnMaskType.CAUSAL_MASK
+        case 'padding_causal' | 'causal_padding':
+            return AttnMaskType.PADDING_CAUSAL_MASK
+    raise ValueError(f"Unsupported {attn_mask_type=}, supported attn_mask_type="
+                     "{'no_mask', 'padding', 'causal', 'padding_causal', 'causal_padding'}")
 
 
 def is_fused_attn_kernel_available(q_type, kv_type, qkv_layout, attn_bias_type, attn_mask_type,

@@ -56,7 +56,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("cast_to_fp8_noalloc", &cast_to_fp8_noalloc, "Cast to FP8");
   m.def("cast_from_fp8", &cast_from_fp8, "Cast from FP8");
   m.def("te_gemm", &te_gemm, "CublasLt GEMM");
-#ifndef USE_ROCM
   m.def("fused_attn_fwd_qkvpacked", &fused_attn_fwd_qkvpacked,
                   "Fused Attention FP8/BF16/FP16 FWD with packed QKV");
   m.def("fused_attn_bwd_qkvpacked", &fused_attn_bwd_qkvpacked,
@@ -69,10 +68,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                   "Fused Attention FP8/BF16/FP16 FWD with separate Q, K and V");
   m.def("fused_attn_bwd", &fused_attn_bwd,
                   "Fused Attention FP8/BF16/FP16 BWD with separate Q, K and V");
+#ifndef USE_ROCM
   m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention");
   m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention");
-  m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend");
 #endif
+  m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend");
   m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O");
   m.def("gelu", &gelu, "GeLU with FP8 output");
   m.def("relu", &relu, "ReLU with FP8 output");
@@ -169,7 +169,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .value("GRAD_OUTPUT3", transformer_engine::FP8BwdTensors::GRAD_OUTPUT3)
     .value("GRAD_INPUT3", transformer_engine::FP8BwdTensors::GRAD_INPUT3);
 
-#ifndef USE_ROCM
   py::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type")
       .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)
       .value("NVTE_PRE_SCALE_BIAS", NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS)
@@ -199,10 +198,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .value("NVTE_THD_TH2D", NVTE_QKV_Layout::NVTE_THD_TH2D)
       .value("NVTE_THD_THD_THD", NVTE_QKV_Layout::NVTE_THD_THD_THD);
 
+#ifndef USE_ROCM
   py::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend")
       .value("NVTE_F16_max512_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen)
       .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)
       .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8)
+      .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend);
+#else
+  py::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend")
+      .value("NVTE_AOTriton", NVTE_Fused_Attn_Backend::NVTE_AOTriton)
       .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend);
 #endif
 }

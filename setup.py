@@ -476,21 +476,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
         src_dir / "common.cu",
         src_dir / "ts_fp8_op.cpp",
     ]
-    if use_rocm:
-      sources.extend([ 
-        extensions_dir/"transpose.cu",
-        extensions_dir/"softmax.cu",
-        extensions_dir/"recipe.cu",
-        extensions_dir/"normalization.cu",
-        extensions_dir/"misc.cu",
-        extensions_dir/"gemm.cu",
-        extensions_dir/"cast.cu",
-        extensions_dir/"activation.cu",
-        extensions_dir/"apply_rope.cu",
-        extensions_dir/"pybind.cpp",
-      ])
-    if use_cuda:
-      sources.extend(_all_files_in_dir(extensions_dir))
+    sources.extend(_all_files_in_dir(extensions_dir))
 
     # Header files
     if use_rocm:
@@ -513,12 +499,12 @@ def setup_pytorch_extension() -> setuptools.Extension:
       cxx_flags.extend(['-D__HIP_PLATFORM_AMD__=1'])
       nvcc_flags = [
           "-O3",
-          "-U__CUDA_NO_HALF_OPERATORS__",
-          "-U__CUDA_NO_HALF_CONVERSIONS__",
-          "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-          "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-          "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-          "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+          "-U__HIP_NO_HALF_OPERATORS__",
+          "-U__HIP_NO_HALF_CONVERSIONS__",
+          "-U__HIP_NO_BFLOAT16_OPERATORS__",
+          "-U__HIP_NO_BFLOAT16_CONVERSIONS__",
+          "-U__HIP_NO_BFLOAT162_OPERATORS__",
+          "-U__HIP_NO_BFLOAT162_CONVERSIONS__",
       ]
     if use_cuda:
       nvcc_flags = [

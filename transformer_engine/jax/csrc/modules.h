@@ -18,9 +18,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
-#ifndef USE_ROCM
 #include "transformer_engine/fused_attn.h"
-#endif
 #include "common/util/logging.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -108,7 +106,6 @@ pybind11::bytes PackCustomCallSoftmaxDescriptor(size_t batch_size, size_t paddin
                                                 size_t head_dim, size_t q_seqlen, size_t k_seqlen,
                                                 DType dtype, float scale_factor);
 
-#ifndef USE_ROCM
 struct CustomCallFusedAttnDescriptor {
     size_t batch_size;
     size_t q_max_seqlen;
@@ -138,7 +135,6 @@ NVTE_Fused_Attn_Backend GetFusedAttnBackend(DType q_dtype, DType kv_dtype,
                                             size_t q_num_heads, size_t kv_num_heads,
                                             size_t q_max_seqlen, size_t kv_max_seqlen,
                                             size_t head_dim);
-#endif
 
 void Transpose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
@@ -210,7 +206,6 @@ void ScaledUpperTriangMaskedSoftmaxForward(cudaStream_t stream, void **buffers, 
 void ScaledUpperTriangMaskedSoftmaxBackward(cudaStream_t stream, void **buffers, const char *opaque,
                                             std::size_t opaque_len);
 
-#ifndef USE_ROCM
 pybind11::tuple GetSelfFusedAttnForwardWorkspaceSizes(
     size_t batch_size, size_t max_seqlen, size_t num_heads, size_t head_dim, float scaling_factor,
     float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype,
@@ -257,7 +252,6 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
 
 void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
-#endif //#ifndef USE_ROCM
 }  // namespace jax
 }  // namespace transformer_engine
 

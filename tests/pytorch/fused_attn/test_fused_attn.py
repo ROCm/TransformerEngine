@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -7,6 +9,7 @@ from importlib.metadata import version
 import os
 import math
 from typing import Any, Dict, List, Tuple, Union
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from pkg_resources import packaging
 import pytest
@@ -63,13 +66,15 @@ def reset_rng_states() -> None:
     torch.set_rng_state(_cpu_rng_state)
     _set_cuda_rng_state(_cuda_rng_state)
 
-@functools.cache
-def _cudnn_version() -> Tuple[int, int, int]:
-    """Runtime cuDNN version (major, minor, patch)"""
-    encoded_version = ext.get_cudnn_version()
-    major, encoded_version = divmod(encoded_version, 1000)
-    minor, patch = divmod(encoded_version, 100)
-    return (major, minor, patch)
+# ROCm fused attn from aotrition integrated does not use cudnn
+if not IS_HIP_EXTENSION:
+    @functools.cache
+    def _cudnn_version() -> Tuple[int, int, int]:
+        """Runtime cuDNN version (major, minor, patch)"""
+        encoded_version = ext.get_cudnn_version()
+        major, encoded_version = divmod(encoded_version, 1000)
+        minor, patch = divmod(encoded_version, 100)
+        return (major, minor, patch)
 
 class ModelConfig:
     def __init__(
@@ -101,36 +106,15 @@ class ModelConfig:
         self.attn_type  = "self" if (max_seqlen_q == max_seqlen_kv) else "cross"
         self.num_layers = num_layers
 
-def _is_fused_attention_supported(
-    config: ModelConfig,
-    dtype: torch.dtype,
-    qkv_layout: str = "sbh3d",
-) -> Tuple[bool, NVTE_Fused_Attn_Backend]:
-    """Check if FusedAttention supports a model configuration"""
-    backends = []
-    os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
-    backend = tex.get_fused_attn_backend(
-        TE_DType[dtype],
-        TE_DType[dtype],
-        QKVLayout[qkv_layout],
-        AttnBiasType[config.attn_bias_type],
-        AttnMaskType[config.attn_mask_type],
-        config.dropout_p,
-        config.num_heads,
-        config.num_gqa_groups,
-        config.max_seqlen_q,
-        config.max_seqlen_kv,
-        config.head_dim,
-    )
-    if backend == FusedAttnBackend["FP8"]:
-        backends.append(backend)
-        return True, backends
-    if backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
-        backends.append(backend)
-        return True, backends
-    if backend == FusedAttnBackend["F16_max512_seqlen"]:
-        backends.append(backend)
-        os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
+if not IS_HIP_EXTENSION:
+    def _is_fused_attention_supported(
+        config: ModelConfig,
+        dtype: torch.dtype,
+        qkv_layout: str = "sbh3d",
+    ) -> Tuple[bool, NVTE_Fused_Attn_Backend]:
+        """Check if FusedAttention supports a model configuration"""
+        backends = []
+        os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
         backend = tex.get_fused_attn_backend(
             TE_DType[dtype],
             TE_DType[dtype],
@@ -144,43 +128,100 @@ def _is_fused_attention_supported(
             config.max_seqlen_kv,
             config.head_dim,
         )
+        if backend == FusedAttnBackend["FP8"]:
+            backends.append(backend)
+            return True, backends
         if backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
             backends.append(backend)
-        return True, backends
-    return False, backends
+            return True, backends
+        if backend == FusedAttnBackend["F16_max512_seqlen"]:
+            backends.append(backend)
+            os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
+            backend = tex.get_fused_attn_backend(
+                TE_DType[dtype],
+                TE_DType[dtype],
+                QKVLayout[qkv_layout],
+                AttnBiasType[config.attn_bias_type],
+                AttnMaskType[config.attn_mask_type],
+                config.dropout_p,
+                config.num_heads,
+                config.num_gqa_groups,
+                config.max_seqlen_q,
+                config.max_seqlen_kv,
+                config.head_dim,
+            )
+            if backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
+                backends.append(backend)
+            return True, backends
+        return False, backends
+else:
+    def _is_fused_attention_supported(
+        config: ModelConfig,
+        dtype: torch.dtype,
+        qkv_layout: str = "sbh3d",
+    ) -> Tuple[bool, NVTE_Fused_Attn_Backend]:
+        backend = tex.get_fused_attn_backend(
+            TE_DType[dtype],
+            TE_DType[dtype],
+            QKVLayout[qkv_layout],
+            AttnBiasType[config.attn_bias_type],
+            AttnMaskType[config.attn_mask_type],
+            config.dropout_p,
+            config.num_heads,
+            config.num_gqa_groups,
+            config.max_seqlen_q,
+            config.max_seqlen_kv,
+            config.head_dim,
+        )
+        if backend != FusedAttnBackend["No_Backend"]:
+            return True, [backend]
+        else:
+            return False, []
 
 @functools.cache
 def _is_flash_attention_2_available() -> bool:
     """Check if flash-attn 2.0+ is available"""
-    Version = packaging.version.Version
-    return Version(version("flash-attn")) >= Version("2")
+    if not IS_HIP_EXTENSION:
+        Version = packaging.version.Version
+        return Version(version("flash-attn")) >= Version("2")
+    else:
+        return False
 
 @functools.cache
 def _is_flash_attention_2_1() -> bool:
     """Check if flash-attn 2.1+ is available"""
-    Version = packaging.version.Version
-    return Version(version("flash-attn")) >= Version("2.1")
+    if not IS_HIP_EXTENSION:
+        Version = packaging.version.Version
+        return Version(version("flash-attn")) >= Version("2.1")
+    else:
+        return False
 
 @functools.cache
 def _is_flash_attention_2_3() -> bool:
     """Check if flash-attn 2.3+ is available"""
-    Version = packaging.version.Version
-    return Version(version("flash-attn")) >= Version("2.3")
+    if not IS_HIP_EXTENSION:
+        Version = packaging.version.Version
+        return Version(version("flash-attn")) >= Version("2.3")
+    else:
+        return False
 
 def _is_flash_attention_supported(config: ModelConfig) -> bool:
     """Check if FlashAttention supports a model configuration"""
-    if get_device_compute_capability() < (8, 0):
-        return False
-    if config.attn_bias_type not in ["no_bias", "alibi"]:
-        return False
-    if config.num_heads != config.num_gqa_groups and not _is_flash_attention_2_available():
-        return False
-    if "causal" in config.attn_mask_type and config.attn_type == "cross":
-        if _is_flash_attention_2_1():
-            # FAv2.1 implements causal mask for cross attention differently
-            # https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag
+    if not IS_HIP_EXTENSION:
+        if get_device_compute_capability() < (8, 0):
             return False
-    return True
+        if config.attn_bias_type not in ["no_bias", "alibi"]:
+            return False
+        if config.num_heads != config.num_gqa_groups and not _is_flash_attention_2_available():
+            return False
+        if "causal" in config.attn_mask_type and config.attn_type == "cross":
+            if _is_flash_attention_2_1():
+                # FAv2.1 implements causal mask for cross attention differently
+                # https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag
+                return False
+        return True
+    else:
+        return False
 
 def _is_unfused_attention_supported(config: ModelConfig) -> bool:
     """Check if UnfusedDotProductAttention supports a model configuration"""
@@ -214,7 +255,7 @@ def get_swa(seq_q, seq_kv, w=None):
     ml = ~ ml
     return w, ml
 
-@pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.skipif(False if IS_HIP_EXTENSION else _cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required in NVTE.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_base])
 @pytest.mark.parametrize("model", model_configs_base.keys())
@@ -239,11 +280,11 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
         pytest.skip(
             "No need to test this layout for cross attention"
         )
-
     # Skip if only unfused backend is supported
     unfused_attn_supported = _is_unfused_attention_supported(config)
-    if config.max_seqlen_q <= 512 and config.max_seqlen_kv <= 512:
-        os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
+    if not IS_HIP_EXTENSION:
+        if config.max_seqlen_q <= 512 and config.max_seqlen_kv <= 512:
+            os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
     fused_attn_supported, fused_attn_backend = _is_fused_attention_supported(
         config, dtype, qkv_layout=qkv_layout,
     )
@@ -311,7 +352,7 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
         for i,_ in enumerate(fused_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], fused_attn_bwd_1[i], **tols)
 
-@pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.skipif(False if IS_HIP_EXTENSION else _cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required in NVTE.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_base])
 @pytest.mark.parametrize("model", ["base_1_1", "base_2_1"])
@@ -335,7 +376,7 @@ model_configs_mask = {
     "mask_6_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
 }
 
-@pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.skipif(False if IS_HIP_EXTENSION else _cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required in NVTE.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_mask])
 @pytest.mark.parametrize("model", model_configs_mask.keys())
@@ -371,7 +412,7 @@ model_configs_bias = {
     "bias_4_5": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal",           "alibi"), # skipped
 }
 
-@pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.skipif(False if IS_HIP_EXTENSION else _cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required in NVTE.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_bias])
 @pytest.mark.parametrize("model", model_configs_bias.keys())
@@ -428,7 +469,7 @@ model_configs_layout = {
     "layout_1_3": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "post_scale_bias"),
 }
 
-@pytest.mark.skipif(_cudnn_version() < (8,9,5), reason="cuDNN 8.9.5+ is required.")
+@pytest.mark.skipif(False if IS_HIP_EXTENSION else _cudnn_version() < (8,9,5), reason="cuDNN 8.9.5+ is required in NVTE.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_layout])
 @pytest.mark.parametrize("model", model_configs_layout.keys())
@@ -623,7 +664,7 @@ model_configs_te_layer = {
     "te_3_1": ModelConfig(4, 16, 16,  64, 2048, 2048, 0.0,  "causal",           "alibi"),
 }
 
-@pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.skipif(False if IS_HIP_EXTENSION else _cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required in NVTE.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_te_layer])
 @pytest.mark.parametrize("model", model_configs_te_layer.keys())
@@ -707,7 +748,7 @@ def test_transformer_layer(dtype, model_configs, model, ckpt_attn, qkv_format, f
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         torch.testing.assert_close(fused_attn_bwd, flash_attn_bwd, **tols)
 
-@pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.skipif(False if IS_HIP_EXTENSION else _cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required in NVTE.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_te_layer])
 @pytest.mark.parametrize("model", ["te_1_2", "te_2_0"])
@@ -720,7 +761,7 @@ def test_te_layer_misc(dtype, model_configs, model, qkv_format):
     test_transformer_layer(dtype, model_configs, model,
             ckpt_attn, qkv_format, fused_qkv_params, RoPE)
 
-@pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.skipif(False if IS_HIP_EXTENSION else _cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required in NVTE.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_te_layer])
 @pytest.mark.parametrize("model", ["te_2_0", "te_2_1", "te_2_2"])
@@ -879,7 +920,7 @@ model_configs_fp8 = {
 }
 param_types_fp8 = [torch.float16]
 
-@pytest.mark.skipif(_cudnn_version() < (8,9,3), reason="cuDNN 8.9.3+ is required.")
+@pytest.mark.skipif(False if IS_HIP_EXTENSION else _cudnn_version() < (8,9,3), reason="cuDNN 8.9.3+ is required in NVTE.")
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.skipif(get_device_compute_capability() != (9, 0), reason="FP8 tests require Hopper.")
 @pytest.mark.parametrize("dtype", param_types_fp8)
