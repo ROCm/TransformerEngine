@@ -353,7 +353,7 @@ public:
     d[device_id].push_front(h);
   }
 
-  void store(std::vector<hipblasLtHandle_t> h)
+  void store(const std::vector<hipblasLtHandle_t>& h)
   {
     std::lock_guard<std::mutex> lock(mt);
     if (d.empty())
