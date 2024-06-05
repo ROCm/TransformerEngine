@@ -10,10 +10,8 @@
 
 #ifndef USE_ROCM
 #include <cublasLt.h>
-#include "transformer_engine/fused_attn.h"
-#else
-#include "transformer_engine/fused_attn_aotriton.h"
 #endif
+#include "transformer_engine/fused_attn.h"
 #include "transformer_engine/transformer_engine.h"
 #include "modules.h"
 #include "utils.h"

@@ -1,10 +1,10 @@
 /*************************************************************************
  * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
  *
- * See LICENSE for license information.
+ * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
-#include "transformer_engine/fused_attn_aotriton.h"
+#include "transformer_engine/fused_attn.h"
 #include "../common.h"
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
@@ -380,6 +380,7 @@ void fused_attn_fwd_impl(
   
   //devPtrDropoutSeed and devPtrDropoutOffset are actually device ptrs
   uint64_t philox_seed, philox_offset;
+  cudaStreamSynchronize(stream);
   cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
   cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
 
@@ -477,7 +478,7 @@ void fused_attn_bwd_impl(
   auto wkspace_tensor = aotriton::TensorView<2>(reinterpret_cast<intptr_t>(workspace), m_shape, m_stride, aotriton::DType::kFloat32);
 
   uint64_t philox_seed, philox_offset;
-
+  cudaStreamSynchronize(stream);
   cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
   cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
   bool nvte_log_aotriton_config = false;

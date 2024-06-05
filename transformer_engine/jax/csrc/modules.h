@@ -18,11 +18,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
-#ifndef USE_ROCM
 #include "transformer_engine/fused_attn.h"
-#else
-#include "transformer_engine/fused_attn_aotriton.h"
-#endif
 #include "common/util/logging.h"
 #include "transformer_engine/transformer_engine.h"
 

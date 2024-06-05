@@ -40,11 +40,7 @@
 #include "common/util/logging.h"
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
-#ifndef USE_ROCM
 #include <transformer_engine/fused_attn.h>
-#else
-#include <transformer_engine/fused_attn_aotriton.h>
-#endif
 #include <transformer_engine/fused_rope.h>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/layer_norm.h>
