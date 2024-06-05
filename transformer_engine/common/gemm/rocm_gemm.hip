@@ -356,7 +356,15 @@ public:
   void store(std::vector<hipblasLtHandle_t> h)
   {
     std::lock_guard<std::mutex> lock(mt);
-    for (size_t i=0; i<d.size(); i++)
+    if (d.empty())
+    {
+      // In case of non-graceful application exit
+      // the pool may be destructed before all per-thread HandleCache
+      // Just drop handles then
+      std::cout << "[ERROR] Attempt to store handles to invalid pool" << std::endl;
+      return;
+    }
+    for (unsigned int i=0; i<d.size(); i++)
     {
       if (h[i] != nullptr)
       {
@@ -366,6 +374,7 @@ public:
   }
 
   ~HandlePool() {
+    std::lock_guard<std::mutex> lock(mt);
     for (auto & hlist : d)
     {
       for (auto & h : hlist)
@@ -373,6 +382,7 @@ public:
         hipblasLtDestroy(h);
       }
     }
+    d.clear();
   }
 
   inline size_t get_size() const
@@ -385,7 +395,7 @@ private:
   std::vector<std::forward_list<hipblasLtHandle_t>> d;
 } handle_pool;
 
-thread_local class HandleCache {
+thread_local static class HandleCache {
 public:
   hipblasLtHandle_t get(int device_id) const
   {
