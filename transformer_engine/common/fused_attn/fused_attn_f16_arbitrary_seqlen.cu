@@ -114,7 +114,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         left = -1;
         right = 0;
     } else {
-        mask_type = mask_enum::no_mask;
+        NVTE_ERROR("Unsupported mask type");
     }
 
     try {
@@ -123,12 +123,6 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         ck_tile::index_t shape_seqlen_k = seqlen_k;
         RandValOutputDataType* devPtrRandVal = nullptr;
         bool s_randval = false;
-        if (has_dropout) {
-            CHECK_HIP_ERROR(hipMalloc(&devPtrRandVal, sizeof(RandValOutputDataType) *
-                                shape_batch * nhead * shape_seqlen_q * max_seqlen_k));
-        } else {
-            CHECK_HIP_ERROR(hipMalloc(&devPtrRandVal, sizeof(RandValOutputDataType)));
-        }
 
         auto fmha_traits = fmha_fwd_traits{
             hdim_q,    hdim_v,    data_type, is_group_mode, is_v_rowmajor,
@@ -218,6 +212,50 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     }
 }
 
+template<typename DataType>
+__global__ void reduce_num_heads(
+    const DataType* input,
+    DataType* output,
+    int batch, int seqlen_k, int nhead_k, int group_size, int hdim) {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int h = index % nhead_k;
+    int n = (index / nhead_k) % seqlen_k;
+    int b = (index / (seqlen_k * nhead_k)) % batch;
+
+    if (index < batch * seqlen_k * nhead_k) {
+        for (int k = 0; k < hdim; ++k) {
+            DataType sum = 0.0;
+            for (int i = 0; i < group_size; ++i) {
+                sum += input[((b * seqlen_k + n) * nhead_k + h) * group_size * hdim + i * hdim + k];
+            }
+            output[(b * seqlen_k + n) * nhead_k * hdim + h * hdim + k] = sum;
+        }
+    }
+}
+
+template<>
+__global__ void reduce_num_heads<ck_tile::bf16_t>(
+    const ck_tile::bf16_t* input,
+    ck_tile::bf16_t* output,
+    int batch, int seqlen_k, int nhead_k, int group_size, int hdim) {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int h = index % nhead_k;
+    int n = (index / nhead_k) % seqlen_k;
+    int b = (index / (seqlen_k * nhead_k)) % batch;
+
+    if (index < batch * seqlen_k * nhead_k) {
+        for (int k = 0; k < hdim; ++k) {
+            float sum = 0.f;
+            for (int i = 0; i < group_size; ++i) {
+                sum = sum + ck_tile::bf16_to_float(input[((b * seqlen_k + n) * nhead_k + h) * group_size * hdim + i * hdim + k]);
+            }
+            output[(b * seqlen_k + n) * nhead_k * hdim + h * hdim + k] = ck_tile::float_to_bf16(sum);
+        }
+    }
+}
+
 template <typename DataType>
 void fused_attn_arbitrary_seqlen_bwd_impl(
     int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d,
@@ -246,6 +284,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     using VGradDataType = typename TypeConfig::VGradDataType;
     using BiasGradDataType = typename TypeConfig::BiasGradDataType;
 
+    bool is_mqa_gqa = (h > hg);
     bool has_dropout = (dropout_probability > 0.f);
     bool has_dbias = (devPtrdBias != nullptr);
 
@@ -293,16 +332,21 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         ck_tile::index_t shape_batch = batch;
         ck_tile::index_t shape_seqlen_q = seqlen_q;
         ck_tile::index_t shape_seqlen_k = seqlen_k;
+        KGradDataType* devPtrdKBuffer = nullptr;
+        VGradDataType* devPtrdVBuffer = nullptr;
         DDataType* devPtrD = nullptr;
         RandValOutputDataType* devPtrRandVal = nullptr;
         bool s_randval = false;
-        CHECK_HIP_ERROR(hipMalloc(&devPtrD, sizeof(DDataType) * batch * nhead * max_seqlen_q));
-        if (has_dropout) {
-            CHECK_HIP_ERROR(hipMalloc(&devPtrRandVal, sizeof(RandValOutputDataType) *
-                                shape_batch * nhead * shape_seqlen_q * max_seqlen_k));
+        if (is_mqa_gqa) {
+            CHECK_HIP_ERROR(hipMalloc(&devPtrdKBuffer, sizeof(KGradDataType) *
+                                batch * nhead * shape_seqlen_k * hdim_q));
+            CHECK_HIP_ERROR(hipMalloc(&devPtrdVBuffer, sizeof(VGradDataType) *
+                                batch * nhead * shape_seqlen_k * hdim_v));
         } else {
-            CHECK_HIP_ERROR(hipMalloc(&devPtrRandVal, sizeof(RandValOutputDataType)));
+            devPtrdKBuffer = static_cast<KGradDataType*>(devPtrdK);
+            devPtrdVBuffer = static_cast<VGradDataType*>(devPtrdV);
         }
+        CHECK_HIP_ERROR(hipMalloc(&devPtrD, sizeof(DDataType) * batch * nhead * max_seqlen_q));
         CHECK_HIP_ERROR(hipMemset(devPtrdQ, 0, sizeof(QGradDataType) *
                             batch * max_seqlen_q * nhead * hdim_q));
         auto fmha_traits =
@@ -354,8 +398,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                  devPtrD,
                                  devPtrRandVal,
                                  devPtrdQ,
-                                 devPtrdK,
-                                 devPtrdV,
+                                 devPtrdKBuffer,
+                                 devPtrdVBuffer,
                                  devPtrdBias,
                                  devPtrCuSeqlensQ,
                                  devPtrCuSeqlensKV,
@@ -410,6 +454,27 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         }();
 
         fmha_bwd(fmha_traits, fmha_args, stream_config);
+
+        if (is_mqa_gqa) {
+            int block = 1024;
+            int grid = (batch * seqlen_k * nhead_k + block - 1) / block;
+            int dim_size = nhead / nhead_k;
+
+            // Launch the kernel for devPtrdK
+            hipLaunchKernelGGL(reduce_num_heads<KGradDataType>, grid, block, 0, stream,
+                devPtrdKBuffer, static_cast<KGradDataType*>(devPtrdK),
+                batch, seqlen_k, nhead_k, nhead / nhead_k, hdim_q);
+            hipLaunchKernelGGL(reduce_num_heads<VGradDataType>, grid, block, 0, stream,
+                devPtrdVBuffer, static_cast<VGradDataType*>(devPtrdV),
+                batch, seqlen_k, nhead_k, nhead / nhead_k, hdim_v);
+
+            // Synchronize the stream to ensure all kernels have completed
+            CHECK_HIP_ERROR(hipStreamSynchronize(stream));
+
+            CHECK_HIP_ERROR(hipFree(devPtrdKBuffer));
+            CHECK_HIP_ERROR(hipFree(devPtrdVBuffer));
+        }
+        CHECK_HIP_ERROR(hipFree(devPtrD));
     } catch (std::runtime_error &e) {
         NVTE_ERROR(e.what());
     }

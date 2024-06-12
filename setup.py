@@ -79,24 +79,26 @@ def frameworks() -> List[str]:
 
     return _frameworks
 
+
 # Call once in global scope since this function manipulates the
 # command-line arguments. Future calls will use a cached value.
 frameworks()
 
 import importlib.util
-#default to use cuda
+# Default to use cuda
 use_cuda = True
 use_rocm = False
 if ("pytorch" in frameworks()) and (importlib.util.find_spec("torch") is not None):
-  from torch.utils.cpp_extension import IS_HIP_EXTENSION
-  if IS_HIP_EXTENSION:
-    use_cuda = False
-    use_rocm = True
+    from torch.utils.cpp_extension import IS_HIP_EXTENSION
+    if IS_HIP_EXTENSION:
+        use_cuda = False
+        use_rocm = True
 elif ("jax" in frameworks()) and (importlib.util.find_spec("jax") is not None):
-  import jax
-  if jax.lib.xla_bridge.get_backend().platform_version.split(maxsplit=1)[0] == "rocm":
-    use_cuda = False
-    use_rocm = True
+    import jax
+    if jax.lib.xla_bridge.get_backend().platform_version.split(maxsplit=1)[0] == "rocm":
+        use_cuda = False
+        use_rocm = True
+
 
 @lru_cache(maxsize=1)
 def with_debug_build() -> bool:
@@ -109,9 +111,11 @@ def with_debug_build() -> bool:
         return True
     return False
 
+
 # Call once in global scope since this function manipulates the
 # command-line arguments. Future calls will use a cached value.
 with_debug_build()
+
 
 def found_cmake() -> bool:
     """"Check if valid CMake is available
@@ -153,7 +157,7 @@ def cmake_bin() -> Path:
     except ImportError:
         pass
     else:
-        if (cmake.__file__ is not None):
+        if cmake.__file__ is not None:
             cmake_dir = Path(cmake.__file__).resolve().parent
             _cmake_bin = cmake_dir / "data" / "bin" / "cmake"
             if not _cmake_bin.is_file():
@@ -213,11 +217,11 @@ def found_pybind11() -> bool:
 
 def cuda_version() -> Tuple[int, ...]:
     """CUDA Toolkit version as a (major, minor) tuple
-  
+
     Throws FileNotFoundError if NVCC is not found.
-  
+
     """
-  
+
     # Try finding NVCC
     nvcc_bin: Optional[Path] = None
     if nvcc_bin is None and os.getenv("CUDA_HOME"):
@@ -235,7 +239,7 @@ def cuda_version() -> Tuple[int, ...]:
         nvcc_bin = cuda_home / "bin" / "nvcc"
     if not nvcc_bin.is_file():
         raise FileNotFoundError(f"Could not find NVCC at {nvcc_bin}")
-  
+
     # Query NVCC for version info
     output = subprocess.run(
         [nvcc_bin, "-V"],
@@ -250,22 +254,26 @@ def cuda_version() -> Tuple[int, ...]:
 
 def rocm_generate_ck_files():
     fa_dir = root_path / "transformer_engine" / "common" / "fused_attn"
-    gen_py= fa_dir / "generate.py"
-    fwd_blob_txt = fa_dir / "fwd_blob_list.txt"
-    bwd_blob_txt = fa_dir / "bwd_blob_list.txt"
-    
-    fa_dir = str(fa_dir)
+    gen_py = fa_dir / "generate.py"
+    ck_dir = fa_dir / "ck_fmha"
+    fwd_blob_txt = ck_dir / "fwd_blob_list.txt"
+    bwd_blob_txt = ck_dir / "bwd_blob_list.txt"
+
+    # Create the directory if it doesn't exist
+    ck_dir.mkdir(parents=True, exist_ok=True)
+
     gen_py = str(gen_py)
+    ck_dir = str(ck_dir)
     fwd_blob_txt = str(fwd_blob_txt)
-    bwd_blob_txt = str(bwd_blob_txt) 
+    bwd_blob_txt = str(bwd_blob_txt)
 
     # Forward pass
     subprocess.run(["python3", gen_py, "--list_blobs", fwd_blob_txt], check=True)
-    subprocess.run(["python3", gen_py, "-d", "fwd", "--output_dir", fa_dir], check=True)
+    subprocess.run(["python3", gen_py, "-d", "fwd", "--output_dir", ck_dir], check=True)
     
     # Backward pass
     subprocess.run(["python3", gen_py, "--list_blobs", bwd_blob_txt], check=True)
-    subprocess.run(["python3", gen_py, "-d", "bwd", "--output_dir", fa_dir], check=True)
+    subprocess.run(["python3", gen_py, "-d", "bwd", "--output_dir", ck_dir], check=True)
 
 
 @lru_cache(maxsize=1)
@@ -276,6 +284,7 @@ def with_userbuffers() -> bool:
             "MPI_HOME must be set if NVTE_WITH_USERBUFFERS=1"
         return True
     return False
+
 
 def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     """Setup Python dependencies
@@ -311,15 +320,15 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
         if use_cuda:
             add_unique(install_reqs, ["torch", "flash-attn>=2.0.6,<=2.4.2,!=2.0.9,!=2.1.0"])
             add_unique(test_reqs, ["numpy", "onnxruntime", "torchvision"])
-    
+
     if "jax" in frameworks():
         if not found_pybind11():
             add_unique(setup_reqs, "pybind11")
         if use_cuda:
             add_unique(install_reqs, ["jax", "flax>=0.7.1"])
         if use_rocm:
-           # Assume jax is already installed on rocm machines
-           add_unique(install_reqs, ["flax>=0.7.1"])
+            # Assume jax is already installed on rocm machines
+            add_unique(install_reqs, ["flax>=0.7.1"])
         add_unique(test_reqs, ["numpy", "praxis"])
 
     if "paddle" in frameworks():
@@ -491,8 +500,10 @@ def setup_common_extension() -> CMakeExtension:
         cmake_flags=cmake_flags,
     )
 
+
 def _all_files_in_dir(path):
     return list(path.iterdir())
+
 
 def setup_pytorch_extension() -> setuptools.Extension:
     """Setup CUDA extension for PyTorch support"""
@@ -505,81 +516,81 @@ def setup_pytorch_extension() -> setuptools.Extension:
         src_dir / "ts_fp8_op.cpp",
     ]
     if use_rocm:
-      sources.extend([ 
-        extensions_dir/"transpose.cu",
-        extensions_dir/"softmax.cu",
-        extensions_dir/"recipe.cu",
-        extensions_dir/"normalization.cu",
-        extensions_dir/"misc.cu",
-        extensions_dir/"gemm.cu",
-        extensions_dir/"cast.cu",
-        extensions_dir/"activation.cu",
-        extensions_dir/"apply_rope.cu",
-        extensions_dir/"pybind.cpp",
-      ])
+        sources.extend([
+            extensions_dir/"transpose.cu",
+            extensions_dir/"softmax.cu",
+            extensions_dir/"recipe.cu",
+            extensions_dir/"normalization.cu",
+            extensions_dir/"misc.cu",
+            extensions_dir/"gemm.cu",
+            extensions_dir/"cast.cu",
+            extensions_dir/"activation.cu",
+            extensions_dir/"apply_rope.cu",
+            extensions_dir/"pybind.cpp",
+        ])
     if use_cuda:
-      sources.extend(_all_files_in_dir(extensions_dir))
+        sources.extend(_all_files_in_dir(extensions_dir))
 
     # Header files
     if use_rocm:
-      include_dirs = [
-          root_path / "transformer_engine" / "common" / "include",
-          root_path / "transformer_engine" / "pytorch" / "csrc",
-          root_path / "transformer_engine",
-      ]
+        include_dirs = [
+            root_path / "transformer_engine" / "common" / "include",
+            root_path / "transformer_engine" / "pytorch" / "csrc",
+            root_path / "transformer_engine",
+        ]
     if use_cuda:
-      include_dirs = [
-          root_path / "transformer_engine" / "common" / "include",
-          root_path / "transformer_engine" / "pytorch" / "csrc",
-          root_path / "transformer_engine",
-          root_path / "3rdparty" / "cudnn-frontend" / "include",
-      ]
+        include_dirs = [
+            root_path / "transformer_engine" / "common" / "include",
+            root_path / "transformer_engine" / "pytorch" / "csrc",
+            root_path / "transformer_engine",
+            root_path / "3rdparty" / "cudnn-frontend" / "include",
+        ]
     # Compiler flags
     cxx_flags = ["-O3"]
     if use_rocm:
-      ##TODO: Remove after moving to PyTorch 2.2
-      cxx_flags.extend(['-D__HIP_PLATFORM_AMD__=1'])
-      nvcc_flags = [
-          "-O3",
-          "-U__CUDA_NO_HALF_OPERATORS__",
-          "-U__CUDA_NO_HALF_CONVERSIONS__",
-          "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-          "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-          "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-          "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-      ]
+        # TODO: Remove after moving to PyTorch 2.2
+        cxx_flags.extend(['-D__HIP_PLATFORM_AMD__=1'])
+        nvcc_flags = [
+            "-O3",
+            "-U__CUDA_NO_HALF_OPERATORS__",
+            "-U__CUDA_NO_HALF_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+        ]
     if use_cuda:
-      nvcc_flags = [
-          "-O3",
-          "-gencode",
-          "arch=compute_70,code=sm_70",
-          "-U__CUDA_NO_HALF_OPERATORS__",
-          "-U__CUDA_NO_HALF_CONVERSIONS__",
-          "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-          "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-          "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-          "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-          "--expt-relaxed-constexpr",
-          "--expt-extended-lambda",
-          "--use_fast_math",
-      ]
+        nvcc_flags = [
+            "-O3",
+            "-gencode",
+            "arch=compute_70,code=sm_70",
+            "-U__CUDA_NO_HALF_OPERATORS__",
+            "-U__CUDA_NO_HALF_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+            "--expt-relaxed-constexpr",
+            "--expt-extended-lambda",
+            "--use_fast_math",
+        ]
 
     # Version-dependent CUDA options
     if use_rocm:
-      ##TODO: Figure out which hipcc version starts to support this parallel compilation
-      nvcc_flags.extend(["-parallel-jobs=4"])
+        # TODO: Figure out which hipcc version starts to support this parallel compilation
+        nvcc_flags.extend(["-parallel-jobs=4"])
     if use_cuda:
-      try:
-          version = cuda_version()
-      except FileNotFoundError:
-          print("Could not determine CUDA Toolkit version")
-      else:
-          if version >= (11, 2):
-              nvcc_flags.extend(["--threads", "4"])
-          if version >= (11, 0):
-              nvcc_flags.extend(["-gencode", "arch=compute_80,code=sm_80"])
-          if version >= (11, 8):
-              nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
+        try:
+            version = cuda_version()
+        except FileNotFoundError:
+            print("Could not determine CUDA Toolkit version")
+        else:
+            if version >= (11, 2):
+                nvcc_flags.extend(["--threads", "4"])
+            if version >= (11, 0):
+                nvcc_flags.extend(["-gencode", "arch=compute_80,code=sm_80"])
+            if version >= (11, 8):
+                nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
 
     # userbuffers support
     if with_userbuffers():

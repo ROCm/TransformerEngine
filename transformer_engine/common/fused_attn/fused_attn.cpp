@@ -199,7 +199,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         size_t max_seqlen_q, size_t max_seqlen_kv,
         size_t head_dim) {
   using namespace transformer_engine;
-  #ifdef USE_ROCM
+  #ifdef __HIP_PLATFORM_AMD__
   NVTE_Fused_Attn_Backend backend = NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen;
   #else
   NVTE_Fused_Attn_Backend backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;

@@ -51,6 +51,7 @@ else()
        activation/relu.cu
        activation/swiglu.cu
        fused_attn/fused_attn_f16_arbitrary_seqlen.cu
+       fused_attn/fused_attn.cpp
        fused_attn/utils.cu
        gemm/cublaslt_gemm.cu
        layer_norm/ln_api.cpp
@@ -69,7 +70,7 @@ else()
        fused_softmax/scaled_aligned_causal_masked_softmax.cu
        fused_rope/fused_rope.cu
        recipe/delayed_scaling.cu)
-  file(GLOB_RECURSE CK_FA_FILES "fused_attn/*.cpp")
+  file(GLOB_RECURSE CK_FA_FILES "fused_attn/ck_fmha/*.cpp")
   list(APPEND transformer_engine_SOURCES ${CK_FA_FILES})
   message(STATUS "Found the following CK fused attention files:")
   foreach(file ${CK_FA_FILES})
