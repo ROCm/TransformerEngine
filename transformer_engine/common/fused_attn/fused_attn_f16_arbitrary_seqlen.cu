@@ -20,6 +20,7 @@
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
 #ifdef __HIP_PLATFORM_AMD__
+#include <hip/hip_bf16.h>
 
 #define CHECK_HIP_ERROR(call)                                                                 \
     do {                                                                                      \
@@ -214,9 +215,15 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
 
 template<typename DataType>
 __global__ void reduce_num_heads(
-    const DataType* input,
-    DataType* output,
-    int batch, int seqlen_k, int nhead_k, int group_size, int hdim) {
+    const DataType* devPtrdKBuffer,
+    const DataType* devPtrdVBuffer,
+    DataType* devPtrdK,
+    DataType* devPtrdV,
+    int batch,
+    int seqlen_k,
+    int nhead_k,
+    int group_size,
+    int hdim_q) {
     int index = blockIdx.x * blockDim.x + threadIdx.x;
 
     int h = index % nhead_k;
@@ -224,21 +231,34 @@ __global__ void reduce_num_heads(
     int b = (index / (seqlen_k * nhead_k)) % batch;
 
     if (index < batch * seqlen_k * nhead_k) {
-        for (int k = 0; k < hdim; ++k) {
-            DataType sum = 0.0;
+        int write_idx = (b * seqlen_k + n) * nhead_k * hdim_q + h * hdim_q;
+        for (int k = 0; k < hdim_q; ++k) {
+            DataType sum_dK = 0.0;
+            DataType sum_dV = 0.0;
+            int read_idx = ((b * seqlen_k + n) * nhead_k + h) * group_size * hdim_q + k;
             for (int i = 0; i < group_size; ++i) {
-                sum += input[((b * seqlen_k + n) * nhead_k + h) * group_size * hdim + i * hdim + k];
+                sum_dK += devPtrdKBuffer[read_idx];
+                sum_dV += devPtrdVBuffer[read_idx];
+                read_idx += hdim_q;
             }
-            output[(b * seqlen_k + n) * nhead_k * hdim + h * hdim + k] = sum;
+            devPtrdK[write_idx] = sum_dK;
+            devPtrdV[write_idx] = sum_dV;
+            ++write_idx;
         }
     }
 }
 
 template<>
 __global__ void reduce_num_heads<ck_tile::bf16_t>(
-    const ck_tile::bf16_t* input,
-    ck_tile::bf16_t* output,
-    int batch, int seqlen_k, int nhead_k, int group_size, int hdim) {
+    const ck_tile::bf16_t* devPtrdKBuffer,
+    const ck_tile::bf16_t* devPtrdVBuffer,
+    ck_tile::bf16_t* devPtrdK,
+    ck_tile::bf16_t* devPtrdV,
+    int batch,
+    int seqlen_k,
+    int nhead_k,
+    int group_size,
+    int hdim_q) {
     int index = blockIdx.x * blockDim.x + threadIdx.x;
 
     int h = index % nhead_k;
@@ -246,12 +266,19 @@ __global__ void reduce_num_heads<ck_tile::bf16_t>(
     int b = (index / (seqlen_k * nhead_k)) % batch;
 
     if (index < batch * seqlen_k * nhead_k) {
-        for (int k = 0; k < hdim; ++k) {
-            float sum = 0.f;
+        int write_idx = (b * seqlen_k + n) * nhead_k * hdim_q + h * hdim_q;
+        for (int k = 0; k < hdim_q; ++k) {
+            __hip_bfloat16 sum_dK = HIPRT_ZERO_BF16;
+            __hip_bfloat16 sum_dV = HIPRT_ZERO_BF16;
+            int read_idx = ((b * seqlen_k + n) * nhead_k + h) * group_size * hdim_q + k;
             for (int i = 0; i < group_size; ++i) {
-                sum = sum + ck_tile::bf16_to_float(input[((b * seqlen_k + n) * nhead_k + h) * group_size * hdim + i * hdim + k]);
+                sum_dK += __ushort_as_bfloat16(devPtrdKBuffer[read_idx]);
+                sum_dV += __ushort_as_bfloat16(devPtrdVBuffer[read_idx]);
+                read_idx += hdim_q;
             }
-            output[(b * seqlen_k + n) * nhead_k * hdim + h * hdim + k] = ck_tile::float_to_bf16(sum);
+            devPtrdK[write_idx] = __bfloat16_as_ushort(sum_dK);
+            devPtrdV[write_idx] = __bfloat16_as_ushort(sum_dV);
+            ++write_idx;
         }
     }
 }
@@ -460,13 +487,17 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             int grid = (batch * seqlen_k * nhead_k + block - 1) / block;
             int dim_size = nhead / nhead_k;
 
-            // Launch the kernel for devPtrdK
+            // Launch the kernel for devPtrdK & devPtrdV
             hipLaunchKernelGGL(reduce_num_heads<KGradDataType>, grid, block, 0, stream,
-                devPtrdKBuffer, static_cast<KGradDataType*>(devPtrdK),
-                batch, seqlen_k, nhead_k, nhead / nhead_k, hdim_q);
-            hipLaunchKernelGGL(reduce_num_heads<VGradDataType>, grid, block, 0, stream,
-                devPtrdVBuffer, static_cast<VGradDataType*>(devPtrdV),
-                batch, seqlen_k, nhead_k, nhead / nhead_k, hdim_v);
+                devPtrdKBuffer,
+                devPtrdVBuffer,
+                static_cast<KGradDataType*>(devPtrdK),
+                static_cast<VGradDataType*>(devPtrdV),
+                batch,
+                seqlen_k,
+                nhead_k,
+                nhead / nhead_k,
+                hdim_q);
 
             // Synchronize the stream to ensure all kernels have completed
             CHECK_HIP_ERROR(hipStreamSynchronize(stream));
