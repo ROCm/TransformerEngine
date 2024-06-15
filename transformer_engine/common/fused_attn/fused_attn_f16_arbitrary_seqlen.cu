@@ -19,9 +19,8 @@
 #include "utils.h"
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
-#ifdef __HIP_PLATFORM_AMD__
-#include <hip/hip_bf16.h>
 
+#ifdef __HIP_PLATFORM_AMD__
 #define CHECK_HIP_ERROR(call)                                                                 \
     do {                                                                                      \
         hipError_t result = (call);                                                           \
@@ -99,6 +98,12 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     mask_enum mask_type;
     ck_tile::index_t left, right;
     ck_tile::stream_config stream_config{stream};
+    if (hdim_q % 8 != 0) {
+        NVTE_ERROR("Invalid head dimension: hdim_q must be a multiple of 8");
+    }
+    if (hdim_v % 8 != 0) {
+        NVTE_ERROR("Invalid head dimension: hdim_v must be a multiple of 8");
+    }
     if (bias_value == NVTE_Bias_Type::NVTE_NO_BIAS) {
         bias_type = bias_enum::no_bias;
     } else if (bias_value == NVTE_Bias_Type::NVTE_ALIBI) {
@@ -268,16 +273,15 @@ __global__ void reduce_num_heads<ck_tile::bf16_t>(
     if (index < batch * seqlen_k * nhead_k) {
         int write_idx = (b * seqlen_k + n) * nhead_k * hdim_q + h * hdim_q;
         for (int k = 0; k < hdim_q; ++k) {
-            __hip_bfloat16 sum_dK = HIPRT_ZERO_BF16;
-            __hip_bfloat16 sum_dV = HIPRT_ZERO_BF16;
+            float sum_dK = 0.f, sum_dV = 0.f;
             int read_idx = ((b * seqlen_k + n) * nhead_k + h) * group_size * hdim_q + k;
             for (int i = 0; i < group_size; ++i) {
-                sum_dK += __ushort_as_bfloat16(devPtrdKBuffer[read_idx]);
-                sum_dV += __ushort_as_bfloat16(devPtrdVBuffer[read_idx]);
+                sum_dK += ck_tile::bf16_to_float(devPtrdKBuffer[read_idx]);
+                sum_dV += ck_tile::bf16_to_float(devPtrdVBuffer[read_idx]);
                 read_idx += hdim_q;
             }
-            devPtrdK[write_idx] = __bfloat16_as_ushort(sum_dK);
-            devPtrdV[write_idx] = __bfloat16_as_ushort(sum_dV);
+            devPtrdK[write_idx] = ck_tile::float_to_bf16(sum_dK);
+            devPtrdV[write_idx] = ck_tile::float_to_bf16(sum_dV);
             ++write_idx;
         }
     }

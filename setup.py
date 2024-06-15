@@ -268,12 +268,12 @@ def rocm_generate_ck_files():
     bwd_blob_txt = str(bwd_blob_txt)
 
     # Forward pass
-    subprocess.run(["python3", gen_py, "--list_blobs", fwd_blob_txt], check=True)
-    subprocess.run(["python3", gen_py, "-d", "fwd", "--output_dir", ck_dir], check=True)
-    
+    subprocess.run(["python3", gen_py, "--list_blobs", fwd_blob_txt, "-r", "1"], check=True)
+    subprocess.run(["python3", gen_py, "-d", "fwd", "--output_dir", ck_dir, "-r", "1"], check=True)
+
     # Backward pass
-    subprocess.run(["python3", gen_py, "--list_blobs", bwd_blob_txt], check=True)
-    subprocess.run(["python3", gen_py, "-d", "bwd", "--output_dir", ck_dir], check=True)
+    subprocess.run(["python3", gen_py, "--list_blobs", bwd_blob_txt, "-r", "1"], check=True)
+    subprocess.run(["python3", gen_py, "-d", "bwd", "--output_dir", ck_dir, "-r", "1"], check=True)
 
 
 @lru_cache(maxsize=1)

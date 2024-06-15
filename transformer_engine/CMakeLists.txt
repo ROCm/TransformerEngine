@@ -10,14 +10,17 @@ option(USE_CUDA "Use CUDA" ON)
 option(USE_ROCM "Use ROCm" OFF)
 option(USE_HIPBLASLT "Use HIPBLASLT" OFF)
 
-if(((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) AND NOT (EXISTS "/bin/nvcc"))
+if(((EXISTS $ENV{ROCM_PATH}) OR (EXISTS "/opt/rocm")) AND NOT (EXISTS "/bin/nvcc"))
   message("AMD GPU detected.")
   set(USE_ROCM ON)
   set(USE_CUDA OFF)
 
-  # Disable Asserts In Code (Can't use asserts on HIP stack.)
+  # Disable Asserts In Code (Can't use asserts on HIP stack)
   add_definitions(-DNDEBUG)
   add_definitions(-DUSE_ROCM)
+  # Set the default rounding mode for FP32 to BF16 conversion
+  # Use 0 to apply the RTN rounding rule
+  add_definitions(-DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=0)
   if(NOT DEFINED ENV{PYTORCH_ROCM_ARCH})
     SET(TE_ROCM_ARCH gfx90a;gfx940;gfx941;gfx942)
   else()

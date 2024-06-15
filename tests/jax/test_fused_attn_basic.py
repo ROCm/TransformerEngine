@@ -288,10 +288,10 @@ class FusedAttnRunner:
         if self.dropout_prob > 0.:
             return
 
-        #np.testing.assert_allclose(primitive_out.astype(jnp.float32),
-        #                           reference_out.astype(jnp.float32),
-        #                           atol=1e-5,
-        #                           rtol=1e-3)
+        np.testing.assert_allclose(primitive_out.astype(jnp.float32),
+                                   reference_out.astype(jnp.float32),
+                                   atol=1e-5,
+                                   rtol=1e-3)
 
         # Convert the outputs to float32 for the elementwise comparison
         primitive_dq, primitive_dk, primitive_dv, primitive_dbias = map(
@@ -332,22 +332,28 @@ class FusedAttnRunner:
 ])
 @pytest.mark.parametrize('attn_mask_type', [
     pytest.param(AttnMaskType.NO_MASK, id='NO_MASK'),
+    pytest.param(AttnMaskType.CAUSAL_MASK, id='CAUSAL'),
+    pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id='PADDING_CAUSAL'),
 ])
 @pytest.mark.parametrize('qkv_layout', [
     pytest.param(QKVLayout.BSHD_BSHD_BSHD, id='separate'),
 ])
 @pytest.mark.parametrize('dropout_prob', [
     0.,
+    0.1,
 ])
 @pytest.mark.parametrize('is_training', [
     pytest.param(True, id='training'),
+    pytest.param(False, id='inference'),
 ])
 @pytest.mark.parametrize('dtype', [
     pytest.param(jnp.bfloat16, id="BF16"),
     pytest.param(jnp.float16, id="FP16"),
 ])
 @pytest.mark.parametrize('b, s_q, s_kv, h_q, h_kv, d', [
-    pytest.param(4, 2048, 2048, 32, 8, 64, id='4-2048-2048-32-8-64-GQA')
+    (32, 128, 128, 16, 16, 64),
+    (4, 2048, 2048, 32, 32, 64),
+    pytest.param(4, 2048, 2048, 32, 8, 64, id='4-2048-2048-32-8-64-GQA'),
 ])
 class TestFusedAttn:
     """
