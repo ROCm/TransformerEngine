@@ -499,7 +499,7 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
             seqlen_kv = seqlen_q
         else:
             seqlen_kv = key.shape[sequence_dim]
-        
+
         has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype, qkv_layout,
                                                                attn_bias_type, attn_mask_type,
                                                                self.attention_dropout,

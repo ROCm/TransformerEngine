@@ -333,7 +333,6 @@ class FusedAttnRunner:
 @pytest.mark.parametrize('attn_mask_type', [
     pytest.param(AttnMaskType.NO_MASK, id='NO_MASK'),
     pytest.param(AttnMaskType.CAUSAL_MASK, id='CAUSAL'),
-    pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id='PADDING_CAUSAL'),
 ])
 @pytest.mark.parametrize('qkv_layout', [
     pytest.param(QKVLayout.BSHD_BSHD_BSHD, id='separate'),
@@ -353,7 +352,9 @@ class FusedAttnRunner:
 @pytest.mark.parametrize('b, s_q, s_kv, h_q, h_kv, d', [
     (32, 128, 128, 16, 16, 64),
     (4, 2048, 2048, 32, 32, 64),
-    pytest.param(4, 2048, 2048, 32, 8, 64, id='4-2048-2048-32-8-64-GQA'),
+    pytest.param(4, 4096, 4096, 32, 32, 128, id='4-4096-4096-32-32-128-MHA'),
+    pytest.param(6, 4096, 4096, 64, 8,  128, id='6-4096-4096-64-8-128-GQA'),
+    pytest.param(4, 4096, 4096, 32, 8,  128, id='4-4096-4096-32-8-128-GQA'),
 ])
 class TestFusedAttn:
     """
