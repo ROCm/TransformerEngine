@@ -21,14 +21,6 @@
 #include "../util/system.h"
 
 #ifdef __HIP_PLATFORM_AMD__
-#define CHECK_HIP_ERROR(call)                                                                 \
-    do {                                                                                      \
-        hipError_t result = (call);                                                           \
-        if (result != hipSuccess) {                                                           \
-            throw std::runtime_error("HIP error: " + std::string(hipGetErrorString(result))); \
-        }                                                                                     \
-    } while (false)
-
 #define DISPATCH_BF16_AND_F16_TYPES(DATATYPE, NAME, ...)                       \
     switch (DATATYPE) {                                                        \
     case transformer_engine::DType::kBFloat16: {                               \
@@ -46,6 +38,7 @@
 const std::unordered_map<transformer_engine::DType, std::string> dtype_mapping =
     {{transformer_engine::DType::kBFloat16, "bf16"},
      {transformer_engine::DType::kFloat16, "fp16"}};
+
 
 namespace transformer_engine {
 namespace fused_attn {
@@ -127,7 +120,6 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         ck_tile::index_t shape_batch = batch;
         ck_tile::index_t shape_seqlen_q = seqlen_q;
         ck_tile::index_t shape_seqlen_k = seqlen_k;
-        RandValOutputDataType* devPtrRandVal = nullptr;
         bool s_randval = false;
 
         auto fmha_traits = fmha_fwd_traits{
@@ -167,7 +159,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                  devPtrK,
                                  devPtrV,
                                  devPtrBias,
-                                 devPtrRandVal,
+                                 nullptr,
                                  devPtrSoftmaxStats,
                                  devPtrO,
                                  devPtrCuSeqlensQ,
@@ -219,71 +211,83 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
 }
 
 template<typename DataType>
-__global__ void reduce_num_heads(
-    const DataType* devPtrdKBuffer,
-    const DataType* devPtrdVBuffer,
-    DataType* devPtrdK,
-    DataType* devPtrdV,
-    int batch,
+__global__ void reshape_and_sum(
+    DataType* dk, const DataType* dk_expanded,
+    DataType* dv, const DataType* dv_expanded,
+    int batch_size,
     int seqlen_k,
-    int nhead_k,
-    int group_size,
-    int hdim_q) {
-    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    int num_heads,
+    int num_heads_k,
+    int head_size) {
+    static_assert(std::is_arithmetic<DataType>::value,
+                  "reshape_and_sum only supports arithmetic types");
+}
 
-    int h = index % nhead_k;
-    int n = (index / nhead_k) % seqlen_k;
-    int b = (index / (seqlen_k * nhead_k)) % batch;
+template<>
+__global__ void reshape_and_sum<ck_tile::half_t>(
+    ck_tile::half_t* dk, const ck_tile::half_t* dk_expanded,
+    ck_tile::half_t* dv, const ck_tile::half_t* dv_expanded,
+    int batch_size,
+    int seqlen_k,
+    int num_heads,
+    int num_heads_k,
+    int head_size) {
+    int batch_idx = blockIdx.x;
+    int seqlen_idx = blockIdx.y;
+    int head_k_idx = blockIdx.z;
+    int thread_idx = threadIdx.x;
+    int head_idx_offset = num_heads / num_heads_k;
 
-    if (index < batch * seqlen_k * nhead_k) {
-        int write_idx = (b * seqlen_k + n) * nhead_k * hdim_q + h * hdim_q;
-        for (int k = 0; k < hdim_q; ++k) {
-            DataType sum_dK = 0.0;
-            DataType sum_dV = 0.0;
-            int read_idx = ((b * seqlen_k + n) * nhead_k + h) * group_size * hdim_q + k;
-            for (int i = 0; i < group_size; ++i) {
-                sum_dK += devPtrdKBuffer[read_idx];
-                sum_dV += devPtrdVBuffer[read_idx];
-                read_idx += hdim_q;
-            }
-            devPtrdK[write_idx] = sum_dK;
-            devPtrdV[write_idx] = sum_dV;
-            ++write_idx;
+    if (thread_idx < head_size) {
+        float sum_dk = 0.0f;
+        float sum_dv = 0.0f;
+        int read_idx = ((batch_idx * seqlen_k + seqlen_idx) *
+                         num_heads_k + head_k_idx) *
+                         head_idx_offset * head_size + thread_idx;
+        int write_idx = ((batch_idx * seqlen_k + seqlen_idx) *
+                          num_heads_k + head_k_idx) *
+                          head_size + thread_idx;
+        for (int j = 0; j < head_idx_offset; j++) {
+            sum_dk += dk_expanded[read_idx];
+            sum_dv += dv_expanded[read_idx];
+            read_idx += head_size;
         }
+        dk[write_idx] = sum_dk;
+        dv[write_idx] = sum_dv;
     }
 }
 
 template<>
-__global__ void reduce_num_heads<ck_tile::bf16_t>(
-    const ck_tile::bf16_t* devPtrdKBuffer,
-    const ck_tile::bf16_t* devPtrdVBuffer,
-    ck_tile::bf16_t* devPtrdK,
-    ck_tile::bf16_t* devPtrdV,
-    int batch,
+__global__ void reshape_and_sum<ck_tile::bf16_t>(
+    ck_tile::bf16_t* dk, const ck_tile::bf16_t* dk_expanded,
+    ck_tile::bf16_t* dv, const ck_tile::bf16_t* dv_expanded,
+    int batch_size,
     int seqlen_k,
-    int nhead_k,
-    int group_size,
-    int hdim_q) {
-    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    int num_heads,
+    int num_heads_k,
+    int head_size) {
+    int batch_idx = blockIdx.x;
+    int seqlen_idx = blockIdx.y;
+    int head_k_idx = blockIdx.z;
+    int thread_idx = threadIdx.x;
+    int head_idx_offset = num_heads / num_heads_k;
 
-    int h = index % nhead_k;
-    int n = (index / nhead_k) % seqlen_k;
-    int b = (index / (seqlen_k * nhead_k)) % batch;
-
-    if (index < batch * seqlen_k * nhead_k) {
-        int write_idx = (b * seqlen_k + n) * nhead_k * hdim_q + h * hdim_q;
-        for (int k = 0; k < hdim_q; ++k) {
-            float sum_dK = 0.f, sum_dV = 0.f;
-            int read_idx = ((b * seqlen_k + n) * nhead_k + h) * group_size * hdim_q + k;
-            for (int i = 0; i < group_size; ++i) {
-                sum_dK += ck_tile::bf16_to_float(devPtrdKBuffer[read_idx]);
-                sum_dV += ck_tile::bf16_to_float(devPtrdVBuffer[read_idx]);
-                read_idx += hdim_q;
-            }
-            devPtrdK[write_idx] = ck_tile::float_to_bf16(sum_dK);
-            devPtrdV[write_idx] = ck_tile::float_to_bf16(sum_dV);
-            ++write_idx;
+    if (thread_idx < head_size) {
+        float sum_dk = 0.0f;
+        float sum_dv = 0.0f;
+        int read_idx = ((batch_idx * seqlen_k + seqlen_idx) *
+                         num_heads_k + head_k_idx) *
+                         head_idx_offset * head_size + thread_idx;
+        int write_idx = ((batch_idx * seqlen_k + seqlen_idx) *
+                          num_heads_k + head_k_idx) *
+                          head_size + thread_idx;
+        for (int j = 0; j < head_idx_offset; j++) {
+            sum_dk += ck_tile::bf16_to_float(dk_expanded[read_idx]);
+            sum_dv += ck_tile::bf16_to_float(dv_expanded[read_idx]);
+            read_idx += head_size;
         }
+        dk[write_idx] = ck_tile::float_to_bf16(sum_dk);
+        dv[write_idx] = ck_tile::float_to_bf16(sum_dv);
     }
 }
 
@@ -340,6 +344,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     mask_enum mask_type;
     int32_t left, right;
     ck_tile::stream_config stream_config{stream};
+    static thread_local DeviceMemoryManager d_mgr{stream};
+    static thread_local DeviceMemoryManager dk_expanded_mgr{stream};
+    static thread_local DeviceMemoryManager dv_expanded_mgr{stream};
+
     if (bias_value == NVTE_Bias_Type::NVTE_NO_BIAS) {
         bias_type = bias_enum::no_bias;
     } else if (bias_value == NVTE_Bias_Type::NVTE_ALIBI) {
@@ -363,23 +371,19 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         ck_tile::index_t shape_batch = batch;
         ck_tile::index_t shape_seqlen_q = seqlen_q;
         ck_tile::index_t shape_seqlen_k = seqlen_k;
-        KGradDataType* devPtrdKBuffer = nullptr;
-        VGradDataType* devPtrdVBuffer = nullptr;
-        DDataType* devPtrD = nullptr;
-        RandValOutputDataType* devPtrRandVal = nullptr;
         bool s_randval = false;
+
+        d_mgr.resize(sizeof(DDataType) * batch * nhead * max_seqlen_q);
         if (is_mqa_gqa) {
-            CHECK_HIP_ERROR(hipMalloc(&devPtrdKBuffer, sizeof(KGradDataType) *
-                                batch * nhead * shape_seqlen_k * hdim_q));
-            CHECK_HIP_ERROR(hipMalloc(&devPtrdVBuffer, sizeof(VGradDataType) *
-                                batch * nhead * shape_seqlen_k * hdim_v));
-        } else {
-            devPtrdKBuffer = static_cast<KGradDataType*>(devPtrdK);
-            devPtrdVBuffer = static_cast<VGradDataType*>(devPtrdV);
+            dk_expanded_mgr.resize(sizeof(KGradDataType) * batch * nhead * shape_seqlen_k * hdim_q);
+            dv_expanded_mgr.resize(sizeof(VGradDataType) * batch * nhead * shape_seqlen_k * hdim_v);
         }
-        CHECK_HIP_ERROR(hipMalloc(&devPtrD, sizeof(DDataType) * batch * nhead * max_seqlen_q));
-        CHECK_HIP_ERROR(hipMemset(devPtrdQ, 0, sizeof(QGradDataType) *
-                            batch * max_seqlen_q * nhead * hdim_q));
+        HIP_CHECK_ERROR(
+            hipMemsetAsync(devPtrdQ,
+                           0,
+                           sizeof(QGradDataType) * batch * max_seqlen_q * nhead * hdim_q,
+                           stream));
+
         auto fmha_traits =
             fmha_bwd_traits{hdim_q,    hdim_v,    data_type, is_group_mode,
                             mask_type, bias_type, has_dbias, has_dropout};
@@ -426,11 +430,11 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                  devPtrO,
                                  devPtrSoftmaxStats,
                                  devPtrdO,
-                                 devPtrD,
-                                 devPtrRandVal,
+                                 d_mgr.get_allocated_block(),
+                                 nullptr,
                                  devPtrdQ,
-                                 devPtrdKBuffer,
-                                 devPtrdVBuffer,
+                                 is_mqa_gqa ? dk_expanded_mgr.get_allocated_block() : devPtrdK,
+                                 is_mqa_gqa ? dv_expanded_mgr.get_allocated_block() : devPtrdV,
                                  devPtrdBias,
                                  devPtrCuSeqlensQ,
                                  devPtrCuSeqlensKV,
@@ -487,29 +491,21 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         fmha_bwd(fmha_traits, fmha_args, stream_config);
 
         if (is_mqa_gqa) {
-            int block = 1024;
-            int grid = (batch * seqlen_k * nhead_k + block - 1) / block;
-            int dim_size = nhead / nhead_k;
+            dim3 grid(batch, seqlen_k, nhead_k);
+            dim3 block(hdim_q);
 
             // Launch the kernel for devPtrdK & devPtrdV
-            hipLaunchKernelGGL(reduce_num_heads<KGradDataType>, grid, block, 0, stream,
-                devPtrdKBuffer,
-                devPtrdVBuffer,
+            hipLaunchKernelGGL(reshape_and_sum<KGradDataType>, grid, block, 0, stream,
                 static_cast<KGradDataType*>(devPtrdK),
+                static_cast<KGradDataType*>(dk_expanded_mgr.get_allocated_block()),
                 static_cast<VGradDataType*>(devPtrdV),
+                static_cast<VGradDataType*>(dv_expanded_mgr.get_allocated_block()),
                 batch,
                 seqlen_k,
+                nhead,
                 nhead_k,
-                nhead / nhead_k,
                 hdim_q);
-
-            // Synchronize the stream to ensure all kernels have completed
-            CHECK_HIP_ERROR(hipStreamSynchronize(stream));
-
-            CHECK_HIP_ERROR(hipFree(devPtrdKBuffer));
-            CHECK_HIP_ERROR(hipFree(devPtrdVBuffer));
         }
-        CHECK_HIP_ERROR(hipFree(devPtrD));
     } catch (std::runtime_error &e) {
         NVTE_ERROR(e.what());
     }
@@ -576,8 +572,9 @@ void fused_attn_arbitrary_seqlen_fwd(
 
     void* devPtrRngState = rng_state->data.dptr;
     uint64_t* host_rng_state = new uint64_t[2];
-    hipMemcpy(host_rng_state, devPtrRngState, 2 * sizeof(uint64_t),
-              hipMemcpyDeviceToHost);
+    HIP_CHECK_ERROR(hipMemcpyAsync(host_rng_state, devPtrRngState, 2 * sizeof(uint64_t),
+                                   hipMemcpyDeviceToHost, stream));
+    HIP_CHECK_ERROR(hipStreamSynchronize(stream));
     uint64_t drop_seed = host_rng_state[0];
     uint64_t drop_offset = host_rng_state[1];
     delete[] host_rng_state;
@@ -592,6 +589,7 @@ void fused_attn_arbitrary_seqlen_fwd(
     if (iter == dtype_mapping.cend()) {
         NVTE_ERROR("Unexpected QKV_type");
     }
+
     DISPATCH_BF16_AND_F16_TYPES(
         QKV_type, "fused_attn_arbitrary_seqlen_fwd_impl",
         fused_attn_arbitrary_seqlen_fwd_impl<scalar_t>(
@@ -645,8 +643,9 @@ void fused_attn_arbitrary_seqlen_bwd(
 
     void* devPtrRngState = rng_state->data.dptr;
     uint64_t* host_rng_state = new uint64_t[2];
-    hipMemcpy(host_rng_state, devPtrRngState, 2 * sizeof(uint64_t),
-              hipMemcpyDeviceToHost);
+    HIP_CHECK_ERROR(hipMemcpyAsync(host_rng_state, devPtrRngState, 2 * sizeof(uint64_t),
+                                   hipMemcpyDeviceToHost, stream));
+    HIP_CHECK_ERROR(hipStreamSynchronize(stream));
     uint64_t drop_seed = host_rng_state[0];
     uint64_t drop_offset = host_rng_state[1];
     delete[] host_rng_state;
@@ -655,6 +654,7 @@ void fused_attn_arbitrary_seqlen_bwd(
     if (iter == dtype_mapping.cend()) {
         NVTE_ERROR("Unexpected QKV_type");
     }
+
     DISPATCH_BF16_AND_F16_TYPES(
         QKV_type, "fused_attn_arbitrary_seqlen_bwd_impl",
         fused_attn_arbitrary_seqlen_bwd_impl<scalar_t>(

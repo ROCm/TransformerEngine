@@ -24,7 +24,55 @@
 #include "common/common.h"
 
 namespace transformer_engine {
+
 #ifdef __HIP_PLATFORM_AMD__
+struct DeviceMemoryManager {
+public:
+    DeviceMemoryManager(hipStream_t stream = 0) :
+        allocated_block_(nullptr), allocated_size_(0), mem_size_(0), stream_(stream) {}
+    DeviceMemoryManager(std::size_t mem_size, hipStream_t stream = 0) :
+        allocated_size_(mem_size), mem_size_(mem_size), stream_(stream) {
+        if (allocated_size_ > 0) {
+            HIP_CHECK_ERROR(hipMallocAsync(static_cast<void**>(&allocated_block_), allocated_size_, stream_));
+        }
+    }
+    ~DeviceMemoryManager() {
+        if (allocated_size_ > 0) {
+            HIP_CHECK_ERROR(hipFreeAsync(allocated_block_, stream_));
+            allocated_block_ = nullptr;
+            allocated_size_ = mem_size_ = 0;
+            stream_ = 0;
+        }
+    }
+
+    void resize(std::size_t mem_size) {
+        if (allocated_size_ < mem_size) {
+            if (allocated_size_ > 0) {
+                HIP_CHECK_ERROR(hipFreeAsync(allocated_block_, stream_));
+            }
+            allocated_size_ = mem_size;
+            HIP_CHECK_ERROR(hipMallocAsync(static_cast<void**>(&allocated_block_), allocated_size_, stream_));
+        }
+        mem_size_ = mem_size;
+    }
+
+    void* get_allocated_block() const { return allocated_block_; }
+    std::size_t get_allocated_size() const { return allocated_size_; }
+    std::size_t get_mem_size() const { return mem_size_; }
+    hipStream_t get_stream() const { return stream_; }
+
+    void set_zero() const {
+        if (mem_size_ > 0) {
+            HIP_CHECK_ERROR(hipMemsetAsync(allocated_block_, 0, mem_size_, stream_));
+        }
+    }
+private:
+    void* allocated_block_;
+    std::size_t allocated_size_;
+    std::size_t mem_size_;
+    hipStream_t stream_;
+};
+
 void fused_attn_arbitrary_seqlen_fwd(
     size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
     size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim,
