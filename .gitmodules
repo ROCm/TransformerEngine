@@ -14,3 +14,6 @@
 [submodule "3rdparty/aotriton"]
 	path = 3rdparty/aotriton
 	url = https://github.com/ROCm/aotriton.git
+[submodule "3rdparty/composable_kernel"]
+	path = 3rdparty/ck_fused_attn/3rdparty/composable_kernel
+	url = https://github.com/ROCm/composable_kernel.git
