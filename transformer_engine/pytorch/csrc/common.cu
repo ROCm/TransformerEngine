@@ -145,3 +145,16 @@ void *getDataPtr(at::Tensor t) {
         return nullptr;
     }
 }
+
+void* getDataPtr(at::Tensor tensor, int offset) {
+    void* dptr = nullptr;
+    if (tensor.numel() > 0) {
+        dptr = tensor.data_ptr();
+    }
+    if (dptr != nullptr && offset != 0) {
+        char* char_ptr = reinterpret_cast<char*>(dptr);
+        char_ptr += offset * tensor.element_size();
+        dptr = reinterpret_cast<void*>(char_ptr);
+    }
+    return dptr;
+}

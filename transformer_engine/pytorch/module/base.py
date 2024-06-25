@@ -43,9 +43,11 @@ from ..float8_tensor import Float8Tensor
 _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = True
 _2X_ACC_WGRAD = True
+_multi_stream_cublas_workspace = []
 _cublas_workspace = None
 _ub_communicators = None
 _NUM_MAX_UB_STREAMS = 3
+_NUM_MAX_CUBLAS_STREAMS = 4
 _amax_reduce_handle_bwd = None
 
 
@@ -107,6 +109,17 @@ def _prepare_backward(
                 forward=False
             )
             FP8GlobalStateManager.delete_key_from_amax_buffer(forward=False)
+
+
+def get_multi_stream_cublas_workspace() -> List[torch.Tensor]:
+    """Returns workspace for multi-stream cublas."""
+    global _multi_stream_cublas_workspace
+    if not _multi_stream_cublas_workspace:
+        for _ in range(_NUM_MAX_CUBLAS_STREAMS):
+            _multi_stream_cublas_workspace.append(
+                torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda")
+            )
+    return _multi_stream_cublas_workspace
 
 
 def initialize_ub(

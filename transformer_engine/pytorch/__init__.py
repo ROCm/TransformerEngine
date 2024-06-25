@@ -7,6 +7,7 @@ from .module import LayerNormLinear
 from .module import Linear
 from .module import LayerNormMLP
 from .module import LayerNorm
+from .module import GroupedLinear
 from .module import RMSNorm
 from .attention import DotProductAttention
 from .attention import InferenceParams
