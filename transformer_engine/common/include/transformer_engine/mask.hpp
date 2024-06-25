@@ -9,6 +9,13 @@
 #include "ck_tile/core.hpp"
 #include "ck_tile/ops/fmha.hpp"
 
+struct FmhaMasks
+{
+    using NoMask      = ck_tile::GenericAttentionMask<false>;
+    using GenericMask = ck_tile::GenericAttentionMask<true, true>;
+    using CausalMask  = ck_tile::GenericAttentionMask<true, false>;
+};
+
 // keep this in sync with ck_tile::GenericAttentionMaskEnum
 enum class mask_enum
 {
@@ -18,9 +25,9 @@ enum class mask_enum
     window_generic,
 };
 
-struct FmhaMasks
+struct mask_info
 {
-    using NoMask      = ck_tile::GenericAttentionMask<false>;
-    using GenericMask = ck_tile::GenericAttentionMask<true, true>;
-    using CausalMask  = ck_tile::GenericAttentionMask<true, false>;
+    mask_enum type;
+    ck_tile::index_t y, x;
+    ck_tile::index_t left, right; // FA style SWA left/right
 };
