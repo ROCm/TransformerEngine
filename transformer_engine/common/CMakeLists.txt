@@ -50,7 +50,10 @@ else()
        activation/gelu.cu
        activation/relu.cu
        activation/swiglu.cu
-       fused_attn_aotriton/fused_attn.cpp
+       fused_attn_rocm/fused_attn.cpp
+       fused_attn_rocm/fused_attn_aotriton.cpp
+       fused_attn_rocm/fused_attn_ck.cpp
+       fused_attn_rocm/utils.cpp
        gemm/cublaslt_gemm.cu
        layer_norm/ln_api.cpp
        layer_norm/ln_bwd_semi_cuda_kernel.cu
@@ -82,10 +85,14 @@ if(USE_CUDA)
   endif()
 else()
   # Install aotriton fused attn
-  set(AOTRITON_NO_PYTHON ON)
-  set(AOTRITON_COMPRESS_KERNEL OFF)
-  set(AOTRITON_NO_SHARED ON)
-  add_subdirectory(../../3rdparty/aotriton ${CMAKE_CURRENT_BINARY_DIR}/aotriton)
+  #set(AOTRITON_NO_PYTHON ON)
+  #set(AOTRITON_COMPRESS_KERNEL OFF)
+  #set(AOTRITON_NO_SHARED ON)
+  #add_subdirectory(../../3rdparty/aotriton ${CMAKE_CURRENT_BINARY_DIR}/aotriton)
+  set(__AOTRITON_INSTALL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/aotriton/build/install_dir")
+  add_library(aotriton INTERFACE)
+  target_link_libraries(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/lib/libaotriton_v2.a)
+  target_include_directories(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/include)
 endif()
 
 # process source code files

@@ -121,6 +121,8 @@ enum NVTE_Fused_Attn_Backend {
     NVTE_No_Backend = -1,
     /*! AOTriton fused attn */
     NVTE_AOTriton = 0,
+    /*! CK fused attn */
+    NVTE_CK = 1,
 };
 #endif
 
