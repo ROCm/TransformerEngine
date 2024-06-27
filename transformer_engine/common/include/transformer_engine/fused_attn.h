@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -102,6 +104,7 @@ enum NVTE_Mask_Type {
 /*! \enum NVTE_Fused_Attn_Backend
  *  \brief Fused attention backends
  */
+#ifndef __HIP_PLATFORM_AMD__
 enum NVTE_Fused_Attn_Backend {
     /*! No supported backend */
     NVTE_No_Backend = -1,
@@ -112,6 +115,14 @@ enum NVTE_Fused_Attn_Backend {
     /*! cuDNN-based FP8 fused attention for <= 512 sequence length */
     NVTE_FP8 = 2,
 };
+#else
+enum NVTE_Fused_Attn_Backend {
+    /*! No supported backend */
+    NVTE_No_Backend = -1,
+    /*! AOTriton fused attn */
+    NVTE_AOTriton = 0,
+};
+#endif
 
 /*!  \brief Get QKV layout group for a given QKV layout.
  *
@@ -162,6 +173,12 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  - D = Dropout(S)
  *  - O = D * Transpose(V)
  *
+ * Support Matrix for ROCm AOTriton:
+   \verbatim
+   | backend | precision |        qkv layout       |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
+   | aotriton| FP16/BF16 | BS3HD,SB3HD,BSH3D,SBH3D | NO                       | NO/CAUSAL                             |   Yes   |  arbitrary        | arbitrary        |
+   \endverbatim
+ *
  * Support Matrix:
    \verbatim
    | backend | precision |        qkv layout       |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
@@ -205,6 +222,12 @@ void nvte_fused_attn_fwd_qkvpacked(
             cudaStream_t stream);
 
 /*! \brief Compute the backward of the dot product attention with packed QKV input.
+ *
+ * Support Matrix for ROCm AOTriton:
+   \verbatim
+   | backend | precision |        qkv layout       |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
+   | aotriton| FP16/BF16 | BS3HD,SB3HD,BSH3D,SBH3D | NO                       | NO/CAUSAL                             |   Yes   |  arbitrary        | arbitrary        |
+   \endverbatim
  *
  * Support Matrix:
    \verbatim
@@ -259,6 +282,12 @@ void nvte_fused_attn_bwd_qkvpacked(
  *  - D = Dropout(S)
  *  - O = D * Transpose(V)
  *
+ * Support Matrix for ROCm AOTriton:
+   \verbatim
+   | backend | precision |                 qkv layout                  |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
+   | aotriton| FP16/BF16 | BSHD_BS2HD,BSHD_BSH2D,SBHD_SB2HD,SBHD_SBH2D | NO                       | NO/CAUSAL                             |   Yes   |  arbitrary        | arbitrary        |
+   \endverbatim
+ *
  * Support Matrix:
    \verbatim
    | backend | precision |                 qkv layout                  |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
@@ -307,6 +336,12 @@ void nvte_fused_attn_fwd_kvpacked(
             cudaStream_t stream);
 
 /*! \brief Compute the backward of the dot product attention with packed KV input.
+ *
+ * Support Matrix for ROCm AOTriton:
+   \verbatim
+   | backend | precision |                 qkv layout                  |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
+   | aotriton| FP16/BF16 | BSHD_BS2HD,BSHD_BSH2D,SBHD_SB2HD,SBHD_SBH2D | NO                       | NO/CAUSAL                             |   Yes   |  arbitrary        | arbitrary        |
+   \endverbatim
  *
  * Support Matrix:
    \verbatim
@@ -368,6 +403,14 @@ void nvte_fused_attn_bwd_kvpacked(
  *  - D = Dropout(S)
  *  - O = D * Transpose(V)
  *
+ * Support Matrix for ROCm AOTriton:
+   \verbatim
+   | backend | precision |                qkv layout                   |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
+   | aotriton| FP16/BF16 |          BS3HD,SB3HD,BSH3D,SBH3D            | NO                       | NO/CAUSAL                             |   Yes   |  arbitrary        | arbitrary        |
+   |         |           | BSHD_BS2HD,BSHD_BSH2D,SBHD_SB2HD,SBHD_SBH2D |                          |                                       |         |                   |                  |
+   |         |           |       BSHD_BSHD_BSHD,SBHD_SBHD_SBHD         |                          |                                       |         |                   |                  |
+   \endverbatim
+ *
  * Support Matrix:
    \verbatim
    | backend | precision |                qkv layout                   |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
@@ -421,6 +464,14 @@ void nvte_fused_attn_fwd(
             cudaStream_t stream);
 
 /*! \brief Compute the backward of the dot product attention with separate Q, K and V.
+ *
+ * Support Matrix for ROCm AOTriton:
+   \verbatim
+   | backend | precision |                qkv layout                   |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
+   | aotriton| FP16/BF16 |          BS3HD,SB3HD,BSH3D,SBH3D            | NO                       | NO/CAUSAL                             |   Yes   |  arbitrary        | arbitrary        |
+   |         |           | BSHD_BS2HD,BSHD_BSH2D,SBHD_SB2HD,SBHD_SBH2D |                          |                                       |         |                   |                  |
+   |         |           |       BSHD_BSHD_BSHD,SBHD_SBHD_SBHD         |                          |                                       |         |                   |                  |
+   \endverbatim
  *
  * Support Matrix:
    \verbatim

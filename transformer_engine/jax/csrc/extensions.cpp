@@ -8,11 +8,10 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
-//TODO: add back once fused_attn is supported
 #ifndef USE_ROCM
 #include <cublasLt.h>
-#include "transformer_engine/fused_attn.h"
 #endif
+#include "transformer_engine/fused_attn.h"
 #include "transformer_engine/transformer_engine.h"
 #include "modules.h"
 #include "utils.h"
@@ -53,15 +52,12 @@ pybind11::dict Registrations() {
         EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxForward);
     dict["te_scaled_upper_triang_masked_softmax_backward"] =
         EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxBackward);
-    //TODO: add back once fused_attn is available on ROCm
-#ifndef USE_ROCM
     dict["te_self_fused_attn_forward"] = EncapsulateFunction(SelfFusedAttnForward);
     dict["te_self_fused_attn_backward"] = EncapsulateFunction(SelfFusedAttnBackward);
     dict["te_cross_fused_attn_forward"] = EncapsulateFunction(CrossFusedAttnForward);
     dict["te_cross_fused_attn_backward"] = EncapsulateFunction(CrossFusedAttnBackward);
     dict["te_fused_attn_forward"] = EncapsulateFunction(FusedAttnForward);
     dict["te_fused_attn_backward"] = EncapsulateFunction(FusedAttnBackward);
-#endif
     return dict;
 }
 
@@ -78,7 +74,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
 #ifndef USE_ROCM
     m.def("get_cublasLt_version", &cublasLtGetVersion);
     m.def("get_cuda_version", &GetCudaRuntimeVersion);
-    //TODO: add back once fused_attn is available on ROCm
+#endif
     m.def("pack_fused_attn_descriptor", &PackCustomCallFusedAttnDescriptor);
     m.def("get_fused_attn_backend", &GetFusedAttnBackend);
     m.def("get_self_fused_attn_fwd_workspace_sizes", &GetSelfFusedAttnForwardWorkspaceSizes);
@@ -87,7 +83,6 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
     m.def("get_cross_fused_attn_bwd_workspace_sizes", &GetCrossFusedAttnBackwardWorkspaceSizes);
     m.def("get_fused_attn_fwd_workspace_sizes", &GetFusedAttnForwardWorkspaceSizes);
     m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
-#endif
 
     pybind11::enum_<DType>(m, "DType", pybind11::module_local())
         .value("kByte", DType::kByte)
@@ -99,8 +94,6 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
         .value("kFloat8E4M3", DType::kFloat8E4M3)
         .value("kFloat8E5M2", DType::kFloat8E5M2);
 
-    //TODO: add back once fused_attn is available on ROCm
-#ifndef USE_ROCM
     pybind11::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type", pybind11::module_local())
         .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)
         .value("NVTE_PRE_SCALE_BIAS", NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS)
@@ -117,11 +110,17 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
         .value("NVTE_BSHD_BS2HD", NVTE_QKV_Layout::NVTE_BSHD_BS2HD)
         .value("NVTE_BSHD_BSHD_BSHD", NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD);
 
+#ifndef USE_ROCM
     pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local())
         .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend)
         .value("NVTE_F16_max512_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen)
         .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)
         .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8);
+#else
+    pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local())
+        .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend)
+        .value("NVTE_AOTriton", NVTE_Fused_Attn_Backend::NVTE_AOTriton);
+
 #endif
 }
 

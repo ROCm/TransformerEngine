@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -18,6 +20,7 @@ from transformer_engine.jax import fp8_autocast
 from transformer_engine.jax.fused_attn import is_fused_attn_kernel_available
 from transformer_engine.jax.fused_attn import self_fused_attn, cross_fused_attn
 from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType, QKVLayout
+from transformer_engine.jax import is_hip_extension
 
 DTYPES = [jnp.float16, jnp.bfloat16]
 
@@ -69,7 +72,7 @@ class TestDistributedSelfAttn:
         'attn_bias_type',
         [AttnBiasType.NO_BIAS, AttnBiasType.PRE_SCALE_BIAS, AttnBiasType.POST_SCALE_BIAS])
     @pytest.mark.parametrize('attn_mask_type',
-                             [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK])
+                             [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK] if is_hip_extension else [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK])
     @pytest.mark.parametrize('dtype', DTYPES)
     def test_self_attn(self, device_count, mesh_shape, mesh_axes, mesh_resource, data_shape,
                        attn_bias_type, attn_mask_type, dtype):

@@ -26,46 +26,10 @@ from jax.ad_checkpoint import checkpoint_name
 
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
-from ..util import is_hip_extension
 
-if not is_hip_extension():
-    from ..fused_attn import AttnBiasType, AttnMaskType, QKVLayout
-    from ..fused_attn import is_fused_attn_kernel_available, canonicalize_attn_mask_type
-    from ..fused_attn import self_fused_attn, cross_fused_attn, fused_attn
-else:
-    class AttnBiasType(Enum):
-        """Attention Bias Type."""
-        NO_BIAS = "no_bias"
-        PRE_SCALE_BIAS = "pre_scale_bias"
-        POST_SCALE_BIAS = "post_scale_bias"
-
-    class AttnMaskType(Enum):
-        """Attention Mask Type."""
-        NO_MASK = "no_mask"
-        PADDING_MASK = "padding"
-        CAUSAL_MASK = "causal"
-        PADDING_CAUSAL_MASK = "padding_causal"
-
-    class QKVLayout(Enum):
-        """QKV layout"""
-        BS3HD = "bs3hd"
-        BSHD_BS2HD = "bshd_bs2hd"
-        BSHD_BSHD_BSHD = "bshd_bshd_bshd"
-
-    def canonicalize_attn_mask_type(attn_mask_type: str):
-        """Convert string attn_mask_type to AttnMaskType
-        TE-JAX currently fall back to the padding version kernels for the libraries integration.
-        The overhead between padding and non-padding version should be small.
-        However, we will lease this limitation in the near feature.
-        """
-        if attn_mask_type in ['causal', 'padding_causal']:
-            return AttnMaskType.PADDING_CAUSAL_MASK
-        if attn_mask_type in ['no_mask', 'padding']:
-            return AttnMaskType.PADDING_MASK
-        raise ValueError(f"Unsupported {attn_mask_type=}, "
-                         "supported attn_mask_type={'no_mask', 'padding', 'causal', 'padding_causal'}")
-
-
+from ..fused_attn import AttnBiasType, AttnMaskType, QKVLayout
+from ..fused_attn import is_fused_attn_kernel_available, canonicalize_attn_mask_type
+from ..fused_attn import self_fused_attn, cross_fused_attn, fused_attn
 from ..softmax import SoftmaxType
 from ..sharding import num_of_devices
 from ..sharding import get_sharding_map_logic_axis_to_mesh_axis
@@ -265,98 +229,97 @@ class _UnfusedDotProductAttention(nn.Module):    # pylint: disable=too-few-publi
             return jnp.einsum('bhgqk,bkhd->bqhgd', attn_weights, value).reshape(query.shape)
         return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
 
-if not is_hip_extension():
-    class _FusedDotProductAttention(nn.Module):    # pylint: disable=too-few-public-methods
-        attention_dropout: float = 0.
-        attn_mask_type: AttnMaskType = AttnMaskType.CAUSAL_MASK
-        attn_bias_type: Optional[AttnBiasType] = None
-        dtype: DType = jnp.float32
-        qkv_layout: QKVLayout = QKVLayout.BSHD_BSHD_BSHD
-        scale_factor: Optional[float] = None
-        transpose_batch_sequence: bool = False
-    
-        @nn.compact
-        def __call__(self,
-                     query: Array,
-                     key: Array,
-                     value: Array,
-                     mask: Optional[Array] = None,
-                     bias: Optional[Array] = None,
-                     *,
-                     dropout_rng: Optional[PRNGKey] = None,
-                     deterministic: bool = False) -> Array:
-    
-            seed = None
-            if dropout_rng is not None:
-                seed = jax.random.split(dropout_rng, num_of_devices())
-    
-            if self.scale_factor is None:
-                scale_factor = 1.0 / sqrt(query.shape[-1])
-            else:
-                scale_factor = self.scale_factor
-            del self.scale_factor
-    
-            if self.qkv_layout == QKVLayout.BS3HD:
-                """qkvpacked format, treat
-                query: qkvpacked tensor, shape = [..., 3, h, d]
-                key: ignore
-                value: ignore
-                """
-                qkv_packed = query
-                if self.transpose_batch_sequence:
-                    qkv_packed = qkv_packed.transpose([1, 0, 2, 3, 4])
-                x = self_fused_attn(qkv_packed,
-                                    bias,
-                                    mask,
-                                    seed,
-                                    attn_mask_type=self.attn_mask_type,
-                                    attn_bias_type=self.attn_bias_type,
-                                    scaling_factor=scale_factor,
-                                    dropout_probability=self.attention_dropout,
-                                    is_training=not deterministic)
-            elif self.qkv_layout == QKVLayout.BSHD_BS2HD:
-                """kvpacked format, treat
-                query: query tensor, shape = [..., h, d]
-                key: kvpacked tensor, shape = [..., 2, h, d]
-                value: ignore
-                """
-                kv_packed = key
-                if self.transpose_batch_sequence:
-                    query = query.transpose([1, 0, 2, 3])
-                    kv_packed = kv_packed.transpose([1, 0, 2, 3, 4])
-                x = cross_fused_attn(query,
-                                     kv_packed,
-                                     bias,
-                                     mask,
-                                     seed,
-                                     attn_mask_type=self.attn_mask_type,
-                                     attn_bias_type=self.attn_bias_type,
-                                     scaling_factor=scale_factor,
-                                     dropout_probability=self.attention_dropout,
-                                     is_training=not deterministic)
-            elif self.qkv_layout == QKVLayout.BSHD_BSHD_BSHD:
-                if self.transpose_batch_sequence:
-                    query = query.transpose([1, 0, 2, 3])
-                    key = key.transpose([1, 0, 2, 3])
-                    value = value.transpose([1, 0, 2, 3])
-                x = fused_attn(query,
-                               key,
-                               value,
-                               bias,
-                               mask,
-                               seed,
-                               attn_mask_type=self.attn_mask_type,
-                               attn_bias_type=self.attn_bias_type,
-                               scaling_factor=scale_factor,
-                               dropout_probability=self.attention_dropout,
-                               is_training=not deterministic)
-            else:
-                raise ValueError(f"Unsupported {self.qkv_layout=}.")
-    
+class _FusedDotProductAttention(nn.Module):    # pylint: disable=too-few-public-methods
+    attention_dropout: float = 0.
+    attn_mask_type: AttnMaskType = AttnMaskType.CAUSAL_MASK
+    attn_bias_type: Optional[AttnBiasType] = None
+    dtype: DType = jnp.float32
+    qkv_layout: QKVLayout = QKVLayout.BSHD_BSHD_BSHD
+    scale_factor: Optional[float] = None
+    transpose_batch_sequence: bool = False
+
+    @nn.compact
+    def __call__(self,
+                 query: Array,
+                 key: Array,
+                 value: Array,
+                 mask: Optional[Array] = None,
+                 bias: Optional[Array] = None,
+                 *,
+                 dropout_rng: Optional[PRNGKey] = None,
+                 deterministic: bool = False) -> Array:
+
+        seed = None
+        if dropout_rng is not None:
+            seed = jax.random.split(dropout_rng, num_of_devices())
+
+        if self.scale_factor is None:
+            scale_factor = 1.0 / sqrt(query.shape[-1])
+        else:
+            scale_factor = self.scale_factor
+        del self.scale_factor
+
+        if self.qkv_layout == QKVLayout.BS3HD:
+            """qkvpacked format, treat
+            query: qkvpacked tensor, shape = [..., 3, h, d]
+            key: ignore
+            value: ignore
+            """
+            qkv_packed = query
             if self.transpose_batch_sequence:
-                x = x.transpose([1, 0, 2, 3])
-    
-            return x
+                qkv_packed = qkv_packed.transpose([1, 0, 2, 3, 4])
+            x = self_fused_attn(qkv_packed,
+                                bias,
+                                mask,
+                                seed,
+                                attn_mask_type=self.attn_mask_type,
+                                attn_bias_type=self.attn_bias_type,
+                                scaling_factor=scale_factor,
+                                dropout_probability=self.attention_dropout,
+                                is_training=not deterministic)
+        elif self.qkv_layout == QKVLayout.BSHD_BS2HD:
+            """kvpacked format, treat
+            query: query tensor, shape = [..., h, d]
+            key: kvpacked tensor, shape = [..., 2, h, d]
+            value: ignore
+            """
+            kv_packed = key
+            if self.transpose_batch_sequence:
+                query = query.transpose([1, 0, 2, 3])
+                kv_packed = kv_packed.transpose([1, 0, 2, 3, 4])
+            x = cross_fused_attn(query,
+                                 kv_packed,
+                                 bias,
+                                 mask,
+                                 seed,
+                                 attn_mask_type=self.attn_mask_type,
+                                 attn_bias_type=self.attn_bias_type,
+                                 scaling_factor=scale_factor,
+                                 dropout_probability=self.attention_dropout,
+                                 is_training=not deterministic)
+        elif self.qkv_layout == QKVLayout.BSHD_BSHD_BSHD:
+            if self.transpose_batch_sequence:
+                query = query.transpose([1, 0, 2, 3])
+                key = key.transpose([1, 0, 2, 3])
+                value = value.transpose([1, 0, 2, 3])
+            x = fused_attn(query,
+                           key,
+                           value,
+                           bias,
+                           mask,
+                           seed,
+                           attn_mask_type=self.attn_mask_type,
+                           attn_bias_type=self.attn_bias_type,
+                           scaling_factor=scale_factor,
+                           dropout_probability=self.attention_dropout,
+                           is_training=not deterministic)
+        else:
+            raise ValueError(f"Unsupported {self.qkv_layout=}.")
+
+        if self.transpose_batch_sequence:
+            x = x.transpose([1, 0, 2, 3])
+
+        return x
 
 
 class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-methods
@@ -513,16 +476,12 @@ class DotProductAttention(nn.Module):    # pylint: disable=too-few-public-method
         else:
             seqlen_kv = key.shape[sequence_dim]
         
-        #TODO: add back when fused attn is available for rocm TE
-        if not is_hip_extension():
-            has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype, qkv_layout,
-                                                                   attn_bias_type, attn_mask_type,
-                                                                   self.attention_dropout,
-                                                                   self.num_attention_heads,
-                                                                   self.num_gqa_groups, seqlen_q,
-                                                                   seqlen_kv, self.head_dim)
-        else:
-            has_fused_attn_kernel = False
+        has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype, qkv_layout,
+                                                               attn_bias_type, attn_mask_type,
+                                                               self.attention_dropout,
+                                                               self.num_attention_heads,
+                                                               self.num_gqa_groups, seqlen_q,
+                                                               seqlen_kv, self.head_dim)
 
         use_fused_attn = (enable_fused_attn and has_fused_attn_kernel)
 

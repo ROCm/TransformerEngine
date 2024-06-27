@@ -319,18 +319,18 @@ public:
   {
     std::lock_guard<std::mutex> lock(mt);
 
-    if (d.empty())
+    if (pool.empty())
     {
       int device_count = 0; 
       NVTE_CHECK_CUDA(hipGetDeviceCount(&device_count));
-      d.resize(device_count);
+      pool.resize(device_count);
       return nullptr;
     }
 
-    if (!d[device_id].empty())
+    if (!pool[device_id].empty())
     {
-      hipblasLtHandle_t h = d[device_id].front();
-      d[device_id].pop_front();
+      hipblasLtHandle_t h = pool[device_id].front();
+      pool[device_id].pop_front();
       return h;
     }
 
@@ -347,49 +347,73 @@ public:
     return h;
   }
 
-  void store(int device_id, hipblasLtHandle_t h)
+  void store(const std::vector<hipblasLtHandle_t>& handles)
   {
     std::lock_guard<std::mutex> lock(mt);
-    d[device_id].push_front(h);
-  }
-
-  void store(std::vector<hipblasLtHandle_t> h)
-  {
-    std::lock_guard<std::mutex> lock(mt);
-    for (size_t i=0; i<d.size(); i++)
+    if (pool.empty())
     {
-      if (h[i] != nullptr)
+      std::cout << "[ERROR] Attempt to store handles to invalid pool" << std::endl;
+    }
+    for (unsigned int i=0; i<pool.size(); i++)
+    {
+      if (handles[i] != nullptr)
       {
-        d[i].push_front(h[i]);
+        pool[i].push_front(handles[i]);
       }
     }
   }
 
   ~HandlePool() {
-    for (auto & hlist : d)
+#if DESTROY_HIPBLASLT_HANDLES_POOL
+    std::lock_guard<std::mutex> lock(mt);
+    for (auto & hlist : pool)
     {
       for (auto & h : hlist)
       {
         hipblasLtDestroy(h);
       }
     }
+    pool.clear();
+#endif
   }
 
   inline size_t get_size() const
   {
-    return d.size();
+    return pool.size();
   }
 
 private:
   std::mutex mt;
-  std::vector<std::forward_list<hipblasLtHandle_t>> d;
+  using Pool = std::vector<std::forward_list<hipblasLtHandle_t>>;
+  // Order of destructors between thread_local and global is not actually guaranteed
+  // As a simple w/a make pool storage "leaky"
+  // Just do not destruct it and do not destroy hipbladLt handles
+  // Let OS deal with it on application exit
+#if DESTROY_HIPBLASLT_HANDLES_POOL
+  Pool pool;
+#else
+  Pool &pool = *new Pool();
+#endif
 } handle_pool;
 
-thread_local class HandleCache {
+
+thread_local static class HandleCache {
 public:
   hipblasLtHandle_t get(int device_id) const
   {
     return d.empty() ? nullptr : d[device_id];
+  }
+
+  hipblasLtHandle_t obtain(int device_id)
+  {
+    hipblasLtHandle_t h = get(device_id);
+    if (h)
+    {
+      return h;
+    }
+    h = handle_pool.obtain(device_id);
+    set(device_id, h);
+    return h;
   }
 
   void set(int device_id, hipblasLtHandle_t h) 
@@ -398,7 +422,7 @@ public:
     {
       d.resize(handle_pool.get_size());
     }
-    d[device_id] = h; 
+    d[device_id] = h;
   }
 
   ~HandleCache()
@@ -546,8 +570,7 @@ void cublas_gemm(const Tensor *inputA,
   hipblasLtHandle_t handle = cached_handles.get(device_id);
   if (handle == nullptr)
   {
-    handle = handle_pool.obtain(device_id);
-    cached_handles.set(device_id, handle);
+    handle = cached_handles.obtain(device_id);
   }
 
   hipblasLtMatmulDesc_t       operationDesc = nullptr;
