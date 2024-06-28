@@ -93,6 +93,12 @@ else()
   add_library(aotriton INTERFACE)
   target_link_libraries(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/lib/libaotriton_v2.a)
   target_include_directories(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/include)
+
+  # Install ck fused attn
+  set(__CK_FUSED_ATTN_INSTALL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/ck_fused_attn/build/install_dir")
+  add_library(ck_fused_attn INTERFACE)
+  target_link_libraries(ck_fused_attn INTERFACE ${__CK_FUSED_ATTN_INSTALL_DIR}/lib/libck_fused_attn.a)
+  target_include_directories(ck_fused_attn INTERFACE ${__CK_FUSED_ATTN_INSTALL_DIR}/include)
 endif()
 
 # process source code files
@@ -185,7 +191,7 @@ if(USE_CUDA)
        CUDNN::cudnn)
 else()
   find_package(hip)
-  list(APPEND transformer_engine_LINKER_LIBS hip::host hip::device roctx64 aotriton)
+  list(APPEND transformer_engine_LINKER_LIBS hip::host hip::device roctx64 aotriton ck_fused_attn)
   if(USE_HIPBLASLT)
     find_package(hipblaslt)
     target_compile_definitions(transformer_engine PUBLIC USE_HIPBLASLT)

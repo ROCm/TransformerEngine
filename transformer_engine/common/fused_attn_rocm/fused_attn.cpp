@@ -476,10 +476,6 @@ void nvte_fused_attn_fwd(
                           qkv_layout, bias_type, attn_mask_type,
                           dropout, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d);
 
-  if (fused_attention_backend != NVTE_Fused_Attn_Backend::NVTE_AOTriton){
-    NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
-  }
-
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd(
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,

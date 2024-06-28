@@ -1,5 +1,6 @@
 #include <iostream>
 #include <string>
+#include <ck_fused_attn/ck_fused_attn.hpp>
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
 #include "fused_attn_ck.h"
@@ -8,7 +9,7 @@
 namespace transformer_engine {
 namespace fused_attn_rocm {
 
-// check the fused attn config to see whether it's aotriton backend supported
+// check the fused attn config to see whether it's ck backend supported
 bool is_ck_backend_supported(
   NVTEDType q_dtype,
   NVTEDType kv_dtype,
@@ -21,7 +22,7 @@ bool is_ck_backend_supported(
   size_t head_dim) {
 
   using namespace transformer_engine;
-  //aotriton fused attn does not support gqa mode now
+  //ck fused attn does not support gqa mode now
   if(num_attn_heads!=num_gqa_groups){
     return false;
   }
@@ -59,22 +60,19 @@ bool is_ck_backend_supported(
   if((max_seqlen_q!=max_seqlen_kv)&&(attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)){
     return false;
   }
-  //TODO: left false on purpose
-  return false;
+  return true;
 }
 
 
-/*
-aotriton::DType nvte_to_aotriton_dtype(NVTEDType t_dtype){
-#define CAST_TYPE(aname, dtname) if (t_dtype == NVTEDType::aname) return aotriton::DType::dtname
-  CAST_TYPE(kNVTEByte, kUInt8);
-  CAST_TYPE(kNVTEFloat32, kFloat32);
+ck_fused_attn::DType nvte_to_ck_dtype(NVTEDType t_dtype){
+#define CAST_TYPE(aname, dtname) if (t_dtype == NVTEDType::aname) return ck_fused_attn::DType::dtname
   CAST_TYPE(kNVTEFloat16, kFloat16);
   CAST_TYPE(kNVTEBFloat16, kBFloat16);
-  return aotriton::DType::kUnknown;
+  return ck_fused_attn::DType::kNumTypes;
 #undef CAST_TYPE
 }
-// actual fwd implementation, calling aotriton api directly
+
+// actual fwd implementation, calling ck api directly
 void fused_attn_ck_fwd_impl(
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d,
   bool is_training, float scaling_factor, float dropout_probability,
@@ -84,7 +82,7 @@ void fused_attn_ck_fwd_impl(
   void *devPtrSoftmaxAux, void *devPtrO,
   const uint64_t* devPtrDropoutSeed, const uint64_t* devPtrDropoutOffset,
   //void* devPtrCuSeqlensQ, void* devPtrCuSeqlensKV,
-  aotriton::DType dtype,
+  ck_fused_attn::DType dtype,
   //void *workspace, size_t *workspace_size,
   cudaStream_t stream){
 
@@ -101,40 +99,23 @@ void fused_attn_ck_fwd_impl(
   std::array<uint64_t, 4> q_shape{b, h, s_q, d};
   std::array<uint64_t, 4> kv_shape{b, hg, s_kv, d};
 
-  auto q_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrQ), q_shape, q_stride, dtype);
-  auto k_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrK), kv_shape, k_stride, dtype);
-  auto v_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrV), kv_shape, v_stride, dtype);
-
-
   std::array<uint64_t, 4> o_stride;
   generateMatrixStrides(b, h, s_q, s_kv, d, o_stride.data(),
                         layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
 
-  auto o_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrO), q_shape, o_stride, dtype);
-  auto M_tensor = aotriton::TensorView<2>(
-    reinterpret_cast<intptr_t>(devPtrSoftmaxAux), 
-    std::array<uint64_t, 2>{b * h, s_q}, 
-    std::array<uint64_t, 2>{s_q, 1}, 
-    aotriton::DType::kFloat32);
-  auto encoded_softmax_tensor = aotriton::TensorView<4>(
-    reinterpret_cast<intptr_t>(nullptr), 
-    std::array<uint64_t, 4>{0, 0, 0, 0}, 
-    std::array<uint64_t, 4>{1, 1, 1, 1}, 
-    dtype);
-  
   //devPtrDropoutSeed and devPtrDropoutOffset are actually device ptrs
   uint64_t philox_seed, philox_offset;
   cudaStreamSynchronize(stream);
   cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
   cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
 
-  bool nvte_log_aotriton_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_AOTRITON_CONFIG") ) {
+  bool nvte_log_ck_config = false;
+  if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_aotriton_config = true;
+      nvte_log_ck_config = true;
   }
-  if (nvte_log_aotriton_config) {
-    std::cout<<std::endl<<"attn_fwd: ";
+  if (nvte_log_ck_config) {
+    std::cout<<std::endl<<"attn_fwd(ck): ";
     std::cout<<"q_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d<<"), ";
     std::cout<<"q_stride: ("<<q_stride[0]<<", "<<q_stride[1]<<", "<<q_stride[2]<<", "<<q_stride[3]<<"), ";
     std::cout<<"kv_shape: ("<<b<<", "<<hg<<", "<<s_kv<<", "<<d<<"), ";
@@ -150,21 +131,24 @@ void fused_attn_ck_fwd_impl(
     std::cout<<"philox_seed: "<<philox_seed<<", philox_offset: "<<philox_offset<<", ";
     std::cout<<"causal mask: "<<(mask_type==NVTE_CAUSAL_MASK)<<std::endl;
   }
-  aotriton::TensorView<4> empty_bias(0, {0,0,0,0}, {0,0,0,0}, dtype);
-  using aotriton::v2::flash::attn_fwd;
-  NVTE_CHECK_CUDA(attn_fwd(q_tensor,
-                           k_tensor,
-                           v_tensor,
-                           empty_bias,
-                           scaling_factor,
-                           M_tensor,
-                           o_tensor,
-                           is_training? dropout_probability:0,
-                           philox_seed,
-                           philox_offset,
-                           encoded_softmax_tensor,
-                           mask_type==NVTE_CAUSAL_MASK,
-                           stream));
+  using ck_fused_attn::ck_attn_fwd;
+  NVTE_CHECK_CUDA(
+    ck_attn_fwd(
+      dtype,
+      b, h, hg, s_q, s_kv, d,
+      devPtrQ, 
+      q_stride[0], q_stride[1], q_stride[2],
+      devPtrK, 
+      k_stride[0], k_stride[1], k_stride[2],
+      devPtrV, 
+      v_stride[0], v_stride[1], v_stride[2],
+      is_training, scaling_factor, dropout_probability,
+      philox_seed, philox_offset,
+      mask_type==NVTE_CAUSAL_MASK, //is_causal
+      devPtrO,
+      o_stride[0], o_stride[1], o_stride[2],
+      devPtrSoftmaxAux,
+      stream));
 }
 
 void fused_attn_ck_bwd_impl(
@@ -178,7 +162,7 @@ void fused_attn_ck_bwd_impl(
   void* devPtrdO, 
   const uint64_t* devPtrDropoutSeed, 
   const uint64_t* devPtrDropoutOffset,
-  aotriton::DType dtype,
+  ck_fused_attn::DType dtype,
   void *workspace,
   cudaStream_t stream) {
 
@@ -201,37 +185,17 @@ void fused_attn_ck_bwd_impl(
   std::array<uint64_t, 4> q_shape{b, h, s_q, d};
   std::array<uint64_t, 4> kv_shape{b, hg, s_kv, d};
   
-  // m and wkspace are of the same shape and stride
-  std::array<uint64_t, 2> m_shape{b * h, s_q};
-  std::array<uint64_t, 2> m_stride{s_q, 1};
-
-  // input tensors
-  auto q_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrQ), q_shape, q_stride, dtype);
-  auto k_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrK), kv_shape, k_stride, dtype);
-  auto v_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrV), kv_shape, v_stride, dtype);
-  auto o_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrO), q_shape, o_stride, dtype);
-  auto do_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrdO), q_shape, o_stride, dtype);
-  
-  // output tensors
-  auto dq_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrdQ), q_shape, q_stride, dtype);
-  auto dk_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrdK), kv_shape, k_stride, dtype);
-  auto dv_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrdV), kv_shape, v_stride, dtype);
-  
-  // auxilary tensors
-  auto M_tensor = aotriton::TensorView<2>(reinterpret_cast<intptr_t>(devPtrSoftmaxAux), m_shape, m_stride, aotriton::DType::kFloat32);
-  auto wkspace_tensor = aotriton::TensorView<2>(reinterpret_cast<intptr_t>(workspace), m_shape, m_stride, aotriton::DType::kFloat32);
-
   uint64_t philox_seed, philox_offset;
   cudaStreamSynchronize(stream);
   cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
   cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
-  bool nvte_log_aotriton_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_AOTRITON_CONFIG") ) {
+  bool nvte_log_ck_config = false;
+  if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_aotriton_config = true;
+      nvte_log_ck_config = true;
   }
-  if (nvte_log_aotriton_config) {
-    std::cout<<std::endl<<"attn_bwd: ";
+  if (nvte_log_ck_config) {
+    std::cout<<std::endl<<"attn_bwd(ck): ";
     std::cout<<"q_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d<<"), ";
     std::cout<<"q_stride: ("<<q_stride[0]<<", "<<q_stride[1]<<", "<<q_stride[2]<<", "<<q_stride[3]<<"), ";
     std::cout<<"kv_shape: ("<<b<<", "<<hg<<", "<<s_kv<<", "<<d<<"), ";
@@ -246,28 +210,34 @@ void fused_attn_ck_bwd_impl(
     std::cout<<"philox_seed: "<<philox_seed<<", philox_offset: "<<philox_offset<<", ";
     std::cout<<"causal mask: "<<(mask_type==NVTE_CAUSAL_MASK)<<std::endl;
   }
-  aotriton::TensorView<4> empty_bias(0, {0,0,0,0}, {0,0,0,0}, dtype);
-  using aotriton::v2::flash::attn_bwd;
-  NVTE_CHECK_CUDA(attn_bwd(q_tensor,
-                           k_tensor,
-                           v_tensor,
-                           empty_bias,
-                           scaling_factor,
-                           o_tensor,
-                           do_tensor,
-                           dq_tensor,
-                           dk_tensor,
-                           dv_tensor,
-                           empty_bias,
-                           M_tensor,
-                           wkspace_tensor,
-                           dropout_probability,
-                           philox_seed,
-                           philox_offset,
-                           mask_type==NVTE_CAUSAL_MASK,
-                           stream));
+  using ck_fused_attn::ck_attn_bwd;
+  NVTE_CHECK_CUDA(
+    ck_attn_bwd(
+      dtype,
+      b, h, hg, s_q, s_kv, d,
+      devPtrQ,
+      q_stride[0], q_stride[1], q_stride[2],
+      devPtrK,
+      k_stride[0], k_stride[1], k_stride[2],
+      devPtrV,
+      v_stride[0], v_stride[1], v_stride[2],
+      devPtrO,
+      o_stride[0], o_stride[1], o_stride[2],
+      devPtrSoftmaxAux,
+      devPtrdO,
+      o_stride[0], o_stride[1], o_stride[2], //dO and O share the same stride
+      scaling_factor, dropout_probability,
+      philox_seed, philox_offset,
+      mask_type==NVTE_CAUSAL_MASK, // is causal
+      devPtrdQ,
+      q_stride[0], q_stride[1], q_stride[2], //dQ and Q share the same stride
+      devPtrdK,
+      k_stride[0], k_stride[1], k_stride[2], //dK and K share the same stride
+      devPtrdV,
+      v_stride[0], v_stride[1], v_stride[2], //dV and V share the same stride
+      workspace,
+      stream));
 }
-*/
 }  // namespace fused_attn_rocm
 
 using namespace transformer_engine::fused_attn_rocm;
@@ -280,7 +250,6 @@ void fused_attn_ck_fwd_qkvpacked(
   const Tensor* input_cu_seqlens,
   const Tensor* input_rng_state,
   cudaStream_t stream){
-/*
   const NVTEDType QKV_type = static_cast<NVTEDType>(input_QKV->data.dtype);
   void *devPtrQKV = input_QKV->data.dptr;
   // determine the stride based on qkv layout
@@ -298,7 +267,7 @@ void fused_attn_ck_fwd_qkvpacked(
   //save the input rng state to Aux_CTX_Tensors
   output_rng_state->data.dptr = input_rng_state->data.dptr;
 
-  fused_attn_fwd_impl(
+  fused_attn_ck_fwd_impl(
     b, h, h, max_seqlen, max_seqlen, d,
     is_training, attn_scale, dropout, 
     qkv_layout,
@@ -307,9 +276,8 @@ void fused_attn_ck_fwd_qkvpacked(
     output_M->data.dptr, output_O->data.dptr,
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1,
-    nvte_to_aotriton_dtype(QKV_type),
+    nvte_to_ck_dtype(QKV_type),
     stream);
-*/
 }
 
 void fused_attn_ck_bwd_qkvpacked(
@@ -323,7 +291,7 @@ void fused_attn_ck_bwd_qkvpacked(
   const Tensor* input_rng_state,
   Tensor* wkspace,
   cudaStream_t stream){
-/*
+
   const NVTEDType QKV_type = static_cast<NVTEDType>(input_QKV->data.dtype);
   //input tensor
   void *devPtrQKV = input_QKV->data.dptr;
@@ -344,7 +312,7 @@ void fused_attn_ck_bwd_qkvpacked(
   void *devPtrdK = static_cast<void *>(static_cast<int8_t *>(devPtrdQKV) + stride);
   void *devPtrdV = static_cast<void *>(static_cast<int8_t *>(devPtrdQKV) + 2 * stride);
   
-  fused_attn_bwd_impl(
+  fused_attn_ck_bwd_impl(
     b, h, h, max_seqlen, max_seqlen, d,
     attn_scale, dropout, 
     qkv_layout,
@@ -355,10 +323,9 @@ void fused_attn_ck_bwd_qkvpacked(
     input_dO->data.dptr,
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1,
-    nvte_to_aotriton_dtype(QKV_type),
+    nvte_to_ck_dtype(QKV_type),
     wkspace->data.dptr,
     stream);
-*/
 }
 
 void fused_attn_ck_fwd_kvpacked(
@@ -371,7 +338,6 @@ void fused_attn_ck_fwd_kvpacked(
   const Tensor* input_cu_seqlens_kv,
   const Tensor* input_rng_state,
   cudaStream_t stream){
-/*
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_KV->data.dtype);
   //input tensor
@@ -389,7 +355,7 @@ void fused_attn_ck_fwd_kvpacked(
   //save the input rng state to Aux_CTX_Tensors
   output_rng_state->data.dptr = input_rng_state->data.dptr;
 
-  fused_attn_fwd_impl(
+  fused_attn_ck_fwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
     is_training, attn_scale, dropout, 
     qkv_layout,
@@ -398,9 +364,8 @@ void fused_attn_ck_fwd_kvpacked(
     output_M->data.dptr, output_O->data.dptr,
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1,
-    nvte_to_aotriton_dtype(Q_type),
+    nvte_to_ck_dtype(Q_type),
     stream);
-*/
 }
 
 void fused_attn_ck_bwd_kvpacked(
@@ -415,7 +380,6 @@ void fused_attn_ck_bwd_kvpacked(
   const Tensor* input_rng_state,
   Tensor* wkspace,
   cudaStream_t stream){
-/*
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_KV->data.dtype);
   //input tensor
@@ -435,7 +399,7 @@ void fused_attn_ck_bwd_kvpacked(
   void *devPtrdK = devPtrdKV;
   void *devPtrdV = static_cast<void *>(static_cast<int8_t *>(devPtrdKV) + stride);
 
-  fused_attn_bwd_impl(
+  fused_attn_ck_bwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
     attn_scale, dropout, 
     qkv_layout,
@@ -446,10 +410,9 @@ void fused_attn_ck_bwd_kvpacked(
     input_dO->data.dptr,
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1,
-    nvte_to_aotriton_dtype(Q_type),
+    nvte_to_ck_dtype(Q_type),
     wkspace->data.dptr,
     stream);
-*/
 }
 
 void fused_attn_ck_fwd(
@@ -462,13 +425,13 @@ void fused_attn_ck_fwd(
   const Tensor* input_cu_seqlens_kv,
   const Tensor* input_rng_state,
   cudaStream_t stream){
-/*
+
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
   //save the input rng state to Aux_CTX_Tensors
   output_rng_state->data.dptr = input_rng_state->data.dptr;
 
-  fused_attn_fwd_impl(
+  fused_attn_ck_fwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
     is_training, attn_scale, dropout, 
     qkv_layout,
@@ -477,9 +440,8 @@ void fused_attn_ck_fwd(
     output_M->data.dptr, output_O->data.dptr,
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1,
-    nvte_to_aotriton_dtype(Q_type),
+    nvte_to_ck_dtype(Q_type),
     stream);
-*/
 }
 
 void fused_attn_ck_bwd(
@@ -494,10 +456,9 @@ void fused_attn_ck_bwd(
   const Tensor* input_rng_state,
   Tensor* wkspace,
   cudaStream_t stream){
-/*
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
-  fused_attn_bwd_impl(
+  fused_attn_ck_bwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
     attn_scale, dropout, 
     qkv_layout,
@@ -508,10 +469,9 @@ void fused_attn_ck_bwd(
     input_dO->data.dptr,
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1,
-    nvte_to_aotriton_dtype(Q_type),
+    nvte_to_ck_dtype(Q_type),
     wkspace->data.dptr,
     stream);
-*/
 }
 
 }  // namespace transformer_engine

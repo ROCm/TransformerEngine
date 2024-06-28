@@ -138,7 +138,7 @@ void fused_attn_aotriton_fwd_impl(
       nvte_log_aotriton_config = true;
   }
   if (nvte_log_aotriton_config) {
-    std::cout<<std::endl<<"attn_fwd: ";
+    std::cout<<std::endl<<"attn_fwd(aotriton): ";
     std::cout<<"q_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d<<"), ";
     std::cout<<"q_stride: ("<<q_stride[0]<<", "<<q_stride[1]<<", "<<q_stride[2]<<", "<<q_stride[3]<<"), ";
     std::cout<<"kv_shape: ("<<b<<", "<<hg<<", "<<s_kv<<", "<<d<<"), ";
@@ -235,7 +235,7 @@ void fused_attn_aotriton_bwd_impl(
       nvte_log_aotriton_config = true;
   }
   if (nvte_log_aotriton_config) {
-    std::cout<<std::endl<<"attn_bwd: ";
+    std::cout<<std::endl<<"attn_bwd(aotriton): ";
     std::cout<<"q_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d<<"), ";
     std::cout<<"q_stride: ("<<q_stride[0]<<", "<<q_stride[1]<<", "<<q_stride[2]<<", "<<q_stride[3]<<"), ";
     std::cout<<"kv_shape: ("<<b<<", "<<hg<<", "<<s_kv<<", "<<d<<"), ";

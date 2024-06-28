@@ -8,43 +8,8 @@
 
 namespace ck_fused_attn{
 
-#define CK_FUSED_ATTN_TYPE_SWITCH_ALL(dtype, type, ...)                         \
-  switch (dtype) {                                                              \
-    case DType::kBFloat16: {                                                    \
-        using type = ck_tile::bf16_t;                                           \
-        {__VA_ARGS__}                                                           \
-    } break;                                                                    \
-    case DType::kFloat16: {                                                     \
-        using type = ck_tile::half_t;                                           \
-        {__VA_ARGS__}                                                           \
-    } break;                                                                    \
-    default:                                                                    \
-        throw std::runtime_error("Invalid type.");                              \
-    }
-
-template <typename T>
-struct TypeName{
-  static const char* get(){
-    return "";
-  }
-};
-
-template <>
-struct TypeName<ck_tile::bf16_t>{
-  static const char* get(){
-      return "bf16";
-  }
-};
-
-template <>
-struct TypeName<ck_tile::half_t>{
-  static const char* get(){
-      return "fp16";
-  }
-};
-
-template <typename DataType>
-hipError_t ck_attn_fwd_impl(
+hipError_t ck_attn_fwd(
+  DType dtype,
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d,
   const void* q_ptr, 
   uint64_t stride_b_q, uint64_t stride_h_q, uint64_t stride_s_q,
@@ -59,21 +24,8 @@ hipError_t ck_attn_fwd_impl(
   bool is_causal,
   void* o_ptr, 
   uint64_t stride_b_o, uint64_t stride_h_o, uint64_t stride_s_o,
-  void* lse_ptr, // lse shape (b_q, h_q, s_q) and stride (h_qxs_q, s_q, 1) fixed by ck_fused_attn
+  void* lse_ptr, 
   hipStream_t stream){
-
-  using TypeConfig = FmhaFwdTypeConfig<DataType>;
-  using QDataType = typename TypeConfig::QDataType;
-  using KDataType = typename TypeConfig::KDataType;
-  using VDataType = typename TypeConfig::VDataType;
-  using BiasDataType = typename TypeConfig::BiasDataType;
-  using RandValOutputDataType = typename TypeConfig::RandValOutputDataType;
-  using LSEDataType = typename TypeConfig::LSEDataType;
-  using SaccDataType = typename TypeConfig::SaccDataType;
-  using SMPLComputeDataType = typename TypeConfig::SMPLComputeDataType;
-  using PDataType = typename TypeConfig::PDataType;
-  using OaccDataType = typename TypeConfig::OaccDataType;
-  using ODataType = typename TypeConfig::ODataType;
 
   bool has_dropout = (is_training && dropout_probability > 0.f);
   bool has_lse = (lse_ptr != nullptr);
@@ -110,15 +62,22 @@ hipError_t ck_attn_fwd_impl(
     mask_type = mask_enum::no_mask;
   }
 
-  ck_tile::index_t shape_batch = batch;
   ck_tile::index_t shape_seqlen_q = seqlen_q;
   ck_tile::index_t shape_seqlen_k = seqlen_k;
 
-  std::string data_type(TypeName<DataType>::get());
+  std::string data_type_str;
+  if(dtype==DType::kFloat16){
+    data_type_str = "fp16";
+  }else if(dtype==DType::kBFloat16){
+    data_type_str = "bf16";
+  }else{
+    //TODO: better error out system
+    throw std::runtime_error("Invalid dtype in ck_fused_attn.");
+  }
 
   auto fmha_traits = fmha_fwd_traits{
-    hdim_q,    hdim_v,    data_type, is_group_mode, is_v_rowmajor,
-    mask_type, bias_type, has_lse,   has_dropout,   do_fp8_static_quant};
+    hdim_q,    hdim_v,    data_type_str, is_group_mode, is_v_rowmajor,
+    mask_type, bias_type, has_lse,       has_dropout,   do_fp8_static_quant};
 
   auto fmha_args = [&]() {
     // setup stride_* arguments
@@ -199,54 +158,16 @@ hipError_t ck_attn_fwd_impl(
                          {philox_seed, philox_offset}};
   }();
 
-  fmha_fwd(fmha_traits, fmha_args, stream_config);
-
+  float average_runtime = fmha_fwd(fmha_traits, fmha_args, stream_config);
+  if(average_runtime < 0){
+    //TODO: better error out system
+    throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");
+  }
   return hipSuccess;
-} 
-
-hipError_t ck_attn_fwd(
-  DType dtype,
-  uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d,
-  const void* q_ptr, 
-  uint64_t stride_b_q, uint64_t stride_h_q, uint64_t stride_s_q,
-  const void* k_ptr, 
-  uint64_t stride_b_k, uint64_t stride_h_k, uint64_t stride_s_k,
-  const void* v_ptr, 
-  uint64_t stride_b_v, uint64_t stride_h_v, uint64_t stride_s_v,
-  bool is_training,
-  float scaling_factor,
-  float dropout_probability,
-  uint64_t philox_seed, uint64_t philox_offset,
-  bool is_causal,
-  void* o_ptr, 
-  uint64_t stride_b_o, uint64_t stride_h_o, uint64_t stride_s_o,
-  void* lse_ptr, 
-  hipStream_t stream){
-  
-  hipError_t ret;
-  CK_FUSED_ATTN_TYPE_SWITCH_ALL(dtype, type,
-    ret = ck_attn_fwd_impl<type>(b, h, hg, s_q, s_kv, d,
-                                 q_ptr, 
-                                 stride_b_q, stride_h_q, stride_s_q,
-                                 k_ptr, 
-                                 stride_b_k, stride_h_k, stride_s_k,
-                                 v_ptr, 
-                                 stride_b_v, stride_h_v, stride_s_v,
-                                 is_training,
-                                 scaling_factor,
-                                 dropout_probability,
-                                 philox_seed, philox_offset,
-                                 is_causal,
-                                 o_ptr,
-                                 stride_b_o, stride_h_o, stride_s_o,
-                                 lse_ptr,
-                                 stream);
-  );
-  return ret;
 }
 
-template <typename DataType>
-hipError_t ck_attn_bwd_impl(  
+hipError_t ck_attn_bwd(  
+  DType dtype,
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d,
   const void* q_ptr, 
   uint64_t stride_b_q, uint64_t stride_h_q, uint64_t stride_s_q,
@@ -259,9 +180,7 @@ hipError_t ck_attn_bwd_impl(
   const void* lse_ptr, 
   const void* do_ptr, 
   uint64_t stride_b_do, uint64_t stride_h_do, uint64_t stride_s_do,
-  bool is_training,
-  float scaling_factor,
-  float dropout_probability,
+  float scaling_factor, float dropout_probability,
   uint64_t philox_seed, uint64_t philox_offset,
   bool is_causal,
   void* dq_ptr, 
@@ -272,22 +191,6 @@ hipError_t ck_attn_bwd_impl(
   uint64_t stride_b_dv, uint64_t stride_h_dv, uint64_t stride_s_dv,
   void* workspace_ptr,
   hipStream_t stream){
-  using TypeConfig = FmhaBwdTypeConfig<DataType>;
-  using QDataType = typename TypeConfig::QDataType;
-  using KDataType = typename TypeConfig::KDataType;
-  using VDataType = typename TypeConfig::VDataType;
-  using GemmDataType = typename TypeConfig::GemmDataType;
-  using BiasDataType = typename TypeConfig::BiasDataType;
-  using LSEDataType = typename TypeConfig::LSEDataType;
-  using AccDataType = typename TypeConfig::AccDataType;
-  using DDataType = typename TypeConfig::DDataType;
-  using RandValOutputDataType = typename TypeConfig::RandValOutputDataType;
-  using ODataType = typename TypeConfig::ODataType;
-  using OGradDataType = typename TypeConfig::OGradDataType;
-  using QGradDataType = typename TypeConfig::QGradDataType;
-  using KGradDataType = typename TypeConfig::KGradDataType;
-  using VGradDataType = typename TypeConfig::VGradDataType;
-  using BiasGradDataType = typename TypeConfig::BiasGradDataType;
 
   bool has_dropout = (dropout_probability > 0.f);
   bool has_dbias = false;
@@ -303,14 +206,9 @@ hipError_t ck_attn_bwd_impl(
   ck_tile::index_t max_seqlen_q = s_q;
   ck_tile::index_t max_seqlen_k = s_kv;
   float scale_s = scaling_factor;
-  float scale_p = 1.f;
-  float scale_o = 1.f;
   float p_drop = dropout_probability;
   float p_undrop = 1.0 - p_drop;
-  float rp_undrop = 1.0 / p_undrop;
   bool is_group_mode = false;
-  bool is_v_rowmajor = true;
-  bool do_fp8_static_quant = false;
 
   bias_enum bias_type;
   mask_enum mask_type;
@@ -325,15 +223,21 @@ hipError_t ck_attn_bwd_impl(
     mask_type = mask_enum::no_mask;
   }
 
-  ck_tile::index_t shape_batch = batch;
   ck_tile::index_t shape_seqlen_q = seqlen_q;
   ck_tile::index_t shape_seqlen_k = seqlen_k;
 
-  std::string data_type(TypeName<DataType>::get());
-
+  std::string data_type_str;
+  if(dtype==DType::kFloat16){
+    data_type_str = "fp16";
+  }else if(dtype==DType::kBFloat16){
+    data_type_str = "bf16";
+  }else{
+    //TODO: better error out system
+    throw std::runtime_error("Invalid dtype in ck_fused_attn.");
+  }
   auto fmha_traits =
-    fmha_bwd_traits{hdim_q,    hdim_v,    data_type, is_group_mode,
-                    mask_type, bias_type, has_dbias, has_dropout};
+    fmha_bwd_traits{hdim_q,    hdim_v,    data_type_str, is_group_mode,
+                    mask_type, bias_type, has_dbias,     has_dropout};
 
   auto fmha_args = [&]() {
     // setup stride_* arguments
@@ -441,69 +345,12 @@ hipError_t ck_attn_bwd_impl(
                          false,
                          {philox_seed, philox_offset}};
   }();
-  fmha_bwd(fmha_traits, fmha_args, stream_config);
+  float average_runtime = fmha_bwd(fmha_traits, fmha_args, stream_config);
+  if(average_runtime < 0){
+    //TODO: better error out system
+    throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
+  }
   return hipSuccess;
 }
-
-
-hipError_t ck_attn_bwd(  
-  DType dtype,
-  uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d,
-  const void* q_ptr, 
-  uint64_t stride_b_q, uint64_t stride_h_q, uint64_t stride_s_q,
-  const void* k_ptr, 
-  uint64_t stride_b_k, uint64_t stride_h_k, uint64_t stride_s_k,
-  const void* v_ptr, 
-  uint64_t stride_b_v, uint64_t stride_h_v, uint64_t stride_s_v,
-  const void* o_ptr, 
-  uint64_t stride_b_o, uint64_t stride_h_o, uint64_t stride_s_o,
-  const void* lse_ptr, 
-  const void* do_ptr, 
-  uint64_t stride_b_do, uint64_t stride_h_do, uint64_t stride_s_do,
-  bool is_training,
-  float scaling_factor,
-  float dropout_probability,
-  uint64_t philox_seed, uint64_t philox_offset,
-  bool is_causal,
-  void* dq_ptr, 
-  uint64_t stride_b_dq, uint64_t stride_h_dq, uint64_t stride_s_dq,
-  void* dk_ptr, 
-  uint64_t stride_b_dk, uint64_t stride_h_dk, uint64_t stride_s_dk,
-  void* dv_ptr, 
-  uint64_t stride_b_dv, uint64_t stride_h_dv, uint64_t stride_s_dv,
-  void* workspace_ptr,
-  hipStream_t stream){
-
-  hipError_t ret;
-  CK_FUSED_ATTN_TYPE_SWITCH_ALL(dtype, type,
-    ret = ck_attn_bwd_impl<type>(b, h, hg, s_q, s_kv, d,
-                                 q_ptr, 
-                                 stride_b_q, stride_h_q, stride_s_q,
-                                 k_ptr, 
-                                 stride_b_k, stride_h_k, stride_s_k,
-                                 v_ptr, 
-                                 stride_b_v, stride_h_v, stride_s_v,
-                                 o_ptr, 
-                                 stride_b_o, stride_h_o, stride_s_o,
-                                 lse_ptr,
-                                 do_ptr, 
-                                 stride_b_do, stride_h_do, stride_s_do,
-                                 is_training,
-                                 scaling_factor,
-                                 dropout_probability,
-                                 philox_seed, philox_offset,
-                                 is_causal,
-                                 dq_ptr, 
-                                 stride_b_dq, stride_h_dq, stride_s_dq,
-                                 dk_ptr, 
-                                 stride_b_dk, stride_h_dk, stride_s_dk,
-                                 dv_ptr, 
-                                 stride_b_dv, stride_h_dv, stride_s_dv,
-                                 workspace_ptr,
-                                 stream);
-  );
-  return ret;
-}
-
 
 }//namespace ck_fused_attn

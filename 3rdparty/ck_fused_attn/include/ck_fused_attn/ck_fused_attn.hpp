@@ -50,7 +50,6 @@ hipError_t ck_attn_bwd(
   const void* lse_ptr, 
   const void* do_ptr, 
   uint64_t stride_b_do, uint64_t stride_h_do, uint64_t stride_s_do,
-  bool is_training,
   float scaling_factor,
   float dropout_probability,
   uint64_t philox_seed, uint64_t philox_offset,
