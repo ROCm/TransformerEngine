@@ -105,7 +105,7 @@ BwdFunction &get_bwd_launcher(DType wtype,
         && is_aligned(params.dx)
         && is_aligned(params.dgamma)
         && is_aligned(params.dgamma_part)
-        && layer_norm::BWD_TUNED_FUNCS.count(tuned_key) > 0) {
+        && BWD_TUNED_FUNCS.count(tuned_key) > 0) {
         return BWD_TUNED_FUNCS.at(tuned_key);
     }
 
