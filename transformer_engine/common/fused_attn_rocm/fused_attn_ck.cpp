@@ -151,6 +151,18 @@ void fused_attn_ck_fwd_impl(
       stream));
 }
 
+size_t ck_dtype_size(ck_fused_attn::DType t_dtype){
+  switch(t_dtype){
+    case ck_fused_attn::DType::kFloat16: 
+      return 2;
+    case ck_fused_attn::DType::kBFloat16: 
+      return 2;
+    default:
+      return 1;
+  }
+  return 1;
+}
+
 void fused_attn_ck_bwd_impl(
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d,
   float scaling_factor, float dropout_probability, 
@@ -165,7 +177,17 @@ void fused_attn_ck_bwd_impl(
   ck_fused_attn::DType dtype,
   void *workspace,
   cudaStream_t stream) {
-
+  
+  //ck bwd requires initialize dq since ck uses atomic operations
+  //TODO: remove the memset afer ck fixes the atomic operations
+  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
+  if((layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) or (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D)){
+    // just memset all dq, dk, dv
+    cudaMemsetAsync(devPtrdQ, 0, ck_dtype_size(dtype)*b*h*s_q*d*3, stream);
+  }else{
+    // HD_2HD, HD_H2D, HD_HD_HD can just memset dq itself
+    cudaMemsetAsync(devPtrdQ, 0, ck_dtype_size(dtype)*b*h*s_q*d, stream);
+  }
   std::array<uint64_t, 4> q_stride;
   std::array<uint64_t, 4> k_stride;
   std::array<uint64_t, 4> v_stride;

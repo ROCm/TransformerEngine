@@ -9,23 +9,23 @@ list(APPEND ck_fused_attn_SOURCES
 #fwd list
 execute_process(
   COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/generate.py
-  --direction fwd --list_blobs ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/fwd_blob_list.txt
+  --direction fwd --list_blobs ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/fwd_blob_list.txt -r 1
 )
 #fwd kernels
 execute_process(
   COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/generate.py
-  --direction fwd --output_dir ${CMAKE_CURRENT_SOURCE_DIR}/gen_src
+  --direction fwd --output_dir ${CMAKE_CURRENT_SOURCE_DIR}/gen_src -r 1
 )
 
 #bwd list
 execute_process(
   COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/generate.py
-  --direction bwd --list_blobs ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/bwd_blob_list.txt
+  --direction bwd --list_blobs ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/bwd_blob_list.txt -r 1
 )
 #bwd kernels
 execute_process(
   COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/generate.py
-  --direction bwd --output_dir ${CMAKE_CURRENT_SOURCE_DIR}/gen_src
+  --direction bwd --output_dir ${CMAKE_CURRENT_SOURCE_DIR}/gen_src -r 1
 )
 
 
@@ -38,7 +38,8 @@ endforeach()
 
 add_library(ck_fused_attn STATIC ${ck_fused_attn_SOURCES})
 set(CK_FUSED_ATTN_COMPILE_OPTIONS)
-list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -Wno-undefined-func-template -DCK_TILE_FMHA_FWD_FAST_EXP2=1 -fgpu-flush-denormals-to-zero -Wno-float-equal)
+#list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -Wno-undefined-func-template -DCK_TILE_FMHA_FWD_FAST_EXP2=1 -fgpu-flush-denormals-to-zero -Wno-float-equal)
+list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -Wno-undefined-func-template -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=0 -fgpu-flush-denormals-to-zero -Wno-float-equal)
 
 set(CK_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/composable_kernel/include")
 
