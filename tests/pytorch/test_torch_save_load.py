@@ -66,6 +66,9 @@ def test_export_loaded_checkpoint(scale_fwd, scale_bwd, history_fwd, history_bwd
             self.weights_type = tex.DType.kFloat8E4M3
             self.outp_type = precision
 
+        def get_fp8_weights_scratchpad(self, is_first_microbatch):
+            raise RuntimeError("Method get_fp8_weights_scratchpad is dummy and should not be invoked.")
+
         def forward(self, inp, weight):
             inp_fp8 = cast_to_fp8(
                 inp,
