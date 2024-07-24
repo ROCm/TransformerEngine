@@ -511,6 +511,20 @@ private:
   std::unordered_map<Key, Algo, Key::Hash> d;
 } algoCache;
 
+static inline int getIntEnv(const char *name, int defval, int minval)
+{
+  int val = defval;
+  const char* env = std::getenv(name);
+  if (env != nullptr && env[0] != '\0')
+  {
+     val = atoi(env);
+     if (val < minval)
+     {
+        val = minval;
+     }
+  }
+  return val;
+}
 
 void cublas_gemm(const Tensor *inputA,
                  const Tensor *inputB,
@@ -576,8 +590,6 @@ void cublas_gemm(const Tensor *inputA,
   hipblasLtMatmulDesc_t       operationDesc = nullptr;
   hipblasLtMatrixLayout_t     Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr, Ddesc = nullptr;
   hipblasLtMatmulPreference_t preference = nullptr;
-  int                             returnedResults = 0;
-  hipblasLtMatmulHeuristicResult_t heuristicResult = {}; //TODO: Is this Okay?
   hipblasLtEpilogue_t epilogue = HIPBLASLT_EPILOGUE_DEFAULT;
 
   int64_t ld_gelumat = (int64_t) ldd;
@@ -678,26 +690,119 @@ void cublas_gemm(const Tensor *inputA,
   GemmAlgoCache::Algo cached_algo{};
   if (algoCache.find(gemm_cfg, &cached_algo) == 0)
   {
+    int firstAlgo = getIntEnv("TE_HIPBLASLT_ALGO_SELECTION", 0, 0);
+    int tuneLoopCount = getIntEnv("TE_HIPBLASLT_TUNING_RUN_COUNT", 0, 0);
+    int algoTuneCount = 1;
+    std::vector<hipblasLtMatmulHeuristicResult_t> algoArr;
+
+    if (tuneLoopCount)
+    {
+      /* HIPBLASLT may return hundreds of algos for some configs
+       * Limit amount by default. User may override with env
+       */
+      static const int defaultAlgoCount = 16;
+      algoTuneCount = getIntEnv("TE_HIPBLASLT_TUNING_ALGO_COUNT", defaultAlgoCount, 1);
+    }
+    int algoTotalCount = firstAlgo + algoTuneCount;
+    algoArr.resize(algoTotalCount);
+
     NVTE_CHECK_CUBLAS(hipblasLtMatmulPreferenceCreate(&preference));
     NVTE_CHECK_CUBLAS(hipblasLtMatmulPreferenceSetAttribute(
                             preference, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
                             &workspaceSize, sizeof(workspaceSize)));
 
     NVTE_CHECK_CUBLAS(hipblasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Ddesc,
-                                                    Ddesc, preference, 1, &heuristicResult,
-                                                    &returnedResults));
+                                                    Ddesc, preference, algoTotalCount, algoArr.data(),
+                                                    &algoTotalCount));
 
     NVTE_CHECK_CUBLAS(hipblasLtMatmulPreferenceDestroy(preference));
 
-    if (returnedResults == 0) {
+    if (algoTotalCount <= firstAlgo) {
       NVTE_CHECK_CUBLAS(hipblasLtMatrixLayoutDestroy(Ddesc));
       NVTE_CHECK_CUBLAS(hipblasLtMatrixLayoutDestroy(Bdesc));
       NVTE_CHECK_CUBLAS(hipblasLtMatrixLayoutDestroy(Adesc));
       NVTE_CHECK_CUBLAS(hipblasLtMatmulDescDestroy(operationDesc));
-      throw std::runtime_error("Unable to find any suitable algorithms");
+      if (algoTotalCount == 0) {
+        throw std::runtime_error("Unable to find any suitable algorithms");
+      } else {
+        throw std::runtime_error("Unable to find suitable algorithms in specified range");
+      }
     }
 
-    cached_algo.algo = heuristicResult.algo;
+    if (algoTuneCount > 0)
+    {
+      std::cout << "[INFO] Perform hipBLASLt algo selection in range [" << firstAlgo << \
+      "-" << (algoTotalCount - 1) << "] with " << tuneLoopCount << " loops " << std::endl;
+
+      hipStream_t profilingStream;
+      NVTE_CHECK_CUDA(hipStreamCreateWithFlags(&profilingStream, hipStreamNonBlocking));
+      unsigned long bestTime = (unsigned long)-1;
+      int bestAlgo = 0;
+
+      for (int algo=firstAlgo; algo<algoTotalCount; algo++)
+      {
+          // Warm-up call
+          NVTE_CHECK_CUBLAS(hipblasLtMatmul(handle,
+                                          operationDesc,
+                                          static_cast<const void*>(&one),         /* alpha */
+                                          A,                                      /* A */
+                                          Adesc,
+                                          B,                                      /* B */
+                                          Bdesc,
+                                          static_cast<const void*>(&beta),        /* beta */
+                                          D,                                      /* C */
+                                          Ddesc,
+                                          D,                                      /* D */
+                                          Ddesc,
+                                          &algoArr[algo].algo,                    /* algo */
+                                          workspace,                              /* workspace */
+                                          workspaceSize,
+                                          profilingStream));                       /* stream */
+        NVTE_CHECK_CUDA(hipStreamSynchronize(profilingStream));
+
+        //Profiling loop
+        struct timespec timeStart = {0};
+        clock_gettime(CLOCK_MONOTONIC, &timeStart);
+        for (int loop=0; loop<tuneLoopCount; loop++)
+        {
+          NVTE_CHECK_CUBLAS(hipblasLtMatmul(handle,
+                                          operationDesc,
+                                          static_cast<const void*>(&one),         /* alpha */
+                                          A,                                      /* A */
+                                          Adesc,
+                                          B,                                      /* B */
+                                          Bdesc,
+                                          static_cast<const void*>(&beta),        /* beta */
+                                          D,                                      /* C */
+                                          Ddesc,
+                                          D,                                      /* D */
+                                          Ddesc,
+                                          &algoArr[algo].algo,                    /* algo */
+                                          workspace,                              /* workspace */
+                                          workspaceSize,
+                                          profilingStream));                       /* stream */
+        }
+        NVTE_CHECK_CUDA(hipStreamSynchronize(profilingStream));
+        struct timespec timeEnd = {0};
+        clock_gettime(CLOCK_MONOTONIC, &timeEnd);
+        if ((unsigned long)((timeEnd.tv_sec - timeStart.tv_sec) * 1000000000 + (timeEnd.tv_nsec - timeStart.tv_nsec)) < bestTime)
+        {
+          bestAlgo = algo;
+          bestTime = (timeEnd.tv_sec - timeStart.tv_sec) * 1000000000 + (timeEnd.tv_nsec - timeStart.tv_nsec);
+        }
+      }
+
+      NVTE_CHECK_CUDA(hipStreamDestroy(profilingStream));
+      std::cout << "[INFO] Select hipBLASLt algo " << bestAlgo << \
+      " with time " << bestTime / tuneLoopCount << "ns"<< std::endl;
+      cached_algo.algo = algoArr[bestAlgo].algo;
+    }
+    else
+    {
+      std::cout << "[INFO] Select hipBLASLt algo " << firstAlgo << std::endl;
+      cached_algo.algo = algoArr[firstAlgo].algo;
+    }
+
     algoCache.store(gemm_cfg, &cached_algo);
   }
 
