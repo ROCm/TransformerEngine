@@ -1,3 +1,13 @@
+/*************************************************************************
+ * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+ *
+ * License for AMD contributions = MIT. See LICENSE for more information
+ ************************************************************************/
+
+/*! \file utils.h
+ *  \brief Enums and functions for fused attention in rocm.
+ */
+
 
 #ifndef TRANSFORMER_ENGINE_FUSED_ATTN_ROCM_UTILS_H_
 #define TRANSFORMER_ENGINE_FUSED_ATTN_ROCM_UTILS_H_

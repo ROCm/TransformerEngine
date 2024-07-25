@@ -1,3 +1,10 @@
+/*************************************************************************
+ * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+ *
+ * License for AMD contributions = MIT. See LICENSE for more information
+ ************************************************************************/
+
+
 /*! \file fused_attn_aotriton.h
  *  \brief Enums and functions for fused attention aotriton backend.
  */

@@ -1,3 +1,8 @@
+/*************************************************************************
+ * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+ *
+ * License for AMD contributions = MIT. See LICENSE for more information
+ ************************************************************************/
 
 #include "transformer_engine/fused_attn.h"
 #include "../common.h"
