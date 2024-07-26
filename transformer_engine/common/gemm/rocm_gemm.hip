@@ -722,14 +722,10 @@ void cublas_gemm(const Tensor *inputA,
       NVTE_CHECK_CUBLAS(hipblasLtMatrixLayoutDestroy(Bdesc));
       NVTE_CHECK_CUBLAS(hipblasLtMatrixLayoutDestroy(Adesc));
       NVTE_CHECK_CUBLAS(hipblasLtMatmulDescDestroy(operationDesc));
-      if (algoTotalCount == 0) {
-        throw std::runtime_error("Unable to find any suitable algorithms");
-      } else {
-        throw std::runtime_error("Unable to find suitable algorithms in specified range");
-      }
+      throw std::runtime_error("Unable to find any suitable algorithms");
     }
 
-    if (algoTuneCount > 0)
+    if (tuneLoopCount > 0)
     {
       std::cout << "[INFO] Perform hipBLASLt algo selection in range [" << firstAlgo << \
       "-" << (algoTotalCount - 1) << "] with " << tuneLoopCount << " loops " << std::endl;
@@ -799,7 +795,10 @@ void cublas_gemm(const Tensor *inputA,
     }
     else
     {
-      std::cout << "[INFO] Select hipBLASLt algo " << firstAlgo << std::endl;
+      if (firstAlgo != 0)
+      {
+        std::cout << "[INFO] Select hipBLASLt algo " << firstAlgo << std::endl;
+      }
       cached_algo.algo = algoArr[firstAlgo].algo;
     }
 
