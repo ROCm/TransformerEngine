@@ -81,11 +81,20 @@ if(USE_CUDA)
               "within the Transformer Engine source.")
   endif()
 else()
-  # Install aotriton fused attn
-  set(AOTRITON_NO_PYTHON ON)
-  set(AOTRITON_COMPRESS_KERNEL OFF)
-  set(AOTRITON_NO_SHARED ON)
-  add_subdirectory(../../3rdparty/aotriton ${CMAKE_CURRENT_BINARY_DIR}/aotriton)
+  if(NOT DEFINED AOTRITON_PATH)
+    # Install aotriton fused attn
+    set(AOTRITON_NO_PYTHON ON)
+    set(AOTRITON_COMPRESS_KERNEL OFF)
+    set(AOTRITON_NO_SHARED ON)
+    add_subdirectory(../../3rdparty/aotriton ${CMAKE_CURRENT_BINARY_DIR}/aotriton)
+  else()
+    # Use aotriton built during initial TE building/installation
+    # When only need rebuild TE library itself
+    find_library(AOTRITON_LIB NAMES aotriton aotriton_v2 PATHS ${AOTRITON_PATH}/lib REQUIRED NO_DEFAULT_PATH)
+    add_library( aotriton STATIC IMPORTED )
+    set_target_properties( aotriton PROPERTIES IMPORTED_LOCATION ${AOTRITON_LIB} )
+    include_directories(${AOTRITON_PATH}/include)
+  endif()
 endif()
 
 # process source code files
