@@ -19,8 +19,8 @@
 #include <forward_list>
 #include <mutex>
 #include <unordered_map>
+#include <chrono>
 #include <hipblaslt/hipblaslt.h>
-#include <time.h>
 #else
 #define ROCBLAS_BETA_FEATURES_API 
 #include <rocblas/rocblas.h>

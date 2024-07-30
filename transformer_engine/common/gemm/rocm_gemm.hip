@@ -490,20 +490,20 @@ public:
     hipblasLtMatmulAlgo_t algo;
   };
 
-  int find(Key &cfg, Algo *algo)
+  int find(Key &cfg, Algo &algo)
   {
     std::lock_guard<std::mutex> lock(mt);
     if (auto i = d.find(cfg); i != d.end())
     {
-      algo[0] = i->second;
+      algo = i->second;
       return 1;
     }
     return 0;
   }
-  void store(Key &cfg, const Algo *algo)
+  void store(Key &cfg, const Algo &algo)
   {
     std::lock_guard<std::mutex> lock(mt);
-    d[cfg] = algo[0];
+    d[cfg] = algo;
   }
 
 private:
@@ -687,8 +687,8 @@ void cublas_gemm(const Tensor *inputA,
   GemmAlgoCache::Key gemm_cfg(device_id, A_type, B_type, D_type, 
     use_fp8 ? bias_type : (hipblasltDatatype_t)0,
     m, n, k, lda, ldb, ldd, transa, transb, epilogue, workspaceSize );
-  GemmAlgoCache::Algo cached_algo{};
-  if (algoCache.find(gemm_cfg, &cached_algo) == 0)
+  GemmAlgoCache::Algo cached_algo;
+  if (algoCache.find(gemm_cfg, cached_algo) == 0)
   {
     int firstAlgo = getIntEnv("TE_HIPBLASLT_ALGO_SELECTION", 0, 0);
     int tuneLoopCount = getIntEnv("TE_HIPBLASLT_TUNING_RUN_COUNT", 0, 0);
@@ -727,12 +727,15 @@ void cublas_gemm(const Tensor *inputA,
 
     if (tuneLoopCount > 0)
     {
-      std::cout << "[INFO] Perform hipBLASLt algo selection in range [" << firstAlgo << \
-      "-" << (algoTotalCount - 1) << "] with " << tuneLoopCount << " loops " << std::endl;
+      std::cout << "[INFO] Perform hipBLASLt algo selection on GPU" << device_id
+                << " in range [" << firstAlgo << "-" << (algoTotalCount - 1) << "] with "
+                << tuneLoopCount << " loops " << std::endl;
 
       hipStream_t profilingStream;
       NVTE_CHECK_CUDA(hipStreamCreateWithFlags(&profilingStream, hipStreamNonBlocking));
-      unsigned long bestTime = (unsigned long)-1;
+      using tuning_clock = std::chrono::steady_clock;
+      tuning_clock::now(); //the first call takes little longer so do it outside the loop
+      tuning_clock::duration bestTime = tuning_clock::duration::max();
       int bestAlgo = 0;
 
       for (int algo=firstAlgo; algo<algoTotalCount; algo++)
@@ -757,8 +760,7 @@ void cublas_gemm(const Tensor *inputA,
         NVTE_CHECK_CUDA(hipStreamSynchronize(profilingStream));
 
         //Profiling loop
-        struct timespec timeStart = {0};
-        clock_gettime(CLOCK_MONOTONIC, &timeStart);
+        tuning_clock::time_point startTime = tuning_clock::now();
         for (int loop=0; loop<tuneLoopCount; loop++)
         {
           NVTE_CHECK_CUBLAS(hipblasLtMatmul(handle,
@@ -779,18 +781,18 @@ void cublas_gemm(const Tensor *inputA,
                                           profilingStream));                       /* stream */
         }
         NVTE_CHECK_CUDA(hipStreamSynchronize(profilingStream));
-        struct timespec timeEnd = {0};
-        clock_gettime(CLOCK_MONOTONIC, &timeEnd);
-        if ((unsigned long)((timeEnd.tv_sec - timeStart.tv_sec) * 1000000000 + (timeEnd.tv_nsec - timeStart.tv_nsec)) < bestTime)
+        tuning_clock::duration algoTime = tuning_clock::now() - startTime; 
+        if (algoTime < bestTime)
         {
           bestAlgo = algo;
-          bestTime = (timeEnd.tv_sec - timeStart.tv_sec) * 1000000000 + (timeEnd.tv_nsec - timeStart.tv_nsec);
+          bestTime = algoTime;
         }
       }
 
       NVTE_CHECK_CUDA(hipStreamDestroy(profilingStream));
-      std::cout << "[INFO] Select hipBLASLt algo " << bestAlgo << \
-      " with time " << bestTime / tuneLoopCount << "ns"<< std::endl;
+      std::cout << "[INFO] Select hipBLASLt algo " << bestAlgo << " with time "
+                << std::chrono::duration_cast<std::chrono::nanoseconds>(bestTime).count() / tuneLoopCount
+                << " ns" << std::endl;
       cached_algo.algo = algoArr[bestAlgo].algo;
     }
     else
@@ -802,7 +804,7 @@ void cublas_gemm(const Tensor *inputA,
       cached_algo.algo = algoArr[firstAlgo].algo;
     }
 
-    algoCache.store(gemm_cfg, &cached_algo);
+    algoCache.store(gemm_cfg, cached_algo);
   }
 
   // D = alpha * (A * B) + beta * C
