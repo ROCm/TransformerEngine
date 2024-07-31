@@ -31,7 +31,6 @@ bool is_aotriton_backend_supported(
   size_t max_seqlen_q, size_t max_seqlen_kv,
   size_t head_dim) {
 
-  using namespace transformer_engine;
   //aotriton fused attn does not support gqa mode now
   if(num_attn_heads!=num_gqa_groups){
     return false;

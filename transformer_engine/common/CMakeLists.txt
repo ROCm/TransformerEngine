@@ -89,17 +89,8 @@ else()
   set(AOTRITON_COMPRESS_KERNEL OFF)
   set(AOTRITON_NO_SHARED ON)
   add_subdirectory(../../3rdparty/aotriton ${CMAKE_CURRENT_BINARY_DIR}/aotriton)
-  #set(__AOTRITON_INSTALL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/aotriton/build/install_dir")
-  #add_library(aotriton INTERFACE)
-  #target_link_libraries(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/lib/libaotriton_v2.a)
-  #target_include_directories(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/include)
 
-  add_subdirectory(../../3rdparty/ck_fused_attn ${CMAKE_CURRENT_BINARY_DIR}/ck_fused_attn)
-  # Install ck fused attn
-  #set(__CK_FUSED_ATTN_INSTALL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/ck_fused_attn/build/install_dir")
-  #add_library(ck_fused_attn INTERFACE)
-  #target_link_libraries(ck_fused_attn INTERFACE ${__CK_FUSED_ATTN_INSTALL_DIR}/lib/libck_fused_attn.a)
-  #target_include_directories(ck_fused_attn INTERFACE ${__CK_FUSED_ATTN_INSTALL_DIR}/include)
+  add_subdirectory(ck_fused_attn ${CMAKE_CURRENT_BINARY_DIR}/ck_fused_attn)
 endif()
 
 # process source code files
@@ -128,6 +119,7 @@ else()
       HEADER_INCLUDE_DIR ${header_include_dir}
       IGNORES "*/amd_detail/*"
       IGNORES "*/aotriton/*"
+      IGNORES "*/ck_fused_attn/*"
       CUSTOM_MAP_FILE "${TE}/hipify_custom_map.json"
   )
   get_hipified_list("${transformer_engine_SOURCES}" te_hip_sources)

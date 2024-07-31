@@ -459,7 +459,18 @@ def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, fp8_model_par
 
     outputs = _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=False)
     outputs_recompute = _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=True)
-    assert_all_equal(outputs, outputs_recompute)
+    if IS_HIP_EXTENSION:
+        use_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
+        use_fused_attn_ck = int(os.getenv("NVTE_FUSED_ATTN_CK", "1"))
+        # TODO: wait for the ck branch supporting determinism
+        if use_fused_attn and (not use_fused_attn_ck):
+            # AOTriton backend and non-fused attn are deterministic
+            assert_all_equal(outputs, outputs_recompute)
+        else:
+            tols = dict(atol=5e-2, rtol=5e-2)
+            torch.testing.assert_close(outputs, outputs_recompute, **tols)
+    else:
+        assert_all_equal(outputs, outputs_recompute)
 
 
 def _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params=False, recompute=False):
@@ -545,11 +556,22 @@ def test_gpt_full_activation_recompute(dtype, bs, model, fp8, fp8_model_params):
 
     outputs = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=False)
     outputs_recompute = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=True)
-    if IS_HIP_EXTENSION and dtype==torch.float16 and is_mi200():
-        assert_allclose(outputs, outputs_recompute, 1e-2)
+    if IS_HIP_EXTENSION:
+        if dtype==torch.float16 and is_mi200():
+            # mi200 denorm issue
+            assert_allclose(outputs, outputs_recompute, 1e-2)
+        else:
+            # TODO: wait for the ck branch supporting determinism
+            use_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
+            use_fused_attn_ck = int(os.getenv("NVTE_FUSED_ATTN_CK", "1"))
+            if use_fused_attn and (not use_fused_attn_ck):
+                # AOTriton backend and non-fused attn are deterministic
+                assert_all_equal(outputs, outputs_recompute)
+            else:
+                tols = dict(atol=5e-2, rtol=5e-2)
+                torch.testing.assert_close(outputs, outputs_recompute, **tols)
     else:
         assert_all_equal(outputs, outputs_recompute)
-
 
 def _test_e2e_checkpointing_get_model(config, dtype):
     sigma = 0.023
@@ -648,13 +670,25 @@ def test_gpt_checkpointing(dtype, bs, model):
     config = model_configs[model]
     outputs = _test_e2e_checkpointing(bs, dtype, config, checkpoint=False)
     outputs_checkpoint = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
-    if IS_HIP_EXTENSION:
-      # Relax to all close for rocm. We don't have bit-to-bit reproducibility
-      # when running rocblas path mainly due to the usage of atomics
-      # Need to check whether hipBlasLt path has reproducibility
-      assert_allclose(outputs, outputs_checkpoint, 5e-5)
+    if IS_HIP_EXTENSION: 
+        use_hipblaslt = (os.getenv("NVTE_USE_HIPBLASLT") is not None)
+        use_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
+        use_fused_attn_ck = int(os.getenv("NVTE_FUSED_ATTN_CK", "1"))
+        # ck fused_attn non-determinism requires higher tolerance
+        if use_fused_attn and use_fused_attn_ck:
+            # TODO: wait for the ck branch supporting determinism
+            tols = dict(atol=5e-2, rtol=5e-2)
+            torch.testing.assert_close(outputs, outputs_checkpoint, **tols)
+        elif not use_hipblaslt: 
+            # Relax to all close for rocm. We don't have bit-to-bit reproducibility
+            # when running rocblas path mainly due to the usage of atomics
+            # Need to check whether hipBlasLt path has reproducibility
+            assert_allclose(outputs, outputs_checkpoint, 5e-5)
+        else:
+            # should be perfect match with hipblaslt and non-ck attention
+            assert_all_equal(outputs, outputs_checkpoint)
     else: 
-      assert_all_equal(outputs, outputs_checkpoint)
+        assert_all_equal(outputs, outputs_checkpoint)
 
 
 def _test_e2e_gpt_accuracy(block, bs, dtype, config):
@@ -1200,6 +1234,11 @@ def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
 def test_gpt_cuda_graph(dtype, bs, model):
+    if IS_HIP_EXTENSION:
+        use_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
+        if use_fused_attn and (dtype in (torch.float16, torch.bfloat16)):
+            pytest.skip("rocm fused attn backends does not support cuda graph")
+
     config = model_configs[model]
 
     sigma = 0.023
@@ -1302,7 +1341,17 @@ def test_gpt_fp8_parameters(dtype, bs, model):
 
     outputs = _test_gpt_fp8_parameters(bs, dtype, config, False)
     outputs_fp8_params = _test_gpt_fp8_parameters(bs, dtype, config, True)
-    assert_all_equal(outputs, outputs_fp8_params)
+    if IS_HIP_EXTENSION:
+        use_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
+        use_fused_attn_ck = int(os.getenv("NVTE_FUSED_ATTN_CK", "1"))
+        # TODO: wait for the ck branch supporting determinism
+        if use_fused_attn and (not use_fused_attn_ck):
+            assert_all_equal(outputs, outputs_fp8_params)
+        else:
+            tols = dict(atol=5e-2, rtol=5e-2)
+            torch.testing.assert_close(outputs, outputs_fp8_params, **tols)
+    else:
+        assert_all_equal(outputs, outputs_fp8_params)
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
@@ -1378,5 +1427,13 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     # to act fancy)
     torch.manual_seed(0)
     y_bshd = block_bshd(x_bshd)
-
-    assert_all_equal([y_bshd], [y_sbhd.transpose(0,1).contiguous()])
+    
+    # TODO: wait for the full determinism fix from hipblaslt
+    if IS_HIP_EXTENSION:
+        use_hipblaslt = (os.getenv("NVTE_USE_HIPBLASLT") is not None)
+        if use_hipblaslt: 
+            assert_allclose([y_bshd], [y_sbhd.transpose(0,1).contiguous()], 1e-5)
+        else:
+            assert_all_equal([y_bshd], [y_sbhd.transpose(0,1).contiguous()])
+    else:
+        assert_all_equal([y_bshd], [y_sbhd.transpose(0,1).contiguous()])

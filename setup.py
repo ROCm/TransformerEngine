@@ -296,7 +296,7 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
           add_unique(install_reqs, ["jax", "flax>=0.7.1"])
         if use_rocm:
           # assume jax is already installed on rocm machines
-          add_unique(install_reqs, ["flax==0.8.4"])
+          add_unique(install_reqs, ["flax>=0.7.1"])
         add_unique(test_reqs, ["numpy", "praxis"])
     if "paddle" in frameworks():
         add_unique(install_reqs, "paddlepaddle-gpu")

@@ -41,11 +41,10 @@ endforeach()
 
 add_library(ck_fused_attn STATIC ${ck_fused_attn_SOURCES})
 set(CK_FUSED_ATTN_COMPILE_OPTIONS)
-#list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -Wno-undefined-func-template -DCK_TILE_FMHA_FWD_FAST_EXP2=1 -fgpu-flush-denormals-to-zero -Wno-float-equal)
-list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -Wno-undefined-func-template -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=0 -fgpu-flush-denormals-to-zero -Wno-float-equal)
-set(CMAKE_CXX_FLAGS "-std=c++17 -O3 -ftemplate-backtrace-limit=0  -fPIC  -Wno-gnu-line-marker -Wunused-variable -Werror")
+list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -Wno-undefined-func-template -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=0 -fgpu-flush-denormals-to-zero -Wno-float-equal -ftemplate-backtrace-limit=0  -fPIC  -Wno-gnu-line-marker -Wunused-variable -Werror)
 
-set(CK_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/composable_kernel/include")
+set(CK_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../3rdparty/composable_kernel/include")
+message(STATUS "ck_include_dir: ${CK_INCLUDE_DIR}")
 
 if(NOT EXISTS "${CK_INCLUDE_DIR}")
   message(FATAL_ERROR

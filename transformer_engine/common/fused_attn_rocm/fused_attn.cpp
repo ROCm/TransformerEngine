@@ -78,10 +78,21 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         size_t max_seqlen_q, size_t max_seqlen_kv,
         size_t head_dim) {
   using namespace transformer_engine;
-
+  
+  // by default, both ck and aotriton backends are enabled
+  bool nvte_fused_attn_ck = true;
+  bool nvte_fused_attn_aotriton = true;
+  
+  if (const char* env_p = std::getenv("NVTE_FUSED_ATTN_CK") ) {
+    if (env_p != nullptr && std::string(env_p) == "0")
+      nvte_fused_attn_ck = false;
+  }
+  if (const char* env_p = std::getenv("NVTE_FUSED_ATTN_AOTRITON") ) {
+    if (env_p != nullptr && std::string(env_p) == "0")
+      nvte_fused_attn_aotriton = false;
+  }
   // first check whether ck can be used, then check aotriton
-  // TODO: add env to force a backend
-  if(fused_attn_rocm::is_ck_backend_supported(
+  if(nvte_fused_attn_ck && fused_attn_rocm::is_ck_backend_supported(
         q_dtype,
         kv_dtype,
         qkv_layout,
@@ -92,7 +103,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         max_seqlen_q, max_seqlen_kv,
         head_dim)){
     return NVTE_Fused_Attn_Backend::NVTE_CK;
-  }else if(fused_attn_rocm::is_aotriton_backend_supported(
+  }else if(nvte_fused_attn_aotriton && fused_attn_rocm::is_aotriton_backend_supported(
               q_dtype,
               kv_dtype,
               qkv_layout,
