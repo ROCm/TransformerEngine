@@ -36,6 +36,7 @@ Execute the following commands to install ROCm Transformer Engine from source on
   
   cd TransformerEngine-private
   export NVTE_FRAMEWORK=pytorch #optionally set framework, currently only support pytorch and jax
+  export PYTORCH_ROCM_ARCH=gfx942 # CK fused attn only support MI200 and MI300 and fp8 features are only supported on MI300
   pip install .
 
 
