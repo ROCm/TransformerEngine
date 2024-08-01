@@ -119,7 +119,8 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
 #else
     pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local())
         .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend)
-        .value("NVTE_AOTriton", NVTE_Fused_Attn_Backend::NVTE_AOTriton);
+        .value("NVTE_AOTriton", NVTE_Fused_Attn_Backend::NVTE_AOTriton)
+        .value("NVTE_CK", NVTE_Fused_Attn_Backend::NVTE_CK);
 
 #endif
 }

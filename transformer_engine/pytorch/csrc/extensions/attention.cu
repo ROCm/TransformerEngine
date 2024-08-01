@@ -183,7 +183,7 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
 #ifndef USE_ROCM
   at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
 #else
-  //AOTriton has increment of size batch_sizexnum_headsxmaxseqlenkxmaxseqlenq
+  //ROCm fused attn (AOTriton and CK) has increment of size batch_sizexnum_headsxmaxseqlenkxmaxseqlenq
   at::PhiloxCudaState philox_args = init_philox_state(gen, batch_size*num_attn_heads*max_seqlen*max_seqlen);
 #endif
   auto rng_state = torch::empty({2}, options.dtype(torch::kInt64));
@@ -220,7 +220,7 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
                   workspace_data.data_ptr(),
                   workspace.shape(), workspace.dtype());
 #else
-  // AOTriton does not need workspace for fwd pass
+  // ROCm fused attn (AOTriton and CK) does not need workspace for fwd pass
   TensorWrapper workspace;
 #endif
 
@@ -586,7 +586,7 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
   // create workspace
   TensorWrapper workspace;
 
-  // AOTriton does not need workspace for fwd pass
+  // ROCm fused attn (AOTriton and CK) does not need workspace for fwd pass
 #ifndef USE_ROCM
   // populate tensors with appropriate shapes and dtypes
   nvte_fused_attn_fwd_kvpacked(
@@ -1011,7 +1011,7 @@ std::vector<at::Tensor> fused_attn_fwd(
   // create workspace
   TensorWrapper workspace;
 
-  // AOTriton does not need workspace for fwd pass
+  // ROCm fused attn (AOTriton and Ck) does not need workspace for fwd pass
 #ifndef USE_ROCM
   // populate tensors with appropriate shapes and dtypes
   nvte_fused_attn_fwd(

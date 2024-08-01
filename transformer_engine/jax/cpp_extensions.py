@@ -1906,7 +1906,7 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
             else:
                 raise ValueError(f'Unsupported {backend=}')
         else:
-            if backend == NVTE_Fused_Attn_Backend.NVTE_AOTriton:
+            if backend in [NVTE_Fused_Attn_Backend.NVTE_AOTriton, NVTE_Fused_Attn_Backend.NVTE_CK]:
                 softmax_shape = (*batch_shape, num_heads, max_seqlen, 1)
                 softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
             else:
@@ -2302,7 +2302,7 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
             else:
                 raise ValueError(f'Unsupported {backend=}')
         else:
-            if backend == NVTE_Fused_Attn_Backend.NVTE_AOTriton:
+            if backend in [NVTE_Fused_Attn_Backend.NVTE_AOTriton, NVTE_Fused_Attn_Backend.NVTE_CK]:
                 softmax_shape = (*q_batch_shape, num_heads, q_max_seqlen, 1)
                 softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
             else:
@@ -2735,7 +2735,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             else:
                 raise ValueError(f'Unsupported {backend=}')
         else:
-            if backend == NVTE_Fused_Attn_Backend.NVTE_AOTriton:
+            if backend in [NVTE_Fused_Attn_Backend.NVTE_AOTriton, NVTE_Fused_Attn_Backend.NVTE_CK]:
                 softmax_shape = (*q_batch_shape, num_heads, q_max_seqlen, 1)
                 softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
             else:

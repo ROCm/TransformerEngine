@@ -2085,11 +2085,11 @@ class FusedAttention(torch.nn.Module):
     2. FusedAttnBackend["F16_arbitrary_seqlen"]
        cuDNN based fused attention for FP16/BF16 and any sequence length.
 
-    in ROCm, only AOTriton backend will be used
+    in ROCm, both AOTriton and CK backends will be used
 
     Support matrix:
 
-    | backend       | 1                       | 2                              | AOTriton
+    | backend       | 1                       | 2                              | AOTriton or CK
     | flash based   | no                      | yes                            | yes
     | cuDNN based   | yes                     | yes                            | no
     | qkv dtype     | fp16/bf16               | fp16/bf16                      | fp16/bf16
@@ -2223,14 +2223,14 @@ class FusedAttention(torch.nn.Module):
                         max_seqlen_kv,
                         key_layer.device,
                     )
-        # additional asserts for aotriton backend
+        # additional asserts for rocm fused attn backend
         if IS_HIP_EXTENSION:
             assert (
                 "padding" not in attn_mask_type
-                ), f"AOTriton FusedAttention does not support attn_mask_type = {attn_mask_type}!"
+                ), f"ROCm FusedAttention (aotriton or CK) does not support attn_mask_type = {attn_mask_type}!"
             assert (
                 core_attention_bias_type == "no_bias"
-                ), f"AOTriton FusedAttention does not support bias_type = {core_attention_bias_type}!"
+                ), f"ROCm FusedAttention (aotriton or CK) does not support bias_type = {core_attention_bias_type}!"
 
         qkv_dtype = TE_DType[query_layer.dtype]
 
@@ -2239,7 +2239,7 @@ class FusedAttention(torch.nn.Module):
                 and (fused_attention_backend
                     == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen))
 
-        #TODO: check whether context_parallel can be enabled with aotriton backend
+        #TODO: check whether context_parallel can be enabled with aotriton or CK backend
         if context_parallel:
             assert (fused_attention_backend
                 == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
@@ -2881,7 +2881,7 @@ class DotProductAttention(torch.nn.Module):
                     max_seqlen_kv,
                     query_layer.shape[-1], # head_dim
                 )
-                use_fused_attention = (fused_attention_backend == FusedAttnBackend["AOTriton"])
+                use_fused_attention = (fused_attention_backend in [FusedAttnBackend["AOTriton"], FusedAttnBackend["CK"]])
 
         if use_flash_attention:
             if _NVTE_DEBUG:

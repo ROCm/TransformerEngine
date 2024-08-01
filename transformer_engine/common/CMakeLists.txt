@@ -50,7 +50,10 @@ else()
        activation/gelu.cu
        activation/relu.cu
        activation/swiglu.cu
-       fused_attn_aotriton/fused_attn.cpp
+       fused_attn_rocm/fused_attn.cpp
+       fused_attn_rocm/fused_attn_aotriton.cpp
+       fused_attn_rocm/fused_attn_ck.cpp
+       fused_attn_rocm/utils.cpp
        gemm/cublaslt_gemm.cu
        layer_norm/ln_api.cpp
        layer_norm/ln_bwd_semi_cuda_kernel.cu
@@ -86,6 +89,16 @@ else()
   set(AOTRITON_COMPRESS_KERNEL OFF)
   set(AOTRITON_NO_SHARED ON)
   add_subdirectory(../../3rdparty/aotriton ${CMAKE_CURRENT_BINARY_DIR}/aotriton)
+  #set(__AOTRITON_INSTALL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../")
+  #add_library(aotriton INTERFACE)
+  #target_link_libraries(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/lib/libaotriton_v2.a)
+  #target_include_directories(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/include)
+
+  add_subdirectory(ck_fused_attn ${CMAKE_CURRENT_BINARY_DIR}/ck_fused_attn)
+  #set(__CK_FUSED_ATTN_INSTALL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../")
+  #add_library(ck_fused_attn INTERFACE)
+  #target_link_libraries(ck_fused_attn INTERFACE ${__CK_FUSED_ATTN_INSTALL_DIR}/lib/libck_fused_attn.a)
+  #target_include_directories(ck_fused_attn INTERFACE ${__CK_FUSED_ATTN_INSTALL_DIR}/include)
 endif()
 
 # process source code files
@@ -114,6 +127,7 @@ else()
       HEADER_INCLUDE_DIR ${header_include_dir}
       IGNORES "*/amd_detail/*"
       IGNORES "*/aotriton/*"
+      IGNORES "*/ck_fused_attn/*"
       CUSTOM_MAP_FILE "${TE}/hipify_custom_map.json"
   )
   get_hipified_list("${transformer_engine_SOURCES}" te_hip_sources)
@@ -178,7 +192,7 @@ if(USE_CUDA)
        CUDNN::cudnn)
 else()
   find_package(hip)
-  list(APPEND transformer_engine_LINKER_LIBS hip::host hip::device roctx64 aotriton)
+  list(APPEND transformer_engine_LINKER_LIBS hip::host hip::device roctx64 aotriton ck_fused_attn)
   if(USE_HIPBLASLT)
     find_package(hipblaslt)
     target_compile_definitions(transformer_engine PUBLIC USE_HIPBLASLT)

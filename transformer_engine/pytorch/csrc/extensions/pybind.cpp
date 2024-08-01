@@ -207,6 +207,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #else
   py::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend")
       .value("NVTE_AOTriton", NVTE_Fused_Attn_Backend::NVTE_AOTriton)
+      .value("NVTE_CK", NVTE_Fused_Attn_Backend::NVTE_CK)
       .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend);
 #endif
 }
