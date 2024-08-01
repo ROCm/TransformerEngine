@@ -110,9 +110,12 @@ void fused_attn_ck_fwd_impl(
 
   //devPtrDropoutSeed and devPtrDropoutOffset are actually device ptrs
   uint64_t philox_seed, philox_offset;
-  cudaStreamSynchronize(stream);
-  cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
-  cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
+  //skip this synchronization if dropout is not needed
+  if(is_training && dropout_probability > 0.f){
+    cudaStreamSynchronize(stream);
+    cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
+  }
 
   bool nvte_log_ck_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
@@ -213,9 +216,12 @@ void fused_attn_ck_bwd_impl(
   std::array<uint64_t, 4> kv_shape{b, hg, s_kv, d};
   
   uint64_t philox_seed, philox_offset;
-  cudaStreamSynchronize(stream);
-  cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
-  cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
+  if(dropout_probability > 0.f){
+    cudaStreamSynchronize(stream);
+    cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
+  }
+
   bool nvte_log_ck_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")

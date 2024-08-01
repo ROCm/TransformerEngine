@@ -134,9 +134,11 @@ void fused_attn_aotriton_fwd_impl(
   
   //devPtrDropoutSeed and devPtrDropoutOffset are actually device ptrs
   uint64_t philox_seed, philox_offset;
-  cudaStreamSynchronize(stream);
-  cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
-  cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
+  if(is_training && dropout_probability > 0.f){
+    cudaStreamSynchronize(stream);
+    cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
+  }
 
   bool nvte_log_aotriton_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_AOTRITON_CONFIG") ) {
@@ -232,9 +234,12 @@ void fused_attn_aotriton_bwd_impl(
   auto wkspace_tensor = aotriton::TensorView<2>(reinterpret_cast<intptr_t>(workspace), m_shape, m_stride, aotriton::DType::kFloat32);
 
   uint64_t philox_seed, philox_offset;
-  cudaStreamSynchronize(stream);
-  cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
-  cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
+  if(dropout_probability > 0.f){
+    cudaStreamSynchronize(stream);
+    cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
+  }
+
   bool nvte_log_aotriton_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_AOTRITON_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
