@@ -9,6 +9,8 @@ project(ck_fused_attn LANGUAGES HIP CXX)
 set(ck_fused_attn_SOURCES)
 list(APPEND ck_fused_attn_SOURCES
        src/ck_fused_attn.cpp)
+
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/gen_src)
 #fwd list
 execute_process(
   COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/generate.py
