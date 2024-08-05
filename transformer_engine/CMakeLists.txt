@@ -18,6 +18,7 @@ if(((EXISTS $ENV{ROCM_PATH}) OR (EXISTS "/opt/rocm")) AND NOT (EXISTS "/bin/nvcc
   # Disable Asserts In Code (Can't use asserts on HIP stack)
   add_definitions(-DNDEBUG)
   add_definitions(-DUSE_ROCM)
+
   # Set the default rounding mode for FP32 to BF16 conversion
   # Use 0 to apply the RTN rounding rule
   add_definitions(-DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=0)
@@ -63,7 +64,7 @@ else()
   set(HIP_HCC_FLAGS "${CMAKE_HIP_FLAGS} -mavx2 -mf16c -mfma -std=c++17")
   # Ask hcc to generate device code during compilation so we can use
   # host linker to link.
-  set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} -fno-gpu-rdc -Wno-defaulted-function-deleted")
+  set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} -ffast-math -fno-gpu-rdc -Wno-defaulted-function-deleted")
   foreach(rocm_arch ${TE_ROCM_ARCH})
     # if CMAKE_CXX_FLAGS has --offload-arch set already, better to rm first
     set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} --offload-arch=${rocm_arch}")

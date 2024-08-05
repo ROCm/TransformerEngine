@@ -13,6 +13,14 @@
 
 #include "transformer_engine.h"
 
+#ifdef __HIP_PLATFORM_AMD__
+enum class mode_enum
+{
+    batch = 0,
+    group = 1,
+};
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif

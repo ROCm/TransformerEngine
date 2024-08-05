@@ -56,20 +56,17 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     void* devPtrCuSeqlensQ, void* devPtrCuSeqlensKV,
     const std::string& data_type, hipStream_t stream) {
     using TypeConfig = FmhaFwdTypeConfig<DataType>;
-    using QDataType = typename TypeConfig::QDataType;
-    using KDataType = typename TypeConfig::KDataType;
-    using VDataType = typename TypeConfig::VDataType;
-    using BiasDataType = typename TypeConfig::BiasDataType;
+    using QDataType             = typename TypeConfig::QDataType;
+    using KDataType             = typename TypeConfig::KDataType;
+    using VDataType             = typename TypeConfig::VDataType;
+    using BiasDataType          = typename TypeConfig::BiasDataType;
     using RandValOutputDataType = typename TypeConfig::RandValOutputDataType;
-    using LSEDataType = typename TypeConfig::LSEDataType;
-    using SaccDataType = typename TypeConfig::SaccDataType;
-    using SMPLComputeDataType = typename TypeConfig::SMPLComputeDataType;
-    using PDataType = typename TypeConfig::PDataType;
-    using OaccDataType = typename TypeConfig::OaccDataType;
-    using ODataType = typename TypeConfig::ODataType;
-
-    bool has_dropout = (is_training && dropout_probability > 0.f);
-    bool has_lse = (devPtrSoftmaxStats != nullptr);
+    using LSEDataType           = typename TypeConfig::LSEDataType;
+    using SaccDataType          = typename TypeConfig::SaccDataType;
+    using SMPLComputeDataType   = typename TypeConfig::SMPLComputeDataType;
+    using PDataType             = typename TypeConfig::PDataType;
+    using OaccDataType          = typename TypeConfig::OaccDataType;
+    using ODataType             = typename TypeConfig::ODataType;
 
     /* CK input parameters */
     ck_tile::index_t batch = b;
@@ -88,21 +85,18 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     bool is_group_mode = false;
     bool is_v_rowmajor = true;
     bool do_fp8_static_quant = false;
+    bool has_dropout = (is_training && p_drop > 0.f);
+    bool has_lse = (devPtrSoftmaxStats != nullptr);
 
     bias_enum bias_type;
     mask_enum mask_type;
     ck_tile::index_t left, right;
     ck_tile::stream_config stream_config{stream};
-    if (hdim_q % 8 != 0) {
-        NVTE_ERROR("Invalid head dimension: hdim_q must be a multiple of 8");
-    }
-    if (hdim_v % 8 != 0) {
-        NVTE_ERROR("Invalid head dimension: hdim_v must be a multiple of 8");
+    if (nhead % nhead_k != 0) {
+        NVTE_ERROR("nhead must be a multiple of nhead_k");
     }
     if (bias_value == NVTE_Bias_Type::NVTE_NO_BIAS) {
         bias_type = bias_enum::no_bias;
-    } else if (bias_value == NVTE_Bias_Type::NVTE_ALIBI) {
-        bias_type = bias_enum::alibi;
     } else {
         NVTE_ERROR("Unsupported bias type");
     }
@@ -135,38 +129,44 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
             const ck_tile::index_t stride_v = nhead_k * hdim_v;
             const ck_tile::index_t stride_bias = shape_seqlen_k;
             const ck_tile::index_t stride_randval = max_seqlen_k;
+            const ck_tile::index_t stride_o_acc = hdim_v;
             const ck_tile::index_t stride_o = nhead * hdim_v;
             // setup nhead_stride_* arguments
             const ck_tile::index_t nhead_stride_q = hdim_q;
             const ck_tile::index_t nhead_stride_k = hdim_q;
             const ck_tile::index_t nhead_stride_v = hdim_v;
             const ck_tile::index_t nhead_stride_bias = 0;
-            const ck_tile::index_t nhead_stride_randval =
-                shape_seqlen_q * max_seqlen_k;
-            const ck_tile::index_t nhead_stride_lse = shape_seqlen_q;
+            const ck_tile::index_t nhead_stride_randval = shape_seqlen_q * max_seqlen_k;
+            const ck_tile::index_t nhead_stride_lse = max_seqlen_q;
+            const ck_tile::index_t nhead_stride_lse_acc = max_seqlen_q;
+            const ck_tile::index_t nhead_stride_o_acc = max_seqlen_q * hdim_v;
             const ck_tile::index_t nhead_stride_o = hdim_v;
             // setup batch_stride_* arguments
             const ck_tile::index_t batch_stride_q = nhead * shape_seqlen_q * hdim_q;
-            const ck_tile::index_t batch_stride_k =
-                nhead_k * shape_seqlen_k * hdim_q;
-            const ck_tile::index_t batch_stride_v =
-                nhead_k * shape_seqlen_k * hdim_v;
+            const ck_tile::index_t batch_stride_k = nhead_k * shape_seqlen_k * hdim_q;
+            const ck_tile::index_t batch_stride_v = nhead_k * shape_seqlen_k * hdim_v;
             const ck_tile::index_t batch_stride_bias = 0;
-            const ck_tile::index_t batch_stride_randval =
-                nhead * shape_seqlen_q * max_seqlen_k;
-            const ck_tile::index_t batch_stride_lse = nhead * shape_seqlen_q;
+            const ck_tile::index_t batch_stride_randval = nhead * shape_seqlen_q * max_seqlen_k;
+            const ck_tile::index_t batch_stride_lse = nhead * max_seqlen_q;
+            const ck_tile::index_t batch_stride_lse_acc = nhead * max_seqlen_q;
+            const ck_tile::index_t batch_stride_o_acc = nhead * max_seqlen_q * hdim_v;
             const ck_tile::index_t batch_stride_o = nhead * shape_seqlen_q * hdim_v;
+            // setup split_stride_* arguments (only used in split-kv kernel)
+            const ck_tile::index_t split_stride_lse_acc = batch * nhead * max_seqlen_q;
+            const ck_tile::index_t split_stride_o_acc   = batch * nhead * max_seqlen_q * hdim_v;
 
             return fmha_fwd_args{devPtrQ,
                                  devPtrK,
                                  devPtrV,
                                  devPtrBias,
                                  nullptr,
+                                 nullptr,
+                                 nullptr,
                                  devPtrSoftmaxStats,
                                  devPtrO,
                                  devPtrCuSeqlensQ,
                                  devPtrCuSeqlensKV,
-                                 nullptr, /* seqlen_k_ptr */
+                                 nullptr,
                                  shape_seqlen_q,
                                  shape_seqlen_k,
                                  batch,
@@ -175,6 +175,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                  hdim_v,
                                  nhead,
                                  nhead_k,
+                                 1, /* num_splits */
                                  scale_s,
                                  scale_p,
                                  scale_o,
@@ -183,6 +184,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                  stride_v,
                                  stride_bias,
                                  stride_randval,
+                                 stride_o_acc,
                                  stride_o,
                                  nhead_stride_q,
                                  nhead_stride_k,
@@ -190,6 +192,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                  nhead_stride_bias,
                                  nhead_stride_randval,
                                  nhead_stride_lse,
+                                 nhead_stride_lse_acc,
+                                 nhead_stride_o_acc,
                                  nhead_stride_o,
                                  batch_stride_q,
                                  batch_stride_k,
@@ -197,7 +201,11 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                  batch_stride_bias,
                                  batch_stride_randval,
                                  batch_stride_lse,
+                                 batch_stride_lse_acc,
+                                 batch_stride_o_acc,
                                  batch_stride_o,
+                                 split_stride_lse_acc,
+                                 split_stride_o_acc,
                                  left,
                                  right,
                                  static_cast<ck_tile::index_t>(mask_type),
@@ -206,7 +214,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                  {drop_seed, drop_offset}};
         }();
 
-        fmha_fwd(fmha_traits, fmha_args, stream_config);
+        float avg_time = fmha_fwd(fmha_traits, fmha_args, stream_config);
+        if (avg_time < 0.f) {
+            throw std::runtime_error("Not supported yet");
+        }
     } catch (std::runtime_error &e) {
         NVTE_ERROR(e.what());
     }
@@ -305,25 +316,21 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     void* devPtrdO, void* devPtrdBias, void* devPtrCuSeqlensQ,
     void* devPtrCuSeqlensKV, const std::string& data_type, hipStream_t stream) {
     using TypeConfig = FmhaBwdTypeConfig<DataType>;
-    using QDataType = typename TypeConfig::QDataType;
-    using KDataType = typename TypeConfig::KDataType;
-    using VDataType = typename TypeConfig::VDataType;
-    using GemmDataType = typename TypeConfig::GemmDataType;
-    using BiasDataType = typename TypeConfig::BiasDataType;
-    using LSEDataType = typename TypeConfig::LSEDataType;
-    using AccDataType = typename TypeConfig::AccDataType;
-    using DDataType = typename TypeConfig::DDataType;
+    using QDataType             = typename TypeConfig::QDataType;
+    using KDataType             = typename TypeConfig::KDataType;
+    using VDataType             = typename TypeConfig::VDataType;
+    using GemmDataType          = typename TypeConfig::GemmDataType;
+    using BiasDataType          = typename TypeConfig::BiasDataType;
+    using LSEDataType           = typename TypeConfig::LSEDataType;
+    using AccDataType           = typename TypeConfig::AccDataType;
+    using DDataType             = typename TypeConfig::DDataType;
     using RandValOutputDataType = typename TypeConfig::RandValOutputDataType;
-    using ODataType = typename TypeConfig::ODataType;
-    using OGradDataType = typename TypeConfig::OGradDataType;
-    using QGradDataType = typename TypeConfig::QGradDataType;
-    using KGradDataType = typename TypeConfig::KGradDataType;
-    using VGradDataType = typename TypeConfig::VGradDataType;
-    using BiasGradDataType = typename TypeConfig::BiasGradDataType;
-
-    bool is_mqa_gqa = (h > hg);
-    bool has_dropout = (dropout_probability > 0.f);
-    bool has_dbias = (devPtrdBias != nullptr);
+    using ODataType             = typename TypeConfig::ODataType;
+    using OGradDataType         = typename TypeConfig::OGradDataType;
+    using QGradDataType         = typename TypeConfig::QGradDataType;
+    using KGradDataType         = typename TypeConfig::KGradDataType;
+    using VGradDataType         = typename TypeConfig::VGradDataType;
+    using BiasGradDataType      = typename TypeConfig::BiasGradDataType;
 
     /* CK input parameters */
     ck_tile::index_t batch = b;
@@ -341,19 +348,27 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     float rp_undrop = 1.0 / p_undrop;
     bool is_group_mode = false;
     bool do_fp8_static_quant = false;
+    bool is_mqa_gqa = (h > hg);
+    bool has_dropout = (p_drop > 0.f);
+    bool has_dbias = (devPtrdBias != nullptr);
+    bool s_randval = false;
+    bool is_deterministic = false;
+
+    if (nhead % nhead_k != 0) {
+        NVTE_ERROR("nhead must be a multiple of nhead_k");
+    }
 
     bias_enum bias_type;
     mask_enum mask_type;
     int32_t left, right;
     ck_tile::stream_config stream_config{stream};
     static thread_local DeviceMemoryManager d_mgr{stream};
+    static thread_local DeviceMemoryManager dq_acc_mgr{stream};
     static thread_local DeviceMemoryManager dk_expanded_mgr{stream};
     static thread_local DeviceMemoryManager dv_expanded_mgr{stream};
 
     if (bias_value == NVTE_Bias_Type::NVTE_NO_BIAS) {
         bias_type = bias_enum::no_bias;
-    } else if (bias_value == NVTE_Bias_Type::NVTE_ALIBI) {
-        bias_type = bias_enum::alibi;
     } else {
         NVTE_ERROR("Unsupported bias type");
     }
@@ -370,25 +385,24 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     }
 
     try {
-        ck_tile::index_t shape_batch = batch;
-        ck_tile::index_t shape_seqlen_q = seqlen_q;
-        ck_tile::index_t shape_seqlen_k = seqlen_k;
-        bool s_randval = false;
+        const ck_tile::index_t shape_batch = batch;
+        const ck_tile::index_t shape_seqlen_q = seqlen_q;
+        const ck_tile::index_t shape_seqlen_k = seqlen_k;
+        const ck_tile::index_t kN0 = (hdim_q <= 128 ? 128 : 64);
+        const ck_tile::index_t nsplits = 1;
 
         d_mgr.resize(sizeof(DDataType) * batch * nhead * max_seqlen_q);
+        dq_acc_mgr.resize(sizeof(AccDataType) * nsplits * shape_batch * shape_seqlen_q * nhead * hdim_q);
         if (is_mqa_gqa) {
             dk_expanded_mgr.resize(sizeof(KGradDataType) * batch * nhead * shape_seqlen_k * hdim_q);
             dv_expanded_mgr.resize(sizeof(VGradDataType) * batch * nhead * shape_seqlen_k * hdim_v);
         }
-        HIP_CHECK_ERROR(
-            hipMemsetAsync(devPtrdQ,
-                           0,
-                           sizeof(QGradDataType) * batch * max_seqlen_q * nhead * hdim_q,
-                           stream));
+        dq_acc_mgr.set_zero();
 
         auto fmha_traits =
             fmha_bwd_traits{hdim_q,    hdim_v,    data_type, is_group_mode,
-                            mask_type, bias_type, has_dbias, has_dropout};
+                            mask_type, bias_type, has_dbias, has_dropout,
+                            s_randval, is_deterministic};
 
         auto fmha_args = [&]() {
             // setup stride_* arguments
@@ -424,6 +438,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             const ck_tile::index_t batch_stride_dk = nhead * shape_seqlen_k * hdim_q;
             const ck_tile::index_t batch_stride_dv = nhead * shape_seqlen_k * hdim_v;
             const ck_tile::index_t batch_stride_dbias = nhead * shape_seqlen_q * max_seqlen_k;
+            const ck_tile::index_t split_stride_dq_acc = shape_batch * nhead * shape_seqlen_q * hdim_q;
 
             return fmha_bwd_args{devPtrQ,
                                  devPtrKTranspose,
@@ -438,6 +453,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                  is_mqa_gqa ? dk_expanded_mgr.get_allocated_block() : devPtrdK,
                                  is_mqa_gqa ? dv_expanded_mgr.get_allocated_block() : devPtrdV,
                                  devPtrdBias,
+                                 dq_acc_mgr.get_allocated_block(), /* dq_acc_buf */
                                  devPtrCuSeqlensQ,
                                  devPtrCuSeqlensKV,
                                  nullptr, /* seqlen_k_ptr */
@@ -458,6 +474,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                  stride_o,
                                  stride_randval,
                                  stride_do,
+                                 stride_q,  // stride_dq_acc
+                                 stride_q,  // stride_dq
                                  stride_dk,
                                  stride_dv,
                                  stride_dbias,
@@ -469,6 +487,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                  nhead_stride_randval,
                                  nhead_stride_do,
                                  nhead_stride_lsed,
+                                 nhead_stride_q,  // nhead_stride_dq_acc
+                                 nhead_stride_q,  // nhead_stride_dq
+                                 nhead_stride_k,  // nhead_stride_dk
+                                 nhead_stride_v,  // nhead_stride_dv
                                  nhead_stride_dbias,
                                  batch_stride_q,
                                  batch_stride_k,
@@ -478,19 +500,24 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                  batch_stride_randval,
                                  batch_stride_do,
                                  batch_stride_lsed,
+                                 batch_stride_q,  // batch_stride_dq_acc
+                                 batch_stride_q,  // batch_stride_dq
                                  batch_stride_dk,
                                  batch_stride_dv,
                                  batch_stride_dbias,
+                                 split_stride_dq_acc,
                                  left,
                                  right,
                                  static_cast<ck_tile::index_t>(mask_type),
                                  p_drop,
                                  p_undrop,
-                                 s_randval,
                                  {drop_seed, drop_offset}};
         }();
 
-        fmha_bwd(fmha_traits, fmha_args, stream_config);
+        float avg_time = fmha_bwd(fmha_traits, fmha_args, stream_config);
+        if (avg_time < 0.f) {
+            throw std::runtime_error("Not supported yet");
+        }
 
         if (is_mqa_gqa) {
             dim3 grid(batch, seqlen_k, nhead_k);
@@ -1780,4 +1807,4 @@ void fused_attn_arbitrary_seqlen_bwd(size_t batch, size_t num_attn_heads, size_t
 }
 }  // namespace transformer_engine
 #endif  // CUDNN_VERSION >= 8900
-#endif  // __HIP_PLATFORM_AMD__ 
+#endif  // __HIP_PLATFORM_AMD__
