@@ -6,14 +6,16 @@
 
 #include "fused_attn_f16_arbitrary_seqlen.h"
 
-#ifndef __HIP_PLATFORM_AMD__
+#ifdef __HIP_PLATFORM_AMD__
+#include <unordered_map>
+#else
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cudnn_frontend.h>
 #include <cudnn_frontend_utils.h>
-#endif
 #include <map>
 #include <vector>
+#endif
 
 #include "../common.h"
 #include "utils.h"

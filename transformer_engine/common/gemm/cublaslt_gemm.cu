@@ -9,11 +9,8 @@
 #include <type_traits>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/transformer_engine.h>
-#ifndef __HIP_PLATFORM_AMD__
-#include <cublasLt.h>
-#include <cublas_v2.h>
-#include <cuda.h>
-#else
+
+#ifdef __HIP_PLATFORM_AMD__
 #ifdef USE_HIPBLASLT
 #include <vector>
 #include <forward_list>
@@ -24,10 +21,15 @@
 #include <rocblas/rocblas.h>
 #endif // #ifdef USE_HIPBLASLT
 #include <hipcub/hipcub.hpp>
-#include <iostream>
+#else
+#include <cublasLt.h>
+#include <cublas_v2.h>
+#include <cuda.h>
+#endif // #ifndef __HIP_PLATFORM_AMD__
+
 #include <cstdlib>
 #include <string>
-#endif // #ifndef __HIP_PLATFORM_AMD__
+#include <iostream>
 
 #include "../common.h"
 #include "../util/vectorized_pointwise.h"
@@ -416,6 +418,7 @@ void nvte_cublas_gemm(const NVTETensor A,
     NVTE_ERROR("TT layout not allowed.");
   }
 
+  #ifdef __HIP_PLATFORM_AMD__
   bool nvte_log_gemm_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_GEMM_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
@@ -427,8 +430,8 @@ void nvte_cublas_gemm(const NVTETensor A,
     hipMemcpy(&A_scale_inv, inputA->scale_inv.dptr, sizeof(float), hipMemcpyDeviceToHost);
     hipMemcpy(&B_scale_inv, inputB->scale_inv.dptr, sizeof(float), hipMemcpyDeviceToHost);
     std::cout << "m=" << m << " k=" << k << " n=" << n 
-        << " transa=" << (transa?"T":"N")
-        << " transb=" << (transb?"T":"N")
+        << " transa=" << (transa ? "T" : "N")
+        << " transb=" << (transb ? "T" : "N")
         << " A_type=" << (int)inputA->data.dtype
         << " B_type=" << (int)inputB->data.dtype
         << " D_type=" << (int)outputD->data.dtype
@@ -436,12 +439,13 @@ void nvte_cublas_gemm(const NVTETensor A,
         << " grad=" << grad
         << " bias=" << (biasTensor->data.dptr != nullptr)
         << " gelu=" << (outputGelu->data.dptr != nullptr)
-        << " use_fp8=" << ( is_fp8_dtype(inputA->data.dtype) || is_fp8_dtype(inputB->data.dtype) )
-        << " A_scale_inverse = " <<  A_scale_inv
-        << " B_scale_inverse = " <<  B_scale_inv
+        << " use_fp8=" << (is_fp8_dtype(inputA->data.dtype) || is_fp8_dtype(inputB->data.dtype))
+        << " A_scale_inverse = " << A_scale_inv
+        << " B_scale_inverse = " << B_scale_inv
         << " accumulate=" << accumulate
         << std::endl;
   }
+  #endif
 
   cublas_gemm(inputA,
               inputB,
