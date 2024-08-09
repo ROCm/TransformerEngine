@@ -1007,7 +1007,8 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack,
     }
 }
 #else
-// AOTriton only has one backend
+// ROCm fused attn has two backends: aotriton and ck
+// They both have the same shape and stride for softmax and rng aux tensors
 void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack,
                                        const CustomCallFusedAttnDescriptor *desc,
                                        NVTE_Bias_Type bias_type, NVTE_Fused_Attn_Backend backend,
@@ -1630,7 +1631,7 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
 #else
-// aotriton fused attn does not need workspace in fwd pass
+// rocm fused attn does not need workspace in fwd pass
 pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
     size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
@@ -1774,7 +1775,7 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
 #else
-// aotriton requires wkspace size as softmax_lse (batch, num_head, seqlen_q)
+// rocm requires wkspace size as softmax_lse (batch, num_head, seqlen_q)
 pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
     size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,

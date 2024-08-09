@@ -78,6 +78,7 @@ if not IS_HIP_EXTENSION:
 else:
     FusedAttnBackend = {
         "AOTriton": NVTE_Fused_Attn_Backend.NVTE_AOTriton,
+        "CK": NVTE_Fused_Attn_Backend.NVTE_CK,
         "No_Backend": NVTE_Fused_Attn_Backend.NVTE_No_Backend,
         }
 
@@ -226,7 +227,7 @@ def fused_attn_fwd_qkvpacked(
             assert (amax_o is not None
                     ), "amax_o is required as an input for FP8 fused attention."
     else:
-        # AOTriton requires 1 offset per 1 random variable
+        # ROCm fused attn requires 1 offset per 1 random variable
         rng_elts_per_thread = 0
 
     # execute kernel
