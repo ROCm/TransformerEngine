@@ -13,7 +13,7 @@
 #include <stdexcept>
 
 #include <cuda_runtime_api.h>
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
 #ifdef USE_HIPBLASLT
 #include <hipblaslt/hipblaslt.h>
 #else
@@ -23,7 +23,7 @@
 #else
 #include <cublas_v2.h>
 #include <cudnn.h>
-#endif // __HIP_PLATFORM_AMD__
+#endif // USE_ROCM
 #include <nvrtc.h>
 
 #include "../util/string.h"
@@ -54,7 +54,7 @@
     }                                                                   \
   } while (false)
 
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
 #ifdef USE_HIPBLASLT //hipblaslt
 #define NVTE_CHECK_CUBLAS(expr)                                         \
   do {                                                                  \

@@ -18,14 +18,14 @@ namespace transformer_engine {
 
 namespace cuda {
 
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef USE_ROCM
 namespace {
 
 // String with build-time CUDA include path
 #include "string_path_cuda_include.h"
 
 }  // namespace
-#endif // __HIP_PLATFORM_AMD__
+#endif // USE_ROCM
 
 int num_devices() {
   auto query_num_devices = [] () -> int {
@@ -67,7 +67,7 @@ int sm_arch(int device_id) {
   return cache[device_id];
 }
 
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
 const std::string &sm_arch_name(int device_id) {
   static std::vector<std::string> cache(num_devices(), "");
   static std::vector<std::once_flag> flags(num_devices());
@@ -83,7 +83,7 @@ const std::string &sm_arch_name(int device_id) {
   std::call_once(flags[device_id], init);
   return cache[device_id];
 }
-#endif // __HIP_PLATFORM_AMD__
+#endif // USE_ROCM
 
 int sm_count(int device_id) {
   static std::vector<int> cache(num_devices(), -1);
@@ -101,7 +101,7 @@ int sm_count(int device_id) {
   return cache[device_id];
 }
 
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef USE_ROCM
 const std::string &include_directory(bool required) {
   static std::string path;
 
@@ -166,7 +166,7 @@ const std::string &include_directory(bool required) {
   // Return cached path
   return path;
 }
-#endif // __HIP_PLATFORM_AMD__
+#endif // USE_ROCM
 
 }  // namespace cuda
 

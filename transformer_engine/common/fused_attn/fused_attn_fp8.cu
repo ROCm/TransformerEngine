@@ -336,8 +336,9 @@ static cudnn_frontend::Tensor createDropoutForward(
             double probability,
             std::vector<cudnn_frontend::Operation>* ops,
             const cudnn_frontend::Tensor& beforeDropoutTensor) {
-  NVTE_CHECK(ops->size() > 0,
-             "Dropout DAG constructed incorrectly as the first one");
+  cudnn_frontend::throw_if(ops->size() == 0,
+                  "Dropout DAG constructed incorrectly as the first one",
+                  CUDNN_STATUS_BAD_PARAM);
 
   int64_t afterBMM1_dim[4] = {b, h, s_q, s_kv};
   int64_t afterBMM1_stride[4] = {h * s_q * s_kv, s_q * s_kv, s_kv, 1};
@@ -420,8 +421,9 @@ static cudnn_frontend::Tensor createDropoutBackward(
             std::vector<cudnn_frontend::Operation>* ops,
             const cudnn_frontend::Tensor& beforeDropoutTensor,
             const cudnn_frontend::Tensor& dropoutMaskTensor) {
-  NVTE_CHECK(ops->size() > 0,
-             "Dropout DAG constructed incorrectly as the first one");
+  cudnn_frontend::throw_if(ops->size() == 0,
+                  "Dropout DAG constructed incorrectly as the first one",
+                  CUDNN_STATUS_BAD_PARAM);
 
   int64_t afterBMM1_dim[4] = {b, h, s_q, s_kv};
   int64_t afterBMM1_stride[4] = {h * s_q * s_kv, s_q * s_kv, s_kv, 1};
@@ -497,8 +499,9 @@ static cudnn_frontend::Tensor createSoftmaxBackward(
             int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
             std::vector<cudnn_frontend::Operation>* ops,
             const cudnn_frontend::Tensor& dyTensor) {
-  NVTE_CHECK(ops->size() > 0,
-             "Softmax backward constructed incorrectly as the first one");
+  cudnn_frontend::throw_if(ops->size() == 0,
+                  "Softmax backward constructed incorrectly as the first one",
+                  CUDNN_STATUS_BAD_PARAM);
 
   int64_t dx_dim[4] = {b, h, s_q, s_kv};
   int64_t dx_stride[4] = {h * s_q * s_kv, s_q * s_kv, s_kv, 1};
@@ -618,8 +621,9 @@ static cudnn_frontend::Tensor createSVBMM(
             const cudnn_frontend::Tensor &softmaxTensor,
             const cudnn_frontend::Tensor &mnkOverride,
             std::shared_ptr<cudnn_frontend::Tensor> QKVRaggedOffsetTensor) {
-  NVTE_CHECK(ops->size() > 0,
-             "BMM2 op constructed incorrectly as the first one");
+  cudnn_frontend::throw_if(ops->size() == 0,
+                  "BMM2 op constructed incorrectly as the first one",
+                  CUDNN_STATUS_BAD_PARAM);
 
   int64_t v_dim[4] =  {b, h, s_kv, d};
   int64_t v_stride[4];
@@ -665,8 +669,9 @@ static cudnn_frontend::Tensor createSdOBMM(
             const cudnn_frontend::Tensor &softmaxTensor,
             const cudnn_frontend::Tensor &dOTensor,
             const cudnn_frontend::Tensor &mnkOverride) {
-  NVTE_CHECK(ops->size() > 0,
-             "BMM2 op constructed incorrectly as the first one");
+  cudnn_frontend::throw_if(ops->size() == 0,
+                  "BMM2 op constructed incorrectly as the first one",
+                  CUDNN_STATUS_BAD_PARAM);
 
   int64_t s_dim_transpose[4] =  {b, h, s_kv, s_q};
   int64_t s_stride_transpose[4] = {h * s_kv * s_q, s_kv * s_q, 1, s_kv};
@@ -1023,10 +1028,12 @@ void fused_attn_fp8_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
           std::vector<cudnn_frontend::Operation const*> all_ops;
           std::vector<cudnn_frontend::Operation> ops;
 
-          NVTE_CHECK(dropoutProbability == 0.0f || isTraining,
-                     "Dropout probability should be 0.0f for inference mode");
-          NVTE_CHECK(dropoutProbability != 1.0f,
-                     "Dropout probability cannot be 1.0");
+          cudnn_frontend::throw_if(dropoutProbability != 0.0f && !isTraining,
+                          "Dropout probability should be 0.0f for inference mode",
+                          CUDNN_STATUS_BAD_PARAM);
+          cudnn_frontend::throw_if(dropoutProbability == 1.0f,
+                          "Dropout probability cannot be 1.0",
+                          CUDNN_STATUS_BAD_PARAM);
 
           int64_t raggedDim[4] =  {b + 1, 1, 1, 1};
           int64_t raggedStride[4] = {1, 1, 1, 1};
@@ -1276,10 +1283,12 @@ void fused_attn_fp8_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
                              .setWorkspacePointer(workspace_ptr)
                              .setDataPointers(data_ptrs)
                              .build();
+      cudnnStatus_t status = cudnnBackendExecute(
+                      handle_, plan.get_raw_desc(), variantPack.get_raw_desc());
 
-      NVTE_CHECK_CUDNN(cudnnBackendExecute(handle_,
-                                           plan.get_raw_desc(),
-                                           variantPack.get_raw_desc()));
+      cudnn_frontend::throw_if(
+                      [status]() { return (status != CUDNN_STATUS_SUCCESS); },
+                      "Plan execute error", status);
   } catch (cudnn_frontend::cudnnException& e) {
       struct cudaDeviceProp prop;
       NVTE_CHECK_CUDA(cudaGetDeviceProperties(&prop, 0));
@@ -1338,8 +1347,9 @@ void fused_attn_fp8_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
           std::vector<cudnn_frontend::Operation const*> all_ops;
           std::vector<cudnn_frontend::Operation> ops;
 
-          NVTE_CHECK(dropoutProbability != 1.0f,
-                     "Dropout probability cannot be 1.0");
+          cudnn_frontend::throw_if(dropoutProbability == 1.0f,
+                          "Dropout probability cannot be 1.0",
+                          CUDNN_STATUS_BAD_PARAM);
 
           int64_t raggedDim[4] =  {b + 1, 1, 1, 1};
           int64_t raggedStride[4] = {1, 1, 1, 1};
@@ -1828,9 +1838,12 @@ void fused_attn_fp8_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
                              .setWorkspacePointer(workspace_ptr)
                              .setDataPointers(data_ptrs)
                              .build();
-      NVTE_CHECK_CUDNN(cudnnBackendExecute(handle_,
-                                           plan.get_raw_desc(),
-                                           variantPack.get_raw_desc()));
+      cudnnStatus_t status = cudnnBackendExecute(
+                      handle_, plan.get_raw_desc(), variantPack.get_raw_desc());
+
+      cudnn_frontend::throw_if(
+                      [status]() { return (status != CUDNN_STATUS_SUCCESS); },
+                      "Plan execute error", status);
   } catch (cudnn_frontend::cudnnException& e) {
       struct cudaDeviceProp prop;
       NVTE_CHECK_CUDA(cudaGetDeviceProperties(&prop, 0));

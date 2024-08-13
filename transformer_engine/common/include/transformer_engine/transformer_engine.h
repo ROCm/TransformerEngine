@@ -12,7 +12,7 @@
 #define TRANSFORMER_ENGINE_TRANSFORMER_ENGINE_H_
 
 #include <stddef.h>
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
 #include <hip/hip_runtime.h>
 #else
 #include <cuda_runtime_api.h>

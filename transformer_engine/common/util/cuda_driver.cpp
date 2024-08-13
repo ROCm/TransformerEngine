@@ -87,19 +87,19 @@ void swap(Library& first, Library& second) noexcept {
 
 /*! \brief Lazily-initialized shared library for CUDA driver */
 Library& cuda_driver_lib() {
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
 #if defined(_WIN32) || defined(_WIN64) || defined(__WINDOWS__)
   constexpr char lib_name[] = "libamdhip64.dll";
 #else
   constexpr char lib_name[] = "libamdhip64.so";
 #endif
-#else // __HIP_PLATFORM_AMD__
+#else // USE_ROCM
 #if defined(_WIN32) || defined(_WIN64) || defined(__WINDOWS__)
   constexpr char lib_name[] = "nvcuda.dll";
 #else
   constexpr char lib_name[] = "libcuda.so.1";
 #endif
-#endif // __HIP_PLATFORM_AMD__
+#endif // USE_ROCM
   static Library lib(lib_name);
   return lib;
 }

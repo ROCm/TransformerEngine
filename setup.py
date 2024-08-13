@@ -6,6 +6,7 @@
 
 """Installation script."""
 
+import importlib.util
 import ctypes
 from functools import lru_cache
 import os
@@ -84,7 +85,6 @@ def frameworks() -> List[str]:
 # command-line arguments. Future calls will use a cached value.
 frameworks()
 
-import importlib.util
 # Default to use cuda
 use_cuda = True
 use_rocm = False
@@ -95,7 +95,7 @@ if ("pytorch" in frameworks()) and (importlib.util.find_spec("torch") is not Non
         use_rocm = True
 elif ("jax" in frameworks()) and (importlib.util.find_spec("jax") is not None):
     import jax
-    if jax.lib.xla_bridge.get_backend().platform_version.split(maxsplit=1)[0] == "rocm":
+    if "rocm" in jax.lib.xla_bridge.get_backend().platform_version:
         use_cuda = False
         use_rocm = True
 
@@ -250,30 +250,6 @@ def cuda_version() -> Tuple[int, ...]:
     match = re.search(r"release\s*([\d.]+)", output.stdout)
     version = match.group(1).split('.')
     return tuple(int(v) for v in version)
-
-
-def rocm_generate_ck_files():
-    fa_dir = root_path / "transformer_engine" / "common" / "fused_attn"
-    gen_py = fa_dir / "generate.py"
-    ck_dir = fa_dir / "ck_fmha"
-    fwd_blob_txt = ck_dir / "fwd_blob_list.txt"
-    bwd_blob_txt = ck_dir / "bwd_blob_list.txt"
-
-    # Create the directory if it doesn't exist
-    ck_dir.mkdir(parents=True, exist_ok=True)
-
-    gen_py = str(gen_py)
-    ck_dir = str(ck_dir)
-    fwd_blob_txt = str(fwd_blob_txt)
-    bwd_blob_txt = str(bwd_blob_txt)
-
-    # Forward pass
-    subprocess.run(["python3", gen_py, "--api", "fwd", "--list_blobs", fwd_blob_txt], check=True)
-    subprocess.run(["python3", gen_py, "--api", "fwd", "--output_dir", ck_dir], check=True)
-
-    # Backward pass
-    subprocess.run(["python3", gen_py, "--api", "bwd", "--list_blobs", bwd_blob_txt, "--receipt", "3"], check=True)
-    subprocess.run(["python3", gen_py, "--api", "bwd", "--output_dir", ck_dir, "--receipt", "3"], check=True)
 
 
 @lru_cache(maxsize=1)
@@ -488,7 +464,6 @@ def setup_common_extension() -> CMakeExtension:
     if "jax" in frameworks():
         cmake_flags.append("-DENABLE_JAX=ON")
         if use_rocm:
-            rocm_generate_ck_files()
             rocm_path = os.getenv("ROCM_PATH", "/opt/rocm")
             cmake_flags.append(f"-DCMAKE_PREFIX_PATH={rocm_path}")
 

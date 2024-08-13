@@ -18,13 +18,13 @@
 #include <vector>
 
 #include <cuda_fp16.h>
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef USE_ROCM
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #else
 #include <hip/hip_bfloat16.h>
 #include "amd_detail/hip_float8.h"
-#endif // __HIP_PLATFORM_AMD__
+#endif // USE_ROCM
 #include <cuda_runtime_api.h>
 
 #include <transformer_engine/transformer_engine.h>
@@ -64,7 +64,7 @@ using byte = uint8_t;
 using int32 = int32_t;
 using fp32 = float;
 using fp16 = half;
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef USE_ROCM
 using bf16 = nv_bfloat16;
 using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
@@ -84,7 +84,7 @@ TRANSFORMER_ENGINE_TYPE_NAME(uint8_t)
 TRANSFORMER_ENGINE_TYPE_NAME(int32_t)
 TRANSFORMER_ENGINE_TYPE_NAME(float)
 TRANSFORMER_ENGINE_TYPE_NAME(half)
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
 TRANSFORMER_ENGINE_TYPE_NAME(hip_bfloat16)
 TRANSFORMER_ENGINE_TYPE_NAME(hip_f8<hip_f8_type::fp8>)
 TRANSFORMER_ENGINE_TYPE_NAME(hip_f8<hip_f8_type::bf8>)

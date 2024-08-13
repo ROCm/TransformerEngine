@@ -322,7 +322,7 @@ void cast_transpose(const Tensor &input,
              "C and T outputs need to share scale tensor.");
 
 // Launch specific cast-transpose kernel
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef USE_ROCM
 #define LAUNCH_KERNEL(kernel, nvec_in, nvec_out, n_tiles, n_blocks, InputType, OutputType) \
   do {                                                                  \
     cudaFuncSetAttribute(kernel<nvec_in, nvec_out, fp32, InputType, OutputType>, \
@@ -357,7 +357,7 @@ void cast_transpose(const Tensor &input,
           reinterpret_cast<fp32 *>(cast_output->amax.dptr),             \
           row_length, num_rows, n_tiles);                               \
   } while (false)
-#endif // __HIP_PLATFORM_AMD__
+#endif // USE_ROCM
 
 // Launch cast-transpose kernel for given vector sizes
 #define LAUNCH_KERNEL_VEC_SIZES(load_size, store_size, InputType, OutputType) \

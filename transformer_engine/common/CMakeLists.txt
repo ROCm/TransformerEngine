@@ -39,8 +39,8 @@ if(USE_CUDA)
        fused_softmax/scaled_aligned_causal_masked_softmax.cu
        fused_rope/fused_rope.cu
        recipe/delayed_scaling.cu)
-else()
-       list(APPEND transformer_engine_SOURCES
+elseif(USE_ROCM)
+  list(APPEND transformer_engine_SOURCES
        transformer_engine.cpp
        transpose/cast_transpose.cu
        transpose/transpose.cu
@@ -50,9 +50,9 @@ else()
        activation/gelu.cu
        activation/relu.cu
        activation/swiglu.cu
-       fused_attn/fused_attn_f16_arbitrary_seqlen.cu
-       fused_attn/fused_attn.cpp
-       fused_attn/utils.cu
+       fused_attn_rocm/ck_fused_attn.cpp
+       fused_attn_rocm/fused_attn.cpp
+       fused_attn_rocm/utils.cpp
        gemm/cublaslt_gemm.cu
        layer_norm/ln_api.cpp
        layer_norm/ln_bwd_semi_cuda_kernel.cu
@@ -70,8 +70,6 @@ else()
        fused_softmax/scaled_aligned_causal_masked_softmax.cu
        fused_rope/fused_rope.cu
        recipe/delayed_scaling.cu)
-  file(GLOB_RECURSE CK_FA_FILES "fused_attn/ck_fmha/*.cpp")
-  list(APPEND transformer_engine_SOURCES ${CK_FA_FILES})
 endif()
 
 if(USE_CUDA)
@@ -81,25 +79,17 @@ if(USE_CUDA)
   if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
       message(FATAL_ERROR
               "Could not find cuDNN frontend API. "
-              "Try running 'git submodule update --init --recursive' "
+              "Try running 'git submodule update --init' "
               "within the Transformer Engine source.")
   endif()
-else()
-  # Check for CK API
-  set(CK_INCLUDE_DIR
-      "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/composable_kernel/include")
-  if(NOT EXISTS "${CK_INCLUDE_DIR}")
-      message(FATAL_ERROR
-              "Could not find CK API. "
-              "Try running 'git submodule update --init --recursive' "
-              "within the Transformer Engine source.")
-  endif()
+elseif(USE_ROCM)
+  add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/ck_fmha)
 endif()
 
 # process source code files
 if(USE_CUDA)
   add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
-else()
+elseif(USE_ROCM)
   message("${message_line}")
   message(STATUS "CMAKE_CURRENT_SOURCE_DIR: ${CMAKE_CURRENT_SOURCE_DIR}")
   message(STATUS "PROJECT_SOURCE_DIR: ${PROJECT_SOURCE_DIR}")
@@ -121,6 +111,7 @@ else()
   hipify(CUDA_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}
       HEADER_INCLUDE_DIR ${header_include_dir}
       IGNORES "*/amd_detail/*"
+      IGNORES "*/ck_fmha/*"
       CUSTOM_MAP_FILE "${TE}/hipify_custom_map.json"
   )
   get_hipified_list("${transformer_engine_SOURCES}" te_hip_sources)
@@ -161,7 +152,7 @@ if(USE_CUDA)
                                string_code_transpose_rtc_transpose_cu)
   target_include_directories(transformer_engine PRIVATE
                              "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
-else()
+elseif(USE_ROCM)
   target_include_directories(transformer_engine PRIVATE "${CK_INCLUDE_DIR}")
   make_string_header_from_file(utils_hip.cuh
                                string_code_utils_cuh)
@@ -184,9 +175,9 @@ if(USE_CUDA)
        CUDA::nvrtc
        CUDA::nvToolsExt
        CUDNN::cudnn)
-else()
+elseif(USE_ROCM)
   find_package(hip)
-  list(APPEND transformer_engine_LINKER_LIBS hip::host hip::device roctx64)
+  list(APPEND transformer_engine_LINKER_LIBS hip::host hip::device roctx64 ck)
   if(USE_HIPBLASLT)
     find_package(hipblaslt)
     target_compile_definitions(transformer_engine PUBLIC USE_HIPBLASLT)
@@ -209,7 +200,7 @@ if(USE_CUDA)
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 else()
-  set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -O3")
+  set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -O3 -ffast-math")
 endif()
 
 # Install library

@@ -45,11 +45,11 @@ inline __device__ void transpose_regs_partial_dbias(const IVec (&in)[nvec_out],
 #pragma unroll
   for (unsigned int j = 0; j < nvec_in; ++j) {
     CType elt = step_dbias.data.elt[j];
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
     elt = __shfl(elt, dbias_shfl_src_lane, THREADS_PER_WARP);
 #else
     elt = __shfl_sync(0xffffffff, elt, dbias_shfl_src_lane);  // shuffle data in warp
-#endif // __HIP_PLATFORM_AMD__
+#endif // USE_ROCM
     out_dbias.data.elt[j] += elt;
   }
 }
@@ -494,22 +494,22 @@ void fp8_transpose_dbias(const Tensor &input,
       param.workspace = reinterpret_cast<ComputeType *>(workspace->data.dptr);
 
       if (full_tile) {
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef USE_ROCM
         cudaFuncSetAttribute(transpose_dbias_kernel<nvec_in, nvec_out, Param>,
                              cudaFuncAttributePreferredSharedMemoryCarveout,
                              100);
-#endif //#ifndef __HIP_PLATFORM_AMD__
+#endif //#ifndef USE_ROCM
         transpose_dbias_kernel<nvec_in, nvec_out, Param>
           <<<n_blocks,
              cast_transpose_num_threads,
              shared_size_transpose,
              stream>>>(param, row_length, num_rows, n_tiles);
       } else {
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef USE_ROCM
         cudaFuncSetAttribute(transpose_dbias_kernel_notaligned<nvec_in, nvec_out, Param>,
                              cudaFuncAttributePreferredSharedMemoryCarveout,
                              100);
-#endif //#ifndef __HIP_PLATFORM_AMD__
+#endif //#ifndef USE_ROCM
         transpose_dbias_kernel_notaligned<nvec_in, nvec_out, Param>
           <<<n_blocks,
              cast_transpose_num_threads,

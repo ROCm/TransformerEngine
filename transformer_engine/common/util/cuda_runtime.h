@@ -9,10 +9,10 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_UTIL_CUDA_RUNTIME_H_
 #define TRANSFORMER_ENGINE_COMMON_UTIL_CUDA_RUNTIME_H_
 
-#ifdef __HIP_PLATFORM_AMD__
-#include <hip/hip_runtime.h>
-#else
+#ifndef USE_ROCM
 #include <cuda_runtime_api.h>
+#else
+#include <hip/hip_runtime.h>
 #endif
 #include <string>
 
@@ -35,7 +35,7 @@ int current_device();
  */
 int sm_arch(int device_id = -1);
 
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
 /* \brief Compute capability of device
  *
  * \param[in] device_id HIP device (default is current device)
@@ -53,7 +53,7 @@ const std::string &sm_arch_name(int device_id = -1);
  */
 int sm_count(int device_id = -1);
 
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef USE_ROCM
 /* \brief Path to CUDA Toolkit headers
  *
  * The path can be configured by setting NVTE_CUDA_INCLUDE_DIR in the

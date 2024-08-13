@@ -38,7 +38,7 @@ void launch_tuned_(LaunchParams<FwdParams> &launch_params, const bool configure_
         return;
     }
 
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef USE_ROCM
     if (Kernel_traits::SMEM_BYTES_FWD >= 48 * 1024) {
         NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                              Kernel_traits::SMEM_BYTES_FWD));

@@ -10,7 +10,8 @@
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/transformer_engine.h>
 
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
+
 #ifdef USE_HIPBLASLT
 #include <vector>
 #include <forward_list>
@@ -20,12 +21,13 @@
 #define ROCBLAS_BETA_FEATURES_API 
 #include <rocblas/rocblas.h>
 #endif // #ifdef USE_HIPBLASLT
+
 #include <hipcub/hipcub.hpp>
 #else
 #include <cublasLt.h>
 #include <cublas_v2.h>
 #include <cuda.h>
-#endif // #ifndef __HIP_PLATFORM_AMD__
+#endif // #ifndef USE_ROCM
 
 #include <cstdlib>
 #include <string>
@@ -37,7 +39,7 @@
 
 namespace {
 
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
 #ifdef USE_HIPBLASLT
 
 #if HIP_VERSION >= 60000000
@@ -105,13 +107,13 @@ cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
       NVTE_ERROR("Invalid type");
   }
 }
-#endif // __HIP_PLATFORM_AMD__
+#endif // USE_ROCM
 }  // namespace
 
 
 namespace transformer_engine {
 
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
 #include "rocm_gemm.hip"
 #else // Use cublasLt
 void cublas_gemm(const Tensor *inputA,
@@ -372,7 +374,7 @@ void cublas_gemm(const Tensor *inputA,
   NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Adesc));
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
 }
-#endif // __HIP_PLATFORM_AMD__
+#endif // USE_ROCM
 
 }  // namespace transformer_engine
 
@@ -418,7 +420,7 @@ void nvte_cublas_gemm(const NVTETensor A,
     NVTE_ERROR("TT layout not allowed.");
   }
 
-  #ifdef __HIP_PLATFORM_AMD__
+  #ifdef USE_ROCM
   bool nvte_log_gemm_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_GEMM_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
@@ -454,7 +456,7 @@ void nvte_cublas_gemm(const NVTETensor A,
               outputGelu,
               m, n, k,
               lda, ldb, ldd,
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
 #ifdef USE_HIPBLASLT
               (transa) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
               (transb) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
@@ -465,7 +467,7 @@ void nvte_cublas_gemm(const NVTETensor A,
 #else
               (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
               (transb) ? CUBLAS_OP_T : CUBLAS_OP_N,
-#endif //__HIP_PLATFORM_AMD__
+#endif //USE_ROCM
               grad, wspace->data.dptr,
               wspace->data.shape[0],
               accumulate, use_split_accumulator,
@@ -496,7 +498,7 @@ void nvte_cublas_atomic_gemm(const NVTETensor A,
                              cudaStream_t stream) {
   NVTE_API_CALL(nvte_cublas_atomic_gemm);
 
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef USE_ROCM
   int cudart_version;
   NVTE_CHECK_CUDA(cudaRuntimeGetVersion(&cudart_version));
   NVTE_CHECK(cudart_version >= 12020, "Cuda version 12.2 is required for atomic gemm.");
@@ -539,7 +541,7 @@ void nvte_cublas_atomic_gemm(const NVTETensor A,
               outputGelu,
               m, n, k,
               lda, ldb, ldd,
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
 #ifdef USE_HIPBLASLT
               (transa) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
               (transb) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
@@ -550,7 +552,7 @@ void nvte_cublas_atomic_gemm(const NVTETensor A,
 #else
               (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
               (transb) ? CUBLAS_OP_T : CUBLAS_OP_N,
-#endif //__HIP_PLATFORM_AMD__
+#endif //USE_ROCM
               grad, wspace->data.dptr,
               wspace->data.shape[0],
               accumulate, use_split_accumulator,

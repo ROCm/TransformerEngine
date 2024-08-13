@@ -6,17 +6,12 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-
-#ifdef __HIP_PLATFORM_AMD__
-#include <rocblas/rocblas.h>
-#include "common/common_hip.h"
-#include "common/util/hip_runtime.h"
-#else
+#ifndef USE_ROCM
 #include <cublasLt.h>
 #include <cublas_v2.h>
 #include <cudnn.h>
-#include "common/common.h"
-#include "common/util/cuda_runtime.h"
+#else
+#include <rocblas/rocblas.h>
 #endif
 
 #include <functional>
@@ -25,16 +20,22 @@
 #include <string>
 #include <vector>
 
+#ifndef USE_ROCM
+#include "common/common.h"
+#include "common/util/cuda_runtime.h"
+#else
+#include "common/common_hip.h"
+#include "common/util/hip_runtime.h"
+#endif
+
+#include "modules.h"
 #include "transformer_engine/activation.h"
 #include "transformer_engine/cast.h"
-#include "transformer_engine/fused_attn.h"
 #include "transformer_engine/layer_norm.h"
 #include "transformer_engine/rmsnorm.h"
 #include "transformer_engine/softmax.h"
-#include "transformer_engine/transformer_engine.h"
 #include "transformer_engine/transpose.h"
 #include "utils.h"
-#include "modules.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -100,18 +101,6 @@ pybind11::bytes PackCustomCallSoftmaxDescriptor(size_t batch_size, size_t paddin
                                         dtype, scale_factor});
 }
 
-#ifdef __HIP_PLATFORM_AMD__
-pybind11::bytes PackCustomCallFusedAttnDescriptor(
-    size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
-    size_t num_gqa_groups, size_t head_dim, float scaling_factor,
-    float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype,
-    bool is_training) {
-    return PackOpaque(CustomCallFusedAttnDescriptor{
-        batch_size, q_max_seqlen, kv_max_seqlen, num_heads, num_gqa_groups, head_dim,
-        scaling_factor, dropout_probability, bias_type, mask_type, dtype,
-        is_training});
-}
-#else
 pybind11::bytes PackCustomCallFusedAttnDescriptor(
     size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
     size_t num_gqa_groups, size_t head_dim, size_t wkspace_size, float scaling_factor,
@@ -122,7 +111,6 @@ pybind11::bytes PackCustomCallFusedAttnDescriptor(
         scaling_factor, dropout_probability, bias_type, mask_type, dtype, wkspace_dtype,
         is_training});
 }
-#endif
 
 void TransposeImpl(void *input, size_t rows, size_t cols, DType dtype, cudaStream_t stream,
                    void *output) {
@@ -971,6 +959,7 @@ NVTE_Fused_Attn_Backend GetFusedAttnBackend(DType q_dtype, DType kv_dtype,
     return backend;
 }
 
+#ifndef USE_ROCM
 /*
     NOTE: PrepareFusedAttnForwardAuxTensors unifies the auxiliary tensor pack logic from the fused
     attention forward kernels in:
@@ -1017,10 +1006,35 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack,
         }
     }
 }
+#else
+void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack,
+                                       const CustomCallFusedAttnDescriptor *desc,
+                                       NVTE_Bias_Type bias_type, NVTE_Fused_Attn_Backend backend,
+                                       void *softmax_buf, void *rng_state_buf = nullptr,
+                                       void *bias_buf = nullptr) {
+    auto batch_size    = desc->batch_size;
+    auto num_heads     = desc->num_heads;
+    auto q_max_seqlen  = desc->q_max_seqlen;
+    auto kv_max_seqlen = desc->kv_max_seqlen;
 
+    tensor_pack->size       = 2;
+    Tensor *softmax_aux     = reinterpret_cast<Tensor *>(tensor_pack->tensors[0]);
+    softmax_aux->data.dptr  = softmax_buf;
+    softmax_aux->data.shape = std::vector<size_t>{batch_size, num_heads, q_max_seqlen, 1};
+    softmax_aux->data.dtype = DType::kFloat32;
+
+    Tensor *rng_state_aux     = reinterpret_cast<Tensor *>(tensor_pack->tensors[1]);
+    rng_state_aux->data.dptr  = rng_state_buf;
+    rng_state_aux->data.shape = std::vector<size_t>{2};
+    rng_state_aux->data.dtype = DType::kInt64;
+}
+#endif
+
+
+#ifndef USE_ROCM
 /*
     NOTE: Backward fused attention kernels accept auxiliary tensors as explicit function arguments
-    instead of an NVTETensorPack and nvte_fused_attn_bwd() API does all the logic for pulling the
+    instead of an NVTETensorPack and () API does all the logic for pulling the
     necessary tensors out of the tensor pack for the active kernel. That means we can just dump
     everything we got into the tensor pack and not worry about its sizing for the backward pass.
 
@@ -1044,166 +1058,21 @@ void PrepareFusedAttnBackwardAuxTensors(NVTETensorPack *tensor_pack,
         softmax_aux->data.dtype = desc->dtype;
     }
 }
-
-#ifdef __HIP_PLATFORM_AMD__
-void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
-    const CustomCallFusedAttnDescriptor &descriptor =
-        *UnpackOpaque<CustomCallFusedAttnDescriptor>(opaque, opaque_len);
-
-    // input buffers from XLA
-    void *q = buffers[0];
-    void *k = buffers[1];
-    void *v = buffers[2];
-    void *bias = buffers[3];
-    void *q_cu_seqlens = buffers[4];
-    void *kv_cu_seqlens = buffers[5];
-    void *seed = buffers[6];
-
-    // output buffers from XLA
-    void *output = buffers[7];
-    void *softmax_aux = buffers[8];
-    void *rng_state = buffers[9];
-
-    // tensor sizes
-    auto batch_size = descriptor.batch_size;
-    auto q_max_seqlen = descriptor.q_max_seqlen;
-    auto kv_max_seqlen = descriptor.kv_max_seqlen;
-    auto num_heads = descriptor.num_heads;
-    auto num_gqa_groups = descriptor.num_gqa_groups;
-    auto head_dim = descriptor.head_dim;
-    auto scaling_factor = descriptor.scaling_factor;
-    auto dropout_probability = descriptor.dropout_probability;
-    auto bias_type = descriptor.bias_type;
-    auto mask_type = descriptor.mask_type;
-
-    auto q_shape = std::vector<size_t>{batch_size * q_max_seqlen, num_heads, head_dim};
-    auto k_shape = std::vector<size_t>{batch_size * kv_max_seqlen, num_gqa_groups, head_dim};
-    auto v_shape = k_shape;
-    auto bias_shape = std::vector<size_t>{1, num_heads, q_max_seqlen, kv_max_seqlen};
-
-    // input tensors
-    auto dtype = descriptor.dtype;
-    auto q_tensor = TensorWrapper(q, q_shape, dtype);
-    auto k_tensor = TensorWrapper(k, k_shape, dtype);
-    auto v_tensor = TensorWrapper(v, v_shape, dtype);
-    auto bias_tensor = TensorWrapper(bias, bias_shape, dtype);
-
-    // output tensors
-    auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);  // not used in F16
-    auto o_tensor = TensorWrapper(output, q_shape, dtype);
-    auto q_cu_seqlens_tensor =
-        TensorWrapper(q_cu_seqlens, std::vector<size_t>{batch_size + 1}, DType::kInt32);
-    auto kv_cu_seqlens_tensor =
-        TensorWrapper(kv_cu_seqlens, std::vector<size_t>{batch_size + 1}, DType::kInt32);
-
-    // prep RNG state
-    constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD;
-    auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
-    auto backend = nvte_get_fused_attn_backend(
-        static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
-        mask_type, dropout_probability, num_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
-        head_dim);
-    PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
-
-    // auxiliary tensors (to be propagated to the backward pass later)
-    NVTETensorPack aux_output_tensors;
-    nvte_tensor_pack_create(&aux_output_tensors);
-    PrepareFusedAttnForwardAuxTensors(&aux_output_tensors, &descriptor, bias_type, backend,
-                                      softmax_aux);
-
-    nvte_fused_attn_fwd(q_tensor.data(), k_tensor.data(), v_tensor.data(), bias_tensor.data(),
-                        s_tensor.data(), o_tensor.data(), &aux_output_tensors,
-                        q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
-                        rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen,
-                        descriptor.is_training, scaling_factor, dropout_probability, qkv_layout,
-                        bias_type, mask_type, stream);
-
-    nvte_tensor_pack_destroy(&aux_output_tensors);
-}
-
-void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
-    const CustomCallFusedAttnDescriptor &descriptor =
-        *UnpackOpaque<CustomCallFusedAttnDescriptor>(opaque, opaque_len);
-
-    // input buffers from XLA
-    void *q = buffers[0];
-    void *k = buffers[1];
-    void *v = buffers[2];
-    void *bias = buffers[3];
-    void *softmax_aux = buffers[4];
-    void *rng_state = buffers[5];
-    void *output = buffers[6];
-    void *doutput = buffers[7];
-    void *q_cu_seqlens = buffers[8];
-    void *kv_cu_seqlens = buffers[9];
-
-    // output buffers from XLA
-    void *dq = buffers[10];
-    void *dk = buffers[11];
-    void *dv = buffers[12];
-    void *dbias = buffers[13];
-
-    // tensor sizes
-    auto batch_size = descriptor.batch_size;
-    auto q_max_seqlen = descriptor.q_max_seqlen;
-    auto kv_max_seqlen = descriptor.kv_max_seqlen;
-    auto num_heads = descriptor.num_heads;
-    auto num_gqa_groups = descriptor.num_gqa_groups;
-    auto head_dim = descriptor.head_dim;
-    auto scaling_factor = descriptor.scaling_factor;
-    auto dropout_probability = descriptor.dropout_probability;
-    auto bias_type = descriptor.bias_type;
-    auto mask_type = descriptor.mask_type;
-
-    auto q_shape = std::vector<size_t>{batch_size * q_max_seqlen, num_heads, head_dim};
-    auto k_shape = std::vector<size_t>{batch_size * kv_max_seqlen, num_gqa_groups, head_dim};
-    auto v_shape = k_shape;
-    auto output_shape = std::vector<size_t>{batch_size * q_max_seqlen, num_heads, head_dim};
-    auto bias_shape = std::vector<size_t>{1, num_heads, q_max_seqlen, kv_max_seqlen};
-
-    // input tensors
-    auto dtype = descriptor.dtype;
-    auto q_tensor = TensorWrapper(q, q_shape, dtype);
-    auto k_tensor = TensorWrapper(k, k_shape, dtype);
-    auto v_tensor = TensorWrapper(v, v_shape, dtype);
-    auto output_tensor = TensorWrapper(output, output_shape, dtype);
-    auto doutput_tensor = TensorWrapper(doutput, output_shape, dtype);
-
-    // output tensors
-    auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);  // not used in F16
-    auto dq_tensor = TensorWrapper(dq, q_shape, dtype);
-    auto dk_tensor = TensorWrapper(dk, k_shape, dtype);
-    auto dv_tensor = TensorWrapper(dv, v_shape, dtype);
-    auto dbias_tensor = TensorWrapper(dbias, bias_shape, dtype);
-    auto q_cu_seqlens_tensor =
-        TensorWrapper(q_cu_seqlens, std::vector<size_t>{batch_size + 1}, DType::kInt32);
-    auto kv_cu_seqlens_tensor =
-        TensorWrapper(kv_cu_seqlens, std::vector<size_t>{batch_size + 1}, DType::kInt32);
-
-    // auxiliary tensors (propagated from the forward pass)
-    NVTETensorPack aux_input_tensors;
-    nvte_tensor_pack_create(&aux_input_tensors);
-    constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD;
-    auto backend = nvte_get_fused_attn_backend(
-        static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
-        mask_type, dropout_probability, num_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
-        head_dim);
-    PrepareFusedAttnBackwardAuxTensors(&aux_input_tensors, &descriptor, backend, softmax_aux,
-                                       rng_state, bias);
-
-    nvte_fused_attn_bwd(q_tensor.data(), k_tensor.data(), v_tensor.data(), output_tensor.data(),
-                        doutput_tensor.data(),
-                        s_tensor.data(),  // not used for F16
-                        s_tensor.data(),  // not used for F16
-                        &aux_input_tensors, dq_tensor.data(), dk_tensor.data(), dv_tensor.data(),
-                        dbias_tensor.data(), q_cu_seqlens_tensor.data(),
-                        kv_cu_seqlens_tensor.data(), q_max_seqlen, kv_max_seqlen, scaling_factor,
-                        dropout_probability, qkv_layout, bias_type, mask_type,
-                        stream);
-
-    nvte_tensor_pack_destroy(&aux_input_tensors);
-}
 #else
+void PrepareFusedAttnBackwardAuxTensors(NVTETensorPack *tensor_pack,
+                                        const CustomCallFusedAttnDescriptor *desc,
+                                        NVTE_Fused_Attn_Backend backend, void *softmax_buf,
+                                        void *rng_state_buf, void *bias_buf) {
+  // Backward calls put everything into the tensor pack for every backend
+  // so we set dummy bias_type and backend choices here to follow the correct code path
+  auto dummy_bias_type = NVTE_Bias_Type::NVTE_NO_BIAS;
+  auto dummy_backend   = NVTE_Fused_Attn_Backend::NVTE_CK_FMHA;
+  PrepareFusedAttnForwardAuxTensors(tensor_pack, desc, dummy_bias_type, dummy_backend, softmax_buf,
+                                    rng_state_buf, bias_buf);
+}
+#endif
+
+#ifndef USE_ROCM
 pybind11::tuple GetSelfFusedAttnForwardWorkspaceSizes(
     size_t batch_size, size_t max_seqlen, size_t num_heads, size_t head_dim, float scaling_factor,
     float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype,
@@ -1239,7 +1108,9 @@ pybind11::tuple GetSelfFusedAttnForwardWorkspaceSizes(
     auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
     return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
+#endif
 
+#ifndef USE_ROCM
 void SelfFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque,
                           size_t opaque_len) {
     const CustomCallFusedAttnDescriptor &descriptor =
@@ -1308,7 +1179,9 @@ void SelfFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaqu
 
     nvte_tensor_pack_destroy(&aux_output_tensors);
 }
+#endif
 
+#ifndef USE_ROCM
 pybind11::tuple GetSelfFusedAttnBackwardWorkspaceSizes(
     size_t batch_size, size_t max_seqlen, size_t num_heads, size_t head_dim, float scaling_factor,
     float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype,
@@ -1346,7 +1219,9 @@ pybind11::tuple GetSelfFusedAttnBackwardWorkspaceSizes(
     auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
     return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
+#endif
 
+#ifndef USE_ROCM
 void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque,
                            size_t opaque_len) {
     const CustomCallFusedAttnDescriptor &descriptor =
@@ -1418,7 +1293,9 @@ void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaq
 
     nvte_tensor_pack_destroy(&aux_input_tensors);
 }
+#endif
 
+#ifndef USE_ROCM
 pybind11::tuple GetCrossFusedAttnForwardWorkspaceSizes(
     size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
     size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
@@ -1459,7 +1336,9 @@ pybind11::tuple GetCrossFusedAttnForwardWorkspaceSizes(
     auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
     return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
+#endif
 
+#ifndef USE_ROCM
 void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque,
                            size_t opaque_len) {
     const CustomCallFusedAttnDescriptor &descriptor =
@@ -1537,7 +1416,9 @@ void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaq
 
     nvte_tensor_pack_destroy(&aux_output_tensors);
 }
+#endif
 
+#ifndef USE_ROCM
 pybind11::tuple GetCrossFusedAttnBackwardWorkspaceSizes(
     size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
     size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
@@ -1581,7 +1462,9 @@ pybind11::tuple GetCrossFusedAttnBackwardWorkspaceSizes(
     auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
     return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
+#endif
 
+#ifndef USE_ROCM
 void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque,
                             size_t opaque_len) {
     const CustomCallFusedAttnDescriptor &descriptor =
@@ -1665,7 +1548,9 @@ void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opa
 
     nvte_tensor_pack_destroy(&aux_input_tensors);
 }
+#endif
 
+#ifndef USE_ROCM
 pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
     size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
@@ -1708,6 +1593,14 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
     return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
+#else
+pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
+    size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
+    size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype, bool is_training) {
+    return pybind11::make_tuple(std::vector<size_t>{1}, DType::kByte);
+}
+#endif
 
 void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
     const CustomCallFusedAttnDescriptor &descriptor =
@@ -1767,7 +1660,11 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
         static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
         mask_type, dropout_probability, num_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
         head_dim);
+#ifndef USE_ROCM
     PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
+#else
+    PopulateRngStateAsync(rng_state, seed, batch_size, num_heads, q_max_seqlen, kv_max_seqlen, stream);
+#endif
 
     // auxiliary tensors (to be propagated to the backward pass later)
     NVTETensorPack aux_output_tensors;
@@ -1789,6 +1686,7 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
     nvte_tensor_pack_destroy(&aux_output_tensors);
 }
 
+#ifndef USE_ROCM
 pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
     size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
@@ -1836,6 +1734,40 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
     return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
+#else
+bool is_bwd_deterministic() {
+    const char *env_var = std::getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO");
+    return env_var == nullptr || std::string(env_var) == "0";
+}
+
+int integer_divide_ceil(int a, int b) { return (a + b - 1) / b; }
+
+pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
+    size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
+    size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype, bool is_training) {
+    static constexpr size_t float_size = 4;
+    static constexpr size_t bf16_size  = 2;
+
+    // Calculate sizes of different memory components
+    size_t kN0         = (head_dim <= 128) ? 128 : 64;
+    size_t nsplits     = is_bwd_deterministic() ? integer_divide_ceil(kv_max_seqlen, kN0) : 1;
+    size_t d_size      = float_size * batch_size * num_heads * q_max_seqlen;
+    size_t dq_acc_size = float_size * nsplits * batch_size * q_max_seqlen * num_heads * head_dim;
+    size_t dk_expanded_size = 0;
+    size_t dv_expanded_size = 0;
+
+    if (num_heads > num_gqa_groups) {
+        dk_expanded_size = bf16_size * batch_size * kv_max_seqlen * num_heads * head_dim;
+        dv_expanded_size = bf16_size * batch_size * kv_max_seqlen * num_heads * head_dim;
+    }
+
+    // Total workspace size
+    size_t workspace_size = d_size + dq_acc_size + dk_expanded_size + dv_expanded_size;
+
+    return pybind11::make_tuple(std::vector<size_t>{workspace_size}, DType::kByte);
+}
+#endif
 
 void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
     const CustomCallFusedAttnDescriptor &descriptor =
@@ -1925,6 +1857,6 @@ void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, 
 
     nvte_tensor_pack_destroy(&aux_input_tensors);
 }
-#endif  // __HIP_PLATFORM_AMD__
+
 }  // namespace jax
 }  // namespace transformer_engine

@@ -26,12 +26,12 @@ namespace {
 // Strings with headers for RTC kernels
 #include "string_code_utils_cuh.h"
 
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
 #include "string_code_amd_detail_hip_float8_h.h"
 #include "string_code_amd_detail_hip_f8_impl_h.h"
-#endif // __HIP_PLATFORM_AMD__
+#endif // USE_ROCM
 
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef USE_ROCM
 /*! \brief Latest compute capability that NVRTC supports
  *
  * \return Compute capability as int. Last digit is minor revision,
@@ -49,7 +49,7 @@ inline int max_supported_sm_arch() {
   }
   return arch_;
 }
-#endif // __HIP_PLATFORM_AMD__
+#endif // USE_ROCM
 
 }  // namespace
 
@@ -75,7 +75,7 @@ Kernel::~Kernel() {
   for (int device_id=0; device_id<static_cast<int>(modules_.size()); ++device_id) {
     // Unload CUDA modules if needed
     if (modules_[device_id] != null_module) {
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
       cuda_driver::call("hipModuleUnload", modules_[device_id]);
 #else
       CUdevice device;
@@ -90,7 +90,7 @@ Kernel::~Kernel() {
       }
       cuda_driver::call("cuModuleUnload", modules_[device_id]);
       cuda_driver::call("cuDevicePrimaryCtxRelease", device);
-#endif // __HIP_PLATFORM_AMD__
+#endif // USE_ROCM
     }
   }
 }
@@ -157,12 +157,12 @@ void KernelManager::compile(const std::string &kernel_label,
   std::lock_guard<std::mutex> lock_guard_(lock_);
 
   const int device_id = cuda::current_device();
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef USE_ROCM
   // Choose whether to compile to PTX or cubin
   const int sm_arch_ = cuda::sm_arch(device_id);
   const int compile_sm_arch = std::min(sm_arch_, max_supported_sm_arch());
   const bool compile_ptx = (CUDA_VERSION <= 11000) || (sm_arch_ != compile_sm_arch);
-#endif // __HIP_PLATFORM_AMD__
+#endif // USE_ROCM
 
   // Compilation flags
   std::vector<std::string> opts = {
@@ -171,14 +171,14 @@ void KernelManager::compile(const std::string &kernel_label,
 #endif
     "--std=c++17"};
 
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef USE_ROCM
   if (compile_ptx) {
     opts.push_back(concat_strings("--gpu-architecture=compute_", compile_sm_arch));
   } else {
     opts.push_back(concat_strings("--gpu-architecture=sm_", compile_sm_arch));
   }
   opts.push_back(concat_strings("-I", cuda::include_directory(true)));
-#endif //__HIP_PLATFORM_AMD__
+#endif //USE_ROCM
 
   std::vector<const char*> opts_ptrs;
   for (const auto& opt : opts) {
@@ -187,7 +187,7 @@ void KernelManager::compile(const std::string &kernel_label,
 
   // Compile source
   nvrtcProgram program;
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
   constexpr int num_headers = 3;
   const char* headers[num_headers] = {string_code_utils_cuh, string_code_amd_detail_hip_float8_h, string_code_amd_detail_hip_f8_impl_h};
   const char* include_names[num_headers] = {"utils_hip.cuh", "amd_detail/hip_float8.h", "amd_detail/hip_f8_impl.h"};
@@ -195,7 +195,7 @@ void KernelManager::compile(const std::string &kernel_label,
   constexpr int num_headers = 1;
   constexpr const char* headers[num_headers] = {string_code_utils_cuh};
   constexpr const char* include_names[num_headers] = {"utils.cuh"};
-#endif // __HIP_PLATFORM_AMD__
+#endif // USE_ROCM
   NVTE_CHECK_NVRTC(nvrtcCreateProgram(&program,
                                       code.c_str(),
                                       filename.c_str(),
@@ -228,7 +228,7 @@ void KernelManager::compile(const std::string &kernel_label,
 
   // Get compiled code
   std::string compiled_code;
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
   {
     size_t compiled_size;
     NVTE_CHECK_NVRTC(hiprtcGetCodeSize(program, &compiled_size));
@@ -247,7 +247,7 @@ void KernelManager::compile(const std::string &kernel_label,
     compiled_code.resize(compiled_size);
     NVTE_CHECK_NVRTC(nvrtcGetCUBIN(program, compiled_code.data()));
   }
-#endif //__HIP_PLATFORM_AMD__
+#endif //USE_ROCM
 
   // Cache compiled code
   const auto key = get_kernel_cache_key(kernel_label, device_id);
@@ -265,7 +265,7 @@ bool KernelManager::is_compiled(const std::string &kernel_label, int device_id) 
 
 std::string KernelManager::get_kernel_cache_key(const std::string &kernel_label,
                                                 int device_id) const {
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
   return concat_strings(cuda::sm_arch_name(device_id), ",", kernel_label);
 #else
   return concat_strings("sm=", cuda::sm_arch(device_id), ",", kernel_label);

@@ -32,7 +32,7 @@ const char* dtype_name(DType dtype) {
 // Maximum representable value of an FP8 dtype
 inline float fp8_dtype_max(DType dtype) {
   switch (dtype) {
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef USE_ROCM
   case DType::kFloat8E4M3: return 448;
 #else
   case DType::kFloat8E4M3: return 240;

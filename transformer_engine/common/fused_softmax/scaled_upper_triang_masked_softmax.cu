@@ -102,7 +102,7 @@ struct Max {
 template <typename T>
 __device__ __forceinline__ T WARP_SHFL_XOR_NATIVE(T value, int laneMask, int width = warpSize,
                                                   unsigned int mask = 0xffffffff) {
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
     return __shfl_xor(value, laneMask, width);
 #else
 #if CUDA_VERSION >= 9000
@@ -110,7 +110,7 @@ __device__ __forceinline__ T WARP_SHFL_XOR_NATIVE(T value, int laneMask, int wid
 #else
     return __shfl_xor(value, laneMask, width);
 #endif
-#endif// __HIP_PLATFORM_AMD__
+#endif// USE_ROCM
 }
 
 template <typename acc_t, int WARP_BATCH, int WARP_SIZE, template<typename> class ReduceOp>
