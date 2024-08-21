@@ -290,4 +290,7 @@ struct fmha_fwd_traits
     bool do_fp8_static_quant;
     // TODO: padding check is inside this api
 };
+//TODO: enable kernel compilation after CK fixed numerical issues
+#ifndef FUSED_ATTN_CK_NO_KERNEL 
 float fmha_fwd(fmha_fwd_traits, fmha_fwd_args, const ck_tile::stream_config&);
+#endif

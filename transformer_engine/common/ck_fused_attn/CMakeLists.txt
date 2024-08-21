@@ -10,40 +10,48 @@ set(ck_fused_attn_SOURCES)
 list(APPEND ck_fused_attn_SOURCES
        src/ck_fused_attn.cpp)
 
-file(MAKE_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/gen_src)
-#fwd list
-execute_process(
-  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/generate.py
-  --direction fwd --list_blobs ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/fwd_blob_list.txt -r 1
-)
-#fwd kernels
-execute_process(
-  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/generate.py
-  --direction fwd --output_dir ${CMAKE_CURRENT_SOURCE_DIR}/gen_src -r 1
-)
-
-#bwd list
-execute_process(
-  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/generate.py
-  --direction bwd --list_blobs ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/bwd_blob_list.txt -r 1
-)
-#bwd kernels
-execute_process(
-  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/generate.py
-  --direction bwd --output_dir ${CMAKE_CURRENT_SOURCE_DIR}/gen_src -r 1
-)
-
-
-file(GLOB_RECURSE CK_FA_FILES "${CMAKE_CURRENT_SOURCE_DIR}/gen_src/*.cpp")
-list(APPEND ck_fused_attn_SOURCES ${CK_FA_FILES})
-message(STATUS "Found the following CK fused attention files:")
-foreach(file ${CK_FA_FILES})
-  message(STATUS " ${file}")
-endforeach()
+if(NOT FUSED_ATTN_CK_KERNELS_NO_COMPILE)
+  file(MAKE_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/gen_src)
+  #fwd list
+  execute_process(
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/generate.py
+    --direction fwd --list_blobs ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/fwd_blob_list.txt -r 1
+  )
+  #fwd kernels
+  execute_process(
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/generate.py
+    --direction fwd --output_dir ${CMAKE_CURRENT_SOURCE_DIR}/gen_src -r 1
+  )
+  
+  #bwd list
+  execute_process(
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/generate.py
+    --direction bwd --list_blobs ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/bwd_blob_list.txt -r 1
+  )
+  #bwd kernels
+  execute_process(
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/generate.py
+    --direction bwd --output_dir ${CMAKE_CURRENT_SOURCE_DIR}/gen_src -r 1
+  )
+  
+  
+  file(GLOB_RECURSE CK_FA_FILES "${CMAKE_CURRENT_SOURCE_DIR}/gen_src/*.cpp")
+  list(APPEND ck_fused_attn_SOURCES ${CK_FA_FILES})
+  message(STATUS "Found the following CK fused attention files:")
+  foreach(file ${CK_FA_FILES})
+    message(STATUS " ${file}")
+  endforeach()
+endif()
 
 add_library(ck_fused_attn STATIC ${ck_fused_attn_SOURCES})
 set(CK_FUSED_ATTN_COMPILE_OPTIONS)
-list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -Wno-undefined-func-template -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=0 -fgpu-flush-denormals-to-zero -Wno-float-equal -ftemplate-backtrace-limit=0  -fPIC  -Wno-gnu-line-marker -Wunused-variable -Werror)
+list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -Wno-undefined-func-template -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=0 -fgpu-flush-denormals-to-zero -Wno-float-equal -ftemplate-backtrace-limit=0  -fPIC  -Wno-gnu-line-marker -Wunused-variable)
+
+if(NOT FUSED_ATTN_CK_KERNELS_NO_COMPILE)
+  list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -Werror)
+else()
+  target_compile_definitions(ck_fused_attn PUBLIC FUSED_ATTN_CK_NO_KERNEL)
+endif()
 
 set(CK_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../3rdparty/composable_kernel/include")
 message(STATUS "ck_include_dir: ${CK_INCLUDE_DIR}")

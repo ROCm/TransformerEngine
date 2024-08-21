@@ -210,7 +210,7 @@ Currently ROCm TE supports two backends, AOTriton and CK, for fused attention.
 To enable specific backends, the following environment variables can be used:
 
 * NVTE_FUSED_ATTN - enable the fused attention, default = 1;
-* NVTE_FUSED_ATTN_CK - enable the CK backend, default = 1;
+* NVTE_FUSED_ATTN_CK - enable the CK backend, default = 0 (will enable after CK fix rocm6.2 issues);
 * NVTE_FUSED_ATTN_AOTRITON - enable the AOTriton backend, default = 1.
 
 NVTE_FUSED_ATTN has higher priority than NVTE_FUSED_ATTN_CK and NVTE_FUSED_ATTN_AOTRITON. 
