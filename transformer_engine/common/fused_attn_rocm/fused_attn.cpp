@@ -79,13 +79,14 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         size_t head_dim) {
   using namespace transformer_engine;
   
-  // by default, both ck and aotriton backends are enabled
-  bool nvte_fused_attn_ck = true;
+  // by default, aotriton backend is enabled
+  // CK is temporarily disabled until ck fixed rocm6.2 issues
+  bool nvte_fused_attn_ck = false;
   bool nvte_fused_attn_aotriton = true;
   
   if (const char* env_p = std::getenv("NVTE_FUSED_ATTN_CK") ) {
-    if (env_p != nullptr && std::string(env_p) == "0")
-      nvte_fused_attn_ck = false;
+    if (env_p != nullptr && std::string(env_p) != "0")
+      nvte_fused_attn_ck = true;
   }
   if (const char* env_p = std::getenv("NVTE_FUSED_ATTN_AOTRITON") ) {
     if (env_p != nullptr && std::string(env_p) == "0")

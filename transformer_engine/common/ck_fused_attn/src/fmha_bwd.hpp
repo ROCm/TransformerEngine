@@ -337,4 +337,7 @@ struct fmha_bwd_traits
     bool has_dropout;
     // TODO: padding check is inside this api
 };
+//TODO: enable kernel compilation after CK fixed numerical issues
+#ifndef FUSED_ATTN_CK_NO_KERNEL 
 float fmha_bwd(fmha_bwd_traits, fmha_bwd_args, const ck_tile::stream_config&);
+#endif

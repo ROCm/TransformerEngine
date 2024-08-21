@@ -235,11 +235,14 @@ hipError_t ck_attn_fwd(
     std::cout<<"dropout_seed: "<<std::get<0>(fmha_args.drop_seed_offset)<<", ";
     std::cout<<"dropout_offset: "<<std::get<1>(fmha_args.drop_seed_offset)<<std::endl;
   }
+//TODO: enable kernel compilation after CK fixed numerical issues
+#ifndef FUSED_ATTN_CK_NO_KERNEL 
   float average_runtime = fmha_fwd(fmha_traits, fmha_args, stream_config);
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");
   }
+#endif
   return hipSuccess;
 }
 
@@ -505,11 +508,14 @@ hipError_t ck_attn_bwd(
     std::cout<<"dropout_seed: "<<std::get<0>(fmha_args.drop_seed_offset)<<", ";
     std::cout<<"dropout_offset: "<<std::get<1>(fmha_args.drop_seed_offset)<<std::endl;
   }
+//TODO: enable kernel compilation after CK fixed numerical issues
+#ifndef FUSED_ATTN_CK_NO_KERNEL 
   float average_runtime = fmha_bwd(fmha_traits, fmha_args, stream_config);
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
   }
+#endif
   return hipSuccess;
 }
 
