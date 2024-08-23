@@ -1075,7 +1075,6 @@ void PrepareFusedAttnBackwardAuxTensors(NVTETensorPack *tensor_pack,
 }
 #endif
 
-#ifndef USE_ROCM
 pybind11::tuple GetSelfFusedAttnForwardWorkspaceSizes(
     size_t batch_size, size_t max_seqlen, size_t num_heads, size_t head_dim, float scaling_factor,
     float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype,
@@ -1111,15 +1110,6 @@ pybind11::tuple GetSelfFusedAttnForwardWorkspaceSizes(
     auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
     return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
-#else
-pybind11::tuple GetSelfFusedAttnForwardWorkspaceSizes(
-    size_t batch_size, size_t max_seqlen, size_t num_heads, size_t head_dim, float scaling_factor,
-    float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype,
-    bool is_training) {
-
-    return pybind11::make_tuple(std::vector<size_t>(2, 0), DType::kBFloat16);
-}
-#endif
 
 void SelfFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque,
                           size_t opaque_len) {
@@ -1194,7 +1184,6 @@ void SelfFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaqu
     nvte_tensor_pack_destroy(&aux_output_tensors);
 }
 
-#ifndef USE_ROCM
 pybind11::tuple GetSelfFusedAttnBackwardWorkspaceSizes(
     size_t batch_size, size_t max_seqlen, size_t num_heads, size_t head_dim, float scaling_factor,
     float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype,
@@ -1232,16 +1221,6 @@ pybind11::tuple GetSelfFusedAttnBackwardWorkspaceSizes(
     auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
     return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
-#else
-pybind11::tuple GetSelfFusedAttnBackwardWorkspaceSizes(
-    size_t batch_size, size_t max_seqlen, size_t num_heads, size_t head_dim, float scaling_factor,
-    float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype,
-    bool is_training) {
-
-    std::vector<size_t> work_shape = {batch_size * num_heads, max_seqlen};
-    return pybind11::make_tuple(work_shape, DType::kFloat32);
-} 
-#endif
 
 void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque,
                            size_t opaque_len) {
@@ -1315,7 +1294,6 @@ void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaq
     nvte_tensor_pack_destroy(&aux_input_tensors);
 }
 
-#ifndef USE_ROCM
 pybind11::tuple GetCrossFusedAttnForwardWorkspaceSizes(
     size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
     size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
@@ -1356,15 +1334,6 @@ pybind11::tuple GetCrossFusedAttnForwardWorkspaceSizes(
     auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
     return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
-#else
-pybind11::tuple GetCrossFusedAttnForwardWorkspaceSizes(
-    size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
-    size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype, bool is_training) {
-
-    return pybind11::make_tuple(std::vector<size_t>(2, 0), DType::kBFloat16);
-}
-#endif
 
 void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque,
                            size_t opaque_len) {
@@ -1448,7 +1417,6 @@ void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaq
     nvte_tensor_pack_destroy(&aux_output_tensors);
 }
 
-#ifndef USE_ROCM
 pybind11::tuple GetCrossFusedAttnBackwardWorkspaceSizes(
     size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
     size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
@@ -1492,16 +1460,6 @@ pybind11::tuple GetCrossFusedAttnBackwardWorkspaceSizes(
     auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
     return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
-#else
-pybind11::tuple GetCrossFusedAttnBackwardWorkspaceSizes(
-    size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
-    size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype, bool is_training) {
-
-    std::vector<size_t> work_shape = {batch_size * num_heads, q_max_seqlen};
-    return pybind11::make_tuple(work_shape, DType::kFloat32);
-}
-#endif
 
 void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque,
                             size_t opaque_len) {
@@ -1587,7 +1545,6 @@ void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opa
     nvte_tensor_pack_destroy(&aux_input_tensors);
 }
 
-#ifndef USE_ROCM
 pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
     size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
@@ -1630,17 +1587,6 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
     return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
-#else
-// rocm fused attn does not need workspace in fwd pass
-pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
-    size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
-    size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype, bool is_training) {
-
-    return pybind11::make_tuple(std::vector<size_t>(2, 0), DType::kBFloat16);
-}
-#endif
-
 
 void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
     const CustomCallFusedAttnDescriptor &descriptor =
@@ -1726,7 +1672,6 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
     nvte_tensor_pack_destroy(&aux_output_tensors);
 }
 
-#ifndef USE_ROCM
 pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
     size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
@@ -1774,17 +1719,6 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
     return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
-#else
-// rocm requires wkspace size as softmax_lse (batch, num_head, seqlen_q)
-pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
-    size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
-    size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype, bool is_training) {
-
-    std::vector<size_t> work_shape = {batch_size * num_heads, q_max_seqlen};
-    return pybind11::make_tuple(work_shape, DType::kFloat32);
-}
-#endif
 
 void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
     const CustomCallFusedAttnDescriptor &descriptor =

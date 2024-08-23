@@ -35,6 +35,7 @@ hipError_t ck_attn_bwd(
   bool is_causal,
   void* dq_ptr, 
   uint64_t stride_b_dq, uint64_t stride_h_dq, uint64_t stride_s_dq,
+  void* dq_acc_ptr,
   void* dk_ptr, 
   uint64_t stride_b_dk, uint64_t stride_h_dk, uint64_t stride_s_dk,
   void* dv_ptr, 
@@ -44,7 +45,6 @@ hipError_t ck_attn_bwd(
 
   bool has_dropout = (dropout_probability > 0.f);
   bool has_dbias = false;
-  void* dq_acc_ptr = nullptr;
 
   /* CK input parameters */
   ck_tile::index_t batch = b;
@@ -62,7 +62,6 @@ hipError_t ck_attn_bwd(
   bool is_group_mode = false;
   bool s_randval = false;
   bool is_deterministic = false;
-  const ck_tile::index_t nsplits = 1;
 
   bias_enum bias_type = bias_enum::no_bias;
   mask_enum mask_type;
@@ -94,13 +93,6 @@ hipError_t ck_attn_bwd(
                     mask_type, bias_type, has_dbias,     has_dropout, 
                     s_randval, is_deterministic};
 
-  //dq_acc is of shape (B, S, H, D)
-  if(hipMallocAsync(&dq_acc_ptr, sizeof(float)*nsplits*b*h*s_q*d, stream)!=hipSuccess){
-    std::cout<<"Error allocating dq_acc_ptr"<<std::endl;
-  }
-  if(hipMemsetAsync(dq_acc_ptr, 0, sizeof(float)*nsplits*b*h*s_q*d, stream)!=hipSuccess){
-    std::cout<<"Error memset dq_acc_ptr"<<std::endl;
-  }
   auto fmha_args = [&]() {
     // setup stride_* arguments
     const ck_tile::index_t stride_q = stride_s_q;
@@ -311,9 +303,6 @@ hipError_t ck_attn_bwd(
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
-  }
-  if(hipFreeAsync(dq_acc_ptr, stream)!=hipSuccess){
-    std::cout<<"Failed deallocating dq_acc_ptr"<<std::endl; 
   }
   return hipSuccess;
 }

@@ -88,8 +88,16 @@ void fused_attn_ck_fwd_impl(
   const uint64_t* devPtrDropoutSeed, const uint64_t* devPtrDropoutOffset,
   //void* devPtrCuSeqlensQ, void* devPtrCuSeqlensKV,
   ck_fused_attn::DType dtype,
-  //void *workspace, size_t *workspace_size,
+  void *workspace, 
+  size_t *workspace_size,
   cudaStream_t stream){
+
+  // Exit to request upper level API to allocate memory if needed
+  // Currently ck fused attn does not need workspace in fwd pass
+  if(workspace==nullptr){
+    *workspace_size = 0;
+    return;
+  }
 
   std::array<uint64_t, 4> q_stride;
   std::array<uint64_t, 4> k_stride;
@@ -184,8 +192,18 @@ void fused_attn_ck_bwd_impl(
   const uint64_t* devPtrDropoutOffset,
   ck_fused_attn::DType dtype,
   void *workspace,
+  size_t *workspace_size,
   cudaStream_t stream) {
   
+  // Exit to request upper level API to allocate memory if needed
+  if(workspace==nullptr){
+    size_t workspace_size_lse = b*h*s_q*sizeof(float);
+    // CK requires dq_acc ptr
+    size_t workspace_size_dq_acc = b*h*s_q*d*sizeof(float);
+    *workspace_size = workspace_size_lse + workspace_size_dq_acc;
+    return;
+  }
+
   //ck bwd requires initialize dq since ck uses atomic operations
   //TODO: remove the memset afer ck fixes the atomic operations
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
@@ -221,6 +239,12 @@ void fused_attn_ck_bwd_impl(
     cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
     cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
   }
+  // First b*h*sq*sizeof(float) in workspace are for lse
+  // The remaining are for dq_acc_ptr
+  void* dq_acc_ptr = static_cast<void *>(static_cast<int8_t*>(workspace) + b*h*s_q*sizeof(float));
+  // like dq, dq_acc mem also requires zeroing out
+  //dq_acc is of shape (B, S, H, D)
+  NVTE_CHECK_CUDA(cudaMemsetAsync(dq_acc_ptr, 0, sizeof(float)*b*h*s_q*d, stream));
 
   bool nvte_log_ck_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
@@ -264,6 +288,7 @@ void fused_attn_ck_bwd_impl(
       mask_type==NVTE_CAUSAL_MASK, // is causal
       devPtrdQ,
       q_stride[0], q_stride[1], q_stride[2], //dQ and Q share the same stride
+      dq_acc_ptr, 
       devPtrdK,
       k_stride[0], k_stride[1], k_stride[2], //dK and K share the same stride
       devPtrdV,
@@ -282,7 +307,9 @@ void fused_attn_ck_fwd_qkvpacked(
   Tensor* output_O, Tensor* output_M, Tensor* output_rng_state,
   const Tensor* input_cu_seqlens,
   const Tensor* input_rng_state,
+  Tensor *workspace,
   cudaStream_t stream){
+
   const NVTEDType QKV_type = static_cast<NVTEDType>(input_QKV->data.dtype);
   void *devPtrQKV = input_QKV->data.dptr;
   // determine the stride based on qkv layout
@@ -300,6 +327,8 @@ void fused_attn_ck_fwd_qkvpacked(
   //save the input rng state to Aux_CTX_Tensors
   output_rng_state->data.dptr = input_rng_state->data.dptr;
 
+  size_t workspace_size = 0;
+
   fused_attn_ck_fwd_impl(
     b, h, h, max_seqlen, max_seqlen, d,
     is_training, attn_scale, dropout, 
@@ -310,7 +339,23 @@ void fused_attn_ck_fwd_qkvpacked(
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1,
     nvte_to_ck_dtype(QKV_type),
+    workspace->data.dptr,
+    &workspace_size,
     stream);
+
+  if (workspace_size > 0) {
+    if (workspace->data.dptr == nullptr) {
+      workspace->data.shape = {workspace_size};
+      workspace->data.dtype = DType::kByte;
+      return;
+    }
+  } else if (workspace_size == 0) {
+    workspace->data.shape = {1};
+    workspace->data.dtype = DType::kByte;
+    return;
+  } else {
+    NVTE_ERROR("Unexpected workspace_size.");
+  }
 }
 
 void fused_attn_ck_bwd_qkvpacked(
@@ -322,7 +367,7 @@ void fused_attn_ck_bwd_qkvpacked(
   const Tensor* input_cu_seqlens,
   const Tensor* input_M,
   const Tensor* input_rng_state,
-  Tensor* wkspace,
+  Tensor* workspace,
   cudaStream_t stream){
 
   const NVTEDType QKV_type = static_cast<NVTEDType>(input_QKV->data.dtype);
@@ -345,6 +390,8 @@ void fused_attn_ck_bwd_qkvpacked(
   void *devPtrdK = static_cast<void *>(static_cast<int8_t *>(devPtrdQKV) + stride);
   void *devPtrdV = static_cast<void *>(static_cast<int8_t *>(devPtrdQKV) + 2 * stride);
   
+  size_t workspace_size = 0;
+
   fused_attn_ck_bwd_impl(
     b, h, h, max_seqlen, max_seqlen, d,
     attn_scale, dropout, 
@@ -357,8 +404,23 @@ void fused_attn_ck_bwd_qkvpacked(
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1,
     nvte_to_ck_dtype(QKV_type),
-    wkspace->data.dptr,
+    workspace->data.dptr,
+    &workspace_size,
     stream);
+
+  if (workspace_size > 0) {
+    if (workspace->data.dptr == nullptr) {
+      workspace->data.shape = {workspace_size};
+      workspace->data.dtype = DType::kByte;
+      return;
+    }
+  } else if (workspace_size == 0) {
+    workspace->data.shape = {1};
+    workspace->data.dtype = DType::kByte;
+    return;
+  } else {
+    NVTE_ERROR("Unexpected workspace_size.");
+  }
 }
 
 void fused_attn_ck_fwd_kvpacked(
@@ -370,7 +432,9 @@ void fused_attn_ck_fwd_kvpacked(
   const Tensor* input_cu_seqlens_q,
   const Tensor* input_cu_seqlens_kv,
   const Tensor* input_rng_state,
+  Tensor *workspace,
   cudaStream_t stream){
+
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_KV->data.dtype);
   //input tensor
@@ -387,6 +451,8 @@ void fused_attn_ck_fwd_kvpacked(
 
   //save the input rng state to Aux_CTX_Tensors
   output_rng_state->data.dptr = input_rng_state->data.dptr;
+  
+  size_t workspace_size = 0;
 
   fused_attn_ck_fwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
@@ -398,7 +464,23 @@ void fused_attn_ck_fwd_kvpacked(
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1,
     nvte_to_ck_dtype(Q_type),
+    workspace->data.dptr,
+    &workspace_size,
     stream);
+
+  if (workspace_size > 0) {
+    if (workspace->data.dptr == nullptr) {
+      workspace->data.shape = {workspace_size};
+      workspace->data.dtype = DType::kByte;
+      return;
+    }
+  } else if (workspace_size == 0) {
+    workspace->data.shape = {1};
+    workspace->data.dtype = DType::kByte;
+    return;
+  } else {
+    NVTE_ERROR("Unexpected workspace_size.");
+  }
 }
 
 void fused_attn_ck_bwd_kvpacked(
@@ -411,7 +493,7 @@ void fused_attn_ck_bwd_kvpacked(
   const Tensor* input_cu_seqlens_kv,
   const Tensor* input_M,
   const Tensor* input_rng_state,
-  Tensor* wkspace,
+  Tensor* workspace,
   cudaStream_t stream){
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_KV->data.dtype);
@@ -432,6 +514,8 @@ void fused_attn_ck_bwd_kvpacked(
   void *devPtrdK = devPtrdKV;
   void *devPtrdV = static_cast<void *>(static_cast<int8_t *>(devPtrdKV) + stride);
 
+  size_t workspace_size = 0;
+
   fused_attn_ck_bwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
     attn_scale, dropout, 
@@ -444,8 +528,23 @@ void fused_attn_ck_bwd_kvpacked(
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1,
     nvte_to_ck_dtype(Q_type),
-    wkspace->data.dptr,
+    workspace->data.dptr,
+    &workspace_size,
     stream);
+
+  if (workspace_size > 0) {
+    if (workspace->data.dptr == nullptr) {
+      workspace->data.shape = {workspace_size};
+      workspace->data.dtype = DType::kByte;
+      return;
+    }
+  } else if (workspace_size == 0) {
+    workspace->data.shape = {1};
+    workspace->data.dtype = DType::kByte;
+    return;
+  } else {
+    NVTE_ERROR("Unexpected workspace_size.");
+  }
 }
 
 void fused_attn_ck_fwd(
@@ -457,12 +556,15 @@ void fused_attn_ck_fwd(
   const Tensor* input_cu_seqlens_q,
   const Tensor* input_cu_seqlens_kv,
   const Tensor* input_rng_state,
+  Tensor *workspace,
   cudaStream_t stream){
 
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
   //save the input rng state to Aux_CTX_Tensors
   output_rng_state->data.dptr = input_rng_state->data.dptr;
+
+  size_t workspace_size = 0;
 
   fused_attn_ck_fwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
@@ -474,7 +576,23 @@ void fused_attn_ck_fwd(
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1,
     nvte_to_ck_dtype(Q_type),
+    workspace->data.dptr,
+    &workspace_size,
     stream);
+
+  if (workspace_size > 0) {
+    if (workspace->data.dptr == nullptr) {
+      workspace->data.shape = {workspace_size};
+      workspace->data.dtype = DType::kByte;
+      return;
+    }
+  } else if (workspace_size == 0) {
+    workspace->data.shape = {1};
+    workspace->data.dtype = DType::kByte;
+    return;
+  } else {
+    NVTE_ERROR("Unexpected workspace_size.");
+  }
 }
 
 void fused_attn_ck_bwd(
@@ -487,10 +605,13 @@ void fused_attn_ck_bwd(
   const Tensor* input_cu_seqlens_kv,
   const Tensor* input_M,
   const Tensor* input_rng_state,
-  Tensor* wkspace,
+  Tensor* workspace,
   cudaStream_t stream){
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
+
+  size_t workspace_size = 0;
+
   fused_attn_ck_bwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
     attn_scale, dropout, 
@@ -503,8 +624,23 @@ void fused_attn_ck_bwd(
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1,
     nvte_to_ck_dtype(Q_type),
-    wkspace->data.dptr,
+    workspace->data.dptr,
+    &workspace_size,
     stream);
+
+  if (workspace_size > 0) {
+    if (workspace->data.dptr == nullptr) {
+      workspace->data.shape = {workspace_size};
+      workspace->data.dtype = DType::kByte;
+      return;
+    }
+  } else if (workspace_size == 0) {
+    workspace->data.shape = {1};
+    workspace->data.dtype = DType::kByte;
+    return;
+  } else {
+    NVTE_ERROR("Unexpected workspace_size.");
+  }
 }
 
 }  // namespace transformer_engine

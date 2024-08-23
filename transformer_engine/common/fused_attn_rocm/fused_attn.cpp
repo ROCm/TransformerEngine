@@ -143,6 +143,7 @@ void nvte_fused_attn_fwd_qkvpacked(
   const Tensor *input_Bias = reinterpret_cast<const Tensor*>(Bias);
   Tensor *input_output_S = reinterpret_cast<Tensor*>(S);
   Tensor *output_O = reinterpret_cast<Tensor*>(O);
+  Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
   Tensor *output_M = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
   Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
 
@@ -175,6 +176,7 @@ void nvte_fused_attn_fwd_qkvpacked(
       output_O, output_M, output_rng_state,
       input_cu_seqlens,
       input_rng_state,
+      wkspace,
       stream);
   } else if(fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_AOTriton){
     fused_attn_aotriton_fwd_qkvpacked(
@@ -184,6 +186,7 @@ void nvte_fused_attn_fwd_qkvpacked(
       output_O, output_M, output_rng_state,
       input_cu_seqlens,
       input_rng_state,
+      wkspace,
       stream);
   }else{
     NVTE_ERROR("Invalid combination of data type and sequence length for rocm fused attention. \n");
@@ -217,6 +220,7 @@ void nvte_fused_attn_bwd_qkvpacked(
   Tensor *input_Bias = nullptr;
   Tensor *output_dQKV = reinterpret_cast<Tensor*>(dQKV);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
+
   // auxiliary tensors
   const Tensor *input_M = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]); //softmax lse
   //extract the saved rng state from aux_ctx_tensor
@@ -298,6 +302,8 @@ void nvte_fused_attn_fwd_kvpacked(
   const Tensor *input_KV = reinterpret_cast<const Tensor*>(KV);
   const Tensor *input_Bias = reinterpret_cast<const Tensor*>(Bias);
   Tensor *output_O = reinterpret_cast<Tensor*>(O);
+  Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
+  
   Tensor *output_M = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
   Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
 
@@ -334,6 +340,7 @@ void nvte_fused_attn_fwd_kvpacked(
       input_cu_seqlens_q,
       input_cu_seqlens_kv,
       input_rng_state,
+      wkspace,
       stream);
   } else if(fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_AOTriton){
     fused_attn_aotriton_fwd_kvpacked(
@@ -345,6 +352,7 @@ void nvte_fused_attn_fwd_kvpacked(
       input_cu_seqlens_q,
       input_cu_seqlens_kv,
       input_rng_state,
+      wkspace,
       stream);
   }else{
     NVTE_ERROR("Invalid combination of data type and sequence length for rocm fused attention. \n");
@@ -469,6 +477,7 @@ void nvte_fused_attn_fwd(
   const Tensor *input_V = reinterpret_cast<const Tensor*>(V);
   const Tensor *input_Bias = reinterpret_cast<const Tensor*>(Bias);
   Tensor *output_O = reinterpret_cast<Tensor*>(O);
+  Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
   Tensor *output_M = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
   Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
 
@@ -497,6 +506,7 @@ void nvte_fused_attn_fwd(
       input_cu_seqlens_q,
       input_cu_seqlens_kv,
       input_rng_state,
+      wkspace,
       stream);
   } else if(fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_AOTriton){
     fused_attn_aotriton_fwd(
@@ -508,6 +518,7 @@ void nvte_fused_attn_fwd(
       input_cu_seqlens_q,
       input_cu_seqlens_kv,
       input_rng_state,
+      wkspace,
       stream);
   }else{
     NVTE_ERROR("Invalid combination of data type and sequence length for rocm fused attention. \n");
