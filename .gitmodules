@@ -1,6 +1,7 @@
 [submodule "3rdparty/googletest"]
 	path = 3rdparty/googletest
 	url = https://github.com/google/googletest.git
+    branch = main
 [submodule "3rdparty/hipify_torch"]
 	path = 3rdparty/hipify_torch
 	url = https://github.com/ROCmSoftwarePlatform/hipify_torch.git
@@ -12,6 +13,7 @@
 [submodule "3rdparty/cudnn-frontend"]
 	path = 3rdparty/cudnn-frontend
 	url = https://github.com/NVIDIA/cudnn-frontend.git
+    branch = main
 [submodule "3rdparty/composable_kernel"]
 	path = 3rdparty/composable_kernel
 	url = https://github.com/ROCm/composable_kernel.git

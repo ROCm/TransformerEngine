@@ -7,7 +7,9 @@
 
 #include "transformer_engine/fused_attn.h"
 
+#include <iostream>
 #include <cstdlib>
+#include <mutex>
 
 #include "../common.h"
 #include "../util/cuda_runtime.h"
@@ -17,9 +19,98 @@
 
 using namespace transformer_engine;
 
-bool is_bwd_deterministic() {
-    const char *env_var = std::getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO");
-    return env_var == nullptr || std::string(env_var) == "0";
+std::mutex g_fused_attn_mutex;
+
+std::string get_dtype_str(NVTEDType dtype) {
+    switch (dtype) {
+        case NVTEDType::kNVTEByte:
+            return "kNVTEByte";
+        case NVTEDType::kNVTEInt32:
+            return "kNVTEInt32";
+        case NVTEDType::kNVTEInt64:
+            return "kNVTEInt64";
+        case NVTEDType::kNVTEFloat32:
+            return "kNVTEFloat32";
+        case NVTEDType::kNVTEFloat16:
+            return "kNVTEFloat16";
+        case NVTEDType::kNVTEBFloat16:
+            return "kNVTEBFloat16";
+        case NVTEDType::kNVTEFloat8E4M3:
+            return "kNVTEFloat8E4M3";
+        case NVTEDType::kNVTEFloat8E5M2:
+            return "kNVTEFloat8E5M2";
+        case NVTEDType::kNVTENumTypes:
+            return "kNVTENumTypes";
+        default:
+            NVTE_ERROR("dtype not supported!");
+    }
+}
+
+std::string get_qkv_layout_str(NVTE_QKV_Layout qkv_layout) {
+    switch (qkv_layout) {
+        case NVTE_QKV_Layout::NVTE_SB3HD:
+            return "NVTE_SB3HD";
+        case NVTE_QKV_Layout::NVTE_SBH3D:
+            return "NVTE_SBH3D";
+        case NVTE_QKV_Layout::NVTE_SBHD_SB2HD:
+            return "NVTE_SBHD_SB2HD";
+        case NVTE_QKV_Layout::NVTE_SBHD_SBH2D:
+            return "NVTE_SBHD_SBH2D";
+        case NVTE_QKV_Layout::NVTE_SBHD_SBHD_SBHD:
+            return "NVTE_SBHD_SBHD_SBHD";
+        case NVTE_QKV_Layout::NVTE_BS3HD:
+            return "NVTE_BS3HD";
+        case NVTE_QKV_Layout::NVTE_BSH3D:
+            return "NVTE_BSH3D";
+        case NVTE_QKV_Layout::NVTE_BSHD_BS2HD:
+            return "NVTE_BSHD_BS2HD";
+        case NVTE_QKV_Layout::NVTE_BSHD_BSH2D:
+            return "NVTE_BSHD_BSH2D";
+        case NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD:
+            return "NVTE_BSHD_BSHD_BSHD";
+        case NVTE_QKV_Layout::NVTE_T3HD:
+            return "NVTE_T3HD";
+        case NVTE_QKV_Layout::NVTE_TH3D:
+            return "NVTE_TH3D";
+        case NVTE_QKV_Layout::NVTE_THD_T2HD:
+            return "NVTE_THD_T2HD";
+        case NVTE_QKV_Layout::NVTE_THD_TH2D:
+            return "NVTE_THD_TH2D";
+        case NVTE_QKV_Layout::NVTE_THD_THD_THD:
+            return "NVTE_THD_THD_THD";
+        default:
+            NVTE_ERROR("qkv_layout not supported!");
+    }
+}
+
+std::string get_bias_type_str(NVTE_Bias_Type bias_type) {
+    switch (bias_type) {
+        case NVTE_Bias_Type::NVTE_NO_BIAS:
+            return "NVTE_NO_BIAS";
+        case NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS:
+            return "NVTE_PRE_SCALE_BIAS";
+        case NVTE_Bias_Type::NVTE_POST_SCALE_BIAS:
+            return "NVTE_POST_SCALE_BIAS";
+        case NVTE_Bias_Type::NVTE_ALIBI:
+            return "NVTE_ALIBI";
+        default:
+            NVTE_ERROR("bias_type not supported!");
+    }
+}
+
+std::string get_mask_type_str(NVTE_Mask_Type mask_type) {
+    switch (mask_type) {
+        case NVTE_Mask_Type::NVTE_NO_MASK:
+            return "NVTE_NO_MASK";
+        case NVTE_Mask_Type::NVTE_PADDING_MASK:
+            return "NVTE_PADDING_MASK";
+        case NVTE_Mask_Type::NVTE_CAUSAL_MASK:
+            return "NVTE_CAUSAL_MASK";
+        case NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK:
+            return "NVTE_PADDING_CAUSAL_MASK";
+        default:
+            NVTE_ERROR("mask_type not supported!");
+    }
 }
 
 // NVTE fused attention FWD with separate Q, K and V
@@ -49,6 +140,25 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
 
     const NVTEDType Q_type  = static_cast<NVTEDType>(input_Q->data.dtype);
     const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
+
+    if (const char *env_p = std::getenv("NVTE_LOG_CK_CONFIG");
+        env_p != nullptr && std::string(env_p) == "1") {
+        std::lock_guard<std::mutex> lock(g_fused_attn_mutex);
+        std::cout << std::endl << "Fused Attention Config:" << std::endl;
+        std::cout << "Q_type: " << get_dtype_str(Q_type) << std::endl;
+        std::cout << "KV_type: " << get_dtype_str(KV_type) << std::endl;
+        std::cout << "batch: " << b << std::endl;
+        std::cout << "max_seqlen_q: " << max_seqlen_q << std::endl;
+        std::cout << "max_seqlen_kv: " << max_seqlen_kv << std::endl;
+        std::cout << "num_attn_heads: " << h_q << std::endl;
+        std::cout << "num_gqa_groups: " << h_kv << std::endl;
+        std::cout << "d: " << d << std::endl;
+        std::cout << "attn_scale: " << attn_scale << std::endl;
+        std::cout << "dropout: " << dropout << std::endl;
+        std::cout << "qkv_layout: " << get_qkv_layout_str(qkv_layout) << std::endl;
+        std::cout << "bias_type: " << get_bias_type_str(bias_type) << std::endl;
+        std::cout << "attn_mask_type: " << get_mask_type_str(attn_mask_type) << std::endl;
+    }
 
     fused_attn_rocm::ck_fused_attn_fwd(
         b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, is_training, attn_scale, dropout, qkv_layout,
@@ -102,11 +212,14 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
         input_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
     }
 
+    const char *env_var = std::getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO");
+    bool deterministic  = (env_var != nullptr && std::string(env_var) != "0") ? false : true;
+
     fused_attn_rocm::ck_fused_attn_bwd(
         b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, attn_scale, dropout, qkv_layout, bias_type,
         attn_mask_type, input_Q, input_K, input_V, input_O, input_dO, input_Bias, output_S,
         output_dQ, output_dK, output_dV, output_dBias, input_cu_seqlens_q, input_cu_seqlens_kv,
-        input_rng_state, wkspace, is_bwd_deterministic(), stream);
+        input_rng_state, wkspace, deterministic, stream);
 }
 
 // map NVTE_QKV_Layout to NVTE_QKV_Layout_Group

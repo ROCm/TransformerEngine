@@ -455,7 +455,6 @@ def setup_common_extension() -> CMakeExtension:
     Also builds JAX or userbuffers support if needed.
 
     """
-
     cmake_flags = []
     if use_rocm:
         if os.getenv("NVTE_USE_HIPBLASLT") is not None:
@@ -463,9 +462,27 @@ def setup_common_extension() -> CMakeExtension:
 
     if "jax" in frameworks():
         cmake_flags.append("-DENABLE_JAX=ON")
-        if use_rocm:
-            rocm_path = os.getenv("ROCM_PATH", "/opt/rocm")
-            cmake_flags.append(f"-DCMAKE_PREFIX_PATH={rocm_path}")
+    if use_rocm:
+        rocm_path = Path(os.getenv("ROCM_PATH", "/opt/rocm"))
+        gfx_arch_bin = rocm_path / "bin" / "offload-arch"
+
+        if gfx_arch_bin.is_file():
+            gpu_targets = subprocess.run(
+                [str(gfx_arch_bin)],
+                capture_output=True,
+                check=True,
+                text=True,
+            ).stdout.strip()
+        else:
+            gpu_targets = os.getenv("PYTORCH_ROCM_ARCH")
+        print(f"[setup.py] GPU targets: {gpu_targets}")
+
+        cmake_flags += [
+            f"-DCMAKE_PREFIX_PATH={rocm_path}",
+            "-DCMAKE_BUILD_TYPE=Release",
+            f"-DGPU_TARGETS={gpu_targets}",
+            "-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON",
+        ]
 
     if with_userbuffers():
         cmake_flags.append("-DNVTE_WITH_USERBUFFERS=ON")

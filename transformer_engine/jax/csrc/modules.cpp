@@ -1735,37 +1735,52 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
 #else
-bool is_bwd_deterministic() {
-    const char *env_var = std::getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO");
-    return env_var == nullptr || std::string(env_var) == "0";
-}
-
-int integer_divide_ceil(int a, int b) { return (a + b - 1) / b; }
-
 pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_heads,
     size_t num_gqa_groups, size_t head_dim, float scaling_factor, float dropout_probability,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, DType dtype, bool is_training) {
-    static constexpr size_t float_size = 4;
-    static constexpr size_t bf16_size  = 2;
+    constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD;
 
-    // Calculate sizes of different memory components
-    size_t kN0         = (head_dim <= 128) ? 128 : 64;
-    size_t nsplits     = is_bwd_deterministic() ? integer_divide_ceil(kv_max_seqlen, kN0) : 1;
-    size_t d_size      = float_size * batch_size * num_heads * q_max_seqlen;
-    size_t dq_acc_size = float_size * nsplits * batch_size * q_max_seqlen * num_heads * head_dim;
-    size_t dk_expanded_size = 0;
-    size_t dv_expanded_size = 0;
+    auto q_shape      = std::vector<size_t>{batch_size * q_max_seqlen, num_heads, head_dim};
+    auto k_shape      = std::vector<size_t>{batch_size * kv_max_seqlen, num_gqa_groups, head_dim};
+    auto v_shape      = k_shape;
+    auto output_shape = std::vector<size_t>{batch_size * q_max_seqlen, num_heads, head_dim};
+    auto bias_shape   = std::vector<size_t>{1, num_heads, q_max_seqlen, kv_max_seqlen};
 
-    if (num_heads > num_gqa_groups) {
-        dk_expanded_size = bf16_size * batch_size * kv_max_seqlen * num_heads * head_dim;
-        dv_expanded_size = bf16_size * batch_size * kv_max_seqlen * num_heads * head_dim;
-    }
+    auto q_tensor       = TensorWrapper(nullptr, q_shape, dtype);
+    auto k_tensor       = TensorWrapper(nullptr, k_shape, dtype);
+    auto v_tensor       = TensorWrapper(nullptr, v_shape, dtype);
+    auto doutput_tensor = TensorWrapper(nullptr, output_shape, dtype);
+    auto output_tensor  = TensorWrapper(nullptr, output_shape, dtype);
+    // F16 doesn't use this tensor
+    auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);
 
-    // Total workspace size
-    size_t workspace_size = d_size + dq_acc_size + dk_expanded_size + dv_expanded_size;
+    auto dq_tensor    = TensorWrapper(nullptr, q_shape, dtype);
+    auto dk_tensor    = TensorWrapper(nullptr, k_shape, dtype);
+    auto dv_tensor    = TensorWrapper(nullptr, v_shape, dtype);
+    auto dbias_tensor = TensorWrapper(nullptr, bias_shape, dtype);
 
-    return pybind11::make_tuple(std::vector<size_t>{workspace_size}, DType::kByte);
+    auto q_cu_seqlens_tensor =
+        TensorWrapper(nullptr, std::vector<size_t>{batch_size + 1}, DType::kInt32);
+    auto kv_cu_seqlens_tensor =
+        TensorWrapper(nullptr, std::vector<size_t>{batch_size + 1}, DType::kInt32);
+
+    NVTETensorPack aux_input_tensors;
+    nvte_tensor_pack_create(&aux_input_tensors);
+
+    TensorWrapper query_workspace_tensor;
+    nvte_fused_attn_bwd(q_tensor.data(), k_tensor.data(), v_tensor.data(), output_tensor.data(),
+                        doutput_tensor.data(),
+                        s_tensor.data(),  // not used for F16
+                        s_tensor.data(),  // not used for F16
+                        &aux_input_tensors, dq_tensor.data(), dk_tensor.data(), dv_tensor.data(),
+                        dbias_tensor.data(), q_cu_seqlens_tensor.data(),
+                        kv_cu_seqlens_tensor.data(), q_max_seqlen, kv_max_seqlen, scaling_factor,
+                        dropout_probability, qkv_layout, bias_type, mask_type,
+                        query_workspace_tensor.data(), nullptr);
+
+    auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
+    return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
 #endif
 

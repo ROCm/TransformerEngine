@@ -115,9 +115,6 @@ elseif(USE_ROCM)
       CUSTOM_MAP_FILE "${TE}/hipify_custom_map.json"
   )
   get_hipified_list("${transformer_engine_SOURCES}" te_hip_sources)
-  message("${message_line}")
-  message(STATUS "nvte hipified sources: ${te_hip_sources}")
-
   add_library(transformer_engine SHARED ${te_hip_sources})
 endif()
 
@@ -153,7 +150,6 @@ if(USE_CUDA)
   target_include_directories(transformer_engine PRIVATE
                              "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
 elseif(USE_ROCM)
-  target_include_directories(transformer_engine PRIVATE "${CK_INCLUDE_DIR}")
   make_string_header_from_file(utils_hip.cuh
                                string_code_utils_cuh)
   make_string_header_from_file(transpose/rtc/transpose.hip
@@ -176,14 +172,10 @@ if(USE_CUDA)
        CUDA::nvToolsExt
        CUDNN::cudnn)
 elseif(USE_ROCM)
-  find_package(hip)
-  list(APPEND transformer_engine_LINKER_LIBS hip::host hip::device roctx64 ck)
+  list(APPEND transformer_engine_LINKER_LIBS hip::host hip::device Threads::Threads roctx64 ck)
   if(USE_HIPBLASLT)
-    find_package(hipblaslt)
-    target_compile_definitions(transformer_engine PUBLIC USE_HIPBLASLT)
     list(APPEND transformer_engine_LINKER_LIBS roc::hipblaslt)
   else()
-    find_package(rocblas)
     list(APPEND transformer_engine_LINKER_LIBS roc::rocblas)
   endif()
 endif()
@@ -199,8 +191,6 @@ set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
 if(USE_CUDA)
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
-else()
-  set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -O3 -ffast-math")
 endif()
 
 # Install library

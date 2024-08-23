@@ -3,18 +3,19 @@
 
 #include <hip/hip_runtime.h>
 
+#include <iostream>
 #include <cstdint>
-#include <cstdio>
 #include <string>
 
-#define CHECK_HIP_ERROR(cmd)                                                        \
-    do {                                                                            \
-        hipError_t error_code = cmd;                                                \
-        if (error_code != hipSuccess) {                                             \
-            fprintf(stderr, "HIP error: '%s'(%d) in %s at line %d\n",               \
-                    hipGetErrorString(error_code), error_code, __FILE__, __LINE__); \
-            exit(EXIT_FAILURE);                                                     \
-        }                                                                           \
+#define CHECK_HIP_ERROR(expr)                                                            \
+    do {                                                                                 \
+        const hipError_t error_code = (expr);                                            \
+        if (error_code != hipSuccess) {                                                  \
+            std::string error_str = hipGetErrorString(error_code);                       \
+            std::cerr << "HIP error: " << error_str << " in " << __FILE__ << " at line " \
+                      << __LINE__ << std::endl;                                          \
+            throw std::runtime_error(error_str);                                         \
+        }                                                                                \
     } while (0)
 
 void ck_fused_attn_fwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d,
@@ -33,7 +34,7 @@ void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
                             void *devPtrSoftmaxStats, void *devPtrBias, void *devPtrdQ,
                             void *devPtrdK, void *devPtrdV, void *devPtrdO, void *devPtrdBias,
                             void *devPtrCuSeqlensQ, void *devPtrCuSeqlensKV,
-                            const std::string &data_type, void *devPtrSpace, bool deterministic,
-                            hipStream_t stream);
+                            const std::string &data_type, void *workspace, size_t *workspace_size,
+                            bool deterministic, hipStream_t stream);
 
 #endif

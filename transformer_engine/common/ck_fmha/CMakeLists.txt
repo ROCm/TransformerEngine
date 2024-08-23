@@ -40,10 +40,6 @@ list(APPEND CK_FMHA_SOURCES
 
 file(GLOB_RECURSE CK_FMHA_FILES "${CK_GEN_DIR}/*.cpp")
 list(APPEND CK_FMHA_SOURCES ${CK_FMHA_FILES})
-message(STATUS "Found ck fmha files:")
-foreach(file ${CK_FMHA_FILES})
-  message(STATUS " ${file}")
-endforeach()
 
 # Check if CK_PARALLEL_COMPILE_JOBS is not set
 if(NOT DEFINED CK_PARALLEL_COMPILE_JOBS)
@@ -59,21 +55,23 @@ endif()
 add_library(ck STATIC ${CK_FMHA_SOURCES})
 set(CK_FMHA_COMPILE_OPTIONS)
 list(APPEND CK_FMHA_COMPILE_OPTIONS
-  -O3
-  --offload-arch=${ROCM_ARCH}
-  -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=0
   -DCK_TILE_FMHA_FWD_FAST_EXP2=1
+  -DCK_ENABLE_BF8
+  -DCK_ENABLE_FP8
+  -DCK_ENABLE_INT8
   -DCK_ENABLE_BF16
+  -DCK_ENABLE_FP16
+  -DCK_ENABLE_FP32
+  -DCK_ENABLE_FP64
+  -DCK_USE_XDL
   -mllvm
   -enable-post-misched=0
-  -ffast-math
   -fPIC
   -fgpu-flush-denormals-to-zero
+  -fno-offload-uniform-block
   -Wno-undefined-func-template
   -Wno-float-equal
-  -Wno-gnu-line-marker
-  -Wunused-variable
-  -Werror)
+  -Wunused-variable)
 
 set(CK_INCLUDE_DIR "${CK_SRC_DIR}/include")
 message(STATUS "ck_include_dir: ${CK_INCLUDE_DIR}")
@@ -88,12 +86,11 @@ endif()
 target_include_directories(ck PUBLIC ${CMAKE_CURRENT_LIST_DIR}/include)
 target_include_directories(ck PRIVATE ${CK_INCLUDE_DIR} ${CMAKE_CURRENT_LIST_DIR}/src)
 
-find_package(hip)
-list(APPEND CK_FMHA_LINKER_LIBS hip::host hip::device roctx64)
+list(APPEND CK_FMHA_LINKER_LIBS hip::host hip::device Threads::Threads roctx64)
 target_link_libraries(ck PUBLIC ${CK_FMHA_LINKER_LIBS})
 target_compile_options(ck PRIVATE ${CK_FMHA_COMPILE_OPTIONS})
 
 include(GNUInstallDirs)
-message("CMAKE_INSTALL_INCLUDEDIR: ${CMAKE_INSTALL_INCLUDEDIR}")
+message(STATUS "CMAKE_INSTALL_INCLUDEDIR: ${CMAKE_INSTALL_INCLUDEDIR}")
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include" DESTINATION ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_INCLUDEDIR})
 install(TARGETS ck DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)

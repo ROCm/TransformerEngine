@@ -39,9 +39,6 @@ else()
   )
   get_hipified_list("${transformer_engine_SOURCES}" te_hip_sources)
 
-  message("${message_line}")
-  message(STATUS "nvte hipified sources: ${te_hip_sources}")
-
   pybind11_add_module(
     transformer_engine_jax
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/extensions_hip.cpp
@@ -52,10 +49,13 @@ endif()
 
 if(USE_CUDA)
   target_link_libraries(transformer_engine_jax PRIVATE CUDA::cudart CUDA::cublas CUDA::cublasLt transformer_engine)
-else()
-  find_package(hip)
-  find_package(rocblas)
-  target_link_libraries(transformer_engine_jax PRIVATE roc::rocblas hip::host hip::device transformer_engine)
+elseif(USE_ROCM)
+  target_link_libraries(transformer_engine_jax PRIVATE hip::host hip::device Threads::Threads transformer_engine)
+  if(USE_HIPBLASLT)
+    target_link_libraries(transformer_engine_jax PRIVATE roc::hipblaslt)
+  else()
+    target_link_libraries(transformer_engine_jax PRIVATE roc::rocblas)
+  endif()
 endif()
 
 install(TARGETS transformer_engine_jax DESTINATION .)

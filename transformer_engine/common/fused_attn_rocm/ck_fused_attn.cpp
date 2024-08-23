@@ -8,21 +8,12 @@
 #include <string>
 
 #include "../util/cuda_runtime.h"
+#include "../util/logging.h"
 #include "../util/system.h"
 #include "utils.h"
 
 namespace transformer_engine {
 namespace fused_attn_rocm {
-
-inline void hip_check_error(hipError_t error, const char *file, int line) {
-    if (error != hipSuccess) {
-        std::cerr << "HIP error: " << hipGetErrorString(error) << " in " << file << " at line "
-                  << line << std::endl;
-        throw std::runtime_error("HIP error");
-    }
-}
-
-#define HIP_CHECK(error) hip_check_error(error, __FILE__, __LINE__)
 
 void ck_fused_attn_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
                        size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim, bool is_training,
@@ -101,9 +92,9 @@ void ck_fused_attn_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_group
     if (p_dropout > 0) {
         void *devPtrRngState                           = rng_state->data.dptr;
         static thread_local uint64_t host_rng_state[2] = {0};
-        HIP_CHECK(hipMemcpyAsync(host_rng_state, devPtrRngState, 2 * sizeof(uint64_t),
-                                 hipMemcpyDeviceToHost, stream));
-        HIP_CHECK(hipStreamSynchronize(stream));
+        NVTE_CHECK_CUDA(hipMemcpyAsync(host_rng_state, devPtrRngState, 2 * sizeof(uint64_t),
+                                       hipMemcpyDeviceToHost, stream));
+        NVTE_CHECK_CUDA(hipStreamSynchronize(stream));
         drop_seed   = host_rng_state[0];
         drop_offset = host_rng_state[1];
     }
@@ -181,16 +172,17 @@ void ck_fused_attn_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_group
     void *devPtrDropoutSeed  = rng_state->data.dptr;
     void *devPtrDropoutOffset =
         reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr) + 1);
-    void *devPtrSpace = workspace->data.dptr;
+
+    size_t workspace_size = 0;
 
     uint64_t drop_seed   = 0;
     uint64_t drop_offset = 0;
     if (p_dropout > 0) {
-        void *devPtrRngState                           = rng_state->data.dptr;
+        void *devPtrRngState = rng_state->data.dptr;
         static thread_local uint64_t host_rng_state[2] = {0};
-        HIP_CHECK(hipMemcpyAsync(host_rng_state, devPtrRngState, 2 * sizeof(uint64_t),
-                                 hipMemcpyDeviceToHost, stream));
-        HIP_CHECK(hipStreamSynchronize(stream));
+        NVTE_CHECK_CUDA(hipMemcpyAsync(host_rng_state, devPtrRngState, 2 * sizeof(uint64_t),
+                                       hipMemcpyDeviceToHost, stream));
+        NVTE_CHECK_CUDA(hipStreamSynchronize(stream));
         drop_seed   = host_rng_state[0];
         drop_offset = host_rng_state[1];
     }
@@ -200,7 +192,23 @@ void ck_fused_attn_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_group
                            bias_value, mask_value, devPtrQ, devPtrK, devPtrV, devPtrO,
                            devPtrSoftmaxStats, devPtrBias, devPtrdQ, devPtrdK, devPtrdV, devPtrdO,
                            devPtrdBias, devPtrCuSeqlensQ, devPtrCuSeqlensKV,
-                           get_datatype_str(QKV_type), devPtrSpace, deterministic, stream);
+                           get_datatype_str(QKV_type), workspace->data.dptr, &workspace_size,
+                           deterministic, stream);
+
+    if (workspace_size > 0) {
+        if (workspace->data.dptr == nullptr) {
+            workspace->data.shape = {workspace_size};
+            workspace->data.dtype = DType::kByte;
+            return;
+        }
+    } else if (workspace_size == 0) {
+        workspace->data.shape = {1};
+        workspace->data.dtype = DType::kByte;
+        return;
+    } else {
+        NVTE_ERROR("Unexpected workspace_size");
+    }
+
 }
 
 }  // namespace fused_attn_rocm

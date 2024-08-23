@@ -86,8 +86,8 @@ void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
                             void *devPtrSoftmaxStats, void *devPtrBias, void *devPtrdQ,
                             void *devPtrdK, void *devPtrdV, void *devPtrdO, void *devPtrdBias,
                             void *devPtrCuSeqlensQ, void *devPtrCuSeqlensKV,
-                            const std::string &data_type, void *devPtrSpace, bool deterministic,
-                            hipStream_t stream) {
+                            const std::string &data_type, void *workspace, size_t *workspace_size,
+                            bool deterministic, hipStream_t stream) {
     /* CK input parameters */
     ck_tile::index_t batch        = b;
     ck_tile::index_t seqlen_q     = s_q;
@@ -143,6 +143,7 @@ void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
     const ck_tile::index_t kN0            = (hdim_q <= 128) ? 128 : 64;
     const ck_tile::index_t nsplits =
         deterministic ? ck_tile::integer_divide_ceil(max_seqlen_k, kN0) : 1;
+
     /*
     d_mgr.resize(sizeof(float) * batch * nhead * max_seqlen_q);
     dq_acc_mgr.resize(sizeof(float) * nsplits * shape_batch * shape_seqlen_q *
@@ -158,17 +159,27 @@ void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
     constexpr size_t float_size = sizeof(float);
     constexpr size_t bf16_size  = sizeof(ck_tile::bf16_t);
 
-    size_t d_size      = float_size * batch * nhead * max_seqlen_q;
-    size_t dq_acc_size = float_size * nsplits * shape_batch * shape_seqlen_q * nhead * hdim_q;
+    size_t d_size           = float_size * batch * nhead * max_seqlen_q;
+    size_t dq_acc_size      = float_size * nsplits * shape_batch * shape_seqlen_q * nhead * hdim_q;
+    size_t dk_expanded_size = 0;
+    size_t dv_expanded_size = 0;
 
-    void *devPtrD          = devPtrSpace;
+    if (is_mqa_gqa) {
+        dk_expanded_size = bf16_size * batch * nhead * shape_seqlen_k * hdim_q;
+        dv_expanded_size = bf16_size * batch * nhead * shape_seqlen_k * hdim_v;
+    }
+    if (workspace == nullptr) {
+        *workspace_size = d_size + dq_acc_size + dk_expanded_size + dv_expanded_size;
+        return;
+    }
+
+    void *devPtrD          = workspace;
     void *devPtrdQAcc      = reinterpret_cast<void *>(reinterpret_cast<char *>(devPtrD) + d_size);
     void *devPtrdKExpanded = nullptr;
     void *devPtrdVExpanded = nullptr;
-    HIP_CHECK_ERROR(hipMemsetAsync(devPtrdQAcc, 0, dq_acc_size, stream));
-    HIP_CHECK_ERROR(hipStreamSynchronize(stream));
+    CHECK_HIP_ERROR(hipMemsetAsync(devPtrdQAcc, 0, dq_acc_size, stream));
+    CHECK_HIP_ERROR(hipStreamSynchronize(stream));
     if (is_mqa_gqa) {
-        size_t dk_expanded_size = bf16_size * batch * nhead * shape_seqlen_k * hdim_q;
         devPtrdKExpanded =
             reinterpret_cast<void *>(reinterpret_cast<char *>(devPtrdQAcc) + dq_acc_size);
         devPtrdVExpanded =
