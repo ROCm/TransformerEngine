@@ -44,6 +44,7 @@ hipError_t ck_attn_bwd(
 
   bool has_dropout = (dropout_probability > 0.f);
   bool has_dbias = false;
+  void* dq_acc_ptr = nullptr;
 
   /* CK input parameters */
   ck_tile::index_t batch = b;
@@ -59,6 +60,9 @@ hipError_t ck_attn_bwd(
   float p_drop = dropout_probability;
   float p_undrop = 1.0 - p_drop;
   bool is_group_mode = false;
+  bool s_randval = false;
+  bool is_deterministic = false;
+  const ck_tile::index_t nsplits = 1;
 
   bias_enum bias_type = bias_enum::no_bias;
   mask_enum mask_type;
@@ -87,8 +91,16 @@ hipError_t ck_attn_bwd(
   }
   auto fmha_traits =
     fmha_bwd_traits{hdim_q,    hdim_v,    data_type_str, is_group_mode,
-                    mask_type, bias_type, has_dbias,     has_dropout};
+                    mask_type, bias_type, has_dbias,     has_dropout, 
+                    s_randval, is_deterministic};
 
+  //dq_acc is of shape (B, S, H, D)
+  if(hipMallocAsync(&dq_acc_ptr, sizeof(float)*nsplits*b*h*s_q*d, stream)!=hipSuccess){
+    std::cout<<"Error allocating dq_acc_ptr"<<std::endl;
+  }
+  if(hipMemsetAsync(dq_acc_ptr, 0, sizeof(float)*nsplits*b*h*s_q*d, stream)!=hipSuccess){
+    std::cout<<"Error memset dq_acc_ptr"<<std::endl;
+  }
   auto fmha_args = [&]() {
     // setup stride_* arguments
     const ck_tile::index_t stride_q = stride_s_q;
@@ -99,8 +111,10 @@ hipError_t ck_attn_bwd(
     const ck_tile::index_t stride_o = stride_s_o;
     const ck_tile::index_t stride_randval = max_seqlen_k;
     const ck_tile::index_t stride_do = stride_s_do;
+    const ck_tile::index_t stride_dq = stride_s_dq;
     const ck_tile::index_t stride_dk = stride_s_dk;
     const ck_tile::index_t stride_dv = stride_s_dv;
+    const ck_tile::index_t stride_dq_acc = h*d; //dq_acc of shape (B, S, H, D)
     // TODO: support bias later
     const ck_tile::index_t stride_dbias = 0;
     // setup nhead_stride_* arguments
@@ -115,7 +129,11 @@ hipError_t ck_attn_bwd(
     const ck_tile::index_t nhead_stride_do = stride_h_do;
     // TODO: buffer?
     const ck_tile::index_t nhead_stride_lsed = max_seqlen_q;
+    const ck_tile::index_t nhead_stride_dq = stride_h_dq;
+    const ck_tile::index_t nhead_stride_dk = stride_h_dk;
+    const ck_tile::index_t nhead_stride_dv = stride_h_dv;
     const ck_tile::index_t nhead_stride_dbias = max_seqlen_k;
+    const ck_tile::index_t nhead_stride_dq_acc = d; //dq_acc of shape (B, S, H, D)
     // setup batch_stride_* arguments
     const ck_tile::index_t batch_stride_q = stride_b_q;
     const ck_tile::index_t batch_stride_k = stride_b_k;
@@ -126,10 +144,13 @@ hipError_t ck_attn_bwd(
         nhead * shape_seqlen_q * max_seqlen_k;
     const ck_tile::index_t batch_stride_do = stride_b_do;
     const ck_tile::index_t batch_stride_lsed = nhead * max_seqlen_q;
+    const ck_tile::index_t batch_stride_dq = stride_b_dq;
     const ck_tile::index_t batch_stride_dk = stride_b_dk;
     const ck_tile::index_t batch_stride_dv = stride_b_dv;
     const ck_tile::index_t batch_stride_dbias =
         nhead * shape_seqlen_q * max_seqlen_k;
+    const ck_tile::index_t batch_stride_dq_acc = h*s_q*d; //dq_acc of shape (B, S, H, D)
+    const ck_tile::index_t split_stride_dq_acc = b * h * s_q * d;
 
     return fmha_bwd_args{q_ptr,
                          k_ptr,
@@ -143,7 +164,8 @@ hipError_t ck_attn_bwd(
                          dq_ptr,
                          dk_ptr,
                          dv_ptr,
-                         nullptr,
+                         nullptr, // dbias_ptr
+                         dq_acc_ptr, //dq_acc_buf
                          nullptr,//cu_seqlen_q
                          nullptr,//cu_seqlen_kv
                          nullptr, /* seqlen_k_ptr */
@@ -164,6 +186,8 @@ hipError_t ck_attn_bwd(
                          stride_o,
                          stride_randval,
                          stride_do,
+                         stride_dq_acc,//stride_dq_acc
+                         stride_dq,//stride_dq
                          stride_dk,
                          stride_dv,
                          stride_dbias,
@@ -175,6 +199,10 @@ hipError_t ck_attn_bwd(
                          nhead_stride_randval,
                          nhead_stride_do,
                          nhead_stride_lsed,
+                         nhead_stride_dq_acc, //nhead_stride_dq_acc
+                         nhead_stride_dq,
+                         nhead_stride_dk,
+                         nhead_stride_dv,
                          nhead_stride_dbias,
                          batch_stride_q,
                          batch_stride_k,
@@ -184,15 +212,17 @@ hipError_t ck_attn_bwd(
                          batch_stride_randval,
                          batch_stride_do,
                          batch_stride_lsed,
+                         batch_stride_dq_acc, //batch_stride_dq_acc
+                         batch_stride_dq,
                          batch_stride_dk,
                          batch_stride_dv,
                          batch_stride_dbias,
+                         split_stride_dq_acc,
                          left,
                          right,
                          static_cast<ck_tile::index_t>(mask_type),
                          p_drop,
                          p_undrop,
-                         false,
                          {philox_seed, philox_offset}};
   }();
 
@@ -274,7 +304,6 @@ hipError_t ck_attn_bwd(
     std::cout<<"mask_type: "<<fmha_args.mask_type<<", ";
     std::cout<<"p_drop: "<<fmha_args.p_drop<<", ";
     std::cout<<"p_undrop: "<<fmha_args.p_undrop<<", ";
-    std::cout<<"s_randval: "<<fmha_args.s_randval<<", ";
     std::cout<<"dropout_seed: "<<std::get<0>(fmha_args.drop_seed_offset)<<", ";
     std::cout<<"dropout_offset: "<<std::get<1>(fmha_args.drop_seed_offset)<<std::endl;
   }
@@ -282,6 +311,9 @@ hipError_t ck_attn_bwd(
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
+  }
+  if(hipFreeAsync(dq_acc_ptr, stream)!=hipSuccess){
+    std::cout<<"Failed deallocating dq_acc_ptr"<<std::endl; 
   }
   return hipSuccess;
 }

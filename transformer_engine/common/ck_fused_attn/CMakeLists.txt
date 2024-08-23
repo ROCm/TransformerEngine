@@ -13,7 +13,7 @@ set(__CK_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/composable_kern
 #fwd kernels list
 execute_process(
   COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
-  --api fwd,fwd_splitkv --list_blobs ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/fwd_blob_list.txt
+  --api fwd --list_blobs ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/fwd_blob_list.txt
 )
 #bwd kernels list
 execute_process(
@@ -29,13 +29,13 @@ file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/bwd_blob_list.txt FMHA_BWD_GEN_
 # generate the actual fwd kernel cpp files
 execute_process(
   COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
-  --api fwd,fwd_splitkv --output_dir ${CMAKE_CURRENT_SOURCE_DIR}/gen_src
+  --api fwd --output_dir ${CMAKE_CURRENT_SOURCE_DIR}/gen_src
 )
 
 # generate the actual bwd kernel cpp files
 execute_process(
   COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
-  --api bwd --output_dir ${CMAKE_CURRENT_SOURCE_DIR}/gen_src
+  --api bwd --output_dir ${CMAKE_CURRENT_SOURCE_DIR}/gen_src --receipt 3
 )
 
 # copy the header files needed
@@ -58,7 +58,7 @@ endforeach()
 
 add_library(ck_fused_attn STATIC ${ck_fused_attn_SOURCES})
 set(CK_FUSED_ATTN_COMPILE_OPTIONS)
-list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -Wno-undefined-func-template -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=0 -fgpu-flush-denormals-to-zero -Wno-float-equal -ftemplate-backtrace-limit=0  -fPIC  -Wno-gnu-line-marker -Wunused-variable -Werror)
+list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -Wno-undefined-func-template -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=0 -ffast-math -fgpu-flush-denormals-to-zero -Wno-float-equal -ftemplate-backtrace-limit=0  -fPIC  -Wno-gnu-line-marker -Wunused-variable -Werror)
 
 set(CK_INCLUDE_DIR "${__CK_SOURCE_DIR}/include")
 message(STATUS "ck_include_dir: ${CK_INCLUDE_DIR}")
