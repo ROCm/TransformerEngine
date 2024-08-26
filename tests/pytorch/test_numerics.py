@@ -461,8 +461,7 @@ def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, fp8_model_par
     outputs_recompute = _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=True)
     if IS_HIP_EXTENSION:
         use_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
-        # TODO: enable CK after rocm6.2 issues fixed
-        use_fused_attn_ck = int(os.getenv("NVTE_FUSED_ATTN_CK", "0"))
+        use_fused_attn_ck = int(os.getenv("NVTE_FUSED_ATTN_CK", "1"))
         # TODO: wait for the ck branch supporting determinism
         if use_fused_attn and (not use_fused_attn_ck):
             # AOTriton backend and non-fused attn are deterministic
@@ -564,8 +563,7 @@ def test_gpt_full_activation_recompute(dtype, bs, model, fp8, fp8_model_params):
         else:
             # TODO: wait for the ck branch supporting determinism
             use_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
-            # TODO: enable CK after rocm6.2 issues fixed
-            use_fused_attn_ck = int(os.getenv("NVTE_FUSED_ATTN_CK", "0"))
+            use_fused_attn_ck = int(os.getenv("NVTE_FUSED_ATTN_CK", "1"))
             if use_fused_attn and (not use_fused_attn_ck):
                 # AOTriton backend and non-fused attn are deterministic
                 assert_all_equal(outputs, outputs_recompute)
@@ -675,8 +673,7 @@ def test_gpt_checkpointing(dtype, bs, model):
     if IS_HIP_EXTENSION: 
         use_hipblaslt = (os.getenv("NVTE_USE_HIPBLASLT") is not None)
         use_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
-        # TODO: enable CK after rocm6.2 issues fixed
-        use_fused_attn_ck = int(os.getenv("NVTE_FUSED_ATTN_CK", "0"))
+        use_fused_attn_ck = int(os.getenv("NVTE_FUSED_ATTN_CK", "1"))
         # ck fused_attn non-determinism requires higher tolerance
         if use_fused_attn and use_fused_attn_ck:
             # TODO: wait for the ck branch supporting determinism
@@ -1346,8 +1343,7 @@ def test_gpt_fp8_parameters(dtype, bs, model):
     outputs_fp8_params = _test_gpt_fp8_parameters(bs, dtype, config, True)
     if IS_HIP_EXTENSION:
         use_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
-        # TODO: enable CK after rocm6.2 issues fixed
-        use_fused_attn_ck = int(os.getenv("NVTE_FUSED_ATTN_CK", "0"))
+        use_fused_attn_ck = int(os.getenv("NVTE_FUSED_ATTN_CK", "1"))
         # TODO: wait for the ck branch supporting determinism
         if use_fused_attn and (not use_fused_attn_ck):
             assert_all_equal(outputs, outputs_fp8_params)

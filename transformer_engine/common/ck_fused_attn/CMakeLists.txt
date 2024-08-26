@@ -6,54 +6,65 @@ set(CMAKE_CXX_STANDARD 17)
 project(ck_fused_attn LANGUAGES HIP CXX)
 # generate ck fused attn kernels, both fwd/bwd
 
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/gen_src)
+#remove all previously generated kernel files
+execute_process(
+  COMMAND rm -rf ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/*
+)
+
+set(__CK_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/composable_kernel")
+
+#fwd kernels list
+execute_process(
+  COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
+  --api fwd --list_blobs ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/fwd_blob_list.txt
+)
+#bwd kernels list
+execute_process(
+  COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
+  --api bwd --list_blobs ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/bwd_blob_list.txt
+)
+
+# NOTE: for cmake, the FMHA_FWD_GEN_BLOBS/FMHA_BWD_GEN_BLOBS files must be in the same directory
+#       as current cmake list, otherwise will not figure out the dependency properly
+file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/fwd_blob_list.txt FMHA_FWD_GEN_BLOBS)
+file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/bwd_blob_list.txt FMHA_BWD_GEN_BLOBS)
+
+# generate the actual fwd kernel cpp files
+execute_process(
+  COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
+  --api fwd --output_dir ${CMAKE_CURRENT_SOURCE_DIR}/gen_src
+)
+
+# generate the actual bwd kernel cpp files
+execute_process(
+  COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
+  --api bwd --output_dir ${CMAKE_CURRENT_SOURCE_DIR}/gen_src --receipt 3
+)
+
+# copy the header files needed
+file(COPY_FILE ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/bias.hpp ${CMAKE_CURRENT_SOURCE_DIR}/src/bias.hpp)
+file(COPY_FILE ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/mask.hpp ${CMAKE_CURRENT_SOURCE_DIR}/src/mask.hpp)
+file(COPY_FILE ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/fmha_fwd.hpp ${CMAKE_CURRENT_SOURCE_DIR}/src/fmha_fwd.hpp)
+file(COPY_FILE ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/fmha_bwd.hpp ${CMAKE_CURRENT_SOURCE_DIR}/src/fmha_bwd.hpp)
+
 set(ck_fused_attn_SOURCES)
 list(APPEND ck_fused_attn_SOURCES
-       src/ck_fused_attn.cpp)
+       src/ck_fused_attn_fwd.cpp
+       src/ck_fused_attn_bwd.cpp)
 
-if(NOT FUSED_ATTN_CK_KERNELS_NO_COMPILE)
-  file(MAKE_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/gen_src)
-  #fwd list
-  execute_process(
-    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/generate.py
-    --direction fwd --list_blobs ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/fwd_blob_list.txt -r 1
-  )
-  #fwd kernels
-  execute_process(
-    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/generate.py
-    --direction fwd --output_dir ${CMAKE_CURRENT_SOURCE_DIR}/gen_src -r 1
-  )
-  
-  #bwd list
-  execute_process(
-    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/generate.py
-    --direction bwd --list_blobs ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/bwd_blob_list.txt -r 1
-  )
-  #bwd kernels
-  execute_process(
-    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/generate.py
-    --direction bwd --output_dir ${CMAKE_CURRENT_SOURCE_DIR}/gen_src -r 1
-  )
-  
-  
-  file(GLOB_RECURSE CK_FA_FILES "${CMAKE_CURRENT_SOURCE_DIR}/gen_src/*.cpp")
-  list(APPEND ck_fused_attn_SOURCES ${CK_FA_FILES})
-  message(STATUS "Found the following CK fused attention files:")
-  foreach(file ${CK_FA_FILES})
-    message(STATUS " ${file}")
-  endforeach()
-endif()
+file(GLOB_RECURSE CK_FA_FILES "${CMAKE_CURRENT_SOURCE_DIR}/gen_src/*.cpp")
+list(APPEND ck_fused_attn_SOURCES ${CK_FA_FILES})
+message(STATUS "Found the following CK fused attention files:")
+foreach(file ${CK_FA_FILES})
+  message(STATUS " ${file}")
+endforeach()
 
 add_library(ck_fused_attn STATIC ${ck_fused_attn_SOURCES})
 set(CK_FUSED_ATTN_COMPILE_OPTIONS)
-list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -Wno-undefined-func-template -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=0 -fgpu-flush-denormals-to-zero -Wno-float-equal -ftemplate-backtrace-limit=0  -fPIC  -Wno-gnu-line-marker -Wunused-variable)
+list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -Wno-undefined-func-template -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=0 -ffast-math -fgpu-flush-denormals-to-zero -Wno-float-equal -ftemplate-backtrace-limit=0  -fPIC  -Wno-gnu-line-marker -Wunused-variable -Werror)
 
-if(NOT FUSED_ATTN_CK_KERNELS_NO_COMPILE)
-  list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -Werror)
-else()
-  target_compile_definitions(ck_fused_attn PUBLIC FUSED_ATTN_CK_NO_KERNEL)
-endif()
-
-set(CK_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../3rdparty/composable_kernel/include")
+set(CK_INCLUDE_DIR "${__CK_SOURCE_DIR}/include")
 message(STATUS "ck_include_dir: ${CK_INCLUDE_DIR}")
 
 if(NOT EXISTS "${CK_INCLUDE_DIR}")

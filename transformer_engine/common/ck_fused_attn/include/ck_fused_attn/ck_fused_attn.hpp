@@ -62,6 +62,7 @@ hipError_t ck_attn_bwd(
   bool is_causal,
   void* dq_ptr, 
   uint64_t stride_b_dq, uint64_t stride_h_dq, uint64_t stride_s_dq,
+  void* dq_acc_ptr,
   void* dk_ptr, 
   uint64_t stride_b_dk, uint64_t stride_h_dk, uint64_t stride_s_dk,
   void* dv_ptr, 

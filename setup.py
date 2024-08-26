@@ -450,9 +450,6 @@ def setup_common_extension() -> CMakeExtension:
     if use_rocm:
       if os.getenv("NVTE_USE_HIPBLASLT") is not None:
         cmake_flags.append("-DUSE_HIPBLASLT=ON")
-      # TODO: enable CK after rocm6.2 issues are fixed
-      if (not int(os.getenv("NVTE_FUSED_ATTN", "1"))) or (not int(os.getenv("NVTE_FUSED_ATTN_CK", "0"))):
-        cmake_flags.append("-DFUSED_ATTN_CK_KERNELS_NO_COMPILE=ON")
       if os.getenv("NVTE_AOTRITON_PATH"):
         aotriton_path = Path(os.getenv("NVTE_AOTRITON_PATH"))
         cmake_flags.append(f"-DAOTRITON_PATH={aotriton_path}")
