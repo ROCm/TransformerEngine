@@ -450,6 +450,12 @@ def setup_common_extension() -> CMakeExtension:
     if use_rocm:
       if os.getenv("NVTE_USE_HIPBLASLT") is not None:
         cmake_flags.append("-DUSE_HIPBLASLT=ON")
+      if os.getenv("NVTE_AOTRITON_PATH"):
+        aotriton_path = Path(os.getenv("NVTE_AOTRITON_PATH"))
+        cmake_flags.append(f"-DAOTRITON_PATH={aotriton_path}")
+      if os.getenv("NVTE_CK_FUSED_ATTN_PATH"):
+        ck_path = Path(os.getenv("NVTE_CK_FUSED_ATTN_PATH"))
+        cmake_flags.append(f"-DCK_FUSED_ATTN_PATH={ck_path}")
 
     if "jax" in frameworks():
         cmake_flags.append("-DENABLE_JAX=ON")

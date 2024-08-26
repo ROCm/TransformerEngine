@@ -84,21 +84,31 @@ if(USE_CUDA)
               "within the Transformer Engine source.")
   endif()
 else()
-  # Install aotriton fused attn
-  set(AOTRITON_NO_PYTHON ON)
-  set(AOTRITON_COMPRESS_KERNEL OFF)
-  set(AOTRITON_NO_SHARED ON)
-  add_subdirectory(../../3rdparty/aotriton ${CMAKE_CURRENT_BINARY_DIR}/aotriton)
-  #set(__AOTRITON_INSTALL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../")
-  #add_library(aotriton INTERFACE)
-  #target_link_libraries(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/lib/libaotriton_v2.a)
-  #target_include_directories(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/include)
+  if(NOT DEFINED AOTRITON_PATH)
+    # Install aotriton fused attn
+    set(AOTRITON_NO_PYTHON ON)
+    set(AOTRITON_COMPRESS_KERNEL OFF)
+    set(AOTRITON_NO_SHARED ON)
+    add_subdirectory(../../3rdparty/aotriton ${CMAKE_CURRENT_BINARY_DIR}/aotriton)
+  else()
+    # Use aotriton built during initial TE building/installation
+    # When only need rebuild TE library itself
+    find_library(AOTRITON_LIB NAMES aotriton aotriton_v2 PATHS ${AOTRITON_PATH}/lib REQUIRED NO_DEFAULT_PATH)
+    add_library( aotriton STATIC IMPORTED )
+    set_target_properties( aotriton PROPERTIES IMPORTED_LOCATION ${AOTRITON_LIB} )
+    target_include_directories(aotriton INTERFACE ${AOTRITON_PATH}/include)
+  endif()
 
-  add_subdirectory(ck_fused_attn ${CMAKE_CURRENT_BINARY_DIR}/ck_fused_attn)
-  #set(__CK_FUSED_ATTN_INSTALL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../")
-  #add_library(ck_fused_attn INTERFACE)
-  #target_link_libraries(ck_fused_attn INTERFACE ${__CK_FUSED_ATTN_INSTALL_DIR}/lib/libck_fused_attn.a)
-  #target_include_directories(ck_fused_attn INTERFACE ${__CK_FUSED_ATTN_INSTALL_DIR}/include)
+  if(NOT DEFINED CK_FUSED_ATTN_PATH)
+    add_subdirectory(ck_fused_attn ${CMAKE_CURRENT_BINARY_DIR}/ck_fused_attn)
+  else()
+    # Use CK built during initial TE building/installation
+    # When only need rebuild TE library itself
+    find_library(CK_FUSED_ATTN_LIB NAMES ck_fused_attn PATHS ${CK_FUSED_ATTN_PATH}/lib REQUIRED NO_DEFAULT_PATH)
+    add_library( ck_fused_attn STATIC IMPORTED )
+    set_target_properties( ck_fused_attn PROPERTIES IMPORTED_LOCATION ${CK_FUSED_ATTN_LIB} )
+    target_include_directories(ck_fused_attn INTERFACE ${CK_FUSED_ATTN_PATH}/include)
+  endif()
 endif()
 
 # process source code files
