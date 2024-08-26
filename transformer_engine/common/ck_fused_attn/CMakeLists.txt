@@ -7,6 +7,10 @@ project(ck_fused_attn LANGUAGES HIP CXX)
 # generate ck fused attn kernels, both fwd/bwd
 
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/gen_src)
+#remove all previously generated kernel files
+execute_process(
+  COMMAND rm -rf ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/*
+)
 
 set(__CK_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/composable_kernel")
 
