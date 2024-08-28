@@ -6,23 +6,21 @@ set(CMAKE_CXX_STANDARD 17)
 project(ck_fused_attn LANGUAGES HIP CXX)
 # generate ck fused attn kernels, both fwd/bwd
 
-file(MAKE_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/gen_src)
 #remove all previously generated kernel files
-execute_process(
-  COMMAND rm -rf ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/*
-)
+file(REMOVE_RECURSE ${CMAKE_CURRENT_SOURCE_DIR}/gen_src)
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/gen_src)
 
 set(__CK_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/composable_kernel")
 
 #fwd kernels list
 execute_process(
   COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
-  --api fwd --list_blobs ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/fwd_blob_list.txt
+  --direction fwd --list_blobs ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/fwd_blob_list.txt -r 1
 )
 #bwd kernels list
 execute_process(
   COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
-  --api bwd --list_blobs ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/bwd_blob_list.txt
+  --direction bwd --list_blobs ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/bwd_blob_list.txt -r 1
 )
 
 # NOTE: for cmake, the FMHA_FWD_GEN_BLOBS/FMHA_BWD_GEN_BLOBS files must be in the same directory
@@ -33,13 +31,13 @@ file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/gen_src/bwd_blob_list.txt FMHA_BWD_GEN_
 # generate the actual fwd kernel cpp files
 execute_process(
   COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
-  --api fwd --output_dir ${CMAKE_CURRENT_SOURCE_DIR}/gen_src
+  --direction fwd --output_dir ${CMAKE_CURRENT_SOURCE_DIR}/gen_src -r 1
 )
 
 # generate the actual bwd kernel cpp files
 execute_process(
   COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
-  --api bwd --output_dir ${CMAKE_CURRENT_SOURCE_DIR}/gen_src --receipt 3
+  --direction bwd --output_dir ${CMAKE_CURRENT_SOURCE_DIR}/gen_src -r 1
 )
 
 # copy the header files needed

@@ -288,7 +288,6 @@ void fused_attn_ck_bwd_impl(
       mask_type==NVTE_CAUSAL_MASK, // is causal
       devPtrdQ,
       q_stride[0], q_stride[1], q_stride[2], //dQ and Q share the same stride
-      dq_acc_ptr, 
       devPtrdK,
       k_stride[0], k_stride[1], k_stride[2], //dK and K share the same stride
       devPtrdV,
