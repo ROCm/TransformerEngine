@@ -6,8 +6,13 @@
 
 namespace hip_f8_impl {
 
-__host__ inline int clz(uint32_t x) { return __builtin_clz(x); }
-__device__ inline int clz(uint32_t x) { return __clz(x); }
+HIP_HOST_DEVICE inline int clz(uint32_t x) {
+#ifdef  __HIP_DEVICE_COMPILE__
+  return __clz(x);
+#else
+  return __builtin_clz(x);
+#endif
+}
 
 
 template <int wm, int we, typename T, bool negative_zero_nan, bool clip>

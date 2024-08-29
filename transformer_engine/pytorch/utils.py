@@ -11,6 +11,14 @@ import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 
+def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
+    """Check if any of the given tensors require gradient."""
+    for tensor in tensors:
+        if tensor is not None and tensor.requires_grad:
+            return True
+    return False
+
+
 def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     """
     Trick to deallocate tensor memory when delete operation does not
@@ -18,10 +26,15 @@ def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
 
     Must be used carefully.
     """
+    from .float8_tensor import Float8Tensor
     for t in tensors:
         if t is not None:
-            t.data = torch.Tensor()
-            del t
+            if isinstance(t, Float8Tensor):
+                t._data.data = torch.Tensor()
+                del t
+            else:
+                t.data = torch.Tensor()
+                del t
 
 
 def get_device_compute_capability() -> Tuple[int, int]:
@@ -210,20 +223,25 @@ def cast_if_needed(tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
 
 
 def check_dim_for_fp8_exec(tensor: torch.Tensor) -> bool:
-    """For fp8 fprop (TN layout), inputs and weights must be such
-       that dim0 is divisible by 8 and dim1 is divisible by 16.
-    """
-    return not tensor.shape[0] % 8 and not tensor.shape[1] % 16
+    """Check if tensor dimensions are supported for FP8 TN GEMM"""
+    return (
+        tensor.dim() == 2
+        and tensor.size(0) % 8 == 0
+        and tensor.size(1) % 16 == 0
+    )
 
 
 def assert_dim_for_fp8_exec(tensor: torch.Tensor) -> None:
-    """For fp8 fprop (TN layout), inputs and weights must be such
-       that dim0 is divisible by 8 and dim1 is divisible by 16.
-    """
+    """Assert that tensor dimensions are supported for FP8 TN GEMM"""
     # single tensor check so it's clear which tensor is triggering the assertion
-    assert check_dim_for_fp8_exec(tensor), (
-        "Tensor dimensions are not compatible for FP8 execution: "
-        f"({tensor.shape[0]} % 8 != 0, {tensor.shape[1]} % 16 != 0)"
+    assert (
+        tensor.dim() == 2
+        and tensor.size(0) % 8 == 0
+        and tensor.size(1) % 16 == 0
+    ), (
+        "FP8 execution requires 2D input matrices with "
+        "height divisible by 8 and width divisible by 16, "
+        f"but got tensor with dims={list(tensor.size())}"
     )
 
 if IS_HIP_EXTENSION:

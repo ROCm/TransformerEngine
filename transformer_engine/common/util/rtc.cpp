@@ -25,6 +25,7 @@ namespace {
 
 // Strings with headers for RTC kernels
 #include "string_code_utils_cuh.h"
+#include "string_code_util_math_h.h"
 
 #ifdef __HIP_PLATFORM_AMD__
 #include "string_code_amd_detail_hip_float8_h.h"
@@ -88,6 +89,10 @@ Kernel::~Kernel() {
           != CUDA_SUCCESS) {
         continue;
       }
+      if (cuda_driver::call("cuCtxSetCurrent", context)
+          != CUDA_SUCCESS) {
+        continue;
+      }
       cuda_driver::call("cuModuleUnload", modules_[device_id]);
       cuda_driver::call("cuDevicePrimaryCtxRelease", device);
 #endif // __HIP_PLATFORM_AMD__
@@ -122,6 +127,7 @@ CUfunction Kernel::get_function(int device_id) {
     CUcontext context;
     NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &device, device_id);
     NVTE_CALL_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxRetain, &context, device);
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuCtxSetCurrent, context);
 
     // Load function into driver context
     NVTE_CALL_CHECK_CUDA_DRIVER(cuModuleLoadDataEx,
@@ -142,6 +148,10 @@ CUfunction Kernel::get_function(int device_id) {
 
   // Return CUDA function
   return functions_[device_id];
+}
+
+void Kernel::set_function_cache_config(int device_id, CUfunc_cache cache_config) {
+  NVTE_CALL_CHECK_CUDA_DRIVER(cuFuncSetCacheConfig, get_function(device_id), cache_config);
 }
 
 KernelManager& KernelManager::instance() {
@@ -188,13 +198,13 @@ void KernelManager::compile(const std::string &kernel_label,
   // Compile source
   nvrtcProgram program;
 #ifdef __HIP_PLATFORM_AMD__
-  constexpr int num_headers = 3;
-  const char* headers[num_headers] = {string_code_utils_cuh, string_code_amd_detail_hip_float8_h, string_code_amd_detail_hip_f8_impl_h};
-  const char* include_names[num_headers] = {"utils_hip.cuh", "amd_detail/hip_float8.h", "amd_detail/hip_f8_impl.h"};
+  constexpr int num_headers = 4;
+  const char* headers[num_headers] = {string_code_utils_cuh, string_code_util_math_h, string_code_amd_detail_hip_float8_h, string_code_amd_detail_hip_f8_impl_h};
+  const char* include_names[num_headers] = {"utils_hip.cuh", "util/math.h", "amd_detail/hip_float8.h", "amd_detail/hip_f8_impl.h"};
 #else
-  constexpr int num_headers = 1;
-  constexpr const char* headers[num_headers] = {string_code_utils_cuh};
-  constexpr const char* include_names[num_headers] = {"utils.cuh"};
+  constexpr int num_headers = 2;
+  constexpr const char* headers[num_headers] = {string_code_utils_cuh, string_code_util_math_h};
+  constexpr const char* include_names[num_headers] = {"utils.cuh", "util/math.h"};
 #endif // __HIP_PLATFORM_AMD__
   NVTE_CHECK_NVRTC(nvrtcCreateProgram(&program,
                                       code.c_str(),
@@ -256,6 +266,14 @@ void KernelManager::compile(const std::string &kernel_label,
 
   // Clean up
   NVTE_CHECK_NVRTC(nvrtcDestroyProgram(&program));
+}
+
+void KernelManager::set_cache_config(const std::string &kernel_label, CUfunc_cache cache_config) {
+  const int device_id = cuda::current_device();
+  const auto key = get_kernel_cache_key(kernel_label, device_id);
+  NVTE_CHECK(kernel_cache_.count(key) > 0,
+             "Attempted to configure RTC kernel before compilation");
+  kernel_cache_.at(key).set_function_cache_config(device_id, cache_config);
 }
 
 bool KernelManager::is_compiled(const std::string &kernel_label, int device_id) const {

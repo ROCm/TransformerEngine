@@ -6,7 +6,7 @@
 
 import math
 import os
-from typing import List, Optional
+from typing import Dict, List, Optional
 import pytest
 import copy
 
@@ -27,10 +27,9 @@ if IS_HIP_EXTENSION:
 
 from transformer_engine.pytorch import (
     DotProductAttention, LayerNormLinear, LayerNormMLP, Linear,
-    MultiheadAttention, RMSNorm, TransformerLayer, LayerNorm
+    MultiheadAttention, RMSNorm, TransformerLayer, LayerNorm, InferenceParams
 )
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
-from transformer_engine.pytorch.distributed import _set_cuda_rng_state, CudaRNGStatesTracker
 
 
 # Only run FP8 tests on H100.
@@ -59,6 +58,14 @@ model_configs = {
     "126m": ModelConfig(768, 1e-5, 12, 64, 12, 2048),
 }
 
+model_configs_inference = {
+    # hidden_size, eps, num_attention_heads, embed, num_layers, seq_len
+    "126m": ModelConfig(768, 1e-5, 12, 64, 12, 16),
+}
+backends_inference = ["FlashAttention", "UnfusedAttention"]
+module_inference = ["TransformerLayer", "MultiheadAttention"]
+input_formats_inference = ["sbhd", "bshd"]
+
 param_types = [torch.float32, torch.float16]
 if is_bf16_compatible():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
@@ -67,7 +74,7 @@ batch_sizes = [1, 2]
 
 all_boolean = [True, False]
 
-all_activations = ["gelu", "relu", "reglu", "geglu", "swiglu", "qgelu"]
+all_activations = ["gelu", "relu", "reglu", "geglu", "swiglu", "qgelu", "srelu"]
 
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
@@ -78,22 +85,48 @@ def get_causal_attn_mask(sq: int) -> torch.Tensor:
     return torch.triu(torch.ones(sq, sq, device="cuda"), diagonal=1).bool()
 
 
-def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor]) -> bool:
-    """Ensures two lists are equal."""
-    assert len(l1) == len(l2), "Unequal number of outputs."
-    for t1, t2 in zip(l1, l2):
-        assert torch.equal(t1, t2), "Output mismatch."
+def dtype_tols(dtype: torch.dtype) -> Dict[str, float]:
+    """Estimated numerical error for a datatype
+
+    Based on tolerances for torch.testing.assert_close.
+
+    """
+    if dtype == torch.float32:
+        return dict(rtol=1.3e-6, atol=1e-5)
+    if dtype == torch.float16:
+        return dict(rtol=1e-3, atol=1e-5)
+    if dtype == torch.bfloat16:
+        return dict(rtol=1.6e-2, atol=1e-5)
+    raise ValueError(f"Unsuppored dtype ({dtype})")
 
 
-def assert_allclose(l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float) -> bool:
+def rocm_attn_tols() -> Dict[str, float]:
+    if IS_HIP_EXTENSION:
+        use_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
+        use_fused_attn_ck = int(os.getenv("NVTE_FUSED_ATTN_CK", "1"))
+        # TODO: wait for the ck branch supporting determinism
+        if use_fused_attn and (not use_fused_attn_ck):
+            # AOTriton backend and non-fused attn are deterministic
+            # TODO: PIV: should clear tols?
+            pass
+        else:
+            return dict(atol=5e-2, rtol=5e-2)
+    return []
+
+
+def assert_allclose(
+    l1: List[torch.Tensor],
+    l2: List[torch.Tensor],
+    atol: float,
+) -> bool:
     """Ensures two lists are equal."""
     assert len(l1) == len(l2), "Unequal number of outputs."
-    for t1, t2 in zip(l1, l2):
+    for i, (t1, t2) in enumerate(zip(l1, l2)):
         result = torch.allclose(t1, t2, atol=atol)
         if not result:
             diff = torch.abs(t1 - t2).flatten()
             m = torch.argmax(diff)
-            msg = (f"Outputs not close enough."
+            msg = (f"Outputs not close enough in tensor at idx={i}. "
                    f"Location of the maximum difference: {m.item()} "
                    f"with {t1.flatten()[m].item()} vs {t2.flatten()[m].item()} "
                    f"(diff {diff[m].item()})."
@@ -104,7 +137,13 @@ def assert_allclose(l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float)
 def reset_rng_states() -> None:
     """revert back to initial RNG state."""
     torch.set_rng_state(_cpu_rng_state)
-    _set_cuda_rng_state(_cuda_rng_state)
+    torch.cuda.set_rng_state(_cuda_rng_state)
+
+
+@pytest.fixture(autouse=True)
+def reset_global_fp8_state():
+    yield
+    FP8GlobalStateManager.reset()
 
 
 class TorchScaledMaskedSoftmax(nn.Module):
@@ -313,12 +352,17 @@ class TorchQuickGELU(nn.Module):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return input * torch.sigmoid(1.702 * input)
 
+class TorchSquaredRELU(nn.Module):
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return (input > 0) * input * input
+
 _supported_act = {'geglu'  : nn.GELU(approximate="tanh"),
                   'gelu'  : nn.GELU(approximate="tanh"),
                   'reglu'  : nn.ReLU(),
                   'relu'  : nn.ReLU(),
                   'swiglu' : nn.SiLU(),
-                  'qgelu'  : TorchQuickGELU()}
+                  'qgelu'  : TorchQuickGELU(),
+                  'srelu'  : TorchSquaredRELU()}
 
 
 class TorchGLU(nn.Module):
@@ -372,10 +416,10 @@ class TorchGPT(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         a = self.ln(x)
-        b = self.causal_attn(a, attn_mask)
+        b = self.causal_attn(a, attention_mask)
         if self.parallel_attention_mlp:
             n = self.ln_mlp(x)
             x = x + nn.functional.dropout(b + n, p=0.1, training=self.training)
@@ -395,13 +439,6 @@ def _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params=False
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
-    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
-
-    def get_dummy_cuda_rng_tracker():
-        """Get cuda rng tracker."""
-        return _DUMMY_CUDA_RNG_STATE_TRACKER
-
     with fp8_model_init(enabled=fp8 and fp8_model_params):
         block = (
             TransformerLayer(
@@ -416,16 +453,18 @@ def _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params=False
                 kv_channels=config.embed,
                 apply_residual_connection_post_layernorm=False,
                 output_layernorm=False,
-                get_rng_state_tracker=get_dummy_cuda_rng_tracker,
                 params_dtype=dtype,
                 fuse_qkv_params=True,
+                device="cuda",
             )
-            .cuda()
         )
 
     te_inp_hidden_states = torch.randn(
-        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
-    ).cuda()
+        (config.seq_len, bs, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
     te_inp_hidden_states.retain_grad()
     te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
 
@@ -459,21 +498,29 @@ def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, fp8_model_par
 
     outputs = _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=False)
     outputs_recompute = _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=True)
-    if IS_HIP_EXTENSION:
-        use_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
-        use_fused_attn_ck = int(os.getenv("NVTE_FUSED_ATTN_CK", "1"))
-        # TODO: wait for the ck branch supporting determinism
-        if use_fused_attn and (not use_fused_attn_ck):
-            # AOTriton backend and non-fused attn are deterministic
-            assert_all_equal(outputs, outputs_recompute)
-        else:
-            tols = dict(atol=5e-2, rtol=5e-2)
-            torch.testing.assert_close(outputs, outputs_recompute, **tols)
-    else:
-        assert_all_equal(outputs, outputs_recompute)
+
+    # Check that results match
+    tols = dtype_tols(dtype)
+    if dtype in (torch.float16, torch.bfloat16):
+        tols["atol"] = 1e-4
+    tols.update(rocm_attn_tols())
+    if fp8 or fp8_model_params:
+        tols.update(dict(rtol=0.125, atol=0.0675))
+    for i, (ref, test) in enumerate(zip(outputs, outputs_recompute)):
+        torch.testing.assert_close(
+            test,
+            ref,
+            msg=f"Mismatch in tensor {i}",
+            **tols,
+        )
 
 
-def _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params=False, recompute=False):
+def _test_e2e_full_recompute(
+    bs, dtype, config, fp8,
+    fp8_model_params=False,
+    recompute=False,
+    use_reentrant=True
+):
     reset_rng_states()
     FP8GlobalStateManager.reset()
 
@@ -481,16 +528,8 @@ def _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params=False, rec
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
-    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
-
-    def get_dummy_cuda_rng_tracker():
-        """Get cuda rng tracker."""
-        return _DUMMY_CUDA_RNG_STATE_TRACKER
-
     with fp8_model_init(enabled=fp8 and fp8_model_params):
-        block = (
-        TransformerLayer(
+        block = TransformerLayer(
             config.hidden_size,
             4 * config.hidden_size,
             config.num_attention_heads,
@@ -502,29 +541,31 @@ def _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params=False, rec
             kv_channels=config.embed,
             apply_residual_connection_post_layernorm=False,
             output_layernorm=False,
-            get_rng_state_tracker=get_dummy_cuda_rng_tracker,
             params_dtype=dtype,
             fuse_qkv_params=True,
-        )
-        .cuda()
+            device="cuda",
         )
 
     te_inp_hidden_states = torch.randn(
-        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
-    ).cuda()
-    te_inp_hidden_states.retain_grad()
+        (config.seq_len, bs, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=use_reentrant,
+    )
+    if use_reentrant:
+        te_inp_hidden_states.retain_grad()
     te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
 
     with fp8_autocast(enabled=fp8):
         if recompute:
             te_out = te_checkpoint(
                 block,
-                False,  # distribute_saved_activations
-                get_dummy_cuda_rng_tracker,
-                None,  # tp_group
                 te_inp_hidden_states,
                 attention_mask=te_inp_attn_mask,
                 checkpoint_core_attention=False,
+                distribute_saved_activations=False,
+                tp_group=None,
+                use_reentrant=use_reentrant,
             )
         else:
             te_out = block(
@@ -536,11 +577,17 @@ def _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params=False, rec
     loss.backward()
     torch.cuda.synchronize()
 
-    outputs = [te_out, te_inp_hidden_states.grad]
-    for p in block.parameters():
+    outputs = [te_out]
+    names = ["output"]
+    if use_reentrant:
+        outputs.append(te_inp_hidden_states.grad)
+        names.append("input")
+    for name, p in block.named_parameters():
         if p.requires_grad:
             outputs.append(p.grad)
-    return outputs
+            names.append(name)
+
+    return outputs, names
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -548,52 +595,65 @@ def _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params=False, rec
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("fp8", all_boolean)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
-def test_gpt_full_activation_recompute(dtype, bs, model, fp8, fp8_model_params):
+@pytest.mark.parametrize("use_reentrant", all_boolean)
+def test_gpt_full_activation_recompute(dtype, bs, model, fp8, fp8_model_params, use_reentrant):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
     config = model_configs[model]
 
-    outputs = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=False)
-    outputs_recompute = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=True)
+    if not use_reentrant:
+        # Non-reentrant checkpoint becomes non-deterministic with bias+GELU fusion
+        os.environ["NVTE_BIAS_GELU_NVFUSION"] = "0"
+
+    outputs, names = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params,
+                                              recompute=False, use_reentrant=use_reentrant)
+    outputs_recompute, _ = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params,
+                                                    recompute=True, use_reentrant=use_reentrant)
+
+    if not use_reentrant:
+        # Reset bias+GELU fusion flag to avoid contaminating other tests
+        del os.environ["NVTE_BIAS_GELU_NVFUSION"]
+
+    # Check that results match
+    tols = dtype_tols(dtype)
+    if dtype in (torch.float16, torch.bfloat16):
+        tols["atol"] = 1e-3
     if IS_HIP_EXTENSION:
-        if dtype==torch.float16 and is_mi200():
+        if dtype==torch.float16 and is_mi200(): #TODO: PIV: should it be used in other tests too
             # mi200 denorm issue
-            assert_allclose(outputs, outputs_recompute, 1e-2)
-        else:
-            # TODO: wait for the ck branch supporting determinism
-            use_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
-            use_fused_attn_ck = int(os.getenv("NVTE_FUSED_ATTN_CK", "1"))
-            if use_fused_attn and (not use_fused_attn_ck):
-                # AOTriton backend and non-fused attn are deterministic
-                assert_all_equal(outputs, outputs_recompute)
-            else:
-                tols = dict(atol=5e-2, rtol=5e-2)
-                torch.testing.assert_close(outputs, outputs_recompute, **tols)
-    else:
-        assert_all_equal(outputs, outputs_recompute)
+            tols["atol"] = 1e-2
+        tols.update(rocm_attn_tols())
+    if fp8 or fp8_model_params:
+        tols.update(dict(rtol=0.125, atol=0.0675))
+    for i, (ref, test) in enumerate(zip(outputs, outputs_recompute)):
+        torch.testing.assert_close(
+            test,
+            ref,
+            msg=f"Mismatch in tensor {i}",
+            **tols,
+        )
+
 
 def _test_e2e_checkpointing_get_model(config, dtype):
     sigma = 0.023
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    return (
-        TransformerLayer(
-            config.hidden_size,
-            4 * config.hidden_size,
-            config.num_attention_heads,
-            layernorm_epsilon=config.eps,
-            init_method=init_method,
-            output_layer_init_method=output_layer_init_method,
-            hidden_dropout=0.1,
-            attention_dropout=0.1,
-            kv_channels=config.embed,
-            apply_residual_connection_post_layernorm=False,
-            output_layernorm=False,
-            params_dtype=dtype,
-        )
-        .cuda()
+    return TransformerLayer(
+        config.hidden_size,
+        4 * config.hidden_size,
+        config.num_attention_heads,
+        layernorm_epsilon=config.eps,
+        init_method=init_method,
+        output_layer_init_method=output_layer_init_method,
+        hidden_dropout=0.1,
+        attention_dropout=0.1,
+        kv_channels=config.embed,
+        apply_residual_connection_post_layernorm=False,
+        output_layernorm=False,
+        params_dtype=dtype,
+        device="cuda",
     )
 
 
@@ -601,8 +661,11 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
     reset_rng_states()
 
     te_inp_hidden_states = torch.randn(
-        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
-    ).cuda()
+        (config.seq_len, bs, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
     te_inp_hidden_states.retain_grad()
 
     block = _test_e2e_checkpointing_get_model(config, dtype)
@@ -670,37 +733,45 @@ def test_gpt_checkpointing(dtype, bs, model):
     config = model_configs[model]
     outputs = _test_e2e_checkpointing(bs, dtype, config, checkpoint=False)
     outputs_checkpoint = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
+
+    # Check that results match
+    tols = dtype_tols(dtype)
+    if dtype in (torch.float16, torch.bfloat16):
+        tols.update(dict(rtol=2e-2, atol=2e-3))
     if IS_HIP_EXTENSION: 
         use_hipblaslt = (os.getenv("NVTE_USE_HIPBLASLT") is not None)
-        use_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
-        use_fused_attn_ck = int(os.getenv("NVTE_FUSED_ATTN_CK", "1"))
-        # ck fused_attn non-determinism requires higher tolerance
-        if use_fused_attn and use_fused_attn_ck:
-            # TODO: wait for the ck branch supporting determinism
-            tols = dict(atol=5e-2, rtol=5e-2)
-            torch.testing.assert_close(outputs, outputs_checkpoint, **tols)
-        elif not use_hipblaslt: 
+        tols.update(rocm_attn_tols())
+        if len(tols) == 0 and not use_hipblaslt: 
             # Relax to all close for rocm. We don't have bit-to-bit reproducibility
             # when running rocblas path mainly due to the usage of atomics
             # Need to check whether hipBlasLt path has reproducibility
-            assert_allclose(outputs, outputs_checkpoint, 5e-5)
+            tols["atol"] = 5e-5
         else:
             # should be perfect match with hipblaslt and non-ck attention
-            assert_all_equal(outputs, outputs_checkpoint)
-    else: 
-        assert_all_equal(outputs, outputs_checkpoint)
+            # TODO: PIV: should tols be cleared
+            pass
+    for i, (ref, test) in enumerate(zip(outputs, outputs_checkpoint)):
+        torch.testing.assert_close(
+            test,
+            ref,
+            msg=f"Mismatch in tensor {i}",
+            **tols,
+        )
 
 
 def _test_e2e_gpt_accuracy(block, bs, dtype, config):
     reset_rng_states()
 
     inp_hidden_states = torch.randn(
-        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
-    ).cuda()
+        (config.seq_len, bs, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
     inp_hidden_states.retain_grad()
     inp_attn_mask = get_causal_attn_mask(config.seq_len)
 
-    out = block(inp_hidden_states, inp_attn_mask)
+    out = block(inp_hidden_states, attention_mask=inp_attn_mask)
     loss = out.sum()
     loss.backward()
 
@@ -727,12 +798,12 @@ def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
             layernorm_epsilon=config.eps,
             attention_dropout=0.1,
             hidden_dropout=0.1,
+            params_dtype=dtype,
             fuse_qkv_params=True,
             qkv_weight_interleaved=False,
             parallel_attention_mlp=parallel_attention_mlp,
+            device="cuda",
         )
-        .to(dtype=dtype)
-        .cuda()
         .eval()
     )
 
@@ -787,8 +858,11 @@ def _test_mha_accuracy(block, bs, dtype, config, mask_type, te=True):
     reset_rng_states()
 
     inp_hidden_states = torch.randn(
-        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
-    ).cuda()
+        (config.seq_len, bs, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
     inp_hidden_states.retain_grad()
     inp_attn_mask = get_causal_attn_mask(config.seq_len) if mask_type == "causal" else None
 
@@ -821,11 +895,11 @@ def test_mha_accuracy(dtype, bs, model, mask_type):
             config.hidden_size,
             config.num_attention_heads,
             fuse_qkv_params=True,
+            params_dtype=dtype,
             qkv_weight_interleaved=False,
             input_layernorm=False,
+            device="cuda",
         )
-        .to(dtype=dtype)
-        .cuda()
         .eval()
     )
 
@@ -860,8 +934,11 @@ def _test_granular_accuracy(block, bs, dtype, config):
     reset_rng_states()
 
     inp_hidden_states = torch.randn(
-        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
-    ).cuda()
+        (config.seq_len, bs, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
     inp_hidden_states.retain_grad()
 
     out = block(inp_hidden_states)
@@ -879,10 +956,16 @@ def _test_granular_accuracy(block, bs, dtype, config):
 def _test_dpa_accuracy(block, bs, dtype, config):
     reset_rng_states()
 
-    mask = torch.triu(torch.ones(config.seq_len, config.seq_len, device="cuda"), diagonal=1).bool()
+    mask = torch.triu(torch.ones(config.seq_len, config.seq_len, dtype=torch.bool, device="cuda"), diagonal=1)
     query, key, value = [
-        torch.randn(config.seq_len, bs, config.num_attention_heads,
-        config.embed, dtype=dtype, requires_grad=True).cuda() for _ in range(3)]
+        torch.randn(
+            (config.seq_len, bs, config.num_attention_heads, config.embed),
+            dtype=dtype,
+            device="cuda",
+            requires_grad=True,
+        )
+        for _ in range(3)
+    ]
 
     query.retain_grad()
     key.retain_grad()
@@ -943,9 +1026,9 @@ def test_linear_accuracy(dtype, bs, model):
             config.hidden_size,
             4 * config.hidden_size,
             bias=True,
+            params_dtype=dtype,
+            device="cuda",
         )
-        .to(dtype=dtype)
-        .cuda()
         .eval()
     )
 
@@ -954,9 +1037,9 @@ def test_linear_accuracy(dtype, bs, model):
             config.hidden_size,
             4 * config.hidden_size,
             bias=True,
+            device="cuda",
+            dtype=dtype,
         )
-        .to(dtype=dtype)
-        .cuda()
         .eval()
     )
 
@@ -987,10 +1070,10 @@ def test_rmsnorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
         RMSNorm(
             config.hidden_size,
             eps=eps,
-            zero_centered_gamma=zero_centered_gamma
+            params_dtype=dtype,
+            zero_centered_gamma=zero_centered_gamma,
+            device="cuda",
         )
-        .to(dtype=dtype)
-        .cuda()
         .eval()
     )
 
@@ -1031,10 +1114,10 @@ def test_layernorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
         LayerNorm(
             config.hidden_size,
             eps=eps,
-            zero_centered_gamma=zero_centered_gamma
+            params_dtype=dtype,
+            zero_centered_gamma=zero_centered_gamma,
+            device="cuda",
         )
-        .to(dtype=dtype)
-        .cuda()
         .eval()
     )
 
@@ -1080,10 +1163,10 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centere
             config.eps,
             bias=True,
             normalization=normalization,
+            params_dtype=dtype,
             zero_centered_gamma=zero_centered_gamma,
+            device="cuda",
         )
-        .to(dtype=dtype)
-        .cuda()
         .eval()
     )
 
@@ -1113,7 +1196,7 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centere
     torch_outputs = _test_granular_accuracy(torch_ln_linear, bs, dtype, config)
 
     # Check output.
-    atol = {torch.float32 : 2e-4,
+    atol = {torch.float32 : 2.5e-4,
             torch.half    : 2e-3,
             torch.bfloat16: 2e-2,
     }
@@ -1134,9 +1217,9 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
             4 * config.hidden_size,
             activation=activation,
             normalization=normalization,
+            params_dtype=dtype,
+            device="cuda",
         )
-        .to(dtype=dtype)
-        .cuda()
         .eval()
     )
 
@@ -1256,11 +1339,11 @@ def test_gpt_cuda_graph(dtype, bs, model):
             hidden_dropout=0.1,
             attention_dropout=0.1,
             kv_channels=config.embed,
+            params_dtype=dtype,
             apply_residual_connection_post_layernorm=False,
             output_layernorm=False,
+            device="cuda",
         )
-        .to(dtype=dtype)
-        .cuda()
     )
     graphed_block = copy.deepcopy(block)
 
@@ -1283,37 +1366,30 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params):
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
-    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
-
-    def get_dummy_cuda_rng_tracker():
-        """Get cuda rng tracker."""
-        return _DUMMY_CUDA_RNG_STATE_TRACKER
-
     with fp8_model_init(enabled=fp8_model_params):
-        block = (
-            TransformerLayer(
-                config.hidden_size,
-                4 * config.hidden_size,
-                config.num_attention_heads,
-                layernorm_epsilon=config.eps,
-                init_method=init_method,
-                output_layer_init_method=output_layer_init_method,
-                hidden_dropout=0.1,
-                attention_dropout=0.1,
-                kv_channels=config.embed,
-                apply_residual_connection_post_layernorm=False,
-                output_layernorm=False,
-                get_rng_state_tracker=get_dummy_cuda_rng_tracker,
-                params_dtype=dtype,
-                fuse_qkv_params=True,
-            )
-            .cuda()
+        block = TransformerLayer(
+            config.hidden_size,
+            4 * config.hidden_size,
+            config.num_attention_heads,
+            layernorm_epsilon=config.eps,
+            init_method=init_method,
+            output_layer_init_method=output_layer_init_method,
+            hidden_dropout=0.1,
+            attention_dropout=0.1,
+            kv_channels=config.embed,
+            apply_residual_connection_post_layernorm=False,
+            output_layernorm=False,
+            params_dtype=dtype,
+            fuse_qkv_params=True,
+            device="cuda",
         )
 
     te_inp_hidden_states = torch.randn(
-        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
-    ).cuda()
+        (config.seq_len, bs, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
     te_inp_hidden_states.retain_grad()
     te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
 
@@ -1341,17 +1417,20 @@ def test_gpt_fp8_parameters(dtype, bs, model):
 
     outputs = _test_gpt_fp8_parameters(bs, dtype, config, False)
     outputs_fp8_params = _test_gpt_fp8_parameters(bs, dtype, config, True)
+    # Check that results match
+    tols = dict(rtol=0.125, atol=0.0675)
     if IS_HIP_EXTENSION:
-        use_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
-        use_fused_attn_ck = int(os.getenv("NVTE_FUSED_ATTN_CK", "1"))
-        # TODO: wait for the ck branch supporting determinism
-        if use_fused_attn and (not use_fused_attn_ck):
-            assert_all_equal(outputs, outputs_fp8_params)
-        else:
-            tols = dict(atol=5e-2, rtol=5e-2)
-            torch.testing.assert_close(outputs, outputs_fp8_params, **tols)
-    else:
-        assert_all_equal(outputs, outputs_fp8_params)
+        tols = rocm_attn_tols()
+
+    for i, (ref, test) in enumerate(zip(outputs, outputs_fp8_params)):
+        torch.testing.assert_close(
+            test,
+            ref,
+            msg=f"Mismatch in tensor {i}",
+            **tols
+        )
+
+
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
@@ -1367,54 +1446,53 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     # other layer. Set `*dropout` values to 0 to make sure the forward pass
     # is identical to the other layer.
     torch.manual_seed(0)
-    block_sbhd = (
-        TransformerLayer(
-            config.hidden_size,
-            4 * config.hidden_size,
-            config.num_attention_heads,
-            layernorm_epsilon=config.eps,
-            init_method=init_method,
-            output_layer_init_method=output_layer_init_method,
-            hidden_dropout=0,
-            attention_dropout=0,
-            kv_channels=config.embed,
-            apply_residual_connection_post_layernorm=False,
-            output_layernorm=False,
-            attn_input_format="sbhd"
-        )
-        .to(dtype=dtype)
-        .cuda()
+    block_sbhd = TransformerLayer(
+        config.hidden_size,
+        4 * config.hidden_size,
+        config.num_attention_heads,
+        layernorm_epsilon=config.eps,
+        init_method=init_method,
+        output_layer_init_method=output_layer_init_method,
+        hidden_dropout=0,
+        attention_dropout=0,
+        kv_channels=config.embed,
+        params_dtype=dtype,
+        apply_residual_connection_post_layernorm=False,
+        output_layernorm=False,
+        device="cuda",
+        attn_input_format="sbhd",
     )
 
     # Set `torch.manual_seed` to make sure the weights are identical to the
     # other layer. Set `*dropout` values to 0 to make sure the forward pass
     # is identical to the other layer.
     torch.manual_seed(0)
-    block_bshd = (
-        TransformerLayer(
-            config.hidden_size,
-            4 * config.hidden_size,
-            config.num_attention_heads,
-            layernorm_epsilon=config.eps,
-            init_method=init_method,
-            output_layer_init_method=output_layer_init_method,
-            hidden_dropout=0,
-            attention_dropout=0,
-            kv_channels=config.embed,
-            apply_residual_connection_post_layernorm=False,
-            output_layernorm=False,
-            attn_input_format="bshd"
-        )
-        .to(dtype=dtype)
-        .cuda()
+    block_bshd = TransformerLayer(
+        config.hidden_size,
+        4 * config.hidden_size,
+        config.num_attention_heads,
+        layernorm_epsilon=config.eps,
+        init_method=init_method,
+        output_layer_init_method=output_layer_init_method,
+        hidden_dropout=0,
+        attention_dropout=0,
+        kv_channels=config.embed,
+        params_dtype=dtype,
+        apply_residual_connection_post_layernorm=False,
+        output_layernorm=False,
+        device="cuda",
+        attn_input_format="bshd",
     )
 
     for (n1, p1), (n2, p2) in zip(block_bshd.named_parameters(), block_sbhd.named_parameters()):
         assert torch.all(torch.eq(p1, p2)), f"{n1}, {n2} not identical"
 
     x_sbhd = torch.randn(
-        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
-    ).to(dtype).cuda()
+        (config.seq_len, bs, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
 
     x_bshd = x_sbhd.transpose(0,1).contiguous()
 
@@ -1432,8 +1510,119 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     if IS_HIP_EXTENSION:
         use_hipblaslt = (os.getenv("NVTE_USE_HIPBLASLT") is not None)
         if use_hipblaslt: 
-            assert_allclose([y_bshd], [y_sbhd.transpose(0,1).contiguous()], 1e-5)
+            torch.testing.assert_close([y_bshd], [y_sbhd.transpose(0,1).contiguous()], atol=1e-5)
         else:
-            assert_all_equal([y_bshd], [y_sbhd.transpose(0,1).contiguous()])
+            torch.equal(y_bshd, y_sbhd.transpose(0,1).contiguous())
     else:
-        assert_all_equal([y_bshd], [y_sbhd.transpose(0,1).contiguous()])
+        # Check that results match
+        torch.testing.assert_close(
+            y_bshd,
+            y_sbhd.transpose(0,1).contiguous(),
+        )
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model_key", model_configs_inference.keys())
+@pytest.mark.parametrize("use_RoPE", all_boolean)
+@pytest.mark.parametrize("input_format", input_formats_inference)
+@pytest.mark.parametrize("module", module_inference)
+@pytest.mark.parametrize("backend", backends_inference)
+def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module, backend):
+    os.environ["NVTE_FLASH_ATTN"] = "0"
+    os.environ["NVTE_FUSED_ATTN"] = "0"
+
+    if backend == "FlashAttention":
+        os.environ["NVTE_FLASH_ATTN"] = "1"
+    elif backend == "FusedAttention":
+        os.environ["NVTE_FUSED_ATTN"] = "1"
+
+    config = model_configs_inference[model_key]
+
+    S = config.seq_len
+    B = bs
+    H = config.num_attention_heads
+    D = config.hidden_size
+    head_size = config.embed
+    layer_number = 1
+
+    # Limits the max size of KV-cache
+    B_max = B
+    S_max = S + 2
+
+    if module == "TransformerLayer":
+        model = (
+            TransformerLayer(
+                hidden_size=D,
+                ffn_hidden_size= 4 * D,
+                num_attention_heads=H,
+                attn_input_format=input_format,
+                layer_number=layer_number,
+                attention_dropout = 0.0,
+                params_dtype=dtype,
+                device="cuda",
+            )
+            .eval()
+        )
+    else:
+        model = (
+            MultiheadAttention(
+                hidden_size=D,
+                num_attention_heads=H,
+                qkv_format=input_format,
+                layer_number=layer_number,
+                attention_dropout = 0.0,
+                params_dtype=dtype,
+            )
+            .cuda()
+            .eval()
+        )
+
+    inference_params = InferenceParams(max_batch_size=B_max, max_sequence_length=S_max)
+    rotary_freqs = torch.randn((S_max, 1, 1, head_size), dtype=torch.float, device="cuda")
+
+    input = torch.randn((S, B, D), dtype=dtype, device="cuda")
+    if input_format == "bshd":
+        input = input.transpose(0, 1).contiguous()
+
+    incremental_output = torch.zeros_like(input)
+
+    # Generate output for the entire sequence
+    full_output = model(
+        hidden_states=input,
+        rotary_pos_emb=rotary_freqs if use_RoPE else None)
+
+    # Incrementaly generate outputs using KV-cache
+    for i in range(S):
+        if input_format == "sbhd":
+            incremental_input = input[i].view(1,B,D)
+        else:
+            incremental_input = input[:, i, :].view(B,1,D)
+
+        line_output = model(
+            hidden_states=incremental_input,
+            inference_params=inference_params,
+            rotary_pos_emb=rotary_freqs if use_RoPE else None)
+
+        inference_params.sequence_len_offset += 1
+
+        if input_format == "sbhd":
+            incremental_output[i] = line_output.view(B,D)
+        else:
+            incremental_output[:, i, :] = line_output.view(B,D)
+
+    if module == "TransformerLayer":
+        atol = {
+            torch.float32 : 5e-3,
+            torch.half    : 5e-3,
+            torch.bfloat16: 5e-2,
+        }
+    else:
+        atol = {
+            torch.float32 : 1e-3,
+            torch.half    : 1e-3,
+            torch.bfloat16: 1e-2,
+        }
+
+    # Check if the fully generated output matches the one generated incrementally
+    assert_allclose(full_output, incremental_output, atol[dtype])

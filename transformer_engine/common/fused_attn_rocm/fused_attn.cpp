@@ -127,6 +127,10 @@ void nvte_fused_attn_fwd_qkvpacked(
             NVTETensor O,
             NVTETensorPack* Aux_CTX_Tensors,
             const NVTETensor cu_seqlens,
+            const NVTETensor seq_offsets_q,
+            const NVTETensor seq_offsets_k,
+            const NVTETensor seq_offsets_v,
+            const NVTETensor seq_offsets_o,
             const NVTETensor rng_state,
             size_t max_seqlen,
             bool is_training, float attn_scale, float dropout,
@@ -201,6 +205,10 @@ void nvte_fused_attn_bwd_qkvpacked(
             NVTETensor dQKV,
             NVTETensor dBias,
             const NVTETensor cu_seqlens,
+            const NVTETensor seq_offsets_q,
+            const NVTETensor seq_offsets_k,
+            const NVTETensor seq_offsets_v,
+            const NVTETensor seq_offsets_o,
             size_t max_seqlen,
             float attn_scale, float dropout,
             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
@@ -282,6 +290,10 @@ void nvte_fused_attn_fwd_kvpacked(
             NVTETensorPack* Aux_CTX_Tensors,
             const NVTETensor cu_seqlens_q,
             const NVTETensor cu_seqlens_kv,
+            const NVTETensor seq_offsets_q,
+            const NVTETensor seq_offsets_k,
+            const NVTETensor seq_offsets_v,
+            const NVTETensor seq_offsets_o,
             const NVTETensor rng_state,
             size_t max_seqlen_q, size_t max_seqlen_kv,
             bool is_training, float attn_scale, float dropout,
@@ -365,6 +377,10 @@ void nvte_fused_attn_bwd_kvpacked(
             NVTETensor dBias,
             const NVTETensor cu_seqlens_q,
             const NVTETensor cu_seqlens_kv,
+            const NVTETensor seq_offsets_q,
+            const NVTETensor seq_offsets_k,
+            const NVTETensor seq_offsets_v,
+            const NVTETensor seq_offsets_o,
             size_t max_seqlen_q, size_t max_seqlen_kv,
             float attn_scale, float dropout,
             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
@@ -399,7 +415,7 @@ void nvte_fused_attn_bwd_kvpacked(
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
     h_kv = input_KV->data.shape[ndim_kv - 3];
   } else {
-    NVTE_ERROR("nvte_fused_attn_fwd_kvpacked only supports HD_H2D and HD_2HD layouts!");
+    NVTE_ERROR("nvte_fused_attn_bwd_kvpacked only supports HD_H2D and HD_2HD layouts!");
   }
 
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
@@ -452,6 +468,10 @@ void nvte_fused_attn_fwd(
             NVTETensorPack* Aux_CTX_Tensors,
             const NVTETensor cu_seqlens_q,
             const NVTETensor cu_seqlens_kv,
+            const NVTETensor seq_offsets_q,
+            const NVTETensor seq_offsets_k,
+            const NVTETensor seq_offsets_v,
+            const NVTETensor seq_offsets_o,
             const NVTETensor rng_state,
             size_t max_seqlen_q, size_t max_seqlen_kv,
             bool is_training, float attn_scale, float dropout,
@@ -530,6 +550,10 @@ void nvte_fused_attn_bwd(
             NVTETensor dBias,
             const NVTETensor cu_seqlens_q,
             const NVTETensor cu_seqlens_kv,
+            const NVTETensor seq_offsets_q,
+            const NVTETensor seq_offsets_k,
+            const NVTETensor seq_offsets_v,
+            const NVTETensor seq_offsets_o,
             size_t max_seqlen_q, size_t max_seqlen_kv,
             float attn_scale, float dropout,
             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,

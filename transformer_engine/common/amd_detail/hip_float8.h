@@ -6,6 +6,8 @@
 #pragma once
 // FP8 header version 0.3, 2021/05/11
 
+#include <hip/hip_runtime.h>
+
 #define HIP_HOST_DEVICE __host__ __device__
 #define HIP_DEVICE  __device__
 #define HIP_HOST __host__ 
@@ -59,14 +61,25 @@ enum class hip_f8_rounding_mode {
 //    => bias = 15 for 152, 7 for 143
 //    => NAN/INF are represented as per IEEE conventions
 
+#ifndef __HIPCC_RTC__
+static bool hip_f8_bias_mode_bit_host = true;
+
+static inline __host__ bool get_hip_f8_bias_mode() {
+  return hip_f8_bias_mode_bit_host;
+}
+#endif // __HIPCC_RTC__
+
+#ifdef __HIPCC__
 static __device__ bool hip_f8_bias_mode_bit_device = true;
 
-static __global__ void set_hip_f8_bias_mode_bit(bool v) {
-  hip_f8_bias_mode_bit_device = v;
+static inline __device__ bool get_hip_f8_bias_mode() {
+  return hip_f8_bias_mode_bit_device;
 }
 
 #ifndef __HIPCC_RTC__
-static bool hip_f8_bias_mode_bit_host = true;
+static __global__ void set_hip_f8_bias_mode_bit(bool v) {
+  hip_f8_bias_mode_bit_device = v;
+}
 
 static void set_hip_f8_bias_mode_ieee() {
   hipLaunchKernelGGL(set_hip_f8_bias_mode_bit, dim3(1), dim3(1), 0, 0, false);
@@ -78,14 +91,7 @@ static void set_hip_f8_bias_mode_optimal() {
   hip_f8_bias_mode_bit_host = true;
 }
 #endif // __HIPCC_RTC__
-
-static inline HIP_HOST_DEVICE bool get_hip_f8_bias_mode() {
-#if defined(__HIP_DEVICE_COMPILE__)
-  return hip_f8_bias_mode_bit_device;
-#else
-  return hip_f8_bias_mode_bit_host;
-#endif
-}
+#endif // __HIPCC__
 
 
 template<hip_f8_type T>
@@ -302,6 +308,8 @@ struct hip_f8 {
   }
 };
 
+#ifdef __HIPCC__
+
 template<hip_f8_type T>
 struct hip_f8x4 {
   // define some convenience types
@@ -379,3 +387,4 @@ __device__ hip_float32x4 mfma_f32_16x16x32(hip_f8x8<T_A> a, hip_f8x8<T_B> b, hip
 template<hip_f8_type T_A, hip_f8_type T_B>
 __device__ hip_float32x16 mfma_f32_32x32x16(hip_f8x8<T_A> a, hip_f8x8<T_B> b, hip_float32x16 c);
 
+#endif //__HIPCC__

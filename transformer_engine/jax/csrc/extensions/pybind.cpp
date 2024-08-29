@@ -5,16 +5,8 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
 
-#ifndef USE_ROCM
-#include <cublasLt.h>
-#endif
-#include "transformer_engine/fused_attn.h"
-#include "transformer_engine/transformer_engine.h"
-#include "modules.h"
-#include "utils.h"
+#include "jax/csrc/extensions.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -28,14 +20,14 @@ pybind11::dict Registrations() {
     pybind11::dict dict;
     dict["te_transpose"] = EncapsulateFunction(Transpose);
     dict["te_cast_transpose"] = EncapsulateFunction(CastTranspose);
-    dict["te_gelu"] = EncapsulateFunction(Gelu);
-    dict["te_gelu_fp8"] = EncapsulateFunction(GeluFP8);
-    dict["te_dgelu"] = EncapsulateFunction(DGelu);
-    dict["te_dgelu_dbias_cast_transpose"] = EncapsulateFunction(DGeluDBiasCastTranspose);
-    dict["te_gated_gelu"] = EncapsulateFunction(GatedGelu);
-    dict["te_gated_gelu_fp8"] = EncapsulateFunction(GatedGeluFP8);
-    dict["te_dgated_gelu"] = EncapsulateFunction(DGatedGelu);
-    dict["te_dgated_gelu_cast_transpose"] = EncapsulateFunction(DGatedGeluCastTranspose);
+
+    dict["te_act_lu"] = EncapsulateFunction(ActLu);
+    dict["te_act_lu_fp8"] = EncapsulateFunction(ActLuFP8);
+    dict["te_dact_lu"] = EncapsulateFunction(DActLu);
+    dict["te_dbias_cast_transpose"] = EncapsulateFunction(DBiasCastTranspose);
+    dict["te_dact_lu_dbias_cast_transpose"] = EncapsulateFunction(DActLuDBiasCastTranspose);
+    dict["te_dgated_act_lu_cast_transpose"] = EncapsulateFunction(DGatedActLuCastTranspose);
+
     dict["te_layernorm_forward"] = EncapsulateFunction(LayerNormForward);
     dict["te_layernorm_forward_fp8"] = EncapsulateFunction(LayerNormForwardFP8);
     dict["te_layernorm_backward"] = EncapsulateFunction(LayerNormBackward);
@@ -52,10 +44,6 @@ pybind11::dict Registrations() {
         EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxForward);
     dict["te_scaled_upper_triang_masked_softmax_backward"] =
         EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxBackward);
-    dict["te_self_fused_attn_forward"] = EncapsulateFunction(SelfFusedAttnForward);
-    dict["te_self_fused_attn_backward"] = EncapsulateFunction(SelfFusedAttnBackward);
-    dict["te_cross_fused_attn_forward"] = EncapsulateFunction(CrossFusedAttnForward);
-    dict["te_cross_fused_attn_backward"] = EncapsulateFunction(CrossFusedAttnBackward);
     dict["te_fused_attn_forward"] = EncapsulateFunction(FusedAttnForward);
     dict["te_fused_attn_backward"] = EncapsulateFunction(FusedAttnBackward);
     return dict;
@@ -63,24 +51,21 @@ pybind11::dict Registrations() {
 
 PYBIND11_MODULE(transformer_engine_jax, m) {
     m.def("registrations", &Registrations);
-    m.def("pack_common_descriptor", &PackCustomCallCommonDescriptor);
-    m.def("pack_common_wk_descriptor", &PackCustomCallCommonWkDescriptor);
+    m.def("pack_common_descriptor", &PackCustomCallCommonDescriptor,
+          pybind11::arg(), pybind11::arg(), pybind11::arg(), pybind11::arg("act_num") = 0);
+    m.def("pack_common_wk_descriptor", &PackCustomCallCommonWkDescriptor,
+          pybind11::arg(), pybind11::arg(), pybind11::arg(),
+          pybind11::arg(), pybind11::arg(), pybind11::arg("act_num") = 0);
     m.def("pack_norm_descriptor", &PackCustomCallNormDescriptor);
     m.def("pack_softmax_descriptor", &PackCustomCallSoftmaxDescriptor);
     m.def("get_device_compute_capability", &GetDeviceComputeCapability);
-    m.def("get_dgelu_dbias_ct_workspace_sizes", &GetDGeluDBiasCastTransposeWorkspaceSizes);
-    m.def("get_layernorm_fwd_workspace_sizes", &GetLayerNormForwardWorkspaceSizes);
-    m.def("get_layernorm_bwd_workspace_sizes", &GetLayerNormBackwardWorkspaceSizes);
 #ifndef USE_ROCM
     m.def("get_cublasLt_version", &cublasLtGetVersion);
-    m.def("get_cuda_version", &GetCudaRuntimeVersion);
 #endif
-    m.def("pack_fused_attn_descriptor", &PackCustomCallFusedAttnDescriptor);
-    m.def("get_fused_attn_backend", &GetFusedAttnBackend);
-    m.def("get_self_fused_attn_fwd_workspace_sizes", &GetSelfFusedAttnForwardWorkspaceSizes);
-    m.def("get_self_fused_attn_bwd_workspace_sizes", &GetSelfFusedAttnBackwardWorkspaceSizes);
-    m.def("get_cross_fused_attn_fwd_workspace_sizes", &GetCrossFusedAttnForwardWorkspaceSizes);
-    m.def("get_cross_fused_attn_bwd_workspace_sizes", &GetCrossFusedAttnBackwardWorkspaceSizes);
+    m.def("get_dact_dbias_ct_workspace_sizes", &GetDActDBiasCastTransposeWorkspaceSizes);
+    m.def("get_dbias_ct_workspace_sizes", &GetDBiasCastTransposeWorkspaceSizes);
+    m.def("get_layernorm_fwd_workspace_sizes", &GetLayerNormForwardWorkspaceSizes);
+    m.def("get_layernorm_bwd_workspace_sizes", &GetLayerNormBackwardWorkspaceSizes);
     m.def("get_fused_attn_fwd_workspace_sizes", &GetFusedAttnForwardWorkspaceSizes);
     m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
 
@@ -109,6 +94,18 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
         .value("NVTE_BS3HD", NVTE_QKV_Layout::NVTE_BS3HD)
         .value("NVTE_BSHD_BS2HD", NVTE_QKV_Layout::NVTE_BSHD_BS2HD)
         .value("NVTE_BSHD_BSHD_BSHD", NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD);
+
+    pybind11::enum_<NVTE_Activation_Type>(m, "NVTE_Activation_Type", pybind11::module_local())
+        .value("GELU", NVTE_Activation_Type::GELU)
+        .value("GEGLU", NVTE_Activation_Type::GEGLU)
+        .value("SILU", NVTE_Activation_Type::SILU)
+        .value("SWIGLU", NVTE_Activation_Type::SWIGLU)
+        .value("RELU", NVTE_Activation_Type::RELU)
+        .value("REGLU", NVTE_Activation_Type::REGLU)
+        .value("QGELU", NVTE_Activation_Type::QGELU)
+        .value("QGEGLU", NVTE_Activation_Type::QGEGLU)
+        .value("SRELU", NVTE_Activation_Type::SRELU)
+        .value("SREGLU", NVTE_Activation_Type::SREGLU);
 
 #ifndef USE_ROCM
     pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local())
