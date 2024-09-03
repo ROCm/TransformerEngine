@@ -35,6 +35,7 @@ void fused_attn_ck_fwd_qkvpacked(
   Tensor* output_O, Tensor* output_M, Tensor* output_rng_state,
   const Tensor* input_cu_seqlens,
   const Tensor* input_rng_state,
+  Tensor *workspace,
   cudaStream_t stream);
 
 void fused_attn_ck_bwd_qkvpacked(
@@ -46,7 +47,7 @@ void fused_attn_ck_bwd_qkvpacked(
   const Tensor* input_cu_seqlens,
   const Tensor* input_M,
   const Tensor* input_rng_state,
-  Tensor* wkspace,
+  Tensor* workspace,
   cudaStream_t stream);
 
 void fused_attn_ck_fwd_kvpacked(
@@ -58,6 +59,7 @@ void fused_attn_ck_fwd_kvpacked(
   const Tensor* input_cu_seqlens_q,
   const Tensor* input_cu_seqlens_kv,
   const Tensor* input_rng_state,
+  Tensor *workspace,
   cudaStream_t stream);
 
 void fused_attn_ck_bwd_kvpacked(
@@ -70,7 +72,7 @@ void fused_attn_ck_bwd_kvpacked(
   const Tensor* input_cu_seqlens_kv,
   const Tensor* input_M,
   const Tensor* input_rng_state,
-  Tensor* wkspace,
+  Tensor* workspace,
   cudaStream_t stream);
 
 void fused_attn_ck_fwd(
@@ -82,6 +84,7 @@ void fused_attn_ck_fwd(
   const Tensor* input_cu_seqlens_q,
   const Tensor* input_cu_seqlens_kv,
   const Tensor* input_rng_state,
+  Tensor *workspace,
   cudaStream_t stream);
 
 void fused_attn_ck_bwd(
@@ -94,7 +97,7 @@ void fused_attn_ck_bwd(
   const Tensor* input_cu_seqlens_kv,
   const Tensor* input_M,
   const Tensor* input_rng_state,
-  Tensor* wkspace,
+  Tensor* workspace,
   cudaStream_t stream);
 }  // namespace transformer_engine
 #endif //#ifndef TRANSFORMER_ENGINE_FUSED_ATTN_ROCM_FUSED_ATTN_CK_H_
