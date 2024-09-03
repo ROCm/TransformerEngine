@@ -11,7 +11,7 @@ if(USE_CUDA)
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/modules.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/utils.cu
   )
-else()
+elseif(USE_ROCM)
   message("${message_line}")
   message(STATUS "CMAKE_CURRENT_SOURCE_DIR: ${CMAKE_CURRENT_SOURCE_DIR}")
   message(STATUS "PROJECT_SOURCE_DIR: ${PROJECT_SOURCE_DIR}")

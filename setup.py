@@ -120,7 +120,7 @@ with_debug_build()
 def found_cmake() -> bool:
     """"Check if valid CMake is available
 
-    CMake 3.18 or newer is required.
+    CMake 3.18 or newer is required
 
     """
 
@@ -146,7 +146,7 @@ def found_cmake() -> bool:
 def cmake_bin() -> Path:
     """Get CMake executable
 
-    Throws FileNotFoundError if not found.
+    Throws FileNotFoundError if not found
 
     """
 
@@ -265,7 +265,7 @@ def with_userbuffers() -> bool:
 def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     """Setup Python dependencies
 
-    Returns dependencies for build, runtime, and testing.
+    Returns dependencies for build, runtime, and testing
 
     """
 
@@ -328,7 +328,6 @@ class CMakeExtension(setuptools.Extension):
         self.cmake_flags: List[str] = [] if cmake_flags is None else cmake_flags
 
     def _build_cmake(self, build_dir: Path, install_dir: Path) -> None:
-
         # Make sure paths are str
         _cmake_bin = str(cmake_bin())
         cmake_path = str(self.cmake_path)
@@ -389,7 +388,6 @@ class CMakeBuildExtension(BuildExtension):
         super().__init__(*args, **kwargs)
 
     def run(self) -> None:
-
         # Build CMake extensions
         for ext in self.extensions:
             if isinstance(ext, CMakeExtension):
@@ -449,41 +447,58 @@ class CMakeBuildExtension(BuildExtension):
             custom_write_stub(lib_name, stub_path)
 
 
+def configure_rocm() -> List[str]:
+    """Configures ROCm build options
+
+    Returns a list of CMake flags for building with ROCm
+
+    """
+    rocm_path = os.getenv("ROCM_PATH", "/opt/rocm")
+    hip_compiler_flags = [
+        "-Xclang -mllvm",
+        "-mllvm -amdgpu-early-inline-all=true",
+        "-mllvm -amdgpu-function-calls=false",
+        "-Xclang -enable-post-misched=0",
+    ]
+
+    def get_gpu_targets():
+        gfx_arch = os.path.join(rocm_path, "bin", "offload-arch")
+        try:
+            result = subprocess.run(
+                [gfx_arch], capture_output=True, check=True, text=True
+            ).stdout.strip()
+        except subprocess.CalledProcessError as err:
+            print(f"Error getting GPU targets: {err}")
+            result = os.getenv("PYTORCH_ROCM_ARCH", "gfx90a;gfx940;gfx941;gfx942")
+        except Exception as err:
+            print(f"Unexpected error: {err}")
+            result = os.getenv("PYTORCH_ROCM_ARCH", "gfx90a;gfx940;gfx941;gfx942")
+        return result
+
+    gpu_targets = get_gpu_targets()
+    hip_compiler_flags = " ".join(hip_compiler_flags)
+
+    return [
+        f"-DCMAKE_PREFIX_PATH={rocm_path}",
+        f"-DCMAKE_CXX_COMPILER:PATH={rocm_path}/bin/amdclang++",
+        f"-DCMAKE_CXX_FLAGS={hip_compiler_flags}",
+        f"-DCMAKE_HIP_FLAGS={hip_compiler_flags}",
+        f"-DGPU_TARGETS={gpu_targets}",
+        f"-DCMAKE_HIP_ARCHITECTURES={gpu_targets}",
+    ]
+
+
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library
 
-    Also builds JAX or userbuffers support if needed.
+    Also builds JAX or userbuffers support if needed
 
     """
     cmake_flags = []
-    if use_rocm:
-        if os.getenv("NVTE_USE_HIPBLASLT") is not None:
-            cmake_flags.append("-DUSE_HIPBLASLT=ON")
-
     if "jax" in frameworks():
         cmake_flags.append("-DENABLE_JAX=ON")
     if use_rocm:
-        rocm_path = Path(os.getenv("ROCM_PATH", "/opt/rocm"))
-        gfx_arch_bin = rocm_path / "bin" / "offload-arch"
-
-        if gfx_arch_bin.is_file():
-            gpu_targets = subprocess.run(
-                [str(gfx_arch_bin)],
-                capture_output=True,
-                check=True,
-                text=True,
-            ).stdout.strip()
-        else:
-            gpu_targets = os.getenv("PYTORCH_ROCM_ARCH")
-        print(f"[setup.py] GPU targets: {gpu_targets}")
-
-        cmake_flags += [
-            f"-DCMAKE_PREFIX_PATH={rocm_path}",
-            "-DCMAKE_BUILD_TYPE=Release",
-            f"-DGPU_TARGETS={gpu_targets}",
-            "-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON",
-        ]
-
+        cmake_flags += configure_rocm()
     if with_userbuffers():
         cmake_flags.append("-DNVTE_WITH_USERBUFFERS=ON")
     return CMakeExtension(
@@ -499,7 +514,6 @@ def _all_files_in_dir(path):
 
 def setup_pytorch_extension() -> setuptools.Extension:
     """Setup CUDA extension for PyTorch support"""
-
     # Source files
     src_dir = root_path / "transformer_engine" / "pytorch" / "csrc"
     extensions_dir = src_dir / "extensions"
@@ -610,7 +624,6 @@ def setup_pytorch_extension() -> setuptools.Extension:
 
 def setup_paddle_extension() -> setuptools.Extension:
     """Setup CUDA extension for Paddle support"""
-
     # Source files
     src_dir = root_path / "transformer_engine" / "paddle" / "csrc"
     sources = [

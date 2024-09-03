@@ -18,11 +18,15 @@ execute_process(
   --api bwd --output_dir ${CK_GEN_DIR} --receipt 2
 )
 
-# copy the header files needed
-file(COPY_FILE ${CK_SRC_DIR}/example/ck_tile/01_fmha/bias.hpp ${CMAKE_CURRENT_LIST_DIR}/src/bias.hpp)
-file(COPY_FILE ${CK_SRC_DIR}/example/ck_tile/01_fmha/mask.hpp ${CMAKE_CURRENT_LIST_DIR}/src/mask.hpp)
-file(COPY_FILE ${CK_SRC_DIR}/example/ck_tile/01_fmha/fmha_fwd.hpp ${CMAKE_CURRENT_LIST_DIR}/src/fmha_fwd.hpp)
-file(COPY_FILE ${CK_SRC_DIR}/example/ck_tile/01_fmha/fmha_bwd.hpp ${CMAKE_CURRENT_LIST_DIR}/src/fmha_bwd.hpp)
+# Copy the header files needed
+# Glob all .hpp files in the source directory
+file(GLOB HPP_FILES "${CK_SRC_DIR}/example/ck_tile/01_fmha/*.hpp")
+
+# Copy each .hpp file to the destination directory
+foreach(HPP_FILE ${HPP_FILES})
+  get_filename_component(FILE_NAME ${HPP_FILE} NAME)
+  file(COPY ${HPP_FILE} DESTINATION ${CMAKE_CURRENT_LIST_DIR}/src)
+endforeach()
 
 if(DEFINED ENV{PYTORCH_ROCM_ARCH})
   set(ROCM_ARCH $ENV{PYTORCH_ROCM_ARCH})
@@ -53,25 +57,35 @@ if(CK_PARALLEL_COMPILE_JOBS)
 endif()
 
 add_library(ck STATIC ${CK_FMHA_SOURCES})
-set(CK_FMHA_COMPILE_OPTIONS)
-list(APPEND CK_FMHA_COMPILE_OPTIONS
-  -DCK_TILE_FMHA_FWD_FAST_EXP2=1
-  -DCK_ENABLE_BF8
-  -DCK_ENABLE_FP8
-  -DCK_ENABLE_INT8
-  -DCK_ENABLE_BF16
-  -DCK_ENABLE_FP16
-  -DCK_ENABLE_FP32
-  -DCK_ENABLE_FP64
-  -DCK_USE_XDL
-  -mllvm
-  -enable-post-misched=0
-  -fPIC
-  -fgpu-flush-denormals-to-zero
-  -fno-offload-uniform-block
-  -Wno-undefined-func-template
-  -Wno-float-equal
-  -Wunused-variable)
+
+add_library(ck_fmha_options INTERFACE)
+target_compile_definitions(ck_fmha_options INTERFACE
+  CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=3
+  CK_TILE_FMHA_FWD_FAST_EXP2=1
+  CK_USE_XDL
+)
+
+target_compile_definitions(ck_fmha_options INTERFACE
+  CK_ENABLE_BF8
+  CK_ENABLE_FP8
+  CK_ENABLE_INT8
+  CK_ENABLE_BF16
+  CK_ENABLE_FP16
+  CK_ENABLE_FP32
+  CK_ENABLE_FP64
+)
+
+# Compiler-specific options
+target_compile_options(ck_fmha_options INTERFACE
+  $<$<CXX_COMPILER_ID:Clang>:
+    -fcolor-diagnostics
+    -fgpu-flush-denormals-to-zero
+    -ftemplate-backtrace-limit=0
+    -fPIC
+    -Wno-gnu-line-marker
+    -fno-offload-uniform-block
+  >
+)
 
 set(CK_INCLUDE_DIR "${CK_SRC_DIR}/include")
 message(STATUS "ck_include_dir: ${CK_INCLUDE_DIR}")
@@ -88,7 +102,7 @@ target_include_directories(ck PRIVATE ${CK_INCLUDE_DIR} ${CMAKE_CURRENT_LIST_DIR
 
 list(APPEND CK_FMHA_LINKER_LIBS hip::host hip::device Threads::Threads roctx64)
 target_link_libraries(ck PUBLIC ${CK_FMHA_LINKER_LIBS})
-target_compile_options(ck PRIVATE ${CK_FMHA_COMPILE_OPTIONS})
+target_link_libraries(ck PRIVATE ck_fmha_options)
 
 include(GNUInstallDirs)
 message(STATUS "CMAKE_INSTALL_INCLUDEDIR: ${CMAKE_INSTALL_INCLUDEDIR}")

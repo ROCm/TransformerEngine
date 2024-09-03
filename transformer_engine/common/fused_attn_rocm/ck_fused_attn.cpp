@@ -35,9 +35,9 @@ void ck_fused_attn_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_group
     void *devPtrCuSeqlensQ  = cu_seqlens_q->data.dptr;
     void *devPtrCuSeqlensKV = cu_seqlens_kv->data.dptr;
 
-    uint32_t bias_value;
+    uint32_t attn_bias_type;
     if (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS) {
-        bias_value = 0;
+        attn_bias_type = 0;
     } else if (bias_type == NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS) {
         NVTE_ERROR("Only NVTE_NO_BIAS is supported for now");
     } else if (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS) {
@@ -48,15 +48,15 @@ void ck_fused_attn_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_group
         NVTE_ERROR("Unexpected bias_type");
     }
 
-    uint32_t mask_value;
+    uint32_t attn_mask_type;
     if (mask_type == NVTE_Mask_Type::NVTE_NO_MASK) {
-        mask_value = 0;
+        attn_mask_type = 0;
     } else if (mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) {
-        mask_value = 1;
+        attn_mask_type = 1;
     } else if (mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) {
         NVTE_ERROR("NVTE_PADDING_MASK is not supported for now");
     } else if (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) {
-        mask_value = 1;
+        attn_mask_type = 1;
     } else {
         NVTE_ERROR("Unexpected mask_type");
     }
@@ -101,7 +101,7 @@ void ck_fused_attn_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_group
 
     ck_fused_attn_fwd_impl(batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv,
                            head_dim, bias_b, bias_h, is_training, attn_scale, p_dropout, drop_seed,
-                           drop_offset, bias_value, mask_value, devPtrQ, devPtrK, devPtrV,
+                           drop_offset, attn_bias_type, attn_mask_type, devPtrQ, devPtrK, devPtrV,
                            devPtrBias, devPtrS, devPtrO, devPtrCuSeqlensQ, devPtrCuSeqlensKV,
                            get_datatype_str(QKV_type), stream);
 }
@@ -127,9 +127,9 @@ void ck_fused_attn_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_group
     size_t bias_b       = 0;
     size_t bias_h       = 0;
 
-    uint32_t bias_value;
+    uint32_t attn_bias_type;
     if (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS) {
-        bias_value = 0;
+        attn_bias_type = 0;
     } else if (bias_type == NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS) {
         NVTE_ERROR("Only NVTE_NO_BIAS is supported for now");
     } else if (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS) {
@@ -140,15 +140,15 @@ void ck_fused_attn_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_group
         NVTE_ERROR("Unexpected bias_type");
     }
 
-    uint32_t mask_value;
+    uint32_t attn_mask_type;
     if (mask_type == NVTE_Mask_Type::NVTE_NO_MASK) {
-        mask_value = 0;
+        attn_mask_type = 0;
     } else if (mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) {
-        mask_value = 1;
+        attn_mask_type = 1;
     } else if (mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) {
         NVTE_ERROR("NVTE_PADDING_MASK is not supported for now");
     } else if (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) {
-        mask_value = 1;
+        attn_mask_type = 1;
     } else {
         NVTE_ERROR("Unexpected mask_type");
     }
@@ -189,7 +189,7 @@ void ck_fused_attn_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_group
 
     ck_fused_attn_bwd_impl(batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv,
                            head_dim, bias_b, bias_h, attn_scale, p_dropout, drop_seed, drop_offset,
-                           bias_value, mask_value, devPtrQ, devPtrK, devPtrV, devPtrO,
+                           attn_bias_type, attn_mask_type, devPtrQ, devPtrK, devPtrV, devPtrO,
                            devPtrSoftmaxStats, devPtrBias, devPtrdQ, devPtrdK, devPtrdV, devPtrdO,
                            devPtrdBias, devPtrCuSeqlensQ, devPtrCuSeqlensKV,
                            get_datatype_str(QKV_type), workspace->data.dptr, &workspace_size,

@@ -37,8 +37,6 @@ message("${message_line}")
 message(STATUS "USE_CUDA ${USE_CUDA}")
 message(STATUS "USE_ROCM ${USE_ROCM}")
 
-
-
 if(USE_CUDA)
   set(CMAKE_CXX_STANDARD 17)
   set(CMAKE_CUDA_STANDARD 17)

@@ -97,9 +97,9 @@ elseif(USE_ROCM)
   set(TE ${CMAKE_CURRENT_SOURCE_DIR}/../..)
   set(THIRDPARTY ${TE}/3rdparty)
   list(APPEND CMAKE_MODULE_PATH "${THIRDPARTY}/hipify_torch/cmake")
-  include(Hipify)
   message(STATUS "CMAKE_MODULE_PATH: ${CMAKE_MODULE_PATH}")
 
+  include(Hipify)
   set(header_include_dir
       ${CMAKE_CURRENT_SOURCE_DIR}/include 
       ${CMAKE_CURRENT_SOURCE_DIR}/util
