@@ -83,6 +83,7 @@ class FP8GlobalStateManager:
     dp_amax_reduce_interval = None
     dp_amax_reduce_forward_idx = 0
     dp_amax_reduce_backward_idx = 0
+    skip_fp8_weight_update_tensor = None
 
     @classmethod
     def reset(cls) -> None:
@@ -106,6 +107,20 @@ class FP8GlobalStateManager:
         cls.dp_amax_reduce_interval = None
         cls.dp_amax_reduce_forward_idx = 0
         cls.dp_amax_reduce_backward_idx = 0
+        cls.skip_fp8_weight_update_tensor = None
+
+
+    @classmethod
+    def set_skip_fp8_weight_update_tensor(cls, skip: bool) -> None:
+        """`skip_fp8_weight_update_tensor` inplace setter."""
+        if cls.skip_fp8_weight_update_tensor is None:
+            cls.skip_fp8_weight_update_tensor = torch.empty(1, dtype=torch.float32, device="cuda")
+        cls.skip_fp8_weight_update_tensor.fill_(skip)
+
+    @classmethod
+    def get_skip_fp8_weight_update_tensor(cls) -> None:
+        """`skip_fp8_weight_update_tensor` getter."""
+        return cls.skip_fp8_weight_update_tensor
 
     @classmethod
     def is_fp8_available(cls) -> Tuple[bool, str]:
