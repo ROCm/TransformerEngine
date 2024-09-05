@@ -532,9 +532,13 @@ void cast_transpose_fused(const Tensor &input,
                           Tensor *dbias,
                           Tensor *workspace,
                           cudaStream_t stream) {
-    CheckInputTensor(input, "cast_transpose_fused_input");
-    CheckOutputTensor(*cast_output, "cast_output");
-    CheckOutputTensor(*transposed_output, "transposed_output");
+    if (workspace->data.dptr != nullptr) {
+        CheckInputTensor(input, "cast_transpose_fused_input");
+        CheckOutputTensor(*cast_output, "cast_output");
+        CheckOutputTensor(*transposed_output, "transposed_output");
+        if constexpr (IS_DBIAS) CheckOutputTensor(*dbias, "dbias");
+        if constexpr (IS_DACT) CheckInputTensor(act_input, "act_input");
+    }
 
     NVTE_CHECK(input.data.shape.size() == 2, "Input must have 2 dimensions.");
     NVTE_CHECK(cast_output->data.shape.size() == 2, "C output must have 2 dimensions.");
@@ -555,14 +559,12 @@ void cast_transpose_fused(const Tensor &input,
                "C and T outputs need to share scale tensor.");
 
     if constexpr (IS_DBIAS) {
-        CheckOutputTensor(*dbias, "dbias");
         NVTE_CHECK(dbias->data.dtype == input.data.dtype,
                    "DBias must have the same type as input.");
         NVTE_CHECK(dbias->data.shape == std::vector<size_t>{ row_length },
                    "Wrong shape of DBias.");
     }
     if constexpr (IS_DACT) {
-        CheckInputTensor(act_input, "act_input");
         NVTE_CHECK(input.data.dtype == act_input.data.dtype, "Types of both inputs must match.");
         NVTE_CHECK(input.data.shape == act_input.data.shape, "Shapes of both inputs must match.");
     }

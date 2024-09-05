@@ -23,6 +23,8 @@ from transformer_engine.jax.dot import (
     quantize
 )
 from transformer_engine.jax.fp8 import (
+    jnp_float8_e4m3_type,
+    jnp_float8_e5m2_type,
     FP8MetaPackage,
     FP8Helper,
     is_fp8_available
@@ -37,7 +39,6 @@ from transformer_engine.jax.layernorm_mlp import (
 )
 from transformer_engine.jax import cpp_extensions as tex
 from transformer_engine.jax import is_hip_extension
-from transformer_engine.jax import jnp_float8_e4m3_type, jnp_float8_e5m2_type
 
 GEMM_CASES = [
     (256, 256, 512),

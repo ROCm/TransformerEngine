@@ -20,8 +20,7 @@ from jax import lax, vmap
 from jax import nn as jax_nn
 from jax import random as jax_random
 
-from transformer_engine.jax.fp8 import DType as TEDType
-from transformer_engine.jax import jnp_float8_e4m3_type, jnp_float8_e5m2_type
+from transformer_engine.jax.fp8 import jnp_float8_e4m3_type, jnp_float8_e5m2_type, DType as TEDType
 
 PRNGKey = Any
 Shape = Tuple[int, ...]

@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -23,6 +25,7 @@ from transformer_engine.transformer_engine_jax import (
 from .base import BasePrimitive, register_primitive
 from .custom_call import custom_caller, CustomCallArgsWrapper
 from .misc import (
+    is_hip_extension,
     check_valid_batch_dims,
     jax_dtype_to_te_dtype,
     te_dtype_to_jax_dtype,
@@ -187,14 +190,21 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                                   dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen,
                                   kv_max_seqlen, head_dim).get_fused_attn_backend()
 
-        if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
-            softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, kv_max_seqlen)
-            softmax_dtype = q_dtype
-        elif backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-            softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
-            softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
+        if not is_hip_extension():
+            if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
+                softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, kv_max_seqlen)
+                softmax_dtype = q_dtype
+            elif backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
+                softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
+                softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
+            else:
+                raise ValueError(f'Unsupported {backend=}')
         else:
-            raise ValueError(f'Unsupported {backend=}')
+            if backend in [NVTE_Fused_Attn_Backend.NVTE_AOTriton, NVTE_Fused_Attn_Backend.NVTE_CK]:
+                softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
+                softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
+            else:
+                raise ValueError(f'Unsupported {backend=}')
         softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=softmax_dtype)
 
         # JAX does not enable 64-bit int by default so we get XLA to allocate x8 memory with
