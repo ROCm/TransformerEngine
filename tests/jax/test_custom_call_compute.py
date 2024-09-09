@@ -388,7 +388,7 @@ class TestFP8Dot:
 def random_inputs_fixture(shape):
     key = jax.random.PRNGKey(0)
     subkeys = jax.random.split(key, 4)
-    out = jax.random.uniform(subkeys[0], shape, jnp.bfloat16, 5, 8)
+    out = jax.random.uniform(subkeys[0], shape, jnp.bfloat16, 4, 7)
     return out
 
 

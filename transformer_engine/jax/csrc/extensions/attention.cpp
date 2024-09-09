@@ -25,6 +25,7 @@ NVTE_Fused_Attn_Backend GetFusedAttnBackend(DType q_dtype, DType kv_dtype,
     return backend;
 }
 
+#ifndef USE_ROCM
 /*
     NOTE: PrepareFusedAttnForwardAuxTensors unifies the auxiliary tensor pack logic from the fused
     attention forward kernels in:
@@ -52,7 +53,6 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack,
         std::vector<size_t>{input_batch, attn_heads, q_max_seqlen, kv_max_seqlen};
     softmax_aux->data.dtype = desc->dtype;
 
-#ifndef USE_ROCM //PIV TODO
     // arbitrary sequence length backend needs the RNG state and a different shape/dtype softmax
     if (backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
         tensor_pack->size = 2;
@@ -74,8 +74,34 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack,
             bias_aux->data.dtype = desc->dtype;
         }
     }
-#endif
 }
+#else
+// ROCm fused attn has two backends: aotriton and ck
+// They both have the same shape and stride for softmax and rng aux tensors
+void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack,
+                                       const CustomCallFusedAttnDescriptor *desc,
+                                       NVTE_Bias_Type bias_type, NVTE_Fused_Attn_Backend backend,
+                                       void *softmax_buf, void *rng_state_buf = nullptr,
+                                       void *bias_buf = nullptr) {
+    auto input_batch = desc->input_batch;
+    auto attn_heads = desc->attn_heads;
+    auto q_max_seqlen = desc->q_max_seqlen;
+    auto kv_max_seqlen = desc->kv_max_seqlen;
+
+    tensor_pack->size = 2;
+    Tensor *softmax_aux = reinterpret_cast<Tensor *>(tensor_pack->tensors[0]);
+    softmax_aux->data.dptr = softmax_buf;
+    softmax_aux->data.shape =
+        std::vector<size_t>{input_batch, attn_heads, q_max_seqlen, 1};
+    softmax_aux->data.dtype = DType::kFloat32;
+
+    Tensor *rng_state_aux = reinterpret_cast<Tensor *>(tensor_pack->tensors[1]);
+    rng_state_aux->data.dptr = rng_state_buf;
+    rng_state_aux->data.shape = std::vector<size_t>{2};
+    rng_state_aux->data.dtype = DType::kInt64;
+}
+#endif
+
 
 /*
     NOTE: Backward fused attention kernels accept auxiliary tensors as explicit function arguments
@@ -89,14 +115,18 @@ void PrepareFusedAttnBackwardAuxTensors(NVTETensorPack *tensor_pack,
                                         const CustomCallFusedAttnDescriptor *desc,
                                         NVTE_Fused_Attn_Backend backend, void *softmax_buf,
                                         void *rng_state_buf, void *bias_buf) {
-#ifndef USE_ROCM //PIV TODO
     // Backward calls put everything into the tensor pack for every backend
     // so we set dummy bias_type and backend choices here to follow the correct code path
     auto dummy_bias_type = NVTE_Bias_Type::NVTE_POST_SCALE_BIAS;
+#ifndef USE_ROCM
     auto dummy_backend = NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen;
+#else
+    auto dummy_backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
+#endif
     PrepareFusedAttnForwardAuxTensors(tensor_pack, desc, dummy_bias_type, dummy_backend,
                                       softmax_buf, rng_state_buf, bias_buf);
 
+#ifndef USE_ROCM
     // correct softmax shape for max512 sequence length kernel
     if (backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
         Tensor *softmax_aux = reinterpret_cast<Tensor *>(tensor_pack->tensors[0]);

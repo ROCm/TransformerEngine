@@ -2311,7 +2311,8 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
             if fp8_meta["recipe"].fp8_mha:
                 assert (isinstance(qkv, Float8Tensor)), "qkv must be Float8Tensors for FP8 MHA."
                 fp8_meta["scaling_fwd"].scale_inv[META_QKV] = qkv._scale_inv
-            fused_attention_backend = FusedAttnBackend["FP8"]
+            if not IS_HIP_EXTENSION:
+                fused_attention_backend = FusedAttnBackend["FP8"]
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             # 1: qkv packed, 2: kv packed, 3: qkv separate
             qkv_group = len(qkv_layout.split('_'))
@@ -2391,7 +2392,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
         ctx.fused_attention_backend = \
-            fused_attention_backend if ctx.fp8 else FusedAttnBackend["F16_arbitrary_seqlen"]
+            fused_attention_backend if (IS_HIP_EXTENSION or ctx.fp8) else FusedAttnBackend["F16_arbitrary_seqlen"]
         ctx.use_FAv2_bwd = use_FAv2_bwd
 
         return out_ret
@@ -2514,7 +2515,8 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                 assert (isinstance(q, Float8Tensor)
                     and isinstance(kv, Float8Tensor)), "q/kv must be Float8Tensors for FP8 MHA."
                 fp8_meta["scaling_fwd"].scale_inv[META_QKV] = q._scale_inv
-            fused_attention_backend = FusedAttnBackend["FP8"]
+            if not IS_HIP_EXTENSION:
+                fused_attention_backend = FusedAttnBackend["FP8"]
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             if fp8_meta["recipe"].fp8_mha:
                 q_fp8, kv_fp8 = q._data, kv._data
@@ -2601,7 +2603,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
         ctx.fused_attention_backend = \
-            fused_attention_backend if ctx.fp8 else FusedAttnBackend["F16_arbitrary_seqlen"]
+            fused_attention_backend if (IS_HIP_EXTENSION or ctx.fp8) else FusedAttnBackend["F16_arbitrary_seqlen"]
         ctx.use_FAv2_bwd = use_FAv2_bwd
 
         return out_ret
@@ -2733,7 +2735,8 @@ class FusedAttnFunc(torch.autograd.Function):
         if fp8:
             if _NVTE_DEBUG:
                 print('[DotProductAttention]: using FP8 forward')
-            fused_attention_backend = FusedAttnBackend["FP8"]
+            if not IS_HIP_EXTENSION:
+                fused_attention_backend = FusedAttnBackend["FP8"]
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             if fp8_meta["recipe"].fp8_mha:
                 assert (isinstance(q, Float8Tensor)
@@ -2881,7 +2884,7 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
         ctx.fused_attention_backend = \
-            fused_attention_backend if ctx.fp8 else FusedAttnBackend["F16_arbitrary_seqlen"]
+            fused_attention_backend if (IS_HIP_EXTENSION or ctx.fp8) else FusedAttnBackend["F16_arbitrary_seqlen"]
         ctx.use_FAv2_bwd = use_FAv2_bwd
 
         return out_ret
