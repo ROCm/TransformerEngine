@@ -107,7 +107,7 @@ def rocm_attn_tols() -> Dict[str, float]:
         # TODO: wait for the ck branch supporting determinism
         if use_fused_attn and (not use_fused_attn_ck):
             # AOTriton backend and non-fused attn are deterministic
-            # TODO: PIV: should clear tols?
+            # TODO(PIV) should clear tols?
             pass
         else:
             return dict(atol=5e-2, rtol=5e-2)
@@ -620,7 +620,7 @@ def test_gpt_full_activation_recompute(dtype, bs, model, fp8, fp8_model_params, 
     if dtype in (torch.float16, torch.bfloat16):
         tols["atol"] = 1e-3
     if IS_HIP_EXTENSION:
-        if dtype==torch.float16 and is_mi200(): #TODO: PIV: should it be used in other tests too
+        if dtype==torch.float16 and is_mi200(): #TODO(PIV) should it be used in other tests too
             # mi200 denorm issue
             tols["atol"] = 1e-2
         tols.update(rocm_attn_tols())
@@ -748,7 +748,7 @@ def test_gpt_checkpointing(dtype, bs, model):
             tols["atol"] = 5e-5
         else:
             # should be perfect match with hipblaslt and non-ck attention
-            # TODO: PIV: should tols be cleared
+            # TODO(PIV) should tols be cleared
             pass
     for i, (ref, test) in enumerate(zip(outputs, outputs_checkpoint)):
         torch.testing.assert_close(

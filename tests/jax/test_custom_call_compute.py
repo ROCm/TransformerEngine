@@ -388,7 +388,10 @@ class TestFP8Dot:
 def random_inputs_fixture(shape):
     key = jax.random.PRNGKey(0)
     subkeys = jax.random.split(key, 4)
-    out = jax.random.uniform(subkeys[0], shape, jnp.bfloat16, 4, 7)
+    #FP8 SRELU+Linear activation tests cause ROCm FP8 value range overflow
+    #Decrease input values to fit  
+    rng = (4, 7) if is_hip_extension() else (5, 8)
+    out = jax.random.uniform(subkeys[0], shape, jnp.bfloat16, rng[0], rng[1])
     return out
 
 

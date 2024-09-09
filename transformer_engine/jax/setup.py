@@ -49,7 +49,6 @@ if __name__ == "__main__":
             "csrc", current_file_path / "csrc", current_file_path / common_headers_dir)]
 
     # Configure package
-    # TODO: PIV: ROCm pre-requisites torch match
     setuptools.setup(
         name="transformer_engine_jax",
         version=te_version(),
@@ -58,7 +57,7 @@ if __name__ == "__main__":
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
         install_requires=[] if rocm_build() else ["jax", "flax>=0.7.1"],
-        tests_require=["numpy", "praxis"],
+        tests_require=[] if rocm_build() else ["numpy", "praxis"],
         include_package_data=True,
         package_data={"csrc": package_files("csrc"),
                       common_headers_dir: package_files(common_headers_dir),

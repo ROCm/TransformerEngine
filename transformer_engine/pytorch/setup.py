@@ -48,7 +48,6 @@ if __name__ == "__main__":
             "csrc", current_file_path / "csrc", current_file_path / common_headers_dir)]
 
     # Configure package
-    # TODO: PIV: dependencies
     setuptools.setup(
         name="transformer_engine_torch",
         version=te_version(),
