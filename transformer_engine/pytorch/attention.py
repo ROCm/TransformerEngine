@@ -521,10 +521,11 @@ class AttnFuncWithCP(torch.autograd.Function):
             q, k, v = [x.view(x.shape[0], 2, x.shape[1]//2, *x.shape[2:]) for x in [q, k, v]]
         assert(q.shape[-1] % 8 == 0), "hidden size per attention head should be multiple of 8"
         fa_optional_forward_kwargs = {}
-        if _flash_attn_2_3_plus:
-            fa_optional_forward_kwargs["window_size"] = [-1, 0] if causal else [-1, -1]
-        if _flash_attn_2_4_plus:
-            fa_optional_forward_kwargs["alibi_slopes"] = None
+        if not IS_HIP_EXTENSION:
+            if _flash_attn_2_3_plus:
+                fa_optional_forward_kwargs["window_size"] = [-1, 0] if causal else [-1, -1]
+            if _flash_attn_2_4_plus:
+                fa_optional_forward_kwargs["alibi_slopes"] = None
 
         # Flash Attn inputs
         q_inputs = [None, None]
@@ -574,7 +575,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     is_training, max_seqlen_q, max_seqlen_k, cu_seqlens_q,
                                     cu_seqlens_k, q_inputs[i%2], kv_inputs[i%2][0],
                                     kv_inputs[i%2][1], TE_DType[q.dtype],
-                                    tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                                    tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen if not IS_HIP_EXTENSION else tex.NVTE_Fused_Attn_Backend.NVTE_CK,
                                     attn_scale=softmax_scale, dropout=dropout_p,
                                     qkv_layout="bshd_bshd_bshd", attn_mask_type="causal",
                                 )
@@ -601,7 +602,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     is_training, max_seqlen_q, max_seqlen_k//2, cu_seqlens_q,
                                     cu_seqlens_k//2, q_inputs[i%2], kv_inputs[i%2][0],
                                     kv_inputs[i%2][1], TE_DType[q.dtype],
-                                    tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                                    tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen if not IS_HIP_EXTENSION else tex.NVTE_Fused_Attn_Backend.NVTE_CK,
                                     attn_scale=softmax_scale, dropout=dropout_p,
                                     qkv_layout="bshd_bshd_bshd", attn_mask_type="no_mask",
                                 )
@@ -633,7 +634,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     is_training, max_seqlen_q//2, max_seqlen_k, cu_seqlens_q//2,
                                     cu_seqlens_k, q_inputs[i%2], kv_inputs[i%2][0],
                                     kv_inputs[i%2][1], TE_DType[q.dtype],
-                                    tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                                    tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen if not IS_HIP_EXTENSION else tex.NVTE_Fused_Attn_Backend.NVTE_CK,
                                     attn_scale=softmax_scale, dropout=dropout_p,
                                     qkv_layout="bshd_bshd_bshd", attn_mask_type="no_mask",
                                 )
@@ -658,7 +659,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 is_training, max_seqlen_q, max_seqlen_k, cu_seqlens_q,
                                 cu_seqlens_k, q, kv_inputs[i%2][0],
                                 kv_inputs[i%2][1], TE_DType[q.dtype],
-                                tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                                tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen if not IS_HIP_EXTENSION else tex.NVTE_Fused_Attn_Backend.NVTE_CK,
                                 attn_scale=softmax_scale, dropout=dropout_p,
                                 qkv_layout="bshd_bshd_bshd", attn_mask_type="no_mask",
                             )
@@ -769,10 +770,11 @@ class AttnFuncWithCP(torch.autograd.Function):
         send_recv_reqs = []
 
         fa_optional_backward_kwargs = {}
-        if _flash_attn_2_4_plus:
-            fa_optional_backward_kwargs["alibi_slopes"] = None
-        if _flash_attn_2_4_1_plus:
-            fa_optional_backward_kwargs["deterministic"] = ctx.deterministic
+        if not IS_HIP_EXTENSION:
+            if _flash_attn_2_4_plus:
+                fa_optional_backward_kwargs["alibi_slopes"] = None
+            if _flash_attn_2_4_1_plus:
+                fa_optional_backward_kwargs["deterministic"] = ctx.deterministic
 
         for i in range(cp_size):
             # wait until KV is received
@@ -813,7 +815,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             cu_seqlens_q, cu_seqlens_k,
                             q_, kv_[0], kv_[1], out_, dout_, TE_DType[q.dtype],
                             [softmax_lse, ctx.rng_states[cp_size-i-1]],
-                            tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                            tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen if not IS_HIP_EXTENSION else tex.NVTE_Fused_Attn_Backend.NVTE_CK,
                             attn_scale=ctx.softmax_scale,
                             dropout=ctx.dropout_p,
                             qkv_layout="bshd_bshd_bshd",
@@ -853,7 +855,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             cu_seqlens_q, cu_seqlens_k//2,
                             q_, kv_[0], kv_[1], out_, dout_, TE_DType[q.dtype],
                             [softmax_lse, ctx.rng_states[cp_size-i-1]],
-                            tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                            tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen if not IS_HIP_EXTENSION else tex.NVTE_Fused_Attn_Backend.NVTE_CK,
                             attn_scale=ctx.softmax_scale,
                             dropout=ctx.dropout_p,
                             qkv_layout="bshd_bshd_bshd",
@@ -893,7 +895,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                             cu_seqlens_q//2, cu_seqlens_k,
                             q_, kv_[0], kv_[1], out_, dout_, TE_DType[q.dtype],
                             [softmax_lse_, ctx.rng_states[cp_size-i-1]],
-                            tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                            tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen if not IS_HIP_EXTENSION else tex.NVTE_Fused_Attn_Backend.NVTE_CK,
                             attn_scale=ctx.softmax_scale,
                             dropout=ctx.dropout_p,
                             qkv_layout="bshd_bshd_bshd",
@@ -926,7 +928,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                         cu_seqlens_q, cu_seqlens_k,
                         q, kv[0], kv[1], out, dout, TE_DType[q.dtype],
                         [softmax_lse, ctx.rng_states[cp_size-i-1]],
-                        tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                        tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen if not IS_HIP_EXTENSION else tex.NVTE_Fused_Attn_Backend.NVTE_CK,
                         attn_scale=ctx.softmax_scale,
                         dropout=ctx.dropout_p,
                         qkv_layout="bshd_bshd_bshd",
@@ -2239,11 +2241,11 @@ class FusedAttention(torch.nn.Module):
                 and (fused_attention_backend
                     == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen))
 
-        #TODO: check whether context_parallel can be enabled with aotriton or CK backend
         if context_parallel:
-            assert (fused_attention_backend
-                == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
-                ), f"{fused_attention_backend} does not work with context parallelism!"
+            if not IS_HIP_EXTENSION:
+                assert (fused_attention_backend
+                    == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+                    ), f"{fused_attention_backend} does not work with context parallelism!"
             assert (core_attention_bias_type == "no_bias"), \
                 "Core attention bias has not been supported with context parallelism yet!"
             if qkv_format == 'sbhd':
