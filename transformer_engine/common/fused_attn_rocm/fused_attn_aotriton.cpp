@@ -630,6 +630,20 @@ void fused_attn_aotriton_bwd(
     workspace->data.dptr,
     &workspace_size,
     stream);
+
+  if (workspace_size > 0) {
+    if (workspace->data.dptr == nullptr) {
+      workspace->data.shape = {workspace_size};
+      workspace->data.dtype = DType::kByte;
+      return;
+    }
+  } else if (workspace_size == 0) {
+    workspace->data.shape = {1};
+    workspace->data.dtype = DType::kByte;
+    return;
+  } else {
+    NVTE_ERROR("Unexpected workspace_size.");
+  }
 }
 
 }  // namespace transformer_engine

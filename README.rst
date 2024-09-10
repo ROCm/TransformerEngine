@@ -23,7 +23,7 @@ Feature Support Status
 * GEMM: partially supported with following input/output types: (fp32/fp32), (fp16/fp16), (bf16/bf16), (fp8, bf8/fp16, bf16, fp32)
 * Attention (Flash Attention, Fused Multihead Attention): partially supported: Fused Attention with AOTriton and CK backends
 * HipGraph, HipTX: partially supported
-* Tensor Parallism: not supported
+* Tensor Parallelism, Sequence Parallelism, Context Parallelism: supported
 
 Installation
 ------------
