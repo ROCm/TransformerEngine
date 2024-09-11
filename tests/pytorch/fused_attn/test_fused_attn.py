@@ -683,10 +683,15 @@ def test_transformer_layer(dtype, model_configs, model, ckpt_attn, qkv_format, f
     # Skip if only unfused backend is supported
     if config.max_seqlen_q <= 512 and config.max_seqlen_kv <= 512:
         os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
+
+    qkv_layout="sbh3d" if fused_qkv_params else "sb3hd"
+    # override the qkv_layout in mqa gqa mode in ROCm TE
+    if IS_HIP_EXTENSION and model_configs[model].num_gqa_groups != model_configs[model].num_heads:
+        qkv_layout = "sbhd_sbhd_sbhd"
     fused_attn_supported, fused_attn_backend = _is_fused_attention_supported(
         config,
         dtype,
-        qkv_layout="sbh3d" if fused_qkv_params else "sb3hd",
+        qkv_layout=qkv_layout,
     )
     flash_attn_supported = _is_flash_attention_supported(config)
     unfused_attn_supported = _is_unfused_attention_supported(config)

@@ -27,8 +27,22 @@ bool is_ck_backend_supported(
   size_t max_seqlen_q, size_t max_seqlen_kv,
   size_t head_dim) {
 
-  //ck fused attn does not support gqa mode now
-  if(num_attn_heads!=num_gqa_groups){
+  if(num_attn_heads%num_gqa_groups != 0){
+    return false;
+  }
+  
+  bool is_mqa_gqa = num_attn_heads > num_gqa_groups;
+  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+
+  bool is_qkvpacked = layout_group==NVTE_QKV_Layout_Group::NVTE_3HD ||layout_group==NVTE_QKV_Layout_Group::NVTE_H3D;
+
+  // MQA/GQA does not work with qkvpacked layout
+  if(is_mqa_gqa && is_qkvpacked){
+    return false;
+  }
+  
+  // qkvpacked layout requires seq length to be the same
+  if(is_qkvpacked && max_seqlen_q!=max_seqlen_kv){
     return false;
   }
 
@@ -45,8 +59,9 @@ bool is_ck_backend_supported(
   }
   
   //Only BSHD, SBHD style layouts supported
-  if(!((nvte_get_qkv_format(qkv_layout)!= NVTE_QKV_Format::NVTE_SBHD)||
-    (nvte_get_qkv_format(qkv_layout)!= NVTE_QKV_Format::NVTE_BSHD))){
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if(!(qkv_format == NVTE_QKV_Format::NVTE_SBHD||
+    qkv_format == NVTE_QKV_Format::NVTE_BSHD)){
     return false;
   }
   
@@ -56,13 +71,13 @@ bool is_ck_backend_supported(
   }
 
   // Only no mask and causal mask supported
-  if(!((attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK)||
-    (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK))){
+  if(!(attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK||
+    attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)){
     return false;
   } 
   
   // causal does not work with s_q != s_kv
-  if((max_seqlen_q!=max_seqlen_kv)&&(attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)){
+  if(max_seqlen_q!=max_seqlen_kv && attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK){
     return false;
   }
   return true;
@@ -195,12 +210,19 @@ void fused_attn_ck_bwd_impl(
   size_t *workspace_size,
   cudaStream_t stream) {
   
+  bool is_mqa_gqa = (h > hg);
+
   // Exit to request upper level API to allocate memory if needed
   if(workspace==nullptr){
     size_t workspace_size_lse = b*h*s_q*sizeof(float);
     // CK requires dq_acc ptr
     size_t workspace_size_dq_acc = b*h*s_q*d*sizeof(float);
     *workspace_size = workspace_size_lse + workspace_size_dq_acc;
+    if(is_mqa_gqa){
+      // allocate dk, dv (or dkv) as if h=hg
+      size_t dkv_expanded_size = 2*b*h*s_kv*d*ck_dtype_size(dtype);
+      *workspace_size += dkv_expanded_size;
+    }
     return;
   }
 
@@ -245,6 +267,33 @@ void fused_attn_ck_bwd_impl(
   // like dq, dq_acc mem also requires zeroing out
   //dq_acc is of shape (B, S, H, D)
   NVTE_CHECK_CUDA(cudaMemsetAsync(dq_acc_ptr, 0, sizeof(float)*b*h*s_q*d, stream));
+  
+  // TODO: temporary patch for mqa/gqa, remove once CK support stride specification directly
+  void* dk_expanded_ptr = nullptr;
+  void* dv_expanded_ptr = nullptr;
+  std::array<uint64_t, 4> dkv_expanded_stride;
+  //mqa gqa mode
+  if(is_mqa_gqa){
+    //generate kv expanded stride as if h_kv = h_q
+    generateMatrixStrides(b, h, s_q, s_kv, d, dkv_expanded_stride.data(),
+                          layout, NVTE_QKV_Matrix::NVTE_K_Matrix);
+
+    // dk_expanded arranged at the end of dq_acc_ptr
+    dk_expanded_ptr = static_cast<void *>(static_cast<int8_t*>(dq_acc_ptr) + b*h*s_q*d*sizeof(float));
+
+    //dv_expanded_ptr depends on the actual layout
+    if(layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD){
+      dv_expanded_ptr = static_cast<void *>(static_cast<int8_t*>(dk_expanded_ptr) + ck_dtype_size(dtype)*h*d);
+    } else if(layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D){
+      dv_expanded_ptr = static_cast<void *>(static_cast<int8_t*>(dk_expanded_ptr) + ck_dtype_size(dtype)*d);
+    } else if(layout_group == NVTE_QKV_Layout_Group::NVTE_HD_HD_HD){
+      dv_expanded_ptr = static_cast<void *>(static_cast<int8_t*>(dk_expanded_ptr) + ck_dtype_size(dtype)*b*h*s_kv*d);
+    } else{
+      NVTE_ERROR("NVTE_3HD NVTE_H3D should have h=hg.");
+    }
+    // zeroing out dkv expanded in case CK requires that
+    NVTE_CHECK_CUDA(cudaMemsetAsync(dk_expanded_ptr, 0, 2*ck_dtype_size(dtype)*b*h*s_kv*d, stream));
+  }
 
   bool nvte_log_ck_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
@@ -289,6 +338,9 @@ void fused_attn_ck_bwd_impl(
       devPtrdQ,
       q_stride[0], q_stride[1], q_stride[2], //dQ and Q share the same stride
       dq_acc_ptr, 
+      dk_expanded_ptr,
+      dv_expanded_ptr,
+      dkv_expanded_stride[0], dkv_expanded_stride[1], dkv_expanded_stride[2], //dK and K share the same stride
       devPtrdK,
       k_stride[0], k_stride[1], k_stride[2], //dK and K share the same stride
       devPtrdV,
