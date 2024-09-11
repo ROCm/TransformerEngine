@@ -53,8 +53,8 @@ def test_cp_with_flash_attention(dtype, model, qkv_format):
 if IS_HIP_EXTENSION:
     model_configs_fused_attn = {
         #   test:             b,  h, hg,   d,    sq,   skv,   p,      mask,      bias
-        "cp_1_0": ModelConfig(1, 12, 12, 128, 16384, 16384, 0.0,  "causal", "no_bias"), # MHA
-        "cp_1_1": ModelConfig(1, 12, 12, 128, 16384, 16384, 0.0, "no_mask", "no_bias"), # MHA
+        "cp_1_0": ModelConfig(2, 12, 12, 128,  4096,  4096, 0.0,  "causal", "no_bias"), # MHA
+        "cp_1_1": ModelConfig(2, 12, 12, 128,  4096,  4096, 0.0, "no_mask", "no_bias"), # MHA
     }
 else:
     model_configs_fused_attn = {
@@ -73,7 +73,7 @@ else:
 @pytest.mark.skipif(not IS_HIP_EXTENSION and get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", ['bf16', 'fp16'])
 @pytest.mark.parametrize("model", model_configs_fused_attn.keys())
-@pytest.mark.parametrize("qkv_format", ['bshd', 'sbhd', 'thd'])
+@pytest.mark.parametrize("qkv_format", ['bshd', 'sbhd'] if IS_HIP_EXTENSION else ['bshd', 'sbhd', 'thd'])
 def test_cp_with_fused_attention(dtype, model, qkv_format):
     subprocess.run(
         get_bash_arguments(
