@@ -346,6 +346,7 @@ class CMakeExtension(setuptools.Extension):
             f"-DPython_INCLUDE_DIR={sysconfig.get_path('include')}",
             f"-DCMAKE_BUILD_TYPE={build_type}",
             f"-DCMAKE_INSTALL_PREFIX={install_dir}",
+            "-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON",
         ]
         configure_command += self.cmake_flags
         if found_ninja():
@@ -481,6 +482,7 @@ def configure_rocm() -> List[str]:
     return [
         f"-DCMAKE_PREFIX_PATH={rocm_path}",
         f"-DCMAKE_CXX_COMPILER:PATH={rocm_path}/bin/amdclang++",
+        f"-DCMAKE_HIP_COMPILER:PATH={rocm_path}/bin/amdclang++",
         f"-DCMAKE_CXX_FLAGS={hip_compiler_flags}",
         f"-DCMAKE_HIP_FLAGS={hip_compiler_flags}",
         f"-DGPU_TARGETS={gpu_targets}",
@@ -497,7 +499,10 @@ def setup_common_extension() -> CMakeExtension:
     cmake_flags = []
     if "jax" in frameworks():
         cmake_flags.append("-DENABLE_JAX=ON")
-    if use_rocm:
+    if use_cuda:
+        cmake_flags.append("-DUSE_CUDA=ON")
+    elif use_rocm:
+        cmake_flags.append("-DUSE_ROCM=ON")
         cmake_flags += configure_rocm()
     if with_userbuffers():
         cmake_flags.append("-DNVTE_WITH_USERBUFFERS=ON")

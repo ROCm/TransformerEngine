@@ -6,48 +6,66 @@
 
 cmake_minimum_required(VERSION 3.18)
 
-option(USE_CUDA "Use CUDA" ON)
+option(USE_CUDA "Use CUDA" OFF)
 option(USE_ROCM "Use ROCm" OFF)
-option(USE_HIPBLASLT "Use HIPBLASLT" OFF)
-
-# Determine ROCM_PATH
-if(DEFINED ENV{ROCM_PATH} AND EXISTS "$ENV{ROCM_PATH}")
-  set(ROCM_PATH "$ENV{ROCM_PATH}" CACHE PATH "Path to ROCm installation")
-elseif(EXISTS "/opt/rocm")
-  set(ROCM_PATH "/opt/rocm" CACHE PATH "Default ROCm installation path")
-else()
-  set(ROCM_PATH "" CACHE PATH "ROCm installation path not found")
-endif()
-
-# Check if ROCm is available and CUDA is not installed
-if(ROCM_PATH AND NOT EXISTS "/bin/nvcc")
-  message(STATUS "AMD GPU detected.")
-  set(USE_ROCM ON)
-  set(USE_CUDA OFF)
-  add_definitions(-DUSE_ROCM)
-  list(APPEND CMAKE_MODULE_PATH "${ROCM_PATH}/lib/cmake")
-endif()
 
 set(message_line
   "-------------------------------------------------------------")
 message("${message_line}")
-message(STATUS "USE_CUDA ${USE_CUDA}")
-message(STATUS "USE_ROCM ${USE_ROCM}")
-message(STATUS "USE_HIPBLASLT ${USE_HIPBLASLT}")
 
 if(USE_CUDA)
+  message(STATUS "USE_CUDA ${USE_CUDA}")
   if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
   endif()
+
   set(CMAKE_CXX_STANDARD 17)
   set(CMAKE_CUDA_STANDARD 17)
   set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
   project(transformer_engine LANGUAGES CUDA CXX)
+  # Check if CUDA is available
+  if(NOT CMAKE_CUDA_COMPILER)
+    message(FATAL_ERROR "CUDA compiler not found!")
+  endif()
+
+  # Output the CUDA compiler version
+  message(STATUS "CUDA compiler: ${CMAKE_CUDA_COMPILER}")
+  message(STATUS "CUDA version: ${CMAKE_CUDA_COMPILER_VERSION}")
+
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --threads 4")
   if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
   endif()
 elseif(USE_ROCM)
+  message(STATUS "USE_ROCM ${USE_ROCM}")
+  message(STATUS "USE_HIPBLASLT ${USE_HIPBLASLT}")
+  if(DEFINED ENV{ROCM_PATH})
+    set(ROCM_PATH $ENV{ROCM_PATH})
+  elseif(EXISTS "/opt/rocm")
+    set(ROCM_PATH "/opt/rocm")
+  else()
+    message(FATAL_ERROR "ROCm not found")
+  endif()
+
+  if(EXISTS "${ROCM_PATH}/.info/version")
+    file(READ "${ROCM_PATH}/.info/version" ROCM_VERSION)
+    string(STRIP "${ROCM_VERSION}" ROCM_VERSION)
+    message(STATUS "ROCm detected: ${ROCM_VERSION}")
+  else()
+    message(WARNING "ROCm version not found")
+  endif()
+
+  add_definitions(-DUSE_ROCM)
+  list(APPEND CMAKE_MODULE_PATH "${ROCM_PATH}/lib/cmake")
+
+  # Check if hipblaslt is enabled
+  if(DEFINED ENV{NVTE_USE_HIPBLASLT} AND "$ENV{NVTE_USE_HIPBLASLT}" STREQUAL "1")
+    option(USE_HIPBLASLT "Use HIPBLASLT" ON)
+  else()
+    option(USE_HIPBLASLT "Use HIPBLASLT" OFF)
+  endif()
+
   if(NOT DEFINED GPU_TARGETS)
     if (NOT DEFINED CMAKE_HIP_ARCHITECTURES)
       set(GPU_TARGETS gfx90a;gfx940;gfx941;gfx942)
@@ -60,7 +78,9 @@ elseif(USE_ROCM)
   endif()
   message(STATUS "GPU_TARGETS: ${GPU_TARGETS}")
   message(STATUS "CMAKE_HIP_ARCHITECTURES: ${CMAKE_HIP_ARCHITECTURES}")
+
   set(CMAKE_CXX_STANDARD 17)
+
   project(transformer_engine LANGUAGES HIP CXX)
   # General HIP flags applied to all targets
   add_compile_options(
@@ -75,6 +95,8 @@ elseif(USE_ROCM)
   if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(CMAKE_HIP_FLAGS_DEBUG "${CMAKE_HIP_FLAGS_DEBUG} -g")
   endif()
+else()
+  message(FATAL_ERROR "No GPU platform specified")
 endif()
 
 if(USE_CUDA)

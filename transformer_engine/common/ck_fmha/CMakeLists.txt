@@ -59,8 +59,10 @@ endif()
 add_library(ck STATIC ${CK_FMHA_SOURCES})
 
 add_library(ck_fmha_options INTERFACE)
+# CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=3: assembly-based BF16 RTN conversion
+# BF16 RTN conversion is currently disabled due to performance concerns.
+# IMPORTANT: Using truncation mode will cause unit tests to fail.
 target_compile_definitions(ck_fmha_options INTERFACE
-  CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=3
   CK_TILE_FMHA_FWD_FAST_EXP2=1
   CK_USE_XDL
 )
