@@ -183,6 +183,8 @@ hipError_t ck_attn_fwd(
   }
   if (ck_fused_attn_log_config) {
     std::cout<<std::endl<<"run ck fmha_fwd: "<<std::endl;
+
+    // debug fmha_traits
     std::cout<<"fmha_traits: ";
     std::cout<<"hdim_q: "<<fmha_traits.hdim_q<<", ";
     std::cout<<"hdim_v: "<<fmha_traits.hdim_v<<", ";
@@ -194,12 +196,16 @@ hipError_t ck_attn_fwd(
     std::cout<<"has_lse: "<<fmha_traits.has_lse<<", ";
     std::cout<<"has_dropout: "<<fmha_traits.has_dropout<<", ";
     std::cout<<"do_fp8_static_quant: "<<fmha_traits.do_fp8_static_quant<<std::endl;
+
+    // debug fmha_args
     std::cout<<"fmha_args: ";
     std::cout<<"q_ptr: "<<fmha_args.q_ptr<<", ";
     std::cout<<"k_ptr: "<<fmha_args.k_ptr<<", ";
     std::cout<<"v_ptr: "<<fmha_args.v_ptr<<", ";
     std::cout<<"bias_ptr: "<<fmha_args.bias_ptr<<", ";
     std::cout<<"rand_val_ptr: "<<fmha_args.rand_val_ptr<<", ";
+    std::cout<<"lse_acc_ptr: "<<fmha_args.lse_acc_ptr<<", ";
+    std::cout<<"o_acc_ptr: "<<fmha_args.o_acc_ptr<<", ";
     std::cout<<"lse_ptr: "<<fmha_args.lse_ptr<<", ";
     std::cout<<"o_ptr: "<<fmha_args.o_ptr<<", ";
     std::cout<<"seqstart_q_ptr: "<<fmha_args.seqstart_q_ptr<<", ";
@@ -213,6 +219,7 @@ hipError_t ck_attn_fwd(
     std::cout<<"hdim_v: "<<fmha_args.hdim_v<<", ";
     std::cout<<"nhead_q: "<<fmha_args.nhead_q<<", ";
     std::cout<<"nhead_k: "<<fmha_args.nhead_k<<", ";
+    std::cout<<"num_splits: "<<fmha_args.num_splits<<", ";
     std::cout<<"scale_s: "<<fmha_args.scale_s<<", ";
     std::cout<<"scale_p: "<<fmha_args.scale_p<<", ";
     std::cout<<"scale_o: "<<fmha_args.scale_o<<", ";
@@ -221,6 +228,7 @@ hipError_t ck_attn_fwd(
     std::cout<<"stride_v: "<<fmha_args.stride_v<<", ";
     std::cout<<"stride_bias: "<<fmha_args.stride_bias<<", ";
     std::cout<<"stride_randval: "<<fmha_args.stride_randval<<", ";
+    std::cout<<"stride_o_acc: "<<fmha_args.stride_o_acc<<", ";
     std::cout<<"stride_o: "<<fmha_args.stride_o<<", ";
     std::cout<<"nhead_stride_q: "<<fmha_args.nhead_stride_q<<", ";
     std::cout<<"nhead_stride_k: "<<fmha_args.nhead_stride_k<<", ";
@@ -228,6 +236,8 @@ hipError_t ck_attn_fwd(
     std::cout<<"nhead_stride_bias: "<<fmha_args.nhead_stride_bias<<", ";
     std::cout<<"nhead_stride_randval: "<<fmha_args.nhead_stride_randval<<", ";
     std::cout<<"nhead_stride_lse: "<<fmha_args.nhead_stride_lse<<", ";
+    std::cout<<"nhead_stride_lse_acc: "<<fmha_args.nhead_stride_lse_acc<<", ";
+    std::cout<<"nhead_stride_o_acc: "<<fmha_args.nhead_stride_o_acc<<", ";
     std::cout<<"nhead_stride_o: "<<fmha_args.nhead_stride_o<<", ";
     std::cout<<"batch_stride_q: "<<fmha_args.batch_stride_q<<", ";
     std::cout<<"batch_stride_k: "<<fmha_args.batch_stride_k<<", ";
@@ -235,7 +245,11 @@ hipError_t ck_attn_fwd(
     std::cout<<"batch_stride_bias: "<<fmha_args.batch_stride_bias<<", ";
     std::cout<<"batch_stride_randval: "<<fmha_args.batch_stride_randval<<", ";
     std::cout<<"batch_stride_lse: "<<fmha_args.batch_stride_lse<<", ";
+    std::cout<<"batch_stride_lse_acc: "<<fmha_args.batch_stride_lse_acc<<", ";
+    std::cout<<"batch_stride_o_acc: "<<fmha_args.batch_stride_o_acc<<", ";
     std::cout<<"batch_stride_o: "<<fmha_args.batch_stride_o<<", ";
+    std::cout<<"split_stride_lse_acc: "<<fmha_args.split_stride_lse_acc<<", ";
+    std::cout<<"split_stride_o_acc: "<<fmha_args.split_stride_o_acc<<", ";
     std::cout<<"window_size_left: "<<fmha_args.window_size_left<<", ";
     std::cout<<"window_size_right: "<<fmha_args.window_size_right<<", ";
     std::cout<<"mask_type: "<<fmha_args.mask_type<<", ";
