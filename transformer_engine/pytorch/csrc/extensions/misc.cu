@@ -19,14 +19,6 @@ size_t get_cublasLt_version() {
 size_t get_cudnn_version() {
     return cudnnGetVersion();
 }
-
-bool userbuf_comm_available() {  // TODO(ksivamani) check on python side
-#ifdef NVTE_WITH_USERBUFFERS
-    return true;
-#else
-    return false;
 #endif
-}
-#endif //#ifndef USE_ROCM
 
 void placeholder() {}  // TODO(ksivamani) clean this up

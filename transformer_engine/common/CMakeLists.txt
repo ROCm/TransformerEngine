@@ -4,7 +4,85 @@
 #
 # See LICENSE for license information.
 
-# process source code files
+cmake_minimum_required(VERSION 3.18)
+
+option(USE_ROCM "Use ROCm" OFF)
+option(USE_HIPBLASLT "Use HIPBLASLT" OFF)
+
+if(((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) AND NOT (EXISTS "/bin/nvcc"))
+  message("AMD GPU detected.")
+  set(USE_ROCM ON)
+  unset(USE_CUDA)
+else()
+  set(USE_CUDA TRUE)
+endif()
+
+if(USE_CUDA)
+  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
+  endif()
+
+  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CUDA_STANDARD 17)
+  set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+  project(transformer_engine LANGUAGES CUDA CXX)
+
+  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --threads 4")
+  if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
+  endif()
+
+  find_package(CUDAToolkit REQUIRED cublas nvToolsExt)
+
+  # Check for cuDNN frontend API
+  set(CUDNN_FRONTEND_INCLUDE_DIR
+      "${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
+  if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
+      message(FATAL_ERROR
+              "Could not find cuDNN frontend API. "
+              "Try running 'git submodule update --init --recursive' "
+              "within the Transformer Engine source.")
+  endif()
+  include(${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
+
+else()
+  set(CMAKE_CXX_STANDARD 17)
+  project(transformer_engine LANGUAGES HIP CXX)
+
+  # Disable Asserts In Code (Can't use asserts on HIP stack.)
+  add_definitions(-DNDEBUG)
+  add_definitions(-DUSE_ROCM)
+
+  if(NOT DEFINED ENV{PYTORCH_ROCM_ARCH})
+    SET(TE_ROCM_ARCH gfx90a;gfx940;gfx941;gfx942)
+  else()
+    SET(TE_ROCM_ARCH $ENV{PYTORCH_ROCM_ARCH})
+  endif()
+  SET(CMAKE_HIP_ARCHITECTURES ${TE_ROCM_ARCH})
+
+  # build error will be dup-ed parallel-jobs times
+  # set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -parallel-jobs=4")
+  if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -g")
+  endif()
+
+  list(APPEND CMAKE_MODULE_PATH "/opt/rocm")
+endif()
+
+set(message_line "-------------------------------------------------------------")
+message("${message_line}")
+message(STATUS "USE_ROCM ${USE_ROCM}")
+if(USE_ROCM)
+  message(STATUS "HIP_ARCHITECTURES: ${TE_ROCM_ARCH}")
+  message(STATUS "USE_HIPBLASLT ${USE_HIPBLASLT}")
+endif()
+
+find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+
+include_directories(${PROJECT_SOURCE_DIR}/..)
+
+# Configure Transformer Engine library
 set(transformer_engine_SOURCES)
 if(USE_CUDA)
   list(APPEND transformer_engine_SOURCES
@@ -39,6 +117,7 @@ if(USE_CUDA)
        fused_softmax/scaled_aligned_causal_masked_softmax.cu
        fused_rope/fused_rope.cu
        recipe/delayed_scaling.cu)
+  add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 else()
   list(APPEND transformer_engine_SOURCES
        transformer_engine.cpp
@@ -71,50 +150,8 @@ else()
        fused_softmax/scaled_aligned_causal_masked_softmax.cu
        fused_rope/fused_rope.cu
        recipe/delayed_scaling.cu)
-endif()
 
-if(USE_CUDA)
-  # Check for cuDNN frontend API
-  set(CUDNN_FRONTEND_INCLUDE_DIR
-      "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
-  if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
-      message(FATAL_ERROR
-              "Could not find cuDNN frontend API. "
-              "Try running 'git submodule update --init --recursive' "
-              "within the Transformer Engine source.")
-  endif()
-else()
-  if(NOT DEFINED AOTRITON_PATH)
-    # Install aotriton fused attn
-    set(AOTRITON_NO_PYTHON ON)
-    set(AOTRITON_COMPRESS_KERNEL OFF)
-    set(AOTRITON_NO_SHARED ON)
-    add_subdirectory(../../3rdparty/aotriton ${CMAKE_CURRENT_BINARY_DIR}/aotriton)
-  else()
-    # Use aotriton built during initial TE building/installation
-    # When only need rebuild TE library itself
-    find_library(AOTRITON_LIB NAMES aotriton aotriton_v2 PATHS ${AOTRITON_PATH}/lib REQUIRED NO_DEFAULT_PATH)
-    add_library( aotriton STATIC IMPORTED )
-    set_target_properties( aotriton PROPERTIES IMPORTED_LOCATION ${AOTRITON_LIB} )
-    target_include_directories(aotriton INTERFACE ${AOTRITON_PATH}/include)
-  endif()
-
-  if(NOT DEFINED CK_FUSED_ATTN_PATH)
-    add_subdirectory(ck_fused_attn ${CMAKE_CURRENT_BINARY_DIR}/ck_fused_attn)
-  else()
-    # Use CK built during initial TE building/installation
-    # When only need rebuild TE library itself
-    find_library(CK_FUSED_ATTN_LIB NAMES ck_fused_attn PATHS ${CK_FUSED_ATTN_PATH}/lib REQUIRED NO_DEFAULT_PATH)
-    add_library( ck_fused_attn STATIC IMPORTED )
-    set_target_properties( ck_fused_attn PROPERTIES IMPORTED_LOCATION ${CK_FUSED_ATTN_LIB} )
-    target_include_directories(ck_fused_attn INTERFACE ${CK_FUSED_ATTN_PATH}/include)
-  endif()
-endif()
-
-# process source code files
-if(USE_CUDA)
-  add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
-else()
+  # process source code files
   message("${message_line}")
   message(STATUS "CMAKE_CURRENT_SOURCE_DIR: ${CMAKE_CURRENT_SOURCE_DIR}")
   message(STATUS "PROJECT_SOURCE_DIR: ${PROJECT_SOURCE_DIR}")
@@ -151,6 +188,58 @@ endif()
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
+# Configure dependencies
+if (USE_CUDA)
+  target_link_libraries(transformer_engine PUBLIC
+                      CUDA::cublas
+                      CUDA::cuda_driver
+                      CUDA::cudart
+                      CUDA::nvrtc
+                      CUDA::nvToolsExt
+                      CUDNN::cudnn)
+  target_include_directories(transformer_engine PRIVATE
+                           ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+  target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
+else()
+  if(NOT DEFINED AOTRITON_PATH)
+    # Install aotriton fused attn
+    set(AOTRITON_NO_PYTHON ON)
+    set(AOTRITON_COMPRESS_KERNEL OFF)
+    set(AOTRITON_NO_SHARED ON)
+    add_subdirectory(../../3rdparty/aotriton ${CMAKE_CURRENT_BINARY_DIR}/aotriton)
+  else()
+    # Use aotriton built during initial TE building/installation
+    # When only need rebuild TE library itself
+    find_library(AOTRITON_LIB NAMES aotriton aotriton_v2 PATHS ${AOTRITON_PATH}/lib REQUIRED NO_DEFAULT_PATH)
+    add_library( aotriton STATIC IMPORTED )
+    set_target_properties( aotriton PROPERTIES IMPORTED_LOCATION ${AOTRITON_LIB} )
+    target_include_directories(aotriton INTERFACE ${AOTRITON_PATH}/include)
+  endif()
+
+  if(NOT DEFINED CK_FUSED_ATTN_PATH)
+    add_subdirectory(ck_fused_attn ${CMAKE_CURRENT_BINARY_DIR}/ck_fused_attn)
+  else()
+    # Use CK built during initial TE building/installation
+    # When only need rebuild TE library itself
+    find_library(CK_FUSED_ATTN_LIB NAMES ck_fused_attn PATHS ${CK_FUSED_ATTN_PATH}/lib REQUIRED NO_DEFAULT_PATH)
+    add_library( ck_fused_attn STATIC IMPORTED )
+    set_target_properties( ck_fused_attn PROPERTIES IMPORTED_LOCATION ${CK_FUSED_ATTN_LIB} )
+    target_include_directories(ck_fused_attn INTERFACE ${CK_FUSED_ATTN_PATH}/include)
+  endif()
+
+  find_package(hip)
+  list(APPEND transformer_engine_LINKER_LIBS hip::host hip::device roctx64 aotriton ck_fused_attn)
+  if(USE_HIPBLASLT)
+    find_package(hipblaslt)
+    target_compile_definitions(transformer_engine PUBLIC USE_HIPBLASLT)
+    list(APPEND transformer_engine_LINKER_LIBS roc::hipblaslt)
+  else()
+    find_package(rocblas)
+    list(APPEND transformer_engine_LINKER_LIBS roc::rocblas)
+  endif()
+  target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS})
+endif()
+
 # Make header files with C++ strings
 function(make_string_header STRING STRING_NAME)
     configure_file(util/string_header.h.in
@@ -165,55 +254,38 @@ function(make_string_header_from_file file_ STRING_NAME)
 endfunction()
 
 if(USE_CUDA)
-  target_include_directories(transformer_engine PRIVATE
-                             ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
-  
   list(GET CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES 0 cuda_include_path)
   make_string_header("${cuda_include_path}"
-                     string_path_cuda_include)
-  make_string_header_from_file(utils.cuh
-                               string_code_utils_cuh)
+                    string_path_cuda_include)
+
+  make_string_header_from_file(transpose/rtc/cast_transpose_fusion.cu
+                              string_code_transpose_rtc_cast_transpose_fusion_cu)
+  make_string_header_from_file(transpose/rtc/cast_transpose.cu
+                              string_code_transpose_rtc_cast_transpose_cu)
   make_string_header_from_file(transpose/rtc/transpose.cu
-                               string_code_transpose_rtc_transpose_cu)
-  target_include_directories(transformer_engine PRIVATE
-                             "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
+                              string_code_transpose_rtc_transpose_cu)
+  make_string_header_from_file(utils.cuh
+                              string_code_utils_cuh)
 else()
   make_string_header_from_file(utils_hip.cuh
                                string_code_utils_cuh)
+  make_string_header_from_file(transpose/rtc/cast_transpose_fusion.hip
+                              string_code_transpose_rtc_cast_transpose_fusion_cu)
+  make_string_header_from_file(transpose/rtc/cast_transpose.hip
+                              string_code_transpose_rtc_cast_transpose_cu)
   make_string_header_from_file(transpose/rtc/transpose.hip
-                               string_code_transpose_rtc_transpose_cu)
+                              string_code_transpose_rtc_transpose_cu)
   make_string_header_from_file(amd_detail/hip_float8.h
                                string_code_amd_detail_hip_float8_h)
   make_string_header_from_file(amd_detail/hip_f8_impl.h
                                string_code_amd_detail_hip_f8_impl_h)
-  target_include_directories(transformer_engine PRIVATE
-                             "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
 endif()
 
-# find and process package dependency
-if(USE_CUDA)
-  list(APPEND transformer_engine_LINKER_LIBS 
-       CUDA::cublas
-       CUDA::cuda_driver
-       CUDA::cudart
-       CUDA::nvrtc
-       CUDA::nvToolsExt
-       CUDNN::cudnn)
-else()
-  find_package(hip)
-  list(APPEND transformer_engine_LINKER_LIBS hip::host hip::device roctx64 aotriton ck_fused_attn)
-  if(USE_HIPBLASLT)
-    find_package(hipblaslt)
-    target_compile_definitions(transformer_engine PUBLIC USE_HIPBLASLT)
-    list(APPEND transformer_engine_LINKER_LIBS roc::hipblaslt)
-  else()
-    find_package(rocblas)
-    list(APPEND transformer_engine_LINKER_LIBS roc::rocblas)
-  endif()
-endif()
+make_string_header_from_file(util/math.h
+                            string_code_util_math_h)
 
-target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS})
+target_include_directories(transformer_engine PRIVATE
+                          "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
 
 # Compiler options
 set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
@@ -226,6 +298,15 @@ if(USE_CUDA)
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 else()
   set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -O3")
+  set(HIP_HCC_FLAGS "${CMAKE_HIP_FLAGS} -mavx2 -mf16c -mfma -std=c++17")
+  # Ask hcc to generate device code during compilation so we can use
+  # host linker to link.
+  set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} -fno-gpu-rdc -Wno-defaulted-function-deleted")
+  foreach(rocm_arch ${CMAKE_HIP_ARCHITECTURES})
+    # if CMAKE_CXX_FLAGS has --offload-arch set already, better to rm first
+    set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} --offload-arch=${rocm_arch}")
+  endforeach()
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${HIP_HCC_FLAGS}")
 endif()
 
 # Install library

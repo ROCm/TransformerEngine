@@ -49,6 +49,7 @@
 #include <transformer_engine/softmax.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
+#include <transformer_engine/cast_transpose_noop.h>
 
 namespace transformer_engine {
 
@@ -191,6 +192,6 @@ at::Tensor allocateTorchTensor(int M,
                                transformer_engine::DType dtype
 );
 
-void *getDataPtr(at::Tensor t);
+void* getDataPtr(at::Tensor tensor, int offset = 0);
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_COMMON_H_

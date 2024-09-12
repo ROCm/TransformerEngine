@@ -6,7 +6,10 @@
 
 #include <torch/script.h>
 #include "extensions.h"
-
+#include <cuda.h>
+#include <cuda_fp8.h>
+#include "common/util/system.h"
+#include "common/util/cuda_runtime.h"
 
 namespace {
   transformer_engine::DType reverse_map_dtype(int64_t dtype) {
@@ -282,6 +285,41 @@ at::Tensor qgelu_ts(at::Tensor input,
   return output;
 }
 
+at::Tensor srelu_ts(at::Tensor input,
+                     at::Tensor scale,
+                     at::Tensor amax,
+                     at::Tensor scale_inv,
+                     int64_t fp8_tensor,
+                     int64_t otype) {
+  transformer_engine::DType otype_arg = reverse_map_dtype(otype);
+
+  at::Tensor s, a, s_inv;
+  if (scale.numel()) {
+      s = scale[fp8_tensor];
+  } else {
+      s = scale;
+  }
+
+  if (amax.numel()) {
+      a = amax[0][fp8_tensor];
+  } else {
+      a = amax;
+  }
+
+  if (scale_inv.numel()) {
+      s_inv = scale_inv[fp8_tensor];
+  } else {
+      s_inv = scale_inv;
+  }
+
+  at::Tensor output = srelu(input,
+                            s,
+                            a,
+                            s_inv,
+                            otype_arg);
+  return output;
+}
+
 at::Tensor te_gemm_ts(at::Tensor A,
                       at::Tensor A_scale_inverse,
                       int64_t A_fp8_tensor,
@@ -316,6 +354,12 @@ at::Tensor te_gemm_ts(at::Tensor A,
   bool accumulate_arg = static_cast<bool>(accumulate);
   bool use_split_accumulator_arg = static_cast<bool>(use_split_accumulator);
 
+  // Set an external SM Margin to all the GEMMs.
+  // This comes in handy when DP is overlapped with GEMMs
+
+  const int sm_count = transformer_engine::cuda::sm_count();
+  int num_math_sms = sm_count - transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", sm_count);
+
   if (A_scale_inverse.numel())
     A_scale_inverse = A_scale_inverse[A_fp8_tensor];
 
@@ -342,7 +386,7 @@ at::Tensor te_gemm_ts(at::Tensor A,
           workspaceSize_arg,
           accumulate_arg,
           use_split_accumulator_arg,
-          0);
+          num_math_sms);
   return D;
 }
 
@@ -356,6 +400,7 @@ at::Tensor layernorm_fwd_fp8_inf_ts(const at::Tensor &input,
                                     at::Tensor scale_inv,
                                     int64_t fp8_tensor,
                                     int64_t otype,
+                                    const int64_t sm_margin,
                                     const bool zero_centered_gamma) {
   transformer_engine::DType otype_arg = reverse_map_dtype(otype);
   float eps_float = static_cast<float>(eps);
@@ -368,7 +413,11 @@ at::Tensor layernorm_fwd_fp8_inf_ts(const at::Tensor &input,
                                             amax,
                                             scale_inv,
                                             otype_arg,
-                                            zero_centered_gamma);
+                                            sm_margin,
+                                            zero_centered_gamma,
+                                            fp8_tensor,  // scale_offset
+                                            fp8_tensor,  // amax_offset
+                                            fp8_tensor);  // scale_inv_offset
 
   return output;
 }
@@ -378,6 +427,7 @@ at::Tensor layernorm_fwd_inf_ts(const at::Tensor &input,
                                 const at::Tensor &weight,
                                 const at::Tensor &bias,
                                 double eps,
+                                const int64_t sm_margin,
                                 const bool zero_centered_gamma) {
   float eps_float = static_cast<float>(eps);
 
@@ -385,6 +435,7 @@ at::Tensor layernorm_fwd_inf_ts(const at::Tensor &input,
                                         weight,
                                         bias,
                                         eps_float,
+                                        sm_margin,
                                         zero_centered_gamma);
 
   return output;
@@ -399,6 +450,7 @@ at::Tensor rmsnorm_fwd_fp8_inf_ts(const at::Tensor &input,
                                   at::Tensor scale_inv,
                                   int64_t fp8_tensor,
                                   int64_t otype,
+                                  const int64_t sm_margin,
                                   const bool zero_centered_gamma) {
   transformer_engine::DType otype_arg = reverse_map_dtype(otype);
   float eps_float = static_cast<float>(eps);
@@ -410,7 +462,11 @@ at::Tensor rmsnorm_fwd_fp8_inf_ts(const at::Tensor &input,
                                           amax,
                                           scale_inv,
                                           otype_arg,
-                                          zero_centered_gamma);
+                                          sm_margin,
+                                          zero_centered_gamma,
+                                          fp8_tensor,  // scale_offset
+                                          fp8_tensor,  // amax_offset
+                                          fp8_tensor);  // scale_inv_offset
 
   return output;
 }
@@ -419,12 +475,14 @@ at::Tensor rmsnorm_fwd_fp8_inf_ts(const at::Tensor &input,
 at::Tensor rmsnorm_fwd_inf_ts(const at::Tensor &input,
                               const at::Tensor &weight,
                               double eps,
+                              const int64_t sm_margin,
                               const bool zero_centered_gamma) {
   float eps_float = static_cast<float>(eps);
 
   at::Tensor output = rmsnorm_fwd_inf(input,
                                       weight,
                                       eps_float,
+                                      sm_margin,
                                       zero_centered_gamma);
 
   return output;
@@ -441,6 +499,7 @@ TORCH_LIBRARY(tex_ts, m) {
   m.def("reglu_ts", &reglu_ts);
   m.def("swiglu_ts", &swiglu_ts);
   m.def("qgelu_ts", &qgelu_ts);
+  m.def("srelu_ts", &srelu_ts);
   m.def("te_gemm_ts", &te_gemm_ts);
   m.def("layernorm_fwd_fp8_inf_ts", &layernorm_fwd_fp8_inf_ts);
   m.def("layernorm_fwd_inf_ts", &layernorm_fwd_inf_ts);

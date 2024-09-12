@@ -5,7 +5,7 @@
 # See LICENSE for license information.
 
 """Python interface for c++ extensions"""
-from transformer_engine_extensions import *
+from transformer_engine_torch import *
 
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 if not IS_HIP_EXTENSION:

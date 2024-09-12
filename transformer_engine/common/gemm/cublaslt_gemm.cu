@@ -30,6 +30,7 @@
 #include <cstdlib>
 #include <string>
 #endif // #ifndef __HIP_PLATFORM_AMD__
+#include <cstdint>
 
 #include "../common.h"
 #include "../util/vectorized_pointwise.h"
@@ -106,6 +107,17 @@ cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
   }
 }
 #endif // __HIP_PLATFORM_AMD__
+
+uint32_t _getAlignment(uintptr_t address) {
+  // alignment are in bytes
+  uint32_t alignment = 256;
+  for (; ; alignment /= 2) {
+    if (address % alignment == 0) {
+      return alignment;
+    }
+  }
+}
+
 }  // namespace
 
 
@@ -336,6 +348,22 @@ void cublas_gemm(const Tensor *inputA,
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
           preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
           &workspaceSize, sizeof(workspaceSize)));
+  const auto A_alignment = _getAlignment(reinterpret_cast<uintptr_t>(A));
+  const auto B_alignment = _getAlignment(reinterpret_cast<uintptr_t>(B));
+  const auto C_alignment = _getAlignment(reinterpret_cast<uintptr_t>(C));
+  const auto D_alignment = _getAlignment(reinterpret_cast<uintptr_t>(D));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
+    preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES,
+    &A_alignment, sizeof(A_alignment)));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
+    preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_B_BYTES,
+    &B_alignment, sizeof(B_alignment)));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
+    preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_C_BYTES,
+    &C_alignment, sizeof(C_alignment)));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
+    preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_D_BYTES,
+    &D_alignment, sizeof(D_alignment)));
 
   const auto status = cublasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Cdesc,
                                                      Ddesc, preference, 1, &heuristicResult,
@@ -347,7 +375,6 @@ void cublas_gemm(const Tensor *inputA,
   if (returnedResults == 0) throw std::runtime_error("Unable to find any suitable algorithms");
 
   // D = alpha * (A * B) + beta * C
-
   NVTE_CHECK_CUBLAS(cublasLtMatmul(handle,
                                    operationDesc,
                                    static_cast<const void*>(&one),         /* alpha */
