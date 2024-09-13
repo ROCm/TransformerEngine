@@ -1233,11 +1233,11 @@ def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_gpt_cuda_graph(dtype, bs, model):
-    if IS_HIP_EXTENSION:
-        use_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
-        if use_fused_attn and (dtype in (torch.float16, torch.bfloat16)):
-            pytest.skip("rocm fused attn backends does not support cuda graph")
+def test_gpt_cuda_graph(dtype, bs, model, monkeypatch):
+    if IS_HIP_EXTENSION and dtype not in (torch.float32,):
+        if int(os.getenv("NVTE_FUSED_ATTN", "1")):
+            #pytest.skip(f"rocm fused attention backends do not support cuda graph with {dtype}")
+            monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
 
     config = model_configs[model]
 
