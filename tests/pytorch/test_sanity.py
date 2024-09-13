@@ -4,6 +4,7 @@
 #
 # See LICENSE for license information.
 
+import os
 from dataclasses import dataclass
 from typing import Optional
 from contextlib import nullcontext
@@ -807,7 +808,12 @@ def test_sanity_gradient_accumulation_fusion(dtype, fp8_recipe, model, skip_wgra
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("normalization", all_normalizations)
 def test_gpt_cuda_graph(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma,
-                        normalization):
+                        normalization, monkeypatch):
+    if IS_HIP_EXTENSION and dtype not in (torch.float32,):
+        if int(os.getenv("NVTE_FUSED_ATTN", "1")):
+            #pytest.skip(f"rocm fused attention backends do not support cuda graph with {dtype}")
+            monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
+
     config = model_configs[model]
 
     if fp8_recipe is not None:
