@@ -25,7 +25,7 @@ def setup_jax_extension(
     extensions_dir = csrc_source_files / "extensions"
     sources = [
         csrc_source_files / "utils.cu",
-    ] + all_files_in_dir(extensions_dir)
+    ] + all_files_in_dir(extensions_dir, ".cpp")
 
     # Header files
     if rocm_build():
@@ -46,8 +46,8 @@ def setup_jax_extension(
         sources = hipify(base_dir, csrc_source_files, sources, include_dirs)
 
     # Compile flags
-    cxx_flags = [ "-O3" ]
-    nvcc_flags = [ "-O3" ]
+    cxx_flags = ["-O3"]
+    nvcc_flags = ["-O3"]
 
     if rocm_build():
        # Pybind11 extension does not know about HIP so specify necessary parameters here
@@ -65,9 +65,9 @@ def setup_jax_extension(
 
         def _add_cflags(self, flags: List[str]) -> None:
             if isinstance(self.extra_compile_args, dict):
-                cxx_flags = self.extra_compile_args.pop('cxx', [])
+                cxx_flags = self.extra_compile_args.pop("cxx", [])
                 cxx_flags += flags
-                self.extra_compile_args['cxx'] = cxx_flags
+                self.extra_compile_args["cxx"] = cxx_flags
             else:
                 self.extra_compile_args[:0] = flags
 
@@ -75,9 +75,13 @@ def setup_jax_extension(
         "transformer_engine_jax",
         sources=[str(path) for path in sources],
         include_dirs=[str(path) for path in include_dirs],
+<<<<<<< HEAD
         extra_compile_args={
             "cxx": cxx_flags,
             "nvcc": nvcc_flags
         },
         define_macros=macros
+=======
+        extra_compile_args={"cxx": cxx_flags, "nvcc": nvcc_flags},
+>>>>>>> a4e95e8
     )

@@ -6,9 +6,14 @@
 
 """Utility functions for Transformer Engine modules"""
 import math
+import functools
 from typing import Any, Callable, Optional, Tuple
 import torch
+<<<<<<< HEAD
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
+=======
+import transformer_engine.pytorch.cpp_extensions as ext
+>>>>>>> a4e95e8
 
 
 def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
@@ -27,6 +32,7 @@ def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     Must be used carefully.
     """
     from .float8_tensor import Float8Tensor
+
     for t in tensors:
         if t is not None:
             if isinstance(t, Float8Tensor):
@@ -59,12 +65,17 @@ def get_default_init_method() -> Callable:
 def init_method_constant(val: float) -> Callable:
     """Init method to set all tensor elements to a constant value."""
     if val == 1.0:
+
         def init_(tensor: torch.Tensor) -> Callable:
             return torch.nn.init.ones_(tensor)
+
     elif val == 0.0:
+
         def init_(tensor: torch.Tensor) -> Callable:
             return torch.nn.init.zeros_(tensor)
+
     else:
+
         def init_(tensor: torch.Tensor) -> Callable:
             return torch.nn.init.constant_(tensor, val)
 
@@ -116,9 +127,7 @@ def compare_tensors(a: torch.Tensor, b: torch.Tensor) -> None:
 
 def ensure_divisibility(numerator: int, denominator: int) -> None:
     """Ensure that numerator is divisible by the denominator."""
-    assert (
-        numerator % denominator == 0
-    ), f"{numerator} is not divisible by {denominator}"
+    assert numerator % denominator == 0, f"{numerator} is not divisible by {denominator}"
 
 
 def divide(numerator: int, denominator: int) -> int:
@@ -182,9 +191,7 @@ def validate_rng_states_func(get_rng_tracker: Callable) -> None:
     validate_ctx_manager(rng_tracker.fork)
 
 
-def assert_viewless_tensor(
-    tensor: torch.Tensor, extra_msg: Optional[str] = None
-) -> torch.Tensor:
+def assert_viewless_tensor(tensor: torch.Tensor, extra_msg: Optional[str] = None) -> torch.Tensor:
     """Assert that a tensor is not a view (i.e., its '._base' field is
     not set)."""
     if isinstance(tensor, list):
@@ -192,23 +199,21 @@ def assert_viewless_tensor(
     if not isinstance(tensor, torch.Tensor):
         return tensor
     assert tensor._base is None, (
-        f"Ensure tensor._base is None before setting tensor.data or storing "
-        f"tensor to memory buffer. Otherwise, a memory leak will occur (and "
+        "Ensure tensor._base is None before setting tensor.data or storing "
+        "tensor to memory buffer. Otherwise, a memory leak will occur (and "
         f"likely accumulate over iterations). {extra_msg}"
     )
     return tensor
 
 
-def safely_set_viewless_tensor_data(
-    tensor: torch.Tensor, new_data_tensor: torch.Tensor
-) -> None:
+def safely_set_viewless_tensor_data(tensor: torch.Tensor, new_data_tensor: torch.Tensor) -> None:
     """Safely set tensor's '.data' field.
 
     Check first that the tensor is viewless (i.e., '._base' not set). If not,
     raise an exception.
     """
     extra_msg = (
-        f"FYI, tensor._base has shape "
+        "FYI, tensor._base has shape "
         f"{'--' if tensor._base is None else tensor._base.shape},"
         f"and new_data_tensor has shape {new_data_tensor.shape}."
     )
@@ -224,26 +229,19 @@ def cast_if_needed(tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
 
 def check_dim_for_fp8_exec(tensor: torch.Tensor) -> bool:
     """Check if tensor dimensions are supported for FP8 TN GEMM"""
-    return (
-        tensor.dim() == 2
-        and tensor.size(0) % 8 == 0
-        and tensor.size(1) % 16 == 0
-    )
+    return tensor.dim() == 2 and tensor.size(0) % 8 == 0 and tensor.size(1) % 16 == 0
 
 
 def assert_dim_for_fp8_exec(tensor: torch.Tensor) -> None:
     """Assert that tensor dimensions are supported for FP8 TN GEMM"""
     # single tensor check so it's clear which tensor is triggering the assertion
-    assert (
-        tensor.dim() == 2
-        and tensor.size(0) % 8 == 0
-        and tensor.size(1) % 16 == 0
-    ), (
+    assert tensor.dim() == 2 and tensor.size(0) % 8 == 0 and tensor.size(1) % 16 == 0, (
         "FP8 execution requires 2D input matrices with "
         "height divisible by 8 and width divisible by 16, "
         f"but got tensor with dims={list(tensor.size())}"
     )
 
+<<<<<<< HEAD
 if IS_HIP_EXTENSION:
     def is_mi200():
       """check whether this machine is mi200/210/250"""
@@ -262,3 +260,21 @@ def is_bf16_compatible() -> None:
            check on device compute capability to enforce sm_80 or higher.
         """
         return torch.cuda.get_device_capability()[0] >= 8
+=======
+
+def is_bf16_compatible() -> None:
+    """Replaces torch.cuda.is_bf16_compatible() with an explicit
+    check on device compute capability to enforce sm_80 or higher.
+    """
+    return torch.cuda.get_device_capability()[0] >= 8
+
+
+@functools.cache
+def get_cudnn_version() -> Tuple[int, int, int]:
+    """Runtime cuDNN version (major, minor, patch)"""
+    encoded_version = ext.get_cudnn_version()
+    major_version_magnitude = 1000 if encoded_version < 90000 else 10000
+    major, encoded_version = divmod(encoded_version, major_version_magnitude)
+    minor, patch = divmod(encoded_version, 100)
+    return (major, minor, patch)
+>>>>>>> a4e95e8

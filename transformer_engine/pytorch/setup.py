@@ -40,12 +40,12 @@ CMakeBuildExtension = get_build_ext(BuildExtension)
 if __name__ == "__main__":
     # Extensions
     common_headers_dir = "common_headers"
-    copy_common_headers(
-        current_file_path.parent,
-        str(current_file_path / common_headers_dir))
+    copy_common_headers(current_file_path.parent, str(current_file_path / common_headers_dir))
     ext_modules = [
         setup_pytorch_extension(
-            "csrc", current_file_path / "csrc", current_file_path / common_headers_dir)]
+            "csrc", current_file_path / "csrc", current_file_path / common_headers_dir
+        )
+    ]
 
     # Configure package
     setuptools.setup(
@@ -58,9 +58,11 @@ if __name__ == "__main__":
         install_requires=[] if rocm_build() else ["torch", "flash-attn>=2.0.6,<=2.4.2,!=2.0.9,!=2.1.0"],
         tests_require=[] if rocm_build() else ["numpy", "onnxruntime", "torchvision"],
         include_package_data=True,
-        package_data={"csrc": package_files("csrc"),
-                      common_headers_dir: package_files(common_headers_dir),
-                      "build_tools": package_files("build_tools")},
+        package_data={
+            "csrc": package_files("csrc"),
+            common_headers_dir: package_files(common_headers_dir),
+            "build_tools": package_files("build_tools"),
+        },
     )
     if any(x in sys.argv for x in (".", "sdist", "bdist_wheel")):
         shutil.rmtree(common_headers_dir)

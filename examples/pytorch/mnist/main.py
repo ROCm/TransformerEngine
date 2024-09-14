@@ -85,7 +85,12 @@ def calibrate(model, device, test_loader, fp8):
             with te.fp8_autocast(enabled=fp8, calibrating=True):
                 output = model(data)
 
+<<<<<<< HEAD
 def test(model, device, test_loader, use_amp, use_fp8):
+=======
+
+def test(model, device, test_loader, use_fp8):
+>>>>>>> a4e95e8
     """Testing function."""
     model.eval()
     test_loss = 0
@@ -93,6 +98,7 @@ def test(model, device, test_loader, use_amp, use_fp8):
     with torch.no_grad():
         for data, target in test_loader:
             data, target = data.to(device), target.to(device)
+<<<<<<< HEAD
             if use_amp:
                 with autocast(device_type='cuda', dtype=torch.float16):
                     output = model(data)
@@ -105,6 +111,12 @@ def test(model, device, test_loader, use_amp, use_fp8):
             pred = output.argmax(
                 dim=1, keepdim=True
             )  # get the index of the max log-probability
+=======
+            with te.fp8_autocast(enabled=use_fp8):
+                output = model(data)
+            test_loss += F.nll_loss(output, target, reduction="sum").item()  # sum up batch loss
+            pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
+>>>>>>> a4e95e8
             correct += pred.eq(target.view_as(pred)).sum().item()
 
     test_loss /= len(test_loader.dataset)
@@ -160,9 +172,7 @@ def main():
         default=False,
         help="quickly check a single pass",
     )
-    parser.add_argument(
-        "--seed", type=int, default=1, metavar="S", help="random seed (default: 1)"
-    )
+    parser.add_argument("--seed", type=int, default=1, metavar="S", help="random seed (default: 1)")
     parser.add_argument(
         "--log-interval",
         type=int,
@@ -177,10 +187,17 @@ def main():
         help="For Saving the current Model",
     )
     parser.add_argument(
+<<<<<<< HEAD
         "--use-amp", action="store_true", default=False, help="Use AMP training"
     )
     parser.add_argument(
         "--use-fp8", action="store_true", default=False, help="Use FP8 for inference and training without recalibration"
+=======
+        "--use-fp8",
+        action="store_true",
+        default=False,
+        help="Use FP8 for inference and training without recalibration",
+>>>>>>> a4e95e8
     )
     parser.add_argument(
         "--use-fp8-infer", action="store_true", default=False, help="Use FP8 inference only"
@@ -233,7 +250,7 @@ def main():
 
     if args.save_model or args.use_fp8_infer:
         torch.save(model.state_dict(), "mnist_cnn.pt")
-        print('Eval with reloaded checkpoint : fp8='+str(args.use_fp8_infer))
+        print("Eval with reloaded checkpoint : fp8=" + str(args.use_fp8_infer))
         weights = torch.load("mnist_cnn.pt")
         model.load_state_dict(weights)
         test(model, device, test_loader, args.use_fp8_infer)

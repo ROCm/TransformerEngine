@@ -14,16 +14,18 @@ from transformer_engine_torch import (
     NVTE_QKV_Layout,
     NVTE_Bias_Type,
     NVTE_Mask_Type,
-    NVTE_Fused_Attn_Backend
+    NVTE_Fused_Attn_Backend,
 )
 
 
-__all__ = ['fused_attn_fwd_qkvpacked',
-           'fused_attn_bwd_qkvpacked',
-           'fused_attn_fwd_kvpacked',
-           'fused_attn_bwd_kvpacked',
-           'fused_attn_fwd',
-           'fused_attn_bwd']
+__all__ = [
+    "fused_attn_fwd_qkvpacked",
+    "fused_attn_bwd_qkvpacked",
+    "fused_attn_fwd_kvpacked",
+    "fused_attn_bwd_kvpacked",
+    "fused_attn_fwd",
+    "fused_attn_bwd",
+]
 
 
 TORCH_DType = {
@@ -51,22 +53,23 @@ QKVLayout = {
     "thd_t2hd": NVTE_QKV_Layout.NVTE_THD_T2HD,
     "thd_th2d": NVTE_QKV_Layout.NVTE_THD_TH2D,
     "thd_thd_thd": NVTE_QKV_Layout.NVTE_THD_THD_THD,
-    }
+}
 
 AttnBiasType = {
     "no_bias": NVTE_Bias_Type.NVTE_NO_BIAS,
     "pre_scale_bias": NVTE_Bias_Type.NVTE_PRE_SCALE_BIAS,
     "post_scale_bias": NVTE_Bias_Type.NVTE_POST_SCALE_BIAS,
     "alibi": NVTE_Bias_Type.NVTE_ALIBI,
-    }
+}
 
 AttnMaskType = {
     "no_mask": NVTE_Mask_Type.NVTE_NO_MASK,
     "padding": NVTE_Mask_Type.NVTE_PADDING_MASK,
     "causal": NVTE_Mask_Type.NVTE_CAUSAL_MASK,
     "padding_causal": NVTE_Mask_Type.NVTE_PADDING_CAUSAL_MASK,
-    }
+}
 
+<<<<<<< HEAD
 if not IS_HIP_EXTENSION:
     FusedAttnBackend = {
         "F16_max512_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen,
@@ -80,6 +83,14 @@ else:
         "CK": NVTE_Fused_Attn_Backend.NVTE_CK,
         "No_Backend": NVTE_Fused_Attn_Backend.NVTE_No_Backend,
         }
+=======
+FusedAttnBackend = {
+    "F16_max512_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen,
+    "F16_arbitrary_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+    "FP8": NVTE_Fused_Attn_Backend.NVTE_FP8,
+    "No_Backend": NVTE_Fused_Attn_Backend.NVTE_No_Backend,
+}
+>>>>>>> a4e95e8
 
 BACKEND_F16m512_FP8_THREADS_PER_CTA = 128
 BACKEND_F16arb_ELTS_PER_THREADS = 16
@@ -93,10 +104,7 @@ def fused_attn_fwd_qkvpacked(
     qkv_dtype: tex.DType,
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
     attn_bias: torch.Tensor = None,
-    seq_offsets_q: torch.Tensor = None,
-    seq_offsets_k: torch.Tensor = None,
-    seq_offsets_v: torch.Tensor = None,
-    seq_offsets_o: torch.Tensor = None,
+    cu_seqlens_padded: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
     d_scale_s: torch.Tensor = None,
     q_scale_s: torch.Tensor = None,
@@ -132,14 +140,8 @@ def fused_attn_fwd_qkvpacked(
     attn_bias: torch.Tensor, default = None
                 input tensor Bias when attn_bias_type is "pre_scale_bias" or "post_scale_bias";
                 shape [1, num_heads, max_seqlen, max_seqlen], same data type as qkv
-    seq_offsets_q: torch.Tensor, default = None
-                cumulative sequence offsets for Q; shape [batch_size + 1]
-    seq_offsets_k: torch.Tensor, default = None
-                cumulative sequence offsets for K; shape [batch_size + 1]
-    seq_offsets_v: torch.Tensor, default = None
-                cumulative sequence offsets for V; shape [batch_size + 1]
-    seq_offsets_o: torch.Tensor, default = None
-                cumulative sequence offsets for O; shape [batch_size + 1]
+    cu_seqlens_padded: torch.Tensor, default = None
+                cumulative sequence offsets for QKV; shape [batch_size + 1]
     d_scale_qkv: torch.Tensor, default = None
                 input tensor for the dequantization of QKV in FP8 computations
     d_scale_s: torch.Tensor, default = None
@@ -207,11 +209,12 @@ def fused_attn_fwd_qkvpacked(
         attn_scale = 1.0 / math.sqrt(d)
 
     if attn_bias_type not in ["no_bias", "alibi"]:
-        assert (attn_bias is not None
-                ), "attn_bias tensor cannot be None when attn_bias_type is not no_bias or alibi."
-        assert (attn_bias.dtype == qkv.dtype
-                ), "attn_bias tensor must be in the same dtype as qkv."
+        assert (
+            attn_bias is not None
+        ), "attn_bias tensor cannot be None when attn_bias_type is not no_bias or alibi."
+        assert attn_bias.dtype == qkv.dtype, "attn_bias tensor must be in the same dtype as qkv."
 
+<<<<<<< HEAD
     assert (fused_attention_backend != FusedAttnBackend["No_Backend"]
             ), "Fused attention does not support this input combination."
     
@@ -224,12 +227,24 @@ def fused_attn_fwd_qkvpacked(
         # BF16/FP16 fused attention API from fmha_v2
         if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
             rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
+=======
+    assert (
+        fused_attention_backend != FusedAttnBackend["No_Backend"]
+    ), "Fused attention does not support this input combination."
+
+    # BF16/FP16 fused attention API from fmha_v1 apex
+    if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
+        rng_elts_per_thread = (
+            max_seqlen * max_seqlen + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
+        ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
+>>>>>>> a4e95e8
 
         # FP8 fused attention API from fmha_v2
         if fused_attention_backend == FusedAttnBackend["FP8"]:
             rng_elts_per_thread = (max_seqlen * max_seqlen
                     + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1)//BACKEND_F16m512_FP8_THREADS_PER_CTA
 
+<<<<<<< HEAD
             assert (d_scale_qkv is not None
                     ), "d_scale_qkv is required as an input for FP8 fused attention."
             assert (d_scale_s is not None
@@ -245,15 +260,46 @@ def fused_attn_fwd_qkvpacked(
     else:
         # ROCm fused attn requires 1 offset per 1 random variable
         rng_elts_per_thread = 0
+=======
+    # FP8 fused attention API from fmha_v2
+    if fused_attention_backend == FusedAttnBackend["FP8"]:
+        rng_elts_per_thread = (
+            max_seqlen * max_seqlen + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
+        ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
+
+        assert (
+            d_scale_qkv is not None
+        ), "d_scale_qkv is required as an input for FP8 fused attention."
+        assert d_scale_s is not None, "q_scale_s is required as an input for FP8 fused attention."
+        assert q_scale_s is not None, "q_scale_s is required as an input for FP8 fused attention."
+        assert q_scale_o is not None, "q_scale_o is required as an input for FP8 fused attention."
+        assert amax_s is not None, "amax_s is required as an input for FP8 fused attention."
+        assert amax_o is not None, "amax_o is required as an input for FP8 fused attention."
+>>>>>>> a4e95e8
 
     # execute kernel
     output_tensors = tex.fused_attn_fwd_qkvpacked(
-            max_seqlen, is_training, attn_scale, dropout, fast_zero_fill,
-            QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
-            cu_seqlens, qkv, qkv_dtype,
-            seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o,
-            d_scale_qkv, d_scale_s, q_scale_s, q_scale_o, amax_s, amax_o, attn_bias,
-            rng_gen, rng_elts_per_thread,
+        max_seqlen,
+        is_training,
+        attn_scale,
+        dropout,
+        fast_zero_fill,
+        QKVLayout[qkv_layout],
+        AttnBiasType[attn_bias_type],
+        AttnMaskType[attn_mask_type],
+        cu_seqlens,
+        qkv,
+        qkv_dtype,
+        cu_seqlens_padded,
+        d_scale_qkv,
+        d_scale_s,
+        q_scale_s,
+        q_scale_o,
+        amax_s,
+        amax_o,
+        attn_bias,
+        rng_gen,
+        rng_elts_per_thread,
     )
 
     # out, aux_ctx_tensors
@@ -270,10 +316,7 @@ def fused_attn_bwd_qkvpacked(
     dqkv_dtype: tex.DType,
     aux_ctx_tensors: List[torch.Tensor],
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
-    seq_offsets_q: torch.Tensor = None,
-    seq_offsets_k: torch.Tensor = None,
-    seq_offsets_v: torch.Tensor = None,
-    seq_offsets_o: torch.Tensor = None,
+    cu_seqlens_padded: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
     d_scale_s: torch.Tensor = None,
     d_scale_o: torch.Tensor = None,
@@ -317,14 +360,8 @@ def fused_attn_bwd_qkvpacked(
                 e.g. aux_ctx_tensors = [M, ZInv, rng_state]
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend
                 please see FusedAttention module for details on supported backends.
-    seq_offsets_q: torch.Tensor, default = None
-                cumulative sequence offsets for Q; shape [batch_size + 1]
-    seq_offsets_k: torch.Tensor, default = None
-                cumulative sequence offsets for K; shape [batch_size + 1]
-    seq_offsets_v: torch.Tensor, default = None
-                cumulative sequence offsets for V; shape [batch_size + 1]
-    seq_offsets_o: torch.Tensor, default = None
-                cumulative sequence offsets for O; shape [batch_size + 1]
+    cu_seqlens_padded: torch.Tensor, default = None
+                cumulative sequence offsets for QKV; shape [batch_size + 1]
     d_scale_qkv: torch.Tensor, default = None
                 input tensor for the dequantization of QKV in FP8 computations
     d_scale_s: torch.Tensor, default = None
@@ -374,9 +411,11 @@ def fused_attn_bwd_qkvpacked(
         d = qkv.size(-1)
         attn_scale = 1.0 / math.sqrt(d)
 
-    assert (fused_attention_backend != FusedAttnBackend["No_Backend"]
-            ), "Fused attention does not support this input combination."
+    assert (
+        fused_attention_backend != FusedAttnBackend["No_Backend"]
+    ), "Fused attention does not support this input combination."
 
+<<<<<<< HEAD
     if not IS_HIP_EXTENSION:
         if fused_attention_backend != FusedAttnBackend["F16_max512_seqlen"]:
             assert (len(aux_ctx_tensors) >= 1
@@ -395,15 +434,55 @@ def fused_attn_bwd_qkvpacked(
             assert (amax_dqkv is not None), "amax_dqkv is required for FP8 fused attention."
             assert (len(aux_ctx_tensors) == 3
                     ), "aux_ctx_tensors is required to be [M, ZInv, rng_state] for FP8 fused attention."
+=======
+    if fused_attention_backend != FusedAttnBackend["F16_max512_seqlen"]:
+        assert (
+            len(aux_ctx_tensors) >= 1
+        ), "aux_ctx_tensors must contain rng_state as its last element."
+
+    if fused_attention_backend == FusedAttnBackend["FP8"]:
+        assert d_scale_qkv is not None, "d_scale_qkv is required for FP8 fused attention."
+        assert d_scale_s is not None, "d_scale_s is required for FP8 fused attention."
+        assert d_scale_o is not None, "d_scale_o is required for FP8 fused attention."
+        assert d_scale_do is not None, "d_scale_do is required for FP8 fused attention."
+        assert d_scale_dp is not None, "d_scale_dp is required for FP8 fused attention."
+        assert q_scale_s is not None, "q_scale_s is required for FP8 fused attention."
+        assert q_scale_dp is not None, "q_scale_dp is required for FP8 fused attention."
+        assert q_scale_dqkv is not None, "q_scale_dqkv is required for FP8 fused attention."
+        assert amax_dp is not None, "amax_dp is required for FP8 fused attention."
+        assert amax_dqkv is not None, "amax_dqkv is required for FP8 fused attention."
+        assert (
+            len(aux_ctx_tensors) == 3
+        ), "aux_ctx_tensors is required to be [M, ZInv, rng_state] for FP8 fused attention."
+>>>>>>> a4e95e8
 
     # execute kernel
     output_tensors = tex.fused_attn_bwd_qkvpacked(
-            max_seqlen, attn_scale, dropout, fast_zero_fill,
-            QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
-            cu_seqlens, qkv, o, d_o, qkv_dtype, dqkv_dtype, aux_ctx_tensors,
-            seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o,
-            d_scale_qkv, d_scale_s, d_scale_o, d_scale_do, d_scale_dp,
-            q_scale_s, q_scale_dp, q_scale_dqkv, amax_dp, amax_dqkv,
+        max_seqlen,
+        attn_scale,
+        dropout,
+        fast_zero_fill,
+        QKVLayout[qkv_layout],
+        AttnBiasType[attn_bias_type],
+        AttnMaskType[attn_mask_type],
+        cu_seqlens,
+        qkv,
+        o,
+        d_o,
+        qkv_dtype,
+        dqkv_dtype,
+        aux_ctx_tensors,
+        cu_seqlens_padded,
+        d_scale_qkv,
+        d_scale_s,
+        d_scale_o,
+        d_scale_do,
+        d_scale_dp,
+        q_scale_s,
+        q_scale_dp,
+        q_scale_dqkv,
+        amax_dp,
+        amax_dqkv,
     )
 
     return output_tensors
@@ -420,10 +499,8 @@ def fused_attn_fwd_kvpacked(
     qkv_dtype: tex.DType,
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
     attn_bias: torch.Tensor = None,
-    seq_offsets_q: torch.Tensor = None,
-    seq_offsets_k: torch.Tensor = None,
-    seq_offsets_v: torch.Tensor = None,
-    seq_offsets_o: torch.Tensor = None,
+    cu_seqlens_q_padded: torch.Tensor = None,
+    cu_seqlens_kv_padded: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
     d_scale_s: torch.Tensor = None,
     q_scale_s: torch.Tensor = None,
@@ -466,14 +543,10 @@ def fused_attn_fwd_kvpacked(
     attn_bias: torch.Tensor, default = None
                 input tensor Bias when attn_bias_type is "pre_scale_bias" or "post_scale_bias";
                 shape [1, num_heads, max_seqlen_q, max_seqlen_kv], same data type as q and kv
-    seq_offsets_q: torch.Tensor, default = None
+    cu_seqlens_q_padded: torch.Tensor, default = None
                 cumulative sequence offsets for Q; shape [batch_size + 1]
-    seq_offsets_k: torch.Tensor, default = None
-                cumulative sequence offsets for K; shape [batch_size + 1]
-    seq_offsets_v: torch.Tensor, default = None
-                cumulative sequence offsets for V; shape [batch_size + 1]
-    seq_offsets_o: torch.Tensor, default = None
-                cumulative sequence offsets for O; shape [batch_size + 1]
+    cu_seqlens_kv_padded: torch.Tensor, default = None
+                cumulative sequence offsets for KV; shape [batch_size + 1]
     d_scale_qkv: torch.Tensor, default = None
                 input tensor for the dequantization of QKV in FP8 computations
     d_scale_s: torch.Tensor, default = None
@@ -542,52 +615,84 @@ def fused_attn_fwd_kvpacked(
         attn_scale = 1.0 / math.sqrt(d)
 
     if attn_bias_type not in ["no_bias", "alibi"]:
-        assert (attn_bias is not None
-                ), "attn_bias tensor cannot be None when attn_bias_type is not no_bias or alibi."
-        assert (attn_bias.dtype == q.dtype
-                ), "attn_bias tensor must be in the same dtype as q and kv."
+        assert (
+            attn_bias is not None
+        ), "attn_bias tensor cannot be None when attn_bias_type is not no_bias or alibi."
+        assert attn_bias.dtype == q.dtype, "attn_bias tensor must be in the same dtype as q and kv."
 
-    assert (fused_attention_backend != FusedAttnBackend["No_Backend"]
-            ), "Fused attention does not support this input combination."
+    assert (
+        fused_attention_backend != FusedAttnBackend["No_Backend"]
+    ), "Fused attention does not support this input combination."
 
+<<<<<<< HEAD
     if not IS_HIP_EXTENSION:
         # BF16/FP16 fused attention API from fmha_v1 apex
         if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
             rng_elts_per_thread = (max_seqlen_q * max_seqlen_kv
                     + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1)//BACKEND_F16m512_FP8_THREADS_PER_CTA
+=======
+    # BF16/FP16 fused attention API from fmha_v1 apex
+    if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
+        rng_elts_per_thread = (
+            max_seqlen_q * max_seqlen_kv + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
+        ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
+>>>>>>> a4e95e8
 
         # BF16/FP16 fused attention API from fmha_v2
         if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
             rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
 
+<<<<<<< HEAD
         # FP8 fused attention API from fmha_v2
         if fused_attention_backend == FusedAttnBackend["FP8"]:
             rng_elts_per_thread = (max_seqlen_q * max_seqlen_q
                     + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1)//BACKEND_F16m512_FP8_THREADS_PER_CTA
     else:
         rng_elts_per_thread = 0
+=======
+    # FP8 fused attention API from fmha_v2
+    if fused_attention_backend == FusedAttnBackend["FP8"]:
+        rng_elts_per_thread = (
+            max_seqlen_q * max_seqlen_q + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
+        ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
+>>>>>>> a4e95e8
 
-        assert (d_scale_qkv is not None
-                ), "d_scale_qkv is required as an input for FP8 fused attention."
-        assert (d_scale_s is not None
-                ), "q_scale_s is required as an input for FP8 fused attention."
-        assert (q_scale_s is not None
-                ), "q_scale_s is required as an input for FP8 fused attention."
-        assert (q_scale_o is not None
-                ), "q_scale_o is required as an input for FP8 fused attention."
-        assert (amax_s is not None
-                ), "amax_s is required as an input for FP8 fused attention."
-        assert (amax_o is not None
-                ), "amax_o is required as an input for FP8 fused attention."
+        assert (
+            d_scale_qkv is not None
+        ), "d_scale_qkv is required as an input for FP8 fused attention."
+        assert d_scale_s is not None, "q_scale_s is required as an input for FP8 fused attention."
+        assert q_scale_s is not None, "q_scale_s is required as an input for FP8 fused attention."
+        assert q_scale_o is not None, "q_scale_o is required as an input for FP8 fused attention."
+        assert amax_s is not None, "amax_s is required as an input for FP8 fused attention."
+        assert amax_o is not None, "amax_o is required as an input for FP8 fused attention."
 
     # execute kernel
     output_tensors = tex.fused_attn_fwd_kvpacked(
-            max_seqlen_q, max_seqlen_kv, is_training, attn_scale, dropout, fast_zero_fill,
-            QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
-            cu_seqlens_q, cu_seqlens_kv, q, kv, qkv_dtype,
-            seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o,
-            d_scale_qkv, d_scale_s, q_scale_s, q_scale_o, amax_s, amax_o,
-            attn_bias, rng_gen, rng_elts_per_thread,
+        max_seqlen_q,
+        max_seqlen_kv,
+        is_training,
+        attn_scale,
+        dropout,
+        fast_zero_fill,
+        QKVLayout[qkv_layout],
+        AttnBiasType[attn_bias_type],
+        AttnMaskType[attn_mask_type],
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        q,
+        kv,
+        qkv_dtype,
+        cu_seqlens_q_padded,
+        cu_seqlens_kv_padded,
+        d_scale_qkv,
+        d_scale_s,
+        q_scale_s,
+        q_scale_o,
+        amax_s,
+        amax_o,
+        attn_bias,
+        rng_gen,
+        rng_elts_per_thread,
     )
 
     # out, aux_ctx_tensors
@@ -607,10 +712,8 @@ def fused_attn_bwd_kvpacked(
     dqkv_dtype: tex.DType,
     aux_ctx_tensors: List[torch.Tensor],
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
-    seq_offsets_q: torch.Tensor = None,
-    seq_offsets_k: torch.Tensor = None,
-    seq_offsets_v: torch.Tensor = None,
-    seq_offsets_o: torch.Tensor = None,
+    cu_seqlens_q_padded: torch.Tensor = None,
+    cu_seqlens_kv_padded: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
     d_scale_s: torch.Tensor = None,
     d_scale_o: torch.Tensor = None,
@@ -661,14 +764,10 @@ def fused_attn_bwd_kvpacked(
                 e.g. aux_ctx_tensors = [M, ZInv, rng_state]
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend
                 please see FusedAttention module for details on supported backends.
-    seq_offsets_q: torch.Tensor, default = None
+    cu_seqlens_q_padded: torch.Tensor, default = None
                 cumulative sequence offsets for Q; shape [batch_size + 1]
-    seq_offsets_k: torch.Tensor, default = None
-                cumulative sequence offsets for K; shape [batch_size + 1]
-    seq_offsets_v: torch.Tensor, default = None
-                cumulative sequence offsets for V; shape [batch_size + 1]
-    seq_offsets_o: torch.Tensor, default = None
-                cumulative sequence offsets for O; shape [batch_size + 1]
+    cu_seqlens_kv_padded: torch.Tensor, default = None
+                cumulative sequence offsets for KV; shape [batch_size + 1]
     d_scale_qkv: torch.Tensor, default = None
                 input tensor for the dequantization of QKV in FP8 computations
     d_scale_s: torch.Tensor, default = None
@@ -722,9 +821,11 @@ def fused_attn_bwd_kvpacked(
         d = q.size(-1)
         attn_scale = 1.0 / math.sqrt(d)
 
-    assert (fused_attention_backend != FusedAttnBackend["No_Backend"]
-            ), "Fused attention does not support this input combination."
+    assert (
+        fused_attention_backend != FusedAttnBackend["No_Backend"]
+    ), "Fused attention does not support this input combination."
 
+<<<<<<< HEAD
     if not IS_HIP_EXTENSION:
         if fused_attention_backend != FusedAttnBackend["F16_max512_seqlen"]:
             assert (len(aux_ctx_tensors) >= 1
@@ -743,15 +844,59 @@ def fused_attn_bwd_kvpacked(
             assert (amax_dqkv is not None), "amax_dqkv is required for FP8 fused attention."
             assert (len(aux_ctx_tensors) == 3
                     ), "aux_ctx_tensors is required to be [M, ZInv, rng_state] for FP8 fused attention."
+=======
+    if fused_attention_backend != FusedAttnBackend["F16_max512_seqlen"]:
+        assert (
+            len(aux_ctx_tensors) >= 1
+        ), "aux_ctx_tensors must contain rng_state as its last element."
+
+    if fused_attention_backend == FusedAttnBackend["FP8"]:
+        assert d_scale_qkv is not None, "d_scale_qkv is required for FP8 fused attention."
+        assert d_scale_s is not None, "d_scale_s is required for FP8 fused attention."
+        assert d_scale_o is not None, "d_scale_o is required for FP8 fused attention."
+        assert d_scale_do is not None, "d_scale_do is required for FP8 fused attention."
+        assert d_scale_dp is not None, "d_scale_dp is required for FP8 fused attention."
+        assert q_scale_s is not None, "q_scale_s is required for FP8 fused attention."
+        assert q_scale_dp is not None, "q_scale_dp is required for FP8 fused attention."
+        assert q_scale_dqkv is not None, "q_scale_dqkv is required for FP8 fused attention."
+        assert amax_dp is not None, "amax_dp is required for FP8 fused attention."
+        assert amax_dqkv is not None, "amax_dqkv is required for FP8 fused attention."
+        assert (
+            len(aux_ctx_tensors) == 3
+        ), "aux_ctx_tensors is required to be [M, ZInv, rng_state] for FP8 fused attention."
+>>>>>>> a4e95e8
 
     # execute kernel
     output_tensors = tex.fused_attn_bwd_kvpacked(
-            max_seqlen_q, max_seqlen_kv, attn_scale, dropout, fast_zero_fill,
-            QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
-            cu_seqlens_q, cu_seqlens_kv, q, kv, o, d_o, qkv_dtype, dqkv_dtype, aux_ctx_tensors,
-            seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o,
-            d_scale_qkv, d_scale_s, d_scale_o, d_scale_do, d_scale_dp,
-            q_scale_s, q_scale_dp, q_scale_dqkv, amax_dp, amax_dqkv,
+        max_seqlen_q,
+        max_seqlen_kv,
+        attn_scale,
+        dropout,
+        fast_zero_fill,
+        QKVLayout[qkv_layout],
+        AttnBiasType[attn_bias_type],
+        AttnMaskType[attn_mask_type],
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        q,
+        kv,
+        o,
+        d_o,
+        qkv_dtype,
+        dqkv_dtype,
+        aux_ctx_tensors,
+        cu_seqlens_q_padded,
+        cu_seqlens_kv_padded,
+        d_scale_qkv,
+        d_scale_s,
+        d_scale_o,
+        d_scale_do,
+        d_scale_dp,
+        q_scale_s,
+        q_scale_dp,
+        q_scale_dqkv,
+        amax_dp,
+        amax_dqkv,
     )
 
     return output_tensors
@@ -769,10 +914,8 @@ def fused_attn_fwd(
     qkv_dtype: tex.DType,
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
     attn_bias: torch.Tensor = None,
-    seq_offsets_q: torch.Tensor = None,
-    seq_offsets_k: torch.Tensor = None,
-    seq_offsets_v: torch.Tensor = None,
-    seq_offsets_o: torch.Tensor = None,
+    cu_seqlens_q_padded: torch.Tensor = None,
+    cu_seqlens_kv_padded: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
     d_scale_s: torch.Tensor = None,
     q_scale_s: torch.Tensor = None,
@@ -819,14 +962,10 @@ def fused_attn_fwd(
     attn_bias: torch.Tensor, default = None
                 input tensor Bias when attn_bias_type is "pre_scale_bias" or "post_scale_bias";
                 shape [1, num_heads, max_seqlen_q, max_seqlen_kv], same data type as q, k and v
-    seq_offsets_q: torch.Tensor, default = None
+    cu_seqlens_q_padded: torch.Tensor, default = None
                 cumulative sequence offsets for Q; shape [batch_size + 1]
-    seq_offsets_k: torch.Tensor, default = None
-                cumulative sequence offsets for K; shape [batch_size + 1]
-    seq_offsets_v: torch.Tensor, default = None
-                cumulative sequence offsets for V; shape [batch_size + 1]
-    seq_offsets_o: torch.Tensor, default = None
-                cumulative sequence offsets for O; shape [batch_size + 1]
+    cu_seqlens_kv_padded: torch.Tensor, default = None
+                cumulative sequence offsets for KV; shape [batch_size + 1]
     d_scale_qkv: torch.Tensor, default = None
                 input tensor for the dequantization of Q, K and V in FP8 computations
     d_scale_s: torch.Tensor, default = None
@@ -897,24 +1036,34 @@ def fused_attn_fwd(
         attn_scale = 1.0 / math.sqrt(d)
 
     if attn_bias_type not in ["no_bias", "alibi"]:
-        assert (attn_bias is not None
-                ), "attn_bias tensor cannot be None when attn_bias_type is not no_bias or alibi."
-        assert (attn_bias.dtype == q.dtype
-                ), "attn_bias tensor must be in the same dtype as q and kv."
+        assert (
+            attn_bias is not None
+        ), "attn_bias tensor cannot be None when attn_bias_type is not no_bias or alibi."
+        assert attn_bias.dtype == q.dtype, "attn_bias tensor must be in the same dtype as q and kv."
 
-    assert (fused_attention_backend != FusedAttnBackend["No_Backend"]
-            ), "Fused attention does not support this input combination."
+    assert (
+        fused_attention_backend != FusedAttnBackend["No_Backend"]
+    ), "Fused attention does not support this input combination."
 
+<<<<<<< HEAD
     if not IS_HIP_EXTENSION:
         # BF16/FP16 fused attention API from fmha_v2
         if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
             rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
+=======
+    # BF16/FP16 fused attention API from fmha_v1 apex
+    if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
+        rng_elts_per_thread = (
+            max_seqlen_q * max_seqlen_kv + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
+        ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
+>>>>>>> a4e95e8
 
         # FP8 fused attention API from fmha_v2
         if fused_attention_backend == FusedAttnBackend["FP8"]:
             rng_elts_per_thread = (max_seqlen_q * max_seqlen_q
                     + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1)//BACKEND_F16m512_FP8_THREADS_PER_CTA
 
+<<<<<<< HEAD
             assert (d_scale_qkv is not None
                     ), "d_scale_qkv is required as an input for FP8 fused attention."
             assert (d_scale_s is not None
@@ -934,15 +1083,51 @@ def fused_attn_fwd(
                     + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1)//BACKEND_F16m512_FP8_THREADS_PER_CTA
     else:
         rng_elts_per_thread = 0
+=======
+    # FP8 fused attention API from fmha_v2
+    if fused_attention_backend == FusedAttnBackend["FP8"]:
+        rng_elts_per_thread = (
+            max_seqlen_q * max_seqlen_q + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
+        ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
+
+        assert (
+            d_scale_qkv is not None
+        ), "d_scale_qkv is required as an input for FP8 fused attention."
+        assert d_scale_s is not None, "q_scale_s is required as an input for FP8 fused attention."
+        assert q_scale_s is not None, "q_scale_s is required as an input for FP8 fused attention."
+        assert q_scale_o is not None, "q_scale_o is required as an input for FP8 fused attention."
+        assert amax_s is not None, "amax_s is required as an input for FP8 fused attention."
+        assert amax_o is not None, "amax_o is required as an input for FP8 fused attention."
+>>>>>>> a4e95e8
 
     # execute kernel
     output_tensors = tex.fused_attn_fwd(
-            max_seqlen_q, max_seqlen_kv, is_training, attn_scale, dropout, fast_zero_fill,
-            QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
-            cu_seqlens_q, cu_seqlens_kv, q, k, v, qkv_dtype,
-            seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o,
-            d_scale_qkv, d_scale_s, q_scale_s, q_scale_o, amax_s, amax_o,
-            attn_bias, rng_gen, rng_elts_per_thread,
+        max_seqlen_q,
+        max_seqlen_kv,
+        is_training,
+        attn_scale,
+        dropout,
+        fast_zero_fill,
+        QKVLayout[qkv_layout],
+        AttnBiasType[attn_bias_type],
+        AttnMaskType[attn_mask_type],
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        q,
+        k,
+        v,
+        qkv_dtype,
+        cu_seqlens_q_padded,
+        cu_seqlens_kv_padded,
+        d_scale_qkv,
+        d_scale_s,
+        q_scale_s,
+        q_scale_o,
+        amax_s,
+        amax_o,
+        attn_bias,
+        rng_gen,
+        rng_elts_per_thread,
     )
 
     # out, aux_ctx_tensors
@@ -963,10 +1148,8 @@ def fused_attn_bwd(
     dqkv_dtype: tex.DType,
     aux_ctx_tensors: List[torch.Tensor],
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
-    seq_offsets_q: torch.Tensor = None,
-    seq_offsets_k: torch.Tensor = None,
-    seq_offsets_v: torch.Tensor = None,
-    seq_offsets_o: torch.Tensor = None,
+    cu_seqlens_q_padded: torch.Tensor = None,
+    cu_seqlens_kv_padded: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
     d_scale_s: torch.Tensor = None,
     d_scale_o: torch.Tensor = None,
@@ -1020,14 +1203,10 @@ def fused_attn_bwd(
                 e.g. aux_ctx_tensors = [M, ZInv, rng_state]
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend
                 please see FusedAttention module for details on supported backends.
-    seq_offsets_q: torch.Tensor, default = None
+    cu_seqlens_q_padded: torch.Tensor, default = None
                 cumulative sequence offsets for Q; shape [batch_size + 1]
-    seq_offsets_k: torch.Tensor, default = None
-                cumulative sequence offsets for K; shape [batch_size + 1]
-    seq_offsets_v: torch.Tensor, default = None
-                cumulative sequence offsets for V; shape [batch_size + 1]
-    seq_offsets_o: torch.Tensor, default = None
-                cumulative sequence offsets for O; shape [batch_size + 1]
+    cu_seqlens_kv_padded: torch.Tensor, default = None
+                cumulative sequence offsets for KV; shape [batch_size + 1]
     d_scale_qkv: torch.Tensor, default = None
                 input tensor for the dequantization of Q, K and V in FP8 computations
     d_scale_s: torch.Tensor, default = None
@@ -1085,9 +1264,11 @@ def fused_attn_bwd(
         d = q.size(-1)
         attn_scale = 1.0 / math.sqrt(d)
 
-    assert (fused_attention_backend != FusedAttnBackend["No_Backend"]
-            ), "Fused attention does not support this input combination."
+    assert (
+        fused_attention_backend != FusedAttnBackend["No_Backend"]
+    ), "Fused attention does not support this input combination."
 
+<<<<<<< HEAD
     if not IS_HIP_EXTENSION:
         if fused_attention_backend != FusedAttnBackend["F16_max512_seqlen"]:
             assert (len(aux_ctx_tensors) >= 1
@@ -1106,15 +1287,60 @@ def fused_attn_bwd(
             assert (amax_dqkv is not None), "amax_dqkv is required for FP8 fused attention."
             assert (len(aux_ctx_tensors) == 3
                     ), "aux_ctx_tensors is required to be [M, ZInv, rng_state] for FP8 fused attention."
+=======
+    if fused_attention_backend != FusedAttnBackend["F16_max512_seqlen"]:
+        assert (
+            len(aux_ctx_tensors) >= 1
+        ), "aux_ctx_tensors must contain rng_state as its last element."
+
+    if fused_attention_backend == FusedAttnBackend["FP8"]:
+        assert d_scale_qkv is not None, "d_scale_qkv is required for FP8 fused attention."
+        assert d_scale_s is not None, "d_scale_s is required for FP8 fused attention."
+        assert d_scale_o is not None, "d_scale_o is required for FP8 fused attention."
+        assert d_scale_do is not None, "d_scale_do is required for FP8 fused attention."
+        assert d_scale_dp is not None, "d_scale_dp is required for FP8 fused attention."
+        assert q_scale_s is not None, "q_scale_s is required for FP8 fused attention."
+        assert q_scale_dp is not None, "q_scale_dp is required for FP8 fused attention."
+        assert q_scale_dqkv is not None, "q_scale_dqkv is required for FP8 fused attention."
+        assert amax_dp is not None, "amax_dp is required for FP8 fused attention."
+        assert amax_dqkv is not None, "amax_dqkv is required for FP8 fused attention."
+        assert (
+            len(aux_ctx_tensors) == 3
+        ), "aux_ctx_tensors is required to be [M, ZInv, rng_state] for FP8 fused attention."
+>>>>>>> a4e95e8
 
     # execute kernel
     output_tensors = tex.fused_attn_bwd(
-            max_seqlen_q, max_seqlen_kv, attn_scale, dropout, fast_zero_fill,
-            QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
-            cu_seqlens_q, cu_seqlens_kv, q, k, v, o, d_o, qkv_dtype, dqkv_dtype, aux_ctx_tensors,
-            seq_offsets_q, seq_offsets_k, seq_offsets_v, seq_offsets_o,
-            d_scale_qkv, d_scale_s, d_scale_o, d_scale_do, d_scale_dp,
-            q_scale_s, q_scale_dp, q_scale_dqkv, amax_dp, amax_dqkv,
+        max_seqlen_q,
+        max_seqlen_kv,
+        attn_scale,
+        dropout,
+        fast_zero_fill,
+        QKVLayout[qkv_layout],
+        AttnBiasType[attn_bias_type],
+        AttnMaskType[attn_mask_type],
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        q,
+        k,
+        v,
+        o,
+        d_o,
+        qkv_dtype,
+        dqkv_dtype,
+        aux_ctx_tensors,
+        cu_seqlens_q_padded,
+        cu_seqlens_kv_padded,
+        d_scale_qkv,
+        d_scale_s,
+        d_scale_o,
+        d_scale_do,
+        d_scale_dp,
+        q_scale_s,
+        q_scale_dp,
+        q_scale_dqkv,
+        amax_dp,
+        amax_dqkv,
     )
 
     return output_tensors
