@@ -454,6 +454,7 @@ def configure_rocm() -> List[str]:
     Returns a list of CMake flags for building with ROCm
 
     """
+    use_hipblaslt = "ON" if os.getenv("NVTE_USE_HIPBLASLT", "0") == "1" else "OFF"
     rocm_path = os.getenv("ROCM_PATH", "/opt/rocm")
     hip_compiler_flags = [
         "-Xclang -mllvm",
@@ -487,6 +488,7 @@ def configure_rocm() -> List[str]:
         f"-DCMAKE_HIP_FLAGS={hip_compiler_flags}",
         f"-DGPU_TARGETS={gpu_targets}",
         f"-DCMAKE_HIP_ARCHITECTURES={gpu_targets}",
+        f"-DUSE_HIPBLASLT={use_hipblaslt}",
     ]
 
 

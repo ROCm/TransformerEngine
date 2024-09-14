@@ -9,11 +9,11 @@
 
 |License|
 
-Transformer Engine On ROCm and AMDGPU
+Transformer Engine on ROCm
 =====================================
 
-This repository enables Transformer Engine (TE) on ROCm as a library to accelerate Transformer models on AMD GPUs, including using 8-bit floating point (FP8) precision on MI300 GPUs, to provide better performance with lower memory utilization in both training and inference. 
-One of the missions is to provide an alternative to accelerate Transformer models that were previously run on NVIDIA GPUs like Hopper with best efforts to make the migration frictionless. 
+This repository enables Transformer Engine (TE) on ROCm as a library to accelerate Transformer models on AMD GPUs, including using 8-bit floating point (FP8) precision on MI300 GPUs, to provide better performance with lower memory utilization in both training and inference.
+One of the missions is to provide an alternative to accelerate Transformer models that were previously run on NVIDIA GPUs like Hopper with best efforts to make the migration frictionless.
 Moreover, we add optimizations specific to AMD GPUs to get the best performance benefits out of AMD GPUs.
 
 Feature Support Status
@@ -21,31 +21,34 @@ Feature Support Status
 
 * Activation, cast, fused softmax, layernorm, rmsnorm, transpose, fused rope, fp8 recipe, HipRTC: fully supported
 * GEMM: partially supported with following input/output types: (fp32/fp32), (fp16/fp16), (bf16/bf16), (fp8, bf8/fp16, bf16, fp32)
-* Attention (Flash Attention, Fused Multihead Attention): not supported
+* Attention (FlashAttention, Fused Multi-Head Attention): partially supported: FusedAttention with AOTriton and Composable Kernel (CK) backends
 * HipGraph, HipTX: partially supported
-* Tensor Parallism: not supported
+* Tensor Parallelism, Sequence Parallelism, Context Parallelism: supported
 
 Installation
 ------------
+
 Execute the following commands to install ROCm Transformer Engine from source on AMDGPUs:
 
 .. code-block:: bash
 
   # Clone TE repo and submodules
   git clone --recursive https://github.com/ROCmSoftwarePlatform/TransformerEngine-private.git
-  
+
   cd TransformerEngine-private
-  export NVTE_FRAMEWORK=pytorch #optionally set framework, currently only support pytorch and jax
+  export NVTE_FRAMEWORK=pytorch #optionally set framework, currently only support PyTorch and jax
+  export PYTORCH_ROCM_ARCH=gfx942 # CK fused attn only support MI200 and MI300 and fp8 features are only supported on MI300
   pip install .
 
 
-The default installation above will use rocblas in GEMM computation. The hipBlasLt alternative can be selected by setting the environment variable `NVTE_USE_HIPBLASLT` before the `pip install` as:
+The default installation above will use rocBLAS in GEMM computation. In addition, the hipBLASLt alternative can be selected by setting the environment variable `NVTE_USE_HIPBLASLT` before the `pip install` as:
 
 .. code-block:: bash
 
   export NVTE_USE_HIPBLASLT=1
 
-The hipBlasLt alternative has not yet supported all the GEMM configurations in the pytorch unit tests. When hipBlasLt is fully support, we will switch to hipBlasLt as the default path for GEMM computation.
+The hipBLASLt alternative has not yet supported all the GEMM configurations in the PyTorch unit tests. 
+When hipBLASLt is fully support, we will switch to hipBLASLt as the default path for GEMM computation.
 
 Test
 ----
@@ -66,9 +69,11 @@ After a successful Transformer Engine installation via `pip install`, execute th
 
 Framework Integration pytests
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-Pytorch
 
-The following Pytorch integration pytests are supported: 
+PyTorch
+"""""""
+
+The following PyTorch integration pytests are supported:
 
 .. code-block:: bash
 
@@ -81,19 +86,22 @@ The following Pytorch integration pytests are supported:
   tests/pytorch/test_torch_save_load.py
   tests/pytorch/test_fused_rope.py
   tests/pytorch/test_deferred_init.py
+  tests/pytorch/fused_attn/test_fused_attn.py
+  tests/pytorch/fused_attn/test_fused_attn_with_cp.py
 
-Execute the following command to test them after a successfuly installation with Pytorch. 
+Execute the following command to test them after a successfuly installation with PyTorch:
 
 .. code-block:: bash
 
-  ROCBLAS_STREAM_ORDER_ALLOC=1 NVTE_FUSED_ATTN=0 NVTE_FLASH_ATTN=0 pytest tests/pytorch/<testname>
+  NVTE_FLASH_ATTN=0 pytest tests/pytorch/<testname>
 
-`ROCBLAS_STREAM_ORDER_ALLOC=1` can be dropped when the hipGraph feature is fully supported in Pytorch on AMDGPUs. 
-The other environmental variables are required since our ROCm Transformer Engine has not supported fused attention or flash attention yet. 
+* Env `ROCBLAS_STREAM_ORDER_ALLOC=1` can be used in PyTorch-rocBLAS configuration. It can be dropped when the hipGraph feature is fully supported in PyTorch on AMDGPUs.
+* Env `NVTE_FLASH_ATTN=0` is required since our ROCm Transformer Engine has not supported the standalone FlashAttention module from `Dao-AILab <https://github.com/Dao-AILab/flash-attention>`_. However, we have offered an equivalent implementation based on `Composable Kernel <https://github.com/ROCm/composable_kernel>`_.
 
-Jax
+JAX
+"""
 
-The following jax pytests except for test_fused_attn.py are supported. 
+The following jax pytests except for test_fused_attn.py are supported.
 
 .. code-block:: bash
 
@@ -103,18 +111,21 @@ The following jax pytests except for test_fused_attn.py are supported.
   tests/jax/test_helper.py
   tests/jax/test_praxis_layers.py
   tests/jax/test_sharding.py
+  tests/jax/test_fused_attn.py
   tests/jax/test_distributed_layernorm.py
   tests/jax/test_distributed_softmax.py
-
+  tests/jax/test_distributed_fused_attn.py
 
 Examples
 --------
-Pytorch
+
+PyTorch
 ^^^^^^^
+
 MNIST with optional FP8
 
 .. code-block:: bash
-  
+
   cd examples/pytorch/mnist
   python main.py
   python main.py --use-te   # Linear layers from TransformerEngine
@@ -123,18 +134,20 @@ MNIST with optional FP8
 Sort with minGPT
 
 .. code-block:: bash
-  
+
   cd examples/pytorch/minGPT
   python gptSort.py --use-te # Linear and layernorm from TransformerEngine
   python gptSort.py --use-te --ln-mlp # In addition, use LayernormMLP from transformer engine
   python gptSort.py --use-te --ln-mlp --use-fp8 # In addition, use fp8
 
-Jax
+JAX
 ^^^
+
 Flax
+""""
 
 .. code-block:: python
-  
+
   import flax
   import jax
   import jax.numpy as jnp
@@ -177,7 +190,7 @@ Flax
 MNIST
 
 .. code-block:: bash
-  
+
   cd examples/jax/mnist
   python test_single_gpu_mnist.py # Use Flax to train MNIST with BF16 as usual
   python test_single_gpu_mnist.py --use-te # Use `te.DenseGeneral` provided by Transformer Engine to train MNIST with BF16
@@ -186,10 +199,38 @@ MNIST
 Encoder
 
 .. code-block:: bash
-  
+
   cd examples/jax/encoder
   python test_single_gpu_encoder.py
   python test_single_gpu_encoder.py --use-fp8
+
+Features on ROCm Platform
+-------------------------
+
+GEMM tuning with hipBLASLt
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When using GEMM with hipBLASLt, TE provides an ability to manually or automatically select GPU algorithm to use from a list generated by hipBLASLt.
+This ability is controlled by environment variables when call GEMM operation with specific config for the first time.
+
+* TE_HIPBLASLT_ALGO_SELECTION - algorithm index to use in the list returned by hipBLASLt for the config or the first algorithm to select from if auto-selection is enabled; default=0.
+* TE_HIPBLASLT_TUNING_RUN_COUNT - number of profiling loops for algorithm auto-selection; default=0 which means no auto-selection. For small tasks where run-to-run time variation is relatively high, using higher number of loops may give better auto-selection results.
+* TE_HIPBLASLT_TUNING_ALGO_COUNT - maximal number of algorithms to check when auto-selection is enabled; default=16.
+
+Fused Attention Backends on ROCm
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Currently ROCm TE supports two backends, AOTriton and CK, for fused attention.
+To enable specific backends, the following environment variables can be used:
+
+* NVTE_FUSED_ATTN - enable the fused attention, default = 1;
+* NVTE_FUSED_ATTN_CK - enable the CK backend, default = 1;
+* NVTE_FUSED_ATTN_AOTRITON - enable the AOTriton backend, default = 1.
+
+NVTE_FUSED_ATTN has higher priority than NVTE_FUSED_ATTN_CK and NVTE_FUSED_ATTN_AOTRITON.
+NVTE_FUSED_ATTN=0 will use the TE unfused attention even if NVTE_FUSED_ATTN_CK or NVTE_FUSED_ATTN_AOTRITON is set.
+Fused attention backends are chosen according to the match results between the actual problem config and the support matrix of the specific backend.
+For the scenario that both backends are enabled and match the problem configuration, the CK backend will be chosen with higher priority.
 
 Transformer Engine
 ==================
@@ -198,7 +239,6 @@ Transformer Engine
 
 Latest News
 ==================
-
 
 * [12/2023] `New NVIDIA NeMo Framework Features and NVIDIA H200 <https://developer.nvidia.com/blog/new-nvidia-nemo-framework-features-and-nvidia-h200-supercharge-llm-training-performance-and-versatility/>`_
 
@@ -214,7 +254,7 @@ Latest News
 * [04/2023] `Benchmarking Large Language Models on NVIDIA H100 GPUs with CoreWeave (Part 1) <https://www.mosaicml.com/blog/coreweave-nvidia-h100-part-1>`_
 
 What is Transformer Engine?
-==================
+===========================
 .. overview-begin-marker-do-not-remove
 
 Transformer Engine (TE) is a library for accelerating Transformer models on NVIDIA GPUs, including
@@ -284,7 +324,7 @@ JAX
 ^^^
 
 Flax
-~~~~
+""""
 
 .. code-block:: python
 
@@ -328,11 +368,12 @@ Flax
 .. overview-end-marker-do-not-remove
 
 Installation
-----------
+------------
 .. installation
 
-Pre-requisites
+Prerequisites
 ^^^^^^^^^^^^^^^^^^^^
+
 * Linux x86_64
 * CUDA 11.8+ for Hopper and CUDA 12.1+ for Ada
 * NVIDIA Driver supporting CUDA 11.8 or later
@@ -353,6 +394,7 @@ Where 23.10 is the container version. For example, 23.10 for the October 2023 re
 
 pip
 ^^^^^^^^^^^^^^^^^^^^
+
 To install the latest stable version of Transformer Engine,
 
 .. code-block:: bash
@@ -363,11 +405,13 @@ This will automatically detect if any supported deep learning frameworks are ins
 
 From source
 ^^^^^^^^^^^
-`See the installation guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/installation.html#installation-from-source>`_.
+
+See the `installation guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/installation.html#installation-from-source>`_.
 
 Compiling with FlashAttention-2
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-Transformer Engine release v0.11.0 adds support for FlashAttention-2 in PyTorch for improved performance. 
+
+Transformer Engine release v0.11.0 adds support for FlashAttention-2 in PyTorch for improved performance.
 
 It is a known issue that FlashAttention-2 compilation is resource-intensive and requires a large amount of RAM (see `bug <https://github.com/Dao-AILab/flash-attention/issues/358>`_), which may lead to out of memory errors during the installation of Transformer Engine. Please try setting **MAX_JOBS=1** in the environment to circumvent the issue. If the errors persist, install a supported version of FlashAttention-1 (v1.0.6 to v1.0.9).
 
@@ -378,27 +422,27 @@ FP8 Convergence
 
 FP8 has been tested extensively across different model architectures and configurations and we found **no significant difference** between FP8 and BF16 training loss curves. FP8 has also been validated for accuracy on downstream LLM tasks (e.g. LAMBADA and WikiText). Below are examples of models tested for convergence across different frameworks.
 
-+------------+------------------+---------------------------------------------------------------------------------------------------------+
-| Model      | Framework        | Source                                                                                                  |
-+============+==================+=========================================================================================================+
-| T5-770M    |  JAX/T5x         | https://github.com/NVIDIA/JAX-Toolbox/tree/main/rosetta/rosetta/projects/t5x#convergence-and-performance|
-+------------+------------------+---------------------------------------------------------------------------------------------------------+
-| MPT-1.3B   |  Mosaic Composer | https://www.mosaicml.com/blog/coreweave-nvidia-h100-part-1                                              |
-+------------+------------------+---------------------------------------------------------------------------------------------------------+
-| GPT-5B     |  JAX/Paxml       | https://github.com/NVIDIA/JAX-Toolbox/tree/main/rosetta/rosetta/projects/pax#h100-results               |
-+------------+------------------+---------------------------------------------------------------------------------------------------------+
-| GPT-5B     |  NeMo Framework  | Available on request                                                                                  |
-+------------+------------------+---------------------------------------------------------------------------------------------------------+
-| LLama2-7B  |  Alibaba Pai     | https://mp.weixin.qq.com/s/NQT0uKXLbXyh5031zBdeBQ                                                       |
-+------------+------------------+---------------------------------------------------------------------------------------------------------+
-| T5-11B     |  JAX/T5x         | Available on request                                                                                    |
-+------------+------------------+---------------------------------------------------------------------------------------------------------+
-| GPT-22B    |  NeMo Framework  | Available on request                                                                                  |
-+------------+------------------+---------------------------------------------------------------------------------------------------------+
-| LLama2-70B |  Alibaba Pai     | https://mp.weixin.qq.com/s/NQT0uKXLbXyh5031zBdeBQ                                                       |
-+------------+------------------+---------------------------------------------------------------------------------------------------------+
-| GPT-175B   |  JAX/Paxml       | https://github.com/NVIDIA/JAX-Toolbox/tree/main/rosetta/rosetta/projects/pax#h100-results               |
-+------------+------------------+---------------------------------------------------------------------------------------------------------+
++------------+------------------+----------------------------------------------------------------------------------------------------------+
+| Model      | Framework        | Source                                                                                                   |
++============+==================+==========================================================================================================+
+| T5-770M    |  JAX/T5x         | https://github.com/NVIDIA/JAX-Toolbox/tree/main/rosetta/rosetta/projects/t5x#convergence-and-performance |
++------------+------------------+----------------------------------------------------------------------------------------------------------+
+| MPT-1.3B   |  Mosaic Composer | https://www.mosaicml.com/blog/coreweave-nvidia-h100-part-1                                               |
++------------+------------------+----------------------------------------------------------------------------------------------------------+
+| GPT-5B     |  JAX/Paxml       | https://github.com/NVIDIA/JAX-Toolbox/tree/main/rosetta/rosetta/projects/pax#h100-results                |
++------------+------------------+----------------------------------------------------------------------------------------------------------+
+| GPT-5B     |  NeMo Framework  | Available on request                                                                                     |
++------------+------------------+----------------------------------------------------------------------------------------------------------+
+| LLama2-7B  |  Alibaba Pai     | https://mp.weixin.qq.com/s/NQT0uKXLbXyh5031zBdeBQ                                                        |
++------------+------------------+----------------------------------------------------------------------------------------------------------+
+| T5-11B     |  JAX/T5x         | Available on request                                                                                     |
++------------+------------------+----------------------------------------------------------------------------------------------------------+
+| GPT-22B    |  NeMo Framework  | Available on request                                                                                     |
++------------+------------------+----------------------------------------------------------------------------------------------------------+
+| LLama2-70B |  Alibaba Pai     | https://mp.weixin.qq.com/s/NQT0uKXLbXyh5031zBdeBQ                                                        |
++------------+------------------+----------------------------------------------------------------------------------------------------------+
+| GPT-175B   |  JAX/Paxml       | https://github.com/NVIDIA/JAX-Toolbox/tree/main/rosetta/rosetta/projects/pax#h100-results                |
++------------+------------------+----------------------------------------------------------------------------------------------------------+
 
 Integrations
 ==================

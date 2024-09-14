@@ -39,7 +39,6 @@ if(USE_CUDA)
   endif()
 elseif(USE_ROCM)
   message(STATUS "USE_ROCM ${USE_ROCM}")
-  message(STATUS "USE_HIPBLASLT ${USE_HIPBLASLT}")
   if(DEFINED ENV{ROCM_PATH})
     set(ROCM_PATH $ENV{ROCM_PATH})
   elseif(EXISTS "/opt/rocm")
@@ -59,12 +58,9 @@ elseif(USE_ROCM)
   add_definitions(-DUSE_ROCM)
   list(APPEND CMAKE_MODULE_PATH "${ROCM_PATH}/lib/cmake")
 
-  # Check if hipblaslt is enabled
-  if(DEFINED ENV{NVTE_USE_HIPBLASLT} AND "$ENV{NVTE_USE_HIPBLASLT}" STREQUAL "1")
-    option(USE_HIPBLASLT "Use HIPBLASLT" ON)
-  else()
-    option(USE_HIPBLASLT "Use HIPBLASLT" OFF)
-  endif()
+  # Show whether hipBLASLt is enabled
+  option(USE_HIPBLASLT "Use hipBLASLt" OFF)
+  message(STATUS "USE_HIPBLASLT ${USE_HIPBLASLT}")
 
   if(NOT DEFINED GPU_TARGETS)
     if (NOT DEFINED CMAKE_HIP_ARCHITECTURES)
