@@ -69,28 +69,19 @@ AttnMaskType = {
     "padding_causal": NVTE_Mask_Type.NVTE_PADDING_CAUSAL_MASK,
 }
 
-<<<<<<< HEAD
 if not IS_HIP_EXTENSION:
     FusedAttnBackend = {
         "F16_max512_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen,
         "F16_arbitrary_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
         "FP8": NVTE_Fused_Attn_Backend.NVTE_FP8,
         "No_Backend": NVTE_Fused_Attn_Backend.NVTE_No_Backend,
-        }
+    }
 else:
     FusedAttnBackend = {
         "AOTriton": NVTE_Fused_Attn_Backend.NVTE_AOTriton,
         "CK": NVTE_Fused_Attn_Backend.NVTE_CK,
         "No_Backend": NVTE_Fused_Attn_Backend.NVTE_No_Backend,
         }
-=======
-FusedAttnBackend = {
-    "F16_max512_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen,
-    "F16_arbitrary_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
-    "FP8": NVTE_Fused_Attn_Backend.NVTE_FP8,
-    "No_Backend": NVTE_Fused_Attn_Backend.NVTE_No_Backend,
-}
->>>>>>> a4e95e8
 
 BACKEND_F16m512_FP8_THREADS_PER_CTA = 128
 BACKEND_F16arb_ELTS_PER_THREADS = 16
@@ -214,68 +205,34 @@ def fused_attn_fwd_qkvpacked(
         ), "attn_bias tensor cannot be None when attn_bias_type is not no_bias or alibi."
         assert attn_bias.dtype == qkv.dtype, "attn_bias tensor must be in the same dtype as qkv."
 
-<<<<<<< HEAD
-    assert (fused_attention_backend != FusedAttnBackend["No_Backend"]
-            ), "Fused attention does not support this input combination."
-    
-    if not IS_HIP_EXTENSION:
-        # BF16/FP16 fused attention API from fmha_v1 apex
-        if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
-            rng_elts_per_thread = (max_seqlen * max_seqlen
-                    + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1)//BACKEND_F16m512_FP8_THREADS_PER_CTA
-
-        # BF16/FP16 fused attention API from fmha_v2
-        if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
-            rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
-=======
     assert (
         fused_attention_backend != FusedAttnBackend["No_Backend"]
     ), "Fused attention does not support this input combination."
 
-    # BF16/FP16 fused attention API from fmha_v1 apex
-    if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
-        rng_elts_per_thread = (
-            max_seqlen * max_seqlen + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
-        ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
->>>>>>> a4e95e8
+    if not IS_HIP_EXTENSION:
+        # BF16/FP16 fused attention API from fmha_v1 apex
+        if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
+            rng_elts_per_thread = (
+                max_seqlen * max_seqlen + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
+            ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
 
         # FP8 fused attention API from fmha_v2
         if fused_attention_backend == FusedAttnBackend["FP8"]:
-            rng_elts_per_thread = (max_seqlen * max_seqlen
-                    + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1)//BACKEND_F16m512_FP8_THREADS_PER_CTA
+            rng_elts_per_thread = (
+                max_seqlen * max_seqlen + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
+            ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
 
-<<<<<<< HEAD
-            assert (d_scale_qkv is not None
-                    ), "d_scale_qkv is required as an input for FP8 fused attention."
-            assert (d_scale_s is not None
-                    ), "q_scale_s is required as an input for FP8 fused attention."
-            assert (q_scale_s is not None
-                    ), "q_scale_s is required as an input for FP8 fused attention."
-            assert (q_scale_o is not None
-                    ), "q_scale_o is required as an input for FP8 fused attention."
-            assert (amax_s is not None
-                    ), "amax_s is required as an input for FP8 fused attention."
-            assert (amax_o is not None
-                    ), "amax_o is required as an input for FP8 fused attention."
+            assert (
+                d_scale_qkv is not None
+            ), "d_scale_qkv is required as an input for FP8 fused attention."
+            assert d_scale_s is not None, "q_scale_s is required as an input for FP8 fused attention."
+            assert q_scale_s is not None, "q_scale_s is required as an input for FP8 fused attention."
+            assert q_scale_o is not None, "q_scale_o is required as an input for FP8 fused attention."
+            assert amax_s is not None, "amax_s is required as an input for FP8 fused attention."
+            assert amax_o is not None, "amax_o is required as an input for FP8 fused attention."
     else:
         # ROCm fused attn requires 1 offset per 1 random variable
         rng_elts_per_thread = 0
-=======
-    # FP8 fused attention API from fmha_v2
-    if fused_attention_backend == FusedAttnBackend["FP8"]:
-        rng_elts_per_thread = (
-            max_seqlen * max_seqlen + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
-        ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
-
-        assert (
-            d_scale_qkv is not None
-        ), "d_scale_qkv is required as an input for FP8 fused attention."
-        assert d_scale_s is not None, "q_scale_s is required as an input for FP8 fused attention."
-        assert q_scale_s is not None, "q_scale_s is required as an input for FP8 fused attention."
-        assert q_scale_o is not None, "q_scale_o is required as an input for FP8 fused attention."
-        assert amax_s is not None, "amax_s is required as an input for FP8 fused attention."
-        assert amax_o is not None, "amax_o is required as an input for FP8 fused attention."
->>>>>>> a4e95e8
 
     # execute kernel
     output_tensors = tex.fused_attn_fwd_qkvpacked(
@@ -415,46 +372,26 @@ def fused_attn_bwd_qkvpacked(
         fused_attention_backend != FusedAttnBackend["No_Backend"]
     ), "Fused attention does not support this input combination."
 
-<<<<<<< HEAD
     if not IS_HIP_EXTENSION:
         if fused_attention_backend != FusedAttnBackend["F16_max512_seqlen"]:
-            assert (len(aux_ctx_tensors) >= 1
-                    ), "aux_ctx_tensors must contain rng_state as its last element."
+            assert (
+                len(aux_ctx_tensors) >= 1
+            ), "aux_ctx_tensors must contain rng_state as its last element."
 
         if fused_attention_backend == FusedAttnBackend["FP8"]:
-            assert (d_scale_qkv is not None), "d_scale_qkv is required for FP8 fused attention."
-            assert (d_scale_s is not None), "d_scale_s is required for FP8 fused attention."
-            assert (d_scale_o is not None), "d_scale_o is required for FP8 fused attention."
-            assert (d_scale_do is not None), "d_scale_do is required for FP8 fused attention."
-            assert (d_scale_dp is not None), "d_scale_dp is required for FP8 fused attention."
-            assert (q_scale_s is not None), "q_scale_s is required for FP8 fused attention."
-            assert (q_scale_dp is not None), "q_scale_dp is required for FP8 fused attention."
-            assert (q_scale_dqkv is not None), "q_scale_dqkv is required for FP8 fused attention."
-            assert (amax_dp is not None), "amax_dp is required for FP8 fused attention."
-            assert (amax_dqkv is not None), "amax_dqkv is required for FP8 fused attention."
-            assert (len(aux_ctx_tensors) == 3
-                    ), "aux_ctx_tensors is required to be [M, ZInv, rng_state] for FP8 fused attention."
-=======
-    if fused_attention_backend != FusedAttnBackend["F16_max512_seqlen"]:
-        assert (
-            len(aux_ctx_tensors) >= 1
-        ), "aux_ctx_tensors must contain rng_state as its last element."
-
-    if fused_attention_backend == FusedAttnBackend["FP8"]:
-        assert d_scale_qkv is not None, "d_scale_qkv is required for FP8 fused attention."
-        assert d_scale_s is not None, "d_scale_s is required for FP8 fused attention."
-        assert d_scale_o is not None, "d_scale_o is required for FP8 fused attention."
-        assert d_scale_do is not None, "d_scale_do is required for FP8 fused attention."
-        assert d_scale_dp is not None, "d_scale_dp is required for FP8 fused attention."
-        assert q_scale_s is not None, "q_scale_s is required for FP8 fused attention."
-        assert q_scale_dp is not None, "q_scale_dp is required for FP8 fused attention."
-        assert q_scale_dqkv is not None, "q_scale_dqkv is required for FP8 fused attention."
-        assert amax_dp is not None, "amax_dp is required for FP8 fused attention."
-        assert amax_dqkv is not None, "amax_dqkv is required for FP8 fused attention."
-        assert (
-            len(aux_ctx_tensors) == 3
-        ), "aux_ctx_tensors is required to be [M, ZInv, rng_state] for FP8 fused attention."
->>>>>>> a4e95e8
+            assert d_scale_qkv is not None, "d_scale_qkv is required for FP8 fused attention."
+            assert d_scale_s is not None, "d_scale_s is required for FP8 fused attention."
+            assert d_scale_o is not None, "d_scale_o is required for FP8 fused attention."
+            assert d_scale_do is not None, "d_scale_do is required for FP8 fused attention."
+            assert d_scale_dp is not None, "d_scale_dp is required for FP8 fused attention."
+            assert q_scale_s is not None, "q_scale_s is required for FP8 fused attention."
+            assert q_scale_dp is not None, "q_scale_dp is required for FP8 fused attention."
+            assert q_scale_dqkv is not None, "q_scale_dqkv is required for FP8 fused attention."
+            assert amax_dp is not None, "amax_dp is required for FP8 fused attention."
+            assert amax_dqkv is not None, "amax_dqkv is required for FP8 fused attention."
+            assert (
+                len(aux_ctx_tensors) == 3
+            ), "aux_ctx_tensors is required to be [M, ZInv, rng_state] for FP8 fused attention."
 
     # execute kernel
     output_tensors = tex.fused_attn_bwd_qkvpacked(
@@ -624,38 +561,24 @@ def fused_attn_fwd_kvpacked(
         fused_attention_backend != FusedAttnBackend["No_Backend"]
     ), "Fused attention does not support this input combination."
 
-<<<<<<< HEAD
     if not IS_HIP_EXTENSION:
         # BF16/FP16 fused attention API from fmha_v1 apex
         if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
-            rng_elts_per_thread = (max_seqlen_q * max_seqlen_kv
-                    + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1)//BACKEND_F16m512_FP8_THREADS_PER_CTA
-=======
-    # BF16/FP16 fused attention API from fmha_v1 apex
-    if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
-        rng_elts_per_thread = (
-            max_seqlen_q * max_seqlen_kv + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
-        ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
->>>>>>> a4e95e8
+            rng_elts_per_thread = (
+                max_seqlen_q * max_seqlen_kv + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
+            ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
 
         # BF16/FP16 fused attention API from fmha_v2
         if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
             rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
 
-<<<<<<< HEAD
         # FP8 fused attention API from fmha_v2
         if fused_attention_backend == FusedAttnBackend["FP8"]:
-            rng_elts_per_thread = (max_seqlen_q * max_seqlen_q
-                    + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1)//BACKEND_F16m512_FP8_THREADS_PER_CTA
+            rng_elts_per_thread = (
+                max_seqlen_q * max_seqlen_q + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
+            ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
     else:
         rng_elts_per_thread = 0
-=======
-    # FP8 fused attention API from fmha_v2
-    if fused_attention_backend == FusedAttnBackend["FP8"]:
-        rng_elts_per_thread = (
-            max_seqlen_q * max_seqlen_q + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
-        ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
->>>>>>> a4e95e8
 
         assert (
             d_scale_qkv is not None
@@ -825,46 +748,26 @@ def fused_attn_bwd_kvpacked(
         fused_attention_backend != FusedAttnBackend["No_Backend"]
     ), "Fused attention does not support this input combination."
 
-<<<<<<< HEAD
     if not IS_HIP_EXTENSION:
         if fused_attention_backend != FusedAttnBackend["F16_max512_seqlen"]:
-            assert (len(aux_ctx_tensors) >= 1
-                    ), "aux_ctx_tensors must contain rng_state as its last element."
+            assert (
+                len(aux_ctx_tensors) >= 1
+            ), "aux_ctx_tensors must contain rng_state as its last element."
 
         if fused_attention_backend == FusedAttnBackend["FP8"]:
-            assert (d_scale_qkv is not None), "d_scale_qkv is required for FP8 fused attention."
-            assert (d_scale_s is not None), "d_scale_s is required for FP8 fused attention."
-            assert (d_scale_o is not None), "d_scale_o is required for FP8 fused attention."
-            assert (d_scale_do is not None), "d_scale_do is required for FP8 fused attention."
-            assert (d_scale_dp is not None), "d_scale_dp is required for FP8 fused attention."
-            assert (q_scale_s is not None), "q_scale_s is required for FP8 fused attention."
-            assert (q_scale_dp is not None), "q_scale_dp is required for FP8 fused attention."
-            assert (q_scale_dqkv is not None), "q_scale_dqkv is required for FP8 fused attention."
-            assert (amax_dp is not None), "amax_dp is required for FP8 fused attention."
-            assert (amax_dqkv is not None), "amax_dqkv is required for FP8 fused attention."
-            assert (len(aux_ctx_tensors) == 3
-                    ), "aux_ctx_tensors is required to be [M, ZInv, rng_state] for FP8 fused attention."
-=======
-    if fused_attention_backend != FusedAttnBackend["F16_max512_seqlen"]:
-        assert (
-            len(aux_ctx_tensors) >= 1
-        ), "aux_ctx_tensors must contain rng_state as its last element."
-
-    if fused_attention_backend == FusedAttnBackend["FP8"]:
-        assert d_scale_qkv is not None, "d_scale_qkv is required for FP8 fused attention."
-        assert d_scale_s is not None, "d_scale_s is required for FP8 fused attention."
-        assert d_scale_o is not None, "d_scale_o is required for FP8 fused attention."
-        assert d_scale_do is not None, "d_scale_do is required for FP8 fused attention."
-        assert d_scale_dp is not None, "d_scale_dp is required for FP8 fused attention."
-        assert q_scale_s is not None, "q_scale_s is required for FP8 fused attention."
-        assert q_scale_dp is not None, "q_scale_dp is required for FP8 fused attention."
-        assert q_scale_dqkv is not None, "q_scale_dqkv is required for FP8 fused attention."
-        assert amax_dp is not None, "amax_dp is required for FP8 fused attention."
-        assert amax_dqkv is not None, "amax_dqkv is required for FP8 fused attention."
-        assert (
-            len(aux_ctx_tensors) == 3
-        ), "aux_ctx_tensors is required to be [M, ZInv, rng_state] for FP8 fused attention."
->>>>>>> a4e95e8
+            assert d_scale_qkv is not None, "d_scale_qkv is required for FP8 fused attention."
+            assert d_scale_s is not None, "d_scale_s is required for FP8 fused attention."
+            assert d_scale_o is not None, "d_scale_o is required for FP8 fused attention."
+            assert d_scale_do is not None, "d_scale_do is required for FP8 fused attention."
+            assert d_scale_dp is not None, "d_scale_dp is required for FP8 fused attention."
+            assert q_scale_s is not None, "q_scale_s is required for FP8 fused attention."
+            assert q_scale_dp is not None, "q_scale_dp is required for FP8 fused attention."
+            assert q_scale_dqkv is not None, "q_scale_dqkv is required for FP8 fused attention."
+            assert amax_dp is not None, "amax_dp is required for FP8 fused attention."
+            assert amax_dqkv is not None, "amax_dqkv is required for FP8 fused attention."
+            assert (
+                len(aux_ctx_tensors) == 3
+            ), "aux_ctx_tensors is required to be [M, ZInv, rng_state] for FP8 fused attention."
 
     # execute kernel
     output_tensors = tex.fused_attn_bwd_kvpacked(
@@ -1045,60 +948,38 @@ def fused_attn_fwd(
         fused_attention_backend != FusedAttnBackend["No_Backend"]
     ), "Fused attention does not support this input combination."
 
-<<<<<<< HEAD
     if not IS_HIP_EXTENSION:
+        # BF16/FP16 fused attention API from fmha_v1 apex
+        if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
+            rng_elts_per_thread = (
+                max_seqlen_q * max_seqlen_kv + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
+            ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
+
         # BF16/FP16 fused attention API from fmha_v2
         if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
             rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
-=======
-    # BF16/FP16 fused attention API from fmha_v1 apex
-    if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
-        rng_elts_per_thread = (
-            max_seqlen_q * max_seqlen_kv + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
-        ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
->>>>>>> a4e95e8
 
         # FP8 fused attention API from fmha_v2
         if fused_attention_backend == FusedAttnBackend["FP8"]:
             rng_elts_per_thread = (max_seqlen_q * max_seqlen_q
                     + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1)//BACKEND_F16m512_FP8_THREADS_PER_CTA
 
-<<<<<<< HEAD
-            assert (d_scale_qkv is not None
-                    ), "d_scale_qkv is required as an input for FP8 fused attention."
-            assert (d_scale_s is not None
-                    ), "q_scale_s is required as an input for FP8 fused attention."
-            assert (q_scale_s is not None
-                    ), "q_scale_s is required as an input for FP8 fused attention."
-            assert (q_scale_o is not None
-                    ), "q_scale_o is required as an input for FP8 fused attention."
-            assert (amax_s is not None
-                    ), "amax_s is required as an input for FP8 fused attention."
-            assert (amax_o is not None
-                    ), "amax_o is required as an input for FP8 fused attention."
+        # FP8 fused attention API from fmha_v2
+        if fused_attention_backend == FusedAttnBackend["FP8"]:
+            rng_elts_per_thread = (
+                max_seqlen_q * max_seqlen_q + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
+            ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
 
-        # BF16/FP16 fused attention API from fmha_v1 apex
-        if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
-            rng_elts_per_thread = (max_seqlen_q * max_seqlen_kv
-                    + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1)//BACKEND_F16m512_FP8_THREADS_PER_CTA
+            assert (
+                d_scale_qkv is not None
+            ), "d_scale_qkv is required as an input for FP8 fused attention."
+            assert d_scale_s is not None, "q_scale_s is required as an input for FP8 fused attention."
+            assert q_scale_s is not None, "q_scale_s is required as an input for FP8 fused attention."
+            assert q_scale_o is not None, "q_scale_o is required as an input for FP8 fused attention."
+            assert amax_s is not None, "amax_s is required as an input for FP8 fused attention."
+            assert amax_o is not None, "amax_o is required as an input for FP8 fused attention."
     else:
         rng_elts_per_thread = 0
-=======
-    # FP8 fused attention API from fmha_v2
-    if fused_attention_backend == FusedAttnBackend["FP8"]:
-        rng_elts_per_thread = (
-            max_seqlen_q * max_seqlen_q + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
-        ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
-
-        assert (
-            d_scale_qkv is not None
-        ), "d_scale_qkv is required as an input for FP8 fused attention."
-        assert d_scale_s is not None, "q_scale_s is required as an input for FP8 fused attention."
-        assert q_scale_s is not None, "q_scale_s is required as an input for FP8 fused attention."
-        assert q_scale_o is not None, "q_scale_o is required as an input for FP8 fused attention."
-        assert amax_s is not None, "amax_s is required as an input for FP8 fused attention."
-        assert amax_o is not None, "amax_o is required as an input for FP8 fused attention."
->>>>>>> a4e95e8
 
     # execute kernel
     output_tensors = tex.fused_attn_fwd(
@@ -1268,46 +1149,26 @@ def fused_attn_bwd(
         fused_attention_backend != FusedAttnBackend["No_Backend"]
     ), "Fused attention does not support this input combination."
 
-<<<<<<< HEAD
     if not IS_HIP_EXTENSION:
         if fused_attention_backend != FusedAttnBackend["F16_max512_seqlen"]:
-            assert (len(aux_ctx_tensors) >= 1
-                    ), "aux_ctx_tensors must contain rng_state as its last element."
+            assert (
+                len(aux_ctx_tensors) >= 1
+            ), "aux_ctx_tensors must contain rng_state as its last element."
 
         if fused_attention_backend == FusedAttnBackend["FP8"]:
-            assert (d_scale_qkv is not None), "d_scale_qkv is required for FP8 fused attention."
-            assert (d_scale_s is not None), "d_scale_s is required for FP8 fused attention."
-            assert (d_scale_o is not None), "d_scale_o is required for FP8 fused attention."
-            assert (d_scale_do is not None), "d_scale_do is required for FP8 fused attention."
-            assert (d_scale_dp is not None), "d_scale_dp is required for FP8 fused attention."
-            assert (q_scale_s is not None), "q_scale_s is required for FP8 fused attention."
-            assert (q_scale_dp is not None), "q_scale_dp is required for FP8 fused attention."
-            assert (q_scale_dqkv is not None), "q_scale_dqkv is required for FP8 fused attention."
-            assert (amax_dp is not None), "amax_dp is required for FP8 fused attention."
-            assert (amax_dqkv is not None), "amax_dqkv is required for FP8 fused attention."
-            assert (len(aux_ctx_tensors) == 3
-                    ), "aux_ctx_tensors is required to be [M, ZInv, rng_state] for FP8 fused attention."
-=======
-    if fused_attention_backend != FusedAttnBackend["F16_max512_seqlen"]:
-        assert (
-            len(aux_ctx_tensors) >= 1
-        ), "aux_ctx_tensors must contain rng_state as its last element."
-
-    if fused_attention_backend == FusedAttnBackend["FP8"]:
-        assert d_scale_qkv is not None, "d_scale_qkv is required for FP8 fused attention."
-        assert d_scale_s is not None, "d_scale_s is required for FP8 fused attention."
-        assert d_scale_o is not None, "d_scale_o is required for FP8 fused attention."
-        assert d_scale_do is not None, "d_scale_do is required for FP8 fused attention."
-        assert d_scale_dp is not None, "d_scale_dp is required for FP8 fused attention."
-        assert q_scale_s is not None, "q_scale_s is required for FP8 fused attention."
-        assert q_scale_dp is not None, "q_scale_dp is required for FP8 fused attention."
-        assert q_scale_dqkv is not None, "q_scale_dqkv is required for FP8 fused attention."
-        assert amax_dp is not None, "amax_dp is required for FP8 fused attention."
-        assert amax_dqkv is not None, "amax_dqkv is required for FP8 fused attention."
-        assert (
-            len(aux_ctx_tensors) == 3
-        ), "aux_ctx_tensors is required to be [M, ZInv, rng_state] for FP8 fused attention."
->>>>>>> a4e95e8
+            assert d_scale_qkv is not None, "d_scale_qkv is required for FP8 fused attention."
+            assert d_scale_s is not None, "d_scale_s is required for FP8 fused attention."
+            assert d_scale_o is not None, "d_scale_o is required for FP8 fused attention."
+            assert d_scale_do is not None, "d_scale_do is required for FP8 fused attention."
+            assert d_scale_dp is not None, "d_scale_dp is required for FP8 fused attention."
+            assert q_scale_s is not None, "q_scale_s is required for FP8 fused attention."
+            assert q_scale_dp is not None, "q_scale_dp is required for FP8 fused attention."
+            assert q_scale_dqkv is not None, "q_scale_dqkv is required for FP8 fused attention."
+            assert amax_dp is not None, "amax_dp is required for FP8 fused attention."
+            assert amax_dqkv is not None, "amax_dqkv is required for FP8 fused attention."
+            assert (
+                len(aux_ctx_tensors) == 3
+            ), "aux_ctx_tensors is required to be [M, ZInv, rng_state] for FP8 fused attention."
 
     # execute kernel
     output_tensors = tex.fused_attn_bwd(

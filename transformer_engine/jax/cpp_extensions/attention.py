@@ -236,15 +236,11 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             else:
                 raise ValueError(f'Unsupported {backend=}')
         else:
-<<<<<<< HEAD
             if backend in [NVTE_Fused_Attn_Backend.NVTE_AOTriton, NVTE_Fused_Attn_Backend.NVTE_CK]:
                 softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
                 softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
             else:
                 raise ValueError(f'Unsupported {backend=}')
-=======
-            raise ValueError(f"Unsupported {backend=}")
->>>>>>> a4e95e8
         softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=softmax_dtype)
 
         # JAX does not enable 64-bit int by default so we get XLA to allocate x8 memory with

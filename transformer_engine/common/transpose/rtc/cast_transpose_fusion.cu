@@ -80,44 +80,16 @@ inline __device__ void cast_and_transpose_regs_optimized(const CVec (&in)[NVEC_O
     out_cast.store_to(output_cast_tile, current_place + stride * i);
   }
 
-<<<<<<< HEAD
-    #pragma unroll
-    for (unsigned int i = 0; i < NVEC_OUT; ++i) {
-        OVecC out_cast;
-        #pragma unroll
-        for (unsigned int j = 0; j < NVEC_IN; ++j) {
-            const CType tmp = in[i].data.elt[j];
-            if constexpr (IS_DBIAS) {
-                step_dbias.data.elt[j] += tmp;      // dbias: thread tile local accumulation
-            }
-            out_cast.data.elt[j]     = static_cast<OType>(tmp * scale);
-            out_trans[j].data.elt[i] = static_cast<OType>(tmp * scale);    // thread tile transpose
-
-            __builtin_assume(amax >= 0);
-            amax = fmaxf(fabsf(tmp), amax);
-        }
-        out_cast.store_to(output_cast_tile, current_place + stride * i);
-    }
-
-    if constexpr (IS_DBIAS) {
-        #pragma unroll
-        for (unsigned int j = 0; j < NVEC_IN; ++j) {
-            CType elt = step_dbias.data.elt[j];
-#ifdef __HIP_PLATFORM_AMD__
-            elt = __shfl(elt, dbias_shfl_src_lane, THREADS_PER_WARP);
-#else
-            elt = __shfl_sync(0xffffffff, elt, dbias_shfl_src_lane);  // shuffle data in a warp
-#endif
-            out_dbias.data.elt[j] += elt;
-        }
-=======
   if constexpr (IS_DBIAS) {
 #pragma unroll
     for (unsigned int j = 0; j < NVEC_IN; ++j) {
       CType elt = step_dbias.data.elt[j];
+#ifdef __HIP_PLATFORM_AMD__
+			elt = __shfl(elt, dbias_shfl_src_lane, THREADS_PER_WARP);
+#else
       elt = __shfl_sync(0xffffffff, elt, dbias_shfl_src_lane);  // shuffle data in a warp
+#endif
       out_dbias.data.elt[j] += elt;
->>>>>>> a4e95e8
     }
   }
 }

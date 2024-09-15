@@ -17,12 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <type_traits>
-<<<<<<< HEAD
-#include <pybind11/pybind11.h>
-#include "transformer_engine/fused_attn.h"
-=======
 
->>>>>>> a4e95e8
 #include "common/util/logging.h"
 
 namespace transformer_engine {
@@ -32,8 +27,11 @@ int GetCudaRuntimeVersion();
 int GetDeviceComputeCapability(int gpu_id);
 
 #ifndef USE_ROCM
-void PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t q_max_seqlen,
-                           size_t kv_max_seqlen, NVTE_Fused_Attn_Backend backend,
+void PopulateRngStateAsync(void *rng_state_dst, 
+		                       const void *const seed, 
+													 size_t q_max_seqlen,
+                           size_t kv_max_seqlen, 
+													 NVTE_Fused_Attn_Backend backend,
                            cudaStream_t stream);
 #else
 void PopulateRngStateAsync(void *rng_state_dst, 

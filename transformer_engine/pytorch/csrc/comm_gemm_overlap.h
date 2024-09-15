@@ -1058,13 +1058,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
       assert(_ubuf_scale_inv_initialized);
       float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
       char *rs_output_ptr = reinterpret_cast<char *>(rs_output.data_ptr());
-<<<<<<< HEAD
       reduce_fp8_in_bf16_out<transformer_engine::fp8e4m3>(reduce_buf_ptr, rs_output_ptr, d_scale_inv_ptr,
-                             _tp_size, _ubufs[0].numel(), (cudaStream_t) stream_main);
-=======
-      reduce_fp8_in_bf16_out<__nv_fp8_e4m3>(reduce_buf_ptr, rs_output_ptr, d_scale_inv_ptr,
                                             _tp_size, _ubufs[0].numel(), (cudaStream_t)stream_main);
->>>>>>> a4e95e8
     } else {
       torch::Tensor reduce_buf = torch::from_blob(
           reduce_buf_ptr, {_tp_size, _ubufs[0].size(0), _ubufs[0].size(1)}, _ubuf.options());
@@ -1157,13 +1152,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
       assert(_ubuf_scale_inv_initialized);
       float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
       char *rs_output_ptr = reinterpret_cast<char *>(rs_output.data_ptr());
-<<<<<<< HEAD
       reduce_fp8_in_bf16_out<transformer_engine::fp8e4m3>(reduce_buf_ptr, rs_output_ptr, d_scale_inv_ptr,
-                             _tp_size, _ubufs[0].numel(), (cudaStream_t) stream_main);
-=======
-      reduce_fp8_in_bf16_out<__nv_fp8_e4m3>(reduce_buf_ptr, rs_output_ptr, d_scale_inv_ptr,
                                             _tp_size, _ubufs[0].numel(), (cudaStream_t)stream_main);
->>>>>>> a4e95e8
     } else {
       torch::Tensor reduce_buf = torch::from_blob(
           reduce_buf_ptr, {_tp_size, _ubufs[0].size(0), _ubufs[0].size(1)}, _ubuf.options());

@@ -10,11 +10,8 @@ from contextlib import nullcontext
 
 import torch
 import pytest
-<<<<<<< HEAD
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
-=======
 import io
->>>>>>> a4e95e8
 
 from transformer_engine.pytorch.fp8 import (
     fp8_autocast,
@@ -574,15 +571,6 @@ def test_sanity_layernorm_mlp(
 @pytest.mark.parametrize("normalization", all_normalizations)
 @pytest.mark.parametrize("parallel_attention_mlp", all_boolean)
 @pytest.mark.parametrize("cpu_offload", all_boolean)
-<<<<<<< HEAD
-def test_sanity_gpt(dtype, fp8_recipe, model, skip_wgrad,
-                    zero_centered_gamma, bias, activation,
-                    normalization, parallel_attention_mlp,
-                    cpu_offload):
-    if IS_HIP_EXTENSION and cpu_offload:
-      pytest.skip("cpu_offloading not supported in rocm TE")
-
-=======
 def test_sanity_gpt(
     dtype,
     fp8_recipe,
@@ -595,7 +583,9 @@ def test_sanity_gpt(
     parallel_attention_mlp,
     cpu_offload,
 ):
->>>>>>> a4e95e8
+    if IS_HIP_EXTENSION and cpu_offload:
+      pytest.skip("cpu_offloading not supported in rocm TE")
+
     config = model_configs[model]
 
     if fp8_recipe is not None:

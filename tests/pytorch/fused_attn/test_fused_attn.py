@@ -69,22 +69,6 @@ def reset_global_fp8_state():
     fp8.FP8GlobalStateManager.reset()
 
 
-<<<<<<< HEAD
-@functools.cache
-def _cudnn_version() -> Tuple[int, int, int]:
-    # ROCm fused attn does not use cudnn, return high numbers to avoid tests filtering out
-    if IS_HIP_EXTENSION:
-        return (99, 0, 0)
-    """Runtime cuDNN version (major, minor, patch)"""
-    encoded_version = ext.get_cudnn_version()
-    major_version_magnitude = 1000 if encoded_version < 90000 else 10000
-    major, encoded_version = divmod(encoded_version, major_version_magnitude)
-    minor, patch = divmod(encoded_version, 100)
-    return (major, minor, patch)
-
-
-=======
->>>>>>> a4e95e8
 class ModelConfig:
     def __init__(
         self,
@@ -308,14 +292,8 @@ def test_dot_product_attention(
         else:
             qkv_layout = "sbhd_sb2hd"
     if "3" in qkv_layout and config.attn_type == "cross":
-<<<<<<< HEAD
-        pytest.skip(
-            "No need to test this layout for cross attention"
-        )
-=======
         pytest.skip("No need to test this layout for cross attention")
 
->>>>>>> a4e95e8
     # Skip if only unfused backend is supported
     qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
     unfused_attn_supported = _is_unfused_attention_supported(config, qkv_format)
@@ -1337,11 +1315,7 @@ def _rmse(a, b):
     return math.sqrt((torch.pow((a - b), 2) / a.numel()).sum())
 
 
-<<<<<<< HEAD
-@pytest.mark.skipif(_cudnn_version() < (8,9,3), reason="cuDNN 8.9.3+ is required in NVTE.")
-=======
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 3), reason="cuDNN 8.9.3+ is required.")
->>>>>>> a4e95e8
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.skipif(get_device_compute_capability() < (9, 0), reason="FP8 tests require Hopper+.")
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)

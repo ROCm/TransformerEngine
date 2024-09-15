@@ -33,23 +33,16 @@ const char* dtype_name(DType dtype) {
 // Maximum representable value of an FP8 dtype
 inline float fp8_dtype_max(DType dtype) {
   switch (dtype) {
-<<<<<<< HEAD
-#ifndef __HIP_PLATFORM_AMD__
-  case DType::kFloat8E4M3: return 448;
-#else
-  case DType::kFloat8E4M3: return 240;
-#endif
-  case DType::kFloat8E5M2: return 57344;
-  default:
-    NVTE_ERROR("Expected FP8 dtype, but got ", dtype_name(dtype));
-=======
     case DType::kFloat8E4M3:
+#ifndef __HIP_PLATFORM_AMD__
       return 448;
+#else
+			return 240;
+#endif
     case DType::kFloat8E5M2:
       return 57344;
     default:
       NVTE_ERROR("Expected FP8 dtype, but got ", dtype_name(dtype));
->>>>>>> a4e95e8
   }
   return 0;
 }

@@ -197,12 +197,8 @@ def get_build_ext(extension_cls: Type[setuptools.Extension]):
                 # Define new _compile method that redirects to NVCC for .cu and .cuh files.
                 # Also redirect .hip files to HIPCC
                 original_compile_fn = self.compiler._compile
-<<<<<<< HEAD
                 self.compiler.src_extensions += ['.cu', '.cuh', '.hip']
-=======
-                self.compiler.src_extensions += [".cu", ".cuh"]
 
->>>>>>> a4e95e8
                 def _compile_fn(obj, src, ext, cc_args, extra_postargs, pp_opts) -> None:
                     # Copy before we make any modifications.
                     cflags = copy.deepcopy(extra_postargs)
@@ -215,18 +211,12 @@ def get_build_ext(extension_cls: Type[setuptools.Extension]):
                             _, nvcc_bin = cuda_path()
                         original_compiler = self.compiler.compiler_so
 
-<<<<<<< HEAD
                         if os.path.splitext(src)[1] in ['.cu', '.cuh', '.hip']:
                             self.compiler.set_executable('compiler_so', str(nvcc_bin))
-=======
-                        if os.path.splitext(src)[1] in [".cu", ".cuh"]:
-                            self.compiler.set_executable("compiler_so", str(nvcc_bin))
->>>>>>> a4e95e8
                             if isinstance(cflags, dict):
                                 cflags = cflags["nvcc"]
 
                             # Add -fPIC if not already specified
-<<<<<<< HEAD
                             if not any('-fPIC' in flag for flag in cflags):
                                 if rocm_build():
                                     cflags.append('-fPIC')
@@ -237,14 +227,6 @@ def get_build_ext(extension_cls: Type[setuptools.Extension]):
                                 # Forward unknown options
                                 if not any('--forward-unknown-opts' in flag for flag in cflags):
                                     cflags.append('--forward-unknown-opts')
-=======
-                            if not any("-fPIC" in flag for flag in cflags):
-                                cflags.extend(["--compiler-options", "'-fPIC'"])
-
-                            # Forward unknown options
-                            if not any("--forward-unknown-opts" in flag for flag in cflags):
-                                cflags.append("--forward-unknown-opts")
->>>>>>> a4e95e8
 
                         elif isinstance(cflags, dict):
                             cflags = cflags["cxx"]

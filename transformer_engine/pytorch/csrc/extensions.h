@@ -382,20 +382,15 @@ size_t get_cublasLt_version();
 size_t get_cudnn_version();
 #endif
 
+void placeholder();
+
 /***************************************************************************************************
  * Support THD format for Context Parallel
  **************************************************************************************************/
 
-<<<<<<< HEAD
 #ifndef USE_ROCM
-at::Tensor thd_read_half_tensor(const at::Tensor &tensor,
-                                const at::Tensor &cu_seqlens,
-                                int half_idx
-);
-=======
 at::Tensor thd_read_half_tensor(const at::Tensor &tensor, const at::Tensor &cu_seqlens,
                                 int half_idx);
->>>>>>> a4e95e8
 
 void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_step,
                                     const at::Tensor &cu_seqlens, int total_tokens);
@@ -407,28 +402,14 @@ void thd_out_correction(at::Tensor out, const at::Tensor &out_per_step, const at
                         const at::Tensor &lse_per_step, const at::Tensor &cu_seqlens,
                         bool only_second_half);
 
-<<<<<<< HEAD
-void thd_grad_correction(at::Tensor grad,
-                         const at::Tensor &grad_per_step,
-                         const at::Tensor &cu_seqlens,
-                         const std::string &first_half,
-                         const std::string &second_half
-);
-
-at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens,
-                                       int total_tokens,
-                                       int world_size,
-                                       int rank
-);
-#endif
-=======
 void thd_grad_correction(at::Tensor grad, const at::Tensor &grad_per_step,
                          const at::Tensor &cu_seqlens, const std::string &first_half,
                          const std::string &second_half);
->>>>>>> a4e95e8
 
 at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_tokens,
                                        int world_size, int rank);
+#endif
+
 
 /***************************************************************************************************
  * multi_tensor_* kernels

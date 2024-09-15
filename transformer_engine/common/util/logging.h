@@ -9,13 +9,7 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_
 #define TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_
 
-<<<<<<< HEAD
 #include <string>
-#include <stdexcept>
-
-=======
-#include <cublas_v2.h>
->>>>>>> a4e95e8
 #include <cuda_runtime_api.h>
 #ifdef __HIP_PLATFORM_AMD__
 #ifdef USE_HIPBLASLT
@@ -57,7 +51,6 @@
     }                                                                         \
   } while (false)
 
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_AMD__
 #ifdef USE_HIPBLASLT //hipblaslt
 #define NVTE_CHECK_CUBLAS(expr)                                         \
@@ -86,14 +79,6 @@
       NVTE_ERROR("cuBLAS Error: ",                                      \
                  cublasGetStatusString(status_NVTE_CHECK_CUBLAS));      \
     }                                                                   \
-=======
-#define NVTE_CHECK_CUBLAS(expr)                                                      \
-  do {                                                                               \
-    const cublasStatus_t status_NVTE_CHECK_CUBLAS = (expr);                          \
-    if (status_NVTE_CHECK_CUBLAS != CUBLAS_STATUS_SUCCESS) {                         \
-      NVTE_ERROR("cuBLAS Error: ", cublasGetStatusString(status_NVTE_CHECK_CUBLAS)); \
-    }                                                                                \
->>>>>>> a4e95e8
   } while (false)
 #endif
 

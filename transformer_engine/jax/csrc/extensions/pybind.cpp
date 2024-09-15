@@ -50,29 +50,6 @@ pybind11::dict Registrations() {
 }
 
 PYBIND11_MODULE(transformer_engine_jax, m) {
-<<<<<<< HEAD
-    m.def("registrations", &Registrations);
-    m.def("pack_common_descriptor", &PackCustomCallCommonDescriptor,
-          pybind11::arg(), pybind11::arg(), pybind11::arg(), pybind11::arg("act_num") = 0);
-    m.def("pack_common_wk_descriptor", &PackCustomCallCommonWkDescriptor,
-          pybind11::arg(), pybind11::arg(), pybind11::arg(),
-          pybind11::arg(), pybind11::arg(), pybind11::arg("act_num") = 0);
-    m.def("pack_norm_descriptor", &PackCustomCallNormDescriptor);
-    m.def("pack_softmax_descriptor", &PackCustomCallSoftmaxDescriptor);
-    m.def("pack_fused_attn_descriptor", &PackCustomCallFusedAttnDescriptor);
-    m.def("get_fused_attn_backend", &GetFusedAttnBackend);
-    m.def("get_device_compute_capability", &GetDeviceComputeCapability);
-#ifndef USE_ROCM
-    m.def("get_cuda_version", &GetCudaRuntimeVersion);
-    m.def("get_cublasLt_version", &cublasLtGetVersion);
-#endif
-    m.def("get_dact_dbias_ct_workspace_sizes", &GetDActDBiasCastTransposeWorkspaceSizes);
-    m.def("get_dbias_ct_workspace_sizes", &GetDBiasCastTransposeWorkspaceSizes);
-    m.def("get_layernorm_fwd_workspace_sizes", &GetLayerNormForwardWorkspaceSizes);
-    m.def("get_layernorm_bwd_workspace_sizes", &GetLayerNormBackwardWorkspaceSizes);
-    m.def("get_fused_attn_fwd_workspace_sizes", &GetFusedAttnForwardWorkspaceSizes);
-    m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
-=======
   m.def("registrations", &Registrations);
   m.def("pack_common_descriptor", &PackCustomCallCommonDescriptor, pybind11::arg(), pybind11::arg(),
         pybind11::arg(), pybind11::arg("act_num") = 0);
@@ -83,16 +60,19 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("pack_softmax_descriptor", &PackCustomCallSoftmaxDescriptor);
   m.def("pack_fused_attn_descriptor", &PackCustomCallFusedAttnDescriptor);
   m.def("get_fused_attn_backend", &GetFusedAttnBackend);
+#ifndef USE_ROCM
   m.def("get_cuda_version", &GetCudaRuntimeVersion);
+#endif
   m.def("get_device_compute_capability", &GetDeviceComputeCapability);
+#ifndef USE_ROCM
   m.def("get_cublasLt_version", &cublasLtGetVersion);
+#endif
   m.def("get_dact_dbias_ct_workspace_sizes", &GetDActDBiasCastTransposeWorkspaceSizes);
   m.def("get_dbias_ct_workspace_sizes", &GetDBiasCastTransposeWorkspaceSizes);
   m.def("get_layernorm_fwd_workspace_sizes", &GetLayerNormForwardWorkspaceSizes);
   m.def("get_layernorm_bwd_workspace_sizes", &GetLayerNormBackwardWorkspaceSizes);
   m.def("get_fused_attn_fwd_workspace_sizes", &GetFusedAttnForwardWorkspaceSizes);
   m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
->>>>>>> a4e95e8
 
   pybind11::enum_<DType>(m, "DType", pybind11::module_local())
       .value("kByte", DType::kByte)
@@ -132,27 +112,19 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("SRELU", NVTE_Activation_Type::SRELU)
       .value("SREGLU", NVTE_Activation_Type::SREGLU);
 
-<<<<<<< HEAD
 #ifndef USE_ROCM
-    pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local())
-        .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend)
-        .value("NVTE_F16_max512_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen)
-        .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)
-        .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8);
-#else
-    pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local())
-        .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend)
-        .value("NVTE_AOTriton", NVTE_Fused_Attn_Backend::NVTE_AOTriton)
-        .value("NVTE_CK", NVTE_Fused_Attn_Backend::NVTE_CK);
-
-#endif
-=======
   pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local())
       .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend)
       .value("NVTE_F16_max512_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen)
       .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)
       .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8);
->>>>>>> a4e95e8
+#else
+	pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local())
+			.value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend)
+			.value("NVTE_AOTriton", NVTE_Fused_Attn_Backend::NVTE_AOTriton)
+			.value("NVTE_CK", NVTE_Fused_Attn_Backend::NVTE_CK);
+
+#endif
 }
 
 }  // namespace jax

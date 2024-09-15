@@ -9,11 +9,8 @@ import math
 import functools
 from typing import Any, Callable, Optional, Tuple
 import torch
-<<<<<<< HEAD
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
-=======
 import transformer_engine.pytorch.cpp_extensions as ext
->>>>>>> a4e95e8
 
 
 def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
@@ -241,7 +238,6 @@ def assert_dim_for_fp8_exec(tensor: torch.Tensor) -> None:
         f"but got tensor with dims={list(tensor.size())}"
     )
 
-<<<<<<< HEAD
 if IS_HIP_EXTENSION:
     def is_mi200():
       """check whether this machine is mi200/210/250"""
@@ -260,21 +256,15 @@ def is_bf16_compatible() -> None:
            check on device compute capability to enforce sm_80 or higher.
         """
         return torch.cuda.get_device_capability()[0] >= 8
-=======
-
-def is_bf16_compatible() -> None:
-    """Replaces torch.cuda.is_bf16_compatible() with an explicit
-    check on device compute capability to enforce sm_80 or higher.
-    """
-    return torch.cuda.get_device_capability()[0] >= 8
-
 
 @functools.cache
 def get_cudnn_version() -> Tuple[int, int, int]:
+    # ROCm fused attn does not use cudnn, return high numbers to avoid tests filtering out
+    if IS_HIP_EXTENSION:
+        return (99, 0, 0)
     """Runtime cuDNN version (major, minor, patch)"""
     encoded_version = ext.get_cudnn_version()
     major_version_magnitude = 1000 if encoded_version < 90000 else 10000
     major, encoded_version = divmod(encoded_version, major_version_magnitude)
     minor, patch = divmod(encoded_version, 100)
     return (major, minor, patch)
->>>>>>> a4e95e8

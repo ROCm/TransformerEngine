@@ -2553,16 +2553,9 @@ void reduce_fp8_in_bf16_out(void *inputs, void *output, float *scale, int num_in
       <<<grid, block, 0, stream>>>(inputs, output, scale, num_inputs, input_size);
 }
 
-<<<<<<< HEAD
-template void reduce_fp8_in_bf16_out<fp8e4m3>(
-  void *inputs, void *output, float *scale, int num_inputs, int input_size, cudaStream_t stream);
-template void reduce_fp8_in_bf16_out<fp8e5m2>(
-  void *inputs, void *output, float *scale, int num_inputs, int input_size, cudaStream_t stream);
-=======
-template void reduce_fp8_in_bf16_out<__nv_fp8_e4m3>(void *inputs, void *output, float *scale,
+template void reduce_fp8_in_bf16_out<fp8e4m3>(void *inputs, void *output, float *scale,
                                                     int num_inputs, int input_size,
                                                     cudaStream_t stream);
-template void reduce_fp8_in_bf16_out<__nv_fp8_e5m2>(void *inputs, void *output, float *scale,
+template void reduce_fp8_in_bf16_out<fp8e5m2>(void *inputs, void *output, float *scale,
                                                     int num_inputs, int input_size,
                                                     cudaStream_t stream);
->>>>>>> a4e95e8

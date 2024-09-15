@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -201,46 +203,6 @@ __global__ void scaled_aligned_causal_masked_softmax_warp_forward(output_t *dst,
     for (int it = 1; it < WARP_ITERATIONS; ++it) {
       max_value[w] = (max_value[w] > elements[w][it]) ? max_value[w] : elements[w][it];
     }
-<<<<<<< HEAD
-    warp_reduce<acc_t, WARP_ROWS, WARP_WIDTH, Add>(sum);
-    
-    //output_t out[ELEMENTS_PER_LDG_STG] { 0.0f };
-    output_t zero_output_t(0.0f);
-    output_t out[ELEMENTS_PER_LDG_STG] { zero_output_t };
-    // store result
-    #pragma unroll
-    for (int w = 0;  w < WARP_ROWS;  ++w) {
-        const int microbatch = global_row_idx + w;
-        const int i = microbatch % rows;
-        const int masked_elements = i + cols - rows + 1;
-
-        // out of Attention matrix bounds (rows)
-        if (microbatch >= microbatches) {
-            break;
-        }
-
-        #pragma unroll
-        for (int it = 0;  it < WARP_ITERATIONS;  it += ELEMENTS_PER_LDG_STG) {
-            const int j = col + it * WARP_WIDTH;              // index of the first column
-            const int itr_idx = w * cols + it * WARP_WIDTH;
-
-            if (j < masked_elements) {
-                #pragma unroll
-                for (int element = 0; element < ELEMENTS_PER_LDG_STG; ++element) {
-                    if (j + element < masked_elements) {
-                        out[element] = elements[w][it + element] / sum[w];
-                    } else {
-                        out[element] = (output_t)( 0.0f );
-                    }
-                }
-                copy_vector<output_t, ELEMENTS_PER_LDG_STG>(dst + itr_idx, out);
-            } else if (j < cols) {
-                copy_zero_vector<output_t, ELEMENTS_PER_LDG_STG>(dst + itr_idx);
-            } else {
-                break;
-            }
-        }
-=======
   }
   warp_reduce<acc_t, WARP_ROWS, WARP_WIDTH, Max>(max_value);
 
@@ -251,13 +213,14 @@ __global__ void scaled_aligned_causal_masked_softmax_warp_forward(output_t *dst,
     for (int it = 0; it < WARP_ITERATIONS; ++it) {
       elements[w][it] = expf((elements[w][it] - max_value[w]));
       sum[w] += elements[w][it];
->>>>>>> a4e95e8
     }
   }
   warp_reduce<acc_t, WARP_ROWS, WARP_WIDTH, Add>(sum);
 
-  output_t out[ELEMENTS_PER_LDG_STG]{0.0f};
-// store result
+  //output_t out[ELEMENTS_PER_LDG_STG]{0.0f};
+  output_t zero_output_t(0.0f);
+  output_t out[ELEMENTS_PER_LDG_STG] { zero_output_t };
+  // store result
 #pragma unroll
   for (int w = 0; w < WARP_ROWS; ++w) {
     const int microbatch = global_row_idx + w;
@@ -465,27 +428,12 @@ struct CompileTimeLoopBackward<input_t, output_t, acc_t, MIN_POWER> {
   }
 };
 
-<<<<<<< HEAD
-template<typename input_t, typename output_t, typename acc_t>
-void dispatch_scaled_aligned_causal_masked_softmax_forward(
-    output_t *dst,
-    const input_t *src,
-    const acc_t scale,
-    int query_seq_len,
-    int key_seq_len,
-    int batches,
-    int attn_heads,
-    cudaStream_t stream
-) {
-    NVTE_CHECK(key_seq_len >= 0 && key_seq_len <= 16384, "Unsupported shape.");
-=======
 template <typename input_t, typename output_t, typename acc_t>
 void dispatch_scaled_aligned_causal_masked_softmax_forward(output_t *dst, const input_t *src,
-                                                           const input_t scale, int query_seq_len,
+                                                           const acc_t scale, int query_seq_len,
                                                            int key_seq_len, int batches,
                                                            int attn_heads, cudaStream_t stream) {
   NVTE_CHECK(key_seq_len >= 0 && key_seq_len <= 16384, "Unsupported shape.");
->>>>>>> a4e95e8
 
   if (key_seq_len == 0) {
     return;

@@ -237,14 +237,9 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             return jnp.einsum("bhgqk,bkhd->bqhgd", attn_weights, value).reshape(query.shape)
         return jnp.einsum("bhqk,bkhd->bqhd", attn_weights, value)
 
-<<<<<<< HEAD
-class _FusedDotProductAttention(nn.Module):    # pylint: disable=too-few-public-methods
-    attention_dropout: float = 0.
-=======
 
 class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     attention_dropout: float = 0.0
->>>>>>> a4e95e8
     attn_mask_type: AttnMaskType = AttnMaskType.CAUSAL_MASK
     attn_bias_type: Optional[AttnBiasType] = None
     dtype: DType = jnp.float32
@@ -517,15 +512,6 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             seqlen_kv = seqlen_q
         else:
             seqlen_kv = key.shape[sequence_dim]
-<<<<<<< HEAD
-        
-        has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype, qkv_layout,
-                                                               attn_bias_type, attn_mask_type,
-                                                               self.attention_dropout,
-                                                               self.num_attention_heads,
-                                                               self.num_gqa_groups, seqlen_q,
-                                                               seqlen_kv, self.head_dim)
-=======
 
         has_fused_attn_kernel = is_fused_attn_kernel_available(
             self.dtype,
@@ -540,7 +526,6 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             seqlen_kv,
             self.head_dim,
         )
->>>>>>> a4e95e8
 
         use_fused_attn = enable_fused_attn and has_fused_attn_kernel
 

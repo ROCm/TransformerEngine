@@ -8,15 +8,11 @@
 
 #include <pybind11/functional.h>
 
-<<<<<<< HEAD
-#include "../extensions.h"
-#ifdef NVTE_WITH_USERBUFFERS
+//TODO: rocm does not support comm gemm overlap yet
+#ifndef USE_ROCM
 #include "../comm_gemm_overlap.h"
 #endif
-=======
-#include "../comm_gemm_overlap.h"
 #include "../extensions.h"
->>>>>>> a4e95e8
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Softmax functions
@@ -122,31 +118,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fp8_transpose_noalloc", &fp8_transpose_noalloc, "Transpose with FP8 I/O",
         py::call_guard<py::gil_scoped_release>());
   m.def("fp8_transpose_noalloc_noop", &fp8_transpose_noalloc_noop,
-<<<<<<< HEAD
-                            "Transpose with FP8 I/O with noop option.");
-  m.def("gelu", &gelu, "GeLU with FP8 output");
-  m.def("relu", &relu, "ReLU with FP8 output");
-  m.def("geglu", &geglu, "GeGLU with FP8 output");
-  m.def("reglu", &reglu, "ReGLU with FP8 output");
-  m.def("swiglu", &swiglu, "SwiGLU with FP8 output");
-  m.def("qgelu", &qgelu, "QuickGELU with FP8 output");
-  m.def("srelu", &srelu, "Squared ReLU with FP8 output");
-  m.def("dgelu", &dgelu, "Backward of GeLU");
-  m.def("drelu", &drelu, "Backward of ReLU");
-  m.def("dgeglu", &dgeglu, "Backward of GeGLU");
-  m.def("dreglu", &dreglu, "Backward of ReGLU");
-  m.def("dswiglu", &dswiglu, "Backward of SwiGLU");
-  m.def("dqgelu", &dqgelu, "Backward of QuickGELU");
-  m.def("dsrelu", &dsrelu, "Backward of Squared ReLU");
-#ifndef USE_ROCM
-  m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention");
-  m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention");
-#endif
-  m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend");
-  m.def("fused_amax_and_scale_update_after_reduction",
-        &fused_amax_and_scale_update_after_reduction,
-        "Update amax history and FP8 scale/scale_inv after reduction");
-=======
         "Transpose with FP8 I/O with noop option.", py::call_guard<py::gil_scoped_release>());
   m.def("gelu", &gelu, "GeLU with FP8 output", py::call_guard<py::gil_scoped_release>());
   m.def("relu", &relu, "ReLU with FP8 output", py::call_guard<py::gil_scoped_release>());
@@ -162,16 +133,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("dswiglu", &dswiglu, "Backward of SwiGLU", py::call_guard<py::gil_scoped_release>());
   m.def("dqgelu", &dqgelu, "Backward of QuickGELU", py::call_guard<py::gil_scoped_release>());
   m.def("dsrelu", &dsrelu, "Backward of Squared ReLU", py::call_guard<py::gil_scoped_release>());
+#ifndef USE_ROCM
   m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention",
         py::call_guard<py::gil_scoped_release>());
   m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention",
         py::call_guard<py::gil_scoped_release>());
+#endif
   m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend",
         py::call_guard<py::gil_scoped_release>());
   m.def("fused_amax_and_scale_update_after_reduction", &fused_amax_and_scale_update_after_reduction,
         "Update amax history and FP8 scale/scale_inv after reduction",
         py::call_guard<py::gil_scoped_release>());
->>>>>>> a4e95e8
 
   // fused apply rope
   m.def("fused_rope_forward", &fused_rope_forward, "Fused Apply RoPE FWD",
@@ -184,16 +156,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
 
   // Misc
-<<<<<<< HEAD
 #ifndef USE_ROCM
-  m.def("get_cublasLt_version", &get_cublasLt_version, "Get cublasLt version");
-  m.def("get_cudnn_version", &get_cudnn_version, "Get cuDNN version");
-=======
   m.def("get_cublasLt_version", &get_cublasLt_version, "Get cublasLt version",
         py::call_guard<py::gil_scoped_release>());
   m.def("get_cudnn_version", &get_cudnn_version, "Get cuDNN version",
         py::call_guard<py::gil_scoped_release>());
->>>>>>> a4e95e8
 
   // Support THD format for Context Parallel
   m.def("thd_read_half_tensor", &thd_read_half_tensor,
@@ -211,13 +178,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Correct the THD format gradients of context parallelism in backward pass",
         py::call_guard<py::gil_scoped_release>());
   m.def("thd_get_partitioned_indices", &thd_get_partitioned_indices,
-<<<<<<< HEAD
-        "Generate partitioned indices for inputs in THD format");
-#endif
-=======
         "Generate partitioned indices for inputs in THD format",
         py::call_guard<py::gil_scoped_release>());
->>>>>>> a4e95e8
+#endif
 
   // multi-tensor functions
   m.def("multi_tensor_scale", &multi_tensor_scale_cuda,
@@ -252,16 +215,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def_readwrite("scale_inv", &transformer_engine::FP8TensorMeta::scale_inv)
       .def_readwrite("amax_history", &transformer_engine::FP8TensorMeta::amax_history);
 
-<<<<<<< HEAD
-#ifdef NVTE_WITH_USERBUFFERS
-  // comm+GEMM overlap w/ userbuffers
-  m.def("set_ubuf_bootstrap_callbacks", &ubuf::set_ubuf_bootstrap_callbacks);
-=======
+	// TODO: Do we need to guard it out for ROCm?
+#ifndef USE_ROCM
   // Communication functions to initialize Userbuffers communicators
   // Note: Callbacks are not called, so safe to release GIL.
   m.def("set_ubuf_bootstrap_callbacks", &ubuf::set_ubuf_bootstrap_callbacks,
         py::call_guard<py::gil_scoped_release>());
->>>>>>> a4e95e8
 
   py::enum_<ubuf::UBOverlapAlgo>(m, "UbufOverlapAlgo")
       .value("BULK_OVERLAP_AG", ubuf::UBOverlapAlgo::BULK_OVERLAP_AG)
@@ -302,25 +261,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // communicator with Python functions (e.g. PyTorch distributed
   // communication)
   py::class_<ubuf::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap")
-<<<<<<< HEAD
-    .def(py::init<torch::Tensor&, int, int, int, int, int, int, bool, bool, int, bool, bool,
-         torch::Tensor>())
-    .def("split_overlap_ag_p2p", &ubuf::UbufP2PCommOverlap::split_overlap_ag)
-    .def("split_overlap_rs_p2p", &ubuf::UbufP2PCommOverlap::split_overlap_rs)
-    .def("atomic_gemm_overlap_ag_p2p", &ubuf::UbufP2PCommOverlap::atomic_gemm_overlap_ag)
-    .def("atomic_gemm_overlap_rs_p2p", &ubuf::UbufP2PCommOverlap::atomic_gemm_overlap_rs)
-    .def("copy_input_to_ubuf", &ubuf::UbufP2PCommOverlap::copy_input_to_ubuf)
-    .def("get_ubuf_output", &ubuf::UbufP2PCommOverlap::get_ubuf_output)
-    .def("is_fp8_ubuf", &ubuf::UbufP2PCommOverlap::is_fp8_ubuf)
-    .def("is_atomic_gemm", &ubuf::UbufP2PCommOverlap::is_atomic_gemm)
-    .def("is_p2p_overlap", &ubuf::UbufP2PCommOverlap::is_p2p_overlap)
-    .def("set_ubuf_scale_inv", &ubuf::UbufP2PCommOverlap::set_ubuf_scale_inv);
-#else
-  m.def("UbufOverlapAlgo", &placeholder, "Dummy function for python side annotations");
-  m.def("UbufCommOverlap", &placeholder, "Dummy function for python side annotations");
-  m.def("UbufP2PCommOverlap", &placeholder, "Dummy function for python side annotations");
-#endif  // NVTE_WITH_USERBUFFERS
-=======
       .def(py::init<torch::Tensor&, int, int, int, int, int, int, bool, bool, int, bool, bool, bool,
                     torch::Tensor>())
       .def("split_overlap_ag_p2p", &ubuf::UbufP2PCommOverlap::split_overlap_ag,
@@ -343,7 +283,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::call_guard<py::gil_scoped_release>())
       .def("set_ubuf_scale_inv", &ubuf::UbufP2PCommOverlap::set_ubuf_scale_inv,
            py::call_guard<py::gil_scoped_release>());
->>>>>>> a4e95e8
+#else
+  m.def("UbufOverlapAlgo", &placeholder, "Dummy function for python side annotations");
+  m.def("UbufCommOverlap", &placeholder, "Dummy function for python side annotations");
+  m.def("UbufP2PCommOverlap", &placeholder, "Dummy function for python side annotations");
+#endif //USE_ROCM
 
   py::enum_<transformer_engine::DType>(m, "DType", py::module_local())
       .value("kByte", transformer_engine::DType::kByte)

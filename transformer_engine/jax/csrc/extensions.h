@@ -9,35 +9,12 @@
 #ifndef TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_
 #define TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_
 
-<<<<<<< HEAD
-#include <cassert>
-#include <cstddef>
-#include <cstdint>
-#include <vector>
-#include <stdexcept>
-#include <string>
-#include <iostream>
-
-#include <cuda_runtime_api.h>
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
-
-#include "transformer_engine/fused_attn.h"
-#include "transformer_engine/transformer_engine.h"
-#include "transformer_engine/activation.h"
-#include "common/common.h"
-#include "common/util/logging.h"
-#include "utils.h"
 
 #ifndef USE_ROCM
-=======
->>>>>>> a4e95e8
 #include <cublasLt.h>
 #include <cublas_v2.h>
 #include <cudnn.h>
-<<<<<<< HEAD
 #endif
-=======
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <transformer_engine/activation.h>
@@ -55,7 +32,6 @@
 #include "common/common.h"
 #include "common/util/logging.h"
 #include "utils.h"
->>>>>>> a4e95e8
 
 namespace transformer_engine {
 namespace jax {
