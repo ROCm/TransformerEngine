@@ -149,34 +149,6 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
   auto cu_seqlens_sizes = cu_seqlens.sizes().vec();
   std::vector<size_t> cu_seqlens_shape{cu_seqlens_sizes.begin(), cu_seqlens_sizes.end()};
   te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens.data_ptr(), cu_seqlens_shape,
-<<<<<<< HEAD
-                    DType::kInt32, nullptr, nullptr, nullptr);
-  
-  if ((seq_offsets_q.has_value())
-      && (seq_offsets_k.has_value())
-      && (seq_offsets_v.has_value())
-      && (seq_offsets_o.has_value())) {
-      auto seq_offsets_q_sizes = seq_offsets_q.value().sizes().vec();
-      std::vector<size_t> seq_offsets_q_shape{
-                    seq_offsets_q_sizes.begin(), seq_offsets_q_sizes.end()};
-      auto seq_offsets_k_sizes = seq_offsets_k.value().sizes().vec();
-      std::vector<size_t> seq_offsets_k_shape{
-                    seq_offsets_k_sizes.begin(), seq_offsets_k_sizes.end()};
-      auto seq_offsets_v_sizes = seq_offsets_v.value().sizes().vec();
-      std::vector<size_t> seq_offsets_v_shape{
-                    seq_offsets_v_sizes.begin(), seq_offsets_v_sizes.end()};
-      auto seq_offsets_o_sizes = seq_offsets_o.value().sizes().vec();
-      std::vector<size_t> seq_offsets_o_shape{
-                    seq_offsets_o_sizes.begin(), seq_offsets_o_sizes.end()};
-      te_seq_offsets_q = makeTransformerEngineTensor(seq_offsets_q.value().data_ptr(),
-                    seq_offsets_q_shape, DType::kInt32, nullptr, nullptr, nullptr);
-      te_seq_offsets_k = makeTransformerEngineTensor(seq_offsets_k.value().data_ptr(),
-                    seq_offsets_k_shape, DType::kInt32, nullptr, nullptr, nullptr);
-      te_seq_offsets_v = makeTransformerEngineTensor(seq_offsets_v.value().data_ptr(),
-                    seq_offsets_v_shape, DType::kInt32, nullptr, nullptr, nullptr);
-      te_seq_offsets_o = makeTransformerEngineTensor(seq_offsets_o.value().data_ptr(),
-                    seq_offsets_o_shape, DType::kInt32, nullptr, nullptr, nullptr);
-=======
                                               DType::kInt32, nullptr, nullptr, nullptr);
 
   if (cu_seqlens_padded.has_value()) {
@@ -186,17 +158,12 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
     te_cu_seqlens_padded =
         makeTransformerEngineTensor(cu_seqlens_padded.value().data_ptr(), cu_seqlens_padded_shape,
                                     DType::kInt32, nullptr, nullptr, nullptr);
->>>>>>> a4e95e8
   }
 
   // extract random number generator seed and offset
   auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
-<<<<<<< HEAD
-                  rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
-#ifndef USE_ROCM
-=======
       rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
->>>>>>> a4e95e8
+#ifndef USE_ROCM
   at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
 #else
   //ROCm fused attn (AOTriton and CK) has increment of size batch_sizexnum_headsxmaxseqlenkxmaxseqlenq
@@ -533,12 +500,8 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
 
   // extract rng seed and offset
   auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
-<<<<<<< HEAD
-                  rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
-#ifndef USE_ROCM
-=======
       rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
->>>>>>> a4e95e8
+#ifndef USE_ROCM
   at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
 #else
   const transformer_engine::Tensor *input_cu_seqlens_q = reinterpret_cast<const transformer_engine::Tensor*>(te_cu_seqlens_q.data());
@@ -908,12 +871,8 @@ std::vector<at::Tensor> fused_attn_fwd(
 
   // extract rng seed and offset
   auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
-<<<<<<< HEAD
-                  rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
-#ifndef USE_ROCM
-=======
       rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
->>>>>>> a4e95e8
+#ifndef USE_ROCM
   at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
 #else
   const transformer_engine::Tensor *input_cu_seqlens_q = reinterpret_cast<const transformer_engine::Tensor*>(te_cu_seqlens_q.data());

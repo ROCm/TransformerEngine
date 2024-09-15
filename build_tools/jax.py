@@ -75,13 +75,6 @@ def setup_jax_extension(
         "transformer_engine_jax",
         sources=[str(path) for path in sources],
         include_dirs=[str(path) for path in include_dirs],
-<<<<<<< HEAD
-        extra_compile_args={
-            "cxx": cxx_flags,
-            "nvcc": nvcc_flags
-        },
-        define_macros=macros
-=======
         extra_compile_args={"cxx": cxx_flags, "nvcc": nvcc_flags},
->>>>>>> a4e95e8
+        define_macros=macros
     )

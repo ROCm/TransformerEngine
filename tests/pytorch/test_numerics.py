@@ -1593,7 +1593,6 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     # to act fancy)
     torch.manual_seed(0)
     y_bshd = block_bshd(x_bshd)
-<<<<<<< HEAD
     
     # TODO: wait for the full determinism fix from hipblaslt
     if IS_HIP_EXTENSION:
@@ -1608,14 +1607,6 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
             y_bshd,
             y_sbhd.transpose(0,1).contiguous(),
         )
-=======
-
-    # Check that results match
-    torch.testing.assert_close(
-        y_bshd,
-        y_sbhd.transpose(0, 1).contiguous(),
-    )
->>>>>>> a4e95e8
 
 
 @pytest.mark.parametrize("dtype", param_types)

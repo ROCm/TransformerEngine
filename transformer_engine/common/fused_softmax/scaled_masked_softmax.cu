@@ -438,29 +438,9 @@ void dispatch_scaled_softmax_forward(output_t *dst, const input_t *src, const in
     const int next_power_of_two = 1 << log2_elements;
     int batch_count = batches * attn_heads * query_seq_len;
 
-<<<<<<< HEAD
-template<typename input_t, typename output_t, typename acc_t>
-void dispatch_scaled_softmax_forward(
-    output_t *dst,
-    const input_t *src,
-    const acc_t scale,
-    int query_seq_len,
-    int key_seq_len,
-    int batches,
-    int attn_heads,
-    cudaStream_t stream) {
-    NVTE_CHECK(key_seq_len >= 0 && key_seq_len <= 16384, "Unsupported shape.");
-    if (key_seq_len == 0) {
-        return;
-    } else {
-        int log2_elements = log2_ceil(key_seq_len);
-        const int next_power_of_two = 1 << log2_elements;
-        int batch_count = batches * attn_heads * query_seq_len;
-=======
     // This value must match the WARP_SIZE constexpr
     // value computed inside softmax_warp_forward.
     int warp_size = (next_power_of_two < THREADS_PER_WARP) ? next_power_of_two : THREADS_PER_WARP;
->>>>>>> a4e95e8
 
     // This value must match the WARP_BATCH constexpr
     // value computed inside softmax_warp_forward.
@@ -542,27 +522,6 @@ void dispatch_scaled_softmax_forward(
   }
 }
 
-<<<<<<< HEAD
-template<typename input_t, typename output_t, typename acc_t>
-void dispatch_scaled_masked_softmax_forward(
-    output_t *dst,
-    const input_t *src,
-    const uint8_t *mask,
-    const acc_t scale,
-    int query_seq_len,
-    int key_seq_len,
-    int batches,
-    int attn_heads,
-    int pad_batches,
-    cudaStream_t stream) {
-    NVTE_CHECK(key_seq_len >= 0 && key_seq_len <= 16384, "Unsupported shape.");
-    if (key_seq_len == 0) {
-        return;
-    } else {
-        int log2_elements = log2_ceil(key_seq_len);
-        const int next_power_of_two = 1 << log2_elements;
-        int batch_count = batches * attn_heads * query_seq_len;
-=======
 template <typename input_t, typename output_t, typename acc_t>
 void dispatch_scaled_masked_softmax_forward(output_t *dst, const input_t *src, const uint8_t *mask,
                                             const input_t scale, int query_seq_len, int key_seq_len,
@@ -575,7 +534,6 @@ void dispatch_scaled_masked_softmax_forward(output_t *dst, const input_t *src, c
     int log2_elements = log2_ceil(key_seq_len);
     const int next_power_of_two = 1 << log2_elements;
     int batch_count = batches * attn_heads * query_seq_len;
->>>>>>> a4e95e8
 
     // This value must match the WARP_SIZE constexpr
     // value computed inside softmax_warp_forward.

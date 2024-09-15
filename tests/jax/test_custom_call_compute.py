@@ -17,33 +17,10 @@ from jax import jit, value_and_grad
 from flax import linen as nn
 
 from utils import assert_allclose
-<<<<<<< HEAD
-from transformer_engine.jax.dot import (
-    type_safe_dot_general,
-    dequantize,
-    quantize
-)
-from transformer_engine.jax.fp8 import (
-    jnp_float8_e4m3_type,
-    jnp_float8_e5m2_type,
-    FP8MetaPackage,
-    FP8Helper,
-    is_fp8_available
-)
-from transformer_engine.jax.layernorm import (
-    layernorm,
-    layernorm_fp8_dot
-)
-from transformer_engine.jax.layernorm_mlp import (
-    activation_lu,
-    fused_layernorm_fp8_mlp
-)
-=======
 from transformer_engine.jax.dot import type_safe_dot_general, dequantize, quantize
 from transformer_engine.jax.fp8 import FP8MetaPackage, FP8Helper, is_fp8_available
 from transformer_engine.jax.layernorm import layernorm, layernorm_fp8_dot
 from transformer_engine.jax.layernorm_mlp import activation_lu, fused_layernorm_fp8_mlp
->>>>>>> a4e95e8
 from transformer_engine.jax import cpp_extensions as tex
 from transformer_engine.jax import is_hip_extension
 

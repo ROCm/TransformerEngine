@@ -18,20 +18,6 @@
 #include <c10/macros/Macros.h>
 #include <torch/extension.h>
 #include <torch/torch.h>
-<<<<<<< HEAD
-#include <cuda_runtime.h>
-#ifndef USE_ROCM
-#include <cuda_bf16.h>
-#include <cublasLt.h>
-#include <cuda.h>
-#include <cudnn.h>
-#else
-#include <hip/hip_bfloat16.h>
-#endif
-
-#include "common/util/logging.h"
-=======
->>>>>>> a4e95e8
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/cast_transpose_noop.h>

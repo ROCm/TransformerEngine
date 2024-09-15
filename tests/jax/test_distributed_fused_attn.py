@@ -82,21 +82,11 @@ class TestDistributedSelfAttn:
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
     @pytest.mark.parametrize("data_shape", [[32, 512, 3, 12, 64], [32, 1024, 3, 16, 128]])
     @pytest.mark.parametrize(
-<<<<<<< HEAD
-        'attn_bias_type',
-        [AttnBiasType.NO_BIAS, AttnBiasType.PRE_SCALE_BIAS, AttnBiasType.POST_SCALE_BIAS])
-    @pytest.mark.parametrize('attn_mask_type',
-                             [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK] if is_hip_extension() else [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK])
-    @pytest.mark.parametrize('dtype', DTYPES)
-    def test_self_attn(self, device_count, mesh_shape, mesh_axes, mesh_resource, data_shape,
-                       attn_bias_type, attn_mask_type, dtype):
-=======
         "attn_bias_type",
         [AttnBiasType.NO_BIAS, AttnBiasType.PRE_SCALE_BIAS, AttnBiasType.POST_SCALE_BIAS],
     )
     @pytest.mark.parametrize(
-        "attn_mask_type", [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK]
-    )
+        "attn_mask_type", [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK] if is_hip_extension() else [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK])
     @pytest.mark.parametrize("dtype", DTYPES)
     def test_self_attn(
         self,
@@ -109,7 +99,6 @@ class TestDistributedSelfAttn:
         attn_mask_type,
         dtype,
     ):
->>>>>>> a4e95e8
         dropout_prob = 0.0
         is_training = True
         scaling_factor = 1.0

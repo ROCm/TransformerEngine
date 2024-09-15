@@ -73,15 +73,11 @@ class TransposePrimitive(BasePrimitive):
 
         x_aval = ctx.avals_in[0]
         assert x_aval.dtype in [
-<<<<<<< HEAD
-            jnp.float32, jnp.float16, jnp.bfloat16, jnp_float8_e4m3_type, jnp_float8_e5m2_type
-=======
             jnp.float32,
             jnp.float16,
             jnp.bfloat16,
-            jnp.float8_e4m3fn,
-            jnp.float8_e5m2,
->>>>>>> a4e95e8
+            jnp.float8_e4m3_type,
+            jnp.float8_e5m2_type,
         ]
 
         ir_x_type = ir.RankedTensorType(x.type)

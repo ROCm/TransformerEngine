@@ -167,13 +167,9 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
 #if NDEBUG == 0
       "-G",
 #endif
-<<<<<<< HEAD
-    "--std=c++17"};
+			"--std=c++17"};
 
 #ifndef __HIP_PLATFORM_AMD__
-=======
-      "--std=c++17"};
->>>>>>> a4e95e8
   if (compile_ptx) {
     opts.push_back(concat_strings("--gpu-architecture=compute_", compile_sm_arch));
   } else {
@@ -197,18 +193,9 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
   constexpr int num_headers = 2;
   constexpr const char* headers[num_headers] = {string_code_utils_cuh, string_code_util_math_h};
   constexpr const char* include_names[num_headers] = {"utils.cuh", "util/math.h"};
-<<<<<<< HEAD
 #endif // __HIP_PLATFORM_AMD__
-  NVTE_CHECK_NVRTC(nvrtcCreateProgram(&program,
-                                      code.c_str(),
-                                      filename.c_str(),
-                                      num_headers,
-                                      headers,
-                                      include_names));
-=======
   NVTE_CHECK_NVRTC(nvrtcCreateProgram(&program, code.c_str(), filename.c_str(), num_headers,
                                       headers, include_names));
->>>>>>> a4e95e8
   NVTE_CHECK_NVRTC(nvrtcAddNameExpression(program, kernel_name.c_str()));
   const nvrtcResult compile_result =
       nvrtcCompileProgram(program, opts_ptrs.size(), opts_ptrs.data());

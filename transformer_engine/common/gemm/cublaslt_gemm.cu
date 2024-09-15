@@ -6,10 +6,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-<<<<<<< HEAD
-#include <type_traits>
-#include <transformer_engine/gemm.h>
-#include <transformer_engine/transformer_engine.h>
 #ifndef __HIP_PLATFORM_AMD__
 #include <cublasLt.h>
 #include <cublas_v2.h>
@@ -31,17 +27,11 @@
 #include <cstdlib>
 #include <string>
 #endif // #ifndef __HIP_PLATFORM_AMD__
-#include <cstdint>
-=======
-#include <cublasLt.h>
-#include <cublas_v2.h>
-#include <cuda.h>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/transformer_engine.h>
 
 #include <cstdint>
 #include <mutex>
->>>>>>> a4e95e8
 
 #include "../common.h"
 #include "../util/vectorized_pointwise.h"
@@ -134,39 +124,15 @@ uint32_t _getAlignment(uintptr_t address) {
 
 namespace transformer_engine {
 
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_AMD__
 #include "rocm_gemm.hip"
 #else // Use cublasLt
-void cublas_gemm(const Tensor *inputA,
-                 const Tensor *inputB,
-                 Tensor *outputD,
-                 const Tensor *inputBias,
-                 Tensor *outputPreGelu,
-                 int m, int n, int k,
-                 int lda, int ldb, int ldd,
-                 cublasOperation_t transa,
-                 cublasOperation_t transb,
-                 bool grad,
-                 void* workspace,
-                 size_t workspaceSize,
-                 bool accumulate,
-                 bool use_split_accumulator,
-                 int math_sm_count,
-                 int m_split,
-                 int n_split,
-                 bool gemm_producer,
-                 const Tensor *inputCounter,
-                 cudaStream_t stream
-) {
-=======
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, int m, int n, int k, int lda,
                  int ldb, int ldd, cublasOperation_t transa, cublasOperation_t transb, bool grad,
                  void *workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                  int math_sm_count, int m_split, int n_split, bool gemm_producer,
                  const Tensor *inputCounter, cudaStream_t stream) {
->>>>>>> a4e95e8
   void *A = inputA->data.dptr;
   void *A_scale_inverse = inputA->scale_inv.dptr;
   void *B = inputB->data.dptr;
@@ -436,7 +402,6 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
     NVTE_ERROR("TT layout not allowed.");
   }
 
-<<<<<<< HEAD
   bool nvte_log_gemm_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_GEMM_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
@@ -492,12 +457,6 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
               false,
               nullptr,
               stream);
-=======
-  cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, m, n, k, lda, ldb, ldd,
-              (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad,
-              wspace->data.dptr, wspace->data.shape[0], accumulate, use_split_accumulator,
-              math_sm_count, 0, 0, false, nullptr, stream);
->>>>>>> a4e95e8
 }
 
 void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D,
@@ -544,7 +503,6 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
     NVTE_ERROR("TT layout not allowed.");
   }
 
-<<<<<<< HEAD
   cublas_gemm(inputA,
               inputB,
               outputD,
@@ -573,12 +531,6 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
               gemm_producer,
               inputCounter,
               stream);
-=======
-  cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, m, n, k, lda, ldb, ldd,
-              (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad,
-              wspace->data.dptr, wspace->data.shape[0], accumulate, use_split_accumulator,
-              math_sm_count, m_split, n_split, gemm_producer, inputCounter, stream);
-}
 
 void nvte_multi_stream_cublas_gemm(std::vector<NVTETensor> A, std::vector<NVTETensor> B,
                                    std::vector<NVTETensor> D, std::vector<NVTETensor> bias,
@@ -612,5 +564,4 @@ void nvte_multi_stream_cublas_gemm(std::vector<NVTETensor> A, std::vector<NVTETe
   for (int s = 0; s < num_stream_used; s++) {
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, cublas_event[s]));
   }
->>>>>>> a4e95e8
 }

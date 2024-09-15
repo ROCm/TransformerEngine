@@ -23,7 +23,6 @@ __all__ = ["fp8_autocast", "fp8_model_init"]
 
 
 def check_fp8_support() -> Tuple[bool, str]:
-<<<<<<< HEAD
     from torch.utils.cpp_extension import IS_HIP_EXTENSION
     if IS_HIP_EXTENSION:
         if get_device_compute_capability() == (9, 4):
@@ -32,28 +31,16 @@ def check_fp8_support() -> Tuple[bool, str]:
             return False, "Only MI300 machines support fp8"
     else:
         """Return if fp8 support is available"""
-        if get_device_compute_capability() >= (9, 0): # hopper and above
+        if get_device_compute_capability() >= (9, 0):  # hopper and above
             return True, ""
-        if get_device_compute_capability() < (8, 9): # pre-ada
+        if get_device_compute_capability() < (8, 9):  # pre-ada
             return False, "Device compute capability 8.9 or higher required for FP8 execution."
         if tex.get_cublasLt_version() < 120103:
             return False, "CublasLt version 12.1.3.x or higher required for FP8 execution on Ada."
         if float(torch.version.cuda) < 12.1:
             return False, "Cuda version 12.1 or higher required for FP8 execution on Ada."
         return True, ""
-=======
-    """Return if fp8 support is available"""
-    if get_device_compute_capability() >= (9, 0):  # hopper and above
-        return True, ""
-    if get_device_compute_capability() < (8, 9):  # pre-ada
-        return False, "Device compute capability 8.9 or higher required for FP8 execution."
-    if tex.get_cublasLt_version() < 120103:
-        return False, "CublasLt version 12.1.3.x or higher required for FP8 execution on Ada."
-    if float(torch.version.cuda) < 12.1:
-        return False, "Cuda version 12.1 or higher required for FP8 execution on Ada."
-    return True, ""
 
->>>>>>> a4e95e8
 
 def get_default_fp8_recipe() -> DelayedScaling:
     """FP8 recipe with default args."""

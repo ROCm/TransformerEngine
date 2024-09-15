@@ -461,45 +461,23 @@ void fp8_transpose_dbias(const Tensor &input, Tensor *transposed_output, Tensor 
               reinterpret_cast<const ComputeType *>(transposed_output->scale_inv.dptr);
           param.workspace = reinterpret_cast<ComputeType *>(workspace->data.dptr);
 
-<<<<<<< HEAD
-      if (full_tile) {
-#ifndef __HIP_PLATFORM_AMD__
-        cudaFuncSetAttribute(transpose_dbias_kernel<nvec_in, nvec_out, Param>,
-                             cudaFuncAttributePreferredSharedMemoryCarveout,
-                             100);
-#endif //#ifndef __HIP_PLATFORM_AMD__
-        transpose_dbias_kernel<nvec_in, nvec_out, Param>
-          <<<n_blocks,
-             cast_transpose_num_threads,
-             shared_size_transpose,
-             stream>>>(param, row_length, num_rows, n_tiles);
-      } else {
-#ifndef __HIP_PLATFORM_AMD__
-        cudaFuncSetAttribute(transpose_dbias_kernel_notaligned<nvec_in, nvec_out, Param>,
-                             cudaFuncAttributePreferredSharedMemoryCarveout,
-                             100);
-#endif //#ifndef __HIP_PLATFORM_AMD__
-        transpose_dbias_kernel_notaligned<nvec_in, nvec_out, Param>
-          <<<n_blocks,
-             cast_transpose_num_threads,
-             shared_size_transpose,
-             stream>>>(param, row_length, num_rows, n_tiles);
-      }
-=======
           if (full_tile) {
+#ifndef __HIP_PLATFORM_AMD__
             cudaFuncSetAttribute(transpose_dbias_kernel<nvec_in, nvec_out, Param>,
                                  cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+#endif //#ifndef __HIP_PLATFORM_AMD__
             transpose_dbias_kernel<nvec_in, nvec_out, Param>
                 <<<n_blocks, cast_transpose_num_threads, shared_size_transpose, stream>>>(
                     param, row_length, num_rows, n_tiles);
           } else {
+#ifndef __HIP_PLATFORM_AMD__
             cudaFuncSetAttribute(transpose_dbias_kernel_notaligned<nvec_in, nvec_out, Param>,
                                  cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+#endif //#ifndef __HIP_PLATFORM_AMD__
             transpose_dbias_kernel_notaligned<nvec_in, nvec_out, Param>
                 <<<n_blocks, cast_transpose_num_threads, shared_size_transpose, stream>>>(
                     param, row_length, num_rows, n_tiles);
           }
->>>>>>> a4e95e8
 
           reduce_dbias<BiasType>(*workspace, dbias, row_length, num_rows, nvec_out,
                                  stream););  // NOLINT(*)

@@ -23,15 +23,6 @@
 #include <unordered_map>
 #include <vector>
 
-<<<<<<< HEAD
-#include <cuda_runtime_api.h>
-#include <cuda_fp16.h>
-#include <cuda_bf16.h>
-#include <cuda_fp8.h>
-
-#include <transformer_engine/transformer_engine.h>
-=======
->>>>>>> a4e95e8
 #include "./nvtx.h"
 #include "./util/logging.h"
 

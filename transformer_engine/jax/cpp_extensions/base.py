@@ -90,11 +90,7 @@ def register_primitive(cls):
     inner_p.multiple_results = cls.multiple_results
     inner_p.def_impl(partial(xla.apply_primitive, inner_p))
     inner_p.def_abstract_eval(cls.abstract)
-<<<<<<< HEAD
-    mlir.register_lowering(inner_p, cls.lowering, platform='rocm' if is_hip_extension() else 'cuda')
-=======
-    mlir.register_lowering(inner_p, cls.lowering, platform="cuda")
->>>>>>> a4e95e8
+    mlir.register_lowering(inner_p, cls.lowering, platform="rocm" if is_hip_extension() else "cuda")
     cls.inner_primitive = inner_p
 
     outer_p = core.Primitive(name_of_wrapper_p())

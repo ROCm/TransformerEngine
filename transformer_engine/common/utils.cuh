@@ -48,15 +48,9 @@ constexpr uint32_t THREADS_PER_WARP = 32;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-<<<<<<< HEAD
-
 #if !defined(USE_HIPBLASLT) && !defined(__HIPCC_RTC__)
-inline __device__ float2 operator+(const float2 & a, const float2 & b) {  // NOLINT(*)
-    return {a.x + b.x, a.y + b.y};
-=======
 inline __device__ float2 operator+(const float2 &a, const float2 &b) {  // NOLINT(*)
   return {a.x + b.x, a.y + b.y};
->>>>>>> a4e95e8
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -77,37 +71,13 @@ struct Sum {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-<<<<<<< HEAD
-template<typename T>
-inline __device__ T warp_shuffle_xor(const T & x, uint32_t idx) {
+template <typename T>
+inline __device__ T warp_shuffle_xor(const T &x, uint32_t idx) {
 #ifdef __HIP_PLATFORM_AMD__
     return __shfl_xor(x, idx, THREADS_PER_WARP);
 #else
-    return __shfl_xor_sync(static_cast<uint32_t>(-1), x, idx);
-#endif
-}
-
-template<>
-inline __device__ float2 warp_shuffle_xor<float2>(const float2 & x, uint32_t idx) {
-    return { warp_shuffle_xor((float)x.x, idx), warp_shuffle_xor((float)x.y, idx) };
-}
-
-template<typename T>
-inline __device__ T warp_shuffle_down(const T & x, uint32_t idx) {
-#ifdef __HIP_PLATFORM_AMD__
-    return __shfl_down(x, idx, THREADS_PER_WARP);
-#else
-    return __shfl_down_sync(static_cast<uint32_t>(-1), x, idx);
-#endif
-}
-
-template<>
-inline __device__ float2 warp_shuffle_down<float2>(const float2 & x, uint32_t idx) {
-    return { warp_shuffle_down((float)x.x, idx), warp_shuffle_down((float)x.y, idx) };
-=======
-template <typename T>
-inline __device__ T warp_shuffle_xor(const T &x, uint32_t idx) {
   return __shfl_xor_sync(static_cast<uint32_t>(-1), x, idx);
+#endif
 }
 
 template <>
@@ -117,13 +87,16 @@ inline __device__ float2 warp_shuffle_xor<float2>(const float2 &x, uint32_t idx)
 
 template <typename T>
 inline __device__ T warp_shuffle_down(const T &x, uint32_t idx) {
+#ifdef __HIP_PLATFORM_AMD__
+    return __shfl_down(x, idx, THREADS_PER_WARP);
+#else
   return __shfl_down_sync(static_cast<uint32_t>(-1), x, idx);
+#endif
 }
 
 template <>
 inline __device__ float2 warp_shuffle_down<float2>(const float2 &x, uint32_t idx) {
   return {warp_shuffle_down(x.x, idx), warp_shuffle_down(x.y, idx)};
->>>>>>> a4e95e8
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -208,17 +181,13 @@ struct TypeToVec2<half> {
   using Type = half2;
 };
 
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_AMD__
-template<>
+template <>
 struct TypeToVec2<hip_bfloat16> {
     using Type = hip_bfloat16x2;
 };
 #else
-template<>
-=======
 template <>
->>>>>>> a4e95e8
 struct TypeToVec2<nv_bfloat16> {
   using Type = nv_bfloat162;
 };
@@ -287,29 +256,23 @@ struct Converter<float2, half2> {
   static inline __device__ half2 convert(const float2 &x) { return __float22half2_rn(x); }
 };
 
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_AMD__
-template<>
-struct Converter<float2, hip_bfloat16x2>{
-    static inline __device__ hip_bfloat16x2 convert(const float2 &x) {
-        union {
-            hip_bfloat16x2 raw;
-            hip_bfloat16 elt[2];
-        } tmp;
-        tmp.elt[0] = hip_bfloat16(x.x);
-        tmp.elt[1] = hip_bfloat16(x.y);
-        return tmp.raw;
-    }
+template <>
+struct Converter<float2, hip_bfloat16x2> {
+	static inline __device__ hip_bfloat16x2 convert(const float2 &x) {
+		union {
+			hip_bfloat16x2 raw;
+			hip_bfloat16 elt[2];
+		} tmp;
+		tmp.elt[0] = hip_bfloat16(x.x);
+		tmp.elt[1] = hip_bfloat16(x.y);
+		return tmp.raw;
+	}
 };
 #else
-template<>
-struct Converter<float2, nv_bfloat162>{
-    static inline __device__ nv_bfloat162 convert(const float2 &x) {
-=======
 template <>
 struct Converter<float2, nv_bfloat162> {
   static inline __device__ nv_bfloat162 convert(const float2 &x) {
->>>>>>> a4e95e8
 #if __CUDA_ARCH__ >= 800
     return __float22bfloat162_rn(x);
 #else
@@ -351,17 +314,13 @@ struct Vec {
     Elt_type elt[NUM_ELT];
   };
 
-<<<<<<< HEAD
-    Alias_type data;
-    #ifdef __HIP_PLATFORM_AMD__
-    __HOST_DEVICE__ Vec& operator=(const Vec& rhs) {
-        data.vec = rhs.data.vec;
-        return *this;
-    }
-    #endif
-=======
-  Alias_type data;
->>>>>>> a4e95e8
+	Alias_type data;
+#ifdef __HIP_PLATFORM_AMD__
+	__HOST_DEVICE__ Vec& operator=(const Vec& rhs) {
+			data.vec = rhs.data.vec;
+			return *this;
+	}
+#endif
 
   template <typename S>
   inline __device__ void to(Vec<S, NUM_ELT> &other) {  // NOLINT(*)
@@ -442,30 +401,22 @@ struct InterCTASync {
     // BARRIERS ARE ASSUMED TO BE INITIALIZED TO 0!
   }
 
+#ifdef __HIP_PLATFORM_AMD__
+	inline __device__ void spin_wait_(int *barrier, int step, int expected) {
+		__hip_atomic_fetch_add(barrier, step, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT);
+		for (int found = -1; found != expected; ) {
+			found = __hip_atomic_load(barrier, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT);
+		}
+	}
+#else
   inline __device__ void spin_wait_(int *barrier, int step, int expected) {
     asm volatile("red.release.gpu.global.add.s32 [%0], %1;" ::"l"(barrier), "r"(step));
     for (int found = -1; found != expected;) {
       asm volatile("ld.global.acquire.gpu.b32 %0, [%1];" : "=r"(found) : "l"(barrier));
     }
   }
-
-<<<<<<< HEAD
-#ifdef __HIP_PLATFORM_AMD__
-    inline __device__ void spin_wait_(int *barrier, int step, int expected) {
-        __hip_atomic_fetch_add(barrier, step, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT);
-        for (int found = -1; found != expected; ) {
-            found = __hip_atomic_load(barrier, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT);
-        }
-    }
-#else
-    inline __device__ void spin_wait_(int *barrier, int step, int expected) {
-        asm volatile("red.release.gpu.global.add.s32 [%0], %1;" ::"l"(barrier), "r"(step));
-        for ( int found = -1; found != expected; ) {
-            asm volatile("ld.global.acquire.gpu.b32 %0, [%1];" : "=r"(found) : "l"(barrier));
-        }
-    }
 #endif
-=======
+
   inline __device__ void sync() {
     // ALL THREADS MUST ENTER!
 
@@ -484,7 +435,6 @@ struct InterCTASync {
     // CTA waits for thread 0
     __syncthreads();
   }
->>>>>>> a4e95e8
 
   int phase_counter_;
   int *b0_;
@@ -743,28 +693,18 @@ inline __device__ void warp_chan_upd_dynamic(T &m_a, T &m2_a, T &n_a,
     const float m2_ab = m2_a + m2_b + delta * delta * n_a * n_b * rn_ab;
     const float m_ab = (n_a * m_a + n_b * m_b) * rn_ab;
 
-<<<<<<< HEAD
-        n_a = n_ab;
-        m_a = m_ab;
-        m2_a = m2_ab;
-    }
-    // Intra-warp broadcast (only lane 0 has valid stats).
-    #ifdef __HIP_PLATFORM_AMD__
-    m_a = __shfl(m_a, 0, THREADS_PER_WARP);
-    m2_a = __shfl(m2_a, 0, THREADS_PER_WARP);
-    #else
-    m_a = __shfl_sync(static_cast<uint32_t>(-1), m_a, 0);
-    m2_a = __shfl_sync(static_cast<uint32_t>(-1), m2_a, 0);
-    #endif
-=======
     n_a = n_ab;
     m_a = m_ab;
     m2_a = m2_ab;
   }
   // Intra-warp broadcast (only lane 0 has valid stats).
+#ifdef __HIP_PLATFORM_AMD__
+	m_a = __shfl(m_a, 0, THREADS_PER_WARP);
+	m2_a = __shfl(m2_a, 0, THREADS_PER_WARP);
+#else
   m_a = __shfl_sync(static_cast<uint32_t>(-1), m_a, 0);
   m2_a = __shfl_sync(static_cast<uint32_t>(-1), m2_a, 0);
->>>>>>> a4e95e8
+#endif
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -939,27 +879,17 @@ template <int num_elems>
 __device__ __forceinline__ float warp_reduce_max(const float m) {
   float tmp = m;
 #pragma unroll
-<<<<<<< HEAD
-    for (int delta = num_elems/2; delta > 0; delta /= 2) {
-    #ifdef __HIP_PLATFORM_AMD__
-        const float other_m = __shfl_down(tmp, delta, THREADS_PER_WARP);
-    #else
-        const float other_m = __shfl_down_sync(0xFFFFFFFF, tmp, delta);
-    #endif
-        __builtin_assume(tmp >= 0);
-        __builtin_assume(other_m >= 0);
-        tmp = fmaxf(tmp, other_m);
-    }
-    return tmp;
-=======
   for (int delta = num_elems / 2; delta > 0; delta /= 2) {
+#ifdef __HIP_PLATFORM_AMD__
+		const float other_m = __shfl_down(tmp, delta, THREADS_PER_WARP);
+#else
     const float other_m = __shfl_down_sync(0xFFFFFFFF, tmp, delta);
+#endif
     __builtin_assume(tmp >= 0);
     __builtin_assume(other_m >= 0);
     tmp = fmaxf(tmp, other_m);
   }
   return tmp;
->>>>>>> a4e95e8
 }
 
 template <int num_warps, typename compute_t>
