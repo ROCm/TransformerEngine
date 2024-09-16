@@ -325,7 +325,7 @@ class FusedScaleMaskSoftmax(nn.Module):
             scale is None or self.softmax_in_fp32
         ), "softmax should be in fp32 when scaled"
 
-        if self.is_kernel_available(mask, *inp.size()) and not is_in_onnx_export_mode():
+        if int(os.getenv("FUSED_SOFTMAX"), 0) and self.is_kernel_available(mask, *inp.size()) and not is_in_onnx_export_mode():
             return self.forward_fused_softmax(inp, mask, scale)
         return self.forward_torch_softmax(inp, mask, scale)
 

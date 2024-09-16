@@ -42,9 +42,10 @@ class _RMSNorm(torch.autograd.Function):
         inputmat = inp.view((-1, in_features))
 
         # Cast for native AMP
-        inputmat = cast_if_needed(inputmat, activation_dtype)
-        rmsnorm_weight = cast_if_needed(rmsnorm_weight, activation_dtype)
-
+        if int(os.getenv("RMSNORM_CAST"), 0):
+            inputmat = cast_if_needed(inputmat, activation_dtype)
+            rmsnorm_weight = cast_if_needed(rmsnorm_weight, activation_dtype)
+        
         if is_grad_enabled:
             rmsnorm_out, rsigma = tex.rmsnorm_fwd(inputmat, rmsnorm_weight,
                                                   eps, fwd_rmsnorm_sm_margin,

@@ -92,20 +92,20 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
       nvte_fused_attn_aotriton = false;
   }
   // first check whether ck can be used, then check aotriton
-  std::cout << "Function Arguments:" << std::endl;
-  std::cout << "  q_dtype: " << q_dtype << std::endl;
-  std::cout << "  kv_dtype: " << kv_dtype << std::endl;
-  std::cout << "  qkv_layout: " << qkv_layout << std::endl;
-  std::cout << "  bias_type: " << bias_type << std::endl;
-  std::cout << "  attn_mask_type: " << attn_mask_type << std::endl;
-  std::cout << "  dropout: " << dropout << std::endl;
-  std::cout << "  num_attn_heads: " << num_attn_heads << std::endl;
-  std::cout << "  num_gqa_groups: " << num_gqa_groups << std::endl;
-  std::cout << "  max_seqlen_q: " << max_seqlen_q << std::endl;
-  std::cout << "  max_seqlen_kv: " << max_seqlen_kv << std::endl;
-  std::cout << "  head_dim: " << head_dim << std::endl;
-  std::cout << "  ck fused: " << nvte_fused_attn_ck << std::endl;
-  std::cout << "  aotriton fused: " << nvte_fused_attn_aotriton << std::endl;
+  // std::cout << "Function Arguments:" << std::endl;
+  // std::cout << "  q_dtype: " << q_dtype << std::endl;
+  // std::cout << "  kv_dtype: " << kv_dtype << std::endl;
+  // std::cout << "  qkv_layout: " << qkv_layout << std::endl;
+  // std::cout << "  bias_type: " << bias_type << std::endl;
+  // std::cout << "  attn_mask_type: " << attn_mask_type << std::endl;
+  // std::cout << "  dropout: " << dropout << std::endl;
+  // std::cout << "  num_attn_heads: " << num_attn_heads << std::endl;
+  // std::cout << "  num_gqa_groups: " << num_gqa_groups << std::endl;
+  // std::cout << "  max_seqlen_q: " << max_seqlen_q << std::endl;
+  // std::cout << "  max_seqlen_kv: " << max_seqlen_kv << std::endl;
+  // std::cout << "  head_dim: " << head_dim << std::endl;
+  // std::cout << "  ck fused: " << nvte_fused_attn_ck << std::endl;
+  // std::cout << "  aotriton fused: " << nvte_fused_attn_aotriton << std::endl;
   if(nvte_fused_attn_ck && fused_attn_rocm::is_ck_backend_supported(
         q_dtype,
         kv_dtype,
