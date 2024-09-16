@@ -23,7 +23,7 @@ Feature Support Status
 * GEMM: partially supported with following input/output types: (fp32/fp32), (fp16/fp16), (bf16/bf16), (fp8, bf8/fp16, bf16, fp32)
 * Attention (Flash Attention, Fused Multihead Attention): partially supported: Fused Attention with AOTriton and CK backends
 * HipGraph, HipTX: partially supported
-* Tensor Parallism: not supported
+* Tensor Parallelism, Sequence Parallelism, Context Parallelism: supported
 
 Installation
 ------------
@@ -82,15 +82,21 @@ The following Pytorch integration pytests are supported:
   tests/pytorch/test_torch_save_load.py
   tests/pytorch/test_fused_rope.py
   tests/pytorch/test_deferred_init.py
+  tests/pytorch/fused_attn/test_fused_attn.py
+  tests/pytorch/fused_attn/test_fused_attn_with_cp.py
 
 Execute the following command to test them after a successfuly installation with Pytorch. 
 
 .. code-block:: bash
 
-  ROCBLAS_STREAM_ORDER_ALLOC=1 NVTE_FUSED_ATTN=0 NVTE_FLASH_ATTN=0 pytest tests/pytorch/<testname>
+  NVTE_FLASH_ATTN=0 pytest tests/pytorch/<testname>
 
-`ROCBLAS_STREAM_ORDER_ALLOC=1` can be dropped when the hipGraph feature is fully supported in Pytorch on AMDGPUs or when hipBlasLt is used
-The other environmental variables are required since our ROCm Transformer Engine has not supported fused attention or flash attention yet. 
+Env `ROCBLAS_STREAM_ORDER_ALLOC=1` can be used in pytorch-rocblas configuration. 
+It can be dropped when the hipGraph feature is fully supported in Pytorch on AMDGPUs.
+Env `NVTE_FLASH_ATTN=0` is required since our ROCm Transformer Engine has not supported the standalone `flash attention module from Dao-AILab <https://github.com/Dao-AILab/flash-attention>`_.
+But we have an equivalent implementation based on Composable Kernels that could be used.
+
+our ROCm Transformer Engine has not supported ROCm flash attention yet.
 
 Jax
 
@@ -104,9 +110,10 @@ The following jax pytests except for test_fused_attn.py are supported.
   tests/jax/test_helper.py
   tests/jax/test_praxis_layers.py
   tests/jax/test_sharding.py
+  tests/jax/test_fused_attn.py
   tests/jax/test_distributed_layernorm.py
   tests/jax/test_distributed_softmax.py
-
+  tests/jax/test_distributed_fused_attn.py
 
 Examples
 --------

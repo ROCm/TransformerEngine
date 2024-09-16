@@ -16,6 +16,71 @@
 
 namespace ck_fused_attn{
 
+// define dk_dv_reduce function only for fp16 and bf16 types
+template<typename DataType>
+__global__ void dk_dv_reduce(
+  uint64_t b, uint64_t h, uint64_t hg, uint64_t s_kv, uint64_t d,
+  const DataType *dk_expanded,
+  const DataType *dv_expanded,
+  uint64_t stride_b_dkv_expanded, uint64_t stride_h_dkv_expanded, uint64_t stride_s_dkv_expanded,
+  DataType *dk,
+  DataType *dv,
+  //k,v, dk, dv guaranteed to have the same stride
+  uint64_t stride_b_dkv, uint64_t stride_h_dkv, uint64_t stride_s_dkv){
+  
+  uint64_t batch_idx = blockIdx.x;
+  uint64_t seqlen_idx = blockIdx.y;
+  uint64_t head_k_idx = blockIdx.z;
+  uint64_t hdim_idx = threadIdx.x;
+  
+  // h guaranteed to be multiples of hg
+  uint64_t head_idx_offset = h / hg;
+
+  float sum_dk = 0.0f;
+  float sum_dv = 0.0f;
+
+  assert(hdim_dix<d);
+  uint64_t read_idx = batch_idx*stride_b_dkv_expanded + head_k_idx*head_idx_offset*stride_h_dkv_expanded + seqlen_idx*stride_s_dkv_expanded + hdim_idx;
+  uint64_t write_idx = batch_idx*stride_b_dkv + head_k_idx*stride_h_dkv + seqlen_idx* stride_s_dkv + hdim_idx;
+  
+  for(uint64_t ii = 0; ii < head_idx_offset; ii++){
+    // bf16 requires special casting in CK
+    if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
+      sum_dk += ck_tile::bf16_to_float(dk_expanded[read_idx]);
+      sum_dv += ck_tile::bf16_to_float(dv_expanded[read_idx]);
+    }else{
+      sum_dk += dk_expanded[read_idx];
+      sum_dv += dv_expanded[read_idx];
+    }
+    read_idx += stride_h_dkv_expanded;
+  }
+
+  // bf16 requires special casting in CK
+  if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
+    dk[write_idx] = ck_tile::float_to_bf16(sum_dk);
+    dv[write_idx] = ck_tile::float_to_bf16(sum_dv);
+  }else{
+    dk[write_idx] = sum_dk;
+    dv[write_idx] = sum_dv;
+  }
+}
+
+#define CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, type, ...)   \
+switch (dtype) {                                            \
+  case DType::kFloat16: {                                   \
+    using type = ck_tile::half_t;                           \
+    __VA_ARGS__;                                            \
+    break;                                                  \
+  }                                                         \
+  case DType::kBFloat16: {                                  \
+    using type = ck_tile::bf16_t;                           \
+    __VA_ARGS__;                                            \
+    break;                                                  \
+  }                                                         \
+  default:                                                  \
+    throw std::runtime_error("Invalid type for 16 bit..");  \
+}
+
 hipError_t ck_attn_bwd(  
   DType dtype,
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d,
@@ -36,6 +101,9 @@ hipError_t ck_attn_bwd(
   void* dq_ptr, 
   uint64_t stride_b_dq, uint64_t stride_h_dq, uint64_t stride_s_dq,
   void* dq_acc_ptr,
+  void* dk_expanded_ptr,
+  void* dv_expanded_ptr,
+  uint64_t stride_b_dkv_expanded, uint64_t stride_h_dkv_expanded, uint64_t stride_s_dkv_expanded,
   void* dk_ptr, 
   uint64_t stride_b_dk, uint64_t stride_h_dk, uint64_t stride_s_dk,
   void* dv_ptr, 
@@ -45,6 +113,7 @@ hipError_t ck_attn_bwd(
 
   bool has_dropout = (dropout_probability > 0.f);
   bool has_dbias = false;
+  bool is_mqa_gqa = (h > hg);
 
   /* CK input parameters */
   ck_tile::index_t batch = b;
@@ -106,6 +175,7 @@ hipError_t ck_attn_bwd(
     const ck_tile::index_t stride_dq = stride_s_dq;
     const ck_tile::index_t stride_dk = stride_s_dk;
     const ck_tile::index_t stride_dv = stride_s_dv;
+    const ck_tile::index_t stride_dkv_expanded = stride_s_dkv_expanded;
     const ck_tile::index_t stride_dq_acc = h*d; //dq_acc of shape (B, S, H, D)
     // TODO: support bias later
     const ck_tile::index_t stride_dbias = 0;
@@ -124,6 +194,7 @@ hipError_t ck_attn_bwd(
     const ck_tile::index_t nhead_stride_dq = stride_h_dq;
     const ck_tile::index_t nhead_stride_dk = stride_h_dk;
     const ck_tile::index_t nhead_stride_dv = stride_h_dv;
+    const ck_tile::index_t nhead_stride_dkv_expanded = stride_h_dkv_expanded;
     const ck_tile::index_t nhead_stride_dbias = max_seqlen_k;
     const ck_tile::index_t nhead_stride_dq_acc = d; //dq_acc of shape (B, S, H, D)
     // setup batch_stride_* arguments
@@ -139,6 +210,7 @@ hipError_t ck_attn_bwd(
     const ck_tile::index_t batch_stride_dq = stride_b_dq;
     const ck_tile::index_t batch_stride_dk = stride_b_dk;
     const ck_tile::index_t batch_stride_dv = stride_b_dv;
+    const ck_tile::index_t batch_stride_dkv_expanded = stride_b_dkv_expanded;
     const ck_tile::index_t batch_stride_dbias =
         nhead * shape_seqlen_q * max_seqlen_k;
     const ck_tile::index_t batch_stride_dq_acc = h*s_q*d; //dq_acc of shape (B, S, H, D)
@@ -154,8 +226,8 @@ hipError_t ck_attn_bwd(
                          workspace_ptr,
                          nullptr,
                          dq_ptr,
-                         dk_ptr,
-                         dv_ptr,
+                         is_mqa_gqa? dk_expanded_ptr:dk_ptr,
+                         is_mqa_gqa? dv_expanded_ptr:dv_ptr,
                          nullptr, // dbias_ptr
                          dq_acc_ptr, //dq_acc_buf
                          nullptr,//cu_seqlen_q
@@ -180,8 +252,8 @@ hipError_t ck_attn_bwd(
                          stride_do,
                          stride_dq_acc,//stride_dq_acc
                          stride_dq,//stride_dq
-                         stride_dk,
-                         stride_dv,
+                         is_mqa_gqa? stride_dkv_expanded:stride_dk,
+                         is_mqa_gqa? stride_dkv_expanded:stride_dv,
                          stride_dbias,
                          nhead_stride_q,
                          nhead_stride_k,
@@ -193,8 +265,8 @@ hipError_t ck_attn_bwd(
                          nhead_stride_lsed,
                          nhead_stride_dq_acc, //nhead_stride_dq_acc
                          nhead_stride_dq,
-                         nhead_stride_dk,
-                         nhead_stride_dv,
+                         is_mqa_gqa? nhead_stride_dkv_expanded:nhead_stride_dk,
+                         is_mqa_gqa? nhead_stride_dkv_expanded:nhead_stride_dv,
                          nhead_stride_dbias,
                          batch_stride_q,
                          batch_stride_k,
@@ -206,8 +278,8 @@ hipError_t ck_attn_bwd(
                          batch_stride_lsed,
                          batch_stride_dq_acc, //batch_stride_dq_acc
                          batch_stride_dq,
-                         batch_stride_dk,
-                         batch_stride_dv,
+                         is_mqa_gqa? batch_stride_dkv_expanded:batch_stride_dk,
+                         is_mqa_gqa? batch_stride_dkv_expanded:batch_stride_dv,
                          batch_stride_dbias,
                          split_stride_dq_acc,
                          left,
@@ -225,6 +297,7 @@ hipError_t ck_attn_bwd(
   }
   if (ck_fused_attn_log_config) {
     std::cout<<std::endl<<"run ck fmha_bwd: "<<std::endl;
+    // fmha_traits debug
     std::cout<<"fmha_traits: ";
     std::cout<<"hdim_q: "<<fmha_traits.hdim_q<<", ";
     std::cout<<"hdim_v: "<<fmha_traits.hdim_v<<", ";
@@ -233,7 +306,11 @@ hipError_t ck_attn_bwd(
     std::cout<<"mask_type: "<<static_cast<std::underlying_type<mask_enum>::type>(fmha_traits.mask_type)<<", ";
     std::cout<<"bias_type: "<<static_cast<std::underlying_type<bias_enum>::type>(fmha_traits.bias_type)<<", ";
     std::cout<<"has_dbias: "<<fmha_traits.has_dbias<<", ";
-    std::cout<<"has_dropout: "<<fmha_traits.has_dropout<<std::endl;
+    std::cout<<"has_dropout: "<<fmha_traits.has_dropout<<", ";
+    std::cout<<"is_store_randval: "<<fmha_traits.is_store_randval<<", ";
+    std::cout<<"is_deterministic: "<<fmha_traits.is_deterministic<<std::endl;
+
+    // fmha_args debug
     std::cout<<"fmha_args: ";
     std::cout<<"q_ptr: "<<fmha_args.q_ptr<<", ";
     std::cout<<"k_ptr: "<<fmha_args.k_ptr<<", ";
@@ -268,6 +345,8 @@ hipError_t ck_attn_bwd(
     std::cout<<"stride_o: "<<fmha_args.stride_o<<", ";
     std::cout<<"stride_randval: "<<fmha_args.stride_randval<<", ";
     std::cout<<"stride_do: "<<fmha_args.stride_do<<", ";
+    std::cout<<"stride_dq_acc: "<<fmha_args.stride_dq_acc<<", ";
+    std::cout<<"stride_dq: "<<fmha_args.stride_dq<<", ";
     std::cout<<"stride_dk: "<<fmha_args.stride_dk<<", ";
     std::cout<<"stride_dv: "<<fmha_args.stride_dv<<", ";
     std::cout<<"stride_dbias: "<<fmha_args.stride_dbias<<", ";
@@ -279,6 +358,10 @@ hipError_t ck_attn_bwd(
     std::cout<<"nhead_stride_randval: "<<fmha_args.nhead_stride_randval<<", ";
     std::cout<<"nhead_stride_do: "<<fmha_args.nhead_stride_do<<", ";
     std::cout<<"nhead_stride_lsed: "<<fmha_args.nhead_stride_lsed<<", ";
+    std::cout<<"nhead_stride_dq_acc: "<<fmha_args.nhead_stride_dq_acc<<", ";
+    std::cout<<"nhead_stride_dq: "<<fmha_args.nhead_stride_dq<<", ";
+    std::cout<<"nhead_stride_dk: "<<fmha_args.nhead_stride_dk<<", ";
+    std::cout<<"nhead_stride_dv: "<<fmha_args.nhead_stride_dv<<", ";
     std::cout<<"nhead_stride_dbias: "<<fmha_args.nhead_stride_dbias<<", ";
     std::cout<<"batch_stride_q: "<<fmha_args.batch_stride_q<<", ";
     std::cout<<"batch_stride_k: "<<fmha_args.batch_stride_k<<", ";
@@ -288,6 +371,8 @@ hipError_t ck_attn_bwd(
     std::cout<<"batch_stride_randval: "<<fmha_args.batch_stride_randval<<", ";
     std::cout<<"batch_stride_do: "<<fmha_args.batch_stride_do<<", ";
     std::cout<<"batch_stride_lsed: "<<fmha_args.batch_stride_lsed<<", ";
+    std::cout<<"batch_stride_dq_acc: "<<fmha_args.batch_stride_dq_acc<<", ";
+    std::cout<<"batch_stride_dq: "<<fmha_args.batch_stride_dq<<", ";
     std::cout<<"batch_stride_dk: "<<fmha_args.batch_stride_dk<<", ";
     std::cout<<"batch_stride_dv: "<<fmha_args.batch_stride_dv<<", ";
     std::cout<<"batch_stride_dbias: "<<fmha_args.batch_stride_dbias<<", ";
@@ -303,6 +388,37 @@ hipError_t ck_attn_bwd(
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
+  }
+  if(is_mqa_gqa){
+    dim3 grid(b, s_kv, hg);
+    dim3 block(d);
+    if (ck_fused_attn_log_config){
+      std::cout<<std::endl<<"run dk_dv_reduce: "<<std::endl;
+      std::cout<<"dk_expanded_ptr: "<<dk_expanded_ptr<<", ";
+      std::cout<<"dv_expanded_ptr: "<<dv_expanded_ptr<<", ";
+      std::cout<<"stride_b_dkv_expanded: "<<stride_b_dkv_expanded<<", ";
+      std::cout<<"stride_h_dkv_expanded: "<<stride_h_dkv_expanded<<", ";
+      std::cout<<"stride_s_dkv_expanded: "<<stride_s_dkv_expanded<<", ";
+      std::cout<<"dk_ptr: "<<dk_ptr<<", ";
+      std::cout<<"dv_ptr: "<<dv_ptr<<", ";
+      std::cout<<"stride_b_dk: "<<stride_b_dk<<", ";
+      std::cout<<"stride_h_dk: "<<stride_h_dk<<", ";
+      std::cout<<"stride_s_dk: "<<stride_s_dk<<std::endl;
+    }
+    CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
+      hipLaunchKernelGGL(
+        dk_dv_reduce<CK_TILE_TYPE>, grid, block, 0, stream,
+        b, h, hg, s_kv, d,
+        static_cast<CK_TILE_TYPE*>(dk_expanded_ptr),
+        static_cast<CK_TILE_TYPE*>(dv_expanded_ptr),
+        stride_b_dkv_expanded, stride_h_dkv_expanded, stride_s_dkv_expanded,
+        static_cast<CK_TILE_TYPE*>(dk_ptr),
+        static_cast<CK_TILE_TYPE*>(dv_ptr),
+        stride_b_dk, stride_h_dk, stride_s_dk););
+    //reduce the dkv expanded to dk kv
+    if(hipStreamSynchronize(stream)!=hipSuccess){
+      throw std::runtime_error("failed sync in dk_dv_reduce in mqa/gqa.");
+    }
   }
   return hipSuccess;
 }

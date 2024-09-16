@@ -36,6 +36,13 @@ bool is_aotriton_backend_supported(
     return false;
   }
 
+  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+  bool is_qkvpacked = layout_group==NVTE_QKV_Layout_Group::NVTE_3HD ||layout_group==NVTE_QKV_Layout_Group::NVTE_H3D;
+  // qkvpacked layout requires seq length to be the same
+  if(is_qkvpacked && max_seqlen_q!=max_seqlen_kv){
+    return false;
+  }
+
   const int device_id = cuda::current_device();
   const std::string sm_arch_name_ = cuda::sm_arch_name(device_id);
   //only MI250 or MI300X supported
@@ -49,8 +56,9 @@ bool is_aotriton_backend_supported(
   }
   
   //Only BSHD, SBHD style layouts supported
-  if(!((nvte_get_qkv_format(qkv_layout)!= NVTE_QKV_Format::NVTE_SBHD)||
-    (nvte_get_qkv_format(qkv_layout)!= NVTE_QKV_Format::NVTE_BSHD))){
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if(!(qkv_format == NVTE_QKV_Format::NVTE_SBHD||
+    qkv_format == NVTE_QKV_Format::NVTE_BSHD)){
     return false;
   }
   
@@ -60,13 +68,13 @@ bool is_aotriton_backend_supported(
   }
 
   // Only no mask and causal mask supported
-  if(!((attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK)||
-    (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK))){
+  if(!(attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK||
+    attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)){
     return false;
   } 
   
   // causal does not work with s_q != s_kv
-  if((max_seqlen_q!=max_seqlen_kv)&&(attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)){
+  if(max_seqlen_q!=max_seqlen_kv && attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK){
     return false;
   }
 
@@ -630,6 +638,20 @@ void fused_attn_aotriton_bwd(
     workspace->data.dptr,
     &workspace_size,
     stream);
+
+  if (workspace_size > 0) {
+    if (workspace->data.dptr == nullptr) {
+      workspace->data.shape = {workspace_size};
+      workspace->data.dtype = DType::kByte;
+      return;
+    }
+  } else if (workspace_size == 0) {
+    workspace->data.shape = {1};
+    workspace->data.dtype = DType::kByte;
+    return;
+  } else {
+    NVTE_ERROR("Unexpected workspace_size.");
+  }
 }
 
 }  // namespace transformer_engine
