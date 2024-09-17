@@ -4717,7 +4717,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             num_gemms=3,
             allow_non_contiguous=True,
         ) as query_layer:
-
+            
             if self.fp8:
                 forced_fp8_dpa = ""
                 if self.fp8_meta["recipe"].fp8_mha:
@@ -4881,6 +4881,11 @@ class DotProductAttention(TransformerEngineBaseModule):
             use_flash_attention = self.use_flash_attention
             use_fused_attention = self.use_fused_attention
             use_unfused_attention = True
+
+            #TODO: rocm does not support fp8 fused attn
+            if IS_HIP_EXTENSION:
+                if self.fp8:
+                    use_fused_attention = False
 
             # The following section filters out some backends based on
             # certain asserts before executing the forward pass.

@@ -12,6 +12,7 @@ import torch
 import pytest
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import io
+import os
 
 from transformer_engine.pytorch.fp8 import (
     fp8_autocast,
@@ -911,6 +912,10 @@ def test_sanity_gradient_accumulation_fusion(
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("normalization", all_normalizations)
 def test_gpt_cuda_graph(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma, normalization):
+    if IS_HIP_EXTENSION:
+        use_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
+        if use_fused_attn and (dtype in (torch.float16, torch.bfloat16)):
+            pytest.skip("rocm fused attn backends does not support cuda graph")
     config = model_configs[model]
 
     if fp8_recipe is not None:
