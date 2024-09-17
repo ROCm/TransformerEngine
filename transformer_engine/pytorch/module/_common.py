@@ -172,7 +172,6 @@ class _NoopCatFunc(torch.autograd.Function):
         if tensors[0].untyped_storage().size() < numel*tensors[0].element_size():
             out = torch.cat(tensors, dim=dim)
             for tensor, (split_start, split_end) in zip(tensors, split_ranges):
-                dptr = tensor.data_ptr()
                 tensor.data = out[split_start:split_end]
             return out
 
