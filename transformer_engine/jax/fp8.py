@@ -44,6 +44,11 @@ Collection = Union[Dict, FrozenDict]
 
 def _check_fp8_support(gpu_id) -> Tuple[bool, str]:
     """Return if fp8 support is available"""
+    if is_hip_extension():
+        if get_device_compute_capability(gpu_id) == 94:
+            return True, ""
+        else:
+            return False, "Only MI300 machines support fp8"
     gpu_arch = get_device_compute_capability(gpu_id)
     if gpu_arch >= 90:  # hopper and above
         return True, ""

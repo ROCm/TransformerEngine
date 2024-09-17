@@ -2423,6 +2423,7 @@ class FlashAttention(torch.nn.Module):
         super().__init__()
 
         #TODO: wait for rocm flash attn
+        assert not IS_HIP_EXTENSION, "Flash attention is not supported on ROCm"
         if not IS_HIP_EXTENSION:
             assert (
                 _flash_attn_version >= _flash_attn_version_required
@@ -2698,8 +2699,8 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
             if fp8_meta["recipe"].fp8_mha:
                 assert isinstance(qkv, Float8Tensor), "qkv must be Float8Tensors for FP8 MHA."
                 fp8_meta["scaling_fwd"].scale_inv[META_QKV] = qkv._scale_inv
-            if not IS_HIP_EXTENSION:
-                fused_attention_backend = FusedAttnBackend["FP8"]
+            assert not IS_HIP_EXTENSION, "FP8 Fused attention is not supported on ROCm"
+            fused_attention_backend = FusedAttnBackend["FP8"]
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             # 1: qkv packed, 2: kv packed, 3: qkv separate
             qkv_group = len(qkv_layout.split("_"))
@@ -3064,8 +3065,8 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                     kv, Float8Tensor
                 ), "q/kv must be Float8Tensors for FP8 MHA."
                 fp8_meta["scaling_fwd"].scale_inv[META_QKV] = q._scale_inv
-            if not IS_HIP_EXTENSION:
-                fused_attention_backend = FusedAttnBackend["FP8"]
+            assert not IS_HIP_EXTENSION, "FP8 Fused attention is not supported on ROCm"
+            fused_attention_backend = FusedAttnBackend["FP8"]
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             if fp8_meta["recipe"].fp8_mha:
                 q_fp8, kv_fp8 = q._data, kv._data
@@ -3482,10 +3483,9 @@ class FusedAttnFunc(torch.autograd.Function):
     ):
         logger = logging.getLogger("FusedAttnFunc")
         if fp8:
-            ##TODO: shall we error out here for ROCm?
-            if not IS_HIP_EXTENSION:
-                logger.debug("Running forward in FP8")
-                fused_attention_backend = FusedAttnBackend["FP8"]
+            logger.debug("Running forward in FP8")
+            assert not IS_HIP_EXTENSION, "FP8 Fused attention is not supported on ROCm"
+            fused_attention_backend = FusedAttnBackend["FP8"]
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             if fp8_meta["recipe"].fp8_mha:
                 assert (
@@ -4441,6 +4441,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         )
         if IS_HIP_EXTENSION:
             self.use_flash_attention = False
+            self.use_fused_attention = int(os.getenv("NVTE_FUSED_ATTN", "1"))
         else:
             self.use_flash_attention = int(
                 os.getenv("NVTE_FLASH_ATTN", "1")
@@ -4449,7 +4450,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 self.logger.debug("Disabling FlashAttention due to NVTE_FLASH_ATTN=0")
             if self.device_compute_capability < (8, 0):
                 self.logger.debug("Disabling FlashAttention for compute capability < sm80")
-
             if not _flash_attn_2_4_1_plus and self.deterministic:
                 self.use_flash_attention = False
                 self.logger.warning(
@@ -4457,14 +4457,13 @@ class DotProductAttention(TransformerEngineBaseModule):
                     "deterministic execution. In order to use FA with deterministic behavior,"
                     " please install FlashAttention version >=2.4.1."
                 )
-
-        self.use_fused_attention = int(
-            os.getenv("NVTE_FUSED_ATTN", "1")
-        ) and self.device_compute_capability >= (8, 0)
-        if int(os.getenv("NVTE_FUSED_ATTN", "1")) == 0:
-            self.logger.debug("Disabling FusedAttention due to NVTE_FUSED_ATTN=0")
-        if self.device_compute_capability < (8, 0):
-            self.logger.debug("Disabling FusedAttention for compute capability < sm80")
+            self.use_fused_attention = int(
+                os.getenv("NVTE_FUSED_ATTN", "1")
+            ) and self.device_compute_capability >= (8, 0)
+            if int(os.getenv("NVTE_FUSED_ATTN", "1")) == 0:
+                self.logger.debug("Disabling FusedAttention due to NVTE_FUSED_ATTN=0")
+            if self.device_compute_capability < (8, 0):
+                self.logger.debug("Disabling FusedAttention for compute capability < sm80")
 
         assert attention_type in AttnTypes, f"attention_type {attention_type} not supported"
 
