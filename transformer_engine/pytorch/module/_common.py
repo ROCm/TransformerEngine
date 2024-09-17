@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -157,6 +159,7 @@ class _NoopCatFunc(torch.autograd.Function):
         strides = tensors[0].stride()
         data_ptr_stride = strides[dim] * tensors[0].element_size()
         data_ptr = tensors[0].data_ptr() + tensors[0].size(dim) * data_ptr_stride
+        numel = tensors[0].numel()
         for tensor in tensors[1:]:
             if (
                 tensor.dtype != dtype
@@ -166,6 +169,15 @@ class _NoopCatFunc(torch.autograd.Function):
             ):
                 return torch.cat(tensors, dim=dim)
             data_ptr += tensor.size(dim) * data_ptr_stride
+            numel += tensor.numel()
+
+        # Out-of-place concatenation and reallocation if storage size is not sufficient
+        if tensors[0].untyped_storage().size() < numel*tensors[0].element_size():
+            out = torch.cat(tensors, dim=dim)
+            for tensor, (split_start, split_end) in zip(tensors, split_ranges):
+                dptr = tensor.data_ptr()
+                tensor.data = out[split_start:split_end]
+            return out
 
         # No-op concatenation
         out = tensors[0].new()
