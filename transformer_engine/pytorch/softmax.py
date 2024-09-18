@@ -9,7 +9,7 @@ import torch
 from torch import nn
 import torch._C._onnx as _C_onnx
 from torch.onnx import _type_utils
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.te_onnx_extensions import compute_in_fp32
 
@@ -20,11 +20,18 @@ THREADS_PER_BLOCK = 128
 
 _default_causal_mask = {}
 
-def _get_default_causal_mask(sq: int) -> torch.Tensor:
+def _get_default_causal_mask(sq: int, sk: int) -> torch.Tensor:
     """Return the causal upper triangular mask for softmax input"""
-    if sq not in _default_causal_mask:
-        _default_causal_mask[sq] = torch.triu(torch.ones(sq, sq, device="cuda"), diagonal=1).bool()
-    return _default_causal_mask[sq]
+    if sq == 1:
+        return torch.zeros((1, sk), dtype=torch.bool, device="cuda")
+
+    matrix_shape = (sq, sk)
+    if matrix_shape not in _default_causal_mask:
+        diagonal_offset = sk - sq + 1
+        _default_causal_mask[matrix_shape] = torch.triu(
+            torch.ones(sq, sk, dtype=torch.bool, device="cuda"),
+            diagonal=diagonal_offset)
+    return _default_causal_mask[matrix_shape]
 
 
 def _get_onnx_export_causal_mask(
@@ -329,52 +336,52 @@ class FusedScaleMaskSoftmax(nn.Module):
             return self.forward_fused_softmax(inp, mask, scale)
         return self.forward_torch_softmax(inp, mask, scale)
 
-    def is_kernel_available(self, mask: torch.Tensor, b: int, np: int, sq: int, sk: int) -> bool:
+    def is_kernel_available(self, mask: torch.Tensor, b: int, np: int, sq: int, sk: int) -> bool: # pylint: disable=too-many-return-statements
         """Check FusedScaleMaskSoftmax kernel availability based on size"""
         attn_batches = b * np
 
-        if ( # pylint: disable=too-many-boolean-expressions
-            self.scaled_masked_softmax_fusion  # user wants to fuse
-            and self.input_in_float16  # input must be fp16
-            and 16 <= sk <= 16384  # sk must be 16 ~ 16384
-            and sk % 8 == 0  # sk must be divisor of 8
-            and sq % 4 == 0  # sq must be divisor of 4
-            and attn_batches % 4 == 0  # np * b must be divisor of 4
+        if not self.scaled_masked_softmax_fusion:
+            return False  # user doesn't want to fuse
+        if not self.input_in_float16:
+            return False  # input must be fp16
+        if not 16 < sk < 16384:
+            return False  # sk must be 16 ~ 16384
+        if sk % 8 != 0:
+            return False  # sk must be divisor of 8
+        if self.attn_mask_type == "arbitrary":
+            return False  # Custom masks not supported
+
+        if self.attn_mask_type == "causal":         # unfused causal softmax kernel
+            return True
+
+        if (sq % 4 == 0                             # sq must be divisor of 4
+            and attn_batches % 4 == 0               # np * b must be divisor of 4
             and self.attn_mask_type != "arbitrary"  # Custom masks not supported
         ):
-            if 0 <= sk <= 16384:
-                batch_per_block = self.get_batch_per_block(int(sk))
+            batch_per_block = self.get_batch_per_block(int(sk))
 
-                if self.attn_mask_type == "causal":
-                    if attn_batches % batch_per_block == 0:
-                        return True
-                elif self.attn_mask_type == "padding":
-                    if (
-                        mask is not None
-                        and sq % batch_per_block == 0
-                        and mask.shape[-2] == sq
-                        and mask.shape[-1] == sk
-                    ):
-                        return True
-                else:
-                    if sq % batch_per_block == 0:
-                        return True
+            if self.attn_mask_type == "padding":
+                if (
+                    mask is not None
+                    and sq % batch_per_block == 0
+                    and mask.shape[-2] == sq
+                    and mask.shape[-1] == sk
+                ):
+                    return True
+            else:
+                if sq % batch_per_block == 0:
+                    return True
         return False
 
     def forward_fused_softmax(
         self, inp: torch.Tensor, mask: torch.Tensor, scale: Optional[float] = None
     ) -> torch.Tensor:
         """Fused masked softmax kernel"""
-        b, np, sq, sk = inp.size()
         scale = 1.0 if scale is None else scale
 
         if self.attn_mask_type == "causal":
-            assert sq == sk, "causal mask is only for self attention"
+            return ScaledAlignedCausalMaskedSoftmax.apply(inp, scale)
 
-            # input is 3D tensor (attn_batches, sq, sk)
-            inp = inp.view(-1, sq, sk)
-            probs = ScaledUpperTriangMaskedSoftmax.apply(inp, scale)
-            return probs.view(b, np, sq, sk)
         # input is 4D tensor (b, np, sq, sk)
         if mask is not None and self.attn_mask_type != "no_mask":
             return ScaledMaskedSoftmax.apply(inp, mask, scale)
@@ -391,12 +398,12 @@ class FusedScaleMaskSoftmax(nn.Module):
             inp = inp * scale
 
         if self.attn_mask_type == "causal":
+            seq_len_q, seq_len_k = inp.size(2), inp.size(3)
             if is_in_onnx_export_mode() and self.kvcache_max_seq > 0:
-                seq_len_q, seq_len_k = inp.size(2), inp.size(3)
                 assert self.kvcache_max_seq >= seq_len_k
                 mask = _get_onnx_export_causal_mask(seq_len_q, seq_len_k, self.onnx_causal_mask)
             else:
-                mask = _get_default_causal_mask(inp.size(2))
+                mask = _get_default_causal_mask(seq_len_q, seq_len_k)
 
         mask_output = inp
         if mask is not None and self.attn_mask_type != "no_mask":

@@ -18,7 +18,7 @@ from ..flax.transformer import DotProductAttention as flax_DotProductAttention
 from ..flax.transformer import MultiHeadAttention as flax_MultiHeadAttention
 from ..flax.transformer import RelativePositionBiases as flax_RelativePositionBiases
 from ..flax.transformer import TransformerLayer as flax_TransformerLayer
-from ..fused_attn import AttnBiasType, AttnMaskType
+from ..attention import AttnBiasType, AttnMaskType
 
 
 class RelativePositionBiases(TransformerEngineBaseLayer):
@@ -134,6 +134,12 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
     bias_init: WeightInit = WeightInit.Constant(0.0)
     attn_mask_type: str = 'causal'
     attn_bias_type: Optional[str] = None
+    enable_rotary_pos_emb: bool = False
+    rotary_pos_emb_windows: Tuple[int, int] = (1, 10000)
+    rotary_pos_emb_group_method: str = 'consecutive'
+    low_rank_adaptation_scope: str = 'none'
+    low_rank_adaptation_dim: int = 32
+    low_rank_adaptation_alpha: float = None
     fuse_qkv_params: bool = True
     transpose_batch_sequence: bool = True
     enable_sequence_parallel: bool = False
@@ -202,6 +208,12 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
             bias_init=TransformerEngineBaseLayer.generate_params_init("bias", self.bias_init),
             attn_mask_type=self.attn_mask_type,
             attn_bias_type=self.attn_bias_type,
+            enable_rotary_pos_emb=self.enable_rotary_pos_emb,
+            rotary_pos_emb_windows=self.rotary_pos_emb_windows,
+            rotary_pos_emb_group_method=self.rotary_pos_emb_group_method,
+            low_rank_adaptation_scope=self.low_rank_adaptation_scope,
+            low_rank_adaptation_dim=self.low_rank_adaptation_dim,
+            low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
             fuse_qkv_params=self.fuse_qkv_params,
             transpose_batch_sequence=self.transpose_batch_sequence,
             enable_sequence_parallel=self.enable_sequence_parallel,
@@ -255,6 +267,10 @@ class TransformerLayer(TransformerEngineBaseLayer):
     self_attn_bias_type: Optional[str] = None
     enable_rotary_pos_emb: bool = False
     rotary_pos_emb_windows: Tuple[int, int] = (1, 10000)
+    rotary_pos_emb_group_method: str = 'consecutive'
+    low_rank_adaptation_scope: str = 'none'
+    low_rank_adaptation_dim: int = 32
+    low_rank_adaptation_alpha: float = None
     enable_relative_embedding: bool = True
     relative_embedding: pax_fiddle.Config[RelativePositionBiases] = pax_fiddle.template_field(None)
     drop_path: float = 0.0
@@ -324,6 +340,10 @@ class TransformerLayer(TransformerEngineBaseLayer):
             self_attn_bias_type=self.self_attn_bias_type,
             enable_rotary_pos_emb=self.enable_rotary_pos_emb,
             rotary_pos_emb_windows=self.rotary_pos_emb_windows,
+            rotary_pos_emb_group_method=self.rotary_pos_emb_group_method,
+            low_rank_adaptation_scope=self.low_rank_adaptation_scope,
+            low_rank_adaptation_dim=self.low_rank_adaptation_dim,
+            low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
             enable_relative_embedding=self.enable_relative_embedding,
             relative_embedding=relative_embedding_flax_module,
             drop_path=self.drop_path,

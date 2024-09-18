@@ -19,13 +19,8 @@
 
 #include <cuda_runtime_api.h>
 #include <cuda_fp16.h>
-#ifndef __HIP_PLATFORM_AMD__
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
-#else
-#include <hip/hip_bfloat16.h>
-#include "amd_detail/hip_float8.h"
-#endif // __HIP_PLATFORM_AMD__
 
 #include <transformer_engine/transformer_engine.h>
 #include "./nvtx.h"

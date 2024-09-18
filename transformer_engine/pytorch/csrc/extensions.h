@@ -6,10 +6,12 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
+#define TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
+
 #include "common.h"
-#ifndef USE_ROCM
 #include "common/common.h"
-#endif
+
 
 /***************************************************************************************************
  * Attention
@@ -35,7 +37,12 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
                 const at::Tensor cu_seqlens,
                 const at::Tensor QKV,
                 const transformer_engine::DType qkv_type,
+                const c10::optional<at::Tensor> seq_offsets_q,
+                const c10::optional<at::Tensor> seq_offsets_k,
+                const c10::optional<at::Tensor> seq_offsets_v,
+                const c10::optional<at::Tensor> seq_offsets_o,
                 const c10::optional<at::Tensor> descale_QKV,
+                const c10::optional<at::Tensor> descale_S,
                 const c10::optional<at::Tensor> scale_S,
                 const c10::optional<at::Tensor> scale_O,
                 c10::optional<at::Tensor> amax_S,
@@ -55,11 +62,17 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
                 const at::Tensor O,
                 const at::Tensor dO,
                 const transformer_engine::DType qkv_type,
+                const transformer_engine::DType dqkv_type,
                 const std::vector<at::Tensor> Aux_CTX_Tensors,
+                const c10::optional<at::Tensor> seq_offsets_q,
+                const c10::optional<at::Tensor> seq_offsets_k,
+                const c10::optional<at::Tensor> seq_offsets_v,
+                const c10::optional<at::Tensor> seq_offsets_o,
                 const c10::optional<at::Tensor> descale_QKV,
                 const c10::optional<at::Tensor> descale_S,
                 const c10::optional<at::Tensor> descale_O,
                 const c10::optional<at::Tensor> descale_dO,
+                const c10::optional<at::Tensor> descale_dP,
                 const c10::optional<at::Tensor> scale_S,
                 const c10::optional<at::Tensor> scale_dP,
                 const c10::optional<at::Tensor> scale_dQKV,
@@ -77,7 +90,12 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
                 const at::Tensor Q,
                 const at::Tensor KV,
                 const transformer_engine::DType qkv_type,
+                const c10::optional<at::Tensor> seq_offsets_q,
+                const c10::optional<at::Tensor> seq_offsets_k,
+                const c10::optional<at::Tensor> seq_offsets_v,
+                const c10::optional<at::Tensor> seq_offsets_o,
                 const c10::optional<at::Tensor> descale_QKV,
+                const c10::optional<at::Tensor> descale_S,
                 const c10::optional<at::Tensor> scale_S,
                 const c10::optional<at::Tensor> scale_O,
                 c10::optional<at::Tensor> amax_S,
@@ -99,11 +117,17 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
                 const at::Tensor O,
                 const at::Tensor dO,
                 const transformer_engine::DType qkv_type,
+                const transformer_engine::DType dqkv_type,
                 const std::vector<at::Tensor> Aux_CTX_Tensors,
+                const c10::optional<at::Tensor> seq_offsets_q,
+                const c10::optional<at::Tensor> seq_offsets_k,
+                const c10::optional<at::Tensor> seq_offsets_v,
+                const c10::optional<at::Tensor> seq_offsets_o,
                 const c10::optional<at::Tensor> descale_QKV,
                 const c10::optional<at::Tensor> descale_S,
                 const c10::optional<at::Tensor> descale_O,
                 const c10::optional<at::Tensor> descale_dO,
+                const c10::optional<at::Tensor> descale_dP,
                 const c10::optional<at::Tensor> scale_S,
                 const c10::optional<at::Tensor> scale_dP,
                 const c10::optional<at::Tensor> scale_dQKV,
@@ -122,7 +146,12 @@ std::vector<at::Tensor> fused_attn_fwd(
                 const at::Tensor K,
                 const at::Tensor V,
                 const transformer_engine::DType qkv_type,
+                const c10::optional<at::Tensor> seq_offsets_q,
+                const c10::optional<at::Tensor> seq_offsets_k,
+                const c10::optional<at::Tensor> seq_offsets_v,
+                const c10::optional<at::Tensor> seq_offsets_o,
                 const c10::optional<at::Tensor> descale_QKV,
+                const c10::optional<at::Tensor> descale_S,
                 const c10::optional<at::Tensor> scale_S,
                 const c10::optional<at::Tensor> scale_O,
                 c10::optional<at::Tensor> amax_S,
@@ -145,19 +174,27 @@ std::vector<at::Tensor> fused_attn_bwd(
                 const at::Tensor O,
                 const at::Tensor dO,
                 const transformer_engine::DType qkv_type,
+                const transformer_engine::DType dqkv_type,
                 const std::vector<at::Tensor> Aux_CTX_Tensors,
+                const c10::optional<at::Tensor> seq_offsets_q,
+                const c10::optional<at::Tensor> seq_offsets_k,
+                const c10::optional<at::Tensor> seq_offsets_v,
+                const c10::optional<at::Tensor> seq_offsets_o,
                 const c10::optional<at::Tensor> descale_QKV,
                 const c10::optional<at::Tensor> descale_S,
                 const c10::optional<at::Tensor> descale_O,
                 const c10::optional<at::Tensor> descale_dO,
+                const c10::optional<at::Tensor> descale_dP,
                 const c10::optional<at::Tensor> scale_S,
                 const c10::optional<at::Tensor> scale_dP,
                 const c10::optional<at::Tensor> scale_dQKV,
                 c10::optional<at::Tensor> amax_dP,
                 c10::optional<at::Tensor> amax_dQKV);
 
+#ifndef USE_ROCM
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
+#endif
 
 /***************************************************************************************************
  * GEMM
@@ -227,20 +264,40 @@ void fused_cast_transpose(at::Tensor input,
 );
 
 
+void fused_cast_transpose_noop(at::Tensor input,
+                               at::Tensor noop,
+                               at::Tensor scale,
+                               at::Tensor amax,
+                               at::Tensor scale_inv,
+                               at::Tensor input_cast,
+                               at::Tensor input_transpose,
+                               transformer_engine::DType otype,
+                               int scale_offset = 0,
+                               int amax_offset = 0,
+                               int scale_inv_offset = 0
+);
+
+
 std::vector<at::Tensor> fused_cast_transpose_bgrad(at::Tensor grad_output,
                                                    at::Tensor scale,
                                                    at::Tensor amax,
                                                    at::Tensor scale_inv,
-                                                   transformer_engine::DType otype
+                                                   transformer_engine::DType otype,
+                                                   int scale_offset = 0,
+                                                   int amax_offset = 0,
+                                                   int scale_inv_offset = 0
 );
 
 
 std::vector<at::Tensor> fused_fp8_transpose_bgrad(at::Tensor grad_output,
-                                              at::Tensor scale,
-                                              at::Tensor amax,
-                                              at::Tensor scale_inv,
-                                              transformer_engine::DType otype,
-                                              transformer_engine::DType grad_bias_type
+                                                  at::Tensor scale,
+                                                  at::Tensor amax,
+                                                  at::Tensor scale_inv,
+                                                  transformer_engine::DType otype,
+                                                  transformer_engine::DType grad_bias_type,
+                                                  int scale_offset = 0,
+                                                  int amax_offset = 0,
+                                                  int scale_inv_offset = 0
 );
 
 
@@ -249,7 +306,10 @@ std::vector<at::Tensor> fused_cast_transpose_bgrad_dgelu(at::Tensor grad_output,
                                                          at::Tensor scale,
                                                          at::Tensor amax,
                                                          at::Tensor scale_inv,
-                                                         transformer_engine::DType otype
+                                                         transformer_engine::DType otype,
+                                                         int scale_offset = 0,
+                                                         int amax_offset = 0,
+                                                         int scale_inv_offset = 0
 );
 
 
@@ -265,6 +325,17 @@ void fused_multi_cast_transpose(std::vector<at::Tensor> input_list,
 
 at::Tensor fp8_transpose(at::Tensor input,
                          transformer_engine::DType otype
+);
+
+void fp8_transpose_noalloc(at::Tensor input,
+                           at::Tensor output,
+                           transformer_engine::DType otype
+);
+
+void fp8_transpose_noalloc_noop(at::Tensor input,
+                                at::Tensor output,
+                                at::Tensor noop,
+                                transformer_engine::DType otype
 );
 
 /***************************************************************************************************
@@ -313,6 +384,13 @@ at::Tensor qgelu(at::Tensor input,
                   transformer_engine::DType otype
 );
 
+at::Tensor srelu(at::Tensor input,
+                at::Tensor scale,
+                at::Tensor amax,
+                at::Tensor scale_inv,
+                transformer_engine::DType otype
+);
+
 at::Tensor dgelu(at::Tensor grad,
                  at::Tensor input,
                  transformer_engine::DType otype
@@ -343,6 +421,11 @@ at::Tensor dqgelu(at::Tensor grad,
                    transformer_engine::DType otype
 );
 
+at::Tensor dsrelu(at::Tensor grad,
+                 at::Tensor input,
+                 transformer_engine::DType otype
+);
+
 /***************************************************************************************************
  * LayerNorm
  **************************************************************************************************/
@@ -366,7 +449,10 @@ std::vector<at::Tensor> layernorm_fwd_fp8(const at::Tensor &input,
                                           at::Tensor scale_inv,
                                           transformer_engine::DType otype,
                                           const int sm_margin,
-                                          const bool zero_centered_gamma
+                                          const bool zero_centered_gamma,
+                                          const int scale_offset = 0,
+                                          const int amax_offset = 0,
+                                          const int scale_inv_offset = 0
 );
 
 std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(const at::Tensor &input,
@@ -379,7 +465,10 @@ std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(const at::Tensor &input,
                                                   at::Tensor scale_inv,
                                                   transformer_engine::DType otype,
                                                   const int sm_margin,
-                                                  const bool zero_centered_gamma
+                                                  const bool zero_centered_gamma,
+                                                  const int scale_offset = 0,
+                                                  const int amax_offset = 0,
+                                                  const int scale_inv_offset = 0
 );
 
 at::Tensor layernorm_fwd_fp8_inf(const at::Tensor &input,
@@ -390,7 +479,11 @@ at::Tensor layernorm_fwd_fp8_inf(const at::Tensor &input,
                                  at::Tensor amax,
                                  at::Tensor scale_inv,
                                  transformer_engine::DType otype,
-                                 const bool zero_centered_gamma
+                                 const int sm_margin,
+                                 const bool zero_centered_gamma,
+                                 const int scale_offset = 0,
+                                 const int amax_offset = 0,
+                                 const int scale_inv_offset = 0
 );
 
 std::vector<at::Tensor> layernorm_fwd(const at::Tensor &input,
@@ -414,6 +507,7 @@ at::Tensor layernorm_fwd_inf(const at::Tensor &input,
                              const at::Tensor &weight,
                              const at::Tensor &bias,
                              float eps,
+                             const int sm_margin,
                              const bool zero_centered_gamma
 );
 
@@ -438,7 +532,10 @@ std::vector<at::Tensor> rmsnorm_fwd_fp8(const at::Tensor &input,
                                         at::Tensor scale_inv,
                                         transformer_engine::DType otype,
                                         const int sm_margin,
-                                        const bool zero_centered_gamma
+                                        const bool zero_centered_gamma,
+                                        const int scale_offset = 0,
+                                        const int amax_offset = 0,
+                                        const int scale_inv_offset = 0
 );
 
 std::vector<at::Tensor> rmsnorm_fwd_fp8_noalloc(const at::Tensor &input,
@@ -450,7 +547,10 @@ std::vector<at::Tensor> rmsnorm_fwd_fp8_noalloc(const at::Tensor &input,
                                                 at::Tensor scale_inv,
                                                 transformer_engine::DType otype,
                                                 const int sm_margin,
-                                                const bool zero_centered_gamma
+                                                const bool zero_centered_gamma,
+                                                const int scale_offset = 0,
+                                                const int amax_offset = 0,
+                                                const int scale_inv_offset = 0
 );
 
 at::Tensor rmsnorm_fwd_fp8_inf(const at::Tensor &input,
@@ -460,7 +560,11 @@ at::Tensor rmsnorm_fwd_fp8_inf(const at::Tensor &input,
                                at::Tensor amax,
                                at::Tensor scale_inv,
                                transformer_engine::DType otype,
-                               const bool zero_centered_gamma
+                               const int sm_margin,
+                               const bool zero_centered_gamma,
+                               const int scale_offset = 0,
+                               const int amax_offset = 0,
+                               const int scale_inv_offset = 0
 );
 
 std::vector<at::Tensor> rmsnorm_fwd(const at::Tensor &input,
@@ -481,6 +585,7 @@ std::vector<at::Tensor> rmsnorm_fwd_noalloc(const at::Tensor &input,
 at::Tensor rmsnorm_fwd_inf(const at::Tensor &input,
                            const at::Tensor &weight,
                            float eps,
+                           const int sm_margin,
                            const bool zero_centered_gamma
 );
 
@@ -563,16 +668,13 @@ at::Tensor scaled_aligned_causal_masked_softmax_backward(at::Tensor output_grads
  * FP8 recipe
  **************************************************************************************************/
 
-void fused_amax_and_scale_update(const at::Tensor &amax_history,
-                                 const at::Tensor &scale,
-                                 const at::Tensor &scale_inv,
-                                 const at::Tensor &scale_inv_mask,
-                                 at::Tensor updated_amax_history,
-                                 at::Tensor updated_scale,
-                                 at::Tensor updated_scale_inv,
-                                 const std::string& amax_compute_algo,
-                                 transformer_engine::DType fp8_dtype,
-                                 float margin);
+void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reduction_buffer,
+                                                 std::vector<at::Tensor> amax_histories,
+                                                 std::vector<at::Tensor> scales,
+                                                 std::vector<at::Tensor> scale_invs,
+                                                 const std::string &amax_compute_algo,
+                                                 transformer_engine::DType fp8_dtype,
+                                                 float margin);
 
 /***************************************************************************************************
  * Rotary positional embedding
@@ -605,10 +707,94 @@ at::Tensor fused_rope_thd_backward(const at::Tensor &output_grads,
 //TODO: support user buffer for ROCm
 #ifndef USE_ROCM
 size_t get_cublasLt_version();
-
 size_t get_cudnn_version();
-
-bool userbuf_comm_available();
 #endif
 
 void placeholder();
+
+
+/***************************************************************************************************
+ * Support THD format for Context Parallel
+ **************************************************************************************************/
+
+#ifndef USE_ROCM
+at::Tensor thd_read_half_tensor(const at::Tensor &tensor,
+                                const at::Tensor &cu_seqlens,
+                                int half_idx
+);
+
+void thd_second_half_lse_correction(at::Tensor lse,
+                                    const at::Tensor &lse_per_step,
+                                    const at::Tensor &cu_seqlens,
+                                    int total_tokens
+);
+
+at::Tensor thd_read_second_half_lse(const at::Tensor &lse,
+                                    const at::Tensor &cu_seqlens,
+                                    int total_tokens
+);
+
+void thd_out_correction(at::Tensor out,
+                        const at::Tensor &out_per_step,
+                        const at::Tensor &lse,
+                        const at::Tensor &lse_per_step,
+                        const at::Tensor &cu_seqlens,
+                        bool only_second_half
+);
+
+void thd_grad_correction(at::Tensor grad,
+                         const at::Tensor &grad_per_step,
+                         const at::Tensor &cu_seqlens,
+                         const std::string &first_half,
+                         const std::string &second_half
+);
+
+at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens,
+                                       int total_tokens,
+                                       int world_size,
+                                       int rank
+);
+#endif
+
+
+/***************************************************************************************************
+ * multi_tensor_* kernels
+ **************************************************************************************************/
+
+void multi_tensor_scale_cuda(int chunk_size, at::Tensor noop_flag,
+                             std::vector<std::vector<at::Tensor>> tensor_lists, float scale);
+
+std::tuple<at::Tensor, at::Tensor> multi_tensor_l2norm_cuda(
+    int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
+    at::optional<bool> per_tensor_python);
+
+std::tuple<at::Tensor, at::Tensor> multi_tensor_unscale_l2norm_cuda(
+    int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
+    at::Tensor inv_scale, at::optional<bool> per_tensor_python);
+
+void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
+                            std::vector<std::vector<at::Tensor>> tensor_lists, const float lr,
+                            const float beta1, const float beta2, const float epsilon,
+                            const int step, const int mode, const int bias_correction,
+                            const float weight_decay);
+
+void multi_tensor_adam_capturable_cuda(int chunk_size, at::Tensor noop_flag,
+                                       std::vector<std::vector<at::Tensor>> tensor_lists,
+                                       at::Tensor lr, const float beta1, const float beta2,
+                                       const float epsilon, at::Tensor step, const int mode,
+                                       const int bias_correction, const float weight_decay,
+                                       at::Tensor inv_scale);
+
+void multi_tensor_adam_capturable_master_cuda(int chunk_size, at::Tensor noop_flag,
+                                              std::vector<std::vector<at::Tensor>> tensor_lists,
+                                              at::Tensor lr, const float beta1, const float beta2,
+                                              const float epsilon, at::Tensor step, const int mode,
+                                              const int bias_correction, const float weight_decay,
+                                              at::Tensor inv_scale);
+
+void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
+                           std::vector<std::vector<at::Tensor>> tensor_lists, float wd,
+                           float momentum, float dampening, float lr, bool nesterov, bool first_run,
+                           bool wd_after_momentum, float scale);
+
+#endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_

@@ -15,9 +15,9 @@ import pytest
 
 from utils import assert_allclose
 
-from transformer_engine_jax import get_device_compute_capability
+from transformer_engine.transformer_engine_jax import get_device_compute_capability
 from transformer_engine.common.recipe import DelayedScaling, Format
-from transformer_engine.jax import fp8_autocast, update_fp8_metas, update_collections
+from transformer_engine.jax import fp8_autocast, update_collections
 from transformer_engine.jax.flax import DenseGeneral, LayerNormDenseGeneral
 from transformer_engine.jax.flax import LayerNorm as flax_LayerNorm
 from transformer_engine.jax.flax import LayerNormMLP as flax_LayerNormMLP
@@ -37,7 +37,7 @@ from transformer_engine.jax.softmax import SoftmaxType
 
 is_fp8_supported, reason = is_fp8_available()
 
-DATA_SHAPE = [(128, 32, 512), (512, 32, 512)]
+DATA_SHAPE = [(32, 128, 512), (32, 512, 512)]    # (B, S, H)
 DTYPE = [jnp.float32, jnp.bfloat16]
 ENABLE_FP8 = [False, True]
 FP8_FORMATS = [Format.E4M3, Format.HYBRID]
@@ -54,16 +54,6 @@ def enable_fused_attn():
     yield
     if "NVTE_FUSED_ATTN" in os.environ:
         del os.environ["NVTE_FUSED_ATTN"]
-
-
-@pytest.fixture(autouse=True, scope='function')
-def clear_live_arrays():
-    """
-    Clear all live arrays to keep the resource clean
-    """
-    yield
-    for arr in jax.live_arrays():
-        arr.delete()
 
 
 def compare_dict(ref_fd, test_fd, rtol=1e-05, atol=1e-08):
@@ -99,8 +89,6 @@ class TestLayer:
     def loss_and_grads(module, variables, *inputs):
         grad_fn = jax.value_and_grad(TestLayer.loss, argnums=(0, 1))
         loss_val, (wgrads, dgrad) = grad_fn(variables, *inputs, module=module)
-        if FP8Helper.is_fp8_enabled():
-            wgrads = update_fp8_metas(wgrads)
         return loss_val, wgrads, dgrad
 
     def input_getter(self, shape, dtype):
@@ -543,11 +531,25 @@ class LayerNormMLPAttr:
         ACTIVATION: ('gelu', 'linear')
     }, {
         INTERMEDIATE_DIM: 2048,
-        USE_BIAS: True,
+        USE_BIAS: False,
         ENABLE_LN: True,
         LN_TYPE: 'rmsnorm',
         ZERO_CEN: False,
         ACTIVATION: ('gelu', 'linear')
+    }, {
+        INTERMEDIATE_DIM: 2048,
+        USE_BIAS: True,
+        ENABLE_LN: True,
+        LN_TYPE: 'rmsnorm',
+        ZERO_CEN: False,
+        ACTIVATION: ('silu', 'linear')
+    }, {
+        INTERMEDIATE_DIM: 2048,
+        USE_BIAS: False,
+        ENABLE_LN: True,
+        LN_TYPE: 'rmsnorm',
+        ZERO_CEN: False,
+        ACTIVATION: ('silu', 'linear')
     }]
 
 
@@ -730,8 +732,13 @@ class TestDotProductAttn(TestLayer):
     def input_getter(self, shape, dtype):
         key = jax.random.PRNGKey(seed=1234)
         q_key, k_key, v_key = jax.random.split(key, 3)
-        return list(map(partial(jax.random.normal, shape=shape, dtype=dtype),
-                        [q_key, k_key, v_key]))
+        b, s, *_ = shape
+        if self.attrs[DotProductAttnAttr.TRANSPOSE_BS]:
+            shape = (shape[1], shape[0]) + shape[2:]
+        mask = jnp.zeros((b, 1, s, s), dtype=jnp.uint8)
+        return [
+            *map(partial(jax.random.normal, shape=shape, dtype=dtype), [q_key, k_key, v_key]), mask
+        ]
 
     def get_layer_name(self):
         return 'dot_product_attn'
@@ -765,6 +772,7 @@ class TestDotProductAttn(TestLayer):
     @pytest.mark.parametrize('dtype', DTYPE)
     @pytest.mark.parametrize('attrs', DotProductAttnAttr.ATTRS)
     def test_forward_backward(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
+        self.attrs = attrs
         praxis_p, flax_cls = self.generate_praxis_p_and_flax_cls(dtype, attrs)
         self.forward_backward_runner(data_shape, dtype, praxis_p, flax_cls, rtol, atol)
 
@@ -776,52 +784,119 @@ class MultiHeadAttnAttr:
     ZERO_CEN = 'zero_centered_gamma'
     NUM_ATTN_HEADS = 'num_attention_heads'
     NUM_GQA_GROUPS = 'num_gqa_groups'
+    TRANSPOSE_BS = 'transpose_batch_sequence'
+    ENABLE_ROPE = 'enable_rotary_pos_emb'
+    ROPE_GROUP_METHOD = 'rotary_pos_emb_group_method'
+    LORA_SCOPE = 'low_rank_adaptation_scope'
     ATTRS = [{
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
         ZERO_CEN: False,
-        ATTN_MASK_TYPE: 'padding'
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
+        ATTN_MASK_TYPE: 'padding',
+        TRANSPOSE_BS: True,
     }, {
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
         ZERO_CEN: True,
-        ATTN_MASK_TYPE: 'padding'
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
+        ATTN_MASK_TYPE: 'padding',
+        TRANSPOSE_BS: False,
     }, {
         USE_BIAS: True,
         LN_TYPE: 'rmsnorm',
         ZERO_CEN: False,
-        ATTN_MASK_TYPE: 'padding'
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
+        ATTN_MASK_TYPE: 'padding',
+        TRANSPOSE_BS: True,
     }, {
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
         ZERO_CEN: False,
-        ATTN_MASK_TYPE: 'causal'
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
+        ATTN_MASK_TYPE: 'causal',
+        TRANSPOSE_BS: False,
     }, {
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
         ZERO_CEN: True,
-        ATTN_MASK_TYPE: 'causal'
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
+        ATTN_MASK_TYPE: 'causal',
+        TRANSPOSE_BS: True,
     }, {
         USE_BIAS: True,
         LN_TYPE: 'rmsnorm',
         ZERO_CEN: False,
-        ATTN_MASK_TYPE: 'causal'
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
+        ATTN_MASK_TYPE: 'causal',
+        TRANSPOSE_BS: False,
     }, {
         USE_BIAS: True,
         LN_TYPE: 'rmsnorm',
         ZERO_CEN: False,
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         NUM_ATTN_HEADS: 8,
         NUM_GQA_GROUPS: 4,
-        ATTN_MASK_TYPE: 'causal'
+        ATTN_MASK_TYPE: 'causal',
+        TRANSPOSE_BS: True,
+    }, {
+        USE_BIAS: True,
+        LN_TYPE: 'rmsnorm',
+        ZERO_CEN: False,
+        ENABLE_ROPE: True,
+        ROPE_GROUP_METHOD: 'consecutive',
+        NUM_ATTN_HEADS: 8,
+        NUM_GQA_GROUPS: 4,
+        ATTN_MASK_TYPE: 'causal',
+        TRANSPOSE_BS: False,
+    }, {
+        USE_BIAS: True,
+        LN_TYPE: 'rmsnorm',
+        ZERO_CEN: False,
+        ENABLE_ROPE: True,
+        ROPE_GROUP_METHOD: 'alternate',
+        NUM_ATTN_HEADS: 8,
+        NUM_GQA_GROUPS: 4,
+        ATTN_MASK_TYPE: 'causal',
+        TRANSPOSE_BS: True,
+    }, {
+        USE_BIAS: True,
+        LN_TYPE: 'layernorm',
+        ZERO_CEN: False,
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
+        ATTN_MASK_TYPE: 'padding',
+        LORA_SCOPE: 'all',
+        TRANSPOSE_BS: False,
+    }, {
+        USE_BIAS: True,
+        LN_TYPE: 'layernorm',
+        ZERO_CEN: False,
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
+        ATTN_MASK_TYPE: 'causal',
+        LORA_SCOPE: 'all',
+        TRANSPOSE_BS: True,
     }]
 
 
 class TestMultiHeadAttn(TestLayer):
 
     def input_getter(self, shape, dtype):
-        data_key = jax.random.PRNGKey(seed=1234)
-        return (jax.random.normal(data_key, shape,
-                                  dtype), jax.random.normal(data_key, shape, dtype))
+        key = jax.random.PRNGKey(seed=1234)
+        q_key, kv_key = jax.random.split(key, 2)
+        b, s, *_ = shape
+        if self.attrs[MultiHeadAttnAttr.TRANSPOSE_BS]:
+            shape = (shape[1], shape[0]) + shape[2:]
+        mask = jnp.zeros((b, 1, s, s), dtype=jnp.uint8)
+        return [*map(partial(jax.random.normal, shape=shape, dtype=dtype), [q_key, kv_key]), mask]
 
     def get_layer_name(self):
         return 'multi_head_attn'
@@ -839,8 +914,11 @@ class TestMultiHeadAttn(TestLayer):
         input_layernorm = False
         return_layernorm_output = False
         attn_mask_type = attrs[MultiHeadAttnAttr.ATTN_MASK_TYPE]
+        enable_rotary_pos_emb = attrs[MultiHeadAttnAttr.ENABLE_ROPE]
+        rotary_pos_emb_group_method = attrs[MultiHeadAttnAttr.ROPE_GROUP_METHOD]
+        low_rank_adaptation_scope = attrs.get(MultiHeadAttnAttr.LORA_SCOPE, 'none')
         fuse_qkv_params = True
-        transpose_batch_sequence = True
+        transpose_batch_sequence = attrs[MultiHeadAttnAttr.TRANSPOSE_BS]
         scale_attn_logits = False
         scaled_query_init = True
         float32_logits = False
@@ -859,6 +937,9 @@ class TestMultiHeadAttn(TestLayer):
                                      return_layernorm_output=return_layernorm_output,
                                      input_layernorm=input_layernorm,
                                      attn_mask_type=attn_mask_type,
+                                     enable_rotary_pos_emb=enable_rotary_pos_emb,
+                                     rotary_pos_emb_group_method=rotary_pos_emb_group_method,
+                                     low_rank_adaptation_scope=low_rank_adaptation_scope,
                                      fuse_qkv_params=fuse_qkv_params,
                                      transpose_batch_sequence=transpose_batch_sequence,
                                      scale_attn_logits=scale_attn_logits,
@@ -878,6 +959,9 @@ class TestMultiHeadAttn(TestLayer):
             return_layernorm_output=return_layernorm_output,
             input_layernorm=input_layernorm,
             attn_mask_type=attn_mask_type,
+            enable_rotary_pos_emb=enable_rotary_pos_emb,
+            rotary_pos_emb_group_method=rotary_pos_emb_group_method,
+            low_rank_adaptation_scope=low_rank_adaptation_scope,
             fuse_qkv_params=fuse_qkv_params,
             transpose_batch_sequence=transpose_batch_sequence,
             scale_attn_logits=scale_attn_logits,
@@ -890,6 +974,7 @@ class TestMultiHeadAttn(TestLayer):
     @pytest.mark.parametrize('dtype', DTYPE)
     @pytest.mark.parametrize('attrs', MultiHeadAttnAttr.ATTRS)
     def test_forward_backward(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
+        self.attrs = attrs
         praxis_p, flax_cls = self.generate_praxis_p_and_flax_cls(dtype, attrs)
         self.forward_backward_runner(data_shape, dtype, praxis_p, flax_cls, rtol, atol)
 
@@ -905,7 +990,7 @@ class TestMultiHeadAttn(TestLayer):
                                   fp8_format,
                                   rtol=1e-05,
                                   atol=1e-08):
-
+        self.attrs = attrs
         ds = DelayedScaling(fp8_format=fp8_format)
         with fp8_autocast(enabled=True, fp8_recipe=ds):
             praxis_p, flax_cls = self.generate_praxis_p_and_flax_cls(dtype, attrs)
@@ -920,6 +1005,8 @@ class TransformerLayerAttr:
     ZERO_CEN = 'zero_centered_gamma'
     TRANSPOSE_BS = 'transpose_batch_sequence'
     ENABLE_ROPE = 'enable_rotary_pos_emb'
+    ROPE_GROUP_METHOD = 'rotary_pos_emb_group_method'
+    LORA_SCOPE = 'low_rank_adaptation_scope'
     ATTRS = [{
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
@@ -927,6 +1014,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.ENCODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -935,6 +1023,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.ENCODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -943,6 +1032,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.ENCODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -951,6 +1041,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.ENCODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -959,6 +1050,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.ENCODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -967,6 +1059,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.ENCODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -975,6 +1068,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.DECODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -983,6 +1077,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.DECODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -991,6 +1086,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.DECODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -999,6 +1095,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.DECODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -1007,6 +1104,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.DECODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -1015,6 +1113,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('relu',),
         LYR_TYPE: TransformerLayerType.DECODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -1023,6 +1122,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.ENCODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -1031,6 +1131,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.ENCODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -1039,6 +1140,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.ENCODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -1047,7 +1149,18 @@ class TransformerLayerAttr:
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.ENCODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: False
+    }, {
+        USE_BIAS: True,
+        LN_TYPE: 'layernorm',
+        ZERO_CEN: False,
+        ACTIVATION: ('gelu',),
+        LYR_TYPE: TransformerLayerType.ENCODER,
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
+        TRANSPOSE_BS: False,
+        LORA_SCOPE: 'all'
     }, {
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
@@ -1055,6 +1168,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.DECODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -1063,6 +1177,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.DECODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -1071,6 +1186,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.DECODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: True
     }, {
         USE_BIAS: True,
@@ -1079,6 +1195,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('gelu', 'linear'),
         LYR_TYPE: TransformerLayerType.DECODER,
         ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -1087,6 +1204,7 @@ class TransformerLayerAttr:
         ACTIVATION: ('gelu',),
         LYR_TYPE: TransformerLayerType.ENCODER,
         ENABLE_ROPE: True,
+        ROPE_GROUP_METHOD: 'alternate',
         TRANSPOSE_BS: False
     }, {
         USE_BIAS: True,
@@ -1095,16 +1213,51 @@ class TransformerLayerAttr:
         ACTIVATION: ('gelu',),
         LYR_TYPE: TransformerLayerType.DECODER,
         ENABLE_ROPE: True,
+        ROPE_GROUP_METHOD: 'alternate',
         TRANSPOSE_BS: False
+    }, {
+        USE_BIAS: True,
+        LN_TYPE: 'layernorm',
+        ZERO_CEN: True,
+        ACTIVATION: ('gelu',),
+        LYR_TYPE: TransformerLayerType.ENCODER,
+        ENABLE_ROPE: True,
+        ROPE_GROUP_METHOD: 'consecutive',
+        TRANSPOSE_BS: False
+    }, {
+        USE_BIAS: True,
+        LN_TYPE: 'layernorm',
+        ZERO_CEN: True,
+        ACTIVATION: ('gelu',),
+        LYR_TYPE: TransformerLayerType.DECODER,
+        ENABLE_ROPE: True,
+        ROPE_GROUP_METHOD: 'consecutive',
+        TRANSPOSE_BS: False
+    }, {
+        USE_BIAS: True,
+        LN_TYPE: 'layernorm',
+        ZERO_CEN: False,
+        ACTIVATION: ('gelu',),
+        LYR_TYPE: TransformerLayerType.DECODER,
+        ENABLE_ROPE: False,
+        ROPE_GROUP_METHOD: 'consecutive',
+        TRANSPOSE_BS: False,
+        LORA_SCOPE: 'all'
     }]
 
 
 class TestTransformer(TestLayer):
 
     def input_getter(self, shape, dtype):
-        data_key = jax.random.PRNGKey(seed=1234)
-        return (jax.random.normal(data_key, shape,
-                                  dtype), jax.random.normal(data_key, shape, dtype))
+        key = jax.random.PRNGKey(seed=1234)
+        q_key, kv_key = jax.random.split(key, 2)
+        b, s, *_ = shape
+        if self.attrs[TransformerLayerAttr.TRANSPOSE_BS]:
+            shape = (shape[1], shape[0]) + shape[2:]
+        mask = jnp.zeros((b, 1, s, s), dtype=jnp.uint8)
+        return [
+            *map(partial(jax.random.normal, shape=shape, dtype=dtype), [q_key, kv_key]), mask, mask
+        ]
 
     def get_layer_name(self):
         return 'transformerlayer'
@@ -1123,6 +1276,8 @@ class TestTransformer(TestLayer):
         bias_init = WeightInit.Constant(0.0)
         layer_type = attrs[TransformerLayerAttr.LYR_TYPE]
         enable_rotary_pos_emb = attrs[TransformerLayerAttr.ENABLE_ROPE]
+        rotary_pos_emb_group_method = attrs[TransformerLayerAttr.ROPE_GROUP_METHOD]
+        low_rank_adaptation_scope = attrs.get(TransformerLayerAttr.LORA_SCOPE, 'none')
         enable_relative_embedding = True
         relative_embedding = pax_fiddle.Config(RelativePositionBiases,
                                                dtype=dtype,
@@ -1160,6 +1315,8 @@ class TestTransformer(TestLayer):
                                      layer_type=layer_type,
                                      enable_relative_embedding=enable_relative_embedding,
                                      enable_rotary_pos_emb=enable_rotary_pos_emb,
+                                     rotary_pos_emb_group_method=rotary_pos_emb_group_method,
+                                     low_rank_adaptation_scope=low_rank_adaptation_scope,
                                      relative_embedding=relative_embedding,
                                      drop_path=drop_path,
                                      transpose_batch_sequence=transpose_batch_sequence)
@@ -1182,8 +1339,10 @@ class TestTransformer(TestLayer):
                                "bias", bias_init),
                            layer_type=layer_type,
                            enable_rotary_pos_emb=enable_rotary_pos_emb,
+                           rotary_pos_emb_group_method=rotary_pos_emb_group_method,
                            enable_relative_embedding=enable_relative_embedding,
                            relative_embedding=relative_embedding_flax_module,
+                           low_rank_adaptation_scope=low_rank_adaptation_scope,
                            drop_path=drop_path,
                            transpose_batch_sequence=transpose_batch_sequence)
 
@@ -1193,6 +1352,7 @@ class TestTransformer(TestLayer):
     @pytest.mark.parametrize('dtype', DTYPE)
     @pytest.mark.parametrize('attrs', TransformerLayerAttr.ATTRS)
     def test_forward_backward(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
+        self.attrs = attrs
         praxis_p, flax_cls = self.generate_praxis_p_and_flax_cls(dtype, attrs)
         self.forward_backward_runner(data_shape, dtype, praxis_p, flax_cls, rtol, atol)
 
@@ -1208,7 +1368,7 @@ class TestTransformer(TestLayer):
                                   fp8_format,
                                   rtol=1e-05,
                                   atol=1e-08):
-
+        self.attrs = attrs
         ds = DelayedScaling(fp8_format=fp8_format)
         with fp8_autocast(enabled=True, fp8_recipe=ds):
             praxis_p, flax_cls = self.generate_praxis_p_and_flax_cls(dtype, attrs)
