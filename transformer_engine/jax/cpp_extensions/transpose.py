@@ -76,8 +76,8 @@ class TransposePrimitive(BasePrimitive):
             jnp.float32,
             jnp.float16,
             jnp.bfloat16,
-            jnp.float8_e4m3_type,
-            jnp.float8_e5m2_type,
+            jnp_float8_e4m3_type, 
+            jnp_float8_e5m2_type,
         ]
 
         ir_x_type = ir.RankedTensorType(x.type)

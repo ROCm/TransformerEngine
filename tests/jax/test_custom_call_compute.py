@@ -18,7 +18,7 @@ from flax import linen as nn
 
 from utils import assert_allclose
 from transformer_engine.jax.dot import type_safe_dot_general, dequantize, quantize
-from transformer_engine.jax.fp8 import FP8MetaPackage, FP8Helper, is_fp8_available
+from transformer_engine.jax.fp8 import FP8MetaPackage, FP8Helper, is_fp8_available, jnp_float8_e4m3_type, jnp_float8_e5m2_type
 from transformer_engine.jax.layernorm import layernorm, layernorm_fp8_dot
 from transformer_engine.jax.layernorm_mlp import activation_lu, fused_layernorm_fp8_mlp
 from transformer_engine.jax import cpp_extensions as tex
