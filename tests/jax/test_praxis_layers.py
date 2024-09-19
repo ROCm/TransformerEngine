@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -35,6 +37,8 @@ from transformer_engine.jax.praxis import RelativePositionBiases, TransformerEng
 from transformer_engine.jax.praxis import TransformerLayer, TransformerLayerType
 from transformer_engine.jax.softmax import SoftmaxType
 
+from transformer_engine.jax import is_hip_extension
+
 is_fp8_supported, reason = is_fp8_available()
 
 DATA_SHAPE = [(32, 128, 512), (32, 512, 512)]    # (B, S, H)
@@ -49,7 +53,7 @@ def enable_fused_attn():
     Enable fused attn for hopper+ arch.
     Fused attn kernels on pre-hopper arch are not deterministic.
     """
-    if get_device_compute_capability(0) >= 90:
+    if is_hip_extension() or get_device_compute_capability(0) >= 90:
         os.environ["NVTE_FUSED_ATTN"] = "1"
     yield
     if "NVTE_FUSED_ATTN" in os.environ:
