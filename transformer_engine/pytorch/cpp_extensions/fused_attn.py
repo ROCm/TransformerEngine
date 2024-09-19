@@ -67,6 +67,8 @@ AttnMaskType = {
     "padding": NVTE_Mask_Type.NVTE_PADDING_MASK,
     "causal": NVTE_Mask_Type.NVTE_CAUSAL_MASK,
     "padding_causal": NVTE_Mask_Type.NVTE_PADDING_CAUSAL_MASK,
+    "causal_bottom_right": NVTE_Mask_Type.NVTE_CAUSAL_BOTTOM_RIGHT_MASK,
+    "padding_causal_bottom_right": NVTE_Mask_Type.NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
 }
 
 if not IS_HIP_EXTENSION:
@@ -86,6 +88,16 @@ else:
 BACKEND_F16m512_FP8_THREADS_PER_CTA = 128
 BACKEND_F16arb_ELTS_PER_THREADS = 16
 
+META_QKV = tex.FP8FwdTensors.GEMM1_OUTPUT
+META_DQKV = tex.FP8BwdTensors.GRAD_OUTPUT1
+META_O = tex.FP8FwdTensors.GEMM2_INPUT
+META_DO = tex.FP8BwdTensors.GRAD_INPUT2
+META_S = tex.FP8FwdTensors.GEMM3_OUTPUT
+META_DP = tex.FP8BwdTensors.GRAD_INPUT3
+# repurpose some unused amax history buffers for partial results of CP fwd and bwd
+META_O_CP = tex.FP8FwdTensors.GEMM2_OUTPUT
+META_DQKV_CP = tex.FP8BwdTensors.GRAD_INPUT1
+
 
 def fused_attn_fwd_qkvpacked(
     is_training: bool,
@@ -97,17 +109,24 @@ def fused_attn_fwd_qkvpacked(
     attn_bias: torch.Tensor = None,
     cu_seqlens_padded: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
+    d_scale_qkv_offset: int = META_QKV,
     d_scale_s: torch.Tensor = None,
+    d_scale_s_offset: int = META_S,
     q_scale_s: torch.Tensor = None,
+    q_scale_s_offset: int = META_S,
     q_scale_o: torch.Tensor = None,
+    q_scale_o_offset: int = META_O,
     amax_s: torch.Tensor = None,
+    amax_s_offset: int = META_S,
     amax_o: torch.Tensor = None,
+    amax_o_offset: int = META_O,
     attn_scale: float = None,
     dropout: float = 0.0,
     fast_zero_fill: bool = True,
     qkv_layout: str = "sbh3d",
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
+    window_size: Tuple[int, int] = (-1, -1),
     rng_gen: torch.Generator = None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention FWD for packed QKV input.
@@ -135,19 +154,31 @@ def fused_attn_fwd_qkvpacked(
                 cumulative sequence offsets for QKV; shape [batch_size + 1]
     d_scale_qkv: torch.Tensor, default = None
                 input tensor for the dequantization of QKV in FP8 computations
+    d_scale_qkv_offset: int, default = META_QKV
+                offset in d_scale_qkv for QKV
     d_scale_s: torch.Tensor, default = None
                 input tensor for the dequantization of S in FP8 computations, S = Softmax(Q * K.T)
+    d_scale_s_offset: int, default = META_S
+                offset in d_scale_s for S
     q_scale_s: torch.Tensor, default = None
                 input tensor for the quantization of S in FP8 computations, S = Softmax(Q * K.T)
+    q_scale_s_offset: int, default = META_S
+                offset in q_scale_s for S
     q_scale_o: torch.Tensor, default = None
                 input tensor for the quantization of O in FP8 computations
+    q_scale_o_offset: int, default = META_O
+                offset in q_scale_o for O
     amax_s: torch.Tensor, default = None
                 output tensor, amax of S, used by the next iteration in FP8 computations
+    amax_s_offset: int, default = META_S
+                offset in amax_s for S
     amax_o: torch.Tensor, default = None
                 output tensor, amax of O, used by the next iteration in FP8 computations
+    amax_o_offset: int, default = META_O
+                offset in amax_o for O
     attn_scale: float, default = None
                 if not None, use attn_scale as the attention scale for Q*K.T BMM;
-                if None, use 1.0/sqrt(head_dim) as the default
+                if None, use 1.0/sqrt(head_dim_qk) as the default
     dropout: float, default = 0.0
                 dropout probability, 0.0 means no dropout, 1.0 means no output;
                 dropout must be 0.0 if is_training is False
@@ -160,6 +191,11 @@ def fused_attn_fwd_qkvpacked(
                 type of the bias; {"no_bias", "pre_scale_bias", "post_scale_bias", "alibi"}
     attn_mask_type: str, default = "padding"
                 type of the attention mask; {"padding", "causal", "padding_causal", "no_mask"}
+    window_size: Tuple[int, int], default = (-1, -1)
+                sliding window size for local attention, where query at position i attends to keys
+                in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
+                + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
+                window and causal mask specifically.
     rng_gen: torch.Generator, default = None
                 random number generator;
                 if None, uses the default CUDA generator from PyTorch; otherwise, uses rng_gen
@@ -244,16 +280,23 @@ def fused_attn_fwd_qkvpacked(
         QKVLayout[qkv_layout],
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
+        window_size,
         cu_seqlens,
         qkv,
         qkv_dtype,
         cu_seqlens_padded,
         d_scale_qkv,
+        d_scale_qkv_offset,
         d_scale_s,
+        d_scale_s_offset,
         q_scale_s,
+        q_scale_s_offset,
         q_scale_o,
+        q_scale_o_offset,
         amax_s,
+        amax_s_offset,
         amax_o,
+        amax_o_offset,
         attn_bias,
         rng_gen,
         rng_elts_per_thread,
@@ -290,6 +333,8 @@ def fused_attn_bwd_qkvpacked(
     qkv_layout: str = "sbh3d",
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
+    window_size: Tuple[int, int] = (-1, -1),
+    deterministic: bool = False,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention BWD for packed QKV input.
 
@@ -341,7 +386,7 @@ def fused_attn_bwd_qkvpacked(
                 output tensor, amax of dQKV, used by the next iteration in FP8 computations
     attn_scale: float, default = None
                 if not None, use attn_scale as the attention scale for Q*K.T BMM;
-                if None, use 1.0/sqrt(head_dim) as the default
+                if None, use 1.0/sqrt(head_dim_qk) as the default
     dropout: float, default = 0.0
                 dropout probability, 0.0 means no dropout, 1.0 means no output;
                 dropout must be 0.0 if is_training is False
@@ -354,6 +399,13 @@ def fused_attn_bwd_qkvpacked(
                 type of the bias; {"no_bias", "pre_scale_bias", "post_scale_bias", "alibi"}
     attn_mask_type: str, default = "padding"
                 type of the attention mask; {"padding", "causal", "padding_causal", "no_mask"}
+    window_size: Tuple[int, int], default = (-1, -1)
+                sliding window size for local attention, where query at position i attends to keys
+                in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
+                + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
+                window and causal mask specifically.
+    deterministic: bool, default = False
+                whether to execute the backward pass with deterministic behaviours.
 
     Returns
     ----------
@@ -402,6 +454,8 @@ def fused_attn_bwd_qkvpacked(
         QKVLayout[qkv_layout],
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
+        window_size,
+        deterministic,
         cu_seqlens,
         qkv,
         o,
@@ -439,17 +493,24 @@ def fused_attn_fwd_kvpacked(
     cu_seqlens_q_padded: torch.Tensor = None,
     cu_seqlens_kv_padded: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
+    d_scale_qkv_offset: int = META_QKV,
     d_scale_s: torch.Tensor = None,
+    d_scale_s_offset: int = META_S,
     q_scale_s: torch.Tensor = None,
+    q_scale_s_offset: int = META_S,
     q_scale_o: torch.Tensor = None,
+    q_scale_o_offset: int = META_O,
     amax_s: torch.Tensor = None,
+    amax_s_offset: int = META_S,
     amax_o: torch.Tensor = None,
+    amax_o_offset: int = META_O,
     attn_scale: float = None,
     dropout: float = 0.0,
     fast_zero_fill: bool = True,
     qkv_layout: str = "sbhd_sbh2d",
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
+    window_size: Tuple[int, int] = (-1, -1),
     rng_gen: torch.Generator = None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention FWD for packed KV input.
@@ -486,19 +547,31 @@ def fused_attn_fwd_kvpacked(
                 cumulative sequence offsets for KV; shape [batch_size + 1]
     d_scale_qkv: torch.Tensor, default = None
                 input tensor for the dequantization of QKV in FP8 computations
+    d_scale_qkv_offset: int, default = META_QKV
+                offset in d_scale_qkv for QKV
     d_scale_s: torch.Tensor, default = None
                 input tensor for the dequantization of S in FP8 computations, S = Softmax(Q * K.T)
+    d_scale_s_offset: int, default = META_S
+                offset in d_scale_s for S
     q_scale_s: torch.Tensor, default = None
                 input tensor for the quantization of S in FP8 computations, S = Softmax(Q * K.T)
+    q_scale_s_offset: int, default = META_S
+                offset in q_scale_s for S
     q_scale_o: torch.Tensor, default = None
                 input tensor for the quantization of O in FP8 computations
+    q_scale_o_offset: int, default = META_O
+                offset in q_scale_o for O
     amax_s: torch.Tensor, default = None
                 output tensor, amax of S, used by the next iteration in FP8 computations
+    amax_s_offset: int, default = META_S
+                offset in amax_s for S
     amax_o: torch.Tensor, default = None
                 output tensor, amax of O, used by the next iteration in FP8 computations
+    amax_o_offset: int, default = META_O
+                offset in amax_o for O
     attn_scale: float, default = None
                 if not None, use attn_scale as the attention scale for Q*K.T BMM;
-                if None, use 1.0/sqrt(head_dim) as the default
+                if None, use 1.0/sqrt(head_dim_qk) as the default
     dropout: float, default = 0.0
                 dropout probability, 0.0 means no dropout, 1.0 means no output;
                 dropout must be 0.0 if is_training is False
@@ -512,6 +585,11 @@ def fused_attn_fwd_kvpacked(
                 type of the bias; {"no_bias", "pre_scale_bias", "post_scale_bias", "alibi"}
     attn_mask_type: str, default = "padding"
                 type of the attention mask; {"padding", "causal", "padding_causal", "no_mask"}
+    window_size: Tuple[int, int], default = (-1, -1)
+                sliding window size for local attention, where query at position i attends to keys
+                in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
+                + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
+                window and causal mask specifically.
     rng_gen: torch.Generator, default = None
                 random number generator;
                 if None, uses the default CUDA generator from PyTorch; otherwise, uses rng_gen
@@ -600,6 +678,7 @@ def fused_attn_fwd_kvpacked(
         QKVLayout[qkv_layout],
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
+        window_size,
         cu_seqlens_q,
         cu_seqlens_kv,
         q,
@@ -608,11 +687,17 @@ def fused_attn_fwd_kvpacked(
         cu_seqlens_q_padded,
         cu_seqlens_kv_padded,
         d_scale_qkv,
+        d_scale_qkv_offset,
         d_scale_s,
+        d_scale_s_offset,
         q_scale_s,
+        q_scale_s_offset,
         q_scale_o,
+        q_scale_o_offset,
         amax_s,
+        amax_s_offset,
         amax_o,
+        amax_o_offset,
         attn_bias,
         rng_gen,
         rng_elts_per_thread,
@@ -653,6 +738,8 @@ def fused_attn_bwd_kvpacked(
     qkv_layout: str = "sbhd_sbh2d",
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
+    window_size: Tuple[int, int] = (-1, -1),
+    deterministic: bool = False,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention BWD for packed KV input.
 
@@ -714,7 +801,7 @@ def fused_attn_bwd_kvpacked(
                 output tensor, amax of dQKV, used by the next iteration in FP8 computations
     attn_scale: float, default = None
                 if not None, use attn_scale as the attention scale for Q*K.T BMM;
-                if None, use 1.0/sqrt(head_dim) as the default
+                if None, use 1.0/sqrt(head_dim_qk) as the default
     dropout: float, default = 0.0
                 dropout probability, 0.0 means no dropout, 1.0 means no output;
                 dropout must be 0.0 if is_training is False
@@ -728,6 +815,13 @@ def fused_attn_bwd_kvpacked(
                 type of the bias; {"no_bias", "pre_scale_bias", "post_scale_bias", "alibi"}
     attn_mask_type: str, default = "padding"
                 type of the attention mask; {"padding", "causal", "padding_causal", "no_mask"}
+    window_size: Tuple[int, int], default = (-1, -1)
+                sliding window size for local attention, where query at position i attends to keys
+                in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
+                + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
+                window and causal mask specifically.
+    deterministic: bool, default = False
+                whether to execute the backward pass with deterministic behaviours.
 
     Returns
     ----------
@@ -779,6 +873,8 @@ def fused_attn_bwd_kvpacked(
         QKVLayout[qkv_layout],
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
+        window_size,
+        deterministic,
         cu_seqlens_q,
         cu_seqlens_kv,
         q,
@@ -820,17 +916,24 @@ def fused_attn_fwd(
     cu_seqlens_q_padded: torch.Tensor = None,
     cu_seqlens_kv_padded: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
+    d_scale_qkv_offset: int = META_QKV,
     d_scale_s: torch.Tensor = None,
+    d_scale_s_offset: int = META_S,
     q_scale_s: torch.Tensor = None,
+    q_scale_s_offset: int = META_S,
     q_scale_o: torch.Tensor = None,
+    q_scale_o_offset: int = META_O,
     amax_s: torch.Tensor = None,
+    amax_s_offset: int = META_S,
     amax_o: torch.Tensor = None,
+    amax_o_offset: int = META_O,
     attn_scale: float = None,
     dropout: float = 0.0,
     fast_zero_fill: bool = True,
     qkv_layout: str = "sbh3d",
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
+    window_size: Tuple[int, int] = (-1, -1),
     rng_gen: torch.Generator = None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention FWD for separate QKV input.
@@ -870,20 +973,32 @@ def fused_attn_fwd(
     cu_seqlens_kv_padded: torch.Tensor, default = None
                 cumulative sequence offsets for KV; shape [batch_size + 1]
     d_scale_qkv: torch.Tensor, default = None
-                input tensor for the dequantization of Q, K and V in FP8 computations
+                input tensor for the dequantization of QKV in FP8 computations
+    d_scale_qkv_offset: int, default = META_QKV
+                offset in d_scale_qkv for QKV
     d_scale_s: torch.Tensor, default = None
                 input tensor for the dequantization of S in FP8 computations, S = Softmax(Q * K.T)
+    d_scale_s_offset: int, default = META_S
+                offset in d_scale_s for S
     q_scale_s: torch.Tensor, default = None
                 input tensor for the quantization of S in FP8 computations, S = Softmax(Q * K.T)
+    q_scale_s_offset: int, default = META_S
+                offset in q_scale_s for S
     q_scale_o: torch.Tensor, default = None
                 input tensor for the quantization of O in FP8 computations
+    q_scale_o_offset: int, default = META_O
+                offset in q_scale_o for O
     amax_s: torch.Tensor, default = None
                 output tensor, amax of S, used by the next iteration in FP8 computations
+    amax_s_offset: int, default = META_S
+                offset in amax_s for S
     amax_o: torch.Tensor, default = None
                 output tensor, amax of O, used by the next iteration in FP8 computations
+    amax_o_offset: int, default = META_O
+                offset in amax_o for O
     attn_scale: float, default = None
                 if not None, use attn_scale as the attention scale for Q*K.T BMM;
-                if None, use 1.0/sqrt(head_dim) as the default
+                if None, use 1.0/sqrt(head_dim_qk) as the default
     dropout: float, default = 0.0
                 dropout probability, 0.0 means no dropout, 1.0 means no output;
                 dropout must be 0.0 if is_training is False
@@ -899,6 +1014,11 @@ def fused_attn_fwd(
                 type of the bias; {"no_bias", "pre_scale_bias", "post_scale_bias", "alibi"}
     attn_mask_type: str, default = "padding"
                 type of the attention mask; {"padding", "causal", "padding_causal", "no_mask"}
+    window_size: Tuple[int, int], default = (-1, -1)
+                sliding window size for local attention, where query at position i attends to keys
+                in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
+                + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
+                window and causal mask specifically.
     rng_gen: torch.Generator, default = None
                 random number generator;
                 if None, uses the default CUDA generator from PyTorch; otherwise, uses rng_gen
@@ -992,6 +1112,7 @@ def fused_attn_fwd(
         QKVLayout[qkv_layout],
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
+        window_size,
         cu_seqlens_q,
         cu_seqlens_kv,
         q,
@@ -1001,11 +1122,17 @@ def fused_attn_fwd(
         cu_seqlens_q_padded,
         cu_seqlens_kv_padded,
         d_scale_qkv,
+        d_scale_qkv_offset,
         d_scale_s,
+        d_scale_s_offset,
         q_scale_s,
+        q_scale_s_offset,
         q_scale_o,
+        q_scale_o_offset,
         amax_s,
+        amax_s_offset,
         amax_o,
+        amax_o_offset,
         attn_bias,
         rng_gen,
         rng_elts_per_thread,
@@ -1047,6 +1174,8 @@ def fused_attn_bwd(
     qkv_layout: str = "sbh3d",
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
+    window_size: Tuple[int, int] = (-1, -1),
+    deterministic: bool = False,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention BWD for packed KV input.
 
@@ -1111,7 +1240,7 @@ def fused_attn_bwd(
                 output tensor, amax of dQ, dK and dV, used by the next iteration in FP8 computations
     attn_scale: float, default = None
                 if not None, use attn_scale as the attention scale for Q*K.T BMM;
-                if None, use 1.0/sqrt(head_dim) as the default
+                if None, use 1.0/sqrt(head_dim_qk) as the default
     dropout: float, default = 0.0
                 dropout probability, 0.0 means no dropout, 1.0 means no output;
                 dropout must be 0.0 if is_training is False
@@ -1127,6 +1256,13 @@ def fused_attn_bwd(
                 type of the bias; {"no_bias", "pre_scale_bias", "post_scale_bias", "alibi"}
     attn_mask_type: str, default = "padding"
                 type of the attention mask; {"padding", "causal", "padding_causal", "no_mask"}
+    window_size: Tuple[int, int], default = (-1, -1)
+                sliding window size for local attention, where query at position i attends to keys
+                in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
+                + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
+                window and causal mask specifically.
+    deterministic: bool, default = False
+                whether to execute the backward pass with deterministic behaviours.
 
     Returns
     ----------
@@ -1180,6 +1316,8 @@ def fused_attn_bwd(
         QKVLayout[qkv_layout],
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
+        window_size,
+        deterministic,
         cu_seqlens_q,
         cu_seqlens_kv,
         q,

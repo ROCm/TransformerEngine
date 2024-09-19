@@ -9,6 +9,9 @@ import io
 import os
 import pickle
 import warnings
+import socket
+import fcntl
+import struct
 from abc import ABC, abstractmethod
 from typing import Dict, Generator, List, Optional, Tuple, Union
 from contextlib import contextmanager
@@ -47,7 +50,6 @@ _multi_stream_cublas_workspace = []
 _cublas_workspace = None
 _ub_communicators = None
 _NUM_MAX_UB_STREAMS = 3
-_NUM_MAX_CUBLAS_STREAMS = 4
 layers_atomic_ring_exchange = []
 
 
@@ -72,7 +74,7 @@ def get_multi_stream_cublas_workspace() -> List[torch.Tensor]:
     """Returns workspace for multi-stream cublas."""
     global _multi_stream_cublas_workspace
     if not _multi_stream_cublas_workspace:
-        for _ in range(_NUM_MAX_CUBLAS_STREAMS):
+        for _ in range(tex._num_cublas_streams):
             _multi_stream_cublas_workspace.append(
                 torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda")
             )
@@ -81,19 +83,115 @@ def get_multi_stream_cublas_workspace() -> List[torch.Tensor]:
 
 def initialize_ub(
     shape: list,
-    tp_group: dist_group_type,
+    tp_size: int,
     use_fp8: bool = False,
     dtype: torch.dtype = torch.bfloat16,
     ub_cfgs: Optional[dict] = None,
+    bootstrap_backend: Union[str, torch.distributed.Backend] = None,
 ) -> None:
     """Initialize communicators for TP comm overlap using userbuffers."""
+    if not tex.device_supports_multicast():
+        assert bool(os.getenv("UB_SKIPMC", "0")), (
+            "CUDA device, driver and/or toolkit version does not support comm+GEMM overlap with "
+            + "CUDA Multicast. Launch app with UB_SKIPMC=1 to try CUDA IPC instead."
+        )
+
     global _ub_communicators
     assert _ub_communicators is None, "UB communicators are already initialized."
     _ub_communicators = {}
-    rank_id = torch.distributed.get_rank()
-    world_size = torch.distributed.get_world_size()
-    tp_id = torch.distributed.get_rank(tp_group)
-    tp_size = torch.distributed.get_world_size(tp_group)
+
+    if tex.ubuf_built_with_mpi():
+        # Userbuffers will ignore all these values when it is built with MPI, so these are just
+        # placeholders based on an assumption that tp_size covers all devices in a physical node.
+        assert torch.distributed.is_mpi_available()
+        mpi_group = torch.distributed.new_group(backend="mpi")
+        world_rank = torch.distributed.get_rank(mpi_group)
+        world_size = torch.distributed.get_world_size(mpi_group)
+        local_rank = world_rank % tp_size
+        local_size = tp_size
+        self_node_idx = world_rank // tp_size
+        num_nodes = world_size // tp_size
+        ub_callbacks = tex.UbufBootstrapCallbacks()
+    else:
+        assert (
+            torch.distributed.is_initialized()
+        ), "torch.distributed must be initialized before Userbuffers"
+        if bootstrap_backend is None:
+            bootstrap_backend = "nccl"
+            if torch.distributed.is_gloo_available():
+                bootstrap_backend = "gloo"
+            elif torch.distributed.is_mpi_available():
+                bootstrap_backend = "mpi"
+        else:
+            assert bootstrap_backend in ["gloo", "mpi", "nccl"]
+
+        world_group = torch.distributed.new_group(backend=bootstrap_backend)
+        world_rank = torch.distributed.get_rank(world_group)
+        world_size = torch.distributed.get_world_size(world_group)
+
+        # Construct an intra-node communicator based on global ranks that share the same hostname
+        # NOTE: If the user specified a valid network interface for NCCL or GLOO, use the host
+        #       address on that interface instead of the hostname. This can help avoid issues when
+        #       different hosts have the same hostname on Kubernetes clusters.
+        hostname = socket.gethostname()
+        ifname = os.getenv(
+            "NVTE_UB_SOCKET_IFNAME",
+            os.getenv("NCCL_SOCKET_IFNAME", os.getenv("GLOO_SOCKET_IFNAME")),
+        )
+
+        if ifname is not None:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                hostname = socket.inet_ntoa(
+                    fcntl.ioctl(
+                        s.fileno(), 0x8915, struct.pack("256s", ifname[:15].encode("UTF-8"))
+                    )[20:24]
+                )
+            except OSError as err:
+                raise OSError(f"Invalid network interface: {ifname}") from err
+
+        hostnames = [None for _ in range(world_size)]
+        torch.distributed.all_gather_object(hostnames, hostname, world_group)
+        unique_hosts = []
+        for host in hostnames:
+            if host not in unique_hosts:
+                unique_hosts.append(host)
+        num_nodes = len(unique_hosts)
+
+        if num_nodes > 1:
+            ranks_per_node_list = [[] for _ in range(num_nodes)]
+            self_node_idx = -1
+            for i, host in enumerate(hostnames):
+                node_idx = unique_hosts.index(host)
+                ranks_per_node_list[node_idx].append(i)
+                if host == hostname:
+                    self_node_idx = node_idx
+            assert self_node_idx >= 0, "Internal TE error!"
+
+            intra_node_group, _ = torch.distributed.new_subgroups_by_enumeration(
+                ranks_per_node_list, backend=bootstrap_backend
+            )
+            local_rank = torch.distributed.get_rank(intra_node_group)
+            local_size = torch.distributed.get_world_size(intra_node_group)
+            intra_node_ranks = torch.distributed.get_process_group_ranks(intra_node_group)
+
+        else:
+            self_node_idx = 0
+            intra_node_group = world_group
+            local_rank = world_rank
+            local_size = world_size
+            intra_node_ranks = list(range(world_size))
+
+        if world_rank == 0:
+            print(f"!!! [UB] Number of physical nodes: {num_nodes}\n", end="", flush=True)
+        if local_rank == 0:
+            print(
+                f"!!! [UB] Global ranks on node {self_node_idx}: {intra_node_ranks}\n",
+                end="",
+                flush=True,
+            )
+
+        ub_callbacks = tex.UbufBootstrapCallbacks(world_group, intra_node_group)
 
     # Increase the workspace by the number of maximum concurrent streams
     global _cublas_workspace
@@ -128,6 +226,23 @@ def initialize_ub(
             if name in names:
                 return method
         raise KeyError(f"Given layer name {name} does not exist.")
+
+    def get_default_config(name):
+        method = get_method(name)
+        is_reduce_scatter = name in layers_reduce_scatter_overlap
+        default_cfg = {
+            "method": method,
+            "is_reduce_scatter": is_reduce_scatter,
+            "num_sm": 1 if method == "ring_exchange" else 16,
+            "cga_size": 1 if method == "ring_exchange" else 2,
+            "set_sm_margin": False,
+            "num_splits": 4 if method == "pipeline" else tp_size,
+            "aggregate": False,
+            "atomic_gemm": False,
+            "use_ce": True,
+            "fp8_buf": name in layers_all_gather_overlap,
+        }
+        return default_cfg
 
     def add_ub(
         name: str,
@@ -182,52 +297,42 @@ def initialize_ub(
         if method == "ring_exchange":
             ub_obj = tex.UbufP2PCommOverlap(
                 sample_buffer,  # Sample userbuffer
-                rank_id,  # Rank id
+                world_rank,  # World rank
                 world_size,  # World size
-                tp_id,  # TP id
-                tp_size,  # TP size
+                local_rank,  # Rank within the node
+                local_size,  # Number of ranks/GPUs per node
+                self_node_idx,  # Node ID
+                num_nodes,  # Number of nodes
+                tp_size,  # Tensor-parallel group size (may be different than local_size)
                 num_sm,  # Number of communication SMs
                 cga_size,  # CGA cluster size
                 set_sm_margin,  # Set SM margin
                 aggregate,  # Aggregate 2X GEMM chunks
                 _NUM_MAX_UB_STREAMS,  # Max concurrent GEMM streams
-                is_reduce_scatter,  # overlap with reduce scatter
-                atomic_gemm,  # use a single GEMM with atomic-counters
-                use_ce,  # use copy engine for P2P communications
-                torch.Tensor(),  # empty tensor to pass to counters
+                is_reduce_scatter,  # Overlap with reduce scatter
+                atomic_gemm,  # Use a single GEMM with atomic-counters
+                use_ce,  # Use copy engine for P2P communications
+                ub_callbacks,
             )
         else:
             ub_obj = tex.UbufCommOverlap(
                 sample_buffer,  # Sample userbuffer
-                rank_id,  # Rank id
+                world_rank,  # World rank
                 world_size,  # World size
-                tp_id,  # TP id
-                tp_size,  # TP size
+                local_rank,  # Rank within the node
+                local_size,  # Number of ranks/GPUs per node
+                self_node_idx,  # Node ID
+                num_nodes,  # Number of nodes
+                tp_size,  # Tensor-parallel group size (may be different than local_size)
                 num_sm,  # Number of communication SMs
                 cga_size,  # CGA cluster size
                 num_splits,  # Number of communication splits
                 set_sm_margin,  # Set SM margin
                 _NUM_MAX_UB_STREAMS,  # Max concurrent GEMM streams
-                atomic_gemm,  # use a single GEMM with atomic-counters
-                torch.Tensor(),  # empty tensor to pass to counters
+                atomic_gemm,  # Use a single GEMM with atomic-counters
+                ub_callbacks,
             )
         _ub_communicators[name] = ub_obj
-
-    def alloc_copy_allgather_callback(local_data: torch.Tensor, group: str) -> torch.Tensor:
-        pg = None if group == "world" else tp_group
-        global_size = local_data.numel() * torch.distributed.get_world_size(pg)
-        global_data = torch.zeros(global_size, dtype=local_data.dtype, device="cuda")
-        torch.distributed.all_gather_into_tensor(global_data, local_data.cuda(), group=pg)
-        return global_data.cpu()
-
-    def barrier_callback(group: str) -> None:
-        pg = None if group == "world" else tp_group
-        torch.distributed.barrier(group=pg)
-
-    def free_callback(data: torch.Tensor) -> None:
-        data.data = torch.Tensor()
-
-    tex.set_ubuf_bootstrap_callbacks(alloc_copy_allgather_callback, barrier_callback, free_callback)
 
     if ub_cfgs is not None:
         for name in dgrad_reduce_scatter_overlap:
@@ -235,51 +340,25 @@ def initialize_ub(
                 wgrad_name = name.replace("dgrad", "wgrad")
                 assert wgrad_name not in ub_cfgs
                 layers_reduce_scatter_overlap.remove(wgrad_name)
+                layers_all_gather_overlap.remove(name)
                 layers_reduce_scatter_overlap.append(name)
+                methods["bulk"].remove(name)
+                new_method = ub_cfgs[name]["method"]
+                methods[new_method].append(name)
 
     for name in methods["ring_exchange"] + methods["pipeline"] + methods["bulk"]:
+        ub_cfg = get_default_config(name)
         if ub_cfgs is not None and name in ub_cfgs:
-            ub_cfg = ub_cfgs[name]
-            method = ub_cfg.get("method", get_method(name))
-            num_sm = ub_cfg.get("num_sm", 1 if method == "ring_exchange" else 16)
-            cga_size = ub_cfg.get("cga_size", 1 if method == "ring_exchange" else 2)
-            num_splits = ub_cfg.get("num_splits", 4 if method == "pipeline" else 0)
-            set_sm_margin = ub_cfg.get("set_sm_margin", 0)
-            aggregate = ub_cfg.get("aggregate", 0)
-            atomic_gemm = ub_cfg.get("atomic_gemm", 0)
-            use_ce = ub_cfg.get("use_ce", True)
-            is_reduce_scatter = 1 if name in layers_reduce_scatter_overlap else 0
-            # Support FP8 userbuffer when (1) AllGather and (2) FP8-GEMM output ReduceScatter
             fp8_buf = (name in layers_all_gather_overlap) or (
-                ub_cfg.get("fp8_buf", False) and name in methods["pipeline"]
+                ub_cfgs[name].get("fp8_buf", False) and name in methods["pipeline"]
             )
-            add_ub(
-                name,
-                method,
-                is_reduce_scatter,
-                num_sm,
-                cga_size,
-                set_sm_margin,
-                num_splits,
-                aggregate,
-                atomic_gemm,
-                use_ce,
-                fp8_buf,
-            )
-        else:
-            method = get_method(name)
-            add_ub(
-                name,
-                method=method,
-                is_reduce_scatter=1 if name in layers_reduce_scatter_overlap else 0,
-                num_splits=4 if method == "pipeline" else 0,
-                fp8_buf=name in layers_all_gather_overlap,
-            )
+            ub_cfg.update(ub_cfgs[name])
+            ub_cfg["fp8_buf"] = fp8_buf
+        add_ub(name, **ub_cfg)
 
 
 def get_ub(name: str):
     """Get userbuffer communicator corresponding to give key."""
-    global _ub_communicators
     assert _ub_communicators is not None, "UB manager is not initialized."
     assert name in _ub_communicators, f"UB for {name} is not registered."
     return _ub_communicators[name]
@@ -788,11 +867,17 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # If primary weights are in fp8, wrap the parameter as Float8Tensor
             fp8_meta_index = self.param_init_meta[name].fp8_meta_index
             if self.primary_weights_in_fp8 and fp8_meta_index is not None:
+                dummy_amax = torch.empty(
+                    (1, 1),
+                    dtype=torch.float32,
+                    device=param.device,
+                )  # Dummy buffer to avoid overwriting amax history
                 param = Float8Tensor.to_float8(
                     param,
                     fp8_meta=self.fp8_meta,
                     fp8_meta_index=fp8_meta_index,
-                    amax=torch.empty(1, device="cuda"),  # Dummy amax to avoid overwriting history.
+                    amax=dummy_amax,
+                    with_transpose_cache=torch.is_grad_enabled(),
                 )
 
             # Redo parameter wrap in case we broke it above
@@ -814,7 +899,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         cache_name: Optional[str] = None,
         update_workspace: bool = True,
         skip_update_flag: Optional[torch.Tensor] = None,
-        with_transpose: bool = False,
         fsdp_group: dist_group_type = None,
     ) -> Float8Tensor:
         """Get FP8 workspace buffer and maybe update its values
@@ -840,27 +924,30 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         skip_update_flag: torch.Tensor, optional
             GPU flag to skip updating the workspace. Take precedence
             over `update_workspace` if provided.
-        with_transpose: bool, default = `False`
-            Whether to initialize cached transpose in workspace.
         fsdp_group: bool, default = None
             FSDP process group that the weights are distributed over.
         """
 
-        # Construct workspace if needed
+        # Try getting workspace from cache
         out = None
         if cache_name is not None:
             out = self._fp8_workspaces.get(cache_name, None)
-            # Gather cached Fp8 workspace if it's distributed
-            # NOTE: FSDP sharding is supported only for Fp8 buffers and will not work
-            #       for models initialized with Fp8 primary weights.
-            if (
-                not isinstance(out, Float8Tensor)
-                and fsdp_group is not None
-                and out._data.shape != tensor.data.shape
-            ):
-                _fsdp_gather_tensors(fsdp_group, [tensor.data.shape], out)
 
+        # Gather cached Fp8 workspace if it's distributed
+        # NOTE: FSDP sharding is supported only for Fp8 buffers and will not work
+        #       for models initialized with Fp8 primary weights.
+        if (
+            out is not None
+            and not isinstance(out, Float8Tensor)
+            and fsdp_group is not None
+            and out._data.shape != tensor.data.shape
+        ):
+            _fsdp_gather_tensors(fsdp_group, [tensor.data.shape], out)
+
+        # Construct workspace if needed
         if out is None:
+
+            # FP8 data
             if tensor is None or fp8_meta_forward is None or fp8_meta_index is None:
                 raise ValueError(
                     "tensor, fp8_meta_forward, and fp8_meta_index kwargs "
@@ -870,16 +957,38 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 self.fp8_meta["recipe"],
                 fprop_tensor=fp8_meta_forward,
             )
+            data = torch.empty_like(tensor, dtype=torch.uint8)
             scale_inv = torch.empty([1], dtype=torch.float32, device=tensor.device)
+
+            # Transpose cache
+            with_transpose_cache = torch.is_grad_enabled()
+            if (
+                not with_transpose_cache
+                and is_fp8_activation_recompute_enabled()
+                and not in_fp8_activation_recompute_phase()
+            ):
+                with_transpose_cache = True
+            data_transpose = None
+            if with_transpose_cache:
+                data_transpose = torch.empty(
+                    (tensor.size(-1), tensor.numel() // tensor.size(-1)),
+                    dtype=torch.uint8,
+                    device=tensor.device,
+                )
+
+            # Construct FP8 tensor
             out = Float8Tensor(
-                data=torch.empty_like(tensor, dtype=torch.uint8),
+                data=data,
                 fp8_meta=self.fp8_meta,
                 fp8_meta_forward=fp8_meta_forward,
                 fp8_meta_index=fp8_meta_index,
                 fp8_dtype=fp8_dtype,
                 fp8_scale_inv=scale_inv,
                 dtype=tensor.dtype,
+                data_transpose=data_transpose,
             )
+
+            # Update cache
             if cache_name is not None:
                 self._fp8_workspaces[cache_name] = out
             update_workspace = True
@@ -891,33 +1000,17 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if update_workspace:
             if tensor is None:
                 raise ValueError("tensor kwarg must be provided to update FP8 workspace")
-            if with_transpose:
-                out.cast_transpose_(
-                    tensor,
-                    noop_flag=skip_update_flag,
-                )
+            if is_in_onnx_export_mode():
+                # ONNX export does not support fused cast-transpose
+                # kernel and requires that FP8 scales can be
+                # represented with constant ops.
+                transpose_cache = out._transpose
+                out._transpose = None
+                out.quantize_(tensor)
+                out._scale_inv.fill_(out._scale_inv.item())
+                out._transpose = transpose_cache
             else:
-                fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
-                    forward=out._fp8_meta_forward,
-                )
-                fp8_meta = out._fp8_meta[fp8_meta_key]
-                fp8_meta_index = out._fp8_meta_index
-                cast_to_fp8(
-                    tensor,
-                    fp8_meta,
-                    fp8_meta_index,
-                    out._fp8_dtype,
-                    out=out._data,
-                )
-                if is_in_onnx_export_mode():
-                    # ONNX export expects FP8 scales can be
-                    # represented with constant ops. However, copying
-                    # into a buffer involves an expand op for array
-                    # broadcasting. We work around this by filling the
-                    # buffer instead.
-                    out._scale_inv.fill_(fp8_meta.scale_inv[fp8_meta_index].item())
-                else:
-                    out._scale_inv.copy_(fp8_meta.scale_inv[fp8_meta_index])
+                out.quantize_(tensor, noop_flag=skip_update_flag)
 
         return out
 

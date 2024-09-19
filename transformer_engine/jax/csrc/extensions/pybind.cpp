@@ -6,13 +6,20 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "jax/csrc/extensions.h"
+#include "extensions.h"
 
 namespace transformer_engine {
 namespace jax {
 
 template <typename T>
 pybind11::capsule EncapsulateFunction(T *fn) {
+  return pybind11::capsule(reinterpret_cast<void *>(fn), "xla._CUSTOM_CALL_TARGET");
+}
+
+template <typename T>
+pybind11::capsule EncapsulateFFI(T *fn) {
+  static_assert(std::is_invocable_r_v<XLA_FFI_Error *, T, XLA_FFI_CallFrame *>,
+                "Encapsulated function must be an XLA FFI handler");
   return pybind11::capsule(reinterpret_cast<void *>(fn), "xla._CUSTOM_CALL_TARGET");
 }
 
@@ -46,6 +53,10 @@ pybind11::dict Registrations() {
       EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxBackward);
   dict["te_fused_attn_forward"] = EncapsulateFunction(FusedAttnForward);
   dict["te_fused_attn_backward"] = EncapsulateFunction(FusedAttnBackward);
+
+  dict["te_cast_transpose_ffi"] = EncapsulateFFI(CastTransposeHandler);
+  dict["te_act_lu_ffi"] = EncapsulateFFI(ActLuHandler);
+  dict["te_dact_lu_ffi"] = EncapsulateFFI(DActLuHandler);
   return dict;
 }
 
@@ -62,7 +73,11 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_fused_attn_backend", &GetFusedAttnBackend);
 #ifndef USE_ROCM
   m.def("get_cuda_version", &GetCudaRuntimeVersion);
+<<<<<<< HEAD
 #endif
+=======
+  m.def("get_cudnn_version", &GetCudnnRuntimeVersion);
+>>>>>>> upstream/release_v1.11
   m.def("get_device_compute_capability", &GetDeviceComputeCapability);
 #ifndef USE_ROCM
   m.def("get_cublasLt_version", &cublasLtGetVersion);
@@ -73,6 +88,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_layernorm_bwd_workspace_sizes", &GetLayerNormBackwardWorkspaceSizes);
   m.def("get_fused_attn_fwd_workspace_sizes", &GetFusedAttnForwardWorkspaceSizes);
   m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
+  m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
 
   pybind11::enum_<DType>(m, "DType", pybind11::module_local())
       .value("kByte", DType::kByte)
@@ -93,12 +109,23 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("NVTE_NO_MASK", NVTE_Mask_Type::NVTE_NO_MASK)
       .value("NVTE_PADDING_MASK", NVTE_Mask_Type::NVTE_PADDING_MASK)
       .value("NVTE_CAUSAL_MASK", NVTE_Mask_Type::NVTE_CAUSAL_MASK)
-      .value("NVTE_PADDING_CAUSAL_MASK", NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK);
+      .value("NVTE_PADDING_CAUSAL_MASK", NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)
+      .value("NVTE_CAUSAL_BOTTOM_RIGHT_MASK", NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK)
+      .value("NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK",
+             NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
 
   pybind11::enum_<NVTE_QKV_Layout>(m, "NVTE_QKV_Layout", pybind11::module_local())
       .value("NVTE_BS3HD", NVTE_QKV_Layout::NVTE_BS3HD)
       .value("NVTE_BSHD_BS2HD", NVTE_QKV_Layout::NVTE_BSHD_BS2HD)
-      .value("NVTE_BSHD_BSHD_BSHD", NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD);
+      .value("NVTE_BSHD_BSHD_BSHD", NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD)
+      .value("NVTE_T3HD", NVTE_QKV_Layout::NVTE_T3HD)
+      .value("NVTE_THD_T2HD", NVTE_QKV_Layout::NVTE_THD_T2HD)
+      .value("NVTE_THD_THD_THD", NVTE_QKV_Layout::NVTE_THD_THD_THD);
+
+  pybind11::enum_<NVTE_QKV_Format>(m, "NVTE_QKV_Format", pybind11::module_local())
+      .value("NVTE_SBHD", NVTE_QKV_Format::NVTE_SBHD)
+      .value("NVTE_BSHD", NVTE_QKV_Format::NVTE_BSHD)
+      .value("NVTE_THD", NVTE_QKV_Format::NVTE_THD);
 
   pybind11::enum_<NVTE_Activation_Type>(m, "NVTE_Activation_Type", pybind11::module_local())
       .value("GELU", NVTE_Activation_Type::GELU)
@@ -110,7 +137,8 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("QGELU", NVTE_Activation_Type::QGELU)
       .value("QGEGLU", NVTE_Activation_Type::QGEGLU)
       .value("SRELU", NVTE_Activation_Type::SRELU)
-      .value("SREGLU", NVTE_Activation_Type::SREGLU);
+      .value("SREGLU", NVTE_Activation_Type::SREGLU)
+      .export_values();
 
 #ifndef USE_ROCM
   pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local())

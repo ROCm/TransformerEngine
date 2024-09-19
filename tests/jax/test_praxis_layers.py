@@ -17,7 +17,6 @@ import pytest
 
 from utils import assert_allclose
 
-from transformer_engine.transformer_engine_jax import get_device_compute_capability
 from transformer_engine.common.recipe import DelayedScaling, Format
 from transformer_engine.jax import fp8_autocast, update_collections
 from transformer_engine.jax.flax import DenseGeneral, LayerNormDenseGeneral
@@ -47,6 +46,7 @@ ENABLE_FP8 = [False, True]
 FP8_FORMATS = [Format.E4M3, Format.HYBRID]
 
 
+<<<<<<< HEAD
 @pytest.fixture(autouse=True, scope="module")
 def enable_fused_attn():
     """
@@ -60,6 +60,8 @@ def enable_fused_attn():
         del os.environ["NVTE_FUSED_ATTN"]
 
 
+=======
+>>>>>>> upstream/release_v1.11
 def compare_dict(ref_fd, test_fd, rtol=1e-05, atol=1e-08):
     for key in ref_fd:
         assert key in test_fd, f"{key} not found in test dict {test_fd}"

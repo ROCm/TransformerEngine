@@ -4,7 +4,8 @@
 #
 # See LICENSE for license information.
 
-"""Paddle-paddle related extensions."""
+"""JAX related extensions."""
+import os
 from pathlib import Path
 
 import setuptools
@@ -12,6 +13,25 @@ from glob import glob
 
 from .utils import rocm_build, rocm_path, hipify, cuda_path, all_files_in_dir
 from typing import List
+
+
+def xla_path() -> str:
+    """XLA root path lookup.
+    Throws FileNotFoundError if XLA source is not found."""
+
+    try:
+        from jax.extend import ffi
+    except ImportError:
+        if os.getenv("XLA_HOME"):
+            xla_home = Path(os.getenv("XLA_HOME"))
+        else:
+            xla_home = "/opt/xla"
+    else:
+        xla_home = ffi.include_dir()
+
+    if not os.path.isdir(xla_home):
+        raise FileNotFoundError("Could not find xla source.")
+    return xla_home
 
 
 def setup_jax_extension(
@@ -28,22 +48,34 @@ def setup_jax_extension(
     ] + all_files_in_dir(extensions_dir, ".cpp")
 
     # Header files
+<<<<<<< HEAD
     if rocm_build():
        include_dirs = []
     else:
         cuda_home, _ = cuda_path()
         include_dirs = [cuda_home / "include"]
     include_dirs.extend([
+=======
+    cuda_home, _ = cuda_path()
+    xla_home = xla_path()
+    include_dirs = [
+        cuda_home / "include",
+>>>>>>> upstream/release_v1.11
         common_header_files,
         common_header_files / "common",
         common_header_files / "common" / "include",
         csrc_header_files,
+<<<<<<< HEAD
     ])
 
     if rocm_build():
         current_file_path = Path(__file__).parent.resolve()
         base_dir = current_file_path.parent
         sources = hipify(base_dir, csrc_source_files, sources, include_dirs)
+=======
+        xla_home,
+    ]
+>>>>>>> upstream/release_v1.11
 
     # Compile flags
     cxx_flags = ["-O3"]

@@ -75,11 +75,16 @@ include_directories(../../transformer_engine/common/include)
 include_directories(../../transformer_engine/common)
 include_directories(${CMAKE_SOURCE_DIR})
 
+<<<<<<< HEAD
 if(USE_CUDA)
   find_package(CUDAToolkit REQUIRED)
 else()
   find_package(hip REQUIRED)
 endif()
+=======
+find_package(CUDAToolkit REQUIRED)
+include(${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
+>>>>>>> upstream/release_v1.11
 
 add_subdirectory(operator)
 add_subdirectory(util)

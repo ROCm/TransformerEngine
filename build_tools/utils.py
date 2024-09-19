@@ -6,19 +6,20 @@
 
 """Installation script."""
 
+import functools
+import glob
+import importlib
 import os
 import re
-import glob
 import shutil
 import subprocess
 import sys
-from functools import cache
 from pathlib import Path
 from subprocess import CalledProcessError
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 
-@cache
+@functools.lru_cache(maxsize=None)
 def debug_build_enabled() -> bool:
     """Whether to build with a debug configuration"""
     for arg in sys.argv:
@@ -28,6 +29,28 @@ def debug_build_enabled() -> bool:
     if int(os.getenv("NVTE_BUILD_DEBUG", "0")):
         return True
     return False
+
+
+@functools.lru_cache(maxsize=None)
+def get_max_jobs_for_parallel_build() -> int:
+    """Number of parallel jobs for Nina build"""
+
+    # Default: maximum parallel jobs
+    num_jobs = 0
+
+    # Check environment variable
+    if os.getenv("NVTE_BUILD_MAX_JOBS"):
+        num_jobs = int(os.getenv("NVTE_BUILD_MAX_JOBS"))
+    elif os.getenv("MAX_JOBS"):
+        num_jobs = int(os.getenv("MAX_JOBS"))
+
+    # Check command-line arguments
+    for arg in sys.argv.copy():
+        if arg.startswith("--parallel="):
+            num_jobs = int(arg.replace("--parallel=", ""))
+            sys.argv.remove(arg)
+
+    return num_jobs
 
 
 def all_files_in_dir(path, name_extension=None):
@@ -140,6 +163,7 @@ def found_pybind11() -> bool:
     return False
 
 
+<<<<<<< HEAD
 @cache
 def rocm_path() -> Tuple[str, str]:
     """ROCm root path and HIPCC binary path as a tuple"""
@@ -159,6 +183,9 @@ def rocm_path() -> Tuple[str, str]:
 
 
 @cache
+=======
+@functools.lru_cache(maxsize=None)
+>>>>>>> upstream/release_v1.11
 def cuda_path() -> Tuple[str, str]:
     """CUDA root path and NVCC binary path as a tuple.
 
@@ -183,6 +210,11 @@ def cuda_path() -> Tuple[str, str]:
         raise FileNotFoundError(f"Could not find NVCC at {nvcc_bin}")
 
     return cuda_home, nvcc_bin
+
+
+@functools.lru_cache(maxsize=None)
+def cuda_archs() -> str:
+    return os.getenv("NVTE_CUDA_ARCHS", "70;80;89;90")
 
 
 def cuda_version() -> Tuple[int, ...]:
@@ -252,27 +284,48 @@ def get_frameworks() -> List[str]:
     return _frameworks
 
 
-def package_files(directory):
-    paths = []
-    for path, _, filenames in os.walk(directory):
-        path = Path(path)
-        for filename in filenames:
-            paths.append(str(path / filename).replace(f"{directory}/", ""))
-    return paths
+def copy_common_headers(
+    src_dir: Union[Path, str],
+    dst_dir: Union[Path, str],
+) -> None:
+    """Copy headers from core library
 
+    src_dir should be the transformer_engine directory within the root
+    Transformer Engine repository. All .h and .cuh files within
+    transformer_engine/common are copied into dst_dir. Relative paths
+    are preserved.
 
-def copy_common_headers(te_src, dst):
-    headers = te_src / "common"
-    for file_path in glob.glob(os.path.join(str(headers), "**", "*.h"), recursive=True):
-        new_path = os.path.join(dst, file_path[len(str(te_src)) + 1 :])
-        Path(new_path).parent.mkdir(exist_ok=True, parents=True)
-        shutil.copy(file_path, new_path)
+    """
+
+    # Find common header files in src dir
+    headers = glob.glob(
+        os.path.join(str(src_dir), "common", "**", "*.h"),
+        recursive=True,
+    )
+    headers.extend(
+        glob.glob(
+            os.path.join(str(src_dir), "common", "**", "*.cuh"),
+            recursive=True,
+        )
+    )
+    headers = [Path(path) for path in headers]
+
+    # Copy common header files to dst dir
+    src_dir = Path(src_dir)
+    dst_dir = Path(dst_dir)
+    for path in headers:
+        new_path = dst_dir / path.relative_to(src_dir)
+        new_path.parent.mkdir(exist_ok=True, parents=True)
+        shutil.copy(path, new_path)
 
 
 def install_and_import(package):
     """Install a package via pip (if not already installed) and import into globals."""
-    import importlib
+    main_package = package.split("[")[0]
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+    globals()[main_package] = importlib.import_module(main_package)
 
+<<<<<<< HEAD
     try:
         importlib.import_module(package)
     except ImportError:
@@ -330,3 +383,20 @@ def hipify(base_dir, src_dir, sources, include_dirs):
         # *never* absolute paths
         hipified_sources.add(os.path.relpath(fname, cwd))
     return list(hipified_sources)
+=======
+
+def uninstall_te_wheel_packages():
+    subprocess.check_call(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "uninstall",
+            "-y",
+            "transformer_engine_cu12",
+            "transformer_engine_torch",
+            "transformer_engine_paddle",
+            "transformer_engine_jax",
+        ]
+    )
+>>>>>>> upstream/release_v1.11

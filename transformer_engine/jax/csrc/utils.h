@@ -24,6 +24,7 @@ namespace transformer_engine {
 namespace jax {
 
 int GetCudaRuntimeVersion();
+size_t GetCudnnRuntimeVersion();
 int GetDeviceComputeCapability(int gpu_id);
 
 #ifndef USE_ROCM
@@ -42,6 +43,8 @@ void PopulateRngStateAsync(void *rng_state_dst,
                            size_t kv_max_seqlen,
                            cudaStream_t stream);
 #endif
+
+uint32_t GetRuntimeNumSegments(void *cu_seqlen, void *workspace, size_t len, cudaStream_t stream);
 
 class cudaDevicePropertiesManager {
  public:
