@@ -10,14 +10,14 @@
 |License|
 
 Transformer Engine On ROCm and AMDGPU
-=====================================
+*************************************
 
 This repository enables Transformer Engine (TE) on ROCm as a library to accelerate Transformer models on AMD GPUs, including using 8-bit floating point (FP8) precision on MI300 GPUs, to provide better performance with lower memory utilization in both training and inference. 
 One of the missions is to provide an alternative to accelerate Transformer models that were previously run on NVIDIA GPUs like Hopper with best efforts to make the migration frictionless. 
 Moreover, we add optimizations specific to AMD GPUs to get the best performance benefits out of AMD GPUs.
 
 Feature Support Status
-----------------------
+======================
 
 * Activation, cast, fused softmax, layernorm, rmsnorm, transpose, fused rope, fp8 recipe, HipRTC: fully supported
 * GEMM: partially supported with following input/output types: (fp32/fp32), (fp16/fp16), (bf16/bf16), (fp8, bf8/fp16, bf16, fp32)
@@ -26,7 +26,8 @@ Feature Support Status
 * Tensor Parallelism, Sequence Parallelism, Context Parallelism: supported
 
 Installation
-------------
+============
+
 Execute the following commands to install ROCm Transformer Engine from source on AMDGPUs:
 
 .. code-block:: bash
@@ -39,7 +40,6 @@ Execute the following commands to install ROCm Transformer Engine from source on
   export PYTORCH_ROCM_ARCH=gfx942 # CK fused attn only support MI200 and MI300 and fp8 features are only supported on MI300
   pip install .
 
-
 The default installation above will use rocblas in GEMM computation. The hipBlasLt alternative can be selected by setting the environment variable `NVTE_USE_HIPBLASLT` before the `pip install` as:
 
 .. code-block:: bash
@@ -49,7 +49,7 @@ The default installation above will use rocblas in GEMM computation. The hipBlas
 The hipBlasLt alternative has not yet supported all the GEMM configurations in the pytorch unit tests. When hipBlasLt is fully support, we will switch to hipBlasLt as the default path for GEMM computation.
 
 Test
-----
+====
 
 Framework Agnostic C++ library unittests
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -82,15 +82,11 @@ The following Pytorch integration pytests are supported:
   tests/pytorch/test_torch_save_load.py
   tests/pytorch/test_fused_rope.py
   tests/pytorch/test_deferred_init.py
+  tests/pytorch/fused_attn/test_fused_attn.py
+  tests/pytorch/fused_attn/test_fused_attn_with_cp.py
 
-Execute the following command to test them after a successfuly installation with Pytorch. 
-
-.. code-block:: bash
-
-  ROCBLAS_STREAM_ORDER_ALLOC=1 NVTE_FUSED_ATTN=0 NVTE_FLASH_ATTN=0 pytest tests/pytorch/<testname>
-
-`ROCBLAS_STREAM_ORDER_ALLOC=1` can be dropped when the hipGraph feature is fully supported in Pytorch on AMDGPUs or when hipBlasLt is used
-The other environmental variables are required since our ROCm Transformer Engine has not supported fused attention or flash attention yet. 
+Env `ROCBLAS_STREAM_ORDER_ALLOC=1` can be used when run tests in pytorch-rocblas configuration. 
+It can be dropped when the hipGraph feature is fully supported in Pytorch on AMDGPUs.
 
 Jax
 
@@ -104,16 +100,18 @@ The following jax pytests except for test_fused_attn.py are supported.
   tests/jax/test_helper.py
   tests/jax/test_praxis_layers.py
   tests/jax/test_sharding.py
+  tests/jax/test_fused_attn.py
   tests/jax/test_distributed_layernorm.py
   tests/jax/test_distributed_softmax.py
-
+  tests/jax/test_distributed_fused_attn.py
 
 Examples
---------
+========
+
 Pytorch
 ^^^^^^^
 MNIST with optional FP8
-
+~~~~~~~~~~~~~~~~~~~~~~~
 .. code-block:: bash
   
   cd examples/pytorch/mnist
@@ -122,7 +120,7 @@ MNIST with optional FP8
   python main.py --use-fp8  # FP8 + TransformerEngine for Linear layers
 
 Sort with minGPT
-
+~~~~~~~~~~~~~~~~
 .. code-block:: bash
   
   cd examples/pytorch/minGPT
@@ -133,7 +131,7 @@ Sort with minGPT
 Jax
 ^^^
 Flax
-
+~~~~
 .. code-block:: python
   
   import flax
@@ -176,7 +174,7 @@ Flax
         other_variables = te.update_fp8_metas(other_grads)
 
 MNIST
-
+~~~~~
 .. code-block:: bash
   
   cd examples/jax/mnist
@@ -185,7 +183,7 @@ MNIST
   python test_single_gpu_mnist.py --use-fp8 # Use `te.DenseGeneral` provided by Transformer Engine to train MNIST and enable FP8 training and evaluation.
 
 Encoder
-
+~~~~~~~
 .. code-block:: bash
   
   cd examples/jax/encoder
@@ -193,7 +191,7 @@ Encoder
   python test_single_gpu_encoder.py --use-fp8
 
 Features on ROCm Platform
--------------------------
+=========================
 
 GEMM tuning with hipBlasLt
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -219,7 +217,7 @@ Fused attention backends are chosen according to the match results between the a
 For the scenario that both backends are enabled and match the problem configuration, the CK backend will be chosen with higher priority. 
 
 Transformer Engine
-==================
+******************
 
 `Quickstart <#examples>`_ | `Installation <#installation>`_ | `User Guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/index.html>`_ | `Examples <https://github.com/NVIDIA/TransformerEngine/tree/main/examples>`_ | `FP8 Convergence <#fp8-convergence>`_ | `Integrations <#integrations>`_ | `Release notes <https://docs.nvidia.com/deeplearning/transformer-engine/release-notes/index.html>`_
 

@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -75,6 +77,9 @@ assert OPSET >= TRILU_OPSET
 ORT_CUSTOM_OPS_LIB = os.path.join(TESTS_DIR, "./libcustom_ort_fp8_qdq_ops.so")
 
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+if fp8_available and not os.path.exists(ORT_CUSTOM_OPS_LIB):
+    fp8_available = False
+    reason_for_no_fp8 = f"Unable to find {ORT_CUSTOM_OPS_LIB} needed for FP8"
 skip_FP8 = pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 
 supported_activations = ["gelu", "relu", "reglu", "geglu", "swiglu"]

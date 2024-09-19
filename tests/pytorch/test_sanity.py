@@ -4,6 +4,7 @@
 #
 # See LICENSE for license information.
 
+import os
 from dataclasses import dataclass
 from typing import Optional
 from contextlib import nullcontext
@@ -916,6 +917,7 @@ def test_gpt_cuda_graph(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamm
         use_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
         if use_fused_attn and (dtype in (torch.float16, torch.bfloat16)):
             pytest.skip("rocm fused attn backends does not support cuda graph")
+
     config = model_configs[model]
 
     if fp8_recipe is not None:
