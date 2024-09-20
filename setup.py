@@ -94,10 +94,14 @@ if ("pytorch" in frameworks()) and (importlib.util.find_spec("torch") is not Non
         use_cuda = False
         use_rocm = True
 elif ("jax" in frameworks()) and (importlib.util.find_spec("jax") is not None):
+    '''
     import jax
     if "rocm" in jax.lib.xla_bridge.get_backend().platform_version:
         use_cuda = False
         use_rocm = True
+    '''
+    use_cuda = False
+    use_rocm = True
 
 
 @lru_cache(maxsize=1)
