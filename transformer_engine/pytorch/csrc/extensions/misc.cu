@@ -7,14 +7,11 @@
  ************************************************************************/
 
 #include "extensions.h"
-#ifdef NVTE_WITH_USERBUFFERS
-#include "comm_gemm_overlap.h"
-#endif  // NVTE_WITH_USERBUFFERS
 
 #ifndef USE_ROCM
 size_t get_cublasLt_version() { return cublasLtGetVersion(); }
 
 size_t get_cudnn_version() { return cudnnGetVersion(); }
+#else
+void placeholder() {}
 #endif
-
-void placeholder() {}  // TODO(ksivamani) clean this up
