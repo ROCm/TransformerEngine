@@ -4371,7 +4371,7 @@ class FusedAttention(TransformerEngineBaseModule):
                         if not self.fp8_meta["recipe"].fp8_dpa:
                             self.fp8_meta["recipe"].fp8_dpa = True
                             forced_fp8_dpa = " (forced)"
-                    if fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_FP8:
+                    if not IS_HIP_EXTENSION and fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_FP8:
                         self.logger.debug(
                             "Running with fp8_recipe.fp8_mha=%s, "
                             "fp8_recipe.fp8_dpa=%s%s, and NVTE_FP8_DPA_BWD=%s",
@@ -5239,7 +5239,7 @@ class DotProductAttention(torch.nn.Module):
                 and self.device_compute_capability != (9, 0)
             ):
                 self.logger.debug("Disabling FusedAttention for determinism reasons")
-                    use_fused_attention = False
+                use_fused_attention = False
 
             # Select FusedAttention on sm90 and FlashAttention on others for performance
             if (
@@ -5292,9 +5292,12 @@ class DotProductAttention(torch.nn.Module):
             "context_parallel": context_parallel,
             "is_training": self.training,
             "transformer_engine_version": te.__version__,
-            "flash_attn_version": _flash_attn_version,
-            "cudnn_version": ".".join([str(i) for i in get_cudnn_version()]),
         }
+        if not IS_HIP_EXTENSION:
+            run_config.update({
+                "flash_attn_version": _flash_attn_version,
+                "cudnn_version": ".".join([str(i) for i in get_cudnn_version()]),
+            })
 
         if use_flash_attention:
             self.logger.info("Running with FlashAttention backend ")

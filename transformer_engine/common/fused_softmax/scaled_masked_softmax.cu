@@ -427,7 +427,7 @@ __global__ void scaled_masked_softmax_warp_backward(output_t *gradInput, const i
 }
 
 template <typename input_t, typename output_t, typename acc_t>
-void dispatch_scaled_softmax_forward(output_t *dst, const input_t *src, const input_t scale,
+void dispatch_scaled_softmax_forward(output_t *dst, const input_t *src, const acc_t scale,
                                      int query_seq_len, int key_seq_len, int batches,
                                      int attn_heads, cudaStream_t stream) {
   NVTE_CHECK(key_seq_len >= 0 && key_seq_len <= 16384, "Unsupported shape.");
@@ -524,7 +524,7 @@ void dispatch_scaled_softmax_forward(output_t *dst, const input_t *src, const in
 
 template <typename input_t, typename output_t, typename acc_t>
 void dispatch_scaled_masked_softmax_forward(output_t *dst, const input_t *src, const uint8_t *mask,
-                                            const input_t scale, int query_seq_len, int key_seq_len,
+                                            const acc_t scale, int query_seq_len, int key_seq_len,
                                             int batches, int attn_heads, int pad_batches,
                                             cudaStream_t stream) {
   NVTE_CHECK(key_seq_len >= 0 && key_seq_len <= 16384, "Unsupported shape.");

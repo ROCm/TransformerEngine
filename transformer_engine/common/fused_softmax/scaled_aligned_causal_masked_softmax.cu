@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -92,7 +94,7 @@ struct Max {
 template <typename T>
 __device__ __forceinline__ T WARP_SHFL_XOR_NATIVE(T value, int laneMask, int width = warpSize,
                                                   unsigned int mask = 0xffffffff) {
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef __HIP_PLATFORM_AMD__
     return __shfl_xor(value, laneMask, width);
 #else
 #if CUDA_VERSION >= 9000
@@ -215,7 +217,7 @@ __global__ void scaled_aligned_causal_masked_softmax_warp_forward(output_t *dst,
   }
   warp_reduce<acc_t, WARP_ROWS, WARP_WIDTH, Add>(sum);
 
-  output_t out[ELEMENTS_PER_LDG_STG]{0.0f};
+  output_t out[ELEMENTS_PER_LDG_STG] { output_t(0.0f) };
 // store result
 #pragma unroll
   for (int w = 0; w < WARP_ROWS; ++w) {
@@ -426,7 +428,7 @@ struct CompileTimeLoopBackward<input_t, output_t, acc_t, MIN_POWER> {
 
 template <typename input_t, typename output_t, typename acc_t>
 void dispatch_scaled_aligned_causal_masked_softmax_forward(output_t *dst, const input_t *src,
-                                                           const input_t scale, int query_seq_len,
+                                                           const acc_t scale, int query_seq_len,
                                                            int key_seq_len, int batches,
                                                            int attn_heads, cudaStream_t stream) {
   NVTE_CHECK(key_seq_len >= 0 && key_seq_len <= 16384, "Unsupported shape.");

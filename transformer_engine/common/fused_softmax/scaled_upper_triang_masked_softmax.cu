@@ -341,7 +341,7 @@ __global__ void scaled_upper_triang_masked_softmax_warp_backward(output_t *gradI
 
 template <typename input_t, typename output_t, typename acc_t>
 void dispatch_scaled_upper_triang_masked_softmax_forward(output_t *dst, const input_t *src,
-                                                         const input_t scale, int softmax_elements,
+                                                         const acc_t scale, int softmax_elements,
                                                          int softmax_elements_stride,
                                                          int attn_batches, cudaStream_t stream) {
   NVTE_CHECK(softmax_elements >= 0 && softmax_elements <= 16384, "Unsupported shape.");

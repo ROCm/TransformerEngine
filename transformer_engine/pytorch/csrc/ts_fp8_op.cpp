@@ -4,13 +4,14 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include "extensions.h"
+
 #include <cuda.h>
 #include <cuda_fp8.h>
 #include <torch/script.h>
 
 #include "common/util/cuda_runtime.h"
 #include "common/util/system.h"
-#include "extensions.h"
 
 namespace {
 transformer_engine::DType reverse_map_dtype(int64_t dtype) {
