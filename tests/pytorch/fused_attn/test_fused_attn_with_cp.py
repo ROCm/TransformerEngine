@@ -7,23 +7,16 @@
 import os
 import pytest
 import subprocess
-<<<<<<< HEAD
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
-from test_fused_attn import (
-    ModelConfig,
-    _is_flash_attention_2_available,
-=======
 from test_fused_attn import ModelConfig
 from transformer_engine.pytorch.attention import (
     _flash_attn_2_plus,
     _flash_attn_2_3_plus,
->>>>>>> upstream/release_v1.11
 )
-if not IS_HIP_EXTENSION:
-    from transformer_engine.pytorch.utils import (
-        get_device_compute_capability,
-        get_cudnn_version,
-    )
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+from transformer_engine.pytorch.utils import (
+    get_device_compute_capability,
+    get_cudnn_version,
+)
 
 model_configs_flash_attn = {
     #   test:             b,  h, hg,   d,   sq,  skv,   p,     mask,      bias
@@ -56,15 +49,9 @@ def get_bash_arguments(**kwargs):
     return args
 
 
-<<<<<<< HEAD
-@pytest.mark.skipif(not _is_flash_attention_2_available(), reason="Flash-attn 2.0+ is required.")
-@pytest.mark.skipif(IS_HIP_EXTENSION or get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
-@pytest.mark.parametrize("dtype", ['bf16', 'fp16'])
-=======
 @pytest.mark.skipif(not _flash_attn_2_plus, reason="Flash-attn 2.0+ is required.")
-@pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
+@pytest.mark.skipif(IS_HIP_EXTENSION or get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", ["bf16", "fp16"])
->>>>>>> upstream/release_v1.11
 @pytest.mark.parametrize("model", model_configs_flash_attn.keys())
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
 @pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a"])
@@ -97,59 +84,41 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
         check=True,
     )
 
-#TODO: release GQA tests once CK/AOTriton support GQA/MQA
+# TE CK does not support bias or sliding window yet
 if IS_HIP_EXTENSION:
     model_configs_fused_attn = {
-        #   test:             b,  h, hg,   d,    sq,   skv,   p,      mask,      bias
-        "cp_1_0": ModelConfig(2, 12, 12, 128,  4096,  4096, 0.0,  "causal", "no_bias"), # MHA
-        "cp_1_1": ModelConfig(2, 12, 12, 128,  4096,  4096, 0.0, "no_mask", "no_bias"), # MHA
+        #   test:             b,  h, hg,   d,   sq,  skv,   p,     mask,      bias
+        "cp_1_0": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias"),  # MHA
+        "cp_1_1": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "no_bias"),  # MHA
+        "cp_2_0": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "causal", "no_bias"),  # GQA
+        "cp_2_1": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "no_mask", "no_bias"),  # GQA
     }
 else:
     model_configs_fused_attn = {
-        #   test:             b,  h, hg,   d,   sq,  skv,   p,      mask,              bias
+        #   test:             b,  h, hg,   d,   sq,  skv,   p,     mask,      bias
         "cp_1_0": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias"),  # MHA
         "cp_1_1": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "no_bias"),  # MHA
         "cp_1_2": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "causal", "post_scale_bias"),  # MHA
         "cp_1_3": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "post_scale_bias"),  # MHA
-        "cp_2_0": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "causal", "no_bias"),  # GQA
-        "cp_2_1": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "no_mask", "no_bias"),  # GQA
-        "cp_2_2": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "causal", "post_scale_bias"),  # GQA
-        "cp_2_3": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "no_mask", "post_scale_bias"),  # GQA
+        "cp_1_4": ModelConfig(
+            2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias", window_size=(512, 0)
+        ),  # MHA
+        "cp_2_0": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "causal", "no_bias"),  # GQA
+        "cp_2_1": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "no_mask", "no_bias"),  # GQA
+        "cp_2_2": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "causal", "post_scale_bias"),  # GQA
+        "cp_2_3": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "no_mask", "post_scale_bias"),  # GQA
+        "cp_2_4": ModelConfig(
+            2, 12, 2, 128, 4096, 4096, 0.0, "causal", "no_bias", window_size=(512, 0)
+        ),  # GQA
     }
 
-<<<<<<< HEAD
-@pytest.mark.skipif(not IS_HIP_EXTENSION and get_cudnn_version() < (8,9,7), reason="cuDNN 8.9.7+ is required for NVTE.")
-@pytest.mark.skipif(not IS_HIP_EXTENSION and get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
-@pytest.mark.parametrize("dtype", ['bf16', 'fp16'])
-@pytest.mark.parametrize("model", model_configs_fused_attn.keys())
-@pytest.mark.parametrize("qkv_format", ['bshd', 'sbhd'] if IS_HIP_EXTENSION else ['bshd', 'sbhd', 'thd'])
-def test_cp_with_fused_attention(dtype, model, qkv_format):
-=======
-model_configs_fused_attn = {
-    #   test:             b,  h, hg,   d,   sq,  skv,   p,     mask,      bias
-    "cp_1_0": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias"),  # MHA
-    "cp_1_1": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "no_bias"),  # MHA
-    "cp_1_2": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "causal", "post_scale_bias"),  # MHA
-    "cp_1_3": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "post_scale_bias"),  # MHA
-    "cp_1_4": ModelConfig(
-        2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias", window_size=(512, 0)
-    ),  # MHA
-    "cp_2_0": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "causal", "no_bias"),  # GQA
-    "cp_2_1": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "no_mask", "no_bias"),  # GQA
-    "cp_2_2": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "causal", "post_scale_bias"),  # GQA
-    "cp_2_3": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "no_mask", "post_scale_bias"),  # GQA
-    "cp_2_4": ModelConfig(
-        2, 12, 2, 128, 4096, 4096, 0.0, "causal", "no_bias", window_size=(512, 0)
-    ),  # GQA
-}
-
-
+#TODO: release all_gather after CK support bottom_right mask
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
-@pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
-@pytest.mark.parametrize("dtype", ["bf16", "fp16", "fp8"])
+@pytest.mark.skipif(not IS_HIP_EXTENSION and get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
+@pytest.mark.parametrize("dtype", ["bf16", "fp16", "fp8"] if not IS_HIP_EXTENSION else ["bf16", "fp16"])
 @pytest.mark.parametrize("model", model_configs_fused_attn.keys())
-@pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
-@pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a"])
+@pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"] if not IS_HIP_EXTENSION else ["bshd", "sbhd"])
+@pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a"] if not IS_HIP_EXTENSION else ["p2p", "a2a"])
 def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type):
     if qkv_format == "thd" and get_device_compute_capability() < (9, 0):
         pytest.skip("THD format is only supported on sm90+!")
@@ -189,7 +158,6 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type):
             f" num_gqa_groups ({config.num_gqa_groups}) to be divisible by cp_size (2)!"
         )
 
->>>>>>> upstream/release_v1.11
     subprocess.run(
         get_bash_arguments(
             dtype=dtype,

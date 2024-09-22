@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -23,6 +25,8 @@ import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops._common import is_float8_tensor
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine_torch as tex
+
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -651,7 +655,7 @@ def _test_fp8_scale_update(
         """Expected absmax and FP8 scale"""
         amax = ref.abs().amax()
         max_val = {
-            "forward": 448.0,
+            "forward": 448.0 if not IS_HIP_EXTENSION else 240.0,
             "backward": 57344.0,
         }[stage]
         scale = (max_val / amax) / (2**margin)

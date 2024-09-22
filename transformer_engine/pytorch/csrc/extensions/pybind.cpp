@@ -177,8 +177,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("get_cudnn_version", &get_cudnn_version, "Get cuDNN version",
         py::call_guard<py::gil_scoped_release>());
+#endif
   m.attr("_num_cublas_streams") = py::int_(transformer_engine::num_streams);
 
+#ifndef USE_ROCM
   // Support THD format for Context Parallel
   m.def("thd_read_half_tensor", &thd_read_half_tensor,
         "Read the first half(half_idx=0) or the second half(half_idx=1) of each sequence in a THD "
@@ -235,15 +237,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def_readwrite("scale_inv", &transformer_engine::FP8TensorMeta::scale_inv)
       .def_readwrite("amax_history", &transformer_engine::FP8TensorMeta::amax_history);
 
-<<<<<<< HEAD
-	// TODO: Do we need to guard it out for ROCm?
 #ifndef USE_ROCM
-  // Communication functions to initialize Userbuffers communicators
-  // Note: Callbacks are not called, so safe to release GIL.
-  m.def("set_ubuf_bootstrap_callbacks", &ubuf::set_ubuf_bootstrap_callbacks,
-=======
   m.def("device_supports_multicast", &ubuf::device_supports_multicast,
->>>>>>> upstream/release_v1.11
         py::call_guard<py::gil_scoped_release>());
 
   m.def("ubuf_built_with_mpi", &ubuf::ubuf_built_with_mpi,

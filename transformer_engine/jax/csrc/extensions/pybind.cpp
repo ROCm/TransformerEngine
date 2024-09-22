@@ -73,11 +73,8 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_fused_attn_backend", &GetFusedAttnBackend);
 #ifndef USE_ROCM
   m.def("get_cuda_version", &GetCudaRuntimeVersion);
-<<<<<<< HEAD
-#endif
-=======
   m.def("get_cudnn_version", &GetCudnnRuntimeVersion);
->>>>>>> upstream/release_v1.11
+#endif
   m.def("get_device_compute_capability", &GetDeviceComputeCapability);
 #ifndef USE_ROCM
   m.def("get_cublasLt_version", &cublasLtGetVersion);

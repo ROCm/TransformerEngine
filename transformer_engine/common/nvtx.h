@@ -7,8 +7,11 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_NVTX_H_
 #define TRANSFORMER_ENGINE_COMMON_NVTX_H_
 
+#ifndef __HIP_PLATFORM_AMD__
 #include <nvtx3/nvToolsExt.h>
-
+#else
+#include <nvToolsExt.h>
+#endif
 #include <string>
 
 namespace transformer_engine::nvtx {

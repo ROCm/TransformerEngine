@@ -268,24 +268,15 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             head_dim,
         ).get_fused_attn_backend()
 
-<<<<<<< HEAD
         if not is_hip_extension():
             if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
                 softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, kv_max_seqlen)
                 softmax_dtype = q_dtype
             elif backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-                softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
+                softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, config.max_segments_per_seq)
                 softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
             else:
                 raise ValueError(f'Unsupported {backend=}')
-=======
-        if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
-            softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, kv_max_seqlen)
-            softmax_dtype = q_dtype
-        elif backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-            softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, config.max_segments_per_seq)
-            softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
->>>>>>> upstream/release_v1.11
         else:
             if backend in [NVTE_Fused_Attn_Backend.NVTE_AOTriton, NVTE_Fused_Attn_Backend.NVTE_CK]:
                 softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)

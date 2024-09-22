@@ -919,7 +919,6 @@ std::vector<at::Tensor> fused_attn_fwd(
       rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
 #ifndef USE_ROCM
   at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
-<<<<<<< HEAD
 #else
   const transformer_engine::Tensor *input_cu_seqlens_q = reinterpret_cast<const transformer_engine::Tensor*>(te_cu_seqlens_q.data());
   size_t batch_size = input_cu_seqlens_q->data.shape[0]-1;
@@ -928,11 +927,7 @@ std::vector<at::Tensor> fused_attn_fwd(
   size_t num_attn_heads = input_Q->data.shape[ndim-2];
   at::PhiloxCudaState philox_args = init_philox_state(gen, batch_size*num_attn_heads*max_seqlen_q*max_seqlen_kv);
 #endif
-  auto options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
-  auto rng_state = torch::empty({2}, options);
-=======
   auto rng_state = torch::empty({2}, options.dtype(torch::kInt64));
->>>>>>> upstream/release_v1.11
   unpack<<<1, 1, 0, at::cuda::getCurrentCUDAStream()>>>(
       philox_args, static_cast<int64_t *>(rng_state.data_ptr()));
   auto te_rng_state = makeTransformerEngineTensor(rng_state);

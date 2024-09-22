@@ -69,7 +69,12 @@ __global__ void moe_unpermute_kernel(const T *input, T *unpermuted_output, const
     if (source_row != -1) {
       const T *source_row_ptr = input + source_row * num_cols;
 
+#ifndef __HIP_PLATFORM_AMD__
       frag_load_store = __ldlu(reinterpret_cast<const float4 *>(source_row_ptr + i));
+#else
+      //TODO: hip does not support ptx operation __ldlu
+      frag_load_store = *(reinterpret_cast<const float4 *>(source_row_ptr + i));
+#endif
 
       for (int e = 0; e < kElementsPerAccess; e++) {
         frag_sum[e] = TCompute(frag_load_store_ptr[e]);
@@ -93,7 +98,12 @@ __global__ void moe_unpermute_kernel(const T *input, T *unpermuted_output, const
 
       const T *source_row_ptr = input + source_row * num_cols;
 
+#ifndef __HIP_PLATFORM_AMD__
       frag_load_store = __ldlu(reinterpret_cast<const float4 *>(source_row_ptr + i));
+#else
+      //TODO: hip does not support ptx operation __ldlu
+      frag_load_store = *(reinterpret_cast<const float4 *>(source_row_ptr + i));
+#endif
 
       for (int e = 0; e < kElementsPerAccess; e++) {
         frag_elem[e] = TCompute(frag_load_store_ptr[e]);
@@ -113,7 +123,7 @@ __global__ void moe_unpermute_kernel(const T *input, T *unpermuted_output, const
     T *dest_row_ptr = unpermuted_output + source_token * num_cols;
 
     for (int e = 0; e < kElementsPerAccess; e++) {
-      if constexpr ((std::is_same_v<T, __nv_fp8_e4m3> || std::is_same_v<T, __nv_fp8_e5m2>) &&
+      if constexpr ((std::is_same_v<T, transformer_engine::fp8e4m3> || std::is_same_v<T, transformer_engine::fp8e5m2>) &&
                     (!hasProb)) {
         frag_sum[e] = frag_sum[e] / TCompute(topK);
       }
@@ -160,7 +170,11 @@ __global__ void moe_permute_kernel(const T *input_bwd, const T *input_fwd, T *ac
   for (int i = tid * kElementsPerAccess; i < num_cols; i += blockDim.x * kElementsPerAccess) {
     TCompute frag_src[kElementsPerAccess];
 
+#ifndef __HIP_PLATFORM_AMD__
     frag_load_store = __ldlu(reinterpret_cast<const float4 *>(source_row_ptr + i));
+#else
+    frag_load_store = *(reinterpret_cast<const float4 *>(source_row_ptr + i));
+#endif
 
     for (int e = 0; e < kElementsPerAccess; e++) frag_src[e] = TCompute(frag_load_store_ptr[e]);
 
@@ -190,7 +204,11 @@ __global__ void moe_permute_kernel(const T *input_bwd, const T *input_fwd, T *ac
           // Inner product calculation for prob_grad in unpermute bwd
           const T *input_fwd_ptr = input_fwd + dest_row * num_cols;
 
+#ifndef __HIP_PLATFORM_AMD__
           frag_load_store = __ldlu(reinterpret_cast<const float4 *>(input_fwd_ptr + i));
+#else
+          frag_load_store = *(reinterpret_cast<const float4 *>(input_fwd_ptr + i));
+#endif
 
           TCompute frag_input_fwd[kElementsPerAccess];
           for (int e = 0; e < kElementsPerAccess; e++)
@@ -209,7 +227,11 @@ __global__ void moe_permute_kernel(const T *input_bwd, const T *input_fwd, T *ac
       if (k == topK) break;
       // Warp-level reduction
       for (int mask = 16; mask > 0; mask /= 2) {
+#ifdef __HIP_PLATFORM_AMD__
+        accum[k] = accum[k] + __shfl_xor(accum[k], mask, 32);
+#else
         accum[k] = accum[k] + __shfl_xor_sync(0xffffffff, accum[k], mask, 32);
+#endif
       }
     }
 
@@ -227,8 +249,8 @@ void nvte_permute_launcher(const T *input, T *output, const int *sorted_row_id, 
                            const float *prob, float *prob_grad, const T *input_fwd,
                            const int num_rows, const int topK, const int num_cols,
                            const int num_out_tokens, cudaStream_t stream) {
-  using TCompute = typename std::conditional<(std::is_same<T, __nv_fp8_e5m2>::value ||
-                                              std::is_same<T, __nv_fp8_e4m3>::value),
+  using TCompute = typename std::conditional<(std::is_same<T, transformer_engine::fp8e5m2>::value ||
+                                              std::is_same<T, transformer_engine::fp8e4m3>::value),
                                              half, T>::type;
 
   static constexpr int kElementsPerAccess = 16 / sizeof(T);
@@ -288,8 +310,8 @@ template <typename T>
 void nvte_unpermute_launcher(const T *input, T *output, int *row_id_map, const float *prob,
                              const int num_rows, const int topK, const int num_cols,
                              cudaStream_t stream) {
-  using TCompute = typename std::conditional<(std::is_same<T, __nv_fp8_e5m2>::value ||
-                                              std::is_same<T, __nv_fp8_e4m3>::value),
+  using TCompute = typename std::conditional<(std::is_same<T, transformer_engine::fp8e5m2>::value ||
+                                              std::is_same<T, transformer_engine::fp8e4m3>::value),
                                              half, T>::type;
 
   static constexpr int kElementsPerAccess = 16 / sizeof(T);

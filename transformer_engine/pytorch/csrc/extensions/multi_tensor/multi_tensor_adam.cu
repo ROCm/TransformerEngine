@@ -28,8 +28,13 @@ typedef enum {
 } adamMode_t;
 
 using MATH_T = float;
+#ifndef __HIP_PLATFORM_AMD__
 using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
+#else
+using fp8e4m3 = hip_f8<hip_f8_type::fp8>;
+using fp8e5m2 = hip_f8<hip_f8_type::bf8>;
+#endif
 using transformer_engine::DType;
 
 template <typename T>

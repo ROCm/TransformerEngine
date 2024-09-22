@@ -8,14 +8,11 @@ import functools
 import logging
 import math
 import os
-<<<<<<< HEAD
-from typing import Any, Dict, List, Tuple, Union
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
-=======
 from importlib.metadata import version
 from typing import Any, Dict, List, Tuple, Union, Optional
 from contextlib import contextmanager
->>>>>>> upstream/release_v1.11
+
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import pytest
 import torch
@@ -116,143 +113,6 @@ class ModelConfig:
         self.bias_shape = bias_shape
         self.window_size = window_size
 
-
-<<<<<<< HEAD
-if not IS_HIP_EXTENSION:
-    def _is_fused_attention_supported(
-        config: ModelConfig,
-        dtype: torch.dtype,
-        qkv_layout: str = "sbh3d",
-    ) -> Tuple[bool, NVTE_Fused_Attn_Backend]:
-        """Check if FusedAttention supports a model configuration"""
-        backends = []
-        os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
-        backend = tex.get_fused_attn_backend(
-            TE_DType[dtype],
-            TE_DType[dtype],
-            QKVLayout[qkv_layout],
-            AttnBiasType[config.attn_bias_type],
-            AttnMaskType[config.attn_mask_type],
-            config.dropout_p,
-            config.num_heads,
-            config.num_gqa_groups,
-            config.max_seqlen_q,
-            config.max_seqlen_kv,
-            config.head_dim,
-        )
-        if backend == FusedAttnBackend["FP8"]:
-            backends.append(backend)
-            return True, backends
-        if backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
-            backends.append(backend)
-            return True, backends
-        if backend == FusedAttnBackend["F16_max512_seqlen"]:
-            backends.append(backend)
-            os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
-            backend = tex.get_fused_attn_backend(
-                TE_DType[dtype],
-                TE_DType[dtype],
-                QKVLayout[qkv_layout],
-                AttnBiasType[config.attn_bias_type],
-                AttnMaskType[config.attn_mask_type],
-                config.dropout_p,
-                config.num_heads,
-                config.num_gqa_groups,
-                config.max_seqlen_q,
-                config.max_seqlen_kv,
-                config.head_dim,
-            )
-            if backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
-                backends.append(backend)
-            return True, backends
-        return False, backends
-else:
-    def _is_fused_attention_supported(
-        config: ModelConfig,
-        dtype: torch.dtype,
-        qkv_layout: str = "sbh3d",
-    ) -> Tuple[bool, NVTE_Fused_Attn_Backend]:
-        backend = tex.get_fused_attn_backend(
-            TE_DType[dtype],
-            TE_DType[dtype],
-            QKVLayout[qkv_layout],
-            AttnBiasType[config.attn_bias_type],
-            AttnMaskType[config.attn_mask_type],
-            config.dropout_p,
-            config.num_heads,
-            config.num_gqa_groups,
-            config.max_seqlen_q,
-            config.max_seqlen_kv,
-            config.head_dim,
-        )
-        if backend != FusedAttnBackend["No_Backend"]:
-            return True, [backend]
-        else:
-            return False, []
-
-
-@functools.cache
-def _is_flash_attention_2_available() -> bool:
-    """Check if flash-attn 2.0+ is available"""
-    if not IS_HIP_EXTENSION:
-        Version = packaging.version.Version
-        return Version(version("flash-attn")) >= Version("2")
-    else:
-        return False
-
-
-@functools.cache
-def _is_flash_attention_2_1() -> bool:
-    """Check if flash-attn 2.1+ is available"""
-    if not IS_HIP_EXTENSION:
-        Version = packaging.version.Version
-        return Version(version("flash-attn")) >= Version("2.1")
-    else:
-        return False
-
-
-@functools.cache
-def _is_flash_attention_2_3() -> bool:
-    """Check if flash-attn 2.3+ is available"""
-    if not IS_HIP_EXTENSION:
-        Version = packaging.version.Version
-        return Version(version("flash-attn")) >= Version("2.3")
-    else:
-        return False
-
-
-def _is_flash_attention_supported(config: ModelConfig) -> bool:
-    """Check if FlashAttention supports a model configuration"""
-    if not IS_HIP_EXTENSION:
-        if get_device_compute_capability() < (8, 0):
-            return False
-        if config.attn_bias_type not in ["no_bias", "alibi"]:
-            return False
-        if config.num_heads != config.num_gqa_groups and not _is_flash_attention_2_available():
-            return False
-        if "causal" in config.attn_mask_type and config.attn_type == "cross":
-            if _is_flash_attention_2_1():
-                # FAv2.1 implements causal mask for cross attention differently
-                # https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag
-                return False
-        return True
-    else:
-        return False
-
-
-def _is_unfused_attention_supported(
-    config: ModelConfig,
-    qkv_format: str,
-) -> bool:
-    """Check if UnfusedDotProductAttention supports a model configuration"""
-    if "padding" in config.attn_mask_type:
-        return False
-    if "causal" in config.attn_mask_type and config.attn_type == "cross":
-        return False
-    if qkv_format == "thd":
-        return False
-    return True
-=======
 @contextmanager
 def logging_context(highest_level=logging.WARNING):
     previous_level = logging.root.manager.disable
@@ -332,17 +192,18 @@ def _get_attention_backends(
             attention_params
         )
         return available_backends, fused_attention_backend
-
-    backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
+    if not IS_HIP_EXTENSION: 
+        backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
+    else:
+        backends = {0: "AOTriton", 1: "CK"}
     with logging_context():
-        for i in range(3):
+        for i in range(len(backends)):
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
             _attention_backends["backend_selection_requires_update"] = True
             available_backends, fused_attention_backend = test()
             if fused_attention_backend == FusedAttnBackend[backends[i]]:
                 fused_attn_backends.append(fused_attention_backend)
     return available_backends, fused_attn_backends
->>>>>>> upstream/release_v1.11
 
 
 model_configs_base = {
@@ -390,22 +251,8 @@ def test_dot_product_attention(
     if "3" in qkv_layout and config.attn_type == "cross":
         pytest.skip("No need to test this layout for cross attention")
 
-<<<<<<< HEAD
-    # Skip if only unfused backend is supported
-    qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
-    unfused_attn_supported = _is_unfused_attention_supported(config, qkv_format)
-    if not IS_HIP_EXTENSION:
-        if config.max_seqlen_q <= 512 and config.max_seqlen_kv <= 512:
-            os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
-    fused_attn_supported, fused_attn_backend = _is_fused_attention_supported(
-        config,
-        dtype,
-        qkv_layout=qkv_layout,
-    )
-=======
     # Test backend availability
     window_size = (-1, -1)
->>>>>>> upstream/release_v1.11
     if swa:
         window_size = tuple(torch.randint(0, config.max_seqlen_kv, [2], dtype=torch.int32).tolist())
     config.window_size = check_set_window_size(config.attn_mask_type, window_size)
@@ -1196,26 +1043,15 @@ def test_transformer_layer(
     tols = dict(atol=5e-2, rtol=5e-2)
     workspace_opt = True
 
-<<<<<<< HEAD
-    # Skip if only unfused backend is supported
-    if config.max_seqlen_q <= 512 and config.max_seqlen_kv <= 512:
-        os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
-
     qkv_layout="sbh3d" if fused_qkv_params else "sb3hd"
     # override the qkv_layout in mqa gqa mode in ROCm TE
     if IS_HIP_EXTENSION and model_configs[model].num_gqa_groups != model_configs[model].num_heads:
         qkv_layout = "sbhd_sbhd_sbhd"
-    fused_attn_supported, fused_attn_backend = _is_fused_attention_supported(
-        config,
-        dtype,
-        qkv_layout=qkv_layout,
-=======
     # Test backend availability
     available_backends, fused_attn_backends = _get_attention_backends(
         config,
         qkv_dtype=dtype,
-        qkv_layout="sbh3d" if fused_qkv_params else "sb3hd",
->>>>>>> upstream/release_v1.11
+        qkv_layout=qkv_layout,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
@@ -1517,19 +1353,14 @@ def _error(a, b, name_a, name_b, atol, rtol, rmse_tol):
 @pytest.mark.parametrize("qkv_format", qkv_format_fp8_vs_f16)
 @pytest.mark.parametrize("input_layernorm", [True, False])
 @pytest.mark.parametrize("fp8_dpa_bwd", [True, False])
-<<<<<<< HEAD
-def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd):
-    if IS_HIP_EXTENSION:
-        pytest.skip("fp8 fused attention not supported in ROCm")
-    os.environ["NVTE_FLASH_ATTN"] = "0"
-    os.environ["NVTE_FUSED_ATTN"] = "1"
-=======
 @pytest.mark.parametrize("RoPE", [True, False])
 @pytest.mark.parametrize("is_training", [True, False])
 def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, RoPE, is_training):
+    if IS_HIP_EXTENSION:
+        pytest.skip("fp8 fused attention not supported in ROCm")
+
     os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
->>>>>>> upstream/release_v1.11
     config = model_configs_fp8_vs_f16[model]
 
     if _flash_attn_3_plus and not is_training:
@@ -1703,14 +1534,11 @@ def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm, RoP
 @pytest.mark.parametrize("model", model_configs_fp8_vs_f16.keys())
 @pytest.mark.parametrize("qkv_layout", qkv_layout_fp8_vs_f16)
 @pytest.mark.parametrize("fp8_dpa_bwd", [True, False])
-<<<<<<< HEAD
-def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd):
-    if IS_HIP_EXTENSION:
-        pytest.skip("fp8 fused attention not supported in ROCm")
-=======
 @pytest.mark.parametrize("is_training", [True, False])
 def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
->>>>>>> upstream/release_v1.11
+    if IS_HIP_EXTENSION:
+        pytest.skip("fp8 fused attention not supported in ROCm")
+
     config = model_configs_fp8_vs_f16[model]
 
     if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:

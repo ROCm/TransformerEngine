@@ -163,8 +163,7 @@ def found_pybind11() -> bool:
     return False
 
 
-<<<<<<< HEAD
-@cache
+@functools.lru_cache(maxsize=None)
 def rocm_path() -> Tuple[str, str]:
     """ROCm root path and HIPCC binary path as a tuple"""
     """If ROCm installation is not specified, use default /opt/rocm path"""
@@ -182,10 +181,7 @@ def rocm_path() -> Tuple[str, str]:
     return rocm_home, hipcc_bin
 
 
-@cache
-=======
 @functools.lru_cache(maxsize=None)
->>>>>>> upstream/release_v1.11
 def cuda_path() -> Tuple[str, str]:
     """CUDA root path and NVCC binary path as a tuple.
 
@@ -232,7 +228,7 @@ def cuda_version() -> Tuple[int, ...]:
     return tuple(int(v) for v in version)
 
 
-@cache
+@functools.lru_cache(maxsize=None)
 def get_frameworks() -> List[str]:
     """DL frameworks to build support for"""
     _frameworks: List[str] = []
@@ -325,16 +321,23 @@ def install_and_import(package):
     subprocess.check_call([sys.executable, "-m", "pip", "install", package])
     globals()[main_package] = importlib.import_module(main_package)
 
-<<<<<<< HEAD
-    try:
-        importlib.import_module(package)
-    except ImportError:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-    finally:
-        globals()[package] = importlib.import_module(package)
 
+def uninstall_te_wheel_packages():
+    subprocess.check_call(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "uninstall",
+            "-y",
+            "transformer_engine_cu12",
+            "transformer_engine_torch",
+            "transformer_engine_paddle",
+            "transformer_engine_jax",
+        ]
+    )
 
-@cache
+@functools.lru_cache(maxsize=None)
 def rocm_build() -> bool:
     try:
         if "pytorch" in get_frameworks():
@@ -383,20 +386,5 @@ def hipify(base_dir, src_dir, sources, include_dirs):
         # *never* absolute paths
         hipified_sources.add(os.path.relpath(fname, cwd))
     return list(hipified_sources)
-=======
 
-def uninstall_te_wheel_packages():
-    subprocess.check_call(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "uninstall",
-            "-y",
-            "transformer_engine_cu12",
-            "transformer_engine_torch",
-            "transformer_engine_paddle",
-            "transformer_engine_jax",
-        ]
-    )
->>>>>>> upstream/release_v1.11
+

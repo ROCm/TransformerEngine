@@ -25,7 +25,22 @@ bool is_ck_backend_supported(
   float dropout,
   size_t num_attn_heads, size_t num_gqa_groups,
   size_t max_seqlen_q, size_t max_seqlen_kv,
-  size_t head_dim) {
+  size_t head_dim_qk, 
+  size_t head_dim_v, 
+  int64_t window_size_left, 
+  int64_t window_size_right) {
+  
+  //TODO: release after CK support support Multi-latent attention
+  if(head_dim_qk != head_dim_v){
+    return false;
+  }
+
+  //TODO: release after TE integrates swa
+  bool is_no_mask_window_size= window_size_left == -1 && window_size_right == -1;
+  bool is_causal_mask_window_size = window_size_left ==-1 && window_size_right ==0;
+  if(!(is_no_mask_window_size || is_causal_mask_window_size)){
+    return false;
+  }
 
   if(num_attn_heads%num_gqa_groups != 0){
     return false;

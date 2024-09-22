@@ -32,11 +32,7 @@ if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or os.path.isdir(build_tools_
 
 
 from build_tools.build_ext import get_build_ext
-<<<<<<< HEAD
-from build_tools.utils import rocm_build, package_files, copy_common_headers
-=======
-from build_tools.utils import copy_common_headers
->>>>>>> upstream/release_v1.11
+from build_tools.utils import rocm_build, copy_common_headers
 from build_tools.te_version import te_version
 from build_tools.pytorch import setup_pytorch_extension
 
@@ -62,19 +58,8 @@ if __name__ == "__main__":
         description="Transformer acceleration library - Torch Lib",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
-<<<<<<< HEAD
-        install_requires=[] if rocm_build() else ["torch", "flash-attn>=2.0.6,<=2.4.2,!=2.0.9,!=2.1.0"],
-        tests_require=[] if rocm_build() else ["numpy", "onnxruntime", "torchvision"],
-        include_package_data=True,
-        package_data={
-            "csrc": package_files("csrc"),
-            common_headers_dir: package_files(common_headers_dir),
-            "build_tools": package_files("build_tools"),
-        },
-=======
-        install_requires=["torch", "flash-attn>=2.0.6,<=2.6.3,!=2.0.9,!=2.1.0"],
-        tests_require=["numpy", "onnxruntime", "torchvision"],
->>>>>>> upstream/release_v1.11
+        install_requires=[] if rocm_build() else ["torch", "flash-attn>=2.0.6,<=2.6.3,!=2.0.9,!=2.1.0"],
+        tests_require=["numpy==1.22.4", "onnxruntime"] if rocm_build() else ["numpy", "onnxruntime", "torchvision"],
     )
     if any(x in sys.argv for x in (".", "sdist", "bdist_wheel")):
         shutil.rmtree(common_headers_dir)

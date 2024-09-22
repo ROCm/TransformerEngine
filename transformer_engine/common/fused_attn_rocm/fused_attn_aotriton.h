@@ -26,7 +26,10 @@ bool is_aotriton_backend_supported(
   float dropout,
   size_t num_attn_heads, size_t num_gqa_groups,
   size_t max_seqlen_q, size_t max_seqlen_kv,
-  size_t head_dim);
+  size_t head_dim_qk, 
+  size_t head_dim_v, 
+  int64_t window_size_left, 
+  int64_t window_size_right);
 }  // namespace fused_attn_rocm
 
 void fused_attn_aotriton_fwd_qkvpacked(

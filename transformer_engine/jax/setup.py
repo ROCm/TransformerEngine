@@ -31,11 +31,8 @@ if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or os.path.isdir(build_tools_
 
 
 from build_tools.build_ext import get_build_ext
-<<<<<<< HEAD
-from build_tools.utils import rocm_build, package_files, copy_common_headers, install_and_import
-=======
+from build_tools.utils import rocm_build
 from build_tools.utils import copy_common_headers, install_and_import
->>>>>>> upstream/release_v1.11
 from build_tools.te_version import te_version
 from build_tools.jax import setup_jax_extension
 
@@ -63,19 +60,8 @@ if __name__ == "__main__":
         description="Transformer acceleration library - Jax Lib",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
-<<<<<<< HEAD
         install_requires=[] if rocm_build() else ["jax", "flax>=0.7.1"],
         tests_require=[] if rocm_build() else ["numpy", "praxis"],
-        include_package_data=True,
-        package_data={
-            "csrc": package_files("csrc"),
-            common_headers_dir: package_files(common_headers_dir),
-            "build_tools": package_files("build_tools"),
-        },
-=======
-        install_requires=["jax", "flax>=0.7.1"],
-        tests_require=["numpy", "praxis"],
->>>>>>> upstream/release_v1.11
     )
     if any(x in sys.argv for x in (".", "sdist", "bdist_wheel")):
         shutil.rmtree(common_headers_dir)

@@ -176,11 +176,13 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
   // It is a WAR to pre-create all possible cuDNN graph at the JIT compile time
   size_t max_num_segments = is_ragged ? input_batch * max_segments_per_seq : input_batch;
   size_t min_num_segments = input_batch;
+#ifndef USE_ROCM
   auto cudnn_runtime_version = cudnnGetVersion();
   if (is_ragged && cudnn_runtime_version >= 90300) {
     // For cuDNN < 9.3.0, it requires to run all possible seqlens to address act_seqlen = 0
     min_num_segments = input_batch * max_segments_per_seq;
   }
+#endif
   for (auto num_segments = min_num_segments; num_segments <= max_num_segments; ++num_segments) {
     // the last one is the largest which will be the returned workspace size
     auto q_cu_seqlens_tensor =
@@ -268,6 +270,8 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
   auto bias_tensor = TensorWrapper(bias, bias_shape, dtype);
 
   size_t num_segments = input_batch;  // Non-THD format, input_batch = num_segments
+//TODO: ROCm Fused attn does not support var seq len yet
+#ifndef USE_ROCM
   if (is_ragged) {
     auto cudnn_runtime_version = cudnnGetVersion();
     if (cudnn_runtime_version >= 90300) {
@@ -285,6 +289,7 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
     cudaMemsetAsync(output, 0,
                     input_batch * q_max_seqlen * attn_heads * head_dim * typeToSize(dtype), stream);
   }
+#endif
 
   auto q_cu_seqlens_tensor =
       TensorWrapper(q_cu_seqlens, std::vector<size_t>{num_segments + 1}, DType::kInt32);
@@ -302,18 +307,11 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
 
   /* Prepare RNG state */
   auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
-<<<<<<< HEAD
-  auto backend =
-      nvte_get_fused_attn_backend(static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype),
-                                  qkv_layout, bias_type, mask_type, dropout_probability, attn_heads,
-                                  num_gqa_groups, q_max_seqlen, kv_max_seqlen, head_dim);
-#ifndef USE_ROCM
-=======
   auto backend = nvte_get_fused_attn_backend(
       static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
       mask_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
       head_dim, head_dim, -1, -1);
->>>>>>> upstream/release_v1.11
+#ifndef USE_ROCM
   PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 #else
 	PopulateRngStateAsync(rng_state, seed, input_batch, attn_heads, q_max_seqlen, kv_max_seqlen, stream);
@@ -425,11 +423,13 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
   // It is a WAR to pre-create all possible cuDNN graph at the JIT compile time
   size_t max_num_segments = is_ragged ? input_batch * max_segments_per_seq : input_batch;
   size_t min_num_segments = input_batch;
+#ifndef USE_ROCM
   auto cudnn_runtime_version = cudnnGetVersion();
   if (is_ragged && cudnn_runtime_version >= 90300) {
     // For cuDNN < 9.3.0, it requires to run all possible seqlens to address act_seqlen = 0
     min_num_segments = input_batch * max_segments_per_seq;
   }
+#endif
   for (auto num_segments = min_num_segments; num_segments <= max_num_segments; ++num_segments) {
     // the last one is the largest which will be the returned workspace size
     auto q_cu_seqlens_tensor =
@@ -525,6 +525,8 @@ void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, 
   auto doutput_tensor = TensorWrapper(doutput, output_shape, dtype);
 
   size_t num_segments = input_batch;  // Non-THD format, input_batch = num_segments
+//TODO: ROCm fused attention does not support var seq len yet
+#ifndef USE_ROCM
   if (is_ragged) {
     auto cudnn_runtime_version = cudnnGetVersion();
     if (cudnn_runtime_version >= 90300) {
@@ -540,6 +542,7 @@ void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, 
       num_segments = runtime_num_segments_q;
     }
   }
+#endif
 
   auto q_cu_seqlens_tensor =
       TensorWrapper(q_cu_seqlens, std::vector<size_t>{num_segments + 1}, DType::kInt32);

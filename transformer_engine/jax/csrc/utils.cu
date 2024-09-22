@@ -25,7 +25,9 @@ int GetCudaRuntimeVersion() {
   return ver;
 }
 
+#ifndef USE_ROCM
 size_t GetCudnnRuntimeVersion() { return cudnnGetVersion(); }
+#endif
 
 int GetDeviceComputeCapability(int gpu_id) { return transformer_engine::cuda::sm_arch(gpu_id); }
 

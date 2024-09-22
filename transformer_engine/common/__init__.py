@@ -117,6 +117,6 @@ def _load_nvrtc():
 
 
 if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
-    _CUDNN_LIB_CTYPES = _load_cudnn()
-    _NVRTC_LIB_CTYPES = _load_nvrtc()
+    #_CUDNN_LIB_CTYPES = _load_cudnn()
+    #_NVRTC_LIB_CTYPES = _load_nvrtc()
     _TE_LIB_CTYPES = _load_library()

@@ -1,6 +1,4 @@
 /*************************************************************************
- * This file was modified for portability to AMDGPU
- * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -22,16 +20,6 @@
 #include <unistd.h>
 
 #include "userbuffers.h"
-
-#ifndef __HIP_PLATFORM_AMD__
-using bf16 = nv_bfloat16;
-using fp8e4m3 = __nv_fp8_e4m3;
-using fp8e5m2 = __nv_fp8_e5m2;
-#else
-using bf16 = hip_bfloat16;
-using fp8e4m3 = hip_f8<hip_f8_type::fp8>;
-using fp8e5m2 = hip_f8<hip_f8_type::bf8>;
-#endif
 
 #define MAX_THREADS 1024
 
@@ -1888,29 +1876,24 @@ void reducescatter2_userbuff_fp8(void *output, float *scale, const int handler, 
                                                      comm, stream);
 }
 
-template void reducescatter2_userbuff_fp8<fp8e5m2>(void *output, float *scale,
+template void reducescatter2_userbuff_fp8<__nv_fp8_e5m2>(void *output, float *scale,
                                                          const int handler, const int offset,
                                                          const int elements, communicator *comm,
                                                          cudaStream_t stream);
-template void reducescatter2_userbuff_fp8<fp8e4m3>(void *output, float *scale,
+template void reducescatter2_userbuff_fp8<__nv_fp8_e4m3>(void *output, float *scale,
                                                          const int handler, const int offset,
                                                          const int elements, communicator *comm,
                                                          cudaStream_t stream);
 
-template void reducescatter2_userbuff_strided_atomic_fp8<fp8e4m3>(
+template void reducescatter2_userbuff_strided_atomic_fp8<__nv_fp8_e4m3>(
     void *output, float *scale, const int handler, const int offset, const int rowelements,
     const int colelements, const int strideelements_out, const int strideelements_in,
     const int numchunks, void *counters, communicator *comm, cudaStream_t stream);
-<<<<<<< HEAD
-
-template void reducescatter2_userbuff_strided_multiatomic_fp8<fp8e4m3>(
-=======
 template void reducescatter2_userbuff_strided_atomic_fp8<__nv_fp8_e5m2>(
     void *output, float *scale, const int handler, const int offset, const int rowelements,
     const int colelements, const int strideelements_out, const int strideelements_in,
     const int numchunks, void *counters, communicator *comm, cudaStream_t stream);
 template void reducescatter2_userbuff_strided_multiatomic_fp8<__nv_fp8_e4m3>(
->>>>>>> upstream/release_v1.11
     void *output, float *scale, const int handler, const int offset, const int rowelements,
     const int colelements, const int strideelements_out, const int strideelements_in,
     const int numchunks, void *counters, communicator *comm, cudaStream_t stream);
@@ -2557,9 +2540,9 @@ void reduce_fp8_in_bf16_out(void *inputs, void *output, float *scale, int num_in
       <<<grid, block, 0, stream>>>(inputs, output, scale, num_inputs, input_size);
 }
 
-template void reduce_fp8_in_bf16_out<fp8e4m3>(void *inputs, void *output, float *scale,
+template void reduce_fp8_in_bf16_out<__nv_fp8_e4m3>(void *inputs, void *output, float *scale,
                                                     int num_inputs, int input_size,
                                                     cudaStream_t stream);
-template void reduce_fp8_in_bf16_out<fp8e5m2>(void *inputs, void *output, float *scale,
+template void reduce_fp8_in_bf16_out<__nv_fp8_e5m2>(void *inputs, void *output, float *scale,
                                                     int num_inputs, int input_size,
                                                     cudaStream_t stream);

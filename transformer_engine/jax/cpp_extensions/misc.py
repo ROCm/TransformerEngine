@@ -5,16 +5,12 @@
 # See LICENSE for license information.
 """JAX/TE miscellaneous for custom ops"""
 
-<<<<<<< HEAD
 import jax
-from functools import cache
-=======
 import os
 import functools
 from typing import Tuple
 from importlib.metadata import version as get_pkg_version
 from packaging.version import Version as PkgVersion
->>>>>>> upstream/release_v1.11
 
 import numpy as np
 
@@ -29,7 +25,7 @@ from ..sharding import get_padded_spec as te_get_padded_spec
 
 
 # check whether AMD GPU is loaded
-@cache
+@functools.lru_cache(maxsize=None)
 def is_hip_extension() -> bool:
   has_rocm = False
   #iterate through all devices in jax
@@ -167,6 +163,9 @@ def multidim_transpose(shape, static_axis_boundary, transpose_axis_boundary):
 @functools.lru_cache(maxsize=None)
 def get_cudnn_version() -> Tuple[int, int, int]:
     """Runtime cuDNN version (major, minor, patch)"""
+    # ROCm fused attn does not use cudnn, return high numbers to avoid tests filtering out
+    if is_hip_extension():
+        return (99, 0, 0)
     encoded_version = transformer_engine_jax.get_cudnn_version()
     major_version_magnitude = 1000 if encoded_version < 90000 else 10000
     major, encoded_version = divmod(encoded_version, major_version_magnitude)

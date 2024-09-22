@@ -12,12 +12,8 @@ from jax.interpreters import mlir
 
 from transformer_engine import transformer_engine_jax
 
-<<<<<<< HEAD
 from .misc import is_hip_extension
-
-=======
 from .misc import is_ffi_enabled
->>>>>>> upstream/release_v1.11
 
 try:
     from jaxlib.hlo_helpers import custom_call
@@ -35,20 +31,16 @@ class CustomCallAPIVersion(IntEnum):
 
 
 for _name, _value in transformer_engine_jax.registrations().items():
-<<<<<<< HEAD
-    xla_client.register_custom_call_target(_name, _value, platform="ROCM" if is_hip_extension() else "CUDA")
-=======
     if _name.endswith("_ffi"):
         if is_ffi_enabled():
             # COMMAND_BUFFER_COMPATIBLE i.e. cudaGraph enabled by default
             xla_client.register_custom_call_target(
-                _name, _value, platform="CUDA", api_version=CustomCallAPIVersion.FFI.value
+                _name, _value, platform="ROCM" if is_hip_extension() else "CUDA", api_version=CustomCallAPIVersion.FFI.value
             )
     else:
         xla_client.register_custom_call_target(
-            _name, _value, platform="CUDA", api_version=CustomCallAPIVersion.OPAQUE.value
+            _name, _value, platform="ROCM" if is_hip_extension() else "CUDA", api_version=CustomCallAPIVersion.OPAQUE.value
         )
->>>>>>> upstream/release_v1.11
 
 
 @dataclass

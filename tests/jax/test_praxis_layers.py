@@ -46,22 +46,6 @@ ENABLE_FP8 = [False, True]
 FP8_FORMATS = [Format.E4M3, Format.HYBRID]
 
 
-<<<<<<< HEAD
-@pytest.fixture(autouse=True, scope="module")
-def enable_fused_attn():
-    """
-    Enable fused attn for hopper+ arch.
-    Fused attn kernels on pre-hopper arch are not deterministic.
-    """
-    if is_hip_extension() or get_device_compute_capability(0) >= 90:
-        os.environ["NVTE_FUSED_ATTN"] = "1"
-    yield
-    if "NVTE_FUSED_ATTN" in os.environ:
-        del os.environ["NVTE_FUSED_ATTN"]
-
-
-=======
->>>>>>> upstream/release_v1.11
 def compare_dict(ref_fd, test_fd, rtol=1e-05, atol=1e-08):
     for key in ref_fd:
         assert key in test_fd, f"{key} not found in test dict {test_fd}"
