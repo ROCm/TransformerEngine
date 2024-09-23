@@ -86,18 +86,20 @@ def frameworks() -> List[str]:
 frameworks()
 
 # Default to use cuda
-use_cuda = True
-use_rocm = False
-if ("pytorch" in frameworks()) and (importlib.util.find_spec("torch") is not None):
-    from torch.utils.cpp_extension import IS_HIP_EXTENSION
-    if IS_HIP_EXTENSION:
-        use_cuda = False
-        use_rocm = True
-elif ("jax" in frameworks()) and (importlib.util.find_spec("jax") is not None):
-    import jax
-    if "rocm" in jax.lib.xla_bridge.get_backend().platform_version:
-        use_cuda = False
-        use_rocm = True
+use_cuda = bool(int(os.getenv("NVTE_USE_CUDA", "0")))
+use_rocm = bool(int(os.getenv("NVTE_USE_ROCM", "1")))
+if use_cuda and use_rocm:
+    raise ValueError("Cannot build with both CUDA and ROCm")
+#if ("pytorch" in frameworks()) and (importlib.util.find_spec("torch") is not None):
+#    from torch.utils.cpp_extension import IS_HIP_EXTENSION
+#    if IS_HIP_EXTENSION:
+#        use_cuda = False
+#        use_rocm = True
+#elif ("jax" in frameworks()) and (importlib.util.find_spec("jax") is not None):
+#    import jax
+#    if "rocm" in jax.lib.xla_bridge.get_backend().platform_version:
+#        use_cuda = False
+#        use_rocm = True
 
 
 @lru_cache(maxsize=1)
