@@ -101,8 +101,13 @@ inline __device__ void cast_and_transpose_regs_partial_dbias(const IVec (&in)[nv
 
 // STUFF TO TUNE
 constexpr unsigned int n_warps_per_tile = 4;
+#ifdef __HIP_PLATFORM_AMD__
+constexpr int desired_load_size = 4;
+constexpr int desired_store_size = 4;
+#else
 constexpr int desired_load_size = 8;
 constexpr int desired_store_size = 8;
+#endif
 
 constexpr unsigned int max_threads_per_block = 256;
 static_assert(n_warps_per_tile * THREADS_PER_WARP <= max_threads_per_block);

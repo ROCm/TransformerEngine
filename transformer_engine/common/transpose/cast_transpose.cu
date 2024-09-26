@@ -414,13 +414,23 @@ void cast_transpose(const Tensor &input,
       // sufficiently small matrices. Need to consider whether reduced
       // cache efficiency is worth increased SM utilization. Also need
       // to keep in mind whether datatype can fit.
+#ifdef __HIP_PLATFORM_AMD__
+      const size_t estimated_n_tiles = get_n_tiles(4, 4);
+#else
       const size_t estimated_n_tiles = get_n_tiles(8, 8);
+#endif
       const size_t estimated_n_blocks = get_n_blocks(estimated_n_tiles);
+#ifndef __HIP_PLATFORM_AMD__
       if (estimated_n_blocks >= n_sms) {
         LAUNCH_KERNEL_VEC_SIZES(8, 8, InputType, OutputType);
       } else {
         LAUNCH_KERNEL_VEC_SIZES(4, 4, InputType, OutputType);
       }
+#else
+      // Use smaller load_size and store_size to avoid scratch memory
+      // usage.
+      LAUNCH_KERNEL_VEC_SIZES(4, 4, InputType, OutputType);
+#endif
 
     );  // NOLINT(*)
   );  // NOLINT(*)
