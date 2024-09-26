@@ -28,6 +28,9 @@ foreach(HPP_FILE ${HPP_FILES})
   file(COPY ${HPP_FILE} DESTINATION ${CMAKE_CURRENT_LIST_DIR}/src)
 endforeach()
 
+file(COPY "${CK_SRC_DIR}/example/ck_tile/01_fmha/hsaco" DESTINATION ${CMAKE_CURRENT_LIST_DIR}/src)
+set(CK_HSACO_DIR "${CMAKE_CURRENT_LIST_DIR}/src/hsaco")
+
 if(DEFINED ENV{PYTORCH_ROCM_ARCH})
   set(ROCM_ARCH $ENV{PYTORCH_ROCM_ARCH})
 else()
@@ -42,13 +45,21 @@ list(APPEND CK_FMHA_SOURCES
        src/ck_fmha_fwd.cpp
        src/ck_fmha_bwd.cpp)
 
-file(GLOB_RECURSE CK_FMHA_FILES "${CK_GEN_DIR}/*.cpp")
-list(APPEND CK_FMHA_SOURCES ${CK_FMHA_FILES})
+# Glob all generated .cpp files and append to CK_FMHA_SOURCES
+file(GLOB_RECURSE CK_GEN_CPP_FILES "${CK_GEN_DIR}/*.cpp")
+list(APPEND CK_FMHA_SOURCES ${CK_GEN_CPP_FILES})
+
+# Glob all hsaco .cpp files and append to CK_FMHA_SOURCES
+file(GLOB_RECURSE CK_HSACO_CPP_FILES "${CK_HSACO_DIR}/*.cpp")
+list(APPEND CK_FMHA_SOURCES ${CK_HSACO_CPP_FILES})
+
+# Get the number of available processors
+cmake_host_system_information(RESULT NUM_CORES QUERY NUMBER_OF_LOGICAL_CORES)
 
 # Check if CK_PARALLEL_COMPILE_JOBS is not set
 if(NOT DEFINED CK_PARALLEL_COMPILE_JOBS)
-    # Set a default value
-    set(CK_PARALLEL_COMPILE_JOBS 256)
+    # Set the value based on the number of available processors
+    set(CK_PARALLEL_COMPILE_JOBS ${NUM_CORES})
 endif()
 
 if(CK_PARALLEL_COMPILE_JOBS)
@@ -82,10 +93,12 @@ target_compile_options(ck_fmha_options INTERFACE
   $<$<CXX_COMPILER_ID:Clang>:
     -fcolor-diagnostics
     -fgpu-flush-denormals-to-zero
+    -fno-offload-uniform-block
     -ftemplate-backtrace-limit=0
     -fPIC
+    -Wno-float-equal
     -Wno-gnu-line-marker
-    -fno-offload-uniform-block
+    -Wno-undefined-func-template
   >
 )
 
@@ -107,6 +120,7 @@ target_link_libraries(ck PUBLIC ${CK_FMHA_LINKER_LIBS})
 target_link_libraries(ck PRIVATE ck_fmha_options)
 
 include(GNUInstallDirs)
+message(STATUS "CMAKE_INSTALL_PREFIX: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "CMAKE_INSTALL_INCLUDEDIR: ${CMAKE_INSTALL_INCLUDEDIR}")
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include" DESTINATION ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_INCLUDEDIR})
 install(TARGETS ck DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)

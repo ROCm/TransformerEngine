@@ -72,90 +72,82 @@ void ck_fused_attn_fwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
     const auto init_args = [&](auto &args) {
         const ck_tile::index_t stride_q       = nhead * hdim_q;
         const ck_tile::index_t stride_k       = nhead_k * hdim_q;
-        const ck_tile::index_t stride_knew    = 0;
         const ck_tile::index_t stride_v       = nhead_k * hdim_v;
-        const ck_tile::index_t stride_vnew    = 0;
         const ck_tile::index_t stride_bias    = shape_seqlen_k;
         const ck_tile::index_t stride_randval = 0;
-        const ck_tile::index_t stride_o_acc   = hdim_v;
         const ck_tile::index_t stride_o       = nhead * hdim_v;
 
         const ck_tile::index_t nhead_stride_q       = hdim_q;
         const ck_tile::index_t nhead_stride_k       = hdim_q;
-        const ck_tile::index_t nhead_stride_knew    = hdim_q;
         const ck_tile::index_t nhead_stride_v       = hdim_v;
-        const ck_tile::index_t nhead_stride_vnew    = 0;
         const ck_tile::index_t nhead_stride_bias    = 0;
         const ck_tile::index_t nhead_stride_randval = 0;
         const ck_tile::index_t nhead_stride_lse     = shape_seqlen_q;
-        const ck_tile::index_t nhead_stride_lse_acc = shape_seqlen_q;
-        const ck_tile::index_t nhead_stride_o_acc   = max_seqlen_q * hdim_v;
         const ck_tile::index_t nhead_stride_o       = hdim_v;
 
         const ck_tile::index_t batch_stride_q       = nhead * shape_seqlen_q * hdim_q;
         const ck_tile::index_t batch_stride_k       = nhead_k * shape_seqlen_k * hdim_q;
-        const ck_tile::index_t batch_stride_knew    = 0;
         const ck_tile::index_t batch_stride_v       = nhead_k * hdim_v * shape_seqlen_k;
-        const ck_tile::index_t batch_stride_vnew    = 0;
         const ck_tile::index_t batch_stride_bias    = 0;
         const ck_tile::index_t batch_stride_randval = 0;
         const ck_tile::index_t batch_stride_lse     = nhead * shape_seqlen_q;
-        const ck_tile::index_t batch_stride_lse_acc = nhead * shape_seqlen_q;
-        const ck_tile::index_t batch_stride_o_acc   = nhead * max_seqlen_q * hdim_v;
         const ck_tile::index_t batch_stride_o       = nhead * shape_seqlen_q * hdim_v;
 
-        const ck_tile::index_t split_stride_lse_acc = shape_batch * nhead * shape_seqlen_q;
-        const ck_tile::index_t split_stride_o_acc   = batch * nhead * max_seqlen_q * hdim_v;
-
-        args.q_ptr          = devPtrQ;
-        args.k_ptr          = devPtrK;
-        args.v_ptr          = devPtrV;
-        args.bias_ptr       = devPtrBias;
-        args.lse_ptr        = devPtrSoftmaxStats;
-        args.o_ptr          = devPtrO;
+        args.q_ptr        = devPtrQ;
+        args.k_ptr        = devPtrK;
+        args.v_ptr        = devPtrV;
+        args.bias_ptr     = devPtrBias;
+        args.rand_val_ptr = nullptr;
+        args.lse_ptr      = devPtrSoftmaxStats;
+        args.o_ptr        = devPtrO;
+    
         args.seqstart_q_ptr = devPtrCuSeqlensQ;
         args.seqstart_k_ptr = devPtrCuSeqlensKV;
         args.seqlen_k_ptr   = nullptr;
-
-        args.batch        = batch;
-        args.seqlen_q     = shape_seqlen_q;
-        args.seqlen_k     = shape_seqlen_k;
-        args.hdim_q       = hdim_q;
-        args.hdim_v       = hdim_v;
-        args.nhead_q      = nhead;
-        args.nhead_k      = nhead_k;
-        args.max_seqlen_q = max_seqlen_q;
-
-        args.stride_q = stride_q;
-        args.stride_k = stride_k;
-        args.stride_v = stride_v;
-
-        args.nhead_stride_q = nhead_stride_q;
-        args.nhead_stride_k = nhead_stride_k;
-        args.nhead_stride_v = nhead_stride_v;
-
-        args.batch_stride_q = batch_stride_q;
-        args.batch_stride_k = batch_stride_k;
-        args.batch_stride_v = batch_stride_v;
 
         args.scale_s = scale_s;
         args.scale_p = scale_p;
         args.scale_o = scale_o;
 
-        args.stride_bias = stride_bias;
-        args.stride_o    = stride_o;
+        args.seqlen_q     = shape_seqlen_q;
+        args.seqlen_k     = shape_seqlen_k;
+        args.batch        = batch;
+        args.max_seqlen_q = max_seqlen_q;
+        args.hdim_q       = hdim_q;
+        args.hdim_v       = hdim_v;
+        args.nhead_q      = nhead;
+        args.nhead_k      = nhead_k;
 
-        args.nhead_stride_bias = nhead_stride_bias;
-        args.nhead_stride_lse  = nhead_stride_lse;
-        args.nhead_stride_o    = nhead_stride_o;
+        args.stride_q       = stride_q;
+        args.stride_k       = stride_k;
+        args.stride_v       = stride_v;
+        args.stride_bias    = stride_bias;
+        args.stride_randval = stride_randval;
+        args.stride_o       = stride_o;
 
-        args.batch_stride_bias = batch_stride_bias;
-        args.batch_stride_lse  = batch_stride_lse;
-        args.batch_stride_o    = batch_stride_o;
+        args.nhead_stride_q       = nhead_stride_q;
+        args.nhead_stride_k       = nhead_stride_k;
+        args.nhead_stride_v       = nhead_stride_v;
+        args.nhead_stride_bias    = nhead_stride_bias;
+        args.nhead_stride_randval = nhead_stride_randval;
+        args.nhead_stride_lse     = nhead_stride_lse;
+        args.nhead_stride_o       = nhead_stride_o;
+
+        args.batch_stride_q       = batch_stride_q;
+        args.batch_stride_k       = batch_stride_k;
+        args.batch_stride_v       = batch_stride_v;
+        args.batch_stride_bias    = batch_stride_bias;
+        args.batch_stride_randval = batch_stride_randval;
+        args.batch_stride_lse     = batch_stride_lse;
+        args.batch_stride_o       = batch_stride_o;
 
         args.window_size_left  = window_size_left;
         args.window_size_right = window_size_right;
         args.mask_type         = mask_type;
+
+        args.p_drop           = p_drop;
+        args.s_randval        = s_randval;
+        args.drop_seed_offset = std::tie(drop_seed, drop_offset);
     };
 
     fmha_fwd_traits fmha_traits;
