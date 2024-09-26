@@ -90,7 +90,8 @@ def setup_pytorch_extension(
     # Version-dependent CUDA options
     if rocm_build():
         ##TODO: Figure out which hipcc version starts to support this parallel compilation
-        nvcc_flags.extend(["-parallel-jobs=4"])
+        nvcc_flags.extend(["-parallel-jobs=4", "-DUSE_HIPBLASLT"])
+        cxx_flags.extend(["-DUSE_HIPBLASLT"])
     else:
         try:
             version = cuda_version()

@@ -45,6 +45,7 @@ if(USE_CUDA)
   set(CMAKE_CUDA_STANDARD_REQUIRED ON)
   project(transformer_engine_tests LANGUAGES CUDA CXX)
 else()
+  option(USE_HIPBLASLT "Use HIPBLASLT" ON)
   set(CMAKE_CXX_STANDARD 17)
   project(transformer_engine_tests LANGUAGES HIP CXX)
   # Ask hcc to generate device code during compilation so we can use

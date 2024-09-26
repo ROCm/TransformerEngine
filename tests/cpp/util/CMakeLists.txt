@@ -21,6 +21,9 @@ add_executable(test_util
                ../test_common.hip)
 
 target_link_libraries(test_util PUBLIC hip::host hip::device GTest::gtest_main ${TE_LIB})
+if(USE_HIPBLASLT)
+  target_compile_definitions(test_util PUBLIC USE_HIPBLASLT LEGACY_HIPBLAS_DIRECT)
+endif()
 
 endif()
 

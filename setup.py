@@ -57,6 +57,7 @@ def setup_common_extension() -> CMakeExtension:
         if os.getenv("NVTE_CK_FUSED_ATTN_PATH"):
             ck_path = Path(os.getenv("NVTE_CK_FUSED_ATTN_PATH"))
             cmake_flags.append(f"-DCK_FUSED_ATTN_PATH={ck_path}")
+        cmake_flags.append(f"-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON")
 
     return CMakeExtension(
         name="transformer_engine",

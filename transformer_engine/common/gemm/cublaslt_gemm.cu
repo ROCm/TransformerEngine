@@ -24,8 +24,8 @@
 #else
 #define ROCBLAS_BETA_FEATURES_API 
 #include <rocblas/rocblas.h>
-#endif // #ifdef USE_HIPBLASLT
 #include <hipcub/hipcub.hpp>
+#endif // #ifdef USE_HIPBLASLT
 #include <iostream>
 #include <cstdlib>
 #include <string>
