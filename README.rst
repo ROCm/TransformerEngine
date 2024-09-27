@@ -70,13 +70,15 @@ Note that some of operator unit tests fail in hipBLASLt config due to limited in
 Pytorch framework integration tests
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-All Pytorch integration pytests under tests/pytorch/ and tests/pytorch/fused_attn/ are supported 
+Pytorch integration pytests under tests/pytorch/ and tests/pytorch/fused_attn/ are supported 
 Except the following tests that are not supported in rocBLAS configuration
 
 * tests/pytorch/test_cuda_graph.py 
 * tests/pytorch/test_sanity.py::test_gpt_guda_graph
 
 Env `ROCBLAS_STREAM_ORDER_ALLOC=1` should be used when run tests in pytorch-rocblas configuration. 
+
+Also test_onnx_export.py does not support FP8 dues to absence of custom QDQ operatrs library
 
 Jax framework integration tests
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
