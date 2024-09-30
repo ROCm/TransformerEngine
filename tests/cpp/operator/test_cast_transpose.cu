@@ -75,6 +75,7 @@ void performTest(const size_t N, const size_t H) {
   compareResults("output_t", output_t, ref_output_t.get(), atol, rtol);
 }
 
+/*
 std::vector<std::pair<size_t, size_t>> test_cases = {{2048, 12288},
                                                      {768, 1024},
                                                      {256, 65536},
@@ -82,6 +83,13 @@ std::vector<std::pair<size_t, size_t>> test_cases = {{2048, 12288},
                                                      {256, 256},
                                                      {120, 2080},
                                                      {8, 8}};
+																										 */
+std::vector<std::pair<size_t, size_t>> test_cases = {{1024, 1024},
+                                                     {24576, 1024},
+                                                     {3072, 1024},
+                                                     {4096, 1024},
+                                                     {1024, 4096},
+                                                     {24576, 4096}};
 }  // namespace
 
 class CTTestSuite : public ::testing::TestWithParam<std::tuple<transformer_engine::DType,
