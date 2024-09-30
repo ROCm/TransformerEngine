@@ -118,6 +118,7 @@ void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
     bool  ext_asm          = true;
     bool  asm_atomic_fp32  = false;
     bool  asm_no_coex      = false;
+    bool  asm_rtz_cvt      = true;
 
     ck_tile::index_t window_size_left;
     ck_tile::index_t window_size_right;
@@ -142,7 +143,7 @@ void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
     size_t d_size           = float_size * batch * nhead * max_seqlen_q;
     size_t dq_size          = bf16_size * batch * shape_seqlen_q * nhead * hdim_q;
     //size_t dq_acc_size      = float_size * nsplits * shape_batch * shape_seqlen_q * nhead * hdim_q;
-    //size_t dq_acc_size = 0;
+    //size_t dq_acc_size      = 0;
     size_t dk_expanded_size = 0;
     size_t dv_expanded_size = 0;
 
@@ -185,6 +186,7 @@ void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
         traits.uses_ext_asm       = ext_asm;
         traits.is_asm_atomic_fp32 = asm_atomic_fp32;
         traits.is_asm_no_coex     = asm_no_coex;
+        traits.is_asm_rtz_cvt     = asm_rtz_cvt;
     };
 
     const auto init_args = [&](auto &args) {
