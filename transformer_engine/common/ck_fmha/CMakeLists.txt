@@ -5,18 +5,42 @@ cmake_minimum_required(VERSION 3.18)
 set(CMAKE_CXX_STANDARD 17)
 project(ck LANGUAGES HIP CXX)
 
+# Function to replace a string in a file
+function(replace_string_in_file input_file search_str replace_str)
+  file(READ ${input_file} file_content)
+  string(REPLACE "${search_str}" "${replace_str}" new_content "${file_content}")
+  if(NOT "${file_content}" STREQUAL "${new_content}")
+    file(WRITE ${input_file} "${new_content}")
+  endif()
+endfunction()
+
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/gen_src)
 set(CK_GEN_DIR "${CMAKE_CURRENT_LIST_DIR}/gen_src")
 set(CK_SRC_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/composable_kernel")
 
+if(EXISTS "${CK_GEN_DIR}")
+    file(REMOVE_RECURSE "${CK_GEN_DIR}")
+endif()
+
+file(COPY "${CK_SRC_DIR}/example/ck_tile/01_fmha/generate.py"
+     DESTINATION ${CMAKE_CURRENT_LIST_DIR})
+file(COPY "${CK_SRC_DIR}/example/ck_tile/01_fmha/codegen"
+     DESTINATION ${CMAKE_CURRENT_LIST_DIR})
+set(CK_BWD_GEN_FILE "${CMAKE_CURRENT_LIST_DIR}/codegen/ops/fmha_bwd.py")
+
+if(EXISTS "${CK_BWD_GEN_FILE}")
+  replace_string_in_file(${CK_BWD_GEN_FILE} "static fmha_bwd_v3_kernel impl"
+                         "static thread_local fmha_bwd_v3_kernel impl")
+else()
+  message(FATAL_ERROR "CK BWD code generator file not found: ${CK_BWD_GEN_FILE}")
+endif()
+
 execute_process(
-  COMMAND python3 ${CK_SRC_DIR}/example/ck_tile/01_fmha/generate.py
-  --api fwd --output_dir ${CK_GEN_DIR} --receipt 2
-)
+  COMMAND python3 "${CMAKE_CURRENT_LIST_DIR}/generate.py" --api fwd
+          --output_dir ${CK_GEN_DIR} --receipt 2)
 execute_process(
-  COMMAND python3 ${CK_SRC_DIR}/example/ck_tile/01_fmha/generate.py
-  --api bwd --output_dir ${CK_GEN_DIR} --receipt 2
-)
+  COMMAND python3 "${CMAKE_CURRENT_LIST_DIR}/generate.py" --api bwd
+          --output_dir ${CK_GEN_DIR} --receipt 2)
 
 # Copy the header files needed
 # Glob all .hpp files in the source directory
@@ -24,21 +48,16 @@ file(GLOB HPP_FILES "${CK_SRC_DIR}/example/ck_tile/01_fmha/*.hpp")
 
 # Copy each .hpp file to the destination directory
 foreach(HPP_FILE ${HPP_FILES})
-  get_filename_component(FILE_NAME ${HPP_FILE} NAME)
   file(COPY ${HPP_FILE} DESTINATION ${CMAKE_CURRENT_LIST_DIR}/src)
 endforeach()
 
-file(COPY "${CK_SRC_DIR}/example/ck_tile/01_fmha/hsaco" DESTINATION ${CMAKE_CURRENT_LIST_DIR}/src)
 set(CK_HSACO_DIR "${CMAKE_CURRENT_LIST_DIR}/src/hsaco")
-
-if(DEFINED ENV{PYTORCH_ROCM_ARCH})
-  set(ROCM_ARCH $ENV{PYTORCH_ROCM_ARCH})
-else()
-  set(ROCM_ARCH gfx90a;gfx940;gfx941;gfx942)
+if(EXISTS "${CK_HSACO_DIR}")
+    file(REMOVE_RECURSE "${CK_HSACO_DIR}")
 endif()
+file(COPY "${CK_SRC_DIR}/example/ck_tile/01_fmha/hsaco" DESTINATION "${CK_HSACO_DIR}/..")
 
-set(CMAKE_HIP_ARCHITECTURES ${ROCM_ARCH})
-message(STATUS "ROCM_ARCH: ${ROCM_ARCH}")
+message(STATUS "CMAKE_HIP_ARCHITECTURES: ${CMAKE_HIP_ARCHITECTURES}")
 
 set(CK_FMHA_SOURCES)
 list(APPEND CK_FMHA_SOURCES
@@ -75,6 +94,8 @@ add_library(ck_fmha_options INTERFACE)
 # IMPORTANT: Using truncation mode will cause unit tests to fail.
 target_compile_definitions(ck_fmha_options INTERFACE
   CK_TILE_FMHA_FWD_FAST_EXP2=1
+  CK_TILE_FMHA_FWD_SPLITKV_API=0
+  CK_TILE_FMHA_FWD_APPENDKV_API=0
   CK_USE_XDL
 )
 
@@ -90,16 +111,14 @@ target_compile_definitions(ck_fmha_options INTERFACE
 
 # Compiler-specific options
 target_compile_options(ck_fmha_options INTERFACE
-  $<$<CXX_COMPILER_ID:Clang>:
-    -fcolor-diagnostics
-    -fgpu-flush-denormals-to-zero
-    -fno-offload-uniform-block
-    -ftemplate-backtrace-limit=0
-    -fPIC
-    -Wno-float-equal
-    -Wno-gnu-line-marker
-    -Wno-undefined-func-template
-  >
+  -fcolor-diagnostics
+  -fgpu-flush-denormals-to-zero
+  -fno-offload-uniform-block
+  -ftemplate-backtrace-limit=0
+  -fPIC
+  -Wno-float-equal
+  -Wno-gnu-line-marker
+  -Wno-undefined-func-template
 )
 
 set(CK_INCLUDE_DIR "${CK_SRC_DIR}/include")

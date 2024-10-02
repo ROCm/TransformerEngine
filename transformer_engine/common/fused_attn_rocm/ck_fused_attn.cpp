@@ -1,7 +1,6 @@
 #include "ck_fused_attn.h"
 
 #include <ck_fmha.h>
-#include <hip/hip_runtime.h>
 
 #include <iostream>
 #include <stdexcept>
@@ -22,7 +21,7 @@ void ck_fused_attn_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_group
                        const Tensor *input_K, const Tensor *input_V, const Tensor *input_Bias,
                        Tensor *output_O, NVTETensorPack *Aux_CTX_Tensors,
                        const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv,
-                       const Tensor *rng_state, hipStream_t stream) {
+                       const Tensor *rng_state, Tensor *workspace, cudaStream_t stream) {
     const auto QKV_type     = input_Q->data.dtype;
     void *devPtrQ           = input_Q->data.dptr;
     void *devPtrK           = input_K->data.dptr;
@@ -87,23 +86,32 @@ void ck_fused_attn_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_group
         NVTE_ERROR("Unexpected Aux_CTX_Tensors->size");
     }
 
-    uint64_t drop_seed   = 0;
-    uint64_t drop_offset = 0;
-    if (p_dropout > 0) {
-        void *devPtrRngState                           = rng_state->data.dptr;
-        static thread_local uint64_t host_rng_state[2] = {0};
-        NVTE_CHECK_CUDA(hipMemcpyAsync(host_rng_state, devPtrRngState, 2 * sizeof(uint64_t),
-                                       hipMemcpyDeviceToHost, stream));
-        NVTE_CHECK_CUDA(hipStreamSynchronize(stream));
-        drop_seed   = host_rng_state[0];
-        drop_offset = host_rng_state[1];
-    }
+    size_t workspace_size = 0;
+
+    void *devPtrDropoutSeed = rng_state->data.dptr;
+    void *devPtrDropoutOffset =
+        reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr) + 1);
 
     ck_fused_attn_fwd_impl(batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv,
-                           head_dim, bias_b, bias_h, is_training, attn_scale, p_dropout, drop_seed,
-                           drop_offset, attn_bias_type, attn_mask_type, devPtrQ, devPtrK, devPtrV,
-                           devPtrBias, devPtrS, devPtrO, devPtrCuSeqlensQ, devPtrCuSeqlensKV,
-                           get_datatype_str(QKV_type), stream);
+                           head_dim, bias_b, bias_h, is_training, attn_scale, p_dropout,
+                           devPtrDropoutSeed, devPtrDropoutOffset, attn_bias_type, attn_mask_type,
+                           devPtrQ, devPtrK, devPtrV, devPtrBias, devPtrS, devPtrO,
+                           devPtrCuSeqlensQ, devPtrCuSeqlensKV, get_datatype_str(QKV_type),
+                           &workspace->data.dptr, &workspace_size, stream);
+
+    if (workspace_size > 0) {
+        if (workspace->data.dptr == nullptr) {
+            workspace->data.shape = {workspace_size};
+            workspace->data.dtype = DType::kByte;
+            return;
+        }
+    } else if (workspace_size == 0) {
+        workspace->data.shape = {1};
+        workspace->data.dtype = DType::kByte;
+        return;
+    } else {
+        NVTE_ERROR("Unexpected workspace_size");
+    }
 }
 
 void ck_fused_attn_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
@@ -115,7 +123,7 @@ void ck_fused_attn_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_group
                        Tensor *output_dK, Tensor *output_dV, Tensor *output_dBias,
                        const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv,
                        const Tensor *rng_state, Tensor *workspace, bool deterministic,
-                       hipStream_t stream) {
+                       cudaStream_t stream) {
     const auto QKV_type = input_Q->data.dtype;
     void *devPtrQ       = input_Q->data.dptr;
     void *devPtrK       = input_K->data.dptr;
@@ -169,31 +177,28 @@ void ck_fused_attn_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_group
     void *devPtrSoftmaxStats = output_S->data.dptr;
     void *devPtrCuSeqlensQ   = cu_seqlens_q->data.dptr;
     void *devPtrCuSeqlensKV  = cu_seqlens_kv->data.dptr;
+
+    size_t workspace_size = 0;
     void *devPtrDropoutSeed  = rng_state->data.dptr;
     void *devPtrDropoutOffset =
         reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr) + 1);
 
-    size_t workspace_size = 0;
+    static bool bwd_v3         = getenv<int>("NVTE_CK_BWD_V3") == 1;
+    static bool v3_atomic_fp32 = getenv<int>("NVTE_CK_V3_ATOMIC_FP32") == 1;
+    static bool v3_spec        = getenv<int>("NVTE_CK_V3_SPEC") == 1;
+    static int  v3_bf16_cvt    = getenv<int>("NVTE_CK_V3_BF16_CVT");
 
-    uint64_t drop_seed   = 0;
-    uint64_t drop_offset = 0;
-    if (p_dropout > 0) {
-        void *devPtrRngState = rng_state->data.dptr;
-        static thread_local uint64_t host_rng_state[2] = {0};
-        NVTE_CHECK_CUDA(hipMemcpyAsync(host_rng_state, devPtrRngState, 2 * sizeof(uint64_t),
-                                       hipMemcpyDeviceToHost, stream));
-        NVTE_CHECK_CUDA(hipStreamSynchronize(stream));
-        drop_seed   = host_rng_state[0];
-        drop_offset = host_rng_state[1];
+    if (v3_bf16_cvt < 0 || v3_bf16_cvt > 2) {
+        NVTE_ERROR("Invalid NVTE_CK_V3_BF16_CVT value");
     }
 
-    ck_fused_attn_bwd_impl(batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv,
-                           head_dim, bias_b, bias_h, attn_scale, p_dropout, drop_seed, drop_offset,
-                           attn_bias_type, attn_mask_type, devPtrQ, devPtrK, devPtrV, devPtrO,
-                           devPtrSoftmaxStats, devPtrBias, devPtrdQ, devPtrdK, devPtrdV, devPtrdO,
-                           devPtrdBias, devPtrCuSeqlensQ, devPtrCuSeqlensKV,
-                           get_datatype_str(QKV_type), workspace->data.dptr, &workspace_size,
-                           deterministic, stream);
+    ck_fused_attn_bwd_impl(
+        batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim, bias_b,
+        bias_h, attn_scale, p_dropout, devPtrDropoutSeed, devPtrDropoutOffset, attn_bias_type, attn_mask_type,
+        devPtrQ, devPtrK, devPtrV, devPtrO, devPtrSoftmaxStats, devPtrBias, devPtrdQ, devPtrdK,
+        devPtrdV, devPtrdO, devPtrdBias, devPtrCuSeqlensQ, devPtrCuSeqlensKV,
+        get_datatype_str(QKV_type), workspace->data.dptr, &workspace_size, deterministic, bwd_v3,
+        v3_atomic_fp32, v3_spec, v3_bf16_cvt, stream);
 
     if (workspace_size > 0) {
         if (workspace->data.dptr == nullptr) {
@@ -208,7 +213,6 @@ void ck_fused_attn_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_group
     } else {
         NVTE_ERROR("Unexpected workspace_size");
     }
-
 }
 
 }  // namespace fused_attn_rocm

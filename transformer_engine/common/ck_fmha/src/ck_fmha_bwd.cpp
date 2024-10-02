@@ -6,9 +6,6 @@
 #include "fmha_bwd.hpp"
 #include "mask.hpp"
 
-// #include <mutex>
-// std::mutex g_mtx;
-
 template <typename DataType>
 __global__ void reshape_and_sum(DataType *dk, const DataType *dk_expanded, DataType *dv,
                                 const DataType *dv_expanded, int batch_size, int seqlen_k,
@@ -83,14 +80,15 @@ __global__ void reshape_and_sum<ck_tile::bf16_t>(ck_tile::bf16_t *dk,
 
 void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d,
                             int64_t bias_b, int64_t bias_h, float scaling_factor,
-                            float dropout_probability, uint64_t drop_seed, uint64_t drop_offset,
-                            uint32_t bias_type, uint32_t mask_type, void *devPtrQ,
-                            void *devPtrKTranspose, void *devPtrVTranspose, void *devPtrO,
-                            void *devPtrSoftmaxStats, void *devPtrBias, void *devPtrdQ,
-                            void *devPtrdK, void *devPtrdV, void *devPtrdO, void *devPtrdBias,
-                            void *devPtrCuSeqlensQ, void *devPtrCuSeqlensKV,
+                            float dropout_probability, void *devPtrDropoutSeed,
+                            void *devPtrDropoutOffset, uint32_t bias_type, uint32_t mask_type,
+                            void *devPtrQ, void *devPtrKTranspose, void *devPtrVTranspose,
+                            void *devPtrO, void *devPtrSoftmaxStats, void *devPtrBias,
+                            void *devPtrdQ, void *devPtrdK, void *devPtrdV, void *devPtrdO,
+                            void *devPtrdBias, void *devPtrCuSeqlensQ, void *devPtrCuSeqlensKV,
                             const std::string &data_type, void *workspace, size_t *workspace_size,
-                            bool deterministic, hipStream_t stream) {
+                            bool deterministic, bool bwd_v3, bool v3_atomic_fp32, bool v3_spec,
+                            int v3_bf16_cvt, hipStream_t stream) {
     /* CK input parameters */
     ck_tile::index_t batch          = b;
     ck_tile::index_t seqlen_q       = s_q;
@@ -107,18 +105,14 @@ void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
     ck_tile::index_t kN0            = (hdim_q <= 128) ? 128 : 64;
     ck_tile::index_t nsplits = deterministic ? ck_tile::integer_divide_ceil(max_seqlen_k, kN0) : 1;
 
-    float scale_s          = scaling_factor;
-    float p_drop           = dropout_probability;
-    float p_undrop         = 1.0 - p_drop;
-    bool  is_group_mode    = false;
-    bool  is_mqa_gqa       = (h > hg);
-    bool  has_dropout      = (p_drop > 0.f);
-    bool  has_dbias        = (devPtrdBias != nullptr);
-    bool  s_randval        = false;
-    bool  ext_asm          = true;
-    bool  asm_atomic_fp32  = false;
-    bool  asm_no_coex      = false;
-    bool  asm_rtz_cvt      = true;
+    float scale_s      = scaling_factor;
+    float p_drop       = dropout_probability;
+    float p_undrop     = 1.0 - p_drop;
+    bool is_group_mode = false;
+    bool is_mqa_gqa    = (h > hg);
+    bool has_dropout   = (p_drop > 0.f);
+    bool has_dbias     = (devPtrdBias != nullptr);
+    bool s_randval     = false;
 
     ck_tile::index_t window_size_left;
     ck_tile::index_t window_size_right;
@@ -142,10 +136,13 @@ void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
 
     size_t d_size           = float_size * batch * nhead * max_seqlen_q;
     size_t dq_size          = bf16_size * batch * shape_seqlen_q * nhead * hdim_q;
-    //size_t dq_acc_size      = float_size * nsplits * shape_batch * shape_seqlen_q * nhead * hdim_q;
-    //size_t dq_acc_size      = 0;
+    size_t dq_acc_size      = 0;
     size_t dk_expanded_size = 0;
     size_t dv_expanded_size = 0;
+
+    if (!bwd_v3 || v3_atomic_fp32) {
+        dq_acc_size = float_size * nsplits * shape_batch * shape_seqlen_q * nhead * hdim_q;
+    }
 
     if (is_mqa_gqa) {
         dk_expanded_size = bf16_size * batch * nhead * shape_seqlen_k * hdim_q;
@@ -153,40 +150,41 @@ void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
     }
 
     if (workspace == nullptr) {
-        //*workspace_size = d_size + dq_acc_size + dk_expanded_size + dv_expanded_size;
-        *workspace_size = d_size + dk_expanded_size + dv_expanded_size;
+        *workspace_size = d_size + dq_acc_size + dk_expanded_size + dv_expanded_size;
         return;
     }
 
     void *devPtrD          = workspace;
-    //void *devPtrdQAcc      = reinterpret_cast<void *>(reinterpret_cast<char *>(devPtrD) + d_size);
+    void *devPtrdQAcc      = reinterpret_cast<void *>(reinterpret_cast<char *>(devPtrD) + d_size);
     void *devPtrdKExpanded = nullptr;
     void *devPtrdVExpanded = nullptr;
+
     CHECK_HIP_ERROR(hipMemsetAsync(devPtrdQ, 0, dq_size, stream));
-    //CHECK_HIP_ERROR(hipMemsetAsync(devPtrdQAcc, 0, dq_acc_size, stream));
+    if (dq_acc_size > 0) {
+        CHECK_HIP_ERROR(hipMemsetAsync(devPtrdQAcc, 0, dq_acc_size, stream));
+    }
     if (is_mqa_gqa) {
         devPtrdKExpanded =
-            reinterpret_cast<void *>(reinterpret_cast<char *>(devPtrD) + d_size);
-            // reinterpret_cast<void *>(reinterpret_cast<char *>(devPtrdQAcc) + dq_acc_size);
+            reinterpret_cast<void *>(reinterpret_cast<char *>(devPtrdQAcc) + dq_acc_size);
         devPtrdVExpanded =
             reinterpret_cast<void *>(reinterpret_cast<char *>(devPtrdKExpanded) + dk_expanded_size);
     }
 
     const auto init_traits = [&](auto &traits) {
-        traits.hdim_q             = hdim_q;
-        traits.hdim_v             = hdim_v;
-        traits.data_type          = data_type;
-        traits.is_group_mode      = is_group_mode;
-        traits.mask_type          = static_cast<mask_enum>(mask_type);
-        traits.bias_type          = static_cast<bias_enum>(bias_type);
-        traits.has_dbias          = has_dbias;
-        traits.has_dropout        = has_dropout;
-        traits.is_store_randval   = s_randval;
-        traits.is_deterministic   = deterministic;
-        traits.uses_ext_asm       = ext_asm;
-        traits.is_asm_atomic_fp32 = asm_atomic_fp32;
-        traits.is_asm_no_coex     = asm_no_coex;
-        traits.is_asm_rtz_cvt     = asm_rtz_cvt;
+        traits.hdim_q            = hdim_q;
+        traits.hdim_v            = hdim_v;
+        traits.data_type         = data_type;
+        traits.is_group_mode     = is_group_mode;
+        traits.mask_type         = static_cast<mask_enum>(mask_type);
+        traits.bias_type         = static_cast<bias_enum>(bias_type);
+        traits.has_dbias         = has_dbias;
+        traits.has_dropout       = has_dropout;
+        traits.is_store_randval  = s_randval;
+        traits.is_deterministic  = deterministic;
+        traits.uses_bwd_v3       = bwd_v3;
+        traits.is_v3_atomic_fp32 = v3_atomic_fp32;
+        traits.is_v3_spec        = v3_spec;
+        traits.how_v3_bf16_cvt   = v3_bf16_cvt;
     };
 
     const auto init_args = [&](auto &args) {
@@ -239,8 +237,7 @@ void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
         args.dk_ptr       = (is_mqa_gqa ? devPtrdKExpanded : devPtrdK);
         args.dv_ptr       = (is_mqa_gqa ? devPtrdVExpanded : devPtrdV);
         args.dbias_ptr    = devPtrdBias;
-        args.dq_acc_ptr   = nullptr;
-        // args.dq_acc_ptr   = devPtrdQAcc;
+        args.dq_acc_ptr   = devPtrdQAcc;
 
         args.seqstart_q_ptr = devPtrCuSeqlensQ;
         args.seqstart_k_ptr = devPtrCuSeqlensKV;
@@ -305,32 +302,15 @@ void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
         args.window_size_right = window_size_right;
         args.mask_type         = mask_type;
 
-        args.p_drop           = p_drop;
-        args.p_undrop         = p_undrop;
-        args.drop_seed_offset = std::make_tuple(drop_seed, drop_offset);
+        args.p_drop   = p_drop;
+        args.p_undrop = p_undrop;
+        args.drop_seed_offset =
+            std::pair<const void *, const void *>{devPtrDropoutSeed, devPtrDropoutOffset};
     };
 
     fmha_bwd_traits fmha_traits;
     init_traits(fmha_traits);
-    /*
-    {
-        std::lock_guard<std::mutex> lock(g_mtx);
-        std::cout << "fmha_traits:" << std::endl;
-        std::cout << "  hdim_q: " << fmha_traits.hdim_q << std::endl;
-        std::cout << "  hdim_v: " << fmha_traits.hdim_v << std::endl;
-        std::cout << "  data_type: " << fmha_traits.data_type << std::endl;
-        std::cout << "  is_group_mode: " << fmha_traits.is_group_mode << std::endl;
-        std::cout << "  mask_type: " << static_cast<uint32_t>(fmha_traits.mask_type) << std::endl;
-        std::cout << "  bias_type: " << static_cast<uint32_t>(fmha_traits.bias_type) << std::endl;
-        std::cout << "  has_dbias: " << fmha_traits.has_dbias << std::endl;
-        std::cout << "  has_dropout: " << fmha_traits.has_dropout << std::endl;
-        std::cout << "  is_store_randval: " << fmha_traits.is_store_randval << std::endl;
-        std::cout << "  is_deterministic: " << fmha_traits.is_deterministic << std::endl;
-        std::cout << "  uses_ext_asm: " << fmha_traits.uses_ext_asm << std::endl;
-        std::cout << "  is_asm_atomic_fp32: " << fmha_traits.is_asm_atomic_fp32 << std::endl;
-        std::cout << "  is_asm_no_coex: " << fmha_traits.is_asm_no_coex << std::endl;
-    }
-    */
+
     fmha_bwd_args fmha_args;
     init_args(fmha_args);
 
@@ -352,6 +332,5 @@ void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
                            static_cast<ck_tile::bf16_t *>(devPtrdV),
                            static_cast<ck_tile::bf16_t *>(devPtrdVExpanded), batch, seqlen_k, nhead,
                            nhead_k, hdim_q);
-        //CHECK_HIP_ERROR(hipStreamSynchronize(stream));
     }
 }
