@@ -39,6 +39,7 @@ if(USE_CUDA)
   endif()
 elseif(USE_ROCM)
   message(STATUS "USE_ROCM ${USE_ROCM}")
+  set(CMAKE_HIP_PLATFORM amd)
   if(DEFINED ENV{ROCM_PATH})
     set(ROCM_PATH $ENV{ROCM_PATH})
   elseif(EXISTS "/opt/rocm")
@@ -83,7 +84,6 @@ elseif(USE_ROCM)
     -mavx2
     -mf16c
     -mfma
-    -ffast-math
     -fno-gpu-rdc
     -Wno-defaulted-function-deleted)
   # build error will be dup-ed parallel-jobs times

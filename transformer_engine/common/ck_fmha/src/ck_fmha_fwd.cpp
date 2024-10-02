@@ -8,11 +8,12 @@
 
 void ck_fused_attn_fwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d,
                             int64_t bias_b, int64_t bias_h, bool is_training, float scaling_factor,
-                            float dropout_probability, uint64_t drop_seed, uint64_t drop_offset,
-                            uint32_t bias_type, uint32_t mask_type, void *devPtrQ, void *devPtrK,
-                            void *devPtrV, void *devPtrBias, void *devPtrSoftmaxStats,
-                            void *devPtrO, void *devPtrCuSeqlensQ, void *devPtrCuSeqlensKV,
-                            const std::string &data_type, hipStream_t stream) {
+                            float dropout_probability, void *devPtrDropoutSeed,
+                            void *devPtrDropoutOffset, uint32_t bias_type, uint32_t mask_type,
+                            void *devPtrQ, void *devPtrK, void *devPtrV, void *devPtrBias,
+                            void *devPtrSoftmaxStats, void *devPtrO, void *devPtrCuSeqlensQ,
+                            void *devPtrCuSeqlensKV, const std::string &data_type, void *workspace,
+                            size_t *workspace_size, hipStream_t stream) {
     /* CK input parameters */
     ck_tile::index_t batch          = b;
     ck_tile::index_t seqlen_q       = s_q;
@@ -53,6 +54,12 @@ void ck_fused_attn_fwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
         window_size_right = 0;
     } else {
         throw std::runtime_error("Unsupported mask type");
+    }
+
+    if (workspace == nullptr) {
+        // CK FMHA FWD does not require any additional workspace memory
+        *workspace_size = 0;
+        return;
     }
 
     const auto init_traits = [&](auto &traits) {
@@ -100,7 +107,7 @@ void ck_fused_attn_fwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
         args.rand_val_ptr = nullptr;
         args.lse_ptr      = devPtrSoftmaxStats;
         args.o_ptr        = devPtrO;
-    
+
         args.seqstart_q_ptr = devPtrCuSeqlensQ;
         args.seqstart_k_ptr = devPtrCuSeqlensKV;
         args.seqlen_k_ptr   = nullptr;
@@ -145,9 +152,10 @@ void ck_fused_attn_fwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
         args.window_size_right = window_size_right;
         args.mask_type         = mask_type;
 
-        args.p_drop           = p_drop;
-        args.s_randval        = s_randval;
-        args.drop_seed_offset = std::tie(drop_seed, drop_offset);
+        args.p_drop    = p_drop;
+        args.s_randval = s_randval;
+        args.drop_seed_offset =
+            std::pair<const void *, const void *>{devPtrDropoutSeed, devPtrDropoutOffset};
     };
 
     fmha_fwd_traits fmha_traits;

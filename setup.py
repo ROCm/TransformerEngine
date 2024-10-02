@@ -459,6 +459,7 @@ def configure_rocm() -> List[str]:
     use_hipblaslt = "ON" if os.getenv("NVTE_USE_HIPBLASLT", "0") == "1" else "OFF"
     rocm_path = os.getenv("ROCM_PATH", "/opt/rocm")
     hip_compiler_flags = [
+        "-fno-offload-uniform-block",
         "-Xclang -mllvm",
         "-mllvm -amdgpu-early-inline-all=true",
         "-mllvm -amdgpu-function-calls=false",
@@ -483,7 +484,7 @@ def configure_rocm() -> List[str]:
     hip_compiler_flags = " ".join(hip_compiler_flags)
 
     return [
-        f"-DCMAKE_PREFIX_PATH={rocm_path}",
+        f"-DCMAKE_PREFIX_PATH={rocm_path};{rocm_path}/llvm;{rocm_path}/hip",
         f"-DCMAKE_CXX_COMPILER:PATH={rocm_path}/bin/amdclang++",
         f"-DCMAKE_HIP_COMPILER:PATH={rocm_path}/bin/amdclang++",
         f"-DCMAKE_CXX_FLAGS={hip_compiler_flags}",
