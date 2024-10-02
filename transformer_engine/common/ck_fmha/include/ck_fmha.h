@@ -3,8 +3,9 @@
 
 #include <hip/hip_runtime.h>
 
-#include <iostream>
 #include <cstdint>
+#include <cstdlib>
+#include <iostream>
 #include <string>
 
 #define CHECK_HIP_ERROR(expr)                                                            \
@@ -24,7 +25,8 @@ void ck_fused_attn_fwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
                             uint32_t bias_type, uint32_t mask_type, void *devPtrQ, void *devPtrK,
                             void *devPtrV, void *devPtrBias, void *devPtrSoftmaxStats,
                             void *devPtrO, void *devPtrCuSeqlensQ, void *devPtrCuSeqlensKV,
-                            const std::string &data_type, hipStream_t stream);
+                            const std::string &data_type, void *workspace, size_t *workspace_size,
+                            hipStream_t stream);
 
 void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d,
                             int64_t bias_b, int64_t bias_h, float scaling_factor,
@@ -35,6 +37,7 @@ void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
                             void *devPtrdK, void *devPtrdV, void *devPtrdO, void *devPtrdBias,
                             void *devPtrCuSeqlensQ, void *devPtrCuSeqlensKV,
                             const std::string &data_type, void *workspace, size_t *workspace_size,
-                            bool deterministic, hipStream_t stream);
+                            bool deterministic, bool bwd_v3, bool v3_atomic_fp32,
+                            bool v3_spec, bool v3_rtz_cvt, hipStream_t stream);
 
 #endif

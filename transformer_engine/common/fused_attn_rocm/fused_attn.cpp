@@ -7,8 +7,8 @@
 
 #include "transformer_engine/fused_attn.h"
 
-#include <iostream>
 #include <cstdlib>
+#include <iostream>
 #include <mutex>
 
 #include "../common.h"
@@ -18,8 +18,6 @@
 #include "utils.h"
 
 using namespace transformer_engine;
-
-std::mutex g_fused_attn_mutex;
 
 std::string get_dtype_str(NVTEDType dtype) {
     switch (dtype) {
@@ -121,7 +119,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
                          float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
                          NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-                         NVTETensor workspace, hipStream_t stream) {
+                         NVTETensor workspace, cudaStream_t stream) {
     const Tensor *input_cu_seqlens_q  = reinterpret_cast<const Tensor *>(cu_seqlens_q);
     const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor *>(cu_seqlens_kv);
     const Tensor *input_rng_state     = reinterpret_cast<const Tensor *>(rng_state);
@@ -131,6 +129,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
     const Tensor *input_Bias          = reinterpret_cast<const Tensor *>(Bias);
     Tensor *input_output_S            = reinterpret_cast<Tensor *>(S);
     Tensor *output_O                  = reinterpret_cast<Tensor *>(O);
+    Tensor *wkspace                   = reinterpret_cast<Tensor *>(workspace);
 
     auto ndim   = input_Q->data.shape.size();
     size_t b    = input_cu_seqlens_q->data.shape[0] - 1;
@@ -141,29 +140,10 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
     const NVTEDType Q_type  = static_cast<NVTEDType>(input_Q->data.dtype);
     const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
 
-    if (const char *env_p = std::getenv("NVTE_LOG_CK_CONFIG");
-        env_p != nullptr && std::string(env_p) == "1") {
-        std::lock_guard<std::mutex> lock(g_fused_attn_mutex);
-        std::cout << std::endl << "Fused Attention Config:" << std::endl;
-        std::cout << "Q_type: " << get_dtype_str(Q_type) << std::endl;
-        std::cout << "KV_type: " << get_dtype_str(KV_type) << std::endl;
-        std::cout << "batch: " << b << std::endl;
-        std::cout << "max_seqlen_q: " << max_seqlen_q << std::endl;
-        std::cout << "max_seqlen_kv: " << max_seqlen_kv << std::endl;
-        std::cout << "num_attn_heads: " << h_q << std::endl;
-        std::cout << "num_gqa_groups: " << h_kv << std::endl;
-        std::cout << "d: " << d << std::endl;
-        std::cout << "attn_scale: " << attn_scale << std::endl;
-        std::cout << "dropout: " << dropout << std::endl;
-        std::cout << "qkv_layout: " << get_qkv_layout_str(qkv_layout) << std::endl;
-        std::cout << "bias_type: " << get_bias_type_str(bias_type) << std::endl;
-        std::cout << "attn_mask_type: " << get_mask_type_str(attn_mask_type) << std::endl;
-    }
-
     fused_attn_rocm::ck_fused_attn_fwd(
         b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, is_training, attn_scale, dropout, qkv_layout,
         bias_type, attn_mask_type, input_Q, input_K, input_V, input_Bias, output_O, Aux_CTX_Tensors,
-        input_cu_seqlens_q, input_cu_seqlens_kv, input_rng_state, stream);
+        input_cu_seqlens_q, input_cu_seqlens_kv, input_rng_state, wkspace, stream);
 }
 
 // NVTE fused attention BWD with separate Q, K and V
@@ -212,8 +192,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
         input_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
     }
 
-    const char *env_var = std::getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO");
-    bool deterministic  = (env_var != nullptr && std::string(env_var) != "0") ? false : true;
+    bool deterministic = getenv<int>("NVTE_ALLOW_NONDETERMINISTIC_ALGO") == 0;
 
     fused_attn_rocm::ck_fused_attn_bwd(
         b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, attn_scale, dropout, qkv_layout, bias_type,

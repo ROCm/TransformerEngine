@@ -14,7 +14,7 @@ void ck_fused_attn_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_group
                        const Tensor *input_K, const Tensor *input_V, const Tensor *input_Bias,
                        Tensor *output_O, NVTETensorPack *Aux_CTX_Tensors,
                        const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv,
-                       const Tensor *rng_state, hipStream_t stream);
+                       const Tensor *rng_state, Tensor *workspace, cudaStream_t stream);
 
 void ck_fused_attn_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
                        size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim, float attn_scale,
@@ -25,7 +25,7 @@ void ck_fused_attn_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_group
                        Tensor *output_dK, Tensor *output_dV, Tensor *output_dBias,
                        const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv,
                        const Tensor *rng_state, Tensor *workspace, bool deterministic,
-                       hipStream_t stream);
+                       cudaStream_t stream);
 
 }  // namespace fused_attn_rocm
 }  // namespace transformer_engine

@@ -9,26 +9,46 @@ file(MAKE_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/gen_src)
 set(CK_GEN_DIR "${CMAKE_CURRENT_LIST_DIR}/gen_src")
 set(CK_SRC_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/composable_kernel")
 
-execute_process(
-  COMMAND python3 ${CK_SRC_DIR}/example/ck_tile/01_fmha/generate.py
-  --api fwd --output_dir ${CK_GEN_DIR} --receipt 2
-)
-execute_process(
-  COMMAND python3 ${CK_SRC_DIR}/example/ck_tile/01_fmha/generate.py
-  --api bwd --output_dir ${CK_GEN_DIR} --receipt 2
-)
+# Function to replace a string in a file
+function(replace_string_in_file input_file search_str replace_str)
+  file(READ ${input_file} file_content)
+  string(REPLACE "${search_str}" "${replace_str}" new_content "${file_content}")
+  if(NOT "${file_content}" STREQUAL "${new_content}")
+    file(WRITE ${input_file} "${new_content}")
+  endif()
+endfunction()
 
-# Copy the header files needed
-# Glob all .hpp files in the source directory
-file(GLOB HPP_FILES "${CK_SRC_DIR}/example/ck_tile/01_fmha/*.hpp")
+file(COPY "${CK_SRC_DIR}/example/ck_tile/01_fmha/generate.py"
+     DESTINATION ${CMAKE_CURRENT_LIST_DIR})
+file(COPY "${CK_SRC_DIR}/example/ck_tile/01_fmha/codegen"
+     DESTINATION ${CMAKE_CURRENT_LIST_DIR})
+
+set(CK_BWD_GEN_FILE "${CMAKE_CURRENT_LIST_DIR}/codegen/ops/fmha_bwd.py")
+
+if(EXISTS "${CK_BWD_GEN_FILE}")
+  replace_string_in_file(${CK_BWD_GEN_FILE} "static fmha_bwd_v3_kernel"
+                         "static thread_local fmha_bwd_v3_kernel")
+else()
+  message(FATAL_ERROR "CK BWD code generator file not found: ${CK_BWD_GEN_FILE}")
+endif()
+
+execute_process(
+  COMMAND python3 "${CMAKE_CURRENT_LIST_DIR}/generate.py" --api fwd
+          --output_dir ${CK_GEN_DIR} --receipt 2)
+execute_process(
+  COMMAND python3 "${CMAKE_CURRENT_LIST_DIR}/generate.py" --api bwd
+          --output_dir ${CK_GEN_DIR} --receipt 2)
+
+# Copy the header files needed Glob all .hpp files in the source directory
+file(GLOB CK_HPP_FILES "${CK_SRC_DIR}/example/ck_tile/01_fmha/*.hpp")
 
 # Copy each .hpp file to the destination directory
-foreach(HPP_FILE ${HPP_FILES})
-  get_filename_component(FILE_NAME ${HPP_FILE} NAME)
-  file(COPY ${HPP_FILE} DESTINATION ${CMAKE_CURRENT_LIST_DIR}/src)
+foreach(CK_HPP_FILE ${CK_HPP_FILES})
+  file(COPY ${CK_HPP_FILE} DESTINATION ${CMAKE_CURRENT_LIST_DIR}/src)
 endforeach()
 
-file(COPY "${CK_SRC_DIR}/example/ck_tile/01_fmha/hsaco" DESTINATION ${CMAKE_CURRENT_LIST_DIR}/src)
+file(COPY "${CK_SRC_DIR}/example/ck_tile/01_fmha/hsaco"
+     DESTINATION ${CMAKE_CURRENT_LIST_DIR}/src)
 set(CK_HSACO_DIR "${CMAKE_CURRENT_LIST_DIR}/src/hsaco")
 
 if(DEFINED ENV{PYTORCH_ROCM_ARCH})
@@ -41,9 +61,7 @@ set(CMAKE_HIP_ARCHITECTURES ${ROCM_ARCH})
 message(STATUS "ROCM_ARCH: ${ROCM_ARCH}")
 
 set(CK_FMHA_SOURCES)
-list(APPEND CK_FMHA_SOURCES
-       src/ck_fmha_fwd.cpp
-       src/ck_fmha_bwd.cpp)
+list(APPEND CK_FMHA_SOURCES src/ck_fmha_fwd.cpp src/ck_fmha_bwd.cpp)
 
 # Glob all generated .cpp files and append to CK_FMHA_SOURCES
 file(GLOB_RECURSE CK_GEN_CPP_FILES "${CK_GEN_DIR}/*.cpp")
@@ -58,13 +76,14 @@ cmake_host_system_information(RESULT NUM_CORES QUERY NUMBER_OF_LOGICAL_CORES)
 
 # Check if CK_PARALLEL_COMPILE_JOBS is not set
 if(NOT DEFINED CK_PARALLEL_COMPILE_JOBS)
-    # Set the value based on the number of available processors
-    set(CK_PARALLEL_COMPILE_JOBS ${NUM_CORES})
+  # Set the value based on the number of available processors
+  set(CK_PARALLEL_COMPILE_JOBS ${NUM_CORES})
 endif()
 
 if(CK_PARALLEL_COMPILE_JOBS)
-    set_property(GLOBAL APPEND PROPERTY JOB_POOLS compile_job_pool=${CK_PARALLEL_COMPILE_JOBS})
-    set(CMAKE_JOB_POOL_COMPILE compile_job_pool)
+  set_property(GLOBAL APPEND
+               PROPERTY JOB_POOLS compile_job_pool=${CK_PARALLEL_COMPILE_JOBS})
+  set(CMAKE_JOB_POOL_COMPILE compile_job_pool)
 endif()
 
 add_library(ck STATIC ${CK_FMHA_SOURCES})
@@ -73,47 +92,46 @@ add_library(ck_fmha_options INTERFACE)
 # CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=3: assembly-based BF16 RTN conversion
 # BF16 RTN conversion is currently disabled due to performance concerns.
 # IMPORTANT: Using truncation mode will cause unit tests to fail.
-target_compile_definitions(ck_fmha_options INTERFACE
-  CK_TILE_FMHA_FWD_FAST_EXP2=1
-  CK_USE_XDL
-)
+target_compile_definitions(
+  ck_fmha_options
+  INTERFACE CK_TILE_FMHA_FWD_FAST_EXP2=1
+            CK_USE_XDL)
 
-target_compile_definitions(ck_fmha_options INTERFACE
-  CK_ENABLE_BF8
-  CK_ENABLE_FP8
-  CK_ENABLE_INT8
-  CK_ENABLE_BF16
-  CK_ENABLE_FP16
-  CK_ENABLE_FP32
-  CK_ENABLE_FP64
-)
+target_compile_definitions(
+  ck_fmha_options
+  INTERFACE CK_ENABLE_BF8
+            CK_ENABLE_FP8
+            CK_ENABLE_INT8
+            CK_ENABLE_BF16
+            CK_ENABLE_FP16
+            CK_ENABLE_FP32
+            CK_ENABLE_FP64)
 
 # Compiler-specific options
-target_compile_options(ck_fmha_options INTERFACE
-  $<$<CXX_COMPILER_ID:Clang>:
-    -fcolor-diagnostics
-    -fgpu-flush-denormals-to-zero
-    -fno-offload-uniform-block
-    -ftemplate-backtrace-limit=0
-    -fPIC
-    -Wno-float-equal
-    -Wno-gnu-line-marker
-    -Wno-undefined-func-template
-  >
-)
+target_compile_options(
+  ck_fmha_options
+  INTERFACE -fcolor-diagnostics
+            -fgpu-flush-denormals-to-zero
+            -fno-offload-uniform-block
+            -ftemplate-backtrace-limit=0
+            -fPIC
+            -Wno-float-equal
+            -Wno-gnu-line-marker
+            -Wno-undefined-func-template)
 
 set(CK_INCLUDE_DIR "${CK_SRC_DIR}/include")
 message(STATUS "ck_include_dir: ${CK_INCLUDE_DIR}")
 
 if(NOT EXISTS "${CK_INCLUDE_DIR}")
-  message(FATAL_ERROR
-          "Could not find CK API. "
-          "Try running 'git submodule update --init' "
-          "within the Transformer Engine source.")
+  message(
+    FATAL_ERROR
+      "Could not find CK API. " "Try running 'git submodule update --init' "
+      "within the Transformer Engine source.")
 endif()
 
 target_include_directories(ck PUBLIC ${CMAKE_CURRENT_LIST_DIR}/include)
-target_include_directories(ck PRIVATE ${CK_INCLUDE_DIR} ${CMAKE_CURRENT_LIST_DIR}/src)
+target_include_directories(ck PRIVATE ${CK_INCLUDE_DIR}
+                                      ${CMAKE_CURRENT_LIST_DIR}/src)
 
 list(APPEND CK_FMHA_LINKER_LIBS hip::host hip::device Threads::Threads roctx64)
 target_link_libraries(ck PUBLIC ${CK_FMHA_LINKER_LIBS})
@@ -122,5 +140,6 @@ target_link_libraries(ck PRIVATE ck_fmha_options)
 include(GNUInstallDirs)
 message(STATUS "CMAKE_INSTALL_PREFIX: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "CMAKE_INSTALL_INCLUDEDIR: ${CMAKE_INSTALL_INCLUDEDIR}")
-install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include" DESTINATION ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_INCLUDEDIR})
 install(TARGETS ck DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
