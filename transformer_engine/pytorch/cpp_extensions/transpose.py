@@ -3,10 +3,12 @@
 # See LICENSE for license information.
 
 """Python interface for transpose extensions"""
+import os
 from typing import Optional, Tuple, Union
 import torch
 import transformer_engine_extensions as tex
 from ..constants import TE_DType
+from ..cast_transpose_triton import te_cast_transpose_triton
 
 
 __all__ = ['fp8_cast_transpose_fused',
@@ -33,15 +35,28 @@ def fp8_cast_transpose_fused(
         )
         return_outputs = True
 
-    tex.fused_cast_transpose(
-        inp,
-        fp8_meta_tensor.scale[fp8_tensor],
-        fp8_meta_tensor.amax_history[0][fp8_tensor],
-        fp8_meta_tensor.scale_inv[fp8_tensor],
-        cast_out,
-        transpose_out,
-        otype,
-    )
+    use_cast_transpose_triton = bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+    if use_cast_transpose_triton:
+        cast_out, transpose_out, fp8_meta_tensor.amax_history[0][fp8_tensor] = te_cast_transpose_triton(
+            inp,
+            fp8_meta_tensor.scale[fp8_tensor],
+            cast_out,
+            transpose_out,
+            fp8_meta_tensor.amax_history[0][fp8_tensor],
+            #fp8_meta_tensor.scale_inv[fp8_tensor],
+            otype,
+        )
+    else:
+        tex.fused_cast_transpose(
+            inp,
+            fp8_meta_tensor.scale[fp8_tensor],
+            fp8_meta_tensor.amax_history[0][fp8_tensor],
+            fp8_meta_tensor.scale_inv[fp8_tensor],
+            cast_out,
+            transpose_out,
+            otype,
+        )
+
 
     if return_outputs:
         return cast_out, transpose_out
