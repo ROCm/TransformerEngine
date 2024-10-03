@@ -415,10 +415,6 @@ hipError_t ck_attn_bwd(
         static_cast<CK_TILE_TYPE*>(dk_ptr),
         static_cast<CK_TILE_TYPE*>(dv_ptr),
         stride_b_dk, stride_h_dk, stride_s_dk););
-    //reduce the dkv expanded to dk kv
-    if(hipStreamSynchronize(stream)!=hipSuccess){
-      throw std::runtime_error("failed sync in dk_dv_reduce in mqa/gqa.");
-    }
   }
   return hipSuccess;
 }

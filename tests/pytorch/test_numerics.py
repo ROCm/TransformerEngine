@@ -118,7 +118,7 @@ def rocm_attn_tols() -> Dict[str, float]:
             pass
         else:
             return dict(atol=5e-2, rtol=5e-2)
-    return []
+    return {}
 
 
 def assert_allclose(
@@ -1502,7 +1502,7 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     if IS_HIP_EXTENSION:
         use_hipblaslt = (os.getenv("NVTE_USE_HIPBLASLT") is not None)
         if use_hipblaslt: 
-            torch.testing.assert_close([y_bshd], [y_sbhd.transpose(0, 1).contiguous()], atol=1e-5)
+            torch.testing.assert_close([y_bshd], [y_sbhd.transpose(0, 1).contiguous()])
         else:
             torch.equal(y_bshd, y_sbhd.transpose(0, 1).contiguous())
     else:
