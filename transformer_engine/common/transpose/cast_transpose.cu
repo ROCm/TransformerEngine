@@ -92,7 +92,7 @@ cast_transpose_kernel(const IType * const input,
                             (my_id_in_warp + warp_id / n_warps_per_tile * THREADS_PER_WARP) *
                             (THREADS_PER_WARP + 1);
 
-  IVec in[2][nvec_out];
+  IVec in[2][nvec_out]; // Double buffer for input prefetch
   const unsigned int warp_id_in_tile = warp_id % n_warps_per_tile;
   constexpr unsigned int n_iterations = THREADS_PER_WARP / n_warps_per_tile;
   OVec out_space[n_iterations][nvec_in];
@@ -116,15 +116,19 @@ cast_transpose_kernel(const IType * const input,
     const unsigned int current_in = (i + 1) % 2;
     if (i < n_iterations - 1) {
 #pragma unroll
+			// Prefetch the next round of input
       for (unsigned int j = 0; j < nvec_out; ++j) {
         in[current_in][j].load_from(my_input_tile,
                                     current_stride + my_place_in + stride * (nvec_out + j));
       }
     }
     OVec out_trans[nvec_in];  // NOLINT(*)
+		// Perform Transpose in registers, store cast result to global memory and store
+		// transpose result in registers
     cast_and_transpose_regs<true>(in[current_in ^ 1], out_trans, my_output_c_tile,
                                   current_place, stride, max, scale, true);
 #pragma unroll
+		// Transfer transpose result from registers to registers
     for (unsigned int j = 0; j < nvec_in; ++j) {
       out_space[i][j].data.vec = out_trans[j].data.vec;
     }
@@ -135,6 +139,7 @@ cast_transpose_kernel(const IType * const input,
   for (unsigned int i = 0; i < nvec_in; ++i) {
 #pragma unroll
     for (unsigned int j = 0; j < n_iterations; ++j) {
+			// Write transpose result to LDS
       my_scratch[(my_id_in_warp + THREADS_PER_WARP -
                   j - warp_id_in_tile * n_iterations) % THREADS_PER_WARP] = out_space[j][i];
     }
@@ -144,6 +149,7 @@ cast_transpose_kernel(const IType * const input,
     current_stride = i * output_stride +
                      warp_id_in_tile * n_iterations * output_stride * nvec_in;
     for (unsigned int j = 0; j < n_iterations; ++j) {
+			// Write result from LDS to global memory??
       my_scratch[j + warp_id_in_tile * n_iterations].store_to(my_output_t_tile,
                                                               current_stride + my_place);
       my_place = (my_place + THREADS_PER_WARP - 1) % THREADS_PER_WARP;
@@ -310,6 +316,7 @@ void cast_transpose(const Tensor &input,
              "Input and C output must have the same shape.");
   const size_t row_length = input.data.shape[1];
   const size_t num_rows = input.data.shape[0];
+	std::cout << "row_length = " << row_length << " num_rows = " << num_rows << std::endl;
 
   NVTE_CHECK(transposed_output->data.shape[0] == row_length, "Wrong dimension of T output.");
   NVTE_CHECK(transposed_output->data.shape[1] == num_rows, "Wrong dimension of T output.");
