@@ -181,6 +181,7 @@ else()
   message("${message_line}")
   message(STATUS "nvte hipified sources: ${te_hip_sources}")
 
+  set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
   add_library(transformer_engine SHARED ${te_hip_sources})
 endif()
 
@@ -204,15 +205,16 @@ else()
   if(NOT DEFINED AOTRITON_PATH)
     # Install aotriton fused attn
     set(AOTRITON_NO_PYTHON ON)
-    set(AOTRITON_COMPRESS_KERNEL OFF)
-    set(AOTRITON_NO_SHARED ON)
+    set(AOTRITON_COMPRESS_KERNEL ON)
+    set(AOTRITON_NO_SHARED OFF)
+    set(AOTRITON_GPU_BUILD_TIMEOUT 0)
+    set(TARGET_GPUS MI300X)
     add_subdirectory(../../3rdparty/aotriton ${CMAKE_CURRENT_BINARY_DIR}/aotriton)
   else()
     # Use aotriton built during initial TE building/installation
     # When only need rebuild TE library itself
-    find_library(AOTRITON_LIB NAMES aotriton aotriton_v2 PATHS ${AOTRITON_PATH}/lib REQUIRED NO_DEFAULT_PATH)
-    add_library( aotriton STATIC IMPORTED )
-    set_target_properties( aotriton PROPERTIES IMPORTED_LOCATION ${AOTRITON_LIB} )
+    add_library(aotriton INTERFACE)
+    target_link_libraries(aotriton INTERFACE ${AOTRITON_PATH}/lib/libaotriton_v2.so)
     target_include_directories(aotriton INTERFACE ${AOTRITON_PATH}/include)
   endif()
 
@@ -238,6 +240,7 @@ else()
     list(APPEND transformer_engine_LINKER_LIBS roc::rocblas)
   endif()
   target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS})
+  set_target_properties(transformer_engine PROPERTIES INSTALL_RPATH "$ORIGIN/lib")
 endif()
 
 # Make header files with C++ strings
