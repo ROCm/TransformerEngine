@@ -85,7 +85,6 @@ target_compile_definitions(ck_fmha_options INTERFACE
   CK_ENABLE_BF16
   CK_ENABLE_FP16
   CK_ENABLE_FP32
-  CK_ENABLE_FP64
 )
 
 # Compiler-specific options

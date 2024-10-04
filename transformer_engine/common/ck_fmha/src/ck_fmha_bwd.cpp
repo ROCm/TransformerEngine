@@ -5,6 +5,7 @@
 #include "ck_tile/host.hpp"
 #include "fmha_bwd.hpp"
 #include "mask.hpp"
+#include "memory_manager.h"
 
 template <typename DataType>
 __global__ void reshape_and_sum(DataType *dk, const DataType *dk_expanded, DataType *dv,
@@ -131,6 +132,7 @@ void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
         throw std::runtime_error("Unsupported mask type");
     }
 
+    static thread_local MemoryManager mem_mgr{stream};
     constexpr size_t float_size = sizeof(float);
     constexpr size_t bf16_size  = sizeof(ck_tile::bf16_t);
 
@@ -150,24 +152,36 @@ void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
     }
 
     if (workspace == nullptr) {
-        *workspace_size = d_size + dq_acc_size + dk_expanded_size + dv_expanded_size;
+        *workspace_size = 0;
+        //*workspace_size = d_size + dq_acc_size + dk_expanded_size + dv_expanded_size;
         return;
     }
-
+    /*
     void *devPtrD          = workspace;
     void *devPtrdQAcc      = reinterpret_cast<void *>(reinterpret_cast<char *>(devPtrD) + d_size);
+    void *devPtrdKExpanded = nullptr;
+    void *devPtrdVExpanded = nullptr;
+    */
+
+    void *devPtrD          = mem_mgr.allocate(d_size);
+    void *devPtrdQAcc      = nullptr;
     void *devPtrdKExpanded = nullptr;
     void *devPtrdVExpanded = nullptr;
 
     CHECK_HIP_ERROR(hipMemsetAsync(devPtrdQ, 0, dq_size, stream));
     if (dq_acc_size > 0) {
+        devPtrdQAcc = mem_mgr.allocate(dq_acc_size);
         CHECK_HIP_ERROR(hipMemsetAsync(devPtrdQAcc, 0, dq_acc_size, stream));
     }
     if (is_mqa_gqa) {
+        devPtrdKExpanded = mem_mgr.allocate(dk_expanded_size);
+        devPtrdVExpanded = mem_mgr.allocate(dv_expanded_size);
+        /*
         devPtrdKExpanded =
             reinterpret_cast<void *>(reinterpret_cast<char *>(devPtrdQAcc) + dq_acc_size);
         devPtrdVExpanded =
             reinterpret_cast<void *>(reinterpret_cast<char *>(devPtrdKExpanded) + dk_expanded_size);
+        */
     }
 
     const auto init_traits = [&](auto &traits) {
@@ -319,6 +333,8 @@ void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
     if (avg_time < 0.f) {
         throw std::runtime_error("Backward pass: Not supported yet");
     }
+    mem_mgr.deallocate(devPtrD);
+    mem_mgr.deallocate(devPtrdQAcc);
 
     if (is_mqa_gqa) {
         dim3 grid(batch, seqlen_k, nhead_k);
@@ -331,5 +347,7 @@ void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
                            static_cast<ck_tile::bf16_t *>(devPtrdV),
                            static_cast<ck_tile::bf16_t *>(devPtrdVExpanded), batch, seqlen_k, nhead,
                            nhead_k, hdim_q);
+        mem_mgr.deallocate(devPtrdKExpanded);
+        mem_mgr.deallocate(devPtrdVExpanded);
     }
 }

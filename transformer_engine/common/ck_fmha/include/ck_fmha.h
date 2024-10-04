@@ -8,16 +8,7 @@
 #include <iostream>
 #include <string>
 
-#define CHECK_HIP_ERROR(expr)                                                            \
-    do {                                                                                 \
-        const hipError_t error_code = (expr);                                            \
-        if (error_code != hipSuccess) {                                                  \
-            std::string error_str = hipGetErrorString(error_code);                       \
-            std::cerr << "HIP error: " << error_str << " in " << __FILE__ << " at line " \
-                      << __LINE__ << std::endl;                                          \
-            throw std::runtime_error(error_str);                                         \
-        }                                                                                \
-    } while (0)
+#include "memory_manager.h"
 
 void ck_fused_attn_fwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d,
                             int64_t bias_b, int64_t bias_h, bool is_training, float scaling_factor,
