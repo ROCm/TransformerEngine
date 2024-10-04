@@ -40,13 +40,14 @@ Execute the following commands to install ROCm Transformer Engine from source on
   export PYTORCH_ROCM_ARCH=gfx942 # CK fused attn only support MI200 and MI300 and fp8 features are only supported on MI300
   pip install .
 
-The default installation above will use rocblas in GEMM computation. The hipBlasLt alternative can be selected by setting the environment variable `NVTE_USE_HIPBLASLT` before the `pip install` as:
+The default installation above supports both rocBlas and hipBlasLt in GEMM computation. Building with single backend support can be done by setting `NVTE_USE_HIPBLASLT` or `NVTE_USE_ROCBLAS` environment variable before `pip install` as:
 
 .. code-block:: bash
 
   export NVTE_USE_HIPBLASLT=1
+  export NVTE_USE_ROCBLAS=1
 
-The hipBlasLt alternative has not yet supported all the GEMM configurations in the pytorch unit tests. When hipBlasLt is fully support, we will switch to hipBlasLt as the default path for GEMM computation.
+When both GEMM backends are supported the aforementioned env variables can be used to select which backend to use. If none is set hipBlasLt is used by default. The hipBlasLt backed has not yet supported all the GEMM configurations in the pytorch unit tests. 
 
 Test
 ====
