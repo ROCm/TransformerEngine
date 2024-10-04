@@ -6,12 +6,13 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include "../util/cuda_runtime.h"
+
 #include <filesystem>
 #include <mutex>
 
 #include "../common.h"
 #include "../util/cuda_driver.h"
-#include "../util/cuda_runtime.h"
 #include "../util/system.h"
 
 namespace transformer_engine {
@@ -28,7 +29,7 @@ namespace {
 #endif // __HIP_PLATFORM_AMD__
 
 int num_devices() {
-  auto query_num_devices = [] () -> int {
+  auto query_num_devices = []() -> int {
     int count;
     NVTE_CHECK_CUDA(cudaGetDeviceCount(&count));
     return count;
@@ -58,10 +59,10 @@ int sm_arch(int device_id) {
     device_id = current_device();
   }
   NVTE_CHECK(0 <= device_id && device_id < num_devices(), "invalid CUDA device ID");
-  auto init = [&] () {
+  auto init = [&]() {
     cudaDeviceProp prop;
     NVTE_CHECK_CUDA(cudaGetDeviceProperties(&prop, device_id));
-    cache[device_id] = 10*prop.major + prop.minor;
+    cache[device_id] = 10 * prop.major + prop.minor;
   };
   std::call_once(flags[device_id], init);
   return cache[device_id];
@@ -92,7 +93,7 @@ int sm_count(int device_id) {
     device_id = current_device();
   }
   NVTE_CHECK(0 <= device_id && device_id < num_devices(), "invalid CUDA device ID");
-  auto init = [&] () {
+  auto init = [&]() {
     cudaDeviceProp prop;
     NVTE_CHECK_CUDA(cudaGetDeviceProperties(&prop, device_id));
     cache[device_id] = prop.multiProcessorCount;
@@ -113,12 +114,11 @@ const std::string &include_directory(bool required) {
   if (need_to_check_env) {
     // Search for CUDA headers in common paths
     using Path = std::filesystem::path;
-    std::vector<std::pair<std::string, Path>> search_paths = {
-      {"NVTE_CUDA_INCLUDE_DIR", ""},
-      {"CUDA_HOME", ""},
-      {"CUDA_DIR", ""},
-      {"", string_path_cuda_include},
-      {"", "/usr/local/cuda"}};
+    std::vector<std::pair<std::string, Path>> search_paths = {{"NVTE_CUDA_INCLUDE_DIR", ""},
+                                                              {"CUDA_HOME", ""},
+                                                              {"CUDA_DIR", ""},
+                                                              {"", string_path_cuda_include},
+                                                              {"", "/usr/local/cuda"}};
     for (auto &[env, p] : search_paths) {
       if (p.empty()) {
         p = getenv<Path>(env.c_str());
@@ -154,10 +154,11 @@ const std::string &include_directory(bool required) {
           message += p;
         }
       }
-      message += (". "
-                  "Specify path to CUDA Toolkit headers "
-                  "with NVTE_CUDA_INCLUDE_DIR "
-                  "or disable NVRTC support with NVTE_DISABLE_NVRTC=1.");
+      message +=
+          (". "
+           "Specify path to CUDA Toolkit headers "
+           "with NVTE_CUDA_INCLUDE_DIR "
+           "or disable NVRTC support with NVTE_DISABLE_NVRTC=1.");
       NVTE_ERROR(message);
     }
     need_to_check_env = false;

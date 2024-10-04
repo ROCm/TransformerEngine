@@ -6,6 +6,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include "../util/rtc.h"
+
 #include <cstdlib>
 #include <iostream>
 #include <utility>
@@ -15,8 +17,6 @@
 #include "../util/string.h"
 #include "../util/system.h"
 
-#include "../util/rtc.h"
-
 namespace transformer_engine {
 
 namespace rtc {
@@ -24,8 +24,8 @@ namespace rtc {
 namespace {
 
 // Strings with headers for RTC kernels
-#include "string_code_utils_cuh.h"
 #include "string_code_util_math_h.h"
+#include "string_code_utils_cuh.h"
 
 #ifdef __HIP_PLATFORM_AMD__
 #include "string_code_amd_detail_hip_float8_h.h"
@@ -65,15 +65,14 @@ bool is_enabled() {
 }
 
 Kernel::Kernel(std::string mangled_name, std::string compiled_code)
-  : mangled_name_{std::move(mangled_name)}
-  , compiled_code_{std::move(compiled_code)}
-  , modules_(cuda::num_devices(), null_module)
-  , functions_(cuda::num_devices(), null_function)
-  , init_flags_{std::make_unique<std::vector<std::once_flag>>(cuda::num_devices())} {
-}
+    : mangled_name_{std::move(mangled_name)},
+      compiled_code_{std::move(compiled_code)},
+      modules_(cuda::num_devices(), null_module),
+      functions_(cuda::num_devices(), null_function),
+      init_flags_{std::make_unique<std::vector<std::once_flag>>(cuda::num_devices())} {}
 
 Kernel::~Kernel() {
-  for (int device_id=0; device_id<static_cast<int>(modules_.size()); ++device_id) {
+  for (int device_id = 0; device_id < static_cast<int>(modules_.size()); ++device_id) {
     // Unload CUDA modules if needed
     if (modules_[device_id] != null_module) {
 #ifdef __HIP_PLATFORM_AMD__
@@ -81,16 +80,13 @@ Kernel::~Kernel() {
 #else
       CUdevice device;
       CUcontext context;
-      if (cuda_driver::call("cuDeviceGet", &device, device_id)
-          != CUDA_SUCCESS) {
+      if (cuda_driver::call("cuDeviceGet", &device, device_id) != CUDA_SUCCESS) {
         continue;
       }
-      if (cuda_driver::call("cuDevicePrimaryCtxRetain", &context, device)
-          != CUDA_SUCCESS) {
+      if (cuda_driver::call("cuDevicePrimaryCtxRetain", &context, device) != CUDA_SUCCESS) {
         continue;
       }
-      if (cuda_driver::call("cuCtxSetCurrent", context)
-          != CUDA_SUCCESS) {
+      if (cuda_driver::call("cuCtxSetCurrent", context) != CUDA_SUCCESS) {
         continue;
       }
       cuda_driver::call("cuModuleUnload", modules_[device_id]);
@@ -100,9 +96,7 @@ Kernel::~Kernel() {
   }
 }
 
-Kernel::Kernel(Kernel&& other) noexcept {
-  swap(*this, other);
-}
+Kernel::Kernel(Kernel&& other) noexcept { swap(*this, other); }
 
 Kernel& Kernel::operator=(Kernel other) noexcept {
   // Copy-and-swap idiom
@@ -121,7 +115,7 @@ void swap(Kernel& first, Kernel& second) noexcept {
 
 CUfunction Kernel::get_function(int device_id) {
   // Load kernel on device if needed
-  auto load_on_device = [&] () {
+  auto load_on_device = [&]() {
     // Set driver context to proper device
     CUdevice device;
     CUcontext context;
@@ -130,15 +124,11 @@ CUfunction Kernel::get_function(int device_id) {
     NVTE_CALL_CHECK_CUDA_DRIVER(cuCtxSetCurrent, context);
 
     // Load function into driver context
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuModuleLoadDataEx,
-                                &modules_[device_id],
-                                compiled_code_.c_str(),
-                                0,          // numOptions
-                                nullptr,    // options
-                                nullptr);   // optionValues
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuModuleGetFunction,
-                                &functions_[device_id],
-                                modules_[device_id],
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuModuleLoadDataEx, &modules_[device_id], compiled_code_.c_str(),
+                                0,         // numOptions
+                                nullptr,   // options
+                                nullptr);  // optionValues
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuModuleGetFunction, &functions_[device_id], modules_[device_id],
                                 mangled_name_.c_str());
 
     // Reset driver context
@@ -160,10 +150,8 @@ KernelManager& KernelManager::instance() {
   return instance_;
 }
 
-void KernelManager::compile(const std::string &kernel_label,
-                            const std::string &kernel_name,
-                            const std::string &code,
-                            const std::string &filename) {
+void KernelManager::compile(const std::string& kernel_label, const std::string& kernel_name,
+                            const std::string& code, const std::string& filename) {
   std::lock_guard<std::mutex> lock_guard_(lock_);
 
   const int device_id = cuda::current_device();
@@ -177,9 +165,9 @@ void KernelManager::compile(const std::string &kernel_label,
   // Compilation flags
   std::vector<std::string> opts = {
 #if NDEBUG == 0
-    "-G",
+      "-G",
 #endif
-    "--std=c++17"};
+      "--std=c++17"};
 
 #ifndef __HIP_PLATFORM_AMD__
   if (compile_ptx) {
@@ -206,20 +194,14 @@ void KernelManager::compile(const std::string &kernel_label,
   constexpr const char* headers[num_headers] = {string_code_utils_cuh, string_code_util_math_h};
   constexpr const char* include_names[num_headers] = {"utils.cuh", "util/math.h"};
 #endif // __HIP_PLATFORM_AMD__
-  NVTE_CHECK_NVRTC(nvrtcCreateProgram(&program,
-                                      code.c_str(),
-                                      filename.c_str(),
-                                      num_headers,
-                                      headers,
-                                      include_names));
+  NVTE_CHECK_NVRTC(nvrtcCreateProgram(&program, code.c_str(), filename.c_str(), num_headers,
+                                      headers, include_names));
   NVTE_CHECK_NVRTC(nvrtcAddNameExpression(program, kernel_name.c_str()));
-  const nvrtcResult compile_result = nvrtcCompileProgram(program,
-                                                         opts_ptrs.size(),
-                                                         opts_ptrs.data());
+  const nvrtcResult compile_result =
+      nvrtcCompileProgram(program, opts_ptrs.size(), opts_ptrs.data());
   if (compile_result != NVRTC_SUCCESS) {
     // Display log if compilation failed
-    std::string log = concat_strings("NVRTC compilation log for ",
-                                     filename, ":\n");
+    std::string log = concat_strings("NVRTC compilation log for ", filename, ":\n");
     const size_t log_offset = log.size();
     size_t log_size;
     NVTE_CHECK_NVRTC(nvrtcGetProgramLogSize(program, &log_size));
@@ -231,10 +213,8 @@ void KernelManager::compile(const std::string &kernel_label,
   }
 
   // Get mangled function name
-  const char *mangled_name;
-  NVTE_CHECK_NVRTC(nvrtcGetLoweredName(program,
-                                       kernel_name.c_str(),
-                                       &mangled_name));
+  const char* mangled_name;
+  NVTE_CHECK_NVRTC(nvrtcGetLoweredName(program, kernel_name.c_str(), &mangled_name));
 
   // Get compiled code
   std::string compiled_code;
@@ -268,20 +248,19 @@ void KernelManager::compile(const std::string &kernel_label,
   NVTE_CHECK_NVRTC(nvrtcDestroyProgram(&program));
 }
 
-void KernelManager::set_cache_config(const std::string &kernel_label, CUfunc_cache cache_config) {
+void KernelManager::set_cache_config(const std::string& kernel_label, CUfunc_cache cache_config) {
   const int device_id = cuda::current_device();
   const auto key = get_kernel_cache_key(kernel_label, device_id);
-  NVTE_CHECK(kernel_cache_.count(key) > 0,
-             "Attempted to configure RTC kernel before compilation");
+  NVTE_CHECK(kernel_cache_.count(key) > 0, "Attempted to configure RTC kernel before compilation");
   kernel_cache_.at(key).set_function_cache_config(device_id, cache_config);
 }
 
-bool KernelManager::is_compiled(const std::string &kernel_label, int device_id) const {
+bool KernelManager::is_compiled(const std::string& kernel_label, int device_id) const {
   const auto key = get_kernel_cache_key(kernel_label, device_id);
   return kernel_cache_.count(key) > 0;
 }
 
-std::string KernelManager::get_kernel_cache_key(const std::string &kernel_label,
+std::string KernelManager::get_kernel_cache_key(const std::string& kernel_label,
                                                 int device_id) const {
 #ifdef __HIP_PLATFORM_AMD__
   return concat_strings(cuda::sm_arch_name(device_id), ",", kernel_label);

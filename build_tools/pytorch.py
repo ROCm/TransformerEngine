@@ -118,8 +118,9 @@ def setup_pytorch_extension(
         nvcc_flags.append("-DNVTE_WITH_USERBUFFERS")
 
         if os.getenv("UB_MPI_BOOTSTRAP"):
-            assert os.getenv("MPI_HOME") is not None, \
-                "MPI_HOME must be set when compiling with UB_MPI_BOOTSTRAP=1"
+            assert (
+                os.getenv("MPI_HOME") is not None
+            ), "MPI_HOME must be set when compiling with UB_MPI_BOOTSTRAP=1"
             mpi_home = Path(os.getenv("MPI_HOME"))
             include_dirs.append(mpi_home / "include")
             cxx_flags.append("-DUB_MPI_BOOTSTRAP")
@@ -134,12 +135,12 @@ def setup_pytorch_extension(
 
     return CUDAExtension(
         name="transformer_engine_torch",
-        sources=[ str(src) for src in sources ],
-        include_dirs=[ str(inc) for inc in include_dirs ],
+        sources=[str(src) for src in sources],
+        include_dirs=[str(inc) for inc in include_dirs],
         extra_compile_args={
             "cxx": cxx_flags,
             "nvcc": nvcc_flags,
         },
-        libraries=[ str(lib) for lib in libraries ],
-        library_dirs=[ str(lib_dir) for lib_dir in library_dirs ],
+        libraries=[str(lib) for lib in libraries],
+        library_dirs=[str(lib_dir) for lib_dir in library_dirs],
     )
