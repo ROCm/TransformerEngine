@@ -933,7 +933,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                                     kv_inputs[i % 2][1],
                                     TE_DType[q.dtype],
                                     tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen if not IS_HIP_EXTENSION else tex.NVTE_Fused_Attn_Backend.NVTE_CK,
-                                    attn_scale=softmax_scale, 
+                                    attn_scale=softmax_scale,
                                     dropout=dropout_p,
                                     qkv_layout=qkv_layout,
                                     attn_mask_type=attn_mask_type,
@@ -4071,6 +4071,18 @@ class FusedAttention(torch.nn.Module):
                 # workspace optimization path is deterministic
                 os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
 
+            # CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT
+            # - unset:       enables workspace optimization when required workspace is <= 256MB
+            #                or when bias gradient needs to be computed
+            # - n:           enables workspace optimization when required workspace is <= n bytes
+            # - -1:          enables workspace optimization always
+            # - 0:           disables workspace optimization always
+            if "NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT" in os.environ:
+                if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "0":
+                    os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "0"
+                if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "1":
+                    os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
+
         def remove_extra_states_check(self, incompatible_keys):  # pylint: disable=unused-argument
             """
             Temporarily remove fused_attention._extra_state as a missing key
@@ -4181,10 +4193,10 @@ class FusedAttention(torch.nn.Module):
         if IS_HIP_EXTENSION:
             assert (
                 "padding" not in attn_mask_type
-                ), f"ROCm FusedAttention (aotriton or CK) does not support attn_mask_type = {attn_mask_type}!"
+            ), f"ROCm FusedAttention (aotriton or CK) does not support attn_mask_type = {attn_mask_type}!"
             assert (
                 core_attention_bias_type == "no_bias"
-                ), f"ROCm FusedAttention (aotriton or CK) does not support bias_type = {core_attention_bias_type}!"
+            ), f"ROCm FusedAttention (aotriton or CK) does not support bias_type = {core_attention_bias_type}!"
         if qkv_format == "thd":
             assert (
                 max_seqlen_q is not None
@@ -4439,6 +4451,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
             or torch.are_deterministic_algorithms_enabled()
         )
+
         if IS_HIP_EXTENSION:
             self.use_flash_attention = False
             self.use_fused_attention = int(os.getenv("NVTE_FUSED_ATTN", "1"))
@@ -4450,6 +4463,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 self.logger.debug("Disabling FlashAttention due to NVTE_FLASH_ATTN=0")
             if self.device_compute_capability < (8, 0):
                 self.logger.debug("Disabling FlashAttention for compute capability < sm80")
+
             if not _flash_attn_2_4_1_plus and self.deterministic:
                 self.use_flash_attention = False
                 self.logger.warning(
@@ -4457,6 +4471,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     "deterministic execution. In order to use FA with deterministic behavior,"
                     " please install FlashAttention version >=2.4.1."
                 )
+
             self.use_fused_attention = int(
                 os.getenv("NVTE_FUSED_ATTN", "1")
             ) and self.device_compute_capability >= (8, 0)

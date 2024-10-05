@@ -74,7 +74,7 @@ struct Sum {
 template <typename T>
 inline __device__ T warp_shuffle_xor(const T &x, uint32_t idx) {
 #ifdef __HIP_PLATFORM_AMD__
-    return __shfl_xor(x, idx, THREADS_PER_WARP);
+  return __shfl_xor(x, idx, THREADS_PER_WARP);
 #else
   return __shfl_xor_sync(static_cast<uint32_t>(-1), x, idx);
 #endif
@@ -88,7 +88,7 @@ inline __device__ float2 warp_shuffle_xor<float2>(const float2 &x, uint32_t idx)
 template <typename T>
 inline __device__ T warp_shuffle_down(const T &x, uint32_t idx) {
 #ifdef __HIP_PLATFORM_AMD__
-    return __shfl_down(x, idx, THREADS_PER_WARP);
+  return __shfl_down(x, idx, THREADS_PER_WARP);
 #else
   return __shfl_down_sync(static_cast<uint32_t>(-1), x, idx);
 #endif
@@ -184,7 +184,7 @@ struct TypeToVec2<half> {
 #ifdef __HIP_PLATFORM_AMD__
 template <>
 struct TypeToVec2<hip_bfloat16> {
-    using Type = hip_bfloat16x2;
+  using Type = hip_bfloat16x2;
 };
 #else
 template <>
@@ -259,15 +259,15 @@ struct Converter<float2, half2> {
 #ifdef __HIP_PLATFORM_AMD__
 template <>
 struct Converter<float2, hip_bfloat16x2> {
-	static inline __device__ hip_bfloat16x2 convert(const float2 &x) {
-		union {
-			hip_bfloat16x2 raw;
-			hip_bfloat16 elt[2];
-		} tmp;
-		tmp.elt[0] = hip_bfloat16(x.x);
-		tmp.elt[1] = hip_bfloat16(x.y);
-		return tmp.raw;
-	}
+  static inline __device__ hip_bfloat16x2 convert(const float2 &x) {
+    union {
+      hip_bfloat16x2 raw;
+      hip_bfloat16 elt[2];
+    } tmp;
+    tmp.elt[0] = hip_bfloat16(x.x);
+    tmp.elt[1] = hip_bfloat16(x.y);
+    return tmp.raw;
+  }
 };
 #else
 template <>
@@ -314,12 +314,12 @@ struct Vec {
     Elt_type elt[NUM_ELT];
   };
 
-	Alias_type data;
+  Alias_type data;
 #ifdef __HIP_PLATFORM_AMD__
-	__HOST_DEVICE__ Vec& operator=(const Vec& rhs) {
-			data.vec = rhs.data.vec;
-			return *this;
-	}
+  __HOST_DEVICE__ Vec& operator=(const Vec& rhs) {
+    data.vec = rhs.data.vec;
+    return *this;
+  }
 #endif
 
   template <typename S>
@@ -402,12 +402,12 @@ struct InterCTASync {
   }
 
 #ifdef __HIP_PLATFORM_AMD__
-	inline __device__ void spin_wait_(int *barrier, int step, int expected) {
-		__hip_atomic_fetch_add(barrier, step, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT);
-		for (int found = -1; found != expected; ) {
-			found = __hip_atomic_load(barrier, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT);
-		}
-	}
+  inline __device__ void spin_wait_(int *barrier, int step, int expected) {
+    __hip_atomic_fetch_add(barrier, step, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT);
+    for (int found = -1; found != expected; ) {
+      found = __hip_atomic_load(barrier, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT);
+    }
+  }
 #else
   inline __device__ void spin_wait_(int *barrier, int step, int expected) {
     asm volatile("red.release.gpu.global.add.s32 [%0], %1;" ::"l"(barrier), "r"(step));
@@ -699,8 +699,8 @@ inline __device__ void warp_chan_upd_dynamic(T &m_a, T &m2_a, T &n_a,
   }
   // Intra-warp broadcast (only lane 0 has valid stats).
 #ifdef __HIP_PLATFORM_AMD__
-	m_a = __shfl(m_a, 0, THREADS_PER_WARP);
-	m2_a = __shfl(m2_a, 0, THREADS_PER_WARP);
+  m_a = __shfl(m_a, 0, THREADS_PER_WARP);
+  m2_a = __shfl(m2_a, 0, THREADS_PER_WARP);
 #else
   m_a = __shfl_sync(static_cast<uint32_t>(-1), m_a, 0);
   m2_a = __shfl_sync(static_cast<uint32_t>(-1), m2_a, 0);
@@ -881,7 +881,7 @@ __device__ __forceinline__ float warp_reduce_max(const float m) {
 #pragma unroll
   for (int delta = num_elems / 2; delta > 0; delta /= 2) {
 #ifdef __HIP_PLATFORM_AMD__
-		const float other_m = __shfl_down(tmp, delta, THREADS_PER_WARP);
+    const float other_m = __shfl_down(tmp, delta, THREADS_PER_WARP);
 #else
     const float other_m = __shfl_down_sync(0xFFFFFFFF, tmp, delta);
 #endif

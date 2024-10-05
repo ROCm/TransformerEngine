@@ -86,7 +86,7 @@ def calibrate(model, device, test_loader, fp8):
                 output = model(data)
 
 
-def test(model, device, test_loader, use_fp8):
+def test(model, device, test_loader, use_amp, use_fp8):
     """Testing function."""
     model.eval()
     test_loss = 0
@@ -94,8 +94,12 @@ def test(model, device, test_loader, use_fp8):
     with torch.no_grad():
         for data, target in test_loader:
             data, target = data.to(device), target.to(device)
-            with te.fp8_autocast(enabled=use_fp8):
-                output = model(data)
+            if use_amp:
+                with autocast(device_type='cuda', dtype=torch.float16):
+                    output = model(data)
+            else:
+                with te.fp8_autocast(enabled=use_fp8):
+                    output = model(data)
             test_loss += F.nll_loss(output, target, reduction="sum").item()  # sum up batch loss
             pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
             correct += pred.eq(target.view_as(pred)).sum().item()
@@ -166,6 +170,12 @@ def main():
         action="store_true",
         default=False,
         help="For Saving the current Model",
+    )
+    parser.add_argument(
+        "--use-amp",
+        action="store_true",
+        default=False,
+        help="Use AMP training"
     )
     parser.add_argument(
         "--use-fp8",

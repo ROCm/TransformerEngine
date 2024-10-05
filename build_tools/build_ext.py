@@ -217,11 +217,11 @@ def get_build_ext(extension_cls: Type[setuptools.Extension]):
                                 cflags = cflags["nvcc"]
 
                             # Add -fPIC if not already specified
-                            if not any('-fPIC' in flag for flag in cflags):
+                            if not any("-fPIC" in flag for flag in cflags):
                                 if rocm_build():
-                                    cflags.append('-fPIC')
+                                    cflags.append("-fPIC")
                                 else:
-                                    cflags.extend(['--compiler-options', "'-fPIC'"])
+                                    cflags.extend(["--compiler-options", "'-fPIC'"])
 
                             if not rocm_build():
                                 # Forward unknown options

@@ -94,7 +94,7 @@ struct Max {
 template <typename T>
 __device__ __forceinline__ T WARP_SHFL_XOR_NATIVE(T value, int laneMask, int width = warpSize,
                                                   unsigned int mask = 0xffffffff) {
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef __HIP_PLATFORM_AMD__
     return __shfl_xor(value, laneMask, width);
 #else
 #if CUDA_VERSION >= 9000
@@ -217,10 +217,8 @@ __global__ void scaled_aligned_causal_masked_softmax_warp_forward(output_t *dst,
   }
   warp_reduce<acc_t, WARP_ROWS, WARP_WIDTH, Add>(sum);
 
-  //output_t out[ELEMENTS_PER_LDG_STG]{0.0f};
-  output_t zero_output_t(0.0f);
-  output_t out[ELEMENTS_PER_LDG_STG] { zero_output_t };
-  // store result
+  output_t out[ELEMENTS_PER_LDG_STG] { output_t(0.0f) };
+// store result
 #pragma unroll
   for (int w = 0; w < WARP_ROWS; ++w) {
     const int microbatch = global_row_idx + w;

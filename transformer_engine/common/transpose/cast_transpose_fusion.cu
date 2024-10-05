@@ -172,9 +172,9 @@ inline __device__ void cast_and_transpose_regs(const CVec (&in)[nvec_out],
     for (unsigned int j = 0; j < nvec_in; ++j) {
       CType elt = step_dbias.data.elt[j];
 #ifdef __HIP_PLATFORM_AMD__
-			elt = __shfl(elt, dbias_shfl_src_lane, THREADS_PER_WARP);
+      elt = __shfl(elt, dbias_shfl_src_lane, THREADS_PER_WARP);
 #else
-      elt = __shfl_sync(0xffffffff, elt, dbias_shfl_src_lane);  // shuffle data in a warp
+      elt = __shfl_sync(0xffffffff, elt, dbias_shfl_src_lane);  // shuffle data in warp
 #endif
       out_dbias.data.elt[j] += elt;
     }
@@ -465,8 +465,9 @@ static const char *ActTypeToString[] = {
    https://github.com/llvm/llvm-project/issues/105825
    Use templated struct wrapper to work around
  */
-template<typename ComputeType, typename ParamOP, ComputeType (*OP)(ComputeType, const ParamOP&)>
-struct ActivationType{
+template<typename ComputeType, typename ParamOP, ComputeType (*OP)(ComputeType, const ParamOP &)>
+struct ActivationType
+{
     static constexpr auto op = OP;
 };
 

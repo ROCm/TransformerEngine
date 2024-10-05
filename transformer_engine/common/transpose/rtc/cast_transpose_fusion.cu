@@ -85,7 +85,7 @@ inline __device__ void cast_and_transpose_regs_optimized(const CVec (&in)[NVEC_O
     for (unsigned int j = 0; j < NVEC_IN; ++j) {
       CType elt = step_dbias.data.elt[j];
 #ifdef __HIP_PLATFORM_AMD__
-			elt = __shfl(elt, dbias_shfl_src_lane, THREADS_PER_WARP);
+      elt = __shfl(elt, dbias_shfl_src_lane, THREADS_PER_WARP);
 #else
       elt = __shfl_sync(0xffffffff, elt, dbias_shfl_src_lane);  // shuffle data in a warp
 #endif

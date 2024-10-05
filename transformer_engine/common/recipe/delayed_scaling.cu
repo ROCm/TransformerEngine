@@ -37,7 +37,7 @@ inline float fp8_dtype_max(DType dtype) {
 #ifndef __HIP_PLATFORM_AMD__
       return 448;
 #else
-			return 240;
+      return 240;
 #endif
     case DType::kFloat8E5M2:
       return 57344;

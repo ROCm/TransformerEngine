@@ -41,7 +41,6 @@ def check_fp8_support() -> Tuple[bool, str]:
             return False, "Cuda version 12.1 or higher required for FP8 execution on Ada."
         return True, ""
 
-
 def get_default_fp8_recipe() -> DelayedScaling:
     """FP8 recipe with default args."""
     return DelayedScaling()

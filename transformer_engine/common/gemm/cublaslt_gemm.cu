@@ -429,34 +429,20 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
         << std::endl;
   }
 
-  cublas_gemm(inputA,
-              inputB,
-              outputD, 
-              biasTensor,
-              outputGelu,
-              m, n, k,
-              lda, ldb, ldd,
+  cublas_gemm(inputA, inputB, outputD,  biasTensor, outputGelu, m, n, k, lda, ldb, ldd,
 #ifdef __HIP_PLATFORM_AMD__
 #ifdef USE_HIPBLASLT
-              (transa) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
-              (transb) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
+              (transa) ? HIPBLAS_OP_T : HIPBLAS_OP_N, (transb) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
 #else
               (transa) ? rocblas_operation_transpose : rocblas_operation_none,
               (transb) ? rocblas_operation_transpose : rocblas_operation_none,
 #endif //USE_HIPBLASLT
 #else
-              (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
-              (transb) ? CUBLAS_OP_T : CUBLAS_OP_N,
+              (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N,
 #endif //__HIP_PLATFORM_AMD__
-              grad, wspace->data.dptr,
-              wspace->data.shape[0],
-              accumulate, use_split_accumulator,
-              math_sm_count,
-              0,
-              0,
-              false,
-              nullptr,
-              stream);
+              grad,
+              wspace->data.dptr, wspace->data.shape[0], accumulate, use_split_accumulator,
+              math_sm_count, 0, 0, false, nullptr, stream);
 }
 
 void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D,
@@ -503,34 +489,20 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
     NVTE_ERROR("TT layout not allowed.");
   }
 
-  cublas_gemm(inputA,
-              inputB,
-              outputD,
-              biasTensor,
-              outputGelu,
-              m, n, k,
-              lda, ldb, ldd,
+  cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, m, n, k, lda, ldb, ldd,
 #ifdef __HIP_PLATFORM_AMD__
 #ifdef USE_HIPBLASLT
-              (transa) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
-              (transb) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
+              (transa) ? HIPBLAS_OP_T : HIPBLAS_OP_N, (transb) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
 #else
               (transa) ? rocblas_operation_transpose : rocblas_operation_none,
               (transb) ? rocblas_operation_transpose : rocblas_operation_none,
 #endif //USE_HIPBLASLT
 #else
-              (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
-              (transb) ? CUBLAS_OP_T : CUBLAS_OP_N,
+              (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N,
 #endif //__HIP_PLATFORM_AMD__
-              grad, wspace->data.dptr,
-              wspace->data.shape[0],
-              accumulate, use_split_accumulator,
-              math_sm_count,
-              m_split,
-              n_split,
-              gemm_producer,
-              inputCounter,
-              stream);
+              grad,
+              wspace->data.dptr, wspace->data.shape[0], accumulate, use_split_accumulator,
+              math_sm_count, m_split, n_split, gemm_producer, inputCounter, stream);
 }
 
 void nvte_multi_stream_cublas_gemm(std::vector<NVTETensor> A, std::vector<NVTETensor> B,

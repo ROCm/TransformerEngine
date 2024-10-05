@@ -912,11 +912,11 @@ def test_sanity_gradient_accumulation_fusion(
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("normalization", all_normalizations)
-def test_gpt_cuda_graph(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma, normalization):
-    if IS_HIP_EXTENSION:
-        use_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
-        if use_fused_attn and (dtype in (torch.float16, torch.bfloat16)):
-            pytest.skip("rocm fused attn backends does not support cuda graph")
+def test_gpt_cuda_graph(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma, normalization, monkeypatch):
+    if IS_HIP_EXTENSION and (dtype in (torch.float16, torch.bfloat16)):
+        if int(os.getenv("NVTE_FUSED_ATTN", "1")):
+            #pytest.skip(f"rocm fused attention backends do not support cuda graph with {dtype}")
+            monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
 
     config = model_configs[model]
 

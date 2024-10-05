@@ -244,6 +244,7 @@ if IS_HIP_EXTENSION:
       import re
       return (re.search('AMD Instinct MI2.0', torch.cuda.get_device_name(torch.cuda.current_device())) is not None)
     
+
 def is_bf16_compatible() -> None:
     if IS_HIP_EXTENSION:
         # only MI200 and MI300 machines support bf16
@@ -253,16 +254,17 @@ def is_bf16_compatible() -> None:
             return False
     else:
         """Replaces torch.cuda.is_bf16_compatible() with an explicit
-           check on device compute capability to enforce sm_80 or higher.
+        check on device compute capability to enforce sm_80 or higher.
         """
         return torch.cuda.get_device_capability()[0] >= 8
 
+
 @functools.cache
 def get_cudnn_version() -> Tuple[int, int, int]:
+    """Runtime cuDNN version (major, minor, patch)"""
     # ROCm fused attn does not use cudnn, return high numbers to avoid tests filtering out
     if IS_HIP_EXTENSION:
         return (99, 0, 0)
-    """Runtime cuDNN version (major, minor, patch)"""
     encoded_version = ext.get_cudnn_version()
     major_version_magnitude = 1000 if encoded_version < 90000 else 10000
     major, encoded_version = divmod(encoded_version, major_version_magnitude)

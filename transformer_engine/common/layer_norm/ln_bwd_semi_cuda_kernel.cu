@@ -39,12 +39,12 @@ void launch_tuned_(LaunchParams<BwdParams> &launch_params,
     return;
   }
 
+#ifndef __HIP_PLATFORM_AMD__
   if (Kernel_traits::SMEM_BYTES >= 48 * 1024) {
-    #ifndef __HIP_PLATFORM_AMD__
     NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                          Kernel_traits::SMEM_BYTES));
-    #endif
   }
+#endif
   auto stream = launch_params.stream;
   auto ctas_per_col = launch_params.params.ctas_per_col;
   auto ctas_per_row = launch_params.params.ctas_per_row;

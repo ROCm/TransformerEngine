@@ -167,7 +167,7 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
 #if NDEBUG == 0
       "-G",
 #endif
-			"--std=c++17"};
+      "--std=c++17"};
 
 #ifndef __HIP_PLATFORM_AMD__
   if (compile_ptx) {

@@ -36,7 +36,7 @@ Execute the following commands to install ROCm Transformer Engine from source on
   git clone --recursive https://github.com/ROCmSoftwarePlatform/TransformerEngine-private.git
   
   cd TransformerEngine-private
-  export NVTE_FRAMEWORK=pytorch #optionally set framework, currently only support pytorch and jax
+  export NVTE_FRAMEWORK=pytorch,jax #optionally set framework, currently only support pytorch and jax; if not set will try to detect installed frameworks
   export PYTORCH_ROCM_ARCH=gfx942 # CK fused attn only support MI200 and MI300 and fp8 features are only supported on MI300
   pip install .
 
@@ -65,45 +65,25 @@ After a successful Transformer Engine installation via `pip install`, execute th
   make
   make test
 
-Framework Integration pytests
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-Pytorch
+Note that some of operator unit tests fail in hipBLASLt config due to limited input data configurations support
 
-The following Pytorch integration pytests are supported: 
+Pytorch framework integration tests
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-.. code-block:: bash
+Pytorch integration pytests under tests/pytorch/ and tests/pytorch/fused_attn/ are supported 
+Except the following tests that are not supported in rocBLAS configuration
 
-  tests/pytorch/test_sanity.py
-  tests/pytorch/test_sanity_import.py
-  tests/pytorch/test_numerics.py
-  tests/pytorch/test_recipe.py
-  tests/pytorch/test_float8tensor.py
-  tests/pytorch/test_jit.py
-  tests/pytorch/test_torch_save_load.py
-  tests/pytorch/test_fused_rope.py
-  tests/pytorch/test_deferred_init.py
-  tests/pytorch/fused_attn/test_fused_attn.py
-  tests/pytorch/fused_attn/test_fused_attn_with_cp.py
+* tests/pytorch/test_cuda_graph.py 
+* tests/pytorch/test_sanity.py::test_gpt_guda_graph
 
-Env `ROCBLAS_STREAM_ORDER_ALLOC=1` can be used when run tests in pytorch-rocblas configuration. 
-It can be dropped when the hipGraph feature is fully supported in Pytorch on AMDGPUs.
+Env `ROCBLAS_STREAM_ORDER_ALLOC=1` should be used when run tests in pytorch-rocblas configuration. 
 
-Jax
+Also test_onnx_export.py does not support FP8 dues to absence of custom QDQ operatrs library
 
-The following jax pytests except for test_fused_attn.py are supported. 
+Jax framework integration tests
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-.. code-block:: bash
-
-  tests/jax/test_custom_call_compute.py
-  tests/jax/test_layer.py
-  tests/jax/test_sanity_import.py
-  tests/jax/test_helper.py
-  tests/jax/test_praxis_layers.py
-  tests/jax/test_sharding.py
-  tests/jax/test_fused_attn.py
-  tests/jax/test_distributed_layernorm.py
-  tests/jax/test_distributed_softmax.py
-  tests/jax/test_distributed_fused_attn.py
+All JAX pytests are supported. 
 
 Examples
 ========

@@ -410,7 +410,6 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
                                        int world_size, int rank);
 #endif
 
-
 /***************************************************************************************************
  * multi_tensor_* kernels
  **************************************************************************************************/

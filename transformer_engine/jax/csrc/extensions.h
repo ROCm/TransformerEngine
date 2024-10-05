@@ -9,12 +9,12 @@
 #ifndef TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_
 #define TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_
 
-
 #ifndef USE_ROCM
 #include <cublasLt.h>
 #include <cublas_v2.h>
 #include <cudnn.h>
 #endif
+#include <cuda_runtime_api.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <transformer_engine/activation.h>

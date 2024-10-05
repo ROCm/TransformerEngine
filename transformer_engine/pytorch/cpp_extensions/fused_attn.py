@@ -81,7 +81,7 @@ else:
         "AOTriton": NVTE_Fused_Attn_Backend.NVTE_AOTriton,
         "CK": NVTE_Fused_Attn_Backend.NVTE_CK,
         "No_Backend": NVTE_Fused_Attn_Backend.NVTE_No_Backend,
-        }
+    }
 
 BACKEND_F16m512_FP8_THREADS_PER_CTA = 128
 BACKEND_F16arb_ELTS_PER_THREADS = 16
@@ -209,12 +209,19 @@ def fused_attn_fwd_qkvpacked(
         fused_attention_backend != FusedAttnBackend["No_Backend"]
     ), "Fused attention does not support this input combination."
 
-    if not IS_HIP_EXTENSION:
+    if IS_HIP_EXTENSION:
+        # ROCm fused attn requires 1 offset per 1 random variable
+        rng_elts_per_thread = 0
+    else:
         # BF16/FP16 fused attention API from fmha_v1 apex
         if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
             rng_elts_per_thread = (
                 max_seqlen * max_seqlen + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
             ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
+
+        # BF16/FP16 fused attention API from fmha_v2
+        if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
+            rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
 
         # FP8 fused attention API from fmha_v2
         if fused_attention_backend == FusedAttnBackend["FP8"]:
@@ -230,9 +237,6 @@ def fused_attn_fwd_qkvpacked(
             assert q_scale_o is not None, "q_scale_o is required as an input for FP8 fused attention."
             assert amax_s is not None, "amax_s is required as an input for FP8 fused attention."
             assert amax_o is not None, "amax_o is required as an input for FP8 fused attention."
-    else:
-        # ROCm fused attn requires 1 offset per 1 random variable
-        rng_elts_per_thread = 0
 
     # execute kernel
     output_tensors = tex.fused_attn_fwd_qkvpacked(
@@ -561,7 +565,9 @@ def fused_attn_fwd_kvpacked(
         fused_attention_backend != FusedAttnBackend["No_Backend"]
     ), "Fused attention does not support this input combination."
 
-    if not IS_HIP_EXTENSION:
+    if IS_HIP_EXTENSION:
+        rng_elts_per_thread = 0
+    else:
         # BF16/FP16 fused attention API from fmha_v1 apex
         if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
             rng_elts_per_thread = (
@@ -577,17 +583,15 @@ def fused_attn_fwd_kvpacked(
             rng_elts_per_thread = (
                 max_seqlen_q * max_seqlen_q + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
             ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
-    else:
-        rng_elts_per_thread = 0
 
-        assert (
-            d_scale_qkv is not None
-        ), "d_scale_qkv is required as an input for FP8 fused attention."
-        assert d_scale_s is not None, "q_scale_s is required as an input for FP8 fused attention."
-        assert q_scale_s is not None, "q_scale_s is required as an input for FP8 fused attention."
-        assert q_scale_o is not None, "q_scale_o is required as an input for FP8 fused attention."
-        assert amax_s is not None, "amax_s is required as an input for FP8 fused attention."
-        assert amax_o is not None, "amax_o is required as an input for FP8 fused attention."
+            assert (
+                d_scale_qkv is not None
+            ), "d_scale_qkv is required as an input for FP8 fused attention."
+            assert d_scale_s is not None, "q_scale_s is required as an input for FP8 fused attention."
+            assert q_scale_s is not None, "q_scale_s is required as an input for FP8 fused attention."
+            assert q_scale_o is not None, "q_scale_o is required as an input for FP8 fused attention."
+            assert amax_s is not None, "amax_s is required as an input for FP8 fused attention."
+            assert amax_o is not None, "amax_o is required as an input for FP8 fused attention."
 
     # execute kernel
     output_tensors = tex.fused_attn_fwd_kvpacked(
@@ -948,7 +952,9 @@ def fused_attn_fwd(
         fused_attention_backend != FusedAttnBackend["No_Backend"]
     ), "Fused attention does not support this input combination."
 
-    if not IS_HIP_EXTENSION:
+    if IS_HIP_EXTENSION:
+        rng_elts_per_thread = 0
+    else:
         # BF16/FP16 fused attention API from fmha_v1 apex
         if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
             rng_elts_per_thread = (
@@ -958,11 +964,6 @@ def fused_attn_fwd(
         # BF16/FP16 fused attention API from fmha_v2
         if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
             rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
-
-        # FP8 fused attention API from fmha_v2
-        if fused_attention_backend == FusedAttnBackend["FP8"]:
-            rng_elts_per_thread = (max_seqlen_q * max_seqlen_q
-                    + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1)//BACKEND_F16m512_FP8_THREADS_PER_CTA
 
         # FP8 fused attention API from fmha_v2
         if fused_attention_backend == FusedAttnBackend["FP8"]:
@@ -978,8 +979,6 @@ def fused_attn_fwd(
             assert q_scale_o is not None, "q_scale_o is required as an input for FP8 fused attention."
             assert amax_s is not None, "amax_s is required as an input for FP8 fused attention."
             assert amax_o is not None, "amax_o is required as an input for FP8 fused attention."
-    else:
-        rng_elts_per_thread = 0
 
     # execute kernel
     output_tensors = tex.fused_attn_fwd(
