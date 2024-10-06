@@ -971,6 +971,17 @@ void cublas_gemm(const Tensor *inputA,
   if ((!(bias||gelu))&& (use_fp8 && D_type==rocblas_datatype_f16_r)) {
     D_temp_type = rocblas_datatype_f16_r;
   }
+  
+  if(accumulate && (D_temp!=D || D_temp_type!=D_type)){
+    DType output_dtype = get_transformer_engine_dtype(D_type);
+    TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(output_dtype, OType,
+      //D_temp allocated only with fp32
+      detail::identity_kernelLauncher<OType, float>(reinterpret_cast<const OType*>(D),
+                                                    reinterpret_cast<float*>(D_temp), 
+                                                    m*n,
+                                                    stream);
+    );  
+  }
 
   // D = alpha * (A * B) + beta * C
   if (use_fp8) {
