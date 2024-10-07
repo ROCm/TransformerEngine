@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 import logging
 
+from dataclasses import dataclass, fields
 import numpy as np
 from packaging.version import Version as PkgVersion
 
@@ -77,18 +78,21 @@ from transformer_engine.pytorch.graph import is_graph_capturing
 #TODO: add back once rocm TE support flash-attn
 if not IS_HIP_EXTENSION:
     _flash_attn_version = PkgVersion(get_pkg_version("flash-attn"))
-    _flash_attn_version_required = PkgVersion("2.0.6")
-    _flash_attn_max_version = PkgVersion("2.5.8")
-    _flash_attn_2_1_plus = _flash_attn_version >= PkgVersion("2.1")
-    _flash_attn_2_3_plus = _flash_attn_version >= PkgVersion("2.3")
-    _flash_attn_2_4_plus = _flash_attn_version >= PkgVersion("2.4")
-    _flash_attn_2_4_1_plus = _flash_attn_version >= PkgVersion("2.4.1")
+else:
+    _flash_attn_version = PkgVersion("0.0.1")
+_flash_attn_version_required = PkgVersion("2.0.6")
+_flash_attn_max_version = PkgVersion("2.5.8")
+_flash_attn_2_plus = _flash_attn_version >= PkgVersion("2")
+_flash_attn_2_1_plus = _flash_attn_version >= PkgVersion("2.1")
+_flash_attn_2_3_plus = _flash_attn_version >= PkgVersion("2.3")
+_flash_attn_2_4_plus = _flash_attn_version >= PkgVersion("2.4")
+_flash_attn_2_4_1_plus = _flash_attn_version >= PkgVersion("2.4.1")
 
-    if _flash_attn_version >= _flash_attn_version_required:
-        from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_forward_func
-        from flash_attn.flash_attn_interface import _flash_attn_varlen_forward as _flash_attn_forward
-        from flash_attn.flash_attn_interface import _flash_attn_varlen_backward as _flash_attn_backward
-        from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
+if _flash_attn_version >= _flash_attn_version_required:
+    from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_forward_func
+    from flash_attn.flash_attn_interface import _flash_attn_varlen_forward as _flash_attn_forward
+    from flash_attn.flash_attn_interface import _flash_attn_varlen_backward as _flash_attn_backward
+    from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
 
 META_QKV = tex.FP8FwdTensors.GEMM1_OUTPUT
 META_DQKV = tex.FP8BwdTensors.GRAD_OUTPUT1
@@ -108,11 +112,105 @@ logging.basicConfig(
     level=log_levels[log_level if log_level in [0, 1, 2] else 2],
 )
 
+_NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
+_NVTE_FUSED_ATTN = int(os.getenv("NVTE_FUSED_ATTN", "1"))
+_NVTE_UNFUSED_ATTN = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
+
+_attention_backends = {
+    "attention_params": None,
+    "use_flash_attention": None,
+    "use_fused_attention": None,
+    "fused_attention_backend": None,
+    "use_unfused_attention": None,
+    "backend_selection_requires_update": False,
+}
+
+
+@dataclass(eq=True)
+class AttentionParams:
+    """
+    Attention parameters used to determine which backend to be used.
+
+    Parameters
+    ----------
+    qkv_type: Union[torch.Tensor, Float8Tensor], default = `torch.Tensor`
+        Type of query/key/value tensors, {`torch.Tensor`, `Float8Tensor`}.
+    qkv_dtype: torch.dtype, default = `torch.bfloat16`
+        Data type of query/key/value tensors.
+    qkv_layout: str, default = "sbh3d"
+        Query/key/value tensor memory layout.
+    batch_size: int, default = 1
+        Batch size.
+    num_heads: int, default = 16
+        Number of attention heads in the query tensor.
+    num_gqa_groups: int, default = 16
+        Number of attention heads in key and value tensors.
+    max_seqlen_q: int, default = 128
+        Maximum sequence length of the query tensor.
+    max_seqlen_kv: int, default = 128
+        Maximum sequence length of the key and value tensors.
+    head_dim: int, default = 64
+        The size of each attention head.
+    attn_mask_type: str, default = `no_mask`
+        Attention mask type, {`no_mask`, `padding`, `causal`, `padding_causal`,
+        `causal_bottom_right`, `padding_causal_bottom_right`, `arbitrary`}
+    window_size: Tuple[int, int], default = None
+        Sliding window attention size.
+    alibi_slopes_shape: Optional[Union[torch.Size, List]], default = `None`
+        Tensor shape of :attr:`alibi_slopes` in `DotProductAttention`.
+    core_attention_bias_type: str, default = `no_bias`
+        Attention bias type, {`no_bias`, `pre_scale_bias`, `post_scale_bias`, `alibi`}.
+    core_attention_bias_shape: str, default = `1hss`
+        Attention bias shape, {`1hss`, `b1ss`, `bhss`}.
+    core_attention_bias_requires_grad: bool, default = `True`
+        Whether attention bias requires gradient.
+    pad_between_seqs: bool, default = `False`
+        Whether there is padding between sequences in a batch.
+        This only applies to `qkv_format=thd`.
+    attention_dropout: float, default = 0.0
+        Attention dropout.
+    context_parallel: bool, default = `False`
+        Whether context parallelism is used or not.
+    deterministic: bool, default = `False`
+        Whether to run `DotProductAttention` with determinism or not.
+    is_training: bool, default = `True`
+        Whether in training mode (`True`) or inference mode (`False`)
+    fp8: bool, default = `False`
+        Whether `DotProductAttention` is in an `fp8_autocast` region.
+    fp8_meta: Optional[Dict[str Any]], default = `None`
+        The FP8 metadata tensor of `DotProductAttention`.
+    """
+
+    qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
+    qkv_dtype: torch.dtype = torch.bfloat16
+    qkv_layout: str = "sbh3d"
+    batch_size: int = 1
+    num_heads: int = 16
+    num_gqa_groups: int = 16
+    max_seqlen_q: int = 128
+    max_seqlen_kv: int = 128
+    head_dim: int = 64
+    attn_mask_type: str = "no_mask"
+    window_size: Union[Tuple[int, int], None] = None
+    alibi_slopes_shape: Union[torch.Size, List, None] = None
+    core_attention_bias_type: str = "no_bias"
+    core_attention_bias_shape: str = "1hss"
+    core_attention_bias_requires_grad: bool = True
+    pad_between_seqs: bool = False
+    attention_dropout: float = 0.0
+    context_parallel: bool = False
+    deterministic: bool = False
+    is_training: bool = True
+    fp8: bool = False
+    fp8_meta: Union[Dict[str, Any], None] = None
+
+
 _alibi_cache = {
     "_num_heads": None,
     "_alibi_slopes": None,
     "_max_seqlen_q": None,
     "_max_seqlen_kv": None,
+    "_bottom_right_alignment": True,
     "_alibi_bias": None,
     "_alibi_slopes_require_update": False,
     "_alibi_bias_require_update": False,
@@ -120,6 +218,510 @@ _alibi_cache = {
 
 
 __all__ = ["DotProductAttention", "InferenceParams", "MultiheadAttention"]
+
+
+def get_attention_backend(
+    attention_params: AttentionParams = None,
+):
+    """
+    Select the appropriate attention backend/sub-backend based on user input and runtime environment.
+
+    Parameters
+    ----------
+    See `AttentionParams`.
+
+    Returns
+    ----------
+    use_flash_attention: bool
+        Whether the `FlashAttention` backend has been selected.
+    use_fused_attention: bool
+        Whether the `FusedAttention` backend has been selected.
+    fused_attention_backend: tex.NVTE_Fused_Attn_Backend
+        If `use_fused_attention = True`, one of `FusedAttention` three sub-backends, else `None`.
+    use_unfused_attention: bool
+        Whether the `UnfusedDotProductAttention` backend has been selected.
+    available_backends: List[bool]
+        All available backends that could support the provided input. A list of Booleans
+        in the form of [use_flash_attention, use_fused_attention, use_unfused_attention].
+    """
+    qkv_type = attention_params.qkv_type
+    qkv_dtype = attention_params.qkv_dtype
+    qkv_layout = attention_params.qkv_layout
+    batch_size = attention_params.batch_size
+    num_heads = attention_params.num_heads
+    num_gqa_groups = attention_params.num_gqa_groups
+    max_seqlen_q = attention_params.max_seqlen_q
+    max_seqlen_kv = attention_params.max_seqlen_kv
+    head_dim = attention_params.head_dim
+    attn_mask_type = attention_params.attn_mask_type
+    window_size = attention_params.window_size
+    alibi_slopes_shape = attention_params.alibi_slopes_shape
+    core_attention_bias_type = attention_params.core_attention_bias_type
+    core_attention_bias_shape = attention_params.core_attention_bias_shape
+    core_attention_bias_requires_grad = attention_params.core_attention_bias_requires_grad
+    pad_between_seqs = attention_params.pad_between_seqs
+    attention_dropout = attention_params.attention_dropout
+    context_parallel = attention_params.context_parallel
+    deterministic = attention_params.deterministic
+    is_training = attention_params.is_training
+    fp8 = attention_params.fp8
+    fp8_meta = attention_params.fp8_meta
+
+    # Run config
+    logger = logging.getLogger("DotProductAttention")
+    device_compute_capability = get_device_compute_capability()
+    cudnn_version = get_cudnn_version()
+    run_config = {
+        "transformer_engine_version": te.__version__,
+        "compute_capability": "sm"
+        + str(
+            (lambda x, y: x * 10 + y)(device_compute_capability[0], device_compute_capability[1])
+        ),
+        "flash_attn_version": _flash_attn_version,
+        "cudnn_version": ".".join([str(i) for i in cudnn_version]),
+    }
+    attention_params_dict = {
+        field.name: getattr(attention_params, field.name) for field in fields(attention_params)
+    }
+    run_config.update(attention_params_dict)
+    if fp8:
+        run_config["NVTE_FP8_DPA_BWD"] = int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
+    logger.debug("Running with config=%s", run_config)
+
+    # Filter: Environment variables
+    global _NVTE_FLASH_ATTN, _NVTE_FUSED_ATTN, _NVTE_UNFUSED_ATTN
+    # TODO: enable flash attn package in rocm TE
+    if IS_HIP_EXTENSION:
+        _NVTE_FLASH_ATTN = 0
+    else:
+        _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
+    _NVTE_FUSED_ATTN = int(os.getenv("NVTE_FUSED_ATTN", "1"))
+    _NVTE_UNFUSED_ATTN = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
+    use_flash_attention = _NVTE_FLASH_ATTN
+    use_fused_attention = _NVTE_FUSED_ATTN
+    use_unfused_attention = _NVTE_UNFUSED_ATTN
+    if not use_flash_attention:
+        logger.debug("Disabling FlashAttention due to NVTE_FLASH_ATTN=0")
+    if not use_fused_attention:
+        logger.debug("Disabling FusedAttention due to NVTE_FUSED_ATTN=0")
+    if not use_unfused_attention:
+        logger.debug("Disabling UnfusedDotProductAttention due to NVTE_UNFUSED_ATTN=0")
+
+    # Filter: ONNX mode
+    if is_in_onnx_export_mode():
+        if use_flash_attention:
+            logger.debug("Disabling FlashAttention due to ONNX mode")
+        use_flash_attention = False
+        if use_fused_attention:
+            logger.debug("Disabling FusedAttention due to ONNX mode")
+        use_fused_attention = False
+
+    # Filter: Compute capability
+    if device_compute_capability < (8, 0):
+        if use_flash_attention:
+            logger.debug("Disabling FlashAttention as it requires compute capability sm80+")
+            use_flash_attention = False
+        if use_fused_attention:
+            logger.debug("Disabling FusedAttention as it requires compute capability sm80+")
+            use_fused_attention = False
+
+    # Filter: Context parallelism
+    if context_parallel and use_unfused_attention:
+        logger.debug(
+            "Disabling UnfusedDotProductAttention as it does not support context parallelism"
+        )
+        use_unfused_attention = False
+
+    # Filter: Data type
+    if use_flash_attention and (
+        qkv_dtype not in [torch.bfloat16, torch.float16] or qkv_type == Float8Tensor
+    ):
+        logger.debug(
+            "Disabling FlashAttention due to unsupported QKV data type. "
+            "Supported: qkv_type = torch.Tensor, qkv_dtype = {torch.bfloat16, torch.float16}. "
+            "Found: qkv_type = %s, qkv_dtype = %s.",
+            qkv_type,
+            qkv_dtype,
+        )
+        use_flash_attention = False
+    if use_fused_attention and (qkv_dtype not in [torch.bfloat16, torch.float16]):
+        logger.debug(
+            "Disabling FusedAttention due to unsupported QKV data type. "
+            "Supported: qkv_dtype = {torch.bfloat16, torch.float16}. "
+            "Found: qkv_dtype = %s.",
+            qkv_dtype,
+        )
+        use_fused_attention = False
+
+    # Filter: Execution type
+    if fp8 and fp8_meta["recipe"].fp8_dpa:
+        if use_flash_attention:
+            logger.debug("Disabling FlashAttention as it does not support FP8")
+            use_flash_attention = False
+        if use_unfused_attention:
+            logger.debug("Disabling UnfusedDotProductAttention as it does not support FP8")
+            use_unfused_attention = False
+        # TODO: rocm fused attention backends does not support fp8 yet
+        if IS_HIP_EXTENSION and use_fused_attention:
+            logger.debug("Disabling ROCm FusedAttention as it does not support FP8")
+            use_fused_attention = False
+
+    # Filter: Head dimension
+    if use_flash_attention and (
+        head_dim > 256
+        or head_dim % 8 != 0
+        or (head_dim > 192 and device_compute_capability not in ((8, 0), (9, 0)))
+    ):
+        logger.debug(
+            "Disabling FlashAttention due to unsupported head_dim. "
+            "Supported: head_dim %%8 = 0, head_dim <= 256 (>192 requires sm80/90). "
+            "Found: head_dim = %s on sm%s.",
+            head_dim,
+            ".".join([str(i) for i in device_compute_capability]),
+        )
+        use_flash_attention = False
+
+    # Filter: QKV layout
+    qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+    if qkv_format == "thd":
+        if use_unfused_attention:
+            logger.debug("Disabling UnfusedDotProductAttention for qkv_format = thd")
+            use_unfused_attention = False
+        if use_flash_attention and pad_between_seqs:
+            logger.debug(
+                "Disabling FlashAttention for qkv_format = thd when there is "
+                "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
+            )
+            use_flash_attention = False
+        # TODO: rocm fused attention does not integrate var seqlen features
+        if IS_HIP_EXTENSION and use_fused_attention:
+            logger.debug("Disabling ROCm FusedAttention for qkv_format = thd")
+            use_fused_attention = False
+
+    # Filter: Attention mask
+    # attn_mask_type               |     supported backends
+    # -------------------------------------------------------------------
+    # no_mask                      |     All
+    # padding                      |     FlashAttention, FusedAttention
+    # causal                       |
+    #     self-attention           |     All
+    #     cross-attention          |     FusedAttention
+    # padding_causal               |
+    #     self-attention           |     FlashAttention, FusedAttention
+    #     cross-attention          |     FusedAttention
+    # causal_bottom_right          |     All
+    # padding_causal_bottom_right  |     FlashAttention, FusedAttention
+    # arbitrary                    |     UnfusedDotProductAttention
+    if attn_mask_type == "arbitrary":
+        if use_flash_attention:
+            logger.debug("Disabling FlashAttention for arbitrary mask")
+        use_flash_attention = False
+        if use_fused_attention:
+            logger.debug("Disabling FusedAttention for arbitrary mask")
+        use_fused_attention = False
+    if use_unfused_attention and "padding" in attn_mask_type:
+        logger.debug("Disabling UnfusedDotProductAttention for %s mask", attn_mask_type)
+        use_unfused_attention = False
+    if (
+        use_flash_attention
+        and _flash_attn_2_1_plus
+        and attn_mask_type in ["causal", "padding_causal"]
+        and max_seqlen_q != max_seqlen_kv
+    ):
+        logger.warning(
+            "Disabling FlashAttention as it only supports bottom-right-diagonal "
+            "causal mask since flash-attn 2.1. See "
+            "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
+        )
+        use_flash_attention = False
+    if (
+        use_flash_attention
+        and not _flash_attn_2_1_plus
+        and attn_mask_type in ["causal_bottom_right", "padding_causal_bottom_right"]
+        and max_seqlen_q != max_seqlen_kv
+    ):
+        logger.warning(
+            "Disabling FlashAttention as it only supports top-left-diagonal "
+            "causal mask before flash-attn 2.1. See "
+            "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
+        )
+        use_flash_attention = False
+
+    # Filter: Sliding window attention
+    #    backend                 |      window_size       | diagonal alignment
+    # ---------------------------------------------------------------------------------
+    # FlashAttention             | (-1, -1) or (>=0, >=0) | bottom right
+    # FusedAttention             | (-1,  0) or (>=0, 0)   | top left
+    # UnfusedDotProductAttention | (-1, -1) or (>=0, >=0) | both;
+    #                            |                        | converts window_size to an 'arbitrary' mask
+    if window_size is None:
+        window_size = check_set_window_size(attn_mask_type, window_size)
+    else:
+        if use_fused_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
+            if fp8 and (fp8_meta["recipe"].fp8_dpa or fp8_meta["recipe"].fp8_mha):
+                logger.debug(
+                    "Disabling FusedAttention as it does not support sliding window attention"
+                    " for FP8"
+                )
+                use_fused_attention = False
+            elif window_size[1] != 0 or attention_dropout != 0.0 or qkv_format == "thd":
+                logger.debug(
+                    "Disabling FusedAttention as it only supports sliding window attention "
+                    "with causal mask, no dropout, and qkv_format = bshd/sbhd"
+                )
+                use_fused_attention = False
+            elif context_parallel:
+                logger.debug(
+                    "Disabling FusedAttention as it does not support sliding window attention "
+                    "with context parallelism"
+                )
+                use_fused_attention = False
+            elif max_seqlen_q != max_seqlen_kv and attn_mask_type in [
+                "no_mask",
+                "padding",
+                "causal_bottom_right",
+                "padding_causal_bottom_right",
+            ]:
+                logger.debug(
+                    "Disabling FusedAttention as it does not support sliding window attention "
+                    "with attn_mask_type = %s for cross-attention",
+                    attn_mask_type,
+                )
+                use_fused_attention = False
+            elif "padding" in attn_mask_type:
+                logger.debug(
+                    "Disabling FusedAttention as it does not support sliding window attention "
+                    "with attn_mask_type = %s",
+                    attn_mask_type,
+                )
+                use_fused_attention = False
+        if (
+            use_flash_attention
+            and (window_size[0] != -1 or window_size[1] not in [-1, 0])
+            and (not _flash_attn_2_3_plus or context_parallel)
+        ):
+            logger.debug(
+                "Disabling FlashAttention as sliding window attention requires "
+                "flash-attn 2.3+ and no context parallelism"
+            )
+            use_flash_attention = False
+
+    # Filter: Attention bias
+    #    backend                 |      bias types              | ALiBi diagonal alignment
+    # ---------------------------------------------------------------------------------
+    # FlashAttention             | no_bias, alibi/alibi_slopes  | bottom right
+    # FusedAttention             | no_bias, post_scale_bias     |
+    #                            | alibi/alibi_slopes           | top left,
+    #                            |                              | bottom_right (converts to a 'post_scale_bias' bias)
+    # UnfusedDotProductAttention | no_bias, pre/post_scale_bias |
+    #                            | alibi/alibi_slopes           | both; converts to a 'post_scale_bias' bias
+    if use_flash_attention and (
+        core_attention_bias_type not in ["no_bias", "alibi"]
+        or core_attention_bias_shape is not None
+    ):
+        logger.debug("Disabling FlashAttention for pre/post_scale_bias")
+        use_flash_attention = False
+
+    fu_core_attention_bias_type = core_attention_bias_type
+    fu_core_attention_bias_shape = core_attention_bias_shape
+    fu_core_attention_bias_requires_grad = core_attention_bias_requires_grad
+    if (
+        use_fused_attention
+        and core_attention_bias_type == "alibi"
+        and (alibi_slopes_shape is not None or max_seqlen_q != max_seqlen_kv)
+    ):
+        fu_core_attention_bias_type = "post_scale_bias"
+        fu_core_attention_bias_requires_grad = False
+        if alibi_slopes_shape is None:
+            fu_core_attention_bias_shape = "1hss"
+        elif len(alibi_slopes_shape) == 1 and alibi_slopes_shape[0] == num_heads:
+            fu_core_attention_bias_shape = "1hss"
+        elif (
+            len(alibi_slopes_shape) == 2
+            and alibi_slopes_shape[0] == batch_size
+            and alibi_slopes_shape[1] == num_heads
+        ):
+            fu_core_attention_bias_shape = "bhss"
+
+    if (
+        use_fused_attention
+        and fu_core_attention_bias_type == "post_scale_bias"
+        and fu_core_attention_bias_shape != "1hss"
+    ):
+        if fu_core_attention_bias_requires_grad:
+            # remove this line when cuDNN adds bwd support for
+            # [1, 1, s, s], [b, 1, s, s] and [b, h, s, s]
+            logger.debug("Disabling FusedAttention for dBias in [1, H, S, S] shape")
+            use_fused_attention = False
+        else:
+            # max512 backend will only support [1, h, s, s]
+            os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
+
+    # Filter: cuDNN support
+    fused_attention_backend = None
+    if use_fused_attention:
+        q_type = TE_DType[qkv_dtype]
+        kv_type = q_type
+        if fp8 and fp8_meta["recipe"].fp8_dpa:
+            q_type = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
+            kv_type = q_type
+        fused_attention_backend = tex.get_fused_attn_backend(
+            q_type,
+            kv_type,
+            QKVLayout[qkv_layout],
+            AttnBiasType[fu_core_attention_bias_type],
+            AttnMaskType[attn_mask_type],
+            attention_dropout,
+            num_heads,
+            num_gqa_groups,
+            max_seqlen_q,
+            max_seqlen_kv,
+            head_dim,
+            window_size[0],
+            window_size[1],
+        )
+        if fused_attention_backend == FusedAttnBackend["No_Backend"]:
+            logger.debug("Disabling FusedAttention as no backend supports the provided input")
+            use_fused_attention = False
+            fused_attention_backend = None
+        if (
+            use_fused_attention and (not IS_HIP_EXTENSION)
+            and context_parallel
+            and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
+        ):
+            logger.debug(
+                "Disabling FusedAttention as only sub-backend %s does not support "
+                "context parallellism",
+                int(fused_attention_backend),
+            )
+            use_fused_attention = False
+            fused_attention_backend = None
+        if (
+            use_fused_attention and (not IS_HIP_EXTENSION)
+            and window_size is not None
+            and window_size[0] != -1
+            and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
+        ):
+            logger.debug(
+                "Disabling FusedAttention as only sub-backend %s does not support "
+                "slidng window attention",
+                int(fused_attention_backend),
+            )
+            use_fused_attention = False
+            fused_attention_backend = None
+        if (
+            use_fused_attention and (not IS_HIP_EXTENSION)
+            and fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]
+            and fu_core_attention_bias_type == "post_scale_bias"
+            and fu_core_attention_bias_shape != "1hss"
+        ):
+            logger.debug(
+                "Disabling FusedAttention as cuDNN sub-backend 0 only supports post_scale_bias in"
+                " [1, H, S, S] shape"
+            )
+            use_fused_attention = False
+            fused_attention_backend = None
+
+    # Filter: Determinism
+    # backend                      | deterministic
+    # ---------------------------------------------
+    # FlashAttention               |
+    #     flash-attn >=2.0, <2.4.1 | no
+    #     flash-attn >=2.4.1       | yes
+    # FusedAttention               |
+    #     sub-backend 0            | yes
+    #     sub-backend 1            | workspace optimization path and sm90+: yes;
+    #                              | otherwise: no
+    #     sub-backend 2            | no
+    # UnfusedDotProductAttention   | yes
+    if use_flash_attention and deterministic and not _flash_attn_2_4_1_plus:
+        logger.warning(
+            "Disabling FlashAttention as version <2.4.1 does not support deterministic "
+            "execution. To use FlashAttention with deterministic behavior, "
+            "please install flash-attn >= 2.4.1."
+        )
+        use_flash_attention = False
+    if use_fused_attention and deterministic and (not IS_HIP_EXTENSION):
+        if fused_attention_backend == FusedAttnBackend["FP8"] and is_training:
+            logger.debug("Disabling FusedAttention for determinism reasons")
+            use_fused_attention = False
+        if (
+            fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
+            and is_training
+            and (
+                device_compute_capability < (9, 0)
+                or core_attention_bias_requires_grad
+                or cudnn_version < (8, 9, 5)
+            )
+        ):
+            logger.debug("Disabling FusedAttention for determinism reasons")
+            use_fused_attention = False
+
+    if use_fused_attention and deterministic and IS_HIP_EXTENSION:
+        if (
+            fused_attention_backend == FusedAttnBackend["CK"]
+            and is_training
+        ):
+            logger.debug("Disabling FusedAttention for determinism reasons")
+            use_fused_attention = False
+
+    # All available backends
+    available_backends = [use_flash_attention, use_fused_attention, use_unfused_attention]
+    logger.debug(
+        "Available backends = {FlashAttention=%s, FusedAttention=%s%s,"
+        " UnfusedDotProductAttention=%s}",
+        bool(available_backends[0]),
+        bool(available_backends[1]),
+        (
+            f" (sub-backend {int(fused_attention_backend)})"
+            if fused_attention_backend is not None
+            else ""
+        ),
+        bool(available_backends[2]),
+    )
+
+    # Select FusedAttention for performance
+    if (
+        use_flash_attention
+        and use_fused_attention
+        and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
+    ):
+        if device_compute_capability == (9, 0):
+            logger.debug(
+                "Disabling FlashAttention to give FusedAttention preference on Hopper+ "
+                "for performance reasons"
+            )
+            use_flash_attention = False
+
+    # Selected backend
+    if use_flash_attention:
+        use_fused_attention = False
+        use_unfused_attention = False
+    elif use_fused_attention:
+        use_unfused_attention = False
+    selected_backend = "NoBackend"
+    if use_flash_attention:
+        selected_backend = "FlashAttention"
+    elif use_fused_attention:
+        selected_backend = f"FusedAttention (sub-backend {int(fused_attention_backend)})"
+    elif use_unfused_attention:
+        selected_backend = "UnfusedDotProductAttention"
+    logger.debug("Selected backend = %s", selected_backend)
+
+    global _attention_backends
+    _attention_backends["use_flash_attention"] = use_flash_attention
+    _attention_backends["use_fused_attention"] = use_fused_attention
+    _attention_backends["fused_attention_backend"] = fused_attention_backend
+    _attention_backends["use_unfused_attention"] = use_unfused_attention
+    _attention_backends["backend_selection_requires_update"] = False
+
+    return (
+        use_flash_attention,
+        use_fused_attention,
+        fused_attention_backend,
+        use_unfused_attention,
+        available_backends,
+    )
 
 
 class InferenceParams:  # pylint: disable=too-few-public-methods
@@ -169,12 +771,71 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
 
 
 @torch.no_grad()
+def get_swa_mask(
+    window_size: Tuple[int, int],
+    max_seqlen_q: int,
+    max_seqlen_kv: int,
+    attn_mask_type: str = "no_mask",
+    attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
+) -> torch.Tensor:
+    """
+    Convert sliding window `window_size` to an equivalent "`arbitrary`" mask.
+    For "`causal`" mask type, the sliding window diagonal is aligned to the top left corner,
+    and for other mask types, the bottom right corner.
+
+    Parameters
+    ----------
+    window_size: Tuple[int, int]
+        Sliding window size for local attention, where query at position i attends to keys
+        in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
+        + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
+        window and causal mask specifically. Both `causal` and `causal_bottom_right` masks
+        map to `window_size = (-1, 0)` and Transformer Engine distinguishes them based on
+        `attn_mask_type`.
+    max_seqlen_q: int
+        Maximum sequence length for queries.
+    max_seqlen_kv: int
+        Maximum sequence length for keys and values.
+    attn_mask_type: str, default = `no_mask`
+        Attention mask type, {"`no_mask`", "`padding`", "`causal`", "`padding_causal`",
+        "`causal_bottom_right`", "`padding_causal_bottom_right`", "`arbitrary`"}
+    attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]],
+        default = `None`
+        Boolean tensor(s) used to mask out attention softmax input.
+
+    Returns
+    ----------
+    attention_mask: torch.Tensor
+        Combined `attention_mask` (input) and sliding window attention mask.
+        The shape is [max_seqlen_q, max_seqlen_kv] when input `attention_mask` is None;
+        else, the same shape as input `attention_mask`.
+    """
+    mask = torch.ones(max_seqlen_q, max_seqlen_kv, dtype=torch.bool, device="cuda")
+    if attn_mask_type in ["causal"]:
+        left = window_size[0] if window_size[0] != -1 else max_seqlen_q
+        right = window_size[1] if window_size[1] != -1 else max_seqlen_q
+        mask_upper = torch.triu(mask, diagonal=-left)
+        mask_lower = torch.tril(mask_upper, diagonal=right)
+    else:
+        left = window_size[0] if window_size[0] != -1 else max_seqlen_kv
+        right = window_size[1] if window_size[1] != -1 else max_seqlen_kv
+        mask_upper = torch.triu(mask, diagonal=max_seqlen_kv - max_seqlen_q - left)
+        mask_lower = torch.tril(mask_upper, diagonal=max_seqlen_kv - max_seqlen_q + right)
+    attn_mask_type = "arbitrary"
+    mask = mask_lower.logical_not()
+    if attention_mask is not None:
+        mask = torch.logical_and(attention_mask, mask)
+    return attn_mask_type, mask
+
+
+@torch.no_grad()
 def get_alibi(
     num_heads: int,
     max_seqlen_q: int,
     max_seqlen_kv: int,
     alibi_slopes: Optional[torch.Tensor] = None,
     bias_dtype: Optional[torch.dtype] = None,
+    bottom_right_alignment: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Parameters
@@ -189,6 +850,9 @@ def get_alibi(
         Custom ALiBi slopes, FP32, CUDA tensor, in shape [num_heads] or [batch_size, num_heads].
     bias_dtype: Optional[torch.dtype], default = `None`
         Dtype of the generated ALiBi bias. If None, use torch.float32.
+    bottom_right_alignment: bool, default = `True`
+        Whether to align the diagonal of the ALiBi bias to the bottom right corner of
+        the matrix (`True`) or top left (`False`).
 
     Returns
     ----------
@@ -224,15 +888,21 @@ def get_alibi(
             slopes_shape = torch.Size([1, _alibi_cache["_alibi_slopes"].shape[0], 1, 1])
         if _alibi_cache["_alibi_slopes"].dim() == 2:
             slopes_shape = torch.Size([*_alibi_cache["_alibi_slopes"].shape[:], 1, 1])
-        bias = torch.arange(1 - max_seqlen_kv, 1, dtype=torch.int32, device="cuda").view(
-            1, 1, 1, max_seqlen_kv
-        )
+        if bottom_right_alignment:
+            bias = torch.arange(1 - max_seqlen_kv, 1, dtype=torch.int32, device="cuda").view(
+                1, 1, 1, max_seqlen_kv
+            )
+        else:
+            bias = torch.arange(
+                1 - max_seqlen_q, max_seqlen_kv - max_seqlen_q + 1, dtype=torch.int32, device="cuda"
+            ).view(1, 1, 1, max_seqlen_kv)
         bias = bias - torch.arange(1 - max_seqlen_q, 1, dtype=torch.int32, device="cuda").view(
             1, 1, max_seqlen_q, 1
         )
         bias = bias.abs().mul(-1)
         bias = bias * _alibi_cache["_alibi_slopes"].view(slopes_shape)
         _alibi_cache["_max_seqlen_q"], _alibi_cache["_max_seqlen_kv"] = max_seqlen_q, max_seqlen_kv
+        _alibi_cache["_bottom_right_alignment"] = bottom_right_alignment
         bias_dtype = torch.float32 if bias_dtype is None else bias_dtype
         _alibi_cache["_alibi_bias"] = bias.contiguous().to(dtype=bias_dtype, device="cuda")
         _alibi_cache["_alibi_bias_require_update"] = False
@@ -610,11 +1280,10 @@ class AttnFuncWithCP(torch.autograd.Function):
             )
         assert q.shape[-1] % 8 == 0, "hidden size per attention head should be multiple of 8"
         fa_optional_forward_kwargs = {}
-        if not IS_HIP_EXTENSION:
-            if _flash_attn_2_3_plus:
-                fa_optional_forward_kwargs["window_size"] = [-1, 0] if causal else [-1, -1]
-            if _flash_attn_2_4_plus:
-                fa_optional_forward_kwargs["alibi_slopes"] = None
+        if _flash_attn_2_3_plus:
+            fa_optional_forward_kwargs["window_size"] = [-1, 0] if causal else [-1, -1]
+        if _flash_attn_2_4_plus:
+            fa_optional_forward_kwargs["alibi_slopes"] = None
 
         # Flash Attn inputs
         q_inputs = [None, None]
@@ -1156,11 +1825,10 @@ class AttnFuncWithCP(torch.autograd.Function):
         send_recv_reqs = []
 
         fa_optional_backward_kwargs = {}
-        if not IS_HIP_EXTENSION:
-            if _flash_attn_2_4_plus:
-                fa_optional_backward_kwargs["alibi_slopes"] = None
-            if _flash_attn_2_4_1_plus:
-                fa_optional_backward_kwargs["deterministic"] = ctx.deterministic
+        if _flash_attn_2_4_plus:
+            fa_optional_backward_kwargs["alibi_slopes"] = None
+        if _flash_attn_2_4_1_plus:
+            fa_optional_backward_kwargs["deterministic"] = ctx.deterministic
 
         for i in range(cp_size):
             # wait until KV is received
@@ -2079,7 +2747,6 @@ class UnfusedDotProductAttention(torch.nn.Module):
         alibi_slopes: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Unfused attention fprop"""
-
         assert (
             qkv_layout in QKVLayouts
         ), f"UnfusedDotProductAttention does not support qkv_layout = {qkv_layout}!"
@@ -2162,7 +2829,11 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 assert core_attention_bias is not None, "core_attention_bias should not be None!"
             if core_attention_bias_type == "alibi":
                 _, core_attention_bias = get_alibi(
-                    output_size[1], output_size[2], output_size[3], alibi_slopes=alibi_slopes
+                    output_size[1],
+                    output_size[2],
+                    output_size[3],
+                    alibi_slopes=alibi_slopes,
+                    bottom_right_alignment=attn_mask_type not in ["causal", "padding_causal"],
                 )
             matmul_result = torch.baddbmm(
                 matmul_result,
@@ -2267,7 +2938,7 @@ class _PrepareQKVForFA(torch.autograd.Function):
         return dq, dk, dv
 
 
-def _get_qkv_layout(
+def get_qkv_layout(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -2390,19 +3061,47 @@ def check_set_window_size(
     attn_mask_type: str,
     window_size: Tuple[int, int] = None,
 ):
-    """Check if sliding window size is compliant with mask type and if not,
-    assert or set it to the appropriate size
+    """Check if sliding window size is compliant with attention mask type.
+    If not, set it to the appropriate size.
+
+         attn_mask_type                              |   window_size
+    -------------------------------------------------------------------------
+    no_mask, padding, arbitrary                      | (-1, -1) or (>=0, >=0)
+    causal, padding_causal                           | (-1,  0) or (>=0, 0)
+    causal_bottom_right, padding_causal_bottom_right | (-1,  0) or (>=0, 0)
     """
+    orig_window_size = window_size
     if "causal" in attn_mask_type:
-        if window_size is None:
+        if orig_window_size is None or (
+            orig_window_size[0] == -1 and orig_window_size[1] in [-1, 0]
+        ):
             window_size = (-1, 0)
+            warnings.warn(
+                "window_size should be (-1, 0) or (>=0, 0) for attn_mask_type=" + attn_mask_type
+            )
+        elif orig_window_size[0] >= 0:
+            window_size = (orig_window_size[0], 0)
+            warnings.warn(
+                "window_size should be (-1, 0) or (>=0, 0) for attn_mask_type=" + attn_mask_type
+            )
         else:
-            assert (
-                window_size[1] == 0
-            ), "window_size[1] should be 0 when self_attn_mask_type includes 'causal'!"
-    else:
-        if window_size is None:
+            assert False, (
+                "window_size should be (-1, 0) or (>=0, 0) for attn_mask_type=" + attn_mask_type
+            )
+    elif attn_mask_type in ["no_mask", "padding", "arbitrary"]:
+        if orig_window_size is None or (
+            orig_window_size[0] == -1 and orig_window_size[1] in [-1, 0]
+        ):
             window_size = (-1, -1)
+            warnings.warn(
+                "window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type=" + attn_mask_type
+            )
+        elif orig_window_size[0] < 0 or orig_window_size[0] < 0:
+            assert False, (
+                "window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type=" + attn_mask_type
+            )
+    else:
+        assert False, "Invalid attn_mask_type: " + attn_mask_type
     return window_size
 
 
@@ -2421,16 +3120,16 @@ class FlashAttention(torch.nn.Module):
         deterministic: bool = False,
     ) -> None:
         super().__init__()
-
-        #TODO: wait for rocm flash attn
-        assert not IS_HIP_EXTENSION, "Flash attention is not supported on ROCm"
-        if not IS_HIP_EXTENSION:
-            assert (
-                _flash_attn_version >= _flash_attn_version_required
-            ), f"FlashAttention minimum version {_flash_attn_version_required} is required."
-            assert (
-                _flash_attn_version <= _flash_attn_max_version
-            ), f"FlashAttention maximum version {_flash_attn_max_version} is supported."
+        
+        # TODO: enable after flash attn package supported in ROCm TE
+        if IS_HIP_EXTENSION:
+            return
+        assert (
+            _flash_attn_version >= _flash_attn_version_required
+        ), f"FlashAttention minimum version {_flash_attn_version_required} is required."
+        assert (
+            _flash_attn_version <= _flash_attn_max_version
+        ), f"FlashAttention maximum version {_flash_attn_max_version} is supported."
 
         self.softmax_scale = softmax_scale
         self.attention_dropout_ctx = attention_dropout_ctx
@@ -2458,8 +3157,6 @@ class FlashAttention(torch.nn.Module):
         cp_stream: torch.cuda.Stream = None,
     ) -> torch.Tensor:
         """flash-attn fprop"""
-
-        window_size = check_set_window_size(attn_mask_type, window_size)
 
         assert (
             query_layer.dtype in [torch.float16, torch.bfloat16]
@@ -2687,11 +3384,13 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         qkv_layout,
         attn_bias_type,
         attn_mask_type,
+        window_size,
         rng_gen,
         fused_attention_backend,
         use_FAv2_bwd,
         fp8,
         fp8_meta,
+        deterministic,
     ):
         logger = logging.getLogger("FusedAttnFunc_qkvpacked")
         if fp8:
@@ -2736,6 +3435,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                 qkv_layout,
                 attn_bias_type,
                 attn_mask_type,
+                window_size,
                 rng_gen,
             )
             if fp8_meta["recipe"].fp8_mha:
@@ -2801,6 +3501,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                 qkv_layout,
                 attn_bias_type,
                 attn_mask_type,
+                window_size,
                 rng_gen,
             )
             fp8_tensors = (None, None, None, None)
@@ -2820,10 +3521,12 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         ctx.qkv_layout = qkv_layout
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
+        ctx.window_size = window_size
         ctx.fused_attention_backend = (
             fused_attention_backend if (IS_HIP_EXTENSION or ctx.fp8) else FusedAttnBackend["F16_arbitrary_seqlen"]
         )
         ctx.use_FAv2_bwd = use_FAv2_bwd
+        ctx.deterministic = deterministic
 
         return out_ret
 
@@ -2925,6 +3628,8 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                         ctx.qkv_layout,
                         ctx.attn_bias_type,
                         ctx.attn_mask_type,
+                        ctx.window_size,
+                        ctx.deterministic,
                     )
                     if ctx.fp8_meta["recipe"].fp8_mha:
                         dqkv = Float8Tensor(
@@ -2977,6 +3682,8 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                         ctx.qkv_layout,
                         ctx.attn_bias_type,
                         ctx.attn_mask_type,
+                        ctx.window_size,
+                        ctx.deterministic,
                     )
 
         # if no_bias or alibi, return dqkv
@@ -3002,6 +3709,8 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                 None,
                 None,
                 None,
+                None,
+                None,
             )
         # else, return (dqkv, dbias)
         return (
@@ -3012,6 +3721,8 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
             dqkv,
             None,
             rest[0],
+            None,
+            None,
             None,
             None,
             None,
@@ -3051,11 +3762,13 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         qkv_layout,
         attn_bias_type,
         attn_mask_type,
+        window_size,
         rng_gen,
         fused_attention_backend,
         use_FAv2_bwd,
         fp8,
         fp8_meta,
+        deterministic,
     ):
         logger = logging.getLogger("FusedAttnFunc_kvpacked")
         if fp8:
@@ -3109,6 +3822,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                 qkv_layout,
                 attn_bias_type,
                 attn_mask_type,
+                window_size,
                 rng_gen,
             )
             if fp8_meta["recipe"].fp8_mha:
@@ -3182,6 +3896,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                 qkv_layout,
                 attn_bias_type,
                 attn_mask_type,
+                window_size,
                 rng_gen,
             )
             out_save = out_ret
@@ -3208,10 +3923,12 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         ctx.qkv_layout = qkv_layout
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
+        ctx.window_size = window_size
         ctx.fused_attention_backend = (
             fused_attention_backend if (IS_HIP_EXTENSION or ctx.fp8) else FusedAttnBackend["F16_arbitrary_seqlen"]
         )
         ctx.use_FAv2_bwd = use_FAv2_bwd
+        ctx.deterministic = deterministic
 
         return out_ret
 
@@ -3321,6 +4038,8 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                         ctx.qkv_layout,
                         ctx.attn_bias_type,
                         ctx.attn_mask_type,
+                        ctx.window_size,
+                        ctx.deterministic,
                     )
                     if ctx.fp8_meta["recipe"].fp8_mha:
                         dq = Float8Tensor(
@@ -3392,6 +4111,8 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                         ctx.qkv_layout,
                         ctx.attn_bias_type,
                         ctx.attn_mask_type,
+                        ctx.window_size,
+                        ctx.deterministic,
                     )
 
         # if no_bias or alibi, return dqkv
@@ -3406,6 +4127,8 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                 None,
                 dq,
                 dkv,
+                None,
+                None,
                 None,
                 None,
                 None,
@@ -3448,6 +4171,8 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
             None,
             None,
             None,
+            None,
+            None,
         )
 
 
@@ -3475,11 +4200,13 @@ class FusedAttnFunc(torch.autograd.Function):
         qkv_layout,
         attn_bias_type,
         attn_mask_type,
+        window_size,
         rng_gen,
         fused_attention_backend,
         use_FAv2_bwd,
         fp8,
         fp8_meta,
+        deterministic,
     ):
         logger = logging.getLogger("FusedAttnFunc")
         if fp8:
@@ -3555,6 +4282,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 qkv_layout,
                 attn_bias_type,
                 attn_mask_type,
+                window_size,
                 rng_gen,
             )
             if fp8_meta["recipe"].fp8_mha:
@@ -3678,6 +4406,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 qkv_layout,
                 attn_bias_type,
                 attn_mask_type,
+                window_size,
                 rng_gen,
             )
             out_save = out_ret
@@ -3713,10 +4442,12 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.qkv_layout = qkv_layout
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
+        ctx.window_size = window_size
         ctx.fused_attention_backend = (
             fused_attention_backend if (IS_HIP_EXTENSION or ctx.fp8) else FusedAttnBackend["F16_arbitrary_seqlen"]
         )
         ctx.use_FAv2_bwd = use_FAv2_bwd
+        ctx.deterministic = deterministic
 
         return out_ret
 
@@ -3831,6 +4562,8 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.qkv_layout,
                         ctx.attn_bias_type,
                         ctx.attn_mask_type,
+                        ctx.window_size,
+                        ctx.deterministic,
                     )
 
                     if ctx.fp8_meta["recipe"].fp8_mha:
@@ -3955,6 +4688,8 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.qkv_layout,
                         ctx.attn_bias_type,
                         ctx.attn_mask_type,
+                        ctx.window_size,
+                        ctx.deterministic,
                     )
 
         # if no_bias or alibi, return dqkv
@@ -3985,6 +4720,8 @@ class FusedAttnFunc(torch.autograd.Function):
                 None,
                 None,
                 None,
+                None,
+                None,
             )
         # else, return (dqkv, dbias)
         return (
@@ -4000,6 +4737,8 @@ class FusedAttnFunc(torch.autograd.Function):
             dv,
             None,
             rest[0],
+            None,
+            None,
             None,
             None,
             None,
@@ -4066,22 +4805,7 @@ class FusedAttention(torch.nn.Module):
             "NVTE_FUSED_ATTN_USE_FAv2_BWD", "0"
         ) == "1" and get_device_compute_capability() == (9, 0)
         self.layer_number = 1 if layer_number is None else layer_number
-        if not IS_HIP_EXTENSION:
-            if deterministic:
-                # workspace optimization path is deterministic
-                os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
-
-            # CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT
-            # - unset:       enables workspace optimization when required workspace is <= 256MB
-            #                or when bias gradient needs to be computed
-            # - n:           enables workspace optimization when required workspace is <= n bytes
-            # - -1:          enables workspace optimization always
-            # - 0:           disables workspace optimization always
-            if "NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT" in os.environ:
-                if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "0":
-                    os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "0"
-                if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "1":
-                    os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
+        self.deterministic = deterministic
 
         def remove_extra_states_check(self, incompatible_keys):  # pylint: disable=unused-argument
             """
@@ -4119,6 +4843,7 @@ class FusedAttention(torch.nn.Module):
         max_seqlen_kv: Optional[int] = None,
         attn_mask_type: str = "causal",
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
+        window_size: Optional[Tuple[int, int]] = None,
         fused_attention_backend: tex.NVTE_Fused_Attn_Backend = tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
@@ -4189,14 +4914,6 @@ class FusedAttention(torch.nn.Module):
                         max_seqlen_kv,
                         key_layer.device,
                     )
-        # additional asserts for rocm fused attn backend
-        if IS_HIP_EXTENSION:
-            assert (
-                "padding" not in attn_mask_type
-            ), f"ROCm FusedAttention (aotriton or CK) does not support attn_mask_type = {attn_mask_type}!"
-            assert (
-                core_attention_bias_type == "no_bias"
-            ), f"ROCm FusedAttention (aotriton or CK) does not support bias_type = {core_attention_bias_type}!"
         if qkv_format == "thd":
             assert (
                 max_seqlen_q is not None
@@ -4204,9 +4921,10 @@ class FusedAttention(torch.nn.Module):
                 and cu_seqlens_q is not None
                 and cu_seqlens_kv is not None
             ), "max_seqlen_q/kv and cu_seqlens_q/kv can not be None when qkv_format is thd!"
-            if cu_seqlens_q_padded is None or cu_seqlens_kv_padded is None:
-                cu_seqlens_q_padded = cu_seqlens_q
-                cu_seqlens_kv_padded = cu_seqlens_kv
+
+        if cu_seqlens_q_padded is None or cu_seqlens_kv_padded is None:
+            cu_seqlens_q_padded = cu_seqlens_q
+            cu_seqlens_kv_padded = cu_seqlens_kv
 
         qkv_dtype = TE_DType[query_layer.dtype]
 
@@ -4217,10 +4935,9 @@ class FusedAttention(torch.nn.Module):
         )
 
         if context_parallel:
-            if not IS_HIP_EXTENSION:
-                assert (
-                    fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
-                ), f"{fused_attention_backend} does not work with context parallelism!"
+            assert (
+                IS_HIP_EXTENSION or fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+            ), f"{fused_attention_backend} does not work with context parallelism!"
             assert core_attention_bias_type not in [
                 "alibi"
             ], f"{core_attention_bias_type} is not supported with context parallelism!"
@@ -4279,11 +4996,13 @@ class FusedAttention(torch.nn.Module):
                     qkv_layout,
                     core_attention_bias_type,
                     attn_mask_type,
+                    window_size,
                     None,  # rng_gen
                     fused_attention_backend,
                     use_FAv2_bwd,
                     fp8,
                     fp8_meta,
+                    self.deterministic,
                 )
 
         # ...hd -> ...(hd)
@@ -4325,24 +5044,37 @@ class DotProductAttention(TransformerEngineBaseModule):
                       dropout probability for the dropout op during multi-head attention.
     attn_mask_type: str, default = `causal`
                    type of attention mask passed into softmax operation, options are "`no_mask`",
-                   "`padding`", "`causal`", "`padding,causal`", "`causal,padding`", and
-                   "`arbitrary`", where "`padding,causal`" and "`causal,padding`" are equivalent.
-                   This arg can be overridden by :attr:`attn_mask_type` in the `forward` method.
-                   It is useful for cases involving compilation/tracing, e.g. ONNX export, and the
-                   forward arg is useful for dynamically changing mask types, e.g. a different mask
-                   for training and inference. For "`no_mask`", no attention mask is applied. For
-                   "`causal`" or the causal mask in "`padding,causal`", TransformerEngine calculates
-                   and applies an upper triangular mask to the softmax input. No user input is
-                   needed. For "`padding`" or the padding mask in "`padding,causal`", users need to
-                   provide the locations of padded tokens either via :attr:`cu_seqlens_q` and
-                   :attr:`cu_seqlens_kv` in the shape of [batch_size + 1] or :attr:`attention_mask`
-                   in the shape [batch_size, 1, 1, max_seq_len]. For the "`arbitrary`" mask, users
-                   need to provide a mask that is broadcastable to the shape of softmax input.
+                   "`padding`", "`causal`", "`padding,causal`", "`causal,padding`",
+                   "`padding_causal`", "`causal_bottom_right`", "`padding_causal_bottom_right`", and
+                   "`arbitrary`", where "`padding,causal`", "`causal,padding`" and "`padding_causal`"
+                   are equivalent. This arg can be overridden by :attr:`attn_mask_type` in the
+                   `forward` method. It is useful for cases involving compilation/tracing, e.g.
+                   ONNX export, and the forward arg is useful for dynamically changing mask types,
+                   e.g. a different mask for training and inference.
+                   1. For "`no_mask`", no attention mask is applied.
+                   2. For "`causal`", "`causal_bottom_right`", or the causal mask in
+                   "`padding_causal`" and "`padding_causal_bottom_right`", TransformerEngine
+                   calculates and applies an upper triangular mask to the softmax input.
+                   No user input is needed. Causal masks without the "`bottom_right`" appendix align
+                   the diagonal line to the top left corner of the softmax matrix. With
+                   "`bottom_right`", the causal mask is aligned to the bottom right corner, which is
+                   often used in inference/KV caching.
+                   3. For "`padding`", or the padding mask in "`padding_causal`" and
+                   "`padding_causal_bottom_right`", users need to provide the locations of padded
+                   tokens, either via :attr:`cu_seqlens_q` and :attr:`cu_seqlens_kv` (both in shape
+                   [batch_size + 1]), or via :attr:`attention_mask` (one tensor for self-attention
+                   in shape [batch_size, 1, 1, max_seqlen_q], or two tensors in a tuple for
+                   cross-attention in shapes [batch_size, 1, 1, max_seqlen_q] and
+                   [batch_size, 1, 1, max_seqlen_kv]).
+                   4. For "`arbitrary`", users need to provide a mask that is broadcastable to
+                   the shape of softmax input [batch_size, num_heads, max_seqlen_q, max_seqlen_kv].
     window_size: Optional[Tuple[int, int]], default = `None`
                 sliding window size for local attention, where query at position i attends to keys
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
                 + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
-                window and causal mask specifically. Similar to :attr:`attn_mask_type`, it can
+                window and causal mask specifically. Both `causal` and `causal_bottom_right` masks
+                map to `window_size = (-1, 0)` and Transformer Engine distinguishes them based on
+                `attn_mask_type`. Similar to :attr:`attn_mask_type`, `window_size` can
                 be overridden by :attr:`window_size` in `forward` as well.
     attention_type: str, default = `self`
                    type of attention, either "`self`" and "`cross`".
@@ -4358,7 +5090,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                equal length, and the `thd` format is used for when sequences in a batch
                have different lengths. Please note that these formats do not reflect how
                tensors `query_layer`, `key_layer`, `value_layer` are laid out in memory.
-               For that, please use `_get_qkv_layout` to gain the layout information.
+               For that, please use `get_qkv_layout` to gain the layout information.
     softmax_scale: Optional[float], default = `None`
                 softmax scale for the attention scores. If `None`, defaults to
                 `1.0 / math.sqrt(kv_channels)`.
@@ -4410,8 +5142,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         if attn_mask_type == "causal_padding":
             attn_mask_type = "padding_causal"
         self.attn_mask_type = attn_mask_type
-        self.window_size = window_size
-        self.window_size = check_set_window_size(attn_mask_type, self.window_size)
+        self.window_size = check_set_window_size(attn_mask_type, window_size)
         if tp_group is None:
             self.tp_size = tp_size
             if tp_size == 1:
@@ -4446,39 +5177,29 @@ class DotProductAttention(TransformerEngineBaseModule):
         if softmax_scale is None:
             softmax_scale = 1.0 / math.sqrt(kv_channels)
 
-        self.device_compute_capability = get_device_compute_capability()
         self.deterministic = (
             not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
             or torch.are_deterministic_algorithms_enabled()
         )
+        # To use the workspace optimization path for determinism, please
+        # set NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT=1 for cuDNN >=8.9.5 and <9.0.0,
+        # and set NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 for cuDNN >=9.0.0.
+        cudnn_version = get_cudnn_version()
+        if (8, 9, 5) <= cudnn_version < (9, 0, 0):
+            if self.deterministic:
+                os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1"
 
-        if IS_HIP_EXTENSION:
-            self.use_flash_attention = False
-            self.use_fused_attention = int(os.getenv("NVTE_FUSED_ATTN", "1"))
-        else:
-            self.use_flash_attention = int(
-                os.getenv("NVTE_FLASH_ATTN", "1")
-            ) and self.device_compute_capability >= (8, 0)
-            if int(os.getenv("NVTE_FLASH_ATTN", "1")) == 0:
-                self.logger.debug("Disabling FlashAttention due to NVTE_FLASH_ATTN=0")
-            if self.device_compute_capability < (8, 0):
-                self.logger.debug("Disabling FlashAttention for compute capability < sm80")
-
-            if not _flash_attn_2_4_1_plus and self.deterministic:
-                self.use_flash_attention = False
-                self.logger.warning(
-                    "Disabling usage of FlashAttention since version <2.4.1 does not support "
-                    "deterministic execution. In order to use FA with deterministic behavior,"
-                    " please install FlashAttention version >=2.4.1."
-                )
-
-            self.use_fused_attention = int(
-                os.getenv("NVTE_FUSED_ATTN", "1")
-            ) and self.device_compute_capability >= (8, 0)
-            if int(os.getenv("NVTE_FUSED_ATTN", "1")) == 0:
-                self.logger.debug("Disabling FusedAttention due to NVTE_FUSED_ATTN=0")
-            if self.device_compute_capability < (8, 0):
-                self.logger.debug("Disabling FusedAttention for compute capability < sm80")
+            # CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT
+            # - unset:       enables workspace optimization when required workspace is <= 256MB
+            #                or when bias gradient needs to be computed
+            # - n:           enables workspace optimization when required workspace is <= n bytes
+            # - -1:          enables workspace optimization always
+            # - 0:           disables workspace optimization always
+            if "NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT" in os.environ:
+                if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "0":
+                    os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "0"
+                if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "1":
+                    os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
 
         assert attention_type in AttnTypes, f"attention_type {attention_type} not supported"
 
@@ -4490,25 +5211,23 @@ class DotProductAttention(TransformerEngineBaseModule):
             "attention_dropout_ctx": attention_dropout_ctx,
         }
 
-        if self.use_flash_attention:
-            self.flash_attention = FlashAttention(
-                softmax_scale,
-                attention_type=attention_type,
-                layer_number=layer_number,
-                deterministic=self.deterministic,
-                **attn_kwargs,
-            )
+        self.flash_attention = FlashAttention(
+            softmax_scale,
+            attention_type=attention_type,
+            layer_number=layer_number,
+            deterministic=self.deterministic,
+            **attn_kwargs,
+        )
 
         # Instantiating three types since use of flash-attn and FusedAttention
         # might be ruled out due to forward inputs.
-        if self.use_fused_attention:
-            self.fused_attention = FusedAttention(
-                softmax_scale,
-                attention_type=attention_type,
-                layer_number=layer_number,
-                deterministic=self.deterministic,
-                **attn_kwargs,
-            )
+        self.fused_attention = FusedAttention(
+            softmax_scale,
+            attention_type=attention_type,
+            layer_number=layer_number,
+            deterministic=self.deterministic,
+            **attn_kwargs,
+        )
 
         self.unfused_attention = UnfusedDotProductAttention(
             softmax_scale, **attn_kwargs, layer_number=layer_number
@@ -4649,13 +5368,13 @@ class DotProductAttention(TransformerEngineBaseModule):
                      Value tensor.
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]],
              default = `None`. Boolean tensor(s) used to mask out attention softmax input.
-             It should be 'None' for 'causal' and 'no_mask' types. For 'padding' masks, it should be
+             It should be `None` for causal masks and "`no_mask`". For padding masks, it should be
              a single tensor of [batch_size, 1, 1, seqlen_q] for self-attention, and a tuple of
              two tensors in shapes [batch_size, 1, 1, seqlen_q] and [batch_size, 1, 1, seqlen_kv]
-             for cross-attention. For the 'arbitrary' mask type, it should be in a shape that is
-             broadcastable to [batch_size, num_heads, max_seqlen_q, max_seqlen_kv]. A `True` value
-             means the corresponding position is masked out and a `False` means that position is
-             allowed to participate in attention.
+             for cross-attention. For "`arbitrary`" mask, it should be in a shape broadcastable
+             to [batch_size, num_heads, max_seqlen_q, max_seqlen_kv]. A `True` value means
+             the corresponding position is masked out and a `False` means that position
+             is allowed to participate in attention.
         qkv_format: str, default = `None`
                    If provided, overrides :attr:`qkv_format` from initialization.
         cu_seqlens_q: Optional[torch.Tensor], default = `None`
@@ -4680,9 +5399,13 @@ class DotProductAttention(TransformerEngineBaseModule):
         max_seqlen_kv: Optional[int], default = `None`
                        Maximum sequence length in `key_layer` and `value_layer`.
                        Calculated from `cu_seqlens_kv` if not provided.
-        attn_mask_type: {`no_mask`, `padding`, `causal`, `padding,causal`, `causal,padding`,
-                       `arbitrary`}, default = `None`. Type of attention mask passed into
-                       softmax operation. 'padding,causal' and 'causal,padding' are equivalent.
+        attn_mask_type: {'no_mask', 'padding', 'causal', 'padding,causal', 'causal,padding',
+                       'padding_causal', 'causal_bottom_right', 'padding_causal_bottom_right',
+                       'arbitrary'}, default = `None`. Type of attention mask passed into
+                       softmax operation. 'padding,causal', 'causal,padding' and 'padding_causal'
+                       are equivalent. By default, causal masks are aligned to the top left corner
+                       of the softmax matrix. When "`bottom_right`" is specified in the mask type,
+                       causal masks are aligned to the bottom right corner.
         window_size: Optional[Tuple[int, int]], default = `None`
                     Sliding window size for local attention.
         checkpoint_core_attention : bool, default = `False`
@@ -4731,13 +5454,15 @@ class DotProductAttention(TransformerEngineBaseModule):
             num_gemms=3,
             allow_non_contiguous=True,
         ) as query_layer:
-            
+
             if self.fp8:
-                forced_fp8_dpa = ""
                 if self.fp8_meta["recipe"].fp8_mha:
                     if not self.fp8_meta["recipe"].fp8_dpa:
                         self.fp8_meta["recipe"].fp8_dpa = True
-                        forced_fp8_dpa = " (forced)"
+                        self.logger.WARNING(
+                            """Forcing fp8_meta["recipe"].fp8_dpa=True due to """
+                            """fp8_meta["recipe"].fp8_mha=True"""
+                        )
 
             if self.fp8 and self.fp8_meta["recipe"].fp8_dpa:
                 forward_dtype = get_fp8_te_dtype(self.fp8_meta["recipe"], fprop_tensor=True)
@@ -4753,18 +5478,17 @@ class DotProductAttention(TransformerEngineBaseModule):
             assert (
                 query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
             ), "DotProductAttention only supports CUDA tensors."
-
+            assert (
+                query_layer.dtype == key_layer.dtype and query_layer.dtype == value_layer.dtype
+            ), "Queries, keys and values must have the same data type!"
             assert key_layer.shape == value_layer.shape, "Keys and values must have the same shape!"
 
-            if attn_mask_type is not None:
-                window_size = check_set_window_size(attn_mask_type, window_size)
             if attn_mask_type is None:
                 attn_mask_type = self.attn_mask_type
             else:
                 attn_mask_type = attn_mask_type.replace(",", "_")
                 if attn_mask_type == "causal_padding":
                     attn_mask_type = "padding_causal"
-
             assert (
                 attn_mask_type in AttnMaskTypes
             ), f"Attention mask type {attn_mask_type} is not supported!"
@@ -4773,6 +5497,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                     "padding" in attn_mask_type
                 ), "Attention mask type must be padding or padding_causal for qkv_format=thd!"
 
+            if window_size is None:
+                window_size = self.window_size
+            window_size = check_set_window_size(attn_mask_type, window_size)
+
             if self.rng_states_tracker is not None and is_graph_capturing():
                 assert isinstance(
                     self.rng_states_tracker, CudaRNGStatesTracker
@@ -4780,9 +5508,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 assert (
                     graph_safe_rng_available()
                 ), "Upgrade PyTorch version to get RNG manipulation support for cuda graph capture."
-
-            if window_size is None:
-                window_size = self.window_size
 
             if qkv_format is None:
                 qkv_format = self.qkv_format
@@ -4855,6 +5580,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 if max_seqlen_kv is None:
                     seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
                     max_seqlen_kv = pow(2, math.ceil(math.log2(seqlens_kv.max().item())))
+                batch_size = len(cu_seqlens_q) - 1
 
             if qkv_format in ["sbhd", "bshd"]:
                 assert all(
@@ -4862,8 +5588,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                 ), f"Queries, keys and values must be 4D tensors when qkv_format = {qkv_format}!"
                 if qkv_format == "sbhd":
                     max_seqlen_q, max_seqlen_kv = (query_layer.shape[0], key_layer.shape[0])
+                    batch_size = query_layer.shape[1]
                 if qkv_format == "bshd":
                     max_seqlen_q, max_seqlen_kv = (query_layer.shape[1], key_layer.shape[1])
+                    batch_size = query_layer.shape[0]
                 if cu_seqlens_q is not None:
                     seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
                     assert all(
@@ -4876,192 +5604,42 @@ class DotProductAttention(TransformerEngineBaseModule):
                         seqlens_kv <= max_seqlen_kv
                     ), """Sequence lengths indicated by cu_seqlens_kv must be no greater than
                         the sequence dimention in 'key_layer' and 'value_layer'!"""
+                if cu_seqlens_q is None or cu_seqlens_kv is None:
+                    if "padding" in attn_mask_type:
+                        assert (
+                            attention_mask is not None
+                        ), "Please provide attention_mask for padding!"
+                        if max_seqlen_q == max_seqlen_kv:
+                            cu_seqlens_q = get_cu_seqlens(attention_mask)
+                            cu_seqlens_kv = cu_seqlens_q
+                        else:
+                            cu_seqlens_q = get_cu_seqlens(attention_mask[0])
+                            cu_seqlens_kv = get_cu_seqlens(attention_mask[1])
+                    else:
+                        cu_seqlens_q = _get_full_cu_seqlens(
+                            batch_size,
+                            max_seqlen_q,
+                            query_layer.device,
+                        )
+                        cu_seqlens_kv = _get_full_cu_seqlens(
+                            batch_size,
+                            max_seqlen_kv,
+                            key_layer.device,
+                        )
 
             if (
                 isinstance(query_layer, Float8Tensor)
                 and isinstance(key_layer, Float8Tensor)
                 and isinstance(value_layer, Float8Tensor)
             ):
-                qkv_layout, query_layer._data, key_layer._data, value_layer._data = _get_qkv_layout(
+                qkv_layout, query_layer._data, key_layer._data, value_layer._data = get_qkv_layout(
                     query_layer._data, key_layer._data, value_layer._data, qkv_format=qkv_format
                 )
             else:
-                qkv_layout, query_layer, key_layer, value_layer = _get_qkv_layout(
+                qkv_layout, query_layer, key_layer, value_layer = get_qkv_layout(
                     query_layer, key_layer, value_layer, qkv_format=qkv_format
                 )
 
-            # The priority for attention backends (subject to availability and clearing the filters)
-            # is: FlashAttention > FusedAttention (cuDNN) > UnfusedDotProductAttention.
-            use_flash_attention = self.use_flash_attention
-            use_fused_attention = self.use_fused_attention
-            use_unfused_attention = True
-
-            #TODO: rocm does not support fp8 fused attn
-            if IS_HIP_EXTENSION:
-                if self.fp8:
-                    use_fused_attention = False
-
-            # The following section filters out some backends based on
-            # certain asserts before executing the forward pass.
-
-            # Filter: QKV layout.
-            if qkv_format == "thd":
-                if use_unfused_attention:
-                    self.logger.debug("Disabling UnusedDotProductAttention for qkv_format = thd")
-                    use_unfused_attention = False
-                if use_fused_attention and (
-                    (
-                        cu_seqlens_q_padded is not None
-                        and torch.equal(cu_seqlens_q_padded, cu_seqlens_q)
-                    )
-                    or (
-                        cu_seqlens_kv_padded is not None
-                        and torch.equal(cu_seqlens_kv_padded, cu_seqlens_kv)
-                    )
-                ):
-                    self.logger.debug(
-                        "Disabling FlashAttention for qkv_format = thd "
-                        "when there is padding between sequences."
-                    )
-                    use_flash_attention = False
-
-            # Filter: ONNX export.
-            if is_in_onnx_export_mode():
-                if use_flash_attention:
-                    self.logger.debug("Disabling FlashAttention for ONNX mode")
-                use_flash_attention = False
-                if use_fused_attention:
-                    self.logger.debug("Disabling FusedAttention for ONNX mode")
-                use_fused_attention = False
-
-            # Filter: Input type.
-            if use_flash_attention and (
-                query_layer.dtype not in [torch.bfloat16, torch.float16]
-                or key_layer.dtype not in [torch.bfloat16, torch.float16]
-                or value_layer.dtype not in [torch.bfloat16, torch.float16]
-                or any(isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer])
-            ):
-                self.logger.debug(
-                    "Disabling FlashAttention due to unsupported QKV data types. "
-                    "Supported: [torch.bfloat16, torch.float16]. "
-                    "Found: query_layer.dtype=%s, key_layer.dtype=%s, value_layer.dtype=%s.",
-                    query_layer.dtype,
-                    key_layer.dtype,
-                    value_layer.dtype,
-                )
-                use_flash_attention = False
-            if use_fused_attention and (
-                query_layer.dtype not in [torch.bfloat16, torch.float16]
-                or key_layer.dtype not in [torch.bfloat16, torch.float16]
-                or value_layer.dtype not in [torch.bfloat16, torch.float16]
-            ):
-                self.logger.debug(
-                    "Disabling FusedAttention due to unsupported QKV data types. "
-                    "Supported: [torch.bfloat16, torch.float16, Float8Tensor]. "
-                    "Found: query_layer.dtype=%s, key_layer.dtype=%s, value_layer.dtype=%s.",
-                    query_layer.dtype,
-                    key_layer.dtype,
-                    value_layer.dtype,
-                )
-                use_fused_attention = False
-
-            # Filter: Execution type.
-            if use_flash_attention and self.fp8 and self.fp8_meta["recipe"].fp8_dpa:
-                self.logger.debug("Disabling FlashAttention as it does not support FP8 execution.")
-                use_flash_attention = False
-            if use_unfused_attention and self.fp8 and self.fp8_meta["recipe"].fp8_dpa:
-                self.logger.debug(
-                    "Disabling UnfusedDotProductAttention as it does not support FP8 execution."
-                )
-                use_unfused_attention = False
-
-            # Filter: Device and dimensions.
-            # FAv2 supports head_dim <= 256, and for >192 requires sm80/sm90
-            # FAv2 requires head_dim % 8 == 0
-            if use_flash_attention and (
-                query_layer.shape[-1] > 256
-                or query_layer.shape[-1] % 8 != 0
-                or (
-                    query_layer.shape[-1] > 192
-                    and self.device_compute_capability not in ((8, 0), (9, 0))
-                )
-            ):
-                self.logger.debug(
-                    "Disabling FlashAttention due to unsupported head_dim. "
-                    "Supported: %%8 == 0, and <= 256; sm80/90 for >192. "
-                    "Found: query_layer.shape[-1]=%s, key_layer.shape[-1]=%s, sm=%s",
-                    query_layer.shape[-1],
-                    key_layer.shape[-1],
-                    ".".join([str(i) for i in self.device_compute_capability]),
-                )
-                use_flash_attention = False
-
-            #TODO: add back once rocm flash-attn is available
-            if IS_HIP_EXTENSION:
-                use_flash_attention = False
-            else:
-                # Filter: cross attention + causal mask.
-                # (in training mode)
-                if (
-                    use_flash_attention
-                    and inference_params is None
-                    and _flash_attn_2_1_plus
-                    and "causal" in attn_mask_type
-                    and max_seqlen_q != max_seqlen_kv
-                ):
-                    self.logger.warning(
-                        "In training mode, disable the use of FlashAttention since version 2.1+ has "
-                        "changed its behavior for causal mask in cross attention. See "
-                        "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
-                    )
-                    use_flash_attention = False
-
-            context_parallel = (
-                self.cp_group is not None and get_distributed_world_size(self.cp_group) != 1
-            )
-
-            # TODO: rocm fused attn has not supported SWA yet
-            # Filter: sliding window attention.
-            # UnfusedDotProductAttention can support SWA via arbitrary attention mask.
-            if window_size not in ((-1, -1), (-1, 0)):
-                if use_fused_attention:
-                    self.logger.debug("Disabling FusedAttention for SWA")
-                use_fused_attention = False
-                if (not _flash_attn_2_3_plus) or context_parallel:
-                    if use_flash_attention:
-                        self.logger.debug(
-                            "Disabling FusedAttention as it requires flash-attn 2.3+ "
-                            "and no context parallelism"
-                        )
-                    use_flash_attention = False
-
-            # Filter: Attention mask type.
-            #   attn_mask_type(s)    |     supported backends
-            # ------------------------------------------------
-            #   no_mask              |     All
-            #   padding              |     UnfusedDotProductAttention, FlashAttention, FusedAttention
-            #   causal               |     All
-            #   padding + causal     |     FlashAttention, FusedAttention
-            #   arbitrary            |     UnfusedDotProductAttention
-            #
-            if attn_mask_type == "arbitrary":
-                if use_flash_attention:
-                    self.logger.debug("Disabling FlashAttention for arbitrary mask")
-                use_flash_attention = False
-                if use_fused_attention:
-                    self.logger.debug("Disabling FusedAttention for arbitrary mask")
-                use_fused_attention = False
-
-            if (
-                use_unfused_attention
-                and inference_params is None
-                and "causal" in attn_mask_type
-                and max_seqlen_q != max_seqlen_kv
-            ):
-                self.logger.debug("Disabling UnusedDotProductAttention for qkv_format = thd")
-                use_unfused_attention = False
-
-            # Filter: bias.
             global _alibi_cache
             if alibi_slopes is not None:
                 assert (
@@ -5070,6 +5648,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 if self.layer_number == 1:
                     _alibi_cache["_alibi_slopes_require_update"] = True
                     _alibi_cache["_alibi_bias_require_update"] = True
+            bottom_right_alignment = (attn_mask_type not in ["causal", "padding_causal"],)
             if core_attention_bias_type == "alibi":
                 assert (
                     core_attention_bias is None
@@ -5078,184 +5657,104 @@ class DotProductAttention(TransformerEngineBaseModule):
                     _alibi_cache["_num_heads"] != query_layer.shape[-2]
                     or _alibi_cache["_max_seqlen_q"] != max_seqlen_q
                     or _alibi_cache["_max_seqlen_kv"] != max_seqlen_kv
+                    or _alibi_cache["_bottom_right_alignment"] != bottom_right_alignment
                     or _alibi_cache["_alibi_slopes"] is None
                 ):
                     _alibi_cache["_alibi_slopes_require_update"] = True
                     _alibi_cache["_alibi_bias_require_update"] = True
 
-            if use_flash_attention and (
-                core_attention_bias_type not in ["no_bias", "alibi"]
-                or core_attention_bias is not None
-            ):
-                self.logger.debug("Disabling FlashAttention for pre/post_scale_bias")
-                use_flash_attention = False
+            context_parallel = (
+                self.cp_group is not None and get_distributed_world_size(self.cp_group) != 1
+            )
 
-            fu_core_attention_bias_type = core_attention_bias_type
-            fu_core_attention_bias = core_attention_bias
-            if (
-                core_attention_bias_type == "alibi"
-                and use_fused_attention
-                and alibi_slopes is not None
-            ):
-                fu_core_attention_bias_type = "post_scale_bias"
-                _, fu_core_attention_bias = get_alibi(
-                    query_layer.shape[-2],
-                    max_seqlen_q,
-                    max_seqlen_kv,
-                    alibi_slopes=alibi_slopes,
-                    bias_dtype=query_layer.dtype,
-                )
-            if (
-                use_fused_attention
-                and fu_core_attention_bias_type == "post_scale_bias"
-                and (
-                    fu_core_attention_bias.shape[0] != 1
-                    or fu_core_attention_bias.shape[1] != query_layer.shape[-2]
-                )
-            ):
-                if fu_core_attention_bias.requires_grad:
-                    # remove this line when cuDNN adds bwd support for
-                    # [1, 1, s, s], [b, 1, s, s] and [b, h, s, s]
-                    self.logger.debug("Disabling FusedAttention for dBias in [1, H, S, S] shape")
-                    use_fused_attention = False
+            core_attention_bias_shape = None
+            if core_attention_bias is not None:
+                if (
+                    core_attention_bias.shape[0] == batch_size
+                    and core_attention_bias.shape[1] == query_layer.shape[-2]
+                ):
+                    core_attention_bias_shape = "bhss"
+                elif (
+                    core_attention_bias.shape[0] == 1
+                    and core_attention_bias.shape[1] == query_layer.shape[-2]
+                ):
+                    core_attention_bias_shape = "1hss"
+                elif (
+                    core_attention_bias.shape[0] == batch_size and core_attention_bias.shape[1] == 1
+                ):
+                    core_attention_bias_shape = "b1ss"
+                elif core_attention_bias.shape[0] == 1 and core_attention_bias.shape[1] == 1:
+                    core_attention_bias_shape = "11ss"
                 else:
-                    # max512 backend will only support [1, h, s, s]
-                    os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
+                    assert (
+                        False
+                    ), "core_attention_bias must be in one of {bhss, 1hss, b1ss, 11ss} shapes"
 
-            if not IS_HIP_EXTENSION:
-                if use_fused_attention:
-                    q_type = TE_DType[query_layer.dtype]
-                    kv_type = TE_DType[key_layer.dtype]
-                    if self.fp8 and self.fp8_meta["recipe"].fp8_dpa:
-                        if isinstance(query_layer, Float8Tensor) and isinstance(
-                            key_layer, Float8Tensor
-                        ):
-                            q_type = query_layer._fp8_dtype
-                            kv_type = value_layer._fp8_dtype
-                        else:
-                            q_type = forward_dtype
-                            kv_type = forward_dtype
-                    fused_attention_backend = tex.get_fused_attn_backend(
-                        q_type,
-                        kv_type,
-                        QKVLayout[qkv_layout],
-                        AttnBiasType[fu_core_attention_bias_type],
-                        AttnMaskType[attn_mask_type],
-                        self.attention_dropout,
-                        query_layer.shape[-2],  # num_attn_heads
-                        key_layer.shape[-2],  # num_gqa_groups
-                        max_seqlen_q,
-                        max_seqlen_kv,
-                        query_layer.shape[-1],  # head_dim
+            pad_between_seqs = (
+                cu_seqlens_q_padded is not None
+                and not torch.equal(cu_seqlens_q_padded, cu_seqlens_q)
+            ) or (
+                cu_seqlens_kv_padded is not None
+                and not torch.equal(cu_seqlens_kv_padded, cu_seqlens_kv)
+            )
+
+            attention_params = AttentionParams(
+                qkv_type=type(query_layer),
+                qkv_dtype=query_layer.dtype,
+                qkv_layout=qkv_layout,
+                batch_size=batch_size,
+                num_heads=query_layer.shape[-2],
+                num_gqa_groups=key_layer.shape[-2],
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+                head_dim=query_layer.shape[-1],
+                attn_mask_type=attn_mask_type,
+                window_size=window_size,
+                alibi_slopes_shape=alibi_slopes.shape if alibi_slopes is not None else None,
+                core_attention_bias_type=core_attention_bias_type,
+                core_attention_bias_shape=core_attention_bias_shape,
+                core_attention_bias_requires_grad=(
+                    core_attention_bias.requires_grad if core_attention_bias is not None else False
+                ),
+                pad_between_seqs=pad_between_seqs,
+                attention_dropout=self.attention_dropout,
+                context_parallel=context_parallel,
+                deterministic=self.deterministic,
+                is_training=self.training,
+                fp8=self.fp8,
+                fp8_meta=self.fp8_meta,
+            )
+            global _attention_backends
+            if (
+                _attention_backends["attention_params"] is None
+                or attention_params != _attention_backends["attention_params"]
+            ):
+                _attention_backends["attention_params"] = attention_params
+                _attention_backends["backend_selection_requires_update"] = True
+            if _attention_backends["backend_selection_requires_update"]:
+                (
+                    use_flash_attention,
+                    use_fused_attention,
+                    fused_attention_backend,
+                    use_unfused_attention,
+                    _,
+                ) = get_attention_backend(attention_params)
+                if use_flash_attention:
+                    self.logger.info("Running with FlashAttention backend")
+                elif use_fused_attention:
+                    self.logger.info(
+                        "Running with FusedAttention backend (sub-backend %s)",
+                        int(fused_attention_backend),
                     )
-                    # DPA does not support FP8; for FP8, use cpp_extensions modules directly
-                    is_backend_avail = fused_attention_backend in [
-                        FusedAttnBackend["F16_max512_seqlen"],
-                        FusedAttnBackend["F16_arbitrary_seqlen"],
-                        FusedAttnBackend["FP8"],
-                    ]
-                    use_fused_attention = (
-                        use_fused_attention
-                        and is_backend_avail
-                        and (
-                            not context_parallel
-                            or fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
-                        )
-                    )
-                    if (
-                        fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]
-                        and fu_core_attention_bias_type == "post_scale_bias"
-                        and (
-                            fu_core_attention_bias.shape[0] != 1
-                            or fu_core_attention_bias.shape[1] != query_layer.shape[-2]
-                        )
-                    ):
-                        self.logger.debug(
-                            "Disabling FusedAttention as no backend supports the provided input"
-                        )
-                        use_fused_attention = False
-
-                # Filter: determinism.
-                # backend                                  | deterministic
-                # ---------------------------------------------------------
-                # flash-attn v1                            | yes
-                # flash-attn v2                            | no
-                # FusedAttnBackend["F16_max512_seqlen"]    | yes
-                # FusedAttnBackend["F16_arbitrary_seqlen"] | workspace optimization path: yes; otherwise: no
-                # UnfusedDotProductAttention               | yes
-                #
-                # Note that FusedAttnBackend["F16_arbitrary_seqlen"] only has workspace optimization path
-                # on sm90 architectures.
-                #
-                if (
-                    use_fused_attention
-                    and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
-                    and self.deterministic
-                    and self.device_compute_capability != (9, 0)
-                ):
-                    self.logger.debug("Disabling FusedAttention for determinism reasons")
-                    use_fused_attention = False
-
-                # Select FusedAttention on sm90 and FlashAttention on others for performance
-                if (
-                    use_flash_attention
-                    and use_fused_attention
-                    and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
-                ):
-                    if self.device_compute_capability == (9, 0):
-                        self.logger.debug(
-                            "Disabling FlashAttention to give FusedAttention preference on Hopper+ "
-                            "for performance reasons"
-                        )
-                        use_flash_attention = False
+                elif use_unfused_attention:
+                    self.logger.info("Running with UnfusedDotProductAttention backend")
             else:
-                if use_fused_attention:
-                    fused_attention_backend = tex.get_fused_attn_backend(
-                        TE_DType[query_layer.dtype],
-                        TE_DType[key_layer.dtype],
-                        QKVLayout[qkv_layout],
-                        AttnBiasType[fu_core_attention_bias_type],
-                        AttnMaskType[attn_mask_type],
-                        self.attention_dropout,
-                        query_layer.shape[-2], # num_attn_heads
-                        key_layer.shape[-2], # num_gqa_groups
-                        max_seqlen_q,
-                        max_seqlen_kv,
-                        query_layer.shape[-1], # head_dim
-                    )
-                    use_fused_attention = (fused_attention_backend in [FusedAttnBackend["AOTriton"], FusedAttnBackend["CK"]])
-
-            run_config = {
-                "compute_capability": "sm"
-                + str(
-                    (lambda x, y: x * 10 + y)(
-                        self.device_compute_capability[0], self.device_compute_capability[1]
-                    )
-                ),
-                "q_dtype": query_layer.dtype,
-                "k_dtype": key_layer.dtype,
-                "v_dtype": value_layer.dtype,
-                "q_shape": list(query_layer.shape),
-                "k_shape": list(key_layer.shape),
-                "v_shape": list(value_layer.shape),
-                "qkv_format": qkv_format,
-                "qkv_layout": qkv_layout,
-                "mask_type": attn_mask_type,
-                "bias_type": core_attention_bias_type,
-                "bias_shape": (
-                    core_attention_bias.shape if core_attention_bias is not None else None
-                ),
-                "dropout": self.attention_dropout,
-                "context_parallel": context_parallel,
-                "is_training": self.training,
-                "transformer_engine_version": te.__version__,
-                "flash_attn_version": _flash_attn_version if not IS_HIP_EXTENSION else "None",
-                "cudnn_version": ".".join([str(i) for i in get_cudnn_version()]) if not IS_HIP_EXTENSION else "None",
-            }
+                use_flash_attention = _attention_backends["use_flash_attention"]
+                use_fused_attention = _attention_backends["use_fused_attention"]
+                fused_attention_backend = _attention_backends["fused_attention_backend"]
+                use_unfused_attention = _attention_backends["use_unfused_attention"]
 
             if use_flash_attention:
-                self.logger.info("Running with FlashAttention backend ")
-                self.logger.debug("Running with config=%s", run_config)
                 if core_attention_bias_type == "alibi":
                     alibi_slopes, _ = get_alibi(
                         query_layer.shape[-2],
@@ -5282,20 +5781,20 @@ class DotProductAttention(TransformerEngineBaseModule):
                 )
 
             if use_fused_attention:
-                self.logger.info(
-                    "Running with FusedAttention backend (sub-backend %s)",
-                    int(fused_attention_backend),
-                )
-                if self.fp8:
-                    self.logger.debug(
-                        "Running with fp8_recipe.fp8_mha=%s, "
-                        "fp8_recipe.fp8_dpa=%s%s, and NVTE_FP8_DPA_BWD=%s",
-                        self.fp8_meta["recipe"].fp8_mha,
-                        self.fp8_meta["recipe"].fp8_dpa,
-                        forced_fp8_dpa,
-                        int(os.getenv("NVTE_FP8_DPA_BWD", "1")),
+                fu_core_attention_bias_type = core_attention_bias_type
+                fu_core_attention_bias = core_attention_bias
+                if core_attention_bias_type == "alibi" and (
+                    alibi_slopes is not None or max_seqlen_q != max_seqlen_kv
+                ):
+                    fu_core_attention_bias_type = "post_scale_bias"
+                    _, fu_core_attention_bias = get_alibi(
+                        query_layer.shape[-2],
+                        max_seqlen_q,
+                        max_seqlen_kv,
+                        alibi_slopes=alibi_slopes,
+                        bias_dtype=query_layer.dtype,
+                        bottom_right_alignment=attn_mask_type not in ["causal", "padding_causal"],
                     )
-                self.logger.debug("Running with config=%s", run_config)
                 if checkpoint_core_attention:
                     return self._checkpointed_attention_forward(
                         self.fused_attention,
@@ -5311,6 +5810,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         max_seqlen_kv=max_seqlen_kv,
                         attn_mask_type=attn_mask_type,
                         attention_mask=attention_mask,
+                        window_size=window_size,
                         fused_attention_backend=fused_attention_backend,
                         core_attention_bias_type=fu_core_attention_bias_type,
                         core_attention_bias=fu_core_attention_bias,
@@ -5334,6 +5834,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     max_seqlen_kv=max_seqlen_kv,
                     attn_mask_type=attn_mask_type,
                     attention_mask=attention_mask,
+                    window_size=window_size,
                     fused_attention_backend=fused_attention_backend,
                     core_attention_bias_type=fu_core_attention_bias_type,
                     core_attention_bias=fu_core_attention_bias,
@@ -5345,10 +5846,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     fp8_meta=self.fp8_meta,
                 )
 
-            assert (
-                not context_parallel
-            ), "Context parallelism is only implemented with Flash Attention and Fused Attention!"
-
             from .cpu_offload import CPUOffloadEnabled
 
             if CPUOffloadEnabled:
@@ -5358,8 +5855,12 @@ class DotProductAttention(TransformerEngineBaseModule):
                 )
 
             if use_unfused_attention:
-                self.logger.info("Running with UnfusedDotProductAttention backend")
-                self.logger.debug("Running with config=%s", run_config)
+                if window_size is not None and (
+                    window_size[0] != -1 or window_size[1] not in [-1, 0]
+                ):
+                    attn_mask_type, attention_mask = get_swa_mask(
+                        window_size, max_seqlen_q, max_seqlen_kv, attn_mask_type, attention_mask
+                    )
                 if checkpoint_core_attention:
                     return self._checkpointed_attention_forward(
                         self.unfused_attention,
@@ -5427,7 +5928,8 @@ class MultiheadAttention(torch.nn.Module):
     layer_number: int, default = `None`
                  layer number of the current `TransformerLayer` when multiple such modules are
                  concatenated to form a transformer block.
-    attn_mask_type: {'no_mask', 'padding', 'causal', 'padding_causal' 'arbitrary'},
+    attn_mask_type: {'no_mask', 'padding', 'causal', 'padding_causal', 'causal_bottom_right',
+                   'padding_causal_bottom_right','arbitrary'},
                    default = `causal`
                    type of attention mask passed into softmax operation. Overridden by
                    :attr:`attn_mask_type` in the `forward` method. The forward
@@ -5438,7 +5940,9 @@ class MultiheadAttention(torch.nn.Module):
                 sliding window size for local attention, where query at position i attends to keys
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
                 + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
-                window and causal mask specifically. Similar to :attr:`attn_mask_type`, it can
+                window and causal mask specifically. Both `causal` and `causal_bottom_right` masks
+                map to `window_size = (-1, 0)` and Transformer Engine distinguishes them based on
+                `attn_mask_type`. Similar to :attr:`attn_mask_type`, `window_size` can
                 be overridden by :attr:`window_size` in `forward` as well.
     num_gqa_groups : int, default = `None`
                          number of GQA groups in the transformer layer.
@@ -5485,7 +5989,7 @@ class MultiheadAttention(torch.nn.Module):
             are used for when sequences in a batch are of equal length or padded to
             equal length. Please note that these formats do not reflect how
             tensors `query_layer`, `key_layer`, `value_layer` are laid out in memory.
-            For that, please use `_get_qkv_layout` to gain the layout information.
+            For that, please use `get_qkv_layout` to gain the layout information.
 
     Parallelism parameters
     ----------------------
@@ -5569,8 +6073,7 @@ class MultiheadAttention(torch.nn.Module):
 
         self.qkv_format = qkv_format
         self.attn_mask_type = attn_mask_type
-        self.window_size = window_size
-        self.window_size = check_set_window_size(attn_mask_type, self.window_size)
+        self.window_size = check_set_window_size(attn_mask_type, window_size)
         self.layer_number = layer_number
         self.input_layernorm = input_layernorm
         self.attention_type = attention_type
@@ -5818,16 +6321,20 @@ class MultiheadAttention(torch.nn.Module):
              Input tensor.
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]],
              default = `None`. Boolean tensor(s) used to mask out attention softmax input.
-             It should be 'None' for 'causal' and 'no_mask' types. For 'padding' masks, it should be
+             It should be `None` for causal masks and "`no_mask`". For padding masks, it should be
              a single tensor of [batch_size, 1, 1, seqlen_q] for self-attention, and a tuple of
              two tensors in shapes [batch_size, 1, 1, seqlen_q] and [batch_size, 1, 1, seqlen_kv]
-             for cross-attention. For the 'arbitrary' mask type, it should be in a shape that is
-             broadcastable to [batch_size, num_heads, max_seqlen_q, max_seqlen_kv]. A `True` value
-             means the corresponding position is masked out and a `False` means that position is
-             allowed to participate in attention.
-        attn_mask_type: {'no_mask', 'padding', 'causal', 'padding_causal', 'arbitrary'},
+             for cross-attention. For "`arbitrary`" mask, it should be in a shape broadcastable to
+             [batch_size, num_heads, max_seqlen_q, max_seqlen_kv]. A `True` value means
+             the corresponding position is masked out and a `False` means that position
+             is allowed to participate in attention.
+        attn_mask_type: {'no_mask', 'padding', 'causal', 'padding_causal', 'causal_bottom_right',
+                       'padding_causal_bottom_right','arbitrary'},
                        default = `None`
-                       type of attention mask passed into softmax operation.
+                       type of attention mask passed into softmax operation. By default,
+                       causal masks are aligned to the top left corner of the softmax matrix.
+                       When "`bottom_right`" is specified in the mask type, causal masks are
+                       aligned to the bottom right corner.
         window_size: Optional[Tuple[int, int]], default = `None`
                     sliding window size for local attention.
         encoder_output : Optional[torch.Tensor], default = `None`
@@ -5868,12 +6375,11 @@ class MultiheadAttention(torch.nn.Module):
         """
         # hidden_states: [sq, b, h]
 
-        if attn_mask_type is not None:
-            window_size = check_set_window_size(attn_mask_type, window_size)
         if attn_mask_type is None:
             attn_mask_type = self.attn_mask_type
         if window_size is None:
             window_size = self.window_size
+        window_size = check_set_window_size(attn_mask_type, window_size)
 
         if "padding" in attn_mask_type and attention_mask is not None:
             for i, _ in enumerate(attention_mask):
