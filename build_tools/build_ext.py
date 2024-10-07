@@ -27,6 +27,7 @@ from .utils import (
     found_ninja,
     get_frameworks,
     cuda_path,
+    get_max_jobs_for_parallel_build,
 )
 
 
@@ -64,8 +65,6 @@ class CMakeExtension(setuptools.Extension):
             f"-DCMAKE_INSTALL_PREFIX={install_dir}",
         ]
         configure_command += self.cmake_flags
-        if found_ninja():
-            configure_command.append("-GNinja")
 
         import pybind11
 
@@ -76,6 +75,14 @@ class CMakeExtension(setuptools.Extension):
         # CMake build and install commands
         build_command = [_cmake_bin, "--build", build_dir]
         install_command = [_cmake_bin, "--install", build_dir]
+
+        # Check whether parallel build is restricted
+        max_jobs = get_max_jobs_for_parallel_build()
+        if found_ninja():
+            configure_command.append("-GNinja")
+        build_command.append("--parallel")
+        if max_jobs > 0:
+            build_command.append(str(max_jobs))
 
         # Run CMake commands
         for command in [configure_command, build_command, install_command]:
@@ -98,7 +105,7 @@ def get_build_ext(extension_cls: Type[setuptools.Extension]):
                 if isinstance(ext, CMakeExtension):
                     print(f"Building CMake extension {ext.name}")
                     # Set up incremental builds for CMake extensions
-                    setup_dir = Path(__file__).resolve().parent
+                    setup_dir = Path(__file__).resolve().parent.parent
                     build_dir = setup_dir / "build" / "cmake"
 
                     # Ensure the directory exists
@@ -132,8 +139,14 @@ def get_build_ext(extension_cls: Type[setuptools.Extension]):
                     search_paths = list(Path(__file__).resolve().parent.parent.iterdir())
                     # Source compilation from top-level
                     search_paths.extend(list(Path(self.build_lib).iterdir()))
+
+                    # Dynamically load required_libs.
+                    from transformer_engine.common import _load_cudnn, _load_nvrtc
+
+                    _load_cudnn()
+                    _load_nvrtc()
                 else:
-                    # Only during release sdist build.
+                    # Only during release bdist build for paddlepaddle.
                     import transformer_engine
 
                     search_paths = list(Path(transformer_engine.__path__[0]).iterdir())
@@ -197,7 +210,7 @@ def get_build_ext(extension_cls: Type[setuptools.Extension]):
                 # Define new _compile method that redirects to NVCC for .cu and .cuh files.
                 # Also redirect .hip files to HIPCC
                 original_compile_fn = self.compiler._compile
-                self.compiler.src_extensions += [".cu", ".cuh", ".hip"]
+                self.compiler.src_extensions += ['.cu', '.cuh', '.hip']
 
                 def _compile_fn(obj, src, ext, cc_args, extra_postargs, pp_opts) -> None:
                     # Copy before we make any modifications.
@@ -211,8 +224,8 @@ def get_build_ext(extension_cls: Type[setuptools.Extension]):
                             _, nvcc_bin = cuda_path()
                         original_compiler = self.compiler.compiler_so
 
-                        if os.path.splitext(src)[1] in [".cu", ".cuh", ".hip"]:
-                            self.compiler.set_executable("compiler_so", str(nvcc_bin))
+                        if os.path.splitext(src)[1] in ['.cu', '.cuh', '.hip']:
+                            self.compiler.set_executable('compiler_so', str(nvcc_bin))
                             if isinstance(cflags, dict):
                                 cflags = cflags["nvcc"]
 
@@ -225,8 +238,8 @@ def get_build_ext(extension_cls: Type[setuptools.Extension]):
 
                             if not rocm_build():
                                 # Forward unknown options
-                                if not any("--forward-unknown-opts" in flag for flag in cflags):
-                                    cflags.append("--forward-unknown-opts")
+                                if not any('--forward-unknown-opts' in flag for flag in cflags):
+                                    cflags.append('--forward-unknown-opts')
 
                         elif isinstance(cflags, dict):
                             cflags = cflags["cxx"]

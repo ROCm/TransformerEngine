@@ -76,7 +76,7 @@ class TransposePrimitive(BasePrimitive):
             jnp.float32,
             jnp.float16,
             jnp.bfloat16,
-            jnp_float8_e4m3_type,
+            jnp_float8_e4m3_type, 
             jnp_float8_e5m2_type,
         ]
 
@@ -107,7 +107,7 @@ class TransposePrimitive(BasePrimitive):
 
         out = custom_caller(TransposePrimitive.name, args, opaque, False)
 
-        return [out]
+        return out
 
     @staticmethod
     def impl(x, static_axis_boundary, transpose_axis_boundary):

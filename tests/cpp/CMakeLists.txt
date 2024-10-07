@@ -77,6 +77,7 @@ include_directories(${CMAKE_SOURCE_DIR})
 
 if(USE_CUDA)
   find_package(CUDAToolkit REQUIRED)
+  include(${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
 else()
   find_package(hip REQUIRED)
 endif()
