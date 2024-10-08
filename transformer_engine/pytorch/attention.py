@@ -4896,10 +4896,12 @@ class DotProductAttention(TransformerEngineBaseModule):
             use_fused_attention = self.use_fused_attention
             use_unfused_attention = True
 
-            #TODO: rocm does not support fp8 fused attn
             if IS_HIP_EXTENSION:
+                #TODO: rocm does not support fp8 fused attn
                 if self.fp8:
                     use_fused_attention = False
+                #TODO: add back once rocm flash-attn is available
+                use_flash_attention = False
 
             # The following section filters out some backends based on
             # certain asserts before executing the forward pass.
@@ -4996,25 +4998,21 @@ class DotProductAttention(TransformerEngineBaseModule):
                 )
                 use_flash_attention = False
 
-            #TODO: add back once rocm flash-attn is available
-            if IS_HIP_EXTENSION:
+            # Filter: cross attention + causal mask.
+            # (in training mode)
+            if (
+                use_flash_attention
+                and inference_params is None
+                and _flash_attn_2_1_plus
+                and "causal" in attn_mask_type
+                and max_seqlen_q != max_seqlen_kv
+            ):
+                self.logger.warning(
+                    "In training mode, disable the use of FlashAttention since version 2.1+ has "
+                    "changed its behavior for causal mask in cross attention. See "
+                    "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
+                )
                 use_flash_attention = False
-            else:
-                # Filter: cross attention + causal mask.
-                # (in training mode)
-                if (
-                    use_flash_attention
-                    and inference_params is None
-                    and _flash_attn_2_1_plus
-                    and "causal" in attn_mask_type
-                    and max_seqlen_q != max_seqlen_kv
-                ):
-                    self.logger.warning(
-                        "In training mode, disable the use of FlashAttention since version 2.1+ has "
-                        "changed its behavior for causal mask in cross attention. See "
-                        "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
-                    )
-                    use_flash_attention = False
 
             context_parallel = (
                 self.cp_group is not None and get_distributed_world_size(self.cp_group) != 1

@@ -1500,8 +1500,6 @@ def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm):
 @pytest.mark.parametrize("qkv_layout", qkv_layout_fp8_vs_f16)
 @pytest.mark.parametrize("fp8_dpa_bwd", [True, False])
 def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd):
-    if IS_HIP_EXTENSION:
-        pytest.skip("fp8 fused attention not supported in ROCm")
     config = model_configs_fp8_vs_f16[model]
 
     if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
@@ -1715,10 +1713,6 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
     an FP8 MHA module, i.e. Custom_MHA_FP8(), to results from an F16 MHA
     implementation, i.e. transformer_engine.pytorch.attention.MultiHeadAttention.
     Both paths take F16 input and output. QKV layout is t3hd or bs3hd"""
-
-    if IS_HIP_EXTENSION:
-        pytest.skip("fp8 fused attention not supported in ROCm")
- 
     config = model_configs_fp8[model]
 
     fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_custom_mha_fp8(dtype, config, "FusedAttention")
