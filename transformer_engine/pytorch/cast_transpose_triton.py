@@ -48,6 +48,7 @@ def _transpose_triton(A, C, T, stride_am, stride_an, stride_bn, stride_bm, M, N,
     A = A + (rm[:, None] * stride_am + rn[None, :] * stride_an)
     mask = (rm < M)[:, None] & (rn < N)[None, :]
     a = tl.load(A, mask=mask)
+    a = a.to(tl.float32)
 
     scaled_a = a * scale
     scaled_a = tl.clamp(scaled_a, -max_fp8, max_fp8)
@@ -55,14 +56,15 @@ def _transpose_triton(A, C, T, stride_am, stride_an, stride_bn, stride_bm, M, N,
     C = C + (rm[:, None] * stride_am + rn[None, :] * stride_an)
     tl.store(C, fp8_a, mask=mask)
     
-    amax = tl.max(tl.abs(a.to(tl.float32)))
-    tl.atomic_max(amax_ptr, amax, sem='relaxed')
     # rematerialize to save registers
     rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     T = T + (rm[:, None] * stride_bm + rn[None, :] * stride_bn)
     mask = (rm < M)[:, None] & (rn < N)[None, :]
     tl.store(T, fp8_a, mask=mask)
+
+    amax = tl.max(tl.abs(a))
+    tl.atomic_max(amax_ptr, amax, sem='relaxed')
 
 def te_cast_transpose_triton(input, input_scale, cast_out, trans_out, amax_out, otype):
 
