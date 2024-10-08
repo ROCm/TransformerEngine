@@ -12,20 +12,12 @@
 #include <cuda.h>
 #else
 #ifdef USE_HIPBLASLT
-#include <vector>
-#include <forward_list>
-#include <mutex>
-#include <unordered_map>
-#include <chrono>
 #include <hipblaslt/hipblaslt.h>
 #else
 #define ROCBLAS_BETA_FEATURES_API 
 #include <rocblas/rocblas.h>
 #endif // #ifdef USE_HIPBLASLT
-#include <hipcub/hipcub.hpp>
 #include <iostream>
-#include <cstdlib>
-#include <string>
 #endif // #ifndef __HIP_PLATFORM_AMD__
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/transformer_engine.h>
@@ -38,57 +30,7 @@
 
 namespace {
 
-#ifdef __HIP_PLATFORM_AMD__
-#ifdef USE_HIPBLASLT
-
-#if HIP_VERSION >= 60000000
-typedef hipDataType hipblasltDatatype_t;
-typedef hipblasComputeType_t hipblasLtComputeType_t;
-#define HIPBLASLT_R_16F HIP_R_16F
-#define HIPBLASLT_R_32F HIP_R_32F
-#define HIPBLASLT_R_16B HIP_R_16BF
-#define HIPBLASLT_R_8F_E4M3 HIP_R_8F_E4M3_FNUZ
-#define HIPBLASLT_R_8F_E5M2 HIP_R_8F_E5M2_FNUZ
-#define HIPBLASLT_COMPUTE_F32 HIPBLAS_COMPUTE_32F
-#endif // #if HIP_VERSION >= 60000000
-
-hipblasltDatatype_t get_cuda_dtype(const transformer_engine::DType t) {
-  using namespace transformer_engine;
-  switch (t) {
-    case DType::kFloat16:
-      return HIPBLASLT_R_16F;
-    case DType::kFloat32:
-      return HIPBLASLT_R_32F;
-    case DType::kBFloat16:
-      return HIPBLASLT_R_16B;
-    case DType::kFloat8E4M3:
-      return HIPBLASLT_R_8F_E4M3;
-    case DType::kFloat8E5M2:
-      return HIPBLASLT_R_8F_E5M2;
-    default:
-      NVTE_ERROR("Invalid type");
-  }
-}
-#else
-rocblas_datatype get_cuda_dtype(const transformer_engine::DType t) {
-  using namespace transformer_engine;
-  switch (t) {
-    case DType::kFloat16:
-      return rocblas_datatype_f16_r;
-    case DType::kFloat32:
-      return rocblas_datatype_f32_r;
-    case DType::kBFloat16:
-      return rocblas_datatype_bf16_r;
-    case DType::kFloat8E4M3:
-      return rocblas_datatype_f8_r;
-    case DType::kFloat8E5M2:
-      return rocblas_datatype_bf8_r;
-    default:
-      NVTE_ERROR("Invalid type");
-  }
-}
-#endif //#ifdef USE_HIPBLASLT
-#else
+#ifndef __HIP_PLATFORM_AMD__
 cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
   using namespace transformer_engine;
   switch (t) {
@@ -106,7 +48,6 @@ cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
       NVTE_ERROR("Invalid type");
   }
 }
-#endif // __HIP_PLATFORM_AMD__
 
 uint32_t _getAlignment(uintptr_t address) {
   // alignment are in bytes
@@ -117,6 +58,7 @@ uint32_t _getAlignment(uintptr_t address) {
     }
   }
 }
+#endif // __HIP_PLATFORM_AMD__
 
 }  // namespace
 
@@ -124,7 +66,33 @@ uint32_t _getAlignment(uintptr_t address) {
 namespace transformer_engine {
 
 #ifdef __HIP_PLATFORM_AMD__
-#include "rocm_gemm.hip"
+//Forward declaration. The implementation is in rocm_gemm.hip
+void cublas_gemm(const Tensor *inputA,
+                 const Tensor *inputB,
+                 Tensor *outputD,
+                 const Tensor *inputBias,
+                 Tensor *outputPreGelu,
+                 int m, int n, int k,
+                 int lda, int ldb, int ldd,
+#ifdef USE_HIPBLASLT
+                 hipblasOperation_t transa,
+                 hipblasOperation_t transb,
+#else
+                 rocblas_operation transa,
+                 rocblas_operation transb,
+#endif
+                 bool grad,
+                 void* workspace,
+                 size_t workspaceSize,
+                 bool accumulate,
+                 bool use_split_accumulator,
+                 int math_sm_count,
+                 int m_split,
+                 int n_split,
+                 bool gemm_producer,
+                 const Tensor *inputCounter,
+                 hipStream_t stream
+);
 #else // Use cublasLt
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, int m, int n, int k, int lda,
