@@ -5,15 +5,14 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
+#ifdef USE_ROCM
+#include <hip/hip_runtime.h>
+#endif
 #include <cuda_runtime_api.h>
 
 #include <cassert>
 
-#ifndef USE_ROCM
 #include "common/util/cuda_runtime.h"
-#else
-#include "common/util/hip_runtime.h"
-#endif
 #include "utils.h"
 
 namespace transformer_engine {

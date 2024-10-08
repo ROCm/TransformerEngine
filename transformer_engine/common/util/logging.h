@@ -13,10 +13,11 @@
 #ifdef __HIP_PLATFORM_AMD__
 #ifdef USE_HIPBLASLT
 #include <hipblaslt/hipblaslt.h>
-#else
+#endif
+#ifdef USE_ROCBLAS
 #define ROCBLAS_BETA_FEATURES_API
 #include <rocblas/rocblas.h>
-#endif // #ifdef USE_HIPBLASLT
+#endif
 #else
 #include <cublas_v2.h>
 #include <cudnn.h>
@@ -53,7 +54,7 @@
 
 #ifdef __HIP_PLATFORM_AMD__
 #ifdef USE_HIPBLASLT //hipblaslt
-#define NVTE_CHECK_CUBLAS(expr)                                         \
+#define NVTE_CHECK_HIPBLASLT(expr)                                         \
   do {                                                                  \
     const hipblasStatus_t status_NVTE_CHECK_CUBLAS = (expr);            \
     if (status_NVTE_CHECK_CUBLAS != CUBLAS_STATUS_SUCCESS) {            \
@@ -61,8 +62,9 @@
                  std::to_string((int)status_NVTE_CHECK_CUBLAS));        \
     }                                                                   \
   } while (false)
-#else //rocblas
-#define NVTE_CHECK_CUBLAS(expr)                                         \
+#endif
+#ifdef USE_ROCBLAS //rocblas
+#define NVTE_CHECK_ROCBLAS(expr)                                         \
   do {                                                                  \
     const rocblas_status status_NVTE_CHECK_CUBLAS = (expr);             \
     if (status_NVTE_CHECK_CUBLAS != rocblas_status_success) {           \
