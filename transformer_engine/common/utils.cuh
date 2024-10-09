@@ -48,7 +48,6 @@ constexpr uint32_t THREADS_PER_WARP = 32;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-
 #if !defined(USE_HIPBLASLT) && !defined(__HIPCC_RTC__)
 inline __device__ float2 operator+(const float2 &a, const float2 &b) {  // NOLINT(*)
   return {a.x + b.x, a.y + b.y};
