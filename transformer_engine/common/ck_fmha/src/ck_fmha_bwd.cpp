@@ -87,8 +87,8 @@ void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
                             void *devPtrdK, void *devPtrdV, void *devPtrdO, void *devPtrdBias,
                             void *devPtrCuSeqlensQ, void *devPtrCuSeqlensKV,
                             const std::string &data_type, void *workspace, size_t *workspace_size,
-                            bool deterministic, bool ext_asm, bool asm_atomic_fp32,
-                            bool asm_no_coex, bool asm_rtz_cvt, hipStream_t stream) {
+                            bool deterministic, bool bwd_v3, bool v3_atomic_fp32,
+                            bool v3_spec, bool v3_rtz_cvt, hipStream_t stream) {
     /* CK input parameters */
     ck_tile::index_t batch          = b;
     ck_tile::index_t seqlen_q       = s_q;
@@ -140,7 +140,7 @@ void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
     size_t dk_expanded_size = 0;
     size_t dv_expanded_size = 0;
 
-    if (!ext_asm || asm_atomic_fp32) {
+    if (!bwd_v3 || v3_atomic_fp32) {
         dq_acc_size = float_size * nsplits * shape_batch * shape_seqlen_q * nhead * hdim_q;
     }
 
@@ -171,20 +171,20 @@ void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
     }
 
     const auto init_traits = [&](auto &traits) {
-        traits.hdim_q             = hdim_q;
-        traits.hdim_v             = hdim_v;
-        traits.data_type          = data_type;
-        traits.is_group_mode      = is_group_mode;
-        traits.mask_type          = static_cast<mask_enum>(mask_type);
-        traits.bias_type          = static_cast<bias_enum>(bias_type);
-        traits.has_dbias          = has_dbias;
-        traits.has_dropout        = has_dropout;
-        traits.is_store_randval   = s_randval;
-        traits.is_deterministic   = deterministic;
-        traits.uses_ext_asm       = ext_asm;
-        traits.is_asm_atomic_fp32 = asm_atomic_fp32;
-        traits.is_asm_no_coex     = asm_no_coex;
-        traits.is_asm_rtz_cvt     = asm_rtz_cvt;
+        traits.hdim_q            = hdim_q;
+        traits.hdim_v            = hdim_v;
+        traits.data_type         = data_type;
+        traits.is_group_mode     = is_group_mode;
+        traits.mask_type         = static_cast<mask_enum>(mask_type);
+        traits.bias_type         = static_cast<bias_enum>(bias_type);
+        traits.has_dbias         = has_dbias;
+        traits.has_dropout       = has_dropout;
+        traits.is_store_randval  = s_randval;
+        traits.is_deterministic  = deterministic;
+        traits.uses_bwd_v3       = bwd_v3;
+        traits.is_v3_atomic_fp32 = v3_atomic_fp32;
+        traits.is_v3_spec        = v3_spec;
+        traits.is_v3_rtz_cvt     = v3_rtz_cvt;
     };
 
     const auto init_args = [&](auto &args) {

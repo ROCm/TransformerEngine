@@ -207,18 +207,18 @@ void ck_fused_attn_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_group
         drop_offset = host_rng_state[1];
     }
 
-    bool ext_asm         = getenv<int>("NVTE_CK_EXT_ASM") == 1;
-    bool asm_atomic_fp32 = getenv<int>("NVTE_CK_ASM_ATOMIC_FP32") == 1;
-    bool asm_no_coex     = getenv<int>("NVTE_CK_ASM_NO_COEX") == 1;
-    bool asm_rtz_cvt     = getenv<int>("NVTE_CK_ASM_RTZ_CVT") == 1;
+    bool bwd_v3         = getenv<int>("NVTE_CK_BWD_V3") == 1;
+    bool v3_atomic_fp32 = getenv<int>("NVTE_CK_V3_ATOMIC_FP32") == 1;
+    bool v3_spec        = getenv<int>("NVTE_CK_V3_SPEC") == 1;
+    bool v3_rtz_cvt     = getenv<int>("NVTE_CK_V3_RTZ_CVT") == 1;
 
     ck_fused_attn_bwd_impl(
         batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim, bias_b,
         bias_h, attn_scale, p_dropout, drop_seed, drop_offset, attn_bias_type, attn_mask_type,
         devPtrQ, devPtrK, devPtrV, devPtrO, devPtrSoftmaxStats, devPtrBias, devPtrdQ, devPtrdK,
         devPtrdV, devPtrdO, devPtrdBias, devPtrCuSeqlensQ, devPtrCuSeqlensKV,
-        get_datatype_str(QKV_type), workspace->data.dptr, &workspace_size, deterministic, ext_asm,
-        asm_atomic_fp32, asm_no_coex, asm_rtz_cvt, stream);
+        get_datatype_str(QKV_type), workspace->data.dptr, &workspace_size, deterministic, bwd_v3,
+        v3_atomic_fp32, v3_spec, v3_rtz_cvt, stream);
 
     if (workspace_size > 0) {
         if (workspace->data.dptr == nullptr) {

@@ -37,7 +37,7 @@ void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
                             void *devPtrdK, void *devPtrdV, void *devPtrdO, void *devPtrdBias,
                             void *devPtrCuSeqlensQ, void *devPtrCuSeqlensKV,
                             const std::string &data_type, void *workspace, size_t *workspace_size,
-                            bool deterministic, bool ext_asm, bool asm_atomic_fp32,
-                            bool asm_no_coex, bool asm_rtz_cvt, hipStream_t stream);
+                            bool deterministic, bool bwd_v3, bool v3_atomic_fp32,
+                            bool v3_spec, bool v3_rtz_cvt, hipStream_t stream);
 
 #endif
