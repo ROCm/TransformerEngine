@@ -808,6 +808,10 @@ protected:
     while(std::getline(ifs, line)) 
     {
       line.erase(0, line.find_first_not_of(" \t\n\r\f\v"));
+      if (auto pos = line.find_last_not_of(" \t\n\r\f\v"); pos != std::string::npos)
+      {
+        line.resize(pos+1);
+      }
       if (line.empty() || line[0] == '#') continue;
       std::istringstream is(line);
       char c;
@@ -879,32 +883,45 @@ protected:
     }
   }
 
-  bool can_save_()
+  bool can_save_(bool reopen = false)
   {
-    if (save_fs)
+    if (!save_fs)
     {
-      return save_fs->is_open() && !save_fs->bad();
+        save_fs_name = std::getenv("TE_HIPBLASLT_ALGO_SAVE");
+        if (save_fs_name == nullptr || save_fs_name[0] == '\0')
+        {
+          return false;
+        }
+        save_fs = std::make_unique<std::ofstream>();
+        std::cout << "Saving autotune results to " << save_fs_name << "\n";
     }
-    const char* env = std::getenv("TE_HIPBLASLT_ALGO_SAVE");
-    if (env == nullptr || env[0] == '\0')
+
+    if (reopen)
     {
+      if (save_fs->is_open())
+      {
+        save_fs->close();
+      }
+      save_fs->open(save_fs_name, std::ios_base::trunc);
+    }
+
+    if (save_fs->is_open() && !save_fs->bad())
+    {
+      return true;
+    }
+    else
+    {
+      if (reopen) std::cerr << "Could not open autotune results storage " << save_fs_name << "\n";
       return false;
     }
-    save_fs = std::make_unique<std::ofstream>(env);
-    NVTE_CHECK(save_fs->is_open(), "Could not open autotune results storage ", env);
-    std::cout << "Saving autotune results to " << env << "\n";
-    header_(*save_fs);
-    *save_fs << "\n";
-    return true;
   }
 
   void save_()
   {
-    if (!can_save_())
+    if (!can_save_(true))
     {
       return;
     }
-    save_fs->seekp(0);
     header_(*save_fs);
     *save_fs << "\n";
 
@@ -934,6 +951,7 @@ private:
   std::vector<int> dev_cap;
   constexpr static char csv_sep = ','; 
   std::unique_ptr<std::ofstream> save_fs;
+  const char *save_fs_name;
   std::mutex mt;
   /* Map of problem config to tuple of ws_size and Algo
    * When searching, elements matching Key are filtered 
