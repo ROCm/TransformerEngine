@@ -1017,8 +1017,9 @@ def test_sanity_fp8_gemm_with_unalignment(N, datatype):
     torch.cuda.synchronize()
 
 
+#TODO: rocm fused_attn backends does not support fp8 yet
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.skipif(get_device_compute_capability() != (9, 0), reason="FP8 tests require Hopper.")
+@pytest.mark.skipif(IS_HIP_EXTENSION or get_device_compute_capability() != (9, 0), reason="FP8 tests require Hopper.")
 @pytest.mark.skipif(get_cudnn_version() < (9, 3, 0), reason="cuDNN 9.3.0+ is required.")
 @pytest.mark.parametrize("model", ["large"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])

@@ -121,7 +121,7 @@ void PrepareFusedAttnBackwardAuxTensors(NVTETensorPack *tensor_pack,
 #ifndef USE_ROCM
   auto dummy_backend = NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen;
 #else
-	auto dummy_backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
+  auto dummy_backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
 #endif
   PrepareFusedAttnForwardAuxTensors(tensor_pack, desc, dummy_bias_type, dummy_backend, softmax_buf,
                                     rng_state_buf, bias_buf);
@@ -298,7 +298,7 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
 #ifndef USE_ROCM
   PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 #else
-	PopulateRngStateAsync(rng_state, seed, input_batch, attn_heads, q_max_seqlen, kv_max_seqlen, stream);
+  PopulateRngStateAsync(rng_state, seed, input_batch, attn_heads, q_max_seqlen, kv_max_seqlen, stream);
 #endif
 
   /* Auxiliary tensors (to be propagated to the backward pass later) */

@@ -317,7 +317,7 @@ def get_attention_backend(
         use_fused_attention = False
 
     # Filter: Compute capability
-    if device_compute_capability < (8, 0):
+    if not IS_HIP_EXTENSION and device_compute_capability < (8, 0):
         if use_flash_attention:
             logger.debug("Disabling FlashAttention as it requires compute capability sm80+")
             use_flash_attention = False

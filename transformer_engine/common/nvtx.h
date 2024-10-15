@@ -1,6 +1,4 @@
 /*************************************************************************
- * This file was modified for portability to AMDGPU
- * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -9,11 +7,7 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_NVTX_H_
 #define TRANSFORMER_ENGINE_COMMON_NVTX_H_
 
-#ifndef __HIP_PLATFORM_AMD__
 #include <nvtx3/nvToolsExt.h>
-#else
-#include <nvToolsExt.h>
-#endif
 
 #include <string>
 

@@ -51,7 +51,7 @@ def te_dtype_to_jax_dtype(te_dtype):
         TEDType.kInt64: jnp.int64,
         TEDType.kFloat8E4M3: jnp_float8_e4m3_type,
         TEDType.kFloat8E5M2: jnp_float8_e5m2_type,
-        TEDType.kByte: jnp.uint8
+        TEDType.kByte: jnp.uint8,
     }
 
     if te_dtype not in converter:

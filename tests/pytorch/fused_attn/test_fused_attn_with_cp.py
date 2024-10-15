@@ -38,7 +38,7 @@ def get_bash_arguments(**kwargs):
 
 
 @pytest.mark.skipif(not _flash_attn_2_plus, reason="Flash-attn 2.0+ is required.")
-@pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
+@pytest.mark.skipif(not IS_HIP_EXTENSION and get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", ["bf16", "fp16"])
 @pytest.mark.parametrize("model", model_configs_flash_attn.keys())
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
@@ -50,12 +50,14 @@ def test_cp_with_flash_attention(dtype, model, qkv_format):
         check=True,
     )
 
-#TODO: release GQA tests once CK/AOTriton support GQA/MQA
+#TODO: release bias tests once CK/AOTriton support bias
 if IS_HIP_EXTENSION:
     model_configs_fused_attn = {
         #   test:             b,  h, hg,   d,    sq,   skv,   p,      mask,      bias
         "cp_1_0": ModelConfig(2, 12, 12, 128,  4096,  4096, 0.0,  "causal", "no_bias"),  # MHA
         "cp_1_1": ModelConfig(2, 12, 12, 128,  4096,  4096, 0.0, "no_mask", "no_bias"),  # MHA
+        "cp_2_0": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "causal", "no_bias"),  # GQA
+        "cp_2_1": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "no_mask", "no_bias"),  # GQA
     }
 else:
     model_configs_fused_attn = {
@@ -71,7 +73,7 @@ else:
     }
 
 
-@pytest.mark.skipif(not IS_HIP_EXTENSION and get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required for NVTE.")
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
 @pytest.mark.skipif(not IS_HIP_EXTENSION and get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", ["bf16", "fp16"])
 @pytest.mark.parametrize("model", model_configs_fused_attn.keys())
