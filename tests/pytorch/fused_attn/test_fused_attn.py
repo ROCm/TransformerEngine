@@ -491,7 +491,7 @@ model_configs_swa = {
 }
 
 
-@pytest.mark.skipif(not _flash_attn_2_3_plus, reason="Flash-attn 2.3+ is required.")
+@pytest.mark.skipif((not IS_HIP_EXTENSION) and (not _flash_attn_2_3_plus), reason="Flash-attn 2.3+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_swa])
 @pytest.mark.parametrize("model", model_configs_swa.keys())

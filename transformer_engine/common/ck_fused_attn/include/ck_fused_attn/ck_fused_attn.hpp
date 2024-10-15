@@ -21,6 +21,13 @@ enum DType {
   kNumTypes         /*!< Number of supported types */
 };
 
+// keep sync with mask_enum in mask.hpp
+enum MaskType {
+  no_mask = 0,
+  mask_top_left = 1,
+  mask_bottom_right = 2,
+  window_generic = 3,
+};
 
 hipError_t ck_attn_fwd(
   DType dtype,
@@ -35,7 +42,8 @@ hipError_t ck_attn_fwd(
   float scaling_factor,
   float dropout_probability,
   uint64_t philox_seed, uint64_t philox_offset,
-  bool is_causal,
+  MaskType attn_mask_type,
+  int64_t window_size_left, int64_t window_size_right,
   void* o_ptr, 
   uint64_t stride_b_o, uint64_t stride_h_o, uint64_t stride_s_o,
   void* lse_ptr, 
@@ -59,7 +67,8 @@ hipError_t ck_attn_bwd(
   float scaling_factor,
   float dropout_probability,
   uint64_t philox_seed, uint64_t philox_offset,
-  bool is_causal,
+  MaskType attn_mask_type,
+  int64_t window_size_left, int64_t window_size_right,
   void* dq_ptr, 
   uint64_t stride_b_dq, uint64_t stride_h_dq, uint64_t stride_s_dq,
   void* dq_acc_ptr,
