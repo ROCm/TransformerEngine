@@ -29,16 +29,37 @@ bool is_ck_backend_supported(
   int64_t window_size_left, 
   int64_t window_size_right) {
 
+  bool nvte_log_ck_config = false;
+  if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
+    if (env_p != nullptr && std::string(env_p) == "1")
+      nvte_log_ck_config = true;
+  }
+
   if(num_attn_heads%num_gqa_groups != 0){
+    if(nvte_log_ck_config){
+      std::cout<<"Num of attention heads must be divided by num of gqa groups"<<std::endl;
+    }
     return false;
   }
 
-  //TODO: release after TE integrates swa
-  bool is_no_mask_window_size= window_size_left == -1 && window_size_right == -1;
-  bool is_causal_mask_window_size = window_size_left ==-1 && window_size_right ==0;
-  if(!(is_no_mask_window_size || is_causal_mask_window_size)){
-    return false;
-  } 
+  //swa filter
+  if(attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK || attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK){
+    // causal mask window must be with causal top left or causal bottom right mask type
+    if (!((window_size_left ==-1 || window_size_left >=0) && window_size_right ==0)){
+      if(nvte_log_ck_config){
+        std::cout<<"When mask contains causal, window size should be (-1, 0) or (>=0, 0)"<<std::endl;
+      }
+      return false;
+    }
+  }else if(attn_mask_type==NVTE_Mask_Type::NVTE_NO_MASK){
+    // no mask must be with either (-1, -1) or (>=0, >=0)
+    if (!((window_size_left == -1 && window_size_right == -1)||(window_size_left >= 0 && window_size_right >= 0))){
+      if(nvte_log_ck_config){
+        std::cout<<"When no mask, window size should be (-1, -1) or (>=0, >=0)"<<std::endl;
+      }
+      return false;
+    }
+  }
 
   bool is_mqa_gqa = num_attn_heads > num_gqa_groups;
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
@@ -47,11 +68,17 @@ bool is_ck_backend_supported(
 
   // MQA/GQA does not work with qkvpacked layout
   if(is_mqa_gqa && is_qkvpacked){
+    if(nvte_log_ck_config){
+      std::cout<<"When no mask, window size should be (-1, -1) or (>=0, >=0)"<<std::endl;
+    }
     return false;
   }
   
   // qkvpacked layout requires seq length to be the same
   if(is_qkvpacked && max_seqlen_q!=max_seqlen_kv){
+    if(nvte_log_ck_config){
+      std::cout<<"qkv packed layout requires seqlen_q==seqlen_kv"<<std::endl;
+    }
     return false;
   }
 
@@ -59,11 +86,17 @@ bool is_ck_backend_supported(
   const std::string sm_arch_name_ = cuda::sm_arch_name(device_id);
   //only MI300X supported
   if(!(sm_arch_name_.find("gfx942")!=std::string::npos)){
+    if(nvte_log_ck_config){
+      std::cout<<"only MI300X is supported"<<std::endl;
+    }
     return false;
   }
   
   // Q and KV must have the same data type, in fp16 or bf16
   if((q_dtype!=kv_dtype) || !((q_dtype==NVTEDType::kNVTEFloat16) || (q_dtype == NVTEDType::kNVTEBFloat16))){
+    if(nvte_log_ck_config){
+      std::cout<<"q, k, v data type has to be fp16 or bf16"<<std::endl;
+    }
     return false;
   }
   
@@ -71,24 +104,31 @@ bool is_ck_backend_supported(
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   if(!(qkv_format == NVTE_QKV_Format::NVTE_SBHD||
     qkv_format == NVTE_QKV_Format::NVTE_BSHD)){
+    if(nvte_log_ck_config){
+      std::cout<<"qkv format can only be BSHD or SBHD"<<std::endl;
+    }
     return false;
   }
   
-  // AOTriton does not support bias now
+  // CK does not support bias now
   if(!(bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)){
+    if(nvte_log_ck_config){
+      std::cout<<"CK fused attn does not support bias"<<std::endl;
+    }
     return false;
   }
 
-  // Only no mask and causal mask supported
-  if(!(attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK||
-    attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)){
+  // Only no mask and causal (top left) and causal bottom right mask supported
+  // TODO: support padding mask in CK
+  if(!(attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
+    attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+    attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK)){
+    if(nvte_log_ck_config){
+      std::cout<<"CK fused attn only support no_mask, causal_mask, causal_bottom_right_mask"<<std::endl;
+    }
     return false;
   } 
   
-  // causal does not work with s_q != s_kv
-  if(max_seqlen_q!=max_seqlen_kv && attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK){
-    return false;
-  }
   return true;
 }
 
@@ -101,12 +141,33 @@ ck_fused_attn::DType nvte_to_ck_dtype(NVTEDType t_dtype){
 #undef CAST_TYPE
 }
 
+// set the ck mask type based on nvte mask type and window size
+ck_fused_attn::MaskType set_ck_mask(NVTE_Mask_Type nvte_mask_type, int64_t nvte_window_size_left, int64_t nvte_window_size_right){
+  if (nvte_mask_type==NVTE_Mask_Type::NVTE_NO_MASK){
+    // window size in NVTE_NO_Mask can be (-1, -1) and (>=0, >=0)
+    if(nvte_window_size_left==-1 && nvte_window_size_right==-1){
+      // (-1, -1)
+      return ck_fused_attn::MaskType::no_mask;
+    }else{
+      // (>=0, >=0)
+      return ck_fused_attn::MaskType::mask_top_left;
+    }
+  }else if (nvte_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK){
+    // nvte causal mask can map to (-1, 0) or (>=0, 0)
+    return ck_fused_attn::MaskType::mask_top_left;
+  }else if (nvte_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK){
+    return ck_fused_attn::MaskType::mask_bottom_right;
+  }
+  return ck_fused_attn::MaskType::window_generic;
+}
+
 // actual fwd implementation, calling ck api directly
 void fused_attn_ck_fwd_impl(
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d,
   bool is_training, float scaling_factor, float dropout_probability,
   NVTE_QKV_Layout layout,
   NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+  int64_t window_size_left, int64_t window_size_right,
   void *devPtrQ, void *devPtrK, void *devPtrV, 
   void *devPtrSoftmaxAux, void *devPtrO,
   const uint64_t* devPtrDropoutSeed, const uint64_t* devPtrDropoutOffset,
@@ -169,7 +230,8 @@ void fused_attn_ck_fwd_impl(
     std::cout<<"is_training: "<<is_training<<", ";
     std::cout<<"dropout_p: "<<dropout_probability<<", ";
     std::cout<<"philox_seed: "<<philox_seed<<", philox_offset: "<<philox_offset<<", ";
-    std::cout<<"causal mask: "<<(mask_type==NVTE_CAUSAL_MASK)<<std::endl;
+    std::cout<<"mask_type: "<<mask_type<<std::endl;
+    std::cout<<"window_size: ("<<window_size_left<<", "<<window_size_right<<")"<<std::endl;
   }
   using ck_fused_attn::ck_attn_fwd;
   NVTE_CHECK_CUDA(
@@ -184,7 +246,8 @@ void fused_attn_ck_fwd_impl(
       v_stride[0], v_stride[1], v_stride[2],
       is_training, scaling_factor, dropout_probability,
       philox_seed, philox_offset,
-      mask_type==NVTE_CAUSAL_MASK, //is_causal
+      set_ck_mask(mask_type, window_size_left, window_size_right),
+      window_size_left, window_size_right,
       devPtrO,
       o_stride[0], o_stride[1], o_stride[2],
       devPtrSoftmaxAux,
@@ -208,6 +271,7 @@ void fused_attn_ck_bwd_impl(
   float scaling_factor, float dropout_probability, 
   NVTE_QKV_Layout layout,
   NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+  int64_t window_size_left, int64_t window_size_right,
   void* devPtrQ, void* devPtrK, void* devPtrV,
   void* devPtrO, void* devPtrSoftmaxAux, 
   void* devPtrdQ, void* devPtrdK, void* devPtrdV, 
@@ -323,7 +387,8 @@ void fused_attn_ck_bwd_impl(
     std::cout<<"o_stride: ("<<o_stride[0]<<", "<<o_stride[1]<<", "<<o_stride[2]<<", "<<o_stride[3]<<"), ";
     std::cout<<"dropout_p: "<<dropout_probability<<", ";
     std::cout<<"philox_seed: "<<philox_seed<<", philox_offset: "<<philox_offset<<", ";
-    std::cout<<"causal mask: "<<(mask_type==NVTE_CAUSAL_MASK)<<std::endl;
+    std::cout<<"mask_type: "<<mask_type<<std::endl;
+    std::cout<<"window_size: ("<<window_size_left<<", "<<window_size_right<<")"<<std::endl;
   }
   using ck_fused_attn::ck_attn_bwd;
   NVTE_CHECK_CUDA(
@@ -343,7 +408,8 @@ void fused_attn_ck_bwd_impl(
       o_stride[0], o_stride[1], o_stride[2], //dO and O share the same stride
       scaling_factor, dropout_probability,
       philox_seed, philox_offset,
-      mask_type==NVTE_CAUSAL_MASK, // is causal
+      set_ck_mask(mask_type, window_size_left, window_size_right),
+      window_size_left, window_size_right,
       devPtrdQ,
       q_stride[0], q_stride[1], q_stride[2], //dQ and Q share the same stride
       dq_acc_ptr, 
@@ -364,6 +430,7 @@ void fused_attn_ck_fwd_qkvpacked(
   size_t b, size_t h, size_t max_seqlen, size_t d,
   bool is_training, float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+  int64_t window_size_left, int64_t window_size_right,
   const Tensor* input_QKV, const Tensor* input_Bias, 
   Tensor* output_O, Tensor* output_M, Tensor* output_rng_state,
   const Tensor* input_cu_seqlens,
@@ -395,6 +462,7 @@ void fused_attn_ck_fwd_qkvpacked(
     is_training, attn_scale, dropout, 
     qkv_layout,
     bias_type, attn_mask_type,
+    window_size_left, window_size_right,
     devPtrQ, devPtrK, devPtrV, 
     output_M->data.dptr, output_O->data.dptr,
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
@@ -423,6 +491,7 @@ void fused_attn_ck_bwd_qkvpacked(
   size_t b, size_t h, size_t max_seqlen, size_t d,
   float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+  int64_t window_size_left, int64_t window_size_right,
   const Tensor* input_QKV, const Tensor* input_O, const Tensor* input_dO, const Tensor* input_Bias, 
   Tensor* output_dQKV,
   const Tensor* input_cu_seqlens,
@@ -458,6 +527,7 @@ void fused_attn_ck_bwd_qkvpacked(
     attn_scale, dropout, 
     qkv_layout,
     bias_type, attn_mask_type,
+    window_size_left, window_size_right,
     devPtrQ, devPtrK, devPtrV, 
     input_O->data.dptr, input_M->data.dptr,
     devPtrdQ, devPtrdK, devPtrdV, 
@@ -488,6 +558,7 @@ void fused_attn_ck_fwd_kvpacked(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
   bool is_training, float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+  int64_t window_size_left, int64_t window_size_right,
   const Tensor* input_Q, const Tensor* input_KV, const Tensor* input_Bias, 
   Tensor* output_O, Tensor* output_M, Tensor* output_rng_state,
   const Tensor* input_cu_seqlens_q,
@@ -520,6 +591,7 @@ void fused_attn_ck_fwd_kvpacked(
     is_training, attn_scale, dropout, 
     qkv_layout,
     bias_type, attn_mask_type,
+    window_size_left, window_size_right,
     input_Q->data.dptr, devPtrK, devPtrV, 
     output_M->data.dptr, output_O->data.dptr,
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
@@ -548,6 +620,7 @@ void fused_attn_ck_bwd_kvpacked(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
   float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+  int64_t window_size_left, int64_t window_size_right,
   const Tensor* input_Q, const Tensor* input_KV, const Tensor* input_O, const Tensor* input_dO, const Tensor* input_Bias, 
   Tensor* output_dQ, Tensor* output_dKV,
   const Tensor* input_cu_seqlens_q,
@@ -582,6 +655,7 @@ void fused_attn_ck_bwd_kvpacked(
     attn_scale, dropout, 
     qkv_layout,
     bias_type, attn_mask_type,
+    window_size_left, window_size_right,
     input_Q->data.dptr, devPtrK, devPtrV, 
     input_O->data.dptr, input_M->data.dptr,
     output_dQ->data.dptr, devPtrdK, devPtrdV, 
@@ -612,6 +686,7 @@ void fused_attn_ck_fwd(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
   bool is_training, float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+  int64_t window_size_left, int64_t window_size_right,
   const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V, const Tensor* input_Bias, 
   Tensor* output_O, Tensor* output_M, Tensor* output_rng_state,
   const Tensor* input_cu_seqlens_q,
@@ -632,6 +707,7 @@ void fused_attn_ck_fwd(
     is_training, attn_scale, dropout, 
     qkv_layout,
     bias_type, attn_mask_type,
+    window_size_left, window_size_right,
     input_Q->data.dptr, input_K->data.dptr, input_V->data.dptr, 
     output_M->data.dptr, output_O->data.dptr,
     reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
@@ -660,6 +736,7 @@ void fused_attn_ck_bwd(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
   float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+  int64_t window_size_left, int64_t window_size_right,
   const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V, const Tensor* input_O, const Tensor* input_dO, const Tensor* input_Bias, 
   Tensor* output_dQ, Tensor* output_dK, Tensor* output_dV,
   const Tensor* input_cu_seqlens_q,
@@ -678,6 +755,7 @@ void fused_attn_ck_bwd(
     attn_scale, dropout, 
     qkv_layout,
     bias_type, attn_mask_type,
+    window_size_left, window_size_right,
     input_Q->data.dptr, input_K->data.dptr, input_V->data.dptr, 
     input_O->data.dptr, input_M->data.dptr,
     output_dQ->data.dptr, output_dK->data.dptr, output_dV->data.dptr, 

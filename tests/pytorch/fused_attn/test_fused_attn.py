@@ -491,7 +491,7 @@ model_configs_swa = {
 }
 
 
-@pytest.mark.skipif(not _flash_attn_2_3_plus, reason="Flash-attn 2.3+ is required.")
+@pytest.mark.skipif((not IS_HIP_EXTENSION) and (not _flash_attn_2_3_plus), reason="Flash-attn 2.3+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_swa])
 @pytest.mark.parametrize("model", model_configs_swa.keys())
@@ -978,11 +978,14 @@ def test_transformer_layer(
     if IS_HIP_EXTENSION and model_configs[model].num_gqa_groups != model_configs[model].num_heads:
         qkv_layout = "sbhd_sbhd_sbhd"
 
+    window_size = (-1, -1)
+    window_size = check_set_window_size(config.attn_mask_type, window_size)
     # Test backend availability
     available_backends, fused_attn_backends = _get_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,
+        window_size = window_size,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 

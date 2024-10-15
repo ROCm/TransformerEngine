@@ -29,7 +29,8 @@ hipError_t ck_attn_fwd(
   float scaling_factor,
   float dropout_probability,
   uint64_t philox_seed, uint64_t philox_offset,
-  bool is_causal,
+  MaskType attn_mask_type,
+  int64_t window_size_left, int64_t window_size_right,
   void* o_ptr, 
   uint64_t stride_b_o, uint64_t stride_h_o, uint64_t stride_s_o,
   void* lse_ptr, 
@@ -56,20 +57,24 @@ hipError_t ck_attn_fwd(
   bool is_v_rowmajor = true;
   bool do_fp8_static_quant = false;
 
-  //TODO: support other bias and mask
+  //TODO: support bias and alibi
   bias_enum bias_type = bias_enum::no_bias;
   mask_enum mask_type;
   ck_tile::index_t left, right;
   ck_tile::stream_config stream_config{stream};
-
-  if (is_causal){
-    mask_type = mask_enum::mask_top_left;
-    left = -1;
-    right = 0;
-  } else {
+  
+  if (attn_mask_type == MaskType::no_mask){
     mask_type = mask_enum::no_mask;
+  }else if(attn_mask_type == MaskType::mask_top_left){
+    mask_type = mask_enum::mask_top_left;
+  }else if(attn_mask_type == MaskType::mask_bottom_right){
+    mask_type = mask_enum::mask_bottom_right;
+  }else{
+    mask_type = mask_enum::window_generic;
   }
-
+  left = window_size_left;
+  right = window_size_right;
+  
   ck_tile::index_t shape_seqlen_q = seqlen_q;
   ck_tile::index_t shape_seqlen_k = seqlen_k;
 
@@ -146,7 +151,7 @@ hipError_t ck_attn_fwd(
                          stride_v,
                          stride_bias,
                          stride_randval,
-                         stride_o, //stride_o_acc
+                         hdim_v, //stride_o_acc
                          stride_o,
                          nhead_stride_q,
                          nhead_stride_k,
@@ -155,7 +160,7 @@ hipError_t ck_attn_fwd(
                          nhead_stride_randval,
                          nhead_stride_lse,
                          nhead_stride_lse,//nhead_stride_lse_acc
-                         nhead_stride_o, //nhead_stride_o_acc
+                         max_seqlen_q*hdim_v, //nhead_stride_o_acc
                          nhead_stride_o,
                          batch_stride_q,
                          batch_stride_k,
@@ -166,8 +171,8 @@ hipError_t ck_attn_fwd(
                          batch_stride_lse,//batch_stride_lse_acc
                          batch_stride_o,//batch_stride_o_acc
                          batch_stride_o,
-                         1, //split_stride_lse_acc
-                         1, //split_stride_o_acc
+                         (batch * nhead * shape_seqlen_q), //split_stride_lse_acc
+                         (batch * nhead * max_seqlen_q * hdim_v), //split_stride_o_acc
                          left,
                          right,
                          static_cast<ck_tile::index_t>(mask_type),
@@ -185,77 +190,78 @@ hipError_t ck_attn_fwd(
     std::cout<<std::endl<<"run ck fmha_fwd: "<<std::endl;
 
     // debug fmha_traits
-    std::cout<<"fmha_traits: ";
-    std::cout<<"hdim_q: "<<fmha_traits.hdim_q<<", ";
-    std::cout<<"hdim_v: "<<fmha_traits.hdim_v<<", ";
-    std::cout<<"data_type: "<<fmha_traits.data_type<<", ";
-    std::cout<<"is_group_mode: "<<fmha_traits.is_group_mode<<", ";
-    std::cout<<"is_v_rowmajor: "<<fmha_traits.is_v_rowmajor<<", ";
-    std::cout<<"mask_type: "<<static_cast<std::underlying_type<mask_enum>::type>(fmha_traits.mask_type)<<", ";
-    std::cout<<"bias_type: "<<static_cast<std::underlying_type<bias_enum>::type>(fmha_traits.bias_type)<<", ";
-    std::cout<<"has_lse: "<<fmha_traits.has_lse<<", ";
-    std::cout<<"has_dropout: "<<fmha_traits.has_dropout<<", ";
+    std::cout<<"fmha_traits: "<<std::endl;
+    std::cout<<"hdim_q: "<<fmha_traits.hdim_q<<std::endl;
+    std::cout<<"hdim_v: "<<fmha_traits.hdim_v<<std::endl;
+    std::cout<<"data_type: "<<fmha_traits.data_type<<std::endl;
+    std::cout<<"is_group_mode: "<<fmha_traits.is_group_mode<<std::endl;
+    std::cout<<"is_v_rowmajor: "<<fmha_traits.is_v_rowmajor<<std::endl;
+    std::cout<<"mask_type: "<<static_cast<std::underlying_type<mask_enum>::type>(fmha_traits.mask_type)<<std::endl;
+    std::cout<<"bias_type: "<<static_cast<std::underlying_type<bias_enum>::type>(fmha_traits.bias_type)<<std::endl;
+    std::cout<<"has_lse: "<<fmha_traits.has_lse<<std::endl;
+    std::cout<<"has_dropout: "<<fmha_traits.has_dropout<<std::endl;
     std::cout<<"do_fp8_static_quant: "<<fmha_traits.do_fp8_static_quant<<std::endl;
 
     // debug fmha_args
-    std::cout<<"fmha_args: ";
-    std::cout<<"q_ptr: "<<fmha_args.q_ptr<<", ";
-    std::cout<<"k_ptr: "<<fmha_args.k_ptr<<", ";
-    std::cout<<"v_ptr: "<<fmha_args.v_ptr<<", ";
-    std::cout<<"bias_ptr: "<<fmha_args.bias_ptr<<", ";
-    std::cout<<"rand_val_ptr: "<<fmha_args.rand_val_ptr<<", ";
-    std::cout<<"lse_acc_ptr: "<<fmha_args.lse_acc_ptr<<", ";
-    std::cout<<"o_acc_ptr: "<<fmha_args.o_acc_ptr<<", ";
-    std::cout<<"lse_ptr: "<<fmha_args.lse_ptr<<", ";
-    std::cout<<"o_ptr: "<<fmha_args.o_ptr<<", ";
-    std::cout<<"seqstart_q_ptr: "<<fmha_args.seqstart_q_ptr<<", ";
-    std::cout<<"seqstart_k_ptr: "<<fmha_args.seqstart_k_ptr<<", ";
-    std::cout<<"seqlen_k_ptr: "<<fmha_args.seqlen_k_ptr<<", ";
-    std::cout<<"seqlen_q: "<<fmha_args.seqlen_q<<", ";
-    std::cout<<"seqlen_k: "<<fmha_args.seqlen_k<<", ";
-    std::cout<<"batch: "<<fmha_args.batch<<", ";
-    std::cout<<"max_seqlen_q: "<<fmha_args.max_seqlen_q<<", ";
-    std::cout<<"hdim_q: "<<fmha_args.hdim_q<<", ";
-    std::cout<<"hdim_v: "<<fmha_args.hdim_v<<", ";
-    std::cout<<"nhead_q: "<<fmha_args.nhead_q<<", ";
-    std::cout<<"nhead_k: "<<fmha_args.nhead_k<<", ";
-    std::cout<<"num_splits: "<<fmha_args.num_splits<<", ";
-    std::cout<<"scale_s: "<<fmha_args.scale_s<<", ";
-    std::cout<<"scale_p: "<<fmha_args.scale_p<<", ";
-    std::cout<<"scale_o: "<<fmha_args.scale_o<<", ";
-    std::cout<<"stride_q: "<<fmha_args.stride_q<<", ";
-    std::cout<<"stride_k: "<<fmha_args.stride_k<<", ";
-    std::cout<<"stride_v: "<<fmha_args.stride_v<<", ";
-    std::cout<<"stride_bias: "<<fmha_args.stride_bias<<", ";
-    std::cout<<"stride_randval: "<<fmha_args.stride_randval<<", ";
-    std::cout<<"stride_o_acc: "<<fmha_args.stride_o_acc<<", ";
-    std::cout<<"stride_o: "<<fmha_args.stride_o<<", ";
-    std::cout<<"nhead_stride_q: "<<fmha_args.nhead_stride_q<<", ";
-    std::cout<<"nhead_stride_k: "<<fmha_args.nhead_stride_k<<", ";
-    std::cout<<"nhead_stride_v: "<<fmha_args.nhead_stride_v<<", ";
-    std::cout<<"nhead_stride_bias: "<<fmha_args.nhead_stride_bias<<", ";
-    std::cout<<"nhead_stride_randval: "<<fmha_args.nhead_stride_randval<<", ";
-    std::cout<<"nhead_stride_lse: "<<fmha_args.nhead_stride_lse<<", ";
-    std::cout<<"nhead_stride_lse_acc: "<<fmha_args.nhead_stride_lse_acc<<", ";
-    std::cout<<"nhead_stride_o_acc: "<<fmha_args.nhead_stride_o_acc<<", ";
-    std::cout<<"nhead_stride_o: "<<fmha_args.nhead_stride_o<<", ";
-    std::cout<<"batch_stride_q: "<<fmha_args.batch_stride_q<<", ";
-    std::cout<<"batch_stride_k: "<<fmha_args.batch_stride_k<<", ";
-    std::cout<<"batch_stride_v: "<<fmha_args.batch_stride_v<<", ";
-    std::cout<<"batch_stride_bias: "<<fmha_args.batch_stride_bias<<", ";
-    std::cout<<"batch_stride_randval: "<<fmha_args.batch_stride_randval<<", ";
-    std::cout<<"batch_stride_lse: "<<fmha_args.batch_stride_lse<<", ";
-    std::cout<<"batch_stride_lse_acc: "<<fmha_args.batch_stride_lse_acc<<", ";
-    std::cout<<"batch_stride_o_acc: "<<fmha_args.batch_stride_o_acc<<", ";
-    std::cout<<"batch_stride_o: "<<fmha_args.batch_stride_o<<", ";
-    std::cout<<"split_stride_lse_acc: "<<fmha_args.split_stride_lse_acc<<", ";
-    std::cout<<"split_stride_o_acc: "<<fmha_args.split_stride_o_acc<<", ";
-    std::cout<<"window_size_left: "<<fmha_args.window_size_left<<", ";
-    std::cout<<"window_size_right: "<<fmha_args.window_size_right<<", ";
-    std::cout<<"mask_type: "<<fmha_args.mask_type<<", ";
-    std::cout<<"p_drop: "<<fmha_args.p_drop<<", ";
-    std::cout<<"s_randval: "<<fmha_args.s_randval<<", ";
-    std::cout<<"dropout_seed: "<<std::get<0>(fmha_args.drop_seed_offset)<<", ";
+    std::cout<<"fmha_args: "<<std::endl;
+    std::cout<<"q_ptr: "<<fmha_args.q_ptr<<std::endl;
+    std::cout<<"k_ptr: "<<fmha_args.k_ptr<<std::endl;
+    std::cout<<"v_ptr: "<<fmha_args.v_ptr<<std::endl;
+    std::cout<<"bias_ptr: "<<fmha_args.bias_ptr<<std::endl;
+    std::cout<<"rand_val_ptr: "<<fmha_args.rand_val_ptr<<std::endl;
+    std::cout<<"lse_acc_ptr: "<<fmha_args.lse_acc_ptr<<std::endl;
+    std::cout<<"o_acc_ptr: "<<fmha_args.o_acc_ptr<<std::endl;
+    std::cout<<"lse_ptr: "<<fmha_args.lse_ptr<<std::endl;
+    std::cout<<"o_ptr: "<<fmha_args.o_ptr<<std::endl;
+    std::cout<<"seqstart_q_ptr: "<<fmha_args.seqstart_q_ptr<<std::endl;
+    std::cout<<"seqstart_k_ptr: "<<fmha_args.seqstart_k_ptr<<std::endl;
+    std::cout<<"seqlen_k_ptr: "<<fmha_args.seqlen_k_ptr<<std::endl;
+
+    std::cout<<"seqlen_q: "<<fmha_args.seqlen_q<<std::endl;
+    std::cout<<"seqlen_k: "<<fmha_args.seqlen_k<<std::endl;
+    std::cout<<"batch: "<<fmha_args.batch<<std::endl;
+    std::cout<<"max_seqlen_q: "<<fmha_args.max_seqlen_q<<std::endl;
+    std::cout<<"hdim_q: "<<fmha_args.hdim_q<<std::endl;
+    std::cout<<"hdim_v: "<<fmha_args.hdim_v<<std::endl;
+    std::cout<<"nhead_q: "<<fmha_args.nhead_q<<std::endl;
+    std::cout<<"nhead_k: "<<fmha_args.nhead_k<<std::endl;
+    std::cout<<"num_splits: "<<fmha_args.num_splits<<std::endl;
+    std::cout<<"scale_s: "<<fmha_args.scale_s<<std::endl;
+    std::cout<<"scale_p: "<<fmha_args.scale_p<<std::endl;
+    std::cout<<"scale_o: "<<fmha_args.scale_o<<std::endl;
+    std::cout<<"stride_q: "<<fmha_args.stride_q<<std::endl;
+    std::cout<<"stride_k: "<<fmha_args.stride_k<<std::endl;
+    std::cout<<"stride_v: "<<fmha_args.stride_v<<std::endl;
+    std::cout<<"stride_bias: "<<fmha_args.stride_bias<<std::endl;
+    std::cout<<"stride_randval: "<<fmha_args.stride_randval<<std::endl;
+    std::cout<<"stride_o_acc: "<<fmha_args.stride_o_acc<<std::endl;
+    std::cout<<"stride_o: "<<fmha_args.stride_o<<std::endl;
+    std::cout<<"nhead_stride_q: "<<fmha_args.nhead_stride_q<<std::endl;
+    std::cout<<"nhead_stride_k: "<<fmha_args.nhead_stride_k<<std::endl;
+    std::cout<<"nhead_stride_v: "<<fmha_args.nhead_stride_v<<std::endl;
+    std::cout<<"nhead_stride_bias: "<<fmha_args.nhead_stride_bias<<std::endl;
+    std::cout<<"nhead_stride_randval: "<<fmha_args.nhead_stride_randval<<std::endl;
+    std::cout<<"nhead_stride_lse: "<<fmha_args.nhead_stride_lse<<std::endl;
+    std::cout<<"nhead_stride_lse_acc: "<<fmha_args.nhead_stride_lse_acc<<std::endl;
+    std::cout<<"nhead_stride_o_acc: "<<fmha_args.nhead_stride_o_acc<<std::endl;
+    std::cout<<"nhead_stride_o: "<<fmha_args.nhead_stride_o<<std::endl;
+    std::cout<<"batch_stride_q: "<<fmha_args.batch_stride_q<<std::endl;
+    std::cout<<"batch_stride_k: "<<fmha_args.batch_stride_k<<std::endl;
+    std::cout<<"batch_stride_v: "<<fmha_args.batch_stride_v<<std::endl;
+    std::cout<<"batch_stride_bias: "<<fmha_args.batch_stride_bias<<std::endl;
+    std::cout<<"batch_stride_randval: "<<fmha_args.batch_stride_randval<<std::endl;
+    std::cout<<"batch_stride_lse: "<<fmha_args.batch_stride_lse<<std::endl;
+    std::cout<<"batch_stride_lse_acc: "<<fmha_args.batch_stride_lse_acc<<std::endl;
+    std::cout<<"batch_stride_o_acc: "<<fmha_args.batch_stride_o_acc<<std::endl;
+    std::cout<<"batch_stride_o: "<<fmha_args.batch_stride_o<<std::endl;
+    std::cout<<"split_stride_lse_acc: "<<fmha_args.split_stride_lse_acc<<std::endl;
+    std::cout<<"split_stride_o_acc: "<<fmha_args.split_stride_o_acc<<std::endl;
+    std::cout<<"window_size_left: "<<fmha_args.window_size_left<<std::endl;
+    std::cout<<"window_size_right: "<<fmha_args.window_size_right<<std::endl;
+    std::cout<<"mask_type: "<<fmha_args.mask_type<<std::endl;
+    std::cout<<"p_drop: "<<fmha_args.p_drop<<std::endl;
+    std::cout<<"s_randval: "<<fmha_args.s_randval<<std::endl;
+    std::cout<<"dropout_seed: "<<std::get<0>(fmha_args.drop_seed_offset)<<std::endl;
     std::cout<<"dropout_offset: "<<std::get<1>(fmha_args.drop_seed_offset)<<std::endl;
   }
   float average_runtime = fmha_fwd(fmha_traits, fmha_args, stream_config);
