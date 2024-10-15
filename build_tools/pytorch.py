@@ -113,20 +113,16 @@ def setup_pytorch_extension(
         library_dirs = [ cuda_home / "compat" / "lib" ]
         libraries = [ "cuda" ]
 
-    if with_ub:
-        cxx_flags.append("-DNVTE_WITH_USERBUFFERS")
-        nvcc_flags.append("-DNVTE_WITH_USERBUFFERS")
-
-        if os.getenv("UB_MPI_BOOTSTRAP"):
-            assert (
-                os.getenv("MPI_HOME") is not None
-            ), "MPI_HOME must be set when compiling with UB_MPI_BOOTSTRAP=1"
-            mpi_home = Path(os.getenv("MPI_HOME"))
-            include_dirs.append(mpi_home / "include")
-            cxx_flags.append("-DUB_MPI_BOOTSTRAP")
-            nvcc_flags.append("-DUB_MPI_BOOTSTRAP")
-            library_dirs.append(mpi_home / "lib")
-            libraries.append("mpi")
+    if os.getenv("UB_MPI_BOOTSTRAP"):
+        assert (
+            os.getenv("MPI_HOME") is not None
+        ), "MPI_HOME must be set when compiling with UB_MPI_BOOTSTRAP=1"
+        mpi_home = Path(os.getenv("MPI_HOME"))
+        include_dirs.append(mpi_home / "include")
+        cxx_flags.append("-DUB_MPI_BOOTSTRAP")
+        nvcc_flags.append("-DUB_MPI_BOOTSTRAP")
+        library_dirs.append(mpi_home / "lib")
+        libraries.append("mpi")
 
     # Construct PyTorch CUDA extension
     sources = [str(path) for path in sources]

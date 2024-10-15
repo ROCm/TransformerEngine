@@ -25,7 +25,7 @@ def setup_jax_extension(
     extensions_dir = csrc_source_files / "extensions"
     sources = [
         csrc_source_files / "utils.cu",
-    ] + all_files_in_dir(extensions_dir)
+    ] + all_files_in_dir(extensions_dir, ".cpp")
 
     # Header files
     if rocm_build():

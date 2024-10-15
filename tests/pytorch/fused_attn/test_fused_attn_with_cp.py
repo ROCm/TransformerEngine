@@ -56,6 +56,8 @@ if IS_HIP_EXTENSION:
         #   test:             b,  h, hg,   d,    sq,   skv,   p,      mask,      bias
         "cp_1_0": ModelConfig(2, 12, 12, 128,  4096,  4096, 0.0,  "causal", "no_bias"),  # MHA
         "cp_1_1": ModelConfig(2, 12, 12, 128,  4096,  4096, 0.0, "no_mask", "no_bias"),  # MHA
+        "cp_2_0": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "causal", "no_bias"),  # GQA
+        "cp_2_1": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "no_mask", "no_bias"),  # GQA
     }
 else:
     model_configs_fused_attn = {
