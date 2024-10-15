@@ -84,6 +84,8 @@ rocblas_datatype get_cuda_dtype(const transformer_engine::DType t) {
 
 } //namespace
 
+namespace transformer_engine {
+
 #ifndef USE_HIPBLASLT
 
 namespace detail {
@@ -391,8 +393,6 @@ transformer_engine::DType get_transformer_engine_dtype(const rocblas_datatype t)
 }
 #endif //#ifndef USE_HIPBLASLT
 
-namespace transformer_engine {
-  
 #ifdef USE_HIPBLASLT
 
 namespace {
