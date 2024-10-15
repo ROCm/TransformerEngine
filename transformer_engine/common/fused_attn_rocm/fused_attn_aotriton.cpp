@@ -149,12 +149,8 @@ void fused_attn_aotriton_fwd_impl(
     dtype);
   
   //devPtrDropoutSeed and devPtrDropoutOffset are actually device ptrs
-  uint64_t philox_seed, philox_offset;
-  if(is_training && dropout_probability > 0.f){
-    cudaStreamSynchronize(stream);
-    cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
-  }
+  auto philox_seed_tensor = aotriton::TensorView<0>(reinterpret_cast<intptr_t>(devPtrDropoutSeed), aotriton::DType::kUInt64);
+  auto philox_offset_tensor = aotriton::TensorView<0>(reinterpret_cast<intptr_t>(devPtrDropoutOffset), aotriton::DType::kUInt64);
 
   bool nvte_log_aotriton_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_AOTRITON_CONFIG") ) {
@@ -175,7 +171,10 @@ void fused_attn_aotriton_fwd_impl(
     std::cout<<"o_stride: ("<<o_stride[0]<<", "<<o_stride[1]<<", "<<o_stride[2]<<", "<<o_stride[3]<<"), ";
     std::cout<<"is_training: "<<is_training<<", ";
     std::cout<<"dropout_p: "<<dropout_probability<<", ";
-    std::cout<<"philox_seed: "<<philox_seed<<", philox_offset: "<<philox_offset<<", ";
+    uint64_t philox_seed, philox_offset;
+    cudaStreamSynchronize(stream);
+    cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
     std::cout<<"causal mask: "<<(mask_type==NVTE_CAUSAL_MASK)<<std::endl;
   }
   aotriton::TensorView<4> empty_bias(0, {0,0,0,0}, {0,0,0,0}, dtype);
@@ -188,8 +187,11 @@ void fused_attn_aotriton_fwd_impl(
                            M_tensor,
                            o_tensor,
                            is_training? dropout_probability:0,
-                           philox_seed,
-                           philox_offset,
+                           philox_seed_tensor,
+                           philox_offset_tensor,
+                           0, //offset2 
+                           aotriton::TensorView<0>(reinterpret_cast<intptr_t>(nullptr), aotriton::DType::kUInt64), // seed_output
+                           aotriton::TensorView<0>(reinterpret_cast<intptr_t>(nullptr), aotriton::DType::kUInt64), // offset_output
                            encoded_softmax_tensor,
                            mask_type==NVTE_CAUSAL_MASK,
                            stream));
@@ -256,12 +258,10 @@ void fused_attn_aotriton_bwd_impl(
   auto M_tensor = aotriton::TensorView<2>(reinterpret_cast<intptr_t>(devPtrSoftmaxAux), m_shape, m_stride, aotriton::DType::kFloat32);
   auto wkspace_tensor = aotriton::TensorView<2>(reinterpret_cast<intptr_t>(workspace), m_shape, m_stride, aotriton::DType::kFloat32);
 
-  uint64_t philox_seed, philox_offset;
-  if(dropout_probability > 0.f){
-    cudaStreamSynchronize(stream);
-    cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
-  }
+  //devPtrDropoutSeed and devPtrDropoutOffset are actually device ptrs
+  auto philox_seed_tensor = aotriton::TensorView<0>(reinterpret_cast<intptr_t>(devPtrDropoutSeed), aotriton::DType::kUInt64);
+  auto philox_offset_tensor = aotriton::TensorView<0>(reinterpret_cast<intptr_t>(devPtrDropoutOffset), aotriton::DType::kUInt64);
+
 
   bool nvte_log_aotriton_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_AOTRITON_CONFIG") ) {
@@ -281,6 +281,10 @@ void fused_attn_aotriton_bwd_impl(
     std::cout<<"o_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d<<"), ";
     std::cout<<"o_stride: ("<<o_stride[0]<<", "<<o_stride[1]<<", "<<o_stride[2]<<", "<<o_stride[3]<<"), ";
     std::cout<<"dropout_p: "<<dropout_probability<<", ";
+    uint64_t philox_seed, philox_offset;
+    cudaStreamSynchronize(stream);
+    cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
     std::cout<<"philox_seed: "<<philox_seed<<", philox_offset: "<<philox_offset<<", ";
     std::cout<<"causal mask: "<<(mask_type==NVTE_CAUSAL_MASK)<<std::endl;
   }
@@ -300,8 +304,9 @@ void fused_attn_aotriton_bwd_impl(
                            M_tensor,
                            wkspace_tensor,
                            dropout_probability,
-                           philox_seed,
-                           philox_offset,
+                           philox_seed_tensor,
+                           philox_offset_tensor,
+                           0,
                            mask_type==NVTE_CAUSAL_MASK,
                            stream));
 }

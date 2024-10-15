@@ -176,6 +176,10 @@ def get_build_ext(extension_cls: Type[setuptools.Extension]):
                 self.copy_file(ext, target_dir)
                 os.remove(ext)
 
+            # put AOTriton lib in the same directory as libtransformer_engine for non-editable mode (pip install .)
+            if rocm_build() and (Path(self.build_lib)/"lib").exists():
+                self.copy_tree((Path(self.build_lib)/"lib").as_posix(), (target_dir/"lib").as_posix())
+
             # For paddle, the stub file needs to be copied to the install location.
             if paddle_ext is not None:
                 stub_path = Path(self.build_lib) / "transformer_engine"
