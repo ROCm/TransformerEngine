@@ -33,9 +33,9 @@ Execute the following commands to install ROCm Transformer Engine from source on
 .. code-block:: bash
 
   # Clone TE repo and submodules
-  git clone --recursive https://github.com/ROCmSoftwarePlatform/TransformerEngine-private.git
+  git clone --recursive https://github.com/ROCm/TransformerEngine.git
   
-  cd TransformerEngine-private
+  cd TransformerEngine
   export NVTE_FRAMEWORK=pytorch,jax #optionally set framework, currently only support pytorch and jax; if not set will try to detect installed frameworks
   export PYTORCH_ROCM_ARCH=gfx942 # CK fused attn only support MI200 and MI300 and fp8 features are only supported on MI300
   pip install .
