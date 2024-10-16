@@ -7,11 +7,11 @@ import triton.language as tl
 def is_fp8_dtype(dtype):
     return dtype in (tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2)
 
-def reinterpret_as_fp8_tensor(a: torch.Tensor, dtype: tex.DType):
+def get_triton_dtype(dtype: tex.DType):
     if dtype == tex.DType.kFloat8E4M3:
-        return a.view(dtype=torch.float8_e4m3fnuz)
+        return tl.float8e4b8
     if dtype == tex.DType.kFloat8E5M2:
-        return a.view(dtype=torch.float8_e5m2fnuz)
+        return tl.float8e5b16
 
 def get_fp8_max(dtype):
     if dtype == tex.DType.kFloat8E4M3:
@@ -70,15 +70,10 @@ def te_cast_transpose_triton(input, input_scale, cast_out, trans_out, amax_out, 
 
     M, N = input.shape
     
-    if is_fp8_dtype(otype):
-        cast_out = reinterpret_as_fp8_tensor(cast_out, otype)
-        trans_out = reinterpret_as_fp8_tensor(trans_out, otype)
+    tl_dtype = get_triton_dtype(otype)
     
     assert trans_out.size(0) == N and trans_out.size(1) == M
     
     grid = lambda META: (triton.cdiv(M, META['BLOCK_M']) * triton.cdiv(N, META['BLOCK_N']),)
-    _transpose_triton[grid](input, cast_out, trans_out, input.stride(0), input.stride(1), trans_out.stride(0), trans_out.stride(1), M, N, input_scale, amax_out, get_fp8_max(otype), BLOCK_M=128, BLOCK_N=128, GROUP_M=8, num_warps=8)
-    cast_out = cast_out.view(dtype=torch.uint8)
-    trans_out = trans_out.view(dtype=torch.uint8)
-    return cast_out, trans_out, amax_out
+    _transpose_triton[grid](input, triton.reinterpret(cast_out, tl_dtype), triton.reinterpret(trans_out, tl_dtype), input.stride(0), input.stride(1), trans_out.stride(0), trans_out.stride(1), M, N, input_scale, amax_out, get_fp8_max(otype), BLOCK_M=128, BLOCK_N=128, GROUP_M=8, num_warps=8)
 

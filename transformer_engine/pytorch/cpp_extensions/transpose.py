@@ -37,7 +37,7 @@ def fp8_cast_transpose_fused(
 
     use_cast_transpose_triton = bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
     if use_cast_transpose_triton:
-        cast_out, transpose_out, fp8_meta_tensor.amax_history[0][fp8_tensor] = te_cast_transpose_triton(
+        te_cast_transpose_triton(
             inp,
             fp8_meta_tensor.scale[fp8_tensor],
             cast_out,
