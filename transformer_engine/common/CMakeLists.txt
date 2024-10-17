@@ -7,20 +7,23 @@
 cmake_minimum_required(VERSION 3.18)
 
 option(USE_ROCM "Use ROCm" OFF)
-option(USE_HIPBLASLT "Use HIPBLASLT" OFF)
-option(USE_ROCBLAS "Use ROCBLAS" OFF)
+option(USE_HIPBLASLT "Use HIPBLASLT" ON)
+option(USE_ROCBLAS "Use ROCBLAS" ON)
 
-if(((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) AND NOT (EXISTS "/bin/nvcc"))
-  message("AMD GPU detected.")
-  set(USE_ROCM ON)
+if(NOT USE_ROCM)
+  if(((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) AND NOT (EXISTS "/bin/nvcc"))
+    message("AMD GPU detected.")
+    set(USE_ROCM ON)
+  endif()
+endif()
+
+if (USE_ROCM)
+  if (NOT USE_HIPBLASLT AND NOT USE_ROCBLAS)
+    message(FATAL_ERROR "Need specify at least one GEMM library to use: HIPBLASLT or ROCBLAS")
+  endif()
   unset(USE_CUDA)
 else()
   set(USE_CUDA TRUE)
-endif()
-
-if (NOT USE_HIPBLASLT AND NOT USE_ROCBLAS)
-  set(USE_HIPBLASLT ON)
-  set(USE_ROCBLAS ON)
 endif()
 
 if(USE_CUDA)
@@ -216,6 +219,7 @@ else()
   else()
     # Use aotriton built during initial TE building/installation
     # When only need rebuild TE library itself
+    unset(AOTRITON_LIB CACHE)
     find_library(AOTRITON_LIB NAMES aotriton aotriton_v2 PATHS ${AOTRITON_PATH}/lib REQUIRED NO_DEFAULT_PATH)
     add_library( aotriton STATIC IMPORTED )
     set_target_properties( aotriton PROPERTIES IMPORTED_LOCATION ${AOTRITON_LIB} )
@@ -227,6 +231,7 @@ else()
   else()
     # Use CK built during initial TE building/installation
     # When only need rebuild TE library itself
+    unset(CK_FUSED_ATTN_LIB CACHE)
     find_library(CK_FUSED_ATTN_LIB NAMES ck_fused_attn PATHS ${CK_FUSED_ATTN_PATH}/lib REQUIRED NO_DEFAULT_PATH)
     add_library( ck_fused_attn STATIC IMPORTED )
     set_target_properties( ck_fused_attn PROPERTIES IMPORTED_LOCATION ${CK_FUSED_ATTN_LIB} )

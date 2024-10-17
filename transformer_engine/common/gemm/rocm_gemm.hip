@@ -1277,17 +1277,33 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   Otherwise use ROCBLAS 
 */
 
+  bool use_hipblaslt = std::getenv("NVTE_USE_HIPBLASLT") != nullptr;
+  bool use_rocblas = std::getenv("NVTE_USE_ROCBLAS") != nullptr;
+
 #if !defined(USE_HIPBLASLT) && !defined(USE_ROCBLAS)
 #error GEMM backend is not specified
+#elif !defined(USE_HIPBLASLT)
+  if (use_hipblaslt)
+  {
+    use_hipblaslt = false;
+    std::cout << "[NOTICE] hipBLASLt is not enabled, NVTE_USE_HIPBLASLT env is ignored\n";
+  }
+#elif !defined(USE_ROCBLAS)
+  if (use_rocblas)
+  {
+    use_rocblas = false;
+    std::cout << "[NOTICE] rocBLAS is not enabled, NVTE_USE_ROCBLAS env is ignored\n";
+  }
+#else
+  if (use_hipblaslt && use_rocblas)
+  {
+    use_rocblas = false;
+    std::cout << "[NOTICE] Two GEMM backend are enabled, hipBLASLt will be used\n";
+  }
 #endif
 
 #ifdef USE_HIPBLASLT
-  bool use_hipblaslt = true;
-#ifdef USE_ROCBLAS
-  use_hipblaslt = (std::getenv("NVTE_USE_HIPBLASLT") != nullptr) || (std::getenv("NVTE_USE_ROCBLAS") == nullptr);
-#endif
-
-  if (use_hipblaslt)
+  if (use_hipblaslt || !use_rocblas)
   {
     hipblaslt_gemm(inputA, inputB, outputD, inputBias, outputPreGelu, 
                  m, n, k, lda, ldb, ldd, 
