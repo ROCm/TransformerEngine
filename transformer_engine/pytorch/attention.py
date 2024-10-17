@@ -4897,9 +4897,6 @@ class DotProductAttention(TransformerEngineBaseModule):
             use_unfused_attention = True
 
             if IS_HIP_EXTENSION:
-                #TODO: rocm does not support fp8 fused attn
-                if self.fp8:
-                    use_fused_attention = False
                 #TODO: add back once rocm flash-attn is available
                 use_flash_attention = False
 
@@ -4976,7 +4973,12 @@ class DotProductAttention(TransformerEngineBaseModule):
                     "Disabling UnfusedDotProductAttention as it does not support FP8 execution."
                 )
                 use_unfused_attention = False
-
+            if IS_HIP_EXTENSION and use_fused_attention and self.fp8 and self.fp8_meta["recipe"].fp8_dpa:
+                self.logger.debug(
+                    "Disabling ROCm fused attention as it does not support FP8 execution."
+                )
+                use_fused_attention = False
+                
             # Filter: Device and dimensions.
             # FAv2 supports head_dim <= 256, and for >192 requires sm80/sm90
             # FAv2 requires head_dim % 8 == 0
