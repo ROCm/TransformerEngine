@@ -16,12 +16,12 @@
 #include <ATen/cudnn/Handle.h>
 #include <ATen/native/DispatchStub.h>
 #include <c10/macros/Macros.h>
-#include <cuda_bf16.h>
 #ifndef USE_ROCM
 #include <cublasLt.h>
 #include <cuda.h>
 #include <cudnn.h>
 #endif
+#include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 #include <torch/torch.h>

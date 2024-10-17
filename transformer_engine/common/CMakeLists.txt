@@ -63,12 +63,11 @@ else()
   add_definitions(-DNDEBUG)
   add_definitions(-DUSE_ROCM)
 
-  if(NOT DEFINED ENV{PYTORCH_ROCM_ARCH})
-    SET(TE_ROCM_ARCH gfx90a;gfx940;gfx941;gfx942)
+  if(NOT DEFINED ENV{NVTE_ROCM_ARCH})
+    SET(CMAKE_HIP_ARCHITECTURES gfx942)
   else()
-    SET(TE_ROCM_ARCH $ENV{PYTORCH_ROCM_ARCH})
+    SET(CMAKE_HIP_ARCHITECTURES $ENV{NVTE_ROCM_ARCH})
   endif()
-  SET(CMAKE_HIP_ARCHITECTURES ${TE_ROCM_ARCH})
 
   # build error will be dup-ed parallel-jobs times
   # set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -parallel-jobs=4")
@@ -83,7 +82,7 @@ set(message_line "-------------------------------------------------------------"
 message("${message_line}")
 message(STATUS "USE_ROCM ${USE_ROCM}")
 if(USE_ROCM)
-  message(STATUS "HIP_ARCHITECTURES: ${TE_ROCM_ARCH}")
+  message(STATUS "CMAKE_HIP_ARCHITECTURES: ${CMAKE_HIP_ARCHITECTURES}")
   message(STATUS "USE_HIPBLASLT ${USE_HIPBLASLT} USE_ROCBLAS ${USE_ROCBLAS}")
 endif()
 
@@ -215,6 +214,7 @@ else()
     set(AOTRITON_NO_PYTHON ON)
     set(AOTRITON_COMPRESS_KERNEL OFF)
     set(AOTRITON_NO_SHARED ON)
+    set(TARGET_GPUS "MI300X" CACHE STRING "Target arch to compile aotriton fused attn backend (use trade names)")
     add_subdirectory(../../3rdparty/aotriton ${CMAKE_CURRENT_BINARY_DIR}/aotriton)
   else()
     # Use aotriton built during initial TE building/installation
@@ -227,6 +227,7 @@ else()
   endif()
 
   if(NOT DEFINED CK_FUSED_ATTN_PATH)
+    set(CK_FUSED_ATTN_TARGET_GPUS ${CMAKE_HIP_ARCHITECTURES} CACHE STRING "Target arch to compile ck fused attn backend")
     add_subdirectory(ck_fused_attn ${CMAKE_CURRENT_BINARY_DIR}/ck_fused_attn)
   else()
     # Use CK built during initial TE building/installation

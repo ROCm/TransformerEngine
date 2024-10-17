@@ -60,9 +60,11 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("pack_softmax_descriptor", &PackCustomCallSoftmaxDescriptor);
   m.def("pack_fused_attn_descriptor", &PackCustomCallFusedAttnDescriptor);
   m.def("get_fused_attn_backend", &GetFusedAttnBackend);
-  m.def("get_device_compute_capability", &GetDeviceComputeCapability);
 #ifndef USE_ROCM
   m.def("get_cuda_version", &GetCudaRuntimeVersion);
+#endif
+  m.def("get_device_compute_capability", &GetDeviceComputeCapability);
+#ifndef USE_ROCM
   m.def("get_cublasLt_version", &cublasLtGetVersion);
 #endif
   m.def("get_dact_dbias_ct_workspace_sizes", &GetDActDBiasCastTransposeWorkspaceSizes);
