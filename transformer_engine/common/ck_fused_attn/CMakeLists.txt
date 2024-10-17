@@ -6,6 +6,8 @@ set(CMAKE_CXX_STANDARD 17)
 project(ck_fused_attn LANGUAGES HIP CXX)
 # generate ck fused attn kernels, both fwd/bwd
 
+set(CK_FUSED_ATTN_TARGET_GPUS "gfx942" CACHE STRING "Target Architecture to build ck_fused_attn backend")
+
 # remove all previously generated kernel files in gen_src
 file(REMOVE_RECURSE ${CMAKE_CURRENT_SOURCE_DIR}/gen_src)
 # create the empty gen_src again
@@ -62,6 +64,9 @@ endforeach()
 add_library(ck_fused_attn STATIC ${ck_fused_attn_SOURCES})
 set(CK_FUSED_ATTN_COMPILE_OPTIONS)
 list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -Wno-undefined-func-template -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=0 -ffast-math -fgpu-flush-denormals-to-zero -Wno-float-equal -ftemplate-backtrace-limit=0  -fPIC  -Wno-gnu-line-marker -Wunused-variable -Werror)
+foreach(rocm_arch ${CK_FUSED_ATTN_TARGET_GPUS})
+  list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS --offload-arch=${rocm_arch})
+endforeach()
 
 set(CK_INCLUDE_DIR "${__CK_SOURCE_DIR}/include")
 message(STATUS "ck_include_dir: ${CK_INCLUDE_DIR}")

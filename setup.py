@@ -55,6 +55,8 @@ def setup_common_extension() -> CMakeExtension:
     if rocm_build():
         if os.getenv("NVTE_USE_HIPBLASLT") is not None:
             cmake_flags.append("-DUSE_HIPBLASLT=ON")
+        if os.getenv("NVTE_USE_ROCBLAS") is not None:
+            cmake_flags.append("-DUSE_ROCBLAS=ON")
         if os.getenv("NVTE_AOTRITON_PATH"):
             aotriton_path = Path(os.getenv("NVTE_AOTRITON_PATH"))
             cmake_flags.append(f"-DAOTRITON_PATH={aotriton_path}")

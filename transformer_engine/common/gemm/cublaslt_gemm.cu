@@ -18,11 +18,12 @@
 #include <unordered_map>
 #include <chrono>
 #include <hipblaslt/hipblaslt.h>
-#else
+#endif
+#ifdef USE_ROCBLAS
 #define ROCBLAS_BETA_FEATURES_API 
 #include <rocblas/rocblas.h>
-#endif // #ifdef USE_HIPBLASLT
 #include <hipcub/hipcub.hpp>
+#endif
 #include <iostream>
 #include <cstdlib>
 #include <string>
@@ -53,7 +54,7 @@ typedef hipblasComputeType_t hipblasLtComputeType_t;
 #define HIPBLASLT_COMPUTE_F32 HIPBLAS_COMPUTE_32F
 #endif // #if HIP_VERSION >= 60000000
 
-hipblasltDatatype_t get_cuda_dtype(const transformer_engine::DType t) {
+hipblasltDatatype_t get_hipblaslt_dtype(const transformer_engine::DType t) {
   using namespace transformer_engine;
   switch (t) {
     case DType::kFloat16:
@@ -70,8 +71,10 @@ hipblasltDatatype_t get_cuda_dtype(const transformer_engine::DType t) {
       NVTE_ERROR("Invalid type");
   }
 }
-#else
-rocblas_datatype get_cuda_dtype(const transformer_engine::DType t) {
+#endif //USE_HIPBLASLT
+
+#ifdef USE_ROCBLAS
+rocblas_datatype get_rocblas_dtype(const transformer_engine::DType t) {
   using namespace transformer_engine;
   switch (t) {
     case DType::kFloat16:
@@ -88,8 +91,9 @@ rocblas_datatype get_cuda_dtype(const transformer_engine::DType t) {
       NVTE_ERROR("Invalid type");
   }
 }
-#endif //#ifdef USE_HIPBLASLT
-#else
+#endif // USE_ROCBLAS
+
+#else //cublas
 cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
   using namespace transformer_engine;
   switch (t) {
@@ -431,12 +435,7 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
 
   cublas_gemm(inputA, inputB, outputD,  biasTensor, outputGelu, m, n, k, lda, ldb, ldd,
 #ifdef __HIP_PLATFORM_AMD__
-#ifdef USE_HIPBLASLT
-              (transa) ? HIPBLAS_OP_T : HIPBLAS_OP_N, (transb) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
-#else
-              (transa) ? rocblas_operation_transpose : rocblas_operation_none,
-              (transb) ? rocblas_operation_transpose : rocblas_operation_none,
-#endif //USE_HIPBLASLT
+              transa, transb,
 #else
               (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N,
 #endif //__HIP_PLATFORM_AMD__
@@ -491,12 +490,7 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
 
   cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, m, n, k, lda, ldb, ldd,
 #ifdef __HIP_PLATFORM_AMD__
-#ifdef USE_HIPBLASLT
-              (transa) ? HIPBLAS_OP_T : HIPBLAS_OP_N, (transb) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
-#else
-              (transa) ? rocblas_operation_transpose : rocblas_operation_none,
-              (transb) ? rocblas_operation_transpose : rocblas_operation_none,
-#endif //USE_HIPBLASLT
+              transa, transb,
 #else
               (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N,
 #endif //__HIP_PLATFORM_AMD__
