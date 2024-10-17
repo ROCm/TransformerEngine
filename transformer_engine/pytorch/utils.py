@@ -5,9 +5,10 @@
 # See LICENSE for license information.
 
 """Utility functions for Transformer Engine modules"""
-import math
 import functools
+import math
 from typing import Any, Callable, Optional, Tuple
+
 import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine.pytorch.cpp_extensions as ext
@@ -34,10 +35,9 @@ def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
         if t is not None:
             if isinstance(t, Float8Tensor):
                 t._data.data = torch.Tensor()
-                del t
             else:
                 t.data = torch.Tensor()
-                del t
+            del t
 
 
 def get_device_compute_capability() -> Tuple[int, int]:
@@ -259,7 +259,7 @@ def is_bf16_compatible() -> None:
         return torch.cuda.get_device_capability()[0] >= 8
 
 
-@functools.cache
+@functools.lru_cache(maxsize=None)
 def get_cudnn_version() -> Tuple[int, int, int]:
     """Runtime cuDNN version (major, minor, patch)"""
     # ROCm fused attn does not use cudnn, return high numbers to avoid tests filtering out

@@ -161,7 +161,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("get_cudnn_version", &get_cudnn_version, "Get cuDNN version",
         py::call_guard<py::gil_scoped_release>());
+#endif
+  m.attr("_num_cublas_streams") = py::int_(transformer_engine::num_streams);
 
+#ifndef USE_ROCM
   // Support THD format for Context Parallel
   m.def("thd_read_half_tensor", &thd_read_half_tensor,
         "Read the first half(half_idx=0) or the second half(half_idx=1) of each sequence in a THD "
@@ -215,12 +218,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def_readwrite("scale_inv", &transformer_engine::FP8TensorMeta::scale_inv)
       .def_readwrite("amax_history", &transformer_engine::FP8TensorMeta::amax_history);
 
-	// TODO: Do we need to guard it out for ROCm?
 #ifndef USE_ROCM
-  // Communication functions to initialize Userbuffers communicators
-  // Note: Callbacks are not called, so safe to release GIL.
-  m.def("set_ubuf_bootstrap_callbacks", &ubuf::set_ubuf_bootstrap_callbacks,
+  m.def("device_supports_multicast", &ubuf::device_supports_multicast,
         py::call_guard<py::gil_scoped_release>());
+
+  m.def("ubuf_built_with_mpi", &ubuf::ubuf_built_with_mpi,
+        py::call_guard<py::gil_scoped_release>());
+
+  py::class_<ubuf::UbufBootstrapCallbacks>(m, "UbufBootstrapCallbacks")
+      .def(py::init<>(), py::call_guard<py::gil_scoped_release>())
+      .def(py::init<c10d::ProcessGroup *, c10d::ProcessGroup *>(),
+           py::call_guard<py::gil_scoped_release>());
 
   py::enum_<ubuf::UBOverlapAlgo>(m, "UbufOverlapAlgo")
       .value("BULK_OVERLAP_AG", ubuf::UBOverlapAlgo::BULK_OVERLAP_AG)
@@ -236,8 +244,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // communicator with Python functions (e.g. PyTorch distributed
   // communication)
   py::class_<ubuf::UbufCommOverlap>(m, "UbufCommOverlap")
-      .def(py::init<torch::Tensor&, int, int, int, int, int, int, int, bool, int, bool,
-                    torch::Tensor>())
+      .def(py::init<torch::Tensor &, int, int, int, int, int, int, int, int, int, int, bool, int,
+                    bool, ubuf::UbufBootstrapCallbacks &>(),
+           py::call_guard<py::gil_scoped_release>())
       .def("bulk_overlap", &ubuf::UbufCommOverlap::bulk_overlap,
            py::call_guard<py::gil_scoped_release>())
       .def("split_overlap_rs", &ubuf::UbufCommOverlap::split_overlap_rs,
@@ -261,8 +270,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // communicator with Python functions (e.g. PyTorch distributed
   // communication)
   py::class_<ubuf::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap")
-      .def(py::init<torch::Tensor&, int, int, int, int, int, int, bool, bool, int, bool, bool, bool,
-                    torch::Tensor>())
+      .def(py::init<torch::Tensor &, int, int, int, int, int, int, int, int, int, bool, bool, int,
+                    bool, bool, bool, ubuf::UbufBootstrapCallbacks &>(),
+           py::call_guard<py::gil_scoped_release>())
       .def("split_overlap_ag_p2p", &ubuf::UbufP2PCommOverlap::split_overlap_ag,
            py::call_guard<py::gil_scoped_release>())
       .def("split_overlap_rs_p2p", &ubuf::UbufP2PCommOverlap::split_overlap_rs,
@@ -327,7 +337,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .value("NVTE_NO_MASK", NVTE_Mask_Type::NVTE_NO_MASK)
       .value("NVTE_PADDING_MASK", NVTE_Mask_Type::NVTE_PADDING_MASK)
       .value("NVTE_CAUSAL_MASK", NVTE_Mask_Type::NVTE_CAUSAL_MASK)
-      .value("NVTE_PADDING_CAUSAL_MASK", NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK);
+      .value("NVTE_PADDING_CAUSAL_MASK", NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)
+      .value("NVTE_CAUSAL_BOTTOM_RIGHT_MASK", NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK)
+      .value("NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK",
+             NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
 
   py::enum_<NVTE_QKV_Layout>(m, "NVTE_QKV_Layout")
       .value("NVTE_SB3HD", NVTE_QKV_Layout::NVTE_SB3HD)

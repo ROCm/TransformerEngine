@@ -4,7 +4,7 @@
 #
 # See LICENSE for license information.
 
-cmake_minimum_required(VERSION 3.18)
+cmake_minimum_required(VERSION 3.21)
 
 option(USE_ROCM "Use ROCm" OFF)
 option(USE_HIPBLASLT "Use HIPBLASLT" ON)
@@ -37,12 +37,11 @@ if(USE_CUDA)
 
   project(transformer_engine LANGUAGES CUDA CXX)
 
-  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --threads 4")
   if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
   endif()
 
-  find_package(CUDAToolkit REQUIRED cublas nvToolsExt)
+  find_package(CUDAToolkit REQUIRED)
 
   # Check for cuDNN frontend API
   set(CUDNN_FRONTEND_INCLUDE_DIR
@@ -87,13 +86,13 @@ if(USE_ROCM)
 endif()
 
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
-
 include_directories(${PROJECT_SOURCE_DIR}/..)
 
 # Configure Transformer Engine library
 set(transformer_engine_SOURCES)
 if(USE_CUDA)
   list(APPEND transformer_engine_SOURCES
+       pycudnn.cpp
        transformer_engine.cpp
        transpose/cast_transpose.cu
        transpose/transpose.cu
@@ -198,13 +197,12 @@ target_include_directories(transformer_engine PUBLIC
 
 # Configure dependencies
 if (USE_CUDA)
+  target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
+
   target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cuda_driver
-                      CUDA::cudart
-                      CUDA::nvrtc
-                      CUDA::nvToolsExt
-                      CUDNN::cudnn)
+                      CUDA::cudart)
   target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
@@ -325,3 +323,4 @@ endif()
 
 # Install library
 install(TARGETS transformer_engine DESTINATION .)
+
