@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -10,6 +12,8 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 import torch
 from torch.nn.parameter import Parameter
 from torch.nn import init
+
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from .base import (
     get_workspace,
@@ -1536,7 +1540,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                     )
 
             # Disable bias_gelu_nvfusion for determinism checkpointing in non-reentrant mode
-            if self.bias_gelu_nvfusion and not use_reentrant_activation_recompute():
+            if ( not IS_HIP_EXTENSION
+                and self.bias_gelu_nvfusion and not use_reentrant_activation_recompute() ):
                 self.bias_gelu_nvfusion = False
 
             from ..cpu_offload import CPUOffloadEnabled

@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -696,6 +698,8 @@ def checkpoint(
 
     with _checkpoint_hook(new_frame, args, kwargs), te_forward_ctx, user_forward_ctx:
         out = function(*args, **kwargs)
+
+    _USE_REENTRANT_ACTIVATION_RECOMPUTE = True
 
     return out
 
