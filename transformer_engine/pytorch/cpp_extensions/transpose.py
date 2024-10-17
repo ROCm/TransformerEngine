@@ -4,9 +4,11 @@
 
 """Python interface for transpose extensions"""
 from typing import Optional, Tuple, Union
+import os
 import torch
 import transformer_engine_torch as tex
 from ..constants import TE_DType
+from ..cast_transpose_triton import te_cast_transpose_noop_triton
 
 
 __all__ = [
@@ -40,19 +42,33 @@ def fp8_cast_transpose_fused(
         noop_flag = torch.Tensor()
 
     if inp.nelement() > 0:
-        tex.fused_cast_transpose_noop(
-            inp,
-            noop_flag,
-            fp8_meta_tensor.scale,
-            fp8_meta_tensor.amax_history,
-            fp8_meta_tensor.scale_inv,
-            cast_out,
-            transpose_out,
-            otype,
-            scale_offset=int(fp8_tensor),
-            amax_offset=int(fp8_tensor),
-            scale_inv_offset=int(fp8_tensor),
-        )
+        use_cast_transpose_triton = bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+        if use_cast_transpose_triton:
+            te_cast_transpose_noop_triton(
+                inp,
+                noop_flag,
+                fp8_meta_tensor.scale[fp8_tensor],
+                cast_out,
+                transpose_out,
+                # TODO: Check if it is Okay to do that...
+                fp8_meta_tensor.amax_history[0][fp8_tensor],
+                #fp8_meta_tensor.scale_inv[fp8_tensor],
+                otype,
+            )
+        else:
+            tex.fused_cast_transpose_noop(
+                inp,
+                noop_flag,
+                fp8_meta_tensor.scale,
+                fp8_meta_tensor.amax_history,
+                fp8_meta_tensor.scale_inv,
+                cast_out,
+                transpose_out,
+                otype,
+                scale_offset=int(fp8_tensor),
+                amax_offset=int(fp8_tensor),
+                scale_inv_offset=int(fp8_tensor),
+            )
 
     if return_outputs:
         return cast_out, transpose_out
