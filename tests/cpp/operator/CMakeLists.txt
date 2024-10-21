@@ -11,8 +11,7 @@ list(APPEND test_cuda_sources
             test_cast_transpose_dbias.cu
             test_cast_transpose_dbias_dgelu.cu
             test_cast_transpose_dgeglu.cu
-            test_gelu.cu
-            test_geglu.cu
+            test_act.cu
             test_dgeglu.cu
             test_layernorm.cu
             test_rmsnorm.cu
@@ -56,7 +55,7 @@ else()
 endif()
 
 if(USE_CUDA)
-  list(APPEND test_operator_LINKER_LIBS CUDA::cudart GTest::gtest_main ${TE_LIB})
+  list(APPEND test_operator_LINKER_LIBS CUDA::cudart GTest::gtest_main ${TE_LIB} CUDA::nvrtc CUDNN::cudnn)
   target_link_libraries(test_operator PUBLIC ${test_operator_LINKER_LIBS})
   target_compile_options(test_operator PRIVATE -O2)
 else()

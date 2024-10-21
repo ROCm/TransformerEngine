@@ -40,6 +40,8 @@ void PopulateRngStateAsync(void *rng_state_dst,
                            cudaStream_t stream);
 #endif
 
+uint32_t GetRuntimeNumSegments(void *cu_seqlen, void *workspace, size_t len, cudaStream_t stream);
+
 class cudaDevicePropertiesManager {
  public:
   static cudaDevicePropertiesManager &Instance() {

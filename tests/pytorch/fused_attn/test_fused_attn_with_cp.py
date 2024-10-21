@@ -9,15 +9,15 @@ import pytest
 import subprocess
 from torch.cuda import device_count
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
-from test_fused_attn import (
-    ModelConfig,
-    _is_flash_attention_2_available,
+from test_fused_attn import ModelConfig
+from transformer_engine.pytorch.attention import (
+    _flash_attn_2_plus,
+    _flash_attn_2_3_plus,
 )
-if not IS_HIP_EXTENSION:
-    from transformer_engine.pytorch.utils import (
-        get_device_compute_capability,
-        get_cudnn_version,
-    )
+from transformer_engine.pytorch.utils import (
+    get_device_compute_capability,
+    get_cudnn_version,
+)
 
 model_configs_flash_attn = {
     #   test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias
@@ -38,8 +38,8 @@ def get_bash_arguments(**kwargs):
     return args
 
 
-@pytest.mark.skipif(not _is_flash_attention_2_available(), reason="Flash-attn 2.0+ is required.")
-@pytest.mark.skipif(IS_HIP_EXTENSION or get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
+@pytest.mark.skipif(not _flash_attn_2_plus, reason="Flash-attn 2.0+ is required.")
+@pytest.mark.skipif(not IS_HIP_EXTENSION and get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", ["bf16", "fp16"])
 @pytest.mark.parametrize("model", model_configs_flash_attn.keys())
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
@@ -52,7 +52,7 @@ def test_cp_with_flash_attention(dtype, model, qkv_format):
         check=True,
     )
 
-#TODO: release GQA tests once CK/AOTriton support GQA/MQA
+#TODO: release bias tests once CK/AOTriton support bias
 if IS_HIP_EXTENSION:
     model_configs_fused_attn = {
         #   test:             b,  h, hg,   d,    sq,   skv,   p,      mask,      bias
@@ -75,13 +75,15 @@ else:
     }
 
 
-@pytest.mark.skipif(not IS_HIP_EXTENSION and get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required for NVTE.")
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
 @pytest.mark.skipif(not IS_HIP_EXTENSION and get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", ["bf16", "fp16"])
 @pytest.mark.parametrize("model", model_configs_fused_attn.keys())
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd"] if IS_HIP_EXTENSION else ["bshd", "sbhd", "thd"])
 @pytest.mark.skipif(device_count() < 2, reason="multi-GPU host is required")
 def test_cp_with_fused_attention(dtype, model, qkv_format):
+    if qkv_format == "thd" and get_device_compute_capability() < (9, 0):
+        pytest.skip("THD format is only supported on sm90+.")
     subprocess.run(
         get_bash_arguments(
             dtype=dtype, model=model, qkv_format=qkv_format, kernel_backend="FusedAttention"
