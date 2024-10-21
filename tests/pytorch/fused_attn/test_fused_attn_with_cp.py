@@ -7,6 +7,7 @@
 import os
 import pytest
 import subprocess
+from torch.cuda import device_count
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from test_fused_attn import (
     ModelConfig,
@@ -42,6 +43,7 @@ def get_bash_arguments(**kwargs):
 @pytest.mark.parametrize("dtype", ["bf16", "fp16"])
 @pytest.mark.parametrize("model", model_configs_flash_attn.keys())
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
+@pytest.mark.skipif(device_count() < 2, reason="multi-GPU host is required")
 def test_cp_with_flash_attention(dtype, model, qkv_format):
     subprocess.run(
         get_bash_arguments(
@@ -78,6 +80,7 @@ else:
 @pytest.mark.parametrize("dtype", ["bf16", "fp16"])
 @pytest.mark.parametrize("model", model_configs_fused_attn.keys())
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd"] if IS_HIP_EXTENSION else ["bshd", "sbhd", "thd"])
+@pytest.mark.skipif(device_count() < 2, reason="multi-GPU host is required")
 def test_cp_with_fused_attention(dtype, model, qkv_format):
     subprocess.run(
         get_bash_arguments(
