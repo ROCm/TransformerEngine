@@ -1,6 +1,5 @@
 # Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
+# License for AMD contributions = MIT. See LICENSE for more information
 
 import os, sys
 import copy
@@ -16,6 +15,12 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from transformer_engine.pytorch.cpp_extensions import gemm
 from transformer_engine.pytorch.module.base import get_workspace
+
+
+def use_hipblaslt():
+    return (os.getenv("NVTE_USE_HIPBLASLT") is not None
+            or os.getenv("NVTE_USE_ROCBLAS") is None )
+
 
 storage_fname = "te_algo"
 
@@ -52,7 +57,7 @@ def write_storage(fname, head, data):
         writer.writerows(data)
 
 
-@pytest.mark.skipif(os.getenv("NVTE_USE_HIPBLASLT") is None, reason="Autotune requires hipBLASLt")
+@pytest.mark.skipif(not use_hipblaslt(), reason="Autotune requires hipBLASLt")
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="Autotune requires ROCm TE")
 def test_gemm_autotune():
     storage_dir = tempfile.mkdtemp();
@@ -81,7 +86,7 @@ def test_gemm_autotune():
         assert len(algos)==2, "Expected 2 cached records"
         assert algo0 == algos[1], "Invalid algo"
 
-        #Adjust sorkspace size
+        #Adjust workspace size
         ws_max = int(algos[0]["ws_max"])
         if (ws_max > 0):
             algos=[copy.copy(algo0)]
