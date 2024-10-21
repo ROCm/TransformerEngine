@@ -23,6 +23,7 @@ from transformer_engine.pytorch.utils import (
     is_bf16_compatible,
 )
 if IS_HIP_EXTENSION:
+    from functools import lru_cache
     from transformer_engine.pytorch.utils import is_mi200
 
 from transformer_engine.pytorch import (
@@ -53,6 +54,11 @@ torch.cuda.manual_seed(seed)
 _cpu_rng_state = torch.get_rng_state()
 _cuda_rng_state = torch.cuda.get_rng_state()
 
+if IS_HIP_EXTENSION:
+    @lru_cache(maxsize=1)
+    def use_hipblaslt() -> bool:
+        return (os.getenv("NVTE_USE_HIPBLASLT") is not None
+                or os.getenv("NVTE_USE_ROCBLAS") is None )
 
 class ModelConfig:
     def __init__(self, hidden_size, eps, num_attention_heads, embed, num_layers, seq_len):
@@ -760,10 +766,9 @@ def test_gpt_checkpointing(dtype, bs, model):
     tols = dtype_tols(dtype)
     if dtype in (torch.float16, torch.bfloat16):
         tols.update(dict(rtol=2e-2, atol=2e-3))
-    if IS_HIP_EXTENSION: 
-        use_hipblaslt = (os.getenv("NVTE_USE_HIPBLASLT") is not None)
+    if IS_HIP_EXTENSION:
         tols.update(rocm_attn_tols())
-        if len(tols) == 0 and not use_hipblaslt: 
+        if len(tols) == 0 and not use_hipblaslt():
             # Relax to all close for rocm. We don't have bit-to-bit reproducibility
             # when running rocblas path mainly due to the usage of atomics
             # Need to check whether hipBlasLt path has reproducibility
@@ -1593,11 +1598,10 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     # to act fancy)
     torch.manual_seed(0)
     y_bshd = block_bshd(x_bshd)
-    
+
     # TODO: wait for the full determinism fix from hipblaslt
     if IS_HIP_EXTENSION:
-        use_hipblaslt = (os.getenv("NVTE_USE_HIPBLASLT") is not None)
-        if use_hipblaslt: 
+        if use_hipblaslt():
             torch.testing.assert_close(y_bshd, y_sbhd.transpose(0, 1).contiguous())
         else:
             assert torch.equal(y_bshd, y_sbhd.transpose(0, 1).contiguous()), "Tensors are not equal"
