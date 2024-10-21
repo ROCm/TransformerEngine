@@ -8,7 +8,7 @@ import os
 import torch
 import transformer_engine_torch as tex
 from ..constants import TE_DType
-from ..cast_transpose_triton import te_cast_transpose_noop_triton
+from ..cast_transpose_triton import te_cast_transpose_noop_triton, te_cast_transpose_dbias_triton
 
 
 __all__ = [
@@ -82,16 +82,27 @@ def fp8_cast_transpose_bgrad_fused(
     otype: tex.DType,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Cast + Transpose + BGRAD with FP8 output"""
-    return tex.fused_cast_transpose_bgrad(
-        inp,
-        fp8_meta_tensor.scale,
-        fp8_meta_tensor.amax_history,
-        fp8_meta_tensor.scale_inv,
-        otype,
-        scale_offset=int(fp8_tensor),
-        amax_offset=int(fp8_tensor),
-        scale_inv_offset=int(fp8_tensor),
-    )
+    use_cast_transpose_triton = bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+    if use_cast_transpose_triton:
+        return te_cast_transpose_dbias_triton(
+            inp,
+            fp8_meta_tensor.scale[fp8_tensor],
+            # TODO: Check if it is Okay to do that...
+            fp8_meta_tensor.amax_history[0][fp8_tensor],
+            #fp8_meta_tensor.scale_inv[fp8_tensor],
+            otype,
+        )
+    else:
+        return tex.fused_cast_transpose_bgrad(
+            inp,
+            fp8_meta_tensor.scale,
+            fp8_meta_tensor.amax_history,
+            fp8_meta_tensor.scale_inv,
+            otype,
+            scale_offset=int(fp8_tensor),
+            amax_offset=int(fp8_tensor),
+            scale_inv_offset=int(fp8_tensor),
+        )
 
 
 def fp8_transpose_bgrad_fused(
