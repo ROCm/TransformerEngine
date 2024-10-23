@@ -13,6 +13,12 @@ def get_triton_dtype(dtype: tex.DType):
     if dtype == tex.DType.kFloat8E5M2:
         return tl.float8e5b16
 
+def get_te_dtype(dtype):
+    if dtype == torch.float8_e4m3fnuz:
+        return tex.DType.kFloat8E4M3
+    if dtype == torch.float8_e5m2fnuz:
+        return tex.DType.kFloat8E5M2
+
 def get_fp8_max(dtype: tex.DType):
     if dtype == tex.DType.kFloat8E4M3:
         return 240.0
@@ -171,8 +177,8 @@ def _reduce_bias_triton(A, out, stride_am, stride_an, M, N, BLOCK_M: tl.constexp
     tl.store(out, dbias_reg, mask=(rn<N))
 
 @torch.compile
-def reduce_dbias_kernel(partial_dbias):
-    return partial_dbias.to(torch.float32).sum(axis=0).to(torch.float16)
+def reduce_dbias_kernel(partial_dbias, dtype):
+    return partial_dbias.to(torch.float32).sum(axis=0).to(dtype)
 
 def te_cast_transpose_dbias_triton(input, input_scale, amax_out, otype):
     M, N = input.shape
@@ -200,7 +206,7 @@ def te_cast_transpose_dbias_triton(input, input_scale, amax_out, otype):
 
     grid2 = lambda META: (triton.cdiv(N, META['BLOCK_N']),)
     _reduce_bias_triton[grid2](partial_dbias, dbias_out, partial_dbias.stride(0), partial_dbias.stride(1), triton.cdiv(M, block_m_1), N)
-    dbias_out = reduce_dbias_kernel(partial_dbias[0:triton.cdiv(M, block_m_1)])
+    dbias_out = reduce_dbias_kernel(partial_dbias[0:triton.cdiv(M, block_m_1)], input.dtype)
     #dbias_out = partial_dbias[0:triton.cdiv(M, block_m_1)].to(torch.float32).sum(axis=0).to(torch.float16)
     return dbias_out, cast_out, trans_out
 
