@@ -28,7 +28,134 @@ def get_fp8_max(dtype: tex.DType):
 ##########################################
 #### cast_transpose
 ##########################################
+def get_hip_autotune_config():
+    return [
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'waves_per_eu': 2}, num_warps=4,num_stages=2),
+        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'waves_per_eu': 2}, num_warps=8, num_stages=2),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'waves_per_eu': 2}, num_warps=8, num_stages=2),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'waves_per_eu': 3}, num_warps=4, num_stages=2),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'waves_per_eu': 8}, num_warps=4, num_stages=2),
+        
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'waves_per_eu': 2}, num_warps=8, num_stages=3),            
+        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'waves_per_eu': 2}, num_warps=8, num_stages=3),         
+        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 64, 'waves_per_eu': 4}, num_warps=4, num_stages=4),          
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'waves_per_eu': 2}, num_warps=4, num_stages=4),            
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'waves_per_eu': 2}, num_warps=4, num_stages=4),           
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'waves_per_eu': 3}, num_warps=4, num_stages=4),          
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'waves_per_eu': 3}, num_warps=4, num_stages=4),    
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'waves_per_eu': 8}, num_warps=2, num_stages=2),       
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'waves_per_eu': 3}, num_warps=1, num_stages=8),
+        triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 16, 'waves_per_eu': 8}, num_warps=1, num_stages=8),
 
+
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'waves_per_eu': 8}, num_warps=8, num_stages=8),                 
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'waves_per_eu': 8}, num_warps=8, num_stages=8),           
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'waves_per_eu': 8}, num_warps=8, num_stages=8),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'waves_per_eu': 3}, num_warps=8, num_stages=8), 
+        triton.Config({'BLOCK_SIZE_M': 8, 'BLOCK_SIZE_N': 8,  'waves_per_eu': 8}, num_warps=8, num_stages=8),
+        triton.Config({'BLOCK_SIZE_M': 8, 'BLOCK_SIZE_N': 8,  'waves_per_eu': 8}, num_warps=4, num_stages=2),
+        triton.Config({'BLOCK_SIZE_M': 8, 'BLOCK_SIZE_N': 8,  'waves_per_eu': 8}, num_warps=1, num_stages=4),
+    ]
+
+def get_autotune_config():
+    #if is_cuda():
+    #    return get_cuda_autotune_config()
+    #else:
+    return get_hip_autotune_config()
+
+
+# `triton.jit`'ed functions can be auto-tuned by using the `triton.autotune` decorator, which consumes:
+#   - A list of `triton.Config` objects that define different configurations of
+#       meta-parameters (e.g., `BLOCK_SIZE_M`) and compilation options (e.g., `num_warps`) to try
+#   - An auto-tuning *key* whose change in values will trigger evaluation of all the
+#       provided configs
+@triton.autotune(
+    configs=get_autotune_config(),
+    key=['M', 'N'],
+)  
+ 
+
+
+@triton.jit
+def cast_transpose_kernel(
+        noop_flag,
+        input_ptr,
+        scale_ptr,
+        output_c_ptr,
+        output_t_ptr,
+        amax_ptr,
+        M, N,
+        stride_input,
+        stride_output_c,
+        stride_output_t,
+        fp8_max: tl.constexpr, 
+        use_noop: tl.constexpr, 
+        BLOCK_SIZE_M: tl.constexpr, 
+        BLOCK_SIZE_N: tl.constexpr
+):
+    """Kernel for casting and transposing a tensor."""
+    if use_noop:
+        noop = tl.load(noop_ptr)
+        if noop == 1.0:
+            return
+
+    pid_m = tl.program_id(axis=0)
+    pid_n = tl.program_id(axis=1)
+    
+    offsets_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offsets_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+
+    mask_m = offsets_m[:, None] < M
+    mask_n = offsets_n[None, :] < N
+
+    mask_tm = offsets_m[None, :] < M
+    mask_tn = offsets_n[:, None] < N
+
+    input_ptrs = input_ptr + offsets_m[:, None] * stride_input + offsets_n[None, :] 
+    
+    input_ = tl.load(input_ptrs, mask=mask_m & mask_n)
+    scale = tl.load(scale_ptr)
+    input_ = input_.to(tl.float32)
+    output_c = input_ * scale
+   
+    output_c = tl.clamp(output_c, -fp8_max, fp8_max)
+    output_c = tl.cast(output_c, output_c_ptr.type.element_ty) 
+    tl.store(output_c_ptr + offsets_m[:, None] * stride_output_c + offsets_n[None, :], output_c, mask=mask_m & mask_n)
+
+    output_t = output_c.trans()
+   
+    tl.store(output_t_ptr + offsets_n[:, None] * stride_output_t + offsets_m[None, :] , output_t, mask=mask_tn & mask_tm)
+    amax = tl.max(tl.abs(input_))
+    tl.atomic_max(amax_ptr, amax, sem='relaxed')
+    #tl.store(output_t_ptr + offsets_n[None, :] * stride_output_t + offsets_m[:, None] , output_c, mask=mask_n & mask_m)
+    
+dtype_map = {
+        torch.float32: tl.float32,
+        torch.float16: tl.float16,
+        torch.bfloat16: tl.bfloat16,
+        torch.float8_e5m2fnuz: tl.float8e5b16,
+        torch.float8_e4m3fnuz: tl.float8e4b8
+    }
+
+def te_cast_transpose_noop_triton(input, noop_flag, input_scale, cast_out, trans_out, amax_out, otype):
+
+    M, N = input.shape
+    
+    tl_dtype = get_triton_dtype(otype)
+    
+    assert trans_out.size(0) == N and trans_out.size(1) == M
+
+    if noop_flag.nelement() > 0:
+        use_noop = True
+    else:
+        use_noop = False
+    
+    grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']), triton.cdiv(N, META['BLOCK_SIZE_N']))
+    cast_transpose_kernel[grid](noop_flag, input, input_scale, triton.reinterpret(cast_out, tl_dtype), triton.reinterpret(trans_out, tl_dtype), amax_out, M, N, input.stride(0), cast_out.stride(0), trans_out.stride(0), get_fp8_max(otype), use_noop)
+    #grid = lambda META: (triton.cdiv(M, META['BLOCK_M']) * triton.cdiv(N, META['BLOCK_N']),)
+    #_cast_transpose_triton[grid](input, noop_flag, triton.reinterpret(cast_out, tl_dtype), triton.reinterpret(trans_out, tl_dtype), input.stride(0), input.stride(1), trans_out.stride(0), trans_out.stride(1), M, N, input_scale, amax_out, get_fp8_max(otype), use_noop)
+  
+'''
 @triton.autotune(
         configs=[
         triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64, 'GROUP_M': 1}, num_warps=4),
@@ -94,6 +221,7 @@ def te_cast_transpose_noop_triton(input, noop_flag, input_scale, cast_out, trans
     
     grid = lambda META: (triton.cdiv(M, META['BLOCK_M']) * triton.cdiv(N, META['BLOCK_N']),)
     _cast_transpose_triton[grid](input, noop_flag, triton.reinterpret(cast_out, tl_dtype), triton.reinterpret(trans_out, tl_dtype), input.stride(0), input.stride(1), trans_out.stride(0), trans_out.stride(1), M, N, input_scale, amax_out, get_fp8_max(otype), use_noop)
+'''
 
 ##########################################
 #### cast_transpose_dbias

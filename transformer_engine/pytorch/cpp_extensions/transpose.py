@@ -41,6 +41,9 @@ def fp8_cast_transpose_fused(
     if noop_flag is None:
         noop_flag = torch.Tensor()
 
+    if noop_flag.nelement() > 0:
+        print('noop_flag=1')
+
     if inp.nelement() > 0:
         use_cast_transpose_triton = bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
         if use_cast_transpose_triton:
@@ -83,7 +86,7 @@ def fp8_cast_transpose_bgrad_fused(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Cast + Transpose + BGRAD with FP8 output"""
     use_cast_transpose_triton = bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
-    if use_cast_transpose_triton:
+    if not use_cast_transpose_triton:
         return te_cast_transpose_dbias_triton(
             inp,
             fp8_meta_tensor.scale[fp8_tensor],
