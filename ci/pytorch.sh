@@ -30,8 +30,45 @@ run_3() {
     pytest "$TEST_DIR/$@" || test_run_error
 }
 
+run_test_config(){
+    echo ====== Run with GEMM backend: $_gemm and Fused attention backend: $_fus_attn =====
+    if [ $_gemm != "rocblas" ]; then
+        run_1 test_cuda_graphs.py
+        _graph_filter=""
+    else
+        _graph_filter="not graph"
+    fi
+    run_1 test_deferred_init.py
+    run_1 test_float8tensor.py
+    run_1 test_fused_optimizer.py
+    run_1 test_fused_rope.py
+    run_1 test_gqa.py
+    run_1 test_jit.py
+    run_1 test_multi_tensor.py
+    run_1 test_numerics.py -k "$_graph_filter"
+    run_3 test_onnx_export.py
+    run_1 test_recipe.py
+    run_1 test_sanity.py -k "$_graph_filter"
+    run_1 test_torch_save_load.py
+    if [ $_fus_attn != "unfused" ]; then
+        run_1 fused_attn/test_fused_attn.py
+        run_1 fused_attn/test_fused_attn_with_cp.py
+    fi
+}
+
+# Single config mode, run it and return result
+if [ -n "$SINGLE_CONFIG" ]; then
+    _gemm=`echo $SINGLE_CONFIG | cut -d- -f1`
+    _fus_attn=`echo $SINGLE_CONFIG | cut -d- -f2`
+    configure_gemm_env $_gemm && configure_fused_attn_env $_fus_attn && run_test_config
+    return_run_results
+    exit $?
+fi
+
+#Master script mode: prepare testing prerequisites first
 echo "Started with TEST_LEVEL=$TEST_LEVEL at `date`"
 install_prerequisites
+init_test_jobs
 
 for _gemm in hipblaslt rocblas; do
     configure_gemm_env $_gemm || continue
@@ -51,31 +88,14 @@ for _gemm in hipblaslt rocblas; do
             test $_gemm = "hipblaslt" -a $_fus_attn = "auto" && continue
         fi
 
-        echo ====== Run with GEMM backend: $_gemm and Fused attention backend: $_fus_attn =====
 
-        if [ $_gemm != "rocblas" ]; then
-            run_1 test_cuda_graphs.py
-            _graph_filter=""
+        if [ -n "$TEST_JOBS_MODE" ]; then
+            run_test_job "$_gemm-$_fus_attn"
         else
-            _graph_filter="not graph"
-        fi
-        run_1 test_deferred_init.py
-        run_1 test_float8tensor.py
-        run_1 test_fused_optimizer.py
-        run_1 test_fused_rope.py
-        run_1 test_gqa.py
-        run_1 test_jit.py
-        run_1 test_multi_tensor.py
-        run_1 test_numerics.py -k "$_graph_filter"
-        run_3 test_onnx_export.py
-        run_1 test_recipe.py
-        run_1 test_sanity.py -k "$_graph_filter"
-        run_1 test_torch_save_load.py
-        if [ $_fus_attn != "unfused" ]; then
-            run_1 fused_attn/test_fused_attn.py
-            run_1 fused_attn/test_fused_attn_with_cp.py
+            run_test_config
         fi
     done
 done
 
+test -n "$TEST_JOBS_MODE" && finish_test_jobs
 return_run_results

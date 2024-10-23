@@ -59,20 +59,7 @@ run_1() {
     pytest "$TEST_DIR/$@" || test_run_error
 }
 
-echo "Started with TEST_LEVEL=$TEST_LEVEL at `date`"
-install_prerequisites
-
-for _fus_attn in auto ck aotriton unfused; do
-    configure_fused_attn_env $_fus_attn || continue
-
-    #On basic (1) level tests are run with ck/aotriton/unfused
-    #On full (3) level they are run with auto/aotriton/unfused
-    if [ $TEST_LEVEL -ge 3 ]; then
-        test $_fus_attn = "ck" && continue
-    else
-        test $_fus_attn = "auto" && continue
-    fi
-
+run_test_config() {
     run_1 test_custom_call_compute.py
     run_1 test_distributed_fused_attn.py
     run_1 test_distributed_layernorm.py
@@ -88,6 +75,38 @@ for _fus_attn in auto ck aotriton unfused; do
     fi
     run_1 test_sharding.py
     run_1 test_softmax.py
+}
+
+# Single config mode, run it synchroniously and return result
+if [ -n "$SINGLE_CONFIG" ]; then
+    _fus_attn="$SINGLE_CONFIG"
+    configure_fused_attn_env $_fus_attn && run_test_config
+    return_run_results
+    exit $?
+fi
+
+#Master script mode: prepares testing prerequisites
+echo "Started with TEST_LEVEL=$TEST_LEVEL at `date`"
+install_prerequisites
+init_test_jobs
+
+for _fus_attn in auto ck aotriton unfused; do
+    configure_fused_attn_env $_fus_attn || continue
+
+    #On basic (1) level tests are run with ck/aotriton/unfused
+    #On full (3) level they are run with auto/aotriton/unfused
+    if [ $TEST_LEVEL -ge 3 ]; then
+        test $_fus_attn = "ck" && continue
+    else
+        test $_fus_attn = "auto" && continue
+    fi
+
+    if [ -n "$TEST_JOBS_MODE" ]; then
+        run_test_job "$_fus_attn"
+    else
+        run_test_config
+    fi
 done
 
+test -n "$TEST_JOBS_MODE" && finish_test_jobs
 return_run_results

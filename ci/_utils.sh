@@ -10,6 +10,8 @@ test $? -ne 0 && REALPATH=echo
 TEST_DIR=${TE_PATH}tests/
 
 : ${TEST_LEVEL:=99} #Run all tests by default
+TEST_JOBS_MODE=""
+
 _script_error_count=0
 _run_error_count=0
 
@@ -76,4 +78,54 @@ configure_fused_attn_env() {
 
 check_level() {
     test $TEST_LEVEL -ge $1
+}
+
+init_test_jobs() {
+    test -z "$SINGLE_CONFIG" || return
+    : ${TEST_JOBS:=0} #Number of test configurations running in parallel
+    test $TEST_JOBS -gt 0 || return
+    _JOB_CNT=$((TEST_JOBS-1))
+    : ${WAIT_POLL:=60} #Job count polling interval when cannot use wait
+    set -m
+    _TEST_JOB_DIR=`mktemp -d`
+    test -d "$_TEST_JOB_DIR" || exit 1
+    _TEST_CONFIG_LIST=""
+    TEST_JOBS_MODE=1
+    echo "Init test jobs: TEST_JOBS=$TEST_JOBS WAIT_POLL=$WAIT_POLL at `date`"
+}
+
+wait_for_jobs_count() {
+    jobs > "$_TEST_JOB_DIR/jobs.lst"
+    _cnt=`grep Running "$_TEST_JOB_DIR/jobs.lst" | wc -l`
+    while [ $_cnt -gt $1 ]; do
+        sleep "$WAIT_POLL"
+        jobs > "$_TEST_JOB_DIR/jobs.lst"
+        _cnt=`grep Running "$_TEST_JOB_DIR/jobs.lst" | wc -l`
+    done
+}
+
+run_test_job() {
+    test -n "$TEST_JOBS_MODE" || return 1
+    wait_for_jobs_count $_JOB_CNT
+    echo "***** Run job for test config $1 at `date` *****"
+    (SINGLE_CONFIG="$1" TEST_LEVEL=$TEST_LEVEL $0; echo RC=$?) > "$_TEST_JOB_DIR/$1.log" 2>&1 &
+    _TEST_CONFIG_LIST="$_TEST_CONFIG_LIST $1"
+}
+
+finish_test_jobs() {
+    test -n "$TEST_JOBS_MODE" || return 1
+    TEST_JOBS_MODE=""
+    wait > /dev/null; jobs > /dev/null
+    echo "All test jobs completed at `date`"
+    for _config in $_TEST_CONFIG_LIST; do
+        rc=`tail -1 "$_TEST_JOB_DIR/$_config.log"`
+        if [ "$rc" != "RC=0" ]; then
+            echo "Test config $_config finished with error $rc" >&2
+            test_run_error
+        fi
+        echo "##### $_config log begin #####"
+        cat "$_TEST_JOB_DIR/$_config.log"
+        echo "##### $_config log end #####"
+    done
+    rm -rf "$_TEST_JOB_DIR"
 }
