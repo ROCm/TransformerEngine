@@ -9,6 +9,15 @@ DIR=`dirname $0`
 
 TEST_DIR=${TE_PATH}tests/pytorch
 
+install_prerequisites() {
+    pip install numpy==1.22.4 onnx onnxruntime
+    rc=$?
+    if [ $rc -ne 0 ]; then
+        script_error "Failed to install test prerequisites"
+        exit $rc
+    fi
+}
+
 run_1() {
     check_level 1 || return
     echo "Run [$_gemm, $_fus_attn] $@"
@@ -20,6 +29,9 @@ run_3() {
     echo "Run [$_gemm, $_fus_attn] $@"
     pytest "$TEST_DIR/$@" || test_run_error
 }
+
+echo "Started with TEST_LEVEL=$TEST_LEVEL at `date`"
+install_prerequisites
 
 for _gemm in hipblaslt rocblas; do
     configure_gemm_env $_gemm || continue

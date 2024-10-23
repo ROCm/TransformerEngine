@@ -7,6 +7,50 @@ DIR=`dirname $0`
 
 . $DIR/_utils.sh
 
+install_praxis() {
+    git clone https://github.com/google/praxis.git && cd praxis || return $?
+    git checkout $_praxis_commit || return $?
+    sed -i -e 's/^flax/#flax/;s/^jax /#jax /;s/^opt/#opt/;s/^tensorflow/#tensorflow/' requirements.in || return $?
+    pip install . --log build.log
+    rc=$?
+    if [ $rc -ne 0 ]; then
+        script_error "Failed to install praxis from sources"
+        cat build.log
+        return $rc
+    fi
+}
+
+install_prerequisites() {
+    _praxis_commit="3f4cbb4bcda366db"
+    _typing_exttensions_ver="4.11.0"
+    pip show jaxlib | grep Version | grep -q 0.4.23
+    if [ $? -eq 0 ]; then
+        echo "JAX lib 0.4.23 is detected"
+        _praxis_commit="2ebe1cf6a3d89"
+        _typing_exttensions_ver="4.6.1"
+    fi
+
+    pip show praxis >/dev/null 2>&1
+    if [ $? -eq 0 ]; then
+        echo "Pre-installed Praxis is detected"
+    else
+        _tmp_dir=`mktemp -d`
+        _curr_dir=`pwd`
+        cd "$_tmp_dir" || exit $?
+        install_praxis; rc=$?
+        cd "$_curr_dir"
+        rm -rf $_tmp_dir
+        test $rc -eq 0 || exit $rc
+    fi
+
+    pip install ml-dtypes==0.2.0 typing_extensions==$_typing_exttensions_ver
+    rc=$?
+    if [ $rc -ne 0 ]; then
+        script_error "Failed to install test prerequisites"
+        exit $rc
+    fi
+}
+
 TEST_DIR=${TE_PATH}tests/jax
 
 run_1() {
@@ -14,6 +58,9 @@ run_1() {
     echo "Run [$_fus_attn] $*"
     pytest "$TEST_DIR/$@" || test_run_error
 }
+
+echo "Started with TEST_LEVEL=$TEST_LEVEL at `date`"
+install_prerequisites
 
 for _fus_attn in auto ck aotriton unfused; do
     configure_fused_attn_env $_fus_attn || continue

@@ -74,7 +74,6 @@ configure_fused_attn_env() {
     return 0
 }
 
-check_level()
-{
+check_level() {
     test $TEST_LEVEL -ge $1
 }
