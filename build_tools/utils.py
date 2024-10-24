@@ -166,16 +166,16 @@ def found_pybind11() -> bool:
 @functools.lru_cache(maxsize=None)
 def rocm_build() -> bool:
     """ ROCm build should be performed if:
-    - It is configured with NVTE_USE_ROCM env
+    - It is configured with NVTE_USE_ROCM=1 env
       OR:
-    - HIP compiler is found and CUDA on is not
+    - HIP compiler is found and CUDA one is not
     """
-    if os.getenv("NVTE_USE_ROCM"):
+    if bool(int(os.getenv("NVTE_USE_ROCM", "0"))):
         return True
 
     try:
         cuda_path()
-        return True
+        return False
     except FileNotFoundError:
         pass
 
