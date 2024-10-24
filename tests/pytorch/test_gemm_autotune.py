@@ -38,7 +38,8 @@ def analyse_storage(fname):
         reader = csv.DictReader(ifile)
         next(reader)
         head = reader.fieldnames
-    assert "m" in head and "algo_id" in head and "ws_max" in head, "Invalid CSV format"
+    assert ("m" in head and "algo_id" in head and  "ws_min" in head and "ws_max" in head
+            and "aidx" in head), "Invalid CSV format"
     return head
 
 def read_storage(fname):
@@ -87,7 +88,7 @@ def test_gemm_autotune():
         assert algo0 == algos[1], "Invalid algo"
 
         #Adjust workspace size
-        ws_max = int(algos[0]["ws_max"])
+        ws_max = int(algo0["ws_max"])
         if (ws_max > 0):
             algos=[copy.copy(algo0)]
             algos[0]["ws_max"] = str(ws_max - 1) # decrease WS range should restore size
@@ -103,24 +104,30 @@ def test_gemm_autotune():
         else:
             warnings.warn("Cached algo Workspace size is 0")
 
+        #Modify algo index
+        algo_index = int(algo0["aidx"])
+        algos=[copy.copy(algo0)]
+        algos[0]["aidx"] = str(algo_index + 1);
+        write_storage(fname, head, algos)
+        subprocess.run(run_args)
+        algos = read_storage(ofile)
+        assert len(algos)==1, "Expected 1 cached record"
+        assert (algo0["aidx"], algo0["algo_id"]) == (algos[0]["aidx"], algos[0]["algo_id"]), "Invalid algo IDX"
+
         # Configure autotune range so current cached algo is out of it 
         # and cache new value
         os.environ["TE_HIPBLASLT_ALGO_LOAD"] = ""
         os.environ["TE_HIPBLASLT_ALGO_SAVE"] = fname
-        os.environ["TE_HIPBLASLT_TUNING_RUN_COUNT"] = "1"
-        os.environ["TE_HIPBLASLT_ALGO_SELECTION"] = "64" 
-        os.environ["TE_HIPBLASLT_TUNING_ALGO_COUNT"] = "16"
+        os.environ["TE_HIPBLASLT_ALGO_SELECTION"] = str(algo_index + 1)
         subprocess.run(run_args)
         algos = read_storage(fname)
         assert len(algos)==1, "Expected 1 cached record"
         algo1 = copy.copy(algos[0])
         assert algo0["algo_id"] != algo1["algo_id"], "Unexpected algo ID"
 
-        #Restore autotune range begining
+        #Restore autotune range begining, the new algo should still be used
         os.environ["TE_HIPBLASLT_ALGO_LOAD"] = fname
-        del os.environ["TE_HIPBLASLT_TUNING_RUN_COUNT"]
         del os.environ["TE_HIPBLASLT_ALGO_SELECTION"]
-        del os.environ["TE_HIPBLASLT_TUNING_ALGO_COUNT"]
         subprocess.run(run_args)
         algos = read_storage(fname)
         assert len(algos)==1, "Expected 1 cached record"

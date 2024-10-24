@@ -684,11 +684,13 @@ public:
 
   struct Algo {
     std::optional<hipblasLtMatmulAlgo_t> algo;
-    std::optional<int64_t> algoId;
+    int64_t algoId;
+    int index;
     size_t ws_size_min;
     size_t ws_size_max;
-    Algo(): algo(), algoId(), ws_size_min(0), ws_size_max(0) {}
-    Algo(int64_t id, size_t ws_min, size_t ws_max): algo(), algoId(id), ws_size_min(ws_min), ws_size_max(ws_max) {}
+    Algo(): algo(), index(-1), algoId(), ws_size_min(0), ws_size_max(0) {}
+    Algo(int idx, int64_t id, size_t ws_min, size_t ws_max): algo(), index(idx), algoId(id), ws_size_min(ws_min), ws_size_max(ws_max) {}
+    inline bool hasId() { return index>=0; } const
     static inline int64_t getAlgoId(const hipblasLtMatmulAlgo_t &algo)
     {
       return *(const int64_t*)&algo;
@@ -775,7 +777,7 @@ protected:
     fs << "dev_cap" << "m" << "n"  << "k" << "trans_a" << "trans_b" 
     << "type_a" << "type_b" << "type_d" << "bias_type" 
     << "lda" << "ldb" << "ldd" << "epi" << "comp" << "scale"
-    << "ws_min" << "ws_max" << "algo_id";
+    << "ws_min" << "ws_max" << "algo_id" << "aidx";
   }
   
   void load_()
@@ -817,6 +819,7 @@ protected:
       char c;
       std::string type_a, type_b, type_d, bias_type, trans_a, trans_b, epi, comp, scale;
       int64_t algo_id;
+      int algo_idx;
       size_t ws_min, ws_max;
 
       is >> std::skipws;
@@ -844,7 +847,7 @@ protected:
       std::getline(is, epi, csv_sep);
       std::getline(is, comp, csv_sep);
       std::getline(is, scale, csv_sep);
-      is >> ws_min >> c >> ws_max >> c >> algo_id;
+      is >> ws_min >> c >> ws_max >> c >> algo_id >> c >> algo_idx;
   
       if (is.bad())
       {
@@ -879,7 +882,7 @@ protected:
           continue;
       }
 
-      d.emplace(cfg, Algo(algo_id, ws_min, ws_max));
+      d.emplace(cfg, Algo(algo_idx, algo_id, ws_min, ws_max));
     }
   }
 
@@ -944,7 +947,7 @@ protected:
       << ((cfg.bias_type == (hipblasltDatatype_t)-1) ? "-" : typeNameMapper.getName(cfg.bias_type))
       << cfg.lda << cfg.ldb << cfg.ldd << epilogueNameMapper.getName(cfg.epilogue)
       << computeNameMapper.getName(HIPBLASLT_COMPUTE_F32) << typeNameMapper.getName(HIPBLASLT_R_32F)
-      << algo.ws_size_min << algo.ws_size_max << algo.algoId.value() << csv_helper::end() << "\n";
+      << algo.ws_size_min << algo.ws_size_max << algo.algoId << algo.index << csv_helper::end() << "\n";
   }
 
 private:
@@ -1155,7 +1158,7 @@ void cublas_gemm(const Tensor *inputA,
       algoTuneCount = getIntEnv("TE_HIPBLASLT_TUNING_ALGO_COUNT", defaultAlgoCount, 1);
     }
     algoTuneCount += firstAlgo;
-    int algoTotalCount = cached_algo.algoId.has_value() ? std::max(algoTuneCount, 128) : algoTuneCount;
+    int algoTotalCount = cached_algo.hasId() ? std::max(algoTuneCount, (cached_algo.index + 1)) : algoTuneCount;
     algoArr.resize(algoTotalCount);
 
     NVTE_CHECK_CUBLAS(hipblasLtMatmulPreferenceCreate(&preference));
@@ -1171,23 +1174,31 @@ void cublas_gemm(const Tensor *inputA,
     NVTE_CHECK_CUBLAS(hipblasLtMatmulPreferenceDestroy(preference));
 
     //If cached algo exists in persistent storage we just need to find matching hipblasLtMatmulAlgo_t
-    if (cached_algo.algoId.has_value())
+    if (cached_algo.hasId())
     {
-      for (auto algo: algoArr)
+      int idx = (cached_algo.index < algoTotalCount) ? cached_algo.index : 0;
+      for (int i=0; i<algoTotalCount; i++)
       {
+        const auto &algo = algoArr[idx];
         if (algo.state == HIPBLAS_STATUS_SUCCESS)
         {
-          if (cached_algo.algoId.value() == cached_algo.getAlgoId(algo.algo))
+          if (cached_algo.algoId == cached_algo.getAlgoId(algo.algo))
           {
             cached_algo.algo = algo.algo;
-            NVTE_CHECK(algo.workspaceSize <= cached_algo.ws_size_min, "Invalid cached WS size");
+            if (algo.workspaceSize != cached_algo.ws_size_min || idx != cached_algo.index)
+            {
+              cached_algo.ws_size_min = algo.workspaceSize;
+              cached_algo.index = idx;
+              algoCache.store(gemm_cfg, cached_algo);
+            }
             break;
           }
         }
+        idx = (idx + 1) % algoTotalCount;
       }
       if (!cached_algo.algo.has_value())
       {
-        std::cout << "[WARNING] Cannot find cached algoId " << cached_algo.algoId.value() << " in hipBLASLt results" << std::endl;
+        std::cout << "[WARNING] Cannot find cached algoId " << cached_algo.algoId << " in hipBLASLt results" << std::endl;
       }
     }
 
@@ -1288,6 +1299,7 @@ void cublas_gemm(const Tensor *inputA,
         throw std::runtime_error("Unable to find any suitable algorithms");
       }
       cached_algo.algo = algoArr[bestAlgo].algo;
+      cached_algo.index = bestAlgo;
       cached_algo.algoId = cached_algo.getAlgoId(algoArr[bestAlgo].algo);
       cached_algo.ws_size_min = algoArr[bestAlgo].workspaceSize;
       cached_algo.ws_size_max = workspaceSize;
