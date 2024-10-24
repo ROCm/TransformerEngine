@@ -4,17 +4,16 @@
 #
 # See LICENSE for license information.
 
-import math
 import functools
-from importlib.metadata import version
+import logging
+import math
 import os
-from typing import Any, Dict, List, Tuple, Union
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
+from importlib.metadata import version
+from typing import Any, Dict, List, Tuple, Union, Optional
 
-from pkg_resources import packaging
 import pytest
 import torch
-import logging
 
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import TransformerLayer, fp8_autocast, fp8_model_init
@@ -22,6 +21,12 @@ from transformer_engine.pytorch.attention import (
     DotProductAttention,
     MultiheadAttention,
     RotaryPositionEmbedding,
+    get_attention_backend,
+    _flash_attn_2_plus,
+    _flash_attn_2_3_plus,
+    check_set_window_size,
+    AttentionParams,
+    _attention_backends,
 )
 from transformer_engine.pytorch.constants import TE_DType
 import transformer_engine.pytorch.cpp_extensions as ext
@@ -84,6 +89,7 @@ class ModelConfig:
         alibi_type: str = "none",
         num_layers: int = 1,
         bias_shape: str = "1hss",
+        window_size: Tuple[int, int] = (-1, -1),
     ):
         self.batch_size = batch_size
         self.num_heads = num_heads
@@ -100,142 +106,83 @@ class ModelConfig:
         self.attn_type = "self" if (max_seqlen_q == max_seqlen_kv) else "cross"
         self.num_layers = num_layers
         self.bias_shape = bias_shape
+        self.window_size = window_size
 
 
-if not IS_HIP_EXTENSION:
-    def _is_fused_attention_supported(
-        config: ModelConfig,
-        dtype: torch.dtype,
-        qkv_layout: str = "sbh3d",
-    ) -> Tuple[bool, NVTE_Fused_Attn_Backend]:
-        """Check if FusedAttention supports a model configuration"""
-        backends = []
-        os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
-        backend = tex.get_fused_attn_backend(
-            TE_DType[dtype],
-            TE_DType[dtype],
-            QKVLayout[qkv_layout],
-            AttnBiasType[config.attn_bias_type],
-            AttnMaskType[config.attn_mask_type],
-            config.dropout_p,
-            config.num_heads,
-            config.num_gqa_groups,
-            config.max_seqlen_q,
-            config.max_seqlen_kv,
-            config.head_dim,
-        )
-        if backend == FusedAttnBackend["FP8"]:
-            backends.append(backend)
-            return True, backends
-        if backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
-            backends.append(backend)
-            return True, backends
-        if backend == FusedAttnBackend["F16_max512_seqlen"]:
-            backends.append(backend)
-            os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
-            backend = tex.get_fused_attn_backend(
-                TE_DType[dtype],
-                TE_DType[dtype],
-                QKVLayout[qkv_layout],
-                AttnBiasType[config.attn_bias_type],
-                AttnMaskType[config.attn_mask_type],
-                config.dropout_p,
-                config.num_heads,
-                config.num_gqa_groups,
-                config.max_seqlen_q,
-                config.max_seqlen_kv,
-                config.head_dim,
-            )
-            if backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
-                backends.append(backend)
-            return True, backends
-        return False, backends
-else:
-    def _is_fused_attention_supported(
-        config: ModelConfig,
-        dtype: torch.dtype,
-        qkv_layout: str = "sbh3d",
-    ) -> Tuple[bool, NVTE_Fused_Attn_Backend]:
-        backend = tex.get_fused_attn_backend(
-            TE_DType[dtype],
-            TE_DType[dtype],
-            QKVLayout[qkv_layout],
-            AttnBiasType[config.attn_bias_type],
-            AttnMaskType[config.attn_mask_type],
-            config.dropout_p,
-            config.num_heads,
-            config.num_gqa_groups,
-            config.max_seqlen_q,
-            config.max_seqlen_kv,
-            config.head_dim,
-        )
-        if backend != FusedAttnBackend["No_Backend"]:
-            return True, [backend]
-        else:
-            return False, []
-
-
-@functools.cache
-def _is_flash_attention_2_available() -> bool:
-    """Check if flash-attn 2.0+ is available"""
-    if not IS_HIP_EXTENSION:
-        Version = packaging.version.Version
-        return Version(version("flash-attn")) >= Version("2")
-    else:
-        return False
-
-
-@functools.cache
-def _is_flash_attention_2_1() -> bool:
-    """Check if flash-attn 2.1+ is available"""
-    if not IS_HIP_EXTENSION:
-        Version = packaging.version.Version
-        return Version(version("flash-attn")) >= Version("2.1")
-    else:
-        return False
-
-
-@functools.cache
-def _is_flash_attention_2_3() -> bool:
-    """Check if flash-attn 2.3+ is available"""
-    if not IS_HIP_EXTENSION:
-        Version = packaging.version.Version
-        return Version(version("flash-attn")) >= Version("2.3")
-    else:
-        return False
-
-
-def _is_flash_attention_supported(config: ModelConfig) -> bool:
-    """Check if FlashAttention supports a model configuration"""
-    if not IS_HIP_EXTENSION:
-        if get_device_compute_capability() < (8, 0):
-            return False
-        if config.attn_bias_type not in ["no_bias", "alibi"]:
-            return False
-        if config.num_heads != config.num_gqa_groups and not _is_flash_attention_2_available():
-            return False
-        if "causal" in config.attn_mask_type and config.attn_type == "cross":
-            if _is_flash_attention_2_1():
-                # FAv2.1 implements causal mask for cross attention differently
-                # https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag
-                return False
-        return True
-    else:
-        return False
-
-
-def _is_unfused_attention_supported(
+def _get_attention_backends(
     config: ModelConfig,
-    qkv_format: str,
-) -> bool:
-    """Check if UnfusedDotProductAttention supports a model configuration"""
-    if "padding" in config.attn_mask_type:
-        return False
-    if "causal" in config.attn_mask_type and config.attn_type == "cross":
-        return False
-    if qkv_format == "thd":
-        return False
-    return True
+    qkv_dtype: torch.dtype,
+    qkv_layout: str,
+    window_size: Tuple[int, int] = (-1, -1),
+    pad_between_seqs: bool = False,
+    context_parallel: bool = False,
+    deterministic: bool = False,
+    fp8: bool = False,
+    fp8_meta: Optional[Dict[str, Any]] = None,
+) -> Tuple[List, List]:
+    """Check if what attention backends support a model configuration"""
+
+    os.environ["NVTE_FLASH_ATTN"] = "1" if not IS_HIP_EXTENSION else "0"
+    os.environ["NVTE_FUSED_ATTN"] = "1"
+    os.environ["NVTE_UNFUSED_ATTN"] = "1"
+    global _attention_backends
+    _attention_backends["backend_selection_requires_update"] = True
+
+    alibi_slopes_shape = None
+    if config.attn_bias_type == "alibi" and config.alibi_type == "custom":
+        if config.bias_shape == "1hss":
+            alibi_slopes_shape = [config.num_heads]
+        if config.bias_shape == "bhss":
+            alibi_slopes_shape = [config.batch_size, config.num_heads]
+
+    core_attention_bias_shape = (
+        config.bias_shape if config.attn_bias_type == "post_scale_bias" else None
+    )
+    core_attention_bias_requires_grad = False
+    # d=256 is supported by cuDNN 9.0+ for inference but not training
+    if config.attn_bias_type == "post_scale_bias" and config.head_dim <= 128:
+        core_attention_bias_requires_grad = True
+
+    fused_attn_backends = []
+    available_backends = None
+    fused_attention_backend = None
+
+    def test():
+        attention_params = AttentionParams(
+            qkv_dtype=qkv_dtype,
+            qkv_layout=qkv_layout,
+            batch_size=config.batch_size,
+            num_heads=config.num_heads,
+            num_gqa_groups=config.num_gqa_groups,
+            max_seqlen_q=config.max_seqlen_q,
+            max_seqlen_kv=config.max_seqlen_kv,
+            head_dim=config.head_dim,
+            attn_mask_type=config.attn_mask_type,
+            window_size=window_size,
+            alibi_slopes_shape=alibi_slopes_shape,
+            core_attention_bias_type=config.attn_bias_type,
+            core_attention_bias_shape=core_attention_bias_shape,
+            core_attention_bias_requires_grad=core_attention_bias_requires_grad,
+            pad_between_seqs=pad_between_seqs,
+            attention_dropout=config.dropout_p,
+            context_parallel=context_parallel,
+            deterministic=deterministic,
+            fp8=fp8,
+            fp8_meta=fp8_meta,
+        )
+        _, _, fused_attention_backend, _, available_backends = get_attention_backend(
+            attention_params
+        )
+        return available_backends, fused_attention_backend
+
+    backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"} if not IS_HIP_EXTENSION else {0: "AOTriton", 1: "CK"}
+    for i in range(len(backends)):
+        os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
+        _attention_backends["backend_selection_requires_update"] = True
+        available_backends, fused_attention_backend = test()
+        if fused_attention_backend == FusedAttnBackend[backends[i]]:
+            fused_attn_backends.append(fused_attention_backend)
+    return available_backends, fused_attn_backends
 
 
 model_configs_base = {
@@ -253,18 +200,6 @@ param_types = [torch.float16]
 if is_bf16_compatible():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 param_types_lean = [torch.bfloat16]
-
-
-def get_swa(seq_q, seq_kv, w=None):
-    """Generate a random sliding window size (left, right) if w is None,
-    and create its equivalent attention mask in [seq_q, seq_kv] shape"""
-    if w is None:
-        w = torch.randint(0, seq_kv, [2], dtype=torch.int32, device="cuda")
-    m = torch.ones(seq_q, seq_kv, dtype=torch.bool, device="cuda")
-    mu = torch.triu(m, diagonal=seq_kv - seq_q - w[0])
-    ml = torch.tril(mu, diagonal=seq_kv - seq_q + w[1])
-    ml = ~ml
-    return w, ml
 
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
@@ -294,32 +229,31 @@ def test_dot_product_attention(
     if "3" in qkv_layout and config.attn_type == "cross":
         pytest.skip("No need to test this layout for cross attention")
 
-    # Skip if only unfused backend is supported
-    qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
-    unfused_attn_supported = _is_unfused_attention_supported(config, qkv_format)
-    if not IS_HIP_EXTENSION:
-        if config.max_seqlen_q <= 512 and config.max_seqlen_kv <= 512:
-            os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
-    fused_attn_supported, fused_attn_backend = _is_fused_attention_supported(
-        config,
-        dtype,
-        qkv_layout=qkv_layout,
-    )
+    # Test backend availability
+    window_size = (-1, -1)
     if swa:
-        fused_attn_supported = False
-    flash_attn_supported = _is_flash_attention_supported(config)
-    if (len(fused_attn_backend) + flash_attn_supported + unfused_attn_supported) < 2:
-        pytest.skip("Less than two backends to compare.")
-    if qkv_format == "thd" and "padding" not in config.attn_mask_type:
-        pytest.skip("THD layout requires padding/padding_causal mask type.")
+        window_size = tuple(torch.randint(0, config.max_seqlen_kv, [2], dtype=torch.int32).tolist())
+    config.window_size = check_set_window_size(config.attn_mask_type, window_size)
+    available_backends, fused_attn_backends = _get_attention_backends(
+        config,
+        qkv_dtype=dtype,
+        qkv_layout=qkv_layout,
+        window_size=config.window_size,
+        pad_between_seqs=pad_between_seqs,
+    )
+    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+    # FlashAttention does not support pad_between_seqs, but _run_dot_product_attention
+    # mannually pads and unpads the input and output of FlashAttention for testing purposes
+    if pad_between_seqs:
+        flash_attn_supported = True
 
-    # d=256 is supported by cuDNN 9.0+ for inference but not training
+    # Skip if only unfused backend is supported
+    if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
+        pytest.skip("Less than two backends to compare.")
+
     is_training = config.head_dim <= 128
     # UnfusedDotProductAttention backend
     if unfused_attn_supported:
-        if swa:
-            attn_mask_type = config.attn_mask_type
-            config.attn_mask_type = "arbitrary"
         unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
             dtype,
             config,
@@ -327,16 +261,13 @@ def test_dot_product_attention(
             ckpt_attn,
             qkv_layout,
             workspace_opt,
-            swa,
             pad_between_seqs,
             is_training,
         )
-        if swa:
-            config.attn_mask_type = attn_mask_type
 
     # FusedAttention backend
     if fused_attn_supported:
-        if len(fused_attn_backend) == 1:
+        if len(fused_attn_backends) == 1:
             fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
                 dtype,
                 config,
@@ -344,11 +275,10 @@ def test_dot_product_attention(
                 ckpt_attn,
                 qkv_layout,
                 workspace_opt,
-                swa,
                 pad_between_seqs,
                 is_training,
             )
-        if len(fused_attn_backend) == 2:
+        if len(fused_attn_backends) == 2:
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
             fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
                 dtype,
@@ -357,7 +287,6 @@ def test_dot_product_attention(
                 ckpt_attn,
                 qkv_layout,
                 workspace_opt,
-                swa,
                 pad_between_seqs,
                 is_training,
             )
@@ -369,7 +298,6 @@ def test_dot_product_attention(
                 ckpt_attn,
                 qkv_layout,
                 workspace_opt,
-                swa,
                 pad_between_seqs,
                 is_training,
             )
@@ -383,7 +311,6 @@ def test_dot_product_attention(
             ckpt_attn,
             qkv_layout,
             workspace_opt,
-            swa,
             pad_between_seqs,
             is_training,
         )
@@ -403,7 +330,7 @@ def test_dot_product_attention(
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         for i, _ in enumerate(flash_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], **tols)
-    if fused_attn_supported and len(fused_attn_backend) == 2:
+    if fused_attn_supported and len(fused_attn_backends) == 2:
         logging.info("[test_dot_product_attention]: fused attn backend 0 vs 1")
         torch.testing.assert_close(fused_attn_fwd, fused_attn_fwd_1, **tols)
         for i, _ in enumerate(fused_attn_bwd):
@@ -433,6 +360,14 @@ model_configs_mask = {
     "mask_5_1": ModelConfig(4, 16, 16, 64, 128, 256, 0.0, "padding_causal", "no_bias"),
     "mask_6_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
     "mask_6_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
+    "mask_7_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
+    "mask_7_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "causal_bottom_right", "no_bias"),
+    "mask_8_0": ModelConfig(
+        2, 24, 24, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+    ),
+    "mask_8_1": ModelConfig(
+        1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"
+    ),
 }
 
 
@@ -540,15 +475,23 @@ def test_dpa_bias_shapes(dtype, model_configs, model):
 
 
 model_configs_swa = {
-    #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
+    #    test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
     "swa_1_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "no_mask", "no_bias"),
     "swa_1_1": ModelConfig(2, 16, 16, 64, 128, 256, 0.0, "no_mask", "no_bias"),
     "swa_1_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
     "swa_1_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"),
+    "swa_2_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "causal", "no_bias"),
+    "swa_2_1": ModelConfig(2, 16, 16, 64, 128, 256, 0.0, "causal", "no_bias"),
+    "swa_2_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "causal", "no_bias"),
+    "swa_2_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal", "no_bias"),
+    "swa_3_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "causal_bottom_right", "no_bias"),
+    "swa_3_1": ModelConfig(2, 16, 16, 64, 128, 256, 0.0, "causal_bottom_right", "no_bias"),
+    "swa_3_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
+    "swa_3_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal_bottom_right", "no_bias"),
 }
 
 
-@pytest.mark.skipif(not _is_flash_attention_2_3(), reason="Flash-attn 2.3+ is required.")
+@pytest.mark.skipif(not _flash_attn_2_3_plus, reason="Flash-attn 2.3+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_swa])
 @pytest.mark.parametrize("model", model_configs_swa.keys())
@@ -570,7 +513,7 @@ model_configs_alibi_slopes = {
 }
 
 
-@pytest.mark.skipif(not _is_flash_attention_2_3(), reason="Flash-attn 2.3+ is required.")
+@pytest.mark.skipif(not _flash_attn_2_3_plus, reason="Flash-attn 2.3+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_alibi_slopes])
 @pytest.mark.parametrize("model", model_configs_alibi_slopes.keys())
@@ -663,7 +606,6 @@ def _run_dot_product_attention(
     ckpt_attn: bool,
     qkv_layout: str,
     workspace_opt: bool,
-    swa: bool,
     pad_between_seqs: bool,
     is_training: bool,
 ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
@@ -678,6 +620,8 @@ def _run_dot_product_attention(
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1" if workspace_opt else "0"
+    global _attention_backends
+    _attention_backends["backend_selection_requires_update"] = True
 
     # Create seqlens
     qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
@@ -774,11 +718,6 @@ def _run_dot_product_attention(
                 attention_mask_q.to(device="cuda"),
                 attention_mask_kv.to(device="cuda"),
             )
-    window_size = None
-    if swa:
-        window_size, attention_mask = get_swa(config.max_seqlen_q, config.max_seqlen_kv)
-    elif "causal" in config.attn_mask_type:
-        window_size, attention_mask = (-1, 0), None
 
     alibi_slopes = None
     if config.attn_bias_type == "alibi" and config.alibi_type == "custom":
@@ -943,7 +882,7 @@ def _run_dot_product_attention(
         q,
         k,
         v,
-        window_size=window_size,
+        window_size=config.window_size,
         attention_mask=attention_mask,
         qkv_format=qkv_format,
         max_seqlen_q=config.max_seqlen_q,
@@ -1034,22 +973,21 @@ def test_transformer_layer(
     tols = dict(atol=5e-1, rtol=5e-2)
     workspace_opt = True
 
-    # Skip if only unfused backend is supported
-    if config.max_seqlen_q <= 512 and config.max_seqlen_kv <= 512:
-        os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
-
     qkv_layout="sbh3d" if fused_qkv_params else "sb3hd"
     # override the qkv_layout in mqa gqa mode in ROCm TE
     if IS_HIP_EXTENSION and model_configs[model].num_gqa_groups != model_configs[model].num_heads:
         qkv_layout = "sbhd_sbhd_sbhd"
-    fused_attn_supported, fused_attn_backend = _is_fused_attention_supported(
+
+    # Test backend availability
+    available_backends, fused_attn_backends = _get_attention_backends(
         config,
-        dtype,
+        qkv_dtype=dtype,
         qkv_layout=qkv_layout,
     )
-    flash_attn_supported = _is_flash_attention_supported(config)
-    unfused_attn_supported = _is_unfused_attention_supported(config, qkv_format)
-    if (len(fused_attn_backend) + flash_attn_supported + unfused_attn_supported) < 2:
+    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+
+    # Skip if only unfused backend is supported
+    if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
         pytest.skip("Less than two backends to compare.")
 
     # UnfusedDotProductAttention backend
@@ -1168,6 +1106,8 @@ def _run_transformer_layer(
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
+    global _attention_backends
+    _attention_backends["backend_selection_requires_update"] = True
 
     # Create input tensor
     inp = torch.randn(
@@ -1316,7 +1256,7 @@ def _rmse(a, b):
 
 
 @pytest.mark.skipif(IS_HIP_EXTENSION, reason="FP8 Fused attention is not supported on ROCm")
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 3), reason="cuDNN 8.9.3+ is required.")
+@pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.skipif(get_device_compute_capability() < (9, 0), reason="FP8 tests require Hopper+.")
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
@@ -1327,6 +1267,9 @@ def _rmse(a, b):
 def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd):
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "1"
+    os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
+    global _attention_backends
+    _attention_backends["backend_selection_requires_update"] = True
     config = model_configs_fp8_vs_f16[model]
 
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
@@ -1492,7 +1435,7 @@ def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm):
 
 
 @pytest.mark.skipif(IS_HIP_EXTENSION, reason="FP8 Fused attention is not supported on ROCm")
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 3), reason="cuDNN 8.9.3+ is required.")
+@pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.skipif(get_device_compute_capability() < (9, 0), reason="FP8 tests require Hopper+.")
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
@@ -1506,6 +1449,9 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd):
         pytest.skip("qkv_layout not applicable for MQA/GQA")
 
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
+    os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
+    global _attention_backends
+    _attention_backends["backend_selection_requires_update"] = True
 
     logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True")
     fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_dpa_fp8_vs_f16(dtype, config, True, qkv_layout)
@@ -1702,7 +1648,14 @@ models_v1 = ["fp8_3", "fp8_4", "fp8_7", "fp8_8"]
 
 
 @pytest.mark.skipif(IS_HIP_EXTENSION, reason="FP8 Fused attention is not supported on ROCm")
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 3), reason="cuDNN 8.9.3+ is required.")
+@pytest.mark.skipif(
+    (
+        get_cudnn_version() < (8, 9, 3)
+        if cudnn_frontend_version == 0
+        else get_cudnn_version() < (9, 2, 1)
+    ),
+    reason=f"""cuDNN {"8.9.3" if cudnn_frontend_version == 0 else "9.2.1"}+ is required.""",
+)
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.skipif(get_device_compute_capability() < (9, 0), reason="FP8 tests require Hopper+.")
 @pytest.mark.parametrize("dtype", param_types_fp8)
@@ -1713,6 +1666,7 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
     an FP8 MHA module, i.e. Custom_MHA_FP8(), to results from an F16 MHA
     implementation, i.e. transformer_engine.pytorch.attention.MultiHeadAttention.
     Both paths take F16 input and output. QKV layout is t3hd or bs3hd"""
+
     config = model_configs_fp8[model]
 
     fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_custom_mha_fp8(dtype, config, "FusedAttention")
@@ -1783,6 +1737,8 @@ def _run_custom_mha_fp8(dtype, config, backend):
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
+    global _attention_backends
+    _attention_backends["backend_selection_requires_update"] = True
 
     inp = 0.0001 * torch.randint(
         -100,
@@ -1836,6 +1792,8 @@ def _run_ref_mha_f16(dtype, config, backend):
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
+    global _attention_backends
+    _attention_backends["backend_selection_requires_update"] = True
 
     inp = torch.load("qkv.pt").to(device="cuda")
     inp.requires_grad = True

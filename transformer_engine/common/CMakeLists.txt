@@ -4,14 +4,23 @@
 #
 # See LICENSE for license information.
 
-cmake_minimum_required(VERSION 3.18)
+cmake_minimum_required(VERSION 3.21)
 
 option(USE_ROCM "Use ROCm" OFF)
-option(USE_HIPBLASLT "Use HIPBLASLT" OFF)
+option(USE_HIPBLASLT "Use HIPBLASLT" ON)
+option(USE_ROCBLAS "Use ROCBLAS" ON)
 
-if(((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) AND NOT (EXISTS "/bin/nvcc"))
-  message("AMD GPU detected.")
-  set(USE_ROCM ON)
+if(NOT USE_ROCM)
+  if(((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) AND NOT (EXISTS "/bin/nvcc"))
+    message("AMD GPU detected.")
+    set(USE_ROCM ON)
+  endif()
+endif()
+
+if (USE_ROCM)
+  if (NOT USE_HIPBLASLT AND NOT USE_ROCBLAS)
+    message(FATAL_ERROR "Need specify at least one GEMM library to use: HIPBLASLT or ROCBLAS")
+  endif()
   unset(USE_CUDA)
 else()
   set(USE_CUDA TRUE)
@@ -28,12 +37,11 @@ if(USE_CUDA)
 
   project(transformer_engine LANGUAGES CUDA CXX)
 
-  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --threads 4")
   if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
   endif()
 
-  find_package(CUDAToolkit REQUIRED cublas nvToolsExt)
+  find_package(CUDAToolkit REQUIRED)
 
   # Check for cuDNN frontend API
   set(CUDNN_FRONTEND_INCLUDE_DIR
@@ -54,12 +62,11 @@ else()
   add_definitions(-DNDEBUG)
   add_definitions(-DUSE_ROCM)
 
-  if(NOT DEFINED ENV{PYTORCH_ROCM_ARCH})
-    SET(TE_ROCM_ARCH gfx90a;gfx940;gfx941;gfx942)
+  if(NOT DEFINED ENV{NVTE_ROCM_ARCH})
+    SET(CMAKE_HIP_ARCHITECTURES gfx942)
   else()
-    SET(TE_ROCM_ARCH $ENV{PYTORCH_ROCM_ARCH})
+    SET(CMAKE_HIP_ARCHITECTURES $ENV{NVTE_ROCM_ARCH})
   endif()
-  SET(CMAKE_HIP_ARCHITECTURES ${TE_ROCM_ARCH})
 
   # build error will be dup-ed parallel-jobs times
   # set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -parallel-jobs=4")
@@ -74,18 +81,18 @@ set(message_line "-------------------------------------------------------------"
 message("${message_line}")
 message(STATUS "USE_ROCM ${USE_ROCM}")
 if(USE_ROCM)
-  message(STATUS "HIP_ARCHITECTURES: ${TE_ROCM_ARCH}")
-  message(STATUS "USE_HIPBLASLT ${USE_HIPBLASLT}")
+  message(STATUS "CMAKE_HIP_ARCHITECTURES: ${CMAKE_HIP_ARCHITECTURES}")
+  message(STATUS "USE_HIPBLASLT ${USE_HIPBLASLT} USE_ROCBLAS ${USE_ROCBLAS}")
 endif()
 
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
-
 include_directories(${PROJECT_SOURCE_DIR}/..)
 
 # Configure Transformer Engine library
 set(transformer_engine_SOURCES)
 if(USE_CUDA)
   list(APPEND transformer_engine_SOURCES
+       pycudnn.cpp
        transformer_engine.cpp
        transpose/cast_transpose.cu
        transpose/transpose.cu
@@ -191,13 +198,12 @@ target_include_directories(transformer_engine PUBLIC
 
 # Configure dependencies
 if (USE_CUDA)
+  target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
+
   target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cuda_driver
-                      CUDA::cudart
-                      CUDA::nvrtc
-                      CUDA::nvToolsExt
-                      CUDNN::cudnn)
+                      CUDA::cudart)
   target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
@@ -207,10 +213,12 @@ else()
     set(AOTRITON_NO_PYTHON ON)
     set(AOTRITON_COMPRESS_KERNEL OFF)
     set(AOTRITON_NO_SHARED ON)
+    set(TARGET_GPUS "MI300X" CACHE STRING "Target arch to compile aotriton fused attn backend (use trade names)")
     add_subdirectory(../../3rdparty/aotriton ${CMAKE_CURRENT_BINARY_DIR}/aotriton)
   else()
     # Use aotriton built during initial TE building/installation
     # When only need rebuild TE library itself
+    unset(AOTRITON_LIB CACHE)
     find_library(AOTRITON_LIB NAMES aotriton aotriton_v2 PATHS ${AOTRITON_PATH}/lib REQUIRED NO_DEFAULT_PATH)
     add_library( aotriton STATIC IMPORTED )
     set_target_properties( aotriton PROPERTIES IMPORTED_LOCATION ${AOTRITON_LIB} )
@@ -218,10 +226,12 @@ else()
   endif()
 
   if(NOT DEFINED CK_FUSED_ATTN_PATH)
+    set(CK_FUSED_ATTN_TARGET_GPUS ${CMAKE_HIP_ARCHITECTURES} CACHE STRING "Target arch to compile ck fused attn backend")
     add_subdirectory(ck_fused_attn ${CMAKE_CURRENT_BINARY_DIR}/ck_fused_attn)
   else()
     # Use CK built during initial TE building/installation
     # When only need rebuild TE library itself
+    unset(CK_FUSED_ATTN_LIB CACHE)
     find_library(CK_FUSED_ATTN_LIB NAMES ck_fused_attn PATHS ${CK_FUSED_ATTN_PATH}/lib REQUIRED NO_DEFAULT_PATH)
     add_library( ck_fused_attn STATIC IMPORTED )
     set_target_properties( ck_fused_attn PROPERTIES IMPORTED_LOCATION ${CK_FUSED_ATTN_LIB} )
@@ -234,8 +244,10 @@ else()
     find_package(hipblaslt)
     target_compile_definitions(transformer_engine PUBLIC USE_HIPBLASLT)
     list(APPEND transformer_engine_LINKER_LIBS roc::hipblaslt)
-  else()
+  endif()
+  if(USE_ROCBLAS)
     find_package(rocblas)
+    target_compile_definitions(transformer_engine PUBLIC USE_ROCBLAS)
     list(APPEND transformer_engine_LINKER_LIBS roc::rocblas)
   endif()
   target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS})
@@ -312,3 +324,4 @@ endif()
 
 # Install library
 install(TARGETS transformer_engine DESTINATION .)
+

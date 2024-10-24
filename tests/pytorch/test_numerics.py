@@ -23,6 +23,7 @@ from transformer_engine.pytorch.utils import (
     is_bf16_compatible,
 )
 if IS_HIP_EXTENSION:
+    from functools import lru_cache
     from transformer_engine.pytorch.utils import is_mi200
 
 from transformer_engine.pytorch import (
@@ -53,6 +54,11 @@ torch.cuda.manual_seed(seed)
 _cpu_rng_state = torch.get_rng_state()
 _cuda_rng_state = torch.cuda.get_rng_state()
 
+if IS_HIP_EXTENSION:
+    @lru_cache(maxsize=1)
+    def use_hipblaslt() -> bool:
+        return (os.getenv("NVTE_USE_HIPBLASLT") is not None
+                or os.getenv("NVTE_USE_ROCBLAS") is None )
 
 class ModelConfig:
     def __init__(self, hidden_size, eps, num_attention_heads, embed, num_layers, seq_len):
@@ -760,10 +766,9 @@ def test_gpt_checkpointing(dtype, bs, model):
     tols = dtype_tols(dtype)
     if dtype in (torch.float16, torch.bfloat16):
         tols.update(dict(rtol=2e-2, atol=2e-3))
-    if IS_HIP_EXTENSION: 
-        use_hipblaslt = (os.getenv("NVTE_USE_HIPBLASLT") is not None)
+    if IS_HIP_EXTENSION:
         tols.update(rocm_attn_tols())
-        if len(tols) == 0 and not use_hipblaslt: 
+        if len(tols) == 0 and not use_hipblaslt():
             # Relax to all close for rocm. We don't have bit-to-bit reproducibility
             # when running rocblas path mainly due to the usage of atomics
             # Need to check whether hipBlasLt path has reproducibility
@@ -1298,7 +1303,9 @@ def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, fp8=False
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("fp8", all_boolean)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
-def test_grouped_linear_accuracy(dtype, num_gemms, bs, model, fp8, fp8_model_params):
+def test_grouped_linear_accuracy(
+    dtype, num_gemms, bs, model, fp8, fp8_model_params, parallel_mode=None
+):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
@@ -1313,6 +1320,7 @@ def test_grouped_linear_accuracy(dtype, num_gemms, bs, model, fp8, fp8_model_par
             4 * config.hidden_size,
             bias=True,
             params_dtype=dtype,
+            parallel_mode=parallel_mode,
             device="cuda",
         ).eval()
         sequential_linear = torch.nn.ModuleList(
@@ -1322,6 +1330,7 @@ def test_grouped_linear_accuracy(dtype, num_gemms, bs, model, fp8, fp8_model_par
                     4 * config.hidden_size,
                     bias=True,
                     params_dtype=dtype,
+                    parallel_mode=parallel_mode,
                     device="cuda",
                 ).eval()
                 for _ in range(num_gemms)
@@ -1342,6 +1351,20 @@ def test_grouped_linear_accuracy(dtype, num_gemms, bs, model, fp8, fp8_model_par
     # Shoule be bit-wise match
     for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("parallel_mode", ["column", "row"])
+def test_grouped_linear_accuracy_parallel_mode(parallel_mode):
+    """Split the tests to reduce CI time"""
+    test_grouped_linear_accuracy(
+        dtype=torch.float32,
+        num_gemms=6,
+        bs=2,
+        model=list(model_configs.keys())[0],
+        fp8=True,
+        fp8_model_params=True,
+        parallel_mode=parallel_mode,
+    )
 
 
 def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
@@ -1593,14 +1616,13 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     # to act fancy)
     torch.manual_seed(0)
     y_bshd = block_bshd(x_bshd)
-    
+
     # TODO: wait for the full determinism fix from hipblaslt
     if IS_HIP_EXTENSION:
-        use_hipblaslt = (os.getenv("NVTE_USE_HIPBLASLT") is not None)
-        if use_hipblaslt: 
+        if use_hipblaslt():
             torch.testing.assert_close(y_bshd, y_sbhd.transpose(0, 1).contiguous())
         else:
-            torch.equal(y_bshd, y_sbhd.transpose(0, 1).contiguous())
+            assert torch.equal(y_bshd, y_sbhd.transpose(0, 1).contiguous()), "Tensors are not equal"
     else:
         # Check that results match
         torch.testing.assert_close(
@@ -1644,6 +1666,8 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
             ffn_hidden_size=4 * D,
             num_attention_heads=H,
             attn_input_format=input_format,
+            self_attn_mask_type="causal_bottom_right",
+            enc_dec_attn_mask_type="causal_bottom_right",
             layer_number=layer_number,
             attention_dropout=0.0,
             params_dtype=dtype,
@@ -1657,6 +1681,7 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
                 qkv_format=input_format,
                 layer_number=layer_number,
                 attention_dropout=0.0,
+                attn_mask_type="causal_bottom_right",
                 params_dtype=dtype,
             )
             .cuda()
@@ -1864,3 +1889,52 @@ def test_fp8_grouped_gemm(shape, fp8_dtype, accumulate):
     # should be bit-wise match
     for o, o_ref in zip(out, out_ref):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+
+def test_noncontiguous():
+    def _create2modules(m, params):
+        mod1 = m(*params)
+        mod2 = m(*params)
+        for p1, p2 in zip(mod1.parameters(), mod2.parameters()):
+            p2.data = p1.data.clone()
+
+        return mod1, mod2
+
+    def _run_module(m, inp):
+        out = m(inp)
+        out.sum().backward()
+        ret = [out]
+        if inp.grad is not None:
+            ret.append(inp.grad)
+
+        for p in m.parameters():
+            if p.requires_grad:
+                ret.append(p.grad)
+        return ret
+
+    a = torch.randn((128, 256), device="cuda", requires_grad=True)
+    a = a.T
+    assert not a.is_contiguous(), "The test is supposed to test noncontiguous input."
+
+    b = a.contiguous()
+
+    # LayerNorm
+    ln1, ln2 = _create2modules(LayerNorm, [128])
+    outT = _run_module(ln1, a)
+    out = _run_module(ln2, b)
+
+    assert_allclose(out, outT, 1e-7)
+
+    # RMSNorm
+    ln1, ln2 = _create2modules(RMSNorm, [128])
+    outT = _run_module(ln1, a)
+    out = _run_module(ln2, b)
+
+    assert_allclose(out, outT, 1e-7)
+
+    # GEMM
+    g1, g2 = _create2modules(Linear, [128, 128])
+    outT = _run_module(g1, a)
+    out = _run_module(g2, b)
+
+    assert_allclose(out, outT, 1e-7)

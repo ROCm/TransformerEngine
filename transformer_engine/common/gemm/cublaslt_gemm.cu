@@ -11,12 +11,6 @@
 #include <cublas_v2.h>
 #include <cuda.h>
 #else
-#ifdef USE_HIPBLASLT
-#include <hipblaslt/hipblaslt.h>
-#else
-#define ROCBLAS_BETA_FEATURES_API 
-#include <rocblas/rocblas.h>
-#endif // #ifdef USE_HIPBLASLT
 #include <iostream>
 #endif // #ifndef __HIP_PLATFORM_AMD__
 #include <transformer_engine/gemm.h>
@@ -29,9 +23,9 @@
 #include "../util/vectorized_pointwise.h"
 #include "../util/logging.h"
 
+#ifndef __HIP_PLATFORM_AMD__
 namespace {
 
-#ifndef __HIP_PLATFORM_AMD__
 cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
   using namespace transformer_engine;
   switch (t) {
@@ -59,41 +53,20 @@ uint32_t _getAlignment(uintptr_t address) {
     }
   }
 }
-#endif // __HIP_PLATFORM_AMD__
-
 }  // namespace
+#endif // __HIP_PLATFORM_AMD__
 
 
 namespace transformer_engine {
 
 #ifdef __HIP_PLATFORM_AMD__
-//Forward declaration. The implementation is in rocm_gemm.hip
-void cublas_gemm(const Tensor *inputA,
-                 const Tensor *inputB,
-                 Tensor *outputD,
-                 const Tensor *inputBias,
-                 Tensor *outputPreGelu,
-                 int m, int n, int k,
-                 int lda, int ldb, int ldd,
-#ifdef USE_HIPBLASLT
-                 hipblasOperation_t transa,
-                 hipblasOperation_t transb,
-#else
-                 rocblas_operation transa,
-                 rocblas_operation transb,
-#endif
-                 bool grad,
-                 void* workspace,
-                 size_t workspaceSize,
-                 bool accumulate,
-                 bool use_split_accumulator,
-                 int math_sm_count,
-                 int m_split,
-                 int n_split,
-                 bool gemm_producer,
-                 const Tensor *inputCounter,
-                 hipStream_t stream
-);
+//Forward declaration. The implementation is in rocm_gemm.cu
+void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
+                 const Tensor *inputBias, Tensor *outputPreGelu, int m, int n, int k, int lda,
+                 int ldb, int ldd, bool transa, bool transb, bool grad,
+                 void* workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator,
+                 int math_sm_count, int m_split, int n_split, bool gemm_producer,
+                 const Tensor *inputCounter, hipStream_t stream);
 #else // Use cublasLt
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, int m, int n, int k, int lda,
@@ -399,12 +372,7 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
 
   cublas_gemm(inputA, inputB, outputD,  biasTensor, outputGelu, m, n, k, lda, ldb, ldd,
 #ifdef __HIP_PLATFORM_AMD__
-#ifdef USE_HIPBLASLT
-              (transa) ? HIPBLAS_OP_T : HIPBLAS_OP_N, (transb) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
-#else
-              (transa) ? rocblas_operation_transpose : rocblas_operation_none,
-              (transb) ? rocblas_operation_transpose : rocblas_operation_none,
-#endif //USE_HIPBLASLT
+              transa, transb,
 #else
               (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N,
 #endif //__HIP_PLATFORM_AMD__
@@ -459,12 +427,7 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
 
   cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, m, n, k, lda, ldb, ldd,
 #ifdef __HIP_PLATFORM_AMD__
-#ifdef USE_HIPBLASLT
-              (transa) ? HIPBLAS_OP_T : HIPBLAS_OP_N, (transb) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
-#else
-              (transa) ? rocblas_operation_transpose : rocblas_operation_none,
-              (transb) ? rocblas_operation_transpose : rocblas_operation_none,
-#endif //USE_HIPBLASLT
+              transa, transb,
 #else
               (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N,
 #endif //__HIP_PLATFORM_AMD__
@@ -473,10 +436,10 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
               math_sm_count, m_split, n_split, gemm_producer, inputCounter, stream);
 }
 
-void nvte_multi_stream_cublas_gemm(std::vector<NVTETensor> A, std::vector<NVTETensor> B,
-                                   std::vector<NVTETensor> D, std::vector<NVTETensor> bias,
-                                   std::vector<NVTETensor> pre_gelu_out, bool transa, bool transb,
-                                   bool grad, std::vector<NVTETensor> workspace, bool accumulate,
+void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+                                   const NVTETensor *bias, NVTETensor *pre_gelu_out,
+                                   const int num_gemms, bool transa, bool transb, bool grad,
+                                   NVTETensor *workspace, bool accumulate,
                                    bool use_split_accumulator, int math_sm_count,
                                    cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_stream_cublas_gemm);
@@ -484,14 +447,14 @@ void nvte_multi_stream_cublas_gemm(std::vector<NVTETensor> A, std::vector<NVTETe
   // Inits streams and events (once, globally)
   std::call_once(init_flag, init_streams_and_events);
 
-  int num_stream_used = std::min(num_streams, static_cast<int>(A.size()));
+  int num_stream_used = std::min(num_streams, num_gemms);
   // wait for current stream to finish
   NVTE_CHECK_CUDA(cudaEventRecord(cublas_event[0], stream));
   for (int s = 0; s < num_stream_used; s++) {
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(compute_streams[s], cublas_event[0]));
   }
 
-  for (size_t i = 0; i < A.size(); i++) {
+  for (int i = 0; i < num_gemms; i++) {
     nvte_cublas_gemm(A[i], B[i], D[i], bias[i], pre_gelu_out[i], transa, transb, grad,
                      workspace[i % num_streams], accumulate, use_split_accumulator, math_sm_count,
                      compute_streams[i % num_streams]);

@@ -5,15 +5,14 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
+#ifdef USE_ROCM
+#include <hip/hip_runtime.h>
+#endif
 #include <cuda_runtime_api.h>
 
 #include <cassert>
 
-#ifndef USE_ROCM
 #include "common/util/cuda_runtime.h"
-#else
-#include "common/util/hip_runtime.h"
-#endif
 #include "utils.h"
 
 namespace transformer_engine {
@@ -66,6 +65,30 @@ void PopulateRngStateAsync(void *rng_state_dst,
     NVTE_CHECK_CUDA(cudaGetLastError());
 }
 #endif
+
+__global__ void get_runtime_num_segments_kernel(int32_t *cu_seqlen, size_t len, uint32_t *out) {
+  int tid = blockDim.x * blockIdx.x + threadIdx.x;
+  if (tid >= len) return;
+
+  if (cu_seqlen[tid] > 0) {
+    // atomicAdd only support 32 bits dtype
+    atomicAdd(out, 1);
+  }
+}
+
+uint32_t GetRuntimeNumSegments(void *cu_seqlen, void *workspace, size_t len, cudaStream_t stream) {
+  // workspace size requires 4 bytes
+  uint32_t *dout = static_cast<uint32_t *>(workspace);
+  uint32_t hout{};
+  cudaMemsetAsync(dout, 0, sizeof(uint32_t), stream);
+  constexpr int threads = 128;
+  const int blocks = (len - 1) / threads + 1;
+  get_runtime_num_segments_kernel<<<blocks, threads, 0, stream>>>(static_cast<int32_t *>(cu_seqlen),
+                                                                  len, dout);
+  cudaMemcpyAsync(&hout, dout, sizeof(uint32_t), cudaMemcpyDeviceToHost, stream);
+  cudaStreamSynchronize(stream);
+  return hout;
+}
 
 }  // namespace jax
 }  // namespace transformer_engine
