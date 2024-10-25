@@ -80,35 +80,81 @@ check_level() {
     test $TEST_LEVEL -ge $1
 }
 
+check_test_jobs_requested() {
+    test -z "$SINGLE_CONFIG" -a -n "$TEST_JOBS" || return 1
+    # TEST_JOBS - number of test configurations running in parallel
+    # change below condition to -gt 0 to enable single job mode for functionality testing
+    test $TEST_JOBS -gt 1 || return 1
+    return 0
+}
+
+calculate_test_jobs_count() {
+    test -n "$1" && test $1 -gt 0 || return 1
+    check_test_jobs_requested || return 1
+
+    _device_count=$1
+    _devlist=""
+    for f in "$HIP_VISIBLE_DEVICES" "$ROCR_VISIBLE_DEVICES" "$CUDA_VISIBLE_DEVICES"; do
+        test -z "$f" && continue
+        if [ -z "$_devlist" ]; then
+            _devlist="$f"
+        elif [ "$_devlist" != "$f" ]; then
+            echo "Failed to determine visible devices: multiple filering. Disable parallel jobs" >&2
+            return 1
+        fi
+    done
+    if [ -n "$_devlist" ]; then
+        _f=`echo $_devlist | cut -d, -f$_device_count`
+        if [ -z "$_f" ]; then
+            echo "Failed to determine visible devices: list lenght mismatch. Disable parallel jobs" >&2
+            return 1
+        fi
+    fi
+
+    test $_device_count -le $TEST_JOBS && TEST_JOBS=$_device_count
+    if [ -n "$_devlist" ]; then
+        TEST_GPUS=`echo $_devlist | cut -d, -f1-$TEST_JOBS`
+    else
+        TEST_GPUS=`seq -s, 0 $((TEST_JOBS-1))`
+    fi
+    test -n "$TEST_GPUS" || return 1
+    return 0
+}
+
 init_test_jobs() {
-    test -z "$SINGLE_CONFIG" || return
-    : ${TEST_JOBS:=0} #Number of test configurations running in parallel
-    test $TEST_JOBS -gt 0 || return
-    _JOB_CNT=$((TEST_JOBS-1))
+    # Call calculate_test_jobs_count and the check_test_jobs_requested because
+    # The former can update TEST_JOBS count
+    calculate_test_jobs_count $1 && check_test_jobs_requested || return
     : ${WAIT_POLL:=60} #Job count polling interval when cannot use wait
     set -m
     _TEST_JOB_DIR=`mktemp -d`
     test -d "$_TEST_JOB_DIR" || exit 1
     _TEST_CONFIG_LIST=""
     TEST_JOBS_MODE=1
-    echo "Init test jobs: TEST_JOBS=$TEST_JOBS WAIT_POLL=$WAIT_POLL at `date`"
+    echo "Init test jobs: TEST_JOBS=$TEST_JOBS GPUs=$TEST_GPUS WAIT_POLL=$WAIT_POLL"
 }
 
-wait_for_jobs_count() {
-    jobs > "$_TEST_JOB_DIR/jobs.lst"
-    _cnt=`grep Running "$_TEST_JOB_DIR/jobs.lst" | wc -l`
-    while [ $_cnt -gt $1 ]; do
-        sleep "$WAIT_POLL"
-        jobs > "$_TEST_JOB_DIR/jobs.lst"
-        _cnt=`grep Running "$_TEST_JOB_DIR/jobs.lst" | wc -l`
+wait_for_job_slot() {
+    _JOB_IDX=0
+    while [ true ]; do
+        jobs > /dev/null 2>&1
+        for job in `seq 1 $TEST_JOBS`; do
+            jobs %$job > /dev/null 2>&1
+            if [ $? -eq 2 ]; then
+                _JOB_IDX=$job
+                return
+            fi
+        done
+        sleep $WAIT_POLL
     done
 }
 
 run_test_job() {
     test -n "$TEST_JOBS_MODE" || return 1
-    wait_for_jobs_count $_JOB_CNT
-    echo "***** Run job for test config $1 at `date` *****"
-    (SINGLE_CONFIG="$1" TEST_LEVEL=$TEST_LEVEL $0; echo RC=$?) > "$_TEST_JOB_DIR/$1.log" 2>&1 &
+    wait_for_job_slot
+    _GPU_ID=`echo $TEST_GPUS | cut -d, -f$_JOB_IDX`
+    echo "***** Run job on GPU $_GPU_ID for test config $1 at `date` *****"
+    (HIP_VISIBLE_DEVICES=$_GPU_ID SINGLE_CONFIG="$1" TEST_LEVEL=$TEST_LEVEL $0; echo RC=$?) > "$_TEST_JOB_DIR/$1.log" 2>&1 &
     _TEST_CONFIG_LIST="$_TEST_CONFIG_LIST $1"
 }
 
@@ -128,4 +174,8 @@ finish_test_jobs() {
         echo "##### $_config log end #####"
     done
     rm -rf "$_TEST_JOB_DIR"
+}
+
+get_test_config_list() {
+    echo $_TEST_CONFIG_LIST
 }

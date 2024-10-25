@@ -60,11 +60,8 @@ run_1() {
 }
 
 run_test_config() {
+    echo ====== Run with Fused attention backend: $_fus_attn =====
     run_1 test_custom_call_compute.py
-    run_1 test_distributed_fused_attn.py
-    run_1 test_distributed_layernorm.py
-    run_1 test_distributed_layernorm_mlp.py
-    run_1 test_distributed_softmax.py
     run_1 test_functions.py
     run_1 test_fused_attn.py
     run_1 test_helper.py
@@ -75,6 +72,14 @@ run_test_config() {
     fi
     run_1 test_sharding.py
     run_1 test_softmax.py
+}
+
+run_test_config_mgpu() {
+    echo ====== Run mGPU with Fused attention backend: $_fus_attn =====
+    run_1 test_distributed_fused_attn.py
+    run_1 test_distributed_layernorm.py
+    run_1 test_distributed_layernorm_mlp.py
+    run_1 test_distributed_softmax.py
 }
 
 # Single config mode, run it synchroniously and return result
@@ -88,7 +93,8 @@ fi
 #Master script mode: prepares testing prerequisites
 echo "Started with TEST_LEVEL=$TEST_LEVEL at `date`"
 install_prerequisites
-init_test_jobs
+check_test_jobs_requested
+test $? -eq 0 && init_test_jobs `python -c "import jax; print(len([d for d in jax.devices() if 'rocm' in d.client.platform_version]))"`
 
 for _fus_attn in auto ck aotriton unfused; do
     configure_fused_attn_env $_fus_attn || continue
@@ -105,8 +111,14 @@ for _fus_attn in auto ck aotriton unfused; do
         run_test_job "$_fus_attn"
     else
         run_test_config
+        run_test_config_mgpu
     fi
 done
 
-test -n "$TEST_JOBS_MODE" && finish_test_jobs
+if [ -n "$TEST_JOBS_MODE" ]; then
+    finish_test_jobs
+    for _fus_attn in $(get_test_config_list); do
+        configure_fused_attn_env $_fus_attn && run_test_config_mgpu
+    done
+fi
 return_run_results

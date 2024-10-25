@@ -21,13 +21,13 @@ install_prerequisites() {
 run_1() {
     check_level 1 || return
     echo "Run [$_gemm, $_fus_attn] $@"
-    pytest "$TEST_DIR/$@" || test_run_error
+    pytest -j4 "$TEST_DIR/$@" || test_run_error
 }
 
 run_3() {
     check_level 3 || return
     echo "Run [$_gemm, $_fus_attn] $@"
-    pytest "$TEST_DIR/$@" || test_run_error
+    pytest -j4 "$TEST_DIR/$@" || test_run_error
 }
 
 run_test_config(){
@@ -52,6 +52,13 @@ run_test_config(){
     run_1 test_torch_save_load.py
     if [ $_fus_attn != "unfused" ]; then
         run_1 fused_attn/test_fused_attn.py
+    fi
+}
+
+run_test_config_mgpu(){
+    echo ====== Run mGPU with GEMM backend: $_gemm and Fused attention backend: $_fus_attn =====
+    run_1 test_fused_optimizer.py
+    if [ $_fus_attn != "unfused" ]; then
         run_1 fused_attn/test_fused_attn_with_cp.py
     fi
 }
@@ -68,7 +75,7 @@ fi
 #Master script mode: prepare testing prerequisites first
 echo "Started with TEST_LEVEL=$TEST_LEVEL at `date`"
 install_prerequisites
-init_test_jobs
+check_test_jobs_requested && init_test_jobs `python -c "import torch; print(torch.cuda.device_count())"`
 
 for _gemm in hipblaslt rocblas; do
     configure_gemm_env $_gemm || continue
@@ -93,9 +100,17 @@ for _gemm in hipblaslt rocblas; do
             run_test_job "$_gemm-$_fus_attn"
         else
             run_test_config
+            run_test_config_mgpu
         fi
     done
 done
 
-test -n "$TEST_JOBS_MODE" && finish_test_jobs
+if [ -n "$TEST_JOBS_MODE" ]; then
+    finish_test_jobs
+    for _cfg in $(get_test_config_list); do
+        _gemm=`echo $_cfg | cut -d- -f1`
+        _fus_attn=`echo $_cfg | cut -d- -f2`
+        configure_gemm_env $_gemm && configure_fused_attn_env $_fus_attn && run_test_config_mgpu;
+    done
+fi
 return_run_results
