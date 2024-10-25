@@ -141,6 +141,7 @@ else()
        fused_attn_rocm/fused_attn_ck.cpp
        fused_attn_rocm/utils.cpp
        gemm/cublaslt_gemm.cu
+       gemm/rocm_gemm.cu
        layer_norm/ln_api.cpp
        layer_norm/ln_bwd_semi_cuda_kernel.cu
        layer_norm/ln_fwd_cuda_kernel.cu

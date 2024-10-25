@@ -3,6 +3,91 @@
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
+#include <type_traits>
+#include <transformer_engine/gemm.h>
+#include <transformer_engine/transformer_engine.h>
+#ifdef USE_HIPBLASLT
+#include <vector>
+#include <forward_list>
+#include <mutex>
+#include <unordered_map>
+#include <sstream>
+#include <fstream>
+#include <chrono>
+#include <optional>
+#include <hipblaslt/hipblaslt.h>
+#endif
+#ifdef USE_ROCBLAS
+#define ROCBLAS_BETA_FEATURES_API 
+#include <rocblas/rocblas.h>
+#include <hipcub/hipcub.hpp>
+#endif
+#include <iostream>
+#include <cstdlib>
+#include <string>
+#include <cstdint>
+
+#include "../common.h"
+#include "../util/vectorized_pointwise.h"
+#include "../util/logging.h"
+
+namespace {
+
+#ifdef USE_HIPBLASLT
+
+#if HIP_VERSION >= 60000000
+typedef hipDataType hipblasltDatatype_t;
+typedef hipblasComputeType_t hipblasLtComputeType_t;
+#define HIPBLASLT_R_16F HIP_R_16F
+#define HIPBLASLT_R_32F HIP_R_32F
+#define HIPBLASLT_R_16B HIP_R_16BF
+#define HIPBLASLT_R_8F_E4M3 HIP_R_8F_E4M3_FNUZ
+#define HIPBLASLT_R_8F_E5M2 HIP_R_8F_E5M2_FNUZ
+#define HIPBLASLT_COMPUTE_F32 HIPBLAS_COMPUTE_32F
+#endif // #if HIP_VERSION >= 60000000
+
+hipblasltDatatype_t get_hipblaslt_dtype(const transformer_engine::DType t) {
+  using namespace transformer_engine;
+  switch (t) {
+    case DType::kFloat16:
+      return HIPBLASLT_R_16F;
+    case DType::kFloat32:
+      return HIPBLASLT_R_32F;
+    case DType::kBFloat16:
+      return HIPBLASLT_R_16B;
+    case DType::kFloat8E4M3:
+      return HIPBLASLT_R_8F_E4M3;
+    case DType::kFloat8E5M2:
+      return HIPBLASLT_R_8F_E5M2;
+    default:
+      NVTE_ERROR("Invalid type");
+  }
+}
+#endif
+
+#ifdef USE_ROCBLAS
+rocblas_datatype get_rocblas_dtype(const transformer_engine::DType t) {
+  using namespace transformer_engine;
+  switch (t) {
+    case DType::kFloat16:
+      return rocblas_datatype_f16_r;
+    case DType::kFloat32:
+      return rocblas_datatype_f32_r;
+    case DType::kBFloat16:
+      return rocblas_datatype_bf16_r;
+    case DType::kFloat8E4M3:
+      return rocblas_datatype_f8_r;
+    case DType::kFloat8E5M2:
+      return rocblas_datatype_bf8_r;
+    default:
+      NVTE_ERROR("Invalid type");
+  }
+}
+#endif
+
+} //namespace
+
+namespace transformer_engine {
 
 #ifdef USE_ROCBLAS
 
@@ -313,6 +398,8 @@ transformer_engine::DType get_transformer_engine_dtype(const rocblas_datatype t)
 
 #ifdef USE_HIPBLASLT
 
+namespace {
+
 static class HandlePool {
 public:
   hipblasLtHandle_t get(int device_id) 
@@ -438,77 +525,445 @@ private:
 } cached_handles;
 
 
+class csv_helper
+{
+public:
+  struct start {};
+  struct end {};
 
+  csv_helper(std::ostream& os, char sep_val) : m_os{ os }, m_sep_val(sep_val), m_start(true), m_sep("") {}
+
+  csv_helper& operator << (const start&)
+  {
+    m_start = true;
+    return *this;
+  }
+
+  csv_helper& operator << (const end&)
+  {
+    m_sep="";
+    m_start = false;
+    return *this;
+  }
+
+  template< typename T>
+  csv_helper& operator<<(const T& v)
+  {
+    m_os << m_sep << v;
+    if (m_start)
+    {
+      m_start = false;
+      m_sep = m_sep_val;
+    }
+    return *this;
+  }
+
+private:
+  std::ostream& m_os;
+  char m_sep_val;
+  bool m_start;
+  std::string m_sep;
+};
+
+
+template<typename T>
+class NameMapper
+{
+public:
+  NameMapper(const std::unordered_map<T, std::string_view>& name_map): map(name_map) {}
+  const std::string_view &getName(const T &val) {
+    return map.at(val);
+  }
+  T getValue(const std::string& name, const char *label="")
+  {
+    for (auto iter = map.begin(); iter != map.end(); ++iter)
+    {
+        if (name == iter->second) return iter->first;
+    }
+    NVTE_ERROR("Invalid ", label, " name: ", name);
+  }
+protected: 
+  const std::unordered_map<T, std::string_view> &map;
+};
+
+static std::unordered_map<hipblasltDatatype_t, std::string_view> type_name_map = {
+  {HIPBLASLT_R_32F, "float32"},
+  {HIPBLASLT_R_16F, "float16"},
+  {HIPBLASLT_R_16B, "bfloat16"},
+  {HIPBLASLT_R_8F_E4M3, "float8e4m3"},
+  {HIPBLASLT_R_8F_E5M2, "float8e5m2"},
+};
+static NameMapper<hipblasltDatatype_t> typeNameMapper(type_name_map);
+
+static std::unordered_map<hipblasOperation_t, std::string_view> trans_name_map = {
+  {HIPBLAS_OP_N, "N"},
+  {HIPBLAS_OP_T, "T"}
+};
+static NameMapper<hipblasOperation_t> transposeNameMapper(trans_name_map);
+
+static std::unordered_map<hipblasLtEpilogue_t, std::string_view> epi_name_map = {
+  {HIPBLASLT_EPILOGUE_DEFAULT, "-"},
+  {HIPBLASLT_EPILOGUE_BIAS, "bias"},
+  {HIPBLASLT_EPILOGUE_GELU_AUX, "geluaux"},
+  {HIPBLASLT_EPILOGUE_GELU_AUX_BIAS, "geluauxbias"},
+  {HIPBLASLT_EPILOGUE_DGELU, "dgelu"},
+  {HIPBLASLT_EPILOGUE_DGELU_BGRAD, "dgelubgrad"},
+  {HIPBLASLT_EPILOGUE_BGRADB, "bgradb"}
+};
+static NameMapper<hipblasLtEpilogue_t> epilogueNameMapper(epi_name_map);
+
+static std::unordered_map<hipblasLtComputeType_t, std::string_view> comp_name_map = {
+  {HIPBLASLT_COMPUTE_F32, "f32"}
+};
+static NameMapper<hipblasLtComputeType_t> computeNameMapper(comp_name_map);
 
 static class GemmAlgoCache {
 public:
   struct Key {
-    int hipDevice;
+    int deviceCap;
     hipblasltDatatype_t a_type, b_type, d_type, bias_type;
     int m, n, k;
     int lda, ldb, ldd;
     hipblasOperation_t transa, transb;
     hipblasLtEpilogue_t epilogue;
-    size_t workspaceSize;
 
-    Key(int hipDevice_,
+    Key(int deviceCap_,
         hipblasltDatatype_t a_type_, hipblasltDatatype_t b_type_,
         hipblasltDatatype_t d_type_, hipblasltDatatype_t bias_type_,
         int m_, int n_, int k_, int lda_, int ldb_, int ldd_,
         hipblasOperation_t transa_, hipblasOperation_t transb_,
-        hipblasLtEpilogue_t epilogue_, size_t workspaceSize_):
-        hipDevice(hipDevice_),
+        hipblasLtEpilogue_t epilogue_):
+        deviceCap(deviceCap_),
         a_type(a_type_), b_type(b_type_),
         d_type(d_type_), bias_type(bias_type_),
         m(m_), n(n_), k(k_), lda(lda_), ldb(ldb_), ldd(ldd_),
         transa(transa_), transb(transb_),
-        epilogue(epilogue_), workspaceSize(workspaceSize_) {}
+        epilogue(epilogue_) {}
+
+    Key() {}
 
     bool operator==(const Key &val) const
     {
-      return ((hipDevice == val.hipDevice)
+      return ((deviceCap == val.deviceCap)
       && (a_type == val.a_type) && (b_type == val.b_type)
       && (d_type == val.d_type) && (bias_type == val.bias_type)
       && (m == val.m) && (n == val.n) && (k == val.k)
       && (lda == val.lda) && (ldb == val.ldb) && (ldd == val.ldd)
       && (transa == val.transa) && (transb == val.transb)
-      && (workspaceSize == val.workspaceSize)
       && (epilogue == val.epilogue) );
     }
 
-    struct Hash
+    struct Comp
     {
-      ::std::size_t operator()(const Key& val) const
+      bool operator()(const Key& lhs, const Key& rhs) const
       {
-        // For simplicity represent the struct as string_view and use std hash
-        return ::std::hash<::std::string_view>{}(::std::string_view((const char*)&val, sizeof(val)));
+        return ::std::string_view((const char*)&lhs, sizeof(lhs)) < ::std::string_view((const char*)&rhs, sizeof(rhs));
       }
     };
   };
 
+  void init()
+  {
+    std::lock_guard<std::mutex> lock(mt);
+    int device_count = 0; 
+    NVTE_CHECK_CUDA(hipGetDeviceCount(&device_count));
+    dev_cap.resize(device_count);
+    for (int i=0; i<device_count; i++)
+    {
+      hipDeviceProp_t prop;
+      NVTE_CHECK_CUDA(hipGetDeviceProperties(&prop, i));
+      dev_cap[i] = prop.major*100 + prop.minor;
+    }
+    load_();
+    save_();
+  }
+
+  inline int device_cap(int device_id)
+  {
+    if (dev_cap.empty())
+      init();
+    return dev_cap[device_id];
+  }
+
   struct Algo {
-    hipblasLtMatmulAlgo_t algo;
+    std::optional<hipblasLtMatmulAlgo_t> algo;
+    int64_t algoId;
+    int index;
+    size_t ws_size_min;
+    size_t ws_size_max;
+    Algo(): algo(), index(-1), algoId(), ws_size_min(0), ws_size_max(0) {}
+    Algo(int idx, int64_t id, size_t ws_min, size_t ws_max): algo(), index(idx), algoId(id), ws_size_min(ws_min), ws_size_max(ws_max) {}
+    inline bool hasId() { return index>=0; } const
+    static inline int64_t getAlgoId(const hipblasLtMatmulAlgo_t &algo)
+    {
+      return *(const int64_t*)&algo;
+    }
   };
 
-  int find(Key &cfg, Algo &algo)
+  bool find(const Key &cfg, size_t ws_size, Algo &algo)
   {
     std::lock_guard<std::mutex> lock(mt);
-    if (auto i = d.find(cfg); i != d.end())
+    if (auto *pentry = find_(cfg, ws_size, ws_size); pentry != nullptr)
     {
-      algo = i->second;
-      return 1;
+      algo = *pentry;
+      return true;
     }
-    return 0;
+    return false;
   }
-  void store(Key &cfg, const Algo &algo)
+
+  void store(const Key &cfg, const Algo &algo)
   {
+    size_t ws_size_min = algo.ws_size_min;
+    size_t ws_size_max = algo.ws_size_max;
+    NVTE_CHECK(ws_size_max >= ws_size_min, "Invalid WS size");
     std::lock_guard<std::mutex> lock(mt);
-    d[cfg] = algo;
+
+    //Remove overlapping with existing entries;
+    while (auto* pentry = find_(cfg, ws_size_min, ws_size_max)) {
+      if (pentry->ws_size_min <= ws_size_min && pentry->ws_size_max >= ws_size_max)
+      {
+        *pentry = algo;
+        save_();
+        return;
+      }
+
+      if (ws_size_max > pentry->ws_size_max)
+      {
+        ws_size_min = pentry->ws_size_max + 1;
+      }
+      else if (ws_size_min < pentry->ws_size_min)
+      {
+        ws_size_max = pentry->ws_size_min - 1;
+      }
+      else
+      {
+        //Should never be here
+        NVTE_ERROR("Cannot merge WS size range");
+      }
+    }
+
+    //Merge to adjusted entry if possible
+    auto* pentry = find_(cfg, ws_size_min - 1, ws_size_min);
+    if (pentry && pentry->algoId == algo.algoId)
+    {
+      pentry->algo = algo.algo;
+      pentry->ws_size_max = ws_size_max;
+      save_();
+    }
+    else
+    {
+      auto it = d.emplace(cfg, algo);
+      it->second.ws_size_min = ws_size_min;
+      it->second.ws_size_max = ws_size_max;
+      save_(it->first, it->second);
+    }
+  }
+
+protected:
+
+  Algo* find_(const Key &cfg, size_t ws_min, size_t ws_max)
+  {
+    const auto key_range = d.equal_range(cfg);
+    for (auto i = key_range.first; i != key_range.second; i++)
+    {
+      if (ws_min <= i->second.ws_size_max && ws_max >= i->second.ws_size_min)
+      {
+        return &i->second;
+      }
+    }
+    return nullptr;
+  }
+
+  void header_(std::ostream& ofs)
+  {
+    csv_helper fs(ofs, csv_sep);
+    fs << "dev_cap" << "m" << "n"  << "k" << "trans_a" << "trans_b" 
+    << "type_a" << "type_b" << "type_d" << "bias_type" 
+    << "lda" << "ldb" << "ldd" << "epi" << "comp" << "scale"
+    << "ws_min" << "ws_max" << "algo_id" << "aidx";
+  }
+  
+  void load_()
+  {
+    const char* env = std::getenv("TE_HIPBLASLT_ALGO_LOAD");
+    if (env == nullptr || env[0] == '\0')
+    {
+      return;
+    }
+    std::ifstream ifs{env};
+    if (!ifs.is_open())
+    {
+      std::cerr << "Could not load autotune results storage " << env << "\n";
+      return;
+    }
+    std::cout << "Loading autotune results from " << env << "\n";
+
+    Key cfg;
+    std::string line;
+    std::getline(ifs, line); // the first line with legend
+    {
+      std::ostringstream hline;
+      header_(hline);
+      if (hline.str() != line) {
+        std::cerr << "Incorrect algo storage legend. Expected " << hline.str() << "\n";
+        return;
+      }
+    }
+
+    while(std::getline(ifs, line)) 
+    {
+      line.erase(0, line.find_first_not_of(" \t\n\r\f\v"));
+      if (auto pos = line.find_last_not_of(" \t\n\r\f\v"); pos != std::string::npos)
+      {
+        line.resize(pos+1);
+      }
+      if (line.empty() || line[0] == '#') continue;
+      std::istringstream is(line);
+      char c;
+      std::string type_a, type_b, type_d, bias_type, trans_a, trans_b, epi, comp, scale;
+      int64_t algo_id;
+      int algo_idx;
+      size_t ws_min, ws_max;
+
+      is >> std::skipws;
+      is >> cfg.deviceCap >> c >> cfg.m >> c >> cfg.n >> c >> cfg.k >> c;
+
+      //Filter out entries for devices not presented on the curent system
+      bool b_found = false;
+      for (int i=0; i<dev_cap.size(); i++)
+      {
+        if (dev_cap[i] == cfg.deviceCap)
+        {
+          b_found = true;
+          break;
+        }
+      }
+      if (!b_found) continue;
+
+      std::getline(is, trans_a, csv_sep);
+      std::getline(is, trans_b, csv_sep);
+      std::getline(is, type_a, csv_sep);
+      std::getline(is, type_b, csv_sep);
+      std::getline(is, type_d, csv_sep);
+      std::getline(is, bias_type, csv_sep);
+      is >> cfg.lda >> c >> cfg.ldb >> c >> cfg.ldd >> c;
+      std::getline(is, epi, csv_sep);
+      std::getline(is, comp, csv_sep);
+      std::getline(is, scale, csv_sep);
+      is >> ws_min >> c >> ws_max >> c >> algo_id >> c >> algo_idx;
+  
+      if (is.bad())
+      {
+        std::cerr << "Parsing CSV line failed: " << line << "\n";
+        return;
+      }
+
+      if (ws_min > ws_max)
+      {
+        std::cout << "[WARNING] Invalid WS size at " << line << "\n";
+        continue;
+      }
+  
+      cfg.a_type = typeNameMapper.getValue(type_a, "type_a");
+      cfg.b_type = typeNameMapper.getValue(type_b, "type_b");
+      cfg.d_type = typeNameMapper.getValue(type_d, "type_d");
+      cfg.bias_type = (bias_type == "-") ? (hipblasltDatatype_t)-1 : typeNameMapper.getValue(bias_type, "bias_type");
+
+      cfg.transa = transposeNameMapper.getValue(trans_a, "trans_a");
+      cfg.transb = transposeNameMapper.getValue(trans_b, "trans_b");
+
+      cfg.epilogue = epilogueNameMapper.getValue(epi, "epi");
+      //Check and filter out compute and scale types
+      if (computeNameMapper.getValue(comp, "comp") != HIPBLASLT_COMPUTE_F32 || typeNameMapper.getValue(scale, "scale") != HIPBLASLT_R_32F)
+      {
+        continue;
+      }
+
+      if (find_(cfg, ws_min, ws_max))
+      {
+          std::cout << "[WARNING] Duplicated/overlapped entry in algo cache\n";
+          continue;
+      }
+
+      d.emplace(cfg, Algo(algo_idx, algo_id, ws_min, ws_max));
+    }
+  }
+
+  bool can_save_(bool reopen = false)
+  {
+    if (!save_fs)
+    {
+        save_fs_name = std::getenv("TE_HIPBLASLT_ALGO_SAVE");
+        if (save_fs_name == nullptr || save_fs_name[0] == '\0')
+        {
+          return false;
+        }
+        save_fs = std::make_unique<std::ofstream>();
+        std::cout << "Saving autotune results to " << save_fs_name << "\n";
+    }
+
+    if (reopen)
+    {
+      if (save_fs->is_open())
+      {
+        save_fs->close();
+      }
+      save_fs->open(save_fs_name, std::ios_base::trunc);
+    }
+
+    if (save_fs->is_open() && !save_fs->bad())
+    {
+      return true;
+    }
+    else
+    {
+      if (reopen) std::cerr << "Could not open autotune results storage " << save_fs_name << "\n";
+      return false;
+    }
+  }
+
+  void save_()
+  {
+    if (!can_save_(true))
+    {
+      return;
+    }
+    header_(*save_fs);
+    *save_fs << "\n";
+
+    for (const auto &elem: d)
+    {
+      save_(elem.first, elem.second);
+    }
+  }
+
+  void save_(const Key &cfg, const Algo &algo)
+  {
+    if (!can_save_())
+    {
+      return;
+    }
+    csv_helper csv(*save_fs, csv_sep);
+    csv << cfg.deviceCap << cfg.m << cfg.n << cfg.k 
+      << transposeNameMapper.getName(cfg.transa) << transposeNameMapper.getName(cfg.transb)
+      << typeNameMapper.getName(cfg.a_type) << typeNameMapper.getName(cfg.b_type) << typeNameMapper.getName(cfg.d_type)
+      << ((cfg.bias_type == (hipblasltDatatype_t)-1) ? "-" : typeNameMapper.getName(cfg.bias_type))
+      << cfg.lda << cfg.ldb << cfg.ldd << epilogueNameMapper.getName(cfg.epilogue)
+      << computeNameMapper.getName(HIPBLASLT_COMPUTE_F32) << typeNameMapper.getName(HIPBLASLT_R_32F)
+      << algo.ws_size_min << algo.ws_size_max << algo.algoId << algo.index << csv_helper::end() << "\n";
   }
 
 private:
+  std::vector<int> dev_cap;
+  constexpr static char csv_sep = ','; 
+  std::unique_ptr<std::ofstream> save_fs;
+  const char *save_fs_name;
   std::mutex mt;
-  std::unordered_map<Key, Algo, Key::Hash> d;
+  /* Map of problem config to tuple of ws_size and Algo
+   * When searching, elements matching Key are filtered 
+   * for requested WS size be between Algo.ws_size and pair.first
+   */
+  std::multimap<Key, Algo, Key::Comp> d;
 } algoCache;
 
 static inline int getIntEnv(const char *name, int defval, int minval)
@@ -525,6 +980,8 @@ static inline int getIntEnv(const char *name, int defval, int minval)
   }
   return val;
 }
+
+} //namespace
 
 void hipblaslt_gemm(const Tensor *inputA,
                  const Tensor *inputB,
@@ -684,11 +1141,11 @@ void hipblaslt_gemm(const Tensor *inputA,
                                                    HIPBLASLT_MATMUL_DESC_EPILOGUE,
                                                    &epilogue, sizeof(epilogue)));
 
-  GemmAlgoCache::Key gemm_cfg(device_id, A_type, B_type, D_type, 
-    use_fp8 ? bias_type : (hipblasltDatatype_t)0,
-    m, n, k, lda, ldb, ldd, transa, transb, epilogue, workspaceSize );
+  GemmAlgoCache::Key gemm_cfg(algoCache.device_cap(device_id), A_type, B_type, D_type, 
+    use_fp8 ? bias_type : (hipblasltDatatype_t)-1,
+    m, n, k, lda, ldb, ldd, transa, transb, epilogue );
   GemmAlgoCache::Algo cached_algo;
-  if (algoCache.find(gemm_cfg, cached_algo) == 0)
+  if (algoCache.find(gemm_cfg, workspaceSize, cached_algo) == 0 || !cached_algo.algo.has_value())
   {
     int firstAlgo = getIntEnv("TE_HIPBLASLT_ALGO_SELECTION", 0, 0);
     int tuneLoopCount = getIntEnv("TE_HIPBLASLT_TUNING_RUN_COUNT", 0, 0);
@@ -703,7 +1160,8 @@ void hipblaslt_gemm(const Tensor *inputA,
       static const int defaultAlgoCount = 16;
       algoTuneCount = getIntEnv("TE_HIPBLASLT_TUNING_ALGO_COUNT", defaultAlgoCount, 1);
     }
-    int algoTotalCount = firstAlgo + algoTuneCount;
+    algoTuneCount += firstAlgo;
+    int algoTotalCount = cached_algo.hasId() ? std::max(algoTuneCount, (cached_algo.index + 1)) : algoTuneCount;
     algoArr.resize(algoTotalCount);
 
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceCreate(&preference));
@@ -714,97 +1172,143 @@ void hipblaslt_gemm(const Tensor *inputA,
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Ddesc,
                                                     Ddesc, preference, algoTotalCount, algoArr.data(),
                                                     &algoTotalCount));
+    algoArr.resize(algoTotalCount);
 
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceDestroy(preference));
 
-    if (algoTotalCount <= firstAlgo) {
-      NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(Ddesc));
-      NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(Bdesc));
-      NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(Adesc));
-      NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescDestroy(operationDesc));
-      throw std::runtime_error("Unable to find any suitable algorithms");
+    //If cached algo exists in persistent storage we just need to find matching hipblasLtMatmulAlgo_t
+    if (cached_algo.hasId())
+    {
+      int idx = (cached_algo.index < algoTotalCount) ? cached_algo.index : 0;
+      for (int i=0; i<algoTotalCount; i++)
+      {
+        const auto &algo = algoArr[idx];
+        if (algo.state == HIPBLAS_STATUS_SUCCESS)
+        {
+          if (cached_algo.algoId == cached_algo.getAlgoId(algo.algo))
+          {
+            cached_algo.algo = algo.algo;
+            if (algo.workspaceSize != cached_algo.ws_size_min || idx != cached_algo.index)
+            {
+              cached_algo.ws_size_min = algo.workspaceSize;
+              cached_algo.index = idx;
+              algoCache.store(gemm_cfg, cached_algo);
+            }
+            break;
+          }
+        }
+        idx = (idx + 1) % algoTotalCount;
+      }
+      if (!cached_algo.algo.has_value())
+      {
+        std::cout << "[WARNING] Cannot find cached algoId " << cached_algo.algoId << " in hipBLASLt results" << std::endl;
+      }
     }
 
-    if (tuneLoopCount > 0)
+    //No suitable entry in autotune cache or could not find matched algo in hipBLASLt results
+    if (!cached_algo.algo.has_value())
     {
-      std::cout << "[INFO] Perform hipBLASLt algo selection on GPU" << device_id
-                << " in range [" << firstAlgo << "-" << (algoTotalCount - 1) << "] with "
-                << tuneLoopCount << " loops " << std::endl;
 
-      hipStream_t profilingStream;
-      NVTE_CHECK_CUDA(hipStreamCreateWithFlags(&profilingStream, hipStreamNonBlocking));
-      using tuning_clock = std::chrono::steady_clock;
-      tuning_clock::now(); //the first call takes little longer so do it outside the loop
-      tuning_clock::duration bestTime = tuning_clock::duration::max();
-      int bestAlgo = 0;
-
-      for (int algo=firstAlgo; algo<algoTotalCount; algo++)
+      int bestAlgo = -1;
+      if (tuneLoopCount > 0)
       {
-          // Warm-up call
-          NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
-                                          operationDesc,
-                                          static_cast<const void*>(&one),         /* alpha */
-                                          A,                                      /* A */
-                                          Adesc,
-                                          B,                                      /* B */
-                                          Bdesc,
-                                          static_cast<const void*>(&beta),        /* beta */
-                                          D,                                      /* C */
-                                          Ddesc,
-                                          D,                                      /* D */
-                                          Ddesc,
-                                          &algoArr[algo].algo,                    /* algo */
-                                          workspace,                              /* workspace */
-                                          workspaceSize,
-                                          profilingStream));                       /* stream */
-        NVTE_CHECK_CUDA(hipStreamSynchronize(profilingStream));
+        std::cout << "[INFO] Perform hipBLASLt algo selection on GPU" << device_id
+                  << " in range [" << firstAlgo << "-" << (algoTuneCount - 1) << "] with "
+                  << tuneLoopCount << " loops " << std::endl;
 
-        //Profiling loop
-        tuning_clock::time_point startTime = tuning_clock::now();
-        for (int loop=0; loop<tuneLoopCount; loop++)
+        hipStream_t profilingStream;
+        NVTE_CHECK_CUDA(hipStreamCreateWithFlags(&profilingStream, hipStreamNonBlocking));
+        using tuning_clock = std::chrono::steady_clock;
+        tuning_clock::now(); //the first call takes little longer so do it outside the loop
+        tuning_clock::duration bestTime = tuning_clock::duration::max();
+
+        for (int algo=firstAlgo; algo<algoTuneCount; algo++)
         {
-          NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
-                                          operationDesc,
-                                          static_cast<const void*>(&one),         /* alpha */
-                                          A,                                      /* A */
-                                          Adesc,
-                                          B,                                      /* B */
-                                          Bdesc,
-                                          static_cast<const void*>(&beta),        /* beta */
-                                          D,                                      /* C */
-                                          Ddesc,
-                                          D,                                      /* D */
-                                          Ddesc,
-                                          &algoArr[algo].algo,                    /* algo */
-                                          workspace,                              /* workspace */
-                                          workspaceSize,
-                                          profilingStream));                       /* stream */
+            if (algoArr[algo].state != HIPBLAS_STATUS_SUCCESS)
+            {
+              continue;
+            }
+            // Warm-up call
+            NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
+                                            operationDesc,
+                                            static_cast<const void*>(&one),         /* alpha */
+                                            A,                                      /* A */
+                                            Adesc,
+                                            B,                                      /* B */
+                                            Bdesc,
+                                            static_cast<const void*>(&beta),        /* beta */
+                                            D,                                      /* C */
+                                            Ddesc,
+                                            D,                                      /* D */
+                                            Ddesc,
+                                            &algoArr[algo].algo,                    /* algo */
+                                            workspace,                              /* workspace */
+                                            workspaceSize,
+                                            profilingStream));                       /* stream */
+          NVTE_CHECK_CUDA(hipStreamSynchronize(profilingStream));
+
+          //Profiling loop
+          tuning_clock::time_point startTime = tuning_clock::now();
+          for (int loop=0; loop<tuneLoopCount; loop++)
+          {
+            NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
+                                            operationDesc,
+                                            static_cast<const void*>(&one),         /* alpha */
+                                            A,                                      /* A */
+                                            Adesc,
+                                            B,                                      /* B */
+                                            Bdesc,
+                                            static_cast<const void*>(&beta),        /* beta */
+                                            D,                                      /* C */
+                                            Ddesc,
+                                            D,                                      /* D */
+                                            Ddesc,
+                                            &algoArr[algo].algo,                    /* algo */
+                                            workspace,                              /* workspace */
+                                            workspaceSize,
+                                            profilingStream));                       /* stream */
+          }
+          NVTE_CHECK_CUDA(hipStreamSynchronize(profilingStream));
+          tuning_clock::duration algoTime = tuning_clock::now() - startTime; 
+          if (algoTime < bestTime)
+          {
+            bestAlgo = algo;
+            bestTime = algoTime;
+          }
         }
-        NVTE_CHECK_CUDA(hipStreamSynchronize(profilingStream));
-        tuning_clock::duration algoTime = tuning_clock::now() - startTime; 
-        if (algoTime < bestTime)
+
+        NVTE_CHECK_CUDA(hipStreamDestroy(profilingStream));
+        if (bestAlgo >= 0)
         {
-          bestAlgo = algo;
-          bestTime = algoTime;
+          std::cout << "[INFO] Select hipBLASLt algo " << bestAlgo << " with time "
+                    << std::chrono::duration_cast<std::chrono::nanoseconds>(bestTime).count() / tuneLoopCount
+                    << " ns" << std::endl;
         }
       }
+      else if (firstAlgo < algoTuneCount)
+      {
+        if (firstAlgo != 0)
+        {
+          std::cout << "[INFO] Select hipBLASLt algo " << firstAlgo << std::endl;
+        }
+        bestAlgo = firstAlgo;
+      }
 
-      NVTE_CHECK_CUDA(hipStreamDestroy(profilingStream));
-      std::cout << "[INFO] Select hipBLASLt algo " << bestAlgo << " with time "
-                << std::chrono::duration_cast<std::chrono::nanoseconds>(bestTime).count() / tuneLoopCount
-                << " ns" << std::endl;
+      if (bestAlgo < 0) {
+        NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(Ddesc));
+        NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(Bdesc));
+        NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(Adesc));
+        NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescDestroy(operationDesc));
+        throw std::runtime_error("Unable to find any suitable algorithms");
+      }
       cached_algo.algo = algoArr[bestAlgo].algo;
-    }
-    else
-    {
-      if (firstAlgo != 0)
-      {
-        std::cout << "[INFO] Select hipBLASLt algo " << firstAlgo << std::endl;
-      }
-      cached_algo.algo = algoArr[firstAlgo].algo;
-    }
+      cached_algo.index = bestAlgo;
+      cached_algo.algoId = cached_algo.getAlgoId(algoArr[bestAlgo].algo);
+      cached_algo.ws_size_min = algoArr[bestAlgo].workspaceSize;
+      cached_algo.ws_size_max = workspaceSize;
 
-    algoCache.store(gemm_cfg, cached_algo);
+      algoCache.store(gemm_cfg, cached_algo);
+    }
   }
 
   // D = alpha * (A * B) + beta * C
@@ -820,7 +1324,7 @@ void hipblaslt_gemm(const Tensor *inputA,
                                    Ddesc,
                                    D,                                      /* D */
                                    Ddesc,
-                                   &cached_algo.algo,                      /* algo */
+                                   &cached_algo.algo.value(),              /* algo */
                                    workspace,                              /* workspace */
                                    workspaceSize,
                                    stream));                               /* stream */
@@ -1341,3 +1845,5 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   }
 #endif
 }
+
+} //namespace transformer_engine
