@@ -205,9 +205,8 @@ def te_cast_transpose_dbias_triton(input, input_scale, amax_out, otype):
     block_m_1 = int(best_config.kwargs['BLOCK_M'])
 
     grid2 = lambda META: (triton.cdiv(N, META['BLOCK_N']),)
-    _reduce_bias_triton[grid2](partial_dbias, dbias_out, partial_dbias.stride(0), partial_dbias.stride(1), triton.cdiv(M, block_m_1), N)
+    #_reduce_bias_triton[grid2](partial_dbias, dbias_out, partial_dbias.stride(0), partial_dbias.stride(1), triton.cdiv(M, block_m_1), N)
     dbias_out = reduce_dbias_kernel(partial_dbias[0:triton.cdiv(M, block_m_1)], input.dtype)
-    #dbias_out = partial_dbias[0:triton.cdiv(M, block_m_1)].to(torch.float32).sum(axis=0).to(torch.float16)
     return dbias_out, cast_out, trans_out
 
     
