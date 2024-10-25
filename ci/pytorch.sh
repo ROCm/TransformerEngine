@@ -21,13 +21,13 @@ install_prerequisites() {
 run_1() {
     check_level 1 || return
     echo "Run [$_gemm, $_fus_attn] $@"
-    pytest -j4 "$TEST_DIR/$@" || test_run_error
+    pytest -n4 "$TEST_DIR/$@" || test_run_error
 }
 
 run_3() {
     check_level 3 || return
     echo "Run [$_gemm, $_fus_attn] $@"
-    pytest -j4 "$TEST_DIR/$@" || test_run_error
+    pytest -n4 "$TEST_DIR/$@" || test_run_error
 }
 
 run_test_config(){
