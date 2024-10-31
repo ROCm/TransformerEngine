@@ -24,7 +24,8 @@ def get_tolerances(in_dtype):
                           (8, 8),
                           (1, 3221),
                           (2333, 1),
-                          (1481, 677)
+                          (1481, 677),
+                          (40960, 128256)
                           ]
             for in_dtype in [torch.float32, torch.float16, torch.bfloat16]
             #for out_dtype in ['fp8e4m3', 'fp8e5m2']
@@ -63,6 +64,7 @@ def test_cast_tranpose_triton(M, N, in_dtype, out_dtype):
                           (256, 65536),
                           (65536, 128),
                           (256, 256),
+                          (40960, 128256)
                           ]
             for in_dtype in [torch.float32, torch.float16, torch.bfloat16]
             for out_dtype in [torch.float8_e4m3fnuz, torch.float8_e5m2fnuz]

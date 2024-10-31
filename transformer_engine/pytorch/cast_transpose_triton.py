@@ -56,8 +56,8 @@ def _cast_transpose_triton(A, noop_ptr, C, T, stride_am, stride_an, stride_bn, s
     pid_m = group_id * GROUP_M + (pid % group_size)
     pid_n = (pid % width) // group_size
     
-    rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    rm = pid_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
+    rn = pid_n.to(tl.int64) * BLOCK_N + tl.arange(0, BLOCK_N)
     A = A + rm[:, None] * stride_am + rn[None, :] * stride_an
     mask = (rm < M)[:, None] & (rn < N)[None, :]
     a = tl.load(A, mask=mask)
@@ -70,8 +70,8 @@ def _cast_transpose_triton(A, noop_ptr, C, T, stride_am, stride_an, stride_bn, s
     tl.store(C, fp8_a, mask=mask)
     
     # rematerialize to save registers
-    rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    rm = pid_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
+    rn = pid_n.to(tl.int64) * BLOCK_N + tl.arange(0, BLOCK_N)
     T = T + rm[:, None] * stride_bm + rn[None, :] * stride_bn
     mask = (rm < M)[:, None] & (rn < N)[None, :]
     tl.store(T, fp8_a, mask=mask)
@@ -120,15 +120,15 @@ def _transpose_triton_dbias(A, C, T, stride_am, stride_an, stride_bn, stride_bm,
     pid_m = group_id * GROUP_M + (pid % group_size)
     pid_n = (pid % width) // group_size
     
-    rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    rm = pid_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
+    rn = pid_n.to(tl.int64) * BLOCK_N + tl.arange(0, BLOCK_N)
     A = A + rm[:, None] * stride_am + rn[None, :] * stride_an
     mask = (rm < M)[:, None] & (rn < N)[None, :]
     a = tl.load(A, mask=mask, other=0.)
     a = a.to(tl.float32)
 
     partial_sum_a = tl.sum(a, axis=0)
-    partial_dbias = partial_dbias + pid_m * stride_am + rn * stride_an
+    partial_dbias = partial_dbias + pid_m.to(tl.int64) * stride_am + rn * stride_an
     tl.store(partial_dbias, partial_sum_a, mask=(rn<N))
 
     scaled_a = a * scale
@@ -138,8 +138,8 @@ def _transpose_triton_dbias(A, C, T, stride_am, stride_an, stride_bn, stride_bm,
     tl.store(C, fp8_a, mask=mask)
     
     # rematerialize to save registers
-    rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    rm = pid_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
+    rn = pid_n.to(tl.int64) * BLOCK_N + tl.arange(0, BLOCK_N)
     T = T + rm[:, None] * stride_bm + rn[None, :] * stride_bn
     mask = (rm < M)[:, None] & (rn < N)[None, :]
     tl.store(T, fp8_a, mask=mask)
@@ -161,7 +161,7 @@ def _reduce_bias_triton(A, out, stride_am, stride_an, M, N, BLOCK_M: tl.constexp
     pid = tl.program_id(0)
     grid_n = (N + BLOCK_N - 1) // BLOCK_N
     iters_m = (M + BLOCK_M - 1) // BLOCK_M
-    rn = pid * BLOCK_N + tl.arange(0, BLOCK_N)
+    rn = pid.to(tl.int64) * BLOCK_N + tl.arange(0, BLOCK_N)
     dbias_reg = tl.zeros((BLOCK_N,), tl.float32)
     rm = tl.arange(0, BLOCK_M)
     for i in range(iters_m):
