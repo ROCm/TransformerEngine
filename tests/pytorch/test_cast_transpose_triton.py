@@ -13,9 +13,8 @@ def get_tolerances(in_dtype):
     elif in_dtype == torch.bfloat16:
         return 1e-5, 1e-2
 
-@pytest.mark.parametrize("M, N, in_dtype, out_dtype",
-        [(*shape, in_dtype, out_dtype)
-            for shape in [(2048, 12288),
+@pytest.mark.parametrize("M, N", 
+                         [(2048, 12288),
                           (768, 1024),
                           (256, 65536),
                           (65536, 128),
@@ -26,12 +25,9 @@ def get_tolerances(in_dtype):
                           (2333, 1),
                           (1481, 677),
                           (40960, 128256)
-                          ]
-            for in_dtype in [torch.float32, torch.float16, torch.bfloat16]
-            #for out_dtype in ['fp8e4m3', 'fp8e5m2']
-            for out_dtype in [torch.float8_e4m3fnuz, torch.float8_e5m2fnuz]
-        ]
-        )
+                        ])
+@pytest.mark.parametrize("in_dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("out_dtype", [torch.float8_e4m3fnuz, torch.float8_e5m2fnuz])
 def test_cast_tranpose_triton(M, N, in_dtype, out_dtype):
     ## Unit distribution between [-2.0, 1.0]
     input_tensor = torch.rand(M, N, dtype=torch.float32, device='cuda') * 3.0 - 2.0
@@ -55,21 +51,17 @@ def test_cast_tranpose_triton(M, N, in_dtype, out_dtype):
     assert torch.equal(transposed_tensor, transposed_tensor_triton), 'transposed results do not match!'
     assert torch.allclose(amax_tensor, amax_tensor_triton, atol=1e-6, rtol=5e-6), 'Amax results do not match!'
 
-
-@pytest.mark.parametrize("M, N, in_dtype, out_dtype",
-        [(*shape, in_dtype, out_dtype)
-            for shape in [(64, 400),
+@pytest.mark.parametrize("M, N", 
+                         [(64, 400),
                           (2048, 12288),
                           (768, 1024),
                           (256, 65536),
                           (65536, 128),
                           (256, 256),
                           (40960, 128256)
-                          ]
-            for in_dtype in [torch.float32, torch.float16, torch.bfloat16]
-            for out_dtype in [torch.float8_e4m3fnuz, torch.float8_e5m2fnuz]
-        ]
-        )
+                          ])
+@pytest.mark.parametrize("in_dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("out_dtype", [torch.float8_e4m3fnuz, torch.float8_e5m2fnuz])
 def test_cast_tranpose_dbias_triton(M, N, in_dtype, out_dtype):
     ## Unit distribution between [-2.0, 1.0]
     input_tensor = torch.rand(M, N, dtype=torch.float32, device='cuda') * 3.0 - 2.0

@@ -189,7 +189,7 @@ def te_cast_transpose_dbias_triton(input, input_scale, amax_out, otype):
     if M == 0 or N == 0:
         return dbias_out, cast_out, trans_out
 
-    MIN_BLOCK_M = 64 ## This needs to be changed  
+    MIN_BLOCK_M = 64 ## This needs to be changed if minimum block size m changed
     partial_dbias = torch.empty(triton.cdiv(M, MIN_BLOCK_M), N, dtype=torch.float32, device='cuda')
 
     assert trans_out.size(0) == N and trans_out.size(1) == M
@@ -201,7 +201,6 @@ def te_cast_transpose_dbias_triton(input, input_scale, amax_out, otype):
     grid = lambda META: (triton.cdiv(M, META['BLOCK_M']) * triton.cdiv(N, META['BLOCK_N']),)
     _transpose_triton_dbias[grid](input, triton.reinterpret(cast_out, tl_dtype), triton.reinterpret(trans_out, tl_dtype), input.stride(0), input.stride(1), trans_out.stride(0), trans_out.stride(1), M, N, input_scale, amax_out, partial_dbias, get_fp8_max(otype))
     best_config = _transpose_triton_dbias.best_config
-    #print('best_config=', best_config)
     block_m_1 = int(best_config.kwargs['BLOCK_M'])
 
     grid2 = lambda META: (triton.cdiv(N, META['BLOCK_N']),)
