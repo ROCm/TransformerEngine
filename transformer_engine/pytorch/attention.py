@@ -550,6 +550,7 @@ def get_attention_backend(
             fu_core_attention_bias_shape = "bhss"
 
     if (
+        not IS_HIP_EXTENSION and
         use_fused_attention
         and fu_core_attention_bias_type == "post_scale_bias"
         and fu_core_attention_bias_shape != "1hss"
@@ -562,6 +563,14 @@ def get_attention_backend(
         else:
             # max512 backend will only support [1, h, s, s]
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
+    if (
+        IS_HIP_EXTENSION and
+        use_fused_attention
+        and fu_core_attention_bias_type == "post_scale_bias"
+    ):
+        if fu_core_attention_bias_shape not in ["11ss", "1hss", "b1ss", "bhss"]:
+            logger.debug("Disabling ROCm FusedAttention for Bias shape not in 11ss, 1hss, b1ss, bhss")
+            use_fused_attention = False
 
     # Filter: cuDNN support
     fused_attention_backend = None

@@ -13,22 +13,22 @@ namespace fused_attn_rocm {
 
 using namespace transformer_engine;
 
-size_t nvte_dtype_size(NVTEDType t_dtype){
+size_t nvte_dtype_size(DType t_dtype){
   switch(t_dtype){
-    case NVTEDType::kNVTEByte: 
+    case DType::kByte: 
       return 1;
-    case NVTEDType::kNVTEInt32: 
+    case DType::kInt32: 
       return 4;
-    case NVTEDType::kNVTEInt64: 
+    case DType::kInt64: 
       return 8;
-    case NVTEDType::kNVTEFloat32: 
+    case DType::kFloat32: 
       return 4;
-    case NVTEDType::kNVTEFloat16: 
+    case DType::kFloat16: 
       return 2;
-    case NVTEDType::kNVTEBFloat16: 
+    case DType::kBFloat16: 
       return 2;
-    case NVTEDType::kNVTEFloat8E4M3: 
-    case NVTEDType::kNVTEFloat8E5M2: 
+    case DType::kFloat8E4M3: 
+    case DType::kFloat8E5M2: 
       return 1;
     default:
       return 1;

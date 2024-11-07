@@ -99,12 +99,12 @@ bool is_aotriton_backend_supported(
 
 
 #ifdef USE_FUSED_ATTN_AOTRITON
-aotriton::DType nvte_to_aotriton_dtype(NVTEDType t_dtype){
-#define CAST_TYPE(aname, dtname) if (t_dtype == NVTEDType::aname) return aotriton::DType::dtname
-  CAST_TYPE(kNVTEByte, kUInt8);
-  CAST_TYPE(kNVTEFloat32, kFloat32);
-  CAST_TYPE(kNVTEFloat16, kFloat16);
-  CAST_TYPE(kNVTEBFloat16, kBFloat16);
+aotriton::DType nvte_to_aotriton_dtype(DType t_dtype){
+#define CAST_TYPE(aname, dtname) if (t_dtype == DType::aname) return aotriton::DType::dtname
+  CAST_TYPE(kByte, kUInt8);
+  CAST_TYPE(kFloat32, kFloat32);
+  CAST_TYPE(kFloat16, kFloat16);
+  CAST_TYPE(kBFloat16, kBFloat16);
   return aotriton::DType::kUnknown;
 #undef CAST_TYPE
 }
@@ -330,15 +330,15 @@ void fused_attn_aotriton_fwd_qkvpacked(
   size_t b, size_t h, size_t max_seqlen, size_t d,
   bool is_training, float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-  const Tensor* input_QKV, const Tensor* input_Bias, 
-  Tensor* output_O, Tensor* output_M, Tensor* output_rng_state,
+  const Tensor* input_QKV,
+  Tensor* output_O, NVTETensorPack *Aux_CTX_Tensors,
   const Tensor* input_cu_seqlens,
-  const Tensor* input_rng_state,
+  const Tensor* rng_state,
   Tensor *workspace,
   cudaStream_t stream){
 
 #ifdef USE_FUSED_ATTN_AOTRITON
-  const NVTEDType QKV_type = static_cast<NVTEDType>(input_QKV->data.dtype);
+  const DType QKV_type = input_QKV->data.dtype;
   void *devPtrQKV = input_QKV->data.dptr;
   // determine the stride based on qkv layout
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
@@ -353,7 +353,27 @@ void fused_attn_aotriton_fwd_qkvpacked(
   void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + 2 * stride);
 
   //save the input rng state to Aux_CTX_Tensors
-  output_rng_state->data.dptr = input_rng_state->data.dptr;
+  void *devPtrO = output_O->data.dptr;
+  void *devPtrS = nullptr;
+
+  if (Aux_CTX_Tensors->size == 0) {
+    Aux_CTX_Tensors->size = 2;
+    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    output_S->data.dptr = nullptr;
+    output_S->data.shape = {b, h, max_seqlen, 1};
+    output_S->data.dtype = DType::kFloat32;
+    Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+    output_rng_state->data.dptr = nullptr;
+    output_rng_state->data.shape = {2};
+    output_rng_state->data.dtype = DType::kInt64;
+  } else if (Aux_CTX_Tensors->size == 2) {
+    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    devPtrS = output_S->data.dptr;
+    Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+    output_rng_state->data.dptr = rng_state->data.dptr;
+  } else {
+    NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
+  }
 
   size_t workspace_size = 0;
 
@@ -363,9 +383,9 @@ void fused_attn_aotriton_fwd_qkvpacked(
     qkv_layout,
     bias_type, attn_mask_type,
     devPtrQ, devPtrK, devPtrV, 
-    output_M->data.dptr, output_O->data.dptr,
-    reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
-    reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1,
+    devPtrS, devPtrO,
+    reinterpret_cast<const uint64_t *>(rng_state->data.dptr), 
+    reinterpret_cast<const uint64_t *>(rng_state->data.dptr) + 1,
     nvte_to_aotriton_dtype(QKV_type),
     workspace->data.dptr,
     &workspace_size,
@@ -393,16 +413,16 @@ void fused_attn_aotriton_bwd_qkvpacked(
   size_t b, size_t h, size_t max_seqlen, size_t d,
   float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-  const Tensor* input_QKV, const Tensor* input_O, const Tensor* input_dO, const Tensor* input_Bias, 
+  const Tensor* input_QKV, const Tensor* input_O, const Tensor* input_dO, 
+  const Tensor* output_S,
   Tensor* output_dQKV,
   const Tensor* input_cu_seqlens,
-  const Tensor* input_M,
-  const Tensor* input_rng_state,
+  const Tensor* rng_state,
   Tensor* workspace,
   cudaStream_t stream){
 
 #ifdef USE_FUSED_ATTN_AOTRITON
-  const NVTEDType QKV_type = static_cast<NVTEDType>(input_QKV->data.dtype);
+  const DType QKV_type = input_QKV->data.dtype;
   //input tensor
   void *devPtrQKV = input_QKV->data.dptr;
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
@@ -415,6 +435,9 @@ void fused_attn_aotriton_bwd_qkvpacked(
   void *devPtrQ = static_cast<void *>(devPtrQKV);
   void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride);
   void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + 2 * stride);
+  void *devPtrSoftmaxStats = output_S->data.dptr;
+  void *devPtrO = input_O->data.dptr;
+  void *devPtrdO = input_dO->data.dptr;
 
   // output tensor
   void *devPtrdQKV = output_dQKV->data.dptr;
@@ -430,11 +453,11 @@ void fused_attn_aotriton_bwd_qkvpacked(
     qkv_layout,
     bias_type, attn_mask_type,
     devPtrQ, devPtrK, devPtrV, 
-    input_O->data.dptr, input_M->data.dptr,
+    devPtrO, devPtrSoftmaxStats,
     devPtrdQ, devPtrdK, devPtrdV, 
-    input_dO->data.dptr,
-    reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
-    reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1,
+    devPtrdO, 
+    reinterpret_cast<const uint64_t *>(rng_state->data.dptr), 
+    reinterpret_cast<const uint64_t *>(rng_state->data.dptr) + 1,
     nvte_to_aotriton_dtype(QKV_type),
     workspace->data.dptr,
     &workspace_size,
@@ -462,31 +485,50 @@ void fused_attn_aotriton_fwd_kvpacked(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
   bool is_training, float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-  const Tensor* input_Q, const Tensor* input_KV, const Tensor* input_Bias, 
-  Tensor* output_O, Tensor* output_M, Tensor* output_rng_state,
+  const Tensor* input_Q, const Tensor* input_KV,
+  Tensor* output_O, NVTETensorPack *Aux_CTX_Tensors,
   const Tensor* input_cu_seqlens_q,
   const Tensor* input_cu_seqlens_kv,
-  const Tensor* input_rng_state,
+  const Tensor* rng_state,
   Tensor *workspace,
   cudaStream_t stream){
 
 #ifdef USE_FUSED_ATTN_AOTRITON
-  const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
-  const NVTEDType KV_type = static_cast<NVTEDType>(input_KV->data.dtype);
+  const DType QKV_type = input_Q->data.dtype;
   //input tensor
+  void *devPtrQ = input_Q->data.dptr;
   void *devPtrKV = input_KV->data.dptr;
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
-    stride = nvte_dtype_size(Q_type)*h_kv*d;
+    stride = nvte_dtype_size(QKV_type)*h_kv*d;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
-    stride = nvte_dtype_size(Q_type) * d;
+    stride = nvte_dtype_size(QKV_type) * d;
   }
   void *devPtrK = devPtrKV;
   void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrKV) + stride);
 
-  //save the input rng state to Aux_CTX_Tensors
-  output_rng_state->data.dptr = input_rng_state->data.dptr;
+  void *devPtrO = output_O->data.dptr;
+  void *devPtrS = nullptr;
+
+  if (Aux_CTX_Tensors->size == 0) {
+    Aux_CTX_Tensors->size = 2;
+    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    output_S->data.dptr = nullptr;
+    output_S->data.shape = {b, h_q, max_seqlen_q, 1};
+    output_S->data.dtype = DType::kFloat32;
+    Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+    output_rng_state->data.dptr = nullptr;
+    output_rng_state->data.shape = {2};
+    output_rng_state->data.dtype = DType::kInt64;
+  } else if (Aux_CTX_Tensors->size == 2) {
+    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    devPtrS = output_S->data.dptr;
+    Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+    output_rng_state->data.dptr = rng_state->data.dptr;
+  } else {
+    NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
+  }
 
   size_t workspace_size = 0;
 
@@ -495,11 +537,11 @@ void fused_attn_aotriton_fwd_kvpacked(
     is_training, attn_scale, dropout, 
     qkv_layout,
     bias_type, attn_mask_type,
-    input_Q->data.dptr, devPtrK, devPtrV, 
-    output_M->data.dptr, output_O->data.dptr,
-    reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
-    reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1,
-    nvte_to_aotriton_dtype(Q_type),
+    devPtrQ, devPtrK, devPtrV,
+    devPtrS, devPtrO,
+    reinterpret_cast<const uint64_t *>(rng_state->data.dptr), 
+    reinterpret_cast<const uint64_t *>(rng_state->data.dptr) + 1,
+    nvte_to_aotriton_dtype(QKV_type),
     workspace->data.dptr,
     &workspace_size,
     stream);
@@ -526,34 +568,40 @@ void fused_attn_aotriton_bwd_kvpacked(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
   float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-  const Tensor* input_Q, const Tensor* input_KV, const Tensor* input_O, const Tensor* input_dO, const Tensor* input_Bias, 
+  const Tensor* input_Q, const Tensor* input_KV, const Tensor* input_O, const Tensor* input_dO,
+  const Tensor* output_S,
   Tensor* output_dQ, Tensor* output_dKV,
   const Tensor* input_cu_seqlens_q,
   const Tensor* input_cu_seqlens_kv,
-  const Tensor* input_M,
-  const Tensor* input_rng_state,
+  const Tensor* rng_state,
   Tensor* workspace,
   cudaStream_t stream){
 
 #ifdef USE_FUSED_ATTN_AOTRITON
-  const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
-  const NVTEDType KV_type = static_cast<NVTEDType>(input_KV->data.dtype);
+  const DType QKV_type = input_Q->data.dtype;
   //input tensor
+  void *devPtrQ = input_Q->data.dptr;
   void *devPtrKV = input_KV->data.dptr;
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
-    stride = nvte_dtype_size(Q_type) * h_kv * d;
+    stride = nvte_dtype_size(QKV_type) * h_kv * d;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
-    stride = nvte_dtype_size(Q_type) * d;
+    stride = nvte_dtype_size(QKV_type) * d;
   }
   void *devPtrK = devPtrKV;
   void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrKV) + stride);
 
   // output tensor
+  void *devPtrdQ = output_dQ->data.dptr;
   void *devPtrdKV = output_dKV->data.dptr;
   void *devPtrdK = devPtrdKV;
   void *devPtrdV = static_cast<void *>(static_cast<int8_t *>(devPtrdKV) + stride);
+
+  void *devPtrO = input_O->data.dptr;
+  void *devPtrdO = input_dO->data.dptr;
+
+  void *devPtrSoftmaxStats = output_S->data.dptr;
 
   size_t workspace_size = 0;
 
@@ -562,13 +610,13 @@ void fused_attn_aotriton_bwd_kvpacked(
     attn_scale, dropout, 
     qkv_layout,
     bias_type, attn_mask_type,
-    input_Q->data.dptr, devPtrK, devPtrV, 
-    input_O->data.dptr, input_M->data.dptr,
-    output_dQ->data.dptr, devPtrdK, devPtrdV, 
-    input_dO->data.dptr,
-    reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
-    reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1,
-    nvte_to_aotriton_dtype(Q_type),
+    devPtrQ, devPtrK, devPtrV, 
+    devPtrO, devPtrSoftmaxStats,
+    devPtrdQ, devPtrdK, devPtrdV, 
+    devPtrdO,
+    reinterpret_cast<const uint64_t *>(rng_state->data.dptr), 
+    reinterpret_cast<const uint64_t *>(rng_state->data.dptr) + 1,
+    nvte_to_aotriton_dtype(QKV_type),
     workspace->data.dptr,
     &workspace_size,
     stream);
@@ -595,19 +643,41 @@ void fused_attn_aotriton_fwd(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
   bool is_training, float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-  const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V, const Tensor* input_Bias, 
-  Tensor* output_O, Tensor* output_M, Tensor* output_rng_state,
+  const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V,
+  Tensor* output_O, NVTETensorPack *Aux_CTX_Tensors,
   const Tensor* input_cu_seqlens_q,
   const Tensor* input_cu_seqlens_kv,
-  const Tensor* input_rng_state,
+  const Tensor* rng_state,
   Tensor *workspace,
   cudaStream_t stream){
 
 #ifdef USE_FUSED_ATTN_AOTRITON
-  const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
-  const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
-  //save the input rng state to Aux_CTX_Tensors
-  output_rng_state->data.dptr = input_rng_state->data.dptr;
+  const DType QKV_type = input_Q->data.dtype;
+
+  void *devPtrQ = input_Q->data.dptr;
+  void *devPtrK = input_K->data.dptr;
+  void *devPtrV = input_V->data.dptr;
+  void *devPtrO = output_O->data.dptr;
+  void *devPtrS = nullptr;
+ 
+  if (Aux_CTX_Tensors->size == 0) {
+      Aux_CTX_Tensors->size = 2;
+      Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+      output_S->data.dptr = nullptr;
+      output_S->data.shape = {b, h_q, max_seqlen_q, 1};
+      output_S->data.dtype = DType::kFloat32;
+      Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+      output_rng_state->data.dptr = nullptr;
+      output_rng_state->data.shape = {2};
+      output_rng_state->data.dtype = DType::kInt64;
+  } else if (Aux_CTX_Tensors->size == 2) {
+    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    devPtrS = output_S->data.dptr;
+    Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+    output_rng_state->data.dptr = rng_state->data.dptr;
+  } else {
+    NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
+  }
 
   size_t workspace_size = 0;
 
@@ -616,11 +686,11 @@ void fused_attn_aotriton_fwd(
     is_training, attn_scale, dropout, 
     qkv_layout,
     bias_type, attn_mask_type,
-    input_Q->data.dptr, input_K->data.dptr, input_V->data.dptr, 
-    output_M->data.dptr, output_O->data.dptr,
-    reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
-    reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1,
-    nvte_to_aotriton_dtype(Q_type),
+    devPtrQ, devPtrK, devPtrV, 
+    devPtrS, devPtrO,
+    reinterpret_cast<const uint64_t *>(rng_state->data.dptr), 
+    reinterpret_cast<const uint64_t *>(rng_state->data.dptr) + 1,
+    nvte_to_aotriton_dtype(QKV_type),
     workspace->data.dptr,
     &workspace_size,
     stream);
@@ -647,18 +717,28 @@ void fused_attn_aotriton_bwd(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
   float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-  const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V, const Tensor* input_O, const Tensor* input_dO, const Tensor* input_Bias, 
+  const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V, const Tensor* input_O, const Tensor* input_dO,
+  const Tensor* output_S,
   Tensor* output_dQ, Tensor* output_dK, Tensor* output_dV,
   const Tensor* input_cu_seqlens_q,
   const Tensor* input_cu_seqlens_kv,
-  const Tensor* input_M,
-  const Tensor* input_rng_state,
+  const Tensor* rng_state,
   Tensor* workspace,
   cudaStream_t stream){
 
 #ifdef USE_FUSED_ATTN_AOTRITON
-  const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
-  const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
+  const DType QKV_type = input_Q->data.dtype;
+
+  void *devPtrQ = input_Q->data.dptr;
+  void *devPtrK = input_K->data.dptr;
+  void *devPtrV = input_V->data.dptr;
+  void *devPtrO = input_O->data.dptr;
+  void *devPtrdO = input_dO->data.dptr;
+  
+  void *devPtrdQ = output_dQ->data.dptr;
+  void *devPtrdK = output_dK->data.dptr;
+  void *devPtrdV = output_dV->data.dptr;
+  void *devPtrSoftmaxStats = output_S->data.dptr;
 
   size_t workspace_size = 0;
 
@@ -667,13 +747,13 @@ void fused_attn_aotriton_bwd(
     attn_scale, dropout, 
     qkv_layout,
     bias_type, attn_mask_type,
-    input_Q->data.dptr, input_K->data.dptr, input_V->data.dptr, 
-    input_O->data.dptr, input_M->data.dptr,
-    output_dQ->data.dptr, output_dK->data.dptr, output_dV->data.dptr, 
-    input_dO->data.dptr,
-    reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr), 
-    reinterpret_cast<const uint64_t *>(input_rng_state->data.dptr) + 1,
-    nvte_to_aotriton_dtype(Q_type),
+    devPtrQ, devPtrK, devPtrV, 
+    devPtrO, devPtrSoftmaxStats,
+    devPtrdQ, devPtrdK, devPtrdV, 
+    devPtrdO, 
+    reinterpret_cast<const uint64_t *>(rng_state->data.dptr), 
+    reinterpret_cast<const uint64_t *>(rng_state->data.dptr) + 1,
+    nvte_to_aotriton_dtype(QKV_type),
     workspace->data.dptr,
     &workspace_size,
     stream);

@@ -78,27 +78,40 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack,
 #else
 // ROCm fused attn has two backends: aotriton and ck
 // They both have the same shape and stride for softmax and rng aux tensors
+// CK now support bias features
 void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack,
                                        const CustomCallFusedAttnDescriptor *desc,
                                        NVTE_Bias_Type bias_type, NVTE_Fused_Attn_Backend backend,
                                        void *softmax_buf, void *rng_state_buf = nullptr,
                                        void *bias_buf = nullptr) {
-    auto input_batch = desc->input_batch;
-    auto attn_heads = desc->attn_heads;
-    auto q_max_seqlen = desc->q_max_seqlen;
-    auto kv_max_seqlen = desc->kv_max_seqlen;
+  auto input_batch = desc->input_batch;
+  auto bias_batch = desc->bias_batch;
+  auto attn_heads = desc->attn_heads;
+  auto bias_heads = desc->bias_heads;
+  auto q_max_seqlen = desc->q_max_seqlen;
+  auto kv_max_seqlen = desc->kv_max_seqlen;
 
-    tensor_pack->size = 2;
-    Tensor *softmax_aux = reinterpret_cast<Tensor *>(tensor_pack->tensors[0]);
-    softmax_aux->data.dptr = softmax_buf;
-    softmax_aux->data.shape =
-        std::vector<size_t>{input_batch, attn_heads, q_max_seqlen, 1};
-    softmax_aux->data.dtype = DType::kFloat32;
+  tensor_pack->size = 2;
+  Tensor *softmax_aux = reinterpret_cast<Tensor *>(tensor_pack->tensors[0]);
+  softmax_aux->data.dptr = softmax_buf;
+  softmax_aux->data.shape =
+      std::vector<size_t>{input_batch, attn_heads, q_max_seqlen, 1};
+  softmax_aux->data.dtype = DType::kFloat32;
 
-    Tensor *rng_state_aux = reinterpret_cast<Tensor *>(tensor_pack->tensors[1]);
-    rng_state_aux->data.dptr = rng_state_buf;
-    rng_state_aux->data.shape = std::vector<size_t>{2};
-    rng_state_aux->data.dtype = DType::kInt64;
+  Tensor *rng_state_aux = reinterpret_cast<Tensor *>(tensor_pack->tensors[1]);
+  rng_state_aux->data.dptr = rng_state_buf;
+  rng_state_aux->data.shape = std::vector<size_t>{2};
+  rng_state_aux->data.dtype = DType::kInt64;
+
+  // include bias if enabled
+  if (bias_type != NVTE_Bias_Type::NVTE_NO_BIAS && bias_type != NVTE_Bias_Type::NVTE_ALIBI) {
+    tensor_pack->size = 3;
+    Tensor *bias_aux = reinterpret_cast<Tensor *>(tensor_pack->tensors[2]);
+    bias_aux->data.dptr = bias_buf;
+    bias_aux->data.shape =
+        std::vector<size_t>{bias_batch, bias_heads, q_max_seqlen, kv_max_seqlen};
+    bias_aux->data.dtype = desc->dtype;
+  }
 }
 #endif
 

@@ -52,7 +52,8 @@ file(COPY_FILE ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/fmha_bwd.hpp ${CMAKE_C
 set(ck_fused_attn_SOURCES)
 list(APPEND ck_fused_attn_SOURCES
        src/ck_fused_attn_fwd.cpp
-       src/ck_fused_attn_bwd.cpp)
+       src/ck_fused_attn_bwd.cpp
+       src/ck_fused_attn_utils.cpp)
 
 file(GLOB_RECURSE CK_FA_FILES "${CMAKE_CURRENT_SOURCE_DIR}/gen_src/*.cpp")
 list(APPEND ck_fused_attn_SOURCES ${CK_FA_FILES})

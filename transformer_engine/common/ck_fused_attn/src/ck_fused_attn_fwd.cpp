@@ -13,22 +13,26 @@
 #include "bias.hpp"
 #include "mask.hpp"
 #include "fmha_fwd.hpp"
+#include "ck_fused_attn_utils.hpp"
 
 namespace ck_fused_attn{
 
 hipError_t ck_attn_fwd(
   DType dtype,
-  uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d,
+  uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d, uint64_t bias_b, uint64_t bias_h,
   const void* q_ptr, 
   uint64_t stride_b_q, uint64_t stride_h_q, uint64_t stride_s_q,
   const void* k_ptr, 
   uint64_t stride_b_k, uint64_t stride_h_k, uint64_t stride_s_k,
   const void* v_ptr, 
   uint64_t stride_b_v, uint64_t stride_h_v, uint64_t stride_s_v,
+  const void* bias_ptr,
+  const void* alibi_slope_ptr,
   bool is_training,
   float scaling_factor,
   float dropout_probability,
   uint64_t philox_seed, uint64_t philox_offset,
+  BiasType attn_bias_type,
   MaskType attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,
   void* o_ptr, 
@@ -57,12 +61,22 @@ hipError_t ck_attn_fwd(
   bool is_v_rowmajor = true;
   bool do_fp8_static_quant = false;
 
-  //TODO: support bias and alibi
-  bias_enum bias_type = bias_enum::no_bias;
+  bias_enum bias_type;
+  BiasShape bias_shape; 
+  if (attn_bias_type==BiasType::no_bias){
+    bias_type = bias_enum::no_bias;
+  }else if (attn_bias_type==BiasType::elementwise_bias){
+    bias_type = bias_enum::elementwise_bias;
+    bias_shape = get_bias_shape(b, h, bias_b, bias_h);
+  }else if (attn_bias_type==BiasType::alibi){
+    bias_type = bias_enum::alibi;
+  }else{
+    //TODO: better error out system
+    throw std::runtime_error("Invalid bias_type in ck_fused_attn.");
+  }
+
   mask_enum mask_type;
   ck_tile::index_t left, right;
-  ck_tile::stream_config stream_config{stream};
-  
   if (attn_mask_type == MaskType::no_mask){
     mask_type = mask_enum::no_mask;
   }else if(attn_mask_type == MaskType::mask_top_left){
@@ -75,6 +89,8 @@ hipError_t ck_attn_fwd(
   left = window_size_left;
   right = window_size_right;
   
+  ck_tile::stream_config stream_config{stream};
+
   ck_tile::index_t shape_seqlen_q = seqlen_q;
   ck_tile::index_t shape_seqlen_k = seqlen_k;
 
@@ -97,15 +113,15 @@ hipError_t ck_attn_fwd(
     const ck_tile::index_t stride_q = stride_s_q;
     const ck_tile::index_t stride_k = stride_s_k;
     const ck_tile::index_t stride_v = stride_s_v;
-    // TODO: support bias later
-    const ck_tile::index_t stride_bias = 0;
+    // bias is of shape [b, h , s_q, s_kv]
+    const ck_tile::index_t stride_bias = max_seqlen_k;
     const ck_tile::index_t stride_randval = max_seqlen_k;
     const ck_tile::index_t stride_o = stride_s_o;
     // setup nhead_stride_* arguments
     const ck_tile::index_t nhead_stride_q = stride_h_q;
     const ck_tile::index_t nhead_stride_k = stride_h_k;
     const ck_tile::index_t nhead_stride_v = stride_h_v;
-    const ck_tile::index_t nhead_stride_bias = 0;
+    const ck_tile::index_t nhead_stride_bias = (bias_shape==BiasShape::k1HSS || bias_shape==BiasShape::kBHSS) ? max_seqlen_q * max_seqlen_k: 0;
     //TODO: randval never used, can we remove it
     const ck_tile::index_t nhead_stride_randval =
         shape_seqlen_q * max_seqlen_k;
@@ -115,7 +131,7 @@ hipError_t ck_attn_fwd(
     const ck_tile::index_t batch_stride_q = stride_b_q;
     const ck_tile::index_t batch_stride_k = stride_b_k;
     const ck_tile::index_t batch_stride_v = stride_b_v;
-    const ck_tile::index_t batch_stride_bias = 0;
+    const ck_tile::index_t batch_stride_bias = (bias_shape==BiasShape::k11SS || bias_shape==BiasShape::k1HSS) ? 0: (bias_shape==BiasShape::kBHSS? bias_h* max_seqlen_q * max_seqlen_k: max_seqlen_q*max_seqlen_k);
     //TODO: randval never used, can we remove it
     const ck_tile::index_t batch_stride_randval =
         nhead * shape_seqlen_q * max_seqlen_k;
@@ -125,7 +141,7 @@ hipError_t ck_attn_fwd(
     return fmha_fwd_args{q_ptr,
                          k_ptr,
                          v_ptr,
-                         nullptr,//bias_ptr
+                         bias_type==bias_enum::alibi? alibi_slope_ptr :bias_ptr,
                          nullptr,//rand_val_ptr
                          nullptr, // lse_acc_ptr
                          nullptr, // o_acc_ptr
@@ -149,7 +165,7 @@ hipError_t ck_attn_fwd(
                          stride_q,
                          stride_k,
                          stride_v,
-                         stride_bias,
+                         bias_type==bias_enum::alibi? 0: stride_bias, // upstream TE only requires standard (vanilla) alibi slopes
                          stride_randval,
                          hdim_v, //stride_o_acc
                          stride_o,

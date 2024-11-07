@@ -200,7 +200,6 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
   // output_tensors = [O, nvte_aux_tensor_pack.tensors]
   std::vector<at::Tensor> output_tensors;
   output_tensors.push_back(O);
-#ifndef USE_ROCM
   for (size_t i = 0; i < nvte_aux_tensor_pack.size; ++i) {
     auto tensor = reinterpret_cast<transformer_engine::Tensor *>(nvte_aux_tensor_pack.tensors[i]);
     // allocate memory for nvte_aux_tensor_pack.tensors
@@ -225,24 +224,6 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
     output_tensors.push_back(output_tensor);
     tensor->data.dptr = output_tensor.data_ptr();
   }
-#else
-  //prepare the aux tensors
-  nvte_aux_tensor_pack.size = 2;
-  transformer_engine::Tensor* softmax_aux = reinterpret_cast<transformer_engine::Tensor*>(nvte_aux_tensor_pack.tensors[0]);
-  softmax_aux->data.dptr = nullptr;
-  softmax_aux->data.shape = {batch_size, num_attn_heads, max_seqlen, 1};
-  softmax_aux->data.dtype = transformer_engine::DType::kFloat32;
-  at::Tensor softmax_at_tensor;
-  softmax_at_tensor = allocateSpace(softmax_aux->data.shape, softmax_aux->data.dtype, false);
-  softmax_aux->data.dptr = softmax_at_tensor.data_ptr();
-  output_tensors.push_back(softmax_at_tensor);
-  
-  transformer_engine::Tensor* rng_state_aux = reinterpret_cast<transformer_engine::Tensor*>(nvte_aux_tensor_pack.tensors[1]);
-  rng_state_aux->data.dptr = rng_state.data_ptr();
-  rng_state_aux->data.shape = std::vector<size_t>{2};
-  rng_state_aux->data.dtype = transformer_engine::DType::kInt64;
-  output_tensors.push_back(rng_state);
-#endif
 
   // execute the kernel
   nvte_fused_attn_fwd_qkvpacked(
@@ -539,7 +520,6 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
   // output_tensors = [O, nvte_aux_tensor_pack.tensors]
   std::vector<at::Tensor> output_tensors;
   output_tensors.push_back(O);
-#ifndef USE_ROCM
   for (size_t i = 0; i < nvte_aux_tensor_pack.size; ++i) {
     auto tensor = reinterpret_cast<transformer_engine::Tensor *>(nvte_aux_tensor_pack.tensors[i]);
     // allocate memory for nvte_aux_tensor_pack.tensors
@@ -564,23 +544,6 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
     output_tensors.push_back(output_tensor);
     tensor->data.dptr = output_tensor.data_ptr();
   }
-#else
-  nvte_aux_tensor_pack.size = 2;
-  transformer_engine::Tensor* softmax_aux = reinterpret_cast<transformer_engine::Tensor*>(nvte_aux_tensor_pack.tensors[0]);
-  softmax_aux->data.dptr = nullptr;
-  softmax_aux->data.shape = {batch_size, num_attn_heads, max_seqlen_q, 1};
-  softmax_aux->data.dtype = transformer_engine::DType::kFloat32;
-  at::Tensor softmax_at_tensor;
-  softmax_at_tensor = allocateSpace(softmax_aux->data.shape, softmax_aux->data.dtype, false);
-  softmax_aux->data.dptr = softmax_at_tensor.data_ptr();
-  output_tensors.push_back(softmax_at_tensor);
-  
-  transformer_engine::Tensor* rng_state_aux = reinterpret_cast<transformer_engine::Tensor*>(nvte_aux_tensor_pack.tensors[1]);
-  rng_state_aux->data.dptr = rng_state.data_ptr();
-  rng_state_aux->data.shape = std::vector<size_t>{2};
-  rng_state_aux->data.dtype = transformer_engine::DType::kInt64;
-  output_tensors.push_back(rng_state);
-#endif
 
   // execute the kernel
   nvte_fused_attn_fwd_kvpacked(
@@ -915,7 +878,6 @@ std::vector<at::Tensor> fused_attn_fwd(
   // output_tensors = [O, nvte_aux_tensor_pack.tensors]
   std::vector<at::Tensor> output_tensors;
   output_tensors.push_back(O);
-#ifndef USE_ROCM
   for (size_t i = 0; i < nvte_aux_tensor_pack.size; ++i) {
     auto tensor = reinterpret_cast<transformer_engine::Tensor *>(nvte_aux_tensor_pack.tensors[i]);
     // allocate memory for nvte_aux_tensor_pack.tensors
@@ -940,24 +902,6 @@ std::vector<at::Tensor> fused_attn_fwd(
     output_tensors.push_back(output_tensor);
     tensor->data.dptr = output_tensor.data_ptr();
   }
-#else
-  nvte_aux_tensor_pack.size = 2;
-  transformer_engine::Tensor* softmax_aux = reinterpret_cast<transformer_engine::Tensor*>(nvte_aux_tensor_pack.tensors[0]);
-  softmax_aux->data.dptr = nullptr;
-  softmax_aux->data.shape = {batch_size, num_attn_heads, max_seqlen_q, 1};
-  softmax_aux->data.dtype = transformer_engine::DType::kFloat32;
-  at::Tensor softmax_at_tensor;
-  softmax_at_tensor = allocateSpace(softmax_aux->data.shape, softmax_aux->data.dtype, false);
-  softmax_aux->data.dptr = softmax_at_tensor.data_ptr();
-  output_tensors.push_back(softmax_at_tensor);
-
-  
-  transformer_engine::Tensor* rng_state_aux = reinterpret_cast<transformer_engine::Tensor*>(nvte_aux_tensor_pack.tensors[1]);
-  rng_state_aux->data.dptr = rng_state.data_ptr();
-  rng_state_aux->data.shape = std::vector<size_t>{2};
-  rng_state_aux->data.dtype = transformer_engine::DType::kInt64;
-  output_tensors.push_back(rng_state);
-#endif
 
   // execute the kernel
   nvte_fused_attn_fwd(te_Q.data(), te_K.data(), te_V.data(), te_Bias.data(), te_S.data(),

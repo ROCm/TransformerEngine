@@ -182,8 +182,6 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
   Tensor *input_output_S = reinterpret_cast<Tensor*>(S);
   Tensor *output_O = reinterpret_cast<Tensor*>(O);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
-  Tensor *output_M = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
-  Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
 
   auto ndim = input_QKV->data.shape.size();
   size_t b = input_cu_seqlens->data.shape[0] - 1;
@@ -213,7 +211,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
       is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
       window_size_left, window_size_right,
       input_QKV, input_Bias, 
-      output_O, output_M, output_rng_state,
+      output_O, Aux_CTX_Tensors,
       input_cu_seqlens,
       input_rng_state,
       wkspace,
@@ -222,8 +220,8 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
     fused_attn_aotriton_fwd_qkvpacked(
       b, h, max_seqlen, d,
       is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
-      input_QKV, input_Bias, 
-      output_O, output_M, output_rng_state,
+      input_QKV, 
+      output_O, Aux_CTX_Tensors,
       input_cu_seqlens,
       input_rng_state,
       wkspace,
@@ -250,14 +248,15 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
   const Tensor *input_QKV = reinterpret_cast<const Tensor*>(QKV);
   const Tensor *input_O = reinterpret_cast<const Tensor*>(O);
   const Tensor *input_dO = reinterpret_cast<const Tensor*>(dO);
-  Tensor *input_Bias = nullptr;
   Tensor *output_dQKV = reinterpret_cast<Tensor*>(dQKV);
+  Tensor *output_dBias = reinterpret_cast<Tensor *>(dBias);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
 
   // auxiliary tensors
-  const Tensor *input_M = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]); //softmax lse
+  const Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]); //softmax lse
   //extract the saved rng state from aux_ctx_tensor
   const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[1]);
+  Tensor *input_Bias = nullptr;
 
   auto ndim = input_QKV->data.shape.size();
   size_t b = input_cu_seqlens->data.shape[0] - 1;
@@ -282,15 +281,17 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
       max_seqlen, d, window_size_left, window_size_right);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
+    if((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)){
+      input_Bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+    }
     fused_attn_ck_bwd_qkvpacked(
       b, h, max_seqlen, d,
       attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
       window_size_left, window_size_right,
-      input_QKV, input_O, input_dO, input_Bias, 
-      output_dQKV,
+      input_QKV, input_O, input_dO, input_Bias, output_S,
+      output_dQKV, output_dBias,
       input_cu_seqlens,
-      input_M,
       input_rng_state,
       wkspace,
       stream);
@@ -299,10 +300,9 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
       b, h, max_seqlen, d,
       attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
-      input_QKV, input_O, input_dO, input_Bias, 
+      input_QKV, input_O, input_dO, output_S,
       output_dQKV,
       input_cu_seqlens,
-      input_M,
       input_rng_state,
       wkspace,
       stream);
@@ -333,9 +333,6 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
   Tensor *output_O = reinterpret_cast<Tensor*>(O);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
   
-  Tensor *output_M = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
-  Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
-
   size_t b = input_cu_seqlens_q->data.shape[0] - 1;
   auto ndim = input_Q->data.shape.size();
   size_t h_q = input_Q->data.shape[ndim - 2];
@@ -368,7 +365,7 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
       qkv_layout, bias_type, attn_mask_type,
       window_size_left, window_size_right,
       input_Q, input_KV, input_Bias, 
-      output_O, output_M, output_rng_state,
+      output_O, Aux_CTX_Tensors,
       input_cu_seqlens_q,
       input_cu_seqlens_kv,
       input_rng_state,
@@ -379,8 +376,8 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
       is_training, attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
-      input_Q, input_KV, input_Bias, 
-      output_O, output_M, output_rng_state,
+      input_Q, input_KV, 
+      output_O, Aux_CTX_Tensors,
       input_cu_seqlens_q,
       input_cu_seqlens_kv,
       input_rng_state,
@@ -409,13 +406,15 @@ void nvte_fused_attn_bwd_kvpacked(
   const Tensor *input_KV = reinterpret_cast<const Tensor*>(KV);
   const Tensor *input_O = reinterpret_cast<const Tensor*>(O);
   const Tensor *input_dO = reinterpret_cast<const Tensor*>(dO);
-  Tensor *input_Bias = nullptr;
   Tensor *output_dQ = reinterpret_cast<Tensor*>(dQ);
   Tensor *output_dKV = reinterpret_cast<Tensor*>(dKV);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
+  Tensor *output_dBias = reinterpret_cast<Tensor *>(dBias);
+
   // auxiliary tensors (to be propagated to the backward pass later)
-  const Tensor *input_M = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]); //softmax lse
+  const Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]); //softmax lse
   const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[1]);
+  Tensor *input_Bias = nullptr;
 
   size_t b = input_cu_seqlens_q->data.shape[0] - 1;
   auto ndim = input_Q->data.shape.size();
@@ -443,16 +442,19 @@ void nvte_fused_attn_bwd_kvpacked(
       max_seqlen_kv, d, window_size_left, window_size_right);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
+    if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
+      input_Bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+    }
     fused_attn_ck_bwd_kvpacked(
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
       attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
       window_size_left, window_size_right,
       input_Q, input_KV, input_O, input_dO, input_Bias, 
-      output_dQ, output_dKV,
+      output_S,
+      output_dQ, output_dKV, output_dBias,
       input_cu_seqlens_q,
       input_cu_seqlens_kv,
-      input_M,
       input_rng_state,
       wkspace,
       stream);
@@ -461,11 +463,11 @@ void nvte_fused_attn_bwd_kvpacked(
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
       attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
-      input_Q, input_KV, input_O, input_dO, input_Bias, 
+      input_Q, input_KV, input_O, input_dO, 
+      output_S,
       output_dQ, output_dKV,
       input_cu_seqlens_q,
       input_cu_seqlens_kv,
-      input_M,
       input_rng_state,
       wkspace,
       stream);
@@ -496,8 +498,6 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   const Tensor *input_Bias = reinterpret_cast<const Tensor*>(Bias);
   Tensor *output_O = reinterpret_cast<Tensor*>(O);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
-  Tensor *output_M = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
-  Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
 
   auto ndim = input_Q->data.shape.size();
   size_t b = input_cu_seqlens_q->data.shape[0] - 1;
@@ -522,7 +522,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       qkv_layout, bias_type, attn_mask_type,
       window_size_left, window_size_right,
       input_Q, input_K, input_V, input_Bias, 
-      output_O, output_M, output_rng_state,
+      output_O, Aux_CTX_Tensors,
       input_cu_seqlens_q,
       input_cu_seqlens_kv,
       input_rng_state,
@@ -533,8 +533,8 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
       is_training, attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
-      input_Q, input_K, input_V, input_Bias, 
-      output_O, output_M, output_rng_state,
+      input_Q, input_K, input_V, 
+      output_O, Aux_CTX_Tensors,
       input_cu_seqlens_q,
       input_cu_seqlens_kv,
       input_rng_state,
@@ -566,13 +566,16 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   const Tensor *input_V = reinterpret_cast<const Tensor*>(V);
   const Tensor *input_O = reinterpret_cast<const Tensor*>(O);
   const Tensor *input_dO = reinterpret_cast<const Tensor*>(dO);
-  Tensor *input_Bias = nullptr;
+
   Tensor *output_dQ = reinterpret_cast<Tensor*>(dQ);
   Tensor *output_dK = reinterpret_cast<Tensor*>(dK);
   Tensor *output_dV = reinterpret_cast<Tensor*>(dV);
-  const Tensor *input_M = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]); //softmax lse
-  const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[1]);
+  Tensor *output_dBias = reinterpret_cast<Tensor *>(dBias);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
+
+  const Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]); //softmax lse
+  const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[1]);
+  Tensor *input_Bias = nullptr;
 
   auto ndim = input_Q->data.shape.size();
   size_t b = input_cu_seqlens_q->data.shape[0] - 1;
@@ -591,16 +594,19 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       max_seqlen_kv, d, window_size_left, window_size_right);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
+    if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
+      input_Bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+    }
     fused_attn_ck_bwd(
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
       attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
       window_size_left, window_size_right,
       input_Q, input_K, input_V, input_O, input_dO, input_Bias, 
-      output_dQ, output_dK, output_dV,
+      output_S,
+      output_dQ, output_dK, output_dV, output_dBias,
       input_cu_seqlens_q,
       input_cu_seqlens_kv,
-      input_M,
       input_rng_state,
       wkspace,
       stream);
@@ -609,11 +615,11 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
       attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
-      input_Q, input_K, input_V, input_O, input_dO, input_Bias, 
+      input_Q, input_K, input_V, input_O, input_dO,
+      output_S,
       output_dQ, output_dK, output_dV,
       input_cu_seqlens_q,
       input_cu_seqlens_kv,
-      input_M,
       input_rng_state,
       wkspace,
       stream);

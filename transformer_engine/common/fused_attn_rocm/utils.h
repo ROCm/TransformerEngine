@@ -34,7 +34,7 @@ void generateMatrixStrides(
             uint64_t d, uint64_t* stride,
             NVTE_QKV_Layout layout, NVTE_QKV_Matrix matrix);
 
-size_t nvte_dtype_size(NVTEDType t_dtype);
+size_t nvte_dtype_size(DType t_dtype);
 
 
 }  // namespace fused_attn_rocm
