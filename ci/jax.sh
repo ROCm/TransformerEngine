@@ -53,33 +53,37 @@ install_prerequisites() {
 
 TEST_DIR=${TE_PATH}tests/jax
 
-run_1() {
-    check_level 1 || return
+run() {
+    check_level $1 || return
+    shift
+    _test_name_tag=`get_test_name_tag $1 $_fus_attn`
+    check_test_filter $_test_name_tag || return
     echo "Run [$_fus_attn] $*"
-    pytest "$TEST_DIR/$@" || test_run_error
+    pytest `get_pytest_junitxml $_test_name_tag` "$TEST_DIR/$@" || test_run_error
+    echo "Done [$_fus_attn] $1"
 }
 
 run_test_config() {
     echo ====== Run with Fused attention backend: $_fus_attn =====
-    run_1 test_custom_call_compute.py
-    run_1 test_functions.py
-    run_1 test_fused_attn.py
-    run_1 test_helper.py
+    run 1 test_custom_call_compute.py
+    run 1 test_functions.py
+    run 1 test_fused_attn.py
+    run 1 test_helper.py
     if [ $_fus_attn != "unfused" ]; then
         #Layer tests control Fused attn so we can only play with backend
-        run_1 test_layer.py
-        run_1 test_praxis_layers.py
+        run 1 test_layer.py
+        run 1 test_praxis_layers.py
     fi
-    run_1 test_sharding.py
-    run_1 test_softmax.py
+    run 1 test_sharding.py
+    run 1 test_softmax.py
 }
 
 run_test_config_mgpu() {
     echo ====== Run mGPU with Fused attention backend: $_fus_attn =====
-    run_1 test_distributed_fused_attn.py
-    run_1 test_distributed_layernorm.py
-    run_1 test_distributed_layernorm_mlp.py
-    run_1 test_distributed_softmax.py
+    run 1 test_distributed_fused_attn.py
+    run 1 test_distributed_layernorm.py
+    run 1 test_distributed_layernorm_mlp.py
+    run 1 test_distributed_softmax.py
 }
 
 # Single config mode, run it synchroniously and return result

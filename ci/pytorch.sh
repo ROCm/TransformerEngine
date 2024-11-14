@@ -18,48 +18,50 @@ install_prerequisites() {
     fi
 }
 
-run_1() {
-    check_level 1 || return
+run() {
+    check_level $1 || return
+    shift
+    _test_name_tag=`get_test_name_tag $1 $_gemm-$_fus_attn`
+    check_test_filter $_test_name_tag || return
     echo "Run [$_gemm, $_fus_attn] $@"
-    pytest -n4 "$TEST_DIR/$@" || test_run_error
-}
-
-run_3() {
-    check_level 3 || return
-    echo "Run [$_gemm, $_fus_attn] $@"
-    pytest -n4 "$TEST_DIR/$@" || test_run_error
+    : ${_WORKERS_COUNT:=1}
+    pytest `get_pytest_junitxml $_test_name_tag` \
+           -n$_WORKERS_COUNT --max-worker-restart=$_WORKERS_COUNT "$TEST_DIR/$@" || test_run_error
+    echo "Done [$_gemm, $_fus_attn] $1"
 }
 
 run_test_config(){
     echo ====== Run with GEMM backend: $_gemm and Fused attention backend: $_fus_attn =====
+    _WORKERS_COUNT=4
     if [ $_gemm != "rocblas" ]; then
-        run_1 test_cuda_graphs.py
+        run 1 test_cuda_graphs.py
         _graph_filter=""
     else
         _graph_filter="not graph"
     fi
-    run_1 test_deferred_init.py
-    run_1 test_float8tensor.py
-    run_1 test_fused_optimizer.py
-    run_1 test_fused_rope.py
-    run_1 test_gqa.py
-    run_1 test_jit.py
-    run_1 test_multi_tensor.py
-    run_1 test_numerics.py -k "$_graph_filter"
-    run_3 test_onnx_export.py
-    run_1 test_recipe.py
-    run_1 test_sanity.py -k "$_graph_filter"
-    run_1 test_torch_save_load.py
+    run 1 test_deferred_init.py
+    run 1 test_float8tensor.py
+    run 1 test_fused_optimizer.py
+    run 1 test_fused_rope.py
+    run 1 test_gqa.py
+    run 1 test_jit.py
+    run 1 test_multi_tensor.py
+    run 1 test_numerics.py -k "$_graph_filter"
+    run 3 test_onnx_export.py
+    run 1 test_recipe.py
+    run 1 test_sanity.py -k "$_graph_filter"
+    run 1 test_torch_save_load.py
     if [ $_fus_attn != "unfused" ]; then
-        run_1 fused_attn/test_fused_attn.py
+        run 1 fused_attn/test_fused_attn.py
     fi
 }
 
 run_test_config_mgpu(){
     echo ====== Run mGPU with GEMM backend: $_gemm and Fused attention backend: $_fus_attn =====
-    run_1 test_fused_optimizer.py
+    _WORKERS_COUNT=1
+    run 1 test_fused_optimizer.py
     if [ $_fus_attn != "unfused" ]; then
-        run_1 fused_attn/test_fused_attn_with_cp.py
+        run 1 fused_attn/test_fused_attn_with_cp.py
     fi
 }
 

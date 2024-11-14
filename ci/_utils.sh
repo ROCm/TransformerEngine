@@ -7,6 +7,7 @@ realpath $DIR >/dev/null 2>/dev/null
 test $? -ne 0 && REALPATH=echo
 
 : ${TE_PATH:=`$REALPATH $DIR/..`/}
+export TE_PATH
 TEST_DIR=${TE_PATH}tests/
 
 : ${TEST_LEVEL:=99} #Run all tests by default
@@ -178,4 +179,25 @@ finish_test_jobs() {
 
 get_test_config_list() {
     echo $_TEST_CONFIG_LIST
+}
+
+get_test_name_tag() {
+    _fname=${1##*/}
+    _test_name=${_fname%%.*}
+    test -n "$2" && _test_suffix=.$2
+    echo "$_test_name$_test_suffix"
+}
+
+get_pytest_junitxml() {
+    if [ -n "$JUNITXML_PREFIX$JUNITXML_SUFFIX" ]; then
+        echo "--junitxml=$JUNITXML_PREFIX$1$JUNITXML_SUFFIX"
+    fi
+}
+
+check_test_filter() {
+    test -z "$TEST_LIST" && return 0
+    for _test in $TEST_LIST; do
+        test "$_test" = "$1" && return 0
+    done
+    return 1
 }
