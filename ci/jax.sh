@@ -10,7 +10,9 @@ DIR=`dirname $0`
 install_praxis() {
     git clone https://github.com/google/praxis.git && cd praxis || return $?
     git checkout $_praxis_commit || return $?
+    #Remove unndcessary dependencies for testing and make sure JAX is not upgraded
     sed -i -e 's/^flax/#flax/;s/^jax /#jax /;s/^opt/#opt/;s/^tensorflow/#tensorflow/' requirements.in || return $?
+    pip list | awk '/jax/ { print $1"=="$2}' > requirements.in
     pip install . --log build.log
     rc=$?
     if [ $rc -ne 0 ]; then
