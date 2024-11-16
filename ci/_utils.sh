@@ -195,9 +195,11 @@ get_pytest_junitxml() {
 }
 
 check_test_filter() {
-    test -z "$TEST_LIST" && return 0
-    for _test in $TEST_LIST; do
-        test "$_test" = "$1" && return 0
+    test -z "$TEST_FILTER" && return 0
+    for _tf in $TEST_FILTER; do
+        case "$1" in
+        $_tf) return 0
+        esac
     done
     return 1
 }
