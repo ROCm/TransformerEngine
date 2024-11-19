@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -206,11 +208,11 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
 
   // Clear buffers
   if (params.fp8_out) {
-    cudaMemsetAsync(params.amax, 0, rmsnorm::product(z->amax.shape) * typeToSize(z->amax.dtype),
+    (void)cudaMemsetAsync(params.amax, 0, rmsnorm::product(z->amax.shape) * typeToSize(z->amax.dtype),
                     stream);
   }
   if (launch_params.barrier_size > 0) {
-    cudaMemsetAsync(params.barrier, 0,
+    (void)cudaMemsetAsync(params.barrier, 0,
                     rmsnorm::product(barrier->data.shape) * typeToSize(barrier->data.dtype),
                     stream);
   }
@@ -319,7 +321,7 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
   if (launch_params.barrier_size > 0) {
     params.workspace = workspace->data.dptr;
     params.barrier = reinterpret_cast<int *>(barrier->data.dptr);
-    cudaMemsetAsync(params.barrier, 0,
+    (void)cudaMemsetAsync(params.barrier, 0,
                     rmsnorm::product(barrier->data.shape) * typeToSize(barrier->data.dtype),
                     stream);
   }

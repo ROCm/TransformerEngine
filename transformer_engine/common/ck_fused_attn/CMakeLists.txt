@@ -63,7 +63,7 @@ endforeach()
 
 add_library(ck_fused_attn STATIC ${ck_fused_attn_SOURCES})
 set(CK_FUSED_ATTN_COMPILE_OPTIONS)
-list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -Wno-undefined-func-template -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=0 -ffast-math -fgpu-flush-denormals-to-zero -Wno-float-equal -ftemplate-backtrace-limit=0  -fPIC  -Wno-gnu-line-marker -Wunused-variable -Werror)
+list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -Wno-undefined-func-template -DCK_TILE_FMHA_FWD_FAST_EXP2=1 -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=0 -fgpu-flush-denormals-to-zero -Wno-float-equal -ftemplate-backtrace-limit=0  -fPIC  -Wno-gnu-line-marker -Wunused-variable -Werror)
 foreach(rocm_arch ${CK_FUSED_ATTN_TARGET_GPUS})
   list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS --offload-arch=${rocm_arch})
 endforeach()

@@ -220,16 +220,44 @@ If you want to check that only previously tuned algorithms are used by your appl
 Fused Attention Backends on ROCm
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Currently ROCm TE supports two backends, AOTriton and CK, for fused attention. 
-To enable specific backends, the following environment variables can be used:
+To enable specific backends in compilation and/or in runtime, the following environment variables can be used:
 
 * NVTE_FUSED_ATTN - enable the fused attention, default = 1;
 * NVTE_FUSED_ATTN_CK - enable the CK backend, default = 1;
 * NVTE_FUSED_ATTN_AOTRITON - enable the AOTriton backend, default = 1.
 
+Setting env NVTE_FUSED_ATTN_<BACKEND>=0 in compilation will skip the build of the specific backend, which saves the overall building time. 
+Setting env NVTE_FUSED_ATTN_<BACKEND>=0 in runtime provides the option to choose specific backends in runtime. 
+Note that one backend can be enabled in compilation but disabled in runtime. 
+However, if one backend is disabled in compilation, the same env NVTE_FUSED_ATTN_<BACKEND>=0 is required during runtime. 
+Otherwise TE will error out that the specific backend is not compiled. 
+
 NVTE_FUSED_ATTN has higher priority than NVTE_FUSED_ATTN_CK and NVTE_FUSED_ATTN_AOTRITON. 
 NVTE_FUSED_ATTN=0 will use the TE unfused attention even if NVTE_FUSED_ATTN_CK or NVTE_FUSED_ATTN_AOTRITON is set. 
 Fused attention backends are chosen according to the match results between the actual problem config and the support matrix of the specific backend. 
 For the scenario that both backends are enabled and match the problem configuration, the CK backend will be chosen with higher priority. 
+
+Experimental Triton Kernels on ROCm
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Most CUDA kernels in Transformer Engine are hipified to run on ROCm. While the hipifiled CUDA kernels are functional, they are not necessarily optimal
+on ROCm. We added some Triton kernels to TE ROCm to improve the performance over the hipified kernels. Currently, we have integrated Triton kernels
+for cast_transpose and cast_transpose_bgrad, which are commonly used in fp8 training. This feature is still experimental as it requires relatievely newer
+version of Pytorch+Triton, which is not available in ROCm 6.2 Pytorch release docker images. Also, it only works on Pytorch extension as JAX extension 
+does not use it.
+
+To use this feature, you will need to first uninstall Pytorch and get the nightly version:
+
+.. code-block:: bash
+
+pip3 uninstall -y torch
+pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/rocm6.2
+
+Then at runtime, you can enable this feature using the environment variable:
+
+.. code-block:: bash
+
+export NVTE_USE_CAST_TRANSPOSE_TRITON=1
+
 
 Transformer Engine
 ******************

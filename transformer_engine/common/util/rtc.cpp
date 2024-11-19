@@ -76,7 +76,7 @@ Kernel::~Kernel() {
     // Unload CUDA modules if needed
     if (modules_[device_id] != null_module) {
 #ifdef __HIP_PLATFORM_AMD__
-      cuda_driver::call("hipModuleUnload", modules_[device_id]);
+      (void)cuda_driver::call("hipModuleUnload", modules_[device_id]);
 #else
       CUdevice device;
       CUcontext context;

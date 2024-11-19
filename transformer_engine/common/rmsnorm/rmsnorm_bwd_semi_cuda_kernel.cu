@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2023, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -57,9 +57,9 @@ void launch_tuned_(LaunchParams<BwdParams> &launch_params,
     dim3 grid(ctas_per_row * ctas_per_col);
     dim3 block(Kernel_traits::THREADS_PER_CTA);
     void *params_ = reinterpret_cast<void *>(&launch_params.params);
-    cudaLaunchCooperativeKernel(reinterpret_cast<void *>(kernel), grid, block,
-                                reinterpret_cast<void **>(&params_), Kernel_traits::SMEM_BYTES,
-                                stream);
+    (void)cudaLaunchCooperativeKernel(reinterpret_cast<void *>(kernel), grid, block,
+                                      reinterpret_cast<void **>(&params_),
+                                      Kernel_traits::SMEM_BYTES, stream);
   }
 
   using Kernel_traits_f =
@@ -91,8 +91,8 @@ void launch_general_(LaunchParams<BwdParams> &launch_params,
   int ctas_per_row = launch_params.params.ctas_per_row;
   if (configure_params) {
     int ctas_per_sm;
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&ctas_per_sm, kernel,
-                                                  Kernel_traits::THREADS_PER_CTA, 0);
+    (void)cudaOccupancyMaxActiveBlocksPerMultiprocessor(&ctas_per_sm, kernel,
+                                                        Kernel_traits::THREADS_PER_CTA, 0);
     const int max_ctas = launch_params.multiprocessorCount * ctas_per_sm;
     ctas_per_row = ceil_div(cols, HIDDEN_SIZE);
     ctas_per_col = std::min(ceil_div(rows, WARPS_M), max_ctas / ctas_per_row);
@@ -117,8 +117,8 @@ void launch_general_(LaunchParams<BwdParams> &launch_params,
     kernel<<<grid, block, 0, stream>>>(launch_params.params);
   } else {
     void *params_ = reinterpret_cast<void *>(&launch_params.params);
-    cudaLaunchCooperativeKernel(reinterpret_cast<void *>(kernel), grid, block,
-                                reinterpret_cast<void **>(&params_), 0, stream);
+    (void)cudaLaunchCooperativeKernel(reinterpret_cast<void *>(kernel), grid, block,
+                                      reinterpret_cast<void **>(&params_), 0, stream);
   }
 
   // Launch finalization kernel

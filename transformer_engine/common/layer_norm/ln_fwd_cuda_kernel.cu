@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2022-2023, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -56,8 +56,8 @@ void launch_tuned_(LaunchParams<FwdParams> &launch_params,
     dim3 grid(ctas_per_row * ctas_per_col);
     dim3 block(Kernel_traits::THREADS_PER_CTA);
     void *params_ = reinterpret_cast<void *>(&launch_params.params);
-    cudaLaunchCooperativeKernel((void *)kernel, grid, block, (void **)&params_,  // NOLINT(*)
-                                Kernel_traits::SMEM_BYTES_FWD, stream);
+    (void)cudaLaunchCooperativeKernel((void *)kernel, grid, block, (void **)&params_,  // NOLINT(*)
+                                      Kernel_traits::SMEM_BYTES_FWD, stream);
   }
 }
 
@@ -103,8 +103,8 @@ void launch_general_(LaunchParams<FwdParams> &launch_params,
     kernel<<<grid, block, 0, stream>>>(launch_params.params);
   } else {
     void *params_ = reinterpret_cast<void *>(&launch_params.params);
-    cudaLaunchCooperativeKernel(reinterpret_cast<void *>(kernel), grid, block,
-                                reinterpret_cast<void **>(&params_), 0, stream);
+    (void)cudaLaunchCooperativeKernel(reinterpret_cast<void *>(kernel), grid, block,
+                                      reinterpret_cast<void **>(&params_), 0, stream);
   }
 }
 

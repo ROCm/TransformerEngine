@@ -7,10 +7,12 @@
 
 #include <iostream>
 #include <string>
+#ifdef USE_FUSED_ATTN_AOTRITON
 #include <aotriton/dtypes.h>
 #include <aotriton/flash.h>
 #include <aotriton/runtime.h>
 #include <aotriton/util.h>
+#endif // USE_FUSED_ATTN_AOTRITON
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
 #include "fused_attn_aotriton.h"
@@ -33,6 +35,7 @@ bool is_aotriton_backend_supported(
   int64_t window_size_left,
   int64_t window_size_right) {
 
+#ifdef USE_FUSED_ATTN_AOTRITON
   //TODO: release after TE integrates swa into AOTriton
   bool is_no_mask_window_size= window_size_left == -1 && window_size_right == -1;
   bool is_causal_mask_window_size = window_size_left ==-1 && window_size_right ==0;
@@ -88,9 +91,14 @@ bool is_aotriton_backend_supported(
   }
 
   return true;
+#else
+  NVTE_ERROR("AOTriton backend not compiled.");
+  return false;
+#endif // USE_FUSED_ATTN_AOTRITON
 }
 
 
+#ifdef USE_FUSED_ATTN_AOTRITON
 aotriton::DType nvte_to_aotriton_dtype(NVTEDType t_dtype){
 #define CAST_TYPE(aname, dtname) if (t_dtype == NVTEDType::aname) return aotriton::DType::dtname
   CAST_TYPE(kNVTEByte, kUInt8);
@@ -160,9 +168,9 @@ void fused_attn_aotriton_fwd_impl(
   //devPtrDropoutSeed and devPtrDropoutOffset are actually device ptrs
   uint64_t philox_seed, philox_offset;
   if(is_training && dropout_probability > 0.f){
-    cudaStreamSynchronize(stream);
-    cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
+    (void)cudaStreamSynchronize(stream);
+    (void)cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
+    (void)cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
   }
 
   bool nvte_log_aotriton_config = false;
@@ -267,9 +275,9 @@ void fused_attn_aotriton_bwd_impl(
 
   uint64_t philox_seed, philox_offset;
   if(dropout_probability > 0.f){
-    cudaStreamSynchronize(stream);
-    cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
+    (void)cudaStreamSynchronize(stream);
+    (void)cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
+    (void)cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
   }
 
   bool nvte_log_aotriton_config = false;
@@ -314,6 +322,7 @@ void fused_attn_aotriton_bwd_impl(
                            mask_type==NVTE_CAUSAL_MASK,
                            stream));
 }
+#endif // USE_FUSED_ATTN_AOTRITON
 }  // namespace fused_attn_rocm
 
 using namespace transformer_engine::fused_attn_rocm;
@@ -328,6 +337,7 @@ void fused_attn_aotriton_fwd_qkvpacked(
   Tensor *workspace,
   cudaStream_t stream){
 
+#ifdef USE_FUSED_ATTN_AOTRITON
   const NVTEDType QKV_type = static_cast<NVTEDType>(input_QKV->data.dtype);
   void *devPtrQKV = input_QKV->data.dptr;
   // determine the stride based on qkv layout
@@ -374,6 +384,9 @@ void fused_attn_aotriton_fwd_qkvpacked(
   } else {
     NVTE_ERROR("Unexpected workspace_size.");
   }
+#else
+  NVTE_ERROR("AOTriton backend not compiled.");
+#endif // USE_FUSED_ATTN_AOTRITON
 }
 
 void fused_attn_aotriton_bwd_qkvpacked(
@@ -388,6 +401,7 @@ void fused_attn_aotriton_bwd_qkvpacked(
   Tensor* workspace,
   cudaStream_t stream){
 
+#ifdef USE_FUSED_ATTN_AOTRITON
   const NVTEDType QKV_type = static_cast<NVTEDType>(input_QKV->data.dtype);
   //input tensor
   void *devPtrQKV = input_QKV->data.dptr;
@@ -439,6 +453,9 @@ void fused_attn_aotriton_bwd_qkvpacked(
   } else {
     NVTE_ERROR("Unexpected workspace_size.");
   }
+#else
+  NVTE_ERROR("AOTriton backend not compiled.");
+#endif // USE_FUSED_ATTN_AOTRITON
 }
 
 void fused_attn_aotriton_fwd_kvpacked(
@@ -453,6 +470,7 @@ void fused_attn_aotriton_fwd_kvpacked(
   Tensor *workspace,
   cudaStream_t stream){
 
+#ifdef USE_FUSED_ATTN_AOTRITON
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_KV->data.dtype);
   //input tensor
@@ -499,6 +517,9 @@ void fused_attn_aotriton_fwd_kvpacked(
   } else {
     NVTE_ERROR("Unexpected workspace_size.");
   }
+#else
+  NVTE_ERROR("AOTriton backend not compiled.");
+#endif // USE_FUSED_ATTN_AOTRITON
 }
 
 void fused_attn_aotriton_bwd_kvpacked(
@@ -514,6 +535,7 @@ void fused_attn_aotriton_bwd_kvpacked(
   Tensor* workspace,
   cudaStream_t stream){
 
+#ifdef USE_FUSED_ATTN_AOTRITON
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_KV->data.dtype);
   //input tensor
@@ -564,6 +586,9 @@ void fused_attn_aotriton_bwd_kvpacked(
   } else {
     NVTE_ERROR("Unexpected workspace_size.");
   }
+#else
+  NVTE_ERROR("AOTriton backend not compiled.");
+#endif // USE_FUSED_ATTN_AOTRITON
 }
 
 void fused_attn_aotriton_fwd(
@@ -578,6 +603,7 @@ void fused_attn_aotriton_fwd(
   Tensor *workspace,
   cudaStream_t stream){
 
+#ifdef USE_FUSED_ATTN_AOTRITON
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
   //save the input rng state to Aux_CTX_Tensors
@@ -612,6 +638,9 @@ void fused_attn_aotriton_fwd(
   } else {
     NVTE_ERROR("Unexpected workspace_size.");
   }
+#else
+  NVTE_ERROR("AOTriton backend not compiled.");
+#endif // USE_FUSED_ATTN_AOTRITON
 }
 
 void fused_attn_aotriton_bwd(
@@ -627,6 +656,7 @@ void fused_attn_aotriton_bwd(
   Tensor* workspace,
   cudaStream_t stream){
 
+#ifdef USE_FUSED_ATTN_AOTRITON
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
 
@@ -661,6 +691,9 @@ void fused_attn_aotriton_bwd(
   } else {
     NVTE_ERROR("Unexpected workspace_size.");
   }
+#else
+  NVTE_ERROR("AOTriton backend not compiled.");
+#endif // USE_FUSED_ATTN_AOTRITON
 }
 
 }  // namespace transformer_engine

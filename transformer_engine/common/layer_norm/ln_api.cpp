@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -245,11 +247,11 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
 
   // Clear buffers
   if (params.fp8_out) {
-    cudaMemsetAsync(params.amax, 0, layer_norm::product(z->amax.shape) * typeToSize(z->amax.dtype),
+    (void)cudaMemsetAsync(params.amax, 0, layer_norm::product(z->amax.shape) * typeToSize(z->amax.dtype),
                     stream);
   }
   if (launch_params.barrier_size > 0) {
-    cudaMemsetAsync(params.barrier, 0,
+    (void)cudaMemsetAsync(params.barrier, 0,
                     layer_norm::product(barrier->data.shape) * typeToSize(barrier->data.dtype),
                     stream);
   }
@@ -377,7 +379,7 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
   if (launch_params.barrier_size > 0) {
     params.workspace = workspace->data.dptr;
     params.barrier = reinterpret_cast<int*>(barrier->data.dptr);
-    cudaMemsetAsync(params.barrier, 0,
+    (void)cudaMemsetAsync(params.barrier, 0,
                     layer_norm::product(barrier->data.shape) * typeToSize(barrier->data.dtype),
                     stream);
   }

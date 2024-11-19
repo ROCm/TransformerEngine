@@ -464,10 +464,17 @@ def get_attention_backend(
                     " for FP8"
                 )
                 use_fused_attention = False
-            elif window_size[1] != 0 or attention_dropout != 0.0 or qkv_format == "thd":
+            elif (not IS_HIP_EXTENSION) and (window_size[1] != 0 or attention_dropout != 0.0 or qkv_format == "thd"):
                 logger.debug(
                     "Disabling FusedAttention as it only supports sliding window attention "
                     "with causal mask, no dropout, and qkv_format = bshd/sbhd"
+                )
+                use_fused_attention = False
+            # ROCm TE can support generic sliding window with dropout
+            elif IS_HIP_EXTENSION and qkv_format == "thd":
+                logger.debug(
+                    "Disabling ROCm FusedAttention as it only supports sliding window attention "
+                    "with qkv_format = bshd/sbhd"
                 )
                 use_fused_attention = False
             elif context_parallel:
@@ -505,7 +512,6 @@ def get_attention_backend(
                 "flash-attn 2.3+ and no context parallelism"
             )
             use_flash_attention = False
-
     # Filter: Attention bias
     #    backend                 |      bias types              | ALiBi diagonal alignment
     # ---------------------------------------------------------------------------------

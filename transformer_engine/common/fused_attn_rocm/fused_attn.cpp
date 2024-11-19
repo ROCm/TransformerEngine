@@ -6,6 +6,7 @@
 
 #include <iostream>
 #include <string>
+#include <tuple>
 #include "transformer_engine/fused_attn.h"
 #include "fused_attn_aotriton.h"
 #include "fused_attn_ck.h"
@@ -65,6 +66,39 @@ NVTE_QKV_Format nvte_get_qkv_format(NVTE_QKV_Layout qkv_layout) {
   }
 }
 
+// check if sliding window size is compliant with attention mask type
+// Follow from upstream NVTE pytorch check_set_window_size (https://github.com/NVIDIA/TransformerEngine/blob/7b284fef07cd3093d2670142c67cdd548828634b/transformer_engine/pytorch/attention.py#L5129)
+//         attn_mask_type                              |   window_size
+//    -------------------------------------------------------------------------
+//    no_mask, padding, arbitrary                      | (-1, -1) or (>=0, >=0)
+//    causal, padding_causal                           | (-1,  0) or (>=0, 0)
+//    causal_bottom_right, padding_causal_bottom_right | (-1,  0) or (>=0, 0)
+std::pair<int64_t, int64_t> check_set_window_size(NVTE_Mask_Type attn_mask_type, std::pair<int64_t, int64_t> window_size){
+  //mask_type contain causal
+  if(attn_mask_type==NVTE_CAUSAL_MASK || attn_mask_type==NVTE_PADDING_CAUSAL_MASK || attn_mask_type==NVTE_CAUSAL_BOTTOM_RIGHT_MASK || attn_mask_type==NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK){
+    if(window_size==std::make_pair<int64_t, int64_t>(-1, -1) || (window_size.first >=0 && window_size.second!=0)){
+      //TODO: better INFO logging
+      std::cout<<"window_size should be (-1, 0) or (>=0, 0) for attn_mask_type="<<attn_mask_type<<std::endl;
+      window_size.second = 0;
+      return window_size;
+    }else if( window_size!=std::make_pair<int64_t, int64_t>(-1, 0) && (window_size.first < 0 || window_size.second != 0)){
+      NVTE_ERROR("window_size should be (-1, 0) or (>=0, 0) for attn_mask_type=" + std::to_string(attn_mask_type));
+    }
+  }else if(attn_mask_type==NVTE_NO_MASK || attn_mask_type==NVTE_PADDING_MASK){
+    //no_mask and padding mask
+    if(window_size==std::make_pair<int64_t, int64_t>(-1, 0)){
+      //TODO: better INFO logging
+      std::cout<<"window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type="<<attn_mask_type<<std::endl;
+      window_size.second=-1;
+      return window_size;
+    }else if(window_size!=std::make_pair<int64_t, int64_t>(-1, -1) && (window_size.first < 0 or window_size.second < 0)){
+      NVTE_ERROR("window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type=" + std::to_string(attn_mask_type)); 
+    }
+  }else{
+    NVTE_ERROR("Invalid attn_mask_type: " + std::to_string(attn_mask_type));
+  }
+  return window_size;
+}
 
 // select a backend for fused attention
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
@@ -74,10 +108,17 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     int64_t window_size_right) {
   using namespace transformer_engine;
   
-  // by default, both ck and aotriton backends are enabled
-  bool nvte_fused_attn_ck = true;
-  bool nvte_fused_attn_aotriton = true;
-  
+  // by default, fused attn is enabled
+  bool nvte_fused_attn = true;
+  if (const char* env_p = std::getenv("NVTE_FUSED_ATTN") ) {
+    if (env_p != nullptr && std::string(env_p) == "0")
+      nvte_fused_attn = false;
+  }
+
+  // by default, both ck and aotriton backends are enabled by nvte_fused_attn
+  bool nvte_fused_attn_ck = nvte_fused_attn;
+  bool nvte_fused_attn_aotriton = nvte_fused_attn;
+
   if (const char* env_p = std::getenv("NVTE_FUSED_ATTN_CK") ) {
     if (env_p != nullptr && std::string(env_p) == "0")
       nvte_fused_attn_ck = false;
@@ -86,6 +127,10 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     if (env_p != nullptr && std::string(env_p) == "0")
       nvte_fused_attn_aotriton = false;
   }
+  
+  // fix the incompatible window size from upstream frameworks pytorch/jax
+  std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
+
   // first check whether ck can be used, then check aotriton
   if(nvte_fused_attn_ck && fused_attn_rocm::is_ck_backend_supported(
         q_dtype,
@@ -155,6 +200,9 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
 
   const NVTEDType QKV_type = static_cast<NVTEDType>(input_QKV->data.dtype);
 
+  // fix the incompatible window size from upstream frameworks pytorch/jax
+  std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
+
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, dropout, h, h, max_seqlen,
       max_seqlen, d, window_size_left, window_size_right);
@@ -163,6 +211,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
     fused_attn_ck_fwd_qkvpacked(
       b, h, max_seqlen, d,
       is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
+      window_size_left, window_size_right,
       input_QKV, input_Bias, 
       output_O, output_M, output_rng_state,
       input_cu_seqlens,
@@ -225,6 +274,9 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
 
   const NVTEDType QKV_type = static_cast<NVTEDType>(input_QKV->data.dtype);
 
+  // fix the incompatible window size from upstream frameworks pytorch/jax
+  std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
+
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, dropout, h, h, max_seqlen,
       max_seqlen, d, window_size_left, window_size_right);
@@ -234,6 +286,7 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
       b, h, max_seqlen, d,
       attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
+      window_size_left, window_size_right,
       input_QKV, input_O, input_dO, input_Bias, 
       output_dQKV,
       input_cu_seqlens,
@@ -301,6 +354,9 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_KV->data.dtype);
 
+  // fix the incompatible window size from upstream frameworks pytorch/jax
+  std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
+
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
       max_seqlen_kv, d, window_size_left, window_size_right);
@@ -310,6 +366,7 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
       is_training, attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
+      window_size_left, window_size_right,
       input_Q, input_KV, input_Bias, 
       output_O, output_M, output_rng_state,
       input_cu_seqlens_q,
@@ -378,6 +435,9 @@ void nvte_fused_attn_bwd_kvpacked(
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_KV->data.dtype);
 
+  // fix the incompatible window size from upstream frameworks pytorch/jax
+  std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
+
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
       max_seqlen_kv, d, window_size_left, window_size_right);
@@ -387,6 +447,7 @@ void nvte_fused_attn_bwd_kvpacked(
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
       attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
+      window_size_left, window_size_right,
       input_Q, input_KV, input_O, input_dO, input_Bias, 
       output_dQ, output_dKV,
       input_cu_seqlens_q,
@@ -447,6 +508,9 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
 
+  // fix the incompatible window size from upstream frameworks pytorch/jax
+  std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
+
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
       max_seqlen_kv, d, window_size_left, window_size_right);
@@ -456,6 +520,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
       is_training, attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
+      window_size_left, window_size_right,
       input_Q, input_K, input_V, input_Bias, 
       output_O, output_M, output_rng_state,
       input_cu_seqlens_q,
@@ -518,6 +583,9 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
 
+  // fix the incompatible window size from upstream frameworks pytorch/jax
+  std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
+
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
       max_seqlen_kv, d, window_size_left, window_size_right);
@@ -527,6 +595,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
       attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
+      window_size_left, window_size_right,
       input_Q, input_K, input_V, input_O, input_dO, input_Bias, 
       output_dQ, output_dK, output_dV,
       input_cu_seqlens_q,

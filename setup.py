@@ -63,6 +63,10 @@ def setup_common_extension() -> CMakeExtension:
         if os.getenv("NVTE_CK_FUSED_ATTN_PATH"):
             ck_path = Path(os.getenv("NVTE_CK_FUSED_ATTN_PATH"))
             cmake_flags.append(f"-DCK_FUSED_ATTN_PATH={ck_path}")
+        if int(os.getenv("NVTE_FUSED_ATTN_AOTRITON", "1"))==0 or int(os.getenv("NVTE_FUSED_ATTN", "1"))==0:
+            cmake_flags.append("-DUSE_FUSED_ATTN_AOTRITON=OFF")
+        if int(os.getenv("NVTE_FUSED_ATTN_CK", "1"))==0 or int(os.getenv("NVTE_FUSED_ATTN", "1"))==0:
+            cmake_flags.append("-DUSE_FUSED_ATTN_CK=OFF")
 
     return CMakeExtension(
         name="transformer_engine",

@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import importlib
+import importlib.metadata
 from pathlib import Path
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple
@@ -306,12 +307,13 @@ def get_frameworks() -> List[str]:
                     _unsupported_frameworks.append("pytorch")
                 _frameworks.remove("pytorch")
         if "jax" in _frameworks:
-            try:
-                import jaxlib.rocm
-            except ImportError:
-                if "jax" in _requested_frameworks:
-                    _unsupported_frameworks.append("jax")
-                _frameworks.remove("jax")
+            if not any(re.match(r'jax-rocm\d+-plugin', d.metadata['Name']) for d in importlib.metadata.distributions()):
+                try:
+                    import jaxlib.rocm #pre JAX 0.4.30 way
+                except ImportError:
+                    if "jax" in _requested_frameworks:
+                        _unsupported_frameworks.append("jax")
+                    _frameworks.remove("jax")
         if "paddle" in _frameworks:
             if "paddle" in _requested_frameworks:
                 _unsupported_frameworks.append("paddle")
@@ -355,8 +357,8 @@ def hipify(base_dir, src_dir, sources, include_dirs):
         is_pytorch_extension=True,
         hipify_extra_files_only=False,
         show_detailed=False)
-    
-    # Because hipify output_directory == project_directory 
+
+    # Because hipify output_directory == project_directory
     # Original sources list may contain previous hipifying results that ends up with duplicated entries
     # Keep unique entries only
     hipified_sources = set()
@@ -364,7 +366,7 @@ def hipify(base_dir, src_dir, sources, include_dirs):
         fname = os.path.abspath(str(fname))
         if fname in hipify_result:
             file_result = hipify_result[fname]
-            if (file_result.hipified_path is not None):
+            if file_result.hipified_path is not None:
                 fname = hipify_result[fname].hipified_path
         # setup() arguments must *always* be /-separated paths relative to the setup.py directory,
         # *never* absolute paths

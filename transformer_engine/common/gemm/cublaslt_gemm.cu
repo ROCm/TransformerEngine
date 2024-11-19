@@ -351,8 +351,8 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
 
   if (nvte_log_gemm_config) {
     float A_scale_inv, B_scale_inv;
-    hipMemcpy(&A_scale_inv, inputA->scale_inv.dptr, sizeof(float), hipMemcpyDeviceToHost);
-    hipMemcpy(&B_scale_inv, inputB->scale_inv.dptr, sizeof(float), hipMemcpyDeviceToHost);
+    (void)cudaMemcpy(&A_scale_inv, inputA->scale_inv.dptr, sizeof(float), cudaMemcpyDeviceToHost);
+    (void)cudaMemcpy(&B_scale_inv, inputB->scale_inv.dptr, sizeof(float), cudaMemcpyDeviceToHost);
     std::cout << "m=" << m << " k=" << k << " n=" << n 
         << " transa=" << (transa?"T":"N")
         << " transb=" << (transb?"T":"N")

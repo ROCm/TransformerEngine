@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -48,7 +50,8 @@ inline CUresult call(const char *symbol, ArgTs... args) {
     const CUresult status_NVTE_CHECK_CUDA_DRIVER = (expr);                                       \
     if (status_NVTE_CHECK_CUDA_DRIVER != CUDA_SUCCESS) {                                         \
       const char *desc_NVTE_CHECK_CUDA_DRIVER;                                                   \
-      ::transformer_engine::cuda_driver::call("cuGetErrorString", status_NVTE_CHECK_CUDA_DRIVER, \
+      (void)::transformer_engine::cuda_driver::call("cuGetErrorString",                          \
+                                              status_NVTE_CHECK_CUDA_DRIVER,                     \
                                               &desc_NVTE_CHECK_CUDA_DRIVER);                     \
       NVTE_ERROR("CUDA Error: ", desc_NVTE_CHECK_CUDA_DRIVER);                                   \
     }                                                                                            \

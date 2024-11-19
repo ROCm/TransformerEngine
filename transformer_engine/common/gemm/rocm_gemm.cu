@@ -1400,8 +1400,8 @@ void rocblas_gemm(const Tensor *inputA,
   float alpha = 1.0;
   if (use_fp8) {
      float A_scale_inv, B_scale_inv;
-     hipMemcpy(&A_scale_inv, A_scale_inverse, sizeof(float), hipMemcpyDeviceToHost);
-     hipMemcpy(&B_scale_inv, B_scale_inverse, sizeof(float), hipMemcpyDeviceToHost);
+     (void)hipMemcpy(&A_scale_inv, A_scale_inverse, sizeof(float), hipMemcpyDeviceToHost);
+     (void)hipMemcpy(&B_scale_inv, B_scale_inverse, sizeof(float), hipMemcpyDeviceToHost);
      alpha = A_scale_inv * B_scale_inv;
   }
 
