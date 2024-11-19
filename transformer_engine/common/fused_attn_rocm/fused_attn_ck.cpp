@@ -216,6 +216,11 @@ void fused_attn_ck_fwd_impl(
   size_t *workspace_size,
   cudaStream_t stream){
 
+  bool nvte_log_ck_config = false;
+  if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
+    if (env_p != nullptr && std::string(env_p) == "1")
+      nvte_log_ck_config = true;
+  }
   // Exit to request upper level API to allocate memory if needed
   // Currently ck fused attn does not need workspace in fwd pass
   if(workspace==nullptr){
@@ -223,6 +228,10 @@ void fused_attn_ck_fwd_impl(
     // ck requires an alibi slope array even if in standard (vanilla) mode
     if(bias_type == NVTE_Bias_Type::NVTE_ALIBI){
       (*workspace_size)+= h*sizeof(float);
+    }
+
+    if (nvte_log_ck_config) {
+      std::cout<<std::endl<<"attn_fwd(ck) requested workspace of size "<<*workspace_size<<std::endl;
     }
     return;
   }
@@ -262,12 +271,7 @@ void fused_attn_ck_fwd_impl(
     //assign standard alibi slope
     hipLaunchKernelGGL(generate_alibi_slope, grid, block, 0, stream, h, static_cast<float*>(devPtrAlibiSlope));
   }
-
-  bool nvte_log_ck_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_ck_config = true;
-  }
+  
   if (nvte_log_ck_config) {
     std::cout<<std::endl<<"attn_fwd(ck): ";
     std::cout<<"q_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d<<"), ";
@@ -342,6 +346,12 @@ void fused_attn_ck_bwd_impl(
   size_t *workspace_size,
   cudaStream_t stream) {
   
+  bool nvte_log_ck_config = false;
+  if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
+    if (env_p != nullptr && std::string(env_p) == "1")
+      nvte_log_ck_config = true;
+  } 
+
   bool is_mqa_gqa = (h > hg);
 
   // Exit to request upper level API to allocate memory if needed
@@ -358,9 +368,12 @@ void fused_attn_ck_bwd_impl(
     // ck requires an alibi slope array even if in standard (vanilla) mode
     if(bias_type == NVTE_Bias_Type::NVTE_ALIBI){
       (*workspace_size)+= h*sizeof(float);
-    }else if ((bias_type==NVTE_Bias_Type::NVTE_POST_SCALE_BIAS) && (devPtrdBias!=nullptr) && (bias_b!=b or bias_h!=h)){
+    }else if ((bias_type==NVTE_Bias_Type::NVTE_POST_SCALE_BIAS) && (bias_b!=b or bias_h!=h)){
       //ck requires a buffer dbias_expanded of size BHSS if bias is not BHSS
       (*workspace_size) += b*h*s_q*s_kv*ck_dtype_size(dtype);
+    }
+    if (nvte_log_ck_config) {
+      std::cout<<std::endl<<"attn_bwd(ck) requested workspace of size "<<*workspace_size<<std::endl;
     }
     return;
   }
@@ -466,12 +479,7 @@ void fused_attn_ck_bwd_impl(
       NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdBias, 0, ck_dtype_size(dtype)*bias_b*bias_h*s_q*s_kv, stream));
     }
   }
-  
-  bool nvte_log_ck_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_ck_config = true;
-  }
+ 
   if (nvte_log_ck_config) {
     std::cout<<std::endl<<"attn_bwd(ck): ";
     std::cout<<"q_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d<<"), ";
