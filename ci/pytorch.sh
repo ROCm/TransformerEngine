@@ -33,7 +33,13 @@ run() {
 run_test_config(){
     echo ====== Run with GEMM backend: $_gemm and Fused attention backend: $_fus_attn =====
     _WORKERS_COUNT=4
+    if [ $_fus_attn = "ck" -o $_fus_attn = "auto" ]; then 
+        _is_default_fa="1"
+    else
+        _is_default_fa=""
+    fi
     if [ $_gemm != "rocblas" ]; then
+        #test -n "$_is_default_fa" && run 1 test_cast_transpose_triton.py
         run 1 test_cuda_graphs.py
         _graph_filter=""
     else
@@ -41,8 +47,9 @@ run_test_config(){
     fi
     run 1 test_deferred_init.py
     run 1 test_float8tensor.py
-    run 1 test_fused_optimizer.py
     run 1 test_fused_rope.py
+    test $_gemm = "hipblaslt" && run 1 test_fusible_ops.py #TODO: Run on RocBLAS with supported subtests
+    test $_gemm = "hipblaslt" -a -n "$_is_default_fa" && run 3 test_gemm_autotune.py
     run 1 test_gqa.py
     run 1 test_jit.py
     run 1 test_multi_tensor.py
@@ -51,17 +58,16 @@ run_test_config(){
     run 1 test_recipe.py
     run 1 test_sanity.py -k "$_graph_filter"
     run 1 test_torch_save_load.py
-    if [ $_fus_attn != "unfused" ]; then
-        run 1 fused_attn/test_fused_attn.py
-    fi
+    test $_fus_attn != "unfused" && run 1 fused_attn/test_fused_attn.py
 }
 
 run_test_config_mgpu(){
     echo ====== Run mGPU with GEMM backend: $_gemm and Fused attention backend: $_fus_attn =====
     _WORKERS_COUNT=1
-    run 1 test_fused_optimizer.py
+    run 3 test_fused_optimizer.py
+    run 3 test_fusible_ops_distributed.py
     if [ $_fus_attn != "unfused" ]; then
-        run 1 fused_attn/test_fused_attn_with_cp.py
+        run 3 fused_attn/test_fused_attn_with_cp.py
     fi
 }
 

@@ -82,10 +82,10 @@ run_test_config() {
 
 run_test_config_mgpu() {
     echo ====== Run mGPU with Fused attention backend: $_fus_attn =====
-    run 1 test_distributed_fused_attn.py
-    run 1 test_distributed_layernorm.py
-    run 1 test_distributed_layernorm_mlp.py
-    run 1 test_distributed_softmax.py
+    run 3 test_distributed_fused_attn.py
+    run 3 test_distributed_layernorm.py
+    run 3 test_distributed_layernorm_mlp.py
+    run 3 test_distributed_softmax.py
 }
 
 # Single config mode, run it synchroniously and return result
