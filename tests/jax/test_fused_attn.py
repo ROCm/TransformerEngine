@@ -309,10 +309,6 @@ class FusedAttnRunner:
                     "B1SS, BHSS and 11SS bias shapes are only supported for "
                     "the F16_arbitrary_seqlen backend."
                 )
-            elif is_hip_extension and self.bias_shape=="B1SS":
-                pytest.skip(
-                    "B1SS, bias shapes are not supported for rocm fused attn"
-                )
 
     def _setup_inputs(self):
         self._check_configs()

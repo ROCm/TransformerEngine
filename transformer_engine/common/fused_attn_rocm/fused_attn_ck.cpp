@@ -116,7 +116,7 @@ bool is_ck_backend_supported(
   // CK does not support pre_scale bias
   if(!(bias_type == NVTE_Bias_Type::NVTE_NO_BIAS || bias_type == NVTE_Bias_Type::NVTE_ALIBI || bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS)){
     if(nvte_log_ck_config){
-      std::cout<<"CK fused attn does not support bias"<<std::endl;
+      std::cout<<"CK fused attn does not support pre_scale bias"<<std::endl;
     }
     return false;
   }
@@ -284,7 +284,7 @@ void fused_attn_ck_fwd_impl(
     std::cout<<"dropout_p: "<<dropout_probability<<", ";
     std::cout<<"philox_seed: "<<philox_seed<<", philox_offset: "<<philox_offset<<", ";
     std::cout<<"bias_type: "<<bias_type<<std::endl;
-    std::cout<<"(bias_b, bias_h): ("<<bias_b<<", "<<bias_h<<", ";
+    std::cout<<"(bias_b, bias_h): ("<<bias_b<<", "<<bias_h<<"), ";
     std::cout<<"mask_type: "<<mask_type<<std::endl;
     std::cout<<"window_size: ("<<window_size_left<<", "<<window_size_right<<")"<<std::endl;
   }
@@ -358,6 +358,9 @@ void fused_attn_ck_bwd_impl(
     // ck requires an alibi slope array even if in standard (vanilla) mode
     if(bias_type == NVTE_Bias_Type::NVTE_ALIBI){
       (*workspace_size)+= h*sizeof(float);
+    }else if ((bias_type==NVTE_Bias_Type::NVTE_POST_SCALE_BIAS) && (devPtrdBias!=nullptr) && (bias_b!=b or bias_h!=h)){
+      //ck requires a buffer dbias_expanded of size BHSS if bias is not BHSS
+      (*workspace_size) += b*h*s_q*s_kv*ck_dtype_size(dtype);
     }
     return;
   }
@@ -405,7 +408,6 @@ void fused_attn_ck_bwd_impl(
   //dq_acc is of shape (B, S, H, D)
   NVTE_CHECK_CUDA(cudaMemsetAsync(dq_acc_ptr, 0, sizeof(float)*b*h*s_q*d, stream));
   
-  // TODO: temporary patch for mqa/gqa, remove once CK support stride specification directly
   void* dk_expanded_ptr = nullptr;
   void* dv_expanded_ptr = nullptr;
   std::array<uint64_t, 4> dkv_expanded_stride;
@@ -433,6 +435,7 @@ void fused_attn_ck_bwd_impl(
   }
 
   void* devPtrAlibiSlope = nullptr;
+  void* dbias_expanded_ptr = nullptr;
   if(bias_type == NVTE_Bias_Type::NVTE_ALIBI){
     // alibi slope is the last section in the workspace buffer
     if(is_mqa_gqa){
@@ -447,13 +450,23 @@ void fused_attn_ck_bwd_impl(
     grid.x = ceil(h/1024.);
     //assign standard alibi slope
     hipLaunchKernelGGL(generate_alibi_slope, grid, block, 0, stream, h, static_cast<float*>(devPtrAlibiSlope));
+  }else if((bias_type==NVTE_Bias_Type::NVTE_POST_SCALE_BIAS) && (devPtrdBias!=nullptr)){
+    if(bias_b!=b or bias_h!= h){
+      // dbias_expanded_ptr is the last section in the workspace buffer
+      if(is_mqa_gqa){
+        dbias_expanded_ptr = static_cast<void *>(static_cast<int8_t*>(dk_expanded_ptr) + 2*b*h*s_kv*d*ck_dtype_size(dtype));
+      }else{
+        // devPtrAlibiSlope at the end of dq_acc_ptr if no mqa/gqa temp buffer needed
+        dbias_expanded_ptr = static_cast<void *>(static_cast<int8_t*>(dq_acc_ptr) + b*h*s_q*d*sizeof(float));
+      }
+      // zeroing out dbias_expanded_ptr as CK requires that
+      NVTE_CHECK_CUDA(cudaMemsetAsync(dbias_expanded_ptr, 0, ck_dtype_size(dtype)*b*h*s_q*s_kv, stream));
+    }else{
+      // dbias_expanded_ptr not needed for BHSS shape
+      NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdBias, 0, ck_dtype_size(dtype)*bias_b*bias_h*s_q*s_kv, stream));
+    }
   }
   
-  if(devPtrdBias!=nullptr){
-    // zero out dbias
-    NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdBias, 0, ck_dtype_size(dtype)*bias_b*bias_h*s_q*s_kv, stream));
-  }
-
   bool nvte_log_ck_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
@@ -474,7 +487,7 @@ void fused_attn_ck_bwd_impl(
     std::cout<<"dropout_p: "<<dropout_probability<<", ";
     std::cout<<"philox_seed: "<<philox_seed<<", philox_offset: "<<philox_offset<<", ";
     std::cout<<"bias_type: "<<bias_type<<std::endl;
-    std::cout<<"(bias_b, bias_h): ("<<bias_b<<", "<<bias_h<<", ";
+    std::cout<<"(bias_b, bias_h): ("<<bias_b<<", "<<bias_h<<"), ";
     std::cout<<"mask_type: "<<mask_type<<std::endl;
     std::cout<<"window_size: ("<<window_size_left<<", "<<window_size_right<<")"<<std::endl;
   }
@@ -511,6 +524,7 @@ void fused_attn_ck_bwd_impl(
       k_stride[0], k_stride[1], k_stride[2], //dK and K share the same stride
       devPtrdV,
       v_stride[0], v_stride[1], v_stride[2], //dV and V share the same stride
+      dbias_expanded_ptr,
       devPtrdBias,
       workspace,
       stream));

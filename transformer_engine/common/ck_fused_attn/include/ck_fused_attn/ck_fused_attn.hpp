@@ -93,6 +93,7 @@ hipError_t ck_attn_bwd(
   uint64_t stride_b_dk, uint64_t stride_h_dk, uint64_t stride_s_dk,
   void* dv_ptr, 
   uint64_t stride_b_dv, uint64_t stride_h_dv, uint64_t stride_s_dv,
+  void* dbias_expanded_ptr,
   void* dbias_ptr,
   void* workspace_ptr,
   hipStream_t stream);
