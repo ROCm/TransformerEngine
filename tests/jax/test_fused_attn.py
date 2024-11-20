@@ -304,7 +304,7 @@ class FusedAttnRunner:
                     "B1SS, BHSS and 11SS bias shapes are only supported for "
                     "AttnMaskType.NO_MASK and AttnMaskType.CAUSAL_MASK."
                 )
-            elif not is_hip_extension and self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
+            elif (not is_hip_extension()) and self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
                 pytest.skip(
                     "B1SS, BHSS and 11SS bias shapes are only supported for "
                     "the F16_arbitrary_seqlen backend."
