@@ -107,7 +107,7 @@ struct hip_f8 {
   }
 
   // constructor from float
-#if defined(__gfx940__)
+#if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
   explicit HIP_DEVICE hip_f8(float v, hip_f8_rounding_mode rm=hip_f8_rounding_mode::standard, uint32_t rng=0) {
     union {
       float fval;
@@ -149,10 +149,10 @@ struct hip_f8 {
     }
   }
 
-  explicit HIP_HOST //Code host still uses SW simulated conversion on gfx940
-#else // #if defined(__gfx940__)
+  explicit HIP_HOST //Code host still uses SW simulated conversion on MI300
+#else // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
   explicit HIP_HOST_DEVICE // On architectures other than gfx940, both host and device still use SW simulated conversion
-#endif // #if defined(__gfx940__)
+#endif // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
   hip_f8(float v, hip_f8_rounding_mode rm=hip_f8_rounding_mode::standard, uint32_t rng=0) {
     if (T == hip_f8_type::bf8) {
       if (get_hip_f8_bias_mode()) {
@@ -170,15 +170,15 @@ struct hip_f8 {
   }
 
   // constructor from half
-#if defined(__gfx940__)
+#if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
   explicit HIP_DEVICE hip_f8(half v, hip_f8_rounding_mode rm=hip_f8_rounding_mode::standard, uint32_t rng=0) 
 	  : hip_f8((float)v, rm, rng)
   {
   }
-  explicit HIP_HOST //Code host still uses SW simulated conversion on gfx940
-#else // #if defined(__gfx940__)
-  explicit HIP_HOST_DEVICE // On architectures other than gfx940, both host and device still use SW simulated conversion
-#endif // #if defined(__gfx940__)
+  explicit HIP_HOST //Code host still uses SW simulated conversion on MI300
+#else // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
+  explicit HIP_HOST_DEVICE // On architectures other than MI300, both host and device still use SW simulated conversion
+#endif // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
   hip_f8(half v, hip_f8_rounding_mode rm=hip_f8_rounding_mode::standard, uint32_t rng=0) {
     if (T == hip_f8_type::bf8) {
       if (get_hip_f8_bias_mode()) {
@@ -199,7 +199,7 @@ struct hip_f8 {
   explicit HIP_HOST_DEVICE hip_f8(hip_bfloat16 v, hip_f8_rounding_mode r=hip_f8_rounding_mode::standard, uint32_t rng=0);
 
   // convert to float
-#if defined(__gfx940__)
+#if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
   HIP_DEVICE operator float() const {
     union
     {
@@ -220,10 +220,10 @@ struct hip_f8 {
 
    return val.fval;
   }
-  explicit inline HIP_HOST //Code host still uses SW simulated conversion on gfx940
-#else // #if defined(__gfx940__)
-  explicit inline HIP_HOST_DEVICE // On architectures other than gfx940, both host and device still use SW simulated conversion
-#endif // #if defined(__gfx940__)
+  explicit inline HIP_HOST //Code host still uses SW simulated conversion on MI300
+#else // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
+  explicit inline HIP_HOST_DEVICE // On architectures other than MI300, both host and device still use SW simulated conversion
+#endif // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
   operator float() const {
     if (T == hip_f8_type::bf8) {
       if (get_hip_f8_bias_mode()) {
@@ -241,14 +241,14 @@ struct hip_f8 {
   }
 
   // convert to half
-#if defined(__gfx940__)
+#if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
   explicit HIP_DEVICE inline operator half() const {
     return __half(float(*this));
   }
-  explicit inline HIP_HOST //Code host still uses SW simulated conversion on gfx940
-#else // #if defined(__gfx940__)
-  explicit inline HIP_HOST_DEVICE // On architectures other than gfx940, both host and device still use SW simulated conversion
-#endif // #if defined(__gfx940__)
+  explicit inline HIP_HOST //Code host still uses SW simulated conversion on MI300
+#else // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
+  explicit inline HIP_HOST_DEVICE // On architectures other than MI300, both host and device still use SW simulated conversion
+#endif // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
   operator half() const {
     if (T == hip_f8_type::bf8) {
       if (get_hip_f8_bias_mode()) {
