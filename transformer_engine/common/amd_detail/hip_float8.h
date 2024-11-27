@@ -149,10 +149,8 @@ struct hip_f8 {
     }
   }
 
+#ifndef __HIPCC_RTC__
   explicit HIP_HOST //Code host still uses SW simulated conversion on MI300
-#else // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
-  explicit HIP_HOST_DEVICE // On architectures other than gfx940, both host and device still use SW simulated conversion
-#endif // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
   hip_f8(float v, hip_f8_rounding_mode rm=hip_f8_rounding_mode::standard, uint32_t rng=0) {
     if (T == hip_f8_type::bf8) {
       if (get_hip_f8_bias_mode()) {
@@ -168,17 +166,34 @@ struct hip_f8 {
       }
     }
   }
-
+#endif
+#else // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
+  explicit HIP_HOST_DEVICE // On architectures other than gfx940, both host and device still use SW simulated conversion
+  hip_f8(float v, hip_f8_rounding_mode rm=hip_f8_rounding_mode::standard, uint32_t rng=0) {
+    if (T == hip_f8_type::bf8) {
+      if (get_hip_f8_bias_mode()) {
+	data = hip_f8_impl::cast_to_f8<2, 5, float, true/*negative_zero_nan*/, true/*clip*/>(v, (rm == hip_f8_rounding_mode::stochastic), rng);
+      } else {
+	data = hip_f8_impl::cast_to_f8<2, 5, float, false/*negative_zero_nan*/, true/*clip*/>(v, (rm == hip_f8_rounding_mode::stochastic), rng);
+      }
+    } else /* fp8*/ {
+      if (get_hip_f8_bias_mode()) {
+	data = hip_f8_impl::cast_to_f8<3, 4, float, true/*negative_zero_nan*/, true/*clip*/>(v, (rm == hip_f8_rounding_mode::stochastic), rng);
+      } else {
+	data = hip_f8_impl::cast_to_f8<3, 4, float, false/*negative_zero_nan*/, true/*clip*/>(v, (rm == hip_f8_rounding_mode::stochastic), rng);
+      }
+    }
+  }
+#endif // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
+			 
   // constructor from half
 #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
   explicit HIP_DEVICE hip_f8(half v, hip_f8_rounding_mode rm=hip_f8_rounding_mode::standard, uint32_t rng=0) 
 	  : hip_f8((float)v, rm, rng)
   {
   }
+#ifndef __HIPCC_RTC__
   explicit HIP_HOST //Code host still uses SW simulated conversion on MI300
-#else // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
-  explicit HIP_HOST_DEVICE // On architectures other than MI300, both host and device still use SW simulated conversion
-#endif // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
   hip_f8(half v, hip_f8_rounding_mode rm=hip_f8_rounding_mode::standard, uint32_t rng=0) {
     if (T == hip_f8_type::bf8) {
       if (get_hip_f8_bias_mode()) {
@@ -194,6 +209,25 @@ struct hip_f8 {
       }
     }
   }
+#endif
+#else // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
+  explicit HIP_HOST_DEVICE // On architectures other than MI300, both host and device still use SW simulated conversion
+  hip_f8(half v, hip_f8_rounding_mode rm=hip_f8_rounding_mode::standard, uint32_t rng=0) {
+    if (T == hip_f8_type::bf8) {
+      if (get_hip_f8_bias_mode()) {
+	data = hip_f8_impl::cast_to_f8<2, 5, half, true/*negative_zero_nan*/, true/*clip*/>(v, (rm == hip_f8_rounding_mode::stochastic), rng);
+      } else {
+	data = hip_f8_impl::cast_to_f8<2, 5, half, false/*negative_zero_nan*/, true/*clip*/>(v, (rm == hip_f8_rounding_mode::stochastic), rng);
+      }
+    } else /* fp8*/ {
+      if (get_hip_f8_bias_mode()) {
+	data = hip_f8_impl::cast_to_f8<3, 4, half, true/*negative_zero_nan*/, true/*clip*/>(v, (rm == hip_f8_rounding_mode::stochastic), rng);
+      } else {
+	data = hip_f8_impl::cast_to_f8<3, 4, half, false/*negative_zero_nan*/, true/*clip*/>(v, (rm == hip_f8_rounding_mode::stochastic), rng);
+      }
+    }
+  }
+#endif // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
 
   // constructor from hip_bfloat16
   explicit HIP_HOST_DEVICE hip_f8(hip_bfloat16 v, hip_f8_rounding_mode r=hip_f8_rounding_mode::standard, uint32_t rng=0);
@@ -220,10 +254,8 @@ struct hip_f8 {
 
    return val.fval;
   }
+#ifndef __HIPCC_RTC__
   explicit inline HIP_HOST //Code host still uses SW simulated conversion on MI300
-#else // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
-  explicit inline HIP_HOST_DEVICE // On architectures other than MI300, both host and device still use SW simulated conversion
-#endif // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
   operator float() const {
     if (T == hip_f8_type::bf8) {
       if (get_hip_f8_bias_mode()) {
@@ -239,16 +271,33 @@ struct hip_f8 {
       }
     }
   }
+#endif
+#else // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
+  explicit inline HIP_HOST_DEVICE // On architectures other than MI300, both host and device still use SW simulated conversion
+  operator float() const {
+    if (T == hip_f8_type::bf8) {
+      if (get_hip_f8_bias_mode()) {
+	return hip_f8_impl::cast_from_f8<2, 5, float, true/*negative_zero_nan*/>(data);
+      } else {
+	return hip_f8_impl::cast_from_f8<2, 5, float, false/*negative_zero_nan*/>(data);
+      }
+    } else /* fp8*/ {
+      if (get_hip_f8_bias_mode()) {
+	return hip_f8_impl::cast_from_f8<3, 4, float, true/*negative_zero_nan*/>(data);
+      } else {
+	return hip_f8_impl::cast_from_f8<3, 4, float, false/*negative_zero_nan*/>(data);
+      }
+    }
+  }
+#endif // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
 
   // convert to half
 #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
   explicit HIP_DEVICE inline operator half() const {
     return __half(float(*this));
   }
+#ifndef __HIPCC_RTC__
   explicit inline HIP_HOST //Code host still uses SW simulated conversion on MI300
-#else // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
-  explicit inline HIP_HOST_DEVICE // On architectures other than MI300, both host and device still use SW simulated conversion
-#endif // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
   operator half() const {
     if (T == hip_f8_type::bf8) {
       if (get_hip_f8_bias_mode()) {
@@ -264,6 +313,25 @@ struct hip_f8 {
       }
     }
   }
+#endif
+#else // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
+  explicit inline HIP_HOST_DEVICE // On architectures other than MI300, both host and device still use SW simulated conversion
+  operator half() const {
+    if (T == hip_f8_type::bf8) {
+      if (get_hip_f8_bias_mode()) {
+	return hip_f8_impl::cast_from_f8<2, 5, half, true/*negative_zero_nan*/>(data);
+      } else {
+	return hip_f8_impl::cast_from_f8<2, 5, half, false/*negative_zero_nan*/>(data);
+      }
+    } else /* fp8*/ {
+      if (get_hip_f8_bias_mode()) {
+	return hip_f8_impl::cast_from_f8<3, 4, half, true/*negative_zero_nan*/>(data);
+      } else {
+	return hip_f8_impl::cast_from_f8<3, 4, half, false/*negative_zero_nan*/>(data);
+      }
+    }
+  }
+#endif // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
 
   // convert to hip_bfloat16
   explicit inline HIP_HOST_DEVICE operator hip_bfloat16() const;
