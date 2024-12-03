@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -8,6 +10,7 @@ import math
 
 import pytest
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine
 import transformer_engine.pytorch as te
@@ -20,6 +23,19 @@ from transformer_engine.pytorch.ops.fused_forward import (
 )
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine_torch as tex
+
+if IS_HIP_EXTENSION:
+    import os
+    from functools import cache
+    @cache
+    def use_hipblaslt() -> bool:
+        return (os.getenv("NVTE_USE_HIPBLASLT") is not None
+                or os.getenv("NVTE_USE_ROCBLAS") is None )
+    @pytest.fixture(autouse=True)
+    def skip_rocblas():
+        if not use_hipblaslt():
+            pytest.skip("ROCBLAS path is not supported for this test")
+
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()

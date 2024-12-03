@@ -23,7 +23,7 @@ from transformer_engine.pytorch.utils import (
     is_bf16_compatible,
 )
 if IS_HIP_EXTENSION:
-    from functools import lru_cache
+    from functools import cache
     from transformer_engine.pytorch.utils import is_mi200
 
 from transformer_engine.pytorch import (
@@ -55,7 +55,7 @@ _cpu_rng_state = torch.get_rng_state()
 _cuda_rng_state = torch.cuda.get_rng_state()
 
 if IS_HIP_EXTENSION:
-    @lru_cache(maxsize=1)
+    @cache
     def use_hipblaslt() -> bool:
         return (os.getenv("NVTE_USE_HIPBLASLT") is not None
                 or os.getenv("NVTE_USE_ROCBLAS") is None )
@@ -1430,11 +1430,12 @@ def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_gpt_cuda_graph(dtype, bs, model, monkeypatch):
-    if IS_HIP_EXTENSION and dtype not in (torch.float32,):
-        if int(os.getenv("NVTE_FUSED_ATTN", "1")):
-            #pytest.skip(f"rocm fused attention backends do not support cuda graph with {dtype}")
-            monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
+def test_gpt_cuda_graph(dtype, bs, model):
+    if IS_HIP_EXTENSION:
+        if not use_hipblaslt():
+            pytest.skip("CUDA graph capture not supported with rocBLAS path")
+        if dtype not in (torch.float32,):
+            pytest.skip(f"ROCm fused attention backends do not support cuda graph with {dtype}")
 
     config = model_configs[model]
 
@@ -1639,6 +1640,10 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
 @pytest.mark.parametrize("module", module_inference)
 @pytest.mark.parametrize("backend", backends_inference)
 def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module, backend):
+    if ((backend == "FlashAttention" and os.getenv("NVTE_FLASH_ATTN", "1") == "0") or
+        (backend == "FusedAttention" and os.getenv("NVTE_FUSED_ATTN", "1") == "0")):
+        pytest.skip(f"{backend} is disabled")
+
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"
 

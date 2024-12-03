@@ -34,14 +34,14 @@ return_run_results() {
 configure_gemm_env() {
     case "$1" in
         "auto")
-            unset NVTE_USE_HIPBLASLT NVTE_USE_ROCBLAS
+            unset NVTE_USE_HIPBLASLT NVTE_USE_ROCBLAS ROCBLAS_STREAM_ORDER_ALLOC
         ;;
         "hipblaslt")
             export NVTE_USE_HIPBLASLT=1
-            unset NVTE_USE_ROCBLAS
+            unset NVTE_USE_ROCBLAS ROCBLAS_STREAM_ORDER_ALLOC
         ;;
         "rocblas")
-            export NVTE_USE_ROCBLAS=1
+            export NVTE_USE_ROCBLAS=1 ROCBLAS_STREAM_ORDER_ALLOC=1
             unset NVTE_USE_HIPBLASLT
         ;;
         *)
@@ -55,17 +55,24 @@ configure_gemm_env() {
 configure_fused_attn_env() {
     case "$1" in
         "auto")
-            unset NVTE_FUSED_ATTN NVTE_FUSED_ATTN_AOTRITON NVTE_FUSED_ATTN_CK
+            unset NVTE_FLASH_ATTN NVTE_FUSED_ATTN NVTE_FUSED_ATTN_AOTRITON NVTE_FUSED_ATTN_CK
         ;;
         "aotriton")
+            export NVTE_FLASH_ATTN=0
             export NVTE_FUSED_ATTN_CK=0
             unset NVTE_FUSED_ATTN NVTE_FUSED_ATTN_AOTRITON
         ;;
         "ck")
+            export NVTE_FLASH_ATTN=0
             export NVTE_FUSED_ATTN_AOTRITON=0
             unset NVTE_FUSED_ATTN NVTE_FUSED_ATTN_CK
         ;;
+        "flash")
+            export NVTE_FUSED_ATTN=0 NVTE_FUSED_ATTN_CK=0 NVTE_FUSED_ATTN_AOTRITON=0
+            unset NVTE_FLASH_ATTN
+        ;;
         "unfused")
+            export NVTE_FLASH_ATTN=0
             export NVTE_FUSED_ATTN=0
             unset NVTE_FUSED_ATTN_AOTRITON NVTE_FUSED_ATTN_CK
         ;;

@@ -9,8 +9,10 @@ DIR=`dirname $0`
 
 TEST_DIR=${TE_PATH}tests/pytorch
 
+: ${TEST_WORKERS:=4}
+
 install_prerequisites() {
-    pip install numpy==1.22.4 onnx onnxruntime
+    pip install numpy==1.24 onnx onnxruntime
     rc=$?
     if [ $rc -ne 0 ]; then
         script_error "Failed to install test prerequisites"
@@ -25,48 +27,42 @@ run() {
     check_test_filter $_test_name_tag || return
     echo "Run [$_gemm, $_fus_attn] $@"
     : ${_WORKERS_COUNT:=1}
-    pytest `get_pytest_junitxml $_test_name_tag` \
+    pytest -v `get_pytest_junitxml $_test_name_tag` \
            -n$_WORKERS_COUNT --max-worker-restart=$_WORKERS_COUNT "$TEST_DIR/$@" || test_run_error
     echo "Done [$_gemm, $_fus_attn] $1"
 }
 
 run_test_config(){
     echo ====== Run with GEMM backend: $_gemm and Fused attention backend: $_fus_attn =====
-    _WORKERS_COUNT=4
-    if [ $_fus_attn = "ck" -o $_fus_attn = "auto" ]; then 
-        _is_default_fa="1"
-    else
-        _is_default_fa=""
-    fi
-    if [ $_gemm != "rocblas" ]; then
-        #test -n "$_is_default_fa" && run 1 test_cast_transpose_triton.py
-        run 1 test_cuda_graphs.py
-        _graph_filter=""
-    else
-        _graph_filter="not graph"
-    fi
+    _WORKERS_COUNT=$TEST_WORKERS
+    #test $_fus_attn = "auto" && run 1 test_cast_transpose_triton.py
+    run 1 test_cuda_graphs.py
     run 1 test_deferred_init.py
     run 1 test_float8tensor.py
-    run 1 test_fused_rope.py
-    test $_gemm = "hipblaslt" && run 1 test_fusible_ops.py #TODO: Run on RocBLAS with supported subtests
-    test $_gemm = "hipblaslt" -a -n "$_is_default_fa" && run 3 test_gemm_autotune.py
+    if [ $_fus_attn = "auto" ]; then
+        run 1 test_fused_rope.py
+        run 1 test_fusible_ops.py
+        test $_gemm = "hipblaslt" && run 3 test_gemm_autotune.py
+    fi
     run 1 test_gqa.py
     run 1 test_jit.py
     run 1 test_multi_tensor.py
-    run 1 test_numerics.py -k "$_graph_filter"
-    run 3 test_onnx_export.py
+    run 1 test_numerics.py
+    # All FA are disabled in ONNX export mode
+    test $_fus_attn = "auto" && run 3 test_onnx_export.py
     run 1 test_recipe.py
-    run 1 test_sanity.py -k "$_graph_filter"
+    run 1 test_sanity.py
     run 1 test_torch_save_load.py
-    test $_fus_attn != "unfused" && run 1 fused_attn/test_fused_attn.py
+    test $_fus_attn = "auto" && run 1 fused_attn/test_fused_attn.py
 }
 
 run_test_config_mgpu(){
     echo ====== Run mGPU with GEMM backend: $_gemm and Fused attention backend: $_fus_attn =====
     _WORKERS_COUNT=1
-    run 3 test_fused_optimizer.py
-    run 3 test_fusible_ops_distributed.py
-    if [ $_fus_attn != "unfused" ]; then
+    test $TEST_WORKERS = 0 && _WORKERS_COUNT=0
+    if [ $_fus_attn = "auto" ]; then
+        run 3 test_fused_optimizer.py
+        run 3 test_fusible_ops_distributed.py
         run 3 fused_attn/test_fused_attn_with_cp.py
     fi
 }
@@ -88,21 +84,20 @@ check_test_jobs_requested && init_test_jobs `python -c "import torch; print(torc
 for _gemm in hipblaslt rocblas; do
     configure_gemm_env $_gemm || continue
     
-    for _fus_attn in auto ck aotriton unfused; do
+    for _fus_attn in auto flash ck aotriton unfused; do
         configure_fused_attn_env $_fus_attn || continue
 
-        #On basic (1) test level rocBLAS tests are run with default FUSED_ATTN flags only
-        #On normal (3) level it runs with all but default backend configuration
-        #hipBlasLt tests are run with ck/aotriton/unfused on test level 1
-        #and with auto/aotriton/unfused on test level 3
+        #Auto - default mode with both Flash and Fused attentions are enabled
+        #Flash - Fused attention is disabled
+        #CK/AOTriton - no Flash attention and only corresponding Fused attention backend is enabled
+        #Unfused - no Flash and Fused attentions are enabled
+        #On basic (1) test level tests are run in auto and unfused mode
+        #On normal (3) level it runs in auto, flash, ck and aotriton modes
         if [ $TEST_LEVEL -ge 3 ]; then
-            test $_gemm = "rocblas" -a $_fus_attn = "auto" && continue
-            test $_gemm = "hipblaslt" -a $_fus_attn = "ck" && continue
+            test $_fus_attn = "unfused" && continue
         else
-            test $_gemm = "rocblas" -a $_fus_attn != "auto" && continue
-            test $_gemm = "hipblaslt" -a $_fus_attn = "auto" && continue
+            test $_fus_attn != "auto" -a $_fus_attn != "unfused" && continue
         fi
-
 
         if [ -n "$TEST_JOBS_MODE" ]; then
             run_test_job "$_gemm-$_fus_attn"

@@ -10,9 +10,9 @@ DIR=`dirname $0`
 install_praxis() {
     git clone https://github.com/google/praxis.git && cd praxis || return $?
     git checkout $_praxis_commit || return $?
-    #Remove unndcessary dependencies for testing and make sure JAX is not upgraded
+    #Remove unnecessary dependencies for testing and make sure JAX is not upgraded
     sed -i -e 's/^flax/#flax/;s/^jax /#jax /;s/^opt/#opt/;s/^tensorflow/#tensorflow/' requirements.in || return $?
-    pip list | awk '/jax/ { print $1"=="$2}' > requirements.in
+    pip list | awk '/jax/ { print $1"=="$2}' >> requirements.in
     pip install . --log build.log
     rc=$?
     if [ $rc -ne 0 ]; then
@@ -61,7 +61,7 @@ run() {
     _test_name_tag=`get_test_name_tag $1 $_fus_attn`
     check_test_filter $_test_name_tag || return
     echo "Run [$_fus_attn] $*"
-    pytest `get_pytest_junitxml $_test_name_tag` "$TEST_DIR/$@" || test_run_error
+    pytest -v `get_pytest_junitxml $_test_name_tag` "$TEST_DIR/$@" || test_run_error
     echo "Done [$_fus_attn] $1"
 }
 
@@ -69,7 +69,7 @@ run_test_config() {
     echo ====== Run with Fused attention backend: $_fus_attn =====
     run 1 test_custom_call_compute.py
     run 1 test_functions.py
-    run 1 test_fused_attn.py
+    test $_fus_attn != "unfused" && run 1 test_fused_attn.py
     run 1 test_helper.py
     if [ $_fus_attn != "unfused" ]; then
         #Layer tests control Fused attn so we can only play with backend
@@ -82,7 +82,7 @@ run_test_config() {
 
 run_test_config_mgpu() {
     echo ====== Run mGPU with Fused attention backend: $_fus_attn =====
-    run 3 test_distributed_fused_attn.py
+    test $_fus_attn != "unfused" && run 3 test_distributed_fused_attn.py
     run 3 test_distributed_layernorm.py
     run 3 test_distributed_layernorm_mlp.py
     run 3 test_distributed_softmax.py
