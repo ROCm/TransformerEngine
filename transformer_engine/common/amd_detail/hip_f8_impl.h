@@ -126,8 +126,11 @@ uint8_t cast_to_f8(T _x, bool stoch, uint32_t rng) {
      but after shift right by 4 bits, it would look like midpoint.
   */
 
-  if (exponent_diff>0)
-    mantissa >>= exponent_diff;
+  if (exponent_diff>0) {
+    // mantissa >>= exponent_diff;
+		for (int i=0;i<exponent_diff;i++)
+			mantissa >>= 1;
+	}
   else if (exponent_diff == -1)
     mantissa <<= -exponent_diff;
   bool implicit_one = mantissa & (1 << mfmt); 

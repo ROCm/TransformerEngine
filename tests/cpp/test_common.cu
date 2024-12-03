@@ -187,6 +187,13 @@ void compareResults(const std::string &name, const Tensor &test, const void *ref
     const T *test_data = test.cpu_dptr<T>();
     const T *ref_data = reinterpret_cast<const T*>(ref);
     for (size_t i = 0; i < N; ++i) {
+		  if (i==5739983)
+			  if (sizeof(test_data[i])==1)
+				std::cout << "test_data=" << static_cast<float>(test_data[i]) << " ref_data="
+				<< static_cast<float>(ref_data[i]) 
+				<< " hex test_data=" << reinterpret_cast<const int&>(test_data[i])
+				<< " hex ref_data=" << reinterpret_cast<const int&>(ref_data[i])
+				<< std::endl;
       #ifndef __HIP_PLATFORM_AMD__
       double t = static_cast<double>(test_data[i]);
       double r = static_cast<double>(ref_data[i]);

@@ -86,7 +86,14 @@ void compute_ref_act_cast(const IT *input_h,
     for (size_t j = 0; j < H; j++) {
       CT elt = static_cast<CT>(input_h[i * H + j]);
       elt = act(elt);
+			if (i==467 && j==1487) {
+				std::cout << "output_fp32[5739983]=" << (scale * elt) << " scale=" << scale << " elt=" << elt << std::endl;
+				float a = scale * elt;
+				std::cout << "float32 hex = " << reinterpret_cast<int&>(a) << std::endl;
+			}
       output_h[i * H + j] = static_cast<OT>(scale * elt);
+			if (i==467 && j==1487)
+				std::cout << "hex data is " << std::hex << reinterpret_cast<const int&>(output_h[i * H + j]) << std::endl;
       amax = std::abs(elt) > amax ? std::abs(elt) : amax;
     }
   }

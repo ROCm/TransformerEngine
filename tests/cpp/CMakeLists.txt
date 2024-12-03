@@ -48,6 +48,8 @@ else()
   project(transformer_engine_tests LANGUAGES HIP CXX)
   # Ask hcc to generate device code during compilation so we can use
   # host linker to link.
+	message(STATUS "HIP_HCC_FLAGS: ${HIP_HCC_FLAGS}")
+	message(STATUS "CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
   set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} -fno-gpu-rdc -Wno-defaulted-function-deleted")
   foreach(rocm_arch ${CMAKE_HIP_ARCHITECTURES})
     # if CMAKE_CXX_FLAGS has --offload-arch set already, better to rm first
