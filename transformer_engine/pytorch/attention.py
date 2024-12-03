@@ -75,13 +75,9 @@ from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
 from transformer_engine.pytorch.graph import is_graph_capturing
 
 
-#TODO: add back once rocm TE support flash-attn
-if not IS_HIP_EXTENSION:
-    _flash_attn_version = PkgVersion(get_pkg_version("flash-attn"))
-else:
-    _flash_attn_version = PkgVersion("0.0.1")
+_flash_attn_version = PkgVersion(get_pkg_version("flash-attn"))
 _flash_attn_version_required = PkgVersion("2.0.6")
-_flash_attn_max_version = PkgVersion("2.5.8")
+_flash_attn_max_version = PkgVersion("2.6.3")
 _flash_attn_2_plus = _flash_attn_version >= PkgVersion("2")
 _flash_attn_2_1_plus = _flash_attn_version >= PkgVersion("2.1")
 _flash_attn_2_3_plus = _flash_attn_version >= PkgVersion("2.3")
@@ -291,11 +287,7 @@ def get_attention_backend(
 
     # Filter: Environment variables
     global _NVTE_FLASH_ATTN, _NVTE_FUSED_ATTN, _NVTE_UNFUSED_ATTN
-    # TODO: enable flash attn package in rocm TE
-    if IS_HIP_EXTENSION:
-        _NVTE_FLASH_ATTN = 0
-    else:
-        _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
+    _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
     _NVTE_FUSED_ATTN = int(os.getenv("NVTE_FUSED_ATTN", "1"))
     _NVTE_UNFUSED_ATTN = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
     use_flash_attention = _NVTE_FLASH_ATTN
@@ -691,7 +683,7 @@ def get_attention_backend(
 
     # Select FusedAttention for performance
     if (
-        use_flash_attention
+        use_flash_attention and (not IS_HIP_EXTENSION)
         and use_fused_attention
         and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
     ):
@@ -3132,9 +3124,6 @@ class FlashAttention(torch.nn.Module):
     ) -> None:
         super().__init__()
         
-        # TODO: enable after flash attn package supported in ROCm TE
-        if IS_HIP_EXTENSION:
-            return
         assert (
             _flash_attn_version >= _flash_attn_version_required
         ), f"FlashAttention minimum version {_flash_attn_version_required} is required."

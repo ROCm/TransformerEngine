@@ -105,10 +105,8 @@ std::vector<at::Tensor> fused_attn_bwd(
     const c10::optional<at::Tensor> scale_dP, const c10::optional<at::Tensor> scale_dQKV,
     c10::optional<at::Tensor> amax_dP, c10::optional<at::Tensor> amax_dQKV);
 
-#ifndef USE_ROCM
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
-#endif
 
 /***************************************************************************************************
  * GEMM

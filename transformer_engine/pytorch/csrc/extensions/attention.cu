@@ -1174,7 +1174,6 @@ std::vector<at::Tensor> fused_attn_bwd(
   return {dQ, dK, dV, dBias};
 }
 
-#ifndef USE_ROCM
 namespace flash_attention {
 
 constexpr int warp_size = 32;
@@ -1315,6 +1314,7 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v) {
   return qkv;
 }
 
+#ifndef USE_ROCM
 /***************************************************************************************************
  * Support THD format for Context Parallel: Binary search
  **************************************************************************************************/

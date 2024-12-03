@@ -80,10 +80,6 @@ else()
     set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -g")
   endif()
 
-  # Hide non-necessary symbols in shared object.
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
-  set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
-
   list(APPEND CMAKE_MODULE_PATH "/opt/rocm")
 endif()
 
@@ -344,6 +340,8 @@ else()
     set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} --offload-arch=${rocm_arch}")
   endforeach()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${HIP_HCC_FLAGS}")
+  # Hide non-necessary symbols in shared object.
+  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
 endif()
 
 # Install library
