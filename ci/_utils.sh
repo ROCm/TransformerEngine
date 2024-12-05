@@ -34,14 +34,14 @@ return_run_results() {
 configure_gemm_env() {
     case "$1" in
         "auto")
-            unset NVTE_USE_HIPBLASLT NVTE_USE_ROCBLAS
+            unset NVTE_USE_HIPBLASLT NVTE_USE_ROCBLAS ROCBLAS_STREAM_ORDER_ALLOC
         ;;
         "hipblaslt")
             export NVTE_USE_HIPBLASLT=1
-            unset NVTE_USE_ROCBLAS
+            unset NVTE_USE_ROCBLAS ROCBLAS_STREAM_ORDER_ALLOC
         ;;
         "rocblas")
-            export NVTE_USE_ROCBLAS=1
+            export NVTE_USE_ROCBLAS=1 ROCBLAS_STREAM_ORDER_ALLOC=1
             unset NVTE_USE_HIPBLASLT
         ;;
         *)

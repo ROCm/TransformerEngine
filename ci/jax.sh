@@ -10,7 +10,7 @@ DIR=`dirname $0`
 install_praxis() {
     git clone https://github.com/google/praxis.git && cd praxis || return $?
     git checkout $_praxis_commit || return $?
-    #Remove unndcessary dependencies for testing and make sure JAX is not upgraded
+    #Remove unnecessary dependencies for testing and make sure JAX is not upgraded
     sed -i -e 's/^flax/#flax/;s/^jax /#jax /;s/^opt/#opt/;s/^tensorflow/#tensorflow/' requirements.in || return $?
     pip list | awk '/jax/ { print $1"=="$2}' >> requirements.in
     pip install . --log build.log
@@ -60,7 +60,7 @@ run() {
     _test_name_tag=`get_test_name_tag $1 $_fus_attn`
     check_test_filter $_test_name_tag || return
     echo "Run [$_fus_attn] $*"
-    pytest `get_pytest_junitxml $_test_name_tag` "$TEST_DIR/$@" || test_run_error
+    pytest -v `get_pytest_junitxml $_test_name_tag` "$TEST_DIR/$@" || test_run_error
     echo "Done [$_fus_attn] $1"
 }
 
