@@ -10,7 +10,7 @@ DIR=`dirname $0`
 TEST_DIR=${TE_PATH}tests/pytorch
 
 install_prerequisites() {
-    pip install numpy==1.22.4 onnx onnxruntime
+    pip install 'numpy>=1.22.4,<2.0' onnx onnxruntime
     rc=$?
     if [ $rc -ne 0 ]; then
         script_error "Failed to install test prerequisites"
