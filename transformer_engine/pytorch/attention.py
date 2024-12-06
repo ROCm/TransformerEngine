@@ -636,11 +636,15 @@ def get_attention_backend(
     # FlashAttention               |
     #     flash-attn >=2.0, <2.4.1 | no
     #     flash-attn >=2.4.1       | yes
-    # FusedAttention               |
+    # FusedAttention (NVTE)        |
     #     sub-backend 0            | yes
     #     sub-backend 1            | workspace optimization path and sm90+: yes;
     #                              | otherwise: no
     #     sub-backend 2            | no
+    # FusedAttention (ROCM)        |
+    #     CK                       | with extra dq_acc buffer, yes
+    #                              | otherwise: no
+    #     AOTriton                 | yes
     # UnfusedDotProductAttention   | yes
     if use_flash_attention and deterministic and not _flash_attn_2_4_1_plus:
         logger.warning(
@@ -661,14 +665,6 @@ def get_attention_backend(
                 or core_attention_bias_requires_grad
                 or cudnn_version < (8, 9, 5)
             )
-        ):
-            logger.debug("Disabling FusedAttention for determinism reasons")
-            use_fused_attention = False
-
-    if use_fused_attention and deterministic and IS_HIP_EXTENSION:
-        if (
-            fused_attention_backend == FusedAttnBackend["CK"]
-            and is_training
         ):
             logger.debug("Disabling FusedAttention for determinism reasons")
             use_fused_attention = False

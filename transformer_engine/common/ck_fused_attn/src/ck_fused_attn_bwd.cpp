@@ -189,7 +189,7 @@ hipError_t ck_attn_bwd(
   const void* do_ptr, 
   uint64_t stride_b_do, uint64_t stride_h_do, uint64_t stride_s_do,
   float scaling_factor, float dropout_probability,
-  uint64_t philox_seed, uint64_t philox_offset,
+  void* philox_seed_ptr, void* philox_offset_ptr,
   BiasType attn_bias_type,
   MaskType attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,
@@ -206,6 +206,11 @@ hipError_t ck_attn_bwd(
   void* dbias_expanded_ptr,
   void* dbias_ptr,
   void* workspace_ptr,
+  bool deterministic,
+  bool uses_bwd_v3,
+  bool is_v3_atomic_fp32,
+  bool is_v3_spec,
+  int how_v3_bf16_cvt,
   hipStream_t stream){
 
   bool has_dropout = (dropout_probability > 0.f);
@@ -227,7 +232,6 @@ hipError_t ck_attn_bwd(
   float p_undrop = 1.0 - p_drop;
   bool is_group_mode = false;
   bool s_randval = false;
-  bool is_deterministic = false;
 
   bias_enum bias_type;
   BiasShape bias_shape; 
@@ -256,8 +260,14 @@ hipError_t ck_attn_bwd(
   }
   left = window_size_left;
   right = window_size_right;
-
-  ck_tile::stream_config stream_config{stream};
+ 
+  bool ck_fused_attn_log_config = false;
+  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
+    if (env_p != nullptr && std::string(env_p) == "1")
+      ck_fused_attn_log_config = true;
+  } 
+  // print kernel name on verbose mode
+  ck_tile::stream_config stream_config{stream, false, ck_fused_attn_log_config};
 
   ck_tile::index_t shape_seqlen_q = seqlen_q;
   ck_tile::index_t shape_seqlen_k = seqlen_k;
@@ -271,10 +281,16 @@ hipError_t ck_attn_bwd(
     //TODO: better error out system
     throw std::runtime_error("Invalid dtype in ck_fused_attn.");
   }
+
   auto fmha_traits =
     fmha_bwd_traits{hdim_q,    hdim_v,    data_type_str, is_group_mode,
                     mask_type, bias_type, has_dbias,     has_dropout, 
-                    s_randval, is_deterministic};
+                    s_randval, deterministic, 
+                    uses_bwd_v3, // use_bwd_v3
+                    is_v3_atomic_fp32, // is_v3_atomic_fp32
+                    is_v3_spec, // is_v3_spec
+                    how_v3_bf16_cvt //how_v3_bf16_cvt 0:RTNE; 1:RTNA; 2:RTZ
+                    };
 
   auto fmha_args = [&]() {
     // setup stride_* arguments
@@ -290,7 +306,7 @@ hipError_t ck_attn_bwd(
     const ck_tile::index_t stride_dk = stride_s_dk;
     const ck_tile::index_t stride_dv = stride_s_dv;
     const ck_tile::index_t stride_dkv_expanded = stride_s_dkv_expanded;
-    const ck_tile::index_t stride_dq_acc = h*d; //dq_acc of shape (B, S, H, D)
+    const ck_tile::index_t stride_dq_acc = d; //dq_acc of shape (nsplits, B, H, S, D)
     // dbias is of the same shape as bias
     // but ck only take dbias with BHSS
     const ck_tile::index_t stride_dbias = max_seqlen_k;
@@ -311,7 +327,7 @@ hipError_t ck_attn_bwd(
     const ck_tile::index_t nhead_stride_dkv_expanded = stride_h_dkv_expanded;
     // dbias can only be of BHSS
     const ck_tile::index_t nhead_stride_dbias = max_seqlen_q * max_seqlen_k;
-    const ck_tile::index_t nhead_stride_dq_acc = d; //dq_acc of shape (B, S, H, D)
+    const ck_tile::index_t nhead_stride_dq_acc = s_q*d; //dq_acc of shape (nsplits, B, H, S, D)
     // setup batch_stride_* arguments
     const ck_tile::index_t batch_stride_q = stride_b_q;
     const ck_tile::index_t batch_stride_k = stride_b_k;
@@ -330,7 +346,7 @@ hipError_t ck_attn_bwd(
     const ck_tile::index_t batch_stride_dkv_expanded = stride_b_dkv_expanded;
     // for dbias, use h since h can be different from bias_h
     const ck_tile::index_t batch_stride_dbias = h* max_seqlen_q * max_seqlen_k;
-    const ck_tile::index_t batch_stride_dq_acc = h*s_q*d; //dq_acc of shape (B, S, H, D)
+    const ck_tile::index_t batch_stride_dq_acc = h*s_q*d; //dq_acc of shape (nsplits, B, H, S, D)
     const ck_tile::index_t split_stride_dq_acc = b * h * s_q * d;
 
     return fmha_bwd_args{q_ptr,
@@ -404,14 +420,9 @@ hipError_t ck_attn_bwd(
                          static_cast<ck_tile::index_t>(mask_type),
                          p_drop,
                          p_undrop,
-                         {philox_seed, philox_offset}};
+                         std::pair<const void*, const void*>{philox_seed_ptr, philox_offset_ptr}};
   }();
 
-  bool ck_fused_attn_log_config = false;
-  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      ck_fused_attn_log_config = true;
-  }
   if (ck_fused_attn_log_config) {
     std::cout<<std::endl<<"run ck fmha_bwd: "<<std::endl;
     // fmha_traits debug
@@ -426,6 +437,10 @@ hipError_t ck_attn_bwd(
     std::cout<<"has_dropout: "<<fmha_traits.has_dropout<<std::endl;
     std::cout<<"is_store_randval: "<<fmha_traits.is_store_randval<<std::endl;
     std::cout<<"is_deterministic: "<<fmha_traits.is_deterministic<<std::endl;
+    std::cout<<"uses_bwd_v3: "<<fmha_traits.uses_bwd_v3<<std::endl;
+    std::cout<<"is_v3_atomic_fp32: "<<fmha_traits.is_v3_atomic_fp32<<std::endl;
+    std::cout<<"is_v3_spec: "<<fmha_traits.is_v3_spec<<std::endl;
+    std::cout<<"how_v3_bf16_cvt: "<<fmha_traits.how_v3_bf16_cvt<<std::endl;
 
     // fmha_args debug
     std::cout<<"fmha_args: "<<std::endl;
@@ -498,8 +513,8 @@ hipError_t ck_attn_bwd(
     std::cout<<"mask_type: "<<fmha_args.mask_type<<std::endl;
     std::cout<<"p_drop: "<<fmha_args.p_drop<<std::endl;
     std::cout<<"p_undrop: "<<fmha_args.p_undrop<<std::endl;
-    std::cout<<"dropout_seed: "<<std::get<0>(fmha_args.drop_seed_offset)<<std::endl;
-    std::cout<<"dropout_offset: "<<std::get<1>(fmha_args.drop_seed_offset)<<std::endl;
+    std::cout<<"dropout_seed_ptr: "<<std::get<0>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset))<<std::endl;
+    std::cout<<"dropout_offset_ptr: "<<std::get<1>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset))<<std::endl;
   }
   float average_runtime = fmha_bwd(fmha_traits, fmha_args, stream_config);
   if(average_runtime < 0){

@@ -51,7 +51,7 @@ hipError_t ck_attn_fwd(
   bool is_training,
   float scaling_factor,
   float dropout_probability,
-  uint64_t philox_seed, uint64_t philox_offset,
+  void* philox_seed_ptr, void* philox_offset_ptr,
   BiasType attn_bias_type,
   MaskType attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,
@@ -79,7 +79,7 @@ hipError_t ck_attn_bwd(
   uint64_t stride_b_do, uint64_t stride_h_do, uint64_t stride_s_do,
   float scaling_factor,
   float dropout_probability,
-  uint64_t philox_seed, uint64_t philox_offset,
+  void* philox_seed_ptr, void* philox_offset_ptr,
   BiasType attn_bias_type,
   MaskType attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,
@@ -96,6 +96,11 @@ hipError_t ck_attn_bwd(
   void* dbias_expanded_ptr,
   void* dbias_ptr,
   void* workspace_ptr,
+  bool deterministic,
+  bool uses_bwd_v3,
+  bool is_v3_atomic_fp32,
+  bool is_v3_spec,
+  int how_v3_bf16_cvt,
   hipStream_t stream);
 
 }//namespace ck_fused_attn
