@@ -128,11 +128,9 @@ uint8_t cast_to_f8(T _x, bool stoch, uint32_t rng) {
 
   if (exponent_diff>0) {
     //mantissa >>= exponent_diff;
-    // Use a loop to work around the compiler bug that produced the wrong result for the right shift
+    // Work around the compiler bug that produced the wrong result for the right shift
     // TODO: Change back after the compiler bug is resolved.
-    int shift_amount = exponent_diff > 32 ? 32 : exponent_diff;
-    for (int i=0;i<shift_amount;++i)
-      mantissa >>= 1;
+    mantissa = exponent_diff >= 32 ? 0 : (mantissa >> exponent_diff);
   }
   else if (exponent_diff == -1)
     mantissa <<= -exponent_diff;
