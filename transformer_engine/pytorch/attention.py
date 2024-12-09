@@ -641,6 +641,7 @@ def get_attention_backend(
     #     sub-backend 1            | workspace optimization path and sm90+: yes;
     #                              | otherwise: no
     #     sub-backend 2            | no
+    # TODO: ROCm CK will enable determinism after ck team tells us how
     # FusedAttention (ROCM)        |
     #     CK                       | with extra dq_acc buffer, yes
     #                              | otherwise: no
@@ -665,6 +666,14 @@ def get_attention_backend(
                 or core_attention_bias_requires_grad
                 or cudnn_version < (8, 9, 5)
             )
+        ):
+            logger.debug("Disabling FusedAttention for determinism reasons")
+            use_fused_attention = False
+    # TODO: remove the filtering after ck team tells us how to enable more deterministic bwd kernels
+    if use_fused_attention and deterministic and IS_HIP_EXTENSION:
+        if (
+            fused_attention_backend == FusedAttnBackend["CK"]
+            and is_training
         ):
             logger.debug("Disabling FusedAttention for determinism reasons")
             use_fused_attention = False

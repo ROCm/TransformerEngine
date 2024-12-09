@@ -289,7 +289,7 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
       attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
       window_size_left, window_size_right,
-      deterministic,
+      false, // TODO: re-enable deterministic after CK team show us how
       input_QKV, input_O, input_dO, input_Bias, output_S,
       output_dQKV, output_dBias,
       input_cu_seqlens,
@@ -452,7 +452,7 @@ void nvte_fused_attn_bwd_kvpacked(
       attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
       window_size_left, window_size_right,
-      deterministic,
+      false, // TODO: re-enable deterministic after CK team show us how
       input_Q, input_KV, input_O, input_dO, input_Bias, 
       output_S,
       output_dQ, output_dKV, output_dBias,
@@ -606,7 +606,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
       window_size_left, window_size_right,
-      deterministic,
+      false, // TODO: re-enable deterministic after CK team show us how
       input_Q, input_K, input_V, input_O, input_dO, input_Bias, 
       output_S,
       output_dQ, output_dK, output_dV, output_dBias,
