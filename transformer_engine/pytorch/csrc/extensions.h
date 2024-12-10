@@ -375,19 +375,18 @@ at::Tensor fused_rope_thd_backward(const at::Tensor &output_grads, const at::Ten
  * Miscellaneous
  **************************************************************************************************/
 
-//TODO: support user buffer for ROCm
 #ifndef USE_ROCM
 size_t get_cublasLt_version();
 size_t get_cudnn_version();
 #endif
 
+//TODO: support user buffer for ROCm
 void placeholder();
 
 /***************************************************************************************************
  * Support THD format for Context Parallel
  **************************************************************************************************/
 
-#ifndef USE_ROCM
 at::Tensor thd_read_half_tensor(const at::Tensor &tensor, const at::Tensor &cu_seqlens,
                                 int half_idx);
 
@@ -407,7 +406,6 @@ void thd_grad_correction(at::Tensor grad, const at::Tensor &grad_per_step,
 
 at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_tokens,
                                        int world_size, int rank);
-#endif
 
 /***************************************************************************************************
  * multi_tensor_* kernels

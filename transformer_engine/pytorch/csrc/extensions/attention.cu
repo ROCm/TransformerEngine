@@ -1314,7 +1314,6 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v) {
   return qkv;
 }
 
-#ifndef USE_ROCM
 /***************************************************************************************************
  * Support THD format for Context Parallel: Binary search
  **************************************************************************************************/
@@ -1867,5 +1866,3 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
 
   return output;
 }
-
-#endif //ifndef USE_ROCM

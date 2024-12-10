@@ -84,6 +84,7 @@ _flash_attn_2_3_plus = _flash_attn_version >= PkgVersion("2.3")
 _flash_attn_2_4_plus = _flash_attn_version >= PkgVersion("2.4")
 _flash_attn_2_4_1_plus = _flash_attn_version >= PkgVersion("2.4.1")
 _flash_attn_2_5_7_plus = _flash_attn_version >= PkgVersion("2.5.7")
+_flash_attn_2_6_plus = _flash_attn_version >= PkgVersion("2.6")
 
 if _flash_attn_version >= _flash_attn_version_required:
     from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_forward_func
@@ -461,13 +462,6 @@ def get_attention_backend(
                 logger.debug(
                     "Disabling FusedAttention as it only supports sliding window attention "
                     "with causal mask, no dropout, and qkv_format = bshd/sbhd"
-                )
-                use_fused_attention = False
-            # ROCm TE can support generic sliding window with dropout
-            elif IS_HIP_EXTENSION and qkv_format == "thd":
-                logger.debug(
-                    "Disabling ROCm FusedAttention as it only supports sliding window attention "
-                    "with qkv_format = bshd/sbhd"
                 )
                 use_fused_attention = False
             elif context_parallel:
@@ -1832,6 +1826,8 @@ class AttnFuncWithCP(torch.autograd.Function):
             fa_optional_backward_kwargs["alibi_slopes"] = None
         if _flash_attn_2_4_1_plus:
             fa_optional_backward_kwargs["deterministic"] = ctx.deterministic
+        if _flash_attn_2_6_plus:
+            fa_optional_backward_kwargs["softcap"] = 0.0
 
         for i in range(cp_size):
             # wait until KV is received
