@@ -16,7 +16,7 @@ import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
 from flax.linen import fp8_ops
 
-from .util import is_hip_extension
+from .util import is_hip_extension, jnp_float8_e4m3_type, jnp_float8_e5m2_type
 
 from transformer_engine.transformer_engine_jax import DType
 
@@ -30,13 +30,6 @@ from transformer_engine.common.recipe import DelayedScaling, Format
 from transformer_engine.jax.sharding import global_shard_guard
 from transformer_engine.jax.sharding import MeshResource
 
-if not is_hip_extension():
-    jnp_float8_e4m3_type = jnp.float8_e4m3fn
-    jnp_float8_e5m2_type = jnp.float8_e5m2
-else:
-    jnp_float8_e4m3_type = jnp.float8_e4m3fnuz
-    jnp_float8_e5m2_type = jnp.float8_e5m2fnuz
- 
 _is_fp8_available = None
 _reason_for_no_fp8 = ""
 Collection = Union[Dict, FrozenDict]
