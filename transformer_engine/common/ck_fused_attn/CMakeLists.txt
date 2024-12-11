@@ -43,18 +43,6 @@ execute_process(
   --api bwd --output_dir ${CMAKE_CURRENT_SOURCE_DIR}/gen_src --receipt 3
 )
 
-# copy the header files needed
-file(GLOB HPP_FILES "${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/*.hpp")
-foreach(HPP_FILE ${HPP_FILES})
-  file(COPY ${HPP_FILE} DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/src)
-endforeach()
-
-# copy the hsaco files needed
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/hsaco")
-  file(REMOVE_RECURSE ${CMAKE_CURRENT_SOURCE_DIR}/src/hsaco)
-endif()
-file(COPY "${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/hsaco" DESTINATION "${CMAKE_CURRENT_SOURCE_DIR}/src")
-
 set(ck_fused_attn_SOURCES)
 list(APPEND ck_fused_attn_SOURCES
        src/ck_fused_attn_fwd.cpp
@@ -66,7 +54,7 @@ file(GLOB_RECURSE CK_FA_FILES "${CMAKE_CURRENT_SOURCE_DIR}/gen_src/*.cpp")
 list(APPEND ck_fused_attn_SOURCES ${CK_FA_FILES})
 
 # Glob all hsaco .cpp files and append to ck_fused_attn
-file(GLOB_RECURSE CK_HSACO_FILES "${CMAKE_CURRENT_SOURCE_DIR}/src/hsaco/*.cpp")
+file(GLOB_RECURSE CK_HSACO_FILES "${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/hsaco/*.cpp")
 list(APPEND ck_fused_attn_SOURCES ${CK_HSACO_FILES})
 
 message(STATUS "Found the following CK fused attention files:")
@@ -92,7 +80,7 @@ if(NOT EXISTS "${CK_INCLUDE_DIR}")
 endif()
 
 target_include_directories(ck_fused_attn PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_include_directories(ck_fused_attn PRIVATE ${CK_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(ck_fused_attn PRIVATE ${CK_INCLUDE_DIR} ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha)
 
 find_package(hip)
 list(APPEND ck_fused_attn_LINKER_LIBS hip::host hip::device roctx64)
