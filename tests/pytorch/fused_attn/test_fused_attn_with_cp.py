@@ -39,13 +39,14 @@ def get_bash_arguments(**kwargs):
 
 
 @pytest.mark.skipif(not _flash_attn_2_plus, reason="Flash-attn 2.0+ is required.")
-@pytest.mark.skipif(_flash_attn_2_6_plus, reason="CP tests are not supported on Flash-attn 2.6+.")
 @pytest.mark.skipif(not IS_HIP_EXTENSION and get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", ["bf16", "fp16"])
 @pytest.mark.parametrize("model", model_configs_flash_attn.keys())
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
 @pytest.mark.skipif(device_count() < 2, reason="multi-GPU host is required")
 def test_cp_with_flash_attention(dtype, model, qkv_format):
+    if IS_HIP_EXTENSION and _flash_attn_2_6_plus and qkv_format == "thd":
+        pytest.skip("CP tests do not support THD format with Flash-attn 2.6+.")
     subprocess.run(
         get_bash_arguments(
             dtype=dtype, model=model, qkv_format=qkv_format, kernel_backend="FlashAttention"

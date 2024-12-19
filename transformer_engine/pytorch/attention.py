@@ -1640,6 +1640,14 @@ class AttnFuncWithCP(torch.autograd.Function):
                                 **fa_optional_forward_kwargs,
                             )
 
+                    # Depending on flash_attn version softmax_lse shape may be
+                    # either (batch_size, nheads, seqlen) or (nheads, total_q_seqlen)
+                    # Here we use the former format
+                    if not use_fused_attention and _flash_attn_2_6_plus:
+                        softmax_lse_per_step[i] = softmax_lse_per_step[i].view(
+                            softmax_lse_per_step[i].shape[0], cu_seqlens_q.numel() - 1, -1
+                            ).movedim(0, 1)
+
             if i > 0:
                 # wait until fwd restuls correction of last step is done
                 if i > 1:
@@ -1801,14 +1809,22 @@ class AttnFuncWithCP(torch.autograd.Function):
                 softmax_lse_ = softmax_lse.view(
                     *softmax_lse.shape[:-1], 2, softmax_lse.shape[-1] // 2
                 )
-                softmax_lse_ = softmax_lse_[..., 1, :].contiguous()
+                softmax_lse_ = softmax_lse_[..., 1, :]
                 if ctx.use_fused_attention:
                     # [b, np, sq//2] -> [b, np, sq//2, 1]
                     softmax_lse_.unsqueeze_(-1)
+                elif _flash_attn_2_6_plus:
+                    # [b, np, sq//2] -> [np, b*sq//2]
+                    softmax_lse_ = softmax_lse_.movedim(1,0).reshape(softmax_lse_.shape[1], -1)
+                softmax_lse_ = softmax_lse_.contiguous()
 
         if ctx.use_fused_attention:
             # [b, np, sq] -> [b, np, sq, 1]
             softmax_lse.unsqueeze_(-1)
+        elif _flash_attn_2_6_plus:
+            # [b, np, sq] -> [np, b*sq]
+            softmax_lse = softmax_lse.movedim(1,0).reshape(softmax_lse.shape[1], -1).contiguous()
+
         out = out.view(*q.shape)
         dout = dout.view(*q.shape)
         # Flash Attn outputs
