@@ -43,28 +43,28 @@ execute_process(
   --api bwd --output_dir ${CMAKE_CURRENT_SOURCE_DIR}/gen_src --receipt 3
 )
 
-# copy the header files needed
-file(COPY_FILE ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/bias.hpp ${CMAKE_CURRENT_SOURCE_DIR}/src/bias.hpp)
-file(COPY_FILE ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/mask.hpp ${CMAKE_CURRENT_SOURCE_DIR}/src/mask.hpp)
-file(COPY_FILE ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/fmha_fwd.hpp ${CMAKE_CURRENT_SOURCE_DIR}/src/fmha_fwd.hpp)
-file(COPY_FILE ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/fmha_bwd.hpp ${CMAKE_CURRENT_SOURCE_DIR}/src/fmha_bwd.hpp)
-
 set(ck_fused_attn_SOURCES)
 list(APPEND ck_fused_attn_SOURCES
        src/ck_fused_attn_fwd.cpp
        src/ck_fused_attn_bwd.cpp
        src/ck_fused_attn_utils.cpp)
 
+# Glob all generated .cpp files and append to ck_fused_attn
 file(GLOB_RECURSE CK_FA_FILES "${CMAKE_CURRENT_SOURCE_DIR}/gen_src/*.cpp")
 list(APPEND ck_fused_attn_SOURCES ${CK_FA_FILES})
+
+# Glob all hsaco .cpp files and append to ck_fused_attn
+file(GLOB_RECURSE CK_HSACO_FILES "${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/hsaco/*.cpp")
+list(APPEND ck_fused_attn_SOURCES ${CK_HSACO_FILES})
+
 message(STATUS "Found the following CK fused attention files:")
-foreach(file ${CK_FA_FILES})
+foreach(file ${ck_fused_attn_SOURCES})
   message(STATUS " ${file}")
 endforeach()
 
 add_library(ck_fused_attn STATIC ${ck_fused_attn_SOURCES})
 set(CK_FUSED_ATTN_COMPILE_OPTIONS)
-list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -Wno-undefined-func-template -DCK_TILE_FMHA_FWD_FAST_EXP2=1 -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=0 -fgpu-flush-denormals-to-zero -Wno-float-equal -ftemplate-backtrace-limit=0  -fPIC  -Wno-gnu-line-marker -Wunused-variable -Werror)
+list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -Wno-undefined-func-template -DCK_TILE_FMHA_FWD_FAST_EXP2=1 -DCK_TILE_FMHA_FWD_SPLITKV_API=0 -DCK_TILE_FMHA_FWD_APPENDKV_API=0 -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=3 -fgpu-flush-denormals-to-zero -Wno-float-equal -ftemplate-backtrace-limit=0  -fPIC  -Wno-gnu-line-marker -Wunused-variable -Werror)
 foreach(rocm_arch ${CK_FUSED_ATTN_TARGET_GPUS})
   list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS --offload-arch=${rocm_arch})
 endforeach()
@@ -80,7 +80,7 @@ if(NOT EXISTS "${CK_INCLUDE_DIR}")
 endif()
 
 target_include_directories(ck_fused_attn PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_include_directories(ck_fused_attn PRIVATE ${CK_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(ck_fused_attn PRIVATE ${CK_INCLUDE_DIR} ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha)
 
 find_package(hip)
 list(APPEND ck_fused_attn_LINKER_LIBS hip::host hip::device roctx64)

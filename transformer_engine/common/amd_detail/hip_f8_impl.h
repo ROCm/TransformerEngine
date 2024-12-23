@@ -23,9 +23,6 @@ uint8_t cast_to_f8(T _x, bool stoch, uint32_t rng) {
   static_assert(wm+we==7, "wm+we==7");
   static_assert(is_half || is_float, "Only half and float can be cast to f8");
 
-  //if(sizeof(T)==2 && we==5 && !negative_zero_nan)
-    //return cast_to_f8_no_range_reduce<2, 5, __half>(_x, stoch, rng);
-
   const int mfmt = (sizeof(T)==4) ? 23 : 10;
   uint32_t x;
   if(sizeof(T)==4)
@@ -118,8 +115,14 @@ uint8_t cast_to_f8(T _x, bool stoch, uint32_t rng) {
     mantissa += (1 << mfmt); //Add the implicit 1 into mantissa
   }
 
-
-  bool midpoint = (mantissa & ( (1 << (mfmt-wm+exponent_diff)) - 1 )) == ( 1 << (mfmt-wm+exponent_diff-1) ); 
+  bool midpoint;
+  if (exponent_diff<=wm+1)
+    // The determinination of midpoint only makes sense when wm+1 could compensate the difference in exponent.
+    // Why wm+1 instead of wm? It is because in additional to the wm bits to be left as f8 mantissa, there is
+    // also the implicit 1 (There is not always implicit 1 but it does not matter).
+    midpoint = (mantissa & ( (1 << (mfmt-wm+exponent_diff)) - 1 )) == ( 1 << (mfmt-wm+exponent_diff-1) );
+  else
+    midpoint = false;
   /* This part is a bit tricky. The judgment of whether it is a tie needs to be done before we shift right 
      as shift right could rip off some residual part and make something not midpoint look like midpoint. 
      For example, the fp16 number 0x1002 (0 00100 0000000010), it is larger than midpoint, 
@@ -127,7 +130,8 @@ uint8_t cast_to_f8(T _x, bool stoch, uint32_t rng) {
   */
 
   if (exponent_diff>0)
-    mantissa >>= exponent_diff;
+    // Clip the exponent_diff as if the right shift when exponent_diff > 31 is undefined behavior
+    mantissa >>= (exponent_diff > 31 ? 31 : exponent_diff);
   else if (exponent_diff == -1)
     mantissa <<= -exponent_diff;
   bool implicit_one = mantissa & (1 << mfmt); 

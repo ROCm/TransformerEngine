@@ -31,7 +31,7 @@ hipError_t ck_attn_fwd(
   bool is_training,
   float scaling_factor,
   float dropout_probability,
-  uint64_t philox_seed, uint64_t philox_offset,
+  void* philox_seed_ptr, void* philox_offset_ptr,
   BiasType attn_bias_type,
   MaskType attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,
@@ -143,8 +143,6 @@ hipError_t ck_attn_fwd(
                          v_ptr,
                          bias_type==bias_enum::alibi? alibi_slope_ptr :bias_ptr,
                          nullptr,//rand_val_ptr
-                         nullptr, // lse_acc_ptr
-                         nullptr, // o_acc_ptr
                          lse_ptr,
                          o_ptr,
                          nullptr,//cu_seqlen_q
@@ -158,7 +156,6 @@ hipError_t ck_attn_fwd(
                          hdim_v,
                          nhead,
                          nhead_k,
-                         1, //num_splits
                          scale_s,
                          scale_p,
                          scale_o,
@@ -167,7 +164,6 @@ hipError_t ck_attn_fwd(
                          stride_v,
                          bias_type==bias_enum::alibi? 0: stride_bias, // upstream TE only requires standard (vanilla) alibi slopes
                          stride_randval,
-                         hdim_v, //stride_o_acc
                          stride_o,
                          nhead_stride_q,
                          nhead_stride_k,
@@ -175,8 +171,6 @@ hipError_t ck_attn_fwd(
                          nhead_stride_bias,
                          nhead_stride_randval,
                          nhead_stride_lse,
-                         nhead_stride_lse,//nhead_stride_lse_acc
-                         max_seqlen_q*hdim_v, //nhead_stride_o_acc
                          nhead_stride_o,
                          batch_stride_q,
                          batch_stride_k,
@@ -184,17 +178,13 @@ hipError_t ck_attn_fwd(
                          batch_stride_bias,
                          batch_stride_randval,
                          batch_stride_lse,
-                         batch_stride_lse,//batch_stride_lse_acc
-                         batch_stride_o,//batch_stride_o_acc
                          batch_stride_o,
-                         (batch * nhead * shape_seqlen_q), //split_stride_lse_acc
-                         (batch * nhead * max_seqlen_q * hdim_v), //split_stride_o_acc
                          left,
                          right,
                          static_cast<ck_tile::index_t>(mask_type),
                          p_drop,
                          false,
-                         {philox_seed, philox_offset}};
+                         std::pair<const void*, const void*>{philox_seed_ptr, philox_offset_ptr}};
   }();
   
   bool ck_fused_attn_log_config = false;
@@ -225,8 +215,6 @@ hipError_t ck_attn_fwd(
     std::cout<<"v_ptr: "<<fmha_args.v_ptr<<std::endl;
     std::cout<<"bias_ptr: "<<fmha_args.bias_ptr<<std::endl;
     std::cout<<"rand_val_ptr: "<<fmha_args.rand_val_ptr<<std::endl;
-    std::cout<<"lse_acc_ptr: "<<fmha_args.lse_acc_ptr<<std::endl;
-    std::cout<<"o_acc_ptr: "<<fmha_args.o_acc_ptr<<std::endl;
     std::cout<<"lse_ptr: "<<fmha_args.lse_ptr<<std::endl;
     std::cout<<"o_ptr: "<<fmha_args.o_ptr<<std::endl;
     std::cout<<"seqstart_q_ptr: "<<fmha_args.seqstart_q_ptr<<std::endl;
@@ -241,7 +229,6 @@ hipError_t ck_attn_fwd(
     std::cout<<"hdim_v: "<<fmha_args.hdim_v<<std::endl;
     std::cout<<"nhead_q: "<<fmha_args.nhead_q<<std::endl;
     std::cout<<"nhead_k: "<<fmha_args.nhead_k<<std::endl;
-    std::cout<<"num_splits: "<<fmha_args.num_splits<<std::endl;
     std::cout<<"scale_s: "<<fmha_args.scale_s<<std::endl;
     std::cout<<"scale_p: "<<fmha_args.scale_p<<std::endl;
     std::cout<<"scale_o: "<<fmha_args.scale_o<<std::endl;
@@ -250,7 +237,6 @@ hipError_t ck_attn_fwd(
     std::cout<<"stride_v: "<<fmha_args.stride_v<<std::endl;
     std::cout<<"stride_bias: "<<fmha_args.stride_bias<<std::endl;
     std::cout<<"stride_randval: "<<fmha_args.stride_randval<<std::endl;
-    std::cout<<"stride_o_acc: "<<fmha_args.stride_o_acc<<std::endl;
     std::cout<<"stride_o: "<<fmha_args.stride_o<<std::endl;
     std::cout<<"nhead_stride_q: "<<fmha_args.nhead_stride_q<<std::endl;
     std::cout<<"nhead_stride_k: "<<fmha_args.nhead_stride_k<<std::endl;
@@ -258,8 +244,6 @@ hipError_t ck_attn_fwd(
     std::cout<<"nhead_stride_bias: "<<fmha_args.nhead_stride_bias<<std::endl;
     std::cout<<"nhead_stride_randval: "<<fmha_args.nhead_stride_randval<<std::endl;
     std::cout<<"nhead_stride_lse: "<<fmha_args.nhead_stride_lse<<std::endl;
-    std::cout<<"nhead_stride_lse_acc: "<<fmha_args.nhead_stride_lse_acc<<std::endl;
-    std::cout<<"nhead_stride_o_acc: "<<fmha_args.nhead_stride_o_acc<<std::endl;
     std::cout<<"nhead_stride_o: "<<fmha_args.nhead_stride_o<<std::endl;
     std::cout<<"batch_stride_q: "<<fmha_args.batch_stride_q<<std::endl;
     std::cout<<"batch_stride_k: "<<fmha_args.batch_stride_k<<std::endl;
@@ -267,18 +251,14 @@ hipError_t ck_attn_fwd(
     std::cout<<"batch_stride_bias: "<<fmha_args.batch_stride_bias<<std::endl;
     std::cout<<"batch_stride_randval: "<<fmha_args.batch_stride_randval<<std::endl;
     std::cout<<"batch_stride_lse: "<<fmha_args.batch_stride_lse<<std::endl;
-    std::cout<<"batch_stride_lse_acc: "<<fmha_args.batch_stride_lse_acc<<std::endl;
-    std::cout<<"batch_stride_o_acc: "<<fmha_args.batch_stride_o_acc<<std::endl;
     std::cout<<"batch_stride_o: "<<fmha_args.batch_stride_o<<std::endl;
-    std::cout<<"split_stride_lse_acc: "<<fmha_args.split_stride_lse_acc<<std::endl;
-    std::cout<<"split_stride_o_acc: "<<fmha_args.split_stride_o_acc<<std::endl;
     std::cout<<"window_size_left: "<<fmha_args.window_size_left<<std::endl;
     std::cout<<"window_size_right: "<<fmha_args.window_size_right<<std::endl;
     std::cout<<"mask_type: "<<fmha_args.mask_type<<std::endl;
     std::cout<<"p_drop: "<<fmha_args.p_drop<<std::endl;
     std::cout<<"s_randval: "<<fmha_args.s_randval<<std::endl;
-    std::cout<<"dropout_seed: "<<std::get<0>(fmha_args.drop_seed_offset)<<std::endl;
-    std::cout<<"dropout_offset: "<<std::get<1>(fmha_args.drop_seed_offset)<<std::endl;
+    std::cout<<"dropout_seed_ptr: "<<std::get<0>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset))<<std::endl;
+    std::cout<<"dropout_offset_ptr: "<<std::get<1>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset))<<std::endl;
   }
   float average_runtime = fmha_fwd(fmha_traits, fmha_args, stream_config);
   if(average_runtime < 0){

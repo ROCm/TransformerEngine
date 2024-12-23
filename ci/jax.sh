@@ -23,13 +23,15 @@ install_praxis() {
 }
 
 install_prerequisites() {
-    _praxis_commit="3f4cbb4bcda366db"
-    _typing_exttensions_ver="4.11.0"
+    _praxis_commit="899b56ebe9128a0"
     pip show jaxlib | grep Version | grep -q 0.4.23
     if [ $? -eq 0 ]; then
         echo "JAX lib 0.4.23 is detected"
         _praxis_commit="2ebe1cf6a3d89"
-        _typing_exttensions_ver="4.6.1"
+    else
+        #Workaround for JAX 0.4.31 regression: crash in test_destributed_fused_attn and test_distributed_layernorm_mlp
+        #TODO: remove the flag when switch to a newer JAX that has a fix
+        _JAX_WA_XLA_FLAGS="--xla_gpu_enable_dot_strength_reduction=false --xla_gpu_enable_command_buffer=CUSTOM_CALL"
     fi
 
     pip show praxis >/dev/null 2>&1
@@ -45,7 +47,7 @@ install_prerequisites() {
         test $rc -eq 0 || exit $rc
     fi
 
-    pip install ml-dtypes==0.2.0 typing_extensions==$_typing_exttensions_ver
+    pip install 'ml-dtypes>=0.2.0' 'typing_extensions>=4.11.0'
     rc=$?
     if [ $rc -ne 0 ]; then
         script_error "Failed to install test prerequisites"
@@ -82,10 +84,17 @@ run_test_config() {
 
 run_test_config_mgpu() {
     echo ====== Run mGPU with Fused attention backend: $_fus_attn =====
-    test $_fus_attn != "unfused" && run 3 test_distributed_fused_attn.py
-    run 3 test_distributed_layernorm.py
-    run 3 test_distributed_layernorm_mlp.py
-    run 3 test_distributed_softmax.py
+    if [ -n "$_JAX_WA_XLA_FLAGS" ]; then
+        test $_fus_attn != "unfused" && XLA_FLAGS="$_JAX_WA_XLA_FLAGS" run 3 test_distributed_fused_attn.py
+        run 3 test_distributed_layernorm.py
+        XLA_FLAGS="$_JAX_WA_XLA_FLAGS" run 3 test_distributed_layernorm_mlp.py
+        XLA_FLAGS="$_JAX_WA_XLA_FLAGS" run 3 test_distributed_softmax.py
+    else
+        test $_fus_attn != "unfused" && run 3 test_distributed_fused_attn.py
+        run 3 test_distributed_layernorm.py
+        run 3 test_distributed_layernorm_mlp.py
+        run 3 test_distributed_softmax.py
+    fi
 }
 
 # Single config mode, run it synchroniously and return result

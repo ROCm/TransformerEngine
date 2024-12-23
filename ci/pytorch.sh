@@ -9,10 +9,10 @@ DIR=`dirname $0`
 
 TEST_DIR=${TE_PATH}tests/pytorch
 
-: ${TEST_WORKERS:=4}
+#: ${TEST_WORKERS:=4}
 
 install_prerequisites() {
-    pip install numpy==1.24 onnx onnxruntime
+    pip install 'numpy>=1.22.4,<2.0' onnx onnxruntime
     rc=$?
     if [ $rc -ne 0 ]; then
         script_error "Failed to install test prerequisites"
@@ -26,15 +26,15 @@ run() {
     _test_name_tag=`get_test_name_tag $1 $_gemm-$_fus_attn`
     check_test_filter $_test_name_tag || return
     echo "Run [$_gemm, $_fus_attn] $@"
-    : ${_WORKERS_COUNT:=1}
-    pytest -v `get_pytest_junitxml $_test_name_tag` \
-           -n$_WORKERS_COUNT --max-worker-restart=$_WORKERS_COUNT "$TEST_DIR/$@" || test_run_error
+    #: ${_WORKERS_COUNT:=1}
+    #_args=-n$_WORKERS_COUNT --max-worker-restart=$_WORKERS_COUNT 
+    pytest -v `get_pytest_junitxml $_test_name_tag` "$TEST_DIR/$@" || test_run_error
     echo "Done [$_gemm, $_fus_attn] $1"
 }
 
 run_test_config(){
     echo ====== Run with GEMM backend: $_gemm and Fused attention backend: $_fus_attn =====
-    _WORKERS_COUNT=$TEST_WORKERS
+    #_WORKERS_COUNT=$TEST_WORKERS
     #test $_fus_attn = "auto" && run 1 test_cast_transpose_triton.py
     run 1 test_cuda_graphs.py
     run 1 test_deferred_init.py
@@ -58,8 +58,8 @@ run_test_config(){
 
 run_test_config_mgpu(){
     echo ====== Run mGPU with GEMM backend: $_gemm and Fused attention backend: $_fus_attn =====
-    _WORKERS_COUNT=1
-    test $TEST_WORKERS = 0 && _WORKERS_COUNT=0
+    #_WORKERS_COUNT=1
+    #test $TEST_WORKERS = 0 && _WORKERS_COUNT=0
     if [ $_fus_attn = "auto" ]; then
         run 3 test_fused_optimizer.py
         run 3 test_fusible_ops_distributed.py
@@ -90,13 +90,15 @@ for _gemm in hipblaslt rocblas; do
         #Auto - default mode with both Flash and Fused attentions are enabled
         #Flash - Fused attention is disabled
         #CK/AOTriton - no Flash attention and only corresponding Fused attention backend is enabled
-        #Unfused - no Flash and Fused attentions are enabled
-        #On basic (1) test level tests are run in auto and unfused mode
-        #On normal (3) level it runs in auto, flash, ck and aotriton modes
+        #Unfused - Flash and Fused attentions are disnabled
+        #Level 1 - run hipBlasLt in auto and unfused modes, rocBlas in auto mode
+        #Level 3 - run hipBlasLt in all but unfused modes, rocBlas in auto and unfused modes
         if [ $TEST_LEVEL -ge 3 ]; then
-            test $_fus_attn = "unfused" && continue
+            test $_gemm = hipblaslt -a $_fus_attn = unfused && continue
+            test $_gemm = rocblas -a $_fus_attn != auto -a $_fus_attn != unfused && continue
         else
-            test $_fus_attn != "auto" -a $_fus_attn != "unfused" && continue
+            test $_gemm = hipblaslt -a $_fus_attn != auto -a $_fus_attn != unfused && continue
+            test $_gemm = rocblas -a $_fus_attn != auto && continue
         fi
 
         if [ -n "$TEST_JOBS_MODE" ]; then

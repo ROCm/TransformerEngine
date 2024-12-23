@@ -237,6 +237,16 @@ NVTE_FUSED_ATTN=0 will use the TE unfused attention even if NVTE_FUSED_ATTN_CK o
 Fused attention backends are chosen according to the match results between the actual problem config and the support matrix of the specific backend. 
 For the scenario that both backends are enabled and match the problem configuration, the CK backend will be chosen with higher priority. 
 
+FA v3 Backward Kernels in CK Backend
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ROCm TE provides experimental support for flash-attention v3 bwd kernels using the ck backend for limited fused attention configs (currently only for hdim=128). 
+To enable FA v3 kernels, the following environment variables can be used:
+
+* NVTE_CK_USES_BWD_V3 - by default 0, if set to 1, some cases will call the bwd v3 dqdkdv kernel;
+* NVTE_CK_V3_ATOMIC_FP32 - by default 1, if set to 0 will use atomic fp16/bf16(w/o convert_dq kernel) when NVTE_CK_USES_BWD_V3 is set to 1;
+* NVTE_CK_V3_SPEC - by default 0, if set to 1 will call the specialized v3 kernel when NVTE_CK_USES_BWD_V3 is set to 1;
+* NVTE_CK_V3_BF16_CVT - by default 1, float to bf16 convert type when bwd_v3 is set to 1, 0:RTNE; 1:RTNA; 2:RTZ.
+
 Experimental Triton Kernels on ROCm
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Most CUDA kernels in Transformer Engine are hipified to run on ROCm. While the hipifiled CUDA kernels are functional, they are not necessarily optimal

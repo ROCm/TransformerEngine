@@ -16,26 +16,8 @@ from jax.interpreters.mlir import dtype_to_ir_type
 from transformer_engine.transformer_engine_jax import DType as TEDType
 
 from ..sharding import get_padded_spec as te_get_padded_spec
+from ..util import is_hip_extension, jnp_float8_e4m3_type, jnp_float8_e5m2_type
 
-
-# check whether AMD GPU is loaded
-@cache
-def is_hip_extension() -> bool:
-  has_rocm = False
-  #iterate through all devices in jax
-  for dev in jax.devices():
-    if "rocm" in dev.client.platform_version:
-      has_rocm=True
-      break
-  return has_rocm
-
-if not is_hip_extension():
-    jnp_float8_e4m3_type = jnp.float8_e4m3fn
-    jnp_float8_e5m2_type = jnp.float8_e5m2
-else:
-    jnp_float8_e4m3_type = jnp.float8_e4m3fnuz
-    jnp_float8_e5m2_type = jnp.float8_e5m2fnuz
- 
 
 def te_dtype_to_jax_dtype(te_dtype):
     """
