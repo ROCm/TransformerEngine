@@ -59,7 +59,7 @@ run_test_config(){
     run_default_fa 1 test_recipe.py
     run 1 test_sanity.py
     run_default_fa 1 test_torch_save_load.py
-    run_default_fa 1 fused_attn/test_fused_attn.py
+    run_default_fa 1 fused_attn/test_fused_attn.py # Backend selection is controlled by the test
 }
 
 run_test_config_mgpu(){
