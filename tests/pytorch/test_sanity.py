@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -50,6 +50,13 @@ from test_onnx_export import create_meta
 
 # Only run FP8 tests on H100.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+
+if IS_HIP_EXTENSION:
+    from functools import cache
+    @cache
+    def use_hipblaslt() -> bool:
+        return (os.getenv("NVTE_USE_HIPBLASLT") is not None
+                or os.getenv("NVTE_USE_ROCBLAS") is None )
 
 
 def custom_amax_to_scale(
@@ -913,11 +920,12 @@ def test_sanity_gradient_accumulation_fusion(
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("normalization", all_normalizations)
-def test_gpt_cuda_graph(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma, normalization, monkeypatch):
-    if IS_HIP_EXTENSION and (dtype in (torch.float16, torch.bfloat16)):
-        if int(os.getenv("NVTE_FUSED_ATTN", "1")):
-            #pytest.skip(f"rocm fused attention backends do not support cuda graph with {dtype}")
-            monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
+def test_gpt_cuda_graph(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma, normalization):
+    if IS_HIP_EXTENSION:
+        if not use_hipblaslt():
+            pytest.skip("CUDA graph capture not supported with rocBLAS path")
+        if dtype in (torch.float16, torch.bfloat16):
+            pytest.skip(f"ROCm fused attention backends do not support cuda graph with {dtype}")
 
     config = model_configs[model]
 

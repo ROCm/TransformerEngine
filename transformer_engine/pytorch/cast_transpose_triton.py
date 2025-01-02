@@ -1,3 +1,6 @@
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# License for AMD contributions = MIT. See LICENSE for more information
+
 import torch
 
 import transformer_engine_torch as tex

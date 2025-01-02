@@ -1,10 +1,11 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 import pytest
+import os
 from functools import partial
 
 import jax
@@ -410,6 +411,13 @@ class TestDistributedContexParallelSelfAttn:
         # make sure the mesh evently divides cp and tp axis
         if num_head % kv_groups != 0 or (num_head // kv_groups) % tp_size != 0:
             pytest.skip(f"Skipping {kv_groups=} not multiple of {data_shape=} or {tp_size=}")
+
+        # skip unsupported AOTriton configurations
+        if is_hip_extension() and int(os.getenv("NVTE_FUSED_ATTN_CK", "1")) == 0:
+            if kv_groups != 1:
+                pytest.skip(f"Skipping {kv_groups=} for AOTriton")
+            if attn_mask_type == AttnMaskType.CAUSAL_MASK and mesh_shape[1] != 1: #CP
+                pytest.skip(f"Skipping CAUSAL_MASK and CP={mesh_shape[1]} for AOTriton")
 
         def target_func(q, k, v, mask):
             return jnp.mean(

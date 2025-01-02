@@ -1,4 +1,4 @@
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -82,6 +82,7 @@ check_level() {
 }
 
 check_test_jobs_requested() {
+    return 1 #Disable parallel jobs because some tests do not support parallel execution
     test -z "$SINGLE_CONFIG" -a -n "$TEST_JOBS" || return 1
     # TEST_JOBS - number of test configurations running in parallel
     # change below condition to -gt 0 to enable single job mode for functionality testing
@@ -202,4 +203,10 @@ check_test_filter() {
         esac
     done
     return 1
+}
+
+start_message() {
+    echo "Started with TEST_LEVEL=$TEST_LEVEL at `date`"
+    echo "ROCm: `ls -d /opt/rocm-*`"
+    python --version
 }

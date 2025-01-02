@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -24,7 +24,6 @@ from transformer_engine.pytorch.utils import (
     is_bf16_compatible,
 )
 if IS_HIP_EXTENSION:
-    from functools import lru_cache
     from transformer_engine.pytorch.utils import is_mi200
 
 from transformer_engine.pytorch import (
@@ -60,10 +59,16 @@ _cpu_rng_state = torch.get_rng_state()
 _cuda_rng_state = torch.cuda.get_rng_state()
 
 if IS_HIP_EXTENSION:
-    @lru_cache(maxsize=1)
     def use_hipblaslt() -> bool:
         return (os.getenv("NVTE_USE_HIPBLASLT") is not None
                 or os.getenv("NVTE_USE_ROCBLAS") is None )
+
+    def rocm_fused_attn_backend() -> tuple[bool, bool]:
+        if int(os.getenv("NVTE_FUSED_ATTN", "1")) == 0:
+            return (False, False)
+        return (int(os.getenv("NVTE_FUSED_ATTN_AOTRITON", "1")) != 0,
+                int(os.getenv("NVTE_FUSED_ATTN_CK", "1")) != 0)
+
 
 class ModelConfig:
     def __init__(self, hidden_size, eps, num_attention_heads, embed, num_layers, seq_len):
@@ -123,15 +128,14 @@ def dtype_tols(dtype: torch.dtype) -> Dict[str, float]:
 
 def rocm_attn_tols() -> Dict[str, float]:
     if IS_HIP_EXTENSION:
-        use_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
-        use_fused_attn_ck = int(os.getenv("NVTE_FUSED_ATTN_CK", "1"))
+        _, use_fused_attn_ck = rocm_fused_attn_backend()
         # TODO: wait for the ck branch supporting determinism
-        if use_fused_attn and (not use_fused_attn_ck):
+        if use_fused_attn_ck:
+            return dict(atol=5e-2, rtol=5e-2)
+        else:
             # AOTriton backend and non-fused attn are deterministic
             # TODO(PIV) should clear tols?
             pass
-        else:
-            return dict(atol=5e-2, rtol=5e-2)
     return {}
 
 
@@ -1637,11 +1641,14 @@ def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_gpt_cuda_graph(dtype, bs, model, monkeypatch):
-    # TODO: remove after AOTRITON also supports cuda graph
-    if IS_HIP_EXTENSION and dtype not in (torch.float32,):
-        if int(os.getenv("NVTE_FUSED_ATTN_AOTRITON", "1")):
-            monkeypatch.setenv("NVTE_FUSED_ATTN_AOTRITON", "0")
+def test_gpt_cuda_graph(dtype, bs, model):
+    if IS_HIP_EXTENSION:
+        if not use_hipblaslt():
+            pytest.skip("CUDA graph capture not supported with rocBLAS path")
+        if dtype not in (torch.float32,):
+            use_aotriton, use_ck = rocm_fused_attn_backend()
+            if use_aotriton and not use_ck:
+                pytest.skip(f"AOTriton attention backend does not support cuda graph with {dtype}")
 
     config = model_configs[model]
 
