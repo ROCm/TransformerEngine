@@ -50,8 +50,8 @@ run_test_config(){
     run_default_fa 1 test_fused_rope.py
     run_default_fa 1 test_fusible_ops.py
     test $_gemm = "hipblaslt" && run_default_fa 3 test_gemm_autotune.py
-    run_default_fa 1 test_gqa.py
-    run_default_fa 1 test_jit.py
+    run 1 test_gqa.py
+    run 1 test_jit.py
     run_default_fa 1 test_multi_tensor.py
     run 1 test_numerics.py
     run_default_fa 3 test_onnx_export.py # All FA are disabled in ONNX export mode
