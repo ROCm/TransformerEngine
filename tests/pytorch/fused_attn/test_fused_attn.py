@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -193,14 +193,28 @@ def _get_attention_backends(
         )
         return available_backends, fused_attention_backend
 
-    backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"} if not IS_HIP_EXTENSION else {0: "AOTriton", 1: "CK"}
-    with logging_context():
-        for i in range(len(backends)):
-            os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
-            _attention_backends["backend_selection_requires_update"] = True
-            available_backends, fused_attention_backend = test()
-            if fused_attention_backend == FusedAttnBackend[backends[i]]:
-                fused_attn_backends.append(fused_attention_backend)
+    if IS_HIP_EXTENSION:
+        backends = {"AOTriton": "AOTRITON", "CK": "CK"}
+        with logging_context():
+            for i in backends.keys():
+                for k in backends.keys():
+                    os.environ["NVTE_FUSED_ATTN_"+backends[k]] = "0"
+                os.environ["NVTE_FUSED_ATTN_"+backends[i]] = "1"
+                _attention_backends["backend_selection_requires_update"] = True
+                available_backends, fused_attention_backend = test()
+                if fused_attention_backend == FusedAttnBackend[i]:
+                    fused_attn_backends.append(fused_attention_backend)
+        for i in backends.keys():
+            del os.environ["NVTE_FUSED_ATTN_"+backends[i]];
+    else:
+        backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
+        with logging_context():
+            for i in range(len(backends)):
+                os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
+                _attention_backends["backend_selection_requires_update"] = True
+                available_backends, fused_attention_backend = test()
+                if fused_attention_backend == FusedAttnBackend[backends[i]]:
+                    fused_attn_backends.append(fused_attention_backend)
     return available_backends, fused_attn_backends
 
 
@@ -303,6 +317,8 @@ def test_dot_product_attention(
             )
         if len(fused_attn_backends) == 2:
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
+            os.environ["NVTE_FUSED_ATTN_CK"] = "0"
+            os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "1"
             fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
                 dtype,
                 config,
@@ -314,6 +330,8 @@ def test_dot_product_attention(
                 is_training,
             )
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
+            os.environ["NVTE_FUSED_ATTN_CK"] = "1"
+            os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "0"
             fused_attn_fwd_1, fused_attn_bwd_1 = _run_dot_product_attention(
                 dtype,
                 config,
@@ -324,6 +342,8 @@ def test_dot_product_attention(
                 pad_between_seqs,
                 is_training,
             )
+            del os.environ["NVTE_FUSED_ATTN_CK"]
+            del os.environ["NVTE_FUSED_ATTN_AOTRITON"]
 
     # FlashAttention backend
     if flash_attn_supported:
