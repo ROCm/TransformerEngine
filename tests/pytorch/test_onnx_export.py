@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -30,6 +30,7 @@ import numpy as np
 import onnxruntime as ort
 import torch
 from torch import nn as nn
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from typing import Optional, Union, Tuple, List
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
@@ -74,7 +75,9 @@ OPSET = 17
 assert OPSET >= TRILU_OPSET
 
 # Shared library implementing custom FP8 Q/DQ operators for ONNX Runtime (ORT).
-ORT_CUSTOM_OPS_LIB = os.path.join(TESTS_DIR, "./libcustom_ort_fp8_qdq_ops.so")
+ORT_CUSTOM_OPS_LIB = os.path.join(TESTS_DIR, "./libcustom_ort_fp8_qdq_ops.so"
+                                  if not IS_HIP_EXTENSION
+                                  else "./libcustom_ort_fp8_qdq_ops_hip.so")
 
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 if fp8_available and not os.path.exists(ORT_CUSTOM_OPS_LIB):

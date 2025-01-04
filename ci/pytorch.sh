@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -27,40 +27,46 @@ run() {
     check_test_filter $_test_name_tag || return
     echo "Run [$_gemm, $_fus_attn] $@"
     #: ${_WORKERS_COUNT:=1}
-    #_args=-n$_WORKERS_COUNT --max-worker-restart=$_WORKERS_COUNT 
+    #_args=-n$_WORKERS_COUNT --max-worker-restart=$_WORKERS_COUNT
     pytest -v `get_pytest_junitxml $_test_name_tag` "$TEST_DIR/$@" || test_run_error
     echo "Done [$_gemm, $_fus_attn] $1"
 }
 
-run_test_config(){
-    echo ====== Run with GEMM backend: $_gemm and Fused attention backend: $_fus_attn =====
-    #_WORKERS_COUNT=$TEST_WORKERS
-    #test $_fus_attn = "auto" && run 1 test_cast_transpose_triton.py
-    run 1 test_cuda_graphs.py
-    run 1 test_deferred_init.py
-    run 1 test_float8tensor.py
+run_default_fa() {
+    #Run tests that do not use fused attention or control backend selection
+    #with default backend only
     if [ $_fus_attn = "auto" ]; then
-        run 1 test_fused_rope.py
-        run 1 test_fusible_ops.py
-        test $_gemm = "hipblaslt" && run 3 test_gemm_autotune.py
+        run $*
     fi
+}
+
+run_test_config(){
+    echo ==== Run with GEMM backend: $_gemm and Fused attention backend: $_fus_attn ====
+    #_WORKERS_COUNT=$TEST_WORKERS
+    #run_default_fa 1 test_cast_transpose_triton.py
+    run 1 test_cuda_graphs.py
+    run_default_fa 1 test_deferred_init.py
+    run_default_fa 1 test_float8tensor.py
+    run_default_fa 1 test_fused_rope.py
+    run_default_fa 1 test_fusible_ops.py
+    test $_gemm = "hipblaslt" && run_default_fa 3 test_gemm_autotune.py
     run 1 test_gqa.py
     run 1 test_jit.py
-    run 1 test_multi_tensor.py
+    run_default_fa 1 test_multi_tensor.py
     run 1 test_numerics.py
     run_default_fa 3 test_onnx_export.py # All FA are disabled in ONNX export mode
     run_default_fa 1 test_permutation.py
-    run 1 test_recipe.py
+    run_default_fa 1 test_recipe.py
     run 1 test_sanity.py
-    run 1 test_torch_save_load.py
-    test $_fus_attn = "auto" && run 1 fused_attn/test_fused_attn.py
+    run_default_fa 1 test_torch_save_load.py
+    run_default_fa 1 fused_attn/test_fused_attn.py # Backend selection is controlled by the test
 }
 
 run_test_config_mgpu(){
-    echo ====== Run mGPU with GEMM backend: $_gemm and Fused attention backend: $_fus_attn =====
     #_WORKERS_COUNT=1
     #test $TEST_WORKERS = 0 && _WORKERS_COUNT=0
-    if [ $_fus_attn = "auto" ]; then
+    if [ $_fus_attn = "auto" -a $_gemm = "hipblaslt" ]; then
+        echo ==== Run mGPU with GEMM backend: $_gemm and Fused attention backend: $_fus_attn ====
         run 3 test_fused_optimizer.py
         run 3 test_fusible_ops_distributed.py
         run 3 fused_attn/test_fused_attn_with_cp.py
@@ -77,9 +83,10 @@ if [ -n "$SINGLE_CONFIG" ]; then
 fi
 
 #Master script mode: prepare testing prerequisites first
-echo "Started with TEST_LEVEL=$TEST_LEVEL at `date`"
+start_message
 install_prerequisites
-check_test_jobs_requested && init_test_jobs `python -c "import torch; print(torch.cuda.device_count())"`
+pip list | egrep "flash|ml_dtypes|numpy|onnx|torch|transformer_e|typing_ext"
+#check_test_jobs_requested && init_test_jobs `python -c "import torch; print(torch.cuda.device_count())"`
 
 for _gemm in hipblaslt rocblas; do
     configure_gemm_env $_gemm || continue
@@ -87,10 +94,10 @@ for _gemm in hipblaslt rocblas; do
     for _fus_attn in auto flash ck aotriton unfused; do
         configure_fused_attn_env $_fus_attn || continue
 
-        #Auto - default mode with both Flash and Fused attentions are enabled
+        #Auto - default mode with all Flash and Fused attention backends enabled
         #Flash - Fused attention is disabled
         #CK/AOTriton - no Flash attention and only corresponding Fused attention backend is enabled
-        #Unfused - Flash and Fused attentions are disnabled
+        #Unfused - Flash and Fused attentions are disabled
         #Level 1 - run hipBlasLt in auto and unfused modes, rocBlas in auto mode
         #Level 3 - run hipBlasLt in all but unfused modes, rocBlas in auto and unfused modes
         if [ $TEST_LEVEL -ge 3 ]; then

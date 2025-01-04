@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -33,10 +33,6 @@ if IS_HIP_EXTENSION:
     def use_hipblaslt() -> bool:
         return (os.getenv("NVTE_USE_HIPBLASLT") is not None
                 or os.getenv("NVTE_USE_ROCBLAS") is None )
-    @pytest.fixture(autouse=True)
-    def skip_rocblas():
-        if not use_hipblaslt():
-            pytest.skip("ROCBLAS path is not supported for this test")
 
 
 # Check if FP8 is supported
@@ -568,6 +564,9 @@ class TestBasicOps:
                 or out_features % 16 != 0
             ):
                 pytest.skip("FP8 GEMMs require dims that are divisible by 16")
+        if ( IS_HIP_EXTENSION and not use_hipblaslt() and
+            accumulate_into_main_grad and dtype != torch.float32 and not fp8_compute):
+            pytest.skip("Parameters combination is not supported by ROCBLAS")
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
