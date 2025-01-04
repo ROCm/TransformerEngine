@@ -27,15 +27,25 @@ bool is_ck_backend_supported(
   float dropout,
   size_t num_attn_heads, size_t num_gqa_groups,
   size_t max_seqlen_q, size_t max_seqlen_kv,
-  size_t head_dim, 
+  size_t head_dim_qk, 
+  size_t head_dim_v, 
   int64_t window_size_left, 
   int64_t window_size_right) {
 
 #ifdef USE_FUSED_ATTN_CK
+
   bool nvte_log_ck_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
       nvte_log_ck_config = true;
+  }
+
+  //TODO: release after CK support support Multi-latent attention
+  if(head_dim_qk != head_dim_v){
+    if(nvte_log_ck_config){
+      std::cout<<"CK fused attn does not support multi-latent attention"<<std::endl;
+    }
+    return false;
   }
 
   if(num_attn_heads%num_gqa_groups != 0){

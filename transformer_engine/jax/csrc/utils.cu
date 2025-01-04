@@ -24,6 +24,13 @@ int GetCudaRuntimeVersion() {
   return ver;
 }
 
+#ifndef USE_ROCM
+size_t GetCudnnRuntimeVersion() { return cudnnGetVersion(); }
+#else
+// use a very small number for cudnn in rocm
+size_t GetCudnnRuntimeVersion() { return 0; }
+#endif
+
 int GetDeviceComputeCapability(int gpu_id) { return transformer_engine::cuda::sm_arch(gpu_id); }
 
 __global__ void populate_rng_state_kernel(int64_t *rng_state_dst, const int64_t *const seed,

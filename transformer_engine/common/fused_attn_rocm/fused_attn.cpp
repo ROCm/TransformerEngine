@@ -104,8 +104,8 @@ std::pair<int64_t, int64_t> check_set_window_size(NVTE_Mask_Type attn_mask_type,
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type attn_mask_type, float dropout, size_t num_attn_heads, size_t num_gqa_groups,
-    size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim, int64_t window_size_left, 
-    int64_t window_size_right) {
+    size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v,
+    int64_t window_size_left, int64_t window_size_right) {
   using namespace transformer_engine;
   
   // by default, fused attn is enabled
@@ -141,7 +141,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         dropout,
         num_attn_heads, num_gqa_groups,
         max_seqlen_q, max_seqlen_kv,
-        head_dim,
+        head_dim_qk,
+        head_dim_v,
         window_size_left,
         window_size_right)){
     return NVTE_Fused_Attn_Backend::NVTE_CK;
@@ -154,7 +155,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
               dropout,
               num_attn_heads, num_gqa_groups,
               max_seqlen_q, max_seqlen_kv,
-              head_dim, 
+              head_dim_qk, 
+              head_dim_v, 
               window_size_left,
               window_size_right)){
     return NVTE_Fused_Attn_Backend::NVTE_AOTriton;
@@ -203,7 +205,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, dropout, h, h, max_seqlen,
-      max_seqlen, d, window_size_left, window_size_right);
+      max_seqlen, d, d, window_size_left, window_size_right);
   
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd_qkvpacked(
@@ -278,7 +280,7 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, dropout, h, h, max_seqlen,
-      max_seqlen, d, window_size_left, window_size_right);
+      max_seqlen, d, d, window_size_left, window_size_right);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     if((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)){
@@ -358,7 +360,7 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
-      max_seqlen_kv, d, window_size_left, window_size_right);
+      max_seqlen_kv, d, d, window_size_left, window_size_right);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd_kvpacked(
@@ -441,7 +443,7 @@ void nvte_fused_attn_bwd_kvpacked(
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
-      max_seqlen_kv, d, window_size_left, window_size_right);
+      max_seqlen_kv, d, d, window_size_left, window_size_right);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
@@ -507,7 +509,8 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   size_t b = input_cu_seqlens_q->data.shape[0] - 1;
   size_t h_q = input_Q->data.shape[ndim - 2];
   size_t h_kv = input_K->data.shape[ndim - 2];
-  size_t d = input_Q->data.shape[ndim - 1];
+  size_t d_qk = input_Q->data.shape[ndim - 1];
+  size_t d_v = input_V->data.shape[ndim - 1];
 
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
@@ -517,11 +520,11 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
-      max_seqlen_kv, d, window_size_left, window_size_right);
+      max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd(
-      b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
+      b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk,
       is_training, attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
       window_size_left, window_size_right,
@@ -534,7 +537,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       stream);
   } else if(fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_AOTriton){
     fused_attn_aotriton_fwd(
-      b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
+      b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk,
       is_training, attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
       input_Q, input_K, input_V, 
@@ -585,7 +588,8 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   size_t b = input_cu_seqlens_q->data.shape[0] - 1;
   size_t h_q = input_Q->data.shape[ndim - 2];
   size_t h_kv = input_K->data.shape[ndim - 2];
-  size_t d = input_Q->data.shape[ndim - 1];
+  size_t d_qk = input_Q->data.shape[ndim - 1];
+  size_t d_v = input_V->data.shape[ndim - 1];
 
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
@@ -595,14 +599,14 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
-      max_seqlen_kv, d, window_size_left, window_size_right);
+      max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
       input_Bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
     }
     fused_attn_ck_bwd(
-      b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
+      b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk,
       attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
       window_size_left, window_size_right,
@@ -618,7 +622,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   } else if(fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_AOTriton){
     // currently aotriton bwd is deterministic
     fused_attn_aotriton_bwd(
-      b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
+      b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk,
       attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
       input_Q, input_K, input_V, input_O, input_dO,

@@ -6,14 +6,20 @@
 """JAX/TE miscellaneous for custom ops"""
 
 import jax
-from functools import cache
+import os
+import functools
+from typing import Tuple
+from importlib.metadata import version as get_pkg_version
+from packaging.version import Version as PkgVersion
 
 import numpy as np
+
 import jax.numpy as jnp
 from jax import dtypes
 from jax.interpreters.mlir import dtype_to_ir_type
 
 from transformer_engine.transformer_engine_jax import DType as TEDType
+from transformer_engine import transformer_engine_jax
 
 from ..sharding import get_padded_spec as te_get_padded_spec
 from ..util import is_hip_extension, jnp_float8_e4m3_type, jnp_float8_e5m2_type
@@ -134,3 +140,37 @@ def multidim_transpose(shape, static_axis_boundary, transpose_axis_boundary):
         *shape[transpose_axis_boundary:],
         *shape[transpose_start_idx:transpose_axis_boundary],
     )
+
+
+@functools.lru_cache(maxsize=None)
+def get_cudnn_version() -> Tuple[int, int, int]:
+    """Runtime cuDNN version (major, minor, patch)"""
+    # ROCm fused attn does not use cudnn, return high numbers to avoid tests filtering out
+    if is_hip_extension():
+        return (99, 0, 0)
+    encoded_version = transformer_engine_jax.get_cudnn_version()
+    major_version_magnitude = 1000 if encoded_version < 90000 else 10000
+    major, encoded_version = divmod(encoded_version, major_version_magnitude)
+    minor, patch = divmod(encoded_version, 100)
+    return (major, minor, patch)
+
+
+@functools.lru_cache(maxsize=None)
+def jax_version_meet_requirement(version: str):
+    """
+    Helper function checking if required JAX version is available
+    """
+    jax_version = PkgVersion(get_pkg_version("jax"))
+    jax_version_required = PkgVersion(version)
+    return jax_version >= jax_version_required
+
+
+def is_ffi_enabled():
+    """
+    Helper function checking if XLA Custom Call with FFI is enabled
+    """
+    is_supported = jax_version_meet_requirement("0.4.31")
+    # New APIs with FFI are enabled by default
+    is_enabled = int(os.getenv("NVTE_JAX_WITH_FFI", "1"))
+    assert is_enabled in (0, 1), "Invalid NVTE_JAX_WITH_FFI value"
+    return is_supported and is_enabled

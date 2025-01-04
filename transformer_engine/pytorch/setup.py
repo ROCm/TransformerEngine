@@ -58,7 +58,7 @@ if __name__ == "__main__":
         description="Transformer acceleration library - Torch Lib",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
-        install_requires=[] if rocm_build() else ["torch", "flash-attn>=2.0.6,<=2.4.2,!=2.0.9,!=2.1.0"],
+        install_requires=[] if rocm_build() else ["torch", "flash-attn>=2.0.6,<=2.6.3,!=2.0.9,!=2.1.0"],
         tests_require=[] if rocm_build() else ["numpy", "onnxruntime", "torchvision"],
     )
     if any(x in sys.argv for x in (".", "sdist", "bdist_wheel")):

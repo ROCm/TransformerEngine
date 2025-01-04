@@ -8,16 +8,15 @@
 
 import functools
 import glob
+import importlib
 import os
 import re
 import shutil
 import subprocess
 import sys
-import importlib
-import importlib.metadata
 from pathlib import Path
 from subprocess import CalledProcessError
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 
 @functools.lru_cache(maxsize=None)
@@ -40,8 +39,8 @@ def get_max_jobs_for_parallel_build() -> int:
     num_jobs = 0
 
     # Check environment variable
-    if os.getenv("NVTE_MAX_BUILD_JOBS"):
-        num_jobs = int(os.getenv("NVTE_MAX_BUILD_JOBS"))
+    if os.getenv("NVTE_BUILD_MAX_JOBS"):
+        num_jobs = int(os.getenv("NVTE_BUILD_MAX_JOBS"))
     elif os.getenv("MAX_JOBS"):
         num_jobs = int(os.getenv("MAX_JOBS"))
 
@@ -229,6 +228,11 @@ def cuda_path() -> Tuple[str, str]:
     return cuda_home, nvcc_bin
 
 
+@functools.lru_cache(maxsize=None)
+def cuda_archs() -> str:
+    return os.getenv("NVTE_CUDA_ARCHS", "70;80;89;90")
+
+
 def cuda_version() -> Tuple[int, ...]:
     """CUDA Toolkit version as a (major, minor) tuple."""
     # Query NVCC for version info
@@ -324,12 +328,39 @@ def get_frameworks() -> List[str]:
     return _frameworks
 
 
-def copy_common_headers(te_src, dst):
-    headers = te_src / "common"
-    for file_path in glob.glob(os.path.join(str(headers), "**", "*.h"), recursive=True):
-        new_path = os.path.join(dst, file_path[len(str(te_src)) + 1 :])
-        Path(new_path).parent.mkdir(exist_ok=True, parents=True)
-        shutil.copy(file_path, new_path)
+def copy_common_headers(
+    src_dir: Union[Path, str],
+    dst_dir: Union[Path, str],
+) -> None:
+    """Copy headers from core library
+
+    src_dir should be the transformer_engine directory within the root
+    Transformer Engine repository. All .h and .cuh files within
+    transformer_engine/common are copied into dst_dir. Relative paths
+    are preserved.
+
+    """
+
+    # Find common header files in src dir
+    headers = glob.glob(
+        os.path.join(str(src_dir), "common", "**", "*.h"),
+        recursive=True,
+    )
+    headers.extend(
+        glob.glob(
+            os.path.join(str(src_dir), "common", "**", "*.cuh"),
+            recursive=True,
+        )
+    )
+    headers = [Path(path) for path in headers]
+
+    # Copy common header files to dst dir
+    src_dir = Path(src_dir)
+    dst_dir = Path(dst_dir)
+    for path in headers:
+        new_path = dst_dir / path.relative_to(src_dir)
+        new_path.parent.mkdir(exist_ok=True, parents=True)
+        shutil.copy(path, new_path)
 
 
 def install_and_import(package):
@@ -338,6 +369,21 @@ def install_and_import(package):
     subprocess.check_call([sys.executable, "-m", "pip", "install", package])
     globals()[main_package] = importlib.import_module(main_package)
 
+
+def uninstall_te_wheel_packages():
+    subprocess.check_call(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "uninstall",
+            "-y",
+            "transformer_engine_cu12",
+            "transformer_engine_torch",
+            "transformer_engine_paddle",
+            "transformer_engine_jax",
+        ]
+    )
 
 def hipify(base_dir, src_dir, sources, include_dirs):
     hipify_path = base_dir / "3rdparty" / "hipify_torch"
@@ -372,17 +418,3 @@ def hipify(base_dir, src_dir, sources, include_dirs):
         # *never* absolute paths
         hipified_sources.add(os.path.relpath(fname, cwd))
     return list(hipified_sources)
-
-def uninstall_te_fw_packages():
-    subprocess.check_call(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "uninstall",
-            "-y",
-            "transformer_engine_torch",
-            "transformer_engine_paddle",
-            "transformer_engine_jax",
-        ]
-    )

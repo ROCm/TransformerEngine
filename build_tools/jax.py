@@ -4,7 +4,8 @@
 #
 # See LICENSE for license information.
 
-"""Paddle-paddle related extensions."""
+"""JAX related extensions."""
+import os
 from pathlib import Path
 
 import setuptools
@@ -12,6 +13,25 @@ from glob import glob
 
 from .utils import rocm_build, rocm_path, hipify, cuda_path, all_files_in_dir
 from typing import List
+
+
+def xla_path() -> str:
+    """XLA root path lookup.
+    Throws FileNotFoundError if XLA source is not found."""
+
+    try:
+        from jax.extend import ffi
+    except ImportError:
+        if os.getenv("XLA_HOME"):
+            xla_home = Path(os.getenv("XLA_HOME"))
+        else:
+            xla_home = "/opt/xla"
+    else:
+        xla_home = ffi.include_dir()
+
+    if not os.path.isdir(xla_home):
+        raise FileNotFoundError("Could not find xla source.")
+    return xla_home
 
 
 def setup_jax_extension(
@@ -29,15 +49,18 @@ def setup_jax_extension(
 
     # Header files
     if rocm_build():
-       include_dirs = []
+        include_dirs = []
     else:
         cuda_home, _ = cuda_path()
         include_dirs = [cuda_home / "include"]
+
+    xla_home = xla_path()
     include_dirs.extend([
         common_header_files,
         common_header_files / "common",
         common_header_files / "common" / "include",
         csrc_header_files,
+        xla_home,
     ])
 
     if rocm_build():
@@ -50,10 +73,10 @@ def setup_jax_extension(
     nvcc_flags = ["-O3"]
 
     if rocm_build():
-       # Pybind11 extension does not know about HIP so specify necessary parameters here
-       rocm_home, _ = rocm_path()
-       macros=[("USE_ROCM",None)]
-       cxx_flags.extend(["-D__HIP_PLATFORM_AMD__", "-I{}/include".format(str(rocm_home))])
+        # Pybind11 extension does not know about HIP so specify necessary parameters here
+        rocm_home, _ = rocm_path()
+        macros=[("USE_ROCM",None)]
+        cxx_flags.extend(["-D__HIP_PLATFORM_AMD__", "-I{}/include".format(str(rocm_home))])
     else:
         macros=[]
 

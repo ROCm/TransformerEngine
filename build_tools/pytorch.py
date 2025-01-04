@@ -14,8 +14,9 @@ from .utils import (
     rocm_build,
     hipify,
     all_files_in_dir,
-    cuda_version,
+    cuda_archs,
     cuda_path,
+    cuda_version,
 )
 
 
@@ -72,8 +73,6 @@ def setup_pytorch_extension(
     else:
         nvcc_flags = [
             "-O3",
-            "-gencode",
-            "arch=compute_70,code=sm_70",
             "-U__CUDA_NO_HALF_OPERATORS__",
             "-U__CUDA_NO_HALF_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT16_OPERATORS__",
@@ -85,27 +84,39 @@ def setup_pytorch_extension(
             "--use_fast_math",
         ]
 
-    # Version-dependent CUDA options
     if rocm_build():
         ##TODO: Figure out which hipcc version starts to support this parallel compilation
         nvcc_flags.extend(["-parallel-jobs=4"])
     else:
+        cuda_architectures = cuda_archs()
+
+        if "70" in cuda_architectures:
+            nvcc_flags.extend(["-gencode", "arch=compute_70,code=sm_70"])
+
+        # Version-dependent CUDA options
         try:
             version = cuda_version()
         except FileNotFoundError:
             print("Could not determine CUDA Toolkit version")
         else:
-            if version >= (11, 2):
-                nvcc_flags.extend(["--threads", "4"])
-            if version >= (11, 0):
+            if version < (12, 0):
+                raise RuntimeError("Transformer Engine requires CUDA 12.0 or newer")
+            nvcc_flags.extend(
+                (
+                    "--threads",
+                    os.getenv("NVTE_BUILD_THREADS_PER_JOB", "1"),
+                )
+            )
+
+            if "80" in cuda_architectures:
                 nvcc_flags.extend(["-gencode", "arch=compute_80,code=sm_80"])
-            if version >= (11, 8):
+            if "90" in cuda_architectures:
                 nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
 
     # Libraries
     library_dirs = []
     libraries = []
-    if os.getenv("NVTE_UB_WITH_MPI"):
+    if bool(int(os.getenv("NVTE_UB_WITH_MPI", 0))):
         assert (
             os.getenv("MPI_HOME") is not None
         ), "MPI_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"

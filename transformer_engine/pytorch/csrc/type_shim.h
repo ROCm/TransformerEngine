@@ -8,6 +8,7 @@
 #pragma once
 
 #include <ATen/ATen.h>
+#include "common/utils.cuh"
 
 // Forward/backward compatiblity hack around
 // https://github.com/pytorch/pytorch/commit/3aeb78079bcd68282fe9117088e138b77318e288
@@ -268,8 +269,6 @@
     default:                                                                          \
       AT_ERROR(#NAME, " not implemented for '", toString(TYPEIN), "'");               \
   }
-
-constexpr uint32_t THREADS_PER_WARP = 32;
 
 template <typename T>
 __device__ __forceinline__ T

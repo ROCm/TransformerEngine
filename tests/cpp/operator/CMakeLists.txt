@@ -12,10 +12,10 @@ list(APPEND test_cuda_sources
             test_cast_transpose_dbias_dgelu.cu
             test_cast_transpose_dgeglu.cu
             test_act.cu
-            test_dgeglu.cu
             test_layernorm.cu
             test_rmsnorm.cu
             test_multi_cast_transpose.cu
+            test_multi_padding.cu
             test_causal_softmax.cu
             ../test_common.cu)
 if(USE_ROCM)
@@ -64,4 +64,4 @@ else()
 endif()
 
 include(GoogleTest)
-gtest_discover_tests(test_operator)
+gtest_discover_tests(test_operator PROPERTIES DISCOVERY_TIMEOUT 600)

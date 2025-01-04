@@ -439,14 +439,18 @@ __global__ void __launch_bounds__(cast_transpose_num_threads)
     }
   }
 
-  /* warp tile amax reduce*/
-  amax = reduce_max<cast_transpose_num_threads / THREADS_PER_WARP>(amax, warp_id);
-
-  if (threadIdx.x == 0) {
-    static_assert(std::is_same<CType, float>::value);
-    if (param.amax != nullptr) {
+  // Reduce amax over block
+  if (param.amax != nullptr) {
+    amax = reduce_max<cast_transpose_num_threads / THREADS_PER_WARP>(amax, warp_id);
+    if (threadIdx.x == 0) {
+      static_assert(std::is_same<CType, float>::value);
       atomicMaxFloat(param.amax, amax);
     }
+  }
+
+  // Update scale-inverse
+  if (blockIdx.x == 0 && threadIdx.x == 0 && param.scale_inv != nullptr) {
+    reciprocal<CType>(param.scale_inv, scale);
   }
 }
 
@@ -890,17 +894,18 @@ __global__ void __launch_bounds__(cast_transpose_num_threads)
     __syncthreads();
   }
 
-  /* warp tile amax reduce*/
-  max = reduce_max<cast_transpose_num_threads / THREADS_PER_WARP>(max, warp_id);
-
-  if (threadIdx.x == 0) {
-    static_assert(std::is_same<CType, float>::value);
-    if (amax != nullptr) {
+  // Reduce amax over block
+  if (amax != nullptr) {
+    max = reduce_max<cast_transpose_num_threads / THREADS_PER_WARP>(max, warp_id);
+    if (threadIdx.x == 0) {
+      static_assert(std::is_same<CType, float>::value);
       atomicMaxFloat(amax, max);
     }
-    if (scale_inv != nullptr) {
-      reciprocal<float>(scale_inv, scale);
-    }
+  }
+
+  // Update scale-inverse
+  if (blockIdx.x == 0 && threadIdx.x == 0 && scale_inv != nullptr) {
+    reciprocal<CType>(scale_inv, scale);
   }
 }
 
@@ -1099,17 +1104,18 @@ __global__ void __launch_bounds__(cast_transpose_num_threads)
     __syncthreads();
   }
 
-  /* warp tile amax reduce*/
-  max = reduce_max<cast_transpose_num_threads / THREADS_PER_WARP>(max, warp_id);
-
-  if (threadIdx.x == 0) {
-    static_assert(std::is_same<CType, float>::value);
-    if (amax != nullptr) {
+  // Reduce amax over block
+  if (amax != nullptr) {
+    max = reduce_max<cast_transpose_num_threads / THREADS_PER_WARP>(max, warp_id);
+    if (threadIdx.x == 0) {
+      static_assert(std::is_same<CType, float>::value);
       atomicMaxFloat(amax, max);
     }
-    if (scale_inv != nullptr) {
-      reciprocal<float>(scale_inv, scale);
-    }
+  }
+
+  // Update scale-inverse
+  if (blockIdx.x == 0 && threadIdx.x == 0 && scale_inv != nullptr) {
+    reciprocal<CType>(scale_inv, scale);
   }
 }
 

@@ -17,6 +17,7 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from .base import (
     get_workspace,
+    _ub_communicators,
     get_ub,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
@@ -45,8 +46,6 @@ from ..distributed import (
     allreduce,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
-    is_fp8_activation_recompute_enabled,
-    in_fp8_activation_recompute_phase,
     use_reentrant_activation_recompute,
     _fsdp_scatter_tensors,
     _fsdp_gather_tensors,
@@ -573,8 +572,8 @@ class _LayerNormMLP(torch.autograd.Function):
             )
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
-                fc1_weight = Parameter(fc1_weight.requires_grad)
-                fc2_weight = Parameter(fc2_weight.requires_grad)
+                fc1_weight = Parameter(fc1_weight, fc1_weight.requires_grad)
+                fc2_weight = Parameter(fc2_weight, fc2_weight.requires_grad)
 
                 fc1_weight.main_grad = fc1_weight_main_grad
                 fc2_weight.main_grad = fc2_weight_main_grad
@@ -1198,7 +1197,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                             y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} *
                             (1 + \gamma) + \beta
     device : Union[torch.device, str], default = "cuda"
-          The device on which the parameters of the model will allocated. It is the user's
+          The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
 
@@ -1301,7 +1300,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.gemm_gelu_fusion = (
             bool(int(os.getenv("NVTE_GEMM_GELU_FUSION", "0")))
             and self.activation == "gelu"
-            and not get_ub("fc1_fprop").is_atomic_gemm()
+            and ((_ub_communicators is None) or (not get_ub("fc1_fprop").is_atomic_gemm()))
         )
 
         if tp_group is None:
@@ -1488,19 +1487,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc2_weight_fp8 = None
             if self.fp8:
                 update_workspace = is_first_microbatch is None or is_first_microbatch
-                with_transpose = torch.is_grad_enabled()
-                if (
-                    is_fp8_activation_recompute_enabled()
-                    and not in_fp8_activation_recompute_phase()
-                ):
-                    with_transpose = True
-                update_transpose_cache = with_transpose
-                if update_transpose_cache:
-                    update_transpose_cache = (
-                        is_first_microbatch or skip_fp8_weight_update is not None
-                    )
                 if isinstance(fc1_weight, Float8Tensor):
-                    if update_transpose_cache:
+                    if fc1_weight._transpose is not None:
                         fc1_weight.transpose_2d(
                             fill_cache=True,
                             noop_flag=skip_fp8_weight_update,
@@ -1516,10 +1504,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
                         cache_name=cache_name,
                         update_workspace=update_workspace,
                         skip_update_flag=skip_fp8_weight_update,
-                        with_transpose=with_transpose,
                     )
                 if isinstance(fc2_weight, Float8Tensor):
-                    if update_transpose_cache:
+                    if fc2_weight._transpose is not None:
                         fc2_weight.transpose_2d(
                             fill_cache=True,
                             noop_flag=skip_fp8_weight_update,
@@ -1535,7 +1522,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
                         cache_name=cache_name,
                         update_workspace=update_workspace,
                         skip_update_flag=skip_fp8_weight_update,
-                        with_transpose=with_transpose,
                     )
 
             # Disable bias_gelu_nvfusion for determinism checkpointing in non-reentrant mode

@@ -24,6 +24,7 @@ namespace transformer_engine {
 namespace jax {
 
 int GetCudaRuntimeVersion();
+size_t GetCudnnRuntimeVersion();
 int GetDeviceComputeCapability(int gpu_id);
 
 #ifndef USE_ROCM

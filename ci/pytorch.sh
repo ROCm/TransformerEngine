@@ -48,8 +48,8 @@ run_test_config(){
     run 1 test_jit.py
     run 1 test_multi_tensor.py
     run 1 test_numerics.py
-    # All FA are disabled in ONNX export mode
-    test $_fus_attn = "auto" && run 3 test_onnx_export.py
+    run_default_fa 3 test_onnx_export.py # All FA are disabled in ONNX export mode
+    run_default_fa 1 test_permutation.py
     run 1 test_recipe.py
     run 1 test_sanity.py
     run 1 test_torch_save_load.py
