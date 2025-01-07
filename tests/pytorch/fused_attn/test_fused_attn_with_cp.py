@@ -74,8 +74,8 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
             f"CP implementation with QKVO A2A requires num_heads ({config.num_heads}) and"
             f" num_gqa_groups ({config.num_gqa_groups}) to be divisible by cp_size (2)!"
         )
-    if IS_HIP_EXTENSION and _flash_attn_2_6_plus and qkv_format == "thd":
-        pytest.skip("CP tests do not support THD format with Flash-attn 2.6+.")
+    if IS_HIP_EXTENSION and qkv_format == "thd":
+        pytest.skip("CP tests do not support THD format on ROCm yet!")
 
     subprocess.run(
         get_bash_arguments(

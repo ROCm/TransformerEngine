@@ -1,7 +1,7 @@
 ..
     This file was modified to include portability information to AMDGPU.
 
-    Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
+    Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
 
     Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
@@ -21,7 +21,7 @@ Feature Support Status
 
 * Activation, cast, fused softmax, layernorm, rmsnorm, transpose, fused rope, fp8 recipe, HipRTC: fully supported
 * GEMM: partially supported with following input/output types: (fp32/fp32), (fp16/fp16), (bf16/bf16), (fp8, bf8/fp16, bf16, fp32)
-* Attention (Flash Attention, Fused Multihead Attention): partially supported: Fused Attention with AOTriton and CK backends
+* Attention (Flash Attention, Fused Multihead Attention): partially supported: Fused Attention with AOTriton and CK backends, FlashAttention-2 with fixed length sequences
 * HipGraph, HipTX: partially supported
 * Tensor Parallelism, Sequence Parallelism, Context Parallelism: supported
 
