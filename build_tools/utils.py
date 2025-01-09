@@ -9,6 +9,7 @@
 import functools
 import glob
 import importlib
+import importlib.metadata
 import os
 import re
 import shutil
