@@ -75,10 +75,17 @@ NVTE_QKV_Format nvte_get_qkv_format(NVTE_QKV_Layout qkv_layout) {
 //    causal_bottom_right, padding_causal_bottom_right | (-1,  0) or (>=0, 0)
 std::pair<int64_t, int64_t> check_set_window_size(NVTE_Mask_Type attn_mask_type, std::pair<int64_t, int64_t> window_size){
   //mask_type contain causal
+  bool nvte_log_fused_attn_config = false;
+  if (const char* env_p = std::getenv("NVTE_LOG_FUSED_ATTN_CONFIG") ) {
+    if (env_p != nullptr && std::string(env_p) == "1")
+      nvte_log_fused_attn_config = true;
+  }
   if(attn_mask_type==NVTE_CAUSAL_MASK || attn_mask_type==NVTE_PADDING_CAUSAL_MASK || attn_mask_type==NVTE_CAUSAL_BOTTOM_RIGHT_MASK || attn_mask_type==NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK){
     if(window_size==std::make_pair<int64_t, int64_t>(-1, -1) || (window_size.first >=0 && window_size.second!=0)){
       //TODO: better INFO logging
-      std::cout<<"window_size should be (-1, 0) or (>=0, 0) for attn_mask_type="<<attn_mask_type<<std::endl;
+      if(nvte_log_fused_attn_config){
+        std::cout<<"window_size should be (-1, 0) or (>=0, 0) for attn_mask_type="<<attn_mask_type<<std::endl;
+      }
       window_size.second = 0;
       return window_size;
     }else if( window_size!=std::make_pair<int64_t, int64_t>(-1, 0) && (window_size.first < 0 || window_size.second != 0)){
@@ -88,7 +95,9 @@ std::pair<int64_t, int64_t> check_set_window_size(NVTE_Mask_Type attn_mask_type,
     //no_mask and padding mask
     if(window_size==std::make_pair<int64_t, int64_t>(-1, 0)){
       //TODO: better INFO logging
-      std::cout<<"window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type="<<attn_mask_type<<std::endl;
+      if(nvte_log_fused_attn_config){
+        std::cout<<"window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type="<<attn_mask_type<<std::endl;
+      }
       window_size.second=-1;
       return window_size;
     }else if(window_size!=std::make_pair<int64_t, int64_t>(-1, -1) && (window_size.first < 0 or window_size.second < 0)){
