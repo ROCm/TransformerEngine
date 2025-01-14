@@ -244,7 +244,9 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
   }
 
   // Update scale-inverse
+	/*
   if (blockIdx.x == 0 && threadIdx.x == 0 && param.scale_inv != nullptr) {
     reciprocal<CType>(param.scale_inv, scale);
   }
+	*/
 }

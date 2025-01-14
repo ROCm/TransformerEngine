@@ -123,7 +123,9 @@ __global__ void __launch_bounds__(block_size) cast_transpose_optimized_kernel(
   }
 
   // Update scale-inverse
+	/*
   if (blockIdx.x == 0 && threadIdx.x == 0 && scale_inv_ptr != nullptr) {
     reciprocal<CType>(scale_inv_ptr, scale);
   }
+	*/
 }

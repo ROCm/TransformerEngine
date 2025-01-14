@@ -449,9 +449,11 @@ __global__ void __launch_bounds__(cast_transpose_num_threads)
   }
 
   // Update scale-inverse
+	/*
   if (blockIdx.x == 0 && threadIdx.x == 0 && param.scale_inv != nullptr) {
     reciprocal<CType>(param.scale_inv, scale);
   }
+	*/
 }
 
 static const char *ActTypeToString[] = {
@@ -904,9 +906,11 @@ __global__ void __launch_bounds__(cast_transpose_num_threads)
   }
 
   // Update scale-inverse
+	/*
   if (blockIdx.x == 0 && threadIdx.x == 0 && scale_inv != nullptr) {
     reciprocal<CType>(scale_inv, scale);
   }
+	*/
 }
 
 template <int nvec_in, int nvec_out, typename CType, typename IType, typename OType,
@@ -1114,9 +1118,11 @@ __global__ void __launch_bounds__(cast_transpose_num_threads)
   }
 
   // Update scale-inverse
+	/*
   if (blockIdx.x == 0 && threadIdx.x == 0 && scale_inv != nullptr) {
     reciprocal<CType>(scale_inv, scale);
   }
+	*/
 }
 
 template <typename ComputeType, typename ParamOP, ComputeType (*OP1)(ComputeType, const ParamOP &),
