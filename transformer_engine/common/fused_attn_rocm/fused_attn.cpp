@@ -109,6 +109,18 @@ std::pair<int64_t, int64_t> check_set_window_size(NVTE_Mask_Type attn_mask_type,
   return window_size;
 }
 
+// To align with NVTE, treat causal padding with BSHD/SBHD as causal no padding
+NVTE_Mask_Type check_set_mask_type(NVTE_Mask_Type attn_mask_type, NVTE_QKV_Layout qkv_layout){
+  if(nvte_get_qkv_format(qkv_layout)!=NVTE_QKV_Format::NVTE_THD){
+    if(attn_mask_type==NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK){
+      return NVTE_Mask_Type::NVTE_CAUSAL_MASK;
+    }else if(attn_mask_type==NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK){
+      return NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK;
+    }  
+  }
+  return attn_mask_type;
+}
+
 // select a backend for fused attention
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
@@ -139,6 +151,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   
   // fix the incompatible window size from upstream frameworks pytorch/jax
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
+  // remove "padding" from mask_type if not in var seqlen
+  attn_mask_type = check_set_mask_type(attn_mask_type, qkv_layout);
 
   // first check whether ck can be used, then check aotriton
   if(nvte_fused_attn_ck && fused_attn_rocm::is_ck_backend_supported(
@@ -211,6 +225,8 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
 
   // fix the incompatible window size from upstream frameworks pytorch/jax
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
+  // remove "padding" from mask_type if not in var seqlen
+  attn_mask_type = check_set_mask_type(attn_mask_type, qkv_layout);
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, dropout, h, h, max_seqlen,
@@ -286,6 +302,8 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
 
   // fix the incompatible window size from upstream frameworks pytorch/jax
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
+  // remove "padding" from mask_type if not in var seqlen
+  attn_mask_type = check_set_mask_type(attn_mask_type, qkv_layout);
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, dropout, h, h, max_seqlen,
@@ -366,6 +384,8 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
 
   // fix the incompatible window size from upstream frameworks pytorch/jax
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
+  // remove "padding" from mask_type if not in var seqlen
+  attn_mask_type = check_set_mask_type(attn_mask_type, qkv_layout);
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
@@ -449,6 +469,8 @@ void nvte_fused_attn_bwd_kvpacked(
 
   // fix the incompatible window size from upstream frameworks pytorch/jax
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
+  // remove "padding" from mask_type if not in var seqlen
+  attn_mask_type = check_set_mask_type(attn_mask_type, qkv_layout);
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
@@ -526,6 +548,8 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
 
   // fix the incompatible window size from upstream frameworks pytorch/jax
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
+  // remove "padding" from mask_type if not in var seqlen
+  attn_mask_type = check_set_mask_type(attn_mask_type, qkv_layout);
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
@@ -605,6 +629,8 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
 
   // fix the incompatible window size from upstream frameworks pytorch/jax
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
+  // remove "padding" from mask_type if not in var seqlen
+  attn_mask_type = check_set_mask_type(attn_mask_type, qkv_layout);
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
