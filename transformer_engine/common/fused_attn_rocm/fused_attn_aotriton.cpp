@@ -185,16 +185,6 @@ void fused_attn_aotriton_fwd_impl(
     std::array<uint64_t, 4>{1, 1, 1, 1}, 
     dtype);
   
-#if 0
-  //devPtrDropoutSeed and devPtrDropoutOffset are actually device ptrs
-  uint64_t philox_seed, philox_offset;
-  if(is_training && dropout_probability > 0.f){
-    (void)cudaStreamSynchronize(stream);
-    (void)cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
-    (void)cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
-  }
-#endif
-
   bool nvte_log_aotriton_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_AOTRITON_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
@@ -214,26 +204,10 @@ void fused_attn_aotriton_fwd_impl(
     std::cout<<"o_stride: ("<<o_stride[0]<<", "<<o_stride[1]<<", "<<o_stride[2]<<", "<<o_stride[3]<<"), ";
     std::cout<<"is_training: "<<is_training<<", ";
     std::cout<<"dropout_p: "<<dropout_probability<<", ";
-    // std::cout<<"philox_seed: "<<philox_seed<<", philox_offset: "<<philox_offset<<", ";
     std::cout<<"causal mask: "<<(mask_type==NVTE_CAUSAL_MASK)<<std::endl;
   }
   aotriton::TensorView<4> empty_bias(0, {0,0,0,0}, {0,0,0,0}, dtype);
   using aotriton::v2::flash::attn_fwd;
-#if 0
-  NVTE_CHECK_CUDA(attn_fwd(q_tensor,
-                           k_tensor,
-                           v_tensor,
-                           empty_bias,
-                           scaling_factor,
-                           M_tensor,
-                           o_tensor,
-                           is_training? dropout_probability:0,
-                           philox_seed,
-                           philox_offset,
-                           encoded_softmax_tensor,
-                           mask_type==NVTE_CAUSAL_MASK,
-                           stream));
-#endif
   auto seed = mk_aoscalartensor(devPtrDropoutSeed);
   auto offset1 = mk_aoscalartensor(devPtrDropoutOffset);
   auto offset2 = 0;
@@ -319,15 +293,6 @@ void fused_attn_aotriton_bwd_impl(
   auto M_tensor = aotriton::TensorView<2>(reinterpret_cast<intptr_t>(devPtrSoftmaxAux), m_shape, m_stride, aotriton::DType::kFloat32);
   auto wkspace_tensor = aotriton::TensorView<2>(reinterpret_cast<intptr_t>(workspace), m_shape, m_stride, aotriton::DType::kFloat32);
 
-#if 0
-  uint64_t philox_seed, philox_offset;
-  if(dropout_probability > 0.f){
-    (void)cudaStreamSynchronize(stream);
-    (void)cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
-    (void)cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
-  }
-#endif
-
   bool nvte_log_aotriton_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_AOTRITON_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
@@ -346,7 +311,6 @@ void fused_attn_aotriton_bwd_impl(
     std::cout<<"o_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d<<"), ";
     std::cout<<"o_stride: ("<<o_stride[0]<<", "<<o_stride[1]<<", "<<o_stride[2]<<", "<<o_stride[3]<<"), ";
     std::cout<<"dropout_p: "<<dropout_probability<<", ";
-    // std::cout<<"philox_seed: "<<philox_seed<<", philox_offset: "<<philox_offset<<", ";
     std::cout<<"causal mask: "<<(mask_type==NVTE_CAUSAL_MASK)<<std::endl;
   }
   aotriton::TensorView<4> empty_bias(0, {0,0,0,0}, {0,0,0,0}, dtype);
