@@ -224,17 +224,38 @@ if (USE_CUDA)
 else()
   if(USE_FUSED_ATTN_AOTRITON)
     if(NOT DEFINED AOTRITON_PATH)
-      # Install aotriton fused attn
-      set(AOTRITON_NO_PYTHON ON)
-      set(AOTRITON_NO_SHARED OFF)
+      # # Install aotriton fused attn
+      # set(AOTRITON_NO_PYTHON ON)
+      # set(AOTRITON_NO_SHARED OFF)
+      # if(USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS)
+      #   set(AOTRITON_NOIMAGE_MODE OFF)
+      # else()
+      #   set(AOTRITON_NOIMAGE_MODE ON)
+      # endif()
+      # set(AOTRITON_NAME_SUFFIX "TEprivate")
+      # set(TARGET_GPUS "MI300X" CACHE STRING "Target arch to compile aotriton fused attn backend (use trade names)")
+      # add_subdirectory(../../3rdparty/aotriton ${CMAKE_CURRENT_BINARY_DIR}/aotriton)
       if(USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS)
         set(AOTRITON_NOIMAGE_MODE OFF)
       else()
         set(AOTRITON_NOIMAGE_MODE ON)
       endif()
-      set(AOTRITON_NAME_SUFFIX "TEprivate")
-      set(TARGET_GPUS "MI300X" CACHE STRING "Target arch to compile aotriton fused attn backend (use trade names)")
-      add_subdirectory(../../3rdparty/aotriton ${CMAKE_CURRENT_BINARY_DIR}/aotriton)
+      set(__AOTRITON_INSTALL_DIR "${CMAKE_CURRENT_BINARY_DIR}/aotriton")
+      include(ExternalProject)
+      ExternalProject_Add(aotriton_external
+        URL ../../3rdparty/aotriton 
+        CMAKE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${__AOTRITON_INSTALL_DIR}
+        -DTARGET_GPUS=MI300X
+        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+        -DAOTRITON_NO_PYTHON=ON
+        -DAOTRITON_NO_SHARED=OFF
+        -DAOTRITON_NOIMAGE_MODE=${AOTRITON_NOIMAGE_MODE}
+        BUILD_BYPRODUCTS "${__AOTRITON_INSTALL_DIR}/lib/libaotriton_v2.so"
+        )
+      add_library(aotriton INTERFACE)
+      add_dependencies(aotriton aotriton_external)
+      target_link_libraries(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/lib/libaotriton_v2.so)
+      target_include_directories(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/include)
     else()
       # Use aotriton built during initial TE building/installation
       # When only need rebuild TE library itself

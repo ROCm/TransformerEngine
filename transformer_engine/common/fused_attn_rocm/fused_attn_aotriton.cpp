@@ -18,14 +18,18 @@
 #include "fused_attn_aotriton.h"
 #include "utils.h"
 
-namespace transformer_engine {
-namespace fused_attn_rocm {
+namespace {
 
-inline aotriton::TensorView<0> mk_aoscalartensor(const uint64_t* devPtrDropoutSeed)
+inline aotriton::TensorView<0> mk_aoscalartensor(const uint64_t* ptr)
 {
-  return aotriton::TensorView<0>(reinterpret_cast<intptr_t>(q.data_ptr()),
+  return aotriton::TensorView<0>(reinterpret_cast<intptr_t>(ptr),
                                  aotriton::DType::kUInt64);
 }
+
+}
+
+namespace transformer_engine {
+namespace fused_attn_rocm {
 
 // check the fused attn config to see whether it's aotriton backend supported
 bool is_aotriton_backend_supported(
@@ -206,7 +210,7 @@ void fused_attn_aotriton_fwd_impl(
     std::cout<<"o_stride: ("<<o_stride[0]<<", "<<o_stride[1]<<", "<<o_stride[2]<<", "<<o_stride[3]<<"), ";
     std::cout<<"is_training: "<<is_training<<", ";
     std::cout<<"dropout_p: "<<dropout_probability<<", ";
-    std::cout<<"philox_seed: "<<philox_seed<<", philox_offset: "<<philox_offset<<", ";
+    // std::cout<<"philox_seed: "<<philox_seed<<", philox_offset: "<<philox_offset<<", ";
     std::cout<<"causal mask: "<<(mask_type==NVTE_CAUSAL_MASK)<<std::endl;
   }
   aotriton::TensorView<4> empty_bias(0, {0,0,0,0}, {0,0,0,0}, dtype);
@@ -229,8 +233,8 @@ void fused_attn_aotriton_fwd_impl(
   auto seed = mk_aoscalartensor(devPtrDropoutSeed);
   auto offset1 = mk_aoscalartensor(devPtrDropoutOffset);
   auto offset2 = 0;
-  auto seed_output = mk_philoxtensor(nullptr);
-  auto offset_output = mk_philoxtensor(nullptr);
+  auto seed_output = mk_aoscalartensor(nullptr);
+  auto offset_output = mk_aoscalartensor(nullptr);
   const auto is_causal = mask_type == NVTE_CAUSAL_MASK;
   NVTE_CHECK_CUDA(attn_fwd(q_tensor,
                            k_tensor,
@@ -338,7 +342,7 @@ void fused_attn_aotriton_bwd_impl(
     std::cout<<"o_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d<<"), ";
     std::cout<<"o_stride: ("<<o_stride[0]<<", "<<o_stride[1]<<", "<<o_stride[2]<<", "<<o_stride[3]<<"), ";
     std::cout<<"dropout_p: "<<dropout_probability<<", ";
-    std::cout<<"philox_seed: "<<philox_seed<<", philox_offset: "<<philox_offset<<", ";
+    // std::cout<<"philox_seed: "<<philox_seed<<", philox_offset: "<<philox_offset<<", ";
     std::cout<<"causal mask: "<<(mask_type==NVTE_CAUSAL_MASK)<<std::endl;
   }
   aotriton::TensorView<4> empty_bias(0, {0,0,0,0}, {0,0,0,0}, dtype);
