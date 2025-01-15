@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
@@ -1210,6 +1210,7 @@ void hipblaslt_gemm(const Tensor *inputA,
     {
 
       int bestAlgo = -1;
+      algoTuneCount = std::min(algoTuneCount, algoTotalCount);
       if (tuneLoopCount > 0)
       {
         std::cout << "[INFO] Perform hipBLASLt algo selection on GPU" << device_id
@@ -1287,10 +1288,6 @@ void hipblaslt_gemm(const Tensor *inputA,
       }
       else if (firstAlgo < algoTuneCount)
       {
-        if (firstAlgo != 0)
-        {
-          std::cout << "[INFO] Select hipBLASLt algo " << firstAlgo << std::endl;
-        }
         bestAlgo = firstAlgo;
       }
 
@@ -1306,6 +1303,11 @@ void hipblaslt_gemm(const Tensor *inputA,
       cached_algo.algoId = cached_algo.getAlgoId(algoArr[bestAlgo].algo);
       cached_algo.ws_size_min = algoArr[bestAlgo].workspaceSize;
       cached_algo.ws_size_max = workspaceSize;
+
+      if (const char* env_p = std::getenv("NVTE_LOG_GEMM_CONFIG") ) {
+        if (env_p != nullptr && std::string(env_p) == "1")
+          std::cout << "[INFO] Use hipBLASLt algo [" << bestAlgo << "] " << cached_algo.algoId << std::endl;
+      }
 
       algoCache.store(gemm_cfg, cached_algo);
     }

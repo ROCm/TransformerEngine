@@ -24,7 +24,7 @@ from transformer_engine.pytorch.utils import (
     is_bf16_compatible,
 )
 if IS_HIP_EXTENSION:
-    from transformer_engine.pytorch.utils import is_mi200
+    from transformer_engine.pytorch.utils import is_mi200, is_mi308
 
 from transformer_engine.pytorch import (
     DotProductAttention,
@@ -1864,7 +1864,11 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     # TODO: wait for the full determinism fix from hipblaslt
     if IS_HIP_EXTENSION:
         if use_hipblaslt():
-            torch.testing.assert_close(y_bshd, y_sbhd.transpose(0, 1).contiguous())
+            tols = dtype_tols(dtype)
+            if dtype in (torch.float16, torch.bfloat16) and is_mi308():
+                # mi308 hipblaslt precision issue
+                tols["atol"] = 5e-3
+            torch.testing.assert_close(y_bshd, y_sbhd.transpose(0, 1).contiguous(), **tols)
         else:
             assert torch.equal(y_bshd, y_sbhd.transpose(0, 1).contiguous()), "Tensors are not equal"
     else:
