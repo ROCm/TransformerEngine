@@ -18,6 +18,10 @@
 #include "fused_attn_aotriton.h"
 #include "utils.h"
 
+#if AOTRITON_ENABLE_SUFFIX
+namespace aotriton = AOTRITON_NS;
+#endif
+
 namespace {
 
 inline aotriton::TensorView<0> mk_aoscalartensor(const uint64_t* ptr)
