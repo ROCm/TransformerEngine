@@ -241,6 +241,7 @@ else()
         set(AOTRITON_NOIMAGE_MODE ON)
       endif()
       set(__AOTRITON_INSTALL_DIR "${CMAKE_CURRENT_BINARY_DIR}/aotriton")
+      set(__AOTRITON_SUFFIX "_TEprivate")
       include(ExternalProject)
       ExternalProject_Add(aotriton_external
         URL ../../3rdparty/aotriton 
@@ -249,13 +250,38 @@ else()
         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
         -DAOTRITON_NO_PYTHON=ON
         -DAOTRITON_NO_SHARED=OFF
+        -DAOTRITON_NAME_SUFFIX=${__AOTRITON_SUFFIX}
         -DAOTRITON_NOIMAGE_MODE=${AOTRITON_NOIMAGE_MODE}
-        BUILD_BYPRODUCTS "${__AOTRITON_INSTALL_DIR}/lib/libaotriton_v2.so"
+        BUILD_BYPRODUCTS "${__AOTRITON_INSTALL_DIR}/lib/libaotriton${__AOTRITON_SUFFIX}_v2.so"
         )
       add_library(aotriton INTERFACE)
       add_dependencies(aotriton aotriton_external)
       target_link_libraries(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/lib/libaotriton_v2.so)
       target_include_directories(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/include)
+      if(NOT USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS)
+        set(__AOTRITON_VER "0.8b")
+        set(__AOTRITON_MANYLINUX "manylinux_2_28")
+        set(__AOTRITON_ARCH "x86_64")
+        set(__AOTRITON_ROCM "6.2")
+        set(__AOTRITON_Z "gz")
+        set(__AOTRITON_SHA256 "e938def5d32869fe2e00aec0300f354c9f157867bebdf2e104d732b94cb238d8")
+        string(CONCAT __AOTRITON_FILE "aotriton-"
+                                      "${__AOTRITON_VER}-${__AOTRITON_MANYLINUX}"
+                                      "_${__AOTRITON_ARCH}-rocm${__AOTRITON_ROCM}"
+                                      "-shared.tar.${__AOTRITON_Z}")
+        string(CONCAT __AOTRITON_URL "https://github.com/ROCm/aotriton/releases/download/"
+                                     "${__AOTRITON_VER}/${__AOTRITON_FILE}")
+        ExternalProject_Add(aotriton_images
+                            URL "${__AOTRITON_URL}"
+                            URL_HASH SHA256=${__AOTRITON_SHA256}
+                            SOURCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/aotriton_tarball
+                            CONFIGURE_COMMAND ""
+                            BUILD_COMMAND ""
+                            INSTALL_COMMAND ${CMAKE_COMMAND} -E copy_directory
+                            "${CMAKE_CURRENT_BINARY_DIR}/aotriton_tarball/lib/aotriton.images"
+                            "${__AOTRITON_INSTALL_DIR}/lib/aotriton.images")
+        add_dependencies(aotriton aotriton_images)
+      endif()
     else()
       # Use aotriton built during initial TE building/installation
       # When only need rebuild TE library itself
