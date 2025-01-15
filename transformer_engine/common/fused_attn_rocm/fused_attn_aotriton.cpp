@@ -21,6 +21,12 @@
 namespace transformer_engine {
 namespace fused_attn_rocm {
 
+inline aotriton::TensorView<0> mk_aoscalartensor(const uint64_t* devPtrDropoutSeed)
+{
+  return aotriton::TensorView<0>(reinterpret_cast<intptr_t>(q.data_ptr()),
+                                 aotriton::DType::kUInt64);
+}
+
 // check the fused attn config to see whether it's aotriton backend supported
 bool is_aotriton_backend_supported(
   NVTEDType q_dtype,
@@ -171,6 +177,7 @@ void fused_attn_aotriton_fwd_impl(
     std::array<uint64_t, 4>{1, 1, 1, 1}, 
     dtype);
   
+#if 0
   //devPtrDropoutSeed and devPtrDropoutOffset are actually device ptrs
   uint64_t philox_seed, philox_offset;
   if(is_training && dropout_probability > 0.f){
@@ -178,6 +185,7 @@ void fused_attn_aotriton_fwd_impl(
     (void)cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
     (void)cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
   }
+#endif
 
   bool nvte_log_aotriton_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_AOTRITON_CONFIG") ) {
@@ -203,6 +211,7 @@ void fused_attn_aotriton_fwd_impl(
   }
   aotriton::TensorView<4> empty_bias(0, {0,0,0,0}, {0,0,0,0}, dtype);
   using aotriton::v2::flash::attn_fwd;
+#if 0
   NVTE_CHECK_CUDA(attn_fwd(q_tensor,
                            k_tensor,
                            v_tensor,
@@ -215,6 +224,29 @@ void fused_attn_aotriton_fwd_impl(
                            philox_offset,
                            encoded_softmax_tensor,
                            mask_type==NVTE_CAUSAL_MASK,
+                           stream));
+#endif
+  auto seed = mk_aoscalartensor(devPtrDropoutSeed);
+  auto offset1 = mk_aoscalartensor(devPtrDropoutOffset);
+  auto offset2 = 0;
+  auto seed_output = mk_philoxtensor(nullptr);
+  auto offset_output = mk_philoxtensor(nullptr);
+  const auto is_causal = mask_type == NVTE_CAUSAL_MASK;
+  NVTE_CHECK_CUDA(attn_fwd(q_tensor,
+                           k_tensor,
+                           v_tensor,
+                           empty_bias,
+                           scaling_factor,
+                           M_tensor,
+                           o_tensor,
+                           is_training? dropout_probability : 0,
+                           seed,
+                           offset1,
+                           offset2,
+                           seed_output,
+                           offset_output,
+                           encoded_softmax_tensor,
+                           is_causal,
                            stream));
 }
 
@@ -279,12 +311,14 @@ void fused_attn_aotriton_bwd_impl(
   auto M_tensor = aotriton::TensorView<2>(reinterpret_cast<intptr_t>(devPtrSoftmaxAux), m_shape, m_stride, aotriton::DType::kFloat32);
   auto wkspace_tensor = aotriton::TensorView<2>(reinterpret_cast<intptr_t>(workspace), m_shape, m_stride, aotriton::DType::kFloat32);
 
+#if 0
   uint64_t philox_seed, philox_offset;
   if(dropout_probability > 0.f){
     (void)cudaStreamSynchronize(stream);
     (void)cudaMemcpy(&philox_seed, devPtrDropoutSeed, sizeof(uint64_t), cudaMemcpyDeviceToHost);
     (void)cudaMemcpy(&philox_offset, devPtrDropoutOffset, sizeof(uint64_t), cudaMemcpyDeviceToHost);
   }
+#endif
 
   bool nvte_log_aotriton_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_AOTRITON_CONFIG") ) {
@@ -309,6 +343,9 @@ void fused_attn_aotriton_bwd_impl(
   }
   aotriton::TensorView<4> empty_bias(0, {0,0,0,0}, {0,0,0,0}, dtype);
   using aotriton::v2::flash::attn_bwd;
+  auto seed = mk_aoscalartensor(devPtrDropoutSeed);
+  auto offset = mk_aoscalartensor(devPtrDropoutOffset);
+  const auto is_causal = mask_type == NVTE_CAUSAL_MASK;
   NVTE_CHECK_CUDA(attn_bwd(q_tensor,
                            k_tensor,
                            v_tensor,
@@ -323,9 +360,10 @@ void fused_attn_aotriton_bwd_impl(
                            M_tensor,
                            wkspace_tensor,
                            dropout_probability,
-                           philox_seed,
-                           philox_offset,
-                           mask_type==NVTE_CAUSAL_MASK,
+                           seed,
+                           offset,
+                           0,
+                           is_causal,
                            stream));
 }
 #endif // USE_FUSED_ATTN_AOTRITON

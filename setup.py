@@ -62,7 +62,7 @@ def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library"""
     # Project directory root
     root_path = Path(__file__).resolve().parent
-    
+
     cmake_flags = []
     if rocm_build():
         if os.getenv("NVTE_USE_HIPBLASLT") is not None:
