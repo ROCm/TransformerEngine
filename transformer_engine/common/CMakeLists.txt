@@ -282,6 +282,9 @@ else()
                             "${__AOTRITON_INSTALL_DIR}/lib/aotriton.images")
         add_dependencies(aotriton aotriton_images)
       endif()
+      install(DIRECTORY
+              ${__AOTRITON_INSTALL_DIR}/lib
+              DESTINATION ${CMAKE_INSTALL_PREFIX}/transformer_engine)
     else()
       # Use aotriton built during initial TE building/installation
       # When only need rebuild TE library itself
