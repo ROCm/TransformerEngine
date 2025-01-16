@@ -1151,6 +1151,7 @@ void hipblaslt_gemm(const Tensor *inputA,
     int tuneLoopCount = getIntEnv("TE_HIPBLASLT_TUNING_RUN_COUNT", 0, 0);
     int algoTuneCount = 1;
     std::vector<hipblasLtMatmulHeuristicResult_t> algoArr;
+    bool logTuning = getIntEnv("TE_HIPBLASLT_LOG_TUNING", 0, 0) != 0;
 
     if (tuneLoopCount)
     {
@@ -1199,7 +1200,7 @@ void hipblaslt_gemm(const Tensor *inputA,
         }
         idx = (idx + 1) % algoTotalCount;
       }
-      if (!cached_algo.algo.has_value())
+      if (logTuning && !cached_algo.algo.has_value())
       {
         std::cout << "[WARNING] Cannot find cached algoId " << cached_algo.algoId << " in hipBLASLt results" << std::endl;
       }
@@ -1213,9 +1214,10 @@ void hipblaslt_gemm(const Tensor *inputA,
       algoTuneCount = std::min(algoTuneCount, algoTotalCount);
       if (tuneLoopCount > 0)
       {
-        std::cout << "[INFO] Perform hipBLASLt algo selection on GPU" << device_id
-                  << " in range [" << firstAlgo << "-" << (algoTuneCount - 1) << "] with "
-                  << tuneLoopCount << " loops " << std::endl;
+        if (logTuning)
+          std::cout << "[INFO] Perform hipBLASLt algo selection on GPU" << device_id
+                    << " in range [" << firstAlgo << "-" << (algoTuneCount - 1) << "] with "
+                    << tuneLoopCount << " loops " << std::endl;
 
         hipStream_t profilingStream;
         NVTE_CHECK_CUDA(hipStreamCreateWithFlags(&profilingStream, hipStreamNonBlocking));
@@ -1281,9 +1283,10 @@ void hipblaslt_gemm(const Tensor *inputA,
         NVTE_CHECK_CUDA(hipStreamDestroy(profilingStream));
         if (bestAlgo >= 0)
         {
-          std::cout << "[INFO] Select hipBLASLt algo " << bestAlgo << " with time "
-                    << std::chrono::duration_cast<std::chrono::nanoseconds>(bestTime).count() / tuneLoopCount
-                    << " ns" << std::endl;
+          if (logTuning)
+            std::cout << "[INFO] Select hipBLASLt algo " << bestAlgo << " with time "
+                      << std::chrono::duration_cast<std::chrono::nanoseconds>(bestTime).count() / tuneLoopCount
+                      << " ns" << std::endl;
         }
       }
       else if (firstAlgo < algoTuneCount)
@@ -1304,10 +1307,8 @@ void hipblaslt_gemm(const Tensor *inputA,
       cached_algo.ws_size_min = algoArr[bestAlgo].workspaceSize;
       cached_algo.ws_size_max = workspaceSize;
 
-      if (const char* env_p = std::getenv("NVTE_LOG_GEMM_CONFIG") ) {
-        if (env_p != nullptr && std::string(env_p) == "1")
-          std::cout << "[INFO] Use hipBLASLt algo [" << bestAlgo << "] " << cached_algo.algoId << std::endl;
-      }
+      if (logTuning)
+        std::cout << "[INFO] Use hipBLASLt algo [" << bestAlgo << "] " << cached_algo.algoId << std::endl;
 
       algoCache.store(gemm_cfg, cached_algo);
     }
