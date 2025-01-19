@@ -15,7 +15,7 @@ from .. import cpp_extensions as tex
 from ..export import is_in_onnx_export_mode
 from ..fp8 import get_fp8_te_dtype
 from ..utils import get_default_init_method
-
+from ..triton_kernels.rmsnorm_triton import te_rmsnorm_fwd_noalloc_triton, te_rmsnorm_fwd_inf_triton
 
 def _get_normalization_func(
     normalization: str, fp8_output: bool, is_grad_enabled: bool, forward: bool
@@ -98,14 +98,25 @@ def _apply_normalization(
                 None,
             )
     else:
+        use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) )
         if is_grad_enabled:
-            output = normalization_func(*inputs, ln_out, eps, fwd_ln_sm_margin, zero_centered_gamma)
+            if use_rmsnorm_triton and (zero_centered_gamma==False):
+                output = te_rmsnorm_fwd_noalloc_triton(*inputs, eps, ln_out)
+            else:
+                output = normalization_func(*inputs, ln_out, eps, fwd_ln_sm_margin, zero_centered_gamma)
         else:
-            return (
-                normalization_func(*inputs, eps, fwd_ln_sm_margin, zero_centered_gamma),
-                None,
-                None,
-            )
+            if use_rmsnorm_triton and (zero_centered_gamma==False):
+                return (
+                    te_rmsnorm_fwd_inf_triton(*inputs, eps),
+                    None,
+                    None,
+                )
+            else:
+                return (
+                    normalization_func(*inputs, eps, fwd_ln_sm_margin, zero_centered_gamma),
+                    None,
+                    None,
+                )
     if normalization == "RMSNorm":
         output = (ln_out, None, output[1])
     elif normalization == "LayerNorm":
