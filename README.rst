@@ -243,30 +243,29 @@ ROCm TE provides experimental support for flash-attention v3 bwd kernels using t
 To enable FA v3 kernels, the following environment variables can be used:
 
 * NVTE_CK_USES_BWD_V3 - by default 0, if set to 1, some cases will call the bwd v3 dqdkdv kernel;
-* NVTE_CK_V3_ATOMIC_FP32 - by default 1, if set to 0 will use atomic fp16/bf16(w/o convert_dq kernel) when NVTE_CK_USES_BWD_V3 is set to 1;
-* NVTE_CK_V3_SPEC - by default 0, if set to 1 will call the specialized v3 kernel when NVTE_CK_USES_BWD_V3 is set to 1;
-* NVTE_CK_V3_BF16_CVT - by default 1, float to bf16 convert type when bwd_v3 is set to 1, 0:RTNE; 1:RTNA; 2:RTZ.
+* NVTE_CK_IS_V3_ATOMIC_FP32 - by default 1, if set to 0 will use atomic fp16/bf16(w/o convert_dq kernel) when NVTE_CK_USES_BWD_V3 is set to 1;
+* NVTE_CK_IS_V3_SPEC - by default 0, if set to 1 will call the specialized v3 kernel when NVTE_CK_USES_BWD_V3 is set to 1;
+* NVTE_CK_HOW_V3_BF16_CVT - by default 1, float to bf16 convert type when bwd_v3 is set to 1, 0:RTNE; 1:RTNA; 2:RTZ.
 
 Experimental Triton Kernels on ROCm
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-Most CUDA kernels in Transformer Engine are hipified to run on ROCm. While the hipifiled CUDA kernels are functional, they are not necessarily optimal
-on ROCm. We added some Triton kernels to TE ROCm to improve the performance over the hipified kernels. Currently, we have integrated Triton kernels
-for cast_transpose and cast_transpose_bgrad, which are commonly used in fp8 training. This feature is still experimental as it requires relatievely newer
-version of Pytorch+Triton, which is not available in ROCm 6.2 Pytorch release docker images. Also, it only works on Pytorch extension as JAX extension 
-does not use it.
+Most CUDA kernels in Transformer Engine are hipified to run on ROCm. While the hipifiled CUDA kernels are functional, they are not necessarily optimal on ROCm. 
+We added some Triton kernels to TE ROCm to improve the performance over the hipified kernels. 
+Currently, we have integrated Triton kernels for cast_transpose and cast_transpose_bgrad, which are commonly used in fp8 training, and also rmsnorm kernels. 
+This feature is still experimental as it requires relatievely newer version of Pytorch+Triton, which is not available in ROCm 6.2 Pytorch release docker images. 
+Also, it only works on Pytorch extension as JAX extension does not use it.
 
 To use this feature, you will need to first uninstall Pytorch and get the nightly version:
 
 .. code-block:: bash
 
-pip3 uninstall -y torch
-pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/rocm6.2
+  pip3 uninstall -y torch
+  pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/rocm6.2
 
-Then at runtime, you can enable this feature using the environment variable:
+Then at runtime, you can enable specific triton kernels using the specific environment variables:
 
-.. code-block:: bash
-
-export NVTE_USE_CAST_TRANSPOSE_TRITON=1
+* NVTE_USE_CAST_TRANSPOSE_TRITON=1 can be used to enable cast transpose (bgrad) triton kernels; 
+* NVTE_USE_RMSNORM_TRITON=1 can be used to enable rmsnorm triton kernels.
 
 
 Transformer Engine
