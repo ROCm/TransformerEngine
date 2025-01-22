@@ -42,23 +42,26 @@ def get_tolerances(in_dtype):
         return 1e-2, 1e-2
     else:
         raise RuntimeError("Invalid type")
-    return 0, 0
+
+test_shapes = [(2048, 4096),
+               (768, 2048),
+               (256, 1024),
+               (128, 768),
+               (64, 512),
+               (173, 409),
+               (71, 3571),
+               (29, 17389),]
+
+test_dtypes = [torch.float32, torch.float16, torch.bfloat16]
+
+all_boolean = [True, False]
 
 # matrix size from tests/cpp/operator/test_rmsnorm.cu
-@pytest.mark.parametrize("M, N", 
-                         [(2048, 4096),
-                          (768, 2048),
-                          (256, 1024),
-                          (128, 768),
-                          (64, 512),
-                          (173, 409),
-                          (71, 3571),
-                          (29, 17389),
-                        ])
-@pytest.mark.parametrize("in_dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("M, N", test_shapes)
+@pytest.mark.parametrize("in_dtype", test_dtypes)
 #TODO add fp8/bf8 once fp8 triton kernels are available
-@pytest.mark.parametrize("out_dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("zero_centered_gamma", [False, True])
+@pytest.mark.parametrize("out_dtype", test_dtypes)
+@pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 def test_rmsnorm_fwd_fp8_noalloc_triton(M, N, in_dtype, out_dtype, zero_centered_gamma):
     if sizeof(in_dtype) < sizeof(out_dtype):
         pytest.skip("size of input dtype < size of output dtype")
@@ -87,19 +90,10 @@ def test_rmsnorm_fwd_fp8_noalloc_triton(M, N, in_dtype, out_dtype, zero_centered
     # rsigma is of type fp32
     assert torch.allclose(rsigma_triton, rsigma_hipified, atol=1e-6, rtol=5e-5), 'rsigma does not match'
 
-@pytest.mark.parametrize("M, N", 
-                         [(2048, 4096),
-                          (768, 2048),
-                          (256, 1024),
-                          (128, 768),
-                          (64, 512),
-                          (173, 409),
-                          (71, 3571),
-                          (29, 17389),
-                        ])
-@pytest.mark.parametrize("in_dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("M, N", test_shapes)
+@pytest.mark.parametrize("in_dtype", test_dtypes)
 #TODO add fp8/bf8 once fp8 triton kernels are available
-@pytest.mark.parametrize("zero_centered_gamma", [False, True])
+@pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 def test_rmsnorm_fwd_noalloc_triton(M, N, in_dtype, zero_centered_gamma):
     ## Uniform distribution between [-2.0, 1.0]
     input_tensor = torch.rand(M, N, dtype=torch.float32, device='cuda') * 3.0 - 2.0
@@ -121,19 +115,10 @@ def test_rmsnorm_fwd_noalloc_triton(M, N, in_dtype, zero_centered_gamma):
     # rsigma is of type fp32
     assert torch.allclose(rsigma_triton, rsigma_hipified, atol=1e-6, rtol=5e-5), 'rsigma does not match'
 
-@pytest.mark.parametrize("M, N", 
-                         [(2048, 4096),
-                          (768, 2048),
-                          (256, 1024),
-                          (128, 768),
-                          (64, 512),
-                          (173, 409),
-                          (71, 3571),
-                          (29, 17389),
-                        ])
-@pytest.mark.parametrize("in_dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("M, N", test_shapes)
+@pytest.mark.parametrize("in_dtype", test_dtypes)
 #TODO add fp8/bf8 once fp8 triton kernels are available
-@pytest.mark.parametrize("zero_centered_gamma", [False, True])
+@pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 def test_rmsnorm_fwd_inf_triton(M, N, in_dtype, zero_centered_gamma):
     ## Uniform distribution between [-2.0, 1.0]
     input_tensor = torch.rand(M, N, dtype=torch.float32, device='cuda') * 3.0 - 2.0
