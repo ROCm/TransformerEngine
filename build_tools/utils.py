@@ -170,6 +170,12 @@ def rocm_build() -> bool:
       OR:
     - HIP compiler is found and CUDA one is not
     """
+    platform = os.getenv("NVTE_PLATFORM", "rocm").lower()
+    if platform == "rocm":
+        return True
+    #if platform == "cuda":
+    #    return False
+
     if bool(int(os.getenv("NVTE_USE_ROCM", "0"))):
         return True
 
