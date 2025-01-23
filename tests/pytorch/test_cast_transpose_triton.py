@@ -46,13 +46,15 @@ def test_cast_tranpose_triton(M, N, in_dtype, out_dtype):
     casted_tensor_triton = torch.empty(M, N, dtype=torch.uint8, device='cuda')
     transposed_tensor_triton = torch.empty(N, M, dtype=torch.uint8, device='cuda')
     amax_tensor_triton = torch.zeros(1, dtype=torch.float32, device='cuda')
+    scale_inv_tensor_triton = torch.empty(1, dtype=torch.float32, device='cuda')
 
     fused_cast_transpose_noop(input_tensor, noop_flag, scale_tensor, amax_tensor, scale_inv_tensor, casted_tensor, transposed_tensor, get_te_dtype(out_dtype), 0, 0, 0)
-    te_cast_transpose_noop_triton(input_tensor, noop_flag, scale_tensor, casted_tensor_triton, transposed_tensor_triton, amax_tensor_triton, get_te_dtype(out_dtype))
+    te_cast_transpose_noop_triton(input_tensor, noop_flag, scale_tensor, casted_tensor_triton, transposed_tensor_triton, amax_tensor_triton, scale_inv_tensor_triton, get_te_dtype(out_dtype))
 
     assert torch.equal(casted_tensor, casted_tensor_triton), 'Casted results do not match!'
     assert torch.equal(transposed_tensor, transposed_tensor_triton), 'transposed results do not match!'
     assert torch.allclose(amax_tensor, amax_tensor_triton, atol=1e-6, rtol=5e-6), 'Amax results do not match!'
+    assert torch.allclose(scale_inv_tensor, scale_inv_tensor_triton, atol=1e-6, rtol=5e-6), 'Scale inverse results do not match!'
 
 @pytest.mark.parametrize("M, N", 
                          [(64, 400),
@@ -72,17 +74,14 @@ def test_cast_tranpose_dbias_triton(M, N, in_dtype, out_dtype):
     scale_tensor = torch.rand(M, N, dtype=torch.float32, device='cuda') * 3.0 - 2.0
     noop_flag = torch.Tensor()
 
-    #casted_tensor = torch.empty(M, N, dtype=torch.uint8, device='cuda')
-    #transposed_tensor = torch.empty(N, M, dtype=torch.uint8, device='cuda')
     amax_tensor = torch.zeros(1, dtype=torch.float32, device='cuda')
     scale_inv_tensor = torch.empty(1, dtype=torch.float32, device='cuda')
     
-    #casted_tensor_triton = torch.empty(M, N, dtype=torch.uint8, device='cuda')
-    #transposed_tensor_triton = torch.empty(N, M, dtype=torch.uint8, device='cuda')
     amax_tensor_triton = torch.zeros(1, dtype=torch.float32, device='cuda')
+    scale_inv_tensor_triton = torch.empty(1, dtype=torch.float32, device='cuda')
 
     dbias_tensor, casted_tensor, transposed_tensor = fused_cast_transpose_bgrad(input_tensor, scale_tensor, amax_tensor, scale_inv_tensor, get_te_dtype(out_dtype), 0, 0, 0)
-    dbias_tensor_triton, casted_tensor_triton, transposed_tensor_triton = te_cast_transpose_dbias_triton(input_tensor, scale_tensor, amax_tensor_triton, get_te_dtype(out_dtype))
+    dbias_tensor_triton, casted_tensor_triton, transposed_tensor_triton = te_cast_transpose_dbias_triton(input_tensor, scale_tensor, amax_tensor_triton, scale_inv_tensor_triton, get_te_dtype(out_dtype))
 
     assert torch.equal(casted_tensor, casted_tensor_triton), 'Casted results do not match!'
     assert torch.equal(transposed_tensor, transposed_tensor_triton), 'transposed results do not match!'
@@ -90,4 +89,5 @@ def test_cast_tranpose_dbias_triton(M, N, in_dtype, out_dtype):
     atol, rtol = get_tolerances(in_dtype)
     rtol *= 4
     assert torch.allclose(dbias_tensor, dbias_tensor_triton, atol=atol, rtol=rtol), 'Amax results do not match!'
+    assert torch.allclose(scale_inv_tensor, scale_inv_tensor_triton, atol=1e-6, rtol=5e-6), 'Scale inverse results do not match!'
 

@@ -673,6 +673,7 @@ def test_gpt_full_activation_recompute(dtype, bs, model, fp8, fp8_model_params, 
         pytest.skip(reason_for_no_fp8)
 
     config = model_configs[model]
+    torch.compiler.reset() # avoid cache size limit overflow
 
     if not use_reentrant:
         # Non-reentrant checkpoint becomes non-deterministic with bias+GELU fusion
@@ -1868,7 +1869,7 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     if IS_HIP_EXTENSION:
         if use_hipblaslt():
             tols = dtype_tols(dtype)
-            if dtype in (torch.float16, torch.bfloat16) and is_mi308(): 
+            if dtype in (torch.float16, torch.bfloat16) and is_mi308():
                 # mi308 hipblaslt precision issue
                 tols["atol"] = 2e-3
             torch.testing.assert_close(y_bshd, y_sbhd.transpose(0, 1).contiguous(), **tols)
