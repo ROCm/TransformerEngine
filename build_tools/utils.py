@@ -186,8 +186,14 @@ def rocm_build() -> bool:
     if nvte_platform:
         nvte_platform_lower = nvte_platform.lower()
         if nvte_platform_lower == "rocm":
-            return True
+            _, hipcc_bin = rocm_path()
+            if hipcc_bin.is_file():
+                return True
+            else:
+                 raise FileNotFoundError(f"Could not find hipcc at {hipcc_bin}")
+             
         elif nvte_platform_lower == "cuda":
+            cuda_path()
             return False
         else:
             raise ValueError(
@@ -196,11 +202,9 @@ def rocm_build() -> bool:
             )
 
     # Try to detect ROCm
-    try:
-        _, hipcc_bin = rocm_path()
-        return hipcc_bin.is_file()
-    except FileNotFoundError:
-        pass
+    _, hipcc_bin = rocm_path()
+    if hipcc_bin.is_file():
+        return True
 
     # Try to detect CUDA
     try:
