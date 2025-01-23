@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -245,6 +245,10 @@ if IS_HIP_EXTENSION:
       import re
       return (re.search('AMD Instinct MI2.0', torch.cuda.get_device_name(torch.cuda.current_device())) is not None)
     
+    def is_mi308():
+      """check whether this machine is mi308"""
+      import re
+      return (re.search('AMD Instinct MI308', torch.cuda.get_device_name(torch.cuda.current_device())) is not None)
 
 def is_bf16_compatible() -> None:
     if IS_HIP_EXTENSION:
