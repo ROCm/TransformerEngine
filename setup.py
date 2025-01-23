@@ -150,7 +150,6 @@ if __name__ == "__main__":
             "paddle": [f"transformer_engine_paddle=={__version__}"],
         }
     else:
-        print("Raja== Reached:",rocm_build())
         setup_requires, install_requires, test_requires = setup_requirements()
         ext_modules = [setup_common_extension()]
         cmdclass = {"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist}
