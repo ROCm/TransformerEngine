@@ -12,7 +12,6 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from test_fused_attn import ModelConfig
 from transformer_engine.pytorch.attention import (
     _flash_attn_2_plus,
-    _flash_attn_2_6_plus,
 )
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,

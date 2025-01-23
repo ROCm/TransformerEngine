@@ -24,7 +24,7 @@ from transformer_engine.pytorch.utils import (
     is_bf16_compatible,
 )
 if IS_HIP_EXTENSION:
-    from transformer_engine.pytorch.utils import is_mi200
+    from transformer_engine.pytorch.utils import is_mi200, is_mi308
 
 from transformer_engine.pytorch import (
     DotProductAttention,
@@ -63,10 +63,13 @@ if IS_HIP_EXTENSION:
         return (os.getenv("NVTE_USE_HIPBLASLT") is not None
                 or os.getenv("NVTE_USE_ROCBLAS") is None )
 
-    def rocm_fused_attn_backend() -> tuple[bool, bool]:
+    def rocm_attn_backend() -> tuple[bool, bool, bool]:
+        """Returns the FA backends to use: (flash_attn, fused_attn_aotriton, fused_attn_ck)"""
+        use_flash_attn = int(os.environ.get("NVTE_FLASH_ATTN", "1")) != 0
         if int(os.getenv("NVTE_FUSED_ATTN", "1")) == 0:
-            return (False, False)
-        return (int(os.getenv("NVTE_FUSED_ATTN_AOTRITON", "1")) != 0,
+            return (use_flash_attn, False, False)
+        return (use_flash_attn,
+                int(os.getenv("NVTE_FUSED_ATTN_AOTRITON", "1")) != 0,
                 int(os.getenv("NVTE_FUSED_ATTN_CK", "1")) != 0)
 
 
@@ -128,9 +131,9 @@ def dtype_tols(dtype: torch.dtype) -> Dict[str, float]:
 
 def rocm_attn_tols() -> Dict[str, float]:
     if IS_HIP_EXTENSION:
-        _, use_fused_attn_ck = rocm_fused_attn_backend()
+        use_flash_attn, _, use_fused_attn_ck = rocm_attn_backend()
         # TODO: wait for the ck branch supporting determinism
-        if use_fused_attn_ck:
+        if not use_flash_attn and use_fused_attn_ck:
             return dict(atol=5e-2, rtol=5e-2)
         else:
             # AOTriton backend and non-fused attn are deterministic
@@ -1646,9 +1649,9 @@ def test_gpt_cuda_graph(dtype, bs, model):
         if not use_hipblaslt():
             pytest.skip("CUDA graph capture not supported with rocBLAS path")
         if dtype not in (torch.float32,):
-            if int(os.environ.get("FLASH_ATTN", "1")) != 0:
+            use_fa, use_aotriton, use_ck = rocm_attn_backend()
+            if use_fa:
                 pytest.skip(f"ROCm flash attention does not support cuda graph with {dtype}")
-            use_aotriton, use_ck = rocm_fused_attn_backend()
             if use_aotriton and not use_ck:
                 pytest.skip(f"AOTriton attention backend does not support cuda graph with {dtype}")
 
@@ -1747,8 +1750,6 @@ def test_gpt_fp8_parameters(dtype, bs, model):
     outputs_fp8_params = _test_gpt_fp8_parameters(bs, dtype, config, True)
     # Check that results match
     tols = dict(rtol=0.125, atol=0.0675)
-    if IS_HIP_EXTENSION:
-        tols = rocm_attn_tols()
 
     for i, (ref, test) in enumerate(zip(outputs, outputs_fp8_params)):
         torch.testing.assert_close(
@@ -1866,7 +1867,11 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     # TODO: wait for the full determinism fix from hipblaslt
     if IS_HIP_EXTENSION:
         if use_hipblaslt():
-            torch.testing.assert_close(y_bshd, y_sbhd.transpose(0, 1).contiguous())
+            tols = dtype_tols(dtype)
+            if dtype in (torch.float16, torch.bfloat16) and is_mi308(): 
+                # mi308 hipblaslt precision issue
+                tols["atol"] = 2e-3
+            torch.testing.assert_close(y_bshd, y_sbhd.transpose(0, 1).contiguous(), **tols)
         else:
             assert torch.equal(y_bshd, y_sbhd.transpose(0, 1).contiguous()), "Tensors are not equal"
     else:
