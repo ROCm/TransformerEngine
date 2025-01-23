@@ -24,7 +24,7 @@ from transformer_engine.pytorch.utils import (
     is_bf16_compatible,
 )
 if IS_HIP_EXTENSION:
-    from transformer_engine.pytorch.utils import is_mi200
+    from transformer_engine.pytorch.utils import is_mi200, is_mi308
 
 from transformer_engine.pytorch import (
     DotProductAttention,
@@ -670,6 +670,7 @@ def test_gpt_full_activation_recompute(dtype, bs, model, fp8, fp8_model_params, 
         pytest.skip(reason_for_no_fp8)
 
     config = model_configs[model]
+    torch.compiler.reset() # avoid cache size limit overflow
 
     if not use_reentrant:
         # Non-reentrant checkpoint becomes non-deterministic with bias+GELU fusion
@@ -1808,7 +1809,7 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
         device="cuda",
         attn_input_format="bshd",
     )
-    
+
     #TODO: release after rocm fused attn support var seq len features
     if not IS_HIP_EXTENSION:
         torch.manual_seed(0)
@@ -1838,7 +1839,7 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
         for (n1, p1), (n2, p2) in zip(
             block_bshd.named_parameters(), block_sbhd.named_parameters()
         ):
-            assert torch.all(torch.eq(p1, p2)), f"{n1} and {n2} not identical"      
+            assert torch.all(torch.eq(p1, p2)), f"{n1} and {n2} not identical"
 
     x_sbhd = torch.randn(
         (config.seq_len, bs, config.hidden_size),
@@ -1864,7 +1865,11 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     # TODO: wait for the full determinism fix from hipblaslt
     if IS_HIP_EXTENSION:
         if use_hipblaslt():
-            torch.testing.assert_close(y_bshd, y_sbhd.transpose(0, 1).contiguous())
+            tols = dtype_tols(dtype)
+            if dtype in (torch.float16, torch.bfloat16) and is_mi308():
+                # mi308 hipblaslt precision issue
+                tols["atol"] = 2e-3
+            torch.testing.assert_close(y_bshd, y_sbhd.transpose(0, 1).contiguous(), **tols)
         else:
             assert torch.equal(y_bshd, y_sbhd.transpose(0, 1).contiguous()), "Tensors are not equal"
     else:
@@ -1873,7 +1878,7 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
             y_bshd,
             y_sbhd.transpose(0, 1).contiguous(),
         )
-    
+
     # TODO: wait for rocm fused attn support var seqlen
     if not IS_HIP_EXTENSION:
         # THD is not supported in float32 and on GPUs older than Ampere, skip the test here
