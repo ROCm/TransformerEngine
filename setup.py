@@ -35,11 +35,6 @@ current_file_path = Path(__file__).parent.resolve()
 from setuptools.command.build_ext import build_ext as BuildExtension
 
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
-nvte_platform = os.getenv("NVTE_PLATFORM", "rocm").lower()
-print("Raja===",nvte_platform)
-
-if nvte_platform != "rocm" and nvte_platform != "cuda":
-    raise ValueError("Environment variable NVTE_PLATFORM must be set to 'ROCM' or 'CUDA'.")
 
 if "pytorch" in frameworks:
     from torch.utils.cpp_extension import BuildExtension

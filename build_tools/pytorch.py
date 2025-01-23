@@ -84,7 +84,6 @@ def setup_pytorch_extension(
             "--use_fast_math",
         ]
 
-    print("(pytorch.py)Raja==",rocm_build())
     if rocm_build():
         ##TODO: Figure out which hipcc version starts to support this parallel compilation
         nvcc_flags.extend(["-parallel-jobs=4"])
