@@ -1,6 +1,6 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -12,10 +12,32 @@ option(USE_ROCBLAS "Use ROCBLAS" ON)
 option(USE_FUSED_ATTN_AOTRITON "Use aotriton backend" ON)
 option(USE_FUSED_ATTN_CK "Use ck backend" ON)
 
-if(NOT USE_ROCM)
-  if(((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) AND NOT (EXISTS "/bin/nvcc"))
+# Check for the environment variable to decide between ROCm and CUDA
+if(DEFINED ENV{NVTE_PLATFORM})
+  string(TOLOWER "$ENV{NVTE_PLATFORM}" NVTE_PLATFORM_LOWER)
+  if("${NVTE_PLATFORM_LOWER}" STREQUAL "rocm")
+    if( ((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) )
+      set(USE_ROCM ON)
+      message("AMD GPU detected.")
+    endif()
+  elseif("${NVTE_PLATFORM_LOWER}" STREQUAL "cuda")
+    if (EXISTS "/bin/nvcc")
+      set(USE_ROCM OFF)
+      set(USE_CUDA TRUE)
+      message("NVIDIA GPU detected.")
+    endif()
+  endif()
+else()
+# if NVTE_PLATFORM is not set, check for rocm first then cuda.
+  if((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH}))
     message("AMD GPU detected.")
     set(USE_ROCM ON)
+  else()
+    if (EXISTS "/bin/nvcc")
+      set(USE_ROCM OFF)
+      set(USE_CUDA TRUE)
+      message("NVIDIA GPU detected.")
+    endif()
   endif()
 endif()
 
@@ -24,8 +46,6 @@ if (USE_ROCM)
     message(FATAL_ERROR "Need specify at least one GEMM library to use: HIPBLASLT or ROCBLAS")
   endif()
   unset(USE_CUDA)
-else()
-  set(USE_CUDA TRUE)
 endif()
 
 # Language options
