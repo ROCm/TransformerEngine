@@ -252,7 +252,7 @@ Experimental Triton Kernels on ROCm
 Most CUDA kernels in Transformer Engine are hipified to run on ROCm. While the hipifiled CUDA kernels are functional, they are not necessarily optimal on ROCm. 
 We added some Triton kernels to TE ROCm to improve the performance over the hipified kernels. 
 Currently, we have integrated Triton kernels for cast_transpose and cast_transpose_bgrad, which are commonly used in fp8 training, and also rmsnorm kernels. 
-This feature is still experimental as it requires relatievely newer version of Pytorch+Triton. 
+This feature is still experimental as it requires relatievely newer version of Pytorch (with version >= 2.4) and Triton. 
 Also, it only works on Pytorch extension as JAX extension does not use it.
 
 At runtime, you can enable specific triton kernels using the specific environment variables:
