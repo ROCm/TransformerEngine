@@ -1,6 +1,6 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -27,20 +27,19 @@ if(DEFINED ENV{NVTE_PLATFORM})
       message("NVIDIA GPU detected.")
     endif()
   endif()
-endif()
-
-if((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH}))
-  message("AMD GPU detected.")
-  set(USE_ROCM ON)
 else()
-  if (EXISTS "/bin/nvcc")
-    set(USE_ROCM OFF)
-    set(USE_CUDA TRUE)
-    message("NVIDIA GPU detected.")
+# if NVTE_PLATFORM is not set, check for rocm first then cuda.
+  if((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH}))
+    message("AMD GPU detected.")
+    set(USE_ROCM ON)
+  else()
+    if (EXISTS "/bin/nvcc")
+      set(USE_ROCM OFF)
+      set(USE_CUDA TRUE)
+      message("NVIDIA GPU detected.")
+    endif()
   endif()
 endif()
-
-
 
 if (USE_ROCM)
   if (NOT USE_HIPBLASLT AND NOT USE_ROCBLAS)
