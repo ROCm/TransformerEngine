@@ -223,6 +223,7 @@ def rocm_build() -> bool:
 def rocm_path() -> Tuple[str, str]:
     """ROCm root path and HIPCC binary path as a tuple"""
     """If ROCm installation is not specified, use default /opt/rocm path"""
+    hipcc_bin = None
     if os.getenv("ROCM_PATH"):
         rocm_home = Path(os.getenv("ROCM_PATH"))
         hipcc_bin = rocm_home / "bin" / "hipcc"
