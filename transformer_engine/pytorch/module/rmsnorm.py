@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -15,7 +17,7 @@ from .base import TransformerEngineBaseModule
 from .. import cpp_extensions as tex
 from ..jit import no_torch_dynamo
 from ..utils import cast_if_needed
-
+from ..triton_kernels.rmsnorm_triton import te_rmsnorm_fwd_triton
 
 __all__ = ["RMSNorm"]
 
@@ -46,18 +48,30 @@ class _RMSNorm(torch.autograd.Function):
         inputmat = cast_if_needed(inputmat, activation_dtype)
         rmsnorm_weight = cast_if_needed(rmsnorm_weight, activation_dtype)
 
+        use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) )
+
         if is_grad_enabled:
-            rmsnorm_out, rsigma = tex.rmsnorm_fwd(
-                inputmat, rmsnorm_weight, eps, fwd_rmsnorm_sm_margin, zero_centered_gamma
-            )
+            if use_rmsnorm_triton:
+                rmsnorm_out, rsigma = te_rmsnorm_fwd_triton(
+                    inputmat, rmsnorm_weight, eps, zero_centered_gamma
+                )
+            else:
+                rmsnorm_out, rsigma = tex.rmsnorm_fwd(
+                    inputmat, rmsnorm_weight, eps, fwd_rmsnorm_sm_margin, zero_centered_gamma
+                )
             ctx.save_for_backward(inputmat, rmsnorm_weight, rsigma)
             ctx.inp_shape = inp.shape
             ctx.bwd_rmsnorm_sm_margin = bwd_rmsnorm_sm_margin
             ctx.zero_centered_gamma = zero_centered_gamma
         else:
-            rmsnorm_out = tex.rmsnorm_fwd_inf(
-                inputmat, rmsnorm_weight, eps, inf_rmsnorm_sm_margin, zero_centered_gamma
-            )
+            if use_rmsnorm_triton:
+                rmsnorm_out = te_rmsnorm_fwd_inf_triton(
+                    inputmat, rmsnorm_weight, eps, zero_centered_gamma
+                )
+            else:
+                rmsnorm_out = tex.rmsnorm_fwd_inf(
+                    inputmat, rmsnorm_weight, eps, inf_rmsnorm_sm_margin, zero_centered_gamma
+                )
         return rmsnorm_out.view_as(inp)
 
     @staticmethod
