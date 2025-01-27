@@ -59,8 +59,9 @@ run_test_config(){
     run 1 test_sanity.py
     run_default_fa 1 test_torch_save_load.py
     run_default_fa 1 fused_attn/test_fused_attn.py # Backend selection is controlled by the test
-    NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa 1 triton_kernels/test_cast_transpose_triton.py
-    NVTE_USE_RMSNORM_TRITON=1 run_default_fa 1 triton_kernels/test_rmsnorm_triton.py
+    run_default_fa 1 triton_kernels/test_cast_transpose_triton.py
+    run_default_fa 1 triton_kernels/test_rmsnorm_triton.py
+    NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 run_default_fa 1 test_numerics.py
 }
 
 run_test_config_mgpu(){
