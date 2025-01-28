@@ -38,6 +38,11 @@ Execute the following commands to install ROCm Transformer Engine from source on
   cd TransformerEngine
   export NVTE_FRAMEWORK=pytorch,jax #optionally set framework, currently only support pytorch and jax; if not set will try to detect installed frameworks
   export NVTE_ROCM_ARCH=gfx942 # CK fused attn only support MI200 and MI300 and fp8 features are only supported on MI300
+  
+  # Build Platform Selection (optional)
+  # Note: Useful when both ROCm and CUDA platforms are present in the Docker
+  export NVTE_USE_ROCM=1  #Use 1 for ROCm, or set to 0 to use CUDA; If not set will try to detect installed platform, prioritizing ROCm
+
   pip install .
 
 The default installation above supports both rocBlas and hipBlasLt in GEMM computation. Building with single backend support can be done by setting `NVTE_USE_HIPBLASLT` or `NVTE_USE_ROCBLAS` environment variable before `pip install` as:

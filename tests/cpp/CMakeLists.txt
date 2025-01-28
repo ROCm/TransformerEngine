@@ -6,9 +6,8 @@
 
 cmake_minimum_required(VERSION 3.18)
 
-option(USE_CUDA "Use CUDA" OFF)
-option(USE_ROCM "Use ROCm" ON)
-
+set(USE_ROCM ON)
+set(USE CUDA OFF)
 # Check for the environment variable to decide between ROCm and CUDA
 if(DEFINED ENV{NVTE_USE_ROCM})
   set(NVTE_USE_ROCM $ENV{NVTE_USE_ROCM})
