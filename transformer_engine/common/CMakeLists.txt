@@ -44,10 +44,10 @@ if(USE_CUDA)
   # Hide non-necessary symbols in shared object.
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
- 
+
   # Transformer Engine library
   project(transformer_engine LANGUAGES CUDA CXX)
-  
+
   # CUDA Toolkit
   find_package(CUDAToolkit REQUIRED)
   if (CUDAToolkit_VERSION VERSION_LESS 12.0)
@@ -186,10 +186,10 @@ else()
   message(STATUS "CMAKE_MODULE_PATH: ${CMAKE_MODULE_PATH}")
 
   set(header_include_dir
-      ${CMAKE_CURRENT_SOURCE_DIR}/include 
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
       ${CMAKE_CURRENT_SOURCE_DIR}/util
       ${CMAKE_CURRENT_SOURCE_DIR}/rmsnorm
-      ${CMAKE_CURRENT_SOURCE_DIR}/layer_norm 
+      ${CMAKE_CURRENT_SOURCE_DIR}/layer_norm
       ${CMAKE_CURRENT_SOURCE_DIR})
   message(STATUS "HIPIFY CUDA_SOURCE_DIR: ${CMAKE_CURRENT_SOURCE_DIR}")
   message(STATUS "HIPIFY HEADER_INCLUDE_DIR: ${header_include_dir}")
@@ -218,31 +218,77 @@ if (USE_CUDA)
   target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
-  
+
   # Hack to enable dynamic loading in cuDNN frontend
   target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
 else()
   if(USE_FUSED_ATTN_AOTRITON)
     set(__AOTRITON_VER "0.8.2b")
-    set(__AOTRITON_MANYLINUX "manylinux_2_28")
-    set(__AOTRITON_ARCH "x86_64")
-    set(__AOTRITON_ROCM "6.2")
+    set(__AOTRITON_MANYLINUX_LIST
+        "manylinux_2_28"  # rocm6.2
+        "manylinux_2_28"  # rocm6.3
+        )
+    set(__AOTRITON_ARCH ${CMAKE_HOST_SYSTEM_PROCESSOR})
+    set(__AOTRITON_ROCM_LIST
+        "rocm6.2"
+        "rocm6.3"
+        )
+    set(__AOTRITON_SHA256_LIST
+        "66445e6b0209b9f4080743b839cc9d424054dc5c8d07363f9f27f109231c324a"  # rocm6.2
+        "16356dc1813cf3e60da23eb2f29440cb35eedd3a2fbf81e6093a0bc42056ad08"  # rocm6.3
+        )
     set(__AOTRITON_Z "gz")
-    set(__AOTRITON_SHA256 "66445e6b0209b9f4080743b839cc9d424054dc5c8d07363f9f27f109231c324a")
     set(__AOTRITON_INSTALL_DIR "${CMAKE_CURRENT_BINARY_DIR}/aotriton")
     set(__AOTRITON_SUFFIX "_TEprivate")
     if(NOT DEFINED AOTRITON_PATH)
-      # # Install aotriton fused attn
+      ## Install aotriton fused attn
+
+      # Get matching ROCM version
+      find_package(rocm-core REQUIRED)
+      set(__AOTRITON_SYSTEM_ROCM "${rocm-core_VERSION_MAJOR}.${rocm-core_VERSION_MINOR}")
+      list(GET __AOTRITON_ROCM_LIST 0 __AOTRITON_ROCM_DEFAULT_STR)
+      # Initialize __AOTRITON_ROCM to lowest version, in case all builds > system's ROCM
+      string(SUBSTRING ${__AOTRITON_ROCM_DEFAULT_STR} 4 -1 __AOTRITON_ROCM)
+      foreach(AOTRITON_ROCM_BUILD_STR IN LISTS __AOTRITON_ROCM_LIST)
+        # len("rocm") == 4
+        string(SUBSTRING ${AOTRITON_ROCM_BUILD_STR} 4 -1 AOTRITON_ROCM_BUILD)
+        # Find the last build that <= system's ROCM
+        # Assume the list is from lower to higher
+        if(AOTRITON_ROCM_BUILD VERSION_GREATER __AOTRITON_SYSTEM_ROCM)
+          break()
+        endif()
+        set(__AOTRITON_ROCM ${AOTRITON_ROCM_BUILD})
+      endforeach()
+      list(FIND __AOTRITON_ROCM_LIST "rocm${__AOTRITON_ROCM}" __AOTRITON_ROCM_INDEX)
+      list(GET __AOTRITON_SHA256_LIST ${__AOTRITON_ROCM_INDEX} __AOTRITON_SHA256)
+      list(GET __AOTRITON_MANYLINUX_LIST ${__AOTRITON_ROCM_INDEX} __AOTRITON_MANYLINUX)
+
+      # If actually build GPU kernels (should not by default due to excessive time consumption)
       if(USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS)
         set(AOTRITON_NOIMAGE_MODE OFF)
       else()
         set(AOTRITON_NOIMAGE_MODE ON)
       endif()
+      # GPU Targets
+      macro(get_target_gpus_from_pytorch target_gpus)
+        set(gfx90a_key MI200)
+        set(gfx942_key MI300X)
+        set(gfx1100_key Navi31)
+
+        foreach(X IN LISTS CMAKE_HIP_ARCHITECTURES)
+          set(key ${X})
+          string(APPEND key "_key")
+          string(APPEND target_gpus ${${key}})
+          string(APPEND target_gpus "|")
+        endforeach()
+      endmacro()
+      get_target_gpus_from_pytorch(aotriton_target_gpus)
       include(ExternalProject)
       ExternalProject_Add(aotriton_external
-        URL ../../3rdparty/aotriton 
+        URL ../../3rdparty/aotriton
+        LIST_SEPARATOR |
         CMAKE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${__AOTRITON_INSTALL_DIR}
-        -DTARGET_GPUS=MI300X
+        -DTARGET_GPUS=${aotriton_target_gpus}
         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
         -DAOTRITON_NO_PYTHON=ON
         -DAOTRITON_NO_SHARED=OFF
@@ -388,7 +434,7 @@ if(USE_CUDA)
     set(BUILD_JOBS_STR "max")
   endif()
   message(STATUS "Parallel build jobs: ${BUILD_JOBS_STR}")
-  
+
   # Number of threads per parallel build job
   set(BUILD_THREADS_PER_JOB $ENV{NVTE_BUILD_THREADS_PER_JOB})
   if (NOT BUILD_THREADS_PER_JOB)
