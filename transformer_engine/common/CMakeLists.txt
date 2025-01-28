@@ -7,21 +7,18 @@
 cmake_minimum_required(VERSION 3.21)
 
 option(USE_ROCM "Use ROCM" ON)
-option(USE_CUDA "Use CUDA" FALSE)
 option(USE_HIPBLASLT "Use HIPBLASLT" ON)
 option(USE_ROCBLAS "Use ROCBLAS" ON)
 option(USE_FUSED_ATTN_AOTRITON "Use aotriton backend" ON)
 option(USE_FUSED_ATTN_CK "Use ck backend" ON)
-
-if (NOT USE_ROCM)
-  set(USE_CUDA TRUE)
-endif()
 
 if (USE_ROCM)
   if (NOT USE_HIPBLASLT AND NOT USE_ROCBLAS)
     message(FATAL_ERROR "Need specify at least one GEMM library to use: HIPBLASLT or ROCBLAS")
   endif()
   unset(USE_CUDA)
+else()
+  set(USE_CUDA TRUE)
 endif()
 
 # Language options

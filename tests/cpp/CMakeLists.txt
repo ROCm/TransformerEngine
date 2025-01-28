@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -12,14 +12,20 @@ option(USE_ROCM "Use ROCm" ON)
 # Check for the environment variable to decide between ROCm and CUDA
 if(DEFINED ENV{NVTE_USE_ROCM})
   set(NVTE_USE_ROCM $ENV{NVTE_USE_ROCM})
-  if("${NVTE_USE_ROCM}" STREQUAL "1")
+  
+  if(NOT NVTE_USE_ROCM MATCHES "^[0-9]+$")
+    message(FATAL_ERROR "Invalid value for NVTE_USE_ROCM: '${NVTE_USE_ROCM}'")
+  endif()
+
+  math(EXPR NVTE_USE_ROCM_INT "${NVTE_USE_ROCM}")
+  if(NOT "${NVTE_USE_ROCM_INT}" EQUAL 0)
     if( ((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) )
       set(USE_ROCM ON)
       message("AMD GPU detected.")
     else()
       message(FATAL_ERROR "FileNotFoundError: Could not find HIPCC at '/opt/rocm'")
     endif()
-  elseif("${NVTE_USE_ROCM}" STREQUAL "0")
+  else()
     if (EXISTS "/bin/nvcc")
       set(USE_ROCM OFF)
       set(USE_CUDA ON)
@@ -27,9 +33,8 @@ if(DEFINED ENV{NVTE_USE_ROCM})
     else()
       message(FATAL_ERROR "FileNotFoundError: Could not find NVCC at '/bin/nvcc'")
     endif()
-  else()
-    message(FATAL_ERROR "Invalid value for NVTE_USE_ROCM: '${NVTE_USE_ROCM}'. It must be set to '1(to use ROCm)' or '0(to use CUDA)'.")
   endif()
+
 else()
 # if NVTE_PLATFORM is not set, check for rocm first then cuda.
   if((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH}))
@@ -40,8 +45,9 @@ else()
     set(USE_CUDA ON)
     message("NVIDIA GPU detected.")
   else()
-    message(FATAL_ERROR "Could not detect ROCm or CUDA platform. Please ensure one of them is installed and accessible.")
+    message(FATAL_ERROR "Could not detect ROCm or CUDA platform. Please install")
   endif()
+
 endif()
 
 
