@@ -166,39 +166,38 @@ def found_pybind11() -> bool:
 @functools.lru_cache(maxsize=None)
 def rocm_build() -> bool:
     """
-    ROCm build should be performed if:
-    1. It is configured with NVTE_USE_ROCM=1 env
-    2. If `NVTE_PLATFORM` is set:
-        - Use `rocm` or `cuda` (case-insensitive).
-    3. If NVTE_PLATFORM is not set:
+    Determines which build platform to use:
+
+    1. If `NVTE_USE_ROCM` is set to:
+        - 1, Build ROCm, if hipcc is detected.
+        - 0, Build CUDA, if nvcc is detected.
+    
+    2. If NVTE_PLATFORM is not set:
         - If hipcc is detected use ROCM
         - else if nvcc is detected use CUDA.
+    
     Returns:
         bool: `True` for ROCm, `False` for CUDA.
 
     Raises:
-        ValueError: For invalid `NVTE_PLATFORM` or if neither ROCm nor CUDA is detected.
+        ValueError: For invalid `NVTE_USE_ROCM` or if neither ROCm nor CUDA is detected.
     """
-    if bool(int(os.getenv("NVTE_USE_ROCM", "0"))):
-        return True
-
-     # Check if NVTE_PLATFORM is already set
-    nvte_platform = os.getenv("NVTE_PLATFORM")
-    if nvte_platform:
-        nvte_platform_lower = nvte_platform.lower()
-        if nvte_platform_lower == "rocm":
+    nvte_use_rocm = os.getenv("NVTE_USE_ROCM")
+    if nvte_use_rocm:
+        nvte_use_rocm = int(nvte_use_rocm)
+        if nvte_use_rocm == 1:
             _, hipcc_bin = rocm_path()
             if hipcc_bin.is_file():
                 return True
             else:
                  raise FileNotFoundError(f"Could not find hipcc at {hipcc_bin}")
-        elif nvte_platform_lower == "cuda":
+        elif nvte_use_rocm == 0:
             cuda_path()
             return False
         else:
             raise ValueError(
-                f"Invalid value for NVTE_PLATFORM: '{nvte_platform}'. "
-                "It must be set to 'rocm' or 'cuda'."
+                f"Invalid value for NVTE_USE_ROCM: '{nvte_use_rocm}'. "
+                "It must be set to '1(to use ROCm)' or '0(to use CUDA)'."
             )
 
     # Try to detect ROCm
