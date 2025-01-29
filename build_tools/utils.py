@@ -178,6 +178,7 @@ def rocm_build() -> bool:
         bool: `True` for ROCm, `False` for CUDA.
 
     Raises:
+        ValueError: If NVTE_USE_ROCM is set to invalid value.
         FileNotFoundError: If required tools (hipcc or nvcc) are not found.
     """
     nvte_use_rocm = os.getenv("NVTE_USE_ROCM")
@@ -193,7 +194,7 @@ def rocm_build() -> bool:
             if hipcc_bin.is_file():
                 return True
             else:
-                 raise FileNotFoundError(f"Could not find hipcc at {hipcc_bin}")
+                raise FileNotFoundError(f"Could not find hipcc at {hipcc_bin}")
         else:
             cuda_path()
             return False

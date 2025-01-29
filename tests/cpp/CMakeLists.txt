@@ -6,14 +6,14 @@
 
 cmake_minimum_required(VERSION 3.18)
 
-set(USE_ROCM ON)
+option(USE_ROCM "Use ROCm" ON)
 set(USE CUDA OFF)
 # Check for the environment variable to decide between ROCm and CUDA
 if(DEFINED ENV{NVTE_USE_ROCM})
   set(NVTE_USE_ROCM $ENV{NVTE_USE_ROCM})
   
   if(NOT NVTE_USE_ROCM MATCHES "^[0-9]+$")
-    message(FATAL_ERROR "Invalid value for NVTE_USE_ROCM: '${NVTE_USE_ROCM}'")
+	  message(FATAL_ERROR "ValueError: Invalid value for NVTE_USE_ROCM: '${NVTE_USE_ROCM}'")
   endif()
 
   math(EXPR NVTE_USE_ROCM_INT "${NVTE_USE_ROCM}")
@@ -35,7 +35,7 @@ if(DEFINED ENV{NVTE_USE_ROCM})
   endif()
 
 else()
-# if NVTE_PLATFORM is not set, check for rocm first then cuda.
+# if NVTE_USE_ROCM is not set, check for rocm first then cuda.
   if((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH}))
     message("AMD GPU detected.")
     set(USE_ROCM ON)
