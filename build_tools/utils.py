@@ -178,32 +178,40 @@ def rocm_build() -> bool:
         bool: `True` for ROCm, `False` for CUDA.
 
     Raises:
-        ValueError: If NVTE_USE_ROCM is set to invalid value.
         FileNotFoundError: If required tools (hipcc or nvcc) are not found.
     """
     nvte_use_rocm = os.getenv("NVTE_USE_ROCM")
-    if nvte_use_rocm is not None:
+    if nvte_use_rocm:
         try:
             nvte_use_rocm = bool(int(nvte_use_rocm))
         except ValueError:
-            raise ValueError(f"Invalid value for NVTE_USE_ROCM: '{nvte_use_rocm}'.")
+            raise ValueError(
+                f"Invalid value for NVTE_USE_ROCM: '{nvte_use_rocm}'.")
 
-    if (nvte_use_rocm is None) or nvte_use_rocm:
-        _, hipcc_bin = rocm_path()
-        if hipcc_bin.is_file():
-            return True
-        elif(nvte_use_rocm is not None):
-            raise FileNotFoundError(f"Could not find hipcc at {hipcc_bin}")
+        if nvte_use_rocm:
+            _, hipcc_bin = rocm_path()
+            if hipcc_bin.is_file():
+                return True
+            else:
+                 raise FileNotFoundError(f"Could not find hipcc at {hipcc_bin}")
         else:
-            try:
-                cuda_path()
-                return False
-            except FileNotFoundError:
-                # If neither ROCm nor CUDA is detected, raise an error
-                raise FileNotFoundError("Could not detect ROCm or CUDA platform. Please install.")
-    else:
+            cuda_path()
+            return False
+
+    # Try to detect ROCm
+    _, hipcc_bin = rocm_path()
+    if hipcc_bin.is_file():
+        return True
+
+    # Try to detect CUDA
+    try:
         cuda_path()
         return False
+    except FileNotFoundError:
+        pass
+
+    # If neither ROCm nor CUDA is detected, raise an error
+    raise FileNotFoundError("Could not detect ROCm or CUDA platform. Please install.")
 
 @functools.lru_cache(maxsize=None)
 def rocm_path() -> Tuple[str, str]:

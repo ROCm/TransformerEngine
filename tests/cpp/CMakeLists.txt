@@ -6,48 +6,49 @@
 
 cmake_minimum_required(VERSION 3.18)
 
-option(USE_ROCM "Use ROCm" ON)
+set(USE_ROCM ON)
 set(USE CUDA OFF)
-
 # Check for the environment variable to decide between ROCm and CUDA
 if(DEFINED ENV{NVTE_USE_ROCM})
-  set(NVTE_USE_ROCM $ENV{NVTE_USE_ROCM}) 
- 
-  #Check for invalid values.
-  if(NOT NVTE_USE_ROCM MATCHES "^[0-9]+$")
-	  message(FATAL_ERROR "ValueError: Invalid value for NVTE_USE_ROCM: '${NVTE_USE_ROCM}'")
-  endif()
+  set(NVTE_USE_ROCM $ENV{NVTE_USE_ROCM})
   
-  math(EXPR NVTE_USE_ROCM_INT "${NVTE_USE_ROCM}")
-endif()
+  if(NOT NVTE_USE_ROCM MATCHES "^[0-9]+$")
+    message(FATAL_ERROR "Invalid value for NVTE_USE_ROCM: '${NVTE_USE_ROCM}'")
+  endif()
 
-#If NVTE_USE_ROCM>=1 or None, check for ROCm
-if (NOT DEFINED ENV{NVTE_USE_ROCM} OR "${NVTE_USE_ROCM_INT}" GREATER_EQUAL 1)
-  if((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH}))
-    set(USE_ROCM ON)
-    message("AMD GPU detected.")
-  elseif(DEFINED ENV{NVTE_USE_ROCM})
-    message(FATAL_ERROR "FileNotFoundError: Could not find HIPCC at '/opt/rocm'")
-  #If NVTE_USE_ROCM=None and if ROCm not detected
+  math(EXPR NVTE_USE_ROCM_INT "${NVTE_USE_ROCM}")
+  if(NOT "${NVTE_USE_ROCM_INT}" EQUAL 0)
+    if( ((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) )
+      set(USE_ROCM ON)
+      message("AMD GPU detected.")
+    else()
+      message(FATAL_ERROR "FileNotFoundError: Could not find HIPCC at '/opt/rocm'")
+    endif()
   else()
     if (EXISTS "/bin/nvcc")
       set(USE_ROCM OFF)
       set(USE_CUDA ON)
       message("NVIDIA GPU detected.")
     else()
-      message(FATAL_ERROR "Could not detect ROCm or CUDA platform. Please install")	    
+      message(FATAL_ERROR "FileNotFoundError: Could not find NVCC at '/bin/nvcc'")
     endif()
   endif()
-#If NVTE_USE_ROCM=0 check for CUDA
+
 else()
-  if (EXISTS "/bin/nvcc")
-      set(USE_ROCM OFF)
-      set(USE_CUDA ON)
-      message("NVIDIA GPU detected.")
-    else()
-      message(FATAL_ERROR "FileNotFoundError: Could not find NVCC at '/bin/nvcc'")
+# if NVTE_PLATFORM is not set, check for rocm first then cuda.
+  if((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH}))
+    message("AMD GPU detected.")
+    set(USE_ROCM ON)
+  elseif (EXISTS "/bin/nvcc")
+    set(USE_ROCM OFF)
+    set(USE_CUDA ON)
+    message("NVIDIA GPU detected.")
+  else()
+    message(FATAL_ERROR "Could not detect ROCm or CUDA platform. Please install")
   endif()
+
 endif()
+
 
 if(USE_ROCM)
   # Add HIP to the CMAKE Module Path
