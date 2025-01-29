@@ -223,6 +223,9 @@ if (USE_CUDA)
   target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
 else()
   if(USE_FUSED_ATTN_AOTRITON)
+    # This is for GPU kernel downloading
+    # The AOTriton C++ runtime will be built from ../../3rdparty/aotriton
+    # Hence there is no need to add multiple ROCM version here
     set(__AOTRITON_VER "0.8.2b")
     set(__AOTRITON_MANYLINUX "manylinux_2_28")
     set(__AOTRITON_ARCH "x86_64")
@@ -238,11 +241,26 @@ else()
       else()
         set(AOTRITON_NOIMAGE_MODE ON)
       endif()
+      # GPU Targets
+      macro(translate_arch_to_gpu_names target_gpus)
+        set(gfx90a_key MI200)
+        set(gfx942_key MI300X)
+        set(gfx1100_key Navi31)
+
+        foreach(X IN LISTS CMAKE_HIP_ARCHITECTURES)
+          set(key ${X})
+          string(APPEND key "_key")
+          string(APPEND target_gpus ${${key}})
+          string(APPEND target_gpus "|")
+        endforeach()
+      endmacro()
+      translate_arch_to_gpu_names(aotriton_target_gpus)
       include(ExternalProject)
       ExternalProject_Add(aotriton_external
-        URL ../../3rdparty/aotriton 
+        URL ../../3rdparty/aotriton
+        LIST_SEPARATOR |
         CMAKE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${__AOTRITON_INSTALL_DIR}
-        -DTARGET_GPUS=MI300X
+        -DTARGET_GPUS=${aotriton_target_gpus}
         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
         -DAOTRITON_NO_PYTHON=ON
         -DAOTRITON_NAME_SUFFIX=${__AOTRITON_SUFFIX}
