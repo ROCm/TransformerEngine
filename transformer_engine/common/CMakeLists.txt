@@ -270,7 +270,7 @@ else()
         set(AOTRITON_NOIMAGE_MODE ON)
       endif()
       # GPU Targets
-      macro(get_target_gpus_from_pytorch target_gpus)
+      macro(translate_arch_to_gpu_names target_gpus)
         set(gfx90a_key MI200)
         set(gfx942_key MI300X)
         set(gfx1100_key Navi31)
@@ -282,7 +282,7 @@ else()
           string(APPEND target_gpus "|")
         endforeach()
       endmacro()
-      get_target_gpus_from_pytorch(aotriton_target_gpus)
+      translate_arch_to_gpu_names(aotriton_target_gpus)
       include(ExternalProject)
       ExternalProject_Add(aotriton_external
         URL ../../3rdparty/aotriton
