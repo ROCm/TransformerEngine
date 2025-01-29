@@ -226,12 +226,6 @@ else()
     # This is for GPU kernel downloading
     # The AOTriton C++ runtime will be built from ../../3rdparty/aotriton
     # Hence there is no need to add multiple ROCM version here
-    set(__AOTRITON_VER "0.8.2b")
-    set(__AOTRITON_MANYLINUX "manylinux_2_28")
-    set(__AOTRITON_ARCH "x86_64")
-    set(__AOTRITON_ROCM "6.2")
-    set(__AOTRITON_Z "gz")
-    set(__AOTRITON_SHA256 "66445e6b0209b9f4080743b839cc9d424054dc5c8d07363f9f27f109231c324a")
     set(__AOTRITON_INSTALL_DIR "${CMAKE_CURRENT_BINARY_DIR}/aotriton")
     set(__AOTRITON_SUFFIX "_TEprivate")
     if(NOT DEFINED AOTRITON_PATH)
@@ -272,12 +266,13 @@ else()
       target_link_libraries(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/lib/libaotriton${__AOTRITON_SUFFIX}_v2.so)
       target_include_directories(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/include)
       if(NOT USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS)
-        string(CONCAT __AOTRITON_FILE "aotriton-"
-                                      "${__AOTRITON_VER}-${__AOTRITON_MANYLINUX}"
-                                      "_${__AOTRITON_ARCH}-rocm${__AOTRITON_ROCM}"
-                                      "-shared.tar.${__AOTRITON_Z}")
+        set(__AOTRITON_VER "0.8.2b")
+        set(__AOTRITON_SHA256 "66445e6b0209b9f4080743b839cc9d424054dc5c8d07363f9f27f109231c324a")
         string(CONCAT __AOTRITON_URL "https://github.com/ROCm/aotriton/releases/download/"
-                                     "${__AOTRITON_VER}/${__AOTRITON_FILE}")
+                                      "${__AOTRITON_VER}/aotriton-"
+                                      "${__AOTRITON_VER}-manylinux_2_28"
+                                     "x86_64-rocm6.2"
+                                     "-shared.tar.gz")
         ExternalProject_Add(aotriton_images
                             URL "${__AOTRITON_URL}"
                             URL_HASH SHA256=${__AOTRITON_SHA256}
