@@ -11,12 +11,15 @@ from dataclasses import dataclass
 import os
 
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from .. import cpp_extensions as tex
 from ..export import is_in_onnx_export_mode
 from ..fp8 import get_fp8_te_dtype
 from ..utils import get_default_init_method
-from ..triton_kernels.rmsnorm_triton import te_rmsnorm_fwd_noalloc_triton, te_rmsnorm_fwd_inf_triton
+
+if IS_HIP_EXTENSION:
+    from ..triton_kernels.rmsnorm_triton import te_rmsnorm_fwd_noalloc_triton, te_rmsnorm_fwd_inf_triton, te_rmsnorm_bwd_triton
 
 def _get_normalization_func(
     normalization: str, fp8_output: bool, is_grad_enabled: bool, forward: bool
@@ -33,7 +36,7 @@ def _get_normalization_func(
     }
     bwd_normalization_funcs = {
         "LayerNorm": tex.layernorm_bwd,
-        "RMSNorm": tex.rmsnorm_bwd,
+        "RMSNorm": te_rmsnorm_bwd_triton if (IS_HIP_EXTENSION and bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) )) else tex.rmsnorm_bwd,
     }
 
     if forward:
@@ -101,12 +104,12 @@ def _apply_normalization(
     else:
         use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) )
         if is_grad_enabled:
-            if use_rmsnorm_triton and normalization == "RMSNorm":
+            if IS_HIP_EXTENSION and use_rmsnorm_triton and normalization == "RMSNorm":
                 output = te_rmsnorm_fwd_noalloc_triton(*inputs, ln_out, eps, zero_centered_gamma)
             else:
                 output = normalization_func(*inputs, ln_out, eps, fwd_ln_sm_margin, zero_centered_gamma)
         else:
-            if use_rmsnorm_triton and normalization == "RMSNorm":
+            if IS_HIP_EXTENSION and use_rmsnorm_triton and normalization == "RMSNorm":
                 return (
                     te_rmsnorm_fwd_inf_triton(*inputs, eps, zero_centered_gamma),
                     None,

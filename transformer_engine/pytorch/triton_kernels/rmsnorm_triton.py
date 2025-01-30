@@ -19,7 +19,7 @@ def get_autotune_config():
 
 @triton.autotune(configs=get_autotune_config(), key=['n_rows', 'n_cols'], use_cuda_graph=True)
 @triton.jit
-def _rmsnorm_triton(output_ptr, input_ptr, g_ptr, rsigma_ptr, input_row_stride, output_row_stride, n_rows, n_cols, epsilon,
+def _rmsnorm_fwd_triton(output_ptr, input_ptr, g_ptr, rsigma_ptr, input_row_stride, output_row_stride, n_rows, n_cols, epsilon,
                     ZERO_CENTERED_GAMMA: tl.constexpr, BLOCK_SIZE: tl.constexpr, USE_BLOCKED: tl.constexpr,
                     NUM_PRGMS: tl.constexpr):
     row_start = tl.program_id(0)
@@ -125,7 +125,7 @@ def te_rmsnorm_fwd_fp8_noalloc_triton(input, weight, eps, ln_out, otype, zero_ce
     grid = lambda meta: (NUM_PRGMS, )
     #encode the otype if ln_out is of different dtype
     ln_out = ln_out.view(otype)
-    _rmsnorm_triton[grid](ln_out, input, weight, rsigma, input.stride(0), ln_out.stride(0), M, N, eps, zero_centered_gamma, blk_size, USE_BLOCKED, NUM_PRGMS)
+    _rmsnorm_fwd_triton[grid](ln_out, input, weight, rsigma, input.stride(0), ln_out.stride(0), M, N, eps, zero_centered_gamma, blk_size, USE_BLOCKED, NUM_PRGMS)
 
     return ln_out, rsigma
 
@@ -148,3 +148,177 @@ def te_rmsnorm_fwd_triton(input, weight, eps, zero_centered_gamma):
     ln_out = torch.empty_like(input_)
     return te_rmsnorm_fwd_noalloc_triton(input_, weight_, ln_out, eps, zero_centered_gamma)
 
+@triton.jit
+def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, dg_ptr, input_row_stride, output_row_stride,
+                        n_rows, n_cols, ZERO_CENTERED_GAMMA: tl.constexpr, BLOCK_SIZE: tl.constexpr,
+                        USE_BLOCKED: tl.constexpr, NUM_PRGMS: tl.constexpr):
+    row_start = tl.program_id(0)
+    col_offsets = tl.arange(0, BLOCK_SIZE)
+    #   tl.assume(input_row_stride >= 0)
+    #   tl.assume(output_row_stride >= 0)
+    #   tl.assume(row_start >= 0)
+
+    if USE_BLOCKED:
+        for row_idx in tl.range(row_start, n_rows, NUM_PRGMS, num_stages=1):
+            row_input_ptr = input_ptr + row_idx * input_row_stride
+            row_grad_output_ptr = grad_output_ptr + row_idx * output_row_stride
+            row_dx_ptr = dx_ptr + row_idx * input_row_stride
+            row_dg_ptr = dg_ptr + row_idx * input_row_stride
+
+            # Compute gradients sum of all colums for each row
+            n_cols_blks = tl.cdiv(n_cols, BLOCK_SIZE) - 1
+            # older version of triton doesn't accept below init
+            # comment out for now to make it compatible with triton 3.1
+            # grad_sum: tl.float32 = 0.0
+            grad_sum = 0.0
+            for blk_idx in tl.range(0, n_cols_blks, num_stages=2):
+                cols = blk_idx * BLOCK_SIZE + col_offsets
+                input_ptrs = row_input_ptr + cols
+                grad_output_ptrs = row_grad_output_ptr + cols
+
+                input_ptrs = tl.multiple_of(input_ptrs, (16, ))
+                grad_output_ptrs = tl.multiple_of(grad_output_ptrs, (16, ))
+
+                x = tl.load(input_ptrs).to(tl.float32)
+                grad_output = tl.load(grad_output_ptrs).to(tl.float32)
+                g_ptrs = g_ptr + cols
+                g = tl.load(g_ptrs).to(tl.float32)
+                if (ZERO_CENTERED_GAMMA):
+                    g += 1.
+                grad_sum += tl.sum(grad_output * x * g, axis=0)
+
+            # remainder for grad_sum:
+            cols = n_cols_blks * BLOCK_SIZE + col_offsets
+            mask = cols < n_cols
+            input_ptrs = row_input_ptr + cols
+            x = tl.load(input_ptrs, mask=mask, other=0.0).to(tl.float32)
+            grad_output_ptrs = row_grad_output_ptr + cols
+            grad_output = tl.load(grad_output_ptrs, mask=mask, other=0.0).to(tl.float32)
+            g_ptrs = g_ptr + cols
+            g = tl.load(g_ptrs, mask=mask, other=0.0).to(tl.float32)
+            if (ZERO_CENTERED_GAMMA):
+                g += 1.
+            grad_sum += tl.sum(grad_output * x * g, axis=0)
+
+            # Load r_sigma
+            norm_factor = tl.load(rsigma_ptr + row_idx).to(tl.float32)
+
+            for blk_idx in tl.range(0, n_cols_blks, num_stages=2):
+                cols = blk_idx * BLOCK_SIZE + col_offsets
+                input_ptrs = row_input_ptr + cols
+                grad_output_ptrs = row_grad_output_ptr + cols
+
+                input_ptrs = tl.multiple_of(input_ptrs, (16, ))
+                grad_output_ptrs = tl.multiple_of(grad_output_ptrs, (16, ))
+
+                x = tl.load(input_ptrs).to(tl.float32)
+                grad_output = tl.load(grad_output_ptrs).to(tl.float32)
+
+                g_ptrs = g_ptr + cols
+                g = tl.load(g_ptrs).to(tl.float32)
+                if (ZERO_CENTERED_GAMMA):
+                    g += 1.
+                grad_input = grad_output * norm_factor * g - (norm_factor * norm_factor * norm_factor) * x * (grad_sum /
+                                                                                                              n_cols)
+
+                dx_ptrs = row_dx_ptr + cols
+                tl.store(dx_ptrs, grad_input.to(dx_ptr.type.element_ty))
+
+                dg = grad_output * x * norm_factor
+                dg_ptrs = row_dg_ptr + cols
+                tl.store(dg_ptrs, dg.to(tl.float32))
+
+            # Handle remainder
+            cols = n_cols_blks * BLOCK_SIZE + col_offsets
+            mask = cols < n_cols
+
+            input_ptrs = row_input_ptr + cols
+            x = tl.load(input_ptrs, mask=mask, other=0.0).to(tl.float32)
+            grad_output_ptrs = row_grad_output_ptr + cols
+            grad_output = tl.load(grad_output_ptrs, mask=mask, other=0.0).to(tl.float32)
+            g_ptrs = g_ptr + cols
+            g = tl.load(g_ptrs, mask=mask, other=0.0).to(tl.float32)
+            if (ZERO_CENTERED_GAMMA):
+                g += 1.
+            grad_input = grad_output * norm_factor * g - (norm_factor * norm_factor * norm_factor) * x * (grad_sum /
+                                                                                                          n_cols)
+
+            dx_ptrs = row_dx_ptr + cols
+            tl.store(dx_ptrs, grad_input.to(dx_ptr.type.element_ty), mask=mask)
+
+            dg = grad_output * x * norm_factor
+            dg_ptrs = row_dg_ptr + cols
+            tl.store(dg_ptrs, dg.to(tl.float32), mask=mask)
+
+    else:
+        mask = col_offsets < n_cols
+        for row_idx in tl.range(row_start, n_rows, NUM_PRGMS, num_stages=2):
+            input_ptrs = input_ptr + row_idx * input_row_stride + col_offsets
+            grad_output_ptrs = grad_output_ptr + row_idx * output_row_stride + col_offsets
+            dx_ptrs = dx_ptr + row_idx * input_row_stride + col_offsets
+            dg_ptrs = dg_ptr + row_idx * input_row_stride + col_offsets
+
+            input_ptrs = tl.multiple_of(input_ptrs, (16, ))
+            grad_output_ptrs = tl.multiple_of(grad_output_ptrs, (16, ))
+            dx_ptrs = tl.multiple_of(dx_ptrs, (16, ))
+
+            x = tl.load(input_ptrs, mask=mask, other=0.0).to(tl.float32)
+            grad_output = tl.load(grad_output_ptrs, mask=mask, other=0.0).to(tl.float32)
+            g = tl.load(g_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
+            if (ZERO_CENTERED_GAMMA):
+                g += 1.
+
+            norm_factor = tl.load(rsigma_ptr + row_idx).to(tl.float32)
+            grad_sum = tl.sum(grad_output * x * g, axis=0)
+
+            grad_input = grad_output * norm_factor * g - (norm_factor * norm_factor * norm_factor) * x * (grad_sum /
+                                                                                                          n_cols)
+            tl.store(dx_ptrs, grad_input.to(dx_ptr.type.element_ty), mask=mask)
+
+            dg = grad_output * x * norm_factor
+            tl.store(dg_ptrs, dg.to(tl.float32), mask=mask)
+
+@triton.jit
+def _rmsnorm_bwd_dg_reduce_triton(dg_in_ptr, dg_out_ptr, dg_in_stride, n_rows, n_cols, BLOCK_SIZE_M: tl.constexpr,
+                                  BLOCK_SIZE_N: tl.constexpr):
+    # we want parallelism in N direction
+    # if N is small, we will just use one CU,
+    # otherwise, it can be split by N/BLOCK_SIZE
+    pid = tl.program_id(0)
+    cols = pid * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    for i in range(0, n_rows, BLOCK_SIZE_M):
+        rows = i + tl.arange(0, BLOCK_SIZE_M)
+        mask = (rows[:, None] < n_rows) & (cols[None, :] < n_cols)
+        offs = rows[:, None] * n_cols + cols[None, :]
+        acc += tl.load(dg_in_ptr + offs, mask=mask, other=0.).to(tl.float32)
+
+    sum_dg = tl.sum(acc, axis=0)
+    tl.store(dg_out_ptr + cols, sum_dg.to(dg_out_ptr.type.element_ty), mask=cols < n_cols)
+
+# may take non-contiguous inputs
+# see rmsnorm_bwd in transformer_engine/pytorch/csrc/extensions/normalization.cu
+def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, zero_centered_gamma):
+    dz_ = dz.contiguous()
+    x_ = x.contiguous()
+    rsigma_ = rsigma.contiguous()
+    gamma_ = gamma.contiguous()
+
+    dx = torch.empty_like(x_)
+    dgamma = torch.empty_like(gamma_)
+
+    M, N = x_.shape
+    dg_tmp = torch.zeros(M, N, device='cuda', dtype=torch.float32, requires_grad=False)
+
+    MAX_FUSED_SIZE = 65536 // x_.element_size()
+    blk_size = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))
+    USE_BLOCKED = N > blk_size
+    NUM_PRGMS = min(M, get_num_sms())
+    grid_bwd = lambda meta: (NUM_PRGMS, )
+
+    _rmsnorm_bwd_triton[grid_bwd](dz_, x_, gamma_, rsigma_, dx, dg_tmp, x_.stride(0), dz_.stride(0), M, N, zero_centered_gamma, blk_size, USE_BLOCKED, NUM_PRGMS, num_warps=8)
+
+    grid_reduce = lambda meta: [triton.cdiv(N, meta['BLOCK_SIZE_N'])]
+    _rmsnorm_bwd_dg_reduce_triton[grid_reduce](dg_tmp, dgamma, dg_tmp.stride(0), M, N, BLOCK_SIZE_M=128, BLOCK_SIZE_N=64)
+
+    return dx, dgamma
