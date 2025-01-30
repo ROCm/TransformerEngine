@@ -209,7 +209,7 @@ def rocm_build() -> bool:
         cuda_path()
         return False
     except FileNotFoundError:
-    # If neither ROCm nor CUDA is detected, raise an error
+        # If neither ROCm nor CUDA is detected, raise an error
         raise FileNotFoundError("Could not detect ROCm or CUDA platform")
 
 @functools.lru_cache(maxsize=None)
