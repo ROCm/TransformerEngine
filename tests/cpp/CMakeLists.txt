@@ -44,7 +44,7 @@ else()
     set(USE_CUDA ON)
     message("NVIDIA GPU detected.")
   else()
-    message(FATAL_ERROR "Could not detect ROCm or CUDA platform. Please install")
+    message(FATAL_ERROR "Could not detect ROCm or CUDA platform")
   endif()
 
 endif()
