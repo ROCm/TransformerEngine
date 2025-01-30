@@ -61,6 +61,9 @@ from ..float8_tensor import Float8Tensor
 from ._common import _apply_normalization
 from ..cpu_offload import is_cpu_offload_enabled
 
+if IS_HIP_EXTENSION:
+    from ..triton_kernels.rmsnorm_triton import te_rmsnorm_bwd_triton
+
 __all__ = ["LayerNormMLP"]
 
 
@@ -1057,14 +1060,23 @@ class _LayerNormMLP(torch.autograd.Function):
                     ctx.zero_centered_gamma,
                 )
             elif ctx.normalization == "RMSNorm":
-                dgrad, dgamma = tex.rmsnorm_bwd(
-                    dgrad,
-                    inputmat,
-                    rsigma,
-                    ln_weight,
-                    ctx.bwd_ln_sm_margin,
-                    ctx.zero_centered_gamma,
-                )
+                if IS_HIP_EXTENSION and bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ):
+                    dgrad, dgamma = te_rmsnorm_bwd_triton(
+                        dgrad,
+                        inputmat,
+                        rsigma,
+                        ln_weight,
+                        ctx.zero_centered_gamma,
+                    )
+                else:
+                    dgrad, dgamma = tex.rmsnorm_bwd(
+                        dgrad,
+                        inputmat,
+                        rsigma,
+                        ln_weight,
+                        ctx.bwd_ln_sm_margin,
+                        ctx.zero_centered_gamma,
+                    )
                 dbeta = None
             clear_tensor_data(mu)
             clear_tensor_data(rsigma)

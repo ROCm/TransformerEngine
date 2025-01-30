@@ -12,11 +12,13 @@ from typing import Union, Tuple, Optional
 import torch
 from torch.nn.parameter import Parameter
 from torch.nn import init
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from .. import cpp_extensions as tex
 from ..jit import no_torch_dynamo
 from ..utils import cast_if_needed
-from ..triton_kernels.rmsnorm_triton import te_rmsnorm_fwd_triton
+if IS_HIP_EXTENSION:
+    from ..triton_kernels.rmsnorm_triton import te_rmsnorm_fwd_triton, te_rmsnorm_fwd_inf_triton, te_rmsnorm_bwd_triton
 
 __all__ = ["RMSNorm"]
 
@@ -80,14 +82,23 @@ class _RMSNorm(torch.autograd.Function):
         inputmat, rmsnorm_weight, rsigma = ctx.saved_tensors
         grad_output = grad_output.contiguous()
         d_rmsnorm_out = grad_output.view(inputmat.shape)
-        dxmat, dgamma = tex.rmsnorm_bwd(
-            d_rmsnorm_out,
-            inputmat,
-            rsigma,
-            rmsnorm_weight,
-            ctx.bwd_rmsnorm_sm_margin,
-            ctx.zero_centered_gamma,
-        )
+        if IS_HIP_EXTENSION and bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ):
+            dxmat, dgamma = te_rmsnorm_bwd_triton(
+                d_rmsnorm_out,
+                inputmat,
+                rsigma,
+                rmsnorm_weight,
+                ctx.zero_centered_gamma,
+            )
+        else:
+            dxmat, dgamma = tex.rmsnorm_bwd(
+                d_rmsnorm_out,
+                inputmat,
+                rsigma,
+                rmsnorm_weight,
+                ctx.bwd_rmsnorm_sm_margin,
+                ctx.zero_centered_gamma,
+            )
         return (
             dxmat.view(ctx.inp_shape),
             dgamma,
