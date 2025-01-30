@@ -11,29 +11,28 @@ option(USE_HIPBLASLT "Use HIPBLASLT" ON)
 option(USE_ROCBLAS "Use ROCBLAS" ON)
 option(USE_FUSED_ATTN_AOTRITON "Use aotriton backend" ON)
 option(USE_FUSED_ATTN_CK "Use ck backend" ON)
+set(USE_CUDA OFF)
 
 if (USE_ROCM)
   #Check if ROCm exists
   if( ((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) )
-    set(USE_ROCM ON)
-    message("AMD GPU detected")
+    message("Using AMD Platform")
   else()
-    message(FATAL_ERROR "FileNotFoundError: Could not find HIPCC at '/opt/rocm'")
+    message(FATAL_ERROR "Could not find HIPCC at '/opt/rocm'")
   endif()
     
   if (NOT USE_HIPBLASLT AND NOT USE_ROCBLAS)
     message(FATAL_ERROR "Need specify at least one GEMM library to use: HIPBLASLT or ROCBLAS")
   endif()
-  
-  unset(USE_CUDA)
+
 else()
   #Check if CUDA exists
   if (EXISTS "/bin/nvcc")
     set(USE_ROCM OFF)
-    set(USE_CUDA TRUE)
-    message("NVIDIA GPU detected")
+    set(USE_CUDA ON)
+    message("Using NVIDIA Platform")
   else()
-    message(FATAL_ERROR "FileNotFoundError: Could not find NVCC at '/bin/nvcc'")
+    message(FATAL_ERROR "Could not find NVCC at '/bin/nvcc'")
   endif()
   
 endif()

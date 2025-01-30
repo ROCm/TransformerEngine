@@ -7,24 +7,23 @@
 cmake_minimum_required(VERSION 3.18)
 
 option(USE_ROCM "Use ROCm" ON)
-set(USE CUDA OFF)
+set(USE_CUDA OFF)
 
 if (USE_ROCM)
   #Check if ROCm exists
   if( ((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) )
-    set(USE_ROCM ON)
-    message("AMD GPU detected")
+    message("Using AMD Platform")
   else()
-    message(FATAL_ERROR "FileNotFoundError: Could not find HIPCC at '/opt/rocm'")
+    message(FATAL_ERROR "Could not find HIPCC at '/opt/rocm'")
   endif()
 else()
   #Check if CUDA exists
   if (EXISTS "/bin/nvcc")
     set(USE_ROCM OFF)
     set(USE_CUDA ON)
-    message("NVIDIA GPU detected")
+    message("Using NVIDIA Platform")
   else()
-    message(FATAL_ERROR "FileNotFoundError: Could not find NVCC at '/bin/nvcc'")
+    message(FATAL_ERROR "Could not find NVCC at '/bin/nvcc'")
   endif()
 endif()
 
