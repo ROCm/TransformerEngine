@@ -269,9 +269,9 @@ else()
         set(__AOTRITON_VER "0.8.2b")
         set(__AOTRITON_SHA256 "66445e6b0209b9f4080743b839cc9d424054dc5c8d07363f9f27f109231c324a")
         string(CONCAT __AOTRITON_URL "https://github.com/ROCm/aotriton/releases/download/"
-                                      "${__AOTRITON_VER}/aotriton-"
-                                      "${__AOTRITON_VER}-manylinux_2_28"
-                                     "x86_64-rocm6.2"
+                                     "${__AOTRITON_VER}/aotriton-"
+                                     "${__AOTRITON_VER}-manylinux_2_28"
+                                     "_x86_64-rocm6.2"
                                      "-shared.tar.gz")
         ExternalProject_Add(aotriton_images
                             URL "${__AOTRITON_URL}"
