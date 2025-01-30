@@ -251,7 +251,7 @@ else()
       translate_arch_to_gpu_names(aotriton_target_gpus)
       include(ExternalProject)
       ExternalProject_Add(aotriton_external
-        URL ../../3rdparty/aotriton
+        SOURCE_DIR ../../3rdparty/aotriton
         LIST_SEPARATOR |
         CMAKE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${__AOTRITON_INSTALL_DIR}
         -DTARGET_GPUS=${aotriton_target_gpus}
