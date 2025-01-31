@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -65,6 +65,7 @@ def setup_common_extension() -> CMakeExtension:
     
     cmake_flags = []
     if rocm_build():
+        cmake_flags.append("-DUSE_ROCM=ON")
         if os.getenv("NVTE_USE_HIPBLASLT") is not None:
             cmake_flags.append("-DUSE_HIPBLASLT=ON")
         if os.getenv("NVTE_USE_ROCBLAS") is not None:
@@ -81,6 +82,7 @@ def setup_common_extension() -> CMakeExtension:
             cmake_flags.append("-DUSE_FUSED_ATTN_CK=OFF")
     else:
         cmake_flags=["-DCMAKE_CUDA_ARCHITECTURES={}".format(cuda_archs())]
+        cmake_flags.append("-DUSE_ROCM=OFF")
 
     return CMakeExtension(
         name="transformer_engine",

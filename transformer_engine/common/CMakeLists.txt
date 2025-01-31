@@ -1,31 +1,40 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 cmake_minimum_required(VERSION 3.21)
 
-option(USE_ROCM "Use ROCm" OFF)
+option(USE_ROCM "Use ROCm" ON)
 option(USE_HIPBLASLT "Use HIPBLASLT" ON)
 option(USE_ROCBLAS "Use ROCBLAS" ON)
 option(USE_FUSED_ATTN_AOTRITON "Use aotriton backend" ON)
 option(USE_FUSED_ATTN_CK "Use ck backend" ON)
-
-if(NOT USE_ROCM)
-  if(((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) AND NOT (EXISTS "/bin/nvcc"))
-    message("AMD GPU detected.")
-    set(USE_ROCM ON)
-  endif()
-endif()
+set(USE_CUDA OFF)
 
 if (USE_ROCM)
+  #Check if ROCm exists
+  if( ((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) )
+    message("Using AMD Platform")
+  else()
+    message(FATAL_ERROR "Could not find HIPCC at '/opt/rocm'")
+  endif()
+    
   if (NOT USE_HIPBLASLT AND NOT USE_ROCBLAS)
     message(FATAL_ERROR "Need specify at least one GEMM library to use: HIPBLASLT or ROCBLAS")
   endif()
-  unset(USE_CUDA)
+
 else()
-  set(USE_CUDA TRUE)
+  #Check if CUDA exists
+  if (EXISTS "/bin/nvcc")
+    set(USE_ROCM OFF)
+    set(USE_CUDA ON)
+    message("Using NVIDIA Platform")
+  else()
+    message(FATAL_ERROR "Could not find NVCC at '/bin/nvcc'")
+  endif()
+  
 endif()
 
 # Language options
