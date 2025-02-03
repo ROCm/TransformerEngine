@@ -286,7 +286,9 @@ else()
       endif()
       install(DIRECTORY
               ${__AOTRITON_INSTALL_DIR}/lib
-              DESTINATION ${CMAKE_INSTALL_PREFIX}/transformer_engine)
+              DESTINATION ${CMAKE_INSTALL_PREFIX}/transformer_engine
+              PATTERN "cmake" EXCLUDE
+              PATTERN "libaotriton${__AOTRITON_SUFFIX}_v2.so" EXCLUDE)
     else()
       # Use aotriton built during initial TE building/installation
       # When only need rebuild TE library itself
