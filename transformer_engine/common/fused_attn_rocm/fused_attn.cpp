@@ -109,26 +109,87 @@ std::pair<int64_t, int64_t> check_set_window_size(NVTE_Mask_Type attn_mask_type,
   return window_size;
 }
 
+// for printing NVTEDType in log_fused_attn_config
+const std::unordered_map<NVTEDType, std::string> mNVTEDTypeStr = {
+  {NVTEDType::kNVTEByte, "Byte"},
+  {NVTEDType::kNVTEInt32, "Int32"},
+  {NVTEDType::kNVTEInt64, "Int64"},
+  {NVTEDType::kNVTEFloat32, "Float32"},
+  {NVTEDType::kNVTEFloat16, "Float16"},
+  {NVTEDType::kNVTEBFloat16, "BFloat16"},
+  {NVTEDType::kNVTEFloat8E4M3, "Float8E4M3"},
+  {NVTEDType::kNVTEFloat8E5M2, "Float8E5M2"},
+};
+
+// for printing qkv_layout in log_fused_attn_config
+const std::unordered_map<NVTE_QKV_Layout, std::string> mNVTEQKVLayoutStr = {
+  {NVTE_QKV_Layout::NVTE_SB3HD, "SB3HD"},
+  {NVTE_QKV_Layout::NVTE_SBH3D, "SBH3D"},
+  {NVTE_QKV_Layout::NVTE_SBHD_SB2HD, "SBHD_SB2HD"},
+  {NVTE_QKV_Layout::NVTE_SBHD_SBH2D, "SBHD_SBH2D"},
+  {NVTE_QKV_Layout::NVTE_SBHD_SBHD_SBHD, "SBHD_SBHD_SBHD"},
+  {NVTE_QKV_Layout::NVTE_BS3HD, "BS3HD"},
+  {NVTE_QKV_Layout::NVTE_BSH3D, "BSH3D"},
+  {NVTE_QKV_Layout::NVTE_BSHD_BS2HD, "BSHD_BS2HD"},
+  {NVTE_QKV_Layout::NVTE_BSHD_BSH2D, "BSHD_BSH2D"},
+  {NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD, "BSHD_BSHD_BSHD"},
+  {NVTE_QKV_Layout::NVTE_T3HD, "T3HD"},
+  {NVTE_QKV_Layout::NVTE_TH3D, "TH3D"},
+  {NVTE_QKV_Layout::NVTE_THD_T2HD, "THD_T2HD"},
+  {NVTE_QKV_Layout::NVTE_THD_TH2D, "THD_TH2D"},
+  {NVTE_QKV_Layout::NVTE_THD_THD_THD, "THD_THD_THD"},
+};
+
+// for printing bias_type in log_fused_attn_config
+const std::unordered_map<NVTE_Bias_Type, std::string> mNVTEBiasTypeStr = {
+  {NVTE_Bias_Type::NVTE_NO_BIAS, "NO_BIAS"},
+  {NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS, "PRE_SCALE_BIAS"},
+  {NVTE_Bias_Type::NVTE_POST_SCALE_BIAS, "POST_SCALE_BIAS"},
+  {NVTE_Bias_Type::NVTE_ALIBI, "ALIBI"},
+};
+
+// for printing mask_type in log_fused_attn_config
+const std::unordered_map<NVTE_Mask_Type, std::string> mNVTEMaskTypeStr = {
+  {NVTE_Mask_Type::NVTE_NO_MASK, "NO_MASK"},
+  {NVTE_Mask_Type::NVTE_PADDING_MASK, "PADDING_MASK"},
+  {NVTE_Mask_Type::NVTE_CAUSAL_MASK, "CAUSAL_MASK"},
+  {NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK, "PADDING_CAUSAL_MASK"},
+  {NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK, "CAUSAL_BOTTOM_RIGHT_MASK"},
+  {NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK, "PADDING_CAUSAL_BOTTOM_RIGHT_MASK"},
+};
+
 void log_fused_attn_config(
-    const std::string& func_name, NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout, 
+    const char* func_name, NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout, 
     NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, float dropout, size_t batch_size, 
     size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv, 
     size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left, int64_t window_size_right) {
   std::cout<<func_name<<", ";
-  std::cout<<"q_dtype: "<<q_dtype<<", ";
-  std::cout<<"kv_dtype: "<<kv_dtype<<", ";
-  std::cout<<"qkv_layout: "<<qkv_layout<<", ";
-  std::cout<<"bias_type: "<<bias_type<<", ";
-  std::cout<<"mask_type: "<<attn_mask_type<<", ";
+  std::cout<<"q_dtype: "<<mNVTEDTypeStr.at(q_dtype)<<", ";
+  std::cout<<"kv_dtype: "<<mNVTEDTypeStr.at(kv_dtype)<<", ";
+  std::cout<<"qkv_layout: "<<mNVTEQKVLayoutStr.at(qkv_layout)<<", ";
+  std::cout<<"bias_type: "<<mNVTEBiasTypeStr.at(bias_type)<<", ";
+  std::cout<<"mask_type: "<<mNVTEMaskTypeStr.at(attn_mask_type)<<", ";
   std::cout<<"dropout_p: "<<dropout<<", ";
   std::cout<<"b: "<<batch_size<<", ";
   std::cout<<"h_q: "<<num_attn_heads<<", ";
   std::cout<<"h_kv: "<<num_gqa_groups<<", ";
+  if(num_attn_heads!=num_gqa_groups){
+    std::cout<<"(GQA/MQA), ";
+  }
   std::cout<<"s_q: "<<max_seqlen_q<<", ";
   std::cout<<"s_kv: "<<max_seqlen_kv<<", ";
+  if(max_seqlen_q == max_seqlen_kv){
+    std::cout<<"(self_attn), ";
+  }else{
+    std::cout<<"(cross_attn), ";
+  }
   std::cout<<"d_qk: "<<head_dim_qk<<", ";
   std::cout<<"d_v: "<<head_dim_v<<", ";
-  std::cout<<"(window_size_left, window_size_right): ("<<window_size_left<<", "<<window_size_right<<")"<<std::endl;
+  std::cout<<"(window_size_left, window_size_right): ("<<window_size_left<<", "<<window_size_right<<") ";
+  if(window_size_left >0 or window_size_right >0){
+    std::cout<<", (sliding window)";
+  }
+  std::cout<<std::endl;
 }
 
 // select a backend for fused attention
@@ -239,7 +300,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
   }
   if(nvte_log_fused_attn_config){
     log_fused_attn_config(
-      "nvte_fused_attn_fwd_qkvpacked",
+      __FUNCTION__,
       QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, dropout, b, h, h, max_seqlen,
       max_seqlen, d, d, window_size_left, window_size_right);
   }
@@ -327,7 +388,7 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
   }
   if(nvte_log_fused_attn_config){
     log_fused_attn_config(
-      "nvte_fused_attn_bwd_qkvpacked",
+      __FUNCTION__,
       QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, dropout, b, h, h, max_seqlen,
       max_seqlen, d, d, window_size_left, window_size_right);
   }
@@ -420,7 +481,7 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
   }
   if(nvte_log_fused_attn_config){
     log_fused_attn_config(
-      "nvte_fused_attn_fwd_kvpacked",
+      __FUNCTION__,
       Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, b, h_q, h_kv, max_seqlen_q,
       max_seqlen_kv, d, d, window_size_left, window_size_right);
   }
@@ -516,7 +577,7 @@ void nvte_fused_attn_bwd_kvpacked(
   }
   if(nvte_log_fused_attn_config){
     log_fused_attn_config(
-      "nvte_fused_attn_bwd_kvpacked",
+      __FUNCTION__,
       Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, b, h_q, h_kv, max_seqlen_q,
       max_seqlen_kv, d, d, window_size_left, window_size_right);
   }
@@ -606,7 +667,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   }
   if(nvte_log_fused_attn_config){
     log_fused_attn_config(
-      "nvte_fused_attn_fwd",
+      __FUNCTION__,
       Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, b, h_q, h_kv, max_seqlen_q,
       max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right);
   }
@@ -698,7 +759,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   }
   if(nvte_log_fused_attn_config){
     log_fused_attn_config(
-      "nvte_fused_attn_bwd",
+      __FUNCTION__,
       Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, b, h_q, h_kv, max_seqlen_q,
       max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right);
   }
