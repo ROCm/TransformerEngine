@@ -163,6 +163,17 @@ void log_fused_attn_config(
     NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, float dropout, size_t batch_size, 
     size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv, 
     size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left, int64_t window_size_right) {
+
+  //log the fused attn config at NVTE common level
+  bool nvte_log_fused_attn_config = false;
+  if (const char* env_p = std::getenv("NVTE_LOG_FUSED_ATTN_CONFIG") ) {
+    if (env_p != nullptr && std::string(env_p) == "1")
+      nvte_log_fused_attn_config = true;
+  }
+  if(!nvte_log_fused_attn_config){
+    return;
+  }
+
   std::cout<<func_name<<", ";
   std::cout<<"q_dtype: "<<mNVTEDTypeStr.at(q_dtype)<<", ";
   std::cout<<"kv_dtype: "<<mNVTEDTypeStr.at(kv_dtype)<<", ";
@@ -293,17 +304,10 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
   const NVTEDType QKV_type = static_cast<NVTEDType>(input_QKV->data.dtype);
 
   //log the fused attn config at NVTE common level
-  bool nvte_log_fused_attn_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_FUSED_ATTN_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_fused_attn_config = true;
-  }
-  if(nvte_log_fused_attn_config){
-    log_fused_attn_config(
-      __FUNCTION__,
-      QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, dropout, b, h, h, max_seqlen,
-      max_seqlen, d, d, window_size_left, window_size_right);
-  }
+  log_fused_attn_config(
+    __FUNCTION__,
+    QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, dropout, b, h, h, max_seqlen,
+    max_seqlen, d, d, window_size_left, window_size_right);
 
   // fix the incompatible window size from upstream frameworks pytorch/jax
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
@@ -381,17 +385,10 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
   const NVTEDType QKV_type = static_cast<NVTEDType>(input_QKV->data.dtype);
 
   //log the fused attn config at NVTE common level
-  bool nvte_log_fused_attn_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_FUSED_ATTN_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_fused_attn_config = true;
-  }
-  if(nvte_log_fused_attn_config){
-    log_fused_attn_config(
-      __FUNCTION__,
-      QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, dropout, b, h, h, max_seqlen,
-      max_seqlen, d, d, window_size_left, window_size_right);
-  }
+  log_fused_attn_config(
+    __FUNCTION__,
+    QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, dropout, b, h, h, max_seqlen,
+    max_seqlen, d, d, window_size_left, window_size_right);
 
   // fix the incompatible window size from upstream frameworks pytorch/jax
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
@@ -474,17 +471,10 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
   const NVTEDType KV_type = static_cast<NVTEDType>(input_KV->data.dtype);
 
   //log the fused attn config at NVTE common level
-  bool nvte_log_fused_attn_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_FUSED_ATTN_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_fused_attn_config = true;
-  }
-  if(nvte_log_fused_attn_config){
-    log_fused_attn_config(
-      __FUNCTION__,
-      Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, b, h_q, h_kv, max_seqlen_q,
-      max_seqlen_kv, d, d, window_size_left, window_size_right);
-  }
+  log_fused_attn_config(
+    __FUNCTION__,
+    Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, b, h_q, h_kv, max_seqlen_q,
+    max_seqlen_kv, d, d, window_size_left, window_size_right);
 
   // fix the incompatible window size from upstream frameworks pytorch/jax
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
@@ -570,17 +560,10 @@ void nvte_fused_attn_bwd_kvpacked(
   const NVTEDType KV_type = static_cast<NVTEDType>(input_KV->data.dtype);
 
   //log the fused attn config at NVTE common level
-  bool nvte_log_fused_attn_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_FUSED_ATTN_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_fused_attn_config = true;
-  }
-  if(nvte_log_fused_attn_config){
-    log_fused_attn_config(
-      __FUNCTION__,
-      Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, b, h_q, h_kv, max_seqlen_q,
-      max_seqlen_kv, d, d, window_size_left, window_size_right);
-  }
+  log_fused_attn_config(
+    __FUNCTION__,
+    Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, b, h_q, h_kv, max_seqlen_q,
+    max_seqlen_kv, d, d, window_size_left, window_size_right);
 
   // fix the incompatible window size from upstream frameworks pytorch/jax
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
@@ -660,17 +643,10 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
 
   //log the fused attn config at NVTE common level
-  bool nvte_log_fused_attn_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_FUSED_ATTN_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_fused_attn_config = true;
-  }
-  if(nvte_log_fused_attn_config){
-    log_fused_attn_config(
-      __FUNCTION__,
-      Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, b, h_q, h_kv, max_seqlen_q,
-      max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right);
-  }
+  log_fused_attn_config(
+    __FUNCTION__,
+    Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, b, h_q, h_kv, max_seqlen_q,
+    max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right);
 
   // fix the incompatible window size from upstream frameworks pytorch/jax
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
@@ -752,17 +728,10 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
 
   //log the fused attn config at NVTE common level
-  bool nvte_log_fused_attn_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_FUSED_ATTN_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_fused_attn_config = true;
-  }
-  if(nvte_log_fused_attn_config){
-    log_fused_attn_config(
-      __FUNCTION__,
-      Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, b, h_q, h_kv, max_seqlen_q,
-      max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right);
-  }
+  log_fused_attn_config(
+    __FUNCTION__,
+    Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, b, h_q, h_kv, max_seqlen_q,
+    max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right);
 
   // fix the incompatible window size from upstream frameworks pytorch/jax
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
