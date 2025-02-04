@@ -39,8 +39,9 @@ from ..cpp_extensions import (
 from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
-from ..float8_tensor import Float8Tensor
+from ..tensor import Float8Tensor, QuantizedTensor
 from ..export import is_in_onnx_export_mode
+from ..cpu_offload import is_cpu_offload_enabled
 
 __all__ = ["GroupedLinear"]
 
@@ -69,6 +70,7 @@ class _GroupedLinear(torch.autograd.Function):
         weights_fp8: List[Union[Float8Tensor, None]],
         *weights_and_biases: Union[Float8Tensor, torch.Tensor, None],
     ) -> torch.Tensor:
+        # pylint: disable=missing-function-docstring
         num_gemms = len(m_splits)
         weights = weights_and_biases[:num_gemms]
         biases = weights_and_biases[num_gemms:]
@@ -267,6 +269,7 @@ class _GroupedLinear(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+        # pylint: disable=missing-function-docstring
         with torch.cuda.nvtx.range("_GroupedLinear_backward"):
             (
                 inputmat_scale_inv,
@@ -640,7 +643,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         if self.primary_weights_in_fp8:
             self.init_fp8_metadata(num_gemms=self.num_gemms)
 
-        self.reset_parameters(defer_init=(device == "meta"))
+        self.reset_parameters(defer_init=device == "meta")
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
@@ -715,11 +718,11 @@ class GroupedLinear(TransformerEngineBaseModule):
 
         with self.prepare_forward(inp, is_first_microbatch, num_gemms=self.num_gemms) as inp:
 
-            weight_tensors = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
+            weight_tensors = [self._fast_get_param(f"weight{i}") for i in range(self.num_gemms)]
             bias_tensors = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
             if not self.fp8:
                 weight_tensors = [
-                    w.from_float8() if isinstance(w, Float8Tensor) else w for w in weight_tensors
+                    w.dequantize() if isinstance(w, QuantizedTensor) else w for w in weight_tensors
                 ]
 
             weight_tensors_fp8 = [None] * self.num_gemms
@@ -746,8 +749,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                             skip_update_flag=skip_fp8_weight_update,
                         )
 
-            from ..cpu_offload import CPUOffloadEnabled
-
             if torch.is_grad_enabled():
                 linear_fn = _GroupedLinear.apply
                 args = []
@@ -763,7 +764,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 self.fp8_calibration,
                 self.fp8_meta,
                 self.fuse_wgrad_accumulation,
-                CPUOffloadEnabled,
+                is_cpu_offload_enabled(),
                 self.sequence_parallel,
                 self.activation_dtype,
                 self._offsets,
