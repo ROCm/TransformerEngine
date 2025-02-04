@@ -417,11 +417,9 @@ def uninstall_te_wheel_packages():
     )
 
 def hipify(base_dir, src_dir, sources, include_dirs):
-    hipify_path = str(base_dir / "3rdparty" / "hipify_torch")
     cwd = os.getcwd()
-    if hipify_path not in sys.path:
-        sys.path.insert(1, hipify_path)
-    from hipify_torch.hipify_python import hipify as do_hipify
+    hipify_module = importlib.import_module("3rdparty.hipify_torch.hipify_torch.hipify_python")
+    do_hipify = hipify_module.hipify
 
     hipify_result = do_hipify(
         project_directory=src_dir,
