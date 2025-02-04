@@ -40,6 +40,7 @@ from transformer_engine.pytorch import (
     Fp8Padding,
     Fp8Unpadding,
 )
+from transformer_engine.pytorch.attention import _flash_attn_2_7_plus
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import fp8_gemm, fp8_grouped_gemm, gemm, grouped_gemm
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
@@ -63,10 +64,13 @@ if IS_HIP_EXTENSION:
         return (os.getenv("NVTE_USE_HIPBLASLT") is not None
                 or os.getenv("NVTE_USE_ROCBLAS") is None )
 
-    def rocm_fused_attn_backend() -> tuple[bool, bool]:
+    def rocm_attn_backend() -> tuple[bool, bool, bool]:
+        """Returns the FA backends to use: (flash_attn, fused_attn_aotriton, fused_attn_ck)"""
+        use_flash_attn = int(os.environ.get("NVTE_FLASH_ATTN", "1")) != 0
         if int(os.getenv("NVTE_FUSED_ATTN", "1")) == 0:
-            return (False, False)
-        return (int(os.getenv("NVTE_FUSED_ATTN_AOTRITON", "1")) != 0,
+            return (use_flash_attn, False, False)
+        return (use_flash_attn,
+                int(os.getenv("NVTE_FUSED_ATTN_AOTRITON", "1")) != 0,
                 int(os.getenv("NVTE_FUSED_ATTN_CK", "1")) != 0)
 
 
@@ -128,9 +132,9 @@ def dtype_tols(dtype: torch.dtype) -> Dict[str, float]:
 
 def rocm_attn_tols() -> Dict[str, float]:
     if IS_HIP_EXTENSION:
-        _, use_fused_attn_ck = rocm_fused_attn_backend()
+        use_flash_attn, _, use_fused_attn_ck = rocm_attn_backend()
         # TODO: wait for the ck branch supporting determinism
-        if use_fused_attn_ck:
+        if not use_flash_attn and use_fused_attn_ck:
             return dict(atol=5e-2, rtol=5e-2)
         else:
             # AOTriton backend and non-fused attn are deterministic
@@ -828,6 +832,10 @@ def test_gpt_checkpointing(dtype, bs, model):
             msg=f"Mismatch in tensor {i}",
             **tols,
         )
+        if IS_HIP_EXTENSION and not _flash_attn_2_7_plus and is_mi308() and rocm_attn_backend()[0]:
+            # ROCm FA before 2.7.0 has a bug in dropout rng initialisation that exposes in
+            # intermediate tensors mismatch on MI308. This is not a problem in the final output.
+            break
 
 
 def _test_e2e_gpt_accuracy(block, bs, dtype, config):
@@ -1647,7 +1655,9 @@ def test_gpt_cuda_graph(dtype, bs, model):
         if not use_hipblaslt():
             pytest.skip("CUDA graph capture not supported with rocBLAS path")
         if dtype not in (torch.float32,):
-            use_aotriton, use_ck = rocm_fused_attn_backend()
+            use_fa, use_aotriton, use_ck = rocm_attn_backend()
+            if use_fa:
+                pytest.skip(f"ROCm flash attention does not support cuda graph with {dtype}")
             if use_aotriton and not use_ck:
                 pytest.skip(f"AOTriton attention backend does not support cuda graph with {dtype}")
 
@@ -1746,8 +1756,6 @@ def test_gpt_fp8_parameters(dtype, bs, model):
     outputs_fp8_params = _test_gpt_fp8_parameters(bs, dtype, config, True)
     # Check that results match
     tols = dict(rtol=0.125, atol=0.0675)
-    if IS_HIP_EXTENSION:
-        tols = rocm_attn_tols()
 
     for i, (ref, test) in enumerate(zip(outputs, outputs_fp8_params)):
         torch.testing.assert_close(
@@ -1908,6 +1916,10 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
 @pytest.mark.parametrize("module", module_inference)
 @pytest.mark.parametrize("backend", backends_inference)
 def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module, backend):
+    if ((backend == "FlashAttention" and os.getenv("NVTE_FLASH_ATTN", "1") == "0") or
+        (backend == "FusedAttention" and os.getenv("NVTE_FUSED_ATTN", "1") == "0")):
+        pytest.skip(f"{backend} is disabled")
+
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"
 

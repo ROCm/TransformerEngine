@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -12,7 +12,6 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from test_fused_attn import ModelConfig
 from transformer_engine.pytorch.attention import (
     _flash_attn_2_plus,
-    _flash_attn_2_3_plus,
 )
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
@@ -74,6 +73,8 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
             f"CP implementation with QKVO A2A requires num_heads ({config.num_heads}) and"
             f" num_gqa_groups ({config.num_gqa_groups}) to be divisible by cp_size (2)!"
         )
+    if IS_HIP_EXTENSION and qkv_format == "thd":
+        pytest.skip("CP tests do not support THD format on ROCm yet!")
 
     subprocess.run(
         get_bash_arguments(

@@ -136,7 +136,7 @@ def _get_attention_backends(
 ) -> Tuple[List, List]:
     """Check if what attention backends support a model configuration"""
 
-    os.environ["NVTE_FLASH_ATTN"] = "1" if not IS_HIP_EXTENSION else "0"
+    os.environ["NVTE_FLASH_ATTN"] = "1"
     os.environ["NVTE_FUSED_ATTN"] = "1"
     os.environ["NVTE_UNFUSED_ATTN"] = "1"
     _attention_backends["backend_selection_requires_update"] = True

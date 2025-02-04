@@ -93,12 +93,13 @@ pip list | egrep "flash|ml_dtypes|numpy|onnx|torch|transformer_e|typing_ext"
 for _gemm in hipblaslt rocblas; do
     configure_gemm_env $_gemm || continue
     
-    for _fus_attn in auto ck aotriton unfused; do
+    for _fus_attn in auto flash ck aotriton unfused; do
         configure_fused_attn_env $_fus_attn || continue
 
-        #Auto - default mode with all Fused attentions backends enabled
-        #CK/AOTriton - only corresponding Fused attention backend is enabled
-        #Unfused - Fused attention is disabled
+        #Auto - default mode with all Flash and Fused attention backends enabled
+        #Flash - Fused attention is disabled
+        #CK/AOTriton - no Flash attention and only corresponding Fused attention backend is enabled
+        #Unfused - Flash and Fused attentions are disabled
         #Level 1 - run hipBlasLt in auto and unfused modes, rocBlas in auto mode
         #Level 3 - run hipBlasLt in all but unfused modes, rocBlas in auto and unfused modes
         if [ $TEST_LEVEL -ge 3 ]; then

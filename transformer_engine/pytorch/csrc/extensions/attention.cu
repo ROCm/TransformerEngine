@@ -1250,7 +1250,6 @@ std::vector<at::Tensor> fused_attn_bwd(
   return {dQ, dK, dV, dBias};
 }
 
-#ifndef USE_ROCM
 namespace flash_attention {
 
 constexpr int warp_size = 32;
@@ -1943,5 +1942,3 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
 
   return output;
 }
-
-#endif //ifndef USE_ROCM
