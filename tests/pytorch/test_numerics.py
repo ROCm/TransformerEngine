@@ -1876,6 +1876,7 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
             tols = dtype_tols(dtype)
             if dtype in (torch.float16, torch.bfloat16) and is_mi308():
                 # mi308 hipblaslt precision issue
+                tols["rtol"] = tols["rtol"] * 3
                 tols["atol"] = 2e-3
             torch.testing.assert_close(y_bshd, y_sbhd.transpose(0, 1).contiguous(), **tols)
         else:
