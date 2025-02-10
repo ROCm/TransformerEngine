@@ -132,6 +132,12 @@ if not IS_HIP_EXTENSION:
         )
 
         _use_flash_attn_3 = True
+else:
+    # temp workaround for ck_tile/fa3
+    _flash_attn_v3_version = PkgVersion(get_pkg_version("flash-attn"))
+    if  _flash_attn_v3_version >= PkgVersion("3.0.0"):
+        _flash_attn_max_version = _flash_attn_v3_version
+
 
 if _flash_attn_version >= _flash_attn_version_required:
     from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
