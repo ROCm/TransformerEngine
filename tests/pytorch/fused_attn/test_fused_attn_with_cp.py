@@ -54,13 +54,13 @@ def get_bash_arguments(num_gpus_per_node, **kwargs):
     return args
 
 
+@pytest.mark.skipif(device_count() < 2, reason="multi-GPU host is required")
 @pytest.mark.skipif(not _flash_attn_2_plus, reason="Flash-attn 2.0+ is required.")
 @pytest.mark.skipif(not IS_HIP_EXTENSION and get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", ["bf16", "fp16"])
 @pytest.mark.parametrize("model", model_configs_flash_attn.keys())
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
 @pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a", "a2a+p2p"])
-@pytest.mark.skipif(device_count() < 2, reason="multi-GPU host is required")
 def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
     config = model_configs_flash_attn[model]
     if "p2p" in cp_comm_type and config.window_size != (-1, 0) and config.window_size != (-1, -1):
@@ -112,13 +112,13 @@ model_configs_fused_attn = {
 }
 
 
+@pytest.mark.skipif(device_count() < 2, reason="multi-GPU host is required")
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
 @pytest.mark.skipif(not IS_HIP_EXTENSION and get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", ["bf16", "fp16", "fp8"])
 @pytest.mark.parametrize("model", model_configs_fused_attn.keys())
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
 @pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a", "a2a+p2p"])
-@pytest.mark.skipif(device_count() < 2, reason="multi-GPU host is required")
 def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type):
     if IS_HIP_EXTENSION and qkv_format == "thd":
         pytest.skip("THD format has not been supported on ROCm yet!")

@@ -75,8 +75,7 @@ OPSET = 17
 assert OPSET >= TRILU_OPSET
 
 # Shared library implementing custom FP8 Q/DQ operators for ONNX Runtime (ORT).
-ORT_CUSTOM_OPS_LIB = os.path.join(TESTS_DIR, "custom_ort_ops", "libcustom_ort_ops.so"
-                                  if not IS_HIP_EXTENSION else "libcustom_ort_ops_hip.so")
+ORT_CUSTOM_OPS_LIB = os.path.join(TESTS_DIR, "custom_ort_ops", "libcustom_ort_ops.so")
 
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 if fp8_available and not os.path.exists(ORT_CUSTOM_OPS_LIB):
