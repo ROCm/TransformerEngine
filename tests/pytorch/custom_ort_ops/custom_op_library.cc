@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -19,7 +21,13 @@
 
 #include "core/common/common.h"
 #include "core/session/onnxruntime_lite_custom_op.h"
+#ifdef __HIP_PLATFORM_AMD__
+#include <hip/hip_fp8.h>
+using fp8e4m3 = __hip_fp8_e4m3_fnuz;
+#else
 #include <cuda_fp8.h>
+using fp8e4m3 = __nv_fp8_e4m3;
+#endif
 
 namespace {
 
@@ -74,12 +82,12 @@ OrtStatus* ORT_API_CALL RegisterCustomOps(OrtSessionOptions* options, const OrtA
   static const std::unique_ptr<Ort::Custom::OrtLiteCustomOp> c_Quantize{
     Ort::Custom::CreateLiteCustomOp("TRT_FP8QuantizeLinear",
                                     "CPUExecutionProvider",
-                                    Quantize<float, __nv_fp8_e4m3, float>)
+                                    Quantize<float, fp8e4m3, float>)
   };
   static const std::unique_ptr<Ort::Custom::OrtLiteCustomOp> c_Dequantize{
     Ort::Custom::CreateLiteCustomOp("TRT_FP8DequantizeLinear",
                                     "CPUExecutionProvider",
-                                    Dequantize<__nv_fp8_e4m3, float, float>)
+                                    Dequantize<fp8e4m3, float, float>)
   };
 
   // Register custom ops

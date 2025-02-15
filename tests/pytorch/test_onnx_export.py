@@ -909,7 +909,7 @@ def test_export_linear(
             validate_result(fname, inp, model, atol=1e-3, is_fp8=use_fp8, te_outputs=te_outputs)
 
 
-@pytest.mark.parametrize("scale_factor", [112])
+@pytest.mark.parametrize("scale_factor", [112 if not IS_HIP_EXTENSION else 224])
 @pytest.mark.parametrize("use_fp8", [False, True])
 # Returning the bias is a TE fusion optimization we don't care about.
 @pytest.mark.parametrize("return_bias", [False])
@@ -977,7 +977,7 @@ def test_export_layernorm_linear(
             validate_result(fname, inp, model, atol=1e-6, is_fp8=use_fp8, te_outputs=te_outputs)
 
 
-@pytest.mark.parametrize("scale_factor", [112])
+@pytest.mark.parametrize("scale_factor", [112 if not IS_HIP_EXTENSION else 224])
 @pytest.mark.parametrize("use_fp8", [False, True])
 # Returning the bias is a TE fusion optimization we don't care about.
 @pytest.mark.parametrize("return_bias", [False])
