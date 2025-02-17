@@ -893,13 +893,22 @@ protected:
   {
     if (!save_fs)
     {
-        save_fs_name = std::getenv("TE_HIPBLASLT_ALGO_SAVE");
-        if (save_fs_name == nullptr || save_fs_name[0] == '\0')
-        {
-          return false;
-        }
-        save_fs = std::make_unique<std::ofstream>();
-        std::cout << "Saving autotune results to " << save_fs_name << "\n";
+      save_fs_name_string = std::getenv("TE_HIPBLASLT_ALGO_SAVE");
+
+      pid_t pid = getpid();
+
+      size_t pos = 0;
+      while ((pos = save_fs_name_string.find("%i", pos)) != string::npos) {
+        save_fs_name_string.replace(pos, 2, std::to_string(pid));
+      }
+      save_fs_name = save_fs_name_string.c_str();
+
+      if (save_fs_name == nullptr || save_fs_name[0] == '\0')
+      {
+        return false;
+      }
+      save_fs = std::make_unique<std::ofstream>();
+      std::cout << "Saving autotune results to " << save_fs_name << "\n";
     }
 
     if (reopen)
