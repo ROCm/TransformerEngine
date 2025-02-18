@@ -7,6 +7,7 @@
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/transformer_engine.h>
 #ifdef USE_HIPBLASLT
+#include <unistd.h>
 #include <vector>
 #include <forward_list>
 #include <mutex>
@@ -898,7 +899,7 @@ protected:
       pid_t pid = getpid();
 
       size_t pos = 0;
-      while ((pos = save_fs_name_string.find("%i", pos)) != string::npos) {
+      while ((pos = save_fs_name_string.find("%i", pos)) != std::string::npos) {
         save_fs_name_string.replace(pos, 2, std::to_string(pid));
       }
       save_fs_name = save_fs_name_string.c_str();
