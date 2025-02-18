@@ -1,5 +1,7 @@
 #!/usr/bin/python3
 
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -13,9 +15,13 @@ import transformer_engine.pytorch as te
 import torch
 from torch import nn
 import torch.distributed as dist
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from transformer_engine.common.recipe import Format, DelayedScaling
 from run_layer_with_overlap import _compare_tensors
+
+if IS_HIP_EXTENSION:
+    from transformer_engine.pytorch.utils import is_mi308
 
 SEQ_LEN, BATCH_SIZE = 16, 16
 HIDDEN_SIZE = 64
@@ -28,6 +34,17 @@ FP8 = False
 # Fp8 recipe setup
 fp8_format = Format.HYBRID
 fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=32, amax_compute_algo="max")
+
+
+if IS_HIP_EXTENSION:
+    def rocm_attn_backend() -> tuple[bool, bool, bool]:
+        """Returns the FA backends to use: (flash_attn, fused_attn_aotriton, fused_attn_ck)"""
+        use_flash_attn = int(os.environ.get("NVTE_FLASH_ATTN", "1")) != 0
+        if int(os.getenv("NVTE_FUSED_ATTN", "1")) == 0:
+            return (use_flash_attn, False, False)
+        return (use_flash_attn,
+                int(os.getenv("NVTE_FUSED_ATTN_AOTRITON", "1")) != 0,
+                int(os.getenv("NVTE_FUSED_ATTN_CK", "1")) != 0)
 
 
 def main(argv=None, namespace=None):
@@ -130,6 +147,11 @@ def dist_print(msg, src=None, end="\n", error=False):
 def _get_tolerances(dtype):
     if FP8:
         return {"rtol": 0.125, "atol": 0.0625}
+
+    if IS_HIP_EXTENSION and is_mi308() and dtype in (torch.float16, torch.bfloat16):
+        fa, _, ck  = rocm_attn_backend()
+        if fa or ck:
+            return {"rtol": 2e-3, "atol": 1e-5}
 
     if dtype == torch.float16:
         return {"rtol": 1e-3, "atol": 1e-5}

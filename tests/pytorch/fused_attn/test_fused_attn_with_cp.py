@@ -54,7 +54,6 @@ def get_bash_arguments(num_gpus_per_node, **kwargs):
     return args
 
 
-@pytest.mark.skipif(device_count() < 2, reason="multi-GPU host is required")
 @pytest.mark.skipif(not _flash_attn_2_plus, reason="Flash-attn 2.0+ is required.")
 @pytest.mark.skipif(not IS_HIP_EXTENSION and get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", ["bf16", "fp16"])
@@ -81,9 +80,13 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
     if IS_HIP_EXTENSION and qkv_format == "thd":
         pytest.skip("CP tests do not support THD format on ROCm yet!")
 
+    num_gpus_per_node=4 if cp_comm_type == "a2a+p2p" else 2
+    if device_count() < num_gpus_per_node:
+        pytest.skip("CP test requires more GPUs than available.")
+
     subprocess.run(
         get_bash_arguments(
-            num_gpus_per_node=4 if cp_comm_type == "a2a+p2p" else 2,
+            num_gpus_per_node=num_gpus_per_node,
             dtype=dtype,
             model=model,
             qkv_format=qkv_format,
@@ -112,7 +115,6 @@ model_configs_fused_attn = {
 }
 
 
-@pytest.mark.skipif(device_count() < 2, reason="multi-GPU host is required")
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
 @pytest.mark.skipif(not IS_HIP_EXTENSION and get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", ["bf16", "fp16", "fp8"])
@@ -164,9 +166,13 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type):
             f" num_gqa_groups ({config.num_gqa_groups}) to be divisible by cp_size (2)!"
         )
 
+    num_gpus_per_node=4 if cp_comm_type == "a2a+p2p" else 2
+    if device_count() < num_gpus_per_node:
+        pytest.skip("CP test requires more GPUs than available.")
+
     subprocess.run(
         get_bash_arguments(
-            num_gpus_per_node=4 if cp_comm_type == "a2a+p2p" else 2,
+            num_gpus_per_node=num_gpus_per_node,
             dtype=dtype,
             model=model,
             qkv_format=qkv_format,

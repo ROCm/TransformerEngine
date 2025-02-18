@@ -18,6 +18,7 @@ install_prerequisites() {
         script_error "Failed to install test prerequisites"
         exit $rc
     fi
+    NVTE_USE_ROCM=1 bash $TEST_DIR/custom_ort_ops/build.sh
 }
 
 run() {
@@ -72,6 +73,7 @@ run_test_config_mgpu(){
         run 3 test_fused_optimizer.py
         run 3 test_fusible_ops_distributed.py
         run 3 fused_attn/test_fused_attn_with_cp.py
+        run 3 distributed/test_numerics.py
     fi
 }
 
