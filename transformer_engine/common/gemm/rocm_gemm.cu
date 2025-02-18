@@ -967,6 +967,7 @@ private:
   constexpr static char csv_sep = ','; 
   std::unique_ptr<std::ofstream> save_fs;
   const char *save_fs_name;
+  std::string save_fs_name_string;
   std::mutex mt;
   /* Map of problem config to tuple of ws_size and Algo
    * When searching, elements matching Key are filtered 
