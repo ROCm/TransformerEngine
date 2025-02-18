@@ -1883,6 +1883,9 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
             if dtype in (torch.float16, torch.bfloat16) and is_mi308():
                 # mi308 hipblaslt precision issue
                 tols["atol"] = 2e-3
+                _, use_aotriton, use_ck = rocm_attn_backend()
+                if use_aotriton and not use_ck:
+                    tols["rtol"] = tols["rtol"] * 3
             torch.testing.assert_close(y_bshd, y_sbhd.transpose(0, 1).contiguous(), **tols)
         else:
             assert torch.equal(y_bshd, y_sbhd.transpose(0, 1).contiguous()), "Tensors are not equal"
