@@ -894,20 +894,21 @@ protected:
   {
     if (!save_fs)
     {
-      save_fs_name_string = std::getenv("TE_HIPBLASLT_ALGO_SAVE");
+      const char* temp = std::getenv("TE_HIPBLAS_ALGO_SAVE");
+      if (temp == nullptr || temp[0] == '\0')
+      {
+        return false;
+      }
+
+      save_fs_name = std::getenv("TE_HIPBLASLT_ALGO_SAVE");
 
       pid_t pid = getpid();
 
       size_t pos = 0;
-      while ((pos = save_fs_name_string.find("%i", pos)) != std::string::npos) {
-        save_fs_name_string.replace(pos, 2, std::to_string(pid));
+      while ((pos = save_fs_name.find("%i", pos)) != std::string::npos) {
+        save_fs_name.replace(pos, 2, std::to_string(pid));
       }
-      save_fs_name = save_fs_name_string.c_str();
 
-      if (save_fs_name == nullptr || save_fs_name[0] == '\0')
-      {
-        return false;
-      }
       save_fs = std::make_unique<std::ofstream>();
       std::cout << "Saving autotune results to " << save_fs_name << "\n";
     }
@@ -918,7 +919,7 @@ protected:
       {
         save_fs->close();
       }
-      save_fs->open(save_fs_name, std::ios_base::trunc);
+      save_fs->open(save_fs_name.c_str(), std::ios_base::trunc);
     }
 
     if (save_fs->is_open() && !save_fs->bad())
@@ -967,8 +968,7 @@ private:
   std::vector<int> dev_cap;
   constexpr static char csv_sep = ','; 
   std::unique_ptr<std::ofstream> save_fs;
-  const char *save_fs_name;
-  std::string save_fs_name_string;
+  std::string save_fs_name;
   std::mutex mt;
   /* Map of problem config to tuple of ws_size and Algo
    * When searching, elements matching Key are filtered 
