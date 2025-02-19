@@ -900,7 +900,7 @@ protected:
         return false;
       }
 
-      save_fs_name = std::getenv("TE_HIPBLASLT_ALGO_SAVE");
+      save_fs_name = temp;
 
       pid_t pid = getpid();
 
@@ -919,7 +919,7 @@ protected:
       {
         save_fs->close();
       }
-      save_fs->open(save_fs_name.c_str(), std::ios_base::trunc);
+      save_fs->open(save_fs_name, std::ios_base::trunc);
     }
 
     if (save_fs->is_open() && !save_fs->bad())
