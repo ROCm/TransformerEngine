@@ -13,6 +13,11 @@ TEST_DIR=${TE_PATH}tests/
 : ${TEST_LEVEL:=99} #Run all tests by default
 TEST_JOBS_MODE=""
 
+if [ -z "${TEST_SGPU}${TEST_MGPU}" ]; then
+    TEST_SGPU=1
+    TEST_MGPU=1
+fi
+
 _script_error_count=0
 _run_error_count=0
 
@@ -213,7 +218,7 @@ check_test_filter() {
 }
 
 start_message() {
-    echo "Started with TEST_LEVEL=$TEST_LEVEL at `date`"
+    echo "Started with TEST_LEVEL=$TEST_LEVEL sGPU='$TEST_SGPU' mGPU='$TEST_MGPU' at `date`"
     echo "ROCm: `ls -d /opt/rocm-*`"
     python --version
 }
