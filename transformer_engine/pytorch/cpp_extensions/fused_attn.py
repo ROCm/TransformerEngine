@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -254,13 +254,11 @@ def fused_attn_fwd_qkvpacked(
             rng_elts_per_thread = (
                 max_seqlen * max_seqlen + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
             ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
-
         # BF16/FP16 fused attention API from fmha_v2
-        if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
+        elif fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
             rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
-
         # FP8 fused attention API from fmha_v2
-        if fused_attention_backend == FusedAttnBackend["FP8"]:
+        elif fused_attention_backend == FusedAttnBackend["FP8"]:
             rng_elts_per_thread = (
                 max_seqlen * max_seqlen + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
             ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
@@ -273,6 +271,8 @@ def fused_attn_fwd_qkvpacked(
             assert q_scale_o is not None, "q_scale_o is required as an input for FP8 fused attention."
             assert amax_s is not None, "amax_s is required as an input for FP8 fused attention."
             assert amax_o is not None, "amax_o is required as an input for FP8 fused attention."
+        else:
+            raise ValueError(f"Unsupported backend {fused_attention_backend}")
 
     # execute kernel
     output_tensors = tex.fused_attn_fwd_qkvpacked(
@@ -651,13 +651,11 @@ def fused_attn_fwd_kvpacked(
             rng_elts_per_thread = (
                 max_seqlen_q * max_seqlen_kv + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
             ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
-
         # BF16/FP16 fused attention API from fmha_v2
-        if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
+        elif fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
             rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
-
         # FP8 fused attention API from fmha_v2
-        if fused_attention_backend == FusedAttnBackend["FP8"]:
+        elif fused_attention_backend == FusedAttnBackend["FP8"]:
             rng_elts_per_thread = (
                 max_seqlen_q * max_seqlen_q + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
             ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
@@ -670,6 +668,8 @@ def fused_attn_fwd_kvpacked(
             assert q_scale_o is not None, "q_scale_o is required as an input for FP8 fused attention."
             assert amax_s is not None, "amax_s is required as an input for FP8 fused attention."
             assert amax_o is not None, "amax_o is required as an input for FP8 fused attention."
+        else:
+            raise ValueError(f"Unsupported backend {fused_attention_backend}")
 
     # execute kernel
     output_tensors = tex.fused_attn_fwd_kvpacked(
@@ -1080,13 +1080,11 @@ def fused_attn_fwd(
             rng_elts_per_thread = (
                 max_seqlen_q * max_seqlen_kv + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
             ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
-
         # BF16/FP16 fused attention API from fmha_v2
-        if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
+        elif fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
             rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
-
         # FP8 fused attention API from fmha_v2
-        if fused_attention_backend == FusedAttnBackend["FP8"]:
+        elif fused_attention_backend == FusedAttnBackend["FP8"]:
             rng_elts_per_thread = (
                 max_seqlen_q * max_seqlen_q + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
             ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
@@ -1099,6 +1097,8 @@ def fused_attn_fwd(
             assert q_scale_o is not None, "q_scale_o is required as an input for FP8 fused attention."
             assert amax_s is not None, "amax_s is required as an input for FP8 fused attention."
             assert amax_o is not None, "amax_o is required as an input for FP8 fused attention."
+        else:
+            raise ValueError(f"Unsupported backend {fused_attention_backend}")
 
     # execute kernel
     output_tensors = tex.fused_attn_fwd(
