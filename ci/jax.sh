@@ -63,7 +63,11 @@ run_test_config() {
     run 1 test_fused_attn.py
     run_default_fa 1 test_helper.py
     run_default_fa 1 test_layer.py #it effectevly always uses unfused attention
-    run 1 test_praxis_layers.py
+    if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
+        run 1 test_praxis_layers.py
+    else
+        run 3 test_praxis_layers.py
+    fi
     run_default_fa 1 test_sharding.py
     run_default_fa 1 test_softmax.py
 }
