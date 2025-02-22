@@ -256,9 +256,6 @@ void fused_attn_ck_fwd_impl(
   generateMatrixStrides(b, hg, s_q, s_kv, d, v_stride.data(),
                         layout, NVTE_QKV_Matrix::NVTE_V_Matrix);
 
-  std::array<uint64_t, 4> q_shape{b, h, s_q, d};
-  std::array<uint64_t, 4> kv_shape{b, hg, s_kv, d};
-
   std::array<uint64_t, 4> o_stride;
   generateMatrixStrides(b, h, s_q, s_kv, d, o_stride.data(),
                         layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
@@ -408,8 +405,6 @@ void fused_attn_ck_bwd_impl(
   //q and o are having the same shape
   //k and v are having the same shape
   //x and dx are having the same shape and stride
-  std::array<uint64_t, 4> q_shape{b, h, s_q, d};
-  std::array<uint64_t, 4> kv_shape{b, hg, s_kv, d};
   
   // First b*h*sq*sizeof(float) in workspace are for lse
   // The next section are for dq_acc_ptr
@@ -481,7 +476,6 @@ void fused_attn_ck_bwd_impl(
   // default values follows the ck example setting
   bool nvte_ck_uses_bwd_v3 = getenv<int>("NVTE_CK_USES_BWD_V3", 0);
   bool nvte_ck_is_v3_atomic_fp32 = getenv<int>("NVTE_CK_IS_V3_ATOMIC_FP32", 1);
-  bool nvte_ck_is_v3_spec = getenv<int>("NVTE_CK_IS_V3_SPEC", 0);
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
 
   if (nvte_log_ck_config) {
@@ -543,7 +537,6 @@ void fused_attn_ck_bwd_impl(
       deterministic,
       nvte_ck_uses_bwd_v3,
       nvte_ck_is_v3_atomic_fp32,
-      nvte_ck_is_v3_spec,
       nvte_ck_how_v3_bf16_cvt,
       stream));
 }

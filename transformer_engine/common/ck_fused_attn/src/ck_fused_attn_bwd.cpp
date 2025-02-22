@@ -209,7 +209,6 @@ hipError_t ck_attn_bwd(
   bool deterministic,
   bool uses_bwd_v3,
   bool is_v3_atomic_fp32,
-  bool is_v3_spec,
   int how_v3_bf16_cvt,
   hipStream_t stream){
 
@@ -288,7 +287,6 @@ hipError_t ck_attn_bwd(
                     s_randval, deterministic, 
                     uses_bwd_v3, // use_bwd_v3
                     is_v3_atomic_fp32, // is_v3_atomic_fp32
-                    is_v3_spec, // is_v3_spec
                     how_v3_bf16_cvt //how_v3_bf16_cvt 0:RTNE; 1:RTNA; 2:RTZ
                     };
 
@@ -439,7 +437,6 @@ hipError_t ck_attn_bwd(
     std::cout<<"is_deterministic: "<<fmha_traits.is_deterministic<<std::endl;
     std::cout<<"uses_bwd_v3: "<<fmha_traits.uses_bwd_v3<<std::endl;
     std::cout<<"is_v3_atomic_fp32: "<<fmha_traits.is_v3_atomic_fp32<<std::endl;
-    std::cout<<"is_v3_spec: "<<fmha_traits.is_v3_spec<<std::endl;
     std::cout<<"how_v3_bf16_cvt: "<<fmha_traits.how_v3_bf16_cvt<<std::endl;
 
     // fmha_args debug
