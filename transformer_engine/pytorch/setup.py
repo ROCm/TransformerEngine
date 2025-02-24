@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -58,7 +58,7 @@ if __name__ == "__main__":
         description="Transformer acceleration library - Torch Lib",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
-        install_requires=[] if rocm_build() else ["torch", "flash-attn>=2.0.6,<=2.6.3,!=2.0.9,!=2.1.0"],
+        install_requires=[] if rocm_build() else ["torch"],
         tests_require=[] if rocm_build() else ["numpy", "onnxruntime", "torchvision"],
     )
     if any(x in sys.argv for x in (".", "sdist", "bdist_wheel")):

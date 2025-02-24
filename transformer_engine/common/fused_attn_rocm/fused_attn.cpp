@@ -230,7 +230,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     if (env_p != nullptr && std::string(env_p) == "0")
       nvte_fused_attn_aotriton = false;
   }
-   
+
   // fix the incompatible window size from upstream frameworks pytorch/jax
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
 
