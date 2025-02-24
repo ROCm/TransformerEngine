@@ -110,7 +110,7 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     if not found_cmake():
         setup_reqs.append("cmake>=3.21")
     if not found_ninja():
-        setup_reqs.append("ninja")
+        setup_reqs.append("ninja>=1.10")
     if not found_pybind11():
         setup_reqs.append("pybind11")
 
