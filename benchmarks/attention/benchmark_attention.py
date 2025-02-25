@@ -51,7 +51,7 @@ model_configs = {
     "test_3": ModelConfig(2, 32, 4, 128, 8192, 8192, 0.0, "causal", "no_bias"),  # GQA
 }
 
-
+# Runs for warmup iterations and started profiling using rocprof
 def benchmark_dot_product_attention(model, attention, column_name, filename):
     config = model_configs[model]
 
@@ -87,6 +87,7 @@ def benchmark_dot_product_attention(model, attention, column_name, filename):
         print("Error: results.stats.csv not found!")
     torch.cuda.empty_cache()
     
+# Profiler helper function for rocprof
 def benchmark_dot_product_attention_profiler(model, attention, column_name):
     config = model_configs[model]
     torch.cuda.synchronize()
@@ -126,6 +127,8 @@ def parse_helper(filename, fwd_search_pattern, bwd_search_pattern, column_name, 
 
     return df_times
 
+# Parser function to parse the results.stats file form rocprof
+# This function gathers Avg timing information for both Fwd and Bwd Kernels.
 def parse_results(per_cudnn, per_flash, model):
     df_times = pd.read_csv("times.csv")
     row = len(df_times.index) - 1
@@ -159,6 +162,7 @@ def parse_results(per_cudnn, per_flash, model):
 
 
 def main():
+    # Creating the required columns to benchmark
     times = pd.DataFrame(
         columns=[
             "FusedAttention Module",
@@ -190,6 +194,7 @@ def main():
         f"sm{device_properties.major}{device_properties.minor} compute capability, "
         f"{device_properties.total_memory/1024**3:.1f}GB memory"
     )
+    # Benchmarking starts..
     for model in model_configs.keys():
         config = model_configs[model]
         available_backends, fused_attn_backends = _get_attention_backends(
@@ -202,16 +207,20 @@ def main():
         flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
     
         if not(fused_attn_supported or flash_attn_supported):
+            print("No attention backend's detected for ",model)
             continue
+
         print(
             f'Running {model} with {"cuDNN attention" if fused_attn_supported else ""}'
             f'{" and flash-attention" if flash_attn_supported else ""}...'
         )
+        # Initialize the row for current model
         df = pd.read_csv("times.csv")
         new_row = [0.0] * len(df.columns)
         df = pd.concat([df, pd.DataFrame([new_row], columns=df.columns)], ignore_index=True)
         df.to_csv("times.csv", index=False)
 
+        # Benchmark for each attention backend
         if flash_attn_supported:
             benchmark_dot_product_attention(model, "FlashAttention", "FlashAttention Module", f"prof_flash_{model}.csv")
         
@@ -249,6 +258,7 @@ def main():
             num_kernels_cudnn = 0
         num_kernels_flash = 4 if flash_attn_supported else 0
         
+        # Parser to populate csv file
         parse_results(num_kernels_cudnn, num_kernels_flash, model)
         
     df_times = pd.read_csv("times.csv")
