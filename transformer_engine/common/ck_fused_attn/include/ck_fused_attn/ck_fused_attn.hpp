@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
@@ -99,7 +99,6 @@ hipError_t ck_attn_bwd(
   bool deterministic,
   bool uses_bwd_v3,
   bool is_v3_atomic_fp32,
-  bool is_v3_spec,
   int how_v3_bf16_cvt,
   hipStream_t stream);
 

@@ -19,15 +19,16 @@ set(__CK_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/composable_kern
 #fwd kernels list
 execute_process(
   COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
-  --api fwd --list_blobs ${CMAKE_CURRENT_BINARY_DIR}/gen_src/blob_list.txt
+  --api fwd --list_blobs ${CMAKE_CURRENT_BINARY_DIR}/gen_src/fwd_blob_list.txt
 )
 #bwd kernels list
 execute_process(
   COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
-  --api bwd --list_blobs ${CMAKE_CURRENT_BINARY_DIR}/gen_src/blob_list.txt --receipt 3
+  --api bwd --list_blobs ${CMAKE_CURRENT_BINARY_DIR}/gen_src/bwd_blob_list.txt --receipt 3
 )
 
-file(STRINGS ${CMAKE_CURRENT_BINARY_DIR}/gen_src/blob_list.txt FMHA_GEN_BLOBS)
+file(STRINGS ${CMAKE_CURRENT_BINARY_DIR}/gen_src/fwd_blob_list.txt FMHA_FWD_GEN_BLOBS)
+file(STRINGS ${CMAKE_CURRENT_BINARY_DIR}/gen_src/bwd_blob_list.txt FMHA_BWD_GEN_BLOBS)
 
 # generate the actual fwd kernel cpp files
 execute_process(
@@ -48,11 +49,17 @@ list(APPEND ck_fused_attn_SOURCES
        src/ck_fused_attn_utils.cpp)
 
 # Update all new and modified kernels and add to ck_fused_attn
-foreach(blob ${FMHA_GEN_BLOBS})
+foreach(blob ${FMHA_FWD_GEN_BLOBS})
   file(RELATIVE_PATH blob_path ${CMAKE_CURRENT_BINARY_DIR}/gen_src ${blob})
   file(COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp/${blob_path} ${blob} ONLY_IF_DIFFERENT)
 endforeach()
-list(APPEND ck_fused_attn_SOURCES ${FMHA_GEN_BLOBS})
+list(APPEND ck_fused_attn_SOURCES ${FMHA_FWD_GEN_BLOBS})
+foreach(blob ${FMHA_BWD_GEN_BLOBS})
+  file(RELATIVE_PATH blob_path ${CMAKE_CURRENT_BINARY_DIR}/gen_src ${blob})
+  file(COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp/${blob_path} ${blob} ONLY_IF_DIFFERENT)
+endforeach()
+list(APPEND ck_fused_attn_SOURCES ${FMHA_BWD_GEN_BLOBS})
+
 # remove all previously generated temporary files
 file(REMOVE_RECURSE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp)
 
