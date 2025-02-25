@@ -71,7 +71,7 @@ def remove_dups(_list: List):
 def found_cmake() -> bool:
     """ "Check if valid CMake is available
 
-    CMake 3.21 or newer is required.
+    CMake 3.18 or newer is required.
 
     """
 
@@ -91,7 +91,7 @@ def found_cmake() -> bool:
     match = re.search(r"version\s*([\d.]+)", output.stdout)
     version = match.group(1).split(".")
     version = tuple(int(v) for v in version)
-    return version >= (3, 21)
+    return version >= (3, 18)
 
 
 def cmake_bin() -> Path:
@@ -125,21 +125,8 @@ def cmake_bin() -> Path:
 
 
 def found_ninja() -> bool:
-    """ "Check if Ninja is available
-
-    Ninja 1.10 or newer is required.
-
-    """
-    _ninja_bin = shutil.which("ninja")
-    # Query Ninja for version info
-    output = subprocess.run(
-        [_ninja_bin, "--version"],
-        capture_output=True,
-        check=True,
-        universal_newlines=True,
-    )
-    version = tuple(int(v) for v in output.stdout.split("."))
-    return version >= (1, 10)
+    """ "Check if Ninja is available"""
+    return shutil.which("ninja") is not None
 
 
 def found_pybind11() -> bool:
