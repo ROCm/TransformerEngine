@@ -188,7 +188,7 @@ This ability is controlled by environment variables when call GEMM operation wit
 * TE_HIPBLASLT_TUNING_RUN_COUNT - number of profiling loops for algorithm auto-selection; default=0 which means no auto-selection. For small tasks where run-to-run time variation is relatively high, using higher number of loops may give better auto-selection results.
 * TE_HIPBLASLT_TUNING_ALGO_COUNT - maximal number of algorithms to check when auto-selection is enabled; default=16.
 * TE_HIPBLASLT_ALGO_LOAD - filename of algorithm selection data saved by previous GEMM operation runs; if file does not exist, algorithm selection logic proceeds as if no filename were specified
-* TE_HIPBLASLT_ALGO_SAVE - filename to save algorithm selection data to; can be the same as a filename to load in which case the file will be read first and then overwritten with updated results
+* TE_HIPBLASLT_ALGO_SAVE - filename to save algorithm selection data to; filename may contain %i, that is replaced with the process ID; can be the same as a filename to load in which case the file will be read first and then overwritten with updated results
 
 It is not guaranteed that algorithm selection data file created with one version of TE or hipBlasLt will work with other versions. Even if it works, it is highly recommended to perform algorithm selection tuning again when switch to new libraries versions because new hipBLASLt may have new optimized algorithms.
 
