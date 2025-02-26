@@ -4,7 +4,7 @@
 # 
 # See LICENSE for license information.
 
-import os, sys, time
+import os, sys, time, shutil
 import subprocess
 import pandas as pd
 import numpy as np
@@ -14,11 +14,10 @@ import transformer_engine
 from transformer_engine_torch import NVTE_Fused_Attn_Backend
 
 cwd = os.getcwd()
-if "benchmark" in cwd:
-    trimmed_path = cwd[:cwd.index("benchmark")]
+if "TransformerEngine" in cwd:
+    index = cwd.index("TransformerEngine") + len("TransformerEngine")
+    trimmed_path = cwd[:index]
     sys.path.append(trimmed_path)
-else:
-    sys.path.append(cwd)
 
 from tests.pytorch.fused_attn.test_fused_attn import (
     ModelConfig,
@@ -51,6 +50,28 @@ model_configs = {
     "test_3": ModelConfig(2, 32, 4, 128, 8192, 8192, 0.0, "causal", "no_bias"),  # GQA
 }
 
+indices = [model for model in model_configs.keys()]
+columns = [
+        "FusedAttention Module",
+        "FusedAttention Kernels (fwd)",
+        "FusedAttention Kernels (bwd)",
+        "FusedAttention Kernels (fwd+bwd)",
+        "FlashAttention Module",
+        "FlashAttention Kernels (fwd)",
+        "FlashAttention Kernels (bwd)",
+        "FlashAttention Kernels (fwd+bwd)",
+        "Fused vs Flash Kernels Speedup (fwd+bwd)",
+        "FusedAttention CK Module",
+        "FusedAttention CK Kernels (fwd)",
+        "FusedAttention CK Kernels (bwd)",
+        "FusedAttention CK Kernels (fwd+bwd)",
+        "FusedAttention AOTriton Module",
+        "FusedAttention AOTriton Kernels (fwd)",
+        "FusedAttention AOTriton Kernels (bwd)",
+        "FusedAttention AOTriton Kernels (fwd+bwd)",
+    ]
+
+output_csv="times.csv"
 # Runs for warmup iterations and started profiling using rocprof
 def benchmark_dot_product_attention(model, attention, column_name, filename):
     config = model_configs[model]
@@ -74,15 +95,15 @@ def benchmark_dot_product_attention(model, attention, column_name, filename):
             "--basenames off",
             "python",
             "-c",
-            f""" "import benchmark_attention_amd;""",
-            f"""benchmark_attention_amd.benchmark_dot_product_attention_profiler("""
+            f""" "import benchmark_attention_rocm;""",
+            f"""benchmark_attention_rocm.benchmark_dot_product_attention_profiler("""
             f"""'{model}', '{attention}', '{column_name}')" """,
         ]
     prof_cmd = " ".join(prof_cmd)
     subprocess.call(prof_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=True)
 
     if os.path.exists("results.stats.csv"):
-        os.rename("results.stats.csv", filename)
+        shutil.move("results.stats.csv", filename)
     else:
         print("Error: results.stats.csv not found!")
     torch.cuda.empty_cache()
@@ -107,85 +128,59 @@ def benchmark_dot_product_attention_profiler(model, attention, column_name):
     torch.cuda.synchronize()
     attn_time = time.time() - attn_start
 
-    df = pd.read_csv("times.csv")
-    last_row_index = len(df) - 1
-    df.loc[last_row_index, column_name] = attn_time * 1e3 / num_iters
-    df.to_csv("times.csv", index=False)
+    df_times = pd.read_csv(output_csv, index_col=0)
+    df_times.loc[model, column_name] = attn_time * 1e3 / num_iters
+    df_times.to_csv(output_csv)
     torch.cuda.empty_cache()
 
-def parse_helper(filename, fwd_search_pattern, bwd_search_pattern, column_name, df_times):
-    row = len(df_times.index) - 1
-    df = pd.read_csv(os.path.join("./", filename))
+def parse_helper(model, filename, fwd_search_pattern, bwd_search_pattern, column_name, df_times):
+    df = pd.read_csv(filename)
     
     t_attn_avg = np.empty(4)
     t_attn_avg[0] = df[df["Name"].str.contains(fwd_search_pattern)]["AverageNs"].to_numpy()
     t_attn_avg[1:4] = df[df["Name"].str.contains(bwd_search_pattern)]["AverageNs"].to_numpy()
     
-    df_times.loc[row, f"{column_name} Kernels (fwd)"] = t_attn_avg[0] / 1e6
-    df_times.loc[row, f"{column_name} Kernels (bwd)"] = t_attn_avg[1:4].sum() / 1e6
-    df_times.loc[row, f"{column_name} Kernels (fwd+bwd)"] = t_attn_avg.sum() / 1e6
-
-    return df_times
+    df_times.loc[model, f"{column_name} Kernels (fwd)"] = t_attn_avg[0] / 1e6
+    df_times.loc[model, f"{column_name} Kernels (bwd)"] = t_attn_avg[1:4].sum() / 1e6
+    df_times.loc[model, f"{column_name} Kernels (fwd+bwd)"] = t_attn_avg.sum() / 1e6
 
 # Parser function to parse the results.stats file form rocprof
 # This function gathers Avg timing information for both Fwd and Bwd Kernels.
-def parse_results(per_cudnn, per_flash, model):
-    df_times = pd.read_csv("times.csv")
-    row = len(df_times.index) - 1
+def parse_results(model, df_times, filename_flash_attn, filename_fused_attn, filename_fused_ck, filename_fused_aotriton):
+    if os.path.exists(filename_flash_attn):
+        parse_helper(model, filename_flash_attn, "FmhaFwd", "FmhaBwd", "FlashAttention", df_times)
 
-    if per_cudnn > 0:
-        # FUSED
-        filename = f"prof_fused_{model}.csv"
-        df_times = parse_helper(filename, "FmhaFwd", "FmhaBwd", "FusedAttention", df_times)
+    if os.path.exists(filename_fused_attn):
+        parse_helper(model, filename_fused_attn, "FmhaFwd", "FmhaBwd", "FusedAttention", df_times)
 
-        #CK
-        filename = f"prof_fused_ck_{model}.csv"
-        if os.path.exists(filename):
-            df_times = parse_helper(filename, "FmhaFwd", "FmhaBwd", "FusedAttention CK", df_times)
-        
-        #AOTriton
-        filename = f"prof_fused_aotriton_{model}.csv"
-        if os.path.exists(filename):
-            df_times = parse_helper(filename, "attn_fwd", "bwd", "FusedAttention AOTriton", df_times)
-        
-    #FLASH
-    if per_flash > 0:
-        filename = f"prof_flash_{model}.csv"
-        df_times = parse_helper(filename, "FmhaFwd", "FmhaBwd", "FlashAttention", df_times)
-        
-    if per_cudnn > 0 and per_flash > 0:
-        df_times.loc[row, "Fused vs Flash Kernels Speedup (fwd+bwd)"] = (
-            df_times.loc[row, "FlashAttention Kernels (fwd+bwd)"]
-            / df_times.loc[row, "FusedAttention Kernels (fwd+bwd)"]
+    if os.path.exists(filename_fused_ck):
+        parse_helper(model, filename_fused_ck, "FmhaFwd", "FmhaBwd", "FusedAttention CK", df_times)
+
+    if os.path.exists(filename_fused_aotriton):
+        parse_helper(model, filename_fused_aotriton, "attn_fwd", "bwd", "FusedAttention AOTriton", df_times)
+
+    if os.path.exists(filename_flash_attn) and os.path.exists(filename_fused_attn):
+        df_times.loc[model, "Fused vs Flash Kernels Speedup (fwd+bwd)"] = (
+            df_times.loc[model, "FlashAttention Kernels (fwd+bwd)"]
+            / df_times.loc[model, "FusedAttention Kernels (fwd+bwd)"]
         )
-    df_times.to_csv("times.csv", index=False)
 
 
 def main():
-    # Creating the required columns to benchmark
-    times = pd.DataFrame(
-        columns=[
-            "FusedAttention Module",
-            "FusedAttention Kernels (fwd)",
-            "FusedAttention Kernels (bwd)",
-            "FusedAttention Kernels (fwd+bwd)",
-            "FlashAttention Module",
-            "FlashAttention Kernels (fwd)",
-            "FlashAttention Kernels (bwd)",
-            "FlashAttention Kernels (fwd+bwd)",
-            "Fused vs Flash Kernels Speedup (fwd+bwd)",
-            "FusedAttention CK Module ",
-            "FusedAttention CK Kernels (fwd)",
-            "FusedAttention CK Kernels (bwd)",
-            "FusedAttention CK Kernels (fwd+bwd)",
-            "FusedAttention AOTriton Module",
-            "FusedAttention AOTriton Kernels (fwd)",
-            "FusedAttention AOTriton Kernels (bwd)",
-            "FusedAttention AOTriton Kernels (fwd+bwd)",
-        ]
-    )
-    times.to_csv("times.csv", index=False)
+    
+    output_dir = "profiler_outputs/"
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir)
+    os.makedirs(output_dir)
+    
+    if (os.path.exists(output_csv)):
+        os.remove(output_csv)
 
+    df_times = pd.DataFrame(index=indices, columns=columns)
+    df_times.fillna(0.0, inplace=True)
+    df_times.index.name = "Model"
+    df_times.to_csv(output_csv)
+    
     device_id = torch.cuda.current_device()
     device_properties = torch.cuda.get_device_properties(device_id)
     print(
@@ -207,26 +202,22 @@ def main():
         flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
     
         if not(fused_attn_supported or flash_attn_supported):
-            print("No attention backend's detected for ",model)
+            print("No attention backend's detected for ", model)
             continue
 
         print(
             f'Running {model} with {"cuDNN attention" if fused_attn_supported else ""}'
             f'{" and flash-attention" if flash_attn_supported else ""}...'
         )
-        # Initialize the row for current model
-        df = pd.read_csv("times.csv")
-        new_row = [0.0] * len(df.columns)
-        df = pd.concat([df, pd.DataFrame([new_row], columns=df.columns)], ignore_index=True)
-        df.to_csv("times.csv", index=False)
-
+        
         # Benchmark for each attention backend
         if flash_attn_supported:
-            benchmark_dot_product_attention(model, "FlashAttention", "FlashAttention Module", f"prof_flash_{model}.csv")
-        
+            filename_flash_attn = os.path.join("profiler_outputs/", f"prof_flash_{model}.csv")
+            benchmark_dot_product_attention(model, "FlashAttention", "FlashAttention Module", filename_flash_attn)
+           
         if fused_attn_supported:
-            
-            benchmark_dot_product_attention(model, "FusedAttention", "FusedAttention Module", f"prof_fused_{model}.csv")
+            filename_fused_attn = os.path.join("profiler_outputs/", f"prof_fused_{model}.csv")
+            benchmark_dot_product_attention(model, "FusedAttention", "FusedAttention Module", filename_fused_attn)
             
             if NVTE_Fused_Attn_Backend.NVTE_CK in fused_attn_backends:
                 #CK Backend
@@ -234,33 +225,27 @@ def main():
                 # os.environ["NVTE_CK_USES_BWD_V3"] = "1"
                 os.environ["NVTE_FUSED_ATTN_CK"] = "1"
                 os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
-                benchmark_dot_product_attention(model, "FusedAttention", "FusedAttention CK Module", f"prof_fused_ck_{model}.csv")
+                os.environ["NVTE_FUSED_ATTN"] = "0"
+                filename_fused_ck = os.path.join("profiler_outputs/", f"prof_fused_ck_{model}.csv")
+                benchmark_dot_product_attention(model, "FusedAttention", "FusedAttention CK Module", filename_fused_ck)
+            # del os.environ["NVTE_CK_USES_BWD_V3"]
 
             if NVTE_Fused_Attn_Backend.NVTE_AOTriton in fused_attn_backends:
                 #AOTRITON Backend
                 os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
                 os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "1"
-                # os.environ["NVTE_CK_USES_BWD_V3"] = "0"
                 os.environ["NVTE_FUSED_ATTN_CK"] = "0"
-                benchmark_dot_product_attention(model, "FusedAttention", "FusedAttention AOTriton Module", f"prof_fused_aotriton_{model}.csv")
+                filename_fused_aotriton = os.path.join("profiler_outputs/", f"prof_fused_aotriton_{model}.csv")
+                benchmark_dot_product_attention(model, "FusedAttention", "FusedAttention AOTriton Module", filename_fused_aotriton)
 
             del os.environ["NVTE_FUSED_ATTN_CK"]
-            # del os.environ["NVTE_CK_USES_BWD_V3"]
             del os.environ["NVTE_FUSED_ATTN_AOTRITON"]
+            del os.environ["NVTE_FUSED_ATTN"]
 
-        if fused_attn_supported:
-            num_kernels_cudnn = 4
-            if config.attn_bias_type == "post_scale_bias":
-                num_kernels_cudnn = num_kernels_cudnn + 1
-            if config.num_heads != config.num_gqa_groups:
-                num_kernels_cudnn = num_kernels_cudnn + 2
-        else:
-            num_kernels_cudnn = 0
-        num_kernels_flash = 4 if flash_attn_supported else 0
-        
-        # Parser to populate csv file
-        parse_results(num_kernels_cudnn, num_kernels_flash, model)
-        
+        df_times = pd.read_csv("times.csv", index_col=0)
+        parse_results(model, df_times, filename_flash_attn, filename_fused_attn, filename_fused_ck, filename_fused_aotriton)
+        df_times.to_csv("times.csv")
+
     df_times = pd.read_csv("times.csv")
     df_times.index = list(model_configs.keys())
     a = df_times[
