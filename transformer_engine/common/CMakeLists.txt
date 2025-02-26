@@ -312,6 +312,7 @@ else()
   if(USE_FUSED_ATTN_CK)
     if(NOT DEFINED CK_FUSED_ATTN_PATH)
       set(CK_FUSED_ATTN_TARGET_GPUS ${CMAKE_HIP_ARCHITECTURES} CACHE STRING "Target arch to compile ck fused attn backend")
+      set(CK_FUSED_ATTN_INSTALL_PREFIX "transformer_engine" CACHE STRING "ck_fused_attn install prefix in TE")      
       add_subdirectory(ck_fused_attn ${CMAKE_CURRENT_BINARY_DIR}/ck_fused_attn)
     else()
       # Use CK built during initial TE building/installation
@@ -436,4 +437,4 @@ endif()
 
 # Install library
 install(TARGETS transformer_engine DESTINATION .)
-set_target_properties(transformer_engine PROPERTIES INSTALL_RPATH "$ORIGIN/lib")
+set_target_properties(transformer_engine PROPERTIES INSTALL_RPATH "$ORIGIN/lib;$ORIGIN/transformer_engine/lib")
