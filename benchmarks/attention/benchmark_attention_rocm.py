@@ -13,6 +13,7 @@ import nvtx
 import transformer_engine
 from transformer_engine_torch import NVTE_Fused_Attn_Backend
 
+# Ensure the working directory includes TransformerEngine in sys.path
 cwd = os.getcwd()
 if "TransformerEngine" in cwd:
     index = cwd.index("TransformerEngine") + len("TransformerEngine")
@@ -50,6 +51,7 @@ model_configs = {
     "test_3": ModelConfig(2, 32, 4, 128, 8192, 8192, 0.0, "causal", "no_bias"),  # GQA
 }
 
+# Define DataFrame indices and columns
 indices = [model for model in model_configs.keys()]
 columns = [
         "FusedAttention Module",
@@ -72,7 +74,8 @@ columns = [
     ]
 
 output_csv="times.csv"
-# Runs for warmup iterations and started profiling using rocprof
+
+# Runs benchmark with warmup iterations and profiles using rocprof
 def benchmark_dot_product_attention(model, attention, column_name, filename):
     config = model_configs[model]
 
@@ -88,7 +91,7 @@ def benchmark_dot_product_attention(model, attention, column_name, filename):
                 pad_between_seqs,
                 is_training,
             )
-        
+    # Profiling command using rocprof
     prof_cmd = [
             "rocprof",
             "--hip-trace",
@@ -108,7 +111,7 @@ def benchmark_dot_product_attention(model, attention, column_name, filename):
         print("Error: results.stats.csv not found!")
     torch.cuda.empty_cache()
     
-# Profiler helper function for rocprof
+# Runs profiler and records timing information
 def benchmark_dot_product_attention_profiler(model, attention, column_name):
     config = model_configs[model]
     torch.cuda.synchronize()
@@ -133,33 +136,37 @@ def benchmark_dot_product_attention_profiler(model, attention, column_name):
     df_times.to_csv(output_csv)
     torch.cuda.empty_cache()
 
+# Helper function to extract timing results from profiler logs
 def parse_helper(model, filename, fwd_search_pattern, bwd_search_pattern, column_name, df_times):
     df = pd.read_csv(filename)
-    
-    t_attn_avg = np.empty(4)
-    t_attn_avg[0] = df[df["Name"].str.contains(fwd_search_pattern)]["AverageNs"].to_numpy()
-    t_attn_avg[1:4] = df[df["Name"].str.contains(bwd_search_pattern)]["AverageNs"].to_numpy()
-    
-    df_times.loc[model, f"{column_name} Kernels (fwd)"] = t_attn_avg[0] / 1e6
-    df_times.loc[model, f"{column_name} Kernels (bwd)"] = t_attn_avg[1:4].sum() / 1e6
+
+    # Extract kernel timing values    
+    fwd_values = df[df["Name"].str.contains(fwd_search_pattern)]["AverageNs"].to_numpy()
+    bwd_values = df[df["Name"].str.contains(bwd_search_pattern)]["AverageNs"].to_numpy()
+    t_attn_avg = np.empty(len(fwd_values) + len(bwd_values))
+    t_attn_avg[:len(fwd_values)] = fwd_values
+    t_attn_avg[len(fwd_values):] = bwd_values
+
+    # Store results in DataFrame
+    df_times.loc[model, f"{column_name} Kernels (fwd)"] = t_attn_avg[:len(fwd_values)].sum() / 1e6
+    df_times.loc[model, f"{column_name} Kernels (bwd)"] = t_attn_avg[len(fwd_values):].sum() / 1e6
     df_times.loc[model, f"{column_name} Kernels (fwd+bwd)"] = t_attn_avg.sum() / 1e6
 
-# Parser function to parse the results.stats file form rocprof
-# This function gathers Avg timing information for both Fwd and Bwd Kernels.
+# Parses profiler logs for different attention backends
 def parse_results(model, df_times, filename_flash_attn, filename_fused_attn, filename_fused_ck, filename_fused_aotriton):
-    if os.path.exists(filename_flash_attn):
+    if filename_flash_attn:
         parse_helper(model, filename_flash_attn, "FmhaFwd", "FmhaBwd", "FlashAttention", df_times)
 
-    if os.path.exists(filename_fused_attn):
+    if filename_fused_attn:
         parse_helper(model, filename_fused_attn, "FmhaFwd", "FmhaBwd", "FusedAttention", df_times)
 
-    if os.path.exists(filename_fused_ck):
+    if filename_fused_ck:
         parse_helper(model, filename_fused_ck, "FmhaFwd", "FmhaBwd", "FusedAttention CK", df_times)
 
-    if os.path.exists(filename_fused_aotriton):
+    if filename_fused_aotriton:
         parse_helper(model, filename_fused_aotriton, "attn_fwd", "bwd", "FusedAttention AOTriton", df_times)
 
-    if os.path.exists(filename_flash_attn) and os.path.exists(filename_fused_attn):
+    if filename_flash_attn and filename_fused_attn:
         df_times.loc[model, "Fused vs Flash Kernels Speedup (fwd+bwd)"] = (
             df_times.loc[model, "FlashAttention Kernels (fwd+bwd)"]
             / df_times.loc[model, "FusedAttention Kernels (fwd+bwd)"]
@@ -177,6 +184,7 @@ def main():
         os.remove(output_csv)
 
     df_times = pd.DataFrame(index=indices, columns=columns)
+    df_times = df_times.infer_objects(copy=False)
     df_times.fillna(0.0, inplace=True)
     df_times.index.name = "Model"
     df_times.to_csv(output_csv)
@@ -200,7 +208,7 @@ def main():
             pad_between_seqs=pad_between_seqs,
         )
         flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
-    
+
         if not(fused_attn_supported or flash_attn_supported):
             print("No attention backend's detected for ", model)
             continue
@@ -209,7 +217,8 @@ def main():
             f'Running {model} with {"cuDNN attention" if fused_attn_supported else ""}'
             f'{" and flash-attention" if flash_attn_supported else ""}...'
         )
-        
+
+        filename_flash_attn, filename_fused_attn, filename_fused_ck, filename_fused_aotriton = None, None, None, None
         # Benchmark for each attention backend
         if flash_attn_supported:
             filename_flash_attn = os.path.join("profiler_outputs/", f"prof_flash_{model}.csv")
@@ -222,13 +231,13 @@ def main():
             if NVTE_Fused_Attn_Backend.NVTE_CK in fused_attn_backends:
                 #CK Backend
                 os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "0"
-                # os.environ["NVTE_CK_USES_BWD_V3"] = "1"
+                os.environ["NVTE_CK_USES_BWD_V3"] = "1"
                 os.environ["NVTE_FUSED_ATTN_CK"] = "1"
                 os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
                 os.environ["NVTE_FUSED_ATTN"] = "0"
                 filename_fused_ck = os.path.join("profiler_outputs/", f"prof_fused_ck_{model}.csv")
                 benchmark_dot_product_attention(model, "FusedAttention", "FusedAttention CK Module", filename_fused_ck)
-            # del os.environ["NVTE_CK_USES_BWD_V3"]
+            del os.environ["NVTE_CK_USES_BWD_V3"]
 
             if NVTE_Fused_Attn_Backend.NVTE_AOTriton in fused_attn_backends:
                 #AOTRITON Backend
