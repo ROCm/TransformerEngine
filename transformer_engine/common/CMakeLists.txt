@@ -19,7 +19,7 @@ if (USE_ROCM)
   if( ((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) )
     message("Using AMD Platform")
   else()
-    message(FATAL_ERROR "Could not find HIPCC at '/opt/rocm'")
+    message(FATAL_ERROR "Could not find ROCm installation")
   endif()
     
   if (NOT USE_HIPBLASLT AND NOT USE_ROCBLAS)
@@ -28,12 +28,12 @@ if (USE_ROCM)
 
 else()
   #Check if CUDA exists
-  if (EXISTS "/bin/nvcc")
+  if (EXISTS "$ENV{CUDA_HOME}/bin/nvcc")
     set(USE_ROCM OFF)
     set(USE_CUDA ON)
     message("Using NVIDIA Platform")
   else()
-    message(FATAL_ERROR "Could not find NVCC at '/bin/nvcc'")
+    message(FATAL_ERROR "Could not find NVCC at '$ENV{CUDA_HOME}/bin/nvcc'")
   endif()
   
 endif()
