@@ -8,12 +8,6 @@ project(ck_fused_attn LANGUAGES HIP CXX)
 
 set(CK_FUSED_ATTN_TARGET_GPUS "gfx942" CACHE STRING "Target Architecture to build ck_fused_attn backend")
 
-if (CK_FUSED_ATTN_INSTALL_PREFIX)
-  set(_CK_FUSED_ATTN_INSTALL_PREFIX ${CK_FUSED_ATTN_INSTALL_PREFIX}/ )
-else()
-  set(_CK_FUSED_ATTN_INSTALL_PREFIX . )
-endif()
-
 # remove files that should be regenerated
 file(REMOVE_RECURSE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp ${CMAKE_CURRENT_BINARY_DIR}/gen_src/blob_list.txt)
 
@@ -102,8 +96,3 @@ find_package(hip)
 list(APPEND ck_fused_attn_LINKER_LIBS hip::host hip::device roctx64)
 target_link_libraries(ck_fused_attn PUBLIC ${ck_fused_attn_LINKER_LIBS})
 target_compile_options(ck_fused_attn PRIVATE ${CK_FUSED_ATTN_COMPILE_OPTIONS})
-
-include(GNUInstallDirs)
-message("CMAKE_INSTALL_INCLUDEDIR ${CMAKE_INSTALL_INCLUDEDIR}")
-install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/ck_fused_attn" DESTINATION ${CMAKE_INSTALL_PREFIX}/${_CK_FUSED_ATTN_INSTALL_PREFIX}/${CMAKE_INSTALL_INCLUDEDIR})
-install(TARGETS ck_fused_attn DESTINATION ${CMAKE_INSTALL_PREFIX}/${_CK_FUSED_ATTN_INSTALL_PREFIX}/lib)
