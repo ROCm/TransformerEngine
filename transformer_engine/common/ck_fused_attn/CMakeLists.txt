@@ -96,8 +96,3 @@ find_package(hip)
 list(APPEND ck_fused_attn_LINKER_LIBS hip::host hip::device roctx64)
 target_link_libraries(ck_fused_attn PUBLIC ${ck_fused_attn_LINKER_LIBS})
 target_compile_options(ck_fused_attn PRIVATE ${CK_FUSED_ATTN_COMPILE_OPTIONS})
-
-include(GNUInstallDirs)
-message("CMAKE_INSTALL_INCLUDEDIR ${CMAKE_INSTALL_INCLUDEDIR}")
-install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/ck_fused_attn" DESTINATION ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_INCLUDEDIR})
-install(TARGETS ck_fused_attn DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)

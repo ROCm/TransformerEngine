@@ -436,4 +436,4 @@ endif()
 
 # Install library
 install(TARGETS transformer_engine DESTINATION .)
-set_target_properties(transformer_engine PROPERTIES INSTALL_RPATH "$ORIGIN/lib")
+set_target_properties(transformer_engine PROPERTIES INSTALL_RPATH "$ORIGIN/lib;$ORIGIN/transformer_engine/lib")
