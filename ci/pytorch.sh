@@ -60,9 +60,11 @@ run_test_config(){
     run 1 test_sanity.py
     run_default_fa 1 test_torch_save_load.py
     run_default_fa 1 fused_attn/test_fused_attn.py # Backend selection is controlled by the test
-    run_default_fa 1 triton_kernels/test_cast_transpose_triton.py
-    run_default_fa 1 triton_kernels/test_rmsnorm_triton.py
-    NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 run_default_fa 1 test_numerics.py
+    if [ $_gemm = "hipblaslt" ]; then
+        run_default_fa 1 triton_kernels/test_cast_transpose_triton.py
+        run_default_fa 1 triton_kernels/test_rmsnorm_triton.py
+        NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 run_default_fa 3 test_numerics.py
+    fi
 }
 
 run_test_config_mgpu(){
@@ -113,15 +115,15 @@ for _gemm in hipblaslt rocblas; do
         fi
 
         if [ -n "$TEST_JOBS_MODE" ]; then
-            run_test_job "$_gemm-$_fus_attn"
+            test -n "$TEST_SGPU" && run_test_job "$_gemm-$_fus_attn"
         else
-            run_test_config
-            run_test_config_mgpu
+            test -n "$TEST_SGPU" && run_test_config
+            test -n "$TEST_MGPU" && run_test_config_mgpu
         fi
     done
 done
 
-if [ -n "$TEST_JOBS_MODE" ]; then
+if [ -n "$TEST_JOBS_MODE" -a -n "$TEST_MGPU" ]; then
     finish_test_jobs
     for _cfg in $(get_test_config_list); do
         _gemm=`echo $_cfg | cut -d- -f1`
