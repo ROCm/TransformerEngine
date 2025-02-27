@@ -7,6 +7,7 @@
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/transformer_engine.h>
 #ifdef USE_HIPBLASLT
+#include <unistd.h>
 #include <vector>
 #include <forward_list>
 #include <mutex>
@@ -893,13 +894,23 @@ protected:
   {
     if (!save_fs)
     {
-        save_fs_name = std::getenv("TE_HIPBLASLT_ALGO_SAVE");
-        if (save_fs_name == nullptr || save_fs_name[0] == '\0')
-        {
-          return false;
-        }
-        save_fs = std::make_unique<std::ofstream>();
-        std::cout << "Saving autotune results to " << save_fs_name << "\n";
+      const char* temp = std::getenv("TE_HIPBLAS_ALGO_SAVE");
+      if (temp == nullptr || temp[0] == '\0')
+      {
+        return false;
+      }
+
+      save_fs_name = temp;
+
+      pid_t pid = getpid();
+
+      size_t pos = 0;
+      while ((pos = save_fs_name.find("%i", pos)) != std::string::npos) {
+        save_fs_name.replace(pos, 2, std::to_string(pid));
+      }
+
+      save_fs = std::make_unique<std::ofstream>();
+      std::cout << "Saving autotune results to " << save_fs_name << "\n";
     }
 
     if (reopen)
@@ -957,7 +968,7 @@ private:
   std::vector<int> dev_cap;
   constexpr static char csv_sep = ','; 
   std::unique_ptr<std::ofstream> save_fs;
-  const char *save_fs_name;
+  std::string save_fs_name;
   std::mutex mt;
   /* Map of problem config to tuple of ws_size and Algo
    * When searching, elements matching Key are filtered 
