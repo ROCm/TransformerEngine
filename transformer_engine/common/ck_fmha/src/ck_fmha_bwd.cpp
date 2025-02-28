@@ -183,7 +183,7 @@ void ck_fused_attn_bwd_impl(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64
         traits.is_deterministic  = deterministic;
         traits.uses_bwd_v3       = bwd_v3;
         traits.is_v3_atomic_fp32 = v3_atomic_fp32;
-        traits.is_v3_spec        = v3_spec;
+/*        traits.is_v3_spec        = v3_spec;   */
         traits.how_v3_bf16_cvt   = v3_bf16_cvt;
     };
 
