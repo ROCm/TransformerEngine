@@ -1889,6 +1889,9 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
             y_sbhd.transpose(0, 1).contiguous(),
         )
 
+    # in ROCm TE, THD only supported with ck backend
+    if IS_HIP_EXTENSION and os.getenv("NVTE_FUSED_ATTN_CK", "1") == "0":
+        return 
     # THD is not supported in float32 and on GPUs older than Ampere, skip the test here
     if dtype != torch.float32 and (IS_HIP_EXTENSION or sm_80plus):
         # To make sure forward is also identical (just in case some module decides

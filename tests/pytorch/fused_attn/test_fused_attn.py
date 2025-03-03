@@ -676,15 +676,12 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, pad_between
         dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
     )
 
-# ROCm specific pytests, not in upstream NVTE repo
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_layout_thd])
 @pytest.mark.parametrize("model", model_configs_layout_thd.keys())
 @pytest.mark.parametrize("qkv_layout", qkv_layouts_thd)
 def test_dpa_qkv_layout_thd_mqa_gqa(dtype, model_configs, model, qkv_layout):
-    if (not IS_HIP_EXTENSION):
-        pytest.skip("ROCm specific pytests.");
-
     def find_factors(x):
         f = []
         for i in range(2, x + 1):
