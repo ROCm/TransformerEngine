@@ -894,7 +894,7 @@ protected:
   {
     if (!save_fs)
     {
-      const char* temp = std::getenv("TE_HIPBLAS_ALGO_SAVE");
+      const char* temp = std::getenv("TE_HIPBLASLT_ALGO_SAVE");
       if (temp == nullptr || temp[0] == '\0')
       {
         return false;
