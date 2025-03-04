@@ -50,6 +50,14 @@ const std::string &sm_arch_name(int device_id = -1);
  */
 int sm_count(int device_id = -1);
 
+/* \brief CUDA Multicast support status for device
+ *
+ * \param[in] device_id CUDA device (default is current device)
+ *
+ * \return CUDA multicast support flag
+ */
+bool supports_multicast(int device_id = -1);
+
 #ifndef __HIP_PLATFORM_AMD__
 /* \brief Path to CUDA Toolkit headers
  *

@@ -121,7 +121,8 @@ model_configs_fused_attn = {
 @pytest.mark.parametrize("model", model_configs_fused_attn.keys())
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
 @pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a", "a2a+p2p"])
-def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type):
+@pytest.mark.parametrize("fp8_mha", [False, True])
+def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha):
     if IS_HIP_EXTENSION and qkv_format == "thd":
         pytest.skip("THD format has not been supported on ROCm yet!")
     if qkv_format == "thd" and get_device_compute_capability() < (9, 0):
@@ -165,6 +166,8 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type):
             f"CP implementation with QKVO A2A requires num_heads ({config.num_heads}) and"
             f" num_gqa_groups ({config.num_gqa_groups}) to be divisible by cp_size (2)!"
         )
+    if dtype != "fp8" and fp8_mha:
+        pytest.skip("Only fp8 works with fp8_mha=True!")
 
     num_gpus_per_node=4 if cp_comm_type == "a2a+p2p" else 2
     if device_count() < num_gpus_per_node:
@@ -178,6 +181,7 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type):
             qkv_format=qkv_format,
             kernel_backend="FusedAttention",
             cp_comm_type=cp_comm_type,
+            fp8_mha=fp8_mha,
         ),
         check=True,
     )
