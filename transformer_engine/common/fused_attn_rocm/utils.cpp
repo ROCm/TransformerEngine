@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
@@ -42,7 +42,7 @@ void generateMatrixStrides(
             uint64_t s_q, uint64_t s_kv,
             uint64_t d, uint64_t* stride,
             NVTE_QKV_Layout layout, NVTE_QKV_Matrix matrix) {
-    // AOTriton internally takes BHSD for implementation
+    // CK/AOTriton internally takes BHSD for implementation
     constexpr int batch_dim_idx   = 0;
     constexpr int head_dim_idx    = 1;
     constexpr int seqlen_dim_idx  = 2;
