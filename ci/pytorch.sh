@@ -64,6 +64,8 @@ run_test_config(){
         run_default_fa 1 triton_kernels/test_cast_transpose_triton.py
         run_default_fa 1 triton_kernels/test_rmsnorm_triton.py
         NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 run_default_fa 3 test_numerics.py
+        NVTE_CK_USES_BWD_V3=1 run_default_fa 1 fused_attn/test_fused_attn.py
+        NVTE_CK_USES_BWD_V3=1 run_default_fa 3 test_numerics.py
     fi
 }
 
@@ -75,6 +77,7 @@ run_test_config_mgpu(){
         run 3 test_fused_optimizer.py
         run 3 test_fusible_ops_distributed.py
         run 3 fused_attn/test_fused_attn_with_cp.py
+        NVTE_CK_USES_BWD_V3=1 run 3 fused_attn/test_fused_attn_with_cp.py
         run 3 distributed/test_numerics.py
     fi
 }

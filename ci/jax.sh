@@ -63,10 +63,14 @@ run_test_config() {
     run 1 test_fused_attn.py
     run_default_fa 1 test_helper.py
     run_default_fa 1 test_layer.py #it effectevly always uses unfused attention
+    NVTE_CK_USES_BWD_V3=1 run_default_fa 1 test_layer.py #it effectevly always uses unfused attention
     if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
         run 1 test_praxis_layers.py
     else
         run 3 test_praxis_layers.py
+    fi
+    if [ $_fus_attn = "ck" ]
+        NVTE_CK_USES_BWD_V3=1 run 1 test_fused_attn.py
     fi
     run_default_fa 1 test_sharding.py
     run_default_fa 1 test_softmax.py
@@ -78,6 +82,9 @@ run_test_config_mgpu() {
     #TODO: remove the flag when switch to a newer JAX that has a fix
     export XLA_FLAGS="--xla_gpu_enable_dot_strength_reduction=false --xla_gpu_enable_command_buffer=CUSTOM_CALL"
     run 3 test_distributed_fused_attn.py
+    if [ $_fus_attn = "ck" ]
+        NVTE_CK_USES_BWD_V3=1 run 3 test_distributed_fused_attn.py
+    fi
     run_default_fa 3 test_distributed_layernorm.py
     run_default_fa 3 test_distributed_layernorm_mlp.py
     run_default_fa 3 test_distributed_softmax.py
