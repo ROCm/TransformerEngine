@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved. 
+ * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved. 
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -92,6 +92,7 @@ pybind11::dict Registrations() {
   dict["te_rmsnorm_forward_fp8_ffi"] = EncapsulateFunction(RMSNormForwardFP8Handler);
   dict["te_rmsnorm_backward_ffi"] = EncapsulateFunction(RMSNormBackwardHandler);
 
+#ifndef USE_ROCM
   // Attention
   pybind11::dict fused_attn_forward_ffi;
   fused_attn_forward_ffi["prepare"] = EncapsulateFFI(CudnnHandleInitHandler);
@@ -102,7 +103,10 @@ pybind11::dict Registrations() {
   fused_attn_backward_ffi["prepare"] = EncapsulateFFI(CudnnHandleInitHandler);
   fused_attn_backward_ffi["execute"] = EncapsulateFFI(FusedAttnBackwardHandler);
   dict["te_fused_attn_backward_ffi"] = fused_attn_backward_ffi;
-
+#else
+  dict["te_fused_attn_forward_ffi"] = EncapsulateFFI(FusedAttnForwardHandler);
+  dict["te_fused_attn_backward_ffi"] = EncapsulateFFI(FusedAttnBackwardHandler);
+#endif
   return dict;
 }
 

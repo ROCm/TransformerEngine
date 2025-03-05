@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -103,6 +103,7 @@ int sm_count(int device_id) {
   return cache[device_id];
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 bool supports_multicast(int device_id) {
 #if CUDART_VERSION >= 12010
   // NOTE: This needs to be guarded at compile time because the
@@ -128,7 +129,7 @@ bool supports_multicast(int device_id) {
 #endif
 }
 
-#ifndef __HIP_PLATFORM_AMD__
+
 const std::string &include_directory(bool required) {
   static std::string path;
 

@@ -77,8 +77,6 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
             f"CP implementation with QKVO A2A requires num_heads ({config.num_heads}) and"
             f" num_gqa_groups ({config.num_gqa_groups}) to be divisible by cp_size (2)!"
         )
-    if IS_HIP_EXTENSION and qkv_format == "thd":
-        pytest.skip("CP tests do not support THD format on ROCm yet!")
 
     num_gpus_per_node=4 if cp_comm_type == "a2a+p2p" else 2
     if device_count() < num_gpus_per_node:
@@ -135,7 +133,7 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
         pytest.skip("FP8 attention has not been supported on ROCm yet!")
 
     config = model_configs_fused_attn[model]
-    if qkv_format == "thd" and config.num_heads != config.num_gqa_groups:
+    if not IS_HIP_EXTENSION and qkv_format == "thd" and config.num_heads != config.num_gqa_groups:
         pytest.skip("THD format does not support QGA/MQA yet!")
     if qkv_format == "thd" and config.attn_bias_type == "post_scale_bias":
         pytest.skip("THD format does not support post_scale_bias yet!")

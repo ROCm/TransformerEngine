@@ -657,26 +657,47 @@ model_configs_layout_thd = {
 }
 
 
+# ROCm fused attn does not use cudnn, return high numbers to avoid tests filtering out
 @pytest.mark.skipif(get_cudnn_version() < (9, 0, 0), reason="cuDNN 9.0.0+ is required.")
 @pytest.mark.skipif(
+    (not IS_HIP_EXTENSION) and
     get_device_compute_capability() < (9, 0), reason="THD is only supported on Hopper+."
 )
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_layout_thd])
 @pytest.mark.parametrize("model", model_configs_layout_thd.keys())
 @pytest.mark.parametrize("qkv_layout", qkv_layouts_thd)
-def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout):
+@pytest.mark.parametrize("pad_between_seqs", [False, True])
+def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, pad_between_seqs):
     """Test DotProductAttention module with different QKV layouts"""
     config = model_configs[model]
     if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
         pytest.skip("qkv_layout not applicable for MQA/GQA")
-    pad_between_seqs = True
+    if (pad_between_seqs==False and get_cudnn_version() < (9, 3, 0)):
+        pytest.skip("cuDNN 9.3.0+ is required to run pad_between_seqs = False");
     test_dot_product_attention(
         dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
     )
-    if get_cudnn_version() >= (9, 3, 0):
-        # cuDNN 9.3.0+ is required to run pad_between_seqs = False/True in the same run
-        pad_between_seqs = False
+
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_layout_thd])
+@pytest.mark.parametrize("model", model_configs_layout_thd.keys())
+@pytest.mark.parametrize("qkv_layout", qkv_layouts_thd)
+@pytest.mark.parametrize("pad_between_seqs", [False, True])
+def test_dpa_qkv_layout_thd_mqa_gqa(dtype, model_configs, model, qkv_layout, pad_between_seqs):
+    def find_factors(x):
+        f = []
+        for i in range(2, x + 1):
+            if x % i == 0:
+                f.append(i)
+        return f
+
+    config = model_configs[model]
+    num_querys_per_gqa_group = find_factors(config.num_heads)
+
+    for num_q_per_gqa_group in num_querys_per_gqa_group:
+        config.num_gqa_groups = config.num_heads // num_q_per_gqa_group
         test_dot_product_attention(
             dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
         )

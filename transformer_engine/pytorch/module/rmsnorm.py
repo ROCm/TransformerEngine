@@ -10,7 +10,6 @@ from typing import Iterable, Optional, Union
 
 import torch
 
-from ..triton_kernels.rmsnorm_triton import te_rmsnorm_fwd_triton
 from transformer_engine.pytorch.ops import RMSNorm as _RMSNormOp
 
 __all__ = ["RMSNorm"]

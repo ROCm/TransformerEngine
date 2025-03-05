@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -50,6 +50,7 @@ const std::string &sm_arch_name(int device_id = -1);
  */
 int sm_count(int device_id = -1);
 
+#ifndef __HIP_PLATFORM_AMD__
 /* \brief CUDA Multicast support status for device
  *
  * \param[in] device_id CUDA device (default is current device)
@@ -58,7 +59,6 @@ int sm_count(int device_id = -1);
  */
 bool supports_multicast(int device_id = -1);
 
-#ifndef __HIP_PLATFORM_AMD__
 /* \brief Path to CUDA Toolkit headers
  *
  * The path can be configured by setting NVTE_CUDA_INCLUDE_DIR in the

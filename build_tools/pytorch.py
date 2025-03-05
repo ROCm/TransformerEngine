@@ -33,13 +33,6 @@ def setup_pytorch_extension(
         csrc_source_files / "common.cpp",
         csrc_source_files / "ts_fp8_op.cpp",
     ] + all_files_in_dir(extensions_dir)
-
-    if not rocm_build():
-        sources.extend([
-            csrc_source_files / "userbuffers" / "ipcsocket.cc",
-            csrc_source_files / "userbuffers" / "userbuffers.cu",
-            csrc_source_files / "userbuffers" / "userbuffers-host.cpp",
-        ])
         
     # Header files
     include_dirs = [

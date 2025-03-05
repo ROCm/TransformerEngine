@@ -114,7 +114,6 @@ include_directories(${PROJECT_SOURCE_DIR}/..)
 set(transformer_engine_SOURCES)
 if(USE_CUDA)
   list(APPEND transformer_engine_SOURCES
-       #Changed
        cudnn_utils.cpp
        transformer_engine.cpp
        common.cu
@@ -150,15 +149,13 @@ if(USE_CUDA)
        fused_softmax/scaled_aligned_causal_masked_softmax.cu
        fused_rope/fused_rope.cu
        recipe/delayed_scaling.cu
-     comm_gemm_overlap/userbuffers/ipcsocket.cc
-     comm_gemm_overlap/userbuffers/userbuffers-host.cpp
-     comm_gemm_overlap/userbuffers/userbuffers.cu
-     comm_gemm_overlap/comm_gemm_overlap.cpp)
+       comm_gemm_overlap/userbuffers/ipcsocket.cc
+       comm_gemm_overlap/userbuffers/userbuffers-host.cpp
+       comm_gemm_overlap/userbuffers/userbuffers.cu
+       comm_gemm_overlap/comm_gemm_overlap.cpp)
   add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 else()
   list(APPEND transformer_engine_SOURCES
-       # Changed
-       cudnn_utils.cpp
        transformer_engine.cpp
        common.cu
        transpose/cast_transpose.cu
@@ -234,15 +231,15 @@ if (USE_CUDA)
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
 
-# Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
-# Changed
-option(NVTE_UB_WITH_MPI "Bootstrap Userbuffers with MPI" OFF)
-if (NVTE_UB_WITH_MPI)
-    find_package(MPI REQUIRED)
-    target_link_libraries(transformer_engine PUBLIC MPI::MPI_CXX)
-    target_include_directories(transformer_engine PRIVATE ${MPI_CXX_INCLUDES})
-    target_compile_definitions(transformer_engine PUBLIC NVTE_UB_WITH_MPI)
-endif()
+  # Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
+  # Changed
+  option(NVTE_UB_WITH_MPI "Bootstrap Userbuffers with MPI" OFF)
+  if (NVTE_UB_WITH_MPI)
+      find_package(MPI REQUIRED)
+      target_link_libraries(transformer_engine PUBLIC MPI::MPI_CXX)
+      target_include_directories(transformer_engine PRIVATE ${MPI_CXX_INCLUDES})
+      target_compile_definitions(transformer_engine PUBLIC NVTE_UB_WITH_MPI)
+  endif()
   
   # Hack to enable dynamic loading in cuDNN frontend
   target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
@@ -328,6 +325,7 @@ else()
 
   if(USE_FUSED_ATTN_CK)
     if(NOT DEFINED CK_FUSED_ATTN_PATH)
+      set(CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT ${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT} CACHE STRING "ck float to bf16 conversion rounding")
       set(CK_FUSED_ATTN_TARGET_GPUS ${CMAKE_HIP_ARCHITECTURES} CACHE STRING "Target arch to compile ck fused attn backend")
       add_subdirectory(ck_fused_attn ${CMAKE_CURRENT_BINARY_DIR}/ck_fused_attn)
     else()

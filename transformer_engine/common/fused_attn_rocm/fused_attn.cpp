@@ -281,6 +281,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
   using namespace transformer_engine;
 
   const Tensor *input_cu_seqlens = reinterpret_cast<const Tensor*>(cu_seqlens);
+  const Tensor *input_cu_seqlens_padded = reinterpret_cast<const Tensor *>(cu_seqlens_padded);
   const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(rng_state);
   const Tensor *input_QKV = reinterpret_cast<const Tensor*>(QKV);
   const Tensor *input_Bias = reinterpret_cast<const Tensor*>(Bias);
@@ -323,7 +324,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
       window_size_left, window_size_right,
       input_QKV, input_Bias, 
       output_O, Aux_CTX_Tensors,
-      input_cu_seqlens,
+      input_cu_seqlens, input_cu_seqlens_padded,
       input_rng_state,
       wkspace,
       stream);
@@ -356,6 +357,7 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
   using namespace transformer_engine;
 
   const Tensor *input_cu_seqlens = reinterpret_cast<const Tensor*>(cu_seqlens);
+  const Tensor *input_cu_seqlens_padded = reinterpret_cast<const Tensor *>(cu_seqlens_padded);
   const Tensor *input_QKV = reinterpret_cast<const Tensor*>(QKV);
   const Tensor *input_O = reinterpret_cast<const Tensor*>(O);
   const Tensor *input_dO = reinterpret_cast<const Tensor*>(dO);
@@ -409,7 +411,7 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
       false, // TODO: enable deterministic after CK team show us how
       input_QKV, input_O, input_dO, input_Bias, output_S,
       output_dQKV, output_dBias,
-      input_cu_seqlens,
+      input_cu_seqlens, input_cu_seqlens_padded,
       input_rng_state,
       wkspace,
       stream);
@@ -445,6 +447,8 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = reinterpret_cast<const Tensor*>(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor*>(cu_seqlens_kv);
+  const Tensor *input_cu_seqlens_q_padded = reinterpret_cast<const Tensor *>(cu_seqlens_q_padded);
+  const Tensor *input_cu_seqlens_kv_padded = reinterpret_cast<const Tensor *>(cu_seqlens_kv_padded);
   const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(rng_state);
   const Tensor *input_Q = reinterpret_cast<const Tensor*>(Q);
   const Tensor *input_KV = reinterpret_cast<const Tensor*>(KV);
@@ -493,6 +497,8 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
       output_O, Aux_CTX_Tensors,
       input_cu_seqlens_q,
       input_cu_seqlens_kv,
+      input_cu_seqlens_q_padded,
+      input_cu_seqlens_kv_padded,
       input_rng_state,
       wkspace,
       stream);
@@ -527,6 +533,8 @@ void nvte_fused_attn_bwd_kvpacked(
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = reinterpret_cast<const Tensor*>(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor*>(cu_seqlens_kv);
+  const Tensor *input_cu_seqlens_q_padded = reinterpret_cast<const Tensor *>(cu_seqlens_q_padded);
+  const Tensor *input_cu_seqlens_kv_padded = reinterpret_cast<const Tensor *>(cu_seqlens_kv_padded);
   const Tensor *input_Q = reinterpret_cast<const Tensor*>(Q);
   const Tensor *input_KV = reinterpret_cast<const Tensor*>(KV);
   const Tensor *input_O = reinterpret_cast<const Tensor*>(O);
@@ -587,6 +595,8 @@ void nvte_fused_attn_bwd_kvpacked(
       output_dQ, output_dKV, output_dBias,
       input_cu_seqlens_q,
       input_cu_seqlens_kv,
+      input_cu_seqlens_q_padded,
+      input_cu_seqlens_kv_padded,
       input_rng_state,
       wkspace,
       stream);
@@ -624,6 +634,8 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = reinterpret_cast<const Tensor*>(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor*>(cu_seqlens_kv);
+  const Tensor *input_cu_seqlens_q_padded = reinterpret_cast<const Tensor *>(cu_seqlens_q_padded);
+  const Tensor *input_cu_seqlens_kv_padded = reinterpret_cast<const Tensor *>(cu_seqlens_kv_padded);
   const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(rng_state);
   const Tensor *input_Q = reinterpret_cast<const Tensor*>(Q);
   const Tensor *input_K = reinterpret_cast<const Tensor*>(K);
@@ -665,6 +677,8 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       output_O, Aux_CTX_Tensors,
       input_cu_seqlens_q,
       input_cu_seqlens_kv,
+      input_cu_seqlens_q_padded,
+      input_cu_seqlens_kv_padded,
       input_rng_state,
       wkspace,
       stream);
@@ -701,6 +715,8 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = reinterpret_cast<const Tensor*>(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor*>(cu_seqlens_kv);
+  const Tensor *input_cu_seqlens_q_padded = reinterpret_cast<const Tensor *>(cu_seqlens_q_padded);
+  const Tensor *input_cu_seqlens_kv_padded = reinterpret_cast<const Tensor *>(cu_seqlens_kv_padded);
   const Tensor *input_Q = reinterpret_cast<const Tensor*>(Q);
   const Tensor *input_K = reinterpret_cast<const Tensor*>(K);
   const Tensor *input_V = reinterpret_cast<const Tensor*>(V);
@@ -755,6 +771,8 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       output_dQ, output_dK, output_dV, output_dBias,
       input_cu_seqlens_q,
       input_cu_seqlens_kv,
+      input_cu_seqlens_q_padded,
+      input_cu_seqlens_kv_padded,
       input_rng_state,
       wkspace,
       stream);

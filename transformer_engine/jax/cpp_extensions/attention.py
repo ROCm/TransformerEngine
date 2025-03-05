@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -279,23 +279,30 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             config.window_size,
         ).get_fused_attn_backend()
 
-        if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
-            softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, kv_max_seqlen)
-            softmax_dtype = q_dtype
-        elif backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-            # cuDNN 9.6 reduces the required softmax shape
-            if get_cudnn_version() >= (9, 6, 0):
-                softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
+        if not is_hip_extension():
+            if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
+                softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, kv_max_seqlen)
+                softmax_dtype = q_dtype
+            elif backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
+                # cuDNN 9.6 reduces the required softmax shape
+                if get_cudnn_version() >= (9, 6, 0):
+                    softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
+                else:
+                    softmax_shape = (
+                        *batch_shape,
+                        attn_heads,
+                        q_max_seqlen,
+                        config.max_segments_per_seq,
+                    )
+                softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
             else:
-                softmax_shape = (
-                    *batch_shape,
-                    attn_heads,
-                    q_max_seqlen,
-                    config.max_segments_per_seq,
-                )
-            softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
+                raise ValueError(f"Unsupported {backend=}")
         else:
-            raise ValueError(f"Unsupported {backend=}")
+            if backend in [NVTE_Fused_Attn_Backend.NVTE_AOTriton, NVTE_Fused_Attn_Backend.NVTE_CK]:
+                softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, config.max_segments_per_seq)
+                softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
+            else:
+                raise ValueError(f"Unsupported {backend=}")
         softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=softmax_dtype)
 
         # JAX does not enable 64-bit int by default so we get XLA to allocate x8 memory with
@@ -478,7 +485,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         config: _FusedAttnConfig,
     ):
         assert FusedAttnFwdPrimitive.inner_primitive is not None
-
         if nvte_get_qkv_format(config.qkv_layout) == NVTE_QKV_Format.NVTE_THD:
 
             def _fix_len_take(x, condition, fill_value=-1):

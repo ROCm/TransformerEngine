@@ -36,30 +36,26 @@ namespace {
 
 #ifdef USE_HIPBLASLT
 
-#if HIP_VERSION >= 60000000
-typedef hipDataType hipblasltDatatype_t;
-typedef hipblasComputeType_t hipblasLtComputeType_t;
-#define HIPBLASLT_R_16F HIP_R_16F
-#define HIPBLASLT_R_32F HIP_R_32F
-#define HIPBLASLT_R_16B HIP_R_16BF
-#define HIPBLASLT_R_8F_E4M3 HIP_R_8F_E4M3_FNUZ
-#define HIPBLASLT_R_8F_E5M2 HIP_R_8F_E5M2_FNUZ
-#define HIPBLASLT_COMPUTE_F32 HIPBLAS_COMPUTE_32F
-#endif // #if HIP_VERSION >= 60000000
-
-hipblasltDatatype_t get_hipblaslt_dtype(const transformer_engine::DType t) {
+static hipDataType get_hipblaslt_dtype(const transformer_engine::DType t) {
   using namespace transformer_engine;
   switch (t) {
     case DType::kFloat16:
-      return HIPBLASLT_R_16F;
+      return HIP_R_16F;
     case DType::kFloat32:
-      return HIPBLASLT_R_32F;
+      return HIP_R_32F;
     case DType::kBFloat16:
-      return HIPBLASLT_R_16B;
+      return HIP_R_16BF;
+#if HIP_VERSION >= 60300000
     case DType::kFloat8E4M3:
-      return HIPBLASLT_R_8F_E4M3;
+      return te_fp8_fnuz() ? HIP_R_8F_E4M3_FNUZ : HIP_R_8F_E4M3;
     case DType::kFloat8E5M2:
-      return HIPBLASLT_R_8F_E5M2;
+      return te_fp8_fnuz() ? HIP_R_8F_E5M2_FNUZ: HIP_R_8F_E5M2;
+#else
+    case DType::kFloat8E4M3:
+      return HIP_R_8F_E4M3_FNUZ;
+    case DType::kFloat8E5M2:
+      return HIP_R_8F_E5M2_FNUZ;
+#endif
     default:
       NVTE_ERROR("Invalid type");
   }
@@ -367,11 +363,7 @@ void bias_gradient_kernelLauncher(const Tin* in, float* out, int m, int n, bool 
   if(! stream_order_alloc){
     NVTE_CHECK_CUDA( hipMemset(out, 0, n*sizeof(float)) );
   }else{
-#if HIP_VERSION >= 50300000
     NVTE_CHECK_CUDA( hipMemsetAsync(out, 0, n*sizeof(float), stream) );
-#else
-    NVTE_ERROR("Stream order allocation is supported on ROCm 5.3 and above.");
-#endif
   }
   hipLaunchKernelGGL(( bias_gradient_kernel<Tin, THREADS_PER_BLOCK>), dim3(grid), dim3(block), 0, stream, in, out, m, n);
 }
@@ -575,11 +567,11 @@ public:
   const std::string_view &getName(const T &val) {
     return map.at(val);
   }
-  T getValue(const std::string& name, const char *label="")
+  T getValue(const std::string& name, const char *label="", std::function<bool(const T&)> filter = nullptr)
   {
     for (auto iter = map.begin(); iter != map.end(); ++iter)
     {
-        if (name == iter->second) return iter->first;
+      if ((name == iter->second) && (!filter || filter(iter->first))) return iter->first;
     }
     NVTE_ERROR("Invalid ", label, " name: ", name);
   }
@@ -587,14 +579,18 @@ protected:
   const std::unordered_map<T, std::string_view> &map;
 };
 
-static std::unordered_map<hipblasltDatatype_t, std::string_view> type_name_map = {
-  {HIPBLASLT_R_32F, "float32"},
-  {HIPBLASLT_R_16F, "float16"},
-  {HIPBLASLT_R_16B, "bfloat16"},
-  {HIPBLASLT_R_8F_E4M3, "float8e4m3"},
-  {HIPBLASLT_R_8F_E5M2, "float8e5m2"},
+static std::unordered_map<hipDataType, std::string_view> type_name_map = {
+  {HIP_R_32F, "float32"},
+  {HIP_R_16F, "float16"},
+  {HIP_R_16BF, "bfloat16"},
+  {HIP_R_8F_E4M3_FNUZ, "float8e4m3"},
+  {HIP_R_8F_E5M2_FNUZ, "float8e5m2"},
+#if HIP_VERSION >= 60300000
+  {HIP_R_8F_E4M3, "float8e4m3"},
+  {HIP_R_8F_E5M2, "float8e5m2"},
+#endif
 };
-static NameMapper<hipblasltDatatype_t> typeNameMapper(type_name_map);
+static NameMapper<hipDataType> typeNameMapper(type_name_map);
 
 static std::unordered_map<hipblasOperation_t, std::string_view> trans_name_map = {
   {HIPBLAS_OP_N, "N"},
@@ -613,24 +609,24 @@ static std::unordered_map<hipblasLtEpilogue_t, std::string_view> epi_name_map = 
 };
 static NameMapper<hipblasLtEpilogue_t> epilogueNameMapper(epi_name_map);
 
-static std::unordered_map<hipblasLtComputeType_t, std::string_view> comp_name_map = {
-  {HIPBLASLT_COMPUTE_F32, "f32"}
+static std::unordered_map<hipblasComputeType_t, std::string_view> comp_name_map = {
+  {HIPBLAS_COMPUTE_32F, "f32"}
 };
-static NameMapper<hipblasLtComputeType_t> computeNameMapper(comp_name_map);
+static NameMapper<hipblasComputeType_t> computeNameMapper(comp_name_map);
 
 static class GemmAlgoCache {
 public:
   struct Key {
     int deviceCap;
-    hipblasltDatatype_t a_type, b_type, d_type, bias_type;
+    hipDataType a_type, b_type, d_type, bias_type;
     int m, n, k;
     int lda, ldb, ldd;
     hipblasOperation_t transa, transb;
     hipblasLtEpilogue_t epilogue;
 
     Key(int deviceCap_,
-        hipblasltDatatype_t a_type_, hipblasltDatatype_t b_type_,
-        hipblasltDatatype_t d_type_, hipblasltDatatype_t bias_type_,
+        hipDataType a_type_, hipDataType b_type_,
+        hipDataType d_type_, hipDataType bias_type_,
         int m_, int n_, int k_, int lda_, int ldb_, int ldd_,
         hipblasOperation_t transa_, hipblasOperation_t transb_,
         hipblasLtEpilogue_t epilogue_):
@@ -864,18 +860,32 @@ protected:
         std::cout << "[WARNING] Invalid WS size at " << line << "\n";
         continue;
       }
-  
-      cfg.a_type = typeNameMapper.getValue(type_a, "type_a");
-      cfg.b_type = typeNameMapper.getValue(type_b, "type_b");
-      cfg.d_type = typeNameMapper.getValue(type_d, "type_d");
-      cfg.bias_type = (bias_type == "-") ? (hipblasltDatatype_t)-1 : typeNameMapper.getValue(bias_type, "bias_type");
+
+#if HIP_VERSION >= 60300000
+      auto fp8_filter = te_fp8_fnuz()
+                            ? [](const hipDataType& val) 
+                                { return (val != HIP_R_8F_E4M3 && val != HIP_R_8F_E5M2); }
+                            : [](const hipDataType& val) {
+                                return (val != HIP_R_8F_E4M3_FNUZ && val != HIP_R_8F_E5M2_FNUZ);
+                              };
+#else
+      auto fp8_filter = nullptr;
+#endif
+
+      cfg.a_type = typeNameMapper.getValue(type_a, "type_a", fp8_filter);
+      cfg.b_type = typeNameMapper.getValue(type_b, "type_b", fp8_filter);
+      cfg.d_type = typeNameMapper.getValue(type_d, "type_d", fp8_filter);
+      cfg.bias_type = (bias_type == "-")
+                          ? (hipDataType)-1
+                          : typeNameMapper.getValue(bias_type, "bias_type", fp8_filter);
 
       cfg.transa = transposeNameMapper.getValue(trans_a, "trans_a");
       cfg.transb = transposeNameMapper.getValue(trans_b, "trans_b");
 
       cfg.epilogue = epilogueNameMapper.getValue(epi, "epi");
       //Check and filter out compute and scale types
-      if (computeNameMapper.getValue(comp, "comp") != HIPBLASLT_COMPUTE_F32 || typeNameMapper.getValue(scale, "scale") != HIPBLASLT_R_32F)
+      if (computeNameMapper.getValue(comp, "comp") != HIPBLAS_COMPUTE_32F ||
+        typeNameMapper.getValue(scale, "scale") != HIP_R_32F)
       {
         continue;
       }
@@ -894,7 +904,7 @@ protected:
   {
     if (!save_fs)
     {
-      const char* temp = std::getenv("TE_HIPBLAS_ALGO_SAVE");
+      const char* temp = std::getenv("TE_HIPBLASLT_ALGO_SAVE");
       if (temp == nullptr || temp[0] == '\0')
       {
         return false;
@@ -958,9 +968,9 @@ protected:
     csv << cfg.deviceCap << cfg.m << cfg.n << cfg.k 
       << transposeNameMapper.getName(cfg.transa) << transposeNameMapper.getName(cfg.transb)
       << typeNameMapper.getName(cfg.a_type) << typeNameMapper.getName(cfg.b_type) << typeNameMapper.getName(cfg.d_type)
-      << ((cfg.bias_type == (hipblasltDatatype_t)-1) ? "-" : typeNameMapper.getName(cfg.bias_type))
+      << ((cfg.bias_type == (hipDataType)-1) ? "-" : typeNameMapper.getName(cfg.bias_type))
       << cfg.lda << cfg.ldb << cfg.ldd << epilogueNameMapper.getName(cfg.epilogue)
-      << computeNameMapper.getName(HIPBLASLT_COMPUTE_F32) << typeNameMapper.getName(HIPBLASLT_R_32F)
+      << computeNameMapper.getName(HIPBLAS_COMPUTE_32F) << typeNameMapper.getName(HIP_R_32F)
       << algo.ws_size_min << algo.ws_size_max << algo.algoId << algo.index << csv_helper::end() << "\n";
   }
 
@@ -1026,10 +1036,10 @@ void hipblaslt_gemm(const Tensor *inputA,
   const bool gelu = pre_gelu_out != nullptr;
   const bool use_fp8 = is_fp8_dtype(inputA->data.dtype) ||
                        is_fp8_dtype(inputB->data.dtype);
-  const hipblasltDatatype_t A_type = get_hipblaslt_dtype(inputA->data.dtype);
-  const hipblasltDatatype_t B_type = get_hipblaslt_dtype(inputB->data.dtype);
-  const hipblasltDatatype_t D_type = get_hipblaslt_dtype(outputD->data.dtype);
-  const hipblasltDatatype_t bias_type = get_hipblaslt_dtype(inputBias->data.dtype);
+  const hipDataType A_type = get_hipblaslt_dtype(inputA->data.dtype);
+  const hipDataType B_type = get_hipblaslt_dtype(inputB->data.dtype);
+  const hipDataType D_type = get_hipblaslt_dtype(outputD->data.dtype);
+  const hipDataType bias_type = get_hipblaslt_dtype(inputBias->data.dtype);
 
   NVTE_CHECK(!is_fp8_dtype(inputA->data.dtype) || A_scale_inverse != nullptr,
              "FP8 input to GEMM requires inverse of scale!");
@@ -1063,7 +1073,7 @@ void hipblaslt_gemm(const Tensor *inputA,
   int64_t ld_gelumat = (int64_t) ldd;
 
   // default to tf32 except for e5m2 inputs where the config is not supported
-  hipblasLtComputeType_t gemm_compute_type = HIPBLASLT_COMPUTE_F32;
+  hipblasComputeType_t gemm_compute_type = HIPBLAS_COMPUTE_32F;
 
   // Create matrix descriptors. Not setting any extra attributes.
   NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutCreate(&Adesc, A_type,
@@ -1076,7 +1086,7 @@ void hipblaslt_gemm(const Tensor *inputA,
                                                ldb));
   NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutCreate(&Ddesc, D_type, m, n, ldd));
 
-  NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescCreate(&operationDesc, gemm_compute_type, HIPBLASLT_R_32F));
+  NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescCreate(&operationDesc, gemm_compute_type, HIP_R_32F));
   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc, HIPBLASLT_MATMUL_DESC_TRANSA,
                                                    &transa, sizeof(transa)));
   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc, HIPBLASLT_MATMUL_DESC_TRANSB,
@@ -1153,7 +1163,7 @@ void hipblaslt_gemm(const Tensor *inputA,
                                                    &epilogue, sizeof(epilogue)));
 
   GemmAlgoCache::Key gemm_cfg(algoCache.device_cap(device_id), A_type, B_type, D_type, 
-    use_fp8 ? bias_type : (hipblasltDatatype_t)-1,
+    use_fp8 ? bias_type : (hipDataType)-1,
     m, n, k, lda, ldb, ldd, transa, transb, epilogue );
   GemmAlgoCache::Algo cached_algo;
   if (algoCache.find(gemm_cfg, workspaceSize, cached_algo) == 0 || !cached_algo.algo.has_value())
@@ -1468,11 +1478,7 @@ void rocblas_gemm(const Tensor *inputA,
     if(! stream_order_alloc){
       NVTE_CHECK_CUDA( hipMalloc(&D_temp, sizeof(float)*m*n) );
     }else{
-#if HIP_VERSION >= 50300000
       NVTE_CHECK_CUDA( hipMallocAsync(&D_temp, sizeof(float)*m*n, stream) );
-#else
-      NVTE_ERROR("Stream order allocation is supported on ROCm 5.3 and above.");
-#endif  
     }
   }else {
     D_temp = D;
@@ -1565,11 +1571,7 @@ void rocblas_gemm(const Tensor *inputA,
         if(! stream_order_alloc){
           NVTE_CHECK_CUDA( hipMalloc(&bias_tmp, sizeof(float)*input_dim) ); // The bias gradient is for the first linear layer
         }else{
-#if HIP_VERSION >= 50300000
           NVTE_CHECK_CUDA( hipMallocAsync(&bias_tmp, sizeof(float)*input_dim, stream) );
-#else
-          NVTE_ERROR("Stream order allocation is supported on ROCm 5.3 and above.");
-#endif  
         }
       }else {
         bias_tmp = bias_ptr;
@@ -1595,11 +1597,7 @@ void rocblas_gemm(const Tensor *inputA,
         if(! stream_order_alloc){
           NVTE_CHECK_CUDA( hipFree(bias_tmp) ); 
         }else{
-#if HIP_VERSION >= 50300000
           NVTE_CHECK_CUDA( hipFreeAsync(bias_tmp, stream) );
-#else
-          NVTE_ERROR("Stream order allocation is supported on ROCm 5.3 and above.");
-#endif
         }
       }
 
@@ -1647,11 +1645,7 @@ void rocblas_gemm(const Tensor *inputA,
         if(! stream_order_alloc){
           NVTE_CHECK_CUDA( hipMalloc(&bias_tmp, sizeof(float)*output_dim) );
         }else{
-#if HIP_VERSION >= 50300000
           NVTE_CHECK_CUDA( hipMallocAsync(&bias_tmp, sizeof(float)*output_dim, stream) );
-#else
-          NVTE_ERROR("Stream order allocation is supported on ROCm 5.3 and above.");
-#endif  
         }
       }else {
         bias_tmp = bias_ptr;
@@ -1678,11 +1672,7 @@ void rocblas_gemm(const Tensor *inputA,
         if(! stream_order_alloc){
           NVTE_CHECK_CUDA( hipFree(bias_tmp) ); 
         }else{
-#if HIP_VERSION >= 50300000
           NVTE_CHECK_CUDA( hipFreeAsync(bias_tmp, stream) );
-#else
-          NVTE_ERROR("Stream order allocation is supported on ROCm 5.3 and above.");
-#endif
         }
       }
       if (D_type == rocblas_datatype_f16_r || D_type == rocblas_datatype_bf16_r) {
@@ -1783,11 +1773,7 @@ void rocblas_gemm(const Tensor *inputA,
     if(! stream_order_alloc){
       NVTE_CHECK_CUDA( hipFree(D_temp) );
     }else{
-#if HIP_VERSION >= 50300000
       NVTE_CHECK_CUDA( hipFreeAsync(D_temp, stream) );
-#else
-      NVTE_ERROR("Stream order allocation is supported on ROCm 5.3 and above.");
-#endif
     }
   }
 }

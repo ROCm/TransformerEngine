@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -518,7 +518,7 @@ void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
 void fused_multi_row_padding(at::Tensor input, at::Tensor output,
                              std::vector<size_t> input_row_list,
                              std::vector<size_t> padded_input_row_list);
-
+#ifndef USE_ROCM
 /***************************************************************************************************
  * Comm+GEMM Overlap Wrappers
  **************************************************************************************************/
@@ -698,5 +698,6 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                         size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                         at::Tensor rs_output);
 };  // CommOverlapP2P
+#endif // !USE_ROCM
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_

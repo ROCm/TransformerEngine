@@ -1,12 +1,110 @@
 /*************************************************************************
- * Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 #pragma once
-// FP8 header version 0.3, 2021/05/11
+
+#ifdef __HIPCC__
 
 #include <hip/hip_runtime.h>
+
+#if HIP_VERSION >= 60200000
+#include <hip/hip_fp8.h>
+
+#if HIP_VERSION >= 60300000
+#if !defined(__HIP_DEVICE_COMPILE__)
+#include <optional>
+#include "../util/string.h"
+
+/* Platforms that have both MI300 family and other families GPUs are unknown and not supported.
+* Thus, FP8 format is selected once by the current (any) GPU architecture.
+*/
+static bool _te_check_fp8_fnuz() {
+  hipDeviceProp_t prop;
+  hipError_t res= hipGetDeviceProperties(&prop, 0);
+  if (res != hipSuccess) {
+    //TODO: better error out system
+    throw std::runtime_error(transformer_engine::concat_strings(
+      "hipGetDeviceProperties failed with error: ", hipGetErrorString(res)));
+  }
+  return prop.major == 9 && prop.minor == 4;
+}
+
+static inline bool te_fp8_fnuz() {
+  static std::optional<bool> use_fnuz;
+  if (!use_fnuz.has_value()) {
+    use_fnuz = _te_check_fp8_fnuz();
+  }
+  return use_fnuz.value();
+}
+
+/* Device methods in _te_hip_fp8 are dummy and are needed for compilation
+* because HIPCC compiles __device__ and __global__ functions for host.
+* The results are discarded so those methods are declared but not defined
+*/
+template<typename FNUZ, typename OCP>
+union _te_hip_fp8 {
+  FNUZ fnuz;
+  OCP ocp;
+  __host__ __device__ _te_hip_fp8<FNUZ, OCP>() = default;
+
+  __host__ operator float() const {
+    return te_fp8_fnuz() ? fnuz.operator float() : ocp.operator float();
+  }
+  __device__ operator float() const;
+
+  __host__ _te_hip_fp8<FNUZ, OCP>(const float& v) {
+    if (te_fp8_fnuz()) fnuz=v; else ocp=v;
+  }
+  __device__ _te_hip_fp8<FNUZ, OCP>(const float& v);
+};
+
+typedef _te_hip_fp8<__hip_fp8_e4m3_fnuz, __hip_fp8_e4m3> _te_hip_fp8_e4m3;
+typedef _te_hip_fp8<__hip_fp8_e5m2_fnuz, __hip_fp8_e5m2> _te_hip_fp8_e5m2;
+
+#elif HIP_FP8_TYPE_FNUZ
+typedef __hip_fp8_e4m3_fnuz _te_hip_fp8_e4m3;
+typedef __hip_fp8_e5m2_fnuz _te_hip_fp8_e5m2;
+static inline bool te_fp8_fnuz() { return true; }
+#elif HIP_FP8_TYPE_OCP
+typedef __hip_fp8_e4m3 _te_hip_fp8_e4m3;
+typedef __hip_fp8_e5m2 _te_hip_fp8_e5m2;
+static inline bool te_fp8_fnuz() { return false; }
+#else
+#error "Unsupported HIP_FP8_TYPE"
+#endif //__HIP_DEVICE_COMPILE__
+
+#else //HIP_VERSION >= 60300000
+typedef __hip_fp8_e4m3_fnuz _te_hip_fp8_e4m3;
+typedef __hip_fp8_e5m2_fnuz _te_hip_fp8_e5m2;
+#endif //HIP_VERSION >= 60300000
+
+struct te_hip_fp8_e4m3 {  
+  _te_hip_fp8_e4m3 data;
+
+  __host__ __device__ te_hip_fp8_e4m3() = default;
+
+  __host__ __device__ operator float() const { return data.operator float(); }
+
+  __host__ __device__ te_hip_fp8_e4m3(const float& v) { data = v;}
+};
+static_assert(sizeof(te_hip_fp8_e4m3) == 1, "Size mismatch");
+
+union te_hip_fp8_e5m2 {
+  _te_hip_fp8_e5m2 data;
+
+  __host__ __device__ te_hip_fp8_e5m2() = default;
+
+  __host__ __device__ operator float() const { return data.operator float(); }
+
+  __host__ __device__ te_hip_fp8_e5m2(const float& v) { data = v; }
+};
+static_assert(sizeof(te_hip_fp8_e5m2) == 1, "Size mismatch");
+
+#else //HIP_VERSION >= 60200000
+
+// FP8 header version 0.3, 2021/05/11
 
 #define HIP_HOST_DEVICE __host__ __device__
 #define HIP_DEVICE  __device__
@@ -69,7 +167,6 @@ static inline __host__ bool get_hip_f8_bias_mode() {
 }
 #endif // __HIPCC_RTC__
 
-#ifdef __HIPCC__
 static __device__ bool hip_f8_bias_mode_bit_device = true;
 
 static inline __device__ bool get_hip_f8_bias_mode() {
@@ -91,7 +188,6 @@ static void set_hip_f8_bias_mode_optimal() {
   hip_f8_bias_mode_bit_host = true;
 }
 #endif // __HIPCC_RTC__
-#endif // __HIPCC__
 
 
 template<hip_f8_type T>
@@ -107,7 +203,7 @@ struct hip_f8 {
   }
 
   // constructor from float
-#if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
+#ifdef __gfx942__
   explicit HIP_DEVICE hip_f8(float v, hip_f8_rounding_mode rm=hip_f8_rounding_mode::standard, uint32_t rng=0) {
     union {
       float fval;
@@ -150,7 +246,7 @@ struct hip_f8 {
   }
 
 #ifndef __HIPCC_RTC__
-  explicit HIP_HOST //Code host still uses SW simulated conversion on MI300
+  explicit HIP_HOST //Code host still uses SW simulated conversion on gfx942
   hip_f8(float v, hip_f8_rounding_mode rm=hip_f8_rounding_mode::standard, uint32_t rng=0) {
     if (T == hip_f8_type::bf8) {
       if (get_hip_f8_bias_mode()) {
@@ -167,8 +263,8 @@ struct hip_f8 {
     }
   }
 #endif
-#else // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
-  explicit HIP_HOST_DEVICE // On architectures other than gfx940, both host and device still use SW simulated conversion
+#else // #ifndef __gfx942__
+  explicit HIP_HOST_DEVICE // On architectures other than gfx942, both host and device still use SW simulated conversion
   hip_f8(float v, hip_f8_rounding_mode rm=hip_f8_rounding_mode::standard, uint32_t rng=0) {
     if (T == hip_f8_type::bf8) {
       if (get_hip_f8_bias_mode()) {
@@ -184,16 +280,16 @@ struct hip_f8 {
       }
     }
   }
-#endif // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
+#endif // #ifdef __gfx942__
 			 
   // constructor from half
-#if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
+#ifdef __gfx942__
   explicit HIP_DEVICE hip_f8(half v, hip_f8_rounding_mode rm=hip_f8_rounding_mode::standard, uint32_t rng=0) 
 	  : hip_f8((float)v, rm, rng)
   {
   }
 #ifndef __HIPCC_RTC__
-  explicit HIP_HOST //Code host still uses SW simulated conversion on MI300
+  explicit HIP_HOST //Code host still uses SW simulated conversion on gfx942
   hip_f8(half v, hip_f8_rounding_mode rm=hip_f8_rounding_mode::standard, uint32_t rng=0) {
     if (T == hip_f8_type::bf8) {
       if (get_hip_f8_bias_mode()) {
@@ -210,8 +306,8 @@ struct hip_f8 {
     }
   }
 #endif
-#else // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
-  explicit HIP_HOST_DEVICE // On architectures other than MI300, both host and device still use SW simulated conversion
+#else // #ifndef __gfx942__
+  explicit HIP_HOST_DEVICE // On architectures other than gfx942, both host and device still use SW simulated conversion
   hip_f8(half v, hip_f8_rounding_mode rm=hip_f8_rounding_mode::standard, uint32_t rng=0) {
     if (T == hip_f8_type::bf8) {
       if (get_hip_f8_bias_mode()) {
@@ -227,13 +323,13 @@ struct hip_f8 {
       }
     }
   }
-#endif // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
+#endif // #ifdef __gfx942__
 
   // constructor from hip_bfloat16
   explicit HIP_HOST_DEVICE hip_f8(hip_bfloat16 v, hip_f8_rounding_mode r=hip_f8_rounding_mode::standard, uint32_t rng=0);
 
   // convert to float
-#if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
+#ifdef __gfx942__
   HIP_DEVICE operator float() const {
     union
     {
@@ -255,7 +351,7 @@ struct hip_f8 {
    return val.fval;
   }
 #ifndef __HIPCC_RTC__
-  explicit inline HIP_HOST //Code host still uses SW simulated conversion on MI300
+  explicit inline HIP_HOST //Code host still uses SW simulated conversion on gfx942
   operator float() const {
     if (T == hip_f8_type::bf8) {
       if (get_hip_f8_bias_mode()) {
@@ -272,8 +368,8 @@ struct hip_f8 {
     }
   }
 #endif
-#else // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
-  explicit inline HIP_HOST_DEVICE // On architectures other than MI300, both host and device still use SW simulated conversion
+#else // #ifdef __gfx942__
+  explicit inline HIP_HOST_DEVICE // On architectures other than gfx942, both host and device still use SW simulated conversion
   operator float() const {
     if (T == hip_f8_type::bf8) {
       if (get_hip_f8_bias_mode()) {
@@ -289,15 +385,15 @@ struct hip_f8 {
       }
     }
   }
-#endif // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
+#endif // #ifdef __gfx942__
 
   // convert to half
-#if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
+#ifdef __gfx942__
   explicit HIP_DEVICE inline operator half() const {
     return __half(float(*this));
   }
 #ifndef __HIPCC_RTC__
-  explicit inline HIP_HOST //Code host still uses SW simulated conversion on MI300
+  explicit inline HIP_HOST //Code host still uses SW simulated conversion on gfx942
   operator half() const {
     if (T == hip_f8_type::bf8) {
       if (get_hip_f8_bias_mode()) {
@@ -314,8 +410,8 @@ struct hip_f8 {
     }
   }
 #endif
-#else // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
-  explicit inline HIP_HOST_DEVICE // On architectures other than MI300, both host and device still use SW simulated conversion
+#else // #ifndef __gfx942__
+  explicit inline HIP_HOST_DEVICE // On architectures other than gfx942, both host and device still use SW simulated conversion
   operator half() const {
     if (T == hip_f8_type::bf8) {
       if (get_hip_f8_bias_mode()) {
@@ -331,7 +427,7 @@ struct hip_f8 {
       }
     }
   }
-#endif // #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
+#endif // #ifdef __gfx942__
 
   // convert to hip_bfloat16
   explicit inline HIP_HOST_DEVICE operator hip_bfloat16() const;
@@ -376,7 +472,6 @@ struct hip_f8 {
   }
 };
 
-#ifdef __HIPCC__
 
 template<hip_f8_type T>
 struct hip_f8x4 {
@@ -448,11 +543,20 @@ using hip_f8x8 = hip_f8x4<T> __attribute__((ext_vector_type(2)));
 typedef float hip_float32x4  __attribute__((ext_vector_type(4)));
 typedef float hip_float32x16 __attribute__((ext_vector_type(16)));
 
-// these are device-specific and we don't expect them to exist unless we're compiling with hip-clang for MI300.
+// these are device-specific and we don't expect them to exist unless we're compiling with hip-clang for gfx942.
 template<hip_f8_type T_A, hip_f8_type T_B>
 __device__ hip_float32x4 mfma_f32_16x16x32(hip_f8x8<T_A> a, hip_f8x8<T_B> b, hip_float32x4 c);
 
 template<hip_f8_type T_A, hip_f8_type T_B>
 __device__ hip_float32x16 mfma_f32_32x32x16(hip_f8x8<T_A> a, hip_f8x8<T_B> b, hip_float32x16 c);
 
+
+typedef hip_f8<hip_f8_type::fp8> te_hip_fp8_e4m3;
+typedef hip_f8<hip_f8_type::bf8> te_hip_fp8_e5m2;
+
+#endif //HIP_VERSION >= 60200000
+
+#else //__HIPCC__
+typedef struct {char storage;} te_hip_fp8_e4m3;
+typedef struct {char storage;} te_hip_fp8_e5m2;
 #endif //__HIPCC__

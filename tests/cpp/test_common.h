@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -61,9 +61,9 @@ using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
 #else
 using bf16 = hip_bfloat16;
-using fp8e4m3 = hip_f8<hip_f8_type::fp8>;
-using fp8e5m2 = hip_f8<hip_f8_type::bf8>;
-#endif
+using fp8e4m3 = te_hip_fp8_e4m3;
+using fp8e5m2 = te_hip_fp8_e5m2;
+#endif //USE_ROCM
 
 template <typename T>
 struct TypeInfo{

@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -9,7 +11,14 @@ import torch
 import transformer_engine
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
+if not IS_HIP_EXTENSION:
+    torch_float8_e4m3_type = torch.float8_e4m3fn
+    torch_float8_e5m2_type = torch.float8_e5m2
+else:
+    torch_float8_e4m3_type = torch.float8_e4m3fnuz
+    torch_float8_e5m2_type = torch.float8_e5m2fnuz
 
 def str_to_dtype(dtype: str | torch.dtype) -> torch.dtype:
     """Convert type name to PyTorch dtype"""
@@ -29,12 +38,12 @@ def str_to_dtype(dtype: str | torch.dtype) -> torch.dtype:
         half=torch.float16,
         bfloat16=torch.bfloat16,
         bf16=torch.bfloat16,
-        float8_e4m3fn=torch.float8_e4m3fn,
-        float8_e4m3=torch.float8_e4m3fn,
-        float8e4m3=torch.float8_e4m3fn,
-        float8=torch.float8_e4m3fn,
-        float8_e5m2=torch.float8_e5m2,
-        float8e5m2=torch.float8_e5m2,
+        float8_e4m3fn=torch_float8_e4m3_type,
+        float8_e4m3=torch_float8_e4m3_type,
+        float8e4m3=torch_float8_e4m3_type,
+        float8=torch_float8_e4m3_type,
+        float8_e5m2=torch_float8_e5m2_type,
+        float8e5m2=torch_float8_e5m2_type,
         uint8=torch.uint8,
         byte=torch.uint8,
         int8=torch.int8,
@@ -65,8 +74,8 @@ def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
             tex.DType.kFloat32: torch.float32,
             tex.DType.kFloat16: torch.half,
             tex.DType.kBFloat16: torch.bfloat16,
-            tex.DType.kFloat8E4M3: torch.float8_e4m3fn,
-            tex.DType.kFloat8E5M2: torch.float8_e5m2,
+            tex.DType.kFloat8E4M3: torch_float8_e4m3_type,
+            tex.DType.kFloat8E5M2: torch_float8_e5m2_type,
         }[dtype]
 
     # PyTorch dtypes
@@ -78,8 +87,8 @@ def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
         return dict(rtol=1.3e-6, atol=1e-5)
     if dtype == torch.float64:
         return dict(rtol=1e-7, atol=1e-7)
-    if dtype == torch.float8_e4m3fn:
+    if dtype == torch.float8_e4m3fn or dtype == torch.float8_e4m3fnuz:
         return dict(rtol=0.125, atol=0.0675)  # epsilon = 0.0625
-    if dtype == torch.float8_e5m2:
-        return dict(rtol=0.25, atol=0.125)  # epsilon = 0.152
+    if dtype == torch.float8_e5m2 or dtype == torch.float8_e5m2fnuz:
+        return dict(rtol=0.25, atol=0.125)  # epsilon = 0.152  
     raise ValueError(f"Unsupported dtype ({dtype})")
