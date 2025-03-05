@@ -19,7 +19,7 @@ namespace ck_fused_attn{
 
 hipError_t ck_attn_fwd(
   DType dtype,
-  uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d, uint64_t bias_b, uint64_t bias_h,
+  uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v, uint64_t bias_b, uint64_t bias_h,
   const void* q_ptr, 
   uint64_t stride_b_q, uint64_t stride_h_q, uint64_t stride_s_q,
   const void* k_ptr, 
@@ -47,10 +47,10 @@ hipError_t ck_attn_fwd(
   ck_tile::index_t batch = b;
   ck_tile::index_t seqlen_q = s_q;
   ck_tile::index_t nhead = h;
-  ck_tile::index_t hdim_q = d;
+  ck_tile::index_t hdim_q = d_qk;
   ck_tile::index_t seqlen_k = s_kv;
   ck_tile::index_t nhead_k = hg;
-  ck_tile::index_t hdim_v = d;
+  ck_tile::index_t hdim_v = d_v;
   ck_tile::index_t max_seqlen_q = s_q;
   ck_tile::index_t max_seqlen_k = s_kv;
   float scale_s = scaling_factor;
