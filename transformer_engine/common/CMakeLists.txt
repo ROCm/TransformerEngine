@@ -150,10 +150,10 @@ if(USE_CUDA)
        fused_softmax/scaled_aligned_causal_masked_softmax.cu
        fused_rope/fused_rope.cu
        recipe/delayed_scaling.cu
-     comm_gemm_overlap/userbuffers/ipcsocket.cc
-     comm_gemm_overlap/userbuffers/userbuffers-host.cpp
-     comm_gemm_overlap/userbuffers/userbuffers.cu
-     comm_gemm_overlap/comm_gemm_overlap.cpp)
+       comm_gemm_overlap/userbuffers/ipcsocket.cc
+       comm_gemm_overlap/userbuffers/userbuffers-host.cpp
+       comm_gemm_overlap/userbuffers/userbuffers.cu
+       comm_gemm_overlap/comm_gemm_overlap.cpp)
   add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 else()
   list(APPEND transformer_engine_SOURCES
