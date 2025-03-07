@@ -25,3 +25,10 @@ if not is_hip_extension():
 else:
   jnp_float8_e4m3_type = jnp.float8_e4m3fnuz
   jnp_float8_e5m2_type = jnp.float8_e5m2fnuz
+
+if is_hip_extension():
+  def is_mi200():
+      """check whether this machine is mi200/210/250"""
+      import re
+      return (re.search('AMD Instinct MI2.0', jax.devices()[0].device_kind) is not None)
+  
