@@ -35,11 +35,11 @@ for _name, _value in transformer_engine_jax.registrations().items():
         if is_ffi_enabled():
             # COMMAND_BUFFER_COMPATIBLE i.e. cudaGraph enabled by default
             jex.ffi.register_ffi_target(
-                _name, _value, platform="CUDA", api_version=CustomCallAPIVersion.FFI.value
+                _name, _value, platform="ROCM" if is_hip_extension() else "CUDA", api_version=CustomCallAPIVersion.FFI.value
             )
     else:
         jex.ffi.register_ffi_target(
-            _name, _value, platform="CUDA", api_version=CustomCallAPIVersion.OPAQUE.value
+            _name, _value, platform="ROCM" if is_hip_extension() else "CUDA", api_version=CustomCallAPIVersion.OPAQUE.value
         )
 
 
