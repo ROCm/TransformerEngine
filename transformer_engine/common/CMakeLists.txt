@@ -1,31 +1,41 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 cmake_minimum_required(VERSION 3.21)
 
-option(USE_ROCM "Use ROCm" OFF)
+option(USE_ROCM "Use ROCm" ON)
 option(USE_HIPBLASLT "Use HIPBLASLT" ON)
 option(USE_ROCBLAS "Use ROCBLAS" ON)
 option(USE_FUSED_ATTN_AOTRITON "Use aotriton backend" ON)
+option(USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS "Build AOTriton GPU kernels" OFF)
 option(USE_FUSED_ATTN_CK "Use ck backend" ON)
-
-if(NOT USE_ROCM)
-  if(((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) AND NOT (EXISTS "/bin/nvcc"))
-    message("AMD GPU detected.")
-    set(USE_ROCM ON)
-  endif()
-endif()
+set(USE_CUDA OFF)
 
 if (USE_ROCM)
+  #Check if ROCm exists
+  if( ((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) )
+    message("Using AMD Platform")
+  else()
+    message(FATAL_ERROR "Could not find ROCm installation")
+  endif()
+    
   if (NOT USE_HIPBLASLT AND NOT USE_ROCBLAS)
     message(FATAL_ERROR "Need specify at least one GEMM library to use: HIPBLASLT or ROCBLAS")
   endif()
-  unset(USE_CUDA)
+
 else()
-  set(USE_CUDA TRUE)
+  #Check if CUDA exists
+  if (EXISTS "$ENV{CUDA_HOME}/bin/nvcc")
+    set(USE_ROCM OFF)
+    set(USE_CUDA ON)
+    message("Using NVIDIA Platform")
+  else()
+    message(FATAL_ERROR "Could not find NVCC at '$ENV{CUDA_HOME}/bin/nvcc'")
+  endif()
+  
 endif()
 
 # Language options
@@ -212,7 +222,6 @@ target_include_directories(transformer_engine PUBLIC
 if (USE_CUDA)
   target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
-                      CUDA::cuda_driver
                       CUDA::cudart)
   target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
@@ -222,19 +231,79 @@ if (USE_CUDA)
   target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
 else()
   if(USE_FUSED_ATTN_AOTRITON)
+    # This is for GPU kernel downloading
+    # The AOTriton C++ runtime will be built from ../../3rdparty/aotriton
+    # Hence there is no need to add multiple ROCM version here
+    set(__AOTRITON_INSTALL_DIR "${CMAKE_CURRENT_BINARY_DIR}/aotriton")
+    set(__AOTRITON_SUFFIX "_TEprivate")
     if(NOT DEFINED AOTRITON_PATH)
-      # Install aotriton fused attn
-      set(AOTRITON_NO_PYTHON ON)
-      set(AOTRITON_COMPRESS_KERNEL OFF)
-      set(AOTRITON_NO_SHARED ON)
-      set(TARGET_GPUS "MI300X" CACHE STRING "Target arch to compile aotriton fused attn backend (use trade names)")
-      add_subdirectory(../../3rdparty/aotriton ${CMAKE_CURRENT_BINARY_DIR}/aotriton)
+      # # Install aotriton fused attn
+      if(USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS)
+        set(AOTRITON_NOIMAGE_MODE OFF)
+      else()
+        set(AOTRITON_NOIMAGE_MODE ON)
+      endif()
+      set(aotriton_target_gpus "")
+      # GPU Targets
+      macro(translate_arch_to_gpu_names aotriton_target_gpus)
+        set(gfx90a_key MI200)
+        set(gfx942_key MI300X)
+        set(gfx1100_key Navi31)
+
+        foreach(X IN LISTS CMAKE_HIP_ARCHITECTURES)
+          set(key ${X})
+          string(APPEND key "_key")
+          string(APPEND aotriton_target_gpus ${${key}})
+          string(APPEND aotriton_target_gpus "|")
+        endforeach()
+      endmacro()
+      translate_arch_to_gpu_names(aotriton_target_gpus)
+      include(ExternalProject)
+      ExternalProject_Add(aotriton_external
+        SOURCE_DIR ../../3rdparty/aotriton
+        LIST_SEPARATOR |
+        CMAKE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${__AOTRITON_INSTALL_DIR}
+        -DTARGET_GPUS=${aotriton_target_gpus}
+        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+        -DAOTRITON_NO_PYTHON=ON
+        -DAOTRITON_NAME_SUFFIX=${__AOTRITON_SUFFIX}
+        -DAOTRITON_NOIMAGE_MODE=${AOTRITON_NOIMAGE_MODE}
+        BUILD_BYPRODUCTS "${__AOTRITON_INSTALL_DIR}/lib/libaotriton${__AOTRITON_SUFFIX}_v2.so"
+        )
+      add_library(aotriton INTERFACE)
+      add_dependencies(aotriton aotriton_external)
+      target_link_libraries(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/lib/libaotriton${__AOTRITON_SUFFIX}_v2.so)
+      target_include_directories(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/include)
+      if(NOT USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS)
+        set(__AOTRITON_VER "0.8.2b")
+        set(__AOTRITON_SHA256 "66445e6b0209b9f4080743b839cc9d424054dc5c8d07363f9f27f109231c324a")
+        string(CONCAT __AOTRITON_URL "https://github.com/ROCm/aotriton/releases/download/"
+                                     "${__AOTRITON_VER}/aotriton-"
+                                     "${__AOTRITON_VER}-manylinux_2_28"
+                                     "_x86_64-rocm6.2"
+                                     "-shared.tar.gz")
+        ExternalProject_Add(aotriton_images
+                            URL "${__AOTRITON_URL}"
+                            URL_HASH SHA256=${__AOTRITON_SHA256}
+                            SOURCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/aotriton_tarball
+                            CONFIGURE_COMMAND ""
+                            BUILD_COMMAND ""
+                            INSTALL_COMMAND ${CMAKE_COMMAND} -E copy_directory
+                            "${CMAKE_CURRENT_BINARY_DIR}/aotriton_tarball/lib/aotriton.images"
+                            "${__AOTRITON_INSTALL_DIR}/lib/aotriton.images")
+        add_dependencies(aotriton aotriton_images)
+      endif()
+      install(DIRECTORY
+              ${__AOTRITON_INSTALL_DIR}/lib
+              DESTINATION ${CMAKE_INSTALL_PREFIX}/transformer_engine
+              PATTERN "cmake" EXCLUDE
+              PATTERN "libaotriton${__AOTRITON_SUFFIX}_v2.so" EXCLUDE)
     else()
       # Use aotriton built during initial TE building/installation
       # When only need rebuild TE library itself
       unset(AOTRITON_LIB CACHE)
-      find_library(AOTRITON_LIB NAMES aotriton aotriton_v2 PATHS ${AOTRITON_PATH}/lib REQUIRED NO_DEFAULT_PATH)
-      add_library( aotriton STATIC IMPORTED )
+      find_library(AOTRITON_LIB NAMES aotriton aotriton${__AOTRITON_SUFFIX}_v2 PATHS ${AOTRITON_PATH}/lib REQUIRED NO_DEFAULT_PATH)
+      add_library( aotriton SHARED IMPORTED )
       set_target_properties( aotriton PROPERTIES IMPORTED_LOCATION ${AOTRITON_LIB} )
       target_include_directories(aotriton INTERFACE ${AOTRITON_PATH}/include)
     endif()
@@ -367,3 +436,4 @@ endif()
 
 # Install library
 install(TARGETS transformer_engine DESTINATION .)
+set_target_properties(transformer_engine PROPERTIES INSTALL_RPATH "$ORIGIN/lib;$ORIGIN/transformer_engine/lib")

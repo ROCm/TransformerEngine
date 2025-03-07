@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -11,6 +11,8 @@ from typing import Callable, Optional, Tuple
 import torch
 
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
+# pylint: disable=unnecessary-lambda-assignment
 
 jit_fuser = torch.jit.script
 if torch.__version__ >= "2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
@@ -113,8 +115,8 @@ def dgelu_fused_(grad_output: torch.Tensor, inp: torch.Tensor) -> torch.Tensor:
 
 def bias_gelu_fused(inp: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
     """Disable native AMP for bias_gelu_fused_"""
-    with torch.cuda.amp.autocast(enabled=False):
-        if bias.numel() != 0:
+    with torch.amp.autocast('cuda', enabled=False):
+        if bias is not None and bias.numel() != 0:
             return bias_gelu_fused_(inp, bias)
         return gelu_fused_(inp)
 
@@ -123,8 +125,8 @@ def bgrad_dgelu_fused(
     grad_output: torch.Tensor, inp: torch.Tensor, bias: torch.Tensor
 ) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
     """Disable native AMP for `bgrad_dgelu_fused_`"""
-    with torch.cuda.amp.autocast(enabled=False):
-        if bias.numel() != 0:
+    with torch.amp.autocast('cuda', enabled=False):
+        if bias is not None and bias.numel() != 0:
             return bgrad_dgelu_fused_(grad_output, inp, bias)
         return None, dgelu_fused_(grad_output, inp)
 
@@ -164,7 +166,7 @@ def bias_dropout_add_fused_train(
 ) -> torch.Tensor:
     """Disable native AMP and enable grad for BDA"""
     with torch.enable_grad():
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast('cuda', enabled=False):
             return bias_dropout_add_fused_train_(x, bias, residual, prob)
 
 
@@ -180,7 +182,7 @@ def bias_dropout_add_fused_inference(
     x: torch.Tensor, bias: torch.Tensor, residual: torch.Tensor, prob: float
 ) -> torch.Tensor:
     """Disable native AMP for BDA"""
-    with torch.cuda.amp.autocast(enabled=False):
+    with torch.amp.autocast('cuda', enabled=False):
         return bias_dropout_add_fused_inference_(x, bias, residual, prob)
 
 

@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -62,9 +62,10 @@ def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library"""
     # Project directory root
     root_path = Path(__file__).resolve().parent
-    
+
     cmake_flags = []
     if rocm_build():
+        cmake_flags.append("-DUSE_ROCM=ON")
         if os.getenv("NVTE_USE_HIPBLASLT") is not None:
             cmake_flags.append("-DUSE_HIPBLASLT=ON")
         if os.getenv("NVTE_USE_ROCBLAS") is not None:
@@ -81,6 +82,7 @@ def setup_common_extension() -> CMakeExtension:
             cmake_flags.append("-DUSE_FUSED_ATTN_CK=OFF")
     else:
         cmake_flags=["-DCMAKE_CUDA_ARCHITECTURES={}".format(cuda_archs())]
+        cmake_flags.append("-DUSE_ROCM=OFF")
 
     return CMakeExtension(
         name="transformer_engine",
@@ -115,7 +117,7 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     # Framework-specific requirements
     if (not rocm_build()) and (not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0")))):
         if "pytorch" in frameworks:
-            install_reqs.extend(["torch", "flash-attn>=2.0.6,<=2.6.3,!=2.0.9,!=2.1.0"])
+            install_reqs.extend(["torch"])
             test_reqs.extend(["numpy", "onnxruntime", "torchvision", "prettytable"])
         if "jax" in frameworks:
             install_reqs.extend(["jax", "flax>=0.7.1"])

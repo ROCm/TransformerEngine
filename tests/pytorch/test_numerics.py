@@ -24,7 +24,7 @@ from transformer_engine.pytorch.utils import (
     is_bf16_compatible,
 )
 if IS_HIP_EXTENSION:
-    from transformer_engine.pytorch.utils import is_mi200
+    from transformer_engine.pytorch.utils import is_mi200, is_mi308
 
 from transformer_engine.pytorch import (
     DotProductAttention,
@@ -40,6 +40,7 @@ from transformer_engine.pytorch import (
     Fp8Padding,
     Fp8Unpadding,
 )
+from transformer_engine.pytorch.attention import _flash_attn_2_7_plus
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import fp8_gemm, fp8_grouped_gemm, gemm, grouped_gemm
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
@@ -63,10 +64,13 @@ if IS_HIP_EXTENSION:
         return (os.getenv("NVTE_USE_HIPBLASLT") is not None
                 or os.getenv("NVTE_USE_ROCBLAS") is None )
 
-    def rocm_fused_attn_backend() -> tuple[bool, bool]:
+    def rocm_attn_backend() -> tuple[bool, bool, bool]:
+        """Returns the FA backends to use: (flash_attn, fused_attn_aotriton, fused_attn_ck)"""
+        use_flash_attn = int(os.environ.get("NVTE_FLASH_ATTN", "1")) != 0
         if int(os.getenv("NVTE_FUSED_ATTN", "1")) == 0:
-            return (False, False)
-        return (int(os.getenv("NVTE_FUSED_ATTN_AOTRITON", "1")) != 0,
+            return (use_flash_attn, False, False)
+        return (use_flash_attn,
+                int(os.getenv("NVTE_FUSED_ATTN_AOTRITON", "1")) != 0,
                 int(os.getenv("NVTE_FUSED_ATTN_CK", "1")) != 0)
 
 
@@ -128,9 +132,9 @@ def dtype_tols(dtype: torch.dtype) -> Dict[str, float]:
 
 def rocm_attn_tols() -> Dict[str, float]:
     if IS_HIP_EXTENSION:
-        _, use_fused_attn_ck = rocm_fused_attn_backend()
+        use_flash_attn, _, use_fused_attn_ck = rocm_attn_backend()
         # TODO: wait for the ck branch supporting determinism
-        if use_fused_attn_ck:
+        if not use_flash_attn and use_fused_attn_ck:
             return dict(atol=5e-2, rtol=5e-2)
         else:
             # AOTriton backend and non-fused attn are deterministic
@@ -670,6 +674,7 @@ def test_gpt_full_activation_recompute(dtype, bs, model, fp8, fp8_model_params, 
         pytest.skip(reason_for_no_fp8)
 
     config = model_configs[model]
+    torch.compiler.reset() # avoid cache size limit overflow
 
     if not use_reentrant:
         # Non-reentrant checkpoint becomes non-deterministic with bias+GELU fusion
@@ -827,6 +832,10 @@ def test_gpt_checkpointing(dtype, bs, model):
             msg=f"Mismatch in tensor {i}",
             **tols,
         )
+        if IS_HIP_EXTENSION and not _flash_attn_2_7_plus and is_mi308() and rocm_attn_backend()[0]:
+            # ROCm FA before 2.7.0 has a bug in dropout rng initialisation that exposes in
+            # intermediate tensors mismatch on MI308. This is not a problem in the final output.
+            break
 
 
 def _test_e2e_gpt_accuracy(block, bs, dtype, config):
@@ -1646,7 +1655,9 @@ def test_gpt_cuda_graph(dtype, bs, model):
         if not use_hipblaslt():
             pytest.skip("CUDA graph capture not supported with rocBLAS path")
         if dtype not in (torch.float32,):
-            use_aotriton, use_ck = rocm_fused_attn_backend()
+            use_fa, use_aotriton, use_ck = rocm_attn_backend()
+            if use_fa:
+                pytest.skip(f"ROCm flash attention does not support cuda graph with {dtype}")
             if use_aotriton and not use_ck:
                 pytest.skip(f"AOTriton attention backend does not support cuda graph with {dtype}")
 
@@ -1656,10 +1667,12 @@ def test_gpt_cuda_graph(dtype, bs, model):
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    block = TransformerLayer(
+    block_args = (
         config.hidden_size,
         4 * config.hidden_size,
         config.num_attention_heads,
+    )
+    block_kwargs = dict(
         layernorm_epsilon=config.eps,
         init_method=init_method,
         output_layer_init_method=output_layer_init_method,
@@ -1671,7 +1684,11 @@ def test_gpt_cuda_graph(dtype, bs, model):
         output_layernorm=False,
         device="cuda",
     )
-    graphed_block = copy.deepcopy(block)
+    block = TransformerLayer(*block_args, **block_kwargs)
+    graphed_block = TransformerLayer(*block_args, **block_kwargs)
+    with torch.no_grad():
+        for param1, param2 in zip(block.parameters(), graphed_block.parameters()):
+            param2.copy_(param1)
 
     out, grads = _test_gpt_e2e_cuda_graph(block, bs, dtype, config, False)
     graphed_out, graphed_grads = _test_gpt_e2e_cuda_graph(graphed_block, bs, dtype, config, True)
@@ -1745,8 +1762,6 @@ def test_gpt_fp8_parameters(dtype, bs, model):
     outputs_fp8_params = _test_gpt_fp8_parameters(bs, dtype, config, True)
     # Check that results match
     tols = dict(rtol=0.125, atol=0.0675)
-    if IS_HIP_EXTENSION:
-        tols = rocm_attn_tols()
 
     for i, (ref, test) in enumerate(zip(outputs, outputs_fp8_params)):
         torch.testing.assert_close(
@@ -1808,37 +1823,30 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
         device="cuda",
         attn_input_format="bshd",
     )
-    
-    #TODO: release after rocm fused attn support var seq len features
-    if not IS_HIP_EXTENSION:
-        torch.manual_seed(0)
-        block_thd = TransformerLayer(
-            config.hidden_size,
-            4 * config.hidden_size,
-            config.num_attention_heads,
-            layernorm_epsilon=config.eps,
-            init_method=init_method,
-            output_layer_init_method=output_layer_init_method,
-            hidden_dropout=0,
-            attention_dropout=0,
-            kv_channels=config.embed,
-            params_dtype=dtype,
-            apply_residual_connection_post_layernorm=False,
-            output_layernorm=False,
-            device="cuda",
-            attn_input_format="thd",
-            self_attn_mask_type="padding_causal",
-        )
 
-        for (n1, p1), (n2, p2), (n3, p3) in zip(
-            block_bshd.named_parameters(), block_sbhd.named_parameters(), block_thd.named_parameters()
-        ):
-            assert torch.all(torch.eq(p1, p2) & torch.eq(p1, p3)), f"{n1}, {n2} and {n3} not identical"
-    else:
-        for (n1, p1), (n2, p2) in zip(
-            block_bshd.named_parameters(), block_sbhd.named_parameters()
-        ):
-            assert torch.all(torch.eq(p1, p2)), f"{n1} and {n2} not identical"      
+    torch.manual_seed(0)
+    block_thd = TransformerLayer(
+        config.hidden_size,
+        4 * config.hidden_size,
+        config.num_attention_heads,
+        layernorm_epsilon=config.eps,
+        init_method=init_method,
+        output_layer_init_method=output_layer_init_method,
+        hidden_dropout=0,
+        attention_dropout=0,
+        kv_channels=config.embed,
+        params_dtype=dtype,
+        apply_residual_connection_post_layernorm=False,
+        output_layernorm=False,
+        device="cuda",
+        attn_input_format="thd",
+        self_attn_mask_type="padding_causal",
+    )
+
+    for (n1, p1), (n2, p2), (n3, p3) in zip(
+        block_bshd.named_parameters(), block_sbhd.named_parameters(), block_thd.named_parameters()
+    ):
+        assert torch.all(torch.eq(p1, p2) & torch.eq(p1, p3)), f"{n1}, {n2} and {n3} not identical"
 
     x_sbhd = torch.randn(
         (config.seq_len, bs, config.hidden_size),
@@ -1864,7 +1872,14 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     # TODO: wait for the full determinism fix from hipblaslt
     if IS_HIP_EXTENSION:
         if use_hipblaslt():
-            torch.testing.assert_close(y_bshd, y_sbhd.transpose(0, 1).contiguous())
+            tols = dtype_tols(dtype)
+            if dtype in (torch.float16, torch.bfloat16) and is_mi308():
+                # mi308 hipblaslt precision issue
+                tols["atol"] = 2e-3
+                _, use_aotriton, use_ck = rocm_attn_backend()
+                if use_aotriton and not use_ck:
+                    tols["rtol"] = tols["rtol"] * 3
+            torch.testing.assert_close(y_bshd, y_sbhd.transpose(0, 1).contiguous(), **tols)
         else:
             assert torch.equal(y_bshd, y_sbhd.transpose(0, 1).contiguous()), "Tensors are not equal"
     else:
@@ -1873,26 +1888,29 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
             y_bshd,
             y_sbhd.transpose(0, 1).contiguous(),
         )
-    
-    # TODO: wait for rocm fused attn support var seqlen
-    if not IS_HIP_EXTENSION:
-        # THD is not supported in float32 and on GPUs older than Ampere, skip the test here
-        if dtype != torch.float32 and sm_80plus:
-            # To make sure forward is also identical (just in case some module decides
-            # to act fancy)
-            torch.manual_seed(0)
-            y_thd = block_thd(
-                x_thd,
-                cu_seqlens_q=x_thd_cumsum,
-                cu_seqlens_kv=x_thd_cumsum,
-                max_seqlen_q=config.seq_len,
-                max_seqlen_kv=config.seq_len,
-            )
 
-            torch.testing.assert_close(
-                y_bshd,
-                y_thd.reshape(bs, config.seq_len, config.hidden_size).contiguous(),
-            )
+    # in ROCm TE, THD only supported with ck backend
+    if IS_HIP_EXTENSION:
+        _, _, use_ck = rocm_attn_backend()
+        if not use_ck:
+            return 
+    # THD is not supported in float32 and on GPUs older than Ampere, skip the test here
+    if dtype != torch.float32 and (IS_HIP_EXTENSION or sm_80plus):
+        # To make sure forward is also identical (just in case some module decides
+        # to act fancy)
+        torch.manual_seed(0)
+        y_thd = block_thd(
+            x_thd,
+            cu_seqlens_q=x_thd_cumsum,
+            cu_seqlens_kv=x_thd_cumsum,
+            max_seqlen_q=config.seq_len,
+            max_seqlen_kv=config.seq_len,
+        )
+
+        torch.testing.assert_close(
+            y_bshd,
+            y_thd.reshape(bs, config.seq_len, config.hidden_size).contiguous(),
+        )
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -1903,6 +1921,10 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
 @pytest.mark.parametrize("module", module_inference)
 @pytest.mark.parametrize("backend", backends_inference)
 def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module, backend):
+    if ((backend == "FlashAttention" and os.getenv("NVTE_FLASH_ATTN", "1") == "0") or
+        (backend == "FusedAttention" and os.getenv("NVTE_FUSED_ATTN", "1") == "0")):
+        pytest.skip(f"{backend} is disabled")
+
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"
 

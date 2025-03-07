@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager, AbstractContextManager, ContextDecorator
+from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 
@@ -127,6 +128,7 @@ def set_tensor_model_parallel_attributes(
     setattr(tensor, "partition_stride", stride)
 
 
+@lru_cache
 def get_distributed_world_size(group: Optional[dist_group_type] = None) -> int:
     """Return world size for the distributed group."""
     if not torch.distributed.is_initialized():
@@ -134,6 +136,7 @@ def get_distributed_world_size(group: Optional[dist_group_type] = None) -> int:
     return torch.distributed.get_world_size(group=group)
 
 
+@lru_cache
 def get_distributed_rank(group: Optional[dist_group_type] = None) -> int:
     """Return my rank for the distributed group."""
     assert torch.distributed.is_initialized(), "torch.distributed is not initialized."
@@ -205,6 +208,8 @@ class activation_recompute_forward(AbstractContextManager, ContextDecorator):
     activations, followed by calculation of gradients using these values.
     """
 
+    _is_first_fp8_module: List = []
+
     def __init__(self, activation_recompute: bool = False, recompute_phase: bool = False):
         super().__init__()
         self.activation_recompute = activation_recompute
@@ -216,6 +221,15 @@ class activation_recompute_forward(AbstractContextManager, ContextDecorator):
             self.activation_recompute and FP8GlobalStateManager.is_fp8_enabled()
         )
         _FP8_ACTIVATION_RECOMPUTE_PHASE = self.recompute_phase
+
+        if self.activation_recompute and not self.recompute_phase:
+            activation_recompute_forward._is_first_fp8_module.append(
+                FP8GlobalStateManager.IS_FIRST_FP8_MODULE
+            )
+        if self.activation_recompute and self.recompute_phase:
+            FP8GlobalStateManager.IS_FIRST_FP8_MODULE = (
+                activation_recompute_forward._is_first_fp8_module.pop(0)
+            )
 
     def __exit__(self, *exc_details):
         global _FP8_ACTIVATION_RECOMPUTE_ENABLED, _FP8_ACTIVATION_RECOMPUTE_PHASE
@@ -242,14 +256,14 @@ def _get_active_autocast_contexts():
 
     gpu_autocast_enabled = torch.is_autocast_enabled()
     gpu_autocast_dtype = torch.get_autocast_gpu_dtype()
-    gpu_autocast_ctx = torch.cuda.amp.autocast(
-        gpu_autocast_enabled, gpu_autocast_dtype, autocast_cached
+    gpu_autocast_ctx = torch.amp.autocast('cuda',
+        gpu_autocast_dtype, gpu_autocast_enabled, autocast_cached
     )
 
     cpu_autocast_enabled = torch.is_autocast_cpu_enabled()
     cpu_autocast_dtype = torch.get_autocast_cpu_dtype()
-    cpu_autocast_ctx = torch.cpu.amp.autocast(
-        cpu_autocast_enabled, cpu_autocast_dtype, autocast_cached
+    cpu_autocast_ctx = torch.amp.autocast('cpu',
+        cpu_autocast_dtype, cpu_autocast_enabled, autocast_cached
     )
 
     return gpu_autocast_ctx, cpu_autocast_ctx
@@ -753,11 +767,11 @@ class CudaRNGStatesTracker:
         """
         # Check seed is not already used.
         if seed in self.seeds_:
-            raise Exception(f"seed {seed} already exists")
+            raise RuntimeError(f"seed {seed} already exists")
         self.seeds_.add(seed)
         # Check that state is not already defined.
         if name in self.states_:
-            raise Exception(f"cuda rng state {name} already exists")
+            raise RuntimeError(f"cuda rng state {name} already exists")
 
         if graph_safe_rng_available():
             new_state = _get_cuda_rng_state(clone=True)
@@ -787,7 +801,7 @@ class CudaRNGStatesTracker:
         """
         # Check if we have added the state
         if name not in self.states_:
-            raise Exception(f"cuda rng state {name} is not added")
+            raise KeyError(f"cuda rng state {name} is not added")
         # Get the reference to current rng state.
         orig_cuda_rng_state = _get_cuda_rng_state()
         # Set rng state to the desired one

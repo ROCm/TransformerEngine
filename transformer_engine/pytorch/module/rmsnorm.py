@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -11,11 +13,10 @@ import torch
 from torch.nn.parameter import Parameter
 from torch.nn import init
 
-from .base import TransformerEngineBaseModule
 from .. import cpp_extensions as tex
 from ..jit import no_torch_dynamo
 from ..utils import cast_if_needed
-
+from ..triton_kernels.rmsnorm_triton import te_rmsnorm_fwd_triton
 
 __all__ = ["RMSNorm"]
 
@@ -36,6 +37,7 @@ class _RMSNorm(torch.autograd.Function):
         is_grad_enabled: bool,
         activation_dtype: torch.dtype,
     ) -> torch.Tensor:
+        # pylint: disable=missing-function-docstring
         # Make sure input dimensions are compatible
         in_features = rmsnorm_weight.numel()
         assert inp.is_cuda, "TransformerEngine needs CUDA."
@@ -46,22 +48,35 @@ class _RMSNorm(torch.autograd.Function):
         inputmat = cast_if_needed(inputmat, activation_dtype)
         rmsnorm_weight = cast_if_needed(rmsnorm_weight, activation_dtype)
 
+        use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) )
+
         if is_grad_enabled:
-            rmsnorm_out, rsigma = tex.rmsnorm_fwd(
-                inputmat, rmsnorm_weight, eps, fwd_rmsnorm_sm_margin, zero_centered_gamma
-            )
+            if use_rmsnorm_triton:
+                rmsnorm_out, rsigma = te_rmsnorm_fwd_triton(
+                    inputmat, rmsnorm_weight, eps, zero_centered_gamma
+                )
+            else:
+                rmsnorm_out, rsigma = tex.rmsnorm_fwd(
+                    inputmat, rmsnorm_weight, eps, fwd_rmsnorm_sm_margin, zero_centered_gamma
+                )
             ctx.save_for_backward(inputmat, rmsnorm_weight, rsigma)
             ctx.inp_shape = inp.shape
             ctx.bwd_rmsnorm_sm_margin = bwd_rmsnorm_sm_margin
             ctx.zero_centered_gamma = zero_centered_gamma
         else:
-            rmsnorm_out = tex.rmsnorm_fwd_inf(
-                inputmat, rmsnorm_weight, eps, inf_rmsnorm_sm_margin, zero_centered_gamma
-            )
+            if use_rmsnorm_triton:
+                rmsnorm_out = te_rmsnorm_fwd_inf_triton(
+                    inputmat, rmsnorm_weight, eps, zero_centered_gamma
+                )
+            else:
+                rmsnorm_out = tex.rmsnorm_fwd_inf(
+                    inputmat, rmsnorm_weight, eps, inf_rmsnorm_sm_margin, zero_centered_gamma
+                )
         return rmsnorm_out.view_as(inp)
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+        # pylint: disable=missing-function-docstring
         inputmat, rmsnorm_weight, rsigma = ctx.saved_tensors
         grad_output = grad_output.contiguous()
         d_rmsnorm_out = grad_output.view(inputmat.shape)
@@ -146,8 +161,9 @@ class RMSNorm(torch.nn.Module):
             )
         )
         self.sequence_parallel = sequence_parallel
+        self.activation_dtype: Optional[torch.dtype] = None
 
-        self.reset_parameters(defer_init=(device == "meta"))
+        self.reset_parameters(defer_init=device == "meta")
 
         # These many SMs are subtracted from the total SM count when calling forward
         # and backward RMSNorm C APIs. These envvars can be used to prevent the LN
@@ -182,10 +198,22 @@ class RMSNorm(torch.nn.Module):
 
     @no_torch_dynamo()
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
-        """RMSNorm FWD"""
+        # pylint: disable=missing-function-docstring
 
         # Set the activation type for AMP.
-        TransformerEngineBaseModule.set_activation_dtype(self, inp)
+        # Note: This will soon be deprecated with
+        # https://github.com/NVIDIA/TransformerEngine/pull/1033
+        if torch.is_autocast_enabled():
+            self.activation_dtype = torch.get_autocast_gpu_dtype()
+        elif self.activation_dtype != inp.dtype:
+            dtype = inp.dtype
+            for name, param in self.named_parameters():
+                if param is not None:
+                    assert dtype == param.dtype, (
+                        "Data types for parameters must match when outside of autocasted region. "
+                        f" Found input dtype: {dtype} and {name!r} dtype: {param.dtype}"
+                    )
+            self.activation_dtype = dtype
 
         if torch.is_grad_enabled():
             fwd_fn = _RMSNorm.apply

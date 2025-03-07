@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -9,6 +9,7 @@
 import functools
 import glob
 import importlib
+import importlib.metadata
 import os
 import re
 import shutil
@@ -165,28 +166,58 @@ def found_pybind11() -> bool:
 
 @functools.lru_cache(maxsize=None)
 def rocm_build() -> bool:
-    """ ROCm build should be performed if:
-    - It is configured with NVTE_USE_ROCM=1 env
-      OR:
-    - HIP compiler is found and CUDA one is not
     """
-    if bool(int(os.getenv("NVTE_USE_ROCM", "0"))):
+    Determines which build platform to use:
+
+    - If `NVTE_USE_ROCM` is set:
+        - Non-zero value: Use ROCm, if hipcc is detected.
+        - Zero value: Use CUDA, if nvcc is detected.
+    - If `NVTE_USE_ROCM` is not set:
+        - Attempt to auto-detect: Check for ROCm first, then CUDA.
+
+    Returns:
+        bool: `True` for ROCm, `False` for CUDA.
+
+    Raises:
+        ValueError: If NVTE_USE_ROCM is set to invalid value.
+        FileNotFoundError: If required tools (hipcc or nvcc) are not found.
+    """
+    nvte_use_rocm = os.getenv("NVTE_USE_ROCM")
+    if nvte_use_rocm:
+        try:
+            nvte_use_rocm = bool(int(nvte_use_rocm))
+        except ValueError:
+            raise ValueError(
+                f"Invalid value for NVTE_USE_ROCM: '{nvte_use_rocm}'.")
+
+        if nvte_use_rocm:
+            _, hipcc_bin = rocm_path()
+            if hipcc_bin.is_file():
+                return True
+            else:
+                raise FileNotFoundError(f"Could not find hipcc at {hipcc_bin}")
+        else:
+            cuda_path()
+            return False
+
+    # Try to detect ROCm
+    _, hipcc_bin = rocm_path()
+    if hipcc_bin.is_file():
         return True
 
+    # Try to detect CUDA
     try:
         cuda_path()
         return False
     except FileNotFoundError:
-        pass
-
-    _, hipcc_bin = rocm_path()
-    return hipcc_bin.is_file()
-
+        # If neither ROCm nor CUDA is detected, raise an error
+        raise FileNotFoundError("Could not detect ROCm or CUDA platform")
 
 @functools.lru_cache(maxsize=None)
 def rocm_path() -> Tuple[str, str]:
     """ROCm root path and HIPCC binary path as a tuple"""
     """If ROCm installation is not specified, use default /opt/rocm path"""
+    hipcc_bin = None
     if os.getenv("ROCM_PATH"):
         rocm_home = Path(os.getenv("ROCM_PATH"))
         hipcc_bin = rocm_home / "bin" / "hipcc"
@@ -386,11 +417,9 @@ def uninstall_te_wheel_packages():
     )
 
 def hipify(base_dir, src_dir, sources, include_dirs):
-    hipify_path = base_dir / "3rdparty" / "hipify_torch"
     cwd = os.getcwd()
-    os.chdir(hipify_path)
-    from hipify_torch.hipify_python import hipify as do_hipify
-    os.chdir(cwd)
+    hipify_module = importlib.import_module("3rdparty.hipify_torch.hipify_torch.hipify_python")
+    do_hipify = hipify_module.hipify
 
     hipify_result = do_hipify(
         project_directory=src_dir,

@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -66,6 +66,7 @@ __all__ = [
         "dropout_probability",
         "is_training",
         "max_segments_per_seq",
+        "window_size",
         "context_parallel_load_balanced",
         "cp_axis",
     ],
@@ -83,6 +84,7 @@ class _FusedAttnConfig:
     dropout_probability: float
     is_training: bool
     max_segments_per_seq: int
+    window_size: Tuple[int, int]
     context_parallel_load_balanced: bool
     cp_axis: str
 
@@ -104,6 +106,7 @@ class FusedAttnHelper:
     q_max_seqlen: int
     kv_max_seqlen: int
     head_dim: int
+    window_size: Tuple[int, int]
 
     def is_fused_attn_kernel_available(self):
         """Check if there is available fused attention kernel"""
@@ -111,6 +114,9 @@ class FusedAttnHelper:
 
     def get_fused_attn_backend(self):
         """Get the fused attention kernel backend"""
+        # temporary hack to disable thd in rocm fused attn as no pad_between_sequence
+        if self.qkv_layout in [NVTE_QKV_Layout.NVTE_T3HD, NVTE_QKV_Layout.NVTE_THD_T2HD, NVTE_QKV_Layout.NVTE_THD_THD_THD]:
+            return NVTE_Fused_Attn_Backend.NVTE_No_Backend
         return transformer_engine_jax.get_fused_attn_backend(
             jax_dtype_to_te_dtype(self.q_dtype),
             jax_dtype_to_te_dtype(self.kv_dtype),
@@ -123,6 +129,8 @@ class FusedAttnHelper:
             self.q_max_seqlen,
             self.kv_max_seqlen,
             self.head_dim,
+            self.window_size[0],
+            self.window_size[1],
         )
 
     @staticmethod
@@ -266,6 +274,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             q_max_seqlen,
             kv_max_seqlen,
             head_dim,
+            config.window_size,
         ).get_fused_attn_backend()
 
         if not is_hip_extension():
@@ -319,6 +328,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             jax_dtype_to_te_dtype(q_aval.dtype),
             config.is_training,
             config.max_segments_per_seq,
+            config.window_size[0],
+            config.window_size[1],
         )
         wkspace_aval = q_aval.update(
             shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
@@ -398,6 +409,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             jax_dtype_to_te_dtype(wkspace_aval.dtype),
             config.is_training,
             not FusedAttnHelper.is_non_deterministic_allowed(),
+            config.window_size[0],
+            config.window_size[1],
         )
 
         out = custom_caller(FusedAttnFwdPrimitive.name, args, opaque, has_side_effect=False)
@@ -625,6 +638,8 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             config.is_training,
             deterministic,
             config.max_segments_per_seq,
+            config.window_size[0],
+            config.window_size[1],
         )
 
         dq_aval = q_aval.update(shape=q_aval.shape, dtype=q_dtype)
@@ -724,6 +739,8 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             jax_dtype_to_te_dtype(wkspace_aval.dtype),
             config.is_training,
             not FusedAttnHelper.is_non_deterministic_allowed(),
+            config.window_size[0],
+            config.window_size[1],
         )
 
         out = custom_caller(FusedAttnBwdPrimitive.name, args, opaque, has_side_effect=False)
@@ -919,26 +936,30 @@ class _FusedAttnCPWithAllGatherHelper:
         header = "Context parallel fused attention"
 
         allowed_layouts = [NVTE_QKV_Layout.NVTE_BSHD_BS2HD, NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD]
-        assert self.config.qkv_layout in allowed_layouts, (
-            f"{header} only supports layouts: {','.join([str(x) for x in allowed_layouts])} got:"
-            f" {self.config.qkv_layout}"
-        )
+        if self.config.qkv_layout not in allowed_layouts:
+            raise ValueError(
+                f"{header} only supports layouts:"
+                f" {','.join([str(x) for x in allowed_layouts])} got: {self.config.qkv_layout}"
+            )
 
-        assert (
-            self.config.attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS
-        ), f"{header} does not support bias got: {self.config.attn_bias_type}"
+        if self.config.attn_bias_type != NVTE_Bias_Type.NVTE_NO_BIAS:
+            raise ValueError(f"{header} does not support bias got: {self.config.attn_bias_type}")
 
         allowed_masks = [NVTE_Mask_Type.NVTE_NO_MASK, NVTE_Mask_Type.NVTE_CAUSAL_MASK]
-        assert self.config.attn_mask_type in allowed_masks, (
-            f"{header} only supports masking types: "
-            f" {','.join([str(x) for x in allowed_masks])} got: {self.config.attn_mask_type}"
-        )
+        if self.config.attn_mask_type not in allowed_masks:
+            raise ValueError(
+                f"{header} only supports masking types: "
+                f" {','.join([str(x) for x in allowed_masks])} got: {self.config.attn_mask_type}"
+            )
 
-        assert self.config.max_segments_per_seq == 1, (
-            f"{header} only supports max_segments_per_seq == 1 got:"
-            f" {self.config.max_segments_per_seq}"
-        )
-        assert self.config.dropout_probability == 0.0, f"{header} does not support dropout"
+        if self.config.max_segments_per_seq != 1:
+            raise ValueError(
+                f"{header} only supports max_segments_per_seq == 1 got:"
+                f" {self.config.max_segments_per_seq}"
+            )
+
+        if self.config.dropout_probability != 0.0:
+            raise ValueError(f"{header} does not support dropout")
 
     def get_adjusted_mask(self):
         """Converts the mask for context parallelism."""
@@ -1052,6 +1073,9 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
     def partition(config, mesh, arg_infos, result_infos):
         # Call base implementation for non-context parallel mesh to avoid unecessary work.
         is_context_parallel = get_mesh_axis_size(config.cp_axis, mesh) > 1
+        assert (
+            not is_context_parallel or config.window_size[0] == -1
+        ), "Sliding window attention is not supported when context parallelism is enabled"
         if not is_context_parallel:
             return FusedAttnFwdPrimitive.partition(config, mesh, arg_infos, result_infos)
 
@@ -1146,6 +1170,9 @@ class FusedAttnCPWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
     def partition(config, mesh, arg_infos, result_infos):
         # Call base implementation for non-context parallel mesh to avoid unecessary work.
         is_context_parallel = get_mesh_axis_size(config.cp_axis, mesh) > 1
+        assert (
+            not is_context_parallel or config.window_size[0] == -1
+        ), "Sliding window attention is not supported when context parallelism is enabled"
         if not is_context_parallel:
             return FusedAttnBwdPrimitive.partition(config, mesh, arg_infos, result_infos)
 
@@ -1294,6 +1321,7 @@ def fused_attn_fwd(
     dropout_probability: float,
     is_training: bool,
     max_segments_per_seq: int,
+    window_size: Optional[Tuple[int, int]] = None,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
 ) -> jnp.ndarray:
@@ -1324,6 +1352,11 @@ def fused_attn_fwd(
         scaling_factor (float): Scaling factor for the attention scores.
         dropout_probability (float): Dropout probability to apply during attention.
         is_training (bool): Flag indicating whether the model is in training mode.
+        max_segments_per_seq (int):
+            Indicating the maximum number of segments inside a sequence. This parameter is to
+            constrain the limit usage and need to be static during the e2e training. The XLA compile
+            time and memory consumption is proportional to `max_segments_per_seq`.
+        window_size (Optional[Tuple[int, int]]): Sliding window size.
         context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
@@ -1366,6 +1399,7 @@ def fused_attn_fwd(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
+        window_size=(-1, -1) if window_size is None else window_size,
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
     )
@@ -1400,6 +1434,7 @@ def fused_attn_bwd(
     dropout_probability: float,
     is_training: bool,
     max_segments_per_seq: int,
+    window_size: Optional[Tuple[int, int]] = None,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
 ):
@@ -1431,6 +1466,11 @@ def fused_attn_bwd(
         scaling_factor (float): Scaling factor for the attention scores.
         dropout_probability (float): Dropout probability to apply during attention.
         is_training (bool): Flag indicating whether the model is in training mode.
+        max_segments_per_seq (int):
+            Indicating the maximum number of segments inside a sequence. This parameter is to
+            constrain the limit usage and need to be static during the e2e training. The XLA compile
+            time and memory consumption is proportional to `max_segments_per_seq`.
+        window_size (Optional[Tuple[int, int]]): Sliding window size .
         context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
@@ -1476,6 +1516,7 @@ def fused_attn_bwd(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
+        window_size=(-1, -1) if window_size is None else window_size,
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
     )

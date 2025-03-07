@@ -1,19 +1,33 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 cmake_minimum_required(VERSION 3.18)
 
-option(USE_CUDA "Use CUDA" ON)
-option(USE_ROCM "Use ROCm" OFF)
+option(USE_ROCM "Use ROCm" ON)
+set(USE_CUDA OFF)
 
-if(((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) AND NOT (EXISTS "/bin/nvcc"))
-  message("AMD GPU detected.")
-  set(USE_ROCM ON)
-  set(USE_CUDA OFF)
+if (USE_ROCM)
+  #Check if ROCm exists
+  if( ((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) )
+    message("Using AMD Platform")
+  else()
+    message(FATAL_ERROR "Could not ROCm installation")
+  endif()
+else()
+  #Check if CUDA exists
+  if (EXISTS "$ENV{CUDA_HOME}/bin/nvcc")
+    set(USE_ROCM OFF)
+    set(USE_CUDA ON)
+    message("Using NVIDIA Platform")
+  else()
+    message(FATAL_ERROR "Could not find NVCC at '$ENV{CUDA_HOME}/bin/nvcc'")
+  endif()
+endif()
 
+if(USE_ROCM)
   # Add HIP to the CMAKE Module Path
   # set(CMAKE_MODULE_PATH ${HIP_PATH}/cmake ${CMAKE_MODULE_PATH})
   # Disable Asserts In Code (Can't use asserts on HIP stack.)

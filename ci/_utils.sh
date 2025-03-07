@@ -13,6 +13,11 @@ TEST_DIR=${TE_PATH}tests/
 : ${TEST_LEVEL:=99} #Run all tests by default
 TEST_JOBS_MODE=""
 
+if [ -z "${TEST_SGPU}${TEST_MGPU}" ]; then
+    TEST_SGPU=1
+    TEST_MGPU=1
+fi
+
 _script_error_count=0
 _run_error_count=0
 
@@ -55,17 +60,24 @@ configure_gemm_env() {
 configure_fused_attn_env() {
     case "$1" in
         "auto")
-            unset NVTE_FUSED_ATTN NVTE_FUSED_ATTN_AOTRITON NVTE_FUSED_ATTN_CK
+            unset NVTE_FLASH_ATTN NVTE_FUSED_ATTN NVTE_FUSED_ATTN_AOTRITON NVTE_FUSED_ATTN_CK
         ;;
         "aotriton")
+            export NVTE_FLASH_ATTN=0
             export NVTE_FUSED_ATTN_CK=0
             unset NVTE_FUSED_ATTN NVTE_FUSED_ATTN_AOTRITON
         ;;
         "ck")
+            export NVTE_FLASH_ATTN=0
             export NVTE_FUSED_ATTN_AOTRITON=0
             unset NVTE_FUSED_ATTN NVTE_FUSED_ATTN_CK
         ;;
+        "flash")
+            export NVTE_FUSED_ATTN=0 NVTE_FUSED_ATTN_CK=0 NVTE_FUSED_ATTN_AOTRITON=0
+            unset NVTE_FLASH_ATTN
+        ;;
         "unfused")
+            export NVTE_FLASH_ATTN=0
             export NVTE_FUSED_ATTN=0
             unset NVTE_FUSED_ATTN_AOTRITON NVTE_FUSED_ATTN_CK
         ;;
@@ -206,7 +218,7 @@ check_test_filter() {
 }
 
 start_message() {
-    echo "Started with TEST_LEVEL=$TEST_LEVEL at `date`"
+    echo "Started with TEST_LEVEL=$TEST_LEVEL sGPU='$TEST_SGPU' mGPU='$TEST_MGPU' at `date`"
     echo "ROCm: `ls -d /opt/rocm-*`"
     python --version
 }

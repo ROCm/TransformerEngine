@@ -18,6 +18,7 @@ install_prerequisites() {
         script_error "Failed to install test prerequisites"
         exit $rc
     fi
+    NVTE_USE_ROCM=1 bash $TEST_DIR/custom_ort_ops/build.sh
 }
 
 run() {
@@ -43,7 +44,6 @@ run_default_fa() {
 run_test_config(){
     echo ==== Run with GEMM backend: $_gemm and Fused attention backend: $_fus_attn ====
     #_WORKERS_COUNT=$TEST_WORKERS
-    #run_default_fa 1 test_cast_transpose_triton.py
     run 1 test_cuda_graphs.py
     run_default_fa 1 test_deferred_init.py
     run_default_fa 1 test_float8tensor.py
@@ -60,6 +60,11 @@ run_test_config(){
     run 1 test_sanity.py
     run_default_fa 1 test_torch_save_load.py
     run_default_fa 1 fused_attn/test_fused_attn.py # Backend selection is controlled by the test
+    if [ $_gemm = "hipblaslt" ]; then
+        run_default_fa 1 triton_kernels/test_cast_transpose_triton.py
+        run_default_fa 1 triton_kernels/test_rmsnorm_triton.py
+        NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 run_default_fa 3 test_numerics.py
+    fi
 }
 
 run_test_config_mgpu(){
@@ -70,6 +75,7 @@ run_test_config_mgpu(){
         run 3 test_fused_optimizer.py
         run 3 test_fusible_ops_distributed.py
         run 3 fused_attn/test_fused_attn_with_cp.py
+        run 3 distributed/test_numerics.py
     fi
 }
 
@@ -91,12 +97,13 @@ pip list | egrep "flash|ml_dtypes|numpy|onnx|torch|transformer_e|typing_ext"
 for _gemm in hipblaslt rocblas; do
     configure_gemm_env $_gemm || continue
     
-    for _fus_attn in auto ck aotriton unfused; do
+    for _fus_attn in auto flash ck aotriton unfused; do
         configure_fused_attn_env $_fus_attn || continue
 
-        #Auto - default mode with all Fused attentions backends enabled
-        #CK/AOTriton - only corresponding Fused attention backend is enabled
-        #Unfused - Fused attention is disabled
+        #Auto - default mode with all Flash and Fused attention backends enabled
+        #Flash - Fused attention is disabled
+        #CK/AOTriton - no Flash attention and only corresponding Fused attention backend is enabled
+        #Unfused - Flash and Fused attentions are disabled
         #Level 1 - run hipBlasLt in auto and unfused modes, rocBlas in auto mode
         #Level 3 - run hipBlasLt in all but unfused modes, rocBlas in auto and unfused modes
         if [ $TEST_LEVEL -ge 3 ]; then
@@ -108,15 +115,15 @@ for _gemm in hipblaslt rocblas; do
         fi
 
         if [ -n "$TEST_JOBS_MODE" ]; then
-            run_test_job "$_gemm-$_fus_attn"
+            test -n "$TEST_SGPU" && run_test_job "$_gemm-$_fus_attn"
         else
-            run_test_config
-            run_test_config_mgpu
+            test -n "$TEST_SGPU" && run_test_config
+            test -n "$TEST_MGPU" && run_test_config_mgpu
         fi
     done
 done
 
-if [ -n "$TEST_JOBS_MODE" ]; then
+if [ -n "$TEST_JOBS_MODE" -a -n "$TEST_MGPU" ]; then
     finish_test_jobs
     for _cfg in $(get_test_config_list); do
         _gemm=`echo $_cfg | cut -d- -f1`

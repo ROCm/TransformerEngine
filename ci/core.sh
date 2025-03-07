@@ -1,11 +1,17 @@
 #!/bin/sh
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
 DIR=`dirname $0`
 
 . $DIR/_utils.sh
+
+start_message
+if [ -z "$TEST_SGPU" ]; then
+    return_run_results
+    exit 0
+fi
 
 TEST_DIR=${TE_PATH}tests/cpp
 

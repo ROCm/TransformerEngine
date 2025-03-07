@@ -75,9 +75,7 @@ OPSET = 17
 assert OPSET >= TRILU_OPSET
 
 # Shared library implementing custom FP8 Q/DQ operators for ONNX Runtime (ORT).
-ORT_CUSTOM_OPS_LIB = os.path.join(TESTS_DIR, "./libcustom_ort_fp8_qdq_ops.so"
-                                  if not IS_HIP_EXTENSION
-                                  else "./libcustom_ort_fp8_qdq_ops_hip.so")
+ORT_CUSTOM_OPS_LIB = os.path.join(TESTS_DIR, "custom_ort_ops", "libcustom_ort_ops.so")
 
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 if fp8_available and not os.path.exists(ORT_CUSTOM_OPS_LIB):
@@ -93,7 +91,7 @@ all_normalizations = ["LayerNorm", "RMSNorm"]
 @pytest.fixture()
 def seed_default_rng():
     """Reseed the PRNG for test reproducibility"""
-    torch.random.seed()
+    torch.manual_seed(1234)
 
 
 @pytest.fixture()
@@ -911,7 +909,7 @@ def test_export_linear(
             validate_result(fname, inp, model, atol=1e-3, is_fp8=use_fp8, te_outputs=te_outputs)
 
 
-@pytest.mark.parametrize("scale_factor", [112])
+@pytest.mark.parametrize("scale_factor", [112 if not IS_HIP_EXTENSION else 224])
 @pytest.mark.parametrize("use_fp8", [False, True])
 # Returning the bias is a TE fusion optimization we don't care about.
 @pytest.mark.parametrize("return_bias", [False])
@@ -979,7 +977,7 @@ def test_export_layernorm_linear(
             validate_result(fname, inp, model, atol=1e-6, is_fp8=use_fp8, te_outputs=te_outputs)
 
 
-@pytest.mark.parametrize("scale_factor", [112])
+@pytest.mark.parametrize("scale_factor", [112 if not IS_HIP_EXTENSION else 224])
 @pytest.mark.parametrize("use_fp8", [False, True])
 # Returning the bias is a TE fusion optimization we don't care about.
 @pytest.mark.parametrize("return_bias", [False])

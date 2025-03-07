@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
@@ -7,6 +7,7 @@
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/transformer_engine.h>
 #ifdef USE_HIPBLASLT
+#include <unistd.h>
 #include <vector>
 #include <forward_list>
 #include <mutex>
@@ -893,13 +894,23 @@ protected:
   {
     if (!save_fs)
     {
-        save_fs_name = std::getenv("TE_HIPBLASLT_ALGO_SAVE");
-        if (save_fs_name == nullptr || save_fs_name[0] == '\0')
-        {
-          return false;
-        }
-        save_fs = std::make_unique<std::ofstream>();
-        std::cout << "Saving autotune results to " << save_fs_name << "\n";
+      const char* temp = std::getenv("TE_HIPBLASLT_ALGO_SAVE");
+      if (temp == nullptr || temp[0] == '\0')
+      {
+        return false;
+      }
+
+      save_fs_name = temp;
+
+      pid_t pid = getpid();
+
+      size_t pos = 0;
+      while ((pos = save_fs_name.find("%i", pos)) != std::string::npos) {
+        save_fs_name.replace(pos, 2, std::to_string(pid));
+      }
+
+      save_fs = std::make_unique<std::ofstream>();
+      std::cout << "Saving autotune results to " << save_fs_name << "\n";
     }
 
     if (reopen)
@@ -957,7 +968,7 @@ private:
   std::vector<int> dev_cap;
   constexpr static char csv_sep = ','; 
   std::unique_ptr<std::ofstream> save_fs;
-  const char *save_fs_name;
+  std::string save_fs_name;
   std::mutex mt;
   /* Map of problem config to tuple of ws_size and Algo
    * When searching, elements matching Key are filtered 
@@ -1151,6 +1162,7 @@ void hipblaslt_gemm(const Tensor *inputA,
     int tuneLoopCount = getIntEnv("TE_HIPBLASLT_TUNING_RUN_COUNT", 0, 0);
     int algoTuneCount = 1;
     std::vector<hipblasLtMatmulHeuristicResult_t> algoArr;
+    bool logTuning = getIntEnv("TE_HIPBLASLT_LOG_TUNING", 0, 0) != 0;
 
     if (tuneLoopCount)
     {
@@ -1199,7 +1211,7 @@ void hipblaslt_gemm(const Tensor *inputA,
         }
         idx = (idx + 1) % algoTotalCount;
       }
-      if (!cached_algo.algo.has_value())
+      if (logTuning && !cached_algo.algo.has_value())
       {
         std::cout << "[WARNING] Cannot find cached algoId " << cached_algo.algoId << " in hipBLASLt results" << std::endl;
       }
@@ -1210,11 +1222,13 @@ void hipblaslt_gemm(const Tensor *inputA,
     {
 
       int bestAlgo = -1;
+      algoTuneCount = std::min(algoTuneCount, algoTotalCount);
       if (tuneLoopCount > 0)
       {
-        std::cout << "[INFO] Perform hipBLASLt algo selection on GPU" << device_id
-                  << " in range [" << firstAlgo << "-" << (algoTuneCount - 1) << "] with "
-                  << tuneLoopCount << " loops " << std::endl;
+        if (logTuning)
+          std::cout << "[INFO] Perform hipBLASLt algo selection on GPU" << device_id
+                    << " in range [" << firstAlgo << "-" << (algoTuneCount - 1) << "] with "
+                    << tuneLoopCount << " loops " << std::endl;
 
         hipStream_t profilingStream;
         NVTE_CHECK_CUDA(hipStreamCreateWithFlags(&profilingStream, hipStreamNonBlocking));
@@ -1280,17 +1294,14 @@ void hipblaslt_gemm(const Tensor *inputA,
         NVTE_CHECK_CUDA(hipStreamDestroy(profilingStream));
         if (bestAlgo >= 0)
         {
-          std::cout << "[INFO] Select hipBLASLt algo " << bestAlgo << " with time "
-                    << std::chrono::duration_cast<std::chrono::nanoseconds>(bestTime).count() / tuneLoopCount
-                    << " ns" << std::endl;
+          if (logTuning)
+            std::cout << "[INFO] Select hipBLASLt algo " << bestAlgo << " with time "
+                      << std::chrono::duration_cast<std::chrono::nanoseconds>(bestTime).count() / tuneLoopCount
+                      << " ns" << std::endl;
         }
       }
       else if (firstAlgo < algoTuneCount)
       {
-        if (firstAlgo != 0)
-        {
-          std::cout << "[INFO] Select hipBLASLt algo " << firstAlgo << std::endl;
-        }
         bestAlgo = firstAlgo;
       }
 
@@ -1306,6 +1317,9 @@ void hipblaslt_gemm(const Tensor *inputA,
       cached_algo.algoId = cached_algo.getAlgoId(algoArr[bestAlgo].algo);
       cached_algo.ws_size_min = algoArr[bestAlgo].workspaceSize;
       cached_algo.ws_size_max = workspaceSize;
+
+      if (logTuning)
+        std::cout << "[INFO] Use hipBLASLt algo [" << bestAlgo << "] " << cached_algo.algoId << std::endl;
 
       algoCache.store(gemm_cfg, cached_algo);
     }

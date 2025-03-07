@@ -1,7 +1,7 @@
 ..
     This file was modified to include portability information to AMDGPU.
 
-    Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
+    Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
 
     Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
@@ -21,7 +21,7 @@ Feature Support Status
 
 * Activation, cast, fused softmax, layernorm, rmsnorm, transpose, fused rope, fp8 recipe, HipRTC: fully supported
 * GEMM: partially supported with following input/output types: (fp32/fp32), (fp16/fp16), (bf16/bf16), (fp8, bf8/fp16, bf16, fp32)
-* Attention (Flash Attention, Fused Multihead Attention): partially supported: Fused Attention with AOTriton and CK backends
+* Attention (Flash Attention, Fused Multihead Attention): partially supported: Fused Attention with AOTriton and CK backends, FlashAttention-2 without variable sequence length feature
 * HipGraph, HipTX: partially supported
 * Tensor Parallelism, Sequence Parallelism, Context Parallelism: supported
 
@@ -38,6 +38,11 @@ Execute the following commands to install ROCm Transformer Engine from source on
   cd TransformerEngine
   export NVTE_FRAMEWORK=pytorch,jax #optionally set framework, currently only support pytorch and jax; if not set will try to detect installed frameworks
   export NVTE_ROCM_ARCH=gfx942 # CK fused attn only support MI200 and MI300 and fp8 features are only supported on MI300
+  
+  # Build Platform Selection (optional)
+  # Note: Useful when both ROCm and CUDA platforms are present in the Docker
+  export NVTE_USE_ROCM=1  #Use 1 for ROCm, or set to 0 to use CUDA; If not set will try to detect installed platform, prioritizing ROCm
+
   pip install .
 
 The default installation above supports both rocBlas and hipBlasLt in GEMM computation. Building with single backend support can be done by setting `NVTE_USE_HIPBLASLT` or `NVTE_USE_ROCBLAS` environment variable before `pip install` as:
@@ -183,7 +188,7 @@ This ability is controlled by environment variables when call GEMM operation wit
 * TE_HIPBLASLT_TUNING_RUN_COUNT - number of profiling loops for algorithm auto-selection; default=0 which means no auto-selection. For small tasks where run-to-run time variation is relatively high, using higher number of loops may give better auto-selection results.
 * TE_HIPBLASLT_TUNING_ALGO_COUNT - maximal number of algorithms to check when auto-selection is enabled; default=16.
 * TE_HIPBLASLT_ALGO_LOAD - filename of algorithm selection data saved by previous GEMM operation runs; if file does not exist, algorithm selection logic proceeds as if no filename were specified
-* TE_HIPBLASLT_ALGO_SAVE - filename to save algorithm selection data to; can be the same as a filename to load in which case the file will be read first and then overwritten with updated results
+* TE_HIPBLASLT_ALGO_SAVE - filename to save algorithm selection data to; can be the same as a filename to load in which case the file will be read first and then overwritten with updated results; filename may contain %i, that is replaced with the process ID. For example `auto_tune_%i.csv`.
 
 It is not guaranteed that algorithm selection data file created with one version of TE or hipBlasLt will work with other versions. Even if it works, it is highly recommended to perform algorithm selection tuning again when switch to new libraries versions because new hipBLASLt may have new optimized algorithms.
 
@@ -243,30 +248,21 @@ ROCm TE provides experimental support for flash-attention v3 bwd kernels using t
 To enable FA v3 kernels, the following environment variables can be used:
 
 * NVTE_CK_USES_BWD_V3 - by default 0, if set to 1, some cases will call the bwd v3 dqdkdv kernel;
-* NVTE_CK_V3_ATOMIC_FP32 - by default 1, if set to 0 will use atomic fp16/bf16(w/o convert_dq kernel) when NVTE_CK_USES_BWD_V3 is set to 1;
-* NVTE_CK_V3_SPEC - by default 0, if set to 1 will call the specialized v3 kernel when NVTE_CK_USES_BWD_V3 is set to 1;
-* NVTE_CK_V3_BF16_CVT - by default 1, float to bf16 convert type when bwd_v3 is set to 1, 0:RTNE; 1:RTNA; 2:RTZ.
+* NVTE_CK_IS_V3_ATOMIC_FP32 - by default 1, if set to 0 will use atomic fp16/bf16(w/o convert_dq kernel) when NVTE_CK_USES_BWD_V3 is set to 1;
+* NVTE_CK_HOW_V3_BF16_CVT - by default 1, float to bf16 convert type when bwd_v3 is set to 1, 0:RTNE; 1:RTNA; 2:RTZ.
 
 Experimental Triton Kernels on ROCm
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-Most CUDA kernels in Transformer Engine are hipified to run on ROCm. While the hipifiled CUDA kernels are functional, they are not necessarily optimal
-on ROCm. We added some Triton kernels to TE ROCm to improve the performance over the hipified kernels. Currently, we have integrated Triton kernels
-for cast_transpose and cast_transpose_bgrad, which are commonly used in fp8 training. This feature is still experimental as it requires relatievely newer
-version of Pytorch+Triton, which is not available in ROCm 6.2 Pytorch release docker images. Also, it only works on Pytorch extension as JAX extension 
-does not use it.
+Most CUDA kernels in Transformer Engine are hipified to run on ROCm. While the hipifiled CUDA kernels are functional, they are not necessarily optimal on ROCm. 
+We added some Triton kernels to TE ROCm to improve the performance over the hipified kernels. 
+Currently, we have integrated Triton kernels for cast_transpose and cast_transpose_bgrad, which are commonly used in fp8 training, and also rmsnorm kernels. 
+This feature is still experimental as it requires relatievely newer version of Pytorch (with version >= 2.4) and Triton. 
+Also, it only works on Pytorch extension as JAX extension does not use it.
 
-To use this feature, you will need to first uninstall Pytorch and get the nightly version:
+At runtime, you can enable specific triton kernels using the specific environment variables:
 
-.. code-block:: bash
-
-pip3 uninstall -y torch
-pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/rocm6.2
-
-Then at runtime, you can enable this feature using the environment variable:
-
-.. code-block:: bash
-
-export NVTE_USE_CAST_TRANSPOSE_TRITON=1
+* NVTE_USE_CAST_TRANSPOSE_TRITON=1 can be used to enable cast transpose (bgrad) triton kernels; 
+* NVTE_USE_RMSNORM_TRITON=1 can be used to enable rmsnorm triton kernels.
 
 
 Transformer Engine

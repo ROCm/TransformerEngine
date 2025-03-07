@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -117,6 +119,9 @@ def _load_nvrtc():
 
 
 if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
-    #_CUDNN_LIB_CTYPES = _load_cudnn()
-    #_NVRTC_LIB_CTYPES = _load_nvrtc()
+    try:
+        _CUDNN_LIB_CTYPES = _load_cudnn()
+        _NVRTC_LIB_CTYPES = _load_nvrtc()
+    except OSError:
+        pass
     _TE_LIB_CTYPES = _load_library()

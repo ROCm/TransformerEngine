@@ -63,7 +63,11 @@ run_test_config() {
     run 1 test_fused_attn.py
     run_default_fa 1 test_helper.py
     run_default_fa 1 test_layer.py #it effectevly always uses unfused attention
-    run 1 test_praxis_layers.py
+    if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
+        run 1 test_praxis_layers.py
+    else
+        run 3 test_praxis_layers.py
+    fi
     run_default_fa 1 test_sharding.py
     run_default_fa 1 test_softmax.py
 }
@@ -110,14 +114,14 @@ for _fus_attn in auto ck aotriton; do
     fi
 
     if [ -n "$TEST_JOBS_MODE" ]; then
-        run_test_job "$_fus_attn"
+        test -n "$TEST_SGPU" && run_test_job "$_fus_attn"
     else
-        run_test_config
-        run_test_config_mgpu
+        test -n "$TEST_SGPU" && run_test_config
+        test -n "$TEST_MGPU" && run_test_config_mgpu
     fi
 done
 
-if [ -n "$TEST_JOBS_MODE" ]; then
+if [ -n "$TEST_JOBS_MODE" -a -n "$TEST_MGPU" ]; then
     finish_test_jobs
     for _fus_attn in $(get_test_config_list); do
         configure_fused_attn_env $_fus_attn && run_test_config_mgpu

@@ -148,12 +148,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("dswiglu", &dswiglu, "Backward of SwiGLU", py::call_guard<py::gil_scoped_release>());
   m.def("dqgelu", &dqgelu, "Backward of QuickGELU", py::call_guard<py::gil_scoped_release>());
   m.def("dsrelu", &dsrelu, "Backward of Squared ReLU", py::call_guard<py::gil_scoped_release>());
-#ifndef USE_ROCM
   m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention",
         py::call_guard<py::gil_scoped_release>());
   m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention",
         py::call_guard<py::gil_scoped_release>());
-#endif
   m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend",
         py::call_guard<py::gil_scoped_release>());
   m.def("fused_amax_and_scale_update_after_reduction", &fused_amax_and_scale_update_after_reduction,
@@ -180,7 +178,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #endif
   m.attr("_num_cublas_streams") = py::int_(transformer_engine::num_streams);
 
-#ifndef USE_ROCM
   // Support THD format for Context Parallel
   m.def("thd_read_half_tensor", &thd_read_half_tensor,
         "Read the first half(half_idx=0) or the second half(half_idx=1) of each sequence in a THD "
@@ -199,7 +196,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("thd_get_partitioned_indices", &thd_get_partitioned_indices,
         "Generate partitioned indices for inputs in THD format",
         py::call_guard<py::gil_scoped_release>());
-#endif
 
   // multi-tensor functions
   m.def("multi_tensor_scale", &multi_tensor_scale_cuda,

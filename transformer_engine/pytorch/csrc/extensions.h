@@ -134,10 +134,8 @@ std::vector<at::Tensor> fused_attn_bwd(
     const c10::optional<at::Tensor> scale_dP, const c10::optional<at::Tensor> scale_dQKV,
     c10::optional<at::Tensor> amax_dP, c10::optional<at::Tensor> amax_dQKV);
 
-#ifndef USE_ROCM
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
-#endif
 
 /***************************************************************************************************
  * GEMM
@@ -417,40 +415,39 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
                                const bool transpose_output_memory);
 
 at::Tensor fused_rope_thd_forward(const at::Tensor &input, const at::Tensor &cu_seqlens,
-                                  const at::Tensor &freqs);
+                                  const at::Tensor &freqs, const int cp_size, const int cp_rank);
 
 at::Tensor fused_rope_thd_backward(const at::Tensor &output_grads, const at::Tensor &cu_seqlens,
-                                   const at::Tensor &freqs);
+                                   const at::Tensor &freqs, const int cp_size, const int cp_rank);
 
 /***************************************************************************************************
  * Miscellaneous
  **************************************************************************************************/
 
-//TODO: support user buffer for ROCm
 #ifndef USE_ROCM
 size_t get_cublasLt_version();
 size_t get_cudnn_version();
 #endif
 
+//TODO: support user buffer for ROCm
 void placeholder();
 
 /***************************************************************************************************
  * Support THD format for Context Parallel
  **************************************************************************************************/
 
-#ifndef USE_ROCM
 at::Tensor thd_read_half_tensor(const at::Tensor &tensor, const at::Tensor &cu_seqlens,
                                 int half_idx);
 
 void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_step,
-                                    const at::Tensor &cu_seqlens, int total_tokens);
+                                    const at::Tensor &cu_seqlens, bool lse_packed);
 
 at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_seqlens,
-                                    int total_tokens);
+                                    bool lse_packed);
 
 void thd_out_correction(at::Tensor out, const at::Tensor &out_per_step, const at::Tensor &lse,
                         const at::Tensor &lse_per_step, const at::Tensor &cu_seqlens,
-                        bool only_second_half);
+                        bool only_second_half, bool lse_packed);
 
 void thd_grad_correction(at::Tensor grad, const at::Tensor &grad_per_step,
                          const at::Tensor &cu_seqlens, const std::string &first_half,
@@ -458,7 +455,6 @@ void thd_grad_correction(at::Tensor grad, const at::Tensor &grad_per_step,
 
 at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_tokens,
                                        int world_size, int rank);
-#endif
 
 /***************************************************************************************************
  * multi_tensor_* kernels
