@@ -195,8 +195,46 @@ void populate_cast_transpose_dbias_workspace_config(const Tensor &cast_output, /
   workspace->data.dtype = DType::kFloat32;
 }
 
+template <int nvec, typename ComputeType, typename OutputType>
+__global__ void __launch_bounds__(reduce_dbias_num_threads)
+    reduce_dbias_kernel(OutputType *const dbias_output, const ComputeType *const dbias_partial,
+                        const int row_length, const int num_rows) {
+  using ComputeVec = Vec<ComputeType, nvec>;
+  using OutputVec = Vec<OutputType, nvec>;
+
+  const int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (thread_id * nvec >= row_length) {
+    return;
+  }
+
+  const ComputeType *const thread_in_base = dbias_partial + thread_id * nvec;
+  OutputType *const thread_out_base = dbias_output + thread_id * nvec;
+
+  const int stride_in_vec = row_length / nvec;
+
+  ComputeVec ldg_vec;
+  ComputeVec acc_vec;
+  acc_vec.clear();
+  for (int i = 0; i < num_rows; ++i) {
+    ldg_vec.load_from(thread_in_base, i * stride_in_vec);
+#pragma unroll
+    for (int e = 0; e < nvec; ++e) {
+      acc_vec.data.elt[e] += ldg_vec.data.elt[e];
+    }
+  }
+
+  OutputVec stg_vec;
+#pragma unroll
+  for (int e = 0; e < nvec; ++e) {
+    stg_vec.data.elt[e] = OutputType(acc_vec.data.elt[e]);
+  }
+  stg_vec.store_to(thread_out_base, 0);
+}
+
 template <typename ComputeType, typename OutputType>
-__global__ void reduce_dbias_kernel(OutputType *const dbias_output, const ComputeType *const dbias_partial, const int row_length, const int thread_num_rows, const int num_rows) {
+__global__ void reduce_dbias_kernel(OutputType *const dbias_output, const ComputeType *const dbias_partial, 
+                const int row_length, const int thread_num_rows, const int num_rows) {
 
   const int col = blockIdx.x * blockDim.x + threadIdx.x;
   const int warps_id_y = threadIdx.y;
@@ -235,6 +273,7 @@ __global__ void reduce_dbias_kernel(OutputType *const dbias_output, const Comput
 template <typename InputType>
 void reduce_dbias(const Tensor &workspace, Tensor *dbias, const size_t row_length,
                   const size_t num_rows, const int nvec_out, cudaStream_t stream) {
+  using DbiasOutputType = fp32;
   constexpr int reduce_dbias_store_bytes = 8;  // stg.64
   constexpr int reduce_dbias_nvec = reduce_dbias_store_bytes / sizeof(InputType);
 
@@ -243,23 +282,38 @@ void reduce_dbias(const Tensor &workspace, Tensor *dbias, const size_t row_lengt
   const size_t reduce_dbias_row_length = row_length;
   const size_t reduce_dbias_num_rows =
       DIVUP(num_rows, static_cast<size_t>(nvec_out * THREADS_PER_WARP));
-  const size_t reduce_dbias_num_blocks = DIVUP(row_length, static_cast<size_t>(THREADS_PER_WARP));
 
-  size_t  warps_num = min(reduce_dbias_num_rows, 32);
+#ifdef __HIP_PLATFORM_AMD__ 
+  const char* env_var = std::getenv("HEYI_CAST_TRANSPOSE_DBIAS");
+  if(env_var != nullptr && env_var[0] == '1'){
+    const size_t reduce_dbias_num_blocks = DIVUP(row_length, static_cast<size_t>(THREADS_PER_WARP));
 
-  dim3 block(THREADS_PER_WARP, warps_num, 1);
-  dim3 grid(reduce_dbias_num_blocks, 1);
+    size_t  warps_num = min(reduce_dbias_num_rows, 32);
 
-  size_t thread_num_rows = DIVUP(reduce_dbias_num_rows, warps_num);
-  using DbiasOutputType = fp32;
+    dim3 block(THREADS_PER_WARP, warps_num, 1);
+    dim3 grid(reduce_dbias_num_blocks, 1);
 
-  const int sharedMemSize = THREADS_PER_WARP * sizeof(DbiasOutputType) * warps_num;
+    size_t thread_num_rows = DIVUP(reduce_dbias_num_rows, warps_num);
 
-  reduce_dbias_kernel<DbiasOutputType, InputType>
-        <<<grid, block, sharedMemSize, stream>>>(
+    const int sharedMemSize = THREADS_PER_WARP * sizeof(DbiasOutputType) * warps_num;
+
+    reduce_dbias_kernel<DbiasOutputType, InputType>
+          <<<grid, block, sharedMemSize, stream>>>(
+              reinterpret_cast<InputType *>(dbias->data.dptr),
+              reinterpret_cast<const fp32 *>(workspace.data.dptr), reduce_dbias_row_length,
+              thread_num_rows, reduce_dbias_num_rows);
+  }
+#endif 
+  else{
+    const size_t reduce_dbias_num_blocks =
+      DIVUP(row_length, reduce_dbias_num_threads * reduce_dbias_nvec);
+
+    reduce_dbias_kernel<reduce_dbias_nvec, DbiasOutputType, InputType>
+        <<<reduce_dbias_num_blocks, reduce_dbias_num_threads, 0, stream>>>(
             reinterpret_cast<InputType *>(dbias->data.dptr),
             reinterpret_cast<const fp32 *>(workspace.data.dptr), reduce_dbias_row_length,
-            thread_num_rows, reduce_dbias_num_rows);
+            reduce_dbias_num_rows);
+  }
 }
 
 template <bool IS_DBIAS, bool IS_DACT, typename ComputeType, typename Param, int nvec_in,
@@ -562,82 +616,38 @@ void cast_transpose_fused(const Tensor &input, const Tensor &act_input, Tensor *
           size_t num_blocks;
 
           if (jit_compiled) {
-            bool do_general_config = true;
-#ifdef __HIP_PLATFORM_AMD__            
-            if((std::is_same<OutputType, fp8e5m2>::value) || (std::is_same<OutputType, fp8e4m3>::value)){
-              //std::cout << "OutputType FP8" << std::endl;
-              do_general_config = false;
-              const int n_sms = 128;
-              // Helper functions to get kernel configuration
-              auto get_n_tiles = [=] (size_t load_size, size_t store_size) -> int {
-                //constexpr size_t threads_per_warp = static_cast<size_t>(THREADS_PER_WARP);
-                size_t nvec_in = load_size / sizeof(InputType);
-                size_t nvec_out = store_size / sizeof(OutputType);
-                size_t n_tiles = DIVUP(row_length, nvec_in * threads_per_warp) *
-                                DIVUP(num_rows, nvec_out * threads_per_warp);
-              return n_tiles;
-              };
-              auto get_n_blocks = [=] (size_t n_tiles, size_t cast_transpose_num_threads, size_t n_warps_per_tile) -> int {
-                size_t n_warps_per_block = cast_transpose_num_threads / threads_per_warp;
-                size_t n_blocks = DIVUP(n_tiles * n_warps_per_tile, n_warps_per_block);
-              return n_blocks;
-              }; 
+          // Pick kernel config
+            std::vector<KernelConfig> kernel_configs;
+            kernel_configs.reserve(16);
+            const size_t sm_count = static_cast<size_t>(cuda::sm_count());
+            auto add_config = [&](size_t load_size_config, size_t store_size_config) {
+              kernel_configs.emplace_back(row_length, num_rows, itype_size, itype2_size, otype_size,
+                                          load_size_config, store_size_config, sm_count, IS_DACT);
+            };
+            add_config(8, 8);
+            add_config(4, 8);
+            add_config(8, 4);
+            add_config(4, 4);
+            add_config(2, 8);
+            add_config(8, 2);
+            add_config(2, 4);
+            add_config(4, 2);
+            add_config(2, 2);
+            add_config(1, 8);
+            add_config(8, 1);
+            add_config(1, 4);
+            add_config(4, 1);
+            add_config(1, 2);
+            add_config(2, 1);
+            add_config(1, 1);
 
-              const size_t estimated_n_tiles = get_n_tiles(8, 4);
-              unsigned int cast_transpose_num_threads = n_warps_per_tile * threads_per_warp;
-              const size_t estimated_n_blocks = get_n_blocks(estimated_n_tiles, cast_transpose_num_threads, n_warps_per_tile);
-        
-              if constexpr (!IS_DACT) {
-                if(estimated_n_blocks >= n_sms) {
-                    load_size = 8;
-                    store_size = 4;
-                }else{
-                    load_size = 4;
-                    store_size = std::is_same<InputType, float>::value ? 4 : 2;
-                }
-              }
-            const size_t iter_size = threads_per_warp / n_warps_per_tile; 
-            const size_t row_tile_elements = load_size * threads_per_warp / itype_size;
-            const size_t col_tile_elements = store_size * iter_size * n_warps_per_tile / otype_size;
-            // Number of CUDA blocks
-            num_blocks = (row_length / row_tile_elements) * (num_rows / col_tile_elements);
-            do_general_config =!(row_length % row_tile_elements == 0 && num_rows % col_tile_elements == 0);
-          }
-#endif         
-            if(do_general_config){
-            // Pick kernel config
-              std::vector<KernelConfig> kernel_configs;
-              kernel_configs.reserve(16);
-              const size_t sm_count = static_cast<size_t>(cuda::sm_count());
-              auto add_config = [&](size_t load_size_config, size_t store_size_config) {
-                kernel_configs.emplace_back(row_length, num_rows, itype_size, itype2_size, otype_size,
-                                            load_size_config, store_size_config, sm_count, IS_DACT);
-              };
-              add_config(8, 8);
-              add_config(4, 8);
-              add_config(8, 4);
-              add_config(4, 4);
-              add_config(2, 8);
-              add_config(8, 2);
-              add_config(2, 4);
-              add_config(4, 2);
-              add_config(2, 2);
-              add_config(1, 8);
-              add_config(8, 1);
-              add_config(1, 4);
-              add_config(4, 1);
-              add_config(1, 2);
-              add_config(2, 1);
-              add_config(1, 1);
-
-              // Select the kernel configuration with the lowest cost
-              const auto &kernel_config =
-                  *std::min_element(kernel_configs.begin(), kernel_configs.end());
-              NVTE_CHECK(kernel_config.valid, "invalid kernel config");
-              load_size = kernel_config.load_size;
-              store_size = kernel_config.store_size;
-              num_blocks = kernel_config.num_blocks;
-            }
+            // Select the kernel configuration with the lowest cost
+            const auto &kernel_config =
+                *std::min_element(kernel_configs.begin(), kernel_configs.end());
+            NVTE_CHECK(kernel_config.valid, "invalid kernel config");
+            load_size = kernel_config.load_size;
+            store_size = kernel_config.store_size;
+            num_blocks = kernel_config.num_blocks;
           }
 
           const size_t nvec_in = load_size / itype_size;
@@ -1426,4 +1436,3 @@ void nvte_dqgeglu_cast_transpose(const NVTETensor input, const NVTETensor gated_
       reinterpret_cast<Tensor *>(cast_output), reinterpret_cast<Tensor *>(transposed_output),
       stream);
 }
-
