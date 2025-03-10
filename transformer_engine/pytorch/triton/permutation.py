@@ -213,14 +213,15 @@ def _unpermute_kernel(
 ):
     if FP8_DTYPE == "e5m2":
         compute_type = tl.float16
-        data_type = tl.float8e5
+        data_type = tl.float8e5b16
         pytorch_tensor_dtype = tl.uint8
     elif FP8_DTYPE == "e4m3":
         compute_type = tl.float16
-        data_type = tl.float8e4nv
+        data_type = tl.float8e4b8
         pytorch_tensor_dtype = tl.uint8
     else:
-        compute_type = input_ptr.dtype.element_ty
+        # NOTE: Using fp32 accumulate precision on ROCm.
+        compute_type = tl.float32
         assert FP8_DTYPE is None
 
     pid = tl.program_id(0)
@@ -330,11 +331,11 @@ def _unpermute_bwd_with_probs_kernel(
 ):
     if FP8_DTYPE == "e5m2":
         compute_type = tl.float16
-        data_type = tl.float8e5
+        data_type = tl.float8e5b16
         pytorch_tensor_dtype = tl.uint8
     elif FP8_DTYPE == "e4m3":
         compute_type = tl.float16
-        data_type = tl.float8e4nv
+        data_type = tl.float8e4b8
         pytorch_tensor_dtype = tl.uint8
     else:
         compute_type = fwd_output_grad_ptr.dtype.element_ty
