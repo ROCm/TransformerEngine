@@ -114,7 +114,6 @@ include_directories(${PROJECT_SOURCE_DIR}/..)
 set(transformer_engine_SOURCES)
 if(USE_CUDA)
   list(APPEND transformer_engine_SOURCES
-       #Changed
        cudnn_utils.cpp
        transformer_engine.cpp
        common.cu
@@ -157,8 +156,7 @@ if(USE_CUDA)
   add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 else()
   list(APPEND transformer_engine_SOURCES
-       # Changed
-       cudnn_utils.cpp
+      #  cudnn_utils.cpp
        transformer_engine.cpp
        common.cu
        transpose/cast_transpose.cu
