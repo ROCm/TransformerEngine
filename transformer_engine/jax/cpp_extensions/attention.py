@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -119,6 +119,9 @@ class FusedAttnHelper:
 
     def get_fused_attn_backend(self):
         """Get the fused attention kernel backend"""
+        # temporary hack to disable thd in rocm fused attn as no pad_between_sequence
+        if self.qkv_layout in [NVTE_QKV_Layout.NVTE_T3HD, NVTE_QKV_Layout.NVTE_THD_T2HD, NVTE_QKV_Layout.NVTE_THD_THD_THD]:
+            return NVTE_Fused_Attn_Backend.NVTE_No_Backend
         return transformer_engine_jax.get_fused_attn_backend(
             jax_dtype_to_te_dtype(self.q_dtype),
             jax_dtype_to_te_dtype(self.kv_dtype),
