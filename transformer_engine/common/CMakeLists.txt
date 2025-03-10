@@ -232,15 +232,15 @@ if (USE_CUDA)
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
 
-# Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
-# Changed
-option(NVTE_UB_WITH_MPI "Bootstrap Userbuffers with MPI" OFF)
-if (NVTE_UB_WITH_MPI)
-    find_package(MPI REQUIRED)
-    target_link_libraries(transformer_engine PUBLIC MPI::MPI_CXX)
-    target_include_directories(transformer_engine PRIVATE ${MPI_CXX_INCLUDES})
-    target_compile_definitions(transformer_engine PUBLIC NVTE_UB_WITH_MPI)
-endif()
+  # Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
+  # Changed
+  option(NVTE_UB_WITH_MPI "Bootstrap Userbuffers with MPI" OFF)
+  if (NVTE_UB_WITH_MPI)
+      find_package(MPI REQUIRED)
+      target_link_libraries(transformer_engine PUBLIC MPI::MPI_CXX)
+      target_include_directories(transformer_engine PRIVATE ${MPI_CXX_INCLUDES})
+      target_compile_definitions(transformer_engine PUBLIC NVTE_UB_WITH_MPI)
+  endif()
   
   # Hack to enable dynamic loading in cuDNN frontend
   target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
