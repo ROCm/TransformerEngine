@@ -78,4 +78,127 @@ mask_enum get_ck_mask_type(MaskType attn_mask_type){
   return mask_type;
 }
 
+// kernel to remove padding for q, k, v, o (dq, dk, dv, do)
+template<typename DataType>
+__global__ void remove_padding_kernel(
+  uint64_t b, uint64_t h, uint64_t s, uint64_t d,
+  bool is_ragged, // sometimes both cu_seqlen and cu_seqlen_padded given in bshd cases
+  uint64_t stride_b, uint64_t stride_h, uint64_t stride_s, //stride_d is 1
+  const DataType* data_ptr,
+  const int32_t* cu_seqlen_ptr, const int32_t* cu_seqlen_padded_ptr,
+  DataType* data_without_padding_ptr){
+
+  // TE always has (B, S) first, then (H, D), so stride_total_seqlen will be minimal of stride_b and stride_s 
+  uint64_t stride_total_seqlen = std::min(stride_b, stride_s);
+  for(uint64_t hd_idx = blockIdx.x*blockDim.x + threadIdx.x; hd_idx < h*d; hd_idx += blockDim.x * gridDim.x){
+    uint64_t h_idx = hd_idx/d;
+    uint64_t d_idx = hd_idx%d;
+    //loop over all batch
+    for(uint64_t b_idx = 0; b_idx < b; b_idx++){
+      for(uint64_t s_idx = 0; s_idx < cu_seqlen_ptr[b_idx+1] - cu_seqlen_ptr[b_idx]; s_idx++){
+        if(is_ragged){
+          // thd with padding
+          // thd implies stride B > stride S
+          *(data_without_padding_ptr + (cu_seqlen_ptr[b_idx] + s_idx)*stride_s + h_idx*stride_h+d_idx) = *(data_ptr + (cu_seqlen_padded_ptr[b_idx]+s_idx)*stride_s + h_idx *stride_h+d_idx);
+        }else{
+          // bshd or sbhd with padding
+          *(data_without_padding_ptr + (cu_seqlen_ptr[b_idx] + s_idx)*stride_total_seqlen + h_idx*stride_h + d_idx) = *(data_ptr + b_idx*stride_b + s_idx*stride_s + h_idx*stride_h + d_idx);
+        }
+      }
+    }
+  }
+}
+
+// kernel launcher for remove padding in q, k, v, o (dq, dk, dv, do)
+void remove_padding(
+  DType dtype,
+  uint64_t b, uint64_t h, uint64_t s, uint64_t d,
+  bool is_ragged,
+  uint64_t stride_b, uint64_t stride_h, uint64_t stride_s, //stride_d is 1
+  const void* data_ptr,
+  const void* cu_seqlen_ptr, const void* cu_seqlen_padded_ptr,
+  void* data_without_padding_ptr,
+  hipStream_t stream){
+  
+  // cu_seqlen_padded_ptr can be nullptr
+  assert(cu_seqlen_ptr!=nullptr);
+  constexpr int THREADS_PER_BLOCK = 1024;
+  // parallel over h*d dimension
+  dim3 block(THREADS_PER_BLOCK);
+  dim3 grid(ceil(1.0 * h * d/THREADS_PER_BLOCK));
+
+  CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
+    hipLaunchKernelGGL(
+      remove_padding_kernel<CK_TILE_TYPE>, grid, block, 0, stream,
+      b, h, s, d,
+      is_ragged,
+      stride_b, stride_h, stride_s,
+      static_cast<const CK_TILE_TYPE*>(data_ptr),
+      static_cast<const int32_t*>(cu_seqlen_ptr),
+      static_cast<const int32_t*>(cu_seqlen_padded_ptr),
+      static_cast<CK_TILE_TYPE*>(data_without_padding_ptr)););
+
+}
+
+// kernel to add padding for q, k, v, o (dq, dk, dv, do)
+template<typename DataType>
+__global__ void add_padding_kernel(
+  uint64_t b, uint64_t h, uint64_t s, uint64_t d,
+  bool is_ragged,
+  uint64_t stride_b, uint64_t stride_h, uint64_t stride_s, //stride_d is 1
+  const DataType* data_without_padding_ptr,
+  const int32_t* cu_seqlen_ptr, const int32_t* cu_seqlen_padded_ptr,
+  DataType* data_ptr){
+  
+  // TE always has (B, S) first, then (H, D), so stride_total_seqlen will be minimal of stride_b and stride_s 
+  uint64_t stride_total_seqlen = std::min(stride_b, stride_s);
+  for(uint64_t hd_idx = blockIdx.x*blockDim.x + threadIdx.x; hd_idx < h*d; hd_idx += blockDim.x * gridDim.x){
+    uint64_t h_idx = hd_idx/d;
+    uint64_t d_idx = hd_idx%d;
+    //loop over all batch
+    for(uint64_t b_idx = 0; b_idx < b; b_idx++){
+      for(uint64_t s_idx = 0; s_idx < cu_seqlen_ptr[b_idx+1] - cu_seqlen_ptr[b_idx]; s_idx++){
+        if(is_ragged){
+          // thd with padding
+          // thd implies stride B > stride S
+          *(data_ptr + (cu_seqlen_padded_ptr[b_idx]+s_idx)*stride_s + h_idx *stride_h+d_idx) = *(data_without_padding_ptr + (cu_seqlen_ptr[b_idx] + s_idx)*stride_s + h_idx*stride_h+d_idx);
+        }else{
+          // bshd/sbhd with padding
+          *(data_ptr + b_idx*stride_b + s_idx*stride_s + h_idx*stride_h + d_idx) = *(data_without_padding_ptr + (cu_seqlen_ptr[b_idx] + s_idx)*stride_total_seqlen + h_idx*stride_h+d_idx);
+        }
+      }
+    }
+  }
+}
+
+// kernel launcher for adding padding in q, k, v, o (dq, dk, dv, do)
+void add_padding(
+  DType dtype,
+  uint64_t b, uint64_t h, uint64_t s, uint64_t d,
+  bool is_ragged,
+  uint64_t stride_b, uint64_t stride_h, uint64_t stride_s, //stride_d is 1
+  const void* data_without_padding_ptr,
+  const void* cu_seqlen_ptr, const void* cu_seqlen_padded_ptr,
+  void* data_ptr,
+  hipStream_t stream){
+  
+  // cu_seqlen_padded_ptr can be nullptr
+  assert(cu_seqlen_ptr!=nullptr);
+  constexpr int THREADS_PER_BLOCK = 1024;
+  // parallel over h*d dimension
+  dim3 block(THREADS_PER_BLOCK);
+  dim3 grid(ceil(1.0 * h * d/THREADS_PER_BLOCK));
+
+  CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
+    hipLaunchKernelGGL(
+      add_padding_kernel<CK_TILE_TYPE>, grid, block, 0, stream,
+      b, h, s, d,
+      is_ragged,
+      stride_b, stride_h, stride_s,
+      static_cast<const CK_TILE_TYPE*>(data_without_padding_ptr),
+      static_cast<const int32_t*>(cu_seqlen_ptr),
+      static_cast<const int32_t*>(cu_seqlen_padded_ptr),
+      static_cast<CK_TILE_TYPE*>(data_ptr)););
+
+}
 }//namespace ck_fused_attn

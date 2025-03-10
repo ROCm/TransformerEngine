@@ -423,4 +423,69 @@ hipError_t ck_attn_varlen_fwd(
   return hipSuccess;
 }
 
+hipError_t ck_attn_fwd_pad_between_seqs(
+  DType dtype,
+  uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d,
+  bool is_ragged,
+  const void* q_ptr, 
+  void* q_without_padding_ptr, 
+  uint64_t stride_b_q, uint64_t stride_h_q, uint64_t stride_s_q,
+  const void* k_ptr, 
+  void* k_without_padding_ptr, 
+  uint64_t stride_b_k, uint64_t stride_h_k, uint64_t stride_s_k,
+  const void* v_ptr, 
+  void* v_without_padding_ptr, 
+  uint64_t stride_b_v, uint64_t stride_h_v, uint64_t stride_s_v,
+  const void* cu_seqlen_q_ptr, const void* cu_seqlen_kv_ptr,
+  const void* cu_seqlen_q_padded_ptr, const void* cu_seqlen_kv_padded_ptr,
+  bool is_training,
+  float scaling_factor,
+  float dropout_probability,
+  void* philox_seed_ptr, void* philox_offset_ptr,
+  MaskType attn_mask_type,
+  int64_t window_size_left, int64_t window_size_right,
+  void* o_ptr, 
+  void* o_without_padding_ptr, 
+  uint64_t stride_b_o, uint64_t stride_h_o, uint64_t stride_s_o,
+  void* lse_thd_ptr,
+  void* lse_ptr, 
+  hipStream_t stream){
+
+  // remove padding for q, k, v
+  remove_padding(dtype, b, h, s_q, d, is_ragged, stride_b_q, stride_h_q, stride_s_q, q_ptr, cu_seqlen_q_ptr, cu_seqlen_q_padded_ptr, q_without_padding_ptr, stream);
+  remove_padding(dtype, b, hg, s_kv, d, is_ragged, stride_b_k, stride_h_k, stride_s_k, k_ptr, cu_seqlen_kv_ptr, cu_seqlen_kv_padded_ptr, k_without_padding_ptr, stream);
+  remove_padding(dtype, b, hg, s_kv, d, is_ragged, stride_b_v, stride_h_v, stride_s_v, v_ptr, cu_seqlen_kv_ptr, cu_seqlen_kv_padded_ptr, v_without_padding_ptr, stream);
+  // call varlen api using without_padding ptrs
+  // for BSHD/SBHD, after padding removal, THD require stride_s update
+  if(ck_attn_varlen_fwd(
+      dtype,
+      b, h, hg, s_q, s_kv, d,
+      q_without_padding_ptr, 
+      stride_h_q, (is_ragged? stride_s_q : std::min(stride_s_q, stride_b_q)),
+      k_without_padding_ptr,
+      stride_h_k, (is_ragged? stride_s_k : std::min(stride_s_k, stride_b_k)),
+      v_without_padding_ptr,
+      stride_h_v, (is_ragged? stride_s_v : std::min(stride_s_v, stride_b_v)),
+      cu_seqlen_q_ptr, cu_seqlen_kv_ptr,
+      is_training,
+      scaling_factor,
+      dropout_probability, 
+      philox_seed_ptr, philox_offset_ptr,
+      attn_mask_type,
+      window_size_left, window_size_right,
+      o_without_padding_ptr,
+      stride_h_o, (is_ragged? stride_s_o : std::min(stride_s_o, stride_b_o)),
+      lse_thd_ptr,
+      lse_ptr,
+      stream)!=hipSuccess){
+    //TODO: better error out system
+    throw std::runtime_error("Failed calling varlen fwd api for pad_between_seqs.");
+  }
+  // add padding for o
+  // o share the same shape as q
+  add_padding(dtype, b, h, s_q, d, is_ragged, stride_b_o, stride_h_o, stride_s_o, o_without_padding_ptr, cu_seqlen_q_ptr, cu_seqlen_q_padded_ptr, o_ptr, stream);
+
+  return hipSuccess;
+}
+
 }//namespace ck_fused_attn
