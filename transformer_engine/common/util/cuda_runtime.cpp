@@ -14,7 +14,9 @@
 #include "../common.h"
 #include "../util/cuda_driver.h"
 #include "../util/system.h"
+#ifndef __HIP_PLATFORM_AMD__
 #include "common/util/cuda_runtime.h"
+#endif
 
 namespace transformer_engine {
 
@@ -103,6 +105,7 @@ int sm_count(int device_id) {
   return cache[device_id];
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 bool supports_multicast(int device_id) {
 #if CUDART_VERSION >= 12010
   // NOTE: This needs to be guarded at compile time because the
@@ -127,6 +130,8 @@ bool supports_multicast(int device_id) {
   return false;
 #endif
 }
+#endif // __HIP_PLATFORM_AMD__
+
 
 #ifndef __HIP_PLATFORM_AMD__
 const std::string &include_directory(bool required) {
