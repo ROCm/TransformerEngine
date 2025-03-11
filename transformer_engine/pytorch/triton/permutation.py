@@ -12,6 +12,14 @@ import triton.language as tl
 
 from transformer_engine_torch import DType as TE_DType
 
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
+if IS_HIP_EXTENSION:
+    e5m2_data_type = tl.float8e5b16
+    e4m3_data_type = tl.float8e4b8
+else:
+    e5m2_data_type = tl.float8e5
+    e4m3_data_type = tl.float8e4nv
 
 @triton.jit
 def _row_id_map_pass_1_kernel(
@@ -213,11 +221,11 @@ def _unpermute_kernel(
 ):
     if FP8_DTYPE == "e5m2":
         compute_type = tl.float16
-        data_type = tl.float8e5b16
+        data_type = e5m2_data_type
         pytorch_tensor_dtype = tl.uint8
     elif FP8_DTYPE == "e4m3":
         compute_type = tl.float16
-        data_type = tl.float8e4b8
+        data_type = e4m3_data_type
         pytorch_tensor_dtype = tl.uint8
     else:
         # NOTE: Using fp32 accumulate precision on ROCm.
@@ -331,11 +339,11 @@ def _unpermute_bwd_with_probs_kernel(
 ):
     if FP8_DTYPE == "e5m2":
         compute_type = tl.float16
-        data_type = tl.float8e5b16
+        data_type = e5m2_data_type
         pytorch_tensor_dtype = tl.uint8
     elif FP8_DTYPE == "e4m3":
         compute_type = tl.float16
-        data_type = tl.float8e4b8
+        data_type = e4m3_data_type
         pytorch_tensor_dtype = tl.uint8
     else:
         compute_type = fwd_output_grad_ptr.dtype.element_ty
