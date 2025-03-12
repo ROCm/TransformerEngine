@@ -17,6 +17,47 @@
 
 #include "cuda_runtime.h"
 
+// Define fused-attention handles separately for USE_ROCM
+#ifndef USE_ROCM
+#define NVTE_DECLARE_FUSED_ATTENTION_HANDLES(m)                                               \
+  pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend")                      \
+        .value("NVTE_F16_max512_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen)       \
+        .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) \
+        .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8)                                   \
+        .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend);
+#else
+#define NVTE_DECLARE_FUSED_ATTENTION_HANDLES(m)                             \
+  pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend")    \
+        .value("NVTE_AOTriton", NVTE_Fused_Attn_Backend::NVTE_AOTriton)     \
+        .value("NVTE_CK", NVTE_Fused_Attn_Backend::NVTE_CK)                 \
+        .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend); 
+#endif
+
+// Define comm overlap handles if not using ROCm
+#ifndef USE_ROCM
+#define NVTE_DECLARE_COMM_OVERLAP_HANDLES(m)                                                  \
+  pybind11::enum_<transformer_engine::CommOverlapType>(m, "CommOverlapType")                  \
+      .value("RS", transformer_engine::CommOverlapType::RS)                                   \
+      .value("AG", transformer_engine::CommOverlapType::AG);                                  \
+  pybind11::enum_<transformer_engine::CommOverlapAlgo>(m, "CommOverlapAlgo")                  \
+      .value("BULK_OVERLAP_AG", transformer_engine::CommOverlapAlgo::BULK_OVERLAP_AG)         \
+      .value("BULK_OVERLAP_RS", transformer_engine::CommOverlapAlgo::BULK_OVERLAP_RS)         \
+      .value("SPLIT_PIPELINED_AG_P2P",                                                        \
+                transformer_engine::CommOverlapAlgo::SPLIT_PIPELINED_AG_P2P)                     \
+      .value("SPLIT_PIPELINED_RS", transformer_engine::CommOverlapAlgo::SPLIT_PIPELINED_RS)   \
+      .value("SPLIT_PIPELINED_RS_P2P",                                                        \
+                transformer_engine::CommOverlapAlgo::SPLIT_PIPELINED_RS_P2P)                     \
+      .value("ATOMIC_GEMM_RS", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_RS)           \
+      .value("ATOMIC_GEMM_AG_P2P", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_AG_P2P)   \
+      .value("ATOMIC_GEMM_RS_P2P", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_RS_P2P);  \
+    m.def("device_supports_multicast", &transformer_engine::cuda::supports_multicast,           \
+            py::call_guard<py::gil_scoped_release>(), py::arg("device_id") = -1);                 \
+    m.def("ubuf_built_with_mpi", &transformer_engine::ubuf_built_with_mpi,                      \
+            py::call_guard<py::gil_scoped_release>());
+#else
+#define NVTE_DECLARE_COMM_OVERLAP_HANDLES(m)
+#endif
+
 #define NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)                                               \
   pybind11::enum_<transformer_engine::DType>(m, "DType")                                      \
       .value("kByte", transformer_engine::DType::kByte)                                       \
@@ -55,36 +96,6 @@
       .value("NVTE_THD_T2HD", NVTE_QKV_Layout::NVTE_THD_T2HD)                                 \
       .value("NVTE_THD_TH2D", NVTE_QKV_Layout::NVTE_THD_TH2D)                                 \
       .value("NVTE_THD_THD_THD", NVTE_QKV_Layout::NVTE_THD_THD_THD);                          \
-  #ifndef USE_ROCM
-    pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend")                      \
-        .value("NVTE_F16_max512_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen)       \
-        .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) \
-        .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8)                                   \
-        .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend);                    \
-  #else
-    pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend")
-        .value("NVTE_AOTriton", NVTE_Fused_Attn_Backend::NVTE_AOTriton)
-        .value("NVTE_CK", NVTE_Fused_Attn_Backend::NVTE_CK)
-        .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend);
-  #endif
-  #ifndef USE_ROCM
-    pybind11::enum_<transformer_engine::CommOverlapType>(m, "CommOverlapType")                  \
-        .value("RS", transformer_engine::CommOverlapType::RS)                                   \
-        .value("AG", transformer_engine::CommOverlapType::AG);                                  \
-    pybind11::enum_<transformer_engine::CommOverlapAlgo>(m, "CommOverlapAlgo")                  \
-        .value("BULK_OVERLAP_AG", transformer_engine::CommOverlapAlgo::BULK_OVERLAP_AG)         \
-        .value("BULK_OVERLAP_RS", transformer_engine::CommOverlapAlgo::BULK_OVERLAP_RS)         \
-        .value("SPLIT_PIPELINED_AG_P2P",                                                        \
-                transformer_engine::CommOverlapAlgo::SPLIT_PIPELINED_AG_P2P)                     \
-        .value("SPLIT_PIPELINED_RS", transformer_engine::CommOverlapAlgo::SPLIT_PIPELINED_RS)   \
-        .value("SPLIT_PIPELINED_RS_P2P",                                                        \
-                transformer_engine::CommOverlapAlgo::SPLIT_PIPELINED_RS_P2P)                     \
-        .value("ATOMIC_GEMM_RS", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_RS)           \
-        .value("ATOMIC_GEMM_AG_P2P", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_AG_P2P)   \
-        .value("ATOMIC_GEMM_RS_P2P", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_RS_P2P);  \
-    m.def("device_supports_multicast", &transformer_engine::cuda::supports_multicast,           \
-            py::call_guard<py::gil_scoped_release>(), py::arg("device_id") = -1);                 \
-    m.def("ubuf_built_with_mpi", &transformer_engine::ubuf_built_with_mpi,                      \
-            py::call_guard<py::gil_scoped_release>());
-  #endif //USE_ROCM
+    NVTE_DECLARE_FUSED_ATTENTION_HANDLES(m)                                \
+    NVTE_DECLARE_COMM_OVERLAP_HANDLES(m)
 #endif
