@@ -6,6 +6,7 @@
 
 #include <iostream>
 #include <string>
+#include <numeric> // Required for std::accumulate
 #ifdef USE_FUSED_ATTN_CK
 #include <ck_fused_attn/ck_fused_attn.hpp>
 #endif // USE_FUSED_ATTN_CK
@@ -296,15 +297,13 @@ void fused_attn_ck_fwd_impl(
     std::cout<<"layout: "<<layout<<", ";
     if(is_ragged){
       // THD
-      int32_t total_q = *(static_cast<const int32_t *>(devPtrCuSeqlensQ) + b);
-      int32_t total_kv = *(static_cast<const int32_t *>(devPtrCuSeqlensKV) + b);
-      std::cout<<"q_shape: ("<<total_q<<", "<<h<<", "<<d<<"), ";
+      std::cout<<"q_shape: ("<<b*s_q<<", "<<h<<", "<<d<<"), ";
       std::cout<<"q_stride: ("<<q_stride[2]<<", "<<q_stride[1]<<", "<<q_stride[3]<<"), ";
-      std::cout<<"kv_shape: ("<<total_kv<<", "<<hg<<", "<<d<<"), ";
+      std::cout<<"kv_shape: ("<<b*s_kv<<", "<<hg<<", "<<d<<"), ";
       std::cout<<"k_stride: ("<<k_stride[2]<<", "<<k_stride[1]<<", "<<k_stride[3]<<"), ";
       std::cout<<"v_stride: ("<<v_stride[2]<<", "<<v_stride[1]<<", "<<v_stride[3]<<"), ";
 
-      std::cout<<"o_shape: ("<<total_q<<", "<<h<<", "<<d<<"), ";
+      std::cout<<"o_shape: ("<<b*s_q<<", "<<h<<", "<<d<<"), ";
       std::cout<<"o_stride: ("<<o_stride[2]<<", "<<o_stride[1]<<", "<<o_stride[3]<<"), ";
     }else{
       // non-THD
@@ -350,7 +349,7 @@ void fused_attn_ck_fwd_impl(
         devPtrSoftmaxLSETHD,
         devPtrSoftmaxAux,
         stream));
-    // softmax_lse will be fixed from [total_seqlen_q, h] to [b, h, s] in ck_fused_attn
+    // softmax_lse will be fixed from [h, b*s_q] to [b, h, s] in ck_fused_attn
   }else{
     using ck_fused_attn::ck_attn_fwd;
     NVTE_CHECK_CUDA(
@@ -391,6 +390,7 @@ size_t ck_dtype_size(ck_fused_attn::DType t_dtype){
 
 void fused_attn_ck_bwd_impl(
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d, uint64_t bias_b, uint64_t bias_h,
+  size_t q_storage_bytes, size_t k_storage_bytes, size_t v_storage_bytes,
   float scaling_factor, float dropout_probability, 
   NVTE_QKV_Layout layout,
   NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
@@ -440,7 +440,7 @@ void fused_attn_ck_bwd_impl(
       (*workspace_size) += b*h*s_q*s_kv*ck_dtype_size(dtype);
     }
     if(is_ragged){
-      // transform the input softmax_lse of shape [b, h, s] into [h, total_s]
+      // transform the input softmax_lse of shape [b, h, s] into [h, b*s_q]
       (*workspace_size)+= b*h*s_q*sizeof(float);
     }
     if (nvte_log_ck_config) {
@@ -454,21 +454,12 @@ void fused_attn_ck_bwd_impl(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
   if((layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) or (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D)){
     // just memset all dq, dk, dv
-    if(is_ragged){
-      int32_t total_q = *(static_cast<const int32_t *>(devPtrCuSeqlensQ) + b);
-      (void)cudaMemsetAsync(devPtrdQ, 0, ck_dtype_size(dtype)*h*total_q*d*3, stream);
-
-    }else{
-      (void)cudaMemsetAsync(devPtrdQ, 0, ck_dtype_size(dtype)*b*h*s_q*d*3, stream);
-    }
+    // dq, dk, dv is of same shape as q, k, v
+    NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdQ, 0, q_storage_bytes + k_storage_bytes + v_storage_bytes, stream));
   }else{
     // HD_2HD, HD_H2D, HD_HD_HD can just memset dq itself
-    if(is_ragged){
-      int32_t total_q = *(static_cast<const int32_t *>(devPtrCuSeqlensQ) + b);
-      (void)cudaMemsetAsync(devPtrdQ, 0, ck_dtype_size(dtype)*h*total_q*d, stream);
-    }else{
-      (void)cudaMemsetAsync(devPtrdQ, 0, ck_dtype_size(dtype)*b*h*s_q*d, stream);
-    }
+    // dq is of the same shape as q
+    NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdQ, 0, q_storage_bytes, stream));
   }
   std::array<uint64_t, 4> q_stride;
   std::array<uint64_t, 4> k_stride;
@@ -573,15 +564,13 @@ void fused_attn_ck_bwd_impl(
     std::cout<<"layout: "<<layout<<", ";
     if(is_ragged){
       // THD
-      int32_t total_q = *(static_cast<const int32_t *>(devPtrCuSeqlensQ) + b);
-      int32_t total_kv = *(static_cast<const int32_t *>(devPtrCuSeqlensKV) + b);
-      std::cout<<"q_shape: ("<<total_q<<", "<<h<<", "<<d<<"), ";
+      std::cout<<"q_shape: ("<<b*s_q<<", "<<h<<", "<<d<<"), ";
       std::cout<<"q_stride: ("<<q_stride[2]<<", "<<q_stride[1]<<", "<<q_stride[3]<<"), ";
-      std::cout<<"kv_shape: ("<<total_kv<<", "<<hg<<", "<<d<<"), ";
+      std::cout<<"kv_shape: ("<<b*s_kv<<", "<<hg<<", "<<d<<"), ";
       std::cout<<"k_stride: ("<<k_stride[2]<<", "<<k_stride[1]<<", "<<k_stride[3]<<"), ";
       std::cout<<"v_stride: ("<<v_stride[2]<<", "<<v_stride[1]<<", "<<v_stride[3]<<"), ";
 
-      std::cout<<"o_shape: ("<<total_q<<", "<<h<<", "<<d<<"), ";
+      std::cout<<"o_shape: ("<<b*s_q<<", "<<h<<", "<<d<<"), ";
       std::cout<<"o_stride: ("<<o_stride[2]<<", "<<o_stride[1]<<", "<<o_stride[3]<<"), ";
     }else{
       // non-THD
@@ -860,8 +849,16 @@ void fused_attn_ck_bwd_qkvpacked(
   void *devPtrCuSeqlens = input_cu_seqlens->data.dptr; 
   size_t workspace_size = 0;
 
+  // extract the qkv and o storage bytes to clear dq buffer
+  size_t qkv_storage_bytes = 0;
+  qkv_storage_bytes = std::accumulate((input_QKV->data).shape.begin(), (input_QKV->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  // ensure q, k ,v are of the same storage size
+  assert(qkv_storage_bytes%3==0);
+  // in qkvpacked layouts, o is of the same shape as q shape
+  // dqkv has the same shape as qkv
   fused_attn_ck_bwd_impl(
     b, h, h, max_seqlen, max_seqlen, d, bias_b, bias_h,
+    qkv_storage_bytes/3, qkv_storage_bytes/3, qkv_storage_bytes/3,
     attn_scale, dropout, 
     qkv_layout,
     bias_type, attn_mask_type,
@@ -1070,8 +1067,18 @@ void fused_attn_ck_bwd_kvpacked(
   void *devPtrCuSeqlensKV = input_cu_seqlens_kv->data.dptr;
   size_t workspace_size = 0;
 
+  // extract the qkv and o storage bytes to clear qkv buffer
+  size_t q_storage_bytes = 0;
+  size_t kv_storage_bytes = 0;
+  // b from cu_seqlen is not the actual storage batch for pad_between_seq case
+  q_storage_bytes = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  kv_storage_bytes = std::accumulate((input_KV->data).shape.begin(), (input_KV->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  // ensure k ,v are of the same storage size
+  assert(kv_storage_bytes%2==0);
+
   fused_attn_ck_bwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, bias_b, bias_h,
+    q_storage_bytes, kv_storage_bytes/2, kv_storage_bytes/2,
     attn_scale, dropout, 
     qkv_layout,
     bias_type, attn_mask_type,
@@ -1261,8 +1268,18 @@ void fused_attn_ck_bwd(
 
   size_t workspace_size = 0;
 
+  // extract the qkv and o storage bytes to clear dq buffer
+  size_t q_storage_bytes = 0;
+  size_t k_storage_bytes = 0;
+  size_t v_storage_bytes = 0;
+  // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
+  q_storage_bytes = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  k_storage_bytes = std::accumulate((input_K->data).shape.begin(), (input_K->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  v_storage_bytes = std::accumulate((input_V->data).shape.begin(), (input_V->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+
   fused_attn_ck_bwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, bias_b, bias_h,
+    q_storage_bytes, k_storage_bytes, v_storage_bytes,
     attn_scale, dropout, 
     qkv_layout,
     bias_type, attn_mask_type,
