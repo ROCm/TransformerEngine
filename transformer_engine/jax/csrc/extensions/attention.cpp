@@ -228,12 +228,9 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
   return pybind11::make_tuple(workspace_shape, query_workspace_tensor.dtype());
 }
 
-#define FUSED_ATTN_IMPL_COMMON_BLOCK                                                            \
-  auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;                \
-  auto bias_shape = std::vector<size_t>{bias_batch, bias_heads, q_max_seqlen, kv_max_seqlen};   \
-  size_t num_segments = input_batch;                                                            \
-  if (is_ragged) {                                                                              \
-    auto cudnn_runtime_version = cudnnGetVersion();                                             \
+#ifndef USE_ROCM
+#define FUSED_ATTN_IMPL_COMMON_BLOCK_VERSION                                                        \
+    auto cudnn_runtime_version = cudnnGetVersion();                                                 \
     if (cudnn_runtime_version >= 90300) {                                                       \
       num_segments = input_batch * max_segments_per_seq;                                        \
     } else {                                                                                    \
@@ -244,7 +241,24 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
       NVTE_CHECK(runtime_num_segments_q == runtime_num_segments_kv);                            \
       NVTE_CHECK(runtime_num_segments_q <= input_batch * max_segments_per_seq);                 \
       num_segments = runtime_num_segments_q;                                                    \
-    }                                                                                           \
+    }
+#else
+#define FUSED_ATTN_IMPL_COMMON_BLOCK_VERSION                                                        \
+  size_t runtime_num_segments_q =                                                           \
+    GetRuntimeNumSegments(q_cu_seqlens, workspace, input_batch * q_max_seqlen, stream);   \
+  size_t runtime_num_segments_kv =                                                          \
+    GetRuntimeNumSegments(kv_cu_seqlens, workspace, input_batch * kv_max_seqlen, stream); \
+  NVTE_CHECK(runtime_num_segments_q == runtime_num_segments_kv);                            \
+  NVTE_CHECK(runtime_num_segments_q <= input_batch * max_segments_per_seq);                 \
+  num_segments = runtime_num_segments_q;                                                    
+#endif
+
+#define FUSED_ATTN_IMPL_COMMON_BLOCK                                                            \
+  auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;                \
+  auto bias_shape = std::vector<size_t>{bias_batch, bias_heads, q_max_seqlen, kv_max_seqlen};   \
+  size_t num_segments = input_batch;                                                            \
+  if (is_ragged) {                                                                              \
+    FUSED_ATTN_IMPL_COMMON_BLOCK_VERSION                                                        \
   }                                                                                             \
   std::vector<size_t> seq_shape{num_segments + 1};                                              \
   auto q_cu_seqlens_tensor = TensorWrapper(q_cu_seqlens, seq_shape, DType::kInt32);             \
