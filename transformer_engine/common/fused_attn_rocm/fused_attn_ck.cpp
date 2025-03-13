@@ -850,8 +850,7 @@ void fused_attn_ck_bwd_qkvpacked(
   size_t workspace_size = 0;
 
   // extract the qkv and o storage bytes to clear dq buffer
-  size_t qkv_storage_bytes = 0;
-  qkv_storage_bytes = std::accumulate((input_QKV->data).shape.begin(), (input_QKV->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  size_t qkv_storage_bytes = std::accumulate((input_QKV->data).shape.begin(), (input_QKV->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
   // ensure q, k ,v are of the same storage size
   assert(qkv_storage_bytes%3==0);
   // in qkvpacked layouts, o is of the same shape as q shape
