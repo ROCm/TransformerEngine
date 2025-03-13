@@ -10,6 +10,7 @@ import math
 import os
 from typing import Optional
 
+from ...triton_kernels.rmsnorm_triton import te_rmsnorm_fwd_triton
 import torch
 
 from transformer_engine_torch import rmsnorm_bwd, rmsnorm_fwd
@@ -200,6 +201,9 @@ class RMSNorm(BasicOperation):
         y = None
         rstdevs = None
         sm_margin = self._sm_margins["forward" if requires_grad else "inference"]
+
+        use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) )
+
         if with_fp8_output:
             fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(forward=True)
             fp8_dtype = get_fp8_te_dtype(output_fp8_meta["recipe"], fprop_tensor=True)
@@ -234,9 +238,19 @@ class RMSNorm(BasicOperation):
                 self.zero_centered_gamma,
             )
             if requires_grad:
-                y, rstdevs = rmsnorm_fwd(*args)
+                if use_rmsnorm_triton:
+                    y, rstdevs = te_rmsnorm_fwd_triton(
+                    x, w, self.eps, self.zero_centered_gamma
+                    )
+                else:
+                    y, rstdevs = rmsnorm_fwd(*args)
             else:
-                y = rmsnorm_fwd_inf(*args)
+                if use_rmsnorm_triton:
+                    y = te_rmsnorm_fwd_inf_triton(
+                    x, w, self.eps, self.zero_centered_gamma
+                )
+                else:
+                    y = rmsnorm_fwd_inf(*args)
 
         # Save state for backward pass
         if requires_grad:
