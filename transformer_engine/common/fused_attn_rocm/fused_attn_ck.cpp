@@ -1067,11 +1067,9 @@ void fused_attn_ck_bwd_kvpacked(
   size_t workspace_size = 0;
 
   // extract the qkv and o storage bytes to clear qkv buffer
-  size_t q_storage_bytes = 0;
-  size_t kv_storage_bytes = 0;
   // b from cu_seqlen is not the actual storage batch for pad_between_seq case
-  q_storage_bytes = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
-  kv_storage_bytes = std::accumulate((input_KV->data).shape.begin(), (input_KV->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  size_t q_storage_bytes = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  size_t kv_storage_bytes = std::accumulate((input_KV->data).shape.begin(), (input_KV->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
   // ensure k ,v are of the same storage size
   assert(kv_storage_bytes%2==0);
 
@@ -1268,13 +1266,10 @@ void fused_attn_ck_bwd(
   size_t workspace_size = 0;
 
   // extract the qkv and o storage bytes to clear dq buffer
-  size_t q_storage_bytes = 0;
-  size_t k_storage_bytes = 0;
-  size_t v_storage_bytes = 0;
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
-  q_storage_bytes = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
-  k_storage_bytes = std::accumulate((input_K->data).shape.begin(), (input_K->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
-  v_storage_bytes = std::accumulate((input_V->data).shape.begin(), (input_V->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  size_t q_storage_bytes = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  size_t k_storage_bytes = std::accumulate((input_K->data).shape.begin(), (input_K->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  size_t v_storage_bytes = std::accumulate((input_V->data).shape.begin(), (input_V->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
 
   fused_attn_ck_bwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, bias_b, bias_h,

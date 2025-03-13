@@ -86,8 +86,8 @@ __global__ void dk_dv_reduce(
 // define dk_dv_reduce function in THD layout only for fp16 and bf16 types
 template<typename DataType>
 __global__ void dk_dv_reduce_thd(
-  uint64_t b, uint64_t h, uint64_t hg, uint64_t d, 
-  const int32_t* cu_seqlen_kv_ptr,
+  uint64_t h, uint64_t hg, uint64_t d, 
+  const int32_t* total_seqlen_kv_ptr,
   const DataType *dk_expanded,
   const DataType *dv_expanded,
   uint64_t stride_h_dkv_expanded, uint64_t stride_s_dkv_expanded,
@@ -96,15 +96,13 @@ __global__ void dk_dv_reduce_thd(
   //k,v, dk, dv guaranteed to have the same stride
   uint64_t stride_h_dkv, uint64_t stride_s_dkv){
 
-  int32_t total_seqlen_kv = *(cu_seqlen_kv_ptr + b);
-
   uint64_t seqlen_idx = blockIdx.x;
   uint64_t head_k_idx = blockIdx.y;
   uint64_t hdim_idx = threadIdx.x;
   
   assert(hdim_dix<d);
 
-  if(seqlen_idx>=total_seqlen_kv){
+  if(seqlen_idx >= *total_seqlen_kv_ptr){
     return;
   }
 
@@ -890,8 +888,8 @@ hipError_t ck_attn_varlen_bwd(
     CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
       hipLaunchKernelGGL(
         dk_dv_reduce_thd<CK_TILE_TYPE>, grid, block, 0, stream,
-        b, h, hg, d, 
-        static_cast<const int32_t*>(cu_seqlen_kv_ptr),
+        h, hg, d, 
+        static_cast<const int32_t*>(cu_seqlen_kv_ptr)+b,
         static_cast<CK_TILE_TYPE*>(dk_expanded_ptr),
         static_cast<CK_TILE_TYPE*>(dv_expanded_ptr),
         stride_h_dkv_expanded, stride_s_dkv_expanded,
