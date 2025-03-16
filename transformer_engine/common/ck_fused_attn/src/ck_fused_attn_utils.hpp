@@ -9,7 +9,6 @@
 
 #include<iostream>
 #include<cstdint>
-#include<hip/hip_runtime.h>
 
 //forward declaration for ck_tile enum
 enum class mask_enum;
@@ -56,26 +55,6 @@ std::pair<bias_enum, BiasShape> get_ck_bias_type_shape(BiasType attn_bias_type, 
 
 mask_enum get_ck_mask_type(MaskType attn_mask_type);
 
-// kernel launcher for remove padding in q, k, v, o (dq, dk, dv, do)
-void remove_padding(
-  DType dtype,
-  uint64_t b, uint64_t h, uint64_t s, uint64_t d,
-  bool is_ragged,
-  uint64_t stride_b, uint64_t stride_h, uint64_t stride_s, //stride_d is 1
-  const void* data_ptr,
-  const void* cu_seqlen_ptr, const void* cu_seqlen_padded_ptr,
-  void* data_without_padding_ptr,
-  hipStream_t stream);
-// kernel launcher for adding padding in q, k, v, o (dq, dk, dv, do)
-void add_padding(
-  DType dtype,
-  uint64_t b, uint64_t h, uint64_t s, uint64_t d,
-  bool is_ragged,
-  uint64_t stride_b, uint64_t stride_h, uint64_t stride_s, //stride_d is 1
-  const void* data_without_padding_ptr,
-  const void* cu_seqlen_ptr, const void* cu_seqlen_padded_ptr,
-  void* data_ptr,
-  hipStream_t stream);
 
 }//namespace ck_fused_attn
 #endif // CK_FUSED_ATTN_UTILS_H
