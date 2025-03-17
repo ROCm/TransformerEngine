@@ -320,5 +320,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       m.def("CommOverlapHelper", &placeholder, "Dummy function for python side annotations");
       m.def("CommOverlap", &placeholder, "Dummy function for python side annotations");
       m.def("CommOverlapP2P", &placeholder, "Dummy function for python side annotations");
+      m.def("CommOverlapAlgo", &placeholder, "Dummy function for python side annotations");
 #endif //USE_ROCM
 }
