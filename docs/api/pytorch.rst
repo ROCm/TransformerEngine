@@ -55,3 +55,4 @@ pyTorch
 .. autoapifunction:: transformer_engine.pytorch.initialize_ub
 
 .. autoapifunction:: transformer_engine.pytorch.destroy_ub
+.. autoapifunction:: transformer_engine.pytorch.moe_sort_chunks_by_index
