@@ -73,6 +73,7 @@ def setup_common_extension() -> CMakeExtension:
         if os.getenv("NVTE_AOTRITON_PATH"):
             aotriton_path = Path(os.getenv("NVTE_AOTRITON_PATH"))
             cmake_flags.append(f"-DAOTRITON_PATH={aotriton_path}")
+        cmake_flags.append(f"-DCK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT={os.getenv('NVTE_CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT', 3)}")
         if os.getenv("NVTE_CK_FUSED_ATTN_PATH"):
             ck_path = Path(os.getenv("NVTE_CK_FUSED_ATTN_PATH"))
             cmake_flags.append(f"-DCK_FUSED_ATTN_PATH={ck_path}")
