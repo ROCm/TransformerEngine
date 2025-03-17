@@ -237,7 +237,8 @@ void log_bwd_config(const char* func_name, const fmha_bwd_traits& fmha_traits, c
       ck_fused_attn_log_config = true;
   }
   if (ck_fused_attn_log_config) {
-    std::cout<<std::endl<<"run ck fmha_bwd: "<<std::endl;
+    std::cout<<std::endl<<func_name<<std::endl;
+
     // fmha_traits debug
     std::cout<<"fmha_traits: "<<std::endl;
     std::cout<<"hdim_q: "<<fmha_traits.hdim_q<<std::endl;

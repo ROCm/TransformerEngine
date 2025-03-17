@@ -905,14 +905,6 @@ def get_attention_backend(
         ):
             logger.debug("Disabling FusedAttention for determinism reasons")
             use_fused_attention = False
-    # TODO: remove the filtering after ck team tells us how to enable more deterministic bwd kernels
-    if use_fused_attention and deterministic and IS_HIP_EXTENSION:
-        if (
-            fused_attention_backend == FusedAttnBackend["CK"]
-            and is_training
-        ):
-            logger.debug("Disabling FusedAttention for determinism reasons")
-            use_fused_attention = False
 
     # All available backends
     available_backends = [use_flash_attention, use_fused_attention, use_unfused_attention]
