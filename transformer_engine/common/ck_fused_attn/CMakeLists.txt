@@ -6,7 +6,6 @@ set(CMAKE_CXX_STANDARD 17)
 project(ck_fused_attn LANGUAGES HIP CXX)
 # generate ck fused attn kernels, both fwd/bwd
 
-set(CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT 3 CACHE STRING "ck float to bf16 conversion rounding")
 set(CK_FUSED_ATTN_TARGET_GPUS "gfx942" CACHE STRING "Target Architecture to build ck_fused_attn backend")
 
 # remove files that should be regenerated
