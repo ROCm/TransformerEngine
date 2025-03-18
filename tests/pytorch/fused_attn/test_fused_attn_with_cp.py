@@ -77,8 +77,6 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
             f"CP implementation with QKVO A2A requires num_heads ({config.num_heads}) and"
             f" num_gqa_groups ({config.num_gqa_groups}) to be divisible by cp_size (2)!"
         )
-    if IS_HIP_EXTENSION and qkv_format == "thd":
-        pytest.skip("CP tests do not support THD format on ROCm yet!")
 
     num_gpus_per_node=4 if cp_comm_type == "a2a+p2p" else 2
     if device_count() < num_gpus_per_node:
@@ -122,9 +120,7 @@ model_configs_fused_attn = {
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
 @pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a", "a2a+p2p"])
 def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type):
-    if IS_HIP_EXTENSION and qkv_format == "thd":
-        pytest.skip("THD format has not been supported on ROCm yet!")
-    if qkv_format == "thd" and get_device_compute_capability() < (9, 0):
+    if (not IS_HIP_EXTENSION) and qkv_format == "thd" and get_device_compute_capability() < (9, 0):
         pytest.skip("THD format is only supported on sm90+!")
     if cp_comm_type == "all_gather" and get_cudnn_version() < (9, 3, 0):
         pytest.skip("CP implementation with KV all-gather is only supported with cuDNN >= 9.3.0!")
@@ -134,7 +130,7 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type):
         pytest.skip("FP8 attention has not been supported on ROCm yet!")
 
     config = model_configs_fused_attn[model]
-    if qkv_format == "thd" and config.num_heads != config.num_gqa_groups:
+    if not IS_HIP_EXTENSION and qkv_format == "thd" and config.num_heads != config.num_gqa_groups:
         pytest.skip("THD format does not support QGA/MQA yet!")
     if qkv_format == "thd" and config.attn_bias_type == "post_scale_bias":
         pytest.skip("THD format does not support post_scale_bias yet!")

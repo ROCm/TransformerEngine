@@ -51,3 +51,5 @@ pyTorch
 .. autoapifunction:: transformer_engine.pytorch.moe_permute
 
 .. autoapifunction:: transformer_engine.pytorch.moe_unpermute
+
+.. autoapifunction:: transformer_engine.pytorch.moe_sort_chunks_by_index

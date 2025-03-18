@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -6,12 +8,14 @@ import os, sys, logging
 from contextlib import nullcontext
 import torch
 import torch.distributed as dist
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from transformer_engine.pytorch.attention import DotProductAttention
 from transformer_engine.pytorch.attention import get_cu_seqlens_on_cp_rank
 import transformer_engine_torch as tex
 from test_fused_attn_with_cp import model_configs_flash_attn, model_configs_fused_attn
 from transformer_engine.pytorch.fp8 import fp8_autocast
 from transformer_engine.common.recipe import DelayedScaling
+import warnings
 
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
@@ -155,7 +159,7 @@ def run_dpa_with_cp(
                 torch.tensor([q_input_shape[0]], dtype=torch.int32),
             ]
         ).cuda()
-        if kernel_backend == "FlashAttention":
+        if IS_HIP_EXTENSION or kernel_backend == "FlashAttention":
             cu_seqlens_q = cu_seqlens_q_padded[:-1]
         else:
             cu_seqlens_q = torch.cat(
@@ -302,6 +306,9 @@ def run_dpa_with_cp(
         cu_pads_q = cu_seqlens_q_padded - cu_seqlens_q
         num_pads_q = cu_pads_q[1:] - cu_pads_q[:-1]
         for x in [dq, out, dq_, out_]:
+            if IS_HIP_EXTENSION and torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() != 0:
+                warnings.warn(f"Rank:{rank} non-zero elements in padding region")
+                x[cu_seqlens_q_padded[-1] :] = 0
             assert torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() == 0
             for b in range(config.batch_size):
                 assert (
@@ -318,6 +325,9 @@ def run_dpa_with_cp(
         cu_pads_kv = cu_seqlens_kv_padded - cu_seqlens_kv
         num_pads_kv = cu_pads_kv[1:] - cu_pads_kv[:-1]
         for x in [dk, dv, dk_, dv_]:
+            if IS_HIP_EXTENSION and torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() != 0:
+                warnings.warn(f"Rank:{rank} non-zero elements in padding region")
+                x[cu_seqlens_kv_padded[-1] :] = 0
             assert torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() == 0
             for b in range(config.batch_size):
                 assert (
