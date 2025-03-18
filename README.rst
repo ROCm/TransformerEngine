@@ -251,8 +251,19 @@ To enable FA v3 kernels, the following environment variables can be used:
 * NVTE_CK_IS_V3_ATOMIC_FP32 - by default 1, if set to 0 will use atomic fp16/bf16(w/o convert_dq kernel) when NVTE_CK_USES_BWD_V3 is set to 1;
 * NVTE_CK_HOW_V3_BF16_CVT - by default 1, float to bf16 convert type when bwd_v3 is set to 1, 0:RTNE; 1:RTNA; 2:RTZ.
 
+Float to BFloat16 Conversion in CK Backend
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+How fp32 converts to bf16 affects both the performance and accuracy in ck fused attn. 
+ROCm TE provides the compile-time env NVTE_CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT with the following values available to choose from: 
+
+* 0 - standard;
+* 1 - truncate with nan;
+* 2 - truncate;
+* 3 - standard asm, default;
+* 4 - rta_asm.
+
 Experimental Triton Kernels on ROCm
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Most CUDA kernels in Transformer Engine are hipified to run on ROCm. While the hipifiled CUDA kernels are functional, they are not necessarily optimal on ROCm. 
 We added some Triton kernels to TE ROCm to improve the performance over the hipified kernels. 
 Currently, we have integrated Triton kernels for cast_transpose and cast_transpose_bgrad, which are commonly used in fp8 training, and also rmsnorm kernels. 
