@@ -223,7 +223,24 @@ void generate_alibi_slope(uint64_t h, float* alibi_slope_ptr){
   }
 }
 
+// no device std::upper_bound
+__forceinline__ __device__ int binary_search(int target, const int32_t *array, int len) {
+  int left = 1, right = len - 1;
+  while (left < right) {
+    int mid = (left + right) / 2;
+    if (array[mid] <= target) {
+      left = mid + 1;
+    } else {
+      right = mid;
+    }
+  }
+  return left - 1;
+}
+
+constexpr int THREADS_PER_WARP = 32;
 // kernel to remove padding for q, k, v, o (dq, dk, dv, do)
+// each warp is in charge of one token index (h*d*sizeof(DataType) bytes copy)
+// one lane (thread) in one warp is charge of one element in 32 segment trunk of h*d
 template<typename DataType>
 __global__ void remove_padding_kernel(
   uint64_t b, uint64_t h, uint64_t s, uint64_t d,
@@ -233,23 +250,28 @@ __global__ void remove_padding_kernel(
   const int32_t* cu_seqlen_ptr, const int32_t* cu_seqlen_padded_ptr,
   DataType* data_without_padding_ptr){
 
-  // TE always has (B, S) first, then (H, D), so stride_total_seqlen will be minimal of stride_b and stride_s 
+  int warp_idx = (blockIdx.x * blockDim.x + threadIdx.x) / THREADS_PER_WARP;
+  int lane_idx = threadIdx.x % THREADS_PER_WARP;
+  int num_warps = (blockDim.x * gridDim.x) / THREADS_PER_WARP;
+  int num_total_tokens = cu_seqlen_ptr[b];
+
   uint64_t stride_total_seqlen = std::min(stride_b, stride_s);
-  for(uint64_t hd_idx = blockIdx.x*blockDim.x + threadIdx.x; hd_idx < h*d; hd_idx += blockDim.x * gridDim.x){
-    uint64_t h_idx = hd_idx/d;
-    uint64_t d_idx = hd_idx%d;
-    //loop over all batch
-    for(uint64_t b_idx = 0; b_idx < b; b_idx++){
-      for(uint64_t s_idx = 0; s_idx < cu_seqlen_ptr[b_idx+1] - cu_seqlen_ptr[b_idx]; s_idx++){
-        if(is_ragged){
-          // thd with padding
-          // thd implies stride B > stride S
-          *(data_without_padding_ptr + (cu_seqlen_ptr[b_idx] + s_idx)*stride_s + h_idx*stride_h+d_idx) = *(data_ptr + (cu_seqlen_padded_ptr[b_idx]+s_idx)*stride_s + h_idx *stride_h+d_idx);
-        }else{
-          // bshd or sbhd with padding
-          *(data_without_padding_ptr + (cu_seqlen_ptr[b_idx] + s_idx)*stride_total_seqlen + h_idx*stride_h + d_idx) = *(data_ptr + b_idx*stride_b + s_idx*stride_s + h_idx*stride_h + d_idx);
-        }
-      }
+  for(int token_id = warp_idx; token_id<num_total_tokens; token_id += num_warps){
+    int b_idx = binary_search(token_id, cu_seqlen_ptr, b+1);
+    int s_idx = token_id - cu_seqlen_ptr[b_idx];
+    DataType* cur_without_padding = nullptr;
+    const DataType* cur = nullptr;
+    if(is_ragged){
+      cur_without_padding = data_without_padding_ptr + stride_s* token_id;
+      cur = data_ptr + (cu_seqlen_padded_ptr[b_idx] + s_idx)*stride_s;
+    }else{
+      cur_without_padding = data_without_padding_ptr + stride_total_seqlen* token_id;
+      cur = data_ptr + (b_idx * stride_b + s_idx*stride_s);
+    }
+    for(int hd_idx = lane_idx; hd_idx < h*d; hd_idx+=THREADS_PER_WARP){
+      int h_idx = hd_idx/d;
+      int d_idx = hd_idx%d;
+      cur_without_padding[h_idx*stride_h + d_idx] = cur[h_idx*stride_h + d_idx];
     }
   }
 }
@@ -267,10 +289,10 @@ void remove_padding(
   
   // cu_seqlen_padded_ptr can be nullptr
   assert(cu_seqlen_ptr!=nullptr);
-  constexpr int THREADS_PER_BLOCK = 1024;
+  constexpr int THREADS_PER_BLOCK = 256;
   // parallel over h*d dimension
   dim3 block(THREADS_PER_BLOCK);
-  dim3 grid(ceil(1.0 * h * d/THREADS_PER_BLOCK));
+  dim3 grid(ceil(1.0 * b * s * THREADS_PER_WARP/THREADS_PER_BLOCK));
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(dtype, DataType,
     hipLaunchKernelGGL(
@@ -286,6 +308,7 @@ void remove_padding(
 }
 
 // kernel to add padding for q, k, v, o (dq, dk, dv, do)
+// reverse of remove_padding
 template<typename DataType>
 __global__ void add_padding_kernel(
   uint64_t b, uint64_t h, uint64_t s, uint64_t d,
@@ -294,24 +317,29 @@ __global__ void add_padding_kernel(
   const DataType* data_without_padding_ptr,
   const int32_t* cu_seqlen_ptr, const int32_t* cu_seqlen_padded_ptr,
   DataType* data_ptr){
-  
-  // TE always has (B, S) first, then (H, D), so stride_total_seqlen will be minimal of stride_b and stride_s 
+
+  int warp_idx = (blockIdx.x * blockDim.x + threadIdx.x) / THREADS_PER_WARP;
+  int lane_idx = threadIdx.x % THREADS_PER_WARP;
+  int num_warps = (blockDim.x * gridDim.x) / THREADS_PER_WARP;
+  int num_total_tokens = cu_seqlen_ptr[b];
+
   uint64_t stride_total_seqlen = std::min(stride_b, stride_s);
-  for(uint64_t hd_idx = blockIdx.x*blockDim.x + threadIdx.x; hd_idx < h*d; hd_idx += blockDim.x * gridDim.x){
-    uint64_t h_idx = hd_idx/d;
-    uint64_t d_idx = hd_idx%d;
-    //loop over all batch
-    for(uint64_t b_idx = 0; b_idx < b; b_idx++){
-      for(uint64_t s_idx = 0; s_idx < cu_seqlen_ptr[b_idx+1] - cu_seqlen_ptr[b_idx]; s_idx++){
-        if(is_ragged){
-          // thd with padding
-          // thd implies stride B > stride S
-          *(data_ptr + (cu_seqlen_padded_ptr[b_idx]+s_idx)*stride_s + h_idx *stride_h+d_idx) = *(data_without_padding_ptr + (cu_seqlen_ptr[b_idx] + s_idx)*stride_s + h_idx*stride_h+d_idx);
-        }else{
-          // bshd/sbhd with padding
-          *(data_ptr + b_idx*stride_b + s_idx*stride_s + h_idx*stride_h + d_idx) = *(data_without_padding_ptr + (cu_seqlen_ptr[b_idx] + s_idx)*stride_total_seqlen + h_idx*stride_h+d_idx);
-        }
-      }
+  for(int token_id = warp_idx; token_id<num_total_tokens; token_id += num_warps){
+    int b_idx = binary_search(token_id, cu_seqlen_ptr, b+1);
+    int s_idx = token_id - cu_seqlen_ptr[b_idx];
+    const DataType* cur_without_padding = nullptr;
+    DataType* cur = nullptr;
+    if(is_ragged){
+      cur_without_padding = data_without_padding_ptr + stride_s* token_id;
+      cur = data_ptr + (cu_seqlen_padded_ptr[b_idx] + s_idx)*stride_s;
+    }else{
+      cur_without_padding = data_without_padding_ptr + stride_total_seqlen* token_id;
+      cur = data_ptr + (b_idx * stride_b + s_idx*stride_s);
+    }
+    for(int hd_idx = lane_idx; hd_idx < h*d; hd_idx+=THREADS_PER_WARP){
+      int h_idx = hd_idx/d;
+      int d_idx = hd_idx%d;
+      cur[h_idx*stride_h + d_idx] = cur_without_padding[h_idx*stride_h + d_idx];
     }
   }
 }
@@ -329,10 +357,10 @@ void add_padding(
   
   // cu_seqlen_padded_ptr can be nullptr
   assert(cu_seqlen_ptr!=nullptr);
-  constexpr int THREADS_PER_BLOCK = 1024;
+  constexpr int THREADS_PER_BLOCK = 256;
   // parallel over h*d dimension
   dim3 block(THREADS_PER_BLOCK);
-  dim3 grid(ceil(1.0 * h * d/THREADS_PER_BLOCK));
+  dim3 grid(ceil(1.0 * b*s * THREADS_PER_WARP/THREADS_PER_BLOCK));
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(dtype, DataType,
     hipLaunchKernelGGL(

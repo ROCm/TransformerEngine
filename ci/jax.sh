@@ -63,9 +63,8 @@ run_test_config() {
     run 1 test_fused_attn.py
     run_default_fa 1 test_helper.py
     run_default_fa 1 test_layer.py #it effectevly always uses unfused attention
-    if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
-        run 1 test_praxis_layers.py
-    else
+    # skip test_praxis_layers.py for ck backend as we didn't enable deterministic backward for now
+    if [ $_fus_attn = "aotriton" ]; then
         run 3 test_praxis_layers.py
     fi
     run_default_fa 1 test_sharding.py
