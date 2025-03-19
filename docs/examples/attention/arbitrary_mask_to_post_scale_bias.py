@@ -3,9 +3,17 @@
 # See LICENSE for license information.
 
 import os
+import sys
 import torch
 from typing import Tuple
-from tests.pytorch.fused_attn.test_fused_attn import ModelConfig
+
+# Add path to tests directory
+tests_path = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "../../../tests/pytorch/fused_attn")
+)
+sys.path.append(tests_path)
+
+from test_fused_attn import ModelConfig
 from transformer_engine.pytorch.attention import DotProductAttention
 
 # Initialize RNG state
