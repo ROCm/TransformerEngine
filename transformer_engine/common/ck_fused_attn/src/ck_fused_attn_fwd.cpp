@@ -17,23 +17,6 @@
 
 namespace ck_fused_attn{
 
-// cuda kernel to convert softmax lse from [h, b*s_q] (with effective data in first total_q places) to [b, h, s_q]
-__global__ void softmax_lse_from_thd(
-  uint64_t b, uint64_t h, uint64_t s_q,
-  const int32_t* cu_seqlen_q,
-  const float* lse_thd,
-  float* lse){
-
-  for(uint64_t bh_idx = blockIdx.x*blockDim.x + threadIdx.x; bh_idx < b*h; bh_idx += blockDim.x * gridDim.x){
-    uint64_t b_idx = bh_idx/h;
-    uint64_t h_idx = bh_idx%h;
-    // loop over a given batch and head idx
-    for(uint64_t s_idx = cu_seqlen_q[b_idx]; s_idx < cu_seqlen_q[b_idx + 1]; s_idx++){
-      lse[bh_idx * s_q + s_idx - cu_seqlen_q[b_idx]] = lse_thd[h_idx * b*s_q + s_idx];
-    }
-  }
-}
-
 // print the fmha traits and args when calling ck apis
 void log_fwd_config(const char* func_name, const fmha_fwd_traits& fmha_traits, const fmha_fwd_args& fmha_args){
   bool ck_fused_attn_log_config = false;
@@ -411,14 +394,7 @@ hipError_t ck_attn_varlen_fwd(
   // convert softmax_lse from [h, b*max_seqlen_q] (effective data in first total_q places) to [b, h, s_q]
   if(lse_thd_ptr!=lse_ptr){
     assert((lse_thd_ptr!=nullptr) && (lse_ptr!=nullptr));
-    constexpr int THREADS_PER_BLOCK = 1024;
-    dim3 block(THREADS_PER_BLOCK);
-    dim3 grid(ceil(1.0 * b * h/THREADS_PER_BLOCK));
-    hipLaunchKernelGGL(
-      softmax_lse_from_thd, grid, block, 0, stream,
-      b, h, s_q, static_cast<const int32_t*>(cu_seqlen_q_ptr),
-      static_cast<const float*>(lse_thd_ptr),
-      static_cast<float*>(lse_ptr));
+    softmax_lse_from_thd(b, h, s_q, cu_seqlen_q_ptr, lse_thd_ptr, lse_ptr, stream);
   }
   return hipSuccess;
 }

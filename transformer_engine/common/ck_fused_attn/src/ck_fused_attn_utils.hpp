@@ -55,6 +55,21 @@ std::pair<bias_enum, BiasShape> get_ck_bias_type_shape(BiasType attn_bias_type, 
 
 mask_enum get_ck_mask_type(MaskType attn_mask_type);
 
+// kernel launcher for converting softmax in thd mode to [b, h, s_q] mode
+void softmax_lse_from_thd(
+  uint64_t b, uint64_t h, uint64_t s_q,
+  const void* cu_seqlen_q_ptr,
+  const void* lse_thd_ptr,
+  void* lse_ptr, 
+  hipStream_t stream);
+
+// kernel launcher for converting softmax in [b, h, s_q] mode to thd mode ([h, b*sq] with total_seqlen_q values first)
+void softmax_lse_to_thd(
+  uint64_t b, uint64_t h, uint64_t s_q,
+  const void* cu_seqlen_q_ptr,
+  const void* lse_ptr,
+  void* lse_thd_ptr, 
+  hipStream_t stream);
 
 }//namespace ck_fused_attn
 #endif // CK_FUSED_ATTN_UTILS_H

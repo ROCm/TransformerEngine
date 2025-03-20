@@ -17,23 +17,6 @@
 
 namespace ck_fused_attn{
 
-// convert the softmax lse from [b, h, s_q] into shape [h, b*s_q] (with effective data in first total_q places)
-__global__ void softmax_lse_to_thd(
-  uint64_t b, uint64_t h, uint64_t s_q,
-  const int32_t* cu_seqlen_q,
-  const float* lse,
-  float* lse_thd){
-
-  for(uint64_t bh_idx = blockIdx.x*blockDim.x + threadIdx.x; bh_idx < b*h; bh_idx += blockDim.x * gridDim.x){
-    uint64_t b_idx = bh_idx/h;
-    uint64_t h_idx = bh_idx%h;
-    // loop over a given batch and head idx
-    for(uint64_t s_idx = cu_seqlen_q[b_idx]; s_idx < cu_seqlen_q[b_idx + 1]; s_idx++){
-      lse_thd[h_idx * b*s_q + s_idx] = lse[bh_idx * s_q + s_idx - cu_seqlen_q[b_idx]];
-    }
-  }
-}
-
 // define dk_dv_reduce function only for fp16 and bf16 types
 template<typename DataType>
 __global__ void dk_dv_reduce(
@@ -698,14 +681,7 @@ hipError_t ck_attn_varlen_bwd(
   // convert the softmax_lse from shape [b, h, s_q] into THD
   if(lse_thd_ptr!=lse_ptr){
     assert((lse_thd_ptr!=nullptr) && (lse_ptr!=nullptr));
-    constexpr int THREADS_PER_BLOCK = 1024;
-    dim3 block(THREADS_PER_BLOCK);
-    dim3 grid(ceil(1.0 * b * h/THREADS_PER_BLOCK));
-    hipLaunchKernelGGL(
-      softmax_lse_to_thd, grid, block, 0, stream,
-      b, h, s_q, static_cast<const int32_t*>(cu_seqlen_q_ptr),
-      static_cast<const float*>(lse_ptr),
-      static_cast<float*>(lse_thd_ptr));
+    softmax_lse_to_thd(b, h, s_q, cu_seqlen_q_ptr, lse_ptr, lse_thd_ptr, stream);
   }
 
   // THD does not work with bias
