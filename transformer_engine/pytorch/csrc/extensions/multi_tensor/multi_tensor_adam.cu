@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -34,9 +34,9 @@ using MATH_T = float;
 using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
 #else
-using fp8e4m3 = hip_f8<hip_f8_type::fp8>;
-using fp8e5m2 = hip_f8<hip_f8_type::bf8>;
-#endif
+using fp8e4m3 = te_hip_fp8_e4m3;
+using fp8e5m2 = te_hip_fp8_e5m2;
+#endif //__HIP_PLATFORM_AMD__
 using transformer_engine::DType;
 
 template <typename T>
