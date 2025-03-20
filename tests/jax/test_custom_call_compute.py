@@ -29,6 +29,7 @@ from transformer_engine.jax.cpp_extensions.transpose import (
 from transformer_engine.jax.cpp_extensions.quantization import _jax_cast_fp8
 from transformer_engine.jax import cpp_extensions as tex
 from transformer_engine.jax import is_hip_extension
+from transformer_engine.jax.fp8 import jnp_float8_e4m3_type, jnp_float8_e5m2_type
 
 
 GEMM_CASES = [
@@ -797,8 +798,8 @@ class TestTranspose:
     @pytest.mark.parametrize(
         "out_dtype",
         [
-            pytest.param(jnp.float8_e4m3fn, id="output_float8_e4m3fn"),
-            pytest.param(jnp.float8_e5m2, id="output_float8_e5m2"),
+            pytest.param(jnp_float8_e4m3_type, id="output_float8_e4m3fn"),
+            pytest.param(jnp_float8_e4m3_type, id="output_float8_e5m2"),
         ],
     )
     def test_cast_transpose(self, in_dtype, input_shape, transpose_axis, out_dtype):
@@ -825,8 +826,8 @@ class TestTranspose:
     @pytest.mark.parametrize(
         "out_dtype",
         [
-            pytest.param(jnp.float8_e4m3fn, id="output_float8_e4m3fn"),
-            pytest.param(jnp.float8_e5m2, id="output_float8_e5m2"),
+            pytest.param(jnp_float8_e4m3_type, id="output_float8_e4m3fn"),
+            pytest.param(jnp_float8_e5m2_type, id="output_float8_e5m2"),
         ],
     )
     def test_dbias_cast_transpose(self, in_dtype, input_shape, transpose_axis, out_dtype):
@@ -870,8 +871,8 @@ class TestTranspose:
 @pytest.mark.parametrize(
     "out_dtype",
     [
-        pytest.param(jnp.float8_e4m3fn, id="output_float8_e4m3fn"),
-        pytest.param(jnp.float8_e5m2, id="output_float8_e5m2"),
+        pytest.param(jnp_float8_e4m3_type, id="output_float8_e4m3fn"),
+        pytest.param(jnp_float8_e5m2_type, id="output_float8_e5m2"),
     ],
 )
 def test_quantize(input_shape, in_dtype, out_dtype):
