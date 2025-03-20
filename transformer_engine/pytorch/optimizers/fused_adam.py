@@ -12,6 +12,7 @@ from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from .multi_tensor_apply import multi_tensor_applier
 from ..float8_tensor import Float8Tensor
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 
 def get_fp8_meta(fp8_tensor):
@@ -188,7 +189,7 @@ class FusedAdam(torch.optim.Optimizer):
             torch.float16: torch.full(
                 [1], torch.finfo(torch.float16).max / 2.0, dtype=torch.float32
             ),
-            torch.uint8: torch.full([1], 448.0, dtype=torch.float32),
+            torch.uint8: torch.full([1], 240.0 if IS_HIP_EXTENSION else 448.0, dtype=torch.float32),
         }
         self._scales = {}
         self.use_decoupled_grad = use_decoupled_grad
