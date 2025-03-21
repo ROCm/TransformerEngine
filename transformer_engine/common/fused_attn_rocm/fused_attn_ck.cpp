@@ -322,9 +322,9 @@ void fused_attn_ck_fwd_impl(
     std::cout<<"is_training: "<<is_training<<", ";
     std::cout<<"dropout_p: "<<dropout_probability<<", ";
     std::cout<<"philox_seed_ptr: "<<devPtrDropoutSeed<<", philox_offset_ptr: "<<devPtrDropoutOffset<<", ";
-    std::cout<<"bias_type: "<<bias_type<<std::endl;
+    std::cout<<"bias_type: "<<bias_type<<", ";
     std::cout<<"(bias_b, bias_h): ("<<bias_b<<", "<<bias_h<<"), ";
-    std::cout<<"mask_type: "<<mask_type<<std::endl;
+    std::cout<<"mask_type: "<<mask_type<<", ";
     std::cout<<"window_size: ("<<window_size_left<<", "<<window_size_right<<")"<<std::endl;
   }
   if(is_ragged){
@@ -555,7 +555,13 @@ void fused_attn_ck_bwd_impl(
   }
   // bwd v3 is optional by enabling the following envs
   // default values follows the ck example setting
-  bool nvte_ck_uses_bwd_v3 = getenv<int>("NVTE_CK_USES_BWD_V3", 0);
+  // TODO: release SBHD format once CK support it
+  bool nvte_ck_uses_bwd_v3 = getenv<int>("NVTE_CK_USES_BWD_V3", 0) and (nvte_get_qkv_format(layout)!=NVTE_QKV_Format::NVTE_SBHD);
+  if(nvte_log_ck_config){
+    if(getenv<int>("NVTE_CK_USES_BWD_V3", 0) and (nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_SBHD)){
+      std::cout<<"Disable CK BWD v3 since SBHD format not supported"<<std::endl;
+    }
+  }
   bool nvte_ck_is_v3_atomic_fp32 = getenv<int>("NVTE_CK_IS_V3_ATOMIC_FP32", 1);
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
 
@@ -588,11 +594,14 @@ void fused_attn_ck_bwd_impl(
     std::cout<<"M_stride: ("<<s_q<<", "<<1<<"), ";
     std::cout<<"dropout_p: "<<dropout_probability<<", ";
     std::cout<<"philox_seed_ptr: "<<devPtrDropoutSeed<<", philox_offset_ptr: "<<devPtrDropoutOffset<<", ";
-    std::cout<<"bias_type: "<<bias_type<<std::endl;
+    std::cout<<"bias_type: "<<bias_type<<", ";
     std::cout<<"(bias_b, bias_h): ("<<bias_b<<", "<<bias_h<<"), ";
-    std::cout<<"mask_type: "<<mask_type<<std::endl;
-    std::cout<<"window_size: ("<<window_size_left<<", "<<window_size_right<<")"<<std::endl;
-    std::cout<<"deterministic: "<<deterministic<<std::endl;
+    std::cout<<"mask_type: "<<mask_type<<", ";
+    std::cout<<"window_size: ("<<window_size_left<<", "<<window_size_right<<"), ";
+    std::cout<<"deterministic: "<<deterministic<<", ";
+    std::cout<<"nvte_ck_uses_bwd_v3: "<<nvte_ck_uses_bwd_v3<<", ";
+    std::cout<<"nvte_ck_is_v3_atomic_fp32: "<<nvte_ck_is_v3_atomic_fp32<<", ";
+    std::cout<<"nvte_ck_how_v3_bf16_cvt: "<<nvte_ck_how_v3_bf16_cvt<<std::endl;
   }
   if(is_ragged){
     using ck_fused_attn::ck_attn_varlen_bwd;
