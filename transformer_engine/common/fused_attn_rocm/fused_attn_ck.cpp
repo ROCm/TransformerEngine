@@ -137,7 +137,9 @@ bool is_ck_backend_supported(
   // joint filter that THD layout should imply padding mask  
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   bool is_ragged = qkv_format==NVTE_QKV_Format::NVTE_THD;
-  // in NVTE, padding can mean padding between seq or no pad between seq
+  // in NVTE, padding can happen in both THD format or BSHD/SBHD format
+  // For THD format, padding is natural
+  // For BSHD/SBHD, padding can be inferred by a cu_seqlen which shows the actual seqlen for each batch, while the dim(S) is the max_seqlen
   bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
@@ -224,7 +226,9 @@ void generate_alibi_slope(uint64_t h, float* alibi_slope_ptr){
 }
 
 // no device std::upper_bound
-__forceinline__ __device__ int binary_search(int target, const int32_t *array, int len) {
+// in an increasing array with given size len, search for the index that:
+// array[index] <= target < array[target+1]
+__forceinline__ __device__ int binary_search(int32_t target, const int32_t *array, int len) {
   int left = 1, right = len - 1;
   while (left < right) {
     int mid = (left + right) / 2;

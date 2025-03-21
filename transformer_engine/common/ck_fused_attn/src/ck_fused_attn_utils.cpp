@@ -80,7 +80,9 @@ mask_enum get_ck_mask_type(MaskType attn_mask_type){
 }
 
 // no device std::upper_bound
-__forceinline__ __device__ int binary_search(int target, const int32_t *array, int len) {
+// in an increasing array with given size len, search for the index that:
+// array[index] <= target < array[target+1]
+__forceinline__ __device__ int binary_search(int32_t target, const int32_t *array, int len) {
   int left = 1, right = len - 1;
   while (left < right) {
     int mid = (left + right) / 2;
