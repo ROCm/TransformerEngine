@@ -378,6 +378,92 @@ void add_padding(
       static_cast<DataType*>(data_ptr)););
 
 }
+
+// cuda kernel to convert softmax lse from [h, b*s_q] (with effective data in first total_q places) to [b, h, s_q]
+// one warp in charge of one token index (h*sizeof(float) bytes)
+// one lane (thread) in one warp is charge of one element in 32 segment trunk of h
+__global__ void softmax_lse_from_thd_kernel(
+  uint64_t b, uint64_t h, uint64_t s_q,
+  const int32_t* cu_seqlen_q_ptr,
+  const float* lse_thd_ptr,
+  float* lse_ptr){
+
+  int warp_idx = (blockIdx.x * blockDim.x + threadIdx.x) / THREADS_PER_WARP;
+  int lane_idx = threadIdx.x % THREADS_PER_WARP;
+  int num_warps = (blockDim.x * gridDim.x) / THREADS_PER_WARP;
+  int num_total_tokens = cu_seqlen_q_ptr[b];
+
+  for(int token_id = warp_idx; token_id < num_total_tokens; token_id += num_warps){
+    int b_idx = binary_search(token_id, cu_seqlen_q_ptr, b+1);
+    int s_idx = token_id - cu_seqlen_q_ptr[b_idx];
+
+    for(int h_idx = lane_idx; h_idx < h; h_idx+=THREADS_PER_WARP){
+      int bh_idx = b_idx*h + h_idx;
+      lse_ptr[bh_idx * s_q + s_idx] = lse_thd_ptr[h_idx * b*s_q + token_id];
+    }
+  }
+}
+
+// kernel launcher for converting softmax in thd mode to [b, h, s_q] mode
+void softmax_lse_from_thd(
+  uint64_t b, uint64_t h, uint64_t s_q,
+  const void* cu_seqlen_q_ptr,
+  const void* lse_thd_ptr,
+  void* lse_ptr, 
+  hipStream_t stream){
+  
+  constexpr int THREADS_PER_BLOCK = 256;
+  dim3 block(THREADS_PER_BLOCK);
+  dim3 grid(ceil(1.0 * b * s_q * THREADS_PER_WARP/THREADS_PER_BLOCK));
+  hipLaunchKernelGGL(
+    softmax_lse_from_thd_kernel, grid, block, 0, stream,
+    b, h, s_q, static_cast<const int32_t*>(cu_seqlen_q_ptr),
+    static_cast<const float*>(lse_thd_ptr),
+    static_cast<float*>(lse_ptr));
+
+}
+
+// convert the softmax lse from [b, h, s_q] into shape [h, b*s_q] (with effective data in first total_q places)
+__global__ void softmax_lse_to_thd_kernel(
+  uint64_t b, uint64_t h, uint64_t s_q,
+  const int32_t* cu_seqlen_q_ptr,
+  const float* lse_ptr,
+  float* lse_thd_ptr){
+
+  int warp_idx = (blockIdx.x * blockDim.x + threadIdx.x) / THREADS_PER_WARP;
+  int lane_idx = threadIdx.x % THREADS_PER_WARP;
+  int num_warps = (blockDim.x * gridDim.x) / THREADS_PER_WARP;
+  int num_total_tokens = cu_seqlen_q_ptr[b];
+
+  for(int token_id = warp_idx; token_id < num_total_tokens; token_id += num_warps){
+    int b_idx = binary_search(token_id, cu_seqlen_q_ptr, b+1);
+    int s_idx = token_id - cu_seqlen_q_ptr[b_idx];
+
+    for(int h_idx = lane_idx; h_idx < h; h_idx+=THREADS_PER_WARP){
+      int bh_idx = b_idx*h + h_idx;
+      lse_thd_ptr[h_idx * b*s_q + token_id] = lse_ptr[bh_idx * s_q + s_idx];
+    }
+  }
+}
+
+// kernel launcher for converting softmax in [b, h, s_q] mode to thd mode ([h, b*sq] with total_seqlen_q values first)
+void softmax_lse_to_thd(
+  uint64_t b, uint64_t h, uint64_t s_q,
+  const void* cu_seqlen_q_ptr,
+  const void* lse_ptr,
+  void* lse_thd_ptr, 
+  hipStream_t stream){
+
+  constexpr int THREADS_PER_BLOCK = 256;
+  dim3 block(THREADS_PER_BLOCK);
+  dim3 grid(ceil(1.0 * b * s_q * THREADS_PER_WARP/THREADS_PER_BLOCK));
+  hipLaunchKernelGGL(
+    softmax_lse_to_thd_kernel, grid, block, 0, stream,
+    b, h, s_q, static_cast<const int32_t*>(cu_seqlen_q_ptr),
+    static_cast<const float*>(lse_ptr),
+    static_cast<float*>(lse_thd_ptr));
+}
+
 // actual fwd implementation, calling ck api directly
 void fused_attn_ck_fwd_impl(
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d, uint64_t bias_b, uint64_t bias_h,
@@ -554,8 +640,12 @@ void fused_attn_ck_fwd_impl(
         devPtrOWithoutPadding,
         o_stride[1], (is_ragged? o_stride[2] : std::min(o_stride[0], o_stride[2])),
         devPtrSoftmaxLSETHD,
-        devPtrSoftmaxAux,
         stream));
+    // convert softmax_lse from [h, b*max_seqlen_q] (effective data in first total_q places) to [b, h, s_q]
+    if(devPtrSoftmaxLSETHD!=devPtrSoftmaxAux){
+      assert((devPtrSoftmaxLSETHD!=nullptr) && (devPtrSoftmaxAux!=nullptr));
+      softmax_lse_from_thd(b, h, s_q, devPtrCuSeqlensQ, devPtrSoftmaxLSETHD, devPtrSoftmaxAux, stream);
+    }
     // add padding for o
     // o share the same shape as q
     add_padding(dtype, b, h, s_q, d, is_ragged, o_stride[0], o_stride[1], o_stride[2], devPtrOWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrO, stream);
@@ -579,9 +669,12 @@ void fused_attn_ck_fwd_impl(
         devPtrO,
         o_stride[1], o_stride[2],
         devPtrSoftmaxLSETHD,
-        devPtrSoftmaxAux,
         stream));
-    // softmax_lse will be fixed from [h, b*s_q] to [b, h, s] in ck_fused_attn
+    // convert softmax_lse from [h, b*max_seqlen_q] (effective data in first total_q places) to [b, h, s_q]
+    if(devPtrSoftmaxLSETHD!=devPtrSoftmaxAux){
+      assert((devPtrSoftmaxLSETHD!=nullptr) && (devPtrSoftmaxAux!=nullptr));
+      softmax_lse_from_thd(b, h, s_q, devPtrCuSeqlensQ, devPtrSoftmaxLSETHD, devPtrSoftmaxAux, stream);
+    }
   }else{
     using ck_fused_attn::ck_attn_fwd;
     NVTE_CHECK_CUDA(
@@ -907,6 +1000,12 @@ void fused_attn_ck_bwd_impl(
     remove_padding(dtype, b, h, s_q, d, is_ragged, o_stride[0], o_stride[1], o_stride[2], devPtrO, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrOWithoutPadding, stream);
     remove_padding(dtype, b, h, s_q, d, is_ragged, o_stride[0], o_stride[1], o_stride[2], devPtrdO, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrdOWithoutPadding, stream);
 
+    // convert the softmax_lse from shape [b, h, s_q] into THD
+    if(devPtrSoftmaxLSETHD!=devPtrSoftmaxAux){
+      assert((devPtrSoftmaxLSETHD!=nullptr) && (devPtrSoftmaxAux!=nullptr));
+      softmax_lse_to_thd(b, h, s_q, devPtrCuSeqlensQ, devPtrSoftmaxAux, devPtrSoftmaxLSETHD, stream);
+    }
+
     using ck_fused_attn::ck_attn_varlen_bwd;
     NVTE_CHECK_CUDA(
       ck_attn_varlen_bwd(
@@ -921,7 +1020,7 @@ void fused_attn_ck_bwd_impl(
         devPtrCuSeqlensQ, devPtrCuSeqlensKV, 
         devPtrOWithoutPadding,
         o_stride[1], (is_ragged? o_stride[2] : std::min(o_stride[0], o_stride[2])),
-        devPtrSoftmaxAux,
+        devPtrSoftmaxLSETHD,
         devPtrdOWithoutPadding,
         o_stride[1], (is_ragged? o_stride[2] : std::min(o_stride[0], o_stride[2])), //dO and O share the same stride in TE
         scaling_factor, dropout_probability,
@@ -939,7 +1038,6 @@ void fused_attn_ck_bwd_impl(
         devPtrdVWithoutPadding,
         v_stride[1], (is_ragged? v_stride[2] : std::min(v_stride[0], v_stride[2])), //dV and V share the same stride
         lse_workspace, // softmax_lsed
-        devPtrSoftmaxLSETHD,
         deterministic,
         // bwd_v3 not supported for THD
         stream));
@@ -950,6 +1048,11 @@ void fused_attn_ck_bwd_impl(
     add_padding(dtype, b, hg, s_kv, d, is_ragged, v_stride[0], v_stride[1], v_stride[2], devPtrdVWithoutPadding, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrdV, stream);
 
   }else if(is_ragged){
+    // convert the softmax_lse from shape [b, h, s_q] into THD
+    if(devPtrSoftmaxLSETHD!=devPtrSoftmaxAux){
+      assert((devPtrSoftmaxLSETHD!=nullptr) && (devPtrSoftmaxAux!=nullptr));
+      softmax_lse_to_thd(b, h, s_q, devPtrCuSeqlensQ, devPtrSoftmaxAux, devPtrSoftmaxLSETHD, stream);
+    }
     using ck_fused_attn::ck_attn_varlen_bwd;
     NVTE_CHECK_CUDA(
       ck_attn_varlen_bwd(
@@ -964,7 +1067,7 @@ void fused_attn_ck_bwd_impl(
         devPtrCuSeqlensQ, devPtrCuSeqlensKV, 
         devPtrO,
         o_stride[1], o_stride[2],
-        devPtrSoftmaxAux,
+        devPtrSoftmaxLSETHD,
         devPtrdO,
         o_stride[1], o_stride[2], //dO and O share the same stride
         scaling_factor, dropout_probability,
@@ -982,7 +1085,6 @@ void fused_attn_ck_bwd_impl(
         devPtrdV,
         v_stride[1], v_stride[2], //dV and V share the same stride
         lse_workspace, // softmax_lsed
-        devPtrSoftmaxLSETHD,
         deterministic,
         // bwd_v3 not supported for THD
         stream));

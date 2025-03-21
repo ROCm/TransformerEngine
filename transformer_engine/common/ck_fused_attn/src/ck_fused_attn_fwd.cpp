@@ -263,11 +263,10 @@ hipError_t ck_attn_varlen_fwd(
   void* o_ptr, 
   uint64_t stride_h_o, uint64_t stride_s_o,
   void* lse_thd_ptr,
-  void* lse_ptr, 
   hipStream_t stream){
 
   bool has_dropout = (is_training && dropout_probability > 0.f);
-  bool has_lse = (lse_ptr != nullptr);
+  bool has_lse = (lse_thd_ptr != nullptr);
 
   /* CK input parameters */
   ck_tile::index_t batch = b;
@@ -389,12 +388,6 @@ hipError_t ck_attn_varlen_fwd(
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");
-  }
-
-  // convert softmax_lse from [h, b*max_seqlen_q] (effective data in first total_q places) to [b, h, s_q]
-  if(lse_thd_ptr!=lse_ptr){
-    assert((lse_thd_ptr!=nullptr) && (lse_ptr!=nullptr));
-    softmax_lse_from_thd(b, h, s_q, cu_seqlen_q_ptr, lse_thd_ptr, lse_ptr, stream);
   }
   return hipSuccess;
 }

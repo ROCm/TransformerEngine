@@ -638,7 +638,7 @@ hipError_t ck_attn_varlen_bwd(
   const void* cu_seqlen_q_ptr, const void* cu_seqlen_kv_ptr,
   const void* o_ptr, 
   uint64_t stride_h_o, uint64_t stride_s_o,
-  const void* lse_ptr, 
+  const void* lse_thd_ptr, 
   const void* do_ptr, 
   uint64_t stride_h_do, uint64_t stride_s_do,
   float scaling_factor, float dropout_probability,
@@ -656,7 +656,6 @@ hipError_t ck_attn_varlen_bwd(
   void* dv_ptr, 
   uint64_t stride_h_dv, uint64_t stride_s_dv,
   void* lse_workspace_ptr,
-  void* lse_thd_ptr,
   bool deterministic,
   hipStream_t stream){
 
@@ -677,12 +676,6 @@ hipError_t ck_attn_varlen_bwd(
   float p_undrop = 1.0 - p_drop;
   bool is_group_mode = true;
   bool s_randval = false;
-
-  // convert the softmax_lse from shape [b, h, s_q] into THD
-  if(lse_thd_ptr!=lse_ptr){
-    assert((lse_thd_ptr!=nullptr) && (lse_ptr!=nullptr));
-    softmax_lse_to_thd(b, h, s_q, cu_seqlen_q_ptr, lse_ptr, lse_thd_ptr, stream);
-  }
 
   // THD does not work with bias
 
