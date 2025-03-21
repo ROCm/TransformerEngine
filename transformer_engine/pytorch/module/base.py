@@ -55,7 +55,7 @@ layers_atomic_ring_exchange = []
 
 
 def get_cublas_workspace_size_bytes() -> None:
-    """Return 75MiB if using AMD GPU."""
+    """Return 76MiB if using AMD GPU."""
     if IS_HIP_EXTENSION:
         return 79_691_776
 
