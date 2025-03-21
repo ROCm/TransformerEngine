@@ -48,3 +48,7 @@ dist/
 downloads/
 .pytest_cache/
 compile_commands.json
+*hip*
+*.hip
+*_hip*
+transformer_engine/lib
