@@ -24,7 +24,7 @@ from ...tensor import Float8Tensor, QuantizedTensor
 from ...utils import canonicalize_device, canonicalize_dtype, clear_tensor_data
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_autocast_dtype, reshape
-
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 class RMSNorm(BasicOperation):
     r"""Root Mean Square Layer Normalization
@@ -204,7 +204,8 @@ class RMSNorm(BasicOperation):
 
         use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) )
 
-        if with_fp8_output:
+        #Need to change this when triton has fp8 support
+        if not IS_HIP_EXTENSION and with_fp8_output:
             fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(forward=True)
             fp8_dtype = get_fp8_te_dtype(output_fp8_meta["recipe"], fprop_tensor=True)
             args = (
