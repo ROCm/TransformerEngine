@@ -5,7 +5,6 @@
  ************************************************************************/
 
 #include <utility>
-#include <hip/hip_runtime_api.h>
 #include "ck_fused_attn_utils.hpp"
 #include "ck_fused_attn/ck_fused_attn.hpp"
 #include "mask.hpp"
