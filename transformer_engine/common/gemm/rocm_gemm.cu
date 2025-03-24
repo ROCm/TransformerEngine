@@ -17,6 +17,7 @@
 #include <chrono>
 #include <optional>
 #include <hipblaslt/hipblaslt.h>
+#include <hipblaslt/hipblaslt-ext.hpp>
 
 #include <iostream>
 #include <cstdlib>
@@ -1151,17 +1152,53 @@ void hipblaslt_gemm(const Tensor *inputA,
   GemmAlgoCache::Algo cached_algo;
   if (algoCache.find(gemm_cfg, workspaceSize, cached_algo) == 0 || !cached_algo.algo.has_value())
   {
+    bool logTuning = getIntEnv("TE_HIPBLASLT_LOG_TUNING", 0, 0) != 0;
+    
+    // Find algo base algo_id directly if tuning file is set.
+    if (cached_algo.hasId())
+    {
+      std::vector<hipblasLtMatmulHeuristicResult_t> algo_arr;
+      std::vector<int> algo_index{static_cast<int>(cached_algo.algoId)};
+      
+      if (hipblaslt_ext::getAlgosFromIndex(handle, algo_index, algo_arr) == HIPBLAS_STATUS_SUCCESS &&
+          algo_arr[0].state == HIPBLAS_STATUS_SUCCESS) {
+        size_t ws_size_min = 0;
+        if (HIPBLAS_STATUS_SUCCESS == hipblaslt_ext::matmulIsAlgoSupported(
+          handle,
+          operationDesc, 
+          static_cast<const void*>(&one),
+          Adesc, 
+          Bdesc, 
+          static_cast<const void*>(&beta),
+          Ddesc,
+          Ddesc,
+          algo_arr[0].algo,
+          ws_size_min
+        )) {
+          cached_algo.algo = algo_arr[0].algo;
+          if (ws_size_min != cached_algo.ws_size_min)
+          {
+            cached_algo.ws_size_min = ws_size_min;
+            algoCache.store(gemm_cfg, cached_algo);
+          }
+        }
+      }
+      
+      if (logTuning && !cached_algo.algo.has_value()) {
+        std::cout << "[WARNING] Cannot get corresponding solution from cached algoId " << cached_algo.algoId << std::endl;
+      }
+    }
+
     int firstAlgo = getIntEnv("TE_HIPBLASLT_ALGO_SELECTION", 0, 0);
     int tuneLoopCount = getIntEnv("TE_HIPBLASLT_TUNING_RUN_COUNT", 0, 0);
     int algoTuneCount = 1;
     std::vector<hipblasLtMatmulHeuristicResult_t> algoArr;
-    bool logTuning = getIntEnv("TE_HIPBLASLT_LOG_TUNING", 0, 0) != 0;
 
     if (tuneLoopCount)
     {
       /* HIPBLASLT may return hundreds of algos for some configs
-       * Limit amount by default. User may override with env
-       */
+      * Limit amount by default. User may override with env
+      */
       static const int defaultAlgoCount = 16;
       algoTuneCount = getIntEnv("TE_HIPBLASLT_TUNING_ALGO_COUNT", defaultAlgoCount, 1);
     }
@@ -1182,7 +1219,7 @@ void hipblaslt_gemm(const Tensor *inputA,
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceDestroy(preference));
 
     //If cached algo exists in persistent storage we just need to find matching hipblasLtMatmulAlgo_t
-    if (cached_algo.hasId())
+    if (cached_algo.hasId() && !cached_algo.algo.has_value())
     {
       int idx = (cached_algo.index < algoTotalCount) ? cached_algo.index : 0;
       for (int i=0; i<algoTotalCount; i++)
