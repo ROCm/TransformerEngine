@@ -1197,8 +1197,8 @@ void hipblaslt_gemm(const Tensor *inputA,
     if (tuneLoopCount)
     {
       /* HIPBLASLT may return hundreds of algos for some configs
-      * Limit amount by default. User may override with env
-      */
+       * Limit amount by default. User may override with env
+       */
       static const int defaultAlgoCount = 16;
       algoTuneCount = getIntEnv("TE_HIPBLASLT_TUNING_ALGO_COUNT", defaultAlgoCount, 1);
     }
