@@ -799,7 +799,7 @@ class TestTranspose:
         "out_dtype",
         [
             pytest.param(jnp_float8_e4m3_type, id="output_float8_e4m3fn"),
-            pytest.param(jnp_float8_e4m3_type, id="output_float8_e5m2"),
+            pytest.param(jnp_float8_e5m2_type, id="output_float8_e5m2"),
         ],
     )
     def test_cast_transpose(self, in_dtype, input_shape, transpose_axis, out_dtype):
