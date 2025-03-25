@@ -775,14 +775,15 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
             if p.requires_grad:
                 param_grads.append(p.grad.clone())
 
-        global _cpu_rng_state, _cuda_rng_state
-        _cpu_rng_state = torch.get_rng_state()
-        _cuda_rng_state = torch.cuda.get_rng_state()
+        cpu_rng_state = torch.get_rng_state()
+        cuda_rng_state = torch.cuda.get_rng_state()
 
         del block
         block = _test_e2e_checkpointing_get_model(config, dtype)
         block.load_state_dict(torch.load(path))
-        reset_rng_states()
+
+        torch.set_rng_state(cpu_rng_state)
+        torch.cuda.set_rng_state(cuda_rng_state)
 
         for p in block.parameters():
             if p.requires_grad:
