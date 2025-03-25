@@ -555,13 +555,7 @@ void fused_attn_ck_bwd_impl(
   }
   // bwd v3 is optional by enabling the following envs
   // default values follows the ck example setting
-  // TODO: release SBHD format once CK support it
-  bool nvte_ck_uses_bwd_v3 = getenv<int>("NVTE_CK_USES_BWD_V3", 0) and (nvte_get_qkv_format(layout)!=NVTE_QKV_Format::NVTE_SBHD);
-  if(nvte_log_ck_config){
-    if(getenv<int>("NVTE_CK_USES_BWD_V3", 0) and (nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_SBHD)){
-      std::cout<<"Disable CK BWD v3 since SBHD format not supported"<<std::endl;
-    }
-  }
+  bool nvte_ck_uses_bwd_v3 = getenv<int>("NVTE_CK_USES_BWD_V3", 0);
   bool nvte_ck_is_v3_atomic_fp32 = getenv<int>("NVTE_CK_IS_V3_ATOMIC_FP32", 1);
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
 
