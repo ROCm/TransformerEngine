@@ -228,6 +228,7 @@ void generate_alibi_slope(uint64_t h, float* alibi_slope_ptr){
 // no device std::upper_bound
 // in an increasing array with given size len, search for the index that:
 // array[index] <= target < array[target+1]
+// guaranteed that target >=0 and target <= cu_seqlen[end-1]
 __forceinline__ __device__ int binary_search(int32_t target, const int32_t *array, int len) {
   int left = 1, right = len - 1;
   while (left < right) {
@@ -241,10 +242,10 @@ __forceinline__ __device__ int binary_search(int32_t target, const int32_t *arra
   return left - 1;
 }
 
-constexpr int THREADS_PER_WARP = 32;
+constexpr int THREADS_PER_WAVEFRONT = 32;
 // kernel to remove padding for q, k, v, o (dq, dk, dv, do)
-// each warp is in charge of one token index (h*d*sizeof(DataType) bytes copy)
-// one lane (thread) in one warp is charge of one element in 32 segment trunk of h*d
+// each wavefront is in charge of one token index (h*d*sizeof(DataType) bytes copy)
+// one workitem (thread) in one wavefront is charge of one element in 32 segment trunk of h*d
 template<typename DataType>
 __global__ void remove_padding_kernel(
   uint64_t b, uint64_t h, uint64_t s, uint64_t d,
@@ -254,13 +255,13 @@ __global__ void remove_padding_kernel(
   const int32_t* cu_seqlen_ptr, const int32_t* cu_seqlen_padded_ptr,
   DataType* data_without_padding_ptr){
 
-  int warp_idx = (blockIdx.x * blockDim.x + threadIdx.x) / THREADS_PER_WARP;
-  int lane_idx = threadIdx.x % THREADS_PER_WARP;
-  int num_warps = (blockDim.x * gridDim.x) / THREADS_PER_WARP;
+  int wavefront_idx = (blockIdx.x * blockDim.x + threadIdx.x) / THREADS_PER_WAVEFRONT;
+  int workitem_idx = threadIdx.x % THREADS_PER_WAVEFRONT;
+  int num_wavefronts = (blockDim.x * gridDim.x) / THREADS_PER_WAVEFRONT;
   int num_total_tokens = cu_seqlen_ptr[b];
 
   uint64_t stride_total_seqlen = std::min(stride_b, stride_s);
-  for(int token_id = warp_idx; token_id<num_total_tokens; token_id += num_warps){
+  for(int token_id = wavefront_idx; token_id<num_total_tokens; token_id += num_wavefronts){
     int b_idx = binary_search(token_id, cu_seqlen_ptr, b+1);
     int s_idx = token_id - cu_seqlen_ptr[b_idx];
     DataType* cur_without_padding = nullptr;
@@ -272,7 +273,7 @@ __global__ void remove_padding_kernel(
       cur_without_padding = data_without_padding_ptr + stride_total_seqlen* token_id;
       cur = data_ptr + (b_idx * stride_b + s_idx*stride_s);
     }
-    for(int hd_idx = lane_idx; hd_idx < h*d; hd_idx+=THREADS_PER_WARP){
+    for(int hd_idx = workitem_idx; hd_idx < h*d; hd_idx+=THREADS_PER_WAVEFRONT){
       int h_idx = hd_idx/d;
       int d_idx = hd_idx%d;
       cur_without_padding[h_idx*stride_h + d_idx] = cur[h_idx*stride_h + d_idx];
@@ -296,7 +297,7 @@ void remove_padding(
   constexpr int THREADS_PER_BLOCK = 256;
   // parallel over h*d dimension
   dim3 block(THREADS_PER_BLOCK);
-  dim3 grid(ceil(1.0 * b * s * THREADS_PER_WARP/THREADS_PER_BLOCK));
+  dim3 grid(ceil(1.0 * b * s * THREADS_PER_WAVEFRONT/THREADS_PER_BLOCK));
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(dtype, DataType,
     hipLaunchKernelGGL(
@@ -322,13 +323,13 @@ __global__ void add_padding_kernel(
   const int32_t* cu_seqlen_ptr, const int32_t* cu_seqlen_padded_ptr,
   DataType* data_ptr){
 
-  int warp_idx = (blockIdx.x * blockDim.x + threadIdx.x) / THREADS_PER_WARP;
-  int lane_idx = threadIdx.x % THREADS_PER_WARP;
-  int num_warps = (blockDim.x * gridDim.x) / THREADS_PER_WARP;
+  int wavefront_idx = (blockIdx.x * blockDim.x + threadIdx.x) / THREADS_PER_WAVEFRONT;
+  int workitem_idx = threadIdx.x % THREADS_PER_WAVEFRONT;
+  int num_wavefronts = (blockDim.x * gridDim.x) / THREADS_PER_WAVEFRONT;
   int num_total_tokens = cu_seqlen_ptr[b];
 
   uint64_t stride_total_seqlen = std::min(stride_b, stride_s);
-  for(int token_id = warp_idx; token_id<num_total_tokens; token_id += num_warps){
+  for(int token_id = wavefront_idx; token_id<num_total_tokens; token_id += num_wavefronts){
     int b_idx = binary_search(token_id, cu_seqlen_ptr, b+1);
     int s_idx = token_id - cu_seqlen_ptr[b_idx];
     const DataType* cur_without_padding = nullptr;
@@ -340,7 +341,7 @@ __global__ void add_padding_kernel(
       cur_without_padding = data_without_padding_ptr + stride_total_seqlen* token_id;
       cur = data_ptr + (b_idx * stride_b + s_idx*stride_s);
     }
-    for(int hd_idx = lane_idx; hd_idx < h*d; hd_idx+=THREADS_PER_WARP){
+    for(int hd_idx = workitem_idx; hd_idx < h*d; hd_idx+=THREADS_PER_WAVEFRONT){
       int h_idx = hd_idx/d;
       int d_idx = hd_idx%d;
       cur[h_idx*stride_h + d_idx] = cur_without_padding[h_idx*stride_h + d_idx];
@@ -364,7 +365,7 @@ void add_padding(
   constexpr int THREADS_PER_BLOCK = 256;
   // parallel over h*d dimension
   dim3 block(THREADS_PER_BLOCK);
-  dim3 grid(ceil(1.0 * b*s * THREADS_PER_WARP/THREADS_PER_BLOCK));
+  dim3 grid(ceil(1.0 * b*s * THREADS_PER_WAVEFRONT/THREADS_PER_BLOCK));
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(dtype, DataType,
     hipLaunchKernelGGL(
@@ -380,24 +381,24 @@ void add_padding(
 }
 
 // cuda kernel to convert softmax lse from [h, b*s_q] (with effective data in first total_q places) to [b, h, s_q]
-// one warp in charge of one token index (h*sizeof(float) bytes)
-// one lane (thread) in one warp is charge of one element in 32 segment trunk of h
+// one wavefront in charge of one token index (h*sizeof(float) bytes)
+// one workitem (thread) in one wavefront is charge of one element in 32 segment trunk of h
 __global__ void softmax_lse_from_thd_kernel(
   uint64_t b, uint64_t h, uint64_t s_q,
   const int32_t* cu_seqlen_q_ptr,
   const float* lse_thd_ptr,
   float* lse_ptr){
 
-  int warp_idx = (blockIdx.x * blockDim.x + threadIdx.x) / THREADS_PER_WARP;
-  int lane_idx = threadIdx.x % THREADS_PER_WARP;
-  int num_warps = (blockDim.x * gridDim.x) / THREADS_PER_WARP;
+  int wavefront_idx = (blockIdx.x * blockDim.x + threadIdx.x) / THREADS_PER_WAVEFRONT;
+  int workitem_idx = threadIdx.x % THREADS_PER_WAVEFRONT;
+  int num_wavefronts = (blockDim.x * gridDim.x) / THREADS_PER_WAVEFRONT;
   int num_total_tokens = cu_seqlen_q_ptr[b];
 
-  for(int token_id = warp_idx; token_id < num_total_tokens; token_id += num_warps){
+  for(int token_id = wavefront_idx; token_id < num_total_tokens; token_id += num_wavefronts){
     int b_idx = binary_search(token_id, cu_seqlen_q_ptr, b+1);
     int s_idx = token_id - cu_seqlen_q_ptr[b_idx];
 
-    for(int h_idx = lane_idx; h_idx < h; h_idx+=THREADS_PER_WARP){
+    for(int h_idx = workitem_idx; h_idx < h; h_idx+=THREADS_PER_WAVEFRONT){
       int bh_idx = b_idx*h + h_idx;
       lse_ptr[bh_idx * s_q + s_idx] = lse_thd_ptr[h_idx * b*s_q + token_id];
     }
@@ -414,7 +415,7 @@ void softmax_lse_from_thd(
   
   constexpr int THREADS_PER_BLOCK = 256;
   dim3 block(THREADS_PER_BLOCK);
-  dim3 grid(ceil(1.0 * b * s_q * THREADS_PER_WARP/THREADS_PER_BLOCK));
+  dim3 grid(ceil(1.0 * b * s_q * THREADS_PER_WAVEFRONT/THREADS_PER_BLOCK));
   hipLaunchKernelGGL(
     softmax_lse_from_thd_kernel, grid, block, 0, stream,
     b, h, s_q, static_cast<const int32_t*>(cu_seqlen_q_ptr),
@@ -430,16 +431,16 @@ __global__ void softmax_lse_to_thd_kernel(
   const float* lse_ptr,
   float* lse_thd_ptr){
 
-  int warp_idx = (blockIdx.x * blockDim.x + threadIdx.x) / THREADS_PER_WARP;
-  int lane_idx = threadIdx.x % THREADS_PER_WARP;
-  int num_warps = (blockDim.x * gridDim.x) / THREADS_PER_WARP;
+  int wavefront_idx = (blockIdx.x * blockDim.x + threadIdx.x) / THREADS_PER_WAVEFRONT;
+  int workitem_idx = threadIdx.x % THREADS_PER_WAVEFRONT;
+  int num_wavefronts = (blockDim.x * gridDim.x) / THREADS_PER_WAVEFRONT;
   int num_total_tokens = cu_seqlen_q_ptr[b];
 
-  for(int token_id = warp_idx; token_id < num_total_tokens; token_id += num_warps){
+  for(int token_id = wavefront_idx; token_id < num_total_tokens; token_id += num_wavefronts){
     int b_idx = binary_search(token_id, cu_seqlen_q_ptr, b+1);
     int s_idx = token_id - cu_seqlen_q_ptr[b_idx];
 
-    for(int h_idx = lane_idx; h_idx < h; h_idx+=THREADS_PER_WARP){
+    for(int h_idx = workitem_idx; h_idx < h; h_idx+=THREADS_PER_WAVEFRONT){
       int bh_idx = b_idx*h + h_idx;
       lse_thd_ptr[h_idx * b*s_q + token_id] = lse_ptr[bh_idx * s_q + s_idx];
     }
@@ -456,7 +457,7 @@ void softmax_lse_to_thd(
 
   constexpr int THREADS_PER_BLOCK = 256;
   dim3 block(THREADS_PER_BLOCK);
-  dim3 grid(ceil(1.0 * b * s_q * THREADS_PER_WARP/THREADS_PER_BLOCK));
+  dim3 grid(ceil(1.0 * b * s_q * THREADS_PER_WAVEFRONT/THREADS_PER_BLOCK));
   hipLaunchKernelGGL(
     softmax_lse_to_thd_kernel, grid, block, 0, stream,
     b, h, s_q, static_cast<const int32_t*>(cu_seqlen_q_ptr),
