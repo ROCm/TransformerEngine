@@ -156,7 +156,6 @@ if(USE_CUDA)
   add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 else()
   list(APPEND transformer_engine_SOURCES
-      #  cudnn_utils.cpp
        transformer_engine.cpp
        common.cu
        transpose/cast_transpose.cu

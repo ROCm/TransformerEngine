@@ -14,9 +14,7 @@
 #include "../common.h"
 #include "../util/cuda_driver.h"
 #include "../util/system.h"
-#ifndef __HIP_PLATFORM_AMD__
 #include "common/util/cuda_runtime.h"
-#endif
 
 namespace transformer_engine {
 
@@ -130,10 +128,8 @@ bool supports_multicast(int device_id) {
   return false;
 #endif
 }
-#endif // __HIP_PLATFORM_AMD__
 
 
-#ifndef __HIP_PLATFORM_AMD__
 const std::string &include_directory(bool required) {
   static std::string path;
 
