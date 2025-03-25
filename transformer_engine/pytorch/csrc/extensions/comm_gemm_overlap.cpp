@@ -1,6 +1,7 @@
 /*************************************************************************
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- *
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+ * 
  * See LICENSE for license information.
  ************************************************************************/
 #ifndef USE_ROCM
