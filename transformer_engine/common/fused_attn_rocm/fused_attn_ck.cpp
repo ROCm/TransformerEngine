@@ -227,7 +227,7 @@ void generate_alibi_slope(uint64_t h, float* alibi_slope_ptr){
 
 // no device std::upper_bound
 // in an increasing array with given size len, search for the index that:
-// array[index] <= target < array[target+1]
+// array[index] <= target < array[index+1]
 // guaranteed that target >=0 and target <= cu_seqlen[end-1]
 __forceinline__ __device__ int binary_search(int32_t target, const int32_t *array, int len) {
   int left = 1, right = len - 1;
@@ -246,10 +246,9 @@ constexpr int THREADS_PER_WAVEFRONT = 32;
 // kernel to remove padding for q, k, v, o (dq, dk, dv, do)
 // each wavefront is in charge of one token index (h*d*sizeof(DataType) bytes copy)
 // one workitem (thread) in one wavefront is charge of one element in 32 segment trunk of h*d
-template<typename DataType>
+template<typename DataType, bool is_ragged>
 __global__ void remove_padding_kernel(
   uint64_t b, uint64_t h, uint64_t s, uint64_t d,
-  bool is_ragged, // sometimes both cu_seqlen and cu_seqlen_padded given in bshd cases
   uint64_t stride_b, uint64_t stride_h, uint64_t stride_s, //stride_d is 1
   const DataType* data_ptr,
   const int32_t* cu_seqlen_ptr, const int32_t* cu_seqlen_padded_ptr,
@@ -266,7 +265,7 @@ __global__ void remove_padding_kernel(
     int s_idx = token_id - cu_seqlen_ptr[b_idx];
     DataType* cur_without_padding = nullptr;
     const DataType* cur = nullptr;
-    if(is_ragged){
+    if constexpr(is_ragged){
       cur_without_padding = data_without_padding_ptr + stride_s* token_id;
       cur = data_ptr + (cu_seqlen_padded_ptr[b_idx] + s_idx)*stride_s;
     }else{
@@ -300,24 +299,30 @@ void remove_padding(
   dim3 grid(ceil(1.0 * b * s * THREADS_PER_WAVEFRONT/THREADS_PER_BLOCK));
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(dtype, DataType,
-    hipLaunchKernelGGL(
-      remove_padding_kernel<DataType>, grid, block, 0, stream,
-      b, h, s, d,
-      is_ragged,
-      stride_b, stride_h, stride_s,
-      static_cast<const DataType*>(data_ptr),
-      static_cast<const int32_t*>(cu_seqlen_ptr),
-      static_cast<const int32_t*>(cu_seqlen_padded_ptr),
-      static_cast<DataType*>(data_without_padding_ptr)););
-
+    if(is_ragged){
+      remove_padding_kernel<DataType, true><<<grid, block, 0, stream>>>(
+        b, h, s, d,
+        stride_b, stride_h, stride_s,
+        static_cast<const DataType*>(data_ptr),
+        static_cast<const int32_t*>(cu_seqlen_ptr),
+        static_cast<const int32_t*>(cu_seqlen_padded_ptr),
+        static_cast<DataType*>(data_without_padding_ptr));
+    }else{
+      remove_padding_kernel<DataType, false><<<grid, block, 0, stream>>>(
+        b, h, s, d,
+        stride_b, stride_h, stride_s,
+        static_cast<const DataType*>(data_ptr),
+        static_cast<const int32_t*>(cu_seqlen_ptr),
+        static_cast<const int32_t*>(cu_seqlen_padded_ptr),
+        static_cast<DataType*>(data_without_padding_ptr));
+    });
 }
 
 // kernel to add padding for q, k, v, o (dq, dk, dv, do)
 // reverse of remove_padding
-template<typename DataType>
+template<typename DataType, bool is_ragged>
 __global__ void add_padding_kernel(
   uint64_t b, uint64_t h, uint64_t s, uint64_t d,
-  bool is_ragged,
   uint64_t stride_b, uint64_t stride_h, uint64_t stride_s, //stride_d is 1
   const DataType* data_without_padding_ptr,
   const int32_t* cu_seqlen_ptr, const int32_t* cu_seqlen_padded_ptr,
@@ -334,7 +339,7 @@ __global__ void add_padding_kernel(
     int s_idx = token_id - cu_seqlen_ptr[b_idx];
     const DataType* cur_without_padding = nullptr;
     DataType* cur = nullptr;
-    if(is_ragged){
+    if constexpr(is_ragged){
       cur_without_padding = data_without_padding_ptr + stride_s* token_id;
       cur = data_ptr + (cu_seqlen_padded_ptr[b_idx] + s_idx)*stride_s;
     }else{
@@ -368,16 +373,23 @@ void add_padding(
   dim3 grid(ceil(1.0 * b*s * THREADS_PER_WAVEFRONT/THREADS_PER_BLOCK));
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(dtype, DataType,
-    hipLaunchKernelGGL(
-      add_padding_kernel<DataType>, grid, block, 0, stream,
-      b, h, s, d,
-      is_ragged,
-      stride_b, stride_h, stride_s,
-      static_cast<const DataType*>(data_without_padding_ptr),
-      static_cast<const int32_t*>(cu_seqlen_ptr),
-      static_cast<const int32_t*>(cu_seqlen_padded_ptr),
-      static_cast<DataType*>(data_ptr)););
-
+    if(is_ragged){
+      add_padding_kernel<DataType, true><<<grid, block, 0, stream>>>(
+        b, h, s, d,
+        stride_b, stride_h, stride_s,
+        static_cast<const DataType*>(data_without_padding_ptr),
+        static_cast<const int32_t*>(cu_seqlen_ptr),
+        static_cast<const int32_t*>(cu_seqlen_padded_ptr),
+        static_cast<DataType*>(data_ptr));
+    }else{
+      add_padding_kernel<DataType, false><<<grid, block, 0, stream>>>(
+        b, h, s, d,
+        stride_b, stride_h, stride_s,
+        static_cast<const DataType*>(data_without_padding_ptr),
+        static_cast<const int32_t*>(cu_seqlen_ptr),
+        static_cast<const int32_t*>(cu_seqlen_padded_ptr),
+        static_cast<DataType*>(data_ptr));
+    });
 }
 
 // cuda kernel to convert softmax lse from [h, b*s_q] (with effective data in first total_q places) to [b, h, s_q]
@@ -498,7 +510,7 @@ void fused_attn_ck_fwd_impl(
       (*workspace_size)+= h*sizeof(float);
     }
     // softmax_lse buffer needed for THD qkv_layout
-    if(is_ragged or pad_between_seqs){
+    if(is_ragged || pad_between_seqs){
       (*workspace_size)+= b*h*s_q*sizeof(float);
     }
     // request q, k, v, o buffer without padding
@@ -540,7 +552,7 @@ void fused_attn_ck_fwd_impl(
   }
   // First b*h*sq*sizeof(float) in workspace are for lse in THD layout
   void* devPtrSoftmaxLSETHD = nullptr;
-  if(is_ragged or pad_between_seqs){
+  if(is_ragged || pad_between_seqs){
     devPtrSoftmaxLSETHD = workspace_next;
     workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + b*h*s_q*sizeof(float));
   }
@@ -750,11 +762,11 @@ void fused_attn_ck_bwd_impl(
     // ck requires an alibi slope array even if in standard (vanilla) mode
     if(bias_type == NVTE_Bias_Type::NVTE_ALIBI){
       (*workspace_size)+= h*sizeof(float);
-    }else if ((bias_type==NVTE_Bias_Type::NVTE_POST_SCALE_BIAS) && (bias_b!=b or bias_h!=h)){
+    }else if ((bias_type==NVTE_Bias_Type::NVTE_POST_SCALE_BIAS) && (bias_b!=b || bias_h!=h)){
       //ck requires a buffer dbias_expanded of size BHSS if bias is not BHSS
       (*workspace_size) += b*h*s_q*s_kv*nvte_dtype_size(dtype);
     }
-    if(is_ragged or pad_between_seqs){
+    if(is_ragged || pad_between_seqs){
       // transform the input softmax_lse of shape [b, h, s] into [h, b*s_q] with total_seqlen_q effective values
       (*workspace_size)+= b*h*s_q*sizeof(float);
     }
@@ -791,7 +803,7 @@ void fused_attn_ck_bwd_impl(
   //ck bwd requires initialize dq since ck uses atomic operations
   //TODO: remove the memset afer ck fixes the atomic operations
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
-  if((layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) or (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D)){
+  if((layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) || (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D)){
     // just memset all dq, dk, dv
     NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdQ, 0, q_storage_bytes + k_storage_bytes+ v_storage_bytes, stream));
   }else{
@@ -862,7 +874,7 @@ void fused_attn_ck_bwd_impl(
     //assign standard alibi slope
     hipLaunchKernelGGL(generate_alibi_slope, grid, block, 0, stream, h, static_cast<float*>(devPtrAlibiSlope));
   }else if((bias_type==NVTE_Bias_Type::NVTE_POST_SCALE_BIAS) && (devPtrdBias!=nullptr)){
-    if(bias_b!=b or bias_h!= h){
+    if(bias_b!=b || bias_h!= h){
       dbias_expanded_ptr = workspace_next;
       workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + b*h*s_q*s_kv*nvte_dtype_size(dtype));
       // zeroing out dbias_expanded_ptr as CK requires that
@@ -874,7 +886,7 @@ void fused_attn_ck_bwd_impl(
   }
   
   void* devPtrSoftmaxLSETHD = nullptr;
-  if(is_ragged or pad_between_seqs){
+  if(is_ragged || pad_between_seqs){
     devPtrSoftmaxLSETHD = workspace_next;
     workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + b*h*s_q*sizeof(float));
   }
