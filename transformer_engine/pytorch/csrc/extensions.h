@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -698,6 +698,6 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                         size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                         at::Tensor rs_output);
 };  // CommOverlapP2P
-#endif
+#endif // !USE_ROCM
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_

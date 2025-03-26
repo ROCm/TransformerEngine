@@ -1,6 +1,7 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * This file was modified for portability to AMDGPU
  * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * 
  * See LICENSE for license information.
  ************************************************************************/
@@ -479,4 +480,4 @@ torch::Tensor CommOverlapP2P::get_ubuf_output(int comm_type) {
   int output_c_dim1 = _ubuf.size(1);
   return torch::from_blob(ubuf_wt_ptr, {output_c_dim0, output_c_dim1}, _ubuf_torch.options());
 }
-#endif
+#endif // !USE_ROCM
