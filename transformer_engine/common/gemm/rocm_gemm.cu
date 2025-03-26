@@ -1153,7 +1153,8 @@ void hipblaslt_gemm(const Tensor *inputA,
   if (algoCache.find(gemm_cfg, workspaceSize, cached_algo) == 0 || !cached_algo.algo.has_value())
   {
     bool logTuning = getIntEnv("TE_HIPBLASLT_LOG_TUNING", 0, 0) != 0;
-    
+
+#if HIP_VERSION >= 60000000
     // Find algo base algo_id directly if tuning file is set.
     if (cached_algo.hasId())
     {
@@ -1188,6 +1189,7 @@ void hipblaslt_gemm(const Tensor *inputA,
         std::cout << "[WARNING] Cannot get corresponding solution from cached algoId " << cached_algo.algoId << std::endl;
       }
     }
+#endif // #if HIP_VERSION >= 60000000
 
     int firstAlgo = getIntEnv("TE_HIPBLASLT_ALGO_SELECTION", 0, 0);
     int tuneLoopCount = getIntEnv("TE_HIPBLASLT_TUNING_RUN_COUNT", 0, 0);
@@ -1347,10 +1349,11 @@ void hipblaslt_gemm(const Tensor *inputA,
       cached_algo.ws_size_min = algoArr[bestAlgo].workspaceSize;
       cached_algo.ws_size_max = workspaceSize;
 
-      if (logTuning)
-        std::cout << "[INFO] Use hipBLASLt algo [" << bestAlgo << "] " << cached_algo.algoId << std::endl;
-
       algoCache.store(gemm_cfg, cached_algo);
+    }
+
+    if (logTuning) {
+      std::cout << "[INFO] Use hipBLASLt algo [" << cached_algo.index << "] " << cached_algo.algoId << std::endl;
     }
   }
 
