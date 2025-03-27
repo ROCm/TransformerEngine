@@ -55,6 +55,5 @@ std::pair<bias_enum, BiasShape> get_ck_bias_type_shape(BiasType attn_bias_type, 
 
 mask_enum get_ck_mask_type(MaskType attn_mask_type);
 
-
 }//namespace ck_fused_attn
 #endif // CK_FUSED_ATTN_UTILS_H

@@ -97,7 +97,7 @@ class TestDistributedSelfAttn:
     )
     @pytest.mark.parametrize(
         "attn_mask_type",
-        [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK] if is_hip_extension() else [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK]
+        [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK]
     )
     @pytest.mark.parametrize("dtype", DTYPES)
     def test_self_attn(

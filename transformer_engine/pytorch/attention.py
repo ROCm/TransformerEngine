@@ -521,12 +521,6 @@ def get_attention_backend(
                     "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
                 )
             use_flash_attention = False
-        if IS_HIP_EXTENSION and use_fused_attention and pad_between_seqs:
-            logger.debug(
-                "Disabling rocm fused attn for qkv_format = thd when there is "
-                "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
-            )
-            use_fused_attention = False
     # Filter: Dropout
     if attention_dropout != 0.0 and use_flash_attention and _use_flash_attn_3:
         logger.debug("Disabling FlashAttention 3 for dropout")
