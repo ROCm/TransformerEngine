@@ -95,9 +95,7 @@ run_test_config_mgpu() {
         run 3 test_distributed_fused_attn.py
         ;;
     esac
-        ;;
-    esac
-
+    
     run_default_fa 3 test_distributed_layernorm.py
     JAX_DISABLE_JIT=$_JAX_DISABLE_JIT_FLAG run_default_fa 3 test_distributed_layernorm_mlp.py
     run_default_fa 3 test_distributed_softmax.py
