@@ -248,6 +248,7 @@ constexpr int THREADS_PER_WAVEFRONT = 32;
 // one workitem (thread) in one wavefront is charge of one element in 32 segment trunk of h*d
 template<typename DataType, bool is_ragged>
 __global__ void remove_padding_kernel(
+  // b guaranteed to be correct, extracted from input_cu_seqlens->data.shape[0] - 1
   uint64_t b, uint64_t h, uint64_t s, uint64_t d,
   uint64_t stride_b, uint64_t stride_h, uint64_t stride_s, //stride_d is 1
   const DataType* data_ptr,
@@ -258,7 +259,7 @@ __global__ void remove_padding_kernel(
   int workitem_idx = threadIdx.x % THREADS_PER_WAVEFRONT;
   int num_wavefronts = (blockDim.x * gridDim.x) / THREADS_PER_WAVEFRONT;
   int num_total_tokens = cu_seqlen_ptr[b];
-
+  //BSHD SBHD --> THD (BSHD)
   uint64_t stride_total_seqlen = std::min(stride_b, stride_s);
   for(int token_id = wavefront_idx; token_id<num_total_tokens; token_id += num_wavefronts){
     int b_idx = binary_search(token_id, cu_seqlen_ptr, b+1);
@@ -322,6 +323,7 @@ void remove_padding(
 // reverse of remove_padding
 template<typename DataType, bool is_ragged>
 __global__ void add_padding_kernel(
+  // b guaranteed to be correct, extracted from input_cu_seqlens->data.shape[0] - 1
   uint64_t b, uint64_t h, uint64_t s, uint64_t d,
   uint64_t stride_b, uint64_t stride_h, uint64_t stride_s, //stride_d is 1
   const DataType* data_without_padding_ptr,
@@ -333,6 +335,7 @@ __global__ void add_padding_kernel(
   int num_wavefronts = (blockDim.x * gridDim.x) / THREADS_PER_WAVEFRONT;
   int num_total_tokens = cu_seqlen_ptr[b];
 
+  //BSHD SBHD --> THD (BSHD)
   uint64_t stride_total_seqlen = std::min(stride_b, stride_s);
   for(int token_id = wavefront_idx; token_id<num_total_tokens; token_id += num_wavefronts){
     int b_idx = binary_search(token_id, cu_seqlen_ptr, b+1);
