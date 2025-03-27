@@ -1177,7 +1177,6 @@ void hipblaslt_gemm(const Tensor *inputA,
           ws_size_min
         )) {
           cached_algo.algo = algo_arr[0].algo;
-          cached_algo.ws_size_min = ws_size_min;
           algoCache.store(gemm_cfg, cached_algo);
         }
       }
