@@ -75,16 +75,16 @@ run_test_config() {
 run_test_config_mgpu() {
     echo ==== Run mGPU with Fused attention backend: $_fus_attn ====
     
+    _JAX_DISABLE_JIT_FLAG=${JAX_DISABLE_JIT:-0}
     _ver=$(pip show jaxlib | grep Version)
     case "$_ver" in
     *0.4.35*)
-        # Workaround for UNBALANED test failure in test_contex_parallel_allgather_attn 
-        export JAX_DISABLE_JIT=1
-        run 3 test_distributed_fused_attn.py -k 'test_contex_parallel_allgather_attn and UNBALANCED'
-        unset JAX_DISABLE_JIT
+        # Workaround for distributed tests hang with JIT enabled
+        JAX_DISABLE_JIT=1 run 3 test_distributed_fused_attn.py -k 'not (test_contex_parallel_allgather_attn[BALANCED or test_context_parallel_ring_attn)'
+        _JAX_DISABLE_JIT_FLAG=1
 
-        # Run rest of the tests without JAX_DISABLE_JIT
-        run 3 test_distributed_fused_attn.py -k 'not (test_contex_parallel_allgather_attn and UNBALANCED) and not test_context_parallel_ring_attn'
+        # Run tests that fail with JIT disabled
+        run 3 test_distributed_fused_attn.py -k 'test_contex_parallel_allgather_attn[BALANCED'
 
         # Test ring attention with and without scan loop
         NVTE_FUSED_RING_ATTENTION_USE_SCAN=0 run 3 test_distributed_fused_attn.py -k test_context_parallel_ring_attn
@@ -92,14 +92,13 @@ run_test_config_mgpu() {
         ;;
     *0.4.31*)
         #Workaround for JAX 0.4.31 regression: crash in test_destributed_fused_attn and test_distributed_layernorm_mlp
-        #TODO: Will remove this after fixing jax 0.4.35 test issue with UNBALANCED tests in test_distributed_fused_attn::test_context_parallel_allgather_attn
         export XLA_FLAGS="--xla_gpu_enable_dot_strength_reduction=false --xla_gpu_enable_command_buffer=CUSTOM_CALL"
         run 3 test_distributed_fused_attn.py
         ;;
     esac
 
     run_default_fa 3 test_distributed_layernorm.py
-    run_default_fa 3 test_distributed_layernorm_mlp.py
+    JAX_DISABLE_JIT=$_JAX_DISABLE_JIT_FLAG run_default_fa 3 test_distributed_layernorm_mlp.py
     run_default_fa 3 test_distributed_softmax.py
     unset XLA_FLAGS
 }
