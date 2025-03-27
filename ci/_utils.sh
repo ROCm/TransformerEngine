@@ -28,6 +28,7 @@ script_error() {
 
 test_run_error() {
     _run_error_count=$((_run_error_count+1))
+    test -n "$@" && echo "Error in test $@" >&2
 }
 
 return_run_results() {

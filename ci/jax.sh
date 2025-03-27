@@ -45,7 +45,7 @@ run() {
     _test_name_tag=`get_test_name_tag $1 $_fus_attn`
     check_test_filter $_test_name_tag || return
     echo "Run [$_fus_attn] $*"
-    pytest -v `get_pytest_junitxml $_test_name_tag` "$TEST_DIR/$@" || test_run_error
+    pytest -v `get_pytest_junitxml $_test_name_tag` "$TEST_DIR/$@" || test_run_error "[$_fus_attn] $1"
     echo "Done [$_fus_attn] $1"
 }
 
@@ -73,12 +73,23 @@ run_test_config() {
 
 run_test_config_mgpu() {
     echo ==== Run mGPU with Fused attention backend: $_fus_attn ====
-    #Workaround for JAX 0.4.31 regression: crash in test_destributed_fused_attn and test_distributed_layernorm_mlp
-    #TODO: remove the flag when switch to a newer JAX that has a fix
-    export XLA_FLAGS="--xla_gpu_enable_dot_strength_reduction=false --xla_gpu_enable_command_buffer=CUSTOM_CALL"
-    run 3 test_distributed_fused_attn.py
+    
+    _JAX_DISABLE_JIT_FLAG=${JAX_DISABLE_JIT:-0}
+    _ver=$(pip show jaxlib | grep Version)
+    case "$_ver" in
+    *0.4.35*)
+        # Workaround for distributed tests hang with JIT enabled
+        _JAX_DISABLE_JIT_FLAG=1
+        ;;
+    *0.4.31*)
+        #Workaround for JAX 0.4.31 regression: crash in test_destributed_fused_attn and test_distributed_layernorm_mlp
+        export XLA_FLAGS="--xla_gpu_enable_dot_strength_reduction=false --xla_gpu_enable_command_buffer=CUSTOM_CALL"
+        ;;
+    esac
+
+    JAX_DISABLE_JIT=$_JAX_DISABLE_JIT_FLAG run 3 test_distributed_fused_attn.py
     run_default_fa 3 test_distributed_layernorm.py
-    run_default_fa 3 test_distributed_layernorm_mlp.py
+    JAX_DISABLE_JIT=$_JAX_DISABLE_JIT_FLAG run_default_fa 3 test_distributed_layernorm_mlp.py
     run_default_fa 3 test_distributed_softmax.py
     unset XLA_FLAGS
 }
