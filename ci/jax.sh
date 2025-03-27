@@ -80,19 +80,15 @@ run_test_config_mgpu() {
     case "$_ver" in
     *0.4.35*)
         # Workaround for distributed tests hang with JIT enabled
-        JAX_DISABLE_JIT=1 run 3 test_distributed_fused_attn.py -k 'not test_contex_parallel_allgather_attn[BALANCED'
         _JAX_DISABLE_JIT_FLAG=1
-
-        # Run tests that fail with JIT disabled
-        run 3 test_distributed_fused_attn.py -k 'test_contex_parallel_allgather_attn[BALANCED'
         ;;
     *0.4.31*)
         #Workaround for JAX 0.4.31 regression: crash in test_destributed_fused_attn and test_distributed_layernorm_mlp
         export XLA_FLAGS="--xla_gpu_enable_dot_strength_reduction=false --xla_gpu_enable_command_buffer=CUSTOM_CALL"
-        run 3 test_distributed_fused_attn.py
         ;;
     esac
 
+    JAX_DISABLE_JIT=$_JAX_DISABLE_JIT_FLAG run 3 test_distributed_fused_attn.py
     run_default_fa 3 test_distributed_layernorm.py
     JAX_DISABLE_JIT=$_JAX_DISABLE_JIT_FLAG run_default_fa 3 test_distributed_layernorm_mlp.py
     run_default_fa 3 test_distributed_softmax.py
