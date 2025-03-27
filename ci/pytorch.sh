@@ -29,7 +29,7 @@ run() {
     echo "Run [$_gemm, $_fus_attn] $@"
     #: ${_WORKERS_COUNT:=1}
     #_args=-n$_WORKERS_COUNT --max-worker-restart=$_WORKERS_COUNT
-    pytest -v `get_pytest_junitxml $_test_name_tag` "$TEST_DIR/$@" || test_run_error
+    pytest -v `get_pytest_junitxml $_test_name_tag` "$TEST_DIR/$@" || test_run_error "[$_gemm, $_fus_attn] $1"
     echo "Done [$_gemm, $_fus_attn] $1"
 }
 

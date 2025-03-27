@@ -45,7 +45,7 @@ run() {
     _test_name_tag=`get_test_name_tag $1 $_fus_attn`
     check_test_filter $_test_name_tag || return
     echo "Run [$_fus_attn] $*"
-    pytest -v `get_pytest_junitxml $_test_name_tag` "$TEST_DIR/$@" || test_run_error
+    pytest -v `get_pytest_junitxml $_test_name_tag` "$TEST_DIR/$@" || test_run_error "[$_fus_attn] $1"
     echo "Done [$_fus_attn] $1"
 }
 
@@ -63,9 +63,8 @@ run_test_config() {
     run 1 test_fused_attn.py
     run_default_fa 1 test_helper.py
     run_default_fa 1 test_layer.py #it effectevly always uses unfused attention
-    if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
-        run 1 test_praxis_layers.py
-    else
+    # skip test_praxis_layers.py for ck backend as we didn't enable deterministic backward for now
+    if [ $_fus_attn = "aotriton" ]; then
         run 3 test_praxis_layers.py
     fi
     run_default_fa 1 test_sharding.py
@@ -94,6 +93,8 @@ run_test_config_mgpu() {
         #Workaround for JAX 0.4.31 regression: crash in test_destributed_fused_attn and test_distributed_layernorm_mlp
         export XLA_FLAGS="--xla_gpu_enable_dot_strength_reduction=false --xla_gpu_enable_command_buffer=CUSTOM_CALL"
         run 3 test_distributed_fused_attn.py
+        ;;
+    esac
         ;;
     esac
 

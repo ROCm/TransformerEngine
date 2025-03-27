@@ -684,7 +684,8 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, pad_between
 @pytest.mark.parametrize("model_configs", [model_configs_layout_thd])
 @pytest.mark.parametrize("model", model_configs_layout_thd.keys())
 @pytest.mark.parametrize("qkv_layout", qkv_layouts_thd)
-def test_dpa_qkv_layout_thd_mqa_gqa(dtype, model_configs, model, qkv_layout):
+@pytest.mark.parametrize("pad_between_seqs", [False, True])
+def test_dpa_qkv_layout_thd_mqa_gqa(dtype, model_configs, model, qkv_layout, pad_between_seqs):
     def find_factors(x):
         f = []
         for i in range(2, x + 1):
@@ -698,7 +699,7 @@ def test_dpa_qkv_layout_thd_mqa_gqa(dtype, model_configs, model, qkv_layout):
     for num_q_per_gqa_group in num_querys_per_gqa_group:
         config.num_gqa_groups = config.num_heads // num_q_per_gqa_group
         test_dot_product_attention(
-            dtype, model_configs, model, False, True, qkv_layout, False, False
+            dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
         )
 
 

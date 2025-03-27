@@ -119,9 +119,6 @@ class FusedAttnHelper:
 
     def get_fused_attn_backend(self):
         """Get the fused attention kernel backend"""
-        # temporary hack to disable thd in rocm fused attn as no pad_between_sequence
-        if self.qkv_layout in [NVTE_QKV_Layout.NVTE_T3HD, NVTE_QKV_Layout.NVTE_THD_T2HD, NVTE_QKV_Layout.NVTE_THD_THD_THD]:
-            return NVTE_Fused_Attn_Backend.NVTE_No_Backend
         return transformer_engine_jax.get_fused_attn_backend(
             jax_dtype_to_te_dtype(self.q_dtype),
             jax_dtype_to_te_dtype(self.kv_dtype),
@@ -302,7 +299,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 raise ValueError(f"Unsupported {backend=}")
         else:
             if backend in [NVTE_Fused_Attn_Backend.NVTE_AOTriton, NVTE_Fused_Attn_Backend.NVTE_CK]:
-                softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
+                softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, config.max_segments_per_seq)
                 softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
             else:
                 raise ValueError(f"Unsupported {backend=}")
@@ -488,7 +485,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         config: _FusedAttnConfig,
     ):
         assert FusedAttnFwdPrimitive.inner_primitive is not None
-
         if nvte_get_qkv_format(config.qkv_layout) == NVTE_QKV_Format.NVTE_THD:
 
             def _fix_len_take(x, condition, fill_value=-1):
