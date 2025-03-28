@@ -1154,7 +1154,6 @@ void hipblaslt_gemm(const Tensor *inputA,
   {
     bool logTuning = getIntEnv("TE_HIPBLASLT_LOG_TUNING", 0, 0) != 0;
 
-#if HIP_VERSION >= 60000000
     // Find algo base algo_id directly if tuning file is set.
     if (cached_algo.hasId())
     {
@@ -1177,15 +1176,15 @@ void hipblaslt_gemm(const Tensor *inputA,
           ws_size_min
         )) {
           cached_algo.algo = algo_arr[0].algo;
+          cached_algo.ws_size_min = algo_arr[0].workspaceSize;
           algoCache.store(gemm_cfg, cached_algo);
         }
       }
-      
+
       if (logTuning && !cached_algo.algo.has_value()) {
         std::cout << "[WARNING] Cannot get corresponding solution from cached algoId " << cached_algo.algoId << std::endl;
       }
     }
-#endif // #if HIP_VERSION >= 60000000
 
     int firstAlgo = getIntEnv("TE_HIPBLASLT_ALGO_SELECTION", 0, 0);
     int tuneLoopCount = getIntEnv("TE_HIPBLASLT_TUNING_RUN_COUNT", 0, 0);
@@ -1215,35 +1214,6 @@ void hipblaslt_gemm(const Tensor *inputA,
     algoArr.resize(algoTotalCount);
 
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceDestroy(preference));
-
-    //If cached algo exists in persistent storage we just need to find matching hipblasLtMatmulAlgo_t
-    if (cached_algo.hasId() && !cached_algo.algo.has_value())
-    {
-      int idx = (cached_algo.index < algoTotalCount) ? cached_algo.index : 0;
-      for (int i=0; i<algoTotalCount; i++)
-      {
-        const auto &algo = algoArr[idx];
-        if (algo.state == HIPBLAS_STATUS_SUCCESS)
-        {
-          if (cached_algo.algoId == cached_algo.getAlgoId(algo.algo))
-          {
-            cached_algo.algo = algo.algo;
-            if (algo.workspaceSize != cached_algo.ws_size_min || idx != cached_algo.index)
-            {
-              cached_algo.ws_size_min = algo.workspaceSize;
-              cached_algo.index = idx;
-              algoCache.store(gemm_cfg, cached_algo);
-            }
-            break;
-          }
-        }
-        idx = (idx + 1) % algoTotalCount;
-      }
-      if (logTuning && !cached_algo.algo.has_value())
-      {
-        std::cout << "[WARNING] Cannot find cached algoId " << cached_algo.algoId << " in hipBLASLt results" << std::endl;
-      }
-    }
 
     //No suitable entry in autotune cache or could not find matched algo in hipBLASLt results
     if (!cached_algo.algo.has_value())
