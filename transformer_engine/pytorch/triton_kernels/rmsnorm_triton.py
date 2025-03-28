@@ -8,14 +8,33 @@ import triton
 import triton.language as tl
 from itertools import product
 
+
 def get_num_sms():
     current_device_index = torch.cuda.current_device()
     current_device = torch.cuda.get_device_properties(current_device_index)
     num_sms = current_device.multi_processor_count
     return num_sms
 
+
+def num_programs(x):
+    return min(x.shape[0], get_num_sms())
+
+
+def block_size(x):
+    return min(65536 // x.element_size(), triton.next_power_of_2(x.shape[1]))
+
+
+def use_blocked(x):
+    return x.shape[1] > block_size(x)
+
+
+def dg_tmp_rows(x):
+    return x.shape[0] if use_blocked(x) else num_programs(x)
+
+
 def get_autotune_config():
     return [triton.Config({'waves_per_eu': we}, num_warps=nw) for (we, nw) in product([0, 1, 2, 4], [4, 8, 16])]
+
 
 @triton.autotune(configs=get_autotune_config(), key=['n_rows', 'n_cols'], use_cuda_graph=True)
 @triton.jit
@@ -114,14 +133,15 @@ def _rmsnorm_fwd_triton(output_ptr, input_ptr, g_ptr, rsigma_ptr, input_row_stri
             output_ptrs = tl.multiple_of(output_ptrs, (16, ))
             tl.store(output_ptrs, rms_norm.to(output_ptr.type.element_ty), mask=mask)
 
+
 # TODO: currently our triton kernel has not supported fp8 yet
 def te_rmsnorm_fwd_fp8_noalloc_triton(input, weight, eps, ln_out, otype, zero_centered_gamma):
     M, N = input.shape
     rsigma = torch.empty((M, ), device='cuda', dtype=torch.float32)
-    MAX_FUSED_SIZE = 65536 // input.element_size()
-    blk_size = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))
-    USE_BLOCKED = N > blk_size
-    NUM_PRGMS = min(M, get_num_sms())
+    blk_size = block_size(input)
+    USE_BLOCKED = use_blocked(input)
+    NUM_PRGMS = num_programs(input)
+
     grid = lambda meta: (NUM_PRGMS, )
     #encode the otype if ln_out is of different dtype
     ln_out = ln_out.view(otype)
@@ -129,16 +149,19 @@ def te_rmsnorm_fwd_fp8_noalloc_triton(input, weight, eps, ln_out, otype, zero_ce
 
     return ln_out, rsigma
 
+
 # specialized version of rmsnorm fwd, with input and output of the same dtype
 def te_rmsnorm_fwd_noalloc_triton(input, weight, ln_out, eps, zero_centered_gamma):
     assert input.dtype==ln_out.dtype, "input and output dtype should be the same in te_rmsnorm_fwd_noalloc_triton"
     return te_rmsnorm_fwd_fp8_noalloc_triton(input, weight, eps, ln_out, input.dtype, zero_centered_gamma)
+
 
 # specialized version of rmsnorm fwd, optimized for inference
 def te_rmsnorm_fwd_inf_triton(input, weight, eps, zero_centered_gamma):
     ln_out = torch.empty_like(input)
     ln_out, _ = te_rmsnorm_fwd_noalloc_triton(input, weight, ln_out, eps, zero_centered_gamma)
     return ln_out
+
 
 # may take non-contiguous input and weight
 # see rmsnorm_fwd in transformer_engine/pytorch/csrc/extensions/normalization.cu
@@ -147,6 +170,7 @@ def te_rmsnorm_fwd_triton(input, weight, eps, zero_centered_gamma):
     weight_ = weight.contiguous()
     ln_out = torch.empty_like(input_)
     return te_rmsnorm_fwd_noalloc_triton(input_, weight_, ln_out, eps, zero_centered_gamma)
+
 
 @triton.jit
 def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, dg_ptr, input_row_stride, output_row_stride,
@@ -252,11 +276,12 @@ def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, d
 
     else:
         mask = col_offsets < n_cols
+        dg_col_redux = tl.zeros((BLOCK_SIZE, ), dtype=tl.float32)
+
         for row_idx in tl.range(row_start, n_rows, NUM_PRGMS, num_stages=2):
             input_ptrs = input_ptr + row_idx * input_row_stride + col_offsets
             grad_output_ptrs = grad_output_ptr + row_idx * output_row_stride + col_offsets
             dx_ptrs = dx_ptr + row_idx * input_row_stride + col_offsets
-            dg_ptrs = dg_ptr + row_idx * input_row_stride + col_offsets
 
             input_ptrs = tl.multiple_of(input_ptrs, (16, ))
             grad_output_ptrs = tl.multiple_of(grad_output_ptrs, (16, ))
@@ -276,7 +301,10 @@ def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, d
             tl.store(dx_ptrs, grad_input.to(dx_ptr.type.element_ty), mask=mask)
 
             dg = grad_output * x * norm_factor
-            tl.store(dg_ptrs, dg.to(tl.float32), mask=mask)
+            dg_col_redux += dg.to(tl.float32)
+
+        tl.store(dg_ptr + tl.program_id(0) * input_row_stride + col_offsets, dg_col_redux, mask=mask)
+
 
 @triton.jit
 def _rmsnorm_bwd_dg_reduce_triton(dg_in_ptr, dg_out_ptr, dg_in_stride, n_rows, n_cols, BLOCK_SIZE_M: tl.constexpr,
@@ -291,10 +319,11 @@ def _rmsnorm_bwd_dg_reduce_triton(dg_in_ptr, dg_out_ptr, dg_in_stride, n_rows, n
         rows = i + tl.arange(0, BLOCK_SIZE_M)
         mask = (rows[:, None] < n_rows) & (cols[None, :] < n_cols)
         offs = rows[:, None] * n_cols + cols[None, :]
-        acc += tl.load(dg_in_ptr + offs, mask=mask, other=0.).to(tl.float32)
+        acc += tl.load(dg_in_ptr + offs, mask=mask, other=0., cache_modifier=".cg").to(tl.float32)
 
     sum_dg = tl.sum(acc, axis=0)
     tl.store(dg_out_ptr + cols, sum_dg.to(dg_out_ptr.type.element_ty), mask=cols < n_cols)
+
 
 # may take non-contiguous inputs
 # see rmsnorm_bwd in transformer_engine/pytorch/csrc/extensions/normalization.cu
@@ -308,17 +337,20 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, zero_centered_gamma):
     dgamma = torch.empty_like(gamma_)
 
     M, N = x_.shape
-    dg_tmp = torch.zeros(M, N, device='cuda', dtype=torch.float32, requires_grad=False)
+    blk_size = block_size(x_)
+    USE_BLOCKED = use_blocked(x_)
+    NUM_PRGMS = num_programs(x_)
+    need_reduction = N > 1
+    dg_tmp = torch.empty(dg_tmp_rows(x_), N, device='cuda', dtype=torch.float32, requires_grad=False) if need_reduction else None
 
-    MAX_FUSED_SIZE = 65536 // x_.element_size()
-    blk_size = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))
-    USE_BLOCKED = N > blk_size
-    NUM_PRGMS = min(M, get_num_sms())
     grid_bwd = lambda meta: (NUM_PRGMS, )
+    _rmsnorm_bwd_triton[grid_bwd](dz_, x_, gamma_, rsigma_, dx, dg_tmp if need_reduction else dg,
+                                  x_.stride(0), dz_.stride(0), M, N, zero_centered_gamma, blk_size,
+                                  USE_BLOCKED, NUM_PRGMS, num_warps=8)
 
-    _rmsnorm_bwd_triton[grid_bwd](dz_, x_, gamma_, rsigma_, dx, dg_tmp, x_.stride(0), dz_.stride(0), M, N, zero_centered_gamma, blk_size, USE_BLOCKED, NUM_PRGMS, num_warps=8)
-
-    grid_reduce = lambda meta: [triton.cdiv(N, meta['BLOCK_SIZE_N'])]
-    _rmsnorm_bwd_dg_reduce_triton[grid_reduce](dg_tmp, dgamma, dg_tmp.stride(0), M, N, BLOCK_SIZE_M=128, BLOCK_SIZE_N=64)
+    if need_reduction:
+        grid_reduce = lambda meta: [triton.cdiv(N, meta['BLOCK_SIZE_N'])]
+        _rmsnorm_bwd_dg_reduce_triton[grid_reduce](dg_tmp, dgamma, dg_tmp.stride(0), dg_tmp.shape[0], dg_tmp.shape[1],
+                                                   BLOCK_SIZE_M=128, BLOCK_SIZE_N=64)
 
     return dx, dgamma
