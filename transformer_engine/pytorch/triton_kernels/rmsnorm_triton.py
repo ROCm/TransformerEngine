@@ -7,24 +7,7 @@ import triton
 import triton.language as tl
 from itertools import product
 
-
-def get_num_sms(sm_margin=None):
-    num_sms = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
-    if sm_margin is not None and sm_margin > 0:
-        num_sms = max(num_sms - sm_margin, 1)
-    return num_sms
-
-
-def num_programs(x, sm_margin=None):
-    return min(x.shape[0], get_num_sms(sm_margin))
-
-
-def block_size(x):
-    return min(65536 // x.element_size(), triton.next_power_of_2(x.shape[1]))
-
-
-def use_blocked(x):
-    return x.shape[1] > block_size(x)
+from .norm_common_triton import num_programs, block_size, use_blocked
 
 
 def dg_tmp_rows(x, sm_margin=None):
