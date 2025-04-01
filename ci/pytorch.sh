@@ -73,7 +73,7 @@ run_test_config_mgpu(){
     if [ $_fus_attn = "auto" -a $_gemm = "hipblaslt" ]; then
         echo ==== Run mGPU with GEMM backend: $_gemm and Fused attention backend: $_fus_attn ====
         run 3 test_fused_optimizer.py
-        run 3 test_fusible_ops_distributed.py
+        run 3 distributed/test_fusible_ops.py
         run 3 fused_attn/test_fused_attn_with_cp.py
         run 3 distributed/test_numerics.py
     fi

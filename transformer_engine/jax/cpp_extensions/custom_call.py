@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -7,8 +7,8 @@
 from dataclasses import dataclass
 from enum import IntEnum
 
-from jax.lib import xla_client
 from jax.interpreters import mlir
+import jax.extend as jex
 
 from transformer_engine import transformer_engine_jax
 
@@ -34,11 +34,11 @@ for _name, _value in transformer_engine_jax.registrations().items():
     if _name.endswith("_ffi"):
         if is_ffi_enabled():
             # COMMAND_BUFFER_COMPATIBLE i.e. cudaGraph enabled by default
-            xla_client.register_custom_call_target(
+            jex.ffi.register_ffi_target(
                 _name, _value, platform="ROCM" if is_hip_extension() else "CUDA", api_version=CustomCallAPIVersion.FFI.value
             )
     else:
-        xla_client.register_custom_call_target(
+        jex.ffi.register_ffi_target(
             _name, _value, platform="ROCM" if is_hip_extension() else "CUDA", api_version=CustomCallAPIVersion.OPAQUE.value
         )
 
