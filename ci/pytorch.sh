@@ -33,6 +33,18 @@ run() {
     echo "Done [$_gemm, $_fus_attn] $1"
 }
 
+run_mcore_integration_test() {
+    # Set the absolute path to the integration test file.
+    local mcore_test_file="${TE_PATH}/qa/L1_pytorch_mcore_integration/test.sh"
+    if [ ! -f "$mcore_test_file" ]; then
+        script_error "MCore integration test file not found: $mcore_test_file"
+        exit 1
+    fi
+    echo "==== Running MCore Integration Test from ${mcore_test_file} ====="    
+    bash "$mcore_test_file" || test_run_error "MCore integration test failed"
+    echo "==== MCore Integration Test completed successfully ===="
+}
+
 run_default_fa() {
     #Run tests that do not use fused attention or control backend selection
     #with default backend only
@@ -119,6 +131,11 @@ for _gemm in hipblaslt rocblas; do
         else
             test -n "$TEST_SGPU" && run_test_config
             test -n "$TEST_MGPU" && run_test_config_mgpu
+        fi
+
+        # Run MCore integration test only in level 3 and in auto mode.
+        if [ $TEST_LEVEL -ge 3 ] && [ "$_fus_attn" = "auto" ]; then
+            run_mcore_integration_test
         fi
     done
 done
