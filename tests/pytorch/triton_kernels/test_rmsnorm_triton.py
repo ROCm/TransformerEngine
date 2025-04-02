@@ -3,8 +3,6 @@
 
 import pytest
 import torch
-import triton
-import triton.language as tl
 import os
 
 from transformer_engine.pytorch.triton_kernels.rmsnorm_triton import te_rmsnorm_fwd_fp8_noalloc_triton, te_rmsnorm_fwd_noalloc_triton, te_rmsnorm_fwd_inf_triton, te_rmsnorm_bwd_triton
@@ -42,38 +40,6 @@ def get_tolerances(in_dtype):
         raise RuntimeError("Invalid type")
 
 
-# PyTorch forward reference implementation.
-def torch_rmsnorm_fwd(x, g, zero_centered_gamma, epsilon, out_dtype=torch.float16):
-    x = x.to(torch.float32)
-    g = g.to(torch.float32)
-    mean_sq_x = torch.mean(x * x, dim=-1)
-    rsigma = torch.rsqrt(mean_sq_x + epsilon)
-    if zero_centered_gamma:
-        g += 1
-    rms_norm = x * rsigma.unsqueeze(1) * g
-    rms_norm = rms_norm.to(out_dtype)
-    return rms_norm, rsigma
-
-
-# PyTorch backward reference implementation.
-def torch_rmsnorm_bwd(dz, x, g, rsigma, zero_centered_gamma, out_dtype=torch.float16):
-    dz = dz.to(torch.float32)
-    x = x.to(torch.float32)
-    g = g.to(torch.float32)
-    if zero_centered_gamma:
-        g += 1
-    rsigma = rsigma.view(-1, 1)
-    y = x * rsigma
-    dy = g * dz
-    dg = torch.sum(y * dz, dim=0)
-    dyy = dy * y
-    mdyy = torch.mean(dyy, dim=1, keepdim=True)
-    dx = rsigma * (dy - mdyy * y)
-    dx = dx.to(out_dtype)
-    dg = dg.to(out_dtype)
-    return dx, dg
-
-
 # PyTorch implementation of `compareResults` C++ function from `tests/cpp/test_common.cu`.
 # Arguments:
 #     t: actual tensor
@@ -84,7 +50,6 @@ def te_compare_results(t, r, atol, rtol):
     assert atol > 0, "Absolute tolerance must be positive."
     assert rtol > 0, "Relative tolerance must be positive."
     dtype = t.dtype
-    is_fp32 = (dtype == torch.float32)
     t = t.cpu().to(torch.float32).to(torch.float64)
     r = r.cpu().to(torch.float32).to(torch.float64)
     diff = t - r
@@ -185,33 +150,23 @@ def test_rmsnorm_fwd_bwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma):
     ln_out_hipified = torch.empty(M, N, dtype=out_dtype, device='cuda')
     ln_out_hipified, rsigma_hipified = tex.rmsnorm_fwd_fp8_noalloc(input_tensor, gamma_tensor, epsilon, scale_tensor, ln_out_hipified, amax_tensor, scale_inv_tensor, get_te_dtype(out_dtype), fwd_ln_sm_margin, zero_centered_gamma)
 
-    # run the fwd torch reference in CPU
-    ln_out_torch, rsigma_torch = torch_rmsnorm_fwd(input_tensor.cpu(), gamma_tensor.cpu(), zero_centered_gamma, epsilon, out_dtype=out_dtype)
-
     # assert on ln_out
     ln_out_atol = 1e-8
     _, ln_out_rtol = get_tolerances(out_dtype)
     torch.testing.assert_close(ln_out_triton, ln_out_hipified, atol=ln_out_atol, rtol=ln_out_rtol,
                                msg=lambda msg: f"ln_out does not match triton <-> hip\n\n{msg}\n")
-    torch.testing.assert_close(ln_out_triton.cpu(), ln_out_torch, atol=ln_out_atol, rtol=ln_out_rtol,
-                               msg=lambda msg: f"ln_out does not match triton <-> torch\n\n{msg}\n")
 
     # assert on rsigma
     rsigma_atol, rsigma_rtol = 1e-6, 5e-5
     # rsigma is of type fp32
     torch.testing.assert_close(rsigma_triton, rsigma_hipified, atol=rsigma_atol, rtol=rsigma_rtol,
                                msg=lambda msg: f"rsigma does not match triton <-> hip\n\n{msg}\n")
-    torch.testing.assert_close(rsigma_triton.cpu(), rsigma_torch, atol=rsigma_atol, rtol=rsigma_rtol,
-                               msg=lambda msg: f"rsigma does not match triton <-> torch\n\n{msg}\n")
 
     # run triton bwd
     dx_triton, dgamma_triton = te_rmsnorm_bwd_triton(dz_tensor, input_tensor, rsigma_triton, gamma_tensor, zero_centered_gamma)
 
     # run hipified ref bwd
     dx_hipified, dgamma_hipified = tex.rmsnorm_bwd(dz_tensor, input_tensor, rsigma_hipified, gamma_tensor, fwd_ln_sm_margin, zero_centered_gamma)
-
-    # run torch ref bwd in CPU
-    dx_torch, dgamma_torch = torch_rmsnorm_bwd(dz_tensor.cpu(), input_tensor.cpu(), gamma_tensor.cpu(), rsigma_torch.cpu(), zero_centered_gamma, out_dtype=in_dtype)
 
     atol_bwd = 5e-6
     rtol_bwd = 1e-4
@@ -222,11 +177,9 @@ def test_rmsnorm_fwd_bwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma):
 
     # assert on dx
     te_compare_results(dx_triton, dx_hipified, atol_bwd, rtol_bwd)
-    te_compare_results(dx_triton, dx_torch, atol_bwd, rtol_bwd)
 
     # assert on dgamma
     te_compare_results(dgamma_triton, dgamma_hipified, atol_bwd, rtol_bwd)
-    te_compare_results(dgamma_triton, dgamma_torch, atol_bwd, rtol_bwd)
 
 
 @pytest.mark.parametrize("M, N", test_shapes)

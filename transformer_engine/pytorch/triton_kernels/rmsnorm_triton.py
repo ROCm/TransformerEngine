@@ -3,7 +3,6 @@
 
 import torch
 
-import transformer_engine_torch as tex
 import triton
 import triton.language as tl
 from itertools import product
@@ -344,7 +343,7 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, zero_centered_gamma):
     dg_tmp = torch.empty(dg_tmp_rows(x_), N, device='cuda', dtype=torch.float32, requires_grad=False) if need_reduction else None
 
     grid_bwd = lambda meta: (NUM_PRGMS, )
-    _rmsnorm_bwd_triton[grid_bwd](dz_, x_, gamma_, rsigma_, dx, dg_tmp if need_reduction else dg,
+    _rmsnorm_bwd_triton[grid_bwd](dz_, x_, gamma_, rsigma_, dx, dg_tmp if need_reduction else dgamma,
                                   x_.stride(0), dz_.stride(0), M, N, zero_centered_gamma, blk_size,
                                   USE_BLOCKED, NUM_PRGMS, num_warps=8)
 
