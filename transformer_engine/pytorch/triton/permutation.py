@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -229,7 +231,7 @@ def _unpermute_kernel(
         pytorch_tensor_dtype = tl.uint8
     else:
         # NOTE: Using fp32 accumulate precision on ROCm.
-        compute_type = tl.float32
+        compute_type = tl.float32 if IS_HIP_EXTENSION else input_ptr.dtype.element_ty
         assert FP8_DTYPE is None
 
     pid = tl.program_id(0)

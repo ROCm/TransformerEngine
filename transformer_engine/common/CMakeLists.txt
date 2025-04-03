@@ -1,6 +1,6 @@
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -65,14 +65,14 @@ if(USE_CUDA)
 
   # cuDNN frontend API
   set(CUDNN_FRONTEND_INCLUDE_DIR
-      "${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
   if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
       message(FATAL_ERROR
-              "Could not find cuDNN frontend API. "
+              "Could not find cuDNN frontend API at ${CUDNN_FRONTEND_INCLUDE_DIR}. "
               "Try running 'git submodule update --init --recursive' "
               "within the Transformer Engine source.")
   endif()
-  include(${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
+  include(${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
 else()
   set(CMAKE_CXX_STANDARD 17)
   project(transformer_engine LANGUAGES HIP CXX)
@@ -129,15 +129,17 @@ if(USE_CUDA)
        activation/swiglu.cu
        fused_attn/fused_attn_fp8.cu
        fused_attn/fused_attn.cpp
+       fused_attn/thd_utils.cu
        fused_attn/utils.cu
        gemm/cublaslt_gemm.cu
-       layer_norm/ln_api.cpp
-       layer_norm/ln_bwd_semi_cuda_kernel.cu
-       layer_norm/ln_fwd_cuda_kernel.cu
+       normalization/common.cpp
+       normalization/layernorm/ln_api.cpp
+       normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
+       normalization/layernorm/ln_fwd_cuda_kernel.cu
+       normalization/rmsnorm/rmsnorm_api.cpp
+       normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
+       normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
        permutation/permutation.cu
-       rmsnorm/rmsnorm_api.cpp
-       rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
-       rmsnorm/rmsnorm_fwd_cuda_kernel.cu
        util/cast.cu
        util/padding.cu
        util/cuda_driver.cpp
@@ -170,15 +172,17 @@ else()
        fused_attn_rocm/fused_attn_aotriton.cpp
        fused_attn_rocm/fused_attn_ck.cpp
        fused_attn_rocm/utils.cpp
+       fused_attn/thd_utils.cu
        gemm/cublaslt_gemm.cu
        gemm/rocm_gemm.cu
-       layer_norm/ln_api.cpp
-       layer_norm/ln_bwd_semi_cuda_kernel.cu
-       layer_norm/ln_fwd_cuda_kernel.cu
+       normalization/common.cpp
+       normalization/layernorm/ln_api.cpp
+       normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
+       normalization/layernorm/ln_fwd_cuda_kernel.cu
+       normalization/rmsnorm/rmsnorm_api.cpp
+       normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
+       normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
        permutation/permutation.cu
-       rmsnorm/rmsnorm_api.cpp
-       rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
-       rmsnorm/rmsnorm_fwd_cuda_kernel.cu
        util/cast.cu
        util/padding.cu
        util/cuda_driver.cpp
@@ -414,6 +418,14 @@ set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
                             PROPERTIES
                             COMPILE_OPTIONS "--use_fast_math")
 if(USE_CUDA)
+  option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" OFF)
+  if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
+    set_source_files_properties(activation/gelu.cu
+                                activation/relu.cu
+                                activation/swiglu.cu
+                                PROPERTIES
+                                COMPILE_OPTIONS "--use_fast_math")
+  endif()
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 
