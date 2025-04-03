@@ -288,8 +288,8 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *cast_output
               // Helper functions to get kernel configuration
               auto get_n_tiles = [=] (size_t load_size, size_t store_size) -> int {
                 constexpr size_t threads_per_warp = static_cast<size_t>(THREADS_PER_WARP);
-                size_t nvec_in = load_size / sizeof(InputType);
-                size_t nvec_out = store_size;
+                size_t nvec_in = load_size / itype_size;
+                size_t nvec_out = store_size / otype_size;
                 size_t n_tiles = DIVUP(row_length, nvec_in * threads_per_warp) *
                                 DIVUP(num_rows, nvec_out * threads_per_warp);
                 return n_tiles;

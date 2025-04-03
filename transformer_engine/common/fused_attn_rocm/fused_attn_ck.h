@@ -38,6 +38,7 @@ void fused_attn_ck_fwd_qkvpacked(
   const Tensor* input_QKV, const Tensor* input_Bias, 
   Tensor* output_O, NVTETensorPack *Aux_CTX_Tensors,
   const Tensor* input_cu_seqlens,
+  const Tensor* input_cu_seqlens_padded,
   const Tensor* rng_state,
   Tensor *workspace,
   cudaStream_t stream);
@@ -53,6 +54,7 @@ void fused_attn_ck_bwd_qkvpacked(
   Tensor* output_dQKV,
   Tensor* output_dBias,
   const Tensor* input_cu_seqlens,
+  const Tensor* input_cu_seqlens_padded,
   const Tensor* rng_state,
   Tensor* workspace,
   cudaStream_t stream);
@@ -66,6 +68,8 @@ void fused_attn_ck_fwd_kvpacked(
   Tensor* output_O, NVTETensorPack *Aux_CTX_Tensors,
   const Tensor* input_cu_seqlens_q,
   const Tensor* input_cu_seqlens_kv,
+  const Tensor* input_cu_seqlens_q_padded,
+  const Tensor* input_cu_seqlens_kv_padded,
   const Tensor* rng_state,
   Tensor *workspace,
   cudaStream_t stream);
@@ -82,6 +86,8 @@ void fused_attn_ck_bwd_kvpacked(
   Tensor* output_dBias,
   const Tensor* input_cu_seqlens_q,
   const Tensor* input_cu_seqlens_kv,
+  const Tensor* input_cu_seqlens_q_padded,
+  const Tensor* input_cu_seqlens_kv_padded,
   const Tensor* rng_state,
   Tensor* workspace,
   cudaStream_t stream);
@@ -95,6 +101,8 @@ void fused_attn_ck_fwd(
   Tensor* output_O, NVTETensorPack *Aux_CTX_Tensors,
   const Tensor* input_cu_seqlens_q,
   const Tensor* input_cu_seqlens_kv,
+  const Tensor* input_cu_seqlens_q_padded,
+  const Tensor* input_cu_seqlens_kv_padded,
   const Tensor* rng_state,
   Tensor *workspace,
   cudaStream_t stream);
@@ -111,6 +119,8 @@ void fused_attn_ck_bwd(
   Tensor* output_dBias,
   const Tensor* input_cu_seqlens_q,
   const Tensor* input_cu_seqlens_kv,
+  const Tensor* input_cu_seqlens_q_padded,
+  const Tensor* input_cu_seqlens_kv_padded,
   const Tensor* rng_state,
   Tensor* workspace,
   cudaStream_t stream);

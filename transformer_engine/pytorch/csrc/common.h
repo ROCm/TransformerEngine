@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -28,6 +28,9 @@
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/cast_transpose_noop.h>
+#ifndef USE_ROCM
+#include <transformer_engine/comm_gemm_overlap.h>
+#endif
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/fused_rope.h>
 #include <transformer_engine/gemm.h>
@@ -41,12 +44,14 @@
 #include <transformer_engine/transpose.h>
 
 #include <ATen/cuda/CUDAGraphsUtils.cuh>
+#include <cassert>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <memory>
 #include <random>
 #include <stdexcept>
+#include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 #include <vector>
 
 #include "common/util/logging.h"

@@ -17,25 +17,6 @@
 
 namespace ck_fused_attn{
 
-// cuda kernel to convert softmax lse from [h, total_seqlen_q] to [b, h, s_q]
-__global__ void softmax_lse_from_thd(
-  uint64_t b, uint64_t h, uint64_t s_q,
-  const int32_t* cu_seqlen_q,
-  const float* lse_thd,
-  float* lse){
-
-  int32_t total_seqlen_q = cu_seqlen_q[b];
-  
-  for(uint64_t bh_idx = blockIdx.x*blockDim.x + threadIdx.x; bh_idx < b*h; bh_idx += blockDim.x * gridDim.x){
-    uint64_t b_idx = bh_idx/h;
-    uint64_t h_idx = bh_idx%h;
-    // loop over a given batch and head idx
-    for(uint64_t s_idx = cu_seqlen_q[b_idx]; s_idx < cu_seqlen_q[b_idx + 1]; s_idx++){
-      lse[bh_idx * s_q + s_idx - cu_seqlen_q[b_idx]] = lse_thd[h_idx * total_seqlen_q + s_idx];
-    }
-  }
-}
-
 // print the fmha traits and args when calling ck apis
 void log_fwd_config(const char* func_name, const fmha_fwd_traits& fmha_traits, const fmha_fwd_args& fmha_args){
   bool ck_fused_attn_log_config = false;
@@ -282,11 +263,10 @@ hipError_t ck_attn_varlen_fwd(
   void* o_ptr, 
   uint64_t stride_h_o, uint64_t stride_s_o,
   void* lse_thd_ptr,
-  void* lse_ptr, 
   hipStream_t stream){
 
   bool has_dropout = (is_training && dropout_probability > 0.f);
-  bool has_lse = (lse_ptr != nullptr);
+  bool has_lse = (lse_thd_ptr != nullptr);
 
   /* CK input parameters */
   ck_tile::index_t batch = b;
@@ -295,8 +275,6 @@ hipError_t ck_attn_varlen_fwd(
   ck_tile::index_t nhead_k = hg;
   ck_tile::index_t hdim_v = d;
   ck_tile::index_t max_seqlen_q = s_q;
-  ck_tile::index_t total_seqlen_q = *(static_cast<const int32_t *>(cu_seqlen_q_ptr) + b);
-  ck_tile::index_t total_seqlen_kv = *(static_cast<const int32_t *>(cu_seqlen_kv_ptr) + b);
 
   float scale_s = scaling_factor;
   float scale_p = 1.f;
@@ -340,8 +318,8 @@ hipError_t ck_attn_varlen_fwd(
     const ck_tile::index_t nhead_stride_bias = 0;
     //TODO: randval never used, can we remove it
     const ck_tile::index_t nhead_stride_randval = 0;
-    // CK group mode requires softmax_lse be of shape [h, total_s_q]
-    const ck_tile::index_t nhead_stride_lse = total_seqlen_q;
+    // In CK group mode, softmax_lse can be of shape [h, b*s_q] with effective data in first total_seqlen_q places
+    const ck_tile::index_t nhead_stride_lse = batch*max_seqlen_q;
     const ck_tile::index_t nhead_stride_o = stride_h_o;
     // setup batch_stride_* arguments
     const ck_tile::index_t batch_stride_q = 0;
@@ -364,8 +342,8 @@ hipError_t ck_attn_varlen_fwd(
                          cu_seqlen_q_ptr,//cu_seqlen_q
                          cu_seqlen_kv_ptr,//cu_seqlen_kv
                          nullptr, /* seqlen_k_ptr */
-                         total_seqlen_q,
-                         total_seqlen_kv,
+                         0, //seqlen_q, unused in group mode
+                         0, //seqlen_kv, unused in group mode
                          batch,
                          max_seqlen_q,
                          hdim_q,
@@ -410,19 +388,6 @@ hipError_t ck_attn_varlen_fwd(
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");
-  }
-
-  // convert softmax_lse from [h, total_seqlen_q] to [b, h, s_q]
-  if(lse_thd_ptr!=lse_ptr){
-    assert((lse_thd_ptr!=nullptr) && (lse_ptr!=nullptr));
-    constexpr int THREADS_PER_BLOCK = 1024;
-    dim3 block(THREADS_PER_BLOCK);
-    dim3 grid(ceil(1.0 * b * h/THREADS_PER_BLOCK));
-    hipLaunchKernelGGL(
-      softmax_lse_from_thd, grid, block, 0, stream,
-      b, h, s_q, static_cast<const int32_t*>(cu_seqlen_q_ptr),
-      static_cast<const float*>(lse_thd_ptr),
-      static_cast<float*>(lse_ptr));
   }
   return hipSuccess;
 }

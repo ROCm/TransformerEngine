@@ -1,4 +1,4 @@
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 from functools import cache
 import importlib.metadata
@@ -25,3 +25,10 @@ if not is_hip_extension():
 else:
   jnp_float8_e4m3_type = jnp.float8_e4m3fnuz
   jnp_float8_e5m2_type = jnp.float8_e5m2fnuz
+
+if is_hip_extension():
+  def is_mi200():
+      """check whether this machine is mi200/210/250"""
+      import re
+      return (re.search('AMD Instinct MI2.0', jax.devices()[0].device_kind) is not None)
+  

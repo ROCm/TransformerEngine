@@ -26,7 +26,7 @@ fi
 
 echo ===== Run non GEMM tests =====
 ctest --test-dir build -j4 -E "OperatorTest/GEMMTestSuite"
-test $? -eq 0 || test_run_error
+test $? -eq 0 || test_run_error "non-GEMM"
 
 for _gemm in hipblaslt rocblas; do
     configure_gemm_env $_gemm || continue
@@ -36,7 +36,7 @@ for _gemm in hipblaslt rocblas; do
     fi
     echo  ===== Run GEMM $_gemm tests =====
     ctest --test-dir build -j4 -R "OperatorTest/GEMMTestSuite" $_exclude
-    test $? -eq 0 || test_run_error
+    test $? -eq 0 || test_run_error "GEMM $_gemm"
 done
 
 return_run_results

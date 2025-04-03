@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -58,6 +58,7 @@ constexpr T DIVUP(const T &x, const T &y) {
 
 using byte = uint8_t;
 using int32 = int32_t;
+using int64 = int64_t;
 using fp32 = float;
 using fp16 = half;
 #ifndef __HIP_PLATFORM_AMD__
@@ -66,9 +67,9 @@ using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
 #else
 using bf16 = hip_bfloat16;
-using fp8e4m3 = hip_f8<hip_f8_type::fp8>;
-using fp8e5m2 = hip_f8<hip_f8_type::bf8>;
-#endif
+using fp8e4m3 = te_hip_fp8_e4m3;
+using fp8e5m2 = te_hip_fp8_e5m2;
+#endif //__HIP_PLATFORM_AMD__
 
 namespace detail {
 
@@ -81,12 +82,13 @@ constexpr inline const char *type_name() noexcept;
   }
 TRANSFORMER_ENGINE_TYPE_NAME(uint8_t)
 TRANSFORMER_ENGINE_TYPE_NAME(int32_t)
+TRANSFORMER_ENGINE_TYPE_NAME(int64_t)
 TRANSFORMER_ENGINE_TYPE_NAME(float)
 TRANSFORMER_ENGINE_TYPE_NAME(half)
 #ifdef __HIP_PLATFORM_AMD__
 TRANSFORMER_ENGINE_TYPE_NAME(hip_bfloat16)
-TRANSFORMER_ENGINE_TYPE_NAME(hip_f8<hip_f8_type::fp8>)
-TRANSFORMER_ENGINE_TYPE_NAME(hip_f8<hip_f8_type::bf8>)
+TRANSFORMER_ENGINE_TYPE_NAME(te_hip_fp8_e4m3)
+TRANSFORMER_ENGINE_TYPE_NAME(te_hip_fp8_e5m2)
 #else
 TRANSFORMER_ENGINE_TYPE_NAME(nv_bfloat16)
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e4m3)
@@ -98,7 +100,7 @@ TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e5m2)
 
 template <typename T>
 struct TypeInfo {
-  using types = std::tuple<byte, int32, fp32, fp16, bf16, fp8e4m3, fp8e5m2>;
+  using types = std::tuple<byte, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2>;
 
   template <typename U, DType current>
   struct Helper {
@@ -135,7 +137,11 @@ struct TypeInfo {
       { __VA_ARGS__ }                                        \
     } break;                                                 \
     case DType::kInt32: {                                    \
-      using type = float;                                    \
+      using type = int32_t;                                  \
+      { __VA_ARGS__ }                                        \
+    } break;                                                 \
+    case DType::kInt64: {                                    \
+      using type = int64_t;                                  \
       { __VA_ARGS__ }                                        \
     } break;                                                 \
     case DType::kFloat32: {                                  \
@@ -258,6 +264,14 @@ inline int log2_ceil(int value) {
   int log2_value = 0;
   while ((1 << log2_value) < value) ++log2_value;
   return log2_value;
+}
+
+template <size_t B>
+inline size_t alignTo(size_t x) {
+  size_t r = x % B;
+  if (r == 0) return x;
+
+  return x + B - r;
 }
 
 template <typename T>

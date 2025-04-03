@@ -17,25 +17,6 @@
 
 namespace ck_fused_attn{
 
-// convert the softmax lse from [b, h, s_q] into shape [h, total_seqlen_q]
-__global__ void softmax_lse_to_thd(
-  uint64_t b, uint64_t h, uint64_t s_q,
-  const int32_t* cu_seqlen_q,
-  const float* lse,
-  float* lse_thd){
-
-  int32_t total_seqlen_q = cu_seqlen_q[b];
-  
-  for(uint64_t bh_idx = blockIdx.x*blockDim.x + threadIdx.x; bh_idx < b*h; bh_idx += blockDim.x * gridDim.x){
-    uint64_t b_idx = bh_idx/h;
-    uint64_t h_idx = bh_idx%h;
-    // loop over a given batch and head idx
-    for(uint64_t s_idx = cu_seqlen_q[b_idx]; s_idx < cu_seqlen_q[b_idx + 1]; s_idx++){
-      lse_thd[h_idx * total_seqlen_q + s_idx] = lse[bh_idx * s_q + s_idx - cu_seqlen_q[b_idx]];
-    }
-  }
-}
-
 // define dk_dv_reduce function only for fp16 and bf16 types
 template<typename DataType>
 __global__ void dk_dv_reduce(
@@ -88,7 +69,8 @@ __global__ void dk_dv_reduce(
 // define dk_dv_reduce function in THD layout only for fp16 and bf16 types
 template<typename DataType>
 __global__ void dk_dv_reduce_thd(
-  uint64_t h, uint64_t hg, uint64_t d, int32_t total_seqlen_kv,
+  uint64_t h, uint64_t hg, uint64_t d, 
+  const int32_t* total_seqlen_kv_ptr,
   const DataType *dk_expanded,
   const DataType *dv_expanded,
   uint64_t stride_h_dkv_expanded, uint64_t stride_s_dkv_expanded,
@@ -96,19 +78,23 @@ __global__ void dk_dv_reduce_thd(
   DataType *dv,
   //k,v, dk, dv guaranteed to have the same stride
   uint64_t stride_h_dkv, uint64_t stride_s_dkv){
-  
+
   uint64_t seqlen_idx = blockIdx.x;
   uint64_t head_k_idx = blockIdx.y;
   uint64_t hdim_idx = threadIdx.x;
   
+  assert(hdim_dix<d);
+
+  if(seqlen_idx >= *total_seqlen_kv_ptr){
+    return;
+  }
+
   // h guaranteed to be multiples of hg
   uint64_t head_idx_offset = h / hg;
 
   float sum_dk = 0.0f;
   float sum_dv = 0.0f;
 
-  assert(hdim_dix<d);
-  assert(seqlen_idx < total_seqlen_kv);
 
   uint64_t read_idx = head_k_idx*head_idx_offset*stride_h_dkv_expanded + seqlen_idx*stride_s_dkv_expanded + hdim_idx;
   uint64_t write_idx = head_k_idx*stride_h_dkv + seqlen_idx* stride_s_dkv + hdim_idx;
@@ -652,7 +638,7 @@ hipError_t ck_attn_varlen_bwd(
   const void* cu_seqlen_q_ptr, const void* cu_seqlen_kv_ptr,
   const void* o_ptr, 
   uint64_t stride_h_o, uint64_t stride_s_o,
-  const void* lse_ptr, 
+  const void* lse_thd_ptr, 
   const void* do_ptr, 
   uint64_t stride_h_do, uint64_t stride_s_do,
   float scaling_factor, float dropout_probability,
@@ -670,7 +656,6 @@ hipError_t ck_attn_varlen_bwd(
   void* dv_ptr, 
   uint64_t stride_h_dv, uint64_t stride_s_dv,
   void* lse_workspace_ptr,
-  void* lse_thd_ptr,
   bool deterministic,
   hipStream_t stream){
 
@@ -686,26 +671,11 @@ hipError_t ck_attn_varlen_bwd(
   ck_tile::index_t hdim_v = d;
   ck_tile::index_t max_seqlen_q = s_q;
   ck_tile::index_t max_seqlen_k = s_kv;
-  ck_tile::index_t total_seqlen_q = *(static_cast<const int32_t *>(cu_seqlen_q_ptr) + b);
-  ck_tile::index_t total_seqlen_kv = *(static_cast<const int32_t *>(cu_seqlen_kv_ptr) + b);
   float scale_s = scaling_factor;
   float p_drop = dropout_probability;
   float p_undrop = 1.0 - p_drop;
   bool is_group_mode = true;
   bool s_randval = false;
-
-  // convert the softmax_lse from shape [b, h, s_q] into THD
-  if(lse_thd_ptr!=lse_ptr){
-    assert((lse_thd_ptr!=nullptr) && (lse_ptr!=nullptr));
-    constexpr int THREADS_PER_BLOCK = 1024;
-    dim3 block(THREADS_PER_BLOCK);
-    dim3 grid(ceil(1.0 * b * h/THREADS_PER_BLOCK));
-    hipLaunchKernelGGL(
-      softmax_lse_to_thd, grid, block, 0, stream,
-      b, h, s_q, static_cast<const int32_t*>(cu_seqlen_q_ptr),
-      static_cast<const float*>(lse_ptr),
-      static_cast<float*>(lse_thd_ptr));
-  }
 
   // THD does not work with bias
 
@@ -760,8 +730,8 @@ hipError_t ck_attn_varlen_bwd(
     const ck_tile::index_t nhead_stride_o = stride_h_o;
     const ck_tile::index_t nhead_stride_randval = 0;
     const ck_tile::index_t nhead_stride_do = stride_h_do;
-    // lsed and lse of shape [h, total_seqlen_q]
-    const ck_tile::index_t nhead_stride_lsed = total_seqlen_q;
+    // lsed and lse of shape [h, b*s_q] with effective data in first total_seqlen_q places
+    const ck_tile::index_t nhead_stride_lsed = batch*max_seqlen_q;
     const ck_tile::index_t nhead_stride_dq = stride_h_dq;
     const ck_tile::index_t nhead_stride_dk = stride_h_dk;
     const ck_tile::index_t nhead_stride_dv = stride_h_dv;
@@ -786,7 +756,7 @@ hipError_t ck_attn_varlen_bwd(
     // bias not used in THD qkv layout
     const ck_tile::index_t batch_stride_dbias = 0;
     const ck_tile::index_t batch_stride_dq_acc = 0; //dq_acc of shape (nsplits, T, H, D)
-    const ck_tile::index_t split_stride_dq_acc = total_seqlen_q*h*d;
+    const ck_tile::index_t split_stride_dq_acc = batch*max_seqlen_q*h*d;
 
     return fmha_bwd_args{q_ptr,
                          k_ptr,
@@ -805,8 +775,8 @@ hipError_t ck_attn_varlen_bwd(
                          cu_seqlen_q_ptr,//cu_seqlen_q
                          cu_seqlen_kv_ptr,//cu_seqlen_kv
                          nullptr, /* seqlen_k_ptr */
-                         total_seqlen_q,
-                         total_seqlen_kv,
+                         0, //seqlen_q, unused in group mode
+                         0, //seqlen_kv, unused in group mode
                          batch,
                          max_seqlen_q,
                          max_seqlen_k,
@@ -871,7 +841,7 @@ hipError_t ck_attn_varlen_bwd(
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
   }
   if(is_mqa_gqa){
-    dim3 grid(total_seqlen_kv, hg);
+    dim3 grid(b*s_kv, hg);
     dim3 block(d);
     if (ck_fused_attn_log_config){
       std::cout<<std::endl<<"run dk_dv_reduce_thd: "<<std::endl;
@@ -887,7 +857,8 @@ hipError_t ck_attn_varlen_bwd(
     CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
       hipLaunchKernelGGL(
         dk_dv_reduce_thd<CK_TILE_TYPE>, grid, block, 0, stream,
-        h, hg, d, total_seqlen_kv,
+        h, hg, d, 
+        static_cast<const int32_t*>(cu_seqlen_kv_ptr)+b,
         static_cast<CK_TILE_TYPE*>(dk_expanded_ptr),
         static_cast<CK_TILE_TYPE*>(dv_expanded_ptr),
         stride_h_dkv_expanded, stride_s_dkv_expanded,

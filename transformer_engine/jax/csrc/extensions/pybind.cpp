@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved. 
+ * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved. 
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -54,9 +54,59 @@ pybind11::dict Registrations() {
   dict["te_fused_attn_forward"] = EncapsulateFunction(FusedAttnForward);
   dict["te_fused_attn_backward"] = EncapsulateFunction(FusedAttnBackward);
 
+  // Transpose
+  dict["te_transpose_ffi"] = EncapsulateFFI(TransposeHandler);
   dict["te_cast_transpose_ffi"] = EncapsulateFFI(CastTransposeHandler);
+  dict["te_dbias_cast_transpose_ffi"] = EncapsulateFFI(DBiasCastTransposeHandler);
+
+  // Activation
   dict["te_act_lu_ffi"] = EncapsulateFFI(ActLuHandler);
+  dict["te_act_lu_fp8_ffi"] = EncapsulateFFI(ActLuFP8Handler);
   dict["te_dact_lu_ffi"] = EncapsulateFFI(DActLuHandler);
+  dict["te_dact_lu_dbias_cast_transpose_ffi"] =
+      EncapsulateFunction(DActLuDBiasCastTransposeHandler);
+  dict["te_dgated_act_lu_cast_transpose_ffi"] =
+      EncapsulateFunction(DGatedActLuCastTransposeHandler);
+
+  // Quantization
+  dict["te_quantize_ffi"] = EncapsulateFFI(QuantizeHandler);
+  dict["te_dequantize_ffi"] = EncapsulateFFI(DequantizeHandler);
+
+  // Softmax
+  dict["te_scaled_softmax_forward_ffi"] = EncapsulateFunction(ScaledSoftmaxForwardHandler);
+  dict["te_scaled_softmax_backward_ffi"] = EncapsulateFunction(ScaledSoftmaxBackwardHandler);
+  dict["te_scaled_masked_softmax_forward_ffi"] =
+      EncapsulateFunction(ScaledMaskedSoftmaxForwardHandler);
+  dict["te_scaled_masked_softmax_backward_ffi"] =
+      EncapsulateFunction(ScaledMaskedSoftmaxBackwardHandler);
+  dict["te_scaled_upper_triang_masked_softmax_forward_ffi"] =
+      EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxForwardHandler);
+  dict["te_scaled_upper_triang_masked_softmax_backward_ffi"] =
+      EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxBackwardHandler);
+
+  // Normalization
+  dict["te_layernorm_forward_ffi"] = EncapsulateFFI(LayerNormForwardHandler);
+  dict["te_layernorm_forward_fp8_ffi"] = EncapsulateFFI(LayerNormForwardFP8Handler);
+  dict["te_layernorm_backward_ffi"] = EncapsulateFFI(LayerNormBackwardHandler);
+  dict["te_rmsnorm_forward_ffi"] = EncapsulateFunction(RMSNormForwardHandler);
+  dict["te_rmsnorm_forward_fp8_ffi"] = EncapsulateFunction(RMSNormForwardFP8Handler);
+  dict["te_rmsnorm_backward_ffi"] = EncapsulateFunction(RMSNormBackwardHandler);
+
+#ifndef USE_ROCM
+  // Attention
+  pybind11::dict fused_attn_forward_ffi;
+  fused_attn_forward_ffi["prepare"] = EncapsulateFFI(CudnnHandleInitHandler);
+  fused_attn_forward_ffi["execute"] = EncapsulateFFI(FusedAttnForwardHandler);
+  dict["te_fused_attn_forward_ffi"] = fused_attn_forward_ffi;
+
+  pybind11::dict fused_attn_backward_ffi;
+  fused_attn_backward_ffi["prepare"] = EncapsulateFFI(CudnnHandleInitHandler);
+  fused_attn_backward_ffi["execute"] = EncapsulateFFI(FusedAttnBackwardHandler);
+  dict["te_fused_attn_backward_ffi"] = fused_attn_backward_ffi;
+#else
+  dict["te_fused_attn_forward_ffi"] = EncapsulateFFI(FusedAttnForwardHandler);
+  dict["te_fused_attn_backward_ffi"] = EncapsulateFFI(FusedAttnBackwardHandler);
+#endif
   return dict;
 }
 

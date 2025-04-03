@@ -18,6 +18,7 @@
 #include "fused_attn_aotriton.h"
 #include "utils.h"
 
+#ifdef USE_FUSED_ATTN_AOTRITON
 #if AOTRITON_ENABLE_SUFFIX
 namespace aotriton = AOTRITON_NS;
 #endif
@@ -31,6 +32,7 @@ inline aotriton::TensorView<0> mk_aoscalartensor(const uint64_t* ptr)
 }
 
 }
+#endif // USE_FUSED_ATTN_AOTRITON
 
 namespace transformer_engine {
 namespace fused_attn_rocm {
