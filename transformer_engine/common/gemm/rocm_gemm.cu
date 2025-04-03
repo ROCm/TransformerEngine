@@ -1004,6 +1004,16 @@ static inline int getIntEnv(const char *name, int defval, int minval)
 
 } //namespace
 
+static std::once_flag init_flag;
+static hipblasLtHandle_t hipblaslt_handles[num_streams];
+
+// Warning: only call once per device!
+static void init_hipblaslt_handles() {
+  for (int i = 0; i < num_streams; i++) {
+    NVTE_CHECK_HIPBLASLT(hipblasLtCreate(&hipblaslt_handles[i]));
+  }
+}
+
 void hipblaslt_gemm(const Tensor *inputA,
                  const Tensor *inputB,
                  Tensor *outputD,
@@ -1023,7 +1033,8 @@ void hipblaslt_gemm(const Tensor *inputA,
                  int n_split,
                  bool gemm_producer,
                  const Tensor *inputCounter,
-                 hipStream_t stream
+                 hipStream_t stream,
+                 hipblasLtHandle_t handle
 ) {
   void *A = inputA->data.dptr;
   void *A_scale_inverse = inputA->scale_inv.dptr;
@@ -1059,10 +1070,12 @@ void hipblaslt_gemm(const Tensor *inputA,
   int device_id;
   NVTE_CHECK_CUDA(hipGetDevice(&device_id));
 
-  hipblasLtHandle_t handle = cached_handles.get(device_id);
-  if (handle == nullptr)
-  {
-    handle = cached_handles.obtain(device_id);
+  if (handle == nullptr) {
+    handle = cached_handles.get(device_id);
+    if (handle == nullptr)
+    {
+      handle = cached_handles.obtain(device_id);
+    }
   }
 
   hipblasLtMatmulDesc_t       operationDesc = nullptr;
@@ -1785,13 +1798,12 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  int ldb, int ldd, bool transa, bool transb, bool grad,
                  void *workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                  int math_sm_count, int m_split, int n_split, bool gemm_producer,
-                 const Tensor *inputCounter, hipStream_t stream)
+                 const Tensor *inputCounter, hipStream_t stream, int stream_offset)
 {
 /*If no backend is specified with env variable use HIPBLASLT unless it is disabled
   If HIPBLASLT backend is enabled and requested, use it despite ROCBLAS status
   Otherwise use ROCBLAS 
 */
-
   bool use_hipblaslt = std::getenv("NVTE_USE_HIPBLASLT") != nullptr;
   bool use_rocblas = std::getenv("NVTE_USE_ROCBLAS") != nullptr;
 
@@ -1820,6 +1832,11 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 #ifdef USE_HIPBLASLT
   if (use_hipblaslt || !use_rocblas)
   {
+    // Init hipblaslt handles (once, globally)
+    std::call_once(init_flag, init_hipblaslt_handles);
+    // Check stream_offset valid.
+    NVTE_CHECK(stream_offset >= -1 && stream_offset < num_streams);
+
     hipblaslt_gemm(inputA, inputB, outputD, inputBias, outputPreGelu, 
                  m, n, k, lda, ldb, ldd, 
                 (transa) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
@@ -1827,7 +1844,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  grad,
                  workspace, workspaceSize, accumulate, use_split_accumulator,
                  math_sm_count, m_split, n_split, gemm_producer,
-                 inputCounter, stream);
+                 inputCounter, stream, 
+                 stream_offset == -1 ? nullptr : hipblaslt_handles[stream_offset]);
     return;
   }
 #endif
