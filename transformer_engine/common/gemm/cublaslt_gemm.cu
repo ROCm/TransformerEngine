@@ -315,13 +315,11 @@ static void init_streams_and_events() {
 
 }  // namespace transformer_engine
 
-#ifdef __HIP_PLATFORM_AMD__
-// stream_offset = -1 means torch default stream
-void nvte_cublas_gemm_with_stream_offset(const NVTETensor A, const NVTETensor B, NVTETensor D, const NVTETensor bias,
+void nvte_cublas_gemm_ex(const NVTETensor A, const NVTETensor B, NVTETensor D, const NVTETensor bias,
                       NVTETensor pre_gelu_out, bool transa, bool transb, bool grad,
                       NVTETensor workspace, bool accumulate, bool use_split_accumulator,
-                      int math_sm_count, cudaStream_t stream, int stream_offset) {
-  NVTE_API_CALL(nvte_cublas_gemm_with_stream_offset);
+                      int math_sm_count, cudaStream_t stream, int stream_offset = -1) {
+  NVTE_API_CALL(nvte_cublas_gemm_ex);
 
   using namespace transformer_engine;
   const Tensor *inputA = reinterpret_cast<const Tensor *>(A);
@@ -378,83 +376,34 @@ void nvte_cublas_gemm_with_stream_offset(const NVTETensor A, const NVTETensor B,
         << std::endl;
   }
 
+#ifdef __HIP_PLATFORM_AMD__
   cublas_gemm(inputA, inputB, outputD,  biasTensor, outputGelu, m, n, k, lda, ldb, ldd,
               transa, transb,
               grad,
               wspace->data.dptr, wspace->data.shape[0], accumulate, use_split_accumulator,
               math_sm_count, 0, 0, false, nullptr, stream, stream_offset);
+#else
+  cublas_gemm(inputA, inputB, outputD,  biasTensor, outputGelu, m, n, k, lda, ldb, ldd,
+              transa, transb,
+              (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N,
+              grad,
+              wspace->data.dptr, wspace->data.shape[0], accumulate, use_split_accumulator,
+              math_sm_count, 0, 0, false, nullptr, stream);
+#endif //__HIP_PLATFORM_AMD__
 }
-#endif // __HIP_PLATFORM_AMD__
 
 void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, const NVTETensor bias,
                       NVTETensor pre_gelu_out, bool transa, bool transb, bool grad,
                       NVTETensor workspace, bool accumulate, bool use_split_accumulator,
                       int math_sm_count, cudaStream_t stream) {
   NVTE_API_CALL(nvte_cublas_gemm);
-  using namespace transformer_engine;
-  const Tensor *inputA = reinterpret_cast<const Tensor *>(A);
-  const Tensor *inputB = reinterpret_cast<const Tensor *>(B);
-  Tensor *outputD = reinterpret_cast<Tensor *>(D);
-  const Tensor *biasTensor = reinterpret_cast<const Tensor *>(bias);
-  Tensor *outputGelu = reinterpret_cast<Tensor *>(pre_gelu_out);
-  Tensor *wspace = reinterpret_cast<Tensor *>(workspace);
-
-  const int m = transa ? inputA->data.shape[0] : inputA->data.shape[1];
-  const int k = transa ? inputA->data.shape[1] : inputA->data.shape[0];
-  const int n = transb ? inputB->data.shape[1] : inputB->data.shape[0];
-  int lda, ldb, ldd;
-  if (transa && !transb) {  // TN
-    lda = k;
-    ldb = k;
-    ldd = m;
-  } else if (!transa && !transb) {  // NN
-    lda = m;
-    ldb = k;
-    ldd = m;
-  } else if (!transa && transb) {  // NT
-    lda = m;
-    ldb = n;
-    ldd = m;
-  } else {  // TT
-    NVTE_ERROR("TT layout not allowed.");
-  }
-
-  bool nvte_log_gemm_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_GEMM_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_gemm_config = true;
-  }
-
-  if (nvte_log_gemm_config) {
-    float A_scale_inv, B_scale_inv;
-    (void)cudaMemcpy(&A_scale_inv, inputA->scale_inv.dptr, sizeof(float), cudaMemcpyDeviceToHost);
-    (void)cudaMemcpy(&B_scale_inv, inputB->scale_inv.dptr, sizeof(float), cudaMemcpyDeviceToHost);
-    std::cout << "m=" << m << " k=" << k << " n=" << n 
-        << " transa=" << (transa?"T":"N")
-        << " transb=" << (transb?"T":"N")
-        << " A_type=" << (int)inputA->data.dtype
-        << " B_type=" << (int)inputB->data.dtype
-        << " D_type=" << (int)outputD->data.dtype
-        << " bias_type=" << (int)biasTensor->data.dtype
-        << " grad=" << grad
-        << " bias=" << (biasTensor->data.dptr != nullptr)
-        << " gelu=" << (outputGelu->data.dptr != nullptr)
-        << " use_fp8=" << ( is_fp8_dtype(inputA->data.dtype) || is_fp8_dtype(inputB->data.dtype) )
-        << " A_scale_inverse = " <<  A_scale_inv
-        << " B_scale_inverse = " <<  B_scale_inv
-        << " accumulate=" << accumulate
-        << std::endl;
-  }
-
-  cublas_gemm(inputA, inputB, outputD,  biasTensor, outputGelu, m, n, k, lda, ldb, ldd,
-#ifdef __HIP_PLATFORM_AMD__
-              transa, transb,
-#else
-              (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N,
-#endif //__HIP_PLATFORM_AMD__
-              grad,
-              wspace->data.dptr, wspace->data.shape[0], accumulate, use_split_accumulator,
-              math_sm_count, 0, 0, false, nullptr, stream);
+  
+  // stream_offset = -1 means torch default stream
+  nvte_cublas_gemm_ex(A, B, D, bias, pre_gelu_out, 
+                      transa, transb, 
+                      grad, 
+                      workspace, accumulate, use_split_accumulator, 
+                      math_sm_count, stream, -1);
 }
 
 void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D,
@@ -531,15 +480,9 @@ void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVT
   }
 
   for (int i = 0; i < num_gemms; i++) {
-#ifdef __HIP_PLATFORM_AMD__
-    nvte_cublas_gemm_with_stream_offset(A[i], B[i], D[i], bias[i], pre_gelu_out[i], transa, transb, grad,
-                                        workspace[i % num_streams], accumulate, use_split_accumulator, math_sm_count,
-                                        compute_streams[i % num_streams], i % num_streams);
-#else
-    nvte_cublas_gemm(A[i], B[i], D[i], bias[i], pre_gelu_out[i], transa, transb, grad,
+    nvte_cublas_gemm_ex(A[i], B[i], D[i], bias[i], pre_gelu_out[i], transa, transb, grad,
                      workspace[i % num_streams], accumulate, use_split_accumulator, math_sm_count,
-                     compute_streams[i % num_streams]);
-#endif // __HIP_PLATFORM_AMD__
+                     compute_streams[i % num_streams], i % num_streams);
   }
 
   // record events on compute streams
