@@ -5,7 +5,7 @@ import pytest
 import torch
 import os
 
-from transformer_engine.pytorch.triton_kernels.rmsnorm_triton import te_rmsnorm_fwd_fp8_noalloc_triton, te_rmsnorm_fwd_noalloc_triton, te_rmsnorm_fwd_inf_triton, te_rmsnorm_bwd_triton
+from transformer_engine.pytorch.triton_kernels.rmsnorm_triton import te_rmsnorm_fwd_fp8_noalloc_triton, te_rmsnorm_fwd_noalloc_triton, te_rmsnorm_fwd_inf_triton, te_rmsnorm_bwd_triton, get_num_sms
 from transformer_engine.pytorch import cpp_extensions as tex
 
 
@@ -81,6 +81,27 @@ def te_compare_results(t, r, atol, rtol):
     assert not has_mismatch, "There are tensor mismatches."
 
 
+def get_ln_sm_margin(sm_margin_type):
+    try:
+        sm_margin = max(int(os.getenv(f"NVTE_{sm_margin_type}_LAYERNORM_SM_MARGIN", "0")), 0)
+    except ValueError:
+        sm_margin = 0
+    assert sm_margin >= 0
+    return sm_margin
+
+
+def get_fwd_ln_sm_margin():
+    return get_ln_sm_margin("FWD")
+
+
+def get_bwd_ln_sm_margin():
+    return get_ln_sm_margin("BWD")
+
+
+def get_inf_ln_sm_margin():
+    return get_ln_sm_margin("INF")
+
+
 test_shapes = [
     (2048, 4096),
     (768, 2048),
@@ -134,19 +155,21 @@ def test_rmsnorm_fwd_bwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma):
     # in hipfied kernel cpp test, dz is of weight type
     dz_tensor = dz_tensor.to(in_dtype)
 
+    # other parameters:
     epsilon = 1e-5
+    fwd_ln_sm_margin = get_fwd_ln_sm_margin()
+    bwd_ln_sm_margin = get_bwd_ln_sm_margin()
 
     # run the fwd triton path
     # in hipfied kernel cpp test, z is of out_type
     ln_out_triton = torch.empty(M, N, dtype=out_dtype, device='cuda')
-    ln_out_triton, rsigma_triton = te_rmsnorm_fwd_fp8_noalloc_triton(input_tensor, gamma_tensor, epsilon, ln_out_triton, out_dtype, zero_centered_gamma)
+    ln_out_triton, rsigma_triton = te_rmsnorm_fwd_fp8_noalloc_triton(input_tensor, gamma_tensor, epsilon, ln_out_triton, out_dtype, fwd_ln_sm_margin, zero_centered_gamma)
 
     # run the fwd reference hipified kernel path
     # dummy fp8 meta
     scale_tensor = torch.empty(0, dtype=torch.float32, device='cuda')
     amax_tensor = torch.zeros(0, dtype=torch.float32, device='cuda')
     scale_inv_tensor = torch.empty(0, dtype=torch.float32, device='cuda')
-    fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
     ln_out_hipified = torch.empty(M, N, dtype=out_dtype, device='cuda')
     ln_out_hipified, rsigma_hipified = tex.rmsnorm_fwd_fp8_noalloc(input_tensor, gamma_tensor, epsilon, scale_tensor, ln_out_hipified, amax_tensor, scale_inv_tensor, get_te_dtype(out_dtype), fwd_ln_sm_margin, zero_centered_gamma)
 
@@ -163,10 +186,10 @@ def test_rmsnorm_fwd_bwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma):
                                msg=lambda msg: f"rsigma does not match triton <-> hip\n\n{msg}\n")
 
     # run triton bwd
-    dx_triton, dgamma_triton = te_rmsnorm_bwd_triton(dz_tensor, input_tensor, rsigma_triton, gamma_tensor, zero_centered_gamma)
+    dx_triton, dgamma_triton = te_rmsnorm_bwd_triton(dz_tensor, input_tensor, rsigma_triton, gamma_tensor, bwd_ln_sm_margin, zero_centered_gamma)
 
     # run hipified ref bwd
-    dx_hipified, dgamma_hipified = tex.rmsnorm_bwd(dz_tensor, input_tensor, rsigma_hipified, gamma_tensor, fwd_ln_sm_margin, zero_centered_gamma)
+    dx_hipified, dgamma_hipified = tex.rmsnorm_bwd(dz_tensor, input_tensor, rsigma_hipified, gamma_tensor, bwd_ln_sm_margin, zero_centered_gamma)
 
     atol_bwd = 5e-6
     rtol_bwd = 1e-4
@@ -195,12 +218,13 @@ def test_rmsnorm_fwd_noalloc_triton(M, N, in_dtype, zero_centered_gamma):
     gamma_tensor = gamma_tensor.to(in_dtype)
 
     epsilon = 1e-5
+    fwd_ln_sm_margin = get_fwd_ln_sm_margin()
+
     # run the triton path
     ln_out_triton = torch.empty(M, N, dtype=in_dtype, device='cuda')
-    ln_out_triton, rsigma_triton = te_rmsnorm_fwd_noalloc_triton(input_tensor, gamma_tensor, ln_out_triton, epsilon, zero_centered_gamma)
+    ln_out_triton, rsigma_triton = te_rmsnorm_fwd_noalloc_triton(input_tensor, gamma_tensor, ln_out_triton, epsilon, fwd_ln_sm_margin, zero_centered_gamma)
 
     # run the reference hipified kernel path
-    fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
     ln_out_hipified = torch.empty(M, N, dtype=in_dtype, device='cuda')
     ln_out_hipified, rsigma_hipified = tex.rmsnorm_fwd_noalloc(input_tensor, gamma_tensor, ln_out_hipified, epsilon, fwd_ln_sm_margin, zero_centered_gamma)
     atol, rtol = get_tolerances(in_dtype)
@@ -222,11 +246,21 @@ def test_rmsnorm_fwd_inf_triton(M, N, in_dtype, zero_centered_gamma):
     gamma_tensor = gamma_tensor.to(in_dtype)
 
     epsilon = 1e-5
+    inf_ln_sm_margin = get_inf_ln_sm_margin()
+
     # run the triton path
-    ln_out_triton = te_rmsnorm_fwd_inf_triton(input_tensor, gamma_tensor, epsilon, zero_centered_gamma)
+    ln_out_triton = te_rmsnorm_fwd_inf_triton(input_tensor, gamma_tensor, epsilon, inf_ln_sm_margin, zero_centered_gamma)
 
     # run the reference hipified kernel path
-    fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
-    ln_out_hipified = tex.rmsnorm_fwd_inf(input_tensor, gamma_tensor, epsilon, fwd_ln_sm_margin, zero_centered_gamma)
+    ln_out_hipified = tex.rmsnorm_fwd_inf(input_tensor, gamma_tensor, epsilon, inf_ln_sm_margin, zero_centered_gamma)
     atol, rtol = get_tolerances(in_dtype)
     assert torch.allclose(ln_out_triton, ln_out_hipified, atol=atol, rtol=rtol), 'ln_out does not match'
+
+
+def test_sm_margin():
+    num_sms = get_num_sms()
+    assert num_sms > 0
+    assert get_num_sms(0) == num_sms
+    assert get_num_sms(-5) == num_sms
+    assert get_num_sms(1) == num_sms - 1
+    assert get_num_sms(100 * num_sms) == 1
