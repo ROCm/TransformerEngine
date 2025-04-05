@@ -82,10 +82,10 @@ bool is_ck_backend_supported(
 
   const int device_id = cuda::current_device();
   const std::string sm_arch_name_ = cuda::sm_arch_name(device_id);
-  //only gfx942 supported
-  if(!(sm_arch_name_.find("gfx942")!=std::string::npos)){
+  //only gfx942 and gfx 950 supported
+  if(!(sm_arch_name_.find("gfx942")!=std::string::npos || sm_arch_name_.find("gfx950")!=std::string::npos)){
     if(nvte_log_ck_config){
-      std::cout<<"only gfx942 is supported"<<std::endl;
+      std::cout<<"only gfx942/gfx950 is supported"<<std::endl;
     }
     return false;
   }

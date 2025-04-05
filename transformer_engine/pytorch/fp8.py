@@ -25,10 +25,10 @@ __all__ = ["fp8_autocast", "fp8_model_init"]
 def check_fp8_support() -> Tuple[bool, str]:
     from torch.utils.cpp_extension import IS_HIP_EXTENSION
     if IS_HIP_EXTENSION:
-        if get_device_compute_capability() == (9, 4):
+        if get_device_compute_capability() in [(9, 4), (9, 5)]:
             return True, ""
         else:
-            return False, "Only MI300 machines support fp8"
+            return False, "Only MI300/MI325/MI350 machines support fp8"
     else:
         """Return if fp8 support is available"""
         if get_device_compute_capability() >= (9, 0):  # hopper and above
