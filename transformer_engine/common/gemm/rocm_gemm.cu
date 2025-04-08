@@ -1007,7 +1007,11 @@ static inline int getIntEnv(const char *name, int defval, int minval)
 static std::once_flag init_flag;
 static hipblasLtHandle_t hipblaslt_handles[num_streams];
 
-// Warning: only call once per device!
+/* Warning: only call once per device!
+ * When calling nvte_multi_stream_cublas_gemm with hipblaslt backend
+ * need to create multiple handles corresponding to compute_streams
+ * to avoid a handle be used by multi-streams concurrently.
+ */
 static void init_hipblaslt_handles() {
   for (int i = 0; i < num_streams; i++) {
     NVTE_CHECK_HIPBLASLT(hipblasLtCreate(&hipblaslt_handles[i]));
@@ -1832,10 +1836,10 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 #ifdef USE_HIPBLASLT
   if (use_hipblaslt || !use_rocblas)
   {
-    // Init hipblaslt handles (once, globally)
-    std::call_once(init_flag, init_hipblaslt_handles);
     // Check stream_offset valid.
     NVTE_CHECK(stream_offset >= -1 && stream_offset < num_streams);
+    // Init hipblaslt handles (once, globally)
+    std::call_once(init_flag, init_hipblaslt_handles);
 
     hipblaslt_gemm(inputA, inputB, outputD, inputBias, outputPreGelu, 
                  m, n, k, lda, ldb, ldd, 

@@ -60,13 +60,12 @@ namespace transformer_engine {
 
 #ifdef __HIP_PLATFORM_AMD__
 //Forward declaration. The implementation is in rocm_gemm.cu
-// stream_offset -1 means torch default stream.
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, int m, int n, int k, int lda,
                  int ldb, int ldd, bool transa, bool transb, bool grad,
                  void* workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                  int math_sm_count, int m_split, int n_split, bool gemm_producer,
-                 const Tensor *inputCounter, hipStream_t stream, int stream_offset = -1);
+                 const Tensor *inputCounter, hipStream_t stream, int compute_stream_offset = -1);
 #else // Use cublasLt
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, int m, int n, int k, int lda,
@@ -315,12 +314,11 @@ static void init_streams_and_events() {
 
 }  // namespace transformer_engine
 
-void nvte_cublas_gemm_ex(const NVTETensor A, const NVTETensor B, NVTETensor D, const NVTETensor bias,
-                      NVTETensor pre_gelu_out, bool transa, bool transb, bool grad,
-                      NVTETensor workspace, bool accumulate, bool use_split_accumulator,
-                      int math_sm_count, cudaStream_t stream, int stream_offset = -1) {
-  NVTE_API_CALL(nvte_cublas_gemm_ex);
-
+// -1 means the stream from outer rather than compute_streams
+static void cublas_gemm_ex(const NVTETensor A, const NVTETensor B, NVTETensor D, const NVTETensor bias,
+                           NVTETensor pre_gelu_out, bool transa, bool transb, bool grad,
+                           NVTETensor workspace, bool accumulate, bool use_split_accumulator,
+                           int math_sm_count, cudaStream_t stream, int compute_stream_offset = -1) {
   using namespace transformer_engine;
   const Tensor *inputA = reinterpret_cast<const Tensor *>(A);
   const Tensor *inputB = reinterpret_cast<const Tensor *>(B);
@@ -376,20 +374,19 @@ void nvte_cublas_gemm_ex(const NVTETensor A, const NVTETensor B, NVTETensor D, c
         << std::endl;
   }
 
+  cublas_gemm(inputA, inputB, outputD,  biasTensor, outputGelu, m, n, k, lda, ldb, ldd,
 #ifdef __HIP_PLATFORM_AMD__
-  cublas_gemm(inputA, inputB, outputD,  biasTensor, outputGelu, m, n, k, lda, ldb, ldd,
               transa, transb,
-              grad,
-              wspace->data.dptr, wspace->data.shape[0], accumulate, use_split_accumulator,
-              math_sm_count, 0, 0, false, nullptr, stream, stream_offset);
 #else
-  cublas_gemm(inputA, inputB, outputD,  biasTensor, outputGelu, m, n, k, lda, ldb, ldd,
-              transa, transb,
               (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N,
+#endif //__HIP_PLATFORM_AMD__
               grad,
               wspace->data.dptr, wspace->data.shape[0], accumulate, use_split_accumulator,
-              math_sm_count, 0, 0, false, nullptr, stream);
+              math_sm_count, 0, 0, false, nullptr, stream
+#ifdef __HIP_PLATFORM_AMD__
+              ,compute_stream_offset
 #endif //__HIP_PLATFORM_AMD__
+            );
 }
 
 void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, const NVTETensor bias,
@@ -398,12 +395,11 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
                       int math_sm_count, cudaStream_t stream) {
   NVTE_API_CALL(nvte_cublas_gemm);
   
-  // stream_offset = -1 means torch default stream
-  nvte_cublas_gemm_ex(A, B, D, bias, pre_gelu_out, 
-                      transa, transb, 
-                      grad, 
-                      workspace, accumulate, use_split_accumulator, 
-                      math_sm_count, stream, -1);
+  cublas_gemm_ex(A, B, D, bias, pre_gelu_out, 
+                 transa, transb, 
+                 grad, 
+                 workspace, accumulate, use_split_accumulator, 
+                 math_sm_count, stream, -1);
 }
 
 void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D,
@@ -480,9 +476,9 @@ void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVT
   }
 
   for (int i = 0; i < num_gemms; i++) {
-    nvte_cublas_gemm_ex(A[i], B[i], D[i], bias[i], pre_gelu_out[i], transa, transb, grad,
-                     workspace[i % num_streams], accumulate, use_split_accumulator, math_sm_count,
-                     compute_streams[i % num_streams], i % num_streams);
+    cublas_gemm_ex(A[i], B[i], D[i], bias[i], pre_gelu_out[i], transa, transb, grad,
+                   workspace[i % num_streams], accumulate, use_split_accumulator, math_sm_count,
+                   compute_streams[i % num_streams], i % num_streams);
   }
 
   // record events on compute streams
