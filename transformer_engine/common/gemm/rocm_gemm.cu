@@ -1802,7 +1802,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  int ldb, int ldd, bool transa, bool transb, bool grad,
                  void *workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                  int math_sm_count, int m_split, int n_split, bool gemm_producer,
-                 const Tensor *inputCounter, hipStream_t stream, int stream_offset)
+                 const Tensor *inputCounter, hipStream_t stream, int compute_stream_offset)
 {
 /*If no backend is specified with env variable use HIPBLASLT unless it is disabled
   If HIPBLASLT backend is enabled and requested, use it despite ROCBLAS status
@@ -1836,20 +1836,20 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 #ifdef USE_HIPBLASLT
   if (use_hipblaslt || !use_rocblas)
   {
-    // Check stream_offset valid.
-    NVTE_CHECK(stream_offset >= -1 && stream_offset < num_streams);
+    // Check compute_stream_offset valid.
+    NVTE_CHECK(compute_stream_offset >= -1 && compute_stream_offset < num_streams);
     // Init hipblaslt handles (once, globally)
     std::call_once(init_flag, init_hipblaslt_handles);
 
     hipblaslt_gemm(inputA, inputB, outputD, inputBias, outputPreGelu, 
-                 m, n, k, lda, ldb, ldd, 
-                (transa) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
-                (transb) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
-                 grad,
-                 workspace, workspaceSize, accumulate, use_split_accumulator,
-                 math_sm_count, m_split, n_split, gemm_producer,
-                 inputCounter, stream, 
-                 stream_offset == -1 ? nullptr : hipblaslt_handles[stream_offset]);
+                   m, n, k, lda, ldb, ldd, 
+                   (transa) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
+                   (transb) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
+                   grad,
+                   workspace, workspaceSize, accumulate, use_split_accumulator,
+                   math_sm_count, m_split, n_split, gemm_producer,
+                   inputCounter, stream, 
+                   compute_stream_offset == -1 ? nullptr : hipblaslt_handles[compute_stream_offset]);
     return;
   }
 #endif
