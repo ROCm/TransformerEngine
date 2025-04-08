@@ -2,12 +2,14 @@
 # License for AMD contributions = MIT. See LICENSE for more information
 
 
-import os
-
 import pytest
 import torch
 
 from transformer_engine.pytorch import cpp_extensions as tex
+from transformer_engine.pytorch.triton_kernels.norm_common_triton import (
+    get_fwd_ln_sm_margin,
+    get_bwd_ln_sm_margin,
+)
 from transformer_engine.pytorch.triton_kernels.layernorm_triton import (
     te_layernorm_bwd_triton,
     te_layernorm_fwd_fp8_noalloc_triton,
@@ -73,7 +75,6 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
 
     # Run Hipified forward reference.
     scale = amax = scale_inv = torch.empty(0, device="cuda")
-    fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
     y_hipified = torch.empty((M, N), dtype=out_dtype, device="cuda")
     y_hipified, mu_hipified, rsigma_hipified = tex.layernorm_fwd_fp8_noalloc(
         x,
@@ -85,7 +86,7 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
         amax,
         scale_inv,
         get_te_dtype(out_dtype),
-        fwd_ln_sm_margin,
+        get_fwd_ln_sm_margin(),
         zero_centered_gamma,
     )
 
@@ -141,7 +142,7 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
         mu_hipified,
         rsigma_hipified,
         gamma,
-        fwd_ln_sm_margin,
+        get_bwd_ln_sm_margin(),
         zero_centered_gamma,
     )
 

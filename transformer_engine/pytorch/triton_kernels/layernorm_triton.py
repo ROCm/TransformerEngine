@@ -8,6 +8,8 @@ import torch
 import triton
 import triton.language as tl
 
+from .norm_common_triton import block_size, use_blocked
+
 
 def get_autotune_config():
     return [
@@ -326,16 +328,6 @@ def _layernorm_bwd_dwdb_triton(
     tl.store(FINAL_DB + cols, sum_db.to(FINAL_DB.type.element_ty), mask=cols < N)
 
 
-def _block_size(x):
-    max_fused_size = 65536 // x.element_size()
-    block_size = min(max_fused_size, triton.next_power_of_2(x.shape[1]))
-    return block_size
-
-
-def _use_blocked(x):
-    return x.shape[1] > _block_size(x)
-
-
 def te_layernorm_fwd_fp8_noalloc_triton(
     x, gamma, beta, eps, y, out_dtype, zero_centered_gamma
 ):
@@ -344,7 +336,7 @@ def te_layernorm_fwd_fp8_noalloc_triton(
     mu = torch.empty((M,), dtype=torch.float32, device=x.device)
     rsigma = torch.empty((M,), dtype=torch.float32, device=x.device)
 
-    BLOCK_SIZE = _block_size(x)
+    BLOCK_SIZE = block_size(x)
     _layernorm_fwd_triton[(M,)](
         x,
         y,
@@ -367,10 +359,9 @@ def te_layernorm_fwd_fp8_noalloc_triton(
 def te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, zero_centered_gamma):
     M, N = x.shape
 
-    BLOCK_SIZE = _block_size(x)
+    BLOCK_SIZE = block_size(x)
     num_warps = min(max(BLOCK_SIZE // 256, 1), 8)
     tile_num = max(min(256, M // 4), 1)
-    use_blocked = _use_blocked(x)
 
     dx = torch.empty_like(x)
     _dgamma = torch.zeros((tile_num, N), dtype=torch.float32, device=gamma.device)
@@ -393,7 +384,7 @@ def te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, zero_centered_gamma):
         ZERO_CENTERED_GAMMA=zero_centered_gamma,
         NUM_ROWS=M,
         BLOCK_SIZE_N=BLOCK_SIZE,
-        USE_BLOCKED=use_blocked,
+        USE_BLOCKED=use_blocked(x),
         num_warps=num_warps,
     )
 
