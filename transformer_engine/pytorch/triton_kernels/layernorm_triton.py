@@ -18,9 +18,9 @@ def get_autotune_config():
     ]
 
 
-@triton.autotune(
-    configs=get_autotune_config(), key=["n_rows", "n_cols"], use_cuda_graph=True
-)
+# @triton.autotune(
+#     configs=get_autotune_config(), key=["n_rows", "n_cols"], use_cuda_graph=True
+# )
 @triton.jit
 def _layernorm_fwd_triton(
     x_ptr,
@@ -329,7 +329,8 @@ def _layernorm_bwd_dwdb_triton(
 
 
 def te_layernorm_fwd_fp8_noalloc_triton(
-    x, gamma, beta, eps, y, out_dtype, zero_centered_gamma
+    x, gamma, beta, eps, y, out_dtype, zero_centered_gamma,
+    waves_per_eu=2, num_warps=8,
 ):
     M, N = x.shape
     y = y.view(out_dtype)
@@ -351,6 +352,9 @@ def te_layernorm_fwd_fp8_noalloc_triton(
         eps,
         ZERO_CENTERED_GAMMA=zero_centered_gamma,
         BLOCK_SIZE=BLOCK_SIZE,
+        num_stages=1,
+        waves_per_eu=waves_per_eu,  # 1 2 4
+        num_warps=num_warps,  # 4 8 16
     )
 
     return y, mu, rsigma
