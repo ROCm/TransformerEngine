@@ -54,7 +54,7 @@ layers_atomic_ring_exchange = []
 def get_cublas_workspace_size_bytes() -> None:
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
     if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
-        return 33_554_432
+        return 79_691_776
     return 4_194_304
 
 

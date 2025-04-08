@@ -6,15 +6,32 @@ import torch
 import transformer_engine_torch as tex
 import triton
 import triton.language as tl
+from ..utils import get_device_compute_capability
 
 def is_fp8_dtype(dtype):
     return dtype in (tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2)
 
+if get_device_compute_capability() == (9, 4):
+    tl_e4m3_data_type = tl.float8e4b8
+    tl_e5m2_data_type = tl.float8e5b16
+    e4m3_max = 240.0
+    e5m2_max = 57344.0
+elif get_device_compute_capability() == (9, 5):
+    tl_e4m3_data_type = tl.float8e4nv
+    tl_e5m2_data_type = tl.float8e5
+    e4m3_max = 448.0
+    e5m2_max = 57344.0
+else:
+    tl_e4m3_data_type = None
+    tl_e5m2_data_type = None
+    e4m3_max = None
+    e5m2_max = None
+
 def get_triton_dtype(dtype: tex.DType):
     if dtype == tex.DType.kFloat8E4M3:
-        return tl.float8e4b8
+        return tl_e4m3_data_type
     if dtype == tex.DType.kFloat8E5M2:
-        return tl.float8e5b16
+        return tl_e5m2_data_type
 
 def get_te_dtype(dtype):
     if dtype == torch.float8_e4m3fnuz:
@@ -24,9 +41,9 @@ def get_te_dtype(dtype):
 
 def get_fp8_max(dtype: tex.DType):
     if dtype == tex.DType.kFloat8E4M3:
-        return 240.0
+        return e4m3_max
     if dtype == tex.DType.kFloat8E5M2:
-        return 57344.0
+        return e5m2_max
 
 ##########################################
 #### cast_transpose
@@ -48,7 +65,7 @@ def _cast_transpose_triton(A, noop_ptr, C, T, stride_am, stride_an, stride_bn, s
             return
 
     pid = tl.program_id(0)
-    scale = tl.load(scale_ptr)
+    scale = tl.load(scale_ptr).to(tl.float32)
 
     grid_m = (M + BLOCK_M - 1) // BLOCK_M
     grid_n = (N + BLOCK_N - 1) // BLOCK_N
