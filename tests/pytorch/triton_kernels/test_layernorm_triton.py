@@ -175,3 +175,75 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
         rtol_bwd,
         lambda msg: f"dbeta does not match triton <-> hip\n\n{msg}\n",
     )
+
+
+if __name__ == "__main__":
+    import sys
+
+    in_dtype = out_dtype = torch.float16
+    zero_centered_gamma = True
+    run_triton = sys.argv[1] == "triton"
+    run_hipified = sys.argv[1] == "te"
+    M = int(sys.argv[2])
+    N = int(sys.argv[3])
+    run_bwd = sys.argv[4] == "bwd"
+    mode = "forward only" if not run_bwd else "forward + backward"
+    waves_per_eu = int(sys.argv[5]) if run_triton else None
+    num_warps = int(sys.argv[6]) if run_triton else None
+
+    # Generate tensors:
+    x = fill_uniform((M, N), in_dtype)
+    gamma = fill_uniform(N, in_dtype)
+    beta = fill_uniform(N, in_dtype)
+    dz = fill_uniform((M, N), in_dtype)
+
+    epsilon = 1e-5
+
+    if run_triton:
+        print(f"Running {mode} Triton implementation for shape {(M, N)}...")
+        # Run Triton forward.
+        y_triton = torch.empty((M, N), dtype=out_dtype, device="cuda")
+        y_triton, mu_triton, rsigma_triton = te_layernorm_fwd_fp8_noalloc_triton(
+            x, gamma, beta, epsilon, y_triton, out_dtype, zero_centered_gamma,
+            waves_per_eu=waves_per_eu, num_warps=num_warps
+        )
+        if run_bwd:
+            # Run Triton backward.
+            dx_triton, dgamma_triton, dbeta_triton = te_layernorm_bwd_triton(
+                dz,
+                x,
+                mu_triton,
+                rsigma_triton,
+                gamma,
+                zero_centered_gamma,
+            )
+
+    if run_hipified:
+        print(f"Running {mode} TE implementation for shape {(M, N)}...")
+        # Run Hipified forward reference.
+        scale = amax = scale_inv = torch.empty(0, device="cuda")
+        y_hipified = torch.empty((M, N), dtype=out_dtype, device="cuda")
+        y_hipified, mu_hipified, rsigma_hipified = tex.layernorm_fwd_fp8_noalloc(
+            x,
+            gamma,
+            beta,
+            epsilon,
+            scale,
+            y_hipified,
+            amax,
+            scale_inv,
+            get_te_dtype(out_dtype),
+            get_fwd_ln_sm_margin(),
+            zero_centered_gamma,
+        )
+        if run_bwd:
+            # Run Hipified backward reference.
+            dx_hipified, dgamma_hipified, dbeta_hipified = tex.layernorm_bwd(
+                dz,
+                x,
+                mu_hipified,
+                rsigma_hipified,
+                gamma,
+                get_bwd_ln_sm_margin(),
+                zero_centered_gamma,
+            )

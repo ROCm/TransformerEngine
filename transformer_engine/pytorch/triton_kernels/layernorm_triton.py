@@ -329,8 +329,15 @@ def _layernorm_bwd_dwdb_triton(
 
 
 def te_layernorm_fwd_fp8_noalloc_triton(
-    x, gamma, beta, eps, y, out_dtype, zero_centered_gamma,
-    waves_per_eu=2, num_warps=8,
+    x,
+    gamma,
+    beta,
+    eps,
+    y,
+    out_dtype,
+    zero_centered_gamma,
+    waves_per_eu=2,
+    num_warps=8,
 ):
     M, N = x.shape
     y = y.view(out_dtype)
