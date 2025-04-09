@@ -1004,15 +1004,14 @@ static inline int getIntEnv(const char *name, int defval, int minval)
 
 } //namespace
 
-static std::once_flag init_flag;
-static hipblasLtHandle_t hipblaslt_handles[num_streams];
 
 /* Warning: only call once per device!
  * When calling nvte_multi_stream_cublas_gemm with hipblaslt backend
  * need to create multiple handles corresponding to compute_streams
  * to avoid a handle be used by multi-streams concurrently.
  */
-static void init_hipblaslt_handles() {
+static void init_hipblaslt_handles(hipblasLtHandle_t* hipblaslt_handles) {
+  NVTE_CHECK(hipblaslt_handles != nullptr);
   for (int i = 0; i < num_streams; i++) {
     NVTE_CHECK_HIPBLASLT(hipblasLtCreate(&hipblaslt_handles[i]));
   }
@@ -1838,8 +1837,16 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   {
     // Check compute_stream_offset valid.
     NVTE_CHECK(compute_stream_offset >= -1 && compute_stream_offset < num_streams);
-    // Init hipblaslt handles (once, globally)
-    std::call_once(init_flag, init_hipblaslt_handles);
+
+    hipblasLtHandle_t handle = nullptr;
+    if (compute_stream_offset != -1) {
+      // Init hipblaslt handles (once, globally)
+      static std::once_flag init_flag;
+      static hipblasLtHandle_t hipblaslt_handles[num_streams];
+      std::call_once(init_flag, init_hipblaslt_handles, hipblaslt_handles);
+
+      handle = hipblaslt_handles[compute_stream_offset]; 
+    }
 
     hipblaslt_gemm(inputA, inputB, outputD, inputBias, outputPreGelu, 
                    m, n, k, lda, ldb, ldd, 
@@ -1849,7 +1856,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                    workspace, workspaceSize, accumulate, use_split_accumulator,
                    math_sm_count, m_split, n_split, gemm_producer,
                    inputCounter, stream, 
-                   compute_stream_offset == -1 ? nullptr : hipblaslt_handles[compute_stream_offset]);
+                   handle);
+    
     return;
   }
 #endif

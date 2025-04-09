@@ -314,7 +314,7 @@ static void init_streams_and_events() {
 
 }  // namespace transformer_engine
 
-// -1 means the stream from outer rather than compute_streams
+// compute_stream_offset = -1 means the stream from outer rather than compute_streams
 static void cublas_gemm_ex(const NVTETensor A, const NVTETensor B, NVTETensor D, const NVTETensor bias,
                            NVTETensor pre_gelu_out, bool transa, bool transb, bool grad,
                            NVTETensor workspace, bool accumulate, bool use_split_accumulator,
