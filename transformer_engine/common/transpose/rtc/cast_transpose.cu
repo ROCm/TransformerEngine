@@ -9,6 +9,7 @@
 using namespace transformer_engine;
 
 namespace {
+
 // Parameters
 using CType = float;
 using IType = __ITYPE__;
@@ -45,7 +46,7 @@ __global__ void __launch_bounds__(block_size) cast_transpose_optimized_kernel(
 
   // Input tensors are divided into tiles
   // Note: Each tile is a warp_size x warp_size grid of nvec_out x nvec_in subtiles
-  constexpr size_t tile_dim_m =  THREADS_PER_WARP * nvec_out;
+  constexpr size_t tile_dim_m = THREADS_PER_WARP * nvec_out;
   constexpr size_t tile_dim_n = THREADS_PER_WARP * nvec_in;
 
   // Position of tile within tensor
@@ -108,8 +109,7 @@ __global__ void __launch_bounds__(block_size) cast_transpose_optimized_kernel(
       const size_t j1 = tidy + iter * bdimy;
       const size_t row = tile_row + i1 * nvec_out;
       const size_t col = tile_col + j1 * nvec_in + j2;
-      if(tidx < THREADS_PER_WARP)
-        shared_output_t[j1][i1].store_to(&output_t[col * num_rows + row]);
+      shared_output_t[j1][i1].store_to(&output_t[col * num_rows + row]);
     }
     __syncthreads();
   }

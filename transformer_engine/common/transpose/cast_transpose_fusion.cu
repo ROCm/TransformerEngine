@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -232,6 +232,7 @@ __global__ void __launch_bounds__(reduce_dbias_num_threads)
   stg_vec.store_to(thread_out_base, 0);
 }
 
+#ifdef __HIP_PLATFORM_AMD__
 template <typename ComputeType, typename OutputType>
 __global__ void reduce_dbias_kernel(OutputType *const dbias_output, const ComputeType *const dbias_partial, 
                 const int row_length, const int thread_num_rows, const int num_rows) {
@@ -268,12 +269,12 @@ __global__ void reduce_dbias_kernel(OutputType *const dbias_output, const Comput
     dbias_output[col] = OutputType(acc);
   }
 }
+#endif
 
 
 template <typename InputType>
 void reduce_dbias(const Tensor &workspace, Tensor *dbias, const size_t row_length,
                   const size_t num_rows, const int nvec_out, cudaStream_t stream) {
-  using DbiasOutputType = fp32;
   constexpr int reduce_dbias_store_bytes = 8;  // stg.64
   constexpr int reduce_dbias_nvec = reduce_dbias_store_bytes / sizeof(InputType);
 
@@ -284,9 +285,14 @@ void reduce_dbias(const Tensor &workspace, Tensor *dbias, const size_t row_lengt
       DIVUP(num_rows, static_cast<size_t>(nvec_out * THREADS_PER_WARP));
 
 #ifdef __HIP_PLATFORM_AMD__ 
-  const char* env_var = std::getenv("HEYI_CAST_TRANSPOSE_DBIAS");
-  if(env_var != nullptr && env_var[0] == '1'){
+  bool nvte_use_optimized_hipified_cast_transpose = false;
+  if (const char* env_p = std::getenv("NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE") ) {
+    if (env_p != nullptr && std::string(env_p) == "1")
+      nvte_use_optimized_hipified_cast_transpose = true;
+  }
+  if(nvte_use_optimized_hipified_cast_transpose){
     const size_t reduce_dbias_num_blocks = DIVUP(row_length, static_cast<size_t>(THREADS_PER_WARP));
+    using DbiasOutputType = fp32;
 
     size_t  warps_num = min(reduce_dbias_num_rows, 32);
 
@@ -302,18 +308,19 @@ void reduce_dbias(const Tensor &workspace, Tensor *dbias, const size_t row_lengt
               reinterpret_cast<InputType *>(dbias->data.dptr),
               reinterpret_cast<const fp32 *>(workspace.data.dptr), reduce_dbias_row_length,
               thread_num_rows, reduce_dbias_num_rows);
+  }else{
+#endif 
+  const size_t reduce_dbias_num_blocks =
+    DIVUP(row_length, reduce_dbias_num_threads * reduce_dbias_nvec);
+  using DbiasOutputType = fp32;
+  reduce_dbias_kernel<reduce_dbias_nvec, DbiasOutputType, InputType>
+      <<<reduce_dbias_num_blocks, reduce_dbias_num_threads, 0, stream>>>(
+          reinterpret_cast<InputType *>(dbias->data.dptr),
+          reinterpret_cast<const fp32 *>(workspace.data.dptr), reduce_dbias_row_length,
+          reduce_dbias_num_rows);
+#ifdef __HIP_PLATFORM_AMD__ 
   }
 #endif 
-  else{
-    const size_t reduce_dbias_num_blocks =
-      DIVUP(row_length, reduce_dbias_num_threads * reduce_dbias_nvec);
-
-    reduce_dbias_kernel<reduce_dbias_nvec, DbiasOutputType, InputType>
-        <<<reduce_dbias_num_blocks, reduce_dbias_num_threads, 0, stream>>>(
-            reinterpret_cast<InputType *>(dbias->data.dptr),
-            reinterpret_cast<const fp32 *>(workspace.data.dptr), reduce_dbias_row_length,
-            reduce_dbias_num_rows);
-  }
 }
 
 template <bool IS_DBIAS, bool IS_DACT, typename ComputeType, typename Param, int nvec_in,
@@ -616,7 +623,7 @@ void cast_transpose_fused(const Tensor &input, const Tensor &act_input, Tensor *
           size_t num_blocks;
 
           if (jit_compiled) {
-          // Pick kernel config
+            // Pick kernel config
             std::vector<KernelConfig> kernel_configs;
             kernel_configs.reserve(16);
             const size_t sm_count = static_cast<size_t>(cuda::sm_count());
