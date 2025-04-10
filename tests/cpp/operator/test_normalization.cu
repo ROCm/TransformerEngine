@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -56,7 +58,11 @@ void compute_ref_stats(NormType norm_type,
       current = static_cast<compute_t>(data[i * H + j]);
       sum_sq += (current - m) * (current - m);
     }
+#ifdef __HIP_PLATFORM_AMD__
+    rsigma[i] = 1.0/sqrtf((sum_sq / H) + epsilon);
+#else
     rsigma[i] = rsqrtf((sum_sq / H) + epsilon);
+#endif
   }
 }
 
@@ -73,6 +79,9 @@ inline auto compute_gamma(InputType gamma, const bool zero_centered_gamma, const
     }
     return g;
   } else {
+#ifdef __HIP_PLATFORM_AMD__
+    (void)use_cudnn;  // Parameter is unused on AMD platform
+#else
     if (use_cudnn){
       compute_t g = static_cast<compute_t>(0.f);
       InputType gi = gamma;
@@ -81,7 +90,9 @@ inline auto compute_gamma(InputType gamma, const bool zero_centered_gamma, const
       }
       g = static_cast<compute_t>(gi);
       return g;
-    } else {
+    } else
+#endif
+    {
       compute_t g = static_cast<compute_t>(gamma);
       if (zero_centered_gamma) {
         g += static_cast<compute_t>(1.f);
@@ -213,12 +224,16 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   std::unique_ptr<WeightType[]> ref_dbeta = std::make_unique<InputType[]>(H);
 
   cudaDeviceProp prop;
-  cudaGetDeviceProperties(&prop, 0);
+  (void)cudaGetDeviceProperties(&prop, 0);
 
+#ifdef __HIP_PLATFORM_AMD__
+  ASSERT_FALSE(use_cudnn) << "CUDNN is not supported on ROCm";
+#else
   if (use_cudnn){
     nvte_enable_cudnn_norm_fwd(true);
     nvte_enable_cudnn_norm_bwd(true);
   }
+#endif
 
   // Forward kernel
   float epsilon = 1e-5;
@@ -262,10 +277,12 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                      prop.multiProcessorCount, zero_centered_gamma, 0);
   }
 
+#ifndef __HIP_PLATFORM_AMD__
   if (use_cudnn){
     nvte_enable_cudnn_norm_fwd(false);
     nvte_enable_cudnn_norm_bwd(false);
   }
+#endif
 
   // Reference implementations
   // use the GPU stats to tighten the tolerances
@@ -293,7 +310,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                        N, H, zero_centered_gamma,
                        use_cudnn);
 
-  cudaDeviceSynchronize();
+  (void)cudaDeviceSynchronize();
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
@@ -360,14 +377,22 @@ INSTANTIATE_TEST_SUITE_P(
     OperatorTest,
     NormTestSuite,
     ::testing::Combine(
+#ifdef __HIP_PLATFORM_AMD__
+        ::testing::Values(false), //ROCm does not support cudnn
+#else
         ::testing::Values(false), //TODO: enabling tests for cudnn backend
+#endif
         ::testing::Values(NormType::LayerNorm, NormType::RMSNorm),
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16, DType::kFloat8E4M3),
         ::testing::ValuesIn(test_cases),
         ::testing::Values(false, true)),
     [](const testing::TestParamInfo<NormTestSuite::ParamType>& info) {
+#ifdef __HIP_PLATFORM_AMD__
+    auto backend = "";
+#else
     auto backend = std::get<0>(info.param) == false ? "Te" : "Cudnn";
+#endif
 std::string name =
   backend +
   normToString.at(std::get<1>(info.param)) + "_" +

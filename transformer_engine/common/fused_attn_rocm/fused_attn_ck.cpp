@@ -198,7 +198,7 @@ ck_fused_attn::MaskType set_ck_mask(NVTE_Mask_Type nvte_mask_type, int64_t nvte_
       return ck_fused_attn::MaskType::no_mask;
     }else{
       // (>=0, >=0)
-      return ck_fused_attn::MaskType::mask_top_left;
+      return ck_fused_attn::MaskType::mask_bottom_right;
     }
   }else if (nvte_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK || nvte_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK){
     // nvte causal mask can map to (-1, 0) or (>=0, 0)

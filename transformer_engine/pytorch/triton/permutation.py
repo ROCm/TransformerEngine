@@ -22,6 +22,7 @@ if IS_HIP_EXTENSION:
 else:
     e5m2_data_type = tl.float8e5
     e4m3_data_type = tl.float8e4nv
+IS_HIP_EXTENSION = triton.language.constexpr(IS_HIP_EXTENSION)
 
 @triton.jit
 def _row_id_map_pass_1_kernel(

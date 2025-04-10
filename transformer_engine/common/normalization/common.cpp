@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -125,8 +127,8 @@ void TeNormalizationPlan<KernelParamsType>::_set_workspace() {
     if (_launch_params.barrier_bytes > 0) {
       _launch_params.params.barrier =
           reinterpret_cast<int*>(workspace_dptr + _launch_params.workspace_bytes);
-      cudaMemsetAsync(_launch_params.params.barrier, 0, _launch_params.barrier_bytes,
-                      _launch_params.stream);
+      (void)cudaMemsetAsync(_launch_params.params.barrier, 0, _launch_params.barrier_bytes,
+                            _launch_params.stream);
     }
     if constexpr (std::is_same_v<KernelParamsType, BackwardKernelParams>) {
       _launch_params.params.dgamma_part =
@@ -175,6 +177,7 @@ void TeNormalizationPlan<BackwardKernelParams>::execute(void* x_dptr, void* gamm
   _kernel(_launch_params, false);
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage,
                                                DType wtype, DType itype, DType otype, DType ctype,
                                                const size_t batch_size, const size_t hidden_size,
@@ -385,6 +388,7 @@ void CudnnNormalizationPlan::execute(void* x_dptr, void* gamma_dptr, void* mean_
   NVTE_CHECK_CUDNN(cudnnSetStream(_handle, stream));
   NVTE_CHECK(_graph.execute(_handle, _variant_pack, workspace_dptr).is_good());
 }
+#endif
 
 NormalizationPlanBase* NormalizationPlanRegistry::getNormalizationPlan(
     NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype,
@@ -401,11 +405,14 @@ NormalizationPlanBase* NormalizationPlanRegistry::getNormalizationPlan(
   }
 
   std::unique_ptr<NormalizationPlanBase> plan;
+#ifndef __HIP_PLATFORM_AMD__
   if (NormBackend == NVTE_Norm_Backend::Cudnn) {
     plan = std::make_unique<CudnnNormalizationPlan>(NormType, NormStage, wtype, itype, otype, ctype,
                                                     batch_size, hidden_size, sm_count,
                                                     zero_centered_gamma);
-  } else if (NormStage == NVTE_Norm_Stage::Forward) {
+  } else
+#endif
+  if (NormStage == NVTE_Norm_Stage::Forward) {
     plan = std::make_unique<TeNormalizationPlan<ForwardKernelParams>>(
         NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size, sm_count,
         zero_centered_gamma, is_tuned);
@@ -418,6 +425,7 @@ NormalizationPlanBase* NormalizationPlanRegistry::getNormalizationPlan(
   return normalizationPlanMap[key].get();
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 bool& _cudnn_norm_fwd_flag() {
   static bool flag = transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN");
   return flag;
@@ -430,10 +438,12 @@ bool& _cudnn_norm_bwd_flag() {
 
 bool use_cudnn_norm_fwd() { return _cudnn_norm_fwd_flag(); }
 bool use_cudnn_norm_bwd() { return _cudnn_norm_bwd_flag(); }
+#endif
 
 }  //  namespace normalization
 }  // namespace transformer_engine
 
+#ifndef __HIP_PLATFORM_AMD__
 void nvte_enable_cudnn_norm_fwd(bool enable) {
   NVTE_API_CALL(nvte_enable_cudnn_norm_fwd);
   transformer_engine::normalization::_cudnn_norm_fwd_flag() = enable;
@@ -443,3 +453,4 @@ void nvte_enable_cudnn_norm_bwd(bool enable) {
   NVTE_API_CALL(nvte_enable_cudnn_norm_bwd);
   transformer_engine::normalization::_cudnn_norm_bwd_flag() = enable;
 }
+#endif

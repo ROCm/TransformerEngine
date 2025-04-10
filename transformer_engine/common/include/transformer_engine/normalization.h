@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -142,12 +144,14 @@ void nvte_rmsnorm_bwd(const NVTETensor dz, const NVTETensor x, const NVTETensor 
                       NVTETensor workspace, const int multiprocessorCount,
                       const bool zero_centered_gamma, cudaStream_t stream);
 
+#ifndef __HIP_PLATFORM_AMD__
 /*! \brief Helper to enable cuDNN backend for normalization
  *
  *  \param[in]     bool              Enable if True
  */
 void nvte_enable_cudnn_norm_fwd(bool enable);
 void nvte_enable_cudnn_norm_bwd(bool enable);
+#endif
 
 #ifdef __cplusplus
 }  // extern "C"

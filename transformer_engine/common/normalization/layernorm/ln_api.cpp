@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -51,10 +53,13 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
 
   NVTE_Norm_Backend norm_backend;
   bool is_aligned = true;
+#ifndef __HIP_PLATFORM_AMD__
   if (use_cudnn_norm_fwd()) {
     // TODO: add check for GPU ARCH
     norm_backend = NVTE_Norm_Backend::Cudnn;
-  } else {
+  } else
+#endif
+  {
     norm_backend = NVTE_Norm_Backend::Te;
     is_aligned = is_ptr_aligned(z->data.dptr, x.data.dptr, gamma.data.dptr, beta.data.dptr,
                                 mu->data.dptr, rsigma->data.dptr);
@@ -120,10 +125,13 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
 
   NVTE_Norm_Backend norm_backend;
   bool is_aligned = true;
+#ifndef __HIP_PLATFORM_AMD__
   if (use_cudnn_norm_bwd()) {
     // TODO: add check for GPU ARCH
     norm_backend = NVTE_Norm_Backend::Cudnn;
-  } else {
+  } else
+#endif
+  {
     norm_backend = NVTE_Norm_Backend::Te;
     is_aligned = is_ptr_aligned(x.data.dptr, gamma.data.dptr, mu.data.dptr, rsigma.data.dptr,
                                 dx->data.dptr, dz.data.dptr, dbeta->data.dptr, dgamma->data.dptr);

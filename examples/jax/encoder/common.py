@@ -14,19 +14,18 @@ if is_hip_extension():
 @lru_cache
 def is_bf16_supported():
     """Return if BF16 has hardware supported"""
-    if is_hip_extension:
-        # only MI200 and MI300 machines support bf16
-        if get_device_compute_capability(0) == 94 or is_mi200():
-            return True
-        else:
-            return False
-    else:
-        gpu_arch = get_device_compute_capability(0)
-        return gpu_arch >= 80
+    gpu_arch = get_device_compute_capability(0)
+    if is_hip_extension():
+        # only GFX9.4 and MI200 machines support bf16
+        return gpu_arch == 94 or is_mi200()
+    return gpu_arch >= 80
 
 
 @lru_cache
 def is_fp8_supported():
     """Return if FP8 has hardware supported"""
     gpu_arch = get_device_compute_capability(0)
+    if is_hip_extension():
+        # only GFX9.4 machines support fp8
+        return gpu_arch == 94
     return gpu_arch >= 90

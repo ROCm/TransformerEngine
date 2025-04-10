@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -7,9 +9,11 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_NORM_COMMON_H_
 #define TRANSFORMER_ENGINE_COMMON_NORM_COMMON_H_
 
+#ifndef __HIP_PLATFORM_AMD__
 #include <cudnn.h>
 #include <cudnn_frontend.h>
 #include <cudnn_frontend_utils.h>
+#endif
 #include <transformer_engine/transformer_engine.h>
 
 #include <functional>
@@ -21,14 +25,18 @@
 #include <vector>
 
 #include "../common.h"
+#ifndef __HIP_PLATFORM_AMD__
 #include "../cudnn_utils.h"
+#endif
 #include "../util/system.h"
 
 namespace transformer_engine {
 
 namespace normalization {
 
+#ifndef __HIP_PLATFORM_AMD__
 namespace fe = cudnn_frontend;
+#endif
 
 template <typename KernelParamsType>
 struct LaunchParams {
@@ -136,7 +144,11 @@ struct BackwardKernelParams : public KernelParamsBase {
   void* dgamma;
 };
 
+#ifdef __HIP_PLATFORM_AMD__
+enum class NVTE_Norm_Backend { Te };
+#else
 enum class NVTE_Norm_Backend { Te, Cudnn };
+#endif
 enum class NVTE_Norm_Type { LayerNorm, RMSNorm };
 enum class NVTE_Norm_Stage { Forward, Backward };
 
@@ -252,6 +264,7 @@ class TeNormalizationPlan : public NormalizationPlanBase {
   const bool _is_layernorm;
 };
 
+#ifndef __HIP_PLATFORM_AMD__
 class CudnnNormalizationPlan : public NormalizationPlanBase {
  public:
   CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype,
@@ -284,6 +297,7 @@ class CudnnNormalizationPlan : public NormalizationPlanBase {
   std::unordered_map<std::shared_ptr<fe::graph::Tensor_attributes>, void*> _variant_pack;
   cudnnHandle_t _handle;
 };
+#endif
 
 class NormalizationPlanRegistry {
  public:
@@ -312,9 +326,15 @@ using byte = uint8_t;
 using int32 = int32_t;
 using fp32 = float;
 using fp16 = half;
+#ifdef __HIP_PLATFORM_AMD__
+using bf16 = hip_bfloat16;
+using fp8e4m3 = te_hip_fp8_e4m3;
+using fp8e5m2 = te_hip_fp8_e5m2;
+#else
 using bf16 = nv_bfloat16;
 using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
+#endif //__HIP_PLATFORM_AMD__
 
 template <typename T>
 struct TypeToDType;
@@ -371,8 +391,10 @@ bool is_ptr_aligned(const Args*... ptrs) {
   return ((reinterpret_cast<uintptr_t>(ptrs) % Alignment == 0) && ...);
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 bool use_cudnn_norm_fwd();
 bool use_cudnn_norm_bwd();
+#endif
 
 }  // namespace normalization
 

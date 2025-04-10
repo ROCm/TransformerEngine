@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -14,7 +16,7 @@ using namespace transformer_engine::normalization;
 template <typename weight_t, typename input_t, typename output_t, typename compute_t,
           typename index_t, int HIDDEN_SIZE, int CTAS_PER_ROW, int WARPS_M, int WARPS_N,
           int BYTES_PER_LDG_MAIN, int BYTES_PER_LDG_FINAL>
-void launch_tuned_(LaunchParams<BackwardKernelParams> &launch_params,
+static void launch_tuned_(LaunchParams<BackwardKernelParams> &launch_params,
                    const bool configure_params) {  // NOLINT(*)
   using Kernel_traits = Kernel_traits<weight_t, input_t, output_t, compute_t, index_t, HIDDEN_SIZE,
                                       CTAS_PER_ROW, WARPS_M, WARPS_N, BYTES_PER_LDG_MAIN>;
@@ -38,10 +40,12 @@ void launch_tuned_(LaunchParams<BackwardKernelParams> &launch_params,
     return;
   }
 
+#ifndef __HIP_PLATFORM_AMD__
   if (Kernel_traits::SMEM_BYTES >= 48 * 1024) {
     NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                          Kernel_traits::SMEM_BYTES));
   }
+#endif
   auto stream = launch_params.stream;
   auto ctas_per_col = launch_params.params.ctas_per_col;
   auto ctas_per_row = launch_params.params.ctas_per_row;
@@ -53,9 +57,9 @@ void launch_tuned_(LaunchParams<BackwardKernelParams> &launch_params,
     dim3 grid(ctas_per_row * ctas_per_col);
     dim3 block(Kernel_traits::THREADS_PER_CTA);
     void *params_ = reinterpret_cast<void *>(&launch_params.params);
-    cudaLaunchCooperativeKernel(reinterpret_cast<void *>(kernel), grid, block,
-                                reinterpret_cast<void **>(&params_), Kernel_traits::SMEM_BYTES,
-                                stream);
+    (void)cudaLaunchCooperativeKernel(reinterpret_cast<void *>(kernel), grid, block,
+                                      reinterpret_cast<void **>(&params_),
+                                      Kernel_traits::SMEM_BYTES, stream);
   }
 
   using Kernel_traits_f =
@@ -71,7 +75,7 @@ void launch_tuned_(LaunchParams<BackwardKernelParams> &launch_params,
 template <typename weight_t, typename input_t, typename output_t, typename compute_t,
           typename index_t, int HIDDEN_SIZE, int WARPS_M, int WARPS_N, int BYTES_PER_LDG_MAIN,
           int BYTES_PER_LDG_FINAL>
-void launch_general_(LaunchParams<BackwardKernelParams> &launch_params,
+static void launch_general_(LaunchParams<BackwardKernelParams> &launch_params,
                      const bool configure_params) {  // NOLINT(*)
   auto ceil_div = [](int x, int y) -> int { return (x + y - 1) / y; };
 
@@ -87,8 +91,8 @@ void launch_general_(LaunchParams<BackwardKernelParams> &launch_params,
   int ctas_per_row = launch_params.params.ctas_per_row;
   if (configure_params) {
     int ctas_per_sm;
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&ctas_per_sm, kernel,
-                                                  Kernel_traits::THREADS_PER_CTA, 0);
+    (void)cudaOccupancyMaxActiveBlocksPerMultiprocessor(&ctas_per_sm, kernel,
+                                                        Kernel_traits::THREADS_PER_CTA, 0);
     const int max_ctas = launch_params.multiprocessorCount * ctas_per_sm;
     ctas_per_row = ceil_div(cols, HIDDEN_SIZE);
     ctas_per_col = std::min(ceil_div(rows, WARPS_M), max_ctas / ctas_per_row);
@@ -111,8 +115,8 @@ void launch_general_(LaunchParams<BackwardKernelParams> &launch_params,
     kernel<<<grid, block, 0, stream>>>(launch_params.params);
   } else {
     void *params_ = reinterpret_cast<void *>(&launch_params.params);
-    cudaLaunchCooperativeKernel(reinterpret_cast<void *>(kernel), grid, block,
-                                reinterpret_cast<void **>(&params_), 0, stream);
+    (void)cudaLaunchCooperativeKernel(reinterpret_cast<void *>(kernel), grid, block,
+                                      reinterpret_cast<void **>(&params_), 0, stream);
   }
 
   // Launch finalization kernel
