@@ -31,8 +31,9 @@ function prof_te_fwd() {
     for shape in "${shapes[@]}"; do
 	read -r m n <<< "${shape}"
 
+	# Kernel name can be 'ln_fwd_tuned_kernel' or 'ln_fwd_general_kernel'.
 	prof_kernel.sh \
-	    -r ln_fwd_tuned_kernel \
+	    -r 'ln_fwd_\(tuned\|general\)_kernel' \
 	    -o "prof_te_fwd/${m}_${n}" \
 	    -- python tests/pytorch/triton_kernels/test_layernorm_triton.py te "${m}" "${n}" fwd
     done
