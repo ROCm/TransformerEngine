@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -276,6 +276,94 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *cast_output
           const bool aligned =
               (row_length % THREADS_PER_WARP == 0 && num_rows % THREADS_PER_WARP == 0);
           if (aligned && rtc::is_enabled()) {  // Runtime-compiled tuned kernel
+#ifdef __HIP_PLATFORM_AMD__
+            // do_general_config means using the cost model like NVTE to generate kernel configs
+            bool do_general_config = true;
+            // even if we enforce to use OPTIMIZED_HIPIFIED_CAST_TRANSPOSE, may fall back to general kernel configs from NVTE cost model
+            bool nvte_use_optimized_hipified_cast_transpose = false;
+            if (const char* env_p = std::getenv("NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE") ) {
+              if (env_p != nullptr && std::string(env_p) == "1")
+                nvte_use_optimized_hipified_cast_transpose = true;
+            }
+            if(nvte_use_optimized_hipified_cast_transpose && 
+              //only use the optimized kernel in fp8 setting
+              (std::is_same<OutputType, fp8e5m2>::value || std::is_same<OutputType, fp8e4m3>::value)){
+              // Estimate number of SMs
+              // Note: H100 has 132 SMs, A100 has 108 SMs.
+              // Note: Directly querying number of SMs with cudaGetDeviceProperties is
+              // slow (>1 ms). Consider querying once and caching.
+              const int n_sms = 304; //MI300X
+              // Helper functions to get kernel configuration
+              auto get_n_tiles = [=] (size_t load_size, size_t store_size) -> int {
+                constexpr size_t threads_per_warp = static_cast<size_t>(THREADS_PER_WARP);
+                size_t nvec_in = load_size / itype_size;
+                size_t nvec_out = store_size / otype_size;
+                size_t n_tiles = DIVUP(row_length, nvec_in * threads_per_warp) *
+                                DIVUP(num_rows, nvec_out * threads_per_warp);
+                return n_tiles;
+              };
+              // heuristics for MI300X
+              // TODO: heuristics for other HW like MI350
+              size_t wpt_size = 8;
+              size_t iter_size = THREADS_PER_WARP / wpt_size;
+              const size_t estimated_n_tiles = get_n_tiles(16, 8);
+
+              size_t load_size;
+              size_t store_size;
+              // n_tiles == n_blocks
+              if(estimated_n_tiles >= n_sms) {
+                if(std::is_same<InputType, float>::value)
+                  load_size = 16;
+                else
+                  load_size = 8;
+                store_size = 4;
+              }else{
+                load_size = 8,
+                store_size = 4;
+              }
+
+              const size_t row_tile_elements = load_size * THREADS_PER_WARP / itype_size;
+              const size_t col_tile_elements = store_size * iter_size * wpt_size / otype_size;
+              // Number of CUDA blocks
+              size_t num_blocks = (row_length / row_tile_elements) * (num_rows / col_tile_elements);
+              size_t rtc_block_size = THREADS_PER_WARP * wpt_size;
+
+              do_general_config =!(row_length % row_tile_elements == 0 && num_rows % col_tile_elements == 0);
+
+              if(!do_general_config){
+                // Compile NVRTC kernel if needed and launch
+                auto &rtc_manager = rtc::KernelManager::instance();
+                const std::string kernel_label = concat_strings(
+                    "cast_transpose"
+                    ",itype=",
+                    itype_name, ",otype=", otype_name, ",load_size=", load_size,
+                    ",store_size=", store_size, ",wpt_size=", wpt_size);
+
+                if (!rtc_manager.is_compiled(kernel_label)) {
+                  std::string code = string_code_transpose_rtc_cast_transpose_cu;
+                  code = regex_replace(code, "__ITYPE__", itype_name);
+                  code = regex_replace(code, "__OTYPE__", otype_name);
+                  code = regex_replace(code, "__LOAD_SIZE__", load_size);
+                  code = regex_replace(code, "__STORE_SIZE__", store_size);
+                  code = regex_replace(code, "__WARPS_PER_TILE__", wpt_size);
+                  code = regex_replace(code, "__BLOCK_SIZE__", rtc_block_size);
+                  rtc_manager.compile(kernel_label, "cast_transpose_optimized_kernel", code,
+                                      "transformer_engine/common/transpose/rtc/cast_transpose.cu");
+                }
+
+                rtc_manager.launch(kernel_label, num_blocks, rtc_block_size, 0, stream,
+                                  static_cast<const InputType *>(input.data.dptr),
+                                  reinterpret_cast<const CType *>(noop.data.dptr),
+                                  static_cast<OutputType *>(cast_output.data.dptr),
+                                  static_cast<OutputType *>(transposed_output.data.dptr),
+                                  static_cast<const CType *>(cast_output.scale.dptr),
+                                  static_cast<CType *>(cast_output.amax.dptr),
+                                  static_cast<CType *>(cast_output.scale_inv.dptr), row_length,
+                                  num_rows);
+              }
+            }
+            if(do_general_config){
+#endif
             // Pick kernel config
             std::vector<KernelConfig> kernel_configs;
             kernel_configs.reserve(16);
@@ -334,6 +422,9 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *cast_output
                                static_cast<CType *>(cast_output.amax.dptr),
                                static_cast<CType *>(cast_output.scale_inv.dptr), row_length,
                                num_rows);
+#ifdef __HIP_PLATFORM_AMD__
+            }
+#endif
           } else {  // Statically-compiled general kernel
             constexpr size_t load_size = 4;
             constexpr size_t store_size = 4;
