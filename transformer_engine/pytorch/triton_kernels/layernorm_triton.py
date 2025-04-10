@@ -11,10 +11,14 @@ import triton.language as tl
 from .norm_common_triton import block_size, use_blocked
 
 
-def get_autotune_config():
+def get_autotune_config(full_tuning_space=False):
+    if full_tuning_space:
+        tuning_space = product([1, 2, 4], [4, 8, 16])
+    else:
+        tuning_space = [(1, 8), (1, 16), (2, 16), (4, 4), (4, 8), (4, 16)]
     return [
-        triton.Config({"waves_per_eu": we}, num_warps=wa, num_stages=1)
-        for we, wa in product([1, 2, 4], [4, 8, 16])
+        triton.Config({"waves_per_eu": waves_per_eu}, num_warps=num_warps, num_stages=1)
+        for waves_per_eu, num_warps in tuning_space
     ]
 
 
