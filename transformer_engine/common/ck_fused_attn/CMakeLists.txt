@@ -24,7 +24,7 @@ execute_process(
 #bwd kernels list
 execute_process(
   COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
-  --api bwd --list_blobs ${CMAKE_CURRENT_BINARY_DIR}/gen_src/bwd_blob_list.txt --receipt 3
+  --api bwd --list_blobs ${CMAKE_CURRENT_BINARY_DIR}/gen_src/bwd_blob_list.txt --receipt 5
 )
 
 file(STRINGS ${CMAKE_CURRENT_BINARY_DIR}/gen_src/fwd_blob_list.txt FMHA_FWD_GEN_BLOBS)
@@ -39,7 +39,7 @@ execute_process(
 # generate the actual bwd kernel cpp files
 execute_process(
   COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
-  --api bwd --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp --receipt 3
+  --api bwd --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp --receipt 5
 )
 
 set(ck_fused_attn_SOURCES)
