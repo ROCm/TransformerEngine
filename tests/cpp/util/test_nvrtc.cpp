@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -21,8 +23,8 @@ TEST(UtilTest, NVRTC) {
   // GPU data buffer
   int *device_buffer;
   std::vector<int> host_buffer(2);
-  cudaMalloc((void**)&device_buffer, 2*sizeof(int));  // NOLINT(*)
-  cudaMemset(device_buffer, 0, 2*sizeof(int));
+  (void)cudaMalloc((void**)&device_buffer, 2*sizeof(int));  // NOLINT(*)
+  (void)cudaMemset(device_buffer, 0, 2*sizeof(int));
 
   // CUDA kernel implementations
   const char code1[] = R"code(

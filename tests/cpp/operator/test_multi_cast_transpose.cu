@@ -131,7 +131,7 @@ void performTest() {
                                      ref_width_list);
 
   // Check correctness
-  cudaDeviceSynchronize();
+  (void)cudaDeviceSynchronize();
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
   for (size_t tensor_id = 0; tensor_id < num_tensors; ++tensor_id) {

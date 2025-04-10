@@ -121,7 +121,7 @@ class Tensor {
 
   ~Tensor() {
     if (tensor_.dptr() != nullptr) {
-      cudaFree(tensor_.dptr());
+      (void)cudaFree(tensor_.dptr());
     }
   }
   NVTETensor data() const noexcept {

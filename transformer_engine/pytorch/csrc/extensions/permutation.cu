@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -28,8 +30,8 @@ std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
 
     size_t temp_storage_bytes = 0;
     int *temp_ptr = nullptr;
-    cub::DeviceRadixSort::SortPairs(nullptr, temp_storage_bytes, temp_ptr, temp_ptr, temp_ptr,
-                                    temp_ptr, max_expanded_token_num);
+    (void)cub::DeviceRadixSort::SortPairs(nullptr, temp_storage_bytes, temp_ptr, temp_ptr, temp_ptr,
+                                          temp_ptr, max_expanded_token_num);
     at::Tensor temp_storage = torch::empty(
         temp_storage_bytes, torch::dtype(torch::kInt8).device(torch::kCUDA).requires_grad(false));
 
@@ -47,9 +49,9 @@ std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
   void *d_temp_storage = getDataPtr(workspace[3], 0);
   size_t temp_storage_bytes = std::numeric_limits<size_t>::max();
 
-  cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes, indices_ptr,
-                                  sorted_indices_ptr, row_id_ptr, sorted_row_id_ptr,
-                                  num_tokens * topK);
+  (void)cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes, indices_ptr,
+                                        sorted_indices_ptr, row_id_ptr, sorted_row_id_ptr,
+                                        num_tokens * topK);
 
   // Activations type
   at::ScalarType _st;

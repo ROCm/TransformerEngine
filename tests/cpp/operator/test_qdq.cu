@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -72,7 +74,7 @@ void performTestQ(const size_t N) {
   compute_ref_q<InputType, OutputType>(input.cpu_dptr<InputType>(), ref_output.get(),
                                        N, &ref_amax, output.scale());
 
-  cudaDeviceSynchronize();
+  (void)cudaDeviceSynchronize();
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
@@ -101,7 +103,7 @@ void performTestDQ(const size_t N) {
   compute_ref_dq<InputType, OutputType>(input.cpu_dptr<InputType>(), ref_output.get(),
                                         N, input.scale_inv());
 
-  cudaDeviceSynchronize();
+  (void)cudaDeviceSynchronize();
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 

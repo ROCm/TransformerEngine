@@ -88,13 +88,13 @@ uint32_t GetRuntimeNumSegments(void *cu_seqlen, void *workspace, size_t len, cud
   // workspace size requires 4 bytes
   uint32_t *dout = static_cast<uint32_t *>(workspace);
   uint32_t hout{};
-  cudaMemsetAsync(dout, 0, sizeof(uint32_t), stream);
+  (void)cudaMemsetAsync(dout, 0, sizeof(uint32_t), stream);
   constexpr int threads = 128;
   const int blocks = (len - 1) / threads + 1;
   get_runtime_num_segments_kernel<<<blocks, threads, 0, stream>>>(static_cast<int32_t *>(cu_seqlen),
                                                                   len, dout);
-  cudaMemcpyAsync(&hout, dout, sizeof(uint32_t), cudaMemcpyDeviceToHost, stream);
-  cudaStreamSynchronize(stream);
+  (void)cudaMemcpyAsync(&hout, dout, sizeof(uint32_t), cudaMemcpyDeviceToHost, stream);
+  (void)cudaStreamSynchronize(stream);
   return hout;
 }
 
