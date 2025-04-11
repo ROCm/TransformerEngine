@@ -279,7 +279,7 @@ class RMSNorm(BasicOperation):
 
         # Compute RMSNorm backward pass
         use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
-        rmsnorm_func = te_rmsnorm_bwd_triton if use_rmsnorm_triton else rmsnorm_bwd
+        rmsnorm_bwd_func = te_rmsnorm_bwd_triton if use_rmsnorm_triton else rmsnorm_bwd
         
         dx, dw = rmsnorm_bwd_func(
             dy,

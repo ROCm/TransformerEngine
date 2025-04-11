@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -702,23 +704,16 @@ class _LayerNormLinear(torch.autograd.Function):
                     ctx.zero_centered_gamma,
                 )
             elif ctx.normalization == "RMSNorm":
-                if IS_HIP_EXTENSION and bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ):
-                    dgrad, dgamma = te_rmsnorm_bwd_triton(
-                        dgrad,
-                        inputmat,
-                        rsigma,
-                        ln_weight,
-                        ctx.zero_centered_gamma,
-                    )
-                else:
-                    dgrad, dgamma = tex.rmsnorm_bwd(
-                        dgrad,
-                        inputmat,
-                        rsigma,
-                        ln_weight,
-                        ctx.bwd_ln_sm_margin,
-                        ctx.zero_centered_gamma,
-                    )
+                use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
+                rmsnorm_bwd_func = te_rmsnorm_bwd_triton if use_rmsnorm_triton else tex.rmsnorm_bwd
+                dgrad, dgamma = rmsnorm_bwd_func(
+                    dgrad,
+                    inputmat,
+                    rsigma,
+                    ln_weight,
+                    ctx.bwd_ln_sm_margin,
+                    ctx.zero_centered_gamma,
+                )
                 dbeta = None
             clear_tensor_data(mu)
             clear_tensor_data(rsigma)
