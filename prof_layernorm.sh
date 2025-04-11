@@ -12,6 +12,8 @@ shapes=(
     "76800 1600"
 )
 
+py_src='tests/pytorch/triton_kernels/test_layernorm_triton.py'
+
 function prof_triton_fwd() {
     for we in 1 2 4; do  # waves_per_eu
 	for wa in 4 8 16; do  # num_warps
@@ -21,7 +23,7 @@ function prof_triton_fwd() {
 		prof_kernel.sh \
 		    -r _layernorm_fwd_triton \
 		    -o "prof_triton_fwd/we${we}_wa${wa}/${m}_${n}" \
-		    -- python tests/pytorch/triton_kernels/test_layernorm_triton.py triton "${m}" "${n}" fwd "${we}" "${wa}"
+		    -- python "${py_src}" triton "${m}" "${n}" fwd "${we}" "${wa}"
 	    done
 	done
     done
@@ -35,13 +37,27 @@ function prof_te_fwd() {
 	prof_kernel.sh \
 	    -r 'ln_fwd_\(tuned\|general\)_kernel' \
 	    -o "prof_te_fwd/${m}_${n}" \
-	    -- python tests/pytorch/triton_kernels/test_layernorm_triton.py te "${m}" "${n}" fwd
+	    -- python "${py_src}" te "${m}" "${n}" fwd
+    done
+}
+
+function prof_triton_bwd() {
+    we=2
+    wa=8
+
+    for shape in "${shapes[@]}"; do
+	read -r m n <<< "${shape}"
+
+	prof_kernel.sh \
+	    -r '_layernorm_bwd_\(dx_fused\|dwdb\)_triton' \
+	    -o "prof_triton_bwd/${m}_${n}" \
+	    -- python "${py_src}" triton "${m}" "${n}" bwd "${we}" "${wa}"
     done
 }
 
 ### ENTRY POINT
 
 # prof_triton_fwd
-prof_te_fwd
-# TODO: prof_triton_bwd
+# prof_te_fwd
+prof_triton_bwd
 # TODO: prof_te_bwd
