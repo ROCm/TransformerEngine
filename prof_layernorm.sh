@@ -55,9 +55,20 @@ function prof_triton_bwd() {
     done
 }
 
+function prof_te_bwd() {
+    for shape in "${shapes[@]}"; do
+	read -r m n <<< "${shape}"
+
+	prof_kernel.sh \
+	    -r 'ln_bwd_\(finalize_\)*\(tuned\|general\)_kernel' \
+	    -o "prof_te_bwd/${m}_${n}" \
+	    -- python "${py_src}" te "${m}" "${n}" bwd
+    done
+}
+
 ### ENTRY POINT
 
 # prof_triton_fwd
 # prof_te_fwd
-prof_triton_bwd
-# TODO: prof_te_bwd
+# prof_triton_bwd
+prof_te_bwd
