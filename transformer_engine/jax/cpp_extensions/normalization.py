@@ -1,6 +1,6 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for normalization"""
@@ -11,14 +11,13 @@ import warnings
 
 import jax
 import jax.numpy as jnp
-from jax import core, dtypes
+from jax import dtypes
 from jax.interpreters import mlir
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
 from jax.extend import ffi
 
 from transformer_engine import transformer_engine_jax
-from transformer_engine.transformer_engine_jax import DType as TEDType
 
 from .base import BasePrimitive, register_primitive
 from .custom_call import custom_caller, CustomCallArgsWrapper
@@ -79,14 +78,14 @@ class LayerNormFwdPrimitive(BasePrimitive):
 
         mu_rsigama_dtype = jnp.float32
 
-        out_aval = core.raise_to_shaped(x_aval)
+        out_aval = x_aval
         mu_aval = rsigma_aval = out_aval.update(shape=out_aval.shape[:-1], dtype=mu_rsigama_dtype)
 
         assert gamma_aval.size == beta_aval.size
         hidden_size = gamma_aval.size
         assert x_aval.size % hidden_size == 0
 
-        wkspace_info, barrier_info = transformer_engine_jax.get_layernorm_fwd_workspace_sizes(
+        (wkspace_info,) = transformer_engine_jax.get_layernorm_fwd_workspace_sizes(
             x_aval.size // hidden_size,  # batch size
             hidden_size,
             jax_dtype_to_te_dtype(x_aval.dtype),  # in te_dtype
@@ -100,18 +99,15 @@ class LayerNormFwdPrimitive(BasePrimitive):
         wkspace_aval = out_aval.update(
             shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
         )
-        barrier_aval = out_aval.update(
-            shape=barrier_info[0], dtype=te_dtype_to_jax_dtype(barrier_info[1])
-        )
 
-        return out_aval, mu_aval, rsigma_aval, wkspace_aval, barrier_aval
+        return out_aval, mu_aval, rsigma_aval, wkspace_aval
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
         """
         LayerNorm fwd outer primitive abstract
         """
-        out_aval, mu_aval, rsigma_aval, _, _ = LayerNormFwdPrimitive.abstract(*args, **kwargs)
+        out_aval, mu_aval, rsigma_aval, _ = LayerNormFwdPrimitive.abstract(*args, **kwargs)
         return out_aval, mu_aval, rsigma_aval
 
     @staticmethod
@@ -155,7 +151,7 @@ class LayerNormFwdPrimitive(BasePrimitive):
             batch_shape = out_shape[:-1]
             batch_size = reduce(operator.mul, x_shape) // hidden_size
 
-            wkspace_aval, barrier_aval = ctx.avals_out[-2:]
+            wkspace_aval = ctx.avals_out[-1]
 
             out_types = [
                 ir.RankedTensorType.get(out_shape, output_type),
@@ -163,9 +159,6 @@ class LayerNormFwdPrimitive(BasePrimitive):
                 ir.RankedTensorType.get(batch_shape, ir_rsigma_dtype),
                 ir.RankedTensorType.get(
                     wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)
-                ),
-                ir.RankedTensorType.get(
-                    barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype)
                 ),
             ]
             operands = [x, gamma, beta]
@@ -178,15 +171,9 @@ class LayerNormFwdPrimitive(BasePrimitive):
                 batch_size,
                 hidden_size,
                 wkspace_aval.size,
-                barrier_aval.size,
-                (0,),  # no dgamma_part in FWD pass
-                (0,),  # no dbeta_part in BWD pass
                 jax_dtype_to_te_dtype(x_aval.dtype),
                 jax_dtype_to_te_dtype(gamma_aval.dtype),
                 jax_dtype_to_te_dtype(wkspace_aval.dtype),
-                jax_dtype_to_te_dtype(barrier_aval.dtype),
-                TEDType.kByte,  # dummy dgamma_part te_dtype
-                TEDType.kByte,  # dummy dbeta_part te_dtype
                 zero_centered_gamma,
                 epsilon,
                 sm_margin,
@@ -202,7 +189,7 @@ class LayerNormFwdPrimitive(BasePrimitive):
         to describe implementation
         """
         assert LayerNormFwdPrimitive.inner_primitive is not None
-        out, mu, rsigma, _, _ = LayerNormFwdPrimitive.inner_primitive.bind(
+        out, mu, rsigma, _ = LayerNormFwdPrimitive.inner_primitive.bind(
             x, gamma, beta, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon
         )
         return out, mu, rsigma
@@ -378,32 +365,21 @@ class LayerNormBwdPrimitive(BasePrimitive):
         assert mu_aval.shape == rsigma_aval.shape == x_aval.shape[:-1]
         assert mu_dtype == rsigma_dtype == jnp.float32
 
-        dx_aval = core.raise_to_shaped(dz_aval)
-        dgamma_aval = dbeta_aval = core.raise_to_shaped(gamma_aval)
+        dx_aval = dz_aval
+        dgamma_aval = dbeta_aval = gamma_aval
 
-        wkspace_info, barrier_info, dgamma_part_info, dbeta_part_info = (
-            transformer_engine_jax.get_layernorm_bwd_workspace_sizes(
-                x_aval.size // gamma_aval.size,  # batch size
-                gamma_aval.size,  # hidden size
-                jax_dtype_to_te_dtype(x_aval.dtype),  # input te_dtype
-                jax_dtype_to_te_dtype(gamma_aval.dtype),  # weight te_dtype
-                True,
-                kwargs["zero_centered_gamma"],
-                kwargs["epsilon"],
-                get_backward_sm_margin(),
-            )
+        (wkspace_info,) = transformer_engine_jax.get_layernorm_bwd_workspace_sizes(
+            x_aval.size // gamma_aval.size,  # batch size
+            gamma_aval.size,  # hidden size
+            jax_dtype_to_te_dtype(x_aval.dtype),  # input te_dtype
+            jax_dtype_to_te_dtype(gamma_aval.dtype),  # weight te_dtype
+            True,
+            kwargs["zero_centered_gamma"],
+            kwargs["epsilon"],
+            get_backward_sm_margin(),
         )
         wkspace_aval = dx_aval.update(
             shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
-        )
-        barrier_aval = dx_aval.update(
-            shape=barrier_info[0], dtype=te_dtype_to_jax_dtype(barrier_info[1])
-        )
-        dgamma_part_aval = dgamma_aval.update(
-            shape=dgamma_part_info[0], dtype=te_dtype_to_jax_dtype(dgamma_part_info[1])
-        )
-        dbeta_part_aval = dbeta_aval.update(
-            shape=dbeta_part_info[0], dtype=te_dtype_to_jax_dtype(dbeta_part_info[1])
         )
 
         return (
@@ -411,9 +387,6 @@ class LayerNormBwdPrimitive(BasePrimitive):
             dgamma_aval,
             dbeta_aval,
             wkspace_aval,
-            barrier_aval,
-            dgamma_part_aval,
-            dbeta_part_aval,
         )
 
     @staticmethod
@@ -421,9 +394,7 @@ class LayerNormBwdPrimitive(BasePrimitive):
         """
         LayerNorm bwd outer primitive abstract
         """
-        dx_aval, dgamma_aval, dbeta_aval, _, _, _, _ = LayerNormBwdPrimitive.abstract(
-            *args, **kwargs
-        )
+        dx_aval, dgamma_aval, dbeta_aval, _ = LayerNormBwdPrimitive.abstract(*args, **kwargs)
         return dx_aval, dgamma_aval, dbeta_aval
 
     @staticmethod
@@ -474,20 +445,14 @@ class LayerNormBwdPrimitive(BasePrimitive):
 
             sm_margin = get_backward_sm_margin()
 
-            wkspace_aval, barrier_aval, dgamma_part_aval, dbeta_part_aval = ctx.avals_out[-4:]
+            wkspace_aval = ctx.avals_out[-1]
             opaque = transformer_engine_jax.pack_norm_descriptor(
                 batch_size,
                 hidden_size,
                 wkspace_aval.size,
-                barrier_aval.size,
-                dgamma_part_aval.shape,
-                dbeta_part_aval.shape,
                 jax_dtype_to_te_dtype(x_aval.dtype),
                 jax_dtype_to_te_dtype(gamma_aval.dtype),
                 jax_dtype_to_te_dtype(wkspace_aval.dtype),
-                jax_dtype_to_te_dtype(barrier_aval.dtype),
-                jax_dtype_to_te_dtype(dgamma_part_aval.dtype),
-                jax_dtype_to_te_dtype(dbeta_part_aval.dtype),
                 zero_centered_gamma,
                 epsilon,
                 sm_margin,
@@ -500,7 +465,7 @@ class LayerNormBwdPrimitive(BasePrimitive):
     @staticmethod
     def impl(dz, x, mu, rsigma, gamma, zero_centered_gamma, epsilon):
         assert LayerNormBwdPrimitive.inner_primitive is not None
-        dx, dgamma, dbeta, _, _, _, _ = LayerNormBwdPrimitive.inner_primitive.bind(
+        dx, dgamma, dbeta, _ = LayerNormBwdPrimitive.inner_primitive.bind(
             dz, x, mu, rsigma, gamma, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon
         )
         return dx, dgamma, dbeta
@@ -628,13 +593,13 @@ class RmsNormFwdPrimitive(BasePrimitive):
 
         rsigama_dtype = jnp.float32
 
-        out_aval = core.raise_to_shaped(x_aval)
+        out_aval = x_aval
         rsigma_aval = out_aval.update(shape=out_aval.shape[:-1], dtype=rsigama_dtype)
 
         hidden_size = gamma_aval.size
         assert x_aval.size % hidden_size == 0
 
-        wkspace_info, barrier_info = transformer_engine_jax.get_layernorm_fwd_workspace_sizes(
+        (wkspace_info,) = transformer_engine_jax.get_layernorm_fwd_workspace_sizes(
             x_aval.size // hidden_size,  # batch size
             hidden_size,
             jax_dtype_to_te_dtype(x_aval.dtype),  # in te_dtype
@@ -648,18 +613,15 @@ class RmsNormFwdPrimitive(BasePrimitive):
         wkspace_aval = out_aval.update(
             shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
         )
-        barrier_aval = out_aval.update(
-            shape=barrier_info[0], dtype=te_dtype_to_jax_dtype(barrier_info[1])
-        )
 
-        return out_aval, rsigma_aval, wkspace_aval, barrier_aval
+        return out_aval, rsigma_aval, wkspace_aval
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
         """
         RMSNorm fwd outer primitive abstract
         """
-        out_aval, rsigma_aval, _, _ = RmsNormFwdPrimitive.abstract(*args, **kwargs)
+        out_aval, rsigma_aval, _ = RmsNormFwdPrimitive.abstract(*args, **kwargs)
         return out_aval, rsigma_aval
 
     @staticmethod
@@ -692,16 +654,13 @@ class RmsNormFwdPrimitive(BasePrimitive):
             batch_shape = out_shape[:-1]
             batch_size = reduce(operator.mul, x_shape) // hidden_size
 
-            wkspace_aval, barrier_aval = ctx.avals_out[-2:]
+            wkspace_aval = ctx.avals_out[-1]
 
             out_types = [
                 ir.RankedTensorType.get(out_shape, x_type.element_type),
                 ir.RankedTensorType.get(batch_shape, rsigma_element_type),
                 ir.RankedTensorType.get(
                     wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)
-                ),
-                ir.RankedTensorType.get(
-                    barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype)
                 ),
             ]
             operands = [x, gamma]
@@ -714,15 +673,9 @@ class RmsNormFwdPrimitive(BasePrimitive):
                 batch_size,
                 hidden_size,
                 wkspace_aval.size,
-                barrier_aval.size,
-                (0,),  # no dgamma_part in FWD pass
-                (0,),  # no dbeta_part in BWD pass
                 jax_dtype_to_te_dtype(x_aval.dtype),
                 jax_dtype_to_te_dtype(gamma_aval.dtype),
                 jax_dtype_to_te_dtype(wkspace_aval.dtype),
-                jax_dtype_to_te_dtype(barrier_aval.dtype),
-                TEDType.kByte,  # dummy dgamma_part te_dtype
-                TEDType.kByte,  # dummy dbeta_part te_dtype
                 False,  # RMSNorm doesn't support zero_centered_gamma
                 epsilon,
                 sm_margin,
@@ -738,7 +691,7 @@ class RmsNormFwdPrimitive(BasePrimitive):
         to describe implementation
         """
         assert RmsNormFwdPrimitive.inner_primitive is not None
-        out, rsigma, _, _ = RmsNormFwdPrimitive.inner_primitive.bind(x, gamma, epsilon=epsilon)
+        out, rsigma, _ = RmsNormFwdPrimitive.inner_primitive.bind(x, gamma, epsilon=epsilon)
         return out, rsigma
 
     @staticmethod
@@ -834,39 +787,31 @@ class RmsNormBwdPrimitive(BasePrimitive):
         assert rsigma_aval.shape == x_aval.shape[:-1]
         assert rsigma_dtype == jnp.float32
 
-        dx_aval = core.raise_to_shaped(dz_aval)
-        dgamma_aval = core.raise_to_shaped(gamma_aval)
+        dx_aval = dz_aval
+        dgamma_aval = gamma_aval
 
-        wkspace_info, barrier_info, dgamma_part_info, _ = (
-            transformer_engine_jax.get_layernorm_bwd_workspace_sizes(
-                x_aval.size // gamma_aval.size,  # batch size
-                gamma_aval.size,  # hidden size
-                jax_dtype_to_te_dtype(x_aval.dtype),  # in te_dtype
-                jax_dtype_to_te_dtype(gamma_aval.dtype),  # weight te_dtype
-                False,
-                False,
-                kwargs["epsilon"],
-                get_backward_sm_margin(),
-            )
+        (wkspace_info,) = transformer_engine_jax.get_layernorm_bwd_workspace_sizes(
+            x_aval.size // gamma_aval.size,  # batch size
+            gamma_aval.size,  # hidden size
+            jax_dtype_to_te_dtype(x_aval.dtype),  # in te_dtype
+            jax_dtype_to_te_dtype(gamma_aval.dtype),  # weight te_dtype
+            False,
+            False,
+            kwargs["epsilon"],
+            get_backward_sm_margin(),
         )
         wkspace_aval = dx_aval.update(
             shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
         )
-        barrier_aval = dx_aval.update(
-            shape=barrier_info[0], dtype=te_dtype_to_jax_dtype(barrier_info[1])
-        )
-        dgamma_part_aval = dgamma_aval.update(
-            shape=dgamma_part_info[0], dtype=te_dtype_to_jax_dtype(dgamma_part_info[1])
-        )
 
-        return dx_aval, dgamma_aval, wkspace_aval, barrier_aval, dgamma_part_aval
+        return dx_aval, dgamma_aval, wkspace_aval
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
         """
         RMSNorm bwd outer primitive abstract
         """
-        dx_aval, dgamma_aval, _, _, _ = RmsNormBwdPrimitive.abstract(*args, **kwargs)
+        dx_aval, dgamma_aval, _ = RmsNormBwdPrimitive.abstract(*args, **kwargs)
         return dx_aval, dgamma_aval
 
     @staticmethod
@@ -900,19 +845,13 @@ class RmsNormBwdPrimitive(BasePrimitive):
             hidden_size = reduce(operator.mul, g_shape)
             batch_size = reduce(operator.mul, x_shape) // hidden_size
 
-            wkspace_aval, barrier_aval, dgamma_part_aval = ctx.avals_out[-3:]
+            wkspace_aval = ctx.avals_out[-1]
 
             out_types = [
                 ir.RankedTensorType.get(x_shape, x_type.element_type),
                 ir.RankedTensorType.get(g_shape, g_type.element_type),
                 ir.RankedTensorType.get(
                     wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)
-                ),
-                ir.RankedTensorType.get(
-                    barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype)
-                ),
-                ir.RankedTensorType.get(
-                    dgamma_part_aval.shape, jax_dtype_to_ir_dtype(dgamma_part_aval.dtype)
                 ),
             ]
             operands = [dz, rsigma, x, gamma]
@@ -925,15 +864,9 @@ class RmsNormBwdPrimitive(BasePrimitive):
                 batch_size,
                 hidden_size,
                 wkspace_aval.size,
-                barrier_aval.size,
-                dgamma_part_aval.shape,
-                (0,),  # no dbeta_part for RMSnorm
                 jax_dtype_to_te_dtype(x_aval.dtype),
                 jax_dtype_to_te_dtype(gamma_aval.dtype),
                 jax_dtype_to_te_dtype(wkspace_aval.dtype),
-                jax_dtype_to_te_dtype(barrier_aval.dtype),
-                jax_dtype_to_te_dtype(dgamma_part_aval.dtype),
-                TEDType.kByte,  # dummy dbeta_part te_dtype
                 False,  # RMSNorm doesn't support zero_centered_gamma
                 epsilon,
                 sm_margin,
@@ -946,7 +879,7 @@ class RmsNormBwdPrimitive(BasePrimitive):
     @staticmethod
     def impl(dz, x, rsigma, gamma, epsilon):
         assert RmsNormBwdPrimitive.inner_primitive is not None
-        dx, dgamma, _, _, _ = RmsNormBwdPrimitive.inner_primitive.bind(
+        dx, dgamma, _ = RmsNormBwdPrimitive.inner_primitive.bind(
             dz, x, rsigma, gamma, epsilon=epsilon
         )
         return dx, dgamma
@@ -1070,7 +1003,7 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
 
         assert gamma_aval.size == beta_aval.size
 
-        wkspace_info, barrier_info = transformer_engine_jax.get_layernorm_fwd_workspace_sizes(
+        (wkspace_info,) = transformer_engine_jax.get_layernorm_fwd_workspace_sizes(
             x_aval.size // gamma_aval.size,  # batch size
             gamma_aval.size,  # hidden size
             jax_dtype_to_te_dtype(x_aval.dtype),  # in type
@@ -1088,18 +1021,15 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
         wkspace_aval = x_aval.update(
             shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
         )
-        barrier_aval = x_aval.update(
-            shape=barrier_info[0], dtype=te_dtype_to_jax_dtype(barrier_info[1])
-        )
 
-        return out_aval, mu_aval, rsigma_aval, updated_amax_aval, wkspace_aval, barrier_aval
+        return out_aval, mu_aval, rsigma_aval, updated_amax_aval, wkspace_aval
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
         """
         LayerNorm fwd (fp8 out) outer primitive abstract
         """
-        out_aval, mu_aval, rsigma_aval, updated_amax_aval, _, _ = LayerNormFwdFp8Primitive.abstract(
+        out_aval, mu_aval, rsigma_aval, updated_amax_aval, _ = LayerNormFwdFp8Primitive.abstract(
             *args, **kwargs
         )
         return out_aval, mu_aval, rsigma_aval, updated_amax_aval
@@ -1162,7 +1092,7 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
             batch_shape = out_shape[:-1]
             batch_size = reduce(operator.mul, x_shape) // hidden_size
 
-            wkspace_aval, barrier_aval = ctx.avals_out[-2:]
+            wkspace_aval = ctx.avals_out[-1]
 
             out_types = [
                 ir.RankedTensorType.get(out_shape, ir_out_dtype),
@@ -1171,9 +1101,6 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
                 ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
                 ir.RankedTensorType.get(
                     wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)
-                ),
-                ir.RankedTensorType.get(
-                    barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype)
                 ),
             ]
             operands = [x, gamma, beta, amax, scale, scale_inv]
@@ -1193,15 +1120,9 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
                 batch_size,
                 hidden_size,
                 wkspace_aval.size,
-                barrier_aval.size,
-                (0,),  # no dgamma_part in FWD pass
-                (0,),  # no dbeta_part in BWD pass
                 jax_dtype_to_te_dtype(x_aval.dtype),
                 jax_dtype_to_te_dtype(gamma_aval.dtype),
                 jax_dtype_to_te_dtype(wkspace_aval.dtype),
-                jax_dtype_to_te_dtype(barrier_aval.dtype),
-                TEDType.kByte,  # dummy dgamma_part te_dtype
-                TEDType.kByte,  # dummy dbeta_part te_dtype
                 zero_centered_gamma,
                 epsilon,
                 sm_margin,
@@ -1219,7 +1140,7 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
         to describe implementation
         """
         assert LayerNormFwdFp8Primitive.inner_primitive is not None
-        out, mu, rsigma, updated_amax, _, _ = LayerNormFwdFp8Primitive.inner_primitive.bind(
+        out, mu, rsigma, updated_amax, _ = LayerNormFwdFp8Primitive.inner_primitive.bind(
             x,
             gamma,
             beta,
@@ -1398,7 +1319,7 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
 
         rsigama_dtype = jnp.float32
 
-        wkspace_info, barrier_info = transformer_engine_jax.get_layernorm_fwd_workspace_sizes(
+        (wkspace_info,) = transformer_engine_jax.get_layernorm_fwd_workspace_sizes(
             x_aval.size // hidden_size,  # batch_size
             hidden_size,
             jax_dtype_to_te_dtype(x_aval.dtype),  # in te_dtype
@@ -1416,18 +1337,15 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
         wkspace_aval = x_aval.update(
             shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
         )
-        barrier_aval = x_aval.update(
-            shape=barrier_info[0], dtype=te_dtype_to_jax_dtype(barrier_info[1])
-        )
 
-        return out_aval, rsigma_aval, amax_aval, wkspace_aval, barrier_aval
+        return out_aval, rsigma_aval, amax_aval, wkspace_aval
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
         """
         RMSNorm fwd (fp8 out) outer primitive abstract
         """
-        out_aval, rsigma_aval, amax_aval, _, _ = RmsNormFwdFp8Primitive.abstract(*args, **kwargs)
+        out_aval, rsigma_aval, amax_aval, _ = RmsNormFwdFp8Primitive.abstract(*args, **kwargs)
         return out_aval, rsigma_aval, amax_aval
 
     @staticmethod
@@ -1480,7 +1398,7 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
             batch_shape = out_shape[:-1]
             batch_size = reduce(operator.mul, x_shape) // hidden_size
 
-            wkspace_aval, barrier_aval = ctx.avals_out[-2:]
+            wkspace_aval = ctx.avals_out[-1]
 
             out_types = [
                 ir.RankedTensorType.get(out_shape, ir_out_dtype),
@@ -1488,9 +1406,6 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
                 ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
                 ir.RankedTensorType.get(
                     wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)
-                ),
-                ir.RankedTensorType.get(
-                    barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype)
                 ),
             ]
             operands = [x, gamma, amax, scale, scale_inv]
@@ -1503,15 +1418,9 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
                 batch_size,
                 hidden_size,
                 wkspace_aval.size,
-                barrier_aval.size,
-                (0,),  # no dgamma_part in FWD pass
-                (0,),  # no dbeta_part in BWD pass
                 jax_dtype_to_te_dtype(x_aval.dtype),
                 jax_dtype_to_te_dtype(gamma_aval.dtype),
                 jax_dtype_to_te_dtype(wkspace_aval.dtype),
-                jax_dtype_to_te_dtype(barrier_aval.dtype),
-                TEDType.kByte,  # dummy dgamma_part te_dtype
-                TEDType.kByte,  # dummy dbeta_part te_dtype
                 False,  # RMSNorm doesn't support zero_centered_gamma
                 epsilon,
                 sm_margin,
@@ -1529,7 +1438,7 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
         to describe implementation
         """
         assert RmsNormFwdFp8Primitive.inner_primitive is not None
-        out, rsigma, amax, _, _ = RmsNormFwdFp8Primitive.inner_primitive.bind(
+        out, rsigma, amax, _ = RmsNormFwdFp8Primitive.inner_primitive.bind(
             x, gamma, amax, scale, scale_inv, out_dtype=out_dtype, epsilon=epsilon
         )
         return out, rsigma, amax

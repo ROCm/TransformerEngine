@@ -1,7 +1,7 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -121,7 +121,7 @@ class Tensor {
 
   ~Tensor() {
     if (tensor_.dptr() != nullptr) {
-      cudaFree(tensor_.dptr());
+      (void)cudaFree(tensor_.dptr());
     }
   }
   NVTETensor data() const noexcept {

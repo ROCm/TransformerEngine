@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
@@ -139,7 +139,7 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
   bool accumulate = false;
 
   cudaDeviceProp prop;
-  cudaGetDeviceProperties(&prop, 0);
+  (void)cudaGetDeviceProperties(&prop, 0);
 
 #ifdef __HIP_PLATFORM_AMD__
   if ((isFp8Type(atype) || isFp8Type(btype)) && 
@@ -191,7 +191,7 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
     &ref_amax_d,
     use_gelu? ref_pre_gelu_out.get(): nullptr);
   // check if error message happens in running                             
-  cudaDeviceSynchronize();
+  (void)cudaDeviceSynchronize();
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 

@@ -1845,19 +1845,19 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
       static hipblasLtHandle_t hipblaslt_handles[num_streams];
       std::call_once(init_flag, init_hipblaslt_handles, hipblaslt_handles);
 
-      handle = hipblaslt_handles[compute_stream_offset]; 
+      handle = hipblaslt_handles[compute_stream_offset];
     }
 
     hipblaslt_gemm(inputA, inputB, outputD, inputBias, outputPreGelu, 
-                   m, n, k, lda, ldb, ldd, 
+                   m, n, k, lda, ldb, ldd,
                    (transa) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
                    (transb) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
                    grad,
                    workspace, workspaceSize, accumulate, use_split_accumulator,
                    math_sm_count, m_split, n_split, gemm_producer,
-                   inputCounter, stream, 
+                   inputCounter, stream,
                    handle);
-    
+
     return;
   }
 #endif
@@ -1865,7 +1865,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 #ifdef USE_ROCBLAS
   {
     rocblas_gemm(inputA, inputB, outputD, inputBias, outputPreGelu, 
-                 m, n, k, lda, ldb, ldd, 
+                 m, n, k, lda, ldb, ldd,
                 (transa) ? rocblas_operation_transpose : rocblas_operation_none,
                 (transb) ? rocblas_operation_transpose : rocblas_operation_none,
                  grad,

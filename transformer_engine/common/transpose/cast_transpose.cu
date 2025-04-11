@@ -1,7 +1,7 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -285,7 +285,7 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *cast_output
               if (env_p != nullptr && std::string(env_p) == "1")
                 nvte_use_optimized_hipified_cast_transpose = true;
             }
-            if(nvte_use_optimized_hipified_cast_transpose && 
+            if(nvte_use_optimized_hipified_cast_transpose &&
               //only use the optimized kernel in fp8 setting
               (std::is_same<OutputType, fp8e5m2>::value || std::is_same<OutputType, fp8e4m3>::value)){
               // Estimate number of SMs

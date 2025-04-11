@@ -1,7 +1,7 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2023-2024, Advanced Micro Devices, Inc. All rights reserved.
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -74,20 +74,20 @@ Tensor::Tensor(const NVTEShape &shape, const DType type) {
     scale_inv_cpu_data_ = nullptr;
     float *amax = nullptr, *scale = nullptr, *scale_inv = nullptr;
     if (total_size != 0) {
-        cudaMalloc((void**)&dptr, total_size);  // NOLINT(*)
-        cudaMemset(dptr, 0, total_size);
+        (void)cudaMalloc((void**)&dptr, total_size);  // NOLINT(*)
+        (void)cudaMemset(dptr, 0, total_size);
         cpu_data_ = std::make_unique<unsigned char[]>(total_size);
         for (size_t i = 0; i < total_size; ++i) {
           cpu_data_[i] = 0;
         }
     }
     if (isFp8Type(type)) {
-      cudaMalloc((void**)&amax, sizeof(float));  // NOLINT(*)
-      cudaMemset(amax, 0, sizeof(float));
-      cudaMalloc((void**)&scale, sizeof(float));  // NOLINT(*)
-      cudaMemset(scale, 0, sizeof(float));
-      cudaMalloc((void**)&scale_inv, sizeof(float));  // NOLINT(*)
-      cudaMemset(scale_inv, 0, sizeof(float));
+      (void)cudaMalloc((void**)&amax, sizeof(float));  // NOLINT(*)
+      (void)cudaMemset(amax, 0, sizeof(float));
+      (void)cudaMalloc((void**)&scale, sizeof(float));  // NOLINT(*)
+      (void)cudaMemset(scale, 0, sizeof(float));
+      (void)cudaMalloc((void**)&scale_inv, sizeof(float));  // NOLINT(*)
+      (void)cudaMemset(scale_inv, 0, sizeof(float));
       amax_cpu_data_ = std::make_shared<float>();
       *amax_cpu_data_ = 0;
       scale_cpu_data_ = std::make_shared<float>();
@@ -101,28 +101,24 @@ Tensor::Tensor(const NVTEShape &shape, const DType type) {
 void Tensor::to_cpu() const {
   const NVTEShape s = tensor_.shape();
   const size_t size = product(s) * typeToSize(tensor_.dtype());
-  cudaMemcpy(cpu_data_.get(), tensor_.dptr(), size, cudaMemcpyDeviceToHost);
+  (void)cudaMemcpy(cpu_data_.get(), tensor_.dptr(), size, cudaMemcpyDeviceToHost);
   if (isFp8Type(dtype())) {
-    cudaMemcpy(amax_cpu_data_.get(), tensor_.amax(), sizeof(float),
-               cudaMemcpyDeviceToHost);
-    cudaMemcpy(scale_cpu_data_.get(), tensor_.scale(), sizeof(float),
-               cudaMemcpyDeviceToHost);
-    cudaMemcpy(scale_inv_cpu_data_.get(), tensor_.scale_inv(), sizeof(float),
-               cudaMemcpyDeviceToHost);
+    (void)cudaMemcpy(amax_cpu_data_.get(), tensor_.amax(), sizeof(float), cudaMemcpyDeviceToHost);
+    (void)cudaMemcpy(scale_cpu_data_.get(), tensor_.scale(), sizeof(float), cudaMemcpyDeviceToHost);
+    (void)cudaMemcpy(scale_inv_cpu_data_.get(), tensor_.scale_inv(), sizeof(float),
+                     cudaMemcpyDeviceToHost);
   }
 }
 
 void Tensor::from_cpu() const {
   const NVTEShape s = tensor_.shape();
   const size_t size = product(s) * typeToSize(tensor_.dtype());
-  cudaMemcpy(tensor_.dptr(), cpu_data_.get(), size, cudaMemcpyHostToDevice);
+  (void)cudaMemcpy(tensor_.dptr(), cpu_data_.get(), size, cudaMemcpyHostToDevice);
   if (isFp8Type(dtype())) {
-  cudaMemcpy(tensor_.amax(), amax_cpu_data_.get(), sizeof(float),
-             cudaMemcpyHostToDevice);
-  cudaMemcpy(tensor_.scale(), scale_cpu_data_.get(), sizeof(float),
-             cudaMemcpyHostToDevice);
-  cudaMemcpy(tensor_.scale_inv(), scale_inv_cpu_data_.get(), sizeof(float),
-             cudaMemcpyHostToDevice);
+    (void)cudaMemcpy(tensor_.amax(), amax_cpu_data_.get(), sizeof(float), cudaMemcpyHostToDevice);
+    (void)cudaMemcpy(tensor_.scale(), scale_cpu_data_.get(), sizeof(float), cudaMemcpyHostToDevice);
+    (void)cudaMemcpy(tensor_.scale_inv(), scale_inv_cpu_data_.get(), sizeof(float),
+                     cudaMemcpyHostToDevice);
   }
 }
 

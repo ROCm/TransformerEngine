@@ -1,5 +1,7 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -63,7 +65,7 @@ void performTest(const size_t N, const size_t H) {
                                      ref_output_t.get(), N, H, &ref_amax,
                                      output_c.scale());
 
-  cudaDeviceSynchronize();
+  (void)cudaDeviceSynchronize();
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
   if (isFp8Type(otype)) {

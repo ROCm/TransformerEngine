@@ -1,7 +1,7 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved. 
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved. 
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -54,7 +54,7 @@ class cudaDevicePropertiesManager {
     if (!prop_queried_) {
       int device_id;
       NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
-      cudaGetDeviceProperties(&prop_, device_id);
+      (void)cudaGetDeviceProperties(&prop_, device_id);
       prop_queried_ = true;
     }
     return prop_.multiProcessorCount;
@@ -64,7 +64,7 @@ class cudaDevicePropertiesManager {
     if (!prop_queried_) {
       int device_id;
       NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
-      cudaGetDeviceProperties(&prop_, device_id);
+      (void)cudaGetDeviceProperties(&prop_, device_id);
       prop_queried_ = true;
     }
     return prop_.major;

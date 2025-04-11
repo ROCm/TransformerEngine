@@ -1,7 +1,7 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -234,7 +234,7 @@ __global__ void __launch_bounds__(reduce_dbias_num_threads)
 
 #ifdef __HIP_PLATFORM_AMD__
 template <typename ComputeType, typename OutputType>
-__global__ void reduce_dbias_kernel(OutputType *const dbias_output, const ComputeType *const dbias_partial, 
+__global__ void reduce_dbias_kernel(OutputType *const dbias_output, const ComputeType *const dbias_partial,
                 const int row_length, const int thread_num_rows, const int num_rows) {
 
   const int col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -259,7 +259,7 @@ __global__ void reduce_dbias_kernel(OutputType *const dbias_output, const Comput
   extern __shared__ ComputeType sdata[];
   sdata[threadIdx.y * blockDim.x + threadIdx.x] = acc;
   __syncthreads();
-  
+
   if(threadIdx.y == 0 && col < row_length)
   {
     acc = 0;
@@ -284,7 +284,7 @@ void reduce_dbias(const Tensor &workspace, Tensor *dbias, const size_t row_lengt
   const size_t reduce_dbias_num_rows =
       DIVUP(num_rows, static_cast<size_t>(nvec_out * THREADS_PER_WARP));
 
-#ifdef __HIP_PLATFORM_AMD__ 
+#ifdef __HIP_PLATFORM_AMD__
   bool nvte_use_optimized_hipified_cast_transpose = false;
   if (const char* env_p = std::getenv("NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
@@ -309,7 +309,7 @@ void reduce_dbias(const Tensor &workspace, Tensor *dbias, const size_t row_lengt
               reinterpret_cast<const fp32 *>(workspace.data.dptr), reduce_dbias_row_length,
               thread_num_rows, reduce_dbias_num_rows);
   }else{
-#endif 
+#endif
   const size_t reduce_dbias_num_blocks =
     DIVUP(row_length, reduce_dbias_num_threads * reduce_dbias_nvec);
   using DbiasOutputType = fp32;
@@ -318,9 +318,9 @@ void reduce_dbias(const Tensor &workspace, Tensor *dbias, const size_t row_lengt
           reinterpret_cast<InputType *>(dbias->data.dptr),
           reinterpret_cast<const fp32 *>(workspace.data.dptr), reduce_dbias_row_length,
           reduce_dbias_num_rows);
-#ifdef __HIP_PLATFORM_AMD__ 
+#ifdef __HIP_PLATFORM_AMD__
   }
-#endif 
+#endif
 }
 
 template <bool IS_DBIAS, bool IS_DACT, typename ComputeType, typename Param, int nvec_in,
