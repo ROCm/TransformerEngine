@@ -1,6 +1,6 @@
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -380,7 +380,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 ub=ub_obj_lnout if ub_overlap_ag else None,
                 extra_output_tensor=ln_out if ub_overlap_ag else None,
             )
-            if not is_grad_enabled:
+            if not is_grad_enabled and not return_layernorm_output:
                 clear_tensor_data(ln_out_total)
 
             if bias_gelu_nvfusion:
@@ -1062,7 +1062,7 @@ class _LayerNormMLP(torch.autograd.Function):
             elif ctx.normalization == "RMSNorm":
                 use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
                 rmsnorm_bwd_func = te_rmsnorm_bwd_triton if use_rmsnorm_triton else tex.rmsnorm_bwd
-                dgrad, dgamma = tex.rmsnorm_bwd(
+                dgrad, dgamma = rmsnorm_bwd_func(
                     dgrad,
                     inputmat,
                     rsigma,
@@ -1493,7 +1493,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
                                produced)
         """
 
-        skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
+        if FP8GlobalStateManager.fp8_graph_capturing():
+            skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
+        else:
+            skip_fp8_weight_update = None
         if skip_fp8_weight_update is not None:
             is_first_microbatch = False
 

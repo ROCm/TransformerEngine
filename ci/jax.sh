@@ -79,11 +79,11 @@ run_test_config_mgpu() {
     case "$_ver" in
     *0.4.35*)
         # Workaround for distributed tests hang with JIT enabled
-        JAX_DISABLE_JIT=1 run 3 test_distributed_fused_attn.py -k 'not (test_contex_parallel_allgather_attn[BALANCED or test_context_parallel_ring_attn)'
+        JAX_DISABLE_JIT=1 run 3 test_distributed_fused_attn.py -k 'not (test_context_parallel_allgather_attn[BALANCED or test_context_parallel_ring_attn)'
         _JAX_DISABLE_JIT_FLAG=1
 
         # Run tests that fail with JIT disabled
-        run 3 test_distributed_fused_attn.py -k 'test_contex_parallel_allgather_attn[BALANCED'
+        run 3 test_distributed_fused_attn.py -k 'test_context_parallel_allgather_attn[BALANCED'
 
         # Test ring attention with and without scan loop
         NVTE_FUSED_RING_ATTENTION_USE_SCAN=0 run 3 test_distributed_fused_attn.py -k test_context_parallel_ring_attn

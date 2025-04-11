@@ -1,7 +1,7 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -394,11 +394,11 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
                       NVTETensor workspace, bool accumulate, bool use_split_accumulator,
                       int math_sm_count, cudaStream_t stream) {
   NVTE_API_CALL(nvte_cublas_gemm);
-  
-  cublas_gemm_ex(A, B, D, bias, pre_gelu_out, 
-                 transa, transb, 
-                 grad, 
-                 workspace, accumulate, use_split_accumulator, 
+
+  cublas_gemm_ex(A, B, D, bias, pre_gelu_out,
+                 transa, transb,
+                 grad,
+                 workspace, accumulate, use_split_accumulator,
                  math_sm_count, stream, -1);
 }
 

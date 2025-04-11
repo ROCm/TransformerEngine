@@ -1,6 +1,6 @@
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -1123,7 +1123,7 @@ def _run_attention_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False
 
         del block
         block = get_model(dtype, config)
-        block.load_state_dict(torch.load(path))
+        block.load_state_dict(torch.load(path, weights_only=False))
         torch.set_rng_state(_cpu_rng_state_new)
         torch.cuda.set_rng_state(_cuda_rng_state_new)
 

@@ -77,6 +77,7 @@ run_test_config_mgpu(){
         run 3 distributed/test_fusible_ops.py
         run 3 fused_attn/test_fused_attn_with_cp.py
         run 3 distributed/test_numerics.py
+        run 3 distributed/test_torch_fsdp2.py
     fi
 }
 

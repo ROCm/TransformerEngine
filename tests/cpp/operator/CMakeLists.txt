@@ -1,6 +1,6 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2024, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -12,8 +12,7 @@ list(APPEND test_cuda_sources
             test_cast_transpose_dbias_dgelu.cu
             test_cast_transpose_dgeglu.cu
             test_act.cu
-            test_layernorm.cu
-            test_rmsnorm.cu
+            test_normalization.cu
             test_multi_cast_transpose.cu
             test_multi_padding.cu
             test_causal_softmax.cu

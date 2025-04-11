@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -20,6 +22,7 @@ if IS_HIP_EXTENSION:
 else:
     e5m2_data_type = tl.float8e5
     e4m3_data_type = tl.float8e4nv
+IS_HIP_EXTENSION = triton.language.constexpr(IS_HIP_EXTENSION)
 
 @triton.jit
 def _row_id_map_pass_1_kernel(
@@ -229,7 +232,7 @@ def _unpermute_kernel(
         pytorch_tensor_dtype = tl.uint8
     else:
         # NOTE: Using fp32 accumulate precision on ROCm.
-        compute_type = tl.float32
+        compute_type = tl.float32 if IS_HIP_EXTENSION else input_ptr.dtype.element_ty
         assert FP8_DTYPE is None
 
     pid = tl.program_id(0)

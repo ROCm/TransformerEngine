@@ -1,6 +1,6 @@
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -46,7 +46,7 @@ def run_dpa_with_cp(
         "causal",
         "no_mask",
     ], f"{config.attn_mask_type} is an unsupported attention mask type!"
-    if kernel_backend == "FusedAttention" and qkv_format == "thd":
+    if qkv_format == "thd":
         if "causal" in config.attn_mask_type:
             config.attn_mask_type = "padding_causal"
         else:
@@ -167,7 +167,7 @@ def run_dpa_with_cp(
                 torch.tensor([q_input_shape[0]], dtype=torch.int32),
             ]
         ).cuda()
-        if IS_HIP_EXTENSION or kernel_backend == "FlashAttention":
+        if kernel_backend == "FlashAttention":
             cu_seqlens_q = cu_seqlens_q_padded[:-1]
         else:
             cu_seqlens_q = torch.cat(
