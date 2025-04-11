@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -524,7 +526,7 @@ class _moe_chunk_sort(torch.autograd.Function):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # pylint: disable=missing-function-docstring
         if not inp.numel():
-            return inp, torch.tensor([], device=inp.device)
+            return inp
 
         assert inp.is_cuda, "TransformerEngine needs CUDA."
         assert split_sizes.is_cuda, "TransformerEngine needs CUDA."
