@@ -37,7 +37,7 @@ run_default_fa() {
     #Run tests that do not use fused attention or control backend selection
     #with default backend only
     if [ $_fus_attn = "auto" ]; then
-        run $*
+        run "$@"
     fi
 }
 
