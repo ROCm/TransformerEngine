@@ -11,16 +11,20 @@ from dataclasses import dataclass
 import os
 
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from .. import cpp_extensions as tex
 from ..export import is_in_onnx_export_mode
 from ..fp8 import get_fp8_te_dtype
 from ..utils import get_default_init_method
-from ..triton_kernels.rmsnorm_triton import te_rmsnorm_fwd_noalloc_triton, te_rmsnorm_fwd_inf_triton
+
+if IS_HIP_EXTENSION:
+    from ..triton_kernels.rmsnorm_triton import te_rmsnorm_fwd_noalloc_triton, te_rmsnorm_fwd_inf_triton, te_rmsnorm_bwd_triton
 
 def _get_normalization_func(
     normalization: str, fp8_output: bool, is_grad_enabled: bool, forward: bool
 ):
+    use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
     fwd_normalization_funcs = {
         ("LayerNorm", True, True): tex.layernorm_fwd_fp8,
         ("LayerNorm", True, False): tex.layernorm_fwd_fp8_inf,
@@ -28,12 +32,12 @@ def _get_normalization_func(
         ("LayerNorm", False, False): tex.layernorm_fwd_inf,
         ("RMSNorm", True, True): tex.rmsnorm_fwd_fp8,
         ("RMSNorm", True, False): tex.rmsnorm_fwd_fp8_inf,
-        ("RMSNorm", False, True): tex.rmsnorm_fwd_noalloc,
-        ("RMSNorm", False, False): tex.rmsnorm_fwd_inf,
+        ("RMSNorm", False, True): te_rmsnorm_fwd_noalloc_triton if use_rmsnorm_triton else tex.rmsnorm_fwd_noalloc,
+        ("RMSNorm", False, False): te_rmsnorm_fwd_inf_triton if use_rmsnorm_triton else tex.rmsnorm_fwd_inf,
     }
     bwd_normalization_funcs = {
         "LayerNorm": tex.layernorm_bwd,
-        "RMSNorm": tex.rmsnorm_bwd,
+        "RMSNorm": te_rmsnorm_bwd_triton if use_rmsnorm_triton else tex.rmsnorm_bwd,
     }
 
     if forward:
@@ -99,25 +103,14 @@ def _apply_normalization(
                 None,
             )
     else:
-        use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) )
         if is_grad_enabled:
-            if use_rmsnorm_triton and normalization == "RMSNorm":
-                output = te_rmsnorm_fwd_noalloc_triton(*inputs, ln_out, eps, zero_centered_gamma)
-            else:
-                output = normalization_func(*inputs, ln_out, eps, fwd_ln_sm_margin, zero_centered_gamma)
+            output = normalization_func(*inputs, ln_out, eps, fwd_ln_sm_margin, zero_centered_gamma)
         else:
-            if use_rmsnorm_triton and normalization == "RMSNorm":
-                return (
-                    te_rmsnorm_fwd_inf_triton(*inputs, eps, zero_centered_gamma),
-                    None,
-                    None,
-                )
-            else:
-                return (
-                    normalization_func(*inputs, eps, fwd_ln_sm_margin, zero_centered_gamma),
-                    None,
-                    None,
-                )
+            return (
+                normalization_func(*inputs, eps, fwd_ln_sm_margin, zero_centered_gamma),
+                None,
+                None,
+            )
     if normalization == "RMSNorm":
         output = (ln_out, None, output[1])
     elif normalization == "LayerNorm":
