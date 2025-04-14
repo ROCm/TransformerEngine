@@ -41,6 +41,10 @@ def get_num_sms(sm_margin=None):
     return num_sms
 
 
+def num_programs(x, sm_margin=None):
+    return min(x.shape[0], get_num_sms(sm_margin))
+
+
 def block_size(x):
     max_fused_size = 65536 // x.element_size()
     block_size = min(max_fused_size, triton.next_power_of_2(x.shape[1]))

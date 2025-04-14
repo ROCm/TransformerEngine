@@ -8,7 +8,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .norm_common_triton import block_size, use_blocked
+from .norm_common_triton import num_programs, block_size, use_blocked
 
 
 def get_autotune_config(full_tuning_space=False):
@@ -332,6 +332,7 @@ def _layernorm_bwd_dwdb_triton(
     tl.store(FINAL_DB + cols, sum_db.to(FINAL_DB.type.element_ty), mask=cols < N)
 
 
+# TODO: Implement persistent kernel in forward and add `sm_margin` to the interface.
 def te_layernorm_fwd_fp8_noalloc_triton(
     x,
     gamma,
@@ -371,12 +372,13 @@ def te_layernorm_fwd_fp8_noalloc_triton(
     return y, mu, rsigma
 
 
+# TODO: Add `sm_margin` to the interface.
 def te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, zero_centered_gamma):
     M, N = x.shape
 
     BLOCK_SIZE = block_size(x)
     num_warps = min(max(BLOCK_SIZE // 256, 1), 8)
-    tile_num = max(min(256, M // 4), 1)
+    tile_num = num_programs(x)
 
     dx = torch.empty_like(x)
     _dgamma = torch.zeros((tile_num, N), dtype=torch.float32, device=gamma.device)
