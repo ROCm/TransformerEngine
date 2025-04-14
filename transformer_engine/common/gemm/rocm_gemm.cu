@@ -1063,9 +1063,9 @@ void hipblaslt_gemm(const Tensor *inputA,
   // check consistency of arguments:
   // if fp8 is desired, context cannot be null
   // fp8 + gelu fusion + fp8 aux is unavailable right now.
-  if (use_fp8) {
-    NVTE_CHECK(!gelu, "fp8 gemm + gelu fusion is unavailable right now!");
-  }
+  // if (use_fp8) {
+  //   NVTE_CHECK(!gelu, "fp8 gemm + gelu fusion is unavailable right now!");
+  // }
   float one = 1.0;
   float zero = 0.0;
   float beta = (accumulate) ? one : zero;
@@ -1132,6 +1132,13 @@ void hipblaslt_gemm(const Tensor *inputA,
       NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
                                                        HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE,
                                                        &bias_type, sizeof(bias_type)));
+    }
+    if (gelu){
+      const hipDataType aux_type = get_hipblaslt_dtype(outputPreGelu->data.dtype);
+      NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
+                                                        HIPBLASLT_MATMUL_DESC_EPILOGUE_AUX_DATA_TYPE,
+                                                        &aux_type,
+                                                        sizeof(aux_type)));
     }
   }
 
@@ -1422,10 +1429,10 @@ void rocblas_gemm(const Tensor *inputA,
   // check consistency of arguments:
   // if fp8 is desired, context cannot be null
   // fp8 + gelu fusion + fp8 aux is unavailable right now.
-  if (use_fp8 && gelu) {
-    NVTE_CHECK(!is_fp8_dtype(outputPreGelu->data.dtype),
-             "fp8 Aux output for gemm + gelu fusion not supported!");
-  }
+  // if (use_fp8 && gelu) {
+  //   NVTE_CHECK(!is_fp8_dtype(outputPreGelu->data.dtype),
+  //            "fp8 Aux output for gemm + gelu fusion not supported!");
+  // }
   if (is_fp8_dtype(outputD->data.dtype)) {
     NVTE_CHECK(!accumulate,
              "Accumulation mode not supported with FP8 GEMM output!");

@@ -133,7 +133,12 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
   if(isFp8Type(dtype)){
     setRandomScale(&D);
   }
+
   bool transa = false;
+  if (const char* env_p = std::getenv("NVTE_TRANS") ) {
+    if (env_p != nullptr && std::string(env_p) == "1")
+      transa = true;
+  }
   bool transb = false;
   bool grad = false;
   bool accumulate = false;
