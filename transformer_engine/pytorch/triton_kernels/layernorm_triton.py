@@ -261,13 +261,14 @@ def _layernorm_bwd_dx_fused_triton(
         mask = cols < N
         row = pid
 
+        dw_row = tl.zeros((BLOCK_SIZE_N,), dtype=tl.float32)
+        db_row = tl.zeros((BLOCK_SIZE_N,), dtype=tl.float32)
+
         for _ in range(0, rows_per_tile):
             # Compute pointers:
             x_ptrs = X + row * stride
             dy_ptrs = DY + row * stride
             dx_ptrs = DX + row * stride
-            dw_ptrs = DW + pid * N + cols
-            db_ptrs = DB + pid * N + cols
 
             # Load data to SRAM:
             x = tl.load(x_ptrs + cols, mask=mask, other=0).to(tl.float32)
@@ -291,15 +292,14 @@ def _layernorm_bwd_dx_fused_triton(
             tl.store(dx_ptrs + cols, dx.to(DX.type.element_ty), mask=mask)
 
             # Accumulate partial sums for dw and db:
-            partial_dw = dy * xhat
-            partial_db = dy
-            partial_dw += tl.load(dw_ptrs, mask=mask)
-            partial_db += tl.load(db_ptrs, mask=mask)
-            tl.store(dw_ptrs, partial_dw, mask=mask)
-            tl.store(db_ptrs, partial_db, mask=mask)
+            dw_row += dy * xhat
+            db_row += dy
 
             # Advance to next row:
             row += tile_num
+
+        tl.store(DW + pid * N + cols, dw_row, mask=mask)
+        tl.store(DB + pid * N + cols, db_row, mask=mask)
 
 
 @triton.jit
