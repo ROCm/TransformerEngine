@@ -378,7 +378,8 @@ def te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, zero_centered_gamma):
 
     BLOCK_SIZE = block_size(x)
     num_warps = min(max(BLOCK_SIZE // 256, 1), 8)
-    tile_num = num_programs(x)
+    tile_num = max(min(256, M // 4), 1)
+    # tile_num = num_programs(x)
 
     dx = torch.empty_like(x)
     _dgamma = torch.zeros((tile_num, N), dtype=torch.float32, device=gamma.device)
