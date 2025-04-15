@@ -17,9 +17,9 @@ def get_te_dtype(dtype):
         return tex.DType.kFloat16
     if dtype == torch.bfloat16:
         return tex.DType.kBFloat16
-    if dtype == torch.float8_e4m3fnuz:
+    if dtype == torch.float8_e4m3fnuz or dtype == torch.float8_e4m3fn:
         return tex.DType.kFloat8E4M3
-    if dtype == torch.float8_e5m2fnuz:
+    if dtype == torch.float8_e5m2fnuz or dtype == torch.float8_e5m2:
         return tex.DType.kFloat8E5M2
 
 def sizeof(in_dtype):
@@ -27,7 +27,8 @@ def sizeof(in_dtype):
         return 4
     elif in_dtype == torch.float16 or in_dtype == torch.bfloat16:
         return 2
-    elif in_dtype == torch.float8_e4m3fnuz or in_dtype == float8_e5m2fnuz:
+    elif (in_dtype == torch.float8_e4m3fnuz or in_dtype == torch.float8_e5m2fnuz
+          or in_dtype == torch.float8_e4m3fn or in_dtype == torch.float8_e5m2):
         return 1
     return 1
 
@@ -38,7 +39,9 @@ def get_tolerances(in_dtype):
         return 1e-5, 1e-3
     elif in_dtype == torch.bfloat16:
         return 1e-5, 1e-2
-    elif in_dtype == torch.float8_e4m3fnuz or in_dtype == torch.float8_e5m2fnuz:
+    elif (in_dtype == torch.float8_e4m3fnuz or in_dtype == torch.float8_e5m2fnuz
+          or in_dtype == torch.float8_e4m3fn or in_dtype == torch.float8_e5m2):
+        #TODO: different tolerances for FNUZ and OCP
         return 1e-2, 1e-2
     else:
         raise RuntimeError("Invalid type")

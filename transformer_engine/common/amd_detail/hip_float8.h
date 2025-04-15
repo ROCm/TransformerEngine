@@ -8,6 +8,7 @@
 #ifdef __HIPCC__
 
 #include <hip/hip_runtime.h>
+#include <hip/hip_version.h> //For RTC it should be included explicitly
 
 #if HIP_VERSION >= 60200000
 #include <hip/hip_fp8.h>

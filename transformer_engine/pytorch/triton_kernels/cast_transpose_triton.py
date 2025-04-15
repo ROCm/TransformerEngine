@@ -6,25 +6,26 @@ import torch
 import transformer_engine_torch as tex
 import triton
 import triton.language as tl
+from ..utils import is_fp8_fnuz
 
 def is_fp8_dtype(dtype):
     return dtype in (tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2)
 
 def get_triton_dtype(dtype: tex.DType):
     if dtype == tex.DType.kFloat8E4M3:
-        return tl.float8e4b8
+        return tl.float8e4b8 if is_fp8_fnuz() else tl.float8e4nv
     if dtype == tex.DType.kFloat8E5M2:
-        return tl.float8e5b16
+        return tl.float8e5b16 if is_fp8_fnuz() else tl.float8e5
 
 def get_te_dtype(dtype):
-    if dtype == torch.float8_e4m3fnuz:
+    if dtype == torch.float8_e4m3fnuz or dtype == torch.float8_e4m3fn:
         return tex.DType.kFloat8E4M3
-    if dtype == torch.float8_e5m2fnuz:
+    if dtype == torch.float8_e5m2fnuz or dtype == torch.float8_e5m2:
         return tex.DType.kFloat8E5M2
 
 def get_fp8_max(dtype: tex.DType):
     if dtype == tex.DType.kFloat8E4M3:
-        return 240.0
+        return 240.0 if is_fp8_fnuz() else 448.0
     if dtype == tex.DType.kFloat8E5M2:
         return 57344.0
 

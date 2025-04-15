@@ -12,6 +12,7 @@ from enum import Enum
 from typing import Optional, Union, Callable, NamedTuple
 from typing_extensions import Literal
 from pydantic.dataclasses import dataclass
+from transformer_engine.common import te_rocm_build
 
 
 class _FormatHelper(NamedTuple):
@@ -37,8 +38,8 @@ class Format(Enum):
             FP8 tensors in the forward pass are in e4m3 format,
             FP8 tensors in the backward pass are in e5m2 format
     """
-    #TODO: check NV H100 or AMD MI300 first 
-    E4M3 = _FormatHelper(max_fwd=240, max_bwd=240)
+    E4M3 = (_FormatHelper(max_fwd=240, max_bwd=240) if te_rocm_build
+            else _FormatHelper(max_fwd=448, max_bwd=448))
     E5M2 = _FormatHelper(max_fwd=57344, max_bwd=57344)
     HYBRID = _FormatHelper(max_fwd=E4M3.max_fwd, max_bwd=E5M2.max_bwd)
 
