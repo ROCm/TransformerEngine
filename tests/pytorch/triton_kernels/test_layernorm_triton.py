@@ -188,24 +188,63 @@ if __name__ == "__main__":
     N = int(sys.argv[3])
     run_bwd = sys.argv[4] == "bwd"
     mode = "forward only" if not run_bwd else "forward + backward"
-    waves_per_eu = int(sys.argv[5]) if run_triton else None
-    num_warps = int(sys.argv[6]) if run_triton else None
+
+    # Parse waves_per_eu and num_warps:
+    waves_per_eu = None
+    if run_triton:
+        try:
+            waves_per_eu = int(sys.argv[5])
+        except IndexError:
+            pass
+    num_warps = None
+    if run_triton:
+        try:
+            num_warps = int(sys.argv[6])
+        except IndexError:
+            pass
 
     # Generate tensors:
     x = fill_uniform((M, N), in_dtype)
     gamma = fill_uniform(N, in_dtype)
     beta = fill_uniform(N, in_dtype)
-    dz = fill_uniform((M, N), in_dtype)
+    if run_bwd:
+        dz = fill_uniform((M, N), in_dtype)
 
     epsilon = 1e-5
 
     if run_triton:
         print(f"Running {mode} Triton implementation for shape {(M, N)}...")
+        # Select waves_per_eu and num_warps.
+        try:
+            best_waves_per_eu, best_num_warps = {
+                (2048, 12288): (1, 8),
+                (768, 1024): (4, 8),
+                (256, 65536): (2, 16),
+                (128, 6144): (4, 4),
+                (64, 2304): (4, 16),
+                (229, 541): (2, 16),
+                (71, 3571): (1, 16),
+                (29, 17389): (2, 16),
+                (76800, 1600): (4, 4),
+            }[(M, N)]
+        except KeyError:
+            best_waves_per_eu, best_num_warps = 2, 8
+        if waves_per_eu is None:
+            waves_per_eu = best_waves_per_eu
+        if num_warps is None:
+            num_warps = best_num_warps
         # Run Triton forward.
         y_triton = torch.empty((M, N), dtype=out_dtype, device="cuda")
         y_triton, mu_triton, rsigma_triton = te_layernorm_fwd_fp8_noalloc_triton(
-            x, gamma, beta, epsilon, y_triton, out_dtype, zero_centered_gamma,
-            waves_per_eu=waves_per_eu, num_warps=num_warps
+            x,
+            gamma,
+            beta,
+            epsilon,
+            y_triton,
+            out_dtype,
+            zero_centered_gamma,
+            waves_per_eu=waves_per_eu,
+            num_warps=num_warps,
         )
         if run_bwd:
             # Run Triton backward.
