@@ -41,7 +41,7 @@ def _check_fp8_support(gpu_id) -> Tuple[bool, str]:
     """Return if fp8 support is available"""
     gpu_arch = get_device_compute_capability(gpu_id)
     if is_hip_extension():
-        if gpu_arch == 94 or gpu_arch == 95:
+        if gpu_arch in [94, 95]:
             return True, ""
         else:
             return False, "GFX 9.4 or 9.5 required for FP8 execution."

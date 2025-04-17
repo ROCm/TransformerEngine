@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -16,6 +18,7 @@ from contextlib import contextmanager
 
 import torch
 import torch.nn.functional as F
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine_torch as tex
 from ._common import _ParameterInitMeta
@@ -52,7 +55,9 @@ layers_atomic_ring_exchange = []
 
 
 def get_cublas_workspace_size_bytes() -> None:
-    """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
+    """Return 76 MiB for AMD GPU, 32 MiB if using hopper, 4 MiB for all other architectures."""
+    if IS_HIP_EXTENSION:
+        return 79_691_776
     if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
         return 33_554_432
     return 4_194_304

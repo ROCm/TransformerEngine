@@ -29,10 +29,11 @@ torch_float8_e5m2_type = torch.float8_e5m2fnuz if is_fp8_fnuz() else torch.float
 
 def check_fp8_support() -> Tuple[bool, str]:
     if IS_HIP_EXTENSION:
-        if get_device_compute_capability() == (9, 4):
+        gpu_arch = get_device_compute_capability()
+        if gpu_arch == (9, 4) or gpu_arch == (9, 5):
             return True, ""
         else:
-            return False, "Only MI300 machines support fp8"
+            return False, "GFX 9.4 or 9.5 required for FP8 execution."
     else:
         """Return if fp8 support is available"""
         if get_device_compute_capability() >= (9, 0):  # hopper and above

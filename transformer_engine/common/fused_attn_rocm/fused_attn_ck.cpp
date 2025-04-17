@@ -81,11 +81,11 @@ bool is_ck_backend_supported(
   }
 
   const int device_id = cuda::current_device();
-  const std::string sm_arch_name_ = cuda::sm_arch_name(device_id);
-  //only gfx942 supported
-  if(!(sm_arch_name_.find("gfx942")!=std::string::npos)){
+  const int gpu_arch = cuda::sm_arch(device_id);
+  //only gfx942 and gfx950 supported
+  if(gpu_arch != 94 && gpu_arch != 95){
     if(nvte_log_ck_config){
-      std::cout<<"only gfx942 is supported"<<std::endl;
+      std::cout<<"only GFX 9.4 and 9.5 are supported"<<std::endl;
     }
     return false;
   }
@@ -159,7 +159,6 @@ bool is_ck_backend_supported(
   }
   return true;
 #else
-  NVTE_ERROR("CK fused attn backend not compiled.");
   return false;
 #endif // USE_FUSED_ATTN_CK
 }
