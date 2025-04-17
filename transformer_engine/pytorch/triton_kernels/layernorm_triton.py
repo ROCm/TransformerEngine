@@ -271,8 +271,12 @@ def _layernorm_bwd_dx_fused_triton(
             dx_ptrs = DX + row * stride
 
             # Load data to SRAM:
-            x = tl.load(x_ptrs + cols, mask=mask, other=0).to(tl.float32)
-            dy = tl.load(dy_ptrs + cols, mask=mask, other=0).to(tl.float32)
+            x = tl.load(x_ptrs + cols, mask=mask, other=0, cache_modifier=".cg").to(
+                tl.float32
+            )
+            dy = tl.load(dy_ptrs + cols, mask=mask, other=0, cache_modifier=".cg").to(
+                tl.float32
+            )
             w = tl.load(W + cols, mask=mask, other=0).to(tl.float32)
             mean = tl.load(Mean + row)
             rstd = tl.load(Rstd + row)
@@ -323,8 +327,8 @@ def _layernorm_bwd_dwdb_triton(
         rows = i + tl.arange(0, BLOCK_SIZE_M)
         mask = (rows[:, None] < M) & (cols[None, :] < N)
         offs = rows[:, None] * N + cols[None, :]
-        dw += tl.load(DW + offs, mask=mask, other=0.0)
-        db += tl.load(DB + offs, mask=mask, other=0.0)
+        dw += tl.load(DW + offs, mask=mask, other=0.0, cache_modifier=".cg")
+        db += tl.load(DB + offs, mask=mask, other=0.0, cache_modifier=".cg")
     # Write the final sum to the output.
     sum_dw = tl.sum(dw, axis=0)
     sum_db = tl.sum(db, axis=0)
