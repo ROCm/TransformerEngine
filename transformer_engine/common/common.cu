@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -56,6 +58,7 @@ void checkCuDriverContext(CUstream stream) {
   }
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 CUtensorMapDataType get_CUtensorMapDataType(DType dtype) {
   static const std::unordered_map<DType, CUtensorMapDataType> dtypeMapping = {
       {DType::kByte, CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT8},
@@ -159,5 +162,6 @@ bool is_fp8_cast_supported_shape(const Tensor *output) {
       is_delayed_tensor_scaling(scaling_mode) && (scaling_mode.x == -1) && (scaling_mode.y == -1);
   return is_fp8_cast_supported;
 }
+#endif  // !__HIP_PLATFORM_AMD__
 
 }  // namespace transformer_engine

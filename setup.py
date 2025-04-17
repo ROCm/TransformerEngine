@@ -47,7 +47,6 @@ elif "jax" in frameworks:
 
 
 CMakeBuildExtension = get_build_ext(BuildExtension)
-archs = cuda_archs()
 
 class TimedBdist(bdist_wheel):
     """Helper class to measure build time"""

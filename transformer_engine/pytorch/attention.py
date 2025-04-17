@@ -164,6 +164,7 @@ else:
         from flash_attn.flash_attn_interface import (
             _flash_attn_varlen_backward as _flash_attn_varlen_bwd,
         )
+        from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
 
         _flash_attn_is_installed = True
         _flash_attn_2_plus = _flash_attn_version >= PkgVersion("2")
@@ -748,14 +749,11 @@ def get_attention_backend(
                 logger.debug(
                     "Disabling FusedAttention as it only supports sliding window attention "
                     "with (left, 0) and no dropout"
-                    "with (left, 0) and no dropout"
                 )
                 use_fused_attention = False
             elif max_seqlen_q > max_seqlen_kv:
-            elif max_seqlen_q > max_seqlen_kv:
                 logger.debug(
                     "Disabling FusedAttention as it does not support sliding window attention "
-                    "with s_q > s_kv for cross-attention"
                     "with s_q > s_kv for cross-attention"
                 )
                 use_fused_attention = False

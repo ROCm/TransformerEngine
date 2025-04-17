@@ -190,7 +190,7 @@ else()
        normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
        permutation/permutation.cu
        util/cast.cu
-       util/cast_gated_act.cu
+       #util/cast_gated_act.cu
        util/padding.cu
        util/cuda_driver.cpp
        util/cuda_runtime.cpp
@@ -211,10 +211,9 @@ else()
   message(STATUS "CMAKE_MODULE_PATH: ${CMAKE_MODULE_PATH}")
 
   set(header_include_dir
+      ${CMAKE_CURRENT_SOURCE_DIR}/..
       ${CMAKE_CURRENT_SOURCE_DIR}/include 
       ${CMAKE_CURRENT_SOURCE_DIR}/util
-      ${CMAKE_CURRENT_SOURCE_DIR}/rmsnorm
-      ${CMAKE_CURRENT_SOURCE_DIR}/layer_norm 
       ${CMAKE_CURRENT_SOURCE_DIR})
   message(STATUS "HIPIFY CUDA_SOURCE_DIR: ${CMAKE_CURRENT_SOURCE_DIR}")
   message(STATUS "HIPIFY HEADER_INCLUDE_DIR: ${header_include_dir}")

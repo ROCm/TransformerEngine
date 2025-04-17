@@ -4,35 +4,48 @@
 #
 # See LICENSE for license information.
 
-list(APPEND test_cuda_sources
-            test_cast.cu
-            test_cast_dbias.cu
-            test_cast_dbias_dgelu.cu
-            test_cast_gated_swiglu.cu
-            test_cast_mxfp8_gated_swiglu.cu
-            test_qdq.cu
-            test_cast_mxfp8.cu
-            test_transpose.cu
-            test_cast_transpose.cu
-            test_cast_transpose_dbias.cu
-            test_cast_transpose_dbias_dgelu.cu
-            test_cast_transpose_dgeglu.cu
-            test_act.cu
-            test_normalization.cu
-            test_normalization_mxfp8.cu
-            test_multi_cast_transpose.cu
-            test_multi_padding.cu
-            test_causal_softmax.cu
-            test_swizzle.cu
-            ../test_common.cu)
-if(USE_ROCM)
-  list(APPEND test_cuda_sources
-              test_cublaslt_gemm.cu)
-endif()
-
 if(USE_CUDA)
-  add_executable(test_operator ${test_cuda_sources})
+  add_executable(test_operator
+    test_cast.cu
+    test_cast_dbias.cu
+    test_cast_dbias_dgelu.cu
+    test_cast_gated_swiglu.cu
+    test_cast_mxfp8_gated_swiglu.cu
+    test_qdq.cu
+    test_cast_mxfp8.cu
+    test_transpose.cu
+    test_cast_transpose.cu
+    test_cast_transpose_dbias.cu
+    test_cast_transpose_dbias_dgelu.cu
+    test_cast_transpose_dgeglu.cu
+    test_act.cu
+    test_normalization.cu
+    test_normalization_mxfp8.cu
+    test_multi_cast_transpose.cu
+    test_multi_padding.cu
+    test_causal_softmax.cu
+    test_swizzle.cu
+    ../test_common.cu)
 else()
+  list(APPEND test_cuda_sources
+    test_cast.cu
+    test_cast_dbias.cu
+    test_cast_dbias_dgelu.cu
+    test_qdq.cu
+    test_transpose.cu
+    test_cast_transpose.cu
+    test_cast_transpose_dbias.cu
+    test_cast_transpose_dbias_dgelu.cu
+    test_cast_transpose_dgeglu.cu
+    test_act.cu
+    test_normalization.cu
+    test_multi_cast_transpose.cu
+    test_multi_padding.cu
+    test_causal_softmax.cu
+    test_swizzle.cu
+    ../test_common.cu
+    test_cublaslt_gemm.cu)
+
   message("${message_line}")
   message(STATUS "CMAKE_CURRENT_SOURCE_DIR: ${CMAKE_CURRENT_SOURCE_DIR}")
   message(STATUS "PROJECT_SOURCE_DIR: ${PROJECT_SOURCE_DIR}")
@@ -66,7 +79,8 @@ if(USE_CUDA)
   target_link_libraries(test_operator PUBLIC ${test_operator_LINKER_LIBS})
   target_compile_options(test_operator PRIVATE -O2)
 else()
-  target_link_libraries(test_operator PUBLIC hip::host hip::device GTest::gtest_main ${TE_LIB})
+  find_package(OpenMP REQUIRED)
+  target_link_libraries(test_operator PUBLIC hip::host hip::device GTest::gtest_main ${TE_LIB} OpenMP::OpenMP_CXX)
   target_compile_options(test_operator PRIVATE -O2)
 endif()
 

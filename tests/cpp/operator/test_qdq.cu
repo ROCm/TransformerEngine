@@ -120,6 +120,7 @@ std::vector<size_t> qdq_test_cases = {2048* 12288,
 
 } //namespace
 
+#ifndef __HIP_PLATFORM_AMD__
 static const int32_t deviceComputeCapability = []() {
   cudaDeviceProp deviceProp;
   cudaGetDeviceProperties(&deviceProp, 0);
@@ -127,6 +128,7 @@ static const int32_t deviceComputeCapability = []() {
 }();
 
 static bool is_supported_by_CC_100() { return deviceComputeCapability >= 100; }
+#endif
 
 class QDQTestSuite : public ::testing::TestWithParam<std::tuple<transformer_engine::DType,
                                                                 transformer_engine::DType,
@@ -136,10 +138,12 @@ TEST_P(QDQTestSuite, TestQ) {
     using namespace transformer_engine;
     using namespace test;
 
+#ifndef __HIP_PLATFORM_AMD__
     // Skips test for Archs >= 10.0
     if (is_supported_by_CC_100()) {
       GTEST_SKIP();
     }
+#endif
 
     const DType input_type = std::get<0>(GetParam());
     const DType output_type = std::get<1>(GetParam());
@@ -156,10 +160,12 @@ TEST_P(QDQTestSuite, TestDQ) {
     using namespace transformer_engine;
     using namespace test;
 
+#ifndef __HIP_PLATFORM_AMD__
     // Skips test for Archs >= 10.0
     if (is_supported_by_CC_100()) {
       GTEST_SKIP();
     }
+#endif
 
     const DType input_type = std::get<0>(GetParam());
     const DType output_type = std::get<1>(GetParam());

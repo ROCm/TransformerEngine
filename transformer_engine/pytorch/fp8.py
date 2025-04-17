@@ -11,6 +11,7 @@ from collections import deque
 from typing import Callable, List, Optional, Dict, Any, Tuple, Union
 
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import DelayedScaling, Format, CurrentScaling
 
@@ -23,12 +24,11 @@ __all__ = ["fp8_autocast", "fp8_model_init"]
 
 
 def check_fp8_support() -> Tuple[bool, str]:
-    from torch.utils.cpp_extension import IS_HIP_EXTENSION
     if IS_HIP_EXTENSION:
         if get_device_compute_capability() == (9, 4):
             return True, ""
         else:
-            return False, "Only MI300 machines support fp8"
+            return False, "GFX9.4 is required for FP8 execution"
     else:
         """Return if fp8 support is available"""
         if get_device_compute_capability() >= (9, 0):  # hopper and above
@@ -43,6 +43,8 @@ def check_fp8_support() -> Tuple[bool, str]:
 
 def check_mxfp8_support() -> Tuple[bool, str]:
     """Return if fp8 support is available"""
+    if IS_HIP_EXTENSION:
+        return False, "MXFP8 is not supported on ROCm"
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
         return True, ""
     return False, "Device compute capability 10.0 or higher required for MXFP8 execution."

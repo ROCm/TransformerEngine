@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -23,6 +25,10 @@ constexpr int N_SF_PER_TD_PER_TILE = 4;
 // output is in ~K-major interleaved blocks
 constexpr int NEW_SF_TILE_DIM_K_I32 = NEW_SF_TILE_DIM_K / 4;
 constexpr int NEW_SF_TILE_DIM_M_I32 = 32;
+
+#ifdef __HIP_PLATFORM_AMD__
+#define __ldg(ptr) *(ptr)
+#endif
 
 template <typename LType>
 __device__ inline void regs_shuffle_with_bit_shifts(LType* regs_vec) {
@@ -237,22 +243,28 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
       int slm_size = n_tiles_in_tb * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t);
       switch (vec_load_size) {
         case 4:
+#ifndef __HIP_PLATFORM_AMD__
           cudaFuncSetAttribute(swizzle_row_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
                                cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size);
+#endif
           swizzle_row_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
               <<<num_blocks, block_size, slm_size, stream>>>(input->scale_inv.dptr,
                                                              output->scale_inv.dptr, m, k);
           break;
         case 2:
+#ifndef __HIP_PLATFORM_AMD__
           cudaFuncSetAttribute(swizzle_row_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
                                cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size);
+#endif
           swizzle_row_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
               <<<num_blocks, block_size, slm_size, stream>>>(input->scale_inv.dptr,
                                                              output->scale_inv.dptr, m, k);
           break;
         case 1:
+#ifndef __HIP_PLATFORM_AMD__
           cudaFuncSetAttribute(swizzle_row_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
                                cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size);
+#endif
           swizzle_row_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
               <<<num_blocks, block_size, slm_size, stream>>>(input->scale_inv.dptr,
                                                              output->scale_inv.dptr, m, k);
@@ -270,22 +282,28 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
       int slm_size = n_tiles_in_tb * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t);
       switch (vec_load_size) {
         case 4:
+#ifndef __HIP_PLATFORM_AMD__
           cudaFuncSetAttribute(swizzle_col_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
                                cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size);
+#endif
           swizzle_col_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
               <<<num_blocks, block_size, slm_size, stream>>>(input->scale_inv.dptr,
                                                              output->scale_inv.dptr, m, k);
           break;
         case 2:
+#ifndef __HIP_PLATFORM_AMD__
           cudaFuncSetAttribute(swizzle_col_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
                                cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size);
+#endif
           swizzle_col_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
               <<<num_blocks, block_size, slm_size, stream>>>(input->scale_inv.dptr,
                                                              output->scale_inv.dptr, m, k);
           break;
         case 1:
+#ifndef __HIP_PLATFORM_AMD__
           cudaFuncSetAttribute(swizzle_col_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
                                cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size);
+#endif
           swizzle_col_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
               <<<num_blocks, block_size, slm_size, stream>>>(input->scale_inv.dptr,
                                                              output->scale_inv.dptr, m, k);

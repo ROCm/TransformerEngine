@@ -14,7 +14,7 @@ import shutil
 from pathlib import Path
 
 import setuptools
-from torch.utils.cpp_extension import BuildExtension
+from torch.utils.cpp_extension import BuildExtension, IS_HIP_EXTENSION
 
 from importlib.metadata import version as get_pkg_version
 from importlib.metadata import PackageNotFoundError
@@ -56,15 +56,16 @@ if __name__ == "__main__":
     ]
 
     # FA for blackwell.
-    try:
-        fa_version = PkgVersion(get_pkg_version("flash-attn"))
-    except PackageNotFoundError:
-        fa_version = "unknown"
-    if fa_version != PkgVersion("2.4.2.dev0"):
-        import subprocess
+    if not IS_HIP_EXTENSION:
+        try:
+            fa_version = PkgVersion(get_pkg_version("flash-attn"))
+        except PackageNotFoundError:
+            fa_version = "unknown"
+        if fa_version != PkgVersion("2.4.2.dev0"):
+            import subprocess
 
-        fa_path = current_file_path.parent.parent / "3rdparty/flashattn_internal"
-        subprocess.check_call([sys.executable, "-m", "pip", "install", fa_path])
+            fa_path = current_file_path.parent.parent / "3rdparty/flashattn_internal"
+            subprocess.check_call([sys.executable, "-m", "pip", "install", fa_path])
 
     # Configure package
     setuptools.setup(

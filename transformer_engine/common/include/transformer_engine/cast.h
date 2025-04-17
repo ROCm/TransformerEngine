@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -104,6 +106,7 @@ void nvte_fp8_quantize_dbias_dsrelu(const NVTETensor input, const NVTETensor act
                                     NVTETensor output, NVTETensor dbias, NVTETensor workspace,
                                     cudaStream_t stream);
 
+#ifndef __HIP_PLATFORM_AMD__
 /*! \brief Compute backward of ActLU operation on the input, then cast to MXFP8.
  *         Additionally, reduce the result of the ActLU backward along columns.
  *         Supported by the devices with the compute capability 10.0 or newer.
@@ -180,6 +183,7 @@ void nvte_fp8_quantize_dbias_dqgelu_x2(const NVTETensor input, const NVTETensor 
 void nvte_fp8_quantize_dbias_dsrelu_x2(const NVTETensor input, const NVTETensor act_input,
                                        NVTETensor output_rowwise, NVTETensor output_columnwise,
                                        NVTETensor dbias, NVTETensor workplace, cudaStream_t stream);
+#endif // !__HIP_PLATFORM_AMD__
 
 /*! \brief Cast tensor from FP8.
  *
@@ -189,6 +193,7 @@ void nvte_fp8_quantize_dbias_dsrelu_x2(const NVTETensor input, const NVTETensor 
  */
 void nvte_fp8_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
+#ifndef __HIP_PLATFORM_AMD__
 /*! \brief Compute activation of the input, casting the output to FP8/MXFP8.
  *
  *  \param[in]     grad             Input tensor of shape [N, H].
@@ -216,6 +221,7 @@ void nvte_fp8_quantize_swiglu(const NVTETensor grad, const NVTETensor gated_inpu
 void nvte_fp8_quantize_swiglu_x2(const NVTETensor grad, const NVTETensor gated_input,
                                  NVTETensor output_rowwise, NVTETensor output_colwise,
                                  cudaStream_t stream);
+#endif // !__HIP_PLATFORM_AMD__
 
 #ifdef __cplusplus
 }  // extern "C"

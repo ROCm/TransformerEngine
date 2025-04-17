@@ -124,10 +124,10 @@ class Tensor {
     if (tensor_.dptr() != nullptr) {
       (void)cudaFree(tensor_.dptr());
     }
-    if (tensor_.scale_inv()){cudaFree(tensor_.scale_inv());}
+    if (tensor_.scale_inv()){(void)cudaFree(tensor_.scale_inv());}
     if (is_tensor_2x){
-      if (tensor_.columnwise_dptr()){ cudaFree(tensor_.columnwise_dptr());}
-      if (tensor_.columnwise_scale_inv()){ cudaFree(tensor_.columnwise_scale_inv());}
+      if (tensor_.columnwise_dptr()){(void)cudaFree(tensor_.columnwise_dptr());}
+      if (tensor_.columnwise_scale_inv()){(void)cudaFree(tensor_.columnwise_scale_inv());}
     }
   }
   NVTETensor data() const noexcept {

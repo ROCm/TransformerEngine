@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -355,6 +357,7 @@ std::vector<at::Tensor> fp8_cast_dbias_dsrelu(at::Tensor grad_output, at::Tensor
   return {grad_bias, dact};
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 std::vector<at::Tensor> fp8_cast_dbias_x2(const at::Tensor& input, const at::Tensor& scale,
                                           at::Tensor amax, at::Tensor scale_inv,
                                           transformer_engine::DType otype, const int scale_offset,
@@ -679,3 +682,4 @@ std::vector<at::Tensor> fp8_cast_dbias_dsrelu_x2(at::Tensor grad_output, at::Ten
 
   return {grad_bias, dact_rowwise, dact_columnwise};
 }
+#endif // !__HIP_PLATFORM_AMD__

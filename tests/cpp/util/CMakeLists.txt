@@ -4,13 +4,13 @@
 #
 # See LICENSE for license information.
 
+find_package(OpenMP REQUIRED)
 if(USE_CUDA)
 add_executable(test_util
                test_nvrtc.cpp
                test_string.cpp
                ../test_common.cu)
 
-find_package(OpenMP REQUIRED)
 target_link_libraries(test_util PUBLIC CUDA::cudart GTest::gtest_main ${TE_LIB} CUDA::nvrtc CUDNN::cudnn  OpenMP::OpenMP_CXX)
 else()
 add_executable(test_util
@@ -18,7 +18,7 @@ add_executable(test_util
                test_string.cpp
                ../test_common.hip)
 
-target_link_libraries(test_util PUBLIC hip::host hip::device GTest::gtest_main ${TE_LIB})
+target_link_libraries(test_util PUBLIC hip::host hip::device GTest::gtest_main ${TE_LIB} OpenMP::OpenMP_CXX)
 endif()
 
 target_compile_options(test_util PRIVATE -O2 -fopenmp)

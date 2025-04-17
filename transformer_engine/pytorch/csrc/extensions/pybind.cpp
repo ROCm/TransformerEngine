@@ -159,6 +159,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("scale"), py::arg("amax"), py::arg("scale_inv"), py::arg("otype"),
         py::arg("scaling_mode"), py::arg("scale_offset") = 0, py::arg("amax_offset") = 0,
         py::arg("scale_inv_offset") = 0);
+#ifndef USE_ROCM
   m.def("fp8_cast_dbias_x2", &fp8_cast_dbias_x2, "FP8 cast + dbias",
         py::call_guard<py::gil_scoped_release>(), py::arg("input"), py::arg("scale"),
         py::arg("amax"), py::arg("scale_inv"), py::arg("otype"), py::arg("scale_offset") = 0,
@@ -188,6 +189,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>(), py::arg("grad_output"), py::arg("act_input"),
         py::arg("scale"), py::arg("amax"), py::arg("scale_inv"), py::arg("otype"),
         py::arg("scale_offset") = 0, py::arg("amax_offset") = 0, py::arg("scale_inv_offset") = 0);
+#endif // !USE_ROCM
   m.def("te_gemm", &te_gemm, "CublasLt GEMM");  /// TODO Think
   m.def("te_grouped_gemm", &te_grouped_gemm, "Grouped GEMM");
   m.def("te_grouped_gemm_single_output", &te_grouped_gemm_single_output,

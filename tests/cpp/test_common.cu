@@ -591,7 +591,7 @@ bool isFp8Type(DType type) {
 int32_t getDeviceComputeCapability()
 {
     cudaDeviceProp deviceProp;
-    cudaGetDeviceProperties(&deviceProp, 0);
+    (void)cudaGetDeviceProperties(&deviceProp, 0);
     return 10 * deviceProp.major + deviceProp.minor;
 }
 

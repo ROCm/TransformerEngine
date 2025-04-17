@@ -423,6 +423,7 @@ std::vector<at::Tensor> fp8_cast_dbias_dsrelu(at::Tensor grad_output, at::Tensor
                                               int scale_offset = 0, int amax_offset = 0,
                                               int scale_inv_offset = 0);
 
+#ifndef __HIP_PLATFORM_AMD__
 std::vector<at::Tensor> fp8_cast_dbias_x2(const at::Tensor &input, const at::Tensor &scale,
                                           at::Tensor amax, at::Tensor scale_inv,
                                           transformer_engine::DType otype, const int scale_offset,
@@ -462,6 +463,7 @@ std::vector<at::Tensor> fp8_cast_dbias_dsrelu_x2(at::Tensor grad_output, at::Ten
                                                  transformer_engine::DType otype,
                                                  int scale_offset = 0, int amax_offset = 0,
                                                  int scale_inv_offset = 0);
+#endif
 
 /***************************************************************************************************
  * Softmax

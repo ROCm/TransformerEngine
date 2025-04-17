@@ -9,7 +9,9 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_COMMON_H_
 #define TRANSFORMER_ENGINE_COMMON_COMMON_H_
 
+#ifndef __HIP_PLATFORM_AMD__
 #include <cudaTypedefs.h>
+#endif
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -412,6 +414,7 @@ void update_tensor_scale_inv(Tensor *t, cudaStream_t stream);
 
 void checkCuDriverContext(CUstream stream);
 
+#ifndef __HIP_PLATFORM_AMD__
 CUtensorMapDataType get_CUtensorMapDataType(DType dtype);
 
 inline bool isPointerAligned(const void *const ptr, const int alignment);
@@ -424,6 +427,7 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const Tensor *tensor_ptr, cons
 bool is_supported_by_CC_100();
 bool is_mxfp8_cast_supported_shape(const Tensor *output);
 bool is_fp8_cast_supported_shape(const Tensor *output);
+#endif  // !__HIP_PLATFORM_AMD__
 
 }  // namespace transformer_engine
 

@@ -1,11 +1,15 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
 #include <cuda.h>
+#ifndef __HIP_PLATFORM_AMD__
 #include <cudaTypedefs.h>
+#endif
 #include <cuda_runtime.h>
 #include <transformer_engine/cast.h>
 
@@ -22,6 +26,7 @@
 
 namespace transformer_engine {
 
+#ifndef __HIP_PLATFORM_AMD__
 constexpr size_t MXFP8_CHUNK_DIM_Y = 64;
 constexpr size_t MXFP8_CHUNK_DIM_X = 64;
 constexpr size_t MXFP8_CHUNKS_PER_BLOCK_Y = 1;
@@ -1054,6 +1059,7 @@ void cast_mxfp8(const Tensor &input, const Tensor &act_input, Tensor *output_row
       );               // NOLINT(*)
   );                   // NOLINT(*)
 }
+#endif // !__HIP_PLATFORM_AMD__
 
 namespace detail {
 
@@ -1091,6 +1097,7 @@ void CastVectorizedUnaryKernelLauncher(const Tensor &input, const Tensor &act_in
   );                      // NOLINT(*)
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 // Supported by the Arch >= 10.0
 template <bool IS_DBIAS, bool IS_DACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
 void fp8_quantize_arch_ge_100(const Tensor &input, const Tensor &act_input, Tensor *output,
@@ -1125,6 +1132,7 @@ void fp8_quantize_arch_ge_100(const Tensor &input, const Tensor &act_input, Tens
     NVTE_ERROR("Not implemented on Arch >= 10.0: " + to_string(output->scaling_mode) + ".");
   }
 }
+#endif // !__HIP_PLATFORM_AMD__
 
 // Supported by the Arch < 10.0
 template <bool IS_DBIAS, bool IS_DACT>
@@ -1157,16 +1165,20 @@ void fp8_quantize(const Tensor &input, const Tensor &act_input, Tensor *output, 
   NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
   NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
 
+#ifndef __HIP_PLATFORM_AMD__
   // Supported by the Arch >= 10.0
   if (is_supported_by_CC_100()) {
     fp8_quantize_arch_ge_100<IS_DBIAS, IS_DACT, ParamOP, OP>(input, act_input, output, dbias,
                                                              workspace, stream);
-  } else {
+  } else
+#endif
+  {
     // Supported by the Arch < 10.0
     fp8_quantize_arch_l_100<IS_DBIAS, IS_DACT>(input, act_input, output, dbias, workspace, stream);
   }
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 template <bool IS_DBIAS, bool IS_DACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
 void fp8_quantize_x2(const Tensor &input, const Tensor &act_input, Tensor *output_rowwise,
                      Tensor *output_colwise, Tensor *dbias, Tensor *workspace,
@@ -1215,6 +1227,7 @@ void fp8_quantize_x2(const Tensor &input, const Tensor &act_input, Tensor *outpu
                to_string(output_colwise->scaling_mode) + ".");
   }
 }
+#endif // !__HIP_PLATFORM_AMD__
 
 void fp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
   CheckInputTensor(input, "cast_input");
@@ -1282,7 +1295,11 @@ void nvte_fp8_quantize_dbias_dgelu(const NVTETensor input, const NVTETensor acti
 
   constexpr bool IS_DBIAS = true;
   constexpr bool IS_DACT = true;
+#ifdef __HIP_PLATFORM_AMD__
+  constexpr auto dActivation = nullptr; //only used on NV arch>=10
+#else
   constexpr auto dActivation = &dgelu<fp32, fp32>;
+#endif
 
   fp8_quantize<IS_DBIAS, IS_DACT, Empty, dActivation>(
       *reinterpret_cast<const Tensor *>(input), *reinterpret_cast<const Tensor *>(activation_input),
@@ -1298,7 +1315,11 @@ void nvte_fp8_quantize_dbias_dsilu(const NVTETensor input, const NVTETensor acti
 
   constexpr bool IS_DBIAS = true;
   constexpr bool IS_DACT = true;
+#ifdef __HIP_PLATFORM_AMD__
+  constexpr auto dActivation = nullptr; //only used on NV arch>=10
+#else
   constexpr auto dActivation = &dsilu<fp32, fp32>;
+#endif
 
   fp8_quantize<IS_DBIAS, IS_DACT, Empty, dActivation>(
       *reinterpret_cast<const Tensor *>(input), *reinterpret_cast<const Tensor *>(activation_input),
@@ -1314,7 +1335,11 @@ void nvte_fp8_quantize_dbias_drelu(const NVTETensor input, const NVTETensor acti
 
   constexpr bool IS_DBIAS = true;
   constexpr bool IS_DACT = true;
+#ifdef __HIP_PLATFORM_AMD__
+  constexpr auto dActivation = nullptr; //only used on NV arch>=10
+#else
   constexpr auto dActivation = &drelu<fp32, fp32>;
+#endif
 
   fp8_quantize<IS_DBIAS, IS_DACT, Empty, dActivation>(
       *reinterpret_cast<const Tensor *>(input), *reinterpret_cast<const Tensor *>(activation_input),
@@ -1330,7 +1355,11 @@ void nvte_fp8_quantize_dbias_dqgelu(const NVTETensor input, const NVTETensor act
 
   constexpr bool IS_DBIAS = true;
   constexpr bool IS_DACT = true;
+#ifdef __HIP_PLATFORM_AMD__
+  constexpr auto dActivation = nullptr; //only used on NV arch>=10
+#else
   constexpr auto dActivation = &dqgelu<fp32, fp32>;
+#endif
 
   fp8_quantize<IS_DBIAS, IS_DACT, Empty, dActivation>(
       *reinterpret_cast<const Tensor *>(input), *reinterpret_cast<const Tensor *>(activation_input),
@@ -1346,7 +1375,11 @@ void nvte_fp8_quantize_dbias_dsrelu(const NVTETensor input, const NVTETensor act
 
   constexpr bool IS_DBIAS = true;
   constexpr bool IS_DACT = true;
+#ifdef __HIP_PLATFORM_AMD__
+  constexpr auto dActivation = nullptr; //only used on NV arch>=10
+#else
   constexpr auto dActivation = &dsrelu<fp32, fp32>;
+#endif
 
   fp8_quantize<IS_DBIAS, IS_DACT, Empty, dActivation>(
       *reinterpret_cast<const Tensor *>(input), *reinterpret_cast<const Tensor *>(activation_input),
@@ -1354,6 +1387,7 @@ void nvte_fp8_quantize_dbias_dsrelu(const NVTETensor input, const NVTETensor act
       reinterpret_cast<Tensor *>(workspace), stream);
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 void nvte_fp8_quantize_x2(const NVTETensor input, NVTETensor output_rowwise,
                           NVTETensor output_colwise, cudaStream_t stream) {
   NVTE_API_CALL(nvte_fp8_quantize_x2);
@@ -1469,6 +1503,7 @@ void nvte_fp8_quantize_dbias_dsrelu_x2(const NVTETensor input, const NVTETensor 
       reinterpret_cast<Tensor *>(output_rowwise), reinterpret_cast<Tensor *>(output_colwise),
       reinterpret_cast<Tensor *>(dbias), reinterpret_cast<Tensor *>(workspace), stream);
 }
+#endif // !__HIP_PLATFORM_AMD__
 
 void nvte_fp8_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_fp8_dequantize);

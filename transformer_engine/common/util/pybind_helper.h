@@ -55,7 +55,16 @@
     m.def("device_supports_multicast", &transformer_engine::cuda::supports_multicast,           \
             py::call_guard<py::gil_scoped_release>(), py::arg("device_id") = -1);                 \
     m.def("ubuf_built_with_mpi", &transformer_engine::ubuf_built_with_mpi,                      \
-            py::call_guard<py::gil_scoped_release>());
+            py::call_guard<py::gil_scoped_release>());                                          \   
+    m.def(                                                                                      \
+        "get_stream_priority_range",                                                            \
+        [](int device_id = -1) {                                                                \
+          int low_pri, high_pri;                                                                \
+          transformer_engine::cuda::stream_priority_range(&low_pri, &high_pri, device_id);      \
+          return std::make_pair(low_pri, high_pri);                                             \
+        },                                                                                      \
+        py::call_guard<py::gil_scoped_release>(), py::arg("device_id") = -1);                   \
+
 #else
 #define NVTE_DECLARE_COMM_OVERLAP_HANDLES(m)
 #endif
@@ -100,12 +109,5 @@
       .value("NVTE_THD_THD_THD", NVTE_QKV_Layout::NVTE_THD_THD_THD);                          \
     NVTE_DECLARE_FUSED_ATTENTION_HANDLES(m)                                \
     NVTE_DECLARE_COMM_OVERLAP_HANDLES(m)
-    m.def(                                                                                      \
-        "get_stream_priority_range",                                                            \
-        [](int device_id = -1) {                                                                \
-          int low_pri, high_pri;                                                                \
-          transformer_engine::cuda::stream_priority_range(&low_pri, &high_pri, device_id);      \
-          return std::make_pair(low_pri, high_pri);                                             \
-        },                                                                                      \
-        py::call_guard<py::gil_scoped_release>(), py::arg("device_id") = -1);                   \
-  #endif
+
+#endif
