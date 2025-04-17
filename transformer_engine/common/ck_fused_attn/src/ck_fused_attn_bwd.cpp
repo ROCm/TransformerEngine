@@ -986,71 +986,71 @@ hipError_t ck_attn_varlen_bwd(
   }
   if(is_mqa_gqa){
     dim3 grid(b*s_kv, hg);
-		if (d_qk == d_v) {
-			dim3 block(d_qk);
-			if (ck_fused_attn_log_config){
-				std::cout<<std::endl<<"run dk_dv_reduce_thd: "<<std::endl;
-				std::cout<<"dk_expanded_ptr: "<<dk_expanded_ptr<<std::endl;
-				std::cout<<"dv_expanded_ptr: "<<dv_expanded_ptr<<std::endl;
-				std::cout<<"stride_h_dkv_expanded: "<<stride_h_dk_expanded<<std::endl;
-				std::cout<<"stride_s_dkv_expanded: "<<stride_s_dk_expanded<<std::endl;
-				std::cout<<"dk_ptr: "<<dk_ptr<<std::endl;
-				std::cout<<"dv_ptr: "<<dv_ptr<<std::endl;
-				std::cout<<"stride_h_dk: "<<stride_h_dk<<std::endl;
-				std::cout<<"stride_s_dk: "<<stride_s_dk<<std::endl;
-			}
-			CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
-				hipLaunchKernelGGL(
-					dk_dv_reduce_thd<CK_TILE_TYPE>, grid, block, 0, stream,
-					h, hg, d_qk,
+    if (d_qk == d_v) {
+      dim3 block(d_qk);
+      if (ck_fused_attn_log_config){
+        std::cout<<std::endl<<"run dk_dv_reduce_thd: "<<std::endl;
+        std::cout<<"dk_expanded_ptr: "<<dk_expanded_ptr<<std::endl;
+        std::cout<<"dv_expanded_ptr: "<<dv_expanded_ptr<<std::endl;
+        std::cout<<"stride_h_dkv_expanded: "<<stride_h_dk_expanded<<std::endl;
+        std::cout<<"stride_s_dkv_expanded: "<<stride_s_dk_expanded<<std::endl;
+        std::cout<<"dk_ptr: "<<dk_ptr<<std::endl;
+        std::cout<<"dv_ptr: "<<dv_ptr<<std::endl;
+        std::cout<<"stride_h_dk: "<<stride_h_dk<<std::endl;
+        std::cout<<"stride_s_dk: "<<stride_s_dk<<std::endl;
+      }
+      CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
+        hipLaunchKernelGGL(
+          dk_dv_reduce_thd<CK_TILE_TYPE>, grid, block, 0, stream,
+          h, hg, d_qk,
           static_cast<const int32_t*>(cu_seqlen_kv_ptr)+b,
-					static_cast<CK_TILE_TYPE*>(dk_expanded_ptr),
-					static_cast<CK_TILE_TYPE*>(dv_expanded_ptr),
-					stride_h_dk_expanded, stride_s_dk_expanded,
-					static_cast<CK_TILE_TYPE*>(dk_ptr),
-					static_cast<CK_TILE_TYPE*>(dv_ptr),
-					stride_h_dk, stride_s_dk););
-		} else {
-			dim3 block_dk(d_qk);
-			if (ck_fused_attn_log_config){
-				std::cout<<std::endl<<"run dk_or_dv_reduce_thd on dk: "<<std::endl;
-				std::cout<<"dk_expanded_ptr: "<<dk_expanded_ptr<<std::endl;
-				std::cout<<"stride_h_dk_expanded: "<<stride_h_dk_expanded<<std::endl;
-				std::cout<<"stride_s_dk_expanded: "<<stride_s_dk_expanded<<std::endl;
-				std::cout<<"dk_ptr: "<<dk_ptr<<std::endl;
-				std::cout<<"stride_h_dk: "<<stride_h_dk<<std::endl;
-				std::cout<<"stride_s_dk: "<<stride_s_dk<<std::endl;
-			}
-			CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
-				hipLaunchKernelGGL(
-					dk_or_dv_reduce_thd<CK_TILE_TYPE>, grid, block_dk, 0, stream,
-					h, hg, d_qk,
+          static_cast<CK_TILE_TYPE*>(dk_expanded_ptr),
+          static_cast<CK_TILE_TYPE*>(dv_expanded_ptr),
+          stride_h_dk_expanded, stride_s_dk_expanded,
+          static_cast<CK_TILE_TYPE*>(dk_ptr),
+          static_cast<CK_TILE_TYPE*>(dv_ptr),
+          stride_h_dk, stride_s_dk););
+    } else {
+      dim3 block_dk(d_qk);
+      if (ck_fused_attn_log_config){
+        std::cout<<std::endl<<"run dk_or_dv_reduce_thd on dk: "<<std::endl;
+        std::cout<<"dk_expanded_ptr: "<<dk_expanded_ptr<<std::endl;
+        std::cout<<"stride_h_dk_expanded: "<<stride_h_dk_expanded<<std::endl;
+        std::cout<<"stride_s_dk_expanded: "<<stride_s_dk_expanded<<std::endl;
+        std::cout<<"dk_ptr: "<<dk_ptr<<std::endl;
+        std::cout<<"stride_h_dk: "<<stride_h_dk<<std::endl;
+        std::cout<<"stride_s_dk: "<<stride_s_dk<<std::endl;
+      }
+      CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
+        hipLaunchKernelGGL(
+          dk_or_dv_reduce_thd<CK_TILE_TYPE>, grid, block_dk, 0, stream,
+          h, hg, d_qk,
           static_cast<const int32_t*>(cu_seqlen_kv_ptr)+b,
-					static_cast<CK_TILE_TYPE*>(dk_expanded_ptr),
-					stride_h_dk_expanded, stride_s_dk_expanded,
-					static_cast<CK_TILE_TYPE*>(dk_ptr),
-					stride_h_dk, stride_s_dk););
+          static_cast<CK_TILE_TYPE*>(dk_expanded_ptr),
+          stride_h_dk_expanded, stride_s_dk_expanded,
+          static_cast<CK_TILE_TYPE*>(dk_ptr),
+          stride_h_dk, stride_s_dk););
 
-			dim3 block_dv(d_v);
-			if (ck_fused_attn_log_config){
-				std::cout<<std::endl<<"run dk_or_dv_reduce_thd on dv: "<<std::endl;
-				std::cout<<"dv_expanded_ptr: "<<dv_expanded_ptr<<std::endl;
-				std::cout<<"stride_h_dv_expanded: "<<stride_h_dv_expanded<<std::endl;
-				std::cout<<"stride_s_dv_expanded: "<<stride_s_dv_expanded<<std::endl;
-				std::cout<<"dv_ptr: "<<dv_ptr<<std::endl;
-				std::cout<<"stride_h_dv: "<<stride_h_dv<<std::endl;
-				std::cout<<"stride_s_dv: "<<stride_s_dv<<std::endl;
-			}
-			CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
-				hipLaunchKernelGGL(
-					dk_or_dv_reduce_thd<CK_TILE_TYPE>, grid, block_dv, 0, stream,
-					h, hg, d_v,
+      dim3 block_dv(d_v);
+      if (ck_fused_attn_log_config){
+        std::cout<<std::endl<<"run dk_or_dv_reduce_thd on dv: "<<std::endl;
+        std::cout<<"dv_expanded_ptr: "<<dv_expanded_ptr<<std::endl;
+        std::cout<<"stride_h_dv_expanded: "<<stride_h_dv_expanded<<std::endl;
+        std::cout<<"stride_s_dv_expanded: "<<stride_s_dv_expanded<<std::endl;
+        std::cout<<"dv_ptr: "<<dv_ptr<<std::endl;
+        std::cout<<"stride_h_dv: "<<stride_h_dv<<std::endl;
+        std::cout<<"stride_s_dv: "<<stride_s_dv<<std::endl;
+      }
+      CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
+        hipLaunchKernelGGL(
+          dk_or_dv_reduce_thd<CK_TILE_TYPE>, grid, block_dv, 0, stream,
+          h, hg, d_v,
           static_cast<const int32_t*>(cu_seqlen_kv_ptr)+b,
-					static_cast<CK_TILE_TYPE*>(dv_expanded_ptr),
-					stride_h_dv_expanded, stride_s_dv_expanded,
-					static_cast<CK_TILE_TYPE*>(dv_ptr),
-					stride_h_dv, stride_s_dv););
-		}
+          static_cast<CK_TILE_TYPE*>(dv_expanded_ptr),
+          stride_h_dv_expanded, stride_s_dv_expanded,
+          static_cast<CK_TILE_TYPE*>(dv_ptr),
+          stride_h_dv, stride_s_dv););
+    }
   }
   return hipSuccess;
 }

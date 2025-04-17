@@ -601,14 +601,14 @@ void fused_attn_ck_fwd_impl(
       std::cout<<"o_stride: ("<<o_stride[2]<<", "<<o_stride[1]<<", "<<o_stride[3]<<"), ";
     }else{
       // non-THD
-			std::cout<<"q_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d_qk<<"), ";
-			std::cout<<"q_stride: ("<<q_stride[0]<<", "<<q_stride[1]<<", "<<q_stride[2]<<", "<<q_stride[3]<<"), ";
-			std::cout<<"k_shape: ("<<b<<", "<<hg<<", "<<s_kv<<", "<<d_qk<<"), ";
-			std::cout<<"k_stride: ("<<k_stride[0]<<", "<<k_stride[1]<<", "<<k_stride[2]<<", "<<k_stride[3]<<"), ";
-			std::cout<<"v_shape: ("<<b<<", "<<hg<<", "<<s_kv<<", "<<d_v<<"), ";
-			std::cout<<"v_stride: ("<<v_stride[0]<<", "<<v_stride[1]<<", "<<v_stride[2]<<", "<<v_stride[3]<<"), ";
-			std::cout<<"o_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d_v<<"), ";
-			std::cout<<"o_stride: ("<<o_stride[0]<<", "<<o_stride[1]<<", "<<o_stride[2]<<", "<<o_stride[3]<<"), ";
+      std::cout<<"q_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d_qk<<"), ";
+      std::cout<<"q_stride: ("<<q_stride[0]<<", "<<q_stride[1]<<", "<<q_stride[2]<<", "<<q_stride[3]<<"), ";
+      std::cout<<"k_shape: ("<<b<<", "<<hg<<", "<<s_kv<<", "<<d_qk<<"), ";
+      std::cout<<"k_stride: ("<<k_stride[0]<<", "<<k_stride[1]<<", "<<k_stride[2]<<", "<<k_stride[3]<<"), ";
+      std::cout<<"v_shape: ("<<b<<", "<<hg<<", "<<s_kv<<", "<<d_v<<"), ";
+      std::cout<<"v_stride: ("<<v_stride[0]<<", "<<v_stride[1]<<", "<<v_stride[2]<<", "<<v_stride[3]<<"), ";
+      std::cout<<"o_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d_v<<"), ";
+      std::cout<<"o_stride: ("<<o_stride[0]<<", "<<o_stride[1]<<", "<<o_stride[2]<<", "<<o_stride[3]<<"), ";
     }
     std::cout<<"pad_between_seqs: "<<pad_between_seqs<<", ";
     std::cout<<"scaling_factor: "<<scaling_factor<<", ";
@@ -739,7 +739,6 @@ void fused_attn_ck_bwd_impl(
 
   bool is_mqa_gqa = (h > hg);
 
-  // TODO: which d should I use? d_qk or d_v?
   size_t kN0 = (d_qk <= 128)? 128:64;
   size_t nsplits = deterministic? ceil(1.0*s_kv/kN0):1; 
 
@@ -989,14 +988,14 @@ void fused_attn_ck_bwd_impl(
       std::cout<<"o_stride: ("<<o_stride[2]<<", "<<o_stride[1]<<", "<<o_stride[3]<<"), ";
     }else{
       // non-THD
-			std::cout<<"q_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d_qk<<"), ";
-			std::cout<<"q_stride: ("<<q_stride[0]<<", "<<q_stride[1]<<", "<<q_stride[2]<<", "<<q_stride[3]<<"), ";
-			std::cout<<"k_shape: ("<<b<<", "<<hg<<", "<<s_kv<<", "<<d_qk<<"), ";
-			std::cout<<"k_stride: ("<<k_stride[0]<<", "<<k_stride[1]<<", "<<k_stride[2]<<", "<<k_stride[3]<<"), ";
-			std::cout<<"v_shape: ("<<b<<", "<<hg<<", "<<s_kv<<", "<<d_v<<"), ";
-			std::cout<<"v_stride: ("<<v_stride[0]<<", "<<v_stride[1]<<", "<<v_stride[2]<<", "<<v_stride[3]<<"), ";
-			std::cout<<"o_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d_v<<"), ";
-			std::cout<<"o_stride: ("<<o_stride[0]<<", "<<o_stride[1]<<", "<<o_stride[2]<<", "<<o_stride[3]<<"), ";
+      std::cout<<"q_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d_qk<<"), ";
+      std::cout<<"q_stride: ("<<q_stride[0]<<", "<<q_stride[1]<<", "<<q_stride[2]<<", "<<q_stride[3]<<"), ";
+      std::cout<<"k_shape: ("<<b<<", "<<hg<<", "<<s_kv<<", "<<d_qk<<"), ";
+      std::cout<<"k_stride: ("<<k_stride[0]<<", "<<k_stride[1]<<", "<<k_stride[2]<<", "<<k_stride[3]<<"), ";
+      std::cout<<"v_shape: ("<<b<<", "<<hg<<", "<<s_kv<<", "<<d_v<<"), ";
+      std::cout<<"v_stride: ("<<v_stride[0]<<", "<<v_stride[1]<<", "<<v_stride[2]<<", "<<v_stride[3]<<"), ";
+      std::cout<<"o_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d_v<<"), ";
+      std::cout<<"o_stride: ("<<o_stride[0]<<", "<<o_stride[1]<<", "<<o_stride[2]<<", "<<o_stride[3]<<"), ";
     }
     std::cout<<"pad_between_seqs: "<<pad_between_seqs<<", ";
     std::cout<<"scaling_factor: "<<scaling_factor<<", ";
