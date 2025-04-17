@@ -780,7 +780,7 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
 
         del block
         block = _test_e2e_checkpointing_get_model(config, dtype)
-        block.load_state_dict(torch.load(path))
+        block.load_state_dict(torch.load(path, weights_only=False))
 
         torch.set_rng_state(cpu_rng_state)
         torch.cuda.set_rng_state(cuda_rng_state)

@@ -7,6 +7,7 @@
 """Installation script."""
 
 import os
+import sys
 import time
 from pathlib import Path
 from typing import List, Tuple
@@ -46,7 +47,7 @@ elif "jax" in frameworks:
 
 
 CMakeBuildExtension = get_build_ext(BuildExtension)
-
+archs = cuda_archs()
 
 class TimedBdist(bdist_wheel):
     """Helper class to measure build time"""
@@ -131,7 +132,8 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
             test_reqs.extend(["numpy", "onnxruntime", "torchvision", "prettytable"])
         if "jax" in frameworks:
             install_reqs.extend(["jax", "flax>=0.7.1"])
-            test_reqs.extend(["numpy", "praxis"])
+            # test_reqs.extend(["numpy", "praxis"])
+            test_reqs.extend(["numpy"])
         if "paddle" in frameworks:
             install_reqs.append("paddlepaddle-gpu")
             test_reqs.append("numpy")

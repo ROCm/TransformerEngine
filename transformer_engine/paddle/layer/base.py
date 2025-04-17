@@ -248,7 +248,11 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
             del self.fp8_meta[recompute_buffer_pos_key]
 
     @paddle.no_grad()
-    def set_state_dict(self, state_dict, use_structured_name=True):
+    def set_state_dict(
+        self,
+        state_dict,
+        use_structured_name=True, # pylint: disable=unused-argument
+    ):
         """Restore FP8 State from checkpoint."""
         fp8_state_tensor = state_dict.pop("fp8_state")
         self._set_fp8_state(fp8_state_tensor)

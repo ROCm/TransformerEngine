@@ -416,6 +416,7 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
         fuse_wgrad_accumulation: bool,
         is_first_microbatch: bool,
     ) -> Union[Tuple[paddle.Tensor, ...], paddle.Tensor]:
+        # pylint: disable=missing-function-docstring
         if normalization == "RMSNorm":
             assert ln_bias is None, "RMSNorm does not support bias!"
         else:  # LayerNorm
@@ -542,6 +543,7 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
     def backward(
         ctx, *grad_outputs: Tuple[paddle.Tensor, ...]
     ) -> Tuple[Union[paddle.Tensor, None], ...]:
+        # pylint: disable=missing-function-docstring
         with TransformerEngineBaseLayer.prepare_backward(
             ctx.fp8_enabled, ctx.fp8_meta, ctx.tp_group, ctx.tp_size, name="_LayerNormMLP"
         ):

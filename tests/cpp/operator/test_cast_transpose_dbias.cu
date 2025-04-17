@@ -66,7 +66,6 @@ void performTest(const size_t N, const size_t H) {
 
   DType itype = TypeInfo<IType>::dtype;
   DType otype = TypeInfo<OType>::dtype;
-  DType ctype = TypeInfo<CType>::dtype;
 
   Tensor input({N, H}, itype);
 

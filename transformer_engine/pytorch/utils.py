@@ -328,3 +328,8 @@ def devices_match(device1: torch.device, device2: torch.device) -> bool:
             index2 = torch.cuda.current_device()
         return index1 == index2
     return device1 == device2
+
+@functools.lru_cache
+def get_sm_count() -> int:
+    """Returns the number of streaming multiprocessors in the current device."""
+    return torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
