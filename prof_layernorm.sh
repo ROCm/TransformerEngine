@@ -66,9 +66,21 @@ function prof_te_bwd() {
     done
 }
 
+function prof_triton_fwd_bwd() {
+    for shape in "${shapes[@]}"; do
+	read -r m n <<< "${shape}"
+
+	prof_kernel.sh \
+	    -r '_layernorm_\(fwd\|bwd_\(dx_fused\|dwdb\)\)_triton' \
+	    -o "prof_triton_fwd_bwd/${m}_${n}" \
+	    -- python "${py_src}" triton "${m}" "${n}" bwd
+    done
+}
+
 ### ENTRY POINT
 
 # prof_triton_fwd
 # prof_te_fwd
 # prof_triton_bwd
-prof_te_bwd
+# prof_te_bwd
+prof_triton_fwd_bwd
