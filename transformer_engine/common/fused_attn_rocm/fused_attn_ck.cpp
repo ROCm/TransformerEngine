@@ -1178,17 +1178,15 @@ void fused_attn_ck_fwd_qkvpacked(
   void *devPtrQKV = input_QKV->data.dptr;
   // determine the stride based on qkv layout
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
-  size_t stride_to_k = 0, stride_to_v = 0;
+  size_t stride_to_k = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
     stride_to_k = nvte_dtype_size(QKV_type) * h * d_qk;
-    stride_to_v = nvte_dtype_size(QKV_type) * h * (d_qk+d_v);
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
     stride_to_k = nvte_dtype_size(QKV_type) * d_qk;
-    stride_to_v = nvte_dtype_size(QKV_type) * (d_qk+d_v);
   }
   void *devPtrQ = static_cast<void *>(devPtrQKV);
   void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride_to_k);
-  void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride_to_v);
+  void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + 2*stride_to_k);
 
   void *devPtrBias = nullptr;
   size_t bias_b = 0;
@@ -1322,17 +1320,15 @@ void fused_attn_ck_bwd_qkvpacked(
   //input tensor
   void *devPtrQKV = input_QKV->data.dptr;
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
-  size_t stride_to_k = 0, stride_to_v = 0;
+  size_t stride_to_k = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
     stride_to_k = nvte_dtype_size(QKV_type) * h * d_qk;
-    stride_to_v = nvte_dtype_size(QKV_type) * h * (d_qk+d_v);
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
     stride_to_k = nvte_dtype_size(QKV_type) * d_qk;
-    stride_to_v = nvte_dtype_size(QKV_type) * (d_qk+d_v);
   }
   void *devPtrQ = static_cast<void *>(devPtrQKV);
   void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride_to_k);
-  void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride_to_v);
+  void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + 2*stride_to_k);
   void *devPtrSoftmaxStats = output_S->data.dptr;
 
   void *devPtrO = input_O->data.dptr;
@@ -1352,7 +1348,7 @@ void fused_attn_ck_bwd_qkvpacked(
   void *devPtrdQKV = output_dQKV->data.dptr;
   void *devPtrdQ = static_cast<void *>(devPtrdQKV);
   void *devPtrdK = static_cast<void *>(static_cast<int8_t *>(devPtrdQKV) + stride_to_k);
-  void *devPtrdV = static_cast<void *>(static_cast<int8_t *>(devPtrdQKV) + stride_to_v);
+  void *devPtrdV = static_cast<void *>(static_cast<int8_t *>(devPtrdQKV) + 2*stride_to_k);
   
   void *devPtrCuSeqlens = input_cu_seqlens->data.dptr; 
   void *devPtrSeqOffsets = input_cu_seqlens_padded->data.dptr;

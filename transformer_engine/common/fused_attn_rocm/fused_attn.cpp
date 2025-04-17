@@ -382,7 +382,6 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
   } else {
     NVTE_ERROR("nvte_fused_attn_fwd_qkvpacked only supports H3D and 3HD layouts!");
   }
-  // TODO: When QKV packed, d_qk and d_v are probably the same?
   size_t d = input_QKV->data.shape[ndim - 1];
 
   const NVTEDType QKV_type = static_cast<NVTEDType>(input_QKV->data.dtype);
