@@ -319,7 +319,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
   
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd_qkvpacked(
-      b, h, max_seqlen, d,
+      b, h, max_seqlen, d, d,
       is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
       window_size_left, window_size_right,
       input_QKV, input_Bias, 
@@ -404,7 +404,7 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
       input_Bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
     }
     fused_attn_ck_bwd_qkvpacked(
-      b, h, max_seqlen, d,
+      b, h, max_seqlen, d, d,
       attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
       window_size_left, window_size_right,
@@ -489,7 +489,7 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd_kvpacked(
-      b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
+      b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, d,
       is_training, attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
       window_size_left, window_size_right,
@@ -585,7 +585,7 @@ void nvte_fused_attn_bwd_kvpacked(
       input_Bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
     }
     fused_attn_ck_bwd_kvpacked(
-      b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
+      b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, d,
       attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
       window_size_left, window_size_right,
@@ -669,7 +669,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd(
-      b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk,
+      b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v,
       is_training, attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
       window_size_left, window_size_right,
@@ -761,7 +761,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       input_Bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
     }
     fused_attn_ck_bwd(
-      b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk,
+      b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v,
       attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
       window_size_left, window_size_right,
