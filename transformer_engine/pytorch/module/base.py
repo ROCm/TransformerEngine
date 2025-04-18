@@ -991,7 +991,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     fp8_meta=self.fp8_meta,
                     fp8_meta_index=fp8_meta_index,
                     amax=dummy_amax,
-                    with_transpose_cache=torch.is_grad_enabled(),
+                    with_transpose_cache=torch.is_grad_enabled() and os.getenv("ENABLE_TRANSPOSE_CACHE", True),
                 )
 
             # Redo parameter wrap in case we broke it above
