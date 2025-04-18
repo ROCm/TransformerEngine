@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -59,6 +59,9 @@ from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ..float8_tensor import Float8Tensor
 from ._common import _apply_normalization
+
+if IS_HIP_EXTENSION:
+    from ..triton_kernels.rmsnorm_triton import te_rmsnorm_bwd_triton
 
 __all__ = ["LayerNormMLP"]
 
@@ -1039,7 +1042,9 @@ class _LayerNormMLP(torch.autograd.Function):
                     ctx.zero_centered_gamma,
                 )
             elif ctx.normalization == "RMSNorm":
-                dgrad, dgamma = tex.rmsnorm_bwd(
+                use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
+                rmsnorm_bwd_func = te_rmsnorm_bwd_triton if use_rmsnorm_triton else tex.rmsnorm_bwd
+                dgrad, dgamma = rmsnorm_bwd_func(
                     dgrad,
                     inputmat,
                     rsigma,

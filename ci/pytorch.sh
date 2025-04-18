@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -61,6 +61,12 @@ run_test_config(){
     run 1 test_sanity.py -k "$_graph_filter"
     run 1 test_torch_save_load.py
     test $_fus_attn != "unfused" && run 1 fused_attn/test_fused_attn.py
+    if [ $_gemm = "hipblaslt" ]; then
+        run 1 triton_kernels/test_cast_transpose_triton.py
+        #TODO: release rmsnorm_fwd_bwd_triton tests after the memory issue in hsa-runtime fixed
+        run 1 triton_kernels/test_rmsnorm_triton.py -k "not test_rmsnorm_fwd_bwd_triton"
+        NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 run 3 test_numerics.py
+    fi
 }
 
 run_test_config_mgpu(){

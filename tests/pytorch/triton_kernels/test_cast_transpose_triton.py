@@ -1,8 +1,11 @@
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# License for AMD contributions = MIT. See LICENSE for more information
+
 import pytest
 import torch
 import triton
 import triton.language as tl
-from transformer_engine.pytorch.cast_transpose_triton import te_cast_transpose_noop_triton, te_cast_transpose_dbias_triton, get_te_dtype
+from transformer_engine.pytorch.triton_kernels.cast_transpose_triton import te_cast_transpose_noop_triton, te_cast_transpose_dbias_triton, get_te_dtype
 from transformer_engine.pytorch.cpp_extensions import fused_cast_transpose_noop, fused_cast_transpose_bgrad
 
 def get_tolerances(in_dtype):

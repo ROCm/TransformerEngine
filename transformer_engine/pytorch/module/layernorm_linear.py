@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -10,6 +12,8 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 from torch.nn import init
+
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from .. import cpp_extensions as tex
 
@@ -47,6 +51,9 @@ from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ._common import _apply_normalization, _noop_cat
 from ..float8_tensor import Float8Tensor
+
+if IS_HIP_EXTENSION:
+    from ..triton_kernels.rmsnorm_triton import te_rmsnorm_bwd_triton
 
 # NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
@@ -688,7 +695,9 @@ class _LayerNormLinear(torch.autograd.Function):
                     ctx.zero_centered_gamma,
                 )
             elif ctx.normalization == "RMSNorm":
-                dgrad, dgamma = tex.rmsnorm_bwd(
+                use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
+                rmsnorm_bwd_func = te_rmsnorm_bwd_triton if use_rmsnorm_triton else tex.rmsnorm_bwd
+                dgrad, dgamma = rmsnorm_bwd_func(
                     dgrad,
                     inputmat,
                     rsigma,
