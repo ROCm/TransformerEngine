@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -9,7 +9,7 @@ DIR=`dirname $0`
 
 TEST_DIR=${TE_PATH}tests/pytorch
 
-: ${TEST_WORKERS:=4}
+#: ${TEST_WORKERS:=4}
 
 install_prerequisites() {
     pip install 'numpy>=1.22.4,<2.0' onnx onnxruntime
@@ -26,22 +26,21 @@ run() {
     _test_name_tag=`get_test_name_tag $1 $_gemm-$_fus_attn`
     check_test_filter $_test_name_tag || return
     echo "Run [$_gemm, $_fus_attn] $@"
-    : ${_WORKERS_COUNT:=1}
-    pytest -v `get_pytest_junitxml $_test_name_tag` \
-           -n$_WORKERS_COUNT --max-worker-restart=$_WORKERS_COUNT "$TEST_DIR/$@" || test_run_error
+    #: ${_WORKERS_COUNT:=1}
+    pytest -v `get_pytest_junitxml $_test_name_tag` "$TEST_DIR/$@" || test_run_error
+    #       -n$_WORKERS_COUNT --max-worker-restart=$_WORKERS_COUNT "$TEST_DIR/$@" || test_run_error
     echo "Done [$_gemm, $_fus_attn] $1"
 }
 
 run_test_config(){
     echo ====== Run with GEMM backend: $_gemm and Fused attention backend: $_fus_attn =====
-    _WORKERS_COUNT=$TEST_WORKERS
+    #_WORKERS_COUNT=$TEST_WORKERS
     if [ $_fus_attn = "ck" -o $_fus_attn = "auto" ]; then 
         _is_default_fa="1"
     else
         _is_default_fa=""
     fi
     if [ $_gemm != "rocblas" ]; then
-        #test -n "$_is_default_fa" && run 1 test_cast_transpose_triton.py
         run 1 test_cuda_graphs.py
         _graph_filter=""
     else
@@ -61,12 +60,18 @@ run_test_config(){
     run 1 test_sanity.py -k "$_graph_filter"
     run 1 test_torch_save_load.py
     test $_fus_attn != "unfused" && run 1 fused_attn/test_fused_attn.py
+    if [ $_gemm = "hipblaslt" ] && [ $_fus_attn = "auto" ]; then
+        run 1 triton_kernels/test_cast_transpose_triton.py
+        #TODO: release rmsnorm_fwd_bwd_triton tests after the memory issue in hsa-runtime fixed
+        run 1 triton_kernels/test_rmsnorm_triton.py -k "not test_rmsnorm_fwd_bwd_triton"
+        NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 run 3 test_numerics.py
+    fi
 }
 
 run_test_config_mgpu(){
     echo ====== Run mGPU with GEMM backend: $_gemm and Fused attention backend: $_fus_attn =====
-    _WORKERS_COUNT=1
-    test $TEST_WORKERS = 0 && _WORKERS_COUNT=0
+    #_WORKERS_COUNT=1
+    #test $TEST_WORKERS = 0 && _WORKERS_COUNT=0
     run 3 test_fused_optimizer.py
     run 3 test_fusible_ops_distributed.py
     if [ $_fus_attn != "unfused" ]; then

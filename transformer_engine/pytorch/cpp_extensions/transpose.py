@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -8,7 +10,10 @@ import os
 import torch
 import transformer_engine_torch as tex
 from ..constants import TE_DType
-from ..cast_transpose_triton import te_cast_transpose_noop_triton, te_cast_transpose_dbias_triton
+
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+if IS_HIP_EXTENSION:
+    from ..triton_kernels.cast_transpose_triton import te_cast_transpose_noop_triton, te_cast_transpose_dbias_triton
 
 
 __all__ = [
@@ -42,7 +47,7 @@ def fp8_cast_transpose_fused(
         noop_flag = torch.Tensor()
 
     if inp.nelement() > 0:
-        use_cast_transpose_triton = bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+        use_cast_transpose_triton = bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) ) and IS_HIP_EXTENSION
         if use_cast_transpose_triton:
             te_cast_transpose_noop_triton(
                 inp,
@@ -80,7 +85,7 @@ def fp8_cast_transpose_bgrad_fused(
     otype: tex.DType,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Cast + Transpose + BGRAD with FP8 output"""
-    use_cast_transpose_triton = bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+    use_cast_transpose_triton = bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) ) and IS_HIP_EXTENSION
     if use_cast_transpose_triton:
         return te_cast_transpose_dbias_triton(
             inp,
