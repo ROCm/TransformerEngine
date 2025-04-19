@@ -276,6 +276,13 @@ At runtime, you can enable specific triton kernels using the specific environmen
 * NVTE_USE_RMSNORM_TRITON=1 can be used to enable rmsnorm triton kernels.
 
 
+Transpose Cache
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+In fine tuning workloads like LORA where W is frozen and only the adapter weights are trainable,  $dl/dx = W^T (dl/dy) + B^T(A^T dl/dy)$. Since W is frozen we can cache W^T at the 
+expense of using more memory. A and B are lora matrices.The cache is enabled by default. To turn it off use 
+
+- `export ENABLE_TRANPOSE_CACHE=False`.
+
 Transformer Engine
 ******************
 
