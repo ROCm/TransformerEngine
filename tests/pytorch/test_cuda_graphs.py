@@ -25,6 +25,7 @@ from transformer_engine.pytorch import (
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine.pytorch.ops as te_ops
+from transformer_engine.common import recipe
 
 if IS_HIP_EXTENSION:
     import os
@@ -33,6 +34,7 @@ if IS_HIP_EXTENSION:
 
 # Check if FP8 is supported.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 
 
 # Record initial RNG state.
@@ -55,6 +57,11 @@ class ModelConfig:
 
 
 model_configs = {"small": ModelConfig(2, 32, 64, 2, 32)}
+
+fp8_recipes = [
+    recipe.DelayedScaling(),
+    recipe.MXFP8BlockScaling(),
+]
 
 # Supported data types
 dtypes: List[torch.dtype] = [torch.float32, torch.float16]
@@ -170,6 +177,7 @@ def _test_cuda_graphs(
     fp8: bool,
     fp8_params: bool,
     fp8_weight_caching: bool,
+    fp8_recipe: recipe.Recipe,
 ) -> List[torch.Tensor]:
     """Helper function for CUDA graph test."""
     reset_rng_states()
@@ -180,7 +188,7 @@ def _test_cuda_graphs(
         fp8_weight_caching = False
 
     # Create modules.
-    with fp8_model_init(enabled=fp8_params):
+    with fp8_model_init(enabled=fp8_params, recipe=fp8_recipe):
         if module == "transformer":
             modules = [
                 TransformerLayer(
@@ -262,6 +270,7 @@ def _test_cuda_graphs(
                 num_warmup_iters=10,
                 fp8_enabled=fp8,
                 fp8_weight_caching=fp8_weight_caching,
+                fp8_recipe=fp8_recipe,
             )
         elif graph_mode == "individual":
             # Graph individual modules.
@@ -272,6 +281,7 @@ def _test_cuda_graphs(
                     num_warmup_iters=10,
                     fp8_enabled=fp8,
                     fp8_weight_caching=fp8_weight_caching,
+                    fp8_recipe=fp8_recipe,
                 )
                 for module in modules
             ]
@@ -288,7 +298,7 @@ def _test_cuda_graphs(
         for grad_accumulation_step in range(2):
             input_ = generate_data(model_config, dtype)
             grad_output = generate_data(model_config, dtype, requires_grad=False)
-            with fp8_autocast(enabled=fp8):
+            with fp8_autocast(enabled=fp8, fp8_recipe=fp8_recipe):
                 kwargs = {}
                 if fp8_weight_caching:
                     kwargs["is_first_microbatch"] = grad_accumulation_step == 0
@@ -303,6 +313,7 @@ def _test_cuda_graphs(
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("fp8", (False, True))
 @pytest.mark.parametrize("fp8_params", (False, True))
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 def test_make_graphed_callables(
     *,
     module: str,
@@ -311,6 +322,7 @@ def test_make_graphed_callables(
     dtype: torch.dtype,
     fp8: bool,
     fp8_params: bool,
+    fp8_recipe: recipe.Recipe,
     fp8_weight_caching: bool = False,
 ) -> None:
 
@@ -321,6 +333,8 @@ def test_make_graphed_callables(
         pytest.skip("FP8 needed for FP8 parameters.")
     if fp8_weight_caching and not fp8:
         pytest.skip("FP8 needed for FP8 parameters.")
+    if fp8_recipe.mxfp8() and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
 
     # Run model with different CUDA graph settings.
     model_config = model_configs[model_config]
@@ -332,6 +346,7 @@ def test_make_graphed_callables(
         fp8=fp8,
         fp8_params=fp8_params,
         fp8_weight_caching=fp8_weight_caching,
+        fp8_recipe=fp8_recipe,
     )
     outputs = _test_cuda_graphs(graph_mode="none", **kwargs)
     graph_outputs_mode1 = _test_cuda_graphs(graph_mode="full", **kwargs)
@@ -357,16 +372,19 @@ _test_make_graphed_callables_with_fp8_weight_caching_modules = [
     _test_make_graphed_callables_with_fp8_weight_caching_modules,
 )
 @pytest.mark.parametrize("fp8_params", (False, True))
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 def test_make_graphed_callables_with_fp8_weight_caching(
     *,
     module: str,
     fp8_params: bool,
+    fp8_recipe: recipe.Recipe,
 ) -> None:
     test_make_graphed_callables(
         module=module,
         dtype=torch.float32,
         fp8=True,
         fp8_params=fp8_params,
+        fp8_recipe=fp8_recipe,
         fp8_weight_caching=True,
     )
 

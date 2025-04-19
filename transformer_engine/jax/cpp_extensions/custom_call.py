@@ -7,9 +7,8 @@
 from dataclasses import dataclass
 from enum import IntEnum
 
+import jax
 from jax.interpreters import mlir
-import jax.extend as jex
-
 from transformer_engine import transformer_engine_jax
 
 from .misc import is_hip_extension
@@ -33,6 +32,7 @@ class CustomCallAPIVersion(IntEnum):
 for _name, _value in transformer_engine_jax.registrations().items():
     if _name.endswith("_ffi"):
         if is_ffi_enabled():
+<<<<<<< HEAD
             # COMMAND_BUFFER_COMPATIBLE i.e. cudaGraph enabled by default
             jex.ffi.register_ffi_target(
                 _name, _value, platform="ROCM" if is_hip_extension() else "CUDA", api_version=CustomCallAPIVersion.FFI.value
@@ -40,6 +40,14 @@ for _name, _value in transformer_engine_jax.registrations().items():
     else:
         jex.ffi.register_ffi_target(
             _name, _value, platform="ROCM" if is_hip_extension() else "CUDA", api_version=CustomCallAPIVersion.OPAQUE.value
+=======
+            jax.ffi.register_ffi_target(
+                _name, _value, platform="CUDA", api_version=CustomCallAPIVersion.FFI.value
+            )
+    else:
+        jax.ffi.register_ffi_target(
+            _name, _value, platform="CUDA", api_version=CustomCallAPIVersion.OPAQUE.value
+>>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
         )
 
 

@@ -261,7 +261,12 @@ def cuda_path() -> Tuple[str, str]:
 
 @functools.lru_cache(maxsize=None)
 def cuda_archs() -> str:
-    return os.getenv("NVTE_CUDA_ARCHS", "70;80;89;90")
+    version = cuda_version()
+    if os.getenv("NVTE_CUDA_ARCHS") is None:
+        os.environ["NVTE_CUDA_ARCHS"] = (
+            "70;80;89;90;100;120" if version >= (12, 8) else "70;80;89;90"
+        )
+    return os.getenv("NVTE_CUDA_ARCHS")
 
 
 def cuda_version() -> Tuple[int, ...]:
@@ -282,7 +287,7 @@ def cuda_version() -> Tuple[int, ...]:
 def get_frameworks() -> List[str]:
     """DL frameworks to build support for"""
     _frameworks: List[str] = []
-    supported_frameworks = ["pytorch", "jax", "paddle"]
+    supported_frameworks = ["pytorch", "jax"]
 
     # Check environment variable
     if os.getenv("NVTE_FRAMEWORK"):
@@ -311,12 +316,6 @@ def get_frameworks() -> List[str]:
             pass
         else:
             _frameworks.append("jax")
-        try:
-            import paddle
-        except ImportError:
-            pass
-        else:
-            _frameworks.append("paddle")
 
     # Special framework names
     if "all" in _frameworks:
@@ -411,7 +410,6 @@ def uninstall_te_wheel_packages():
             "-y",
             "transformer_engine_cu12",
             "transformer_engine_torch",
-            "transformer_engine_paddle",
             "transformer_engine_jax",
         ]
     )
