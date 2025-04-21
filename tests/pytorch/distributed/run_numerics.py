@@ -79,7 +79,7 @@ def main(argv=None, namespace=None):
         "backend": "nccl",
         "rank": WORLD_RANK,
         "world_size": WORLD_SIZE,
-        "timeout": datetime.timedelta(seconds=30),
+        "timeout": datetime.timedelta(seconds=120 if IS_HIP_EXTENSION else 30),
     }
     dist_init_kwargs["init_method"] = "env://"
     dist_init_kwargs["device_id"] = torch.device(f"cuda:{LOCAL_RANK}")

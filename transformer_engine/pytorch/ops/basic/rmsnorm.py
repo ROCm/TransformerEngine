@@ -15,22 +15,12 @@ from typing import Optional
 import torch
 
 from transformer_engine_torch import rmsnorm_bwd, rmsnorm_fwd
-<<<<<<< HEAD
-from ...cpp_extensions import (
-    rmsnorm_fwd_fp8,
-    rmsnorm_fwd_fp8_inf,
-    rmsnorm_fwd_inf,
-)
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 if IS_HIP_EXTENSION:
-  from ...triton_kernels.rmsnorm_triton import te_rmsnorm_bwd_triton, te_rmsnorm_fwd_triton, te_rmsnorm_fwd_inf_triton
-from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
-from ...tensor import Float8Tensor, QuantizedTensor
-=======
+  from ...triton_kernels.rmsnorm_triton import te_rmsnorm_bwd_triton
 from ...fp8 import FP8GlobalStateManager
 from ...tensor import QuantizedTensor
 from ...constants import TE_DType
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
 from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
@@ -214,50 +204,6 @@ class RMSNorm(BasicOperation):
 
         # Compute RMSNorm
         sm_margin = self._sm_margins["forward" if requires_grad else "inference"]
-<<<<<<< HEAD
-
-        #Need to change this when triton has fp8 support
-        if with_fp8_output:
-            fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(forward=True)
-            fp8_dtype = get_fp8_te_dtype(output_fp8_meta["recipe"], fprop_tensor=True)
-            args = (
-                x,
-                w,
-                self.eps,
-                output_fp8_meta[fp8_meta_key],
-                0,  # fp8_meta_index
-                fp8_dtype,
-                sm_margin,
-                self.zero_centered_gamma,
-            )
-            if requires_grad:
-                data, rstdevs = rmsnorm_fwd_fp8(*args)
-            else:
-                data = rmsnorm_fwd_fp8_inf(*args)
-            y = Float8Tensor(
-                data=data,
-                fp8_meta=output_fp8_meta,
-                fp8_meta_forward=True,
-                fp8_meta_index=0,
-                fp8_dtype=fp8_dtype,
-                dtype=dtype,
-            )
-        else:
-            use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
-            args = (
-                x,
-                w,
-                self.eps,
-                sm_margin,
-                self.zero_centered_gamma,
-            )
-            if requires_grad:
-                rmsnorm_fwd_func = te_rmsnorm_fwd_triton if use_rmsnorm_triton else rmsnorm_fwd
-                y, rstdevs = rmsnorm_fwd_func(*args)
-            else:
-                rmsnorm_fwd_func = te_rmsnorm_fwd_inf_triton if use_rmsnorm_triton else rmsnorm_fwd_inf
-                y = rmsnorm_fwd_func(*args)
-=======
         y, _, rstdevs = rmsnorm_fwd(
             x,
             w,
@@ -268,7 +214,6 @@ class RMSNorm(BasicOperation):
             sm_margin,
             self.zero_centered_gamma,
         )
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
 
         # Save state for backward pass
         if requires_grad:

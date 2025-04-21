@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -16,14 +18,17 @@ from transformer_engine.pytorch.ops.op import (
     FusibleOperation,
     OperationContext,
 )
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from transformer_engine.pytorch.ops.fused import (
     fuse_backward_linear_add,
     fuse_forward_linear_bias_activation,
     fuse_forward_linear_bias_add,
-    fuse_userbuffers_backward_linear,
-    fuse_userbuffers_forward_linear,
 )
-
+if not IS_HIP_EXTENSION:
+    from transformer_engine.pytorch.ops.fused import (
+        fuse_userbuffers_backward_linear,
+        fuse_userbuffers_forward_linear,
+    )
 
 def _split_tuple(t: tuple, idx: int) -> tuple[tuple, tuple]:
     """Split tuple at index"""
@@ -351,7 +356,8 @@ class OperationFuser:
         ops: list[tuple[FusibleOperation, list[int]]],
     ) -> list[tuple[FusibleOperation, list[int]]]:
         """Attempt to fuse operations in forward pass"""
-        ops = fuse_userbuffers_forward_linear(ops)
+        if not IS_HIP_EXTENSION:
+            ops = fuse_userbuffers_forward_linear(ops)
         ops = fuse_forward_linear_bias_add(ops)
         ops = fuse_forward_linear_bias_activation(ops)
         return ops
@@ -362,7 +368,8 @@ class OperationFuser:
         ops: list[tuple[FusibleOperation, list[int]]],
     ) -> list[tuple[FusibleOperation, list[int]]]:
         """Attempt to fuse operations in backward pass"""
-        ops = fuse_userbuffers_backward_linear(ops)
+        if not IS_HIP_EXTENSION:
+            ops = fuse_userbuffers_backward_linear(ops)
         ops = fuse_backward_linear_add(ops)
         return ops
 

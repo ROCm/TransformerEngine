@@ -179,6 +179,14 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
  * Cast
  **************************************************************************************************/
 
+#ifdef USE_ROCM
+namespace transformer_engine {
+//dummy CommOverlapCore, CommOverlapType in rocm
+class CommOverlapCore{};
+class CommOverlapType{};
+}
+#endif
+
 namespace transformer_engine::pytorch {
 
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
@@ -365,7 +373,6 @@ void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
 void fused_multi_row_padding(at::Tensor input, at::Tensor output,
                              std::vector<size_t> input_row_list,
                              std::vector<size_t> padded_input_row_list);
-#ifndef USE_ROCM
 /***************************************************************************************************
  * swizzle
  **************************************************************************************************/
@@ -376,6 +383,7 @@ at::Tensor rowwise_swizzle(at::Tensor input, at::Tensor scale_inv);
 
 at::Tensor columnwise_swizzle(at::Tensor input, at::Tensor scale_inv);
 
+#ifndef USE_ROCM
 /***************************************************************************************************
  * Comm+GEMM Overlap Wrappers
  **************************************************************************************************/

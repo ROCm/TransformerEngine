@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -171,6 +173,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   auto main_stream = at::cuda::getCurrentCUDAStream();
   if (A_tensor.numel() != 0 && B_tensor.numel() != 0) {
     if (comm_overlap) {
+#ifndef USE_ROCM
       // Prepare extra output tensor
       TensorWrapper extra_output_tensor;
       if (extra_output.has_value()) {
@@ -209,6 +212,9 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                                          use_split_accumulator, extra_output_tensor, main_stream);
         }
       }
+#else
+    NVTE_ERROR("ROCm TE does not support comm_overlap\n");
+#endif //!USE_ROCM
     } else {
       // Launch GEMM
       nvte_cublas_gemm(A_tensor.data(), B_tensor.data(), D_tensor.data(), bias_tensor.data(),

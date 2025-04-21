@@ -9,7 +9,9 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_COMMON_H_
 #define TRANSFORMER_ENGINE_COMMON_COMMON_H_
 
+#ifndef __HIP_PLATFORM_AMD__
 #include <cudaTypedefs.h>
+#endif //#ifndef __HIP_PLATFORM_AMD__
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -179,18 +181,15 @@ using fp16 = half;
 using bf16 = nv_bfloat16;
 using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
-<<<<<<< HEAD
+#if CUDA_VERSION >= 12080
+using fp8e8m0 = __nv_fp8_e8m0;
+#endif // CUDA_VERSION >= 12080
+using e8m0_t = uint8_t;
 #else
 using bf16 = hip_bfloat16;
 using fp8e4m3 = te_hip_fp8_e4m3;
 using fp8e5m2 = te_hip_fp8_e5m2;
 #endif //__HIP_PLATFORM_AMD__
-=======
-#if CUDA_VERSION >= 12080
-using fp8e8m0 = __nv_fp8_e8m0;
-#endif
-using e8m0_t = uint8_t;
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
 
 namespace detail {
 
@@ -214,12 +213,10 @@ TRANSFORMER_ENGINE_TYPE_NAME(te_hip_fp8_e5m2)
 TRANSFORMER_ENGINE_TYPE_NAME(nv_bfloat16)
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e4m3)
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e5m2)
-<<<<<<< HEAD
-=======
 #if CUDA_VERSION >= 12080
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e8m0)
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
-#endif
+#endif // CUDA_VERSION >= 12080
+#endif // #ifdef __HIP_PLATFORM_AMD__
 #undef TRANSFORMER_ENGINE_TYPE_NAME
 
 }  // namespace detail
@@ -482,6 +479,7 @@ void update_tensor_scale_inv(Tensor *t, cudaStream_t stream);
 
 void checkCuDriverContext(CUstream stream);
 
+#ifndef __HIP_PLATFORM_AMD__
 CUtensorMapDataType get_CUtensorMapDataType(DType dtype);
 
 inline bool isPointerAligned(const void *const ptr, const int alignment);
@@ -491,6 +489,7 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
                           const uint64_t globalY, const uint64_t globalX, const uint32_t shmemY,
                           const uint32_t shmemX, const uint32_t stride_elems,
                           const uint32_t offset_elems, const size_t type_size);
+#endif //#ifndef __HIP_PLATFORM_AMD__
 
 bool is_supported_by_CC_100();
 

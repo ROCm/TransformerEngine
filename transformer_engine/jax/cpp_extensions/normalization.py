@@ -15,7 +15,12 @@ from jax import dtypes
 from jax.interpreters import mlir
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
-from jax import ffi
+#TODO: wait for jax v0.5.0 migration
+from .misc import is_hip_extension
+if is_hip_extension():
+    from jax.extend import ffi
+else:
+    from jax import ffi
 
 from transformer_engine import transformer_engine_jax
 

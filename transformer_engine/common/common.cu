@@ -10,8 +10,13 @@
 
 #include "./common.h"
 #include "./utils.cuh"
+#ifndef __HIP_PLATFORM_AMD__
 #include "common/util/cuda_runtime.h"
 #include "common/util/logging.h"
+#else
+#include "./util/cuda_runtime.h"
+#include "./util/logging.h"
+#endif //#ifndef __HIP_PLATFORM_AMD__
 
 namespace transformer_engine {
 
@@ -56,6 +61,7 @@ void checkCuDriverContext(CUstream stream) {
   }
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 CUtensorMapDataType get_CUtensorMapDataType(DType dtype) {
   static const std::unordered_map<DType, CUtensorMapDataType> dtypeMapping = {
       {DType::kByte, CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT8},
@@ -133,6 +139,7 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
       // Any element that is outside of bounds will be set to zero by the TMA transfer.
       CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
 }
+#endif //#ifndef __HIP_PLATFORM_AMD__
 
 bool is_supported_by_CC_100() {
   int deviceComputeCapability = cuda::sm_arch(cuda::current_device());

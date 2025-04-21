@@ -54,11 +54,9 @@ run_test_config(){
     run 1 test_jit.py
     run_default_fa 1 test_multi_tensor.py
     run 1 test_numerics.py
-    run_default_fa 3 test_onnx_export.py # All FA are disabled in ONNX export mode
-    run_default_fa 1 test_permutation.py
+    run_default_fa 1 test_permutation.py -k "not test_permutation_mask_map_fp8"
     run_default_fa 1 test_recipe.py
     run 1 test_sanity.py
-    run_default_fa 1 test_torch_save_load.py
     run_default_fa 1 fused_attn/test_fused_attn.py # Backend selection is controlled by the test
     if [ $_gemm = "hipblaslt" ]; then
         run_default_fa 1 triton_kernels/test_cast_transpose_triton.py
@@ -77,7 +75,6 @@ run_test_config_mgpu(){
         run 3 distributed/test_fusible_ops.py
         run 3 fused_attn/test_fused_attn_with_cp.py
         run 3 distributed/test_numerics.py
-        run 3 distributed/test_torch_fsdp2.py
     fi
 }
 

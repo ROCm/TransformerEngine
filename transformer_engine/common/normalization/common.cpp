@@ -41,10 +41,12 @@ Compute always in FP32
 namespace transformer_engine {
 namespace normalization {
 
+#ifndef __HIP_PLATFORM_AMD__
 cudnn_frontend::NormFwdPhase_t get_cudnn_forward_phase(const bool training) {
   return training ? cudnn_frontend::NormFwdPhase_t::TRAINING
                   : cudnn_frontend::NormFwdPhase_t::INFERENCE;
 }
+#endif //#ifndef __HIP_PLATFORM_AMD__
 
 TupleKeyType get_key(NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType,
                      NVTE_Norm_Stage NormStage, DType wtype, DType itype, DType otype, DType ctype,
@@ -481,15 +483,10 @@ NormalizationPlanBase* NormalizationPlanRegistry::getNormalizationPlan(
   if (NormBackend == NVTE_Norm_Backend::Cudnn) {
     plan = std::make_unique<CudnnNormalizationPlan>(NormType, NormStage, wtype, itype, otype, ctype,
                                                     batch_size, hidden_size, sm_count,
-<<<<<<< HEAD
-                                                    zero_centered_gamma);
+                                                    zero_centered_gamma, mode, training);
   } else
 #endif
   if (NormStage == NVTE_Norm_Stage::Forward) {
-=======
-                                                    zero_centered_gamma, mode, training);
-  } else if (NormStage == NVTE_Norm_Stage::Forward) {
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
     plan = std::make_unique<TeNormalizationPlan<ForwardKernelParams>>(
         NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size, sm_count,
         zero_centered_gamma, is_tuned);

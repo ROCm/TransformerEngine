@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -12,7 +14,9 @@
 #define TRANSFORMER_ENGINE_DEQUANTIZE_KERNELS_CUH_
 
 #include <cuda.h>
+#ifndef __HIP_PLATFORM_AMD__
 #include <cudaTypedefs.h>
+#endif //#ifndef __HIP_PLATFORM_AMD__
 #include <cuda_runtime.h>
 #include <transformer_engine/cast.h>
 
@@ -48,6 +52,7 @@ constexpr size_t THREADS_PER_CHUNK_X_COLWISE = CHUNK_DIM_X;                     
 constexpr size_t ITERATIONS = CHUNK_DIM_Y / BUFFER_DIM_Y;                       //    8 = 128 / 16
 static_assert(ITERATIONS >= 1);
 
+#ifndef __HIP_PLATFORM_AMD__
 template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     dequantize_mxfp8_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
@@ -227,6 +232,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   }
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
+#endif
 
 static void fp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
   NVTE_CHECK(is_fp8_dtype(input.data.dtype), "Input must have FP8 type.");
@@ -249,6 +255,7 @@ static void fp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t str
   );                      // NOLINT(*)
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
   bool use_rowwise_scaling = input.has_data();
   bool use_colwise_scaling = input.has_columnwise_data();
@@ -332,6 +339,7 @@ static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t s
       );                                                                      // NOLINT(*)
   );                                                                          // NOLINT(*)
 }
+#endif
 }  // namespace dequantization
 
 namespace detail {
@@ -342,12 +350,14 @@ void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t stream)
 
   if (is_tensor_scaling(input.scaling_mode)) {
     dequantization::fp8_dequantize(input, output, stream);
+#ifndef __HIP_PLATFORM_AMD__
   } else if (is_mxfp_scaling(input.scaling_mode)) {
     if (is_supported_by_CC_100()) {
       dequantization::mxfp8_dequantize(input, output, stream);
     } else {
       NVTE_ERROR("MXFP8 Dequantization is NOT supported by architectures < 10.0");
     }
+#endif
   } else {
     NVTE_ERROR("Not implemented scaling mode: " + to_string(input.scaling_mode) + ".");
   }

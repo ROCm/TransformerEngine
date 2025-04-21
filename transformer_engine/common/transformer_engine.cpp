@@ -197,18 +197,7 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
 
 NVTETensor nvte_create_tensor(NVTEScalingMode scaling_mode) {
   transformer_engine::Tensor *ret = new transformer_engine::Tensor;
-<<<<<<< HEAD
-  ret->data.dptr = dptr;
-  if(shape.data!=nullptr and shape.ndim>0){
-    ret->data.shape = std::vector<size_t>(shape.data, shape.data + shape.ndim);
-  }
-  ret->data.dtype = static_cast<transformer_engine::DType>(dtype);
-  ret->amax.dptr = amax;
-  ret->scale.dptr = scale;
-  ret->scale_inv.dptr = scale_inv;
-=======
   ret->scaling_mode = scaling_mode;
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
   return ret;
 }
 void nvte_destroy_tensor(NVTETensor tensor) {

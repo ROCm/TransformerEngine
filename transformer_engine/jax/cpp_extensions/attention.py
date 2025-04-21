@@ -17,7 +17,12 @@ from jax import dtypes, lax
 from jax.interpreters import mlir
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
-from jax import ffi
+#TODO: wait for jax v0.5.0 migration
+from .misc import is_hip_extension
+if is_hip_extension():
+    from jax.extend import ffi
+else:
+    from jax import ffi
 
 from transformer_engine.jax.attention import CPStrategy, SequenceDescriptor
 
@@ -33,7 +38,6 @@ from transformer_engine.transformer_engine_jax import (
 from .base import BasePrimitive, register_primitive
 from .custom_call import custom_caller, CustomCallArgsWrapper
 from .misc import (
-    is_hip_extension,
     check_valid_batch_dims,
     jax_dtype_to_te_dtype,
     te_dtype_to_jax_dtype,

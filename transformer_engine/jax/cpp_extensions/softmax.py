@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -12,7 +14,12 @@ import jax.numpy as jnp
 from jax import dtypes
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
-from jax import ffi
+#TODO: wait for jax v0.5.0 migration
+from .misc import is_hip_extension
+if is_hip_extension():
+    from jax.extend import ffi
+else:
+    from jax import ffi
 
 from transformer_engine import transformer_engine_jax
 

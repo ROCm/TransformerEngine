@@ -896,14 +896,22 @@ __forceinline__ __device__ float warp_reduce_max_broadcast(const float val) {
   float val_tmp = val;
 #pragma unroll
   for (int offset = THREADS_PER_WARP / 2; offset > 0; offset /= 2) {
+#ifdef __HIP_PLATFORM_AMD__
+    const float val_other = __shfl_down(val_tmp, offset, THREADS_PER_WARP);
+#else
     const float val_other = __shfl_down_sync(0xFFFFFFFF, val_tmp, offset);
+#endif
     __builtin_assume(val_tmp >= 0);
     __builtin_assume(val_other >= 0);
     val_tmp = fmaxf(val_tmp, val_other);
   }
   // Broadcast the amax to other threads of the subwarp from the zero subwarp lane_id
   constexpr int subwarp_lane_zero = 0;
+#ifdef __HIP_PLATFORM_AMD__
+  val_tmp = __shfl(val_tmp, subwarp_lane_zero, THREADS_PER_WARP);
+#else
   val_tmp = __shfl_sync(0xFFFFFFFF, val_tmp, subwarp_lane_zero);
+#endif
   return val_tmp;
 }
 
@@ -937,14 +945,22 @@ __forceinline__ __device__ float subwarp_reduce_max_broadcast(const float val) {
   float val_tmp = val;
 #pragma unroll
   for (int offset = subwarp_width / 2; offset > 0; offset /= 2) {
+#ifdef __HIP_PLATFORM_AMD__
+    const float val_other = __shfl_down(val_tmp, offset, subwarp_width);
+#else
     const float val_other = __shfl_down_sync(0xFFFFFFFF, val_tmp, offset, subwarp_width);
+#endif
     __builtin_assume(val_tmp >= 0);
     __builtin_assume(val_other >= 0);
     val_tmp = fmaxf(val_tmp, val_other);
   }
   // Broadcast the amax to other threads of the subwarp from the zero subwarp lane_id
   constexpr int subwarp_lane_zero = 0;
+#ifdef __HIP_PLATFORM_AMD__
+  val_tmp = __shfl(val_tmp, subwarp_lane_zero, subwarp_width);
+#else
   val_tmp = __shfl_sync(0xFFFFFFFF, val_tmp, subwarp_lane_zero, subwarp_width);
+#endif
   return val_tmp;
 }
 
@@ -970,8 +986,13 @@ __device__ __forceinline__ void reciprocal<float>(float *value_inv, const float 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+#ifndef __HIP_PLATFORM_AMD__
 using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
+#else
+using fp8e4m3 = te_hip_fp8_e4m3;
+using fp8e5m2 = te_hip_fp8_e5m2;
+#endif //__HIP_PLATFORM_AMD__
 using e8m0_t = uint8_t;
 
 constexpr uint32_t FP32_MANTISSA_BITS = 23;
@@ -1012,6 +1033,9 @@ __device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
   if (isinf(val)) {
     return 0xFE;
   }
+#ifdef __HIP_PLATFORM_AMD__
+#define __CUDA_ARCH_HAS_FEATURE__(x) 0
+#endif //__HIP_PLATFORM_AMD__
 #if ((__CUDA_ARCH_HAS_FEATURE__(SM100_ALL)) || (__CUDA_ARCH_HAS_FEATURE__(SM101_ALL)) || \
      (__CUDA_ARCH_HAS_FEATURE__(SM120_ALL)))
   uint16_t out;

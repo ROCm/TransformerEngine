@@ -85,39 +85,7 @@ size_t product(const NVTEShape &shape, size_t begin, size_t end) {
     }
     return ret;
 }
-<<<<<<< HEAD
 
-Tensor::Tensor(const NVTEShape &shape, const DType type) {
-    size_t s = typeToSize(type);
-    size_t total_size = product(shape) * s;
-    void *dptr = nullptr;
-    cpu_data_ = nullptr;
-    amax_cpu_data_ = nullptr;
-    scale_cpu_data_ = nullptr;
-    scale_inv_cpu_data_ = nullptr;
-    float *amax = nullptr, *scale = nullptr, *scale_inv = nullptr;
-    if (total_size != 0) {
-        (void)cudaMalloc((void**)&dptr, total_size);  // NOLINT(*)
-        (void)cudaMemset(dptr, 0, total_size);
-        cpu_data_ = std::make_unique<unsigned char[]>(total_size);
-        for (size_t i = 0; i < total_size; ++i) {
-          cpu_data_[i] = 0;
-        }
-    }
-    if (isFp8Type(type)) {
-      (void)cudaMalloc((void**)&amax, sizeof(float));  // NOLINT(*)
-      (void)cudaMemset(amax, 0, sizeof(float));
-      (void)cudaMalloc((void**)&scale, sizeof(float));  // NOLINT(*)
-      (void)cudaMemset(scale, 0, sizeof(float));
-      (void)cudaMalloc((void**)&scale_inv, sizeof(float));  // NOLINT(*)
-      (void)cudaMemset(scale_inv, 0, sizeof(float));
-      amax_cpu_data_ = std::make_shared<float>();
-      *amax_cpu_data_ = 0;
-      scale_cpu_data_ = std::make_shared<float>();
-      *scale_cpu_data_ = 0;
-      scale_inv_cpu_data_ = std::make_shared<float>();
-      *scale_inv_cpu_data_ = 0;
-=======
 size_t product(const NVTEShape &shape) {
   return product(shape, 0, shape.ndim);
 }
@@ -311,7 +279,6 @@ Tensor::Tensor(const std::string& name,
         std::fill_n(columnwise_scale_inv_cpu_data_.get(), columnwise_scale_size, 0);
         tensor_.set_columnwise_scale_inv(columnwise_scale_inv, DType::kFloat8E8M0, columnwise_scale_shape);
       }
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
     }
   }
 }
@@ -319,14 +286,6 @@ Tensor::Tensor(const std::string& name,
 void Tensor::to_cpu() const {
   const NVTEShape s = tensor_.shape();
   const size_t size = product(s) * typeToSize(tensor_.dtype());
-<<<<<<< HEAD
-  (void)cudaMemcpy(cpu_data_.get(), tensor_.dptr(), size, cudaMemcpyDeviceToHost);
-  if (isFp8Type(dtype())) {
-    (void)cudaMemcpy(amax_cpu_data_.get(), tensor_.amax(), sizeof(float), cudaMemcpyDeviceToHost);
-    (void)cudaMemcpy(scale_cpu_data_.get(), tensor_.scale(), sizeof(float), cudaMemcpyDeviceToHost);
-    (void)cudaMemcpy(scale_inv_cpu_data_.get(), tensor_.scale_inv(), sizeof(float),
-                     cudaMemcpyDeviceToHost);
-=======
   if (rowwise_) {
     cudaMemcpy(cpu_data_rowwise_.get(),
                tensor_.get_rowwise_data().data_ptr,
@@ -365,21 +324,12 @@ void Tensor::to_cpu() const {
                  scale_size,
                  cudaMemcpyDeviceToHost);
     }
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
   }
 }
 
 void Tensor::from_cpu() const {
   const NVTEShape s = tensor_.shape();
   const size_t size = product(s) * typeToSize(tensor_.dtype());
-<<<<<<< HEAD
-  (void)cudaMemcpy(tensor_.dptr(), cpu_data_.get(), size, cudaMemcpyHostToDevice);
-  if (isFp8Type(dtype())) {
-    (void)cudaMemcpy(tensor_.amax(), amax_cpu_data_.get(), sizeof(float), cudaMemcpyHostToDevice);
-    (void)cudaMemcpy(tensor_.scale(), scale_cpu_data_.get(), sizeof(float), cudaMemcpyHostToDevice);
-    (void)cudaMemcpy(tensor_.scale_inv(), scale_inv_cpu_data_.get(), sizeof(float),
-                     cudaMemcpyHostToDevice);
-=======
   if (rowwise_) {
     cudaMemcpy(tensor_.get_rowwise_data().data_ptr,
                cpu_data_rowwise_.get(), size, cudaMemcpyHostToDevice);
@@ -408,7 +358,6 @@ void Tensor::from_cpu() const {
                  columnwise_scale_inv_cpu_data_.get(), scale_size,
                  cudaMemcpyHostToDevice);
     }
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
   }
 }
 
@@ -583,9 +532,14 @@ static size_t getFirstMismatchIdx(const DType data_type, const T* test_data, con
       continue;
     }
 
+#ifndef __HIP_PLATFORM_AMD__
     double t = static_cast<double>(test_data[i]);
     double r = static_cast<double>(ref_data[i]);
-
+#else
+    double t = static_cast<double>(static_cast<float>(test_data[i]));
+    double r = static_cast<double>(static_cast<float>(ref_data[i]));
+#endif
+ 
     bool mismatch = fabs(t - r) > atol && (r == 0 || fabs((t - r) / r) > rtol);
     /* For Float32 the floating point comparison is enough to error out */
     bool assertion = mismatch && (data_type == DType::kFloat32);
@@ -595,9 +549,22 @@ static size_t getFirstMismatchIdx(const DType data_type, const T* test_data, con
       const double mean = (t + r) / 2;
       const double mean_p = mean >= 0 ? mean * (1 + 1e-6) : mean * (1 - 1e-6);
       const double mean_m = mean >= 0 ? mean * (1 - 1e-6) : mean * (1 + 1e-6);
+#ifndef __HIP_PLATFORM_AMD__
       const double cast_mean_p = static_cast<double>(static_cast<T>(mean_p));
       const double cast_mean_m = static_cast<double>(static_cast<T>(mean_m));
+#else
+      const double cast_mean_p = static_cast<double>(static_cast<float>(static_cast<T>(static_cast<float>(mean_p))));
+      const double cast_mean_m = static_cast<double>(static_cast<float>(static_cast<T>(static_cast<float>(mean_m))));
+#endif
+#ifdef __HIP_PLATFORM_AMD__
+	    // Somehow, if I don't put explicit type instantiation here, std::min and std::max would
+	    // behave weirdly (returning 0). It seems that the implicit type instantiation was not
+	    // done correctly.
+	    // More strangely, this behavior could not be reproduced in a standalone reproducer...
+      assertion = !(cast_mean_m == std::min<double>(t,r) && cast_mean_p == std::max<double>(t,r));
+#else
       assertion = !(cast_mean_m == std::min(t,r) && cast_mean_p == std::max(t,r));
+#endif
     }
     if (assertion && i < first_mismatch_idx) {
       first_mismatch_idx = i;
@@ -728,22 +695,12 @@ void generate_data_uniformly(T* data, const size_t size, std::mt19937* gen) {
 }
 
 void fillUniform(Tensor *t) {
-<<<<<<< HEAD
-  const size_t size = product(t->shape());
-  static std::mt19937 gen(12345);
-  std::uniform_real_distribution<> dis(-2.0, 1.0);
-  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(t->dtype(), T, {
-      T *data = t->cpu_dptr<T>();
-      for (size_t i = 0; i < size; ++i) {
-          data[i] = T(static_cast<float>(dis(gen)));
-=======
   if (t->rowwise()) {
     const size_t size = product(t->rowwise_shape());
     TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(t->dtype(), T,
       {
         T *data = t->rowwise_cpu_dptr<T>();
         generate_data_uniformly(data, size, &(t->gen()));
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
       }
     );
   } else {

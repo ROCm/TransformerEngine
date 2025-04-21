@@ -30,14 +30,9 @@ from transformer_engine.pytorch.ops._common import is_float8_tensor
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine_torch as tex
 
-<<<<<<< HEAD
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
-# Check if FP8 is supported
-=======
-
 # Check what quantization schemes are supported
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 quantization_list: list[Optional[str]] = [None]

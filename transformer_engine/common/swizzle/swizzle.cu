@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -90,8 +92,13 @@ __global__ void swizzle_col_scaling_kernel(const void* input, void* output, cons
       threadIdx.y < k_tiles_in_tb) {
 #pragma unroll
     for (int i = 0; i < N_SF_PER_TD_PER_TILE; i++) {
+#ifndef __HIP_PLATFORM_AMD__
       regs_vec[i] = __ldg(reinterpret_cast<const LType*>(
           input_i32 + (threadIdx.y * SF_TILE_DIM_K_I32 + i) * M_i32 + threadIdx.x * N_TILE_PER_TD));
+#else
+      regs_vec[i] = *(reinterpret_cast<const LType*>(
+          input_i32 + (threadIdx.y * SF_TILE_DIM_K_I32 + i) * M_i32 + threadIdx.x * N_TILE_PER_TD));
+#endif
     }
 
     // local shuffle
@@ -170,8 +177,13 @@ __global__ void swizzle_row_scaling_kernel(const void* input, void* output, cons
   if (threadIdx.x * N_TILE_PER_TD < n_tiles_in_tb) {
 #pragma unroll
     for (int i = 0; i < N_SF_PER_TD_PER_TILE; i++) {
+#ifndef __HIP_PLATFORM_AMD__
       regs_vec[i] = __ldg(reinterpret_cast<const LType*>(
           input_i32 + (i * TB_DIM + threadIdx.y) * K_i32 + threadIdx.x * N_TILE_PER_TD));
+#else
+      regs_vec[i] = *(reinterpret_cast<const LType*>(
+          input_i32 + (i * TB_DIM + threadIdx.y) * K_i32 + threadIdx.x * N_TILE_PER_TD));
+#endif
     }
 
     // shuffle regs
@@ -254,22 +266,28 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
       int slm_size = n_tiles_in_tb * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t);
       switch (vec_load_size) {
         case 4:
+#ifndef __HIP_PLATFORM_AMD__
           cudaFuncSetAttribute(swizzle_row_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
                                cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size);
+#endif
           swizzle_row_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
               <<<num_blocks, block_size, slm_size, stream>>>(input->scale_inv.dptr,
                                                              output->scale_inv.dptr, m, k);
           break;
         case 2:
+#ifndef __HIP_PLATFORM_AMD__
           cudaFuncSetAttribute(swizzle_row_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
                                cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size);
+#endif
           swizzle_row_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
               <<<num_blocks, block_size, slm_size, stream>>>(input->scale_inv.dptr,
                                                              output->scale_inv.dptr, m, k);
           break;
         case 1:
+#ifndef __HIP_PLATFORM_AMD__
           cudaFuncSetAttribute(swizzle_row_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
                                cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size);
+#endif
           swizzle_row_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
               <<<num_blocks, block_size, slm_size, stream>>>(input->scale_inv.dptr,
                                                              output->scale_inv.dptr, m, k);
@@ -287,22 +305,28 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
       int slm_size = n_tiles_in_tb * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t);
       switch (vec_load_size) {
         case 4:
+#ifndef __HIP_PLATFORM_AMD__
           cudaFuncSetAttribute(swizzle_col_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
                                cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size);
+#endif
           swizzle_col_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
               <<<num_blocks, block_size, slm_size, stream>>>(
                   input->columnwise_scale_inv.dptr, output->columnwise_scale_inv.dptr, m, k);
           break;
         case 2:
+#ifndef __HIP_PLATFORM_AMD__
           cudaFuncSetAttribute(swizzle_col_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
                                cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size);
+#endif
           swizzle_col_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
               <<<num_blocks, block_size, slm_size, stream>>>(
                   input->columnwise_scale_inv.dptr, output->columnwise_scale_inv.dptr, m, k);
           break;
         case 1:
+#ifndef __HIP_PLATFORM_AMD__
           cudaFuncSetAttribute(swizzle_col_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
                                cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size);
+#endif
           swizzle_col_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
               <<<num_blocks, block_size, slm_size, stream>>>(
                   input->columnwise_scale_inv.dptr, output->columnwise_scale_inv.dptr, m, k);

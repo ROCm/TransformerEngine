@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -16,11 +18,13 @@ from .forward_linear_bias_add import (
     ForwardLinearBiasAdd,
     fuse_forward_linear_bias_add,
 )
-from .userbuffers_backward_linear import (
-    UserbuffersBackwardLinear,
-    fuse_userbuffers_backward_linear,
-)
-from .userbuffers_forward_linear import (
-    UserbuffersForwardLinear,
-    fuse_userbuffers_forward_linear,
-)
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+if not IS_HIP_EXTENSION:
+    from .userbuffers_backward_linear import (
+        UserbuffersBackwardLinear,
+        fuse_userbuffers_backward_linear,
+    )
+    from .userbuffers_forward_linear import (
+        UserbuffersForwardLinear,
+        fuse_userbuffers_forward_linear,
+    )

@@ -49,17 +49,15 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
 
   NVTE_Norm_Backend norm_backend;
   bool is_aligned = true;
-<<<<<<< HEAD
 #ifndef __HIP_PLATFORM_AMD__
-  if (use_cudnn_norm_fwd()) {
-=======
   bool cudnn_backend = use_cudnn_norm_fwd() || is_block_scaling(z->scaling_mode);
+#endif
 
   bool training =
       is_delayed_tensor_scaling(z->scaling_mode) || (z->columnwise_data).dptr != nullptr;
 
+#ifndef __HIP_PLATFORM_AMD__
   if (cudnn_backend) {
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
     // TODO: add check for GPU ARCH
     norm_backend = NVTE_Norm_Backend::Cudnn;
   } else

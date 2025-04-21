@@ -103,9 +103,7 @@ int sm_count(int device_id) {
   return cache[device_id];
 }
 
-<<<<<<< HEAD
 #ifndef __HIP_PLATFORM_AMD__
-=======
 void stream_priority_range(int *low_priority, int *high_priority, int device_id) {
   static std::vector<std::pair<int, int>> cache(num_devices());
   static std::vector<std::once_flag> flags(num_devices());
@@ -126,7 +124,6 @@ void stream_priority_range(int *low_priority, int *high_priority, int device_id)
   *high_priority = cache[device_id].second;
 }
 
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
 bool supports_multicast(int device_id) {
 #if CUDART_VERSION >= 12010
   // NOTE: This needs to be guarded at compile time because the

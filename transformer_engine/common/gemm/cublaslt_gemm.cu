@@ -21,7 +21,11 @@
 #include "../common.h"
 #include "../util/vectorized_pointwise.h"
 #include "../util/logging.h"
+#ifndef __HIP_PLATFORM_AMD__
 #include "common/util/cuda_runtime.h"
+#else
+#include "../util/cuda_runtime.h"
+#endif // #ifndef __HIP_PLATFORM_AMD__
 
 #ifndef __HIP_PLATFORM_AMD__
 namespace {
@@ -53,8 +57,6 @@ uint32_t _getAlignment(uintptr_t address) {
     }
   }
 }
-<<<<<<< HEAD
-=======
 
 struct GemmParam {
   void *A;
@@ -145,7 +147,6 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
   return ret;
 }
 
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
 }  // namespace
 #endif // __HIP_PLATFORM_AMD__
 

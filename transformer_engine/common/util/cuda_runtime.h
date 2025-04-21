@@ -50,9 +50,7 @@ const std::string &sm_arch_name(int device_id = -1);
  */
 int sm_count(int device_id = -1);
 
-<<<<<<< HEAD
 #ifndef __HIP_PLATFORM_AMD__
-=======
 /* \brief Minimum and maximum stream priorities supported on device
  *
  * \param[in] device_id CUDA device (default is current device)
@@ -63,7 +61,6 @@ int sm_count(int device_id = -1);
  */
 void stream_priority_range(int *low_priority, int *high_priority, int device_id = -1);
 
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
 /* \brief CUDA Multicast support status for device
  *
  * \param[in] device_id CUDA device (default is current device)

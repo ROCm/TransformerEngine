@@ -9,12 +9,8 @@
 import os
 from typing import Any, List, Optional, Tuple, Union, Callable
 from dataclasses import dataclass
-<<<<<<< HEAD
-import os
-=======
 from functools import reduce
 from operator import mul as multiply_op
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
 
 import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
@@ -28,29 +24,14 @@ from ..tensor.mxfp8_tensor import MXFP8Quantizer
 _use_cudnn_mxfp8_norm = bool(int(os.getenv("NVTE_CUDNN_MXFP8_NORM", "0")))
 
 if IS_HIP_EXTENSION:
-    from ..triton_kernels.rmsnorm_triton import te_rmsnorm_fwd_noalloc_triton, te_rmsnorm_fwd_inf_triton, te_rmsnorm_bwd_triton
+    from ..triton_kernels.rmsnorm_triton import te_rmsnorm_bwd_triton
 
-<<<<<<< HEAD
-def _get_normalization_func(
-    normalization: str, fp8_output: bool, is_grad_enabled: bool, forward: bool
-):
-    use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
-    fwd_normalization_funcs = {
-        ("LayerNorm", True, True): tex.layernorm_fwd_fp8,
-        ("LayerNorm", True, False): tex.layernorm_fwd_fp8_inf,
-        ("LayerNorm", False, True): tex.layernorm_fwd_noalloc,
-        ("LayerNorm", False, False): tex.layernorm_fwd_inf,
-        ("RMSNorm", True, True): tex.rmsnorm_fwd_fp8,
-        ("RMSNorm", True, False): tex.rmsnorm_fwd_fp8_inf,
-        ("RMSNorm", False, True): te_rmsnorm_fwd_noalloc_triton if use_rmsnorm_triton else tex.rmsnorm_fwd_noalloc,
-        ("RMSNorm", False, False): te_rmsnorm_fwd_inf_triton if use_rmsnorm_triton else tex.rmsnorm_fwd_inf,
-=======
 def _get_normalization_func(normalization: str, forward: bool):
     fwd_normalization_funcs = {
         "LayerNorm": tex.layernorm_fwd,
         "RMSNorm": tex.rmsnorm_fwd,
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
     }
+    use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
     bwd_normalization_funcs = {
         "LayerNorm": tex.layernorm_bwd,
         "RMSNorm": te_rmsnorm_bwd_triton if use_rmsnorm_triton else tex.rmsnorm_bwd,

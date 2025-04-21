@@ -379,41 +379,14 @@ TEST_P(NormTestSuite, TestNorm) {
 }
 
 INSTANTIATE_TEST_SUITE_P(
-<<<<<<< HEAD
-    OperatorTest,
-    NormTestSuite,
-    ::testing::Combine(
-#ifdef __HIP_PLATFORM_AMD__
-        ::testing::Values(false), //ROCm does not support cudnn
-#else
-        ::testing::Values(false), //TODO: enabling tests for cudnn backend
-#endif
-        ::testing::Values(NormType::LayerNorm, NormType::RMSNorm),
-        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
-        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16, DType::kFloat8E4M3),
-        ::testing::ValuesIn(test_cases),
-        ::testing::Values(false, true)),
-    [](const testing::TestParamInfo<NormTestSuite::ParamType>& info) {
-#ifdef __HIP_PLATFORM_AMD__
-    auto backend = "";
-#else
-    auto backend = std::get<0>(info.param) == false ? "Te" : "Cudnn";
-#endif
-std::string name =
-  backend +
-  normToString.at(std::get<1>(info.param)) + "_" +
-  test::typeName(std::get<2>(info.param)) + "X" +
-  test::typeName(std::get<3>(info.param)) + "X" +
-  std::to_string(std::get<4>(info.param).first) + "X" +
-  std::to_string(std::get<4>(info.param).second) + "X" +
-  std::to_string(std::get<5>(info.param));
-      return name;
-    });
-=======
   OperatorTest,
   NormTestSuite,
   ::testing::Combine(
+#ifdef __HIP_PLATFORM_AMD__
+    ::testing::Values(false),
+#else
     ::testing::Values(true, false),
+#endif
     ::testing::Values(NormType::LayerNorm, NormType::RMSNorm),
     ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
     ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16, DType::kFloat8E4M3),
@@ -431,4 +404,3 @@ std::string name =
       std::to_string(std::get<5>(info.param));
     return name;
   });
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae

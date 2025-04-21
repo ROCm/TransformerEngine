@@ -10,14 +10,9 @@
 
 #include <memory>
 #include <vector>
-<<<<<<< HEAD
-=======
 #include <array>
 #include <random>
 
-#include <cuda_bf16.h>
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
-#include <cuda_fp16.h>
 #ifndef USE_ROCM
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
@@ -65,15 +60,12 @@ using fp16 = half;
 using bf16 = nv_bfloat16;
 using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
-<<<<<<< HEAD
 #else
 using bf16 = hip_bfloat16;
 using fp8e4m3 = te_hip_fp8_e4m3;
 using fp8e5m2 = te_hip_fp8_e5m2;
 #endif //USE_ROCM
-=======
 using fp8e8m0 = uint8_t;
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
 
 template <typename T>
 struct TypeInfo{
@@ -140,10 +132,6 @@ class Tensor {
   Tensor& operator=(Tensor &&other) = default;
 
   ~Tensor() {
-<<<<<<< HEAD
-    if (tensor_.dptr() != nullptr) {
-      (void)cudaFree(tensor_.dptr());
-=======
     void *data_ptr = tensor_.dptr();
     void *scale_inv = tensor_.scale_inv();
     void *columnwise_data_ptr = tensor_.get_columnwise_data().data_ptr;
@@ -165,7 +153,6 @@ class Tensor {
     }
     if (columnwise_scale_inv != nullptr){
       cudaFree(columnwise_scale_inv);
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
     }
   }
 

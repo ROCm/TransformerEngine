@@ -813,20 +813,14 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
             if p.requires_grad:
                 param_grads.append(p.grad.clone())
 
-        cpu_rng_state = torch.get_rng_state()
-        cuda_rng_state = torch.cuda.get_rng_state()
+        global _cpu_rng_state, _cuda_rng_state
+        _cpu_rng_state = torch.get_rng_state()
+        _cuda_rng_state = torch.cuda.get_rng_state()
 
         del block
         block = _test_e2e_checkpointing_get_model(config, dtype)
-<<<<<<< HEAD
-        block.load_state_dict(torch.load(path))
-
-        torch.set_rng_state(cpu_rng_state)
-        torch.cuda.set_rng_state(cuda_rng_state)
-=======
         block.load_state_dict(torch.load(path, weights_only=False))
         reset_rng_states()
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
 
         for p in block.parameters():
             if p.requires_grad:
@@ -1936,14 +1930,9 @@ def test_gpt_fp8_parameters(dtype, bs, model, recipe):
 
     config = model_configs[model]
 
-<<<<<<< HEAD
-    outputs = _test_gpt_fp8_parameters(bs, dtype, config, False)
-    outputs_fp8_params = _test_gpt_fp8_parameters(bs, dtype, config, True)
-=======
     outputs = _test_gpt_fp8_parameters(bs, dtype, config, False, recipe)
     outputs_fp8_params = _test_gpt_fp8_parameters(bs, dtype, config, True, recipe)
 
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
     # Check that results match
     tols = dict(rtol=0.125, atol=0.0675)
 

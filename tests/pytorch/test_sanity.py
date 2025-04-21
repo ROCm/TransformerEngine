@@ -11,11 +11,7 @@ from contextlib import nullcontext
 
 import torch
 import pytest
-<<<<<<< HEAD
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
-import io
-=======
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
 import os
 
 from transformer_engine.pytorch.fp8 import (

@@ -772,28 +772,9 @@ class TestBasicOps:
         out_shape = in_shape[:-1] + [out_features]
 
         # Skip invalid configurations
-<<<<<<< HEAD
-        if fp8_compute or fp8_input or fp8_weight or fp8_output or fp8_grad_output:
-            if not fp8_available:
-                pytest.skip(reason_for_no_fp8)
-            if torch.device(device).type != "cuda":
-                pytest.skip("FP8 is only supported on CUDA devices")
-        if fp8_compute:
-            if (
-                math.prod(in_shape[:-1]) % 16 != 0
-                or in_features % 16 != 0
-                or out_features % 16 != 0
-            ):
-                pytest.skip("FP8 GEMMs require dims that are divisible by 16")
-        if ( IS_HIP_EXTENSION and not use_hipblaslt() and
-            accumulate_into_main_grad and dtype != torch.float32 and not fp8_compute):
-            pytest.skip("Parameters combination is not supported by ROCBLAS")
-        if fp8_output and not fp8_compute:
-=======
         maybe_skip_quantization(quantization, dims=in_shape, device=device)
         maybe_skip_quantization(quantization, dims=out_shape)
         if quantization == "fp8" and quantized_output and not quantized_compute:
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
             pytest.skip("FP8 output is only supported with FP8 GEMMs")
         if quantization == "fp8" and quantized_grad_input and not quantized_compute:
             pytest.skip("FP8 grad input is only supported with FP8 GEMMs")

@@ -111,16 +111,16 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
   DType dtype = TypeInfo<D_Type>::dtype;
 
   // pytorch tensor storage is row-major while cublas/rocblas is column-major
-  Tensor A({ k, m }, atype);
-  Tensor B({ n, k }, btype);
-  Tensor D({ n, m }, dtype);
+  Tensor A("A", { k, m }, atype);
+  Tensor B("B", { n, k }, btype);
+  Tensor D("D", { n, m }, dtype);
   Tensor bias;
   if(use_bias){
-    bias = Tensor({m}, bias_type);
+    bias = Tensor("bias", {m}, bias_type);
   }
   Tensor pre_gelu_out;
   if(use_gelu){
-    pre_gelu_out = Tensor({ n, m }, gelu_type);
+    pre_gelu_out = Tensor("pre_gelu_out", { n, m }, gelu_type);
   }
   
   //initialize the data and scale inv of A, B
@@ -149,7 +149,7 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
   }
 #endif
 
-  Tensor Workspace({ 33554432 }, DType::kByte);
+  Tensor Workspace("Workspace", { 33554432 }, DType::kByte);
 
   //perform the gemm in GPU
   nvte_cublas_gemm(A.data(),
@@ -180,11 +180,11 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
   }
   float ref_amax_d;
   compute_ref<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(
-    A.cpu_dptr<A_Type>(), 
-    B.cpu_dptr<B_Type>(), 
-    A.scale_inv(),
-    B.scale_inv(),
-    use_bias? bias.cpu_dptr<Bias_Type>(): nullptr,
+    A.rowwise_cpu_dptr<A_Type>(), 
+    B.rowwise_cpu_dptr<B_Type>(), 
+    A.rowwise_scale_inv(),
+    B.rowwise_scale_inv(),
+    use_bias? bias.rowwise_cpu_dptr<Bias_Type>(): nullptr,
     D.scale(),
     m, k, n,
     ref_D.get(),
@@ -206,7 +206,7 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
   if (dtype == DType::kFloat32) {
     atol = 1e-5;
   }
-  compareResults("D", D, ref_D.get(), atol, rtol);
+  compareResults("D", D, ref_D.get(), true, atol, rtol);
 
   if(use_gelu){
     auto [atol, rtol] = getTolerances(gelu_type);
@@ -214,7 +214,7 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
     if (dtype == DType::kFloat32) {
       atol = 5e-6;
     }
-    compareResults("gelu", pre_gelu_out, ref_pre_gelu_out.get(), atol, rtol);
+    compareResults("gelu", pre_gelu_out, ref_pre_gelu_out.get(), true, atol, rtol);
   }
 }
 

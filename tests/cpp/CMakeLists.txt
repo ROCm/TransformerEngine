@@ -6,7 +6,6 @@
 
 cmake_minimum_required(VERSION 3.18)
 
-<<<<<<< HEAD
 option(USE_ROCM "Use ROCm" ON)
 set(USE_CUDA OFF)
 
@@ -25,13 +24,6 @@ else()
     message("Using NVIDIA Platform")
   else()
     message(FATAL_ERROR "Could not find NVCC at '$ENV{CUDA_HOME}/bin/nvcc'")
-=======
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
-    set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90 100 120)
-  else ()
-    set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90)
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
   endif()
 endif()
 
@@ -48,7 +40,11 @@ if(USE_ROCM)
   endif()
 else()
   if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES 70 80 90)
+    if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
+      set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90 100 120)
+    else ()
+      set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90)
+    endif()
   endif()
 endif()
 
@@ -57,8 +53,6 @@ set(message_line
 message("${message_line}")
 message(STATUS "USE_CUDA ${USE_CUDA}")
 message(STATUS "USE_ROCM ${USE_ROCM}")
-
-
 
 if(USE_CUDA)
   set(CMAKE_CXX_STANDARD 17)

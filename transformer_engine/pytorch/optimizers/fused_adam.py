@@ -12,11 +12,7 @@ import torch
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
 from .multi_tensor_apply import multi_tensor_applier
-<<<<<<< HEAD
-from ..float8_tensor import Float8Tensor
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
-=======
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
 
 
 def get_fp8_meta(fp8_tensor):

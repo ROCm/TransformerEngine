@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -12,7 +14,9 @@
 #define TRANSFORMER_ENGINE_CAST_GATED_KERNELS_CUH_
 
 #include <cuda.h>
+#ifndef __HIP_PLATFORM_AMD__
 #include <cudaTypedefs.h>
+#endif //#ifndef __HIP_PLATFORM_AMD__
 #include <cuda_runtime.h>
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
@@ -52,6 +56,7 @@ static_assert(ITERATIONS >= 1);
 
 __device__ inline float sigmoidf(const float x) { return __frcp_rn(1.0f + __expf(-x)); }
 
+#ifndef __HIP_PLATFORM_AMD__
 template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &), typename IType, typename OType>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
@@ -920,6 +925,7 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
       );                                        // NOLINT(*)
   );                                            // NOLINT(*)
 }
+#endif //#ifndef __HIP_PLATFORM_AMD__
 
 template <typename ParamOP, float (*ActOP)(float, const ParamOP &)>
 void cast_gated(const Tensor &input, Tensor *output, cudaStream_t stream) {
@@ -1030,17 +1036,22 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
     NVTE_CHECK(output->flat_last_dim() == output_cols, "Wrong dimension of the output.");
   }
 
+#ifndef __HIP_PLATFORM_AMD__
   const bool use_tma_kernels = is_fp8_rowwise_output && is_fp8_colwise_output && cols % 32 == 0;
+#endif //#ifndef __HIP_PLATFORM_AMD__
 
   if (is_delayed_tensor_scaling(output->scaling_mode)) {
+#ifndef __HIP_PLATFORM_AMD__
     if (use_tma_kernels) {
       cast_fp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
     } else {
+#endif //#ifndef __HIP_PLATFORM_AMD__
       if constexpr (IS_DGATED) {
         cast_dgated<ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
       } else {
         cast_gated<ParamOP, ActOP>(gated_input, output, stream);
       }
+#ifndef __HIP_PLATFORM_AMD__
     }
   } else if (is_mxfp_scaling(output->scaling_mode)) {
     if (use_tma_kernels) {
@@ -1049,6 +1060,7 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
       NVTE_ERROR("Invalid input shape. Expected the last dimension to be divisible ",
                  "by 32, got input of shape ", gated_input.data.shape);
     }
+#endif //#ifndef __HIP_PLATFORM_AMD__
   } else {
     NVTE_ERROR("Not supported scaling mode");
   }

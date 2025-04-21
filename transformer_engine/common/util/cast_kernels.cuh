@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -12,7 +14,9 @@
 #define TRANSFORMER_ENGINE_CAST_KERNELS_CUH_
 
 #include <cuda.h>
+#ifndef __HIP_PLATFORM_AMD__
 #include <cudaTypedefs.h>
+#endif //#ifndef __HIP_PLATFORM_AMD__
 #include <cuda_runtime.h>
 #include <transformer_engine/cast.h>
 
@@ -54,6 +58,7 @@ constexpr size_t MXFP8_BUFF_STAGES_NUM =
 constexpr size_t MXFP8_ITERATIONS = MXFP8_CHUNK_DIM_Y / MXFP8_BUFFER_DIM_Y;  //   2 = 64 / 32
 static_assert(MXFP8_ITERATIONS >= MXFP8_PREFETCH_BUFFERS_NUM);
 
+#ifndef __HIP_PLATFORM_AMD__
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, size_t SCALE_DIM_Y,
           size_t SCALE_DIM_X>
@@ -1017,6 +1022,7 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
       );               // NOLINT(*)
   );                   // NOLINT(*)
 }
+#endif //#ifndef __HIP_PLATFORM_AMD__
 
 namespace detail {
 
@@ -1034,10 +1040,25 @@ __device__ inline float dequantize_func(float value, const DequantizeParam &para
 
 }  // namespace detail
 
+/* HIPCC has strict rules for __device__ functions usage on host.
+   It forbids not only calling but also other ODR-use assigning to variables
+   https://github.com/llvm/llvm-project/issues/105825
+   Use templated struct wrapper to work around
+ */
+template<typename ComputeType, typename ParamOP, ComputeType (*OP)(ComputeType, const ParamOP &)>
+struct ActivationType
+{
+    static constexpr auto op = OP;
+};
+
 template <typename ParamOP, float (*OP)(float, const ParamOP &)>
 void CastVectorizedUnaryKernelLauncher(const Tensor &input, const Tensor *noop, Tensor *output,
                                        cudaStream_t stream) {
+#ifdef __HIP_PLATFORM_AMD__
+  constexpr float (*UnaryOP)(float, const ParamOP &) = (ActivationType<float, ParamOP, OP>::op == nullptr) ? ActivationType<float, ParamOP, detail::identity>::op : ActivationType<float, ParamOP, OP>::op;
+#else //#ifdef __HIP_PLATFORM_AMD__
   constexpr float (*UnaryOP)(float, const ParamOP &) = (OP == nullptr) ? detail::identity : OP;
+#endif //#ifdef __HIP_PLATFORM_AMD__
   const size_t N = product(input.data.shape);
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.data.dtype, IType,
@@ -1062,7 +1083,11 @@ void CastVectorizedUnaryKernelLauncher(const Tensor &input, const Tensor *noop, 
 template <typename ParamOP, float (*OP)(float, const ParamOP &)>
 void CastVectorizedUnaryGradKernelLauncher(const Tensor &grad, const Tensor *input, Tensor *output,
                                            cudaStream_t stream) {
+#ifdef __HIP_PLATFORM_AMD__
+  constexpr float (*UnaryOP)(float, const ParamOP &) = (ActivationType<float, ParamOP, OP>::op == nullptr) ? ActivationType<float, ParamOP, detail::identity>::op : ActivationType<float, ParamOP, OP>::op;
+#else //#ifdef __HIP_PLATFORM_AMD__
   constexpr float (*UnaryOP)(float, const ParamOP &) = (OP == nullptr) ? detail::identity : OP;
+#endif //#ifdef __HIP_PLATFORM_AMD__
   const size_t N = product(input->data.shape);
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input->data.dtype, IType,
@@ -1086,6 +1111,7 @@ void CastVectorizedUnaryGradKernelLauncher(const Tensor &grad, const Tensor *inp
 
 namespace {
 
+#ifndef __HIP_PLATFORM_AMD__
 static bool is_full_tile_1D_tensor(const Tensor *const t) {
   const size_t N = product(t->data.shape);
   const bool isFullTile = (N % ELEMS_PER_BLOCK == 0);
@@ -1098,9 +1124,11 @@ bool dimensions_supported_by_TMA(const Tensor *const t) {
   const int alignment_requirement = TMA_bytes / typeToSize(t->dtype());
   return cols % alignment_requirement == 0;
 }
+#endif //#ifndef __HIP_PLATFORM_AMD__
 
 }  // namespace
 
+#ifndef __HIP_PLATFORM_AMD__
 // Supported by the Arch >= 10.0
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
@@ -1141,6 +1169,7 @@ void fp8_quantize_arch_ge_100(const Tensor &input, const Tensor *act_input, cons
       NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
   }
 }
+#endif //#ifndef __HIP_PLATFORM_AMD__
 
 // Supported by the Arch < 10.0
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
@@ -1181,15 +1210,19 @@ void fp8_quantize(const Tensor &input, const Tensor *act_input, const Tensor *no
   NVTE_CHECK(!is_fp8_dtype(input.dtype()), "Input must be in higher precision.");
   NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
 
+#ifndef __HIP_PLATFORM_AMD__
   // Supported by the Arch >= 10.0
   if (is_supported_by_CC_100()) {
     fp8_quantize_arch_ge_100<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
                                                                      dbias, workspace, stream);
   } else {
+#endif //#ifndef __HIP_PLATFORM_AMD__
     // Supported by the Arch < 10.0
     fp8_quantize_arch_l_100<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
                                                                     dbias, workspace, stream);
+#ifndef __HIP_PLATFORM_AMD__
   }
+#endif //#ifndef __HIP_PLATFORM_AMD__
 }
 
 namespace detail {
@@ -1234,12 +1267,14 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, const NVTETe
       }
       break;
     }
+#ifndef __HIP_PLATFORM_AMD__
     case NVTE_MXFP8_1D_SCALING: {
       mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
           *input_tensor, activation_input_tensor, &noop_tensor, output_tensor, dbias_tensor,
           workspace_tensor, stream);
       break;
     }
+#endif //#ifndef __HIP_PLATFORM_AMD__
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(output_tensor->scaling_mode) + ".");
   }

@@ -15,11 +15,8 @@ from distributed_test_base import (
     generate_context_parallel_configs,
     generate_collectives_count,
 )
-<<<<<<< HEAD
-from transformer_engine.jax import fp8_autocast, is_hip_extension
-=======
+from transformer_engine.jax import is_hip_extension
 from test_fused_attn import FusedAttnRunner, BiasShape, SeqDescFormat
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
 from transformer_engine.jax.attention import (
     is_fused_attn_kernel_available,
     AttnBiasType,
@@ -30,12 +27,6 @@ from transformer_engine.jax.attention import (
     inverse_reorder_causal_load_balancing,
     CPStrategy,
 )
-<<<<<<< HEAD
-from transformer_engine.jax.sharding import MeshResource
-import pytest
-import os
-=======
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
 
 
 DTYPES = [jnp.bfloat16]

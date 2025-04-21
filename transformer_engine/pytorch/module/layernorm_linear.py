@@ -14,13 +14,9 @@ from operator import mul as multiply_op
 import torch
 from torch.nn import init
 
-<<<<<<< HEAD
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
-from .. import cpp_extensions as tex
-=======
 import transformer_engine_torch as tex
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
 
 from .base import (
     get_workspace,

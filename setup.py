@@ -45,7 +45,8 @@ elif "jax" in frameworks:
 
 
 CMakeBuildExtension = get_build_ext(BuildExtension)
-archs = cuda_archs()
+if not rocm_build():
+    archs = cuda_archs()
 
 
 class TimedBdist(bdist_wheel):
@@ -60,22 +61,6 @@ class TimedBdist(bdist_wheel):
 
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library"""
-<<<<<<< HEAD
-=======
-    cmake_flags = ["-DCMAKE_CUDA_ARCHITECTURES={}".format(archs)]
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
-    if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
-        assert (
-            os.getenv("MPI_HOME") is not None
-        ), "MPI_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
-        cmake_flags.append("-DNVTE_UB_WITH_MPI=ON")
-
-    if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
-        cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
-
-    # Project directory root
-    root_path = Path(__file__).resolve().parent
-
     cmake_flags = []
     if rocm_build():
         cmake_flags.append("-DUSE_ROCM=ON")
@@ -95,8 +80,20 @@ def setup_common_extension() -> CMakeExtension:
         if int(os.getenv("NVTE_FUSED_ATTN_CK", "1"))==0 or int(os.getenv("NVTE_FUSED_ATTN", "1"))==0:
             cmake_flags.append("-DUSE_FUSED_ATTN_CK=OFF")
     else:
-        cmake_flags=["-DCMAKE_CUDA_ARCHITECTURES={}".format(cuda_archs())]
+        cmake_flags = ["-DCMAKE_CUDA_ARCHITECTURES={}".format(archs)]
+        if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
+            assert (
+                os.getenv("MPI_HOME") is not None
+            ), "MPI_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
+            cmake_flags.append("-DNVTE_UB_WITH_MPI=ON")
+
+        if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
+            cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
+
         cmake_flags.append("-DUSE_ROCM=OFF")
+
+    # Project directory root
+    root_path = Path(__file__).resolve().parent
 
     return CMakeExtension(
         name="transformer_engine",

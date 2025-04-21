@@ -320,35 +320,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::call_guard<py::gil_scoped_release>(), py::arg("buffer_shape"),
            py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"), py::arg("comm_type"),
            py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS, py::arg("comm_cga_size") = 1,
-<<<<<<< HEAD
-           py::arg("num_comm_sm") = 1, py::arg("set_sm_margin") = false,
-           py::arg("atomic_gemm") = false, py::arg("use_ce") = true, py::arg("aggregate") = false)
-      .def("split_overlap_ag_p2p", &CommOverlapP2P::split_overlap_ag,
-           py::call_guard<py::gil_scoped_release>())
-      .def("split_overlap_rs_p2p", &CommOverlapP2P::split_overlap_rs,
-           py::call_guard<py::gil_scoped_release>())
-      .def("atomic_gemm_overlap_ag_p2p", &CommOverlapP2P::atomic_gemm_overlap_ag,
-           py::call_guard<py::gil_scoped_release>())
-      .def("atomic_gemm_overlap_rs_p2p", &CommOverlapP2P::atomic_gemm_overlap_rs,
-           py::call_guard<py::gil_scoped_release>())
-      .def("copy_input_to_ubuf", &CommOverlapP2P::copy_input_to_ubuf,
-           py::call_guard<py::gil_scoped_release>())
-      .def("get_ubuf_output", &CommOverlapP2P::get_ubuf_output,
-           py::call_guard<py::gil_scoped_release>())
-      .def("set_ubuf_scale_inv", &CommOverlapP2P::set_ubuf_scale_inv,
-           py::call_guard<py::gil_scoped_release>())
-      .def("is_fp8_ubuf", &CommOverlapP2P::is_fp8_ubuf, py::call_guard<py::gil_scoped_release>())
-      .def("is_atomic_gemm", &CommOverlapP2P::is_atomic_gemm,
-           py::call_guard<py::gil_scoped_release>())
-      .def("is_p2p_overlap", &CommOverlapP2P::is_p2p_overlap,
-           py::call_guard<py::gil_scoped_release>());
-#else
-      m.def("CommOverlapHelper", &placeholder, "Dummy function for python side annotations");
-      m.def("CommOverlap", &placeholder, "Dummy function for python side annotations");
-      m.def("CommOverlapP2P", &placeholder, "Dummy function for python side annotations");
-      m.def("CommOverlapAlgo", &placeholder, "Dummy function for python side annotations");
-#endif //USE_ROCM
-=======
            py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0, py::arg("num_comm_sm") = 1,
            py::arg("set_sm_margin") = false, py::arg("atomic_gemm") = false,
            py::arg("use_ce") = true, py::arg("aggregate") = false)
@@ -357,5 +328,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("quantizer"),
            py::arg("local_chunk") = false, py::arg("shape") = std::nullopt)
       .def("set_buffer_params", &CommOverlapP2P::set_buffer_params);
->>>>>>> af7b2b44dd6173c9b3049f306c0773a938feceae
+#else
+  m.def("CommOverlapHelper", &placeholder, "Dummy function for python side annotations");
+  m.def("CommOverlap", &placeholder, "Dummy function for python side annotations");
+  m.def("CommOverlapP2P", &placeholder, "Dummy function for python side annotations");
+#endif //USE_ROCM
 }
