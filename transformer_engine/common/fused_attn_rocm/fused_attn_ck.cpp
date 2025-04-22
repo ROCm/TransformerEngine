@@ -82,10 +82,10 @@ bool is_ck_backend_supported(
 
   const int device_id = cuda::current_device();
   const int gpu_arch = cuda::sm_arch(device_id);
-  //only gfx942 and gfx950 supported
+  //only gfx94x and gfx95x supported
   if(gpu_arch != 94 && gpu_arch != 95){
     if(nvte_log_ck_config){
-      std::cout<<"only GFX 9.4 and 9.5 are supported"<<std::endl;
+      std::cout<<"Only gfx94x and gfx95x are supported"<<std::endl;
     }
     return false;
   }

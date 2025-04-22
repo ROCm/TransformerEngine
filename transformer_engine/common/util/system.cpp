@@ -84,3 +84,13 @@ extern "C" bool nvte_is_rocm_build() {
   return false;
 #endif
 }
+
+#ifdef USE_ROCM
+extern "C" bool nvte_uses_fp8_fnuz() 
+{
+#if HIP_VERSION >= 60300000
+  return te_fp8_fnuz();
+#endif
+  return true; // default to true for older versions that only support
+}
+#endif

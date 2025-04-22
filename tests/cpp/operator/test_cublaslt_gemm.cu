@@ -142,10 +142,16 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
   (void)cudaGetDeviceProperties(&prop, 0);
 
 #ifdef __HIP_PLATFORM_AMD__
-  if ((isFp8Type(atype) || isFp8Type(btype)) && 
-    !(prop.major == 9 && prop.minor >= 4))
+  if (isFp8Type(atype) || isFp8Type(btype))
   {
-    GTEST_SKIP() << "FP8 is not supported on this HW";
+    bool fp8_supported = (prop.major == 9 && prop.minor >= 4);
+    if (fp8_supported && prop.minor >= 5) {
+      fp8_supported = (std::getenv("NVTE_USE_ROCBLAS") == nullptr) ||
+                      (std::getenv("NVTE_USE_HIPBLASLT") != nullptr);
+    }
+    if (!fp8_supported) {
+      GTEST_SKIP() << "FP8 is not supported in current config";
+    }
   }
 #endif
 

@@ -44,7 +44,7 @@ def _check_fp8_support(gpu_id) -> Tuple[bool, str]:
         if gpu_arch in [94, 95]:
             return True, ""
         else:
-            return False, "GFX 9.4 or 9.5 required for FP8 execution."
+            return False, "Device arch gfx94x or gfx95x required for FP8 execution."
     if gpu_arch >= 90:  # hopper and above
         return True, ""
     if gpu_arch < 89:  # pre-ada

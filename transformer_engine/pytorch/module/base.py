@@ -41,6 +41,7 @@ from ..cpp_extensions import (
 )
 from ..constants import dist_group_type
 from ..float8_tensor import Float8Tensor
+from ..utils import get_device_compute_capability
 
 __all__ = ["initialize_ub", "destroy_ub"]
 
@@ -55,9 +56,13 @@ layers_atomic_ring_exchange = []
 
 
 def get_cublas_workspace_size_bytes() -> None:
-    """Return 76 MiB for AMD GPU, 32 MiB if using hopper, 4 MiB for all other architectures."""
+    """Return workspace size needed for current architecture"""
     if IS_HIP_EXTENSION:
-        return 79_691_776
+        """Return 64 MiB for gfx50x, 32 MiB for all other architectures."""
+        if get_device_compute_capability() == (9, 5):
+            return 67_108_864
+        return 33_554_432        
+    """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
     if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
         return 33_554_432
     return 4_194_304
