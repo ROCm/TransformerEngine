@@ -160,7 +160,7 @@ def _layernorm_bwd_dx_fused_triton(
             c1 = 0.0
             c2 = 0.0
 
-            for block_idx in tl.range(0, num_col_blocks, num_stages=2):
+            for block_idx in tl.range(0, num_col_blocks):
                 cols = block_idx * BLOCK_SIZE_N + col_offsets
 
                 x = tl.load(x_row_ptr + cols).to(tl.float32)
@@ -199,7 +199,7 @@ def _layernorm_bwd_dx_fused_triton(
             dw_row_ptr = DW + pid * N
             db_row_ptr = DB + pid * N
 
-            for block_idx in tl.range(0, num_col_blocks, num_stages=2):
+            for block_idx in tl.range(0, num_col_blocks):
                 cols = block_idx * BLOCK_SIZE_N + col_offsets
 
                 x = tl.load(x_row_ptr + cols).to(tl.float32)
@@ -264,19 +264,15 @@ def _layernorm_bwd_dx_fused_triton(
         dw_row = tl.zeros((BLOCK_SIZE_N,), dtype=tl.float32)
         db_row = tl.zeros((BLOCK_SIZE_N,), dtype=tl.float32)
 
-        for _ in tl.range(0, rows_per_tile, num_stages=2):
+        for _ in range(0, rows_per_tile):
             # Compute pointers:
             x_ptrs = X + row * stride
             dy_ptrs = DY + row * stride
             dx_ptrs = DX + row * stride
 
             # Load data to SRAM:
-            x = tl.load(x_ptrs + cols, mask=mask, other=0, cache_modifier=".cg").to(
-                tl.float32
-            )
-            dy = tl.load(dy_ptrs + cols, mask=mask, other=0, cache_modifier=".cg").to(
-                tl.float32
-            )
+            x = tl.load(x_ptrs + cols, mask=mask, other=0).to(tl.float32)
+            dy = tl.load(dy_ptrs + cols, mask=mask, other=0).to(tl.float32)
             w = tl.load(W + cols, mask=mask, other=0).to(tl.float32)
             mean = tl.load(Mean + row)
             rstd = tl.load(Rstd + row)
@@ -323,12 +319,12 @@ def _layernorm_bwd_dwdb_triton(
     dw = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     db = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     # Iterate through the rows of DW and DB to sum the partial sums.
-    for i in tl.range(0, M, BLOCK_SIZE_M, num_stages=2):
+    for i in range(0, M, BLOCK_SIZE_M):
         rows = i + tl.arange(0, BLOCK_SIZE_M)
         mask = (rows[:, None] < M) & (cols[None, :] < N)
         offs = rows[:, None] * N + cols[None, :]
-        dw += tl.load(DW + offs, mask=mask, other=0.0, cache_modifier=".cg")
-        db += tl.load(DB + offs, mask=mask, other=0.0, cache_modifier=".cg")
+        dw += tl.load(DW + offs, mask=mask, other=0.0)
+        db += tl.load(DB + offs, mask=mask, other=0.0)
     # Write the final sum to the output.
     sum_dw = tl.sum(dw, axis=0)
     sum_db = tl.sum(db, axis=0)
@@ -418,8 +414,8 @@ def te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, zero_centered_gamma):
         dbeta,
         min(tile_num, M),
         N,
-        BLOCK_SIZE_M=32,  # 128 in rmsnorm
-        BLOCK_SIZE_N=128,  # 64 in rmsnorm
+        BLOCK_SIZE_M=32,
+        BLOCK_SIZE_N=128,
     )
 
     return dx, dgamma, dbeta
