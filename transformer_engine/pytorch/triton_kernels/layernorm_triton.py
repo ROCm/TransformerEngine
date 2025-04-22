@@ -160,7 +160,7 @@ def _layernorm_bwd_dx_fused_triton(
             c1 = 0.0
             c2 = 0.0
 
-            for block_idx in tl.range(0, num_col_blocks):
+            for block_idx in tl.range(0, num_col_blocks, num_stages=2):
                 cols = block_idx * BLOCK_SIZE_N + col_offsets
 
                 x = tl.load(x_row_ptr + cols).to(tl.float32)
@@ -199,7 +199,7 @@ def _layernorm_bwd_dx_fused_triton(
             dw_row_ptr = DW + pid * N
             db_row_ptr = DB + pid * N
 
-            for block_idx in tl.range(0, num_col_blocks):
+            for block_idx in tl.range(0, num_col_blocks, num_stages=2):
                 cols = block_idx * BLOCK_SIZE_N + col_offsets
 
                 x = tl.load(x_row_ptr + cols).to(tl.float32)
@@ -264,7 +264,7 @@ def _layernorm_bwd_dx_fused_triton(
         dw_row = tl.zeros((BLOCK_SIZE_N,), dtype=tl.float32)
         db_row = tl.zeros((BLOCK_SIZE_N,), dtype=tl.float32)
 
-        for _ in range(0, rows_per_tile):
+        for _ in tl.range(0, rows_per_tile, num_stages=2):
             # Compute pointers:
             x_ptrs = X + row * stride
             dy_ptrs = DY + row * stride
@@ -323,7 +323,7 @@ def _layernorm_bwd_dwdb_triton(
     dw = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     db = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     # Iterate through the rows of DW and DB to sum the partial sums.
-    for i in range(0, M, BLOCK_SIZE_M):
+    for i in tl.range(0, M, BLOCK_SIZE_M, num_stages=2):
         rows = i + tl.arange(0, BLOCK_SIZE_M)
         mask = (rows[:, None] < M) & (cols[None, :] < N)
         offs = rows[:, None] * N + cols[None, :]
