@@ -418,8 +418,8 @@ def te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, zero_centered_gamma):
         dbeta,
         min(tile_num, M),
         N,
-        BLOCK_SIZE_M=32,
-        BLOCK_SIZE_N=128,
+        BLOCK_SIZE_M=32,  # 128 in rmsnorm
+        BLOCK_SIZE_N=128,  # 64 in rmsnorm
     )
 
     return dx, dgamma, dbeta
