@@ -12,11 +12,12 @@ import torch
 import triton
 import triton.language as tl
 
+from transformer_engine.pytorch.utils import is_fp8_fnuz
 from transformer_engine_torch import DType as TE_DType
 
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
-if IS_HIP_EXTENSION:
+if is_fp8_fnuz():
     e5m2_data_type = tl.float8e5b16
     e4m3_data_type = tl.float8e4b8
 else:
