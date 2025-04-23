@@ -12,7 +12,6 @@ import math
 import os
 from typing import Optional
 
-from ...triton_kernels.rmsnorm_triton import te_rmsnorm_fwd_triton
 import torch
 
 from transformer_engine_torch import rmsnorm_bwd, rmsnorm_fwd
@@ -21,6 +20,9 @@ from ...cpp_extensions import (
     rmsnorm_fwd_fp8_inf,
     rmsnorm_fwd_inf,
 )
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+if IS_HIP_EXTENSION:
+  from ...triton_kernels.rmsnorm_triton import te_rmsnorm_bwd_triton, te_rmsnorm_fwd_triton, te_rmsnorm_fwd_inf_triton
 from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
 from ...tensor import Float8Tensor, QuantizedTensor
 from ...utils import (
@@ -31,7 +33,6 @@ from ...utils import (
 )
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_autocast_dtype, reshape
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 class RMSNorm(BasicOperation):
     r"""Root Mean Square Layer Normalization
@@ -211,10 +212,8 @@ class RMSNorm(BasicOperation):
         rstdevs = None
         sm_margin = self._sm_margins["forward" if requires_grad else "inference"]
 
-        use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) )
-
         #Need to change this when triton has fp8 support
-        if not IS_HIP_EXTENSION and with_fp8_output:
+        if with_fp8_output:
             fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(forward=True)
             fp8_dtype = get_fp8_te_dtype(output_fp8_meta["recipe"], fprop_tensor=True)
             args = (
@@ -240,6 +239,7 @@ class RMSNorm(BasicOperation):
                 dtype=dtype,
             )
         else:
+            use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
             args = (
                 x,
                 w,
@@ -248,19 +248,11 @@ class RMSNorm(BasicOperation):
                 self.zero_centered_gamma,
             )
             if requires_grad:
-                if use_rmsnorm_triton:
-                    y, rstdevs = te_rmsnorm_fwd_triton(
-                    x, w, self.eps, self.zero_centered_gamma
-                    )
-                else:
-                    y, rstdevs = rmsnorm_fwd(*args)
+                rmsnorm_fwd_func = te_rmsnorm_fwd_triton if use_rmsnorm_triton else rmsnorm_fwd
+                y, rstdevs = rmsnorm_fwd_func(*args)
             else:
-                if use_rmsnorm_triton:
-                    y = te_rmsnorm_fwd_inf_triton(
-                    x, w, self.eps, self.zero_centered_gamma
-                )
-                else:
-                    y = rmsnorm_fwd_inf(*args)
+                rmsnorm_fwd_func = te_rmsnorm_fwd_inf_triton if use_rmsnorm_triton else rmsnorm_fwd_inf
+                y = rmsnorm_fwd_func(*args)
 
         # Save state for backward pass
         if requires_grad:
@@ -297,7 +289,10 @@ class RMSNorm(BasicOperation):
             dy = dy.dequantize()
 
         # Compute RMSNorm backward pass
-        dx, dw = rmsnorm_bwd(
+        use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
+        rmsnorm_bwd_func = te_rmsnorm_bwd_triton if use_rmsnorm_triton else rmsnorm_bwd
+        
+        dx, dw = rmsnorm_bwd_func(
             dy,
             x,
             rstdevs,
