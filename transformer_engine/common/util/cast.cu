@@ -41,7 +41,7 @@ void fp8_quantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.data.dtype, IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-          output->data.dtype, OType, constexpr int nvec = 32 / sizeof(IType);
+          output->data.dtype, OType, constexpr int nvec = 64 / sizeof(IType);
           VectorizedUnaryKernelLauncher<nvec, detail::Empty, detail::identity>(
               reinterpret_cast<const IType *>(input.data.dptr),
               reinterpret_cast<OType *>(output->data.dptr),
@@ -63,7 +63,7 @@ void fp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
   TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
       input.data.dtype, IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
-          output->data.dtype, OType, constexpr int nvec = 32 / sizeof(OType);
+          output->data.dtype, OType, constexpr int nvec = 64 / sizeof(OType);
           detail::DequantizeParam p;
           p.scale_inv = reinterpret_cast<const fp32 *>(input.scale_inv.dptr);
           VectorizedUnaryKernelLauncher<nvec, detail::DequantizeParam, detail::dequantize_func>(
