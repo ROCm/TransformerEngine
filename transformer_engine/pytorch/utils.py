@@ -244,20 +244,26 @@ def assert_dim_for_fp8_exec(tensor: torch.Tensor) -> None:
     )
 
 if IS_HIP_EXTENSION:
+    @functools.lru_cache(maxsize=None)
     def is_mi200():
       """check whether this machine is mi200/210/250"""
       import re
       return (re.search('AMD Instinct MI2.0', torch.cuda.get_device_name(torch.cuda.current_device())) is not None)
     
+    @functools.lru_cache(maxsize=None)
     def is_mi308():
       """check whether this machine is mi308"""
       import re
       return (re.search('AMD Instinct MI308', torch.cuda.get_device_name(torch.cuda.current_device())) is not None)
 
+@functools.lru_cache(maxsize=None)
+def is_fp8_fnuz():
+    return IS_HIP_EXTENSION and get_device_compute_capability() == (9, 4)
+
 def is_bf16_compatible() -> None:
     if IS_HIP_EXTENSION:
-        # only MI200 and MI300 machines support bf16
-        if get_device_compute_capability() == (9, 4) or is_mi200():
+        # only MI200 and newer machines support bf16
+        if get_device_compute_capability() in [(9, 4), (9, 5)] or is_mi200():
             return True
         else:
             return False
