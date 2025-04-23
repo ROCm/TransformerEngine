@@ -1,0 +1,181 @@
+From ad97d7b5ac31a0596be92feb8dbca94e33d76765 Mon Sep 17 00:00:00 2001
+From: Bruno Mazzotti <bruno.mazzotti@amd.com>
+Date: Tue, 8 Apr 2025 20:22:36 +0000
+Subject: [PATCH] [HACK] disable autotuner and create standalone kernel runner
+
+* disable autotuner to facilitate profiling
+* create standalone kernel runner to facilitate profiling
+* select default waves_per_eu and num_warps in kernel runner
+
+DO NOT MERGE!
+---
+ .../triton_kernels/test_layernorm_triton.py   | 111 ++++++++++++++++++
+ .../triton_kernels/layernorm_triton.py        |  19 ++-
+ 2 files changed, 126 insertions(+), 4 deletions(-)
+
+diff --git a/tests/pytorch/triton_kernels/test_layernorm_triton.py b/tests/pytorch/triton_kernels/test_layernorm_triton.py
+index 7576b521..53de9914 100644
+--- a/tests/pytorch/triton_kernels/test_layernorm_triton.py
++++ b/tests/pytorch/triton_kernels/test_layernorm_triton.py
+@@ -177,3 +177,114 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
+         rtol_bwd,
+         lambda msg: f"dbeta does not match triton <-> hip\n\n{msg}\n",
+     )
++
++
++if __name__ == "__main__":
++    import sys
++
++    in_dtype = out_dtype = torch.float16
++    zero_centered_gamma = True
++    run_triton = sys.argv[1] == "triton"
++    run_hipified = sys.argv[1] == "te"
++    M = int(sys.argv[2])
++    N = int(sys.argv[3])
++    run_bwd = sys.argv[4] == "bwd"
++    mode = "forward only" if not run_bwd else "forward + backward"
++
++    # Parse waves_per_eu and num_warps:
++    waves_per_eu = None
++    if run_triton:
++        try:
++            waves_per_eu = int(sys.argv[5])
++        except IndexError:
++            pass
++    num_warps = None
++    if run_triton:
++        try:
++            num_warps = int(sys.argv[6])
++        except IndexError:
++            pass
++
++    # Generate tensors:
++    x = fill_uniform((M, N), in_dtype)
++    gamma = fill_uniform(N, in_dtype)
++    beta = fill_uniform(N, in_dtype)
++    if run_bwd:
++        dz = fill_uniform((M, N), in_dtype)
++
++    epsilon = 1e-5
++
++    if run_triton:
++        print(f"Running {mode} Triton implementation for shape {(M, N)}...")
++        # Select waves_per_eu and num_warps.
++        try:
++            best_waves_per_eu, best_num_warps = {
++                (2048, 12288): (1, 8),
++                (768, 1024): (4, 8),
++                (256, 65536): (2, 16),
++                (128, 6144): (4, 4),
++                (64, 2304): (4, 16),
++                (229, 541): (2, 16),
++                (71, 3571): (1, 16),
++                (29, 17389): (2, 16),
++                (76800, 1600): (4, 4),
++            }[(M, N)]
++        except KeyError:
++            best_waves_per_eu, best_num_warps = 2, 8
++        if waves_per_eu is None:
++            waves_per_eu = best_waves_per_eu
++        if num_warps is None:
++            num_warps = best_num_warps
++        # Run Triton forward.
++        y_triton = torch.empty((M, N), dtype=out_dtype, device="cuda")
++        y_triton, mu_triton, rsigma_triton = te_layernorm_fwd_fp8_noalloc_triton(
++            x,
++            gamma,
++            beta,
++            epsilon,
++            y_triton,
++            out_dtype,
++            zero_centered_gamma,
++            waves_per_eu=waves_per_eu,
++            num_warps=num_warps,
++        )
++        if run_bwd:
++            # Run Triton backward.
++            dx_triton, dgamma_triton, dbeta_triton = te_layernorm_bwd_triton(
++                dz,
++                x,
++                mu_triton,
++                rsigma_triton,
++                gamma,
++                zero_centered_gamma,
++            )
++
++    if run_hipified:
++        print(f"Running {mode} TE implementation for shape {(M, N)}...")
++        # Run Hipified forward reference.
++        scale = amax = scale_inv = torch.empty(0, device="cuda")
++        y_hipified = torch.empty((M, N), dtype=out_dtype, device="cuda")
++        y_hipified, mu_hipified, rsigma_hipified = tex.layernorm_fwd_fp8_noalloc(
++            x,
++            gamma,
++            beta,
++            epsilon,
++            scale,
++            y_hipified,
++            amax,
++            scale_inv,
++            get_te_dtype(out_dtype),
++            get_fwd_ln_sm_margin(),
++            zero_centered_gamma,
++        )
++        if run_bwd:
++            # Run Hipified backward reference.
++            dx_hipified, dgamma_hipified, dbeta_hipified = tex.layernorm_bwd(
++                dz,
++                x,
++                mu_hipified,
++                rsigma_hipified,
++                gamma,
++                get_bwd_ln_sm_margin(),
++                zero_centered_gamma,
++            )
+diff --git a/transformer_engine/pytorch/triton_kernels/layernorm_triton.py b/transformer_engine/pytorch/triton_kernels/layernorm_triton.py
+index 2680342f..5800f56f 100644
+--- a/transformer_engine/pytorch/triton_kernels/layernorm_triton.py
++++ b/transformer_engine/pytorch/triton_kernels/layernorm_triton.py
+@@ -22,9 +22,9 @@ def get_autotune_config(full_tuning_space=False):
+     ]
+ 
+ 
+-@triton.autotune(
+-    configs=get_autotune_config(), key=["n_rows", "n_cols"], use_cuda_graph=True
+-)
++# @triton.autotune(
++#     configs=get_autotune_config(), key=["n_rows", "n_cols"], use_cuda_graph=True
++# )
+ @triton.jit
+ def _layernorm_fwd_triton(
+     x_ptr,
+@@ -334,7 +334,15 @@ def _layernorm_bwd_dwdb_triton(
+ 
+ # TODO: Implement persistent kernel in forward and add `sm_margin` to the interface.
+ def te_layernorm_fwd_fp8_noalloc_triton(
+-    x, gamma, beta, eps, y, out_dtype, zero_centered_gamma
++    x,
++    gamma,
++    beta,
++    eps,
++    y,
++    out_dtype,
++    zero_centered_gamma,
++    waves_per_eu=2,
++    num_warps=8,
+ ):
+     M, N = x.shape
+     y = y.view(out_dtype)
+@@ -356,6 +364,9 @@ def te_layernorm_fwd_fp8_noalloc_triton(
+         eps,
+         ZERO_CENTERED_GAMMA=zero_centered_gamma,
+         BLOCK_SIZE=BLOCK_SIZE,
++        num_stages=1,
++        waves_per_eu=waves_per_eu,  # 1 2 4
++        num_warps=num_warps,  # 4 8 16
+     )
+ 
+     return y, mu, rsigma
+-- 
+2.34.1
+
