@@ -8,7 +8,7 @@ import torch
 import transformer_engine_torch as tex
 
 
-__all__ = ["gelu", "relu", "reglu", "geglu", "swiglu", "qgelu", "srelu"]
+__all__ = ["gelu", "relu", "reglu", "geglu", "swiglu", "dswiglu", "qgelu", "srelu"]
 
 
 def gelu(
@@ -138,6 +138,19 @@ def swiglu(
         amax_history,
         scale_inv,
         fp8_tensor,
+        otype,
+    )
+
+
+def dswiglu(
+    grad: torch.Tensor,
+    inp: torch.Tensor,
+    otype: tex.DType,
+) -> torch.Tensor:
+    """dSwiGLU with FP8 output"""
+    return torch.ops.tex_ts.dswiglu_ts(
+        grad,
+        inp,
         otype,
     )
 
