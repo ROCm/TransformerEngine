@@ -92,7 +92,6 @@ bool is_aotriton_backend_supported(
 
   return true;
 #else
-  NVTE_ERROR("AOTriton backend not compiled.");
   return false;
 #endif // USE_FUSED_ATTN_AOTRITON
 }

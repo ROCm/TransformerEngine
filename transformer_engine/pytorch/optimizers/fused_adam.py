@@ -5,7 +5,27 @@
 """Fused Adam optimizer."""
 import torch
 import transformer_engine_torch as tex
+from transformer_engine.pytorch.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch.utils import is_fp8_fnuz
 from .multi_tensor_apply import multi_tensor_applier
+from ..float8_tensor import Float8Tensor
+
+
+def get_fp8_meta(fp8_tensor):
+    """FP8 metadata getter."""
+    if fp8_tensor._fp8_meta is None:
+        raise RuntimeError("FP8 meta data is not initialized.")
+
+    fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
+        forward=fp8_tensor._fp8_meta_forward,
+    )
+
+    fp8_meta_index = fp8_tensor._fp8_meta_index
+    scale = fp8_tensor._fp8_meta[fp8_meta_key].scale[fp8_meta_index]
+    amax = fp8_tensor._fp8_meta[fp8_meta_key].amax_history[0][fp8_meta_index]
+    scale_inv = fp8_tensor._scale_inv
+    return scale, amax, scale_inv
 
 
 class FusedAdam(torch.optim.Optimizer):
@@ -125,6 +145,27 @@ class FusedAdam(torch.optim.Optimizer):
         self.multi_tensor_adam = tex.multi_tensor_adam
         self.multi_tensor_adam_capturable = tex.multi_tensor_adam_capturable
         self.multi_tensor_adam_capturable_master = tex.multi_tensor_adam_capturable_master
+
+        self.master_weight_dtype = master_weight_dtype
+        self.exp_avg_dtype = exp_avg_dtype
+        self.exp_avg_sq_dtype = exp_avg_sq_dtype
+        self.name_to_dtype_map = {
+            "exp_avg": self.exp_avg_dtype,
+            "exp_avg_sq": self.exp_avg_sq_dtype,
+            "master_param": self.master_weight_dtype,
+        }
+        self.dtype_to_range_map = {
+            torch.float16: torch.full(
+                [1], torch.finfo(torch.float16).max / 2.0, dtype=torch.float32
+            ),
+            torch.uint8: torch.full([1], 240.0 if is_fp8_fnuz() else 448.0, dtype=torch.float32),
+        }
+        self._scales = {}
+        self.use_decoupled_grad = use_decoupled_grad
+        # Works only when master params is in FP32
+        self.store_param_remainders = (
+            store_param_remainders and master_weights and master_weight_dtype == torch.float32
+        )
 
     def zero_grad(self):
         if self.set_grad_none:

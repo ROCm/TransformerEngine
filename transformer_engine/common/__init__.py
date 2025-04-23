@@ -100,8 +100,17 @@ def _load_nvrtc():
         return ctypes.CDLL(sos[0], mode=ctypes.RTLD_GLOBAL)
     return ctypes.CDLL(f"libnvrtc.{_get_sys_extension()}", mode=ctypes.RTLD_GLOBAL)
 
+te_rocm_build = False
+te_uses_fp8_fnuz = False
 
 if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
     #_CUDNN_LIB_CTYPES = _load_cudnn()
     #_NVRTC_LIB_CTYPES = _load_nvrtc()
     _TE_LIB_CTYPES = _load_library()
+    try:
+        te_rocm_build = _TE_LIB_CTYPES.nvte_is_rocm_build()
+    except AttributeError:
+        # If the function is not available, we assume it's not a ROCm build
+        te_rocm_build = False
+    if te_rocm_build:
+        te_uses_fp8_fnuz = _TE_LIB_CTYPES.nvte_uses_fp8_fnuz()

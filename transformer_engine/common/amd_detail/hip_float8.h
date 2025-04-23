@@ -7,6 +7,7 @@
 // FP8 header version 0.3, 2021/05/11
 
 #include <hip/hip_runtime.h>
+#include <hip/hip_version.h> //For RTC it should be included explicitly
 
 #define HIP_HOST_DEVICE __host__ __device__
 #define HIP_DEVICE  __device__

@@ -45,8 +45,42 @@ bool is_ck_backend_supported(
     return false;
   }
 
-  //swa filter
-  if(attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK || attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK){
+  // filter based on data type
+  // Q and KV must have the same data type, in fp16 or bf16
+  if((q_dtype!=kv_dtype) || !((q_dtype==NVTEDType::kNVTEFloat16) || (q_dtype == NVTEDType::kNVTEBFloat16))){
+    if(nvte_log_ck_config){
+      std::cout<<"q, k, v data type has to be fp16 or bf16"<<std::endl;
+    }
+    return false;
+  }
+
+  // filter based on bias type
+  // CK does not support pre_scale bias
+  if(!(bias_type == NVTE_Bias_Type::NVTE_NO_BIAS || bias_type == NVTE_Bias_Type::NVTE_ALIBI || bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS)){
+    if(nvte_log_ck_config){
+      std::cout<<"CK fused attn does not support pre_scale bias"<<std::endl;
+    }
+    return false;
+  }
+
+  const int device_id = cuda::current_device();
+  const int gpu_arch = cuda::sm_arch(device_id);
+  //only gfx94x and gfx95x supported
+  if(gpu_arch != 94 && gpu_arch != 95){
+    if(nvte_log_ck_config){
+      std::cout<<"Only gfx94x and gfx95x are supported"<<std::endl;
+    }
+    return false;
+  }
+
+  // joint filters
+
+  // joint filter based on sliding window and attn_mask
+  bool is_causal = (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+                    attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK||
+                    attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK||
+                    attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
+  if(is_causal){
     // causal mask window must be with causal top left or causal bottom right mask type
     if (!((window_size_left ==-1 || window_size_left >=0) && window_size_right ==0 )){
       if(nvte_log_ck_config){
@@ -134,7 +168,6 @@ bool is_ck_backend_supported(
   
   return true;
 #else
-  NVTE_ERROR("CK fused attn backend not compiled.");
   return false;
 #endif // USE_FUSED_ATTN_CK
 }

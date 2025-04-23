@@ -19,8 +19,8 @@ if [ $rc -ne 0 ]; then
 fi
 
 echo ===== Run non GEMM tests =====
-ctest --test-dir build -j4 -E "OperatorTest/GEMMTestSuite"
-test $? -eq 0 || test_run_error
+ctest --test-dir build -j4 --output-on-failure -E "OperatorTest/GEMMTestSuite"
+test $? -eq 0 || test_run_error "non-GEMM"
 
 for _gemm in hipblaslt rocblas; do
     configure_gemm_env $_gemm || continue
@@ -29,8 +29,8 @@ for _gemm in hipblaslt rocblas; do
         _exclude="-E Test(.*bf16/.*X.X1|.*fp8.*fp16/.*X1X0|.*fp8.*X.X1|.*fp8/|.*bf8/)"
     fi
     echo  ===== Run GEMM $_gemm tests =====
-    ctest --test-dir build -j4 -R "OperatorTest/GEMMTestSuite" $_exclude
-    test $? -eq 0 || test_run_error
+    ctest --test-dir build -j4 --output-on-failure -R "OperatorTest/GEMMTestSuite" $_exclude
+    test $? -eq 0 || test_run_error "GEMM $_gemm"
 done
 
 return_run_results

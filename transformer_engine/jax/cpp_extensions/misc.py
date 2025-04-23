@@ -15,8 +15,9 @@ from jax.interpreters.mlir import dtype_to_ir_type
 
 from transformer_engine.transformer_engine_jax import DType as TEDType
 
+from ..fp8 import jnp_float8_e4m3_type, jnp_float8_e5m2_type
 from ..sharding import get_padded_spec as te_get_padded_spec
-from ..util import is_hip_extension, jnp_float8_e4m3_type, jnp_float8_e5m2_type
+from ..util import is_hip_extension
 
 
 def te_dtype_to_jax_dtype(te_dtype):

@@ -11,24 +11,35 @@ from collections import deque
 from typing import Callable, List, Optional, Dict, Any, Tuple, Union
 
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import DelayedScaling, Format
 
 from .constants import dist_group_type
-from .utils import get_device_compute_capability
+from .utils import get_device_compute_capability, is_fp8_fnuz
 from .jit import jit_fuser
 
 
-__all__ = ["fp8_autocast", "fp8_model_init"]
+__all__ = ["fp8_autocast", "fp8_model_init", "torch_float8_e4m3_type", "torch_float8_e5m2_type"]
+
+
+torch_float8_e4m3_type = torch.float8_e4m3fnuz if is_fp8_fnuz() else torch.float8_e4m3fn
+torch_float8_e5m2_type = torch.float8_e5m2fnuz if is_fp8_fnuz() else torch.float8_e5m2
 
 
 def check_fp8_support() -> Tuple[bool, str]:
-    from torch.utils.cpp_extension import IS_HIP_EXTENSION
     if IS_HIP_EXTENSION:
-        if get_device_compute_capability() == (9, 4):
+        gpu_arch = get_device_compute_capability()
+        if gpu_arch == (9, 4):
             return True, ""
+        elif gpu_arch == (9, 5):
+            if (os.getenv("NVTE_USE_HIPBLASLT") is not None
+                or os.getenv("NVTE_USE_ROCBLAS") is None):
+                return True, ""
+            else:
+                return False, "Using HipBlasLt is required on gfx95x for FP8 execution."
         else:
-            return False, "Only MI300 machines support fp8"
+            return False, "Device arch gfx94x or gfx95x required for FP8 execution."
     else:
         """Return if fp8 support is available"""
         if get_device_compute_capability() >= (9, 0):  # hopper and above
@@ -44,6 +55,15 @@ def check_fp8_support() -> Tuple[bool, str]:
 def get_default_fp8_recipe() -> DelayedScaling:
     """FP8 recipe with default args."""
     return DelayedScaling()
+
+
+def get_fp8_torch_dtype(fp8_recipe: DelayedScaling, fprop_tensor: bool = True) -> torch.dtype:
+    """Get fp8 data type according to recipe and tensor"""
+    if fp8_recipe.fp8_format == Format.E4M3 or (
+        fp8_recipe.fp8_format == Format.HYBRID and fprop_tensor
+    ):
+        return torch_float8_e4m3_type
+    return torch_float8_e5m2_type
 
 
 def get_fp8_te_dtype(fp8_recipe: DelayedScaling, fprop_tensor: bool = True) -> tex.DType:
