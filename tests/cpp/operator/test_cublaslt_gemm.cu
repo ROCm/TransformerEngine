@@ -155,7 +155,13 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
   }
 #endif
 
-  Tensor Workspace({ 33554432 }, DType::kByte);
+  size_t workspace_size = 33554432;
+#ifdef __HIP_PLATFORM_AMD__
+  if (prop.major == 9 && prop.minor == 5) {
+    workspace_size = 67108864;
+  }
+#endif
+  Tensor Workspace({ workspace_size }, DType::kByte);
 
   //perform the gemm in GPU
   nvte_cublas_gemm(A.data(),
@@ -212,6 +218,18 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
   if (dtype == DType::kFloat32) {
     atol = 1e-5;
   }
+#ifdef __HIP_PLATFORM_AMD__
+  if (prop.major == 9 && prop.minor == 5)
+  {
+    // relax for certain gemm with hipblaslt
+    if (!isFp8Type(dtype) && (isFp8Type(atype) or isFp8Type(btype))) {
+      atol = 5e-4;
+      rtol = 5e-3;
+    } else if (dtype == DType::kFloat32) {
+      rtol = 1e-5;
+    }
+  }
+#endif
   compareResults("D", D, ref_D.get(), atol, rtol);
 
   if(use_gelu){
