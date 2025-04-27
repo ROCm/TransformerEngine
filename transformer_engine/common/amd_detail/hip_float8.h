@@ -79,6 +79,7 @@ static inline bool te_fp8_fnuz() { return false; }
 #else //HIP_VERSION >= 60300000
 typedef __hip_fp8_e4m3_fnuz _te_hip_fp8_e4m3;
 typedef __hip_fp8_e5m2_fnuz _te_hip_fp8_e5m2;
+static inline bool te_fp8_fnuz() { return true; }
 #endif //HIP_VERSION >= 60300000
 
 struct te_hip_fp8_e4m3 {  
