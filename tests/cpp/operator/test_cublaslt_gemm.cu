@@ -76,14 +76,18 @@ void compute_ref(
   size_t m, size_t k, size_t n,
   D_Type* ref_d_data,
   float* ref_d_amax,
-  Gelu_Type* ref_gelu_data){
+  Gelu_Type* ref_gelu_data,
+  bool transa,
+  bool transb){
 
   *ref_d_amax = 0;
   for(size_t ii = 0; ii < m; ii++){
     for(size_t jj = 0; jj < n; jj++){
       float val = 0;
       for(size_t kk = 0; kk < k; kk++){
-        val += a_scale_inv*b_scale_inv*((float)a_data[ii + kk*m])*((float)b_data[kk + jj*k]);
+        float a_val = transa ? (float)a_data[kk + ii*k] : (float)a_data[ii + kk*m];
+        float b_val = transb ? (float)b_data[jj + kk*n] : (float)b_data[kk + jj*k];
+        val += a_scale_inv*a_val*b_scale_inv*b_val;
       }
       if(bias_data){
         val += (float)bias_data[ii];
@@ -103,16 +107,28 @@ void compute_ref(
 }
 
 template <typename A_Type, typename B_Type, typename Bias_Type, typename Gelu_Type, typename D_Type>
-void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, const size_t n) {
+void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, const size_t n, bool transa = false, bool transb = false) {
   DType atype = TypeInfo<A_Type>::dtype;
   DType btype = TypeInfo<B_Type>::dtype;
   DType bias_type = TypeInfo<Bias_Type>::dtype;
   DType gelu_type = TypeInfo<Gelu_Type>::dtype;
   DType dtype = TypeInfo<D_Type>::dtype;
-
+  
   // pytorch tensor storage is row-major while cublas/rocblas is column-major
-  Tensor A({ k, m }, atype);
-  Tensor B({ n, k }, btype);
+  Tensor A;
+  if (transa){
+    A = Tensor({ m, k }, atype);
+  }
+  else {
+    A = Tensor({ k, m }, atype);
+  }
+  Tensor B;
+  if (transb){
+    B = Tensor({ k, n }, btype);
+  }
+  else {
+    B = Tensor({ n, k }, btype);
+  }
   Tensor D({ n, m }, dtype);
   Tensor bias;
   if(use_bias){
@@ -133,8 +149,7 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
   if(isFp8Type(dtype)){
     setRandomScale(&D);
   }
-  bool transa = false;
-  bool transb = false;
+
   bool grad = false;
   bool accumulate = false;
 
@@ -189,7 +204,9 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
     m, k, n,
     ref_D.get(),
     &ref_amax_d,
-    use_gelu? ref_pre_gelu_out.get(): nullptr);
+    use_gelu? ref_pre_gelu_out.get(): nullptr,
+    transa,
+    transb);
   // check if error message happens in running                             
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
@@ -221,7 +238,28 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
 using fp32=float;
 using fp8=fp8e4m3;
 using bf8=fp8e5m2;
- 
+
+TEST_P(GEMMTestSuite, Testfp8xfp8xfp16xfp16xfp8) {
+  using namespace transformer_engine;
+  using namespace test;
+
+  const size_t m = std::get<0>(std::get<0>(GetParam()));
+  const size_t k = std::get<1>(std::get<0>(GetParam()));
+  const size_t n = std::get<2>(std::get<0>(GetParam()));
+  const bool use_bias = std::get<1>(GetParam());
+  const bool use_gelu = std::get<2>(GetParam());
+  bool transa = true;
+  bool transb = false;
+
+  using A_Type = fp8;
+  using B_Type = fp8;
+  using Bias_Type = fp16;
+  using Gelu_Type = fp16;
+  using D_Type = fp8;
+
+  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n, transa, transb);
+}
+
 TEST_P(GEMMTestSuite, Testfp32xfp32xfp32xfp32xfp32) {
   using namespace transformer_engine;
   using namespace test;
