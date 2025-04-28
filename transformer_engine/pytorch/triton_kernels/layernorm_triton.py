@@ -146,8 +146,29 @@ def _layernorm_fwd_triton(
         tl.store(y_ptr_start + col_offsets, y_block.to(y_ptr.type.element_ty), mask=mask)
 
     if APPLY_SCALE:
-        tl.atomic_max(amax_ptr, amax, sem="relaxed")
-        #tl.store(amax_ptr, amax)
+        #tl.atomic_max(amax_ptr, amax, sem="relaxed")
+        tl.store(amax_ptr+pid, amax)
+
+
+@triton.jit
+def _layernorm_fwd_reduce_triton(
+    amax_input_ptr,
+    amax_output_ptr,
+    n_rows,
+    BLOCK_SIZE: tl.constexpr,
+):
+
+    # program id
+    pid = tl.program_id(0)
+
+    amax_offs = tl.arange(0, BLOCK_SIZE) + (pid * BLOCK_SIZE)
+    amax_input_ptrs = amax_input_ptr + amax_offs
+    amax_mask = amax_offs < n_rows
+    _amax = tl.load(amax_input_ptrs, mask=amax_mask, other=0.0)
+
+    amax = tl.max(_amax, axis=-1)
+
+    tl.atomic_max(amax_output_ptr, amax, sem="relaxed")
 
 
 @triton.jit
@@ -385,9 +406,11 @@ def te_layernorm_fwd_fp8_noalloc_triton(
     y = y.view(out_dtype)
     mu = torch.empty((M,), dtype=torch.float32, device=x.device)
     rsigma = torch.empty((M,), dtype=torch.float32, device=x.device)
+    amax_temp = torch.empty((M,), dtype=torch.float32, device=x.device)
 
     BLOCK_SIZE = block_size(x)
-    _layernorm_fwd_triton[(304,)](
+    _layernorm_fwd_triton[(M,)](
+    #_layernorm_fwd_triton[(608,)]( # Persistent Kernel - Mark persistent as True before uncommenting
         x,
         y,
         gamma,
@@ -395,7 +418,7 @@ def te_layernorm_fwd_fp8_noalloc_triton(
         mu,
         rsigma,
         scale,
-        amax,
+        amax_temp,
         x.stride(0),
         y.stride(0),
         M,
@@ -404,10 +427,17 @@ def te_layernorm_fwd_fp8_noalloc_triton(
         ZERO_CENTERED_GAMMA=zero_centered_gamma,
         BLOCK_SIZE=BLOCK_SIZE,
         APPLY_SCALE=(out_dtype == torch.float8_e4m3fnuz),
-        PERSISTENT=True,
+        PERSISTENT=False,
         num_stages=1,
         waves_per_eu=waves_per_eu,  # 1 2 4
         num_warps=num_warps,  # 4 8 16
+    )
+
+    _layernorm_fwd_reduce_triton[(triton.cdiv(M, 256),)](
+        amax_temp,
+        amax,
+        M,
+        256,
     )
 
     scale_inv = None if scale_inv is None else (1.0 / scale)

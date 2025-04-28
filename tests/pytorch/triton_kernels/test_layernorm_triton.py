@@ -231,6 +231,7 @@ if __name__ == "__main__":
     import sys
 
     in_dtype = torch.float16
+    #out_dtype = torch.float16
     out_dtype = torch.float8_e4m3fnuz
     zero_centered_gamma = True
     run_triton = sys.argv[1] == "triton"
