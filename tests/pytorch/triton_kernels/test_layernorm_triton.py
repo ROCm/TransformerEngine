@@ -140,6 +140,23 @@ def test_layernorm_fwd_bwd_triton(in_dtype_test, out_dtype_test, M, N, zero_cent
         rtol_stats,
         lambda msg: f"rsigma does not match triton <-> hip\n\n{msg}\n",
     )
+    if out_dtype_test[1:] == "fp8e4m3":
+        compare_results(
+            "torch",
+            amax_triton,
+            amax_hipified,
+            atol_stats,
+            rtol_stats,
+            lambda msg: f"amax does not match triton <-> hip\n\n{msg}\n",
+        )
+        compare_results(
+            "torch",
+            scale_inv_triton,
+            scale_inv_hipified,
+            atol_stats,
+            rtol_stats,
+            lambda msg: f"scale_inv does not match triton <-> hip\n\n{msg}\n",
+        )
 
     # Assert on y:
     atol, rtol = get_tolerances(out_dtype)
