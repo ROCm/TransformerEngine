@@ -404,9 +404,10 @@ def te_layernorm_fwd_fp8_noalloc_triton(
 ):
     M, N = x.shape
     y = y.view(out_dtype)
+    IS_FP8 = (out_dtype == torch.float8_e4m3fnuz)
     mu = torch.empty((M,), dtype=torch.float32, device=x.device)
     rsigma = torch.empty((M,), dtype=torch.float32, device=x.device)
-    amax_temp = torch.empty((M,), dtype=torch.float32, device=x.device)
+    amax_temp = torch.empty((M,), dtype=torch.float32, device=x.device) if IS_FP8 else None
 
     BLOCK_SIZE = block_size(x)
     _layernorm_fwd_triton[(M,)](
@@ -426,21 +427,22 @@ def te_layernorm_fwd_fp8_noalloc_triton(
         eps,
         ZERO_CENTERED_GAMMA=zero_centered_gamma,
         BLOCK_SIZE=BLOCK_SIZE,
-        APPLY_SCALE=(out_dtype == torch.float8_e4m3fnuz),
+        APPLY_SCALE=IS_FP8,
         PERSISTENT=False,
         num_stages=1,
         waves_per_eu=waves_per_eu,  # 1 2 4
         num_warps=num_warps,  # 4 8 16
     )
 
-    _layernorm_fwd_reduce_triton[(triton.cdiv(M, 256),)](
-        amax_temp,
-        amax,
-        M,
-        256,
-    )
+    if IS_FP8:
+        _layernorm_fwd_reduce_triton[(triton.cdiv(M, 256),)](
+            amax_temp,
+            amax,
+            M,
+            256,
+        )
 
-    scale_inv = None if scale_inv is None else (1.0 / scale)
+    scale_inv = (1.0 / scale) if IS_FP8 else None
 
     return y, mu, rsigma, scale_inv
 
