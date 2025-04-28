@@ -33,6 +33,8 @@ def _layernorm_fwd_triton(
     b_ptr,
     mean_ptr,
     rstd_ptr,
+    scale_ptr,
+    amax_ptr,
     x_row_stride,
     y_row_stride,
     n_rows,
@@ -40,6 +42,7 @@ def _layernorm_fwd_triton(
     eps,
     ZERO_CENTERED_GAMMA: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    APPLY_SCALE: tl.constexpr,
 ):
 
     # program id
@@ -90,6 +93,10 @@ def _layernorm_fwd_triton(
     tl.store(mean_ptr + row, mean)
     tl.store(rstd_ptr + row, rstd)
 
+    if APPLY_SCALE:
+        scale = tl.load(scale_ptr)
+        amax = 0.0
+
     # Normalize and store
     loop_num_l = loop_num
     for b in range(0, loop_num_l):
@@ -101,6 +108,10 @@ def _layernorm_fwd_triton(
             w_block += 1
         y_block = (x_block - mean) * rstd
         y_block = y_block * w_block + b_block
+        if APPLY_SCALE:
+            amax_temp = tl.max(tl.abs(y_block))
+            amax = amax_temp if amax_temp > amax else amax
+            y_block = y_block * scale
         tl.store(y_ptr_start + col_offsets, y_block.to(y_ptr.type.element_ty))
 
     # For last iteration, do masked load and store
@@ -113,6 +124,11 @@ def _layernorm_fwd_triton(
         w_block += 1
     y_block = (x_block - mean) * rstd
     y_block = y_block * w_block + b_block
+    if APPLY_SCALE:
+        amax_temp = tl.max(tl.abs(y_block))
+        amax = amax_temp if amax_temp > amax else amax
+        tl.atomic_max(amax_ptr, amax)
+        y_block = y_block * scale
     tl.store(y_ptr_start + col_offsets, y_block.to(y_ptr.type.element_ty), mask=mask)
 
 
@@ -334,7 +350,16 @@ def _layernorm_bwd_dwdb_triton(
 
 # TODO: Implement persistent kernel in forward and add `sm_margin` to the interface.
 def te_layernorm_fwd_fp8_noalloc_triton(
-    x, gamma, beta, eps, y, out_dtype, zero_centered_gamma
+    x,
+    gamma,
+    beta,
+    eps,
+    scale,
+    y,
+    amax,
+    scale_inv,
+    out_dtype,
+    zero_centered_gamma
 ):
     M, N = x.shape
     y = y.view(out_dtype)
@@ -349,6 +374,8 @@ def te_layernorm_fwd_fp8_noalloc_triton(
         beta,
         mu,
         rsigma,
+        scale,
+        amax,
         x.stride(0),
         y.stride(0),
         M,
@@ -356,9 +383,12 @@ def te_layernorm_fwd_fp8_noalloc_triton(
         eps,
         ZERO_CENTERED_GAMMA=zero_centered_gamma,
         BLOCK_SIZE=BLOCK_SIZE,
+        APPLY_SCALE=(out_dtype == torch.float8_e4m3fnuz),
     )
 
-    return y, mu, rsigma
+    scale_inv = 1.0 / scale if scale_inv else None
+
+    return y, mu, rsigma, scale_inv
 
 
 # TODO: Add `sm_margin` to the interface.
