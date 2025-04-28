@@ -127,7 +127,8 @@ def _layernorm_fwd_triton(
     if APPLY_SCALE:
         amax_temp = tl.max(tl.abs(y_block))
         amax = amax_temp if amax_temp > amax else amax
-        tl.atomic_max(amax_ptr, amax)
+        tl.atomic_max(amax_ptr, amax, sem="relaxed")
+        #tl.store(amax_ptr, amax)
         y_block = y_block * scale
     tl.store(y_ptr_start + col_offsets, y_block.to(y_ptr.type.element_ty), mask=mask)
 
