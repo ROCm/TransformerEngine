@@ -1009,6 +1009,8 @@ void hipblaslt_gemm(const Tensor *inputA,
   void *B = inputB->data.dptr;
   void *B_scale_inverse = inputB->scale_inv.dptr;
   void *D = outputD->data.dptr;
+  void *D_amax = outputD->amax.dptr;
+  void *D_scale = outputD->scale.dptr;
   void *bias_ptr = inputBias->data.dptr;
   const bool bias = bias_ptr != nullptr;
   void *pre_gelu_out = outputPreGelu->data.dptr;
@@ -1028,8 +1030,15 @@ void hipblaslt_gemm(const Tensor *inputA,
   // check consistency of arguments:
   // if fp8 is desired, context cannot be null
   // fp8 + gelu fusion + fp8 aux is unavailable right now.
-  if (use_fp8) {
-    NVTE_CHECK(!gelu, "fp8 gemm + gelu fusion is unavailable right now!");
+  const hipblasltDatatype_t aux_type = get_hipblaslt_dtype(outputPreGelu->data.dtype);
+  //Currently hipblasLT only supports below config for fp8 gelu_aux
+  bool allow_fp8_gemm = (A_type == HIP_R_8F_E4M3_FNUZ) &&
+                        (B_type == HIP_R_8F_E4M3_FNUZ) &&
+                        (D_type == HIP_R_8F_E4M3_FNUZ) &&
+                        (bias) ? (bias_type == HIP_R_16F) : true &&
+                        (gelu) ? (aux_type == HIP_R_16F) : false;
+  if(!allow_fp8_gemm && use_fp8) {
+    NVTE_CHECK(!gelu, "fp8 gemm + gelu fusion is unavailable with current config!");
   }
   float one = 1.0;
   float zero = 0.0;
@@ -1091,10 +1100,27 @@ void hipblaslt_gemm(const Tensor *inputA,
                                                      HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER,
                                                      &B_scale_inverse,
                                                      sizeof(B_scale_inverse)));
+    if (is_fp8_dtype(outputD->data.dtype)) {
+      NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
+                                                        HIPBLASLT_MATMUL_DESC_AMAX_D_POINTER,
+                                                        &D_amax,
+                                                        sizeof(D_amax)));
+
+      NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
+                                                        HIPBLASLT_MATMUL_DESC_D_SCALE_POINTER ,
+                                                        &D_scale,
+                                                        sizeof(D_scale)));
+    }
     if (bias) {
       NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
                                                        HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE,
                                                        &bias_type, sizeof(bias_type)));
+    }
+    if (gelu){
+      NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
+                                                        HIPBLASLT_MATMUL_DESC_EPILOGUE_AUX_DATA_TYPE,
+                                                        &aux_type,
+                                                        sizeof(aux_type)));
     }
   }
 

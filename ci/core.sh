@@ -27,6 +27,9 @@ for _gemm in hipblaslt rocblas; do
     _exclude=""
     if [ $_gemm = "hipblaslt" ]; then
         _exclude="-E Test(.*bf16/.*X.X1|.*fp8.*fp16/.*X1X0|.*fp8.*X.X1|.*fp8/|.*bf8/)"
+        echo  ===== Run FP8 GEMM gelu fusion $_gemm tests =====
+        # fp8 gelu fusion tests
+        ctest --test-dir build -j4 -R "OperatorTest/GEMMTestSuite.Testfp8xfp8xfp16xfp16xfp8/.*X.X1"
     fi
     echo  ===== Run GEMM $_gemm tests =====
     ctest --test-dir build -j4 -R "OperatorTest/GEMMTestSuite" $_exclude
