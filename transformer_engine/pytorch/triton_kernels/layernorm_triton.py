@@ -387,7 +387,7 @@ def te_layernorm_fwd_fp8_noalloc_triton(
         APPLY_SCALE=(out_dtype == torch.float8_e4m3fnuz),
     )
 
-    scale_inv = 1.0 / scale if scale_inv else None
+    scale_inv = None if scale_inv is None else (1.0 / scale)
 
     return y, mu, rsigma, scale_inv
 
