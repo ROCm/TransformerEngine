@@ -129,7 +129,8 @@ def output_dtypes_str(dtypes_str):
 
 # Convert descriptive type string to PyTorch type.
 def str_to_torch_dtype(dtype_str):
-    return {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}[
+    return {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32,
+    "fp8e4m3": torch.float8_e4m3fnuz}[
         dtype_str[1:] if dtype_str[0] in {"i", "o"} else dtype_str
     ]
 

@@ -29,8 +29,10 @@ from test_common_triton import (
 
 
 test_idtypes_str = input_dtypes_str(["fp32", "fp16"])
+#test_idtypes_str = input_dtypes_str(["fp32"])
 
-test_odtypes_str = output_dtypes_str(["fp32", "bf16", "fp16"])
+test_odtypes_str = output_dtypes_str(["fp32", "bf16", "fp16", "fp8e4m3"])
+#test_odtypes_str = output_dtypes_str(["fp8e4m3"])
 
 test_shapes = [
     (2048, 12288),
@@ -46,14 +48,14 @@ test_shapes = [
 all_boolean = [False, True]
 
 
-@pytest.mark.parametrize("in_dtype", test_idtypes_str)
-@pytest.mark.parametrize("out_dtype", test_odtypes_str)
+@pytest.mark.parametrize("in_dtype_test", test_idtypes_str)
+@pytest.mark.parametrize("out_dtype_test", test_odtypes_str)
 @pytest.mark.parametrize("M, N", test_shapes)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
-def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma):
+def test_layernorm_fwd_bwd_triton(in_dtype_test, out_dtype_test, M, N, zero_centered_gamma):
     # Get Torch data types:
-    in_dtype = str_to_torch_dtype(in_dtype)
-    out_dtype = str_to_torch_dtype(out_dtype)
+    in_dtype = str_to_torch_dtype(in_dtype_test)
+    out_dtype = str_to_torch_dtype(out_dtype_test)
 
     # Skip conditions:
     skip_in_dtype_gt_out_dtype(in_dtype, out_dtype)
@@ -64,17 +66,43 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
     gamma = fill_uniform(N, in_dtype)
     beta = fill_uniform(N, in_dtype)
     dz = fill_uniform((M, N), in_dtype)
+    if out_dtype_test[1:] == "fp8e4m3":
+        scale = fill_uniform((1,), torch.float32)
+    else:
+        scale = torch.empty(0, device="cuda")
 
     epsilon = 1e-5
 
     # Run Triton forward.
     y_triton = torch.empty((M, N), dtype=out_dtype, device="cuda")
-    y_triton, mu_triton, rsigma_triton = te_layernorm_fwd_fp8_noalloc_triton(
-        x, gamma, beta, epsilon, y_triton, out_dtype, zero_centered_gamma
+    if out_dtype_test[1:] == "fp8e4m3":
+        amax_triton = torch.full((1,), 0.0, device="cuda")
+        scale_inv_triton = torch.full((1,), 0.0, device="cuda")
+    else:
+        amax_triton = scale_inv_triton = None
+
+    y_triton, mu_triton, rsigma_triton, scale_inv_triton = te_layernorm_fwd_fp8_noalloc_triton(
+        x,
+        gamma,
+        beta,
+        epsilon,
+        scale,
+        y_triton,
+        amax_triton,
+        scale_inv_triton,
+        out_dtype,
+        zero_centered_gamma
     )
 
+    print(amax_triton)
+    print(scale_inv_triton)
+
     # Run Hipified forward reference.
-    scale = amax = scale_inv = torch.empty(0, device="cuda")
+    if out_dtype_test[1:] == "fp8e4m3":
+        amax_hipified = torch.full((1,), 0.0, device="cuda")
+        scale_inv_hipified = torch.full((1,), 0.0, device="cuda")
+    else:
+        amax_hipified = scale_inv_hipified = torch.empty(0, device="cuda")
     y_hipified = torch.empty((M, N), dtype=out_dtype, device="cuda")
     y_hipified, mu_hipified, rsigma_hipified = tex.layernorm_fwd_fp8_noalloc(
         x,
@@ -83,12 +111,15 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
         epsilon,
         scale,
         y_hipified,
-        amax,
-        scale_inv,
+        amax_hipified,
+        scale_inv_hipified,
         get_te_dtype(out_dtype),
         get_fwd_ln_sm_margin(),
         zero_centered_gamma,
     )
+
+    print(amax_hipified)
+    print(scale_inv_hipified)
 
     # Assert on mu and rsigma:
     atol_stats, _ = get_tolerances(torch.float32)
@@ -120,8 +151,8 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
         pass
     compare_results(
         "torch",
-        y_triton,
-        y_hipified,
+        y_triton.to(torch.float32),
+        y_hipified.to(torch.float32),
         atol,
         rtol,
         lambda msg: f"y does not match triton <-> hip\n\n{msg}\n",
