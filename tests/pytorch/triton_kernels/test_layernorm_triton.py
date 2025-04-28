@@ -98,12 +98,12 @@ def test_layernorm_fwd_bwd_triton(in_dtype_test, out_dtype_test, M, N, zero_cent
     print(scale_inv_triton)
 
     # Run Hipified forward reference.
+    y_hipified = torch.empty((M, N), dtype=out_dtype, device="cuda")
     if out_dtype_test[1:] == "fp8e4m3":
         amax_hipified = torch.full((1,), 0.0, device="cuda")
         scale_inv_hipified = torch.full((1,), 0.0, device="cuda")
     else:
         amax_hipified = scale_inv_hipified = torch.empty(0, device="cuda")
-    y_hipified = torch.empty((M, N), dtype=out_dtype, device="cuda")
     y_hipified, mu_hipified, rsigma_hipified = tex.layernorm_fwd_fp8_noalloc(
         x,
         gamma,
@@ -208,3 +208,133 @@ def test_layernorm_fwd_bwd_triton(in_dtype_test, out_dtype_test, M, N, zero_cent
         rtol_bwd,
         lambda msg: f"dbeta does not match triton <-> hip\n\n{msg}\n",
     )
+
+
+if __name__ == "__main__":
+    import sys
+
+    in_dtype = torch.float16
+    out_dtype = torch.float8_e4m3fnuz
+    zero_centered_gamma = True
+    run_triton = sys.argv[1] == "triton"
+    run_hipified = sys.argv[1] == "te"
+    M = int(sys.argv[2])
+    N = int(sys.argv[3])
+    run_bwd = sys.argv[4] == "bwd"
+    mode = "forward only" if not run_bwd else "forward + backward"
+
+    # Parse waves_per_eu and num_warps:
+    waves_per_eu = None
+    if run_triton:
+        try:
+            waves_per_eu = int(sys.argv[5])
+        except IndexError:
+            pass
+    num_warps = None
+    if run_triton:
+        try:
+            num_warps = int(sys.argv[6])
+        except IndexError:
+            pass
+
+    # Generate tensors:
+    x = fill_uniform((M, N), in_dtype)
+    gamma = fill_uniform(N, in_dtype)
+    beta = fill_uniform(N, in_dtype)
+    if run_bwd:
+        dz = fill_uniform((M, N), in_dtype)
+    if out_dtype == torch.float8_e4m3fnuz:
+        scale = fill_uniform((1,), torch.float32)
+    else:
+        scale = torch.empty(0, device="cuda")
+
+    epsilon = 1e-5
+
+    if run_triton:
+        print(f"Running {mode} Triton implementation for shape {(M, N)}...")
+        # Select waves_per_eu and num_warps.
+        try:
+            best_waves_per_eu, best_num_warps = {
+                (2048, 12288): (1, 8),
+                (768, 1024): (4, 8),
+                (256, 65536): (2, 16),
+                (128, 6144): (4, 4),
+                (64, 2304): (4, 16),
+                (229, 541): (2, 16),
+                (71, 3571): (1, 16),
+                (29, 17389): (2, 16),
+                (76800, 1600): (4, 4),
+            }[(M, N)]
+        except KeyError:
+            best_waves_per_eu, best_num_warps = 2, 8
+        if waves_per_eu is None:
+            waves_per_eu = best_waves_per_eu
+        if num_warps is None:
+            num_warps = best_num_warps
+        # Run Triton forward.
+        y_triton = torch.empty((M, N), dtype=out_dtype, device="cuda")
+        if out_dtype == torch.float8_e4m3fnuz:
+            amax_triton = torch.full((1,), 0.0, device="cuda")
+            scale_inv_triton = torch.full((1,), 0.0, device="cuda")
+        else:
+            amax_triton = scale_inv_triton = None
+
+        y_triton, mu_triton, rsigma_triton, scale_inv_triton = te_layernorm_fwd_fp8_noalloc_triton(
+            x,
+            gamma,
+            beta,
+            epsilon,
+            scale,
+            y_triton,
+            amax_triton,
+            scale_inv_triton,
+            out_dtype,
+            zero_centered_gamma,
+            waves_per_eu=waves_per_eu,
+            num_warps=num_warps,
+        )
+        if run_bwd:
+            # Run Triton backward.
+            dx_triton, dgamma_triton, dbeta_triton = te_layernorm_bwd_triton(
+                dz,
+                x,
+                mu_triton,
+                rsigma_triton,
+                gamma,
+                zero_centered_gamma,
+            )
+
+    if run_hipified:
+        print(f"Running {mode} TE implementation for shape {(M, N)}...")
+        # Run Hipified forward reference.
+        y_hipified = torch.empty((M, N), dtype=out_dtype, device="cuda")
+        if out_dtype == torch.float8_e4m3fnuz:
+            amax_hipified = torch.full((1,), 0.0, device="cuda")
+            scale_inv_hipified = torch.full((1,), 0.0, device="cuda")
+        else:
+            amax_hipified = scale_inv_hipified = torch.empty(0, device="cuda")
+
+        y_hipified, mu_hipified, rsigma_hipified = tex.layernorm_fwd_fp8_noalloc(
+            x,
+            gamma,
+            beta,
+            epsilon,
+            scale,
+            y_hipified,
+            amax_hipified,
+            scale_inv_hipified,
+            get_te_dtype(out_dtype),
+            get_fwd_ln_sm_margin(),
+            zero_centered_gamma,
+        )
+        if run_bwd:
+            # Run Hipified backward reference.
+            dx_hipified, dgamma_hipified, dbeta_hipified = tex.layernorm_bwd(
+                dz,
+                x,
+                mu_hipified,
+                rsigma_hipified,
+                gamma,
+                get_bwd_ln_sm_margin(),
+                zero_centered_gamma,
+            )

@@ -22,9 +22,9 @@ def get_autotune_config(full_tuning_space=False):
     ]
 
 
-@triton.autotune(
-    configs=get_autotune_config(), key=["n_rows", "n_cols"], use_cuda_graph=True
-)
+# @triton.autotune(
+#     configs=get_autotune_config(), key=["n_rows", "n_cols"], use_cuda_graph=True
+# )
 @triton.jit
 def _layernorm_fwd_triton(
     x_ptr,
@@ -128,6 +128,7 @@ def _layernorm_fwd_triton(
         amax_temp = tl.max(tl.abs(y_block))
         amax = amax_temp if amax_temp > amax else amax
         tl.atomic_max(amax_ptr, amax)
+        #tl.store(amax_ptr, amax)
         y_block = y_block * scale
     tl.store(y_ptr_start + col_offsets, y_block.to(y_ptr.type.element_ty), mask=mask)
 
@@ -359,7 +360,9 @@ def te_layernorm_fwd_fp8_noalloc_triton(
     amax,
     scale_inv,
     out_dtype,
-    zero_centered_gamma
+    zero_centered_gamma,
+    waves_per_eu=2,
+    num_warps=8,
 ):
     M, N = x.shape
     y = y.view(out_dtype)
@@ -384,6 +387,9 @@ def te_layernorm_fwd_fp8_noalloc_triton(
         ZERO_CENTERED_GAMMA=zero_centered_gamma,
         BLOCK_SIZE=BLOCK_SIZE,
         APPLY_SCALE=(out_dtype == torch.float8_e4m3fnuz),
+        num_stages=1,
+        waves_per_eu=waves_per_eu,  # 1 2 4
+        num_warps=num_warps,  # 4 8 16
     )
 
     scale_inv = 1.0 / scale if scale_inv else None
