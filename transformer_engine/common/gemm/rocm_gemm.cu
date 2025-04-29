@@ -1256,6 +1256,7 @@ void hipblaslt_gemm(const Tensor *inputA,
                     << " in range [" << firstAlgo << "-" << (algoTuneCount - 1) << "] with "
                     << tuneLoopCount << " loops " << std::endl;
 
+        NVTE_CHECK_CUDA(hipStreamSynchronize(stream));
         hipStream_t profilingStream;
         NVTE_CHECK_CUDA(hipStreamCreateWithFlags(&profilingStream, hipStreamNonBlocking));
         using tuning_clock = std::chrono::steady_clock;
