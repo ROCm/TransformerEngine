@@ -76,14 +76,18 @@ void compute_ref(
   size_t m, size_t k, size_t n,
   D_Type* ref_d_data,
   float* ref_d_amax,
-  Gelu_Type* ref_gelu_data){
+  Gelu_Type* ref_gelu_data,
+  bool transa,
+  bool transb){
 
   *ref_d_amax = 0;
   for(size_t ii = 0; ii < m; ii++){
     for(size_t jj = 0; jj < n; jj++){
       float val = 0;
       for(size_t kk = 0; kk < k; kk++){
-        val += a_scale_inv*b_scale_inv*((float)a_data[ii + kk*m])*((float)b_data[kk + jj*k]);
+        float a_val = transa ? (float)a_data[kk + ii*k] : (float)a_data[ii + kk*m];
+        float b_val = transb ? (float)b_data[jj + kk*n] : (float)b_data[kk + jj*k];
+        val += a_scale_inv*b_scale_inv*a_val*b_val;
       }
       if(bias_data){
         val += (float)bias_data[ii];
@@ -103,7 +107,7 @@ void compute_ref(
 }
 
 template <typename A_Type, typename B_Type, typename Bias_Type, typename Gelu_Type, typename D_Type>
-void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, const size_t n) {
+void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, const size_t n, bool transa = false, bool transb = false) {
   DType atype = TypeInfo<A_Type>::dtype;
   DType btype = TypeInfo<B_Type>::dtype;
   DType bias_type = TypeInfo<Bias_Type>::dtype;
@@ -112,7 +116,13 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
 
   // pytorch tensor storage is row-major while cublas/rocblas is column-major
   Tensor A({ k, m }, atype);
+  if (transa){
+    A = Tensor({ m, k }, atype);
+  }
   Tensor B({ n, k }, btype);
+  if (transb){
+    B = Tensor({ k, n }, atype);
+  }
   Tensor D({ n, m }, dtype);
   Tensor bias;
   if(use_bias){
@@ -133,8 +143,6 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
   if(isFp8Type(dtype)){
     setRandomScale(&D);
   }
-  bool transa = false;
-  bool transb = false;
   bool grad = false;
   bool accumulate = false;
 
@@ -201,7 +209,9 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
     m, k, n,
     ref_D.get(),
     &ref_amax_d,
-    use_gelu? ref_pre_gelu_out.get(): nullptr);
+    use_gelu? ref_pre_gelu_out.get(): nullptr,
+    transa,
+    transb);
   // check if error message happens in running                             
   (void)cudaDeviceSynchronize();
   auto err = cudaGetLastError();
