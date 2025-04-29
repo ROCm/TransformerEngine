@@ -73,6 +73,7 @@ from transformer_engine.pytorch.module import destroy_ub
 from transformer_engine.pytorch.attention import DotProductAttention
 from transformer_engine.pytorch.attention import InferenceParams
 from transformer_engine.pytorch.attention import MultiheadAttention
+from transformer_engine.pytorch.gemm_triton import te_gemm_triton
 from transformer_engine.pytorch.transformer import TransformerLayer
 from transformer_engine.pytorch.permutation import (
     moe_permute,
