@@ -105,16 +105,130 @@ META_DP = tex.FP8BwdTensors.GRAD_INPUT3
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 # NVTE_DEBUG_LEVEL = 0/1/2 # enables more and more verbose debug mode, default = 0
 _NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
-log_level = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL
-log_levels = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
-logging.basicConfig(
-    format="[%(levelname)-8s | %(name)-19s]: %(message)s",
-    level=log_levels[log_level if log_level in [0, 1, 2] else 2],
-)
+_log_level = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL
+_log_levels = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
+_log_level = _log_levels[_log_level if _log_level in [0, 1, 2] else 2]
+_formatter = logging.Formatter("[%(levelname)-8s | %(name)-19s]: %(message)s")
+_stream_handler = logging.StreamHandler()
+_stream_handler.setFormatter(_formatter)
+fa_logger = logging.getLogger()
+fa_logger.setLevel(_log_level)
+if not fa_logger.hasHandlers():
+    fa_logger.addHandler(_stream_handler)
+
+
+@functools.lru_cache(maxsize=None)
+def _get_supported_versions(version_min, version_max):
+    return ">= " + str(version_min) + ", " + "<= " + str(version_max)
+
 
 _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
 _NVTE_FUSED_ATTN = int(os.getenv("NVTE_FUSED_ATTN", "1"))
 _NVTE_UNFUSED_ATTN = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
+
+# Detect flash-attn v2 in the environment
+_flash_attn_is_installed = False
+_flash_attn_version = PkgVersion("0")
+_flash_attn_version_required = PkgVersion("2.1.1")
+_flash_attn_max_version = PkgVersion("2.7.4.post1")
+_flash_attn_2_plus = False
+_flash_attn_2_1_plus = False
+_flash_attn_2_3_plus = False
+_flash_attn_2_4_plus = False
+_flash_attn_2_4_1_plus = False
+_flash_attn_2_5_7_plus = False
+_flash_attn_2_6_0_plus = False
+_flash_attn_2_7_0_plus = False
+
+flash_attn_cuda_bwd = None
+flash_attn_func = None
+flash_attn_varlen_func = None
+_flash_attn_fwd = None
+_flash_attn_bwd = None
+_flash_attn_varlen_fwd = None
+_flash_attn_varlen_bwd = None
+
+try:
+    _flash_attn_version = PkgVersion(get_pkg_version("flash-attn"))
+except PackageNotFoundError:
+    if torch.cuda.is_available() and (IS_HIP_EXTENSION or get_device_compute_capability() >= (8, 0)) and _NVTE_FLASH_ATTN:
+        fa_logger.debug(
+            "flash-attn v2 is not installed. To use, please install it by"
+            """ "pip install flash-attn".""",
+        )
+else:
+    if _flash_attn_version_required <= _flash_attn_version <= _flash_attn_max_version:
+        from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
+        from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
+        from flash_attn.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd
+        from flash_attn.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd
+        from flash_attn.flash_attn_interface import (
+            _flash_attn_varlen_forward as _flash_attn_varlen_fwd,
+        )
+        from flash_attn.flash_attn_interface import (
+            _flash_attn_varlen_backward as _flash_attn_varlen_bwd,
+        )
+
+        _flash_attn_is_installed = True
+        _flash_attn_2_plus = _flash_attn_version >= PkgVersion("2")
+        _flash_attn_2_1_plus = _flash_attn_version >= PkgVersion("2.1")
+        _flash_attn_2_3_plus = _flash_attn_version >= PkgVersion("2.3")
+        _flash_attn_2_4_plus = _flash_attn_version >= PkgVersion("2.4")
+        _flash_attn_2_4_1_plus = _flash_attn_version >= PkgVersion("2.4.1")
+        _flash_attn_2_5_7_plus = _flash_attn_version >= PkgVersion("2.5.7")
+        _flash_attn_2_6_0_plus = _flash_attn_version >= PkgVersion("2.6.0")
+        _flash_attn_2_7_0_plus = _flash_attn_version >= PkgVersion("2.7.0")
+    elif (torch.cuda.is_available() and 
+          (IS_HIP_EXTENSION or get_device_compute_capability() >= (8, 0)) and _NVTE_FLASH_ATTN
+    ):
+        fa_logger.warning(
+            "Supported flash-attn versions are %s. Found flash-attn %s.",
+            _get_supported_versions(
+                _flash_attn_version_required,
+                _flash_attn_max_version,
+            ),
+            _flash_attn_version,
+        )
+
+# Detect flash-attn v3 in the environment
+# This section will be removed when FA3 is released as a regular FA package,
+# i.e. flashattn-hopper 3.0.0 as flash-attn 3.0.0
+_flash_attn_3_is_installed = False
+_flash_attn_3_version = PkgVersion("0")
+_flash_attn_3_0_0_beta = False
+_use_flash_attn_3 = False
+_flash_attn_3_installation_steps = """\
+(1) pip install "git+https://github.com/Dao-AILab/flash-attention.git#egg=flashattn-hopper&subdirectory=hopper"
+(2) python_path=`python -c "import site; print(site.getsitepackages()[0])"`
+(3) mkdir -p $python_path/flashattn_hopper
+(4) wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILab/flash-attention/main/hopper/flash_attn_interface.py"""
+if not IS_HIP_EXTENSION:
+    try:
+        _flash_attn_3_version = PkgVersion(get_pkg_version("flashattn-hopper"))
+        _flash_attn_3_is_installed = True
+    except PackageNotFoundError:
+        if torch.cuda.is_available() and get_device_compute_capability() >= (9, 0) and _NVTE_FLASH_ATTN:
+            fa_logger.debug(
+                "flash-attn v3 is not installed. To use, please install it by \n%s",
+                _flash_attn_3_installation_steps,
+            )
+
+if _flash_attn_3_is_installed:
+    from flashattn_hopper.flash_attn_interface import flash_attn_func as flash_attn_func_v3
+    from flashattn_hopper.flash_attn_interface import (
+        flash_attn_varlen_func as flash_attn_varlen_func_v3,
+    )
+    from flashattn_hopper.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
+    from flashattn_hopper.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
+    from flashattn_hopper.flash_attn_interface import (
+        _flash_attn_varlen_forward as _flash_attn_varlen_fwd_v3,
+    )
+    from flashattn_hopper.flash_attn_interface import (
+        _flash_attn_varlen_backward as _flash_attn_varlen_bwd_v3,
+    )
+
+    _flash_attn_3_0_0_beta = PkgVersion("3.0.0b") < _flash_attn_3_version < PkgVersion("3.0.0")
+    _use_flash_attn_3 = True
 
 _attention_backends = {
     "attention_params": None,

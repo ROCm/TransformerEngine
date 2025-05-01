@@ -1620,7 +1620,15 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     # TODO: wait for the full determinism fix from hipblaslt
     if IS_HIP_EXTENSION:
         if use_hipblaslt():
-            torch.testing.assert_close(y_bshd, y_sbhd.transpose(0, 1).contiguous())
+            tols = dtype_tols(dtype)
+            if dtype in (torch.float16, torch.bfloat16):
+                # On some GPUs hipblaslt results for SBHD and BSHD are different
+                # that results in lower final result precision
+                tols["atol"] = 2e-3
+                _, use_aotriton, use_ck = rocm_attn_backend()
+                if use_aotriton and not use_ck:
+                    tols["rtol"] = tols["rtol"] * 3
+            torch.testing.assert_close(y_bshd, y_sbhd.transpose(0, 1).contiguous(), **tols)
         else:
             assert torch.equal(y_bshd, y_sbhd.transpose(0, 1).contiguous()), "Tensors are not equal"
     else:
