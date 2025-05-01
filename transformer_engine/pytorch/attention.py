@@ -1,4 +1,4 @@
-# This file was modified for portability to AMDGPU
+1# This file was modified for portability to AMDGPU
 # Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
@@ -120,7 +120,7 @@ _NVTE_UNFUSED_ATTN = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
 _flash_attn_is_installed = False
 _flash_attn_version = PkgVersion("0")
 _flash_attn_version_required = PkgVersion("2.1.1")
-_flash_attn_max_version = PkgVersion("2.7.3")
+_flash_attn_max_version = PkgVersion("2.7.4.post1")
 _flash_attn_2_plus = False
 _flash_attn_2_1_plus = False
 _flash_attn_2_3_plus = False
@@ -147,8 +147,9 @@ except PackageNotFoundError:
             """ "pip install flash-attn".""",
         )
 else:
+    fa_logger.debug("CHECK FA VERSION = %s, %s, %s", _flash_attn_version_required, _flash_attn_version, _flash_attn_max_version)
     if _flash_attn_version_required <= _flash_attn_version <= _flash_attn_max_version:
-        from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
+        from flash_attn.flash_attn_triton_amd.interface_fa import varlen_bwd as flash_attn_cuda_bwd
         from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
         from flash_attn.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd
         from flash_attn.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd
