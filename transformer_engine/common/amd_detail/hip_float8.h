@@ -88,7 +88,7 @@ struct te_hip_fp8_e4m3 {
 
   __host__ __device__ operator float() const { return data.operator float(); }
 
-  __host__ __device__ te_hip_fp8_e4m3(const float& v) { data = v;}
+  __host__ __device__ te_hip_fp8_e4m3(const float& v): data(v) {}
 };
 static_assert(sizeof(te_hip_fp8_e4m3) == 1, "Size mismatch");
 
