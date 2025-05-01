@@ -9,6 +9,7 @@ import triton
 import triton.language as tl
 
 from .norm_common_triton import block_size, use_blocked
+from .norm_common_triton import block_size_bwd, use_blocked_bwd
 
 
 def get_autotune_config(full_tuning_space=False):
@@ -170,7 +171,6 @@ def _layernorm_fwd_reduce_triton(
 
     tl.atomic_max(amax_output_ptr, amax, sem="relaxed")
 
-
 @triton.jit
 def _layernorm_bwd_dx_fused_triton(
     DX,  # pointer to the input gradient
@@ -271,13 +271,13 @@ def _layernorm_bwd_dx_fused_triton(
 
                 partial_dw = dy * xhat
                 dw_ptrs = dw_row_ptr + cols
-                partial_dw += tl.load(dw_ptrs)
-                tl.store(dw_ptrs, partial_dw)
+                partial_dw += tl.load(dw_ptrs).to(tl.float32)
+                tl.store(dw_ptrs, partial_dw.to(DW.type.element_ty))
 
                 partial_db = dy
                 db_ptrs = db_row_ptr + cols
-                partial_db += tl.load(db_ptrs)
-                tl.store(db_ptrs, partial_db)
+                partial_db += tl.load(db_ptrs).to(tl.float32)
+                tl.store(db_ptrs, partial_db.to(DB.type.element_ty))
 
             cols = num_col_blocks * BLOCK_SIZE_N + col_offsets
             mask = cols < N
@@ -298,13 +298,13 @@ def _layernorm_bwd_dx_fused_triton(
 
             partial_dw = dy * xhat
             dw_ptrs = dw_row_ptr + cols
-            partial_dw += tl.load(dw_ptrs, mask=mask)
-            tl.store(dw_ptrs, partial_dw, mask=mask)
+            partial_dw += tl.load(dw_ptrs, mask=mask).to(tl.float32)
+            tl.store(dw_ptrs, partial_dw.to(DW.type.element_ty), mask=mask)
 
             partial_db = dy
             db_ptrs = db_row_ptr + cols
-            partial_db += tl.load(db_ptrs, mask=mask)
-            tl.store(db_ptrs, partial_db, mask=mask)
+            partial_db += tl.load(db_ptrs, mask=mask).to(tl.float32)
+            tl.store(db_ptrs, partial_db.to(DB.type.element_ty), mask=mask)
 
             # Advance to next row.
             row += tile_num
@@ -353,8 +353,8 @@ def _layernorm_bwd_dx_fused_triton(
             # Advance to next row:
             row += tile_num
 
-        tl.store(DW + pid * N + cols, dw_row, mask=mask)
-        tl.store(DB + pid * N + cols, db_row, mask=mask)
+        tl.store(DW + pid * N + cols, dw_row.to(DW.type.element_ty), mask=mask)
+        tl.store(DB + pid * N + cols, db_row.to(DB.type.element_ty), mask=mask)
 
 
 @triton.jit
@@ -378,8 +378,8 @@ def _layernorm_bwd_dwdb_triton(
         rows = i + tl.arange(0, BLOCK_SIZE_M)
         mask = (rows[:, None] < M) & (cols[None, :] < N)
         offs = rows[:, None] * N + cols[None, :]
-        dw += tl.load(DW + offs, mask=mask, other=0.0)
-        db += tl.load(DB + offs, mask=mask, other=0.0)
+        dw += tl.load(DW + offs, mask=mask, other=0.0).to(tl.float32)
+        db += tl.load(DB + offs, mask=mask, other=0.0).to(tl.float32)
     # Write the final sum to the output.
     sum_dw = tl.sum(dw, axis=0)
     sum_db = tl.sum(db, axis=0)
@@ -451,16 +451,19 @@ def te_layernorm_fwd_fp8_noalloc_triton(
 def te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, zero_centered_gamma):
     M, N = x.shape
 
-    BLOCK_SIZE = block_size(x)
-    num_warps = min(max(BLOCK_SIZE // 256, 1), 8)
     tile_num = max(min(256, M // 4), 1)
-
+    #rows_per_tile = NUM_ROWS // tile_num
+    if (M <= 512 and M * N < 64 * 1024 * 1024):
+        tile_num = M
+    elif M > 16384:
+        tile_num = 1024
+    BLOCK_SIZE = block_size_bwd(x, tile_num)
+    num_warps = min(max(BLOCK_SIZE // 256, 1), 8)
     dx = torch.empty_like(x)
     _dgamma = torch.zeros((tile_num, N), dtype=torch.float32, device=gamma.device)
     _dbeta = torch.zeros((tile_num, N), dtype=torch.float32, device=gamma.device)
-    dgamma = torch.empty((N,), dtype=gamma.dtype, device=gamma.device)
-    dbeta = torch.empty((N,), dtype=gamma.dtype, device=gamma.device)
-
+    dgamma = torch.zeros((N,), dtype=gamma.dtype, device=gamma.device)
+    dbeta = torch.zeros((N,), dtype=gamma.dtype, device=gamma.device)
     grid_bwd = (tile_num,)
     _layernorm_bwd_dx_fused_triton[grid_bwd](
         dx,
@@ -476,10 +479,9 @@ def te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, zero_centered_gamma):
         ZERO_CENTERED_GAMMA=zero_centered_gamma,
         NUM_ROWS=M,
         BLOCK_SIZE_N=BLOCK_SIZE,
-        USE_BLOCKED=use_blocked(x),
-        num_warps=num_warps,
+        USE_BLOCKED=use_blocked_bwd(x, tile_num),
+        num_warps=num_warps
     )
-
     grid_reduce = lambda meta: (triton.cdiv(N, meta["BLOCK_SIZE_N"]),)
     _layernorm_bwd_dwdb_triton[grid_reduce](
         _dgamma,

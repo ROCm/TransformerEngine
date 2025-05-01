@@ -53,3 +53,14 @@ def block_size(x):
 
 def use_blocked(x):
     return x.shape[1] > block_size(x)
+
+def block_size_bwd(x, tile_num):
+    max_fused_size = 65536 // (x.element_size() * 2)
+    block_size = min(max_fused_size, triton.next_power_of_2(x.shape[1]))
+    # For cases with small M and large N, decrease block size to help with register spill
+    if tile_num == x.shape[0]:
+        block_size = min(block_size, 4096)  
+    return block_size
+
+def use_blocked_bwd(x, tile_num):
+    return x.shape[1] > block_size_bwd(x, tile_num)
