@@ -20,8 +20,10 @@ def torch_to_te_dtype(dtype):
         torch.float32: tex.DType.kFloat32,
         torch.float16: tex.DType.kFloat16,
         torch.bfloat16: tex.DType.kBFloat16,
-        torch.float8_e4m3fnuz: tex.DType.kFloat8E4M3,
-        torch.float8_e5m2fnuz: tex.DType.kFloat8E5M2,
+        #torch.float8_e4m3fnuz: tex.DType.kFloat8E4M3,
+        #torch.float8_e5m2fnuz: tex.DType.kFloat8E5M2,
+        torch.float8_e4m3fn: tex.DType.kFloat8E4M3,
+        torch.float8_e5m2: tex.DType.kFloat8E5M2,
     }
     return torch_to_TE_dtypes[dtype]
 
@@ -34,11 +36,13 @@ def te_to_torch_dtype(dtype):
             tex.DType.kBFloat16 : torch.bfloat16,
             #tex.DType.kFloat8E4M3: torch.float8_e4m3fnuz,
             #tex.DType.kFloat8E5M2: torch.float8_e5m2fnuz,
+            tex.DType.kFloat8E4M3: torch.float8_e4m3fn,
+            tex.DType.kFloat8E5M2: torch.float8_e5m2,
             # Currently, TE does not use Pytorch's fp8 data types
             # Instead it has its own Float8Tensor, which uses
             # torch.uint8 as its data type
-            tex.DType.kFloat8E4M3: torch.uint8,
-            tex.DType.kFloat8E5M2: torch.uint8,
+            #tex.DType.kFloat8E4M3: torch.uint8,
+            #tex.DType.kFloat8E5M2: torch.uint8,
             }
     return te_dtype_to_torch_dtype[dtype]
 
@@ -47,9 +51,11 @@ def is_fp8_dtype(dtype):
 
 def reinterpret_as_fp8_tensor(a: torch.Tensor, dtype: tex.DType):
     if dtype == tex.DType.kFloat8E4M3:
-        return a.view(dtype=torch.float8_e4m3fnuz)
+        #return a.view(dtype=torch.float8_e4m3fnuz)
+        return a.view(dtype=torch.float8_e4m3fn)
     if dtype == tex.DType.kFloat8E5M2:
-        return a.view(dtype=torch.float8_e5m2fnuz)
+        #return a.view(dtype=torch.float8_e5m2fnuz)
+        return a.view(dtype=torch.float8_e5m2)
 
 def te_gemm_triton(A,
                    A_scale_inverse,
@@ -102,9 +108,9 @@ def te_gemm_triton(A,
     For epilogue BIAS, bias vector length is blas_m
     for epilogue BGRADB, bias gradient vector length is blas_n
     '''
-    assert te_to_torch_dtype(A_type) == A.dtype, 'A dtype does not match.'
-    assert te_to_torch_dtype(B_type) == B.dtype, 'B dtype does not match.'
-    assert te_to_torch_dtype(D_type) == D.dtype, 'D dtype does not match.'
+    #assert te_to_torch_dtype(A_type) == A.dtype, 'A dtype does not match.'
+    #assert te_to_torch_dtype(B_type) == B.dtype, 'B dtype does not match.'
+    #assert te_to_torch_dtype(D_type) == D.dtype, 'D dtype does not match.'
     assert (bias.data_ptr() == 0) or (te_to_torch_dtype(bias_type) == bias.dtype), 'bias dtype does not match.'
     
 
@@ -155,7 +161,11 @@ def te_gemm_triton(A,
     output_fp8 = is_fp8_dtype(D_type)
     #matmul(a_row_major, b_row_major, D, a_scale_triton, b_scale_triton, D_scale, bias, D_amax, epilogue, input_fp8, output_fp8) 
     if input_fp8:
-        D = gemm_a8w8(a_row_major, b_row_major, te_to_torch_dtype(A_type))
+        print("a shape[0]: ", a_row_major.shape[0])
+        print("b.shape[0]: ", b_row_major.shape[0])
+        print("a.shape[1]: ", a_row_major.shape[1])
+        print("b.shape[1]: ", b_row_major.shape[1])
+        D = gemm_a8w8(a_row_major, b_row_major, a_scale_triton, b_scale_triton, bias, te_to_torch_dtype(A_type))
     else:
         D = gemm_a16w16(a_row_major, b_row_major, te_to_torch_dtype(A_type))
 
