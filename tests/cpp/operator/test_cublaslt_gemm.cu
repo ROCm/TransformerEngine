@@ -87,7 +87,7 @@ void compute_ref(
       for(size_t kk = 0; kk < k; kk++){
         float a_val = transa ? (float)a_data[kk + ii*k] : (float)a_data[ii + kk*m];
         float b_val = transb ? (float)b_data[jj + kk*n] : (float)b_data[kk + jj*k];
-        val += a_scale_inv*b_scale_inv*a_val*b_val;
+        val += a_scale_inv*a_val*b_scale_inv*b_val;
       }
       if(bias_data){
         val += (float)bias_data[ii];
@@ -124,10 +124,10 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
   }
   Tensor B;
   if (transb){
-    B = Tensor({ k, n }, atype);
+    B = Tensor({ k, n }, btype);
   }
   else {
-    B = Tensor({ n, k }, atype);
+    B = Tensor({ n, k }, btype);
   }
   Tensor D({ n, m }, dtype);
   Tensor bias;
