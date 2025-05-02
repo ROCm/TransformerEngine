@@ -4,18 +4,31 @@
 #
 # See LICENSE for license information.
 
+import pytest
+from functools import partial
+
 import jax
 import jax.numpy as jnp
 import numpy as np
+from flax.linen import dot_product_attention
 from jax import random
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from distributed_test_base import (
     generate_configs,
     generate_context_parallel_configs,
     generate_collectives_count,
+    compare_ops,
+)
+from utils import (
+    make_causal_mask,
+    make_self_mask,
+    assert_allclose,
+    print_debug_tensor_stats,
 )
 from transformer_engine.jax import fp8_autocast, is_hip_extension
 from transformer_engine.jax.attention import (
     is_fused_attn_kernel_available,
+    fused_attn,
     AttnBiasType,
     AttnMaskType,
     QKVLayout,
@@ -25,12 +38,11 @@ from transformer_engine.jax.attention import (
     CPStrategy,
 )
 from transformer_engine.jax.sharding import MeshResource
-import pytest
 import os
 
-from test_fused_attn import FusedAttnRunner, BiasShape, SeqDescFormat
+from test_fused_attn import FusedAttnRunner, BiasShape, general_dot_product_attention, make_mask
 
-DTYPES = [jnp.bfloat16]
+DTYPES = [jnp.float16, jnp.bfloat16]
 
 
 class TestDistributedSelfAttn:
@@ -132,7 +144,6 @@ class TestDistributedSelfAttn:
             QKVLayout.BS3HD,
             bias_shape,
             None,
-            SeqDescFormat.Seqlens,
             number_of_devices=device_count,
             mesh_shape=mesh_shape,
             mesh_axes=mesh_axes,
@@ -197,7 +208,6 @@ class TestDistributedCrossAttn:
             QKVLayout.BSHD_BS2HD,
             bias_shape,
             None,
-            SeqDescFormat.Seqlens,
             number_of_devices=device_count,
             mesh_shape=mesh_shape,
             mesh_axes=mesh_axes,
@@ -286,7 +296,6 @@ class TestDistributedContextParallelSelfAttn:
             qkv_layout,
             bias_shape,
             None,
-            SeqDescFormat.Seqlens,
             number_of_devices=device_count,
             mesh_shape=mesh_shape,
             mesh_axes=mesh_axes,

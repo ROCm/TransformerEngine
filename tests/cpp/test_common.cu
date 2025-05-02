@@ -417,7 +417,11 @@ void compareResults_parallel(const std::string &name, const Tensor &test, const 
 
 void compareResults(const std::string &name, const Tensor &test, const void *ref,
                     double atol, double rtol, bool if_on_gpus) {
+#ifndef __HIP_PLATFORM_AMD__
   constexpr bool sequential = false;
+#else
+  constexpr bool sequential = true;
+#endif
   if constexpr (sequential) {
     compareResults_sequential(name, test, ref, atol, rtol, if_on_gpus);
   } else {
