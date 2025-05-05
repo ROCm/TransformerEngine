@@ -8,6 +8,7 @@ from operator import mul as multiply_op
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
+import functools
 
 import transformer_engine_torch as tex
 
@@ -19,7 +20,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ._common import _noop_cat
+from ._common import _noop_cat, WeightGradStore
 from ..fp8 import get_fp8_te_dtype, FP8GlobalStateManager
 from ..utils import (
     divide,
@@ -73,6 +74,7 @@ class _Linear(torch.autograd.Function):
         fp8: bool,
         fp8_calibration: bool,
         fp8_meta: Dict[str, Any],
+        wgrad_store: WeightGradStore,
         fuse_wgrad_accumulation: bool,
         cpu_offloading: bool,
         tp_group: Union[dist_group_type, None],
@@ -395,6 +397,7 @@ class _Linear(torch.autograd.Function):
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
                 if in_fp8_activation_recompute_phase():
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
+            ctx.wgrad_store = wgrad_store
 
         # Row Parallel Linear
         if parallel_mode == "row":
@@ -687,11 +690,10 @@ class _Linear(torch.autograd.Function):
                         )
                 else:
                     # WGRAD
-                    wgrad, grad_bias, _ = gemm(
-                        inputmat_total,
-                        grad_output,
-                        ctx.activation_dtype,
-                        get_workspace(),
+                    general_gemm_wgrad = functools.partial(
+                        gemm,
+                        dtype=ctx.activation_dtype,
+                        workspace=get_workspace(),
                         layout="NT",
                         grad=True,
                         use_bias=ctx.use_bias,
@@ -700,19 +702,23 @@ class _Linear(torch.autograd.Function):
                         ub=ub_obj_wgrad,
                         ub_algo=ub_algo_wgrad,
                     )
+                    if ctx.wgrad_store.split_bw():
+                        ctx.wgrad_store.put([inputmat_total, grad_output], general_gemm_wgrad)
+                    else:
+                        wgrad, grad_bias, _ = general_gemm_wgrad(inputmat_total, grad_output)
+
+                        # Deallocate input tensor
+                        clear_tensor_data(inputmat_total)
+                        clear_tensor_data(inputmat_t_total)
 
                 if ctx.ub_bulk_wgrad:
                     dgrad = ub_obj_wgrad.get_ubuf_output(0)
-
-                # Deallocate input tensor
-                clear_tensor_data(inputmat_total)
-                clear_tensor_data(inputmat_t_total)
 
             # Wait for dgrad reduce-scatter or all-reduce
             if dgrad_reduce_handle is not None:
                 dgrad_reduce_handle.wait()
 
-            if not ctx.use_bias:
+            if not ctx.use_bias or ctx.wgrad_store.split_bw():
                 grad_bias = None
 
         if weight.requires_grad:
@@ -755,6 +761,7 @@ class _Linear(torch.autograd.Function):
             None,  # fp8
             None,  # fp8_calibration
             None,  # fp8_meta
+            None,  # wgrad_store
             None,  # fuse_wgrad_accumulation
             None,  # cpu_offloading
             None,  # tp_group
@@ -868,6 +875,7 @@ class Linear(TransformerEngineBaseModule):
         ub_bulk_dgrad: bool = False,
         ub_bulk_wgrad: bool = False,
         ub_name: Optional[str] = None,
+        split_bw: bool = False,
     ) -> None:
         super().__init__()
 
@@ -940,6 +948,7 @@ class Linear(TransformerEngineBaseModule):
 
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
+        self.wgrad_store = WeightGradStore(split_bw, ub_bulk_wgrad)
 
         # Initialize params in FP8
         with_fp8_params = FP8GlobalStateManager.with_fp8_parameters()
@@ -1176,6 +1185,7 @@ class Linear(TransformerEngineBaseModule):
                 self.fp8,
                 self.fp8_calibration,
                 self.fp8_meta,
+                self.wgrad_store,
                 self.fuse_wgrad_accumulation,
                 is_cpu_offload_enabled(),
                 self.tp_group,
@@ -1203,3 +1213,24 @@ class Linear(TransformerEngineBaseModule):
         if self.return_bias:
             return out, cast_if_needed(bias_tensor, self.activation_dtype)
         return out
+
+    def wgrad_comp(self):
+        """
+        Execute the delayed weight gradient computation.
+        This method is called after the main backward pass to compute weight gradients.
+        """
+        if not self.wgrad_store.split_bw():
+            return
+        with torch.cuda.nvtx.range("_Linear_wgrad"):
+            (wgrad, grad_bias_, _, _), _ = self.wgrad_store.pop()
+            if not self.fuse_wgrad_accumulation:
+                unfused_weights = [getattr(self, name) for name in self.weight_names]
+                weight_tensor = _noop_cat(unfused_weights)
+                if weight_tensor.grad is None:
+                    weight_tensor.grad = wgrad.to(weight_tensor.dtype)
+            if self.use_bias:
+                bias_tensor = _noop_cat([getattr(self, name) for name in self.bias_names])
+                if bias_tensor.grad is None:
+                    bias_tensor.grad = grad_bias_.to(bias_tensor.dtype)
+            del grad_bias_
+            del wgrad
