@@ -5,10 +5,12 @@
 """GroupedLinear API"""
 from typing import Union, Optional, Callable, Tuple, List, Dict, Any
 
+import functools
 import torch
 
 import transformer_engine_torch as tex
 
+from ._common import WeightGradStore
 from .base import (
     get_multi_stream_cublas_workspace,
     TransformerEngineBaseModule,
@@ -61,6 +63,7 @@ class _GroupedLinear(torch.autograd.Function):
         fp8: bool,
         fp8_calibration: bool,
         fp8_meta: Dict[str, Any],
+        wgrad_store: WeightGradStore,
         fuse_wgrad_accumulation: bool,
         cpu_offloading: bool,
         sequence_parallel: bool,
@@ -258,6 +261,7 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.fp8_meta_offsets = fp8_meta_offsets
             ctx.requires_dgrad = inp.requires_grad
             ctx.reduce_and_update_bwd_fp8_tensors = False
+            ctx.wgrad_store = wgrad_store
             if ctx.fp8 and requires_grad(inp, weights[0], biases[0]):
                 ctx.reduce_and_update_bwd_fp8_tensors = (
                     ctx.reduce_and_update_bwd_fp8_tensors
@@ -426,22 +430,24 @@ class _GroupedLinear(torch.autograd.Function):
                             accumulate=accumulate_wgrad_into_param_main_grad,
                         )
                 else:
-                    # WGRAD
-                    _, grad_biases, _ = grouped_gemm(
-                        inputmats,
-                        grad_output_mats,
-                        wgrad_list,
-                        ctx.activation_dtype,
-                        get_multi_stream_cublas_workspace(),
+                    grouped_gemm_wgrad = functools.partial(
+                        grouped_gemm,
+                        out_dtype=ctx.activation_dtype,
+                        workspaces=get_multi_stream_cublas_workspace(),
                         layout="NT",
                         grad=True,
                         use_bias=ctx.use_bias,
                         accumulate=accumulate_wgrad_into_param_main_grad,
                     )
+                    # WGRAD
+                    if ctx.wgrad_store.split_bw():
+                        ctx.wgrad_store.put([inputmats, grad_output_mats, wgrad_list], grouped_gemm_wgrad)
+                    else:
+                        _, grad_biases, _ = grouped_gemm_wgrad(inputmats, grad_output_mats, wgrad_list)
 
-                # Deallocate input tensor
-                clear_tensor_data(*inputmats)
-                clear_tensor_data(*inputmats_t)
+                        # Deallocate input tensor
+                        clear_tensor_data(*inputmats)
+                        clear_tensor_data(*inputmats_t)
 
                 def handle_custom_ddp_from_mcore(w, wgrad):
                     if w.requires_grad:
@@ -473,7 +479,9 @@ class _GroupedLinear(torch.autograd.Function):
             else:
                 wgrad_list = [None] * ctx.num_gemms
 
-            if not ctx.use_bias:
+            if ctx.wgrad_store.split_bw():
+                wgrad_list = [None] * ctx.num_gemms
+            if not ctx.use_bias or (ctx.wgrad_store.split_bw() and not ctx.fp8):
                 grad_biases = [None] * ctx.num_gemms
 
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
@@ -487,6 +495,7 @@ class _GroupedLinear(torch.autograd.Function):
             None,  # fp8
             None,  # fp8_calibration
             None,  # fp8_meta
+            None,  # wgrad_store
             None,  # fuse_wgrad_accumulation
             None,  # cpu_offloading
             None,  # sequence_parallel
@@ -565,6 +574,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         ub_overlap_rs: bool = False,
         ub_overlap_ag: bool = False,
         ub_name: Optional[str] = None,
+        split_bw: bool = False,
     ) -> None:
         super().__init__()
 
@@ -579,6 +589,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.ub_overlap_rs = ub_overlap_rs
         self.ub_overlap_ag = ub_overlap_ag
         self.ub_name = ub_name
+        self.wgrad_store = WeightGradStore(split_bw)
         assert (
             not ub_overlap_rs and not ub_overlap_ag
         ), "GroupedLinear doesn't support Userbuffer overlap."
@@ -791,3 +802,26 @@ class GroupedLinear(TransformerEngineBaseModule):
         if self.return_bias:
             return out, [cast_if_needed(b, self.activation_dtype) for b in bias_tensors]
         return out
+
+
+    def wgrad_comp(self):
+        """
+        Execute the delayed weight gradient computation.
+        This method is called after the main backward pass to compute weight gradients.
+        """
+        if not self.wgrad_store.split_bw():
+            return
+        with torch.cuda.nvtx.range("_GroupedLinear_wgrad"):
+            (_, grad_biases_, _), tensor_list = self.wgrad_store.pop()
+            wgrad_list = tensor_list[2]
+            if not self.fuse_wgrad_accumulation:
+                for i in range(self.num_gemms):
+                    weight_param = getattr(self, f"weight{i}")
+                    if weight_param.grad is None:
+                        weight_param.grad = wgrad_list[i].to(weight_param.dtype)
+            if self.use_bias:
+                for i in range(self.num_gemms):
+                    bias_param = getattr(self, f"bias{i}")
+                    if bias_param.grad is None:
+                        bias_param.grad = grad_biases_[i].to(bias_param.dtype)
+            del grad_biases_
