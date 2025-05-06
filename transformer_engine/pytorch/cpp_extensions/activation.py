@@ -10,7 +10,7 @@ import torch
 import transformer_engine_torch as tex
 from ._common import canonicalize_fp8_scales
 
-__all__ = ["gelu", "relu", "reglu", "geglu", "swiglu", "qgelu", "srelu"]
+__all__ = ["gelu", "relu", "reglu", "geglu", "swiglu", "dswiglu", "qgelu", "srelu"]
 
 
 def gelu(
@@ -44,6 +44,17 @@ def gelu(
         otype,
     )
 
+def dswiglu(
+    grad: torch.Tensor,
+    inp: torch.Tensor,
+    otype: tex.DType,
+) -> torch.Tensor:
+    """dSwiGLU with FP8 output"""
+    return torch.ops.tex_ts.dswiglu_ts(
+        grad,
+        inp,
+        otype,
+    )
 
 def relu(
     inp: torch.Tensor,
