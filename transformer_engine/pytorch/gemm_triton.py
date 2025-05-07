@@ -165,9 +165,9 @@ def te_gemm_triton(A,
         print("b.shape[0]: ", b_row_major.shape[0])
         print("a.shape[1]: ", a_row_major.shape[1])
         print("b.shape[1]: ", b_row_major.shape[1])
-        D = gemm_a8w8(a_row_major, b_row_major, a_scale_triton, b_scale_triton, bias, te_to_torch_dtype(A_type))
+        gemm_a8w8(a_row_major, b_row_major, D, a_scale_triton, b_scale_triton, bias, te_to_torch_dtype(A_type))
     else:
-        D = gemm_a16w16(a_row_major, b_row_major, te_to_torch_dtype(A_type))
+        gemm_a16w16(a_row_major, b_row_major, D, te_to_torch_dtype(A_type))
 
 @triton.autotune(
     configs=[
