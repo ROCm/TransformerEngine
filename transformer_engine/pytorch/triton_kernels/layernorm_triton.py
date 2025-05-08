@@ -42,7 +42,8 @@ def _layernorm_fwd_triton(
     eps,
     ZERO_CENTERED_GAMMA: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
-    APPLY_SCALE: tl.constexpr,
+    IS_FP8: tl.constexpr,
+    APPLY_ATOMIC: tl.constexpr,
     PERSISTENT: tl.constexpr,
 ):
 
@@ -61,7 +62,7 @@ def _layernorm_fwd_triton(
         rows_per_tile = 1
         start_row = pid
 
-    if APPLY_SCALE:
+    if IS_FP8:
         scale = tl.load(scale_ptr)
         amax = 0.0
 
@@ -123,7 +124,7 @@ def _layernorm_fwd_triton(
                 w_block += 1
             y_block = (x_block - mean) * rstd
             y_block = y_block * w_block + b_block
-            if APPLY_SCALE:
+            if IS_FP8:
                 amax_temp = tl.max(tl.abs(y_block), axis=-1)
                 amax = amax_temp if amax_temp > amax else amax
                 y_block = y_block * scale
@@ -139,15 +140,17 @@ def _layernorm_fwd_triton(
             w_block += 1
         y_block = (x_block - mean) * rstd
         y_block = y_block * w_block + b_block
-        if APPLY_SCALE:
+        if IS_FP8:
             amax_temp = tl.max(tl.abs(y_block), axis=-1)
             amax = amax_temp if amax_temp > amax else amax
             y_block = y_block * scale
         tl.store(y_ptr_start + col_offsets, y_block.to(y_ptr.type.element_ty), mask=mask)
 
-    if APPLY_SCALE:
-        #tl.atomic_max(amax_ptr, amax, sem="relaxed")
-        tl.store(amax_ptr+pid, amax)
+    if IS_FP8:
+        if APPLY_ATOMIC:
+            tl.atomic_max(amax_ptr, amax, sem="relaxed")
+        else:
+            tl.store(amax_ptr+pid, amax)
 
 
 @triton.jit
@@ -409,6 +412,8 @@ def te_layernorm_fwd_fp8_noalloc_triton(
     rsigma = torch.empty((M,), dtype=torch.float32, device=x.device)
     amax_temp = torch.empty((M,), dtype=torch.float32, device=x.device) if IS_FP8 else None
 
+    APPLY_ATOMIC = True if (M < 512) else False
+
     BLOCK_SIZE = block_size(x)
     _layernorm_fwd_triton[(M,)](
     #_layernorm_fwd_triton[(608,)]( # Persistent Kernel - Mark persistent as True before uncommenting
@@ -427,14 +432,15 @@ def te_layernorm_fwd_fp8_noalloc_triton(
         eps,
         ZERO_CENTERED_GAMMA=zero_centered_gamma,
         BLOCK_SIZE=BLOCK_SIZE,
-        APPLY_SCALE=IS_FP8,
+        IS_FP8=IS_FP8,
+        APPLY_ATOMIC=APPLY_ATOMIC,
         PERSISTENT=False,
         num_stages=1,
         waves_per_eu=waves_per_eu,  # 1 2 4
         num_warps=num_warps,  # 4 8 16
     )
 
-    if IS_FP8:
+    if IS_FP8 and not APPLY_ATOMIC:
         _layernorm_fwd_reduce_triton[(triton.cdiv(M, 256),)](
             amax_temp,
             amax,
