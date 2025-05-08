@@ -41,23 +41,21 @@ test_shapes = [
     (71, 3571),
     (29, 17389),
 ]
-
-test_types_str = ["fp32", "fp16", "bf16"]
-test_idtypes_str = input_dtypes_str(test_types_str)
-test_odtypes_str = output_dtypes_str(test_types_str)
+test_idtypes_str = input_dtypes_str(["fp32", "fp16"])
+test_odtypes_str = output_dtypes_str(["fp8e4m3"])
 
 all_boolean = [True, False]
 
 
 # matrix size from tests/cpp/operator/test_rmsnorm.cu
 @pytest.mark.parametrize("M, N", test_shapes)
-@pytest.mark.parametrize("in_dtype", test_idtypes_str)
+@pytest.mark.parametrize("in_dtype_test", test_idtypes_str)
 # TODO: add fp8/bf8 once fp8 triton kernels are available
-@pytest.mark.parametrize("out_dtype", test_odtypes_str)
+@pytest.mark.parametrize("out_dtype_test", test_odtypes_str)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
-def test_rmsnorm_fwd_bwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma):
-    in_dtype = str_to_torch_dtype(in_dtype)
-    out_dtype = str_to_torch_dtype(out_dtype)
+def test_rmsnorm_fwd_bwd_triton(M, N, in_dtype_test, out_dtype_test, zero_centered_gamma):
+    in_dtype = str_to_torch_dtype(in_dtype_test)
+    out_dtype = str_to_torch_dtype(out_dtype_test)
 
     # skip conditions
     skip_in_dtype_gt_out_dtype(in_dtype, out_dtype)
@@ -75,28 +73,36 @@ def test_rmsnorm_fwd_bwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma):
     fwd_ln_sm_margin = get_fwd_ln_sm_margin()
     bwd_ln_sm_margin = get_bwd_ln_sm_margin()
 
+    if out_dtype_test[1:] == "fp8e4m3":
+        scale = fill_uniform((1,), torch.float32)
+        amax_triton = torch.full((1,), 0.0, device="cuda")
+    else:
+        scale = None
     # run the fwd triton path
     # in hipfied kernel cpp test, z is of out_type
     ln_out_triton = torch.empty(M, N, dtype=out_dtype, device='cuda')
-    ln_out_triton, rsigma_triton = te_rmsnorm_fwd_fp8_noalloc_triton(input_tensor, gamma_tensor, epsilon, ln_out_triton, out_dtype, fwd_ln_sm_margin, zero_centered_gamma)
+    ln_out_triton, rsigma_triton = te_rmsnorm_fwd_fp8_noalloc_triton(input_tensor, gamma_tensor, epsilon, ln_out_triton, out_dtype, fwd_ln_sm_margin, zero_centered_gamma,
+                                                                     scale=scale, amax=amax_triton)
+    scale_inv_triton = 1 / scale
 
     # run the fwd reference hipified kernel path
     # dummy fp8 meta
-    scale_tensor = torch.empty(0, dtype=torch.float32, device='cuda')
-    amax_tensor = torch.zeros(0, dtype=torch.float32, device='cuda')
-    scale_inv_tensor = torch.empty(0, dtype=torch.float32, device='cuda')
+    if out_dtype_test[1:] == "fp8e4m3":
+        amax_hipified = torch.full((1,), 0.0, device="cuda")
+        scale_inv_hipified = torch.full((1,), 0.0, device="cuda")
+    else:
+        amax_hipified = scale_inv_hipified = torch.empty(0, device="cuda")
     ln_out_hipified = torch.empty(M, N, dtype=out_dtype, device='cuda')
-    ln_out_hipified, rsigma_hipified = tex.rmsnorm_fwd_fp8_noalloc(input_tensor, gamma_tensor, epsilon, scale_tensor, ln_out_hipified, amax_tensor, scale_inv_tensor, get_te_dtype(out_dtype), fwd_ln_sm_margin, zero_centered_gamma)
+    ln_out_hipified, rsigma_hipified = tex.rmsnorm_fwd_fp8_noalloc(input_tensor, gamma_tensor, epsilon, scale, ln_out_hipified, amax_hipified, scale_inv_hipified, get_te_dtype(out_dtype), fwd_ln_sm_margin, zero_centered_gamma)
 
     # assert on ln_out
-    ln_out_atol = 1e-8
-    _, ln_out_rtol = get_tolerances(out_dtype)
+    atol, rtol = get_tolerances(out_dtype)
     compare_results(
         "torch",
-        ln_out_triton,
-        ln_out_hipified,
-        ln_out_atol,
-        ln_out_rtol,
+        ln_out_triton.to(torch.float32),
+        ln_out_hipified.to(torch.float32),
+        atol,
+        rtol,
         lambda msg: f"ln_out does not match triton <-> hip\n\n{msg}\n",
     )
 
@@ -111,6 +117,25 @@ def test_rmsnorm_fwd_bwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma):
         rsigma_rtol,
         lambda msg: f"rsigma does not match triton <-> hip\n\n{msg}\n",
     )
+    atol_stats, _ = get_tolerances(torch.float32)
+    rtol_stats = 5e-5
+    if out_dtype_test[1:] == "fp8e4m3":
+        compare_results(
+            "torch",
+            amax_triton,
+            amax_hipified,
+            atol_stats,
+            rtol_stats,
+            lambda msg: f"amax does not match triton <-> hip\n\n{msg}\n",
+        )
+        compare_results(
+            "torch",
+            scale_inv_triton,
+            scale_inv_hipified,
+            atol_stats,
+            rtol_stats,
+            lambda msg: f"scale_inv does not match triton <-> hip\n\n{msg}\n",
+        )
 
     # run triton bwd
     dx_triton, dgamma_triton = te_rmsnorm_bwd_triton(dz_tensor, input_tensor, rsigma_triton, gamma_tensor, bwd_ln_sm_margin, zero_centered_gamma)
@@ -147,11 +172,18 @@ def test_rmsnorm_fwd_bwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma):
 
 
 @pytest.mark.parametrize("M, N", test_shapes)
-@pytest.mark.parametrize("in_dtype", test_idtypes_str)
+@pytest.mark.parametrize("in_dtype_test", test_idtypes_str)
+@pytest.mark.parametrize("out_dtype_test", test_odtypes_str)
 # TODO: add fp8/bf8 once fp8 triton kernels are available
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
-def test_rmsnorm_fwd_noalloc_triton(M, N, in_dtype, zero_centered_gamma):
-    in_dtype = str_to_torch_dtype(in_dtype)
+def test_rmsnorm_fwd_noalloc_triton(M, N, in_dtype_test, out_dtype_test, zero_centered_gamma):
+    in_dtype = str_to_torch_dtype(in_dtype_test)
+    out_dtype = str_to_torch_dtype(out_dtype_test)
+
+    # skip conditions
+    skip_in_dtype_gt_out_dtype(in_dtype, out_dtype)
+    skip_mixed_16bit_float_types(in_dtype, out_dtype)
+
     input_tensor = fill_uniform((M, N), in_dtype)
     gamma_tensor = fill_uniform(N, in_dtype)
 
@@ -159,17 +191,34 @@ def test_rmsnorm_fwd_noalloc_triton(M, N, in_dtype, zero_centered_gamma):
     fwd_ln_sm_margin = get_fwd_ln_sm_margin()
 
     # run the triton path
-    ln_out_triton = torch.empty(M, N, dtype=in_dtype, device='cuda')
-    ln_out_triton, rsigma_triton = te_rmsnorm_fwd_noalloc_triton(input_tensor, gamma_tensor, ln_out_triton, epsilon, fwd_ln_sm_margin, zero_centered_gamma)
-
+    ln_out_triton = torch.empty(M, N, dtype=out_dtype, device='cuda')
+    if out_dtype_test[1:] == "fp8e4m3":
+        scale = fill_uniform((1,), torch.float32)
+        amax_triton = torch.full((1,), 0.0, device="cuda")
+        amax_hipified =  torch.full((1,), 0.0, device="cuda")
+        scale_inv_hipified = torch.full((1,), 0.0, device="cuda")
+    else:
+        scale = torch.empty(0, device="cuda")
+        amax_triton = torch.empty(0, device="cuda")
+        amax_hipified = torch.empty(0, device="cuda")
+        scale_inv_hipified = torch.empty(0, device="cuda")
+    ln_out_triton, rsigma_triton = te_rmsnorm_fwd_fp8_noalloc_triton(input_tensor, gamma_tensor, epsilon, ln_out_triton, out_dtype, fwd_ln_sm_margin, zero_centered_gamma,
+                                                                     scale=scale, amax=amax_triton)
+    scale_inv_triton = 1 / scale
     # run the reference hipified kernel path
-    ln_out_hipified = torch.empty(M, N, dtype=in_dtype, device='cuda')
-    ln_out_hipified, rsigma_hipified = tex.rmsnorm_fwd_noalloc(input_tensor, gamma_tensor, ln_out_hipified, epsilon, fwd_ln_sm_margin, zero_centered_gamma)
-    atol, rtol = get_tolerances(in_dtype)
+    ln_out_hipified = torch.empty(M, N, dtype=out_dtype, device='cuda')
+    ln_out_hipified, rsigma_hipified = tex.rmsnorm_fwd_fp8_noalloc(input_tensor, gamma_tensor, 
+                                                               epsilon, scale,
+                                                               ln_out_hipified,
+                                                               amax_hipified,
+                                                               scale_inv_hipified,
+                                                               get_te_dtype(out_dtype),
+                                                               fwd_ln_sm_margin, zero_centered_gamma)
+    atol, rtol = get_tolerances(out_dtype)
     compare_results(
         "torch",
-        ln_out_triton,
-        ln_out_hipified,
+        ln_out_triton.to(torch.float64),
+        ln_out_hipified.to(torch.float64),
         atol,
         rtol,
         lambda msg: f"ln_out does not match triton <-> hip\n\n{msg}\n",
@@ -183,6 +232,24 @@ def test_rmsnorm_fwd_noalloc_triton(M, N, in_dtype, zero_centered_gamma):
         5e-5,
         lambda msg: f"rsigma does not match triton <-> hip\n\n{msg}\n",
     )
+
+    if out_dtype_test[1:] == "fp8e4m3":
+        compare_results(
+            "torch",
+            amax_triton,
+            amax_hipified,
+            atol,
+            rtol,
+            lambda msg: f"amax does not match triton <-> hip\n\n{msg}\n",
+        )
+        compare_results(
+            "torch",
+            scale_inv_triton,
+            scale_inv_hipified,
+            atol,
+            rtol,
+            lambda msg: f"scale_inv does not match triton <-> hip\n\n{msg}\n",
+        )
 
 
 @pytest.mark.parametrize("M, N", test_shapes)

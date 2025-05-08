@@ -18,22 +18,41 @@ def get_autotune_config():
     return [triton.Config({'waves_per_eu': we}, num_warps=nw) for (we, nw) in product([0, 1, 2, 4], [4, 8, 16])]
 
 
-@triton.autotune(configs=get_autotune_config(), key=['n_rows', 'n_cols'], use_cuda_graph=True)
+#@triton.autotune(configs=get_autotune_config(), key=['n_rows', 'n_cols'], use_cuda_graph=True)
+
+
 @triton.jit
-def _rmsnorm_fwd_triton(output_ptr, input_ptr, g_ptr, rsigma_ptr, input_row_stride, output_row_stride, n_rows, n_cols, epsilon,
+def _rmsnorm_fwd_triton(output_ptr, input_ptr, g_ptr, rsigma_ptr, scale_ptr, amax_ptr, input_row_stride, output_row_stride, n_rows, n_cols, epsilon,
                     ZERO_CENTERED_GAMMA: tl.constexpr, BLOCK_SIZE: tl.constexpr, USE_BLOCKED: tl.constexpr,
-                    NUM_PRGMS: tl.constexpr):
-    row_start = tl.program_id(0)
+                    NUM_PRGMS: tl.constexpr,
+                    APPLY_SCALE: tl.constexpr):
+    pid = tl.program_id(0)
     col_offsets = tl.arange(0, BLOCK_SIZE)
     # as older version Triton doesn't support tl.assume and BUFF OPS, comment out for now
     # tl.assume(input_row_stride >= 0)
     # tl.assume(output_row_stride >= 0)
     # tl.assume(row_start >= 0)
+    if APPLY_SCALE:
+        scale = tl.load(scale_ptr)
+        amax = 0.0
 
+    row_start = pid
+    '''
+    rows_per_prgm = n_rows // NUM_PRGMS
+    remaining = n_rows % NUM_PRGMS
+    row_start = pid * rows_per_prgm
+    
+    if pid >= remaining:
+        row_start = row_start + remaining
+    else:
+        row_start = row_start + pid
+    if pid < remaining:
+        rows_per_prgm += 1 
+    '''
     if USE_BLOCKED:
-
         # Persistent loop for rows
-        for row_idx in tl.range(row_start, n_rows, NUM_PRGMS, num_stages=1):
+         for row_idx in tl.range(row_start, n_rows, NUM_PRGMS, num_stages=1):
+         #for row_idx in tl.range(row_start, row_start + rows_per_prgm, num_stages=1):
             row_input_ptr = input_ptr + row_idx * input_row_stride
             row_output_ptr = output_ptr + row_idx * output_row_stride
 
@@ -76,6 +95,10 @@ def _rmsnorm_fwd_triton(output_ptr, input_ptr, g_ptr, rsigma_ptr, input_row_stri
                 if (ZERO_CENTERED_GAMMA):
                     g += 1
                 rms_norm = x * norm_factor * g
+                if APPLY_SCALE:
+                    amax_temp = tl.max(tl.abs(rms_norm))
+                    amax = amax_temp if amax_temp > amax else amax
+                    rms_norm = rms_norm * scale
                 output_ptrs = row_output_ptr + cols
                 tl.store(output_ptrs, rms_norm.to(output_ptr.type.element_ty))
 
@@ -89,12 +112,18 @@ def _rmsnorm_fwd_triton(output_ptr, input_ptr, g_ptr, rsigma_ptr, input_row_stri
             if (ZERO_CENTERED_GAMMA):
                 g += 1
             rms_norm = x * norm_factor * g
+            if APPLY_SCALE:
+                amax_temp = tl.max(tl.abs(rms_norm))
+                amax = amax_temp if amax_temp > amax else amax
+                rms_norm = rms_norm * scale
             output_ptrs = row_output_ptr + cols
             tl.store(output_ptrs, rms_norm.to(output_ptr.type.element_ty), mask=mask)
 
     else:
+ 
         mask = col_offsets < n_cols
         for row_idx in tl.range(row_start, n_rows, NUM_PRGMS, num_stages=2):
+        #for row_idx in tl.range(row_start, row_start + rows_per_prgm, num_stages=2):
             input_ptrs = input_ptr + row_idx * input_row_stride + col_offsets
             input_ptrs = tl.multiple_of(input_ptrs, (16, ))
             row = tl.load(input_ptrs, mask=mask, other=0.0, cache_modifier=".cg").to(tl.float32)
@@ -110,25 +139,69 @@ def _rmsnorm_fwd_triton(output_ptr, input_ptr, g_ptr, rsigma_ptr, input_row_stri
             if (ZERO_CENTERED_GAMMA):
                 g += 1
             rms_norm = row * norm_factor * g
-
+            if APPLY_SCALE:
+                amax_temp = tl.max(tl.abs(rms_norm))
+                amax = amax_temp if amax_temp > amax else amax
+                rms_norm = rms_norm * scale
             output_ptrs = output_ptr + row_idx * output_row_stride + col_offsets
             output_ptrs = tl.multiple_of(output_ptrs, (16, ))
             tl.store(output_ptrs, rms_norm.to(output_ptr.type.element_ty), mask=mask)
 
+    if APPLY_SCALE:
+        #tl.atomic_max(amax_ptr, amax, sem="relaxed")
+        tl.store(amax_ptr+pid, amax)
+
+
+@triton.jit
+def _rmsnorm_fwd_reduce_triton(
+    amax_input_ptr,
+    amax_output_ptr,
+    n_rows,
+    BLOCK_SIZE: tl.constexpr,
+):
+
+    # program id
+    pid = tl.program_id(0)
+
+    amax_offs = tl.arange(0, BLOCK_SIZE) + (pid * BLOCK_SIZE)
+    amax_input_ptrs = amax_input_ptr + amax_offs
+    amax_mask = amax_offs < n_rows
+    _amax = tl.load(amax_input_ptrs, mask=amax_mask, other=0.0)
+
+    amax = tl.max(_amax, axis=-1)
+
+    tl.atomic_max(amax_output_ptr, amax, sem="relaxed")
+
+
 
 # TODO: currently our triton kernel has not supported fp8 yet
-def te_rmsnorm_fwd_fp8_noalloc_triton(input, weight, eps, ln_out, otype, sm_margin, zero_centered_gamma):
+# TODO: Cagri: figure out how the scale_inv is used
+def te_rmsnorm_fwd_fp8_noalloc_triton(input, weight, eps, ln_out, otype, sm_margin, zero_centered_gamma,
+                                      scale=None, amax=None, scale_inv=None):
     M, N = input.shape
     rsigma = torch.empty((M, ), device='cuda', dtype=torch.float32)
     blk_size = block_size(input)
     USE_BLOCKED = use_blocked(input)
     NUM_PRGMS = num_programs(input, sm_margin)
-
     grid = lambda meta: (NUM_PRGMS, )
+    # fully utilize the CUs if sm_margin is not set
+    if sm_margin == None:
+        NUM_PRGMS = input.shape[0]
     #encode the otype if ln_out is of different dtype
     ln_out = ln_out.view(otype)
-    _rmsnorm_fwd_triton[grid](ln_out, input, weight, rsigma, input.stride(0), ln_out.stride(0), M, N, eps, zero_centered_gamma, blk_size, USE_BLOCKED, NUM_PRGMS)
-
+    IS_FP8 = (otype == torch.float8_e4m3fnuz)
+    amax_temp = torch.empty((NUM_PRGMS,), dtype=torch.float32, device=input.device) if IS_FP8 else None
+    _rmsnorm_fwd_triton[grid](ln_out, input, weight, rsigma, scale, amax_temp, input.stride(0), ln_out.stride(0), M, N, eps, zero_centered_gamma, blk_size, 
+                              USE_BLOCKED, NUM_PRGMS,
+                              APPLY_SCALE=IS_FP8)
+    scale_inv = (1.0 / scale) if IS_FP8 else None
+    if IS_FP8:
+        _rmsnorm_fwd_reduce_triton[(triton.cdiv(NUM_PRGMS, 256),)](
+            amax_temp,
+            amax,
+            NUM_PRGMS,
+            256,
+        )
     return ln_out, rsigma
 
 
