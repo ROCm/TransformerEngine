@@ -388,10 +388,11 @@ def _layernorm_bwd_dwdb_triton(
     tl.store(FINAL_DW + cols, sum_dw.to(FINAL_DW.type.element_ty), mask=cols < N)
     tl.store(FINAL_DB + cols, sum_db.to(FINAL_DB.type.element_ty), mask=cols < N)
 
+
 @triton.jit
 def _layernorm_bwd_dwdb_triton_v2(
-    X,  # pointer to the partial sum of weights gradient
-    DY,  # pointer to the partial sum of biases gradient
+    X,  # pointer to the input
+    DY,  # pointer to the output gradient
     Mean,  # pointer to the mean
     Rstd,  # pointer to the 1/std
     stride,
@@ -402,13 +403,11 @@ def _layernorm_bwd_dwdb_triton_v2(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
 ):
-    # dx_row_ptr = DX + row * stride
-    # Map the program id to the elements of DW and DB it should compute.
     pid = tl.program_id(0)
     cols = pid * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     dw = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     db = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    # Iterate through the rows of DW and DB to sum the partial sums.
+    # Iterate through the rows of x and dy to compute dw and db.git st
     for i in range(0, M, BLOCK_SIZE_M):
         rows = i + tl.arange(0, BLOCK_SIZE_M)
         means = tl.load(Mean + rows, mask=rows < M, other=0.0).to(tl.float32)
@@ -492,7 +491,6 @@ def te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, zero_centered_gamma):
     # calculate dw and db separately when M is small
     IGNORE_DW_DB_IN_FUSED = M <= 512
     tile_num = max(min(256, M // 4), 1)
-    #rows_per_tile = NUM_ROWS // tile_num
     if (M <= 512 and M * N < 64 * 1024 * 1024):
         tile_num = M
     elif M > 16384:
@@ -511,7 +509,7 @@ def te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, zero_centered_gamma):
     dgamma = torch.zeros((N,), dtype=gamma.dtype, device=gamma.device)
     dbeta = torch.zeros((N,), dtype=gamma.dtype, device=gamma.device)
     grid_bwd = (tile_num,)
-    kernel1 = _layernorm_bwd_dx_fused_triton[grid_bwd](
+    _layernorm_bwd_dx_fused_triton[grid_bwd](
         dx,
         dz,
         _dgamma,
@@ -535,7 +533,7 @@ def te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, zero_centered_gamma):
         dwdb_block_n = triton.next_power_of_2(dwdb_block_n)
         dwdb_block_m = (64 * 128) // dwdb_block_n
         dwdb_block_m = min(triton.next_power_of_2(tile_num), dwdb_block_m)
-        kernel2 = _layernorm_bwd_dwdb_triton[grid_reduce](
+        _layernorm_bwd_dwdb_triton[grid_reduce](
             _dgamma,
             _dbeta,
             dgamma,
@@ -550,16 +548,16 @@ def te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, zero_centered_gamma):
         dwdb_block_n = triton.next_power_of_2(dwdb_block_n)
         dwdb_block_m = (64 * 128) // dwdb_block_n
         dwdb_block_m = min(triton.next_power_of_2(M), dwdb_block_m)
-        kernel2 = _layernorm_bwd_dwdb_triton_v2[grid_reduce](
-            x,  # pointer to the partial sum of weights gradient
-            dz,  # pointer to the partial sum of biases gradient
-            mu,  # pointer to the mean
-            rsigma,  # pointer to the 1/std
+        _layernorm_bwd_dwdb_triton_v2[grid_reduce](
+            x,
+            dz,
+            mu,
+            rsigma,
             x.stride(0),
-            dgamma,  # pointer to the weights gradient
-            dbeta,  # pointer to the biases gradient
-            M,  # GROUP_SIZE_M
-            N,  # number of columns
+            dgamma,
+            dbeta,
+            M,
+            N,
             BLOCK_SIZE_M=dwdb_block_m,
             BLOCK_SIZE_N=dwdb_block_n,
         )
