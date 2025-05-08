@@ -1021,6 +1021,7 @@ void hipblaslt_gemm(const Tensor *inputA,
   const hipblasltDatatype_t B_type = get_hipblaslt_dtype(inputB->data.dtype);
   const hipblasltDatatype_t D_type = get_hipblaslt_dtype(outputD->data.dtype);
   const hipblasltDatatype_t bias_type = get_hipblaslt_dtype(inputBias->data.dtype);
+  const hipblasltDatatype_t aux_type = get_hipblaslt_dtype(outputPreGelu->data.dtype);
 
   NVTE_CHECK(!is_fp8_dtype(inputA->data.dtype) || A_scale_inverse != nullptr,
              "FP8 input to GEMM requires inverse of scale!");
@@ -1029,8 +1030,6 @@ void hipblaslt_gemm(const Tensor *inputA,
 
   // check consistency of arguments:
   // if fp8 is desired, context cannot be null
-  // fp8 + gelu fusion + fp8 aux is unavailable right now.
-  const hipblasltDatatype_t aux_type = get_hipblaslt_dtype(outputPreGelu->data.dtype);
   if(use_fp8 && gelu){
     //Currently hipblasLT only supports below config for fp8 gelu_aux
     bool allow_fp8_gemm = (A_type == HIP_R_8F_E4M3_FNUZ) &&
