@@ -1031,14 +1031,14 @@ void hipblaslt_gemm(const Tensor *inputA,
   // if fp8 is desired, context cannot be null
   // fp8 + gelu fusion + fp8 aux is unavailable right now.
   const hipblasltDatatype_t aux_type = get_hipblaslt_dtype(outputPreGelu->data.dtype);
-  //Currently hipblasLT only supports below config for fp8 gelu_aux
-  bool allow_fp8_gemm = (A_type == HIP_R_8F_E4M3_FNUZ) &&
+  if(use_fp8 && gelu){
+    //Currently hipblasLT only supports below config for fp8 gelu_aux
+    bool allow_fp8_gemm = (A_type == HIP_R_8F_E4M3_FNUZ) &&
                         (B_type == HIP_R_8F_E4M3_FNUZ) &&
                         (D_type == HIP_R_8F_E4M3_FNUZ) &&
                         (bias) ? (bias_type == HIP_R_16F) : true &&
                         (gelu) ? (aux_type == HIP_R_16F) : false;
-  if(!allow_fp8_gemm && use_fp8) {
-    NVTE_CHECK(!gelu, "fp8 gemm + gelu fusion is unavailable with current config!");
+    NVTE_CHECK(allow_fp8_gemm, "fp8 gemm + gelu fusion is unavailable with current config!");
   }
   float one = 1.0;
   float zero = 0.0;
