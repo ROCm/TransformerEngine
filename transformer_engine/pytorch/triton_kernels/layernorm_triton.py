@@ -8,7 +8,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .norm_common_triton import block_size, use_blocked
+from .norm_common_triton import block_size
 from .norm_common_triton import block_size_bwd, use_blocked_bwd
 
 
@@ -78,7 +78,9 @@ def _layernorm_fwd_triton(
         loop_num_l = loop_num
         for b in range(0, loop_num_l):
             col_offsets = b * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-            x_block = tl.load(x_ptr_start + col_offsets).to(tl.float32)  # Unmasked loads
+            x_block = tl.load(x_ptr_start + col_offsets).to(
+                tl.float32
+            )  # Unmasked loads
             _mean += x_block
 
         # For last iteration, do masked load
@@ -94,7 +96,9 @@ def _layernorm_fwd_triton(
         loop_num_l = loop_num
         for b in range(0, loop_num_l):
             col_offsets = b * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-            x_block = tl.load(x_ptr_start + col_offsets).to(tl.float32)  # Unmasked loads
+            x_block = tl.load(x_ptr_start + col_offsets).to(
+                tl.float32
+            )  # Unmasked loads
             x_block = x_block - mean
             _var += x_block * x_block
 
@@ -135,7 +139,9 @@ def _layernorm_fwd_triton(
         mask = col_offsets < n_cols
         w_block = tl.load(w_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
         b_block = tl.load(b_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
-        x_block = tl.load(x_ptr_start + col_offsets, mask=mask, other=0.0).to(tl.float32)
+        x_block = tl.load(x_ptr_start + col_offsets, mask=mask, other=0.0).to(
+            tl.float32
+        )
         if ZERO_CENTERED_GAMMA:
             w_block += 1
         y_block = (x_block - mean) * rstd
@@ -144,11 +150,13 @@ def _layernorm_fwd_triton(
             amax_temp = tl.max(tl.abs(y_block), axis=-1)
             amax = amax_temp if amax_temp > amax else amax
             y_block = y_block * scale
-        tl.store(y_ptr_start + col_offsets, y_block.to(y_ptr.type.element_ty), mask=mask)
+        tl.store(
+            y_ptr_start + col_offsets, y_block.to(y_ptr.type.element_ty), mask=mask
+        )
 
     if APPLY_SCALE:
-        #tl.atomic_max(amax_ptr, amax, sem="relaxed")
-        tl.store(amax_ptr+pid, amax)
+        # tl.atomic_max(amax_ptr, amax, sem="relaxed")
+        tl.store(amax_ptr + pid, amax)
 
 
 @triton.jit
@@ -170,6 +178,7 @@ def _layernorm_fwd_reduce_triton(
     amax = tl.max(_amax, axis=-1)
 
     tl.atomic_max(amax_output_ptr, amax, sem="relaxed")
+
 
 @triton.jit
 def _layernorm_bwd_dx_fused_triton(
@@ -252,7 +261,7 @@ def _layernorm_bwd_dx_fused_triton(
             # Compute dx and partial sums for dw and db:
 
             dx_row_ptr = DX + row * stride
-            if IGNORE_DW_DB == False:
+            if not IGNORE_DW_DB:
                 dw_row_ptr = DW + pid * N
                 db_row_ptr = DB + pid * N
 
@@ -270,7 +279,7 @@ def _layernorm_bwd_dx_fused_triton(
 
                 dx = (wdy - (xhat * c1 + c2)) * rstd
                 tl.store(dx_row_ptr + cols, dx.to(DX.type.element_ty))
-                if IGNORE_DW_DB == False:
+                if not IGNORE_DW_DB:
                     partial_dw = dy * xhat
                     dw_ptrs = dw_row_ptr + cols
                     partial_dw += tl.load(dw_ptrs).to(tl.float32)
@@ -297,7 +306,7 @@ def _layernorm_bwd_dx_fused_triton(
 
             dx = (wdy - (xhat * c1 + c2)) * rstd
             tl.store(dx_row_ptr + cols, dx.to(DX.type.element_ty), mask=mask)
-            if IGNORE_DW_DB == False:
+            if not IGNORE_DW_DB:
                 partial_dw = dy * xhat
                 dw_ptrs = dw_row_ptr + cols
                 partial_dw += tl.load(dw_ptrs, mask=mask).to(tl.float32)
@@ -317,7 +326,7 @@ def _layernorm_bwd_dx_fused_triton(
         cols = tl.arange(0, BLOCK_SIZE_N)
         mask = cols < N
         row = pid
-        if IGNORE_DW_DB == False:
+        if not IGNORE_DW_DB:
             dw_row = tl.zeros((BLOCK_SIZE_N,), dtype=tl.float32)
             db_row = tl.zeros((BLOCK_SIZE_N,), dtype=tl.float32)
 
@@ -347,14 +356,14 @@ def _layernorm_bwd_dx_fused_triton(
 
             # Write dx:
             tl.store(dx_ptrs + cols, dx.to(DX.type.element_ty), mask=mask)
-            if IGNORE_DW_DB == False:
+            if not IGNORE_DW_DB:
                 # Accumulate partial sums for dw and db:
                 dw_row += dy * xhat
                 db_row += dy
 
             # Advance to next row:
             row += tile_num
-        if IGNORE_DW_DB == False:
+        if not IGNORE_DW_DB:
             tl.store(DW + pid * N + cols, dw_row.to(DW.type.element_ty), mask=mask)
             tl.store(DB + pid * N + cols, db_row.to(DB.type.element_ty), mask=mask)
 
@@ -443,14 +452,16 @@ def te_layernorm_fwd_fp8_noalloc_triton(
 ):
     M, N = x.shape
     y = y.view(out_dtype)
-    IS_FP8 = (out_dtype == torch.float8_e4m3fnuz)
+    IS_FP8 = out_dtype == torch.float8_e4m3fnuz
     mu = torch.empty((M,), dtype=torch.float32, device=x.device)
     rsigma = torch.empty((M,), dtype=torch.float32, device=x.device)
-    amax_temp = torch.empty((M,), dtype=torch.float32, device=x.device) if IS_FP8 else None
+    amax_temp = (
+        torch.empty((M,), dtype=torch.float32, device=x.device) if IS_FP8 else None
+    )
 
     BLOCK_SIZE = block_size(x)
     _layernorm_fwd_triton[(M,)](
-    #_layernorm_fwd_triton[(608,)]( # Persistent Kernel - Mark persistent as True before uncommenting
+        # _layernorm_fwd_triton[(608,)]( # Persistent Kernel - Mark persistent as True before uncommenting
         x,
         y,
         gamma,
@@ -485,22 +496,23 @@ def te_layernorm_fwd_fp8_noalloc_triton(
 
     return y, mu, rsigma, scale_inv
 
+
 # TODO: Add `sm_margin` to the interface.
 def te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, zero_centered_gamma):
     M, N = x.shape
     # calculate dw and db separately when M is small
     IGNORE_DW_DB_IN_FUSED = M <= 512
     tile_num = max(min(256, M // 4), 1)
-    if (M <= 512 and M * N < 64 * 1024 * 1024):
+    if M <= 512 and M * N < 64 * 1024 * 1024:
         tile_num = M
     elif M > 16384:
         tile_num = 2048
         if IGNORE_DW_DB_IN_FUSED:
-            tile_num = 4096  
+            tile_num = 4096
     BLOCK_SIZE = block_size_bwd(x, tile_num)
     num_warps = min(max(BLOCK_SIZE // 256, 1), 8)
     dx = torch.empty_like(x)
-    if IGNORE_DW_DB_IN_FUSED == False:
+    if not IGNORE_DW_DB_IN_FUSED:
         _dgamma = torch.zeros((tile_num, N), dtype=torch.float32, device=gamma.device)
         _dbeta = torch.zeros((tile_num, N), dtype=torch.float32, device=gamma.device)
     else:
@@ -528,7 +540,7 @@ def te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, zero_centered_gamma):
         IGNORE_DW_DB=IGNORE_DW_DB_IN_FUSED,
     )
     grid_reduce = lambda meta: (triton.cdiv(N, meta["BLOCK_SIZE_N"]),)
-    if IGNORE_DW_DB_IN_FUSED == False:
+    if not IGNORE_DW_DB_IN_FUSED:
         dwdb_block_n = max(16, N // 256)
         dwdb_block_n = triton.next_power_of_2(dwdb_block_n)
         dwdb_block_m = (64 * 128) // dwdb_block_n
