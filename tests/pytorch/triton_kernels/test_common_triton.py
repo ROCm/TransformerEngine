@@ -11,23 +11,13 @@ import triton
 
 from transformer_engine.pytorch import cpp_extensions as tex
 
+from transformer_engine.pytorch.triton_kernels.norm_common_triton import e4m3_type, e5m2_type
+
 
 # Mimics behavior of `fillUniform` from `tests/cpp/test_common.cu`.
 
 rng_seed = 12345
 rng = np.random.default_rng(np.random.MT19937(rng_seed))
-
-
-def is_cdna4():
-    return triton.runtime.driver.active.get_current_target().arch == 'gfx950'
-
-
-e4m3_type = torch.float8_e4m3fn if is_cdna4() else torch.float8_e4m3fnuz
-e5m2_type = torch.float8_e5m2 if is_cdna4() else torch.float8_e5m2fnuz
-
-
-def IS_FP8(dtype):
-    return (dtype == e4m3_type) or (dtype == e5m2_type)
 
 
 def fill_uniform(shape, dtype):
@@ -60,6 +50,7 @@ def get_tolerances(dtype):
 # Arguments:
 #     t: actual tensor
 #     r: expected tensor
+# NOTE: DO NOT upcast inputs to fp32 if you are using te_compare for any precision other than fp32
 def te_compare_results(t, r, atol, rtol, msg):
     assert t.dtype == r.dtype, f"Tensor dtypes don't match: {t.dtype} vs {r.dtype}."
     assert t.shape == r.shape, f"Tensor shapes don't match: {t.shape} vs {r.shape}."

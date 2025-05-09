@@ -9,6 +9,7 @@ import triton
 import triton.language as tl
 
 from .norm_common_triton import block_size, use_blocked
+from .norm_common_triton import IS_FP8 as IS_FP8_COMMON
 
 
 def get_autotune_config(full_tuning_space=False):
@@ -405,14 +406,15 @@ def te_layernorm_fwd_fp8_noalloc_triton(
 ):
     M, N = x.shape
     y = y.view(out_dtype)
-    IS_FP8 = (out_dtype == torch.float8_e4m3fnuz)
+    IS_FP8 = IS_FP8_COMMON(out_dtype)
     mu = torch.empty((M,), dtype=torch.float32, device=x.device)
     rsigma = torch.empty((M,), dtype=torch.float32, device=x.device)
     amax_temp = torch.empty((M,), dtype=torch.float32, device=x.device) if IS_FP8 else None
 
-    APPLY_ATOMIC = True if (M < 512) else False
+    APPLY_ATOMIC = M < 512
 
-    BLOCK_SIZE = block_size(x)
+    max_fused_size = 16384 // x.element_size()
+    BLOCK_SIZE = min(max_fused_size, triton.next_power_of_2(x.shape[1]))
     _layernorm_fwd_triton[(M,)](
         x,
         y,
@@ -431,7 +433,10 @@ def te_layernorm_fwd_fp8_noalloc_triton(
         BLOCK_SIZE=BLOCK_SIZE,
         IS_FP8=IS_FP8,
         APPLY_ATOMIC=APPLY_ATOMIC,
-        PERSISTENT=False, # TODO: Improve performance with persistent kernel
+        # TODO: Improve performance with persistent kernel
+        # Persistent kernel currently lags behind non persistent version
+        # It also lags behind TE implementation in a few cases
+        PERSISTENT=False,
     )
 
     if IS_FP8 and not APPLY_ATOMIC:

@@ -9,6 +9,7 @@ from transformer_engine.pytorch import cpp_extensions as tex
 from transformer_engine.pytorch.triton_kernels.norm_common_triton import (
     get_fwd_ln_sm_margin,
     get_bwd_ln_sm_margin,
+    IS_FP8,
 )
 from transformer_engine.pytorch.triton_kernels.layernorm_triton import (
     te_layernorm_bwd_triton,
@@ -25,7 +26,6 @@ from test_common_triton import (
     get_te_dtype,
     get_tolerances,
     compare_results,
-    IS_FP8,
 )
 
 
@@ -74,8 +74,8 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
 
     # Run Triton forward.
     y_triton = torch.empty((M, N), dtype=out_dtype, device="cuda")
-    amax_triton = torch.full((1,), 0.0, device="cuda") if IS_FP8(out_dtype) else None
-    scale_inv_triton = torch.full((1,), 0.0, device="cuda") if IS_FP8(out_dtype) else None
+    amax_triton = torch.zeros((1,), device="cuda") if IS_FP8(out_dtype) else None
+    scale_inv_triton = torch.zeros((1,), device="cuda") if IS_FP8(out_dtype) else None
 
     y_triton, mu_triton, rsigma_triton, scale_inv_triton = te_layernorm_fwd_fp8_noalloc_triton(
         x,
@@ -157,6 +157,7 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
         # TODO: Investigate test failures when using atol=5e-7.
         # atol = 5e-7
         pass
+    # NOTE: DO NOT upcast inputs to fp32 if you are using te_compare for any precision other than fp32
     compare_results(
         "te" if IS_FP8(out_dtype) else "torch",
         y_triton,

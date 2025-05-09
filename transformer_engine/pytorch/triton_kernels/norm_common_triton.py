@@ -8,6 +8,18 @@ import torch
 import triton
 
 
+def is_cdna4():
+    return triton.runtime.driver.active.get_current_target().arch == 'gfx950'
+
+
+e4m3_type = torch.float8_e4m3fn if is_cdna4() else torch.float8_e4m3fnuz
+e5m2_type = torch.float8_e5m2 if is_cdna4() else torch.float8_e5m2fnuz
+
+
+def IS_FP8(dtype):
+    return (dtype == e4m3_type) or (dtype == e5m2_type)
+
+
 def get_ln_sm_margin(sm_margin_type):
     assert sm_margin_type in {"FWD", "BWD", "INF"}
     try:
@@ -46,7 +58,7 @@ def num_programs(x, sm_margin=None):
 
 
 def block_size(x):
-    max_fused_size = 16384 // x.element_size()
+    max_fused_size = 65536 // x.element_size()
     block_size = min(max_fused_size, triton.next_power_of_2(x.shape[1]))
     return block_size
 
