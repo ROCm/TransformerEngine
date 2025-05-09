@@ -8,7 +8,8 @@ import torch
 import triton
 import triton.language as tl
 
-from .norm_common_triton import block_size
+from .norm_common_triton import block_size, use_blocked
+from .norm_common_triton import IS_FP8 as IS_FP8_COMMON
 
 
 def get_autotune_config(full_tuning_space=False):
@@ -408,11 +409,8 @@ def te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, zero_centered_gamma):
     tile_num = max(min(256, M // 4), 1)
     if M <= 512 and M * N < 64 * 1024 * 1024:
         tile_num = M
-    elif M > 16384:
+    elif M >= 8192:
         tile_num = 2048
-        if IGNORE_DW_DB_IN_FUSED:
-            tile_num = 4096
-
     max_fused_size = 32768 // x.element_size()
     next_power = triton.next_power_of_2(N)
     BLOCK_SIZE = min(max_fused_size, next_power)
