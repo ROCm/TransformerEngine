@@ -9,6 +9,7 @@ from transformer_engine.pytorch import cpp_extensions as tex
 from transformer_engine.pytorch.triton_kernels.norm_common_triton import (
     get_fwd_ln_sm_margin,
     get_bwd_ln_sm_margin,
+    IS_FP8,
 )
 from transformer_engine.pytorch.triton_kernels.layernorm_triton import (
     te_layernorm_bwd_triton,
@@ -30,7 +31,7 @@ from test_common_triton import (
 
 test_idtypes_str = input_dtypes_str(["fp32", "fp16"])
 
-test_odtypes_str = output_dtypes_str(["fp32", "bf16", "fp16"])
+test_odtypes_str = output_dtypes_str(["fp32", "bf16", "fp16", "fp8e4"])
 
 test_shapes = [
     (2048, 12288),
@@ -64,18 +65,41 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
     gamma = fill_uniform(N, in_dtype)
     beta = fill_uniform(N, in_dtype)
     dz = fill_uniform((M, N), in_dtype)
+    if IS_FP8(out_dtype):
+        scale = fill_uniform((1,), torch.float32)
+    else:
+        scale = torch.empty(0, device="cuda")
 
     epsilon = 1e-5
 
     # Run Triton forward.
     y_triton = torch.empty((M, N), dtype=out_dtype, device="cuda")
-    y_triton, mu_triton, rsigma_triton = te_layernorm_fwd_fp8_noalloc_triton(
-        x, gamma, beta, epsilon, y_triton, out_dtype, zero_centered_gamma
+    amax_triton = torch.zeros((1,), device="cuda") if IS_FP8(out_dtype) else None
+    scale_inv_triton = torch.zeros((1,), device="cuda") if IS_FP8(out_dtype) else None
+
+    y_triton, mu_triton, rsigma_triton, scale_inv_triton = (
+        te_layernorm_fwd_fp8_noalloc_triton(
+            x,
+            gamma,
+            beta,
+            epsilon,
+            scale,
+            y_triton,
+            amax_triton,
+            scale_inv_triton,
+            out_dtype,
+            zero_centered_gamma,
+        )
     )
 
     # Run Hipified forward reference.
-    scale = amax = scale_inv = torch.empty(0, device="cuda")
     y_hipified = torch.empty((M, N), dtype=out_dtype, device="cuda")
+    if IS_FP8(out_dtype):
+        amax_hipified = torch.full((1,), 0.0, device="cuda")
+        scale_inv_hipified = torch.full((1,), 0.0, device="cuda")
+    else:
+        amax_hipified = scale_inv_hipified = torch.empty(0, device="cuda")
+
     y_hipified, mu_hipified, rsigma_hipified = tex.layernorm_fwd_fp8_noalloc(
         x,
         gamma,
@@ -83,8 +107,8 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
         epsilon,
         scale,
         y_hipified,
-        amax,
-        scale_inv,
+        amax_hipified,
+        scale_inv_hipified,
         get_te_dtype(out_dtype),
         get_fwd_ln_sm_margin(),
         zero_centered_gamma,
@@ -109,6 +133,23 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
         rtol_stats,
         lambda msg: f"rsigma does not match triton <-> hip\n\n{msg}\n",
     )
+    if IS_FP8(out_dtype):
+        compare_results(
+            "torch",
+            amax_triton,
+            amax_hipified,
+            atol_stats,
+            rtol_stats,
+            lambda msg: f"amax does not match triton <-> hip\n\n{msg}\n",
+        )
+        compare_results(
+            "torch",
+            scale_inv_triton,
+            scale_inv_hipified,
+            atol_stats,
+            rtol_stats,
+            lambda msg: f"scale_inv does not match triton <-> hip\n\n{msg}\n",
+        )
 
     # Assert on y:
     atol, rtol = get_tolerances(out_dtype)
@@ -118,8 +159,9 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
         # TODO: Investigate test failures when using atol=5e-7.
         # atol = 5e-7
         pass
+    # NOTE: DO NOT upcast inputs to fp32 if you are using te_compare for any precision other than fp32
     compare_results(
-        "torch",
+        "te" if IS_FP8(out_dtype) else "torch",
         y_triton,
         y_hipified,
         atol,
@@ -127,53 +169,54 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
         lambda msg: f"y does not match triton <-> hip\n\n{msg}\n",
     )
 
-    # Run Triton backward.
-    dx_triton, dgamma_triton, dbeta_triton = te_layernorm_bwd_triton(
-        dz,
-        x,
-        mu_triton,
-        rsigma_triton,
-        gamma,
-        zero_centered_gamma,
-    )
+    if not IS_FP8(out_dtype):
+        # Run Triton backward.
+        dx_triton, dgamma_triton, dbeta_triton = te_layernorm_bwd_triton(
+            dz,
+            x,
+            mu_triton,
+            rsigma_triton,
+            gamma,
+            zero_centered_gamma,
+        )
 
-    # Run Hipified backward reference.
-    dx_hipified, dgamma_hipified, dbeta_hipified = tex.layernorm_bwd(
-        dz,
-        x,
-        mu_hipified,
-        rsigma_hipified,
-        gamma,
-        get_bwd_ln_sm_margin(),
-        zero_centered_gamma,
-    )
+        # Run Hipified backward reference.
+        dx_hipified, dgamma_hipified, dbeta_hipified = tex.layernorm_bwd(
+            dz,
+            x,
+            mu_hipified,
+            rsigma_hipified,
+            gamma,
+            get_bwd_ln_sm_margin(),
+            zero_centered_gamma,
+        )
 
-    # Assert on dx, dgamma and dbeta:
-    atol_bwd = 1.5e-4
-    rtol_bwd = 1e-4
-    # TE comparison deals with fp16 rounding errors.
-    bwd_cmp = "te" if in_dtype == out_dtype == torch.float16 else "torch"
-    compare_results(
-        bwd_cmp,
-        dx_triton,
-        dx_hipified,
-        atol_bwd,
-        rtol_bwd,
-        lambda msg: f"dx does not match triton <-> hip\n\n{msg}\n",
-    )
-    compare_results(
-        bwd_cmp,
-        dgamma_triton,
-        dgamma_hipified,
-        atol_bwd,
-        rtol_bwd,
-        lambda msg: f"dgamma does not match triton <-> hip\n\n{msg}\n",
-    )
-    compare_results(
-        bwd_cmp,
-        dbeta_triton,
-        dbeta_hipified,
-        atol_bwd,
-        rtol_bwd,
-        lambda msg: f"dbeta does not match triton <-> hip\n\n{msg}\n",
-    )
+        # Assert on dx, dgamma and dbeta:
+        atol_bwd = 1.5e-4
+        rtol_bwd = 1e-4
+        # TE comparison deals with fp16 rounding errors.
+        bwd_cmp = "te" if in_dtype == out_dtype == torch.float16 else "torch"
+        compare_results(
+            bwd_cmp,
+            dx_triton,
+            dx_hipified,
+            atol_bwd,
+            rtol_bwd,
+            lambda msg: f"dx does not match triton <-> hip\n\n{msg}\n",
+        )
+        compare_results(
+            bwd_cmp,
+            dgamma_triton,
+            dgamma_hipified,
+            atol_bwd,
+            rtol_bwd,
+            lambda msg: f"dgamma does not match triton <-> hip\n\n{msg}\n",
+        )
+        compare_results(
+            bwd_cmp,
+            dbeta_triton,
+            dbeta_hipified,
+            atol_bwd,
+            rtol_bwd,
+            lambda msg: f"dbeta does not match triton <-> hip\n\n{msg}\n",
+        )
