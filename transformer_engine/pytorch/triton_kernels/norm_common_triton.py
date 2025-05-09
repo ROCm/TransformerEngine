@@ -9,7 +9,7 @@ import triton
 
 
 def is_cdna4():
-    return triton.runtime.driver.active.get_current_target().arch == 'gfx950'
+    return triton.runtime.driver.active.get_current_target().arch == "gfx950"
 
 
 e4m3_type = torch.float8_e4m3fn if is_cdna4() else torch.float8_e4m3fnuz

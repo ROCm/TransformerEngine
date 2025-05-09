@@ -79,7 +79,9 @@ def _layernorm_fwd_triton(
         loop_num_l = loop_num
         for b in range(0, loop_num_l):
             col_offsets = b * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-            x_block = tl.load(x_ptr_start + col_offsets).to(tl.float32)  # Unmasked loads
+            x_block = tl.load(x_ptr_start + col_offsets).to(
+                tl.float32
+            )  # Unmasked loads
             _mean += x_block
 
         # For last iteration, do masked load
@@ -95,7 +97,9 @@ def _layernorm_fwd_triton(
         loop_num_l = loop_num
         for b in range(0, loop_num_l):
             col_offsets = b * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-            x_block = tl.load(x_ptr_start + col_offsets).to(tl.float32)  # Unmasked loads
+            x_block = tl.load(x_ptr_start + col_offsets).to(
+                tl.float32
+            )  # Unmasked loads
             x_block = x_block - mean
             _var += x_block * x_block
 
@@ -136,7 +140,9 @@ def _layernorm_fwd_triton(
         mask = col_offsets < n_cols
         w_block = tl.load(w_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
         b_block = tl.load(b_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
-        x_block = tl.load(x_ptr_start + col_offsets, mask=mask, other=0.0).to(tl.float32)
+        x_block = tl.load(x_ptr_start + col_offsets, mask=mask, other=0.0).to(
+            tl.float32
+        )
         if ZERO_CENTERED_GAMMA:
             w_block += 1
         y_block = (x_block - mean) * rstd
@@ -145,13 +151,15 @@ def _layernorm_fwd_triton(
             amax_temp = tl.max(tl.abs(y_block), axis=-1)
             amax = amax_temp if amax_temp > amax else amax
             y_block = y_block * scale
-        tl.store(y_ptr_start + col_offsets, y_block.to(y_ptr.type.element_ty), mask=mask)
+        tl.store(
+            y_ptr_start + col_offsets, y_block.to(y_ptr.type.element_ty), mask=mask
+        )
 
     if IS_FP8:
         if APPLY_ATOMIC:
             tl.atomic_max(amax_ptr, amax, sem="relaxed")
         else:
-            tl.store(amax_ptr+pid, amax)
+            tl.store(amax_ptr + pid, amax)
 
 
 @triton.jit
@@ -393,23 +401,16 @@ def _layernorm_bwd_dwdb_triton(
 
 # TODO: Implement persistent kernel in forward and add `sm_margin` to the interface.
 def te_layernorm_fwd_fp8_noalloc_triton(
-    x,
-    gamma,
-    beta,
-    eps,
-    scale,
-    y,
-    amax,
-    scale_inv,
-    out_dtype,
-    zero_centered_gamma
+    x, gamma, beta, eps, scale, y, amax, scale_inv, out_dtype, zero_centered_gamma
 ):
     M, N = x.shape
     y = y.view(out_dtype)
     IS_FP8 = IS_FP8_COMMON(out_dtype)
     mu = torch.empty((M,), dtype=torch.float32, device=x.device)
     rsigma = torch.empty((M,), dtype=torch.float32, device=x.device)
-    amax_temp = torch.empty((M,), dtype=torch.float32, device=x.device) if IS_FP8 else None
+    amax_temp = (
+        torch.empty((M,), dtype=torch.float32, device=x.device) if IS_FP8 else None
+    )
 
     APPLY_ATOMIC = M < 512
 

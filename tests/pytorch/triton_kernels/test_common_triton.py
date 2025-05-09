@@ -7,11 +7,13 @@ import types
 import numpy as np
 import pytest
 import torch
-import triton
 
 from transformer_engine.pytorch import cpp_extensions as tex
 
-from transformer_engine.pytorch.triton_kernels.norm_common_triton import e4m3_type, e5m2_type
+from transformer_engine.pytorch.triton_kernels.norm_common_triton import (
+    e4m3_type,
+    e5m2_type,
+)
 
 
 # Mimics behavior of `fillUniform` from `tests/cpp/test_common.cu`.
@@ -36,10 +38,7 @@ def get_tolerances(dtype):
         return 1e-5, 1e-3
     elif dtype == torch.bfloat16:
         return 1e-5, 1e-2
-    elif (
-        dtype == e4m3_type
-        or dtype == e5m2_type
-    ):
+    elif dtype == e4m3_type or dtype == e5m2_type:
         # TODO: different tolerances for FNUZ and OCP
         return 1e-2, 1e-2
     else:
@@ -139,10 +138,13 @@ def output_dtypes_str(dtypes_str):
 
 # Convert descriptive type string to PyTorch type.
 def str_to_torch_dtype(dtype_str):
-    return {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32,
-    "fp8e4": e4m3_type, "fp8e5": e5m2_type}[
-        dtype_str[1:] if dtype_str[0] in {"i", "o"} else dtype_str
-    ]
+    return {
+        "fp16": torch.float16,
+        "bf16": torch.bfloat16,
+        "fp32": torch.float32,
+        "fp8e4": e4m3_type,
+        "fp8e5": e5m2_type,
+    }[dtype_str[1:] if dtype_str[0] in {"i", "o"} else dtype_str]
 
 
 # Common pytest skip conditions:
