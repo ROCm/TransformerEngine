@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -17,6 +19,7 @@ from transformer_engine.transformer_engine_jax import NVTE_QKV_Format
 from transformer_engine.transformer_engine_jax import nvte_get_qkv_format
 
 from . import cpp_extensions as tex
+from .util import is_hip_extension
 
 
 class AttnBiasType(Enum):
@@ -68,7 +71,9 @@ class AttnMaskType(Enum):
         return self in [
             AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
             AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
-        ]
+        ] or ( #Use bottom-right if no mask is set to match TE FusedAttn (CK) code
+            is_hip_extension() and self == AttnMaskType.NO_MASK
+            )
 
 
 class QKVFormat(Enum):
