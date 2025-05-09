@@ -9,7 +9,6 @@ import triton
 import triton.language as tl
 
 from .norm_common_triton import block_size
-from .norm_common_triton import block_size_bwd, use_blocked_bwd
 
 
 def get_autotune_config(full_tuning_space=False):
@@ -353,7 +352,7 @@ def _layernorm_bwd_dwdb_triton_v2(
     cols = pid * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     dw = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     db = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    # Iterate through the rows of x and dy to compute dw and db.git st
+    # Iterate through the rows of x and dy to compute dw and db
     for i in range(0, M, BLOCK_SIZE_M):
         rows = i + tl.arange(0, BLOCK_SIZE_M)
         means = tl.load(Mean + rows, mask=rows < M, other=0.0).to(tl.float32)
@@ -413,8 +412,16 @@ def te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, zero_centered_gamma):
         tile_num = 2048
         if IGNORE_DW_DB_IN_FUSED:
             tile_num = 4096
-    BLOCK_SIZE = block_size_bwd(x, tile_num)
+
+    max_fused_size = 32768 // x.element_size()
+    next_power = triton.next_power_of_2(x.shape[1])
+    BLOCK_SIZE = min(max_fused_size, next_power)
+    # For cases with small M and large N, decrease block size to help with occupancy and register spill
+    if tile_num == x.shape[0]:
+        BLOCK_SIZE = min(BLOCK_SIZE, 4096)
+    USE_BLOCKED = x.shape[1] > BLOCK_SIZE
     num_warps = min(max(BLOCK_SIZE // 256, 1), 8)
+
     dx = torch.empty_like(x)
     if not IGNORE_DW_DB_IN_FUSED:
         _dgamma = torch.zeros((tile_num, N), dtype=torch.float32, device=gamma.device)
@@ -439,7 +446,7 @@ def te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, zero_centered_gamma):
         ZERO_CENTERED_GAMMA=zero_centered_gamma,
         NUM_ROWS=M,
         BLOCK_SIZE_N=BLOCK_SIZE,
-        USE_BLOCKED=use_blocked_bwd(x, tile_num),
+        USE_BLOCKED=USE_BLOCKED,
         num_warps=num_warps,
         IGNORE_DW_DB=IGNORE_DW_DB_IN_FUSED,
     )
