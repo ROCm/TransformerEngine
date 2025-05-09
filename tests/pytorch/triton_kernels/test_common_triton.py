@@ -10,6 +10,11 @@ import torch
 
 from transformer_engine.pytorch import cpp_extensions as tex
 
+from transformer_engine.pytorch.triton_kernels.norm_common_triton import (
+    e4m3_type,
+    e5m2_type,
+)
+
 
 # Mimics behavior of `fillUniform` from `tests/cpp/test_common.cu`.
 
@@ -33,12 +38,7 @@ def get_tolerances(dtype):
         return 1e-5, 1e-3
     elif dtype == torch.bfloat16:
         return 1e-5, 1e-2
-    elif (
-        dtype == torch.float8_e4m3fnuz
-        or dtype == torch.float8_e5m2fnuz
-        or dtype == torch.float8_e4m3fn
-        or dtype == torch.float8_e5m2
-    ):
+    elif dtype == e4m3_type or dtype == e5m2_type:
         # TODO: different tolerances for FNUZ and OCP
         return 1e-2, 1e-2
     else:
@@ -49,6 +49,7 @@ def get_tolerances(dtype):
 # Arguments:
 #     t: actual tensor
 #     r: expected tensor
+# NOTE: DO NOT upcast inputs to fp32 if you are using te_compare for any precision other than fp32
 def te_compare_results(t, r, atol, rtol, msg):
     assert t.dtype == r.dtype, f"Tensor dtypes don't match: {t.dtype} vs {r.dtype}."
     assert t.shape == r.shape, f"Tensor shapes don't match: {t.shape} vs {r.shape}."
@@ -137,9 +138,13 @@ def output_dtypes_str(dtypes_str):
 
 # Convert descriptive type string to PyTorch type.
 def str_to_torch_dtype(dtype_str):
-    return {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}[
-        dtype_str[1:] if dtype_str[0] in {"i", "o"} else dtype_str
-    ]
+    return {
+        "fp16": torch.float16,
+        "bf16": torch.bfloat16,
+        "fp32": torch.float32,
+        "fp8e4": e4m3_type,
+        "fp8e5": e5m2_type,
+    }[dtype_str[1:] if dtype_str[0] in {"i", "o"} else dtype_str]
 
 
 # Common pytest skip conditions:
