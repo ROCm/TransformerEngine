@@ -33,6 +33,8 @@ def _layernorm_fwd_triton(
     b_ptr,
     mean_ptr,
     rstd_ptr,
+    scale_ptr,
+    amax_ptr,
     x_row_stride,
     y_row_stride,
     n_rows,
@@ -40,80 +42,136 @@ def _layernorm_fwd_triton(
     eps,
     ZERO_CENTERED_GAMMA: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    IS_FP8: tl.constexpr,
+    APPLY_ATOMIC: tl.constexpr,
+    PERSISTENT: tl.constexpr,
 ):
 
     # program id
-    row = tl.program_id(0)
-    x_ptr_start = x_ptr + (row * x_row_stride)
-    y_ptr_start = y_ptr + (row * y_row_stride)
+    pid = tl.program_id(0)
+    num_tiles = tl.num_programs(0)
 
-    loop_num = tl.cdiv(n_cols, BLOCK_SIZE) - 1
+    if PERSISTENT:
+        rows_per_tile = n_rows // num_tiles
+        if pid < n_rows % num_tiles:
+            rows_per_tile += 1
+            start_row = rows_per_tile * pid
+        else:
+            start_row = (rows_per_tile * pid) + (n_rows % num_tiles)
+    else:
+        rows_per_tile = 1
+        start_row = pid
 
-    # calculate mean
-    mean = 0
-    _mean = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
-    loop_num_l = loop_num
-    for b in range(0, loop_num_l):
-        col_offsets = b * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        x_block = tl.load(x_ptr_start + col_offsets).to(tl.float32)  # Unmasked loads
+    if IS_FP8:
+        scale = tl.load(scale_ptr)
+        amax = 0.0
+
+    for row in range(start_row, start_row + rows_per_tile):
+        x_ptr_start = x_ptr + (row * x_row_stride)
+        y_ptr_start = y_ptr + (row * y_row_stride)
+
+        loop_num = tl.cdiv(n_cols, BLOCK_SIZE) - 1
+
+        # calculate mean
+        mean = 0
+        _mean = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+        loop_num_l = loop_num
+        for b in range(0, loop_num_l):
+            col_offsets = b * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+            x_block = tl.load(x_ptr_start + col_offsets).to(tl.float32)  # Unmasked loads
+            _mean += x_block
+
+        # For last iteration, do masked load
+        col_offsets = loop_num_l * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        x_block = tl.load(
+            x_ptr_start + col_offsets, mask=col_offsets < n_cols, other=0.0
+        ).to(tl.float32)
         _mean += x_block
+        mean = tl.sum(_mean, axis=0) / n_cols
 
-    # For last iteration, do masked load
-    col_offsets = loop_num_l * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    x_block = tl.load(
-        x_ptr_start + col_offsets, mask=col_offsets < n_cols, other=0.0
-    ).to(tl.float32)
-    _mean += x_block
-    mean = tl.sum(_mean, axis=0) / n_cols
+        # variance
+        _var = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+        loop_num_l = loop_num
+        for b in range(0, loop_num_l):
+            col_offsets = b * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+            x_block = tl.load(x_ptr_start + col_offsets).to(tl.float32)  # Unmasked loads
+            x_block = x_block - mean
+            _var += x_block * x_block
 
-    # variance
-    _var = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
-    loop_num_l = loop_num
-    for b in range(0, loop_num_l):
-        col_offsets = b * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        x_block = tl.load(x_ptr_start + col_offsets).to(tl.float32)  # Unmasked loads
-        x_block = x_block - mean
+        # For last iteration, do masked load
+        col_offsets = loop_num_l * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        x_block = tl.load(
+            x_ptr_start + col_offsets, mask=col_offsets < n_cols, other=0.0
+        ).to(tl.float32)
+        x_block = tl.where(col_offsets < n_cols, x_block - mean, 0.0)
         _var += x_block * x_block
 
-    # For last iteration, do masked load
-    col_offsets = loop_num_l * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    x_block = tl.load(
-        x_ptr_start + col_offsets, mask=col_offsets < n_cols, other=0.0
-    ).to(tl.float32)
-    x_block = tl.where(col_offsets < n_cols, x_block - mean, 0.0)
-    _var += x_block * x_block
+        var = tl.sum(_var, axis=0) / n_cols
+        rstd = tl.rsqrt(var + eps)
 
-    var = tl.sum(_var, axis=0) / n_cols
-    rstd = tl.rsqrt(var + eps)
+        # Write mean / rstd
+        tl.store(mean_ptr + row, mean)
+        tl.store(rstd_ptr + row, rstd)
 
-    # Write mean / rstd
-    tl.store(mean_ptr + row, mean)
-    tl.store(rstd_ptr + row, rstd)
+        # Normalize and store
+        loop_num_l = loop_num
+        for b in range(0, loop_num_l):
+            col_offsets = b * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+            w_block = tl.load(w_ptr + col_offsets).to(tl.float32)
+            b_block = tl.load(b_ptr + col_offsets).to(tl.float32)
+            x_block = tl.load(x_ptr_start + col_offsets).to(tl.float32)
+            if ZERO_CENTERED_GAMMA:
+                w_block += 1
+            y_block = (x_block - mean) * rstd
+            y_block = y_block * w_block + b_block
+            if IS_FP8:
+                amax_temp = tl.max(tl.abs(y_block), axis=-1)
+                amax = amax_temp if amax_temp > amax else amax
+                y_block = y_block * scale
+            tl.store(y_ptr_start + col_offsets, y_block.to(y_ptr.type.element_ty))
 
-    # Normalize and store
-    loop_num_l = loop_num
-    for b in range(0, loop_num_l):
-        col_offsets = b * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        w_block = tl.load(w_ptr + col_offsets).to(tl.float32)
-        b_block = tl.load(b_ptr + col_offsets).to(tl.float32)
-        x_block = tl.load(x_ptr_start + col_offsets).to(tl.float32)
+        # For last iteration, do masked load and store
+        col_offsets = loop_num_l * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = col_offsets < n_cols
+        w_block = tl.load(w_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
+        b_block = tl.load(b_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
+        x_block = tl.load(x_ptr_start + col_offsets, mask=mask, other=0.0).to(tl.float32)
         if ZERO_CENTERED_GAMMA:
             w_block += 1
         y_block = (x_block - mean) * rstd
         y_block = y_block * w_block + b_block
-        tl.store(y_ptr_start + col_offsets, y_block.to(y_ptr.type.element_ty))
+        if IS_FP8:
+            amax_temp = tl.max(tl.abs(y_block), axis=-1)
+            amax = amax_temp if amax_temp > amax else amax
+            y_block = y_block * scale
+        tl.store(y_ptr_start + col_offsets, y_block.to(y_ptr.type.element_ty), mask=mask)
 
-    # For last iteration, do masked load and store
-    col_offsets = loop_num_l * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = col_offsets < n_cols
-    w_block = tl.load(w_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
-    b_block = tl.load(b_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
-    x_block = tl.load(x_ptr_start + col_offsets, mask=mask, other=0.0).to(tl.float32)
-    if ZERO_CENTERED_GAMMA:
-        w_block += 1
-    y_block = (x_block - mean) * rstd
-    y_block = y_block * w_block + b_block
-    tl.store(y_ptr_start + col_offsets, y_block.to(y_ptr.type.element_ty), mask=mask)
+    if IS_FP8:
+        if APPLY_ATOMIC:
+            tl.atomic_max(amax_ptr, amax, sem="relaxed")
+        else:
+            tl.store(amax_ptr+pid, amax)
+
+
+@triton.jit
+def _layernorm_fwd_reduce_triton(
+    amax_input_ptr,
+    amax_output_ptr,
+    n_rows,
+    BLOCK_SIZE: tl.constexpr,
+):
+
+    # program id
+    pid = tl.program_id(0)
+
+    amax_offs = tl.arange(0, BLOCK_SIZE) + (pid * BLOCK_SIZE)
+    amax_input_ptrs = amax_input_ptr + amax_offs
+    amax_mask = amax_offs < n_rows
+    _amax = tl.load(amax_input_ptrs, mask=amax_mask, other=0.0)
+
+    amax = tl.max(_amax, axis=-1)
+
+    tl.atomic_max(amax_output_ptr, amax, sem="relaxed")
 
 
 @triton.jit
@@ -334,12 +392,25 @@ def _layernorm_bwd_dwdb_triton(
 
 # TODO: Implement persistent kernel in forward and add `sm_margin` to the interface.
 def te_layernorm_fwd_fp8_noalloc_triton(
-    x, gamma, beta, eps, y, out_dtype, zero_centered_gamma
+    x,
+    gamma,
+    beta,
+    eps,
+    scale,
+    y,
+    amax,
+    scale_inv,
+    out_dtype,
+    zero_centered_gamma
 ):
     M, N = x.shape
     y = y.view(out_dtype)
+    IS_FP8 = (out_dtype == torch.float8_e4m3fnuz)
     mu = torch.empty((M,), dtype=torch.float32, device=x.device)
     rsigma = torch.empty((M,), dtype=torch.float32, device=x.device)
+    amax_temp = torch.empty((M,), dtype=torch.float32, device=x.device) if IS_FP8 else None
+
+    APPLY_ATOMIC = True if (M < 512) else False
 
     BLOCK_SIZE = block_size(x)
     _layernorm_fwd_triton[(M,)](
@@ -349,6 +420,8 @@ def te_layernorm_fwd_fp8_noalloc_triton(
         beta,
         mu,
         rsigma,
+        scale,
+        amax if APPLY_ATOMIC else amax_temp,
         x.stride(0),
         y.stride(0),
         M,
@@ -356,9 +429,22 @@ def te_layernorm_fwd_fp8_noalloc_triton(
         eps,
         ZERO_CENTERED_GAMMA=zero_centered_gamma,
         BLOCK_SIZE=BLOCK_SIZE,
+        IS_FP8=IS_FP8,
+        APPLY_ATOMIC=APPLY_ATOMIC,
+        PERSISTENT=False, # TODO: Improve performance with persistent kernel
     )
 
-    return y, mu, rsigma
+    if IS_FP8 and not APPLY_ATOMIC:
+        _layernorm_fwd_reduce_triton[(triton.cdiv(M, 256),)](
+            amax_temp,
+            amax,
+            M,
+            256,
+        )
+
+    scale_inv = (1.0 / scale) if IS_FP8 else None
+
+    return y, mu, rsigma, scale_inv
 
 
 # TODO: Add `sm_margin` to the interface.

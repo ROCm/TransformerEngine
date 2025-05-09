@@ -7,6 +7,7 @@ import types
 import numpy as np
 import pytest
 import torch
+import triton
 
 from transformer_engine.pytorch import cpp_extensions as tex
 
@@ -15,6 +16,18 @@ from transformer_engine.pytorch import cpp_extensions as tex
 
 rng_seed = 12345
 rng = np.random.default_rng(np.random.MT19937(rng_seed))
+
+
+def is_cdna4():
+    return triton.runtime.driver.active.get_current_target().arch == 'gfx950'
+
+
+e4m3_type = torch.float8_e4m3fn if is_cdna4() else torch.float8_e4m3fnuz
+e5m2_type = torch.float8_e5m2 if is_cdna4() else torch.float8_e5m2fnuz
+
+
+def IS_FP8(dtype):
+    return (dtype == e4m3_type) or (dtype == e5m2_type)
 
 
 def fill_uniform(shape, dtype):
@@ -34,10 +47,8 @@ def get_tolerances(dtype):
     elif dtype == torch.bfloat16:
         return 1e-5, 1e-2
     elif (
-        dtype == torch.float8_e4m3fnuz
-        or dtype == torch.float8_e5m2fnuz
-        or dtype == torch.float8_e4m3fn
-        or dtype == torch.float8_e5m2
+        dtype == e4m3_type
+        or dtype == e5m2_type
     ):
         # TODO: different tolerances for FNUZ and OCP
         return 1e-2, 1e-2
@@ -137,7 +148,8 @@ def output_dtypes_str(dtypes_str):
 
 # Convert descriptive type string to PyTorch type.
 def str_to_torch_dtype(dtype_str):
-    return {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}[
+    return {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32,
+    "fp8e4": e4m3_type, "fp8e5": e5m2_type}[
         dtype_str[1:] if dtype_str[0] in {"i", "o"} else dtype_str
     ]
 
