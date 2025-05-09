@@ -17,7 +17,7 @@ from flax import linen as nn
 
 from utils import assert_allclose, assert_tree_like_allclose
 from transformer_engine.jax.dot import type_safe_dot_general, dequantize, quantize
-from transformer_engine.jax.fp8 import FP8MetaPackage, FP8Helper, is_fp8_available, jnp_float8_e4m3_type, jnp_float8_e5m2_type
+from transformer_engine.jax.fp8 import FP8MetaPackage, FP8Helper, is_fp8_available, get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
 from transformer_engine.jax.layernorm import layernorm, layernorm_fp8_dot
 from transformer_engine.jax.layernorm_mlp import activation_lu, fused_layernorm_fp8_mlp
 from transformer_engine.jax.cpp_extensions.activation import _jax_act_lu
@@ -29,8 +29,9 @@ from transformer_engine.jax.cpp_extensions.transpose import (
 from transformer_engine.jax.cpp_extensions.quantization import _jax_cast_fp8
 from transformer_engine.jax import cpp_extensions as tex
 from transformer_engine.jax import is_hip_extension
-from transformer_engine.jax.fp8 import jnp_float8_e4m3_type, jnp_float8_e5m2_type
 
+jnp_float8_e4m3_type = get_jnp_float8_e4m3_type()
+jnp_float8_e5m2_type = get_jnp_float8_e5m2_type()
 
 GEMM_CASES = [
     (256, 256, 512),

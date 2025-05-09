@@ -21,8 +21,8 @@ from transformer_engine.transformer_engine_jax import DType as TEDType
 from .base import BasePrimitive, register_primitive
 from .custom_call import custom_caller, CustomCallArgsWrapper
 from .misc import (
-    jnp_float8_e4m3_type, 
-    jnp_float8_e5m2_type,
+    get_jnp_float8_e4m3_type, 
+    get_jnp_float8_e5m2_type,
     check_valid_batch_dims,
     jax_dtype_to_te_dtype,
     jax_dtype_to_ir_dtype,
@@ -131,8 +131,8 @@ class TransposePrimitive(BasePrimitive):
             jnp.float32,
             jnp.float16,
             jnp.bfloat16,
-            jnp_float8_e4m3_type,
-            jnp_float8_e5m2_type,
+            get_jnp_float8_e4m3_type(),
+            get_jnp_float8_e5m2_type(),
         ]
 
         if is_ffi_enabled():

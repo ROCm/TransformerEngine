@@ -34,8 +34,8 @@ _is_fp8_available = None
 _reason_for_no_fp8 = ""
 Collection = Union[Dict, FrozenDict]
 
-jnp_float8_e4m3_type = jnp.float8_e4m3fnuz if is_fp8_fnuz() else jnp.float8_e4m3fn
-jnp_float8_e5m2_type = jnp.float8_e5m2fnuz if is_fp8_fnuz() else jnp.float8_e5m2
+get_jnp_float8_e4m3_type = lambda: jnp.float8_e4m3fnuz if is_fp8_fnuz() else jnp.float8_e4m3fn
+get_jnp_float8_e5m2_type = lambda: jnp.float8_e5m2fnuz if is_fp8_fnuz() else jnp.float8_e5m2
 
 def _check_fp8_support(gpu_id) -> Tuple[bool, str]:
     """Return if fp8 support is available"""
@@ -76,6 +76,8 @@ def is_fp8_available(gpu_id=None) -> Tuple[bool, str]:
 
 
 def _format2dtypes(format_: Format):
+    jnp_float8_e4m3_type = get_jnp_float8_e4m3_type()
+    jnp_float8_e5m2_type = get_jnp_float8_e5m2_type()
     if format_ == Format.E4M3:
         return jnp_float8_e4m3_type, jnp_float8_e4m3_type
     if format_ == Format.E5M2:

@@ -9,8 +9,11 @@ from __future__ import annotations
 import torch
 
 import transformer_engine.pytorch as te
-from transformer_engine.pytorch.fp8 import torch_float8_e4m3_type, torch_float8_e5m2_type
+from transformer_engine.pytorch.fp8 import get_torch_float8_e4m3_type, get_torch_float8_e5m2_type
 import transformer_engine_torch as tex
+
+torch_float8_e4m3_type = get_torch_float8_e4m3_type()
+torch_float8_e5m2_type = get_torch_float8_e5m2_type()
 
 def str_to_dtype(dtype: str | torch.dtype) -> torch.dtype:
     """Convert type name to PyTorch dtype"""
