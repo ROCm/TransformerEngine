@@ -58,7 +58,7 @@ std::vector<std::tuple<size_t, size_t, size_t>> test_case_sizes = {
 // <A_type, B_type, Bias_Type, Gelu_Type D_type>, <m, k, n>
 class GEMMTestSuite 
   :public ::testing::TestWithParam<std::tuple<
-                                    std::tuple<size_t, size_t, size_t>, bool, bool>>{};
+                                    std::tuple<size_t, size_t, size_t>, bool, bool, bool, bool>>{};
 
 float ref_gelu(float x){
   float cdf = 0.5f * (1.0f + tanhf((0.7978845608028654f * (x + 0.044715f * x * x * x))));
@@ -87,7 +87,7 @@ void compute_ref(
       for(size_t kk = 0; kk < k; kk++){
         float a_val = transa ? (float)a_data[kk + ii*k] : (float)a_data[ii + kk*m];
         float b_val = transb ? (float)b_data[jj + kk*n] : (float)b_data[kk + jj*k];
-        val += a_scale_inv*b_scale_inv*a_val*b_val;
+        val += a_scale_inv*a_val*b_scale_inv*b_val;
       }
       if(bias_data){
         val += (float)bias_data[ii];
@@ -115,13 +115,19 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
   DType dtype = TypeInfo<D_Type>::dtype;
 
   // pytorch tensor storage is row-major while cublas/rocblas is column-major
-  Tensor A({ k, m }, atype);
+  Tensor A;
   if (transa){
     A = Tensor({ m, k }, atype);
   }
-  Tensor B({ n, k }, btype);
+  else {
+    A = Tensor({ k, m }, atype);
+  }
+  Tensor B;
   if (transb){
-    B = Tensor({ k, n }, atype);
+    B = Tensor({ k, n }, btype);
+  }
+  else {
+    B = Tensor({ n, k }, btype);
   }
   Tensor D({ n, m }, dtype);
   Tensor bias;
@@ -265,6 +271,8 @@ TEST_P(GEMMTestSuite, Testfp32xfp32xfp32xfp32xfp32) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
+  const bool transa = std::get<3>(GetParam());
+  const bool transb = std::get<4>(GetParam());
 
   using A_Type = fp32;
   using B_Type = fp32;
@@ -272,7 +280,7 @@ TEST_P(GEMMTestSuite, Testfp32xfp32xfp32xfp32xfp32) {
   using Gelu_Type = fp32;
   using D_Type = fp32;
 
-  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n);
+  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n, transa, transb);
 }
 
 TEST_P(GEMMTestSuite, Testfp16xfp16xfp16xfp16xfp16) {
@@ -284,6 +292,8 @@ TEST_P(GEMMTestSuite, Testfp16xfp16xfp16xfp16xfp16) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
+  const bool transa = std::get<3>(GetParam());
+  const bool transb = std::get<4>(GetParam());
 
   using A_Type = fp16;
   using B_Type = fp16;
@@ -291,7 +301,7 @@ TEST_P(GEMMTestSuite, Testfp16xfp16xfp16xfp16xfp16) {
   using Gelu_Type = fp16;
   using D_Type = fp16;
 
-  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n);
+  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n, transa, transb);
 }
 
 TEST_P(GEMMTestSuite, Testbf16xbf16xbf16xbf16xbf16) {
@@ -303,6 +313,8 @@ TEST_P(GEMMTestSuite, Testbf16xbf16xbf16xbf16xbf16) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
+  const bool transa = std::get<3>(GetParam());
+  const bool transb = std::get<4>(GetParam());
 
   using A_Type = bf16;
   using B_Type = bf16;
@@ -310,7 +322,7 @@ TEST_P(GEMMTestSuite, Testbf16xbf16xbf16xbf16xbf16) {
   using Gelu_Type = bf16;
   using D_Type = bf16;
 
-  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n);
+  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n, transa, transb);
 }
 
 TEST_P(GEMMTestSuite, Testfp8xfp8xbf16xbf16xfp32) {
@@ -322,6 +334,8 @@ TEST_P(GEMMTestSuite, Testfp8xfp8xbf16xbf16xfp32) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
+  const bool transa = std::get<3>(GetParam());
+  const bool transb = std::get<4>(GetParam());
 
   using A_Type = fp8;
   using B_Type = fp8;
@@ -329,7 +343,7 @@ TEST_P(GEMMTestSuite, Testfp8xfp8xbf16xbf16xfp32) {
   using Gelu_Type = bf16;
   using D_Type = fp32;
 
-  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n);
+  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n, transa, transb);
 }
 
 TEST_P(GEMMTestSuite, Testfp8xfp8xbf16xbf16xfp16) {
@@ -341,6 +355,8 @@ TEST_P(GEMMTestSuite, Testfp8xfp8xbf16xbf16xfp16) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
+  const bool transa = std::get<3>(GetParam());
+  const bool transb = std::get<4>(GetParam());
 
   using A_Type = fp8;
   using B_Type = fp8;
@@ -348,7 +364,7 @@ TEST_P(GEMMTestSuite, Testfp8xfp8xbf16xbf16xfp16) {
   using Gelu_Type = bf16;
   using D_Type = fp16;
 
-  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n);
+  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n, transa, transb);
 }
 
 TEST_P(GEMMTestSuite, Testfp8xfp8xbf16xbf16xbf16) {
@@ -360,6 +376,8 @@ TEST_P(GEMMTestSuite, Testfp8xfp8xbf16xbf16xbf16) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
+  const bool transa = std::get<3>(GetParam());
+  const bool transb = std::get<4>(GetParam());
 
   using A_Type = fp8;
   using B_Type = fp8;
@@ -367,7 +385,7 @@ TEST_P(GEMMTestSuite, Testfp8xfp8xbf16xbf16xbf16) {
   using Gelu_Type = bf16;
   using D_Type = bf16;
 
-  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n);
+  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n, transa, transb);
 }
 
 TEST_P(GEMMTestSuite, Testfp8xfp8xbf16xbf16xfp8) {
@@ -379,6 +397,8 @@ TEST_P(GEMMTestSuite, Testfp8xfp8xbf16xbf16xfp8) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
+  const bool transa = std::get<3>(GetParam());
+  const bool transb = std::get<4>(GetParam());
 
   using A_Type = fp8;
   using B_Type = fp8;
@@ -386,7 +406,7 @@ TEST_P(GEMMTestSuite, Testfp8xfp8xbf16xbf16xfp8) {
   using Gelu_Type = bf16;
   using D_Type = fp8;
 
-  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n);
+  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n, transa, transb);
 }
 
 TEST_P(GEMMTestSuite, Testfp8xfp8xbf16xbf16xbf8) {
@@ -398,6 +418,8 @@ TEST_P(GEMMTestSuite, Testfp8xfp8xbf16xbf16xbf8) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
+  const bool transa = std::get<3>(GetParam());
+  const bool transb = std::get<4>(GetParam());
 
   using A_Type = fp8;
   using B_Type = fp8;
@@ -405,7 +427,7 @@ TEST_P(GEMMTestSuite, Testfp8xfp8xbf16xbf16xbf8) {
   using Gelu_Type = bf16;
   using D_Type = bf8;
 
-  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n);
+  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n, transa, transb);
 }
 
 TEST_P(GEMMTestSuite, Testfp8xbf8xbf16xbf16xfp32) {
@@ -417,6 +439,8 @@ TEST_P(GEMMTestSuite, Testfp8xbf8xbf16xbf16xfp32) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
+  const bool transa = std::get<3>(GetParam());
+  const bool transb = std::get<4>(GetParam());
 
   using A_Type = fp8;
   using B_Type = bf8;
@@ -424,7 +448,7 @@ TEST_P(GEMMTestSuite, Testfp8xbf8xbf16xbf16xfp32) {
   using Gelu_Type = bf16;
   using D_Type = fp32;
 
-  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n);
+  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n, transa, transb);
 }
 
 TEST_P(GEMMTestSuite, Testfp8xbf8xbf16xbf16xfp16) {
@@ -436,6 +460,8 @@ TEST_P(GEMMTestSuite, Testfp8xbf8xbf16xbf16xfp16) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
+  const bool transa = std::get<3>(GetParam());
+  const bool transb = std::get<4>(GetParam());
 
   using A_Type = fp8;
   using B_Type = bf8;
@@ -443,7 +469,7 @@ TEST_P(GEMMTestSuite, Testfp8xbf8xbf16xbf16xfp16) {
   using Gelu_Type = bf16;
   using D_Type = fp16;
 
-  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n);
+  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n, transa, transb);
 }
 
 TEST_P(GEMMTestSuite, Testfp8xbf8xbf16xbf16xbf16) {
@@ -455,6 +481,8 @@ TEST_P(GEMMTestSuite, Testfp8xbf8xbf16xbf16xbf16) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
+  const bool transa = std::get<3>(GetParam());
+  const bool transb = std::get<4>(GetParam());
 
   using A_Type = fp8;
   using B_Type = bf8;
@@ -462,7 +490,7 @@ TEST_P(GEMMTestSuite, Testfp8xbf8xbf16xbf16xbf16) {
   using Gelu_Type = bf16;
   using D_Type = bf16;
 
-  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n);
+  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n, transa, transb);
 }
 
 TEST_P(GEMMTestSuite, Testfp8xbf8xbf16xbf16xfp8) {
@@ -474,6 +502,8 @@ TEST_P(GEMMTestSuite, Testfp8xbf8xbf16xbf16xfp8) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
+  const bool transa = std::get<3>(GetParam());
+  const bool transb = std::get<4>(GetParam());
 
   using A_Type = fp8;
   using B_Type = bf8;
@@ -481,7 +511,7 @@ TEST_P(GEMMTestSuite, Testfp8xbf8xbf16xbf16xfp8) {
   using Gelu_Type = bf16;
   using D_Type = fp8;
 
-  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n);
+  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n, transa, transb);
 }
 
 TEST_P(GEMMTestSuite, Testfp8xbf8xbf16xbf16xbf8) {
@@ -493,6 +523,8 @@ TEST_P(GEMMTestSuite, Testfp8xbf8xbf16xbf16xbf8) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
+  const bool transa = std::get<3>(GetParam());
+  const bool transb = std::get<4>(GetParam());
 
   using A_Type = fp8;
   using B_Type = bf8;
@@ -500,7 +532,7 @@ TEST_P(GEMMTestSuite, Testfp8xbf8xbf16xbf16xbf8) {
   using Gelu_Type = bf16;
   using D_Type = bf8;
 
-  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n);
+  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n, transa, transb);
 }
 
 TEST_P(GEMMTestSuite, Testbf8xfp8xbf16xbf16xfp32) {
@@ -512,6 +544,8 @@ TEST_P(GEMMTestSuite, Testbf8xfp8xbf16xbf16xfp32) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
+  const bool transa = std::get<3>(GetParam());
+  const bool transb = std::get<4>(GetParam());
 
   using A_Type = bf8;
   using B_Type = fp8;
@@ -519,7 +553,7 @@ TEST_P(GEMMTestSuite, Testbf8xfp8xbf16xbf16xfp32) {
   using Gelu_Type = bf16;
   using D_Type = fp32;
 
-  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n);
+  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n, transa, transb);
 }
 
 TEST_P(GEMMTestSuite, Testbf8xfp8xbf16xbf16xfp16) {
@@ -531,6 +565,8 @@ TEST_P(GEMMTestSuite, Testbf8xfp8xbf16xbf16xfp16) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
+  const bool transa = std::get<3>(GetParam());
+  const bool transb = std::get<4>(GetParam());
 
   using A_Type = bf8;
   using B_Type = fp8;
@@ -538,7 +574,7 @@ TEST_P(GEMMTestSuite, Testbf8xfp8xbf16xbf16xfp16) {
   using Gelu_Type = bf16;
   using D_Type = fp16;
 
-  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n);
+  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n, transa, transb);
 }
 
 TEST_P(GEMMTestSuite, Testbf8xfp8xbf16xbf16xbf16) {
@@ -550,6 +586,8 @@ TEST_P(GEMMTestSuite, Testbf8xfp8xbf16xbf16xbf16) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
+  const bool transa = std::get<3>(GetParam());
+  const bool transb = std::get<4>(GetParam());
 
   using A_Type = bf8;
   using B_Type = fp8;
@@ -557,7 +595,7 @@ TEST_P(GEMMTestSuite, Testbf8xfp8xbf16xbf16xbf16) {
   using Gelu_Type = bf16;
   using D_Type = bf16;
 
-  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n);
+  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n, transa, transb);
 }
 
 TEST_P(GEMMTestSuite, Testbf8xfp8xbf16xbf16xfp8) {
@@ -569,6 +607,8 @@ TEST_P(GEMMTestSuite, Testbf8xfp8xbf16xbf16xfp8) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
+  const bool transa = std::get<3>(GetParam());
+  const bool transb = std::get<4>(GetParam());
 
   using A_Type = bf8;
   using B_Type = fp8;
@@ -576,7 +616,7 @@ TEST_P(GEMMTestSuite, Testbf8xfp8xbf16xbf16xfp8) {
   using Gelu_Type = bf16;
   using D_Type = fp8;
 
-  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n);
+  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n, transa, transb);
 }
 
 TEST_P(GEMMTestSuite, Testbf8xfp8xbf16xbf16xbf8) {
@@ -588,6 +628,8 @@ TEST_P(GEMMTestSuite, Testbf8xfp8xbf16xbf16xbf8) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
+  const bool transa = std::get<3>(GetParam());
+  const bool transb = std::get<4>(GetParam());
 
   using A_Type = bf8;
   using B_Type = fp8;
@@ -595,7 +637,7 @@ TEST_P(GEMMTestSuite, Testbf8xfp8xbf16xbf16xbf8) {
   using Gelu_Type = bf16;
   using D_Type = bf8;
 
-  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n);
+  performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(use_bias, use_gelu, m, k, n, transa, transb);
 }
 
 
@@ -605,12 +647,16 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Combine(
         ::testing::ValuesIn(test_case_sizes),
         ::testing::Values(false, true), //use bias
-        ::testing::Values(false, true)), //use_gelu
+        ::testing::Values(false, true), //use_gelu
+        ::testing::Values(false, true), //transa
+        ::testing::Values(false, true)), //transb
     [](const testing::TestParamInfo<GEMMTestSuite::ParamType>& info) {
+      auto TN = [](bool v){ return v ? "T" : "N"; };
       std::string name = std::to_string(std::get<0>(std::get<0>(info.param))) + "X" +
                          std::to_string(std::get<1>(std::get<0>(info.param))) + "X" +
                          std::to_string(std::get<2>(std::get<0>(info.param))) + "X" +
                          std::to_string(std::get<1>(info.param)) + "X" +
-                         std::to_string(std::get<2>(info.param));
+                         std::to_string(std::get<2>(info.param)) + "X" +
+                         TN(std::get<3>(info.param)) + "X" + TN(std::get<4>(info.param));
       return name;
     });
