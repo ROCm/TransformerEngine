@@ -35,6 +35,7 @@ def _layernorm_fwd_triton(
     rstd_ptr,
     scale_ptr,
     amax_ptr,
+    scale_inv_ptr,
     x_row_stride,
     y_row_stride,
     n_rows,
@@ -156,6 +157,9 @@ def _layernorm_fwd_triton(
 
     if IS_FP8:
         if APPLY_ATOMIC:
+            if pid == 0:
+                scale_inv = tl.fdiv(1.0, scale)
+                tl.store(scale_inv_ptr, scale_inv)
             tl.atomic_max(amax_ptr, amax, sem="relaxed")
         else:
             tl.store(amax_ptr + pid, amax)
@@ -165,6 +169,8 @@ def _layernorm_fwd_triton(
 def _layernorm_fwd_reduce_triton(
     amax_input_ptr,
     amax_output_ptr,
+    scale_ptr,
+    scale_inv_ptr,
     n_rows,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -180,6 +186,11 @@ def _layernorm_fwd_reduce_triton(
     amax = tl.max(_amax, axis=-1)
 
     tl.atomic_max(amax_output_ptr, amax, sem="relaxed")
+
+    if pid == 0:
+        scale = tl.load(scale_ptr)
+        scale_inv = tl.fdiv(1.0, scale)
+        tl.store(scale_inv_ptr, scale_inv)
 
 
 @triton.jit
@@ -463,6 +474,7 @@ def te_layernorm_fwd_fp8_noalloc_triton(
         rsigma,
         scale,
         amax if APPLY_ATOMIC else amax_temp,
+        scale_inv,
         x.stride(0),
         y.stride(0),
         M,
@@ -482,13 +494,13 @@ def te_layernorm_fwd_fp8_noalloc_triton(
         _layernorm_fwd_reduce_triton[(triton.cdiv(M, 256),)](
             amax_temp,
             amax,
+            scale,
+            scale_inv,
             M,
             256,
         )
 
-    scale_inv = (1.0 / scale) if IS_FP8 else None
-
-    return y, mu, rsigma, scale_inv
+    return y, mu, rsigma
 
 
 # TODO: Add `sm_margin` to the interface.

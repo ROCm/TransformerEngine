@@ -77,19 +77,17 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
     amax_triton = torch.zeros((1,), device="cuda") if IS_FP8(out_dtype) else None
     scale_inv_triton = torch.zeros((1,), device="cuda") if IS_FP8(out_dtype) else None
 
-    y_triton, mu_triton, rsigma_triton, scale_inv_triton = (
-        te_layernorm_fwd_fp8_noalloc_triton(
-            x,
-            gamma,
-            beta,
-            epsilon,
-            scale,
-            y_triton,
-            amax_triton,
-            scale_inv_triton,
-            out_dtype,
-            zero_centered_gamma,
-        )
+    y_triton, mu_triton, rsigma_triton = te_layernorm_fwd_fp8_noalloc_triton(
+        x,
+        gamma,
+        beta,
+        epsilon,
+        scale,
+        y_triton,
+        amax_triton,
+        scale_inv_triton,
+        out_dtype,
+        zero_centered_gamma,
     )
 
     # Run Hipified forward reference.
