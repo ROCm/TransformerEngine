@@ -414,12 +414,15 @@ def te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, zero_centered_gamma):
             tile_num = 4096
 
     max_fused_size = 32768 // x.element_size()
-    next_power = triton.next_power_of_2(x.shape[1])
+    next_power = triton.next_power_of_2(N)
     BLOCK_SIZE = min(max_fused_size, next_power)
     # For cases with small M and large N, decrease block size to help with occupancy and register spill
-    if tile_num == x.shape[0]:
-        BLOCK_SIZE = min(BLOCK_SIZE, 4096)
-    USE_BLOCKED = x.shape[1] > BLOCK_SIZE
+    if tile_num == M:
+        if tile_num > 256:
+            BLOCK_SIZE = min(BLOCK_SIZE, 2048)
+        else:
+            BLOCK_SIZE = min(BLOCK_SIZE, 4096)
+    USE_BLOCKED = N > BLOCK_SIZE
     num_warps = min(max(BLOCK_SIZE // 256, 1), 8)
 
     dx = torch.empty_like(x)
