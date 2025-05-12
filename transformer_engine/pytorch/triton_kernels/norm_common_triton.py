@@ -42,6 +42,9 @@ def get_num_sms(sm_margin=None):
 
 
 def num_programs(x, sm_margin=None):
+    # if sm_margin is not set, create a program for each row
+    # if sm_margin == None or sm_margin == 0:
+    #    return x.shape[0]
     return min(x.shape[0], get_num_sms(sm_margin))
 
 
@@ -59,7 +62,7 @@ def block_size_bwd(x, tile_num):
     max_fused_size = 65536 // (x.element_size() * 2)
     next_power = triton.next_power_of_2(x.shape[1])
     block_size = min(max_fused_size, next_power)
-     # For cases with small M and large N, decrease block size to help with register spill 
+    # For cases with small M and large N, decrease block size to help with register spill
     if tile_num == x.shape[0]:
         # for better occupancy
         if tile_num > 256:
