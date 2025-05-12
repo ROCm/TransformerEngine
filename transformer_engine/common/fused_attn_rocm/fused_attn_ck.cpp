@@ -44,7 +44,14 @@ bool is_ck_backend_supported(
   }
   
   // single filters
-
+  
+  // aiter currently does not support MLA yet
+  if (head_dim_qk != head_dim_v) {
+    if(nvte_log_ck_config){
+       std::cout<<"head_dim_qk must be equal to head_dim_v"<<std::endl;
+    }
+    return false;
+  }
   // filter based on num_heads and num_gqa_groups
   if(num_gqa_groups == 0 || num_attn_heads%num_gqa_groups != 0){
     if(nvte_log_ck_config){
@@ -540,7 +547,12 @@ void fused_attn_ck_fwd_impl(
     if (env_p != nullptr && std::string(env_p) == "1")
       nvte_log_ck_config = true;
   }
-
+  bool nvte_ck_uses_fwd_v3 = getenv<int>("NVTE_CK_USES_FWD_V3", 0) and (layout==NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD);
+  if(nvte_log_ck_config){
+    if(getenv<int>("NVTE_CK_USES_FWD_V3", 0) and (layout!=NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD)){
+      std::cout<<"Disable CK FWD v3 since only BSHD_BSHD_BSHD layout supported"<<std::endl;
+    }
+  }
   bool is_ragged = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_THD; 
 
   // extract the qkv and o storage bytes to allocate buffer for padding removing
@@ -664,7 +676,8 @@ void fused_attn_ck_fwd_impl(
     std::cout<<"bias_type: "<<bias_type<<", ";
     std::cout<<"(bias_b, bias_h): ("<<bias_b<<", "<<bias_h<<"), ";
     std::cout<<"mask_type: "<<mask_type<<", ";
-    std::cout<<"window_size: ("<<window_size_left<<", "<<window_size_right<<")"<<std::endl;
+    std::cout<<"window_size: ("<<window_size_left<<", "<<window_size_right<<")"<<", ";
+    std::cout<<"nvte_ck_uses_fwd_v3: "<<nvte_ck_uses_fwd_v3<<std::endl;
   }
   if(pad_between_seqs){
     // remove padding for q, k, v
@@ -693,6 +706,7 @@ void fused_attn_ck_fwd_impl(
         devPtrOWithoutPadding,
         o_stride[1], (is_ragged? o_stride[2] : std::min(o_stride[0], o_stride[2])),
         devPtrSoftmaxLSEWithoutPadding,
+        nvte_ck_uses_fwd_v3,
         stream));
     // add padding for o and softmax_lse
     add_padding(dtype, b, h, s_q, d_v, max_tokens_q, is_ragged, o_stride[0], o_stride[1], o_stride[2], devPtrOWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrO, stream);
@@ -718,6 +732,7 @@ void fused_attn_ck_fwd_impl(
         devPtrO,
         o_stride[1], o_stride[2],
         devPtrSoftmaxAux,
+        nvte_ck_uses_fwd_v3,
         stream));
   }else{
     using ck_fused_attn::ck_attn_fwd;
@@ -741,6 +756,7 @@ void fused_attn_ck_fwd_impl(
         devPtrO,
         o_stride[0], o_stride[1], o_stride[2],
         devPtrSoftmaxAux,
+        nvte_ck_uses_fwd_v3,
         stream));
   }
 }
