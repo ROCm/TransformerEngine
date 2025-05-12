@@ -9,7 +9,7 @@ import subprocess
 import pandas as pd
 import numpy as np
 import torch
-import nvtx
+# import nvtx
 import transformer_engine
 from transformer_engine_torch import NVTE_Fused_Attn_Backend
 
@@ -45,32 +45,32 @@ is_training = True
 
 model_configs = {
     #   test:             b,  h, hg,   d,   sq,  skv,   p,     mask,              bias
-    "test_0": ModelConfig(2, 16, 16, 64, 512, 512, 0.0, "no_mask", "no_bias"),  # short seq
-    "test_1": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "causal", "no_bias"),  # longer seq, mask
-    "test_2": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "causal", "post_scale_bias"),  # bias
-    "test_3": ModelConfig(2, 32, 4, 128, 8192, 8192, 0.0, "causal", "no_bias"),  # GQA
+    # "test_0": ModelConfig(2, 16, 16, 64, 512, 512, 0.0, "no_mask", "no_bias"),  # short seq
+    # "test_1": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "causal", "no_bias"),  # longer seq, mask
+    # "test_2": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "causal", "post_scale_bias"),  # bias
+    "test_3": ModelConfig(8, 64, 8, 128, 8192, 8192, 0.0, "causal", "no_bias"),  # GQA
 }
 
 # Define DataFrame indices and columns
 indices = [model for model in model_configs.keys()]
 columns = [
-        "FusedAttention Module",
-        "FusedAttention Kernels (fwd)",
-        "FusedAttention Kernels (bwd)",
-        "FusedAttention Kernels (fwd+bwd)",
-        "FlashAttention Module",
-        "FlashAttention Kernels (fwd)",
-        "FlashAttention Kernels (bwd)",
-        "FlashAttention Kernels (fwd+bwd)",
-        "Fused vs Flash Kernels Speedup (fwd+bwd)",
+        # "FusedAttention Module",
+        # "FusedAttention Kernels (fwd)",
+        # "FusedAttention Kernels (bwd)",
+        # "FusedAttention Kernels (fwd+bwd)",
+        # "FlashAttention Module",
+        # "FlashAttention Kernels (fwd)",
+        # "FlashAttention Kernels (bwd)",
+        # "FlashAttention Kernels (fwd+bwd)",
+        # "Fused vs Flash Kernels Speedup (fwd+bwd)",
         "FusedAttention CK Module",
         "FusedAttention CK Kernels (fwd)",
         "FusedAttention CK Kernels (bwd)",
         "FusedAttention CK Kernels (fwd+bwd)",
-        "FusedAttention AOTriton Module",
-        "FusedAttention AOTriton Kernels (fwd)",
-        "FusedAttention AOTriton Kernels (bwd)",
-        "FusedAttention AOTriton Kernels (fwd+bwd)",
+        # "FusedAttention AOTriton Module",
+        # "FusedAttention AOTriton Kernels (fwd)",
+        # "FusedAttention AOTriton Kernels (bwd)",
+        # "FusedAttention AOTriton Kernels (fwd+bwd)",
     ]
 
 output_csv="times.csv"
@@ -103,8 +103,8 @@ def benchmark_dot_product_attention(model, attention, column_name, filename):
             f"""'{model}', '{attention}', '{column_name}')" """,
         ]
     prof_cmd = " ".join(prof_cmd)
+    print(prof_cmd)
     subprocess.call(prof_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=True)
-
     if os.path.exists("results.stats.csv"):
         shutil.move("results.stats.csv", filename)
     else:
@@ -128,6 +128,7 @@ def benchmark_dot_product_attention_profiler(model, attention, column_name):
                 pad_between_seqs,
                 is_training,
             )
+    print("++++++++++++++RUN+++++++++++++++++++++")
     torch.cuda.synchronize()
     attn_time = time.time() - attn_start
 
@@ -219,12 +220,15 @@ def main():
         )
 
         filename_flash_attn, filename_fused_attn, filename_fused_ck, filename_fused_aotriton = None, None, None, None
+        print(fused_attn_backends)
         # Benchmark for each attention backend
         if flash_attn_supported:
+            print("===============================================")
             filename_flash_attn = os.path.join("profiler_outputs/", f"prof_flash_{model}.csv")
             benchmark_dot_product_attention(model, "FlashAttention", "FlashAttention Module", filename_flash_attn)
            
         if fused_attn_supported:
+            print("============================")
             filename_fused_attn = os.path.join("profiler_outputs/", f"prof_fused_{model}.csv")
             benchmark_dot_product_attention(model, "FusedAttention", "FusedAttention Module", filename_fused_attn)
             
@@ -232,6 +236,7 @@ def main():
                 #CK Backend
                 os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "0"
                 os.environ["NVTE_CK_USES_BWD_V3"] = "1"
+                os.environ["NVTE_CK_USES_FWD_V3"] = "1"
                 os.environ["NVTE_FUSED_ATTN_CK"] = "1"
                 os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
                 os.environ["NVTE_FUSED_ATTN"] = "0"
@@ -260,11 +265,11 @@ def main():
     a = df_times[
         [
             "FusedAttention Kernels (fwd+bwd)",
-            "FlashAttention Kernels (fwd+bwd)",
-            "Fused vs Flash Kernels Speedup (fwd+bwd)",
+            # "FlashAttention Kernels (fwd+bwd)",
+            # "Fused vs Flash Kernels Speedup (fwd+bwd)",
         ]
     ]
-    a.columns = ["cuDNN fwd+bwd (ms)", "flash-attn fwd+bwd (ms)", "cuDNN vs flash speedup"]
+    # a.columns = ["cuDNN fwd+bwd (ms)", "flash-attn fwd+bwd (ms)", "cuDNN vs flash speedup"]
     print()
     print(a)
 
