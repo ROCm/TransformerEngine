@@ -405,3 +405,4 @@ hipError_t ck_attn_varlen_fwd(
 }
 
 }//namespace ck_fused_attn
+

@@ -27,42 +27,42 @@ __global__ void dk_dv_reduce(
   //k,v, dk, dv guaranteed to have the same stride
   uint64_t stride_b_dkv, uint64_t stride_h_dkv, uint64_t stride_s_dkv){
    
-   uint64_t batch_idx = blockIdx.x;
-   uint64_t seqlen_idx = blockIdx.y;
-   uint64_t head_k_idx = blockIdx.z;
-   uint64_t hdim_idx = threadIdx.x;
-   
-   // h guaranteed to be multiples of hg
-   uint64_t head_idx_offset = h / hg;
- 
-   float sum_dk = 0.0f;
-   float sum_dv = 0.0f;
- 
-   assert(hdim_dix<d);
-   uint64_t read_idx = batch_idx*stride_b_dkv_expanded + head_k_idx*head_idx_offset*stride_h_dkv_expanded + seqlen_idx*stride_s_dkv_expanded + hdim_idx;
-   uint64_t write_idx = batch_idx*stride_b_dkv + head_k_idx*stride_h_dkv + seqlen_idx* stride_s_dkv + hdim_idx;
-   
-   for(uint64_t ii = 0; ii < head_idx_offset; ii++){
-     // bf16 requires special casting in CK
-     if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
-       sum_dk += ck_tile::bf16_to_float(dk_expanded[read_idx]);
-       sum_dv += ck_tile::bf16_to_float(dv_expanded[read_idx]);
-     }else{
-       sum_dk += dk_expanded[read_idx];
-       sum_dv += dv_expanded[read_idx];
-     }
-     read_idx += stride_h_dkv_expanded;
-   }
- 
-   // bf16 requires special casting in CK
-   if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
-     dk[write_idx] = ck_tile::float_to_bf16(sum_dk);
-     dv[write_idx] = ck_tile::float_to_bf16(sum_dv);
-   }else{
-     dk[write_idx] = sum_dk;
-     dv[write_idx] = sum_dv;
-   }
- }
+  uint64_t batch_idx = blockIdx.x;
+  uint64_t seqlen_idx = blockIdx.y;
+  uint64_t head_k_idx = blockIdx.z;
+  uint64_t hdim_idx = threadIdx.x;
+  
+  // h guaranteed to be multiples of hg
+  uint64_t head_idx_offset = h / hg;
+
+  float sum_dk = 0.0f;
+  float sum_dv = 0.0f;
+
+  assert(hdim_dix<d);
+  uint64_t read_idx = batch_idx*stride_b_dkv_expanded + head_k_idx*head_idx_offset*stride_h_dkv_expanded + seqlen_idx*stride_s_dkv_expanded + hdim_idx;
+  uint64_t write_idx = batch_idx*stride_b_dkv + head_k_idx*stride_h_dkv + seqlen_idx* stride_s_dkv + hdim_idx;
+  
+  for(uint64_t ii = 0; ii < head_idx_offset; ii++){
+    // bf16 requires special casting in CK
+    if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
+      sum_dk += ck_tile::bf16_to_float(dk_expanded[read_idx]);
+      sum_dv += ck_tile::bf16_to_float(dv_expanded[read_idx]);
+    }else{
+      sum_dk += dk_expanded[read_idx];
+      sum_dv += dv_expanded[read_idx];
+    }
+    read_idx += stride_h_dkv_expanded;
+  }
+
+  // bf16 requires special casting in CK
+  if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
+    dk[write_idx] = ck_tile::float_to_bf16(sum_dk);
+    dv[write_idx] = ck_tile::float_to_bf16(sum_dv);
+  }else{
+    dk[write_idx] = sum_dk;
+    dv[write_idx] = sum_dv;
+  }
+}
 
 // When d_qk != d_v, we need to reduce dk and dv separately
 template<typename DataType>
@@ -73,38 +73,38 @@ __global__ void dk_or_dv_reduce(
   DataType *dk_or_dv,
   //k,v, dk, dv guaranteed to have the same stride
   uint64_t stride_b_dk_or_dv, uint64_t stride_h_dk_or_dv, uint64_t stride_s_dk_or_dv){
-   
-   uint64_t batch_idx = blockIdx.x;
-   uint64_t seqlen_idx = blockIdx.y;
-   uint64_t head_k_or_v_idx = blockIdx.z;
-   uint64_t hdim_idx = threadIdx.x;
-   
-   // h guaranteed to be multiples of hg
-   uint64_t head_idx_offset = h / hg;
- 
-   float sum_dk_or_dv = 0.0f;
- 
-   assert(hdim_dix<d);
-   uint64_t read_idx = batch_idx*stride_b_dk_or_dv_expanded + head_k_or_v_idx*head_idx_offset*stride_h_dk_or_dv_expanded + seqlen_idx*stride_s_dk_or_dv_expanded + hdim_idx;
-   uint64_t write_idx = batch_idx*stride_b_dk_or_dv + head_k_or_v_idx*stride_h_dk_or_dv + seqlen_idx* stride_s_dk_or_dv + hdim_idx;
-   
-   for(uint64_t ii = 0; ii < head_idx_offset; ii++){
-     // bf16 requires special casting in CK
-     if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
-       sum_dk_or_dv += ck_tile::bf16_to_float(dk_or_dv_expanded[read_idx]);
-     }else{
-       sum_dk_or_dv += dk_or_dv_expanded[read_idx];
-     }
-     read_idx += stride_h_dk_or_dv_expanded;
-   }
- 
-   // bf16 requires special casting in CK
-   if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
-     dk_or_dv[write_idx] = ck_tile::float_to_bf16(sum_dk_or_dv);
-   }else{
-     dk_or_dv[write_idx] = sum_dk_or_dv;
-   }
- }
+  
+  uint64_t batch_idx = blockIdx.x;
+  uint64_t seqlen_idx = blockIdx.y;
+  uint64_t head_k_or_v_idx = blockIdx.z;
+  uint64_t hdim_idx = threadIdx.x;
+  
+  // h guaranteed to be multiples of hg
+  uint64_t head_idx_offset = h / hg;
+
+  float sum_dk_or_dv = 0.0f;
+
+  assert(hdim_dix<d);
+  uint64_t read_idx = batch_idx*stride_b_dk_or_dv_expanded + head_k_or_v_idx*head_idx_offset*stride_h_dk_or_dv_expanded + seqlen_idx*stride_s_dk_or_dv_expanded + hdim_idx;
+  uint64_t write_idx = batch_idx*stride_b_dk_or_dv + head_k_or_v_idx*stride_h_dk_or_dv + seqlen_idx* stride_s_dk_or_dv + hdim_idx;
+  
+  for(uint64_t ii = 0; ii < head_idx_offset; ii++){
+    // bf16 requires special casting in CK
+    if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
+      sum_dk_or_dv += ck_tile::bf16_to_float(dk_or_dv_expanded[read_idx]);
+    }else{
+      sum_dk_or_dv += dk_or_dv_expanded[read_idx];
+    }
+    read_idx += stride_h_dk_or_dv_expanded;
+  }
+
+  // bf16 requires special casting in CK
+  if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
+    dk_or_dv[write_idx] = ck_tile::float_to_bf16(sum_dk_or_dv);
+  }else{
+    dk_or_dv[write_idx] = sum_dk_or_dv;
+  }
+}
 
 // define dk_dv_reduce function in THD layout only for fp16 and bf16 types
 template<typename DataType>
@@ -118,48 +118,48 @@ __global__ void dk_dv_reduce_thd(
   DataType *dv,
   //k,v, dk, dv guaranteed to have the same stride
   uint64_t stride_h_dkv, uint64_t stride_s_dkv){
- 
-   uint64_t seqlen_idx = blockIdx.x;
-   uint64_t head_k_idx = blockIdx.y;
-   uint64_t hdim_idx = threadIdx.x;
-   
-   assert(hdim_dix<d);
- 
-   if(seqlen_idx >= *total_seqlen_kv_ptr){
-     return;
-   }
- 
-   // h guaranteed to be multiples of hg
-   uint64_t head_idx_offset = h / hg;
- 
-   float sum_dk = 0.0f;
-   float sum_dv = 0.0f;
- 
- 
-   uint64_t read_idx = head_k_idx*head_idx_offset*stride_h_dkv_expanded + seqlen_idx*stride_s_dkv_expanded + hdim_idx;
-   uint64_t write_idx = head_k_idx*stride_h_dkv + seqlen_idx* stride_s_dkv + hdim_idx;
-   
-   for(uint64_t ii = 0; ii < head_idx_offset; ii++){
-     // bf16 requires special casting in CK
-     if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
-       sum_dk += ck_tile::bf16_to_float(dk_expanded[read_idx]);
-       sum_dv += ck_tile::bf16_to_float(dv_expanded[read_idx]);
-     }else{
-       sum_dk += dk_expanded[read_idx];
-       sum_dv += dv_expanded[read_idx];
-     }
-     read_idx += stride_h_dkv_expanded;
-   }
- 
-   // bf16 requires special casting in CK
-   if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
-     dk[write_idx] = ck_tile::float_to_bf16(sum_dk);
-     dv[write_idx] = ck_tile::float_to_bf16(sum_dv);
-   }else{
-     dk[write_idx] = sum_dk;
-     dv[write_idx] = sum_dv;
-   }
- }
+
+  uint64_t seqlen_idx = blockIdx.x;
+  uint64_t head_k_idx = blockIdx.y;
+  uint64_t hdim_idx = threadIdx.x;
+  
+  assert(hdim_dix<d);
+
+  if(seqlen_idx >= *total_seqlen_kv_ptr){
+    return;
+  }
+
+  // h guaranteed to be multiples of hg
+  uint64_t head_idx_offset = h / hg;
+
+  float sum_dk = 0.0f;
+  float sum_dv = 0.0f;
+
+
+  uint64_t read_idx = head_k_idx*head_idx_offset*stride_h_dkv_expanded + seqlen_idx*stride_s_dkv_expanded + hdim_idx;
+  uint64_t write_idx = head_k_idx*stride_h_dkv + seqlen_idx* stride_s_dkv + hdim_idx;
+  
+  for(uint64_t ii = 0; ii < head_idx_offset; ii++){
+    // bf16 requires special casting in CK
+    if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
+      sum_dk += ck_tile::bf16_to_float(dk_expanded[read_idx]);
+      sum_dv += ck_tile::bf16_to_float(dv_expanded[read_idx]);
+    }else{
+      sum_dk += dk_expanded[read_idx];
+      sum_dv += dv_expanded[read_idx];
+    }
+    read_idx += stride_h_dkv_expanded;
+  }
+
+  // bf16 requires special casting in CK
+  if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
+    dk[write_idx] = ck_tile::float_to_bf16(sum_dk);
+    dv[write_idx] = ck_tile::float_to_bf16(sum_dv);
+  }else{
+    dk[write_idx] = sum_dk;
+    dv[write_idx] = sum_dv;
+  }
+}
 
 // When d_qk != d_v, we need to reduce dk and dv separately
 template<typename DataType>
@@ -171,42 +171,42 @@ __global__ void dk_or_dv_reduce_thd(
   DataType *dk_or_dv,
   //k,v, dk, dv guaranteed to have the same stride
   uint64_t stride_h_dk_or_dv, uint64_t stride_s_dk_or_dv){
- 
-   uint64_t seqlen_idx = blockIdx.x;
-   uint64_t head_k_or_v_idx = blockIdx.y;
-   uint64_t hdim_idx = threadIdx.x;
-   
-   assert(hdim_dix<d);
- 
-   if(seqlen_idx >= *total_seqlen_kv_ptr){
-     return;
-   }
- 
-   // h guaranteed to be multiples of hg
-   uint64_t head_idx_offset = h / hg;
- 
-   float sum_dk_or_dv = 0.0f;
- 
-   uint64_t read_idx = head_k_or_v_idx*head_idx_offset*stride_h_dk_or_dv_expanded + seqlen_idx*stride_s_dk_or_dv_expanded + hdim_idx;
-   uint64_t write_idx = head_k_or_v_idx*stride_h_dk_or_dv + seqlen_idx* stride_s_dk_or_dv + hdim_idx;
-   
-   for(uint64_t ii = 0; ii < head_idx_offset; ii++){
-     // bf16 requires special casting in CK
-     if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
-       sum_dk_or_dv += ck_tile::bf16_to_float(dk_or_dv_expanded[read_idx]);
-     }else{
-       sum_dk_or_dv += dk_or_dv_expanded[read_idx];
-     }
-     read_idx += stride_h_dk_or_dv_expanded;
-   }
- 
-   // bf16 requires special casting in CK
-   if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
-     dk_or_dv[write_idx] = ck_tile::float_to_bf16(sum_dk_or_dv);
-   }else{
-     dk_or_dv[write_idx] = sum_dk_or_dv;
-   }
- }
+
+  uint64_t seqlen_idx = blockIdx.x;
+  uint64_t head_k_or_v_idx = blockIdx.y;
+  uint64_t hdim_idx = threadIdx.x;
+  
+  assert(hdim_dix<d);
+
+  if(seqlen_idx >= *total_seqlen_kv_ptr){
+    return;
+  }
+
+  // h guaranteed to be multiples of hg
+  uint64_t head_idx_offset = h / hg;
+
+  float sum_dk_or_dv = 0.0f;
+
+  uint64_t read_idx = head_k_or_v_idx*head_idx_offset*stride_h_dk_or_dv_expanded + seqlen_idx*stride_s_dk_or_dv_expanded + hdim_idx;
+  uint64_t write_idx = head_k_or_v_idx*stride_h_dk_or_dv + seqlen_idx* stride_s_dk_or_dv + hdim_idx;
+  
+  for(uint64_t ii = 0; ii < head_idx_offset; ii++){
+    // bf16 requires special casting in CK
+    if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
+      sum_dk_or_dv += ck_tile::bf16_to_float(dk_or_dv_expanded[read_idx]);
+    }else{
+      sum_dk_or_dv += dk_or_dv_expanded[read_idx];
+    }
+    read_idx += stride_h_dk_or_dv_expanded;
+  }
+
+  // bf16 requires special casting in CK
+  if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
+    dk_or_dv[write_idx] = ck_tile::float_to_bf16(sum_dk_or_dv);
+  }else{
+    dk_or_dv[write_idx] = sum_dk_or_dv;
+  }
+}
 
 
 // define dbias_reduce functions only for fp16 and bf16 types
@@ -215,29 +215,29 @@ __global__ void dbias_reduce_11ss(
   uint64_t b, uint64_t h, uint64_t s_q, uint64_t s_kv,
   const DataType *dbias_expanded,
   DataType *dbias){
-   
-   const uint64_t stride_h = s_q*s_kv;
-   const uint64_t stride_b = h*s_q*s_kv;
-   for(uint64_t ss_idx = blockIdx.x*blockDim.x + threadIdx.x; ss_idx < s_q*s_kv; ss_idx += blockDim.x * gridDim.x){
-     //sum over b, h dims both
-     float sum_dbias = 0.0f;
-     for(uint64_t b_idx = 0; b_idx< b; b_idx++){
-       for(uint64_t h_idx = 0; h_idx < h; h_idx++){
-         if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
-           // bf16 requires special casting in CK
-           sum_dbias += ck_tile::bf16_to_float(dbias_expanded[b_idx*stride_b + h_idx*stride_h+ss_idx]);
-         }else{
-           sum_dbias += dbias_expanded[b_idx*stride_b + h_idx*stride_h+ss_idx];
-         }
-       }
-     }
-     if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
-       dbias[ss_idx] = ck_tile::float_to_bf16(sum_dbias);
-     }else{
-       dbias[ss_idx] = sum_dbias;
-     }
-   }
- }
+  
+  const uint64_t stride_h = s_q*s_kv;
+  const uint64_t stride_b = h*s_q*s_kv;
+  for(uint64_t ss_idx = blockIdx.x*blockDim.x + threadIdx.x; ss_idx < s_q*s_kv; ss_idx += blockDim.x * gridDim.x){
+    //sum over b, h dims both
+    float sum_dbias = 0.0f;
+    for(uint64_t b_idx = 0; b_idx< b; b_idx++){
+      for(uint64_t h_idx = 0; h_idx < h; h_idx++){
+        if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
+          // bf16 requires special casting in CK
+          sum_dbias += ck_tile::bf16_to_float(dbias_expanded[b_idx*stride_b + h_idx*stride_h+ss_idx]);
+        }else{
+          sum_dbias += dbias_expanded[b_idx*stride_b + h_idx*stride_h+ss_idx];
+        }
+      }
+    }
+    if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
+      dbias[ss_idx] = ck_tile::float_to_bf16(sum_dbias);
+    }else{
+      dbias[ss_idx] = sum_dbias;
+    }
+  }
+}
 
 // define dbias_reduce functions only for fp16 and bf16 types
 template<typename DataType>
@@ -245,29 +245,29 @@ __global__ void dbias_reduce_1hss(
   uint64_t b, uint64_t h, uint64_t s_q, uint64_t s_kv,
   const DataType *dbias_expanded,
   DataType *dbias){
-   
-   const uint64_t stride_h = s_q*s_kv;
-   const uint64_t stride_b = h*s_q*s_kv;
-   for(uint64_t ss_idx = blockIdx.x*blockDim.x + threadIdx.x; ss_idx < s_q*s_kv; ss_idx += blockDim.x * gridDim.x){
-     for(uint64_t h_idx = 0; h_idx < h; h_idx++){
-       //sum over b dims only
-       float sum_dbias = 0.0f;
-       for(uint64_t b_idx = 0; b_idx< b; b_idx++){
-         if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
-           // bf16 requires special casting in CK
-           sum_dbias += ck_tile::bf16_to_float(dbias_expanded[b_idx*stride_b + h_idx*stride_h+ss_idx]);
-         }else{
-           sum_dbias += dbias_expanded[b_idx*stride_b + h_idx*stride_h+ss_idx];
-         }
-       }
-       if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
-         dbias[ss_idx + h_idx*stride_h] = ck_tile::float_to_bf16(sum_dbias);
-       }else{
-         dbias[ss_idx + h_idx*stride_h] = sum_dbias;
-       }
-     }
-   }
- }
+  
+  const uint64_t stride_h = s_q*s_kv;
+  const uint64_t stride_b = h*s_q*s_kv;
+  for(uint64_t ss_idx = blockIdx.x*blockDim.x + threadIdx.x; ss_idx < s_q*s_kv; ss_idx += blockDim.x * gridDim.x){
+    for(uint64_t h_idx = 0; h_idx < h; h_idx++){
+      //sum over b dims only
+      float sum_dbias = 0.0f;
+      for(uint64_t b_idx = 0; b_idx< b; b_idx++){
+        if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
+          // bf16 requires special casting in CK
+          sum_dbias += ck_tile::bf16_to_float(dbias_expanded[b_idx*stride_b + h_idx*stride_h+ss_idx]);
+        }else{
+          sum_dbias += dbias_expanded[b_idx*stride_b + h_idx*stride_h+ss_idx];
+        }
+      }
+      if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
+        dbias[ss_idx + h_idx*stride_h] = ck_tile::float_to_bf16(sum_dbias);
+      }else{
+        dbias[ss_idx + h_idx*stride_h] = sum_dbias;
+      }
+    }
+  }
+}
 
 // define dbias_reduce functions only for fp16 and bf16 types
 template<typename DataType>
@@ -275,29 +275,29 @@ __global__ void dbias_reduce_b1ss(
   uint64_t b, uint64_t h, uint64_t s_q, uint64_t s_kv,
   const DataType *dbias_expanded,
   DataType *dbias){
-   
-   const uint64_t stride_h = s_q*s_kv;
-   const uint64_t stride_b = h*s_q*s_kv;
-   for(uint64_t ss_idx = blockIdx.x*blockDim.x + threadIdx.x; ss_idx < s_q*s_kv; ss_idx += blockDim.x * gridDim.x){
-     for(uint64_t b_idx = 0; b_idx< b; b_idx++){
-       //sum over h dims only
-       float sum_dbias = 0.0f;
-       for(uint64_t h_idx = 0; h_idx < h; h_idx++){
-         if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
-           // bf16 requires special casting in CK
-           sum_dbias += ck_tile::bf16_to_float(dbias_expanded[b_idx*stride_b + h_idx*stride_h+ss_idx]);
-         }else{
-           sum_dbias += dbias_expanded[b_idx*stride_b + h_idx*stride_h+ss_idx];
-         }
-       }
-       if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
-         dbias[ss_idx + b_idx*stride_h] = ck_tile::float_to_bf16(sum_dbias);
-       }else{
-         dbias[ss_idx + b_idx*stride_h] = sum_dbias;
-       }
-     }
-   }
- }
+  
+  const uint64_t stride_h = s_q*s_kv;
+  const uint64_t stride_b = h*s_q*s_kv;
+  for(uint64_t ss_idx = blockIdx.x*blockDim.x + threadIdx.x; ss_idx < s_q*s_kv; ss_idx += blockDim.x * gridDim.x){
+    for(uint64_t b_idx = 0; b_idx< b; b_idx++){
+      //sum over h dims only
+      float sum_dbias = 0.0f;
+      for(uint64_t h_idx = 0; h_idx < h; h_idx++){
+        if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
+          // bf16 requires special casting in CK
+          sum_dbias += ck_tile::bf16_to_float(dbias_expanded[b_idx*stride_b + h_idx*stride_h+ss_idx]);
+        }else{
+          sum_dbias += dbias_expanded[b_idx*stride_b + h_idx*stride_h+ss_idx];
+        }
+      }
+      if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
+        dbias[ss_idx + b_idx*stride_h] = ck_tile::float_to_bf16(sum_dbias);
+      }else{
+        dbias[ss_idx + b_idx*stride_h] = sum_dbias;
+      }
+    }
+  }
+}
 
 // print the fmha_traits and args passed into ck apis
 void log_bwd_config(const char* func_name,
@@ -1064,3 +1064,4 @@ hipError_t ck_attn_varlen_bwd(
 }
 
 }//namespace ck_fused_attn
+

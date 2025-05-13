@@ -159,3 +159,4 @@ hipError_t ck_attn_varlen_bwd(
 
 }//namespace ck_fused_attn
 #endif // CK_FUSED_ATTN_H
+
