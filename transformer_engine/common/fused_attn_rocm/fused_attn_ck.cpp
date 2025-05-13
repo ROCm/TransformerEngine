@@ -45,7 +45,7 @@ bool is_ck_backend_supported(
   
   // filters based on head_dime_qk and head_dim_v
   if (head_dim_qk != head_dim_v) {
-     if(nvte_log_aiter_config){
+     if(nvte_log_ck_config){
         std::cout<<"head_dim_qk must be equal to head_dim_v"<<std::endl;
       }
       return false;
