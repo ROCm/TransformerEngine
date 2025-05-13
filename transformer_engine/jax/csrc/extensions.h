@@ -34,6 +34,7 @@
 #include "transformer_engine/activation.h"
 #include "utils.h"
 
+
 namespace transformer_engine {
 namespace jax {
 
@@ -304,6 +305,9 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
 void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnBackwardHandler);
+
+// Grouped GEMM
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);
 
 }  // namespace jax
 }  // namespace transformer_engine

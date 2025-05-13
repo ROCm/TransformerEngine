@@ -124,7 +124,11 @@ pybind11::dict Registrations() {
   // Attention
   dict["te_fused_attn_forward_ffi"] = EncapsulateFFI(FusedAttnForwardHandler);
   dict["te_fused_attn_backward_ffi"] = EncapsulateFFI(FusedAttnBackwardHandler);
+
+  // Grouped GEMM
+  dict["te_grouped_gemm_ffi"] = EncapsulateFFI(GroupedGemmHandler);
 #endif
+
   return dict;
 }
 

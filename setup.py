@@ -18,6 +18,7 @@ from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.te_version import te_version
 from build_tools.utils import (
     rocm_build,
+    rocm_path,
     cuda_archs,
     found_cmake,
     found_ninja,
@@ -73,8 +74,11 @@ def setup_common_extension() -> CMakeExtension:
     root_path = Path(__file__).resolve().parent
 
     cmake_flags = []
+    cmake_flags.append("-DCMAKE_POLICY_VERSION_MINIMUM=3.5")
     if rocm_build():
+        rocm_home = rocm_path()[0]
         cmake_flags.append("-DUSE_ROCM=ON")
+        cmake_flags.append(f"-DCMAKE_PREFIX_PATH={rocm_home};{rocm_home}/hip")
         if os.getenv("NVTE_USE_HIPBLASLT") is not None:
             cmake_flags.append("-DUSE_HIPBLASLT=ON")
         if os.getenv("NVTE_USE_ROCBLAS") is not None:
