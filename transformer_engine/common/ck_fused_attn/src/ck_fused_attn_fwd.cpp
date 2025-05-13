@@ -18,10 +18,13 @@
  // print the fmha traits and args when calling ck apis
  void log_fwd_config(const char* func_name,
                      const std::string data_type_str,
-                     consr bool is_group_mode,
+                     const bool is_group_mode,
                      const mask_enum mask_type,
                      const bias_enum bias_type,
                      const bool has_lse,
+                     const bool has_dropout,
+                     const bool is_v_rowmajor,
+                     const bool do_fp8_static_quant,
                      const fmha_fwd_args& fmha_args){
    bool ck_fused_attn_log_config = false;
    if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
@@ -235,7 +238,7 @@
    }();
    
    // print ck traits and args when needed
-   log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, mask.type, bias_type, has_lse, fmha_args);
+   log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, mask.type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, fmha_args);
  
    float average_runtime = aiter::mha_fwd(fmha_args,
                                           stream_config,
@@ -300,6 +303,7 @@
    mask_info mask;
    mask.type = attn_mask_type;
    
+   bias_enum bias_type = bias_enum::no_bias;
    ck_tile::stream_config stream_config{stream};
  
    std::string data_type_str = get_data_type_str(dtype);
@@ -386,7 +390,7 @@
    }();
  
    // print ck traits and args when needed
-   log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, mask.type, bias_type, has_lse, fmha_args);
+   log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, mask.type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, fmha_args);
  
    float average_runtime = aiter::mha_fwd(fmha_args,
                                           stream_config,

@@ -306,8 +306,9 @@
                      const mask_enum mask_type,
                      const bias_enum bias_type,
                      const bool has_dbias,
-                     const bool s_randval,
-                     const bool deterministic,
+                     const bool has_dropout,
+                     const bool is_store_randval,
+                     const bool is_deterministic,
                      const bool uses_bwd_v3,
                      const bool is_v3_atomic_fp32,
                      const int how_v3_bf16_cvt,
@@ -483,7 +484,7 @@
    right = window_size_right;
   
    mask_info mask;
-   mask.type = attn_mask_type;
+   mask.type = static_cast<mask_enum>attn_mask_type;
 
    bool ck_fused_attn_log_config = false;
    if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
@@ -634,7 +635,7 @@
    }();
  
    // print ck traits and args when needed
-   log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask.type, bias_enum::no_bias, has_dbias, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args); 
+   log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask.type, bias_enum::no_bias, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args);
    
    float average_runtime = aiter::mha_bwd(fmha_args,
                                           stream_config,
@@ -832,7 +833,7 @@
    right = window_size_right;
 
    mask_info mask;
-   mask.type = attn_mask_type;
+   mask.type = static_cast<mask_enum>attn_mask_type;
   
    bool ck_fused_attn_log_config = false;
    if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
@@ -976,7 +977,7 @@
    }();
  
    // print ck traits and args when needed
-   log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask.type, bias_enum::no_bias, has_dbias, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args);
+   log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask.type, bias_enum::no_bias, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args);
  
    float average_runtime = aiter::mha_bwd(fmha_args,
                                           stream_config,
