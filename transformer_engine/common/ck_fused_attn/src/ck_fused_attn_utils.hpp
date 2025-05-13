@@ -4,8 +4,8 @@
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
-#ifndef AITER_FUSED_ATTN_UTILS_H
-#define AITER_FUSED_ATTN_UTILS_H
+#ifndef CK_FUSED_ATTN_UTILS_H
+#define CK_FUSED_ATTN_UTILS_H
 
 #include<iostream>
 #include<cstdint>
@@ -15,7 +15,7 @@ enum class mask_enum;
 //forward declaration for ck_tile enum
 enum class bias_enum;
 
-namespace aiter_fused_attn{
+namespace ck_fused_attn{
 
 #define CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, type, ...)   \
 switch (dtype) {                                            \
@@ -42,11 +42,11 @@ enum class BiasShape{
   kNumBiasShapes  /*!< Number of supported bias shapes */
 };
 
-//forward declaration of aiter_fused_attn::DType
+//forward declaration of ck_fused_attn::DType
 enum class DType ;
-//forward declaration of aiter_fused_attn::MaskType
+//forward declaration of ck_fused_attn::MaskType
 enum class MaskType;
-//forward declaration of aiter_fused_attn::BiasType
+//forward declaration of ck_fused_attn::BiasType
 enum class BiasType;
 
 std::string get_data_type_str(DType dtype);
@@ -55,5 +55,5 @@ std::pair<bias_enum, BiasShape> get_ck_bias_type_shape(BiasType attn_bias_type, 
 
 // mask_enum get_ck_mask_type(MaskType attn_mask_type);
 
-}//namespace aiter_fused_attn
-#endif // AITER_FUSED_ATTN_UTILS_H
+}//namespace ck_fused_attn
+#endif // CK_FUSED_ATTN_UTILS_H

@@ -6,11 +6,11 @@
 
 #include <utility>
 #include "ck_fused_attn_utils.hpp"
-#include "aiter_fused_attn/aiter_fused_attn.hpp"
+#include "ck_fused_attn/ck_fused_attn.hpp"
 #include "mask.hpp"
 #include "bias.hpp"
 
-namespace aiter_fused_attn{
+namespace ck_fused_attn{
 
 std::string get_data_type_str(DType dtype){
   std::string data_type_str;
@@ -20,7 +20,7 @@ std::string get_data_type_str(DType dtype){
     data_type_str = "bf16";
   }else{
     //TODO: better error out system
-    throw std::runtime_error("Invalid dtype in aiter_fused_attn.");
+    throw std::runtime_error("Invalid dtype in ck_fused_attn.");
   }
   return data_type_str;
 }
@@ -39,12 +39,12 @@ BiasShape get_bias_shape(uint64_t b, uint64_t h, uint64_t bias_b, uint64_t bias_
     return BiasShape::k11SS;
   }else{
     //should not happen
-    throw std::runtime_error("Invalid bias_shape in aiter_fused_attn.");
+    throw std::runtime_error("Invalid bias_shape in ck_fused_attn.");
   }
   return BiasShape::kNumBiasShapes;
 }
 
-//get ck_tile bias_type and AITER_FUSED_ATTN bias_shape
+//get ck_tile bias_type and CK_FUSED_ATTN bias_shape
 std::pair<bias_enum, BiasShape> get_ck_bias_type_shape(BiasType attn_bias_type, uint64_t b, uint64_t h, uint64_t bias_b, uint64_t bias_h){
   bias_enum bias_type;
   BiasShape bias_shape; 
@@ -57,9 +57,9 @@ std::pair<bias_enum, BiasShape> get_ck_bias_type_shape(BiasType attn_bias_type, 
     bias_type = bias_enum::alibi;
   }else{
     //TODO: better error out system
-    throw std::runtime_error("Invalid bias_type in aiter_fused_attn.");
+    throw std::runtime_error("Invalid bias_type in ck_fused_attn.");
   }
   return std::make_pair(bias_type, bias_shape); 
 }
 
-}//namespace aiter_fused_attn
+}//namespace ck_fused_attn

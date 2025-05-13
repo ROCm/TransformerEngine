@@ -8,12 +8,12 @@
  #include <cstdlib>
  #include <stdexcept>
  #include <type_traits>
- #include "aiter_fused_attn/aiter_fused_attn.hpp"
+ #include "ck_fused_attn/ck_fused_attn.hpp"
  #include "ck_tile/host.hpp"
  #include "mha_bwd.h"
- #include "aiter_fused_attn_utils.hpp"
+ #include "ck_fused_attn_utils.hpp"
  
- namespace aiter_fused_attn{
+ namespace ck_fused_attn{
  
  // define dk_dv_reduce function only for fp16 and bf16 types
  template<typename DataType>
@@ -302,13 +302,13 @@
  // print the fmha_traits and args passed into ck apis
  void log_bwd_config(const char* func_name, const fmha_bwd_traits& fmha_traits, const fmha_bwd_args& fmha_args){
  
-   bool aiter_fused_attn_log_config = false;
-   if (const char* env_p = std::getenv("AITER_FUSED_ATTN_LOG_CONFIG") ) {
+   bool ck_fused_attn_log_config = false;
+   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
      if (env_p != nullptr && std::string(env_p) == "1")
-       aiter_fused_attn_log_config = true;
+       ck_fused_attn_log_config = true;
    }
-   if (aiter_fused_attn_log_config) {
-     std::cout<<std::endl<<"run aiter fmha_bwd: "<<std::endl;
+   if (ck_fused_attn_log_config) {
+     std::cout<<std::endl<<"run ck fmha_bwd: "<<std::endl;
      // fmha_traits debug
      std::cout<<"fmha_traits: "<<std::endl;
      std::cout<<"hdim_q: "<<fmha_traits.hdim_q<<std::endl;
@@ -402,7 +402,7 @@
  
  }
  
- hipError_t aiter_attn_bwd(  
+ hipError_t ck_attn_bwd(  
    DType dtype,
    uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v, uint64_t bias_b, uint64_t bias_h,
    const void* q_ptr, 
@@ -488,14 +488,14 @@
        mask = mask_info::decode(mask_identify, seqlen_q, seqlen_k);
    }
 
-   bool aiter_fused_attn_log_config = false;
-   if (const char* env_p = std::getenv("AITER_FUSED_ATTN_LOG_CONFIG") ) {
+   bool ck_fused_attn_log_config = false;
+   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
      if (env_p != nullptr && std::string(env_p) == "1")
-       aiter_fused_attn_log_config = true;
+       ck_fused_attn_log_config = true;
    }
  
    // print kernel name on verbose mode
-   ck_tile::stream_config stream_config{stream, false, aiter_fused_attn_log_config};
+   ck_tile::stream_config stream_config{stream, false, ck_fused_attn_log_config};
  
    ck_tile::index_t shape_seqlen_q = seqlen_q;
    ck_tile::index_t shape_seqlen_k = seqlen_k;
@@ -653,13 +653,13 @@
                                           how_v3_bf16_cvt);
    if(average_runtime < 0){
      //TODO: better error out system
-     throw std::runtime_error("fused attn configs not supported in aiter_fused_attn bwd pass.");
+     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
    }
    if(is_mqa_gqa){
      dim3 grid(b, s_kv, hg);
      if (d_qk == d_v) {
        dim3 block(d_qk);
-       if (aiter_fused_attn_log_config){
+       if (ck_fused_attn_log_config){
          std::cout<<std::endl<<"run dk_dv_reduce: "<<std::endl;
          std::cout<<"dk_expanded_ptr: "<<dk_expanded_ptr<<std::endl;
          std::cout<<"dv_expanded_ptr: "<<dv_expanded_ptr<<std::endl;
@@ -672,7 +672,7 @@
          std::cout<<"stride_h_dk: "<<stride_h_dk<<std::endl;
          std::cout<<"stride_s_dk: "<<stride_s_dk<<std::endl;
        }
-       AITER_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
+       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
          hipLaunchKernelGGL(
            dk_dv_reduce<CK_TILE_TYPE>, grid, block, 0, stream,
            b, h, hg, s_kv, d_qk,
@@ -684,7 +684,7 @@
            stride_b_dk, stride_h_dk, stride_s_dk););
      } else {
        dim3 block_dk(d_qk);
-       if (aiter_fused_attn_log_config){
+       if (ck_fused_attn_log_config){
          std::cout<<std::endl<<"run dk_or_dv_reduce on dk: "<<std::endl;
          std::cout<<"dk_expanded_ptr: "<<dk_expanded_ptr<<std::endl;
          std::cout<<"stride_b_dk_expanded: "<<stride_b_dk_expanded<<std::endl;
@@ -695,7 +695,7 @@
          std::cout<<"stride_h_dk: "<<stride_h_dk<<std::endl;
          std::cout<<"stride_s_dk: "<<stride_s_dk<<std::endl;
        }
-       AITER_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
+       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
          hipLaunchKernelGGL(
            dk_or_dv_reduce<CK_TILE_TYPE>, grid, block_dk, 0, stream,
            b, h, hg, s_kv, d_qk,
@@ -705,7 +705,7 @@
            stride_b_dk, stride_h_dk, stride_s_dk););
  
        dim3 block_dv(d_v);
-       if (aiter_fused_attn_log_config){
+       if (ck_fused_attn_log_config){
          std::cout<<std::endl<<"run dk_or_dv_reduce on dv: "<<std::endl;
          std::cout<<"dv_expanded_ptr: "<<dv_expanded_ptr<<std::endl;
          std::cout<<"stride_b_dv_expanded: "<<stride_b_dv_expanded<<std::endl;
@@ -716,7 +716,7 @@
          std::cout<<"stride_h_dv: "<<stride_h_dv<<std::endl;
          std::cout<<"stride_s_dv: "<<stride_s_dv<<std::endl;
        }
-       AITER_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
+       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
          hipLaunchKernelGGL(
            dk_or_dv_reduce<CK_TILE_TYPE>, grid, block_dv, 0, stream,
            b, h, hg, s_kv, d_v,
@@ -733,36 +733,36 @@
      dim3 block(THREADS_PER_BLOCK);
      dim3 grid(ceil(1.0 * s_q * s_kv/THREADS_PER_BLOCK));
      if(bias_shape==BiasShape::k11SS){
-       if (aiter_fused_attn_log_config){
+       if (ck_fused_attn_log_config){
          std::cout<<std::endl<<"run dbias_reduce_11SS: "<<std::endl;
          std::cout<<"dbias_ptr: "<<dbias_ptr<<std::endl;
          std::cout<<"dbias_expanded_ptr: "<<dbias_expanded_ptr<<std::endl;
        }
-       AITER_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
+       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
          hipLaunchKernelGGL(
            dbias_reduce_11ss<CK_TILE_TYPE>, grid, block, 0, stream,
            b, h, s_q, s_kv,
            static_cast<CK_TILE_TYPE*>(dbias_expanded_ptr),
            static_cast<CK_TILE_TYPE*>(dbias_ptr));); 
      }else if(bias_shape==BiasShape::k1HSS){
-       if (aiter_fused_attn_log_config){
+       if (ck_fused_attn_log_config){
          std::cout<<std::endl<<"run dbias_reduce_1HSS: "<<std::endl;
          std::cout<<"dbias_ptr: "<<dbias_ptr<<std::endl;
          std::cout<<"dbias_expanded_ptr: "<<dbias_expanded_ptr<<std::endl;
        }
-       AITER_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
+       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
          hipLaunchKernelGGL(
            dbias_reduce_1hss<CK_TILE_TYPE>, grid, block, 0, stream,
            b, h, s_q, s_kv,
            static_cast<CK_TILE_TYPE*>(dbias_expanded_ptr),
            static_cast<CK_TILE_TYPE*>(dbias_ptr));); 
      }else if(bias_shape==BiasShape::kB1SS){
-       if (aiter_fused_attn_log_config){
+       if (ck_fused_attn_log_config){
          std::cout<<std::endl<<"run dbias_reduce_B1SS: "<<std::endl;
          std::cout<<"dbias_ptr: "<<dbias_ptr<<std::endl;
          std::cout<<"dbias_expanded_ptr: "<<dbias_expanded_ptr<<std::endl;
        }
-       AITER_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
+       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
          hipLaunchKernelGGL(
            dbias_reduce_b1ss<CK_TILE_TYPE>, grid, block, 0, stream,
            b, h, s_q, s_kv,
@@ -773,7 +773,7 @@
    return hipSuccess;
  }
  
- hipError_t aiter_attn_varlen_bwd(  
+ hipError_t ck_attn_varlen_bwd(  
    DType dtype,
    uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v,
    const void* q_ptr, 
@@ -851,13 +851,13 @@
        mask = mask_info::decode(mask_identify, seqlen_q, seqlen_k);
    }
   
-   bool aiter_fused_attn_log_config = false;
-   if (const char* env_p = std::getenv("AITER_FUSED_ATTN_LOG_CONFIG") ) {
+   bool ck_fused_attn_log_config = false;
+   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
      if (env_p != nullptr && std::string(env_p) == "1")
-       aiter_fused_attn_log_config = true;
+       ck_fused_attn_log_config = true;
    } 
    // print kernel name on verbose mode
-   ck_tile::stream_config stream_config{stream, false, aiter_fused_attn_log_config};
+   ck_tile::stream_config stream_config{stream, false, ck_fused_attn_log_config};
  
    std::string data_type_str = get_data_type_str(dtype);
  
@@ -1009,13 +1009,13 @@
                                     how_v3_bf16_cvt);
    if(average_runtime < 0){
      //TODO: better error out system
-     throw std::runtime_error("fused attn configs not supported in aiter_fused_attn bwd pass.");
+     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
    }
    if(is_mqa_gqa){
      dim3 grid(b*s_kv, hg);
      if (d_qk == d_v) {
        dim3 block(d_qk);
-       if (aiter_fused_attn_log_config){
+       if (ck_fused_attn_log_config){
          std::cout<<std::endl<<"run dk_dv_reduce_thd: "<<std::endl;
          std::cout<<"dk_expanded_ptr: "<<dk_expanded_ptr<<std::endl;
          std::cout<<"dv_expanded_ptr: "<<dv_expanded_ptr<<std::endl;
@@ -1026,7 +1026,7 @@
          std::cout<<"stride_h_dk: "<<stride_h_dk<<std::endl;
          std::cout<<"stride_s_dk: "<<stride_s_dk<<std::endl;
        }
-       AITER_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
+       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
          hipLaunchKernelGGL(
            dk_dv_reduce_thd<CK_TILE_TYPE>, grid, block, 0, stream,
            h, hg, d_qk,
@@ -1039,7 +1039,7 @@
            stride_h_dk, stride_s_dk););
      } else {
        dim3 block_dk(d_qk);
-       if (aiter_fused_attn_log_config){
+       if (ck_fused_attn_log_config){
          std::cout<<std::endl<<"run dk_or_dv_reduce_thd on dk: "<<std::endl;
          std::cout<<"dk_expanded_ptr: "<<dk_expanded_ptr<<std::endl;
          std::cout<<"stride_h_dk_expanded: "<<stride_h_dk_expanded<<std::endl;
@@ -1048,7 +1048,7 @@
          std::cout<<"stride_h_dk: "<<stride_h_dk<<std::endl;
          std::cout<<"stride_s_dk: "<<stride_s_dk<<std::endl;
        }
-       AITER_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
+       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
          hipLaunchKernelGGL(
            dk_or_dv_reduce_thd<CK_TILE_TYPE>, grid, block_dk, 0, stream,
            h, hg, d_qk,
@@ -1059,7 +1059,7 @@
            stride_h_dk, stride_s_dk););
  
        dim3 block_dv(d_v);
-       if (aiter_fused_attn_log_config){
+       if (ck_fused_attn_log_config){
          std::cout<<std::endl<<"run dk_or_dv_reduce_thd on dv: "<<std::endl;
          std::cout<<"dv_expanded_ptr: "<<dv_expanded_ptr<<std::endl;
          std::cout<<"stride_h_dv_expanded: "<<stride_h_dv_expanded<<std::endl;
@@ -1068,7 +1068,7 @@
          std::cout<<"stride_h_dv: "<<stride_h_dv<<std::endl;
          std::cout<<"stride_s_dv: "<<stride_s_dv<<std::endl;
        }
-       AITER_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
+       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
          hipLaunchKernelGGL(
            dk_or_dv_reduce_thd<CK_TILE_TYPE>, grid, block_dv, 0, stream,
            h, hg, d_v,
@@ -1082,5 +1082,5 @@
    return hipSuccess;
  }
  
- }//namespace aiter_fused_attn
+ }//namespace ck_fused_attn
  

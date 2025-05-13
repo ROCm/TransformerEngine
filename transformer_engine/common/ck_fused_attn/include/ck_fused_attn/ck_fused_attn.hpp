@@ -4,15 +4,15 @@
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
- #ifndef AITER_FUSED_ATTN_H
- #define AITER_FUSED_ATTN_H
+ #ifndef CK_FUSED_ATTN_H
+ #define CK_FUSED_ATTN_H
  
  #include<iostream>
  #include<string>
  #include<cstdint>
  #include<hip/hip_runtime.h>
  
- namespace aiter_fused_attn{
+ namespace ck_fused_attn{
  
  // input qkv dtypes
  enum class DType {
@@ -37,7 +37,7 @@
  };
  
  
- hipError_t aiter_attn_fwd(
+ hipError_t ck_attn_fwd(
    DType dtype,
    uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v, uint64_t bias_b, uint64_t bias_h,
    const void* q_ptr, 
@@ -60,7 +60,7 @@
    void* lse_ptr, 
    hipStream_t stream);
  
- hipError_t aiter_attn_varlen_fwd(
+ hipError_t ck_attn_varlen_fwd(
    DType dtype,
    uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v,
    const void* q_ptr, 
@@ -81,7 +81,7 @@
    void* lse_thd_ptr,
    hipStream_t stream);
  
- hipError_t aiter_attn_bwd(  
+ hipError_t ck_attn_bwd(  
    DType dtype,
    uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v, uint64_t bias_b, uint64_t bias_h,
    const void* q_ptr, 
@@ -123,7 +123,7 @@
    int how_v3_bf16_cvt,
    hipStream_t stream);
  
- hipError_t aiter_attn_varlen_bwd(  
+ hipError_t ck_attn_varlen_bwd(  
    DType dtype,
    uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v,
    const void* q_ptr, 
@@ -157,6 +157,6 @@
    bool deterministic,
    hipStream_t stream);
  
- }//namespace aiter_fused_attn
- #endif // AITER_FUSED_ATTN_H
+ }//namespace ck_fused_attn
+ #endif // CK_FUSED_ATTN_H
  

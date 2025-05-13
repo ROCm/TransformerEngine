@@ -8,21 +8,21 @@
  #include <cstdlib>
  #include <stdexcept>
  #include <type_traits>
- #include "aiter_fused_attn/aiter_fused_attn.hpp"
+ #include "ck_fused_attn/ck_fused_attn.hpp"
  #include "ck_tile/host.hpp"
  #include "mha_fwd.h"
- #include "aiter_fused_attn_utils.hpp"
+ #include "ck_fused_attn_utils.hpp"
  
- namespace aiter_fused_attn{
+ namespace ck_fused_attn{
  
  // print the fmha traits and args when calling ck apis
  void log_fwd_config(const char* func_name, const fmha_fwd_traits& fmha_traits, const fmha_fwd_args& fmha_args){
-   bool aiter_fused_attn_log_config = false;
+   bool ck_fused_attn_log_config = false;
    if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
      if (env_p != nullptr && std::string(env_p) == "1")
-       aiter_fused_attn_log_config = true;
+       ck_fused_attn_log_config = true;
    }
-   if (aiter_fused_attn_log_config) {
+   if (ck_fused_attn_log_config) {
      std::cout<<std::endl<<func_name<<std::endl;
  
      // debug fmha_traits
@@ -92,7 +92,7 @@
    }
  }
  
- hipError_t aiter_attn_fwd(
+ hipError_t ck_attn_fwd(
    DType dtype,
    uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v, uint64_t bias_b, uint64_t bias_h,
    const void* q_ptr, 
@@ -254,12 +254,12 @@
                                           has_lse);
    if(average_runtime < 0){
      //TODO: better error out system
-     throw std::runtime_error("fused attn configs not supported in aiter_fused_attn fwd pass.");
+     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");
    }
    return hipSuccess;
  }
  
- hipError_t aiter_attn_varlen_fwd(
+ hipError_t ck_attn_varlen_fwd(
    DType dtype,
    uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v,
    const void* q_ptr, 
@@ -419,10 +419,10 @@
                                           has_lse);
    if(average_runtime < 0){
      //TODO: better error out system
-     throw std::runtime_error("fused attn configs not supported in aiter_fused_attn fwd pass.");
+     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");
    }
    return hipSuccess;
  }
  
- }//namespace aiter_fused_attn
+ }//namespace ck_fused_attn
  
