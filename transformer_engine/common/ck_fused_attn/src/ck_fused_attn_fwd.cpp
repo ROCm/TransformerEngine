@@ -152,7 +152,7 @@
    right = window_size_right;
 
    mask_info mask;
-   mask.type = attn_mask_type;
+   mask.type = static_cast<mask_enum>(attn_mask_type);
    
    ck_tile::stream_config stream_config{stream};
  
@@ -301,7 +301,7 @@
    right = window_size_right;
 
    mask_info mask;
-   mask.type = attn_mask_type;
+   mask.type = static_cast<mask_enum>(attn_mask_type);
    
    bias_enum bias_type = bias_enum::no_bias;
    ck_tile::stream_config stream_config{stream};

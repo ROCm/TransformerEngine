@@ -484,7 +484,7 @@
    right = window_size_right;
   
    mask_info mask;
-   mask.type = static_cast<mask_enum>attn_mask_type;
+   mask.type = static_cast<mask_enum>(attn_mask_type);
 
    bool ck_fused_attn_log_config = false;
    if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
@@ -833,7 +833,7 @@
    right = window_size_right;
 
    mask_info mask;
-   mask.type = static_cast<mask_enum>attn_mask_type;
+   mask.type = static_cast<mask_enum>(attn_mask_type);
   
    bool ck_fused_attn_log_config = false;
    if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
