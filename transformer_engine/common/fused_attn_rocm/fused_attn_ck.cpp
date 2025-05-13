@@ -43,7 +43,13 @@ bool is_ck_backend_supported(
       nvte_log_ck_config = true;
   }
   
-  // single filters
+  // filters based on head_dime_qk and head_dim_v
+  if (head_dim_qk != head_dim_v) {
+     if(nvte_log_aiter_config){
+        std::cout<<"head_dim_qk must be equal to head_dim_v"<<std::endl;
+      }
+      return false;
+  }
 
   // filter based on num_heads and num_gqa_groups
   if(num_gqa_groups == 0 || num_attn_heads%num_gqa_groups != 0){
