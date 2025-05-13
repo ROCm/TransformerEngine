@@ -16,7 +16,13 @@
  namespace ck_fused_attn{
  
  // print the fmha traits and args when calling ck apis
- void log_fwd_config(const char* func_name, const fmha_fwd_traits& fmha_traits, const fmha_fwd_args& fmha_args){
+ void log_fwd_config(const char* func_name,
+                     const std::string data_type_str,
+                     consr bool is_group_mode,
+                     const mask_enum mask_type,
+                     const bias_enum bias_type,
+                     const bool has_lse,
+                     const fmha_fwd_args& fmha_args){
    bool ck_fused_attn_log_config = false;
    if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
      if (env_p != nullptr && std::string(env_p) == "1")
@@ -27,16 +33,16 @@
  
      // debug fmha_traits
      std::cout<<"fmha_traits: "<<std::endl;
-     std::cout<<"hdim_q: "<<fmha_traits.hdim_q<<std::endl;
-     std::cout<<"hdim_v: "<<fmha_traits.hdim_v<<std::endl;
-     std::cout<<"data_type: "<<fmha_traits.data_type<<std::endl;
-     std::cout<<"is_group_mode: "<<fmha_traits.is_group_mode<<std::endl;
-     std::cout<<"is_v_rowmajor: "<<fmha_traits.is_v_rowmajor<<std::endl;
-     std::cout<<"mask_type: "<<static_cast<std::underlying_type<mask_enum>::type>(fmha_traits.mask_type)<<std::endl;
-     std::cout<<"bias_type: "<<static_cast<std::underlying_type<bias_enum>::type>(fmha_traits.bias_type)<<std::endl;
-     std::cout<<"has_lse: "<<fmha_traits.has_lse<<std::endl;
-     std::cout<<"has_dropout: "<<fmha_traits.has_dropout<<std::endl;
-     std::cout<<"do_fp8_static_quant: "<<fmha_traits.do_fp8_static_quant<<std::endl;
+     std::cout<<"hdim_q: "<<fmha_args.hdim_q<<std::endl;
+     std::cout<<"hdim_v: "<<fmha_args.hdim_v<<std::endl;
+     std::cout<<"data_type: "<<data_type_str<<std::endl;
+     std::cout<<"is_group_mode: "<<is_group_mode<<std::endl;
+     std::cout<<"is_v_rowmajor: "<<is_v_rowmajor<<std::endl;
+     std::cout<<"mask_type: "<<static_cast<std::underlying_type<mask_enum>::type>(mask_type)<<std::endl;
+     std::cout<<"bias_type: "<<static_cast<std::underlying_type<bias_enum>::type>(bias_type)<<std::endl;
+     std::cout<<"has_lse: "<<has_lse<<std::endl;
+     std::cout<<"has_dropout: "<<has_dropout<<std::endl;
+     std::cout<<"do_fp8_static_quant: "<<do_fp8_static_quant<<std::endl;
  
      // debug fmha_args
      std::cout<<"fmha_args: "<<std::endl;
@@ -143,21 +149,7 @@
    right = window_size_right;
 
    mask_info mask;
-   if (attn_mask_type == MaskType::no_mask) {
-       mask = mask_info::decode("0", seqlen_q, seqlen_k);
-   }
-   else if (attn_mask_type == MaskType::mask_bottom_right) {
-       std::string mask_identify = "b:" + std::to_string(left) + "," + std::to_string(right);
-       mask = mask_info::decode(mask_identify, seqlen_q, seqlen_k);
-   }
-   else if (attn_mask_type == MaskType::mask_top_left) {
-       std::string mask_identify = "t:" + std::to_string(left) + "," + std::to_string(right);
-       mask = mask_info::decode(mask_identify, seqlen_q, seqlen_k);
-   }
-   else {
-       std::string mask_identify = "g:" + std::to_string(left) + "," + std::to_string(right);
-       mask = mask_info::decode(mask_identify, seqlen_q, seqlen_k);
-   }
+   mask.type = attn_mask_type;
    
    ck_tile::stream_config stream_config{stream};
  
@@ -236,14 +228,14 @@
                           batch_stride_o,
                           left,
                           right,
-                          static_cast<ck_tile::index_t>(mask_type),
+                          static_cast<ck_tile::index_t>(mask.type),
                           p_drop,
                           false,
                           std::pair<const void*, const void*>{philox_seed_ptr, philox_offset_ptr}};
    }();
    
    // print ck traits and args when needed
-//    log_fwd_config(__FUNCTION__, fmha_traits, fmha_args); 
+   log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, mask.type, bias_type, has_lse, fmha_args);
  
    float average_runtime = aiter::mha_fwd(fmha_args,
                                           stream_config,
@@ -306,21 +298,7 @@
    right = window_size_right;
 
    mask_info mask;
-   if (attn_mask_type == MaskType::no_mask) {
-       mask = mask_info::decode("0", seqlen_q, seqlen_k);
-   }
-   else if (attn_mask_type == MaskType::mask_bottom_right) {
-       std::string mask_identify = "b:" + std::to_string(left) + "," + std::to_string(right);
-       mask = mask_info::decode(mask_identify, seqlen_q, seqlen_k);
-   }
-   else if (attn_mask_type == MaskType::mask_top_left) {
-       std::string mask_identify = "t:" + std::to_string(left) + "," + std::to_string(right);
-       mask = mask_info::decode(mask_identify, seqlen_q, seqlen_k);
-   }
-   else {
-       std::string mask_identify = "g:" + std::to_string(left) + "," + std::to_string(right);
-       mask = mask_info::decode(mask_identify, seqlen_q, seqlen_k);
-   }
+   mask.type = attn_mask_type;
    
    ck_tile::stream_config stream_config{stream};
  
@@ -401,14 +379,14 @@
                           batch_stride_o,
                           left,
                           right,
-                          static_cast<ck_tile::index_t>(mask_type),
+                          static_cast<ck_tile::index_t>(mask.type),
                           p_drop,
                           false,
                           std::pair<const void*, const void*>{philox_seed_ptr, philox_offset_ptr}};
    }();
  
    // print ck traits and args when needed
-   // log_fwd_config(__FUNCTION__, fmha_traits, fmha_args); 
+   log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, mask.type, bias_type, has_lse, fmha_args);
  
    float average_runtime = aiter::mha_fwd(fmha_args,
                                           stream_config,

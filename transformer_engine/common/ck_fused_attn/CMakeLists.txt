@@ -6,7 +6,8 @@ set(CMAKE_CXX_STANDARD 17)
 project(ck_fused_attn LANGUAGES HIP CXX)
 # generate fused attn kernels, both fwd/bwd
 
-set(CK_FUSED_ATTN_TARGET_GPUS "gfx942,gfx950" CACHE STRING "Target Architecture to build ck_fused_attn backend")
+set(CK_FUSED_ATTN_TARGET_GPUS "gfx950" CACHE STRING "Target Architecture to build ck_fused_attn backend")
+set(CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT 3)
 
 # remove files that should be regenerated
 file(REMOVE_RECURSE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp ${CMAKE_CURRENT_BINARY_DIR}/gen_src/blob_list.txt)
@@ -144,7 +145,7 @@ endif()
 
 target_include_directories(ck_fused_attn PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(ck_fused_attn PRIVATE ${CK_INCLUDE_DIR} ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha)
-target_include_directories(ck_fused_attn PRIVATE ${AITER_INCLUDE_DIR}/mha_fwd.h ${AITER_INCLUDE_DIR}/mha_bwd.h)
+target_include_directories(ck_fused_attn PRIVATE ${AITER_INCLUDE_DIR})
 
 find_package(hip)
 list(APPEND ck_fused_attn_LINKER_LIBS hip::host hip::device roctx64)
