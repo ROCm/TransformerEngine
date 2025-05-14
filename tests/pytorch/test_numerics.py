@@ -1041,7 +1041,7 @@ def test_mha_accuracy(dtype, bs, model, mask_type):
             assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
 
-def _test_granular_accuracy(block, bs, dtype, config):
+def _test_granular_accuracy(block, bs, dtype, config, fp8=False):
     reset_rng_states()
 
     inp_hidden_states = torch.randn(
@@ -1052,7 +1052,8 @@ def _test_granular_accuracy(block, bs, dtype, config):
     )
     inp_hidden_states.retain_grad()
 
-    out = block(inp_hidden_states)
+    with fp8_autocast(enabled=fp8):
+        out = block(inp_hidden_states)
     loss = out.sum()
     loss.backward()
 
@@ -1171,6 +1172,47 @@ def test_linear_accuracy(dtype, bs, model):
         }
         for te_output, torch_output in zip(te_outputs, torch_outputs):
             assert_allclose(te_output, torch_output, tolerance, rtol[dtype])
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", ["small"])
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
+def test_fp8_linear_without_transpose_cache_accuracy(dtype, bs, model, fp8_model_params):
+    reset_rng_states()
+    FP8GlobalStateManager.reset()
+
+    config = model_configs[model]
+    with fp8_model_init(enabled=fp8_model_params):    
+        linear = Linear(
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=True,
+            params_dtype=dtype,
+            device="cuda",
+            keep_fp8_weight_transpose_cache=False
+        ).eval()
+
+        ref_linear = Linear(
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=True,
+            params_dtype=dtype,
+            device="cuda",
+        ).eval()
+
+    # Share params
+    with torch.no_grad():
+        ref_linear.weight = Parameter(linear.weight.clone())
+        ref_linear.bias = Parameter(linear.bias.clone())
+
+    outputs = _test_granular_accuracy(linear, bs, dtype, config, fp8=True)
+    ref_outputs = _test_granular_accuracy(ref_linear, bs, dtype, config, fp8=True)
+
+    # Check output.
+    if model == "small":
+        for te_output, torch_output in zip(outputs, ref_outputs):
+            assert_allclose(te_output, torch_output, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("dtype", param_types)

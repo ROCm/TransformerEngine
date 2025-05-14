@@ -1024,6 +1024,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         update_workspace: bool = True,
         skip_update_flag: Optional[torch.Tensor] = None,
         fsdp_group: dist_group_type = None,
+        create_transpose_cache: bool = True,
     ) -> Float8Tensor:
         """Get FP8 workspace buffer and maybe update its values
 
@@ -1085,7 +1086,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             scale_inv = torch.empty([1], dtype=torch.float32, device=tensor.device)
 
             # Transpose cache
-            with_transpose_cache = torch.is_grad_enabled()
+            with_transpose_cache = torch.is_grad_enabled() and create_transpose_cache
             if (
                 not with_transpose_cache
                 and is_fp8_activation_recompute_enabled()
