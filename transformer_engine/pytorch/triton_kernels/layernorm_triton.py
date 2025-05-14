@@ -74,10 +74,8 @@ def _layernorm_fwd_triton(
         loop_num = tl.cdiv(n_cols, BLOCK_SIZE) - 1
 
         # calculate mean
-        mean = 0
         _mean = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
-        loop_num_l = loop_num
-        for b in range(0, loop_num_l):
+        for b in range(0, loop_num):
             col_offsets = b * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
             x_block = tl.load(x_ptr_start + col_offsets).to(
                 tl.float32
@@ -85,7 +83,7 @@ def _layernorm_fwd_triton(
             _mean += x_block
 
         # For last iteration, do masked load
-        col_offsets = loop_num_l * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        col_offsets = loop_num * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         x_block = tl.load(
             x_ptr_start + col_offsets, mask=col_offsets < n_cols, other=0.0
         ).to(tl.float32)
@@ -94,8 +92,7 @@ def _layernorm_fwd_triton(
 
         # variance
         _var = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
-        loop_num_l = loop_num
-        for b in range(0, loop_num_l):
+        for b in range(0, loop_num):
             col_offsets = b * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
             x_block = tl.load(x_ptr_start + col_offsets).to(
                 tl.float32
@@ -104,7 +101,7 @@ def _layernorm_fwd_triton(
             _var += x_block * x_block
 
         # For last iteration, do masked load
-        col_offsets = loop_num_l * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        col_offsets = loop_num * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         x_block = tl.load(
             x_ptr_start + col_offsets, mask=col_offsets < n_cols, other=0.0
         ).to(tl.float32)
@@ -119,8 +116,7 @@ def _layernorm_fwd_triton(
         tl.store(rstd_ptr + row, rstd)
 
         # Normalize and store
-        loop_num_l = loop_num
-        for b in range(0, loop_num_l):
+        for b in range(0, loop_num):
             col_offsets = b * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
             w_block = tl.load(w_ptr + col_offsets).to(tl.float32)
             b_block = tl.load(b_ptr + col_offsets).to(tl.float32)
@@ -136,7 +132,7 @@ def _layernorm_fwd_triton(
             tl.store(y_ptr_start + col_offsets, y_block.to(y_ptr.type.element_ty))
 
         # For last iteration, do masked load and store
-        col_offsets = loop_num_l * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        col_offsets = loop_num * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         mask = col_offsets < n_cols
         w_block = tl.load(w_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
         b_block = tl.load(b_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
@@ -263,7 +259,6 @@ def _layernorm_bwd_dx_fused_triton(
             if ZERO_CENTERED_GAMMA:
                 w += 1
             wdy = w * dy
-            xhat = tl.where(mask, xhat, 0)
             wdy = tl.where(mask, wdy, 0)
             c1 += tl.sum(xhat * wdy, axis=0)
             c2 += tl.sum(wdy, axis=0)
@@ -314,8 +309,6 @@ def _layernorm_bwd_dx_fused_triton(
             if ZERO_CENTERED_GAMMA:
                 w += 1
             wdy = w * dy
-            xhat = tl.where(mask, xhat, 0)
-            wdy = tl.where(mask, wdy, 0)
 
             dx = (wdy - (xhat * c1 + c2)) * rstd
             tl.store(dx_row_ptr + cols, dx.to(DX.type.element_ty), mask=mask)
@@ -361,7 +354,6 @@ def _layernorm_bwd_dx_fused_triton(
             if ZERO_CENTERED_GAMMA:
                 w += 1
             wdy = w * dy
-            xhat = tl.where(mask, xhat, 0)
             wdy = tl.where(mask, wdy, 0)
             c1 = tl.sum(xhat * wdy, axis=0) / N
             c2 = tl.sum(wdy, axis=0) / N
