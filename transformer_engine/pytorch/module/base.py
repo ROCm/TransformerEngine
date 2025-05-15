@@ -1087,12 +1087,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             # Transpose cache
             with_transpose_cache = torch.is_grad_enabled() and create_transpose_cache
-            if (
-                not with_transpose_cache
-                and is_fp8_activation_recompute_enabled()
-                and not in_fp8_activation_recompute_phase()
-            ):
-                with_transpose_cache = True
+            # if (
+            #     not with_transpose_cache
+            #     and is_fp8_activation_recompute_enabled()
+            #     and not in_fp8_activation_recompute_phase()
+            # ):
+            #     with_transpose_cache = True
             data_transpose = None
             if with_transpose_cache:
                 data_transpose = torch.empty(
