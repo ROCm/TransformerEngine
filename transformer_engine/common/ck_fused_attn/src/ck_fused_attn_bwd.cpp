@@ -482,8 +482,7 @@ hipError_t ck_attn_bwd(
   left = window_size_left;
   right = window_size_right;
  
-  mask_info mask;
-  mask.type = static_cast<mask_enum>(attn_mask_type);
+  mask_type = static_cast<mask_enum>(attn_mask_type);
   bool ck_fused_attn_log_config = false;
   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
@@ -626,20 +625,20 @@ hipError_t ck_attn_bwd(
                          split_stride_dq_acc,
                          left,
                          right,
-                         static_cast<ck_tile::index_t>(mask.type),
+                         static_cast<ck_tile::index_t>(mask_type),
                          p_drop,
                          p_undrop,
                          std::pair<const void*, const void*>{philox_seed_ptr, philox_offset_ptr}};
   }();
 
   // print ck traits and args when needed
-  log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask.type, bias_type, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args);
+  log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_type, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args);
   
   float average_runtime = aiter::mha_bwd(fmha_args,
                                          stream_config,
                                          data_type_str,
                                          is_group_mode,
-                                         mask,
+                                         mask_type,
                                          bias_type,
                                          has_dbias,
                                          s_randval,
@@ -829,8 +828,7 @@ hipError_t ck_attn_varlen_bwd(
   ck_tile::index_t left, right;
   left = window_size_left;
   right = window_size_right;
-  mask_info mask;
-  mask.type = static_cast<mask_enum>(attn_mask_type);
+  mask_type = static_cast<mask_enum>(attn_mask_type);
  
   bool ck_fused_attn_log_config = false;
   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
@@ -967,20 +965,20 @@ hipError_t ck_attn_varlen_bwd(
                          split_stride_dq_acc,
                          left,
                          right,
-                         static_cast<ck_tile::index_t>(mask.type),
+                         static_cast<ck_tile::index_t>(mask_type),
                          p_drop,
                          p_undrop,
                          std::pair<const void*, const void*>{philox_seed_ptr, philox_offset_ptr}};
   }();
 
   // print ck traits and args when needed
-  log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask.type, bias_enum::no_bias, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args);
+  log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_enum::no_bias, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args);
 
   float average_runtime = aiter::mha_bwd(fmha_args,
                                          stream_config,
                                          data_type_str,
                                          is_group_mode,
-                                         mask,
+                                         mask_type,
                                          bias_enum::no_bias,
                                          has_dbias,
                                          s_randval,

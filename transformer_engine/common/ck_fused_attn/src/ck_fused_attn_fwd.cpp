@@ -150,8 +150,7 @@ hipError_t ck_attn_fwd(
   ck_tile::index_t left, right;
   left = window_size_left;
   right = window_size_right;
-  mask_info mask;
-  mask.type = static_cast<mask_enum>(attn_mask_type);
+  mask_type = static_cast<mask_enum>(attn_mask_type);
   
   ck_tile::stream_config stream_config{stream};
 
@@ -230,20 +229,20 @@ hipError_t ck_attn_fwd(
                          batch_stride_o,
                          left,
                          right,
-                         static_cast<ck_tile::index_t>(mask.type),
+                         static_cast<ck_tile::index_t>(mask_type),
                          p_drop,
                          false,
                          std::pair<const void*, const void*>{philox_seed_ptr, philox_offset_ptr}};
   }();
   
   // print ck traits and args when needed
-  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, mask.type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, fmha_args);
+  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, fmha_args);
 
   float average_runtime = aiter::mha_fwd(fmha_args,
                                          stream_config,
                                          data_type_str,
                                          is_group_mode,
-                                         mask,
+                                         mask_type,
                                          bias_type,
                                          has_lse);
   if(average_runtime < 0){
@@ -298,8 +297,7 @@ hipError_t ck_attn_varlen_fwd(
   ck_tile::index_t left, right;
   left = window_size_left;
   right = window_size_right;
-  mask_info mask;
-  mask.type = static_cast<mask_enum>(attn_mask_type);
+  mask_type = static_cast<mask_enum>(attn_mask_type);
   
   bias_enum bias_type = bias_enum::no_bias;
   ck_tile::stream_config stream_config{stream};
@@ -381,20 +379,20 @@ hipError_t ck_attn_varlen_fwd(
                          batch_stride_o,
                          left,
                          right,
-                         static_cast<ck_tile::index_t>(mask.type),
+                         static_cast<ck_tile::index_t>(mask_type),
                          p_drop,
                          false,
                          std::pair<const void*, const void*>{philox_seed_ptr, philox_offset_ptr}};
   }();
 
   // print ck traits and args when needed
-  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, mask.type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, fmha_args);
+  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, fmha_args);
 
   float average_runtime = aiter::mha_fwd(fmha_args,
                                          stream_config,
                                          data_type_str,
                                          is_group_mode,
-                                         mask,
+                                         mask_type,
                                          bias_type,
                                          has_lse);
   if(average_runtime < 0){
