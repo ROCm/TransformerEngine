@@ -482,7 +482,7 @@ hipError_t ck_attn_bwd(
   left = window_size_left;
   right = window_size_right;
  
-  mask_type = static_cast<mask_enum>(attn_mask_type);
+  mask_enum mask_type = static_cast<mask_enum>(attn_mask_type);
   bool ck_fused_attn_log_config = false;
   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
@@ -828,7 +828,7 @@ hipError_t ck_attn_varlen_bwd(
   ck_tile::index_t left, right;
   left = window_size_left;
   right = window_size_right;
-  mask_type = static_cast<mask_enum>(attn_mask_type);
+  mask_enum mask_type = static_cast<mask_enum>(attn_mask_type);
  
   bool ck_fused_attn_log_config = false;
   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {

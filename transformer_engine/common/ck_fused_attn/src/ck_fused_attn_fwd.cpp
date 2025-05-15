@@ -150,7 +150,7 @@ hipError_t ck_attn_fwd(
   ck_tile::index_t left, right;
   left = window_size_left;
   right = window_size_right;
-  mask_type = static_cast<mask_enum>(attn_mask_type);
+  mask_enum mask_type = static_cast<mask_enum>(attn_mask_type);
   
   ck_tile::stream_config stream_config{stream};
 
@@ -297,7 +297,7 @@ hipError_t ck_attn_varlen_fwd(
   ck_tile::index_t left, right;
   left = window_size_left;
   right = window_size_right;
-  mask_type = static_cast<mask_enum>(attn_mask_type);
+  mask_enum mask_type = static_cast<mask_enum>(attn_mask_type);
   
   bias_enum bias_type = bias_enum::no_bias;
   ck_tile::stream_config stream_config{stream};
