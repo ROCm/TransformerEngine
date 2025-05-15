@@ -101,6 +101,7 @@ class _LayerNormLinear(torch.autograd.Function):
         ub_name: str,
         fp8_output: bool,
         fsdp_group: Union[dist_group_type, None],
+        keep_fp8_weight_transpose_cache: bool = True,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # pylint: disable=missing-function-docstring
         # Make sure input dimensions are compatible
@@ -368,6 +369,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.requires_dgrad = inp.requires_grad
             ctx.normalization = normalization
             ctx.reduce_and_update_bwd_fp8_tensors = False
+            ctx.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
             if ctx.fp8 and requires_grad(inp, ln_weight, ln_bias, weight, bias):
                 _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
@@ -534,7 +536,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
                 # DGRAD: Evaluated unconditionally to feed into Linear backward
                 _ = tex.fp8_gemm(
-                    weight_fp8.transpose_2d(),
+                    weight_fp8.transpose_2d(fill_cache=ctx.keep_fp8_weight_transpose_cache),
                     weight_fp8._scale_inv,
                     0,
                     weight_fp8._fp8_dtype,
@@ -786,6 +788,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,  # ub_name
             None,  # fp8_output
             None,  # fsdp_group
+            None,  # keep_fp8_weight_transpose_cache
         )
 
 
@@ -901,6 +904,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ub_overlap_ag: bool = False,
         ub_overlap_rs_dgrad: bool = False,
         ub_name: Optional[str] = None,
+        keep_fp8_weight_transpose_cache: bool = True,
     ) -> None:
         super().__init__()
 
@@ -923,6 +927,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if any([ub_bulk_wgrad, ub_bulk_dgrad, ub_overlap_ag, ub_overlap_rs_dgrad]):
             assert ub_name is not None, "Userbuffer name [string] is not set."
         self.ub_name = ub_name
+        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1193,7 +1198,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                     # Make sure transpose cache is valid, if present
                     # Note: Transpose cache may have been invalidated
                     # externally, e.g. by optimizer.
-                    if weight_tensor._transpose is not None:
+                    if weight_tensor._transpose is not None and not self.keep_fp8_weight_transpose_cache:
                         weight_tensor.transpose_2d(
                             fill_cache=True,
                             noop_flag=skip_fp8_weight_update,
@@ -1208,6 +1213,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                         cache_name=(None if is_first_microbatch is None else "weight"),
                         update_workspace=update_workspace,
                         skip_update_flag=skip_fp8_weight_update,
+                        create_transpose_cache=self.keep_fp8_weight_transpose_cache,
                     )
 
             if torch.is_grad_enabled():
@@ -1251,6 +1257,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.ub_name,
                 fp8_output,
                 self.fsdp_group,
+                self.keep_fp8_weight_transpose_cache,
             )
             out = fwd_fn(*args)
 

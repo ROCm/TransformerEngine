@@ -91,6 +91,7 @@ class _Linear(torch.autograd.Function):
         ub_name: str,
         fp8_output: bool,
         fsdp_group: Union[dist_group_type, None],
+        keep_fp8_weight_transpose_cache: bool = True,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
         is_input_fp8 = isinstance(inp, Float8Tensor)
@@ -390,6 +391,7 @@ class _Linear(torch.autograd.Function):
             ctx.requires_dgrad = inp.requires_grad
             ctx.is_input_fp8 = is_input_fp8
             ctx.reduce_and_update_bwd_fp8_tensors = False
+            ctx.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
             if ctx.fp8 and requires_grad(inp, weight, bias):
                 _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
@@ -573,7 +575,7 @@ class _Linear(torch.autograd.Function):
             if ctx.requires_dgrad:
                 if ctx.fp8:
                     _ = fp8_gemm(
-                        weight_fp8.transpose_2d(),
+                        weight_fp8.transpose_2d(fill_cache=ctx.keep_fp8_weight_transpose_cache),
                         weight_fp8._scale_inv,
                         0,
                         weight_fp8._fp8_dtype,
@@ -773,6 +775,7 @@ class _Linear(torch.autograd.Function):
             None,  # ub_name
             None,  # fp8_output
             None,  # fsdp_group
+            None,  # keep_fp8_weight_transpose_cache
         )
 
 
@@ -868,6 +871,7 @@ class Linear(TransformerEngineBaseModule):
         ub_bulk_dgrad: bool = False,
         ub_bulk_wgrad: bool = False,
         ub_name: Optional[str] = None,
+        keep_fp8_weight_transpose_cache: bool = True,
     ) -> None:
         super().__init__()
 
@@ -878,6 +882,7 @@ class Linear(TransformerEngineBaseModule):
         self.use_bias = bias
         self.return_bias = return_bias
         self.apply_bias = bias and not return_bias
+        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
 
         if device == "meta":
             assert parameters_split is None, "Cannot split module parameters on 'meta' device."
@@ -1142,7 +1147,7 @@ class Linear(TransformerEngineBaseModule):
                     # Make sure transpose cache is valid, if present
                     # Note: Transpose cache may have been invalidated
                     # externally, e.g. by optimizer.
-                    if weight_tensor._transpose is not None:
+                    if weight_tensor._transpose is not None and self.keep_fp8_weight_transpose_cache:
                         weight_tensor.transpose_2d(
                             fill_cache=True,
                             noop_flag=skip_fp8_weight_update,
@@ -1158,6 +1163,7 @@ class Linear(TransformerEngineBaseModule):
                         update_workspace=update_workspace,
                         skip_update_flag=skip_fp8_weight_update,
                         fsdp_group=self.fsdp_group,
+                        create_transpose_cache=self.keep_fp8_weight_transpose_cache,
                     )
 
             if torch.is_grad_enabled():
@@ -1194,6 +1200,7 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_name,
                 fp8_output,
                 self.fsdp_group,
+                self.keep_fp8_weight_transpose_cache,
             )
             out = linear_fn(*args)
 
