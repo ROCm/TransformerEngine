@@ -149,15 +149,27 @@ except PackageNotFoundError:
 else:
     fa_logger.debug("CHECK FA VERSION = %s, %s, %s", _flash_attn_version_required, _flash_attn_version, _flash_attn_max_version)
     if _flash_attn_version_required <= _flash_attn_version <= _flash_attn_max_version:
-        from flash_attn.flash_attn_triton_amd.interface_fa import varlen_bwd as flash_attn_cuda_bwd
-        from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
-        from flash_attn.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd
-        from flash_attn.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd
-        from flash_attn.flash_attn_interface import (
-            _flash_attn_varlen_forward as _flash_attn_varlen_fwd,
+        #from flash_attn.flash_attn_triton_amd.interface_fa import varlen_bwd as flash_attn_cuda_bwd
+        #from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
+        #from flash_attn.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd
+        #from flash_attn.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd
+        #from flash_attn.flash_attn_interface import (
+        ##    _flash_attn_varlen_forward as _flash_attn_varlen_fwd,
+        #)
+        #from flash_attn.flash_attn_interface import (
+        #    _flash_attn_varlen_backward as _flash_attn_varlen_bwd,
+        #)
+
+        #from flash_attn.flash_attn_triton_amd.interface_fa import varlen_bwd as flash_attn_cuda_bwd
+        from aiter.ops.triton.mha import _flash_attn_backward as flash_attn_cuda_bwd
+        from aiter.ops.triton.mha import flash_attn_func, flash_attn_varlen_func
+        from aiter.ops.triton.mha import _flash_attn_forward as _flash_attn_fwd
+        from aiter.ops.triton.mha import _flash_attn_backward as _flash_attn_bwd
+        from aiter.ops.triton.mha import (
+            _flash_attn_forward as _flash_attn_varlen_fwd,
         )
-        from flash_attn.flash_attn_interface import (
-            _flash_attn_varlen_backward as _flash_attn_varlen_bwd,
+        from aiter.ops.triton.mha import (
+            _flash_attn_backward as _flash_attn_varlen_bwd,
         )
 
         _flash_attn_is_installed = True
@@ -5576,9 +5588,11 @@ class FlashAttention(torch.nn.Module):
                     fa_optional_forward_kwargs["deterministic"] = self.deterministic
                 fa_optional_forward_args_thd = []
                 if qkv_format in ["bshd", "sbhd"] and "padding" not in attn_mask_type:
+                    #print("flash_attn_func")
                     func = flash_attn_func if not _use_flash_attn_3 else flash_attn_func_v3
                 else:
                     if _flash_attn_2_5_7_plus:
+                        #print("flash_attn_varlen_func")
                         fa_optional_forward_kwargs["block_table"] = None
                     func = (
                         flash_attn_varlen_func
@@ -5663,7 +5677,7 @@ class FlashAttention(torch.nn.Module):
                             dtype=activation_dtype,
                         )
                 else:
-                    output = func(
+                    output, _, _ = func(
                         query_layer,
                         key_layer,
                         value_layer,
@@ -5690,6 +5704,7 @@ class FlashAttention(torch.nn.Module):
                 output = output.view(batch_size, max_seqlen_q // cp_size, -1).transpose(0, 1)
         elif qkv_format == "bshd":
             # (bs)hd -> bs(hd)
+            #print(output)
             output = output.reshape(batch_size, max_seqlen_q // cp_size, -1)
         elif qkv_format == "thd":
             # thd -> t(hd)
