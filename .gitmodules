@@ -17,6 +17,9 @@
 [submodule "3rdparty/composable_kernel"]
 	path = 3rdparty/composable_kernel
 	url = https://github.com/ROCm/composable_kernel.git
+[submodule "3rdparty/aiter"]
+	path = 3rdparty/aiter
+	url = https://github.com/ROCm/aiter.git
 [submodule "examples/pytorch/nanogpt"]
 	path = examples/pytorch/nanogpt
 	url = https://github.com/floraamd/nanoGPTwTE.git

@@ -10,15 +10,22 @@
 #include <type_traits>
 #include "ck_fused_attn/ck_fused_attn.hpp"
 #include "ck_tile/host.hpp"
-#include "bias.hpp"
-#include "mask.hpp"
-#include "fmha_fwd.hpp"
+#include "mha_fwd.h"
 #include "ck_fused_attn_utils.hpp"
 
 namespace ck_fused_attn{
 
 // print the fmha traits and args when calling ck apis
-void log_fwd_config(const char* func_name, const fmha_fwd_traits& fmha_traits, const fmha_fwd_args& fmha_args){
+void log_fwd_config(const char* func_name,
+                    const std::string data_type_str,
+                    const bool is_group_mode,
+                    const mask_enum mask_type,
+                    const bias_enum bias_type,
+                    const bool has_lse,
+                    const bool has_dropout,
+                    const bool is_v_rowmajor,
+                    const bool do_fp8_static_quant,
+                    const fmha_fwd_args& fmha_args){
   bool ck_fused_attn_log_config = false;
   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
@@ -29,16 +36,16 @@ void log_fwd_config(const char* func_name, const fmha_fwd_traits& fmha_traits, c
 
     // debug fmha_traits
     std::cout<<"fmha_traits: "<<std::endl;
-    std::cout<<"hdim_q: "<<fmha_traits.hdim_q<<std::endl;
-    std::cout<<"hdim_v: "<<fmha_traits.hdim_v<<std::endl;
-    std::cout<<"data_type: "<<fmha_traits.data_type<<std::endl;
-    std::cout<<"is_group_mode: "<<fmha_traits.is_group_mode<<std::endl;
-    std::cout<<"is_v_rowmajor: "<<fmha_traits.is_v_rowmajor<<std::endl;
-    std::cout<<"mask_type: "<<static_cast<std::underlying_type<mask_enum>::type>(fmha_traits.mask_type)<<std::endl;
-    std::cout<<"bias_type: "<<static_cast<std::underlying_type<bias_enum>::type>(fmha_traits.bias_type)<<std::endl;
-    std::cout<<"has_lse: "<<fmha_traits.has_lse<<std::endl;
-    std::cout<<"has_dropout: "<<fmha_traits.has_dropout<<std::endl;
-    std::cout<<"do_fp8_static_quant: "<<fmha_traits.do_fp8_static_quant<<std::endl;
+    std::cout<<"hdim_q: "<<fmha_args.hdim_q<<std::endl;
+    std::cout<<"hdim_v: "<<fmha_args.hdim_v<<std::endl;
+    std::cout<<"data_type: "<<data_type_str<<std::endl;
+    std::cout<<"is_group_mode: "<<is_group_mode<<std::endl;
+    std::cout<<"is_v_rowmajor: "<<is_v_rowmajor<<std::endl;
+    std::cout<<"mask_type: "<<static_cast<std::underlying_type<mask_enum>::type>(mask_type)<<std::endl;
+    std::cout<<"bias_type: "<<static_cast<std::underlying_type<bias_enum>::type>(bias_type)<<std::endl;
+    std::cout<<"has_lse: "<<has_lse<<std::endl;
+    std::cout<<"has_dropout: "<<has_dropout<<std::endl;
+    std::cout<<"do_fp8_static_quant: "<<do_fp8_static_quant<<std::endl;
 
     // debug fmha_args
     std::cout<<"fmha_args: "<<std::endl;
@@ -139,20 +146,16 @@ hipError_t ck_attn_fwd(
   bias_enum bias_type;
   BiasShape bias_shape; 
   std::tie(bias_type, bias_shape) = get_ck_bias_type_shape(attn_bias_type, b, h, bias_b, bias_h);
-
-  mask_enum mask_type = get_ck_mask_type(attn_mask_type);
-
+ 
   ck_tile::index_t left, right;
   left = window_size_left;
   right = window_size_right;
+  mask_info mask;
+  mask.type = static_cast<mask_enum>(attn_mask_type);
   
   ck_tile::stream_config stream_config{stream};
 
   std::string data_type_str = get_data_type_str(dtype);
-
-  auto fmha_traits = fmha_fwd_traits{
-    hdim_q,    hdim_v,    data_type_str, is_group_mode, is_v_rowmajor,
-    mask_type, bias_type, has_lse,       has_dropout,   do_fp8_static_quant};
 
   auto fmha_args = [&]() {
     // setup stride_* arguments
@@ -227,16 +230,22 @@ hipError_t ck_attn_fwd(
                          batch_stride_o,
                          left,
                          right,
-                         static_cast<ck_tile::index_t>(mask_type),
+                         static_cast<ck_tile::index_t>(mask.type),
                          p_drop,
                          false,
                          std::pair<const void*, const void*>{philox_seed_ptr, philox_offset_ptr}};
   }();
   
   // print ck traits and args when needed
-  log_fwd_config(__FUNCTION__, fmha_traits, fmha_args); 
+  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, mask.type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, fmha_args);
 
-  float average_runtime = fmha_fwd(fmha_traits, fmha_args, stream_config);
+  float average_runtime = aiter::mha_fwd(fmha_args,
+                                         stream_config,
+                                         data_type_str,
+                                         is_group_mode,
+                                         mask,
+                                         bias_type,
+                                         has_lse);
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");
@@ -285,20 +294,17 @@ hipError_t ck_attn_varlen_fwd(
   bool do_fp8_static_quant = false;
 
   // THD does not work with bias
-
-  mask_enum mask_type = get_ck_mask_type(attn_mask_type);
-
+ 
   ck_tile::index_t left, right;
   left = window_size_left;
   right = window_size_right;
+  mask_info mask;
+  mask.type = static_cast<mask_enum>(attn_mask_type);
   
+  bias_enum bias_type = bias_enum::no_bias;
   ck_tile::stream_config stream_config{stream};
 
   std::string data_type_str = get_data_type_str(dtype);
-
-  auto fmha_traits = fmha_fwd_traits{
-    hdim_q,    hdim_v,    data_type_str, is_group_mode, is_v_rowmajor,
-    mask_type, bias_enum::no_bias, has_lse,       has_dropout,   do_fp8_static_quant};
 
   auto fmha_args = [&]() {
     // setup stride_* arguments
@@ -375,16 +381,22 @@ hipError_t ck_attn_varlen_fwd(
                          batch_stride_o,
                          left,
                          right,
-                         static_cast<ck_tile::index_t>(mask_type),
+                         static_cast<ck_tile::index_t>(mask.type),
                          p_drop,
                          false,
                          std::pair<const void*, const void*>{philox_seed_ptr, philox_offset_ptr}};
   }();
 
   // print ck traits and args when needed
-  log_fwd_config(__FUNCTION__, fmha_traits, fmha_args); 
+  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, mask.type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, fmha_args);
 
-  float average_runtime = fmha_fwd(fmha_traits, fmha_args, stream_config);
+  float average_runtime = aiter::mha_fwd(fmha_args,
+                                         stream_config,
+                                         data_type_str,
+                                         is_group_mode,
+                                         mask,
+                                         bias_type,
+                                         has_lse);
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");
@@ -393,3 +405,4 @@ hipError_t ck_attn_varlen_fwd(
 }
 
 }//namespace ck_fused_attn
+

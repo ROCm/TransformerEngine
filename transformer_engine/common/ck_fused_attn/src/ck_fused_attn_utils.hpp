@@ -53,7 +53,7 @@ std::string get_data_type_str(DType dtype);
 BiasShape get_bias_shape(uint64_t b, uint64_t h, uint64_t bias_b, uint64_t bias_h);
 std::pair<bias_enum, BiasShape> get_ck_bias_type_shape(BiasType attn_bias_type, uint64_t b, uint64_t h, uint64_t bias_b, uint64_t bias_h);
 
-mask_enum get_ck_mask_type(MaskType attn_mask_type);
+// mask_enum get_ck_mask_type(MaskType attn_mask_type);
 
 }//namespace ck_fused_attn
 #endif // CK_FUSED_ATTN_UTILS_H

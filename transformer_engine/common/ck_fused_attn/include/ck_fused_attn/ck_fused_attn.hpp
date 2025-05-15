@@ -155,7 +155,11 @@ hipError_t ck_attn_varlen_bwd(
   uint64_t stride_h_dv, uint64_t stride_s_dv,
   void* lse_workspace_ptr,
   bool deterministic,
+  bool uses_bwd_v3,
+  bool is_v3_atomic_fp32,
+  int how_v3_bf16_cvt,
   hipStream_t stream);
 
 }//namespace ck_fused_attn
 #endif // CK_FUSED_ATTN_H
+
