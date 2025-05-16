@@ -7,7 +7,6 @@ project(ck_fused_attn LANGUAGES HIP CXX)
 # generate fused attn kernels, both fwd/bwd
 
 set(CK_FUSED_ATTN_TARGET_GPUS "gfx950" CACHE STRING "Target Architecture to build ck_fused_attn backend")
-set(CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT 2)
 
 # remove files that should be regenerated
 file(REMOVE_RECURSE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp ${CMAKE_CURRENT_BINARY_DIR}/gen_src/blob_list.txt)
