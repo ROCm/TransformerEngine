@@ -7,7 +7,7 @@ from itertools import product
 import torch
 import triton
 import triton.language as tl
-
+import warnings
 from .norm_common_triton import IS_FP8 as IS_FP8_COMMON
 
 
@@ -442,8 +442,23 @@ def _layernorm_bwd_dwdb_triton_v2(
 
 # TODO: Implement persistent kernel in forward and add `sm_margin` to the interface.
 def te_layernorm_fwd_fp8_noalloc_triton(
-    x, gamma, beta, eps, scale, y, amax, scale_inv, out_dtype, zero_centered_gamma
+    x,
+    gamma,
+    beta,
+    eps,
+    scale,
+    y,
+    amax,
+    scale_inv,
+    out_dtype,
+    sm_margin,
+    zero_centered_gamma,
 ):
+    if sm_margin is not None and sm_margin > 0:
+        warnings.warn(
+            '"sm_margin" is not supported in the Triton based forward layer-norm kernel. '
+            + f"sm_margin={sm_margin} will be ignored."
+        )
     M, N = x.shape
     y = y.view(out_dtype)
     IS_FP8 = IS_FP8_COMMON(out_dtype)
@@ -496,7 +511,12 @@ def te_layernorm_fwd_fp8_noalloc_triton(
 
 
 # TODO: Add `sm_margin` to the interface.
-def te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, zero_centered_gamma):
+def te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, sm_margin, zero_centered_gamma):
+    if sm_margin is not None and sm_margin > 0:
+        warnings.warn(
+            '"sm_margin" is not supported in the Triton based backward layer-norm kernel. '
+            + f"sm_margin={sm_margin} will be ignored."
+        )
     M, N = x.shape
     # calculate dw and db separately when M is small
     IGNORE_DW_DB_IN_FUSED = M <= 512
