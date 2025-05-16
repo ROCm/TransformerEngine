@@ -125,8 +125,8 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
    *    no fp8       → allow NN, TN, NT
    */
   if (has_fp8 && transb) {
-      GTEST_SKIP();
-    }
+    GTEST_SKIP();
+  }
   // pytorch tensor storage is row-major while cublas/rocblas is column-major
   Tensor A;
   if (transa){
