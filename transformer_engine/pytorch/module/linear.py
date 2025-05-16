@@ -127,14 +127,24 @@ class _Linear(torch.autograd.Function):
                     and weight.requires_grad
                     and not sequence_parallel
                 ):
-                    # FP8 input for forward, FP8 input transpose for backward wgrad
-                    inputmat, inputmat_t = fp8_cast_transpose_fused(
-                        inputmat,
-                        fp8_meta["scaling_fwd"],
-                        tex.FP8FwdTensors.GEMM1_INPUT,
-                        fp8_dtype_forward,
-                        scale_inv=inputmat_scale_inv,
-                    )
+                    if not keep_fp8_weight_transpose_cache:
+                        inputmat = cast_to_fp8(
+                            inputmat,
+                            fp8_meta["scaling_fwd"],
+                            tex.FP8FwdTensors.GEMM1_INPUT,
+                            fp8_dtype_forward,
+                            scale_inv=inputmat_scale_inv,
+                        )
+                        inputmat_t = None
+                    else:
+                        # FP8 input for forward, FP8 input transpose for backward wgrad
+                        inputmat, inputmat_t = fp8_cast_transpose_fused(
+                            inputmat,
+                            fp8_meta["scaling_fwd"],
+                            tex.FP8FwdTensors.GEMM1_INPUT,
+                            fp8_dtype_forward,
+                            scale_inv=inputmat_scale_inv,
+                        )
                 else:
                     # FP8 input for forward
                     inputmat = cast_to_fp8(
