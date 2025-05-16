@@ -54,11 +54,16 @@ std::vector<std::tuple<size_t, size_t, size_t>> test_case_sizes = {
 }  // namespace
 
 
+using Layout = std::pair<bool,bool>;// {transa, transb}
+static const Layout kNN{false,false};
+static const Layout kTN{true ,false};
+static const Layout kNT{false,true };
 
+static const std::vector<Layout> kLayouts = { kNN, kTN, kNT };
 // <A_type, B_type, Bias_Type, Gelu_Type D_type>, <m, k, n>
 class GEMMTestSuite 
   :public ::testing::TestWithParam<std::tuple<
-                                    std::tuple<size_t, size_t, size_t>, bool, bool, bool, bool>>{};
+                                    std::tuple<size_t, size_t, size_t>, bool, bool, Layout>>{};
 
 float ref_gelu(float x){
   float cdf = 0.5f * (1.0f + tanhf((0.7978845608028654f * (x + 0.044715f * x * x * x))));
@@ -107,13 +112,21 @@ void compute_ref(
 }
 
 template <typename A_Type, typename B_Type, typename Bias_Type, typename Gelu_Type, typename D_Type>
-void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, const size_t n, bool transa = false, bool transb = false) {
+void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, const size_t n, bool transa, bool transb) {
   DType atype = TypeInfo<A_Type>::dtype;
   DType btype = TypeInfo<B_Type>::dtype;
   DType bias_type = TypeInfo<Bias_Type>::dtype;
   DType gelu_type = TypeInfo<Gelu_Type>::dtype;
   DType dtype = TypeInfo<D_Type>::dtype;
 
+  const bool has_fp8 = isFp8Type(atype) || isFp8Type(btype);
+  /* 
+   *    fp8 present  → allow NN, TN   
+   *    no fp8       → allow NN, TN, NT
+   */
+  if (has_fp8 && transb) {
+      GTEST_SKIP();
+    }
   // pytorch tensor storage is row-major while cublas/rocblas is column-major
   Tensor A;
   if (transa){
@@ -271,8 +284,9 @@ TEST_P(GEMMTestSuite, Testfp32xfp32xfp32xfp32xfp32) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
-  const bool transa = std::get<3>(GetParam());
-  const bool transb = std::get<4>(GetParam());
+  const Layout layout  = std::get<3>(GetParam());
+  const bool transa = layout.first;
+  const bool transb = layout.second;
 
   using A_Type = fp32;
   using B_Type = fp32;
@@ -292,8 +306,9 @@ TEST_P(GEMMTestSuite, Testfp16xfp16xfp16xfp16xfp16) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
-  const bool transa = std::get<3>(GetParam());
-  const bool transb = std::get<4>(GetParam());
+  const Layout layout  = std::get<3>(GetParam());
+  const bool transa = layout.first;
+  const bool transb = layout.second;
 
   using A_Type = fp16;
   using B_Type = fp16;
@@ -313,8 +328,9 @@ TEST_P(GEMMTestSuite, Testbf16xbf16xbf16xbf16xbf16) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
-  const bool transa = std::get<3>(GetParam());
-  const bool transb = std::get<4>(GetParam());
+  const Layout layout  = std::get<3>(GetParam());
+  const bool transa = layout.first;
+  const bool transb = layout.second;
 
   using A_Type = bf16;
   using B_Type = bf16;
@@ -334,8 +350,9 @@ TEST_P(GEMMTestSuite, Testfp8xfp8xbf16xbf16xfp32) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
-  const bool transa = std::get<3>(GetParam());
-  const bool transb = std::get<4>(GetParam());
+  const Layout layout  = std::get<3>(GetParam());
+  const bool transa = layout.first;
+  const bool transb = layout.second;
 
   using A_Type = fp8;
   using B_Type = fp8;
@@ -355,8 +372,9 @@ TEST_P(GEMMTestSuite, Testfp8xfp8xbf16xbf16xfp16) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
-  const bool transa = std::get<3>(GetParam());
-  const bool transb = std::get<4>(GetParam());
+  const Layout layout  = std::get<3>(GetParam());
+  const bool transa = layout.first;
+  const bool transb = layout.second;
 
   using A_Type = fp8;
   using B_Type = fp8;
@@ -376,8 +394,9 @@ TEST_P(GEMMTestSuite, Testfp8xfp8xbf16xbf16xbf16) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
-  const bool transa = std::get<3>(GetParam());
-  const bool transb = std::get<4>(GetParam());
+  const Layout layout  = std::get<3>(GetParam());
+  const bool transa = layout.first;
+  const bool transb = layout.second;
 
   using A_Type = fp8;
   using B_Type = fp8;
@@ -397,8 +416,9 @@ TEST_P(GEMMTestSuite, Testfp8xfp8xbf16xbf16xfp8) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
-  const bool transa = std::get<3>(GetParam());
-  const bool transb = std::get<4>(GetParam());
+  const Layout layout  = std::get<3>(GetParam());
+  const bool transa = layout.first;
+  const bool transb = layout.second;
 
   using A_Type = fp8;
   using B_Type = fp8;
@@ -418,8 +438,9 @@ TEST_P(GEMMTestSuite, Testfp8xfp8xbf16xbf16xbf8) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
-  const bool transa = std::get<3>(GetParam());
-  const bool transb = std::get<4>(GetParam());
+  const Layout layout  = std::get<3>(GetParam());
+  const bool transa = layout.first;
+  const bool transb = layout.second;
 
   using A_Type = fp8;
   using B_Type = fp8;
@@ -439,8 +460,9 @@ TEST_P(GEMMTestSuite, Testfp8xbf8xbf16xbf16xfp32) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
-  const bool transa = std::get<3>(GetParam());
-  const bool transb = std::get<4>(GetParam());
+  const Layout layout  = std::get<3>(GetParam());
+  const bool transa = layout.first;
+  const bool transb = layout.second;
 
   using A_Type = fp8;
   using B_Type = bf8;
@@ -460,8 +482,9 @@ TEST_P(GEMMTestSuite, Testfp8xbf8xbf16xbf16xfp16) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
-  const bool transa = std::get<3>(GetParam());
-  const bool transb = std::get<4>(GetParam());
+  const Layout layout  = std::get<3>(GetParam());
+  const bool transa = layout.first;
+  const bool transb = layout.second;
 
   using A_Type = fp8;
   using B_Type = bf8;
@@ -481,8 +504,9 @@ TEST_P(GEMMTestSuite, Testfp8xbf8xbf16xbf16xbf16) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
-  const bool transa = std::get<3>(GetParam());
-  const bool transb = std::get<4>(GetParam());
+  const Layout layout  = std::get<3>(GetParam());
+  const bool transa = layout.first;
+  const bool transb = layout.second;
 
   using A_Type = fp8;
   using B_Type = bf8;
@@ -502,8 +526,9 @@ TEST_P(GEMMTestSuite, Testfp8xbf8xbf16xbf16xfp8) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
-  const bool transa = std::get<3>(GetParam());
-  const bool transb = std::get<4>(GetParam());
+  const Layout layout  = std::get<3>(GetParam());
+  const bool transa = layout.first;
+  const bool transb = layout.second;
 
   using A_Type = fp8;
   using B_Type = bf8;
@@ -523,8 +548,9 @@ TEST_P(GEMMTestSuite, Testfp8xbf8xbf16xbf16xbf8) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
-  const bool transa = std::get<3>(GetParam());
-  const bool transb = std::get<4>(GetParam());
+  const Layout layout  = std::get<3>(GetParam());
+  const bool transa = layout.first;
+  const bool transb = layout.second;
 
   using A_Type = fp8;
   using B_Type = bf8;
@@ -544,8 +570,9 @@ TEST_P(GEMMTestSuite, Testbf8xfp8xbf16xbf16xfp32) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
-  const bool transa = std::get<3>(GetParam());
-  const bool transb = std::get<4>(GetParam());
+  const Layout layout  = std::get<3>(GetParam());
+  const bool transa = layout.first;
+  const bool transb = layout.second;
 
   using A_Type = bf8;
   using B_Type = fp8;
@@ -565,8 +592,9 @@ TEST_P(GEMMTestSuite, Testbf8xfp8xbf16xbf16xfp16) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
-  const bool transa = std::get<3>(GetParam());
-  const bool transb = std::get<4>(GetParam());
+  const Layout layout  = std::get<3>(GetParam());
+  const bool transa = layout.first;
+  const bool transb = layout.second;
 
   using A_Type = bf8;
   using B_Type = fp8;
@@ -586,8 +614,9 @@ TEST_P(GEMMTestSuite, Testbf8xfp8xbf16xbf16xbf16) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
-  const bool transa = std::get<3>(GetParam());
-  const bool transb = std::get<4>(GetParam());
+  const Layout layout  = std::get<3>(GetParam());
+  const bool transa = layout.first;
+  const bool transb = layout.second;
 
   using A_Type = bf8;
   using B_Type = fp8;
@@ -607,8 +636,9 @@ TEST_P(GEMMTestSuite, Testbf8xfp8xbf16xbf16xfp8) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
-  const bool transa = std::get<3>(GetParam());
-  const bool transb = std::get<4>(GetParam());
+  const Layout layout  = std::get<3>(GetParam());
+  const bool transa = layout.first;
+  const bool transb = layout.second;
 
   using A_Type = bf8;
   using B_Type = fp8;
@@ -628,8 +658,9 @@ TEST_P(GEMMTestSuite, Testbf8xfp8xbf16xbf16xbf8) {
   const size_t n = std::get<2>(std::get<0>(GetParam()));
   const bool use_bias = std::get<1>(GetParam());
   const bool use_gelu = std::get<2>(GetParam());
-  const bool transa = std::get<3>(GetParam());
-  const bool transb = std::get<4>(GetParam());
+  const Layout layout  = std::get<3>(GetParam());
+  const bool transa = layout.first;
+  const bool transb = layout.second;
 
   using A_Type = bf8;
   using B_Type = fp8;
@@ -648,15 +679,15 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(test_case_sizes),
         ::testing::Values(false, true), //use bias
         ::testing::Values(false, true), //use_gelu
-        ::testing::Values(false, true), //transa
-        ::testing::Values(false, true)), //transb
+        ::testing::ValuesIn(kLayouts)),//transa,transb
     [](const testing::TestParamInfo<GEMMTestSuite::ParamType>& info) {
       auto TN = [](bool v){ return v ? "T" : "N"; };
+      const auto layout = std::get<3>(info.param);
       std::string name = std::to_string(std::get<0>(std::get<0>(info.param))) + "X" +
                          std::to_string(std::get<1>(std::get<0>(info.param))) + "X" +
                          std::to_string(std::get<2>(std::get<0>(info.param))) + "X" +
                          std::to_string(std::get<1>(info.param)) + "X" +
                          std::to_string(std::get<2>(info.param)) + "X" +
-                         TN(std::get<3>(info.param)) + "X" + TN(std::get<4>(info.param));
+                         TN(layout.first) + TN(layout.second);
       return name;
     });
