@@ -440,7 +440,7 @@ def _layernorm_bwd_dwdb_triton_v2(
     tl.store(FINAL_DB + cols, sum_db.to(FINAL_DB.type.element_ty), mask=cols < N)
 
 
-# TODO: Implement persistent kernel in forward and add `sm_margin` to the interface.
+# TODO: Add support for `sm_margin > 0`.
 def te_layernorm_fwd_fp8_noalloc_triton(
     x,
     gamma,
@@ -510,7 +510,7 @@ def te_layernorm_fwd_fp8_noalloc_triton(
     return y, mu, rsigma
 
 
-# TODO: Add `sm_margin` to the interface.
+# TODO: Add support for `sm_margin > 0`.
 def te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, sm_margin, zero_centered_gamma):
     if sm_margin is not None and sm_margin > 0:
         warnings.warn(
