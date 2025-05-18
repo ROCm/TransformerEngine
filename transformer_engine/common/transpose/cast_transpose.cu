@@ -11,6 +11,7 @@
 #include <transformer_engine/transpose.h>
 
 #include <algorithm>
+#include <iostream>
 
 #include "../common.h"
 #include "../util/rtc.h"
@@ -292,7 +293,8 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *cast_output
               // Note: H100 has 132 SMs, A100 has 108 SMs.
               // Note: Directly querying number of SMs with cudaGetDeviceProperties is
               // slow (>1 ms). Consider querying once and caching.
-              const int n_sms = 304; //MI300X
+              // const int n_sms = 304; //MI300X
+              const int n_sms = 256; //MI355
               // Helper functions to get kernel configuration
               auto get_n_tiles = [=] (size_t load_size, size_t store_size) -> int {
                 constexpr size_t threads_per_warp = static_cast<size_t>(THREADS_PER_WARP);
@@ -305,6 +307,7 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *cast_output
               // heuristics for MI300X
               // TODO: heuristics for other HW like MI350
               size_t wpt_size = 8;
+              // heuristics for MI355
               size_t iter_size = THREADS_PER_WARP / wpt_size;
               const size_t estimated_n_tiles = get_n_tiles(16, 8);
 
@@ -321,12 +324,22 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *cast_output
                 load_size = 8,
                 store_size = 4;
               }
-
+              
+              // row_tile_elem = 8*64/2=256, col_tile=4*64/1=256
+              // 32768/256=128
+              // 57344/256=224
+              // num_blocks=28672
               const size_t row_tile_elements = load_size * THREADS_PER_WARP / itype_size;
               const size_t col_tile_elements = store_size * iter_size * wpt_size / otype_size;
               // Number of CUDA blocks
               size_t num_blocks = (row_length / row_tile_elements) * (num_rows / col_tile_elements);
               size_t rtc_block_size = THREADS_PER_WARP * wpt_size;
+              
+              // std::cout << "Debug(wenx), THREADS_PER_WARP=" << THREADS_PER_WARP << ", itype_size="
+              //   << itype_size << ", otype_size=" << otype_size << ", row_tile_elements=" << row_tile_elements
+              //   << ", col_tile_elements=" << col_tile_elements << ", row_length=" << row_length
+              //   << ", num_rows=" << num_rows << "num_blocks=" << num_blocks << ", rtc_block_size="
+              //   << rtc_block_size << std::endl;
 
               do_general_config =!(row_length % row_tile_elements == 0 && num_rows % col_tile_elements == 0);
 

@@ -61,6 +61,8 @@ def fp8_cast_transpose_fused(
 
     # Launch kernel if needed
     if inp.nelement() > 0:
+        # TODO(wenx)
+        # print(f"cast_transpose, {inp.shape=}, {otype=}", flush=True)
         use_cast_transpose_triton = bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
         if use_cast_transpose_triton:
             te_cast_transpose_noop_triton(

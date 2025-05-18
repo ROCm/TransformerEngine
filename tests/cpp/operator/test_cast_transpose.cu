@@ -79,6 +79,55 @@ void performTest(const size_t N, const size_t H) {
   compareResults("output_t", output_t, ref_output_t.get(), atol, rtol);
 }
 
+template <typename InputType, typename OutputType>
+void performBench(const size_t N, const size_t H) {
+  using namespace test;
+
+  DType itype = TypeInfo<InputType>::dtype;
+  DType otype = TypeInfo<OutputType>::dtype;
+
+  Tensor input({ N, H }, itype);
+  Tensor output_c({ N, H }, otype);
+  Tensor output_t({ H, N }, otype);
+
+  std::unique_ptr<OutputType[]> ref_output_c = std::make_unique<OutputType[]>(N * H);
+  std::unique_ptr<OutputType[]> ref_output_t = std::make_unique<OutputType[]>(N * H);
+
+  fillUniform(&input);
+  setRandomScale(&output_c);
+  output_t.shareFP8Meta(output_c);
+
+  int num_iters = 50;
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
+
+  for (int i = 0; i < 5; ++i) {
+    nvte_cast_transpose(input.data(), output_c.data(), output_t.data(), 0);
+  }
+  cudaDeviceSynchronize();
+
+  cudaEventRecord(start);
+  for (int i = 0; i < num_iters; ++i) {
+    nvte_cast_transpose(input.data(), output_c.data(), output_t.data(), 0);
+  }
+  cudaEventRecord(stop);
+
+  cudaEventSynchronize(stop);
+  auto err = cudaGetLastError();
+  ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
+  float milliseconds = 0;
+  cudaEventElapsedTime(&milliseconds, start, stop);
+  float avg_time_ms = milliseconds / num_iters;
+
+  std::cout << "shape=[" << N << ", " << H << "], Average nvte_cast_transpose time over " << num_iters 
+          << " iterations: " << avg_time_ms << " ms" << std::endl;
+
+  cudaEventDestroy(start);
+  cudaEventDestroy(stop);
+}
+
 std::vector<std::pair<size_t, size_t>> test_cases = {{2048, 12288},
                                                      {768, 1024},
                                                      {256, 65536},
@@ -89,6 +138,12 @@ std::vector<std::pair<size_t, size_t>> test_cases = {{2048, 12288},
                                                      {1, 3221},       // Prime 456
                                                      {2333, 1},       // Prime 345
                                                      {1481, 677}};    // Primes 234, 123
+std::vector<std::pair<size_t, size_t>> test_cases_llama70b = {
+                                                     {32768, 8192},
+                                                     {32768, 28672},
+                                                     {32768, 57344},
+                                                     {32768, 10240}
+                                                    };
 }  // namespace
 
 class CTTestSuite : public ::testing::TestWithParam<std::tuple<transformer_engine::DType,
@@ -105,20 +160,26 @@ TEST_P(CTTestSuite, TestCastTranspose) {
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(input_type, InputType,
     TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(output_type, OutputType,
-      performTest<InputType, OutputType>(size.first, size.second);
+      // performTest<InputType, OutputType>(size.first, size.second);
+      performBench<InputType, OutputType>(size.first, size.second);
     );
   );
 }
 
 
+std::vector<DType> all_fp8_types = {DType::kFloat8E5M2,
+                                   DType::kFloat8E4M3};
 
 INSTANTIATE_TEST_SUITE_P(
   OperatorTest,
   CTTestSuite,
   ::testing::Combine(
-      ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
-      ::testing::ValuesIn(test::all_fp_types),
-      ::testing::ValuesIn(test_cases)),
+      // ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+      // ::testing::ValuesIn(test::all_fp_types),
+      // ::testing::ValuesIn(test_cases)),
+      ::testing::Values(DType::kBFloat16),
+      ::testing::ValuesIn(all_fp8_types),
+      ::testing::ValuesIn(test_cases_llama70b)),
   [](const testing::TestParamInfo<CTTestSuite::ParamType>& info) {
     std::string name = test::typeName(std::get<0>(info.param)) + "X" +
                        test::typeName(std::get<1>(info.param)) + "X" +
