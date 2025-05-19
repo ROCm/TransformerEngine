@@ -120,6 +120,20 @@ all_normalizations = ["LayerNorm", "RMSNorm"]
 
 mask_types = ["causal", "no_mask"]
 
+NVTE_TEST_NVINSPECT_ENABLED = os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", False)
+
+if NVTE_TEST_NVINSPECT_ENABLED:
+    # The numerics of all the layers should work the same,
+    # when debug=True. I fed them with dummy feature
+    # to prevent switching off debug, which can happen if
+    # no feature is active.
+    import nvdlfw_inspect.api as debug_api
+
+    debug_api.initialize(
+        os.environ["NVTE_TEST_NVINSPECT_CONFIG_FILE"],
+        feature_dirs=os.environ["NVTE_TEST_NVINSPECT_FEATURE_DIRS"],
+    )
+
 fp8_recipes = [
     recipe.MXFP8BlockScaling(),
     recipe.DelayedScaling(),
@@ -621,6 +635,8 @@ def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, recipe, fp8_m
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
+    if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("FP8 parameters are not supported in debug mode.")
     if recipe.float8_block_scaling() and not fp8_block_scaling_available:
         pytest.skip(reason_for_no_fp8_block_scaling)
 
@@ -741,6 +757,8 @@ def test_gpt_full_activation_recompute(
         use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
         if fp8 and recipe.float8_current_scaling() and use_cast_transpose_triton:
             pytest.skip("Float8 Current Scaling unsupported for full recompute.")
+    if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("FP8 parameters are not supported in debug mode.")
     if recipe.float8_block_scaling() and not fp8_block_scaling_available:
         pytest.skip(reason_for_no_fp8_block_scaling)
 
@@ -1957,6 +1975,8 @@ def test_grouped_linear_accuracy(
         pytest.skip(reason_for_no_fp8)
     if fp8 and recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
+    if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("FP8 parameters are not supported in debug mode.")
     if fp8 and recipe.float8_block_scaling() and not fp8_block_scaling_available:
         pytest.skip(reason_for_no_fp8_block_scaling)
 
@@ -2155,6 +2175,8 @@ def test_padding_grouped_linear_accuracy(
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
+    if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("FP8 parameters are not supported in debug mode.")
     if recipe.float8_block_scaling() and not fp8_block_scaling_available:
         pytest.skip(reason_for_no_fp8_block_scaling)
 
@@ -2276,6 +2298,8 @@ def test_gpt_cuda_graph(dtype, bs, model):
             if use_fa:
                 pytest.skip(f"ROCm flash attention does not support cuda graph with {dtype}")
 
+    if NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("Cuda Graphs are not supported in debug mode.")
     config = model_configs[model]
 
     sigma = 0.023
@@ -2373,6 +2397,8 @@ def test_gpt_fp8_parameters(dtype, bs, model, recipe):
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
+    if NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("FP8 parameters are not supported in debug mode.")
     if recipe.float8_block_scaling() and not fp8_block_scaling_available:
         pytest.skip(reason_for_no_fp8_block_scaling)
 
