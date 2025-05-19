@@ -8,81 +8,21 @@ project(ck_fused_attn LANGUAGES HIP CXX)
 
 set(CK_FUSED_ATTN_TARGET_GPUS "gfx950" CACHE STRING "Target Architecture to build ck_fused_attn backend")
 
-# remove files that should be regenerated
-file(REMOVE_RECURSE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp ${CMAKE_CURRENT_BINARY_DIR}/gen_src/blob_list.txt)
-
-# create gen_src and gen_src/tmp directories if needed
-file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp)
+if (CK_FUSED_ATTN_INSTALL_PREFIX)
+  set(_CK_FUSED_ATTN_INSTALL_PREFIX ${CK_FUSED_ATTN_INSTALL_PREFIX}/ )
+else()
+  set(_CK_FUSED_ATTN_INSTALL_PREFIX . )
+endif()
 
 set(__AITER_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/aiter")
+set(__AITER_TEST_DIR "${__AITER_SOURCE_DIR}/op_tests/cpp/mha")
 set(__CK_SOURCE_DIR "${__AITER_SOURCE_DIR}/3rdparty/composable_kernel")
 
-#fwd kernels list
-execute_process(
-  COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
-  --api fwd --list_blobs ${CMAKE_CURRENT_BINARY_DIR}/gen_src/fwd_blob_list.txt --receipt 600
-)
-execute_process(
-  COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
-  --api fwd_splitkv --list_blobs ${CMAKE_CURRENT_BINARY_DIR}/gen_src/fwd_splitkv_blob_list.txt --receipt 600
-)
-execute_process(
-  COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
-  --api batch_prefill --list_blobs ${CMAKE_CURRENT_BINARY_DIR}/gen_src/fwd_batch_prefill_blob_list.txt --receipt 600
-)
-
-#bwd kernels list
-execute_process(
-  COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
-  --api bwd --list_blobs ${CMAKE_CURRENT_BINARY_DIR}/gen_src/bwd_blob_list.txt --receipt 600
-)
-
-file(STRINGS ${CMAKE_CURRENT_BINARY_DIR}/gen_src/fwd_blob_list.txt FMHA_FWD_GEN_BLOBS)
-file(STRINGS ${CMAKE_CURRENT_BINARY_DIR}/gen_src/fwd_splitkv_blob_list.txt FMHA_FWD_SPLITKV_GEN_BLOBS)
-file(STRINGS ${CMAKE_CURRENT_BINARY_DIR}/gen_src/fwd_batch_prefill_blob_list.txt FMHA_FWD_BATCH_PREFILL_GEN_BLOBS)
-file(STRINGS ${CMAKE_CURRENT_BINARY_DIR}/gen_src/bwd_blob_list.txt FMHA_BWD_GEN_BLOBS)
-
-# generate the actual fwd kernel cpp files
-execute_process(
-  COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
-  --api fwd --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp --receipt 600
-)
-
-execute_process(
-  COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
-  --api fwd_splitkv --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp --receipt 600
-)
-
-execute_process(
-  COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
-  --api batch_prefill --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp --receipt 600
-)
-
-execute_process(
-  COMMAND python3 ${__AITER_SOURCE_DIR}/csrc/cpp_itfs/mha_fwd_generate.py
-  --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp --receipt 5
-)
-
-execute_process(
-  COMMAND python3 ${__AITER_SOURCE_DIR}/csrc/py_itfs_cu/fmha_v3_fwd_kernel_generate.py
-  --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp
-)
-
-# generate the actual bwd kernel cpp files
-execute_process(
-  COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
-  --api bwd --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp --receipt 600
-)
-
-execute_process(
-  COMMAND python3 ${__AITER_SOURCE_DIR}/csrc/py_itfs_cu/fmha_v3_bwd_kernel_generate.py
-  --receipt 1 --filter *@*_ndeterministic@*_nbias*_dropout*_ndeterministic* --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp
-)
-
-execute_process(
-  COMMAND python3 ${__AITER_SOURCE_DIR}/csrc/cpp_itfs/mha_bwd_generate.py
-  --receipt 3 --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp
-)
+#compile the libmha_fwd.so and libmha_bwd.so
+set(ENV{AITER_LOG_MORE} 1)
+#execute_process(
+#  COMMAND python3 ${__AITER_TEST_DIR}/compile.py
+#)
 
 set(ck_fused_attn_SOURCES)
 list(APPEND ck_fused_attn_SOURCES
@@ -90,61 +30,14 @@ list(APPEND ck_fused_attn_SOURCES
        src/ck_fused_attn_bwd.cpp
        src/ck_fused_attn_utils.cpp)
 
-foreach(blob ${FMHA_FWD_GEN_BLOBS})
-  file(RELATIVE_PATH blob_path ${CMAKE_CURRENT_BINARY_DIR}/gen_src ${blob})
-  file(COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp/${blob_path} ${blob} ONLY_IF_DIFFERENT)
-endforeach()
-list(APPEND ck_fused_attn_SOURCES ${FMHA_FWD_GEN_BLOBS})
-
-foreach(blob ${FMHA_FWD_SPLITKV_GEN_BLOBS})
-  file(RELATIVE_PATH blob_path ${CMAKE_CURRENT_BINARY_DIR}/gen_src ${blob})
-  file(COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp/${blob_path} ${blob} ONLY_IF_DIFFERENT)
-endforeach()
-list(APPEND ck_fused_attn_SOURCES ${FMHA_FWD_SPLITKV_GEN_BLOBS})
-
-foreach(blob ${FMHA_FWD_BATCH_PREFILL_GEN_BLOBS})
-  file(RELATIVE_PATH blob_path ${CMAKE_CURRENT_BINARY_DIR}/gen_src ${blob})
-  file(COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp/${blob_path} ${blob} ONLY_IF_DIFFERENT)
-endforeach()
-list(APPEND ck_fused_attn_SOURCES ${FMHA_FWD_BATCH_PREFILL_GEN_BLOBS})
-
-foreach(blob ${FMHA_BWD_GEN_BLOBS})
-  file(RELATIVE_PATH blob_path ${CMAKE_CURRENT_BINARY_DIR}/gen_src ${blob})
-  file(COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp/${blob_path} ${blob} ONLY_IF_DIFFERENT)
-endforeach()
-list(APPEND ck_fused_attn_SOURCES ${FMHA_BWD_GEN_BLOBS})
-
-set(MHA_BWD_SRC "${CMAKE_CURRENT_BINARY_DIR}/gen_src/mha_bwd.cpp")
-set(MHA_FWD_SRC "${CMAKE_CURRENT_BINARY_DIR}/gen_src/mha_fwd.cpp")
-set(ASM_MHA_BWD_SRC "${CMAKE_CURRENT_BINARY_DIR}/gen_src/asm_fmha_bwd_v3.cpp")
-set(ASM_MHA_FWD_SRC "${CMAKE_CURRENT_BINARY_DIR}/gen_src/asm_fmha_fwd_v3.cpp")
-
-# TODO: other generated files need to be added to `ck_fused_attn_SOURCES`
-file(RELATIVE_PATH blob_path ${CMAKE_CURRENT_BINARY_DIR}/gen_src ${MHA_BWD_SRC})
-file(COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp/${blob_path} ${MHA_BWD_SRC} ONLY_IF_DIFFERENT)
-
-file(RELATIVE_PATH blob_path ${CMAKE_CURRENT_BINARY_DIR}/gen_src ${MHA_FWD_SRC})
-file(COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp/${blob_path} ${MHA_FWD_SRC} ONLY_IF_DIFFERENT)
-
-file(RELATIVE_PATH blob_path ${CMAKE_CURRENT_BINARY_DIR}/gen_src ${ASM_MHA_BWD_SRC})
-file(COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp/${blob_path} ${ASM_MHA_BWD_SRC} ONLY_IF_DIFFERENT)
-
-file(RELATIVE_PATH blob_path ${CMAKE_CURRENT_BINARY_DIR}/gen_src ${ASM_MHA_FWD_SRC})
-file(COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp/${blob_path} ${ASM_MHA_FWD_SRC} ONLY_IF_DIFFERENT)
-
-list(APPEND ck_fused_attn_SOURCES ${MHA_BWD_SRC} ${MHA_FWD_SRC} ${ASM_MHA_BWD_SRC} ${ASM_MHA_FWD_SRC})
-
-# remove all previously generated temporary files
-file(REMOVE_RECURSE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp)
-
 message(STATUS "Found the following fused attention files:")
 foreach(file ${ck_fused_attn_SOURCES})
   message(STATUS " ${file}")
 endforeach()
 
-add_library(ck_fused_attn STATIC ${ck_fused_attn_SOURCES})
+add_library(ck_fused_attn SHARED ${ck_fused_attn_SOURCES})
 set(CK_FUSED_ATTN_COMPILE_OPTIONS)
-list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -Wno-undefined-func-template -DCK_TILE_FMHA_FWD_FAST_EXP2=1 -DCK_TILE_FMHA_FWD_SPLITKV_API=1 -DCK_TILE_FMHA_FWD_APPENDKV_API=0 -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT} -fgpu-flush-denormals-to-zero -Wno-float-equal -ftemplate-backtrace-limit=0  -fPIC  -Wno-gnu-line-marker -Wunused-variable -Wuninitialized -Werror "SHELL:-mllvm -enable-post-misched=0" "SHELL:-mllvm -amdgpu-early-inline-all=true" "SHELL:-mllvm -amdgpu-function-calls=false" "SHELL:-mllvm -amdgpu-coerce-illegal-types=1" "SHELL:-mllvm --amdgpu-kernarg-preload-count=16")
+list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -std=c++17 -O3 -DUSE_ROCM=1 -DCK_TILE_FMHA_FWD_SPLITKV_API=1 --offload-arch=native)
 foreach(rocm_arch ${CK_FUSED_ATTN_TARGET_GPUS})
   list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS --offload-arch=${rocm_arch})
 endforeach()
@@ -174,6 +67,13 @@ target_include_directories(ck_fused_attn PRIVATE ${CK_INCLUDE_DIR} ${__CK_SOURCE
 target_include_directories(ck_fused_attn PRIVATE ${AITER_INCLUDE_DIR})
 
 find_package(hip)
-list(APPEND ck_fused_attn_LINKER_LIBS hip::host hip::device roctx64)
+list(APPEND ck_fused_attn_LINKER_LIBS hip::host hip::device roctx64 ${__AITER_TEST_DIR}/libmha_fwd.so ${__AITER_TEST_DIR}/libmha_bwd.so)
 target_link_libraries(ck_fused_attn PUBLIC ${ck_fused_attn_LINKER_LIBS})
 target_compile_options(ck_fused_attn PRIVATE ${CK_FUSED_ATTN_COMPILE_OPTIONS})
+set_target_properties(ck_fused_attn PROPERTIES INSTALL_RPATH "$ORIGIN")
+
+include(GNUInstallDirs)
+message("CMAKE_INSTALL_INCLUDEDIR ${CMAKE_INSTALL_INCLUDEDIR}")
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/ck_fused_attn" DESTINATION ${CMAKE_INSTALL_PREFIX}/${_CK_FUSED_ATTN_INSTALL_PREFIX}/${CMAKE_INSTALL_INCLUDEDIR})
+install(FILES ${__AITER_TEST_DIR}/libmha_fwd.so ${__AITER_TEST_DIR}/libmha_bwd.so DESTINATION ${CMAKE_INSTALL_PREFIX}/${_CK_FUSED_ATTN_INSTALL_PREFIX}/lib)
+install(TARGETS ck_fused_attn DESTINATION ${CMAKE_INSTALL_PREFIX}/${_CK_FUSED_ATTN_INSTALL_PREFIX}/lib)

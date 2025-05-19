@@ -343,6 +343,7 @@ else()
     if(NOT DEFINED CK_FUSED_ATTN_PATH)
       set(CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT ${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT} CACHE STRING "ck float to bf16 conversion rounding")
       set(CK_FUSED_ATTN_TARGET_GPUS ${CMAKE_HIP_ARCHITECTURES} CACHE STRING "Target arch to compile ck fused attn backend")
+      set(CK_FUSED_ATTN_INSTALL_PREFIX "transformer_engine" CACHE STRING "ck_fused_attn install prefix in TE")
       add_subdirectory(ck_fused_attn ${CMAKE_CURRENT_BINARY_DIR}/ck_fused_attn)
     else()
       # Use CK built during initial TE building/installation
