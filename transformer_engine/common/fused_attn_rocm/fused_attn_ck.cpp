@@ -500,6 +500,13 @@ void fused_attn_ck_fwd_impl(
       nvte_log_ck_config = true;
   }
 
+  bool nvte_ck_uses_fwd_v3 = getenv<int>("NVTE_CK_USES_FWD_V3", 0) and (layout==NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD);
+  if(nvte_log_ck_config){
+    if(getenv<int>("NVTE_CK_USES_FWD_V3", 0) and (layout!=NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD)){
+      std::cout<<"Disable CK FWD v3 since only BSHD_BSHD_BSHD layout supported"<<std::endl;
+    }
+  }
+
   bool is_ragged = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_THD; 
  
   // Exit to request upper level API to allocate memory if needed

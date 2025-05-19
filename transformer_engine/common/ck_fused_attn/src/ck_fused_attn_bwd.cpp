@@ -38,7 +38,7 @@ __global__ void dk_dv_reduce(
   float sum_dk = 0.0f;
   float sum_dv = 0.0f;
 
-  assert(hdim_dix<d);
+  assert(hdim_idx<d);
   uint64_t read_idx = batch_idx*stride_b_dkv_expanded + head_k_idx*head_idx_offset*stride_h_dkv_expanded + seqlen_idx*stride_s_dkv_expanded + hdim_idx;
   uint64_t write_idx = batch_idx*stride_b_dkv + head_k_idx*stride_h_dkv + seqlen_idx* stride_s_dkv + hdim_idx;
   
@@ -84,7 +84,7 @@ __global__ void dk_or_dv_reduce(
 
   float sum_dk_or_dv = 0.0f;
 
-  assert(hdim_dix<d);
+  assert(hdim_idx<d);
   uint64_t read_idx = batch_idx*stride_b_dk_or_dv_expanded + head_k_or_v_idx*head_idx_offset*stride_h_dk_or_dv_expanded + seqlen_idx*stride_s_dk_or_dv_expanded + hdim_idx;
   uint64_t write_idx = batch_idx*stride_b_dk_or_dv + head_k_or_v_idx*stride_h_dk_or_dv + seqlen_idx* stride_s_dk_or_dv + hdim_idx;
   
@@ -123,7 +123,7 @@ __global__ void dk_dv_reduce_thd(
   uint64_t head_k_idx = blockIdx.y;
   uint64_t hdim_idx = threadIdx.x;
   
-  assert(hdim_dix<d);
+  assert(hdim_idx<d);
 
   if(seqlen_idx >= *total_seqlen_kv_ptr){
     return;
@@ -176,7 +176,7 @@ __global__ void dk_or_dv_reduce_thd(
   uint64_t head_k_or_v_idx = blockIdx.y;
   uint64_t hdim_idx = threadIdx.x;
   
-  assert(hdim_dix<d);
+  assert(hdim_idx<d);
 
   if(seqlen_idx >= *total_seqlen_kv_ptr){
     return;
