@@ -19,12 +19,14 @@ namespace ck_fused_attn{
 void log_fwd_config(const char* func_name,
                     const std::string data_type_str,
                     const bool is_group_mode,
+                    const bool has_logits_soft_cap,
                     const mask_enum mask_type,
                     const bias_enum bias_type,
                     const bool has_lse,
                     const bool has_dropout,
                     const bool is_v_rowmajor,
                     const bool do_fp8_static_quant,
+                    const bool uses_fwd_v3,
                     const fmha_fwd_args& fmha_args){
   bool ck_fused_attn_log_config = false;
   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
@@ -43,9 +45,11 @@ void log_fwd_config(const char* func_name,
     std::cout<<"is_v_rowmajor: "<<is_v_rowmajor<<std::endl;
     std::cout<<"mask_type: "<<static_cast<std::underlying_type<mask_enum>::type>(mask_type)<<std::endl;
     std::cout<<"bias_type: "<<static_cast<std::underlying_type<bias_enum>::type>(bias_type)<<std::endl;
+    std::cout<<"has_logits_soft_cap: "<<has_logits_soft_cap<<std::endl;
     std::cout<<"has_lse: "<<has_lse<<std::endl;
     std::cout<<"has_dropout: "<<has_dropout<<std::endl;
     std::cout<<"do_fp8_static_quant: "<<do_fp8_static_quant<<std::endl;
+    std::cout<<"uses_fwd_v3: "<<uses_fwd_v3<<std::endl;
 
     // debug fmha_args
     std::cout<<"fmha_args: "<<std::endl;
@@ -71,6 +75,7 @@ void log_fwd_config(const char* func_name,
     std::cout<<"scale_s: "<<fmha_args.scale_s<<std::endl;
     std::cout<<"scale_p: "<<fmha_args.scale_p<<std::endl;
     std::cout<<"scale_o: "<<fmha_args.scale_o<<std::endl;
+    std::cout<<"logits_soft_cap: "<<fmha_args.logits_soft_cap<<std::endl;
     std::cout<<"stride_q: "<<fmha_args.stride_q<<std::endl;
     std::cout<<"stride_k: "<<fmha_args.stride_k<<std::endl;
     std::cout<<"stride_v: "<<fmha_args.stride_v<<std::endl;
@@ -121,7 +126,8 @@ hipError_t ck_attn_fwd(
   int64_t window_size_left, int64_t window_size_right,
   void* o_ptr, 
   uint64_t stride_b_o, uint64_t stride_h_o, uint64_t stride_s_o,
-  void* lse_ptr, 
+  void* lse_ptr,
+  bool uses_fwd_v3,
   hipStream_t stream){
 
   bool has_dropout = (is_training && dropout_probability > 0.f);
@@ -138,9 +144,11 @@ hipError_t ck_attn_fwd(
   float scale_s = scaling_factor;
   float scale_p = 1.f;
   float scale_o = 1.f;
+  float logits_soft_cap = 0.f;
   float p_drop = dropout_probability;
   bool is_group_mode = false;
   bool is_v_rowmajor = true;
+  bool has_logits_soft_cap = 0.f < logits_soft_cap;
   bool do_fp8_static_quant = false;
 
   bias_enum bias_type;
@@ -207,6 +215,7 @@ hipError_t ck_attn_fwd(
                          scale_s,
                          scale_p,
                          scale_o,
+                         logits_soft_cap,
                          stride_q,
                          stride_k,
                          stride_v,
@@ -236,7 +245,7 @@ hipError_t ck_attn_fwd(
   }();
   
   // print ck traits and args when needed
-  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, fmha_args);
+  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, fmha_args);
 
   float average_runtime = aiter::mha_fwd(fmha_args,
                                          stream_config,
@@ -244,7 +253,8 @@ hipError_t ck_attn_fwd(
                                          is_group_mode,
                                          mask_type,
                                          bias_type,
-                                         has_lse);
+                                         has_lse,
+                                         uses_fwd_v3);
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");
@@ -271,6 +281,7 @@ hipError_t ck_attn_varlen_fwd(
   void* o_ptr, 
   uint64_t stride_h_o, uint64_t stride_s_o,
   void* lse_thd_ptr,
+  bool uses_fwd_v3,
   hipStream_t stream){
 
   bool has_dropout = (is_training && dropout_probability > 0.f);
@@ -287,9 +298,11 @@ hipError_t ck_attn_varlen_fwd(
   float scale_s = scaling_factor;
   float scale_p = 1.f;
   float scale_o = 1.f;
+  float logits_soft_cap = 0.f;
   float p_drop = dropout_probability;
   bool is_group_mode = true;
   bool is_v_rowmajor = true;
+  bool has_logits_soft_cap = 0.f < logits_soft_cap;
   bool do_fp8_static_quant = false;
 
   // THD does not work with bias
@@ -357,6 +370,7 @@ hipError_t ck_attn_varlen_fwd(
                          scale_s,
                          scale_p,
                          scale_o,
+                         logits_soft_cap,
                          stride_q,
                          stride_k,
                          stride_v,
@@ -386,7 +400,7 @@ hipError_t ck_attn_varlen_fwd(
   }();
 
   // print ck traits and args when needed
-  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, fmha_args);
+  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, fmha_args);
 
   float average_runtime = aiter::mha_fwd(fmha_args,
                                          stream_config,
@@ -394,7 +408,8 @@ hipError_t ck_attn_varlen_fwd(
                                          is_group_mode,
                                          mask_type,
                                          bias_type,
-                                         has_lse);
+                                         has_lse,
+                                         uses_fwd_v3);
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");

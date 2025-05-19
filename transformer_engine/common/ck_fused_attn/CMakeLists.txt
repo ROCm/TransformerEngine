@@ -48,8 +48,18 @@ execute_process(
 )
 
 execute_process(
+  COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
+  --api batch_prefill --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp --receipt 600
+)
+
+execute_process(
   COMMAND python3 ${__AITER_SOURCE_DIR}/csrc/cpp_itfs/mha_fwd_generate.py
-  --receipt 3 --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp --receipt 3
+  --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp --receipt 5
+)
+
+execute_process(
+  COMMAND python3 ${__AITER_SOURCE_DIR}/py_itfs_cu/fmha_v3_fwd_kernel_generate.py
+  --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp
 )
 
 # generate the actual bwd kernel cpp files
