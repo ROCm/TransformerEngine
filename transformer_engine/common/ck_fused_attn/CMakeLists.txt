@@ -26,6 +26,11 @@ execute_process(
   COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
   --api fwd_splitkv --list_blobs ${CMAKE_CURRENT_BINARY_DIR}/gen_src/fwd_splitkv_blob_list.txt --receipt 600
 )
+execute_process(
+  COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
+  --api batch_prefill --list_blobs ${CMAKE_CURRENT_BINARY_DIR}/gen_src/fwd_batch_prefill_blob_list.txt --receipt 600
+)
+
 #bwd kernels list
 execute_process(
   COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
@@ -34,6 +39,7 @@ execute_process(
 
 file(STRINGS ${CMAKE_CURRENT_BINARY_DIR}/gen_src/fwd_blob_list.txt FMHA_FWD_GEN_BLOBS)
 file(STRINGS ${CMAKE_CURRENT_BINARY_DIR}/gen_src/fwd_splitkv_blob_list.txt FMHA_FWD_SPLITKV_GEN_BLOBS)
+file(STRINGS ${CMAKE_CURRENT_BINARY_DIR}/gen_src/fwd_batch_prefill_blob_list.txt FMHA_FWD_BATCH_PREFILL_GEN_BLOBS)
 file(STRINGS ${CMAKE_CURRENT_BINARY_DIR}/gen_src/bwd_blob_list.txt FMHA_BWD_GEN_BLOBS)
 
 # generate the actual fwd kernel cpp files
@@ -58,7 +64,7 @@ execute_process(
 )
 
 execute_process(
-  COMMAND python3 ${__AITER_SOURCE_DIR}/py_itfs_cu/fmha_v3_fwd_kernel_generate.py
+  COMMAND python3 ${__AITER_SOURCE_DIR}/csrc/py_itfs_cu/fmha_v3_fwd_kernel_generate.py
   --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp
 )
 
@@ -69,13 +75,13 @@ execute_process(
 )
 
 execute_process(
-  COMMAND python3 ${__AITER_SOURCE_DIR}/csrc/py_itfs_cu/fmha_bwd_pre_post_kernel.py
-  --receipt 1 --filter *@*_ndeterministic@*_nbias*_dropout*_ndeterministic* --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp --receipt 3
+  COMMAND python3 ${__AITER_SOURCE_DIR}/csrc/py_itfs_cu/fmha_v3_bwd_kernel_generate.py
+  --receipt 1 --filter *@*_ndeterministic@*_nbias*_dropout*_ndeterministic* --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp
 )
 
 execute_process(
   COMMAND python3 ${__AITER_SOURCE_DIR}/csrc/cpp_itfs/mha_bwd_generate.py
-  --receipt 3 --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp --receipt 3
+  --receipt 3 --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp
 )
 
 set(ck_fused_attn_SOURCES)
@@ -94,8 +100,14 @@ foreach(blob ${FMHA_FWD_SPLITKV_GEN_BLOBS})
   file(RELATIVE_PATH blob_path ${CMAKE_CURRENT_BINARY_DIR}/gen_src ${blob})
   file(COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp/${blob_path} ${blob} ONLY_IF_DIFFERENT)
 endforeach()
-
 list(APPEND ck_fused_attn_SOURCES ${FMHA_FWD_SPLITKV_GEN_BLOBS})
+
+foreach(blob ${FMHA_FWD_BATCH_PREFILL_GEN_BLOBS})
+  file(RELATIVE_PATH blob_path ${CMAKE_CURRENT_BINARY_DIR}/gen_src ${blob})
+  file(COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp/${blob_path} ${blob} ONLY_IF_DIFFERENT)
+endforeach()
+list(APPEND ck_fused_attn_SOURCES ${FMHA_FWD_BATCH_PREFILL_GEN_BLOBS})
+
 foreach(blob ${FMHA_BWD_GEN_BLOBS})
   file(RELATIVE_PATH blob_path ${CMAKE_CURRENT_BINARY_DIR}/gen_src ${blob})
   file(COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp/${blob_path} ${blob} ONLY_IF_DIFFERENT)
