@@ -110,7 +110,8 @@ class FusedAttnHelper:
     kv_num_heads: int
     q_max_seqlen: int
     kv_max_seqlen: int
-    head_dim: int
+    qk_head_dim: int
+    v_head_dim: int
     window_size: Tuple[int, int]
 
     def is_fused_attn_kernel_available(self):
@@ -130,7 +131,8 @@ class FusedAttnHelper:
             self.kv_num_heads,
             self.q_max_seqlen,
             self.kv_max_seqlen,
-            self.head_dim,
+            self.qk_head_dim,
+            self.v_head_dim,
             self.window_size[0],
             self.window_size[1],
         )
@@ -145,27 +147,27 @@ class FusedAttnHelper:
         """Parse qkv aval"""
         match qkv_layout:
             case NVTE_QKV_Layout.NVTE_BS3HD | NVTE_QKV_Layout.NVTE_T3HD:
-                *q_batch_shape, q_max_seqlen, nqkv, attn_heads, q_head_dim = q_aval.shape
+                *q_batch_shape, q_max_seqlen, nqkv, attn_heads, qk_head_dim = q_aval.shape
                 kv_batch_shape = q_batch_shape
                 kv_max_seqlen = q_max_seqlen
                 num_gqa_groups = attn_heads
-                kv_head_dim = q_head_dim
+                v_head_dim = qk_head_dim
                 assert nqkv == 3
             case NVTE_QKV_Layout.NVTE_BSHD_BS2HD | NVTE_QKV_Layout.NVTE_THD_T2HD:
-                *q_batch_shape, q_max_seqlen, attn_heads, q_head_dim = q_aval.shape
-                *kv_batch_shape, kv_max_seqlen, nkv, num_gqa_groups, kv_head_dim = k_aval.shape
+                *q_batch_shape, q_max_seqlen, attn_heads, qk_head_dim = q_aval.shape
+                *kv_batch_shape, kv_max_seqlen, nkv, num_gqa_groups, v_head_dim = v_aval.shape
                 assert nkv == 2
             case NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD | NVTE_QKV_Layout.NVTE_THD_THD_THD:
-                *q_batch_shape, q_max_seqlen, attn_heads, q_head_dim = q_aval.shape
-                *kv_batch_shape, kv_max_seqlen, num_gqa_groups, kv_head_dim = k_aval.shape
-                assert k_aval.shape == v_aval.shape
+                *q_batch_shape, q_max_seqlen, attn_heads, qk_head_dim = q_aval.shape
+                *kv_batch_shape, kv_max_seqlen, num_gqa_groups, v_head_dim = v_aval.shape
+                # assert k_aval.shape == v_aval.shape
             case _:
                 raise ValueError(f"Unexpected {qkv_layout=}")
         assert q_batch_shape == kv_batch_shape
-        assert q_head_dim == kv_head_dim
+        # assert q_head_dim == kv_head_dim
         assert q_aval.dtype == k_aval.dtype == v_aval.dtype
 
-        return (q_batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, q_head_dim)
+        return (q_batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, qk_head_dim, v_head_dim)
 
 
 @dataclass(frozen=True)
@@ -258,11 +260,11 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         assert q_dtype == k_dtype == v_dtype == bias_dtype
         assert q_seqlen_or_cu_seqlen_aval.dtype == kv_seqlen_or_cu_seqlen_aval.dtype
 
-        batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, head_dim = (
+        batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, qk_head_dim, v_head_dim = (
             FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
         )
 
-        output_shape = (*batch_shape, q_max_seqlen, attn_heads, head_dim)
+        output_shape = (*batch_shape, q_max_seqlen, attn_heads, v_head_dim)
         out_aval = q_aval.update(shape=output_shape, dtype=q_dtype)
 
         # backend determines the softmax buffer shape/dtype
@@ -277,7 +279,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             num_gqa_groups,
             q_max_seqlen,
             kv_max_seqlen,
-            head_dim,
+            qk_head_dim,
+            v_head_dim,
             config.window_size,
         ).get_fused_attn_backend()
 
@@ -332,7 +335,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             attn_heads,
             num_gqa_groups,
             bias_heads,
-            head_dim,
+            qk_head_dim,
+            v_head_dim,
             config.scaling_factor,
             config.dropout_probability,
             config.attn_bias_type,
@@ -384,7 +388,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         """
         q_aval, k_aval, v_aval, bias_aval, *_ = ctx.avals_in
 
-        batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, head_dim = (
+        batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, qk_head_dim, v_head_dim = (
             FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
         )
 
@@ -420,7 +424,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 attn_heads=attn_heads,
                 num_gqa_groups=num_gqa_groups,
                 bias_heads=bias_heads,
-                head_dim=head_dim,
+                qk_head_dim=qk_head_dim,
+                v_head_dim=v_head_dim,
                 max_segments_per_seq=config.max_segments_per_seq,
                 scaling_factor=float(config.scaling_factor),
                 dropout_probability=float(config.dropout_probability),
@@ -461,7 +466,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 attn_heads,
                 num_gqa_groups,
                 bias_heads,
-                head_dim,
+                qk_head_dim,
+                v_head_dim,
                 config.max_segments_per_seq,
                 wkspace_aval.size,
                 config.scaling_factor,
@@ -704,7 +710,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         assert q_dtype == k_dtype == v_dtype == bias_dtype == doutput_dtype
         assert q_seqlen_or_cu_seqlen_aval.dtype == kv_seqlen_or_cu_seqlen_aval.dtype
 
-        batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, head_dim = (
+        batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, qk_head_dim, v_head_dim = (
             FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
         )
 
@@ -725,7 +731,8 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             attn_heads,
             num_gqa_groups,
             bias_heads,
-            head_dim,
+            qk_head_dim,
+            v_head_dim,
             config.scaling_factor,
             config.dropout_probability,
             config.attn_bias_type,
@@ -784,7 +791,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         """
         q_aval, k_aval, v_aval, bias_aval, *_ = ctx.avals_in
 
-        batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, head_dim = (
+        batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, qk_head_dim, v_head_dim = (
             FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
         )
 
@@ -823,7 +830,8 @@ class FusedAttnBwdPrimitive(BasePrimitive):
                 attn_heads=attn_heads,
                 num_gqa_groups=num_gqa_groups,
                 bias_heads=bias_heads,
-                head_dim=head_dim,
+                qk_head_dim=qk_head_dim,
+                v_head_dim=v_head_dim,
                 max_segments_per_seq=config.max_segments_per_seq,
                 scaling_factor=float(config.scaling_factor),
                 dropout_probability=float(config.dropout_probability),
@@ -867,7 +875,8 @@ class FusedAttnBwdPrimitive(BasePrimitive):
                 attn_heads,
                 num_gqa_groups,
                 bias_heads,
-                head_dim,
+                qk_head_dim,
+                v_head_dim,
                 config.max_segments_per_seq,
                 wkspace_aval.size,
                 config.scaling_factor,

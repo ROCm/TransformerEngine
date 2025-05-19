@@ -232,7 +232,8 @@ def is_fused_attn_kernel_available(
     kv_num_heads,
     q_max_seqlen,
     kv_max_seqlen,
-    head_dim,
+    qk_head_dim,
+    v_head_dim,
     window_size: Optional[Tuple[int, int]] = None,
 ):
     """
@@ -251,7 +252,8 @@ def is_fused_attn_kernel_available(
             kv_num_heads,
             q_max_seqlen,
             kv_max_seqlen,
-            head_dim,
+            qk_head_dim,
+            v_head_dim,
             (-1, -1) if window_size is None else window_size,
         )
 

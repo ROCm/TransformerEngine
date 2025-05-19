@@ -71,16 +71,17 @@ def general_dot_product_attention(
     dtype: DTypeLike,
 ) -> Array:
     """
-    Similar to flax.linen.dot_product_attention but with GQA support
+    Similar to flax.linen.dot_product_attention but with GQA and MLA support
     """
     query, key, value, bias = promote_dtype(query, key, value, bias, dtype=dtype)
     dtype = query.dtype
 
-    b, s_q, h_q, d = query.shape
+    b, s_q, h_q, d_qk = query.shape
     _, s_kv, h_kv, _ = key.shape
+    _, _, _, d_v = value.shape
     assert (h_q % h_kv == 0) and (h_q >= h_kv)
     num_groups = h_q // h_kv
-    grouped_query = jnp.reshape(query, (b, s_q, h_kv, num_groups, d))
+    grouped_query = jnp.reshape(query, (b, s_q, h_kv, num_groups, d_qk))
     # logits with shape (b, h_kv, num_groups, s_q, s_kv)
     logits = scale_factor * jnp.einsum("...qhgd,...khd->...hgqk", grouped_query, key)
 
@@ -106,7 +107,7 @@ def general_dot_product_attention(
         softmax_out = softmax_out * multiplier
 
     context = jnp.einsum("...hgqk,...khd->...qhgd", softmax_out, value)
-    context = jnp.reshape(context, query.shape)
+    context = jnp.reshape(context, (b, s_q, h_q, d_v))
     return context
 
 
@@ -294,7 +295,8 @@ class FusedAttnRunner:
     max_seqlen_kv: int
     num_heads_q: int
     num_heads_kv: int
-    head_dim: int
+    head_dim_qk: int
+    head_dim_v: int
     attn_bias_type: AttnBiasType
     attn_mask_type: AttnMaskType
     dropout_prob: float
@@ -357,7 +359,8 @@ class FusedAttnRunner:
             self.num_heads_kv,
             self.max_seqlen_q,
             self.max_seqlen_kv,
-            self.head_dim,
+            self.head_dim_qk,
+            self.head_dim_v,
             (-1, -1) if self.window_size is None else self.window_size,
         ).get_fused_attn_backend()
         if self.backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
@@ -390,12 +393,19 @@ class FusedAttnRunner:
         key = jax.random.PRNGKey(0)
         q_key, k_key, v_key, bias_key, dropout_key = jax.random.split(key, 5)
 
-        q_shape = (self.batch_size, self.max_seqlen_q, self.num_heads_q, self.head_dim)
-        k_shape = v_shape = (
+        q_shape = (self.batch_size, self.max_seqlen_q, self.num_heads_q, self.head_dim_qk)
+        k_shape = (
             self.batch_size,
             self.max_seqlen_kv,
             self.num_heads_kv,
-            self.head_dim,
+            self.head_dim_qk,
+        )
+        # Use head_dim_v for value tensor
+        v_shape = (
+            self.batch_size,
+            self.max_seqlen_kv,
+            self.num_heads_kv,
+            self.head_dim_v,
         )
 
         if self.attn_bias_type == AttnBiasType.NO_BIAS:
@@ -581,7 +591,7 @@ class FusedAttnRunner:
                     raise ValueError(f"Unknown {self.seq_desc_format=}")
 
         self.dropout_rng = dropout_key if self.dropout_prob > 0 else None
-        self.scaling_factor = 1.0 / sqrt(self.head_dim)
+        self.scaling_factor = 1.0 / sqrt(self.head_dim_qk)
 
         # Setup distributed sharding specs
         # Setup shardings for distributed tests
@@ -887,7 +897,6 @@ class FusedAttnRunner:
     "attn_mask_type",
     [
         pytest.param(AttnMaskType.NO_MASK, id="NO_MASK"),
-        pytest.param(AttnMaskType.PADDING_MASK, id="PADDING"),
         pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL"),
         pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id="PADDING_CAUSAL"),
     ],
@@ -998,6 +1007,7 @@ class TestFusedAttn:
             h_q,
             h_kv,
             d,
+            d,
             attn_bias_type,
             attn_mask_type,
             dropout_prob,
@@ -1051,6 +1061,171 @@ class TestFusedAttn:
             h_q,
             h_kv,
             d,
+            d,
+            attn_bias_type,
+            attn_mask_type,
+            dropout_prob,
+            dtype,
+            True,
+            qkv_layout,
+            bias_shape,
+            window_size,
+            seq_desc_format,
+        )
+        if is_hip_extension():
+            is_padding = attn_mask_type in [AttnMaskType.PADDING_MASK, AttnMaskType.PADDING_CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK]
+            if swa and is_padding:
+                pytest.skip("Jax cannot get cu_seqlen correctly from mask with swa")
+        runner.test_backward()
+
+
+@pytest.mark.parametrize(
+    "attn_mask_type",
+    [
+        pytest.param(AttnMaskType.NO_MASK, id="NO_MASK"),
+        pytest.param(AttnMaskType.PADDING_MASK, id="PADDING"),
+        pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL"),
+        pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id="PADDING_CAUSAL"),
+    ],
+)
+@pytest.mark.parametrize(
+    "qkv_layout",
+    [
+        pytest.param(QKVLayout.BSHD_BSHD_BSHD, id="SEPARATE"),
+    ],
+)
+@pytest.mark.parametrize(
+    "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype",
+    [
+        # Cross-attention with different q/kv sequence lengths and head dimensions
+        pytest.param(4, 256, 128, 12, 6, 64, 128, jnp.bfloat16, id="mla-cross-gqa"),
+        # Self-attention with sliding window and FP16 precision
+        pytest.param(2, 512, 512, 8, 8, 64, 96, jnp.float16, id="mla-swa-fp16"),
+    ],
+)
+@pytest.mark.parametrize(
+    "dropout_prob",
+    [
+        pytest.param(0.0, id="DROP_0.0"),
+    ],
+)
+@pytest.mark.parametrize(
+    "swa",
+    [
+        pytest.param(False, id="NO_SWA"),
+    ],
+)
+@pytest.mark.parametrize(
+    "seq_desc_format",
+    [
+        pytest.param(SeqDescFormat.Mask, id="Mask"),
+    ],
+)
+class TestFusedAttnMLA:
+    """
+    Fused attention tester for Multi-Latent Attention (MLA)
+    """
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        "is_training",
+        [
+            pytest.param(True, id="TRAINING"),
+            pytest.param(False, id="INFERENCE"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "attn_bias_type, bias_shape",
+        [
+            pytest.param(AttnBiasType.NO_BIAS, None, id="NO_BIAS"),
+        ],
+    )
+    def test_forward_mla(
+        b,
+        s_q,
+        s_kv,
+        h_q,
+        h_kv,
+        d_qk,
+        d_v,
+        attn_bias_type,
+        attn_mask_type,
+        dropout_prob,
+        dtype,
+        is_training,
+        qkv_layout,
+        bias_shape,
+        swa,
+        seq_desc_format,
+    ):
+        """
+        Test forward MLA with parameterized configs
+        """
+        window_size = None
+        if swa:
+            window_size = (s_kv // 10, 0)
+        runner = FusedAttnRunner(
+            b,
+            s_q,
+            s_kv,
+            h_q,
+            h_kv,
+            d_qk,
+            d_v,
+            attn_bias_type,
+            attn_mask_type,
+            dropout_prob,
+            dtype,
+            is_training,
+            qkv_layout,
+            bias_shape,
+            window_size,
+            seq_desc_format,
+        )
+        if is_hip_extension():
+            is_padding = attn_mask_type in [AttnMaskType.PADDING_MASK, AttnMaskType.PADDING_CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK]
+            if swa and is_padding:
+                pytest.skip("Jax cannot get cu_seqlen correctly from mask with swa")
+        runner.test_forward()
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        "attn_bias_type, bias_shape",
+        [
+            pytest.param(AttnBiasType.NO_BIAS, None, id="NO_BIAS"),
+        ],
+    )
+    def test_backward_mla(
+        b,
+        s_q,
+        s_kv,
+        h_q,
+        h_kv,
+        d_qk,
+        d_v,
+        attn_bias_type,
+        attn_mask_type,
+        dropout_prob,
+        dtype,
+        qkv_layout,
+        bias_shape,
+        swa,
+        seq_desc_format,
+    ):
+        """
+        Test backward MLA with parameterized configs
+        """
+        window_size = None
+        if swa:
+            window_size = (s_kv // 10, 0)
+        runner = FusedAttnRunner(
+            b,
+            s_q,
+            s_kv,
+            h_q,
+            h_kv,
+            d_qk,
+            d_v,
             attn_bias_type,
             attn_mask_type,
             dropout_prob,
