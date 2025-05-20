@@ -499,7 +499,12 @@ void fused_attn_ck_fwd_impl(
     if (env_p != nullptr && std::string(env_p) == "1")
       nvte_log_ck_config = true;
   }
-
+  bool nvte_ck_uses_fwd_v3 = getenv<int>("NVTE_CK_USES_FWD_V3", 0) and (layout==NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD);
+  if(nvte_log_ck_config){
+    if(getenv<int>("NVTE_CK_USES_FWD_V3", 0) and (layout!=NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD)){
+      std::cout<<"Disable CK FWD v3 since only BSHD_BSHD_BSHD layout supported"<<std::endl;
+    }
+  }
   bool is_ragged = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_THD; 
  
   // Exit to request upper level API to allocate memory if needed
@@ -625,7 +630,8 @@ void fused_attn_ck_fwd_impl(
     std::cout<<"bias_type: "<<bias_type<<", ";
     std::cout<<"(bias_b, bias_h): ("<<bias_b<<", "<<bias_h<<"), ";
     std::cout<<"mask_type: "<<mask_type<<", ";
-    std::cout<<"window_size: ("<<window_size_left<<", "<<window_size_right<<")"<<std::endl;
+    std::cout<<"window_size: ("<<window_size_left<<", "<<window_size_right<<")"<<", ";
+    std::cout<<"nvte_ck_uses_fwd_v3: "<<nvte_ck_uses_fwd_v3<<std::endl;
   }
   if(pad_between_seqs){
     // remove padding for q, k, v
@@ -653,6 +659,7 @@ void fused_attn_ck_fwd_impl(
         devPtrOWithoutPadding,
         o_stride[1], (is_ragged? o_stride[2] : std::min(o_stride[0], o_stride[2])),
         devPtrSoftmaxLSETHD,
+        nvte_ck_uses_fwd_v3,
         stream));
     // convert softmax_lse from [h, b*max_seqlen_q] (effective data in first total_q places) to [b, h, s_q]
     if(devPtrSoftmaxLSETHD!=devPtrSoftmaxAux){
@@ -682,6 +689,7 @@ void fused_attn_ck_fwd_impl(
         devPtrO,
         o_stride[1], o_stride[2],
         devPtrSoftmaxLSETHD,
+        nvte_ck_uses_fwd_v3,
         stream));
     // convert softmax_lse from [h, b*max_seqlen_q] (effective data in first total_q places) to [b, h, s_q]
     if(devPtrSoftmaxLSETHD!=devPtrSoftmaxAux){
@@ -710,6 +718,7 @@ void fused_attn_ck_fwd_impl(
         devPtrO,
         o_stride[0], o_stride[1], o_stride[2],
         devPtrSoftmaxAux,
+        nvte_ck_uses_fwd_v3,
         stream));
   }
 }
