@@ -91,6 +91,9 @@ class _Linear(torch.autograd.Function):
         ub_name: str,
         fp8_output: bool,
         fsdp_group: Union[dist_group_type, None],
+        skip_fp8_weight_update: bool,
+        module: torch.nn.Module,
+        keep_fp8_weight_cache: bool = True,
         keep_fp8_weight_transpose_cache: bool = True,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
@@ -179,7 +182,19 @@ class _Linear(torch.autograd.Function):
 
             # Use FP8 weights
             if weight_fp8 is None:
-                weight_fp8 = weight
+                if isinstance(weight, Float8Tensor):
+                    weight_fp8 = weight
+                else:
+                    update_workspace = is_first_microbatch is None or is_first_microbatch
+                    weight_fp8 = module.get_fp8_workspace(
+                        tensor=weight,
+                        fp8_meta_forward=True,
+                        fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
+                        update_workspace=update_workspace,
+                        skip_update_flag=skip_fp8_weight_update,
+                        fsdp_group=fsdp_group,
+                        create_transpose_cache=keep_fp8_weight_transpose_cache,
+                    )
 
             assert isinstance(weight_fp8, Float8Tensor)
 
@@ -249,6 +264,7 @@ class _Linear(torch.autograd.Function):
                 dim_size[1] = out_features
                 out = torch.empty(dim_size, dtype=out_pttype, device=inputmat_total.device)
 
+
             _ = fp8_gemm(
                 weight_fp8._data,
                 weight_fp8._scale_inv,
@@ -280,6 +296,8 @@ class _Linear(torch.autograd.Function):
                     fp8_dtype=fp8_dtype_forward,
                     dtype=activation_dtype,
                 )
+            if not keep_fp8_weight_cache:
+                clear_tensor_data(weight_fp8)
         else:
             # Cast for native AMP
             weight = cast_if_needed(weight, activation_dtype)
@@ -401,6 +419,9 @@ class _Linear(torch.autograd.Function):
             ctx.requires_dgrad = inp.requires_grad
             ctx.is_input_fp8 = is_input_fp8
             ctx.reduce_and_update_bwd_fp8_tensors = False
+            ctx.module = module
+            ctx.skip_fp8_weight_update = skip_fp8_weight_update
+            ctx.keep_fp8_weight_cache = keep_fp8_weight_cache
             ctx.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
             if ctx.fp8 and requires_grad(inp, weight, bias):
                 _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
@@ -584,6 +605,18 @@ class _Linear(torch.autograd.Function):
 
             if ctx.requires_dgrad:
                 if ctx.fp8:
+                    if not ctx.keep_fp8_weight_cache:
+                        update_workspace = ctx.is_first_microbatch is None or ctx.is_first_microbatch
+                        weight_fp8 = ctx.module.get_fp8_workspace(
+                            tensor=weight,
+                            fp8_meta_forward=True,
+                            fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
+                            update_workspace=update_workspace,
+                            skip_update_flag=ctx.skip_fp8_weight_update,
+                            fsdp_group=ctx.fsdp_group,
+                            create_transpose_cache=ctx.keep_fp8_weight_transpose_cache,
+                        )
+                        
                     _ = fp8_gemm(
                         weight_fp8.transpose_2d(fill_cache=ctx.keep_fp8_weight_transpose_cache),
                         weight_fp8._scale_inv,
@@ -604,6 +637,8 @@ class _Linear(torch.autograd.Function):
                         D_dtype=output_te_dtype,
                         extra_output_tensor=rs_out,
                     )
+                    if not ctx.keep_fp8_weight_cache:
+                        clear_tensor_data(weight_fp8)
 
                     if ctx.ub_overlap_rs_dgrad:
                         dgrad = rs_out
@@ -785,6 +820,9 @@ class _Linear(torch.autograd.Function):
             None,  # ub_name
             None,  # fp8_output
             None,  # fsdp_group
+            None,  # skip_fp8_weight_update
+            None,  # module,
+            None,  # keep_fp8_weight_cache
             None,  # keep_fp8_weight_transpose_cache
         )
 
@@ -882,6 +920,7 @@ class Linear(TransformerEngineBaseModule):
         ub_bulk_wgrad: bool = False,
         ub_name: Optional[str] = None,
         keep_fp8_weight_transpose_cache: bool = True,
+        keep_fp8_weight_cache: bool = True,
     ) -> None:
         super().__init__()
 
@@ -893,6 +932,7 @@ class Linear(TransformerEngineBaseModule):
         self.return_bias = return_bias
         self.apply_bias = bias and not return_bias
         self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
+        self.keep_fp8_weight_cache = keep_fp8_weight_cache
 
         if device == "meta":
             assert parameters_split is None, "Cannot split module parameters on 'meta' device."
@@ -1162,19 +1202,7 @@ class Linear(TransformerEngineBaseModule):
                             fill_cache=True,
                             noop_flag=skip_fp8_weight_update,
                         )
-                else:
-                    # FP8 cast to workspace buffer
-                    update_workspace = is_first_microbatch is None or is_first_microbatch
-                    weight_fp8 = self.get_fp8_workspace(
-                        tensor=weight_tensor,
-                        fp8_meta_forward=True,
-                        fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
-                        cache_name=(None if is_first_microbatch is None else "weight"),
-                        update_workspace=update_workspace,
-                        skip_update_flag=skip_fp8_weight_update,
-                        fsdp_group=self.fsdp_group,
-                        create_transpose_cache=self.keep_fp8_weight_transpose_cache,
-                    )
+                    self.keep_fp8_weight_cache = True
 
             if torch.is_grad_enabled():
                 linear_fn = _Linear.apply
@@ -1210,6 +1238,9 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_name,
                 fp8_output,
                 self.fsdp_group,
+                skip_fp8_weight_update,
+                self,
+                self.keep_fp8_weight_cache,
                 self.keep_fp8_weight_transpose_cache,
             )
             out = linear_fn(*args)

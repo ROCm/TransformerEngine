@@ -101,6 +101,9 @@ class _LayerNormLinear(torch.autograd.Function):
         ub_name: str,
         fp8_output: bool,
         fsdp_group: Union[dist_group_type, None],
+        skip_fp8_weight_update: bool,
+        module: torch.nn.Module,
+        keep_fp8_weight_cache: bool = True,
         keep_fp8_weight_transpose_cache: bool = True,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # pylint: disable=missing-function-docstring
@@ -217,7 +220,20 @@ class _LayerNormLinear(torch.autograd.Function):
 
             # Use FP8 weights
             if weight_fp8 is None:
-                weight_fp8 = weight
+                if isinstance(weight, Float8Tensor):
+                    weight_fp8 = weight
+                else:
+                    update_workspace = is_first_microbatch is None or is_first_microbatch
+                    weight_fp8 = module.get_fp8_workspace(
+                        tensor=weight,
+                        fp8_meta_forward=True,
+                        fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
+                        cache_name=(None if is_first_microbatch is None else "weight"),
+                        update_workspace=update_workspace,
+                        skip_update_flag=skip_fp8_weight_update,
+                        fsdp_group=fsdp_group,
+                        create_transpose_cache=keep_fp8_weight_transpose_cache,
+                    )
 
             assert isinstance(weight_fp8, Float8Tensor)
 
@@ -268,6 +284,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 fp8_meta_tensor=meta_tensor,
                 D_dtype=output_te_dtype,
             )
+            if not keep_fp8_weight_cache:
+                clear_tensor_data(weight_fp8)
             if output_dtype == torch.uint8:
                 out = Float8Tensor(
                     data=out,
@@ -369,6 +387,9 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.requires_dgrad = inp.requires_grad
             ctx.normalization = normalization
             ctx.reduce_and_update_bwd_fp8_tensors = False
+            ctx.module = module
+            ctx.skip_fp8_weight_update = skip_fp8_weight_update
+            ctx.keep_fp8_weight_cache = keep_fp8_weight_cache
             ctx.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
             if ctx.fp8 and requires_grad(inp, ln_weight, ln_bias, weight, bias):
                 _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
@@ -533,6 +554,18 @@ class _LayerNormLinear(torch.autograd.Function):
                     out_te_type = fp8_dtype_backward
                     out_type = torch.uint8
                     ub_obj_dgrad.set_ubuf_scale_inv(meta_tensor.scale_inv[out_index])
+                
+                if not ctx.keep_fp8_weight_cache:
+                    update_workspace = ctx.is_first_microbatch is None or ctx.is_first_microbatch
+                    weight_fp8 = ctx.module.get_fp8_workspace(
+                        tensor=weight,
+                        fp8_meta_forward=True,
+                        fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
+                        update_workspace=update_workspace,
+                        skip_update_flag=ctx.skip_fp8_weight_update,
+                        fsdp_group=ctx.fsdp_group,
+                        create_transpose_cache=ctx.keep_fp8_weight_transpose_cache,
+                    )
 
                 # DGRAD: Evaluated unconditionally to feed into Linear backward
                 _ = tex.fp8_gemm(
@@ -559,6 +592,9 @@ class _LayerNormLinear(torch.autograd.Function):
                     fp8_meta_tensor=meta_tensor,
                     D_dtype=out_te_type,
                 )
+                if not ctx.keep_fp8_weight_cache:
+                    clear_tensor_data(weight_fp8)
+
                 clear_tensor_data(grad_output_c)
             else:
                 # DGRAD: Evaluated unconditionally to feed into Linear backward
@@ -788,6 +824,9 @@ class _LayerNormLinear(torch.autograd.Function):
             None,  # ub_name
             None,  # fp8_output
             None,  # fsdp_group
+            None,  # skip_fp8_weight_update
+            None,  # module,
+            None,  # keep_fp8_weight_cache
             None,  # keep_fp8_weight_transpose_cache
         )
 
@@ -905,6 +944,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ub_overlap_rs_dgrad: bool = False,
         ub_name: Optional[str] = None,
         keep_fp8_weight_transpose_cache: bool = True,
+        keep_fp8_weight_cache: bool = True,
     ) -> None:
         super().__init__()
 
@@ -928,6 +968,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             assert ub_name is not None, "Userbuffer name [string] is not set."
         self.ub_name = ub_name
         self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
+        self.keep_fp8_weight_cache = keep_fp8_weight_cache
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1203,18 +1244,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                             fill_cache=True,
                             noop_flag=skip_fp8_weight_update,
                         )
-                else:
-                    # FP8 cast to workspace buffer
-                    update_workspace = is_first_microbatch is None or is_first_microbatch
-                    weight_fp8 = self.get_fp8_workspace(
-                        tensor=weight_tensor,
-                        fp8_meta_forward=True,
-                        fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
-                        cache_name=(None if is_first_microbatch is None else "weight"),
-                        update_workspace=update_workspace,
-                        skip_update_flag=skip_fp8_weight_update,
-                        create_transpose_cache=self.keep_fp8_weight_transpose_cache,
-                    )
+                    self.keep_fp8_weight_cache = True
+                    
 
             if torch.is_grad_enabled():
                 fwd_fn = _LayerNormLinear.apply
@@ -1257,6 +1288,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.ub_name,
                 fp8_output,
                 self.fsdp_group,
+                skip_fp8_weight_update,
+                self,
+                self.keep_fp8_weight_cache,
                 self.keep_fp8_weight_transpose_cache,
             )
             out = fwd_fn(*args)
