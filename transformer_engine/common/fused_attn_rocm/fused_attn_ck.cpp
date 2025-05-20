@@ -632,7 +632,8 @@ void fused_attn_ck_fwd_impl(
     std::cout<<"bias_type: "<<bias_type<<", ";
     std::cout<<"(bias_b, bias_h): ("<<bias_b<<", "<<bias_h<<"), ";
     std::cout<<"mask_type: "<<mask_type<<", ";
-    std::cout<<"window_size: ("<<window_size_left<<", "<<window_size_right<<")"<<std::endl;
+    std::cout<<"window_size: ("<<window_size_left<<", "<<window_size_right<<")"<<", ";
+    std::cout<<"nvte_ck_uses_fwd_v3: "<<nvte_ck_uses_fwd_v3<<std::endl;
   }
   if(pad_between_seqs){
     // remove padding for q, k, v
@@ -660,6 +661,7 @@ void fused_attn_ck_fwd_impl(
         devPtrOWithoutPadding,
         o_stride[1], (is_ragged? o_stride[2] : std::min(o_stride[0], o_stride[2])),
         devPtrSoftmaxLSETHD,
+        nvte_ck_uses_fwd_v3,
         stream));
     // convert softmax_lse from [h, b*max_seqlen_q] (effective data in first total_q places) to [b, h, s_q]
     if(devPtrSoftmaxLSETHD!=devPtrSoftmaxAux){
@@ -689,6 +691,7 @@ void fused_attn_ck_fwd_impl(
         devPtrO,
         o_stride[1], o_stride[2],
         devPtrSoftmaxLSETHD,
+        nvte_ck_uses_fwd_v3,
         stream));
     // convert softmax_lse from [h, b*max_seqlen_q] (effective data in first total_q places) to [b, h, s_q]
     if(devPtrSoftmaxLSETHD!=devPtrSoftmaxAux){
@@ -717,6 +720,7 @@ void fused_attn_ck_fwd_impl(
         devPtrO,
         o_stride[0], o_stride[1], o_stride[2],
         devPtrSoftmaxAux,
+        nvte_ck_uses_fwd_v3,
         stream));
   }
 }
