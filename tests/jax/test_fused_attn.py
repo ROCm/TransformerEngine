@@ -1097,10 +1097,15 @@ class TestFusedAttn:
 @pytest.mark.parametrize(
     "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype",
     [
-        # Cross-attention with different q/kv sequence lengths and head dimensions
         pytest.param(4, 256, 128, 12, 6, 64, 128, jnp.bfloat16, id="mla-cross-gqa"),
-        # Self-attention with sliding window and FP16 precision
         pytest.param(2, 512, 512, 8, 8, 64, 96, jnp.float16, id="mla-swa-fp16"),
+        # MLA test cases from PyTorch test_fused_attn.py
+        pytest.param(8, 128, 128, 16, 16, 64, 128, jnp.bfloat16, id="mla_1_0"),
+        pytest.param(4, 128, 256, 16, 16, 64, 128, jnp.bfloat16, id="mla_1_1"),
+        pytest.param(2, 2048, 2048, 24, 24, 128, 64, jnp.bfloat16, id="mla_2_0"),
+        pytest.param(1, 2048, 4096, 24, 24, 128, 64, jnp.bfloat16, id="mla_2_1"),
+        pytest.param(8, 1, 2048, 16, 16, 128, 64, jnp.bfloat16, id="mla_3_0"),
+        pytest.param(8, 1, 2048, 16, 16, 256, 128, jnp.bfloat16, id="mla_3_1"),
     ],
 )
 @pytest.mark.parametrize(
