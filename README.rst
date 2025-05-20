@@ -43,6 +43,9 @@ Execute the following commands to install ROCm Transformer Engine from source on
   # Note: Useful when both ROCm and CUDA platforms are present in the Docker
   export NVTE_USE_ROCM=1  #Use 1 for ROCm, or set to 0 to use CUDA; If not set will try to detect installed platform, prioritizing ROCm
 
+  # Build AITER shared library
+  python3 3rdparty/aiter/op_tests/cpp/mha/compiler.py
+
   pip install .
 
 The default installation above supports both rocBlas and hipBlasLt in GEMM computation. Building with single backend support can be done by setting `NVTE_USE_HIPBLASLT` or `NVTE_USE_ROCBLAS` environment variable before `pip install` as:
@@ -242,10 +245,16 @@ NVTE_FUSED_ATTN=0 will use the TE unfused attention even if NVTE_FUSED_ATTN_CK o
 Fused attention backends are chosen according to the match results between the actual problem config and the support matrix of the specific backend. 
 For the scenario that both backends are enabled and match the problem configuration, the CK backend will be chosen with higher priority. 
 
-FA v3 Backward Kernels in CK Backend
+FA v3 Kernels in CK Backend
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-ROCm TE provides experimental support for flash-attention v3 bwd kernels using the ck backend for limited fused attention configs (currently only for hdim=128). 
-To enable FA v3 kernels, the following environment variables can be used:
+ROCm TE provides experimental support for flash-attention v3 fwd/bwd kernels using the ck backend for limited fused attention configs. 
+To enable FA v3 fwd kernels, the following environment variables can be used:
+
+* NVTE_CK_USES_FWD_V3 - by default 0, if set to 1, some cases will call the fwd v3 kernel;
+
+FA v3 fwd kernels take the standard bf16 convert type, RTNE.
+
+To enable FA v3 bwd kernels, the following environment variables can be used:
 
 * NVTE_CK_USES_BWD_V3 - by default 0, if set to 1, some cases will call the bwd v3 dqdkdv kernel;
 * NVTE_CK_IS_V3_ATOMIC_FP32 - by default 1, if set to 0 will use atomic fp16/bf16(w/o convert_dq kernel) when NVTE_CK_USES_BWD_V3 is set to 1;
