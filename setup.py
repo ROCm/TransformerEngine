@@ -173,7 +173,7 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
                 )
                 # Blackwell is not supported as of Triton 3.2.0, need custom internal build
                 # install_reqs.append("triton")
-                test_reqs.extend(["numpy", "torchvision"])
+                test_reqs.extend(["numpy", "torchvision", "transformers"])
         if "jax" in frameworks:
             if rocm_build():
                 from build_tools.jax import jax_install_requires
