@@ -1044,6 +1044,7 @@ void hipblaslt_gemm(const Tensor *inputA,
   void *B = inputB->data.dptr;
   void *B_scale_inverse = inputB->scale_inv.dptr;
   void *D = outputD->data.dptr;
+  //Added for fp8 gelu_fusion support
   // void *D_amax = outputD->amax.dptr;
   // void *D_scale = outputD->scale.dptr;
   void *bias_ptr = inputBias->data.dptr;
@@ -1131,6 +1132,8 @@ void hipblaslt_gemm(const Tensor *inputA,
                                                      HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER,
                                                      &B_scale_inverse,
                                                      sizeof(B_scale_inverse)));
+    //Added for fp8 gelu_fusion support
+
     // if (is_fp8_dtype(outputD->data.dtype)) {
     //   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
     //                                                     HIPBLASLT_MATMUL_DESC_AMAX_D_POINTER,
@@ -1147,6 +1150,8 @@ void hipblaslt_gemm(const Tensor *inputA,
                                                        HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE,
                                                        &bias_type, sizeof(bias_type)));
     }
+    //Added for fp8 gelu_fusion support
+    
     // if (gelu){
     //   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
     //                                                     HIPBLASLT_MATMUL_DESC_EPILOGUE_AUX_DATA_TYPE,
