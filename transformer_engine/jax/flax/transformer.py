@@ -562,6 +562,13 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         else:
             seqlen_kv = key.shape[sequence_dim]
 
+        if qkv_layout == QKVLayout.BSHD_BSHD_BSHD:
+            v_head_dim  = value.shape[3]
+        elif qkv_layout == QKVLayout.THD_THD_THD:
+            v_head_dim  = value.shape[2]
+        else:
+            v_head_dim = self.head_dim
+   
         has_fused_attn_kernel = is_fused_attn_kernel_available(
             self.dtype,
             self.dtype,
@@ -574,6 +581,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             seqlen_q,
             seqlen_kv,
             self.head_dim,
+            v_head_dim,
             self.window_size,
         )
 
