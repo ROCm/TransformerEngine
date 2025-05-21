@@ -274,7 +274,8 @@ def non_tn_fp8_gemm_supported() -> bool:
     """Checks whether the device supports
     non-TN layouts for FP8 GEMMs.
     """
-    return torch.cuda.get_device_capability() >= (10, 0)
+    # TODO: release until rocm support non-TN fp8 gemms
+    return (not IS_HIP_EXTENSION) and (torch.cuda.get_device_capability() >= (10, 0))
 
 
 @functools.lru_cache(maxsize=None)

@@ -97,7 +97,7 @@ void performTestSwizzle1D(const int num_tiles_M, const int num_tiles_K, bool row
   else
     compute_ref_swizzle<128, 4, false>(input.columnwise_cpu_scale_inv_ptr<uint8_t>(), ref_output.get(), scale_shape[1], scale_shape[0]);
 
-  cudaDeviceSynchronize();
+  (void)cudaDeviceSynchronize();
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 

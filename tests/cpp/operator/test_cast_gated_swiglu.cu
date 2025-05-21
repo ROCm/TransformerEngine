@@ -83,7 +83,7 @@ void performTest(const std::vector<size_t>& shape) {
   std::unique_ptr<OType[]> ref_output_c = std::make_unique<OType[]>(input_size);
 
   nvte_dswiglu(grad.data(), input.data(), output_c.data(), 0);
-  cudaDeviceSynchronize();
+  (void)cudaDeviceSynchronize();
 
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);

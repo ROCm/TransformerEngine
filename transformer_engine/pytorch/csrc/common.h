@@ -27,7 +27,6 @@
 #include <torch/torch.h>
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
-#include <transformer_engine/cast_transpose_noop.h>
 #ifndef USE_ROCM
 #include <transformer_engine/comm_gemm_overlap.h>
 #endif
@@ -163,6 +162,28 @@ std::vector<size_t> getTensorShape(at::Tensor t);
 
 transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
                                                       const std::string& fp8_recipe);
+#ifdef USE_ROCM
+// code reference from transformer_engine/common/amd_detail/hip_float8.h
+// currently only MI300X uses funz
+static bool _te_check_fp8_fnuz() {
+  hipDeviceProp_t prop;
+  hipError_t res= hipGetDeviceProperties(&prop, 0);
+  if (res != hipSuccess) {
+    //TODO: better error out system
+    throw std::runtime_error(transformer_engine::concat_strings(
+      "hipGetDeviceProperties failed with error: ", hipGetErrorString(res)));
+  }
+  return prop.major == 9 && prop.minor == 4;
+}
+
+static inline bool te_fp8_fnuz() {
+  static std::optional<bool> use_fnuz;
+  if (!use_fnuz.has_value()) {
+    use_fnuz = _te_check_fp8_fnuz();
+  }
+  return use_fnuz.value();
+}
+#endif // USE_ROCM
 
 inline at::ScalarType GetATenDType(transformer_engine::DType t) {
   switch (t) {
@@ -179,9 +200,17 @@ inline at::ScalarType GetATenDType(transformer_engine::DType t) {
     case transformer_engine::DType::kByte:
       return at::kByte;
     case transformer_engine::DType::kFloat8E4M3:
+#ifndef USE_ROCM
       return at::kFloat8_e4m3fn;
+#else
+      return te_fp8_fnuz()? at::kFloat8_e4m3fnuz : at::kFloat8_e4m3fn;
+#endif // USE_ROCM
     case transformer_engine::DType::kFloat8E5M2:
+#ifndef USE_ROCM
       return at::kFloat8_e5m2;
+#else
+      return te_fp8_fnuz()? at::kFloat8_e5m2fnuz : at::kFloat8_e5m2;
+#endif // USE_ROCM
     default:
       NVTE_ERROR("Invalid type");
   }
@@ -190,8 +219,14 @@ inline at::ScalarType GetATenDType(transformer_engine::DType t) {
 inline transformer_engine::DType GetTransformerEngineDType(at::ScalarType t) {
   switch (t) {
     case at::kFloat8_e4m3fn:
+#ifdef USE_ROCM
+    case at::kFloat8_e4m3fnuz:
+#endif // USE_ROCM
       return transformer_engine::DType::kFloat8E4M3;
     case at::kFloat8_e5m2:
+#ifdef USE_ROCM
+    case at::kFloat8_e5m2fnuz:
+#endif // USE_ROCM
       return transformer_engine::DType::kFloat8E5M2;
     case at::kHalf:
       return transformer_engine::DType::kFloat16;

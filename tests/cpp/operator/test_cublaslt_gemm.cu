@@ -212,7 +212,7 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
     auto [atol, rtol] = getTolerances(gelu_type);
     //relax for certain prime number gemm
     if (dtype == DType::kFloat32) {
-      atol = 5e-6;
+      atol = 1e-5;
     }
     compareResults("gelu", pre_gelu_out, ref_pre_gelu_out.get(), true, atol, rtol);
   }

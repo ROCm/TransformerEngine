@@ -116,7 +116,7 @@ void performTest(const std::vector<size_t>& shape) {
                             workspace.data(),
                             0);
 
-  cudaDeviceSynchronize();
+  (void)cudaDeviceSynchronize();
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 

@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -23,6 +25,9 @@ TE_DType = {
     torch.half: tex.DType.kFloat16,
     torch.bfloat16: tex.DType.kBFloat16,
 }
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+if IS_HIP_EXTENSION:
+    TE_DType.update({torch.float8_e4m3fnuz: tex.DType.kFloat8E4M3, torch.float8_e5m2fnuz: tex.DType.kFloat8E5M2})
 
 AttnMaskTypes = (
     "no_mask",

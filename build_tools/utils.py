@@ -348,10 +348,6 @@ def get_frameworks() -> List[str]:
                     if "jax" in _requested_frameworks:
                         _unsupported_frameworks.append("jax")
                     _frameworks.remove("jax")
-        if "paddle" in _frameworks:
-            if "paddle" in _requested_frameworks:
-                _unsupported_frameworks.append("paddle")
-            _frameworks.remove("paddle")
         if _unsupported_frameworks:
             raise ValueError(f"ROCm is not supported by requested frameworks: {_unsupported_frameworks}")
 

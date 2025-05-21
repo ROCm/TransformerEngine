@@ -58,7 +58,7 @@ void performTest(const std::vector<size_t>& shape) {
   compute_ref<InputType, OutputType>(input.rowwise_cpu_dptr<InputType>(), ref_output_c.get(),
                                      full_size, &ref_amax, output_c.scale());
 
-  cudaDeviceSynchronize();
+  (void)cudaDeviceSynchronize();
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
   if (isFp8Type(otype)) {

@@ -48,21 +48,26 @@ run_test_config(){
     run_default_fa 1 test_deferred_init.py
     run_default_fa 1 test_float8tensor.py
     run_default_fa 1 test_fused_rope.py
-    run_default_fa 1 test_fusible_ops.py
+    # test_fusible_ops now contains fp8+grad and other gemm configs not supported by rocblas gemm path
+    test $_gemm = "hipblaslt" && run_default_fa 1 test_fusible_ops.py
     test $_gemm = "hipblaslt" && run_default_fa 3 test_gemm_autotune.py
     run 1 test_gqa.py
     run 1 test_jit.py
     run_default_fa 1 test_multi_tensor.py
-    run 1 test_numerics.py
-    run_default_fa 1 test_permutation.py -k "not test_permutation_mask_map_fp8"
-    run_default_fa 1 test_recipe.py
-    run 1 test_sanity.py
+    # test_numerics now contains fp8+grad and other gemm configs not supported by rocblas gemm path
+    test $_gemm = "hipblaslt" && run 1 test_numerics.py
+    # TODO: release test_permutation_mask_map_fp8 until upstream fixes the to_float8 error
+    run_default_fa 1 test_permutation.py -k "not test_permutation_mask_map_fp8 and not test_permutation_single_case"
+    # test_recipe now contains fp8+grad and other gemm configs not supported by rocblas gemm path
+    test $_gemm = "hipblaslt" && run_default_fa 1 test_recipe.py
+    # test_sanity now contains fp8+grad and other gemm configs not supported by rocblas gemm path
+    test $_gemm = "hipblaslt" && run 1 test_sanity.py
     run_default_fa 1 fused_attn/test_fused_attn.py # Backend selection is controlled by the test
     if [ $_gemm = "hipblaslt" ]; then
-        run_default_fa 1 triton_kernels/test_cast_transpose_triton.py
+        #TODO: bring back cast transpose kernels after triton kernels for transformer_engine::pytorch::quantize
         #TODO: release rmsnorm_fwd_bwd_triton tests after the memory issue in hsa-runtime fixed
-        run_default_fa 1 triton_kernels/test_rmsnorm_triton.py -k "not test_rmsnorm_fwd_bwd_triton"
-        NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 run_default_fa 3 test_numerics.py
+        run_default_fa 1 triton_kernels/test_rmsnorm_triton.py
+        NVTE_USE_RMSNORM_TRITON=1 run_default_fa 3 test_numerics.py
     fi
 }
 

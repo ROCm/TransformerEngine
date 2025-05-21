@@ -383,7 +383,7 @@ INSTANTIATE_TEST_SUITE_P(
   NormTestSuite,
   ::testing::Combine(
 #ifdef __HIP_PLATFORM_AMD__
-    ::testing::Values(false),
+    ::testing::Values(false), //ROCm does not support cudnn
 #else
     ::testing::Values(true, false),
 #endif
