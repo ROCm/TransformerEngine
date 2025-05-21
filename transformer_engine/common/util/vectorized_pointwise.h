@@ -162,7 +162,7 @@ class VectorizedStorer : public VectorizedAccessor<DType, nvec, aligned> {
   }
 };
 
-constexpr int unary_kernel_threads = 512;
+constexpr int unary_kernel_threads = 1024;
 
 template <int nvec, bool aligned, typename ComputeType, typename Param,
           ComputeType (*OP)(ComputeType, const Param &), typename InputType, typename OutputType>
