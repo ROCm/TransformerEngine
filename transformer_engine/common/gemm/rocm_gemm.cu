@@ -1044,6 +1044,9 @@ void hipblaslt_gemm(const Tensor *inputA,
   void *B = inputB->data.dptr;
   void *B_scale_inverse = inputB->scale_inv.dptr;
   void *D = outputD->data.dptr;
+  //Added for fp8 gelu_fusion support
+  // void *D_amax = outputD->amax.dptr;
+  // void *D_scale = outputD->scale.dptr;
   void *bias_ptr = inputBias->data.dptr;
   const bool bias = bias_ptr != nullptr;
   void *pre_gelu_out = outputPreGelu->data.dptr;
@@ -1054,6 +1057,7 @@ void hipblaslt_gemm(const Tensor *inputA,
   const hipDataType B_type = get_hipblaslt_dtype(inputB->data.dtype);
   const hipDataType D_type = get_hipblaslt_dtype(outputD->data.dtype);
   const hipDataType bias_type = get_hipblaslt_dtype(inputBias->data.dtype);
+  // const hipblasltDatatype_t aux_type = get_hipblaslt_dtype(outputPreGelu->data.dtype);
 
   NVTE_CHECK(!is_fp8_dtype(inputA->data.dtype) || A_scale_inverse != nullptr,
              "FP8 input to GEMM requires inverse of scale!");
@@ -1128,11 +1132,32 @@ void hipblaslt_gemm(const Tensor *inputA,
                                                      HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER,
                                                      &B_scale_inverse,
                                                      sizeof(B_scale_inverse)));
+    //Added for fp8 gelu_fusion support
+
+    // if (is_fp8_dtype(outputD->data.dtype)) {
+    //   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
+    //                                                     HIPBLASLT_MATMUL_DESC_AMAX_D_POINTER,
+    //                                                     &D_amax,
+    //                                                     sizeof(D_amax)));
+
+    //   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
+    //                                                     HIPBLASLT_MATMUL_DESC_D_SCALE_POINTER ,
+    //                                                     &D_scale,
+    //                                                     sizeof(D_scale)));
+    // }
     if (bias) {
       NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
                                                        HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE,
                                                        &bias_type, sizeof(bias_type)));
     }
+    //Added for fp8 gelu_fusion support
+    
+    // if (gelu){
+    //   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
+    //                                                     HIPBLASLT_MATMUL_DESC_EPILOGUE_AUX_DATA_TYPE,
+    //                                                     &aux_type,
+    //                                                     sizeof(aux_type)));
+    // }
   }
 
   if (bias && gelu) {
