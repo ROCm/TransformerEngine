@@ -1160,7 +1160,7 @@ void fused_attn_ck_bwd_impl(
 
 using namespace transformer_engine::fused_attn_rocm;
 void fused_attn_ck_fwd_qkvpacked(
-  size_t b, size_t h, size_t max_seqlen, size_t d_qk, size_t d_v,
+  size_t b, size_t h, size_t max_seqlen, size_t d,
   bool is_training, float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,
@@ -1179,9 +1179,9 @@ void fused_attn_ck_fwd_qkvpacked(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride_to_k = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
-    stride_to_k = nvte_dtype_size(QKV_type) * h * d_qk;
+    stride_to_k = nvte_dtype_size(QKV_type) * h * d;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
-    stride_to_k = nvte_dtype_size(QKV_type) * d_qk;
+    stride_to_k = nvte_dtype_size(QKV_type) * d;
   }
   void *devPtrQ = static_cast<void *>(devPtrQKV);
   void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride_to_k);
@@ -1259,7 +1259,7 @@ void fused_attn_ck_fwd_qkvpacked(
   // in qkvpacked layouts, o is of the same shape as q shape
 
   fused_attn_ck_fwd_impl(
-    b, h, h, max_seqlen, max_seqlen, d_qk, d_v, bias_b, bias_h,
+    b, h, h, max_seqlen, max_seqlen, d, d, bias_b, bias_h,
     pad_between_seqs, qkv_storage_bytes/3, qkv_storage_bytes/3, qkv_storage_bytes/3, qkv_storage_bytes/3,
     is_training, attn_scale, dropout, 
     qkv_layout,
@@ -1299,7 +1299,7 @@ void fused_attn_ck_fwd_qkvpacked(
 }
 
 void fused_attn_ck_bwd_qkvpacked(
-  size_t b, size_t h, size_t max_seqlen, size_t d_qk, size_t d_v,
+  size_t b, size_t h, size_t max_seqlen, size_t d,
   float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,
@@ -1321,9 +1321,9 @@ void fused_attn_ck_bwd_qkvpacked(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride_to_k = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
-    stride_to_k = nvte_dtype_size(QKV_type) * h * d_qk;
+    stride_to_k = nvte_dtype_size(QKV_type) * h * d;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
-    stride_to_k = nvte_dtype_size(QKV_type) * d_qk;
+    stride_to_k = nvte_dtype_size(QKV_type) * d;
   }
   void *devPtrQ = static_cast<void *>(devPtrQKV);
   void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride_to_k);
@@ -1370,7 +1370,7 @@ void fused_attn_ck_bwd_qkvpacked(
   // do has the same shape as o
 
   fused_attn_ck_bwd_impl(
-    b, h, h, max_seqlen, max_seqlen, d_qk, d_v, bias_b, bias_h,
+    b, h, h, max_seqlen, max_seqlen, d, d, bias_b, bias_h,
     pad_between_seqs, qkv_storage_bytes/3, qkv_storage_bytes/3, qkv_storage_bytes/3, qkv_storage_bytes/3,
     attn_scale, dropout, 
     qkv_layout,
@@ -1409,7 +1409,7 @@ void fused_attn_ck_bwd_qkvpacked(
 }
 
 void fused_attn_ck_fwd_kvpacked(
-  size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d_qk, size_t d_v,
+  size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
   bool is_training, float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,
@@ -1431,9 +1431,9 @@ void fused_attn_ck_fwd_kvpacked(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
-    stride = nvte_dtype_size(QKV_type)*h_kv*d_qk;
+    stride = nvte_dtype_size(QKV_type)*h_kv*d;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
-    stride = nvte_dtype_size(QKV_type) * d_qk;
+    stride = nvte_dtype_size(QKV_type) * d;
   }
   void *devPtrK = devPtrKV;
   void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrKV) + stride);
@@ -1516,7 +1516,7 @@ void fused_attn_ck_fwd_kvpacked(
   // in kvpacked layout, o will have the same shape as q
 
   fused_attn_ck_fwd_impl(
-    b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, bias_b, bias_h,
+    b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, d, bias_b, bias_h,
     pad_between_seqs, q_storage_bytes, kv_storage_bytes/2, kv_storage_bytes/2, q_storage_bytes, 
     is_training, attn_scale, dropout, 
     qkv_layout,
@@ -1552,7 +1552,7 @@ void fused_attn_ck_fwd_kvpacked(
 }
 
 void fused_attn_ck_bwd_kvpacked(
-  size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d_qk, size_t d_v,
+  size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
   float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,
@@ -1576,9 +1576,9 @@ void fused_attn_ck_bwd_kvpacked(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
-    stride = nvte_dtype_size(QKV_type) * h_kv * d_qk;
+    stride = nvte_dtype_size(QKV_type) * h_kv * d;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
-    stride = nvte_dtype_size(QKV_type) * d_qk;
+    stride = nvte_dtype_size(QKV_type) * d;
   }
   void *devPtrK = devPtrKV;
   void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrKV) + stride);
@@ -1627,7 +1627,7 @@ void fused_attn_ck_bwd_kvpacked(
   // in kvpacked layout, o will have the same shape as q
 
   fused_attn_ck_bwd_impl(
-    b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, bias_b, bias_h,
+    b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, d, bias_b, bias_h,
     pad_between_seqs, q_storage_bytes, kv_storage_bytes/2, kv_storage_bytes/2, q_storage_bytes, 
     attn_scale, dropout, 
     qkv_layout,
