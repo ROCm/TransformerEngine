@@ -63,6 +63,7 @@ hipError_t ck_attn_fwd(
 hipError_t ck_attn_varlen_fwd(
   DType dtype,
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v,
+  uint64_t max_tokens_q,
   const void* q_ptr, 
   uint64_t stride_h_q, uint64_t stride_s_q,
   const void* k_ptr, 
@@ -126,6 +127,7 @@ hipError_t ck_attn_bwd(
 hipError_t ck_attn_varlen_bwd(  
   DType dtype,
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v,
+  uint64_t max_tokens_q,
   const void* q_ptr, 
   uint64_t stride_h_q, uint64_t stride_s_q,
   const void* k_ptr, 

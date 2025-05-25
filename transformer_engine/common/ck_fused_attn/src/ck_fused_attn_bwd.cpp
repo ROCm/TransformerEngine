@@ -769,6 +769,7 @@ hipError_t ck_attn_bwd(
 hipError_t ck_attn_varlen_bwd(  
   DType dtype,
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v,
+  uint64_t max_tokens_q,
   const void* q_ptr, 
   uint64_t stride_h_q, uint64_t stride_s_q,
   const void* k_ptr, 
@@ -860,7 +861,7 @@ hipError_t ck_attn_varlen_bwd(
     const ck_tile::index_t stride_dv = stride_s_dv;
     const ck_tile::index_t stride_dk_expanded = stride_s_dk_expanded;
     const ck_tile::index_t stride_dv_expanded = stride_s_dv_expanded;
-    const ck_tile::index_t stride_dq_acc = h*d_qk; //dq_acc of shape (nsplits, T, H, D_qk)
+    const ck_tile::index_t stride_dq_acc = d_qk; //dq_acc of shape (nsplits, H, max_tokens_q, D_qk)
     // bias not used in THD qkv layout
     const ck_tile::index_t stride_dbias = 0;
     // setup nhead_stride_* arguments
@@ -872,8 +873,8 @@ hipError_t ck_attn_varlen_bwd(
     const ck_tile::index_t nhead_stride_o = stride_h_o;
     const ck_tile::index_t nhead_stride_randval = 0;
     const ck_tile::index_t nhead_stride_do = stride_h_do;
-    // lsed and lse of shape [h, b*s_q] with effective data in first total_seqlen_q places
-    const ck_tile::index_t nhead_stride_lsed = batch*max_seqlen_q;
+    // use packed lse
+    const ck_tile::index_t nhead_stride_lsed = max_tokens_q;
     const ck_tile::index_t nhead_stride_dq = stride_h_dq;
     const ck_tile::index_t nhead_stride_dk = stride_h_dk;
     const ck_tile::index_t nhead_stride_dv = stride_h_dv;
@@ -881,7 +882,7 @@ hipError_t ck_attn_varlen_bwd(
     const ck_tile::index_t nhead_stride_dv_expanded = stride_h_dv_expanded;
     // bias not used in THD qkv layout
     const ck_tile::index_t nhead_stride_dbias = 0;
-    const ck_tile::index_t nhead_stride_dq_acc = d_qk; //dq_acc of shape (nsplits, T, H, D_qk)
+    const ck_tile::index_t nhead_stride_dq_acc = max_tokens_q*d_qk; //dq_acc of shape (nsplits, H, max_tokens_q, D_qk)
     // setup batch_stride_* arguments
     const ck_tile::index_t batch_stride_q = 0;
     const ck_tile::index_t batch_stride_k = 0;
@@ -900,7 +901,7 @@ hipError_t ck_attn_varlen_bwd(
     // bias not used in THD qkv layout
     const ck_tile::index_t batch_stride_dbias = 0;
     const ck_tile::index_t batch_stride_dq_acc = 0; //dq_acc of shape (nsplits, T, H, D)
-    const ck_tile::index_t split_stride_dq_acc = batch*max_seqlen_q*h*d_qk;
+    const ck_tile::index_t split_stride_dq_acc = max_tokens_q*h*d_qk;
 
     return fmha_bwd_args{q_ptr,
                          k_ptr,
