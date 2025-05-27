@@ -186,6 +186,13 @@ at::Tensor swiglu_ts(at::Tensor input, at::Tensor scale, at::Tensor amax, at::Te
   return output;
 }
 
+at::Tensor dswiglu_ts(at::Tensor grad, at::Tensor input, int64_t otype) {
+  transformer_engine::DType otype_arg = reverse_map_dtype(otype);
+  
+  at::Tensor output = dswiglu(grad, input, otype_arg);
+  return output;
+}
+
 at::Tensor qgelu_ts(at::Tensor input, at::Tensor scale, at::Tensor amax, at::Tensor scale_inv,
                     int64_t fp8_tensor, int64_t otype) {
   transformer_engine::DType otype_arg = reverse_map_dtype(otype);
@@ -406,6 +413,7 @@ TORCH_LIBRARY(tex_ts, m) {
   m.def("geglu_ts", &geglu_ts);
   m.def("reglu_ts", &reglu_ts);
   m.def("swiglu_ts", &swiglu_ts);
+  m.def("dswiglu_ts", &dswiglu_ts);
   m.def("qgelu_ts", &qgelu_ts);
   m.def("srelu_ts", &srelu_ts);
   m.def("te_gemm_ts", &te_gemm_ts);
