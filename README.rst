@@ -30,25 +30,36 @@ Installation
 
 Execute the following commands to install ROCm Transformer Engine from source on AMDGPUs:
 
+Known Issue with ROCm 6.4 PyTorch Release
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Using the docker image ``rocm/pytorch:rocm6.4_ubuntu22.04_py3.10_pytorch_release_2.5.1`` triggers a failure in the unit-test ``tests/pytorch/test_permutation.py``  
+
+Rebuilding PyTorch at commit ``f929e0d602a71aa393ca2e6097674b210bdf321c`` resolves the issue.
+
+Re-install PyTorch
+^^^^^^^^^^^^^^^^^^
+
 .. code-block:: bash
 
-  # 1) Remove the pre-installed wheels (optional, but avoids confusion)
-  pip uninstall -y torch torchvision torchaudio
+  # Remove the pre-installed pytorch
+  pip uninstall -y torch
 
-  # 2) Clone PyTorch and check out the working commit
+  # Clone PyTorch and check out the working commit
   export PYTORCH_COMMIT=f929e0d602a71aa393ca2e6097674b210bdf321c
   git clone https://github.com/pytorch/pytorch
   cd pytorch
-  git fetch --depth 1 origin ${PYTORCH_COMMIT}
+  git fetch origin ${PYTORCH_COMMIT}
   git checkout -q ${PYTORCH_COMMIT}
+  git submodule update --recursive --init
 
-  # 3) Sync third-party submodules at matching revisions
-  git submodule update --recursive --init --depth 1
-
-  # 4) Build for ROCm and install (skip C++/Python tests to save time)
+  # Build and install
   ./tools/amd_build/build_amd.py
   BUILD_TEST=0 python3 setup.py install
-  
+
+Install TE
+^^^^^^^^^^^^^^^^^^
+
 .. code-block:: bash
 
   # Clone TE repo and submodules
