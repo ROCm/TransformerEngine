@@ -32,6 +32,25 @@ Execute the following commands to install ROCm Transformer Engine from source on
 
 .. code-block:: bash
 
+  # 1) Remove the pre-installed wheels (optional, but avoids confusion)
+  pip uninstall -y torch torchvision torchaudio
+
+  # 2) Clone PyTorch and check out the working commit
+  export PYTORCH_COMMIT=f929e0d602a71aa393ca2e6097674b210bdf321c
+  git clone https://github.com/pytorch/pytorch
+  cd pytorch
+  git fetch --depth 1 origin ${PYTORCH_COMMIT}
+  git checkout -q ${PYTORCH_COMMIT}
+
+  # 3) Sync third-party submodules at matching revisions
+  git submodule update --recursive --init --depth 1
+
+  # 4) Build for ROCm and install (skip C++/Python tests to save time)
+  ./tools/amd_build/build_amd.py
+  BUILD_TEST=0 python3 setup.py install
+  
+.. code-block:: bash
+
   # Clone TE repo and submodules
   git clone --recursive https://github.com/ROCm/TransformerEngine.git
   
