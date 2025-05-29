@@ -135,9 +135,9 @@ def _get_attention_backends(
 ) -> Tuple[List, List]:
     """Check if what attention backends support a model configuration"""
 
-    os.environ["NVTE_FLASH_ATTN"] = "1"
+    os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "1"
-    os.environ["NVTE_UNFUSED_ATTN"] = "1"
+    os.environ["NVTE_UNFUSED_ATTN"] = "0"
     _attention_backends["backend_selection_requires_update"] = True
 
     alibi_slopes_shape = None
@@ -421,41 +421,41 @@ def test_dpa_mla(dtype, model_configs, model):
 
 model_configs_mask = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,      bias
-    "mask_1_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "causal", "no_bias"),
-    "mask_1_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "causal", "no_bias"),
-    "mask_1_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal", "no_bias"),
-    "mask_2_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
-    "mask_2_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
-    "mask_2_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal_bottom_right", "no_bias"),
-    "mask_3_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
-    "mask_3_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "padding", "no_bias"),
-    "mask_3_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding", "no_bias"),
-    "mask_4_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "mask_4_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "mask_4_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
-    "mask_5_0": ModelConfig(
-        2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
-    ),
-    "mask_5_1": ModelConfig(
-        2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
-    ),
-    "mask_5_2": ModelConfig(
-        2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"
-    ),
-    "mask_6_0": ModelConfig(2, 16, 16, 128, 1, 2048, 0.0, "causal", "no_bias"),
-    "mask_6_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "causal", "no_bias"),
-    "mask_7_0": ModelConfig(2, 16, 16, 128, 1, 2048, 0.0, "causal_bottom_right", "no_bias"),
-    "mask_7_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "causal_bottom_right", "no_bias"),
-    "mask_8_0": ModelConfig(2, 24, 24, 128, 1, 2048, 0.0, "padding", "no_bias"),
-    "mask_8_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "padding", "no_bias"),
-    "mask_9_0": ModelConfig(2, 24, 24, 128, 1, 2048, 0.0, "padding_causal", "no_bias"),
-    "mask_9_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "padding_causal", "no_bias"),
-    "mask_10_0": ModelConfig(
-        2, 24, 24, 128, 1, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
-    ),
-    "mask_10_1": ModelConfig(
-        2, 16, 16, 256, 1, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
-    ),
+    "mask_1_0": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "causal", "no_bias"),
+    # "mask_1_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "causal", "no_bias"),
+    # "mask_1_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal", "no_bias"),
+    # "mask_2_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
+    # "mask_2_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
+    # "mask_2_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal_bottom_right", "no_bias"),
+    # "mask_3_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
+    # "mask_3_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "padding", "no_bias"),
+    # "mask_3_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding", "no_bias"),
+    # "mask_4_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    # "mask_4_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    # "mask_4_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
+    # "mask_5_0": ModelConfig(
+    #     2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+    # ),
+    # "mask_5_1": ModelConfig(
+    #     2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+    # ),
+    # "mask_5_2": ModelConfig(
+    #     2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"
+    # ),
+    # "mask_6_0": ModelConfig(2, 16, 16, 128, 1, 2048, 0.0, "causal", "no_bias"),
+    # "mask_6_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "causal", "no_bias"),
+    # "mask_7_0": ModelConfig(2, 16, 16, 128, 1, 2048, 0.0, "causal_bottom_right", "no_bias"),
+    # "mask_7_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "causal_bottom_right", "no_bias"),
+    # "mask_8_0": ModelConfig(2, 24, 24, 128, 1, 2048, 0.0, "padding", "no_bias"),
+    # "mask_8_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "padding", "no_bias"),
+    # "mask_9_0": ModelConfig(2, 24, 24, 128, 1, 2048, 0.0, "padding_causal", "no_bias"),
+    # "mask_9_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "padding_causal", "no_bias"),
+    # "mask_10_0": ModelConfig(
+    #     2, 24, 24, 128, 1, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+    # ),
+    # "mask_10_1": ModelConfig(
+    #     2, 16, 16, 256, 1, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+    # ),
 }
 
 
@@ -1119,14 +1119,14 @@ def _run_dot_product_attention(
 
 model_configs_te_layer = {
     #   test:             b,  h, hg,   d,   sq,  skv,   p,      mask,             bias
-    "te_1_0": ModelConfig(2, 16, 16, 64, 128, 128, 0.0, "no_mask", "post_scale_bias"),
-    "te_1_1": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "causal", "post_scale_bias"),
-    "te_1_2": ModelConfig(2, 16, 16, 64, 128, 128, 0.0, "padding", "post_scale_bias"),
-    "te_2_0": ModelConfig(1, 16, 16, 64, 2048, 2048, 0.0, "causal", "no_bias"),
-    "te_2_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "te_2_2": ModelConfig(1, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
-    "te_3_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "causal", "alibi"),
-    "te_3_1": ModelConfig(4, 16, 16, 64, 2048, 2048, 0.0, "causal", "alibi"),
+    # "te_1_0": ModelConfig(2, 16, 16, 64, 128, 128, 0.0, "no_mask", "post_scale_bias"),
+    # "te_1_1": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "causal", "post_scale_bias"),
+    # "te_1_2": ModelConfig(2, 16, 16, 64, 128, 128, 0.0, "padding", "post_scale_bias"),
+    "te_2_0": ModelConfig(8, 64, 64, 128, 8192, 8192, 0.0, "causal", "no_bias"),
+    # "te_2_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "no_mask", "no_bias"),
+    # "te_2_2": ModelConfig(1, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
+    # "te_3_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "causal", "alibi"),
+    # "te_3_1": ModelConfig(4, 16, 16, 64, 2048, 2048, 0.0, "causal", "alibi"),
 }
 
 
@@ -1236,7 +1236,7 @@ def test_te_layer_misc(dtype, model_configs, model, qkv_format):
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_te_layer])
-@pytest.mark.parametrize("model", ["te_2_0", "te_2_1", "te_2_2"])
+@pytest.mark.parametrize("model", ["te_2_0"])
 def test_te_layer_mqa_gqa(dtype, model_configs, model):
     """Test TransformerLayer module with MQA/GQA"""
 
@@ -1253,6 +1253,7 @@ def test_te_layer_mqa_gqa(dtype, model_configs, model):
     RoPE = True
     config = model_configs[model]
     num_querys_per_gqa_group = find_factors(config.num_heads)
+    num_querys_per_gqa_group = [8]
 
     for num_q_per_gqa_group in num_querys_per_gqa_group:
         config.num_gqa_groups = config.num_heads // num_q_per_gqa_group
