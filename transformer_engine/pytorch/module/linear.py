@@ -7,8 +7,8 @@ from functools import reduce
 from operator import mul as multiply_op
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
-import torch
 import functools
+import torch
 
 import transformer_engine_torch as tex
 
@@ -707,9 +707,10 @@ class _Linear(torch.autograd.Function):
                     else:
                         wgrad, grad_bias, _ = general_gemm_wgrad(inputmat_total, grad_output)
 
-                        # Deallocate input tensor
-                        clear_tensor_data(inputmat_total)
-                        clear_tensor_data(inputmat_t_total)
+                if not ctx.wgrad_store.split_bw():
+                    # Deallocate input tensor
+                    clear_tensor_data(inputmat_total)
+                    clear_tensor_data(inputmat_t_total)
 
                 if ctx.ub_bulk_wgrad:
                     dgrad = ub_obj_wgrad.get_ubuf_output(0)
@@ -1222,7 +1223,7 @@ class Linear(TransformerEngineBaseModule):
         if not self.wgrad_store.split_bw():
             return
         with torch.cuda.nvtx.range("_Linear_wgrad"):
-            (wgrad, grad_bias_, _, _), _ = self.wgrad_store.pop()
+            (wgrad, grad_bias, _), _ = self.wgrad_store.pop()
             if not self.fuse_wgrad_accumulation:
                 unfused_weights = [getattr(self, name) for name in self.weight_names]
                 weight_tensor = _noop_cat(unfused_weights)
@@ -1231,6 +1232,6 @@ class Linear(TransformerEngineBaseModule):
             if self.use_bias:
                 bias_tensor = _noop_cat([getattr(self, name) for name in self.bias_names])
                 if bias_tensor.grad is None:
-                    bias_tensor.grad = grad_bias_.to(bias_tensor.dtype)
-            del grad_bias_
+                    bias_tensor.grad = grad_bias.to(bias_tensor.dtype)
+            del grad_bias
             del wgrad
