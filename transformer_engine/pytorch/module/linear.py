@@ -781,7 +781,7 @@ class Linear(TransformerEngineBaseModule):
             self.in_features = divide(self.in_features, self.tp_size)
 
         self.sequence_parallel = (self.tp_size > 1) and sequence_parallel
-        self.wgrad_store = WeightGradStore(split_bw, ub_bulk_wgrad)
+        self.wgrad_store = WeightGradStore(split_bw)
 
         # Initialize params in FP8
         with_fp8_params = FP8GlobalStateManager.with_fp8_parameters()
