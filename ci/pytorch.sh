@@ -66,7 +66,7 @@ run_test_config(){
     if [ $_gemm = "hipblaslt" ]; then
         #TODO: bring back cast transpose kernels after triton kernels for transformer_engine::pytorch::quantize
         #TODO: release rmsnorm_fwd_bwd_triton tests after the memory issue in hsa-runtime fixed
-        run_default_fa 1 triton_kernels/test_rmsnorm_triton.py
+        run_default_fa 1 triton_kernels/test_rmsnorm_triton.py -k "not test_rmsnorm_fwd_bwd_triton"
         NVTE_USE_RMSNORM_TRITON=1 run_default_fa 3 test_numerics.py
     fi
 }
