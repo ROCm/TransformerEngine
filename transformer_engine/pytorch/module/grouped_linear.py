@@ -430,6 +430,7 @@ class _GroupedLinear(torch.autograd.Function):
                             accumulate=accumulate_wgrad_into_param_main_grad,
                         )
                 else:
+                    # WGRAD
                     grouped_gemm_wgrad = functools.partial(
                         grouped_gemm,
                         out_dtype=ctx.activation_dtype,
@@ -439,15 +440,15 @@ class _GroupedLinear(torch.autograd.Function):
                         use_bias=ctx.use_bias,
                         accumulate=accumulate_wgrad_into_param_main_grad,
                     )
-                    # WGRAD
                     if ctx.wgrad_store.split_bw():
                         ctx.wgrad_store.put([inputmats, grad_output_mats, wgrad_list], grouped_gemm_wgrad)
                     else:
                         _, grad_biases, _ = grouped_gemm_wgrad(inputmats, grad_output_mats, wgrad_list)
 
-                        # Deallocate input tensor
-                        clear_tensor_data(*inputmats)
-                        clear_tensor_data(*inputmats_t)
+                if not ctx.wgrad_store.split_bw():
+                    # Deallocate input tensor
+                    clear_tensor_data(*inputmats)
+                    clear_tensor_data(*inputmats_t)
 
                 def handle_custom_ddp_from_mcore(w, wgrad):
                     if w.requires_grad:
@@ -776,6 +777,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 self.fp8,
                 self.fp8_calibration,
                 self.fp8_meta,
+                self.wgrad_store,
                 self.fuse_wgrad_accumulation,
                 is_cpu_offload_enabled(),
                 self.sequence_parallel,
@@ -812,7 +814,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         if not self.wgrad_store.split_bw():
             return
         with torch.cuda.nvtx.range("_GroupedLinear_wgrad"):
-            (_, grad_biases_, _), tensor_list = self.wgrad_store.pop()
+            (_, grad_biases, _), tensor_list = self.wgrad_store.pop()
             wgrad_list = tensor_list[2]
             if not self.fuse_wgrad_accumulation:
                 for i in range(self.num_gemms):
@@ -823,5 +825,5 @@ class GroupedLinear(TransformerEngineBaseModule):
                 for i in range(self.num_gemms):
                     bias_param = getattr(self, f"bias{i}")
                     if bias_param.grad is None:
-                        bias_param.grad = grad_biases_[i].to(bias_param.dtype)
-            del grad_biases_
+                        bias_param.grad = grad_biases[i].to(bias_param.dtype)
+            del grad_biases

@@ -1279,7 +1279,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if not self.wgrad_store.split_bw():
             return
         with torch.cuda.nvtx.range("_LayerNormLinear_wgrad"):
-            (wgrad, grad_bias_, _, _), _ = self.wgrad_store.pop()
+            (wgrad, grad_bias, _), _ = self.wgrad_store.pop()
             if not self.fuse_wgrad_accumulation:
                 unfused_weights = [getattr(self, name) for name in self.weight_names]
                 weight_tensor = _noop_cat(unfused_weights)
@@ -1288,6 +1288,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
             if self.use_bias:
                 bias_tensor = _noop_cat([getattr(self, name) for name in self.bias_names])
                 if bias_tensor.grad is None:
-                    bias_tensor.grad = grad_bias_.to(bias_tensor.dtype)
-            del grad_bias_
+                    bias_tensor.grad = grad_bias.to(bias_tensor.dtype)
+            del grad_bias
             del wgrad
