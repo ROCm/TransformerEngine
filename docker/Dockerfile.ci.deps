@@ -50,7 +50,6 @@ ARG JAX_COMMIT="58e53c664a30015eac865d57b4987827460d67b0"
 ARG XLA_COMMIT="fe4a1ec96238c765874ebc76f17184df0d2c7b1f"
 RUN git clone https://github.com/ROCm/xla.git && cd xla && git fetch origin ${XLA_COMMIT} && git checkout -q ${XLA_COMMIT} && cd .. \
     && git clone https://github.com/ROCm/jax.git && cd jax && git fetch origin ${JAX_COMMIT} && git checkout -q ${JAX_COMMIT} \
-    && echo 'run:rocm_plugin --copt=-DLEGACY_HIPBLAS_DIRECT' > .bazelrc.user \
     && python3 ./build/build.py --enable_rocm \
 									 --build_gpu_plugin \
 									 --use_clang=true \
