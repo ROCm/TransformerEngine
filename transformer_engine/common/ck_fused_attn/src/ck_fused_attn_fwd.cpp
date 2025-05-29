@@ -99,6 +99,7 @@ void log_fwd_config(const char* func_name,
     std::cout<<"window_size_left: "<<fmha_args.window_size_left<<std::endl;
     std::cout<<"window_size_right: "<<fmha_args.window_size_right<<std::endl;
     std::cout<<"mask_type: "<<fmha_args.mask_type<<std::endl;
+    std::cout<<"min_seqlen_q: "<<fmha_args.min_seqlen_q<<std::endl;
     std::cout<<"p_drop: "<<fmha_args.p_drop<<std::endl;
     std::cout<<"s_randval: "<<fmha_args.s_randval<<std::endl;
     std::cout<<"dropout_seed_ptr: "<<std::get<0>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset))<<std::endl;
@@ -239,6 +240,7 @@ hipError_t ck_attn_fwd(
                          left,
                          right,
                          static_cast<ck_tile::index_t>(mask_type),
+                         0, // min_seqlen_q
                          p_drop,
                          false,
                          std::pair<const void*, const void*>{philox_seed_ptr, philox_offset_ptr}};
@@ -394,6 +396,7 @@ hipError_t ck_attn_varlen_fwd(
                          left,
                          right,
                          static_cast<ck_tile::index_t>(mask_type),
+                         0, // min_seqlen_q
                          p_drop,
                          false,
                          std::pair<const void*, const void*>{philox_seed_ptr, philox_offset_ptr}};
