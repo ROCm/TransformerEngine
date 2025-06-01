@@ -19,16 +19,25 @@ from ..fp8 import get_fp8_te_dtype
 from ..utils import get_default_init_method
 
 if IS_HIP_EXTENSION:
-    from ..triton_kernels.rmsnorm_triton import te_rmsnorm_fwd_noalloc_triton, te_rmsnorm_fwd_inf_triton, te_rmsnorm_bwd_triton
+    from ..triton_kernels.layernorm import (
+        te_layernorm_fwd_noalloc_triton, 
+        te_layernorm_bwd_triton
+    )
+    from ..triton_kernels.rmsnorm import (
+        te_rmsnorm_fwd_noalloc_triton, 
+        te_rmsnorm_fwd_inf_triton, 
+        te_rmsnorm_bwd_triton
+    )
 
 def _get_normalization_func(
     normalization: str, fp8_output: bool, is_grad_enabled: bool, forward: bool
 ):
     use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
+    use_layernorm_triton = bool( int(os.environ.get('NVTE_USE_LAYERNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
     fwd_normalization_funcs = {
         ("LayerNorm", True, True): tex.layernorm_fwd_fp8,
         ("LayerNorm", True, False): tex.layernorm_fwd_fp8_inf,
-        ("LayerNorm", False, True): tex.layernorm_fwd_noalloc,
+        ("LayerNorm", False, True): te_layernorm_fwd_noalloc_triton if use_layernorm_triton else tex.layernorm_fwd_noalloc,
         ("LayerNorm", False, False): tex.layernorm_fwd_inf,
         ("RMSNorm", True, True): tex.rmsnorm_fwd_fp8,
         ("RMSNorm", True, False): tex.rmsnorm_fwd_fp8_inf,
@@ -36,7 +45,7 @@ def _get_normalization_func(
         ("RMSNorm", False, False): te_rmsnorm_fwd_inf_triton if use_rmsnorm_triton else tex.rmsnorm_fwd_inf,
     }
     bwd_normalization_funcs = {
-        "LayerNorm": tex.layernorm_bwd,
+        "LayerNorm": te_layernorm_bwd_triton if use_layernorm_triton else tex.layernorm_bwd,
         "RMSNorm": te_rmsnorm_bwd_triton if use_rmsnorm_triton else tex.rmsnorm_bwd,
     }
 

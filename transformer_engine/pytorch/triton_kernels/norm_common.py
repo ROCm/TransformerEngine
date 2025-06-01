@@ -1,24 +1,9 @@
 # Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
-
 import os
-
 import torch
 import triton
-
-
-def is_cdna4():
-    return triton.runtime.driver.active.get_current_target().arch == "gfx950"
-
-
-e4m3_type = torch.float8_e4m3fn if is_cdna4() else torch.float8_e4m3fnuz
-e5m2_type = torch.float8_e5m2 if is_cdna4() else torch.float8_e5m2fnuz
-
-
-def IS_FP8(dtype):
-    return (dtype == e4m3_type) or (dtype == e5m2_type)
-
 
 def get_ln_sm_margin(sm_margin_type):
     assert sm_margin_type in {"FWD", "BWD", "INF"}

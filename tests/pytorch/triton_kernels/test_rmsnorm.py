@@ -6,30 +6,28 @@ import pytest
 import torch
 
 from transformer_engine.pytorch import cpp_extensions as tex
-from transformer_engine.pytorch.triton_kernels.norm_common_triton import (
+from transformer_engine.pytorch.triton_kernels.common import torch_dtype_to_te_dtype
+from transformer_engine.pytorch.triton_kernels.norm_common import (
     get_fwd_ln_sm_margin,
     get_bwd_ln_sm_margin,
     get_inf_ln_sm_margin,
 )
-from transformer_engine.pytorch.triton_kernels.rmsnorm_triton import (
+from transformer_engine.pytorch.triton_kernels.rmsnorm import (
     te_rmsnorm_fwd_fp8_noalloc_triton,
     te_rmsnorm_fwd_noalloc_triton,
     te_rmsnorm_fwd_inf_triton,
     te_rmsnorm_bwd_triton,
 )
-
-from test_common_triton import (
+from test_common import (
     input_dtypes_str,
     output_dtypes_str,
     str_to_torch_dtype,
     skip_in_dtype_gt_out_dtype,
     skip_mixed_16bit_float_types,
     fill_uniform,
-    get_te_dtype,
     get_tolerances,
     compare_results,
 )
-
 
 test_shapes = [
     (2048, 4096),
@@ -86,7 +84,7 @@ def test_rmsnorm_fwd_bwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma):
     amax_tensor = torch.zeros(0, dtype=torch.float32, device='cuda')
     scale_inv_tensor = torch.empty(0, dtype=torch.float32, device='cuda')
     ln_out_hipified = torch.empty(M, N, dtype=out_dtype, device='cuda')
-    ln_out_hipified, rsigma_hipified = tex.rmsnorm_fwd_fp8_noalloc(input_tensor, gamma_tensor, epsilon, scale_tensor, ln_out_hipified, amax_tensor, scale_inv_tensor, get_te_dtype(out_dtype), fwd_ln_sm_margin, zero_centered_gamma)
+    ln_out_hipified, rsigma_hipified = tex.rmsnorm_fwd_fp8_noalloc(input_tensor, gamma_tensor, epsilon, scale_tensor, ln_out_hipified, amax_tensor, scale_inv_tensor, torch_dtype_to_te_dtype(out_dtype), fwd_ln_sm_margin, zero_centered_gamma)
 
     # assert on ln_out
     ln_out_atol = 1e-8

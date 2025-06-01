@@ -12,7 +12,7 @@ import torch
 
 import transformer_engine_torch as tex
 from ..constants import TE_DType
-from ..triton_kernels.cast_transpose_triton import te_cast_transpose_noop_triton, te_cast_transpose_dbias_triton
+from ..triton_kernels.cast_transpose import te_cast_transpose_noop_triton, te_cast_transpose_dbias_triton
 from ._common import canonicalize_fp8_scales, empty_tensor
 
 

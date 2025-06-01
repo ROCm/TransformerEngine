@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -18,6 +20,13 @@ from ...cpp_extensions import (
     layernorm_fwd_fp8_inf,
     layernorm_fwd_inf,
 )
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+if IS_HIP_EXTENSION:
+  from ...triton_kernels.layernorm import (
+      te_layernorm_fwd_fp8_triton,
+      te_layernorm_fwd_triton, 
+      te_layernorm_bwd_triton, 
+  )
 from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
 from ...tensor import Float8Tensor, QuantizedTensor
 from ...utils import (
@@ -223,6 +232,7 @@ class LayerNorm(BasicOperation):
         if with_fp8_output:
             output_fp8_meta = next_op.get_fp8_meta("input")
 
+        use_layernorm_triton = bool( int(os.environ.get('NVTE_USE_LAYERNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
         # Compute layer norm
         y = None
         means = None
@@ -243,8 +253,10 @@ class LayerNorm(BasicOperation):
                 self.zero_centered_gamma,
             )
             if requires_grad:
-                data, means, rstdevs = layernorm_fwd_fp8(*args)
+                layernorm_fwd_fp8_func = te_layernorm_fwd_fp8_triton if use_layernorm_triton else layernorm_fwd_fp8
+                data, means, rstdevs = layernorm_fwd_fp8_func(*args)
             else:
+                # triton kernel integrated in layernorm_fwd_fp8_inf
                 data = layernorm_fwd_fp8_inf(*args)
             y = Float8Tensor(
                 data=data,
@@ -264,7 +276,8 @@ class LayerNorm(BasicOperation):
                 self.zero_centered_gamma,
             )
             if requires_grad:
-                y, means, rstdevs = layernorm_fwd(*args)
+                layernorm_fwd_func = te_layernorm_fwd_triton if use_layernorm_triton else layernorm_fwd
+                y, means, rstdevs = layernorm_fwd_func(*args)
             else:
                 y = layernorm_fwd_inf(*args)
 
@@ -303,7 +316,9 @@ class LayerNorm(BasicOperation):
             dy = dy.dequantize()
 
         # Compute layer norm backward pass
-        dx, dw, db = layernorm_bwd(
+        use_layernorm_triton = bool( int(os.environ.get('NVTE_USE_LAYERNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
+        layernorm_bwd_func = te_layernorm_bwd_triton if use_layernorm_triton else layernorm_bwd
+        dx, dw, db = layernorm_bwd_func(
             dy,
             x,
             means,

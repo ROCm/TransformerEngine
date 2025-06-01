@@ -10,11 +10,10 @@ import torch
 
 from transformer_engine.pytorch import cpp_extensions as tex
 
-from transformer_engine.pytorch.triton_kernels.norm_common_triton import (
-    e4m3_type,
-    e5m2_type,
+from transformer_engine.pytorch.triton_kernels.common import (
+    torch_e4m3_type,
+    torch_e5m2_type,
 )
-
 
 # Mimics behavior of `fillUniform` from `tests/cpp/test_common.cu`.
 
@@ -38,7 +37,7 @@ def get_tolerances(dtype):
         return 1e-5, 1e-3
     elif dtype == torch.bfloat16:
         return 1e-5, 1e-2
-    elif dtype == e4m3_type or dtype == e5m2_type:
+    elif dtype == torch_e4m3_type or dtype == torch_e5m2_type:
         # TODO: different tolerances for FNUZ and OCP
         return 1e-2, 1e-2
     else:
@@ -108,18 +107,6 @@ def compare_results(provider, actual, expected, atol, rtol, msg):
         te_compare_results(actual, expected, atol, rtol, msg)
 
 
-# Convert PyTorch type to TE type.
-def get_te_dtype(dtype):
-    return {
-        torch.float32: tex.DType.kFloat32,
-        torch.float16: tex.DType.kFloat16,
-        torch.bfloat16: tex.DType.kBFloat16,
-        torch.float8_e4m3fnuz: tex.DType.kFloat8E4M3,
-        torch.float8_e4m3fn: tex.DType.kFloat8E4M3,
-        torch.float8_e5m2fnuz: tex.DType.kFloat8E5M2,
-        torch.float8_e5m2: tex.DType.kFloat8E5M2,
-    }[dtype]
-
 
 # Get size in bytes of a given PyTorch type.
 def sizeof(dtype):
@@ -142,13 +129,11 @@ def str_to_torch_dtype(dtype_str):
         "fp16": torch.float16,
         "bf16": torch.bfloat16,
         "fp32": torch.float32,
-        "fp8e4": e4m3_type,
-        "fp8e5": e5m2_type,
+        "fp8e4": torch_e4m3_type,
+        "fp8e5": torch_e5m2_type,
     }[dtype_str[1:] if dtype_str[0] in {"i", "o"} else dtype_str]
 
-
 # Common pytest skip conditions:
-
 
 def skip_in_dtype_gt_out_dtype(in_dtype, out_dtype):
     if sizeof(in_dtype) < sizeof(out_dtype):

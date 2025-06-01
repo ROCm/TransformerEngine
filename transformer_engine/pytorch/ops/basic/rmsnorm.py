@@ -22,7 +22,7 @@ from ...cpp_extensions import (
 )
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 if IS_HIP_EXTENSION:
-  from ...triton_kernels.rmsnorm_triton import te_rmsnorm_bwd_triton, te_rmsnorm_fwd_triton, te_rmsnorm_fwd_inf_triton
+  from ...triton_kernels.rmsnorm import te_rmsnorm_bwd_triton, te_rmsnorm_fwd_triton, te_rmsnorm_fwd_inf_triton
 from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
 from ...tensor import Float8Tensor, QuantizedTensor
 from ...utils import (

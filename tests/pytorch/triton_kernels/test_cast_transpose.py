@@ -3,19 +3,16 @@
 
 import pytest
 import torch
-from transformer_engine.pytorch.triton_kernels.cast_transpose_triton import (
-    te_cast_transpose_noop_triton, te_cast_transpose_dbias_triton )
+from transformer_engine.pytorch.triton_kernels.cast_transpose import (
+    te_cast_transpose_noop_triton, 
+    te_cast_transpose_dbias_triton 
+)
 from transformer_engine.pytorch.cpp_extensions import (
-    fused_cast_transpose_noop, fused_cast_transpose_bgrad )
+    fused_cast_transpose_noop, 
+    fused_cast_transpose_bgrad 
+)
 import transformer_engine_torch as tex
-
-def get_tolerances(in_dtype):
-    if in_dtype == torch.float32:
-        return 1e-6, 5e-6
-    elif in_dtype == torch.float16:
-        return 1e-5, 1e-3
-    elif in_dtype == torch.bfloat16:
-        return 1e-5, 1e-2
+from test_common import get_tolerances
 
 @pytest.mark.parametrize("M, N", 
                          [(2048, 12288),

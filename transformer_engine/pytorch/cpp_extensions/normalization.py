@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -9,7 +11,16 @@ import torch
 
 import transformer_engine_torch as tex
 from ._common import canonicalize_fp8_scales
-
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+if IS_HIP_EXTENSION:
+  import os
+  from ..triton_kernels.layernorm import (
+      te_layernorm_fwd_fp8_noalloc_triton,
+      te_layernorm_fwd_fp8_triton, 
+      te_layernorm_fwd_fp8_inf_ts_triton,
+      te_layernorm_fwd_inf_ts_triton,
+  )
+  from ..triton_kernels.common import te_dtype_to_enum_value
 
 __all__ = [
     "layernorm_fwd_fp8",
@@ -47,9 +58,11 @@ def layernorm_fwd_fp8(
         fp8_meta_index=fp8_tensor,
     )
 
+    use_layernorm_triton = bool( int(os.environ.get('NVTE_USE_LAYERNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
     # Launch kernel
     if ln_out is not None:
-        return tex.layernorm_fwd_fp8_noalloc(
+        layernorm_fwd_fp8_noalloc_func = te_layernorm_fwd_fp8_noalloc_triton if use_layernorm_triton else tex.layernorm_fwd_fp8_noalloc
+        return layernorm_fwd_fp8_noalloc_func(
             inp,
             weight,
             bias,
@@ -63,7 +76,8 @@ def layernorm_fwd_fp8(
             zero_centered_gamma,
             **fp8_scales_offsets,
         )
-    return tex.layernorm_fwd_fp8(
+    layernorm_fwd_fp8_func = te_layernorm_fwd_fp8_triton if use_layernorm_triton else tex.layernorm_fwd_fp8
+    return layernorm_fwd_fp8_func(
         inp,
         weight,
         bias,
@@ -108,8 +122,10 @@ def layernorm_fwd_fp8_inf(
         allow_multiple_offsets=False,
     )
 
+    use_layernorm_triton = bool( int(os.environ.get('NVTE_USE_LAYERNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
+    layernorm_fwd_fp8_inf_ts_func = te_layernorm_fwd_fp8_inf_ts_triton if use_layernorm_triton else torch.ops.tex_ts.layernorm_fwd_fp8_inf_ts
     # Launch kernel
-    ret = torch.ops.tex_ts.layernorm_fwd_fp8_inf_ts(
+    ret = layernorm_fwd_fp8_inf_ts_func(
         inp,
         weight,
         bias,
@@ -118,7 +134,7 @@ def layernorm_fwd_fp8_inf(
         fp8_scales["amax"],
         fp8_scales["scale_inv"],
         fp8_scales_offsets["scale_offset"],
-        otype,
+        te_dtype_to_enum_value(otype),
         sm_margin,
         zero_centered_gamma,
     )
@@ -134,7 +150,9 @@ def layernorm_fwd_inf(
     zero_centered_gamma: bool,
 ) -> torch.Tensor:
     """LayerNorm with FP8 output"""
-    return torch.ops.tex_ts.layernorm_fwd_inf_ts(
+    use_layernorm_triton = bool( int(os.environ.get('NVTE_USE_LAYERNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
+    layernorm_fwd_inf_ts_func = te_layernorm_fwd_inf_ts_triton if use_layernorm_triton else torch.ops.tex_ts.layernorm_fwd_inf_ts
+    return layernorm_fwd_inf_ts_func(
         inp,
         weight,
         bias,
