@@ -54,7 +54,8 @@ from ..tensor import QuantizedTensor
 from ..cpu_offload import is_cpu_offload_enabled
 
 if IS_HIP_EXTENSION:
-    from ..triton_kernels.rmsnorm_triton import te_rmsnorm_bwd_triton
+    from ..triton_kernels.layernorm import te_layernorm_bwd_triton
+    from ..triton_kernels.rmsnorm import te_rmsnorm_bwd_triton
 
 __all__ = ["LayerNormLinear"]
 
@@ -694,7 +695,9 @@ class _LayerNormLinear(torch.autograd.Function):
             dgamma = None
             dbeta = None
             if ctx.normalization == "LayerNorm":
-                dgrad, dgamma, dbeta = tex.layernorm_bwd(
+                use_layernorm_triton = bool( int(os.environ.get('NVTE_USE_LAYERNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
+                layernorm_bwd_func = te_layernorm_bwd_triton if use_layernorm_triton else tex.layernorm_bwd
+                dgrad, dgamma, dbeta = layernorm_bwd_func(
                     dgrad,
                     inputmat,
                     mu,
