@@ -155,7 +155,7 @@ class FusedAttnHelper:
                 assert nqkv == 3
             case NVTE_QKV_Layout.NVTE_BSHD_BS2HD | NVTE_QKV_Layout.NVTE_THD_T2HD:
                 *q_batch_shape, q_max_seqlen, attn_heads, qk_head_dim = q_aval.shape
-                *kv_batch_shape, kv_max_seqlen, nkv, num_gqa_groups, v_head_dim = v_aval.shape
+                *kv_batch_shape, kv_max_seqlen, nkv, num_gqa_groups, v_head_dim = k_aval.shape
                 assert nkv == 2
             case NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD | NVTE_QKV_Layout.NVTE_THD_THD_THD:
                 *q_batch_shape, q_max_seqlen, attn_heads, qk_head_dim = q_aval.shape
