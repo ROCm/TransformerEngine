@@ -6,6 +6,7 @@
 #include <type_traits>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/transformer_engine.h>
+#include <map>
 #ifdef USE_HIPBLASLT
 #include <unistd.h>
 #include <vector>
