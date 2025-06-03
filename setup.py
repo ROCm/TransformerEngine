@@ -150,12 +150,13 @@ if __name__ == "__main__":
         assert bool(
             int(os.getenv("NVTE_RELEASE_BUILD", "0"))
         ), "NVTE_RELEASE_BUILD env must be set for metapackage build."
+        te_cuda_vers = "rocm" if rocm_build() else "cu12"
         ext_modules = []
         cmdclass = {}
         package_data = {}
         include_package_data = False
         setup_requires = []
-        install_requires = ([f"transformer_engine_cu12=={__version__}"],)
+        install_requires = ([f"transformer_engine_{te_cuda_vers}=={__version__}"],)
         extras_require = {
             "pytorch": [f"transformer_engine_torch=={__version__}"],
             "jax": [f"transformer_engine_jax=={__version__}"],

@@ -207,7 +207,8 @@ def get_build_ext(extension_cls: Type[setuptools.Extension]):
         def build_extensions(self):
             # BuildExtensions from PyTorch and PaddlePaddle already handle CUDA files correctly
             # so we don't need to modify their compiler. Only the pybind11 build_ext needs to be fixed.
-            if "pytorch" not in get_frameworks() and "paddle" not in get_frameworks():
+            ext_names = [ext.name for ext in self.extensions]
+            if "transformer_engine_pytorch" not in ext_names and "transformer_engine_paddle" not in ext_names:
                 # Ensure at least an empty list of flags for 'cxx' and 'nvcc' when
                 # extra_compile_args is a dict.
                 for ext in self.extensions:
