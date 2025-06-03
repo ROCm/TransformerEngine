@@ -52,6 +52,7 @@ The default installation above supports both rocBlas and hipBlasLt in GEMM compu
   export NVTE_USE_HIPBLASLT=1
   export NVTE_USE_ROCBLAS=1
 
+If neither of the aforementioned environment variables are set or both of them are set, then both backends are built. If only one of these environment variables is set, then the other backend is not built.
 When both GEMM backends are supported the aforementioned env variables can be used to select which backend to use. If none is set hipBlasLt is used by default. The hipBlasLt backed has not yet supported all the GEMM configurations in the pytorch unit tests. 
 
 Test
