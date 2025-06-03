@@ -163,6 +163,7 @@ class VectorizedStorer : public VectorizedAccessor<DType, nvec, aligned> {
 };
 
 constexpr int unary_kernel_threads = 1024;
+constexpr int activation_kernel_threads = 128;
 
 template <int nvec, bool aligned, typename ComputeType, typename Param,
           ComputeType (*OP)(ComputeType, const Param &), typename InputType, typename OutputType>
@@ -480,7 +481,7 @@ template <int nvec, bool aligned, typename ComputeType, typename Param,
           ComputeType (*Activation)(const ComputeType, const Param &),
           ComputeType (*Dactivation)(const ComputeType, const Param &), typename InputType,
           typename OutputType>
-__launch_bounds__(unary_kernel_threads) __global__
+__launch_bounds__(activation_kernel_threads) __global__
     void dgated_act_kernel(const InputType *grad, const InputType *input, OutputType *output,
                            const size_t m, const size_t n, const Param p,
                            const size_t num_aligned_elements) {
@@ -524,7 +525,7 @@ void DGatedActivationKernelLauncher(const InputType *grad, const InputType *inpu
                                     const Param &p, cudaStream_t stream) {
   if (m != 0 && n != 0) {
     size_t num_aligned_elements = get_num_aligned_elements(grad, n, nvec, sizeof(InputType));
-    constexpr size_t threads = unary_kernel_threads;
+    constexpr size_t threads = activation_kernel_threads;
     size_t num_blocks = DIVUP(num_aligned_elements * m, threads);
     constexpr size_t max_blocks = 65535;
     num_blocks = std::min(num_blocks, max_blocks);
