@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
@@ -31,7 +31,7 @@ bool is_ck_backend_supported(
 }  // namespace fused_attn_rocm
 
 void fused_attn_ck_fwd_qkvpacked(
-  size_t b, size_t h, size_t max_seqlen, size_t d_qk, size_t d_v,
+  size_t b, size_t h, size_t max_seqlen, size_t d,
   bool is_training, float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,
@@ -44,7 +44,7 @@ void fused_attn_ck_fwd_qkvpacked(
   cudaStream_t stream);
 
 void fused_attn_ck_bwd_qkvpacked(
-  size_t b, size_t h, size_t max_seqlen, size_t d_qk, size_t d_v,
+  size_t b, size_t h, size_t max_seqlen, size_t d,
   float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,
@@ -60,7 +60,7 @@ void fused_attn_ck_bwd_qkvpacked(
   cudaStream_t stream);
 
 void fused_attn_ck_fwd_kvpacked(
-  size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d_qk, size_t d_v,
+  size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
   bool is_training, float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,
@@ -75,7 +75,7 @@ void fused_attn_ck_fwd_kvpacked(
   cudaStream_t stream);
 
 void fused_attn_ck_bwd_kvpacked(
-  size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d_qk, size_t d_v,
+  size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
   float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,

@@ -247,6 +247,7 @@ hipError_t ck_attn_fwd(
 hipError_t ck_attn_varlen_fwd(
   DType dtype,
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v,
+  uint64_t max_tokens_q,
   const void* q_ptr, 
   uint64_t stride_h_q, uint64_t stride_s_q,
   const void* k_ptr, 
@@ -318,8 +319,8 @@ hipError_t ck_attn_varlen_fwd(
     const ck_tile::index_t nhead_stride_bias = 0;
     //TODO: randval never used, can we remove it
     const ck_tile::index_t nhead_stride_randval = 0;
-    // In CK group mode, softmax_lse can be of shape [h, b*s_q] with effective data in first total_seqlen_q places
-    const ck_tile::index_t nhead_stride_lse = batch*max_seqlen_q;
+    // use packed lse of shape [h, max_tokens_q]
+    const ck_tile::index_t nhead_stride_lse = max_tokens_q;
     const ck_tile::index_t nhead_stride_o = stride_h_o;
     // setup batch_stride_* arguments
     const ck_tile::index_t batch_stride_q = 0;
