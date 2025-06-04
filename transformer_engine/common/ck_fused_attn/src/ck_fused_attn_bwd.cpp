@@ -799,6 +799,9 @@ hipError_t ck_attn_varlen_bwd(
   uint64_t stride_h_dv, uint64_t stride_s_dv,
   void* lse_workspace_ptr,
   bool deterministic,
+  bool uses_bwd_v3,
+  bool is_v3_atomic_fp32,
+  int how_v3_bf16_cvt,
   hipStream_t stream){
 
   bool has_dropout = (dropout_probability > 0.f);
@@ -841,9 +844,9 @@ hipError_t ck_attn_varlen_bwd(
     fmha_bwd_traits{hdim_q,    hdim_v,    data_type_str, is_group_mode,
                     mask_type, bias_enum::no_bias, has_dbias,     has_dropout, 
                     s_randval, deterministic, 
-                    false, // use_bwd_v3
-                    true, // is_v3_atomic_fp32
-                    1 //how_v3_bf16_cvt 0:RTNE; 1:RTNA; 2:RTZ
+                    uses_bwd_v3, // use_bwd_v3
+                    is_v3_atomic_fp32, // is_v3_atomic_fp32
+                    how_v3_bf16_cvt //how_v3_bf16_cvt 0:RTNE; 1:RTNA; 2:RTZ
                     };
 
   auto fmha_args = [&]() {

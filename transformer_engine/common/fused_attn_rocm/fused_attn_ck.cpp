@@ -1092,7 +1092,9 @@ void fused_attn_ck_bwd_impl(
         v_stride[1], (is_ragged? v_stride[2] : std::min(v_stride[0], v_stride[2])), //dV and V share the same stride
         lse_workspace, // softmax_lsed
         deterministic,
-        // bwd_v3 not supported for THD
+        nvte_ck_uses_bwd_v3,
+        nvte_ck_is_v3_atomic_fp32,
+        nvte_ck_how_v3_bf16_cvt,
         stream));
     // add padding for dq, dk, dv
     // dq, dk, dv of same shape as q, k, v
@@ -1136,7 +1138,9 @@ void fused_attn_ck_bwd_impl(
         v_stride[1], v_stride[2], //dV and V share the same stride
         lse_workspace, // softmax_lsed
         deterministic,
-        // bwd_v3 not supported for THD
+        nvte_ck_uses_bwd_v3,
+        nvte_ck_is_v3_atomic_fp32,
+        nvte_ck_how_v3_bf16_cvt,
         stream));
   }else{
     using ck_fused_attn::ck_attn_bwd;
