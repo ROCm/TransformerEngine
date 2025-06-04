@@ -9,18 +9,16 @@ import subprocess
 import pandas as pd
 import numpy as np
 import torch
-import nvtx
 import transformer_engine
 from transformer_engine_torch import NVTE_Fused_Attn_Backend
 
-# Ensure the working directory includes TransformerEngine in sys.path
-cwd = os.getcwd()
-if "TransformerEngine" in cwd:
-    index = cwd.index("TransformerEngine") + len("TransformerEngine")
-    trimmed_path = cwd[:index]
-    sys.path.append(trimmed_path)
+# Add test_fused_attn to the sys path 
+tests_path = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "../../tests/pytorch/fused_attn")
+)
+sys.path.append(tests_path)
 
-from tests.pytorch.fused_attn.test_fused_attn import (
+from test_fused_attn import (
     ModelConfig,
     _get_attention_backends,
     _run_dot_product_attention,
@@ -174,7 +172,8 @@ def parse_results(model, df_times, filename_flash_attn, filename_fused_attn, fil
 
 
 def main():
-    
+    cwd = os.path.dirname(__file__)
+    os.chdir(cwd)
     output_dir = "profiler_outputs/"
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
