@@ -92,7 +92,7 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
         mu_hipified,
         rsigma_hipified,
         gamma,
-        sm_margin,
+        get_bwd_ln_sm_margin(),
         zero_centered_gamma,
     )
 

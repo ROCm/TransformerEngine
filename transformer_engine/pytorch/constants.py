@@ -27,7 +27,8 @@ TE_DType = {
 }
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 if IS_HIP_EXTENSION:
-    TE_DType.update({torch.float8_e4m3fnuz: tex.DType.kFloat8E4M3, torch.float8_e5m2fnuz: tex.DType.kFloat8E5M2})
+    TE_DType.update({torch.float8_e4m3fnuz: tex.DType.kFloat8E4M3, 
+                     torch.float8_e5m2fnuz: tex.DType.kFloat8E5M2})
 
 AttnMaskTypes = (
     "no_mask",

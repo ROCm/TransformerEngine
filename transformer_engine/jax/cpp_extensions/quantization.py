@@ -11,9 +11,9 @@ import jax.numpy as jnp
 from jax import dtypes
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
-#TODO: wait for jax v0.5.0 migration
 from .misc import is_hip_extension
-if is_hip_extension():
+#TODO: wait for jax v0.5.0 migration
+if is_hip_extension() and jax.__version__ < "0.5.0":
     from jax.extend import ffi
 else:
     from jax import ffi

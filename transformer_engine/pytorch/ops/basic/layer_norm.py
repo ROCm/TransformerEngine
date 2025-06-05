@@ -226,9 +226,7 @@ class LayerNorm(BasicOperation):
 
         # Compute layer norm
         sm_margin = self._sm_margins["forward" if requires_grad else "inference"]
-        use_layernorm_triton = bool( int(os.environ.get('NVTE_USE_LAYERNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
-        layernorm_fwd_func = te_layernorm_fwd_triton if use_layernorm_triton else layernorm_fwd
-        y, means, rstdevs = layernorm_fwd_func(
+        y, means, rstdevs = layernorm_fwd(
             x,
             w,
             b,

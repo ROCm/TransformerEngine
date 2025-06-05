@@ -53,6 +53,10 @@
 #include "c10/util/ArrayRef.h"
 #include "common/util/logging.h"
 
+#ifdef USE_ROCM
+// to borrow te_fp8_fnuz()
+#include "common/amd_detail/hip_float8.h"
+#endif // USE_ROCM
 namespace transformer_engine::pytorch {
 
 // Each tensor here is shape (N, ) holding all scaling
@@ -162,28 +166,6 @@ std::vector<size_t> getTensorShape(at::Tensor t);
 
 transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
                                                       const std::string& fp8_recipe);
-#ifdef USE_ROCM
-// code reference from transformer_engine/common/amd_detail/hip_float8.h
-// currently only MI300X uses funz
-static bool _te_check_fp8_fnuz() {
-  hipDeviceProp_t prop;
-  hipError_t res= hipGetDeviceProperties(&prop, 0);
-  if (res != hipSuccess) {
-    //TODO: better error out system
-    throw std::runtime_error(transformer_engine::concat_strings(
-      "hipGetDeviceProperties failed with error: ", hipGetErrorString(res)));
-  }
-  return prop.major == 9 && prop.minor == 4;
-}
-
-static inline bool te_fp8_fnuz() {
-  static std::optional<bool> use_fnuz;
-  if (!use_fnuz.has_value()) {
-    use_fnuz = _te_check_fp8_fnuz();
-  }
-  return use_fnuz.value();
-}
-#endif // USE_ROCM
 
 inline at::ScalarType GetATenDType(transformer_engine::DType t) {
   switch (t) {

@@ -17,9 +17,9 @@ from jax import dtypes, lax
 from jax.interpreters import mlir
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
-#TODO: wait for jax v0.5.0 migration
 from .misc import is_hip_extension
-if is_hip_extension():
+#TODO: wait for jax v0.5.0 migration
+if is_hip_extension() and jax.__version__ < "0.5.0":
     from jax.extend import ffi
 else:
     from jax import ffi
@@ -309,8 +309,11 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             else:
                 raise ValueError(f"Unsupported {backend=}")
         else:
-            if backend in [NVTE_Fused_Attn_Backend.NVTE_AOTriton, NVTE_Fused_Attn_Backend.NVTE_CK]:
+            if backend == NVTE_Fused_Attn_Backend.NVTE_AOTriton:
                 softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, config.max_segments_per_seq)
+                softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
+            elif backend == NVTE_Fused_Attn_Backend.NVTE_CK:
+                softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
                 softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
             else:
                 raise ValueError(f"Unsupported {backend=}")

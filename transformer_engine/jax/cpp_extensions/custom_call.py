@@ -14,7 +14,7 @@ from transformer_engine import transformer_engine_jax
 from .misc import is_hip_extension
 from .misc import is_ffi_enabled
 #wait for the jax v0.5.0 migration
-if is_hip_extension():
+if is_hip_extension() and jax.__version__<"0.5.0":
     import jax.extend as jex
 else:
     import jax as jex
