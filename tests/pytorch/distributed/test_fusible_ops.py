@@ -27,12 +27,10 @@ from transformer_engine.pytorch.tensor import QuantizedTensor
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops._common import is_float8_tensor
-from transformer_engine.pytorch.utils import is_bf16_compatible
+from transformer_engine.pytorch.utils import is_bf16_compatible, is_fp8_fnuz
 import transformer_engine_torch as tex
 
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
-
-# Check what quantization schemes are supported
+# Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 quantization_list: list[Optional[str]] = [None]
@@ -690,7 +688,7 @@ def _test_fp8_scale_update(
         """Expected absmax and FP8 scale"""
         amax = ref.abs().amax()
         max_val = {
-            "forward": 448.0 if not IS_HIP_EXTENSION else 240.0,
+            "forward": 448.0 if not is_fp8_fnuz() else 240.0,
             "backward": 57344.0,
         }[stage]
         scale = (max_val / amax) / (2**margin)

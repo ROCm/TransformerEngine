@@ -6,28 +6,10 @@ import torch
 import transformer_engine_torch as tex
 import triton
 import triton.language as tl
-
-def is_fp8_dtype(dtype):
-    return dtype in (tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2)
-
-def get_triton_dtype(dtype: tex.DType):
-    if dtype == tex.DType.kFloat8E4M3:
-        return tl.float8e4b8
-    if dtype == tex.DType.kFloat8E5M2:
-        return tl.float8e5b16
-
-def get_te_dtype(dtype):
-    if dtype == torch.float8_e4m3fnuz:
-        return tex.DType.kFloat8E4M3
-    if dtype == torch.float8_e5m2fnuz:
-        return tex.DType.kFloat8E5M2
-
-def get_fp8_max(dtype: tex.DType):
-    if dtype == tex.DType.kFloat8E4M3:
-        return 240.0
-    if dtype == tex.DType.kFloat8E5M2:
-        return 57344.0
-
+from .common import (
+    te_dtype_to_triton_dtype,
+    get_fp8_max,
+)
 ##########################################
 #### cast_transpose
 ##########################################
@@ -89,7 +71,7 @@ def te_cast_transpose_noop_triton(input, noop_flag, input_scale, cast_out, trans
 
     M, N = input.shape
     
-    tl_dtype = get_triton_dtype(otype)
+    tl_dtype = te_dtype_to_triton_dtype(otype)
     
     assert trans_out.size(0) == N and trans_out.size(1) == M
 
@@ -205,7 +187,7 @@ def te_cast_transpose_dbias_triton(input, input_scale, amax_out, scale_inv_out, 
     assert input.stride(0) == 1 or input.stride(1) == 1
     assert trans_out.stride(0) == 1 or trans_out.stride(1) == 1
 
-    tl_dtype = get_triton_dtype(otype)
+    tl_dtype = te_dtype_to_triton_dtype(otype)
     
     grid = lambda META: (triton.cdiv(M, META['BLOCK_M']) * triton.cdiv(N, META['BLOCK_N']),)
     _transpose_triton_dbias[grid](input, triton.reinterpret(cast_out, tl_dtype), triton.reinterpret(trans_out, tl_dtype), input.stride(0), input.stride(1), trans_out.stride(0), trans_out.stride(1), M, N, input_scale, amax_out, scale_inv_out, partial_dbias, get_fp8_max(otype))

@@ -7,26 +7,7 @@ import triton
 import triton.language as tl
 from itertools import product
 import transformer_engine_torch as tex
-
-
-def get_num_sms(sm_margin=None):
-    num_sms = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
-    if sm_margin is not None and sm_margin > 0:
-        num_sms = max(num_sms - sm_margin, 1)
-    return num_sms
-
-
-def num_programs(x, sm_margin=None):
-    return min(x.shape[0], get_num_sms(sm_margin))
-
-
-def block_size(x):
-    return min(65536 // x.element_size(), triton.next_power_of_2(x.shape[1]))
-
-
-def use_blocked(x):
-    return x.shape[1] > block_size(x)
-
+from .norm_common import num_programs, block_size, use_blocked
 
 def dg_tmp_rows(x, sm_margin=None):
     return x.shape[0] if use_blocked(x) else num_programs(x, sm_margin)
@@ -133,41 +114,7 @@ def _rmsnorm_fwd_triton(output_ptr, input_ptr, g_ptr, rsigma_ptr, input_row_stri
             output_ptrs = tl.multiple_of(output_ptrs, (16, ))
             tl.store(output_ptrs, rms_norm.to(output_ptr.type.element_ty), mask=mask)
 
-# TODO: current not supporting fp8 types
-def get_torch_dtype(te_dtype):
-    if te_dtype == tex.DType.kByte:
-        return torch.uint8
-    if te_dtype == tex.DType.kInt32:
-        return torch.int32
-    if te_dtype == tex.DType.kFloat32:
-        return torch.float32
-    if te_dtype == tex.DType.kFloat16:
-        return torch.half
-    if te_dtype == tex.DType.kBFloat16:
-        return torch.bfloat16
-
-# TODO: currently fp8 output not needed 
-# since currently output types align with input type or weight type in all TE pytorch usage
-def te_rmsnorm_fwd_triton(input, weight, eps, ln_out, quantizer, te_otype, sm_margin, zero_centered_gamma):
-    M, N = input.shape
-    rsigma = torch.empty((M, ), device='cuda', dtype=torch.float32)
-    blk_size = block_size(input)
-    USE_BLOCKED = use_blocked(input)
-    NUM_PRGMS = num_programs(input, sm_margin)
-
-    grid = lambda meta: (NUM_PRGMS, )
-
-    otype = get_torch_dtype(te_otype)
-
-    #allocate ln_out if ln_out is none
-    if ln_out is None:
-        ln_out = torch.empty((M, N), device='cuda', dtype=otype)
-
-    #encode the otype if ln_out is of different dtype
-    ln_out = ln_out.view(otype)
-    _rmsnorm_fwd_triton[grid](ln_out, input, weight, rsigma, input.stride(0), ln_out.stride(0), M, N, eps, zero_centered_gamma, blk_size, USE_BLOCKED, NUM_PRGMS)
-
-    return ln_out, None, rsigma
+#TODO: refactor te_rmsnorm_fwd_triton to match transformer_engine::pytorch::rmsnorm_fwd 
 
 @triton.jit
 def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, dg_ptr, input_row_stride, output_row_stride,
@@ -321,10 +268,9 @@ def _rmsnorm_bwd_dg_reduce_triton(dg_in_ptr, dg_out_ptr, dg_in_stride, n_rows, n
     sum_dg = tl.sum(acc, axis=0)
     tl.store(dg_out_ptr + cols, sum_dg.to(dg_out_ptr.type.element_ty), mask=cols < n_cols)
 
-
-# may take non-contiguous inputs
-# see rmsnorm_bwd in transformer_engine/pytorch/csrc/extensions/normalization.cu
+# triton drop-in replacement for transformer_engine::pytorch::rmsnorm_bwd
 def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma):
+    # may take non-contiguous inputs
     dz_ = dz.contiguous()
     x_ = x.contiguous()
     rsigma_ = rsigma.contiguous()

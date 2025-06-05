@@ -12,16 +12,11 @@ import torch
 import triton
 import triton.language as tl
 
+from transformer_engine.pytorch.utils import is_fp8_fnuz
 from transformer_engine_torch import DType as TE_DType
 
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
-if IS_HIP_EXTENSION:
-    e5m2_data_type = tl.float8e5b16
-    e4m3_data_type = tl.float8e4b8
-else:
-    e5m2_data_type = tl.float8e5
-    e4m3_data_type = tl.float8e4nv
 IS_HIP_EXTENSION = triton.language.constexpr(IS_HIP_EXTENSION)
 
 @triton.jit
@@ -222,13 +217,10 @@ def _unpermute_kernel(
     FP8_DTYPE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    if FP8_DTYPE == "e5m2":
+    if ((FP8_DTYPE == tl.float8e5b16 or FP8_DTYPE == tl.float8e5) or
+        (FP8_DTYPE == tl.float8e4b8 or FP8_DTYPE == tl.float8e4nv)):
         compute_type = tl.float16
-        data_type = e5m2_data_type
-        pytorch_tensor_dtype = tl.uint8
-    elif FP8_DTYPE == "e4m3":
-        compute_type = tl.float16
-        data_type = e4m3_data_type
+        data_type = FP8_DTYPE
         pytorch_tensor_dtype = tl.uint8
     else:
         # NOTE: Using fp32 accumulate precision on ROCm.
@@ -275,9 +267,9 @@ def unpermute_with_mask_map(
 ):
     # pylint: disable=missing-function-docstring
     if fp8_dtype == TE_DType.kFloat8E5M2:
-        fp8_dtype = "e5m2"
+        fp8_dtype = tl.float8e5b16 if is_fp8_fnuz() else tl.float8e5
     elif fp8_dtype == TE_DType.kFloat8E4M3:
-        fp8_dtype = "e4m3"
+        fp8_dtype = tl.float8e4b8 if is_fp8_fnuz() else tl.float8e4nv
     else:
         fp8_dtype = None
     output = torch.empty((num_tokens, hidden_size), dtype=inp.dtype, device="cuda")
@@ -340,13 +332,10 @@ def _unpermute_bwd_with_probs_kernel(
     FP8_DTYPE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    if FP8_DTYPE == "e5m2":
+    if ((FP8_DTYPE == tl.float8e5b16 or FP8_DTYPE == tl.float8e5) or
+        (FP8_DTYPE == tl.float8e4b8 or FP8_DTYPE == tl.float8e4nv)):
         compute_type = tl.float16
-        data_type = e5m2_data_type
-        pytorch_tensor_dtype = tl.uint8
-    elif FP8_DTYPE == "e4m3":
-        compute_type = tl.float16
-        data_type = e4m3_data_type
+        data_type = FP8_DTYPE
         pytorch_tensor_dtype = tl.uint8
     else:
         compute_type = fwd_output_grad_ptr.dtype.element_ty
@@ -408,9 +397,9 @@ def unpermute_with_mask_map_bwd_with_probs(
 ):
     # pylint: disable=missing-function-docstring
     if fp8_dtype == TE_DType.kFloat8E5M2:
-        fp8_dtype = "e5m2"
+        fp8_dtype = tl.float8e5b16 if is_fp8_fnuz() else tl.float8e5
     elif fp8_dtype == TE_DType.kFloat8E4M3:
-        fp8_dtype = "e4m3"
+        fp8_dtype = tl.float8e4b8 if is_fp8_fnuz() else tl.float8e4nv
     else:
         fp8_dtype = None
     act_grad = torch.empty(

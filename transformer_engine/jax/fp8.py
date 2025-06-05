@@ -16,7 +16,7 @@ import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
 from flax.linen import fp8_ops
 
-from .util import is_hip_extension, jnp_float8_e4m3_type, jnp_float8_e5m2_type
+from .util import is_hip_extension, is_fp8_fnuz
 
 from transformer_engine.transformer_engine_jax import DType
 
@@ -34,15 +34,17 @@ _is_fp8_available = None
 _reason_for_no_fp8 = ""
 Collection = Union[Dict, FrozenDict]
 
+get_jnp_float8_e4m3_type = lambda: jnp.float8_e4m3fnuz if is_fp8_fnuz() else jnp.float8_e4m3fn
+get_jnp_float8_e5m2_type = lambda: jnp.float8_e5m2fnuz if is_fp8_fnuz() else jnp.float8_e5m2
 
 def _check_fp8_support(gpu_id) -> Tuple[bool, str]:
     """Return if fp8 support is available"""
+    gpu_arch = get_device_compute_capability(gpu_id)
     if is_hip_extension():
-        if get_device_compute_capability(gpu_id) == 94:
+        if gpu_arch in [94, 95]:
             return True, ""
         else:
-            return False, "Only MI300 machines support fp8"
-    gpu_arch = get_device_compute_capability(gpu_id)
+            return False, "Device arch gfx94x or gfx95x required for FP8 execution."
     if gpu_arch >= 90:  # hopper and above
         return True, ""
     if gpu_arch < 89:  # pre-ada
@@ -74,6 +76,8 @@ def is_fp8_available(gpu_id=None) -> Tuple[bool, str]:
 
 
 def _format2dtypes(format_: Format):
+    jnp_float8_e4m3_type = get_jnp_float8_e4m3_type()
+    jnp_float8_e5m2_type = get_jnp_float8_e5m2_type()
     if format_ == Format.E4M3:
         return jnp_float8_e4m3_type, jnp_float8_e4m3_type
     if format_ == Format.E5M2:

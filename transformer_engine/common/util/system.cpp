@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -74,3 +76,21 @@ NVTE_INSTANTIATE_GETENV(std::filesystem::path, std::filesystem::path());
 bool file_exists(const std::string &path) { return static_cast<bool>(std::ifstream(path.c_str())); }
 
 }  // namespace transformer_engine
+
+extern "C" bool nvte_is_rocm_build() {
+#ifdef USE_ROCM
+  return true;
+#else
+  return false;
+#endif
+}
+
+#ifdef USE_ROCM
+extern "C" bool nvte_uses_fp8_fnuz() 
+{
+#if HIP_VERSION >= 60300000
+  return te_fp8_fnuz();
+#endif
+  return true; // default to true for older versions compatibility
+}
+#endif

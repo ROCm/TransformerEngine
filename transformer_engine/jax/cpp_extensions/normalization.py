@@ -27,8 +27,7 @@ from transformer_engine import transformer_engine_jax
 from .base import BasePrimitive, register_primitive
 from .custom_call import custom_caller, CustomCallArgsWrapper
 from .misc import (
-    jnp_float8_e4m3_type, 
-    jnp_float8_e5m2_type,
+    get_jnp_float8_e4m3_type,
     get_padded_spec,
     check_valid_batch_dims,
     jax_dtype_to_te_dtype,
@@ -1049,7 +1048,7 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
         x_aval, gamma_aval, beta_aval, amax_aval, scale_aval, scale_inv_aval = ctx.avals_in
 
         # Currently only support casting to E4M3 only in C side.
-        assert out_dtype == jnp_float8_e4m3_type
+        assert out_dtype == get_jnp_float8_e4m3_type()
 
         assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert gamma_aval.dtype == beta_aval.dtype
@@ -1360,7 +1359,7 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
         """
 
         # Currently only support casting to E4M3 only in C side.
-        assert out_dtype == jnp_float8_e4m3_type
+        assert out_dtype == get_jnp_float8_e4m3_type()
 
         if is_ffi_enabled():
             name = "te_rmsnorm_forward_fp8_ffi"

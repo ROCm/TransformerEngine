@@ -261,7 +261,7 @@ else()
     set(__AOTRITON_INSTALL_DIR "${CMAKE_CURRENT_BINARY_DIR}/aotriton")
     set(__AOTRITON_SUFFIX "_TEprivate")
     if(NOT DEFINED AOTRITON_PATH)
-      # # Install aotriton fused attn
+      # Install aotriton fused attn
       if(USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS)
         set(AOTRITON_NOIMAGE_MODE OFF)
       else()
@@ -277,51 +277,60 @@ else()
         foreach(X IN LISTS CMAKE_HIP_ARCHITECTURES)
           set(key ${X})
           string(APPEND key "_key")
-          string(APPEND aotriton_target_gpus ${${key}})
-          string(APPEND aotriton_target_gpus "|")
+          set(gpu ${${key}})
+          if (gpu)
+            string(APPEND aotriton_target_gpus "${gpu}|")
+          else()
+            message(WARNING "AOTriton building is not supported for ${X}")
+          endif()
         endforeach()
       endmacro()
       translate_arch_to_gpu_names(aotriton_target_gpus)
-      include(ExternalProject)
-      ExternalProject_Add(aotriton_external
-        SOURCE_DIR ../../3rdparty/aotriton
-        LIST_SEPARATOR |
-        CMAKE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${__AOTRITON_INSTALL_DIR}
-        -DTARGET_GPUS=${aotriton_target_gpus}
-        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-        -DAOTRITON_NO_PYTHON=ON
-        -DAOTRITON_NAME_SUFFIX=${__AOTRITON_SUFFIX}
-        -DAOTRITON_NOIMAGE_MODE=${AOTRITON_NOIMAGE_MODE}
-        BUILD_BYPRODUCTS "${__AOTRITON_INSTALL_DIR}/lib/libaotriton${__AOTRITON_SUFFIX}_v2.so"
-        )
-      add_library(aotriton INTERFACE)
-      add_dependencies(aotriton aotriton_external)
-      target_link_libraries(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/lib/libaotriton${__AOTRITON_SUFFIX}_v2.so)
-      target_include_directories(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/include)
-      if(NOT USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS)
-        set(__AOTRITON_VER "0.8.2b")
-        set(__AOTRITON_SHA256 "66445e6b0209b9f4080743b839cc9d424054dc5c8d07363f9f27f109231c324a")
-        string(CONCAT __AOTRITON_URL "https://github.com/ROCm/aotriton/releases/download/"
-                                     "${__AOTRITON_VER}/aotriton-"
-                                     "${__AOTRITON_VER}-manylinux_2_28"
-                                     "_x86_64-rocm6.2"
-                                     "-shared.tar.gz")
-        ExternalProject_Add(aotriton_images
-                            URL "${__AOTRITON_URL}"
-                            URL_HASH SHA256=${__AOTRITON_SHA256}
-                            SOURCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/aotriton_tarball
-                            CONFIGURE_COMMAND ""
-                            BUILD_COMMAND ""
-                            INSTALL_COMMAND ${CMAKE_COMMAND} -E copy_directory
-                            "${CMAKE_CURRENT_BINARY_DIR}/aotriton_tarball/lib/aotriton.images"
-                            "${__AOTRITON_INSTALL_DIR}/lib/aotriton.images")
-        add_dependencies(aotriton aotriton_images)
+      if (NOT aotriton_target_gpus)
+        set(USE_FUSED_ATTN_AOTRITON FALSE)
+        message(WARNING "Disable AOTriton building because no supported GPU targets found")
+      else()
+        include(ExternalProject)
+        ExternalProject_Add(aotriton_external
+          SOURCE_DIR ../../3rdparty/aotriton
+          LIST_SEPARATOR |
+          CMAKE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${__AOTRITON_INSTALL_DIR}
+          -DTARGET_GPUS=${aotriton_target_gpus}
+          -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+          -DAOTRITON_NO_PYTHON=ON
+          -DAOTRITON_NAME_SUFFIX=${__AOTRITON_SUFFIX}
+          -DAOTRITON_NOIMAGE_MODE=${AOTRITON_NOIMAGE_MODE}
+          BUILD_BYPRODUCTS "${__AOTRITON_INSTALL_DIR}/lib/libaotriton${__AOTRITON_SUFFIX}_v2.so"
+          )
+        add_library(aotriton INTERFACE)
+        add_dependencies(aotriton aotriton_external)
+        target_link_libraries(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/lib/libaotriton${__AOTRITON_SUFFIX}_v2.so)
+        target_include_directories(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/include)
+        if(NOT USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS)
+          set(__AOTRITON_VER "0.8.2b")
+          set(__AOTRITON_SHA256 "66445e6b0209b9f4080743b839cc9d424054dc5c8d07363f9f27f109231c324a")
+          string(CONCAT __AOTRITON_URL "https://github.com/ROCm/aotriton/releases/download/"
+                                      "${__AOTRITON_VER}/aotriton-"
+                                      "${__AOTRITON_VER}-manylinux_2_28"
+                                      "_x86_64-rocm6.2"
+                                      "-shared.tar.gz")
+          ExternalProject_Add(aotriton_images
+                              URL "${__AOTRITON_URL}"
+                              URL_HASH SHA256=${__AOTRITON_SHA256}
+                              SOURCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/aotriton_tarball
+                              CONFIGURE_COMMAND ""
+                              BUILD_COMMAND ""
+                              INSTALL_COMMAND ${CMAKE_COMMAND} -E copy_directory
+                              "${CMAKE_CURRENT_BINARY_DIR}/aotriton_tarball/lib/aotriton.images"
+                              "${__AOTRITON_INSTALL_DIR}/lib/aotriton.images")
+          add_dependencies(aotriton aotriton_images)
+        endif()
+        install(DIRECTORY
+                ${__AOTRITON_INSTALL_DIR}/lib
+                DESTINATION ${CMAKE_INSTALL_PREFIX}/transformer_engine
+                PATTERN "cmake" EXCLUDE
+                PATTERN "libaotriton${__AOTRITON_SUFFIX}_v2.so" EXCLUDE)
       endif()
-      install(DIRECTORY
-              ${__AOTRITON_INSTALL_DIR}/lib
-              DESTINATION ${CMAKE_INSTALL_PREFIX}/transformer_engine
-              PATTERN "cmake" EXCLUDE
-              PATTERN "libaotriton${__AOTRITON_SUFFIX}_v2.so" EXCLUDE)
     else()
       # Use aotriton built during initial TE building/installation
       # When only need rebuild TE library itself

@@ -72,11 +72,11 @@ bool is_ck_backend_supported(
   }
 
   const int device_id = cuda::current_device();
-  const std::string sm_arch_name_ = cuda::sm_arch_name(device_id);
-  //only gfx942 supported
-  if(!(sm_arch_name_.find("gfx942")!=std::string::npos)){
+  const int gpu_arch = cuda::sm_arch(device_id);
+  //only gfx94x and gfx95x supported
+  if(gpu_arch != 94 && gpu_arch != 95){
     if(nvte_log_ck_config){
-      std::cout<<"only gfx942 is supported"<<std::endl;
+      std::cout<<"Only gfx94x and gfx95x are supported"<<std::endl;
     }
     return false;
   }
@@ -150,7 +150,6 @@ bool is_ck_backend_supported(
   }
   return true;
 #else
-  NVTE_ERROR("CK fused attn backend not compiled.");
   return false;
 #endif // USE_FUSED_ATTN_CK
 }
@@ -233,7 +232,7 @@ __forceinline__ __device__ int binary_search(int32_t target, const int32_t *arra
   return left - 1;
 }
 
-constexpr int THREADS_PER_WAVEFRONT = 32;
+constexpr int THREADS_PER_WAVEFRONT = 64;
 // kernel to remove padding for q, k, v, o (dq, dk, dv, do)
 // each wavefront is in charge of one token index (h*d*sizeof(DataType) bytes copy)
 // one workitem (thread) in one wavefront is charge of one element in 32 segment trunk of h*d

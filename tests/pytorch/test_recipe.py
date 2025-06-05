@@ -19,9 +19,8 @@ from transformer_engine.pytorch.fp8 import (
 )
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 import transformer_engine.pytorch.ops as te_ops
+from transformer_engine.pytorch.utils import is_fp8_fnuz
 import transformer_engine_torch as tex
-
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -261,7 +260,7 @@ class TestFP8Recipe:
 
                 # Compute scale
                 max_val = {
-                    "forward": 448.0 if not IS_HIP_EXTENSION else 240.0,
+                    "forward": 448.0 if not is_fp8_fnuz() else 240.0,
                     "backward": 57344.0,
                 }[stage]
                 ref_scale = (max_val / ref_amax) / (2**margin)

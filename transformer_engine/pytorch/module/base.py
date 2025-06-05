@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -16,6 +18,7 @@ from contextlib import contextmanager
 
 import torch
 import torch.nn.functional as F
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
@@ -37,6 +40,7 @@ from ..constants import dist_group_type
 from ..tensor import QuantizedTensor, Quantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
+from ..utils import get_device_compute_capability
 
 __all__ = ["initialize_ub", "destroy_ub"]
 
@@ -52,6 +56,12 @@ layers_atomic_ring_exchange = []
 
 
 def get_cublas_workspace_size_bytes() -> None:
+    """Return workspace size needed for current architecture"""
+    if IS_HIP_EXTENSION:
+        """Return 64 MiB for gfx50x, 32 MiB for all other architectures."""
+        if get_device_compute_capability() == (9, 5):
+            return 67_108_864
+        return 33_554_432        
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
     if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
         return 33_554_432

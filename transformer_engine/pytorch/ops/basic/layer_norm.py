@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -13,9 +15,13 @@ from typing import Optional
 import torch
 
 from transformer_engine_torch import layernorm_bwd, layernorm_fwd
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+if IS_HIP_EXTENSION:
+    # TODO: bring back te_layernorm_fwd_triton after refactoring
+    from ...triton_kernels.layernorm import te_layernorm_bwd_triton
 from ...fp8 import FP8GlobalStateManager
-from ...constants import TE_DType
 from ...tensor import QuantizedTensor
+from ...constants import TE_DType
 from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
@@ -220,7 +226,9 @@ class LayerNorm(BasicOperation):
 
         # Compute layer norm
         sm_margin = self._sm_margins["forward" if requires_grad else "inference"]
-        y, means, rstdevs = layernorm_fwd(
+        use_layernorm_triton = bool( int(os.environ.get('NVTE_USE_LAYERNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
+        layernorm_fwd_func = te_layernorm_fwd_triton if use_layernorm_triton else layernorm_fwd
+        y, means, rstdevs = layernorm_fwd_func(
             x,
             w,
             b,
@@ -267,7 +275,9 @@ class LayerNorm(BasicOperation):
             dy = dy.dequantize()
 
         # Compute layer norm backward pass
-        dx, dw, db = layernorm_bwd(
+        use_layernorm_triton = bool( int(os.environ.get('NVTE_USE_LAYERNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
+        layernorm_bwd_func = te_layernorm_bwd_triton if use_layernorm_triton else layernorm_bwd
+        dx, dw, db = layernorm_bwd_func(
             dy,
             x,
             means,

@@ -26,8 +26,7 @@ from transformer_engine.transformer_engine_jax import NVTE_Activation_Type
 from .base import BasePrimitive, register_primitive
 from .custom_call import custom_caller, CustomCallArgsWrapper
 from .misc import (
-    jnp_float8_e4m3_type, 
-    jnp_float8_e5m2_type,
+    get_jnp_float8_e4m3_type,
     check_valid_batch_dims,
     jax_dtype_to_te_dtype,
     jax_dtype_to_ir_dtype,
@@ -367,7 +366,7 @@ class ActLuFp8Primitive(BasePrimitive):
         """
         dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         # Currently only support casting to E4M3 only in C side.
-        assert out_dtype == jnp_float8_e4m3_type
+        assert out_dtype == get_jnp_float8_e4m3_type()
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert amax_aval.dtype == jnp.float32
         assert scale_aval.dtype == jnp.float32

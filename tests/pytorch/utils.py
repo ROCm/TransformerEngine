@@ -8,17 +8,12 @@ from __future__ import annotations
 
 import torch
 
-import transformer_engine
 import transformer_engine.pytorch as te
+from transformer_engine.pytorch.fp8 import get_torch_float8_e4m3_type, get_torch_float8_e5m2_type
 import transformer_engine_torch as tex
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
-if not IS_HIP_EXTENSION:
-    torch_float8_e4m3_type = torch.float8_e4m3fn
-    torch_float8_e5m2_type = torch.float8_e5m2
-else:
-    torch_float8_e4m3_type = torch.float8_e4m3fnuz
-    torch_float8_e5m2_type = torch.float8_e5m2fnuz
+torch_float8_e4m3_type = get_torch_float8_e4m3_type()
+torch_float8_e5m2_type = get_torch_float8_e5m2_type()
 
 def str_to_dtype(dtype: str | torch.dtype) -> torch.dtype:
     """Convert type name to PyTorch dtype"""
