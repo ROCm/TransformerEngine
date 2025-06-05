@@ -78,9 +78,21 @@ def setup_common_extension() -> CMakeExtension:
         # HIPBLASLT and ROCBLAS support are controlled as follows:
         #  If neither NVTE_USE_HIPBLASLT nor NVTE_USE_ROCBLAS are set, or both are set, both frameworks are enabled
         #  If one is set and the other is not, then only the corresponding backend is built
-        #  Note that the "no environment variable set" case relies on defaults set in transformer_engine/common/CMakeLists.txt
         enable_hipblaslt = os.getenv("NVTE_USE_HIPBLASLT") is not None
         enable_rocblas = os.getenv("NVTE_USE_ROCBLAS") is not None
+        if enable_hipblaslt and enable_rocblas:
+            cmake_flags.append("-DUSE_HIPBLASLT=ON")
+            cmake_flags.append("-DUSE_ROCBLAS=ON")
+        elif enable_hipblaslt:
+            cmake_flags.append("-DUSE_HIPBLASLT=ON")
+            cmake_flags.append("-DUSE_ROCBLAS=OFF")
+        elif enable_rocblas:
+            cmake_flags.append("-DUSE_HIPBLASLT=OFF")
+            cmake_flags.append("-DUSE_ROCBLAS=ON")
+        else:
+            cmake_flags.append("-DUSE_HIPBLASLT=ON")
+            cmake_flags.append("-DUSE_ROCBLAS=ON")
+
         if enable_hipblaslt or enable_rocblas:
             cmake_flags.append("-DUSE_HIPBLASLT=" + ("ON" if enable_hipblaslt else "OFF"))
             cmake_flags.append("-DUSE_ROCBLAS=" + ("ON" if enable_rocblas else "OFF"))
