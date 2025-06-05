@@ -5,6 +5,7 @@
 # See LICENSE for license information.
 
 import os, sys, time, shutil
+import argparse
 import subprocess
 import pandas as pd
 import numpy as np
@@ -74,7 +75,7 @@ columns = [
 output_csv="times.csv"
 
 # Runs benchmark with warmup iterations and profiles using rocprof
-def benchmark_dot_product_attention(model, attention, column_name, filename):
+def benchmark_dot_product_attention(model, attention, column_name, dirname):
     config = model_configs[model]
 
     warmup_iters = 3
@@ -89,8 +90,11 @@ def benchmark_dot_product_attention(model, attention, column_name, filename):
                 pad_between_seqs,
                 is_training,
             )
+    os.makedirs(dirname)
+    before_files = set(os.listdir("."))
     # Profiling command using rocprof
     prof_cmd = [
+            "env | grep NVTE; "
             "rocprof",
             "--hip-trace",
             "--basenames off",
@@ -102,11 +106,11 @@ def benchmark_dot_product_attention(model, attention, column_name, filename):
         ]
     prof_cmd = " ".join(prof_cmd)
     subprocess.call(prof_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=True)
+    after_files = set(os.listdir("."))
+    new_files = after_files - before_files
 
-    if os.path.exists("results.stats.csv"):
-        shutil.move("results.stats.csv", filename)
-    else:
-        print("Error: results.stats.csv not found!")
+    for f in new_files:
+        shutil.move(f, os.path.join(dirname, f))
     torch.cuda.empty_cache()
     
 # Runs profiler and records timing information
@@ -135,8 +139,8 @@ def benchmark_dot_product_attention_profiler(model, attention, column_name):
     torch.cuda.empty_cache()
 
 # Helper function to extract timing results from profiler logs
-def parse_helper(model, filename, fwd_search_pattern, bwd_search_pattern, column_name, df_times):
-    df = pd.read_csv(filename)
+def parse_helper(model, dirname, fwd_search_pattern, bwd_search_pattern, column_name, df_times):
+    df = pd.read_csv(os.path.join(dirname,"results.stats.csv"))
 
     # Extract kernel timing values    
     fwd_values = df[df["Name"].str.contains(fwd_search_pattern)]["AverageNs"].to_numpy()
@@ -151,20 +155,20 @@ def parse_helper(model, filename, fwd_search_pattern, bwd_search_pattern, column
     df_times.loc[model, f"{column_name} Kernels (fwd+bwd)"] = t_attn_avg.sum() / 1e6
 
 # Parses profiler logs for different attention backends
-def parse_results(model, df_times, filename_flash_attn, filename_fused_attn, filename_fused_ck, filename_fused_aotriton):
-    if filename_flash_attn:
-        parse_helper(model, filename_flash_attn, "FmhaFwd", "FmhaBwd", "FlashAttention", df_times)
+def parse_results(model, df_times, perf_dir_flash_attn, perf_dir_fused_attn, perf_dir_fused_ck, perf_dir_fused_aotriton):
+    if perf_dir_flash_attn:
+        parse_helper(model, perf_dir_flash_attn, "FmhaFwd", "FmhaBwd", "FlashAttention", df_times)
 
-    if filename_fused_attn:
-        parse_helper(model, filename_fused_attn, "FmhaFwd", "FmhaBwd", "FusedAttention", df_times)
+    if perf_dir_fused_attn:
+        parse_helper(model, perf_dir_fused_attn, "FmhaFwd", "FmhaBwd", "FusedAttention", df_times)
 
-    if filename_fused_ck:
-        parse_helper(model, filename_fused_ck, "FmhaFwd", "FmhaBwd", "FusedAttention CK", df_times)
+    if perf_dir_fused_ck:
+        parse_helper(model, perf_dir_fused_ck, "FmhaFwd", "FmhaBwd", "FusedAttention CK", df_times)
 
-    if filename_fused_aotriton:
-        parse_helper(model, filename_fused_aotriton, "attn_fwd", "bwd", "FusedAttention AOTriton", df_times)
+    if perf_dir_fused_aotriton:
+        parse_helper(model, perf_dir_fused_aotriton, "attn_fwd", "bwd", "FusedAttention AOTriton", df_times)
 
-    if filename_flash_attn and filename_fused_attn:
+    if perf_dir_flash_attn and perf_dir_fused_attn:
         df_times.loc[model, "Fused vs Flash Kernels Speedup (fwd+bwd)"] = (
             df_times.loc[model, "FlashAttention Kernels (fwd+bwd)"]
             / df_times.loc[model, "FusedAttention Kernels (fwd+bwd)"]
@@ -172,15 +176,29 @@ def parse_results(model, df_times, filename_flash_attn, filename_fused_attn, fil
 
 
 def main():
-    cwd = os.path.dirname(__file__)
-    os.chdir(cwd)
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--use_ck_bwd_v3", action="store_true", help="Use NVTE_CK_USES_BWD_V3=1 for CK bwd kernels")
+    args = parser.parse_args()
+
+    cwd = os.getcwd()
     output_dir = "profiler_outputs/"
-    if os.path.exists(output_dir):
-        shutil.rmtree(output_dir)
+    run_dir = os.path.dirname(__file__)
+
+    # Remove from current working directory
+    if os.path.exists(os.path.join(cwd, output_dir)):
+        shutil.rmtree(os.path.join(cwd, output_dir))
+    if os.path.exists(os.path.join(cwd, output_csv)):
+        os.remove(os.path.join(cwd, output_csv))
+
+    # Remove from run directory
+    if os.path.exists(os.path.join(run_dir, output_dir)):
+        shutil.rmtree(os.path.join(run_dir, output_dir))
+    if os.path.exists(os.path.join(run_dir, output_csv)):
+        os.remove(os.path.join(run_dir, output_csv))
+
+    os.chdir(run_dir)
     os.makedirs(output_dir)
-    
-    if (os.path.exists(output_csv)):
-        os.remove(output_csv)
 
     df_times = pd.DataFrame(index=indices, columns=columns)
     df_times = df_times.infer_objects(copy=False)
@@ -217,41 +235,49 @@ def main():
             f'{" and flash-attention" if flash_attn_supported else ""}...'
         )
 
-        filename_flash_attn, filename_fused_attn, filename_fused_ck, filename_fused_aotriton = None, None, None, None
+        perf_dir_flash_attn, perf_dir_fused_attn, perf_dir_fused_ck, perf_dir_fused_aotriton = None, None, None, None
+        
         # Benchmark for each attention backend
         if flash_attn_supported:
-            filename_flash_attn = os.path.join("profiler_outputs/", f"prof_flash_{model}.csv")
-            benchmark_dot_product_attention(model, "FlashAttention", "FlashAttention Module", filename_flash_attn)
+            os.environ.update({
+                "NVTE_FUSED_ATTN": "0", "NVTE_FLASH_ATTN": "1",
+                "NVTE_FUSED_ATTN_AOTRITON": "0", "NVTE_FUSED_ATTN_CK": "0" , "NVTE_UNFUSED_ATTN": "0"
+            })
+            perf_dir_flash_attn = os.path.join("profiler_outputs/", f"prof_flash_{model}")
+            benchmark_dot_product_attention(model, "FlashAttention", "FlashAttention Module", perf_dir_flash_attn)
            
         if fused_attn_supported:
-            filename_fused_attn = os.path.join("profiler_outputs/", f"prof_fused_{model}.csv")
-            benchmark_dot_product_attention(model, "FusedAttention", "FusedAttention Module", filename_fused_attn)
-            
-            if NVTE_Fused_Attn_Backend.NVTE_CK in fused_attn_backends:
-                #CK Backend
-                os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "0"
+
+            os.environ.update({
+                "NVTE_FUSED_ATTN": "1", "NVTE_FLASH_ATTN": "0",
+                "NVTE_FUSED_ATTN_AOTRITON": "0", "NVTE_FUSED_ATTN_CK": "1", "NVTE_UNFUSED_ATTN": "0"
+            })
+            if args.use_ck_bwd_v3:
                 os.environ["NVTE_CK_USES_BWD_V3"] = "1"
-                os.environ["NVTE_FUSED_ATTN_CK"] = "1"
-                os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
-                os.environ["NVTE_FUSED_ATTN"] = "0"
-                filename_fused_ck = os.path.join("profiler_outputs/", f"prof_fused_ck_{model}.csv")
-                benchmark_dot_product_attention(model, "FusedAttention", "FusedAttention CK Module", filename_fused_ck)
-            del os.environ["NVTE_CK_USES_BWD_V3"]
+            
+            # FusedAttention run
+            perf_dir_fused_attn = os.path.join("profiler_outputs/", f"prof_fused_{model}")
+            benchmark_dot_product_attention(model, "FusedAttention", "FusedAttention Module", perf_dir_fused_attn)
+            
+            #FusedAttention CK run
+            if NVTE_Fused_Attn_Backend.NVTE_CK in fused_attn_backends:
+                perf_dir_fused_ck = os.path.join("profiler_outputs/", f"prof_fused_ck_{model}")
+                benchmark_dot_product_attention(model, "FusedAttention", "FusedAttention CK Module", perf_dir_fused_ck)
 
             if NVTE_Fused_Attn_Backend.NVTE_AOTriton in fused_attn_backends:
                 #AOTRITON Backend
-                os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
-                os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "1"
-                os.environ["NVTE_FUSED_ATTN_CK"] = "0"
-                filename_fused_aotriton = os.path.join("profiler_outputs/", f"prof_fused_aotriton_{model}.csv")
-                benchmark_dot_product_attention(model, "FusedAttention", "FusedAttention AOTriton Module", filename_fused_aotriton)
+                os.environ.update({
+                    "NVTE_FUSED_ATTN_AOTRITON": "1", "NVTE_FUSED_ATTN_CK": "0",
+                    "NVTE_CK_USES_BWD_V3": "0", "NVTE_UNFUSED_ATTN": "0"
+                })
+                perf_dir_fused_aotriton = os.path.join("profiler_outputs/", f"prof_fused_aotriton_{model}")
+                benchmark_dot_product_attention(model, "FusedAttention", "FusedAttention AOTriton Module", perf_dir_fused_aotriton)
 
-            del os.environ["NVTE_FUSED_ATTN_CK"]
-            del os.environ["NVTE_FUSED_ATTN_AOTRITON"]
-            del os.environ["NVTE_FUSED_ATTN"]
+            for var in ["NVTE_CK_USES_BWD_V3", "NVTE_FUSED_ATTN_AOTRITON", "NVTE_FUSED_ATTN_CK", "NVTE_FUSED_ATTN", "NVTE_FLASH_ATTN", "NVTE_UNFUSED_ATTN"]:
+                os.environ.pop(var, None)
 
         df_times = pd.read_csv("times.csv", index_col=0)
-        parse_results(model, df_times, filename_flash_attn, filename_fused_attn, filename_fused_ck, filename_fused_aotriton)
+        parse_results(model, df_times, perf_dir_flash_attn, perf_dir_fused_attn, perf_dir_fused_ck, perf_dir_fused_aotriton)
         df_times.to_csv("times.csv")
 
     df_times = pd.read_csv("times.csv")
@@ -266,7 +292,15 @@ def main():
     a.columns = ["cuDNN fwd+bwd (ms)", "flash-attn fwd+bwd (ms)", "cuDNN vs flash speedup"]
     print()
     print(a)
+    if cwd != run_dir:
+        final_profiler_dir = os.path.join(cwd, "profiler_outputs")
+        if os.path.exists(final_profiler_dir):
+            shutil.rmtree(final_profiler_dir)
+        shutil.move("profiler_outputs", final_profiler_dir)
 
-
+        final_csv_path = os.path.join(cwd, output_csv)
+        if os.path.exists(final_csv_path):
+            os.remove(final_csv_path)
+        shutil.move(output_csv, final_csv_path)    
 if __name__ == "__main__":
     main()
