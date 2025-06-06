@@ -93,9 +93,6 @@ def setup_common_extension() -> CMakeExtension:
             cmake_flags.append("-DUSE_HIPBLASLT=ON")
             cmake_flags.append("-DUSE_ROCBLAS=ON")
 
-        if enable_hipblaslt or enable_rocblas:
-            cmake_flags.append("-DUSE_HIPBLASLT=" + ("ON" if enable_hipblaslt else "OFF"))
-            cmake_flags.append("-DUSE_ROCBLAS=" + ("ON" if enable_rocblas else "OFF"))
         if os.getenv("NVTE_AOTRITON_PATH"):
             aotriton_path = Path(os.getenv("NVTE_AOTRITON_PATH"))
             cmake_flags.append(f"-DAOTRITON_PATH={aotriton_path}")
