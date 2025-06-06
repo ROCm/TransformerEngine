@@ -155,7 +155,7 @@ def parse_helper(model, dirname, fwd_search_pattern, bwd_search_pattern, column_
     df_times.loc[model, f"{column_name} Kernels (fwd+bwd)"] = t_attn_avg.sum() / 1e6
 
 # Parses profiler logs for different attention backends
-def parse_results(model, df_times, perf_dir_flash_attn, perf_dir_fused_attn, perf_dir_fused_ck, perf_dir_fused_aotriton):
+def parse_results(model, df_times, perf_dir_flash_attn, perf_dir_fused_attn, perf_dir_fused_ck, perf_dir_fused_aotriton, use_ck_bwd_v3):
     if perf_dir_flash_attn:
         parse_helper(model, perf_dir_flash_attn, "FmhaFwd", "FmhaBwd", "FlashAttention", df_times)
 
@@ -163,7 +163,8 @@ def parse_results(model, df_times, perf_dir_flash_attn, perf_dir_fused_attn, per
         parse_helper(model, perf_dir_fused_attn, "FmhaFwd", "FmhaBwd", "FusedAttention", df_times)
 
     if perf_dir_fused_ck:
-        parse_helper(model, perf_dir_fused_ck, "FmhaFwd", "FmhaBwd", "FusedAttention CK", df_times)
+        bwd_pattern = "kernel_func" if use_ck_bwd_v3 else "FmhaBwd"
+        parse_helper(model, perf_dir_fused_ck, "FmhaFwd", bwd_pattern, "FusedAttention CK", df_times)
 
     if perf_dir_fused_aotriton:
         parse_helper(model, perf_dir_fused_aotriton, "attn_fwd", "bwd", "FusedAttention AOTriton", df_times)
@@ -277,7 +278,7 @@ def main():
                 os.environ.pop(var, None)
 
         df_times = pd.read_csv("times.csv", index_col=0)
-        parse_results(model, df_times, perf_dir_flash_attn, perf_dir_fused_attn, perf_dir_fused_ck, perf_dir_fused_aotriton)
+        parse_results(model, df_times, perf_dir_flash_attn, perf_dir_fused_attn, perf_dir_fused_ck, perf_dir_fused_aotriton, args.use_ck_bwd_v3)
         df_times.to_csv("times.csv")
 
     df_times = pd.read_csv("times.csv")
