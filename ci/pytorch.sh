@@ -81,6 +81,19 @@ run_test_config_mgpu(){
     fi
 }
 
+run_benchmark() {
+    echo "\n============= Running benchmarks attention script ============="
+    BENCH_SCRIPT="$DIR/../benchmarks/attention/benchmark_attention_rocm.py"
+
+    if [ ! -f "$BENCH_SCRIPT" ]; then
+        echo "Benchmark script not found: $BENCH_SCRIPT"
+        return
+    fi
+
+    python "$BENCH_SCRIPT" --use_ck_bwd_v3
+    echo "================================================================\n"
+}
+
 # Single config mode, run it and return result
 if [ -n "$SINGLE_CONFIG" ]; then
     _gemm=`echo $SINGLE_CONFIG | cut -d- -f1`
@@ -93,6 +106,8 @@ fi
 #Master script mode: prepare testing prerequisites first
 start_message
 install_prerequisites
+# Run benchmark
+run_benchmark
 pip list | egrep "flash|ml_dtypes|numpy|onnx|torch|transformer_e|typing_ext"
 #check_test_jobs_requested && init_test_jobs `python -c "import torch; print(torch.cuda.device_count())"`
 
