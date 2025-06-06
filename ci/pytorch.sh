@@ -62,10 +62,8 @@ run_test_config(){
     run_default_fa 1 fused_attn/test_fused_attn.py # Backend selection is controlled by the test
     if [ $_gemm = "hipblaslt" ]; then
         run_default_fa 1 triton_kernels/test_cast_transpose.py
-        #TODO: release rmsnorm_fwd_bwd_triton tests after the memory issue in hsa-runtime fixed
-        run_default_fa 1 triton_kernels/test_rmsnorm.py -k "not test_rmsnorm_fwd_bwd_triton"
-        #TODO: release layernorm triton tests after memory issue in hsa-runtime fixed
-        #run_default_fa 1 triton_kernels/test_layernorm.py
+        run_default_fa 1 triton_kernels/test_rmsnorm.py
+        run_default_fa 1 triton_kernels/test_layernorm.py
         run_default_fa 1 triton_kernels/test_norm_common.py
         NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa 3 test_numerics.py
     fi
