@@ -303,6 +303,7 @@ Also, it only works on Pytorch extension as JAX extension does not use it.
 At runtime, you can enable specific triton kernels using the specific environment variables:
 
 * NVTE_USE_CAST_TRANSPOSE_TRITON=1 can be used to enable cast transpose (bgrad) triton kernels; 
+* NVTE_USE_LAYERNORM_TRITON=1 can be used to enable layernorm triton kernels.
 * NVTE_USE_RMSNORM_TRITON=1 can be used to enable rmsnorm triton kernels.
 
 

@@ -8,8 +8,14 @@ import torch
 import triton
 import triton.language as tl
 import warnings
-from .norm_common_triton import IS_FP8 as IS_FP8_COMMON
-
+import transformer_engine_torch as tex
+from .common import (
+    is_fp8_torch_dtype,
+    te_dtype_to_torch_dtype,
+    torch_dtype_to_te_dtype,
+    te_dtype_to_aten_dtype,
+    enum_value_to_te_dtype,
+)
 
 def get_autotune_config(full_tuning_space=False):
     if full_tuning_space:
@@ -439,9 +445,67 @@ def _layernorm_bwd_dwdb_triton_v2(
     tl.store(FINAL_DW + cols, sum_dw.to(FINAL_DW.type.element_ty), mask=cols < N)
     tl.store(FINAL_DB + cols, sum_db.to(FINAL_DB.type.element_ty), mask=cols < N)
 
+# triton version for transformer_engine::pytorch::layernorm_fwd_fp8
+def te_layernorm_fwd_fp8_triton(
+    x: torch.Tensor,
+    gamma: torch.Tensor,
+    beta: torch.Tensor,
+    eps: float,
+    scale: torch.Tensor,
+    amax: torch.Tensor,
+    scale_inv: torch.Tensor,
+    out_te_dtype: tex.DType,
+    sm_margin: int,
+    zero_centered_gamma: bool,
+    scale_offset: int = 0, 
+    amax_offset: int = 0, 
+    scale_inv_offset: int = 0
+):
+    # input may not be contiguous
+    x_ = x.contiguous()
+    ln_out = torch.empty_like(x_, dtype = te_dtype_to_aten_dtype(out_te_dtype))
+    return te_layernorm_fwd_fp8_noalloc_triton(x_, gamma, beta, eps, scale, ln_out, amax, scale_inv, out_te_dtype, sm_margin, zero_centered_gamma, scale_offset, amax_offset, scale_inv_offset)
 
+# triton drop-in replacement for transformer_engine::pytorch::layernorm_fwd_fp8_noalloc
 # TODO: Add support for `sm_margin > 0`.
 def te_layernorm_fwd_fp8_noalloc_triton(
+    x: torch.Tensor,
+    gamma: torch.Tensor,
+    beta: torch.Tensor,
+    eps: float,
+    scale: torch.Tensor,
+    y: torch.Tensor,
+    amax: torch.Tensor,
+    scale_inv: torch.Tensor,
+    out_te_dtype: tex.DType,
+    sm_margin: int,
+    zero_centered_gamma: bool,
+    scale_offset: int =0, 
+    amax_offset: int =0,
+    scale_inv_offset: int =0
+):
+    # in order to keep the original y dtype
+    y_dtype = y.dtype
+    out_dtype = te_dtype_to_torch_dtype(out_te_dtype)
+    is_fp8 = is_fp8_torch_dtype(out_dtype)
+    y, mu, rsigma = layernorm_fwd_fp8_noalloc_triton(
+        x, 
+        gamma, 
+        beta, 
+        eps, 
+        scale[scale_offset] if is_fp8 else None, 
+        y, 
+        amax[amax_offset] if is_fp8 else None, 
+        scale_inv[scale_inv_offset] if is_fp8 else None, 
+        out_dtype, 
+        sm_margin, 
+        zero_centered_gamma)
+    #restore the original datatype for y
+    y = y.view(y_dtype)
+    return y, mu, rsigma
+
+
+def layernorm_fwd_fp8_noalloc_triton(
     x,
     gamma,
     beta,
@@ -450,7 +514,7 @@ def te_layernorm_fwd_fp8_noalloc_triton(
     y,
     amax,
     scale_inv,
-    out_dtype,
+    out_dtype, # tex.DType (transformer_engine::pytorch::DType)
     sm_margin,
     zero_centered_gamma,
 ):
@@ -461,7 +525,7 @@ def te_layernorm_fwd_fp8_noalloc_triton(
         )
     M, N = x.shape
     y = y.view(out_dtype)
-    IS_FP8 = IS_FP8_COMMON(out_dtype)
+    IS_FP8 = is_fp8_torch_dtype(out_dtype)
     mu = torch.empty((M,), dtype=torch.float32, device=x.device)
     rsigma = torch.empty((M,), dtype=torch.float32, device=x.device)
     amax_temp = (
@@ -506,12 +570,79 @@ def te_layernorm_fwd_fp8_noalloc_triton(
             M,
             256,
         )
-
     return y, mu, rsigma
+
+# triton version for torch.ops.tex_ts.layernorm_fwd_fp8_inf_ts
+# only returns the normalized output
+def te_layernorm_fwd_fp8_inf_ts_triton(
+    x: torch.Tensor,
+    gamma: torch.Tensor,
+    beta: torch.Tensor,
+    eps: float,
+    scale: torch.Tensor,
+    amax: torch.Tensor,
+    scale_inv: torch.Tensor,
+    fp8_tensor: int, # the index point to the fp8 meta tensors
+    out_dtype_enum_value: int,
+    sm_margin: int,
+    zero_centered_gamma: bool,
+):
+    out_te_dtype = enum_value_to_te_dtype(out_dtype_enum_value)
+    ln_out, _, _ = te_layernorm_fwd_fp8_triton(x, gamma, beta, eps, scale, amax, scale_inv, out_te_dtype, sm_margin, zero_centered_gamma, fp8_tensor, fp8_tensor, fp8_tensor)
+    return ln_out
+
+# triton version for transformer_engine::pytorch::layernorm_fwd
+# based on layernorm_fwd_noalloc but without ln_out pre-allocation
+def te_layernorm_fwd_triton(
+    x: torch.Tensor,
+    gamma: torch.Tensor,
+    beta: torch.Tensor,
+    eps: float,
+    sm_margin: int,
+    zero_centered_gamma: bool,
+):
+    ln_out = torch.empty_like(x)
+    return te_layernorm_fwd_noalloc_triton(x, gamma, beta, ln_out, eps, sm_margin, zero_centered_gamma)
+
+# triton version for transformer_engine::pytorch::layernorm_fwd_noalloc
+# specialized version of layernorm_fwd_fp8_noalloc, with input and output of the same dtype (not fp8)
+def te_layernorm_fwd_noalloc_triton(
+    x: torch.Tensor,
+    gamma: torch.Tensor,
+    beta: torch.Tensor,
+    y: torch.Tensor,
+    eps: float,
+    sm_margin: int,
+    zero_centered_gamma: bool,
+):
+    assert x.dtype==y.dtype, "input and output dtype should be the same in te_layernorm_fwd_noalloc_triton"
+    return te_layernorm_fwd_fp8_noalloc_triton(x, gamma, beta, eps, None, y, None, None, torch_dtype_to_te_dtype(y.dtype), sm_margin, zero_centered_gamma)
+
+# triton version for torch.ops.tex_ts.layernorm_fwd_inf_ts
+# specialized version for te_layernorm_fwd_triton, optimized for inference
+# only returns the normalized output
+def te_layernorm_fwd_inf_ts_triton(
+    x: torch.Tensor,
+    gamma: torch.Tensor,
+    beta: torch.Tensor,
+    eps: float,
+    sm_margin: int,
+    zero_centered_gamma: bool,
+):
+    ln_out, _, _ = te_layernorm_fwd_triton(x, gamma, beta, eps, sm_margin, zero_centered_gamma)
+    return ln_out
 
 
 # TODO: Add support for `sm_margin > 0`.
-def te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, sm_margin, zero_centered_gamma):
+def te_layernorm_bwd_triton(
+    dz: torch.Tensor, 
+    x: torch.Tensor, 
+    mu: torch.Tensor, 
+    rsigma: torch.Tensor, 
+    gamma: torch.Tensor, 
+    sm_margin: int, 
+    zero_centered_gamma: bool
+):
     if sm_margin is not None and sm_margin > 0:
         warnings.warn(
             '"sm_margin" is not supported in the Triton based backward layer-norm kernel. '

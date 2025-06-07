@@ -7,8 +7,7 @@ import triton
 import triton.language as tl
 from itertools import product
 
-from .norm_common_triton import num_programs, block_size, use_blocked
-
+from .norm_common import num_programs, block_size, use_blocked
 
 def dg_tmp_rows(x, sm_margin=None):
     return x.shape[0] if use_blocked(x) else num_programs(x, sm_margin)
