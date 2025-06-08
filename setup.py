@@ -80,13 +80,10 @@ def setup_common_extension() -> CMakeExtension:
         #  If one is set and the other is not, then only the corresponding backend is built
         enable_hipblaslt = os.getenv("NVTE_USE_HIPBLASLT") is not None
         enable_rocblas = os.getenv("NVTE_USE_ROCBLAS") is not None
-        if enable_hipblaslt and enable_rocblas:
-            cmake_flags.append("-DUSE_HIPBLASLT=ON")
-            cmake_flags.append("-DUSE_ROCBLAS=ON")
-        elif enable_hipblaslt:
+        if enable_hipblaslt and not enable_rocblas:
             cmake_flags.append("-DUSE_HIPBLASLT=ON")
             cmake_flags.append("-DUSE_ROCBLAS=OFF")
-        elif enable_rocblas:
+        elif enable_rocblas and not enable_hipblaslt:
             cmake_flags.append("-DUSE_HIPBLASLT=OFF")
             cmake_flags.append("-DUSE_ROCBLAS=ON")
         else:
