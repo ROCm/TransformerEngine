@@ -1391,8 +1391,6 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centere
 @pytest.mark.parametrize("activation", all_activations)
 @pytest.mark.parametrize("normalization", all_normalizations)
 def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
-    # to avoid glitch in CI
-    reset_rng_states()
     config = model_configs[model]
 
     te_ln_mlp = LayerNormMLP(
