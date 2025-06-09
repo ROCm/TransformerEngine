@@ -75,10 +75,21 @@ def setup_common_extension() -> CMakeExtension:
     cmake_flags = []
     if rocm_build():
         cmake_flags.append("-DUSE_ROCM=ON")
-        if os.getenv("NVTE_USE_HIPBLASLT") is not None:
+        # HIPBLASLT and ROCBLAS support are controlled as follows:
+        #  If neither NVTE_USE_HIPBLASLT nor NVTE_USE_ROCBLAS are set, or both are set, both frameworks are enabled
+        #  If one is set and the other is not, then only the corresponding backend is built
+        enable_hipblaslt = os.getenv("NVTE_USE_HIPBLASLT") is not None
+        enable_rocblas = os.getenv("NVTE_USE_ROCBLAS") is not None
+        if enable_hipblaslt and not enable_rocblas:
             cmake_flags.append("-DUSE_HIPBLASLT=ON")
-        if os.getenv("NVTE_USE_ROCBLAS") is not None:
+            cmake_flags.append("-DUSE_ROCBLAS=OFF")
+        elif enable_rocblas and not enable_hipblaslt:
+            cmake_flags.append("-DUSE_HIPBLASLT=OFF")
             cmake_flags.append("-DUSE_ROCBLAS=ON")
+        else:
+            cmake_flags.append("-DUSE_HIPBLASLT=ON")
+            cmake_flags.append("-DUSE_ROCBLAS=ON")
+
         if os.getenv("NVTE_AOTRITON_PATH"):
             aotriton_path = Path(os.getenv("NVTE_AOTRITON_PATH"))
             cmake_flags.append(f"-DAOTRITON_PATH={aotriton_path}")
