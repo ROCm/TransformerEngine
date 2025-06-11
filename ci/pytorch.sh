@@ -106,8 +106,6 @@ fi
 #Master script mode: prepare testing prerequisites first
 start_message
 install_prerequisites
-# Run benchmark
-run_benchmark
 pip list | egrep "flash|ml_dtypes|numpy|onnx|torch|transformer_e|typing_ext"
 #check_test_jobs_requested && init_test_jobs `python -c "import torch; print(torch.cuda.device_count())"`
 
@@ -148,4 +146,10 @@ if [ -n "$TEST_JOBS_MODE" -a -n "$TEST_MGPU" ]; then
         configure_gemm_env $_gemm && configure_fused_attn_env $_fus_attn && run_test_config_mgpu;
     done
 fi
+
+#run benchmark script
+if [ $TEST_LEVEL -ge 3 ]; then
+    run_benchmark
+fi
+
 return_run_results

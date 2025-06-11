@@ -160,7 +160,8 @@ def parse_results(model, df_times, perf_dir_flash_attn, perf_dir_fused_attn, per
         parse_helper(model, perf_dir_flash_attn, "FmhaFwd", "FmhaBwd", "FlashAttention", df_times)
 
     if perf_dir_fused_attn:
-        parse_helper(model, perf_dir_fused_attn, "FmhaFwd", "FmhaBwd", "FusedAttention", df_times)
+        bwd_pattern = "kernel_func" if use_ck_bwd_v3 else "FmhaBwd"
+        parse_helper(model, perf_dir_fused_attn, "FmhaFwd", bwd_pattern, "FusedAttention", df_times)
 
     if perf_dir_fused_ck:
         bwd_pattern = "kernel_func" if use_ck_bwd_v3 else "FmhaBwd"
