@@ -134,3 +134,18 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
         te_rocm_build = False
     if te_rocm_build:
         te_uses_fp8_fnuz = _TE_LIB_CTYPES.nvte_uses_fp8_fnuz()
+        try:
+            # Get installed ROCm version
+            with open(os.getenv("ROCM_PATH", "/opt/rocm") + "/.info/version", "r") as f:
+                rocm_version= f.read().strip().split('.')[:2]
+
+            # Get ROCm version from the build info file
+            with open(get_te_path() / "transformer_engine" / "build_info.txt", 'r') as f:
+                build_info = f.read().split('\n')
+            build_rocm_version = list(filter(lambda f: f.startswith("ROCM_VERSION:"), build_info))
+            if build_rocm_version:
+                build_rocm_version = build_rocm_version[0].split(":")[1].strip().split('.')[:2]
+            assert (rocm_version == build_rocm_version), f"ROCm {'.'.join(rocm_version)} is detected but the library is built for {'.'.join(build_rocm_version)}"
+        except FileNotFoundError:
+            pass
+

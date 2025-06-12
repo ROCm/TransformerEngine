@@ -81,6 +81,9 @@ def setup_pytorch_extension(
     if rocm_build():
         ##TODO: Figure out which hipcc version starts to support this parallel compilation
         nvcc_flags.extend(["-parallel-jobs=4"])
+        # Pytorch extension can get the ROCm architecture from the environment variable
+        if os.getenv("NVTE_ROCM_ARCH") is not None:
+            os.environ["PYTORCH_ROCM_ARCH"] = os.getenv("NVTE_ROCM_ARCH")
     else:
         cuda_architectures = cuda_archs()
 

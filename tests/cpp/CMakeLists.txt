@@ -63,10 +63,6 @@ else()
   # Ask hcc to generate device code during compilation so we can use
   # host linker to link.
   set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} -fno-gpu-rdc -Wno-defaulted-function-deleted")
-  foreach(rocm_arch ${CMAKE_HIP_ARCHITECTURES})
-    # if CMAKE_CXX_FLAGS has --offload-arch set already, better to rm first
-    set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} --offload-arch=${rocm_arch}")
-  endforeach()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${HIP_HCC_FLAGS}")
 endif()
 
@@ -92,6 +88,7 @@ if(USE_CUDA)
   find_package(CUDAToolkit REQUIRED)
   include(${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
 else()
+  set(GPU_TARGETS ${CMAKE_HIP_ARCHITECTURES})
   find_package(hip REQUIRED)
 endif()
 

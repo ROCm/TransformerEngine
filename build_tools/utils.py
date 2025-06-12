@@ -279,21 +279,6 @@ def cuda_version() -> Tuple[int, ...]:
     return tuple(int(v) for v in version)
 
 
-def rocm_version() -> Tuple[int, ...]:
-    """ROCm version as a (major, minor) tuple."""
-    # Query hipcc for version info
-    _, hipcc_bin = rocm_path()
-    output = subprocess.run(
-        [hipcc_bin, "--version"],
-        capture_output=True,
-        check=True,
-        universal_newlines=True,
-    )
-    match = re.search(r"HIP version:\s*([\d.]+)", output.stdout)
-    version = match.group(1).split(".")[:2]  # Only major and minor versions
-    return tuple(int(v) for v in version)
-
-
 def get_frameworks() -> List[str]:
     """DL frameworks to build support for"""
     _frameworks: List[str] = []
