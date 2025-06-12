@@ -303,7 +303,7 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *cast_output
                 return n_tiles;
               };
               // heuristics for MI300X
-              // TODO: heuristics for other HW like MI350
+              // TODO: heuristics for other HW arches like gfx950
               size_t wpt_size = 8;
               size_t iter_size = THREADS_PER_WARP / wpt_size;
               const size_t estimated_n_tiles = get_n_tiles(16, 8);
