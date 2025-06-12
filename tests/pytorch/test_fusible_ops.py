@@ -12,7 +12,6 @@ from typing import Optional
 
 import pytest
 import torch
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine
 import transformer_engine.common.recipe
@@ -29,14 +28,6 @@ from transformer_engine.pytorch.tensor import QuantizedTensor
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine_torch as tex
-
-if IS_HIP_EXTENSION:
-    import os
-    from functools import cache
-    @cache
-    def use_hipblaslt() -> bool:
-        return (os.getenv("NVTE_USE_HIPBLASLT") is not None
-                or os.getenv("NVTE_USE_ROCBLAS") is None )
 
 
 # Check if FP8 is supported

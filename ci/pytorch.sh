@@ -88,7 +88,7 @@ run_test_config_mgpu(){
 if [ -n "$SINGLE_CONFIG" ]; then
     _gemm=`echo $SINGLE_CONFIG | cut -d- -f1`
     _fus_attn=`echo $SINGLE_CONFIG | cut -d- -f2`
-    configure_gemm_env $_gemm && configure_fused_attn_env $_fus_attn && run_test_config
+    configure_fused_attn_env $_fus_attn && run_test_config
     return_run_results
     exit $?
 fi
@@ -99,33 +99,29 @@ install_prerequisites
 pip list | egrep "flash|ml_dtypes|numpy|onnx|torch|transformer_e|typing_ext"
 #check_test_jobs_requested && init_test_jobs `python -c "import torch; print(torch.cuda.device_count())"`
 
-for _gemm in hipblaslt rocblas; do
-    configure_gemm_env $_gemm || continue
+_gemm="hipblaslt"
     
-    for _fus_attn in auto flash ck aotriton unfused; do
-        configure_fused_attn_env $_fus_attn || continue
+for _fus_attn in auto flash ck aotriton unfused; do
+    configure_fused_attn_env $_fus_attn || continue
 
-        #Auto - default mode with all Flash and Fused attention backends enabled
-        #Flash - Fused attention is disabled
-        #CK/AOTriton - no Flash attention and only corresponding Fused attention backend is enabled
-        #Unfused - Flash and Fused attentions are disabled
-        #Level 1 - run hipBlasLt in auto and unfused modes, rocBlas in auto mode
-        #Level 3 - run hipBlasLt in all but unfused modes, rocBlas in auto and unfused modes
-        if [ $TEST_LEVEL -ge 3 ]; then
-            test $_gemm = hipblaslt -a $_fus_attn = unfused && continue
-            test $_gemm = rocblas -a $_fus_attn != auto -a $_fus_attn != unfused && continue
-        else
-            test $_gemm = hipblaslt -a $_fus_attn != auto -a $_fus_attn != unfused && continue
-            test $_gemm = rocblas -a $_fus_attn != auto && continue
-        fi
+    #Auto - default mode with all Flash and Fused attention backends enabled
+    #Flash - Fused attention is disabled
+    #CK/AOTriton - no Flash attention and only corresponding Fused attention backend is enabled
+    #Unfused - Flash and Fused attentions are disabled
+    #Level 1 - run hipBlasLt in auto and unfused modes
+    #Level 3 - run hipBlasLt in all but unfused modes
+    if [ $TEST_LEVEL -ge 3 ]; then
+        test $_gemm = hipblaslt -a $_fus_attn = unfused && continue
+    else
+        test $_gemm = hipblaslt -a $_fus_attn != auto -a $_fus_attn != unfused && continue
+    fi
 
-        if [ -n "$TEST_JOBS_MODE" ]; then
-            test -n "$TEST_SGPU" && run_test_job "$_gemm-$_fus_attn"
-        else
-            test -n "$TEST_SGPU" && run_test_config
-            test -n "$TEST_MGPU" && run_test_config_mgpu
-        fi
-    done
+    if [ -n "$TEST_JOBS_MODE" ]; then
+        test -n "$TEST_SGPU" && run_test_job "$_gemm-$_fus_attn"
+    else
+        test -n "$TEST_SGPU" && run_test_config
+        test -n "$TEST_MGPU" && run_test_config_mgpu
+    fi
 done
 
 if [ -n "$TEST_JOBS_MODE" -a -n "$TEST_MGPU" ]; then
@@ -133,7 +129,7 @@ if [ -n "$TEST_JOBS_MODE" -a -n "$TEST_MGPU" ]; then
     for _cfg in $(get_test_config_list); do
         _gemm=`echo $_cfg | cut -d- -f1`
         _fus_attn=`echo $_cfg | cut -d- -f2`
-        configure_gemm_env $_gemm && configure_fused_attn_env $_fus_attn && run_test_config_mgpu;
+        configure_fused_attn_env $_fus_attn && run_test_config_mgpu;
     done
 fi
 return_run_results

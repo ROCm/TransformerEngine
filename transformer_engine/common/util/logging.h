@@ -6,18 +6,11 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifndef TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_
-#define TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_
+#pragma once
 
 #include <cuda_runtime_api.h>
 #ifdef __HIP_PLATFORM_AMD__
-#ifdef USE_HIPBLASLT
 #include <hipblaslt/hipblaslt.h>
-#endif
-#ifdef USE_ROCBLAS
-#define ROCBLAS_BETA_FEATURES_API
-#include <rocblas/rocblas.h>
-#endif
 #else
 #include <cublas_v2.h>
 #include <cudnn.h>
@@ -53,7 +46,6 @@
   } while (false)
 
 #ifdef __HIP_PLATFORM_AMD__
-#ifdef USE_HIPBLASLT //hipblaslt
 #define NVTE_CHECK_HIPBLASLT(expr)                                         \
   do {                                                                  \
     const hipblasStatus_t status_NVTE_CHECK_CUBLAS = (expr);            \
@@ -62,17 +54,6 @@
                  std::to_string((int)status_NVTE_CHECK_CUBLAS));        \
     }                                                                   \
   } while (false)
-#endif
-#ifdef USE_ROCBLAS //rocblas
-#define NVTE_CHECK_ROCBLAS(expr)                                         \
-  do {                                                                  \
-    const rocblas_status status_NVTE_CHECK_CUBLAS = (expr);             \
-    if (status_NVTE_CHECK_CUBLAS != rocblas_status_success) {           \
-      NVTE_ERROR("ROCBLAS Error: " +                                    \
-                 std::string(rocblas_status_to_string(status_NVTE_CHECK_CUBLAS)));      \
-    }                                                                   \
-  } while (false)
-#endif
 #else //cublas
 #define NVTE_CHECK_CUBLAS(expr)                                                      \
   do {                                                                               \
@@ -114,5 +95,3 @@
       NVTE_ERROR("NVRTC Error: ", nvrtcGetErrorString(status_NVTE_CHECK_NVRTC)); \
     }                                                                            \
   } while (false)
-
-#endif  // TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_

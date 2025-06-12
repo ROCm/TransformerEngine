@@ -75,15 +75,7 @@ Install TE
 
   pip install .
 
-The default installation above supports both rocBlas and hipBlasLt in GEMM computation. Building with single backend support can be done by setting `NVTE_USE_HIPBLASLT` or `NVTE_USE_ROCBLAS` environment variable before `pip install` as:
-
-.. code-block:: bash
-
-  export NVTE_USE_HIPBLASLT=1
-  export NVTE_USE_ROCBLAS=1
-
-If neither of the aforementioned environment variables are set or both of them are set, then both backends are built. If only one of these environment variables is set, then the other backend is not built.
-When both GEMM backends are supported the aforementioned env variables can be used to select which backend to use. If none is set hipBlasLt is used by default. The hipBlasLt backed has not yet supported all the GEMM configurations in the pytorch unit tests. 
+The default installation above supports hipBlasLt in GEMM computation. rocBlas is no longer supported.
 
 Test
 ====
@@ -107,15 +99,9 @@ Note that some of operator unit tests fail in hipBLASLt config due to limited in
 Pytorch framework integration tests
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Pytorch integration pytests under tests/pytorch/ and tests/pytorch/fused_attn/ are supported 
-Except the following tests that are not supported in rocBLAS configuration
+Pytorch integration pytests under tests/pytorch/ and tests/pytorch/fused_attn/ are supported except for:
 
-* tests/pytorch/test_cuda_graph.py 
-* tests/pytorch/test_sanity.py::test_gpt_guda_graph
-
-Env `ROCBLAS_STREAM_ORDER_ALLOC=1` should be used when run tests in pytorch-rocblas configuration. 
-
-Also test_onnx_export.py does not support FP8 dues to absence of custom QDQ operatrs library
+test_onnx_export.py does not support FP8 dues to absence of custom QDQ operators library.
 
 Jax framework integration tests
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
