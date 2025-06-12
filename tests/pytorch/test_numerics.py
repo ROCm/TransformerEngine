@@ -1972,8 +1972,8 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     if IS_HIP_EXTENSION:
         if use_hipblaslt():
             tols = dtype_tols(dtype)
-            if dtype in (torch.float16, torch.bfloat16) and is_mi308():
-                # mi308 hipblaslt precision issue
+            if dtype in (torch.float16, torch.bfloat16):
+                # mi308, mi300 hipblaslt precision issue
                 tols["atol"] = 2e-3
                 _, use_aotriton, use_ck = rocm_attn_backend()
                 if use_aotriton and not use_ck:
