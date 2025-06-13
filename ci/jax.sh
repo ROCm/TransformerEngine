@@ -7,31 +7,17 @@ DIR=`dirname $0`
 
 . $DIR/_utils.sh
 
-install_flax() {
-    pip list | awk '$1=="jax" || $1=="jaxlib" { print $1"=="$2 }' > requirements.in
-    echo "flax" >> requirements.in
-    echo "typing_extensions>=4.12.2" >> requirements.in
-    pip install -r requirements.in --log build.log
-    rc=$?
-    if [ $rc -ne 0 ]; then
-        script_error "Failed to install Flax"
-        cat build.log
-        return $rc
-    fi
-}
-
 install_prerequisites() {
-    pip show flax >/dev/null 2>&1
-    if [ $? -eq 0 ]; then
-        echo "Pre-installed Flax is detected"
-    else
-        _tmp_dir=`mktemp -d`
-        _curr_dir=`pwd`
-        cd "$_tmp_dir" || exit $?
-        install_flax; rc=$?
-        cd "$_curr_dir"
-        rm -rf $_tmp_dir
-        test $rc -eq 0 || exit $rc
+    _req_file=$(mktemp)
+    pip list | awk '$1=="jax" || $1=="jaxlib" { print $1"=="$2 }' > "$_req_file"
+    echo "flax>=0.7.1" >> "$_req_file"
+    echo "typing_extensions>=4.12.2" >> "$_req_file"
+    pip install -r "$_req_file"
+    rc=$?
+    rm -f "$_req_file"
+    if [ $rc -ne 0 ]; then
+        script_error "Failed to install Flax and dependencies"
+        return $rc
     fi
 }
 
