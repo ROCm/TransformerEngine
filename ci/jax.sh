@@ -7,30 +7,28 @@ DIR=`dirname $0`
 
 . $DIR/_utils.sh
 
-install_praxis() {
-    git clone https://github.com/google/praxis.git && cd praxis || return $?
-    git checkout 899b56ebe9128a0 || return $?
-    #Remove unnecessary dependencies for testing and make sure JAX is not upgraded
-    sed -i -e 's/^flax/#flax/;s/^jax /#jax /;s/^opt/#opt/;s/^tensorflow/#tensorflow/' requirements.in || return $?
-    pip list | awk '/jax|transformer_engine/ { print $1"=="$2}' >> requirements.in
-    pip install . --log build.log
+install_flax() {
+    pip list | awk '$1=="jax" || $1=="jaxlib" { print $1"=="$2 }' > requirements.in
+    echo "flax" >> requirements.in
+    echo "typing_extensions>=4.12.2" >> requirements.in
+    pip install -r requirements.in --log build.log
     rc=$?
     if [ $rc -ne 0 ]; then
-        script_error "Failed to install praxis from sources"
+        script_error "Failed to install Flax"
         cat build.log
         return $rc
     fi
 }
 
 install_prerequisites() {
-    pip show praxis >/dev/null 2>&1
+    pip show flax >/dev/null 2>&1
     if [ $? -eq 0 ]; then
-        echo "Pre-installed Praxis is detected"
+        echo "Pre-installed Flax is detected"
     else
         _tmp_dir=`mktemp -d`
         _curr_dir=`pwd`
         cd "$_tmp_dir" || exit $?
-        install_praxis; rc=$?
+        install_flax; rc=$?
         cd "$_curr_dir"
         rm -rf $_tmp_dir
         test $rc -eq 0 || exit $rc
@@ -63,10 +61,6 @@ run_test_config() {
     run 1 test_fused_attn.py
     run_default_fa 1 test_helper.py
     run_default_fa 1 test_layer.py #it effectevly always uses unfused attention
-    # skip test_praxis_layers.py for ck backend as we didn't enable deterministic backward for now
-    if [ $_fus_attn = "aotriton" ]; then
-        run 3 test_praxis_layers.py
-    fi
     run_default_fa 1 test_sharding.py
     run_default_fa 1 test_softmax.py
 }
@@ -113,7 +107,7 @@ fi
 #Master script mode: prepares testing prerequisites
 start_message
 install_prerequisites
-pip list | egrep "flax|fidle|jax|ml_dtypes|numpy|praxis|transformer_e|typing_ext"
+pip list | egrep "flax|fidle|jax|ml_dtypes|numpy|transformer_e|typing_ext"
 #check_test_jobs_requested
 #test $? -eq 0 && init_test_jobs `python -c "import jax; print(len([d for d in jax.devices() if 'rocm' in d.client.platform_version]))"`
 
