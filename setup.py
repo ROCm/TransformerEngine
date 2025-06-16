@@ -125,13 +125,18 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
         setup_reqs.append("pybind11")
 
     # Framework-specific requirements
-    if (not rocm_build()) and (not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0")))):
+    if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         if "pytorch" in frameworks:
-            install_reqs.extend(["torch"])
-            test_reqs.extend(["numpy", "onnxruntime", "torchvision", "prettytable"])
+            if not rocm_build():
+                install_reqs.extend(["torch"])
+                test_reqs.extend(["numpy", "onnxruntime", "torchvision", "prettytable"])
         if "jax" in frameworks:
-            install_reqs.extend(["jax", "flax>=0.7.1"])
-            test_reqs.extend(["numpy", "praxis"])
+            if rocm_build():
+                from build_tools.jax import jax_install_requires
+                install_reqs.extend(jax_install_requires(["flax>=0.7.1"]))
+            else:
+                install_reqs.extend(["jax", "flax>=0.7.1"])
+                test_reqs.extend(["numpy", "praxis"])
         if "paddle" in frameworks:
             install_reqs.append("paddlepaddle-gpu")
             test_reqs.append("numpy")

@@ -104,3 +104,12 @@ def setup_jax_extension(
         extra_compile_args={"cxx": cxx_flags, "nvcc": nvcc_flags},
         define_macros=macros
     )
+
+
+def jax_install_requires(reqs: List[str]) -> List[str]:
+    """Update requirements with current JAX version to avoid undesired update."""
+    try:
+        import jax
+    except ImportError:
+        return []
+    return reqs + [f"jax=={jax.__version__}"]
