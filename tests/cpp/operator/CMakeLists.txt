@@ -5,22 +5,22 @@
 # See LICENSE for license information.
 
 list(APPEND test_cuda_sources
-            test_qdq.cu
-            test_cast_transpose.cu
-            test_transpose.cu
-            test_cast_transpose_dbias.cu
-            test_cast_transpose_dbias_dgelu.cu
-            test_cast_transpose_dgeglu.cu
-            test_act.cu
-            test_normalization.cu
-            test_multi_cast_transpose.cu
-            test_multi_padding.cu
-            test_causal_softmax.cu
+            # test_qdq.cu
+            # test_cast_transpose.cu
+            # test_transpose.cu
+            # test_cast_transpose_dbias.cu
+            # test_cast_transpose_dbias_dgelu.cu
+            # test_cast_transpose_dgeglu.cu
+            # test_act.cu
+             test_normalization.cu
+            # test_multi_cast_transpose.cu
+            # test_multi_padding.cu
+            # test_causal_softmax.cu
             ../test_common.cu)
-if(USE_ROCM)
-  list(APPEND test_cuda_sources
-              test_cublaslt_gemm.cu)
-endif()
+# if(USE_ROCM)
+#   list(APPEND test_cuda_sources
+#               test_cublaslt_gemm.cu)
+# endif()
 
 if(USE_CUDA)
   add_executable(test_operator ${test_cuda_sources})

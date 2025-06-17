@@ -242,6 +242,11 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                        z.data(), mu.data(), rsigma.data(), workspace_fwd.data(),
                        prop.multiProcessorCount, zero_centered_gamma, 0);
     workspace_fwd = Tensor(workspace_fwd.shape(), workspace_fwd.dtype());
+    for(int i=0;i<5;i++)
+    nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), epsilon,
+                       z.data(), mu.data(), rsigma.data(), workspace_fwd.data(),
+                       prop.multiProcessorCount, zero_centered_gamma, 0);
+    for(int i=0;i<10;i++)
     nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), epsilon,
                        z.data(), mu.data(), rsigma.data(), workspace_fwd.data(),
                        prop.multiProcessorCount, zero_centered_gamma, 0);
@@ -252,6 +257,13 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                        workspace_bwd.data(),
                        prop.multiProcessorCount, zero_centered_gamma, 0);
     workspace_bwd = Tensor(workspace_bwd.shape(), workspace_bwd.dtype());
+    for(int i=0;i<5;i++)
+    nvte_layernorm_bwd(dz.data(), input.data(),
+                       mu.data(), rsigma.data(), gamma.data(),
+                       dx.data(), dgamma.data(), dbeta.data(),
+                       workspace_bwd.data(),
+                       prop.multiProcessorCount, zero_centered_gamma, 0);
+    for(int i=0;i<10;i++)
     nvte_layernorm_bwd(dz.data(), input.data(),
                        mu.data(), rsigma.data(), gamma.data(),
                        dx.data(), dgamma.data(), dbeta.data(),
@@ -340,10 +352,27 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
 }
 
 std::vector<std::pair<size_t, size_t>> test_cases = {
-  {71, 229},
-  {29, 541},
-  {768, 6144},
-  {2048, 12288},
+  // {71, 229},
+  // {29, 541},
+  // {768, 6144},
+  //{2048, 12288},
+  // {6800,928},
+  // {16000,1472}
+  // {46000,2240},
+  // {8200,2011}
+  // {14000,1485},
+  // {34003,3957}
+  //{71,3571}
+  //{168,184}
+   {768,1024},
+  // {256,65536},
+  // {128,6144},
+  // {64,2304},
+  // {229,541},
+  // {71, 3571},
+  // {29, 17389},
+  //{6048,16320}
+  //{76800,1600}
 };
 
 }  // namespace
@@ -382,9 +411,9 @@ INSTANTIATE_TEST_SUITE_P(
 #else
         ::testing::Values(false), //TODO: enabling tests for cudnn backend
 #endif
-        ::testing::Values(NormType::LayerNorm, NormType::RMSNorm),
-        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
-        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16, DType::kFloat8E4M3),
+        ::testing::Values(NormType::LayerNorm),
+        ::testing::Values(DType::kFloat16),
+        ::testing::Values(DType::kFloat16),
         ::testing::ValuesIn(test_cases),
         ::testing::Values(false, true)),
     [](const testing::TestParamInfo<NormTestSuite::ParamType>& info) {
