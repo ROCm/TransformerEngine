@@ -20,11 +20,8 @@ mkdir -p /wheelhouse/logs
 # Generate wheels for common library.
 git config --global --add safe.directory /TransformerEngine
 cd /TransformerEngine
-git pull
-git checkout $TARGET_BRANCH
-git submodule update --init --recursive
 
-#If Python is installed on top of the base image, use that.
+#If there is default Python installation, use it
 PYTHON=`which python`
 if [ -z "$PYTHON" ]; then
         PYBINDIR=/opt/python/cp310-cp310/bin/
@@ -33,6 +30,12 @@ else
 fi
 
 ROCM_BUILD=`${PYBINDIR}python -c "import build_tools.utils as u; print(int(u.rocm_build()))"`
+
+if [ "$ROCM_BUILD" = "1" ]; then
+        git pull
+fi
+git checkout $TARGET_BRANCH
+git submodule update --init --recursive
 
 if $BUILD_METAPACKAGE ; then
         cd /TransformerEngine
