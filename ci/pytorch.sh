@@ -90,7 +90,7 @@ run_benchmark() {
         return
     fi
 
-    python "$BENCH_SCRIPT" --use_ck_bwd_v3
+    python "$BENCH_SCRIPT" --use_ck_bwd_v3 --run_sanity_checks
     echo "================================================================\n"
 }
 

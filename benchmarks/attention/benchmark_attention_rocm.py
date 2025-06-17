@@ -73,7 +73,7 @@ columns = [
     ]
 
 output_csv="times.csv"
-
+cwd = os.getcwd()
 # Runs benchmark with warmup iterations and profiles using rocprof
 def benchmark_dot_product_attention(model, attention, column_name, dirname):
     config = model_configs[model]
@@ -145,6 +145,10 @@ def parse_helper(model, dirname, fwd_search_pattern, bwd_search_pattern, column_
     # Extract kernel timing values    
     fwd_values = df[df["Name"].str.contains(fwd_search_pattern)]["AverageNs"].to_numpy()
     bwd_values = df[df["Name"].str.contains(bwd_search_pattern)]["AverageNs"].to_numpy()
+
+    if len(bwd_values) == 0:
+        return False  # CK V3 not supported or kernel_func not found
+    
     t_attn_avg = np.empty(len(fwd_values) + len(bwd_values))
     t_attn_avg[:len(fwd_values)] = fwd_values
     t_attn_avg[len(fwd_values):] = bwd_values
@@ -154,19 +158,27 @@ def parse_helper(model, dirname, fwd_search_pattern, bwd_search_pattern, column_
     df_times.loc[model, f"{column_name} Kernels (bwd)"] = t_attn_avg[len(fwd_values):].sum() / 1e6
     df_times.loc[model, f"{column_name} Kernels (fwd+bwd)"] = t_attn_avg.sum() / 1e6
 
+    return True
+
 # Parses profiler logs for different attention backends
 def parse_results(model, df_times, perf_dir_flash_attn, perf_dir_fused_attn, perf_dir_fused_ck, perf_dir_fused_aotriton, use_ck_bwd_v3):
     if perf_dir_flash_attn:
         parse_helper(model, perf_dir_flash_attn, "FmhaFwd", "FmhaBwd", "FlashAttention", df_times)
 
     if perf_dir_fused_attn:
-        bwd_pattern = "kernel_func" if use_ck_bwd_v3 else "FmhaBwd"
-        parse_helper(model, perf_dir_fused_attn, "FmhaFwd", bwd_pattern, "FusedAttention", df_times)
+        ck_v3_success = False
+        if use_ck_bwd_v3:
+            ck_v3_success = parse_helper(model, perf_dir_fused_ck, "FmhaFwd", "kernel_func", "FusedAttention", df_times)
+        if not ck_v3_success:
+            parse_helper(model, perf_dir_fused_ck, "FmhaFwd", "FmhaBwd", "FusedAttention", df_times)
 
-    if perf_dir_fused_ck:
-        bwd_pattern = "kernel_func" if use_ck_bwd_v3 else "FmhaBwd"
-        parse_helper(model, perf_dir_fused_ck, "FmhaFwd", bwd_pattern, "FusedAttention CK", df_times)
-
+    if perf_dir_fused_attn:
+        ck_v3_success = False
+        if use_ck_bwd_v3:
+            ck_v3_success = parse_helper(model, perf_dir_fused_ck, "FmhaFwd", "kernel_func", "FusedAttention CK", df_times)
+        if not ck_v3_success:
+            parse_helper(model, perf_dir_fused_ck, "FmhaFwd", "FmhaBwd", "FusedAttention CK", df_times)
+    
     if perf_dir_fused_aotriton:
         parse_helper(model, perf_dir_fused_aotriton, "attn_fwd", "bwd", "FusedAttention AOTriton", df_times)
 
@@ -176,14 +188,83 @@ def parse_results(model, df_times, perf_dir_flash_attn, perf_dir_fused_attn, per
             / df_times.loc[model, "FusedAttention Kernels (fwd+bwd)"]
         )
 
+###############################################################################
+# Post-benchmark sanity checks
+###############################################################################
+def sanity_checks(
+    profiler_root: str = "profiler_outputs",
+    csv_path: str = "times.csv",
+    tolerance_pct: float = 5.0,
+):
+    """
+    • Verifies that every model/backend that *should* have run produced
+        profiler_root/<dir>/results.stats.csv
+    • Checks FusedAttention vs FusedAttention-CK timing within ±tolerance_pct
+    • Non-zero exit code on any failure (CI friendly)
+    """
+    df = pd.read_csv(os.path.join(cwd, csv_path), index_col=0)
+    ok_overall = True
+    tol = tolerance_pct / 100.0
+    profiler_root = os.path.join(cwd, profiler_root)
 
-def main():
+    dir_pattern = {
+        "FlashAttention":           "prof_flash_{model}",
+        "FusedAttention":           "prof_fused_{model}",
+        "FusedAttention CK":        "prof_fused_ck_{model}",
+        "FusedAttention AOTriton":  "prof_fused_aotriton_{model}",
+    }
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--use_ck_bwd_v3", action="store_true", help="Use NVTE_CK_USES_BWD_V3=1 for CK bwd kernels")
-    args = parser.parse_args()
+    print("\n========== Sanity-check results ==========")
+    for model, cfg in model_configs.items():
+        avail, fused_bes = _get_attention_backends(
+            cfg,
+            qkv_dtype=dtype,
+            qkv_layout=qkv_layout,
+            window_size=cfg.window_size,
+            pad_between_seqs=pad_between_seqs,
+        )
+        flash_ok, fused_ok, _ = avail
 
-    cwd = os.getcwd()
+        expected = {}
+        if flash_ok:
+            expected["FlashAttention"] = dir_pattern["FlashAttention"]
+        if fused_ok:
+            expected["FusedAttention"] = dir_pattern["FusedAttention"]
+            if NVTE_Fused_Attn_Backend.NVTE_CK in fused_bes:
+                expected["FusedAttention CK"] = dir_pattern["FusedAttention CK"]
+            if NVTE_Fused_Attn_Backend.NVTE_AOTriton in fused_bes:
+                expected["FusedAttention AOTriton"] = dir_pattern["FusedAttention AOTriton"]
+
+        print(f"{model}:")
+        # Rocprof run status
+        for be, pat in expected.items():
+            stats = os.path.join(profiler_root, pat.format(model=model), "results.stats.csv")
+            if os.path.isfile(stats):
+                print(f"  [{be:<22}] Profiling successful")
+            else:
+                ok_overall = False
+                print(f"  [Error] {be:<16} error in profiling, results.stats.csv not found")
+
+        # Fused Vs Fused CK trace
+        if "FusedAttention" in expected and "FusedAttention CK" in expected:
+            f_fwd, f_bwd = df.loc[model, ["FusedAttention Kernels (fwd)",
+                                          "FusedAttention Kernels (bwd)"]]
+            c_fwd, c_bwd = df.loc[model, ["FusedAttention CK Kernels (fwd)",
+                                          "FusedAttention CK Kernels (bwd)"]]
+            if min(f_fwd, f_bwd, c_fwd, c_bwd) > 0:
+                rel_fwd = abs(f_fwd - c_fwd) / max(f_fwd, c_fwd)
+                rel_bwd = abs(f_bwd - c_bwd) / max(f_bwd, c_bwd)
+                if rel_fwd < tol and rel_bwd < tol:
+                    print(f"  [OK ] Fused vs CK diff ≤ {tolerance_pct}% "
+                          f"(fwd {rel_fwd*100:.2f} %, bwd {rel_bwd*100:.2f} %)")
+                else:
+                    ok_overall = False
+                    print(f"  [FAIL] Fused vs CK kernel time diff > {tolerance_pct}% "
+                          f"(fwd {rel_fwd*100:.2f} %, bwd {rel_bwd*100:.2f} %)")
+        print("-" * 60)
+
+
+def main(args):
     output_dir = "profiler_outputs/"
     run_dir = os.path.dirname(__file__)
 
@@ -304,5 +385,12 @@ def main():
         if os.path.exists(final_csv_path):
             os.remove(final_csv_path)
         shutil.move(output_csv, final_csv_path)    
+
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--use_ck_bwd_v3", action="store_true", help="Use NVTE_CK_USES_BWD_V3=1 for CK bwd kernels")
+    parser.add_argument("--run_sanity_checks", action="store_true", help="After benchmarking, verify profiler outputs and Fused vs CK timing parity")
+    args = parser.parse_args()
+    main(args)
+    if args.run_sanity_checks:
+        sanity_checks()
