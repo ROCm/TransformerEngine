@@ -1206,8 +1206,6 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                   math_sm_count, m_split, n_split, gemm_producer,
                   inputCounter, stream,
                   handle);
-
-  return;
 }
 
 } //namespace transformer_engine

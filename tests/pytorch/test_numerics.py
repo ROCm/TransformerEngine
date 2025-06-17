@@ -859,9 +859,6 @@ def test_gpt_checkpointing(dtype, bs, model):
         tols.update(dict(rtol=2e-2, atol=2e-3))
     if IS_HIP_EXTENSION:
         tols.update(rocm_attn_tols())
-        if len(tols) == 0:
-            # TODO(PIV) should tols be cleared
-            pass
     for i, (ref, test) in enumerate(zip(outputs, outputs_checkpoint)):
         torch.testing.assert_close(
             test,

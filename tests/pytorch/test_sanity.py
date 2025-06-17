@@ -940,10 +940,6 @@ def test_sanity_gradient_accumulation_fusion(
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("normalization", all_normalizations)
 def test_gpt_cuda_graph(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma, normalization):
-    if IS_HIP_EXTENSION:
-        if dtype in (torch.float16, torch.bfloat16):
-            pytest.skip(f"ROCm fused attention backends do not support cuda graph with {dtype}")
-
     config = model_configs[model]
 
     if fp8_recipe is not None:
