@@ -24,14 +24,13 @@ install_prerequisites() {
 run() {
     check_level $1 || return
     shift
-    _test_name_tag=`get_test_name_tag $1 hipblaslt-$_fus_attn`
+    _test_name_tag=`get_test_name_tag $1 $_fus_attn`
     check_test_filter $_test_name_tag || return
-    echo "Run [hipblaslt, $_fus_attn] $@"
+    echo "Run [$_fus_attn] $@"
     #: ${_WORKERS_COUNT:=1}
     #_args=-n$_WORKERS_COUNT --max-worker-restart=$_WORKERS_COUNT
-    pytest -v `get_pytest_junitxml $_test_name_tag` "$TEST_DIR/$@" || test_run_error "[hipblaslt, $_fus_attn] $1"
-    echo "Done [, $_fus_attn] $1"
-    echo "Done [hipblaslt, $_fus_attn] $1"
+    pytest -v `get_pytest_junitxml $_test_name_tag` "$TEST_DIR/$@" || test_run_error "[$_fus_attn] $1"
+    echo "Done [$_fus_attn] $1"
 }
 
 run_default_fa() {
@@ -43,7 +42,7 @@ run_default_fa() {
 }
 
 run_test_config(){
-    echo ==== Run with GEMM backend: hipblaslt and Fused attention backend: $_fus_attn ====
+    echo ==== Run with Fused attention backend: $_fus_attn ====
     #_WORKERS_COUNT=$TEST_WORKERS
     run 1 test_cuda_graphs.py
     run_default_fa 1 test_deferred_init.py
@@ -76,7 +75,7 @@ run_test_config_mgpu(){
     #_WORKERS_COUNT=1
     #test $TEST_WORKERS = 0 && _WORKERS_COUNT=0
     if [ $_fus_attn = "auto"]; then
-        echo ==== Run mGPU with GEMM backend: hipblaslt and Fused attention backend: $_fus_attn ====
+        echo ==== Run mGPU with Fused attention backend: $_fus_attn ====
         run 3 test_fused_optimizer.py
         run 3 distributed/test_fusible_ops.py
         run 3 fused_attn/test_fused_attn_with_cp.py
@@ -109,13 +108,13 @@ for _fus_attn in auto flash ck aotriton unfused; do
     #Level 1 - run in auto and unfused modes
     #Level 3 - run in all but unfused modes
     if [ $TEST_LEVEL -ge 3 ]; then
-        $_fus_attn = unfused && continue
+        test $_fus_attn = unfused && continue
     else
-        $_fus_attn != auto -a $_fus_attn != unfused && continue
+        test $_fus_attn != auto -a $_fus_attn != unfused && continue
     fi
 
     if [ -n "$TEST_JOBS_MODE" ]; then
-        test -n "$TEST_SGPU" && run_test_job "hipblaslt-$_fus_attn"
+        test -n "$TEST_SGPU" && run_test_job "$_fus_attn"
     else
         test -n "$TEST_SGPU" && run_test_config
         test -n "$TEST_MGPU" && run_test_config_mgpu

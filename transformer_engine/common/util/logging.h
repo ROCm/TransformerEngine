@@ -95,4 +95,3 @@
       NVTE_ERROR("NVRTC Error: ", nvrtcGetErrorString(status_NVTE_CHECK_NVRTC)); \
     }                                                                            \
   } while (false)
-  

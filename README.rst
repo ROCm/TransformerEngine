@@ -20,7 +20,7 @@ Feature Support Status
 ======================
 
 * Activation, cast, fused softmax, layernorm, rmsnorm, transpose, fused rope, fp8 recipe, HipRTC: fully supported
-* GEMM: partially supported with following input/output types: (fp32/fp32), (fp16/fp16), (bf16/bf16), (fp8, bf8/fp16, bf16, fp32) **Note:** Support for rocBLAS as a GEMM backend has been removed; `hipBLASLt` is the primary backend.
+* GEMM: partially supported with following input/output types: (fp32/fp32), (fp16/fp16), (bf16/bf16), (fp8, bf8/fp16, bf16, fp32) **Note:** Support for rocBLAS as a GEMM backend has been removed; `hipBLASLt` is the only backend.
 * Attention (Flash Attention, Fused Multihead Attention): partially supported: Fused Attention with AOTriton and CK backends, FlashAttention-2 without variable sequence length feature
 * HipGraph, HipTX: partially supported
 * Tensor Parallelism, Sequence Parallelism, Context Parallelism: supported
@@ -70,7 +70,6 @@ Install TE
   export NVTE_ROCM_ARCH=gfx942 # CK fused attn only support MI200 and MI300 and fp8 features are only supported on MI300
   
   # Build Platform Selection (optional)
-  # Note: rocBLAS is no longer a supported GEMM backend. hipBLASLt is used for GEMM operations.
   # Note: Useful when both ROCm and CUDA platforms are present in the Docker
   export NVTE_USE_ROCM=1  #Use 1 for ROCm, or set to 0 to use CUDA; If not set will try to detect installed platform, prioritizing ROCm
 

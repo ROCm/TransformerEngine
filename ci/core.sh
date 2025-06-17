@@ -32,8 +32,11 @@ if [ $? -eq 0 ]; then
 fi
 
 _exclude="-E Test(.*XTN|.*XNT|.*bf16/.*X.X1|.*fp8.*fp16/.*X1X0|.*fp8.*X.X1|.*fp8/|.*bf8/)"
-echo  ===== Run GEMM hipblaslt tests =====
-ctest --test-dir build -j4 --output-on-failure -R "OperatorTest/GEMMTestSuite" $_exclude
-test $? -eq 0 || test_run_error "GEMM hipblaslt"
+check_test_filter "gemm"
+if [ $? -eq 0 ]; then
+    echo  ===== Run GEMM tests =====
+    ctest --test-dir build -j4 --output-on-failure -R "OperatorTest/GEMMTestSuite" $_exclude
+    test $? -eq 0 || test_run_error "GEMM"
+fi
 
 return_run_results
