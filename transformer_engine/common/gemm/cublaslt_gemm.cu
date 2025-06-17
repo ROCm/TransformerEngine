@@ -21,11 +21,7 @@
 #include "../common.h"
 #include "../util/vectorized_pointwise.h"
 #include "../util/logging.h"
-#ifndef __HIP_PLATFORM_AMD__
 #include "common/util/cuda_runtime.h"
-#else
-#include "../util/cuda_runtime.h"
-#endif // #ifndef __HIP_PLATFORM_AMD__
 
 #ifndef __HIP_PLATFORM_AMD__
 namespace {

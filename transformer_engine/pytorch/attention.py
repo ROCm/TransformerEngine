@@ -183,7 +183,7 @@ else:
             _get_supported_versions(
                 (
                     _flash_attn_version_required
-                    if get_device_compute_capability() < (10, 0)
+                    if (IS_HIP_EXTENSION or get_device_compute_capability() < (10, 0))
                     else _flash_attn_version_required_blackwell
                 ),
                 _flash_attn_max_version,
@@ -3206,7 +3206,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             _flash_attn_2_3_plus and not _flash_attn_2_7_0_plus
                         ):
                             fa_backward_kwargs["window_size"] = (-1, -1)
-                        if _flash_attn_2_7_0_plus:
+                        elif _flash_attn_2_7_0_plus:
                             fa_backward_kwargs["window_size_left"] = -1
                             fa_backward_kwargs["window_size_right"] = -1
                         if not _use_flash_attn_3:

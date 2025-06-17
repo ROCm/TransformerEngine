@@ -10,13 +10,8 @@
 
 #include "./common.h"
 #include "./utils.cuh"
-#ifndef __HIP_PLATFORM_AMD__
 #include "common/util/cuda_runtime.h"
 #include "common/util/logging.h"
-#else
-#include "./util/cuda_runtime.h"
-#include "./util/logging.h"
-#endif //#ifndef __HIP_PLATFORM_AMD__
 
 namespace transformer_engine {
 

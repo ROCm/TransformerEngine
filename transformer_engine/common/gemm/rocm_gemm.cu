@@ -1239,6 +1239,7 @@ void hipblaslt_gemm(const Tensor *inputA,
         operationDesc, HIPBLASLT_MATMUL_DESC_D_SCALE_POINTER, &D_scale, sizeof(D_scale)));
       NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
         operationDesc, HIPBLASLT_MATMUL_DESC_AMAX_D_POINTER, &D_amax, sizeof(D_amax)));
+      // To make supported gemm configs consistent with NV cublaslt
       // For FP8 output, cuBLAS requires C_type to match bias_type and
       // be FP16/BF16
       const hipDataType C_type = bias ? bias_type : HIP_R_16BF;
@@ -1270,6 +1271,7 @@ void hipblaslt_gemm(const Tensor *inputA,
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
                                                       HIPBLASLT_MATMUL_DESC_EPILOGUE_AUX_LD,
                                                       &ld_gelumat, sizeof(ld_gelumat)));
+    // TODO: future enablement
     //const hipDataType aux_type = get_hipblaslt_dtype(outputPreGelu->data.dtype);
     //NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
     //  operationDesc, HIPBLASLT_MATMUL_DESC_EPILOGUE_AUX_DATA_TYPE, &aux_type, sizeof(aux_type)));

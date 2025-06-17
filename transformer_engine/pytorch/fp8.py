@@ -57,7 +57,7 @@ def check_fp8_support() -> Tuple[bool, str]:
 
 def check_mxfp8_support() -> Tuple[bool, str]:
     """Return if fp8 support is available"""
-    if get_device_compute_capability() >= (10, 0):  # blackwell and above
+    if (not IS_HIP_EXTENSION) and get_device_compute_capability() >= (10, 0):  # blackwell and above
         return True, ""
     return False, "Device compute capability 10.0 or higher required for MXFP8 execution."
 

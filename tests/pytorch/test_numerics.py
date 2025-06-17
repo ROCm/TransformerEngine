@@ -214,6 +214,7 @@ class TorchScaledMaskedSoftmax(nn.Module):
         probs = probs.to(dtype)
         return probs
 
+
 class TorchDotProductAttention(torch.nn.Module):
     def __init__(
         self,
@@ -1441,6 +1442,7 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
 
     # Check output.
     assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype], rtol[dtype])
+
     # Check gradients, only for small model
     rtol = {
         torch.float32: 1e-3,
@@ -1457,6 +1459,7 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
     if model == "small":
         for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
             assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
+
 
 def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, recipe, fp8=False):
     reset_rng_states()
@@ -1783,7 +1786,7 @@ def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
         loss.backward()
         optimizer.step()
         return out
-  
+
     # Warmup steps in a separate stream.
     s = torch.cuda.Stream()
     s.wait_stream(torch.cuda.current_stream())
@@ -1938,7 +1941,6 @@ def test_gpt_fp8_parameters(dtype, bs, model, recipe):
 
     # Check that results match
     tols = dict(rtol=0.125, atol=0.0675)
-
     for i, (ref, test) in enumerate(zip(outputs, outputs_fp8_params)):
         torch.testing.assert_close(
             test,

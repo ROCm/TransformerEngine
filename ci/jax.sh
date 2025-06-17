@@ -85,8 +85,9 @@ run_test_config_mgpu() {
         # Run tests that fail with JIT disabled
         run 3 test_distributed_fused_attn.py -k 'test_context_parallel_allgather_attn[BALANCED'
 
-        # Test ring attention with scan loop only
-        NVTE_FUSED_RING_ATTENTION_USE_SCAN=1 XLA_FLAGS="--xla_experimental_ignore_channel_id" run 3 test_distributed_fused_attn.py -k test_context_parallel_ring_attn
+        # Test ring attention with xla_flag --xla_experimental_ignore_channel_id only
+        # TODO: remove this flag after jax/xla update
+        XLA_FLAGS="--xla_experimental_ignore_channel_id" run 3 test_distributed_fused_attn.py -k test_context_parallel_ring_attn
         ;;
     *0.4.31*)
         #Workaround for JAX 0.4.31 regression: crash in test_destributed_fused_attn and test_distributed_layernorm_mlp
