@@ -85,8 +85,7 @@ run_test_config_mgpu(){
 
 # Single config mode, run it and return result
 if [ -n "$SINGLE_CONFIG" ]; then
-    _gemm=`echo $SINGLE_CONFIG | cut -d- -f1`
-    _fus_attn=`echo $SINGLE_CONFIG | cut -d- -f2`
+    _fus_attn="$SINGLE_CONFIG"
     configure_fused_attn_env $_fus_attn && run_test_config
     return_run_results
     exit $?
@@ -123,9 +122,7 @@ done
 
 if [ -n "$TEST_JOBS_MODE" -a -n "$TEST_MGPU" ]; then
     finish_test_jobs
-    for _cfg in $(get_test_config_list); do
-        _gemm=`echo $_cfg | cut -d- -f1`
-        _fus_attn=`echo $_cfg | cut -d- -f2`
+    for _fus_attn in $(get_test_config_list); do
         configure_fused_attn_env $_fus_attn && run_test_config_mgpu;
     done
 fi
