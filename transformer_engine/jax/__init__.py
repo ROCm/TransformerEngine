@@ -13,30 +13,33 @@ from importlib.metadata import version
 
 from transformer_engine.common import get_te_path, is_package_installed
 from transformer_engine.common import _get_sys_extension
+from .util import is_hip_extension
 
 
 def _load_library():
     """Load shared library with Transformer Engine C extensions"""
     module_name = "transformer_engine_jax"
+    te_cuda_vers = "rocm" if is_hip_extension() else "cu12"
 
     if is_package_installed(module_name):
         assert is_package_installed("transformer_engine"), "Could not find `transformer-engine`."
         assert is_package_installed(
-            "transformer_engine_cu12"
-        ), "Could not find `transformer-engine-cu12`."
+            f"transformer_engine_{te_cuda_vers}"
+        ), f"Could not find `transformer-engine-{te_cuda_vers}`."
         assert (
             version(module_name)
             == version("transformer-engine")
-            == version("transformer-engine-cu12")
+            == version(f"transformer-engine-{te_cuda_vers}")
         ), (
             "TransformerEngine package version mismatch. Found"
             f" {module_name} v{version(module_name)}, transformer-engine"
-            f" v{version('transformer-engine')}, and transformer-engine-cu12"
-            f" v{version('transformer-engine-cu12')}. Install transformer-engine using 'pip install"
+            f" v{version('transformer-engine')}, and transformer-engine-{te_cuda_vers}"
+            f" v{version(f'transformer-engine-{te_cuda_vers}')}."
+            " Install transformer-engine using 'pip install"
             " transformer-engine[jax]==VERSION'"
         )
 
-    if is_package_installed("transformer-engine-cu12"):
+    if is_package_installed(f"transformer-engine-{te_cuda_vers}"):
         if not is_package_installed(module_name):
             logging.info(
                 "Could not find package %s. Install transformer-engine using 'pip"
@@ -61,7 +64,6 @@ from .fp8 import fp8_autocast, update_collections, get_delayed_scaling
 from .fp8 import NVTE_FP8_COLLECTION_NAME
 from .sharding import MeshResource
 from .sharding import MajorShardingType, ShardingResource, ShardingType
-from .util import is_hip_extension
 
 from ..common.utils import deprecate_wrapper
 from ..common.utils import DeprecatedEnum

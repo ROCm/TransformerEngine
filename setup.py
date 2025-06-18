@@ -64,10 +64,21 @@ def setup_common_extension() -> CMakeExtension:
     cmake_flags = []
     if rocm_build():
         cmake_flags.append("-DUSE_ROCM=ON")
-        if os.getenv("NVTE_USE_HIPBLASLT") is not None:
+        # HIPBLASLT and ROCBLAS support are controlled as follows:
+        #  If neither NVTE_USE_HIPBLASLT nor NVTE_USE_ROCBLAS are set, or both are set, both frameworks are enabled
+        #  If one is set and the other is not, then only the corresponding backend is built
+        enable_hipblaslt = os.getenv("NVTE_USE_HIPBLASLT") is not None
+        enable_rocblas = os.getenv("NVTE_USE_ROCBLAS") is not None
+        if enable_hipblaslt and not enable_rocblas:
             cmake_flags.append("-DUSE_HIPBLASLT=ON")
-        if os.getenv("NVTE_USE_ROCBLAS") is not None:
+            cmake_flags.append("-DUSE_ROCBLAS=OFF")
+        elif enable_rocblas and not enable_hipblaslt:
+            cmake_flags.append("-DUSE_HIPBLASLT=OFF")
             cmake_flags.append("-DUSE_ROCBLAS=ON")
+        else:
+            cmake_flags.append("-DUSE_HIPBLASLT=ON")
+            cmake_flags.append("-DUSE_ROCBLAS=ON")
+
         if os.getenv("NVTE_AOTRITON_PATH"):
             aotriton_path = Path(os.getenv("NVTE_AOTRITON_PATH"))
             cmake_flags.append(f"-DAOTRITON_PATH={aotriton_path}")
@@ -126,14 +137,19 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
         setup_reqs.append("pybind11")
 
     # Framework-specific requirements
-    if (not rocm_build()) and (not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0")))):
+    if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         if "pytorch" in frameworks:
-            install_reqs.extend(["torch"])
-            test_reqs.extend(["numpy", "torchvision", "prettytable"])
+            if not rocm_build():
+                install_reqs.extend(["torch"])
+                test_reqs.extend(["numpy", "torchvision", "prettytable"])
         if "jax" in frameworks:
-            install_reqs.extend(["jax", "flax>=0.7.1"])
-            # test_reqs.extend(["numpy", "praxis"])
-            test_reqs.extend(["numpy"])
+            if rocm_build():
+                from build_tools.jax import jax_install_requires
+                install_reqs.extend(jax_install_requires(["flax>=0.7.1"]))
+            else:
+                install_reqs.extend(["jax", "flax>=0.7.1"])
+                # test_reqs.extend(["numpy", "praxis"])
+                test_reqs.extend(["numpy"])
 
     return [remove_dups(reqs) for reqs in [setup_reqs, install_reqs, test_reqs]]
 
@@ -149,12 +165,13 @@ if __name__ == "__main__":
         assert bool(
             int(os.getenv("NVTE_RELEASE_BUILD", "0"))
         ), "NVTE_RELEASE_BUILD env must be set for metapackage build."
+        te_cuda_vers = "rocm" if rocm_build() else "cu12"
         ext_modules = []
         cmdclass = {}
         package_data = {}
         include_package_data = False
         setup_requires = []
-        install_requires = ([f"transformer_engine_cu12=={__version__}"],)
+        install_requires = ([f"transformer_engine_{te_cuda_vers}=={__version__}"],)
         extras_require = {
             "pytorch": [f"transformer_engine_torch=={__version__}"],
             "jax": [f"transformer_engine_jax=={__version__}"],

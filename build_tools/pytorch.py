@@ -41,7 +41,9 @@ def setup_pytorch_extension(
         csrc_header_files,
     ]
 
-    if rocm_build():
+    # If NVTE_RELEASE_BUILD is set, we assume not building but sources packaging
+    # and we do not hipify the sources
+    if rocm_build() and not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         current_file_path = Path(__file__).parent.resolve()
         base_dir = current_file_path.parent
         sources = hipify(base_dir, csrc_source_files, sources, include_dirs)
@@ -78,6 +80,9 @@ def setup_pytorch_extension(
     if rocm_build():
         ##TODO: Figure out which hipcc version starts to support this parallel compilation
         nvcc_flags.extend(["-parallel-jobs=4"])
+        # Pytorch extension can get the ROCm architecture from the environment variable
+        if os.getenv("NVTE_ROCM_ARCH") is not None:
+            os.environ["PYTORCH_ROCM_ARCH"] = os.getenv("NVTE_ROCM_ARCH")
     else:
         cuda_architectures = cuda_archs()
 

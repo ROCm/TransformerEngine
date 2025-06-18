@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -11,6 +13,7 @@ import importlib
 import importlib.util
 import sys
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from importlib.metadata import version
 
 from transformer_engine.common import get_te_path, is_package_installed
@@ -20,25 +23,27 @@ from transformer_engine.common import _get_sys_extension
 def _load_library():
     """Load shared library with Transformer Engine C extensions"""
     module_name = "transformer_engine_torch"
+    te_cuda_vers = "rocm" if IS_HIP_EXTENSION else "cu12"
 
     if is_package_installed(module_name):
         assert is_package_installed("transformer_engine"), "Could not find `transformer-engine`."
         assert is_package_installed(
-            "transformer_engine_cu12"
-        ), "Could not find `transformer-engine-cu12`."
+            f"transformer_engine_{te_cuda_vers}"
+        ), f"Could not find `transformer-engine-{te_cuda_vers}`."
         assert (
             version(module_name)
             == version("transformer-engine")
-            == version("transformer-engine-cu12")
+            == version(f"transformer-engine-{te_cuda_vers}")
         ), (
             "TransformerEngine package version mismatch. Found"
             f" {module_name} v{version(module_name)}, transformer-engine"
-            f" v{version('transformer-engine')}, and transformer-engine-cu12"
-            f" v{version('transformer-engine-cu12')}. Install transformer-engine using 'pip install"
+            f" v{version('transformer-engine')}, and transformer-engine-{te_cuda_vers}"
+            f" v{version(f'transformer-engine-{te_cuda_vers}')}."
+            " Install transformer-engine using 'pip install"
             " transformer-engine[pytorch]==VERSION'"
         )
 
-    if is_package_installed("transformer-engine-cu12"):
+    if is_package_installed(f"transformer-engine-{te_cuda_vers}"):
         if not is_package_installed(module_name):
             logging.info(
                 "Could not find package %s. Install transformer-engine using 'pip"
