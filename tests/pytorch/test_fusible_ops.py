@@ -1,5 +1,3 @@
-# This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -28,7 +26,6 @@ from transformer_engine.pytorch.tensor import QuantizedTensor
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine_torch as tex
-
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
