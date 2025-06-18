@@ -394,6 +394,35 @@ def copy_common_headers(
         shutil.copy(path, new_path)
 
 
+def copy_hipify_tools(
+    src_dir: Union[Path, str],
+    dst_dir: Union[Path, str],
+) -> None:
+    """Copy necessary hipify tools from library root
+    src_dir should be the root or Transformer Engine repository.
+    """
+    if rocm_build() and bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
+        hipify_dir = src_dir / "3rdparty" / "hipify_torch"
+        hipify_copy = dst_dir / "3rdparty" / "hipify_torch"
+        if hipify_copy.exists():
+            shutil.rmtree(hipify_copy)
+        shutil.copytree(hipify_dir, hipify_copy)
+        shutil.copy(src_dir / "hipify_custom_map.json", dst_dir / "hipify_custom_map.json")
+
+
+def clear_hipify_tools_copy(
+    dst_dir: Union[Path, str],
+) -> None:
+    """Clear temporary copies of hipify tools
+    """
+    hipify_copy = dst_dir / "3rdparty"
+    if hipify_copy.exists():
+        shutil.rmtree(hipify_copy)
+    map_copy = dst_dir / "hipify_custom_map.json"
+    if map_copy.exists():
+        map_copy.unlink()
+
+
 def install_and_import(package):
     """Install a package via pip (if not already installed) and import into globals."""
     main_package = package.split("[")[0]
@@ -409,6 +438,7 @@ def uninstall_te_wheel_packages():
             "pip",
             "uninstall",
             "-y",
+            "transformer_engine_rocm", # te_cuda_vers for ROCm build
             "transformer_engine_cu12",
             "transformer_engine_torch",
             "transformer_engine_paddle",

@@ -248,6 +248,8 @@ if (USE_CUDA)
   # Hack to enable dynamic loading in cuDNN frontend
   target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
 else()
+  set(GPU_TARGETS ${CMAKE_HIP_ARCHITECTURES})
+
   if(USE_FUSED_ATTN_AOTRITON)
     # This is for GPU kernel downloading
     # The AOTriton C++ runtime will be built from ../../3rdparty/aotriton
@@ -261,6 +263,7 @@ else()
       else()
         set(AOTRITON_NOIMAGE_MODE ON)
       endif()
+      set(aotriton_supported_archs)
       set(aotriton_target_gpus "")
       # GPU Targets
       macro(translate_arch_to_gpu_names aotriton_target_gpus)
@@ -273,6 +276,7 @@ else()
           string(APPEND key "_key")
           set(gpu ${${key}})
           if (gpu)
+            list(APPEND aotriton_supported_archs ${X})
             string(APPEND aotriton_target_gpus "${gpu}|")
           else()
             message(WARNING "AOTriton building is not supported for ${X}")
@@ -286,7 +290,7 @@ else()
       else()
         include(ExternalProject)
         ExternalProject_Add(aotriton_external
-          SOURCE_DIR ../../3rdparty/aotriton
+          SOURCE_DIR ${TE}/3rdparty/aotriton
           LIST_SEPARATOR |
           CMAKE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${__AOTRITON_INSTALL_DIR}
           -DTARGET_GPUS=${aotriton_target_gpus}
@@ -308,15 +312,21 @@ else()
                                       "${__AOTRITON_VER}-manylinux_2_28"
                                       "_x86_64-rocm6.2"
                                       "-shared.tar.gz")
+          set(aotriton_image_dirs)
+          foreach(X IN LISTS aotriton_supported_archs)
+            list(APPEND aotriton_image_dirs "${CMAKE_CURRENT_BINARY_DIR}/aotriton_tarball/lib/aotriton.images/amd-${X}")
+          endforeach()
+          set(aotriton_lib_install_dir "${__AOTRITON_INSTALL_DIR}/lib/aotriton.images")
+          file(REMOVE_RECURSE ${aotriton_lib_install_dir})
+          file(MAKE_DIRECTORY ${aotriton_lib_install_dir})
           ExternalProject_Add(aotriton_images
                               URL "${__AOTRITON_URL}"
                               URL_HASH SHA256=${__AOTRITON_SHA256}
                               SOURCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/aotriton_tarball
                               CONFIGURE_COMMAND ""
                               BUILD_COMMAND ""
-                              INSTALL_COMMAND ${CMAKE_COMMAND} -E copy_directory
-                              "${CMAKE_CURRENT_BINARY_DIR}/aotriton_tarball/lib/aotriton.images"
-                              "${__AOTRITON_INSTALL_DIR}/lib/aotriton.images")
+                              BUILD_ALWAYS TRUE
+                              INSTALL_COMMAND cp -Ra ${aotriton_image_dirs} ${aotriton_lib_install_dir})
           add_dependencies(aotriton aotriton_images)
         endif()
         install(DIRECTORY
@@ -339,7 +349,6 @@ else()
   if(USE_FUSED_ATTN_CK)
     if(NOT DEFINED CK_FUSED_ATTN_PATH)
       set(CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT ${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT} CACHE STRING "ck float to bf16 conversion rounding")
-      set(CK_FUSED_ATTN_TARGET_GPUS ${CMAKE_HIP_ARCHITECTURES} CACHE STRING "Target arch to compile ck fused attn backend")
       add_subdirectory(ck_fused_attn ${CMAKE_CURRENT_BINARY_DIR}/ck_fused_attn)
     else()
       # Use CK built during initial TE building/installation
@@ -461,10 +470,6 @@ else()
   # Ask hcc to generate device code during compilation so we can use
   # host linker to link.
   set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} -fno-gpu-rdc -Wno-defaulted-function-deleted")
-  foreach(rocm_arch ${CMAKE_HIP_ARCHITECTURES})
-    # if CMAKE_CXX_FLAGS has --offload-arch set already, better to rm first
-    set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} --offload-arch=${rocm_arch}")
-  endforeach()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${HIP_HCC_FLAGS}")
   # Hide non-necessary symbols in shared object.
   set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
@@ -473,3 +478,11 @@ endif()
 # Install library
 install(TARGETS transformer_engine DESTINATION .)
 set_target_properties(transformer_engine PROPERTIES INSTALL_RPATH "$ORIGIN/lib;$ORIGIN/transformer_engine/lib")
+
+if (USE_ROCM)
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/build_info.txt"
+    "ROCM_VERSION: ${hip_VERSION_MAJOR}.${hip_VERSION_MINOR}\n"
+    "GPU_TARGETS: ${CMAKE_HIP_ARCHITECTURES}\n"
+  )
+  install(FILES "${CMAKE_CURRENT_BINARY_DIR}/build_info.txt" DESTINATION "transformer_engine/")
+endif()

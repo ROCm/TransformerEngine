@@ -63,7 +63,9 @@ def setup_jax_extension(
         xla_home,
     ])
 
-    if rocm_build():
+    # If NVTE_RELEASE_BUILD is set, we assume not building but sources packaging
+    # and we do not hipify the sources
+    if rocm_build() and not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         current_file_path = Path(__file__).parent.resolve()
         base_dir = current_file_path.parent
         sources = hipify(base_dir, csrc_source_files, sources, include_dirs)
@@ -102,3 +104,12 @@ def setup_jax_extension(
         extra_compile_args={"cxx": cxx_flags, "nvcc": nvcc_flags},
         define_macros=macros
     )
+
+
+def jax_install_requires(reqs: List[str]) -> List[str]:
+    """Update requirements with current JAX version to avoid undesired update."""
+    try:
+        import jax
+    except ImportError:
+        return []
+    return reqs + [f"jax=={jax.__version__}"]

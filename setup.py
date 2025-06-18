@@ -136,13 +136,18 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
         setup_reqs.append("pybind11")
 
     # Framework-specific requirements
-    if (not rocm_build()) and (not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0")))):
+    if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         if "pytorch" in frameworks:
-            install_reqs.extend(["torch"])
-            test_reqs.extend(["numpy", "onnxruntime", "torchvision", "prettytable"])
+            if not rocm_build():
+                install_reqs.extend(["torch"])
+                test_reqs.extend(["numpy", "onnxruntime", "torchvision", "prettytable"])
         if "jax" in frameworks:
-            install_reqs.extend(["jax", "flax>=0.7.1"])
-            test_reqs.extend(["numpy", "praxis"])
+            if rocm_build():
+                from build_tools.jax import jax_install_requires
+                install_reqs.extend(jax_install_requires(["flax>=0.7.1"]))
+            else:
+                install_reqs.extend(["jax", "flax>=0.7.1"])
+                test_reqs.extend(["numpy", "praxis"])
         if "paddle" in frameworks:
             install_reqs.append("paddlepaddle-gpu")
             test_reqs.append("numpy")
@@ -161,12 +166,13 @@ if __name__ == "__main__":
         assert bool(
             int(os.getenv("NVTE_RELEASE_BUILD", "0"))
         ), "NVTE_RELEASE_BUILD env must be set for metapackage build."
+        te_cuda_vers = "rocm" if rocm_build() else "cu12"
         ext_modules = []
         cmdclass = {}
         package_data = {}
         include_package_data = False
         setup_requires = []
-        install_requires = ([f"transformer_engine_cu12=={__version__}"],)
+        install_requires = ([f"transformer_engine_{te_cuda_vers}=={__version__}"],)
         extras_require = {
             "pytorch": [f"transformer_engine_torch=={__version__}"],
             "jax": [f"transformer_engine_jax=={__version__}"],
