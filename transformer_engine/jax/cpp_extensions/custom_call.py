@@ -7,13 +7,17 @@
 from dataclasses import dataclass
 from enum import IntEnum
 
+import jax
 from jax.interpreters import mlir
-import jax.extend as jex
-
 from transformer_engine import transformer_engine_jax
 
 from .misc import is_hip_extension
 from .misc import is_ffi_enabled
+#wait for the jax v0.5.0 migration
+if is_hip_extension() and jax.__version__<"0.5.0":
+    import jax.extend as jex
+else:
+    import jax as jex
 
 try:
     from jaxlib.hlo_helpers import custom_call
@@ -33,7 +37,6 @@ class CustomCallAPIVersion(IntEnum):
 for _name, _value in transformer_engine_jax.registrations().items():
     if _name.endswith("_ffi"):
         if is_ffi_enabled():
-            # COMMAND_BUFFER_COMPATIBLE i.e. cudaGraph enabled by default
             jex.ffi.register_ffi_target(
                 _name, _value, platform="ROCM" if is_hip_extension() else "CUDA", api_version=CustomCallAPIVersion.FFI.value
             )

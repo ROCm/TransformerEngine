@@ -6,7 +6,7 @@ import torch
 import triton
 import triton.language as tl
 from itertools import product
-
+import transformer_engine_torch as tex
 from .norm_common import num_programs, block_size, use_blocked
 
 def dg_tmp_rows(x, sm_margin=None):
@@ -114,44 +114,7 @@ def _rmsnorm_fwd_triton(output_ptr, input_ptr, g_ptr, rsigma_ptr, input_row_stri
             output_ptrs = tl.multiple_of(output_ptrs, (16, ))
             tl.store(output_ptrs, rms_norm.to(output_ptr.type.element_ty), mask=mask)
 
-
-# TODO: currently our triton kernel has not supported fp8 yet
-def te_rmsnorm_fwd_fp8_noalloc_triton(input, weight, eps, ln_out, otype, sm_margin, zero_centered_gamma):
-    M, N = input.shape
-    rsigma = torch.empty((M, ), device='cuda', dtype=torch.float32)
-    blk_size = block_size(input)
-    USE_BLOCKED = use_blocked(input)
-    NUM_PRGMS = num_programs(input, sm_margin)
-
-    grid = lambda meta: (NUM_PRGMS, )
-    #encode the otype if ln_out is of different dtype
-    ln_out = ln_out.view(otype)
-    _rmsnorm_fwd_triton[grid](ln_out, input, weight, rsigma, input.stride(0), ln_out.stride(0), M, N, eps, zero_centered_gamma, blk_size, USE_BLOCKED, NUM_PRGMS)
-
-    return ln_out, rsigma
-
-
-# specialized version of rmsnorm fwd, with input and output of the same dtype
-def te_rmsnorm_fwd_noalloc_triton(input, weight, ln_out, eps, sm_margin, zero_centered_gamma):
-    assert input.dtype==ln_out.dtype, "input and output dtype should be the same in te_rmsnorm_fwd_noalloc_triton"
-    return te_rmsnorm_fwd_fp8_noalloc_triton(input, weight, eps, ln_out, input.dtype, sm_margin, zero_centered_gamma)
-
-
-# specialized version of rmsnorm fwd, optimized for inference
-def te_rmsnorm_fwd_inf_triton(input, weight, eps, sm_margin, zero_centered_gamma):
-    ln_out = torch.empty_like(input)
-    ln_out, _ = te_rmsnorm_fwd_noalloc_triton(input, weight, ln_out, eps, sm_margin, zero_centered_gamma)
-    return ln_out
-
-
-# may take non-contiguous input and weight
-# see rmsnorm_fwd in transformer_engine/pytorch/csrc/extensions/normalization.cu
-def te_rmsnorm_fwd_triton(input, weight, eps, sm_margin, zero_centered_gamma):
-    input_ = input.contiguous()
-    weight_ = weight.contiguous()
-    ln_out = torch.empty_like(input_)
-    return te_rmsnorm_fwd_noalloc_triton(input_, weight_, ln_out, eps, sm_margin, zero_centered_gamma)
-
+#TODO: refactor te_rmsnorm_fwd_triton to match transformer_engine::pytorch::rmsnorm_fwd 
 
 @triton.jit
 def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, dg_ptr, input_row_stride, output_row_stride,
@@ -305,10 +268,9 @@ def _rmsnorm_bwd_dg_reduce_triton(dg_in_ptr, dg_out_ptr, dg_in_stride, n_rows, n
     sum_dg = tl.sum(acc, axis=0)
     tl.store(dg_out_ptr + cols, sum_dg.to(dg_out_ptr.type.element_ty), mask=cols < n_cols)
 
-
-# may take non-contiguous inputs
-# see rmsnorm_bwd in transformer_engine/pytorch/csrc/extensions/normalization.cu
+# triton drop-in replacement for transformer_engine::pytorch::rmsnorm_bwd
 def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma):
+    # may take non-contiguous inputs
     dz_ = dz.contiguous()
     x_ = x.contiguous()
     rsigma_ = rsigma.contiguous()

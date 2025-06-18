@@ -61,6 +61,92 @@ static hipDataType get_hipblaslt_dtype(const transformer_engine::DType t) {
       NVTE_ERROR("Invalid type");
   }
 }
+
+//TODO: unified with cublaslt_gemm.cu after rocblas pass taken out
+struct GemmParam {
+  void *A;
+  void *B;
+  cublasOperation_t transA;
+  cublasOperation_t transB;
+  transformer_engine::DType Atype;
+  transformer_engine::DType Btype;
+  void *A_scale_inv;
+  void *B_scale_inv;
+  int lda;
+  int ldb;
+
+  GemmParam(cublasOperation_t transA, cublasOperation_t transB)
+      : A(nullptr),
+        B(nullptr),
+        transA(transA),
+        transB(transB),
+        Atype(transformer_engine::DType::kNumTypes),
+        Btype(transformer_engine::DType::kNumTypes),
+        A_scale_inv(nullptr),
+        B_scale_inv(nullptr),
+        lda(0),
+        ldb(0) {}
+};
+
+GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cublasOperation_t transA,
+                                const transformer_engine::Tensor &B, const cublasOperation_t transB,
+                                const int k, const int lda, const int ldb) {
+  using namespace transformer_engine;
+  NVTE_CHECK(A.scaling_mode == B.scaling_mode,
+             "Inputs A and B to GEMM need to have the same scaling mode!");
+  NVTE_CHECK(A.has_data() || A.has_columnwise_data(), "Input A does not hold any data!");
+  NVTE_CHECK(B.has_data() || B.has_columnwise_data(), "Input B does not hold any data!");
+  GemmParam ret(transA, transB);
+
+  ret.lda = lda;
+  ret.ldb = ldb;
+
+  if (is_tensor_scaling(A.scaling_mode)) {
+    ret.A = A.data.dptr;
+    ret.A_scale_inv = A.scale_inv.dptr;
+    if (transA == CUBLAS_OP_T) {
+      ret.Atype = A.data.dtype;
+    } else {
+      ret.Atype = A.has_columnwise_data() ? A.columnwise_data.dtype : A.data.dtype;
+      if (is_fp8_dtype(ret.Atype)) {
+        // Hopper and Ada - we need to use columnwise_data and change transA
+        NVTE_CHECK(A.has_columnwise_data(), "Input A is not suitable for columnwise usage!");
+        ret.A = A.columnwise_data.dptr;
+        ret.transA = CUBLAS_OP_T;
+        ret.A_scale_inv = A.columnwise_scale_inv.dptr;
+        ret.lda = k;
+      }
+    }
+    ret.B = B.data.dptr;
+    ret.B_scale_inv = B.scale_inv.dptr;
+    if (transB == CUBLAS_OP_T) {
+      ret.Btype = B.has_columnwise_data() ? B.columnwise_data.dtype : B.data.dtype;
+      if (is_fp8_dtype(ret.Btype)) {
+        // Hopper and Ada - we need to use columnwise_data and change transA
+        NVTE_CHECK(B.has_columnwise_data(), "Input B is not suitable for columnwise usage!");
+        ret.B = B.columnwise_data.dptr;
+        ret.transB = CUBLAS_OP_N;
+        ret.B_scale_inv = B.columnwise_scale_inv.dptr;
+        ret.ldb = k;
+      }
+    } else {
+      ret.Btype = B.data.dtype;
+    }
+  } else {
+    // If not tensor scaling (which includes also high precision types), we need to
+    // use the proper version of data
+    // We leave the transA/B values as is, since Blackwell supports transposes
+    ret.A = transA ? A.data.dptr : A.columnwise_data.dptr;
+    ret.Atype = transA ? A.data.dtype : A.columnwise_data.dtype;
+    ret.A_scale_inv = transA ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
+    ret.B = transB ? B.columnwise_data.dptr : B.data.dptr;
+    ret.Btype = transB ? B.columnwise_data.dtype : B.data.dtype;
+    ret.B_scale_inv = transB ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
+  }
+  return ret;
+}
+
+
 #endif
 
 #ifdef USE_ROCBLAS
@@ -1019,50 +1105,53 @@ static void init_hipblaslt_handles(hipblasLtHandle_t* hipblaslt_handles) {
 }
 
 void hipblaslt_gemm(const Tensor *inputA,
-                 const Tensor *inputB,
-                 Tensor *outputD,
-                 const Tensor *inputBias,
-                 Tensor *outputPreGelu,
-                 int m, int n, int k,
-                 int lda, int ldb, int ldd,
-                 hipblasOperation_t transa,
-                 hipblasOperation_t transb,
-                 bool grad,
-                 void* workspace,
-                 size_t workspaceSize,
-                 bool accumulate,
-                 bool use_split_accumulator,
-                 int math_sm_count,
-                 int m_split,
-                 int n_split,
-                 bool gemm_producer,
-                 const Tensor *inputCounter,
-                 hipStream_t stream,
-                 hipblasLtHandle_t handle
+                    const Tensor *inputB,
+                    Tensor *outputD,
+                    const Tensor *inputBias,
+                    Tensor *outputPreGelu,
+                    int m, int n, int k,
+                    int lda, int ldb, int ldd,
+                    hipblasOperation_t transa,
+                    hipblasOperation_t transb,
+                    bool grad,
+                    void* workspace,
+                    size_t workspaceSize,
+                    bool accumulate,
+                    bool use_split_accumulator,
+                    int math_sm_count,
+                    int m_split,
+                    int n_split,
+                    bool gemm_producer,
+                    const Tensor *inputCounter,
+                    hipStream_t stream,
+                    hipblasLtHandle_t handle
 ) {
-  void *A = inputA->data.dptr;
-  void *A_scale_inverse = inputA->scale_inv.dptr;
-  void *B = inputB->data.dptr;
-  void *B_scale_inverse = inputB->scale_inv.dptr;
+  // Return immediately if GEMM is trivial
+  if (m <= 0 || n <= 0) {
+    return;
+  }
+  NVTE_CHECK(k > 0);
+
+  const GemmParam &param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, k, lda, ldb);
+  void *C = outputD->data.dptr;
   void *D = outputD->data.dptr;
-  //Added for fp8 gelu_fusion support
-  // void *D_amax = outputD->amax.dptr;
-  // void *D_scale = outputD->scale.dptr;
+  void *D_scale = outputD->scale.dptr;
+  void *D_amax = outputD->amax.dptr;
   void *bias_ptr = inputBias->data.dptr;
   const bool bias = bias_ptr != nullptr;
   void *pre_gelu_out = outputPreGelu->data.dptr;
   const bool gelu = pre_gelu_out != nullptr;
-  const bool use_fp8 = is_fp8_dtype(inputA->data.dtype) ||
-                       is_fp8_dtype(inputB->data.dtype);
-  const hipDataType A_type = get_hipblaslt_dtype(inputA->data.dtype);
-  const hipDataType B_type = get_hipblaslt_dtype(inputB->data.dtype);
+  const bool use_fp8 = is_fp8_dtype(param.Atype) || is_fp8_dtype(param.Btype);
+
+  const hipDataType A_type = get_hipblaslt_dtype(param.Atype);
+  const hipDataType B_type = get_hipblaslt_dtype(param.Btype);
   const hipDataType D_type = get_hipblaslt_dtype(outputD->data.dtype);
   const hipDataType bias_type = get_hipblaslt_dtype(inputBias->data.dtype);
   // const hipblasltDatatype_t aux_type = get_hipblaslt_dtype(outputPreGelu->data.dtype);
 
-  NVTE_CHECK(!is_fp8_dtype(inputA->data.dtype) || A_scale_inverse != nullptr,
+  NVTE_CHECK(!is_fp8_dtype(param.Atype) || param.A_scale_inv != nullptr,
              "FP8 input to GEMM requires inverse of scale!");
-  NVTE_CHECK(!is_fp8_dtype(inputB->data.dtype) || B_scale_inverse != nullptr,
+  NVTE_CHECK(!is_fp8_dtype(param.Btype) || param.B_scale_inv != nullptr,
              "FP8 input to GEMM requires inverse of scale!");
 
   // check consistency of arguments:
@@ -1071,6 +1160,10 @@ void hipblaslt_gemm(const Tensor *inputA,
   if (use_fp8) {
     NVTE_CHECK(!gelu, "fp8 gemm + gelu fusion is unavailable right now!");
   }
+  if (is_fp8_dtype(outputD->data.dtype)) {
+    NVTE_CHECK(!accumulate, "Accumulation mode not supported with FP8 GEMM output!");
+  }
+
   float one = 1.0;
   float zero = 0.0;
   float beta = (accumulate) ? one : zero;
@@ -1098,20 +1191,20 @@ void hipblaslt_gemm(const Tensor *inputA,
 
   // Create matrix descriptors. Not setting any extra attributes.
   NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutCreate(&Adesc, A_type,
-                                               transa == HIPBLAS_OP_N ? m : k,
-                                               transa == HIPBLAS_OP_N ? k : m,
-                                               lda));
+                                                   param.transA == HIPBLAS_OP_N ? m : k,
+                                                   param.transA == HIPBLAS_OP_N ? k : m,
+                                                   param.lda));
   NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutCreate(&Bdesc, B_type,
-                                               transb == HIPBLAS_OP_N ? k : n,
-                                               transb == HIPBLAS_OP_N ? n : k,
-                                               ldb));
+                                                   param.transB == HIPBLAS_OP_N ? k : n,
+                                                   param.transB == HIPBLAS_OP_N ? n : k,
+                                                   param.ldb));
   NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutCreate(&Ddesc, D_type, m, n, ldd));
 
   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescCreate(&operationDesc, gemm_compute_type, HIP_R_32F));
   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc, HIPBLASLT_MATMUL_DESC_TRANSA,
-                                                   &transa, sizeof(transa)));
+                                                       &param.transA, sizeof(param.transA)));
   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc, HIPBLASLT_MATMUL_DESC_TRANSB,
-                                                   &transb, sizeof(transb)));
+                                                       &param.transB, sizeof(param.transB)));
 
   // set fp8 attributes -- input and output types should already be set to fp8 as appropriate
   // Note: gelu fusion isn't available right now, and we don't need
@@ -1125,40 +1218,43 @@ void hipblaslt_gemm(const Tensor *inputA,
                                                      &fastAccuMode,
                                                      sizeof(fastAccuMode)));
     */
-    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
-                                                     HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER,
-                                                     &A_scale_inverse,
-                                                     sizeof(A_scale_inverse)));
-    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
-                                                     HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER,
-                                                     &B_scale_inverse,
-                                                     sizeof(B_scale_inverse)));
-    //Added for fp8 gelu_fusion support
+    if ((is_delayed_tensor_scaling(inputA->scaling_mode) &&
+         is_delayed_tensor_scaling(inputB->scaling_mode))) {
+      void *A_scale_inverse = param.A_scale_inv;
+      void *B_scale_inverse = param.B_scale_inv;
+      NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
+                                                           HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                                                           &A_scale_inverse, sizeof(A_scale_inverse)));
+      NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
+                                                           HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                                                           &B_scale_inverse, sizeof(B_scale_inverse)));
+    } else {
+      NVTE_ERROR("Not implemented scaling modes: " + to_string(inputA->scaling_mode) + " and  " +
+                 to_string(inputB->scaling_mode) + ".");
+    }
 
-    // if (is_fp8_dtype(outputD->data.dtype)) {
-    //   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
-    //                                                     HIPBLASLT_MATMUL_DESC_AMAX_D_POINTER,
-    //                                                     &D_amax,
-    //                                                     sizeof(D_amax)));
-
-    //   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
-    //                                                     HIPBLASLT_MATMUL_DESC_D_SCALE_POINTER ,
-    //                                                     &D_scale,
-    //                                                     sizeof(D_scale)));
-    // }
+    if (is_fp8_dtype(outputD->data.dtype)) {
+      // Accumulation mode not supported for FP8 output
+      C = nullptr;
+      NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+        operationDesc, HIPBLASLT_MATMUL_DESC_D_SCALE_POINTER, &D_scale, sizeof(D_scale)));
+      NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+        operationDesc, HIPBLASLT_MATMUL_DESC_AMAX_D_POINTER, &D_amax, sizeof(D_amax)));
+      // To make supported gemm configs consistent with NV cublaslt
+      // For FP8 output, cuBLAS requires C_type to match bias_type and
+      // be FP16/BF16
+      const hipDataType C_type = bias ? bias_type : HIP_R_16BF;
+      NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutCreate(&Cdesc, C_type, m, n, ldd));
+    }else{
+      NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutCreate(&Cdesc, D_type, m, n, ldd));
+    }
     if (bias) {
       NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
                                                        HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE,
                                                        &bias_type, sizeof(bias_type)));
     }
-    //Added for fp8 gelu_fusion support
-    
-    // if (gelu){
-    //   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
-    //                                                     HIPBLASLT_MATMUL_DESC_EPILOGUE_AUX_DATA_TYPE,
-    //                                                     &aux_type,
-    //                                                     sizeof(aux_type)));
-    // }
+  }else{
+    NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutCreate(&Cdesc, D_type, m, n, ldd));
   }
 
   if (bias && gelu) {
@@ -1176,6 +1272,10 @@ void hipblaslt_gemm(const Tensor *inputA,
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
                                                       HIPBLASLT_MATMUL_DESC_EPILOGUE_AUX_LD,
                                                       &ld_gelumat, sizeof(ld_gelumat)));
+    // TODO: future enablement
+    //const hipDataType aux_type = get_hipblaslt_dtype(outputPreGelu->data.dtype);
+    //NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+    //  operationDesc, HIPBLASLT_MATMUL_DESC_EPILOGUE_AUX_DATA_TYPE, &aux_type, sizeof(aux_type)));
   } else if (bias) {
     if (grad) {
       // grad output is always input B
@@ -1206,7 +1306,7 @@ void hipblaslt_gemm(const Tensor *inputA,
 
   GemmAlgoCache::Key gemm_cfg(algoCache.device_cap(device_id), A_type, B_type, D_type, 
     use_fp8 ? bias_type : (hipDataType)-1,
-    m, n, k, lda, ldb, ldd, transa, transb, epilogue );
+    m, n, k, param.lda, param.ldb, ldd, param.transA, param.transB, epilogue );
   GemmAlgoCache::Algo cached_algo;
   if (algoCache.find(gemm_cfg, workspaceSize, cached_algo) == 0 || !cached_algo.algo.has_value())
   {
@@ -1299,9 +1399,9 @@ void hipblaslt_gemm(const Tensor *inputA,
             NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
                                             operationDesc,
                                             static_cast<const void*>(&one),         /* alpha */
-                                            A,                                      /* A */
+                                            param.A,                                      /* A */
                                             Adesc,
-                                            B,                                      /* B */
+                                            param.B,                                      /* B */
                                             Bdesc,
                                             static_cast<const void*>(&beta),        /* beta */
                                             D,                                      /* C */
@@ -1321,9 +1421,9 @@ void hipblaslt_gemm(const Tensor *inputA,
             NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
                                             operationDesc,
                                             static_cast<const void*>(&one),         /* alpha */
-                                            A,                                      /* A */
+                                            param.A,                                      /* A */
                                             Adesc,
-                                            B,                                      /* B */
+                                            param.B,                                      /* B */
                                             Bdesc,
                                             static_cast<const void*>(&beta),        /* beta */
                                             D,                                      /* C */
@@ -1382,9 +1482,9 @@ void hipblaslt_gemm(const Tensor *inputA,
   NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
                                    operationDesc,
                                    static_cast<const void*>(&one),         /* alpha */
-                                   A,                                      /* A */
+                                   param.A,                                      /* A */
                                    Adesc,
-                                   B,                                      /* B */
+                                   param.B,                                      /* B */
                                    Bdesc,
                                    static_cast<const void*>(&beta),        /* beta */
                                    D,                                      /* C */
@@ -1396,6 +1496,13 @@ void hipblaslt_gemm(const Tensor *inputA,
                                    workspaceSize,
                                    stream));                               /* stream */
 
+  // Update FP8 scale-inv in output tensor
+  // Note: This is a WAR for the case when we have fp8 output but D->scale_inv is not allocated.
+  // TODO: Changing gemm interface so that D->scale_inv is allocated and the scale_inv can be
+  // calculated here.
+  if (is_fp8_dtype(outputD->data.dtype) && outputD->scale_inv.dptr) {
+    update_tensor_scale_inv(outputD, stream);
+  }
 
   NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(Ddesc));
   NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(Bdesc));

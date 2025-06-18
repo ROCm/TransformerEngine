@@ -1,4 +1,4 @@
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
 import os, sys
@@ -13,7 +13,7 @@ import warnings
 import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
-from transformer_engine.pytorch.cpp_extensions import gemm
+from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.module.base import get_workspace
 
 
@@ -142,7 +142,7 @@ def run_gemm():
     N = 32
     datatype = torch.float16    
     inp = torch.randn((N, N), device="cuda", dtype=datatype)
-    _, _, _ = gemm(A=inp, B=inp, dtype=datatype, workspace=get_workspace())
+    _, _, _, _ = general_gemm(A=inp, B=inp, out_dtype=datatype, workspace=get_workspace())
 
 
 if __name__ == "__main__":

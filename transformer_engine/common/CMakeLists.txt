@@ -41,13 +41,17 @@ endif()
 # Language options
 if(USE_CUDA)
   if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
+    if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
+      set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90 100 120)
+    else ()
+      set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
+    endif()
   endif()
   set(CMAKE_CXX_STANDARD 17)
   set(CMAKE_CUDA_STANDARD 17)
   set(CMAKE_CUDA_STANDARD_REQUIRED ON)
   if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
+    set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -g -G")
   endif()
 
   # Hide non-necessary symbols in shared object.
@@ -146,6 +150,7 @@ if(USE_CUDA)
        util/cuda_runtime.cpp
        util/rtc.cpp
        util/system.cpp
+       swizzle/swizzle.cu
        fused_softmax/scaled_masked_softmax.cu
        fused_softmax/scaled_upper_triang_masked_softmax.cu
        fused_softmax/scaled_aligned_causal_masked_softmax.cu
@@ -189,6 +194,7 @@ else()
        util/cuda_runtime.cpp
        util/rtc.cpp
        util/system.cpp
+       swizzle/swizzle.cu
        fused_softmax/scaled_masked_softmax.cu
        fused_softmax/scaled_upper_triang_masked_softmax.cu
        fused_softmax/scaled_aligned_causal_masked_softmax.cu
@@ -203,10 +209,9 @@ else()
   message(STATUS "CMAKE_MODULE_PATH: ${CMAKE_MODULE_PATH}")
 
   set(header_include_dir
+      ${CMAKE_CURRENT_SOURCE_DIR}/..
       ${CMAKE_CURRENT_SOURCE_DIR}/include 
       ${CMAKE_CURRENT_SOURCE_DIR}/util
-      ${CMAKE_CURRENT_SOURCE_DIR}/rmsnorm
-      ${CMAKE_CURRENT_SOURCE_DIR}/layer_norm 
       ${CMAKE_CURRENT_SOURCE_DIR})
   message(STATUS "HIPIFY CUDA_SOURCE_DIR: ${CMAKE_CURRENT_SOURCE_DIR}")
   message(STATUS "HIPIFY HEADER_INCLUDE_DIR: ${header_include_dir}")

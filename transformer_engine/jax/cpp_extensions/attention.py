@@ -17,7 +17,12 @@ from jax import dtypes, lax
 from jax.interpreters import mlir
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
-from jax.extend import ffi
+from .misc import is_hip_extension
+#TODO: wait for jax v0.5.0 migration
+if is_hip_extension() and jax.__version__ < "0.5.0":
+    from jax.extend import ffi
+else:
+    from jax import ffi
 
 from transformer_engine.jax.attention import CPStrategy, SequenceDescriptor
 
@@ -33,7 +38,6 @@ from transformer_engine.transformer_engine_jax import (
 from .base import BasePrimitive, register_primitive
 from .custom_call import custom_caller, CustomCallArgsWrapper
 from .misc import (
-    is_hip_extension,
     check_valid_batch_dims,
     jax_dtype_to_te_dtype,
     te_dtype_to_jax_dtype,
@@ -255,8 +259,13 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         k_dtype = dtypes.canonicalize_dtype(k_aval.dtype)
         v_dtype = dtypes.canonicalize_dtype(v_aval.dtype)
         bias_dtype = dtypes.canonicalize_dtype(bias_aval.dtype)
-        assert q_dtype == k_dtype == v_dtype == bias_dtype
-        assert q_seqlen_or_cu_seqlen_aval.dtype == kv_seqlen_or_cu_seqlen_aval.dtype
+        assert (
+            q_dtype == k_dtype == v_dtype == bias_dtype
+        ), f"q_dtype={q_dtype}, k_dtype={k_dtype}, v_dtype={v_dtype}, bias_dtype={bias_dtype}"
+        assert q_seqlen_or_cu_seqlen_aval.dtype == kv_seqlen_or_cu_seqlen_aval.dtype, (
+            f"q_seqlen_or_cu_seqlen_aval={q_seqlen_or_cu_seqlen_aval},"
+            f" kv_seqlen_or_cu_seqlen_aval={kv_seqlen_or_cu_seqlen_aval}"
+        )
 
         batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, head_dim = (
             FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
@@ -653,6 +662,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         )
         arg_shardings = [arg_i.sharding for arg_i in arg_infos]
         arg_shardings[4] = seed_sharding
+        arg_shardings[-1] = arg_shardings[-3]
+        arg_shardings[-2] = arg_shardings[-4]
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
         impl = partial(FusedAttnFwdPrimitive.impl, config=config)
@@ -1050,7 +1061,10 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         dk_sharding = NamedSharding(mesh, PartitionSpec(*k_spec))
         dv_sharding = NamedSharding(mesh, PartitionSpec(*v_spec))
         dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
-        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+        arg_shardings = [arg_i.sharding for arg_i in arg_infos]
+        arg_shardings[-1] = arg_shardings[-3]
+        arg_shardings[-2] = arg_shardings[-4]
+        arg_shardings = tuple(arg_shardings)
         out_shardings = (dq_sharding, dk_sharding, dv_sharding, dbias_sharding)
 
         def sharded_impl(
@@ -1610,9 +1624,7 @@ class _FusedAttnCPWithP2PHelper:
         def truthy(val):
             return val.lower() in ["1", "true"]
 
-        x = use_scan and get_xla_flag(
-            "--xla_experimental_ignore_channel_id", default=False, cast=truthy
-        )
+        x = use_scan and get_xla_flag("--xla_ignore_channel_id", default=True, cast=truthy)
         return x
 
     def check_supported(self):

@@ -10,25 +10,22 @@ from itertools import chain
 
 import torch
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.utils import is_fp8_fnuz
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
 from .multi_tensor_apply import multi_tensor_applier
-from ..float8_tensor import Float8Tensor
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+from transformer_engine.pytorch.utils import is_fp8_fnuz
 
 
 def get_fp8_meta(fp8_tensor):
     """FP8 metadata getter."""
-    if fp8_tensor._fp8_meta is None:
-        raise RuntimeError("FP8 meta data is not initialized.")
+    assert isinstance(fp8_tensor, Float8Tensor), "Fused optimizer supports only Float8Tensor class"
+    if fp8_tensor._quantizer is None:
+        raise RuntimeError("FP8 quantizer data is not initialized.")
 
-    fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
-        forward=fp8_tensor._fp8_meta_forward,
-    )
+    quantizer = fp8_tensor._quantizer
 
-    fp8_meta_index = fp8_tensor._fp8_meta_index
-    scale = fp8_tensor._fp8_meta[fp8_meta_key].scale[fp8_meta_index]
-    amax = fp8_tensor._fp8_meta[fp8_meta_key].amax_history[0][fp8_meta_index]
+    scale = quantizer.scale
+    amax = quantizer.amax
     scale_inv = fp8_tensor._scale_inv
     return scale, amax, scale_inv
 
@@ -202,7 +199,7 @@ class FusedAdam(torch.optim.Optimizer):
             torch.float16: torch.full(
                 [1], torch.finfo(torch.float16).max / 2.0, dtype=torch.float32
             ),
-            torch.uint8: torch.full([1], 240.0 if is_fp8_fnuz() else 448.0, dtype=torch.float32),
+            torch.uint8: torch.full([1], 240.0 if IS_HIP_EXTENSION and is_fp8_fnuz() else 448.0, dtype=torch.float32),
         }
         self._scales = {}
         self.use_decoupled_grad = use_decoupled_grad
@@ -240,6 +237,10 @@ class FusedAdam(torch.optim.Optimizer):
         dtype = self.name_to_dtype_map[state_name]
         if dtype == torch.uint8:
             assert isinstance(scaled_state, Float8Tensor)
+            assert len(scaled_state._quantizer.scale) == 1, (
+                "Only scaling with one scaling factor                per tensor is supported by the"
+                " FusedAdam."
+            )
         else:
             assert scaled_state.dtype == dtype
 
@@ -254,7 +255,7 @@ class FusedAdam(torch.optim.Optimizer):
         absmax = absmax.to(dtype=torch.float32, device=unscaled_state.device)
         torch.div(absmax, max_range, out=scale)
         if isinstance(scaled_state, Float8Tensor):
-            scaled_state._scale_inv.copy_(scale)
+            scaled_state._quantizer.scale.copy_(1 / scale)
             scaled_state.copy_(unscaled_state)
         else:
             rscale = torch.where(scale > 0, scale.reciprocal(), 0.0)
@@ -272,7 +273,6 @@ class FusedAdam(torch.optim.Optimizer):
         state = self.state[param]
         dtype = self.name_to_dtype_map[state_name]
         if dtype == torch.uint8:
-            assert isinstance(state[state_name], Float8Tensor)
             unscaled = state[state_name].float()
         elif dtype == torch.float16:
             assert state[state_name].dtype == torch.float16
@@ -346,12 +346,15 @@ class FusedAdam(torch.optim.Optimizer):
             data.zero_()
 
         if dtype == torch.uint8:
-            self.state[param][state_name] = Float8Tensor(
-                data=data,
-                dtype=torch.float32,
-                fp8_scale_inv=torch.ones([1], dtype=torch.float32, device=param.device),
+            quantizer = Float8Quantizer(
+                scale=torch.ones([1], dtype=torch.float32, device=param.device),
+                amax=torch.zeros([1], dtype=torch.float32, device=param.device),
+                fp8_dtype=tex.DType.kFloat8E4M3,
             )
+            self.state[param][state_name] = quantizer.make_empty(param.shape)
+            self.state[param][state_name].quantize_(data.float())
         else:
+
             self.state[param][state_name] = data
 
         # Create scale if necessary.
@@ -424,6 +427,8 @@ class FusedAdam(torch.optim.Optimizer):
                 param = id_map[k]
                 self.state[param] = {}
                 for name in v:
+                    if v[name] is None:
+                        continue
                     if (
                         self.store_param_remainders
                         and name == "master_param"

@@ -14,10 +14,9 @@ import shutil
 from pathlib import Path
 
 import setuptools
-from torch.utils.cpp_extension import BuildExtension
 
 try:
-    import torch  # pylint: disable=unused-import
+    from torch.utils.cpp_extension import BuildExtension
 except ImportError as e:
     raise RuntimeError("This package needs Torch to build.") from e
 
@@ -61,7 +60,7 @@ if __name__ == "__main__":
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
         install_requires=[] if rocm_build() else ["torch"],
-        tests_require=[] if rocm_build() else ["numpy", "onnxruntime", "torchvision"],
+        tests_require=[] if rocm_build() else ["numpy", "torchvision"],
     )
     if any(x in sys.argv for x in (".", "sdist", "bdist_wheel")):
         shutil.rmtree(common_headers_dir)

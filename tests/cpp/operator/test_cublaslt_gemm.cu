@@ -111,6 +111,19 @@ void compute_ref(
   }
 }
 
+template <typename Type>
+void cpu_rowwise_to_columnwise(
+  size_t m, size_t n,
+  const Type* rowwise_ptr, 
+  Type* columnwise_ptr){
+  
+  for(size_t ii = 0; ii < m; ii++){
+    for(size_t jj = 0; jj < n; jj++){
+      columnwise_ptr[jj*m + ii] = rowwise_ptr[ii*n + jj];
+    }
+  }
+}
+
 template <typename A_Type, typename B_Type, typename Bias_Type, typename Gelu_Type, typename D_Type>
 void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, const size_t n, bool transa, bool transb) {
   DType atype = TypeInfo<A_Type>::dtype;
@@ -121,40 +134,57 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
 
   const bool has_fp8 = isFp8Type(atype) || isFp8Type(btype);
   /* 
-   *    fp8 present  → allow NN, TN   
+   *    fp8 present  → allow NN, TN, NT
    *    no fp8       → allow NN, TN, NT
    */
-  if (has_fp8 && transb) {
-    GTEST_SKIP();
-  }
   // pytorch tensor storage is row-major while cublas/rocblas is column-major
   Tensor A;
   if (transa){
-    A = Tensor({ m, k }, atype);
-  }
-  else {
-    A = Tensor({ k, m }, atype);
+    A = Tensor("A", { m, k }, atype);
+  }else {
+    // hipblaslt path need fp8-gemm with TN layout
+    // TODO: support MXFP8 scaling
+    A = Tensor("A", { k, m }, atype, true, isFp8Type(atype));
   }
   Tensor B;
   if (transb){
-    B = Tensor({ k, n }, btype);
+    //hipblaslt path need fp8-gemm with TN layout
+    // TODO: support MXFP8 scaling
+    B = Tensor("B", { k, n }, btype, true, isFp8Type(btype));
+  }else {
+    B = Tensor("B", { n, k }, btype);
   }
-  else {
-    B = Tensor({ n, k }, btype);
-  }
-  Tensor D({ n, m }, dtype);
+  Tensor D("D", { n, m }, dtype);
   Tensor bias;
   if(use_bias){
-    bias = Tensor({m}, bias_type);
+    bias = Tensor("bias", {m}, bias_type);
   }
   Tensor pre_gelu_out;
   if(use_gelu){
-    pre_gelu_out = Tensor({ n, m }, gelu_type);
+    pre_gelu_out = Tensor("pre_gelu_out", { n, m }, gelu_type);
   }
   
   //initialize the data and scale inv of A, B
   fillUniform(&A);
+  if(isFp8Type(atype) && !transa){
+    // A must be of shape k, m
+    cpu_rowwise_to_columnwise(
+      k, m,
+      A.rowwise_cpu_dptr<A_Type>(),
+      A.columnwise_cpu_dptr<A_Type>());
+    // sync the columnwise data on GPU as well
+    A.from_cpu();
+  }
   fillUniform(&B);
+  if(isFp8Type(btype) && transb){
+    // B must be of shape k, m
+    cpu_rowwise_to_columnwise(
+      k, n,
+      B.rowwise_cpu_dptr<B_Type>(),
+      B.columnwise_cpu_dptr<B_Type>());
+    // sync the columnwise data on GPU as well
+    B.from_cpu();
+  }
   if(use_bias){
     fillUniform(&bias);
   }
@@ -188,7 +218,7 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
     workspace_size = 67108864;
   }
 #endif
-  Tensor Workspace({ workspace_size }, DType::kByte);
+  Tensor Workspace("Workspace", { workspace_size }, DType::kByte);
 
   //perform the gemm in GPU
   nvte_cublas_gemm(A.data(),
@@ -219,11 +249,11 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
   }
   float ref_amax_d;
   compute_ref<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(
-    A.cpu_dptr<A_Type>(), 
-    B.cpu_dptr<B_Type>(), 
-    A.scale_inv(),
-    B.scale_inv(),
-    use_bias? bias.cpu_dptr<Bias_Type>(): nullptr,
+    A.rowwise_cpu_dptr<A_Type>(), 
+    B.rowwise_cpu_dptr<B_Type>(), 
+    A.rowwise_scale_inv(),
+    B.rowwise_scale_inv(),
+    use_bias? bias.rowwise_cpu_dptr<Bias_Type>(): nullptr,
     D.scale(),
     m, k, n,
     ref_D.get(),
@@ -259,15 +289,15 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
     }
   }
 #endif
-  compareResults("D", D, ref_D.get(), atol, rtol);
+  compareResults("D", D, ref_D.get(), true, atol, rtol);
 
   if(use_gelu){
     auto [atol, rtol] = getTolerances(gelu_type);
     //relax for certain prime number gemm
     if (dtype == DType::kFloat32) {
-      atol = 5e-6;
+      atol = 1e-5;
     }
-    compareResults("gelu", pre_gelu_out, ref_pre_gelu_out.get(), atol, rtol);
+    compareResults("gelu", pre_gelu_out, ref_pre_gelu_out.get(), true, atol, rtol);
   }
 }
 
