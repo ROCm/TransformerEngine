@@ -1,5 +1,3 @@
-# This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -10,7 +8,6 @@ from typing import Iterable, List, Tuple, Union
 import pytest
 
 import torch
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from transformer_engine.pytorch import (
     DotProductAttention,
     LayerNormLinear,
@@ -26,10 +23,6 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common import recipe
-
-if IS_HIP_EXTENSION:
-    import os
-    from functools import cache
 
 
 # Check if FP8 is supported.
@@ -79,17 +72,6 @@ def reset_rng_states() -> None:
 def reset_global_fp8_state():
     yield
     FP8GlobalStateManager.reset()
-
-
-if IS_HIP_EXTENSION:
-    @cache
-    def use_hipblaslt() -> bool:
-        return (os.getenv("NVTE_USE_HIPBLASLT") is not None
-                or os.getenv("NVTE_USE_ROCBLAS") is None )
-    @pytest.fixture(autouse=True)
-    def skip_rocblas():
-        if not use_hipblaslt():
-            pytest.skip("CUDA graph capture not supported with rocBLAS path")
 
 
 def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor], names=None) -> bool:

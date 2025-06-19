@@ -33,14 +33,8 @@ get_torch_float8_e5m2_type = lambda: torch.float8_e5m2fnuz if is_fp8_fnuz() else
 def check_fp8_support() -> Tuple[bool, str]:
     if IS_HIP_EXTENSION:
         gpu_arch = get_device_compute_capability()
-        if gpu_arch == (9, 4):
+        if gpu_arch in ((9, 4), (9, 5)):
             return True, ""
-        elif gpu_arch == (9, 5):
-            if (os.getenv("NVTE_USE_HIPBLASLT") is not None
-                or os.getenv("NVTE_USE_ROCBLAS") is None):
-                return True, ""
-            else:
-                return False, "Using HipBlasLt is required on gfx95x for FP8 execution."
         else:
             return False, "Device arch gfx94x or gfx95x required for FP8 execution."
     else:

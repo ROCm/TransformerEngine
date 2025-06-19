@@ -67,10 +67,6 @@ _cpu_rng_state = torch.get_rng_state()
 _cuda_rng_state = torch.cuda.get_rng_state()
 
 if IS_HIP_EXTENSION:
-    def use_hipblaslt() -> bool:
-        return (os.getenv("NVTE_USE_HIPBLASLT") is not None
-                or os.getenv("NVTE_USE_ROCBLAS") is None )
-
     def rocm_attn_backend() -> tuple[bool, bool, bool]:
         """Returns the FA backends to use: (flash_attn, fused_attn_aotriton, fused_attn_ck)"""
         use_flash_attn = int(os.environ.get("NVTE_FLASH_ATTN", "1")) != 0
@@ -863,15 +859,6 @@ def test_gpt_checkpointing(dtype, bs, model):
         tols.update(dict(rtol=2e-2, atol=2e-3))
     if IS_HIP_EXTENSION:
         tols.update(rocm_attn_tols())
-        if len(tols) == 0 and not use_hipblaslt():
-            # Relax to all close for rocm. We don't have bit-to-bit reproducibility
-            # when running rocblas path mainly due to the usage of atomics
-            # Need to check whether hipBlasLt path has reproducibility
-            tols["atol"] = 5e-5
-        else:
-            # should be perfect match with hipblaslt and non-ck attention
-            # TODO(PIV) should tols be cleared
-            pass
     for i, (ref, test) in enumerate(zip(outputs, outputs_checkpoint)):
         torch.testing.assert_close(
             test,
@@ -1827,8 +1814,6 @@ def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
 @pytest.mark.parametrize("model", ["126m"])
 def test_gpt_cuda_graph(dtype, bs, model):
     if IS_HIP_EXTENSION:
-        if not use_hipblaslt():
-            pytest.skip("CUDA graph capture not supported with rocBLAS path")
         if dtype not in (torch.float32,):
             use_fa, use_aotriton, use_ck = rocm_attn_backend()
             if use_fa:
@@ -2049,18 +2034,16 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
 
     # TODO: wait for the full determinism fix from hipblaslt
     if IS_HIP_EXTENSION:
-        if use_hipblaslt():
-            tols = dtype_tols(dtype)
-            if dtype in (torch.float16, torch.bfloat16):
-                # On some GPUs hipblaslt results for SBHD and BSHD are different
-                # that results in lower final result precision
-                tols["atol"] = 2e-3
-                _, use_aotriton, use_ck = rocm_attn_backend()
-                if use_aotriton and not use_ck:
-                    tols["rtol"] = tols["rtol"] * 3
-            torch.testing.assert_close(y_bshd, y_sbhd.transpose(0, 1).contiguous(), **tols)
-        else:
-            assert torch.equal(y_bshd, y_sbhd.transpose(0, 1).contiguous()), "Tensors are not equal"
+        tols = dtype_tols(dtype)
+        if dtype in (torch.float16, torch.bfloat16):
+            # On some GPUs hipblaslt results for SBHD and BSHD are different
+            # that results in lower final result precision
+            tols["atol"] = 2e-3
+            _, use_aotriton, use_ck = rocm_attn_backend()
+            if use_aotriton and not use_ck:
+                tols["rtol"] = tols["rtol"] * 3
+        torch.testing.assert_close(y_bshd, y_sbhd.transpose(0, 1).contiguous(), **tols)
+
     else:
         # Check that results match
         torch.testing.assert_close(
