@@ -17,11 +17,6 @@ from transformer_engine.pytorch.cpp_extensions import gemm
 from transformer_engine.pytorch.module.base import get_workspace
 
 
-def use_hipblaslt():
-    return (os.getenv("NVTE_USE_HIPBLASLT") is not None
-            or os.getenv("NVTE_USE_ROCBLAS") is None )
-
-
 storage_fname = "te_algo"
 
 
@@ -58,7 +53,6 @@ def write_storage(fname, head, data):
         writer.writerows(data)
 
 
-@pytest.mark.skipif(not use_hipblaslt(), reason="Autotune requires hipBLASLt")
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="Autotune requires ROCm TE")
 def test_gemm_autotune():
     storage_dir = tempfile.mkdtemp();

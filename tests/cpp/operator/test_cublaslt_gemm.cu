@@ -110,10 +110,29 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
   DType gelu_type = TypeInfo<Gelu_Type>::dtype;
   DType dtype = TypeInfo<D_Type>::dtype;
 
-  // pytorch tensor storage is row-major while cublas/rocblas is column-major
-  Tensor A({ k, m }, atype);
-  Tensor B({ n, k }, btype);
-  Tensor D({ n, m }, dtype);
+  const bool has_fp8 = isFp8Type(atype) || isFp8Type(btype);
+  /* 
+   *    fp8 present  → allow NN, TN, NT
+   *    no fp8       → allow NN, TN, NT
+   */
+  // pytorch tensor storage is row-major while cublas/hipblaslt is column-major
+  Tensor A;
+  if (transa){
+    A = Tensor("A", { m, k }, atype);
+  }else {
+    // hipblaslt path need fp8-gemm with TN layout
+    // TODO: support MXFP8 scaling
+    A = Tensor("A", { k, m }, atype, true, isFp8Type(atype));
+  }
+  Tensor B;
+  if (transb){
+    //hipblaslt path need fp8-gemm with TN layout
+    // TODO: support MXFP8 scaling
+    B = Tensor("B", { k, n }, btype, true, isFp8Type(btype));
+  }else {
+    B = Tensor("B", { n, k }, btype);
+  }
+  Tensor D("D", { n, m }, dtype);
   Tensor bias;
   if(use_bias){
     bias = Tensor({m}, bias_type);
@@ -145,10 +164,6 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
   if (isFp8Type(atype) || isFp8Type(btype))
   {
     bool fp8_supported = (prop.major == 9 && prop.minor >= 4);
-    if (fp8_supported && prop.minor >= 5) {
-      fp8_supported = (std::getenv("NVTE_USE_ROCBLAS") == nullptr) ||
-                      (std::getenv("NVTE_USE_HIPBLASLT") != nullptr);
-    }
     if (!fp8_supported) {
       GTEST_SKIP() << "FP8 is not supported in current config";
     }
