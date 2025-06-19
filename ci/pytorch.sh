@@ -82,16 +82,20 @@ run_test_config_mgpu(){
 }
 
 run_benchmark() {
+    check_test_filter benchmark || return
     echo "\n============= Running benchmarks attention script ============="
     BENCH_SCRIPT="$DIR/../benchmarks/attention/benchmark_attention_rocm.py"
+    
+    if command -v realpath >/dev/null 2>&1; then
+        BENCH_SCRIPT=$(realpath "$DIR/../benchmarks/attention/benchmark_attention_rocm.py")
+    fi
 
     if [ ! -f "$BENCH_SCRIPT" ]; then
         echo "Benchmark script not found: $BENCH_SCRIPT"
         return
     fi
 
-    python "$BENCH_SCRIPT" --use_ck_bwd_v3 --run_sanity_checks
-    echo "================================================================\n"
+    python "$BENCH_SCRIPT" --use_ck_bwd_v3 --run_sanity_checks || test_run_error $BENCH_SCRIPT
 }
 
 # Single config mode, run it and return result

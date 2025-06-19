@@ -202,8 +202,11 @@ def sanity_checks(
     • Checks FusedAttention vs FusedAttention-CK timing within ±tolerance_pct
     • Non-zero exit code on any failure (CI friendly)
     """
-    df = pd.read_csv(os.path.join(cwd, csv_path), index_col=0)
+    print("\n============= Sanity-check results =============")
     ok_overall = True
+    times_csv_path = os.path.join(cwd, csv_path)
+    df = pd.read_csv(times_csv_path, index_col=0)
+    
     tol = tolerance_pct / 100.0
     profiler_root = os.path.join(cwd, profiler_root)
 
@@ -214,7 +217,6 @@ def sanity_checks(
         "FusedAttention AOTriton":  "prof_fused_aotriton_{model}",
     }
 
-    print("\n========== Sanity-check results ==========")
     for model, cfg in model_configs.items():
         avail, fused_bes = _get_attention_backends(
             cfg,
@@ -243,7 +245,7 @@ def sanity_checks(
                 print(f"  [{be:<22}] Profiling successful")
             else:
                 ok_overall = False
-                print(f"  [Error] {be:<16} error in profiling, results.stats.csv not found")
+                raise FileNotFoundError(f"Error while profiling {model} [{be}], results.stats.csv not found")
 
         # Fused Vs Fused CK trace
         if "FusedAttention" in expected and "FusedAttention CK" in expected:
@@ -259,9 +261,10 @@ def sanity_checks(
                           f"(fwd {rel_fwd*100:.2f} %, bwd {rel_bwd*100:.2f} %)")
                 else:
                     ok_overall = False
-                    print(f"  [FAIL] Fused vs CK kernel time diff > {tolerance_pct}% "
+                    raise AssertionError(f" Fused vs CK kernel time diff > {tolerance_pct}% "
                           f"(fwd {rel_fwd*100:.2f} %, bwd {rel_bwd*100:.2f} %)")
         print("-" * 60)
+    return ok_overall
 
 
 def main(args):
