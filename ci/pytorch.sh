@@ -83,6 +83,23 @@ run_test_config_mgpu(){
     fi
 }
 
+run_benchmark() {
+    check_test_filter benchmark || return
+    echo "\n============= Running benchmarks attention script ============="
+    BENCH_SCRIPT="$DIR/../benchmarks/attention/benchmark_attention_rocm.py"
+    
+    if command -v realpath >/dev/null 2>&1; then
+        BENCH_SCRIPT=$(realpath "$DIR/../benchmarks/attention/benchmark_attention_rocm.py")
+    fi
+
+    if [ ! -f "$BENCH_SCRIPT" ]; then
+        echo "Benchmark script not found: $BENCH_SCRIPT"
+        return
+    fi
+
+    python "$BENCH_SCRIPT" --use_ck_bwd_v3 --run_sanity_checks || test_run_error $BENCH_SCRIPT
+}
+
 # Single config mode, run it and return result
 if [ -n "$SINGLE_CONFIG" ]; then
     _fus_attn="$SINGLE_CONFIG"
@@ -126,4 +143,10 @@ if [ -n "$TEST_JOBS_MODE" -a -n "$TEST_MGPU" ]; then
         configure_fused_attn_env $_fus_attn && run_test_config_mgpu;
     done
 fi
+
+#run benchmark script
+if [ $TEST_LEVEL -ge 3 ]; then
+    run_benchmark
+fi
+
 return_run_results

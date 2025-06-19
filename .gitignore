@@ -49,3 +49,6 @@ downloads/
 .pytest_cache/
 compile_commands.json
 .nfs
+**/profiler_outputs/
+**/times.csv
+
