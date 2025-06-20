@@ -74,12 +74,13 @@ run_test_config(){
 run_test_config_mgpu(){
     #_WORKERS_COUNT=1
     #test $TEST_WORKERS = 0 && _WORKERS_COUNT=0
-    if [ $_fus_attn = "auto"]; then
+    if [ $_fus_attn = "auto" ]; then
         echo ==== Run mGPU with Fused attention backend: $_fus_attn ====
         run 3 test_fused_optimizer.py
+        run 3 test_sanity_import.py
         run 3 distributed/test_fusible_ops.py
-        run 3 fused_attn/test_fused_attn_with_cp.py
         run 3 distributed/test_numerics.py
+        run 3 fused_attn/test_fused_attn_with_cp.py
     fi
 }
 
