@@ -145,8 +145,10 @@ if [ -n "$TEST_JOBS_MODE" -a -n "$TEST_MGPU" ]; then
 fi
 
 #run benchmark script
-if [ $TEST_LEVEL -ge 3 ] && [ -n "$TEST_SGPU" ]; then
-    run_benchmark
+if [ $TEST_LEVEL -ge 3 ]; then
+    if [ -n "$TEST_SGPU" ]; then
+        run_benchmark   
+    fi
 fi
 
 return_run_results
