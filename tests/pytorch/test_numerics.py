@@ -1089,6 +1089,30 @@ def _test_granular_accuracy(block, bs, dtype, config):
     return outputs
 
 
+def _test_granular_accuracy_with_fp8(block, bs, dtype, config):
+    reset_rng_states()
+
+    inp_hidden_states = torch.randn(
+        (config.seq_len, bs, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
+    inp_hidden_states.retain_grad()
+
+    with fp8_autocast(enabled=True):
+        out = block(inp_hidden_states)
+        loss = out.sum()
+        loss.backward()
+
+    torch.cuda.synchronize()
+    outputs = [out, inp_hidden_states.grad]
+    for p in block.parameters():
+        if p.requires_grad:
+            outputs.append(p.grad)
+    return outputs
+
+
 def _test_dpa_accuracy(block, bs, dtype, config):
     reset_rng_states()
 
@@ -1196,6 +1220,45 @@ def test_linear_accuracy(dtype, bs, model):
         }
         for te_output, torch_output in zip(te_outputs, torch_outputs):
             assert_allclose(te_output, torch_output, tolerance, rtol[dtype])
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", ["small"])
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
+def test_fp8_linear_without_transpose_cache_accuracy(dtype, bs, model, fp8_model_params):
+    reset_rng_states()
+    FP8GlobalStateManager.reset()
+
+    config = model_configs[model]
+    with fp8_model_init(enabled=fp8_model_params):    
+        linear = Linear(
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=True,
+            params_dtype=dtype,
+            device="cuda",
+            keep_fp8_weight_transpose_cache=False
+        ).eval()
+
+        ref_linear = Linear(
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=True,
+            params_dtype=dtype,
+            device="cuda",
+        ).eval()
+
+    # Share params
+    with torch.no_grad():
+        ref_linear.weight = Parameter(linear.weight.clone())
+        ref_linear.bias = Parameter(linear.bias.clone())
+    outputs = _test_granular_accuracy_with_fp8(linear, bs, dtype, config)
+    ref_outputs = _test_granular_accuracy_with_fp8(ref_linear, bs, dtype, config)
+
+    # Check output.
+    for te_output, torch_output in zip(outputs, ref_outputs):
+        assert_allclose(te_output, torch_output, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("dtype", param_types)

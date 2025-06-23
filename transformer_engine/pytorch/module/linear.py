@@ -56,6 +56,8 @@ from ..tensor.quantized_tensor import (
 )
 
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
+from ..rocm_utils import create_fp8_weight_transpose_cache, clear_fp8_weight_transpose_cache
+
 
 __all__ = ["Linear"]
 
@@ -99,6 +101,7 @@ class _Linear(torch.autograd.Function):
         fsdp_group: Union[dist_group_type, None],
         module: torch.nn.Module,
         skip_fp8_weight_update: bool,
+        keep_fp8_weight_transpose_cache: bool,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
 
@@ -188,6 +191,7 @@ class _Linear(torch.autograd.Function):
                     update_workspace=update_workspace,
                     skip_update_flag=skip_fp8_weight_update,
                     fsdp_group=fsdp_group,
+                    create_transpose_cache=keep_fp8_weight_transpose_cache,
                 )
 
         # Cast bias to expected dtype
@@ -302,6 +306,7 @@ class _Linear(torch.autograd.Function):
             ctx.reduce_and_update_bwd_fp8_tensors = False
             ctx.owns_input = saved_inputmat is not inp
             ctx.is_input_fp8 = not own_quantized_input
+            ctx.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
             if ctx.fp8 and requires_grad(inp, weight, bias):
                 _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
@@ -474,6 +479,9 @@ class _Linear(torch.autograd.Function):
                 if ctx.grad_input_quantizer is not None:
                     ctx.grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
 
+                if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
+                    create_fp8_weight_transpose_cache(weight_fp8)
+                    
                 # dgrad GEMM
                 nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
                 dgrad, *_, rs_out = general_gemm(
@@ -492,6 +500,9 @@ class _Linear(torch.autograd.Function):
                     bulk_overlap=ctx.ub_bulk_dgrad,
                 )
                 nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
+
+                if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
+                    clear_fp8_weight_transpose_cache(weight_fp8)
 
                 # Launch tensor-parallel communication
                 if ctx.ub_overlap_rs_dgrad:
@@ -650,6 +661,7 @@ class _Linear(torch.autograd.Function):
             None,  # fsdp_group
             None,  # module
             None,  # skip_fp8_weight_update
+            None,  # keep_fp8_weight_transpose_cache
         )
 
 
@@ -746,6 +758,7 @@ class Linear(TransformerEngineBaseModule):
         ub_bulk_dgrad: bool = False,
         ub_bulk_wgrad: bool = False,
         ub_name: Optional[str] = None,
+        keep_fp8_weight_transpose_cache: bool = True,
     ) -> None:
         super().__init__()
 
@@ -940,6 +953,8 @@ class Linear(TransformerEngineBaseModule):
             self.gemm_bias_unfused_add = True
         else:
             self.gemm_bias_unfused_add = False
+        
+        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
 
     def reset_parameters(self, defer_init=False):
         super().reset_parameters(defer_init=defer_init)
@@ -1071,6 +1086,7 @@ class Linear(TransformerEngineBaseModule):
                 self.fsdp_group,
                 self,
                 skip_fp8_weight_update,
+                self.keep_fp8_weight_transpose_cache,
             )
             out = linear_fn(*args)
         if self.gemm_bias_unfused_add:
