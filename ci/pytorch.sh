@@ -12,7 +12,7 @@ TEST_DIR=${TE_PATH}tests/pytorch
 #: ${TEST_WORKERS:=4}
 
 install_prerequisites() {
-    pip install 'numpy>=1.22.4,<2.0' onnx onnxruntime pandas
+    pip install 'numpy>=1.22.4,<2.0' pandas
     rc=$?
     if [ $rc -ne 0 ]; then
         script_error "Failed to install test prerequisites"
@@ -108,9 +108,9 @@ fi
 #Master script mode: prepare testing prerequisites first
 start_message
 install_prerequisites
-pip list | egrep "flash|ml_dtypes|numpy|onnx|torch|transformer_e|typing_ext"
+pip list | egrep "flash|ml_dtypes|numpy|torch|transformer_e|typing_ext"
 #check_test_jobs_requested && init_test_jobs `python -c "import torch; print(torch.cuda.device_count())"`
-    
+
 for _fus_attn in auto flash ck aotriton unfused; do
     configure_fused_attn_env $_fus_attn || continue
 
