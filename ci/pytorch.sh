@@ -12,7 +12,7 @@ TEST_DIR=${TE_PATH}tests/pytorch
 #: ${TEST_WORKERS:=4}
 
 install_prerequisites() {
-    pip install 'numpy>=1.22.4,<2.0' onnx onnxruntime
+    pip install 'numpy>=1.22.4,<2.0' onnx onnxruntime pandas
     rc=$?
     if [ $rc -ne 0 ]; then
         script_error "Failed to install test prerequisites"
@@ -146,7 +146,9 @@ fi
 
 #run benchmark script
 if [ $TEST_LEVEL -ge 3 ]; then
-    run_benchmark
+    if [ -n "$TEST_SGPU" ]; then
+        run_benchmark   
+    fi
 fi
 
 return_run_results
