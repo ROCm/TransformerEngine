@@ -53,14 +53,11 @@ run_test_config(){
     run 1 test_gqa.py
     run 1 test_jit.py
     run_default_fa 1 test_multi_tensor.py
-    # test_numerics now contains fp8+grad and other gemm configs not supported by rocblas gemm path
-    test $_gemm = "hipblaslt" && run 1 test_numerics.py
+    run 1 test_numerics.py
     # TODO: release test_permutation_mask_map_fp8 until upstream fixes the to_float8 error
     run_default_fa 1 test_permutation.py -k "not test_permutation_mask_map_fp8 and not test_permutation_single_case"
-    # test_recipe now contains fp8+grad and other gemm configs not supported by rocblas gemm path
-    test $_gemm = "hipblaslt" && run_default_fa 1 test_recipe.py
-    # test_sanity now contains fp8+grad and other gemm configs not supported by rocblas gemm path
-    test $_gemm = "hipblaslt" && run 1 test_sanity.py
+    run_default_fa 1 test_recipe.py
+    run 1 test_sanity.py
     run_default_fa 1 fused_attn/test_fused_attn.py # Backend selection is controlled by the test
     # TODO: bring back cast transpose kernels after triton kernels for transformer_engine::pytorch::quantize
     #run_default_fa 1 triton_kernels/test_cast_transpose.py
