@@ -38,7 +38,7 @@ from build_tools.pytorch import setup_pytorch_extension
 
 
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
-CMakeBuildExtension = get_build_ext(BuildExtension)
+CMakeBuildExtension = get_build_ext(BuildExtension, True)
 
 
 if __name__ == "__main__":

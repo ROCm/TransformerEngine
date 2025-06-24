@@ -22,7 +22,7 @@ if is_hip_extension() and jax.__version__ < "0.5.0":
 else:
     from jax import ffi
 
-from transformer_engine import transformer_engine_jax
+import transformer_engine_jax
 
 from .base import BasePrimitive, register_primitive
 from .custom_call import custom_caller, CustomCallArgsWrapper
