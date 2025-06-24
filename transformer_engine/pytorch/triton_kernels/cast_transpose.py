@@ -67,28 +67,6 @@ def _cast_transpose_triton(A, noop_ptr, C, T, stride_am, stride_an, stride_bn, s
         scale_inv_out = tl.fdiv(1.0, scale)
         tl.store(scale_inv_ptr, scale_inv_out)
 
-def te_cast_transpose_noop_triton_new(input, noop_flag, output):
-
-    M, N = input.shape
-    quantizer = output._get_quantizer()
-    input_scale = quantizer.scale
-    amax_out = quantizer.amax
-    otype = quantizer.dtype
-    cast_out = output._data
-    trans_out = output._transpose
-    scale_inv_out = output._scale_inv
-    
-    tl_dtype = te_dtype_to_triton_dtype(otype)
-    
-    assert trans_out.size(0) == N and trans_out.size(1) == M
-
-    if noop_flag.nelement() > 0:
-        use_noop = True
-    else:
-        use_noop = False
-    
-    grid = lambda META: (triton.cdiv(M, META['BLOCK_M']) * triton.cdiv(N, META['BLOCK_N']),)
-    _cast_transpose_triton[grid](input, noop_flag, triton.reinterpret(cast_out, tl_dtype), triton.reinterpret(trans_out, tl_dtype), input.stride(0), input.stride(1), trans_out.stride(0), trans_out.stride(1), M, N, input_scale, amax_out, scale_inv_out, get_fp8_max(otype), use_noop)
 
 def te_cast_transpose_noop_triton(input, noop_flag, input_scale, cast_out, trans_out, amax_out, scale_inv_out, otype):
 

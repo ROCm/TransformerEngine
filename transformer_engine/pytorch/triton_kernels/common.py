@@ -15,6 +15,12 @@ def is_cdna4():
 torch_e4m3_type = torch.float8_e4m3fn if is_cdna4() else torch.float8_e4m3fnuz
 torch_e5m2_type = torch.float8_e5m2 if is_cdna4() else torch.float8_e5m2fnuz
 
+def get_torch_dtype_to_triton_dtype(torch_dtype):
+    return {
+        torch.float32: tl.float32,
+        torch.float16: tl.float16,
+        torch.bfloat16: tl.bfloat16,
+    }[torch_dtype]
 # Convert te dtype to torch type.
 def te_dtype_to_torch_dtype(te_dtype):
     return {

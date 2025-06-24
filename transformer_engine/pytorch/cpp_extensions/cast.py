@@ -1,22 +1,22 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
-# See LICENSE for license information.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# License for AMD contributions = MIT. See LICENSE for more information
 
 """Python interface for cast extensions"""
 from typing import List, Optional, Tuple, Union
 import functools
 import torch
 
-from transformer_engine.pytorch.triton_kernels.cast_transpose import te_cast_transpose_noop_triton_new
+from transformer_engine.pytorch.triton_kernels.cast import dequantize_triton_wrapper
+from transformer_engine.pytorch.triton_kernels.cast_transpose import te_cast_transpose_noop_triton
 import transformer_engine_torch as tex
-from ..tensor.quantized_tensor import Quantizer
+from ..tensor.quantized_tensor import QuantizedTensor, Quantizer
 
 @functools.lru_cache(maxsize=None)
 def _empty_tensor() -> torch.Tensor:
     """Get tensor with no entries and no data"""
     return torch.Tensor().cuda()
 
-def quantize(
+def quantize_triton(
     tensor: torch.Tensor,
     quantizer: Quantizer,
     output: Optional[torch.Tensor] = None,
@@ -30,9 +30,9 @@ def quantize(
     if not fake_tensor_type.is_floating_point:
         fake_tensor_type = torch.float32
     
-    out = None
+    out: QuantizedTensor = None
     if output is None:
-        out = quantizer.make_empty(input_shape)
+        out = quantizer.make_empty(input_shape, dtype=fake_tensor_type)
     else:
         out = quantizer.create_tensor_from_data(output, fake_dtype=fake_tensor_type)
     
@@ -43,29 +43,28 @@ def quantize(
         return out
         
     if input_tensor.nelement() > 0:
-        te_cast_transpose_noop_triton_new(
-            input_tensor,
-            noop_flag,
-            out
-        )
-        # use_cast_transpose_triton = bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
-        # if use_cast_transpose_triton:
-        #     te_cast_transpose_noop_triton_new(
-        #         input_tensor,
-        #         noop_flag,
-        #         out
-        #     )
-        # else:
-        #     tex.fused_cast_transpose_noop(
-        #         inp,
-        #         noop_flag,
-        #         fp8_scales["scale"],
-        #         fp8_scales["amax"],
-        #         fp8_scales["scale_inv"],
-        #         cast_out,
-        #         transpose_out,
-        #         otype,
-        #         **fp8_scales_offsets,
-        #     )
-
+        if out.get_metadata()["data_transpose"] is not None:
+            quantizer = out._get_quantizer()
+            input_scale = quantizer.scale
+            amax_out = quantizer.amax
+            otype = quantizer.dtype
+            cast_out = out._data
+            trans_out = out._transpose
+            scale_inv_out = out._scale_inv
+            te_cast_transpose_noop_triton(
+                input_tensor,
+                noop_flag,
+                input_scale=input_scale,
+                cast_out=cast_out,
+                trans_out=trans_out,
+                amax_out=amax_out,
+                scale_inv_out=scale_inv_out,
+                otype=otype
+            )
+        else:
+            out.quantize_(input)
     return out
+
+def dequantize_triton(input: QuantizedTensor, dtype: torch.dtype):
+    return dequantize_triton_wrapper(input, dtype)
+    
