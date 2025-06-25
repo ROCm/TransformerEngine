@@ -1818,8 +1818,6 @@ def test_gpt_cuda_graph(dtype, bs, model):
             use_fa, use_aotriton, use_ck = rocm_attn_backend()
             if use_fa:
                 pytest.skip(f"ROCm flash attention does not support cuda graph with {dtype}")
-            if use_aotriton and not use_ck:
-                pytest.skip(f"AOTriton attention backend does not support cuda graph with {dtype}")
 
     config = model_configs[model]
 
