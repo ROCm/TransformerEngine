@@ -22,7 +22,10 @@ def quantize_triton(
     output: Optional[torch.Tensor] = None,
     noop_flag: torch.Tensor = None 
 ) -> torch.Tensor:
-    """quantize"""
+    """
+    Quantizes the input tensor using a specified quantizer,
+    with an option to utilize Triton-based `cast_transpose` for performance.
+    """
 
     input_tensor = tensor.contiguous()
     input_shape = list(input_tensor.shape)
@@ -32,14 +35,18 @@ def quantize_triton(
     
     out: QuantizedTensor = None
     if output is None:
+        # Create an empty QuantizedTensor if no output tensor is provided
         out = quantizer.make_empty(input_shape, dtype=fake_tensor_type)
     else:
+        # Create a QuantizedTensor from the provided output tensor
         out = quantizer.create_tensor_from_data(output, fake_dtype=fake_tensor_type)
     
+    # Construct no-op flag if needed
     if noop_flag is None:
         noop_flag = _empty_tensor()
 
     if out.nelement() == 0:
+        # Return empty output if the quantized tensor has no elements
         return out
         
     if input_tensor.nelement() > 0:
@@ -53,6 +60,7 @@ def quantize_triton(
             trans_out = out._transpose
             scale_inv_out = out._scale_inv
             use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+            # Determine whether to use the Triton kernel for cast_transpose
             if use_cast_transpose_triton:
                 te_cast_transpose_noop_triton(
                     input_tensor,
@@ -65,6 +73,7 @@ def quantize_triton(
                     otype=otype
                 )
             else:
+                # Fallback to the default quantizer if Triton is not enabled/applicable
                 out = quantizer.quantize(input_tensor)
         else:
             out = quantizer.quantize(input_tensor)
