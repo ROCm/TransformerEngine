@@ -1,10 +1,8 @@
 # Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
-import math
 import pytest
 import torch
-import functools
 
 from transformer_engine.pytorch.cpp_extensions.cast import quantize_triton, dequantize_triton
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
