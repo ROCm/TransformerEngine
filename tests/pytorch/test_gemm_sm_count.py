@@ -25,10 +25,10 @@ def _run_gemm_timing(name: str, gemm_parameters: Dict) -> float:
     
     timing = timing[2:]  # Discard the initial timings to avoid warm-up effects
     mean = sum(timing) / len(timing)
-    disp = [abs(t - mean) for t in timing]
-    logging.info(f"{name} timing: {mean} ms with variance {sum(disp)/len(timing)}")
-    if any(d > 0.2 * mean for d in disp):
-        raise RuntimeError(f"High timing variance detected: {timing}")
+    abs_dev = [abs(t - mean) for t in timing]
+    logging.info(f"{name} timing: {mean} ms with deviation {sum(abs_dev)/len(timing)}")
+    if any(d > 0.2 * mean for d in abs_dev):
+        raise RuntimeError(f"High timing deviation detected: {timing}")
     return mean
 
 

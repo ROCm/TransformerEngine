@@ -35,6 +35,8 @@ template<typename T>
 struct CacheEntry {
   T value;
   hipEvent_t event;
+
+  constexpr CacheEntry() : value(), event(nullptr) {}
   
   bool isValid() const { return event != nullptr; }
 
@@ -52,16 +54,9 @@ struct CacheEntry {
     {
       return false;
     }
-    else if (err == hipErrorCapturedEvent)
-    {
-      std::cerr << "[ERROR] hipEventQuery failed: " << hipGetErrorString(err) << std::endl;
-      NVTE_ERROR("Invalid event");
-      return false;
-    }
     else
     {
-      std::cerr << "[ERROR] hipEventQuery failed with error " << err << ": " << hipGetErrorString(err) << std::endl;
-      NVTE_ERROR("Invalid event");
+      NVTE_ERROR("Invalid event: err=", std::to_string(err), " ", hipGetErrorString(err));
       return false;
     }
   }
@@ -71,7 +66,7 @@ template<typename T, typename K>
 class ObjCache {
 public:
   using Data = std::unordered_map<K, std::unordered_map<hipStream_t, CacheEntry<T>>>;
-  static constexpr CacheEntry<T> invalidEntry = {};
+  static constexpr CacheEntry<T> invalidEntry{};
 
   const CacheEntry<T>& get(const K& key, const hipStream_t stream) const
   {
@@ -120,7 +115,7 @@ public:
     data[key][stream] = item; 
   }
 
-  ObjCache(void (*offload)(const Data&)): offload(offload) {}
+  ObjCache(void (*a_offload)(const Data&)): offload(a_offload) {}
 
   ~ObjCache()
   {
@@ -157,7 +152,7 @@ class ObjPool: public ObjCache<T, K> {
       {
         for (const auto &it2: it.second)
         {
-          this->data[it.first][it2.first] = it2.second;
+          ObjCache<T, K>::set(it.first, it2.first, it2.second);
         }
       }
     }
@@ -1181,7 +1176,6 @@ void hipblaslt_gemm(const Tensor *inputA,
 
         NVTE_CHECK_CUDA(hipStreamSynchronize(stream));
         hipStream_t &profilingStream = stream; // Reuse the stream for profiling
-        NVTE_CHECK_CUDA(hipStreamCreateWithFlags(&profilingStream, hipStreamNonBlocking));
         using tuning_clock = std::chrono::steady_clock;
         tuning_clock::now(); //the first call takes little longer so do it outside the loop
         tuning_clock::duration bestTime = tuning_clock::duration::max();
@@ -1361,13 +1355,16 @@ bool get_service_stream(int math_sm_count, hipStream_t stream, struct ServiceStr
   }
 
   ServiceStreamKey key = make_service_stream_key(device_id, math_sm_count);
-  auto streamEntry = service_stream_cache.get(key, stream);
+  CacheEntry<hipStream_t> streamEntry = service_stream_cache.get(key, stream);
   if (!streamEntry.isValid()) {
     /* There is no entry in the cache, try the following:
       * 1. Try to acquire any available stream form the cache.
       * 2. If not available, try to acquire any available stream form the pool.
-      * 3. If still not available, create a new stream and event.
-    */
+      * 3. If still not available, create a new stream and event. */
+    bool b_log = false;
+    if (const char* env_p = std::getenv("NVTE_LOG_MATH_SM_COUNT") ) {
+      b_log = (env_p != nullptr) && (std::string(env_p) == "1");
+    }
     streamEntry = service_stream_cache.acquire(key, stream);
     if (!streamEntry.isValid()) {
       streamEntry = service_stream_pool.acquire(key, stream);
@@ -1382,10 +1379,18 @@ bool get_service_stream(int math_sm_count, hipStream_t stream, struct ServiceStr
       }
       NVTE_CHECK_CUDA(hipExtStreamCreateWithCUMask(&streamEntry.value, maskSize, mask.data()));
       NVTE_CHECK_CUDA(hipEventCreateWithFlags(&streamEntry.event, hipEventDisableTiming));
-      std::cout << "[DEBUG] Created service stream for device " << device_id
+      if (b_log)
+      {
+        std::cout << "[DEBUG] Created service stream for device " << device_id
+                  << " with " << math_sm_count << " CUs" << std::endl;
+      }
+    }
+    else if (b_log)
+    {
+      std::cout << "[DEBUG] Reusing service stream for device " << device_id
                 << " with " << math_sm_count << " CUs" << std::endl;
     }
-  service_stream_cache.set(key, stream, streamEntry);
+    service_stream_cache.set(key, stream, streamEntry);
   }
 
   ctl.stream = streamEntry.value;
@@ -1415,7 +1420,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  int math_sm_count, int m_split, int n_split, bool gemm_producer,
                  const Tensor *inputCounter, hipStream_t stream, int compute_stream_offset)
 {
-  struct ServiceStreamCtl ss_ctl;
+  ServiceStreamCtl ss_ctl;
   bool use_service_stream =
       (math_sm_count != 0) ? get_service_stream(math_sm_count, stream, ss_ctl) : false;
 
