@@ -625,7 +625,7 @@ class _moe_chunk_sort(torch.autograd.Function):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # pylint: disable=missing-function-docstring
         if not inp.numel():
-            return inp
+            return inp, probs
 
         assert inp.is_cuda, "TransformerEngine needs CUDA."
         assert split_sizes.is_cuda, "TransformerEngine needs CUDA."

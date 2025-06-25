@@ -21,5 +21,5 @@ if is_hip_extension():
   
 @cache
 def is_fp8_fnuz():
-  from transformer_engine.transformer_engine_jax import get_device_compute_capability
+  from transformer_engine_jax import get_device_compute_capability
   return is_hip_extension() and get_device_compute_capability(0) == 94
