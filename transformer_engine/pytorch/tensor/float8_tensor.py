@@ -4,6 +4,7 @@
 
 """Tensor class with FP8 data"""
 from __future__ import annotations
+import os
 from typing import Optional, Tuple, Iterable
 import warnings
 
@@ -14,6 +15,7 @@ from transformer_engine_torch import DType as TE_DType
 from ..utils import devices_match, non_tn_fp8_gemm_supported
 from ._internal.float8_tensor_base import Float8TensorBase, _FromFloat8Func
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
+from ..triton_kernels.cast import quantize_triton
 
 aten = torch.ops.aten
 
@@ -80,7 +82,11 @@ class Float8Quantizer(Quantizer):
             src = src.contiguous()
 
         # Launch cast kernel
-        tex.quantize(src, self, dst, noop_flag)
+        use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+        if use_cast_transpose_triton:
+            quantize_triton(src, self, dst, noop_flag)
+        else:
+            tex.quantize(src, self, dst, noop_flag)
 
         # Update FP8 dtype
         dst._fp8_dtype = self.dtype

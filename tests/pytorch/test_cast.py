@@ -5,7 +5,7 @@ import os
 import pytest
 import torch
 
-from transformer_engine.pytorch.cpp_extensions.cast import quantize_triton
+from transformer_engine.pytorch.triton_kernels.cast import quantize_triton
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 import transformer_engine_torch as tex
 from triton_kernels.test_common import fill_uniform, get_tolerances
@@ -38,9 +38,12 @@ def test_quantize(shape, in_dtype, out_dtype):
     output_tensor  = quantize_triton(input_tensor, quantizer=quantizer)
     
     quantizer2 = Float8Quantizer(scale=scale_tensor, amax=amax_tensor, fp8_dtype=out_dtype)
-    te_quantized_out = quantizer2.quantize(input_tensor)
+    te_quantized_out = tex.quantize(input_tensor, quantizer2)
+
+    # Check for cyclic imports
     os.environ['NVTE_USE_CAST_TRANSPOSE_TRITON'] = '1'
-   
+    quantizer2.quantize(input_tensor)
+    
     atol, rtol = get_tolerances(in_dtype)
     assert torch.allclose(output_tensor, te_quantized_out, atol=atol, rtol=rtol), 'Quantized results do not match!'
     assert torch.allclose(output_tensor._get_quantizer().scale, te_quantized_out._get_quantizer().scale, atol=atol, rtol=rtol), 'Scale results do not match!'

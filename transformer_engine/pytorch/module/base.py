@@ -41,6 +41,7 @@ from ..tensor import QuantizedTensor, Quantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..utils import get_device_compute_capability
+from ..triton_kernels.cast import quantize_triton
 
 __all__ = ["initialize_ub", "destroy_ub"]
 
@@ -1049,7 +1050,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if hasattr(out, "quantize_"):
                 out.quantize_(tensor, noop_flag=skip_update_flag)
             else:
-                tex.quantize(tensor, quantizer, out, skip_update_flag)
+                use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+                if use_cast_transpose_triton:
+                    quantize_triton(tensor, self, quantizer, skip_update_flag)
+                else:
+                    tex.quantize(tensor, quantizer, out, skip_update_flag)
 
         return out
 

@@ -5,6 +5,7 @@
 """Tensor with quantized data"""
 
 from __future__ import annotations
+import os
 from typing import Optional, Tuple, Iterable, Any, Dict, Union
 import abc
 import copy
@@ -190,7 +191,13 @@ class _QuantizeFunc(torch.autograd.Function):
         quantizer: Quantizer,
     ) -> QuantizedTensor:
         # pylint: disable=missing-function-docstring
-        return tex.quantize(tensor, quantizer)
+        use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+        if use_cast_transpose_triton:
+            # Importing here to resolve cyclic imports
+            from ..triton_kernels.cast import quantize_triton
+            quantize_triton(tensor, quantizer)
+        else:
+            return tex.quantize(tensor, quantizer)
 
     @staticmethod
     def backward(

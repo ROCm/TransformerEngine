@@ -7,7 +7,7 @@ from typing import List, Optional, Tuple, Union
 import functools
 import torch
 
-from transformer_engine.pytorch.triton_kernels.cast_transpose import te_cast_transpose_noop_triton
+from .cast_transpose import te_cast_transpose_noop_triton
 import transformer_engine_torch as tex
 from ..tensor.quantized_tensor import QuantizedTensor, Quantizer
 
@@ -50,7 +50,6 @@ def quantize_triton(
         return out
         
     if input_tensor.nelement() > 0:
-        
         if out.get_metadata()["data_transpose"] is not None:
             quantizer = out._get_quantizer()
             input_scale = quantizer.scale
@@ -59,22 +58,17 @@ def quantize_triton(
             cast_out = out._data
             trans_out = out._transpose
             scale_inv_out = out._scale_inv
-            use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
-            # Determine whether to use the Triton kernel for cast_transpose
-            if use_cast_transpose_triton:
-                te_cast_transpose_noop_triton(
-                    input_tensor,
-                    noop_flag,
-                    input_scale=input_scale,
-                    cast_out=cast_out,
-                    trans_out=trans_out,
-                    amax_out=amax_out,
-                    scale_inv_out=scale_inv_out,
-                    otype=otype
-                )
-            else:
-                # Fallback to the default quantizer if Triton is not enabled/applicable
-                out = quantizer.quantize(input_tensor)
+            te_cast_transpose_noop_triton(
+                input_tensor,
+                noop_flag,
+                input_scale=input_scale,
+                cast_out=cast_out,
+                trans_out=trans_out,
+                amax_out=amax_out,
+                scale_inv_out=scale_inv_out,
+                otype=otype
+            )
+            
         else:
-            out = quantizer.quantize(input_tensor)
+            out = tex.quantize(input_tensor, quantizer)
     return out

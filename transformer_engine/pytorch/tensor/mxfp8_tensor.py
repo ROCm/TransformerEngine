@@ -6,6 +6,7 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -17,6 +18,7 @@ from ..utils import devices_match, round_up_to_nearest_multiple
 
 from ._internal.mxfp8_tensor_base import MXFP8TensorBase, _FromMXFP8Func
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
+from ..triton_kernels.cast import quantize_triton
 
 aten = torch.ops.aten
 
@@ -59,7 +61,11 @@ class MXFP8Quantizer(Quantizer):
             src = src.contiguous()
 
         # Launch cast kernel
-        tex.quantize(src, self, dst, noop_flag)
+        use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+        if use_cast_transpose_triton:
+            quantize_triton(src, self, dst, noop_flag)
+        else:
+            tex.quantize(src, self, dst, noop_flag)
 
         # Update FP8 dtype
         dst._fp8_dtype = self.dtype
