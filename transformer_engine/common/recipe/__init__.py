@@ -12,17 +12,30 @@ from enum import Enum
 from typing import Optional, Union, Callable, NamedTuple
 from typing_extensions import Literal
 from pydantic.dataclasses import dataclass
-from transformer_engine.common import te_uses_fp8_fnuz
+from transformer_engine.common import is_fp8_fnuz
 
 
 class _FormatHelper(NamedTuple):
     """
     Stores max FP8 values for fprop and bprop a `Format`.
     """
+    fwd: tuple
+    bwd: tuple
 
-    max_fwd: float
-    max_bwd: float
+    @property
+    def max_fwd(self) -> float: 
+        return self.fwd[is_fp8_fnuz()]
 
+    @property
+    def max_bwd(self) -> float:
+        return self.bwd[is_fp8_fnuz()]
+
+class _FormatMaxVals(Enum):
+    """
+    Tuples of FP8 (OCP, FNUZ) values for different formats.
+    """
+    E4M3 = (448, 240)
+    E5M2 = (57344, 57344)
 
 class Format(Enum):
     """
@@ -38,10 +51,9 @@ class Format(Enum):
             FP8 tensors in the forward pass are in e4m3 format,
             FP8 tensors in the backward pass are in e5m2 format
     """
-    E4M3 = (_FormatHelper(max_fwd=240, max_bwd=240) if te_uses_fp8_fnuz
-            else _FormatHelper(max_fwd=448, max_bwd=448))
-    E5M2 = _FormatHelper(max_fwd=57344, max_bwd=57344)
-    HYBRID = _FormatHelper(max_fwd=E4M3.max_fwd, max_bwd=E5M2.max_bwd)
+    E4M3 = _FormatHelper(fwd=_FormatMaxVals.E4M3.value, bwd=_FormatMaxVals.E4M3.value) 
+    E5M2 = _FormatHelper(fwd=_FormatMaxVals.E5M2.value, bwd=_FormatMaxVals.E5M2.value)
+    HYBRID = _FormatHelper(fwd=E4M3.fwd, bwd=E5M2.bwd)
 
 
 class Recipe:
