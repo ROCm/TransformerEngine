@@ -94,6 +94,12 @@ def te_dtype_to_triton_dtype(dtype: tex.DType):
         return tl.float8e4b8 if is_fp8_fnuz() else tl.float8e4nv
     if dtype == tex.DType.kFloat8E5M2:
         return tl.float8e5b16 if is_fp8_fnuz() else tl.float8e5
+    if dtype == tex.DType.kFloat32:
+        return tl.float32
+    if dtype == tex.DType.kFloat16:
+        return tl.float16
+    if dtype == tex.DType.kBFloat16:
+        return tl.bfloat16,
 
 def get_fp8_max(dtype: tex.DType):
     if dtype == tex.DType.kFloat8E4M3:

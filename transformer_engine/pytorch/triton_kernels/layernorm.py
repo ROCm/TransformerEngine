@@ -3,6 +3,7 @@
 
 
 from itertools import product
+import os
 
 import torch
 from transformer_engine.pytorch.cpp_extensions.cast import quantize_triton
@@ -467,64 +468,48 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
         )
     device = input.device
     M, N = input.shape
-    fake_tensor_type = input.dtype
+    
     mu = torch.empty(M, dtype=torch.float32, device=device)
     rsigma = torch.empty(M, dtype=torch.float32, device=device)
-    
+    torch_out_dtype = te_dtype_to_torch_dtype(out_dtype)
     if quantizer is None or isinstance(quantizer, MXFP8Quantizer):
-        ln_out = torch.empty(M, N, dtype=fake_tensor_type, device=device)
+        ln_out = torch.empty(M, N, dtype=torch_out_dtype, device=device)
     else:
         if ln_out is None:
-            ln_out = quantizer.make_empty((M, N),  dtype=fake_tensor_type)
+            ln_out = quantizer.make_empty((M, N),  dtype=torch_out_dtype)
         else:
-            ln_out = quantizer.create_tensor_from_data(ln_out, fake_dtype=fake_tensor_type)
+            ln_out = quantizer.create_tensor_from_data(ln_out, fake_dtype=torch_out_dtype)
     
     APPLY_ATOMIC = M < 512
     IS_FP8 = out_dtype == tex.DType.kFloat8E4M3 or out_dtype == tex.DType.kFloat8E5M2
-    print("IS FP8!!!!", IS_FP8)
+
+    amax_temp = (
+        torch.empty((M,), dtype=torch.float32, device=input.device) if IS_FP8 else None
+    )
+
     max_fused_size = 16384 // input.element_size()
-    print("max_fused_size: ", max_fused_size)
     BLOCK_SIZE = min(max_fused_size, triton.next_power_of_2(input.shape[1]))
-    print("BLOCK_SIZE: ", BLOCK_SIZE)
     scale = None
     amax_out = None
     scale_inv = None
-
+    cast_out = ln_out
     if IS_FP8:
         scale = quantizer.scale
         amax_out = quantizer.amax
         scale_inv = ln_out._scale_inv
-        print("scale: ", scale)
-        print("amax_out: ", amax_out)
-        print("scale_inv: ", scale_inv)
-    # print(quantizer)
-    # print(input,
-    #     weight,
-    #     bias,
-    #     mu,
-    #     rsigma,
-    #     scale,
-    #     amax_out,
-    #     scale_inv,
-    #     input.stride(0),
-    #     ln_out.stride(0),
-    #     M,
-    #     N,
-    #     eps)
-    # print(ln_out)
+        cast_out = ln_out._data
+
     tl_dtype = te_dtype_to_triton_dtype(out_dtype)
-    print(tl_dtype)
-    print(ln_out)
-    print("APPLY_ATOMIC: ", APPLY_ATOMIC)
+
     _layernorm_fwd_triton[(M,)](
         input,
-        triton.reinterpret(ln_out, tl_dtype),
+        triton.reinterpret(cast_out, tl_dtype),
         weight,
         bias,
         mu,
         rsigma,
         scale,
-        amax_out,
+        amax_out if APPLY_ATOMIC else amax_temp,
         scale_inv,
         input.stride(0),
         ln_out.stride(0),
@@ -534,7 +519,7 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
         ZERO_CENTERED_GAMMA=zero_centered_gamma,
         BLOCK_SIZE=BLOCK_SIZE,
         IS_FP8=IS_FP8,
-        APPLY_ATOMIC=False,
+        APPLY_ATOMIC=APPLY_ATOMIC,
         # TODO: Improve performance with persistent kernel
         # Persistent kernel currently lags behind non persistent version
         # It also lags behind TE implementation in a few cases
@@ -542,10 +527,12 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
     )
     if isinstance(quantizer, MXFP8Quantizer):
         ln_out = quantize_triton(ln_out, quantizer)
-
+    print("ISFP8: ", IS_FP8)
+    print("APPLY ATOMIC: ", APPLY_ATOMIC)
     if IS_FP8 and not APPLY_ATOMIC:
+        print("CALLING REDUCE")
         _layernorm_fwd_reduce_triton[(triton.cdiv(M, 256),)](
-            amax_out,
+            amax_temp,
             amax_out,
             scale,
             scale_inv,
