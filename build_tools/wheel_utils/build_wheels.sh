@@ -21,7 +21,7 @@ git config --global --add safe.directory /TransformerEngine
 cd /TransformerEngine
 
 #If there is default Python installation, use it
-PYTHON=`which python`
+PYTHON=`which python || true`
 if [ -z "$PYTHON" ]; then
         PYBINDIR=/opt/python/cp310-cp310/bin/
 else
