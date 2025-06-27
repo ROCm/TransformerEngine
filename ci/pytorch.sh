@@ -50,6 +50,7 @@ run_test_config(){
     run_default_fa 1 test_fused_rope.py
     run_default_fa 1 test_fusible_ops.py
     run_default_fa 3 test_gemm_autotune.py
+    run_default_fa 3 test_gemm_sm_count.py
     run 1 test_gqa.py
     run 1 test_jit.py
     run_default_fa 1 test_multi_tensor.py
