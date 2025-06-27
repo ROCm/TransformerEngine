@@ -185,13 +185,21 @@ inline at::ScalarType GetATenDType(transformer_engine::DType t) {
 #ifndef USE_ROCM
       return at::kFloat8_e4m3fn;
 #else
+  #if HIP_VERSION >= 60300000
       return te_fp8_fnuz()? at::kFloat8_e4m3fnuz : at::kFloat8_e4m3fn;
+  #else
+      return at::kFloat8_e4m3fnuz;
+  #endif
 #endif // USE_ROCM
     case transformer_engine::DType::kFloat8E5M2:
 #ifndef USE_ROCM
       return at::kFloat8_e5m2;
 #else
+  #if HIP_VERSION >= 60300000
       return te_fp8_fnuz()? at::kFloat8_e5m2fnuz : at::kFloat8_e5m2;
+  #else
+      return at::kFloat8_e5m2fnuz;
+  #endif
 #endif // USE_ROCM
     default:
       NVTE_ERROR("Invalid type");
