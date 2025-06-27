@@ -34,10 +34,10 @@ def quantize_triton(
     out: QuantizedTensor = None
     if output is None:
         # Create an empty QuantizedTensor if no output tensor is provided
-        out = quantizer.make_empty(input_tensor.shape, dtype=fake_tensor_type, requires_grad=input_tensor.requires_grad)
+        out = quantizer.make_empty(input_tensor.shape, dtype=fake_tensor_type)
     else:
         # Create a QuantizedTensor from the provided output tensor
-        out = quantizer.create_tensor_from_data(output._data, fake_dtype=fake_tensor_type, internal = quantizer.internal if hasattr(quantizer, 'internal') else None, requires_grad=input_tensor.requires_grad)
+        out = output
     
     # Construct no-op flag if needed
     if noop_flag is None:
