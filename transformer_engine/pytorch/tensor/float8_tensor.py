@@ -112,7 +112,7 @@ class Float8Quantizer(Quantizer):
         # Allocate FP8 data transpose if needed
         data_transpose = None
         if self.columnwise_usage:
-            inner_dim = data.size(-1)
+            inner_dim = data.size(-1) if len(data.size()) > 0 else 1
             data_transpose = torch.empty(
                 inner_dim,
                 data.numel() // inner_dim,

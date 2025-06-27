@@ -12,6 +12,7 @@ from triton_kernels.test_common import fill_uniform, get_tolerances
 
 @pytest.mark.parametrize("shape", 
                          [
+                        (32, 2, 64),
                         (128, 128),
                         (256, 256),
                         (768, 1024),

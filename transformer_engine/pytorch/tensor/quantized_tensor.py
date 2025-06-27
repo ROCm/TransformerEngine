@@ -195,7 +195,7 @@ class _QuantizeFunc(torch.autograd.Function):
         if use_cast_transpose_triton:
             # Importing here to resolve cyclic imports
             from ..triton_kernels.cast import quantize_triton
-            quantize_triton(tensor, quantizer)
+            return quantize_triton(tensor, quantizer)
         else:
             return tex.quantize(tensor, quantizer)
 

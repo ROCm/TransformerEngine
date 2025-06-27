@@ -26,9 +26,7 @@ def quantize_triton(
     Quantizes the input tensor using a specified quantizer,
     with an option to utilize Triton-based `cast_transpose` for performance.
     """
-
     input_tensor = tensor.contiguous()
-    input_shape = list(input_tensor.shape)
     fake_tensor_type = input_tensor.dtype
     if not fake_tensor_type.is_floating_point:
         fake_tensor_type = torch.float32
@@ -36,16 +34,16 @@ def quantize_triton(
     out: QuantizedTensor = None
     if output is None:
         # Create an empty QuantizedTensor if no output tensor is provided
-        out = quantizer.make_empty(input_shape, dtype=fake_tensor_type)
+        out = quantizer.make_empty(input_tensor.shape, dtype=fake_tensor_type, requires_grad=input_tensor.requires_grad)
     else:
         # Create a QuantizedTensor from the provided output tensor
-        out = quantizer.create_tensor_from_data(output, fake_dtype=fake_tensor_type)
+        out = quantizer.create_tensor_from_data(output._data, fake_dtype=fake_tensor_type, internal = quantizer.internal if hasattr(quantizer, 'internal') else None, requires_grad=input_tensor.requires_grad)
     
     # Construct no-op flag if needed
     if noop_flag is None:
         noop_flag = _empty_tensor()
 
-    if out.nelement() == 0:
+    if out.size().numel() == 0:
         # Return empty output if the quantized tensor has no elements
         return out
         
@@ -70,5 +68,5 @@ def quantize_triton(
             )
             
         else:
-            out = tex.quantize(input_tensor, quantizer)
+            out = tex.quantize(input_tensor, quantizer, out, noop_flag)
     return out
