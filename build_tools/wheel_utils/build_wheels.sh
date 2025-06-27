@@ -21,7 +21,7 @@ git config --global --add safe.directory /TransformerEngine
 cd /TransformerEngine
 
 #If there is default Python installation, use it
-PYTHON=`which python`
+PYTHON=`which python || true`
 if [ -z "$PYTHON" ]; then
         PYBINDIR=/opt/python/cp310-cp310/bin/
 else
@@ -50,7 +50,10 @@ if $BUILD_COMMON ; then
         WHL_BASE="transformer_engine-${VERSION}"
         if [ "$ROCM_BUILD" = "1" ]; then
                 TE_CUDA_VERS="rocm"
-                ${PYBINDIR}pip install ninja
+                ${PYBINDIR}pip install ninja dataclasses
+                if [ -n "$PYBINDIR" ]; then
+                        PATH="$PYBINDIR:$PATH" #hipify expects python in PATH
+                fi
         else
                 TE_CUDA_VERS="cu12"
                 PYBINDIR=/opt/python/cp38-cp38/bin/
