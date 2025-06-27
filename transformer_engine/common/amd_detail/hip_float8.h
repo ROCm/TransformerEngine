@@ -37,6 +37,10 @@ static inline bool te_fp8_fnuz() {
 
 #include <hip/hip_version.h> //For RTC it should be included explicitly
 
+#if defined(__HIP_DEVICE_COMPILE__) && HIP_VERSION < 60300000
+static constexpr inline bool te_fp8_fnuz() { return true; }
+#endif
+
 #if HIP_VERSION >= 60200000
 #include <hip/hip_fp8.h>
 
@@ -70,11 +74,11 @@ typedef _te_hip_fp8<__hip_fp8_e5m2_fnuz, __hip_fp8_e5m2> _te_hip_fp8_e5m2;
 #elif HIP_FP8_TYPE_FNUZ
 typedef __hip_fp8_e4m3_fnuz _te_hip_fp8_e4m3;
 typedef __hip_fp8_e5m2_fnuz _te_hip_fp8_e5m2;
-static inline bool te_fp8_fnuz() { return true; }
+static constexpr inline bool te_fp8_fnuz() { return true; }
 #elif HIP_FP8_TYPE_OCP
 typedef __hip_fp8_e4m3 _te_hip_fp8_e4m3;
 typedef __hip_fp8_e5m2 _te_hip_fp8_e5m2;
-static inline bool te_fp8_fnuz() { return false; }
+static constexpr inline bool te_fp8_fnuz() { return false; }
 #else
 #error "Unsupported HIP_FP8_TYPE"
 #endif //__HIP_DEVICE_COMPILE__
