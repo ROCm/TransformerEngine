@@ -1395,7 +1395,7 @@ bool get_service_stream(int math_sm_count, hipStream_t stream, struct ServiceStr
 
   ctl.stream = streamEntry.value;
   ctl.end_event = streamEntry.event;
-  NVTE_CHECK_CUDA(hipEventCreate(&ctl.start_event));
+  NVTE_CHECK_CUDA(hipEventCreateWithFlags(&ctl.start_event, hipEventDisableTiming));
   NVTE_CHECK_CUDA(hipEventRecord(ctl.start_event, stream));
   NVTE_CHECK_CUDA(hipStreamWaitEvent(ctl.stream, ctl.start_event, 0));
   return true; 

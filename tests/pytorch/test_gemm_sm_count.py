@@ -50,4 +50,4 @@ def test_gemm_sm_count():
     with torch.cuda.stream(torch.cuda.Stream()):
         constrained_timing = _run_gemm_timing("Constrained", gemm_parameters)
     
-    assert full_timing  < constrained_timing * 5, "GEMM performance is not changed with constrained SM count"
+    assert full_timing * 5  < constrained_timing, "GEMM performance is not changed with constrained SM count"
