@@ -16,11 +16,12 @@ RUN dnf install -y epel-release elrepo-release
 RUN dnf config-manager --set-enabled build_system powertools extras epel elrepo
 
 # Setup dev packages
-RUN dnf group install -y "Development Tools" && dnf install -y git cmake llvm-toolset
+RUN dnf group install -y "Development Tools" && \
+    dnf install -y git cmake llvm-toolset hipblaslt hipblaslt-devel gcc-toolset-12
 RUN dnf clean all
 RUN rm -rf /var/cache/dnf/*
 
-ENV CMAKE_PREFIX_PATH=${ROCM_PATH}/lib/cmake
+ENV CMAKE_PREFIX_PATH=/opt/rocm/lib/cmake
 ENV NVTE_RELEASE_BUILD=1
 
 ARG GPU_TARGETS="gfx942"
