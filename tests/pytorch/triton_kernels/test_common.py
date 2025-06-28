@@ -8,11 +8,9 @@ import numpy as np
 import pytest
 import torch
 
-from transformer_engine.pytorch import cpp_extensions as tex
-
 from transformer_engine.pytorch.triton_kernels.common import (
-    torch_e4m3_type,
-    torch_e5m2_type,
+    get_torch_e4m3_type,
+    get_torch_e5m2_type,
 )
 
 # Mimics behavior of `fillUniform` from `tests/cpp/test_common.cu`.
@@ -37,7 +35,7 @@ def get_tolerances(dtype):
         return 1e-5, 1e-3
     elif dtype == torch.bfloat16:
         return 1e-5, 1e-2
-    elif dtype == torch_e4m3_type or dtype == torch_e5m2_type:
+    elif dtype == get_torch_e4m3_type() or dtype == get_torch_e5m2_type():
         # TODO: different tolerances for FNUZ and OCP
         return 1e-2, 1e-2
     else:
@@ -129,8 +127,8 @@ def str_to_torch_dtype(dtype_str):
         "fp16": torch.float16,
         "bf16": torch.bfloat16,
         "fp32": torch.float32,
-        "fp8e4": torch_e4m3_type,
-        "fp8e5": torch_e5m2_type,
+        "fp8e4": get_torch_e4m3_type(),
+        "fp8e5": get_torch_e5m2_type(),
     }[dtype_str[1:] if dtype_str[0] in {"i", "o"} else dtype_str]
 
 # Common pytest skip conditions:
