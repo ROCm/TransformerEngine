@@ -1524,6 +1524,9 @@ def test_grouped_linear_accuracy(
     fuse_wgrad_accumulation,
     parallel_mode=None,
 ):
+    if IS_HIP_EXTENSION:
+        if dtype not in (torch.float32,) and fuse_wgrad_accumulation and not fp8:
+            pytest.skip(f"Rocm does not support fused wgrad accumulation for {dtype}.")
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
