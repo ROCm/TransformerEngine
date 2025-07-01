@@ -900,6 +900,7 @@ class FusedAttnRunner:
     "attn_mask_type",
     [
         pytest.param(AttnMaskType.NO_MASK, id="NO_MASK"),
+        pytest.param(AttnMaskType.PADDING_MASK, id="PADDING"),
         pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL"),
         pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id="PADDING_CAUSAL"),
     ],
@@ -1109,6 +1110,8 @@ class TestFusedAttn:
         pytest.param(1, 2048, 4096, 24, 24, 128, 64, jnp.bfloat16, id="mla_2_1"),
         pytest.param(8, 1, 2048, 16, 16, 128, 64, jnp.bfloat16, id="mla_3_0"),
         pytest.param(8, 1, 2048, 16, 16, 256, 128, jnp.bfloat16, id="mla_3_1"),
+        # MLA for deepseekv2
+        pytest.param(8, 2048, 4096, 16, 16, 192, 128, jnp.bfloat16, id="mla_3_2"),
     ],
 )
 @pytest.mark.parametrize(
