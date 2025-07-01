@@ -3,12 +3,12 @@
 
 """Python interface for cast extensions"""
 import os
-from typing import List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Tuple, Union
 import functools
 import torch
-
 import warnings
 
+from ..utils import non_tn_fp8_gemm_supported
 
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from .cast_transpose import te_cast_transpose_noop_triton
@@ -20,6 +20,31 @@ from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 def _empty_tensor() -> torch.Tensor:
     """Get tensor with no entries and no data"""
     return torch.Tensor().cuda()
+
+def _setup_conditional_transpose_storage(
+        tensor: QuantizedTensor,
+    ) -> QuantizedTensor:
+        shape = tensor.shape
+        quantizer = tensor._get_quantizer()
+
+        # Allocate FP8 data transpose if needed
+        data_transpose = None
+        create_transpose = quantizer.columnwise_usage and not non_tn_fp8_gemm_supported(); 
+        if quantizer.columnwise_usage and create_transpose:
+            if tensor.ndim == 0:
+                # If the original tensor is a scalar, its transpose is also a scalar.
+                data_transpose = torch.empty((), dtype=torch.uint8, device=tensor.device)
+            else:
+                transposed_shape = (shape[-1],) + shape[:-1]
+                data_transpose = torch.empty(
+                    transposed_shape,
+                    dtype=torch.uint8,
+                    device=tensor.device,
+                )
+
+        # Construct FP8 tensor
+        tensor._transpose = data_transpose
+        tensor._transpose_invalid = tensor._transpose is None
 
 def te_quantize_triton(
     tensor: torch.Tensor,
@@ -40,7 +65,14 @@ def te_quantize_triton(
     if output is None:
         assert quantizer is not None, "Quantizer object cannot be None. Please provide a valid quantizer."
         # Create an empty QuantizedTensor if no output tensor is provided
-        out = quantizer.make_empty(input_tensor.shape, dtype=fake_tensor_type)
+        if input_tensor.ndim == 0:
+            out = quantizer.make_empty((1, ), dtype=fake_tensor_type)
+            out._data = out._data.squeeze(0)
+            out._transpose = out._transpose.squeeze(0)
+            _setup_conditional_transpose_storage(out)
+        else:
+            out = quantizer.make_empty(input_tensor.shape, dtype=fake_tensor_type)
+            _setup_conditional_transpose_storage(out)
     else:
         # Create a QuantizedTensor from the provided output tensor
         out = output

@@ -111,18 +111,14 @@ class Float8Quantizer(Quantizer):
 
         # Allocate FP8 data transpose if needed
         data_transpose = None
-        create_transpose = self.columnwise_usage and not non_tn_fp8_gemm_supported(); 
-        if self.columnwise_usage and create_transpose:
-            if data.ndim == 0:
-                # If the original tensor is a scalar, its transpose is also a scalar.
-                data_transpose = torch.empty((), dtype=torch.uint8, device=device)
-            else:
-                transposed_shape = (shape[-1],) + shape[:-1]
-                data_transpose = torch.empty(
-                    transposed_shape,
-                    dtype=torch.uint8,
-                    device=device,
-                )
+        if self.columnwise_usage:
+            inner_dim = data.size(-1)
+            data_transpose = torch.empty(
+                inner_dim,
+                data.numel() // inner_dim,
+                dtype=torch.uint8,
+                device=device,
+            )
 
         # Construct FP8 tensor
         return Float8Tensor(
