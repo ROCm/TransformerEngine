@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -15,7 +17,7 @@ from transformer_engine_torch import DType as TE_DType
 from ..utils import devices_match, non_tn_fp8_gemm_supported
 from ._internal.float8_tensor_base import Float8TensorBase, _FromFloat8Func
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
-from ..triton_kernels.cast import quantize_triton
+from ..triton_kernels.cast import te_quantize_triton
 
 aten = torch.ops.aten
 
@@ -83,10 +85,8 @@ class Float8Quantizer(Quantizer):
 
         # Launch cast kernel
         use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
-        if use_cast_transpose_triton:
-            quantize_triton(src, self, dst, noop_flag)
-        else:
-            tex.quantize(src, self, dst, noop_flag)
+        quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
+        quantize_func(src, self, dst, noop_flag)
 
         # Update FP8 dtype
         dst._fp8_dtype = self.dtype
@@ -112,13 +112,17 @@ class Float8Quantizer(Quantizer):
         # Allocate FP8 data transpose if needed
         data_transpose = None
         if self.columnwise_usage:
-            inner_dim = data.size(-1) if len(data.size()) > 0 else 1
-            data_transpose = torch.empty(
-                inner_dim,
-                data.numel() // inner_dim,
-                dtype=torch.uint8,
-                device=device,
-            )
+            if data.ndim == 0:
+                # If the original tensor is a scalar, its transpose is also a scalar.
+                data_transpose = torch.empty((), dtype=torch.uint8, device=device)
+            else:
+                inner_dim = data.size(-1)
+                data_transpose = torch.empty(
+                    inner_dim,
+                    data.numel() // inner_dim,
+                    dtype=torch.uint8,
+                    device=device,
+                )
 
         # Construct FP8 tensor
         return Float8Tensor(
