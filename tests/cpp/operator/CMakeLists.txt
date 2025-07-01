@@ -6,12 +6,14 @@
 
 list(APPEND test_cuda_sources
             test_cast.cu
+            test_cast_current_scaling.cu
             test_cast_dbias.cu
             test_cast_dbias_dgelu.cu
             test_cast_gated_swiglu.cu
             test_qdq.cu
             test_cast_transpose.cu
             test_transpose.cu
+            test_cast_transpose_current_scaling.cu
             test_cast_transpose_dbias.cu
             test_cast_transpose_dbias_dgelu.cu
             test_cast_transpose_dgeglu.cu

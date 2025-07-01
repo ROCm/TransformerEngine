@@ -51,4 +51,4 @@ compile_commands.json
 .nfs
 **/profiler_outputs/
 **/times.csv
-
+tensor_dumps/

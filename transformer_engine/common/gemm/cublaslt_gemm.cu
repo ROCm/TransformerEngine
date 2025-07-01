@@ -20,6 +20,7 @@
 
 #include "../common.h"
 #include "../util/vectorized_pointwise.h"
+#include "../util/handle_manager.h"
 #include "../util/logging.h"
 #include "common/util/cuda_runtime.h"
 
@@ -52,6 +53,10 @@ uint32_t _getAlignment(uintptr_t address) {
       return alignment;
     }
   }
+}
+
+inline void CreateCublasHandle(cublasLtHandle_t *handle) {
+  NVTE_CHECK_CUBLAS(cublasLtCreate(handle));
 }
 
 struct GemmParam {
@@ -152,12 +157,15 @@ namespace transformer_engine {
 #ifdef __HIP_PLATFORM_AMD__
 //Forward declaration. The implementation is in rocm_gemm.cu
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
-                 const Tensor *inputBias, Tensor *outputPreGelu, int m, int n, int k, int lda,
-                 int ldb, int ldd, bool transa, bool transb, bool grad,
-                 void* workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator,
-                 int math_sm_count, int m_split, int n_split, bool gemm_producer,
-                 const Tensor *inputCounter, hipStream_t stream, int compute_stream_offset = -1);
+                  const Tensor *inputBias, Tensor *outputPreGelu, int m, int n, int k, int lda,
+                  int ldb, int ldd, bool transa, bool transb, bool grad,
+                  void* workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator,
+                  int math_sm_count, int m_split, int n_split, bool gemm_producer,
+                  const Tensor *inputCounter, hipStream_t stream, int compute_stream_offset = -1);
 #else // Use cublasLt
+
+using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
+
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, int m, int n, int k, int lda,
                  int ldb, int ldd, cublasOperation_t transa, cublasOperation_t transb, bool grad,
@@ -210,8 +218,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   float zero = 0.0;
   float beta = (accumulate) ? one : zero;
 
-  cublasLtHandle_t handle;
-  NVTE_CHECK_CUBLAS(cublasLtCreate(&handle));
+  cublasLtHandle_t handle = cublasHandleManager::Instance().GetHandle();
 
   cublasLtMatmulDesc_t operationDesc = nullptr;
   cublasLtMatrixLayout_t Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr, Ddesc = nullptr;
@@ -260,8 +267,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 #if CUDA_VERSION >= 12080
     cublasLtMatmulMatrixScale_t scaling_mode;
 #endif
-    if ((is_delayed_tensor_scaling(inputA->scaling_mode) &&
-         is_delayed_tensor_scaling(inputB->scaling_mode))) {
+    if ((is_tensor_scaling(inputA->scaling_mode) && is_tensor_scaling(inputB->scaling_mode))) {
       void *A_scale_inverse = param.A_scale_inv;
       void *B_scale_inverse = param.B_scale_inv;
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
@@ -364,6 +370,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                                      &pre_gelu_out, sizeof(pre_gelu_out)));
     NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
         operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_LD, &ld_gelumat, sizeof(ld_gelumat)));
+    const cudaDataType_t aux_type = get_cuda_dtype(outputPreGelu->data.dtype);
+    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
+        operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_DATA_TYPE, &aux_type, sizeof(aux_type)));
   }
 
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE,
