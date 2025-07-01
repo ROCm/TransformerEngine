@@ -12,8 +12,8 @@ from test_common import fill_uniform, get_tolerances
 
 @pytest.mark.parametrize("shape", 
                          [
-                        (16),
-                        (16000),
+                        (16 ),
+                        (16000 ),
                         (128, 128),
                         (256, 256),
                         (768, 1024),
@@ -49,5 +49,8 @@ def test_quantize(shape, in_dtype, out_dtype):
     
     atol, rtol = get_tolerances(in_dtype)
     assert torch.allclose(quantized_out_triton, quantized_out_tex, atol=atol, rtol=rtol), 'Quantized results do not match!'
+    assert torch.allclose(
+        quantized_out_triton._transpose, quantized_out_tex._transpose, atol=0.0, rtol=0.0
+    ), 'Transposed quantized results do not match!'
     assert torch.allclose(quantized_out_triton._get_quantizer().scale, quantized_out_tex._get_quantizer().scale, atol=atol, rtol=rtol), 'Scale results do not match!'
     assert torch.allclose(quantized_out_triton._get_quantizer().amax, quantized_out_tex._get_quantizer().amax, atol=atol, rtol=rtol), 'AMAX results do not match!'

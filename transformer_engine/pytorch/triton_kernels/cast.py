@@ -9,11 +9,12 @@ import torch
 
 import warnings
 
+
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from .cast_transpose import te_cast_transpose_noop_triton
 import transformer_engine_torch as tex
 from ..tensor.quantized_tensor import QuantizedTensor, Quantizer
-from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 
 @functools.lru_cache(maxsize=None)
 def _empty_tensor() -> torch.Tensor:
@@ -30,10 +31,6 @@ def te_quantize_triton(
     Quantizes the input tensor using a specified quantizer,
     with an option to utilize Triton-based `cast_transpose` for performance.
     """
-    if isinstance(quantizer, MXFP8Quantizer):
-        warnings.warn(
-            '"MXFP8" quantization is not supported in the Triton based quantize kernel'
-        )
     input_tensor = tensor.contiguous()
     fake_tensor_type = input_tensor.dtype
     if not fake_tensor_type.is_floating_point:
@@ -79,4 +76,9 @@ def te_quantize_triton(
                 
             else:
                 out = tex.quantize(input_tensor, quantizer, out, noop_flag)
+    elif isinstance(out, MXFP8TensorBase):
+        out = tex.quantize(input_tensor, quantizer, out, noop_flag)
+    else:
+        raise NotImplementedError(f"Not implemented for tensor type: '{type(out).__name__}'")
+
     return out
