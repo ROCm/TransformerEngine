@@ -1,5 +1,6 @@
 set -euo pipefail
 
+cd ..
 pip install .
 
 #等待编译结束
@@ -30,7 +31,4 @@ filename="${dim1}_${dim2}_${ctas}_${wm}_${wn}_${bpl}"
 touch "/home/tuned_fwd/768/f16f16/$filename"
 echo "→ Created file $filename"
 
-python /home/tools/abs_readall.py "/home/tuned_fwd/768/f16f16/${filename}"
-
-
-
+python /home/TransformerEngine/tuning_tools/abs_readall.py "/home/tuned_fwd/768/f16f16/${filename}"
