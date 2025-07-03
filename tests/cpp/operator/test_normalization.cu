@@ -346,6 +346,8 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
 
   double atol_bwd = 5e-4;
   double rtol_bwd = 5e-4;
+  // double atol_bwd = 2e-3;
+  // double rtol_bwd = 2e-3;
   compareResults("dx", dx, ref_dx.get(), atol_bwd, rtol_bwd);
   compareResults("dgamma", dgamma, ref_dgamma.get(), atol_bwd, rtol_bwd);
   compareResults("dbeta", dbeta, ref_dbeta.get(), atol_bwd, rtol_bwd);
@@ -356,22 +358,15 @@ std::vector<std::pair<size_t, size_t>> test_cases = {
   // {29, 541},
   // {768, 6144},
   //{2048, 12288},
-  // {6800,928},
-  // {16000,1472}
-  // {46000,2240},
-  // {8200,2011}
-  // {14000,1485},
-  // {34003,3957}
   //{71,3571}
   //{168,184}
-   {768,1024},
+  // {768,1024},
   // {256,65536},
   // {128,6144},
   // {64,2304},
   // {229,541},
   // {71, 3571},
-  // {29, 17389},
-  //{6048,16320}
+  {512,768}
   //{76800,1600}
 };
 

@@ -26,9 +26,11 @@ bpl=$(grep -m 1 'bytes_per_load:'   "$ROCLOG" | awk -F: '{gsub(/ /,"",$2); print
 
 # 拼成文件名并创建空文件
 filename="${dim1}_${dim2}_${ctas}_${wm}_${wn}_${bpl}"
-touch "/home/tuned_fwd/1024/f16f16/$filename"
+#  filename="${dim1}_${dim2}_${wm}_${wn}_${bpl}"
+touch "/home/tuned_fwd/768/f16f16/$filename"
 echo "→ Created file $filename"
 
-python /home/tools/abs_readall.py "/home/tuned_fwd/1024/f16f16/${filename}"
+python /home/tools/abs_readall.py "/home/tuned_fwd/768/f16f16/${filename}"
+
 
 

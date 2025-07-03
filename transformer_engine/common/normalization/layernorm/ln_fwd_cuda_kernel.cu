@@ -35,10 +35,10 @@ static void launch_tuned_(LaunchParams<ForwardKernelParams> &launch_params,
     }
     return;
   }
-  std::cout<<"ctas_per_row:"<<CTAS_PER_ROW<<std::endl;
-  std::cout<<"warps_m:"<<WARPS_M<<std::endl;
-  std::cout<<"warps_n:"<<WARPS_N<<std::endl;
-  std::cout<<"bytes_per_load:"<<BYTES_PER_LDG<<std::endl;
+  std::cout<<"tuned fwd ctas_per_row:"<< CTAS_PER_ROW<<std::endl;
+  std::cout<<"tuned fwd warps_m:"<< WARPS_M<<std::endl;
+  std::cout<<"tuned fwd warps_n:"<< WARPS_N<<std::endl;
+  std::cout<<"tuned fwd bytes_per_load:"<<BYTES_PER_LDG <<std::endl;
 #ifndef __HIP_PLATFORM_AMD__
   if (Kernel_traits::SMEM_BYTES_FWD >= 48 * 1024) {
     NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -66,7 +66,8 @@ template <typename weight_t, typename input_t, typename output_t, typename compu
 static void launch_general_(LaunchParams<ForwardKernelParams> &launch_params,
                      const bool configure_params) {  // NOLINT(*)
   using Kernel_traits = Kernel_traits<weight_t, input_t, output_t, compute_t, index_t, HIDDEN_SIZE,
-                                      1, WARPS_M, WARPS_N, BYTES_PER_LDG>;
+                                      1, WARPS_M, WARPS_N, BYTES_PER_LDG,
+                                      transformer_engine::Stats_ge<compute_t, 1, WARPS_M, WARPS_N,int>>;
   auto kernel = &ln_fwd_general_kernel<Kernel_traits>;
   auto ceil_div = [](int x, int y) -> int { return (x + y - 1) / y; };
 
@@ -91,7 +92,9 @@ static void launch_general_(LaunchParams<ForwardKernelParams> &launch_params,
     }
     return;
   }
-
+  // std::cout<<"warps_m:"<<WARPS_M<<std::endl;
+  // std::cout<<"warps_n:"<<WARPS_N<<std::endl;
+  // std::cout<<"bytes_per_load:"<<BYTES_PER_LDG<<std::endl;
   // Launch kernel
   auto stream = launch_params.stream;
   dim3 grid(ctas_per_row * ctas_per_col);
@@ -207,7 +210,7 @@ REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 768, bf16, bf16, bf16, fp32, 1
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 768, fp32, fp32, bf16, fp32, 1, 4, 1, 16);
 
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 1024, fp32, fp32, fp32, fp32, 1, 4, 1, 16);
-REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 1024, fp16, fp16, fp16, fp32, 2, 1, 4, 8);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 1024, fp16, fp16, fp16, fp32, 1, 4, 2, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 1024, fp32, fp32, fp16, fp32, 1, 4, 1, 16);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 1024, bf16, bf16, bf16, fp32, 1, 4, 1, 16);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 1024, fp32, fp32, bf16, fp32, 1, 4, 1, 16);
@@ -255,7 +258,7 @@ REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 5120, bf16, bf16, bf16, fp32, 
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 5120, fp32, fp32, bf16, fp32, 1, 1, 4, 16);
 
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 6144, fp32, fp32, fp32, fp32, 1, 1, 4, 16);
-REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 6144, fp16, fp16, fp16, fp32, 2, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 6144, fp16, fp16, fp16, fp32, 1, 1, 8, 16);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 6144, fp32, fp32, fp16, fp32, 1, 1, 4, 16);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 6144, bf16, bf16, bf16, fp32, 1, 1, 4, 16);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 6144, fp32, fp32, bf16, fp32, 1, 1, 4, 16);
@@ -273,7 +276,7 @@ REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 10240, bf16, bf16, bf16, fp32,
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 10240, fp32, fp32, bf16, fp32, 1, 1, 4, 16);
 
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 12288, fp32, fp32, fp32, fp32, 2, 1, 4, 16);
-REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 12288, fp16, fp16, fp16, fp32, 2, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 12288, fp16, fp16, fp16, fp32, 1, 1, 16, 16);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 12288, fp32, fp32, fp16, fp32, 2, 1, 4, 16);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 12288, bf16, bf16, bf16, fp32, 2, 1, 4, 16);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 12288, fp32, fp32, bf16, fp32, 2, 1, 4, 16);
@@ -345,7 +348,7 @@ REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 49152, bf16, bf16, bf16, fp32,
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 49152, fp32, fp32, bf16, fp32, 4, 1, 4, 16);
 
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 65536, fp32, fp32, fp32, fp32, 8, 1, 4, 16);
-REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 65536, fp16, fp16, fp16, fp32, 8, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 65536, fp16, fp16, fp16, fp32, 2, 1, 8, 16);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 65536, fp32, fp32, fp16, fp32, 8, 1, 4, 16);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 65536, bf16, bf16, bf16, fp32, 8, 1, 4, 16);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 65536, fp32, fp32, bf16, fp32, 8, 1, 4, 16);
@@ -362,7 +365,7 @@ REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 8192, bf16, bf16, fp8e4m3, f
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 128, fp16, fp16, fp8e4m3, fp32, 4, 1, 8);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 512, fp16, fp16, fp8e4m3, fp32, 4, 1, 16);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 1024, fp16, fp16, fp8e4m3, fp32, 4, 1, 16);
-REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 2048, fp16, fp16, fp8e4m3, fp32, 4, 1, 16);
+ REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 2048, fp16, fp16, fp8e4m3, fp32, 4, 1, 16);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 8192, fp16, fp16, fp8e4m3, fp32, 1, 4, 16);
 
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 128, fp32, fp32, fp8e4m3, fp32, 4, 1, 16);
@@ -384,19 +387,27 @@ REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 512, bf16, bf16, bf16, fp32,
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 512, fp32, fp32, bf16, fp32, 4, 1, 16);
 
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 1024, fp32, fp32, fp32, fp32, 4, 1, 16);
-REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 1024, fp16, fp16, fp16, fp32, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 1024, fp16, fp16, fp16, fp32, 2, 4, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 1024, fp32, fp32, fp16, fp32, 4, 1, 16);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 1024, bf16, bf16, bf16, fp32, 4, 1, 16);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 1024, fp32, fp32, bf16, fp32, 4, 1, 16);
 
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 2048, fp32, fp32, fp32, fp32, 4, 1, 16);
-REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 2048, fp16, fp16, fp16, fp32, 4, 1, 16);
+ REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 2048, fp16, fp16, fp16, fp32, 4, 1, 16);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 2048, fp32, fp32, fp16, fp32, 4, 1, 16);
-REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 2048, bf16, bf16, bf16, fp32, 4, 1, 16);
+ REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 2048, bf16, bf16, bf16, fp32, 4, 1, 16);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 2048, fp32, fp32, bf16, fp32, 4, 1, 16);
+
+// REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 4096, fp32, fp32, fp32, fp32, 1, 4, 16);
+// REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 4096, fp16, fp16, fp16, fp32, 1, 4, 16);
+// REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 4096, fp32, fp32, fp16, fp32, 1, 4, 16);
+// REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 4096, bf16, bf16, bf16, fp32, 1, 4, 16);
+// REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 4096, fp32, fp32, bf16, fp32, 1, 4, 16);
 
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 8192, fp32, fp32, fp32, fp32, 1, 4, 16);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 8192, fp16, fp16, fp16, fp32, 1, 4, 16);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 8192, fp32, fp32, fp16, fp32, 1, 4, 16);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 8192, bf16, bf16, bf16, fp32, 1, 4, 16);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 8192, fp32, fp32, bf16, fp32, 1, 4, 16);
+
+ REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 20480, fp16, fp16, fp16, fp32, 1, 16, 16);
