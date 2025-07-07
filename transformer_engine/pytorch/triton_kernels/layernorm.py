@@ -5,13 +5,22 @@
 from itertools import product
 
 import torch
+
+from ..tensor.float8_tensor import Float8Quantizer
+from ..utils import non_tn_fp8_gemm_supported
+from ..constants import TE_DType
+from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor.quantized_tensor import QuantizedTensor, Quantizer
+from ..triton_kernels.cast import te_quantize_triton
 import triton
 import triton.language as tl
 import warnings
 import transformer_engine_torch as tex
 from .common import (
+    get_fp8_max,
     is_fp8_torch_dtype,
     te_dtype_to_torch_dtype,
+    te_dtype_to_triton_dtype,
     torch_dtype_to_te_dtype,
     te_dtype_to_aten_dtype,
     enum_value_to_te_dtype,
@@ -47,6 +56,7 @@ def _layernorm_fwd_triton(
     n_rows,
     n_cols,
     eps,
+    max_fp8: tl.constexpr,
     ZERO_CENTERED_GAMMA: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     IS_FP8: tl.constexpr,
@@ -135,6 +145,7 @@ def _layernorm_fwd_triton(
                 amax_temp = tl.max(tl.abs(y_block), axis=-1)
                 amax = amax_temp if amax_temp > amax else amax
                 y_block = y_block * scale
+                # y_block = tl.clamp(y_block, -max_fp8, max_fp8)
             tl.store(y_ptr_start + col_offsets, y_block.to(y_ptr.type.element_ty))
 
         # For last iteration, do masked load and store
@@ -153,6 +164,7 @@ def _layernorm_fwd_triton(
             amax_temp = tl.max(tl.abs(y_block), axis=-1)
             amax = amax_temp if amax_temp > amax else amax
             y_block = y_block * scale
+            # y_block = tl.clamp(y_block, -max_fp8, max_fp8)
         tl.store(
             y_ptr_start + col_offsets, y_block.to(y_ptr.type.element_ty), mask=mask
         )
@@ -446,6 +458,97 @@ def _layernorm_bwd_dwdb_triton_v2(
     tl.store(FINAL_DB + cols, sum_db.to(FINAL_DB.type.element_ty), mask=cols < N)
 
 #TODO: refactor te_layernorm_fwd_triton function to match transformer_engine::pytorch::layernorm_fwd
+def te_layernorm_fwd_triton(input: torch.Tensor, 
+                            weight: torch.Tensor, 
+                            eps: float,
+                            zero_centered_gamma: bool,
+                            ln_out: torch.Tensor = None, 
+                            bias: torch.Tensor = None,  
+                            quantizer: Quantizer = None, 
+                            out_dtype: TE_DType = tex.DType.kFloat32,
+                            sm_margin: int = 0):
+    if sm_margin is not None and sm_margin > 0:
+        warnings.warn(
+            '"sm_margin" is not supported in the Triton based forward layer-norm kernel. '
+            + f"sm_margin={sm_margin} will be ignored."
+        )
+    device = input.device
+    M, N = input.shape
+    
+    mu = torch.empty((M,), dtype=torch.float32, device=device)
+    rsigma = torch.empty((M,), dtype=torch.float32, device=device)
+    torch_out_dtype = te_dtype_to_torch_dtype(out_dtype)
+    tl_dtype = te_dtype_to_triton_dtype(out_dtype)
+    if quantizer is None or isinstance(quantizer, MXFP8Quantizer):
+        ln_out = torch.empty(M, N, dtype=torch_out_dtype, device=device)
+    else:
+        if ln_out is None:
+            ln_out = quantizer.make_empty((M, N),  dtype=torch_out_dtype)
+            ln_out._transpose = None
+            ln_out._transpose_invalid = True
+        else:
+            ln_out = quantizer.create_tensor_from_data(ln_out, fake_dtype=torch_out_dtype)
+    
+    APPLY_ATOMIC = M < 512
+    IS_FP8 = isinstance(quantizer, Float8Quantizer)
+
+    amax_temp = torch.empty((M,), dtype=torch.float32, device=input.device) if IS_FP8 else None
+
+    max_fused_size = 16384 // input.element_size()
+    BLOCK_SIZE = min(max_fused_size, triton.next_power_of_2(N))
+    
+    if IS_FP8:
+        scale = quantizer.scale
+        amax_out = quantizer.amax
+        scale_inv = ln_out._scale_inv
+        cast_out = ln_out._data
+    else:
+        scale = None
+        amax_out = None
+        scale_inv = None
+        cast_out = ln_out
+    
+    _layernorm_fwd_triton[(M,)](
+        input,
+        triton.reinterpret(cast_out, tl_dtype),
+        weight,
+        bias,
+        mu,
+        rsigma,
+        scale,
+        amax_out if APPLY_ATOMIC else amax_temp,
+        scale_inv,
+        input.stride(0),
+        ln_out.stride(0),
+        M,
+        N,
+        eps,
+        get_fp8_max(ln_out._fp8_dtype) if IS_FP8 else None,
+        ZERO_CENTERED_GAMMA=zero_centered_gamma,
+        BLOCK_SIZE=BLOCK_SIZE,
+        IS_FP8=IS_FP8,
+        APPLY_ATOMIC=APPLY_ATOMIC,
+        # TODO: Improve performance with persistent kernel
+        # Persistent kernel currently lags behind non persistent version
+        # It also lags behind TE implementation in a few cases
+        PERSISTENT=False
+    )
+    if IS_FP8:
+        ln_out.update_usage()
+
+    if isinstance(quantizer, MXFP8Quantizer):
+        ln_out = te_quantize_triton(ln_out, quantizer)
+
+    if IS_FP8 and not APPLY_ATOMIC:
+        _layernorm_fwd_reduce_triton[(triton.cdiv(M, 256),)](
+            amax_temp,
+            amax_out,
+            scale,
+            scale_inv,
+            M,
+            256,
+        )
+    return ln_out, mu, rsigma
 
 # drop in replacement for transformer_engine::pytorch::layernorm_bwd
 # TODO: Add support for `sm_margin > 0`.

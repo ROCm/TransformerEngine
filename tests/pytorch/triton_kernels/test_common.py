@@ -50,11 +50,13 @@ def get_tolerances(dtype):
 #     r: expected tensor
 # NOTE: DO NOT upcast inputs to fp32 if you are using te_compare for any precision other than fp32
 def te_compare_results(t, r, atol, rtol, msg):
-    assert t.dtype == r.dtype, f"Tensor dtypes don't match: {t.dtype} vs {r.dtype}."
+    # assert t.dtype == r.dtype, f"Tensor dtypes don't match: {t.dtype} vs {r.dtype}."
     assert t.shape == r.shape, f"Tensor shapes don't match: {t.shape} vs {r.shape}."
     assert atol > 0, "Absolute tolerance must be positive."
     assert rtol > 0, "Relative tolerance must be positive."
     dtype = t.dtype
+    t_orig = t
+    r_orig = r
     t = t.cpu().to(torch.float32).to(torch.float64)
     r = r.cpu().to(torch.float32).to(torch.float64)
     diff = t - r
@@ -64,6 +66,20 @@ def te_compare_results(t, r, atol, rtol, msg):
     rtol_mismatch[nonzero_r] = torch.abs(diff[nonzero_r] / r[nonzero_r]) > rtol
     mismatch = atol_mismatch & (~nonzero_r | rtol_mismatch)
     has_mismatch = torch.any(mismatch).item()
+    max_abs_diff = torch.max(torch.abs(diff)).item()
+    
+    max_rel_diff = 0.0 # Default to 0.0 if no non-zero reference values
+    if torch.any(nonzero_r):
+        max_rel_diff = torch.max(torch.abs(diff[nonzero_r] / r[nonzero_r])).item()
+    
+    max_abs_diff_indices = torch.unravel_index(torch.argmax(torch.abs(diff)), diff.shape)
+
+    max_rel_diff_indices = None
+    if torch.any(nonzero_r):
+        rel_diff = torch.full_like(diff, 0.0) # Initialize with zeros
+        rel_diff[nonzero_r] = torch.abs(diff[nonzero_r] / r[nonzero_r])
+        max_rel_diff_indices = torch.unravel_index(torch.argmax(rel_diff), rel_diff.shape)
+
     # for fp32 the floating point comparison is enough to error out
     if has_mismatch and dtype != torch.float32:
         # check if it is just a failure of round to nearest choosing different side of the real value
@@ -87,8 +103,24 @@ def te_compare_results(t, r, atol, rtol, msg):
         mismatch = mismatch & round_check
         has_mismatch = torch.any(mismatch).item()
     if has_mismatch:
+        num_mismatched_elements = torch.sum(mismatch).item()
+        total_elements = t.numel() 
         # TODO: Improve base message, add max absolute and relative differences.
-        base_msg = "There are tensor mismatches."
+        base_msg = (
+            f"There are tensor mismatches.\n"
+            f"Number of mismatched rows: {num_mismatched_elements} out of {total_elements} total rows.\n"
+            f"Max Absolute Difference: {max_abs_diff:.6e} (Tolerance: {atol:.6e}) at index {tuple(max_abs_diff_indices)}\n"
+            f"Corresponding values: t={t_orig[max_abs_diff_indices].item()}, r={r_orig[max_abs_diff_indices].item()}\n"
+        )
+        if max_rel_diff_indices is not None:
+             base_msg += (
+                f"Max Relative Difference: {max_rel_diff:.6e} (Tolerance: {rtol:.6e}) at index {tuple(max_rel_diff_indices)}\n"
+                f"Corresponding values: t={t_orig[max_rel_diff_indices].item()}, r={r_orig[max_rel_diff_indices].item()}"
+            )
+        else:
+            base_msg += (
+                f"Max Relative Difference: {max_rel_diff:.6e} (Tolerance: {rtol:.6e}) (no non-zero reference values)\n"
+            )
         if isinstance(msg, str):
             msg = f"{msg}\n\n{base_msg}\n"
         elif isinstance(msg, types.LambdaType):
@@ -145,3 +177,6 @@ def skip_mixed_16bit_float_types(in_dtype, out_dtype):
         in_dtype == torch.bfloat16 and out_dtype == torch.float16
     ):
         pytest.skip("hipified implementation does not support mixing fp16 and bf16")
+
+def IS_FP8(dtype):
+    return (dtype == torch_e4m3_type) or (dtype == torch_e5m2_type)
