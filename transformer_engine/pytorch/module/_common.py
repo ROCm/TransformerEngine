@@ -25,14 +25,14 @@ _use_cudnn_mxfp8_norm = bool(int(os.getenv("NVTE_CUDNN_MXFP8_NORM", "0")))
 
 if IS_HIP_EXTENSION:
     from ..triton_kernels.layernorm import te_layernorm_bwd_triton
-    from ..triton_kernels.rmsnorm import te_rmsnorm_bwd_triton
+    from ..triton_kernels.rmsnorm import te_rmsnorm_bwd_triton, te_rmsnorm_fwd_triton
 
 def _get_normalization_func(normalization: str, forward: bool):
     use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
     use_layernorm_triton = bool( int(os.environ.get('NVTE_USE_LAYERNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
     fwd_normalization_funcs = {
         "LayerNorm": tex.layernorm_fwd,
-        "RMSNorm": tex.rmsnorm_fwd,
+        "RMSNorm": te_rmsnorm_fwd_triton if use_rmsnorm_triton else tex.rmsnorm_fwd,
     }
     bwd_normalization_funcs = {
         "LayerNorm": te_layernorm_bwd_triton if use_layernorm_triton else tex.layernorm_bwd,

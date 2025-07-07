@@ -114,7 +114,6 @@ def _rmsnorm_fwd_triton(output_ptr, input_ptr, g_ptr, rsigma_ptr, input_row_stri
             output_ptrs = tl.multiple_of(output_ptrs, (16, ))
             tl.store(output_ptrs, rms_norm.to(output_ptr.type.element_ty), mask=mask)
 
-#TODO: refactor te_rmsnorm_fwd_triton to match transformer_engine::pytorch::rmsnorm_fwd 
 
 @triton.jit
 def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, dg_ptr, input_row_stride, output_row_stride,
@@ -297,3 +296,53 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma):
                                                    BLOCK_SIZE_M=128, BLOCK_SIZE_N=64)
 
     return dx, dgamma
+
+# triton drop-in replacement for transformer_engine::pytorch::rmsnorm_fwd
+def te_rmsnorm_fwd_triton(
+    input,
+    weight,
+    eps,
+    ln_out,
+    quantizer,
+    otype,
+    sm_margin,
+    zero_centered_gamma
+):
+    if eps < 0:
+        raise ValueError(f"`eps` must be non-negative, but a value of {eps} was passed")
+    if len(input.shape) != 2:
+        raise ValueError(
+            f"The input must be a 2-dimensional matrix, but an input with {input.ndim} was passed.")
+
+    N, H = input.shape
+    if weight.shape[0] != H:
+        raise ValueError(f"The shape of `weight` must be feature-aligned, but {weight.shape[0]=} while {input.shape[1]=}")
+
+    #TODO: Update to include fp8 quantization.
+    if quantizer is not None:
+        raise NotImplementedError("FP8 RMSNorm is not yet supported.")
+
+    rsigma = torch.empty((N,), dtype=torch.float32, device="cuda")
+    out = torch.empty_like(input, dtype=otype) if ln_out is None else ln_out
+
+    BLOCK_SIZE = block_size(input)
+    USE_BLOCKED = use_blocked(input)
+    NUM_PRGMS = num_programs(input, sm_margin)
+    grid_fwd = lambda meta: (NUM_PRGMS, )
+
+
+    _rmsnorm_fwd_triton[grid_fwd](
+        out,
+        input,
+        weight,
+        rsigma,
+        input.stride(0),
+        out.stride(0),
+        N, H, eps,
+        zero_centered_gamma,
+        BLOCK_SIZE,
+        USE_BLOCKED,
+        NUM_PRGMS,
+    )
+
+    return out, None, rsigma
