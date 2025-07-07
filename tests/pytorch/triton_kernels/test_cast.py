@@ -43,12 +43,10 @@ def test_quantize(shape, in_dtype, out_dtype):
     tex_quantizer = Float8Quantizer(scale=scale_tensor, amax=amax_tensor, fp8_dtype=out_dtype)
     quantized_out_tex = tex.quantize(input_tensor, tex_quantizer)
 
-    # Check for cyclic imports
-    os.environ['NVTE_USE_CAST_TRANSPOSE_TRITON'] = '1'
-    tex_quantizer.quantize(input_tensor)
-    
     atol, rtol = get_tolerances(in_dtype)
     assert torch.allclose(quantized_out_triton, quantized_out_tex, atol=atol, rtol=rtol), 'Quantized results do not match!'
+    assert quantized_out_triton._transpose is not None, "Triton transpose is none!" 
+    assert quantized_out_tex._transpose is not None, "TEX transpose is none!" 
     assert torch.allclose(
         quantized_out_triton._transpose, quantized_out_tex._transpose, atol=0.0, rtol=0.0
     ), 'Transposed quantized results do not match!'

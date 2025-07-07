@@ -67,6 +67,8 @@ def _cast_transpose_triton(A, noop_ptr, C, T, stride_am, stride_an, stride_bn, s
         scale_inv_out = tl.fdiv(1.0, scale)
         tl.store(scale_inv_ptr, scale_inv_out)
 
+# Reshapes input of any given shape to 2D for processing, 
+# then uses the Triton kernel to perform casting and transposition efficiently.
 def te_cast_transpose_noop_triton(input, noop_flag, input_scale, cast_out, trans_out, amax_out, scale_inv_out, otype):
 
     row_length = input.shape[-1] if len(input.shape) > 0 else 1
