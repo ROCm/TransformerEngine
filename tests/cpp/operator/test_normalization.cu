@@ -242,11 +242,11 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                        z.data(), mu.data(), rsigma.data(), workspace_fwd.data(),
                        prop.multiProcessorCount, zero_centered_gamma, 0);
     workspace_fwd = Tensor(workspace_fwd.shape(), workspace_fwd.dtype());
-    for(int i=0;i<5;i++)
-    nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), epsilon,
-                       z.data(), mu.data(), rsigma.data(), workspace_fwd.data(),
-                       prop.multiProcessorCount, zero_centered_gamma, 0);
-    for(int i=0;i<10;i++)
+    // for(int i=0;i<5;i++)
+    // nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), epsilon,
+    //                    z.data(), mu.data(), rsigma.data(), workspace_fwd.data(),
+    //                    prop.multiProcessorCount, zero_centered_gamma, 0);
+    // for(int i=0;i<10;i++)
     nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), epsilon,
                        z.data(), mu.data(), rsigma.data(), workspace_fwd.data(),
                        prop.multiProcessorCount, zero_centered_gamma, 0);
@@ -257,13 +257,13 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                        workspace_bwd.data(),
                        prop.multiProcessorCount, zero_centered_gamma, 0);
     workspace_bwd = Tensor(workspace_bwd.shape(), workspace_bwd.dtype());
-    for(int i=0;i<5;i++)
-    nvte_layernorm_bwd(dz.data(), input.data(),
-                       mu.data(), rsigma.data(), gamma.data(),
-                       dx.data(), dgamma.data(), dbeta.data(),
-                       workspace_bwd.data(),
-                       prop.multiProcessorCount, zero_centered_gamma, 0);
-    for(int i=0;i<10;i++)
+    // for(int i=0;i<5;i++)
+    // nvte_layernorm_bwd(dz.data(), input.data(),
+    //                    mu.data(), rsigma.data(), gamma.data(),
+    //                    dx.data(), dgamma.data(), dbeta.data(),
+    //                    workspace_bwd.data(),
+    //                    prop.multiProcessorCount, zero_centered_gamma, 0);
+    // for(int i=0;i<10;i++)
     nvte_layernorm_bwd(dz.data(), input.data(),
                        mu.data(), rsigma.data(), gamma.data(),
                        dx.data(), dgamma.data(), dbeta.data(),
@@ -346,8 +346,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
 
   double atol_bwd = 5e-4;
   double rtol_bwd = 5e-4;
-  // double atol_bwd = 2e-3;
-  // double rtol_bwd = 2e-3;
+
   compareResults("dx", dx, ref_dx.get(), atol_bwd, rtol_bwd);
   compareResults("dgamma", dgamma, ref_dgamma.get(), atol_bwd, rtol_bwd);
   compareResults("dbeta", dbeta, ref_dbeta.get(), atol_bwd, rtol_bwd);
@@ -406,9 +405,9 @@ INSTANTIATE_TEST_SUITE_P(
 #else
         ::testing::Values(false), //TODO: enabling tests for cudnn backend
 #endif
-        ::testing::Values(NormType::LayerNorm),
-        ::testing::Values(DType::kFloat16),
-        ::testing::Values(DType::kFloat16),
+        ::testing::Values(NormType::LayerNorm, NormType::RMSNorm),
+        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16, DType::kFloat8E4M3),
         ::testing::ValuesIn(test_cases),
         ::testing::Values(false, true)),
     [](const testing::TestParamInfo<NormTestSuite::ParamType>& info) {
