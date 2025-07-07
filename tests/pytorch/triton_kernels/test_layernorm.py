@@ -104,10 +104,10 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
 
     # Run Hipified forward reference.
     y_hipified = torch.empty((M, N), dtype=out_dtype, device="cuda")
-    scale_ref, amax_ref = 1.0, torch.zeros(1, dtype=torch.float32, device='cuda')
-    y_ref = torch.empty(M, N, dtype=out_dtype, device="cuda")
-    mu_ref, rsigma_ref = compute_ref_stats(x, epsilon)
-    compute_ref_output(x, gamma, beta, y_ref, mu_ref, rsigma_ref, amax_ref, scale_ref, zero_centered_gamma)
+    scale_ref, amax_ref = 1.0, torch.zeros(1, dtype=torch.float32, device='cpu')
+    y_ref = torch.empty(M, N, dtype=out_dtype, device="cpu")
+    mu_ref, rsigma_ref = compute_ref_stats(x.cpu(), epsilon)
+    compute_ref_output(x.cpu(), gamma.cpu(), beta.cpu(), y_ref, mu_ref, rsigma_ref, amax_ref, scale_ref, zero_centered_gamma)
     
     y_hipified, mu_hipified, rsigma_hipified = tex.layernorm_fwd(
         x,
