@@ -32,6 +32,37 @@ from test_common import (
     compare_results,
 )
 
+def compute_ref_stats(data: torch.Tensor, epsilon: float):
+    mu_computed = torch.mean(data.to(torch.float32), dim=1, keepdim=True)
+    variance = torch.mean((data.to(torch.float32) - mu_computed).pow(2), dim=1, keepdim=True)
+    rsigma_computed = 1.0 / torch.sqrt(variance + epsilon)
+    return mu_computed, rsigma_computed
+
+def compute_gamma_py(g_val, zero_centered_gamma):
+        if zero_centered_gamma:
+            return g_val + 1.0
+        else:
+            return g_val
+        
+def compute_ref_output(data: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor,
+                       output: torch.Tensor,
+                       mu: torch.Tensor, rsigma: torch.Tensor,
+                       amax, scale: float, zero_centered_gamma: bool):
+    data_float = data.to(torch.float32)
+    mu_float = mu.to(torch.float32)
+    rsigma_float = rsigma.to(torch.float32)
+    gamma_float = gamma.to(torch.float32) # M
+    beta_float = beta.to(torch.float32)   # M
+    g_tensor = compute_gamma_py(gamma_float, zero_centered_gamma)
+    tmp_unscaled = (data_float - mu_float) * rsigma_float * g_tensor + beta_float
+    output.copy_((tmp_unscaled * scale).to(output.dtype))
+
+    current_max = torch.max(torch.abs(tmp_unscaled))
+
+    if amax.numel() == 1:
+        amax.fill_(current_max)
+    else:
+        raise ValueError("amax must be a 1-element torch.Tensor.")
 
 test_idtypes_str = input_dtypes_str(["fp32", "fp16", "bf16"])
 # TODO: bring back fp8 after refactoring te_layernorm_fwd_triton
@@ -73,6 +104,11 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
 
     # Run Hipified forward reference.
     y_hipified = torch.empty((M, N), dtype=out_dtype, device="cuda")
+    scale_ref, amax_ref = 1.0, torch.zeros(1, dtype=torch.float32, device='cuda')
+    y_ref = torch.empty(M, N, dtype=out_dtype, device="cuda")
+    mu_ref, rsigma_ref = compute_ref_stats(x, epsilon)
+    compute_ref_output(x, gamma, beta, y_ref, mu_ref, rsigma_ref, amax_ref, scale_ref, zero_centered_gamma)
+    
     y_hipified, mu_hipified, rsigma_hipified = tex.layernorm_fwd(
         x,
         gamma,
@@ -83,6 +119,22 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
         torch_dtype_to_te_dtype(out_dtype),
         get_fwd_ln_sm_margin(),
         zero_centered_gamma,
+    )
+
+    fwd_cmp = "te"
+    atol_fwd, rtol_fwd = get_tolerances(out_dtype)
+    
+    # Uncommenting below lines will cause test failures.
+    # if out_dtype == torch.float32:
+    #     atol_fwd = 5e-7
+
+    compare_results(
+        fwd_cmp,
+        y_hipified,
+        y_ref,
+        atol_fwd,
+        rtol_fwd,
+        lambda msg: f"y does not match hip <-> ref\n\n{msg}\n",
     )
 
     # Run Triton backward.
