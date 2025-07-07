@@ -6,7 +6,6 @@ import torch
 import triton
 import triton.language as tl
 from itertools import product
-import transformer_engine_torch as tex
 from .norm_common import num_programs, block_size, use_blocked
 
 def dg_tmp_rows(x, sm_margin=None):
@@ -316,7 +315,10 @@ def te_rmsnorm_fwd_triton(
 
     N, H = input.shape
     if weight.shape[0] != H:
-        raise ValueError(f"The shape of `weight` must be feature-aligned, but {weight.shape[0]=} while {input.shape[1]=}")
+        raise ValueError(
+            f"The shape of `weight` must be feature-aligned, "
+            f"but {weight.shape[0]=} while {input.shape[1]=}"
+        )
 
     #TODO: Update to include fp8 quantization.
     if quantizer is not None:
