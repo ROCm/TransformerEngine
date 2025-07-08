@@ -37,6 +37,27 @@ return_run_results() {
     test $_run_error_count -eq 0 -a $_script_error_count -eq 0
 }
 
+configure_gemm_env() {
+    case "$1" in
+        "auto")
+            unset NVTE_USE_HIPBLASLT NVTE_USE_ROCBLAS ROCBLAS_STREAM_ORDER_ALLOC
+        ;;
+        "hipblaslt")
+            export NVTE_USE_HIPBLASLT=1
+            unset NVTE_USE_ROCBLAS ROCBLAS_STREAM_ORDER_ALLOC
+        ;;
+        "rocblas")
+            export NVTE_USE_ROCBLAS=1 ROCBLAS_STREAM_ORDER_ALLOC=1
+            unset NVTE_USE_HIPBLASLT
+        ;;
+        *)
+            script_error "Error unknown GEMM config $1"
+            return 1
+        ;;
+    esac
+    return 0
+}
+
 configure_fused_attn_env() {
     case "$1" in
         "auto")

@@ -52,6 +52,13 @@ from test_numerics import reset_rng_states, dtype_tols
 # Only run FP8 tests on H100.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
+if IS_HIP_EXTENSION:
+    from functools import cache
+    @cache
+    def use_hipblaslt() -> bool:
+        return (os.getenv("NVTE_USE_HIPBLASLT") is not None
+                or os.getenv("NVTE_USE_ROCBLAS") is None )
+
 
 def custom_amax_to_scale(
     amax: torch.Tensor,
@@ -916,6 +923,8 @@ def test_sanity_gradient_accumulation_fusion(
 @pytest.mark.parametrize("normalization", all_normalizations)
 def test_gpt_cuda_graph(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma, normalization):
     if IS_HIP_EXTENSION:
+        if not use_hipblaslt():
+            pytest.skip("CUDA graph capture not supported with rocBLAS path")
         if dtype in (torch.float16, torch.bfloat16):
             pytest.skip(f"ROCm fused attention backends do not support cuda graph with {dtype}")
 
