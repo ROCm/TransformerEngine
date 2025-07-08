@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -69,10 +71,10 @@ void scale_block(const ProcessingMethod processing_method,
                 elt *= static_cast<float>(grad[idx]);
             }
             dbias[j] += elt;
-            if (isinf(elt) || isnan(elt)) {
+            if (std::isinf(elt) || std::isnan(elt)) {
                 continue;
             }
-            amax = std::max(amax, std::abs(elt));
+            amax = fmaxf(amax, fabsf(elt));
         }
     }
 
@@ -520,10 +522,12 @@ switch (OP_FUNC_TYPE) { \
 }
 
 TEST_P(FusedCastMXFP8TestSuite, TestFusedCastMXFP8) {
+#ifndef __HIP_PLATFORM_AMD__
     // Skip tests for pre-Blackwell architectures
     if (getDeviceComputeCapability() < blackwellComputeCapability) {
         GTEST_SKIP();
     }
+#endif
 
     using namespace transformer_engine;
     using namespace test;

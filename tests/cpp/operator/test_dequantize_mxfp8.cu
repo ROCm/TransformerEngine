@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -380,10 +382,12 @@ class DequantizeMXFP8TestSuite : public ::testing::TestWithParam
 
 TEST_P(DequantizeMXFP8TestSuite, TestDequantizeMXFP8)
 {
-    // Skip tests for pre-Blackwell architectures
+#ifndef __HIP_PLATFORM_AMD__
+ // Skip tests for pre-Blackwell architectures
     if (getDeviceComputeCapability() < blackwellComputeCapability) {
         GTEST_SKIP();
     }
+#endif
 
     using namespace transformer_engine;
     using namespace test;
