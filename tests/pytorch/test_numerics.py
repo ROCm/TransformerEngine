@@ -1524,6 +1524,7 @@ def test_grouped_linear_accuracy(
     fuse_wgrad_accumulation,
     parallel_mode=None,
 ):
+    # TODO: Reenable after hipblaslt ticket SWDEV-540918 is resolved.
     if IS_HIP_EXTENSION:
         if dtype not in (torch.float32,) and fuse_wgrad_accumulation and not fp8:
             pytest.skip(f"Rocm does not support fused wgrad accumulation for {dtype}.")
