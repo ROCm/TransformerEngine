@@ -5,7 +5,6 @@
 import pytest
 import torch
 
-from transformer_engine import pytorch as te
 from transformer_engine.pytorch.constants import TE_DType
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.triton_kernels.common import torch_dtype_to_te_dtype
@@ -113,7 +112,6 @@ def test_rmsnorm_bwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma):
         lambda msg: f"dgamma does not match triton <-> hip\n\n{msg}\n",
     )
 
-# TODO: bring back fwd pytests after refactoring te_rmsnorm_fwd_triton
 @pytest.mark.parametrize("M, N", test_shapes)
 @pytest.mark.parametrize("in_dtype", test_idtypes_str)
 # TODO: add fp8/bf8 once fp8 triton kernels are available
@@ -133,7 +131,7 @@ def test_rmsnorm_fwd_triton(M, N, in_dtype, zero_centered_gamma):
         gamma_tensor,
         epsilon,
         ln_out_triton,
-        None, in_dtype,
+        None, TE_DType[in_dtype],
         fwd_ln_sm_margin,
         zero_centered_gamma
     )
@@ -144,7 +142,7 @@ def test_rmsnorm_fwd_triton(M, N, in_dtype, zero_centered_gamma):
         input_tensor,
         gamma_tensor,
         epsilon,
-        ln_out_triton,
+        ln_out_hipified,
         None, TE_DType[in_dtype],
         fwd_ln_sm_margin,
         zero_centered_gamma
@@ -167,4 +165,3 @@ def test_rmsnorm_fwd_triton(M, N, in_dtype, zero_centered_gamma):
         5e-5,
         lambda msg: f"rsigma does not match triton <-> hip\n\n{msg}\n",
     )
-

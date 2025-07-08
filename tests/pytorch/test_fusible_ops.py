@@ -1247,7 +1247,16 @@ class TestBasicOps:
             te_ops.Quantize(forward=quantized_compute, backward=False),
         )
         with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
-            y_test = forward(x_test)
+            # TODO: Remove when we support FP8 quantization in the rmsnorm
+            # triton kernels natively
+            if quantization:
+                with pytest.warns(
+                    RuntimeWarning,
+                    match="FP8 is not yet supported in our RMSNorm Triton kernel"
+                ):
+                    y_test = forward(x_test)
+            else:
+                y_test = forward(x_test)
         y_test.backward(dy_test)
 
         # Expected numerical error

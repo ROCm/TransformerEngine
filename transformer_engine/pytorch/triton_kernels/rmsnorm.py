@@ -2,11 +2,13 @@
 # License for AMD contributions = MIT. See LICENSE for more information
 
 import torch
-
+import warnings
 import triton
 import triton.language as tl
+from transformer_engine_torch import rmsnorm_fwd
 from itertools import product
 from .norm_common import num_programs, block_size, use_blocked
+from transformer_engine.pytorch.constants import TE_DType
 
 def dg_tmp_rows(x, sm_margin=None):
     return x.shape[0] if use_blocked(x) else num_programs(x, sm_margin)
@@ -320,19 +322,36 @@ def te_rmsnorm_fwd_triton(
             f"but {weight.shape[0]=} while {input.shape[1]=}"
         )
 
-    #TODO: Update to include fp8 quantization.
+
+    #TODO: Update to include Triton fp8 quantization.
     if quantizer is not None:
-        raise NotImplementedError("FP8 RMSNorm is not yet supported.")
+        warnings.warn(
+            "FP8 is not yet supported in our RMSNorm Triton kernel. "
+            "Falling back to HIP implementation.",
+            RuntimeWarning
+        )
+        return rmsnorm_fwd(
+            input,
+            weight,
+            eps,
+            ln_out,
+            quantizer,
+            otype,
+            sm_margin,
+            zero_centered_gamma
+        )
 
     rsigma = torch.empty((N,), dtype=torch.float32, device="cuda")
-    out = torch.empty_like(input, dtype=otype) if ln_out is None else ln_out
+    pt_dtype = (
+        otype if isinstance(otype, torch.dtype)
+        else {v:k for k,v in TE_DType.items()}[otype]
+    )
+    out = torch.empty_like(input, dtype=pt_dtype) if ln_out is None else ln_out
 
     BLOCK_SIZE = block_size(input)
     USE_BLOCKED = use_blocked(input)
     NUM_PRGMS = num_programs(input, sm_margin)
     grid_fwd = lambda meta: (NUM_PRGMS, )
-
-
     _rmsnorm_fwd_triton[grid_fwd](
         out,
         input,
