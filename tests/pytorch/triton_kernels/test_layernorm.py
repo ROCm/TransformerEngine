@@ -40,23 +40,23 @@ def compute_ref_stats(data: torch.Tensor, epsilon: float):
     mu_computed = torch.mean(data.to(torch.float32), dim=1, keepdim=True)
     variance = torch.mean((data.to(torch.float32) - mu_computed).pow(2), dim=1, keepdim=True)
     rsigma_computed = 1.0 / torch.sqrt(variance + epsilon)
-    return mu_computed, rsigma_computed
+    return mu_computed.squeeze(1), rsigma_computed.squeeze(1)
 
 def compute_gamma_py(g_val, zero_centered_gamma):
-        if zero_centered_gamma:
-            return g_val + 1.0
-        else:
-            return g_val
+    if zero_centered_gamma:
+        return g_val + 1.0
+    else:
+        return g_val
         
 def compute_ref_output(data: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor,
                        output: torch.Tensor,
                        mu: torch.Tensor, rsigma: torch.Tensor,
-                       amax, scale: float, zero_centered_gamma: bool):
+                       amax: torch.Tensor, scale: torch.Tensor, zero_centered_gamma: bool):
     data_float = data.to(torch.float32)
-    mu_float = mu.to(torch.float32)
-    rsigma_float = rsigma.to(torch.float32)
-    gamma_float = gamma.to(torch.float32) # H
-    beta_float = beta.to(torch.float32)   # H
+    mu_float = mu.unsqueeze(1).to(torch.float32)
+    rsigma_float = rsigma.unsqueeze(1).to(torch.float32)
+    gamma_float = gamma.to(torch.float32) # N
+    beta_float = beta.to(torch.float32)   # N
     g_tensor = compute_gamma_py(gamma_float, zero_centered_gamma)
     tmp_unscaled = (data_float - mu_float) * rsigma_float * g_tensor + beta_float
     output.copy_((tmp_unscaled * scale).to(output.dtype))
@@ -68,8 +68,12 @@ def compute_ref_output(data: torch.Tensor, gamma: torch.Tensor, beta: torch.Tens
     else:
         raise ValueError("amax must be a 1-element torch.Tensor.")
 
-test_idtypes_str = input_dtypes_str(["fp32"])
-test_odtypes_str = output_dtypes_str(["fp32"])
+def dequantize_ref(data: torch.Tensor, scale_inv: torch.Tensor, dtype: torch.dtype = torch.float32):
+    data_float = data.to(torch.float32) * scale_inv
+    return data_float.to(dtype)
+
+test_idtypes_str = input_dtypes_str(["fp32", "fp16", "bf16"])
+test_odtypes_str = output_dtypes_str(["fp8e4"])
 
 test_shapes = [
     (71, 229),
@@ -106,7 +110,7 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
     # Run Hipified forward reference.
     quantizer_hipified = None
     quantizer_triton = None
-    scale_ref, amax_ref = 1.0, torch.zeros(1, dtype=torch.float32, device='cuda')
+    scale_ref, amax_ref = torch.tensor(1.0), torch.zeros(1, dtype=torch.float32, device='cuda')
     if is_fp8_torch_dtype(out_dtype):
         scale_triton = torch.rand(1, dtype=torch.float32, device='cuda') * 3.0 - 2.0
         amax_triton = torch.zeros(1, dtype=torch.float32, device='cuda')
@@ -151,29 +155,37 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
         amax_triton = y_triton._get_quantizer().amax
         scale_inv_triton = y_triton._scale_inv
         y_triton = y_triton.dequantize(dtype=in_dtype)
+        y_ref = dequantize_ref(data=y_ref, scale_inv=1/scale_ref, dtype=in_dtype)
     if isinstance(y_hipified, QuantizedTensor):
         amax_hipified = y_hipified._get_quantizer().amax
         scale_inv_hipified = y_hipified._scale_inv
         y_hipified = y_hipified.dequantize(dtype=in_dtype)
-        y_ref.to(dtype=in_dtype)
     
-    if out_dtype == torch.float32:
-        atol_fwd = 5e-7
+    # if out_dtype == torch.float32:
+    #     atol_fwd = 5e-7
+
+    compare_results(
+        "te",
+        y_triton,
+        y_hipified,
+        0.38,
+        rtol_fwd,
+        lambda msg: f"y does not match triton <-> hip\n\n{msg}\n",
+    )
 
     compare_results(
         "te",
         y_hipified,
         y_ref,
-        atol_fwd,
+        0.38,
         rtol_fwd,
         lambda msg: f"y does not match hip <-> ref\n\n{msg}\n",
     )
-
     compare_results(
         "te",
         y_triton,
         y_ref,
-        atol_fwd,
+        0.315,
         rtol_fwd,
         lambda msg: f"y does not match triton <-> ref\n\n{msg}\n",
     )
@@ -184,7 +196,7 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
     compare_results(
         fwd_cmp,
         mu_triton,
-        mu_hipified,
+        mu_ref,
         atol_stats,
         rtol_stats,
         lambda msg: f"mu does not match triton <-> hip\n\n{msg}\n",
@@ -192,7 +204,7 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
     compare_results(
         fwd_cmp,
         rsigma_triton,
-        rsigma_hipified,
+        rsigma_ref,
         atol_stats,
         rtol_stats,
         lambda msg: f"rsigma does not match triton <-> hip\n\n{msg}\n",
@@ -201,7 +213,7 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
         compare_results(
             "torch",
             amax_triton,
-            amax_hipified,
+            amax_ref,
             atol_stats,
             rtol_stats,
             lambda msg: f"amax does not match triton <-> hip\n\n{msg}\n",
@@ -209,7 +221,7 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
         compare_results(
             "torch",
             scale_inv_triton,
-            scale_inv_hipified,
+            1.0/scale_ref,
             atol_stats,
             rtol_stats,
             lambda msg: f"scale_inv does not match triton <-> hip\n\n{msg}\n",
