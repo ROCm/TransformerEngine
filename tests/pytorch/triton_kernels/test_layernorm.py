@@ -68,12 +68,8 @@ def compute_ref_output(data: torch.Tensor, gamma: torch.Tensor, beta: torch.Tens
     else:
         raise ValueError("amax must be a 1-element torch.Tensor.")
 
-def dequantize_ref(data: torch.Tensor, scale_inv: torch.Tensor, dtype: torch.dtype = torch.float32):
-    data_float = data.to(torch.float32) * scale_inv
-    return data_float.to(dtype)
-
 test_idtypes_str = input_dtypes_str(["fp32", "fp16", "bf16"])
-test_odtypes_str = output_dtypes_str(["fp8e4"])
+test_odtypes_str = output_dtypes_str(["fp32", "fp16", "bf16", "fp8e4"])
 
 test_shapes = [
     (71, 229),
@@ -136,6 +132,7 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
         quantizer=quantizer_triton,
         out_dtype=torch_dtype_to_te_dtype(out_dtype)
         )
+    
     y_hipified, mu_hipified, rsigma_hipified = tex.layernorm_fwd(
         input=x,
         weight=gamma,
@@ -150,25 +147,29 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
 
     fwd_cmp = "te"
     atol_fwd, rtol_fwd = get_tolerances(out_dtype)
-
-    if isinstance(y_triton, QuantizedTensor):
-        amax_triton = y_triton._get_quantizer().amax
-        scale_inv_triton = y_triton._scale_inv
-        y_triton = y_triton.dequantize(dtype=in_dtype)
-        y_ref = dequantize_ref(data=y_ref, scale_inv=1/scale_ref, dtype=in_dtype)
-    if isinstance(y_hipified, QuantizedTensor):
-        amax_hipified = y_hipified._get_quantizer().amax
-        scale_inv_hipified = y_hipified._scale_inv
-        y_hipified = y_hipified.dequantize(dtype=in_dtype)
     
     # if out_dtype == torch.float32:
     #     atol_fwd = 5e-7
 
+    y_triton_transpose = None
+    y_hipified_transpose = None
+    if isinstance(y_triton, QuantizedTensor):
+        amax_triton = y_triton._get_quantizer().amax
+        scale_inv_triton = y_triton._scale_inv
+        y_triton_transpose = y_triton._transpose.view(out_dtype)
+        y_triton = y_triton._data.view(out_dtype)
+        
+    if isinstance(y_hipified, QuantizedTensor):
+        amax_hipified = y_hipified._get_quantizer().amax
+        scale_inv_hipified = y_hipified._scale_inv
+        y_hipified_transpose = y_hipified._transpose.view(out_dtype)
+        y_hipified = y_hipified._data.view(out_dtype)
+    
     compare_results(
         "te",
         y_triton,
         y_hipified,
-        0.38,
+        atol_fwd,
         rtol_fwd,
         lambda msg: f"y does not match triton <-> hip\n\n{msg}\n",
     )
@@ -177,19 +178,28 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
         "te",
         y_hipified,
         y_ref,
-        0.38,
+        atol_fwd,
         rtol_fwd,
         lambda msg: f"y does not match hip <-> ref\n\n{msg}\n",
     )
+
     compare_results(
         "te",
         y_triton,
-        y_ref,
-        0.315,
+        y_hipified,
+        atol_fwd,
         rtol_fwd,
-        lambda msg: f"y does not match triton <-> ref\n\n{msg}\n",
+        lambda msg: f"y does not match triton <-> hip\n\n{msg}\n",
     )
-
+    if y_triton_transpose is not None and y_hipified_transpose is not None:
+        compare_results(
+            "te",
+            y_triton_transpose,
+            y_hipified_transpose,
+            atol_fwd,
+            rtol_fwd,
+            lambda msg: f"y transpose does not match triton <-> hip\n\n{msg}\n",
+        )
     atol_stats, _ = get_tolerances(torch.float32)
     rtol_stats = 5e-5
 

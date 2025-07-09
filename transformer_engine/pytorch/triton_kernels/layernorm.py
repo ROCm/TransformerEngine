@@ -7,10 +7,9 @@ from itertools import product
 import torch
 
 from ..tensor.float8_tensor import Float8Quantizer
-from ..utils import non_tn_fp8_gemm_supported
 from ..constants import TE_DType
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
-from ..tensor.quantized_tensor import QuantizedTensor, Quantizer
+from ..tensor.quantized_tensor import Quantizer
 from ..triton_kernels.cast import te_quantize_triton
 import triton
 import triton.language as tl
@@ -56,7 +55,6 @@ def _layernorm_fwd_triton(
     n_rows,
     n_cols,
     eps,
-    max_fp8: tl.constexpr,
     ZERO_CENTERED_GAMMA: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     IS_FP8: tl.constexpr,
@@ -145,7 +143,6 @@ def _layernorm_fwd_triton(
                 amax_temp = tl.max(tl.abs(y_block), axis=-1)
                 amax = amax_temp if amax_temp > amax else amax
                 y_block = y_block * scale
-                # y_block = tl.clamp(y_block, -max_fp8, max_fp8)
             tl.store(y_ptr_start + col_offsets, y_block.to(y_ptr.type.element_ty))
 
         # For last iteration, do masked load and store
@@ -164,7 +161,6 @@ def _layernorm_fwd_triton(
             amax_temp = tl.max(tl.abs(y_block), axis=-1)
             amax = amax_temp if amax_temp > amax else amax
             y_block = y_block * scale
-            # y_block = tl.clamp(y_block, -max_fp8, max_fp8)
         tl.store(
             y_ptr_start + col_offsets, y_block.to(y_ptr.type.element_ty), mask=mask
         )
@@ -523,7 +519,6 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
         M,
         N,
         eps,
-        get_fp8_max(ln_out._fp8_dtype) if IS_FP8 else None,
         ZERO_CENTERED_GAMMA=zero_centered_gamma,
         BLOCK_SIZE=BLOCK_SIZE,
         IS_FP8=IS_FP8,
