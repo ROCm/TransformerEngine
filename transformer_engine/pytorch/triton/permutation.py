@@ -252,7 +252,6 @@ def _unpermute_kernel(
         data_type = FP8_DTYPE
         pytorch_tensor_dtype = tl.uint8
     else:
-        # NOTE: Using fp32 accumulate precision on ROCm.
         data_type = input_ptr.dtype.element_ty
         assert FP8_DTYPE is None
     compute_type = tl.float32
