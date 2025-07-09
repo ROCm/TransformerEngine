@@ -7,8 +7,9 @@ import torch
 
 from transformer_engine.pytorch.triton_kernels.cast import te_quantize_triton
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+from transformer_engine.pytorch.triton_kernels.common import te_dtype_to_torch_dtype
 import transformer_engine_torch as tex
-from test_common import fill_uniform, get_tolerances
+from test_common import compare_results, fill_uniform, get_tolerances
 
 @pytest.mark.parametrize("shape", 
                          [
@@ -42,13 +43,29 @@ def test_quantize(shape, in_dtype, out_dtype):
     
     tex_quantizer = Float8Quantizer(scale=scale_tensor, amax=amax_tensor, fp8_dtype=out_dtype)
     quantized_out_tex = tex.quantize(input_tensor, tex_quantizer)
-
-    atol, rtol = get_tolerances(in_dtype)
-    assert torch.allclose(quantized_out_triton, quantized_out_tex, atol=atol, rtol=rtol), 'Quantized results do not match!'
+    torch_out_dtype = te_dtype_to_torch_dtype(out_dtype)
+    
+    atol_q, rtol_q = get_tolerances(torch_out_dtype)
+    cmp = "te"
+    compare_results(
+        cmp,
+        quantized_out_triton._data.view(torch_out_dtype),
+        quantized_out_tex._data.view(torch_out_dtype),
+        atol_q,
+        rtol_q,
+        lambda msg: f"triton does not match tex <-> hip\n\n{msg}\n",
+    )
     assert quantized_out_triton._transpose is not None, "Triton transpose is none!" 
     assert quantized_out_tex._transpose is not None, "TEX transpose is none!" 
-    assert torch.allclose(
-        quantized_out_triton._transpose, quantized_out_tex._transpose, atol=0.0, rtol=0.0
-    ), 'Transposed quantized results do not match!'
-    assert torch.allclose(quantized_out_triton._get_quantizer().scale, quantized_out_tex._get_quantizer().scale, atol=atol, rtol=rtol), 'Scale results do not match!'
-    assert torch.allclose(quantized_out_triton._get_quantizer().amax, quantized_out_tex._get_quantizer().amax, atol=atol, rtol=rtol), 'AMAX results do not match!'
+    compare_results(
+        cmp,
+        quantized_out_triton._transpose.view(torch_out_dtype),
+        quantized_out_tex._transpose.view(torch_out_dtype),
+        atol_q,
+        rtol_q,
+        lambda msg: f"triton does not match tex <-> hip\n\n{msg}\n",
+    )
+    
+    atol_scale, rtol_scale = get_tolerances(torch.float32)
+    assert torch.allclose(quantized_out_triton._get_quantizer().scale, quantized_out_tex._get_quantizer().scale, atol=atol_scale, rtol=rtol_scale), 'Scale results do not match!'
+    assert torch.allclose(quantized_out_triton._get_quantizer().amax, quantized_out_tex._get_quantizer().amax, atol=atol_scale, rtol=rtol_scale), 'AMAX results do not match!'
