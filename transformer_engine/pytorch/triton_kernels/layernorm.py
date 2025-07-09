@@ -3,6 +3,7 @@
 
 
 from itertools import product
+import os
 
 import torch
 
@@ -10,6 +11,7 @@ from ..tensor.float8_tensor import Float8Quantizer
 from ..constants import TE_DType
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.quantized_tensor import Quantizer
+# TODO: Add TE Quantize once it is merged with main
 from ..triton_kernels.cast import te_quantize_triton
 import triton
 import triton.language as tl
@@ -532,7 +534,11 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
         ln_out.update_usage()
 
     if isinstance(quantizer, MXFP8Quantizer):
-        ln_out = te_quantize_triton(ln_out, quantizer)
+        use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+        # TODO: Add TE Quantize once it is merged with main
+        # quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
+        quantize_func = tex.quantize
+        ln_out = quantize_func(ln_out)
 
     if IS_FP8 and not APPLY_ATOMIC:
         _layernorm_fwd_reduce_triton[(triton.cdiv(M, 256),)](
