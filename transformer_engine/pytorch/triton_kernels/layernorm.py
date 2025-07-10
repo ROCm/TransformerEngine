@@ -11,7 +11,6 @@ from ..tensor.float8_tensor import Float8Quantizer
 from ..constants import TE_DType
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.quantized_tensor import Quantizer
-# TODO: Add TE Quantize once it is merged with main
 from ..triton_kernels.cast import te_quantize_triton
 import triton
 import triton.language as tl
@@ -455,16 +454,15 @@ def _layernorm_bwd_dwdb_triton_v2(
     tl.store(FINAL_DW + cols, sum_dw.to(FINAL_DW.type.element_ty), mask=cols < N)
     tl.store(FINAL_DB + cols, sum_db.to(FINAL_DB.type.element_ty), mask=cols < N)
 
-#TODO: refactor te_layernorm_fwd_triton function to match transformer_engine::pytorch::layernorm_fwd
 def te_layernorm_fwd_triton(input: torch.Tensor, 
                             weight: torch.Tensor, 
+                            bias: torch.Tensor,  
                             eps: float,
-                            zero_centered_gamma: bool,
-                            ln_out: torch.Tensor = None, 
-                            bias: torch.Tensor = None,  
-                            quantizer: Quantizer = None, 
-                            out_dtype: TE_DType = tex.DType.kFloat32,
-                            sm_margin: int = 0):
+                            ln_out: torch.Tensor, 
+                            quantizer: Quantizer, 
+                            out_dtype: TE_DType,
+                            sm_margin: int,
+                            zero_centered_gamma: bool):
     if sm_margin is not None and sm_margin > 0:
         warnings.warn(
             '"sm_margin" is not supported in the Triton based forward layer-norm kernel. '
@@ -535,9 +533,7 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
 
     if isinstance(quantizer, MXFP8Quantizer):
         use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
-        # TODO: Add TE Quantize once it is merged with main
-        # quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
-        quantize_func = tex.quantize
+        quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
         ln_out = quantize_func(ln_out)
 
     if IS_FP8 and not APPLY_ATOMIC:
