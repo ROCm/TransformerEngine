@@ -72,10 +72,14 @@ test_idtypes_str = input_dtypes_str(["fp32", "fp16", "bf16"])
 test_odtypes_str = output_dtypes_str(["fp32", "fp16", "bf16", "fp8e4"])
 
 test_shapes = [
-    (71, 229),
-    (29, 541),
-    (768, 6144),
     (2048, 12288),
+    (768, 1024),
+    (256, 65536),
+    (128, 6144),
+    (64, 2304),
+    (229, 541),
+    (71, 3571),
+    (29, 17389),
 ]
 
 all_boolean = [False, True]
@@ -128,9 +132,10 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
         bias=beta,
         eps=epsilon, 
         ln_out=None,
-        zero_centered_gamma=zero_centered_gamma, 
         quantizer=quantizer_triton,
-        out_dtype=torch_dtype_to_te_dtype(out_dtype)
+        out_dtype=torch_dtype_to_te_dtype(out_dtype),
+        sm_margin=get_fwd_ln_sm_margin(),
+        zero_centered_gamma=zero_centered_gamma, 
         )
     
     y_hipified, mu_hipified, rsigma_hipified = tex.layernorm_fwd(
