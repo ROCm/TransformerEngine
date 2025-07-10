@@ -8,7 +8,8 @@ import triton.language as tl
 from transformer_engine_torch import rmsnorm_fwd
 from itertools import product
 from .norm_common import num_programs, block_size, use_blocked
-from transformer_engine.pytorch.constants import TE_DType
+from transformer_engine.pytorch.triton_kernels.common import te_dtype_to_torch_dtype
+
 
 def dg_tmp_rows(x, sm_margin=None):
     return x.shape[0] if use_blocked(x) else num_programs(x, sm_margin)
@@ -344,7 +345,7 @@ def te_rmsnorm_fwd_triton(
     rsigma = torch.empty((N,), dtype=torch.float32, device="cuda")
     pt_dtype = (
         otype if isinstance(otype, torch.dtype)
-        else {v:k for k,v in TE_DType.items()}[otype]
+        else te_dtype_to_torch_dtype(otype)
     )
     out = torch.empty_like(input, dtype=pt_dtype) if ln_out is None else ln_out.view(pt_dtype)
 

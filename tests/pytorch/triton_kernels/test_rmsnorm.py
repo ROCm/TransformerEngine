@@ -5,8 +5,6 @@
 import pytest
 import torch
 
-from transformer_engine.pytorch.constants import TE_DType
-import transformer_engine_torch as tex
 from transformer_engine.pytorch.triton_kernels.common import torch_dtype_to_te_dtype
 from transformer_engine.pytorch.triton_kernels.norm_common import (
     get_fwd_ln_sm_margin,
@@ -16,6 +14,7 @@ from transformer_engine.pytorch.triton_kernels.rmsnorm import (
     te_rmsnorm_bwd_triton,
     te_rmsnorm_fwd_triton,
 )
+import transformer_engine_torch as tex
 from test_common import (
     input_dtypes_str,
     output_dtypes_str,
@@ -131,7 +130,7 @@ def test_rmsnorm_fwd_triton(M, N, in_dtype, zero_centered_gamma):
         gamma_tensor,
         epsilon,
         ln_out_triton,
-        None, TE_DType[in_dtype],
+        None, torch_dtype_to_te_dtype(in_dtype),
         fwd_ln_sm_margin,
         zero_centered_gamma
     )
@@ -143,7 +142,7 @@ def test_rmsnorm_fwd_triton(M, N, in_dtype, zero_centered_gamma):
         gamma_tensor,
         epsilon,
         ln_out_hipified,
-        None, TE_DType[in_dtype],
+        None, torch_dtype_to_te_dtype(in_dtype),
         fwd_ln_sm_margin,
         zero_centered_gamma
     )
