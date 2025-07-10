@@ -6,6 +6,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <assert.h>
 #ifndef __HIP_PLATFORM_AMD__
 #include "../cudnn_utils.h"
 #endif
