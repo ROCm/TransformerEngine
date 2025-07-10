@@ -346,7 +346,7 @@ def te_rmsnorm_fwd_triton(
         otype if isinstance(otype, torch.dtype)
         else {v:k for k,v in TE_DType.items()}[otype]
     )
-    out = torch.empty_like(input, dtype=pt_dtype) if ln_out is None else ln_out
+    out = torch.empty_like(input, dtype=pt_dtype) if ln_out is None else ln_out.view(pt_dtype)
 
     BLOCK_SIZE = block_size(input)
     USE_BLOCKED = use_blocked(input)
