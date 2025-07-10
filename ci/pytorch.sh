@@ -61,12 +61,11 @@ run_test_config(){
     run 1 test_sanity.py
     run_default_fa 1 fused_attn/test_fused_attn.py # Backend selection is controlled by the test
     # TODO: bring back cast transpose kernels after triton kernels for transformer_engine::pytorch::quantize
-    #run_default_fa 1 triton_kernels/test_cast_transpose.py
+    run_default_fa 1 triton_kernels/test_cast.py
     run_default_fa 1 triton_kernels/test_rmsnorm.py
     run_default_fa 1 triton_kernels/test_layernorm.py
     run_default_fa 1 triton_kernels/test_norm_common.py
-    #NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa 3 test_numerics.py
-    NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa 3 test_numerics.py
+    NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa 3 test_numerics.py
 }
 
 run_test_config_mgpu(){
