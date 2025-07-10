@@ -2,12 +2,14 @@
 # License for AMD contributions = MIT. See LICENSE for more information
 
 import torch
-
+import warnings
 import triton
 import triton.language as tl
+from transformer_engine_torch import rmsnorm_fwd
 from itertools import product
-import transformer_engine_torch as tex
 from .norm_common import num_programs, block_size, use_blocked
+from transformer_engine.pytorch.triton_kernels.common import te_dtype_to_torch_dtype
+
 
 def dg_tmp_rows(x, sm_margin=None):
     return x.shape[0] if use_blocked(x) else num_programs(x, sm_margin)
@@ -114,7 +116,6 @@ def _rmsnorm_fwd_triton(output_ptr, input_ptr, g_ptr, rsigma_ptr, input_row_stri
             output_ptrs = tl.multiple_of(output_ptrs, (16, ))
             tl.store(output_ptrs, rms_norm.to(output_ptr.type.element_ty), mask=mask)
 
-#TODO: refactor te_rmsnorm_fwd_triton to match transformer_engine::pytorch::rmsnorm_fwd 
 
 @triton.jit
 def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, dg_ptr, input_row_stride, output_row_stride,
@@ -297,3 +298,73 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma):
                                                    BLOCK_SIZE_M=128, BLOCK_SIZE_N=64)
 
     return dx, dgamma
+
+# triton drop-in replacement for transformer_engine::pytorch::rmsnorm_fwd
+def te_rmsnorm_fwd_triton(
+    input,
+    weight,
+    eps,
+    ln_out,
+    quantizer,
+    otype,
+    sm_margin,
+    zero_centered_gamma
+):
+    if eps < 0:
+        raise ValueError(f"`eps` must be non-negative, but a value of {eps} was passed")
+    if len(input.shape) != 2:
+        raise ValueError(
+            f"The input must be a 2-dimensional matrix, but an input with {input.ndim} was passed.")
+
+    N, H = input.shape
+    if weight.shape[0] != H:
+        raise ValueError(
+            f"The shape of `weight` must be feature-aligned, "
+            f"but {weight.shape[0]=} while {input.shape[1]=}"
+        )
+
+
+    #TODO: Update to include Triton fp8 quantization.
+    if quantizer is not None:
+        warnings.warn(
+            "FP8 is not yet supported in our RMSNorm Triton kernel. "
+            "Falling back to HIP implementation.",
+            RuntimeWarning
+        )
+        return rmsnorm_fwd(
+            input,
+            weight,
+            eps,
+            ln_out,
+            quantizer,
+            otype,
+            sm_margin,
+            zero_centered_gamma
+        )
+
+    rsigma = torch.empty((N,), dtype=torch.float32, device="cuda")
+    pt_dtype = (
+        otype if isinstance(otype, torch.dtype)
+        else te_dtype_to_torch_dtype(otype)
+    )
+    out = torch.empty_like(input, dtype=pt_dtype) if ln_out is None else ln_out.view(pt_dtype)
+
+    BLOCK_SIZE = block_size(input)
+    USE_BLOCKED = use_blocked(input)
+    NUM_PRGMS = num_programs(input, sm_margin)
+    grid_fwd = lambda meta: (NUM_PRGMS, )
+    _rmsnorm_fwd_triton[grid_fwd](
+        out,
+        input,
+        weight,
+        rsigma,
+        input.stride(0),
+        out.stride(0),
+        N, H, eps,
+        zero_centered_gamma,
+        BLOCK_SIZE,
+        USE_BLOCKED,
+        NUM_PRGMS,
+    )
+
+    return out, None, rsigma
