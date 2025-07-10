@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -5,6 +7,7 @@
 """Tensor with quantized data"""
 
 from __future__ import annotations
+import os
 from typing import Optional, Tuple, Iterable, Any, Dict, Union
 import abc
 import copy
@@ -190,7 +193,10 @@ class _QuantizeFunc(torch.autograd.Function):
         quantizer: Quantizer,
     ) -> QuantizedTensor:
         # pylint: disable=missing-function-docstring
-        return tex.quantize(tensor, quantizer)
+        from ..triton_kernels.cast import te_quantize_triton
+        use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+        quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
+        return quantize_func(tensor, quantizer)
 
     @staticmethod
     def backward(

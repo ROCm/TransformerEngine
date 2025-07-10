@@ -67,21 +67,31 @@ def _cast_transpose_triton(A, noop_ptr, C, T, stride_am, stride_an, stride_bn, s
         scale_inv_out = tl.fdiv(1.0, scale)
         tl.store(scale_inv_ptr, scale_inv_out)
 
+# Reshapes input of any given shape to 2D for processing, 
+# then uses the Triton kernel to perform casting and transposition efficiently.
 def te_cast_transpose_noop_triton(input, noop_flag, input_scale, cast_out, trans_out, amax_out, scale_inv_out, otype):
 
-    M, N = input.shape
+    row_length = input.shape[-1] if len(input.shape) > 0 else 1
+    num_rows = input.numel() // row_length
+    input_2d_view = input.reshape(num_rows, row_length)
+    cast_out_2d_view = cast_out.reshape(row_length, num_rows)
+    trans_out_2d_view =  trans_out.reshape(row_length, num_rows)
+
+    input_stride_M = input_2d_view.stride(0)
+    input_stride_N = input_2d_view.stride(1)
+
+    trans_out_stride_M = trans_out_2d_view.stride(0)
+    trans_out_stride_N = trans_out_2d_view.stride(1)
     
     tl_dtype = te_dtype_to_triton_dtype(otype)
     
-    assert trans_out.size(0) == N and trans_out.size(1) == M
-
     if noop_flag.nelement() > 0:
         use_noop = True
     else:
         use_noop = False
     
-    grid = lambda META: (triton.cdiv(M, META['BLOCK_M']) * triton.cdiv(N, META['BLOCK_N']),)
-    _cast_transpose_triton[grid](input, noop_flag, triton.reinterpret(cast_out, tl_dtype), triton.reinterpret(trans_out, tl_dtype), input.stride(0), input.stride(1), trans_out.stride(0), trans_out.stride(1), M, N, input_scale, amax_out, scale_inv_out, get_fp8_max(otype), use_noop)
+    grid = lambda META: (triton.cdiv(num_rows, META['BLOCK_M']) * triton.cdiv(row_length, META['BLOCK_N']),)
+    _cast_transpose_triton[grid](input_2d_view, noop_flag, triton.reinterpret(cast_out_2d_view, tl_dtype), triton.reinterpret(trans_out_2d_view, tl_dtype), input_stride_M, input_stride_N, trans_out_stride_M, trans_out_stride_N, num_rows, row_length, input_scale, amax_out, scale_inv_out, get_fp8_max(otype), use_noop)
 
 ##########################################
 #### cast_transpose_dbias
