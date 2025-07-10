@@ -10,6 +10,7 @@ from typing import Optional
 
 import pytest
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine
 import transformer_engine.common.recipe
@@ -1249,7 +1250,7 @@ class TestBasicOps:
         with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
             # TODO: Remove when we support FP8 quantization in the rmsnorm
             # triton kernels natively
-            if quantization:
+            if IS_HIP_EXTENSION and quantization:
                 with pytest.warns(
                     RuntimeWarning,
                     match="FP8 is not yet supported in our RMSNorm Triton kernel"
