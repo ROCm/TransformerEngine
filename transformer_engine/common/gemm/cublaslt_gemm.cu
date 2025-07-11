@@ -157,11 +157,11 @@ namespace transformer_engine {
 #ifdef __HIP_PLATFORM_AMD__
 //Forward declaration. The implementation is in rocm_gemm.cu
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
-                  const Tensor *inputBias, Tensor *outputPreGelu, int m, int n, int k, int lda,
-                  int ldb, int ldd, bool transa, bool transb, bool grad,
-                  void* workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator,
-                  int math_sm_count, int m_split, int n_split, bool gemm_producer,
-                  const Tensor *inputCounter, hipStream_t stream, int compute_stream_offset = -1);
+                 const Tensor *inputBias, Tensor *outputPreGelu, int m, int n, int k, int lda,
+                 int ldb, int ldd, bool transa, bool transb, bool grad,
+                 void* workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator,
+                 int math_sm_count, int m_split, int n_split, bool gemm_producer,
+                 const Tensor *inputCounter, hipStream_t stream, int compute_stream_offset = -1);
 #else // Use cublasLt
 
 using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;

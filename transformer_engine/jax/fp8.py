@@ -18,13 +18,13 @@ from flax.linen import fp8_ops
 
 from .util import is_hip_extension, is_fp8_fnuz
 
-from transformer_engine_jax import DType
+from transformer_engine.transformer_engine_jax import DType
 
 if not is_hip_extension():
-  from transformer_engine_jax import (
+  from transformer_engine.transformer_engine_jax import (
     get_cublasLt_version,
     get_cuda_version )
-from transformer_engine_jax import get_device_compute_capability
+from transformer_engine.transformer_engine_jax import get_device_compute_capability
 
 from transformer_engine.common.recipe import DelayedScaling, Format
 from transformer_engine.jax.sharding import global_shard_guard

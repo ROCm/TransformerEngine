@@ -45,7 +45,7 @@ from transformer_engine.pytorch import (
     Fp8Unpadding,
 )
 from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
-from transformer_engine.pytorch.attention import _flash_attn_2_7_0_plus
+from transformer_engine.pytorch.dot_product_attention.utils import FlashAttentionUtils as fa_utils
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
@@ -67,7 +67,8 @@ torch.cuda.manual_seed(seed)
 _cpu_rng_state = torch.get_rng_state()
 _cuda_rng_state = torch.cuda.get_rng_state()
 
-torch._dynamo.config.recompile_limit = 16
+# Supported from torch>=2.6
+# torch._dynamo.config.recompile_limit = 16
 
 if IS_HIP_EXTENSION:
     def rocm_attn_backend() -> tuple[bool, bool, bool]:
@@ -871,7 +872,7 @@ def test_gpt_checkpointing(dtype, bs, model):
             msg=f"Mismatch in tensor {i}",
             **tols,
         )
-        if IS_HIP_EXTENSION and not _flash_attn_2_7_0_plus and is_mi308() and rocm_attn_backend()[0]:
+        if IS_HIP_EXTENSION and not fa_utils.v2_7_0_plus and is_mi308() and rocm_attn_backend()[0]:
             # ROCm FA before 2.7.0 has a bug in dropout rng initialisation that exposes in
             # intermediate tensors mismatch on MI308. This is not a problem in the final output.
             break
@@ -1568,6 +1569,9 @@ def test_grouped_linear_accuracy(
     fuse_wgrad_accumulation,
     parallel_mode=None,
 ):
+    if IS_HIP_EXTENSION:
+        if dtype not in (torch.float32,) and fuse_wgrad_accumulation and not fp8:
+            pytest.skip(f"Rocm does not support fused wgrad accumulation for {dtype}.")
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:

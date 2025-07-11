@@ -39,6 +39,9 @@ TE_DType_To_Torch = {
     tex.DType.kFloat16: torch.half,
     tex.DType.kBFloat16: torch.bfloat16,
 }
+if IS_HIP_EXTENSION:
+    TE_DType_To_Torch.update({tex.DType.kFloat8E4M3: torch.float8_e4m3fnuz,
+                              tex.DType.kFloat8E5M2: torch.float8_e5m2fnuz})
 
 AttnMaskTypes = (
     "no_mask",

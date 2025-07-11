@@ -64,13 +64,10 @@ def _load_library():
             so_dir = get_te_path()
             so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
 
-    spec = importlib.util.spec_from_file_location(module_name, so_path)
-    solib = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = solib
-    spec.loader.exec_module(solib)
+    return ctypes.CDLL(so_path, mode=ctypes.RTLD_GLOBAL)
 
 
-_load_library()
+_TE_JAX_LIB_CTYPES = _load_library()
 from . import flax
 from .fp8 import fp8_autocast, update_collections, get_delayed_scaling
 from .fp8 import NVTE_FP8_COLLECTION_NAME

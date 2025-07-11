@@ -9,6 +9,7 @@
 #include <iostream>
 #include <memory>
 #include <random>
+#include <cmath>
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -62,7 +63,7 @@ void compute_amax_scale_ref(const InputType *data,
   float scale = 1.f;
   float scale_inv = 1.f;
 
-  if (isinf(clamp_amax) || clamp_amax == 0.f) {
+  if (std::isinf(clamp_amax) || clamp_amax == 0.f) {
       *scale_ptr = scale;
       *scale_inv_ptr = scale_inv;
       return;
@@ -73,11 +74,11 @@ void compute_amax_scale_ref(const InputType *data,
 
   // The amax is too small that the scale becoming infinite in FP32. In other word,
   // the scale is not representable in FP32.
-  if (isinf(scale)) {
+  if (std::isinf(scale)) {
     scale = std::numeric_limits<float>::max();
   }
 
-  if (isnan(scale)) {
+  if (std::isnan(scale)) {
     scale = 1.f;
   }
 

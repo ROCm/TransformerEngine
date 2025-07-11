@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -18,6 +20,7 @@ from packaging.version import Version as PkgVersion
 
 import torch
 import torch.nn.functional as F
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine_torch as tex
 import transformer_engine as te
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
@@ -358,7 +361,7 @@ def get_attention_backend(
         logger.debug("Disabling UnfusedDotProductAttention due to NVTE_UNFUSED_ATTN=0")
 
     # Filter: Compute capability
-    if device_compute_capability < (8, 0):
+    if not IS_HIP_EXTENSION and device_compute_capability < (8, 0):
         if use_flash_attention_2 and FlashAttentionUtils.is_installed:
             logger.debug("Disabling FlashAttention 2 for compute capability < sm80")
         use_flash_attention_2 = False
@@ -480,7 +483,8 @@ def get_attention_backend(
         head_dim_qk > 256
         or head_dim_qk % 8 != 0
         or (
-            head_dim_qk > 192
+            not IS_HIP_EXTENSION
+            and head_dim_qk > 192
             and device_compute_capability not in ((8, 0), (9, 0), (10, 0), (12, 0))
         )
     ):
@@ -658,7 +662,7 @@ def get_attention_backend(
                     " for FP8"
                 )
                 use_fused_attention = False
-            elif window_size[1] != 0 or attention_dropout != 0.0:
+            elif (not IS_HIP_EXTENSION) and (window_size[1] != 0 or attention_dropout != 0.0):
                 logger.debug(
                     "Disabling FusedAttention as it only supports sliding window attention "
                     "with (left, 0) and no dropout"
@@ -731,7 +735,9 @@ def get_attention_backend(
         ):
             fu_core_attention_bias_shape = "bhss"
 
+    # rocm ck backend support all 4 bias shapes (11ss, 1hss, b1ss, and bhss)
     if (
+        not IS_HIP_EXTENSION and
         use_fused_attention
         and fu_core_attention_bias_type == "post_scale_bias"
         and fu_core_attention_bias_shape != "1hss"
@@ -774,7 +780,7 @@ def get_attention_backend(
             use_fused_attention = False
             fused_attention_backend = None
         if (
-            use_fused_attention
+            use_fused_attention and (not IS_HIP_EXTENSION)
             and window_size is not None
             and window_size[0] != -1
             and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
@@ -787,7 +793,7 @@ def get_attention_backend(
             use_fused_attention = False
             fused_attention_backend = None
         if (
-            use_fused_attention
+            use_fused_attention and (not IS_HIP_EXTENSION)
             and fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]
             and fu_core_attention_bias_type == "post_scale_bias"
             and fu_core_attention_bias_shape != "1hss"
@@ -821,7 +827,7 @@ def get_attention_backend(
                 "please install flash-attn >= 2.4.1."
             )
             use_flash_attention_2 = False
-    if use_fused_attention and deterministic:
+    if use_fused_attention and deterministic and (not IS_HIP_EXTENSION):
         if fused_attention_backend == FusedAttnBackend["FP8"] and is_training:
             logger.debug("Disabling FusedAttention for determinism reasons")
             use_fused_attention = False
@@ -836,7 +842,14 @@ def get_attention_backend(
         ):
             logger.debug("Disabling FusedAttention for determinism reasons")
             use_fused_attention = False
-
+    # TODO: remove the filtering after ck team tells us how to enable more deterministic bwd kernels
+    if use_fused_attention and deterministic and IS_HIP_EXTENSION:
+        if (
+            fused_attention_backend == FusedAttnBackend["CK"]
+            and is_training
+        ):
+            logger.debug("Disabling FusedAttention for determinism reasons")
+            use_fused_attention = False
     # use_flash_attention may have been set above
     use_flash_attention_2 = use_flash_attention and use_flash_attention_2
     use_flash_attention_3 = use_flash_attention and use_flash_attention_3
@@ -899,7 +912,7 @@ def get_attention_backend(
     )
 
     # Select FusedAttention for performance
-    if use_flash_attention and use_fused_attention and device_compute_capability >= (9, 0):
+    if use_flash_attention and (not IS_HIP_EXTENSION) and use_fused_attention and device_compute_capability >= (9, 0):
         logger.debug(
             "Disabling FlashAttention to give FusedAttention preference on Hopper+ "
             "for performance reasons"

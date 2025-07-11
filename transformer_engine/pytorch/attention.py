@@ -99,11 +99,7 @@ _flash_attn_varlen_bwd = None
 try:
     fa_utils.version = PkgVersion(get_pkg_version("flash-attn"))
 except PackageNotFoundError:
-    if torch.cuda.is_available() and (IS_HIP_EXTENSION or get_device_compute_capability() >= (8, 0)) and _NVTE_FLASH_ATTN:
-        fa_logger.debug(
-            "flash-attn v2 is not installed. To use, please install it by"
-            """ "pip install flash-attn".""",
-        )
+    pass # only print warning if use_flash_attention_2 = True in get_attention_backend
 else:
     if torch.cuda.is_available() and ( (not IS_HIP_EXTENSION) and get_device_compute_capability() >= (10, 0)):
         if fa_utils.version_required_blackwell <= fa_utils.version <= fa_utils.max_version:
@@ -147,18 +143,18 @@ if not IS_HIP_EXTENSION:
         fa_utils.fa3_version = PkgVersion(get_pkg_version("flash-attn-3"))
     except PackageNotFoundError:
         pass  # only print warning if use_flash_attention_3 = True in get_attention_backend
-else:
-    from flash_attn_3.flash_attn_interface import flash_attn_func as flash_attn_func_v3
-    from flash_attn_3.flash_attn_interface import (
-        flash_attn_varlen_func as flash_attn_varlen_func_v3,
-    )
-    from flash_attn_3.flash_attn_interface import (
-        flash_attn_with_kvcache as flash_attn_with_kvcache_v3,
-    )
-    from flash_attn_3.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
-    from flash_attn_3.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
+    else:
+        from flash_attn_3.flash_attn_interface import flash_attn_func as flash_attn_func_v3
+        from flash_attn_3.flash_attn_interface import (
+            flash_attn_varlen_func as flash_attn_varlen_func_v3,
+        )
+        from flash_attn_3.flash_attn_interface import (
+            flash_attn_with_kvcache as flash_attn_with_kvcache_v3,
+        )
+        from flash_attn_3.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
+        from flash_attn_3.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
 
-    fa_utils.set_flash_attention_3_params()
+        fa_utils.set_flash_attention_3_params()
 
 # Global vars for available attention backends and ALiBi cache
 _attention_backends = {
