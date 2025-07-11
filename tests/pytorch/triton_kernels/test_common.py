@@ -50,7 +50,7 @@ def get_tolerances(dtype):
 #     r: expected tensor
 # NOTE: DO NOT upcast inputs to fp32 if you are using te_compare for any precision other than fp32
 def te_compare_results(t, r, atol, rtol, msg):
-    # assert t.dtype == r.dtype, f"Tensor dtypes don't match: {t.dtype} vs {r.dtype}."
+    assert t.dtype == r.dtype, f"Tensor dtypes don't match: {t.dtype} vs {r.dtype}."
     assert t.shape == r.shape, f"Tensor shapes don't match: {t.shape} vs {r.shape}."
     assert atol > 0, "Absolute tolerance must be positive."
     assert rtol > 0, "Relative tolerance must be positive."

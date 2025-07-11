@@ -471,10 +471,13 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
     device = input.device
     M, N = input.shape
     
+    # Create empty tensors for mu and rsigma
     mu = torch.empty((M,), dtype=torch.float32, device=device)
     rsigma = torch.empty((M,), dtype=torch.float32, device=device)
     torch_out_dtype = te_dtype_to_torch_dtype(out_dtype)
     tl_dtype = te_dtype_to_triton_dtype(out_dtype)
+
+    # Create ln_out
     if quantizer is None or isinstance(quantizer, MXFP8Quantizer):
         ln_out = torch.empty(M, N, dtype=torch_out_dtype, device=device)
     else:
@@ -485,7 +488,10 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
         else:
             ln_out = quantizer.create_tensor_from_data(ln_out, fake_dtype=torch_out_dtype)
     
+    # To updaet the amax ptr directly with atomic max
     APPLY_ATOMIC = M < 512
+
+    # MXFP8 is handled regularly, hence quantizer of Float8Quantizer is considered FP8
     IS_FP8 = isinstance(quantizer, Float8Quantizer)
 
     amax_temp = torch.empty((M,), dtype=torch.float32, device=input.device) if IS_FP8 else None
@@ -493,6 +499,7 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
     max_fused_size = 16384 // input.element_size()
     BLOCK_SIZE = min(max_fused_size, triton.next_power_of_2(N))
     
+    # Create necessary values for fp8 if needed
     if IS_FP8:
         scale = quantizer.scale
         amax_out = quantizer.amax
@@ -528,14 +535,18 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
         # It also lags behind TE implementation in a few cases
         PERSISTENT=False
     )
+
+    # Compute FP8 transpose if required
     if IS_FP8:
         ln_out.update_usage()
 
+    # For MXFP8, we do regular layernorm and then quantize it separately
     if isinstance(quantizer, MXFP8Quantizer):
         use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
         quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
         ln_out = quantize_func(ln_out)
-
+    
+    # Reduce and find amax if "not APPLY_ATOMIC" is True.
     if IS_FP8 and not APPLY_ATOMIC:
         _layernorm_fwd_reduce_triton[(triton.cdiv(M, 256),)](
             amax_temp,

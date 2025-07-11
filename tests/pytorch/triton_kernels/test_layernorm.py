@@ -150,9 +150,11 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
         zero_centered_gamma=zero_centered_gamma
     )
 
+    # Run forward
     fwd_cmp = "te"
     atol_fwd, rtol_fwd = get_tolerances(out_dtype)
     
+    # Uncommenting this creates some fp32 test failures
     # if out_dtype == torch.float32:
     #     atol_fwd = 5e-7
 
@@ -214,7 +216,7 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
         mu_ref,
         atol_stats,
         rtol_stats,
-        lambda msg: f"mu does not match triton <-> hip\n\n{msg}\n",
+        lambda msg: f"mu does not match triton <-> ref\n\n{msg}\n",
     )
     compare_results(
         fwd_cmp,
@@ -222,7 +224,7 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
         rsigma_ref,
         atol_stats,
         rtol_stats,
-        lambda msg: f"rsigma does not match triton <-> hip\n\n{msg}\n",
+        lambda msg: f"rsigma does not match triton <-> ref\n\n{msg}\n",
     )
     if IS_FP8(out_dtype):
         compare_results(
@@ -231,7 +233,7 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
             amax_ref,
             atol_stats,
             rtol_stats,
-            lambda msg: f"amax does not match triton <-> hip\n\n{msg}\n",
+            lambda msg: f"amax does not match triton <-> ref\n\n{msg}\n",
         )
         compare_results(
             "torch",
@@ -239,15 +241,15 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
             1.0/scale_ref,
             atol_stats,
             rtol_stats,
-            lambda msg: f"scale_inv does not match triton <-> hip\n\n{msg}\n",
+            lambda msg: f"scale_inv does not match triton <-> ref\n\n{msg}\n",
         )
 
     # Run Triton backward.
     dx_triton, dgamma_triton, dbeta_triton = te_layernorm_bwd_triton(
         dz,
         x,
-        mu_hipified,
-        rsigma_hipified,
+        mu_triton,
+        rsigma_triton,
         gamma,
         get_bwd_ln_sm_margin(),
         zero_centered_gamma,
