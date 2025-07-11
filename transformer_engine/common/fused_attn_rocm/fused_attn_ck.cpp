@@ -474,14 +474,16 @@ __global__ void remove_padding_softmax_lse_kernel(
     int s_idx = token_id - cu_seqlen_q_ptr[b_idx];
 
     if constexpr(is_ragged){
-      // [h, max_tokens_q with padding] to [h, max_tokens_q without padding]
+      // temporary hack for v3 bwd kernels
+      // [h, max_tokens_q with padding] to [h, num_total_tokens]
       for(int h_idx = workitem_idx; h_idx < h; h_idx += THREADS_PER_WAVEFRONT){
-        lse_without_padding_ptr[h_idx * max_tokens_q + token_id] = lse_ptr[(cu_seqlen_q_padded_ptr[b_idx]+s_idx)*h + h_idx];
+        lse_without_padding_ptr[h_idx * num_total_tokens + token_id] = lse_ptr[(cu_seqlen_q_padded_ptr[b_idx]+s_idx)*h + h_idx];
       }
     }else{
-      // [b, h, s_q] to [h, max_tokens_q without padding]
+      // temporary hack for v3 bwd kernels
+      // [b, h, s_q] to [h, num_total_tokens]
       for(int h_idx = workitem_idx; h_idx < h; h_idx += THREADS_PER_WAVEFRONT){
-        lse_without_padding_ptr[h_idx * max_tokens_q + token_id] = lse_ptr[b_idx*h*s_q + h_idx*s_q + s_idx];
+        lse_without_padding_ptr[h_idx * num_total_tokens + token_id] = lse_ptr[b_idx*h*s_q + h_idx*s_q + s_idx];
       }
     }
   }
