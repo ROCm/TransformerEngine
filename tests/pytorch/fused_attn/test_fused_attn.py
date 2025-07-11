@@ -230,7 +230,7 @@ def _get_attention_backends(
                     os.environ["NVTE_FUSED_ATTN_"+backends[k]] = "0"
                 os.environ["NVTE_FUSED_ATTN_"+backends[i]] = "1"
                 _attention_backends["backend_selection_requires_update"] = True
-                available_backends, fused_attention_backend = test()
+                available_backends, flash_attention_backend, fused_attention_backend = test()
                 if fused_attention_backend == FusedAttnBackend[i]:
                     fused_attn_backends.append(fused_attention_backend)
         for i in backends.keys():

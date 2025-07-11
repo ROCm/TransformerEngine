@@ -34,7 +34,18 @@ NVTE_QKV_Layout_Group nvte_get_qkv_layout_group(NVTE_QKV_Layout qkv_layout) {
     case NVTE_QKV_Layout::NVTE_SBHD_SBHD_SBHD:
     case NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD:
     case NVTE_QKV_Layout::NVTE_THD_THD_THD:
+    case NVTE_QKV_Layout::NVTE_SBHD_BSHD_BSHD:
+    case NVTE_QKV_Layout::NVTE_BSHD_SBHD_SBHD:
+    case NVTE_QKV_Layout::NVTE_THD_SBHD_SBHD:
+    case NVTE_QKV_Layout::NVTE_THD_BSHD_BSHD:
       return NVTE_QKV_Layout_Group::NVTE_HD_HD_HD;
+    case NVTE_QKV_Layout::NVTE_Paged_KV_BSHD_BSHD_BSHD:
+    case NVTE_QKV_Layout::NVTE_Paged_KV_SBHD_BSHD_BSHD:
+    case NVTE_QKV_Layout::NVTE_Paged_KV_THD_BSHD_BSHD:
+    case NVTE_QKV_Layout::NVTE_Paged_KV_BSHD_SBHD_SBHD:
+    case NVTE_QKV_Layout::NVTE_Paged_KV_SBHD_SBHD_SBHD:
+    case NVTE_QKV_Layout::NVTE_Paged_KV_THD_SBHD_SBHD:
+      return NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD;
     default:
       NVTE_ERROR("qkv_layout not supported!");
   }
@@ -48,18 +59,71 @@ NVTE_QKV_Format nvte_get_qkv_format(NVTE_QKV_Layout qkv_layout) {
     case NVTE_QKV_Layout::NVTE_SBHD_SB2HD:
     case NVTE_QKV_Layout::NVTE_SBHD_SBH2D:
     case NVTE_QKV_Layout::NVTE_SBHD_SBHD_SBHD:
+    case NVTE_QKV_Layout::NVTE_Paged_KV_SBHD_SBHD_SBHD:
       return NVTE_QKV_Format::NVTE_SBHD;
     case NVTE_QKV_Layout::NVTE_BS3HD:
     case NVTE_QKV_Layout::NVTE_BSH3D:
     case NVTE_QKV_Layout::NVTE_BSHD_BS2HD:
     case NVTE_QKV_Layout::NVTE_BSHD_BSH2D:
     case NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD:
+    case NVTE_QKV_Layout::NVTE_Paged_KV_BSHD_BSHD_BSHD:
       return NVTE_QKV_Format::NVTE_BSHD;
     case NVTE_QKV_Layout::NVTE_T3HD:
     case NVTE_QKV_Layout::NVTE_TH3D:
     case NVTE_QKV_Layout::NVTE_THD_T2HD:
     case NVTE_QKV_Layout::NVTE_THD_TH2D:
     case NVTE_QKV_Layout::NVTE_THD_THD_THD:
+      return NVTE_QKV_Format::NVTE_THD;
+    case NVTE_QKV_Layout::NVTE_SBHD_BSHD_BSHD:
+    case NVTE_QKV_Layout::NVTE_Paged_KV_SBHD_BSHD_BSHD:
+      return NVTE_QKV_Format::NVTE_SBHD_2BSHD;
+    case NVTE_QKV_Layout::NVTE_BSHD_SBHD_SBHD:
+    case NVTE_QKV_Layout::NVTE_Paged_KV_BSHD_SBHD_SBHD:
+      return NVTE_QKV_Format::NVTE_BSHD_2SBHD;
+    case NVTE_QKV_Layout::NVTE_THD_BSHD_BSHD:
+    case NVTE_QKV_Layout::NVTE_Paged_KV_THD_BSHD_BSHD:
+      return NVTE_QKV_Format::NVTE_THD_2BSHD;
+    case NVTE_QKV_Layout::NVTE_THD_SBHD_SBHD:
+    case NVTE_QKV_Layout::NVTE_Paged_KV_THD_SBHD_SBHD:
+      return NVTE_QKV_Format::NVTE_THD_2SBHD;
+    default:
+      NVTE_ERROR("qkv_layout not supported!");
+  }
+}
+
+
+// map NVTE_QKV_Layout to NVTE_QKV_Format for Q
+NVTE_QKV_Format nvte_get_q_format(NVTE_QKV_Layout qkv_layout) {
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  switch (qkv_format) {
+    case NVTE_QKV_Format::NVTE_SBHD:
+    case NVTE_QKV_Format::NVTE_SBHD_2BSHD:
+      return NVTE_QKV_Format::NVTE_SBHD;
+    case NVTE_QKV_Format::NVTE_BSHD:
+    case NVTE_QKV_Format::NVTE_BSHD_2SBHD:
+      return NVTE_QKV_Format::NVTE_BSHD;
+    case NVTE_QKV_Format::NVTE_THD:
+    case NVTE_QKV_Format::NVTE_THD_2BSHD:
+    case NVTE_QKV_Format::NVTE_THD_2SBHD:
+      return NVTE_QKV_Format::NVTE_THD;
+    default:
+      NVTE_ERROR("qkv_layout not supported!");
+  }
+}
+
+// map NVTE_QKV_Layout to NVTE_QKV_Format for KV
+NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout) {
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  switch (qkv_format) {
+    case NVTE_QKV_Format::NVTE_SBHD:
+    case NVTE_QKV_Format::NVTE_BSHD_2SBHD:
+    case NVTE_QKV_Format::NVTE_THD_2SBHD:
+      return NVTE_QKV_Format::NVTE_SBHD;
+    case NVTE_QKV_Format::NVTE_BSHD:
+    case NVTE_QKV_Format::NVTE_SBHD_2BSHD:
+    case NVTE_QKV_Format::NVTE_THD_2BSHD:
+      return NVTE_QKV_Format::NVTE_BSHD;
+    case NVTE_QKV_Format::NVTE_THD:
       return NVTE_QKV_Format::NVTE_THD;
     default:
       NVTE_ERROR("qkv_layout not supported!");
@@ -433,22 +497,22 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
 }
 
 // NVTE fused attention FWD with packed KV
-void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const NVTETensor Bias,
-                                  NVTETensor S, NVTETensor O, NVTETensorPack *Aux_CTX_Tensors,
-                                  const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
-                                  const NVTETensor cu_seqlens_q_padded,
-                                  const NVTETensor cu_seqlens_kv_padded, const NVTETensor rng_state,
-                                  size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
-                                  float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
-                                  NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-                                  int64_t window_size_left, int64_t window_size_right,
-                                  NVTETensor workspace, cudaStream_t stream) {
+void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const NVTETensor Bias, NVTETensor S, NVTETensor O, 
+                                  NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
+                                  const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded, 
+                                  const NVTETensor page_table_k, const NVTETensor page_table_v, const NVTETensor rng_state, 
+                                  size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, float attn_scale, float dropout, 
+                                  NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+                                  int64_t window_size_left, int64_t window_size_right, NVTETensor workspace, 
+                                  cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd_kvpacked);
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = reinterpret_cast<const Tensor*>(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor*>(cu_seqlens_kv);
   const Tensor *input_cu_seqlens_q_padded = reinterpret_cast<const Tensor *>(cu_seqlens_q_padded);
   const Tensor *input_cu_seqlens_kv_padded = reinterpret_cast<const Tensor *>(cu_seqlens_kv_padded);
+  const Tensor *input_page_table_k = reinterpret_cast<const Tensor *>(page_table_k);
+  const Tensor *input_page_table_v = reinterpret_cast<const Tensor *>(page_table_v);
   const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(rng_state);
   const Tensor *input_Q = reinterpret_cast<const Tensor*>(Q);
   const Tensor *input_KV = reinterpret_cast<const Tensor*>(KV);
@@ -624,7 +688,8 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          const NVTETensor Bias, NVTETensor S, NVTETensor O,
                          NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens_q,
                          const NVTETensor cu_seqlens_kv, const NVTETensor cu_seqlens_q_padded,
-                         const NVTETensor cu_seqlens_kv_padded, const NVTETensor rng_state,
+                         const NVTETensor cu_seqlens_kv_padded, const NVTETensor page_table_k,
+                         const NVTETensor page_table_v, const NVTETensor rng_state,
                          size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
                          float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
                          NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
@@ -636,6 +701,8 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor*>(cu_seqlens_kv);
   const Tensor *input_cu_seqlens_q_padded = reinterpret_cast<const Tensor *>(cu_seqlens_q_padded);
   const Tensor *input_cu_seqlens_kv_padded = reinterpret_cast<const Tensor *>(cu_seqlens_kv_padded);
+  const Tensor *input_page_table_k = reinterpret_cast<const Tensor *>(page_table_k);
+  const Tensor *input_page_table_v = reinterpret_cast<const Tensor *>(page_table_v);
   const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(rng_state);
   const Tensor *input_Q = reinterpret_cast<const Tensor*>(Q);
   const Tensor *input_K = reinterpret_cast<const Tensor*>(K);
