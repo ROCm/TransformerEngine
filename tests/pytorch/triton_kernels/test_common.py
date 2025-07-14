@@ -55,8 +55,6 @@ def te_compare_results(t, r, atol, rtol, msg):
     assert atol > 0, "Absolute tolerance must be positive."
     assert rtol > 0, "Relative tolerance must be positive."
     dtype = t.dtype
-    t_orig = t
-    r_orig = r
     t = t.cpu().to(torch.float32).to(torch.float64)
     r = r.cpu().to(torch.float32).to(torch.float64)
     diff = t - r
@@ -177,6 +175,3 @@ def skip_mixed_16bit_float_types(in_dtype, out_dtype):
         in_dtype == torch.bfloat16 and out_dtype == torch.float16
     ):
         pytest.skip("hipified implementation does not support mixing fp16 and bf16")
-
-def IS_FP8(dtype):
-    return (dtype == torch_e4m3_type) or (dtype == torch_e5m2_type)

@@ -25,7 +25,6 @@ from transformer_engine.pytorch.triton_kernels.layernorm import (
     te_layernorm_fwd_triton,
 )
 from test_common import (
-    IS_FP8,
     input_dtypes_str,
     output_dtypes_str,
     str_to_torch_dtype,
@@ -83,7 +82,6 @@ test_shapes = [
 ]
 
 all_boolean = [False, True]
-torch.manual_seed(42)
 
 @pytest.mark.parametrize("in_dtype", test_idtypes_str)
 @pytest.mark.parametrize("out_dtype", test_odtypes_str)
@@ -173,7 +171,7 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
         y_hipified = y_hipified._data.view(out_dtype)
     
     compare_results(
-        "te",
+        fwd_cmp,
         y_triton,
         y_hipified,
         atol_fwd,
@@ -182,7 +180,7 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
     )
 
     compare_results(
-        "te",
+        fwd_cmp,
         y_hipified,
         y_ref,
         atol_fwd,
@@ -191,16 +189,16 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
     )
 
     compare_results(
-        "te",
+        fwd_cmp,
         y_triton,
-        y_hipified,
+        y_ref,
         atol_fwd,
         rtol_fwd,
-        lambda msg: f"y does not match triton <-> hip\n\n{msg}\n",
+        lambda msg: f"y does not match triton <-> ref\n\n{msg}\n",
     )
     if y_triton_transpose is not None and y_hipified_transpose is not None:
         compare_results(
-            "te",
+            fwd_cmp,
             y_triton_transpose,
             y_hipified_transpose,
             atol_fwd,
@@ -226,7 +224,7 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
         rtol_stats,
         lambda msg: f"rsigma does not match triton <-> ref\n\n{msg}\n",
     )
-    if IS_FP8(out_dtype):
+    if is_fp8_torch_dtype(out_dtype):
         compare_results(
             "torch",
             amax_triton,
