@@ -1249,28 +1249,17 @@ class TestBasicOps:
             te_ops.Quantize(forward=quantized_compute, backward=False),
         )
         with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
-            # TODO: Remove when we support FP8 quantization in the rmsnorm
-            # triton kernels natively
-            if (
-                IS_HIP_EXTENSION
-                and bool(int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')))
-                and quantization
-            ):
-                with pytest.warns(
-                    RuntimeWarning,
-                    match="FP8 is not yet supported in our RMSNorm Triton kernel"
-                ):
-                    y_test = forward(x_test)
-            else:
-                y_test = forward(x_test)
+            y_test = forward(x_test)
         y_test.backward(dy_test)
 
         # Expected numerical error
         tols = dtype_tols(dtype)
         if quantized_compute:
             tols = dtype_tols(tex.DType.kFloat8E4M3)
+            assert isinstance(y_test, Float8Tensor)
 
         # Check results
+        assert y_test.dtype == dtype
         y_test = y_test.to(dtype=torch.float64, device="cpu")
         dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
         dw_test = op.weight.grad.to(dtype=torch.float64, device="cpu")
