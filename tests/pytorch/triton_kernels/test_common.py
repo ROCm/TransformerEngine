@@ -70,14 +70,12 @@ def te_compare_results(t, r, atol, rtol, msg):
     max_abs_diff_indices = None
     max_rel_diff_indices = None
     if has_mismatch:
-        max_abs_diff = torch.max(torch.abs(diff[mismatch])).item()
-        max_rel_diff = torch.max(torch.abs(diff[mismatch] / r[mismatch])).item()
+        max_abs_diff = torch.max(torch.abs(diff)).item()
+        max_rel_diff = torch.max(torch.abs(diff[nonzero_r] / r[nonzero_r])).item()
         rel_diff = torch.full_like(diff, 0.0) # Initialize with zeros
-        abs_diff = torch.full_like(diff, 0.0) # Initialize with zeros
-        rel_diff[mismatch] = torch.abs(diff[mismatch] / r[mismatch])
-        abs_diff[mismatch] = torch.abs(diff[mismatch])
+        rel_diff[nonzero_r] = torch.abs(diff[nonzero_r] / r[nonzero_r])
         max_rel_diff_indices = torch.unravel_index(torch.argmax(rel_diff), rel_diff.shape)
-        max_abs_diff_indices = torch.unravel_index(torch.argmax(abs_diff), abs_diff.shape)
+        max_abs_diff_indices = torch.unravel_index(torch.argmax(torch.abs(diff)), diff.shape)
 
     # for fp32 the floating point comparison is enough to error out
     if has_mismatch and dtype != torch.float32:
