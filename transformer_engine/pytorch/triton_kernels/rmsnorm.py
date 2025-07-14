@@ -6,7 +6,10 @@ import triton
 import triton.language as tl
 from itertools import product
 from .norm_common import num_programs, block_size, use_blocked
-from transformer_engine.pytorch.triton_kernels.common import te_dtype_to_torch_dtype
+from transformer_engine.pytorch.triton_kernels.common import (
+    te_dtype_to_torch_dtype,
+    te_dtype_to_triton_dtype,
+)
 from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
 
 
@@ -396,15 +399,17 @@ def te_rmsnorm_fwd_triton(
                 out = quantizer.create_tensor_from_data(ln_out, fake_dtype=pt_otype)
         else:
             out = quantizer.make_empty(input.shape, dtype=pt_otype)
+            out._transpose = None
+            out._transpose_invalid = True
     else:
         out = torch.empty_like(input, dtype=pt_otype) if ln_out is None else ln_out.view(pt_otype)
 
     amax = torch.empty((NUM_PRGMS,), dtype=torch.float32, device="cuda") if IS_FP8 else None
 
+    tl_dtype = te_dtype_to_triton_dtype(quantizer.dtype) if IS_FP8 else None
     grid_fwd = lambda meta: (NUM_PRGMS, )
     _rmsnorm_fwd_triton[grid_fwd](
-        out,
-        out.data if IS_FP8 else None,
+        triton.reinterpret(out._data, tl_dtype) if IS_FP8 else out,
         input,
         weight,
         rsigma,
@@ -421,10 +426,10 @@ def te_rmsnorm_fwd_triton(
     )
     if IS_FP8:
         # Handle FP8 metadata
-        _rmsnorm_fwd_fp8_meta_triton[NUM_PRGMS // BLOCK_SIZE](
+        _rmsnorm_fwd_fp8_meta_triton[(NUM_PRGMS // BLOCK_SIZE, )](
             amax,
-            quantizer.scale,
             quantizer.amax,
+            quantizer.scale,
             out._scale_inv,
             N, BLOCK_SIZE,
         )
