@@ -1453,7 +1453,7 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
         device="cuda",
     ).eval()
 
-    torch_ln_mlp = (
+    te_ln_mlp_ref = (
         TorchLayerNormMLP(
             config.hidden_size,
             4 * config.hidden_size,
@@ -1467,16 +1467,16 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
 
     # Share params
     with torch.no_grad():
-        torch_ln_mlp.ln.weight = Parameter(te_ln_mlp.layer_norm_weight.clone())
+        te_ln_mlp_ref.ln.weight = Parameter(te_ln_mlp.layer_norm_weight.clone())
         if normalization != "RMSNorm":
-            torch_ln_mlp.ln.bias = Parameter(te_ln_mlp.layer_norm_bias.clone())
-        torch_ln_mlp.fc1.weight = Parameter(te_ln_mlp.fc1_weight.clone())
-        torch_ln_mlp.fc1.bias = Parameter(te_ln_mlp.fc1_bias.clone())
-        torch_ln_mlp.fc2.weight = Parameter(te_ln_mlp.fc2_weight.clone())
-        torch_ln_mlp.fc2.bias = Parameter(te_ln_mlp.fc2_bias.clone())
+            te_ln_mlp_ref.ln.bias = Parameter(te_ln_mlp.layer_norm_bias.clone())
+        te_ln_mlp_ref.fc1.weight = Parameter(te_ln_mlp.fc1_weight.clone())
+        te_ln_mlp_ref.fc1.bias = Parameter(te_ln_mlp.fc1_bias.clone())
+        te_ln_mlp_ref.fc2.weight = Parameter(te_ln_mlp.fc2_weight.clone())
+        te_ln_mlp_ref.fc2.bias = Parameter(te_ln_mlp.fc2_bias.clone())
 
     te_outputs = _test_granular_accuracy(te_ln_mlp, bs, dtype, config)
-    torch_outputs = _test_granular_accuracy(torch_ln_mlp, bs, dtype, config)
+    torch_outputs = _test_granular_accuracy(te_ln_mlp_ref, bs, dtype, config)
 
     atol = {
         torch.float32: 2e-2,
@@ -1508,6 +1508,75 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
 
     if model == "small":
         for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
+            assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", ["small"])
+@pytest.mark.parametrize("activation", all_activations)
+@pytest.mark.parametrize("normalization", all_normalizations)
+def test_fp8_layernorm_mlp_without_transpose_cache_accuracy(dtype, bs, model, activation, normalization):
+    config = model_configs[model]
+
+    te_ln_mlp = LayerNormMLP(
+        config.hidden_size,
+        4 * config.hidden_size,
+        activation=activation,
+        normalization=normalization,
+        params_dtype=dtype,
+        device="cuda",
+        keep_fp8_weight_transpose_cache = False,
+    ).eval()
+
+    te_ln_mlp_ref = LayerNormMLP(
+        config.hidden_size,
+        4 * config.hidden_size,
+        activation=activation,
+        normalization=normalization,
+        params_dtype=dtype,
+        device="cuda",
+    ).eval()
+
+    # Share params
+    with torch.no_grad():
+        te_ln_mlp_ref.layer_norm_weight = Parameter(te_ln_mlp.layer_norm_weight.clone())
+        if normalization != "RMSNorm":
+            te_ln_mlp_ref.layer_norm_bias = Parameter(te_ln_mlp.layer_norm_bias.clone())
+        te_ln_mlp_ref.fc1_weight = Parameter(te_ln_mlp.fc1_weight.clone())
+        te_ln_mlp_ref.fc1_bias = Parameter(te_ln_mlp.fc1_bias.clone())
+        te_ln_mlp_ref.fc2_weight = Parameter(te_ln_mlp.fc2_weight.clone())
+        te_ln_mlp_ref.fc2_bias = Parameter(te_ln_mlp.fc2_bias.clone())
+
+    te_outputs = _test_granular_accuracy_with_fp8(te_ln_mlp, bs, dtype, config)
+    te_outputs_ref = _test_granular_accuracy_with_fp8(te_ln_mlp_ref, bs, dtype, config)
+
+    # The accuracy of not keep fp8 weight transpose cache should be bitwise equal.
+    atol = {
+        torch.float32: 0,
+        torch.half: 0,
+        torch.bfloat16: 0,
+    }
+
+    rtol = {
+        torch.float32: 0,
+        torch.half: 0,
+        torch.bfloat16: 0,
+    }
+
+    # Check output.
+    assert_allclose(te_outputs[0], te_outputs_ref[0], atol[dtype], rtol[dtype])
+
+    # Check gradients, only for small model
+    rtol = {
+        torch.float32: 0,
+        torch.half: 0,
+        torch.bfloat16: 0,
+    }
+    atol[torch.half] = 0
+    atol[torch.bfloat16] = 0 
+
+    if model == "small":
+        for te_output, torch_output in zip(te_outputs[1:], te_outputs_ref[1:]):
             assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
 
