@@ -404,12 +404,21 @@ def te_rmsnorm_fwd_triton(
     else:
         out = torch.empty_like(input, dtype=pt_otype) if ln_out is None else ln_out.view(pt_otype)
 
-    amax = torch.empty((NUM_PRGMS,), dtype=torch.float32, device="cuda") if IS_FP8 else None
 
-    tl_dtype = te_dtype_to_triton_dtype(quantizer.dtype) if IS_FP8 else None
+    if IS_FP8:
+        amax = torch.empty((NUM_PRGMS,), dtype=torch.float32, device="cuda")
+        tl_dtype = te_dtype_to_triton_dtype(quantizer.dtype)
+        out_ptr = triton.reinterpret(out._data, tl_dtype)
+        q_scale = quantizer.scale
+    else:
+        amax = None
+        tl_dtype = None
+        q_scale = None
+        out_ptr = out
+
     grid_fwd = lambda meta: (NUM_PRGMS, )
     _rmsnorm_fwd_triton[grid_fwd](
-        triton.reinterpret(out._data, tl_dtype) if IS_FP8 else out,
+        out_ptr,
         input,
         weight,
         rsigma,
@@ -417,7 +426,7 @@ def te_rmsnorm_fwd_triton(
         out.stride(0),
         N, H, eps,
         amax,
-        quantizer.scale if IS_FP8 else None,
+        q_scale,
         zero_centered_gamma,
         BLOCK_SIZE,
         USE_BLOCKED,
