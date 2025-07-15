@@ -182,8 +182,8 @@ def _dequantize_mxfp8_triton(
     stride_row, stride_col, 
     n_rows, n_cols, 
     scale_inv_ptr, stride_scale_inv_row, stride_scale_inv_col,
-    stride_n_rows, stride_n_cols,
-    BLOCK_X: tl.constexpr, BLOCK_Y: tl.constexpr, GROUP_Y: tl.constexpr, MXFP8_BLOCK_SCALING_SIZE: tl.constexpr):
+    scale_n_rows, scale_n_cols,
+    BLOCK_X: tl.constexpr, BLOCK_Y: tl.constexpr, GROUP_Y: tl.constexpr, USE_ROWWISE_SCALING: tl.constexpr, MXFP8_BLOCK_SCALING_SIZE: tl.constexpr):
    
     pid = tl.program_id(0)
 
@@ -210,11 +210,16 @@ def _dequantize_mxfp8_triton(
             mask = (offsets_Y < n_rows)[:, None] & (offsets_X < n_cols)[None, :]
             x_chunk = tl.load(x_ptr_current_chunk, mask=mask)
 
-            scale_offset_X = (pid_n * num_chunks_in_block_X) + chunk_id_x
-            scale_inv_store_offsets = (offsets_Y[:, None] * stride_scale_inv_row) + scale_offset_X * stride_scale_inv_col 
-            scale_inv_store_mask = (offsets_Y < n_rows)[:, None] & (scale_offset_X < stride_n_cols)
-            
-            biased_exponent = tl.load(scale_inv_ptr + scale_inv_store_offsets, mask=scale_inv_store_mask, other=0)
+            if USE_ROWWISE_SCALING:
+                scale_offset_X = (pid_n * num_chunks_in_block_X) + chunk_id_x
+                scale_inv_store_offsets = (offsets_Y[:, None] * stride_scale_inv_row) + scale_offset_X * stride_scale_inv_col 
+                scale_inv_store_mask = (offsets_Y < scale_n_rows)[:, None] & (scale_offset_X < scale_n_cols)
+            else:
+                scale_offset_Y = (pid_m * num_chunks_in_block_Y) + chunk_id_y
+                scale_inv_store_offsets = scale_offset_Y * stride_scale_inv_row + (offsets_X[None, :] * stride_scale_inv_col) 
+                scale_inv_store_mask = (scale_offset_Y < scale_n_rows) & (offsets_X < scale_n_cols)[None, :]
+                
+            biased_exponent = tl.load(scale_inv_ptr + scale_inv_store_offsets, mask=scale_inv_store_mask, other=127)
             block_scale = tl.exp2(biased_exponent.to(tl.float32) - 127)
             y_chunk_scaled = x_chunk.to(tl.float32) * block_scale
             y_ptr_current_chunk = y_ptr + offsets_Y[:, None] * stride_row + offsets_X[None, :] * stride_col
@@ -273,7 +278,7 @@ def te_cast_transpose_mxfp8_triton(input, out, noop_flag=None):
     colwise_scale_M, colwise_scale_N,
     max_fp8, BLOCK_X, BLOCK_Y, GROUP_Y, MXFP8_BLOCK_SCALING_SIZE)
 
-def te_dequantize_mxfp8_triton(input, dtype):
+def te_dequantize_mxfp8_triton(input, dtype, use_rowwise_scaling=True):
     input_metadata = input.get_metadata()
     rowwise_x_ptr = input_metadata["rowwise_data"]
     colwise_x_ptr = input_metadata["columnwise_data"]
@@ -284,10 +289,10 @@ def te_dequantize_mxfp8_triton(input, dtype):
     M, N = rowwise_x_ptr.shape
     out = torch.zeros((M, N), dtype=dtype, device=rowwise_x_ptr.device)
 
-    use_rowwise_scaling = rowwise_x_ptr is not None
+    # use_rowwise_scaling = rowwise_x_ptr is not None
     x_ptr = rowwise_x_ptr if use_rowwise_scaling else colwise_x_ptr
     scale_inv_ptr = rowwise_scale_inv_ptr if use_rowwise_scaling else colwise_scale_inv_ptr
-    stride_M, stride_N = rowwise_scale_inv_ptr.shape if use_rowwise_scaling else colwise_scale_inv_ptr.shape
+    scale_M, scale_N = rowwise_scale_inv_ptr.shape if use_rowwise_scaling else colwise_scale_inv_ptr.shape
     
     BLOCK_X = 64
     BLOCK_Y = 64
@@ -300,8 +305,8 @@ def te_dequantize_mxfp8_triton(input, dtype):
     x_ptr.stride(0), x_ptr.stride(1), 
     M, N, 
     scale_inv_ptr, scale_inv_ptr.stride(0), scale_inv_ptr.stride(1),
-    stride_M, stride_N,
-    BLOCK_X, BLOCK_Y, GROUP_Y, MXFP8_BLOCK_SCALING_SIZE)
+    scale_M, scale_N,
+    BLOCK_X, BLOCK_Y, GROUP_Y, use_rowwise_scaling, MXFP8_BLOCK_SCALING_SIZE)
 
     return out
 

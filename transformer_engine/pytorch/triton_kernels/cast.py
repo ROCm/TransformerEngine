@@ -117,5 +117,5 @@ def te_quantize_triton(
 
     return out
 
-def te_dequantize_triton(input, dtype=torch.float32):
-    return te_dequantize_mxfp8_triton(input, dtype)
+def te_dequantize_triton(input, dtype=torch.float32, use_rowwise_scaling=True):
+    return te_dequantize_mxfp8_triton(input, dtype, use_rowwise_scaling)
