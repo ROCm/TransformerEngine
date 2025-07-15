@@ -60,8 +60,8 @@ def te_compare_results(t, r, atol, rtol, msg):
     diff = t - r
     atol_mismatch = torch.abs(diff) > atol
     nonzero_r = r != 0
-    rtol_mismatch = torch.full_like(atol_mismatch, False)
-    rtol_mismatch[nonzero_r] = torch.abs(diff[nonzero_r] / r[nonzero_r]) > rtol
+    rel_diff = torch.where(nonzero_r, torch.abs(diff / r), torch.zeros_like(diff))
+    rtol_mismatch = torch.where(nonzero_r, rel_diff > rtol, torch.full_like(atol_mismatch, False))
     mismatch = atol_mismatch & (~nonzero_r | rtol_mismatch)
     has_mismatch = torch.any(mismatch).item()
 
@@ -69,11 +69,10 @@ def te_compare_results(t, r, atol, rtol, msg):
     max_abs_diff = 0.0 
     max_abs_diff_indices = None
     max_rel_diff_indices = None
+    
     if has_mismatch:
         max_abs_diff = torch.max(torch.abs(diff)).item()
-        max_rel_diff = torch.max(torch.abs(diff[nonzero_r] / r[nonzero_r])).item()
-        rel_diff = torch.full_like(diff, 0.0) # Initialize with zeros
-        rel_diff[nonzero_r] = torch.abs(diff[nonzero_r] / r[nonzero_r])
+        max_rel_diff = torch.max(rel_diff).item()
         max_rel_diff_indices = torch.unravel_index(torch.argmax(rel_diff), rel_diff.shape)
         max_abs_diff_indices = torch.unravel_index(torch.argmax(torch.abs(diff)), diff.shape)
 
