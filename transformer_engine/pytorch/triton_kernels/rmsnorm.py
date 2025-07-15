@@ -5,7 +5,10 @@ import torch
 import triton
 import triton.language as tl
 from itertools import product
+import warnings
 from .norm_common import num_programs, block_size, use_blocked
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8Tensor
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.triton_kernels.common import (
     te_dtype_to_torch_dtype,
     te_dtype_to_triton_dtype,
@@ -381,7 +384,8 @@ def te_rmsnorm_fwd_triton(
             f"The shape of `weight` must be feature-aligned, "
             f"but {weight.shape[0]=} while {input.shape[1]=}"
         )
-    IS_FP8 = quantizer is not None
+    IS_FP8 = isinstance(quantizer, Float8Quantizer)
+    IS_MFP8 = isinstance(quantizer, MXFP8Quantizer)
     BLOCK_SIZE = block_size(input)
     USE_BLOCKED = use_blocked(input)
     NUM_PRGMS = num_programs(input, sm_margin)
@@ -393,30 +397,28 @@ def te_rmsnorm_fwd_triton(
     )
     if IS_FP8:
         if ln_out is not None:
-            if isinstance(ln_out, QuantizedTensor):
-                out = ln_out
-            else:
-                out = quantizer.create_tensor_from_data(ln_out, fake_dtype=pt_otype)
+            out = (
+                ln_out if isinstance(ln_out, Float8Tensor) else
+                quantizer.create_tensor_from_data(ln_out, fake_dtype=pt_otype)
+            )
         else:
             out = quantizer.make_empty(input.shape, dtype=pt_otype)
-            out._transpose = None
-            out._transpose_invalid = True
-    else:
-        out = torch.empty_like(input, dtype=pt_otype) if ln_out is None else ln_out.view(pt_otype)
 
-
-    if IS_FP8:
         amax = torch.empty((NUM_PRGMS,), dtype=torch.float32, device="cuda")
         tl_dtype = te_dtype_to_triton_dtype(quantizer.dtype)
         out_ptr = triton.reinterpret(out._data, tl_dtype)
         q_scale = quantizer.scale
     else:
+        out = torch.empty_like(input, dtype=pt_otype) if ln_out is None else ln_out.view(pt_otype)
         amax = None
         tl_dtype = None
         q_scale = None
         out_ptr = out
 
+
     grid_fwd = lambda meta: (NUM_PRGMS, )
+
+    # TODO(micky774) Implement fused MXFP8 quantization within the kernel
     _rmsnorm_fwd_triton[grid_fwd](
         out_ptr,
         input,
@@ -442,5 +444,7 @@ def te_rmsnorm_fwd_triton(
             out._scale_inv,
             N, BLOCK_SIZE,
         )
+    elif IS_MFP8:
+        out = quantizer.quantize(out)
 
     return out, None, rsigma

@@ -23,6 +23,7 @@ from transformer_engine.pytorch.ops.fused import (
 )
 from transformer_engine.pytorch.tensor import QuantizedTensor
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine_torch as tex
 
@@ -1252,11 +1253,16 @@ class TestBasicOps:
         assert y_test.dtype == dtype
         # Expected numerical error
         tols = dtype_tols(dtype)
+
+        # Explicit checks for quantization
         if quantized_compute:
             tols = dtype_tols(y_test._quantizer.dtype)
-            assert isinstance(y_test, Float8Tensor)
+            expected_tensor_cls = {
+                Float8Quantizer:Float8Tensor,
+                MXFP8Quantizer:MXFP8Tensor
+            }[type(y_test._quantizer)]
+            assert isinstance(y_test, expected_tensor_cls)
             y_test = y_test.dequantize(dtype=torch.float32)
-            y_test = y_test.to(device="cpu")
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
