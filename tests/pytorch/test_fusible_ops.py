@@ -1,5 +1,5 @@
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
+# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
 # See LICENSE for license information.
 
 from __future__ import annotations
@@ -16,9 +16,6 @@ import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.pytorch.triton_kernels.common import (
-    te_dtype_to_torch_dtype,
-)
 from transformer_engine.pytorch.ops.fused import (
     BackwardLinearAdd,
     ForwardLinearBiasActivation,
