@@ -163,13 +163,12 @@ def _cast_transpose_triton_mxfp8(
             tl.store(rowwise_y_ptr_current_chunk, y_chunk_rowwise_scaled.to(rowwise_y_ptr.type.element_ty), mask=mask)
 
             # Colwise
-            subwarp_amax_colwise = tl.max(tl.abs(x_chunk), axis=0)[:, None]
-
+            subwarp_amax_colwise = tl.max(tl.abs(x_chunk), axis=0, keep_dims=True)
             biased_exponent_colwise = float_to_e8m0_triton(subwarp_amax_colwise * max_norm_rcp)
 
             scale_offset_Y = (pid_m * num_chunks_in_block_Y) + chunk_id_y
-            colwise_scale_inv_store_offsets = scale_offset_Y * stride_colwise_scale_inv_row + (offsets_X[:, None] * stride_colwise_scale_inv_col) 
-            colwise_scale_inv_store_mask = (scale_offset_Y < colwise_scale_M) & (offsets_X < colwise_scale_N)[:, None]
+            colwise_scale_inv_store_offsets = scale_offset_Y * stride_colwise_scale_inv_row + (offsets_X[None, :] * stride_colwise_scale_inv_col) 
+            colwise_scale_inv_store_mask = (scale_offset_Y < colwise_scale_M) & (offsets_X < colwise_scale_N)[None, :]
             tl.store(colwise_scale_inv_ptr + colwise_scale_inv_store_offsets, biased_exponent_colwise, mask = colwise_scale_inv_store_mask)
             
             block_inverse_scale_colwise = exp2f_rcp_triton(biased_exponent_colwise)
