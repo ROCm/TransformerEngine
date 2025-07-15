@@ -66,7 +66,7 @@ def _rmsnorm_fwd_triton(
             for blk_idx in tl.range(0, n_cols_blks, num_stages=2):
                 cols = blk_idx * BLOCK_SIZE + col_offsets
                 input_ptrs = row_input_ptr + cols
-                input_ptrs = tl.multiple_of(input_ptrs, (8, ))
+                input_ptrs = tl.multiple_of(input_ptrs, (64, ))
                 x = tl.load(input_ptrs).to(tl.float32)
                 sum_squares += tl.sum(x * x, axis=0)
 
@@ -74,7 +74,7 @@ def _rmsnorm_fwd_triton(
             cols = n_cols_blks * BLOCK_SIZE + col_offsets
             mask = cols < n_cols
             input_ptrs = row_input_ptr + cols
-            input_ptrs = tl.multiple_of(input_ptrs, (8, ))
+            input_ptrs = tl.multiple_of(input_ptrs, (64, ))
             x = tl.load(input_ptrs, mask=mask, other=0.0, cache_modifier=".cg").to(tl.float32)
             sum_squares += tl.sum(x * x, axis=0)
 
@@ -89,7 +89,7 @@ def _rmsnorm_fwd_triton(
             for blk_idx in tl.range(0, n_cols_blks, num_stages=2):
                 cols = blk_idx * BLOCK_SIZE + col_offsets
                 input_ptrs = row_input_ptr + cols
-                input_ptrs = tl.multiple_of(input_ptrs, (8, ))
+                input_ptrs = tl.multiple_of(input_ptrs, (64, ))
                 x = tl.load(input_ptrs).to(tl.float32)
                 g_ptrs = g_ptr + cols
                 g = tl.load(g_ptrs).to(tl.float32)
@@ -124,7 +124,7 @@ def _rmsnorm_fwd_triton(
         mask = col_offsets < n_cols
         for row_idx in tl.range(row_start, n_rows, NUM_PRGMS, num_stages=2):
             input_ptrs = input_ptr + row_idx * input_row_stride + col_offsets
-            input_ptrs = tl.multiple_of(input_ptrs, (8, ))
+            input_ptrs = tl.multiple_of(input_ptrs, (64, ))
             row = tl.load(input_ptrs, mask=mask, other=0.0, cache_modifier=".cg").to(tl.float32)
             g = tl.load(g_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
             row_norm = row * row
@@ -140,7 +140,7 @@ def _rmsnorm_fwd_triton(
             rms_norm = row * norm_factor * g
 
             output_ptrs = output_ptr + row_idx * output_row_stride + col_offsets
-            output_ptrs = tl.multiple_of(output_ptrs, (8, ))
+            output_ptrs = tl.multiple_of(output_ptrs, (64, ))
             if IS_FP8:
                 amax_temp = tl.max(tl.abs(rms_norm), axis=-1)
                 amax = amax_temp if amax_temp > amax else amax

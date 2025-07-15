@@ -7,18 +7,18 @@ from __future__ import annotations
 from collections.abc import Iterable
 import math
 from typing import Optional
-import os
 
 import pytest
 import torch
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.pytorch.ops._common import is_float8_tensor
+from transformer_engine.pytorch.triton_kernels.common import (
+    te_dtype_to_torch_dtype,
+)
 from transformer_engine.pytorch.ops.fused import (
     BackwardLinearAdd,
     ForwardLinearBiasActivation,
@@ -1256,7 +1256,7 @@ class TestBasicOps:
         # Expected numerical error
         tols = dtype_tols(dtype)
         if quantized_compute:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+            tols = dtype_tols(y_test._quantizer.dtype)
             assert isinstance(y_test, Float8Tensor)
             y_test = y_test.dequantize(dtype=torch.float32)
             y_test = y_test.to(device="cpu")
