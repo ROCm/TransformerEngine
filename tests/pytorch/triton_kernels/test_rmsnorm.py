@@ -214,5 +214,5 @@ def test_rmsnorm_fwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma, quan
             ln_out_hipified._scale_inv,
             1e-6,
             5e-5,
-            lambda msg: f"Quantizer amax does not match triton <-> hip\n\n{msg}\n",
+            lambda msg: f"Output scale inverse does not match triton <-> hip\n\n{msg}\n",
         )
