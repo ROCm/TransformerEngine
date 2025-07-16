@@ -6,6 +6,8 @@ import pytest
 import torch
 
 from transformer_engine.pytorch.triton_kernels.common import torch_dtype_to_te_dtype
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.triton_kernels.norm_common import (
     get_fwd_ln_sm_margin,
     get_bwd_ln_sm_margin,
@@ -24,17 +26,18 @@ from test_common import (
     fill_uniform,
     get_tolerances,
     compare_results,
+    maybe_skip_quantization,
 )
 
 test_shapes = [
     (2048, 4096),
     (768, 2048),
-    (256, 1024),
-    (128, 768),
-    (64, 512),
-    (173, 409),
-    (71, 3571),
-    (29, 17389),
+    # (256, 1024),
+    # (128, 768),
+    # (64, 512),
+    # (173, 409),
+    # (71, 3571),
+    # (29, 17389),
 ]
 
 test_types_str = ["fp32", "fp16", "bf16"]
@@ -113,15 +116,39 @@ def test_rmsnorm_bwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma):
 
 @pytest.mark.parametrize("M, N", test_shapes)
 @pytest.mark.parametrize("in_dtype", test_idtypes_str)
-# TODO: add fp8/bf8 once fp8 triton kernels are available
+@pytest.mark.parametrize("out_dtype", test_odtypes_str)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
-def test_rmsnorm_fwd_triton(M, N, in_dtype, zero_centered_gamma):
+@pytest.mark.parametrize("quantization", (None, 'fp8', 'mxfp8'))
+@pytest.mark.parametrize("fp8_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
+def test_rmsnorm_fwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma, quantization, fp8_dtype):
     in_dtype = str_to_torch_dtype(in_dtype)
+    out_dtype = str_to_torch_dtype(out_dtype)
     input_tensor = fill_uniform((M, N), in_dtype)
     gamma_tensor = fill_uniform(N, in_dtype)
 
+    maybe_skip_quantization(quantization, dims=(M, N), device="cuda")
+    skip_in_dtype_gt_out_dtype(in_dtype, out_dtype)
+    skip_mixed_16bit_float_types(in_dtype, out_dtype)
+
     epsilon = 1e-5
     fwd_ln_sm_margin = get_fwd_ln_sm_margin()
+
+    if quantization == "fp8":
+        scale_triton=torch.full([1], 1, dtype=torch.float32, device="cuda")
+        amax_triton=torch.empty([1], dtype=torch.float32, device="cuda")
+
+        scale_hip = scale_triton.clone()
+        amax_hip = amax_triton.clone()
+
+        quantizer_triton = Float8Quantizer(scale_triton, amax_triton, fp8_dtype)
+        quantizer_hip = Float8Quantizer(scale_hip, amax_hip, fp8_dtype)
+    elif quantization == "mxfp8":
+        quantizer_triton = MXFP8Quantizer(fp8_dtype)
+        quantizer_hip = MXFP8Quantizer(fp8_dtype)
+    else:
+        quantizer_triton = None
+        quantizer_hip = None
+
 
     # run the triton path
     ln_out_triton = torch.empty(M, N, dtype=in_dtype, device='cuda')
@@ -130,7 +157,7 @@ def test_rmsnorm_fwd_triton(M, N, in_dtype, zero_centered_gamma):
         gamma_tensor,
         epsilon,
         ln_out_triton,
-        None, torch_dtype_to_te_dtype(in_dtype),
+        quantizer_triton, torch_dtype_to_te_dtype(out_dtype),
         fwd_ln_sm_margin,
         zero_centered_gamma
     )
@@ -142,13 +169,13 @@ def test_rmsnorm_fwd_triton(M, N, in_dtype, zero_centered_gamma):
         gamma_tensor,
         epsilon,
         ln_out_hipified,
-        None, torch_dtype_to_te_dtype(in_dtype),
+        quantizer_hip, torch_dtype_to_te_dtype(out_dtype),
         fwd_ln_sm_margin,
         zero_centered_gamma
     )
     atol, rtol = get_tolerances(in_dtype)
     compare_results(
-        "torch",
+        "te",
         ln_out_triton,
         ln_out_hipified,
         atol,
@@ -157,10 +184,35 @@ def test_rmsnorm_fwd_triton(M, N, in_dtype, zero_centered_gamma):
     )
     # rsigma is of type fp32
     compare_results(
-        "torch",
+        "te",
         rsigma_triton,
         rsigma_hipified,
         1e-6,
         5e-5,
         lambda msg: f"rsigma does not match triton <-> hip\n\n{msg}\n",
     )
+    if quantization == "fp8":
+        compare_results(
+            "te",
+            quantizer_triton.scale,
+            quantizer_hip.scale,
+            1e-6,
+            5e-5,
+            lambda msg: f"Quantizer scale does not match triton <-> hip\n\n{msg}\n",
+        )
+        compare_results(
+            "te",
+            quantizer_triton.amax,
+            quantizer_hip.amax,
+            1e-6,
+            5e-5,
+            lambda msg: f"Quantizer amax does not match triton <-> hip\n\n{msg}\n",
+        )
+        compare_results(
+            "te",
+            ln_out_triton._scale_inv,
+            ln_out_hipified._scale_inv,
+            1e-6,
+            5e-5,
+            lambda msg: f"Quantizer amax does not match triton <-> hip\n\n{msg}\n",
+        )

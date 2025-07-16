@@ -379,7 +379,10 @@ def te_rmsnorm_fwd_triton(
         if ln_out is not None:
             out = (
                 ln_out if isinstance(ln_out, Float8Tensor) else
-                quantizer.create_tensor_from_data(ln_out.view(te_dtype_to_torch_dtype(quantizer.dtype)), fake_dtype=pt_otype)
+                quantizer.create_tensor_from_data(
+                    ln_out.view(te_dtype_to_torch_dtype(quantizer.dtype)),
+                    fake_dtype=pt_otype
+                )
             )
         else:
             out = quantizer.make_empty(input.shape, dtype=pt_otype)
