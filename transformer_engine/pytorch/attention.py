@@ -156,9 +156,8 @@ else:
         _flash_attn_is_installed = True
 
     if _flash_attn_is_installed:
-        if IS_HIP_EXTENSION and (os.getenv("FLASH_ATTENTION_TRITON_AMD_ENABLE", "FALSE")=="TRUE"):
-            from flash_attn.flash_attn_triton_amd.interface_fa import varlen_bwd as flash_attn_cuda_bwd
-        else:
+        if not IS_HIP_EXTENSION:
+            #Should not be used on AMD GPUs
             from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
         from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
         from flash_attn.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd
@@ -6436,7 +6435,7 @@ class FusedAttention(torch.nn.Module):
         self.attention_dropout = attention_dropout
         self.attention_dropout_ctx = attention_dropout_ctx
         self.attention_type = attention_type
-        self.use_FAv2_bwd = os.getenv(
+        self.use_FAv2_bwd = not IS_HIP_EXTENSION and os.getenv(
             "NVTE_FUSED_ATTN_USE_FAv2_BWD", "0"
         ) == "1" and get_device_compute_capability() == (9, 0)
         self.layer_number = 1 if layer_number is None else layer_number
