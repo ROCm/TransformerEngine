@@ -24,20 +24,20 @@ from test_common import (
     skip_in_dtype_gt_out_dtype,
     skip_mixed_16bit_float_types,
     fill_uniform,
-    get_tolerances,
     compare_results,
     maybe_skip_quantization,
+    dtype_tols,
 )
 
 test_shapes = [
     (2048, 4096),
     (768, 2048),
-    # (256, 1024),
-    # (128, 768),
-    # (64, 512),
-    # (173, 409),
-    # (71, 3571),
-    # (29, 17389),
+    (256, 1024),
+    (128, 768),
+    (64, 512),
+    (173, 409),
+    (71, 3571),
+    (29, 17389),
 ]
 
 test_types_str = ["fp32", "fp16", "bf16"]
@@ -133,6 +133,18 @@ def test_rmsnorm_fwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma, quan
     epsilon = 1e-5
     fwd_ln_sm_margin = get_fwd_ln_sm_margin()
 
+    # TODO(micky774): Remove if/when the tex implementation supports kFloat8E5M2
+    if fp8_dtype == tex.DType.kFloat8E5M2:
+        if quantization == None:
+            pytest.skip(
+                "Skipping redundant test."
+            )
+        elif quantization == "fp8":
+            pytest.skip(
+                "The HIP kernel implementation does not "
+                "support FP8 quantization with fp8e5m2."
+            )
+
     if quantization == "fp8":
         scale_triton=torch.full([1], 1, dtype=torch.float32, device="cuda")
         amax_triton=torch.empty([1], dtype=torch.float32, device="cuda")
@@ -151,29 +163,29 @@ def test_rmsnorm_fwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma, quan
 
 
     # run the triton path
-    ln_out_triton = torch.empty(M, N, dtype=in_dtype, device='cuda')
     ln_out_triton, _, rsigma_triton = te_rmsnorm_fwd_triton(
         input_tensor,
         gamma_tensor,
         epsilon,
-        ln_out_triton,
+        None,
         quantizer_triton, torch_dtype_to_te_dtype(out_dtype),
         fwd_ln_sm_margin,
         zero_centered_gamma
     )
 
     # run the reference hipified kernel path
-    ln_out_hipified = torch.empty(M, N, dtype=in_dtype, device='cuda')
     ln_out_hipified, _, rsigma_hipified = tex.rmsnorm_fwd(
         input_tensor,
         gamma_tensor,
         epsilon,
-        ln_out_hipified,
+        None,
         quantizer_hip, torch_dtype_to_te_dtype(out_dtype),
         fwd_ln_sm_margin,
         zero_centered_gamma
     )
-    atol, rtol = get_tolerances(in_dtype)
+    tols = dtype_tols(out_dtype if quantization is None else fp8_dtype)
+    atol = tols["atol"]
+    rtol = tols["rtol"]
     compare_results(
         "te",
         ln_out_triton,

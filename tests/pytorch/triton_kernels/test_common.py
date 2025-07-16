@@ -47,6 +47,38 @@ def get_tolerances(dtype):
     else:
         raise RuntimeError("Invalid type")
 
+def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
+    """Estimated numerical error for a datatype
+
+    Based on tolerances for torch.testing.assert_close.
+
+    """
+
+    # Transformer Engine dtypes
+    if isinstance(dtype, tex.DType):
+        if dtype == tex.DType.kFloat8E4M3:
+            return dict(rtol=0.125, atol=0.0675)  # epsilon = 0.0625
+        if dtype == tex.DType.kFloat8E5M2:
+            return dict(rtol=0.25, atol=0.125)  # epsilon = 0.152
+        dtype = {
+            tex.DType.kByte: torch.uint8,
+            tex.DType.kInt32: torch.int32,
+            tex.DType.kFloat32: torch.float32,
+            tex.DType.kFloat16: torch.half,
+            tex.DType.kBFloat16: torch.bfloat16,
+        }[dtype]
+
+    # PyTorch dtypes
+    if dtype == torch.float16:
+        return dict(rtol=1e-3, atol=1e-5)
+    if dtype == torch.bfloat16:
+        return dict(rtol=1.6e-2, atol=1e-5)
+    if dtype == torch.float32:
+        return dict(rtol=1.3e-6, atol=1e-5)
+    if dtype == torch.float64:
+        return dict(rtol=1e-7, atol=1e-7)
+    raise ValueError(f"Unsupported dtype ({dtype})")
+
 
 # PyTorch implementation of `compareResults` C++ function from `tests/cpp/test_common.cu`.
 # Arguments:

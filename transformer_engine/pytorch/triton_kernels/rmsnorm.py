@@ -5,7 +5,6 @@ import torch
 import triton
 import triton.language as tl
 from itertools import product
-import warnings
 from .norm_common import num_programs, block_size, use_blocked
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8Tensor
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
@@ -13,7 +12,6 @@ from transformer_engine.pytorch.triton_kernels.common import (
     te_dtype_to_torch_dtype,
     te_dtype_to_triton_dtype,
 )
-from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
 
 
 def dg_tmp_rows(x, sm_margin=None):
