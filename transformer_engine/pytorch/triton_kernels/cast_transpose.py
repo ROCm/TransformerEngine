@@ -252,10 +252,14 @@ def te_cast_transpose_noop_triton(input, noop_flag, input_scale, cast_out, trans
     _cast_transpose_triton[grid](input_2d_view, noop_flag, triton.reinterpret(cast_out_2d_view, tl_dtype), triton.reinterpret(trans_out_2d_view, tl_dtype), input_stride_M, input_stride_N, trans_out_stride_M, trans_out_stride_N, num_rows, row_length, input_scale, amax_out, scale_inv_out, get_fp8_max(otype), use_noop)
 
 def te_cast_transpose_mxfp8_triton(input, out, noop_flag=None):
-    M, N = input.shape
+    row_length = input.shape[-1] if len(input.shape) > 0 else 1
+    num_rows = input.numel() // row_length
+    input_2d_view = input.reshape(num_rows, row_length)
+
     out_metadata = out.get_metadata()
-    rowwise_y_ptr = out_metadata["rowwise_data"]
-    colwise_y_ptr = out_metadata["columnwise_data"]
+    rowwise_y_ptr = out_metadata["rowwise_data"].reshape(num_rows, row_length)
+    colwise_y_ptr = out_metadata["columnwise_data"].reshape(num_rows, row_length)
+
     rowwise_scale_inv_ptr = out_metadata["rowwise_scale_inv"]
     colwise_scale_inv_ptr = out_metadata["columnwise_scale_inv"]
     fp8_dtype = out_metadata["fp8_dtype"]
@@ -266,12 +270,11 @@ def te_cast_transpose_mxfp8_triton(input, out, noop_flag=None):
     tl_dtype = te_dtype_to_triton_dtype(fp8_dtype)
     rowwise_scale_M, rowwise_scale_N = rowwise_scale_inv_ptr.shape
     colwise_scale_M, colwise_scale_N = colwise_scale_inv_ptr.shape
-
-    grid = lambda META: (triton.cdiv(M, META['BLOCK_Y']) * triton.cdiv(N, META['BLOCK_X']),)
+    grid = lambda META: (triton.cdiv(num_rows, META['BLOCK_Y']) * triton.cdiv(row_length, META['BLOCK_X']),)
     _cast_transpose_triton_mxfp8[grid](
-    input, triton.reinterpret(rowwise_y_ptr, tl_dtype), triton.reinterpret(colwise_y_ptr, tl_dtype), 
-    input.stride(0), input.stride(1), 
-    M, N, 
+    input_2d_view, triton.reinterpret(rowwise_y_ptr, tl_dtype), triton.reinterpret(colwise_y_ptr, tl_dtype), 
+    input_2d_view.stride(0), input_2d_view.stride(1), 
+    num_rows, row_length, 
     rowwise_scale_inv_ptr, rowwise_scale_inv_ptr.stride(0), rowwise_scale_inv_ptr.stride(1),
     rowwise_scale_M, rowwise_scale_N,
     colwise_scale_inv_ptr, colwise_scale_inv_ptr.stride(0), colwise_scale_inv_ptr.stride(1),
@@ -279,18 +282,25 @@ def te_cast_transpose_mxfp8_triton(input, out, noop_flag=None):
     max_fp8, BLOCK_X, BLOCK_Y, GROUP_Y, MXFP8_BLOCK_SCALING_SIZE)
 
 def te_dequantize_mxfp8_triton(input, dtype, use_rowwise_scaling=True):
+
     input_metadata = input.get_metadata()
     rowwise_x_ptr = input_metadata["rowwise_data"]
+
+    row_length = rowwise_x_ptr.shape[-1] if len(rowwise_x_ptr.shape) > 0 else 1
+    num_rows = rowwise_x_ptr.numel() // row_length
+    rowwise_x_ptr_2d_view = rowwise_x_ptr.reshape(num_rows, row_length)
+
     colwise_x_ptr = input_metadata["columnwise_data"]
+    colwise_x_ptr_2d_view = colwise_x_ptr.reshape(num_rows, row_length)
+
     rowwise_scale_inv_ptr = input_metadata["rowwise_scale_inv"]
     colwise_scale_inv_ptr = input_metadata["columnwise_scale_inv"]
     fp8_dtype = input_metadata["fp8_dtype"]
 
-    M, N = rowwise_x_ptr.shape
-    out = torch.zeros((M, N), dtype=dtype, device=rowwise_x_ptr.device)
+    out = torch.zeros(input.shape, dtype=dtype, device=rowwise_x_ptr.device)
 
     # use_rowwise_scaling = rowwise_x_ptr is not None
-    x_ptr = rowwise_x_ptr if use_rowwise_scaling else colwise_x_ptr
+    x_ptr = rowwise_x_ptr_2d_view if use_rowwise_scaling else colwise_x_ptr_2d_view
     scale_inv_ptr = rowwise_scale_inv_ptr if use_rowwise_scaling else colwise_scale_inv_ptr
     scale_M, scale_N = rowwise_scale_inv_ptr.shape if use_rowwise_scaling else colwise_scale_inv_ptr.shape
     
@@ -299,11 +309,11 @@ def te_dequantize_mxfp8_triton(input, dtype, use_rowwise_scaling=True):
     GROUP_Y = MXFP8_BLOCK_SCALING_SIZE
     tl_dtype = te_dtype_to_triton_dtype(fp8_dtype)
 
-    grid = lambda META: (triton.cdiv(M, META['BLOCK_Y']) * triton.cdiv(N, META['BLOCK_X']),)
+    grid = lambda META: (triton.cdiv(num_rows, META['BLOCK_Y']) * triton.cdiv(row_length, META['BLOCK_X']),)
     _dequantize_mxfp8_triton[grid](
     triton.reinterpret(x_ptr, tl_dtype), out,
     x_ptr.stride(0), x_ptr.stride(1), 
-    M, N, 
+    num_rows, row_length, 
     scale_inv_ptr, scale_inv_ptr.stride(0), scale_inv_ptr.stride(1),
     scale_M, scale_N,
     BLOCK_X, BLOCK_Y, GROUP_Y, use_rowwise_scaling, MXFP8_BLOCK_SCALING_SIZE)
@@ -423,5 +433,3 @@ def te_cast_transpose_dbias_triton(input, input_scale, amax_out, scale_inv_out, 
 
     dbias_out = reduce_dbias_kernel(partial_dbias[0:triton.cdiv(M, block_m_1)], input.dtype)
     return dbias_out, cast_out, trans_out
-
-    

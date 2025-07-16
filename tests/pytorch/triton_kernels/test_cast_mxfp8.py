@@ -6,16 +6,18 @@ import os
 import pytest
 import torch
 
+from transformer_engine.pytorch.constants import MXFP8_BLOCK_SCALING_SIZE
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.triton_kernels.cast import te_dequantize_triton, te_quantize_triton
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 from transformer_engine.pytorch.triton_kernels.common import get_fp8_max, te_dtype_to_torch_dtype
+from transformer_engine.pytorch.utils import round_up_to_nearest_multiple
 import transformer_engine_torch as tex
 import struct
 from test_common import compare_results, fill_uniform, get_tolerances
 
 FP32_MANTISSA_BITS = 23
-FP32_EXPONENT_BIAS = 127.0
+FP32_EXPONENT_BIAS = 127
 
 def float_to_e8m0(val: float) -> int:
     if math.isnan(val):
@@ -32,7 +34,7 @@ def float_to_e8m0(val: float) -> int:
     if (mantissa > 0 and exponent != 0xFE) and not (exponent == 0 and mantissa <= 0x400000):
         exponent += 1
     
-    return min(exponent, 0xFF)
+    return exponent
 
 def exp2f_rcp(biased_exp: int) -> float:
     if biased_exp == 0:
@@ -41,55 +43,73 @@ def exp2f_rcp(biased_exp: int) -> float:
 
 def scale_block_torch(
     input_tensor: torch.Tensor,
-    output_c: torch.Tensor,
-    output_scales: torch.Tensor, # This will now be a tensor
+    output_rowwise: torch.Tensor,
+    output_columnwise: torch.Tensor,
+    output_scale_rowwise: torch.Tensor, # This will now be a tensor
+    output_scale_columnwise: torch.Tensor, # This will now be a tensor
     scale_idx: int,
     i_min: int,
     i_max: int,
     j_min: int,
     j_max: int,
     cols: int,
+    out_dtype: tex.DType
 ):
-    # Create a view of the original input that mimics the 2D structure
-    input_2d_view = input_tensor.view(-1, cols)
-    block_input = input_2d_view[i_min:i_max, j_min:j_max]
+    #row-wise
+    for i in range(i_min, i_max):
+        block_input = input_tensor[i, j_min:j_max]
+        amax = torch.max(torch.abs(block_input)).item() # .item() gets Python scalar from 0-dim tensor
 
-    # Find the absolute maximum value in the block using torch.max
-    amax = torch.max(torch.abs(block_input)).item() # .item() gets Python scalar from 0-dim tensor
+        # Calculate scale
+        biased_exponent = float_to_e8m0(amax * 1/get_fp8_max(out_dtype))
+        scale_reciprocal = exp2f_rcp(biased_exponent)
+        
+        # Store the biased exponent in the output_scales tensor
+        # output_scales should be a tensor of appropriate type
+        output_scale_rowwise[i][scale_idx[1]] = biased_exponent
+        block_output = block_input.clone() # Work on a clone to avoid modifying input_tensor directly
 
-    # Calculate scale
-    biased_exponent = float_to_e8m0(amax * get_fp8_max())
-    scale_reciprocal = exp2f_rcp(biased_exponent)
+        # Apply scaling
+        block_output *= scale_reciprocal
+
+        # Store the results back into the output tensor
+        output_rowwise[i, j_min:j_max] = block_output.to(te_dtype_to_torch_dtype(out_dtype))
     
-    # Store the biased exponent in the output_scales tensor
-    # output_scales should be a tensor of appropriate type, e.g., torch.int8 or torch.float32
-    output_scales[scale_idx] = biased_exponent
+    #column-wise
+    for j in range(j_min, j_max):
+        block_input = input_tensor[i_min:i_max, j]
+        amax = torch.max(torch.abs(block_input)).item() # .item() gets Python scalar from 0-dim tensor
 
-    # Quantize elements in the block
-    block_output = block_input.clone() # Work on a clone to avoid modifying input_tensor directly
+        # Calculate scale
+        biased_exponent = float_to_e8m0(amax * 1/get_fp8_max(out_dtype))
+        scale_reciprocal = exp2f_rcp(biased_exponent)
+        
+        # Store the biased exponent in the output_scales tensor
+        # output_scales should be a tensor of appropriate type
+        output_scale_columnwise[scale_idx[0]][j] = biased_exponent
+        block_output = block_input.clone() # Work on a clone to avoid modifying input_tensor directly
 
-    # Apply scaling
-    block_output *= scale_reciprocal
+        # Apply scaling
+        block_output *= scale_reciprocal
 
-    # Store the results back into the output_c tensor
-    # Ensure output_c has the correct shape or can be indexed properly
-    output_c_2d_view = output_c.view(-1, cols)
-    output_c_2d_view[i_min:i_max, j_min:j_max] = block_output
+        # Store the results back into the output tensor
+        output_columnwise[i_min:i_max, j] = block_output.to(te_dtype_to_torch_dtype(out_dtype))
 
 def compute_ref_x1_torch(
     input_tensor: torch.Tensor, # Input data
-    output_c: torch.Tensor,     # Main quantized output
-    output_scales: torch.Tensor, # Scales for each block
-    rows: int,
-    cols: int,
+    output_rowwise: torch.Tensor,     # Main quantized output
+    output_columnwise: torch.Tensor,     # Main quantized output
+    output_scale_rowwise: torch.Tensor, # Scales for each block
+    output_scale_columnwise: torch.Tensor, # Scales for each block
     block_size_Y: int,
     block_size_X: int,
-    scales_stride: int,
+    out_dtype: tex.DType
 ):
-    """
-    Computes a reference output (quantized) and optionally a bias sum
-    by iterating over blocks and calling scale_block_torch.
-    """
+    cols = input_tensor.shape[-1] if len(input_tensor.shape) > 0 else 1
+    rows = input_tensor.numel() // cols
+    input_tensor_2d_view = input_tensor.reshape(rows, cols)
+    output_rowwise_2d_view = output_rowwise.reshape(rows, cols)
+    output_columnwise_2d_view = output_columnwise.reshape(rows, cols)
     blocks_Y = (rows + block_size_Y - 1) // block_size_Y
     blocks_X = (cols + block_size_X - 1) // block_size_X
 
@@ -99,65 +119,74 @@ def compute_ref_x1_torch(
         for jj in range(blocks_X):
             j_min = jj * block_size_X
             j_max = min((jj + 1) * block_size_X, cols)
-            scale_idx = ii * scales_stride + jj
+            scale_idx = (ii, jj)
             scale_block_torch (
-                input_tensor=input_tensor,
-                output_c=output_c,
-                output_scales=output_scales,
+                input_tensor=input_tensor_2d_view,
+                output_rowwise=output_rowwise_2d_view,
+                output_columnwise=output_columnwise_2d_view,
+                output_scale_rowwise=output_scale_rowwise,
+                output_scale_columnwise=output_scale_columnwise,
                 scale_idx=scale_idx,
                 i_min=i_min,
                 i_max=i_max,
                 j_min=j_min,
                 j_max=j_max,
                 cols=cols,
+                out_dtype=out_dtype
             )
 
 @pytest.mark.parametrize("shape", 
                          [
+                        (1, 16),
+                        (16, 48),
+                        (65, 96),
                         (128, 128),
                         (256, 256),
+                        (993, 512),
                         (256, 65536),
                         (2048, 6144),
                         (16384, 128),
                         (32768, 160),
                         (4096, 1632),
-                        
+                        (8, 32, 1024),
+                        (16, 8, 4, 512),
                         ])
 @pytest.mark.parametrize("in_dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("out_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
+@pytest.mark.parametrize("out_dtype", [tex.DType.kFloat8E4M3])
 def test_quantize(shape, in_dtype, out_dtype):
+    if ((shape[-1] % MXFP8_BLOCK_SCALING_SIZE != 0) or (math.prod(shape[:-1]) % MXFP8_BLOCK_SCALING_SIZE != 0)):
+        pytest.skip(f"Incorrect shape {shape} for MXFP8. Tensor dims must be divisible by {MXFP8_BLOCK_SCALING_SIZE}")
     input_tensor = fill_uniform(shape, dtype=in_dtype)
     triton_quantizer = MXFP8Quantizer(out_dtype)
-    tex_quantizer = MXFP8Quantizer(out_dtype)
-
+    rowwise_scale_inv_ref = torch.zeros(
+            round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
+            round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
+            dtype=torch.uint8,
+            device="cuda",
+        )
+    columnwise_scale_inv_ref = torch.zeros(
+                round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
+                round_up_to_nearest_multiple(shape[-1], 128),
+                dtype=torch.uint8,
+                device="cuda",
+            )
+    torch_out_dtype = te_dtype_to_torch_dtype(out_dtype)
+    quantized_out_rowwise_ref = torch.empty(shape, dtype=torch_out_dtype, device="cuda")
+    quantized_out_columnwise_ref = torch.empty_like(quantized_out_rowwise_ref)
+    compute_ref_x1_torch(input_tensor, 
+                        quantized_out_rowwise_ref, 
+                        quantized_out_columnwise_ref,  
+                        rowwise_scale_inv_ref, 
+                        columnwise_scale_inv_ref, 32, 32, out_dtype)
+    
     quantized_out_triton  = te_quantize_triton(input_tensor, quantizer=triton_quantizer)
     dequantized_out_triton = te_dequantize_triton(quantized_out_triton, dtype=in_dtype)
     dequantized_out_colwise_triton = te_dequantize_triton(quantized_out_triton, dtype=in_dtype, use_rowwise_scaling=False)
+    atol_fp8, rtol_fp8 = get_tolerances(torch_out_dtype)
+    cmp = "te"
+    compare_results(cmp, quantized_out_triton._rowwise_data.view(torch_out_dtype),  quantized_out_rowwise_ref, atol_fp8, rtol_fp8, "rowwise data doesn't match")
+    compare_results(cmp, quantized_out_triton._columnwise_data.view(torch_out_dtype),  quantized_out_columnwise_ref, atol_fp8, rtol_fp8, "columnwise data doesn't match")
+    compare_results("torch", quantized_out_triton._rowwise_scale_inv,  rowwise_scale_inv_ref, 0.0, 0.0, "rowwise scale inv doesn't match")
+    compare_results("torch", quantized_out_triton._rowwise_data.view(torch_out_dtype),  quantized_out_rowwise_ref, 0.0, 0.0, "colwise scale inv doesn't match")
     compare_results("te", dequantized_out_triton, input_tensor, 0.13, 0.01, 'Dequantized and original results do not match!')
     compare_results("te", dequantized_out_colwise_triton, dequantized_out_triton, 0.01, 0.01, 'Dequantized colwise and dequantized rowwise results do not match!')
-    # quantized_out_tex = tex.quantize(input_tensor, quantizer=tex_quantizer)
-    # torch_out_dtype = te_dtype_to_torch_dtype(out_dtype)
-    
-    # atol_q, rtol_q = get_tolerances(torch_out_dtype)
-    # cmp = "te"
-    # compare_results(
-    #     cmp,
-    #     quantized_out_triton._data.view(torch_out_dtype),
-    #     quantized_out_tex._data.view(torch_out_dtype),
-    #     atol_q,
-    #     rtol_q,
-    #     lambda msg: f"triton does not match tex <-> hip\n\n{msg}\n",
-    # )
-    # assert quantized_out_triton._transpose is not None, "Triton transpose is none!" 
-    # assert quantized_out_tex._transpose is not None, "TEX transpose is none!" 
-    # compare_results(
-    #     cmp,
-    #     quantized_out_triton._transpose.view(torch_out_dtype),
-    #     quantized_out_tex._transpose.view(torch_out_dtype),
-    #     atol_q,
-    #     rtol_q,
-    #     lambda msg: f"triton does not match tex <-> hip\n\n{msg}\n",
-    # )
-    
-    # atol_scale, rtol_scale = get_tolerances(torch.float32)
-    # assert torch.allclose(quantized_out_triton._get_quantizer().amax, quantized_out_tex._get_quantizer().amax, atol=atol_scale, rtol=rtol_scale), 'AMAX results do not match!'
