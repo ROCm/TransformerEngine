@@ -111,11 +111,15 @@ def te_quantize_triton(
                 out = tex.quantize(input_tensor, quantizer, out, noop_flag)
     elif isinstance(out, MXFP8TensorBase):
         te_cast_transpose_mxfp8_triton(input_tensor, out)
-        # out = tex.quantize(input_tensor, quantizer, out, noop_flag)
     else:
         raise NotImplementedError(f"Not implemented for tensor type: '{type(out).__name__}'")
 
     return out
 
 def te_dequantize_triton(input, dtype=torch.float32, use_rowwise_scaling=True):
-    return te_dequantize_mxfp8_triton(input, dtype, use_rowwise_scaling)
+    if isinstance(input, MXFP8TensorBase):
+        return te_dequantize_mxfp8_triton(input, dtype, use_rowwise_scaling)
+    elif isinstance(input, Float8TensorBase):
+        return tex.dequantize(input, dtype)
+    else:
+        raise NotImplementedError(f"Not implemented for tensor type: '{type(input).__name__}'")

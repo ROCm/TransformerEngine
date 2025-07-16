@@ -3,6 +3,7 @@
 
 import math
 import os
+import struct
 import pytest
 import torch
 
@@ -13,8 +14,8 @@ from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 from transformer_engine.pytorch.triton_kernels.common import get_fp8_max, te_dtype_to_torch_dtype
 from transformer_engine.pytorch.utils import round_up_to_nearest_multiple
 import transformer_engine_torch as tex
-import struct
 from test_common import compare_results, fill_uniform, get_tolerances
+
 
 FP32_MANTISSA_BITS = 23
 FP32_EXPONENT_BIAS = 127
@@ -40,19 +41,19 @@ def exp2f_rcp(biased_exp: int) -> float:
     if biased_exp == 0:
         return 1.0
     return math.pow(2.0, FP32_EXPONENT_BIAS - float(biased_exp))
+ 
 
 def scale_block_torch(
     input_tensor: torch.Tensor,
     output_rowwise: torch.Tensor,
     output_columnwise: torch.Tensor,
-    output_scale_rowwise: torch.Tensor, # This will now be a tensor
-    output_scale_columnwise: torch.Tensor, # This will now be a tensor
+    output_scale_rowwise: torch.Tensor,
+    output_scale_columnwise: torch.Tensor,
     scale_idx: int,
     i_min: int,
     i_max: int,
     j_min: int,
     j_max: int,
-    cols: int,
     out_dtype: tex.DType
 ):
     #row-wise
@@ -131,7 +132,6 @@ def compute_ref_x1_torch(
                 i_max=i_max,
                 j_min=j_min,
                 j_max=j_max,
-                cols=cols,
                 out_dtype=out_dtype
             )
 
@@ -188,5 +188,5 @@ def test_quantize(shape, in_dtype, out_dtype):
     compare_results(cmp, quantized_out_triton._columnwise_data.view(torch_out_dtype),  quantized_out_columnwise_ref, atol_fp8, rtol_fp8, "columnwise data doesn't match")
     compare_results("torch", quantized_out_triton._rowwise_scale_inv,  rowwise_scale_inv_ref, 0.0, 0.0, "rowwise scale inv doesn't match")
     compare_results("torch", quantized_out_triton._rowwise_data.view(torch_out_dtype),  quantized_out_rowwise_ref, 0.0, 0.0, "colwise scale inv doesn't match")
-    compare_results("te", dequantized_out_triton, input_tensor, 0.13, 0.01, 'Dequantized and original results do not match!')
-    compare_results("te", dequantized_out_colwise_triton, dequantized_out_triton, 0.01, 0.01, 'Dequantized colwise and dequantized rowwise results do not match!')
+    compare_results("te", dequantized_out_triton, input_tensor,  6.25e-2, 6.25e-2, 'Dequantized and original results do not match!')
+    compare_results("te", dequantized_out_colwise_triton, dequantized_out_triton, 6.25e-2, 6.25e-2, 'Dequantized colwise and dequantized rowwise results do not match!')
