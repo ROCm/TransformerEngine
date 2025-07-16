@@ -542,9 +542,7 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
 
     # For MXFP8, we do regular layernorm and then quantize it separately
     if isinstance(quantizer, MXFP8Quantizer):
-        use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
-        quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
-        ln_out = quantize_func(ln_out)
+        ln_out = te_quantize_triton(ln_out, quantizer)
     
     # Reduce and find amax if "not APPLY_ATOMIC" is True.
     if IS_FP8 and not APPLY_ATOMIC:
