@@ -99,11 +99,7 @@ _flash_attn_varlen_bwd = None
 try:
     fa_utils.version = PkgVersion(get_pkg_version("flash-attn"))
 except PackageNotFoundError:
-    if torch.cuda.is_available() and (IS_HIP_EXTENSION or get_device_compute_capability() >= (8, 0)) and _NVTE_FLASH_ATTN:
-        fa_logger.debug(
-            "flash-attn v2 is not installed. To use, please install it by"
-            """ "pip install flash-attn".""",
-        )
+    pass # only print warning if use_flash_attention_2 = True in get_attention_backend
 else:
     if torch.cuda.is_available() and ( (not IS_HIP_EXTENSION) and get_device_compute_capability() >= (10, 0)):
         if fa_utils.version_required_blackwell <= fa_utils.version <= fa_utils.max_version:

@@ -18,8 +18,8 @@ from jax import dtypes, lax
 from jax.interpreters import mlir
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
-import transformer_engine_jax
-from transformer_engine_jax import NVTE_Fused_Attn_Backend
+from transformer_engine import transformer_engine_jax
+from  transformer_engine.transformer_engine_jax import NVTE_Fused_Attn_Backend
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
@@ -30,11 +30,6 @@ from transformer_engine.jax.attention import (
 )
 
 from .misc import is_hip_extension
-#TODO: wait for jax v0.5.0 migration
-if is_hip_extension() and jax.__version__ < "0.5.0":
-    from jax.extend import ffi
-else:
-    from jax import ffi
 from .base import BasePrimitive, register_primitive
 from .custom_call import custom_caller, CustomCallArgsWrapper
 from .misc import (

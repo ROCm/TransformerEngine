@@ -424,7 +424,7 @@ void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream) {
   }
   // Set amax to 0 if allocated
   if (t.amax.dptr != nullptr) {
-    cudaMemsetAsync(t.amax.dptr, 0, sizeof(float), stream);
+    (void)cudaMemsetAsync(t.amax.dptr, 0, sizeof(float), stream);
   }
 }
 

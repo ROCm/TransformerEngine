@@ -18,8 +18,8 @@ import jax.numpy as jnp
 from jax import dtypes
 from jax.interpreters.mlir import dtype_to_ir_type
 
-from transformer_engine_jax import DType as TEDType
-import transformer_engine_jax
+from transformer_engine.transformer_engine_jax import DType as TEDType
+from transformer_engine import transformer_engine_jax
 
 from ..fp8 import get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
 from ..sharding import get_padded_spec as te_get_padded_spec
