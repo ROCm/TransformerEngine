@@ -485,10 +485,8 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
             ln_out = quantizer.make_empty((M, N),  dtype=torch_out_dtype)
             ln_out._transpose = None
             ln_out._transpose_invalid = True
-        else:
-            ln_out = quantizer.create_tensor_from_data(ln_out, fake_dtype=torch_out_dtype)
-    
-    # To updaet the amax ptr directly with atomic max
+        
+    # To update the amax ptr directly with atomic max
     APPLY_ATOMIC = M < 512
 
     # MXFP8 is handled regularly, hence quantizer of Float8Quantizer is considered FP8
