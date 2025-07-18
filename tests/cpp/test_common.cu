@@ -712,9 +712,9 @@ void fillUniform(Tensor *t) {
       }
     );
   }
+  t->from_cpu();
   std::uniform_real_distribution<> dis(-2.0, 1.0);
   t->set_scale_inv(dis(t->gen()));
-  t->from_cpu();
 }
 
 template<typename InputEncoding, InputsFillCase Case>

@@ -143,16 +143,16 @@ class Tensor {
       columnwise_scale_inv = nullptr;
     }
     if (data_ptr != nullptr) {
-      cudaFree(data_ptr);
+      (void)cudaFree(data_ptr);
     }
     if (scale_inv != nullptr) {
-      cudaFree(scale_inv);
+      (void)cudaFree(scale_inv);
     }
     if (columnwise_data_ptr != nullptr){
-      cudaFree(columnwise_data_ptr);
+      (void)cudaFree(columnwise_data_ptr);
     }
     if (columnwise_scale_inv != nullptr){
-      cudaFree(columnwise_scale_inv);
+      (void)cudaFree(columnwise_scale_inv);
     }
   }
 
