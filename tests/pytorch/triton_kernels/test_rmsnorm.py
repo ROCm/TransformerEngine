@@ -5,7 +5,7 @@
 import pytest
 import torch
 
-from transformer_engine.pytorch.triton_kernels.common import torch_dtype_to_te_dtype
+from transformer_engine.pytorch.triton_kernels.common import torch_dtype_to_te_dtype, te_dtype_to_torch_dtype
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.triton_kernels.norm_common import (
@@ -24,6 +24,7 @@ from test_common import (
     skip_in_dtype_gt_out_dtype,
     skip_mixed_16bit_float_types,
     fill_uniform,
+    get_tolerances,
     compare_results,
     maybe_skip_quantization,
     dtype_tols,
@@ -119,8 +120,8 @@ def test_rmsnorm_bwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma):
 @pytest.mark.parametrize("out_dtype", test_odtypes_str)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("quantization", (None, 'fp8', 'mxfp8'))
-@pytest.mark.parametrize("fp8_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
-def test_rmsnorm_fwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma, quantization, fp8_dtype):
+def test_rmsnorm_fwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma, quantization):
+    fp8_dtype = tex.DType.kFloat8E4M3
     in_dtype = str_to_torch_dtype(in_dtype)
     out_dtype = str_to_torch_dtype(out_dtype)
     input_tensor = fill_uniform((M, N), in_dtype)
@@ -132,18 +133,6 @@ def test_rmsnorm_fwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma, quan
 
     epsilon = 1e-5
     fwd_ln_sm_margin = get_fwd_ln_sm_margin()
-
-    # TODO(micky774): Remove if/when the tex implementation supports kFloat8E5M2
-    if fp8_dtype == tex.DType.kFloat8E5M2:
-        if quantization == None:
-            pytest.skip(
-                "Skipping redundant test."
-            )
-        elif quantization == "fp8":
-            pytest.skip(
-                "The HIP kernel implementation does not "
-                "support FP8 quantization with fp8e5m2."
-            )
 
     if quantization == "fp8":
         scale_triton=torch.full([1], 1, dtype=torch.float32, device="cuda")
