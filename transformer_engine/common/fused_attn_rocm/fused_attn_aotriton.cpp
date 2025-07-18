@@ -215,6 +215,7 @@ void fused_attn_aotriton_fwd_impl(
   auto seed_output = mk_aoscalartensor(nullptr);
   auto offset_output = mk_aoscalartensor(nullptr);
   const auto is_causal = mask_type == NVTE_CAUSAL_MASK;
+  auto atomic_for_causal = aotriton::TensorView<0>::get_null_tensor(aotriton::DType::kInt32);;
   NVTE_CHECK_CUDA(attn_fwd(q_tensor,
                            k_tensor,
                            v_tensor,
@@ -230,6 +231,7 @@ void fused_attn_aotriton_fwd_impl(
                            offset_output,
                            encoded_softmax_tensor,
                            is_causal,
+                           atomic_for_causal,
                            stream));
 }
 
