@@ -45,13 +45,6 @@ bool is_ck_backend_supported(
   
   // single filters
   
-  // aiter currently does not support MLA yet
-  if (head_dim_qk != head_dim_v) {
-    if(nvte_log_ck_config){
-       std::cout<<"head_dim_qk must be equal to head_dim_v"<<std::endl;
-    }
-    return false;
-  }
   // filter based on num_heads and num_gqa_groups
   if(num_gqa_groups == 0 || num_attn_heads%num_gqa_groups != 0){
     if(nvte_log_ck_config){
