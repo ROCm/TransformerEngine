@@ -475,8 +475,6 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
     mu = torch.empty((M,), dtype=torch.float32, device=device)
     rsigma = torch.empty((M,), dtype=torch.float32, device=device)
     torch_out_dtype = te_dtype_to_torch_dtype(out_dtype)
-    tl_dtype = te_dtype_to_triton_dtype(out_dtype)
-
     # Create ln_out
     if quantizer is None or isinstance(quantizer, MXFP8Quantizer):
         ln_out = torch.empty(M, N, dtype=torch_out_dtype, device=device)
@@ -485,7 +483,8 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
             ln_out = quantizer.make_empty((M, N),  dtype=torch_out_dtype)
             ln_out._transpose = None
             ln_out._transpose_invalid = True
-        
+        else:
+            ln_out = quantizer.create_tensor_from_data(ln_out._data)
     # To update the amax ptr directly with atomic max
     APPLY_ATOMIC = M < 512
 
@@ -511,7 +510,7 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
     
     _layernorm_fwd_triton[(M,)](
         input,
-        triton.reinterpret(cast_out, tl_dtype),
+        triton.reinterpret(cast_out, te_dtype_to_triton_dtype(ln_out._fp8_dtype)) if IS_FP8 else cast_out,
         weight,
         bias,
         mu,
@@ -520,7 +519,7 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
         amax_out if APPLY_ATOMIC else amax_temp,
         scale_inv,
         input.stride(0),
-        ln_out.stride(0),
+        cast_out.stride(0),
         M,
         N,
         eps,
