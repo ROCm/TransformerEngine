@@ -178,12 +178,19 @@ class FP8Helper:
     """
     FP8 helper to manage the FP8 meta
     """
+    class dtype_getter:
+        def __init__(self, id):
+            self.id = id
+
+        def __get__(self, obj, objtype=None) -> DType:
+            return _format2dtypes(FP8Helper.FP8_FORMAT)[self.id]
+
 
     INITIALIZED = False
     MARGIN: float = 0.0
     FP8_FORMAT: Format = Format.HYBRID
-    FWD_DTYPE: DType = _format2dtypes(Format.HYBRID)[0]
-    BWD_DTYPE: DType = _format2dtypes(Format.HYBRID)[1]
+    FWD_DTYPE = dtype_getter(0)
+    BWD_DTYPE = dtype_getter(1)
     AMAX_HISTORY_LEN: int = 1024
     AMAX_COMPUTE_ALGO: AmaxComputeAlgo = AmaxComputeAlgo.MAX
     FP8_COLLECTION_NAME: str = NVTE_FP8_COLLECTION_NAME
@@ -213,7 +220,6 @@ class FP8Helper:
         FP8Helper.INITIALIZED = True
         FP8Helper.MARGIN = margin
         FP8Helper.FP8_FORMAT = fp8_format
-        FP8Helper.FWD_DTYPE, FP8Helper.BWD_DTYPE = _format2dtypes(FP8Helper.FP8_FORMAT)
         FP8Helper.AMAX_HISTORY_LEN = amax_history_len
         FP8Helper.AMAX_COMPUTE_ALGO = amax_compute_algo
         FP8Helper.FP8_2X_ACC_FPROP = False
@@ -228,7 +234,6 @@ class FP8Helper:
         FP8Helper.INITIALIZED = False
         FP8Helper.MARGIN = 0.0
         FP8Helper.FP8_FORMAT = Format.HYBRID
-        FP8Helper.FWD_DTYPE, FP8Helper.BWD_DTYPE = _format2dtypes(FP8Helper.FP8_FORMAT)
         FP8Helper.AMAX_HISTORY_LEN = 1024
         FP8Helper.AMAX_COMPUTE_ALGO = AmaxComputeAlgo.MAX
 

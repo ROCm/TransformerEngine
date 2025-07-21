@@ -257,7 +257,7 @@ def sanity_checks(
                 rel_fwd = abs(f_fwd - c_fwd) / max(f_fwd, c_fwd)
                 rel_bwd = abs(f_bwd - c_bwd) / max(f_bwd, c_bwd)
                 if rel_fwd < tol and rel_bwd < tol:
-                    print(f"  [OK ] Fused vs CK diff ≤ {tolerance_pct}% "
+                    print(f"  [OK ] Fused vs CK diff <= {tolerance_pct}% "
                           f"(fwd {rel_fwd*100:.2f} %, bwd {rel_bwd*100:.2f} %)")
                 else:
                     ok_overall = False

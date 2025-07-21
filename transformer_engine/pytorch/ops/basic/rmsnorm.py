@@ -17,8 +17,10 @@ import torch
 from transformer_engine_torch import rmsnorm_bwd, rmsnorm_fwd
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 if IS_HIP_EXTENSION:
-    # TODO: bring back te_rmsnorm_fwd_triton after refactoring
-    from ...triton_kernels.rmsnorm import te_rmsnorm_bwd_triton
+    from ...triton_kernels.rmsnorm import (
+        te_rmsnorm_bwd_triton,
+        te_rmsnorm_fwd_triton
+    )
 from ...fp8 import FP8GlobalStateManager
 from ...tensor import QuantizedTensor
 from ...constants import TE_DType
@@ -83,6 +85,7 @@ class RMSNorm(BasicOperation):
         super().__init__()
         self.eps: float = eps
         self.zero_centered_gamma: bool = zero_centered_gamma
+        self.use_rmsnorm_triton = bool(int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0'))) and IS_HIP_EXTENSION
 
         # Parameter shape
         if not isinstance(normalized_shape, Iterable):
@@ -205,8 +208,9 @@ class RMSNorm(BasicOperation):
 
         # Compute RMSNorm
         sm_margin = self._sm_margins["forward" if requires_grad else "inference"]
-        # Compute RMSNorm backward pass
-        y, _, rstdevs = rmsnorm_fwd(
+        # Compute RMSNorm forward pass
+        rmsnorm_fwd_func = te_rmsnorm_fwd_triton if self.use_rmsnorm_triton else rmsnorm_fwd
+        y, _, rstdevs = rmsnorm_fwd_func(
             x,
             w,
             self.eps,
@@ -252,8 +256,7 @@ class RMSNorm(BasicOperation):
             dy = dy.dequantize()
 
         # Compute RMSNorm backward pass
-        use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
-        rmsnorm_bwd_func = te_rmsnorm_bwd_triton if use_rmsnorm_triton else rmsnorm_bwd
+        rmsnorm_bwd_func = te_rmsnorm_bwd_triton if self.use_rmsnorm_triton else rmsnorm_bwd
         
         dx, dw = rmsnorm_bwd_func(
             dy,
