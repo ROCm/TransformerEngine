@@ -1,19 +1,16 @@
 # Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
-import os
 import torch
 import triton
 import triton.language as tl
-from transformer_engine import pytorch as te
 import transformer_engine_torch as tex
-from ..utils import is_fp8_fnuz
 
 def is_cdna4():
     return triton.runtime.driver.active.get_current_target().arch == "gfx950"
 
-torch_e4m3_type = torch.float8_e4m3fn if is_cdna4() else torch.float8_e4m3fnuz
-torch_e5m2_type = torch.float8_e5m2 if is_cdna4() else torch.float8_e5m2fnuz
+get_torch_e4m3_type = lambda: torch.float8_e4m3fn if is_cdna4() else torch.float8_e4m3fnuz
+get_torch_e5m2_type = lambda: torch.float8_e5m2 if is_cdna4() else torch.float8_e5m2fnuz
 
 # Convert te dtype to torch type.
 def te_dtype_to_torch_dtype(te_dtype):
@@ -23,8 +20,8 @@ def te_dtype_to_torch_dtype(te_dtype):
         tex.DType.kFloat32: torch.float32, 
         tex.DType.kFloat16: torch.float16, 
         tex.DType.kBFloat16: torch.bfloat16, 
-        tex.DType.kFloat8E4M3: torch_e4m3_type, 
-        tex.DType.kFloat8E5M2: torch_e5m2_type, 
+        tex.DType.kFloat8E4M3: get_torch_e4m3_type(), 
+        tex.DType.kFloat8E5M2: get_torch_e5m2_type(), 
     }[te_dtype]
 
 # Convert PyTorch type to TE type.
@@ -81,13 +78,13 @@ def enum_value_to_te_dtype(te_dtype_enum):
     }[te_dtype_enum]
 
 def is_fp8_torch_dtype(dtype):
-    return (dtype == torch_e4m3_type) or (dtype == torch_e5m2_type)
+    return dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz)
 
 def te_dtype_to_triton_dtype(dtype: tex.DType):
     if dtype == tex.DType.kFloat8E4M3:
-        return tl.float8e4b8 if is_fp8_fnuz() else tl.float8e4nv
+        return tl.float8e4b8 if not is_cdna4() else tl.float8e4nv
     if dtype == tex.DType.kFloat8E5M2:
-        return tl.float8e5b16 if is_fp8_fnuz() else tl.float8e5
+        return tl.float8e5b16 if not is_cdna4() else tl.float8e5
     if dtype == tex.DType.kFloat32:
         return tl.float32
     if dtype == tex.DType.kFloat16:
@@ -97,7 +94,7 @@ def te_dtype_to_triton_dtype(dtype: tex.DType):
 
 def get_fp8_max(dtype: tex.DType):
     if dtype == tex.DType.kFloat8E4M3:
-        return 240.0 if is_fp8_fnuz() else 448.0
+        return 240.0 if not is_cdna4() else 448.0
     if dtype == tex.DType.kFloat8E5M2:
         return 57344.0
 
