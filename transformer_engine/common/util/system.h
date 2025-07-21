@@ -101,22 +101,5 @@ inline bool file_exists(const std::string &path) {
   return std::filesystem::exists(path) && std::filesystem::is_regular_file(path);
 }
 
-extern "C" inline bool nvte_is_rocm_build() noexcept{
-#ifdef USE_ROCM
-  return true;
-#else
-  return false;
-#endif
-}
-
-#ifdef USE_ROCM
-extern "C" inline bool nvte_uses_fp8_fnuz() noexcept {
-#if HIP_VERSION >= 60300000
-  return te_fp8_fnuz();
-#endif
-  return true; // default to true for older versions compatibility
-}
-#endif
-
 }  // namespace transformer_engine
 #endif  // TRANSFORMER_ENGINE_COMMON_UTIL_SYSTEM_H_
