@@ -346,7 +346,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .value("GRAD_OUTPUT3", transformer_engine::FP8BwdTensors::GRAD_OUTPUT3)
       .value("GRAD_INPUT3", transformer_engine::FP8BwdTensors::GRAD_INPUT3);
 
-#ifndef USE_ROCM
   py::class_<CommOverlapHelper>(m, "CommOverlapHelper")
       .def(py::init<>(), py::call_guard<py::gil_scoped_release>())
       .def(py::init<c10d::ProcessGroup *, std::optional<c10d::ProcessGroup *>,
@@ -407,10 +406,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::call_guard<py::gil_scoped_release>())
       .def("is_p2p_overlap", &CommOverlapP2P::is_p2p_overlap,
            py::call_guard<py::gil_scoped_release>());
-#else
-      m.def("CommOverlapHelper", &placeholder, "Dummy function for python side annotations");
-      m.def("CommOverlap", &placeholder, "Dummy function for python side annotations");
-      m.def("CommOverlapP2P", &placeholder, "Dummy function for python side annotations");
-      m.def("CommOverlapAlgo", &placeholder, "Dummy function for python side annotations");
-#endif //USE_ROCM
+      // m.def("CommOverlapHelper", &placeholder, "Dummy function for python side annotations");
+      // m.def("CommOverlap", &placeholder, "Dummy function for python side annotations");
+      // m.def("CommOverlapP2P", &placeholder, "Dummy function for python side annotations");
+      // m.def("CommOverlapAlgo", &placeholder, "Dummy function for python side annotations");
 }

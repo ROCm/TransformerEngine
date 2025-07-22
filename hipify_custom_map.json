@@ -3,7 +3,12 @@
         "<cuda_bf16.h>" : "<hip/hip_bfloat16.h>",
         "<cuda_fp8.h>" : "\"amd_detail/hip_float8.h\"",
         "CUfunc_cache" : "hipFuncCache_t", 
-        "<nvtx3/nvToolsExt.h>" : "<roctracer/roctx.h>"
+        "<nvtx3/nvToolsExt.h>" : "<roctracer/roctx.h>",
+        "CUmemGenericAllocationHandle": "hipMemGenericAllocationHandle_t",
+        "#include \"cuda_runtime.h\"": "#include \"hip_runtime.h\"",
+        "__nv_fp8_e5m2": "te_hip_fp8_e5m2",
+        "__nv_fp8_e4m3": "te_hip_fp8_e4m3",
+        "cudaLaunchKernel": "hipLaunchKernel"
  }
 }
 

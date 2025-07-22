@@ -621,7 +621,7 @@ void fused_multi_row_padding(at::Tensor input, at::Tensor output,
 
 at::Tensor swizzle_scaling_factors(at::Tensor input, at::Tensor scale_inv,
                                    std::vector<int64_t> scaling_mode);
-
+#endif
 /***************************************************************************************************
  * Comm+GEMM Overlap Wrappers
  **************************************************************************************************/
@@ -703,7 +703,6 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
                               bool grad, at::Tensor workspace, size_t workspaceSize,
                               bool accumulate, bool use_split_accumulator, bool gemm_overlap,
                               at::Tensor rs_output);
-
   /*
   ** Split FPROP GEMM + ReduceScatter
   */
@@ -716,6 +715,7 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
                         at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
                         size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                         bool gemm_overlap, at::Tensor rs_output);
+
 };  // CommOverlap
 
 class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::CommOverlapP2PBase {
@@ -759,7 +759,6 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                               transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
                               bool grad, at::Tensor workspace, size_t workspaceSize,
                               bool accumulate, bool use_split_accumulator, at::Tensor B_copy);
-
   /*
   ** Split AllGather + GEMM using P2P communication
   ** This function assumes the input_b is pre-copied to _ubufs[rank_id]. This is
@@ -776,7 +775,6 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                         at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
                         size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                         at::Tensor B_copy);
-
   /*
   ** Split ReduceScatter + GEMM using P2P communication
   */
@@ -789,7 +787,6 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                               transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
                               bool grad, at::Tensor workspace, size_t workspaceSize,
                               bool accumulate, bool use_split_accumulator, at::Tensor rs_output);
-
   /*
   ** Split ReduceScatter + GEMM using P2P communication
   */
@@ -803,6 +800,6 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                         size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                         at::Tensor rs_output);
 };  // CommOverlapP2P
-#endif // !USE_ROCM
+// #endif // !USE_ROCM
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_

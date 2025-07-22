@@ -59,6 +59,8 @@ class TimedBdist(bdist_wheel):
 
 
 def setup_common_extension() -> CMakeExtension:
+    cmake_flags = []
+
     """Setup CMake extension for common library"""
     if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
         assert (
@@ -72,7 +74,6 @@ def setup_common_extension() -> CMakeExtension:
     # Project directory root
     root_path = Path(__file__).resolve().parent
 
-    cmake_flags = []
     if rocm_build():
         cmake_flags.append("-DUSE_ROCM=ON")
         if os.getenv("NVTE_USE_HIPBLASLT") is not None:

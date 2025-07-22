@@ -1,7 +1,7 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -11,9 +11,9 @@
 
 #include <pybind11/pybind11.h>
 //TODO: rocm does not support comm gemm overlap yet
-#ifndef USE_ROCM
+// #ifndef USE_ROCM
 #include <transformer_engine/comm_gemm_overlap.h>
-#endif
+// #endif
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/transformer_engine.h>
 
@@ -36,7 +36,7 @@
 #endif
 
 // Define comm overlap handles if not using ROCm
-#ifndef USE_ROCM
+// #ifndef USE_ROCM
 #define NVTE_DECLARE_COMM_OVERLAP_HANDLES(m)                                                  \
   pybind11::enum_<transformer_engine::CommOverlapType>(m, "CommOverlapType")                  \
       .value("RS", transformer_engine::CommOverlapType::RS)                                   \
@@ -65,9 +65,10 @@
         },                                                                                      \
         py::call_guard<py::gil_scoped_release>(), py::arg("device_id") = -1);                   \
 
-#else
-#define NVTE_DECLARE_COMM_OVERLAP_HANDLES(m)
-#endif
+// #else
+// #define NVTE_DECLARE_COMM_OVERLAP_HANDLES(m)
+// #endif
+
 
 #define NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)                                               \
   pybind11::enum_<transformer_engine::DType>(m, "DType")                                      \
@@ -109,5 +110,4 @@
       .value("NVTE_THD_THD_THD", NVTE_QKV_Layout::NVTE_THD_THD_THD);                          \
     NVTE_DECLARE_FUSED_ATTENTION_HANDLES(m)                                \
     NVTE_DECLARE_COMM_OVERLAP_HANDLES(m)
-
 #endif

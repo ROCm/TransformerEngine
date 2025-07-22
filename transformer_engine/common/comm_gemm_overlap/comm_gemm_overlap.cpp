@@ -78,7 +78,7 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
   _tp_id = _rank % _tp_size;
 
   // Set the number of SMs for GEMM with margin
-  int sm_count = transformer_engine::cuda::sm_count();
+  int sm_count = transformer_engine::cuda::sm_count(); // 304
   _math_sms = (set_sm_margin) ? sm_count - num_comm_sm : sm_count;
   _math_sms -= transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", 0);
 
@@ -369,7 +369,7 @@ void CommOverlapBase::split_overlap_rs(TensorWrapper &A, bool transa, TensorWrap
     auto input_a_chunk =
         TensorWrapper(A.dptr(), {m_chunk, k}, A.dtype(), nullptr, nullptr, A.scale_inv());
     auto output_chunk =
-        TensorWrapper(_ubuf.dptr(), {m, m_chunk}, D.dtype(), D.amax(), D.scale(), nullptr);
+        TensorWrapper(_ubuf.dptr(), {n, m_chunk}, D.dtype(), D.amax(), D.scale(), nullptr);
     auto workspace_chunk = TensorWrapper(
         workspace.dptr(), std::vector<size_t>{workspace_size_chunk}, workspace.dtype());
 
@@ -932,11 +932,14 @@ void CommOverlapP2PBase::split_overlap_rs(TensorWrapper &A, bool transa, TensorW
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;
   _ub_comm->cga_size = _cga_size;
-  size_t k = A.size(1);
-  size_t n = B.size(0);
+  // size_t k = A.size(1);
+  // size_t n = B.size(0);
+  size_t m = transa ? A.size(0) : A.size(1);
+  size_t k = transa ? A.size(1) : A.size(0);
+  size_t n_chunk = _ubufs[0].size(0);
 
   // Get communication and GEMM input chunk sizes
-  size_t n_chunk = n / _tp_size;
+  // size_t n_chunk = n / _tp_size;
   const int comm_bytes = _ubufs[0].numel() * _ubufs[0].element_size();
   const int input_b_chunk_bytes = n_chunk * k * B.element_size();
 

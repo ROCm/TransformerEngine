@@ -111,7 +111,6 @@ class CommOverlapBase : public CommOverlapCore {
                     TensorWrapper &bias, TensorWrapper &pre_gelu_out, TensorWrapper &workspace,
                     bool grad, bool accumulate, bool use_split_accumulator,
                     CommOverlapType comm_type, TensorWrapper &rs_output, cudaStream_t stream_main);
-
   /*
   ** Split FPROP GEMM + ReduceScatter
   */
@@ -181,7 +180,6 @@ class CommOverlapP2PBase : public CommOverlapCore {
                         TensorWrapper &workspace, bool grad, bool accumulate,
                         bool use_split_accumulator, TensorWrapper &B_copy,
                         cudaStream_t stream_main);
-
   /*
   ** Split ReduceScatter + GEMM using P2P communication
   */
@@ -190,7 +188,6 @@ class CommOverlapP2PBase : public CommOverlapCore {
                               TensorWrapper &workspace, bool grad, bool accumulate,
                               bool use_split_accumulator, TensorWrapper &rs_output,
                               cudaStream_t stream_main);
-
   /*
   ** Split ReduceScatter + GEMM using P2P communication
   */

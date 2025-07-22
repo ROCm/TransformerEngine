@@ -5,7 +5,7 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
-#ifndef USE_ROCM
+// #ifndef USE_ROCM
 #include "../extensions.h"
 
 #define HALF_BYTES 2
@@ -256,7 +256,6 @@ void CommOverlap::atomic_gemm_overlap_rs(
                                               workspace_, grad, accumulate, use_split_accumulator,
                                               gemm_overlap, rs_out_, stream_main);
 }  // CommOverlap::split_overlap_rs
-
 /*
 ** Split FPROP GEMM + ReduceScatter
 */
@@ -373,7 +372,6 @@ void CommOverlapP2P::atomic_gemm_overlap_ag(
                                                  workspace_, grad, accumulate,
                                                  use_split_accumulator, B_copy_, stream_main);
 }  // atomic_gemm_overlap_ag
-
 /*
 ** Split AllGather + GEMM using P2P communication
 ** This function assumes the input_b is pre-copied to _ubufs[rank_id]. This is
@@ -421,7 +419,6 @@ void CommOverlapP2P::atomic_gemm_overlap_rs(
                                                  workspace_, grad, accumulate,
                                                  use_split_accumulator, rs_out_, stream_main);
 }
-
 /*
 ** Split ReduceScatter + GEMM using P2P communication
 */
@@ -482,4 +479,4 @@ torch::Tensor CommOverlapP2P::get_ubuf_output(int comm_type) {
   int output_c_dim1 = _ubuf.size(1);
   return torch::from_blob(ubuf_wt_ptr, {output_c_dim0, output_c_dim1}, _ubuf_torch.options());
 }
-#endif // !USE_ROCM
+// #endif // !USE_ROCM
