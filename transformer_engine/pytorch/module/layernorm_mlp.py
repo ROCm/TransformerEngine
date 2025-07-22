@@ -77,6 +77,8 @@ if IS_HIP_EXTENSION:
     from ..triton_kernels.layernorm import te_layernorm_bwd_triton
     from ..triton_kernels.rmsnorm import te_rmsnorm_bwd_triton
 
+from ..rocm_utils import create_fp8_weight_transpose_cache, clear_fp8_weight_transpose_cache
+
 __all__ = ["LayerNormMLP"]
 
 
@@ -151,6 +153,7 @@ class _LayerNormMLP(torch.autograd.Function):
         fsdp_group: Union[dist_group_type, None],
         module: torch.nn.Module,
         skip_fp8_weight_update: bool,
+        keep_fp8_weight_transpose_cache: bool,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # pylint: disable=missing-function-docstring
 
@@ -286,6 +289,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     update_workspace=update_workspace,
                     skip_update_flag=skip_fp8_weight_update,
                     fsdp_group=fsdp_group,
+                    create_transpose_cache=keep_fp8_weight_transpose_cache,
                 )
             if not isinstance(fc2_weight, QuantizedTensor):
                 fc2_weight_quantizer.set_usage(rowwise=True, columnwise=True)
@@ -296,6 +300,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     update_workspace=update_workspace,
                     skip_update_flag=skip_fp8_weight_update,
                     fsdp_group=fsdp_group,
+                    create_transpose_cache=keep_fp8_weight_transpose_cache,
                 )
 
         # Cast biases to expected dtype
@@ -510,6 +515,7 @@ class _LayerNormMLP(torch.autograd.Function):
             )
             ctx.normalization = normalization
             ctx.reduce_and_update_bwd_fp8_tensors = False
+            ctx.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
             if ctx.fp8 and requires_grad(
                 inp, ln_weight, ln_bias, fc1_weight, fc2_weight, fc1_bias, fc2_bias
             ):
@@ -675,6 +681,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 not ctx.fp8 and (ctx.activation == "gelu") and (not ctx.bias_gelu_fusion)
             )
 
+            if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
+                create_fp8_weight_transpose_cache(fc2_weight)
+
             # FC2 DGRAD; Unconditional
             gemm_output, *_ = general_gemm(
                 fc2_weight,
@@ -697,6 +706,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc2_dgrad = None
             else:
                 fc2_dgrad = gemm_output
+
+            if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
+                clear_fp8_weight_transpose_cache(fc2_weight)
 
             # FC2 WGRAD
             if ctx.fc2_weight_requires_grad:
@@ -797,6 +809,9 @@ class _LayerNormMLP(torch.autograd.Function):
                     ub_obj_fc1_wgrad = get_ub("fc1_wgrad")
                     fc1_dgrad_bulk = ub_obj_fc1_wgrad.get_buffer(None)
 
+            if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
+                create_fp8_weight_transpose_cache(fc1_weight)
+
             # FC1 DGRAD: Unconditional
             fc1_dgrad, *_, fc1_dgrad_rs_out = general_gemm(
                 fc1_weight,
@@ -811,6 +826,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 extra_output=fc1_dgrad_rs_out,
                 bulk_overlap=ctx.ub_bulk_dgrad,
             )
+
+            if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
+                clear_fp8_weight_transpose_cache(fc1_weight)
 
             # Overlap dgrad-RS/AR with wgrad
             fc1_dgrad_work = None
@@ -1026,6 +1044,7 @@ class _LayerNormMLP(torch.autograd.Function):
             None,  # fsdp_group
             None,  # module
             None,  # skip_fp8_weight_update
+            None,  # keep_fp8_weight_transpose_cache
         )
 
 
@@ -1120,6 +1139,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
                      batch size per training step. Needed for JIT Warmup, a technique where jit
                      fused functions are warmed up before training to ensure same kernels are
                      used for forward propogation and activation recompute phase.
+    keep_fp8_weight_transpose_cache: bool, default = 'True'
+                                     if set to `False`, it will not cache fp8 weight buffer instead of 
+                                     recomputing fp8 weight transpose. Recommend set to `False` when
+                                     enable FSDP parallel.
+                                     
     """
 
     def __init__(
@@ -1151,6 +1175,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         ub_overlap_rs_dgrad: bool = False,
         ub_bulk_dgrad: bool = False,
         ub_bulk_wgrad: bool = False,
+        keep_fp8_weight_transpose_cache: bool = True,
     ) -> None:
         super().__init__()
 
@@ -1292,6 +1317,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
         self.inf_ln_sm_margin = int(os.getenv("NVTE_INF_LAYERNORM_SM_MARGIN", "0"))
+
+        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
 
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
@@ -1441,6 +1468,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.fsdp_group,
                 self,
                 skip_fp8_weight_update,
+                self.keep_fp8_weight_transpose_cache,
             )
             out = fwd_fn(*args)
 
