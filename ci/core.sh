@@ -13,6 +13,8 @@ if [ -z "$TEST_SGPU" ]; then
     exit 0
 fi
 
+configure_omp_threads()
+
 TEST_DIR=${TE_PATH}tests/cpp
 
 cd $TEST_DIR
