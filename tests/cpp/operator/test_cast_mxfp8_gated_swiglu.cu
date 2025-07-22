@@ -417,7 +417,7 @@ class CastMXFP8_GatedActTestSuite : public ::testing::TestWithParam
 
 TEST_P(CastMXFP8_GatedActTestSuite, TestCastMXFP8Swiglu) {
  #ifdef __HIP_PLATFORM_AMD__
-    omp_set_num_threads(std::min(std::max(1, omp_get_num_procs() - 1), omp_get_max_threads())); // Using threads = # of vcpus causes occasional errors.
+    omp_set_num_threads(std::min(128, omp_get_max_threads())); // Using threads = # of vcpus causes occasional errors.
 #else
    // Skip tests for pre-Blackwell architectures
     if (getDeviceComputeCapability() < blackwellComputeCapability) {
