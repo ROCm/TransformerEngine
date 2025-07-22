@@ -96,10 +96,22 @@ def te_compare_results(t, r, atol, rtol, msg):
     diff = t - r
     atol_mismatch = torch.abs(diff) > atol
     nonzero_r = r != 0
-    rtol_mismatch = torch.full_like(atol_mismatch, False)
-    rtol_mismatch[nonzero_r] = torch.abs(diff[nonzero_r] / r[nonzero_r]) > rtol
+    rel_diff = torch.where(nonzero_r, torch.abs(diff / r), torch.zeros_like(diff))
+    rtol_mismatch = torch.where(nonzero_r, rel_diff > rtol, torch.full_like(atol_mismatch, False))
     mismatch = atol_mismatch & (~nonzero_r | rtol_mismatch)
     has_mismatch = torch.any(mismatch).item()
+
+    max_rel_diff = 0.0 # Default to 0.0 if no non-zero reference values
+    max_abs_diff = 0.0 
+    max_abs_diff_indices = None
+    max_rel_diff_indices = None
+    
+    if has_mismatch:
+        max_abs_diff = torch.max(torch.abs(diff)).item()
+        max_rel_diff = torch.max(rel_diff).item()
+        max_rel_diff_indices = torch.unravel_index(torch.argmax(rel_diff), rel_diff.shape)
+        max_abs_diff_indices = torch.unravel_index(torch.argmax(torch.abs(diff)), diff.shape)
+
     # for fp32 the floating point comparison is enough to error out
     if has_mismatch and dtype != torch.float32:
         # check if it is just a failure of round to nearest choosing different side of the real value
@@ -123,8 +135,23 @@ def te_compare_results(t, r, atol, rtol, msg):
         mismatch = mismatch & round_check
         has_mismatch = torch.any(mismatch).item()
     if has_mismatch:
-        # TODO: Improve base message, add max absolute and relative differences.
-        base_msg = "There are tensor mismatches."
+        num_mismatched_elements = torch.sum(mismatch).item()
+        total_elements = t.numel() 
+        base_msg = (
+            f"There are tensor mismatches.\n"
+            f"Number of mismatched rows: {num_mismatched_elements} out of {total_elements} total rows.\n"
+            f"Max Absolute Difference among mismatched: {max_abs_diff:.6e} (Tolerance: {atol:.6e}) at index {tuple(max_abs_diff_indices)}\n"
+            f"Corresponding values: t={t[max_abs_diff_indices].item()}, r={r[max_abs_diff_indices].item()}\n"
+        )
+        if max_rel_diff_indices is not None:
+             base_msg += (
+                f"Max Relative Difference among mismatched: {max_rel_diff:.6e} (Tolerance: {rtol:.6e}) at index {tuple(max_rel_diff_indices)}\n"
+                f"Corresponding values: t={t[max_rel_diff_indices].item()}, r={r[max_rel_diff_indices].item()}"
+            )
+        else:
+            base_msg += (
+                f"Max Relative Difference among mismatched: {max_rel_diff:.6e} (Tolerance: {rtol:.6e}) (no non-zero reference values)\n"
+            )
         if isinstance(msg, str):
             msg = f"{msg}\n\n{base_msg}\n"
         elif isinstance(msg, types.LambdaType):

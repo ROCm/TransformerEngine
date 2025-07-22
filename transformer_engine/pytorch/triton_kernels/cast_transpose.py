@@ -74,7 +74,7 @@ def te_cast_transpose_noop_triton(input, noop_flag, input_scale, cast_out, trans
     row_length = input.shape[-1] if len(input.shape) > 0 else 1
     num_rows = input.numel() // row_length
     input_2d_view = input.reshape(num_rows, row_length)
-    cast_out_2d_view = cast_out.reshape(row_length, num_rows)
+    cast_out_2d_view = cast_out.reshape(num_rows, row_length)
     trans_out_2d_view =  trans_out.reshape(row_length, num_rows)
 
     input_stride_M = input_2d_view.stride(0)
