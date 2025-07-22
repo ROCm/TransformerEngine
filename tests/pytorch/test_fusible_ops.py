@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -7,18 +9,15 @@ from __future__ import annotations
 from collections.abc import Iterable
 import math
 from typing import Optional
-import os
 
 import pytest
 import torch
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.pytorch.ops._common import is_float8_tensor
 from transformer_engine.pytorch.ops.fused import (
     BackwardLinearAdd,
     ForwardLinearBiasActivation,
@@ -26,6 +25,7 @@ from transformer_engine.pytorch.ops.fused import (
 )
 from transformer_engine.pytorch.tensor import QuantizedTensor
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine_torch as tex
 
@@ -1249,26 +1249,22 @@ class TestBasicOps:
             te_ops.Quantize(forward=quantized_compute, backward=False),
         )
         with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
-            # TODO: Remove when we support FP8 quantization in the rmsnorm
-            # triton kernels natively
-            if (
-                IS_HIP_EXTENSION
-                and bool(int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')))
-                and quantization
-            ):
-                with pytest.warns(
-                    RuntimeWarning,
-                    match="FP8 is not yet supported in our RMSNorm Triton kernel"
-                ):
-                    y_test = forward(x_test)
-            else:
-                y_test = forward(x_test)
+            y_test = forward(x_test)
         y_test.backward(dy_test)
 
+        assert y_test.dtype == dtype
         # Expected numerical error
         tols = dtype_tols(dtype)
+
+        # Explicit checks for quantization
         if quantized_compute:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+            tols = dtype_tols(y_test._quantizer.dtype)
+            expected_tensor_cls = {
+                Float8Quantizer:Float8Tensor,
+                MXFP8Quantizer:MXFP8Tensor
+            }[type(y_test._quantizer)]
+            assert isinstance(y_test, expected_tensor_cls)
+            y_test = y_test.dequantize(dtype=torch.float32)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")

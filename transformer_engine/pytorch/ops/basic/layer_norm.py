@@ -17,8 +17,7 @@ import torch
 from transformer_engine_torch import layernorm_bwd, layernorm_fwd
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 if IS_HIP_EXTENSION:
-    # TODO: bring back te_layernorm_fwd_triton after refactoring
-    from ...triton_kernels.layernorm import te_layernorm_bwd_triton
+    from ...triton_kernels.layernorm import te_layernorm_fwd_triton, te_layernorm_bwd_triton
 from ...fp8 import FP8GlobalStateManager
 from ...tensor import QuantizedTensor
 from ...constants import TE_DType
@@ -226,7 +225,9 @@ class LayerNorm(BasicOperation):
 
         # Compute layer norm
         sm_margin = self._sm_margins["forward" if requires_grad else "inference"]
-        y, means, rstdevs = layernorm_fwd(
+        use_layernorm_triton = bool( int(os.environ.get('NVTE_USE_LAYERNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
+        layernorm_fwd_func = te_layernorm_fwd_triton if use_layernorm_triton else layernorm_fwd
+        y, means, rstdevs = layernorm_fwd_func(
             x,
             w,
             b,
