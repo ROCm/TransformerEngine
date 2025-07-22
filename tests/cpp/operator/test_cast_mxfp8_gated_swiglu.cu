@@ -15,6 +15,10 @@
 #include "../test_common.h"
 #include "transformer_engine/transformer_engine.h"
 
+#ifdef __HIP_PLATFORM_AMD__
+#include <omp.h>
+#endif
+
 using namespace transformer_engine;
 using namespace test;
 
@@ -37,6 +41,7 @@ void scale_block(const IType* grad,
     float block_amax = 0.0f;
     float block_amax_gate = 0.0f;
     const size_t stride = cols * 2;
+
 
     // Find the absolute maximum value in the block
     for (size_t i = i_min; i < i_max; ++i) {
@@ -412,11 +417,7 @@ class CastMXFP8_GatedActTestSuite : public ::testing::TestWithParam
 
 TEST_P(CastMXFP8_GatedActTestSuite, TestCastMXFP8Swiglu) {
  #ifdef __HIP_PLATFORM_AMD__
-    std::string test_name = ::testing::UnitTest::GetInstance()->current_test_info()->name();
-    if (test_name == "TestCastMXFP8Swiglu/16384X1632X1X32Xfloat16Xfloat8e4m3XuniformXDGATED" ||
-        test_name == "TestCastMXFP8Swiglu/16384X1632X32X32Xfloat32Xfloat8e5m2XuniformXDGATED") {
-        GTEST_SKIP() << "Skipping test due to known numerical difference between 1/expf() and __frcp_rn(expf()) in 1 of 26'738'688 elements";
-    }
+    omp_set_num_threads(std::min(std::max(1, omp_get_num_procs() - 1), omp_get_max_threads())); // Using threads = # of vcpus causes occasional errors.
 #else
    // Skip tests for pre-Blackwell architectures
     if (getDeviceComputeCapability() < blackwellComputeCapability) {

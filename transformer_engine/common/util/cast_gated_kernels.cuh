@@ -65,7 +65,7 @@ constexpr size_t BUFFERS_NUM = 1; // No async load for HIP
 constexpr size_t CHUNK_DIM_Y = 128;
 constexpr size_t CHUNK_DIM_X = 128;
 constexpr size_t THREADS_PER_CHUNK = 512;
-constexpr size_t THREADS_PER_CHUNK_X = 128;
+constexpr size_t THREADS_PER_CHUNK_X = CHUNK_DIM_X;
 constexpr size_t THREADS_PER_CHUNK_Y = THREADS_PER_CHUNK / THREADS_PER_CHUNK_X;  // 4 = 512 / 128
 constexpr size_t BUFFERS_NUM = 2;
 #endif
@@ -221,7 +221,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
           const float s = sigmoidf(x);
           act_x = x * s;
-          dact_x = x * s * (1 - s) + s; 
+          dact_x = x * s * (1 - s) + s;
         } else {
           act_x = ActOP(x, {});
           dact_x = DActOP(x, {});

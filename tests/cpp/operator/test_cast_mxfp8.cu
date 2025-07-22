@@ -71,10 +71,17 @@ void scale_block(const ProcessingMethod processing_method,
                 elt *= static_cast<float>(grad[idx]);
             }
             dbias[j] += elt;
+#ifndef __HIP_PLATFORM_AMD__
+            if (isinf(elt) || isnan(elt)) {
+                continue;
+            }
+            amax = std::max(amax, std::abs(elt));
+#else
             if (std::isinf(elt) || std::isnan(elt)) {
                 continue;
             }
             amax = fmaxf(amax, fabsf(elt));
+#endif
         }
     }
 
