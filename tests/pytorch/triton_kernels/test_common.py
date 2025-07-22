@@ -1,12 +1,18 @@
 # Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
-
+from __future__ import annotations
 
 import types
+from typing import Optional
+from collections.abc import Iterable
 
 import numpy as np
 import pytest
 import torch
+import math
+
+from transformer_engine.pytorch import cpp_extensions as tex
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 
 from transformer_engine.pytorch.triton_kernels.common import (
     get_torch_e4m3_type,
@@ -40,6 +46,38 @@ def get_tolerances(dtype):
         return 1e-2, 1e-2
     else:
         raise RuntimeError("Invalid type")
+
+def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
+    """Estimated numerical error for a datatype
+
+    Based on tolerances for torch.testing.assert_close.
+
+    """
+
+    # Transformer Engine dtypes
+    if isinstance(dtype, tex.DType):
+        if dtype == tex.DType.kFloat8E4M3:
+            return dict(rtol=0.125, atol=0.0675)  # epsilon = 0.0625
+        if dtype == tex.DType.kFloat8E5M2:
+            return dict(rtol=0.25, atol=0.125)  # epsilon = 0.152
+        dtype = {
+            tex.DType.kByte: torch.uint8,
+            tex.DType.kInt32: torch.int32,
+            tex.DType.kFloat32: torch.float32,
+            tex.DType.kFloat16: torch.half,
+            tex.DType.kBFloat16: torch.bfloat16,
+        }[dtype]
+
+    # PyTorch dtypes
+    if dtype == torch.float16:
+        return dict(rtol=1e-3, atol=1e-5)
+    if dtype == torch.bfloat16:
+        return dict(rtol=1.6e-2, atol=1e-5)
+    if dtype == torch.float32:
+        return dict(rtol=1.3e-6, atol=1e-5)
+    if dtype == torch.float64:
+        return dict(rtol=1e-7, atol=1e-7)
+    raise ValueError(f"Unsupported dtype ({dtype})")
 
 
 # PyTorch implementation of `compareResults` C++ function from `tests/cpp/test_common.cu`.
@@ -143,3 +181,40 @@ def skip_mixed_16bit_float_types(in_dtype, out_dtype):
         in_dtype == torch.bfloat16 and out_dtype == torch.float16
     ):
         pytest.skip("hipified implementation does not support mixing fp16 and bf16")
+
+
+# Check if FP8 is supported
+fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+
+
+def maybe_skip_quantization(
+    quantization: Optional[str],
+    *,
+    dims: Optional[Iterable[int] | int] = None,
+    device: Optional[torch.device | str] = None,
+) -> None:
+
+    # Don't skip if there is no quantization
+    if quantization is None:
+        return
+
+    # Check if quantization scheme is supported
+    if quantization == "fp8" and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if quantization == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+
+    if dims is not None:
+        if not isinstance(dims, Iterable):
+            dims = (dims,)
+        if quantization == "fp8":
+            if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
+                pytest.skip("FP8 GEMMs require dims that are divisible by 16")
+        elif quantization == "mxfp8":
+            if math.prod(dims[:-1]) % 32 != 0 or dims[-1] % 32 != 0:
+                pytest.skip("MXFP8 GEMMs require dims that are divisible by 32")
+
+    # Check if device is supported
+    if device is not None and torch.device(device).type != "cuda":
+        pytest.skip("Quantization is only supported on CUDA devices")
