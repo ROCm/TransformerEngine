@@ -483,7 +483,8 @@ def get_attention_backend(
         head_dim_qk > 256
         or head_dim_qk % 8 != 0
         or (
-            head_dim_qk > 192
+            not IS_HIP_EXTENSION
+            and head_dim_qk > 192
             and device_compute_capability not in ((8, 0), (9, 0), (10, 0), (12, 0))
         )
     ):

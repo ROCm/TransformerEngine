@@ -247,9 +247,9 @@ def _unpermute_kernel(
         data_type = FP8_DTYPE
         pytorch_tensor_dtype = tl.uint8
     else:
-        # NOTE: Using fp32 accumulate precision on ROCm.
-        compute_type = tl.float32 if IS_HIP_EXTENSION else input_ptr.dtype.element_ty
+        data_type = tl.float32 if IS_HIP_EXTENSION else input_ptr.dtype.element_ty
         assert FP8_DTYPE is None
+    compute_type = tl.float32
 
     pid = tl.program_id(0)
     current_start = 0
@@ -397,8 +397,9 @@ def _unpermute_bwd_with_merging_probs_kernel(
         data_type = FP8_DTYPE
         pytorch_tensor_dtype = tl.uint8
     else:
-        compute_type = fwd_output_grad_ptr.dtype.element_ty
+        data_type = fwd_output_grad_ptr.dtype.element_ty
         assert FP8_DTYPE is None
+    compute_type = tl.float32
 
     pid = tl.program_id(0)
     for expert_idx in range(num_experts):
