@@ -399,6 +399,9 @@ def te_rmsnorm_fwd_triton(
         q_scale = quantizer.scale
         q_amax = quantizer.amax
         out_ptr = triton.reinterpret(out._data, tl_dtype)
+        if out._transpose_invalid:
+            out._transpose = torch.empty((out._data.shape[1], out._data.shape[0]), dtype=out._data.dtype)
+            out._transpose_invalid = False
         out_transpose_ptr = triton.reinterpret(out._transpose, tl_dtype)
         out_transpose_stride = out._transpose.stride(0)
     else:
