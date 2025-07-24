@@ -422,6 +422,8 @@ def te_rmsnorm_fwd_triton(
         NUM_PRGMS,
         IS_FP8,
     )
+    if IS_FP8:
+        out._create_transpose()
     if IS_MFP8:
         out = quantizer.quantize(out)
 
