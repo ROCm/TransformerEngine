@@ -991,7 +991,11 @@ struct Numeric_Traits;
 template <>
 struct Numeric_Traits<fp8e4m3> {
   static constexpr int maxUnbiasedExponent = 8;
+  #ifndef __HIP_PLATFORM_AMD__
   static constexpr double maxNorm = 448;
+  #else
+  static constexpr double maxNorm = 240;
+  #endif //__HIP_PLATFORM_AMD__
 };
 
 template <>
