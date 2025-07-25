@@ -119,7 +119,7 @@ def _cast_transpose_triton_mxfp8(
     rowwise_scale_M, rowwise_scale_N,
     colwise_scale_inv_ptr, stride_colwise_scale_inv_row, stride_colwise_scale_inv_col,
     colwise_scale_M, colwise_scale_N,
-    max_fp8: tl.constexpr, BLOCK_X: tl.constexpr, BLOCK_Y: tl.constexpr, GROUP_Y: tl.constexpr, MXFP8_BLOCK_SCALING_SIZE: tl.constexpr):
+    max_fp8: tl.constexpr, BLOCK_X: tl.constexpr, BLOCK_Y: tl.constexpr, GROUP_Y: tl.constexpr, MXFP8_BLOCK_SCALING_SIZE: tl.constexpr,  USE_ROWWISE_SCALING: tl.constexpr, USE_COLWISE_SCALING: tl.constexpr):
    
     pid = tl.program_id(0)
 
@@ -137,7 +137,7 @@ def _cast_transpose_triton_mxfp8(
     
     num_chunks_in_block_Y = BLOCK_Y // MXFP8_BLOCK_SCALING_SIZE
     num_chunks_in_block_X = BLOCK_X // MXFP8_BLOCK_SCALING_SIZE
-    max_norm_rcp = 1.0/max_fp8
+    max_norm_rcp = 1.0 / max_fp8
 
     for chunk_id_y in range(0, num_chunks_in_block_Y):
         offsets_Y = global_offset_Y_base + chunk_id_y * MXFP8_BLOCK_SCALING_SIZE + tl.arange(0, MXFP8_BLOCK_SCALING_SIZE)
@@ -149,32 +149,34 @@ def _cast_transpose_triton_mxfp8(
             x_chunk = tl.load(x_ptr_current_chunk, mask=mask, other=0.0).to(tl.float32)
 
             # Rowwise
-            subwarp_amax_rowwise = tl.max(tl.abs(x_chunk), axis=-1, keep_dims=True)
-            biased_exponent_rowwise = float_to_e8m0_triton(subwarp_amax_rowwise * max_norm_rcp)
-            
-            scale_offset_X = (pid_n * num_chunks_in_block_X) + chunk_id_x
-            rowwise_scale_inv_store_offsets = (offsets_Y[:, None] * stride_rowwise_scale_inv_row) + scale_offset_X * stride_rowwise_scale_inv_col 
-            rowwise_scale_inv_store_mask = (offsets_Y < rowwise_scale_M)[:, None] & (scale_offset_X < rowwise_scale_N)
-            tl.store(rowwise_scale_inv_ptr + rowwise_scale_inv_store_offsets, biased_exponent_rowwise, mask = rowwise_scale_inv_store_mask)
-            
-            block_inverse_scale_rowwise = exp2f_rcp_triton(biased_exponent_rowwise)
-            y_chunk_rowwise_scaled = x_chunk * block_inverse_scale_rowwise
-            rowwise_y_ptr_current_chunk = rowwise_y_ptr + offsets_Y[:, None] * stride_rowwise_row + offsets_X[None, :] * stride_rowwise_col
-            tl.store(rowwise_y_ptr_current_chunk, y_chunk_rowwise_scaled.to(rowwise_y_ptr.type.element_ty), mask=mask)
+            if USE_ROWWISE_SCALING:
+                subwarp_amax_rowwise = tl.max(tl.abs(x_chunk), axis=-1, keep_dims=True)
+                biased_exponent_rowwise = float_to_e8m0_triton(subwarp_amax_rowwise * max_norm_rcp)
+                
+                scale_offset_X = (pid_n * num_chunks_in_block_X) + chunk_id_x
+                rowwise_scale_inv_store_offsets = (offsets_Y[:, None] * stride_rowwise_scale_inv_row) + scale_offset_X * stride_rowwise_scale_inv_col 
+                rowwise_scale_inv_store_mask = (offsets_Y < rowwise_scale_M)[:, None] & (scale_offset_X < rowwise_scale_N)
+                tl.store(rowwise_scale_inv_ptr + rowwise_scale_inv_store_offsets, biased_exponent_rowwise, mask = rowwise_scale_inv_store_mask)
+                
+                block_inverse_scale_rowwise = exp2f_rcp_triton(biased_exponent_rowwise)
+                y_chunk_rowwise_scaled = x_chunk * block_inverse_scale_rowwise
+                rowwise_y_ptr_current_chunk = rowwise_y_ptr + offsets_Y[:, None] * stride_rowwise_row + offsets_X[None, :] * stride_rowwise_col
+                tl.store(rowwise_y_ptr_current_chunk, y_chunk_rowwise_scaled.to(rowwise_y_ptr.type.element_ty), mask=mask)
 
             # Colwise
-            subwarp_amax_colwise = tl.max(tl.abs(x_chunk), axis=0, keep_dims=True)
-            biased_exponent_colwise = float_to_e8m0_triton(subwarp_amax_colwise * max_norm_rcp)
+            if USE_COLWISE_SCALING:
+                subwarp_amax_colwise = tl.max(tl.abs(x_chunk), axis=0, keep_dims=True)
+                biased_exponent_colwise = float_to_e8m0_triton(subwarp_amax_colwise * max_norm_rcp)
 
-            scale_offset_Y = (pid_m * num_chunks_in_block_Y) + chunk_id_y
-            colwise_scale_inv_store_offsets = scale_offset_Y * stride_colwise_scale_inv_row + (offsets_X[None, :] * stride_colwise_scale_inv_col) 
-            colwise_scale_inv_store_mask = (scale_offset_Y < colwise_scale_M) & (offsets_X < colwise_scale_N)[None, :]
-            tl.store(colwise_scale_inv_ptr + colwise_scale_inv_store_offsets, biased_exponent_colwise, mask = colwise_scale_inv_store_mask)
-            
-            block_inverse_scale_colwise = exp2f_rcp_triton(biased_exponent_colwise)
-            y_chunk_colwise_scaled = x_chunk * block_inverse_scale_colwise
-            colwise_y_ptr_current_chunk = colwise_y_ptr + offsets_Y[:, None] * stride_rowwise_row + offsets_X[None, :] * stride_rowwise_col
-            tl.store(colwise_y_ptr_current_chunk, y_chunk_colwise_scaled.to(colwise_y_ptr.type.element_ty), mask=mask)
+                scale_offset_Y = (pid_m * num_chunks_in_block_Y) + chunk_id_y
+                colwise_scale_inv_store_offsets = scale_offset_Y * stride_colwise_scale_inv_row + (offsets_X[None, :] * stride_colwise_scale_inv_col) 
+                colwise_scale_inv_store_mask = (scale_offset_Y < colwise_scale_M) & (offsets_X < colwise_scale_N)[None, :]
+                tl.store(colwise_scale_inv_ptr + colwise_scale_inv_store_offsets, biased_exponent_colwise, mask = colwise_scale_inv_store_mask)
+                
+                block_inverse_scale_colwise = exp2f_rcp_triton(biased_exponent_colwise)
+                y_chunk_colwise_scaled = x_chunk * block_inverse_scale_colwise
+                colwise_y_ptr_current_chunk = colwise_y_ptr + offsets_Y[:, None] * stride_rowwise_row + offsets_X[None, :] * stride_rowwise_col
+                tl.store(colwise_y_ptr_current_chunk, y_chunk_colwise_scaled.to(colwise_y_ptr.type.element_ty), mask=mask)
 
 @triton.jit
 def _dequantize_mxfp8_triton(
@@ -255,21 +257,31 @@ def te_cast_transpose_mxfp8_triton(input, out, noop_flag=None):
     row_length = input.shape[-1] if len(input.shape) > 0 else 1
     num_rows = input.numel() // row_length
     input_2d_view = input.reshape(num_rows, row_length)
-
     out_metadata = out.get_metadata()
-    rowwise_y_ptr = out_metadata["rowwise_data"].reshape(num_rows, row_length)
-    colwise_y_ptr = out_metadata["columnwise_data"].reshape(num_rows, row_length)
 
-    rowwise_scale_inv_ptr = out_metadata["rowwise_scale_inv"]
-    colwise_scale_inv_ptr = out_metadata["columnwise_scale_inv"]
+    USE_ROWWISE_SCALING = out_metadata["rowwise_data"] is not None
+    USE_COLWISE_SCALING = out_metadata["columnwise_data"] is not None
+
+    rowwise_y_ptr, rowwise_scale_inv_ptr = None, None
+    rowwise_scale_M, rowwise_scale_N = 1, 1
+    if USE_ROWWISE_SCALING:
+        rowwise_y_ptr = out_metadata["rowwise_data"].reshape(num_rows, row_length)
+        rowwise_scale_inv_ptr = out_metadata["rowwise_scale_inv"]
+        rowwise_scale_M, rowwise_scale_N = rowwise_scale_inv_ptr.shape
+
+    colwise_y_ptr, colwise_scale_inv_ptr = None, None
+    colwise_scale_M, colwise_scale_N = 1, 1
+    if USE_COLWISE_SCALING:
+        colwise_y_ptr = out_metadata["columnwise_data"].reshape(num_rows, row_length)
+        colwise_scale_inv_ptr = out_metadata["columnwise_scale_inv"]
+        colwise_scale_M, colwise_scale_N = colwise_scale_inv_ptr.shape
+    
     fp8_dtype = out_metadata["fp8_dtype"]
     BLOCK_X = 64
     BLOCK_Y = 64
     GROUP_Y = MXFP8_BLOCK_SCALING_SIZE
     max_fp8 = get_fp8_max(fp8_dtype)
     tl_dtype = te_dtype_to_triton_dtype(fp8_dtype)
-    rowwise_scale_M, rowwise_scale_N = rowwise_scale_inv_ptr.shape
-    colwise_scale_M, colwise_scale_N = colwise_scale_inv_ptr.shape
     grid = lambda META: (triton.cdiv(num_rows, META['BLOCK_Y']) * triton.cdiv(row_length, META['BLOCK_X']),)
     _cast_transpose_triton_mxfp8[grid](
         input_2d_view, triton.reinterpret(rowwise_y_ptr, tl_dtype), triton.reinterpret(colwise_y_ptr, tl_dtype), 
@@ -279,30 +291,32 @@ def te_cast_transpose_mxfp8_triton(input, out, noop_flag=None):
         rowwise_scale_M, rowwise_scale_N,
         colwise_scale_inv_ptr, colwise_scale_inv_ptr.stride(0), colwise_scale_inv_ptr.stride(1),
         colwise_scale_M, colwise_scale_N,
-        max_fp8, BLOCK_X, BLOCK_Y, GROUP_Y, MXFP8_BLOCK_SCALING_SIZE)
+        max_fp8, BLOCK_X, BLOCK_Y, GROUP_Y, MXFP8_BLOCK_SCALING_SIZE, USE_ROWWISE_SCALING, USE_COLWISE_SCALING)
 
-def te_dequantize_mxfp8_triton(input, dtype, use_rowwise_scaling=True):
+def te_dequantize_mxfp8_triton(input, dtype):
     input_metadata = input.get_metadata()
-    rowwise_x_ptr = input_metadata["rowwise_data"]
-
-    row_length = rowwise_x_ptr.shape[-1] if len(rowwise_x_ptr.shape) > 0 else 1
-    num_rows = rowwise_x_ptr.numel() // row_length
-    rowwise_x_ptr_2d_view = rowwise_x_ptr.reshape(num_rows, row_length)
-
-    colwise_x_ptr = input_metadata["columnwise_data"]
-    colwise_x_ptr_2d_view = colwise_x_ptr.reshape(num_rows, row_length)
-
-    rowwise_scale_inv_ptr = input_metadata["rowwise_scale_inv"]
-    colwise_scale_inv_ptr = input_metadata["columnwise_scale_inv"]
-    fp8_dtype = input_metadata["fp8_dtype"]
-
-    out = torch.zeros(input.shape, dtype=dtype, device=rowwise_x_ptr.device)
-
-    # use_rowwise_scaling = rowwise_x_ptr is not None
-    x_ptr = rowwise_x_ptr_2d_view if use_rowwise_scaling else colwise_x_ptr_2d_view
-    scale_inv_ptr = rowwise_scale_inv_ptr if use_rowwise_scaling else colwise_scale_inv_ptr
-    scale_M, scale_N = rowwise_scale_inv_ptr.shape if use_rowwise_scaling else colwise_scale_inv_ptr.shape
+    use_rowwise_scaling = input_metadata["rowwise_data"] is not None
+    x_ptr = None
+    scale_inv_ptr = None
     
+    if use_rowwise_scaling:
+        x_ptr = input_metadata["rowwise_data"]
+        row_length = x_ptr.shape[-1] if len(x_ptr.shape) > 0 else 1
+        num_rows = x_ptr.numel() // row_length
+        x_ptr = x_ptr.reshape(num_rows, row_length)
+        scale_inv_ptr = input_metadata["rowwise_scale_inv"]
+    else:
+        x_ptr = input_metadata["columnwise_data"]
+        row_length = x_ptr.shape[-1] if len(x_ptr.shape) > 0 else 1
+        num_rows = x_ptr.numel() // row_length
+        x_ptr = x_ptr.reshape(num_rows, row_length)
+        scale_inv_ptr = input_metadata["columnwise_scale_inv"]
+    
+    fp8_dtype = input_metadata["fp8_dtype"]
+    scale_M, scale_N = scale_inv_ptr.shape
+
+    out = torch.zeros(input.shape, dtype=dtype, device=x_ptr.device)
+
     BLOCK_X = 64
     BLOCK_Y = 64
     GROUP_Y = 4

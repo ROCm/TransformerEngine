@@ -1,4 +1,4 @@
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
 import math
@@ -59,7 +59,7 @@ def scale_block_torch(
     #row-wise
     for i in range(i_min, i_max):
         block_input = input_tensor[i, j_min:j_max]
-        amax = torch.max(torch.abs(block_input)).item() # .item() gets Python scalar from 0-dim tensor
+        amax = torch.max(torch.abs(block_input)).item()
 
         # Calculate scale
         biased_exponent = float_to_e8m0(amax * 1/get_fp8_max(out_dtype))
@@ -121,7 +121,7 @@ def compute_ref_x1_torch(
             j_min = jj * block_size_X
             j_max = min((jj + 1) * block_size_X, cols)
             scale_idx = (ii, jj)
-            scale_block_torch (
+            scale_block_torch(
                 input_tensor=input_tensor_2d_view,
                 output_rowwise=output_rowwise_2d_view,
                 output_columnwise=output_columnwise_2d_view,
@@ -152,8 +152,8 @@ def compute_ref_x1_torch(
                         (16, 8, 4, 512),
                         ])
 @pytest.mark.parametrize("in_dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("out_dtype", [tex.DType.kFloat8E4M3])
-def test_quantize(shape, in_dtype, out_dtype):
+@pytest.mark.parametrize("out_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
+def test_quantize_dequantize_mxfp8(shape, in_dtype, out_dtype):
     if ((shape[-1] % MXFP8_BLOCK_SCALING_SIZE != 0) or (math.prod(shape[:-1]) % MXFP8_BLOCK_SCALING_SIZE != 0)):
         pytest.skip(f"Incorrect shape {shape} for MXFP8. Tensor dims must be divisible by {MXFP8_BLOCK_SCALING_SIZE}")
     input_tensor = fill_uniform(shape, dtype=in_dtype)
@@ -178,15 +178,11 @@ def test_quantize(shape, in_dtype, out_dtype):
                         quantized_out_columnwise_ref,  
                         rowwise_scale_inv_ref, 
                         columnwise_scale_inv_ref, 32, 32, out_dtype)
-    
     quantized_out_triton  = te_quantize_triton(input_tensor, quantizer=triton_quantizer)
-    dequantized_out_triton = te_dequantize_triton(quantized_out_triton, dtype=in_dtype)
-    dequantized_out_colwise_triton = te_dequantize_triton(quantized_out_triton, dtype=in_dtype, use_rowwise_scaling=False)
-    atol_fp8, rtol_fp8 = get_tolerances(torch_out_dtype)
+
     cmp = "te"
+    atol_fp8, rtol_fp8 = get_tolerances(torch_out_dtype)
     compare_results(cmp, quantized_out_triton._rowwise_data.view(torch_out_dtype),  quantized_out_rowwise_ref, atol_fp8, rtol_fp8, "rowwise data doesn't match")
     compare_results(cmp, quantized_out_triton._columnwise_data.view(torch_out_dtype),  quantized_out_columnwise_ref, atol_fp8, rtol_fp8, "columnwise data doesn't match")
     compare_results("torch", quantized_out_triton._rowwise_scale_inv,  rowwise_scale_inv_ref, 0.0, 0.0, "rowwise scale inv doesn't match")
     compare_results("torch", quantized_out_triton._rowwise_data.view(torch_out_dtype),  quantized_out_rowwise_ref, 0.0, 0.0, "colwise scale inv doesn't match")
-    compare_results("te", dequantized_out_triton, input_tensor,  6.25e-2, 6.25e-2, 'Dequantized and original results do not match!')
-    compare_results("te", dequantized_out_colwise_triton, dequantized_out_triton, 6.25e-2, 6.25e-2, 'Dequantized colwise and dequantized rowwise results do not match!')

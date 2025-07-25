@@ -8,15 +8,9 @@ import torch
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.triton_kernels.cast import te_dequantize_triton
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.triton_kernels.common import (
-    torch_dtype_to_te_dtype,
-)
-from transformer_engine.pytorch.triton_kernels.norm_common import (
-    get_fwd_ln_sm_margin,
-)
-from transformer_engine.pytorch.triton_kernels.layernorm import (
-    te_layernorm_fwd_triton,
-)
+from transformer_engine.pytorch.triton_kernels.common import torch_dtype_to_te_dtype
+from transformer_engine.pytorch.triton_kernels.norm_common import get_fwd_ln_sm_margin
+from transformer_engine.pytorch.triton_kernels.layernorm import te_layernorm_fwd_triton
 from test_common import (
     get_tolerances,
     input_dtypes_str,
@@ -61,7 +55,7 @@ def compute_ref_output(data: torch.Tensor, gamma: torch.Tensor, beta: torch.Tens
         raise ValueError("amax must be a 1-element torch.Tensor.")
 
 test_idtypes_str = input_dtypes_str(["fp32", "fp16", "bf16"])
-test_odtypes_str = output_dtypes_str(["fp8e4"])
+test_odtypes_str = output_dtypes_str(["fp8e4", "fp8e5"])
 
 test_shapes = [
         (32, 32),
@@ -75,7 +69,7 @@ all_boolean = [False, True]
 @pytest.mark.parametrize("out_dtype", test_odtypes_str)
 @pytest.mark.parametrize("M, N", test_shapes)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
-def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma):
+def test_layernorm_fwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma):
 
     # Get Torch data types:
     in_dtype = str_to_torch_dtype(in_dtype)
@@ -110,8 +104,9 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
         sm_margin=get_fwd_ln_sm_margin(),
         zero_centered_gamma=zero_centered_gamma, 
         )
-    dequantized_out_triton = te_dequantize_triton(y_triton, dtype=in_dtype)
-    dequantized_out_colwise_triton = te_dequantize_triton(y_triton, dtype=in_dtype, use_rowwise_scaling=False)
+    dequantized_out_rowwise_triton = te_dequantize_triton(y_triton, dtype=in_dtype)
+    y_triton._rowwise_data = None
+    dequantized_out_colwise_triton = te_dequantize_triton(y_triton, dtype=in_dtype)
 
     if te_out_dtype == tex.DType.kFloat8E5M2:
         atol = 1.25e-1
@@ -129,7 +124,7 @@ def test_layernorm_fwd_bwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma
     
     compare_results(
         fwd_cmp,
-        dequantized_out_triton,
+        dequantized_out_rowwise_triton,
         y_ref,
         atol,
         rtol,

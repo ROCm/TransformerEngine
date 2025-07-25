@@ -116,9 +116,9 @@ def te_quantize_triton(
 
     return out
 
-def te_dequantize_triton(input, dtype=torch.float32, use_rowwise_scaling=True):
+def te_dequantize_triton(input, dtype=torch.float32):
     if isinstance(input, MXFP8TensorBase):
-        return te_dequantize_mxfp8_triton(input, dtype, use_rowwise_scaling)
+        return te_dequantize_mxfp8_triton(input, dtype)
     elif isinstance(input, Float8TensorBase):
         return tex.dequantize(input, dtype)
     else:
