@@ -67,8 +67,8 @@ torch.cuda.manual_seed(seed)
 _cpu_rng_state = torch.get_rng_state()
 _cuda_rng_state = torch.cuda.get_rng_state()
 
-# Supported from torch>=2.6
-# torch._dynamo.config.recompile_limit = 16
+if torch.__version__ >= '2.7.0':
+    torch._dynamo.config.recompile_limit = 16
 
 if IS_HIP_EXTENSION:
     def rocm_attn_backend() -> tuple[bool, bool, bool]:

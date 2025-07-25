@@ -326,12 +326,24 @@ struct Numeric_Traits<fp8e4m3> {
     static constexpr double minSubnorm = 1.0   / static_cast<double>(1 << 9);   // std::pow(2.0, -9.0);
     static constexpr double maxSubnorm = 0.875 / static_cast<double>(1 << 6);   // std::pow(2.0, -6.0);
     static constexpr double minNorm    = 1.0   / static_cast<double>(1 << 6);   // std::pow(2.0, -6.0);
+    #ifndef USE_ROCM
     static constexpr double maxNorm    = 448.0;
-    static constexpr double artifInf   = 10.0 * maxNorm;                        // artificial Infinity
+    #elif HIP_VERSION >= 60300000
+    static const double maxNorm;
+    #else
+    static constexpr double maxNorm = 240.0;
+    #endif //USE_ROCM
+    static const double artifInf;                        // artificial Infinity
     static constexpr int maxBiasedExponentAsFP32 = 8 + FP32_EXPONENT_BIAS;
     static constexpr int maxUnbiasedExponentAsFP32 = 8;
     static constexpr int maxExpNorm    = 1 << maxUnbiasedExponentAsFP32;
 };
+
+#if defined(USE_ROCM) && (HIP_VERSION >= 60300000)
+inline const double Numeric_Traits<fp8e4m3>::maxNorm = te_fp8_fnuz() ? 240.0 : 448.0;
+#endif
+
+inline const double Numeric_Traits<fp8e4m3>::artifInf = 10.0 * Numeric_Traits<fp8e4m3>::maxNorm;
 
 template <>
 struct Numeric_Traits<fp8e5m2> {
@@ -359,12 +371,7 @@ struct Numeric_Traits<fp32> {
 
 template <typename T>
 struct Quantized_Limits {
-    static constexpr double ranges[]  = {
-        0.0,
-        Numeric_Traits<T>::minNorm,
-        Numeric_Traits<T>::maxNorm,
-        Numeric_Traits<T>::artifInf
-    };
+    static const double ranges[4];
     static constexpr inline fp32 max() { return static_cast<fp32>(Numeric_Traits<T>::maxNorm); }
     static constexpr inline fp32 max_reciprocal() { return static_cast<fp32>(1.0 / max()); }
     static constexpr inline fp32 emax() { return static_cast<fp32>(Numeric_Traits<T>::maxExpNorm); }
@@ -373,6 +380,13 @@ struct Quantized_Limits {
     static constexpr inline int max_norm_unbiased_exponent() { return Numeric_Traits<T>::maxUnbiasedExponentAsFP32; }
 };
 
+template <typename T>
+inline const double Quantized_Limits<T>::ranges[4] = {
+    0.0,
+    Numeric_Traits<T>::minNorm,
+    Numeric_Traits<T>::maxNorm,
+    Numeric_Traits<T>::artifInf
+};
 // Input data filling cases
 // Considering normal and subnormal magnitudes of E4M3 and E5M2 formats
 // with nearest to even rounding per OFP8 specification

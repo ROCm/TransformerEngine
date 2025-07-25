@@ -8,7 +8,7 @@
 import torch
 import torch.distributed
 import transformer_engine_torch as tex
-
+from .utils import get_torch_float8_e4m3_type, get_torch_float8_e5m2_type
 
 """
 This is a map: torch.dtype -> int
@@ -32,16 +32,13 @@ if IS_HIP_EXTENSION:
 
 TE_DType_To_Torch = {
     tex.DType.kByte: torch.uint8,
-    tex.DType.kFloat8E4M3: torch.float8_e4m3fn,
-    tex.DType.kFloat8E5M2: torch.float8_e5m2,
+    tex.DType.kFloat8E4M3: get_torch_float8_e4m3_type(),
+    tex.DType.kFloat8E5M2: get_torch_float8_e5m2_type(),
     tex.DType.kInt32: torch.int32,
     tex.DType.kFloat32: torch.float32,
     tex.DType.kFloat16: torch.half,
     tex.DType.kBFloat16: torch.bfloat16,
 }
-if IS_HIP_EXTENSION:
-    TE_DType_To_Torch.update({tex.DType.kFloat8E4M3: torch.float8_e4m3fnuz,
-                              tex.DType.kFloat8E5M2: torch.float8_e5m2fnuz})
 
 AttnMaskTypes = (
     "no_mask",

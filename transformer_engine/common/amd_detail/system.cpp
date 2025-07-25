@@ -1,21 +1,9 @@
 /*************************************************************************
- * This file was modified for portability to AMDGPU
  * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
- * See LICENSE for license information.
+ * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
-
-#include "../util/system.h"
-
-#include <cstdint>
-#include <cstdlib>
-#include <filesystem>
-#include <fstream>
-#include <sstream>
-#include <string>
-
-#include "../common.h"
+#include "hip_float8.h"
 
 extern "C" bool nvte_is_rocm_build() {
 #ifdef USE_ROCM

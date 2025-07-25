@@ -247,7 +247,7 @@ def _unpermute_kernel(
         data_type = FP8_DTYPE
         pytorch_tensor_dtype = tl.uint8
     else:
-        data_type = tl.float32 if IS_HIP_EXTENSION else input_ptr.dtype.element_ty
+        data_type = input_ptr.dtype.element_ty
         assert FP8_DTYPE is None
     compute_type = tl.float32
 

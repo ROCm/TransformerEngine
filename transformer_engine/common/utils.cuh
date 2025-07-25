@@ -991,8 +991,19 @@ struct Numeric_Traits;
 template <>
 struct Numeric_Traits<fp8e4m3> {
   static constexpr int maxUnbiasedExponent = 8;
+  #ifndef __HIP_PLATFORM_AMD__
   static constexpr double maxNorm = 448;
+  #elif HIP_VERSION >= 60300000
+  static const double maxNorm;
+  #else
+  static constexpr double maxNorm = 240;
+  #endif //__HIP_PLATFORM_AMD__
 };
+
+#if defined(__HIP_PLATFORM_AMD__) && (HIP_VERSION >= 60300000)
+inline const double Numeric_Traits<fp8e4m3>::maxNorm =
+    te_fp8_fnuz() ? 240.0 : 448.0;
+#endif
 
 template <>
 struct Numeric_Traits<fp8e5m2> {
@@ -1003,11 +1014,13 @@ struct Numeric_Traits<fp8e5m2> {
 template <typename T>
 struct Quantized_Limits {
   static constexpr int max_unbiased_exponent = Numeric_Traits<T>::maxUnbiasedExponent;
-  static constexpr float max_norm = Numeric_Traits<T>::maxNorm;
+  static const float max_norm;
   static constexpr float max_norm_rcp = 1.0 / max_norm;
   static constexpr float emax = 1 << max_unbiased_exponent;
   static constexpr float emax_rcp = 1.0 / emax;
 };
+template <typename T>
+inline const float Quantized_Limits<T>::max_norm = Numeric_Traits<T>::maxNorm;
 
 __device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
   // TODO: nan/inf needs to be set for any value

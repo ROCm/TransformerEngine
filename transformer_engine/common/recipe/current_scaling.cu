@@ -43,11 +43,15 @@ __launch_bounds__(amax_kernel_threads) __global__
       const InputType val = static_cast<InputType>(loader.separate()[i]);
       __builtin_assume(max >= InputType{0.f});
       if constexpr (std::is_same_v<InputType, bf16__>) {
+#ifndef __HIP_PLATFORM_AMD__
 #if __CUDA_ARCH__ >= 800
         max = __hmax(__habs(val), max);
 #else  // Turing
         max = static_cast<bf16__>(
             fmaxf(fabsf(static_cast<float>(val)), static_cast<float>(max)));
+#endif
+#else
+        max = __hmax(__habs(val), max);
 #endif
       } else if constexpr (std::is_same_v<InputType, __half>) {
         max = __hmax(__habs(val), max);
@@ -67,7 +71,7 @@ __launch_bounds__(amax_kernel_threads) __global__
 template <int nvec, typename InputType>
 void launch_amax_kernel(const InputType *input, float *amax, const size_t N, cudaStream_t stream) {
   // Zero out amax so we can update with atomic max
-  cudaMemsetAsync(amax, 0, sizeof(float), stream);
+  (void)cudaMemsetAsync(amax, 0, sizeof(float), stream);
 
   // Return immediately if tensor is empty
   if (N == 0) {
