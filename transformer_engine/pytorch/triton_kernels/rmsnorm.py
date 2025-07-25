@@ -126,7 +126,7 @@ def _rmsnorm_fwd_triton(
                 amax = tl.maximum(amax, amax_temp)
                 rms_norm = rms_norm * scale
                 output_t_ptrs = out_transpose_ptr + col_offsets * transpose_row_stride + n_cols_blks * BLOCK_SIZE + row_idx
-                tl.store(output_t_ptrs, rms_norm.to(output_type))
+                tl.store(output_t_ptrs, rms_norm.to(output_type), mask=mask)
             tl.store(output_ptrs, rms_norm.to(output_type), mask=mask)
 
     else:
@@ -155,7 +155,7 @@ def _rmsnorm_fwd_triton(
                 amax = tl.maximum(amax, amax_temp)
                 rms_norm = rms_norm * scale
                 output_t_ptrs = out_transpose_ptr + col_offsets * transpose_row_stride + row_idx
-                tl.store(output_t_ptrs, rms_norm.to(output_type))
+                tl.store(output_t_ptrs, rms_norm.to(output_type), mask=mask)
             tl.store(output_ptrs, rms_norm.to(output_type), mask=mask)
     if IS_FP8:
         tl.store(amax_ptr + row_start, amax)
