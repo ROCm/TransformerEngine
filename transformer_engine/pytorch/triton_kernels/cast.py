@@ -81,8 +81,8 @@ def te_quantize_triton(
     # Construct no-op flag if needed
     if noop_flag is None:
         noop_flag = _empty_tensor()
-
-    if out.size().numel() == 0:
+    # if it's mxfp8, we'll check if both rowwise and columnwise data are none
+    if (isinstance(out, MXFP8TensorBase) and out._rowwise_data is None and out._columnwise_data is None) or (not isinstance(out, MXFP8TensorBase) and out.size().numel() == 0):
         # Return empty output if the quantized tensor has no elements
         return out
     

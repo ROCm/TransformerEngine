@@ -68,8 +68,10 @@ def _cast_transpose_triton(A, noop_ptr, C, T, stride_am, stride_an, stride_bn, s
         scale_inv_out = tl.fdiv(1.0, scale)
         tl.store(scale_inv_ptr, scale_inv_out)
 
+FP32_EXPONENT_BIAS: tl.constexpr = 127
+FP32_MANTISSA_BITS: tl.constexpr = 23
 @triton.jit
-def exp2f_rcp_triton(biased_exp: tl.uint8, FP32_EXPONENT_BIAS: tl.constexpr = 127) -> tl.float32:
+def exp2f_rcp_triton(biased_exp: tl.uint8) -> tl.float32:
     biased_exp_f32 = biased_exp.to(tl.float32)
     exp_val = FP32_EXPONENT_BIAS - biased_exp_f32
     result = tl.exp2(exp_val)
@@ -77,7 +79,7 @@ def exp2f_rcp_triton(biased_exp: tl.uint8, FP32_EXPONENT_BIAS: tl.constexpr = 12
     return final_result
 
 @triton.jit
-def float_to_e8m0_triton(val: tl.float32, FP32_MANTISSA_BITS: tl.constexpr = 23) -> tl.uint8:
+def float_to_e8m0_triton(val: tl.float32) -> tl.uint8:
     is_nan = (val != val)
     is_inf = (tl.abs(val) == float('inf'))
     is_zero = val == 0.0
@@ -261,35 +263,43 @@ def te_cast_transpose_mxfp8_triton(input, out, noop_flag=None):
 
     USE_ROWWISE_SCALING = out_metadata["rowwise_data"] is not None
     USE_COLWISE_SCALING = out_metadata["columnwise_data"] is not None
-
-    rowwise_y_ptr, rowwise_scale_inv_ptr = None, None
-    rowwise_scale_M, rowwise_scale_N = 1, 1
-    if USE_ROWWISE_SCALING:
-        rowwise_y_ptr = out_metadata["rowwise_data"].reshape(num_rows, row_length)
-        rowwise_scale_inv_ptr = out_metadata["rowwise_scale_inv"]
-        rowwise_scale_M, rowwise_scale_N = rowwise_scale_inv_ptr.shape
-
-    colwise_y_ptr, colwise_scale_inv_ptr = None, None
-    colwise_scale_M, colwise_scale_N = 1, 1
-    if USE_COLWISE_SCALING:
-        colwise_y_ptr = out_metadata["columnwise_data"].reshape(num_rows, row_length)
-        colwise_scale_inv_ptr = out_metadata["columnwise_scale_inv"]
-        colwise_scale_M, colwise_scale_N = colwise_scale_inv_ptr.shape
     
     fp8_dtype = out_metadata["fp8_dtype"]
+    tl_dtype = te_dtype_to_triton_dtype(fp8_dtype)
+    
+    rowwise_y_ptr, rowwise_scale_inv_ptr = None, None
+    rowwise_scale_M, rowwise_scale_N = 1, 1
+    rowwise_scale_stride_M, rowwise_scale_stride_N = 1, 1
+    if USE_ROWWISE_SCALING:
+        rowwise_y_ptr = out_metadata["rowwise_data"].reshape(num_rows, row_length)
+        rowwise_y_ptr = triton.reinterpret(rowwise_y_ptr, tl_dtype)
+        rowwise_scale_inv_ptr = out_metadata["rowwise_scale_inv"]
+        rowwise_scale_M, rowwise_scale_N = rowwise_scale_inv_ptr.shape
+        rowwise_scale_stride_M, rowwise_scale_stride_N = rowwise_scale_inv_ptr.stride(0), rowwise_scale_inv_ptr.stride(1)
+    
+    colwise_y_ptr, colwise_scale_inv_ptr = None, None
+    colwise_scale_M, colwise_scale_N = 1, 1
+    colwise_scale_stride_M, colwise_scale_stride_N = 1, 1
+    if USE_COLWISE_SCALING:
+        colwise_y_ptr = out_metadata["columnwise_data"].reshape(num_rows, row_length)
+        colwise_y_ptr = triton.reinterpret(colwise_y_ptr, tl_dtype)
+        colwise_scale_inv_ptr = out_metadata["columnwise_scale_inv"]
+        colwise_scale_M, colwise_scale_N = colwise_scale_inv_ptr.shape
+        colwise_scale_stride_M, colwise_scale_stride_N = colwise_scale_inv_ptr.stride(0), colwise_scale_inv_ptr.stride(1)
+    
+    
     BLOCK_X = 64
     BLOCK_Y = 64
     GROUP_Y = MXFP8_BLOCK_SCALING_SIZE
     max_fp8 = get_fp8_max(fp8_dtype)
-    tl_dtype = te_dtype_to_triton_dtype(fp8_dtype)
     grid = lambda META: (triton.cdiv(num_rows, META['BLOCK_Y']) * triton.cdiv(row_length, META['BLOCK_X']),)
     _cast_transpose_triton_mxfp8[grid](
-        input_2d_view, triton.reinterpret(rowwise_y_ptr, tl_dtype), triton.reinterpret(colwise_y_ptr, tl_dtype), 
+        input_2d_view, rowwise_y_ptr, colwise_y_ptr, 
         input_2d_view.stride(0), input_2d_view.stride(1), 
         num_rows, row_length, 
-        rowwise_scale_inv_ptr, rowwise_scale_inv_ptr.stride(0), rowwise_scale_inv_ptr.stride(1),
+        rowwise_scale_inv_ptr, rowwise_scale_stride_M, rowwise_scale_stride_N,
         rowwise_scale_M, rowwise_scale_N,
-        colwise_scale_inv_ptr, colwise_scale_inv_ptr.stride(0), colwise_scale_inv_ptr.stride(1),
+        colwise_scale_inv_ptr, colwise_scale_stride_M, colwise_scale_stride_N,
         colwise_scale_M, colwise_scale_N,
         max_fp8, BLOCK_X, BLOCK_Y, GROUP_Y, MXFP8_BLOCK_SCALING_SIZE, USE_ROWWISE_SCALING, USE_COLWISE_SCALING)
 
