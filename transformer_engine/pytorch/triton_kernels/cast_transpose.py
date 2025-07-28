@@ -68,8 +68,8 @@ def _cast_transpose_triton(A, noop_ptr, C, T, stride_am, stride_an, stride_bn, s
         scale_inv_out = tl.fdiv(1.0, scale)
         tl.store(scale_inv_ptr, scale_inv_out)
 
-FP32_EXPONENT_BIAS: tl.constexpr = 127
-FP32_MANTISSA_BITS: tl.constexpr = 23
+FP32_EXPONENT_BIAS = tl.constexpr(127)
+FP32_MANTISSA_BITS = tl.constexpr(23)
 @triton.jit
 def exp2f_rcp_triton(biased_exp: tl.uint8) -> tl.float32:
     biased_exp_f32 = biased_exp.to(tl.float32)
