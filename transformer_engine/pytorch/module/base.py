@@ -39,6 +39,10 @@ from ..tensor import QuantizedTensor, Quantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..utils import get_device_compute_capability
+from ..triton_kernels.cast import te_quantize_triton
+
+from ..utils import non_tn_fp8_gemm_supported
+from ..tensor.float8_tensor import Float8Quantizer 
 
 __all__ = ["initialize_ub", "destroy_ub"]
 
@@ -939,6 +943,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         update_workspace: bool = True,
         skip_update_flag: Optional[torch.Tensor] = None,
         fsdp_group: Optional[dist_group_type] = None,
+        create_transpose_cache: bool = True,
     ) -> QuantizedTensor:
         """Get FP8 workspace buffer and maybe update its values
 
@@ -961,6 +966,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             over `update_workspace` if provided.
         fsdp_group: bool, default = None
             FSDP process group that the weights are distributed over.
+        create_transpose_cache: bool, default = True
+            Create transpose buffer from `tensor`.
         """
 
         # Try getting workspace from cache
@@ -978,6 +985,21 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             and out.data.shape != tensor.data.shape
         ):
             _fsdp_gather_tensors(fsdp_group, [tensor.data.shape], out)
+
+        if not non_tn_fp8_gemm_supported() and not create_transpose_cache:
+            current_quantizer = None
+            if out is None:
+                current_quantizer = quantizer
+            else:
+                if hasattr(out, "quantize_"):
+                    current_quantizer = out._get_quantizer()
+                else:
+                    current_quantizer = quantizer
+                    
+            assert isinstance(current_quantizer, Float8Quantizer), "`create_tranpose_buffer=False` only availabe in `Float8Quantizer`."
+
+            # NOTE: Not create transpose buffer internally.
+            current_quantizer.columnwise_usage = False
 
         # Construct workspace if needed
         if out is None:
@@ -1001,7 +1023,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if hasattr(out, "quantize_"):
                 out.quantize_(tensor, noop_flag=skip_update_flag)
             else:
-                tex.quantize(tensor, quantizer, out, skip_update_flag)
+                use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+                quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
+                quantize_func(tensor, quantizer, out, skip_update_flag)
 
         return out
 

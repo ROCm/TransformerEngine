@@ -27,10 +27,144 @@
 #include "../util/vectorized_pointwise.h"
 #include "../util/logging.h"
 
+namespace transformer_engine {
+
 namespace {
 
+template<typename T> 
+struct CacheEntry {
+  T value;
+  hipEvent_t event;
+
+  constexpr CacheEntry() : value(), event(nullptr) {}
+  
+  bool isValid() const { return event != nullptr; }
+
+  bool isAvailable() const
+  {
+    if (event == nullptr)
+      return false;
+
+    hipError_t err = hipEventQuery(event);
+    if (err == hipSuccess)
+    {
+      return true;
+    }
+    else if (err == hipErrorNotReady)
+    {
+      return false;
+    }
+    else
+    {
+      NVTE_ERROR("Invalid event: err=", std::to_string(err), " ", hipGetErrorString(err));
+      return false;
+    }
+  }
+};
+
+template<typename T, typename K> 
+class ObjCache {
+public:
+  using Data = std::unordered_map<K, std::unordered_map<hipStream_t, CacheEntry<T>>>;
+  static constexpr CacheEntry<T> invalidEntry{};
+
+  const CacheEntry<T>& get(const K& key, const hipStream_t stream) const
+  {
+    auto key_itr = data.find(key); 
+    if (key_itr == data.end())
+      return invalidEntry;
+
+    auto key_item = key_itr->second;
+
+    if (auto itr = key_item.find(stream); itr != key_item.end())
+      return itr->second;
+
+    return invalidEntry;
+  }
+
+  CacheEntry<T> acquire(const K& key, hipStream_t stream, bool get_available = true)
+  {
+    auto key_itr = data.find(key); 
+    if (key_itr == data.end())
+      return invalidEntry;
+
+    auto key_item = key_itr->second;
+
+    if (auto itr = key_item.find(stream); itr != key_item.end())
+    {
+      auto ret = itr->second;
+      key_item.erase(itr);
+      return ret;
+    }
+    
+    if (!get_available)
+      return invalidEntry;
+
+    for (auto itr = key_item.begin(); itr != key_item.end(); ++itr) {
+      if (itr->second.isAvailable()) {
+        auto ret = itr->second;
+        key_item.erase(itr);
+        return ret;
+      }
+    }
+    return invalidEntry;
+  }
+
+  void set(const K& key, hipStream_t stream, const CacheEntry<T>& item)
+  { 
+    data[key][stream] = item; 
+  }
+
+  ObjCache(void (*a_offload)(const Data&)): offload(a_offload) {}
+
+  ~ObjCache()
+  {
+    if (!data.empty() && offload != nullptr)
+    {
+      offload(data);
+    }
+  }
+
+protected:
+  void (*offload)(const Data&);
+  Data data;
+};
+
+template<typename T, typename K>
+class ObjPool: public ObjCache<T, K> {
+  public:
+    const CacheEntry<T>& get(const K& key, const hipStream_t stream) const
+    {
+      std::lock_guard<std::mutex> lock(mt);
+      return ObjCache<T, K>::get(key, stream);
+    }
+
+    CacheEntry<T> acquire(const K& key, const hipStream_t stream, bool get_available = true)
+    {
+      std::lock_guard<std::mutex> lock(mt);
+      return ObjCache<T, K>::acquire(key, stream, get_available);
+    }
+
+    void store(const typename ObjCache<T, K>::Data &cache)
+    {
+      std::lock_guard<std::mutex> lock(mt);
+      for (const auto &it: cache)
+      {
+        for (const auto &it2: it.second)
+        {
+          ObjCache<T, K>::set(it.first, it2.first, it2.second);
+        }
+      }
+    }
+
+  ObjPool(): ObjCache<T, K>(nullptr) {}
+
+  private:
+    mutable std::mutex mt;
+};
+  
+
 static hipDataType get_hipblaslt_dtype(const transformer_engine::DType t) {
-  using namespace transformer_engine;
   switch (t) {
     case DType::kFloat16:
       return HIP_R_16F;
@@ -138,12 +272,6 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
   return ret;
 }
 
-} //namespace
-
-
-namespace transformer_engine {
-
-namespace {
 
 static class HandlePool {
 public:
@@ -754,8 +882,6 @@ static inline int getIntEnv(const char *name, int defval, int minval)
   return val;
 }
 
-} //namespace
-
 
 /* Warning: only call once per device!
  * When calling nvte_multi_stream_cublas_gemm with hipblaslt backend
@@ -768,6 +894,7 @@ static void init_hipblaslt_handles(hipblasLtHandle_t* hipblaslt_handles) {
     NVTE_CHECK_HIPBLASLT(hipblasLtCreate(&hipblaslt_handles[i]));
   }
 }
+
 
 void hipblaslt_gemm(const Tensor *inputA,
                     const Tensor *inputB,
@@ -1048,8 +1175,7 @@ void hipblaslt_gemm(const Tensor *inputA,
                     << tuneLoopCount << " loops " << std::endl;
 
         NVTE_CHECK_CUDA(hipStreamSynchronize(stream));
-        hipStream_t profilingStream;
-        NVTE_CHECK_CUDA(hipStreamCreateWithFlags(&profilingStream, hipStreamNonBlocking));
+        hipStream_t &profilingStream = stream; // Reuse the stream for profiling
         using tuning_clock = std::chrono::steady_clock;
         tuning_clock::now(); //the first call takes little longer so do it outside the loop
         tuning_clock::duration bestTime = tuning_clock::duration::max();
@@ -1109,7 +1235,6 @@ void hipblaslt_gemm(const Tensor *inputA,
           }
         }
 
-        NVTE_CHECK_CUDA(hipStreamDestroy(profilingStream));
         if (bestAlgo >= 0)
         {
           if (logTuning)
@@ -1175,16 +1300,130 @@ void hipblaslt_gemm(const Tensor *inputA,
   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescDestroy(operationDesc));
 }
 
+
+typedef unsigned long long ServiceStreamKey;
+
+ServiceStreamKey make_service_stream_key(const int device_id, const int cu_count) {
+  return (static_cast<ServiceStreamKey>(device_id) << 32) | static_cast<ServiceStreamKey>(cu_count);
+}
+
+std::pair<int, int> parse_service_stream_key(const ServiceStreamKey &key) {
+  int device_id = static_cast<int>(key >> 32);
+  int cu_count = static_cast<int>(key & 0xFFFFFFFF);
+  return std::make_pair(device_id, cu_count);
+}
+
+static ObjPool<hipStream_t, ServiceStreamKey> service_stream_pool;
+
+thread_local static ObjCache<hipStream_t, ServiceStreamKey> service_stream_cache(
+  [](const ObjCache<hipStream_t, ServiceStreamKey>::Data &d) { service_stream_pool.store(d); }
+);
+
+struct ServiceStreamCtl {
+  hipStream_t stream;
+  hipEvent_t start_event;
+  hipEvent_t end_event;
+};
+
+
+bool get_service_stream(int math_sm_count, hipStream_t stream, struct ServiceStreamCtl &ctl)
+{
+  if (math_sm_count == 0)
+    return false; // No service stream needed
+
+  int device_id;
+  int device_cu_count = 0;
+  NVTE_CHECK_CUDA(hipGetDevice(&device_id));
+  NVTE_CHECK_CUDA(hipDeviceGetAttribute(&device_cu_count, hipDeviceAttributeMultiprocessorCount, device_id));
+  if (math_sm_count < 0 || math_sm_count > device_cu_count)
+  {
+    std::cerr << "[WARNING] Invalid math_sm_count: " << math_sm_count << std::endl;
+    return false; // Invalid math_sm_count
+  }
+  else if (math_sm_count == device_cu_count)
+  {
+    return false; // math_sm_count == device_cu_count is equivalent to math_sm_count == 0
+  }
+
+  // Check if stream is capturing
+  hipStreamCaptureStatus captureStatus;
+  NVTE_CHECK_CUDA(hipStreamIsCapturing(stream, &captureStatus));
+  if (captureStatus != hipStreamCaptureStatusNone)
+  {
+    std::cerr << "[WARNING] Cannot use math_sm_count with captured stream" << std::endl;
+    return false; // Cannot use service stream with captured stream
+  }
+
+  ServiceStreamKey key = make_service_stream_key(device_id, math_sm_count);
+  CacheEntry<hipStream_t> streamEntry = service_stream_cache.get(key, stream);
+  if (!streamEntry.isValid()) {
+    /* There is no entry in the cache, try the following:
+      * 1. Try to acquire any available stream form the cache.
+      * 2. If not available, try to acquire any available stream form the pool.
+      * 3. If still not available, create a new stream and event. */
+    bool b_log = false;
+    if (const char* env_p = std::getenv("NVTE_LOG_MATH_SM_COUNT") ) {
+      b_log = (env_p != nullptr) && (std::string(env_p) == "1");
+    }
+    streamEntry = service_stream_cache.acquire(key, stream);
+    if (!streamEntry.isValid()) {
+      streamEntry = service_stream_pool.acquire(key, stream);
+    }
+    if (!streamEntry.isValid())
+    {
+      const uint32_t maskSize = (math_sm_count + 31) / 32;
+      std::vector<uint32_t> mask(maskSize, (uint32_t)-1);
+      if (math_sm_count % 32 != 0)
+      {
+        mask[maskSize-1] = (1UL << (math_sm_count % 32)) - 1;
+      }
+      NVTE_CHECK_CUDA(hipExtStreamCreateWithCUMask(&streamEntry.value, maskSize, mask.data()));
+      NVTE_CHECK_CUDA(hipEventCreateWithFlags(&streamEntry.event, hipEventDisableTiming));
+      if (b_log)
+      {
+        std::cout << "[DEBUG] Created service stream for device " << device_id
+                  << " with " << math_sm_count << " CUs" << std::endl;
+      }
+    }
+    else if (b_log)
+    {
+      std::cout << "[DEBUG] Reusing service stream for device " << device_id
+                << " with " << math_sm_count << " CUs" << std::endl;
+    }
+    service_stream_cache.set(key, stream, streamEntry);
+  }
+
+  ctl.stream = streamEntry.value;
+  ctl.end_event = streamEntry.event;
+  NVTE_CHECK_CUDA(hipEventCreateWithFlags(&ctl.start_event, hipEventDisableTiming));
+  NVTE_CHECK_CUDA(hipEventRecord(ctl.start_event, stream));
+  NVTE_CHECK_CUDA(hipStreamWaitEvent(ctl.stream, ctl.start_event, 0));
+  return true; 
+}
+
+void release_service_stream(hipStream_t stream, struct ServiceStreamCtl &ctl)
+{
+    NVTE_CHECK_CUDA(hipEventRecord(ctl.end_event, ctl.stream));
+    NVTE_CHECK_CUDA(hipStreamWaitEvent(stream, ctl.end_event, 0));
+    //TODO: when event are really destroyed (documentation says on devide synchronize) and how much overhead is to create them
+    //May need to store event in eventPool and reuse them after thy are recorded
+    NVTE_CHECK_CUDA(hipEventDestroy(ctl.start_event));
+}
+
+} // namespace
+
+
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, int m, int n, int k, int lda,
                  int ldb, int ldd, bool transa, bool transb, bool grad,
                  void *workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                  int math_sm_count, int m_split, int n_split, bool gemm_producer,
                  const Tensor *inputCounter, hipStream_t stream, int compute_stream_offset)
-{  
-  // ROCBLAS support has been removed. HIPBLASLT is the only GEMM backend supported.
-  
-  // Check compute_stream_offset valid.
+{
+  ServiceStreamCtl ss_ctl;
+  bool use_service_stream =
+      (math_sm_count != 0) ? get_service_stream(math_sm_count, stream, ss_ctl) : false;
+
   NVTE_CHECK(compute_stream_offset >= -1 && compute_stream_offset < num_streams);
 
   hipblasLtHandle_t handle = nullptr;
@@ -1204,8 +1443,12 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                   grad,
                   workspace, workspaceSize, accumulate, use_split_accumulator,
                   math_sm_count, m_split, n_split, gemm_producer,
-                  inputCounter, stream,
-                  handle);
+                  inputCounter, use_service_stream ? ss_ctl.stream : stream, handle);
+
+  if (use_service_stream)
+  {
+    release_service_stream(stream, ss_ctl);
+  }
 }
 
 } //namespace transformer_engine

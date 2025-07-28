@@ -362,6 +362,8 @@ else()
 
   find_package(hip)
   list(APPEND transformer_engine_LINKER_LIBS hip::host hip::device roctx64)
+  find_package(hiprtc)
+  list(APPEND transformer_engine_LINKER_LIBS hiprtc)
   find_package(hipblaslt)
   list(APPEND transformer_engine_LINKER_LIBS roc::hipblaslt)
   if(USE_FUSED_ATTN_AOTRITON)

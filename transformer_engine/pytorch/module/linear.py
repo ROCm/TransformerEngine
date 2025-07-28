@@ -59,6 +59,8 @@ from ..tensor.quantized_tensor import (
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
+from ..rocm_utils import create_fp8_weight_transpose_cache, clear_fp8_weight_transpose_cache
+
 
 __all__ = ["Linear"]
 
@@ -102,6 +104,7 @@ class _Linear(torch.autograd.Function):
         fsdp_group: Union[dist_group_type, None],
         module: torch.nn.Module,
         skip_fp8_weight_update: bool,
+        keep_fp8_weight_transpose_cache: bool,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
 
@@ -200,6 +203,7 @@ class _Linear(torch.autograd.Function):
                     update_workspace=update_workspace,
                     skip_update_flag=skip_fp8_weight_update,
                     fsdp_group=fsdp_group,
+                    create_transpose_cache=keep_fp8_weight_transpose_cache,
                 )
 
         # Cast bias to expected dtype
@@ -340,6 +344,7 @@ class _Linear(torch.autograd.Function):
             ctx.requires_wgrad = weight.requires_grad
             ctx.reduce_and_update_bwd_fp8_tensors = False
             ctx.owns_input = saved_inputmat is not inp
+            ctx.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
             if ctx.fp8 and requires_grad(inp, weight, bias):
                 _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
@@ -520,6 +525,9 @@ class _Linear(torch.autograd.Function):
                 if ctx.grad_input_quantizer is not None:
                     ctx.grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
 
+                if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
+                    create_fp8_weight_transpose_cache(weight_fp8)
+                    
                 # dgrad GEMM
                 nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
                 dgrad_gemm_use_split_accumulator = _2X_ACC_DGRAD
@@ -546,6 +554,9 @@ class _Linear(torch.autograd.Function):
                     bulk_overlap=ctx.ub_bulk_dgrad,
                 )
                 nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
+
+                if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
+                    clear_fp8_weight_transpose_cache(weight_fp8)
 
                 # Launch tensor-parallel communication
                 if ctx.ub_overlap_rs_dgrad:
@@ -719,6 +730,7 @@ class _Linear(torch.autograd.Function):
             None,  # fsdp_group
             None,  # module
             None,  # skip_fp8_weight_update
+            None,  # keep_fp8_weight_transpose_cache
         )
 
 
@@ -789,6 +801,10 @@ class Linear(TransformerEngineBaseModule):
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
+    keep_fp8_weight_transpose_cache: bool, default = 'True'
+                                     if set to `False`, it will not cache fp8 weight buffer instead of 
+                                     recomputing fp8 weight transpose. Recommend set to `False` when
+                                     enable FSDP parallel.
 
     """
 
@@ -815,6 +831,7 @@ class Linear(TransformerEngineBaseModule):
         ub_bulk_dgrad: bool = False,
         ub_bulk_wgrad: bool = False,
         ub_name: Optional[str] = None,
+        keep_fp8_weight_transpose_cache: bool = True,
     ) -> None:
         super().__init__()
 
@@ -1009,6 +1026,8 @@ class Linear(TransformerEngineBaseModule):
             self.gemm_bias_unfused_add = True
         else:
             self.gemm_bias_unfused_add = False
+        
+        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
 
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
@@ -1150,6 +1169,7 @@ class Linear(TransformerEngineBaseModule):
                 self.fsdp_group,
                 self,
                 skip_fp8_weight_update,
+                self.keep_fp8_weight_transpose_cache,
             )
             out = linear_fn(*args)
         if self.gemm_bias_unfused_add:
