@@ -159,3 +159,4 @@ def test_layernorm_fwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma):
         rtol_stats,
         lambda msg: f"rsigma does not match triton <-> ref\n\n{msg}\n",
     )
+

@@ -123,3 +123,4 @@ def te_dequantize_triton(input, dtype=torch.float32):
         return tex.dequantize(input, dtype)
     else:
         raise NotImplementedError(f"Not implemented for tensor type: '{type(input).__name__}'")
+

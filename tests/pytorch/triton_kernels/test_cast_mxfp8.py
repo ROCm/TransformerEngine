@@ -203,3 +203,4 @@ def test_quantize_dequantize_mxfp8(shape, in_dtype, out_dtype, block_sizes):
     if colwise:
         compare_results(cmp, quantized_out_triton._columnwise_data.view(torch_out_dtype),  quantized_out_columnwise_ref, atol_fp8, rtol_fp8, "columnwise data doesn't match")
         compare_results("torch", quantized_out_triton._columnwise_scale_inv,  columnwise_scale_inv_ref, 0.0, 0.0, "colwise scale inv doesn't match")
+
