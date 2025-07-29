@@ -24,7 +24,6 @@ This command uses the following parameters:
 
 {builder_image_tag} - tag for generated image
 
-The Docker command may accept optional build arguments (--build-arg):
 
 TARGET_BRANCH - parameter is branch name; if specified, use named branch instead of default one
 
@@ -60,3 +59,6 @@ Take the wheel and tarball archives created by step 2, and run
 This will build the target-specific code on the target machine
 
 Note that it may be necessary to include the flag --no-build-isolation for this installation to be successful
+
+.. |License| image:: https://img.shields.io/badge/License-Apache%202.0-blue.svg
+   :target: https://opensource.org/licenses/Apache-2.0
