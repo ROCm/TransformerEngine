@@ -16,7 +16,7 @@
 	url = https://github.com/ROCm/aotriton.git
 [submodule "3rdparty/aiter"]
 	path = 3rdparty/aiter
-	url = https://github.com/ROCm/aiter.git
+	url = https://github.com/SKPsanjeevi/aiter.git
 [submodule "examples/pytorch/nanogpt"]
 	path = examples/pytorch/nanogpt
 	url = https://github.com/floraamd/nanoGPTwTE.git
