@@ -27,11 +27,8 @@ def prepare_for_saving(
     # pylint: disable=unidiomatic-typecheck  # Using type instead of isinstance to check exact type
     tensor_list, tensor_objects_list = [], []
     for tensor in tensors:
-        if tensor is None:
-            tensor_list.append(None)
-            tensor_objects_list.append(None)
-        elif type(tensor) in (torch.Tensor, torch.nn.Parameter):
-            tensor_list.append(tensor.data)
+        if tensor is None or isinstance(tensor, torch.Tensor):
+            tensor_list.append(tensor)
             tensor_objects_list.append(None)
         else:
             t, t_obj = tensor.prepare_for_saving()
