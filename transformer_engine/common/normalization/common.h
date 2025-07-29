@@ -43,18 +43,28 @@ struct LaunchParams {
   size_t workspace_bytes = 0;
   size_t barrier_bytes = 0;
   size_t dgamma_part_bytes = 0;
+#ifdef __HIP_PLATFORM_AMD__
+  size_t mxfp8_buffer_bytes = 0;
+#endif
   int multiprocessorCount;
   cudaStream_t stream;
 
   KernelParamsType params;
 
   size_t getTotalWorkspaceBytes(const bool _is_layernorm = true) const {
+#ifdef __HIP_PLATFORM_AMD__
+  return (workspace_bytes + barrier_bytes + size_t(_is_layernorm + 1) * dgamma_part_bytes + mxfp8_buffer_bytes);
+#else
     return (workspace_bytes + barrier_bytes + size_t(_is_layernorm + 1) * dgamma_part_bytes);
+#endif
   }
   void alignWorkspace(size_t alignment = 16) {
     workspace_bytes = DIVUP(workspace_bytes, alignment) * alignment;
     barrier_bytes = DIVUP(barrier_bytes, alignment) * alignment;
     dgamma_part_bytes = DIVUP(dgamma_part_bytes, alignment) * alignment;
+#ifdef __HIP_PLATFORM_AMD__
+    mxfp8_buffer_bytes = DIVUP(mxfp8_buffer_bytes, alignment) * alignment;
+#endif
   }
 };
 
@@ -98,7 +108,11 @@ struct KernelParamsBase {
 
 struct ForwardKernelParams : public KernelParamsBase {
   ForwardKernelParams()
+#ifdef __HIP_PLATFORM_AMD__
+      : KernelParamsBase(), z(nullptr), beta(nullptr), epsilon(0.f), fp8_out(false), mxfp8_out(false) {}
+#else
       : KernelParamsBase(), z(nullptr), beta(nullptr), epsilon(0.f), fp8_out(false) {}
+#endif
 
   // Output of LN FWD.
   void* z;
@@ -118,6 +132,14 @@ struct ForwardKernelParams : public KernelParamsBase {
 
   // Whether to compute scale and amax
   bool fp8_out;
+
+#ifdef __HIP_PLATFORM_AMD__
+  // MXFP8 requires an additional buffer, and the full tensor
+  bool mxfp8_out;
+  void *mxfp8_buffer;
+  Tensor *z_tensor;
+  bool training;
+#endif
 };
 
 struct BackwardKernelParams : public KernelParamsBase {
@@ -245,7 +267,11 @@ class TeNormalizationPlan : public NormalizationPlanBase {
  public:
   TeNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype,
                       DType otype, DType ctype, const size_t batch_size, const size_t hidden_size,
-                      const size_t sm_count, const bool zero_centered_gamma, const bool is_tuned);
+                      const size_t sm_count, const bool zero_centered_gamma, const NVTEScalingMode mode
+#ifdef __HIP_PLATFORM_AMD__
+                      , const bool training, const bool is_tuned
+#endif
+                    );
   std::vector<size_t> getWorkspaceShape() const override;
 
   void execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr, void* mean_dptr,

@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -199,6 +201,16 @@ void nvte_quantize_dbias_dqgelu(const NVTETensor input, const NVTETensor act_inp
 void nvte_quantize_dbias_dsrelu(const NVTETensor input, const NVTETensor act_input,
                                 NVTETensor output, NVTETensor dbias, NVTETensor workspace,
                                 cudaStream_t stream);
+
+#ifdef __HIP_PLATFORM_AMD__
+/*! \brief Casts normalized input tensor to MXFP8.
+ *
+ *  \param[in]      input            Input tensor to be cast.
+ *  \param[in,out]  output           Output MXFP8 tensor.
+ *  \param[in]      stream           CUDA stream used for the operation.
+ */
+void nvte_quantize_norm(const NVTETensor input, NVTETensor output, cudaStream_t stream);
+#endif 
 
 /*! \brief Casts input tensor from reduced to higher precision.
  *         If the scaling mode of the input tensor is set to NVTE_MXFP8_1D_SCALING,

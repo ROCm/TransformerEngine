@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -17,6 +19,7 @@
 #include <gtest/gtest.h>
 
 #include <transformer_engine/normalization.h>
+#include <transformer_engine/cast.h>
 #include <transformer_engine/transformer_engine.h>
 #include "../test_common.h"
 
@@ -39,7 +42,7 @@ std::map<NormType, std::string> normToString = {
 
 template <typename InputType, typename ScaleType, typename OutputType>
 void dequantize_1x_kernel(InputType* input_ptr, ScaleType* scale_ptr, OutputType* output_ptr,
-  size_t rows, size_t cols, size_t scaling_mode_x, size_t scaling_mode_y){
+  size_t rows, size_t cols, size_t scaling_mode_x, size_t scaling_mode_y) {
 
   const size_t block_size_Y = scaling_mode_x;   // mind the mapping Y <-- x
   const size_t block_size_X = scaling_mode_y;   //              and X <-- y
@@ -49,7 +52,11 @@ void dequantize_1x_kernel(InputType* input_ptr, ScaleType* scale_ptr, OutputType
   const size_t tiles_num_X = (cols + tile_size_X - 1) / tile_size_X;
   const size_t blocks_per_tile_Y = tile_size_Y / block_size_Y;
   const size_t blocks_per_tile_X = tile_size_X / block_size_X;
+#ifdef __HIP_PLATFORM_AMD__
+    const auto [_, __, ___, blocks_per_row] = get_scale_tensor_dims(rows, cols, scaling_mode_x, scaling_mode_y);
+#else
   const size_t blocks_per_row = (cols + block_size_X - 1) / block_size_X;
+#endif
 
   #pragma omp parallel for proc_bind(spread) schedule(static)
   for (size_t t = 0; t < tiles_num_Y * tiles_num_X; ++t) {
@@ -133,7 +140,11 @@ void compute_ref_stats(NormType norm_type,
       compute_t current = static_cast<compute_t>(data[i * H + j]);
       sum_sq += (current - m) * (current - m);
     }
+#ifdef __HIP_PLATFORM_AMD__
+    rsigma[i] = 1.0f / sqrtf((sum_sq / H) + epsilon);
+#else
     rsigma[i] = rsqrtf((sum_sq / H) + epsilon);
+#endif
   }
 }
 
@@ -173,9 +184,11 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   cudaDeviceProp prop;
   cudaGetDeviceProperties(&prop, 0);
 
+#ifndef __HIP_PLATFORM_AMD__
   if (getDeviceComputeCapability() < blackwellComputeCapability) {
     GTEST_SKIP();
   }
+#endif
 
   using WeightType = InputType;
   DType itype = TypeInfo<InputType>::dtype;
@@ -279,7 +292,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   compareResults("output_rowwise", dequantized_output, ref_output.get(), true, atol, rtol, false);
   if (is_training)
     compareResults("output_colwise", dequantized_output, ref_output.get(), false, atol, rtol, false);
-}
+  }
 
 std::vector<std::pair<size_t, size_t>> test_cases = {
   {32, 32},

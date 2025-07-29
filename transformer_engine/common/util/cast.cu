@@ -143,6 +143,24 @@ void nvte_quantize_dbias_dsrelu(const NVTETensor input, const NVTETensor activat
       activation_input, input, nullptr, output, dbias, workspace, stream);
 }
 
+#ifdef __HIP_PLATFORM_AMD__
+void nvte_quantize_norm(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_quantize_norm);
+  using namespace transformer_engine;
+
+  constexpr bool IS_DBIAS = false;
+  constexpr bool IS_DACT = false;
+  constexpr bool IS_ACT = false;
+  constexpr bool IS_NORM = true;
+  constexpr NVTETensor dbias = nullptr;
+  constexpr NVTETensor workspace = nullptr;
+  constexpr const NVTETensor grad = nullptr;
+
+  detail::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, nullptr, IS_NORM>(input, grad, nullptr, output,
+                                                                     dbias, workspace, stream);
+}
+#endif
+
 void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_dequantize);
   using namespace transformer_engine;
