@@ -403,6 +403,7 @@ def te_rmsnorm_fwd_triton(
         q_scale = quantizer.scale
         q_amax = quantizer.amax
         out_ptr = triton.reinterpret(out._data, tl_dtype)
+        out_stride = out._data.stride(0)
         if quantizer.columnwise_usage:
             if out._transpose_invalid:
                 out._transpose = torch.empty((out._data.shape[1], out._data.shape[0]), dtype=out._data.dtype)
@@ -413,13 +414,13 @@ def te_rmsnorm_fwd_triton(
             out_transpose_ptr = None
             out_transpose_stride = None
     else:
-        out = torch.empty_like(input, dtype=pt_otype) if ln_out is None else ln_out
         amax = None
         tl_dtype = None
         scale_inv_ptr = None
         q_scale = None
         q_amax = None
-        out_ptr = out
+        out_ptr = torch.empty_like(input, dtype=pt_otype) if ln_out is None else ln_out
+        out_stride = out_ptr.stride(0)
         out_transpose_ptr = None
         out_transpose_stride = None
 
@@ -433,7 +434,7 @@ def te_rmsnorm_fwd_triton(
         weight,
         rsigma,
         input.stride(0),
-        out.stride(0),
+        out_stride,
         N, H, eps,
         amax,
         q_amax,
@@ -448,6 +449,6 @@ def te_rmsnorm_fwd_triton(
         IS_FP8,
     )
     if IS_MFP8:
-        out = quantizer.quantize(out)
+        out_ptr = quantizer.quantize(out_ptr)
 
-    return out, None, rsigma
+    return out_ptr, None, rsigma

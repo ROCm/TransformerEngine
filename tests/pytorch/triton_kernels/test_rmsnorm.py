@@ -217,3 +217,15 @@ def test_rmsnorm_fwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma, quan
             5e-5,
             lambda msg: f"Output scale inverse does not match triton <-> hip\n\n{msg}\n",
         )
+        if quantizer_triton.columnwise_usage:
+            assert not ln_out_triton._transpose_invalid, "Expected a valid transpose buffer."
+            compare_results(
+                "te",
+                ln_out_triton._transpose,
+                ln_out_hipified._transpose,
+                1e-6,
+                5e-5,
+                lambda msg: f"Output transpose does not match triton <-> hip\n\n{msg}\n",
+            )
+        else:
+            assert ln_out_triton._transpose_invalid, "Expected an invalid transpose buffer."
