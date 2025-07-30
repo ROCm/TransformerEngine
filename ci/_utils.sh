@@ -202,3 +202,17 @@ start_message() {
     echo "ROCm: `ls -d /opt/rocm-*`"
     python --version
 }
+
+configure_omp_threads() {
+    n_vcpus=$(lscpu | grep "^CPU(s):" | awk '{print $2}')
+    cpus_per_core=$(lscpu | grep "Thread(s) per core:" | awk '{print $NF}')
+
+    n_physical_cores=$((n_vcpus / cpus_per_core))
+
+    if [ -z ${OMP_NUM_THREADS} ]; then
+        export OMP_NUM_THREADS=$n_physical_cores
+	echo "Setting OMP_NUM_THREADS=${OMP_NUM_THREADS}"
+    else
+        echo "Using OMP_NUM_THREADS=${OMP_NUM_THREADS}"
+    fi
+}

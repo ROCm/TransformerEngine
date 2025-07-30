@@ -62,20 +62,4 @@ std::pair<bias_enum, BiasShape> get_ck_bias_type_shape(BiasType attn_bias_type, 
   return std::make_pair(bias_type, bias_shape); 
 }
 
-//CK_FUSED_ATTN MaskType to ck_tile mask enum
-mask_enum get_ck_mask_type(MaskType attn_mask_type){
-  mask_enum mask_type;
-  if (attn_mask_type == MaskType::no_mask){
-    mask_type = mask_enum::no_mask;
-  }else if(attn_mask_type == MaskType::mask_top_left){
-    mask_type = mask_enum::mask_top_left;
-  }else if(attn_mask_type == MaskType::mask_bottom_right){
-    mask_type = mask_enum::mask_bottom_right;
-  }else{
-    mask_type = mask_enum::window_generic;
-  }
-
-  return mask_type;
-}
-
 }//namespace ck_fused_attn

@@ -21,12 +21,12 @@ list(APPEND test_cuda_sources
             test_multi_padding.cu
             test_causal_softmax.cu
             test_swizzle.cu
-            ../test_common.cu)
+            test_cast_mxfp8_gated_swiglu.cu
+            test_cast_mxfp8.cu
+            test_dequantize_mxfp8.cu
+	          ../test_common.cu)
 if(USE_CUDA)
   list(APPEND test_cuda_sources
-              test_cast_mxfp8_gated_swiglu.cu
-              test_cast_mxfp8.cu
-              test_dequantize_mxfp8.cu
               test_normalization_mxfp8.cu)
 else()
   list(APPEND test_cuda_sources
