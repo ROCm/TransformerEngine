@@ -233,6 +233,7 @@ using e8m0_t = uint8_t;
 using bf16 = hip_bfloat16;
 using fp8e4m3 = te_hip_fp8_e4m3;
 using fp8e5m2 = te_hip_fp8_e5m2;
+using e8m0_t = uint8_t;
 #endif //__HIP_PLATFORM_AMD__
 
 namespace detail {

@@ -28,6 +28,9 @@
 #include "../utils.cuh"
 #include "math.h"
 #include "ptx.cuh"
+#ifdef __HIP_PLATFORM_AMD__
+#include "rocm_cast_gated_kernels.cuh"
+#endif
 
 namespace transformer_engine {
 
@@ -38,6 +41,7 @@ __device__ __host__ __forceinline__ uint64_t DIVUP_TO_MULTIPLE(T1 N, T2 M) {
 
 namespace gated_kernels {
 
+#ifndef __HIP_PLATFORM_AMD__
 constexpr size_t ALIGNMENT_SIZE = 128;
 constexpr size_t CHUNK_DIM_Y = 128;
 constexpr size_t CHUNK_DIM_X = 128;
@@ -56,7 +60,6 @@ static_assert(ITERATIONS >= 1);
 
 __device__ inline float sigmoidf(const float x) { return __frcp_rn(1.0f + __expf(-x)); }
 
-#ifndef __HIP_PLATFORM_AMD__
 template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &), typename IType, typename OType>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
@@ -802,6 +805,7 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
               cols););  // NOLINT(*)
   );                    // NOLINT(*)
 }
+#endif //#ifdef __HIP_PLATFORM_AMD__
 
 template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &)>
@@ -850,6 +854,15 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
               TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
                   output->dtype(), OType,
 
+#ifdef __HIP_PLATFORM_AMD__
+                  const IType *tensor_map_grad = IS_DGATED ? reinterpret_cast<const IType *>(grad.data.dptr) : nullptr;
+                  const IType *tensor_map_input_act = reinterpret_cast<const IType *>(gated_input.data.dptr);
+                  const IType *tensor_map_input_gate = reinterpret_cast<const IType *>(gated_input.data.dptr) + cols;
+                  OType *tensor_map_output_act_rowwise = USE_ROWWISE_SCALING ? reinterpret_cast<OType *>(output->data.dptr) : nullptr;
+                  OType *tensor_map_output_gate_rowwise = USE_ROWWISE_SCALING ? reinterpret_cast<OType *>(output->data.dptr) + cols : nullptr;
+                  OType *tensor_map_output_act_colwise = USE_COLWISE_SCALING ? reinterpret_cast<OType *>(output->columnwise_data.dptr) : nullptr;
+                  OType *tensor_map_output_gate_colwise = USE_COLWISE_SCALING ? reinterpret_cast<OType *>(output->columnwise_data.dptr) + cols : nullptr;
+#else // #ifdef __HIP_PLATFORM_AMD__
                   alignas(64) CUtensorMap tensor_map_grad{};
                   alignas(64) CUtensorMap tensor_map_input_act{};
                   alignas(64) CUtensorMap tensor_map_input_gate{};
@@ -886,6 +899,7 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
                                          rows, cols, SHMEM_DIM_Y, SHMEM_DIM_X, tensor_stride_elems,
                                          cols, sizeof(OType));
                   }
+#endif // #ifdef __HIP_PLATFORM_AMD__
 
                   const size_t buff_elems_total = BUFFERS_NUM * SHMEM_DIM_Y * SHMEM_DIM_X;
                   const size_t buff_size_aligned_in =
@@ -908,10 +922,10 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
 
                   const size_t shmem_size = ALIGNMENT_SIZE + in_mem + out_mem;
 
-                  cudaFuncSetAttribute(
-                      cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType,
+                  NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                      (const void*)cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType,
                                               SCALE_DIM_Y, SCALE_DIM_X>,
-                      cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size);
+                      cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
 
                   cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType,
                                           SCALE_DIM_Y, SCALE_DIM_X>
@@ -925,7 +939,6 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
       );                                        // NOLINT(*)
   );                                            // NOLINT(*)
 }
-#endif //#ifndef __HIP_PLATFORM_AMD__
 
 template <typename ParamOP, float (*ActOP)(float, const ParamOP &)>
 void cast_gated(const Tensor &input, Tensor *output, cudaStream_t stream) {
@@ -1001,7 +1014,9 @@ template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP 
           float (*DActOP)(float, const ParamOP &)>
 void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *output,
                     cudaStream_t stream) {
+#ifndef __HIP_PLATFORM_AMD__
   checkCuDriverContext(stream);
+#endif
   constexpr bool allow_empty = false;
   CheckInputTensor(gated_input, "gated_input");
   CheckOutputTensor(*output, "output", allow_empty);
@@ -1036,23 +1051,26 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
     NVTE_CHECK(output->flat_last_dim() == output_cols, "Wrong dimension of the output.");
   }
 
-#ifndef __HIP_PLATFORM_AMD__
   const bool use_tma_kernels = is_fp8_rowwise_output && is_fp8_colwise_output && cols % 32 == 0;
-#endif //#ifndef __HIP_PLATFORM_AMD__
 
   if (is_delayed_tensor_scaling(output->scaling_mode)) {
-#ifndef __HIP_PLATFORM_AMD__
+#ifdef __HIP_PLATFORM_AMD__
+    if constexpr (IS_DGATED) {
+        cast_dgated<ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
+      } else {
+        cast_gated<ParamOP, ActOP>(gated_input, output, stream);
+      }
+#else
     if (use_tma_kernels) {
       cast_fp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
     } else {
-#endif //#ifndef __HIP_PLATFORM_AMD__
       if constexpr (IS_DGATED) {
         cast_dgated<ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
       } else {
         cast_gated<ParamOP, ActOP>(gated_input, output, stream);
       }
-#ifndef __HIP_PLATFORM_AMD__
     }
+#endif
   } else if (is_mxfp_scaling(output->scaling_mode)) {
     if (use_tma_kernels) {
       cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
@@ -1060,7 +1078,6 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
       NVTE_ERROR("Invalid input shape. Expected the last dimension to be divisible ",
                  "by 32, got input of shape ", gated_input.data.shape);
     }
-#endif //#ifndef __HIP_PLATFORM_AMD__
   } else {
     NVTE_ERROR("Not supported scaling mode");
   }
@@ -1080,7 +1097,11 @@ void quantize_gated_helper(const NVTETensor grad, const NVTETensor gated_input, 
   const Tensor gated_input_tensor = *reinterpret_cast<const Tensor *>(gated_input);
   Tensor *output_tensor = reinterpret_cast<Tensor *>(output);
 
+#ifdef __HIP_PLATFORM_AMD__
+  if (1) {
+#else
   if (is_supported_by_CC_100()) {
+#endif
     quantize_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad_tensor, gated_input_tensor,
                                                       output_tensor, stream);
   } else {
