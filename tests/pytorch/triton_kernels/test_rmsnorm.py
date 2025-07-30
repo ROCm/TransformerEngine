@@ -223,8 +223,8 @@ def test_rmsnorm_fwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma, quan
                 "te",
                 ln_out_triton._transpose,
                 ln_out_hipified._transpose,
-                1e-6,
-                5e-5,
+                atol,
+                rtol,
                 lambda msg: f"Output transpose does not match triton <-> hip\n\n{msg}\n",
             )
         else:
