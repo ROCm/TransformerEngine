@@ -6,13 +6,13 @@
 
 
 
-Building manylinux TransformerEngine wheels using Docker
+Building TransformerEngine wheels using Docker
 ********************************************************
 
 Step 1: Create Builder Image
 ============================
 
-Obtain Manylinux_2_28_x86_64 based docker image with ROCm installed on it
+Obtain a docker image with ROCm installed on it.
 
 In the TransformerEngine source tree at build_tool/wheel_utils run:
 .. code-block:: bash
