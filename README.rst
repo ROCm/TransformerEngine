@@ -77,9 +77,7 @@ Install TE
   pip install .
 
 It is also possible to build wheels for later installation with "pip wheel ." although those wheels will not be portable to systems with
-different libraries installed and this build may also require "--no-build-isolation"
-
-Wheel packages can be built using docker as described in `this page <DOCKER_WHEEL_BUILD.rst>`
+different libraries installed. This build may also require "--no-build-isolation" and if the build still fails with this flag try installing setuptools<80.0.0
 
 Test
 ====
