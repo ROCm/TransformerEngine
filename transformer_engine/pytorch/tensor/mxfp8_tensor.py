@@ -6,9 +6,11 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
+import os
 from typing import Optional, Tuple
 
 import torch
+from ..triton_kernels.cast import te_quantize_triton
 import transformer_engine_torch as tex
 
 from transformer_engine_torch import DType as TE_DType
@@ -59,7 +61,9 @@ class MXFP8Quantizer(Quantizer):
             src = src.contiguous()
 
         # Launch cast kernel
-        tex.quantize(src, self, dst, noop_flag)
+        use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+        quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
+        quantize_func(src, self, dst, noop_flag)
 
         # Update FP8 dtype
         dst._fp8_dtype = self.dtype
