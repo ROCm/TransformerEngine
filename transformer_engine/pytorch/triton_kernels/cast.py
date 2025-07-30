@@ -87,7 +87,7 @@ def te_quantize_triton(
     
     if isinstance(out, Float8TensorBase):
         if input_tensor.nelement() > 0:
-            if out.get_metadata()["data_transpose"] is not None:
+            if not out._transpose_invalid:
                 quantizer = out._get_quantizer()
                 input_scale = quantizer.scale
                 amax_out = quantizer.amax
