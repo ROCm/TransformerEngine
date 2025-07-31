@@ -69,6 +69,7 @@ run_test_config(){
     run_default_fa 1 triton_kernels/test_rmsnorm.py
     run_default_fa 1 triton_kernels/test_layernorm.py
     run_default_fa 1 triton_kernels/test_norm_common.py
+    run_default_fa 1 test_parallel_cross_entropy.py
     #NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa 3 test_numerics.py
     NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa 3 test_numerics.py
 }

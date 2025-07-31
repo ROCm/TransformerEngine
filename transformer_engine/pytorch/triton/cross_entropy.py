@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -13,6 +15,7 @@ import torch.distributed as dist
 
 import triton
 import triton.language as tl
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 
 @triton.jit
@@ -203,7 +206,10 @@ def cross_entropy_kernel(
 
 # The optimal maximum block size depends on your hardware, your kernel, and your dtype
 MAX_FUSED_SIZE = 65536 // 2
-
+if IS_HIP_EXTENSION:
+    NUM_WARPS = 16
+else:
+    NUM_WARPS = 32
 
 @triton.jit
 def element_mul_kernel(
@@ -281,7 +287,7 @@ def cross_entropy_forward(
         rank=rank,
         n_cols=V,
         BLOCK_SIZE=BLOCK_SIZE,
-        num_warps=32,
+        num_warps=NUM_WARPS,
     )
 
     world_size = 1 if dist_process_group is None else dist.get_world_size(dist_process_group)
@@ -309,7 +315,7 @@ def cross_entropy_forward(
         n_non_ignore=n_rows,
         label_smoothing=label_smoothing,
         BLOCK_SIZE=BLOCK_SIZE,
-        num_warps=32,
+        num_warps=NUM_WARPS,
     )
 
     loss = torch.reshape(loss_1d, (B, SQ)) if not reduce_loss else (torch.sum(loss_1d) / n_rows)
@@ -335,7 +341,7 @@ def cross_entropy_backward(_input: torch.Tensor, grad_output: torch.Tensor):
             grad_output,
             V,
             BLOCK_SIZE=BLOCK_SIZE,
-            num_warps=32,
+            num_warps=NUM_WARPS,
         )
 
     return _input
