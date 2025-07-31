@@ -41,7 +41,8 @@ from ..tensor import QuantizedTensor, Quantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..utils import get_device_compute_capability
-from ..triton_kernels.cast import te_quantize_triton
+if IS_HIP_EXTENSION:
+    from ..triton_kernels.cast import te_quantize_triton
 
 from ..utils import non_tn_fp8_gemm_supported
 from ..tensor.float8_tensor import Float8Quantizer 

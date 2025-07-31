@@ -18,7 +18,8 @@ from transformer_engine_torch import DType as TE_DType
 from ..utils import devices_match, non_tn_fp8_gemm_supported
 from ._internal.float8_tensor_base import Float8TensorBase, _FromFloat8Func
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
-from ..triton_kernels.cast import te_quantize_triton
+if IS_HIP_EXTENSION:
+    from ..triton_kernels.cast import te_quantize_triton
 
 aten = torch.ops.aten
 
