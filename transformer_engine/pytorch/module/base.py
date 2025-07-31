@@ -1071,9 +1071,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if hasattr(out, "quantize_"):
                 out.quantize_(tensor, noop_flag=skip_update_flag)
             else:
-                use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
-                quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
-                quantize_func(tensor, quantizer, out, skip_update_flag)
+                if IS_HIP_EXTENSION:
+                    use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+                    quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
+                    quantize_func(tensor, quantizer, out, skip_update_flag)
+                else:
+                    tex.quantize(tensor, quantizer, out, skip_update_flag)
 
         return out
 
