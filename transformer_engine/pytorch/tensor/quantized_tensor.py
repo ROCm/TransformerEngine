@@ -3,11 +3,11 @@
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 """Tensor with quantized data"""
 
 from __future__ import annotations
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import os
 from typing import Optional, Tuple, Iterable, Any, Dict, Union
 import abc
