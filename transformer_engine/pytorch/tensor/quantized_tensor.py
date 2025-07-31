@@ -7,6 +7,7 @@
 """Tensor with quantized data"""
 
 from __future__ import annotations
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import os
 from typing import Optional, Tuple, Iterable, Any, Dict, Union
 import abc
@@ -193,10 +194,13 @@ class _QuantizeFunc(torch.autograd.Function):
         quantizer: Quantizer,
     ) -> QuantizedTensor:
         # pylint: disable=missing-function-docstring
-        from ..triton_kernels.cast import te_quantize_triton
-        use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
-        quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
-        return quantize_func(tensor, quantizer)
+        if IS_HIP_EXTENSION:
+            from ..triton_kernels.cast import te_quantize_triton
+            use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+            quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
+            return quantize_func(tensor, quantizer)
+        else:
+            return tex.quantize(tensor, quantizer)
 
     @staticmethod
     def backward(
