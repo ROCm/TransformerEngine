@@ -8,9 +8,12 @@ from collections.abc import Iterable
 import math
 import os
 from typing import Optional, Tuple
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import torch
-from ..triton_kernels.cast import te_quantize_triton
+if IS_HIP_EXTENSION:
+    from ..triton_kernels.cast import te_quantize_triton
+
 import transformer_engine_torch as tex
 
 from transformer_engine_torch import DType as TE_DType
@@ -61,9 +64,12 @@ class MXFP8Quantizer(Quantizer):
             src = src.contiguous()
 
         # Launch cast kernel
-        use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
-        quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
-        quantize_func(src, self, dst, noop_flag)
+        if IS_HIP_EXTENSION:
+            use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+            quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
+            quantize_func(src, self, dst, noop_flag)
+        else:
+            tex.quantize(src, self, dst, noop_flag)
 
         # Update FP8 dtype
         dst._fp8_dtype = self.dtype
