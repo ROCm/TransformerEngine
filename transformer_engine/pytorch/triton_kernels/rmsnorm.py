@@ -411,9 +411,6 @@ def te_rmsnorm_fwd_triton(
                 out._transpose_invalid = False
             out_transpose_ptr = triton.reinterpret(out._transpose, tl_dtype)
             out_transpose_stride = out._transpose.stride(0)
-        else:
-            out_transpose_ptr = None
-            out_transpose_stride = None
 
     else:
         out = torch.empty_like(input, dtype=pt_otype) if ln_out is None else ln_out
@@ -423,8 +420,11 @@ def te_rmsnorm_fwd_triton(
         q_scale = None
         q_amax = None
         out_ptr = out
-        out_transpose_ptr = None
-        out_transpose_stride = None
+
+    # Populate with dummy args to satisfy triton compiler
+    if not MAKE_TRANSPOSE:
+        out_transpose_ptr = out_ptr
+        out_transpose_stride = out_ptr.stride(0)
 
 
     grid_fwd = lambda meta: (NUM_PRGMS, )
