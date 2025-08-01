@@ -982,7 +982,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
-    keep_fp8_weight_transpose_cache: bool, default = 'True'
+    keep_fp8_weight_transpose_cache: bool, default = 'False'
                                      if set to `False`, it will not cache fp8 weight buffer instead of 
                                      recomputing fp8 weight transpose. Recommend set to `False` when
                                      enable FSDP parallel.
@@ -1016,7 +1016,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ub_bulk_wgrad: bool = False,
         ub_bulk_dgrad: bool = False,
         ub_name: Optional[str] = None,
-        keep_fp8_weight_transpose_cache: bool = True,
+        keep_fp8_weight_transpose_cache: bool = False,
     ) -> None:
         super().__init__()
 

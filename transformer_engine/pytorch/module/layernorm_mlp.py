@@ -1204,7 +1204,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                      batch size per training step. Needed for JIT Warmup, a technique where jit
                      fused functions are warmed up before training to ensure same kernels are
                      used for forward propogation and activation recompute phase.
-    keep_fp8_weight_transpose_cache: bool, default = 'True'
+    keep_fp8_weight_transpose_cache: bool, default = 'False'
                                      if set to `False`, it will not cache fp8 weight buffer instead of 
                                      recomputing fp8 weight transpose. Recommend set to `False` when
                                      enable FSDP parallel.
@@ -1240,7 +1240,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         ub_overlap_rs_dgrad: bool = False,
         ub_bulk_dgrad: bool = False,
         ub_bulk_wgrad: bool = False,
-        keep_fp8_weight_transpose_cache: bool = True,
+        keep_fp8_weight_transpose_cache: bool = False,
     ) -> None:
         super().__init__()
 
