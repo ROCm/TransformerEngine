@@ -1045,16 +1045,10 @@ void hipblaslt_gemm(const Tensor *inputA,
 #endif
 
     if (is_fp8_dtype(outputD->data.dtype)) {
-      // Accumulation mode not supported for FP8 output
-      C = nullptr;
       NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
         operationDesc, HIPBLASLT_MATMUL_DESC_D_SCALE_POINTER, &D_scale, sizeof(D_scale)));
       NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
         operationDesc, HIPBLASLT_MATMUL_DESC_AMAX_D_POINTER, &D_amax, sizeof(D_amax)));
-      // To make supported gemm configs consistent with NV cublaslt
-      // For FP8 output, cuBLAS requires C_type to match bias_type and
-      // be FP16/BF16
-      C_type = bias ? bias_type : HIP_R_16BF;
     }
     if (bias) {
       NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,

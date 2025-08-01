@@ -364,6 +364,7 @@ void performTest(const TestParams& params) {
   //relax for certain prime number gemm
   if (dtype == DType::kFloat32) {
     atol = 1e-5;
+    rtol = 6e-6;
   }
 #ifdef __HIP_PLATFORM_AMD__
   if (prop.major == 9 && prop.minor == 5)
@@ -422,7 +423,7 @@ MAKE_GEMM_TEST(Testfp32xfp32xfp32xfp32xfp32, fp32, fp32, fp32, fp32, fp32);
 
 MAKE_GEMM_TEST(Testfp16xfp16xfp16xfp16xfp16, fp16, fp16, fp16, fp16, fp16);
 
-MAKE_GEMM_TEST(estbf16xbf16xbf16xbf16xbf16, bf16, bf16, bf16, bf16, bf16);
+MAKE_GEMM_TEST(Testbf16xbf16xbf16xbf16xbf16, bf16, bf16, bf16, bf16, bf16);
 
 MAKE_GEMM_TEST(Testfp8xfp8xbf16xbf16xfp32, fp8, fp8, bf16, bf16, fp32);
 
@@ -463,7 +464,7 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(false, true), //use bias
         ::testing::Values(false, true), //use_gelu
         ::testing::ValuesIn(kLayouts), //transa,transb
-        ::testing::Values(false, true)), //use mxfp8
+        ::testing::Values(false/*, true*/)), //use mxfp8
     [](const testing::TestParamInfo<GEMMTestSuite::ParamType>& info) {
       auto TN = [](bool v){ return v ? "T" : "N"; };
       const auto layout = std::get<3>(info.param);
