@@ -11,7 +11,7 @@ import warnings
 from ..utils import non_tn_fp8_gemm_supported
 
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
-from .cast_transpose import te_cast_transpose_noop_triton
+from .cast_transpose import te_cast_transpose_mxfp8_triton, te_cast_transpose_noop_triton, te_dequantize_mxfp8_triton
 import transformer_engine_torch as tex
 from ..tensor.quantized_tensor import QuantizedTensor, Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
@@ -72,7 +72,8 @@ def te_quantize_triton(
             _setup_conditional_transpose_storage(out)
         else:
             out = quantizer.make_empty(input_tensor.shape, dtype=fake_tensor_type)
-            _setup_conditional_transpose_storage(out)
+            if isinstance(out, Float8TensorBase):
+                _setup_conditional_transpose_storage(out)
     else:
         # Create a QuantizedTensor from the provided output tensor
         out = output
@@ -80,8 +81,8 @@ def te_quantize_triton(
     # Construct no-op flag if needed
     if noop_flag is None:
         noop_flag = _empty_tensor()
-
-    if out.size().numel() == 0:
+    # if it's mxfp8, we'll check if both rowwise and columnwise data are none
+    if (isinstance(out, MXFP8TensorBase) and out._rowwise_data is None and out._columnwise_data is None) or (not isinstance(out, MXFP8TensorBase) and out.size().numel() == 0):
         # Return empty output if the quantized tensor has no elements
         return out
     
@@ -109,8 +110,17 @@ def te_quantize_triton(
             else:
                 out = tex.quantize(input_tensor, quantizer, out, noop_flag)
     elif isinstance(out, MXFP8TensorBase):
-        out = tex.quantize(input_tensor, quantizer, out, noop_flag)
+        te_cast_transpose_mxfp8_triton(input_tensor, out)
     else:
         raise NotImplementedError(f"Not implemented for tensor type: '{type(out).__name__}'")
 
     return out
+
+def te_dequantize_triton(input, dtype=torch.float32):
+    if isinstance(input, MXFP8TensorBase):
+        return te_dequantize_mxfp8_triton(input, dtype)
+    elif isinstance(input, Float8TensorBase):
+        return tex.dequantize(input, dtype)
+    else:
+        raise NotImplementedError(f"Not implemented for tensor type: '{type(input).__name__}'")
+
