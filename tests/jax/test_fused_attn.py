@@ -587,7 +587,8 @@ class FusedAttnRunner:
                 case _:
                     raise ValueError(f"Unknown {self.seq_desc_format=}")
 
-        self.dropout_rng = dropout_key if self.dropout_prob > 0 else None
+        # new-style RNGs need to be split before they are sharded, and this will not break old-style RNGs
+        self.dropout_rng = jax.random.split(dropout_key, len(jax.devices())) if self.dropout_prob > 0 else None
         self.scaling_factor = 1.0 / sqrt(self.head_dim)
 
         # Setup distributed sharding specs
