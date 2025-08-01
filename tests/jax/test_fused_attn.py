@@ -298,6 +298,7 @@ class FusedAttnRunner:
     attn_bias_type: AttnBiasType
     attn_mask_type: AttnMaskType
     dropout_prob: float
+    use_old_rng: bool
     dtype: DTypeLike
     is_training: bool
     qkv_layout: QKVLayout
@@ -387,7 +388,10 @@ class FusedAttnRunner:
         self.cp_size = self.mesh.shape.get(self.mesh_resource.cp_resource, 1)
         self.tp_size = self.mesh.shape.get(self.mesh_resource.tp_resource, 1)
 
-        key = jax.random.PRNGKey(0)
+        if self.use_old_rng:
+            key = jax.random.PRNGKey(0)
+        else:
+            key = jax.random.key(0)
         q_key, k_key, v_key, bias_key, dropout_key = jax.random.split(key, 5)
 
         q_shape = (self.batch_size, self.max_seqlen_q, self.num_heads_q, self.head_dim)
@@ -858,7 +862,7 @@ class FusedAttnRunner:
 
             # Assume all batch has the same actual_seqlen, probably needs to extend the tests
             bias_mask = self.mask[0, 0]
-            
+
             # Assert all masked dbias are 0s
             assert_allclose(
                 jnp.where(bias_mask, primitive_dbias, 0),
@@ -932,6 +936,13 @@ class FusedAttnRunner:
     ],
 )
 @pytest.mark.parametrize(
+    "use_old_rng",
+    [
+        pytest.param(True, id="Old-style rng"),
+        pytest.param(False, id="New-style rng"),
+    ],
+)
+@pytest.mark.parametrize(
     "swa",
     [
         pytest.param(False, id="NO_SWA"),
@@ -979,6 +990,7 @@ class TestFusedAttn:
         attn_bias_type,
         attn_mask_type,
         dropout_prob,
+        use_old_rng,
         dtype,
         is_training,
         qkv_layout,
@@ -1004,6 +1016,7 @@ class TestFusedAttn:
             attn_bias_type,
             attn_mask_type,
             dropout_prob,
+            use_old_rng,
             dtype,
             is_training,
             qkv_layout,
@@ -1035,6 +1048,7 @@ class TestFusedAttn:
         attn_bias_type,
         attn_mask_type,
         dropout_prob,
+        use_old_rng,
         dtype,
         qkv_layout,
         bias_shape,
@@ -1057,6 +1071,7 @@ class TestFusedAttn:
             attn_bias_type,
             attn_mask_type,
             dropout_prob,
+            use_old_rng,
             dtype,
             True,
             qkv_layout,
