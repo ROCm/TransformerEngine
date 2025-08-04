@@ -991,16 +991,16 @@ struct Numeric_Traits;
 template <>
 struct Numeric_Traits<fp8e4m3> {
   static constexpr int maxUnbiasedExponent = 8;
-  #ifndef __HIP_PLATFORM_AMD__
-  static constexpr double maxNorm = 448;
-  #elif HIP_VERSION >= 60300000
+#if defined(__HIP_PLATFORM_AMD__) && HIP_VERSION >= 60300000 && defined(__HIP_DEVICE_COMPILE__)
+  static constexpr double maxNorm = HIP_FP8_TYPE_FNUZ ? 240.0 : 448.0;
+#elif defined(__HIP_PLATFORM_AMD__) && HIP_VERSION >= 60300000  
   static const double maxNorm;
-  #else
-  static constexpr double maxNorm = 240;
-  #endif //__HIP_PLATFORM_AMD__
+#else
+  static constexpr double maxNorm = 448;
+#endif //__HIP_PLATFORM_AMD__
 };
 
-#if defined(__HIP_PLATFORM_AMD__) && (HIP_VERSION >= 60300000)
+#if defined(__HIP_PLATFORM_AMD__) && HIP_VERSION >= 60300000 && !defined(__HIP_DEVICE_COMPILE__)
 inline const double Numeric_Traits<fp8e4m3>::maxNorm =
     te_fp8_fnuz() ? 240.0 : 448.0;
 #endif
@@ -1014,13 +1014,29 @@ struct Numeric_Traits<fp8e5m2> {
 template <typename T>
 struct Quantized_Limits {
   static constexpr int max_unbiased_exponent = Numeric_Traits<T>::maxUnbiasedExponent;
-  static const float max_norm;
-  static constexpr float max_norm_rcp = 1.0 / max_norm;
   static constexpr float emax = 1 << max_unbiased_exponent;
   static constexpr float emax_rcp = 1.0 / emax;
+#if defined(__HIP_PLATFORM_AMD__) && defined(__HIP_DEVICE_COMPILE__)
+  static constexpr float max_norm      = static_cast<float>(Numeric_Traits<T>::maxNorm);
+  static constexpr float max_norm_rcp  = 1.0f / max_norm;
+#elif defined(__HIP_PLATFORM_AMD__)
+  static const float max_norm;      
+  static const float max_norm_rcp;
+#else
+  static constexpr float max_norm = Numeric_Traits<T>::maxNorm;
+  static constexpr float max_norm_rcp = 1.0 / max_norm;
+#endif
 };
-template <typename T>
-inline const float Quantized_Limits<T>::max_norm = Numeric_Traits<T>::maxNorm;
+
+#if defined(__HIP_PLATFORM_AMD__) && !defined(__HIP_DEVICE_COMPILE__)
+template<typename T>
+inline const float Quantized_Limits<T>::max_norm =
+    static_cast<float>(Numeric_Traits<T>::maxNorm);
+
+template<typename T>
+inline const float Quantized_Limits<T>::max_norm_rcp =
+    1.0f / Quantized_Limits<T>::max_norm;
+#endif
 
 __device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
   // TODO: nan/inf needs to be set for any value
