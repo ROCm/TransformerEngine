@@ -206,6 +206,8 @@ class _FusedAttnRNGStateChecker:
                 "Please use threefry/rbg/unsafe_rbg PRNG implementations to remove this warning."
             )
             if (jnp.issubdtype(seed.dtype, jax.dtypes.prng_key)):
+                # New-style RNGs cannot directly be cast to integers
+                # See https://docs.jax.dev/en/latest/jep/9263-typed-keys.html for details
                 seed = jax.random.key_data(seed)
             seed = seed.astype(self.rng_state_dtype)
 
