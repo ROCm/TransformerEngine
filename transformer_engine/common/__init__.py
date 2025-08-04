@@ -6,6 +6,7 @@
 
 """FW agnostic user-end APIs"""
 
+import functools
 import sys
 import glob
 import sysconfig
@@ -125,13 +126,18 @@ def _load_nvrtc():
     return ctypes.CDLL(f"libnvrtc.{_get_sys_extension()}", mode=ctypes.RTLD_GLOBAL)
 
 te_rocm_build = False
-te_uses_fp8_fnuz = False
+
+@functools.cache
+def is_fp8_fnuz():
+    if te_rocm_build:
+        return _TE_LIB_CTYPES.nvte_uses_fp8_fnuz()
+    return False
 
 if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
     try:
         _CUDNN_LIB_CTYPES = _load_cudnn()
         _NVRTC_LIB_CTYPES = _load_nvrtc()
-    except OSError:
+    except (OSError, subprocess.CalledProcessError):
         pass
     _TE_LIB_CTYPES = _load_library()
     try:
@@ -140,7 +146,6 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
         # If the function is not available, we assume it's not a ROCm build
         te_rocm_build = False
     if te_rocm_build:
-        te_uses_fp8_fnuz = _TE_LIB_CTYPES.nvte_uses_fp8_fnuz()
         try:
             # Get installed ROCm version
             with open(os.getenv("ROCM_PATH", "/opt/rocm") + "/.info/version", "r") as f:

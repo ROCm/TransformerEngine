@@ -1097,6 +1097,30 @@ def _test_granular_accuracy(block, bs, dtype, config):
     return outputs
 
 
+def _test_granular_accuracy_with_fp8(block, bs, dtype, config):
+    reset_rng_states()
+
+    inp_hidden_states = torch.randn(
+        (config.seq_len, bs, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
+    inp_hidden_states.retain_grad()
+
+    with fp8_autocast(enabled=True):
+        out = block(inp_hidden_states)
+        loss = out.sum()
+        loss.backward()
+
+    torch.cuda.synchronize()
+    outputs = [out, inp_hidden_states.grad]
+    for p in block.parameters():
+        if p.requires_grad:
+            outputs.append(p.grad)
+    return outputs
+
+
 def _test_dpa_accuracy(block, bs, dtype, config):
     reset_rng_states()
 
@@ -1225,6 +1249,45 @@ def test_linear_accuracy(dtype, bs, model, return_bias, bias):
         }
         for te_output, torch_output in zip(te_outputs, torch_outputs):
             assert_allclose(te_output, torch_output, tolerance, rtol[dtype])
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", ["small"])
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
+def test_fp8_linear_without_transpose_cache_accuracy(dtype, bs, model, fp8_model_params):
+    reset_rng_states()
+    FP8GlobalStateManager.reset()
+
+    config = model_configs[model]
+    with fp8_model_init(enabled=fp8_model_params):    
+        linear = Linear(
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=True,
+            params_dtype=dtype,
+            device="cuda",
+            keep_fp8_weight_transpose_cache=False
+        ).eval()
+
+        ref_linear = Linear(
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=True,
+            params_dtype=dtype,
+            device="cuda",
+        ).eval()
+
+    # Share params
+    with torch.no_grad():
+        ref_linear.weight = Parameter(linear.weight.clone())
+        ref_linear.bias = Parameter(linear.bias.clone())
+    outputs = _test_granular_accuracy_with_fp8(linear, bs, dtype, config)
+    ref_outputs = _test_granular_accuracy_with_fp8(ref_linear, bs, dtype, config)
+
+    # Check output.
+    for te_output, torch_output in zip(outputs, ref_outputs):
+        assert_allclose(te_output, torch_output, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -1434,7 +1497,7 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, ret
         device="cuda",
     )
 
-    torch_ln_mlp = (
+    te_ln_mlp_ref = (
         TorchLayerNormMLP(
             config.hidden_size,
             4 * config.hidden_size,
@@ -1448,17 +1511,17 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, ret
 
     # Share params
     with torch.no_grad():
-        torch_ln_mlp.ln.weight = Parameter(te_ln_mlp.te_module.layer_norm_weight.clone())
+        te_ln_mlp_ref.ln.weight = Parameter(te_ln_mlp.te_module.layer_norm_weight.clone())
         if normalization != "RMSNorm":
-            torch_ln_mlp.ln.bias = Parameter(te_ln_mlp.te_module.layer_norm_bias.clone())
-        torch_ln_mlp.fc1.weight = Parameter(te_ln_mlp.te_module.fc1_weight.clone())
-        torch_ln_mlp.fc2.weight = Parameter(te_ln_mlp.te_module.fc2_weight.clone())
+            te_ln_mlp_ref.ln.bias = Parameter(te_ln_mlp.te_module.layer_norm_bias.clone())
+        te_ln_mlp_ref.fc1.weight = Parameter(te_ln_mlp.te_module.fc1_weight.clone())
+        te_ln_mlp_ref.fc2.weight = Parameter(te_ln_mlp.te_module.fc2_weight.clone())
         if bias:
-            torch_ln_mlp.fc1.bias = Parameter(te_ln_mlp.te_module.fc1_bias.clone())
-            torch_ln_mlp.fc2.bias = Parameter(te_ln_mlp.te_module.fc2_bias.clone())
+            te_ln_mlp_ref.fc1.bias = Parameter(te_ln_mlp.te_module.fc1_bias.clone())
+            te_ln_mlp_ref.fc2.bias = Parameter(te_ln_mlp.te_module.fc2_bias.clone())
 
     te_outputs = _test_granular_accuracy(te_ln_mlp, bs, dtype, config)
-    torch_outputs = _test_granular_accuracy(torch_ln_mlp, bs, dtype, config)
+    torch_outputs = _test_granular_accuracy(te_ln_mlp_ref, bs, dtype, config)
 
     atol = {
         torch.float32: 2e-2,
@@ -1490,6 +1553,75 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, ret
 
     if model == "small":
         for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
+            assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", ["small"])
+@pytest.mark.parametrize("activation", all_activations)
+@pytest.mark.parametrize("normalization", all_normalizations)
+def test_fp8_layernorm_mlp_without_transpose_cache_accuracy(dtype, bs, model, activation, normalization):
+    config = model_configs[model]
+
+    te_ln_mlp = LayerNormMLP(
+        config.hidden_size,
+        4 * config.hidden_size,
+        activation=activation,
+        normalization=normalization,
+        params_dtype=dtype,
+        device="cuda",
+        keep_fp8_weight_transpose_cache = False,
+    ).eval()
+
+    te_ln_mlp_ref = LayerNormMLP(
+        config.hidden_size,
+        4 * config.hidden_size,
+        activation=activation,
+        normalization=normalization,
+        params_dtype=dtype,
+        device="cuda",
+    ).eval()
+
+    # Share params
+    with torch.no_grad():
+        te_ln_mlp_ref.layer_norm_weight = Parameter(te_ln_mlp.layer_norm_weight.clone())
+        if normalization != "RMSNorm":
+            te_ln_mlp_ref.layer_norm_bias = Parameter(te_ln_mlp.layer_norm_bias.clone())
+        te_ln_mlp_ref.fc1_weight = Parameter(te_ln_mlp.fc1_weight.clone())
+        te_ln_mlp_ref.fc1_bias = Parameter(te_ln_mlp.fc1_bias.clone())
+        te_ln_mlp_ref.fc2_weight = Parameter(te_ln_mlp.fc2_weight.clone())
+        te_ln_mlp_ref.fc2_bias = Parameter(te_ln_mlp.fc2_bias.clone())
+
+    te_outputs = _test_granular_accuracy_with_fp8(te_ln_mlp, bs, dtype, config)
+    te_outputs_ref = _test_granular_accuracy_with_fp8(te_ln_mlp_ref, bs, dtype, config)
+
+    # The accuracy of not keep fp8 weight transpose cache should be bitwise equal.
+    atol = {
+        torch.float32: 0,
+        torch.half: 0,
+        torch.bfloat16: 0,
+    }
+
+    rtol = {
+        torch.float32: 0,
+        torch.half: 0,
+        torch.bfloat16: 0,
+    }
+
+    # Check output.
+    assert_allclose(te_outputs[0], te_outputs_ref[0], atol[dtype], rtol[dtype])
+
+    # Check gradients, only for small model
+    rtol = {
+        torch.float32: 0,
+        torch.half: 0,
+        torch.bfloat16: 0,
+    }
+    atol[torch.half] = 0
+    atol[torch.bfloat16] = 0 
+
+    if model == "small":
+        for te_output, torch_output in zip(te_outputs[1:], te_outputs_ref[1:]):
             assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
 
@@ -1893,8 +2025,6 @@ def test_gpt_cuda_graph(dtype, bs, model):
             use_fa, use_aotriton, use_ck = rocm_attn_backend()
             if use_fa:
                 pytest.skip(f"ROCm flash attention does not support cuda graph with {dtype}")
-            if use_aotriton and not use_ck:
-                pytest.skip(f"AOTriton attention backend does not support cuda graph with {dtype}")
 
     config = model_configs[model]
 

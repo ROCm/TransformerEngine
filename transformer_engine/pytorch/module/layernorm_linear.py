@@ -71,6 +71,9 @@ if IS_HIP_EXTENSION:
     from ..triton_kernels.layernorm import te_layernorm_bwd_triton
     from ..triton_kernels.rmsnorm import te_rmsnorm_bwd_triton
 
+from ..rocm_utils import create_fp8_weight_transpose_cache, clear_fp8_weight_transpose_cache
+
+
 __all__ = ["LayerNormLinear"]
 
 
@@ -121,6 +124,7 @@ class _LayerNormLinear(torch.autograd.Function):
         fsdp_group: Union[dist_group_type, None],
         module: torch.nn.Module,
         skip_fp8_weight_update: bool,
+        keep_fp8_weight_transpose_cache: bool,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # pylint: disable=missing-function-docstring
 
@@ -290,6 +294,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     update_workspace=update_workspace,
                     skip_update_flag=skip_fp8_weight_update,
                     fsdp_group=fsdp_group,
+                    create_transpose_cache=keep_fp8_weight_transpose_cache,
                 )
 
         # Cast bias to expected dtype
@@ -448,6 +453,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.requires_dgrad = inp.requires_grad
             ctx.normalization = normalization
             ctx.reduce_and_update_bwd_fp8_tensors = False
+            ctx.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
             if ctx.fp8 and requires_grad(inp, ln_weight, ln_bias, weight, bias):
                 _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
@@ -642,6 +648,9 @@ class _LayerNormLinear(torch.autograd.Function):
             if ctx.grad_input_quantizer is not None:
                 ctx.grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
 
+            if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
+                create_fp8_weight_transpose_cache(weight)
+
             nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
             dgrad_gemm_use_split_accumulator = _2X_ACC_DGRAD
             if ctx.fp8:
@@ -665,6 +674,9 @@ class _LayerNormLinear(torch.autograd.Function):
                 bulk_overlap=ctx.ub_bulk_dgrad,
             )
             nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
+
+            if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
+                clear_fp8_weight_transpose_cache(weight)
 
             # Launch tensor-parallel communication
             dgrad_work = None
@@ -882,6 +894,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,  # fsdp_group
             None,  # module
             None,  # skip_fp8_weight_update
+            None,  # keep_fp8_weight_transpose_cache
         )
 
 
@@ -969,6 +982,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
+    keep_fp8_weight_transpose_cache: bool, default = 'True'
+                                     if set to `False`, it will not cache fp8 weight buffer instead of 
+                                     recomputing fp8 weight transpose. Recommend set to `False` when
+                                     enable FSDP parallel.
+                                     
     """
 
     def __init__(
@@ -998,6 +1016,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ub_bulk_wgrad: bool = False,
         ub_bulk_dgrad: bool = False,
         ub_name: Optional[str] = None,
+        keep_fp8_weight_transpose_cache: bool = True,
     ) -> None:
         super().__init__()
 
@@ -1223,6 +1242,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
         self.inf_ln_sm_margin = int(os.getenv("NVTE_INF_LAYERNORM_SM_MARGIN", "0"))
 
+        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
+
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
         super().set_meta_tensor(fwd, recipe)
@@ -1385,6 +1406,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.fsdp_group,
                 self,
                 skip_fp8_weight_update,
+                self.keep_fp8_weight_transpose_cache
             )
             out = fwd_fn(*args)
 

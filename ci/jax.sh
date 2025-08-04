@@ -3,6 +3,8 @@
 #
 # See LICENSE for license information.
 
+export NVTE_FRAMEWORK=jax
+
 DIR=`dirname $0`
 
 . $DIR/_utils.sh
@@ -80,6 +82,8 @@ run_test_config_mgpu() {
     JAX_DISABLE_JIT=$_JAX_DISABLE_JIT_FLAG run_default_fa 3 test_distributed_layernorm_mlp.py
     run_default_fa 3 test_distributed_softmax.py
     unset XLA_FLAGS
+
+    run_default_fa 3 test_sanity_import.py
 }
 
 # Single config mode, run it synchroniously and return result

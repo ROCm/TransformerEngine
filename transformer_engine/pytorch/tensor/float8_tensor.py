@@ -1,11 +1,15 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 """Tensor class with FP8 data"""
 from __future__ import annotations
+import os
 from typing import Optional, Tuple, Iterable
 import warnings
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import torch
 import transformer_engine_torch as tex
@@ -15,6 +19,8 @@ from ..utils import devices_match, non_tn_fp8_gemm_supported
 from ._internal.float8_tensor_base import Float8TensorBase, _FromFloat8Func
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
 from ..constants import dist_group_type
+if IS_HIP_EXTENSION:
+    from ..triton_kernels.cast import te_quantize_triton
 
 aten = torch.ops.aten
 
@@ -81,7 +87,12 @@ class Float8Quantizer(Quantizer):
             src = src.contiguous()
 
         # Launch cast kernel
-        tex.quantize(src, self, dst, noop_flag)
+        if IS_HIP_EXTENSION:
+            use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+            quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
+            quantize_func(src, self, dst, noop_flag)
+        else:
+            tex.quantize(src, self, dst, noop_flag)
 
         # Update FP8 dtype
         dst._fp8_dtype = self.dtype
