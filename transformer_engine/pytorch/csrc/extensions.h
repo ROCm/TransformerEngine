@@ -776,6 +776,19 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                         size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                         at::Tensor B_copy);
   /*
+  ** Split AllGather + GEMM using P2P communication using recursive doubling
+  */
+  void split_overlap_ag_rd(at::Tensor A, at::Tensor A_scale_inverse, transformer_engine::DType A_type,
+                        std::vector<int64_t> A_scaling_mode, bool transa, at::Tensor B,
+                        at::Tensor B_scale_inverse, transformer_engine::DType B_type,
+                        std::vector<int64_t> B_scaling_mode, bool transb, at::Tensor D,
+                        at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax,
+                        at::Tensor bias, transformer_engine::DType bias_type,
+                        at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
+                        size_t workspaceSize, bool accumulate, bool use_split_accumulator,
+                        at::Tensor B_copy);
+
+  /*
   ** Split ReduceScatter + GEMM using P2P communication
   */
   void atomic_gemm_overlap_rs(at::Tensor A, at::Tensor A_scale_inverse,

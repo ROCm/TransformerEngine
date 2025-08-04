@@ -1689,7 +1689,24 @@ __global__ void __launch_bounds__(MAX_THREADS)
                                                      : userbuffers_fp16_sum_inplace_gpu_rw_ag<x>), \
         sms, threads, kernelArgs, 0, stream));                                                     \
   }
-
+#define callranks_agMC(x)                                                               \
+  if (ar_nvsize == x) {                                                                 \
+    int arg1 = op - NVTE_MAX_OPS;                                                       \
+    int arg2 = NVTE_REG0_OFFSET(comm) -                                                 \
+               (op == userbuffers_allreduceop_nonsharp ? 2 : 1) * NVTE_REG0_SINGLENODE + \
+               NVTE_MAX_OPS;                                                            \
+    int arg3 = ar_firstgpu, arg4 = ar_nvrank, arg5 = ar_step, arg7 = elements / 8 / x;   \
+    int arg6 = offset / 8 + arg4 * arg7;                                                \
+    void **arg8 = reinterpret_cast<void **>(comm->gpu_ptrs);                             \
+    int arg9 = handler * comm->nvsize;                                                  \
+    uint4 *arg10 = reinterpret_cast<uint4 *>(comm->mc_ptr[handler]);                     \
+    uint64_t arg11 = comm->ub_timeout;                                                   \
+                                                                                        \
+    hipLaunchKernelGGL(                                                                 \
+        (userbuffers_fp16_sum_inplace_gpu_mc_ag<x>),                                    \
+        sms, threads, 0, stream,           \
+        arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11);             \
+  }
 #define callranks_rs(x)                                                                          \
   if (ar_nvsize == x) {                                                                          \
     int arg1 = op - NVTE_MAX_OPS,                                                                \
@@ -1710,7 +1727,24 @@ __global__ void __launch_bounds__(MAX_THREADS)
       reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs<x>),                       \
       sms, threads, kernelArgs, 0, stream));                                                     \
     }
-
+#define callranks_rsMC(x)                                                                         \
+  if (ar_nvsize == x) {                                                                           \
+    int arg1 = op - NVTE_MAX_OPS;                                                                 \
+    int arg2 = NVTE_REG0_OFFSET(comm) -                                                           \
+               (op == userbuffers_allreduceop_nonsharp ? 2 : 1) * NVTE_REG0_SINGLENODE +           \
+               NVTE_MAX_OPS;                                                                      \
+    int arg3 = ar_firstgpu, arg4 = ar_nvrank, arg5 = ar_step, arg7 = elements / 8 / x;              \
+    int arg6 = offset / 8 + arg4 * arg7;                                                          \
+    void **arg8 = reinterpret_cast<void **>(comm->gpu_ptrs);                                       \
+    int arg9 = handler * comm->nvsize;                                                            \
+    float4 *arg10 = reinterpret_cast<float4 *>(comm->mc_ptr[handler]);                            \
+    uint64_t arg11 = comm->ub_timeout;                                                            \
+                                                                                                  \
+    hipLaunchKernelGGL(                                                                 \
+        (userbuffers_fp16_sum_inplace_gpu_mc_rs<x>),                                               \
+        sms, threads, 0, stream,                      \
+        arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11);                       \
+  }
 #define callranks_rs_oop(x)                                                                   \
   if (ar_nvsize == x) {                                                                       \
     int arg1 = op - NVTE_MAX_OPS,                                                             \
@@ -2019,7 +2053,11 @@ void allgather2_userbuff_inplace(const int handler, const int offset, const int 
   }
 #else
   int threads = comm->threads;
-  callranks_ag(2) callranks_ag(4) callranks_ag(8)
+  if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
+    callranks_agMC(2) callranks_agMC(4) callranks_agMC(8)
+  } else {
+    callranks_ag(2) callranks_ag(4) callranks_ag(8)
+  }
 #endif
 }
 
@@ -2061,7 +2099,11 @@ void reducescatter2_userbuff_inplace(const int handler, const int offset, const 
   }
 #else
   int threads = comm->threads;
-  callranks_rs(2) callranks_rs(4) callranks_rs(8)
+  if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
+    callranks_rsMC(2) callranks_rsMC(4) callranks_rsMC(8)
+  } else {
+    callranks_rs(2) callranks_rs(4) callranks_rs(8)
+  }
 #endif
 }
 

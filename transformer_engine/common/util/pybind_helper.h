@@ -46,6 +46,8 @@
       .value("BULK_OVERLAP_RS", transformer_engine::CommOverlapAlgo::BULK_OVERLAP_RS)         \
       .value("SPLIT_PIPELINED_AG_P2P",                                                        \
                 transformer_engine::CommOverlapAlgo::SPLIT_PIPELINED_AG_P2P)                     \
+      .value("SPLIT_PIPELINED_AG_RD_P2P",                                                        \
+                transformer_engine::CommOverlapAlgo::SPLIT_PIPELINED_AG_RD_P2P)                     \
       .value("SPLIT_PIPELINED_RS", transformer_engine::CommOverlapAlgo::SPLIT_PIPELINED_RS)   \
       .value("SPLIT_PIPELINED_RS_P2P",                                                        \
                 transformer_engine::CommOverlapAlgo::SPLIT_PIPELINED_RS_P2P)                     \

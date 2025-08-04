@@ -672,10 +672,248 @@ void CommOverlapP2PBase::atomic_gemm_overlap_ag(TensorWrapper &A, bool transa, T
 }  // CommOverlapP2PBase::atomic_gemm_overlap_ag
 
 /*
-** Split AllGather + GEMM using P2P communication
+** Split AllGather + GEMM using P2P communication using recursive doubling
 ** This function assumes the input_b is pre-copied to _ubufs[rank_id]. This is needed to have AG
 ** outputs in each rank to be in the contiguous memory space after all ring exchange phases.
 */
+void CommOverlapP2PBase::split_overlap_ag_rd(TensorWrapper &A, bool transa, TensorWrapper &B,
+                                          bool transb, TensorWrapper &D, TensorWrapper &bias,
+                                          TensorWrapper &pre_gelu_out, TensorWrapper &workspace,
+                                          bool grad, bool accumulate, bool use_split_accumulator,
+                                          TensorWrapper &B_copy, cudaStream_t stream_main) {
+  int ori_sms = _ub_comm->sms;
+  _ub_comm->use_ce = _use_ce;
+  _ub_comm->sms = _num_comm_sm;
+  _ub_comm->cga_size = _cga_size;
+  // Get GEMM dimensions between TN and NN input layouts
+  const size_t m = (transa) ? A.size(0) : A.size(1);
+  const size_t k = (transa) ? A.size(1) : A.size(0);
+  const size_t n_chunk = _ubufs[0].size(0);
+
+  // Get communication and GEMM output chunk sizes
+  const int comm_bytes = _ubufs[0].numel() * _ubufs[0].element_size();
+  const bool do_gelu = pre_gelu_out.numel() > 0;
+  const int output_chunk_bytes = (n_chunk * m) * D.element_size();
+  const int aux_chunk_bytes = do_gelu ? (n_chunk * m) * pre_gelu_out.element_size() : 0;
+
+  // Get output and workspace data pointers
+  char *output_ptr = reinterpret_cast<char *>(D.dptr());
+  char *pre_gelu_out_ptr = reinterpret_cast<char *>(pre_gelu_out.dptr());
+  char *workspace_ptr = reinterpret_cast<char *>(workspace.dptr());
+  size_t workspace_size_chunk = workspace.numel() / _stream_compute.size();
+
+  NVTE_CHECK_CUDA(cudaEventRecord(_start_compute, stream_main));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_send[0], _start_compute, 0));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_recv, _start_compute, 0));
+  for (size_t i = 0; i < _stream_compute.size(); i++) {
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[i], _start_compute, 0));
+  }
+  if (_aggregate) {
+    const int num_steps = _tp_size / 2;
+    char *input_b_ptr = reinterpret_cast<char *>(_ubuf.dptr());
+
+    // Initial 1X input chunk exchange between neighboring peers
+    int send_chunk_id = _tp_id;
+    int recv_chunk_id = (_tp_id % 2 == 0) ? _tp_id + 1 : _tp_id - 1;
+    int send_offset = comm_bytes * send_chunk_id;
+    int recv_offset = comm_bytes * recv_chunk_id;
+    int peer_rank = (_tp_id % 2 == 0) ? _next_rank : _prev_rank;
+    userbuffers_send(_ub_reg, send_offset, _ub_reg, send_offset, comm_bytes, _ub_comm, peer_rank,
+                     _stream_send[0]);
+    userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm, peer_rank,
+                     _stream_recv);
+    NVTE_CHECK_CUDA(cudaEventRecord(_stop_recv, _stream_recv));
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_send[0], _stop_recv, 0));
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[0], _stop_recv, 0));
+
+    int local_rank_round2 = (_tp_id % 2 == 0) ? _tp_id : _tp_id - 1;
+    const int next_rank = (_tp_size + _tp_id + 2) % _tp_size + _rank_round_tp;
+    const int prev_rank = (_tp_size + _tp_id - 2) % _tp_size + _rank_round_tp;
+
+    // Ring exchange of 2X inputs chunks
+    for (int i = 0; i < num_steps; i++) {
+      send_chunk_id = (_tp_size + local_rank_round2 - i * 2) % _tp_size;
+      recv_chunk_id = (_tp_size + local_rank_round2 - i * 2 - 2) % _tp_size;
+      send_offset = comm_bytes * send_chunk_id;
+      recv_offset = comm_bytes * recv_chunk_id;
+
+      // GEMM
+      char *input_b_chunk_ptr = input_b_ptr + send_offset;
+      auto input_b_chunk =
+          TensorWrapper(reinterpret_cast<void *>(input_b_chunk_ptr), {n_chunk * 2, k}, B.dtype(),
+                        nullptr, nullptr, B.scale_inv());
+
+      char *output_chunk_ptr = output_ptr + (send_chunk_id * output_chunk_bytes);
+      auto output_chunk = TensorWrapper(reinterpret_cast<void *>(output_chunk_ptr),
+                                        {n_chunk * 2, m}, D.dtype(), D.amax(), D.scale(), nullptr);
+
+      char *aux_chunk_ptr =
+          (do_gelu) ? pre_gelu_out_ptr + (send_chunk_id * aux_chunk_bytes) : nullptr;
+      auto aux_chunk_shape =
+          (do_gelu) ? std::vector<size_t>{n_chunk * 2, m} : std::vector<size_t>{0};
+      auto aux_chunk = TensorWrapper(reinterpret_cast<void *>(aux_chunk_ptr), aux_chunk_shape,
+                                     pre_gelu_out.dtype());
+
+      char *workspace_chunk_ptr =
+          workspace_ptr + (i % _stream_compute.size()) * workspace_size_chunk;
+      auto workspace_chunk =
+          TensorWrapper(reinterpret_cast<void *>(workspace_chunk_ptr),
+                        std::vector<size_t>{workspace_size_chunk}, workspace.dtype());
+
+      nvte_cublas_gemm(A.data(), input_b_chunk.data(), output_chunk.data(), bias.data(),
+                       aux_chunk.data(), transa, transb, grad, workspace_chunk.data(), accumulate,
+                       use_split_accumulator, _math_sms,
+                       _stream_compute[i % _stream_compute.size()]);
+
+      if (i < num_steps - 1) {
+        // P2P communication
+        userbuffers_send(_ub_reg, send_offset, _ub_reg, send_offset, comm_bytes * 2, _ub_comm,
+                         next_rank, _stream_send[0]);
+        userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset, comm_bytes * 2, _ub_comm,
+                         prev_rank, _stream_recv);
+        NVTE_CHECK_CUDA(cudaEventRecord(_stop_recv, _stream_recv));
+        NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_send[0], _stop_recv, 0));
+        NVTE_CHECK_CUDA(
+            cudaStreamWaitEvent(_stream_compute[(i + 1) % _stream_compute.size()], _stop_recv, 0));
+      } else if (B_copy.numel() > 0) {
+        assert(B_copy.numel() == _ubufs[_tp_id].numel());
+        assert(B_copy.element_size() == _ubufs[_tp_id].element_size());
+        NVTE_CHECK_CUDA(cudaMemcpyAsync(B_copy.dptr(), _ubufs[_tp_id].dptr(),
+                                        _ubufs[_tp_id].numel() * _ubufs[_tp_id].element_size(),
+                                        cudaMemcpyDeviceToDevice, _stream_send[0]));
+      }
+    }
+  } else {
+      //recursive doubling ag
+      int steps = 0;
+      int tmp_size = _tp_size;
+      while (tmp_size > 1) {
+          steps++;
+          tmp_size >>= 1;
+      }
+      
+
+      //compute the first gemm using own data
+      {
+        int chunk_id = _tp_id;
+        cudaStream_t compute_stream = _stream_compute[chunk_id % _stream_compute.size()];
+
+        auto input_b_chunk = TensorWrapper(_ubufs[chunk_id].dptr(),
+                                          {n_chunk, k}, B.dtype(),
+                                          nullptr, nullptr, B.scale_inv());
+
+        char* output_chunk_ptr = output_ptr + (chunk_id * output_chunk_bytes);
+        auto output_chunk = TensorWrapper(reinterpret_cast<void *>(output_chunk_ptr),
+                                          {n_chunk, m},
+                                          D.dtype(), D.amax(), D.scale(), nullptr);
+
+        char *aux_chunk_ptr =
+            (do_gelu) ? pre_gelu_out_ptr + (chunk_id * aux_chunk_bytes) : nullptr;
+        auto aux_chunk_shape = (do_gelu) ? std::vector<size_t>{n_chunk, m} : std::vector<size_t>{0};
+        auto aux_chunk = TensorWrapper(reinterpret_cast<void *>(aux_chunk_ptr),
+                                      aux_chunk_shape, pre_gelu_out.dtype());
+
+        char *workspace_chunk_ptr =
+            workspace_ptr + (chunk_id % _stream_compute.size()) * workspace_size_chunk;
+        auto workspace_chunk = TensorWrapper(reinterpret_cast<void *>(workspace_chunk_ptr),
+                                            std::vector<size_t>{workspace_size_chunk},
+                                            workspace.dtype());
+
+        nvte_cublas_gemm(A.data(), input_b_chunk.data(), output_chunk.data(),
+                        bias.data(), aux_chunk.data(),
+                        transa, transb, grad, workspace_chunk.data(),
+                        accumulate, use_split_accumulator,
+                        _math_sms, compute_stream);
+      }
+
+      std::vector<int> owned_chunks = {_tp_id};
+      int offset = 1;
+
+      for (int step = 0; step < steps; step++) {
+        int send_rank = (_tp_id + offset) % _tp_size;
+        int recv_rank = (_tp_id - offset + _tp_size) % _tp_size;
+
+        // send and recv
+        for (auto chunk_id : owned_chunks) {
+          size_t send_offset = chunk_id * comm_bytes;
+          userbuffers_send(_ub_reg, send_offset, _ub_reg, send_offset,
+                          comm_bytes, _ub_comm, send_rank, _stream_send[0]);
+        }
+        for (int j = 0; j < offset; j++) {
+          int recv_chunk_id = (recv_rank + j) % _tp_size;
+          size_t recv_offset = recv_chunk_id * comm_bytes;
+          userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset,
+                          comm_bytes, _ub_comm, recv_rank, _stream_recv);
+        }
+        NVTE_CHECK_CUDA(cudaEventRecord(_stop_recv, _stream_recv));
+
+        // when previous recv finishes, proceed the GEMM
+        NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[0], _stop_recv, 0));
+
+        for (int j = 0; j < offset; j++) {
+          int new_chunk_id = (recv_rank + j) % _tp_size;
+          cudaStream_t compute_stream = _stream_compute[new_chunk_id % _stream_compute.size()];
+
+          auto input_b_chunk = TensorWrapper(_ubufs[new_chunk_id].dptr(),
+                                            {n_chunk, k}, B.dtype(),
+                                            nullptr, nullptr, B.scale_inv());
+
+          char* output_chunk_ptr = output_ptr + (new_chunk_id * output_chunk_bytes);
+          auto output_chunk = TensorWrapper(reinterpret_cast<void *>(output_chunk_ptr),
+                                            {n_chunk, m},
+                                            D.dtype(), D.amax(), D.scale(), nullptr);
+
+          char *aux_chunk_ptr =
+              (do_gelu) ? pre_gelu_out_ptr + (new_chunk_id * aux_chunk_bytes) : nullptr;
+          auto aux_chunk_shape = (do_gelu) ? std::vector<size_t>{n_chunk, m} : std::vector<size_t>{0};
+          auto aux_chunk = TensorWrapper(reinterpret_cast<void *>(aux_chunk_ptr),
+                                        aux_chunk_shape, pre_gelu_out.dtype());
+
+          char *workspace_chunk_ptr =
+              workspace_ptr + (new_chunk_id % _stream_compute.size()) * workspace_size_chunk;
+          auto workspace_chunk = TensorWrapper(reinterpret_cast<void *>(workspace_chunk_ptr),
+                                              std::vector<size_t>{workspace_size_chunk},
+                                              workspace.dtype());
+
+          nvte_cublas_gemm(A.data(), input_b_chunk.data(), output_chunk.data(),
+                          bias.data(), aux_chunk.data(),
+                          transa, transb, grad, workspace_chunk.data(),
+                          accumulate, use_split_accumulator,
+                          _math_sms, compute_stream);
+        }
+
+        for (int j = 0; j < offset; j++) {
+          owned_chunks.push_back((recv_rank + j) % _tp_size);
+        }
+        offset *= 2;
+      }
+
+      // synchronize compute streams
+      for (auto& s : _stream_compute) {
+          NVTE_CHECK_CUDA(cudaStreamSynchronize(s));
+      }
+
+      if (B_copy.numel() > 0) {
+          assert(B_copy.numel() == _ubufs[_tp_id].numel());
+          assert(B_copy.element_size() == _ubufs[_tp_id].element_size());
+          NVTE_CHECK_CUDA(cudaMemcpyAsync(B_copy.dptr(), _ubufs[_tp_id].dptr(),
+                                          _ubufs[_tp_id].numel() * _ubufs[_tp_id].element_size(),
+                                          cudaMemcpyDeviceToDevice, _stream_send[0]));
+      }
+
+  }
+
+  _ub_comm->sms = ori_sms;
+  for (size_t i = 0; i < _stream_compute.size(); i++) {
+    NVTE_CHECK_CUDA(cudaEventRecord(_stop_compute, _stream_compute[i]));
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_compute, 0));
+  }
+  NVTE_CHECK_CUDA(cudaEventRecord(_stop_send, _stream_send[0]));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_send, 0));
+  NVTE_CHECK_CUDA(cudaEventRecord(_stop_recv, _stream_recv));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_recv, 0));
+}  // CommOverlapP2PBase::split_overlap_ag_rd
+
 void CommOverlapP2PBase::split_overlap_ag(TensorWrapper &A, bool transa, TensorWrapper &B,
                                           bool transb, TensorWrapper &D, TensorWrapper &bias,
                                           TensorWrapper &pre_gelu_out, TensorWrapper &workspace,

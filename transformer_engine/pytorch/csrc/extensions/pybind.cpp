@@ -389,6 +389,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("use_ce") = true, py::arg("aggregate") = false)
       .def("split_overlap_ag_p2p", &CommOverlapP2P::split_overlap_ag,
            py::call_guard<py::gil_scoped_release>())
+      .def("split_overlap_ag_rd_p2p", &CommOverlapP2P::split_overlap_ag_rd,
+           py::call_guard<py::gil_scoped_release>())
       .def("split_overlap_rs_p2p", &CommOverlapP2P::split_overlap_rs,
            py::call_guard<py::gil_scoped_release>())
       .def("atomic_gemm_overlap_ag_p2p", &CommOverlapP2P::atomic_gemm_overlap_ag,

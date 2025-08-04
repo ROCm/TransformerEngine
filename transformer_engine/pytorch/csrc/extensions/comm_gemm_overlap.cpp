@@ -399,6 +399,26 @@ void CommOverlapP2P::split_overlap_ag(at::Tensor A, at::Tensor A_scale_inverse, 
                                            B_copy_, stream_main);
 }  // split_overlap_ag
 
+void CommOverlapP2P::split_overlap_ag_rd(at::Tensor A, at::Tensor A_scale_inverse, te::DType A_type,
+                                      std::vector<int64_t> A_scaling_mode, bool transa,
+                                      at::Tensor B, at::Tensor B_scale_inverse, te::DType B_type,
+                                      std::vector<int64_t> B_scaling_mode, bool transb,
+                                      at::Tensor D, at::Tensor D_scale, te::DType D_type,
+                                      at::Tensor D_amax, at::Tensor bias, te::DType bias_type,
+                                      at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
+                                      size_t workspaceSize, bool accumulate,
+                                      bool use_split_accumulator, at::Tensor B_copy) {
+  MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inverse, A_scaling_mode, A_type, B, B_scale_inverse,
+                                  B_scaling_mode, B_type, D, D_amax, D_scale, D_type, bias,
+                                  bias_type, pre_gelu_out, workspace)
+
+  auto B_copy_ = makeTransformerEngineTensor(B_copy);
+  cudaStream_t stream_main = static_cast<cudaStream_t>(at::cuda::getCurrentCUDAStream());
+  te::CommOverlapP2PBase::split_overlap_ag_rd(A_, transa, B_, transb, D_, bias_, pre_gelu_out_,
+                                           workspace_, grad, accumulate, use_split_accumulator,
+                                           B_copy_, stream_main);
+}  // split_overlap_ag_rd
+
 /*
 ** Split ReduceScatter + GEMM using P2P communication
 */

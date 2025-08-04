@@ -36,7 +36,8 @@ enum class CommOverlapAlgo {
   SPLIT_PIPELINED_RS_P2P = 4,
   ATOMIC_GEMM_RS = 5,
   ATOMIC_GEMM_AG_P2P = 6,
-  ATOMIC_GEMM_RS_P2P = 7
+  ATOMIC_GEMM_RS_P2P = 7,
+  SPLIT_PIPELINED_AG_RD_P2P = 8
 };
 
 class CommOverlapCore {
@@ -180,6 +181,17 @@ class CommOverlapP2PBase : public CommOverlapCore {
                         TensorWrapper &workspace, bool grad, bool accumulate,
                         bool use_split_accumulator, TensorWrapper &B_copy,
                         cudaStream_t stream_main);
+  /*
+  ** Split AllGather + GEMM using P2P communication using recursive doubling
+  ** This function assumes the input_b is pre-copied to _ubufs[rank_id]. This is needed to have AG
+  ** outputs in each rank to be in the contiguous memory space after all ring exchange phases.
+  */
+  void split_overlap_ag_rd(TensorWrapper &A, bool transa, TensorWrapper &B, bool transb,
+                        TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
+                        TensorWrapper &workspace, bool grad, bool accumulate,
+                        bool use_split_accumulator, TensorWrapper &B_copy,
+                        cudaStream_t stream_main);
+
   /*
   ** Split ReduceScatter + GEMM using P2P communication
   */

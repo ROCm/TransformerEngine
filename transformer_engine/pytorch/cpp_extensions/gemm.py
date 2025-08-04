@@ -358,12 +358,18 @@ def gemm(
         elif ub_algo == tex.CommOverlapAlgo.BULK_OVERLAP_RS:
             fn = ub.bulk_overlap
             args = tuple(args + (tex.CommOverlapType.RS, empty_tensor))
+        elif ub_algo == tex.CommOverlapAlgo.SPLIT_PIPELINED_AG_RD_P2P:
+            fn = ub.split_overlap_ag_rd_p2p
+            extra_output_tensor = (
+                empty_tensor if extra_output_tensor is None else extra_output_tensor
+            )
+            args = tuple(args + (extra_output_tensor,))
         elif ub_algo == tex.CommOverlapAlgo.SPLIT_PIPELINED_AG_P2P:
             fn = ub.split_overlap_ag_p2p
             extra_output_tensor = (
                 empty_tensor if extra_output_tensor is None else extra_output_tensor
             )
-            args = tuple(args + (extra_output_tensor,))
+            args = tuple(args + (extra_output_tensor,))    
         elif ub_algo == tex.CommOverlapAlgo.SPLIT_PIPELINED_RS:
             fn = ub.split_overlap_rs
             assert (
