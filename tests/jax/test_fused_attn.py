@@ -634,7 +634,6 @@ class FusedAttnRunner:
             self.dropout_rng_pspec = PartitionSpec()
         else:
             self.dropout_rng_pspec = PartitionSpec(None,)
-
         self.dropout_rng_sharding = NamedSharding(self.mesh, self.dropout_rng_pspec)
 
         self.logit_scale_pspec = PartitionSpec(None, None, self.mesh_resource.cp_resource, None)
