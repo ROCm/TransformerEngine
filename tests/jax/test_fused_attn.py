@@ -630,8 +630,11 @@ class FusedAttnRunner:
             self.bias_pspec = PartitionSpec()
         self.bias_sharding = NamedSharding(self.mesh, self.bias_pspec)
 
-        self.dropout_rng_pspec =  (PartitionSpec() if jnp.issubdtype(self.dropout_rng.dtype, jax.dtypes.prng_key)
-                                                    else PartitionSpec(None,))
+        if jnp.issubdtype(self.dropout_rng.dtype, jax.dtypes.prng_key):
+            self.dropout_rng_pspec = PartitionSpec()
+        else:
+            self.dropout_rng_pspec = PartitionSpec(None,)
+
         self.dropout_rng_sharding = NamedSharding(self.mesh, self.dropout_rng_pspec)
 
         self.logit_scale_pspec = PartitionSpec(None, None, self.mesh_resource.cp_resource, None)
