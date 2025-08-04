@@ -587,8 +587,7 @@ class FusedAttnRunner:
                 case _:
                     raise ValueError(f"Unknown {self.seq_desc_format=}")
 
-        # new-style RNGs need to be split before they are sharded, and this will not break old-style RNGs
-        self.dropout_rng = jax.random.split(dropout_key, len(jax.devices())) if self.dropout_prob > 0 else None
+        self.dropout_rng = dropout_key
         self.scaling_factor = 1.0 / sqrt(self.head_dim)
 
         # Setup distributed sharding specs
@@ -631,9 +630,8 @@ class FusedAttnRunner:
             self.bias_pspec = PartitionSpec()
         self.bias_sharding = NamedSharding(self.mesh, self.bias_pspec)
 
-        self.dropout_rng_pspec = PartitionSpec(
-            None,
-        )
+        self.dropout_rng_pspec =  (PartitionSpec() if jnp.issubdtype(self.dropout_rng.dtype, jax.dtypes.prng_key)
+                                                    else PartitionSpec(None,))
         self.dropout_rng_sharding = NamedSharding(self.mesh, self.dropout_rng_pspec)
 
         self.logit_scale_pspec = PartitionSpec(None, None, self.mesh_resource.cp_resource, None)
