@@ -211,7 +211,8 @@ def _get_attention_backends(
                 if fused_attention_backend == FusedAttnBackend[i]:
                     fused_attn_backends.append(fused_attention_backend)
         for i in backends.keys():
-            del os.environ["NVTE_FUSED_ATTN_"+backends[i]];
+            del os.environ["NVTE_FUSED_ATTN_"+backends[i]]
+        available_backends[1] = len(fused_attn_backends) > 0
     else:
         backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
         with logging_context():
