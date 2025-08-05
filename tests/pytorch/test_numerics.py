@@ -707,6 +707,10 @@ def test_gpt_full_activation_recompute(
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
+    if IS_HIP_EXTENSION:
+        use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+        if fp8 and recipe.float8_current_scaling() and use_cast_transpose_triton:
+            pytest.skip("Float8 Current Scaling unsupported for full recompute.")
 
     config = model_configs[model]
     torch.compiler.reset() # avoid cache size limit overflow
