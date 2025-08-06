@@ -389,6 +389,9 @@ class TestDistributedContextParallelSelfAttn:
         else:
             os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "0"
 
+        if is_hip_extension() and qkv_layout.is_thd():
+            pytest.skip("THD + ring on Rocm doesn't support context parallelism.")
+
         if qkv_layout.is_thd() and not load_balanced:
             pytest.skip("THD + ring doesn't support unbalanced context parallelism.")
 
