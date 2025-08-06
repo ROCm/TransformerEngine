@@ -176,6 +176,8 @@ def test_rmsnorm_fwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma, quan
     tols = dtype_tols(out_dtype if quantization is None else fp8_dtype)
     atol = tols["atol"]
     rtol = tols["rtol"]
+    assert ln_out_triton.dtype == out_dtype, f"Expected dtypes to match: {ln_out_triton.dtype} != {out_dtype}"
+    assert ln_out_triton.dtype == ln_out_hipified.dtype, f"Expected dtypes to match: {ln_out_triton.dtype} != {ln_out_hipified.dtype}"
     compare_results(
         "te",
         ln_out_triton,
@@ -289,6 +291,8 @@ def test_rmsnorm_fwd_triton_clamp(columnwise):
     tols = dtype_tols(out_dtype if quantization is None else fp8_dtype)
     atol = tols["atol"]
     rtol = tols["rtol"]
+    assert ln_out_triton.dtype == out_dtype, f"Expected dtypes to match: {ln_out_triton.dtype} != {out_dtype}"
+    assert ln_out_triton.dtype == ln_out_hipified.dtype, f"Expected dtypes to match: {ln_out_triton.dtype} != {ln_out_hipified.dtype}"
     compare_results(
         "te",
         ln_out_triton,
