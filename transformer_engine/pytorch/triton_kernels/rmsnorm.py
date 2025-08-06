@@ -12,7 +12,7 @@ from transformer_engine.pytorch.triton_kernels.common import (
     te_dtype_to_torch_dtype,
     te_dtype_to_triton_dtype,
 )
-
+from .common import get_fp8_max
 
 def dg_tmp_rows(x, sm_margin=None):
     return x.shape[0] if use_blocked(x) else num_programs(x, sm_margin)
@@ -43,7 +43,7 @@ def _rmsnorm_fwd_triton(
     USE_BLOCKED: tl.constexpr,
     NUM_PRGMS: tl.constexpr,
     IS_FP8: tl.constexpr,
-    MAKE_TRANSPOSE: tl.constexpr,
+    FP8_MAX: tl.constexpr,
 ):
     row_start = tl.program_id(0)
     col_offsets = tl.arange(0, BLOCK_SIZE)
@@ -107,7 +107,8 @@ def _rmsnorm_fwd_triton(
                     amax_temp = tl.max(tl.abs(rms_norm), axis=-1)
                     amax = tl.maximum(amax, amax_temp)
                     rms_norm = rms_norm * scale
-                    if MAKE_TRANSPOSE:
+                    rms_norm = tl.clamp(rms_norm, -FP8_MAX, FP8_MAX)
+                    if make_transpose:
                         output_t_ptrs = out_transpose_ptr + col_offsets * transpose_row_stride + blk_idx * BLOCK_SIZE + row_idx
                         tl.store(output_t_ptrs, rms_norm.to(output_type))
                 tl.store(output_ptrs, rms_norm.to(output_type))
@@ -127,7 +128,8 @@ def _rmsnorm_fwd_triton(
                 amax_temp = tl.max(tl.abs(rms_norm), axis=-1)
                 amax = tl.maximum(amax, amax_temp)
                 rms_norm = rms_norm * scale
-                if MAKE_TRANSPOSE:
+                rms_norm = tl.clamp(rms_norm, -FP8_MAX, FP8_MAX)
+                if make_transpose:
                     output_t_ptrs = out_transpose_ptr + col_offsets * transpose_row_stride + n_cols_blks * BLOCK_SIZE + row_idx
                     tl.store(output_t_ptrs, rms_norm.to(output_type), mask=mask)
             tl.store(output_ptrs, rms_norm.to(output_type), mask=mask)
@@ -157,7 +159,8 @@ def _rmsnorm_fwd_triton(
                 amax_temp = tl.max(tl.abs(rms_norm), axis=-1)
                 amax = tl.maximum(amax, amax_temp)
                 rms_norm = rms_norm * scale
-                if MAKE_TRANSPOSE:
+                rms_norm = tl.clamp(rms_norm, -FP8_MAX, FP8_MAX)
+                if make_transpose:
                     output_t_ptrs = out_transpose_ptr + col_offsets * transpose_row_stride + row_idx
                     tl.store(output_t_ptrs, rms_norm.to(output_type), mask=mask)
             tl.store(output_ptrs, rms_norm.to(output_type), mask=mask)
@@ -405,7 +408,9 @@ def te_rmsnorm_fwd_triton(
         q_scale = quantizer.scale
         q_amax = quantizer.amax
         out_ptr = triton.reinterpret(out._data, tl_dtype)
-        if MAKE_TRANSPOSE:
+        out_stride = out._data.stride(0)
+        FP8_MAX = get_fp8_max(quantizer.dtype)
+        if quantizer.columnwise_usage:
             if out._transpose_invalid:
                 out._transpose = torch.empty((out._data.shape[1], out._data.shape[0]), dtype=out._data.dtype)
                 out._transpose_invalid = False
@@ -425,6 +430,7 @@ def te_rmsnorm_fwd_triton(
         out_ptr = out
         out_transpose_ptr = None
         out_transpose_stride = None
+        FP8_MAX = None
 
 
     grid_fwd = lambda meta: (NUM_PRGMS, )
@@ -448,7 +454,7 @@ def te_rmsnorm_fwd_triton(
         USE_BLOCKED,
         NUM_PRGMS,
         IS_FP8,
-        MAKE_TRANSPOSE,
+        FP8_MAX,
     )
     if IS_MFP8:
         out = quantizer.quantize(out)
