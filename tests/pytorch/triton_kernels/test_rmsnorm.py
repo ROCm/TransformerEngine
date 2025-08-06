@@ -120,7 +120,8 @@ def test_rmsnorm_bwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma):
 @pytest.mark.parametrize("out_dtype", test_odtypes_str)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("quantization", (None, 'fp8', 'mxfp8'))
-def test_rmsnorm_fwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma, quantization):
+@pytest.mark.parametrize("columnwise", [False, True])
+def test_rmsnorm_fwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma, quantization, columnwise):
     fp8_dtype = tex.DType.kFloat8E4M3
     in_dtype = str_to_torch_dtype(in_dtype)
     out_dtype = str_to_torch_dtype(out_dtype)
@@ -141,8 +142,8 @@ def test_rmsnorm_fwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma, quan
         scale_hip = scale_triton.clone()
         amax_hip = amax_triton.clone()
 
-        quantizer_triton = Float8Quantizer(scale_triton, amax_triton, fp8_dtype)
-        quantizer_hip = Float8Quantizer(scale_hip, amax_hip, fp8_dtype)
+        quantizer_triton = Float8Quantizer(scale_triton, amax_triton, fp8_dtype, columnwise=columnwise)
+        quantizer_hip = Float8Quantizer(scale_hip, amax_hip, fp8_dtype, columnwise=columnwise)
     elif quantization == "mxfp8":
         quantizer_triton = MXFP8Quantizer(fp8_dtype)
         quantizer_hip = MXFP8Quantizer(fp8_dtype)
@@ -217,19 +218,22 @@ def test_rmsnorm_fwd_triton(M, N, in_dtype, out_dtype, zero_centered_gamma, quan
             5e-5,
             lambda msg: f"Output scale inverse does not match triton <-> hip\n\n{msg}\n",
         )
-        assert not ln_out_triton._transpose_invalid, "Expected a valid transpose buffer."
-        compare_results(
-            "te",
-            ln_out_triton._transpose,
-            ln_out_hipified._transpose,
-            atol,
-            rtol,
-            lambda msg: f"Output transpose does not match triton <-> hip\n\n{msg}\n",
-        )
+        if columnwise:
+            assert not ln_out_triton._transpose_invalid, "Expected a valid transpose buffer."
+            compare_results(
+                "te",
+                ln_out_triton._transpose,
+                ln_out_hipified._transpose,
+                atol,
+                rtol,
+                lambda msg: f"Output transpose does not match triton <-> hip\n\n{msg}\n",
+            )
+        else:
+            assert ln_out_triton._transpose_invalid, "Expected an invalid transpose buffer."
 
 
-
-def test_rmsnorm_fwd_triton_clamp():
+@pytest.mark.parametrize("columnwise", [False, True])
+def test_rmsnorm_fwd_triton_clamp(columnwise):
     """
     Non-regression test for MLPerf divergence issue. We test to ensure that in
     the case of output values beyond the range of the used FP8 dtype, we clamp
@@ -336,12 +340,15 @@ def test_rmsnorm_fwd_triton_clamp():
         5e-5,
         lambda msg: f"Output scale inverse does not match triton <-> hip\n\n{msg}\n",
     )
-    assert not ln_out_triton._transpose_invalid, "Expected a valid transpose buffer."
-    compare_results(
-        "te",
-        ln_out_triton._transpose,
-        ln_out_hipified._transpose,
-        atol,
-        rtol,
-        lambda msg: f"Output transpose does not match triton <-> hip\n\n{msg}\n",
-    )
+        if columnwise:
+            assert not ln_out_triton._transpose_invalid, "Expected a valid transpose buffer."
+            compare_results(
+                "te",
+                ln_out_triton._transpose,
+                ln_out_hipified._transpose,
+                atol,
+                rtol,
+                lambda msg: f"Output transpose does not match triton <-> hip\n\n{msg}\n",
+            )
+        else:
+            assert ln_out_triton._transpose_invalid, "Expected an invalid transpose buffer."
