@@ -43,6 +43,7 @@ def _rmsnorm_fwd_triton(
     USE_BLOCKED: tl.constexpr,
     NUM_PRGMS: tl.constexpr,
     IS_FP8: tl.constexpr,
+    MAKE_TRANSPOSE: tl.constexpr,
 ):
     row_start = tl.program_id(0)
     col_offsets = tl.arange(0, BLOCK_SIZE)
@@ -51,7 +52,6 @@ def _rmsnorm_fwd_triton(
     # tl.assume(output_row_stride >= 0)
     # tl.assume(row_start >= 0)
     output_type = output_ptr.type.element_ty
-    make_transpose = out_transpose_ptr is not None
     if IS_FP8:
         scale = tl.load(q_scale_ptr)
         amax = 0.0
@@ -107,7 +107,7 @@ def _rmsnorm_fwd_triton(
                     amax_temp = tl.max(tl.abs(rms_norm), axis=-1)
                     amax = tl.maximum(amax, amax_temp)
                     rms_norm = rms_norm * scale
-                    if make_transpose:
+                    if MAKE_TRANSPOSE:
                         output_t_ptrs = out_transpose_ptr + col_offsets * transpose_row_stride + blk_idx * BLOCK_SIZE + row_idx
                         tl.store(output_t_ptrs, rms_norm.to(output_type))
                 tl.store(output_ptrs, rms_norm.to(output_type))
@@ -127,7 +127,7 @@ def _rmsnorm_fwd_triton(
                 amax_temp = tl.max(tl.abs(rms_norm), axis=-1)
                 amax = tl.maximum(amax, amax_temp)
                 rms_norm = rms_norm * scale
-                if make_transpose:
+                if MAKE_TRANSPOSE:
                     output_t_ptrs = out_transpose_ptr + col_offsets * transpose_row_stride + n_cols_blks * BLOCK_SIZE + row_idx
                     tl.store(output_t_ptrs, rms_norm.to(output_type), mask=mask)
             tl.store(output_ptrs, rms_norm.to(output_type), mask=mask)
@@ -157,7 +157,7 @@ def _rmsnorm_fwd_triton(
                 amax_temp = tl.max(tl.abs(rms_norm), axis=-1)
                 amax = tl.maximum(amax, amax_temp)
                 rms_norm = rms_norm * scale
-                if make_transpose:
+                if MAKE_TRANSPOSE:
                     output_t_ptrs = out_transpose_ptr + col_offsets * transpose_row_stride + row_idx
                     tl.store(output_t_ptrs, rms_norm.to(output_type), mask=mask)
             tl.store(output_ptrs, rms_norm.to(output_type), mask=mask)
@@ -379,6 +379,7 @@ def te_rmsnorm_fwd_triton(
     BLOCK_SIZE = block_size(input)
     USE_BLOCKED = use_blocked(input)
     NUM_PRGMS = num_programs(input, sm_margin)
+    MAKE_TRANSPOSE = False
 
     rsigma = torch.empty((N,), dtype=torch.float32, device="cuda")
     pt_otype = (
@@ -386,6 +387,7 @@ def te_rmsnorm_fwd_triton(
         else te_dtype_to_torch_dtype(otype)
     )
     if IS_FP8:
+        MAKE_TRANSPOSE = quantizer.columnwise_usage
         if ln_out is not None:
             out = (
                 ln_out if isinstance(ln_out, Float8Tensor) else
@@ -403,8 +405,7 @@ def te_rmsnorm_fwd_triton(
         q_scale = quantizer.scale
         q_amax = quantizer.amax
         out_ptr = triton.reinterpret(out._data, tl_dtype)
-        out_stride = out._data.stride(0)
-        if quantizer.columnwise_usage:
+        if MAKE_TRANSPOSE:
             if out._transpose_invalid:
                 out._transpose = torch.empty((out._data.shape[1], out._data.shape[0]), dtype=out._data.dtype)
                 out._transpose_invalid = False
@@ -413,6 +414,7 @@ def te_rmsnorm_fwd_triton(
         else:
             out_transpose_ptr = None
             out_transpose_stride = None
+
     else:
         out = torch.empty_like(input, dtype=pt_otype) if ln_out is None else ln_out
         amax = None
@@ -426,7 +428,6 @@ def te_rmsnorm_fwd_triton(
 
 
     grid_fwd = lambda meta: (NUM_PRGMS, )
-
     # TODO(micky774) Implement fused MXFP8 quantization within the kernel
     _rmsnorm_fwd_triton[grid_fwd](
         out_ptr,
@@ -447,6 +448,7 @@ def te_rmsnorm_fwd_triton(
         USE_BLOCKED,
         NUM_PRGMS,
         IS_FP8,
+        MAKE_TRANSPOSE,
     )
     if IS_MFP8:
         out = quantizer.quantize(out)
