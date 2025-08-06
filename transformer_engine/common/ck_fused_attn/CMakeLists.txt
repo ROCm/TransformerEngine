@@ -61,20 +61,40 @@ execute_process(
   --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp --receipt 5
 )
 
+#execute_process(
+#  COMMAND python3 ${__AITER_SOURCE_DIR}/csrc/py_itfs_cu/fmha_v3_fwd_kernel_generate.py
+#  --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp
+#)
+# generate fwd v3 kernels for both gfx942 and gfx950 targets
 execute_process(
-  COMMAND python3 ${__AITER_SOURCE_DIR}/csrc/py_itfs_cu/fmha_v3_fwd_kernel_generate.py
+  COMMAND python3 ${__AITER_SOURCE_DIR}/hsa/gfx942/fmha_v3_fwd/codegen.py
   --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp
 )
+
+execute_process(
+  COMMAND python3 ${__AITER_SOURCE_DIR}/hsa/gfx950/fmha_v3_fwd/codegen.py
+  --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp
+)
+
 
 # generate the actual bwd kernel cpp files
 execute_process(
   COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
   --api bwd --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp --receipt 600
 )
-
+# TODO: why still run this fmha_v3_bwd_kernel_generate.py?
 execute_process(
   COMMAND python3 ${__AITER_SOURCE_DIR}/csrc/py_itfs_cu/fmha_v3_bwd_kernel_generate.py
-  --receipt 1 --filter *@*_ndeterministic@*_nbias*_dropout*_ndeterministic* --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp
+  --filter *@*_ndeterministic@*_nbias*_dropout*_ndeterministic* --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp
+)
+# generate v3 bwd kernels for both gfx942 and gfx950
+execute_process(
+  COMMAND python3 ${__AITER_SOURCE_DIR}/hsa/gfx942/fmha_v3_bwd/codegen.py
+  --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp
+)
+execute_process(
+  COMMAND python3 ${__AITER_SOURCE_DIR}/hsa/gfx950/fmha_v3_bwd/codegen.py
+  --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp
 )
 
 execute_process(
@@ -114,8 +134,10 @@ list(APPEND ck_fused_attn_SOURCES ${FMHA_BWD_GEN_BLOBS})
 
 set(MHA_BWD_SRC "${CMAKE_CURRENT_BINARY_DIR}/gen_src/mha_bwd.cpp")
 set(MHA_FWD_SRC "${CMAKE_CURRENT_BINARY_DIR}/gen_src/mha_fwd.cpp")
-set(ASM_MHA_BWD_SRC "${CMAKE_CURRENT_BINARY_DIR}/gen_src/asm_fmha_bwd_v3.cpp")
-set(ASM_MHA_FWD_SRC "${CMAKE_CURRENT_BINARY_DIR}/gen_src/asm_fmha_fwd_v3.cpp")
+set(ASM_MHA_BWD_SRC_GFX942 "${CMAKE_CURRENT_BINARY_DIR}/gen_src/asm_fmha_bwd_v3_gfx942.cpp")
+set(ASM_MHA_BWD_SRC_GFX950 "${CMAKE_CURRENT_BINARY_DIR}/gen_src/asm_fmha_bwd_v3_gfx950.cpp")
+set(ASM_MHA_FWD_SRC_GFX942 "${CMAKE_CURRENT_BINARY_DIR}/gen_src/asm_fmha_fwd_v3_gfx942.cpp")
+set(ASM_MHA_FWD_SRC_GFX950 "${CMAKE_CURRENT_BINARY_DIR}/gen_src/asm_fmha_fwd_v3_gfx950.cpp")
 
 # TODO: other generated files need to be added to `ck_fused_attn_SOURCES`
 file(RELATIVE_PATH blob_path ${CMAKE_CURRENT_BINARY_DIR}/gen_src ${MHA_BWD_SRC})
@@ -124,13 +146,19 @@ file(COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp/${blob_path} ${MHA_BWD_SR
 file(RELATIVE_PATH blob_path ${CMAKE_CURRENT_BINARY_DIR}/gen_src ${MHA_FWD_SRC})
 file(COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp/${blob_path} ${MHA_FWD_SRC} ONLY_IF_DIFFERENT)
 
-file(RELATIVE_PATH blob_path ${CMAKE_CURRENT_BINARY_DIR}/gen_src ${ASM_MHA_BWD_SRC})
-file(COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp/${blob_path} ${ASM_MHA_BWD_SRC} ONLY_IF_DIFFERENT)
+file(RELATIVE_PATH blob_path ${CMAKE_CURRENT_BINARY_DIR}/gen_src ${ASM_MHA_BWD_SRC_GFX942})
+file(COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp/${blob_path} ${ASM_MHA_BWD_SRC_GFX942} ONLY_IF_DIFFERENT)
 
-file(RELATIVE_PATH blob_path ${CMAKE_CURRENT_BINARY_DIR}/gen_src ${ASM_MHA_FWD_SRC})
-file(COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp/${blob_path} ${ASM_MHA_FWD_SRC} ONLY_IF_DIFFERENT)
+file(RELATIVE_PATH blob_path ${CMAKE_CURRENT_BINARY_DIR}/gen_src ${ASM_MHA_BWD_SRC_GFX950})
+file(COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp/${blob_path} ${ASM_MHA_BWD_SRC_GFX950} ONLY_IF_DIFFERENT)
 
-list(APPEND ck_fused_attn_SOURCES ${MHA_BWD_SRC} ${MHA_FWD_SRC} ${ASM_MHA_BWD_SRC} ${ASM_MHA_FWD_SRC})
+file(RELATIVE_PATH blob_path ${CMAKE_CURRENT_BINARY_DIR}/gen_src ${ASM_MHA_FWD_SRC_GFX942})
+file(COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp/${blob_path} ${ASM_MHA_FWD_SRC_GFX942} ONLY_IF_DIFFERENT)
+
+file(RELATIVE_PATH blob_path ${CMAKE_CURRENT_BINARY_DIR}/gen_src ${ASM_MHA_FWD_SRC_GFX950})
+file(COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp/${blob_path} ${ASM_MHA_FWD_SRC_GFX950} ONLY_IF_DIFFERENT)
+
+list(APPEND ck_fused_attn_SOURCES ${MHA_BWD_SRC} ${MHA_FWD_SRC} ${ASM_MHA_BWD_SRC_GFX942} ${ASM_MHA_BWD_SRC_GFX950} ${ASM_MHA_FWD_SRC_GFX942} ${ASM_MHA_FWD_SRC_GFX950})
 
 # remove all previously generated temporary files
 file(REMOVE_RECURSE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp)
@@ -142,7 +170,7 @@ endforeach()
 
 add_library(ck_fused_attn STATIC ${ck_fused_attn_SOURCES})
 set(CK_FUSED_ATTN_COMPILE_OPTIONS)
-list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -Wno-undefined-func-template -DCK_TILE_FMHA_FWD_FAST_EXP2=1 -DCK_TILE_FMHA_FWD_SPLITKV_API=1 -DCK_TILE_FMHA_FWD_APPENDKV_API=0 -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT} -fgpu-flush-denormals-to-zero -Wno-float-equal -ftemplate-backtrace-limit=0  -fPIC  -Wno-gnu-line-marker -Wunused-variable -Wuninitialized "SHELL:-mllvm -enable-post-misched=0" "SHELL:-mllvm -amdgpu-early-inline-all=true" "SHELL:-mllvm -amdgpu-function-calls=false" "SHELL:-mllvm -amdgpu-coerce-illegal-types=1" "SHELL:-mllvm --amdgpu-kernarg-preload-count=16")
+list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -Wno-undefined-func-template -DCK_TILE_FMHA_FWD_FAST_EXP2=1 -DCK_TILE_FMHA_FWD_SPLITKV_API=1 -DCK_TILE_FMHA_FWD_APPENDKV_API=0 -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT} -fgpu-flush-denormals-to-zero -Wno-float-equal -ftemplate-backtrace-limit=0  -fPIC  -Wno-gnu-line-marker -Wunused-variable -Wuninitialized --offload-arch=gfx942 --offload-arch=gfx950 "SHELL:-mllvm -enable-post-misched=0" "SHELL:-mllvm -amdgpu-early-inline-all=true" "SHELL:-mllvm -amdgpu-function-calls=false" "SHELL:-mllvm -amdgpu-coerce-illegal-types=1" "SHELL:-mllvm --amdgpu-kernarg-preload-count=16")
 
 set(CK_INCLUDE_DIR "${__CK_SOURCE_DIR}/include")
 message(STATUS "ck_include_dir: ${CK_INCLUDE_DIR}")
