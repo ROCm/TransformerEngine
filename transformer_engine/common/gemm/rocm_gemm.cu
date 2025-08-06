@@ -942,7 +942,6 @@ void hipblaslt_gemm(const Tensor *inputA,
   const hipDataType A_type = get_hipblaslt_dtype(param.Atype);
   const hipDataType B_type = get_hipblaslt_dtype(param.Btype);
   const hipDataType D_type = get_hipblaslt_dtype(outputD->data.dtype);
-  hipDataType C_type = D_type;
   const hipDataType bias_type = get_hipblaslt_dtype(inputBias->data.dtype);
   // const hipblasltDatatype_t aux_type = get_hipblaslt_dtype(outputPreGelu->data.dtype);
 
@@ -996,6 +995,7 @@ void hipblaslt_gemm(const Tensor *inputA,
                                                    param.transB == HIPBLAS_OP_N ? n : k,
                                                    param.ldb));
   NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutCreate(&Ddesc, D_type, m, n, ldd));
+  Cdesc = Ddesc;
 
   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescCreate(&operationDesc, gemm_compute_type, HIP_R_32F));
   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc, HIPBLASLT_MATMUL_DESC_TRANSA,
@@ -1057,8 +1057,6 @@ void hipblaslt_gemm(const Tensor *inputA,
     }
   }
   
-  NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutCreate(&Cdesc, C_type, m, n, ldd));
-
   if (bias && gelu) {
     if (grad) {
       epilogue = HIPBLASLT_EPILOGUE_DGELU_BGRAD;
@@ -1260,7 +1258,6 @@ void hipblaslt_gemm(const Tensor *inputA,
 
       if (bestAlgo < 0) {
         NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(Ddesc));
-        NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(Cdesc));
         NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(Bdesc));
         NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(Adesc));
         NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescDestroy(operationDesc));
@@ -1306,7 +1303,6 @@ void hipblaslt_gemm(const Tensor *inputA,
   }
 
   NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(Ddesc));
-  NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(Cdesc));
   NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(Bdesc));
   NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(Adesc));
   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescDestroy(operationDesc));

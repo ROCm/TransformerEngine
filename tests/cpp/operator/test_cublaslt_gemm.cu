@@ -91,8 +91,8 @@ void compute_ref(
     for(size_t jj = 0; jj < n; jj++){
       float val = 0;
       for(size_t kk = 0; kk < k; kk++){
-        float a_val = transa ? (float)a_data[kk + ii*k] : (float)a_data[ii + kk*m];
-        float b_val = transb ? (float)b_data[jj + kk*n] : (float)b_data[kk + jj*k];
+        float a_val = transa ? a_data[kk + ii*k] : a_data[ii + kk*m];
+        float b_val = transb ? b_data[jj + kk*n] : b_data[kk + jj*k];
         val += a_scale_inv*a_val*b_scale_inv*b_val;
       }
       if(bias_data){
@@ -134,11 +134,13 @@ void compute_mxfp8_ref(
     for(size_t jj = 0; jj < n; jj++){
       float val = 0;
       for(size_t kk = 0; kk < k; kk++){
-        float a_val = (float)a_data[ii*k + kk];
-        float b_val = (float)b_data[kk + jj*k];
-        float a_scale_inv_val = (float)a_scale_inv_data[ii*a_scale_inv_shape.data[1] + kk/32];
-        float b_scale_inv_val = (float)b_scale_inv_data[kk/32 + jj*b_scale_inv_shape.data[1]];
-        val += a_scale_inv_val*a_val*b_scale_inv_val*b_val;
+        float a_val = a_data[ii*k + kk];
+        float b_val = b_data[kk + jj*k];
+        float a_scale_inv_val =
+            (float)std::pow(2, a_scale_inv_data[ii * a_scale_inv_shape.data[1] + kk / 32] - 127);
+        float b_scale_inv_val =
+            (float)std::pow(2, b_scale_inv_data[kk / 32 + jj * b_scale_inv_shape.data[1]] - 127);
+        val += a_scale_inv_val * a_val * b_scale_inv_val * b_val;
       }
       if(bias_data){
         val += (float)bias_data[ii];
@@ -170,6 +172,7 @@ void cpu_rowwise_to_columnwise(
   }
 }
 
+
 struct TestParams {
   size_t m;
   size_t k;
@@ -190,10 +193,70 @@ void performTest(const TestParams& params) {
   DType dtype = TypeInfo<D_Type>::dtype;
 
   const bool has_fp8 = isFp8Type(atype) || isFp8Type(btype);
+  const bool use_mxfp8 = params.scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING;
 
-  if (params.scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING && !has_fp8) {
-    GTEST_SKIP() << "MXFP8 scaling mode requires FP8 types";
+  if (use_mxfp8)
+  {
+    if (!has_fp8) {
+      GTEST_SKIP() << "MXFP8 scaling mode requires Float8 types";
+    }
+    if (params.m % 32 != 0 || params.n % 32 != 0 || params.k % 32 != 0) {
+      GTEST_SKIP() << "MXFP8 requires M, N, K to be multiples of 32";
+    }
   }
+
+  cudaDeviceProp prop;
+  (void)cudaGetDeviceProperties(&prop, 0);
+
+#ifdef __HIP_PLATFORM_AMD__
+  if (has_fp8)
+  {
+    bool fp8_supported = (prop.major == 9 && prop.minor >= 4);
+    if (!fp8_supported) {
+      GTEST_SKIP() << "FP8 is not supported in current config";
+    }
+
+    if (use_mxfp8)
+    {
+      bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5);
+      if (!mxfp8_supported) {
+        GTEST_SKIP() << "MXFP8 is not supported in current config";
+      }
+      if (params.use_bias) {
+        GTEST_SKIP() << "MXFP8 GEMM with bias is not supported";
+      }
+    }
+
+    if (params.use_gelu) {
+      GTEST_SKIP() << "FP8 GEMM with GELU is not supported";
+    }
+    if (params.use_bias && dtype == DType::kFloat16) {
+      GTEST_SKIP() << "FP8 GEMM with bias and FP16 output is not supported";
+    }
+  }
+
+  if (prop.major == 9 && prop.minor == 5) //gfx950 specific hipblasLt limitations
+  {
+    if (isFp8Type(dtype)){
+      GTEST_SKIP() << "GEMM with float8 output is not supported";
+    }
+    if (params.use_gelu && dtype == DType::kBFloat16) {
+      GTEST_SKIP() << "BF16 GEMM with GELU is not supported in current config";
+    }
+    if (has_fp8 && params.use_bias && dtype == DType::kFloat32) {
+      GTEST_SKIP() << "FP8 GEMM with bias and FP32 output is not supported in current config";
+    }
+  }
+  if (prop.major == 9 && prop.minor == 4) //gfx942 specific hipblasLt limitations
+  {
+    if (params.use_gelu && dtype == DType::kBFloat16 && !params.transa) {
+      GTEST_SKIP() << "BF16 GEMM with GELU is not supported in current config";
+    }
+    if (has_fp8 && params.use_bias && dtype == DType::kFloat8E4M3) {
+      GTEST_SKIP() << "FP8 GEMM with bias and FP8 output is not supported in current config";
+    }
+  }
+#endif
 
   // pytorch tensor storage is row-major while cublas/hipblaslt is column-major
   Tensor A;
@@ -222,8 +285,7 @@ void performTest(const TestParams& params) {
   
   //initialize the data and scale inv of A, B
   fillUniform(&A);
-  if (isFp8Type(atype) && !params.transa &&
-      params.scaling_mode == NVTEScalingMode::NVTE_DELAYED_TENSOR_SCALING) {
+  if (isFp8Type(atype) && !params.transa && !use_mxfp8) {
     // A must be of shape k, m
     cpu_rowwise_to_columnwise(
       params.k, params.m,
@@ -233,8 +295,7 @@ void performTest(const TestParams& params) {
     A.from_cpu();
   }
   fillUniform(&B);
-  if (isFp8Type(btype) && params.transb &&
-      params.scaling_mode == NVTEScalingMode::NVTE_DELAYED_TENSOR_SCALING) {
+  if (isFp8Type(btype) && params.transb && !use_mxfp8) {
     // B must be of shape k, m
     cpu_rowwise_to_columnwise(
       params.k, params.n,
@@ -252,26 +313,6 @@ void performTest(const TestParams& params) {
   }
   bool grad = false;
   bool accumulate = false;
-
-  cudaDeviceProp prop;
-  (void)cudaGetDeviceProperties(&prop, 0);
-
-#ifdef __HIP_PLATFORM_AMD__
-  if (isFp8Type(atype) || isFp8Type(btype))
-  {
-    bool fp8_supported = (prop.major == 9 && prop.minor >= 4);
-    if (!fp8_supported) {
-      GTEST_SKIP() << "FP8 is not supported in current config";
-    }    
-  }
-  if (params.scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING)
-  {
-    bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5);
-    if (!mxfp8_supported) {
-      GTEST_SKIP() << "MXFP8 is not supported in current config";
-    }
-  }
-#endif
 
   size_t workspace_size = 33554432;
 #ifdef __HIP_PLATFORM_AMD__
@@ -310,7 +351,7 @@ void performTest(const TestParams& params) {
   }
 
   float ref_amax_d;
-  if (params.scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING) {
+  if (use_mxfp8) {
     const A_Type *a_data;
     const B_Type *b_data;
     const fp8e8m0 *a_scale_inv_data, *b_scale_inv_data;
@@ -364,18 +405,28 @@ void performTest(const TestParams& params) {
   //relax for certain prime number gemm
   if (dtype == DType::kFloat32) {
     atol = 1e-5;
-    rtol = 6e-6;
   }
 #ifdef __HIP_PLATFORM_AMD__
-  if (prop.major == 9 && prop.minor == 5)
-  {
-    // relax for certain gemm with hipblaslt
-    if (!isFp8Type(dtype) && (isFp8Type(atype) or isFp8Type(btype))) {
-      atol = 5e-4;
-      rtol = 5e-3;
-    } else if (dtype == DType::kFloat32) {
-      rtol = 1e-5;
-    }
+  // relax for certain FP8 gemm with hipblaslt
+  if (use_mxfp8) {
+    atol = 5e-4;
+    /*During hipifying std::max is converted to ::max
+    to w/a HIP bug with using std:: in device functions.
+    W/o explicitlit <double>, compiler uses non-templated int method variant from HIP headers
+    TODO: remove when switch to new hipify version after fixing HIP bug */
+    rtol = std::max<double>(rtol, 1e-3);
+  }
+  else if (has_fp8) {
+    atol = 1e-3;
+    //TODO: remove <double> (see comment above)
+    rtol = std::max<double>(rtol, 5e-3);
+  }
+  else if (dtype == DType::kBFloat16) {
+    //relax for certain prime number TN gemm
+    rtol = 5e-2;
+  }
+  else if (dtype == DType::kFloat32) {
+    rtol = 1e-5;
   }
 #endif
   compareResults("D", D, ref_D.get(), true, atol, rtol);
@@ -464,7 +515,7 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(false, true), //use bias
         ::testing::Values(false, true), //use_gelu
         ::testing::ValuesIn(kLayouts), //transa,transb
-        ::testing::Values(false/*, true*/)), //use mxfp8
+        ::testing::Values(false, true)), //use mxfp8
     [](const testing::TestParamInfo<GEMMTestSuite::ParamType>& info) {
       auto TN = [](bool v){ return v ? "T" : "N"; };
       const auto layout = std::get<3>(info.param);
