@@ -257,8 +257,8 @@ def test_rmsnorm_fwd_triton_clamp():
     scale_hip = scale_triton.clone()
     amax_hip = amax_triton.clone()
 
-    quantizer_triton = Float8Quantizer(scale_triton, amax_triton, fp8_dtype)
-    quantizer_hip = Float8Quantizer(scale_hip, amax_hip, fp8_dtype)
+    quantizer_triton = Float8Quantizer(scale_triton, amax_triton, fp8_dtype, columnwise=columnwise)
+    quantizer_hip = Float8Quantizer(scale_hip, amax_hip, fp8_dtype, columnwise=columnwise)
 
 
     # run the triton path
@@ -293,6 +293,16 @@ def test_rmsnorm_fwd_triton_clamp():
         rtol,
         lambda msg: f"ln_out does not match triton <-> hip\n\n{msg}\n",
     )
+    # TODO(micky774): Remove when `compare_results` correctly handles NaN values
+    compare_results(
+        "te",
+        ln_out_triton.isnan(),
+        ln_out_hipified.isnan(),
+        atol,
+        rtol,
+        lambda msg: f"ln_out NaNs do not match triton <-> hip\n\n{msg}\n",
+    )
+
     # rsigma is of type fp32
     compare_results(
         "te",
