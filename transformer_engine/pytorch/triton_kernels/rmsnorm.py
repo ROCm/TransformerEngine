@@ -52,6 +52,7 @@ def _rmsnorm_fwd_triton(
     # tl.assume(output_row_stride >= 0)
     # tl.assume(row_start >= 0)
     output_type = output_ptr.type.element_ty
+    make_transpose = out_transpose_ptr is not None
     if IS_FP8:
         scale = tl.load(q_scale_ptr)
         amax = 0.0
