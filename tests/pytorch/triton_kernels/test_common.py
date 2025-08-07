@@ -5,6 +5,7 @@ from __future__ import annotations
 import types
 from typing import Optional
 from collections.abc import Iterable
+from functools import partial
 
 import numpy as np
 import pytest
@@ -13,6 +14,21 @@ import math
 
 from transformer_engine.pytorch import cpp_extensions as tex
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch.triton_kernels.common import torch_dtype_to_te_dtype
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+from transformer_engine.pytorch.triton_kernels.norm_common import (
+    get_fwd_ln_sm_margin,
+    get_bwd_ln_sm_margin,
+)
+from transformer_engine.pytorch.triton_kernels.rmsnorm import (
+    te_rmsnorm_bwd_triton,
+    te_rmsnorm_fwd_triton,
+)
+from transformer_engine.pytorch.triton_kernels.layernorm import (
+    te_layernorm_bwd_triton,
+    te_layernorm_fwd_triton,
+)
 
 from transformer_engine.pytorch.triton_kernels.common import (
     get_torch_e4m3_type,
@@ -23,7 +39,30 @@ from transformer_engine.pytorch.triton_kernels.common import (
 
 rng_seed = 12345
 rng = np.random.default_rng(np.random.MT19937(rng_seed))
+norms = ["rms", "layer"]
+test_shapes = [
+    (2048, 4096),
+    (768, 2048),
+    (256, 1024),
+    (128, 768),
+    (64, 512),
+    (173, 409),
+    (71, 3571),
+    (29, 17389),
+]
 
+# Add `i` prefix to identify input type.
+def input_dtypes_str(dtypes_str):
+    return ["i" + dtype_str for dtype_str in dtypes_str]
+
+
+# Add `o` prefix to identify output type.
+def output_dtypes_str(dtypes_str):
+    return ["o" + dtype_str for dtype_str in dtypes_str]
+
+test_types_str = ["fp32", "fp16", "bf16"]
+test_idtypes_str = input_dtypes_str(test_types_str)
+test_odtypes_str = output_dtypes_str(test_types_str + ["fp8e4"])
 
 def fill_uniform(shape, dtype):
     x = rng.uniform(-2.0, 1.0, shape)
@@ -176,16 +215,6 @@ def sizeof(dtype):
     return torch.finfo(dtype).bits // 8
 
 
-# Add `i` prefix to identify input type.
-def input_dtypes_str(dtypes_str):
-    return ["i" + dtype_str for dtype_str in dtypes_str]
-
-
-# Add `o` prefix to identify output type.
-def output_dtypes_str(dtypes_str):
-    return ["o" + dtype_str for dtype_str in dtypes_str]
-
-
 # Convert descriptive type string to PyTorch type.
 def str_to_torch_dtype(dtype_str):
     return {
@@ -245,3 +274,167 @@ def maybe_skip_quantization(
     # Check if device is supported
     if device is not None and torch.device(device).type != "cuda":
         pytest.skip("Quantization is only supported on CUDA devices")
+
+
+@pytest.mark.parametrize("M, N", test_shapes)
+@pytest.mark.parametrize("in_dtype", test_idtypes_str)
+@pytest.mark.parametrize("out_dtype", test_odtypes_str)
+@pytest.mark.parametrize("zero_centered_gamma", (False, True))
+@pytest.mark.parametrize("quantization", (None, 'fp8', 'mxfp8'))
+@pytest.mark.parametrize("columnwise", (False, True))
+@pytest.mark.parametrize("ln_out_mode", (None, "quantized"))
+@pytest.mark.parametrize("norm", norms)
+def test_rmsnorm_fwd_triton(
+    M, N,
+    in_dtype,
+    out_dtype,
+    zero_centered_gamma,
+    quantization,
+    columnwise,
+    ln_out_mode,
+    norm
+):
+    # We only support 8E4M3 for forward kernels
+    fp8_dtype = tex.DType.kFloat8E4M3
+
+    in_dtype = str_to_torch_dtype(in_dtype)
+    out_dtype = str_to_torch_dtype(out_dtype)
+    te_out_dtype = torch_dtype_to_te_dtype(out_dtype)
+
+    input_tensor = fill_uniform((M, N), in_dtype)
+    gamma_tensor = fill_uniform(N, in_dtype)
+    bias_tensor = fill_uniform(N, in_dtype)
+
+    maybe_skip_quantization(quantization, dims=(M, N), device="cuda")
+    skip_in_dtype_gt_out_dtype(in_dtype, out_dtype)
+    skip_mixed_16bit_float_types(in_dtype, out_dtype)
+
+
+    epsilon = 1e-5
+    fwd_ln_sm_margin = get_fwd_ln_sm_margin()
+
+    if quantization == "fp8":
+        scale_triton = torch.rand(1, dtype=torch.float32, device='cuda') + 1
+        amax_triton = torch.empty([1], dtype=torch.float32, device="cuda")
+
+        scale_hip = scale_triton.clone()
+        amax_hip = amax_triton.clone()
+
+        quantizer_triton = Float8Quantizer(scale_triton, amax_triton, fp8_dtype, columnwise=columnwise)
+        quantizer_hip = Float8Quantizer(scale_hip, amax_hip, fp8_dtype, columnwise=columnwise)
+    elif quantization == "mxfp8":
+        quantizer_triton = MXFP8Quantizer(fp8_dtype)
+        quantizer_hip = MXFP8Quantizer(fp8_dtype)
+    else:
+        quantizer_triton = None
+        quantizer_hip = None
+
+    triton_func = {
+        "rms":te_rmsnorm_fwd_triton,
+        "layer":te_layernorm_fwd_triton,
+    }[norm]
+    hip_func = {
+        "rms":tex.rmsnorm_fwd,
+        "layer":tex.layernorm_fwd,
+    }[norm]
+
+    args = dict(
+        input=input_tensor,
+        weight=gamma_tensor,
+        eps=epsilon,
+        ln_out=(
+            quantizer_triton.make_empty(input.shape, dtype=out_dtype)
+            if ln_out_mode is not None else None
+        ),
+        otype=te_out_dtype,
+        sm_margin=fwd_ln_sm_margin,
+        zero_centered_gamma=zero_centered_gamma
+    )
+    if norm == "layer":
+        args |= dict(bias=bias_tensor)
+
+    # run the triton path
+    ln_out_triton, mu_triton, rsigma_triton = triton_func(**args)
+
+    # run the reference hipified kernel path
+    args["ln_out"] = (
+        quantizer_hip.make_empty(input.shape, dtype=out_dtype)
+        if ln_out_mode is not None else None
+    )
+    ln_out_hip, mu_hip, rsigma_hip = hip_func(**args)
+
+    if ln_out_triton.dtype != out_dtype:
+        raise ValueError(f"Expected dtypes to match: {ln_out_triton.dtype} != {out_dtype}")
+
+    tols = dtype_tols(out_dtype if quantization is None else fp8_dtype)
+    # We use slightly relaxed tolerances to account for fp8 imprecision
+    _compare_func = partial(compare_results, provider="te", atol=tols["atol"], rtol=tols["rtol"])
+    _compare_func(
+        ln_out_triton,
+        ln_out_hip,
+        lambda msg: f"ln_out does not match triton <-> hip\n\n{msg}\n",
+    )
+    if quantization == "fp8":
+        if columnwise:
+            assert not ln_out_triton._transpose_invalid, "Expected a valid transpose buffer."
+            _compare_func(
+                ln_out_triton._transpose,
+                ln_out_hip._transpose,
+                lambda msg: f"Output transpose does not match triton <-> hip\n\n{msg}\n",
+            )
+        else:
+            assert ln_out_triton._transpose_invalid, "Expected an invalid transpose buffer."
+    elif quantization == "mxfp8":
+            _compare_func(
+                ln_out_triton._rowwise_data,
+                ln_out_hip._rowwise_data,
+                lambda msg: f"Output rowwise data does not match triton <-> hip\n\n{msg}\n",
+            )
+            _compare_func(
+                ln_out_triton._columnwise_data,
+                ln_out_hip._columnwise_data,
+                lambda msg: f"Output columnwise data does not match triton <-> hip\n\n{msg}\n",
+            )
+
+
+    # We use higher precision for the remaining outputs and metadata
+    _compare_func = partial(compare_results, provider="te", atol=1e-6, rtol=5e-5)
+    _compare_func(
+        rsigma_triton,
+        rsigma_hip,
+        lambda msg: f"rsigma does not match triton <-> hip\n\n{msg}\n",
+    )
+    if norm == "layer":
+        mu_triton
+        _compare_func(
+            mu_triton,
+            mu_hip,
+            lambda msg: f"mu does not match triton <-> hip\n\n{msg}\n",
+        )
+    if quantization == "fp8":
+        _compare_func(
+            quantizer_triton.scale,
+            quantizer_hip.scale,
+            lambda msg: f"Quantizer scale does not match triton <-> hip\n\n{msg}\n",
+        )
+        _compare_func(
+            quantizer_triton.amax,
+            quantizer_hip.amax,
+            lambda msg: f"Quantizer amax does not match triton <-> hip\n\n{msg}\n",
+        )
+        _compare_func(
+            ln_out_triton._scale_inv,
+            ln_out_hip._scale_inv,
+            lambda msg: f"Output scale inverse does not match triton <-> hip\n\n{msg}\n",
+        )
+    elif quantization == "mxfp8":
+        _compare_func(
+            ln_out_triton._rowwise_scale_inv,
+            ln_out_hip._rowwise_scale_inv,
+            lambda msg: f"Output rowwise scale inverse does not match triton <-> hip\n\n{msg}\n",
+        )
+        _compare_func(
+            ln_out_triton._columnwise_scale_inv,
+            ln_out_hip._columnwise_scale_inv,
+            lambda msg: f"Output columnwise scale inverse does not match triton <-> hip\n\n{msg}\n",
+        )
