@@ -218,7 +218,7 @@ def sanity_checks(
     }
 
     for model, cfg in model_configs.items():
-        avail, fused_bes = _get_attention_backends(
+        avail, _, fused_bes = _get_attention_backends(
             cfg,
             qkv_dtype=dtype,
             qkv_layout=qkv_layout,
@@ -303,7 +303,7 @@ def main(args):
     # Benchmarking starts..
     for model in model_configs.keys():
         config = model_configs[model]
-        available_backends, fused_attn_backends = _get_attention_backends(
+        available_backends,_, fused_attn_backends = _get_attention_backends(
             config,
             qkv_dtype=dtype,
             qkv_layout=qkv_layout,
