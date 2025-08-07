@@ -79,7 +79,8 @@ def setup_jax_extension(
         rocm_home, _ = rocm_path()
         macros=[("USE_ROCM",None)]
         cxx_flags.extend(["-D__HIP_PLATFORM_AMD__", "-I{}/include".format(str(rocm_home))])
-        nvcc_flags.extend(["--offload-arch={}".format(os.getenv("NVTE_ROCM_ARCH", "gfx942"))])
+        nvcc_flags.extend([f"--offload-arch={arch}" for arch in 
+                           os.getenv("NVTE_ROCM_ARCH", "gfx942;gfx950").split(";")])
     else:
         macros=[]
 

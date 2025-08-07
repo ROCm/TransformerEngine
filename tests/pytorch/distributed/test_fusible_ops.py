@@ -11,7 +11,6 @@ from collections.abc import Iterable
 import functools
 import itertools
 import os
-import pathlib
 import subprocess
 import sys
 from typing import Optional
@@ -831,8 +830,8 @@ if torch.cuda.device_count() >= 2 and 2 not in _world_sizes:
 @pytest.mark.parametrize("world_size", _world_sizes)
 def test_distributed_fuser_ops(world_size: int) -> None:
     """Launch parallel job that runs parallel tests"""
-    python_exe = pathlib.Path(sys.executable).resolve()
-    current_file = pathlib.Path(__file__).resolve()
+    python_exe = sys.executable
+    current_file = os.path.abspath(__file__)
     command = [
         python_exe,
         "-m",

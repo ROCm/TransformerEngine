@@ -72,6 +72,8 @@ Install TE
   # Build Platform Selection (optional)
   # Note: Useful when both ROCm and CUDA platforms are present in the Docker
   export NVTE_USE_ROCM=1  #Use 1 for ROCm, or set to 0 to use CUDA; If not set will try to detect installed platform, prioritizing ROCm
+  # If you are building for gfx942 variants, also specify the number of Compute Units
+  export CU_NUM=304
 
   # Note: If the following fails with messages about missing pip packages that are installed, add "--no-build-isolation" to the command below
   pip install .
