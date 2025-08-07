@@ -25,6 +25,7 @@ from .common import (
     te_dtype_to_aten_dtype,
     enum_value_to_te_dtype,
 )
+from .common import get_fp8_max
 
 def get_autotune_config(full_tuning_space=False):
     if full_tuning_space:
@@ -61,6 +62,7 @@ def _layernorm_fwd_triton(
     IS_FP8: tl.constexpr,
     APPLY_ATOMIC: tl.constexpr,
     PERSISTENT: tl.constexpr,
+    FP8_MAX: tl.constexpr,
 ):
 
     # program id
@@ -144,6 +146,7 @@ def _layernorm_fwd_triton(
                 amax_temp = tl.max(tl.abs(y_block), axis=-1)
                 amax = amax_temp if amax_temp > amax else amax
                 y_block = y_block * scale
+                y_block = tl.clamp(y_block, -FP8_MAX, FP8_MAX)
             tl.store(y_ptr_start + col_offsets, y_block.to(y_ptr.type.element_ty))
 
         # For last iteration, do masked load and store
@@ -162,6 +165,7 @@ def _layernorm_fwd_triton(
             amax_temp = tl.max(tl.abs(y_block), axis=-1)
             amax = amax_temp if amax_temp > amax else amax
             y_block = y_block * scale
+            y_block = tl.clamp(y_block, -FP8_MAX, FP8_MAX)
         tl.store(
             y_ptr_start + col_offsets, y_block.to(y_ptr.type.element_ty), mask=mask
         )
@@ -530,12 +534,16 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
         # TODO: Improve performance with persistent kernel
         # Persistent kernel currently lags behind non persistent version
         # It also lags behind TE implementation in a few cases
-        PERSISTENT=False
+        PERSISTENT=False,
+        FP8_MAX=get_fp8_max(quantizer.dtype) if IS_FP8 else None,
     )
 
     # Compute FP8 transpose if required
     if IS_FP8:
-        ln_out.update_usage()
+        ln_out.update_usage(
+            rowwise_usage=quantizer.rowwise_usage,
+            columnwise_usage=quantizer.columnwise_usage
+        )
 
     # For MXFP8, we do regular layernorm and then quantize it separately
     if isinstance(quantizer, MXFP8Quantizer):
