@@ -29,6 +29,7 @@ bool ubuf_built_with_mpi();
 enum class CommOverlapType { RS = 0, AG = 1 };
 
 enum class CommOverlapAlgo {
+  NOT_DEFINED = -1,
   BULK_OVERLAP_AG = 0,
   BULK_OVERLAP_RS = 1,
   SPLIT_PIPELINED_AG_P2P = 2,
@@ -145,6 +146,8 @@ class CommOverlapP2PBase : public CommOverlapCore {
 
   std::vector<TensorWrapper> _ubufs;
 
+  CommOverlapAlgo _algorithm;
+
   std::vector<cudaStream_t> _stream_send;
   cudaStream_t _stream_recv;
   cudaEvent_t _stop_send, _stop_recv;
@@ -155,10 +158,13 @@ class CommOverlapP2PBase : public CommOverlapCore {
                      ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle,
                      CommOverlapType comm_type, int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS,
                      int comm_cga_size = 1, int gemm_priority = 0, int comm_priority = 0,
+                     CommOverlapAlgo algorithm = CommOverlapAlgo::NOT_DEFINED,
                      int num_comm_sm = 1, bool set_sm_margin = false, bool use_ce = true,
                      bool atomic_gemm = false, bool aggregate = false);
 
   virtual ~CommOverlapP2PBase();
+
+  CommOverlapAlgo get_algorithm(){ return _algorithm;}
 
   /*
   ** Split AllGather + AtomicGEMM using P2P communication

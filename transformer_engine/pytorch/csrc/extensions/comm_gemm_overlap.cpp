@@ -327,6 +327,7 @@ CommOverlapP2P::CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::Scal
                                CommOverlapHelper *helper, int tp_size,
                                te::CommOverlapType comm_type, int num_max_streams,
                                int comm_cga_size, int gemm_priority, int comm_priority,
+                               te::CommOverlapAlgo algorithm,
                                int num_comm_sm, bool set_sm_margin, bool atomic_gemm, bool use_ce,
                                bool aggregate)
     : te::CommOverlapP2PBase(
@@ -334,7 +335,7 @@ CommOverlapP2P::CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::Scal
           helper->mylocal, helper->numlocal, helper->mynode, helper->numnodes, tp_size,
           std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
           std::bind(&CommOverlapHelper::ub_barrier, helper, _1), comm_type, num_max_streams,
-          comm_cga_size, gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce,
+          comm_cga_size, gemm_priority, comm_priority, algorithm, num_comm_sm, set_sm_margin, use_ce,
           atomic_gemm, aggregate) {
   // Even though we never use these PyTorch tensor wrappers directly, they're still necessary to
   // for PyTorch to factor externally allocated memory into its memory pool and garbage collection

@@ -728,7 +728,9 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                  CommOverlapHelper *helper, int tp_size,
                  transformer_engine::CommOverlapType comm_type,
                  int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
-                 int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 3,
+                 int gemm_priority = 0, int comm_priority = 0, 
+                 transformer_engine::CommOverlapAlgo algorithm = transformer_engine::CommOverlapAlgo::NOT_DEFINED,
+                 int num_comm_sm = 3,
                  bool set_sm_margin = true, bool atomic_gemm = false, bool use_ce = true,
                  bool aggregate = false);
 

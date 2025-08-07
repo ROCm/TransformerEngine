@@ -367,6 +367,13 @@ class _LayerNormMLP(torch.autograd.Function):
                     -amin, amax
                 ).float()
 
+            ub_algo_ag = None
+            if ub_overlap_ag:
+                ub_obj_fc1out = get_ub("fc1_fprop")
+                if ub_obj_fc1out.is_p2p_overlap():
+                    ub_algo_ag = ub_obj_fc1out.get_algorithm()
+
+
             fc1_outputs = pytex.gemm(
                 fc1_weight,
                 ln_out_total,
@@ -375,7 +382,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 bias=fc1_bias,
                 use_bias=(not bias_gelu_nvfusion) and use_fc1_bias,
                 gelu=not bias_gelu_nvfusion and (activation == "gelu"),
-                ub_algo=tex.CommOverlapAlgo.SPLIT_PIPELINED_AG_P2P if ub_overlap_ag else None,
+                ub_algo=ub_algo_ag if ub_overlap_ag else None,
                 ub=ub_obj_lnout if ub_overlap_ag else None,
                 extra_output_tensor=ln_out if ub_overlap_ag else None,
             )

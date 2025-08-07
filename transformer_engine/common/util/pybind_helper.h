@@ -42,6 +42,7 @@
       .value("RS", transformer_engine::CommOverlapType::RS)                                   \
       .value("AG", transformer_engine::CommOverlapType::AG);                                  \
   pybind11::enum_<transformer_engine::CommOverlapAlgo>(m, "CommOverlapAlgo")                  \
+      .value("NOT_DEFINED", transformer_engine::CommOverlapAlgo::NOT_DEFINED)         \
       .value("BULK_OVERLAP_AG", transformer_engine::CommOverlapAlgo::BULK_OVERLAP_AG)         \
       .value("BULK_OVERLAP_RS", transformer_engine::CommOverlapAlgo::BULK_OVERLAP_RS)         \
       .value("SPLIT_PIPELINED_AG_P2P",                                                        \

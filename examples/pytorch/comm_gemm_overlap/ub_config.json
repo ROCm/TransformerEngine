@@ -1,4 +1,6 @@
 {
     "proj_fprop" : "pipeline",
-    "fc2_fprop"  : "ring_exchange"
+    "fc2_fprop"  : "ring_exchange",
+    "qkv_fprop"  : "ring_exchange",
+    "fc1_fprop"  : "recursive_doubling"
 }

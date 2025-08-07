@@ -300,6 +300,8 @@ def initialize_ub(
         is_reduce_scatter = name in layers_reduce_scatter_overlap
         if _MIN_STREAM_PRIORITY is None or _MAX_STREAM_PRIORITY is None:
             _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = tex.get_stream_priority_range()
+
+
         default_cfg = {
             "method": method,
             "is_reduce_scatter": is_reduce_scatter,
@@ -314,6 +316,19 @@ def initialize_ub(
             "comm_priority": _MAX_STREAM_PRIORITY,
             "gemm_priority": _MIN_STREAM_PRIORITY,
         }
+
+        algorithm = None
+        if method == "ring_exchange":
+            if is_reduce_scatter:
+                algorithm = tex.CommOverlapAlgo.SPLIT_PIPELINED_RS_P2P 
+            else:
+                algorithm = tex.CommOverlapAlgo.SPLIT_PIPELINED_AG_P2P 
+        elif method == "recursive_doubling":
+            algorithm = tex.CommOverlapAlgo.SPLIT_PIPELINED_AG_RD_P2P 
+
+        if algorithm:
+            default_cfg["algorithm"]=algorithm
+
         return default_cfg
 
     def add_ub(
@@ -330,6 +345,7 @@ def initialize_ub(
         fp8_buf: bool = False,
         comm_priority: int = 0,
         gemm_priority: int = 0,
+        **kwargs
     ) -> None:
         if atomic_gemm:
             warnings.warn(
@@ -366,7 +382,18 @@ def initialize_ub(
                     assert rs_ag_pairs[name] in layers_atomic_ring_exchange, assert_message
 
         buffer_dtype = torch.uint8 if (use_fp8 and fp8_buf) else dtype
+
         if method == "ring_exchange":
+            if is_reduce_scatter:
+                algorithm = tex.CommOverlapAlgo.SPLIT_PIPELINED_RS_P2P 
+            else:
+                algorithm = tex.CommOverlapAlgo.SPLIT_PIPELINED_AG_P2P 
+        elif method == "recursive_doubling":
+            algorithm = tex.CommOverlapAlgo.SPLIT_PIPELINED_AG_RD_P2P 
+        else:
+            algorithm = tex.CommOverlapAlgo.NOT_DEFINED
+
+        if method == "ring_exchange" or  method =="recursive_doubling":
             ub_obj = tex.CommOverlapP2P(
                 shape,  # Communication buffer shape
                 buffer_dtype,  # Communication buffer data type
@@ -382,6 +409,7 @@ def initialize_ub(
                 aggregate=aggregate,
                 gemm_priority=gemm_priority,
                 comm_priority=comm_priority,
+                algorithm=algorithm
             )
         else:
             ub_obj = tex.CommOverlap(
