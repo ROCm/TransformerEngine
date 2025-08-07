@@ -1,0 +1,4 @@
+{
+    "proj_fprop" : "pipeline",
+    "fc2_fprop"  : "ring_exchange"
+}

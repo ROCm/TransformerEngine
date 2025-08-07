@@ -336,6 +336,7 @@ void CommOverlapBase::split_overlap_rs(TensorWrapper &A, bool transa, TensorWrap
                                        bool grad, bool accumulate, bool use_split_accumulator,
                                        bool gemm_overlap, TensorWrapper &rs_output,
                                        cudaStream_t stream_main) {
+  printf("split_overlap_rs_pipeline");
   // Get GEMM dimensions
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
@@ -681,6 +682,7 @@ void CommOverlapP2PBase::split_overlap_ag_rd(TensorWrapper &A, bool transa, Tens
                                           TensorWrapper &pre_gelu_out, TensorWrapper &workspace,
                                           bool grad, bool accumulate, bool use_split_accumulator,
                                           TensorWrapper &B_copy, cudaStream_t stream_main) {
+  printf("split_overlap_ag_rd");
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;
@@ -919,6 +921,7 @@ void CommOverlapP2PBase::split_overlap_ag(TensorWrapper &A, bool transa, TensorW
                                           TensorWrapper &pre_gelu_out, TensorWrapper &workspace,
                                           bool grad, bool accumulate, bool use_split_accumulator,
                                           TensorWrapper &B_copy, cudaStream_t stream_main) {
+  printf("split_overlap_ag");
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;
@@ -1166,6 +1169,7 @@ void CommOverlapP2PBase::split_overlap_rs(TensorWrapper &A, bool transa, TensorW
                                           TensorWrapper &pre_gelu_out, TensorWrapper &workspace,
                                           bool grad, bool accumulate, bool use_split_accumulator,
                                           TensorWrapper &rs_output, cudaStream_t stream_main) {
+  printf("split_overlap_rs_p2p");
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;
