@@ -86,7 +86,7 @@ struct SimpleTensor {
     return {dptr, static_cast<NVTEDType>(dtype), shape};
   }
 
-  int numel() const {
+  size_t numel() const {
     size_t acc = 1;
     for (const auto &dim : shape) {
       acc *= dim;
