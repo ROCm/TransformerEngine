@@ -6,6 +6,7 @@ import types
 from typing import Optional
 from collections.abc import Iterable
 from functools import partial
+from itertools import product
 
 import numpy as np
 import pytest
@@ -32,6 +33,10 @@ from transformer_engine.pytorch.triton_kernels.common import (
     get_torch_e5m2_type,
 )
 
+# Check if FP8 is supported
+fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+
 # Mimics behavior of `fillUniform` from `tests/cpp/test_common.cu`.
 
 rng_seed = 12345
@@ -47,31 +52,36 @@ test_shapes = [
     (71, 3571),
     (29, 17389),
 ]
+# (quantization, columnwise, ln_out_mode)
+test_quantizations = ((None, False, None),)
+test_quantizations += tuple(
+    product(
+        ('fp8', 'mxfp8'),
+        (True, False),
+        (None, 'quantized')
+    )
+)
+
 _triton_funcs = {
-    {
-        "fwd": {
-            "rms":te_rmsnorm_fwd_triton,
-            "layer":te_layernorm_fwd_triton,
-        },
-        "bwd": {
-            "rms":te_rmsnorm_bwd_triton,
-            "layer":te_layernorm_bwd_triton,
-        }
+    "fwd": {
+        "rms":te_rmsnorm_fwd_triton,
+        "layer":te_layernorm_fwd_triton,
+    },
+    "bwd": {
+        "rms":te_rmsnorm_bwd_triton,
+        "layer":te_layernorm_bwd_triton,
     }
 }
 _hip_funcs = {
-    {
-        "fwd": {
-            "rms":tex.rmsnorm_fwd,
-            "layer":tex.layernorm_fwd,
-        },
-        "bwd": {
-            "rms":tex.rmsnorm_bwd,
-            "layer":tex.layernorm_bwd,
-        }
+    "fwd": {
+        "rms":tex.rmsnorm_fwd,
+        "layer":tex.layernorm_fwd,
+    },
+    "bwd": {
+        "rms":tex.rmsnorm_bwd,
+        "layer":tex.layernorm_bwd,
     }
 }
-
 
 # Add `i` prefix to identify input type.
 def input_dtypes_str(dtypes_str):
@@ -82,9 +92,19 @@ def input_dtypes_str(dtypes_str):
 def output_dtypes_str(dtypes_str):
     return ["o" + dtype_str for dtype_str in dtypes_str]
 
-test_types_str = ["fp32", "fp16", "bf16"]
-test_idtypes_str = input_dtypes_str(test_types_str)
-test_odtypes_str = output_dtypes_str(test_types_str + ["fp8e4"])
+
+def _make_test_dtype_pairs(test_types):
+    for i, o in product(test_types, test_types):
+        i_type, i_width = i
+        o_type, o_width = o
+        # We observe a strict inequality since the kernels do not allow for
+        # mixed fp16/bf16.
+        if i_width > o_width:
+            yield ("i"+i_type, "o"+o_type)
+
+test_dtypes_types = [("fp32", 32), ("fp16", 16), ("bf16", 16)]
+test_dtype_pairs = list(_make_test_dtype_pairs(test_dtypes_types))
+
 
 def fill_uniform(shape, dtype):
     x = rng.uniform(-2.0, 1.0, shape)
@@ -261,11 +281,6 @@ def skip_mixed_16bit_float_types(in_dtype, out_dtype):
         pytest.skip("hipified implementation does not support mixing fp16 and bf16")
 
 
-# Check if FP8 is supported
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
-
-
 def maybe_skip_quantization(
     quantization: Optional[str],
     *,
@@ -298,16 +313,21 @@ def maybe_skip_quantization(
         pytest.skip("Quantization is only supported on CUDA devices")
 
 
-@pytest.mark.parametrize("columnwise", [False, True])
 @pytest.mark.parametrize("norm", norms)
 class TestNorms:
 
     @pytest.mark.parametrize("M, N", test_shapes)
-    @pytest.mark.parametrize("in_dtype", test_idtypes_str)
-    @pytest.mark.parametrize("out_dtype", test_odtypes_str)
     @pytest.mark.parametrize("zero_centered_gamma", (False, True))
-    @pytest.mark.parametrize("quantization", (None, 'fp8', 'mxfp8'))
-    @pytest.mark.parametrize("ln_out_mode", (None, "quantized"))
+    @pytest.mark.parametrize(
+        ("in_dtype", "out_dtype"),
+        test_dtype_pairs,
+        ids=tuple(f"{i}-{o}" for i,o in test_dtype_pairs)
+    )
+    @pytest.mark.parametrize(
+        ("quantization", "columnwise", "ln_out_mode"),
+        test_quantizations,
+        ids=(f"{q}-{c}-{l}" for q,c,l in test_quantizations)
+    )
     def test_norm_triton(
         self,
         M, N,
@@ -336,15 +356,9 @@ class TestNorms:
             in_dtype=in_dtype,
             out_dtype=out_dtype
         )
-        if quantization is None:
-            if columnwise:
-                pytest.skip("Columnwise only affects quantized calls.")
-            if ln_out_mode == "quantized":
-                pytest.skip("Quantized output container only affects quantized calls.")
 
 
         epsilon = 1e-5
-        fwd_ln_sm_margin = get_ln_sm_margin("FWD")
 
         quantizer_triton, quantizer_hip = self._make_quantizer(
             quantization=quantization,
@@ -352,36 +366,31 @@ class TestNorms:
             columnwise=columnwise
         )
 
-        args = dict(
-            input=input_tensor,
-            weight=gamma_tensor,
-            eps=epsilon,
-            ln_out=(
-                quantizer_triton.make_empty(input.shape, dtype=out_dtype)
-                if ln_out_mode is not None else None
-            ),
-            otype=te_out_dtype,
-            sm_margin=fwd_ln_sm_margin,
-            zero_centered_gamma=zero_centered_gamma
+        fwd_args = self._make_fwd_args(
+            norm=norm,
+            ln_out_mode=ln_out_mode,
+            input_tensor=input_tensor,
+            gamma_tensor=gamma_tensor,
+            bias_tensor=bias_tensor,
+            epsilon=epsilon,
+            out_dtype=out_dtype,
+            te_out_dtype=te_out_dtype,
+            zero_centered_gamma=zero_centered_gamma,
+            quantizer_triton=quantizer_triton,
+            quantizer_hip=quantizer_hip,
         )
-        if norm == "layer":
-            args |= dict(bias=bias_tensor)
 
         triton_fwd_func = _triton_funcs["fwd"][norm]
         hip_fwd_func = _hip_funcs["fwd"][norm]
 
         # run the triton path
-        ln_out_triton, mu_triton, rsigma_triton = triton_fwd_func(**args)
+        ln_out_triton, mu_triton, rsigma_triton = triton_fwd_func(**fwd_args["triton"])
 
         # run the reference hipified kernel path
-        args["ln_out"] = (
-            quantizer_hip.make_empty(input.shape, dtype=out_dtype)
-            if ln_out_mode is not None else None
-        )
-        ln_out_hip, mu_hip, rsigma_hip = hip_fwd_func(**args)
+        ln_out_hip, mu_hip, rsigma_hip = hip_fwd_func(**fwd_args["hip"])
 
-        if ln_out_triton.dtype != out_dtype:
-            raise ValueError(f"Expected dtypes to match: {ln_out_triton.dtype} != {out_dtype}")
+        if ln_out_triton.dtype != ln_out_hip.dtype:
+            raise ValueError(f"Expected dtypes to match: {ln_out_triton.dtype} != {ln_out_hip.dtype}")
 
         self._compare_quantized_tensors(
             out_triton=ln_out_triton,
@@ -403,33 +412,37 @@ class TestNorms:
         )
 
         dz = fill_uniform((M, N), in_dtype)
-        bwd_ln_sm_margin = get_ln_sm_margin("BWD")
 
         triton_bwd_func = _triton_funcs["bwd"][norm]
         hip_bwd_func = _hip_funcs["bwd"][norm]
 
-        args = dict(
+        args = self._make_bwd_args(
+            norm=norm,
             dz=dz,
-            x=input_tensor,
-            mu=mu_triton,
-            rsigma=rsigma_triton,
-            gamma=gamma_tensor,
-            sm_margin=bwd_ln_sm_margin,
+            input_tensor=input_tensor,
+            rsigma_triton=rsigma_triton,
+            rsigma_hip=rsigma_hip,
+            mu_triton=mu_triton,
+            mu_hip=mu_hip,
+            gamma_tensor=gamma_tensor,
             zero_centered_gamma=zero_centered_gamma,
-        )
-        dx_triton, dgamma_triton, dbeta_triton = triton_bwd_func(
-        )
 
-        args["rsigma"] = rsigma_hip
-        dx_hip, dgamma_hip, dbeta_hip = hip_bwd_func(
-            dz,
-            input_tensor,
-            mu_hip,
-            rsigma_hip,
-            gamma_tensor,
-            bwd_ln_sm_margin,
-            zero_centered_gamma,
         )
+        triton_bwd_outs = triton_bwd_func(*args["triton"])
+
+        if norm == "layer":
+            dx_triton, dgamma_triton, dbeta_triton = triton_bwd_outs
+        elif norm == "rms":
+            dx_triton, dgamma_triton = triton_bwd_outs
+            dbeta_triton = None
+
+        hip_bwd_outs = hip_bwd_func(*args["hip"])
+
+        if norm == "layer":
+            dx_hip, dgamma_hip, dbeta_hip = hip_bwd_outs
+        elif norm == "rms":
+            dx_hip, dgamma_hip = hip_bwd_outs
+            dbeta_hip = None
 
         # Assert on dx, dgamma and dbeta:
         self._compare_bwd_tensors(
@@ -440,8 +453,9 @@ class TestNorms:
             dbeta_triton=dbeta_triton,
             dbeta_hip=dbeta_hip,
             norm=norm
-            )
+        )
 
+    @pytest.mark.parametrize("columnwise", [False, True])
     def test_norm_fwd_triton_clamp(self, columnwise, norm):
         """
         Non-regression test for MLPerf divergence issue. We test to ensure that in
@@ -459,7 +473,6 @@ class TestNorms:
         bias_tensor = fill_uniform(N, in_dtype)
 
         epsilon = 1e-5
-        fwd_ln_sm_margin = get_ln_sm_margin("FWD")
 
         quantization = 'fp8'
         fp8_dtype = tex.DType.kFloat8E4M3
@@ -478,23 +491,25 @@ class TestNorms:
             columnwise=columnwise
         )
 
-        args = dict(
-            input=input_tensor,
-            weight=gamma_tensor,
-            eps=epsilon,
-            ln_out=None,
-            otype=te_out_dtype,
-            sm_margin=fwd_ln_sm_margin,
-            zero_centered_gamma=zero_centered_gamma
+        fwd_args = self._make_fwd_args(
+            norm=norm,
+            ln_out_mode=None,
+            input_tensor=input_tensor,
+            gamma_tensor=gamma_tensor,
+            bias_tensor=bias_tensor,
+            epsilon=epsilon,
+            out_dtype=out_dtype,
+            te_out_dtype=te_out_dtype,
+            zero_centered_gamma=zero_centered_gamma,
+            quantizer_triton=quantizer_triton,
+            quantizer_hip=quantizer_hip,
         )
-        if norm == "layer":
-            args |= dict(bias=bias_tensor)
 
         triton_fwd_func = _triton_funcs["fwd"][norm]
         hip_fwd_func = _hip_funcs["fwd"][norm]
 
-        ln_out_triton, mu_triton, rsigma_triton = triton_fwd_func(**args)
-        ln_out_hip, mu_hip, rsigma_hip = hip_fwd_func(**args)
+        ln_out_triton, mu_triton, rsigma_triton = triton_fwd_func(**fwd_args["triton"])
+        ln_out_hip, mu_hip, rsigma_hip = hip_fwd_func(**fwd_args["hip"])
 
         if ln_out_triton.dtype != out_dtype:
             raise ValueError(f"Expected dtypes to match: {ln_out_triton.dtype} != {out_dtype}")
@@ -526,46 +541,59 @@ class TestNorms:
         ):
         tols = dtype_tols(out_triton.dtype if quantization is None else fp8_dtype)
         _compare_func = partial(compare_results, provider="te", atol=tols["atol"], rtol=tols["rtol"])
+
         _compare_func(
-            out_triton,
-            out_hip,
-            lambda msg: f"Output does not match triton <-> hip\n\n{msg}\n",
+            actual=out_triton,
+            expected=out_hip,
+            msg=lambda msg: f"Output does not match triton <-> hip\n\n{msg}\n",
         )
+        # TODO(micky774): Remove when `compare_results` correctly handles NaN values
+        _compare_func(
+            actual=out_triton.isnan(),
+            expected=out_hip.isnan(),
+            msg=lambda msg: f"ln_out NaNs do not match triton <-> hip\n\n{msg}\n",
+        )
+
         if quantization == "fp8":
             if not isinstance(out_triton, Float8Tensor):
                 raise ValueError(f"Expected a Float8Tensor but got {type(out_triton)} instead.")
 
             if out_triton._transpose_invalid != out_hip._transpose_invalid:
                 msg = "Expected a" 
-                msg += "n in" if out_hip._transpose_invalid else ""
+                msg += "n in" if out_hip._transpose_invalid else " "
                 msg += "valid transpose buffer."
                 raise ValueError(msg)
 
             if not out_hip._transpose_invalid:
+                # The transpose data are generally uint8 so we must convert
+                # them for floating point comparison.
                 _compare_func(
-                    out_triton._transpose,
-                    out_hip._transpose,
-                    lambda msg: f"Output transpose does not match triton <-> hip\n\n{msg}\n",
+                    actual=out_triton._transpose.view(str_to_torch_dtype("fp8e4")),
+                    expected=out_hip._transpose.view(str_to_torch_dtype("fp8e4")),
+                    msg=lambda msg: f"Output transpose does not match triton <-> hip\n\n{msg}\n",
                 )
 
         elif quantization == "mxfp8":
             if not isinstance(out_triton, MXFP8Tensor):
                 raise ValueError(f"Expected a MXFP8Tensor but got {type(out_triton)} instead.")
 
+            # TODO(micky774): Figure out if we need to apply the same view
+            # trick to MXFP8 data as we do to FP8 transpose data.
+            # I suspect not.
             if out_hip._rowwise_data is not None:
                 _compare_func(
-                    out_triton._rowwise_data,
-                    out_hip._rowwise_data,
-                    lambda msg: f"Output rowwise data does not match triton <-> hip\n\n{msg}\n",
+                    actual=out_triton._rowwise_data,
+                    expected=out_hip._rowwise_data,
+                    msg=lambda msg: f"Output rowwise data does not match triton <-> hip\n\n{msg}\n",
                 )
             else:
                 assert out_triton._rowwise_data is None, "Expected no rowwise data."
 
             if out_hip._columnwise_data is not None:
                 _compare_func(
-                    out_triton._columnwise_data,
-                    out_hip._columnwise_data,
-                    lambda msg: f"Output columnwise data does not match triton <-> hip\n\n{msg}\n",
+                    actual=out_triton._columnwise_data,
+                    expected=out_hip._columnwise_data,
+                    msg=lambda msg: f"Output columnwise data does not match triton <-> hip\n\n{msg}\n",
                 )
             else:
                 assert out_triton._columnwise_data is None, "Expected no columnwise data."
@@ -575,20 +603,20 @@ class TestNorms:
         _compare_func = partial(compare_results, provider="te", atol=1e-6, rtol=5e-5)
         if quantization == "fp8":
             _compare_func(
-                out_triton._scale_inv,
-                out_hip._scale_inv,
-                lambda msg: f"Output scale inverse does not match triton <-> hip\n\n{msg}\n",
+                actual=out_triton._scale_inv,
+                expected=out_hip._scale_inv,
+                msg=lambda msg: f"Output scale inverse does not match triton <-> hip\n\n{msg}\n",
             )
         elif quantization == "mxfp8":
             _compare_func(
-                out_triton._rowwise_scale_inv,
-                out_hip._rowwise_scale_inv,
-                lambda msg: f"Output rowwise scale inverse does not match triton <-> hip\n\n{msg}\n",
+                actual=out_triton._rowwise_scale_inv,
+                expected=out_hip._rowwise_scale_inv,
+                msg=lambda msg: f"Output rowwise scale inverse does not match triton <-> hip\n\n{msg}\n",
             )
             _compare_func(
-                out_triton._columnwise_scale_inv,
-                out_hip._columnwise_scale_inv,
-                lambda msg: f"Output columnwise scale inverse does not match triton <-> hip\n\n{msg}\n",
+                actual=out_triton._columnwise_scale_inv,
+                expected=out_hip._columnwise_scale_inv,
+                msg=lambda msg: f"Output columnwise scale inverse does not match triton <-> hip\n\n{msg}\n",
             )
 
 
@@ -597,12 +625,14 @@ class TestNorms:
         quantizer_triton, quantizer_hip,
         quantization
     ):
+        if quantization is None: return
         _compare_func = partial(compare_results, provider="te", atol=1e-6, rtol=5e-5)
 
         if quantizer_triton.dtype != quantizer_hip.dtype:
             raise ValueError("Expected matching quantizer dtypes, but got "
                              f"{quantizer_triton.dtype} != {quantizer_hip.dtype}"
                             )
+
         for usage in ("rowwise_usage", "columnwise_usage"):
             qt_usage = getattr(quantizer_triton, usage)
             qh_usage = getattr(quantizer_triton, usage)
@@ -611,14 +641,14 @@ class TestNorms:
 
         if quantization == "fp8":
             _compare_func(
-                quantizer_triton.scale,
-                quantizer_hip.scale,
-                lambda msg: f"Quantizer scale does not match triton <-> hip\n\n{msg}\n",
+                actual=quantizer_triton.scale,
+                expected=quantizer_hip.scale,
+                msg=lambda msg: f"Quantizer scale does not match triton <-> hip\n\n{msg}\n",
             )
             _compare_func(
-                quantizer_triton.amax,
-                quantizer_hip.amax,
-                lambda msg: f"Quantizer amax does not match triton <-> hip\n\n{msg}\n",
+                actual=quantizer_triton.amax,
+                expected=quantizer_hip.amax,
+                msg=lambda msg: f"Quantizer amax does not match triton <-> hip\n\n{msg}\n",
             )
 
     def _compare_non_quantized_outputs(
@@ -629,22 +659,21 @@ class TestNorms:
     ):
         # We use higher precision for the remaining outputs
         _compare_func = partial(compare_results, provider="te", atol=1e-6, rtol=5e-5)
+
         _compare_func(
-            rsigma_triton,
-            rsigma_hip,
-            lambda msg: f"rsigma does not match triton <-> hip\n\n{msg}\n",
+            actual=rsigma_triton,
+            expected=rsigma_hip,
+            msg=lambda msg: f"rsigma does not match triton <-> hip\n\n{msg}\n",
         )
         if norm == "layer":
             _compare_func(
-                mu_triton,
-                mu_hip,
-                lambda msg: f"mu does not match triton <-> hip\n\n{msg}\n",
+                actual=mu_triton,
+                expected=mu_hip,
+                msg=lambda msg: f"mu does not match triton <-> hip\n\n{msg}\n",
             )
 
     def _check_skips(self, quantization, shape, in_dtype, out_dtype):
         maybe_skip_quantization(quantization, dims=shape, device="cuda")
-        skip_in_dtype_gt_out_dtype(in_dtype, out_dtype)
-        skip_mixed_16bit_float_types(in_dtype, out_dtype)
 
     def _make_quantizer(self, quantization, fp8_dtype, columnwise):
         if quantization == "fp8":
@@ -666,25 +695,66 @@ class TestNorms:
 
     def _compare_bwd_tensors(
         self,
-        dinput_triton, dinput_hip,
+        dx_triton, dx_hip,
         dgamma_triton, dgamma_hip,
         dbeta_triton, dbeta_hip,
         norm
     ):
         _compare_func = partial(compare_results, provider="te", atol=1.5e-4, rtol=1e-4)
+
         _compare_func(
-            dinput_triton,
-            dinput_hip,
-            lambda msg: f"dx does not match triton <-> hip\n\n{msg}\n",
+            actual=dx_triton,
+            expected=dx_hip,
+            msg=lambda msg: f"dx does not match triton <-> hip\n\n{msg}\n",
         )
         _compare_func(
-            dgamma_triton,
-            dgamma_hip,
-            lambda msg: f"dgamma does not match triton <-> hip\n\n{msg}\n",
+            actual=dgamma_triton,
+            expected=dgamma_hip,
+            msg=lambda msg: f"dgamma does not match triton <-> hip\n\n{msg}\n",
         )
         if norm == "layer":
             _compare_func(
-                dbeta_triton,
-                dbeta_hip,
-                lambda msg: f"dbeta does not match triton <-> hip\n\n{msg}\n",
+                actual=dbeta_triton,
+                expected=dbeta_hip,
+                msg=lambda msg: f"dbeta does not match triton <-> hip\n\n{msg}\n",
             )
+
+    def _make_bwd_args(self, norm, **kwargs):
+        # The HIP implementation requires positional only args
+        args = {}
+        for provider in ("triton", "hip"):
+            _args = (kwargs["dz"], kwargs["input_tensor"])
+            if norm == "layer":
+                _args += (kwargs[f"mu_{provider}"],)
+            _args += (
+                kwargs[f"rsigma_{provider}"],
+                kwargs["gamma_tensor"],
+                get_ln_sm_margin("BWD"),
+                kwargs["zero_centered_gamma"],
+            )
+            args[provider] = _args
+        return args
+
+    def _make_fwd_args(self, norm, **kwargs):
+        args = {}
+        for provider in ("triton", "hip"):
+            _args = dict(
+                input=kwargs["input_tensor"],
+                weight=kwargs["gamma_tensor"],
+                eps=kwargs["epsilon"],
+                ln_out=(
+                    kwargs[f"quantizer_{provider}"].make_empty(
+                        kwargs["input_tensor"].shape,
+                        dtype=kwargs["out_dtype"]
+                    ) if kwargs["ln_out_mode"] is not None else None
+                ),
+                otype=kwargs["te_out_dtype"],
+                sm_margin=get_ln_sm_margin("FWD"),
+                zero_centered_gamma=kwargs["zero_centered_gamma"],
+                quantizer=kwargs[f"quantizer_{provider}"],
+            )
+            if norm == "layer":
+                _args["bias"] = kwargs["bias_tensor"]
+
+            args[provider] = _args
+        return args

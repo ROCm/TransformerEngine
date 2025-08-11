@@ -5,8 +5,8 @@ import torch
 import triton
 import triton.language as tl
 from itertools import product
-from .norm_common import num_programs, block_size, use_blocked
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8Tensor
+from .norm_common import num_programs, block_size, use_blocked, make_ln_out
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.triton_kernels.common import (
     te_dtype_to_torch_dtype,
@@ -392,17 +392,12 @@ def te_rmsnorm_fwd_triton(
     )
     if IS_FP8:
         MAKE_TRANSPOSE = quantizer.columnwise_usage
-        if ln_out is not None:
-            out = (
-                ln_out if isinstance(ln_out, Float8Tensor) else
-                quantizer.create_tensor_from_data(
-                    ln_out.view(te_dtype_to_torch_dtype(quantizer.dtype)),
-                    fake_dtype=pt_otype
-                )
-            )
-        else:
-            out = quantizer.make_empty(input.shape, dtype=pt_otype)
-
+        out = make_ln_out(
+            ln_out,
+            quantizer=quantizer,
+            input_shape=input.shape,
+            out_dtype=pt_otype
+        )
         amax = torch.empty((NUM_PRGMS,), dtype=torch.float32, device="cuda")
         tl_dtype = te_dtype_to_triton_dtype(quantizer.dtype)
         scale_inv_ptr = out._scale_inv

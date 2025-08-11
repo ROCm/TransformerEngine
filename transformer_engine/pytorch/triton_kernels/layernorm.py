@@ -18,14 +18,9 @@ import warnings
 import transformer_engine_torch as tex
 from .common import (
     get_fp8_max,
-    is_fp8_torch_dtype,
     te_dtype_to_torch_dtype,
     te_dtype_to_triton_dtype,
-    torch_dtype_to_te_dtype,
-    te_dtype_to_aten_dtype,
-    enum_value_to_te_dtype,
 )
-from .common import get_fp8_max
 
 def get_autotune_config(full_tuning_space=False):
     if full_tuning_space:
@@ -464,7 +459,7 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
                             eps: float,
                             ln_out: torch.Tensor, 
                             quantizer: Quantizer, 
-                            out_dtype: TE_DType,
+                            out_dtype: tex.DType,
                             sm_margin: int,
                             zero_centered_gamma: bool):
     if sm_margin is not None and sm_margin > 0:
@@ -488,7 +483,7 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
             ln_out._transpose = None
             ln_out._transpose_invalid = True
         else:
-            ln_out = quantizer.create_tensor_from_data(ln_out._data)
+            ln_out = quantizer.create_tensor_from_data(ln_out.view(te_dtype_to_torch_dtype(quantizer.dtype)), fake_dtype=torch_out_dtype)
     # To update the amax ptr directly with atomic max
     APPLY_ATOMIC = M < 512
 
