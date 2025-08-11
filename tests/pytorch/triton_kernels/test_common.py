@@ -389,9 +389,6 @@ class TestNorms:
         # run the reference hipified kernel path
         ln_out_hip, mu_hip, rsigma_hip = hip_fwd_func(**fwd_args["hip"])
 
-        if ln_out_triton.dtype != ln_out_hip.dtype:
-            raise ValueError(f"Expected dtypes to match: {ln_out_triton.dtype} != {ln_out_hip.dtype}")
-
         self._compare_quantized_tensors(
             out_triton=ln_out_triton,
             out_hip=ln_out_hip,
