@@ -61,10 +61,6 @@ execute_process(
   --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp --receipt 5
 )
 
-#execute_process(
-#  COMMAND python3 ${__AITER_SOURCE_DIR}/csrc/py_itfs_cu/fmha_v3_fwd_kernel_generate.py
-#  --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp
-#)
 # generate fwd v3 kernels for both gfx942 and gfx950 targets
 execute_process(
   COMMAND python3 ${__AITER_SOURCE_DIR}/hsa/gfx942/fmha_v3_fwd/codegen.py
@@ -82,9 +78,8 @@ execute_process(
   COMMAND python3 ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha/generate.py
   --api bwd --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp --receipt 600
 )
-# TODO: why still run this fmha_v3_bwd_kernel_generate.py?
 execute_process(
-  COMMAND python3 ${__AITER_SOURCE_DIR}/csrc/py_itfs_cu/fmha_v3_bwd_kernel_generate.py
+  COMMAND python3 ${__AITER_SOURCE_DIR}/csrc/py_itfs_cu/fmha_bwd_pre_post_kernel_generate.py
   --filter *@*_ndeterministic@*_nbias*_dropout*_ndeterministic* --output_dir ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp
 )
 # generate v3 bwd kernels for both gfx942 and gfx950
