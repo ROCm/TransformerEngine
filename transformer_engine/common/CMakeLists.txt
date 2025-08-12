@@ -224,11 +224,14 @@ endif()
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
+
+
 # Configure dependencies
 if (USE_CUDA)
   target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
-                      CUDA::cudart)
+                      CUDA::cudart
+                      CUDNN::cudnn_all)
   target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
@@ -241,6 +244,13 @@ if (USE_CUDA)
       target_link_libraries(transformer_engine PUBLIC MPI::MPI_CXX)
       target_include_directories(transformer_engine PRIVATE ${MPI_CXX_INCLUDES})
       target_compile_definitions(transformer_engine PUBLIC NVTE_UB_WITH_MPI)
+  endif()
+
+  option(NVTE_ENABLE_NVSHMEM "Compile with NVSHMEM library" OFF)
+  if (NVTE_ENABLE_NVSHMEM)
+      add_subdirectory(nvshmem_api)
+      target_link_libraries(transformer_engine PUBLIC nvshmemapi)
+      target_include_directories(transformer_engine PUBLIC ${NVSHMEMAPI_INCLUDE_DIR})
   endif()
   
   # Hack to enable dynamic loading in cuDNN frontend

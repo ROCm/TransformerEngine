@@ -180,6 +180,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("dtype"), py::kw_only(), py::arg("out"), py::call_guard<py::gil_scoped_release>());
   m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend",
         py::call_guard<py::gil_scoped_release>());
+  m.def("compute_amax", &compute_amax, "Compute amax", py::arg("input"), py::arg("amax"));
   m.def("fused_amax_and_scale_update_after_reduction", &fused_amax_and_scale_update_after_reduction,
         "Update amax history and FP8 scale/scale_inv after reduction",
         py::call_guard<py::gil_scoped_release>());
@@ -237,6 +238,23 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Generate partitioned indices for inputs in THD format",
         py::call_guard<py::gil_scoped_release>());
 
+  // nvshmem functions
+  m.def("init_nvshmem_backend", &nvshmem_api::init_nvshmem_backend,
+        "Initialize nvshmem backend with Pytorch distributed process groups",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("create_nvshmem_tensor", &nvshmem_api::create_nvshmem_tensor,
+        "Create a tensor in NVSHMEM shared memory", py::call_guard<py::gil_scoped_release>());
+  m.def("nvshmem_send_on_current_stream", &nvshmem_api::nvshmem_send_on_current_stream,
+        "Asynchronously send tensor data to a remote PE using NVSHMEM on the current CUDA stream",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("nvshmem_wait_on_current_stream", &nvshmem_api::nvshmem_wait_on_current_stream,
+        "Wait for a signal value to be updated by a remote PE using NVSHMEM on the current CUDA "
+        "stream",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("nvshmem_finalize", &nvshmem_api::nvshmem_finalize,
+        "Clean up and finalize the NVSHMEM communication backend and free associated resources",
+        py::call_guard<py::gil_scoped_release>());
+
   // multi-tensor functions
   m.def("multi_tensor_scale", &multi_tensor_scale_cuda,
         "Fused overflow check + scale for a list of contiguous tensors",
@@ -269,6 +287,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("multi_tensor_sgd", &multi_tensor_sgd_cuda,
         "Fused SGD optimizer for list of contiguous tensors",
         py::call_guard<py::gil_scoped_release>());
+  m.def("multi_tensor_compute_scale_and_scale_inv", &multi_tensor_compute_scale_and_scale_inv_cuda,
+        "Fused compute scale and scale_inv from amax", py::call_guard<py::gil_scoped_release>());
 
   // Data structures
   py::class_<transformer_engine::pytorch::FP8TensorMeta>(m, "FP8TensorMeta")
