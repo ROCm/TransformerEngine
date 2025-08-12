@@ -42,16 +42,39 @@ mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available(
 rng_seed = 12345
 rng = np.random.default_rng(np.random.MT19937(rng_seed))
 norms = ["rms", "layer"]
-test_shapes = [
-    (2048, 4096),
-    (768, 2048),
-    (256, 1024),
-    (128, 768),
-    (64, 512),
-    (173, 409),
-    (71, 3571),
-    (29, 17389),
-]
+test_shapes_by_norm = (
+    (
+        tuple(
+            product(
+                ("rms",), [
+                    (2048, 4096),
+                    (768, 2048),
+                    (256, 1024),
+                    (128, 768),
+                    (64, 512),
+                    (173, 409),
+                    (71, 3571),
+                    (29, 17389),
+                ]
+            )
+        )
+    ) + (
+        tuple(
+            product(
+                ("layer",), [
+                    (2048, 12288),
+                    (768, 1024),
+                    (256, 65536),
+                    (128, 6144),
+                    (64, 2304),
+                    (229, 541),
+                    (71, 3571),
+                    (29, 17389),
+                ]
+            )
+        )
+    )
+)
 # (quantization, columnwise, ln_out_mode)
 test_quantizations = ((None, False, None),)
 test_quantizations += tuple(
@@ -313,10 +336,9 @@ def maybe_skip_quantization(
         pytest.skip("Quantization is only supported on CUDA devices")
 
 
-@pytest.mark.parametrize("norm", norms)
 class TestNorms:
 
-    @pytest.mark.parametrize("M, N", test_shapes)
+    @pytest.mark.parametrize(("norm", "shape"), test_shapes_by_norm)
     @pytest.mark.parametrize("zero_centered_gamma", (False, True))
     @pytest.mark.parametrize(
         ("in_dtype", "out_dtype"),
@@ -330,7 +352,7 @@ class TestNorms:
     )
     def test_norm_triton(
         self,
-        M, N,
+        shape,
         in_dtype,
         out_dtype,
         zero_centered_gamma,
@@ -341,7 +363,7 @@ class TestNorms:
     ):
         # We only support 8E4M3 for forward kernels
         fp8_dtype = tex.DType.kFloat8E4M3
-
+        M, N = shape
         in_dtype = str_to_torch_dtype(in_dtype)
         out_dtype = str_to_torch_dtype(out_dtype)
         te_out_dtype = torch_dtype_to_te_dtype(out_dtype)
@@ -452,6 +474,7 @@ class TestNorms:
             norm=norm
         )
 
+    @pytest.mark.parametrize("norm", norms)
     @pytest.mark.parametrize("columnwise", [False, True])
     def test_norm_fwd_triton_clamp(self, columnwise, norm):
         """
