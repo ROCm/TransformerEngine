@@ -32,6 +32,10 @@ else()
   
 endif()
 
+if(NOT CMAKE_GENERATOR STREQUAL "Ninja")
+  message(FATAL_ERROR "This project requires the Ninja build system. Install it using 'pip install ninja'.")
+endif()
+
 # Language options
 if(USE_CUDA)
   if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
