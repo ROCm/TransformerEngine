@@ -460,7 +460,7 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
                             eps: float,
                             ln_out: torch.Tensor, 
                             quantizer: Quantizer, 
-                            otype: tex.Dtype,
+                            otype: tex.DType,
                             sm_margin: int,
                             zero_centered_gamma: bool):
     if sm_margin is not None and sm_margin > 0:
