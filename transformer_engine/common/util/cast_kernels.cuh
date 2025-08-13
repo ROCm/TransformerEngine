@@ -1097,7 +1097,9 @@ void CastVectorizedUnaryKernelLauncher(const Tensor &input, const Tensor *noop, 
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
           output->data.dtype, OType,
           if (!is_fp8_dtype(output->data.dtype) || is_tensor_scaling(output->scaling_mode)) {
-            constexpr int nvec = 32 / sizeof(IType);
+
+            constexpr int bw = (sizeof(IType) == 1) ? 64 : 32;
+            constexpr int nvec = bw / sizeof(IType);
             VectorizedUnaryKernelLauncher<nvec, ParamOP, UnaryOP>(
                 reinterpret_cast<const IType *>(input.data.dptr),
                 reinterpret_cast<const fp32 *>(noop->data.dptr),
