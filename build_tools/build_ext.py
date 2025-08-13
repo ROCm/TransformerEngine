@@ -136,7 +136,8 @@ def get_build_ext(extension_cls: Type[setuptools.Extension], install_so_in_wheel
             # Ensure that binaries are not in global package space.
             lib_dir = (
                 "wheel_lib"
-                if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or install_so_in_wheel_lib
+                if (not rocm_build() and
+                    bool(int(os.getenv("NVTE_RELEASE_BUILD", "0")))) or install_so_in_wheel_lib
                 else ""
             )
             target_dir = install_dir / "transformer_engine" / lib_dir

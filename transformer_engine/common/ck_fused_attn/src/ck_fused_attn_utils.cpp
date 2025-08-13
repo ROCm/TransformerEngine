@@ -5,10 +5,22 @@
  ************************************************************************/
 
 #include <utility>
+#include <dlfcn.h>
+#include <filesystem>
 #include "ck_fused_attn_utils.hpp"
 #include "ck_fused_attn/ck_fused_attn.hpp"
 #include "mask.hpp"
 #include "bias.hpp"
+
+
+const char* nvte_get_aiter_asm_dir() {
+  static const std::filesystem::path aiter_asm_dir = []() {
+    Dl_info info;
+    dladdr((void*)nvte_get_aiter_asm_dir, &info);
+    return std::filesystem::path(info.dli_fname).parent_path() / "aiter/" ;
+  }();
+  return aiter_asm_dir.c_str();
+}
 
 namespace ck_fused_attn{
 
