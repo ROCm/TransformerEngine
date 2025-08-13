@@ -110,7 +110,7 @@ def _rmsnorm_fwd_triton(
                     rms_norm = rms_norm * scale
                     rms_norm = tl.clamp(rms_norm, -FP8_MAX, FP8_MAX)
                     if MAKE_TRANSPOSE:
-                        output_t_ptrs = out_transpose_ptr + col_offsets * transpose_row_stride + blk_idx * BLOCK_SIZE + row_idx
+                        output_t_ptrs = out_transpose_ptr + (col_offsets + blk_idx * BLOCK_SIZE) * transpose_row_stride + row_idx
                         tl.store(output_t_ptrs, rms_norm.to(output_type))
                 tl.store(output_ptrs, rms_norm.to(output_type))
 
@@ -131,7 +131,7 @@ def _rmsnorm_fwd_triton(
                 rms_norm = rms_norm * scale
                 rms_norm = tl.clamp(rms_norm, -FP8_MAX, FP8_MAX)
                 if MAKE_TRANSPOSE:
-                    output_t_ptrs = out_transpose_ptr + col_offsets * transpose_row_stride + n_cols_blks * BLOCK_SIZE + row_idx
+                    output_t_ptrs = out_transpose_ptr + (col_offsets + n_cols_blks * BLOCK_SIZE) * transpose_row_stride  + row_idx
                     tl.store(output_t_ptrs, rms_norm.to(output_type), mask=mask)
             tl.store(output_ptrs, rms_norm.to(output_type), mask=mask)
 
