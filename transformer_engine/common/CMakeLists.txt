@@ -32,9 +32,6 @@ else()
   
 endif()
 
-if(NOT CMAKE_GENERATOR STREQUAL "Ninja")
-  message(FATAL_ERROR "This project requires the Ninja build system. Install it using 'pip install ninja'.")
-endif()
 
 # Language options
 if(USE_CUDA)
@@ -78,6 +75,11 @@ if(USE_CUDA)
 else()
   set(CMAKE_CXX_STANDARD 17)
   project(transformer_engine LANGUAGES HIP CXX)
+
+  # If using ROCm, ninja must be installed to build TE.
+  if (NOT CMAKE_GENERATOR STREQUAL "Ninja")
+    message(FATAL_ERROR "This project requires the Ninja build system. Install it using 'pip install ninja'.")
+  endif()
 
   # Disable Asserts In Code (Can't use asserts on HIP stack.)
   add_definitions(-DNDEBUG)
