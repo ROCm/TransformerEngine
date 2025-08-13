@@ -15,10 +15,16 @@ import math
 
 from transformer_engine.pytorch import cpp_extensions as tex
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.triton_kernels.common import torch_dtype_to_te_dtype
+from transformer_engine.pytorch.triton_kernels.common import (
+    torch_dtype_to_te_dtype,
+    te_dtype_to_torch_dtype
+)
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8Tensor
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
-from transformer_engine.pytorch.triton_kernels.norm_common import get_ln_sm_margin
+from transformer_engine.pytorch.triton_kernels.norm_common import (
+    get_ln_sm_margin,
+    make_ln_out
+)
 from transformer_engine.pytorch.triton_kernels.rmsnorm import (
     te_rmsnorm_bwd_triton,
     te_rmsnorm_fwd_triton,
@@ -290,26 +296,6 @@ def str_to_torch_dtype(dtype_str):
         "fp8e5": get_torch_e5m2_type(),
     }[dtype_str[1:] if dtype_str[0] in {"i", "o"} else dtype_str]
 
-# Common pytest skip conditions:
-
-def skip_in_dtype_gt_out_dtype(in_dtype, out_dtype):
-    if sizeof(in_dtype) < sizeof(out_dtype):
-        pytest.skip("size of input dtype < size of output dtype")
-
-
-def skip_mixed_16bit_float_types(in_dtype, out_dtype):
-    if (in_dtype == torch.float16 and out_dtype == torch.bfloat16) or (
-        in_dtype == torch.bfloat16 and out_dtype == torch.float16
-    ):
-        pytest.skip("hipified implementation does not support mixing fp16 and bf16")
-
-
-
-def compute_ref_stats(data: torch.Tensor, epsilon: float):
-    mu_computed = torch.mean(data, dim=1, keepdim=True)
-    variance = torch.mean((data - mu_computed).pow(2), dim=1, keepdim=True)
-    rsigma_computed = 1.0 / torch.sqrt(variance + epsilon)
-    return mu_computed, rsigma_computed
 
 def mxfp8_layernorm_fwd_ref(
     input,
@@ -324,17 +310,22 @@ def mxfp8_layernorm_fwd_ref(
 ):
     # Dummy function to serve as a stand-in for a reference HIP implementation
     input = input.to(torch.float32)
-    mu, rsigma = compute_ref_stats(input, eps)
-
-    weight = weight.to(torch.float32)
-    bias = bias.to(torch.float32)
-
+    mu = torch.mean(input, dim=1, keepdim=True)
+    variance = torch.mean((input - mu).square(), dim=1, keepdim=True)
+    inv_var = torch.rsqrt(variance + eps)
     g_tensor = weight + int(zero_centered_gamma)
-    raw = (input - mu) * rsigma * g_tensor + bias
-    assert isinstance(quantizer, MXFP8Quantizer)
-    out = quantizer(raw, out=ln_out.to(otype))
+    x_normed = (input - mu) * inv_var * g_tensor + bias
 
-    return out, mu.squeeze(1), rsigma.squeeze(1)
+    assert isinstance(quantizer, MXFP8Quantizer)
+    out = (
+        quantizer.make_empty(
+            input.shape,
+            dtype=te_dtype_to_torch_dtype(otype),
+            device=input.device
+        )
+    )
+    out = quantizer.quantize(x_normed, out=out)
+    return out, mu.squeeze(1), inv_var.squeeze(1)
 
 def mxfp8_rmsnorm_fwd_ref(
     input,
@@ -347,16 +338,20 @@ def mxfp8_rmsnorm_fwd_ref(
     zero_centered_gamma
 ):
     # Dummy function to serve as a stand-in for a reference HIP implementation
-    input = input.to(torch.float32)
-    _, rsigma = compute_ref_stats(input, eps)
-
-    weight = weight.to(torch.float32)
-
+    norm_x = torch.mean(input * input, dim=1, keepdim=True)
+    rsigma = torch.rsqrt(norm_x + eps)
     g_tensor = weight + int(zero_centered_gamma)
-    raw = input * rsigma * g_tensor
-    assert isinstance(quantizer, MXFP8Quantizer)
-    out = quantizer(raw, out=ln_out.to(otype))
+    x_normed = input * rsigma * g_tensor
 
+    assert isinstance(quantizer, MXFP8Quantizer)
+    out = (
+        quantizer.make_empty(
+            input.shape,
+            dtype=te_dtype_to_torch_dtype(otype),
+            device=input.device
+        )
+    )
+    out = quantizer.quantize(x_normed, out=out)
     return out, None, rsigma.squeeze(1)
 
 class TestNorms:
@@ -439,7 +434,7 @@ class TestNorms:
         # run the reference hipified kernel path
         ln_out_hip, mu_hip, rsigma_hip = hip_fwd_func(**fwd_args["hip"])
 
-        self._compare_quantized_tensors(
+        self._compare_output_tensors(
             out_triton=ln_out_triton,
             out_hip=ln_out_hip,
             quantization=quantization,
@@ -450,7 +445,7 @@ class TestNorms:
             quantizer_hip=quantizer_hip,
             quantization=quantization
         )
-        self._compare_non_quantized_outputs(
+        self._compare_stat_tensors(
             rsigma_triton=rsigma_triton,
             rsigma_hip=rsigma_hip,
             mu_triton=mu_triton,
@@ -561,7 +556,7 @@ class TestNorms:
         if ln_out_triton.dtype != out_dtype:
             raise ValueError(f"Expected dtypes to match: {ln_out_triton.dtype} != {out_dtype}")
 
-        self._compare_quantized_tensors(
+        self._compare_output_tensors(
             out_triton=ln_out_triton,
             out_hip=ln_out_hip,
             quantization=quantization,
@@ -572,7 +567,7 @@ class TestNorms:
             quantizer_hip=quantizer_hip,
             quantization=quantization
         )
-        self._compare_non_quantized_outputs(
+        self._compare_stat_tensors(
             rsigma_triton=rsigma_triton,
             rsigma_hip=rsigma_hip,
             mu_triton=mu_triton,
@@ -581,7 +576,7 @@ class TestNorms:
         )
 
 
-    def _compare_quantized_tensors(
+    def _compare_output_tensors(
         self,
         out_triton, out_hip,
         quantization, fp8_dtype
@@ -615,8 +610,8 @@ class TestNorms:
                 # The transpose data are generally uint8 so we must convert
                 # them for floating point comparison.
                 _compare_func(
-                    actual=out_triton._transpose.view(str_to_torch_dtype("fp8e4")),
-                    expected=out_hip._transpose.view(str_to_torch_dtype("fp8e4")),
+                    actual=out_triton._transpose.view(te_dtype_to_torch_dtype(out_triton._fp8_dtype)),
+                    expected=out_hip._transpose.view(te_dtype_to_torch_dtype(out_triton._fp8_dtype)),
                     msg=lambda msg: f"Output transpose does not match triton <-> hip\n\n{msg}\n",
                 )
 
@@ -637,16 +632,6 @@ class TestNorms:
             else:
                 assert out_triton._rowwise_data is None, "Expected no rowwise data."
 
-            if out_hip._columnwise_data is not None:
-                _compare_func(
-                    actual=out_triton,
-                    expected=out_hip,
-                    msg=lambda msg: f"Output columnwise data does not match triton <-> hip\n\n{msg}\n",
-                )
-            else:
-                assert out_triton._columnwise_data is None, "Expected no columnwise data."
-
-
         # We use higher precision for the scales
         _compare_func = partial(compare_results, provider="te", atol=1e-6, rtol=5e-5)
         if quantization == "fp8":
@@ -656,16 +641,35 @@ class TestNorms:
                 msg=lambda msg: f"Output scale inverse does not match triton <-> hip\n\n{msg}\n",
             )
         elif quantization == "mxfp8":
-            _compare_func(
-                actual=out_triton._rowwise_scale_inv,
-                expected=out_hip._rowwise_scale_inv,
-                msg=lambda msg: f"Output rowwise scale inverse does not match triton <-> hip\n\n{msg}\n",
-            )
-            _compare_func(
-                actual=out_triton._columnwise_scale_inv,
-                expected=out_hip._columnwise_scale_inv,
-                msg=lambda msg: f"Output columnwise scale inverse does not match triton <-> hip\n\n{msg}\n",
-            )
+            has_rscale_triton = out_triton._rowwise_scale_inv is not None
+            has_rscale_hip = out_hip._rowwise_scale_inv is not None
+            if has_rscale_triton != has_rscale_hip:
+                msg = "Expected rowwise scale to "
+                if has_rscale_hip:
+                   msg += "not "
+                msg += "be None."
+                raise ValueError(msg)
+            if has_rscale_triton:
+                _compare_func(
+                    actual=out_triton._rowwise_scale_inv.view(te_dtype_to_torch_dtype(out_triton._fp8_dtype)),
+                    expected=out_hip._rowwise_scale_inv.view(te_dtype_to_torch_dtype(out_triton._fp8_dtype)),
+                    msg=lambda msg: f"Output rowwise scale inverse does not match triton <-> hip\n\n{msg}\n",
+                )
+
+            has_cscale_triton = out_triton._columnwise_scale_inv is not None
+            has_cscale_hip = out_hip._columnwise_scale_inv is not None
+            if has_cscale_triton != has_cscale_hip:
+                msg = "Expected columnwwise scale to "
+                if has_cscale_hip:
+                   msg += "not "
+                msg += "be None."
+                raise ValueError(msg)
+            if has_cscale_triton:
+                _compare_func(
+                    actual=out_triton._columnwise_scale_inv.view(te_dtype_to_torch_dtype(out_triton._fp8_dtype)),
+                    expected=out_hip._columnwise_scale_inv.view(te_dtype_to_torch_dtype(out_triton._fp8_dtype)),
+                    msg=lambda msg: f"Output columnwise scale inverse does not match triton <-> hip\n\n{msg}\n",
+                )
 
 
     def _compare_quantizers(
@@ -699,7 +703,7 @@ class TestNorms:
                 msg=lambda msg: f"Quantizer amax does not match triton <-> hip\n\n{msg}\n",
             )
 
-    def _compare_non_quantized_outputs(
+    def _compare_stat_tensors(
         self,
         rsigma_triton, rsigma_hip,
         mu_triton, mu_hip,
@@ -724,8 +728,12 @@ class TestNorms:
         # Check if quantization scheme is supported
         if quantization == "fp8" and not fp8_available:
             pytest.skip(reason_for_no_fp8)
-        if quantization == "mxfp8" and not mxfp8_available:
-            pytest.skip(reason_for_no_mxfp8)
+        if quantization == "mxfp8":
+            if not mxfp8_available:
+                pytest.skip(reason_for_no_mxfp8)
+            if shape[0] % 32 !=0 or shape[1] % 32 !=0:
+                pytest.skip("MXFP8 quantization requires dimensions divisible by 32.")
+
 
     def _make_quantizer(self, quantization, fp8_dtype, columnwise):
         if quantization == "fp8":
