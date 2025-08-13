@@ -1241,7 +1241,7 @@ void fused_attn_ck_fwd_qkvpacked(
   void *devPtrCuSeqlens = input_cu_seqlens->data.dptr;
   void *devPtrSeqOffsets = input_cu_seqlens_padded->data.dptr;
 
-  size_t max_tokens = std::accumulate((input_QKV->data).shape.begin(), (input_QKV->data).shape.end(), 1, std::multiplies<size_t>())/h/d/3;
+  size_t max_tokens = std::accumulate((input_QKV->data).shape.begin(), (input_QKV->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h/d/3;
   bool is_ragged = nvte_get_qkv_format(qkv_layout)==NVTE_QKV_Format::NVTE_THD; 
 
   if (Aux_CTX_Tensors->size == 0) {
@@ -1405,7 +1405,7 @@ void fused_attn_ck_bwd_qkvpacked(
   bool pad_between_seqs = (is_ragged && !(input_cu_seqlens_padded->data.shape.empty())) || (!is_ragged && is_padding && !(input_cu_seqlens->data.shape.empty()));
   // extract the max_tokens for padding/unpadding and softmax_lse buffer
   // b from cu_seqlen and max_seqlen are not the actual storage batch and seqlen for pad_between_seqs case
-  size_t max_tokens = std::accumulate((input_QKV->data).shape.begin(), (input_QKV->data).shape.end(), 1, std::multiplies<size_t>())/h/d/3;
+  size_t max_tokens = std::accumulate((input_QKV->data).shape.begin(), (input_QKV->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h/d/3;
 
   // in qkvpacked layouts, o is of the same max_tokens as q
   // dqkv has the same shape as qkv
@@ -1495,8 +1495,8 @@ void fused_attn_ck_fwd_kvpacked(
   void *devPtrSeqOffsetsQ = input_cu_seqlens_q_padded->data.dptr;
   void *devPtrSeqOffsetsKV = input_cu_seqlens_kv_padded->data.dptr;
 
-  size_t max_tokens_q = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), 1, std::multiplies<size_t>())/h_q/d;
-  size_t max_tokens_kv = std::accumulate((input_KV->data).shape.begin(), (input_KV->data).shape.end(), 1, std::multiplies<size_t>())/h_kv/d/2;
+  size_t max_tokens_q = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_q/d;
+  size_t max_tokens_kv = std::accumulate((input_KV->data).shape.begin(), (input_KV->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_kv/d/2;
 
   bool is_ragged = nvte_get_qkv_format(qkv_layout)==NVTE_QKV_Format::NVTE_THD; 
 
@@ -1660,8 +1660,8 @@ void fused_attn_ck_bwd_kvpacked(
   
   // extract the max_tokens for padding/unpadding and softmax_lse buffer
   // b from cu_seqlen and max_seqlen are not the actual storage batch and seqlen for pad_between_seqs case
-  size_t max_tokens_q = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), 1, std::multiplies<size_t>())/h_q/d;
-  size_t max_tokens_kv = std::accumulate((input_KV->data).shape.begin(), (input_KV->data).shape.end(), 1, std::multiplies<size_t>())/h_kv/d/2;
+  size_t max_tokens_q = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_q/d;
+  size_t max_tokens_kv = std::accumulate((input_KV->data).shape.begin(), (input_KV->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_kv/d/2;
   
   fused_attn_ck_bwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, d, bias_b, bias_h,
@@ -1739,8 +1739,8 @@ void fused_attn_ck_fwd(
   void *devPtrSeqOffsetsQ = input_cu_seqlens_q_padded->data.dptr;
   void *devPtrSeqOffsetsKV = input_cu_seqlens_kv_padded->data.dptr;
 
-  size_t max_tokens_q = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), 1, std::multiplies<size_t>())/h_q/d_qk;
-  size_t max_tokens_kv = std::accumulate((input_K->data).shape.begin(), (input_K->data).shape.end(), 1, std::multiplies<size_t>())/h_kv/d_qk;
+  size_t max_tokens_q = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_q/d_qk;
+  size_t max_tokens_kv = std::accumulate((input_K->data).shape.begin(), (input_K->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_kv/d_qk;
 
   bool is_ragged = nvte_get_qkv_format(qkv_layout)==NVTE_QKV_Format::NVTE_THD; 
   if (Aux_CTX_Tensors->size == 0) {
@@ -1891,8 +1891,8 @@ void fused_attn_ck_bwd(
   
   // extract the max_tokens for padding/unpadding and softmax_lse buffer
   // b from cu_seqlen and max_seqlen are not the actual storage batch and seqlen for pad_between_seqs case
-  size_t max_tokens_q = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), 1, std::multiplies<size_t>())/h_q/d_qk;
-  size_t max_tokens_kv = std::accumulate((input_K->data).shape.begin(), (input_K->data).shape.end(), 1, std::multiplies<size_t>())/h_kv/d_qk;
+  size_t max_tokens_q = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_q/d_qk;
+  size_t max_tokens_kv = std::accumulate((input_K->data).shape.begin(), (input_K->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_kv/d_qk;
 
   fused_attn_ck_bwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, bias_b, bias_h,
