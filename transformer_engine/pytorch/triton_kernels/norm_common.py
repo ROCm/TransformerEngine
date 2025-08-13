@@ -68,17 +68,14 @@ def make_ln_out(ln_out, quantizer=None, input_shape=None, out_dtype=torch.float3
     if isinstance(ln_out, MXFP8Tensor):
         return ln_out.dequantize(dtype=out_dtype).to("cuda")
 
-    if isinstance(ln_out, Float8Tensor):
-        ln_out.update_usage(
-            rowwise_usage=quantizer.rowwise_usage,
-            columnwise_usage=quantizer.columnwise_usage
-        )
-        ln_out.dtype=out_dtype
-        return ln_out
-
     # TODO(micky774): Remove when kernels properly support MXFP8 as a fused operation
     if isinstance(quantizer, MXFP8Quantizer):
         return torch.empty(input_shape, dtype=out_dtype, device='cuda')
+
+    if isinstance(ln_out, Float8Tensor):
+        if ln_out.dtype == out_dtype:
+            return ln_out
+        return quantizer.make_empty(input_shape, dtype=out_dtype)
 
     return quantizer.create_tensor_from_data(
             ln_out.view(te_dtype_to_torch_dtype(quantizer.dtype)),
