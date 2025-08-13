@@ -304,46 +304,74 @@ def skip_mixed_16bit_float_types(in_dtype, out_dtype):
         pytest.skip("hipified implementation does not support mixing fp16 and bf16")
 
 
-def maybe_skip_quantization(
-    quantization: Optional[str],
-    *,
-    dims: Optional[Iterable[int] | int] = None,
-    device: Optional[torch.device | str] = None,
-) -> None:
 
-    # Don't skip if there is no quantization
-    if quantization is None:
-        return
+def compute_ref_stats(data: torch.Tensor, epsilon: float):
+    mu_computed = torch.mean(data, dim=1, keepdim=True)
+    variance = torch.mean((data - mu_computed).pow(2), dim=1, keepdim=True)
+    rsigma_computed = 1.0 / torch.sqrt(variance + epsilon)
+    return mu_computed, rsigma_computed
 
-    # Check if quantization scheme is supported
-    if quantization == "fp8" and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    if quantization == "mxfp8" and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
+def mxfp8_layernorm_fwd_ref(
+    input,
+    weight,
+    bias,
+    eps,
+    ln_out,
+    quantizer,
+    otype,
+    sm_margin,
+    zero_centered_gamma
+):
+    # Dummy function to serve as a stand-in for a reference HIP implementation
+    input = input.to(torch.float32)
+    mu, rsigma = compute_ref_stats(input, eps)
 
-    if dims is not None:
-        if not isinstance(dims, Iterable):
-            dims = (dims,)
-        if quantization == "fp8":
-            if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
-                pytest.skip("FP8 GEMMs require dims that are divisible by 16")
-        elif quantization == "mxfp8":
-            if math.prod(dims[:-1]) % 32 != 0 or dims[-1] % 32 != 0:
-                pytest.skip("MXFP8 GEMMs require dims that are divisible by 32")
+    weight = weight.to(torch.float32)
+    bias = bias.to(torch.float32)
 
-    # Check if device is supported
-    if device is not None and torch.device(device).type != "cuda":
-        pytest.skip("Quantization is only supported on CUDA devices")
+    g_tensor = weight + int(zero_centered_gamma)
+    raw = (input - mu) * rsigma * g_tensor + bias
+    assert isinstance(quantizer, MXFP8Quantizer)
+    out = quantizer(raw, out=ln_out.to(otype))
 
+    return out, mu.squeeze(1), rsigma.squeeze(1)
+
+def mxfp8_rmsnorm_fwd_ref(
+    input,
+    weight,
+    eps,
+    ln_out,
+    quantizer,
+    otype,
+    sm_margin,
+    zero_centered_gamma
+):
+    # Dummy function to serve as a stand-in for a reference HIP implementation
+    input = input.to(torch.float32)
+    _, rsigma = compute_ref_stats(input, eps)
+
+    weight = weight.to(torch.float32)
+    bias = bias.to(torch.float32)
+
+    g_tensor = weight + int(zero_centered_gamma)
+    raw = input * rsigma * g_tensor + bias
+    assert isinstance(quantizer, MXFP8Quantizer)
+    out = quantizer(raw, out=ln_out.to(otype))
+
+    return out, None, rsigma.squeeze(1)
 
 class TestNorms:
 
-    @pytest.mark.parametrize(("norm", "shape"), test_shapes_by_norm)
+    @pytest.mark.parametrize(
+        ("norm", "shape"),
+        test_shapes_by_norm,
+        ids=(f"{norm}-{s}" for norm, s in test_shapes_by_norm)
+    )
     @pytest.mark.parametrize("zero_centered_gamma", (False, True))
     @pytest.mark.parametrize(
         ("in_dtype", "out_dtype"),
         test_dtype_pairs,
-        ids=tuple(f"{i}-{o}" for i,o in test_dtype_pairs)
+        ids=(f"{i}-{o}" for i,o in test_dtype_pairs)
     )
     @pytest.mark.parametrize(
         ("quantization", "columnwise", "ln_out_mode"),
@@ -372,13 +400,7 @@ class TestNorms:
         gamma_tensor = fill_uniform(N, in_dtype)
         bias_tensor = fill_uniform(N, in_dtype)
 
-        self._check_skips(
-            quantization=quantization,
-            shape=(M, N),
-            in_dtype=in_dtype,
-            out_dtype=out_dtype
-        )
-
+        self._check_skips(quantization=quantization, shape=(M, N))
 
         epsilon = 1e-5
 
@@ -404,6 +426,13 @@ class TestNorms:
 
         triton_fwd_func = _triton_funcs["fwd"][norm]
         hip_fwd_func = _hip_funcs["fwd"][norm]
+
+        # TODO(micky774): Remove when we have HIP kernels to test against
+        if quantization == "mxfp8":
+            if norm == "layer":
+                hip_fwd_func = mxfp8_layernorm_fwd_ref
+            elif norm == "rms":
+                hip_fwd_func = mxfp8_rmsnorm_fwd_ref
 
         # run the triton path
         ln_out_triton, mu_triton, rsigma_triton = triton_fwd_func(**fwd_args["triton"])
@@ -434,6 +463,10 @@ class TestNorms:
 
         triton_bwd_func = _triton_funcs["bwd"][norm]
         hip_bwd_func = _hip_funcs["bwd"][norm]
+
+        # Backwards kernels do not support quantization
+        if quantization is not None:
+            return
 
         args = self._make_bwd_args(
             norm=norm,
@@ -498,12 +531,7 @@ class TestNorms:
         fp8_dtype = tex.DType.kFloat8E4M3
         gamma_tensor = torch.tensor([2**20] + [0]*127, dtype=in_dtype, device="cuda")
 
-        self._check_skips(
-            quantization=quantization,
-            shape=(M, N),
-            in_dtype=in_dtype,
-            out_dtype=out_dtype
-        )
+        self._check_skips(quantization=quantization, shape=(M, N))
 
         quantizer_triton, quantizer_hip = self._make_quantizer(
             quantization=quantization,
@@ -602,17 +630,18 @@ class TestNorms:
             # I suspect not.
             if out_hip._rowwise_data is not None:
                 _compare_func(
-                    actual=out_triton._rowwise_data,
-                    expected=out_hip._rowwise_data,
+                    actual=out_triton,
+                    expected=out_hip,
                     msg=lambda msg: f"Output rowwise data does not match triton <-> hip\n\n{msg}\n",
                 )
+                out_triton._rowwise_data = None
             else:
                 assert out_triton._rowwise_data is None, "Expected no rowwise data."
 
             if out_hip._columnwise_data is not None:
                 _compare_func(
-                    actual=out_triton._columnwise_data,
-                    expected=out_hip._columnwise_data,
+                    actual=out_triton,
+                    expected=out_hip,
                     msg=lambda msg: f"Output columnwise data does not match triton <-> hip\n\n{msg}\n",
                 )
             else:
@@ -692,8 +721,12 @@ class TestNorms:
                 msg=lambda msg: f"mu does not match triton <-> hip\n\n{msg}\n",
             )
 
-    def _check_skips(self, quantization, shape, in_dtype, out_dtype):
-        maybe_skip_quantization(quantization, dims=shape, device="cuda")
+    def _check_skips(self, quantization, shape):
+        # Check if quantization scheme is supported
+        if quantization == "fp8" and not fp8_available:
+            pytest.skip(reason_for_no_fp8)
+        if quantization == "mxfp8" and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
 
     def _make_quantizer(self, quantization, fp8_dtype, columnwise):
         if quantization == "fp8":
