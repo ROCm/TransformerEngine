@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import types
-from typing import Optional
-from collections.abc import Iterable
 from functools import partial
 from itertools import product
 
 import numpy as np
 import pytest
 import torch
-import math
 
 from transformer_engine.pytorch import cpp_extensions as tex
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
@@ -21,10 +18,7 @@ from transformer_engine.pytorch.triton_kernels.common import (
 )
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8Tensor
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
-from transformer_engine.pytorch.triton_kernels.norm_common import (
-    get_ln_sm_margin,
-    make_ln_out
-)
+from transformer_engine.pytorch.triton_kernels.norm_common import get_ln_sm_margin
 from transformer_engine.pytorch.triton_kernels.rmsnorm import (
     te_rmsnorm_bwd_triton,
     te_rmsnorm_fwd_triton,
@@ -60,8 +54,7 @@ test_shapes_by_norm = (
                     (64, 512),
                     (173, 409),
                     (71, 3571),
-                    # TODO(micky774): Re-enable after debugging rmsnorm kernel
-                    # (29, 17389),
+                    (29, 17389),
                 ]
             )
         )
