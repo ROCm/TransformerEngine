@@ -1,18 +1,22 @@
 # Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
-
+from __future__ import annotations
 
 import types
+from typing import Optional
+from collections.abc import Iterable
 
 import numpy as np
 import pytest
 import torch
+import math
 
 from transformer_engine.pytorch import cpp_extensions as tex
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 
 from transformer_engine.pytorch.triton_kernels.common import (
-    torch_e4m3_type,
-    torch_e5m2_type,
+    get_torch_e4m3_type,
+    get_torch_e5m2_type,
 )
 
 # Mimics behavior of `fillUniform` from `tests/cpp/test_common.cu`.
@@ -37,11 +41,43 @@ def get_tolerances(dtype):
         return 1e-5, 1e-3
     elif dtype == torch.bfloat16:
         return 1e-5, 1e-2
-    elif dtype == torch_e4m3_type or dtype == torch_e5m2_type:
+    elif dtype == get_torch_e4m3_type() or dtype == get_torch_e5m2_type():
         # TODO: different tolerances for FNUZ and OCP
         return 1e-2, 1e-2
     else:
         raise RuntimeError("Invalid type")
+
+def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
+    """Estimated numerical error for a datatype
+
+    Based on tolerances for torch.testing.assert_close.
+
+    """
+
+    # Transformer Engine dtypes
+    if isinstance(dtype, tex.DType):
+        if dtype == tex.DType.kFloat8E4M3:
+            return dict(rtol=0.125, atol=0.0675)  # epsilon = 0.0625
+        if dtype == tex.DType.kFloat8E5M2:
+            return dict(rtol=0.25, atol=0.125)  # epsilon = 0.152
+        dtype = {
+            tex.DType.kByte: torch.uint8,
+            tex.DType.kInt32: torch.int32,
+            tex.DType.kFloat32: torch.float32,
+            tex.DType.kFloat16: torch.half,
+            tex.DType.kBFloat16: torch.bfloat16,
+        }[dtype]
+
+    # PyTorch dtypes
+    if dtype == torch.float16:
+        return dict(rtol=1e-3, atol=1e-5)
+    if dtype == torch.bfloat16:
+        return dict(rtol=1.6e-2, atol=1e-5)
+    if dtype == torch.float32:
+        return dict(rtol=1.3e-6, atol=1e-5)
+    if dtype == torch.float64:
+        return dict(rtol=1e-7, atol=1e-7)
+    raise ValueError(f"Unsupported dtype ({dtype})")
 
 
 # PyTorch implementation of `compareResults` C++ function from `tests/cpp/test_common.cu`.
@@ -60,10 +96,22 @@ def te_compare_results(t, r, atol, rtol, msg):
     diff = t - r
     atol_mismatch = torch.abs(diff) > atol
     nonzero_r = r != 0
-    rtol_mismatch = torch.full_like(atol_mismatch, False)
-    rtol_mismatch[nonzero_r] = torch.abs(diff[nonzero_r] / r[nonzero_r]) > rtol
+    rel_diff = torch.where(nonzero_r, torch.abs(diff / r), torch.zeros_like(diff))
+    rtol_mismatch = torch.where(nonzero_r, rel_diff > rtol, torch.full_like(atol_mismatch, False))
     mismatch = atol_mismatch & (~nonzero_r | rtol_mismatch)
     has_mismatch = torch.any(mismatch).item()
+
+    max_rel_diff = 0.0 # Default to 0.0 if no non-zero reference values
+    max_abs_diff = 0.0 
+    max_abs_diff_indices = None
+    max_rel_diff_indices = None
+    
+    if has_mismatch:
+        max_abs_diff = torch.max(torch.abs(diff)).item()
+        max_rel_diff = torch.max(rel_diff).item()
+        max_rel_diff_indices = torch.unravel_index(torch.argmax(rel_diff), rel_diff.shape)
+        max_abs_diff_indices = torch.unravel_index(torch.argmax(torch.abs(diff)), diff.shape)
+
     # for fp32 the floating point comparison is enough to error out
     if has_mismatch and dtype != torch.float32:
         # check if it is just a failure of round to nearest choosing different side of the real value
@@ -87,8 +135,23 @@ def te_compare_results(t, r, atol, rtol, msg):
         mismatch = mismatch & round_check
         has_mismatch = torch.any(mismatch).item()
     if has_mismatch:
-        # TODO: Improve base message, add max absolute and relative differences.
-        base_msg = "There are tensor mismatches."
+        num_mismatched_elements = torch.sum(mismatch).item()
+        total_elements = t.numel() 
+        base_msg = (
+            f"There are tensor mismatches.\n"
+            f"Number of mismatched rows: {num_mismatched_elements} out of {total_elements} total rows.\n"
+            f"Max Absolute Difference among mismatched: {max_abs_diff:.6e} (Tolerance: {atol:.6e}) at index {tuple(max_abs_diff_indices)}\n"
+            f"Corresponding values: t={t[max_abs_diff_indices].item()}, r={r[max_abs_diff_indices].item()}\n"
+        )
+        if max_rel_diff_indices is not None:
+             base_msg += (
+                f"Max Relative Difference among mismatched: {max_rel_diff:.6e} (Tolerance: {rtol:.6e}) at index {tuple(max_rel_diff_indices)}\n"
+                f"Corresponding values: t={t[max_rel_diff_indices].item()}, r={r[max_rel_diff_indices].item()}"
+            )
+        else:
+            base_msg += (
+                f"Max Relative Difference among mismatched: {max_rel_diff:.6e} (Tolerance: {rtol:.6e}) (no non-zero reference values)\n"
+            )
         if isinstance(msg, str):
             msg = f"{msg}\n\n{base_msg}\n"
         elif isinstance(msg, types.LambdaType):
@@ -129,8 +192,8 @@ def str_to_torch_dtype(dtype_str):
         "fp16": torch.float16,
         "bf16": torch.bfloat16,
         "fp32": torch.float32,
-        "fp8e4": torch_e4m3_type,
-        "fp8e5": torch_e5m2_type,
+        "fp8e4": get_torch_e4m3_type(),
+        "fp8e5": get_torch_e5m2_type(),
     }[dtype_str[1:] if dtype_str[0] in {"i", "o"} else dtype_str]
 
 # Common pytest skip conditions:
@@ -145,3 +208,40 @@ def skip_mixed_16bit_float_types(in_dtype, out_dtype):
         in_dtype == torch.bfloat16 and out_dtype == torch.float16
     ):
         pytest.skip("hipified implementation does not support mixing fp16 and bf16")
+
+
+# Check if FP8 is supported
+fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+
+
+def maybe_skip_quantization(
+    quantization: Optional[str],
+    *,
+    dims: Optional[Iterable[int] | int] = None,
+    device: Optional[torch.device | str] = None,
+) -> None:
+
+    # Don't skip if there is no quantization
+    if quantization is None:
+        return
+
+    # Check if quantization scheme is supported
+    if quantization == "fp8" and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if quantization == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+
+    if dims is not None:
+        if not isinstance(dims, Iterable):
+            dims = (dims,)
+        if quantization == "fp8":
+            if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
+                pytest.skip("FP8 GEMMs require dims that are divisible by 16")
+        elif quantization == "mxfp8":
+            if math.prod(dims[:-1]) % 32 != 0 or dims[-1] % 32 != 0:
+                pytest.skip("MXFP8 GEMMs require dims that are divisible by 32")
+
+    # Check if device is supported
+    if device is not None and torch.device(device).type != "cuda":
+        pytest.skip("Quantization is only supported on CUDA devices")

@@ -47,6 +47,8 @@ run_test_config(){
     run 1 test_cuda_graphs.py
     run_default_fa 1 test_deferred_init.py
     run_default_fa 1 test_float8tensor.py
+    run_default_fa 1 test_float8_current_scaling_exact.py
+    run_default_fa 1 test_cpu_offloading.py
     run_default_fa 1 test_fused_rope.py
     run_default_fa 1 test_fusible_ops.py
     run_default_fa 3 test_gemm_autotune.py
@@ -60,11 +62,13 @@ run_test_config(){
     run_default_fa 1 test_recipe.py
     run 1 test_sanity.py
     run_default_fa 1 fused_attn/test_fused_attn.py # Backend selection is controlled by the test
-    # TODO: bring back cast transpose kernels after triton kernels for transformer_engine::pytorch::quantize
     run_default_fa 1 triton_kernels/test_cast.py
+    run_default_fa 1 triton_kernels/test_cast_mxfp8.py
     run_default_fa 1 triton_kernels/test_rmsnorm.py
     run_default_fa 1 triton_kernels/test_layernorm.py
+    run_default_fa 1 triton_kernels/test_layernorm_mxfp8.py
     run_default_fa 1 triton_kernels/test_norm_common.py
+    run_default_fa 1 test_parallel_cross_entropy.py
     NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa 3 test_numerics.py
     NVTE_USE_RMSNORM_TRITON=1 run_default_fa 1 test_fusible_ops.py
 }

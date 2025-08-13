@@ -6,6 +6,8 @@ import os
 import jax
 import pytest
 
+
+import transformer_engine.jax
 from transformer_engine.transformer_engine_jax import get_device_compute_capability
 
 

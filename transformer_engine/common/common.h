@@ -18,6 +18,7 @@
 #include <cuda_runtime_api.h>
 #include <transformer_engine/transformer_engine.h>
 
+#include <cstdint>
 #include <functional>
 #include <stdexcept>
 #include <string>
@@ -31,6 +32,21 @@
 #include "./util/logging.h"
 
 namespace transformer_engine {
+
+std::string to_string(const DType type);
+std::string to_string(const NVTEScalingMode &mode);
+
+inline bool is_tensor_scaling(const NVTEScalingMode &mode) {
+  return mode == NVTE_DELAYED_TENSOR_SCALING;
+}
+
+inline bool is_block_scaling(const NVTEScalingMode &mode) { return !is_tensor_scaling(mode); }
+
+inline bool is_delayed_tensor_scaling(const NVTEScalingMode &mode) {
+  return mode == NVTE_DELAYED_TENSOR_SCALING;
+}
+
+inline bool is_mxfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }
 
 inline size_t product(const std::vector<size_t> &shape, const size_t begin, const size_t end) {
   NVTE_CHECK(begin <= end && end <= shape.size(), "Attempted to access entries ", begin, " to ",
@@ -70,7 +86,7 @@ struct SimpleTensor {
     return {dptr, static_cast<NVTEDType>(dtype), shape};
   }
 
-  int numel() const {
+  size_t numel() const {
     size_t acc = 1;
     for (const auto &dim : shape) {
       acc *= dim;
@@ -99,17 +115,8 @@ struct Tensor {
         scaling_mode(NVTE_DELAYED_TENSOR_SCALING) {}
 
   int numel() const {
-    NVTE_CHECK(data.dptr != nullptr || columnwise_data.dptr != nullptr,
-               "Tensor does not hold any data!");
     size_t acc = 1;
-    if (data.dptr != nullptr) {
-      for (const auto &dim : data.shape) {
-        acc *= dim;
-      }
-      return acc;
-    }
-    // data is empty, use columnwise_data
-    for (const auto &dim : columnwise_data.shape) {
+    for (const auto dim : shape()) {
       acc *= dim;
     }
     return acc;
@@ -117,7 +124,10 @@ struct Tensor {
 
   bool has_data() const noexcept { return data.dptr != nullptr; }
 
-  bool has_columnwise_data() const noexcept { return columnwise_data.dptr != nullptr; }
+  // Check for size (not just pointer) for 0-dim or no token cases.
+  bool has_columnwise_data() const noexcept {
+    return columnwise_data.dptr != nullptr || columnwise_data.shape.size() != 0;
+  }
 
   DType dtype() const {
     if (has_data()) return data.dtype;
@@ -126,24 +136,54 @@ struct Tensor {
     return data.dtype;
   }
 
+  std::vector<size_t> shape() const {
+    /* Note: We sometimes experience spurious compiler errors
+     * (-Wstringop-overflow) from this function. It appears that GCC
+     * has some bugs with std::vector (see
+     * https://gcc.gnu.org/bugzilla/show_bug.cgi?id=109569).
+     */
+    switch (scaling_mode) {
+      case NVTE_DELAYED_TENSOR_SCALING:
+        if (!has_data() && has_columnwise_data()) {
+          std::vector<size_t> ret;
+          if (!columnwise_data.shape.empty()) {
+            for (size_t i = 1; i < columnwise_data.shape.size(); i++) {
+              ret.push_back(columnwise_data.shape[i]);
+            }
+            ret.push_back(columnwise_data.shape.front());
+          }
+          return ret;
+        } else {
+          return data.shape;
+        }
+        break;
+      case NVTE_MXFP8_1D_SCALING:
+        if (!has_data() && has_columnwise_data()) {
+          return columnwise_data.shape;
+        } else {
+          return data.shape;
+        }
+        break;
+      default:
+        NVTE_ERROR("Cannot parse tensor shape with scaling mode \"", to_string(scaling_mode), "\"");
+        return {};
+    }
+  }
+
   /*! Matrix height after tensor is flattened to 2D
    *
    * If a tensor has dimensions (D1, D2, ..., Dn), it is reinterpreted
    * as a (D1*D2*...*D(n-1), Dn) matrix.
    */
   size_t flat_first_dim() const {
-    if (!has_data() && has_columnwise_data()) {
-      const auto &data_shape = columnwise_data.shape;
-      if (data_shape.empty()) return 1;
-      if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
-        return product(data_shape, 1, data_shape.size());
-      } else {
-        return product(data_shape, 0, data_shape.size() - 1);
+    const auto &full_shape = shape();
+    size_t ret = 1;
+    if (!full_shape.empty()) {
+      for (size_t i = 0; i < full_shape.size() - 1; i++) {
+        ret *= full_shape[i];
       }
     }
-    const auto &data_shape = data.shape;
-    if (data_shape.empty()) return 1;
-    return product(data_shape, 0, data_shape.size() - 1);
+    return ret;
   }
 
   /*! Matrix width after tensor is flattened to 2D
@@ -152,19 +192,23 @@ struct Tensor {
    * as a (D1*D2*...*D(n-1), Dn) matrix.
    */
   size_t flat_last_dim() const {
-    if (!has_data() && has_columnwise_data()) {
-      const auto &data_shape = columnwise_data.shape;
-      if (data_shape.empty()) return 1;
-      if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
-        return data_shape.front();
-      } else {
-        return data_shape.back();
-      }
+    const auto &full_shape = shape();
+    if (full_shape.empty()) {
+      return 1;
+    } else {
+      return full_shape.back();
     }
-    const auto &data_shape = data.shape;
-    if (data_shape.empty()) return 1;
-    return data_shape.back();
   }
+};
+
+struct QuantizationConfig {
+  bool force_pow_2_scales = false;
+  float amax_epsilon = 0.0f;
+
+  static constexpr size_t attr_sizes[] = {
+      sizeof(bool),  // force_pow_2_scales
+      sizeof(float)  // amax_epsilon
+  };
 };
 
 template <typename T>
@@ -189,6 +233,7 @@ using e8m0_t = uint8_t;
 using bf16 = hip_bfloat16;
 using fp8e4m3 = te_hip_fp8_e4m3;
 using fp8e5m2 = te_hip_fp8_e5m2;
+using e8m0_t = uint8_t;
 #endif //__HIP_PLATFORM_AMD__
 
 namespace detail {
@@ -411,6 +456,15 @@ struct TypeInfo {
     }                                                               \
   }
 
+#define TRANSFORMER_ENGINE_SWITCH_CONDITION(CONDITION, FLAG, ...) \
+  if (CONDITION) {                                                \
+    constexpr bool FLAG = true;                                   \
+    { __VA_ARGS__ }                                               \
+  } else {                                                        \
+    constexpr bool FLAG = false;                                  \
+    { __VA_ARGS__ }                                               \
+  }
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline int log2_ceil(int value) {
@@ -442,6 +496,17 @@ constexpr size_t scale_tensor_alignment_Y_rowwise = 128;
 constexpr size_t scale_tensor_alignment_X_colwise = 128;
 constexpr size_t scale_tensor_alignment_Y_colwise = 4;
 
+// Alignment requirements for the Tensor Memory Accelerator (TMA)
+constexpr int TMA_gmem_alignment = 16;  // global memory address alignment
+
+inline bool is_aligned_ptr(const void *ptr, size_t alignment) {
+  return reinterpret_cast<uintptr_t>(ptr) % alignment == 0;
+}
+
+inline bool is_aligned_tensor_data(const Tensor &t, size_t alignment) {
+  return is_aligned_ptr(static_cast<const void *>(t.data.dptr), alignment);
+}
+
 size_t typeToSize(const DType type);
 
 void CheckNoopTensor(const Tensor &t, const std::string &name);
@@ -449,23 +514,6 @@ void CheckInputTensor(const Tensor &t, const std::string &name);
 void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty = false);
 
 bool is_fp8_dtype(const DType t);
-
-std::string to_string(const DType type);
-std::string to_string(const NVTEScalingMode &type);
-
-inline bool is_tensor_scaling(const NVTEScalingMode &mode) {
-  return mode == NVTE_DELAYED_TENSOR_SCALING;
-}
-
-inline bool is_block_scaling(const NVTEScalingMode &mode) {
-  return mode != NVTE_DELAYED_TENSOR_SCALING;
-}
-
-inline bool is_delayed_tensor_scaling(const NVTEScalingMode &mode) {
-  return is_tensor_scaling(mode);
-}
-
-inline bool is_mxfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }
 
 /*! \brief Update a tensor's FP8 scale-inverse
  *
@@ -481,8 +529,6 @@ void checkCuDriverContext(CUstream stream);
 
 #ifndef __HIP_PLATFORM_AMD__
 CUtensorMapDataType get_CUtensorMapDataType(DType dtype);
-
-inline bool isPointerAligned(const void *const ptr, const int alignment);
 
 // Set up parameters to create TMA descriptor.
 void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,

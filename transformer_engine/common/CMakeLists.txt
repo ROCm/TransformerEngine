@@ -80,7 +80,7 @@ else()
   add_definitions(-DUSE_ROCM)
 
   if(NOT DEFINED ENV{NVTE_ROCM_ARCH})
-    SET(CMAKE_HIP_ARCHITECTURES gfx942)
+    SET(CMAKE_HIP_ARCHITECTURES gfx942 gfx950)
   else()
     SET(CMAKE_HIP_ARCHITECTURES $ENV{NVTE_ROCM_ARCH})
   endif()
@@ -126,7 +126,6 @@ if(USE_CUDA)
        activation/swiglu.cu
        fused_attn/fused_attn_fp8.cu
        fused_attn/fused_attn.cpp
-       fused_attn/thd_utils.cu
        fused_attn/utils.cu
        gemm/cublaslt_gemm.cu
        normalization/common.cpp
@@ -140,14 +139,15 @@ if(USE_CUDA)
        util/cast.cu
        util/padding.cu
        util/cuda_driver.cpp
+       util/cuda_nvml.cpp
        util/cuda_runtime.cpp
        util/rtc.cpp
-       util/system.cpp
        swizzle/swizzle.cu
        fused_softmax/scaled_masked_softmax.cu
        fused_softmax/scaled_upper_triang_masked_softmax.cu
        fused_softmax/scaled_aligned_causal_masked_softmax.cu
        fused_rope/fused_rope.cu
+       recipe/current_scaling.cu
        recipe/delayed_scaling.cu
        comm_gemm_overlap/userbuffers/ipcsocket.cc
        comm_gemm_overlap/userbuffers/userbuffers-host.cpp
@@ -170,7 +170,6 @@ else()
        fused_attn_rocm/fused_attn_aotriton.cpp
        fused_attn_rocm/fused_attn_ck.cpp
        fused_attn_rocm/utils.cpp
-       fused_attn/thd_utils.cu
        gemm/cublaslt_gemm.cu
        gemm/rocm_gemm.cu
        normalization/common.cpp
@@ -186,12 +185,13 @@ else()
        util/cuda_driver.cpp
        util/cuda_runtime.cpp
        util/rtc.cpp
-       util/system.cpp
+       amd_detail/system.cpp
        swizzle/swizzle.cu
        fused_softmax/scaled_masked_softmax.cu
        fused_softmax/scaled_upper_triang_masked_softmax.cu
        fused_softmax/scaled_aligned_causal_masked_softmax.cu
        fused_rope/fused_rope.cu
+       recipe/current_scaling.cu
        recipe/delayed_scaling.cu)
 
   # process source code files
@@ -261,78 +261,54 @@ else()
       else()
         set(AOTRITON_NOIMAGE_MODE ON)
       endif()
-      set(aotriton_supported_archs)
-      set(aotriton_target_gpus "")
-      # GPU Targets
-      macro(translate_arch_to_gpu_names aotriton_target_gpus)
-        set(gfx90a_key MI200)
-        set(gfx942_key MI300X)
-        set(gfx1100_key Navi31)
 
+      string(REPLACE ";" "," ARCH_LIST_COMMA_STR "${CMAKE_HIP_ARCHITECTURES}")
+      include(ExternalProject)
+      ExternalProject_Add(aotriton_external
+        LIST_SEPARATOR ","
+        SOURCE_DIR ${TE}/3rdparty/aotriton
+        CMAKE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${__AOTRITON_INSTALL_DIR}
+        -DAOTRITON_TARGET_ARCH=${ARCH_LIST_COMMA_STR}
+        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+        -DAOTRITON_NO_PYTHON=ON
+        -DAOTRITON_NAME_SUFFIX=${__AOTRITON_SUFFIX}
+        -DAOTRITON_NOIMAGE_MODE=${AOTRITON_NOIMAGE_MODE}
+        BUILD_BYPRODUCTS "${__AOTRITON_INSTALL_DIR}/lib/libaotriton${__AOTRITON_SUFFIX}_v2.so"
+        )
+      add_library(aotriton INTERFACE)
+      add_dependencies(aotriton aotriton_external)
+      target_link_libraries(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/lib/libaotriton${__AOTRITON_SUFFIX}_v2.so)
+      target_include_directories(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/include)
+      if(NOT USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS)
+        set(__AOTRITON_VER "0.10b")
+        set(__AOTRITON_SHA256 "1e9b3dddf0c7fc07131c6f0f5266129e83ce2331f459fa2be8c63f4ae91b0f5b")
+        string(CONCAT __AOTRITON_URL "https://github.com/ROCm/aotriton/releases/download/"
+                                    "${__AOTRITON_VER}/aotriton-"
+                                    "${__AOTRITON_VER}-manylinux_2_28"
+                                    "_x86_64-rocm7.0"
+                                    "-shared.tar.gz")
+        set(aotriton_image_dirs)
         foreach(X IN LISTS CMAKE_HIP_ARCHITECTURES)
-          set(key ${X})
-          string(APPEND key "_key")
-          set(gpu ${${key}})
-          if (gpu)
-            list(APPEND aotriton_supported_archs ${X})
-            string(APPEND aotriton_target_gpus "${gpu}|")
-          else()
-            message(WARNING "AOTriton building is not supported for ${X}")
-          endif()
+          list(APPEND aotriton_image_dirs "${CMAKE_CURRENT_BINARY_DIR}/aotriton_tarball/lib/aotriton.images/amd-${X}")
         endforeach()
-      endmacro()
-      translate_arch_to_gpu_names(aotriton_target_gpus)
-      if (NOT aotriton_target_gpus)
-        set(USE_FUSED_ATTN_AOTRITON FALSE)
-        message(WARNING "Disable AOTriton building because no supported GPU targets found")
-      else()
-        include(ExternalProject)
-        ExternalProject_Add(aotriton_external
-          SOURCE_DIR ${TE}/3rdparty/aotriton
-          LIST_SEPARATOR |
-          CMAKE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${__AOTRITON_INSTALL_DIR}
-          -DTARGET_GPUS=${aotriton_target_gpus}
-          -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-          -DAOTRITON_NO_PYTHON=ON
-          -DAOTRITON_NAME_SUFFIX=${__AOTRITON_SUFFIX}
-          -DAOTRITON_NOIMAGE_MODE=${AOTRITON_NOIMAGE_MODE}
-          BUILD_BYPRODUCTS "${__AOTRITON_INSTALL_DIR}/lib/libaotriton${__AOTRITON_SUFFIX}_v2.so"
-          )
-        add_library(aotriton INTERFACE)
-        add_dependencies(aotriton aotriton_external)
-        target_link_libraries(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/lib/libaotriton${__AOTRITON_SUFFIX}_v2.so)
-        target_include_directories(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/include)
-        if(NOT USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS)
-          set(__AOTRITON_VER "0.8.2b")
-          set(__AOTRITON_SHA256 "66445e6b0209b9f4080743b839cc9d424054dc5c8d07363f9f27f109231c324a")
-          string(CONCAT __AOTRITON_URL "https://github.com/ROCm/aotriton/releases/download/"
-                                      "${__AOTRITON_VER}/aotriton-"
-                                      "${__AOTRITON_VER}-manylinux_2_28"
-                                      "_x86_64-rocm6.2"
-                                      "-shared.tar.gz")
-          set(aotriton_image_dirs)
-          foreach(X IN LISTS aotriton_supported_archs)
-            list(APPEND aotriton_image_dirs "${CMAKE_CURRENT_BINARY_DIR}/aotriton_tarball/lib/aotriton.images/amd-${X}")
-          endforeach()
-          set(aotriton_lib_install_dir "${__AOTRITON_INSTALL_DIR}/lib/aotriton.images")
-          file(REMOVE_RECURSE ${aotriton_lib_install_dir})
-          file(MAKE_DIRECTORY ${aotriton_lib_install_dir})
-          ExternalProject_Add(aotriton_images
-                              URL "${__AOTRITON_URL}"
-                              URL_HASH SHA256=${__AOTRITON_SHA256}
-                              SOURCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/aotriton_tarball
-                              CONFIGURE_COMMAND ""
-                              BUILD_COMMAND ""
-                              BUILD_ALWAYS TRUE
-                              INSTALL_COMMAND cp -Ra ${aotriton_image_dirs} ${aotriton_lib_install_dir})
-          add_dependencies(aotriton aotriton_images)
-        endif()
-        install(DIRECTORY
-                ${__AOTRITON_INSTALL_DIR}/lib
-                DESTINATION ${CMAKE_INSTALL_PREFIX}/transformer_engine
-                PATTERN "cmake" EXCLUDE
-                PATTERN "libaotriton${__AOTRITON_SUFFIX}_v2.so" EXCLUDE)
+        set(aotriton_lib_install_dir "${__AOTRITON_INSTALL_DIR}/lib/aotriton.images")
+        file(REMOVE_RECURSE ${aotriton_lib_install_dir})
+        file(MAKE_DIRECTORY ${aotriton_lib_install_dir})
+        ExternalProject_Add(aotriton_images
+                            URL "${__AOTRITON_URL}"
+                            URL_HASH SHA256=${__AOTRITON_SHA256}
+                            SOURCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/aotriton_tarball
+                            CONFIGURE_COMMAND ""
+                            BUILD_COMMAND ""
+                            BUILD_ALWAYS TRUE
+                            INSTALL_COMMAND cp -Ra ${aotriton_image_dirs} ${aotriton_lib_install_dir})
+        add_dependencies(aotriton aotriton_images)
       endif()
+      install(DIRECTORY
+              ${__AOTRITON_INSTALL_DIR}/lib
+              DESTINATION ${CMAKE_INSTALL_PREFIX}/transformer_engine
+              PATTERN "cmake" EXCLUDE
+              PATTERN "libaotriton${__AOTRITON_SUFFIX}_v2.so" EXCLUDE)
     else()
       # Use aotriton built during initial TE building/installation
       # When only need rebuild TE library itself

@@ -9,7 +9,7 @@ from __future__ import annotations
 import torch
 
 import transformer_engine.pytorch as te
-from transformer_engine.pytorch.fp8 import get_torch_float8_e4m3_type, get_torch_float8_e5m2_type
+from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type, get_torch_float8_e5m2_type
 import transformer_engine_torch as tex
 
 torch_float8_e4m3_type = get_torch_float8_e4m3_type()

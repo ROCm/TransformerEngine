@@ -31,26 +31,13 @@
 #include "ptx.cuh"
 #include "transformer_engine/activation.h"
 #include "transformer_engine/transpose.h"
+#ifdef __HIP_PLATFORM_AMD__
+#include "rocm_dequantize_kernels.cuh"
+#endif
 
 namespace transformer_engine {
 
 namespace dequantization {
-
-constexpr size_t CHUNK_DIM_Y = 128;
-constexpr size_t CHUNK_DIM_X = 128;
-constexpr size_t THREADS_PER_CHUNK = 128;
-constexpr size_t BUFFERS_NUM = 2;
-
-constexpr size_t ELEMS_PER_THREAD = 16;
-constexpr size_t BUFFER_DIM_Y = 16;           // only 32 is supported
-constexpr size_t BUFFER_DIM_X = CHUNK_DIM_X;  // 128
-constexpr size_t SHMEM_DIM_Y = BUFFER_DIM_Y;  // 16
-constexpr size_t SHMEM_DIM_X = BUFFER_DIM_X;  // 128
-
-constexpr size_t THREADS_PER_CHUNK_X_ROWWISE = CHUNK_DIM_X / ELEMS_PER_THREAD;  //  8 = 128 / 16
-constexpr size_t THREADS_PER_CHUNK_X_COLWISE = CHUNK_DIM_X;                     //  128
-constexpr size_t ITERATIONS = CHUNK_DIM_Y / BUFFER_DIM_Y;                       //    8 = 128 / 16
-static_assert(ITERATIONS >= 1);
 
 #ifndef __HIP_PLATFORM_AMD__
 template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X>
@@ -232,7 +219,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   }
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
-#endif
+#endif // #ifndef __HIP_PLATFORM_AMD__
 
 static void fp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
   NVTE_CHECK(is_fp8_dtype(input.data.dtype), "Input must have FP8 type.");
@@ -255,11 +242,12 @@ static void fp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t str
   );                      // NOLINT(*)
 }
 
-#ifndef __HIP_PLATFORM_AMD__
 static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
   bool use_rowwise_scaling = input.has_data();
   bool use_colwise_scaling = input.has_columnwise_data();
+#ifndef __HIP_PLATFORM_AMD__
   checkCuDriverContext(stream);
+#endif
 
   const auto &input_shape = input.data.shape;
   NVTE_CHECK(input_shape.size() >= 2, "Input must have at least 2 dimensions.");
@@ -323,7 +311,11 @@ static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t s
               input.dtype(), IType,
               TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
                   output->dtype(), OType,
-
+#ifdef __HIP_PLATFORM_AMD__
+                dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X>
+                <<<grid, block, 0, stream>>>(reinterpret_cast<const IType *>(input_data.dptr), reinterpret_cast<OType *>(output->data.dptr), scales_ptr,
+                                               rows, cols, scales_stride););  // NOLINT(*)
+#else // #ifdef __HIP_PLATFORM_AMD__
                   alignas(64) CUtensorMap tensor_map_input{};
                   alignas(64) CUtensorMap tensor_map_output{};
 
@@ -335,11 +327,11 @@ static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t s
                   dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X>
                   <<<grid, block, 0, stream>>>(tensor_map_input, tensor_map_output, scales_ptr,
                                                rows, cols, scales_stride););  // NOLINT(*)
+#endif // #ifdef __HIP_PLATFORM_AMD__
           );                                                                  // NOLINT(*)
       );                                                                      // NOLINT(*)
   );                                                                          // NOLINT(*)
 }
-#endif
 }  // namespace dequantization
 
 namespace detail {
@@ -350,14 +342,16 @@ void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t stream)
 
   if (is_tensor_scaling(input.scaling_mode)) {
     dequantization::fp8_dequantize(input, output, stream);
-#ifndef __HIP_PLATFORM_AMD__
   } else if (is_mxfp_scaling(input.scaling_mode)) {
+#ifdef __HIP_PLATFORM_AMD__
+    if (1) {
+#else
     if (is_supported_by_CC_100()) {
+#endif
       dequantization::mxfp8_dequantize(input, output, stream);
     } else {
       NVTE_ERROR("MXFP8 Dequantization is NOT supported by architectures < 10.0");
     }
-#endif
   } else {
     NVTE_ERROR("Not implemented scaling mode: " + to_string(input.scaling_mode) + ".");
   }

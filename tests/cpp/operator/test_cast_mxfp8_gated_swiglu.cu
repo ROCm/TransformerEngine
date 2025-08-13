@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -12,6 +14,10 @@
 #include <transformer_engine/activation.h>
 #include "../test_common.h"
 #include "transformer_engine/transformer_engine.h"
+
+#ifdef __HIP_PLATFORM_AMD__
+#include <omp.h>
+#endif
 
 using namespace transformer_engine;
 using namespace test;
@@ -35,6 +41,7 @@ void scale_block(const IType* grad,
     float block_amax = 0.0f;
     float block_amax_gate = 0.0f;
     const size_t stride = cols * 2;
+
 
     // Find the absolute maximum value in the block
     for (size_t i = i_min; i < i_max; ++i) {
@@ -409,10 +416,15 @@ class CastMXFP8_GatedActTestSuite : public ::testing::TestWithParam
                 bool>> {};
 
 TEST_P(CastMXFP8_GatedActTestSuite, TestCastMXFP8Swiglu) {
-    // Skip tests for pre-Blackwell architectures
+ #ifdef __HIP_PLATFORM_AMD__
+    omp_set_num_threads(std::min(128, omp_get_max_threads())); // Using threads = # of vcpus causes occasional errors.
+#else
+   // Skip tests for pre-Blackwell architectures
     if (getDeviceComputeCapability() < blackwellComputeCapability) {
         GTEST_SKIP();
     }
+#endif
+
 
     using namespace transformer_engine;
     using namespace test;

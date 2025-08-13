@@ -7,13 +7,18 @@
 
 # pylint: disable=wrong-import-position,wrong-import-order
 
+import sys
 import logging
+import importlib
+import importlib.util
 import ctypes
 from importlib.metadata import version
 
 from transformer_engine.common import get_te_path, is_package_installed
 from transformer_engine.common import _get_sys_extension
 from .util import is_hip_extension
+
+_logger = logging.getLogger(__name__)
 
 
 def _load_library():
@@ -41,9 +46,9 @@ def _load_library():
 
     if is_package_installed(f"transformer-engine-{te_cuda_vers}"):
         if not is_package_installed(module_name):
-            logging.info(
-                "Could not find package %s. Install transformer-engine using 'pip"
-                " install transformer-engine[jax]==VERSION'",
+            _logger.info(
+                "Could not find package %s. Install transformer-engine using "
+                "'pip3 install transformer-engine[jax]==VERSION'",
                 module_name,
             )
 
@@ -52,8 +57,12 @@ def _load_library():
         so_dir = get_te_path() / "transformer_engine"
         so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
     except StopIteration:
-        so_dir = get_te_path()
-        so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
+        try:
+            so_dir = get_te_path() / "transformer_engine" / "wheel_lib"
+            so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
+        except StopIteration:
+            so_dir = get_te_path()
+            so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
 
     return ctypes.CDLL(so_path, mode=ctypes.RTLD_GLOBAL)
 

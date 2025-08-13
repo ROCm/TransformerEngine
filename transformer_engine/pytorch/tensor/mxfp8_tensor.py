@@ -6,9 +6,14 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
+import os
 from typing import Optional, Tuple
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import torch
+if IS_HIP_EXTENSION:
+    from ..triton_kernels.cast import te_quantize_triton
+
 import transformer_engine_torch as tex
 
 from transformer_engine_torch import DType as TE_DType
@@ -59,12 +64,27 @@ class MXFP8Quantizer(Quantizer):
             src = src.contiguous()
 
         # Launch cast kernel
-        tex.quantize(src, self, dst, noop_flag)
+        if IS_HIP_EXTENSION:
+            use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+            quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
+            quantize_func(src, self, dst, noop_flag)
+        else:
+            tex.quantize(src, self, dst, noop_flag)
 
         # Update FP8 dtype
         dst._fp8_dtype = self.dtype
 
         return dst
+
+    def is_quantizable(self, inp: torch.Tensor) -> bool:
+        """Returns whether or not given inp can be quantized"""
+        if inp.ndim < 2:
+            return False
+        if inp.shape[-1] % MXFP8_BLOCK_SCALING_SIZE != 0:
+            return False
+        if math.prod(inp.shape[:-1]) % MXFP8_BLOCK_SCALING_SIZE != 0:
+            return False
+        return True
 
     def make_empty(
         self,
@@ -207,36 +227,50 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
         # TODO(ksivamani): Fix the detach bug
         return MXFP8Tensor.make_like(self)
 
-    def update_usage(self, rowwise_usage=True, columnwise_usage=True):
+    def update_usage(
+        self,
+        rowwise_usage: Optional[bool] = None,
+        columnwise_usage: Optional[bool] = None,
+    ):
         """
         For MXFP8, columnwise scaled output is only produced by x2
         scaling kernels, so this function only disables usages.
         """
-        assert rowwise_usage or columnwise_usage, "Could not disable all usages of the tensor."
 
-        if columnwise_usage and rowwise_usage:
-            assert (
-                self._rowwise_data is not None
-                and self._rowwise_scale_inv is not None
-                and self._columnwise_data is not None
-                and self._columnwise_scale_inv is not None
-            ), "Cannot update to rowwise and columnwise usage."
-            return
+        # Default usage is based on available data
+        if rowwise_usage is None:
+            rowwise_usage = self._rowwise_data is not None
+        if columnwise_usage is None:
+            columnwise_usage = self._columnwise_data is not None
 
+        # Update row-scaled data
         if rowwise_usage:
-            assert (
-                self._rowwise_data is not None and self._rowwise_scale_inv is not None
-            ), "Cannot update to rowwise usage."
+            if self._rowwise_data is None:
+                raise RuntimeError(
+                    "Requested row-wise usage, but MXFP8Tensor is missing row-scaled FP8 data"
+                )
+            if self._rowwise_scale_inv is None:
+                raise RuntimeError(
+                    "Requested row-wise usage, but MXFP8Tensor is missing row-scaled scale-inverses"
+                )
+        else:
+            self._rowwise_data = None
+            self._rowwise_scale_inv = None
+
+        # Update column-scaled data
+        if columnwise_usage:
+            if self._columnwise_data is None:
+                raise RuntimeError(
+                    "Requested column-wise usage, but MXFP8Tensor is missing column-scaled FP8 data"
+                )
+            if self._columnwise_scale_inv is None:
+                raise RuntimeError(
+                    "Requested column-wise usage, "
+                    "but MXFP8Tensor is missing column-scaled scale-inverses"
+                )
+        else:
             self._columnwise_data = None
             self._columnwise_scale_inv = None
-            return
-
-        assert (
-            self._columnwise_data is not None and self._columnwise_scale_inv is not None
-        ), "Cannot update to columnwise usage."
-        self._rowwise_data = None
-        self._rowwise_scale_inv = None
-        return
 
     def clone(self) -> MXFP8Tensor:
         # pylint: disable=missing-function-docstring
@@ -368,6 +402,8 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
 
         # Tensor device
         new_device = tensor.device if tensor.is_cuda else self.device
+        if not devices_match(new_device, tensor.device):
+            tensor = tensor.to(device=new_device)
 
         # Just copy FP8 data if other tensor is MXFP8Tensor
         if isinstance(tensor, MXFP8Tensor):

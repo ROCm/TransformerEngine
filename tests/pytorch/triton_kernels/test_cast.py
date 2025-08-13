@@ -69,3 +69,35 @@ def test_quantize(shape, in_dtype, out_dtype):
     atol_scale, rtol_scale = get_tolerances(torch.float32)
     assert torch.allclose(quantized_out_triton._get_quantizer().scale, quantized_out_tex._get_quantizer().scale, atol=atol_scale, rtol=rtol_scale), 'Scale results do not match!'
     assert torch.allclose(quantized_out_triton._get_quantizer().amax, quantized_out_tex._get_quantizer().amax, atol=atol_scale, rtol=rtol_scale), 'AMAX results do not match!'
+
+
+@pytest.mark.parametrize("t_shape",
+                         [
+                        (16 ),
+                        (768, 1024),
+                        (1, 128),
+                        (5, 160),
+                        (5, 4, 3, 160),
+                        ])
+@pytest.mark.parametrize("fp8_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
+def test_quantize_bad_transpose(t_shape, fp8_dtype):
+    """
+    Non-regression test for gh-13121, testing whether te_quantize_triton
+    correctly dispatches based off of transpose buffer validity.
+    """
+    # The input type and shape are arbitrary, but we choose only one so as to
+    # avoid unnecessarily expanding the test parameter space.
+    in_dtype = torch.float32
+    shape = (128, 128)
+    input_tensor = fill_uniform(shape, dtype=in_dtype)
+    output_tensor = torch.empty(shape, dtype=in_dtype, device='cuda')
+
+    scale_tensor = torch.rand(1, dtype=torch.float32, device='cuda') * 3.0 - 2.0
+    amax_tensor = torch.zeros(1, dtype=torch.float32, device='cuda')
+    quantizer = Float8Quantizer(scale=scale_tensor, amax=amax_tensor, fp8_dtype=fp8_dtype)
+
+    quantized_output = quantizer(output_tensor)
+    quantized_output._transpose_invalid = True
+    quantized_output._transpose = torch.empty(t_shape, device='cuda')
+
+    te_quantize_triton(input_tensor, quantizer=quantizer, output=quantized_output)

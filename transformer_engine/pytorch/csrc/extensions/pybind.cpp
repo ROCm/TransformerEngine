@@ -26,6 +26,7 @@ namespace transformer_engine::pytorch {
 PyTypeObject *Float8TensorPythonClass = nullptr;  /// TODO Remove
 PyTypeObject *Float8TensorBasePythonClass = nullptr;
 PyTypeObject *Float8QuantizerClass = nullptr;
+PyTypeObject *Float8CurrentScalingQuantizerClass = nullptr;
 PyTypeObject *MXFP8TensorPythonClass = nullptr;  /// TODO Remove
 PyTypeObject *MXFP8TensorBasePythonClass = nullptr;
 PyTypeObject *MXFP8QuantizerClass = nullptr;
@@ -35,6 +36,8 @@ void init_float8_extension() {
   auto fp8_module = py::module_::import("transformer_engine.pytorch.tensor.float8_tensor");
   Float8QuantizerClass =
       reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp8_module.ptr(), "Float8Quantizer"));
+  Float8CurrentScalingQuantizerClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(fp8_module.ptr(), "Float8CurrentScalingQuantizer"));
   Float8TensorPythonClass =
       reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp8_module.ptr(), "Float8Tensor"));
   auto fp8_base_module =
@@ -173,16 +176,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("input_list"), py::arg("output_list"), py::arg("quantizer_list"), py::arg("otype"));
 
   m.def("te_general_grouped_gemm", &te_general_grouped_gemm, "Grouped GEMM");
-  m.def("fused_attn_fwd", &fused_attn_fwd,
-        "Fused Attention FP8/BF16/FP16 FWD with separate Q, K and V");
-  m.def("fused_attn_bwd", &fused_attn_bwd,
-        "Fused Attention FP8/BF16/FP16 BWD with separate Q, K and V");
   m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O", py::arg("input"),
         py::arg("dtype"), py::kw_only(), py::arg("out"), py::call_guard<py::gil_scoped_release>());
-  m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention",
-        py::call_guard<py::gil_scoped_release>());
   m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend",
         py::call_guard<py::gil_scoped_release>());
   m.def("fused_amax_and_scale_update_after_reduction", &fused_amax_and_scale_update_after_reduction,
@@ -190,6 +185,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("fused_multi_row_padding", &fused_multi_row_padding, "Fused Multi-tensor padding",
         py::call_guard<py::gil_scoped_release>());
+
+  // attention kernels
+  m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("fused_attn_fwd", &fused_attn_fwd,
+        "Fused Attention FP8/BF16/FP16 FWD with separate Q, K and V");
+  m.def("fused_attn_bwd", &fused_attn_bwd,
+        "Fused Attention FP8/BF16/FP16 BWD with separate Q, K and V");
+  m.def("copy_to_kv_cache", &copy_to_kv_cache, "Copy new KV tokens to KV cache");
+  m.def("convert_thd_to_bshd", &convert_thd_to_bshd, "Convert a tensor from THD to BSHD");
+  m.def("convert_bshd_to_thd", &convert_bshd_to_thd, "Convert a tesnor from BSHD to THD");
+
   // fused apply rope
   m.def("fused_rope_forward", &fused_rope_forward, "Fused Apply RoPE FWD",
         py::call_guard<py::gil_scoped_release>());
@@ -290,10 +299,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #ifndef USE_ROCM
   py::class_<CommOverlapHelper>(m, "CommOverlapHelper")
       .def(py::init<>(), py::call_guard<py::gil_scoped_release>())
-      .def(py::init<c10d::ProcessGroup *, std::optional<c10d::ProcessGroup *>,
-                    std::optional<c10d::ProcessGroup *>>(),
+      .def(py::init<c10d::ProcessGroup *, std::optional<c10d::ProcessGroup *>>(),
            py::call_guard<py::gil_scoped_release>(), py::arg("world_group"),
-           py::arg("intra_node_group") = py::none(), py::arg("inter_node_group") = py::none());
+           py::arg("intra_node_group") = py::none());
 
   py::class_<CommOverlap, std::shared_ptr<CommOverlap>, transformer_engine::CommOverlapBase,
              transformer_engine::CommOverlapCore>(m, "CommOverlap")

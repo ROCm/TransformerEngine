@@ -9,9 +9,6 @@ import io
 import os
 import pickle
 import warnings
-import socket
-import fcntl
-import struct
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Generator, List, Optional, Set, Tuple, Union
 from contextlib import contextmanager
@@ -27,6 +24,7 @@ from ._common import _ParameterInitMeta
 from ..fp8 import (
     MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
+    Float8CurrentScalingRecipeState,
     FP8GlobalStateManager,
     RecipeState,
 )
@@ -41,7 +39,11 @@ from ..tensor import QuantizedTensor, Quantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..utils import get_device_compute_capability
-from ..triton_kernels.cast import te_quantize_triton
+if IS_HIP_EXTENSION:
+    from ..triton_kernels.cast import te_quantize_triton
+
+from ..utils import non_tn_fp8_gemm_supported
+from ..tensor.float8_tensor import Float8Quantizer 
 
 __all__ = ["initialize_ub", "destroy_ub"]
 
@@ -188,85 +190,32 @@ def initialize_ub(
         world_rank = torch.distributed.get_rank(world_group)
         world_size = torch.distributed.get_world_size(world_group)
 
-        # We have single-node NVLink so we can color based on physical node hostnames.
-        # NOTE: Prefer a network interface defined via the NVTE_UB_SOCKET_IFNAME variable, and
-        #       otherwise fall back on NCCL_SOCKET_IFNAME or GLOO_SOCKET_IFNAME depending on
-        #       the chosen bootstrap backend.
-        mydomain = socket.gethostname()
-        ifname = os.getenv(
-            "NVTE_UB_SOCKET_IFNAME", os.getenv(f"{bootstrap_backend.upper()}_SOCKET_IFNAME")
-        )
-        if ifname is not None:
-            # Make sure the ifname found in the environment is a valid network interface
-            if ifname in [name for _, name in socket.if_nameindex()]:
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                try:
-                    mydomain = socket.inet_ntoa(
-                        fcntl.ioctl(
-                            s.fileno(), 0x8915, struct.pack("256s", ifname[:15].encode("UTF-8"))
-                        )[20:24]
-                    )
-                except OSError as err:
-                    raise OSError(f"Invalid network interface: {ifname}") from err
-                finally:
-                    s.close()
-            else:
-                ifname_warning = (
-                    f"'{ifname}' is not a valid network interface! `te.initialize_ub()` will"
-                    + " attempt to detect ranks on the same node by matching "
-                    + "'socket.gethostname()', which is known to fail on virtual clusters like "
-                    + "Kubernetes. If Userbuffers initialization fails, please set the "
-                    + "'NVTE_UB_SOCKET_IFNAME' variable in your environment to the correct network "
-                    + "interface."
-                )
-                warnings.warn(ifname_warning, UserWarning)
-
-        # Allgather the domain colors across ranks and reduce to a list of unique domains
-        domain_per_rank_list = [None for _ in range(world_size)]
-        torch.distributed.all_gather_object(domain_per_rank_list, mydomain, world_group)
-        unique_domains = []
-        for domain in domain_per_rank_list:
-            if domain not in unique_domains:
-                unique_domains.append(domain)
-        num_domains = len(unique_domains)
-
+        num_domains = world_size // tp_size
+        mydomain_idx = world_rank // tp_size
         if num_domains > 1:
-            # DP/TP model replicated on multiple NVLink domains
-            ranks_per_domain_list = [[] for _ in range(num_domains)]
-            mydomain_idx = -1
-            for i, domain in enumerate(domain_per_rank_list):
-                domain_idx = unique_domains.index(domain)
-                ranks_per_domain_list[domain_idx].append(i)
-                if domain == mydomain:
-                    mydomain_idx = domain_idx
-            assert mydomain_idx >= 0, "Internal TE error!"
-
-            intra_domain_group, _ = torch.distributed.new_subgroups_by_enumeration(
+            ranks_per_domain_list = [
+                [i * tp_size + t for t in range(tp_size)] for i in range(num_domains)
+            ]
+            tp_domain_group, _ = torch.distributed.new_subgroups_by_enumeration(
                 ranks_per_domain_list, backend=bootstrap_backend
             )
-            local_rank = torch.distributed.get_rank(intra_domain_group)
-            intra_domain_ranks = torch.distributed.get_process_group_ranks(intra_domain_group)
+            local_rank = torch.distributed.get_rank(tp_domain_group)
+            tp_domain_ranks = torch.distributed.get_process_group_ranks(tp_domain_group)
 
-            inter_domain_group, _ = torch.distributed.new_subgroups_by_enumeration(
-                [list(ranks) for ranks in zip(*ranks_per_domain_list)],
-                backend=bootstrap_backend,
-            )
-
-            helper = tex.CommOverlapHelper(world_group, intra_domain_group, inter_domain_group)
-
+            helper = tex.CommOverlapHelper(world_group, tp_domain_group)
         else:
             # TP model on single NVLink domain, no replication, no data-parallelism
             mydomain_idx = 0
             local_rank = world_rank
-            intra_domain_ranks = list(range(world_size))
+            tp_domain_ranks = list(range(world_size))
 
             helper = tex.CommOverlapHelper(world_group)
 
         if world_rank == 0:
-            print(f"!!! [UB] Number of NVLink domains: {num_domains}\n", end="", flush=True)
+            print(f"!!! [UB] Number of TP domains: {num_domains}\n", end="", flush=True)
         if local_rank == 0:
             print(
-                f"!!! [UB] Global ranks on domain {mydomain_idx}: {intra_domain_ranks}\n",
+                f"!!! [UB] Global ranks on TP domain {mydomain_idx}: {tp_domain_ranks}\n",
                 end="",
                 flush=True,
             )
@@ -497,7 +446,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             super().__setattr__(name, value)
 
     def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
-        """Increase or decrease size of amax history based on given `length`.
+        """
+        Delayed scaling only.
+
+        Increase or decrease size of amax history based on given `length`.
 
         .. warning::
             This changes the underlying amax memory location.
@@ -555,6 +507,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 self.adjust_amax_history_length(recipe.amax_history_len, fwd=fwd)
                 return
             if recipe.mxfp8() and isinstance(recipe_state, MXFP8BlockScalingRecipeState):
+                return
+            if recipe.float8_current_scaling() and isinstance(
+                recipe_state, Float8CurrentScalingRecipeState
+            ):
                 return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
@@ -988,6 +944,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         update_workspace: bool = True,
         skip_update_flag: Optional[torch.Tensor] = None,
         fsdp_group: Optional[dist_group_type] = None,
+        create_transpose_cache: bool = True,
     ) -> QuantizedTensor:
         """Get FP8 workspace buffer and maybe update its values
 
@@ -1010,6 +967,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             over `update_workspace` if provided.
         fsdp_group: bool, default = None
             FSDP process group that the weights are distributed over.
+        create_transpose_cache: bool, default = True
+            Create transpose buffer from `tensor`.
         """
 
         # Try getting workspace from cache
@@ -1027,6 +986,21 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             and out.data.shape != tensor.data.shape
         ):
             _fsdp_gather_tensors(fsdp_group, [tensor.data.shape], out)
+
+        if not non_tn_fp8_gemm_supported() and not create_transpose_cache:
+            current_quantizer = None
+            if out is None:
+                current_quantizer = quantizer
+            else:
+                if hasattr(out, "quantize_"):
+                    current_quantizer = out._get_quantizer()
+                else:
+                    current_quantizer = quantizer
+                    
+            assert isinstance(current_quantizer, Float8Quantizer), "`create_tranpose_buffer=False` only availabe in `Float8Quantizer`."
+
+            # NOTE: Not create transpose buffer internally.
+            current_quantizer.columnwise_usage = False
 
         # Construct workspace if needed
         if out is None:
@@ -1050,9 +1024,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if hasattr(out, "quantize_"):
                 out.quantize_(tensor, noop_flag=skip_update_flag)
             else:
-                use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
-                quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
-                quantize_func(tensor, quantizer, out, skip_update_flag)
+                if IS_HIP_EXTENSION:
+                    use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+                    quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
+                    quantize_func(tensor, quantizer, out, skip_update_flag)
+                else:
+                    tex.quantize(tensor, quantizer, out, skip_update_flag)
 
         return out
 
