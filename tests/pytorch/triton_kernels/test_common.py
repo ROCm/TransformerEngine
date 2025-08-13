@@ -351,10 +351,9 @@ def mxfp8_rmsnorm_fwd_ref(
     _, rsigma = compute_ref_stats(input, eps)
 
     weight = weight.to(torch.float32)
-    bias = bias.to(torch.float32)
 
     g_tensor = weight + int(zero_centered_gamma)
-    raw = input * rsigma * g_tensor + bias
+    raw = input * rsigma * g_tensor
     assert isinstance(quantizer, MXFP8Quantizer)
     out = quantizer(raw, out=ln_out.to(otype))
 
