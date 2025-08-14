@@ -266,6 +266,8 @@ def test_dot_product_mem_calc(workspace_opt):
         pytest.skip("This test requires the CK fused attention backend.")
 
     os.environ["NVTE_CK_USES_FWD_V3"] = "1"
+    os.environ["NVTE_FUSED_ATTN_CK"] = "0"
+    os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "1"
     _, _ = _run_dot_product_attention(
         dtype,
         config,
@@ -277,6 +279,8 @@ def test_dot_product_mem_calc(workspace_opt):
         is_training,
     )
     del os.environ["NVTE_CK_USES_FWD_V3"]
+    del os.environ["NVTE_FUSED_ATTN_CK"]
+    del os.environ["NVTE_FUSED_ATTN_AOTRITON"]
 
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
