@@ -93,12 +93,23 @@ def te_compare_results(t, r, atol, rtol, msg):
     dtype = t.dtype
     t = t.cpu().to(torch.float32).to(torch.float64)
     r = r.cpu().to(torch.float32).to(torch.float64)
+
+    # Check for mismatches in NaN locations. True where one tensor has a NaN and the other doesn't.
+    nan_mismatch = torch.isnan(t) != torch.isnan(r)
+    
+    # Perform original check wit non-NaN values (i.e., numerical values)
+    t = torch.nan_to_num(t)
+    r = torch.nan_to_num(r)
+    
     diff = t - r
     atol_mismatch = torch.abs(diff) > atol
     nonzero_r = r != 0
     rel_diff = torch.where(nonzero_r, torch.abs(diff / r), torch.zeros_like(diff))
     rtol_mismatch = torch.where(nonzero_r, rel_diff > rtol, torch.full_like(atol_mismatch, False))
-    mismatch = atol_mismatch & (~nonzero_r | rtol_mismatch)
+
+    # A mismatch exists if there is a NaN mismatch OR a numerical mismatch
+    numerical_mismatch = atol_mismatch & (~nonzero_r | rtol_mismatch)
+    mismatch = nan_mismatch | numerical_mismatch
     has_mismatch = torch.any(mismatch).item()
 
     max_rel_diff = 0.0 # Default to 0.0 if no non-zero reference values
