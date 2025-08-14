@@ -97,6 +97,26 @@ _flash_attn_bwd = None
 _flash_attn_varlen_fwd = None
 _flash_attn_varlen_bwd = None
 try:
+    import aiter
+    import triton
+except ImportError:
+    pass
+else:
+    fa_utils.version = PkgVersion("2.7.1")  #masqurade as FA 2.7.1
+    from aiter.ops.triton.mha import flash_attn_onekernel_backward as flash_attn_cuda_bwd
+    from aiter.ops.triton.mha import flash_attn_func, flash_attn_varlen_func
+    from aiter.ops.triton.mha import _flash_attn_forward as _flash_attn_fwd
+    from aiter.ops.triton.mha import flash_attn_onekernel_backward as _flash_attn_bwd
+    from aiter.ops.triton.mha import (
+        _flash_attn_forward as _flash_attn_varlen_fwd,
+    )
+    from aiter.ops.triton.mha import (
+         flash_attn_onekernel_backward as _flash_attn_varlen_bwd,
+    )
+
+    # Setup Flash attention utils
+    fa_utils.set_flash_attention_version()
+try:
     fa_utils.version = PkgVersion(get_pkg_version("flash-attn"))
 except PackageNotFoundError:
     pass # only print warning if use_flash_attention_2 = True in get_attention_backend
