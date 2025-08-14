@@ -241,6 +241,7 @@ if is_bf16_compatible():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 param_types_lean = [torch.bfloat16]
 
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
 @pytest.mark.parametrize("workspace_opt", [True, False])
 def test_dot_product_mem_calc(workspace_opt):
     """
@@ -252,23 +253,19 @@ def test_dot_product_mem_calc(workspace_opt):
         pytest.skip("This test requires bf16 support.")
     dtype = torch.bfloat16
     config = ModelConfig(16, 128, 8, 128, 8192, 8192, 0.0, "causal", "no_bias")
+    is_training = config.head_dim_qk <= 128 and config.head_dim_v <= 128
     qkv_layout = "sbhd_sbhd_sbhd"
-    available_backends, _ = _get_attention_backends(
+    _, fused_attn_backends = _get_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,
         window_size=config.window_size,
         pad_between_seqs=pad_between_seqs,
     )
-    _, fused_attn_supported, _ = available_backends
-    if not fused_attn_supported:
+    if FusedAttnBackend["CK"] not in fused_attn_backends:
         pytest.skip("This test requires the CK fused attention backend.")
-    is_training = config.head_dim_qk <= 128 and config.head_dim_v <= 128
-    # FusedAttention backend
+
     os.environ["NVTE_CK_USES_FWD_V3"] = "1"
-    os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
-    os.environ["NVTE_FUSED_ATTN_CK"] = "1"
-    os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "0"
     _, _ = _run_dot_product_attention(
         dtype,
         config,
@@ -279,8 +276,6 @@ def test_dot_product_mem_calc(workspace_opt):
         pad_between_seqs,
         is_training,
     )
-    del os.environ["NVTE_FUSED_ATTN_CK"]
-    del os.environ["NVTE_FUSED_ATTN_AOTRITON"]
     del os.environ["NVTE_CK_USES_FWD_V3"]
 
 
