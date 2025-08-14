@@ -289,8 +289,8 @@ def test_dot_product_mem_calc(workspace_opt):
         pytest.skip("This test requires the CK fused attention backend.")
 
     os.environ["NVTE_CK_USES_FWD_V3"] = "1"
-    os.environ["NVTE_FUSED_ATTN_CK"] = "0"
-    os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "1"
+    os.environ["NVTE_FUSED_ATTN_CK"] = "1"
+    os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "0"
     _, _ = _run_dot_product_attention(
         dtype,
         config,
