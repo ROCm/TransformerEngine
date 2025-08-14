@@ -241,6 +241,47 @@ if is_bf16_compatible():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 param_types_lean = [torch.bfloat16]
 
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
+@pytest.mark.parametrize("workspace_opt", [True, False])
+def test_dot_product_mem_calc(workspace_opt):
+    """
+    Non-regression test for memory workspace calculation integer overflow issue.
+    """
+    ckpt_attn = False
+    pad_between_seqs = False
+    if not is_bf16_compatible():
+        pytest.skip("This test requires bf16 support.")
+    dtype = torch.bfloat16
+    config = ModelConfig(16, 128, 8, 128, 8192, 8192, 0.0, "causal", "no_bias")
+    is_training = config.head_dim_qk <= 128 and config.head_dim_v <= 128
+    qkv_layout = "sbhd_sbhd_sbhd"
+    _, fused_attn_backends = _get_attention_backends(
+        config,
+        qkv_dtype=dtype,
+        qkv_layout=qkv_layout,
+        window_size=config.window_size,
+        pad_between_seqs=pad_between_seqs,
+    )
+    if FusedAttnBackend["CK"] not in fused_attn_backends:
+        pytest.skip("This test requires the CK fused attention backend.")
+
+    os.environ["NVTE_CK_USES_FWD_V3"] = "1"
+    os.environ["NVTE_FUSED_ATTN_CK"] = "0"
+    os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "1"
+    _, _ = _run_dot_product_attention(
+        dtype,
+        config,
+        "FusedAttention",
+        ckpt_attn,
+        qkv_layout,
+        workspace_opt,
+        pad_between_seqs,
+        is_training,
+    )
+    del os.environ["NVTE_CK_USES_FWD_V3"]
+    del os.environ["NVTE_FUSED_ATTN_CK"]
+    del os.environ["NVTE_FUSED_ATTN_AOTRITON"]
+
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
