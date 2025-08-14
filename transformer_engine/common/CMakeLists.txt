@@ -329,6 +329,7 @@ else()
   if(USE_FUSED_ATTN_CK)
     if(NOT DEFINED CK_FUSED_ATTN_PATH)
       set(CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT ${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT} CACHE STRING "ck float to bf16 conversion rounding")
+      set(CK_TARGET_ARCHS ${CMAKE_HIP_ARCHITECTURES})
       add_subdirectory(ck_fused_attn ${CMAKE_CURRENT_BINARY_DIR}/ck_fused_attn)
     else()
       # Use CK built during initial TE building/installation
