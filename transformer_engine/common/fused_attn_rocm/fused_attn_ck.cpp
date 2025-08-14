@@ -1255,7 +1255,7 @@ void fused_attn_ck_fwd_qkvpacked(
   // extract the qkv and o storage bytes to allocate buffer for padding removing
   size_t qkv_storage_bytes = 0;
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
-  qkv_storage_bytes = std::accumulate((input_QKV->data).shape.begin(), (input_QKV->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  qkv_storage_bytes = std::accumulate((input_QKV->data).shape.begin(), (input_QKV->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
   // ensure q, k ,v are of the same storage size
   assert(qkv_storage_bytes%3==0);
   // in qkvpacked layouts, o is of the same shape as q shape
@@ -1364,7 +1364,7 @@ void fused_attn_ck_bwd_qkvpacked(
   bool pad_between_seqs = (is_ragged && !(input_cu_seqlens_padded->data.shape.empty())) || (!is_ragged && is_padding && !(input_cu_seqlens->data.shape.empty()));
   // extract the qkv and o storage bytes to allocate buffer for padding removing
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
-  size_t qkv_storage_bytes = std::accumulate((input_QKV->data).shape.begin(), (input_QKV->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  size_t qkv_storage_bytes = std::accumulate((input_QKV->data).shape.begin(), (input_QKV->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
   // ensure q, k ,v are of the same storage size
   assert(qkv_storage_bytes%3==0);
   // in qkvpacked layouts, o is of the same shape as q shape
@@ -1509,8 +1509,8 @@ void fused_attn_ck_fwd_kvpacked(
   size_t q_storage_bytes = 0;
   size_t kv_storage_bytes = 0;
   // b from cu_seqlen is not the actual storage batch for pad_between_seq case
-  q_storage_bytes = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
-  kv_storage_bytes = std::accumulate((input_KV->data).shape.begin(), (input_KV->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  q_storage_bytes = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  kv_storage_bytes = std::accumulate((input_KV->data).shape.begin(), (input_KV->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
   // ensure k ,v are of the same storage size
   assert(kv_storage_bytes%2==0);
   
@@ -1620,8 +1620,8 @@ void fused_attn_ck_bwd_kvpacked(
   
   // extract the qkv and o storage bytes to clear qkv buffer and allocate buffer for padding removing
   // b from cu_seqlen is not the actual storage batch for pad_between_seq case
-  size_t q_storage_bytes = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
-  size_t kv_storage_bytes = std::accumulate((input_KV->data).shape.begin(), (input_KV->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  size_t q_storage_bytes = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  size_t kv_storage_bytes = std::accumulate((input_KV->data).shape.begin(), (input_KV->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
   // ensure k ,v are of the same storage size
   assert(kv_storage_bytes%2==0);
   
@@ -1759,11 +1759,11 @@ void fused_attn_ck_fwd(
   size_t v_storage_bytes = 0;
   size_t o_storage_bytes = 0;
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
-  q_storage_bytes = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
-  k_storage_bytes = std::accumulate((input_K->data).shape.begin(), (input_K->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
-  v_storage_bytes = std::accumulate((input_V->data).shape.begin(), (input_V->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  q_storage_bytes = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  k_storage_bytes = std::accumulate((input_K->data).shape.begin(), (input_K->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  v_storage_bytes = std::accumulate((input_V->data).shape.begin(), (input_V->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
   // in qkvpacked layouts, o is of the same shape as q shape
-  o_storage_bytes = std::accumulate((output_O->data).shape.begin(), (output_O->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  o_storage_bytes = std::accumulate((output_O->data).shape.begin(), (output_O->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
 
   fused_attn_ck_fwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, bias_b, bias_h,
@@ -1857,11 +1857,11 @@ void fused_attn_ck_bwd(
   
   // extract the qkv and o storage bytes to allocate buffer for clearing buffer and padding removing
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
-  size_t q_storage_bytes = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
-  size_t k_storage_bytes = std::accumulate((input_K->data).shape.begin(), (input_K->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
-  size_t v_storage_bytes = std::accumulate((input_V->data).shape.begin(), (input_V->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  size_t q_storage_bytes = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  size_t k_storage_bytes = std::accumulate((input_K->data).shape.begin(), (input_K->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  size_t v_storage_bytes = std::accumulate((input_V->data).shape.begin(), (input_V->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
   // in qkvpacked layouts, o is of the same shape as q shape
-  size_t o_storage_bytes = std::accumulate((input_O->data).shape.begin(), (input_O->data).shape.end(), 1, std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
+  size_t o_storage_bytes = std::accumulate((input_O->data).shape.begin(), (input_O->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())*nvte_dtype_size(QKV_type);
 
   fused_attn_ck_bwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, bias_b, bias_h,
