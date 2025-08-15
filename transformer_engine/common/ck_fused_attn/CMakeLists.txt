@@ -23,7 +23,7 @@ SET(V3_ASM_ARCHS_SUPPORTED "gfx942;gfx950")
 # filter unsupported gfx archs for v3 kernels in aiter
 SET(V3_ASM_ARCHS "")
 # generate fwd/bwd v3 kernels for each requested rocm arch
-foreach(CK_TARGET_ARCH IN LISTS CK_TARGET_ARCHS)
+foreach(CK_TARGET_ARCH IN LISTS CMAKE_HIP_ARCHITECTURES)
   string(TOLOWER "${CK_TARGET_ARCH}" CK_TARGET_ARCH_LOWER)
   if(${CK_TARGET_ARCH_LOWER} IN_LIST V3_ASM_ARCHS_SUPPORTED)
     list(APPEND V3_ASM_ARCHS "${CK_TARGET_ARCH_LOWER}")
@@ -35,7 +35,6 @@ message(STATUS "AITER V3_ASM_ARCHS: ${V3_ASM_ARCHS}")
 
 # pass GPU_TARGET as env into aiter codegen
 list(JOIN V3_ASM_ARCHS ";" V3_ASM_ARCHS_STR)
-message(STATUS "AITER GPU_ARCHS env will be set to: ${V3_ASM_ARCHS_STR}")
 set(ENV{GPU_ARCHS} "${V3_ASM_ARCHS_STR}")
 
 # generate v2 (CK) kernels
@@ -181,7 +180,7 @@ add_library(ck_fused_attn STATIC ${ck_fused_attn_SOURCES})
 set(CK_FUSED_ATTN_COMPILE_OPTIONS)
 list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -Wno-undefined-func-template -DCK_TILE_FMHA_FWD_FAST_EXP2=1 -DCK_TILE_FMHA_FWD_SPLITKV_API=1 -DCK_TILE_FMHA_FWD_APPENDKV_API=0 -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT} -fgpu-flush-denormals-to-zero -Wno-float-equal -ftemplate-backtrace-limit=0  -fPIC  -Wno-gnu-line-marker -Wunused-variable -Wuninitialized "SHELL:-mllvm -enable-post-misched=0" "SHELL:-mllvm -amdgpu-early-inline-all=true" "SHELL:-mllvm -amdgpu-function-calls=false" "SHELL:-mllvm -amdgpu-coerce-illegal-types=1" "SHELL:-mllvm --amdgpu-kernarg-preload-count=16")
 
-foreach(CK_TARGET_ARCH IN LISTS V3_ASM_ARCHS)
+foreach(CK_TARGET_ARCH IN LISTS CMAKE_HIP_ARCHITECTURES)
   list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS --offload-arch=${CK_TARGET_ARCH})
 endforeach()
 
