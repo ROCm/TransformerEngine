@@ -387,6 +387,7 @@ void multi_tensor_compute_scale_and_scale_inv_cuda(
 void fused_multi_row_padding(at::Tensor input, at::Tensor output,
                              std::vector<size_t> input_row_list,
                              std::vector<size_t> padded_input_row_list);
+#ifndef USE_ROCM
 /***************************************************************************************************
  * NVSHMEM APIs
  **************************************************************************************************/
@@ -403,6 +404,7 @@ void nvshmem_wait_on_current_stream(torch::Tensor signal, const std::string &wai
 
 void nvshmem_finalize();
 }  // namespace nvshmem_api
+#endif
 
 /***************************************************************************************************
  * swizzle
