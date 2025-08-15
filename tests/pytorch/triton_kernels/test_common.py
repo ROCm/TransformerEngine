@@ -94,22 +94,37 @@ def te_compare_results(t, r, atol, rtol, msg):
     t = t.cpu().to(torch.float32).to(torch.float64)
     r = r.cpu().to(torch.float32).to(torch.float64)
 
-    # Check for mismatches in NaN locations. True where one tensor has a NaN and the other doesn't.
-    nan_mismatch = torch.isnan(t) != torch.isnan(r)
-    
-    # Perform original check wit non-NaN values (i.e., numerical values)
-    t = torch.nan_to_num(t)
-    r = torch.nan_to_num(r)
-    
+    # If any of the tensors contain NaN we
+    if torch.isnan(t).any() or torch.isnan(r).any():
+        base_msg = (
+            f"NaN values found!\n"
+        )
+
+        # Find which tensor has NaNs and at which indices
+        if torch.isnan(t).any():
+            nan_count = torch.isnan(t).sum()
+            nan_indices = torch.where(torch.isnan(t))
+            base_msg += f"Tensor 't' has {nan_count} NaN(s) at indices: {nan_indices}\n"
+
+        if torch.isnan(r).any():
+            nan_count = torch.isnan(r).sum()
+            nan_indices = torch.where(torch.isnan(r))
+            base_msg += f"Tensor 'r' has {nan_count} NaN(s) at indices: {nan_indices}\n"
+
+        if isinstance(msg, str):
+            msg = f"{msg}\n\n{base_msg}\n"
+        elif isinstance(msg, types.LambdaType):
+            msg = msg(base_msg)
+        else:
+            msg = base_msg
+        assert False, msg
+
     diff = t - r
     atol_mismatch = torch.abs(diff) > atol
     nonzero_r = r != 0
     rel_diff = torch.where(nonzero_r, torch.abs(diff / r), torch.zeros_like(diff))
     rtol_mismatch = torch.where(nonzero_r, rel_diff > rtol, torch.full_like(atol_mismatch, False))
-
-    # A mismatch exists if there is a NaN mismatch OR a numerical mismatch
-    numerical_mismatch = atol_mismatch & (~nonzero_r | rtol_mismatch)
-    mismatch = nan_mismatch | numerical_mismatch
+    mismatch = atol_mismatch & (~nonzero_r | rtol_mismatch)
     has_mismatch = torch.any(mismatch).item()
 
     max_rel_diff = 0.0 # Default to 0.0 if no non-zero reference values
