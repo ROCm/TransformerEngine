@@ -467,18 +467,18 @@ def get_attention_backend(
 
     # Filter: Head dimension
     if head_dim_qk != head_dim_v:
-        if (use_flash_attention_2 and FlashAttentionUtils.is_installed) or (
-            use_flash_attention_3 and FlashAttentionUtils.v3_is_installed
-        ):
-            logger.debug("Disabling FlashAttention as it does not support MLA.")
-        use_flash_attention = False
+        #if (use_flash_attention_2 and FlashAttentionUtils.is_installed) or (
+        #    use_flash_attention_3 and FlashAttentionUtils.v3_is_installed
+        #):
+        #    logger.debug("Disabling FlashAttention as it does not support MLA.")
+        #use_flash_attention = False
         qkv_layout_group = qkv_layout.replace("b", "").replace("s", "").replace("t", "")
-        if use_fused_attention and qkv_layout_group != "hd_hd_hd":
-            logger.debug(
-                "Disabling FusedAttention as MLA is not supported with qkv_layout = %s",
-                qkv_layout,
-            )
-            use_fused_attention = False
+        #if use_fused_attention and qkv_layout_group != "hd_hd_hd":
+        #    logger.debug(
+        #        "Disabling FusedAttention as MLA is not supported with qkv_layout = %s",
+        #        qkv_layout,
+        #    )
+        #    use_fused_attention = False
     if use_flash_attention_2 and (
         head_dim_qk > 256
         or head_dim_qk % 8 != 0
