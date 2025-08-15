@@ -567,7 +567,7 @@ void fused_attn_ck_fwd_impl(
       (*workspace_size)+= max_tokens_q*h*sizeof(float);
       // request q, k, v, o buffer without padding
       (*workspace_size)+= q_storage_bytes + k_storage_bytes + v_storage_bytes + o_storage_bytes;
-    }else if(ragged){
+    }else if(is_ragged){
       // softmax_lse buffer needed for pad_between_seq only
       (*workspace_size)+= max_tokens_q*h*sizeof(float);
 
