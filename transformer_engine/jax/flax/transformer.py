@@ -587,11 +587,11 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         else:
             seqlen_kv = key.shape[sequence_dim]
 
-        if qkv_layout == QKVLayout.BSHD_BSHD_BSHD:
-            v_head_dim  = value.shape[3]
-        elif qkv_layout == QKVLayout.THD_THD_THD:
-            v_head_dim  = value.shape[2]
+        if qkv_layout.is_separate():
+            qk_head_dim = query.shape[-1]
+            v_head_dim = value.shape[-1]
         else:
+            qk_head_dim = self.head_dim
             v_head_dim = self.head_dim
    
         has_fused_attn_kernel = is_fused_attn_kernel_available(
@@ -605,7 +605,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             self.num_gqa_groups,
             seqlen_q,
             seqlen_kv,
-            self.head_dim,
+            qk_head_dim,
             v_head_dim,
             self.window_size,
         )
@@ -619,7 +619,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 "Please try to update the cuDNN and TE to the latest version.\n"
                 f"{self.dtype=}\n{qkv_layout=}\n{attn_bias_type=}\n{attn_mask_type=}\n"
                 f"{self.attention_dropout=}\n{self.num_attention_heads=}\n"
-                f"{self.num_gqa_groups=}\n{seqlen_q=}\n{seqlen_kv=}\n{self.head_dim=}\n"
+                f"{self.num_gqa_groups=}\n{seqlen_q=}\n{seqlen_kv=}\n{qk_head_dim=}\n{v_head_dim=}\n"
             )
 
         dropout_rng = None
@@ -627,7 +627,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             dropout_rng = self.make_rng(self.dropout_rng_name)
 
         if self.scale_factor is None:
-            scale_factor = 1.0 / sqrt(self.head_dim)
+            scale_factor = 1.0 / sqrt(qk_head_dim)
         else:
             scale_factor = self.scale_factor
         del self.scale_factor
