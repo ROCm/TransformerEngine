@@ -80,6 +80,7 @@ run_test_config_mgpu(){
         echo ==== Run mGPU with Fused attention backend: $_fus_attn ====
         run 3 test_fused_optimizer.py
         run 3 test_sanity_import.py
+        run 3 distributed/test_cast_master_weights_to_fp8.py
         run 3 distributed/test_fusible_ops.py
         run 3 distributed/test_numerics.py
         run 3 fused_attn/test_fused_attn_with_cp.py

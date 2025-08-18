@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -13,7 +15,7 @@ from .quantized_tensor import QuantizedTensor
 from .float8_tensor import Float8Tensor, Float8Quantizer, Float8CurrentScalingQuantizer
 from .mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from ..optimizers.multi_tensor_apply import multi_tensor_applier
-
+from transformer_engine.pytorch.utils import is_fp8_fnuz
 
 def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
     r"""Change a quantized tensor's data buffer while preserving values
@@ -243,7 +245,7 @@ def _cast_master_weights_to_fp8_current_scaling(params, group):
     # Step 3: Update scales and scale_invs.
     # ---------------------------------------------------------------------------------------------
     if fp8_dtype == tex.DType.kFloat8E4M3:
-        max_fp8 = 448.0
+        max_fp8 = 240.0 if is_fp8_fnuz() else 448.0
     elif fp8_dtype == tex.DType.kFloat8E5M2:
         max_fp8 = 57344.0
     else:
