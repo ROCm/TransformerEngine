@@ -171,11 +171,7 @@ def _train(args):
         if LOCAL_RANK == 0:
             print(f"Rank {LOCAL_RANK}: Iteration {iteration} completed.")
 
-    # Sync all ranks before clean up
-    if isinstance(mesh, torch.distributed.device_mesh.DeviceMesh):
-        for dim in range(mesh.ndim - 1, -1, -1):
-            dist.barrier(group=mesh.get_group(dim))
-
+    dist.barrier(device_ids=[torch.cuda.current_device()])
     dist.destroy_process_group()
     if LOCAL_RANK == 0:
         print(f"Rank {LOCAL_RANK}: Done...")
