@@ -255,7 +255,7 @@ def test_dot_product_mem_calc(workspace_opt):
     config = ModelConfig(16, 128, 8, 128, 8192, 8192, 0.0, "causal", "no_bias")
     is_training = config.head_dim_qk <= 128 and config.head_dim_v <= 128
     qkv_layout = "sbhd_sbhd_sbhd"
-    _, _, fused_attn_backends = _get_attention_backends(
+    _, fused_attn_backends = _get_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,
