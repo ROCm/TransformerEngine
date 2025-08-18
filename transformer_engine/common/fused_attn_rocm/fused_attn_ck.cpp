@@ -642,7 +642,7 @@ void fused_attn_ck_fwd_impl(
     workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + o_storage_bytes);
     // reset the final results since padded places need to be 0
     NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrO, 0, o_storage_bytes, stream));
-  }else if(pad_between_seqs){
+  }else if(is_ragged){
     // next h*max_tokens_q*sizeof(float) in workspace are for lse buffer
     devPtrSoftmaxLSEWithoutPadding = workspace_next;
     workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + h*max_tokens_q*sizeof(float));
@@ -735,7 +735,7 @@ void fused_attn_ck_fwd_impl(
         devPtrSoftmaxLSEWithoutPadding,
         nvte_ck_uses_fwd_v3,
         stream));
-    add_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
+    add_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrCuSeqlensQ, devPtrSoftmaxAux, stream);
   }else{
     using ck_fused_attn::ck_attn_fwd;
     NVTE_CHECK_CUDA(
@@ -1308,8 +1308,7 @@ void fused_attn_ck_fwd_qkvpacked(
   bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
-  bool pad_between_seqs = (devPtrCuSeqlens!=devPtrSeqOffsets || !input_cu_seqlens_padded->data.shape.empty()) && (is_ragged || is_padding);
-  
+  bool pad_between_seqs = (is_ragged && devPtrCuSeqlens!=devPtrSeqOffsets && !input_cu_seqlens_padded->data.shape.empty()) || (is_padding && !input_cu_seqlens->data.shape.empty());
   fused_attn_ck_fwd_impl(
     b, h, h, max_seqlen, max_seqlen, d, d, bias_b, bias_h,
     pad_between_seqs, max_tokens, max_tokens,
@@ -1411,7 +1410,7 @@ void fused_attn_ck_bwd_qkvpacked(
   bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
-  bool pad_between_seqs = (devPtrCuSeqlens!=devPtrSeqOffsets || !input_cu_seqlens_padded->data.shape.empty()) && (is_ragged || is_padding);
+  bool pad_between_seqs = (is_ragged && devPtrCuSeqlens!=devPtrSeqOffsets && !input_cu_seqlens_padded->data.shape.empty()) || (is_padding && !input_cu_seqlens->data.shape.empty());
   // extract the max_tokens for padding/unpadding and softmax_lse buffer
   // b from cu_seqlen and max_seqlen are not the actual storage batch and seqlen for pad_between_seqs case
   size_t max_tokens = std::accumulate((input_QKV->data).shape.begin(), (input_QKV->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h/d/3;
@@ -1564,7 +1563,7 @@ void fused_attn_ck_fwd_kvpacked(
   bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
-  bool pad_between_seqs = (devPtrCuSeqlensQ!=devPtrSeqOffsetsQ || !input_cu_seqlens_q_padded->data.shape.empty()) && (is_ragged || is_padding);
+  bool pad_between_seqs = (is_ragged && devPtrCuSeqlensQ!=devPtrSeqOffsetsQ && !input_cu_seqlens_q_padded->data.shape.empty()) || (is_padding && !input_cu_seqlens_q->data.shape.empty());
   
   fused_attn_ck_fwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, d, bias_b, bias_h,
@@ -1665,7 +1664,7 @@ void fused_attn_ck_bwd_kvpacked(
   bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
-  bool pad_between_seqs = (devPtrCuSeqlensQ!=devPtrSeqOffsetsQ || !input_cu_seqlens_q_padded->data.shape.empty()) && (is_ragged || is_padding);
+  bool pad_between_seqs = (is_ragged && devPtrCuSeqlensQ!=devPtrSeqOffsetsQ && !input_cu_seqlens_q_padded->data.shape.empty()) || (is_padding && !input_cu_seqlens_q->data.shape.empty());
   
   // extract the max_tokens for padding/unpadding and softmax_lse buffer
   // b from cu_seqlen and max_seqlen are not the actual storage batch and seqlen for pad_between_seqs case
@@ -1806,7 +1805,7 @@ void fused_attn_ck_fwd(
   bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
-  bool pad_between_seqs = (devPtrCuSeqlensQ!=devPtrSeqOffsetsQ || !input_cu_seqlens_q_padded->data.shape.empty()) && (is_ragged || is_padding);
+  bool pad_between_seqs = (is_ragged && devPtrCuSeqlensQ!=devPtrSeqOffsetsQ && !input_cu_seqlens_q_padded->data.shape.empty()) || (is_padding && !input_cu_seqlens_q->data.shape.empty());
   
   fused_attn_ck_fwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, bias_b, bias_h,
@@ -1896,7 +1895,7 @@ void fused_attn_ck_bwd(
   bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
-  bool pad_between_seqs = (devPtrCuSeqlensQ!=devPtrSeqOffsetsQ || !input_cu_seqlens_q_padded->data.shape.empty()) && (is_ragged || is_padding);
+  bool pad_between_seqs = (is_ragged && devPtrCuSeqlensQ!=devPtrSeqOffsetsQ && !input_cu_seqlens_q_padded->data.shape.empty()) || (is_padding && !input_cu_seqlens_q->data.shape.empty());
   
   // extract the max_tokens for padding/unpadding and softmax_lse buffer
   // b from cu_seqlen and max_seqlen are not the actual storage batch and seqlen for pad_between_seqs case
