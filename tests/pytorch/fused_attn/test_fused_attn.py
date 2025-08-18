@@ -379,9 +379,22 @@ def test_dot_product_attention(
         )
 
     # FusedAttention backend
+    fused_attn_fwd_v3, fused_attn_bwd_v3 = None, None
     if fused_attn_supported:
         if len(fused_attn_backends) == 1:
+            os.environ["NVTE_CK_USES_BWD_V3"] = "0"
             fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
+                dtype,
+                config,
+                "FusedAttention",
+                ckpt_attn,
+                qkv_layout,
+                workspace_opt,
+                pad_between_seqs,
+                is_training,
+            )
+            os.environ["NVTE_CK_USES_BWD_V3"] = "1"
+            fused_attn_fwd_v3, fused_attn_bwd_v3 = _run_dot_product_attention(
                 dtype,
                 config,
                 "FusedAttention",
@@ -408,7 +421,19 @@ def test_dot_product_attention(
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
             os.environ["NVTE_FUSED_ATTN_CK"] = "1"
             os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "0"
+            os.environ["NVTE_CK_USES_BWD_V3"] = "0"
             fused_attn_fwd_1, fused_attn_bwd_1 = _run_dot_product_attention(
+                dtype,
+                config,
+                "FusedAttention",
+                ckpt_attn,
+                qkv_layout,
+                workspace_opt,
+                pad_between_seqs,
+                is_training,
+            )
+            os.environ["NVTE_CK_USES_BWD_V3"] = "1"
+            fused_attn_fwd_v3, fused_attn_bwd_v3 = _run_dot_product_attention(
                 dtype,
                 config,
                 "FusedAttention",
@@ -420,6 +445,7 @@ def test_dot_product_attention(
             )
             del os.environ["NVTE_FUSED_ATTN_CK"]
             del os.environ["NVTE_FUSED_ATTN_AOTRITON"]
+            del os.environ["NVTE_CK_USES_BWD_V3"]
 
     # FlashAttention backend
     if flash_attn_supported:
@@ -454,6 +480,11 @@ def test_dot_product_attention(
         torch.testing.assert_close(fused_attn_fwd, fused_attn_fwd_1, **tols)
         for i, _ in enumerate(fused_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], fused_attn_bwd_1[i], **tols)
+    if fused_attn_fwd_v3 is not None:
+        logging.info("[test_dot_product_attention]: fused attn backend v3 vs regular")
+        torch.testing.assert_close(fused_attn_fwd_v3, fused_attn_fwd, **tols)
+        for i, _ in enumerate(fused_attn_bwd):
+            torch.testing.assert_close(fused_attn_bwd_v3[i], fused_attn_bwd[i], **tols)
 
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
