@@ -11,6 +11,7 @@ import sys
 import time
 from pathlib import Path
 from typing import List, Tuple
+import subprocess
 
 import setuptools
 from wheel.bdist_wheel import bdist_wheel
@@ -117,6 +118,7 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     if not found_cmake():
         setup_reqs.append("cmake>=3.21")
     if not found_ninja():
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "ninja"])
         setup_reqs.append("ninja")
     if not found_pybind11():
         setup_reqs.append("pybind11")
