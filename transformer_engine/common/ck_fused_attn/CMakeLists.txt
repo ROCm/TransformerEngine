@@ -8,10 +8,6 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 project(ck_fused_attn LANGUAGES HIP CXX)
 
-# generate fused attn kernels, both fwd/bwd
-
-set(ENV{AITER_ASM_DIR_FUNC} "nvte_get_aiter_asm_dir")
-
 # remove files that should be regenerated
 file(REMOVE_RECURSE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp ${CMAKE_CURRENT_BINARY_DIR}/gen_src/blob_list.txt)
 
