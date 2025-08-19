@@ -827,6 +827,9 @@ void fused_attn_ck_bwd_impl(
       (*workspace_size)+= h*max_tokens_q*sizeof(float);
       // allocate the q, k, v, o, do, dq, dk, dv,
       (*workspace_size)+= 2*(q_storage_bytes + k_storage_bytes + v_storage_bytes + o_storage_bytes);
+    }else if(is_ragged){
+      // remove padding for the softmax_lse
+      (*workspace_size)+= h*max_tokens_q*sizeof(float);
     }
     if (nvte_log_ck_config) {
       std::cout<<std::endl<<"attn_bwd(ck) requested workspace of size "<<*workspace_size<<std::endl;
@@ -1016,6 +1019,9 @@ void fused_attn_ck_bwd_impl(
       // zeroing out just the dq itself
       NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdQWithoutPadding, 0, q_storage_bytes, stream));
     }
+  }else if(is_ragged){
+    devPtrSoftmaxLSEWithoutPadding = workspace_next;
+    workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + h*max_tokens_q*sizeof(float));
   }
 
   // bwd v3 is optional by enabling the following envs
@@ -1121,6 +1127,8 @@ void fused_attn_ck_bwd_impl(
     add_padding(dtype, b, hg, s_kv, d_v, max_tokens_kv, is_ragged, v_stride[0], v_stride[1], v_stride[2], devPtrdVWithoutPadding, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrdV, stream);
 
   }else if(is_ragged){
+    remove_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxLSEWithoutPadding, stream);
+
     using ck_fused_attn::ck_attn_varlen_bwd;
     NVTE_CHECK_CUDA(
       ck_attn_varlen_bwd(
