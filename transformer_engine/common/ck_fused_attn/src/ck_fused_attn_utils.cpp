@@ -40,7 +40,7 @@ void set_aiter_asm_dir() {
     Dl_info info;
     dladdr((void*)set_aiter_asm_dir, &info);
     setenv("AITER_ASM_DIR",
-           (std::filesystem::path(info.dli_fname).parent_path() / "aiter" / arh_str).c_str(), 0);
+           (std::filesystem::path(info.dli_fname).parent_path() / "aiter" / arh_str).c_str(), 1);
     // Print the set environment variable for debugging purposes
     std::cout << "AITER_ASM_DIR set to: " << getenv("AITER_ASM_DIR") << std::endl;
   });
