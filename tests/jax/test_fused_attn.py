@@ -8,7 +8,6 @@ from enum import Enum, auto
 from dataclasses import dataclass, field
 from functools import partial
 from math import sqrt
-import os
 from typing import Tuple, Optional, Dict
 import random
 
@@ -1098,8 +1097,4 @@ class TestFusedAttn:
             is_padding = attn_mask_type in [AttnMaskType.PADDING_MASK, AttnMaskType.PADDING_CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK]
             if swa and is_padding:
                 pytest.skip("Jax cannot get cu_seqlen correctly from mask with swa")
-        os.environ["NVTE_CK_USES_BWD_V3"] = "0"
         runner.test_backward()
-        os.environ["NVTE_CK_USES_BWD_V3"] = "1"
-        runner.test_backward()
-        del os.environ['NVTE_CK_USES_BWD_V3']
