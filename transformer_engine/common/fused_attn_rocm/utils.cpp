@@ -200,6 +200,24 @@ void generateMatrixStrides(
                     stride[hidden_dim_idx] = 1;
             }
             break;
+        case NVTE_QKV_Layout::NVTE_SBHD_BSHD_BSHD:
+            if ((matrix == NVTE_QKV_Matrix::NVTE_Q_Matrix)
+                || (matrix == NVTE_QKV_Matrix::NVTE_O_Matrix)) {
+                    stride[batch_dim_idx] = h * d;
+                    stride[head_dim_idx] = d;
+                    stride[seqlen_dim_idx] = b * h * d;
+                    stride[hidden_dim_idx] = 1;
+            } else if ((matrix == NVTE_QKV_Matrix::NVTE_K_Matrix)
+                || (matrix == NVTE_QKV_Matrix::NVTE_V_Matrix)) {
+                    stride[batch_dim_idx] = s_kv * h * d;
+                    stride[head_dim_idx] = d;
+                    stride[seqlen_dim_idx] = h * d;
+                    stride[hidden_dim_idx] = 1;
+            }
+            break;
+        default:
+            NVTE_ERROR("Unsupported layout: ", static_cast<int>(layout));
+            break;
     }
 }
 
