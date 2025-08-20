@@ -36,7 +36,7 @@ bool get_pad_between_seqs(
     for (size_t i=0; i<num_seqs; i++){
       seq_match &= cu_seqlens_ptr[i] == cu_seqlens_padded_ptr[i];
     }
-    if (!seq_match) return true;
+    return !seq_match;
   }
   return !is_ragged && is_padding && !cu_seqlens_empty;
 }
