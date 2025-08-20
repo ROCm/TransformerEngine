@@ -48,6 +48,7 @@ run_test_config() {
     run_default_fa 1 test_functions.py
     run 1 test_fused_attn.py
     NVTE_CK_USES_BWD_V3=1 run 1 test_fused_attn.py # Using FAv3 for backward pass
+    NVTE_CK_USES_FWD_V3=1 run 1 test_fused_attn.py # Using FAv3 for fowrward pass
     run_default_fa 1 test_helper.py
     run_default_fa 1 test_layer.py #it effectevly always uses unfused attention
     run_default_fa 1 test_sharding.py

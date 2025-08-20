@@ -63,6 +63,7 @@ run_test_config(){
     run 1 test_sanity.py
     run_default_fa 1 fused_attn/test_fused_attn.py # Backend selection is controlled by the test
     NVTE_CK_USES_BWD_V3=1 run_default_fa 1 fused_attn/test_fused_attn.py # Using FAv3 for backward pass
+    NVTE_CK_USES_FWD_V3=1 run_default_fa 1 fused_attn/test_fused_attn.py # Using FAv3 for forward pass
     run_default_fa 1 triton_kernels/test_cast.py
     run_default_fa 1 triton_kernels/test_cast_mxfp8.py
     run_default_fa 1 triton_kernels/test_rmsnorm.py
