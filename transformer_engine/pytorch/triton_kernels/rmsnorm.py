@@ -22,9 +22,8 @@ def get_autotune_config():
     return [triton.Config({'waves_per_eu': we}, num_warps=nw) for (we, nw) in product([0, 1, 2, 4], [4, 8, 16])]
 
 
-@triton.autotune(configs=get_autotune_config(), key=['n_rows', 'n_cols'], use_cuda_graph=True)
 @triton.jit
-def _rmsnorm_fwd_triton(
+def _rmsnorm_fwd_triton_impl(
     output_ptr,
     input_ptr,
     g_ptr, rsigma_ptr,
@@ -172,6 +171,9 @@ def _rmsnorm_fwd_triton(
             scale = tl.load(q_scale_ptr)
             scale_inv = tl.fdiv(1.0, scale)
             tl.store(scale_inv_ptr, scale_inv)
+
+autotune_dec = triton.autotune(configs=get_autotune_config(), key=['n_rows', 'n_cols'], use_cuda_graph=True)
+_rmsnorm_fwd_triton = autotune_dec(_rmsnorm_fwd_triton_impl)
 
 @triton.jit
 def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, dg_ptr, input_row_stride, output_row_stride,
@@ -364,7 +366,8 @@ def te_rmsnorm_fwd_triton(
     quantizer,
     otype,
     sm_margin,
-    zero_centered_gamma
+    zero_centered_gamma,
+    autotune = True,
 ):
     if eps < 0:
         raise ValueError(f"`eps` must be non-negative, but a value of {eps} was passed")
@@ -427,7 +430,8 @@ def te_rmsnorm_fwd_triton(
 
     grid_fwd = lambda meta: (NUM_PRGMS, )
     # TODO(micky774) Implement fused MXFP8 quantization within the kernel
-    _rmsnorm_fwd_triton[grid_fwd](
+    kernel = _rmsnorm_fwd_triton if autotune else _rmsnorm_fwd_triton_impl
+    kernel[grid_fwd](
         out_ptr,
         input,
         weight,

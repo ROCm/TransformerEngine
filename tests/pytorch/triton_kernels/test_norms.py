@@ -94,7 +94,7 @@ test_quantizations += tuple(
 
 _triton_funcs = {
     "fwd": {
-        "rms":te_rmsnorm_fwd_triton,
+        "rms":partial(te_rmsnorm_fwd_triton, autotune=False),
         "layer":te_layernorm_fwd_triton,
     },
     "bwd": {
