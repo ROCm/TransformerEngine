@@ -315,8 +315,9 @@ def test_dot_product_mem_calc(workspace_opt):
 @pytest.mark.parametrize("qkv_layout", [None])
 @pytest.mark.parametrize("swa", [False])
 @pytest.mark.parametrize("pad_between_seqs", [False])
+@pytest.mark.parametrize("share_cu_seqlens_ref", [False])
 def test_dot_product_attention(
-    dtype, model_configs, model, ckpt_attn, workspace_opt, qkv_layout, swa, pad_between_seqs
+    dtype, model_configs, model, ckpt_attn, workspace_opt, qkv_layout, swa, pad_between_seqs, share_cu_seqlens_ref
 ):
     """Test DotProductAttention module"""
 
@@ -390,6 +391,7 @@ def test_dot_product_attention(
                 workspace_opt,
                 pad_between_seqs,
                 is_training,
+                share_cu_seqlens_ref,
             )
         if len(fused_attn_backends) == 2:
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
@@ -404,6 +406,7 @@ def test_dot_product_attention(
                 workspace_opt,
                 pad_between_seqs,
                 is_training,
+                share_cu_seqlens_ref,
             )
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
             os.environ["NVTE_FUSED_ATTN_CK"] = "1"
@@ -417,6 +420,7 @@ def test_dot_product_attention(
                 workspace_opt,
                 pad_between_seqs,
                 is_training,
+                share_cu_seqlens_ref,
             )
             del os.environ["NVTE_FUSED_ATTN_CK"]
             del os.environ["NVTE_FUSED_ATTN_AOTRITON"]
@@ -432,6 +436,7 @@ def test_dot_product_attention(
             workspace_opt,
             pad_between_seqs,
             is_training,
+            share_cu_seqlens_ref,
         )
 
     if unfused_attn_supported and flash_attn_supported:
@@ -806,8 +811,11 @@ model_configs_layout_thd = {
 @pytest.mark.parametrize("model_configs", [model_configs_layout_thd])
 @pytest.mark.parametrize("model", model_configs_layout_thd.keys())
 @pytest.mark.parametrize("qkv_layout", qkv_layouts_thd)
-@pytest.mark.parametrize("pad_between_seqs", [False, True])
-def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, pad_between_seqs):
+@pytest.mark.parametrize(
+    ("pad_between_seqs", "share_cu_seqlens_ref"),
+    [(False, False), (True, False), (True, True)]
+)
+def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, pad_between_seqs, share_cu_seqlens_ref):
     """Test DotProductAttention module with different QKV layouts"""
     config = model_configs[model]
     if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
@@ -815,7 +823,7 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, pad_between
     if (pad_between_seqs==False and get_cudnn_version() < (9, 3, 0)):
         pytest.skip("cuDNN 9.3.0+ is required to run pad_between_seqs = False");
     test_dot_product_attention(
-        dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
+        dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs, share_cu_seqlens_ref
     )
 
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
@@ -823,8 +831,11 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, pad_between
 @pytest.mark.parametrize("model_configs", [model_configs_layout_thd])
 @pytest.mark.parametrize("model", model_configs_layout_thd.keys())
 @pytest.mark.parametrize("qkv_layout", qkv_layouts_thd)
-@pytest.mark.parametrize("pad_between_seqs", [False, True])
-def test_dpa_qkv_layout_thd_mqa_gqa(dtype, model_configs, model, qkv_layout, pad_between_seqs):
+@pytest.mark.parametrize(
+    ("pad_between_seqs", "share_cu_seqlens_ref"),
+    [(False, False), (True, False), (True, True)]
+)
+def test_dpa_qkv_layout_thd_mqa_gqa(dtype, model_configs, model, qkv_layout, pad_between_seqs, share_cu_seqlens_ref):
     def find_factors(x):
         f = []
         for i in range(2, x + 1):
@@ -838,7 +849,7 @@ def test_dpa_qkv_layout_thd_mqa_gqa(dtype, model_configs, model, qkv_layout, pad
     for num_q_per_gqa_group in num_querys_per_gqa_group:
         config.num_gqa_groups = config.num_heads // num_q_per_gqa_group
         test_dot_product_attention(
-            dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
+            dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs, share_cu_seqlens_ref
         )
 
 
@@ -851,6 +862,7 @@ def _run_dot_product_attention(
     workspace_opt: bool,
     pad_between_seqs: bool,
     is_training: bool,
+    share_cu_seqlens_ref: bool = False,
 ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Run DotProductAttention module with one forward pass and one backward pass"""
 
@@ -1132,7 +1144,10 @@ def _run_dot_product_attention(
         k = inp[1]
         v = inp[2]
         d_out = out_grad
-        if pad_between_seqs:
+        if not pad_between_seqs and share_cu_seqlens_ref:
+            cu_seqlens_q_padded = cu_seqlens_q
+            cu_seqlens_kv_padded = cu_seqlens_kv
+        else:
             cu_seqlens_q_padded = cu_seqlens_q_after_pad
             cu_seqlens_kv_padded = cu_seqlens_kv_after_pad
     out = block(
