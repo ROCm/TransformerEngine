@@ -29,6 +29,7 @@ if os.getenv("NVTE_FRAMEWORK"):
         _use_jax = "jax" in _frameworks
 
 try:
+<<<<<<< HEAD
     if _use_pytorch: from . import pytorch
 except (ImportError, StopIteration) as e:
     pass
@@ -41,6 +42,15 @@ except (ImportError, StopIteration) as e:
 try:
     if _use_jax: import transformer_engine_jax
 except ImportError:
+=======
+    from . import pytorch
+except ImportError as e:
+    pass
+
+try:
+    from . import jax
+except ImportError as e:
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
     pass
 
 __version__ = str(metadata.version("transformer_engine"))

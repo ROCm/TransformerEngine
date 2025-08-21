@@ -17,10 +17,21 @@
 #endif // __HIP_PLATFORM_AMD__
 #include <nvrtc.h>
 
+<<<<<<< HEAD
 #include <string>
+=======
+#include <iostream>
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 #include <stdexcept>
 
 #include "../util/string.h"
+
+#define NVTE_WARN(...)                                            \
+  do {                                                            \
+    std::cerr << ::transformer_engine::concat_strings(            \
+        __FILE__ ":", __LINE__, " in function ", __func__, ": ",  \
+        ::transformer_engine::concat_strings(__VA_ARGS__), "\n"); \
+  } while (false)
 
 #define NVTE_ERROR(...)                                              \
   do {                                                               \

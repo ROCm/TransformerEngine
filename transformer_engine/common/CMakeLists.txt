@@ -114,6 +114,7 @@ find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 # Configure Transformer Engine library
 include_directories(${PROJECT_SOURCE_DIR}/..)
 set(transformer_engine_SOURCES)
+<<<<<<< HEAD
 if(USE_CUDA)
   list(APPEND transformer_engine_SOURCES
        cudnn_utils.cpp
@@ -226,15 +227,80 @@ else()
 
   add_library(transformer_engine SHARED ${te_hip_sources})
 endif()
+=======
+list(APPEND transformer_engine_SOURCES
+     cudnn_utils.cpp
+     transformer_engine.cpp
+     common.cu
+     multi_tensor/adam.cu
+     multi_tensor/compute_scale.cu
+     multi_tensor/l2norm.cu
+     multi_tensor/scale.cu
+     multi_tensor/sgd.cu
+     transpose/cast_transpose.cu
+     transpose/transpose.cu
+     transpose/cast_transpose_fusion.cu
+     transpose/transpose_fusion.cu
+     transpose/multi_cast_transpose.cu
+     transpose/quantize_transpose_square_blockwise.cu
+     transpose/quantize_transpose_vector_blockwise.cu
+     activation/gelu.cu
+     fused_attn/flash_attn.cu
+     fused_attn/context_parallel.cu
+     fused_attn/kv_cache.cu
+     fused_attn/fused_attn_f16_max512_seqlen.cu
+     fused_attn/fused_attn_f16_arbitrary_seqlen.cu
+     activation/relu.cu
+     activation/swiglu.cu
+     fused_attn/fused_attn_fp8.cu
+     fused_attn/fused_attn.cpp
+     fused_attn/utils.cu
+     gemm/cublaslt_gemm.cu
+     normalization/common.cpp
+     normalization/layernorm/ln_api.cpp
+     normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
+     normalization/layernorm/ln_fwd_cuda_kernel.cu
+     normalization/rmsnorm/rmsnorm_api.cpp
+     normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
+     normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
+     permutation/permutation.cu
+     util/cast.cu
+     util/padding.cu
+     util/cuda_driver.cpp
+     util/cuda_nvml.cpp
+     util/cuda_runtime.cpp
+     util/rtc.cpp
+     swizzle/swizzle.cu
+     fused_softmax/scaled_masked_softmax.cu
+     fused_softmax/scaled_upper_triang_masked_softmax.cu
+     fused_softmax/scaled_aligned_causal_masked_softmax.cu
+     fused_rope/fused_rope.cu
+     recipe/current_scaling.cu
+     recipe/delayed_scaling.cu
+     recipe/fp8_block_scaling.cu
+     comm_gemm_overlap/userbuffers/ipcsocket.cc
+     comm_gemm_overlap/userbuffers/userbuffers-host.cpp
+     comm_gemm_overlap/userbuffers/userbuffers.cu
+     comm_gemm_overlap/comm_gemm_overlap.cpp)
+add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
+
+
 
 # Configure dependencies
 if (USE_CUDA)
   target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
+<<<<<<< HEAD
                       CUDA::cudart)
   target_include_directories(transformer_engine PRIVATE
+=======
+                      CUDA::cudart
+                      CUDNN::cudnn_all)
+target_include_directories(transformer_engine PRIVATE
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
 
@@ -358,6 +424,19 @@ else()
   target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS})
 endif()
 
+<<<<<<< HEAD
+=======
+option(NVTE_ENABLE_NVSHMEM "Compile with NVSHMEM library" OFF)
+if (NVTE_ENABLE_NVSHMEM)
+    add_subdirectory(nvshmem_api)
+    target_link_libraries(transformer_engine PUBLIC nvshmemapi)
+    target_include_directories(transformer_engine PUBLIC ${NVSHMEMAPI_INCLUDE_DIR})
+endif()
+
+# Hack to enable dynamic loading in cuDNN frontend
+target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
+
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 # Helper functions to make header files with C++ strings
 function(make_string_header STRING STRING_NAME)
     configure_file(util/string_header.h.in
@@ -407,6 +486,14 @@ target_include_directories(transformer_engine PRIVATE
 set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
                             fused_softmax/scaled_upper_triang_masked_softmax.cu
                             fused_softmax/scaled_aligned_causal_masked_softmax.cu
+                            multi_tensor/adam.cu
+                            multi_tensor/compute_scale.cu
+                            multi_tensor/l2norm.cu
+                            multi_tensor/scale.cu
+                            multi_tensor/sgd.cu
+                            fused_attn/flash_attn.cu
+                            fused_attn/context_parallel.cu
+                            fused_attn/kv_cache.cu
                             PROPERTIES
                             COMPILE_OPTIONS "--use_fast_math")
 if(USE_CUDA)

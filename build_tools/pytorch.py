@@ -10,6 +10,7 @@ from pathlib import Path
 
 import setuptools
 
+<<<<<<< HEAD
 from .utils import (
     rocm_build,
     hipify,
@@ -17,6 +18,9 @@ from .utils import (
     cuda_archs,
     cuda_version,
 )
+=======
+from .utils import all_files_in_dir, cuda_version, get_cuda_include_dirs, debug_build_enabled
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
 
 def setup_pytorch_extension(
@@ -27,19 +31,27 @@ def setup_pytorch_extension(
     """Setup CUDA extension for PyTorch support"""
 
     # Source files
+<<<<<<< HEAD
     csrc_source_files = Path(csrc_source_files)
     extensions_dir = csrc_source_files / "extensions"
     sources = [
         csrc_source_files / "common.cpp",
     ] + all_files_in_dir(extensions_dir)
         
+=======
+    sources = all_files_in_dir(Path(csrc_source_files), name_extension="cpp")
+
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
     # Header files
-    include_dirs = [
-        common_header_files,
-        common_header_files / "common",
-        common_header_files / "common" / "include",
-        csrc_header_files,
-    ]
+    include_dirs = get_cuda_include_dirs()
+    include_dirs.extend(
+        [
+            common_header_files,
+            common_header_files / "common",
+            common_header_files / "common" / "include",
+            csrc_header_files,
+        ]
+    )
 
     # If NVTE_RELEASE_BUILD is set, we assume not building but sources packaging
     # and we do not hipify the sources
@@ -49,6 +61,7 @@ def setup_pytorch_extension(
         sources = hipify(base_dir, csrc_source_files, sources, include_dirs)
 
     # Compiler flags
+<<<<<<< HEAD
     cxx_flags = [
         "-O3",
         "-fvisibility=hidden",
@@ -108,6 +121,23 @@ def setup_pytorch_extension(
                 if arch == "70":
                     continue  # Already handled
                 nvcc_flags.extend(["-gencode", f"arch=compute_{arch},code=sm_{arch}"])
+=======
+    cxx_flags = ["-O3", "-fvisibility=hidden"]
+    if debug_build_enabled():
+        cxx_flags.append("-g")
+        cxx_flags.append("-UNDEBUG")
+    else:
+        cxx_flags.append("-g0")
+
+    # Version-dependent CUDA options
+    try:
+        version = cuda_version()
+    except FileNotFoundError:
+        print("Could not determine CUDA version")
+    else:
+        if version < (12, 0):
+            raise RuntimeError("Transformer Engine requires CUDA 12.0 or newer")
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
     if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
         assert (
@@ -116,19 +146,29 @@ def setup_pytorch_extension(
         mpi_path = Path(os.getenv("MPI_HOME"))
         include_dirs.append(mpi_path / "include")
         cxx_flags.append("-DNVTE_UB_WITH_MPI")
-        nvcc_flags.append("-DNVTE_UB_WITH_MPI")
+
+    library_dirs = []
+    libraries = []
+    if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", 0))):
+        assert (
+            os.getenv("NVSHMEM_HOME") is not None
+        ), "NVSHMEM_HOME must be set when compiling with NVTE_ENABLE_NVSHMEM=1"
+        nvshmem_home = Path(os.getenv("NVSHMEM_HOME"))
+        include_dirs.append(nvshmem_home / "include")
+        library_dirs.append(nvshmem_home / "lib")
+        libraries.append("nvshmem_host")
+        cxx_flags.append("-DNVTE_ENABLE_NVSHMEM")
 
     # Construct PyTorch CUDA extension
     sources = [str(path) for path in sources]
     include_dirs = [str(path) for path in include_dirs]
-    from torch.utils.cpp_extension import CUDAExtension
+    from torch.utils.cpp_extension import CppExtension
 
-    return CUDAExtension(
+    return CppExtension(
         name="transformer_engine_torch",
         sources=[str(src) for src in sources],
         include_dirs=[str(inc) for inc in include_dirs],
-        extra_compile_args={
-            "cxx": cxx_flags,
-            "nvcc": nvcc_flags,
-        },
+        extra_compile_args={"cxx": cxx_flags},
+        libraries=[str(lib) for lib in libraries],
+        library_dirs=[str(lib_dir) for lib_dir in library_dirs],
     )

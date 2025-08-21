@@ -7,7 +7,6 @@
 """Installation script."""
 
 import os
-import sys
 import time
 from pathlib import Path
 from typing import List, Tuple
@@ -27,7 +26,6 @@ from build_tools.utils import (
     get_frameworks,
     install_and_import,
     remove_dups,
-    uninstall_te_wheel_packages,
 )
 
 frameworks = get_frameworks()
@@ -84,10 +82,21 @@ def setup_common_extension() -> CMakeExtension:
             ), "MPI_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
             cmake_flags.append("-DNVTE_UB_WITH_MPI=ON")
 
+<<<<<<< HEAD
         if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
             cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
 
         cmake_flags.append("-DUSE_ROCM=OFF")
+=======
+    if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))):
+        assert (
+            os.getenv("NVSHMEM_HOME") is not None
+        ), "NVSHMEM_HOME must be set when compiling with NVTE_ENABLE_NVSHMEM=1"
+        cmake_flags.append("-DNVTE_ENABLE_NVSHMEM=ON")
+
+    if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
+        cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
     # Project directory root
     root_path = Path(__file__).resolve().parent
@@ -106,7 +115,15 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     """
 
     # Common requirements
-    setup_reqs: List[str] = []
+    setup_reqs: List[str] = [
+        "nvidia-cuda-runtime-cu12",
+        "nvidia-cublas-cu12",
+        "nvidia-cudnn-cu12",
+        "nvidia-cuda-cccl-cu12",
+        "nvidia-cuda-nvcc-cu12",
+        "nvidia-nvtx-cu12",
+        "nvidia-cuda-nvrtc-cu12",
+    ]
     install_reqs: List[str] = [
         "pydantic",
         "importlib-metadata>=1.0",
@@ -126,6 +143,7 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     # Framework-specific requirements
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         if "pytorch" in frameworks:
+<<<<<<< HEAD
             if rocm_build():
                 install_reqs.extend(["einops"])
             else:
@@ -141,6 +159,21 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
                 install_reqs.extend(["jax", "flax>=0.7.1"])
                 # test_reqs.extend(["numpy", "praxis"])
                 test_reqs.extend(["numpy"])
+=======
+            setup_reqs.extend(["torch>=2.1"])
+            install_reqs.extend(["torch>=2.1"])
+            install_reqs.append(
+                "nvdlfw-inspect @"
+                " git+https://github.com/NVIDIA/nvidia-dlfw-inspect.git@v0.1#egg=nvdlfw-inspect"
+            )
+            # Blackwell is not supported as of Triton 3.2.0, need custom internal build
+            # install_reqs.append("triton")
+            test_reqs.extend(["numpy", "torchvision"])
+        if "jax" in frameworks:
+            setup_reqs.extend(["jax[cuda12]", "flax>=0.7.1"])
+            install_reqs.extend(["jax", "flax>=0.7.1"])
+            test_reqs.extend(["numpy"])
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
     return [remove_dups(reqs) for reqs in [setup_reqs, install_reqs, test_reqs]]
 
@@ -158,7 +191,6 @@ if __name__ == "__main__":
         ), "NVTE_RELEASE_BUILD env must be set for metapackage build."
         te_cuda_vers = "rocm" if rocm_build() else "cu12"
         ext_modules = []
-        cmdclass = {}
         package_data = {}
         include_package_data = False
         setup_requires = []
@@ -170,15 +202,11 @@ if __name__ == "__main__":
     else:
         setup_requires, install_requires, test_requires = setup_requirements()
         ext_modules = [setup_common_extension()]
-        cmdclass = {"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist}
         package_data = {"": ["VERSION.txt"]}
         include_package_data = True
         extras_require = {"test": test_requires}
 
         if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
-            # Remove residual FW packages since compiling from source
-            # results in a single binary with FW extensions included.
-            uninstall_te_wheel_packages()
             if "pytorch" in frameworks:
                 from build_tools.pytorch import setup_pytorch_extension
 

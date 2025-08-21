@@ -3,24 +3,39 @@
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-"""Transformer Engine bindings for JAX"""
+"""Transformer Engine bindings for JAX.
 
-# pylint: disable=wrong-import-position,wrong-import-order
+This module provides JAX bindings for NVIDIA's Transformer Engine, enabling
+high-performance transformer operations with mixed precision and quantization
+support. It includes implementations of key transformer components like attention,
+linear layers, and layer normalization, optimized for NVIDIA GPUs.
 
-import sys
-import logging
-import importlib
-import importlib.util
-import ctypes
-from importlib.metadata import version
+The module exports various transformer operations and utilities:
+- Attention mechanisms (self-attention, cross-attention)
+- Linear transformations with optional quantization
+- Layer normalization operations
+- Activation functions
+- Softmax operations
+- Sharding utilities for distributed training
 
+<<<<<<< HEAD
 from transformer_engine.common import get_te_path, is_package_installed
 from transformer_engine.common import _get_sys_extension
 from .util import is_hip_extension
+=======
+All operations are designed to work seamlessly with JAX's functional programming
+model and support automatic differentiation.
+"""
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
-_logger = logging.getLogger(__name__)
+# pylint: disable=wrong-import-position
 
+# This unused import is needed because the top level `transformer_engine/__init__.py`
+# file catches an `ImportError` as a guard for cases where the given framework's
+# extensions are not available.
+import jax
 
+<<<<<<< HEAD
 def _load_library():
     """Load shared library with Transformer Engine C extensions"""
     module_name = "transformer_engine_jax"
@@ -68,9 +83,18 @@ def _load_library():
 
 
 _TE_JAX_LIB_CTYPES = _load_library()
+=======
+from transformer_engine.common import load_framework_extension
+
+load_framework_extension("jax")
+
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 from . import flax
-from .fp8 import fp8_autocast, update_collections, get_delayed_scaling
-from .fp8 import NVTE_FP8_COLLECTION_NAME
+from . import quantize
+
+from .quantize import fp8_autocast, update_collections, get_delayed_scaling
+from .quantize import NVTE_FP8_COLLECTION_NAME
+
 from .sharding import MeshResource
 from .sharding import MajorShardingType, ShardingResource, ShardingType
 
@@ -96,5 +120,5 @@ __all__ = [
     "ShardingResource",
     "ShardingType",
     "flax",
-    "praxis",
+    "quantize",
 ]

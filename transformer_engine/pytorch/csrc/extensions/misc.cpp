@@ -8,9 +8,19 @@
 
 #include "extensions.h"
 
+<<<<<<< HEAD
 #ifndef USE_ROCM
 size_t get_cublasLt_version() { return cublasLtGetVersion(); }
 
 size_t get_cudnn_version() { return cudnnGetVersion(); }
 #endif
 void placeholder() {}  // TODO(ksivamani) clean this up
+=======
+namespace transformer_engine::pytorch {
+
+size_t get_cublasLt_version() { return cublasLtGetVersion(); }
+
+size_t get_cudnn_version() { return cudnnGetVersion(); }
+
+}  // namespace transformer_engine::pytorch
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270

@@ -15,11 +15,16 @@ from packaging import version
 import jax
 import jax.numpy as jnp
 from jax import dtypes, lax
-from jax.interpreters import mlir
-from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
+<<<<<<< HEAD
 from transformer_engine import transformer_engine_jax
 from  transformer_engine.transformer_engine_jax import NVTE_Fused_Attn_Backend
+=======
+from jax.experimental.custom_partitioning import SdyShardingRule
+
+import transformer_engine_jax
+from transformer_engine_jax import NVTE_Fused_Attn_Backend
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
@@ -31,14 +36,12 @@ from transformer_engine.jax.attention import (
 
 from .misc import is_hip_extension
 from .base import BasePrimitive, register_primitive
-from .custom_call import custom_caller, CustomCallArgsWrapper
 from .misc import (
     check_valid_batch_dims,
     jax_dtype_to_te_dtype,
     te_dtype_to_jax_dtype,
     get_padded_spec,
     get_cudnn_version,
-    is_ffi_enabled,
 )
 from ..sharding import (
     global_mesh_resource,
@@ -48,6 +51,7 @@ from ..sharding import (
     get_mesh_axis_rank,
     get_all_mesh_axes,
     num_of_devices,
+    with_sharding_constraint,
 )
 
 
@@ -256,7 +260,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
     Fused Attention Forward Primitive
     """
 
-    name = "te_fused_attn_forward"
+    name = "te_fused_attn_forward_ffi"
     multiple_results = True
     impl_static_args = (13,)
     inner_primitive = None
@@ -453,6 +457,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
+<<<<<<< HEAD
         if is_ffi_enabled():
             name = "te_fused_attn_forward_ffi"
             out = ffi.ffi_lowering(name)(
@@ -539,6 +544,42 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             out = custom_caller(FusedAttnFwdPrimitive.name, args, opaque, has_side_effect=False)
 
         return out
+=======
+        return ffi.ffi_lowering(FusedAttnFwdPrimitive.name)(
+            ctx,
+            q,
+            k,
+            v,
+            bias,
+            seed,
+            q_cu_seqlen,
+            kv_cu_seqlen,
+            q_seq_offsets,
+            k_seq_offsets,
+            _q_segment_ids,
+            _kv_segment_ids,
+            _q_segment_pos,
+            _kv_segment_pos,  # ffi_lowering needs number of parameters meets primitive.lowering
+            input_batch=input_batch,
+            bias_batch=bias_batch,
+            q_max_seqlen=q_max_seqlen,
+            kv_max_seqlen=kv_max_seqlen,
+            attn_heads=attn_heads,
+            num_gqa_groups=num_gqa_groups,
+            bias_heads=bias_heads,
+            head_dim=head_dim,
+            max_segments_per_seq=config.max_segments_per_seq,
+            scaling_factor=float(config.scaling_factor),
+            dropout_probability=float(config.dropout_probability),
+            bias_type=int(config.attn_bias_type.value),
+            mask_type=int(config.attn_mask_type.value),
+            qkv_layout=int(config.qkv_layout.value),
+            is_training=config.is_training,
+            deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
+            window_size_left=config.window_size[0],
+            window_size_right=config.window_size[1],
+        )
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
     @staticmethod
     def impl(
@@ -727,6 +768,35 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         impl = partial(FusedAttnFwdPrimitive.impl, config=config)
         return mesh, impl, out_shardings, arg_shardings
 
+    @staticmethod
+    def shardy_sharding_rule(config, mesh, value_types, result_types):
+        del mesh, result_types
+
+        # Keep in sync with `infer_sharding_from_operands`.
+        # We only need the first input. Fill up the rest with placeholders.
+        input_spec = [(f"…{x}",) for x in range(len(value_types))]
+        # The RNG state sharding cannot be expressed as a Shardy rule. We use with_sharding_constraint
+        # instead. This has to happen outside of the primitive, see `fused_attn_fwd`.
+        rng_sharding = (f"…{len(value_types)}",)
+
+        if config.qkv_layout.is_qkvpacked():
+            input_spec[0] = ("…0", "seqlen", "three", "head", "hidden")
+        elif config.qkv_layout.is_kvpacked() or config.qkv_layout.is_separate():
+            input_spec[0] = ("…0", "seqlen", "head", "hidden")
+        else:
+            raise ValueError(f"Unsupported {config.qkv_layout=}")
+
+        is_packed_softmax = get_cudnn_version() >= (9, 6, 0) and config.qkv_layout.is_thd()
+        out_sharding = ("…0", "seqlen", "head", "hidden")
+        if is_packed_softmax:
+            softmax_aux_sharding = ("…0", "seqlen", "head", "i")
+        else:
+            softmax_aux_sharding = ("…0", "head", "seqlen", "i")
+
+        return SdyShardingRule(
+            tuple(input_spec), (out_sharding, softmax_aux_sharding, rng_sharding)
+        )
+
 
 register_primitive(FusedAttnFwdPrimitive)
 
@@ -736,7 +806,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
     Fused Attention Backward Primitive
     """
 
-    name = "te_fused_attn_backward"
+    name = "te_fused_attn_backward_ffi"
     multiple_results = True
     impl_static_args = (16,)
     inner_primitive = None
@@ -882,6 +952,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
+<<<<<<< HEAD
         if is_ffi_enabled():
             name = "te_fused_attn_backward_ffi"
             out = ffi.ffi_lowering(name)(
@@ -974,6 +1045,45 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             out = custom_caller(FusedAttnBwdPrimitive.name, args, opaque, has_side_effect=False)
 
         return out
+=======
+        return ffi.ffi_lowering(FusedAttnBwdPrimitive.name)(
+            ctx,
+            q,
+            k,
+            v,
+            bias,
+            softmax_aux,
+            rng_state,
+            output,
+            doutput,
+            q_cu_seqlen,
+            kv_cu_seqlen,
+            q_seq_offsets,
+            k_seq_offsets,
+            q_segment_ids,
+            kv_segment_ids,
+            q_segment_pos,
+            kv_segment_pos,  # ffi_lowering needs number of parameters meets primitive.lowering
+            input_batch=input_batch,
+            bias_batch=bias_batch,
+            q_max_seqlen=q_max_seqlen,
+            kv_max_seqlen=kv_max_seqlen,
+            attn_heads=attn_heads,
+            num_gqa_groups=num_gqa_groups,
+            bias_heads=bias_heads,
+            head_dim=head_dim,
+            max_segments_per_seq=config.max_segments_per_seq,
+            scaling_factor=float(config.scaling_factor),
+            dropout_probability=float(config.dropout_probability),
+            bias_type=int(config.attn_bias_type.value),
+            mask_type=int(config.attn_mask_type.value),
+            qkv_layout=int(config.qkv_layout.value),
+            is_training=config.is_training,
+            deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
+            window_size_left=config.window_size[0],
+            window_size_right=config.window_size[1],
+        )
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
     @staticmethod
     def impl(
@@ -1175,6 +1285,15 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             return local_dq, local_dk, local_dv, global_dbias
 
         return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(config, mesh, value_types, result_types):
+        del config, mesh
+        # We only care about the four first arguments.
+        # Keep in sync with `infer_sharding_from_operands`.
+        input_spec = tuple((f"…{x}",) for x in range(len(value_types)))
+        output_spec = tuple((f"…{x}",) for x in range(len(result_types)))
+        return SdyShardingRule(input_spec, output_spec)
 
 
 register_primitive(FusedAttnBwdPrimitive)
@@ -2614,13 +2733,15 @@ def fused_attn_fwd(
                 primitive = FusedRingAttnFwdPrimitive.outer_primitive
 
     seq_desc_flatten, _ = jax.tree.flatten(sequence_descriptor)
-    return primitive.bind(
+    output, softmax_aux, rng_state = primitive.bind(
         *qkv_for_primitive,
         bias,
         seed,
         *seq_desc_flatten,
         config=fused_config,
     )
+    rng_state = with_sharding_constraint(rng_state, PartitionSpec(get_all_mesh_axes(), None))
+    return (output, softmax_aux, rng_state)
 
 
 def fused_attn_bwd(

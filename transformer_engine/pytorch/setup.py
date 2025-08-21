@@ -59,8 +59,23 @@ if __name__ == "__main__":
         description="Transformer acceleration library - Torch Lib",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
+<<<<<<< HEAD
         install_requires=["einops"] if rocm_build() else ["torch"],
         tests_require=[] if rocm_build() else ["numpy", "torchvision"],
+=======
+        setup_requires=[
+            "torch>=2.1",
+            "nvidia-cuda-runtime-cu12",
+            "nvidia-cublas-cu12",
+            "nvidia-cudnn-cu12",
+            "nvidia-cuda-cccl-cu12",
+            "nvidia-cuda-nvcc-cu12",
+            "nvidia-nvtx-cu12",
+            "nvidia-cuda-nvrtc-cu12",
+        ],
+        install_requires=["torch>=2.1"],
+        tests_require=["numpy", "torchvision"],
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
     )
     if any(x in sys.argv for x in (".", "sdist", "bdist_wheel")):
         shutil.rmtree(common_headers_dir)

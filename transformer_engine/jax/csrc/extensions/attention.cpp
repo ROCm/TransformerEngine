@@ -230,6 +230,7 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
   return pybind11::make_tuple(workspace_shape, query_workspace_tensor.dtype());
 }
 
+<<<<<<< HEAD
 #define FUSED_ATTN_IMPL_COMMON_BLOCK_VERSION                                                       \
     auto cudnn_runtime_version = GetCudnnRuntimeVersion();                                                 \
     if (cudnn_runtime_version >= 90300) {                                                       \
@@ -258,6 +259,33 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
   auto k_seq_offsets_tensor = TensorWrapper(k_seq_offsets, seq_shape, DType::kInt32);           \
   auto workspace_tensor =                                                                       \
       TensorWrapper(workspace, std::vector<size_t>{wkspace_size}, wkspace_dtype);               \
+=======
+#define FUSED_ATTN_IMPL_COMMON_BLOCK                                                          \
+  auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;              \
+  auto bias_shape = std::vector<size_t>{bias_batch, bias_heads, q_max_seqlen, kv_max_seqlen}; \
+  size_t num_segments = input_batch;                                                          \
+  if (is_ragged) {                                                                            \
+    auto cudnn_runtime_version = cudnnGetVersion();                                           \
+    if (cudnn_runtime_version >= 90300) {                                                     \
+      num_segments = input_batch * max_segments_per_seq;                                      \
+    } else {                                                                                  \
+      size_t runtime_num_segments_q = nvte_get_runtime_num_segments(                          \
+          q_cu_seqlens, workspace, input_batch * q_max_seqlen, stream);                       \
+      size_t runtime_num_segments_kv = nvte_get_runtime_num_segments(                         \
+          kv_cu_seqlens, workspace, input_batch * kv_max_seqlen, stream);                     \
+      NVTE_CHECK(runtime_num_segments_q == runtime_num_segments_kv);                          \
+      NVTE_CHECK(runtime_num_segments_q <= input_batch * max_segments_per_seq);               \
+      num_segments = runtime_num_segments_q;                                                  \
+    }                                                                                         \
+  }                                                                                           \
+  std::vector<size_t> seq_shape{num_segments + 1};                                            \
+  auto q_cu_seqlens_tensor = TensorWrapper(q_cu_seqlens, seq_shape, DType::kInt32);           \
+  auto kv_cu_seqlens_tensor = TensorWrapper(kv_cu_seqlens, seq_shape, DType::kInt32);         \
+  auto q_seq_offsets_tensor = TensorWrapper(q_seq_offsets, seq_shape, DType::kInt32);         \
+  auto k_seq_offsets_tensor = TensorWrapper(k_seq_offsets, seq_shape, DType::kInt32);         \
+  auto workspace_tensor =                                                                     \
+      TensorWrapper(workspace, std::vector<size_t>{wkspace_size}, wkspace_dtype);             \
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
   auto layout_group = nvte_get_qkv_layout_group(qkv_layout);
 
 static void FusedAttnForwardImpl(
@@ -293,12 +321,17 @@ static void FusedAttnForwardImpl(
   auto backend = nvte_get_fused_attn_backend(
       static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
       mask_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
+<<<<<<< HEAD
       qk_head_dim, v_head_dim, window_size_left, window_size_right);
 #ifndef USE_ROCM
   PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 #else
   PopulateRngStateAsync(rng_state, seed, input_batch, attn_heads, q_max_seqlen, kv_max_seqlen, stream);
 #endif
+=======
+      head_dim, head_dim, window_size_left, window_size_right);
+  nvte_populate_rng_state_async(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
   /* Auxiliary tensors (to be propagated to the backward pass later) */
   NVTETensorPack aux_output_tensors;
@@ -352,6 +385,7 @@ static void FusedAttnForwardImpl(
   nvte_tensor_pack_destroy(&aux_output_tensors);
 }
 
+<<<<<<< HEAD
 void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
   const CustomCallFusedAttnDescriptor &descriptor =
       *UnpackOpaque<CustomCallFusedAttnDescriptor>(opaque, opaque_len);
@@ -385,6 +419,8 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
       descriptor.deterministic, descriptor.window_size_left, descriptor.window_size_right);
 }
 
+=======
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 #define FUSED_ATTN_FFI_GET_ATTRS                                                        \
   size_t input_batch = get_attr_value<int64_t>(attrs, "input_batch");                   \
   size_t bias_batch = get_attr_value<int64_t>(attrs, "bias_batch");                     \
@@ -661,6 +697,7 @@ static void FusedAttnBackwardImpl(
   nvte_tensor_pack_destroy(&aux_input_tensors);
 }
 
+<<<<<<< HEAD
 void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
   const CustomCallFusedAttnDescriptor &descriptor =
       *UnpackOpaque<CustomCallFusedAttnDescriptor>(opaque, opaque_len);
@@ -700,6 +737,8 @@ void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, 
       descriptor.deterministic, descriptor.window_size_left, descriptor.window_size_right);
 }
 
+=======
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 Error_Type FusedAttnBackwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Type k_buf,
                                 Buffer_Type v_buf, Buffer_Type bias_buf,
                                 Buffer_Type softmax_aux_buf, Buffer_Type rng_state_buf,

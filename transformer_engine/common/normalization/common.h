@@ -13,7 +13,11 @@
 #include <cudnn.h>
 #include <cudnn_frontend.h>
 #include <cudnn_frontend_utils.h>
+<<<<<<< HEAD
 #endif
+=======
+#include <transformer_engine/normalization.h>
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 #include <transformer_engine/transformer_engine.h>
 
 #include <functional>
@@ -148,8 +152,11 @@ struct BackwardKernelParams : public KernelParamsBase {
 enum class NVTE_Norm_Backend { Te };
 #else
 enum class NVTE_Norm_Backend { Te, Cudnn };
+<<<<<<< HEAD
 #endif
 enum class NVTE_Norm_Type { LayerNorm, RMSNorm };
+=======
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 enum class NVTE_Norm_Stage { Forward, Backward };
 
 using TupleKeyType = std::tuple<uint64_t, uint64_t, uint64_t, bool>;

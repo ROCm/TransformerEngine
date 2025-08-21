@@ -6,23 +6,22 @@
 
 """Transformer Engine bindings for pyTorch"""
 
-# pylint: disable=wrong-import-position,wrong-import-order
+# pylint: disable=wrong-import-position
 
-import logging
 import functools
+<<<<<<< HEAD
 import sys
 import importlib
 import importlib.util
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from importlib.metadata import version
+=======
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 from packaging.version import Version as PkgVersion
 
 import torch
 
-from transformer_engine.common import get_te_path, is_package_installed
-from transformer_engine.common import _get_sys_extension
-
-_logger = logging.getLogger(__name__)
+from transformer_engine.common import load_framework_extension
 
 
 @functools.lru_cache(maxsize=None)
@@ -31,6 +30,7 @@ def torch_version() -> tuple[int, ...]:
     return PkgVersion(str(torch.__version__)).release
 
 
+<<<<<<< HEAD
 def _load_library():
     """Load shared library with Transformer Engine C extensions"""
     module_name = "transformer_engine_torch"
@@ -80,10 +80,12 @@ def _load_library():
     spec.loader.exec_module(solib)
 
 
+=======
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {torch_version()}."
 
 
-_load_library()
+load_framework_extension("torch")
 from transformer_engine.pytorch.module import LayerNormLinear
 from transformer_engine.pytorch.module import Linear
 from transformer_engine.pytorch.module import LayerNormMLP
@@ -95,7 +97,8 @@ from transformer_engine.pytorch.module import initialize_ub
 from transformer_engine.pytorch.module import destroy_ub
 from transformer_engine.pytorch.attention import DotProductAttention
 from transformer_engine.pytorch.attention import MultiheadAttention
-from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
+from transformer_engine.pytorch.attention import InferenceParams
+from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 from transformer_engine.pytorch.transformer import TransformerLayer
 from transformer_engine.pytorch.permutation import (
     moe_permute,

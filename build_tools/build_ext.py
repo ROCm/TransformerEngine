@@ -6,7 +6,6 @@
 
 """Installation script."""
 
-import ctypes
 import os
 import subprocess
 import sys
@@ -27,7 +26,7 @@ from .utils import (
     debug_build_enabled,
     found_ninja,
     get_frameworks,
-    cuda_path,
+    nvcc_path,
     get_max_jobs_for_parallel_build,
 )
 
@@ -100,7 +99,9 @@ class CMakeExtension(setuptools.Extension):
         print(f"Time for build_ext: {total_time:.2f} seconds")
 
 
-def get_build_ext(extension_cls: Type[setuptools.Extension], install_so_in_wheel_lib: bool = False):
+def get_build_ext(
+    extension_cls: Type[setuptools.Extension], framework_extension_only: bool = False
+):
     class _CMakeBuildExtension(extension_cls):
         """Setuptools command with support for CMake extension modules"""
 
@@ -135,25 +136,41 @@ def get_build_ext(extension_cls: Type[setuptools.Extension], install_so_in_wheel
             super().run()
             self.extensions = all_extensions
 
-            # Ensure that binaries are not in global package space.
+            # Ensure that shared objects files for source and PyPI installations live
+            # in separate directories to avoid conflicts during install and runtime.
             lib_dir = (
                 "wheel_lib"
+<<<<<<< HEAD
                 if (not rocm_build() and
                     bool(int(os.getenv("NVTE_RELEASE_BUILD", "0")))) or install_so_in_wheel_lib
+=======
+                if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or framework_extension_only
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
                 else ""
             )
-            target_dir = install_dir / "transformer_engine" / lib_dir
-            target_dir.mkdir(exist_ok=True, parents=True)
 
-            for ext in Path(self.build_lib).glob("*.so"):
-                self.copy_file(ext, target_dir)
-                os.remove(ext)
+            # Ensure that binaries are not in global package space.
+            # For editable/inplace builds this is not a concern as
+            # the SOs will be in a local directory anyway.
+            if not self.inplace:
+                target_dir = install_dir / "transformer_engine" / lib_dir
+                target_dir.mkdir(exist_ok=True, parents=True)
+
+                for ext in Path(self.build_lib).glob("*.so"):
+                    self.copy_file(ext, target_dir)
+                    os.remove(ext)
 
         def build_extensions(self):
+<<<<<<< HEAD
             # BuildExtensions from PyTorch already handle CUDA files correctly
             # so we don't need to modify their compiler. Only the pybind11 build_ext needs to be fixed.
             ext_names = [ext.name for ext in self.extensions]
             if "transformer_engine_pytorch" not in ext_names:
+=======
+            # For core lib + JAX install, fix build_ext from pybind11.setup_helpers
+            # to handle CUDA files correctly.
+            if "pytorch" not in get_frameworks():
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
                 # Ensure at least an empty list of flags for 'cxx' and 'nvcc' when
                 # extra_compile_args is a dict.
                 for ext in self.extensions:
@@ -165,13 +182,19 @@ def get_build_ext(extension_cls: Type[setuptools.Extension], install_so_in_wheel
                 # Define new _compile method that redirects to NVCC for .cu and .cuh files.
                 # Also redirect .hip files to HIPCC
                 original_compile_fn = self.compiler._compile
+<<<<<<< HEAD
                 self.compiler.src_extensions += [".cu", ".cuh", ".hip"]
+=======
+                if not framework_extension_only:
+                    self.compiler.src_extensions += [".cu", ".cuh"]
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
                 def _compile_fn(obj, src, ext, cc_args, extra_postargs, pp_opts) -> None:
                     # Copy before we make any modifications.
                     cflags = copy.deepcopy(extra_postargs)
                     original_compiler = self.compiler.compiler_so
                     try:
+<<<<<<< HEAD
 
                         if rocm_build():
                             _, nvcc_bin = rocm_path()
@@ -180,6 +203,15 @@ def get_build_ext(extension_cls: Type[setuptools.Extension], install_so_in_wheel
                         original_compiler = self.compiler.compiler_so
 
                         if os.path.splitext(src)[1] in [".cu", ".cuh", ".hip"]:
+=======
+                        original_compiler = self.compiler.compiler_so
+
+                        if (
+                            os.path.splitext(src)[1] in [".cu", ".cuh"]
+                            and not framework_extension_only
+                        ):
+                            nvcc_bin = nvcc_path()
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
                             self.compiler.set_executable("compiler_so", str(nvcc_bin))
                             if isinstance(cflags, dict):
                                 cflags = cflags["nvcc"]
@@ -191,11 +223,17 @@ def get_build_ext(extension_cls: Type[setuptools.Extension], install_so_in_wheel
                                 else:
                                     cflags.extend(["--compiler-options", "'-fPIC'"])
 
+<<<<<<< HEAD
                             if not rocm_build():
                                 # Forward unknown options
                                 if not any("--forward-unknown-opts" in flag for flag in cflags):
                                     cflags.append("--forward-unknown-opts")
 
+=======
+                            # Forward unknown options
+                            if not any("--forward-unknown-opts" in flag for flag in cflags):
+                                cflags.append("--forward-unknown-opts")
+>>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
                         elif isinstance(cflags, dict):
                             cflags = cflags["cxx"]
 
