@@ -822,6 +822,8 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, pad_between
         pytest.skip("qkv_layout not applicable for MQA/GQA")
     if (pad_between_seqs==False and get_cudnn_version() < (9, 3, 0)):
         pytest.skip("cuDNN 9.3.0+ is required to run pad_between_seqs = False");
+    if not IS_HIP_EXTENSION and share_cu_seqlens_ref:
+        pytest.skip("share_cu_seqlens_ref is a ROCm TE specific implementation detail.")
     test_dot_product_attention(
         dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs, share_cu_seqlens_ref
     )
