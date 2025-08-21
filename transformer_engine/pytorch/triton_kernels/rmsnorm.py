@@ -13,8 +13,8 @@ from transformer_engine.pytorch.triton_kernels.common import (
     te_dtype_to_triton_dtype,
 )
 from .common import get_fp8_max
-from ..constants import TE_DType
 from ..tensor.quantized_tensor import Quantizer
+import transformer_engine_torch as tex
 
 def dg_tmp_rows(x, sm_margin=None):
     return x.shape[0] if use_blocked(x) else num_programs(x, sm_margin)
@@ -364,7 +364,7 @@ def te_rmsnorm_fwd_triton(
     eps: float,
     ln_out: torch.Tensor,
     quantizer: Quantizer,
-    out_dtype: TE_DType,
+    otype: tex.DType,
     sm_margin: int,
     zero_centered_gamma: bool
 ):
@@ -382,7 +382,7 @@ def te_rmsnorm_fwd_triton(
             f"but {weight.shape[0]=} while {input.shape[1]=}"
         )
     IS_FP8 = isinstance(quantizer, Float8Quantizer)
-    IS_MFP8 = isinstance(quantizer, MXFP8Quantizer)
+    IS_MXFP8 = isinstance(quantizer, MXFP8Quantizer)
     BLOCK_SIZE = block_size(input)
     USE_BLOCKED = use_blocked(input)
     NUM_PRGMS = num_programs(input, sm_margin)
@@ -390,8 +390,8 @@ def te_rmsnorm_fwd_triton(
 
     rsigma = torch.empty((N,), dtype=torch.float32, device=device)
     torch_out_dtype = (
-        out_dtype if isinstance(out_dtype, torch.dtype)
-        else te_dtype_to_torch_dtype(out_dtype)
+        otype if isinstance(otype, torch.dtype)
+        else te_dtype_to_torch_dtype(otype)
     )
     if IS_FP8:
         MAKE_TRANSPOSE = quantizer.columnwise_usage
@@ -460,7 +460,7 @@ def te_rmsnorm_fwd_triton(
         FP8_MAX,
         MAKE_TRANSPOSE,
     )
-    if IS_MFP8:
+    if IS_MXFP8:
         out = quantizer.quantize(out)
 
     return out, None, rsigma

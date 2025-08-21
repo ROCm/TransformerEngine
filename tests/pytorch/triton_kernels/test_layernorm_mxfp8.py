@@ -100,7 +100,7 @@ def test_layernorm_fwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma):
         eps=epsilon, 
         ln_out=None,
         quantizer=quantizer_triton,
-        out_dtype=torch_dtype_to_te_dtype(out_dtype),
+        otype=torch_dtype_to_te_dtype(out_dtype),
         sm_margin=get_fwd_ln_sm_margin(),
         zero_centered_gamma=zero_centered_gamma, 
         )

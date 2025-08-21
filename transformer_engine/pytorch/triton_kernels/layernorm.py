@@ -456,13 +456,13 @@ def _layernorm_bwd_dwdb_triton_v2(
     tl.store(FINAL_DW + cols, sum_dw.to(FINAL_DW.type.element_ty), mask=cols < N)
     tl.store(FINAL_DB + cols, sum_db.to(FINAL_DB.type.element_ty), mask=cols < N)
 
-def te_layernorm_fwd_triton(input: torch.Tensor, 
-                            weight: torch.Tensor, 
-                            bias: torch.Tensor,  
+def te_layernorm_fwd_triton(input: torch.Tensor,
+                            weight: torch.Tensor,
+                            bias: torch.Tensor,
                             eps: float,
-                            ln_out: torch.Tensor, 
-                            quantizer: Quantizer, 
-                            out_dtype: TE_DType,
+                            ln_out: torch.Tensor,
+                            quantizer: Quantizer,
+                            otype: tex.DType,
                             sm_margin: int,
                             zero_centered_gamma: bool):
     if sm_margin is not None and sm_margin > 0:
@@ -473,7 +473,7 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
     device = input.device
     M, N = input.shape
 
-    IS_MFP8 = isinstance(quantizer, MXFP8Quantizer)
+    IS_MXFP8 = isinstance(quantizer, MXFP8Quantizer)
     MAKE_TRANSPOSE = False
 
     # Create empty tensors for mu and rsigma
@@ -481,11 +481,11 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
     rsigma = torch.empty((M,), dtype=torch.float32, device=device)
 
     torch_out_dtype = (
-        out_dtype if isinstance(out_dtype, torch.dtype)
-        else te_dtype_to_torch_dtype(out_dtype)
+        otype if isinstance(otype, torch.dtype)
+        else te_dtype_to_torch_dtype(otype)
     )
     # Create ln_out
-    if quantizer is None or IS_MFP8:
+    if quantizer is None or IS_MXFP8:
         ln_out = torch.empty(M, N, dtype=torch_out_dtype, device=device)
     else:
         if ln_out is None:
@@ -567,7 +567,7 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
         )
 
     # For MXFP8, we do regular layernorm and then quantize it separately
-    if IS_MFP8:
+    if IS_MXFP8:
         ln_out = te_quantize_triton(ln_out, quantizer)
     
     # Reduce and find amax if "not APPLY_ATOMIC" is True.
