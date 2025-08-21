@@ -1,12 +1,12 @@
 # Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: MIT
+
 #TODO: compile to a shared library
 cmake_minimum_required(VERSION 3.28)
 set(CMAKE_CXX_STANDARD 20)
 #TODO: remove after figuring out how to install clang-scan-deps
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 project(ck_fused_attn LANGUAGES HIP CXX)
-# generate fused attn kernels, both fwd/bwd
 
 # remove files that should be regenerated
 file(REMOVE_RECURSE ${CMAKE_CURRENT_BINARY_DIR}/gen_src/tmp ${CMAKE_CURRENT_BINARY_DIR}/gen_src/blob_list.txt)
@@ -178,7 +178,14 @@ endforeach()
 
 add_library(ck_fused_attn STATIC ${ck_fused_attn_SOURCES})
 set(CK_FUSED_ATTN_COMPILE_OPTIONS)
-list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -Wno-undefined-func-template -DCK_TILE_FMHA_FWD_FAST_EXP2=1 -DCK_TILE_FMHA_FWD_SPLITKV_API=1 -DCK_TILE_FMHA_FWD_APPENDKV_API=0 -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT} -fgpu-flush-denormals-to-zero -Wno-float-equal -ftemplate-backtrace-limit=0  -fPIC  -Wno-gnu-line-marker -Wunused-variable -Wuninitialized "SHELL:-mllvm -enable-post-misched=0" "SHELL:-mllvm -amdgpu-early-inline-all=true" "SHELL:-mllvm -amdgpu-function-calls=false" "SHELL:-mllvm -amdgpu-coerce-illegal-types=1" "SHELL:-mllvm --amdgpu-kernarg-preload-count=16")
+list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS
+    -DCK_TILE_FMHA_FWD_FAST_EXP2=1 -DCK_TILE_FMHA_FWD_SPLITKV_API=1-DCK_TILE_FMHA_FWD_APPENDKV_API=0
+    -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT}
+    -fgpu-flush-denormals-to-zero -ftemplate-backtrace-limit=0 -fPIC
+    -Wno-undefined-func-template -Wno-float-equal -Wno-gnu-line-marker -Wunused-variable -Wuninitialized
+    "SHELL:-mllvm -enable-post-misched=0" "SHELL:-mllvm -amdgpu-early-inline-all=true"
+    "SHELL:-mllvm -amdgpu-function-calls=false" "SHELL:-mllvm -amdgpu-coerce-illegal-types=1"
+    "SHELL:-mllvm --amdgpu-kernarg-preload-count=16")
 
 foreach(CK_TARGET_ARCH IN LISTS CMAKE_HIP_ARCHITECTURES)
   list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS --offload-arch=${CK_TARGET_ARCH})
@@ -212,3 +219,15 @@ find_package(hip)
 list(APPEND ck_fused_attn_LINKER_LIBS hip::host hip::device roctx64)
 target_link_libraries(ck_fused_attn PUBLIC ${ck_fused_attn_LINKER_LIBS})
 target_compile_options(ck_fused_attn PRIVATE ${CK_FUSED_ATTN_COMPILE_OPTIONS})
+
+# copy v3 kernels to destination
+foreach(ARCH IN LISTS V3_ASM_ARCHS)
+  install(DIRECTORY
+        ${__AITER_SOURCE_DIR}/hsa/${ARCH}/fmha_v3_fwd
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/transformer_engine/aiter/${ARCH}/
+        PATTERN "codegen.py" EXCLUDE)
+  install(DIRECTORY
+        ${__AITER_SOURCE_DIR}/hsa/${ARCH}/fmha_v3_bwd
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/transformer_engine/aiter/${ARCH}/
+        PATTERN "codegen.py" EXCLUDE)
+endforeach()
