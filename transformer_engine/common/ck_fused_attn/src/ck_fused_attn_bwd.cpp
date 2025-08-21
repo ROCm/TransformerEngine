@@ -775,7 +775,7 @@ hipError_t ck_attn_bwd(
 hipError_t ck_attn_varlen_bwd(  
   DType dtype,
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v,
-  uint64_t max_tokens_q,
+  uint64_t max_tokens_q, uint64_t max_tokens_kv,
   const void* q_ptr, 
   uint64_t stride_h_q, uint64_t stride_s_q,
   const void* k_ptr, 
@@ -1000,7 +1000,7 @@ hipError_t ck_attn_varlen_bwd(
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
   }
   if(is_mqa_gqa){
-    dim3 grid(b*s_kv, hg);
+    dim3 grid(max_tokens_kv, hg);
     if (d_qk == d_v) {
       dim3 block(d_qk);
       if (ck_fused_attn_log_config){
