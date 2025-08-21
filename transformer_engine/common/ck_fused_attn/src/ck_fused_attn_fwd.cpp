@@ -248,6 +248,10 @@ hipError_t ck_attn_fwd(
   
   // print ck traits and args when needed
   log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, fmha_args);
+  if (uses_fwd_v3)
+  {
+    set_aiter_asm_dir();
+  }
 
   float average_runtime = aiter::mha_fwd(fmha_args,
                                          stream_config,
@@ -405,6 +409,10 @@ hipError_t ck_attn_varlen_fwd(
 
   // print ck traits and args when needed
   log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, fmha_args);
+  if (uses_fwd_v3)
+  {
+    set_aiter_asm_dir();
+  }
 
   float average_runtime = aiter::mha_fwd(fmha_args,
                                          stream_config,
