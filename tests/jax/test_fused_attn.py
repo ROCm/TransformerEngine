@@ -1073,10 +1073,6 @@ class TestFusedAttn:
             window_size,
             seq_desc_format,
         )
-        if is_hip_extension():
-            is_padding = attn_mask_type in [AttnMaskType.PADDING_MASK, AttnMaskType.PADDING_CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK]
-            if swa and is_padding:
-                pytest.skip("Jax cannot get cu_seqlen correctly from mask with swa")
         runner.test_forward()
 
     @staticmethod
@@ -1128,8 +1124,4 @@ class TestFusedAttn:
             window_size,
             seq_desc_format,
         )
-        if is_hip_extension():
-            is_padding = attn_mask_type in [AttnMaskType.PADDING_MASK, AttnMaskType.PADDING_CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK]
-            if swa and is_padding:
-                pytest.skip("Jax cannot get cu_seqlen correctly from mask with swa")
         runner.test_backward()
