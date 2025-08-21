@@ -34,11 +34,8 @@ def get_autotune_config(full_tuning_space=False):
     ]
 
 
-@triton.autotune(
-    configs=get_autotune_config(), key=["n_rows", "n_cols"], use_cuda_graph=True
-)
 @triton.jit
-def _layernorm_fwd_triton(
+def _layernorm_fwd_triton_impl(
     x_ptr,
     y_ptr,
     w_ptr,
@@ -175,6 +172,8 @@ def _layernorm_fwd_triton(
         else:
             tl.store(amax_ptr + pid, amax)
 
+autotune_dec = triton.autotune(configs=get_autotune_config(), key=["n_rows", "n_cols"], use_cuda_graph=True)
+_layernorm_fwd_triton = autotune_dec(_layernorm_fwd_triton_impl)
 
 @triton.jit
 def _layernorm_fwd_reduce_triton(
@@ -462,7 +461,8 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
                             quantizer: Quantizer, 
                             otype: tex.DType,
                             sm_margin: int,
-                            zero_centered_gamma: bool):
+                            zero_centered_gamma: bool,
+                            autotune: bool,):
     if sm_margin is not None and sm_margin > 0:
         warnings.warn(
             '"sm_margin" is not supported in the Triton based forward layer-norm kernel. '
@@ -500,7 +500,8 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
         scale_inv = None
         cast_out = ln_out
     
-    _layernorm_fwd_triton[(M,)](
+    kernel = _layernorm_fwd_triton if autotune else _layernorm_fwd_triton_impl
+    kernel[(M,)](
         input,
         triton.reinterpret(cast_out, te_dtype_to_triton_dtype(ln_out._fp8_dtype)) if IS_FP8 else cast_out,
         weight,
