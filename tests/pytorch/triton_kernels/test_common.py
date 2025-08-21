@@ -19,15 +19,6 @@ from transformer_engine.pytorch.triton_kernels.common import (
 rng_seed = 12345
 rng = np.random.default_rng(np.random.MT19937(rng_seed))
 
-# Add `i` prefix to identify input type.
-def input_dtypes_str(dtypes_str):
-    return ["i" + dtype_str for dtype_str in dtypes_str]
-
-
-# Add `o` prefix to identify output type.
-def output_dtypes_str(dtypes_str):
-    return ["o" + dtype_str for dtype_str in dtypes_str]
-
 
 def fill_uniform(shape, dtype):
     x = rng.uniform(-2.0, 1.0, shape)
@@ -178,6 +169,16 @@ def compare_results(provider, actual, expected, atol, rtol, msg):
 # Get size in bytes of a given PyTorch type.
 def sizeof(dtype):
     return torch.finfo(dtype).bits // 8
+
+
+# Add `i` prefix to identify input type.
+def input_dtypes_str(dtypes_str):
+    return ["i" + dtype_str for dtype_str in dtypes_str]
+
+
+# Add `o` prefix to identify output type.
+def output_dtypes_str(dtypes_str):
+    return ["o" + dtype_str for dtype_str in dtypes_str]
 
 
 # Convert descriptive type string to PyTorch type.
