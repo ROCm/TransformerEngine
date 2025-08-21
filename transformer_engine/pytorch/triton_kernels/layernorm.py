@@ -462,7 +462,7 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
                             otype: tex.DType,
                             sm_margin: int,
                             zero_centered_gamma: bool,
-                            autotune: bool,):
+                            autotune: bool = True,):
     if sm_margin is not None and sm_margin > 0:
         warnings.warn(
             '"sm_margin" is not supported in the Triton based forward layer-norm kernel. '
