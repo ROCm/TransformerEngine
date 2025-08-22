@@ -1023,7 +1023,7 @@ void fused_attn_ck_bwd_impl(
         std::cout<<"Disabling CK BWD v3 because of numerical issues in gfx950 arch while using varlen backend"<<std::endl;
       }
     }
-    nvte_ck_uses_bwd_v3 = nvte_ck_uses_bwd_v3 and !is_gfx95x;
+    nvte_ck_uses_bwd_v3 = !is_gfx95x;
   }
   if (nvte_log_ck_config) {
     std::cout<<std::endl<<"attn_bwd(ck): ";
