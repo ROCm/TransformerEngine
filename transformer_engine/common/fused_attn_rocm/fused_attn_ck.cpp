@@ -1019,7 +1019,7 @@ void fused_attn_ck_bwd_impl(
     const int gpu_arch = cuda::sm_arch(cuda::current_device());
     const bool is_gfx95x = gpu_arch == 95;
     if(nvte_log_ck_config){
-      if(nvte_ck_uses_bwd_v3 and is_gfx95x){
+      if(is_gfx95x){
         std::cout<<"Disabling CK BWD v3 because of numerical issues in gfx950 arch while using varlen backend"<<std::endl;
       }
     }
