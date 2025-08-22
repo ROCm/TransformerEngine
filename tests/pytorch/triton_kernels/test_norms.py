@@ -174,7 +174,7 @@ def rmsnorm_fwd_ref(
 
 @pytest.fixture
 def autotune():
-    return bool(int(os.environ.get("TE_TEST_TRITON_AUTOTUNE", "0")))
+    return bool(int(os.environ.get("NVTE_TEST_TRITON_AUTOTUNE", "0")))
 
 class TestNorms:
 
