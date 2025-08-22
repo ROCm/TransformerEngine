@@ -803,7 +803,7 @@ void fused_attn_ck_bwd_impl(
     *workspace_size = workspace_size_lse + workspace_size_dq_acc;
     if(is_mqa_gqa){
       // allocate dk, dv (or dkv) as if h=hg
-      size_t dkv_expanded_size = b*h*s_kv*(d_qk+d_v)*nvte_dtype_size(dtype);
+      size_t dkv_expanded_size = max_tokens_kv*h*(d_qk+d_v)*nvte_dtype_size(dtype);
       *workspace_size += dkv_expanded_size;
     }
     // ck requires an alibi slope array even if in standard (vanilla) mode
@@ -894,7 +894,7 @@ void fused_attn_ck_bwd_impl(
 
     // dk_expanded arranged at the end of dq_acc_ptr
     dk_expanded_ptr = workspace_next;
-    workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + b*h*s_kv*(d_qk+d_v)*nvte_dtype_size(dtype));
+    workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + max_tokens_kv*h*(d_qk+d_v)*nvte_dtype_size(dtype));
 
     //dv_expanded_ptr depends on the actual layout
     if(layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD){
@@ -902,12 +902,12 @@ void fused_attn_ck_bwd_impl(
     } else if(layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D){
       dv_expanded_ptr = static_cast<void *>(static_cast<int8_t*>(dk_expanded_ptr) + nvte_dtype_size(dtype)*d_qk);
     } else if(layout_group == NVTE_QKV_Layout_Group::NVTE_HD_HD_HD){
-      dv_expanded_ptr = static_cast<void *>(static_cast<int8_t*>(dk_expanded_ptr) + nvte_dtype_size(dtype)*b*h*s_kv*d_qk);
+      dv_expanded_ptr = static_cast<void *>(static_cast<int8_t*>(dk_expanded_ptr) + nvte_dtype_size(dtype)*max_tokens_kv*h*d_qk);
     } else{
       NVTE_ERROR("NVTE_3HD NVTE_H3D should have h=hg.");
     }
     // zeroing out dkv expanded in case CK requires that
-    NVTE_CHECK_CUDA(cudaMemsetAsync(dk_expanded_ptr, 0, nvte_dtype_size(dtype)*b*h*s_kv*(d_qk+d_v), stream));
+    NVTE_CHECK_CUDA(cudaMemsetAsync(dk_expanded_ptr, 0, nvte_dtype_size(dtype)*max_tokens_kv*h*(d_qk+d_v), stream));
   }
 
   void* devPtrAlibiSlope = nullptr;
@@ -1071,7 +1071,7 @@ void fused_attn_ck_bwd_impl(
       ck_attn_varlen_bwd(
         nvte_to_ck_dtype(dtype),
         b, h, hg, s_q, s_kv, d_qk, d_v,
-        max_tokens_q,
+        max_tokens_q, max_tokens_kv,
         devPtrQWithoutPadding,
         q_stride[1], (is_ragged? q_stride[2] : std::min(q_stride[0], q_stride[2])),
         devPtrKWithoutPadding,
@@ -1117,7 +1117,7 @@ void fused_attn_ck_bwd_impl(
       ck_attn_varlen_bwd(
         nvte_to_ck_dtype(dtype),
         b, h, hg, s_q, s_kv, d_qk, d_v,
-        max_tokens_q,
+        max_tokens_q, max_tokens_kv,
         devPtrQ,
         q_stride[1], q_stride[2],
         devPtrK,
