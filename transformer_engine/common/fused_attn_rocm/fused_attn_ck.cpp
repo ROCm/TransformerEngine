@@ -1014,15 +1014,16 @@ void fused_attn_ck_bwd_impl(
   bool nvte_ck_uses_bwd_v3 = getenv<int>("NVTE_CK_USES_BWD_V3", 0);
   bool nvte_ck_is_v3_atomic_fp32 = getenv<int>("NVTE_CK_IS_V3_ATOMIC_FP32", 1);
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
-  if (pad_between_seqs || is_ragged){
-    // TODO: Enable bwd v3 for MI350 after numerical issues are fixed.
-    const std::string sm_arch_name_ = cuda::sm_arch_name(cuda::current_device());
-    nvte_ck_uses_bwd_v3 = nvte_ck_uses_bwd_v3 and (sm_arch_name_.find("gfx950")==std::string::npos);
+  // TODO: Enable bwd v3 for gfx950 after numerical issues are fixed.
+  if (nvte_ck_uses_bwd_v3 && (pad_between_seqs || is_ragged)){
+    const int gpu_arch = cuda::sm_arch(cuda::current_device());
+    const bool is_gfx95x = gpu_arch == 95;
     if(nvte_log_ck_config){
-      if(getenv<int>("NVTE_CK_USES_BWD_V3", 0) and (sm_arch_name_.find("gfx950")!=std::string::npos)){
+      if(nvte_ck_uses_bwd_v3 and is_gfx95x){
         std::cout<<"Disabling CK BWD v3 because of numerical issues in gfx950 arch while using varlen backend"<<std::endl;
       }
     }
+    nvte_ck_uses_bwd_v3 = nvte_ck_uses_bwd_v3 and !is_gfx95x;
   }
   if (nvte_log_ck_config) {
     std::cout<<std::endl<<"attn_bwd(ck): ";
