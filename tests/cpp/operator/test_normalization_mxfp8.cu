@@ -53,7 +53,8 @@ void dequantize_1x_kernel(InputType* input_ptr, ScaleType* scale_ptr, OutputType
   const size_t blocks_per_tile_Y = tile_size_Y / block_size_Y;
   const size_t blocks_per_tile_X = tile_size_X / block_size_X;
 #ifdef __HIP_PLATFORM_AMD__
-    const auto [_, __, ___, blocks_per_row] = get_scale_tensor_dims(rows, cols, scaling_mode_x, scaling_mode_y);
+    const auto scale_dims = get_scale_tensor_dims(rows, cols, scaling_mode_x, scaling_mode_y);
+    const size_t blocks_per_row = std::get<3>(scale_dims);
 #else
   const size_t blocks_per_row = (cols + block_size_X - 1) / block_size_X;
 #endif
