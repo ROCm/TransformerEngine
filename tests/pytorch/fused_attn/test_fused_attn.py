@@ -315,8 +315,9 @@ def test_dot_product_mem_calc(workspace_opt):
 @pytest.mark.parametrize("qkv_layout", [None])
 @pytest.mark.parametrize("swa", [False])
 @pytest.mark.parametrize("pad_between_seqs", [False])
+@pytest.mark.parametrize("share_cu_seqlens_ref", [False])
 def test_dot_product_attention(
-    dtype, model_configs, model, ckpt_attn, workspace_opt, qkv_layout, swa, pad_between_seqs, share_cu_seqlens_ref=False
+    dtype, model_configs, model, ckpt_attn, workspace_opt, qkv_layout, swa, pad_between_seqs, share_cu_seqlens_ref
 ):
     """Test DotProductAttention module"""
 
@@ -466,7 +467,7 @@ def test_dot_product_attention(
 @pytest.mark.parametrize("model", ["base_1_1", "base_2_1"])
 def test_dpa_checkpoint(dtype, model_configs, model):
     """Test DotProductAttention module with checkpointing"""
-    test_dot_product_attention(dtype, model_configs, model, True, True, None, False, False)
+    test_dot_product_attention(dtype, model_configs, model, True, True, None, False, False, False)
 
 
 model_configs_mla = {
@@ -498,7 +499,7 @@ model_configs_mla = {
 @pytest.mark.parametrize("model", model_configs_mla.keys())
 def test_dpa_mla(dtype, model_configs, model):
     """Test DotProductAttention module with Multi-Latent Attention (MLA)"""
-    test_dot_product_attention(dtype, model_configs, model, True, True, None, False, False)
+    test_dot_product_attention(dtype, model_configs, model, True, True, None, False, False, False)
 
 
 model_configs_mask = {
@@ -547,7 +548,7 @@ model_configs_mask = {
 @pytest.mark.parametrize("model", model_configs_mask.keys())
 def test_dpa_mask(dtype, model_configs, model):
     """Test DotProductAttention module with different mask types"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False, False)
 
 
 model_configs_bias = {
@@ -599,7 +600,7 @@ model_configs_bias = {
 @pytest.mark.parametrize("model", model_configs_bias.keys())
 def test_dpa_bias(dtype, model_configs, model):
     """Test DotProductAttention module with different bias types"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False, False)
 
 
 model_configs_bias_shapes = {
@@ -641,7 +642,7 @@ model_configs_bias_shapes = {
 @pytest.mark.parametrize("model", model_configs_bias_shapes.keys())
 def test_dpa_bias_shapes(dtype, model_configs, model):
     """Test DotProductAttention module with different bias types and shapes"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False, False)
 
 
 model_configs_swa = {
@@ -679,7 +680,7 @@ model_configs_swa = {
 @pytest.mark.parametrize("model", model_configs_swa.keys())
 def test_dpa_sliding_window(dtype, model_configs, model):
     """Test DotProductAttention module with sliding window attention"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, True, False)
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, True, False, False)
 
 
 model_configs_alibi_slopes = {
@@ -701,7 +702,7 @@ model_configs_alibi_slopes = {
 @pytest.mark.parametrize("model", model_configs_alibi_slopes.keys())
 def test_dpa_alibi_slopes(dtype, model_configs, model):
     """Test DotProductAttention module with ALiBi slopes"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False, False)
 
 
 qkv_layouts = [
@@ -740,7 +741,7 @@ model_configs_layout = {
 @pytest.mark.parametrize("qkv_layout", qkv_layouts)
 def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with different QKV layouts"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False, False)
+    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False, False, False)
 
 
 qkv_layouts_thd = ["t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"]
