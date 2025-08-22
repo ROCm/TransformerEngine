@@ -24,7 +24,7 @@ from transformer_engine.pytorch.triton_kernels.layernorm import (
     te_layernorm_bwd_triton,
     te_layernorm_fwd_triton,
 )
-from .test_common import dtype_tols, compare_results, str_to_torch_dtype, fill_uniform
+from test_common import dtype_tols, compare_results, str_to_torch_dtype, fill_uniform
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
