@@ -77,13 +77,6 @@ bool is_aotriton_backend_supported(
     return false;
   }
 
-  const int device_id = cuda::current_device();
-  const std::string sm_arch_name_ = cuda::sm_arch_name(device_id);
-  //only MI250 or MI300X supported
-  if(!((sm_arch_name_.find("gfx942")!=std::string::npos) || (sm_arch_name_.find("gfx90a")!=std::string::npos))){
-    return false;
-  }
-  
   // Q and KV must have the same data type, in fp16 or bf16
   if((q_dtype!=kv_dtype) || !((q_dtype==NVTEDType::kNVTEFloat16) || (q_dtype == NVTEDType::kNVTEBFloat16))){
     return false;
