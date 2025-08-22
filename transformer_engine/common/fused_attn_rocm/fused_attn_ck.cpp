@@ -71,18 +71,6 @@ bool is_ck_backend_supported(
     return false;
   }
 
-  const int device_id = cuda::current_device();
-  const int gpu_arch = cuda::sm_arch(device_id);
-  //only gfx94x and gfx95x supported
-  if(gpu_arch != 94 && gpu_arch != 95){
-    if(nvte_log_ck_config){
-      std::cout<<"Only gfx94x and gfx95x are supported"<<std::endl;
-    }
-    return false;
-  }
-
-  // joint filters
-
   // joint filter based on sliding window and attn_mask
   bool is_causal = (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK||
