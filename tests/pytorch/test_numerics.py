@@ -2316,9 +2316,11 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
     if backend == "FlashAttention" and not fa_utils.is_installed:
         pytest.skip("FlashAttention is not installed")
 
-    if IS_HIP_EXTENSION:
-        if is_paged and backend == "FusedAttention":
+    if IS_HIP_EXTENSION and backend == "FusedAttention":
+        if is_paged:
             pytest.skip("FusedAttention does not support KV cache with paging on ROCm")
+        if os.getenv("NVTE_FUSED_ATTN_CK", "1") == "0":
+            pytest.skip("CK FusedAttention backend is disabled")
 
     reset_rng_states()
 
