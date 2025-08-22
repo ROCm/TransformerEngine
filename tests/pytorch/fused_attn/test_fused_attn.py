@@ -315,9 +315,8 @@ def test_dot_product_mem_calc(workspace_opt):
 @pytest.mark.parametrize("qkv_layout", [None])
 @pytest.mark.parametrize("swa", [False])
 @pytest.mark.parametrize("pad_between_seqs", [False])
-@pytest.mark.parametrize("share_cu_seqlens_ref", [False])
 def test_dot_product_attention(
-    dtype, model_configs, model, ckpt_attn, workspace_opt, qkv_layout, swa, pad_between_seqs, share_cu_seqlens_ref
+    dtype, model_configs, model, ckpt_attn, workspace_opt, qkv_layout, swa, pad_between_seqs, share_cu_seqlens_ref=False
 ):
     """Test DotProductAttention module"""
 
