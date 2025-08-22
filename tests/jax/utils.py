@@ -45,6 +45,8 @@ def is_devices_enough(required):
     """
     Check if the available GPUs is enough
     """
+    if required>4:
+        return False
     return len(jax.devices()) >= required
 
 
