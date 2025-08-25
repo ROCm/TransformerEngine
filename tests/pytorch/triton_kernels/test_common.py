@@ -80,7 +80,7 @@ def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
 #     t: actual tensor
 #     r: expected tensor
 # NOTE: DO NOT upcast inputs to fp32 if you are using te_compare for any precision other than fp32
-def te_compare_results(t, r, atol, rtol, msg):
+def te_compare_results(t, r, atol, rtol, msg, use_torch_semantics=False):
     assert t.dtype == r.dtype, f"Tensor dtypes don't match: {t.dtype} vs {r.dtype}."
     assert t.shape == r.shape, f"Tensor shapes don't match: {t.shape} vs {r.shape}."
     assert atol > 0, "Absolute tolerance must be positive."
@@ -89,23 +89,20 @@ def te_compare_results(t, r, atol, rtol, msg):
     t = t.cpu().to(torch.float32).to(torch.float64)
     r = r.cpu().to(torch.float32).to(torch.float64)
     diff = t - r
-    atol_mismatch = torch.abs(diff) > atol
-    nonzero_r = r != 0
-    rel_diff = torch.where(nonzero_r, torch.abs(diff / r), torch.zeros_like(diff))
-    rtol_mismatch = torch.where(nonzero_r, rel_diff > rtol, torch.full_like(atol_mismatch, False))
-    mismatch = atol_mismatch & (~nonzero_r | rtol_mismatch)
+    if use_torch_semantics:
+        mismatch = torch.abs(diff) > atol + rtol * torch.abs(r)
+    else:
+        atol_mismatch = torch.abs(diff) > atol
+        nonzero_r = r != 0
+        rel_diff = torch.where(nonzero_r, torch.abs(diff / r), torch.zeros_like(diff))
+        rtol_mismatch = torch.where(nonzero_r, rel_diff > rtol, torch.full_like(atol_mismatch, False))
+        mismatch = atol_mismatch & (~nonzero_r | rtol_mismatch)
     has_mismatch = torch.any(mismatch).item()
 
     max_rel_diff = 0.0 # Default to 0.0 if no non-zero reference values
     max_abs_diff = 0.0 
     max_abs_diff_indices = None
     max_rel_diff_indices = None
-    
-    if has_mismatch:
-        max_abs_diff = torch.max(torch.abs(diff)).item()
-        max_rel_diff = torch.max(rel_diff).item()
-        max_rel_diff_indices = torch.unravel_index(torch.argmax(rel_diff), rel_diff.shape)
-        max_abs_diff_indices = torch.unravel_index(torch.argmax(torch.abs(diff)), diff.shape)
 
     # for fp32 the floating point comparison is enough to error out
     if has_mismatch and dtype != torch.float32:
@@ -129,7 +126,15 @@ def te_compare_results(t, r, atol, rtol, msg):
         round_check = ~((cast_mean_m == min_tr) & (cast_mean_p == max_tr))
         mismatch = mismatch & round_check
         has_mismatch = torch.any(mismatch).item()
+
     if has_mismatch:
+        abs_diff = torch.where(mismatch, torch.abs(diff), 0)
+        rel_diff = torch.where(mismatch, rel_diff, 0)
+        max_abs_diff = torch.max(abs_diff).item()
+        max_rel_diff = torch.max(rel_diff).item()
+        max_rel_diff_indices = torch.unravel_index(torch.argmax(rel_diff), rel_diff.shape)
+        max_abs_diff_indices = torch.unravel_index(torch.argmax(abs_diff), diff.shape)
+
         num_mismatched_elements = torch.sum(mismatch).item()
         total_elements = t.numel() 
         base_msg = (
@@ -157,12 +162,12 @@ def te_compare_results(t, r, atol, rtol, msg):
 
 
 # Call PyTorch tensor comparison function or TE tensor comparison function.
-def compare_results(provider, actual, expected, atol, rtol, msg):
+def compare_results(provider, actual, expected, atol, rtol, msg, use_torch_semantics=False):
     assert provider in {"torch", "te"}
     if provider == "torch":
         torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol, msg=msg)
     else:
-        te_compare_results(actual, expected, atol, rtol, msg)
+        te_compare_results(actual, expected, atol, rtol, msg, use_torch_semantics)
 
 
 
