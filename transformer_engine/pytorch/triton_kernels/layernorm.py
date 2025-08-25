@@ -68,6 +68,9 @@ def _layernorm_fwd_triton(
     MAKE_TRANSPOSE: tl.constexpr
 ):
 
+    # Enable the transpose cache only in FP8 mode.
+    tl.static_assert(not MAKE_TRANSPOSE or IS_FP8, msg="Transpose cache requires fp8 data type.")
+
     # program id
     pid = tl.program_id(0)
     num_tiles = tl.num_programs(0)
@@ -143,10 +146,11 @@ def _layernorm_fwd_triton(
                 amax = amax_temp if amax_temp > amax else amax
                 y_block = y_block * scale
                 y_block = tl.clamp(y_block, -FP8_MAX, FP8_MAX)
-            tl.store(y_ptr_start + cols, y_block.to(y_ptr.type.element_ty))
+            y_block = y_block.to(y_ptr.type.element_ty)
+            tl.store(y_ptr_start + cols, y_block)
             if MAKE_TRANSPOSE:
                 output_t_ptrs = out_transpose_ptr + cols * out_transpose_stride + row_idx
-                tl.store(output_t_ptrs, y_block.to(y_ptr.type.element_ty))
+                tl.store(output_t_ptrs, y_block)
 
         # For last iteration, do masked load and store
         cols = n_cols_blks * BLOCK_SIZE + col_offsets
@@ -163,10 +167,11 @@ def _layernorm_fwd_triton(
             amax = amax_temp if amax_temp > amax else amax
             y_block = y_block * scale
             y_block = tl.clamp(y_block, -FP8_MAX, FP8_MAX)
-        tl.store(y_ptr_start + cols, y_block.to(y_ptr.type.element_ty), mask=mask)
+        y_block = y_block.to(y_ptr.type.element_ty)
+        tl.store(y_ptr_start + cols, y_block, mask=mask)
         if MAKE_TRANSPOSE:
             output_t_ptrs = out_transpose_ptr + cols * out_transpose_stride + row_idx
-            tl.store(output_t_ptrs, y_block.to(y_ptr.type.element_ty), mask=mask)
+            tl.store(output_t_ptrs, y_block, mask=mask)
 
     if IS_FP8:
         if APPLY_ATOMIC:
@@ -504,7 +509,10 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
 
     max_fused_size = 16384 // input.element_size()
     BLOCK_SIZE = min(max_fused_size, triton.next_power_of_2(N))
-    
+
+    out_transpose_ptr = None
+    out_transpose_stride = None
+
     # Create necessary values for fp8 if needed
     if IS_FP8:
         scale = quantizer.scale
@@ -512,23 +520,18 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
         scale_inv = ln_out._scale_inv
         cast_out = ln_out._data
         MAKE_TRANSPOSE = quantizer.columnwise_usage
-        tl_dtype = te_dtype_to_triton_dtype(quantizer.dtype)
         if MAKE_TRANSPOSE:
+            tl_dtype = te_dtype_to_triton_dtype(quantizer.dtype)
             if ln_out._transpose_invalid:
                 ln_out._transpose = torch.empty((ln_out._data.shape[1], ln_out._data.shape[0]), dtype=ln_out._data.dtype, device=device)
                 ln_out._transpose_invalid = False
             out_transpose_ptr = triton.reinterpret(ln_out._transpose, tl_dtype)
             out_transpose_stride = ln_out._transpose.stride(0)
-        else:
-            out_transpose_ptr = None
-            out_transpose_stride = None
     else:
         scale = None
         amax_out = None
         scale_inv = None
         cast_out = ln_out
-        out_transpose_ptr = None
-        out_transpose_stride = None
     
     _layernorm_fwd_triton[(M,)](
         input,

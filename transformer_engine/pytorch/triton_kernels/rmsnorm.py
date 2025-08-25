@@ -48,6 +48,10 @@ def _rmsnorm_fwd_triton(
     FP8_MAX: tl.constexpr,
     MAKE_TRANSPOSE: tl.constexpr,
 ):
+
+    # Enable the transpose cache only in FP8 mode.
+    tl.static_assert(not MAKE_TRANSPOSE or IS_FP8, msg="Transpose cache requires fp8 data type.")
+
     row_start = tl.program_id(0)
     col_offsets = tl.arange(0, BLOCK_SIZE)
     # as older version Triton doesn't support tl.assume and BUFF OPS, comment out for now
