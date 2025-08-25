@@ -1,9 +1,14 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 from typing import Tuple
 import torch
+
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
 
 
 def scale_from_amax_tensor(
@@ -44,8 +49,22 @@ def scale_from_amax_tensor(
         exp = exp - 1
         # No subnormals and zero.
         assert (exp > -127).all()
-        unity = torch.tensor([1.0], device=exp.device)
-        torch.ldexp(unity, exp, out=scale)
+        if IS_HIP_EXTENSION:
+            # NOTE: On ROCm/HIP the device-side implementation of torch.ldexp starts to lose
+            # precision once the exponent exceeds 15, so the result is no
+            # longer an exact power-of-two.  The current-scaling tests require an
+            # exact 2^N value when pow_2_scales=true, so for HIP we perform the ldexp on the CPU
+            # and copy the perfectly rounded value back to the original device.
+            # TODO: Remove this once the issue is fixed.
+            host = exp.device
+            scale_cpu = scale.to(device='cpu')
+            exp_cpu = exp.to(device='cpu')
+            unity = torch.tensor([1.0], device='cpu')
+            torch.ldexp(unity, exp_cpu, out=scale_cpu)
+            scale = scale_cpu.to(device=host)
+        else:
+            unity = torch.tensor([1.0], device=exp.device)
+            torch.ldexp(unity, exp, out=scale)
         # Case where amax is inf. The frexp, ldexp logic changes 0.0 scales
         # Return 0.0 for 0.0 scale for consistency with non-pow2 scale
         # calculation.

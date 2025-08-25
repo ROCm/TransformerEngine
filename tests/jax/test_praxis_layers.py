@@ -36,7 +36,7 @@ from transformer_engine.jax.praxis import RelativePositionBiases, TransformerEng
 from transformer_engine.jax.praxis import TransformerLayer, TransformerLayerType
 from transformer_engine.jax.softmax import SoftmaxType
 
-from transformer_engine.jax import is_hip_extension
+from transformer_engine.jax.cpp_extensions.misc import is_hip_extension
 
 is_fp8_supported, reason = is_fp8_available()
 

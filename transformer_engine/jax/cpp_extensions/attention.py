@@ -16,15 +16,10 @@ import jax
 import jax.numpy as jnp
 from jax import dtypes, lax
 from jax.sharding import PartitionSpec, NamedSharding
-<<<<<<< HEAD
-from transformer_engine import transformer_engine_jax
-from  transformer_engine.transformer_engine_jax import NVTE_Fused_Attn_Backend
-=======
 from jax.experimental.custom_partitioning import SdyShardingRule
 
 import transformer_engine_jax
 from transformer_engine_jax import NVTE_Fused_Attn_Backend
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
@@ -118,8 +113,7 @@ class FusedAttnHelper:
     kv_num_heads: int
     q_max_seqlen: int
     kv_max_seqlen: int
-    head_dim_qk: int
-    head_dim_v: int
+    head_dim: int
     window_size: Tuple[int, int]
 
     def is_fused_attn_kernel_available(self):
@@ -139,8 +133,7 @@ class FusedAttnHelper:
             self.kv_num_heads,
             self.q_max_seqlen,
             self.kv_max_seqlen,
-            self.head_dim_qk,
-            self.head_dim_v,
+            self.head_dim,
             self.window_size[0],
             self.window_size[1],
         )
@@ -160,49 +153,23 @@ class FusedAttnHelper:
             kv_batch_shape = q_batch_shape
             kv_max_seqlen = q_max_seqlen
             num_gqa_groups = attn_heads
-            v_head_dim = q_head_dim
+            kv_head_dim = q_head_dim
             assert nqkv == 3
         elif qkv_layout.is_kvpacked():
             *q_batch_shape, q_max_seqlen, attn_heads, q_head_dim = q_aval.shape
-            *kv_batch_shape, kv_max_seqlen, nkv, num_gqa_groups, v_head_dim = k_aval.shape
-            assert q_batch_shape == kv_batch_shape
-            assert q_head_dim == v_head_dim
+            *kv_batch_shape, kv_max_seqlen, nkv, num_gqa_groups, kv_head_dim = k_aval.shape
             assert nkv == 2
         elif qkv_layout.is_separate():
             *q_batch_shape, q_max_seqlen, attn_heads, q_head_dim = q_aval.shape
-            *k_batch_shape, k_max_seqlen, k_num_gqa_groups, k_head_dim = k_aval.shape
-            *v_batch_shape, v_max_seqlen, v_num_gqa_groups, v_head_dim = v_aval.shape
-            assert (
-                q_head_dim == k_head_dim
-            ), f"Mismatched q_head_dim: {q_head_dim} and k_head_dim: {k_head_dim}"
-            assert (
-                k_max_seqlen == v_max_seqlen
-            ), f"Mismatched k_max_seqlen: {k_max_seqlen} and v_max_seqlen: {v_max_seqlen}"
-            kv_max_seqlen = k_max_seqlen
-            assert q_batch_shape == k_batch_shape == v_batch_shape, (
-                f"Mismatched qkv batch size for q_batch_shape: {q_batch_shape}, k_batch_shape:"
-                f" {k_batch_shape} and v_batch_shape: {v_batch_shape}"
-            )
-            assert k_num_gqa_groups == v_num_gqa_groups, (
-                f"Mismatched k_num_gqa_groups: {k_num_gqa_groups} and v_num_gqa_groups:"
-                f" {v_num_gqa_groups}"
-            )
-            num_gqa_groups = k_num_gqa_groups
+            *kv_batch_shape, kv_max_seqlen, num_gqa_groups, kv_head_dim = k_aval.shape
+            assert k_aval.shape == v_aval.shape, f"{k_aval.shape=} {v_aval.shape=}"
         else:
             raise ValueError(f"Unexpected {qkv_layout=}")
-        assert q_aval.dtype == k_aval.dtype == v_aval.dtype, (
-            f"Mismatched data types for q_aval: {q_aval.dtype}, k_aval: {k_aval.dtype}, v_aval:"
-            f" {v_aval.dtype}"
-        )
-        return (
-            q_batch_shape,
-            q_max_seqlen,
-            kv_max_seqlen,
-            attn_heads,
-            num_gqa_groups,
-            q_head_dim,
-            v_head_dim,
-        )
+        assert q_batch_shape == kv_batch_shape
+        assert q_head_dim == kv_head_dim
+        assert q_aval.dtype == k_aval.dtype == v_aval.dtype
+
+        return (q_batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, q_head_dim)
 
 @dataclass(frozen=True)
 class _FusedAttnRNGStateChecker:
@@ -305,11 +272,10 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             kv_max_seqlen,
             attn_heads,
             num_gqa_groups,
-            q_head_dim,
-            v_head_dim,
+            head_dim,
         ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
 
-        output_shape = (*batch_shape, q_max_seqlen, attn_heads, v_head_dim)
+        output_shape = (*batch_shape, q_max_seqlen, attn_heads, head_dim)
         out_aval = q_aval.update(shape=output_shape, dtype=q_dtype)
 
         # backend determines the softmax buffer shape/dtype
@@ -324,8 +290,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             num_gqa_groups,
             q_max_seqlen,
             kv_max_seqlen,
-            q_head_dim,
-            v_head_dim,
+            head_dim,
             config.window_size,
         ).get_fused_attn_backend()
 
@@ -386,8 +351,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             attn_heads,
             num_gqa_groups,
             bias_heads,
-            q_head_dim,
-            v_head_dim,
+            head_dim,
             config.scaling_factor,
             config.dropout_probability,
             config.attn_bias_type.value,
@@ -445,8 +409,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             kv_max_seqlen,
             attn_heads,
             num_gqa_groups,
-            q_head_dim,
-            v_head_dim,
+            head_dim,
         ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
 
         input_batch = reduce(operator.mul, batch_shape)
@@ -457,94 +420,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
-<<<<<<< HEAD
-        if is_ffi_enabled():
-            name = "te_fused_attn_forward_ffi"
-            out = ffi.ffi_lowering(name)(
-                ctx,
-                q,
-                k,
-                v,
-                bias,
-                seed,
-                q_cu_seqlen,
-                kv_cu_seqlen,
-                q_seq_offsets,
-                k_seq_offsets,
-                _q_segment_ids,
-                _kv_segment_ids,
-                _q_segment_pos,
-                _kv_segment_pos,  # ffi_lowering needs number of parameters meets primitive.lowering
-                input_batch=input_batch,
-                bias_batch=bias_batch,
-                q_max_seqlen=q_max_seqlen,
-                kv_max_seqlen=kv_max_seqlen,
-                attn_heads=attn_heads,
-                num_gqa_groups=num_gqa_groups,
-                bias_heads=bias_heads,
-                qk_head_dim=q_head_dim,
-                v_head_dim=v_head_dim,
-                max_segments_per_seq=config.max_segments_per_seq,
-                scaling_factor=float(config.scaling_factor),
-                dropout_probability=float(config.dropout_probability),
-                bias_type=int(config.attn_bias_type.value),
-                mask_type=int(config.attn_mask_type.value),
-                qkv_layout=int(config.qkv_layout.value),
-                is_training=config.is_training,
-                deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
-                window_size_left=config.window_size[0],
-                window_size_right=config.window_size[1],
-            )
-        else:
-            operands = [
-                q,
-                k,
-                v,
-                bias,
-                seed,
-                q_cu_seqlen,
-                kv_cu_seqlen,
-                q_seq_offsets,
-                k_seq_offsets,
-            ]
-            operand_shapes = map(lambda x: x.type.shape, operands)
-            out_types = [
-                ir.RankedTensorType.get(output.shape, mlir.dtype_to_ir_type(output.dtype))
-                for output in ctx.avals_out
-            ]
-            args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-
-            wkspace_aval = ctx.avals_out[-1]
-
-            opaque = transformer_engine_jax.pack_fused_attn_descriptor(
-                input_batch,
-                bias_batch,
-                q_max_seqlen,
-                kv_max_seqlen,
-                attn_heads,
-                num_gqa_groups,
-                bias_heads,
-                q_head_dim,
-                v_head_dim,
-                config.max_segments_per_seq,
-                wkspace_aval.size,
-                config.scaling_factor,
-                config.dropout_probability,
-                config.attn_bias_type,
-                config.attn_mask_type,
-                config.qkv_layout,
-                jax_dtype_to_te_dtype(q_aval.dtype),
-                jax_dtype_to_te_dtype(wkspace_aval.dtype),
-                config.is_training,
-                not FusedAttnHelper.is_non_deterministic_allowed(),
-                config.window_size[0],
-                config.window_size[1],
-            )
-
-            out = custom_caller(FusedAttnFwdPrimitive.name, args, opaque, has_side_effect=False)
-
-        return out
-=======
         return ffi.ffi_lowering(FusedAttnFwdPrimitive.name)(
             ctx,
             q,
@@ -579,7 +454,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             window_size_left=config.window_size[0],
             window_size_right=config.window_size[1],
         )
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
     @staticmethod
     def impl(
@@ -852,8 +726,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             kv_max_seqlen,
             attn_heads,
             num_gqa_groups,
-            qk_head_dim,
-            v_head_dim,
+            head_dim,
         ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
         
 
@@ -874,8 +747,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             attn_heads,
             num_gqa_groups,
             bias_heads,
-            qk_head_dim,
-            v_head_dim,
+            head_dim,
             config.scaling_factor,
             config.dropout_probability,
             config.attn_bias_type.value,
@@ -940,8 +812,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             kv_max_seqlen,
             attn_heads,
             num_gqa_groups,
-            qk_head_dim,
-            v_head_dim,
+            head_dim,
         ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
 
         input_batch = reduce(operator.mul, batch_shape)
@@ -952,100 +823,6 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
-<<<<<<< HEAD
-        if is_ffi_enabled():
-            name = "te_fused_attn_backward_ffi"
-            out = ffi.ffi_lowering(name)(
-                ctx,
-                q,
-                k,
-                v,
-                bias,
-                softmax_aux,
-                rng_state,
-                output,
-                doutput,
-                q_cu_seqlen,
-                kv_cu_seqlen,
-                q_seq_offsets,
-                k_seq_offsets,
-                q_segment_ids,
-                kv_segment_ids,
-                q_segment_pos,
-                kv_segment_pos,  # ffi_lowering needs number of parameters meets primitive.lowering
-                input_batch=input_batch,
-                bias_batch=bias_batch,
-                q_max_seqlen=q_max_seqlen,
-                kv_max_seqlen=kv_max_seqlen,
-                attn_heads=attn_heads,
-                num_gqa_groups=num_gqa_groups,
-                bias_heads=bias_heads,
-                qk_head_dim=qk_head_dim,
-                v_head_dim=v_head_dim,
-                max_segments_per_seq=config.max_segments_per_seq,
-                scaling_factor=float(config.scaling_factor),
-                dropout_probability=float(config.dropout_probability),
-                bias_type=int(config.attn_bias_type.value),
-                mask_type=int(config.attn_mask_type.value),
-                qkv_layout=int(config.qkv_layout.value),
-                is_training=config.is_training,
-                deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
-                window_size_left=config.window_size[0],
-                window_size_right=config.window_size[1],
-            )
-        else:
-            operands = [
-                q,
-                k,
-                v,
-                bias,
-                softmax_aux,
-                rng_state,
-                output,
-                doutput,
-                q_cu_seqlen,
-                kv_cu_seqlen,
-                q_seq_offsets,
-                k_seq_offsets,
-            ]
-            operand_shapes = map(lambda x: x.type.shape, operands)
-            out_types = [
-                ir.RankedTensorType.get(output.shape, mlir.dtype_to_ir_type(output.dtype))
-                for output in ctx.avals_out
-            ]
-            args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-
-            wkspace_aval = ctx.avals_out[-1]
-
-            opaque = transformer_engine_jax.pack_fused_attn_descriptor(
-                input_batch,
-                bias_batch,
-                q_max_seqlen,
-                kv_max_seqlen,
-                attn_heads,
-                num_gqa_groups,
-                bias_heads,
-                qk_head_dim,
-                v_head_dim,
-                config.max_segments_per_seq,
-                wkspace_aval.size,
-                config.scaling_factor,
-                config.dropout_probability,
-                config.attn_bias_type,
-                config.attn_mask_type,
-                config.qkv_layout,
-                jax_dtype_to_te_dtype(q_aval.dtype),
-                jax_dtype_to_te_dtype(wkspace_aval.dtype),
-                config.is_training,
-                not FusedAttnHelper.is_non_deterministic_allowed(),
-                config.window_size[0],
-                config.window_size[1],
-            )
-
-            out = custom_caller(FusedAttnBwdPrimitive.name, args, opaque, has_side_effect=False)
-
-        return out
-=======
         return ffi.ffi_lowering(FusedAttnBwdPrimitive.name)(
             ctx,
             q,
@@ -1083,7 +860,6 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             window_size_left=config.window_size[0],
             window_size_right=config.window_size[1],
         )
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
     @staticmethod
     def impl(

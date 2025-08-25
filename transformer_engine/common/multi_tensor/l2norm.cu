@@ -57,7 +57,12 @@ reduce_block_into_lanes(T *x, T val, int lanes = 1,
       // __SYNCWARP();
 
 #pragma unroll
-    for (int i = 16; i >= lanes; i >>= 1) final = final + __shfl_down_sync(0xffffffff, final, i);
+    for (int i = 16; i >= lanes; i >>= 1) 
+#ifdef __HIP_PLATFORM_AMD__
+    final = final + __shfl_down(final, i, THREADS_PER_WARP);
+#else
+    final = final + __shfl_down_sync(0xffffffff, final, i);
+#endif
   }
 
   if (share_result) {
@@ -99,7 +104,11 @@ reduce_block_into_lanes_max_op(T *x, T val, int lanes = 1,
 
 #pragma unroll
     for (int i = 16; i >= lanes; i >>= 1)
+#ifdef __HIP_PLATFORM_AMD__
+      final = fmaxf(fabsf(final), fabsf(__shfl_down(final, i, THREADS_PER_WARP)));
+#else
       final = fmaxf(fabsf(final), fabsf(__shfl_down_sync(0xffffffff, final, i)));
+#endif
   }
 
   if (share_result) {

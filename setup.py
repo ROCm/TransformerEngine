@@ -82,21 +82,14 @@ def setup_common_extension() -> CMakeExtension:
             ), "MPI_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
             cmake_flags.append("-DNVTE_UB_WITH_MPI=ON")
 
-<<<<<<< HEAD
+        if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))):
+            assert (
+                os.getenv("NVSHMEM_HOME") is not None
+            ), "NVSHMEM_HOME must be set when compiling with NVTE_ENABLE_NVSHMEM=1"
+            cmake_flags.append("-DNVTE_ENABLE_NVSHMEM=ON")
+
         if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
             cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
-
-        cmake_flags.append("-DUSE_ROCM=OFF")
-=======
-    if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))):
-        assert (
-            os.getenv("NVSHMEM_HOME") is not None
-        ), "NVSHMEM_HOME must be set when compiling with NVTE_ENABLE_NVSHMEM=1"
-        cmake_flags.append("-DNVTE_ENABLE_NVSHMEM=ON")
-
-    if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
-        cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
     # Project directory root
     root_path = Path(__file__).resolve().parent
@@ -143,37 +136,26 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     # Framework-specific requirements
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         if "pytorch" in frameworks:
-<<<<<<< HEAD
             if rocm_build():
                 install_reqs.extend(["einops"])
             else:
+                setup_reqs.extend(["torch>=2.1"])
                 install_reqs.extend(["torch>=2.1"])
+                install_reqs.append(
+                    "nvdlfw-inspect @"
+                    " git+https://github.com/NVIDIA/nvidia-dlfw-inspect.git@v0.1#egg=nvdlfw-inspect"
+                )
                 # Blackwell is not supported as of Triton 3.2.0, need custom internal build
                 # install_reqs.append("triton")
-                test_reqs.extend(["numpy", "torchvision", "prettytable", "PyYAML"])
+                test_reqs.extend(["numpy", "torchvision"])
         if "jax" in frameworks:
             if rocm_build():
                 from build_tools.jax import jax_install_requires
                 install_reqs.extend(jax_install_requires(["flax>=0.7.1"]))
             else:
+                setup_reqs.extend(["jax[cuda12]", "flax>=0.7.1"])
                 install_reqs.extend(["jax", "flax>=0.7.1"])
-                # test_reqs.extend(["numpy", "praxis"])
                 test_reqs.extend(["numpy"])
-=======
-            setup_reqs.extend(["torch>=2.1"])
-            install_reqs.extend(["torch>=2.1"])
-            install_reqs.append(
-                "nvdlfw-inspect @"
-                " git+https://github.com/NVIDIA/nvidia-dlfw-inspect.git@v0.1#egg=nvdlfw-inspect"
-            )
-            # Blackwell is not supported as of Triton 3.2.0, need custom internal build
-            # install_reqs.append("triton")
-            test_reqs.extend(["numpy", "torchvision"])
-        if "jax" in frameworks:
-            setup_reqs.extend(["jax[cuda12]", "flax>=0.7.1"])
-            install_reqs.extend(["jax", "flax>=0.7.1"])
-            test_reqs.extend(["numpy"])
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
     return [remove_dups(reqs) for reqs in [setup_reqs, install_reqs, test_reqs]]
 

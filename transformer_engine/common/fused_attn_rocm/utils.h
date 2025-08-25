@@ -36,6 +36,36 @@ void generateMatrixStrides(
 
 size_t nvte_dtype_size(DType t_dtype);
 
+class FusedAttnOffsetManager {
+ public:
+  static FusedAttnOffsetManager &Instance() {
+    static thread_local FusedAttnOffsetManager instance;
+    return instance;
+  }
+
+  size_t GetAndUpdateOffset(size_t increment) {
+    size_t ret = offset_;
+    offset_ += increment;
+    return ret;
+  }
+
+  FusedAttnOffsetManager(FusedAttnOffsetManager const &) = delete;
+  void operator=(FusedAttnOffsetManager const &) = delete;
+
+ private:
+  FusedAttnOffsetManager() {}
+  size_t offset_ = 0;
+};
+
+void PopulateRngStateAsync(void *rng_state_dst, 
+                           const void *const seed,
+                           size_t batch_size, 
+                           size_t num_heads, 
+                           size_t q_max_seqlen, 
+                           size_t kv_max_seqlen,
+                           cudaStream_t stream);
+
+uint32_t GetRuntimeNumSegments(void *cu_seqlen, void *workspace, size_t len, cudaStream_t stream);
 
 }  // namespace fused_attn_rocm
 }  // namespace transformer_engine

@@ -17,11 +17,7 @@
 #endif // __HIP_PLATFORM_AMD__
 #include <nvrtc.h>
 
-<<<<<<< HEAD
-#include <string>
-=======
 #include <iostream>
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 #include <stdexcept>
 
 #include "../util/string.h"

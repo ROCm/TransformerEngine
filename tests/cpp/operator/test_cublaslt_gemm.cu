@@ -140,28 +140,28 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
   // pytorch tensor storage is row-major while cublas/hipblaslt is column-major
   Tensor A;
   if (transa){
-    A = Tensor("A", { m, k }, atype);
+    A = Tensor("A", std::vector<size_t>{ m, k }, atype);
   }else {
     // hipblaslt path need fp8-gemm with TN layout
     // TODO: support MXFP8 scaling
-    A = Tensor("A", { k, m }, atype, true, isFp8Type(atype));
+    A = Tensor("A", std::vector<size_t>{ k, m }, atype, true, isFp8Type(atype));
   }
   Tensor B;
   if (transb){
     //hipblaslt path need fp8-gemm with TN layout
     // TODO: support MXFP8 scaling
-    B = Tensor("B", { k, n }, btype, true, isFp8Type(btype));
+    B = Tensor("B", std::vector<size_t>{ k, n }, btype, true, isFp8Type(btype));
   }else {
-    B = Tensor("B", { n, k }, btype);
+    B = Tensor("B", std::vector<size_t>{ n, k }, btype);
   }
-  Tensor D("D", { n, m }, dtype);
+  Tensor D("D", std::vector<size_t>{ n, m }, dtype);
   Tensor bias;
   if(use_bias){
-    bias = Tensor("bias", {m}, bias_type);
+    bias = Tensor("bias", std::vector<size_t>{m}, bias_type);
   }
   Tensor pre_gelu_out;
   if(use_gelu){
-    pre_gelu_out = Tensor("pre_gelu_out", { n, m }, gelu_type);
+    pre_gelu_out = Tensor("pre_gelu_out", std::vector<size_t>{ n, m }, gelu_type);
   }
   
   //initialize the data and scale inv of A, B
@@ -214,7 +214,7 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
     workspace_size = 67108864;
   }
 #endif
-  Tensor Workspace("Workspace", { workspace_size }, DType::kByte);
+  Tensor Workspace("Workspace", std::vector<size_t>{ workspace_size }, DType::kByte);
 
   //perform the gemm in GPU
   nvte_cublas_gemm(A.data(),

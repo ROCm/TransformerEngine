@@ -3,7 +3,7 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
-
+#ifndef USE_ROCM
 #include "extensions.h"
 #include "transformer_engine/gemm.h"
 #include "xla/ffi/api/c_api.h"
@@ -21,3 +21,4 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(CublasHandleInitHandler, CublasHandleInitFFI,
                               FFI::Bind<FFI_Prepare>().RemainingArgs().RemainingRets().Attrs());
 }  // namespace jax
 }  // namespace transformer_engine
+#endif

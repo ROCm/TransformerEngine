@@ -54,7 +54,11 @@ void compute_ref_stats(NormType norm_type,
       current = static_cast<compute_t>(data[i * H + j]);
       sum_sq += (current - m) * (current - m);
     }
+#ifdef __HIP_PLATFORM_AMD__
+    rsigma[i] = 1.0f / sqrt((sum_sq / H) + epsilon);
+#else
     rsigma[i] = rsqrtf((sum_sq / H) + epsilon);
+#endif
   }
 }
 

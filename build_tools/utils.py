@@ -166,7 +166,6 @@ def found_pybind11() -> bool:
 
 
 @functools.lru_cache(maxsize=None)
-<<<<<<< HEAD
 def rocm_build() -> bool:
     """
     Determines which build platform to use:
@@ -199,7 +198,7 @@ def rocm_build() -> bool:
             else:
                 raise FileNotFoundError(f"Could not find hipcc at {hipcc_bin}")
         else:
-            cuda_path()
+            nvcc_bin = nvcc_path()
             return False
 
     # Try to detect ROCm
@@ -209,7 +208,7 @@ def rocm_build() -> bool:
 
     # Try to detect CUDA
     try:
-        cuda_path()
+        nvcc_bin = nvcc_path()
         return False
     except FileNotFoundError:
         # If neither ROCm nor CUDA is detected, raise an error
@@ -234,10 +233,7 @@ def rocm_path() -> Tuple[str, str]:
     return rocm_home, hipcc_bin
 
 
-@functools.lru_cache(maxsize=None)
-def cuda_path() -> Tuple[str, str]:
-    """CUDA root path and NVCC binary path as a tuple.
-=======
+
 def cuda_toolkit_include_path() -> Tuple[str, str]:
     """Returns root path for cuda toolkit includes.
 
@@ -262,7 +258,6 @@ def cuda_toolkit_include_path() -> Tuple[str, str]:
 @functools.lru_cache(maxsize=None)
 def nvcc_path() -> Tuple[str, str]:
     """Returns the NVCC binary path.
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
     Throws FileNotFoundError if NVCC is not found."""
     # Try finding NVCC
@@ -296,7 +291,11 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
     if cuda_toolkit_include_path() is not None:
         return [cuda_toolkit_include_path()]
 
-    # Use pip wheels to include all headers.
+    if rocm_build():
+        hip_root, _ = rocm_path()
+        return [hip_root / "include"]
+
+    # Use pip wheels to include all headers.        
     try:
         import nvidia
     except ModuleNotFoundError as e:
@@ -494,7 +493,6 @@ def install_and_import(package):
     main_package = package.split("[")[0]
     subprocess.check_call([sys.executable, "-m", "pip", "install", package])
     globals()[main_package] = importlib.import_module(main_package)
-<<<<<<< HEAD
 
 
 def uninstall_te_wheel_packages():
@@ -557,5 +555,3 @@ def hipify(base_dir, src_dir, sources, include_dirs):
         # *never* absolute paths
         hipified_sources.add(os.path.relpath(fname, cwd))
     return list(hipified_sources)
-=======
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270

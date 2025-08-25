@@ -14,7 +14,7 @@ from distributed_test_base import (
     generate_context_parallel_configs,
     generate_collectives_count,
 )
-from transformer_engine.jax import is_hip_extension
+from transformer_engine.jax.cpp_extensions.misc import is_hip_extension
 from test_fused_attn import FusedAttnRunner, BiasShape, SeqDescFormat
 from transformer_engine.jax.attention import (
     is_fused_attn_kernel_available,
@@ -154,51 +154,12 @@ class TestDistributedSelfAttn:
         attn_mask_type,
         dtype,
     ):
-<<<<<<< HEAD
-        dropout_prob = 0.0
-        is_training = True
-
-        batch, seqlen, num_head, hidden = data_shape
-
-        if not is_fused_attn_kernel_available(
-            dtype,
-            dtype,
-            QKVLayout.BS3HD,
-            attn_bias_type,
-            attn_mask_type,
-            dropout_prob,
-            num_head,
-            num_head,
-            seqlen,
-            seqlen,
-            hidden,
-            hidden,
-            None,  # no window
-        ):
-            pytest.skip(f"No FusedAttn backend found")
-
-        col_ref = self.generate_collectives_count_ref(
-=======
         self.impl_test_self_attn(
             device_count,
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
             mesh_shape,
             mesh_axes,
             mesh_resource,
             data_shape,
-<<<<<<< HEAD
-            dtype,
-        )
-        runner = FusedAttnRunner(
-            batch,
-            seqlen,
-            seqlen,
-            num_head,
-            num_head,
-            hidden,
-            hidden,
-=======
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
             attn_bias_type,
             bias_shape,
             attn_mask_type,
@@ -267,7 +228,6 @@ class TestDistributedCrossAttn:
             seqlen,
             seqlen,
             hidden,
-            hidden,
             None,  # no window
         ):
             pytest.skip("No FusedAttn backend found")
@@ -279,7 +239,6 @@ class TestDistributedCrossAttn:
             seqlen,
             num_head,
             num_head,
-            hidden,
             hidden,
             attn_bias_type,
             attn_mask_type,
@@ -335,6 +294,8 @@ class TestDistributedContextParallelSelfAttn:
         use_scan_ring=False,
     ):
         if qkv_layout.is_thd():
+            if is_hip_extension():
+                pytest.skip("THD + ring on Rocm doesn't support context parallelism.")
             if cp_strategy == CPStrategy.ALL_GATHER:
                 pytest.skip("THD doesn't support all gather context parallelism.")
             if not load_balanced and cp_strategy == CPStrategy.RING:
@@ -370,7 +331,6 @@ class TestDistributedContextParallelSelfAttn:
             num_head,
             num_kv_heads,
             hidden,
-            hidden,
             attn_bias_type,
             attn_mask_type,
             dropout_prob,
@@ -400,7 +360,6 @@ class TestDistributedContextParallelSelfAttn:
                 num_kv_heads,
                 seqlen,
                 seqlen,
-                hidden,
                 hidden,
                 None,
             )  # no SWA for CP
@@ -543,22 +502,7 @@ class TestDistributedContextParallelSelfAttn:
         load_balanced,
         use_scan,
     ):
-<<<<<<< HEAD
-        if use_scan:
-            os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "1"
-        else:
-            os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "0"
-
-        if is_hip_extension() and qkv_layout.is_thd():
-            pytest.skip("THD + ring on Rocm doesn't support context parallelism.")
-
-        if qkv_layout.is_thd() and not load_balanced:
-            pytest.skip("THD + ring doesn't support unbalanced context parallelism.")
-
-        return self.impl_test_context_parallel_attn(
-=======
         self.impl_test_context_parallel_attn(
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
             device_count,
             mesh_shape,
             mesh_axes,

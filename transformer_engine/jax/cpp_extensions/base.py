@@ -16,9 +16,7 @@ from jax.experimental.custom_partitioning import custom_partitioning
 from jax._src.interpreters import batching
 from jax._src import dispatch
 
-<<<<<<< HEAD
 from .misc import is_hip_extension
-=======
 import jax
 import transformer_engine_jax
 
@@ -26,7 +24,6 @@ if version.parse(jax.__version__) >= version.parse("0.5.0"):
     from jax import ffi  # pylint: disable=ungrouped-imports
 else:
     from jax.extend import ffi  # pylint: disable=ungrouped-imports
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
 
 class BasePrimitive(metaclass=ABCMeta):
@@ -149,4 +146,4 @@ def register_primitive(cls):
 
 
 for _name, _value in transformer_engine_jax.registrations().items():
-    ffi.register_ffi_target(_name, _value, platform="CUDA")
+    ffi.register_ffi_target(_name, _value, platform="ROCM" if is_hip_extension else "CUDA")

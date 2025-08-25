@@ -8,7 +8,7 @@ import functools
 import torch
 import warnings
 
-from ..utils import non_tn_fp8_gemm_supported
+from ..utils import is_non_tn_fp8_gemm_supported
 
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from .cast_transpose import te_cast_transpose_mxfp8_triton, te_cast_transpose_noop_triton, te_dequantize_mxfp8_triton
@@ -29,7 +29,7 @@ def _setup_conditional_transpose_storage(
 
         # Allocate FP8 data transpose if needed
         data_transpose = None
-        create_transpose = quantizer.columnwise_usage and not non_tn_fp8_gemm_supported(); 
+        create_transpose = quantizer.columnwise_usage and not is_non_tn_fp8_gemm_supported(); 
         if quantizer.columnwise_usage and create_transpose:
             if tensor.ndim == 0:
                 # If the original tensor is a scalar, its transpose is also a scalar.

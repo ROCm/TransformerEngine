@@ -9,14 +9,11 @@
 # pylint: disable=wrong-import-position
 
 import functools
-<<<<<<< HEAD
 import sys
 import importlib
 import importlib.util
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from importlib.metadata import version
-=======
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 from packaging.version import Version as PkgVersion
 
 import torch
@@ -30,7 +27,6 @@ def torch_version() -> tuple[int, ...]:
     return PkgVersion(str(torch.__version__)).release
 
 
-<<<<<<< HEAD
 def _load_library():
     """Load shared library with Transformer Engine C extensions"""
     module_name = "transformer_engine_torch"
@@ -80,8 +76,6 @@ def _load_library():
     spec.loader.exec_module(solib)
 
 
-=======
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {torch_version()}."
 
 

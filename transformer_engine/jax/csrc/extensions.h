@@ -42,130 +42,6 @@ namespace transformer_engine {
 namespace jax {
 
 inline bool use_fp8(DType type) { return type == DType::kFloat8E4M3 || type == DType::kFloat8E5M2; }
-<<<<<<< HEAD
-// 2.
-template <typename T>
-pybind11::bytes PackOpaque(const T &descriptor) {
-  auto str = std::string(reinterpret_cast<const char *>(&descriptor), sizeof(T));
-  return pybind11::bytes(str);
-}
-// 3.
-template <typename T>
-const T *UnpackOpaque(const char *opaque, size_t opaque_len) {
-  if (opaque_len != sizeof(T)) {
-    throw std::runtime_error("Invalid opaque object size");
-  }
-  return reinterpret_cast<const T *>(opaque);
-}
-
-// Packing
-
-struct CustomCallCommonDescriptor {
-  Shape shape;
-  DType in_dtype;
-  DType out_dtype;
-  size_t act_enum;
-};
-
-pybind11::bytes PackCustomCallCommonDescriptor(const std::vector<size_t> &shape, DType in_dtype,
-                                               DType out_dtype, size_t act_enum = 0);
-
-struct CustomCallCommonWkDescriptor {
-  Shape shape;
-  Shape wkshape;
-  DType in_dtype;
-  DType out_dtype;
-  DType wk_dtype;
-  size_t act_enum;
-};
-
-pybind11::bytes PackCustomCallCommonWkDescriptor(const std::vector<size_t> &shape,
-                                                 const std::vector<size_t> &wkshape, DType in_dtype,
-                                                 DType out_dtype, DType wk_dtype,
-                                                 size_t act_enum = 0);
-
-struct CustomCallNormDescriptor {
-  size_t batch_size;
-  size_t hidden_size;
-  size_t wkspace_size;
-  DType x_dtype;
-  DType w_dtype;
-  DType wkspace_dtype;
-  bool zero_centered_gamma;
-  float eps;
-  int sm_margin;
-};
-
-pybind11::bytes PackCustomCallNormDescriptor(size_t batch_size, size_t hidden_size,
-                                             size_t wkspace_size, DType x_dtype, DType w_dtype,
-                                             DType wkspace_dtype, bool zero_centered_gamma,
-                                             float eps, int sm_margin);
-
-struct SoftmaxDescriptor {
-  size_t batch_size;
-  size_t padding_size;
-  size_t head_dim;
-  size_t q_seqlen;
-  size_t k_seqlen;
-  DType dtype;
-  float scale_factor;
-};
-
-pybind11::bytes PackCustomCallSoftmaxDescriptor(size_t batch_size, size_t padding_size,
-                                                size_t head_dim, size_t q_seqlen, size_t k_seqlen,
-                                                DType dtype, float scale_factor);
-
-struct CustomCallFusedAttnDescriptor {
-  size_t input_batch;
-  size_t bias_batch;
-  size_t q_max_seqlen;
-  size_t kv_max_seqlen;
-  size_t attn_heads;
-  size_t num_gqa_groups;
-  size_t bias_heads;
-  size_t qk_head_dim;
-  size_t v_head_dim;
-  size_t max_segments_per_seq;
-  size_t wkspace_size;
-  float scaling_factor;
-  float dropout_probability;
-  NVTE_Bias_Type bias_type;
-  NVTE_Mask_Type mask_type;
-  NVTE_QKV_Layout qkv_layout;
-  DType dtype;
-  DType wkspace_dtype;
-  bool is_training;
-  bool deterministic;
-  int64_t window_size_left;
-  int64_t window_size_right;
-};
-
-pybind11::bytes PackCustomCallFusedAttnDescriptor(
-    size_t input_batch, size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen,
-    size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t qk_head_dim, size_t v_head_dim,
-    size_t max_segments_per_seq, size_t wkspace_size, float scaling_factor,
-    float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
-    NVTE_QKV_Layout qkv_layout, DType dtype, DType wkspace_dtype, bool is_training,
-    bool deterministic, int64_t window_size_left, int64_t window_size_right);
-
-// Transpose
-
-void Transpose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
-
-XLA_FFI_DECLARE_HANDLER_SYMBOL(TransposeHandler);
-
-void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
-
-XLA_FFI_DECLARE_HANDLER_SYMBOL(CastTransposeHandler);
-
-pybind11::tuple GetDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
-                                                    DType in_dtype, DType out_dtype);
-
-void DBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
-
-XLA_FFI_DECLARE_HANDLER_SYMBOL(DBiasCastTransposeHandler);
-=======
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
 // Activation
 
@@ -217,36 +93,29 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxForwardHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxBackwardHandler);
 
 // Attention
-<<<<<<< HEAD
-#ifndef USE_ROCM
-// Cudnn helpers
-XLA_FFI_DECLARE_HANDLER_SYMBOL(CudnnHandleInitHandler);
-#endif
-=======
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnForwardHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnBackwardHandler);
 
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 NVTE_Fused_Attn_Backend GetFusedAttnBackend(DType q_dtype, DType kv_dtype,
                                             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
                                             NVTE_Mask_Type mask_type, float dropout_probability,
                                             size_t q_num_heads, size_t kv_num_heads,
                                             size_t q_max_seqlen, size_t kv_max_seqlen,
-                                            size_t qk_head_dim, size_t v_head_dim, 
-                                            int64_t window_size_left, int64_t window_size_right);
+                                            size_t head_dim, int64_t window_size_left, 
+                                            int64_t window_size_right);
 
 pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
-    size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t qk_head_dim,
-    size_t v_head_dim, float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
+    size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t head_dim, 
+    float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, NVTE_QKV_Layout qkv_layout, DType dtype, bool is_training,
     size_t max_segments_per_seq, int64_t window_size_left, int64_t window_size_right);
 
 pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
-    size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t qk_head_dim,
-    size_t v_head_dim, float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
+    size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t head_dim, 
+    float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, NVTE_QKV_Layout qkv_layout, DType dtype, bool is_training,
     bool deterministic, size_t max_segments_per_seq, int64_t window_size_left,
     int64_t window_size_right);

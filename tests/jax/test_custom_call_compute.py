@@ -12,25 +12,6 @@ from jax import jit, value_and_grad
 from functools import reduce
 import operator
 
-<<<<<<< HEAD
-from utils import assert_allclose, assert_tree_like_allclose
-from transformer_engine.jax.dot import type_safe_dot_general, dequantize, quantize
-from transformer_engine.jax.fp8 import FP8MetaPackage, FP8Helper, is_fp8_available, get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
-from transformer_engine.jax.layernorm import layernorm, layernorm_fp8_dot
-from transformer_engine.jax.layernorm_mlp import activation_lu, fused_layernorm_fp8_mlp
-from transformer_engine.jax.cpp_extensions.activation import _jax_act_lu
-from transformer_engine.jax.cpp_extensions.transpose import (
-    _jax_transpose,
-    _jax_cast_transpose,
-    _jax_dbias_cast_transpose,
-)
-from transformer_engine.jax.cpp_extensions.quantization import _jax_cast_fp8
-from transformer_engine.jax import cpp_extensions as tex
-from transformer_engine.jax import is_hip_extension
-
-jnp_float8_e4m3_type = get_jnp_float8_e4m3_type()
-jnp_float8_e5m2_type = get_jnp_float8_e5m2_type()
-=======
 from utils import (
     assert_allclose,
     assert_tree_like_allclose,
@@ -51,6 +32,7 @@ from transformer_engine.jax.cpp_extensions.quantization import (
 )
 from transformer_engine.jax.cpp_extensions.misc import get_cudnn_version
 from transformer_engine.jax import cpp_extensions as tex
+from transformer_engine.jax.cpp_extensions.misc import is_hip_extension
 from transformer_engine.jax.quantize import (
     DelayedScaleQuantizer,
     ScaledTensor,
@@ -63,7 +45,6 @@ from transformer_engine.jax.activation import activation
 from transformer_engine.jax.dense import dense
 from transformer_engine.jax.layernorm_dense import layernorm_dense
 from transformer_engine.jax.quantize import ScaledTensor1x, ScaledTensor2x
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
 GEMM_CASES = [
     (256, 256, 512),
@@ -72,15 +53,8 @@ GEMM_CASES = [
     (2048, 2048, 1024),
     (2048, 1024, 1024),
 ]
-<<<<<<< HEAD
-
-FP8_COMPUTE_TYPE = [jnp_float8_e4m3_type, jnp_float8_e5m2_type]
-    
-LN_CASES = [(512, 1024)]
-=======
 FP8_COMPUTE_TYPE = [jnp.float8_e4m3fn, jnp.float8_e5m2]
 LN_CASES = [(256, 128), (128, 256)]
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 DTYPES = [jnp.bfloat16, jnp.float32]
 is_fp8_supported, reason = helper.is_fp8_available()
 is_mxfp8_supported, reason = helper.is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
@@ -203,21 +177,6 @@ class TestActivation:
         assert_allclose(prim_grad, ref_grad, dtype=x.dtype)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-<<<<<<< HEAD
-    def test_qdq(self):
-        FP8_E4M3_MAX = (jnp.finfo(jnp_float8_e4m3_type).max).astype(jnp.float32)
-
-        x = jnp.asarray([[-1, 0.1], [2, 3]], jnp.float32)
-        amax = jnp.max(jnp.abs(x)).reshape(1)
-        scale = jnp.asarray(FP8_E4M3_MAX / amax, jnp.float32).reshape(1)
-        scale_inv = (1 / scale).reshape(1)
-
-        y, _ = quantize(x, q_dtype=jnp_float8_e4m3_type, scale=scale)
-
-        z = dequantize(y, dq_dtype=jnp.float32, scale_inv=scale_inv)
-
-        assert_allclose(z, x, dtype=jnp_float8_e4m3_type)
-=======
     @pytest_parametrize_wrapper("shape", ALL_ACTIVATION_SHAPES)
     @pytest_parametrize_wrapper("activation_type", ACTIVATION_TYPES)
     @pytest_parametrize_wrapper("output_type", [jnp.float8_e4m3fn, jnp.float8_e5m2])
@@ -241,7 +200,6 @@ class TestActivation:
             q_dtype=output_type,
             q_layout=QuantizeLayout.ROWWISE,
         )
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
         prim_out, (prim_grad,) = value_n_grad_primitive_func(x, activation_type, quantizer)
         ref_out, (ref_grad,) = self.value_n_grad_ref_func(x, activation_type)
@@ -709,11 +667,6 @@ class TestFusedQuantize:
         x = jnp.repeat(x, len(activation_type), axis=-2)
         dz = jax.random.uniform(subkeys[1], input_shape, in_dtype, -1, 1)
 
-<<<<<<< HEAD
-        primitive_out = type_safe_dot_general(a, b)
-        ref_out = jnp.dot(a, b)
-        
-=======
         jax_quantizer, te_quantizer = QuantizerFactory.create(
             n_quantizers=2, q_dtype=out_dtype, scaling_mode=scaling_mode, q_layout=q_layout
         )
@@ -858,7 +811,6 @@ class TestDense:
         primitive_out = tex.gemm(x, w, contracting_dims)
         ref_out = self._ref_gemm_with_jnp_dot(x, w, data_layout)
 
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
         assert_allclose(primitive_out, ref_out, dtype=jnp.bfloat16)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
@@ -1296,59 +1248,8 @@ class TestGroupedDense:
         group_size = len(shape_list)
         layout_list = ["NN" for _ in range(group_size)]
 
-<<<<<<< HEAD
-@pytest.mark.parametrize(
-    "in_dtype",
-    [
-        pytest.param(jnp.float32, id="input_float32"),
-        pytest.param(jnp.float16, id="input_float16"),
-        pytest.param(jnp.bfloat16, id="input_bfloat16"),
-    ],
-)
-@pytest.mark.parametrize(
-    "input_shape, transpose_axis",
-    [
-        pytest.param((16, 16), 1, id="(16, 16)-1"),
-        pytest.param((256, 128), 1, id="(256, 128)-1"),
-        pytest.param((128, 512), 1, id="(128, 512)-1"),
-        pytest.param((64, 16, 4, 256), 1, id="(64, 16, 4, 256)-1"),
-        pytest.param((64, 16, 4, 256), 2, id="(64, 16, 4, 256)-2"),
-        pytest.param((64, 16, 4, 256), 3, id="(64, 16, 4, 256)-3"),
-    ],
-)
-class TestTranspose:
-    def test_transpose(self, in_dtype, input_shape, transpose_axis):
-        key = jax.random.PRNGKey(0)
-        input_tensor = jax.random.uniform(key, input_shape, in_dtype)
-        static_axis_boundary = -1
-        jax_output = _jax_transpose(input_tensor, static_axis_boundary, transpose_axis)
-        os.environ["NVTE_JAX_WITH_FFI"] = "0"
-        noffi_output = tex.transpose(input_tensor, static_axis_boundary, transpose_axis)
-        os.environ["NVTE_JAX_WITH_FFI"] = "1"
-        ffi_output = tex.transpose(input_tensor, static_axis_boundary, transpose_axis)
-        assert_allclose(jax_output, noffi_output)
-        assert_allclose(noffi_output, ffi_output)
-
-    @pytest.mark.parametrize(
-        "out_dtype",
-        [
-            pytest.param(jnp_float8_e4m3_type, id="output_float8_e4m3fn"),
-            pytest.param(jnp_float8_e5m2_type, id="output_float8_e5m2"),
-        ],
-    )
-    def test_cast_transpose(self, in_dtype, input_shape, transpose_axis, out_dtype):
-        amax = jnp.zeros(1, jnp.float32)
-        scale = jnp.ones(1, jnp.float32)
-        scale_inv = jnp.ones(1, jnp.float32)
-        key = jax.random.PRNGKey(0)
-        input = jax.random.uniform(key, input_shape, in_dtype)
-        static_axis_boundary = -1
-        jax_output = _jax_cast_transpose(
-            input, scale, amax, out_dtype, static_axis_boundary, transpose_axis
-=======
         x_list, kernel_list, contracting_dims_list = self._generate_grouped_gemm_input(
             dtype, shape_list, layout_list
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
         )
         bias_list = []
         key = jax.random.PRNGKey(1)
@@ -1357,35 +1258,6 @@ class TestTranspose:
             bias = jax.random.uniform(key, n, dtype=dtype)
             bias_list.append(bias)
 
-<<<<<<< HEAD
-    @pytest.mark.parametrize(
-        "out_dtype",
-        [
-            pytest.param(jnp_float8_e4m3_type, id="output_float8_e4m3fn"),
-            pytest.param(jnp_float8_e5m2_type, id="output_float8_e5m2"),
-        ],
-    )
-    def test_dbias_cast_transpose(self, in_dtype, input_shape, transpose_axis, out_dtype):
-        amax = jnp.zeros(1, jnp.float32)
-        scale = jnp.ones(1, jnp.float32)
-        scale_inv = jnp.ones(1, jnp.float32)
-        key = jax.random.PRNGKey(0)
-        input = jax.random.uniform(key, input_shape, in_dtype)
-        static_axis_boundary = -1
-        jax_output = _jax_dbias_cast_transpose(
-            input, amax, scale, out_dtype, static_axis_boundary, transpose_axis
-        )
-        os.environ["NVTE_JAX_WITH_FFI"] = "0"
-        noffi_output = tex.dbias_cast_transpose(
-            input, amax, scale, scale_inv, out_dtype, static_axis_boundary, transpose_axis
-        )
-        os.environ["NVTE_JAX_WITH_FFI"] = "1"
-        ffi_output = tex.dbias_cast_transpose(
-            input, amax, scale, scale_inv, out_dtype, static_axis_boundary, transpose_axis
-        )
-        assert_tree_like_allclose(jax_output, ffi_output)
-        assert_tree_like_allclose(noffi_output, ffi_output)
-=======
         def ref_func(x_list, kernel_list, bias_list, contracting_dims_list):
             out_list = []
             for i in range(len(x_list)):
@@ -1401,51 +1273,12 @@ class TestTranspose:
             # and prevent them from being clamp to zero
             out_sum_list = [jnp.sum(out) for out in out_list]
             return jnp.sum(jnp.asarray(out_sum_list))
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
         def primitive_func(x_list, kernel_list, bias_list, contracting_dims_list):
             out_list = grouped_dense(x_list, kernel_list, bias_list, contracting_dims_list)
             out_sum_list = [jnp.sum(out) for out in out_list]
             return jnp.sum(jnp.asarray(out_sum_list))
 
-<<<<<<< HEAD
-@pytest.mark.skipif(not is_fp8_supported, reason=reason)
-@pytest.mark.parametrize(
-    "input_shape",
-    [
-        pytest.param((256, 128), id="(256, 128)"),
-        pytest.param((128, 512, 8), id="(128, 512, 8)"),
-    ],
-)
-@pytest.mark.parametrize(
-    "in_dtype",
-    [
-        pytest.param(jnp.float32, id="input_float32"),
-        pytest.param(jnp.float16, id="input_float16"),
-        pytest.param(jnp.bfloat16, id="input_bfloat16"),
-    ],
-)
-@pytest.mark.parametrize(
-    "out_dtype",
-    [
-        pytest.param(jnp_float8_e4m3_type, id="output_float8_e4m3fn"),
-        pytest.param(jnp_float8_e5m2_type, id="output_float8_e5m2"),
-    ],
-)
-def test_quantize(input_shape, in_dtype, out_dtype):
-    amax = jnp.zeros(1, jnp.float32)
-    scale = jnp.ones(1, jnp.float32)
-    scale_inv = jnp.ones(1, jnp.float32)
-    key = jax.random.PRNGKey(0)
-    input = jax.random.uniform(key, input_shape, in_dtype)
-    jax_output = _jax_cast_fp8(input, scale, amax, out_dtype)
-    os.environ["NVTE_JAX_WITH_FFI"] = "0"
-    noffi_output = tex.cast_fp8(input, amax, scale, scale_inv, out_dtype)
-    os.environ["NVTE_JAX_WITH_FFI"] = "1"
-    ffi_output = tex.cast_fp8(input, amax, scale, scale_inv, out_dtype)
-    assert_tree_like_allclose(jax_output, ffi_output)
-    assert_tree_like_allclose(noffi_output, ffi_output)
-=======
         value_n_grad_ref_func = value_and_grad(ref_func, (0, 1, 2))
         value_n_grad_primitive_func = value_and_grad(primitive_func, (0, 1, 2))
 
@@ -1543,4 +1376,3 @@ def test_quantize(input_shape, in_dtype, out_dtype):
             assert_allclose(primitive_wgrad_list[i], ref_wgrad_list[i], dtype=allclose_dtype)
             assert_allclose(primitive_dbias_list[i], ref_dbias_list[i], dtype=allclose_dtype)
 """
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270

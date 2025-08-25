@@ -12,11 +12,7 @@ import os
 from typing import Any, Callable, List, Optional, Tuple, Union
 import numpy as np
 import torch
-<<<<<<< HEAD
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
-import transformer_engine.pytorch.cpp_extensions as ext
-=======
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
 import transformer_engine.pytorch.cpp_extensions as ext
 from . import torch_version
@@ -477,13 +473,8 @@ def is_non_tn_fp8_gemm_supported() -> bool:
     """Checks whether the device supports
     non-TN layouts for FP8 GEMMs.
     """
-<<<<<<< HEAD
     # TODO: release until rocm support non-TN fp8 gemms
     return (not IS_HIP_EXTENSION) and (torch.cuda.get_device_capability() >= (10, 0))
-=======
-    device_capability = torch.cuda.get_device_capability()
-    return (10, 0) <= device_capability < (12, 0) or device_capability >= (13, 0)
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
 
 @functools.lru_cache(maxsize=None)

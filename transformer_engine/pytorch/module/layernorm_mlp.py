@@ -204,12 +204,8 @@ class _LayerNormMLP(torch.autograd.Function):
         fsdp_group: Union[dist_group_type, None],
         module: torch.nn.Module,
         skip_fp8_weight_update: bool,
-<<<<<<< HEAD
-        keep_fp8_weight_transpose_cache: bool,
-=======
         symmetric_ar_type: str,
         debug: Optional[bool] = False,
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # pylint: disable=missing-function-docstring
 
@@ -343,31 +339,6 @@ class _LayerNormMLP(torch.autograd.Function):
         if fp8 or debug:
             # If weights are not quantized, we call get_weight_workspace,
             # which handles weight caching etc.
-<<<<<<< HEAD
-            if not isinstance(fc1_weight, QuantizedTensor):
-                # FP8 cast to workspace buffer
-                update_workspace = is_first_microbatch is None or is_first_microbatch
-                fc1_weight_final = module.get_weight_workspace(
-                    tensor=fc1_weight,
-                    quantizer=fc1_weight_quantizer,
-                    cache_name=(None if is_first_microbatch is None else "fc1_weight"),
-                    update_workspace=update_workspace,
-                    skip_update_flag=skip_fp8_weight_update,
-                    fsdp_group=fsdp_group,
-                    create_transpose_cache=keep_fp8_weight_transpose_cache,
-                )
-            if not isinstance(fc2_weight, QuantizedTensor):
-                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=True)
-                fc2_weight_final = module.get_weight_workspace(
-                    tensor=fc2_weight,
-                    quantizer=fc2_weight_quantizer,
-                    cache_name=(None if is_first_microbatch is None else "fc2_weight"),
-                    update_workspace=update_workspace,
-                    skip_update_flag=skip_fp8_weight_update,
-                    fsdp_group=fsdp_group,
-                    create_transpose_cache=keep_fp8_weight_transpose_cache,
-                )
-=======
             # FP8 cast to workspace buffer
             update_workspace = is_first_microbatch is None or is_first_microbatch
             fc1_weight_quantizer.set_usage(rowwise=True, columnwise=True)
@@ -395,7 +366,6 @@ class _LayerNormMLP(torch.autograd.Function):
         else:
             fc1_weight_final = cast_if_needed(fc1_weight_final, activation_dtype)
             fc2_weight_final = cast_if_needed(fc2_weight_final, activation_dtype)
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
         # Cast biases to expected dtype
         bias_dtype = activation_dtype
@@ -653,7 +623,6 @@ class _LayerNormMLP(torch.autograd.Function):
             )
             ctx.normalization = normalization
             ctx.reduce_and_update_bwd_fp8_tensors = False
-            ctx.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
             if ctx.fp8 and requires_grad(
                 inp, ln_weight, ln_bias, fc1_weight, fc2_weight, fc1_bias, fc2_bias
             ):
@@ -834,12 +803,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 and (not ctx.debug)
             )
 
-<<<<<<< HEAD
-            if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                create_fp8_weight_transpose_cache(fc2_weight)
-
-            # FC2 DGRAD; Unconditional
-=======
             # Make sure required data is available
             if isinstance(grad_output, QuantizedTensorBase):
                 grad_output.update_usage(rowwise_usage=True)
@@ -849,7 +812,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 ctx.fc2_weight.update_usage(columnwise_usage=True)
 
             # Perform GEMM
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
             gemm_output, *_ = general_gemm(
                 fc2_weight,
                 grad_output,
@@ -877,17 +839,11 @@ class _LayerNormMLP(torch.autograd.Function):
             else:
                 fc2_dgrad = gemm_output
 
-<<<<<<< HEAD
-            if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                clear_fp8_weight_transpose_cache(fc2_weight)
-
-=======
             # --------------------------------------------------
             # Finished FC2 DGRAD...
             # --------------------------------------------------
 
             # --------------------------------------------------
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
             # FC2 WGRAD
             # --------------------------------------------------
 
@@ -1069,13 +1025,6 @@ class _LayerNormMLP(torch.autograd.Function):
                     ub_obj_fc1_wgrad = get_ub("fc1_wgrad")
                     ub_type_fc1_wgrad = tex.CommOverlapType.RS
 
-<<<<<<< HEAD
-            if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                create_fp8_weight_transpose_cache(fc1_weight)
-
-            # FC1 DGRAD: Unconditional
-            fc1_dgrad, *_, fc1_dgrad_rs_out = general_gemm(
-=======
             # --------------------------------------------------
             # FC1 DGRAD
             # --------------------------------------------------
@@ -1098,7 +1047,6 @@ class _LayerNormMLP(torch.autograd.Function):
 
             # dgrad GEMM
             gemm_out, *_, reduce_scatter_out = general_gemm(
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
                 fc1_weight,
                 dact,
                 get_workspace(),
@@ -1114,16 +1062,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 bulk_overlap=ctx.ub_bulk_dgrad,
             )
 
-<<<<<<< HEAD
-            if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                clear_fp8_weight_transpose_cache(fc1_weight)
-
-            # Overlap dgrad-RS/AR with wgrad
-=======
             # Prepare grad input tensor
             # Note: Perform tensor-parallel communication
             fc1_dgrad = None
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
             fc1_dgrad_work = None
             if ctx.ub_overlap_rs_dgrad:
                 fc1_dgrad = reduce_scatter_out
@@ -1413,12 +1354,8 @@ class _LayerNormMLP(torch.autograd.Function):
             None,  # fsdp_group
             None,  # module
             None,  # skip_fp8_weight_update
-<<<<<<< HEAD
-            None,  # keep_fp8_weight_transpose_cache
-=======
             None,  # symmetric_ar_type
             None,  # debug
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
         )
 
 
@@ -1515,13 +1452,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
                      batch size per training step. Needed for JIT Warmup, a technique where jit
                      fused functions are warmed up before training to ensure same kernels are
                      used for forward propogation and activation recompute phase.
-<<<<<<< HEAD
-    keep_fp8_weight_transpose_cache: bool, default = 'True'
-                                     if set to `False`, it will not cache fp8 weight buffer instead of 
-                                     recomputing fp8 weight transpose. Recommend set to `False` when
-                                     enable FSDP parallel.
-                                     
-=======
     delay_wgrad_compute : bool, default = `False`
                          Whether or not to delay weight gradient computation. If set to `True`,
                          it's the user's responsibility to call `module.backward_dw` to compute
@@ -1531,7 +1461,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
                    This can help in latency bound communication situations.
                    Requires PyTorch version 2.7.0 or higher. When set to None, standard all-reduce
                    is used.
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
     """
 
     def __init__(
@@ -1564,12 +1493,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
         ub_overlap_rs_dgrad: bool = False,
         ub_bulk_dgrad: bool = False,
         ub_bulk_wgrad: bool = False,
-<<<<<<< HEAD
-        keep_fp8_weight_transpose_cache: bool = True,
-=======
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
     ) -> None:
         super().__init__()
 
@@ -1725,8 +1650,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
         self.inf_ln_sm_margin = int(os.getenv("NVTE_INF_LAYERNORM_SM_MARGIN", "0"))
-
-        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
 
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
@@ -1916,12 +1839,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.fsdp_group,
                 self,
                 skip_fp8_weight_update,
-<<<<<<< HEAD
-                self.keep_fp8_weight_transpose_cache,
-=======
                 self.symmetric_ar_type,
                 debug,
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
             )
             out = fwd_fn(*args)
 

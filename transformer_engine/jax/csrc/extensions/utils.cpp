@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved. 
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -20,7 +22,14 @@ int GetCudaRuntimeVersion() {
   return ver;
 }
 
+#ifndef USE_ROCM
 size_t GetCudnnRuntimeVersion() { return cudnnGetVersion(); }
+#else
+// use a very high number for cudnn in rocm to enable all filtering
+//(99, 0, 0)
+size_t GetCudnnRuntimeVersion() { return 990000; }
+size_t cudnnGetVersion() { return GetCudnnRuntimeVersion(); }
+#endif
 
 int GetDeviceComputeCapability(int gpu_id) { return transformer_engine::cuda::sm_arch(gpu_id); }
 

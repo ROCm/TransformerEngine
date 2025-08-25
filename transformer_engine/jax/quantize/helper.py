@@ -15,12 +15,17 @@ import jax
 import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
 
+from ..util import is_hip_extension
+
 from transformer_engine_jax import DType
-from transformer_engine_jax import get_cublasLt_version
-from transformer_engine_jax import (
-    get_cuda_version,
-    get_device_compute_capability,
-)
+if is_hip_extension():
+    from transformer_engine_jax import get_device_compute_capability
+else:
+    from transformer_engine_jax import (
+        get_cublasLt_version,
+        get_cuda_version,
+        get_device_compute_capability,
+    )
 from transformer_engine.common import recipe
 from transformer_engine.jax.sharding import global_shard_guard, MeshResource
 
@@ -50,6 +55,11 @@ def _check_delayed_scaling_fp8_support(gpu_arch) -> Tuple[bool, str]:
     Returns:
         A tuple of (bool, str) indicating support and any error message
     """
+    if is_hip_extension():
+        if gpu_arch in [94, 95]:
+            return True, ""
+        else:
+            return False, "Device arch gfx94x or gfx95x required for FP8 execution."
     if gpu_arch >= 90:  # hopper and above
         return True, ""
     if gpu_arch < 89:  # pre-ada
@@ -70,6 +80,8 @@ def _check_block_scaling_fp8_support(gpu_arch) -> Tuple[bool, str]:
     Returns:
         A tuple of (bool, str) indicating support and any error message
     """
+    if is_hip_extension():
+        return False, "FP8 block scaled gemm not yet supported for ROCm"
     if gpu_arch >= 100:  # blackwell and above
         return True, ""
     if gpu_arch < 99:  # pre-blackwell

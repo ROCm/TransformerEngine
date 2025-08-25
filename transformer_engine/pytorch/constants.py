@@ -30,7 +30,6 @@ if IS_HIP_EXTENSION:
     TE_DType.update({torch.float8_e4m3fnuz: tex.DType.kFloat8E4M3, 
                      torch.float8_e5m2fnuz: tex.DType.kFloat8E5M2})
 
-<<<<<<< HEAD
 _FP8_KEYS = (tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2)
 
 class Custom_DType_Dict(dict):
@@ -45,15 +44,6 @@ class Custom_DType_Dict(dict):
         raise KeyError(key)
     
 TE_DType_To_Torch = Custom_DType_Dict({
-=======
-"""
-This is a map: int -> torch.dtype
-Used for resolving cuda extension types to torch.
-Has one to one mapping with enum in
-transformer_engine.h
-"""
-TE_DType_To_Torch = {
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
     tex.DType.kByte: torch.uint8,
     tex.DType.kInt32: torch.int32,
     tex.DType.kFloat32: torch.float32,

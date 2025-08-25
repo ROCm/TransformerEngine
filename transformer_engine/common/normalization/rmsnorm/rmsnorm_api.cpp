@@ -50,13 +50,9 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
 
   NVTE_Norm_Backend norm_backend;
   bool is_aligned = true;
-<<<<<<< HEAD
 #ifndef __HIP_PLATFORM_AMD__
-  bool cudnn_backend = use_cudnn_norm_fwd() || is_block_scaling(z->scaling_mode);
-#endif
-=======
   bool cudnn_backend = use_cudnn_norm_fwd() || is_mxfp_scaling(z->scaling_mode);
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
+#endif
 
   bool training =
       is_delayed_tensor_scaling(z->scaling_mode) || (z->columnwise_data).dptr != nullptr;

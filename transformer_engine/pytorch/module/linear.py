@@ -66,17 +66,11 @@ from ..tensor.quantized_tensor import (
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-<<<<<<< HEAD
-
-from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
 from ..rocm_utils import create_fp8_weight_transpose_cache, clear_fp8_weight_transpose_cache
-
-=======
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.utils import any_feature_enabled
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
 __all__ = ["Linear"]
 
@@ -122,12 +116,8 @@ class _Linear(torch.autograd.Function):
         fsdp_group: Union[dist_group_type, None],
         module: torch.nn.Module,
         skip_fp8_weight_update: bool,
-<<<<<<< HEAD
-        keep_fp8_weight_transpose_cache: bool,
-=======
         symmetric_ar_type: str,
         debug: Optional[bool] = False,
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
 
@@ -243,19 +233,6 @@ class _Linear(torch.autograd.Function):
                     )
                 weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
 
-<<<<<<< HEAD
-                # FP8 cast to workspace buffer
-                update_workspace = is_first_microbatch is None or is_first_microbatch
-                weightmat = module.get_weight_workspace(
-                    tensor=weight,
-                    quantizer=weight_quantizer,
-                    cache_name=(None if is_first_microbatch is None else "weight"),
-                    update_workspace=update_workspace,
-                    skip_update_flag=skip_fp8_weight_update,
-                    fsdp_group=fsdp_group,
-                    create_transpose_cache=keep_fp8_weight_transpose_cache,
-                )
-=======
             # Get quantized weight
             update_workspace = is_first_microbatch is None or is_first_microbatch
             weightmat = module.get_weight_workspace(
@@ -274,7 +251,6 @@ class _Linear(torch.autograd.Function):
         # ------------------------------------------------------
         # Weight tensor is ready for GEMM...
         # ------------------------------------------------------
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
         # Cast bias to expected dtype
         bias_dtype = activation_dtype
@@ -450,7 +426,6 @@ class _Linear(torch.autograd.Function):
             ctx.reduce_and_update_bwd_fp8_tensors = False
 
             ctx.owns_input = saved_inputmat is not inp
-            ctx.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
             if ctx.fp8 and requires_grad(inp, weight, bias):
                 _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
@@ -627,17 +602,8 @@ class _Linear(torch.autograd.Function):
                 if ctx.weight_quantizer is not None and isinstance(weight_fp8, QuantizedTensorBase):
                     weight_fp8.update_usage(columnwise_usage=True)
 
-<<<<<<< HEAD
-                if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                    create_fp8_weight_transpose_cache(weight_fp8)
-                    
-                # dgrad GEMM
-                nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
-                dgrad_gemm_use_split_accumulator = _2X_ACC_DGRAD
-=======
                 # Choose whether to use GEMM kernel with split accumulator
                 use_split_accumulator = _2X_ACC_DGRAD
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
                 if ctx.fp8:
                     recipe = ctx.fp8_recipe
                     if hasattr(recipe, "fp8_gemm_dgrad"):
@@ -677,15 +643,8 @@ class _Linear(torch.autograd.Function):
                 )
                 nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
 
-<<<<<<< HEAD
-                if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                    clear_fp8_weight_transpose_cache(weight_fp8)
-
-                # Launch tensor-parallel communication
-=======
                 # Prepare grad input tensor
                 # Note: Perform tensor-parallel communication
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
                 if ctx.ub_overlap_rs_dgrad:
                     dgrad = reduce_scatter_out
                 elif ctx.ub_bulk_wgrad:
@@ -928,12 +887,8 @@ class _Linear(torch.autograd.Function):
             None,  # fsdp_group
             None,  # module
             None,  # skip_fp8_weight_update
-<<<<<<< HEAD
-            None,  # keep_fp8_weight_transpose_cache
-=======
             None,  # symmetric_ar_type
             None,  # debug
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
         )
 
 
@@ -1006,13 +961,6 @@ class Linear(TransformerEngineBaseModule):
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
-<<<<<<< HEAD
-    keep_fp8_weight_transpose_cache: bool, default = 'True'
-                                     if set to `False`, it will not cache fp8 weight buffer instead of 
-                                     recomputing fp8 weight transpose. Recommend set to `False` when
-                                     enable FSDP parallel.
-
-=======
     delay_wgrad_compute : bool, default = `False`
                          Whether or not to delay weight gradient computation. If set to `True`,
                          it's the user's responsibility to call `module.backward_dw` to compute
@@ -1022,7 +970,6 @@ class Linear(TransformerEngineBaseModule):
                    This can help in latency bound communication situations.
                    Requires PyTorch version 2.7.0 or higher. When set to None, standard all-reduce
                    is used.
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
     """
 
     def __init__(
@@ -1048,13 +995,9 @@ class Linear(TransformerEngineBaseModule):
         ub_bulk_dgrad: bool = False,
         ub_bulk_wgrad: bool = False,
         ub_name: Optional[str] = None,
-<<<<<<< HEAD
-        keep_fp8_weight_transpose_cache: bool = True,
-=======
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
         name: Optional[str] = None,
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
     ) -> None:
         super().__init__()
 
@@ -1264,8 +1207,6 @@ class Linear(TransformerEngineBaseModule):
         else:
             self.gemm_bias_unfused_add = False
         
-        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
-
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
         super().set_meta_tensor(fwd, recipe)
@@ -1439,12 +1380,8 @@ class Linear(TransformerEngineBaseModule):
                 self.fsdp_group,
                 self,
                 skip_fp8_weight_update,
-<<<<<<< HEAD
-                self.keep_fp8_weight_transpose_cache,
-=======
                 self.symmetric_ar_type,
                 debug,
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
             )
             out = linear_fn(*args)
         if self.gemm_bias_unfused_add:

@@ -176,9 +176,11 @@ __global__ void populate_rng_state_kernel(int64_t *rng_state_dst, const int64_t 
 
 __global__ void get_runtime_num_segments_kernel(int32_t *cu_seqlen, size_t len, uint32_t *out);
 
+#ifndef USE_ROCM
 void PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t q_max_seqlen,
                            size_t kv_max_seqlen, NVTE_Fused_Attn_Backend backend,
                            cudaStream_t stream);
+#endif
 
 uint32_t GetRuntimeNumSegments(void *cu_seqlen, void *workspace, size_t len, cudaStream_t stream);
 

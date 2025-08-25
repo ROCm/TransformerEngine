@@ -16,11 +16,6 @@ from jax import dtypes
 from jax.sharding import PartitionSpec, NamedSharding
 from .misc import is_hip_extension
 
-<<<<<<< HEAD
-from transformer_engine import transformer_engine_jax
-
-=======
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 from .base import BasePrimitive, register_primitive
 from .misc import get_padded_spec, check_valid_batch_dims
 from ..softmax import SoftmaxType

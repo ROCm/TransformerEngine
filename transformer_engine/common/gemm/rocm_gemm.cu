@@ -1414,12 +1414,30 @@ void release_service_stream(hipStream_t stream, struct ServiceStreamCtl &ctl)
 
 
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
-                 const Tensor *inputBias, Tensor *outputPreGelu, int m, int n, int k, int lda,
-                 int ldb, int ldd, bool transa, bool transb, bool grad,
+                 const Tensor *inputBias, Tensor *outputPreGelu, bool transa, bool transb, bool grad,
                  void *workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                  int math_sm_count, int m_split, int n_split, bool gemm_producer,
                  const Tensor *inputCounter, hipStream_t stream, int compute_stream_offset)
 {
+  // Tensor dims in row-major order
+  const int A0 = inputA->flat_first_dim();
+  const int A1 = inputA->flat_last_dim();
+  const int B0 = inputB->flat_first_dim();
+  const int B1 = inputB->flat_last_dim();
+
+  // GEMM dims in column-major order
+  const int m = transa ? A0 : A1;
+  const int n = transb ? B1 : B0;
+  const int k = transa ? A1 : A0;
+  NVTE_CHECK((transb ? B0 : B1) == k,
+             "GEMM inputs have incompatible dimensions (A is ", A0, "x", A1, ", B is ", B0, "x", B1,
+             ")");
+
+  const int lda = transa ? k : m;
+  const int ldb = transb ? n : k;
+  const int ldd = m;
+
+
   ServiceStreamCtl ss_ctl;
   bool use_service_stream =
       (math_sm_count != 0) ? get_service_stream(math_sm_count, stream, ss_ctl) : false;

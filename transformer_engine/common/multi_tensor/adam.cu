@@ -30,14 +30,10 @@ using MATH_T = float;
 #ifndef __HIP_PLATFORM_AMD__
 using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
-<<<<<<< HEAD:transformer_engine/pytorch/csrc/extensions/multi_tensor/multi_tensor_adam.cu
 #else
 using fp8e4m3 = te_hip_fp8_e4m3;
 using fp8e5m2 = te_hip_fp8_e5m2;
 #endif //__HIP_PLATFORM_AMD__
-using transformer_engine::DType;
-=======
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270:transformer_engine/common/multi_tensor/adam.cu
 
 template <typename T>
 struct is_fp8 : std::false_type {};

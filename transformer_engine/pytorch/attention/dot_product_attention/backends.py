@@ -13,6 +13,8 @@ import logging
 from packaging.version import Version as PkgVersion
 
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.utils import (
     SplitAlongDim,
@@ -70,14 +72,16 @@ try:
 except PackageNotFoundError:
     pass  # only print warning if use_flash_attention_2 = True in get_attention_backend
 else:
-    if torch.cuda.is_available() and get_device_compute_capability() >= (10, 0):
+    if torch.cuda.is_available() and ( (not IS_HIP_EXTENSION) and get_device_compute_capability() >= (10, 0)):
         if fa_utils.version_required_blackwell <= fa_utils.version <= fa_utils.max_version:
             fa_utils.is_installed = True
     elif fa_utils.version_required <= fa_utils.version <= fa_utils.max_version:
         fa_utils.is_installed = True
 
     if fa_utils.is_installed:
-        from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
+        if not IS_HIP_EXTENSION:
+            #Should not be used on AMD GPUs
+            from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
         from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
         from flash_attn.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd
         from flash_attn.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd
@@ -92,7 +96,7 @@ else:
         fa_utils.set_flash_attention_version()
     elif (
         torch.cuda.is_available()
-        and get_device_compute_capability() >= (8, 0)
+        and (IS_HIP_EXTENSION or get_device_compute_capability() >= (8, 0))
         and dpa_utils._NVTE_FLASH_ATTN
     ):
         attn_log.fa_logger.warning(
@@ -100,32 +104,33 @@ else:
             dpa_utils._get_supported_versions(
                 (
                     fa_utils.version_required
-                    if get_device_compute_capability() < (10, 0)
+                    if (IS_HIP_EXTENSION or get_device_compute_capability() < (10, 0))
                     else fa_utils.version_required_blackwell
                 ),
                 fa_utils.max_version,
             ),
             fa_utils.version,
         )
-try:
-    fa_utils.fa3_version = PkgVersion(get_pkg_version("flash-attn-3"))
-except PackageNotFoundError:
-    flash_attn_func_v3 = None
-    flash_attn_varlen_func_v3 = None
-    flash_attn_with_kvcache_v3 = None
-    # pass  # only print warning if use_flash_attention_3 = True in get_attention_backend
-else:
-    from flash_attn_3.flash_attn_interface import flash_attn_func as flash_attn_func_v3
-    from flash_attn_3.flash_attn_interface import (
-        flash_attn_varlen_func as flash_attn_varlen_func_v3,
-    )
-    from flash_attn_3.flash_attn_interface import (
-        flash_attn_with_kvcache as flash_attn_with_kvcache_v3,
-    )
-    from flash_attn_3.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
-    from flash_attn_3.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
+if not IS_HIP_EXTENSION:
+    try:
+        fa_utils.fa3_version = PkgVersion(get_pkg_version("flash-attn-3"))
+    except PackageNotFoundError:
+        flash_attn_func_v3 = None
+        flash_attn_varlen_func_v3 = None
+        flash_attn_with_kvcache_v3 = None
+        # pass  # only print warning if use_flash_attention_3 = True in get_attention_backend
+    else:
+        from flash_attn_3.flash_attn_interface import flash_attn_func as flash_attn_func_v3
+        from flash_attn_3.flash_attn_interface import (
+            flash_attn_varlen_func as flash_attn_varlen_func_v3,
+        )
+        from flash_attn_3.flash_attn_interface import (
+            flash_attn_with_kvcache as flash_attn_with_kvcache_v3,
+        )
+        from flash_attn_3.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
+        from flash_attn_3.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
 
-    fa_utils.set_flash_attention_3_params()
+        fa_utils.set_flash_attention_3_params()
 
 
 class UnfusedDotProductAttention(torch.nn.Module):
@@ -1102,7 +1107,7 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.attn_mask_type = attn_mask_type
         ctx.window_size = window_size
         ctx.fused_attention_backend = (
-            fused_attention_backend if ctx.fp8 else FusedAttnBackend["F16_arbitrary_seqlen"]
+            fused_attention_backend if (IS_HIP_EXTENSION or ctx.fp8) else FusedAttnBackend["F16_arbitrary_seqlen"]
         )
         ctx.use_FAv2_bwd = use_FAv2_bwd
         ctx.deterministic = deterministic
@@ -1551,7 +1556,7 @@ class FusedAttention(torch.nn.Module):
 
         if context_parallel:
             assert (
-                fp8
+                IS_HIP_EXTENSION or fp8
                 or fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
             ), f"{fused_attention_backend} does not work with context parallelism!"
             assert core_attention_bias_type not in [

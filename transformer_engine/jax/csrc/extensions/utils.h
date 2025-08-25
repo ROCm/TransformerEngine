@@ -23,26 +23,10 @@ namespace jax {
 int GetCudaRuntimeVersion();
 size_t GetCudnnRuntimeVersion();
 int GetDeviceComputeCapability(int gpu_id);
-
-<<<<<<< HEAD:transformer_engine/jax/csrc/utils.h
-#ifndef USE_ROCM
-void PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t q_max_seqlen,
-                           size_t kv_max_seqlen, NVTE_Fused_Attn_Backend backend,
-                           cudaStream_t stream);
-#else
-void PopulateRngStateAsync(void *rng_state_dst, 
-                           const void *const seed,
-                           size_t batch_size, 
-                           size_t num_heads, 
-                           size_t q_max_seqlen, 
-                           size_t kv_max_seqlen,
-                           cudaStream_t stream);
+#ifdef USE_ROCM
+size_t cudnnGetVersion();
 #endif
 
-uint32_t GetRuntimeNumSegments(void *cu_seqlen, void *workspace, size_t len, cudaStream_t stream);
-
-=======
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270:transformer_engine/jax/csrc/extensions/utils.h
 class cudaDevicePropertiesManager {
  public:
   static cudaDevicePropertiesManager &Instance() {

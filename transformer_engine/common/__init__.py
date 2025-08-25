@@ -20,6 +20,8 @@ import functools
 from pathlib import Path
 from importlib.metadata import version, metadata, PackageNotFoundError
 
+import transformer_engine
+
 
 _logger = logging.getLogger(__name__)
 
@@ -158,32 +160,36 @@ def load_framework_extension(framework: str):
     if framework == "torch":
         extra_dep_name = "pytorch"
 
+    te_cuda_vers = "rocm" if te_rocm_build else "cu12"
+
     # If the framework extension pip package is installed, it means that TE is installed via
     # PyPI. For this case we need to make sure that the metapackage, the core lib, and framework
     # extension are all installed via PyPI and have matching version.
+    '''
     if _is_pip_package_installed(module_name):
         assert _is_pip_package_installed(
             "transformer_engine"
         ), "Could not find `transformer-engine`."
         assert _is_pip_package_installed(
-            "transformer_engine_cu12"
-        ), "Could not find `transformer-engine-cu12`."
+            f"transformer_engine_{te_cuda_vers}"
+        ), f"Could not find `transformer-engine-{te_cuda_vers}`."
         assert (
             version(module_name)
             == version("transformer-engine")
-            == version("transformer-engine-cu12")
+            == version(f"transformer-engine-{te_cuda_vers}")
         ), (
             "TransformerEngine package version mismatch. Found"
             f" {module_name} v{version(module_name)}, transformer-engine"
-            f" v{version('transformer-engine')}, and transformer-engine-cu12"
-            f" v{version('transformer-engine-cu12')}. Install transformer-engine using "
+            f" v{version('transformer-engine')}, and transformer-engine-{te_cuda_vers}"
+            f" v{version(f'transformer-engine-{te_cuda_vers}')}. Install transformer-engine using "
             f"'pip3 install transformer-engine[{extra_dep_name}]==VERSION'"
         )
+    '''
 
     # If the core package is installed via PyPI, log if
     # the framework extension is not found from PyPI.
     # Note: Should we error? This is a rare use case.
-    if _is_pip_package_installed("transformer-engine-cu12"):
+    if _is_pip_package_installed(f"transformer-engine-{te_cuda_vers}"):
         if not _is_pip_package_installed(module_name):
             _logger.info(
                 "Could not find package %s. Install transformer-engine using "
@@ -325,13 +331,19 @@ def _load_core_library():
 
 
 if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
-<<<<<<< HEAD
     try:
         _CUDNN_LIB_CTYPES = _load_cudnn()
         _NVRTC_LIB_CTYPES = _load_nvrtc()
+        _CUBLAS_LIB_CTYPES = _load_nvidia_cuda_library("cublas")
+        _CUDART_LIB_CTYPES = _load_nvidia_cuda_library("cuda_runtime")
+
+        # Needed to find the correct headers for NVRTC kernels.
+        if not os.getenv("NVTE_CUDA_INCLUDE_DIR") and _nvidia_cudart_include_dir():
+            os.environ["NVTE_CUDA_INCLUDE_DIR"] = _nvidia_cudart_include_dir()
     except (OSError, subprocess.CalledProcessError):
         pass
-    _TE_LIB_CTYPES = _load_library()
+    finally:
+        _TE_LIB_CTYPES = _load_core_library()
     try:
         te_rocm_build = _TE_LIB_CTYPES.nvte_is_rocm_build()
     except AttributeError:
@@ -344,7 +356,7 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
                 rocm_version= f.read().strip().split('.')[:2]
 
             # Get ROCm version from the build info file
-            with open(get_te_path() / "transformer_engine" / "build_info.txt", 'r') as f:
+            with open(Path(transformer_engine.__path__[0]).parent / "transformer_engine" / "build_info.txt", 'r') as f:
                 build_info = f.read().split('\n')
             build_rocm_version = list(filter(lambda f: f.startswith("ROCM_VERSION:"), build_info))
             if build_rocm_version:
@@ -353,14 +365,3 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
         except FileNotFoundError:
             pass
 
-=======
-    _CUDNN_LIB_CTYPES = _load_cudnn()
-    _NVRTC_LIB_CTYPES = _load_nvrtc()
-    _CUBLAS_LIB_CTYPES = _load_nvidia_cuda_library("cublas")
-    _CUDART_LIB_CTYPES = _load_nvidia_cuda_library("cuda_runtime")
-    _TE_LIB_CTYPES = _load_core_library()
-
-    # Needed to find the correct headers for NVRTC kernels.
-    if not os.getenv("NVTE_CUDA_INCLUDE_DIR") and _nvidia_cudart_include_dir():
-        os.environ["NVTE_CUDA_INCLUDE_DIR"] = _nvidia_cudart_include_dir()
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270

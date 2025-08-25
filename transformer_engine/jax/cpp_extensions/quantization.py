@@ -12,19 +12,10 @@ from packaging import version
 import jax
 import jax.numpy as jnp
 from jax import dtypes
-<<<<<<< HEAD
-from jax.interpreters.mlir import ir
-from jax.sharding import PartitionSpec, NamedSharding
-from .misc import is_hip_extension
-
-from transformer_engine import transformer_engine_jax
-from transformer_engine.transformer_engine_jax import DType as TEDType
-=======
 from jax.experimental.custom_partitioning import SdyShardingRule
 from jax.sharding import PartitionSpec
 
 import transformer_engine_jax
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
 from .base import BasePrimitive, register_primitive
 from .misc import (

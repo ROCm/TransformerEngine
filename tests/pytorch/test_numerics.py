@@ -43,12 +43,8 @@ from transformer_engine.pytorch import (
     Fp8Padding,
     Fp8Unpadding,
 )
-<<<<<<< HEAD
-from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
-from transformer_engine.pytorch.dot_product_attention.utils import FlashAttentionUtils as fa_utils
-=======
 from transformer_engine.pytorch.attention.inference import InferenceParams
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
+from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils as fa_utils
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
@@ -733,15 +729,12 @@ def test_gpt_full_activation_recompute(
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-<<<<<<< HEAD
     if IS_HIP_EXTENSION:
         use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
         if fp8 and recipe.float8_current_scaling() and use_cast_transpose_triton:
             pytest.skip("Float8 Current Scaling unsupported for full recompute.")
-=======
     if recipe.float8_block_scaling() and not fp8_block_scaling_available:
         pytest.skip(reason_for_no_fp8_block_scaling)
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
     config = model_configs[model]
     torch.compiler.reset() # avoid cache size limit overflow
@@ -1295,7 +1288,6 @@ def test_linear_accuracy(dtype, bs, model, return_bias, bias):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["small"])
-<<<<<<< HEAD
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 def test_fp8_linear_without_transpose_cache_accuracy(dtype, bs, model, fp8_model_params):
     reset_rng_states()
@@ -1309,7 +1301,6 @@ def test_fp8_linear_without_transpose_cache_accuracy(dtype, bs, model, fp8_model
             bias=True,
             params_dtype=dtype,
             device="cuda",
-            keep_fp8_weight_transpose_cache=False
         ).eval()
 
         ref_linear = Linear(
@@ -1330,7 +1321,8 @@ def test_fp8_linear_without_transpose_cache_accuracy(dtype, bs, model, fp8_model
     # Check output.
     for te_output, torch_output in zip(outputs, ref_outputs):
         assert_allclose(te_output, torch_output, atol=0, rtol=0)
-=======
+
+
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 def test_linear_accuracy_delay_wgrad_compute(dtype, bs, model, bias, fuse_wgrad_accumulation):
@@ -1374,7 +1366,6 @@ def test_linear_accuracy_delay_wgrad_compute(dtype, bs, model, bias, fuse_wgrad_
     # Shoule be bit-wise match
     for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -1572,6 +1563,9 @@ def test_layernorm_linear_accuracy(
 def test_layernorm_linear_accuracy_delay_wgrad_compute(
     dtype, bs, model, normalization, zero_centered_gamma, bias, fuse_wgrad_accumulation
 ):
+    if IS_HIP_EXTENSION:
+        if dtype not in (torch.float32,) and fuse_wgrad_accumulation and bias:
+            pytest.skip(f"Rocm does not support fused wgrad accumulation for {dtype}.")
     config = model_configs[model]
 
     ln_linear_ref = LayerNormLinear(
@@ -1718,7 +1712,6 @@ def test_fp8_layernorm_mlp_without_transpose_cache_accuracy(dtype, bs, model, ac
         normalization=normalization,
         params_dtype=dtype,
         device="cuda",
-        keep_fp8_weight_transpose_cache = False,
     ).eval()
 
     te_ln_mlp_ref = LayerNormMLP(
@@ -1784,6 +1777,10 @@ def test_layernorm_mlp_accuracy_delay_wgrad_compute(
     dtype, bs, model, activation, normalization, bias, fuse_wgrad_accumulation
 ):
     config = model_configs[model]
+
+    if IS_HIP_EXTENSION:
+        if dtype not in (torch.float32,) and fuse_wgrad_accumulation and bias:
+            pytest.skip(f"Rocm does not support fused wgrad accumulation for {dtype}.")
 
     ln_mlp = LayerNormMLP(
         hidden_size=config.hidden_size,
@@ -1926,13 +1923,11 @@ def test_grouped_linear_accuracy(
     delay_wgrad_compute,
     parallel_mode=None,
 ):
-<<<<<<< HEAD
+    fp8 = recipe is not None
+
     if IS_HIP_EXTENSION:
         if dtype not in (torch.float32,) and fuse_wgrad_accumulation and not fp8:
             pytest.skip(f"Rocm does not support fused wgrad accumulation for {dtype}.")
-=======
-    fp8 = recipe is not None
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if fp8 and recipe.mxfp8() and not mxfp8_available:

@@ -57,29 +57,19 @@ pybind11::dict Registrations() {
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
                      pybind11::arg("execute") = EncapsulateFFI(FusedAttnBackwardHandler));
 
-<<<<<<< HEAD
-  pybind11::dict fused_attn_backward_ffi;
-  fused_attn_backward_ffi["prepare"] = EncapsulateFFI(CudnnHandleInitHandler);
-  fused_attn_backward_ffi["execute"] = EncapsulateFFI(FusedAttnBackwardHandler);
-  dict["te_fused_attn_backward_ffi"] = fused_attn_backward_ffi;
-#else
-  // Normalization
-  dict["te_layernorm_forward_ffi"] = EncapsulateFFI(LayerNormForwardHandler);
-  dict["te_layernorm_forward_fp8_ffi"] = EncapsulateFFI(LayerNormForwardFP8Handler);
-  dict["te_layernorm_backward_ffi"] = EncapsulateFFI(LayerNormBackwardHandler);
-  dict["te_rmsnorm_forward_ffi"] = EncapsulateFFI(RMSNormForwardHandler);
-  dict["te_rmsnorm_forward_fp8_ffi"] = EncapsulateFFI(RMSNormForwardFP8Handler);
-  dict["te_rmsnorm_backward_ffi"] = EncapsulateFFI(RMSNormBackwardHandler);
-=======
-  // Grouped GEMM
   dict["te_grouped_gemm_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
                      pybind11::arg("execute") = EncapsulateFFI(GroupedGemmHandler));
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
+#else
+  // Normalization
+  dict["te_norm_forward_ffi"] = EncapsulateFFI(NormForwardHandler);
+  dict["te_norm_backward_ffi"] = EncapsulateFFI(NormBackwardHandler);
 
   // Attention
   dict["te_fused_attn_forward_ffi"] = EncapsulateFFI(FusedAttnForwardHandler);
   dict["te_fused_attn_backward_ffi"] = EncapsulateFFI(FusedAttnBackwardHandler);
+
+  dict["te_grouped_gemm_ffi"] = EncapsulateFFI(GroupedGemmHandler);
 #endif
   return dict;
 }
@@ -94,18 +84,11 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_device_compute_capability", &GetDeviceComputeCapability);
 #ifndef USE_ROCM
   m.def("get_cublasLt_version", &cublasLtGetVersion);
-<<<<<<< HEAD
 #endif
-  m.def("get_dact_dbias_ct_workspace_sizes", &GetDActDBiasCastTransposeWorkspaceSizes);
-  m.def("get_dbias_ct_workspace_sizes", &GetDBiasCastTransposeWorkspaceSizes);
-  m.def("get_layernorm_fwd_workspace_sizes", &GetLayerNormForwardWorkspaceSizes);
-  m.def("get_layernorm_bwd_workspace_sizes", &GetLayerNormBackwardWorkspaceSizes);
-=======
   m.def("get_dact_dbias_quantize_workspace_sizes", &GetDActDBiasQuantizeWorkspaceSizes);
   m.def("get_dbias_quantize_workspace_sizes", &GetDBiasQuantizeWorkspaceSizes);
   m.def("get_norm_fwd_workspace_sizes", &GetNormForwardWorkspaceSizes);
   m.def("get_norm_bwd_workspace_sizes", &GetNormBackwardWorkspaceSizes);
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
   m.def("get_fused_attn_fwd_workspace_sizes", &GetFusedAttnForwardWorkspaceSizes);
   m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
@@ -166,14 +149,12 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("NVTE_F16_max512_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen)
       .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)
       .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8);
-<<<<<<< HEAD
 #else
   pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local())
       .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend)
       .value("NVTE_AOTriton", NVTE_Fused_Attn_Backend::NVTE_AOTriton)
       .value("NVTE_CK", NVTE_Fused_Attn_Backend::NVTE_CK);
 #endif
-=======
 
   pybind11::enum_<NVTE_Norm_Type>(m, "NVTE_Norm_Type", pybind11::module_local())
       .value("LayerNorm", NVTE_Norm_Type::LayerNorm)
@@ -193,7 +174,6 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("COLWISE", transformer_engine::jax::QuantizeLayout::COLWISE)
       .value("ROWWISE_COLWISE", transformer_engine::jax::QuantizeLayout::ROWWISE_COLWISE)
       .export_values();
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 }
 
 }  // namespace jax

@@ -256,16 +256,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused Apply RoPE BWD", py::call_guard<py::gil_scoped_release>());
 
   // Misc
-<<<<<<< HEAD
 #ifndef USE_ROCM
-  m.def("get_cublasLt_version", &get_cublasLt_version, "Get cublasLt version",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("get_cudnn_version", &get_cudnn_version, "Get cuDNN version",
-=======
   m.def("get_cublasLt_version", &transformer_engine::pytorch::get_cublasLt_version,
         "Get cublasLt version", py::call_guard<py::gil_scoped_release>());
   m.def("get_cudnn_version", &transformer_engine::pytorch::get_cudnn_version, "Get cuDNN version",
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
         py::call_guard<py::gil_scoped_release>());
 #endif
   m.attr("_num_cublas_streams") = py::int_(transformer_engine::num_streams);
@@ -410,19 +404,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("set_sm_margin") = false, py::arg("atomic_gemm") = false,
            py::arg("use_ce") = true, py::arg("aggregate") = false)
       .def("copy_into_buffer", &CommOverlapP2P::copy_into_buffer, py::arg("input"),
-<<<<<<< HEAD
-           py::arg("quantizer"), py::arg("local_chunk") = false)
-      .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("quantizer"),
-           py::arg("local_chunk") = false, py::arg("shape") = std::nullopt)
-      .def("set_buffer_params", &CommOverlapP2P::set_buffer_params);
-#else
-  m.def("CommOverlapHelper", &placeholder, "Dummy function for python side annotations");
-  m.def("CommOverlap", &placeholder, "Dummy function for python side annotations");
-  m.def("CommOverlapP2P", &placeholder, "Dummy function for python side annotations");
-#endif //USE_ROCM
-=======
            py::arg("local_chunk") = false)
       .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("local_chunk") = false,
            py::arg("shape") = std::nullopt);
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
+#else
+  m.def("CommOverlapHelper", &transformer_engine::pytorch::placeholder, "Dummy function for python side annotations");
+  m.def("CommOverlap", &transformer_engine::pytorch::placeholder, "Dummy function for python side annotations");
+  m.def("CommOverlapP2P", &transformer_engine::pytorch::placeholder, "Dummy function for python side annotations");
+#endif //USE_ROCM
 }

@@ -41,12 +41,9 @@ Compute always in FP32
 namespace transformer_engine {
 namespace normalization {
 
-<<<<<<< HEAD
 #ifndef __HIP_PLATFORM_AMD__
-=======
 bool& use_zero_centered_gamma_in_weight_dtype();
 
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 cudnn_frontend::NormFwdPhase_t get_cudnn_forward_phase(const bool training) {
   return training ? cudnn_frontend::NormFwdPhase_t::TRAINING
                   : cudnn_frontend::NormFwdPhase_t::INFERENCE;
@@ -542,12 +539,9 @@ void nvte_enable_cudnn_norm_bwd(bool enable) {
   NVTE_API_CALL(nvte_enable_cudnn_norm_bwd);
   transformer_engine::normalization::_cudnn_norm_bwd_flag() = enable;
 }
-<<<<<<< HEAD
 #endif
-=======
 
 void nvte_enable_zero_centered_gamma_in_weight_dtype(bool enable) {
   NVTE_API_CALL(nvte_enable_zero_centered_gamma_in_weight_dtype);
   transformer_engine::normalization::_zero_centered_gamma_in_weight_dtype() = enable;
 }
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270

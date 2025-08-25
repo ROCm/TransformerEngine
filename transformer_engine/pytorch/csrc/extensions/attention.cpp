@@ -5,12 +5,8 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
-<<<<<<< HEAD:transformer_engine/pytorch/csrc/extensions/attention.cu
-#include "common/common.h"
-=======
 
 #include "common.h"
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270:transformer_engine/pytorch/csrc/extensions/attention.cpp
 #include "extensions.h"
 #include "pybind.h"
 
@@ -758,18 +754,6 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
  * KV Cache: Convert a tensor from qkv_format = thd to qkv_format = bshd
  **************************************************************************************************/
 
-<<<<<<< HEAD:transformer_engine/pytorch/csrc/extensions/attention.cu
-template <typename scalar_t>
-void convert_thd_to_bshd_launcher(at::Tensor tensor, at::Tensor new_tensor, at::Tensor cu_seqlens,
-                                  int b, int max_seq_len, int h, int d) {
-  transformer_engine::fused_attn::convert_thd_to_bshd_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
-          reinterpret_cast<scalar_t *>(tensor.data_ptr<scalar_t>()),
-          reinterpret_cast<scalar_t *>(new_tensor.data_ptr<scalar_t>()), cu_seqlens.data_ptr<int>(),
-          b, max_seq_len, h, d);
-}
-
-=======
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270:transformer_engine/pytorch/csrc/extensions/attention.cpp
 at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len) {
   int h = tensor.size(1);
   int d = tensor.size(2);
@@ -790,18 +774,6 @@ at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, 
  * KV Cache: Convert a tensor from qkv_format = bshd to qkv_format = thd
  **************************************************************************************************/
 
-<<<<<<< HEAD:transformer_engine/pytorch/csrc/extensions/attention.cu
-template <typename scalar_t>
-void convert_bshd_to_thd_launcher(at::Tensor tensor, at::Tensor new_tensor, at::Tensor cu_seqlens,
-                                  int b, int max_seq_len, int h, int d) {
-  transformer_engine::fused_attn::convert_bshd_to_thd_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
-          reinterpret_cast<scalar_t *>(tensor.data_ptr<scalar_t>()),
-          reinterpret_cast<scalar_t *>(new_tensor.data_ptr<scalar_t>()), cu_seqlens.data_ptr<int>(),
-          b, max_seq_len, h, d);
-}
-
-=======
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270:transformer_engine/pytorch/csrc/extensions/attention.cpp
 at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int t) {
   int max_seq_len = tensor.size(1);
   int h = tensor.size(2);
@@ -819,51 +791,6 @@ at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int t) 
   return new_tensor;
 }
 
-<<<<<<< HEAD:transformer_engine/pytorch/csrc/extensions/attention.cu
-/***************************************************************************************************
- * KV Cache: Copy new KV tokens to the KV cache
- *   1. new_k and new_v are in qkv_format; k_cache and v_cache are in 'bshd' format
- *   2. cu_new_lens and cu_cached_lens are in shape [b + 1]; cu_cached_lens include the added lens
- *      in current step
- *   3. Non-paged KV cache is a special case of paged KV cache, with page_table = [b, 1] and
- *      max_pages_per_seq = 1. We use the same underlying kernel for both non-paged and paged.
- *      Set is_non_paged = True/False to indicate as such.
- *   4. is_non_paged = True also re-indexes the KV cache, e.g. the initial batch indices [0, 3, 1, 2]
- *      becomes [0, 1, 1, 2]. The page_table = batch_indices.unsqueeze(1) is however unchanged.
- *      batch_indices_post can be used for monotonical indexing, i.e. [0, 1, 2, 3]. batch_indices is
- *      preserved for the next layer in the same iteration.
- *   5. Only supports same page_table for k_cache and v_cache
- *   6. Only pad_between_seqs = False when qkv_format = thd, i.e. there should be no pad tokens
- *      between sequences in new_k and new_v such as [a a a 0..0 b b 0..0 c 0..0].
- **************************************************************************************************/
-
-template <typename scalar_t>
-void copy_to_kv_cache_launcher(at::Tensor new_k, at::Tensor new_v, at::Tensor k_cache,
-                               at::Tensor v_cache, at::Tensor page_table, at::Tensor cu_new_lens,
-                               at::Tensor cu_cached_lens, NVTE_QKV_Format qkv_format, int h_kv,
-                               int d_k, int d_v, int b, int max_ctx_len, int max_seq_len,
-                               int max_pages_per_seq, bool is_non_paged) {
-  if (new_k.data_ptr() != nullptr && new_v.data_ptr() != nullptr && k_cache.data_ptr() != nullptr &&
-      v_cache.data_ptr() != nullptr) {
-    if (is_non_paged) {
-      transformer_engine::fused_attn::reindex_kv_cache_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
-              reinterpret_cast<scalar_t *>(k_cache.data_ptr<scalar_t>()),
-              reinterpret_cast<scalar_t *>(v_cache.data_ptr<scalar_t>()),
-              page_table.data_ptr<int>(), cu_new_lens.data_ptr<int>(),
-              cu_cached_lens.data_ptr<int>(), h_kv, d_k, d_v, b, max_seq_len);
-    }
-    transformer_engine::fused_attn::copy_to_kv_cache_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
-            reinterpret_cast<scalar_t *>(new_k.data_ptr<scalar_t>()),
-            reinterpret_cast<scalar_t *>(new_v.data_ptr<scalar_t>()),
-            reinterpret_cast<scalar_t *>(k_cache.data_ptr<scalar_t>()),
-            reinterpret_cast<scalar_t *>(v_cache.data_ptr<scalar_t>()), page_table.data_ptr<int>(),
-            cu_new_lens.data_ptr<int>(), cu_cached_lens.data_ptr<int>(), qkv_format, h_kv, d_k, d_v,
-            b, max_ctx_len, max_seq_len, max_pages_per_seq, is_non_paged);
-  }
-}
-
-=======
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270:transformer_engine/pytorch/csrc/extensions/attention.cpp
 void copy_to_kv_cache(at::Tensor new_k, at::Tensor new_v, at::Tensor k_cache, at::Tensor v_cache,
                       at::Tensor page_table, at::Tensor cu_new_lens, at::Tensor cu_cached_lens,
                       NVTE_QKV_Format qkv_format, int b, int max_ctx_len, int max_seq_len,

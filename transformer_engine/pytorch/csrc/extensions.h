@@ -13,10 +13,15 @@
 
 #include "common.h"
 
-<<<<<<< HEAD
-=======
+#ifdef USE_ROCM
+namespace transformer_engine {
+//dummy CommOverlapCore, CommOverlapType in rocm
+class CommOverlapCore{};
+class CommOverlapType{};
+}
+#endif
+
 namespace transformer_engine::pytorch {
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
 /***************************************************************************************************
  * Permutation
@@ -188,19 +193,6 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
  * Cast
  **************************************************************************************************/
 
-<<<<<<< HEAD
-#ifdef USE_ROCM
-namespace transformer_engine {
-//dummy CommOverlapCore, CommOverlapType in rocm
-class CommOverlapCore{};
-class CommOverlapType{};
-}
-#endif
-
-namespace transformer_engine::pytorch {
-
-=======
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
                     std::optional<at::Tensor> noop);
 

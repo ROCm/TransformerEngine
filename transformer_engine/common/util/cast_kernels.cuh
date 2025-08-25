@@ -1319,6 +1319,7 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
           workspace_tensor, stream);
       break;
     }
+#ifndef __HIP_PLATFORM_AMD__
     case NVTE_BLOCK_SCALING_2D: {
       // TODO(kwyss): IS_BIAS, IS_DACT, IS_ACT, ParamOP, OP parameters support.
       NVTE_CHECK((!IS_DBIAS && !IS_DACT && !IS_ACT),
@@ -1349,6 +1350,7 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
                                           columnwise_option, force_pow_2_scales, stream);
       break;
     }
+#endif
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(output_tensor->scaling_mode) + ".");
   }

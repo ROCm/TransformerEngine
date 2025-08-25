@@ -6,11 +6,7 @@
 import logging
 import math
 import os
-<<<<<<< HEAD
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
-from importlib.metadata import version
-=======
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 from typing import Any, Dict, List, Tuple, Union, Optional
 from contextlib import contextmanager
 

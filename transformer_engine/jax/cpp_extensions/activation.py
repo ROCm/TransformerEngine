@@ -12,25 +12,14 @@ from packaging import version
 import jax
 import jax.numpy as jnp
 from jax import dtypes
-<<<<<<< HEAD
-from jax.interpreters.mlir import ir
-from jax.sharding import PartitionSpec, NamedSharding
-from .misc import is_hip_extension
-=======
 from jax.experimental.custom_partitioning import SdyShardingRule
 from jax.sharding import PartitionSpec
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
-from transformer_engine import transformer_engine_jax
-from transformer_engine.transformer_engine_jax import NVTE_Activation_Type
+import transformer_engine_jax
+from transformer_engine_jax import NVTE_Activation_Type
 
 from .base import BasePrimitive, register_primitive
 from .misc import (
-<<<<<<< HEAD
-    get_jnp_float8_e4m3_type,
-    check_valid_batch_dims,
-=======
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
     jax_dtype_to_te_dtype,
     te_dtype_to_jax_dtype,
     get_padded_spec,
@@ -1237,170 +1226,7 @@ def quantize_dact_dbias(
 
 
 def dact_lu(
-<<<<<<< HEAD
-    inputs: jnp.ndarray, act_lu_inputs: jnp.ndarray, activation_type: Sequence[Union[str, Callable]]
-) -> jnp.ndarray:
-    """
-    dact_lu fusion wrapper
-    Return dgated_act_lu(inputs)
-    """
-    if not DActLuPrimitive.enabled():
-        _, vjp_func = jax.vjp(partial(_jax_act_lu, activation_type=activation_type), act_lu_inputs)
-        return vjp_func(inputs)[0]
-
-    act_type_id = ActivationEnum[activation_type].value
-    return DActLuPrimitive.outer_primitive.bind(inputs, act_lu_inputs, act_enum=act_type_id)
-
-
-class ActLuFp8Primitive(BasePrimitive):
-    """
-    ActLu FP8 Primitive
-    """
-
-    name = "te_act_lu_fp8"
-    multiple_results = True
-    impl_static_args = (4, 5)  # out_dtype, act_enum
-    inner_primitive = None
-    outer_primitive = None
-
-    @staticmethod
-    def abstract(
-        x_aval, amax_aval, scale_aval, scale_inv_aval, *, out_dtype, act_enum
-    ):  # pylint: disable=unused-argument
-        """
-        te_act_lu_p abstract
-        """
-        dtype = dtypes.canonicalize_dtype(x_aval.dtype)
-        # Currently only support casting to E4M3 only in C side.
-        assert out_dtype == get_jnp_float8_e4m3_type()
-        assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
-        assert amax_aval.dtype == jnp.float32
-        assert scale_aval.dtype == jnp.float32
-        assert scale_inv_aval.dtype == jnp.float32
-
-        assert x_aval.shape[-2] == 1 or x_aval.shape[-2] == 2
-        hidden_size = x_aval.shape[-1]
-        batch_shape = x_aval.shape[:-2]
-        out_shape = (batch_shape) + (hidden_size,)
-        out_aval = x_aval.update(shape=out_shape, dtype=out_dtype)
-        updated_amax_aval = amax_aval.update(shape=amax_aval.shape, dtype=amax_aval.dtype)
-
-        return out_aval, updated_amax_aval
-
-    @staticmethod
-    def lowering(ctx, x, amax, scale, scale_inv, *, out_dtype, act_enum):
-        """
-        te_gated_act_lu_p lowering rules
-        """
-        x_aval, amax_aval, scale_aval, scale_inv_aval = ctx.avals_in
-        assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
-        assert amax_aval.dtype == jnp.float32
-        assert scale_aval.dtype == jnp.float32
-        assert scale_inv_aval.dtype == jnp.float32
-        if is_ffi_enabled():
-            name = "te_act_lu_fp8_ffi"
-            out = ffi.ffi_lowering(name, operand_output_aliases={1: 1})(
-                ctx, x, amax, scale, scale_inv, act_enum=act_enum
-            )
-        else:
-            ir_x_type = ir.RankedTensorType(x.type)
-            ir_x_shape = ir_x_type.shape
-            ir_out_dtype = jax_dtype_to_ir_dtype(out_dtype)
-            ir_amax_type = ir.RankedTensorType(amax.type)
-            ir_amax_dtype = ir_amax_type.element_type
-            ir_amax_shape = ir_amax_type.shape
-            ir_scale_shape = ir_amax_shape
-            ir_scale_inv_shape = ir_amax_shape
-
-            hidden_size = ir_x_shape[-1]
-            batch_shape = ir_x_shape[:-2]
-            batch_size = reduce(operator.mul, batch_shape)
-            out_shape = batch_shape + [hidden_size]
-            out_types = [
-                ir.RankedTensorType.get(out_shape, ir_out_dtype),
-                ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
-            ]
-            operands = [x, amax, scale, scale_inv]
-            operand_shapes = [ir_x_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
-            args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-
-            opaque = transformer_engine_jax.pack_common_descriptor(
-                (batch_size, hidden_size),
-                jax_dtype_to_te_dtype(x_aval.dtype),
-                jax_dtype_to_te_dtype(out_dtype),
-                act_enum,
-            )
-
-            out = custom_caller(
-                ActLuFp8Primitive.name, args, opaque, False, operand_output_aliases={1: 1}
-            )
-
-        return out
-
-    @staticmethod
-    def impl(x, amax, scale, scale_inv, out_dtype, act_enum):
-        """
-        to describe implementation
-        """
-        assert ActLuFp8Primitive.inner_primitive is not None
-        out, updated_amax = ActLuFp8Primitive.inner_primitive.bind(
-            x, amax, scale, scale_inv, out_dtype=out_dtype, act_enum=act_enum
-        )
-        return out, updated_amax
-
-    @staticmethod
-    def batcher(batched_args, batch_dims, *, out_dtype, act_enum):
-        """
-        to describe batch rules for vmap
-        """
-        check_valid_batch_dims(batch_dims)
-        assert ActLuFp8Primitive.outer_primitive is not None
-        x, amax, scale, scale_inv = batched_args
-        x_bdim, amax_bdim, _, _ = batch_dims
-
-        out_bdims = x_bdim, amax_bdim
-        return (
-            ActLuFp8Primitive.outer_primitive.bind(
-                x, amax, scale, scale_inv, out_dtype=out_dtype, act_enum=act_enum
-            ),
-            out_bdims,
-        )
-
-    @staticmethod
-    def infer_sharding_from_operands(out_dtype, act_enum, mesh, arg_infos, result_infos):
-        del out_dtype, result_infos, act_enum
-        x_spec = get_padded_spec(arg_infos[0])
-        out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-2], x_spec[-1]))
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
-        return (out_sharding, amax_sharding)
-
-    @staticmethod
-    def partition(out_dtype, act_enum, mesh, arg_infos, result_infos):
-        del result_infos
-        x_spec = get_padded_spec(arg_infos[0])
-        out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-2], x_spec[-1]))
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
-        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
-        out_shardings = (out_sharding, amax_sharding)
-
-        def sharded_impl(x, amax, scale, scale_inv):
-            local_x, local_amax = ActLuFp8Primitive.impl(
-                x, amax, scale, scale_inv, out_dtype=out_dtype, act_enum=act_enum
-            )
-            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax, mesh)
-
-            return local_x, global_updated_amax
-
-        return mesh, sharded_impl, out_shardings, arg_shardings
-
-
-register_primitive(ActLuFp8Primitive)
-
-
-def act_lu_fp8(
-=======
     dz: jnp.ndarray,
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
     x: jnp.ndarray,
     activation_type: Sequence[Union[str, Callable]],
     quantizer: Optional[Quantizer] = None,

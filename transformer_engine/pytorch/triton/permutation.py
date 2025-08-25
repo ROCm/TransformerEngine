@@ -12,15 +12,12 @@ import torch
 import triton
 import triton.language as tl
 
-<<<<<<< HEAD
 from transformer_engine.pytorch.utils import is_fp8_fnuz
 from transformer_engine_torch import DType as TE_DType
 
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 IS_HIP_EXTENSION = triton.language.constexpr(IS_HIP_EXTENSION)
-=======
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
 @triton.jit
 def _row_id_map_pass_1_kernel(
@@ -279,18 +276,7 @@ def _unpermute_kernel(
     PERMUTE_PROBS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-<<<<<<< HEAD
-    if ((FP8_DTYPE == tl.float8e5b16 or FP8_DTYPE == tl.float8e5) or
-        (FP8_DTYPE == tl.float8e4b8 or FP8_DTYPE == tl.float8e4nv)):
-        compute_type = tl.float16
-        data_type = FP8_DTYPE
-        pytorch_tensor_dtype = tl.uint8
-    else:
-        data_type = input_ptr.dtype.element_ty
-        assert FP8_DTYPE is None
-=======
     data_type = input_ptr.dtype.element_ty
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
     compute_type = tl.float32
 
     pid = tl.program_id(0)
@@ -355,15 +341,6 @@ def unpermute_with_mask_map(
     hidden_size: int,
 ):
     # pylint: disable=missing-function-docstring
-<<<<<<< HEAD
-    if fp8_dtype == TE_DType.kFloat8E5M2:
-        fp8_dtype = tl.float8e5b16 if is_fp8_fnuz() else tl.float8e5
-    elif fp8_dtype == TE_DType.kFloat8E4M3:
-        fp8_dtype = tl.float8e4b8 if is_fp8_fnuz() else tl.float8e4nv
-    else:
-        fp8_dtype = None
-=======
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
     output = torch.empty((num_tokens, hidden_size), dtype=inp.dtype, device="cuda")
     if permuted_probs is not None:
         unpermuted_probs = torch.empty(
@@ -424,18 +401,7 @@ def _unpermute_bwd_with_merging_probs_kernel(
     # metas
     BLOCK_SIZE: tl.constexpr,
 ):
-<<<<<<< HEAD
-    if ((FP8_DTYPE == tl.float8e5b16 or FP8_DTYPE == tl.float8e5) or
-        (FP8_DTYPE == tl.float8e4b8 or FP8_DTYPE == tl.float8e4nv)):
-        compute_type = tl.float16
-        data_type = FP8_DTYPE
-        pytorch_tensor_dtype = tl.uint8
-    else:
-        data_type = fwd_output_grad_ptr.dtype.element_ty
-        assert FP8_DTYPE is None
-=======
     data_type = fwd_output_grad_ptr.dtype.element_ty
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
     compute_type = tl.float32
 
     pid = tl.program_id(0)
@@ -511,15 +477,6 @@ def unpermute_with_mask_map_bwd_with_merging_probs(
     hidden_size: int,
 ):
     # pylint: disable=missing-function-docstring
-<<<<<<< HEAD
-    if fp8_dtype == TE_DType.kFloat8E5M2:
-        fp8_dtype = tl.float8e5b16 if is_fp8_fnuz() else tl.float8e5
-    elif fp8_dtype == TE_DType.kFloat8E4M3:
-        fp8_dtype = tl.float8e4b8 if is_fp8_fnuz() else tl.float8e4nv
-    else:
-        fp8_dtype = None
-=======
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
     act_grad = torch.empty(
         (num_out_tokens, hidden_size), dtype=fwd_output_grad.dtype, device="cuda"
     )

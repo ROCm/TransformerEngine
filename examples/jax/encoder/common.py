@@ -6,17 +6,13 @@
 """Shared functions for the encoder tests"""
 from functools import lru_cache
 
-<<<<<<< HEAD
-from transformer_engine.transformer_engine_jax import get_device_compute_capability
-from transformer_engine.jax import is_hip_extension
-if is_hip_extension():
-    from transformer_engine.jax.util import is_mi200
-=======
 import transformer_engine
 from transformer_engine_jax import get_device_compute_capability
 from transformer_engine.common import recipe
+from transformer_engine.jax import is_hip_extension
+if is_hip_extension():
+    from transformer_engine.jax.util import is_mi200
 
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
 @lru_cache
 def is_bf16_supported():

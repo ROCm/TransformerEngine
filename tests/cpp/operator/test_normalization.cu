@@ -27,162 +27,6 @@ using namespace test;
 
 namespace {
 
-<<<<<<< HEAD
-enum NormType {
-  LayerNorm,
-  RMSNorm
-};
-
-std::map<NormType, std::string> normToString = {
-  {NormType::LayerNorm, "LayerNorm"},
-  {NormType::RMSNorm, "RmsNorm"}
-};
-
-template <typename InputType>
-void compute_ref_stats(NormType norm_type,
-                       const InputType *data, float *mu, float *rsigma,
-                       const size_t N, const size_t H, const double epsilon){
-  using compute_t = float;
-  compute_t current, m;
-  for (size_t i = 0; i < N; ++i) {
-    compute_t sum = 0;
-    for (size_t j = 0; j < H; ++j) {
-      sum += static_cast<compute_t>(data[i * H + j]);
-    }
-    if (norm_type == LayerNorm){
-      mu[i] = sum / H;
-      m = mu[i];
-    } else { m = 0;}
-
-    compute_t sum_sq = 0;
-    for (size_t j = 0; j < H; ++j) {
-      current = static_cast<compute_t>(data[i * H + j]);
-      sum_sq += (current - m) * (current - m);
-    }
-#ifdef __HIP_PLATFORM_AMD__
-    rsigma[i] = 1.0/sqrtf((sum_sq / H) + epsilon);
-#else
-    rsigma[i] = rsqrtf((sum_sq / H) + epsilon);
-#endif
-  }
-}
-
-// For now, cudnn does static_cast<compute_t>(gamma + static_cast<input_t>(1.0))
-// This will be changed in the future release
-template <typename InputType>
-inline auto compute_gamma(InputType gamma, const bool zero_centered_gamma, const bool use_cudnn){
-
-  using compute_t = float;
-  if constexpr (std::is_same_v<InputType, fp8e5m2> || std::is_same_v<InputType, fp8e4m3>){
-    compute_t g = static_cast<compute_t>(gamma);
-    if (zero_centered_gamma) {
-      g += static_cast<compute_t>(1.f);
-    }
-    return g;
-  } else {
-#ifdef __HIP_PLATFORM_AMD__
-    (void)use_cudnn;  // Parameter is unused on AMD platform
-#else
-    if (use_cudnn){
-      compute_t g = static_cast<compute_t>(0.f);
-      InputType gi = gamma;
-      if (zero_centered_gamma) {
-        gi = gi + static_cast<InputType>(1.f);
-      }
-      g = static_cast<compute_t>(gi);
-      return g;
-    } else
-#endif
-    {
-      compute_t g = static_cast<compute_t>(gamma);
-      if (zero_centered_gamma) {
-        g += static_cast<compute_t>(1.f);
-      }
-      return g;
-    }
-  }
-}
-
-template <typename InputType, typename OutputType>
-void compute_ref_output(NormType norm_type,
-                        const InputType *data, const InputType *gamma, const InputType *beta,
-                        OutputType* output,
-                        const float *mu, const float *rsigma,
-                        const size_t N, const size_t H,
-                        float *amax, float scale, const bool zero_centered_gamma, const bool use_cudnn) {
-  using compute_t = float;
-  compute_t current_max = -1e100;
-  for (size_t i = 0; i < N; ++i) {
-    for (size_t j = 0; j < H; ++j) {
-      compute_t current = static_cast<compute_t>(data[i * H + j]);
-      compute_t g = compute_gamma(gamma[j], zero_centered_gamma, use_cudnn);
-
-      compute_t tmp;
-      if (norm_type == LayerNorm) {
-        tmp = (current - mu[i]) * rsigma[i] * g + static_cast<compute_t>(beta[j]);
-      } else { // RMSNorm
-        tmp = current * rsigma[i] * g;
-      }
-
-      output[i * H + j] = static_cast<OutputType>(tmp * scale);
-      current_max = fmaxf(current_max, fabsf(tmp));
-    }
-  }
-  *amax = current_max;
-}
-
-
-template <typename InputType, typename OutputType>
-void compute_ref_backward(const NormType norm_type, const OutputType *output_grad, const InputType *data,
-                          const float *mu, const float *rsigma,
-                          const InputType *gamma,
-                          InputType *data_grad,
-                          InputType *gamma_grad, InputType *beta_grad,
-                          const size_t N, const size_t H,
-                          const bool zero_centered_gamma, const bool use_cudnn) {
-  using compute_t = float;
-  std::vector<compute_t> dgamma(H, 0.f);
-  std::vector<compute_t> dbeta(H, 0.f);
-
-  for (size_t i = 0 ; i < N; ++i) {
-    // Reductions
-    auto local_mu = (norm_type == LayerNorm) ? mu[i] : 0.;
-    compute_t mdy = 0, mdyy = 0;
-    for (size_t j = 0; j < H; ++j) {
-      const compute_t x = static_cast<compute_t>(data[i * H + j]);
-      const compute_t y = (x - local_mu) * rsigma[i];
-      compute_t g = compute_gamma(gamma[j], zero_centered_gamma, use_cudnn);
-      const compute_t dz = static_cast<compute_t>(output_grad[i * H + j]);
-      const compute_t dy = g * dz;
-      dgamma[j] += y * dz;
-      if (norm_type == LayerNorm) {
-        dbeta[j] += dz;
-        mdy += dy;
-      }
-      mdyy += dy * y;
-    }
-    mdy /= H;
-    mdyy /= H;
-
-    // Input grads
-    for (size_t j = 0; j < H; ++j) {
-      const compute_t x = static_cast<compute_t>(data[i * H + j]);
-      const compute_t y = (x - local_mu) * rsigma[i];
-      compute_t g = compute_gamma(gamma[j], zero_centered_gamma, use_cudnn);
-      const compute_t dz = static_cast<compute_t>(output_grad[i * H + j]);
-      const compute_t dy = g * dz;
-      const compute_t dx = rsigma[i] * (dy - mdyy * y - mdy);
-      data_grad[i * H + j] = static_cast<InputType>(dx);
-    }
-  }
-
-  // Weight grads
-  for (size_t j = 0; j < H; ++j) gamma_grad[j] = static_cast<InputType>(dgamma[j]);
-  if (norm_type == LayerNorm) for (size_t j = 0; j < H; ++j) beta_grad[j] = static_cast<InputType>(dbeta[j]);
-}
-
-=======
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 template <typename InputType, typename OutputType>
 void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                  NormType norm_type, bool use_cudnn, const bool zero_centered_gamma_in_weight_dtype) {
@@ -234,17 +78,14 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   cudaDeviceProp prop;
   (void)cudaGetDeviceProperties(&prop, 0);
 
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_AMD__
   ASSERT_FALSE(use_cudnn) << "CUDNN is not supported on ROCm";
 #else
-=======
   if ((!use_cudnn || !zero_centered_gamma) && zero_centered_gamma_in_weight_dtype) {
     // Skip duplicate tests when zero_centered_gamma_in_weight_dtype is true and won't affect the implementation
     GTEST_SKIP() << "Zero-centered gamma in weight dtype is only supported with cuDNN backend";
   }
 
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
   if (use_cudnn){
     nvte_enable_cudnn_norm_fwd(true);
     nvte_enable_cudnn_norm_bwd(true);

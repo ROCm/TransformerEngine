@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -10,6 +12,7 @@ from typing import Any, Dict, List, Tuple, Union
 import pytest
 import torch
 
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
@@ -43,7 +46,7 @@ def _to_list(x: Union[Iterable, Any]) -> List:
 DimsType = Union[Iterable[int], int]
 
 # TODO replace with call to fp8.py when recipe added.
-recipe_available = get_device_compute_capability() >= (9, 0) and float(torch.version.cuda) >= 12.8
+recipe_available = not IS_HIP_EXTENSION and (get_device_compute_capability() >= (9, 0) and float(torch.version.cuda) >= 12.8)
 reason_for_no_recipe = "Quantize kernels require TMA and are only relevant with GEMMS."
 
 

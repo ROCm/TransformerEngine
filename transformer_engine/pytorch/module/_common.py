@@ -6,6 +6,7 @@
 
 """Internal function used by multiple modules."""
 
+import os
 from typing import Any, List, Optional, Tuple, Union, Callable
 from dataclasses import dataclass
 

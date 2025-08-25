@@ -45,20 +45,15 @@ from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-<<<<<<< HEAD
-from ..utils import get_device_compute_capability
+from ..utils import get_device_compute_capability, torch_get_autocast_gpu_dtype
 if IS_HIP_EXTENSION:
     from ..triton_kernels.cast import te_quantize_triton
 
-from ..utils import non_tn_fp8_gemm_supported
-from ..tensor.float8_tensor import Float8Quantizer 
-=======
-from ..utils import torch_get_autocast_gpu_dtype
+from ..utils import is_non_tn_fp8_gemm_supported
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ...common.recipe import Recipe
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
 
 __all__ = ["initialize_ub", "destroy_ub"]
 
@@ -1201,11 +1196,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         update_workspace: bool = True,
         skip_update_flag: Optional[torch.Tensor] = None,
         fsdp_group: Optional[dist_group_type] = None,
-<<<<<<< HEAD
         create_transpose_cache: bool = True,
-=======
         workspace_dtype: Optional[torch.dtype] = None,
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
     ) -> QuantizedTensor:
         """Get FP8 workspace buffer and maybe update its values
 
@@ -1228,14 +1220,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             over `update_workspace` if provided.
         fsdp_group: bool, default = None
             FSDP process group that the weights are distributed over.
-<<<<<<< HEAD
         create_transpose_cache: bool, default = True
             Create transpose buffer from `tensor`.
-=======
         workspace_dtype: torch.dtype, default = None
             If weight workspace contains high-precision tensor - for example
             for debug quantization, this is dtype of the tensor.
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
         """
 
         # FP8 primary weights
@@ -1276,7 +1265,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         ):
             _fsdp_gather_tensors(fsdp_group, [tensor.data.shape], out)
 
-        if not non_tn_fp8_gemm_supported() and not create_transpose_cache:
+        if not is_non_tn_fp8_gemm_supported() and not create_transpose_cache:
             current_quantizer = None
             if out is None:
                 current_quantizer = quantizer
@@ -1322,7 +1311,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if hasattr(out, "quantize_"):
                 out.quantize_(tensor, noop_flag=skip_update_flag)
             else:
-<<<<<<< HEAD
                 if IS_HIP_EXTENSION:
                     use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
                     quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
@@ -1330,9 +1318,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 else:
                     tex.quantize(tensor, quantizer, out, skip_update_flag)
 
-=======
-                tex.quantize(tensor, quantizer, out, skip_update_flag)
->>>>>>> 42b51c40c4e39adce9640cf98f8a3f5869f5f270
         return out
 
     def _load_from_state_dict(
