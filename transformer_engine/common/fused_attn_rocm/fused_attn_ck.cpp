@@ -562,13 +562,12 @@ void fused_attn_ck_fwd_impl(
       (*workspace_size)+= h*sizeof(float);
     }
     if(pad_between_seqs){
-      // softmax_lse buffer needed for pad_between_seq only
-      // for non pad_between_seqs cases (BSHD/SBHD with no padding or thd without cu_seqlen_padded), no softmax_lse_buffer needed
+      // softmax_lse buffer
       (*workspace_size)+= max_tokens_q*h*sizeof(float);
       // request q, k, v, o buffer without padding
       (*workspace_size)+= q_storage_bytes + k_storage_bytes + v_storage_bytes + o_storage_bytes;
     }else if(is_ragged){
-      // softmax_lse buffer needed for pad_between_seq only
+      // We include a softmax_lse buffer to use the kernel in order to properly reshape the lse as needed.
       (*workspace_size)+= max_tokens_q*h*sizeof(float);
 
     }
@@ -1144,7 +1143,7 @@ void fused_attn_ck_bwd_impl(
         devPtrCuSeqlensQ, devPtrCuSeqlensKV, 
         devPtrO,
         o_stride[1], o_stride[2],
-        devPtrSoftmaxAux,
+        devPtrSoftmaxLSEWithoutPadding,
         devPtrdO,
         o_stride[1], o_stride[2], //dO and O share the same stride
         scaling_factor, dropout_probability,
