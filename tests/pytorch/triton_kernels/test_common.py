@@ -89,12 +89,13 @@ def te_compare_results(t, r, atol, rtol, msg, use_torch_semantics=False):
     t = t.cpu().to(torch.float32).to(torch.float64)
     r = r.cpu().to(torch.float32).to(torch.float64)
     diff = t - r
+    adiff = torch.abs(diff)
+    nonzero_r = r != 0
+    rel_diff = torch.where(nonzero_r, torch.abs(diff / r), torch.zeros_like(diff))
     if use_torch_semantics:
-        mismatch = torch.abs(diff) > atol + rtol * torch.abs(r)
+        mismatch = adiff > atol + rtol * torch.abs(r)
     else:
-        atol_mismatch = torch.abs(diff) > atol
-        nonzero_r = r != 0
-        rel_diff = torch.where(nonzero_r, torch.abs(diff / r), torch.zeros_like(diff))
+        atol_mismatch = adiff > atol
         rtol_mismatch = torch.where(nonzero_r, rel_diff > rtol, torch.full_like(atol_mismatch, False))
         mismatch = atol_mismatch & (~nonzero_r | rtol_mismatch)
     has_mismatch = torch.any(mismatch).item()
@@ -128,7 +129,7 @@ def te_compare_results(t, r, atol, rtol, msg, use_torch_semantics=False):
         has_mismatch = torch.any(mismatch).item()
 
     if has_mismatch:
-        abs_diff = torch.where(mismatch, torch.abs(diff), 0)
+        abs_diff = torch.where(mismatch, adiff, 0)
         rel_diff = torch.where(mismatch, rel_diff, 0)
         max_abs_diff = torch.max(abs_diff).item()
         max_rel_diff = torch.max(rel_diff).item()

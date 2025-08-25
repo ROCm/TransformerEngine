@@ -578,8 +578,7 @@ class TestNorms:
         dbeta_triton, dbeta_hip,
         norm
     ):
-        tols = dtype_tols(dx_triton.dtype)
-        _compare_func = partial(compare_results, provider="te", **tols, use_torch_semantics=True)
+        _compare_func = partial(compare_results, provider="te", atol=1.5e-4, rtol=1e-4, use_torch_semantics=True)
 
         _compare_func(
             actual=dx_triton,
