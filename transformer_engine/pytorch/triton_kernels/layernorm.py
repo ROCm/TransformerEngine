@@ -69,7 +69,7 @@ def _layernorm_fwd_triton(
 ):
 
     # Enable the transpose cache only in FP8 mode.
-    tl.static_assert(not MAKE_TRANSPOSE or IS_FP8, msg="Transpose cache requires fp8 data type.")
+    tl.static_assert(not MAKE_TRANSPOSE or IS_FP8, "Transpose cache requires fp8 data type.")
 
     # program id
     pid = tl.program_id(0)
