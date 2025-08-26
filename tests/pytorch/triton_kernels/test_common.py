@@ -88,6 +88,32 @@ def te_compare_results(t, r, atol, rtol, msg, use_torch_semantics=False):
     dtype = t.dtype
     t = t.cpu().to(torch.float32).to(torch.float64)
     r = r.cpu().to(torch.float32).to(torch.float64)
+
+    # If any of the tensors contain NaN we
+    if torch.isnan(t).any() or torch.isnan(r).any():
+        base_msg = (
+            f"NaN values found!\n"
+        )
+
+        # Find which tensor has NaNs and at which indices
+        if torch.isnan(t).any():
+            nan_count = torch.isnan(t).sum()
+            nan_indices = torch.where(torch.isnan(t))
+            base_msg += f"Tensor 't' has {nan_count} NaN(s) at indices: {nan_indices}\n"
+
+        if torch.isnan(r).any():
+            nan_count = torch.isnan(r).sum()
+            nan_indices = torch.where(torch.isnan(r))
+            base_msg += f"Tensor 'r' has {nan_count} NaN(s) at indices: {nan_indices}\n"
+
+        if isinstance(msg, str):
+            msg = f"{msg}\n\n{base_msg}\n"
+        elif isinstance(msg, types.LambdaType):
+            msg = msg(base_msg)
+        else:
+            msg = base_msg
+        assert False, msg
+
     diff = t - r
     adiff = torch.abs(diff)
     nonzero_r = r != 0

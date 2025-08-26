@@ -13,6 +13,8 @@ from transformer_engine.pytorch.triton_kernels.common import (
     te_dtype_to_triton_dtype,
 )
 from .common import get_fp8_max
+from ..tensor.quantized_tensor import Quantizer
+import transformer_engine_torch as tex
 
 def dg_tmp_rows(x, sm_margin=None):
     return x.shape[0] if use_blocked(x) else num_programs(x, sm_margin)
@@ -45,6 +47,10 @@ def _rmsnorm_fwd_triton_impl(
     FP8_MAX: tl.constexpr,
     MAKE_TRANSPOSE: tl.constexpr,
 ):
+
+    # Enable the transpose cache only in FP8 mode.
+    tl.static_assert(not MAKE_TRANSPOSE or IS_FP8, msg="Transpose cache requires fp8 data type.")
+
     row_start = tl.program_id(0)
     col_offsets = tl.arange(0, BLOCK_SIZE)
     # as older version Triton doesn't support tl.assume and BUFF OPS, comment out for now
@@ -359,15 +365,15 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma):
 
 # triton drop-in replacement for transformer_engine::pytorch::rmsnorm_fwd
 def te_rmsnorm_fwd_triton(
-    input,
-    weight,
-    eps,
-    ln_out,
-    quantizer,
-    otype,
-    sm_margin,
-    zero_centered_gamma,
-    autotune = True,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    ln_out: torch.Tensor,
+    quantizer: Quantizer,
+    otype: tex.DType,
+    sm_margin: int,
+    zero_centered_gamma: bool,
+    autotune: bool = True,
 ):
     if eps < 0:
         raise ValueError(f"`eps` must be non-negative, but a value of {eps} was passed")
@@ -375,6 +381,7 @@ def te_rmsnorm_fwd_triton(
         raise ValueError(
             f"The input must be a 2-dimensional matrix, but an input with {input.ndim} was passed.")
 
+    device = input.device
     N, H = input.shape
     if weight.shape[0] != H:
         raise ValueError(
@@ -388,8 +395,8 @@ def te_rmsnorm_fwd_triton(
     NUM_PRGMS = num_programs(input, sm_margin)
     MAKE_TRANSPOSE = False
 
-    rsigma = torch.empty((N,), dtype=torch.float32, device="cuda")
-    pt_otype = (
+    rsigma = torch.empty((N,), dtype=torch.float32, device=device)
+    torch_out_dtype = (
         otype if isinstance(otype, torch.dtype)
         else te_dtype_to_torch_dtype(otype)
     )
@@ -397,7 +404,7 @@ def te_rmsnorm_fwd_triton(
         ln_out,
         quantizer=quantizer,
         input_shape=input.shape,
-        out_dtype=pt_otype
+        out_dtype=torch_out_dtype
     )
     if IS_FP8:
         MAKE_TRANSPOSE = quantizer.columnwise_usage
@@ -410,7 +417,7 @@ def te_rmsnorm_fwd_triton(
         FP8_MAX = get_fp8_max(quantizer.dtype)
         if MAKE_TRANSPOSE:
             if out._transpose_invalid:
-                out._transpose = torch.empty((out._data.shape[1], out._data.shape[0]), dtype=out._data.dtype)
+                out._transpose = torch.empty((out._data.shape[1], out._data.shape[0]), dtype=out._data.dtype, device=device)
                 out._transpose_invalid = False
             out_transpose_ptr = triton.reinterpret(out._transpose, tl_dtype)
             out_transpose_stride = out._transpose.stride(0)

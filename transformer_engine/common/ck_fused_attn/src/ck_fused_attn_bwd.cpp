@@ -320,7 +320,8 @@ void log_bwd_config(const char* func_name,
       ck_fused_attn_log_config = true;
   }
   if (ck_fused_attn_log_config) {
-    std::cout<<std::endl<<"run ck fmha_bwd: "<<std::endl;
+    std::cout<<std::endl<<func_name<<std::endl;
+
     // fmha_traits debug
     std::cout<<"fmha_traits: "<<std::endl;
     std::cout<<"hdim_q: "<<fmha_args.hdim_q<<std::endl;
@@ -633,6 +634,10 @@ hipError_t ck_attn_bwd(
 
   // print ck traits and args when needed
   log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_type, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args);
+  if (uses_bwd_v3)
+  {
+    set_aiter_asm_dir();
+  }
   
   float average_runtime = aiter::mha_bwd(fmha_args,
                                          stream_config,
@@ -771,7 +776,7 @@ hipError_t ck_attn_bwd(
 hipError_t ck_attn_varlen_bwd(  
   DType dtype,
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v,
-  uint64_t max_tokens_q,
+  uint64_t max_tokens_q, uint64_t max_tokens_kv,
   const void* q_ptr, 
   uint64_t stride_h_q, uint64_t stride_s_q,
   const void* k_ptr, 
@@ -974,6 +979,10 @@ hipError_t ck_attn_varlen_bwd(
 
   // print ck traits and args when needed
   log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_enum::no_bias, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args);
+  if (uses_bwd_v3)
+  {
+    set_aiter_asm_dir();
+  }
 
   float average_runtime = aiter::mha_bwd(fmha_args,
                                          stream_config,
@@ -992,7 +1001,7 @@ hipError_t ck_attn_varlen_bwd(
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
   }
   if(is_mqa_gqa){
-    dim3 grid(b*s_kv, hg);
+    dim3 grid(max_tokens_kv, hg);
     if (d_qk == d_v) {
       dim3 block(d_qk);
       if (ck_fused_attn_log_config){
