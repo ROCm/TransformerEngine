@@ -402,13 +402,10 @@ class FusedAttnRunner:
         self.tp_size = self.mesh.shape.get(self.mesh_resource.tp_resource, 1)
 
         # only support new-style RNGs on AMD hardware since they will crash otherwise
-        if is_hip_extension():
-            if self.use_old_rng:
-                key = jax.random.PRNGKey(0)
-            else:
-                key = jax.random.key(0)
-        else:
+        if is_hip_extension() and not self.use_old_rng:
             key = jax.random.key(0)
+        else:
+            key = jax.random.PRNGKey(0)
 
         q_key, k_key, v_key, bias_key, dropout_key = jax.random.split(key, 5)
 
@@ -1153,6 +1150,9 @@ class TestFusedAttn:
         runner.test_backward()
 
 # Single test with new-style RNG
+@pytest.mark.skipif(
+    not is_hip_extension(), reason="New-style RNGs only enabled on AMD hardware"
+)
 def test_jax_new_rng():
     """
     Non-regression test evaluating whether
