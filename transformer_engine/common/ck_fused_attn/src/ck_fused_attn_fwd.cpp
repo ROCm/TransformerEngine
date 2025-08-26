@@ -161,7 +161,14 @@ hipError_t ck_attn_fwd(
   right = window_size_right;
   mask_enum mask_type = static_cast<mask_enum>(attn_mask_type);
   
-  ck_tile::stream_config stream_config{stream};
+  bool ck_fused_attn_log_config = false;
+  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
+    if (env_p != nullptr && std::string(env_p) == "1")
+      ck_fused_attn_log_config = true;
+  }
+
+  // print kernel name on verbose mode
+  ck_tile::stream_config stream_config{stream, false, ck_fused_attn_log_config};
 
   std::string data_type_str = get_data_type_str(dtype);
 
@@ -320,7 +327,16 @@ hipError_t ck_attn_varlen_fwd(
   mask_enum mask_type = static_cast<mask_enum>(attn_mask_type);
   
   bias_enum bias_type = bias_enum::no_bias;
-  ck_tile::stream_config stream_config{stream};
+  
+  bool ck_fused_attn_log_config = false;
+  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
+    if (env_p != nullptr && std::string(env_p) == "1")
+      ck_fused_attn_log_config = true;
+  }
+
+  // print kernel name on verbose mode
+  ck_tile::stream_config stream_config{stream, false, ck_fused_attn_log_config};
+
 
   std::string data_type_str = get_data_type_str(dtype);
 
