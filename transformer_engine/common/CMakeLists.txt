@@ -75,6 +75,11 @@ else()
   set(CMAKE_CXX_STANDARD 17)
   project(transformer_engine LANGUAGES HIP CXX)
 
+  # If using ROCm, ninja must be installed to build TE.
+  if (NOT CMAKE_GENERATOR STREQUAL "Ninja")
+    message(FATAL_ERROR "This project requires the Ninja build system. Install it using 'pip install ninja'.")
+  endif()
+
   # Disable Asserts In Code (Can't use asserts on HIP stack.)
   add_definitions(-DNDEBUG)
   add_definitions(-DUSE_ROCM)
@@ -269,6 +274,7 @@ else()
         SOURCE_DIR ${TE}/3rdparty/aotriton
         CMAKE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${__AOTRITON_INSTALL_DIR}
         -DAOTRITON_TARGET_ARCH=${ARCH_LIST_COMMA_STR}
+        -DGPU_TARGETS=${ARCH_LIST_COMMA_STR}
         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
         -DAOTRITON_NO_PYTHON=ON
         -DAOTRITON_NAME_SUFFIX=${__AOTRITON_SUFFIX}

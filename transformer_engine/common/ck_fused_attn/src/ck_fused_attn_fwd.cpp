@@ -161,7 +161,14 @@ hipError_t ck_attn_fwd(
   right = window_size_right;
   mask_enum mask_type = static_cast<mask_enum>(attn_mask_type);
   
-  ck_tile::stream_config stream_config{stream};
+  bool ck_fused_attn_log_config = false;
+  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
+    if (env_p != nullptr && std::string(env_p) == "1")
+      ck_fused_attn_log_config = true;
+  }
+
+  // print kernel name on verbose mode
+  ck_tile::stream_config stream_config{stream, false, ck_fused_attn_log_config};
 
   std::string data_type_str = get_data_type_str(dtype);
 
@@ -248,6 +255,10 @@ hipError_t ck_attn_fwd(
   
   // print ck traits and args when needed
   log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, fmha_args);
+  if (uses_fwd_v3)
+  {
+    set_aiter_asm_dir();
+  }
 
   float average_runtime = aiter::mha_fwd(fmha_args,
                                          stream_config,
@@ -316,7 +327,16 @@ hipError_t ck_attn_varlen_fwd(
   mask_enum mask_type = static_cast<mask_enum>(attn_mask_type);
   
   bias_enum bias_type = bias_enum::no_bias;
-  ck_tile::stream_config stream_config{stream};
+  
+  bool ck_fused_attn_log_config = false;
+  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
+    if (env_p != nullptr && std::string(env_p) == "1")
+      ck_fused_attn_log_config = true;
+  }
+
+  // print kernel name on verbose mode
+  ck_tile::stream_config stream_config{stream, false, ck_fused_attn_log_config};
+
 
   std::string data_type_str = get_data_type_str(dtype);
 
@@ -405,6 +425,10 @@ hipError_t ck_attn_varlen_fwd(
 
   // print ck traits and args when needed
   log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, fmha_args);
+  if (uses_fwd_v3)
+  {
+    set_aiter_asm_dir();
+  }
 
   float average_runtime = aiter::mha_fwd(fmha_args,
                                          stream_config,

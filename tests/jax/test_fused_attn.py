@@ -108,7 +108,8 @@ def general_dot_product_attention(
         softmax_out = softmax_out * multiplier
 
     context = jnp.einsum("...hgqk,...khd->...qhgd", softmax_out, value)
-    context = jnp.reshape(context, query.shape)
+    context_shape = query.shape[:-1] + (value.shape[-1],)
+    context = jnp.reshape(context, context_shape)
     return context
 
 
@@ -296,10 +297,12 @@ class FusedAttnRunner:
     max_seqlen_kv: int
     num_heads_q: int
     num_heads_kv: int
-    head_dim: int
+    head_dim_qk: int
+    head_dim_v: int
     attn_bias_type: AttnBiasType
     attn_mask_type: AttnMaskType
     dropout_prob: float
+    use_old_rng: bool
     dtype: DTypeLike
     is_training: bool
     qkv_layout: QKVLayout
@@ -348,6 +351,14 @@ class FusedAttnRunner:
                 "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
             )
 
+        # Test the MLA case where head dims for qk differ from head dims for v, only if the tensors
+        # are provided in BSHD_BSHD_BSHD or THD_THD_THD formats
+        if self.head_dim_qk != self.head_dim_v and not self.qkv_layout.is_separate():
+            pytest.skip(
+                "For head_dim_qk != head_dim_v, it is necessary that the QKV layout "
+                "is either BSHD_BSHD_BSHD or THD_THD_THD"
+            )
+
         self.backend = FusedAttnHelper(
             self.dtype,
             self.dtype,
@@ -359,7 +370,8 @@ class FusedAttnRunner:
             self.num_heads_kv,
             self.max_seqlen_q,
             self.max_seqlen_kv,
-            self.head_dim,
+            self.head_dim_qk,
+            self.head_dim_v,
             (-1, -1) if self.window_size is None else self.window_size,
         ).get_fused_attn_backend()
         if self.backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
@@ -389,16 +401,20 @@ class FusedAttnRunner:
         self.cp_size = self.mesh.shape.get(self.mesh_resource.cp_resource, 1)
         self.tp_size = self.mesh.shape.get(self.mesh_resource.tp_resource, 1)
 
-        key = jax.random.PRNGKey(0)
+        # only support new-style RNGs on AMD hardware since they will crash otherwise
+        if is_hip_extension():
+            if self.use_old_rng:
+                key = jax.random.PRNGKey(0)
+            else:
+                key = jax.random.key(0)
+        else:
+            key = jax.random.key(0)
+
         q_key, k_key, v_key, bias_key, dropout_key = jax.random.split(key, 5)
 
-        q_shape = (self.batch_size, self.max_seqlen_q, self.num_heads_q, self.head_dim)
-        k_shape = v_shape = (
-            self.batch_size,
-            self.max_seqlen_kv,
-            self.num_heads_kv,
-            self.head_dim,
-        )
+        q_shape = (self.batch_size, self.max_seqlen_q, self.num_heads_q, self.head_dim_qk)
+        k_shape = (self.batch_size, self.max_seqlen_kv, self.num_heads_kv, self.head_dim_qk)
+        v_shape = (self.batch_size, self.max_seqlen_kv, self.num_heads_kv, self.head_dim_v)
 
         if self.attn_bias_type == AttnBiasType.NO_BIAS:
             bias_shape = None
@@ -617,7 +633,7 @@ class FusedAttnRunner:
                     raise ValueError(f"Unknown {self.seq_desc_format=}")
 
         self.dropout_rng = dropout_key if self.dropout_prob > 0 else None
-        self.scaling_factor = 1.0 / sqrt(self.head_dim)
+        self.scaling_factor = 1.0 / sqrt(self.head_dim_qk)
 
         # Setup distributed sharding specs
         # Setup shardings for distributed tests
@@ -664,9 +680,15 @@ class FusedAttnRunner:
             self.bias_pspec = PartitionSpec()
         self.bias_sharding = NamedSharding(self.mesh, self.bias_pspec)
 
-        self.dropout_rng_pspec = PartitionSpec(
-            None,
-        )
+        # New-style RNG fix is only applied for AMD GPUs
+        if is_hip_extension():
+            if self.dropout_rng is not None and jnp.issubdtype(self.dropout_rng.dtype, jax.dtypes.prng_key):
+                self.dropout_rng_pspec = PartitionSpec()
+            else:
+                self.dropout_rng_pspec = PartitionSpec(None,)
+        else:
+            self.dropout_rng_pspec = PartitionSpec(None,)
+
         self.dropout_rng_sharding = NamedSharding(self.mesh, self.dropout_rng_pspec)
 
         self.logit_scale_pspec = PartitionSpec(None, None, self.mesh_resource.cp_resource, None)
@@ -936,9 +958,11 @@ class FusedAttnRunner:
     ],
 )
 @pytest.mark.parametrize(
-    "b, s_q, s_kv, h_q, h_kv, d, dtype",
+    "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype",
     [
-        pytest.param(2, 2048, 2048, 12, 12, 64, jnp.bfloat16, id="2-2048-2048-12-12-64-BF16-SELF"),
+        pytest.param(
+            2, 2048, 2048, 12, 12, 64, 64, jnp.bfloat16, id="2-2048-2048-12-12-64-64-BF16-SELF"
+        ),
         pytest.param(
             2,
             2048,
@@ -946,11 +970,33 @@ class FusedAttnRunner:
             12,
             12,
             64,
+            64,
             jnp.bfloat16,
-            id="2-2048-1024-12-12-64-BF16-CROSS",
+            id="2-2048-1024-12-12-64-64-BF16-CROSS",
         ),
-        pytest.param(2, 2048, 2048, 12, 6, 64, jnp.bfloat16, id="2-2048-2048-12-6-64-BF16-GQA"),
-        pytest.param(4, 128, 128, 16, 16, 64, jnp.float16, id="4-128-128-16-16-64-FP16-SELF"),
+        pytest.param(
+            2, 2048, 2048, 12, 6, 64, 64, jnp.bfloat16, id="2-2048-2048-12-6-64-64-BF16-GQA"
+        ),
+        pytest.param(
+            4, 128, 128, 16, 16, 64, 64, jnp.float16, id="4-128-128-16-16-64-64-FP16-SELF"
+        ),
+        pytest.param(
+            4, 128, 128, 16, 16, 64, 32, jnp.float16, id="4-128-128-16-16-64-32-FP16-SELF"
+        ),
+        pytest.param(
+            2,
+            2048,
+            1024,
+            12,
+            12,
+            64,
+            32,
+            jnp.bfloat16,
+            id="2-2048-1024-12-12-64-32-BF16-CROSS",
+        ),
+        pytest.param(
+            2, 2048, 2048, 12, 6, 128, 64, jnp.float16, id="2-2048-2048-12-6-128-64-FP16-GQA"
+        ),
     ],
 )
 @pytest.mark.parametrize(
@@ -958,6 +1004,13 @@ class FusedAttnRunner:
     [
         pytest.param(0.0, id="DROP_0.0"),
         pytest.param(0.1, id="DROP_0.1"),
+    ],
+)
+# Only testing old-style RNGs by default to reduce the # of tests but leaving the hooks in place
+@pytest.mark.parametrize(
+    "use_old_rng",
+    [
+        pytest.param(True, id="Old-style rng"),
     ],
 )
 @pytest.mark.parametrize(
@@ -1004,10 +1057,12 @@ class TestFusedAttn:
         s_kv,
         h_q,
         h_kv,
-        d,
+        d_qk,
+        d_v,
         attn_bias_type,
         attn_mask_type,
         dropout_prob,
+        use_old_rng,
         dtype,
         is_training,
         qkv_layout,
@@ -1029,10 +1084,12 @@ class TestFusedAttn:
             s_kv,
             h_q,
             h_kv,
-            d,
+            d_qk,
+            d_v,
             attn_bias_type,
             attn_mask_type,
             dropout_prob,
+            use_old_rng,
             dtype,
             is_training,
             qkv_layout,
@@ -1040,10 +1097,6 @@ class TestFusedAttn:
             window_size,
             seq_desc_format,
         )
-        if is_hip_extension():
-            is_padding = attn_mask_type in [AttnMaskType.PADDING_MASK, AttnMaskType.PADDING_CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK]
-            if swa and is_padding:
-                pytest.skip("Jax cannot get cu_seqlen correctly from mask with swa")
         runner.test_forward()
 
     @staticmethod
@@ -1060,10 +1113,12 @@ class TestFusedAttn:
         s_kv,
         h_q,
         h_kv,
-        d,
+        d_qk,
+        d_v,
         attn_bias_type,
         attn_mask_type,
         dropout_prob,
+        use_old_rng,
         dtype,
         qkv_layout,
         bias_shape,
@@ -1082,10 +1137,12 @@ class TestFusedAttn:
             s_kv,
             h_q,
             h_kv,
-            d,
+            d_qk,
+            d_v,
             attn_bias_type,
             attn_mask_type,
             dropout_prob,
+            use_old_rng,
             dtype,
             True,
             qkv_layout,
@@ -1093,8 +1150,34 @@ class TestFusedAttn:
             window_size,
             seq_desc_format,
         )
-        if is_hip_extension():
-            is_padding = attn_mask_type in [AttnMaskType.PADDING_MASK, AttnMaskType.PADDING_CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK]
-            if swa and is_padding:
-                pytest.skip("Jax cannot get cu_seqlen correctly from mask with swa")
         runner.test_backward()
+
+# Single test with new-style RNG
+def test_jax_new_rng():
+    """
+    Non-regression test evaluating whether
+    `_FusedAttnRNGStateChecker.check_seed` can correctly handle a new-style
+    JAX PRNG seed.
+    """
+    # Arbitrary args, except `dropout_prob` which needs to be >0
+    kwargs = dict(
+        batch_size = 2,
+        max_seqlen_q = 2048,
+        max_seqlen_kv = 2048,
+        num_heads_q = 12,
+        num_heads_kv = 12,
+        head_dim_qk = 64,
+        head_dim_v = 64,
+        attn_bias_type = AttnBiasType.NO_BIAS,
+        attn_mask_type = AttnMaskType.NO_MASK,
+        dropout_prob = 0.1,
+        use_old_rng = False,
+        dtype = jnp.bfloat16,
+        is_training = True,
+        qkv_layout = QKVLayout.BS3HD,
+        bias_shape = BiasShape._1HSS,
+        seq_desc_format = SeqDescFormat.Mask,
+        window_size = None,
+    )
+    runner = FusedAttnRunner(**kwargs)
+    runner.test_forward()

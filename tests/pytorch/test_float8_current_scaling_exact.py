@@ -12,7 +12,7 @@ import transformer_engine_torch as tex
 
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.common.recipe import Float8CurrentScaling
+from transformer_engine.common.recipe import Float8CurrentScaling, Format
 from transformer_engine.pytorch.fp8 import fp8_autocast, get_fp8_torch_dtype
 
 
@@ -800,3 +800,46 @@ class TestFP8CurrentScalingRecipeLayerNormLinear(TestFP8RecipeLayerNormLinearBas
             recipe1_golden_tensors=None,
             recipe2_golden_tensors=fp8_zero_tolerance_tensor_dumps_recipe2,
         )
+
+# FP8 per-tensor current scaling – large-numel regression with shape param
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+class TestFP8CurrentScalingLargeNumel:
+
+    @staticmethod
+    def setup_class(cls) -> None:
+        seed = 1234
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+
+    @pytest.mark.parametrize("dtype", [torch.float32], ids=["fp32"])
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            (32, 4352, 15360),  # baseline (always OK)
+            (33, 4352, 15360),  # regression (used to overflow int32 numel)
+        ],
+        ids=["bs32", "bs33"],
+    )
+    def test_fp8_current_scaling_linear_large_numel_e4m3(self, dtype, shape):
+        """
+        Regression for 32-bit numel overflow when total elements > 2^31.
+        Verifies FP8 current scaling (E4M3) works for param shapes after numel()→size_t fix.
+        """
+        recipe = Float8CurrentScaling(fp8_format=Format.E4M3)
+        layer = te.Linear(15360, 3840, bias=False).to("cuda")
+
+        try:
+            x = torch.randn(shape, dtype=dtype, device="cuda")
+        except torch.OutOfMemoryError:
+            pytest.skip(f"Skipping {shape}: insufficient device memory for allocation.")
+
+        try:
+            with fp8_autocast(enabled=True, fp8_recipe=recipe):
+                y = layer(x)
+        except torch.OutOfMemoryError:
+            pytest.skip(f"Skipping {shape}: OOM during forward.")
+
+        # Output should match (B, 4352, 3840)
+        bsz, seq, _ = shape
+        assert tuple(y.shape) == (bsz, seq, 3840)
+        torch.cuda.empty_cache()

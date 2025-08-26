@@ -53,17 +53,24 @@ def _layernorm_fwd_triton(
     n_rows,
     n_cols,
     eps,
+    out_transpose_ptr,
+    out_transpose_stride,
     ZERO_CENTERED_GAMMA: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     IS_FP8: tl.constexpr,
     APPLY_ATOMIC: tl.constexpr,
     PERSISTENT: tl.constexpr,
     FP8_MAX: tl.constexpr,
+    MAKE_TRANSPOSE: tl.constexpr
 ):
+
+    # Enable the transpose cache only in FP8 mode.
+    tl.static_assert(not MAKE_TRANSPOSE or IS_FP8, msg="Transpose cache requires fp8 data type.")
 
     # program id
     pid = tl.program_id(0)
     num_tiles = tl.num_programs(0)
+    col_offsets = tl.arange(0, BLOCK_SIZE)
 
     if PERSISTENT:
         rows_per_tile = n_rows // num_tiles
@@ -80,60 +87,52 @@ def _layernorm_fwd_triton(
         scale = tl.load(scale_ptr)
         amax = 0.0
 
-    for row in range(start_row, start_row + rows_per_tile):
-        x_ptr_start = x_ptr + (row * x_row_stride)
-        y_ptr_start = y_ptr + (row * y_row_stride)
+    for row_idx in range(start_row, start_row + rows_per_tile):
+        x_ptr_start = x_ptr + (row_idx * x_row_stride)
+        y_ptr_start = y_ptr + (row_idx * y_row_stride)
 
-        loop_num = tl.cdiv(n_cols, BLOCK_SIZE) - 1
+        n_cols_blks = tl.cdiv(n_cols, BLOCK_SIZE) - 1
 
         # calculate mean
         _mean = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
-        for b in range(0, loop_num):
-            col_offsets = b * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-            x_block = tl.load(x_ptr_start + col_offsets).to(
-                tl.float32
-            )  # Unmasked loads
+        for blk_idx in range(0, n_cols_blks):
+            cols = blk_idx * BLOCK_SIZE + col_offsets
+            x_block = tl.load(x_ptr_start + cols).to(tl.float32)  # Unmasked loads
             _mean += x_block
 
         # For last iteration, do masked load
-        col_offsets = loop_num * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        x_block = tl.load(
-            x_ptr_start + col_offsets, mask=col_offsets < n_cols, other=0.0
-        ).to(tl.float32)
+        cols = n_cols_blks * BLOCK_SIZE + col_offsets
+        x_block = tl.load(x_ptr_start + cols, mask=cols < n_cols, other=0.0).to(tl.float32)
         _mean += x_block
         mean = tl.sum(_mean, axis=0) / n_cols
 
         # variance
         _var = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
-        for b in range(0, loop_num):
-            col_offsets = b * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-            x_block = tl.load(x_ptr_start + col_offsets).to(
-                tl.float32
-            )  # Unmasked loads
+        for blk_idx in range(0, n_cols_blks):
+            cols = blk_idx * BLOCK_SIZE + col_offsets
+            x_block = tl.load(x_ptr_start + cols).to(tl.float32)  # Unmasked loads
             x_block = x_block - mean
             _var += x_block * x_block
 
         # For last iteration, do masked load
-        col_offsets = loop_num * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        x_block = tl.load(
-            x_ptr_start + col_offsets, mask=col_offsets < n_cols, other=0.0
-        ).to(tl.float32)
-        x_block = tl.where(col_offsets < n_cols, x_block - mean, 0.0)
+        cols = n_cols_blks * BLOCK_SIZE + col_offsets
+        x_block = tl.load(x_ptr_start + cols, mask=cols < n_cols, other=0.0).to(tl.float32)
+        x_block = tl.where(cols < n_cols, x_block - mean, 0.0)
         _var += x_block * x_block
 
         var = tl.sum(_var, axis=0) / n_cols
         rstd = tl.rsqrt(var + eps)
 
         # Write mean / rstd
-        tl.store(mean_ptr + row, mean)
-        tl.store(rstd_ptr + row, rstd)
+        tl.store(mean_ptr + row_idx, mean)
+        tl.store(rstd_ptr + row_idx, rstd)
 
         # Normalize and store
-        for b in range(0, loop_num):
-            col_offsets = b * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-            w_block = tl.load(w_ptr + col_offsets).to(tl.float32)
-            b_block = tl.load(b_ptr + col_offsets).to(tl.float32)
-            x_block = tl.load(x_ptr_start + col_offsets).to(tl.float32)
+        for blk_idx in range(0, n_cols_blks):
+            cols = blk_idx * BLOCK_SIZE + col_offsets
+            w_block = tl.load(w_ptr + cols).to(tl.float32)
+            b_block = tl.load(b_ptr + cols).to(tl.float32)
+            x_block = tl.load(x_ptr_start + cols).to(tl.float32)
             if ZERO_CENTERED_GAMMA:
                 w_block += 1
             y_block = (x_block - mean) * rstd
@@ -143,16 +142,18 @@ def _layernorm_fwd_triton(
                 amax = amax_temp if amax_temp > amax else amax
                 y_block = y_block * scale
                 y_block = tl.clamp(y_block, -FP8_MAX, FP8_MAX)
-            tl.store(y_ptr_start + col_offsets, y_block.to(y_ptr.type.element_ty))
+            y_block = y_block.to(y_ptr.type.element_ty)
+            tl.store(y_ptr_start + cols, y_block)
+            if MAKE_TRANSPOSE:
+                output_t_ptrs = out_transpose_ptr + cols * out_transpose_stride + row_idx
+                tl.store(output_t_ptrs, y_block)
 
         # For last iteration, do masked load and store
-        col_offsets = loop_num * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        mask = col_offsets < n_cols
-        w_block = tl.load(w_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
-        b_block = tl.load(b_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
-        x_block = tl.load(x_ptr_start + col_offsets, mask=mask, other=0.0).to(
-            tl.float32
-        )
+        cols = n_cols_blks * BLOCK_SIZE + col_offsets
+        mask = cols < n_cols
+        w_block = tl.load(w_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+        b_block = tl.load(b_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+        x_block = tl.load(x_ptr_start + cols, mask=mask, other=0.0).to(tl.float32)
         if ZERO_CENTERED_GAMMA:
             w_block += 1
         y_block = (x_block - mean) * rstd
@@ -162,9 +163,11 @@ def _layernorm_fwd_triton(
             amax = amax_temp if amax_temp > amax else amax
             y_block = y_block * scale
             y_block = tl.clamp(y_block, -FP8_MAX, FP8_MAX)
-        tl.store(
-            y_ptr_start + col_offsets, y_block.to(y_ptr.type.element_ty), mask=mask
-        )
+        y_block = y_block.to(y_ptr.type.element_ty)
+        tl.store(y_ptr_start + cols, y_block, mask=mask)
+        if MAKE_TRANSPOSE:
+            output_t_ptrs = out_transpose_ptr + cols * out_transpose_stride + row_idx
+            tl.store(output_t_ptrs, y_block, mask=mask)
 
     if IS_FP8:
         if APPLY_ATOMIC:
@@ -454,9 +457,9 @@ def _layernorm_bwd_dwdb_triton_v2(
     tl.store(FINAL_DW + cols, sum_dw.to(FINAL_DW.type.element_ty), mask=cols < N)
     tl.store(FINAL_DB + cols, sum_db.to(FINAL_DB.type.element_ty), mask=cols < N)
 
-def te_layernorm_fwd_triton(input: torch.Tensor, 
-                            weight: torch.Tensor, 
-                            bias: torch.Tensor,  
+def te_layernorm_fwd_triton(input: torch.Tensor,
+                            weight: torch.Tensor,
+                            bias: torch.Tensor,
                             eps: float,
                             ln_out: torch.Tensor, 
                             quantizer: Quantizer, 
@@ -470,11 +473,17 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
         )
     device = input.device
     M, N = input.shape
-    
+
+    IS_MXFP8 = isinstance(quantizer, MXFP8Quantizer)
+    MAKE_TRANSPOSE = False
+
     # Create empty tensors for mu and rsigma
     mu = torch.empty((M,), dtype=torch.float32, device=device)
     rsigma = torch.empty((M,), dtype=torch.float32, device=device)
-    torch_out_dtype = te_dtype_to_torch_dtype(otype)
+    torch_out_dtype = (
+        otype if isinstance(otype, torch.dtype)
+        else te_dtype_to_torch_dtype(otype)
+    )
     # Create ln_out
     ln_out = make_ln_out(ln_out, quantizer=quantizer, input_shape=input.shape, out_dtype=torch_out_dtype)
     # To update the amax ptr directly with atomic max
@@ -483,17 +492,28 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
     # MXFP8 is handled regularly, hence quantizer of Float8Quantizer is considered FP8
     IS_FP8 = isinstance(quantizer, Float8Quantizer)
 
-    amax_temp = torch.empty((M,), dtype=torch.float32, device=input.device) if IS_FP8 else None
+    amax_temp = torch.empty((M,), dtype=torch.float32, device=device) if IS_FP8 else None
 
     max_fused_size = 16384 // input.element_size()
     BLOCK_SIZE = min(max_fused_size, triton.next_power_of_2(N))
-    
+
+    out_transpose_ptr = None
+    out_transpose_stride = None
+
     # Create necessary values for fp8 if needed
     if IS_FP8:
         scale = quantizer.scale
         amax_out = quantizer.amax
         scale_inv = ln_out._scale_inv
         cast_out = ln_out._data
+        MAKE_TRANSPOSE = quantizer.columnwise_usage
+        if MAKE_TRANSPOSE:
+            tl_dtype = te_dtype_to_triton_dtype(quantizer.dtype)
+            if ln_out._transpose_invalid:
+                ln_out._transpose = torch.empty((ln_out._data.shape[1], ln_out._data.shape[0]), dtype=ln_out._data.dtype, device=device)
+                ln_out._transpose_invalid = False
+            out_transpose_ptr = triton.reinterpret(ln_out._transpose, tl_dtype)
+            out_transpose_stride = ln_out._transpose.stride(0)
     else:
         scale = None
         amax_out = None
@@ -515,6 +535,8 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
         M,
         N,
         eps,
+        out_transpose_ptr,
+        out_transpose_stride,
         ZERO_CENTERED_GAMMA=zero_centered_gamma,
         BLOCK_SIZE=BLOCK_SIZE,
         IS_FP8=IS_FP8,
@@ -524,6 +546,7 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
         # It also lags behind TE implementation in a few cases
         PERSISTENT=False,
         FP8_MAX=get_fp8_max(quantizer.dtype) if IS_FP8 else None,
+        MAKE_TRANSPOSE=MAKE_TRANSPOSE
     )
 
     # Compute FP8 transpose if required
@@ -539,7 +562,7 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
         )
 
     # For MXFP8, we do regular layernorm and then quantize it separately
-    if isinstance(quantizer, MXFP8Quantizer):
+    if IS_MXFP8:
         ln_out = te_quantize_triton(ln_out, quantizer)
     
     # Reduce and find amax if "not APPLY_ATOMIC" is True.

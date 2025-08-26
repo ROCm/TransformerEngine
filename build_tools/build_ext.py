@@ -81,6 +81,8 @@ class CMakeExtension(setuptools.Extension):
         max_jobs = get_max_jobs_for_parallel_build()
         if found_ninja():
             configure_command.append("-GNinja")
+        elif rocm_build():
+            raise RuntimeError(f"This project requires the Ninja build system. Install it using 'pip install ninja'.")
         build_command.append("--parallel")
         if max_jobs > 0:
             build_command.append(str(max_jobs))
@@ -136,7 +138,8 @@ def get_build_ext(extension_cls: Type[setuptools.Extension], install_so_in_wheel
             # Ensure that binaries are not in global package space.
             lib_dir = (
                 "wheel_lib"
-                if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or install_so_in_wheel_lib
+                if (not rocm_build() and
+                    bool(int(os.getenv("NVTE_RELEASE_BUILD", "0")))) or install_so_in_wheel_lib
                 else ""
             )
             target_dir = install_dir / "transformer_engine" / lib_dir

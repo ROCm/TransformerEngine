@@ -105,6 +105,7 @@ class TestDistributedSelfAttn:
             seqlen,
             seqlen,
             hidden,
+            hidden,
             None,  # no window
         ):
             pytest.skip(f"No FusedAttn backend found")
@@ -123,6 +124,7 @@ class TestDistributedSelfAttn:
             seqlen,
             num_head,
             num_head,
+            hidden,
             hidden,
             attn_bias_type,
             attn_mask_type,
@@ -177,6 +179,7 @@ class TestDistributedCrossAttn:
             seqlen,
             seqlen,
             hidden,
+            hidden,
             None,  # no window
         ):
             pytest.skip(f"No FusedAttn backend found")
@@ -188,6 +191,7 @@ class TestDistributedCrossAttn:
             seqlen,
             num_head,
             num_head,
+            hidden,
             hidden,
             attn_bias_type,
             attn_mask_type,
@@ -277,6 +281,7 @@ class TestDistributedContextParallelSelfAttn:
             num_head,
             num_kv_heads,
             hidden,
+            hidden,
             attn_bias_type,
             attn_mask_type,
             dropout_prob,
@@ -306,6 +311,7 @@ class TestDistributedContextParallelSelfAttn:
                 num_kv_heads,
                 seqlen,
                 seqlen,
+                hidden,
                 hidden,
                 None,
             )  # no SWA for CP
