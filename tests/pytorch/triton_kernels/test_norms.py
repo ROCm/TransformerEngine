@@ -2,6 +2,7 @@
 # License for AMD contributions = MIT. See LICENSE for more information
 
 
+import os
 import torch
 import pytest
 from functools import partial
@@ -170,6 +171,11 @@ def rmsnorm_fwd_ref(
     out = quantizer.quantize(x_normed, out=out)
     return out, None, rsigma.squeeze(1)
 
+
+@pytest.fixture
+def autotune():
+    return bool(int(os.environ.get("NVTE_TEST_TRITON_AUTOTUNE", "0")))
+
 class TestNorms:
 
     @pytest.mark.parametrize(
@@ -198,6 +204,7 @@ class TestNorms:
         columnwise,
         ln_out_mode,
         norm,
+        autotune,
     ):
         # We only support 8E4M3 for forward kernels
         fp8_dtype = tex.DType.kFloat8E4M3
@@ -245,7 +252,7 @@ class TestNorms:
                 hip_fwd_func = rmsnorm_fwd_ref
 
         # run the triton path
-        ln_out_triton, mu_triton, rsigma_triton = triton_fwd_func(**fwd_args["triton"])
+        ln_out_triton, mu_triton, rsigma_triton = triton_fwd_func(autotune=autotune, **fwd_args["triton"])
 
         # run the reference hipified kernel path
         ln_out_hip, mu_hip, rsigma_hip = hip_fwd_func(**fwd_args["hip"])
@@ -319,7 +326,7 @@ class TestNorms:
 
     @pytest.mark.parametrize("norm", norms)
     @pytest.mark.parametrize("columnwise", [False, True])
-    def test_norm_fwd_triton_clamp(self, columnwise, norm):
+    def test_norm_fwd_triton_clamp(self, columnwise, norm, autotune):
         """
         Non-regression test for MLPerf divergence issue. We test to ensure that in
         the case of output values beyond the range of the used FP8 dtype, we clamp
@@ -366,7 +373,7 @@ class TestNorms:
         triton_fwd_func = _triton_funcs["fwd"][norm]
         hip_fwd_func = _hip_funcs["fwd"][norm]
 
-        ln_out_triton, mu_triton, rsigma_triton = triton_fwd_func(**fwd_args["triton"])
+        ln_out_triton, mu_triton, rsigma_triton = triton_fwd_func(autotune=autotune, **fwd_args["triton"])
         ln_out_hip, mu_hip, rsigma_hip = hip_fwd_func(**fwd_args["hip"])
 
         if ln_out_triton.dtype != out_dtype:
