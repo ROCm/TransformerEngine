@@ -49,7 +49,7 @@ def _rmsnorm_fwd_triton_impl(
 ):
 
     # Enable the transpose cache only in FP8 mode.
-    tl.static_assert(not MAKE_TRANSPOSE or IS_FP8, msg="Transpose cache requires fp8 data type.")
+    tl.static_assert(not MAKE_TRANSPOSE or IS_FP8, "Transpose cache requires fp8 data type.")
 
     row_start = tl.program_id(0)
     col_offsets = tl.arange(0, BLOCK_SIZE)
