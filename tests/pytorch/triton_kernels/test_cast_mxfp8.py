@@ -195,7 +195,6 @@ def test_quantize_dequantize_mxfp8(shape, in_dtype, out_dtype, block_sizes):
             out._rowwise_data = None
     quantized_out_triton  = te_quantize_triton(input_tensor, quantizer=triton_quantizer, output=out)
 
-    cmp = "te"
     atol_fp8, rtol_fp8 = get_tolerances(torch_out_dtype)
     if rowwise:
         te_compare_results(

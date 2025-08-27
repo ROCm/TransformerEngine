@@ -83,8 +83,6 @@ def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
 def te_compare_results(t, r, atol, rtol, msg, use_torch_semantics=False):
     assert t.dtype == r.dtype, f"Tensor dtypes don't match: {t.dtype} vs {r.dtype}."
     assert t.shape == r.shape, f"Tensor shapes don't match: {t.shape} vs {r.shape}."
-    assert atol > 0, "Absolute tolerance must be positive."
-    assert rtol > 0, "Relative tolerance must be positive."
     dtype = t.dtype
     t = t.cpu().to(torch.float32).to(torch.float64)
     r = r.cpu().to(torch.float32).to(torch.float64)
@@ -121,6 +119,8 @@ def te_compare_results(t, r, atol, rtol, msg, use_torch_semantics=False):
     if use_torch_semantics:
         mismatch = adiff > atol + rtol * torch.abs(r)
     else:
+        assert atol > 0, "Absolute tolerance must be positive."
+        assert rtol > 0, "Relative tolerance must be positive."
         atol_mismatch = adiff > atol
         rtol_mismatch = torch.where(nonzero_r, rel_diff > rtol, torch.full_like(atol_mismatch, False))
         mismatch = atol_mismatch & (~nonzero_r | rtol_mismatch)

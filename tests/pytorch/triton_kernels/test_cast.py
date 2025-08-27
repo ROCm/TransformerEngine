@@ -46,9 +46,7 @@ def test_quantize(shape, in_dtype, out_dtype):
     torch_out_dtype = te_dtype_to_torch_dtype(out_dtype)
     
     atol_q, rtol_q = get_tolerances(torch_out_dtype)
-    cmp = "te"
     te_compare_results(
-        cmp,
         quantized_out_triton._data.view(torch_out_dtype),
         quantized_out_tex._data.view(torch_out_dtype),
         atol_q,
@@ -59,7 +57,6 @@ def test_quantize(shape, in_dtype, out_dtype):
     assert quantized_out_triton._transpose is not None, "Triton transpose is none!" 
     assert quantized_out_tex._transpose is not None, "TEX transpose is none!" 
     te_compare_results(
-        cmp,
         quantized_out_triton._transpose.view(torch_out_dtype),
         quantized_out_tex._transpose.view(torch_out_dtype),
         atol_q,

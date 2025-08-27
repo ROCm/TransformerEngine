@@ -25,7 +25,7 @@ from transformer_engine.pytorch.triton_kernels.layernorm import (
     te_layernorm_bwd_triton,
     te_layernorm_fwd_triton,
 )
-from test_common import dtype_tols, compare_results, str_to_torch_dtype, fill_uniform
+from test_common import dtype_tols, te_compare_results, str_to_torch_dtype, fill_uniform
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -405,7 +405,7 @@ class TestNorms:
         quantization, fp8_dtype
         ):
         tols = dtype_tols(out_triton.dtype if quantization is None else fp8_dtype)
-        _compare_func = partial(compare_results, provider="te", **tols, use_torch_semantics=True)
+        _compare_func = partial(te_compare_results, **tols, use_torch_semantics=True)
 
         dq_out_triton = out_triton.dequantize()
         dq_out_hip = out_hip.dequantize()
@@ -414,13 +414,6 @@ class TestNorms:
             expected=dq_out_hip,
             msg=lambda msg: f"Output does not match triton <-> hip\n\n{msg}\n",
         )
-        # TODO(micky774): Remove when `compare_results` correctly handles NaN values
-        _compare_func(
-            actual=dq_out_triton.isnan(),
-            expected=dq_out_hip.isnan(),
-            msg=lambda msg: f"ln_out NaNs do not match triton <-> hip\n\n{msg}\n",
-        )
-
         if quantization == "fp8":
             if not isinstance(out_triton, Float8Tensor):
                 raise ValueError(f"Expected a Float8Tensor but got {type(out_triton)} instead.")
@@ -458,7 +451,7 @@ class TestNorms:
                 assert out_triton._rowwise_data is None, "Expected no rowwise data."
 
         # We use higher precision for the scales
-        _compare_func = partial(compare_results, provider="te", atol=1e-6, rtol=5e-5, use_torch_semantics=True)
+        _compare_func = partial(te_compare_results, atol=1e-6, rtol=5e-5, use_torch_semantics=True)
         if quantization == "fp8":
             _compare_func(
                 actual=out_triton._scale_inv,
@@ -503,7 +496,7 @@ class TestNorms:
         quantization
     ):
         if quantization is None: return
-        _compare_func = partial(compare_results, provider="te", atol=1e-6, rtol=5e-5, use_torch_semantics=True)
+        _compare_func = partial(te_compare_results, atol=1e-6, rtol=5e-5, use_torch_semantics=True)
 
         if quantizer_triton.dtype != quantizer_hip.dtype:
             raise ValueError("Expected matching quantizer dtypes, but got "
@@ -535,7 +528,7 @@ class TestNorms:
         norm
     ):
         # We use higher precision for the remaining outputs
-        _compare_func = partial(compare_results, provider="te", atol=1e-6, rtol=5e-5, use_torch_semantics=True)
+        _compare_func = partial(te_compare_results, atol=1e-6, rtol=5e-5, use_torch_semantics=True)
 
         _compare_func(
             actual=rsigma_triton,
@@ -585,7 +578,7 @@ class TestNorms:
         dbeta_triton, dbeta_hip,
         norm
     ):
-        _compare_func = partial(compare_results, provider="te", atol=1.5e-4, rtol=1e-4, use_torch_semantics=True)
+        _compare_func = partial(te_compare_results, atol=1.5e-4, rtol=1e-4, use_torch_semantics=True)
 
         _compare_func(
             actual=dx_triton,
