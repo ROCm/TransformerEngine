@@ -929,6 +929,34 @@ void hipblaslt_gemm(const Tensor *inputA,
   NVTE_CHECK(k > 0);
 
   const GemmParam &param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, k, lda, ldb);
+
+  bool nvte_log_gemm_config = false;
+  if (const char* env_p = std::getenv("NVTE_LOG_GEMM_CONFIG") ) {
+    if (env_p != nullptr && std::string(env_p) == "1")
+      nvte_log_gemm_config = true;
+  }
+
+  if (nvte_log_gemm_config) {
+    float A_scale_inv, B_scale_inv;
+    (void)cudaMemcpy(&A_scale_inv, inputA->scale_inv.dptr, sizeof(float), cudaMemcpyDeviceToHost);
+    (void)cudaMemcpy(&B_scale_inv, inputB->scale_inv.dptr, sizeof(float), cudaMemcpyDeviceToHost);
+    std::cout << "m=" << m << " k=" << k << " n=" << n 
+        << " transa=" << (transa?"T":"N")
+        << " transb=" << (transb?"T":"N")
+        << " A_type=" << (int)inputA->data.dtype
+        << " B_type=" << (int)inputB->data.dtype
+        << " D_type=" << (int)outputD->data.dtype
+        << " bias_type=" << (int)inputBias->data.dtype
+        << " grad=" << grad
+        << " bias=" << (inputBias->data.dptr != nullptr)
+        << " gelu=" << (outputPreGelu->data.dptr != nullptr)
+        << " use_fp8=" << ( is_fp8_dtype(inputA->data.dtype) || is_fp8_dtype(inputB->data.dtype) )
+        << " A_scale_inverse = " <<  A_scale_inv
+        << " B_scale_inverse = " <<  B_scale_inv
+        << " accumulate=" << accumulate
+        << std::endl;
+  }
+  
   void *D = outputD->data.dptr;
   void *C = D;
   void *D_scale = outputD->scale.dptr;
