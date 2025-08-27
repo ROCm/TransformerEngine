@@ -550,18 +550,6 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
         MAKE_TRANSPOSE=MAKE_TRANSPOSE
     )
 
-    # Compute FP8 transpose if required
-    if IS_FP8:
-        # TODO(micky774): Remove when FP8 transpose building is fused into
-        # the kernel
-        if not ln_out._transpose_invalid:
-            ln_out._transpose = None
-            ln_out._transpose_invalid = True
-        ln_out.update_usage(
-            rowwise_usage=quantizer.rowwise_usage,
-            columnwise_usage=quantizer.columnwise_usage
-        )
-
     # For MXFP8, we do regular layernorm and then quantize it separately
     if IS_MXFP8:
         ln_out = te_quantize_triton(ln_out, quantizer)

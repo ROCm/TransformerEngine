@@ -77,32 +77,32 @@ def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
 
 # PyTorch implementation of `compareResults` C++ function from `tests/cpp/test_common.cu`.
 # Arguments:
-#     t: actual tensor
-#     r: expected tensor
+#     actual: actual tensor
+#     expected: expected tensor
 # NOTE: DO NOT upcast inputs to fp32 if you are using te_compare for any precision other than fp32
-def te_compare_results(t, r, atol, rtol, msg, use_torch_semantics=False):
-    assert t.dtype == r.dtype, f"Tensor dtypes don't match: {t.dtype} vs {r.dtype}."
-    assert t.shape == r.shape, f"Tensor shapes don't match: {t.shape} vs {r.shape}."
-    dtype = t.dtype
-    t = t.cpu().to(torch.float32).to(torch.float64)
-    r = r.cpu().to(torch.float32).to(torch.float64)
+def te_compare_results(actual, expected, atol, rtol, msg, use_torch_semantics=False):
+    assert actual.dtype == expected.dtype, f"Tensor dtypes don't match: {actual.dtype} vs {expected.dtype}."
+    assert actual.shape == expected.shape, f"Tensor shapes don't match: {actual.shape} vs {expected.shape}."
+    dtype = actual.dtype
+    actual = actual.cpu().to(torch.float32).to(torch.float64)
+    expected = expected.cpu().to(torch.float32).to(torch.float64)
 
     # If any of the tensors contain NaN we
-    if torch.isnan(t).any() or torch.isnan(r).any():
+    if torch.isnan(actual).any() or torch.isnan(expected).any():
         base_msg = (
             f"NaN values found!\n"
         )
 
         # Find which tensor has NaNs and at which indices
-        if torch.isnan(t).any():
-            nan_count = torch.isnan(t).sum()
-            nan_indices = torch.where(torch.isnan(t))
-            base_msg += f"Tensor 't' has {nan_count} NaN(s) at indices: {nan_indices}\n"
+        if torch.isnan(actual).any():
+            nan_count = torch.isnan(actual).sum()
+            nan_indices = torch.where(torch.isnan(actual))
+            base_msg += f"Tensor 'actual' has {nan_count} NaN(s) at indices: {nan_indices}\n"
 
-        if torch.isnan(r).any():
-            nan_count = torch.isnan(r).sum()
-            nan_indices = torch.where(torch.isnan(r))
-            base_msg += f"Tensor 'r' has {nan_count} NaN(s) at indices: {nan_indices}\n"
+        if torch.isnan(expected).any():
+            nan_count = torch.isnan(expected).sum()
+            nan_indices = torch.where(torch.isnan(expected))
+            base_msg += f"Tensor 'expected' has {nan_count} NaN(s) at indices: {nan_indices}\n"
 
         if isinstance(msg, str):
             msg = f"{msg}\n\n{base_msg}\n"
@@ -112,12 +112,12 @@ def te_compare_results(t, r, atol, rtol, msg, use_torch_semantics=False):
             msg = base_msg
         assert False, msg
 
-    diff = t - r
+    diff = actual - expected
     adiff = torch.abs(diff)
-    nonzero_r = r != 0
-    rel_diff = torch.where(nonzero_r, torch.abs(diff / r), torch.zeros_like(diff))
+    nonzero_r = expected != 0
+    rel_diff = torch.where(nonzero_r, torch.abs(diff / expected), torch.zeros_like(diff))
     if use_torch_semantics:
-        mismatch = adiff > atol + rtol * torch.abs(r)
+        mismatch = adiff > atol + rtol * torch.abs(expected)
     else:
         assert atol > 0, "Absolute tolerance must be positive."
         assert rtol > 0, "Relative tolerance must be positive."
@@ -135,7 +135,7 @@ def te_compare_results(t, r, atol, rtol, msg, use_torch_semantics=False):
     if has_mismatch and dtype != torch.float32:
         # check if it is just a failure of round to nearest choosing different side of the real value
         # for non fp32 types
-        mean = (t + r) / 2
+        mean = (actual + expected) / 2
         eps = 1e-6
         mean_one_plus_eps = mean * (1 + eps)
         mean_one_minus_eps = mean * (1 - eps)
@@ -148,8 +148,8 @@ def te_compare_results(t, r, atol, rtol, msg, use_torch_semantics=False):
         cast_mean_m = (
             mean_m.to(torch.float32).to(dtype).to(torch.float32).to(torch.float64)
         )
-        min_tr = torch.minimum(t, r)
-        max_tr = torch.maximum(t, r)
+        min_tr = torch.minimum(actual, expected)
+        max_tr = torch.maximum(actual, expected)
         round_check = ~((cast_mean_m == min_tr) & (cast_mean_p == max_tr))
         mismatch = mismatch & round_check
         has_mismatch = torch.any(mismatch).item()
@@ -163,17 +163,17 @@ def te_compare_results(t, r, atol, rtol, msg, use_torch_semantics=False):
         max_abs_diff_indices = torch.unravel_index(torch.argmax(abs_diff), diff.shape)
 
         num_mismatched_elements = torch.sum(mismatch).item()
-        total_elements = t.numel() 
+        total_elements = actual.numel()
         base_msg = (
             f"There are tensor mismatches.\n"
             f"Number of mismatched elements: {num_mismatched_elements} out of {total_elements} total elements.\n"
             f"Max Absolute Difference among mismatched: {max_abs_diff:.6e} (Tolerance: {atol:.6e}) at index {tuple(max_abs_diff_indices)}\n"
-            f"Corresponding values: t={t[max_abs_diff_indices].item()}, r={r[max_abs_diff_indices].item()}\n"
+            f"Corresponding values: actual={actual[max_abs_diff_indices].item()}, expected={expected[max_abs_diff_indices].item()}\n"
         )
         if max_rel_diff_indices is not None:
              base_msg += (
                 f"Max Relative Difference among mismatched: {max_rel_diff:.6e} (Tolerance: {rtol:.6e}) at index {tuple(max_rel_diff_indices)}\n"
-                f"Corresponding values: t={t[max_rel_diff_indices].item()}, r={r[max_rel_diff_indices].item()}"
+                f"Corresponding values: actual={actual[max_rel_diff_indices].item()}, expected={expected[max_rel_diff_indices].item()}"
             )
         else:
             base_msg += (

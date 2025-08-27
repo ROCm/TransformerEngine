@@ -349,7 +349,7 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma):
     USE_BLOCKED = use_blocked(x_)
     NUM_PRGMS = num_programs(x_, sm_margin)
     need_reduction = N > 1
-    dg_tmp = torch.empty(dg_tmp_rows(x_, sm_margin), N, device='cuda', dtype=torch.float32, requires_grad=False) if need_reduction else None
+    dg_tmp = torch.empty(dg_tmp_rows(x_, sm_margin), N, device=x.device, dtype=torch.float32, requires_grad=False) if need_reduction else None
 
     grid_bwd = lambda meta: (NUM_PRGMS, )
     _rmsnorm_bwd_triton[grid_bwd](dz_, x_, gamma_, rsigma_, dx, dg_tmp if need_reduction else dgamma,
@@ -408,7 +408,7 @@ def te_rmsnorm_fwd_triton(
     )
     if IS_FP8:
         MAKE_TRANSPOSE = quantizer.columnwise_usage
-        amax = torch.empty((NUM_PRGMS,), dtype=torch.float32, device="cuda")
+        amax = torch.empty((NUM_PRGMS,), dtype=torch.float32, device=device)
         tl_dtype = te_dtype_to_triton_dtype(quantizer.dtype)
         scale_inv_ptr = out._scale_inv
         q_scale = quantizer.scale
