@@ -33,6 +33,32 @@ from transformer_engine.jax.attention import (
 DTYPES = [jnp.bfloat16]
 
 
+@pytest.fixture(autouse=True)
+def cleanup_shm():
+    yield
+    import subprocess
+    import shutil
+    import warnings
+
+    # Print contents of /dev/shm
+    try:
+        res=subprocess.run(["ls", "-l", "/dev/shm"], check=False, capture_output=True)
+        warnings.warn("Contents of /dev/shm:\n"+res.stdout.decode("utf-8"))
+    except Exception as e:
+        print(f"Error listing /dev/shm: {e}")
+
+    # Clean up /dev/shm
+    for item in os.listdir("/dev/shm"):
+        path = os.path.join("/dev/shm", item)
+        try:
+            if os.path.isfile(path):
+                os.unlink(path)
+            elif os.path.isdir(path):
+                shutil.rmtree(path)
+        except Exception as e:
+            print(f"Error removing {path}: {e}")
+
+
 class TestDistributedSelfAttn:
 
     def generate_collectives_count_ref(
@@ -129,6 +155,7 @@ class TestDistributedSelfAttn:
             attn_bias_type,
             attn_mask_type,
             dropout_prob,
+            True,
             dtype,
             is_training,
             QKVLayout.BS3HD,
@@ -196,6 +223,7 @@ class TestDistributedCrossAttn:
             attn_bias_type,
             attn_mask_type,
             dropout_prob,
+            True,
             dtype,
             is_training,
             QKVLayout.BSHD_BS2HD,
@@ -285,6 +313,7 @@ class TestDistributedContextParallelSelfAttn:
             attn_bias_type,
             attn_mask_type,
             dropout_prob,
+            True,
             dtype,
             is_training,
             qkv_layout,
