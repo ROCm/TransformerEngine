@@ -188,16 +188,6 @@ def te_compare_results(t, r, atol, rtol, msg, use_torch_semantics=False):
         assert False, msg
 
 
-# Call PyTorch tensor comparison function or TE tensor comparison function.
-def compare_results(provider, actual, expected, atol, rtol, msg, use_torch_semantics=False):
-    assert provider in {"torch", "te"}
-    if provider == "torch":
-        torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol, msg=msg)
-    else:
-        te_compare_results(actual, expected, atol, rtol, msg, use_torch_semantics)
-
-
-
 # Get size in bytes of a given PyTorch type.
 def sizeof(dtype):
     return torch.finfo(dtype).bits // 8
