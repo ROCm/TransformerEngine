@@ -77,6 +77,9 @@ run_test_config_mgpu() {
         export XLA_FLAGS="--xla_gpu_enable_dot_strength_reduction=false --xla_gpu_enable_command_buffer=CUSTOM_CALL"
         run 3 test_distributed_fused_attn.py
         ;;
+    *)
+        run 3 test_distributed_fused_attn.py -p no:warnings -s
+        ;;
     esac
     
     run_default_fa 3 test_distributed_layernorm.py

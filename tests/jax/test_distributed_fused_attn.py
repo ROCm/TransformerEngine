@@ -38,14 +38,21 @@ def cleanup_shm():
     yield
     import subprocess
     import shutil
+    import stat
     import warnings
 
     # Print contents of /dev/shm
     try:
+        df_res=subprocess.run(["df", "/dev/shm"], check=False, capture_output=True)
         res=subprocess.run(["ls", "-l", "/dev/shm"], check=False, capture_output=True)
-        warnings.warn("Contents of /dev/shm:\n"+res.stdout.decode("utf-8"))
+        warnings.warn(f"\nUsage /dev/shm:\n{df_res.stdout.decode()}\n{res.stdout.decode()}\n")
     except Exception as e:
-        print(f"Error listing /dev/shm: {e}")
+        warnings.warn(f"Error listing /dev/shm: {e}")
+    try:
+        dd_res = subprocess.run(["dd", "if=/dev/zero", "of=/dev/shm/testfile", "bs=1M", "count=10"], check=False, capture_output=True)
+        warnings.warn(f"Created test file in /dev/shm:\n{dd_res.stderr.decode()}\n")
+    except Exception as e:
+        warnings.warn(f"Warning creating test file in /dev/shm: {e}")
 
     # Clean up /dev/shm
     for item in os.listdir("/dev/shm"):
@@ -57,6 +64,22 @@ def cleanup_shm():
                 shutil.rmtree(path)
         except Exception as e:
             print(f"Error removing {path}: {e}")
+    fd_dir = "/proc/self/fd"
+    try:
+        list_fds = os.listdir(fd_dir)
+        for fd in list_fds:
+            full_path = os.path.join(fd_dir, fd)
+            mode = os.stat(full_path).st_mode
+            if stat.S_ISREG(mode):
+                try:
+                    target = os.readlink(full_path)
+                    if target.startswith("/dev/shm/"):
+                        print(f"FD {fd}: {target}")
+                except Exception as e:
+                    warnings.warn(f"Error processing fd {fd}: {e}")
+    except Exception as e:
+        warnings.warn(f"Error listing open files: {e}")
+
 
 
 class TestDistributedSelfAttn:
