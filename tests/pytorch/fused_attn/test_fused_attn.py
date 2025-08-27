@@ -813,7 +813,7 @@ model_configs_layout_thd = {
 @pytest.mark.parametrize("qkv_layout", qkv_layouts_thd)
 @pytest.mark.parametrize(
     ("pad_between_seqs", "share_cu_seqlens_ref"),
-    [(False, False), (True, False), (True, True)]
+    [(True, False), (False, False), (False, True)]
 )
 def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, pad_between_seqs, share_cu_seqlens_ref):
     """Test DotProductAttention module with different QKV layouts"""
@@ -1147,9 +1147,6 @@ def _run_dot_product_attention(
         v = inp[2]
         d_out = out_grad
         if not pad_between_seqs and share_cu_seqlens_ref:
-            cu_seqlens_q_padded = cu_seqlens_q
-            cu_seqlens_kv_padded = cu_seqlens_kv
-        else:
             cu_seqlens_q_padded = cu_seqlens_q_after_pad
             cu_seqlens_kv_padded = cu_seqlens_kv_after_pad
     out = block(

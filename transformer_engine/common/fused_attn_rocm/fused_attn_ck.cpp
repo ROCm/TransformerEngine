@@ -30,8 +30,8 @@ bool get_pad_between_seqs(
     && input_cu_seqlens->data.dptr!=input_cu_seqlens_padded->data.dptr
     && !input_cu_seqlens_padded->data.shape.empty()
   );
-  // Next we guard against an initial workspace-allocation pass as used by the
-  // JAX implementation. We check for both pointers being null while retaining
+  // Next we guard against an initial workspace-allocation pass as used in the
+  // JAX TE extension. We check for both pointers being null while retaining
   // shape data, indicating the use of dummy data in the allocation pass.
   pad_between_seqs = pad_between_seqs || (
     is_ragged
