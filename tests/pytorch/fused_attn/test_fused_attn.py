@@ -406,7 +406,7 @@ def test_dot_product_attention(
                 workspace_opt,
                 pad_between_seqs,
                 is_training,
-                share_cu_seqlens_ref,
+                share_cu_seqlens_ref, # Not used by AOT
             )
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
             os.environ["NVTE_FUSED_ATTN_CK"] = "1"
@@ -822,8 +822,18 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, pad_between
         pytest.skip("qkv_layout not applicable for MQA/GQA")
     if (pad_between_seqs==False and get_cudnn_version() < (9, 3, 0)):
         pytest.skip("cuDNN 9.3.0+ is required to run pad_between_seqs = False");
+
+    _, _, fused_attn_backends = _get_attention_backends(
+        config,
+        qkv_dtype=dtype,
+        qkv_layout=qkv_layout,
+        window_size=config.window_size,
+        pad_between_seqs=pad_between_seqs,
+    )
     if not IS_HIP_EXTENSION and share_cu_seqlens_ref:
         pytest.skip("share_cu_seqlens_ref is a ROCm TE specific implementation detail.")
+    elif share_cu_seqlens_ref and FusedAttnBackend["CK"] not in fused_attn_backends:
+        pytest.skip("This test is only required for the CK fused attention backend.")
     test_dot_product_attention(
         dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs, share_cu_seqlens_ref
     )
@@ -838,6 +848,18 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, pad_between
     [(False, False), (True, False), (True, True)]
 )
 def test_dpa_qkv_layout_thd_mqa_gqa(dtype, model_configs, model, qkv_layout, pad_between_seqs, share_cu_seqlens_ref):
+    config = model_configs[model]
+
+    _, _, fused_attn_backends = _get_attention_backends(
+        config,
+        qkv_dtype=dtype,
+        qkv_layout=qkv_layout,
+        window_size=config.window_size,
+        pad_between_seqs=pad_between_seqs,
+    )
+    if share_cu_seqlens_ref and FusedAttnBackend["CK"] not in fused_attn_backends:
+        pytest.skip("This test is only required for the CK fused attention backend.")
+
     def find_factors(x):
         f = []
         for i in range(2, x + 1):
@@ -845,7 +867,6 @@ def test_dpa_qkv_layout_thd_mqa_gqa(dtype, model_configs, model, qkv_layout, pad
                 f.append(i)
         return f
 
-    config = model_configs[model]
     num_querys_per_gqa_group = find_factors(config.num_heads)
 
     for num_q_per_gqa_group in num_querys_per_gqa_group:
@@ -1146,7 +1167,7 @@ def _run_dot_product_attention(
         k = inp[1]
         v = inp[2]
         d_out = out_grad
-        if not pad_between_seqs and share_cu_seqlens_ref:
+        if pad_between_seqs or not share_cu_seqlens_ref:
             cu_seqlens_q_padded = cu_seqlens_q_after_pad
             cu_seqlens_kv_padded = cu_seqlens_kv_after_pad
     out = block(

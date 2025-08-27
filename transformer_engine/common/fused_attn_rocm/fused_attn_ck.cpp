@@ -38,7 +38,7 @@ bool get_pad_between_seqs(
     && input_cu_seqlens->data.dptr==nullptr && !input_cu_seqlens->data.shape.empty()
     && input_cu_seqlens_padded->data.dptr==nullptr && !input_cu_seqlens_padded->data.shape.empty()
   );
-  // Finally we check whether we have an array with padding an non-empty input_cu_seqlens
+  // Finally we check whether we have an array with padding and non-empty input_cu_seqlens
   pad_between_seqs = pad_between_seqs || (
     !is_ragged
     && is_padding
