@@ -96,36 +96,39 @@ _flash_attn_fwd = None
 _flash_attn_bwd = None
 _flash_attn_varlen_fwd = None
 _flash_attn_varlen_bwd = None
-try:
-    import aiter
-    import triton
-except ImportError:
-    pass
-else:
-    fa_utils.version = PkgVersion("2.7.1")  #masqurade as FA 2.7.1
-    from aiter.ops.triton.mha import flash_attn_onekernel_backward as flash_attn_cuda_bwd
-    from aiter.ops.triton.mha import flash_attn_func, flash_attn_varlen_func
-    from aiter.ops.triton.mha import _flash_attn_forward as _flash_attn_fwd
-    from aiter.ops.triton.mha import flash_attn_onekernel_backward as _flash_attn_bwd
-    from aiter.ops.triton.mha import (
-        _flash_attn_forward as _flash_attn_varlen_fwd,
-    )
-    from aiter.ops.triton.mha import (
-         flash_attn_onekernel_backward as _flash_attn_varlen_bwd,
-    )
 
-    # Setup Flash attention utils
-    fa_utils.set_flash_attention_version()
-try:
-    fa_utils.version = PkgVersion(get_pkg_version("flash-attn"))
-except PackageNotFoundError:
-    pass # only print warning if use_flash_attention_2 = True in get_attention_backend
-else:
-    if torch.cuda.is_available() and ( (not IS_HIP_EXTENSION) and get_device_compute_capability() >= (10, 0)):
-        if fa_utils.version_required_blackwell <= fa_utils.version <= fa_utils.max_version:
+if IS_HIP_EXTENSION and os.getenv("NVTE_FLASH_ATTN_AITER", "1") == "1":
+    try:
+        import aiter
+        import triton
+        from aiter.ops.triton.mha import flash_attn_func, flash_attn_varlen_func
+        from aiter.ops.triton.mha import _flash_attn_forward as _flash_attn_fwd
+        from aiter.ops.triton.mha import flash_attn_onekernel_backward as _flash_attn_bwd
+        from aiter.ops.triton.mha import (
+            _flash_attn_forward as _flash_attn_varlen_fwd,
+        )
+        from aiter.ops.triton.mha import (
+            flash_attn_onekernel_backward as _flash_attn_varlen_bwd,
+        )
+    except ImportError as e:
+        pass
+    else:
+        # Setup Flash attention utils
+        fa_utils.version = PkgVersion("2.7.1")  #masqurade as FA 2.7.1
+        fa_utils.set_flash_attention_version()
+        attn_log.fa_logger.warning("Using AITER instead of flash-attn")
+
+if not fa_utils.is_installed:
+    try:
+        fa_utils.version = PkgVersion(get_pkg_version("flash-attn"))
+    except PackageNotFoundError:
+        pass # only print warning if use_flash_attention_2 = True in get_attention_backend
+    else:
+        if torch.cuda.is_available() and ( (not IS_HIP_EXTENSION) and get_device_compute_capability() >= (10, 0)):
+            if fa_utils.version_required_blackwell <= fa_utils.version <= fa_utils.max_version:
+                fa_utils.is_installed = True
+        elif fa_utils.version_required <= fa_utils.version <= fa_utils.max_version:
             fa_utils.is_installed = True
-    elif fa_utils.version_required <= fa_utils.version <= fa_utils.max_version:
-        fa_utils.is_installed = True
 
     if fa_utils.is_installed:
         if not IS_HIP_EXTENSION:
@@ -143,6 +146,7 @@ else:
 
         # Setup Flash attention utils
         fa_utils.set_flash_attention_version()
+        attn_log.fa_logger.info("Using flash-attn "+str(fa_utils.version))
     elif (
         torch.cuda.is_available()
         and (IS_HIP_EXTENSION or get_device_compute_capability() >= (8, 0))
