@@ -506,12 +506,6 @@ static void cublas_gemm_ex(const NVTETensor A, const NVTETensor B, NVTETensor D,
     NVTE_ERROR("TT layout not allowed.");
   }
 
-  bool nvte_log_gemm_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_GEMM_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_gemm_config = true;
-  }
-
   cublas_gemm(inputA, inputB, outputD,  biasTensor, outputGelu, m, n, k, lda, ldb, ldd,
 #ifdef __HIP_PLATFORM_AMD__
               transa, transb,

@@ -937,22 +937,26 @@ void hipblaslt_gemm(const Tensor *inputA,
   }
 
   if (nvte_log_gemm_config) {
-    float A_scale_inv, B_scale_inv;
-    (void)cudaMemcpy(&A_scale_inv, inputA->scale_inv.dptr, sizeof(float), cudaMemcpyDeviceToHost);
-    (void)cudaMemcpy(&B_scale_inv, inputB->scale_inv.dptr, sizeof(float), cudaMemcpyDeviceToHost);
+    const bool use_fp8 = is_fp8_dtype(param.Atype) || is_fp8_dtype(param.Btype);
+    const bool tensorwise_fp8 = use_fp8 && 
+                                is_delayed_tensor_scaling(inputA->scaling_mode) && 
+                                is_delayed_tensor_scaling(inputB->scaling_mode);
+    const bool mxfp8 = use_fp8 && 
+               is_block_scaling(inputA->scaling_mode) && 
+               is_block_scaling(inputB->scaling_mode);
+    std::string fp8_mode_str = !use_fp8 ? "non-fp8" : (tensorwise_fp8 ? "fp8_tensorwise" : (mxfp8 ? "mxfp8" : "fp8_unsupported"));
+
     std::cout << "m=" << m << " k=" << k << " n=" << n 
-        << " transa=" << (transa?"T":"N")
-        << " transb=" << (transb?"T":"N")
-        << " A_type=" << (int)inputA->data.dtype
-        << " B_type=" << (int)inputB->data.dtype
+        << " transa=" << (param.transA == HIPBLAS_OP_T ? "T" : "N")
+        << " transb=" << (param.transB == HIPBLAS_OP_T ? "T" : "N")
+        << " A_type=" << (int)(param.Atype)
+        << " B_type=" << (int)(param.Btype)
         << " D_type=" << (int)outputD->data.dtype
         << " bias_type=" << (int)inputBias->data.dtype
         << " grad=" << grad
         << " bias=" << (inputBias->data.dptr != nullptr)
         << " gelu=" << (outputPreGelu->data.dptr != nullptr)
-        << " use_fp8=" << ( is_fp8_dtype(inputA->data.dtype) || is_fp8_dtype(inputB->data.dtype) )
-        << " A_scale_inverse = " <<  A_scale_inv
-        << " B_scale_inverse = " <<  B_scale_inv
+        << " fp8_mode=" << fp8_mode_str
         << " accumulate=" << accumulate
         << std::endl;
   }
