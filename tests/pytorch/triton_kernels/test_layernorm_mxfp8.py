@@ -104,9 +104,9 @@ def test_layernorm_fwd_triton(in_dtype, out_dtype, M, N, zero_centered_gamma):
         sm_margin=get_fwd_ln_sm_margin(),
         zero_centered_gamma=zero_centered_gamma, 
         )
-    dequantized_out_rowwise_triton = te_dequantize_triton(y_triton, dtype=in_dtype)
+    dequantized_out_rowwise_triton = te_dequantize_triton(y_triton, dtype=torch_dtype_to_te_dtype(in_dtype))
     y_triton._rowwise_data = None
-    dequantized_out_colwise_triton = te_dequantize_triton(y_triton, dtype=in_dtype)
+    dequantized_out_colwise_triton = te_dequantize_triton(y_triton, dtype=torch_dtype_to_te_dtype(in_dtype))
 
     if te_out_dtype == tex.DType.kFloat8E5M2:
         atol = 1.25e-1
