@@ -81,4 +81,4 @@ __device__ inline void bulk_tensor_2d_shared_to_global(const T *sh_ptr_base, T *
     }
   }
 }
- }
+} // namespace transformer_engine
