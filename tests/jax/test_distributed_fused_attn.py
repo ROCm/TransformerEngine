@@ -68,15 +68,16 @@ def cleanup_shm():
     try:
         list_fds = os.listdir(fd_dir)
         for fd in list_fds:
-            full_path = os.path.join(fd_dir, fd)
-            mode = os.stat(full_path).st_mode
-            if stat.S_ISREG(mode):
-                try:
+            try:
+                full_path = os.path.join(fd_dir, fd)
+                mode = os.stat(full_path).st_mode
+                if stat.S_ISREG(mode):
                     target = os.readlink(full_path)
                     if target.startswith("/dev/shm/"):
                         print(f"FD {fd}: {target}")
-                except Exception as e:
-                    warnings.warn(f"Error processing fd {fd}: {e}")
+                        #os.close(int(fd))
+            except Exception as e:
+                warnings.warn(f"Error processing fd {fd}: {e}")
     except Exception as e:
         warnings.warn(f"Error listing open files: {e}")
 

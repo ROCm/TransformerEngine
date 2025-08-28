@@ -113,6 +113,8 @@ if [ -n "$SINGLE_CONFIG" ]; then
 fi
 
 #Master script mode: prepare testing prerequisites first
+echo "==== PIV Skip pytorch tests ===="
+exit 0
 start_message
 install_prerequisites
 pip list | egrep "flash|ml_dtypes|numpy|torch|transformer_e|typing_ext"

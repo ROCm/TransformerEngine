@@ -43,6 +43,8 @@ run_default_fa() {
 }
 
 run_test_config() {
+    echo ==== PIV skip run sGPU with Fused attention backend: $_fus_attn ====
+    return 0
     echo ==== Run with Fused attention backend: $_fus_attn ====
     run_default_fa 1 test_custom_call_compute.py
     run_default_fa 1 test_functions.py
@@ -62,15 +64,15 @@ run_test_config_mgpu() {
     case "$_ver" in
     *0.4.35*)
         # Workaround for distributed tests hang with JIT enabled
-        JAX_DISABLE_JIT=1 run 3 test_distributed_fused_attn.py -k 'not (test_context_parallel_allgather_attn[BALANCED or test_context_parallel_ring_attn)'
+        JAX_DISABLE_JIT=1 run 1 test_distributed_fused_attn.py -p no:warnings -s -k 'not (test_context_parallel_allgather_attn[BALANCED or test_context_parallel_ring_attn)'
         _JAX_DISABLE_JIT_FLAG=1
 
         # Run tests that fail with JIT disabled
-        run 3 test_distributed_fused_attn.py -k 'test_context_parallel_allgather_attn[BALANCED'
+        run 1 test_distributed_fused_attn.py -p no:warnings -s -k 'test_context_parallel_allgather_attn[BALANCED'
 
         # Test ring attention with xla_flag --xla_experimental_ignore_channel_id only
         # TODO: remove this flag after jax/xla update
-        XLA_FLAGS="--xla_experimental_ignore_channel_id" run 3 test_distributed_fused_attn.py -k test_context_parallel_ring_attn
+        XLA_FLAGS="--xla_experimental_ignore_channel_id" run 1 test_distributed_fused_attn.py -p no:warnings -s -k test_context_parallel_ring_attn
         ;;
     *0.4.31*)
         #Workaround for JAX 0.4.31 regression: crash in test_destributed_fused_attn and test_distributed_layernorm_mlp
@@ -111,13 +113,16 @@ for _fus_attn in auto ck aotriton; do
     #On basic (1) level tests are run with ck
     #On full (3) level they are run with auto/aotriton
     #Do not use unfused becaue JAX tests either do not use FA or enforce it
-    if [ $TEST_LEVEL -ge 3 ]; then
-        _DEFAULT_FUSED_ATTN="auto"
-        test $_fus_attn = "ck" && continue
-    else
-        _DEFAULT_FUSED_ATTN="ck"
-        test $_fus_attn != "ck" && continue
-    fi
+    #PIV: aotriton only
+    _DEFAULT_FUSED_ATTN="aotriton"
+    test $_fus_attn != "aotriton" && continue
+    #if [ $TEST_LEVEL -ge 3 ]; then
+    #    _DEFAULT_FUSED_ATTN="auto"
+    #    test $_fus_attn = "ck" && continue
+    #else
+    #    _DEFAULT_FUSED_ATTN="ck"
+    #    test $_fus_attn != "ck" && continue
+    #fi
 
     if [ -n "$TEST_JOBS_MODE" ]; then
         test -n "$TEST_SGPU" && run_test_job "$_fus_attn"

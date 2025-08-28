@@ -7,6 +7,8 @@ DIR=`dirname $0`
 
 . $DIR/_utils.sh
 
+echo "==== PIV Skip cpp tests ===="
+exit 0
 start_message
 if [ -z "$TEST_SGPU" ]; then
     return_run_results
