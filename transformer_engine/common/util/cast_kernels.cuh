@@ -930,11 +930,7 @@ void cast_fp8_2D(const Tensor &input, const Tensor *act_input, Tensor *output, T
 #endif // #ifndef __HIP_PLATFORM_AMD__
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
-          float (*OP)(float, const ParamOP &)
-#ifdef __HIP_PLATFORM_AMD__          
-          , bool IS_NORM
-#endif
-          >
+          float (*OP)(float, const ParamOP &)>
 void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                     const Tensor *noop,  // TODO (ksivamani)
                     Tensor *output, Tensor *dbias, Tensor *workspace, cudaStream_t stream) {
@@ -1006,7 +1002,7 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
               TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
                   output->dtype(), OType,
 #ifdef __HIP_PLATFORM_AMD__
-                  cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, IS_NORM, ParamOP, OP, IType, OType,
+                  cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
                                        SCALE_DIM_Y, SCALE_DIM_X><<<grid, block, 0, stream>>>(
                       reinterpret_cast<const IType *>(input.data.dptr), 
                       (IS_DACT) ? reinterpret_cast<const IType *>(act_input->data.dptr) : nullptr,
@@ -1275,11 +1271,7 @@ void fp8_quantize(const Tensor &input, const Tensor *act_input, const Tensor *no
 namespace detail {
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
-#ifdef __HIP_PLATFORM_AMD__
-          float (*OP)(float, const ParamOP &), bool IS_NORM = false>
-#else
           float (*OP)(float, const ParamOP &)>
-#endif
 void quantize_helper(const NVTETensor input, const NVTETensor grad, const NVTETensor noop,
                      NVTETensor output, NVTETensor dbias, NVTETensor workspace,
                      cudaStream_t stream) {
@@ -1319,11 +1311,7 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, const NVTETe
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
-#ifdef __HIP_PLATFORM_AMD__
-      mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IS_NORM>(
-#else
       mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
-#endif
           *input_tensor, activation_input_tensor, &noop_tensor, output_tensor, dbias_tensor,
           workspace_tensor, stream);
       break;

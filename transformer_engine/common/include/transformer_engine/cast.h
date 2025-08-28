@@ -202,16 +202,6 @@ void nvte_quantize_dbias_dsrelu(const NVTETensor input, const NVTETensor act_inp
                                 NVTETensor output, NVTETensor dbias, NVTETensor workspace,
                                 cudaStream_t stream);
 
-#ifdef __HIP_PLATFORM_AMD__
-/*! \brief Casts normalized input tensor to MXFP8.
- *
- *  \param[in]      input            Input tensor to be cast.
- *  \param[in,out]  output           Output MXFP8 tensor.
- *  \param[in]      stream           CUDA stream used for the operation.
- */
-void nvte_quantize_norm(const NVTETensor input, NVTETensor output, cudaStream_t stream);
-#endif 
-
 /*! \brief Casts input tensor from reduced to higher precision.
  *         If the scaling mode of the input tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the block dequantization (MXFP8) of the specified shape of the block will be used.

@@ -9,9 +9,6 @@
 #include "../common.h"
 #include "../kernel_traits.h"
 #include "ln_fwd_kernels.cuh"
-#ifdef __HIP_PLATFORM_AMD__
-#include "transformer_engine/cast.h"
-#endif
 
 using namespace transformer_engine::normalization;
 
@@ -66,10 +63,7 @@ static void launch_tuned_(LaunchParams<ForwardKernelParams> &launch_params,
   }
 #ifdef __HIP_PLATFORM_AMD__
   if (launch_params.params.mxfp8_out) {
-    const size_t rows = launch_params.params.rows;
-    const size_t cols = launch_params.params.cols;
-    auto mxfp8_buffer = TensorWrapper(reinterpret_cast<float*>(launch_params.params.mxfp8_buffer), {rows, cols}, DType::kFloat32);
-    nvte_quantize_norm(mxfp8_buffer.data(), launch_params.params.z_tensor, stream);
+    rocm_norm_mxfp8_quantize<compute_t>(launch_params);
   }
 #endif
 }
@@ -123,10 +117,7 @@ static void launch_general_(LaunchParams<ForwardKernelParams> &launch_params,
   }
 #ifdef __HIP_PLATFORM_AMD__
   if (launch_params.params.mxfp8_out) {
-    const size_t rows = launch_params.params.rows;
-    const size_t cols = launch_params.params.cols;
-    auto mxfp8_buffer = TensorWrapper(reinterpret_cast<float*>(launch_params.params.mxfp8_buffer), {rows, cols}, DType::kFloat32);
-    nvte_quantize_norm(mxfp8_buffer.data(), launch_params.params.z_tensor, stream);
+    rocm_norm_mxfp8_quantize<compute_t>(launch_params);
   }
 #endif
 }

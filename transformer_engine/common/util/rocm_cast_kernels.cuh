@@ -47,9 +47,9 @@ constexpr size_t MXFP8_BUFF_STAGES_NUM =
 constexpr size_t MXFP8_ITERATIONS = MXFP8_CHUNK_DIM_Y / MXFP8_BUFFER_DIM_Y;  //   2 = 64 / 32
 static_assert(MXFP8_ITERATIONS >= MXFP8_PREFETCH_BUFFERS_NUM);
 
-template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, bool IS_NORM, typename ParamOP,
+template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, size_t SCALE_DIM_Y,
-          size_t SCALE_DIM_X>
+          size_t SCALE_DIM_X, bool IS_NORM = false>
 __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
     cast_mxfp8_2D_kernel(const IType *input_ptr,
                          const IType *act_input_ptr,
@@ -385,5 +385,4 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
   }
 }
 
-
- }
+} // namespace transformer_engine

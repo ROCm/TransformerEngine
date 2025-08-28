@@ -123,7 +123,7 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_tuned_ke
 
         z[it].data.elt[jt] = output_t(temp_output);
       }
-      z[it].store_to(params.mxfp8_buffer, idx);
+      z[it].store_to(params.z, idx);
       idx += VEC_COLS_PER_LDG;
     }
   } else {
@@ -301,7 +301,7 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_general_
       // Store output
 #ifdef __HIP_PLATFORM_AMD__
       if (params.mxfp8_out) {
-        z.store_to_elts(params.mxfp8_buffer, row * params.cols + col, params.cols - col);
+        z.store_to_elts(params.z, row * params.cols + col, params.cols - col);
       } else {
 #endif
       Ovec z_out;

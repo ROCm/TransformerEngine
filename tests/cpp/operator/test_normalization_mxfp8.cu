@@ -186,6 +186,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   cudaGetDeviceProperties(&prop, 0);
 
 #ifndef __HIP_PLATFORM_AMD__
+// TODO: Guard all MXFP8 tests for hip_version >= gfx9.5
   if (getDeviceComputeCapability() < blackwellComputeCapability) {
     GTEST_SKIP();
   }
