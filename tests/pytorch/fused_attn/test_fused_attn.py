@@ -830,10 +830,11 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, pad_between
         window_size=config.window_size,
         pad_between_seqs=pad_between_seqs,
     )
-    if not IS_HIP_EXTENSION and share_cu_seqlens_ref:
-        pytest.skip("share_cu_seqlens_ref is a ROCm TE specific implementation detail.")
-    elif share_cu_seqlens_ref and FusedAttnBackend["CK"] not in fused_attn_backends:
-        pytest.skip("This test is only required for the CK fused attention backend.")
+    if share_cu_seqlens_ref:
+        if not IS_HIP_EXTENSION:
+            pytest.skip("share_cu_seqlens_ref is a ROCm TE specific implementation detail.")
+        if FusedAttnBackend["CK"] not in fused_attn_backends:
+            pytest.skip("This test is only required for the CK fused attention backend.")
     test_dot_product_attention(
         dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs, share_cu_seqlens_ref
     )
@@ -845,7 +846,7 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, pad_between
 @pytest.mark.parametrize("qkv_layout", qkv_layouts_thd)
 @pytest.mark.parametrize(
     ("pad_between_seqs", "share_cu_seqlens_ref"),
-    [(False, False), (True, False), (True, True)]
+    [(True, False), (False, False), (False, True)]
 )
 def test_dpa_qkv_layout_thd_mqa_gqa(dtype, model_configs, model, qkv_layout, pad_between_seqs, share_cu_seqlens_ref):
     config = model_configs[model]
