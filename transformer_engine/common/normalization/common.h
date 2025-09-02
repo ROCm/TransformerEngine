@@ -269,9 +269,9 @@ class TeNormalizationPlan : public NormalizationPlanBase {
  public:
   TeNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype,
                       DType otype, DType ctype, const size_t batch_size, const size_t hidden_size,
-                      const size_t sm_count, const bool zero_centered_gamma, const NVTEScalingMode mode
+                      const size_t sm_count, const bool zero_centered_gamma, const bool is_tuned
 #ifdef __HIP_PLATFORM_AMD__
-                      , const bool training, const bool is_tuned
+                      , const NVTEScalingMode mode, const bool training
 #endif
                     );
   std::vector<size_t> getWorkspaceShape() const override;

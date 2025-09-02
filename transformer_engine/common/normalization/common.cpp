@@ -64,11 +64,11 @@ TupleKeyType get_key(NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType,
 template <typename KernelParamsType>
 TeNormalizationPlan<KernelParamsType>::TeNormalizationPlan(
     NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype, DType otype,
-    DType ctype, const size_t batch_size, const size_t hidden_size, const size_t sm_count, const bool zero_centered_gamma,
+    DType ctype, const size_t batch_size, const size_t hidden_size, const size_t sm_count, const bool zero_centered_gamma, const bool is_tuned
 #ifdef __HIP_PLATFORM_AMD__
-    const NVTEScalingMode mode, const bool training,
+    , const NVTEScalingMode mode, const bool training
 #endif
-    const bool is_tuned) : _is_layernorm(NormType == NVTE_Norm_Type::LayerNorm) {
+  ) : _is_layernorm(NormType == NVTE_Norm_Type::LayerNorm) {
   _launch_params.multiprocessorCount = sm_count;
 
   auto& kernel_params = _launch_params.params;
@@ -114,9 +114,12 @@ void TeNormalizationPlan<ForwardKernelParams>::execute(Tensor* z, void* x_dptr, 
   kernel_params.amax = z->amax.dptr;
   kernel_params.scale = z->scale.dptr;
   kernel_params.scale_inv = z->scale_inv.dptr;
+
 #ifdef __HIP_PLATFORM_AMD__
   if (kernel_params.mxfp8_out) {
     _launch_params.z_tensor = z;
+    // z is used as a high precision buffer before quantization for MXFP8. Buffer is assigned in _set_workspace()
+    kernel_params.z = nullptr;
   }
 #endif
 
@@ -163,7 +166,7 @@ void TeNormalizationPlan<KernelParamsType>::_set_workspace() {
     if constexpr (std::is_same_v<KernelParamsType, ForwardKernelParams>) {
       size_t offset = _launch_params.workspace_bytes + _launch_params.barrier_bytes;
       // TODO: Make more general than float for compute_t
-      _launch_params.params.z = reinterpret_cast<float*>(workspace_dptr + offset);
+      _launch_params.params.z = workspace_dptr + offset;
     }
 #endif
     if constexpr (std::is_same_v<KernelParamsType, BackwardKernelParams>) {
@@ -513,20 +516,18 @@ NormalizationPlanBase* NormalizationPlanRegistry::getNormalizationPlan(
 #endif
   if (NormStage == NVTE_Norm_Stage::Forward) {
     plan = std::make_unique<TeNormalizationPlan<ForwardKernelParams>>(
-        NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size, sm_count,
+        NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size, sm_count,zero_centered_gamma, is_tuned
 #ifdef __HIP_PLATFORM_AMD__
-        zero_centered_gamma, mode, training, is_tuned);
-#else
-        zero_centered_gamma, is_tuned);
+        , mode, training
 #endif
+      );
   } else {
     plan = std::make_unique<TeNormalizationPlan<BackwardKernelParams>>(
-        NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size, sm_count,
+        NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size, sm_count, zero_centered_gamma, is_tuned
 #ifdef __HIP_PLATFORM_AMD__
-        zero_centered_gamma, mode, training, is_tuned);
-#else
-        zero_centered_gamma, is_tuned);
+        , mode, training
 #endif
+        );
   }
   normalizationPlanMap.insert({key, std::move(plan)});
   return normalizationPlanMap[key].get();
