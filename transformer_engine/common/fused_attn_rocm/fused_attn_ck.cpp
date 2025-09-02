@@ -540,7 +540,7 @@ void fused_attn_ck_fwd_impl(
     if (env_p != nullptr && std::string(env_p) == "1")
       nvte_log_ck_config = true;
   }
-  bool nvte_ck_uses_fwd_v3 = getenv<int>("NVTE_CK_USES_FWD_V3", 0) and (layout==NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD);
+  bool nvte_ck_uses_fwd_v3 = getenv<int>("NVTE_CK_USES_FWD_V3", 0); // and (layout==NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD);
   if(nvte_log_ck_config){
     if(getenv<int>("NVTE_CK_USES_FWD_V3", 0) and (layout!=NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD)){
       std::cout<<"Disable CK FWD v3 since only BSHD_BSHD_BSHD layout supported"<<std::endl;
