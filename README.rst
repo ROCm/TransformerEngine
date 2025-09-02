@@ -261,6 +261,10 @@ NVTE_FUSED_ATTN=0 will use the TE unfused attention even if NVTE_FUSED_ATTN_CK o
 Fused attention backends are chosen according to the match results between the actual problem config and the support matrix of the specific backend.
 For the scenario that both backends are enabled and match the problem configuration, the CK backend will be chosen with higher priority.
 
+Note that when using `THD` format tensors with CK Fused Attention, one should pass `None` for `cu_seqlens_q_padded, cu_seqlens_kv_padded`
+to indicate that there is no padding between sequences. Otherwise, passing proper tensors will indicate padding between sequences. This is the case
+for both the `FusedAttention` and `DotProductAttention` modules.
+
 FA v3 Kernels in CK Backend
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 ROCm TE provides experimental support for flash-attention v3 fwd/bwd kernels using the ck backend for limited fused attention configs.

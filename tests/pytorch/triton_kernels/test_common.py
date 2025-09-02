@@ -3,16 +3,11 @@
 from __future__ import annotations
 
 import types
-from typing import Optional
-from collections.abc import Iterable
 
 import numpy as np
-import pytest
 import torch
-import math
 
 from transformer_engine.pytorch import cpp_extensions as tex
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 
 from transformer_engine.pytorch.triton_kernels.common import (
     get_torch_e4m3_type,
@@ -82,34 +77,32 @@ def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
 
 # PyTorch implementation of `compareResults` C++ function from `tests/cpp/test_common.cu`.
 # Arguments:
-#     t: actual tensor
-#     r: expected tensor
+#     actual: actual tensor
+#     expected: expected tensor
 # NOTE: DO NOT upcast inputs to fp32 if you are using te_compare for any precision other than fp32
-def te_compare_results(t, r, atol, rtol, msg):
-    assert t.dtype == r.dtype, f"Tensor dtypes don't match: {t.dtype} vs {r.dtype}."
-    assert t.shape == r.shape, f"Tensor shapes don't match: {t.shape} vs {r.shape}."
-    assert atol > 0, "Absolute tolerance must be positive."
-    assert rtol > 0, "Relative tolerance must be positive."
-    dtype = t.dtype
-    t = t.cpu().to(torch.float32).to(torch.float64)
-    r = r.cpu().to(torch.float32).to(torch.float64)
+def te_compare_results(actual, expected, atol, rtol, msg, use_torch_semantics=False):
+    assert actual.dtype == expected.dtype, f"Tensor dtypes don't match: {actual.dtype} vs {expected.dtype}."
+    assert actual.shape == expected.shape, f"Tensor shapes don't match: {actual.shape} vs {expected.shape}."
+    dtype = actual.dtype
+    actual = actual.cpu().to(torch.float32).to(torch.float64)
+    expected = expected.cpu().to(torch.float32).to(torch.float64)
 
     # If any of the tensors contain NaN we
-    if torch.isnan(t).any() or torch.isnan(r).any():
+    if torch.isnan(actual).any() or torch.isnan(expected).any():
         base_msg = (
             f"NaN values found!\n"
         )
 
         # Find which tensor has NaNs and at which indices
-        if torch.isnan(t).any():
-            nan_count = torch.isnan(t).sum()
-            nan_indices = torch.where(torch.isnan(t))
-            base_msg += f"Tensor 't' has {nan_count} NaN(s) at indices: {nan_indices}\n"
+        if torch.isnan(actual).any():
+            nan_count = torch.isnan(actual).sum()
+            nan_indices = torch.where(torch.isnan(actual))
+            base_msg += f"Tensor 'actual' has {nan_count} NaN(s) at indices: {nan_indices}\n"
 
-        if torch.isnan(r).any():
-            nan_count = torch.isnan(r).sum()
-            nan_indices = torch.where(torch.isnan(r))
-            base_msg += f"Tensor 'r' has {nan_count} NaN(s) at indices: {nan_indices}\n"
+        if torch.isnan(expected).any():
+            nan_count = torch.isnan(expected).sum()
+            nan_indices = torch.where(torch.isnan(expected))
+            base_msg += f"Tensor 'expected' has {nan_count} NaN(s) at indices: {nan_indices}\n"
 
         if isinstance(msg, str):
             msg = f"{msg}\n\n{base_msg}\n"
@@ -119,30 +112,30 @@ def te_compare_results(t, r, atol, rtol, msg):
             msg = base_msg
         assert False, msg
 
-    diff = t - r
-    atol_mismatch = torch.abs(diff) > atol
-    nonzero_r = r != 0
-    rel_diff = torch.where(nonzero_r, torch.abs(diff / r), torch.zeros_like(diff))
-    rtol_mismatch = torch.where(nonzero_r, rel_diff > rtol, torch.full_like(atol_mismatch, False))
-    mismatch = atol_mismatch & (~nonzero_r | rtol_mismatch)
+    diff = actual - expected
+    adiff = torch.abs(diff)
+    nonzero_r = expected != 0
+    rel_diff = torch.where(nonzero_r, torch.abs(diff / expected), torch.zeros_like(diff))
+    if use_torch_semantics:
+        mismatch = adiff > atol + rtol * torch.abs(expected)
+    else:
+        assert atol > 0, "Absolute tolerance must be positive."
+        assert rtol > 0, "Relative tolerance must be positive."
+        atol_mismatch = adiff > atol
+        rtol_mismatch = torch.where(nonzero_r, rel_diff > rtol, torch.full_like(atol_mismatch, False))
+        mismatch = atol_mismatch & (~nonzero_r | rtol_mismatch)
     has_mismatch = torch.any(mismatch).item()
 
     max_rel_diff = 0.0 # Default to 0.0 if no non-zero reference values
     max_abs_diff = 0.0 
     max_abs_diff_indices = None
     max_rel_diff_indices = None
-    
-    if has_mismatch:
-        max_abs_diff = torch.max(torch.abs(diff)).item()
-        max_rel_diff = torch.max(rel_diff).item()
-        max_rel_diff_indices = torch.unravel_index(torch.argmax(rel_diff), rel_diff.shape)
-        max_abs_diff_indices = torch.unravel_index(torch.argmax(torch.abs(diff)), diff.shape)
 
     # for fp32 the floating point comparison is enough to error out
     if has_mismatch and dtype != torch.float32:
         # check if it is just a failure of round to nearest choosing different side of the real value
         # for non fp32 types
-        mean = (t + r) / 2
+        mean = (actual + expected) / 2
         eps = 1e-6
         mean_one_plus_eps = mean * (1 + eps)
         mean_one_minus_eps = mean * (1 - eps)
@@ -155,24 +148,32 @@ def te_compare_results(t, r, atol, rtol, msg):
         cast_mean_m = (
             mean_m.to(torch.float32).to(dtype).to(torch.float32).to(torch.float64)
         )
-        min_tr = torch.minimum(t, r)
-        max_tr = torch.maximum(t, r)
+        min_tr = torch.minimum(actual, expected)
+        max_tr = torch.maximum(actual, expected)
         round_check = ~((cast_mean_m == min_tr) & (cast_mean_p == max_tr))
         mismatch = mismatch & round_check
         has_mismatch = torch.any(mismatch).item()
+
     if has_mismatch:
+        abs_diff = torch.where(mismatch, adiff, 0)
+        rel_diff = torch.where(mismatch, rel_diff, 0)
+        max_abs_diff = torch.max(abs_diff).item()
+        max_rel_diff = torch.max(rel_diff).item()
+        max_rel_diff_indices = torch.unravel_index(torch.argmax(rel_diff), rel_diff.shape)
+        max_abs_diff_indices = torch.unravel_index(torch.argmax(abs_diff), diff.shape)
+
         num_mismatched_elements = torch.sum(mismatch).item()
-        total_elements = t.numel() 
+        total_elements = actual.numel()
         base_msg = (
             f"There are tensor mismatches.\n"
-            f"Number of mismatched rows: {num_mismatched_elements} out of {total_elements} total rows.\n"
+            f"Number of mismatched elements: {num_mismatched_elements} out of {total_elements} total elements.\n"
             f"Max Absolute Difference among mismatched: {max_abs_diff:.6e} (Tolerance: {atol:.6e}) at index {tuple(max_abs_diff_indices)}\n"
-            f"Corresponding values: t={t[max_abs_diff_indices].item()}, r={r[max_abs_diff_indices].item()}\n"
+            f"Corresponding values: actual={actual[max_abs_diff_indices].item()}, expected={expected[max_abs_diff_indices].item()}\n"
         )
         if max_rel_diff_indices is not None:
              base_msg += (
                 f"Max Relative Difference among mismatched: {max_rel_diff:.6e} (Tolerance: {rtol:.6e}) at index {tuple(max_rel_diff_indices)}\n"
-                f"Corresponding values: t={t[max_rel_diff_indices].item()}, r={r[max_rel_diff_indices].item()}"
+                f"Corresponding values: actual={actual[max_rel_diff_indices].item()}, expected={expected[max_rel_diff_indices].item()}"
             )
         else:
             base_msg += (
@@ -185,16 +186,6 @@ def te_compare_results(t, r, atol, rtol, msg):
         else:
             msg = base_msg
         assert False, msg
-
-
-# Call PyTorch tensor comparison function or TE tensor comparison function.
-def compare_results(provider, actual, expected, atol, rtol, msg):
-    assert provider in {"torch", "te"}
-    if provider == "torch":
-        torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol, msg=msg)
-    else:
-        te_compare_results(actual, expected, atol, rtol, msg)
-
 
 
 # Get size in bytes of a given PyTorch type.
@@ -222,52 +213,4 @@ def str_to_torch_dtype(dtype_str):
         "fp8e5": get_torch_e5m2_type(),
     }[dtype_str[1:] if dtype_str[0] in {"i", "o"} else dtype_str]
 
-# Common pytest skip conditions:
 
-def skip_in_dtype_gt_out_dtype(in_dtype, out_dtype):
-    if sizeof(in_dtype) < sizeof(out_dtype):
-        pytest.skip("size of input dtype < size of output dtype")
-
-
-def skip_mixed_16bit_float_types(in_dtype, out_dtype):
-    if (in_dtype == torch.float16 and out_dtype == torch.bfloat16) or (
-        in_dtype == torch.bfloat16 and out_dtype == torch.float16
-    ):
-        pytest.skip("hipified implementation does not support mixing fp16 and bf16")
-
-
-# Check if FP8 is supported
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
-
-
-def maybe_skip_quantization(
-    quantization: Optional[str],
-    *,
-    dims: Optional[Iterable[int] | int] = None,
-    device: Optional[torch.device | str] = None,
-) -> None:
-
-    # Don't skip if there is no quantization
-    if quantization is None:
-        return
-
-    # Check if quantization scheme is supported
-    if quantization == "fp8" and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    if quantization == "mxfp8" and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
-
-    if dims is not None:
-        if not isinstance(dims, Iterable):
-            dims = (dims,)
-        if quantization == "fp8":
-            if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
-                pytest.skip("FP8 GEMMs require dims that are divisible by 16")
-        elif quantization == "mxfp8":
-            if math.prod(dims[:-1]) % 32 != 0 or dims[-1] % 32 != 0:
-                pytest.skip("MXFP8 GEMMs require dims that are divisible by 32")
-
-    # Check if device is supported
-    if device is not None and torch.device(device).type != "cuda":
-        pytest.skip("Quantization is only supported on CUDA devices")

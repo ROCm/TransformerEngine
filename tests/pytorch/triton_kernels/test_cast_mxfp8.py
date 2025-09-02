@@ -12,7 +12,7 @@ from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.triton_kernels.cast import te_dequantize_triton, te_quantize_triton
 from transformer_engine.pytorch.triton_kernels.common import te_dtype_to_torch_dtype
 import transformer_engine_torch as tex
-from test_common import compare_results, fill_uniform, get_tolerances
+from test_common import te_compare_results, fill_uniform, get_tolerances
 
 @pytest.mark.parametrize("shape",
                          [
@@ -42,33 +42,34 @@ def test_quantize_mxfp8(shape, in_dtype, fp8_dtype, rowwise, columnwise):
     quantized_out_triton  = te_quantize_triton(input_tensor, quantizer=triton_quantizer, output=out_triton)
     quantized_out_hip = tex.quantize(input_tensor, quantizer=hip_quantizer, output=out_hip)
 
-    cmp = "te"
     atol_fp8, rtol_fp8 = get_tolerances(torch_out_dtype)
     if rowwise:
-        compare_results(
-            cmp,
+        te_compare_results(
             quantized_out_triton._rowwise_data.view(torch_out_dtype),
             quantized_out_hip._rowwise_data.view(torch_out_dtype),
-            atol_fp8, rtol_fp8, "rowwise data doesn't match"
+            atol_fp8, rtol_fp8,
+            msg="rowwise data doesn't match"
         )
-        compare_results(
-            "torch",
+        te_compare_results(
             quantized_out_triton._rowwise_scale_inv,
             quantized_out_hip._rowwise_scale_inv,
             0.0, 0.0,
-            "rowwise scale inv doesn't match")
+            msg="rowwise scale inv doesn't match",
+            use_torch_semantics=True
+        )
     if columnwise:
-        compare_results(
-            cmp,
+        te_compare_results(
             quantized_out_triton._columnwise_data.view(torch_out_dtype),
             quantized_out_hip._columnwise_data.view(torch_out_dtype),
-            atol_fp8, rtol_fp8, "columnwise data doesn't match"
+            atol_fp8, rtol_fp8,
+            msg="columnwise data doesn't match"
         )
-        compare_results(
-            "torch",
+        te_compare_results(
             quantized_out_triton._columnwise_scale_inv,
             quantized_out_hip._columnwise_scale_inv,
-            0.0, 0.0, "columnwise scale inv doesn't match"
+            0.0, 0.0,
+            msg="columnwise scale inv doesn't match",
+            use_torch_semantics=True
         )
 
 @pytest.mark.parametrize("shape",
@@ -103,4 +104,4 @@ def test_dequantize_mxfp8(shape, in_dtype, out_dtype, fp8_dtype, rowwise, column
     out_hip = tex.dequantize(in_hip, out_dtype)
 
     atol, rtol = get_tolerances(te_dtype_to_torch_dtype(out_dtype))
-    compare_results('te', out_triton, out_hip, atol, rtol, "output doesn't match")
+    te_compare_results(out_triton, out_hip, atol, rtol, "output doesn't match", use_torch_semantics=True)

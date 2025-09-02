@@ -9,7 +9,7 @@ from transformer_engine.pytorch.triton_kernels.cast import te_quantize_triton
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 from transformer_engine.pytorch.triton_kernels.common import te_dtype_to_torch_dtype
 import transformer_engine_torch as tex
-from test_common import compare_results, fill_uniform, get_tolerances
+from test_common import te_compare_results, fill_uniform, get_tolerances
 
 @pytest.mark.parametrize("shape", 
                          [
@@ -46,29 +46,40 @@ def test_quantize(shape, in_dtype, out_dtype):
     torch_out_dtype = te_dtype_to_torch_dtype(out_dtype)
     
     atol_q, rtol_q = get_tolerances(torch_out_dtype)
-    cmp = "te"
-    compare_results(
-        cmp,
+    te_compare_results(
         quantized_out_triton._data.view(torch_out_dtype),
         quantized_out_tex._data.view(torch_out_dtype),
         atol_q,
         rtol_q,
         lambda msg: f"triton does not match tex <-> hip\n\n{msg}\n",
+        use_torch_semantics=True,
     )
     assert quantized_out_triton._transpose is not None, "Triton transpose is none!" 
     assert quantized_out_tex._transpose is not None, "TEX transpose is none!" 
-    compare_results(
-        cmp,
+    te_compare_results(
         quantized_out_triton._transpose.view(torch_out_dtype),
         quantized_out_tex._transpose.view(torch_out_dtype),
         atol_q,
         rtol_q,
         lambda msg: f"triton does not match tex <-> hip\n\n{msg}\n",
+        use_torch_semantics=True,
     )
     
     atol_scale, rtol_scale = get_tolerances(torch.float32)
-    assert torch.allclose(quantized_out_triton._get_quantizer().scale, quantized_out_tex._get_quantizer().scale, atol=atol_scale, rtol=rtol_scale), 'Scale results do not match!'
-    assert torch.allclose(quantized_out_triton._get_quantizer().amax, quantized_out_tex._get_quantizer().amax, atol=atol_scale, rtol=rtol_scale), 'AMAX results do not match!'
+    te_compare_results(
+        quantized_out_triton._get_quantizer().scale,
+        quantized_out_tex._get_quantizer().scale,
+        atol=atol_scale, rtol=rtol_scale,
+        msg='Scale results do not match!',
+        use_torch_semantics=True
+    ),
+    te_compare_results(
+        quantized_out_triton._get_quantizer().amax,
+        quantized_out_tex._get_quantizer().amax,
+        atol=atol_scale, rtol=rtol_scale,
+        msg='AMAX results do not match!',
+        use_torch_semantics=True
+    )
 
 
 @pytest.mark.parametrize("t_shape",
