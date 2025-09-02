@@ -222,14 +222,14 @@ Tensor::Tensor(const std::string& name,
 
   if (total_size != 0) {
     if (rowwise) {
-      cudaMalloc((void**)&dptr_rowwise, total_size);  // NOLINT(*)
-      cudaMemset(dptr_rowwise, 0, total_size);
+      (void)cudaMalloc((void**)&dptr_rowwise, total_size);  // NOLINT(*)
+      (void)cudaMemset(dptr_rowwise, 0, total_size);
       cpu_data_rowwise_ = std::make_unique<unsigned char[]>(total_size);
       std::fill_n(cpu_data_rowwise_.get(), total_size, 0);
     }
     if (columnwise) {
-      cudaMalloc((void**)&dptr_columnwise, total_size);  // NOLINT(*)
-      cudaMemset(dptr_columnwise, 0, total_size);
+      (void)cudaMalloc((void**)&dptr_columnwise, total_size);  // NOLINT(*)
+      (void)cudaMemset(dptr_columnwise, 0, total_size);
       cpu_data_columnwise_ = std::make_unique<unsigned char[]>(total_size);
       std::fill_n(cpu_data_columnwise_.get(), total_size, 0);
     }
@@ -239,15 +239,15 @@ Tensor::Tensor(const std::string& name,
 
   if (isFp8Type(type)) {
     if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
-      cudaMalloc((void**)&amax, sizeof(float));  // NOLINT(*)
-      cudaMemset(amax, 0, sizeof(float));
-      cudaMalloc((void**)&scale, sizeof(float));  // NOLINT(*)
-      cudaMemset(scale, 0, sizeof(float));
+      (void)cudaMalloc((void**)&amax, sizeof(float));  // NOLINT(*)
+      (void)cudaMemset(amax, 0, sizeof(float));
+      (void)cudaMalloc((void**)&scale, sizeof(float));  // NOLINT(*)
+      (void)cudaMemset(scale, 0, sizeof(float));
       amax_cpu_data_ = std::make_shared<float>(0);
       scale_cpu_data_ = std::make_shared<float>(0);
       tensor_.set_amax(amax, DType::kFloat32, std::vector<size_t>{1});
       tensor_.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
-      cudaMalloc((void**)&rowwise_scale_inv, sizeof(float));  // NOLINT(*)
+      (void)cudaMalloc((void**)&rowwise_scale_inv, sizeof(float));  // NOLINT(*)
       if (rowwise) {
         tensor_.set_rowwise_scale_inv(rowwise_scale_inv, DType::kFloat32,
                                       std::vector<size_t>{1});
@@ -268,15 +268,15 @@ Tensor::Tensor(const std::string& name,
       auto scale_shape = rowwise_scale_meta.shape;
       auto columnwise_scale_shape = colwise_scale_meta.shape;
       if (rowwise) {
-        cudaMalloc((void**)&rowwise_scale_inv, rowwise_scale_size);  // NOLINT(*)
-        cudaMemset(rowwise_scale_inv, 0, rowwise_scale_size);
+        (void)cudaMalloc((void**)&rowwise_scale_inv, rowwise_scale_size);  // NOLINT(*)
+        (void)cudaMemset(rowwise_scale_inv, 0, rowwise_scale_size);
         rowwise_scale_inv_cpu_data_ = std::make_unique<unsigned char[]>(rowwise_scale_size);
         std::fill_n(rowwise_scale_inv_cpu_data_.get(), rowwise_scale_size, 0);
         tensor_.set_rowwise_scale_inv(rowwise_scale_inv, DType::kFloat8E8M0, scale_shape);
       }
       if (columnwise) {
-        cudaMalloc((void**)&columnwise_scale_inv, columnwise_scale_size);  // NOLINT(*)
-        cudaMemset(columnwise_scale_inv, 0, columnwise_scale_size);
+        (void)cudaMalloc((void**)&columnwise_scale_inv, columnwise_scale_size);  // NOLINT(*)
+        (void)cudaMemset(columnwise_scale_inv, 0, columnwise_scale_size);
         columnwise_scale_inv_cpu_data_ = std::make_unique<unsigned char[]>(columnwise_scale_size);
         std::fill_n(columnwise_scale_inv_cpu_data_.get(), columnwise_scale_size, 0);
         tensor_.set_columnwise_scale_inv(columnwise_scale_inv, DType::kFloat8E8M0, columnwise_scale_shape);
@@ -289,13 +289,13 @@ void Tensor::to_cpu() const {
   const NVTEShape s = tensor_.shape();
   const size_t size = product(s) * typeToSize(tensor_.dtype());
   if (rowwise_) {
-    cudaMemcpy(cpu_data_rowwise_.get(),
+    (void)cudaMemcpy(cpu_data_rowwise_.get(),
                tensor_.get_rowwise_data().data_ptr,
                size,
                cudaMemcpyDeviceToHost);
   }
   if (columnwise_) {
-    cudaMemcpy(cpu_data_columnwise_.get(),
+    (void)cudaMemcpy(cpu_data_columnwise_.get(),
                tensor_.get_columnwise_data().data_ptr,
                size,
                cudaMemcpyDeviceToHost);
@@ -303,12 +303,12 @@ void Tensor::to_cpu() const {
   if (isFp8Type(dtype())) {
     if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
       if (tensor_.amax() != nullptr){
-        cudaMemcpy(amax_cpu_data_.get(),
+        (void)cudaMemcpy(amax_cpu_data_.get(),
                   tensor_.amax(),
                   sizeof(float),
                   cudaMemcpyDeviceToHost);
       }
-      cudaMemcpy(scale_cpu_data_.get(),
+      (void)cudaMemcpy(scale_cpu_data_.get(),
                  tensor_.scale(),
                  sizeof(float),
                  cudaMemcpyDeviceToHost);
@@ -316,14 +316,14 @@ void Tensor::to_cpu() const {
     auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(s, tensor_.scaling_mode());
     if (rowwise_) {
       auto scale_size = product(rowwise_scale_meta.shape) * rowwise_scale_meta.type_size;
-      cudaMemcpy(rowwise_scale_inv_cpu_data_.get(),
+      (void)cudaMemcpy(rowwise_scale_inv_cpu_data_.get(),
                  tensor_.get_rowwise_scale_inv().data_ptr,
                  scale_size,
                  cudaMemcpyDeviceToHost);
     }
     if (columnwise_) {
       auto scale_size = product(colwise_scale_meta.shape) * colwise_scale_meta.type_size;
-      cudaMemcpy(columnwise_scale_inv_cpu_data_.get(),
+      (void)cudaMemcpy(columnwise_scale_inv_cpu_data_.get(),
                  tensor_.get_columnwise_scale_inv().data_ptr,
                  scale_size,
                  cudaMemcpyDeviceToHost);
@@ -335,32 +335,32 @@ void Tensor::from_cpu() const {
   const NVTEShape s = tensor_.shape();
   const size_t size = product(s) * typeToSize(tensor_.dtype());
   if (rowwise_) {
-    cudaMemcpy(tensor_.get_rowwise_data().data_ptr,
+    (void)cudaMemcpy(tensor_.get_rowwise_data().data_ptr,
                cpu_data_rowwise_.get(), size, cudaMemcpyHostToDevice);
   }
   if (columnwise_) {
-    cudaMemcpy(tensor_.get_columnwise_data().data_ptr,
+    (void)cudaMemcpy(tensor_.get_columnwise_data().data_ptr,
                cpu_data_columnwise_.get(), size, cudaMemcpyHostToDevice);
   }
   if (isFp8Type(dtype())) {
     if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
       if (tensor_.amax() != nullptr){
-        cudaMemcpy(tensor_.amax(), amax_cpu_data_.get(), sizeof(float),
+        (void)cudaMemcpy(tensor_.amax(), amax_cpu_data_.get(), sizeof(float),
                   cudaMemcpyHostToDevice);
       }
-      cudaMemcpy(tensor_.scale(), scale_cpu_data_.get(), sizeof(float),
+      (void)cudaMemcpy(tensor_.scale(), scale_cpu_data_.get(), sizeof(float),
                  cudaMemcpyHostToDevice);
     }
     auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(s, tensor_.scaling_mode());
     if (rowwise_) {
       auto scale_size = product(rowwise_scale_meta.shape) * rowwise_scale_meta.type_size;
-      cudaMemcpy(tensor_.get_rowwise_scale_inv().data_ptr,
+      (void)cudaMemcpy(tensor_.get_rowwise_scale_inv().data_ptr,
                  rowwise_scale_inv_cpu_data_.get(), scale_size,
                  cudaMemcpyHostToDevice);
     }
     if (columnwise_) {
       auto scale_size = product(colwise_scale_meta.shape) * colwise_scale_meta.type_size;
-      cudaMemcpy(tensor_.get_columnwise_scale_inv().data_ptr,
+      (void)cudaMemcpy(tensor_.get_columnwise_scale_inv().data_ptr,
                  columnwise_scale_inv_cpu_data_.get(), scale_size,
                  cudaMemcpyHostToDevice);
     }
@@ -499,22 +499,22 @@ void compareResults_sequential(const std::string &name, const Tensor &test,
         const double mean = (t + r) / 2;
         const double mean_p = mean >= 0 ? mean * (1 + 1e-6) : mean * (1 - 1e-6);
         const double mean_m = mean >= 0 ? mean * (1 - 1e-6) : mean * (1 + 1e-6);
-        #ifndef __HIP_PLATFORM_AMD__
+#ifndef __HIP_PLATFORM_AMD__
         const double cast_mean_p = static_cast<double>(static_cast<T>(mean_p));
         const double cast_mean_m = static_cast<double>(static_cast<T>(mean_m));
-        #else
-        const double cast_mean_p = static_cast<double>(static_cast<float>(static_cast<T>(static_cast<float>(mean_p))));
-        const double cast_mean_m = static_cast<double>(static_cast<float>(static_cast<T>(static_cast<float>(mean_m))));
-        #endif
-        #ifdef __HIP_PLATFORM_AMD__
-	// Somehow, if I don't put explicit type instantiation here, std::min and std::max would
-	// behave weirdly (returning 0). It seems that the implicit type instantiation was not
-	// done correctly.
-	// More strangely, this behavior could not be reproduced in a standalone reproducer...
-        assertion = !(cast_mean_m == std::min<double>(t,r) && cast_mean_p == std::max<double>(t,r));
-        #else
-        assertion = !(cast_mean_m == std::min(t,r) && cast_mean_p == std::max(t,r));
-        #endif
+        assertion = !(cast_mean_m == std::min(t, r) && cast_mean_p == std::max(t, r));
+#else
+        const double cast_mean_p =
+            static_cast<double>(static_cast<float>(static_cast<T>(static_cast<float>(mean_p))));
+        const double cast_mean_m =
+            static_cast<double>(static_cast<float>(static_cast<T>(static_cast<float>(mean_m))));
+        /*During hipifying std::max and std::min are converted to ::max and ::min
+        to w/a HIP bug with using std:: in device functions.
+        W/o explicitlit <double>, compiler uses non-templated int method variant from HIP headers
+        TODO: remove when switch to new hipify version after fixing HIP bug */
+        assertion =
+            !(cast_mean_m == std::min<double>(t, r) && cast_mean_p == std::max<double>(t, r));
+#endif
       }
       std::string direction = rowwise ? "rowwise" : "columnwise";
       ASSERT_FALSE(assertion) << "Error in tensor " << name << " in "
@@ -558,18 +558,17 @@ static size_t getFirstMismatchIdx(const DType data_type, const T* test_data, con
 #ifndef __HIP_PLATFORM_AMD__
       const double cast_mean_p = static_cast<double>(static_cast<T>(mean_p));
       const double cast_mean_m = static_cast<double>(static_cast<T>(mean_m));
+      assertion = !(cast_mean_m == std::min(t, r) && cast_mean_p == std::max(t, r));
 #else
-      const double cast_mean_p = static_cast<double>(static_cast<float>(static_cast<T>(static_cast<float>(mean_p))));
-      const double cast_mean_m = static_cast<double>(static_cast<float>(static_cast<T>(static_cast<float>(mean_m))));
-#endif
-#ifdef __HIP_PLATFORM_AMD__
-	    // Somehow, if I don't put explicit type instantiation here, std::min and std::max would
-	    // behave weirdly (returning 0). It seems that the implicit type instantiation was not
-	    // done correctly.
-	    // More strangely, this behavior could not be reproduced in a standalone reproducer...
-      assertion = !(cast_mean_m == std::min<double>(t,r) && cast_mean_p == std::max<double>(t,r));
-#else
-      assertion = !(cast_mean_m == std::min(t,r) && cast_mean_p == std::max(t,r));
+      const double cast_mean_p =
+          static_cast<double>(static_cast<float>(static_cast<T>(static_cast<float>(mean_p))));
+      const double cast_mean_m =
+          static_cast<double>(static_cast<float>(static_cast<T>(static_cast<float>(mean_m))));
+      /*During hipifying std::max and std::min are converted to ::max and ::min
+        to w/a HIP bug with using std:: in device functions.
+        W/o explicitlit <double>, compiler uses non-templated int method variant from HIP headers
+        TODO: remove when switch to new hipify version after fixing HIP bug */
+      assertion = !(cast_mean_m == std::min<double>(t, r) && cast_mean_p == std::max<double>(t, r));
 #endif
     }
     if (assertion && i < first_mismatch_idx) {
@@ -680,7 +679,7 @@ std::pair<double, double> getTolerances(const DType type) {
     case DType::kFloat8E8M0:
       return {1e-2, 1e-2};
     default:
-      NVTE_CHECK("Invalid type!");
+      NVTE_ERROR("Invalid type!");
   }
   return {0, 0};
 }
@@ -718,9 +717,9 @@ void fillUniform(Tensor *t) {
       }
     );
   }
+  t->from_cpu();
   std::uniform_real_distribution<> dis(-2.0, 1.0);
   t->set_scale_inv(dis(t->gen()));
-  t->from_cpu();
 }
 
 template<typename InputEncoding, InputsFillCase Case>
@@ -803,7 +802,7 @@ bool isFp8Type(DType type) {
 int32_t getDeviceComputeCapability()
 {
     cudaDeviceProp deviceProp;
-    cudaGetDeviceProperties(&deviceProp, 0);
+    (void)cudaGetDeviceProperties(&deviceProp, 0);
     return 10 * deviceProp.major + deviceProp.minor;
 }
 

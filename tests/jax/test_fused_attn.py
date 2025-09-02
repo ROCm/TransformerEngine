@@ -302,6 +302,7 @@ class FusedAttnRunner:
     attn_bias_type: AttnBiasType
     attn_mask_type: AttnMaskType
     dropout_prob: float
+    use_old_rng: bool
     dtype: DTypeLike
     is_training: bool
     qkv_layout: QKVLayout
@@ -400,7 +401,12 @@ class FusedAttnRunner:
         self.cp_size = self.mesh.shape.get(self.mesh_resource.cp_resource, 1)
         self.tp_size = self.mesh.shape.get(self.mesh_resource.tp_resource, 1)
 
-        key = jax.random.PRNGKey(0)
+        # only support new-style RNGs on AMD hardware since they will crash otherwise
+        if is_hip_extension() and not self.use_old_rng:
+            key = jax.random.key(0)
+        else:
+            key = jax.random.PRNGKey(0)
+
         q_key, k_key, v_key, bias_key, dropout_key = jax.random.split(key, 5)
 
         q_shape = (self.batch_size, self.max_seqlen_q, self.num_heads_q, self.head_dim_qk)
@@ -671,9 +677,15 @@ class FusedAttnRunner:
             self.bias_pspec = PartitionSpec()
         self.bias_sharding = NamedSharding(self.mesh, self.bias_pspec)
 
-        self.dropout_rng_pspec = PartitionSpec(
-            None,
-        )
+        # New-style RNG fix is only applied for AMD GPUs
+        if is_hip_extension():
+            if self.dropout_rng is not None and jnp.issubdtype(self.dropout_rng.dtype, jax.dtypes.prng_key):
+                self.dropout_rng_pspec = PartitionSpec()
+            else:
+                self.dropout_rng_pspec = PartitionSpec(None,)
+        else:
+            self.dropout_rng_pspec = PartitionSpec(None,)
+
         self.dropout_rng_sharding = NamedSharding(self.mesh, self.dropout_rng_pspec)
 
         self.logit_scale_pspec = PartitionSpec(None, None, self.mesh_resource.cp_resource, None)
@@ -991,6 +1003,13 @@ class FusedAttnRunner:
         pytest.param(0.1, id="DROP_0.1"),
     ],
 )
+# Only testing old-style RNGs by default to reduce the # of tests but leaving the hooks in place
+@pytest.mark.parametrize(
+    "use_old_rng",
+    [
+        pytest.param(True, id="Old-style rng"),
+    ],
+)
 @pytest.mark.parametrize(
     "swa",
     [
@@ -1040,6 +1059,7 @@ class TestFusedAttn:
         attn_bias_type,
         attn_mask_type,
         dropout_prob,
+        use_old_rng,
         dtype,
         is_training,
         qkv_layout,
@@ -1066,6 +1086,7 @@ class TestFusedAttn:
             attn_bias_type,
             attn_mask_type,
             dropout_prob,
+            use_old_rng,
             dtype,
             is_training,
             qkv_layout,
@@ -1094,6 +1115,7 @@ class TestFusedAttn:
         attn_bias_type,
         attn_mask_type,
         dropout_prob,
+        use_old_rng,
         dtype,
         qkv_layout,
         bias_shape,
@@ -1117,6 +1139,7 @@ class TestFusedAttn:
             attn_bias_type,
             attn_mask_type,
             dropout_prob,
+            use_old_rng,
             dtype,
             True,
             qkv_layout,
@@ -1125,3 +1148,36 @@ class TestFusedAttn:
             seq_desc_format,
         )
         runner.test_backward()
+
+# Single test with new-style RNG
+@pytest.mark.skipif(
+    not is_hip_extension(), reason="New-style RNGs only enabled on AMD hardware"
+)
+def test_jax_new_rng():
+    """
+    Non-regression test evaluating whether
+    `_FusedAttnRNGStateChecker.check_seed` can correctly handle a new-style
+    JAX PRNG seed.
+    """
+    # Arbitrary args, except `dropout_prob` which needs to be >0
+    kwargs = dict(
+        batch_size = 2,
+        max_seqlen_q = 2048,
+        max_seqlen_kv = 2048,
+        num_heads_q = 12,
+        num_heads_kv = 12,
+        head_dim_qk = 64,
+        head_dim_v = 64,
+        attn_bias_type = AttnBiasType.NO_BIAS,
+        attn_mask_type = AttnMaskType.NO_MASK,
+        dropout_prob = 0.1,
+        use_old_rng = False,
+        dtype = jnp.bfloat16,
+        is_training = True,
+        qkv_layout = QKVLayout.BS3HD,
+        bias_shape = BiasShape._1HSS,
+        seq_desc_format = SeqDescFormat.Mask,
+        window_size = None,
+    )
+    runner = FusedAttnRunner(**kwargs)
+    runner.test_forward()

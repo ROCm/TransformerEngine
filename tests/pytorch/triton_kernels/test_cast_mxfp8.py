@@ -14,7 +14,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 from transformer_engine.pytorch.triton_kernels.common import get_fp8_max, te_dtype_to_torch_dtype
 from transformer_engine.pytorch.utils import round_up_to_nearest_multiple
 import transformer_engine_torch as tex
-from test_common import compare_results, fill_uniform, get_tolerances
+from test_common import te_compare_results, fill_uniform, get_tolerances
 
 
 FP32_MANTISSA_BITS = 23
@@ -195,12 +195,32 @@ def test_quantize_dequantize_mxfp8(shape, in_dtype, out_dtype, block_sizes):
             out._rowwise_data = None
     quantized_out_triton  = te_quantize_triton(input_tensor, quantizer=triton_quantizer, output=out)
 
-    cmp = "te"
     atol_fp8, rtol_fp8 = get_tolerances(torch_out_dtype)
     if rowwise:
-        compare_results(cmp, quantized_out_triton._rowwise_data.view(torch_out_dtype),  quantized_out_rowwise_ref, atol_fp8, rtol_fp8, "rowwise data doesn't match")
-        compare_results("torch", quantized_out_triton._rowwise_scale_inv,  rowwise_scale_inv_ref, 0.0, 0.0, "rowwise scale inv doesn't match")
+        te_compare_results(
+            quantized_out_triton._rowwise_data.view(torch_out_dtype),
+            quantized_out_rowwise_ref,
+            atol_fp8, rtol_fp8,
+            msg="rowwise data doesn't match"
+        )
+        te_compare_results(
+            quantized_out_triton._rowwise_scale_inv,
+            rowwise_scale_inv_ref,
+            0.0, 0.0,
+            msg="rowwise scale inv doesn't match",
+            use_torch_semantics=True
+        )
     if colwise:
-        compare_results(cmp, quantized_out_triton._columnwise_data.view(torch_out_dtype),  quantized_out_columnwise_ref, atol_fp8, rtol_fp8, "columnwise data doesn't match")
-        compare_results("torch", quantized_out_triton._columnwise_scale_inv,  columnwise_scale_inv_ref, 0.0, 0.0, "colwise scale inv doesn't match")
-
+        te_compare_results(
+            quantized_out_triton._columnwise_data.view(torch_out_dtype),
+            quantized_out_columnwise_ref,
+            atol_fp8, rtol_fp8,
+            msg="columnwise data doesn't match"
+        )
+        te_compare_results(
+            quantized_out_triton._columnwise_scale_inv,
+            columnwise_scale_inv_ref,
+            0.0, 0.0,
+            msg="columnwise scale inv doesn't match",
+            use_torch_semantics=True
+        )
