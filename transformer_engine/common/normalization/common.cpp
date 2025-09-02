@@ -516,14 +516,16 @@ NormalizationPlanBase* NormalizationPlanRegistry::getNormalizationPlan(
 #endif
   if (NormStage == NVTE_Norm_Stage::Forward) {
     plan = std::make_unique<TeNormalizationPlan<ForwardKernelParams>>(
-        NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size, sm_count,zero_centered_gamma, is_tuned
+        NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size, sm_count,
+        zero_centered_gamma, is_tuned
 #ifdef __HIP_PLATFORM_AMD__
         , mode, training
 #endif
       );
   } else {
     plan = std::make_unique<TeNormalizationPlan<BackwardKernelParams>>(
-        NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size, sm_count, zero_centered_gamma, is_tuned
+        NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size, sm_count,
+        zero_centered_gamma, is_tuned
 #ifdef __HIP_PLATFORM_AMD__
         , mode, training
 #endif

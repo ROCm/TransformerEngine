@@ -45,15 +45,16 @@ struct LaunchParams {
   size_t workspace_bytes = 0;
   size_t barrier_bytes = 0;
   size_t dgamma_part_bytes = 0;
-#ifdef __HIP_PLATFORM_AMD__
-  size_t mxfp8_buffer_bytes = 0;
-#endif
+
   int multiprocessorCount;
   cudaStream_t stream;
 
+#ifdef __HIP_PLATFORM_AMD__
+  size_t mxfp8_buffer_bytes = 0;
   // TE MXFP8 quantization parameters
   Tensor *z_tensor;
   bool training;
+#endif
 
   KernelParamsType params;
 
