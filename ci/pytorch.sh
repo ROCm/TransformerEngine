@@ -65,10 +65,9 @@ run_test_config(){
     NVTE_CK_USES_FWD_V3=1 NVTE_CK_USES_BWD_V3=1 run_default_fa 1 fused_attn/test_fused_attn.py # Using FAv3 for forward and backward pass
     run_default_fa 1 triton_kernels/test_cast.py
     run_default_fa 1 triton_kernels/test_cast_mxfp8.py
-    run_default_fa 1 triton_kernels/test_rmsnorm.py
-    run_default_fa 1 triton_kernels/test_layernorm.py
-    run_default_fa 1 triton_kernels/test_layernorm_mxfp8.py
     run_default_fa 1 triton_kernels/test_norm_common.py
+    run_default_fa 1 triton_kernels/test_norms.py
+    NVTE_TEST_TRITON_AUTOTUNE=1 run_default_fa 3 triton_kernels/test_norms.py
     run_default_fa 1 test_parallel_cross_entropy.py
     NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa 3 test_numerics.py
     NVTE_USE_RMSNORM_TRITON=1 run_default_fa 1 test_fusible_ops.py

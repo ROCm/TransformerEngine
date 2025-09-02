@@ -5,8 +5,8 @@ import torch
 import triton
 import triton.language as tl
 from itertools import product
-from .norm_common import num_programs, block_size, use_blocked
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8Tensor
+from .norm_common import num_programs, block_size, use_blocked, make_ln_out
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.triton_kernels.common import (
     te_dtype_to_torch_dtype,
@@ -24,9 +24,8 @@ def get_autotune_config():
     return [triton.Config({'waves_per_eu': we}, num_warps=nw) for (we, nw) in product([0, 1, 2, 4], [4, 8, 16])]
 
 
-@triton.autotune(configs=get_autotune_config(), key=['n_rows', 'n_cols'], use_cuda_graph=True)
 @triton.jit
-def _rmsnorm_fwd_triton(
+def _rmsnorm_fwd_triton_impl(
     output_ptr,
     input_ptr,
     g_ptr, rsigma_ptr,
@@ -116,7 +115,7 @@ def _rmsnorm_fwd_triton(
                     rms_norm = rms_norm * scale
                     rms_norm = tl.clamp(rms_norm, -FP8_MAX, FP8_MAX)
                     if MAKE_TRANSPOSE:
-                        output_t_ptrs = out_transpose_ptr + col_offsets * transpose_row_stride + blk_idx * BLOCK_SIZE + row_idx
+                        output_t_ptrs = out_transpose_ptr + cols * transpose_row_stride + row_idx
                         tl.store(output_t_ptrs, rms_norm.to(output_type))
                 tl.store(output_ptrs, rms_norm.to(output_type))
 
@@ -137,7 +136,7 @@ def _rmsnorm_fwd_triton(
                 rms_norm = rms_norm * scale
                 rms_norm = tl.clamp(rms_norm, -FP8_MAX, FP8_MAX)
                 if MAKE_TRANSPOSE:
-                    output_t_ptrs = out_transpose_ptr + col_offsets * transpose_row_stride + n_cols_blks * BLOCK_SIZE + row_idx
+                    output_t_ptrs = out_transpose_ptr + cols * transpose_row_stride  + row_idx
                     tl.store(output_t_ptrs, rms_norm.to(output_type), mask=mask)
             tl.store(output_ptrs, rms_norm.to(output_type), mask=mask)
 
@@ -178,6 +177,9 @@ def _rmsnorm_fwd_triton(
             scale = tl.load(q_scale_ptr)
             scale_inv = tl.fdiv(1.0, scale)
             tl.store(scale_inv_ptr, scale_inv)
+
+autotune_dec = triton.autotune(configs=get_autotune_config(), key=['n_rows', 'n_cols'], use_cuda_graph=True)
+_rmsnorm_fwd_triton = autotune_dec(_rmsnorm_fwd_triton_impl)
 
 @triton.jit
 def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, dg_ptr, input_row_stride, output_row_stride,
@@ -347,7 +349,7 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma):
     USE_BLOCKED = use_blocked(x_)
     NUM_PRGMS = num_programs(x_, sm_margin)
     need_reduction = N > 1
-    dg_tmp = torch.empty(dg_tmp_rows(x_, sm_margin), N, device='cuda', dtype=torch.float32, requires_grad=False) if need_reduction else None
+    dg_tmp = torch.empty(dg_tmp_rows(x_, sm_margin), N, device=x.device, dtype=torch.float32, requires_grad=False) if need_reduction else None
 
     grid_bwd = lambda meta: (NUM_PRGMS, )
     _rmsnorm_bwd_triton[grid_bwd](dz_, x_, gamma_, rsigma_, dx, dg_tmp if need_reduction else dgamma,
@@ -370,7 +372,8 @@ def te_rmsnorm_fwd_triton(
     quantizer: Quantizer,
     otype: tex.DType,
     sm_margin: int,
-    zero_centered_gamma: bool
+    zero_centered_gamma: bool,
+    autotune: bool = True,
 ):
     if eps < 0:
         raise ValueError(f"`eps` must be non-negative, but a value of {eps} was passed")
@@ -397,19 +400,14 @@ def te_rmsnorm_fwd_triton(
         otype if isinstance(otype, torch.dtype)
         else te_dtype_to_torch_dtype(otype)
     )
+    out = make_ln_out(
+        ln_out,
+        quantizer=quantizer,
+        input_shape=input.shape,
+        out_dtype=torch_out_dtype
+    )
     if IS_FP8:
         MAKE_TRANSPOSE = quantizer.columnwise_usage
-        if ln_out is not None:
-            out = (
-                ln_out if isinstance(ln_out, Float8Tensor) else
-                quantizer.create_tensor_from_data(
-                    ln_out.view(te_dtype_to_torch_dtype(quantizer.dtype)),
-                    fake_dtype=torch_out_dtype
-                )
-            )
-        else:
-            out = quantizer.make_empty(input.shape, dtype=torch_out_dtype)
-
         amax = torch.empty((NUM_PRGMS,), dtype=torch.float32, device=device)
         tl_dtype = te_dtype_to_triton_dtype(quantizer.dtype)
         scale_inv_ptr = out._scale_inv
@@ -426,9 +424,7 @@ def te_rmsnorm_fwd_triton(
         else:
             out_transpose_ptr = None
             out_transpose_stride = None
-
     else:
-        out = torch.empty_like(input, dtype=torch_out_dtype) if ln_out is None else ln_out
         amax = None
         tl_dtype = None
         scale_inv_ptr = None
@@ -439,10 +435,10 @@ def te_rmsnorm_fwd_triton(
         out_transpose_stride = None
         FP8_MAX = None
 
-
     grid_fwd = lambda meta: (NUM_PRGMS, )
     # TODO(micky774) Implement fused MXFP8 quantization within the kernel
-    _rmsnorm_fwd_triton[grid_fwd](
+    kernel = _rmsnorm_fwd_triton if autotune else _rmsnorm_fwd_triton_impl
+    kernel[grid_fwd](
         out_ptr,
         input,
         weight,
@@ -465,6 +461,6 @@ def te_rmsnorm_fwd_triton(
         MAKE_TRANSPOSE,
     )
     if IS_MXFP8:
-        out = quantizer.quantize(out)
+        out = quantizer.quantize(out, out=ln_out)
 
     return out, None, rsigma
