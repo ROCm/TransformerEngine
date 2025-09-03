@@ -515,7 +515,8 @@ class _LayerNormMLP(torch.autograd.Function):
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
                 ln_weight,
-                ln_out.clone() if ub_overlap_ag else ln_out,  # avoid saving a UB buffer
+                # avoid saving a UB buffer or when weights don't require grad
+                ln_out.clone() if ub_overlap_ag else (ln_out if fc1_weight.requires_grad else None),
                 fc1_weight_final,
                 fc1_bias,
                 fc1_out,

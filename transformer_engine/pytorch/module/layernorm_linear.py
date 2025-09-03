@@ -353,8 +353,8 @@ class _LayerNormLinear(torch.autograd.Function):
 
         if not weight.requires_grad:
             if not return_layernorm_output:
-                ln_out = ln_out_total = None
                 clear_tensor_data(ln_out, ln_out_total)
+            ln_out = None
 
         if is_grad_enabled:
             ctx.ln_out_needs_gather = (
@@ -417,7 +417,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight,
                 bias,
                 ln_weight,
-                ln_out.clone() if ub_overlap_ag_fprop else ln_out,  # avoid saving a UB buffer
+                # avoid saving a UB buffer or when weights don't require grad
+                ln_out.clone() if ub_overlap_ag_fprop else (ln_out if weight.requires_grad else None),
                 mu,
                 rsigma,
             )
