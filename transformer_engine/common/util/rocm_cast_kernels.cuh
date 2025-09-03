@@ -49,7 +49,7 @@ static_assert(MXFP8_ITERATIONS >= MXFP8_PREFETCH_BUFFERS_NUM);
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, size_t SCALE_DIM_Y,
-          size_t SCALE_DIM_X>
+          size_t SCALE_DIM_X, bool IS_NORM = false>
 __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
     cast_mxfp8_2D_kernel(const IType *input_ptr,
                          const IType *act_input_ptr,
@@ -225,7 +225,7 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
 
           const float subwarp_amax = subwarp_reduce_max_broadcast<SUBWARP_WIDTH>(thread_amax);
           const e8m0_t biased_exponent =
-              float_to_e8m0(subwarp_amax * Quantized_Limits<OType>::max_norm_rcp);
+              float_to_e8m0(subwarp_amax * Quantized_Limits<OType>::max_norm_rcp) + (IS_NORM ? 1 : 0); // Normalization requires a +1 scale to avoid saturation
 
           // Only single thread writes the computed scaling factor
           if (tid_rowwise_X % THREADS_PER_SCALE_X_ROWWISE == 0) {
@@ -282,7 +282,7 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
         __builtin_assume(amax >= 0);
         block_amax = fmaxf(block_amax, amax);
 
-        const e8m0_t biased_exponent = float_to_e8m0(amax * Quantized_Limits<OType>::max_norm_rcp);
+        const e8m0_t biased_exponent = float_to_e8m0(amax * Quantized_Limits<OType>::max_norm_rcp) + (IS_NORM ? 1 : 0); // Normalization requires a +1 scale to avoid saturation
 
         const int global_scales_offset_Y = scales_colwise_chunk_offset_Y + iter;
         const int global_scales_offset_X = scales_colwise_chunk_offset_X + tid_colwise_X;
@@ -385,5 +385,4 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
   }
 }
 
-
- }
+} // namespace transformer_engine

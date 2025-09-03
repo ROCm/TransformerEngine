@@ -366,5 +366,5 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     __syncthreads();
   }
 }
-}
-}
+} // namespace gated_kernels
+} // namespace transformer_engine

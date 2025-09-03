@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -15,6 +17,7 @@
 
 namespace transformer_engine {
 namespace normalization {
+using namespace transformer_engine;
 
 template <typename Ktraits>
 __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_tuned_kernel(
@@ -35,6 +38,9 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_tuned_ke
   using Ivec = typename Ktraits::Ivec;
   using Ovec = typename Ktraits::Ovec;
   using Wvec = typename Ktraits::Wvec;
+  #ifdef __HIP_PLATFORM_AMD__
+  using Cvec = typename Ktraits::Cvec;
+  #endif
 
   using Stats = typename Ktraits::Stats;
   using stats_t = typename Stats::stats_t;
@@ -99,6 +105,29 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_tuned_ke
       rs_ptr[row] = rs;
     }
 
+
+#ifdef __HIP_PLATFORM_AMD__
+  if (params.mxfp8_out) {
+    Cvec z[LDGS];
+    idx = row * Ktraits::VEC_COLS + c;
+#pragma unroll
+    for (int it = 0; it < LDGS; it++) {
+#pragma unroll
+      for (int jt = 0; jt < NUM_ELTS; jt++) {
+        compute_t y_ij = rs * (xf[it * NUM_ELTS + jt]);
+        compute_t g_ij = gamma[it].data.elt[jt];
+        if (params.zero_centered_gamma) {
+          g_ij += 1;
+        }
+        compute_t temp_output = g_ij * y_ij;
+
+        z[it].data.elt[jt] = output_t(temp_output);
+      }
+      z[it].store_to(params.z, idx);
+      idx += VEC_COLS_PER_LDG;
+    }
+  } else {
+#endif
     Ovec z[LDGS];
     idx = row * Ktraits::VEC_COLS + c;
 #pragma unroll
@@ -124,6 +153,9 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_tuned_ke
       idx += VEC_COLS_PER_LDG;
     }
   }
+#ifdef __HIP_PLATFORM_AMD__
+  }
+#endif
   if (params.fp8_out) {
     // Reduce amax over block
     if (params.amax != nullptr) {
@@ -267,10 +299,18 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_general_
       }
 
       // Store output
+#ifdef __HIP_PLATFORM_AMD__
+      if (params.mxfp8_out) {
+        z.store_to_elts(params.z, row * params.cols + col, params.cols - col);
+      } else {
+#endif
       Ovec z_out;
       z.to(z_out);
       z_out.store_to_elts(params.z, row * params.cols + col, params.cols - col);
     }
+#ifdef __HIP_PLATFORM_AMD__
+    }
+#endif
   }
 
   // Finalize fp8 factors
