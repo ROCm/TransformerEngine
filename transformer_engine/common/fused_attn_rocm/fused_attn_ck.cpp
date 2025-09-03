@@ -528,12 +528,7 @@ void fused_attn_ck_fwd_impl(
     if (env_p != nullptr && std::string(env_p) == "1")
       nvte_log_ck_config = true;
   }
-  bool nvte_ck_uses_fwd_v3 = getenv<int>("NVTE_CK_USES_FWD_V3", 0) and (layout==NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD);
-  if(nvte_log_ck_config){
-    if(getenv<int>("NVTE_CK_USES_FWD_V3", 0) and (layout!=NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD)){
-      std::cout<<"Disable CK FWD v3 since only BSHD_BSHD_BSHD layout supported"<<std::endl;
-    }
-  }
+  bool nvte_ck_uses_fwd_v3 = getenv<int>("NVTE_CK_USES_FWD_V3", 0);
   bool is_ragged = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_THD; 
 
   // extract the qkv and o storage bytes to allocate buffer for padding removing
@@ -1002,17 +997,6 @@ void fused_attn_ck_bwd_impl(
   bool nvte_ck_uses_bwd_v3 = getenv<int>("NVTE_CK_USES_BWD_V3", 0);
   bool nvte_ck_is_v3_atomic_fp32 = getenv<int>("NVTE_CK_IS_V3_ATOMIC_FP32", 1);
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
-  // TODO: Enable bwd v3 for gfx950 after numerical issues are fixed.
-  if (nvte_ck_uses_bwd_v3 && (pad_between_seqs || is_ragged)){
-    const int gpu_arch = cuda::sm_arch(cuda::current_device());
-    const bool is_gfx95x = gpu_arch == 95;
-    if(nvte_log_ck_config){
-      if(is_gfx95x){
-        std::cout<<"Disabling CK BWD v3 because of numerical issues in gfx950 arch while using varlen backend"<<std::endl;
-      }
-    }
-    nvte_ck_uses_bwd_v3 = !is_gfx95x;
-  }
   if (nvte_log_ck_config) {
     std::cout<<std::endl<<"attn_bwd(ck): ";
     std::cout<<"layout: "<<layout<<", ";
