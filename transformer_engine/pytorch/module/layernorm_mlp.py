@@ -461,8 +461,8 @@ class _LayerNormMLP(torch.autograd.Function):
             extra_output=rs_out,
         )
 
-        # Weight with column-wise usage is needed for dgrad GEMM.
-        if is_grad_enabled and inp.requires_grad:
+        # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
+        if is_grad_enabled and inp.requires_grad and keep_fp8_weight_transpose_cache:
             if isinstance(fc1_weight_final, QuantizedTensor):
                 fc1_weight_final.update_usage(columnwise_usage=True)
             if isinstance(fc2_weight_final, QuantizedTensor):
