@@ -77,7 +77,10 @@ def make_ln_out(ln_out, quantizer=None, input_shape=None, out_dtype=torch.float3
             return ln_out
         return quantizer.make_empty(input_shape, dtype=out_dtype)
 
-    return quantizer.create_tensor_from_data(
-            ln_out.view(te_dtype_to_torch_dtype(quantizer.dtype)),
-            fake_dtype=out_dtype
-        )
+    if quantizer is not None:
+        return quantizer.create_tensor_from_data(
+                ln_out.view(te_dtype_to_torch_dtype(quantizer.dtype)),
+                fake_dtype=out_dtype
+            )
+
+    return ln_out
