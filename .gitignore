@@ -55,3 +55,4 @@ tensor_dumps/
 transformer_engine/build_info.txt
 transformer_engine/common/util/hip_nvml.cpp
 transformer_engine/common/util/hip_nvml.h
+transformer_engine/aiter/
