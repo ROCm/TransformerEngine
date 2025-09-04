@@ -164,9 +164,10 @@ void TeNormalizationPlan<KernelParamsType>::_set_workspace() {
     }
 #ifdef __HIP_PLATFORM_AMD__
     if constexpr (std::is_same_v<KernelParamsType, ForwardKernelParams>) {
-      size_t offset = _launch_params.workspace_bytes + _launch_params.barrier_bytes;
-      // TODO: Make more general than float for compute_t
-      _launch_params.params.z = workspace_dptr + offset;
+      if (_launch_params.params.mxfp8_out) {
+        size_t offset = _launch_params.workspace_bytes + _launch_params.barrier_bytes;
+        _launch_params.params.z = workspace_dptr + offset;
+      }
     }
 #endif
     if constexpr (std::is_same_v<KernelParamsType, BackwardKernelParams>) {
