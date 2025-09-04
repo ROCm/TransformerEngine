@@ -7,7 +7,7 @@ import os
 
 import torch
 
-from ..tensor.float8_tensor import Float8Quantizer
+from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ..constants import TE_DType
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.quantized_tensor import Quantizer
@@ -474,13 +474,21 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
         )
     device = input.device
     M, N = input.shape
-    
+
+    # MXFP8 is handled regularly, hence other quantizers are considered FP8
+    IS_FP8_DELAYED = isinstance(quantizer, Float8Quantizer)
+    IS_FP8 = IS_FP8_DELAYED or isinstance(quantizer, Float8CurrentScalingQuantizer)
+    IS_MXFP8 = isinstance(quantizer, MXFP8Quantizer)
+    assert (quantizer is None or IS_FP8 or IS_MXFP8), "Unsupported quantizer type"
+
+    MAKE_TRANSPOSE = False
+
     # Create empty tensors for mu and rsigma
     mu = torch.empty((M,), dtype=torch.float32, device=device)
     rsigma = torch.empty((M,), dtype=torch.float32, device=device)
     torch_out_dtype = te_dtype_to_torch_dtype(out_dtype)
     # Create ln_out
-    if quantizer is None or isinstance(quantizer, MXFP8Quantizer):
+    if quantizer is None or IS_MXFP8:
         ln_out = torch.empty(M, N, dtype=torch_out_dtype, device=device)
     else:
         if ln_out is None:
@@ -491,9 +499,6 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
             ln_out = quantizer.create_tensor_from_data(ln_out._data)
     # To update the amax ptr directly with atomic max
     APPLY_ATOMIC = M < 512
-
-    # MXFP8 is handled regularly, hence quantizer of Float8Quantizer is considered FP8
-    IS_FP8 = isinstance(quantizer, Float8Quantizer)
 
     amax_temp = torch.empty((M,), dtype=torch.float32, device=input.device) if IS_FP8 else None
 
@@ -546,7 +551,7 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
         )
 
     # For MXFP8, we do regular layernorm and then quantize it separately
-    if isinstance(quantizer, MXFP8Quantizer):
+    if IS_MXFP8:
         ln_out = te_quantize_triton(ln_out, quantizer)
     
     # Reduce and find amax if "not APPLY_ATOMIC" is True.
