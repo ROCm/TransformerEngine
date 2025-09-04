@@ -1280,7 +1280,6 @@ def test_fp8_linear_without_transpose_cache_accuracy(dtype, bs, model, fp8_model
 
     config = model_configs[model]
     with fp8_model_init(enabled=fp8_model_params):    
-        torch.manual_seed(42)
         linear = Linear(
             config.hidden_size,
             4 * config.hidden_size,
@@ -1290,7 +1289,7 @@ def test_fp8_linear_without_transpose_cache_accuracy(dtype, bs, model, fp8_model
             keep_fp8_weight_transpose_cache=False
         ).eval()
 
-        torch.manual_seed(42)
+        reset_rng_states()
         ref_linear = Linear(
             config.hidden_size,
             4 * config.hidden_size,
