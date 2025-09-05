@@ -476,8 +476,7 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
     M, N = input.shape
 
     #TODO: Check if need distinct Current and Delayed quantization
-    IS_FP8 = (isinstance(quantizer, Float8Quantizer) or 
-              isinstance(quantizer, Float8CurrentScalingQuantizer))
+    IS_FP8 = isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer))
     IS_MXFP8 = isinstance(quantizer, MXFP8Quantizer)
     assert (quantizer is None or IS_FP8 or IS_MXFP8), "Unsupported quantizer type"
 
