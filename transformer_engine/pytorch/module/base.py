@@ -423,7 +423,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fsdp_wrapped = False
         self.fsdp_group = None
         self._fp8_workspaces: Dict[str, QuantizedTensor] = {}
-        self.activation_dtype: Optional[torch.dtype] = None
+        self.activation_dtype: Optional[torch.dtype] = None,
+        self.keep_fp8_weight_transpose_cache: bool = False
 
     # Names of attributes that can be set quickly (see __setattr__
     # method)
