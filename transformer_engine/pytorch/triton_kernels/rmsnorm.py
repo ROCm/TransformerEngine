@@ -6,7 +6,11 @@ import triton
 import triton.language as tl
 from itertools import product
 from .norm_common import num_programs, block_size, use_blocked
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8Tensor
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8Quantizer,
+    Float8CurrentScalingQuantizer,
+    Float8Tensor
+)
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.triton_kernels.common import (
     te_dtype_to_torch_dtype,
@@ -378,8 +382,10 @@ def te_rmsnorm_fwd_triton(
             f"The shape of `weight` must be feature-aligned, "
             f"but {weight.shape[0]=} while {input.shape[1]=}"
         )
-    IS_FP8 = isinstance(quantizer, Float8Quantizer)
-    IS_MFP8 = isinstance(quantizer, MXFP8Quantizer)
+
+    #TODO: Check if need distinct Current and Delayed quantization
+    IS_FP8 = isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer))
+    IS_MXFP8 = isinstance(quantizer, MXFP8Quantizer)
     BLOCK_SIZE = block_size(input)
     USE_BLOCKED = use_blocked(input)
     NUM_PRGMS = num_programs(input, sm_margin)
@@ -457,7 +463,7 @@ def te_rmsnorm_fwd_triton(
         FP8_MAX,
         MAKE_TRANSPOSE,
     )
-    if IS_MFP8:
+    if IS_MXFP8:
         out = quantizer.quantize(out)
 
     return out, None, rsigma
