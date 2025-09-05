@@ -61,6 +61,7 @@ run_test_config(){
     run_default_fa 1 test_permutation.py -k "not test_permutation_mask_map_fp8 and not test_permutation_single_case"
     run_default_fa 1 test_recipe.py
     run 1 test_sanity.py
+    run_default_fa 1 test_sanity_import.py
     run_default_fa 1 fused_attn/test_fused_attn.py # Backend selection is controlled by the test
     run_default_fa 1 triton_kernels/test_cast.py
     run_default_fa 1 triton_kernels/test_cast_mxfp8.py

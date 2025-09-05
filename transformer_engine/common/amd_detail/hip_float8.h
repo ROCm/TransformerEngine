@@ -47,6 +47,8 @@ static constexpr inline bool te_fp8_fnuz() { return true; }
 #if HIP_VERSION >= 60300000
 #if !defined(__HIP_DEVICE_COMPILE__)
 
+#define TE_DYNAMIC_HIP_FP8_TYPE 1
+
 /* Device methods in _te_hip_fp8 are dummy and are needed for compilation
 * because HIPCC compiles __device__ and __global__ functions for host.
 * The results are discarded so those methods are declared but not defined
