@@ -353,8 +353,8 @@ class _LayerNormLinear(torch.autograd.Function):
 
         if not weight.requires_grad:
             if not return_layernorm_output:
-                ln_out = ln_out_total = None
                 clear_tensor_data(ln_out, ln_out_total)
+            ln_out = None
 
         if is_grad_enabled:
             ctx.ln_out_needs_gather = (
