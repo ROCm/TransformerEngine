@@ -475,13 +475,11 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
     device = input.device
     M, N = input.shape
 
-    # MXFP8 is handled regularly, hence other quantizers are considered FP8
-    IS_FP8_DELAYED = isinstance(quantizer, Float8Quantizer)
-    IS_FP8 = IS_FP8_DELAYED or isinstance(quantizer, Float8CurrentScalingQuantizer)
+    #TODO: Check if need distinct Current and Delayed quantization
+    IS_FP8 = (isinstance(quantizer, Float8Quantizer) or 
+              isinstance(quantizer, Float8CurrentScalingQuantizer))
     IS_MXFP8 = isinstance(quantizer, MXFP8Quantizer)
     assert (quantizer is None or IS_FP8 or IS_MXFP8), "Unsupported quantizer type"
-
-    MAKE_TRANSPOSE = False
 
     # Create empty tensors for mu and rsigma
     mu = torch.empty((M,), dtype=torch.float32, device=device)

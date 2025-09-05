@@ -383,8 +383,9 @@ def te_rmsnorm_fwd_triton(
             f"but {weight.shape[0]=} while {input.shape[1]=}"
         )
 
-    IS_FP8_DELAYED = isinstance(quantizer, Float8Quantizer)
-    IS_FP8 = IS_FP8_DELAYED or isinstance(quantizer, Float8CurrentScalingQuantizer)
+    #TODO: Check if need distinct Current and Delayed quantization
+    IS_FP8 = (isinstance(quantizer, Float8Quantizer) or 
+              isinstance(quantizer, Float8CurrentScalingQuantizer))
     IS_MXFP8 = isinstance(quantizer, MXFP8Quantizer)
     BLOCK_SIZE = block_size(input)
     USE_BLOCKED = use_blocked(input)
