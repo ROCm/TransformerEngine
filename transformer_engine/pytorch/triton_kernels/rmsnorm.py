@@ -5,20 +5,6 @@ import torch
 import triton
 import triton.language as tl
 from itertools import product
-from .norm_common import num_programs, block_size, use_blocked, make_ln_out
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
-from transformer_engine.pytorch.triton_kernels.common import (
-    te_dtype_to_torch_dtype,
-    te_dtype_to_triton_dtype,
-)
-from .common import get_fp8_max
-from ..tensor.quantized_tensor import Quantizer
-import transformer_engine_torch as tex
-
-def dg_tmp_rows(x, sm_margin=None):
-    return x.shape[0] if use_blocked(x) else num_programs(x, sm_margin)
-
 
 def get_autotune_config():
     return [triton.Config({'waves_per_eu': we}, num_warps=nw) for (we, nw) in product([0, 1, 2, 4], [4, 8, 16])]
@@ -27,8 +13,8 @@ def get_autotune_config():
 # TODO(micky774) Implement fused MXFP8 quantization within the kernel
 @triton.jit
 def _rmsnorm_fwd_triton_impl(
-    output_ptr,
     input_ptr,
+    output_ptr,
     g_ptr,
     bias_ptr, # Unused, for API purposes only
     mu_ptr, # Unused, for API purposes only
@@ -336,32 +322,3 @@ def _rmsnorm_bwd_dg_reduce_triton(dg_in_ptr, dg_out_ptr, dg_in_stride, n_rows, n
     sum_dg = tl.sum(acc, axis=0)
     tl.store(dg_out_ptr + cols, sum_dg.to(dg_out_ptr.type.element_ty), mask=cols < n_cols)
 
-# triton drop-in replacement for transformer_engine::pytorch::rmsnorm_bwd
-def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma):
-    # may take non-contiguous inputs
-    dz_ = dz.contiguous()
-    x_ = x.contiguous()
-    rsigma_ = rsigma.contiguous()
-    gamma_ = gamma.contiguous()
-
-    dx = torch.empty_like(x_)
-    dgamma = torch.empty_like(gamma_)
-
-    M, N = x_.shape
-    blk_size = block_size(x_)
-    USE_BLOCKED = use_blocked(x_)
-    NUM_PRGMS = num_programs(x_, sm_margin)
-    need_reduction = N > 1
-    dg_tmp = torch.empty(dg_tmp_rows(x_, sm_margin), N, device=x.device, dtype=torch.float32, requires_grad=False) if need_reduction else None
-
-    grid_bwd = lambda meta: (NUM_PRGMS, )
-    _rmsnorm_bwd_triton[grid_bwd](dz_, x_, gamma_, rsigma_, dx, dg_tmp if need_reduction else dgamma,
-                                  x_.stride(0), dz_.stride(0), M, N, zero_centered_gamma, blk_size,
-                                  USE_BLOCKED, NUM_PRGMS, num_warps=8)
-
-    if need_reduction:
-        grid_reduce = lambda meta: [triton.cdiv(N, meta['BLOCK_SIZE_N'])]
-        _rmsnorm_bwd_dg_reduce_triton[grid_reduce](dg_tmp, dgamma, dg_tmp.stride(0), dg_tmp.shape[0], dg_tmp.shape[1],
-                                                   BLOCK_SIZE_M=128, BLOCK_SIZE_N=64)
-
-    return dx, dgamma

@@ -51,7 +51,7 @@ def te_rmsnorm_fwd_triton(
 ):
     return te_norm_fwd_triton(
         kernel='rms',
-        input=input,
+        input_tensor=input,
         weight=weight,
         bias=None,
         eps=eps,
@@ -78,7 +78,7 @@ def te_layernorm_fwd_triton(
 ):
     return te_norm_fwd_triton(
         kernel='layer',
-        input=input,
+        input_tensor=input,
         weight=weight,
         bias=bias,
         eps=eps,
@@ -93,7 +93,7 @@ def te_layernorm_fwd_triton(
 # triton drop-in replacement for transformer_engine::pytorch::rmsnorm_fwd
 def te_norm_fwd_triton(
     kernel: str,
-    input: torch.Tensor,
+    input_tensor: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor,
     eps: float,
@@ -108,22 +108,22 @@ def te_norm_fwd_triton(
         raise ValueError(f"Expected `kernel` in ('rms', 'layer') but got {kernel=} instead.")
     if eps < 0:
         raise ValueError(f"`eps` must be non-negative, but a value of {eps} was passed")
-    if len(input.shape) != 2:
+    if len(input_tensor.shape) != 2:
         raise ValueError(
-            f"The input must be a 2-dimensional matrix, but an input with {input.ndim} was passed.")
+            f"The input must be a 2-dimensional matrix, but an input with {input_tensor.ndim} was passed.")
 
-    device = input.device
-    N, H = input.shape
+    device = input_tensor.device
+    N, H = input_tensor.shape
     if weight.shape[0] != H:
         raise ValueError(
             f"The shape of `weight` must be feature-aligned, "
-            f"but {weight.shape[0]=} while {input.shape[1]=}"
+            f"but {weight.shape[0]=} while {input_tensor.shape[1]=}"
         )
     IS_FP8 = isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer))
     IS_MXFP8 = isinstance(quantizer, MXFP8Quantizer)
-    BLOCK_SIZE = block_size(input)
-    USE_BLOCKED = use_blocked(input)
-    NUM_PRGMS = num_programs(input, sm_margin)
+    BLOCK_SIZE = block_size(input_tensor)
+    USE_BLOCKED = use_blocked(input_tensor)
+    NUM_PRGMS = num_programs(input_tensor, sm_margin)
     MAKE_TRANSPOSE = False
     APPLY_ATOMIC = N < 512 and kernel == 'layer'
     ATOMIC_REDUCTION_BLOCK_SIZE=256
@@ -137,7 +137,7 @@ def te_norm_fwd_triton(
     out = make_ln_out(
         ln_out,
         quantizer=quantizer,
-        input_shape=input.shape,
+        input_shape=input_tensor.shape,
         out_dtype=torch_out_dtype
     )
     amax = None
@@ -172,13 +172,13 @@ def te_norm_fwd_triton(
     grid_fwd = lambda meta: (NUM_PRGMS, )
     kernel = _norm_kernels[kernel][autotune]
     kernel[grid_fwd](
+        input_tensor,
         out_ptr,
-        input,
         weight,
-        mu,
         bias,
+        mu,
         rsigma,
-        input.stride(0),
+        input_tensor.stride(0),
         out_ptr.stride(0),
         N, H, eps,
         amax,
