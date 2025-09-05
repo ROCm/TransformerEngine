@@ -20,20 +20,20 @@ def get_autotune_config(full_tuning_space=False):
 
 @triton.jit
 def _layernorm_fwd_triton_impl(
-    x_ptr,
-    y_ptr,
-    w_ptr,
+    input_ptr,
+    output_ptr,
+    g_ptr,
     b_ptr,
     mean_ptr,
-    rstd_ptr,
-    scale_ptr,
-    amax_ptr,
-    scale_inv_ptr,
-    x_row_stride,
-    y_row_stride,
+    rsigma_ptr,
+    input_row_stride,
+    output_row_stride,
     n_rows,
     n_cols,
-    eps,
+    epsilon,
+    q_amax_ptr,
+    q_scale_ptr,
+    scale_inv_ptr,
     out_transpose_ptr,
     out_transpose_stride,
     ZERO_CENTERED_GAMMA: tl.constexpr,
@@ -65,12 +65,12 @@ def _layernorm_fwd_triton_impl(
         start_row = pid
 
     if IS_FP8:
-        scale = tl.load(scale_ptr)
+        scale = tl.load(q_scale_ptr)
         amax = 0.0
 
     for row_idx in range(start_row, start_row + rows_per_tile):
-        x_ptr_start = x_ptr + (row_idx * x_row_stride)
-        y_ptr_start = y_ptr + (row_idx * y_row_stride)
+        x_ptr_start = input_ptr + (row_idx * input_row_stride)
+        y_ptr_start = output_ptr + (row_idx * output_row_stride)
 
         n_cols_blks = tl.cdiv(n_cols, BLOCK_SIZE) - 1
 
@@ -102,16 +102,16 @@ def _layernorm_fwd_triton_impl(
         _var += x_block * x_block
 
         var = tl.sum(_var, axis=0) / n_cols
-        rstd = tl.rsqrt(var + eps)
+        rstd = tl.rsqrt(var + epsilon)
 
         # Write mean / rstd
         tl.store(mean_ptr + row_idx, mean)
-        tl.store(rstd_ptr + row_idx, rstd)
+        tl.store(rsigma_ptr + row_idx, rstd)
 
         # Normalize and store
         for blk_idx in range(0, n_cols_blks):
             cols = blk_idx * BLOCK_SIZE + col_offsets
-            w_block = tl.load(w_ptr + cols).to(tl.float32)
+            w_block = tl.load(g_ptr + cols).to(tl.float32)
             b_block = tl.load(b_ptr + cols).to(tl.float32)
             x_block = tl.load(x_ptr_start + cols).to(tl.float32)
             if ZERO_CENTERED_GAMMA:
@@ -123,7 +123,7 @@ def _layernorm_fwd_triton_impl(
                 amax = amax_temp if amax_temp > amax else amax
                 y_block = y_block * scale
                 y_block = tl.clamp(y_block, -FP8_MAX, FP8_MAX)
-            y_block = y_block.to(y_ptr.type.element_ty)
+            y_block = y_block.to(output_ptr.type.element_ty)
             tl.store(y_ptr_start + cols, y_block)
             if MAKE_TRANSPOSE:
                 output_t_ptrs = out_transpose_ptr + cols * out_transpose_stride + row_idx
@@ -132,7 +132,7 @@ def _layernorm_fwd_triton_impl(
         # For last iteration, do masked load and store
         cols = n_cols_blks * BLOCK_SIZE + col_offsets
         mask = cols < n_cols
-        w_block = tl.load(w_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+        w_block = tl.load(g_ptr + cols, mask=mask, other=0.0).to(tl.float32)
         b_block = tl.load(b_ptr + cols, mask=mask, other=0.0).to(tl.float32)
         x_block = tl.load(x_ptr_start + cols, mask=mask, other=0.0).to(tl.float32)
         if ZERO_CENTERED_GAMMA:
@@ -144,7 +144,7 @@ def _layernorm_fwd_triton_impl(
             amax = amax_temp if amax_temp > amax else amax
             y_block = y_block * scale
             y_block = tl.clamp(y_block, -FP8_MAX, FP8_MAX)
-        y_block = y_block.to(y_ptr.type.element_ty)
+        y_block = y_block.to(output_ptr.type.element_ty)
         tl.store(y_ptr_start + cols, y_block, mask=mask)
         if MAKE_TRANSPOSE:
             output_t_ptrs = out_transpose_ptr + cols * out_transpose_stride + row_idx
@@ -155,9 +155,9 @@ def _layernorm_fwd_triton_impl(
             scale_inv = tl.fdiv(1.0, scale)
             tl.store(scale_inv_ptr, scale_inv)
         if APPLY_ATOMIC:
-            tl.atomic_max(amax_ptr, amax, sem="relaxed")
+            tl.atomic_max(q_amax_ptr, amax, sem="relaxed")
         else:
-            tl.store(amax_ptr + pid, amax)
+            tl.store(q_amax_ptr + pid, amax)
 
 autotune_dec = triton.autotune(configs=get_autotune_config(), key=["n_rows", "n_cols"], use_cuda_graph=True)
 _layernorm_fwd_triton = autotune_dec(_layernorm_fwd_triton_impl)

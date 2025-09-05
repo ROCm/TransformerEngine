@@ -151,8 +151,8 @@ def te_norm_fwd_triton(
     if IS_FP8:
         MAKE_TRANSPOSE = quantizer.columnwise_usage
         amax = (
+            quantizer.amax if APPLY_ATOMIC else
             torch.empty((NUM_PRGMS,), dtype=torch.float32, device=device)
-            if APPLY_ATOMIC else quantizer.amax
         )
         tl_dtype = te_dtype_to_triton_dtype(quantizer.dtype)
         scale_inv_ptr = out._scale_inv
@@ -169,35 +169,40 @@ def te_norm_fwd_triton(
             out_transpose_ptr = triton.reinterpret(out._transpose, tl_dtype)
             out_transpose_stride = out._transpose.stride(0)
 
-    grid_fwd = lambda meta: (NUM_PRGMS, )
-    kernel = _norm_kernels[kernel][autotune]
-    kernel[grid_fwd](
-        input_tensor,
-        out_ptr,
-        weight,
-        bias,
-        mu,
-        rsigma,
-        input_tensor.stride(0),
-        out_ptr.stride(0),
-        N, H, eps,
-        amax,
-        q_scale,
-        scale_inv_ptr,
-        out_transpose_ptr,
-        out_transpose_stride,
-        zero_centered_gamma,
-        BLOCK_SIZE,
-        USE_BLOCKED,
-        NUM_PRGMS,
-        IS_FP8,
-        APPLY_ATOMIC,
-        FP8_MAX,
-        MAKE_TRANSPOSE,
+    grid_fwd = lambda meta: (N if kernel=='layer' else NUM_PRGMS,)
+    kernel_func = _norm_kernels[kernel][autotune]
+    kwargs = dict(
+        input_ptr=input_tensor,
+        output_ptr=out_ptr,
+        g_ptr=weight,
+        rsigma_ptr=rsigma,
+        input_row_stride=input_tensor.stride(0),
+        output_row_stride=out_ptr.stride(0),
+        n_rows=N, n_cols=H,
+        epsilon=eps,
+        q_amax_ptr=amax,
+        q_scale_ptr=q_scale,
+        scale_inv_ptr=scale_inv_ptr,
+        out_transpose_ptr=out_transpose_ptr,
+        out_transpose_stride=out_transpose_stride,
+        ZERO_CENTERED_GAMMA=zero_centered_gamma,
+        BLOCK_SIZE=BLOCK_SIZE,
+        IS_FP8=IS_FP8,
+        FP8_MAX=FP8_MAX,
+        MAKE_TRANSPOSE=MAKE_TRANSPOSE,        
     )
-    if IS_MXFP8:
-        out = quantizer.quantize(out, out=ln_out)
-
+    if kernel == 'layer':
+        kwargs["APPLY_ATOMIC"]=APPLY_ATOMIC
+        kwargs["PERSISTENT"]=False # TODO: Improve persistent algo performance
+        kwargs["b_ptr"]=bias
+        kwargs["mean_ptr"]=mu
+    elif kernel == "rms":
+        kwargs["USE_BLOCKED"]=USE_BLOCKED
+        kwargs["NUM_PRGMS"]=NUM_PRGMS
+        
+    kernel_func[grid_fwd](
+        **kwargs,
+    )
     # Reduce and find amax if "not APPLY_ATOMIC" is True for layernorm.
     if IS_FP8 and not APPLY_ATOMIC:
         _layernorm_fwd_reduce_triton[(triton.cdiv(N, ATOMIC_REDUCTION_BLOCK_SIZE),)](
@@ -205,6 +210,8 @@ def te_norm_fwd_triton(
             quantizer.amax,
             N, ATOMIC_REDUCTION_BLOCK_SIZE,
         )
+    elif IS_MXFP8:
+        out = quantizer.quantize(out, out=ln_out)
 
     return out, mu, rsigma
 
