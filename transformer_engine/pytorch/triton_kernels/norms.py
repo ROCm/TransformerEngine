@@ -125,7 +125,7 @@ def te_norm_fwd_triton(
     USE_BLOCKED = use_blocked(input_tensor)
     NUM_PRGMS = num_programs(input_tensor, sm_margin)
     MAKE_TRANSPOSE = False
-    APPLY_ATOMIC = N < 512 and kernel == 'layer'
+    APPLY_ATOMIC = N < 512 or kernel == 'rms'
     ATOMIC_REDUCTION_BLOCK_SIZE=256
 
     mu = torch.empty((N,), dtype=torch.float32, device=device) if kernel == 'layer' else None
