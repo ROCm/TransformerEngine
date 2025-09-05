@@ -417,7 +417,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight,
                 bias,
                 ln_weight,
-                ln_out.clone() if ub_overlap_ag_fprop else (ln_out if weight.requires_grad else None),  # avoid saving a UB buffer
+                ln_out.clone() if ub_overlap_ag_fprop else ln_out,  # avoid saving a UB buffer
                 mu,
                 rsigma,
             )
