@@ -62,15 +62,12 @@ class develop(_develop):
             # by creating a symlink to them. This is only necessary for editable
             # mode since our C++ code assumes the AITER ASM kernel paths relative
             # to trasnformer_engine.so, which is different in editable installs.
-            import triton
-            arh_str = triton.runtime.driver.active.get_current_target().arch
             project_dir = Path(__file__).parent
-            asm_src_dir = project_dir / 'transformer_engine' / 'aiter' / arh_str
+            asm_src_dir = project_dir / 'transformer_engine' / 'aiter'
             # Must be synced with
             # TransformerEngine/transformer_engine/common/ck_fused_attn/src/ck_fused_attn_utils.cpp
-            asm_target_dir = project_dir / 'aiter' / arh_str
+            asm_target_dir = project_dir / 'aiter'
             if asm_src_dir.is_dir() and not asm_target_dir.is_dir():
-                asm_target_dir.parent.mkdir(exist_ok=True)
                 asm_target_dir.symlink_to(asm_src_dir)
 
 class TimedBdist(bdist_wheel):
