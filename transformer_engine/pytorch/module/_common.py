@@ -24,8 +24,12 @@ from ..tensor.mxfp8_tensor import MXFP8Quantizer
 _use_cudnn_mxfp8_norm = bool(int(os.getenv("NVTE_CUDNN_MXFP8_NORM", "0")))
 
 if IS_HIP_EXTENSION:
-    from ..triton_kernels.layernorm import te_layernorm_fwd_triton, te_layernorm_bwd_triton
-    from ..triton_kernels.rmsnorm import te_rmsnorm_bwd_triton, te_rmsnorm_fwd_triton
+    from ..triton_kernels.norms import (
+        te_layernorm_fwd_triton,
+        te_layernorm_bwd_triton,
+        te_rmsnorm_fwd_triton,
+        te_rmsnorm_bwd_triton
+    )
 
 def _get_normalization_func(normalization: str, forward: bool):
     use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ) and IS_HIP_EXTENSION

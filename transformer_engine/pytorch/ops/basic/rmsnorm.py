@@ -17,7 +17,7 @@ import torch
 from transformer_engine_torch import rmsnorm_bwd, rmsnorm_fwd
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 if IS_HIP_EXTENSION:
-    from ...triton_kernels.rmsnorm import (
+    from ...triton_kernels.norms import (
         te_rmsnorm_bwd_triton,
         te_rmsnorm_fwd_triton
     )

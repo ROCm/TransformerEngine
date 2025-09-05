@@ -17,13 +17,11 @@ from transformer_engine.pytorch.triton_kernels.common import (
 )
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8Tensor
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
-from transformer_engine.pytorch.triton_kernels.rmsnorm import (
-    te_rmsnorm_bwd_triton,
-    te_rmsnorm_fwd_triton,
-)
-from transformer_engine.pytorch.triton_kernels.layernorm import (
+from transformer_engine.pytorch.triton_kernels.norms import (
     te_layernorm_bwd_triton,
     te_layernorm_fwd_triton,
+    te_rmsnorm_bwd_triton,
+    te_rmsnorm_fwd_triton,
 )
 from test_common import dtype_tols, te_compare_results, str_to_torch_dtype, fill_uniform
 

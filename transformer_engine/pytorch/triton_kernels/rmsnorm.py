@@ -24,16 +24,19 @@ def get_autotune_config():
     return [triton.Config({'waves_per_eu': we}, num_warps=nw) for (we, nw) in product([0, 1, 2, 4], [4, 8, 16])]
 
 
+# TODO(micky774) Implement fused MXFP8 quantization within the kernel
 @triton.jit
 def _rmsnorm_fwd_triton_impl(
     output_ptr,
     input_ptr,
-    g_ptr, rsigma_ptr,
+    g_ptr,
+    bias_ptr, # Unused, for API purposes only
+    mu_ptr, # Unused, for API purposes only
+    rsigma_ptr,
     input_row_stride,
     output_row_stride,
     n_rows, n_cols,
     epsilon,
-    amax_ptr,
     q_amax_ptr,
     q_scale_ptr,
     scale_inv_ptr,
@@ -44,6 +47,7 @@ def _rmsnorm_fwd_triton_impl(
     USE_BLOCKED: tl.constexpr,
     NUM_PRGMS: tl.constexpr,
     IS_FP8: tl.constexpr,
+    APPLY_ATOMIC: tl.constexpr, # Unused, for API purposes only
     FP8_MAX: tl.constexpr,
     MAKE_TRANSPOSE: tl.constexpr,
 ):
@@ -171,7 +175,6 @@ def _rmsnorm_fwd_triton_impl(
                     tl.store(output_t_ptrs, rms_norm.to(output_type), mask=mask)
             tl.store(output_ptrs, rms_norm.to(output_type), mask=mask)
     if IS_FP8:
-        tl.store(amax_ptr + row_start, amax)
         tl.atomic_max(q_amax_ptr, amax, sem="relaxed")
         if row_start == 0:
             scale = tl.load(q_scale_ptr)
@@ -362,105 +365,3 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma):
                                                    BLOCK_SIZE_M=128, BLOCK_SIZE_N=64)
 
     return dx, dgamma
-
-# triton drop-in replacement for transformer_engine::pytorch::rmsnorm_fwd
-def te_rmsnorm_fwd_triton(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float,
-    ln_out: torch.Tensor,
-    quantizer: Quantizer,
-    otype: tex.DType,
-    sm_margin: int,
-    zero_centered_gamma: bool,
-    autotune: bool = True,
-):
-    if eps < 0:
-        raise ValueError(f"`eps` must be non-negative, but a value of {eps} was passed")
-    if len(input.shape) != 2:
-        raise ValueError(
-            f"The input must be a 2-dimensional matrix, but an input with {input.ndim} was passed.")
-
-    device = input.device
-    N, H = input.shape
-    if weight.shape[0] != H:
-        raise ValueError(
-            f"The shape of `weight` must be feature-aligned, "
-            f"but {weight.shape[0]=} while {input.shape[1]=}"
-        )
-    IS_FP8 = isinstance(quantizer, Float8Quantizer)
-    IS_MXFP8 = isinstance(quantizer, MXFP8Quantizer)
-    BLOCK_SIZE = block_size(input)
-    USE_BLOCKED = use_blocked(input)
-    NUM_PRGMS = num_programs(input, sm_margin)
-    MAKE_TRANSPOSE = False
-
-    rsigma = torch.empty((N,), dtype=torch.float32, device=device)
-    torch_out_dtype = (
-        otype if isinstance(otype, torch.dtype)
-        else te_dtype_to_torch_dtype(otype)
-    )
-    out = make_ln_out(
-        ln_out,
-        quantizer=quantizer,
-        input_shape=input.shape,
-        out_dtype=torch_out_dtype
-    )
-    if IS_FP8:
-        MAKE_TRANSPOSE = quantizer.columnwise_usage
-        amax = torch.empty((NUM_PRGMS,), dtype=torch.float32, device=device)
-        tl_dtype = te_dtype_to_triton_dtype(quantizer.dtype)
-        scale_inv_ptr = out._scale_inv
-        q_scale = quantizer.scale
-        q_amax = quantizer.amax
-        out_ptr = triton.reinterpret(out._data, tl_dtype)
-        FP8_MAX = get_fp8_max(quantizer.dtype)
-        if MAKE_TRANSPOSE:
-            if out._transpose_invalid:
-                out._transpose = torch.empty((out._data.shape[1], out._data.shape[0]), dtype=out._data.dtype, device=device)
-                out._transpose_invalid = False
-            out_transpose_ptr = triton.reinterpret(out._transpose, tl_dtype)
-            out_transpose_stride = out._transpose.stride(0)
-        else:
-            out_transpose_ptr = None
-            out_transpose_stride = None
-    else:
-        amax = None
-        tl_dtype = None
-        scale_inv_ptr = None
-        q_scale = None
-        q_amax = None
-        out_ptr = out
-        out_transpose_ptr = None
-        out_transpose_stride = None
-        FP8_MAX = None
-
-    grid_fwd = lambda meta: (NUM_PRGMS, )
-    # TODO(micky774) Implement fused MXFP8 quantization within the kernel
-    kernel = _rmsnorm_fwd_triton if autotune else _rmsnorm_fwd_triton_impl
-    kernel[grid_fwd](
-        out_ptr,
-        input,
-        weight,
-        rsigma,
-        input.stride(0),
-        out_ptr.stride(0),
-        N, H, eps,
-        amax,
-        q_amax,
-        q_scale,
-        scale_inv_ptr,
-        out_transpose_ptr,
-        out_transpose_stride,
-        zero_centered_gamma,
-        BLOCK_SIZE,
-        USE_BLOCKED,
-        NUM_PRGMS,
-        IS_FP8,
-        FP8_MAX,
-        MAKE_TRANSPOSE,
-    )
-    if IS_MXFP8:
-        out = quantizer.quantize(out, out=ln_out)
-
-    return out, None, rsigma
