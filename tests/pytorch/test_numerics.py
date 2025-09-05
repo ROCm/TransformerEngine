@@ -1115,7 +1115,9 @@ def _test_granular_accuracy(block, bs, dtype, config):
             outputs.append(p.grad)
     return outputs
 
-
+# During initialization/first forward, the weight has transpose even when keep_fp8_weight_transpose_cache = False
+# The backward call clears transpose if keep_fp8_weight_transpose_cache = False
+# in the next iteration of the forward pass will now have no transpose, hence the need for multiple iter check
 def _test_granular_accuracy_with_fp8(block, bs, dtype, config, num_iterations=1):
     all_outputs = []
     reset_rng_states()
