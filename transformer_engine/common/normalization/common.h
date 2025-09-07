@@ -27,6 +27,8 @@
 #include "../common.h"
 #ifndef __HIP_PLATFORM_AMD__
 #include "../cudnn_utils.h"
+#else
+#include "../util/rocm_cast_kernels.cuh"
 #endif
 #include "../util/system.h"
 
@@ -43,18 +45,33 @@ struct LaunchParams {
   size_t workspace_bytes = 0;
   size_t barrier_bytes = 0;
   size_t dgamma_part_bytes = 0;
+
   int multiprocessorCount;
   cudaStream_t stream;
+
+#ifdef __HIP_PLATFORM_AMD__
+  size_t mxfp8_buffer_bytes = 0;
+  // TE MXFP8 quantization parameters
+  Tensor *z_tensor;
+  bool training;
+#endif
 
   KernelParamsType params;
 
   size_t getTotalWorkspaceBytes(const bool _is_layernorm = true) const {
+#ifdef __HIP_PLATFORM_AMD__
+    return (workspace_bytes + barrier_bytes + size_t(_is_layernorm + 1) * dgamma_part_bytes + mxfp8_buffer_bytes);
+#else
     return (workspace_bytes + barrier_bytes + size_t(_is_layernorm + 1) * dgamma_part_bytes);
+#endif
   }
   void alignWorkspace(size_t alignment = 16) {
     workspace_bytes = DIVUP(workspace_bytes, alignment) * alignment;
     barrier_bytes = DIVUP(barrier_bytes, alignment) * alignment;
     dgamma_part_bytes = DIVUP(dgamma_part_bytes, alignment) * alignment;
+#ifdef __HIP_PLATFORM_AMD__
+    mxfp8_buffer_bytes = DIVUP(mxfp8_buffer_bytes, alignment) * alignment;
+#endif
   }
 };
 
@@ -98,7 +115,11 @@ struct KernelParamsBase {
 
 struct ForwardKernelParams : public KernelParamsBase {
   ForwardKernelParams()
+#ifdef __HIP_PLATFORM_AMD__
+      : KernelParamsBase(), z(nullptr), beta(nullptr), epsilon(0.f), fp8_out(false), mxfp8_out(false) {}
+#else
       : KernelParamsBase(), z(nullptr), beta(nullptr), epsilon(0.f), fp8_out(false) {}
+#endif
 
   // Output of LN FWD.
   void* z;
@@ -118,6 +139,10 @@ struct ForwardKernelParams : public KernelParamsBase {
 
   // Whether to compute scale and amax
   bool fp8_out;
+
+#ifdef __HIP_PLATFORM_AMD__
+  bool mxfp8_out;
+#endif
 };
 
 struct BackwardKernelParams : public KernelParamsBase {
@@ -245,7 +270,11 @@ class TeNormalizationPlan : public NormalizationPlanBase {
  public:
   TeNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype,
                       DType otype, DType ctype, const size_t batch_size, const size_t hidden_size,
-                      const size_t sm_count, const bool zero_centered_gamma, const bool is_tuned);
+                      const size_t sm_count, const bool zero_centered_gamma, const bool is_tuned
+#ifdef __HIP_PLATFORM_AMD__
+                      , const NVTEScalingMode mode, const bool training
+#endif
+                    );
   std::vector<size_t> getWorkspaceShape() const override;
 
   void execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr, void* mean_dptr,
@@ -402,6 +431,45 @@ bool is_ptr_aligned(const Args*... ptrs) {
 bool use_cudnn_norm_fwd();
 bool use_cudnn_norm_bwd();
 #endif
+
+#ifdef __HIP_PLATFORM_AMD__
+template <typename compute_t = float>
+void rocm_norm_mxfp8_quantize(LaunchParams<ForwardKernelParams> &launch_params) {
+  const size_t rows = launch_params.params.rows;
+  const size_t cols = launch_params.params.cols;
+  const size_t scale_dim_X_rowwise = 32;
+  const size_t scale_dim_Y_colwise = launch_params.training ? 32 : 1;
+
+  const size_t chunks_Y = DIVUP(rows, transformer_engine::MXFP8_CHUNK_DIM_Y);
+  const size_t chunks_X = DIVUP(cols, transformer_engine::MXFP8_CHUNK_DIM_X);
+  const size_t blocks_Y = DIVUP(chunks_Y, transformer_engine::MXFP8_CHUNKS_PER_BLOCK_Y);
+  const size_t blocks_X = DIVUP(chunks_X, transformer_engine::MXFP8_CHUNKS_PER_BLOCK_X);
+
+  const size_t scale_stride_rowwise = launch_params.z_tensor->scale_inv.shape[1];
+  const size_t scale_stride_colwise = launch_params.training ? launch_params.z_tensor->columnwise_scale_inv.shape[1] : 1;
+
+  e8m0_t *const scales_rowwise_ptr = reinterpret_cast<e8m0_t *>(launch_params.z_tensor->scale_inv.dptr);
+  e8m0_t *const scales_colwise_ptr =
+      launch_params.training ? reinterpret_cast<e8m0_t *>(launch_params.z_tensor->columnwise_scale_inv.dptr) : nullptr;
+  
+  const dim3 block(transformer_engine::MXFP8_THREADS_PER_CHUNK);
+  const dim3 grid(blocks_X, blocks_Y);
+
+  TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+    scale_dim_Y_colwise, SCALE_DIM_Y,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+        launch_params.z_tensor->dtype(), OType,
+        cast_mxfp8_2D_kernel<false, false, false, Empty, {}, compute_t, OType,
+                              SCALE_DIM_Y, scale_dim_X_rowwise, true><<<grid, block, 0, launch_params.stream>>>(
+            reinterpret_cast<const compute_t*>(launch_params.params.z), 
+            nullptr,
+            reinterpret_cast<OType *>(launch_params.z_tensor->data.dptr),
+            reinterpret_cast<OType *>(launch_params.z_tensor->columnwise_data.dptr),
+            scales_rowwise_ptr, scales_colwise_ptr,
+            nullptr, nullptr, nullptr,
+            rows, cols, scale_stride_rowwise, scale_stride_colwise);););
+}
+#endif 
 
 }  // namespace normalization
 }  // namespace transformer_engine
