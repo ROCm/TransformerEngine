@@ -938,9 +938,7 @@ void hipblaslt_gemm(const Tensor *inputA,
   if (nvte_log_gemm_config) {
     const bool use_fp8 = is_fp8_dtype(param.Atype) || is_fp8_dtype(param.Btype);
     const bool a_tensor = is_delayed_tensor_scaling(inputA->scaling_mode);
-    const bool b_tensor = is_delayed_tensor_scaling(inputB->scaling_mode);
     const bool a_block   = is_block_scaling(inputA->scaling_mode);
-    const bool b_block   = is_block_scaling(inputB->scaling_mode); 
 
     std::cout << "m=" << m << " k=" << k << " n=" << n 
         << " transa=" << (param.transA == HIPBLAS_OP_T ? "T" : "N")
@@ -953,8 +951,7 @@ void hipblaslt_gemm(const Tensor *inputA,
         << " bias=" << (inputBias->data.dptr != nullptr)
         << " gelu=" << (outputPreGelu->data.dptr != nullptr)
         << " use_fp8=" << use_fp8
-        << " A_scale_mode=" << (a_tensor ? "tensor" : a_block ? "mxfp8" : "unsupported")
-        << " B_scale_mode=" << (b_tensor ? "tensor" : b_block ? "mxfp8" : "unsupported")
+        << " scale_mode=" << (a_tensor ? "tensor" : a_block ? "mxfp8" : "unsupported")
         << " accumulate=" << accumulate
         << std::endl;
   }
