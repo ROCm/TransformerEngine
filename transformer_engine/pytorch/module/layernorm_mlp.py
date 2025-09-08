@@ -1266,6 +1266,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         )
         self.set_parallel_mode = set_parallel_mode
         self.zero_centered_gamma = zero_centered_gamma
+        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
 
         # GEMM-GELU fusion is currently only supported with split GEMM-AG overlap
         self.gemm_gelu_fusion = (
@@ -1389,8 +1390,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
         self.inf_ln_sm_margin = int(os.getenv("NVTE_INF_LAYERNORM_SM_MARGIN", "0"))
-
-        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
 
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""

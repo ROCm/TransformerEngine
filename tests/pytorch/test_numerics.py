@@ -1289,24 +1289,23 @@ def test_fp8_linear_without_transpose_cache_accuracy(dtype, bs, model, fp8_model
             keep_fp8_weight_transpose_cache=False
         ).eval()
 
+        reset_rng_states()
         ref_linear = Linear(
             config.hidden_size,
             4 * config.hidden_size,
             bias=True,
             params_dtype=dtype,
             device="cuda",
+            keep_fp8_weight_transpose_cache=True # defaults to True
         ).eval()
 
-    # Share params
-    with torch.no_grad():
-        ref_linear.weight = Parameter(linear.weight.clone())
-        ref_linear.bias = Parameter(linear.bias.clone())
+
     outputs = _test_granular_accuracy_with_fp8(linear, bs, dtype, config)
     ref_outputs = _test_granular_accuracy_with_fp8(ref_linear, bs, dtype, config)
 
     # Check output.
-    for te_output, torch_output in zip(outputs, ref_outputs):
-        assert_allclose(te_output, torch_output, atol=0, rtol=0)
+    for te_output_no_cache, te_output_cache in zip(outputs, ref_outputs):
+        assert_allclose(te_output_no_cache, te_output_cache, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("dtype", param_types)
