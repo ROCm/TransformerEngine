@@ -1115,36 +1115,28 @@ def _test_granular_accuracy(block, bs, dtype, config):
             outputs.append(p.grad)
     return outputs
 
-# During initialization/first forward, the weight has transpose even when keep_fp8_weight_transpose_cache = False.
-# The backward call clears transpose if keep_fp8_weight_transpose_cache = False.
-# The next iteration of the forward pass will now have no transpose, hence the need for multiple iter check
-def _test_granular_accuracy_with_fp8(block, bs, dtype, config, num_iterations=1):
-    all_outputs = []
+def _test_granular_accuracy_with_fp8(block, bs, dtype, config):
     reset_rng_states()
-    for _ in range(num_iterations):
 
-        inp_hidden_states = torch.randn(
-            (config.seq_len, bs, config.hidden_size),
-            dtype=dtype,
-            device="cuda",
-            requires_grad=True,
-        )
-        inp_hidden_states.retain_grad()
+    inp_hidden_states = torch.randn(
+        (config.seq_len, bs, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
+    inp_hidden_states.retain_grad()
 
-        with fp8_autocast(enabled=True):
-            out = block(inp_hidden_states)
-            loss = out.sum()
-            loss.backward()
+    with fp8_autocast(enabled=True):
+        out = block(inp_hidden_states)
+        loss = out.sum()
+        loss.backward()
 
-        torch.cuda.synchronize()
-        outputs = [out, inp_hidden_states.grad]
-        for p in block.parameters():
-            if p.requires_grad:
-                outputs.append(p.grad)
-        
-        all_outputs.extend(outputs)
-
-    return all_outputs
+    torch.cuda.synchronize()
+    outputs = [out, inp_hidden_states.grad]
+    for p in block.parameters():
+        if p.requires_grad:
+            outputs.append(p.grad)
+    return outputs
 
 def _test_dpa_accuracy(block, bs, dtype, config):
     reset_rng_states()
@@ -1313,18 +1305,8 @@ def test_fp8_linear_without_transpose_cache_accuracy(dtype, bs, model, fp8_model
             keep_fp8_weight_transpose_cache=True # defaults to True
         ).eval()
 
-    # Share params
-    with torch.no_grad():
-        if module_str != "layernorm_mlp":
-            ref_layer.weight = Parameter(layer.weight.clone())
-            ref_layer.bias = Parameter(layer.bias.clone())
-        else:
-            ref_layer.fc1_weight = Parameter(layer.fc1_weight.clone())
-            ref_layer.fc1_bias = Parameter(layer.fc1_bias.clone())
-            ref_layer.fc2_weight = Parameter(layer.fc2_weight.clone())
-            ref_layer.fc2_bias = Parameter(layer.fc2_bias.clone())
-    outputs = _test_granular_accuracy_with_fp8(layer, bs, dtype, config, num_iterations=2)
-    ref_outputs = _test_granular_accuracy_with_fp8(ref_layer, bs, dtype, config, num_iterations=2)
+    outputs = _test_granular_accuracy_with_fp8(layer, bs, dtype, config)
+    ref_outputs = _test_granular_accuracy_with_fp8(ref_layer, bs, dtype, config)
 
     # Check output.
     for te_output_no_cache, te_output_cache in zip(outputs, ref_outputs):

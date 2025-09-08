@@ -36,6 +36,7 @@ from ..jit import (
     warmup_jit_bias_gelu_all_dtypes,
 )
 from ..utils import (
+    assert_check_transpose_cache,
     divide,
     get_default_init_method,
     init_method_constant,
@@ -391,6 +392,8 @@ class _LayerNormMLP(torch.autograd.Function):
             if gemm_gelu_fusion and bias_gelu_fusion:
                 gemm_gelu_fusion = False
 
+        # Verify that the transpose cache state matches the configuration.
+        assert_check_transpose_cache(fc1_weight_final, keep_fp8_weight_transpose_cache)
         fc1_outputs = general_gemm(
             fc1_weight_final,
             ln_out_total,
@@ -447,6 +450,10 @@ class _LayerNormMLP(torch.autograd.Function):
             fc2_out = torch.empty(dim_size, dtype=activation_dtype, device=device)
 
         # FC2 GEMM
+
+        # Verify that the transpose cache state matches the configuration.
+        assert_check_transpose_cache(fc2_weight_final, keep_fp8_weight_transpose_cache)
+
         _ = general_gemm(
             fc2_weight_final,
             act_out,
@@ -1212,10 +1219,20 @@ class LayerNormMLP(TransformerEngineBaseModule):
                      batch size per training step. Needed for JIT Warmup, a technique where jit
                      fused functions are warmed up before training to ensure same kernels are
                      used for forward propogation and activation recompute phase.
-    keep_fp8_weight_transpose_cache: bool, default = 'True'
-                                     if set to `False`, it will not cache fp8 weight buffer instead of 
-                                     recomputing fp8 weight transpose. Recommend set to `False` when
-                                     enable FSDP parallel.
+    keep_fp8_weight_transpose_cache: bool, default = True
+                Controls whether to cache the FP8 weight transpose buffer during training.
+
+                - If set to `True` (default), the FP8 weight transpose buffer is cached to avoid recomputation, 
+                which can improve performance but significantly increases memory usage.
+                - If set to `False`, the buffer is not cached and the FP8 weight transpose is recomputed as needed. 
+                This reduces memory consumption, especially during checkpoint loading and runtime.
+
+                ⚠️ **Recommendation**: Set this to `False` when using Fully Sharded Data Parallel (FSDP) training. 
+                Caching FP8 weight transposes can double memory usage for modules such as `Linear`, 
+                `LayerNormLinear`, and `LayerNormMLP`, which may lead to excessive memory pressure and 
+                reduced efficiency of PyTorch's caching allocator.
+
+                Use this setting to balance memory usage and performance based on your training configuration.
                                      
     """
 
