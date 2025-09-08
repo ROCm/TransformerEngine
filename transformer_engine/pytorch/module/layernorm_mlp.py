@@ -36,7 +36,6 @@ from ..jit import (
     warmup_jit_bias_gelu_all_dtypes,
 )
 from ..utils import (
-    assert_check_transpose_cache,
     divide,
     get_default_init_method,
     init_method_constant,
@@ -78,6 +77,7 @@ from ..cpp_extensions import (
 if IS_HIP_EXTENSION:
     from ..triton_kernels.layernorm import te_layernorm_bwd_triton
     from ..triton_kernels.rmsnorm import te_rmsnorm_bwd_triton
+    from ..utils import assert_check_transpose_cache
 
 from ..rocm_utils import create_fp8_weight_transpose_cache, clear_fp8_weight_transpose_cache
 
@@ -393,7 +393,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 gemm_gelu_fusion = False
 
         # Verify that the transpose cache state matches the configuration.
-        assert_check_transpose_cache(fc1_weight_final, keep_fp8_weight_transpose_cache)
+        if IS_HIP_EXTENSION:
+            assert_check_transpose_cache(fc1_weight_final, keep_fp8_weight_transpose_cache)
         fc1_outputs = general_gemm(
             fc1_weight_final,
             ln_out_total,
@@ -452,7 +453,8 @@ class _LayerNormMLP(torch.autograd.Function):
         # FC2 GEMM
 
         # Verify that the transpose cache state matches the configuration.
-        assert_check_transpose_cache(fc2_weight_final, keep_fp8_weight_transpose_cache)
+        if IS_HIP_EXTENSION:
+            assert_check_transpose_cache(fc2_weight_final, keep_fp8_weight_transpose_cache)
 
         _ = general_gemm(
             fc2_weight_final,

@@ -8,6 +8,7 @@ from functools import reduce
 from operator import mul as multiply_op
 
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine_torch as tex
 
@@ -23,7 +24,6 @@ from .base import (
 from ._common import noop_cat, _fix_gathered_fp8_transpose
 from ..fp8 import FP8GlobalStateManager
 from ..utils import (
-    assert_check_transpose_cache,
     cast_if_needed,
     clear_tensor_data,
     divide,
@@ -62,6 +62,8 @@ from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
 from ..rocm_utils import create_fp8_weight_transpose_cache, clear_fp8_weight_transpose_cache
 
+if IS_HIP_EXTENSION:
+    from ..utils import assert_check_transpose_cache
 
 __all__ = ["Linear"]
 
@@ -250,7 +252,8 @@ class _Linear(torch.autograd.Function):
                 fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
 
         # Verify that the transpose cache state matches the configuration.
-        assert_check_transpose_cache(weightmat, keep_fp8_weight_transpose_cache)
+        if IS_HIP_EXTENSION:
+            assert_check_transpose_cache(weightmat, keep_fp8_weight_transpose_cache)
 
         out, *_, rs_out = general_gemm(
             weightmat,

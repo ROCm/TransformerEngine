@@ -244,22 +244,22 @@ def assert_dim_for_fp8_exec(*tensors: List[torch.Tensor]) -> None:
             "height divisible by 8 and width divisible by 16, "
             f"but got tensor with dims={list(tensor.size())}"
         )
+if IS_HIP_EXTENSION:
+    def assert_check_transpose_cache(weightmat, keep_fp8_weight_transpose_cache):
+        """
+        Asserts that the state of the weight matrix's transpose cache
+        is consistent with the `keep_fp8_weight_transpose_cache` flag.
 
-def assert_check_transpose_cache(weightmat, keep_fp8_weight_transpose_cache):
-    """
-    Asserts that the state of the weight matrix's transpose cache
-    is consistent with the `keep_fp8_weight_transpose_cache` flag.
-
-    Args:
-        weightmat (torch.Tensor): The weight matrix object to check.
-        keep_fp8_weight_transpose_cache (bool): A flag indicating whether
-                                                the cache should be retained.
-    """
-    transpose_is_empty_or_none = weightmat._transpose is None or weightmat._transpose.numel() == 0
-    if keep_fp8_weight_transpose_cache:
-        assert not transpose_is_empty_or_none, "Expected _transpose to be a valid, non-empty tensor when transpose cache is enabled."
-    else:
-        assert transpose_is_empty_or_none, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
+        Args:
+            weightmat (torch.Tensor): The weight matrix object to check.
+            keep_fp8_weight_transpose_cache (bool): A flag indicating whether
+                                                    the cache should be retained.
+        """
+        transpose_is_empty_or_none = weightmat._transpose is None or weightmat._transpose.numel() == 0
+        if keep_fp8_weight_transpose_cache:
+            assert not transpose_is_empty_or_none, "Expected _transpose to be a valid, non-empty tensor when transpose cache is enabled."
+        else:
+            assert transpose_is_empty_or_none, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
 
 if IS_HIP_EXTENSION:
     @functools.lru_cache(maxsize=None)

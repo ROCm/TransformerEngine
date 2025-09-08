@@ -29,7 +29,6 @@ from .base import (
 )
 from ..fp8 import FP8GlobalStateManager
 from ..utils import (
-    assert_check_transpose_cache,
     assert_dim_for_fp8_exec,
     cast_if_needed,
     clear_tensor_data,
@@ -71,6 +70,7 @@ from ..cpp_extensions import (
 if IS_HIP_EXTENSION:
     from ..triton_kernels.layernorm import te_layernorm_bwd_triton
     from ..triton_kernels.rmsnorm import te_rmsnorm_bwd_triton
+    from ..utils import assert_check_transpose_cache
 
 from ..rocm_utils import create_fp8_weight_transpose_cache, clear_fp8_weight_transpose_cache
 
@@ -339,7 +339,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
 
         # Verify that the transpose cache state matches the configuration.
-        assert_check_transpose_cache(weightmat, keep_fp8_weight_transpose_cache)
+        if IS_HIP_EXTENSION:
+            assert_check_transpose_cache(weightmat, keep_fp8_weight_transpose_cache)
         
         out, *_, rs_out = general_gemm(
             weightmat,
