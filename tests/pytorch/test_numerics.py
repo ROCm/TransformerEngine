@@ -1115,6 +1115,7 @@ def _test_granular_accuracy(block, bs, dtype, config):
             outputs.append(p.grad)
     return outputs
 
+
 def _test_granular_accuracy_with_fp8(block, bs, dtype, config):
     reset_rng_states()
 
@@ -1137,6 +1138,7 @@ def _test_granular_accuracy_with_fp8(block, bs, dtype, config):
         if p.requires_grad:
             outputs.append(p.grad)
     return outputs
+
 
 def _test_dpa_accuracy(block, bs, dtype, config):
     reset_rng_states()
