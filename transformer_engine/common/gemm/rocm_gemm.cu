@@ -932,18 +932,15 @@ void hipblaslt_gemm(const Tensor *inputA,
 
   bool nvte_log_gemm_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_GEMM_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_gemm_config = true;
+      nvte_log_gemm_config = (strcmp(env_p, "1") == 0);
   }
 
   if (nvte_log_gemm_config) {
     const bool use_fp8 = is_fp8_dtype(param.Atype) || is_fp8_dtype(param.Btype);
-    const bool a_delayed = is_delayed_tensor_scaling(inputA->scaling_mode);
-    const bool b_delayed = is_delayed_tensor_scaling(inputB->scaling_mode);
+    const bool a_tensor = is_delayed_tensor_scaling(inputA->scaling_mode);
+    const bool b_tensor = is_delayed_tensor_scaling(inputB->scaling_mode);
     const bool a_block   = is_block_scaling(inputA->scaling_mode);
-    const bool b_block   = is_block_scaling(inputB->scaling_mode);
-    std::string scaling_mode = (a_delayed && b_delayed) ? "delayed" :
-                               (use_fp8 && (a_block && b_block )) ? "mxfp8" : "unsupported"; 
+    const bool b_block   = is_block_scaling(inputB->scaling_mode); 
 
     std::cout << "m=" << m << " k=" << k << " n=" << n 
         << " transa=" << (param.transA == HIPBLAS_OP_T ? "T" : "N")
@@ -955,10 +952,9 @@ void hipblaslt_gemm(const Tensor *inputA,
         << " grad=" << grad
         << " bias=" << (inputBias->data.dptr != nullptr)
         << " gelu=" << (outputPreGelu->data.dptr != nullptr)
-        << " fp8_mode=" << (use_fp8 ? "fp8" : "non-fp8")
-        << " scaling_mode=" << scaling_mode
-        << " A_scale_mode=" << (a_delayed ? "delayed" : a_block ? "mxfp8" : to_string(inputA->scaling_mode))
-        << " B_scale_mode=" << (b_delayed ? "delayed" : b_block ? "mxfp8" : to_string(inputB->scaling_mode))
+        << " use_fp8=" << use_fp8
+        << " A_scale_mode=" << (a_tensor ? "tensor" : a_block ? "mxfp8" : "unsupported")
+        << " B_scale_mode=" << (b_tensor ? "tensor" : b_block ? "mxfp8" : "unsupported")
         << " accumulate=" << accumulate
         << std::endl;
   }
