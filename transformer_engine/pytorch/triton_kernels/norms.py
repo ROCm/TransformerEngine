@@ -189,7 +189,7 @@ def te_norm_fwd_triton(
         BLOCK_SIZE=BLOCK_SIZE,
         IS_FP8=IS_FP8,
         FP8_MAX=FP8_MAX,
-        MAKE_TRANSPOSE=MAKE_TRANSPOSE,        
+        MAKE_TRANSPOSE=MAKE_TRANSPOSE,
     )
     if kernel == 'layer':
         kwargs["APPLY_ATOMIC"]=APPLY_ATOMIC
@@ -199,10 +199,9 @@ def te_norm_fwd_triton(
     elif kernel == "rms":
         kwargs["USE_BLOCKED"]=USE_BLOCKED
         kwargs["NUM_PRGMS"]=NUM_PRGMS
-        
-    kernel_func[grid_fwd](
-        **kwargs,
-    )
+
+    kernel_func[grid_fwd](**kwargs)
+
     # Reduce and find amax if "not APPLY_ATOMIC" is True for layernorm.
     if IS_FP8 and not APPLY_ATOMIC:
         _layernorm_fwd_reduce_triton[(triton.cdiv(N, ATOMIC_REDUCTION_BLOCK_SIZE),)](
@@ -250,12 +249,12 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma):
 # drop in replacement for transformer_engine::pytorch::layernorm_bwd
 # TODO: Add support for `sm_margin > 0`.
 def te_layernorm_bwd_triton(
-    dz: torch.Tensor, 
-    x: torch.Tensor, 
-    mu: torch.Tensor, 
-    rsigma: torch.Tensor, 
-    gamma: torch.Tensor, 
-    sm_margin: int, 
+    dz: torch.Tensor,
+    x: torch.Tensor,
+    mu: torch.Tensor,
+    rsigma: torch.Tensor,
+    gamma: torch.Tensor,
+    sm_margin: int,
     zero_centered_gamma: bool
 ):
     if sm_margin is not None and sm_margin > 0:
