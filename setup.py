@@ -171,6 +171,7 @@ if __name__ == "__main__":
     with open("README.rst", encoding="utf-8") as f:
         long_description = f.read()
 
+    cmdclass = {"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist}
     # Settings for building top level empty package for dependency management.
     if bool(int(os.getenv("NVTE_BUILD_METAPACKAGE", "0"))):
         assert bool(
@@ -178,7 +179,6 @@ if __name__ == "__main__":
         ), "NVTE_RELEASE_BUILD env must be set for metapackage build."
         te_cuda_vers = "rocm" if rocm_build() else "cu12"
         ext_modules = []
-        cmdclass = {}
         package_data = {}
         include_package_data = False
         setup_requires = []
@@ -190,7 +190,6 @@ if __name__ == "__main__":
     else:
         setup_requires, install_requires, test_requires = setup_requirements()
         ext_modules = [setup_common_extension()]
-        cmdclass = {"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist}
         if rocm_build():
             cmdclass["develop"] = develop
         package_data = {"": ["VERSION.txt"]}
