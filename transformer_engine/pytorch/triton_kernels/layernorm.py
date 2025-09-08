@@ -18,14 +18,10 @@ import warnings
 import transformer_engine_torch as tex
 from .common import (
     get_fp8_max,
-    is_fp8_torch_dtype,
     te_dtype_to_torch_dtype,
     te_dtype_to_triton_dtype,
-    torch_dtype_to_te_dtype,
-    te_dtype_to_aten_dtype,
-    enum_value_to_te_dtype,
 )
-from .common import get_fp8_max
+from .norm_common import make_ln_out
 
 def get_autotune_config(full_tuning_space=False):
     if full_tuning_space:
@@ -38,11 +34,8 @@ def get_autotune_config(full_tuning_space=False):
     ]
 
 
-@triton.autotune(
-    configs=get_autotune_config(), key=["n_rows", "n_cols"], use_cuda_graph=True
-)
 @triton.jit
-def _layernorm_fwd_triton(
+def _layernorm_fwd_triton_impl(
     x_ptr,
     y_ptr,
     w_ptr,
@@ -182,6 +175,8 @@ def _layernorm_fwd_triton(
         else:
             tl.store(amax_ptr + pid, amax)
 
+autotune_dec = triton.autotune(configs=get_autotune_config(), key=["n_rows", "n_cols"], use_cuda_graph=True)
+_layernorm_fwd_triton = autotune_dec(_layernorm_fwd_triton_impl)
 
 @triton.jit
 def _layernorm_fwd_reduce_triton(
@@ -465,11 +460,12 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
                             weight: torch.Tensor,
                             bias: torch.Tensor,
                             eps: float,
-                            ln_out: torch.Tensor,
-                            quantizer: Quantizer,
+                            ln_out: torch.Tensor, 
+                            quantizer: Quantizer, 
                             otype: tex.DType,
                             sm_margin: int,
-                            zero_centered_gamma: bool):
+                            zero_centered_gamma: bool,
+                            autotune: bool = True,):
     if sm_margin is not None and sm_margin > 0:
         warnings.warn(
             '"sm_margin" is not supported in the Triton based forward layer-norm kernel. '
@@ -484,21 +480,12 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
     # Create empty tensors for mu and rsigma
     mu = torch.empty((M,), dtype=torch.float32, device=device)
     rsigma = torch.empty((M,), dtype=torch.float32, device=device)
-
     torch_out_dtype = (
         otype if isinstance(otype, torch.dtype)
         else te_dtype_to_torch_dtype(otype)
     )
     # Create ln_out
-    if quantizer is None or IS_MXFP8:
-        ln_out = torch.empty(M, N, dtype=torch_out_dtype, device=device)
-    else:
-        if ln_out is None:
-            ln_out = quantizer.make_empty((M, N),  dtype=torch_out_dtype)
-            ln_out._transpose = None
-            ln_out._transpose_invalid = True
-        else:
-            ln_out = quantizer.create_tensor_from_data(ln_out._data)
+    ln_out = make_ln_out(ln_out, quantizer=quantizer, input_shape=input.shape, out_dtype=torch_out_dtype)
     # To update the amax ptr directly with atomic max
     APPLY_ATOMIC = M < 512
 
@@ -533,7 +520,8 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
         scale_inv = None
         cast_out = ln_out
     
-    _layernorm_fwd_triton[(M,)](
+    kernel = _layernorm_fwd_triton if autotune else _layernorm_fwd_triton_impl
+    kernel[(M,)](
         input,
         triton.reinterpret(cast_out, te_dtype_to_triton_dtype(ln_out._fp8_dtype)) if IS_FP8 else cast_out,
         weight,
@@ -561,13 +549,6 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
         FP8_MAX=get_fp8_max(quantizer.dtype) if IS_FP8 else None,
         MAKE_TRANSPOSE=MAKE_TRANSPOSE
     )
-
-    # Compute FP8 transpose if required
-    if IS_FP8:
-        ln_out.update_usage(
-            rowwise_usage=quantizer.rowwise_usage,
-            columnwise_usage=quantizer.columnwise_usage
-        )
 
     # For MXFP8, we do regular layernorm and then quantize it separately
     if IS_MXFP8:

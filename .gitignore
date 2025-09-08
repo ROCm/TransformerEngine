@@ -53,3 +53,6 @@ compile_commands.json
 **/times.csv
 tensor_dumps/
 aiter/
+transformer_engine/build_info.txt
+transformer_engine/common/util/hip_nvml.*
+transformer_engine/aiter/
