@@ -393,8 +393,10 @@ class _LayerNormMLP(torch.autograd.Function):
                 gemm_gelu_fusion = False
 
         # Verify that the transpose cache state matches the configuration.
-        if IS_HIP_EXTENSION:
+        if IS_HIP_EXTENSION and fp8:
             assert_check_transpose_cache(fc1_weight_final, keep_fp8_weight_transpose_cache)
+            assert_check_transpose_cache(fc2_weight_final, keep_fp8_weight_transpose_cache)
+
         fc1_outputs = general_gemm(
             fc1_weight_final,
             ln_out_total,
@@ -451,10 +453,6 @@ class _LayerNormMLP(torch.autograd.Function):
             fc2_out = torch.empty(dim_size, dtype=activation_dtype, device=device)
 
         # FC2 GEMM
-
-        # Verify that the transpose cache state matches the configuration.
-        if IS_HIP_EXTENSION:
-            assert_check_transpose_cache(fc2_weight_final, keep_fp8_weight_transpose_cache)
 
         _ = general_gemm(
             fc2_weight_final,
@@ -1229,7 +1227,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 - If set to `False`, the buffer is not cached and the FP8 weight transpose is recomputed as needed. 
                 This reduces memory consumption, especially during checkpoint loading and runtime.
 
-                ⚠️ **Recommendation**: Set this to `False` when using Fully Sharded Data Parallel (FSDP) training. 
+                **Recommendation**: Set this to `False` when using Fully Sharded Data Parallel (FSDP) training. 
                 Caching FP8 weight transposes can double memory usage for modules such as `Linear`, 
                 `LayerNormLinear`, and `LayerNormMLP`, which may lead to excessive memory pressure and 
                 reduced efficiency of PyTorch's caching allocator.

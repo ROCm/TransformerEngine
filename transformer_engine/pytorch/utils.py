@@ -244,6 +244,7 @@ def assert_dim_for_fp8_exec(*tensors: List[torch.Tensor]) -> None:
             "height divisible by 8 and width divisible by 16, "
             f"but got tensor with dims={list(tensor.size())}"
         )
+
 if IS_HIP_EXTENSION:
     def assert_check_transpose_cache(weightmat, keep_fp8_weight_transpose_cache):
         """
@@ -261,7 +262,6 @@ if IS_HIP_EXTENSION:
         else:
             assert transpose_is_empty_or_none, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
 
-if IS_HIP_EXTENSION:
     @functools.lru_cache(maxsize=None)
     def is_mi200():
       """check whether this machine is mi200/210/250"""

@@ -338,9 +338,9 @@ class _LayerNormLinear(torch.autograd.Function):
             if hasattr(recipe, "fp8_gemm_fprop"):
                 fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
 
-        # Verify that the transpose cache state matches the configuration.
-        if IS_HIP_EXTENSION:
-            assert_check_transpose_cache(weightmat, keep_fp8_weight_transpose_cache)
+            # Verify that the transpose cache state matches the configuration.
+            if IS_HIP_EXTENSION:
+                assert_check_transpose_cache(weightmat, keep_fp8_weight_transpose_cache)
         
         out, *_, rs_out = general_gemm(
             weightmat,
@@ -1000,7 +1000,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 - If set to `False`, the buffer is not cached and the FP8 weight transpose is recomputed as needed. 
                 This reduces memory consumption, especially during checkpoint loading and runtime.
 
-                ⚠️ **Recommendation**: Set this to `False` when using Fully Sharded Data Parallel (FSDP) training. 
+                **Recommendation**: Set this to `False` when using Fully Sharded Data Parallel (FSDP) training. 
                 Caching FP8 weight transposes can double memory usage for modules such as `Linear`, 
                 `LayerNormLinear`, and `LayerNormMLP`, which may lead to excessive memory pressure and 
                 reduced efficiency of PyTorch's caching allocator.
