@@ -59,7 +59,8 @@ hipError_t ck_attn_fwd(
   uint64_t stride_b_o, uint64_t stride_h_o, uint64_t stride_s_o,
   void* lse_ptr,
   bool uses_fwd_v3,
-  hipStream_t stream);
+  hipStream_t stream,
+  bool is_v3_api_check);
 
 hipError_t ck_attn_varlen_fwd(
   DType dtype,
@@ -82,7 +83,8 @@ hipError_t ck_attn_varlen_fwd(
   uint64_t stride_h_o, uint64_t stride_s_o,
   void* lse_thd_ptr,
   bool uses_fwd_v3,
-  hipStream_t stream);
+  hipStream_t stream,
+  bool is_v3_api_check);
 
 hipError_t ck_attn_bwd(  
   DType dtype,
@@ -124,7 +126,8 @@ hipError_t ck_attn_bwd(
   bool uses_bwd_v3,
   bool is_v3_atomic_fp32,
   int how_v3_bf16_cvt,
-  hipStream_t stream);
+  hipStream_t stream,
+  bool is_v3_api_check);
 
 hipError_t ck_attn_varlen_bwd(  
   DType dtype,
@@ -162,7 +165,8 @@ hipError_t ck_attn_varlen_bwd(
   bool uses_bwd_v3,
   bool is_v3_atomic_fp32,
   int how_v3_bf16_cvt,
-  hipStream_t stream);
+  hipStream_t stream,
+  bool is_v3_api_check);
 
 }//namespace ck_fused_attn
 #endif // CK_FUSED_ATTN_H

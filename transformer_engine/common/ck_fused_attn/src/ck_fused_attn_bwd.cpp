@@ -454,6 +454,7 @@ hipError_t ck_attn_bwd(
   bool uses_bwd_v3,
   bool is_v3_atomic_fp32,
   int how_v3_bf16_cvt,
+  bool is_v3_api_check,
   hipStream_t stream){
 
   bool has_dropout = (dropout_probability > 0.f);
@@ -650,7 +651,10 @@ hipError_t ck_attn_bwd(
                                          deterministic,
                                          uses_bwd_v3,
                                          is_v3_atomic_fp32,
-                                         how_v3_bf16_cvt);
+                                         how_v3_bf16_cvt,
+                                         nullptr,
+                                         nullptr,
+                                         is_v3_api_check);
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
@@ -809,6 +813,7 @@ hipError_t ck_attn_varlen_bwd(
   bool uses_bwd_v3,
   bool is_v3_atomic_fp32,
   int how_v3_bf16_cvt,
+  bool is_v3_api_check,
   hipStream_t stream){
 
   bool has_dropout = (dropout_probability > 0.f);
@@ -995,7 +1000,10 @@ hipError_t ck_attn_varlen_bwd(
                                          deterministic,
                                          uses_bwd_v3,
                                          is_v3_atomic_fp32,
-                                         how_v3_bf16_cvt);
+                                         how_v3_bf16_cvt,
+                                         cu_seqlen_q_ptr,
+                                         cu_seqlen_kv_ptr,
+                                         is_v3_api_check);
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");

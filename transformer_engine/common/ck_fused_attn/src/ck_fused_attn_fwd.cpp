@@ -129,6 +129,8 @@ hipError_t ck_attn_fwd(
   uint64_t stride_b_o, uint64_t stride_h_o, uint64_t stride_s_o,
   void* lse_ptr,
   bool uses_fwd_v3,
+  int how_v3_bf16_cvt,
+  bool is_v3_api_check,
   hipStream_t stream){
 
   bool has_dropout = (is_training && dropout_probability > 0.f);
@@ -267,7 +269,11 @@ hipError_t ck_attn_fwd(
                                          mask_type,
                                          bias_type,
                                          has_lse,
-                                         uses_fwd_v3);
+                                         uses_fwd_v3,
+                                         how_v3_bf16_cvt,
+                                         nullptr,
+                                         nullptr,
+                                         is_v3_api_check);
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");
@@ -296,6 +302,8 @@ hipError_t ck_attn_varlen_fwd(
   uint64_t stride_h_o, uint64_t stride_s_o,
   void* lse_thd_ptr,
   bool uses_fwd_v3,
+  int how_v3_bf16_cvt,
+  bool is_v3_api_check,
   hipStream_t stream){
 
   bool has_dropout = (is_training && dropout_probability > 0.f);
@@ -437,7 +445,11 @@ hipError_t ck_attn_varlen_fwd(
                                          mask_type,
                                          bias_type,
                                          has_lse,
-                                         uses_fwd_v3);
+                                         uses_fwd_v3,
+                                         how_v3_bf16_cvt,
+                                         cu_seqlen_q_ptr,
+                                         cu_seqlen_kv_ptr,
+                                         is_v3_api_check);
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");
