@@ -585,6 +585,8 @@ void fused_attn_ck_fwd_impl(
   uint64_t s_v_stride = 0;
   uint64_t s_o_stride = 0;
   
+  // Check whether there is native AITER support for the config or if a
+  // workaround is needed.
   if(pad_between_seqs || is_ragged){
   // Default values used if ragged
   s_q_stride = q_stride[2];
@@ -898,6 +900,8 @@ void fused_attn_ck_bwd_impl(
   bool nvte_ck_is_v3_atomic_fp32 = getenv<int>("NVTE_CK_IS_V3_ATOMIC_FP32", 1);
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
 
+  // Check whether there is native AITER support for the config or if a
+  // workaround is needed.
   if(pad_between_seqs || is_ragged){
     // Default values used if ragged
     s_q_stride = q_stride[2];
