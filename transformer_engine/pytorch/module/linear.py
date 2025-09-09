@@ -1,6 +1,7 @@
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
 # See LICENSE for license information.
 
 """Linear API"""
@@ -9,7 +10,6 @@ from functools import reduce
 from operator import mul as multiply_op
 
 import torch
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine_torch as tex
 
@@ -63,8 +63,6 @@ from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
 from ..rocm_utils import create_fp8_weight_transpose_cache, clear_fp8_weight_transpose_cache
 
-if IS_HIP_EXTENSION:
-    from ..utils import assert_check_transpose_cache
 
 __all__ = ["Linear"]
 
@@ -251,10 +249,6 @@ class _Linear(torch.autograd.Function):
             recipe = FP8GlobalStateManager.get_fp8_recipe()
             if hasattr(recipe, "fp8_gemm_fprop"):
                 fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
-
-            # Verify that the transpose cache state matches the configuration.
-            if IS_HIP_EXTENSION:
-                assert_check_transpose_cache(weightmat, keep_fp8_weight_transpose_cache)
 
         out, *_, rs_out = general_gemm(
             weightmat,

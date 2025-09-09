@@ -246,22 +246,6 @@ def assert_dim_for_fp8_exec(*tensors: List[torch.Tensor]) -> None:
         )
 
 if IS_HIP_EXTENSION:
-    def assert_check_transpose_cache(weightmat, keep_fp8_weight_transpose_cache):
-        """
-        Asserts that the state of the weight matrix's transpose cache
-        is consistent with the `keep_fp8_weight_transpose_cache` flag.
-
-        Args:
-            weightmat (torch.Tensor): The weight matrix object to check.
-            keep_fp8_weight_transpose_cache (bool): A flag indicating whether
-                                                    the cache should be retained.
-        """
-        transpose_is_empty_or_none = weightmat._transpose is None or weightmat._transpose.numel() == 0
-        if keep_fp8_weight_transpose_cache:
-            assert not transpose_is_empty_or_none, "Expected _transpose to be a valid, non-empty tensor when transpose cache is enabled."
-        else:
-            assert transpose_is_empty_or_none, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
-
     @functools.lru_cache(maxsize=None)
     def is_mi200():
       """check whether this machine is mi200/210/250"""
