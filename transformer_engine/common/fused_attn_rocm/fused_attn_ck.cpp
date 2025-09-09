@@ -761,18 +761,21 @@ void fused_attn_ck_fwd_impl(
     void* devPtrOPreprocess = devPtrO;
     void* cu_seqlen_padded_q_ptr = nullptr;
     void* cu_seqlen_padded_kv_ptr = nullptr;
-    if(pad_between_seqs && !has_v3_support){
-      // remove padding for q, k, v
-      remove_padding(dtype, b, h, s_q, d_qk, max_tokens_q, is_ragged, q_stride[0], q_stride[1], q_stride[2], devPtrQ, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrQWithoutPadding, stream);
-      remove_padding(dtype, b, hg, s_kv, d_qk, max_tokens_kv, is_ragged, k_stride[0], k_stride[1], k_stride[2], devPtrK, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrKWithoutPadding, stream);
-      remove_padding(dtype, b, hg, s_kv, d_v, max_tokens_kv, is_ragged, v_stride[0], v_stride[1], v_stride[2], devPtrV, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrVWithoutPadding, stream);
-      // Update values if pad_between_seqs instead
-      devPtrQProcessed = devPtrQWithoutPadding;
-      devPtrKProcessed = devPtrKWithoutPadding;
-      devPtrVProcessed = devPtrVWithoutPadding;
-      devPtrOPreprocess = devPtrOWithoutPadding;
-      cu_seqlen_padded_q_ptr = devPtrCuSeqlensQ;
-      cu_seqlen_padded_kv_ptr = devPtrCuSeqlensKV;
+    if(pad_between_seqs){
+      if(has_v3_support){
+        cu_seqlen_padded_q_ptr = devPtrCuSeqlensQ;
+        cu_seqlen_padded_kv_ptr = devPtrCuSeqlensKV;
+      }else{
+        // remove padding for q, k, v
+        remove_padding(dtype, b, h, s_q, d_qk, max_tokens_q, is_ragged, q_stride[0], q_stride[1], q_stride[2], devPtrQ, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrQWithoutPadding, stream);
+        remove_padding(dtype, b, hg, s_kv, d_qk, max_tokens_kv, is_ragged, k_stride[0], k_stride[1], k_stride[2], devPtrK, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrKWithoutPadding, stream);
+        remove_padding(dtype, b, hg, s_kv, d_v, max_tokens_kv, is_ragged, v_stride[0], v_stride[1], v_stride[2], devPtrV, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrVWithoutPadding, stream);
+        // Update values if pad_between_seqs instead
+        devPtrQProcessed = devPtrQWithoutPadding;
+        devPtrKProcessed = devPtrKWithoutPadding;
+        devPtrVProcessed = devPtrVWithoutPadding;
+        devPtrOPreprocess = devPtrOWithoutPadding;
+      }
     }
     using ck_fused_attn::ck_attn_varlen_fwd;
     NVTE_CHECK_CUDA(
@@ -1235,26 +1238,29 @@ void fused_attn_ck_bwd_impl(
 
     // Remove the padding for softmax lse
     remove_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxLSEWithoutPadding, stream);
-    if(pad_between_seqs && !has_v3_support){
-      // remove padding for q, k, v
-      remove_padding(dtype, b, h, s_q, d_qk, max_tokens_q, is_ragged, q_stride[0], q_stride[1], q_stride[2], devPtrQ, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrQWithoutPadding, stream);
-      remove_padding(dtype, b, hg, s_kv, d_qk, max_tokens_kv, is_ragged, k_stride[0], k_stride[1], k_stride[2], devPtrK, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrKWithoutPadding, stream);
-      remove_padding(dtype, b, hg, s_kv, d_v, max_tokens_kv, is_ragged, v_stride[0], v_stride[1], v_stride[2], devPtrV, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrVWithoutPadding, stream);
-      // o and do should be of same shape as q
-      remove_padding(dtype, b, h, s_q, d_v, max_tokens_q, is_ragged, o_stride[0], o_stride[1], o_stride[2], devPtrO, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrOWithoutPadding, stream);
-      remove_padding(dtype, b, h, s_q, d_v, max_tokens_q, is_ragged, o_stride[0], o_stride[1], o_stride[2], devPtrdO, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrdOWithoutPadding, stream);
+    if(pad_between_seqs){
+      if(has_v3_support){
+        cu_seqlen_padded_q_ptr = devPtrCuSeqlensQ;
+        cu_seqlen_padded_kv_ptr = devPtrCuSeqlensKV;
+      }else{
+        // remove padding for q, k, v
+        remove_padding(dtype, b, h, s_q, d_qk, max_tokens_q, is_ragged, q_stride[0], q_stride[1], q_stride[2], devPtrQ, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrQWithoutPadding, stream);
+        remove_padding(dtype, b, hg, s_kv, d_qk, max_tokens_kv, is_ragged, k_stride[0], k_stride[1], k_stride[2], devPtrK, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrKWithoutPadding, stream);
+        remove_padding(dtype, b, hg, s_kv, d_v, max_tokens_kv, is_ragged, v_stride[0], v_stride[1], v_stride[2], devPtrV, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrVWithoutPadding, stream);
+        // o and do should be of same shape as q
+        remove_padding(dtype, b, h, s_q, d_v, max_tokens_q, is_ragged, o_stride[0], o_stride[1], o_stride[2], devPtrO, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrOWithoutPadding, stream);
+        remove_padding(dtype, b, h, s_q, d_v, max_tokens_q, is_ragged, o_stride[0], o_stride[1], o_stride[2], devPtrdO, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrdOWithoutPadding, stream);
 
-      // Update values if pad_between_seqs instead
-      devPtrQProcessed = devPtrQWithoutPadding;
-      devPtrKProcessed = devPtrKWithoutPadding;
-      devPtrVProcessed = devPtrVWithoutPadding;
-      devPtrOPreprocess = devPtrOWithoutPadding;
-      devPtrdOPreprocess = devPtrdOWithoutPadding;
-      devPtrdQPreprocess = devPtrdQWithoutPadding;
-      devPtrdKPreprocess = devPtrdKWithoutPadding;
-      devPtrdVPreprocess = devPtrdVWithoutPadding;
-      cu_seqlen_padded_q_ptr = devPtrCuSeqlensQ;
-      cu_seqlen_padded_kv_ptr = devPtrCuSeqlensKV;
+        // Update values if pad_between_seqs instead
+        devPtrQProcessed = devPtrQWithoutPadding;
+        devPtrKProcessed = devPtrKWithoutPadding;
+        devPtrVProcessed = devPtrVWithoutPadding;
+        devPtrOPreprocess = devPtrOWithoutPadding;
+        devPtrdOPreprocess = devPtrdOWithoutPadding;
+        devPtrdQPreprocess = devPtrdQWithoutPadding;
+        devPtrdKPreprocess = devPtrdKWithoutPadding;
+        devPtrdVPreprocess = devPtrdVWithoutPadding;
+      }
     }
     using ck_fused_attn::ck_attn_varlen_bwd;
     NVTE_CHECK_CUDA(
