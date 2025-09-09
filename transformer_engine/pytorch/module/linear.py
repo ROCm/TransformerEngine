@@ -849,6 +849,7 @@ class Linear(TransformerEngineBaseModule):
         self.apply_bias = bias and not return_bias
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
+        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
 
         if device == "meta":
             assert parameters_split is None, "Cannot split module parameters on 'meta' device."
@@ -1032,7 +1033,6 @@ class Linear(TransformerEngineBaseModule):
         else:
             self.gemm_bias_unfused_add = False
         
-        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
 
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
