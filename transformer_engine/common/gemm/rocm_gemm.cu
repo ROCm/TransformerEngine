@@ -929,6 +929,33 @@ void hipblaslt_gemm(const Tensor *inputA,
   NVTE_CHECK(k > 0);
 
   const GemmParam &param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, k, lda, ldb);
+
+  bool nvte_log_gemm_config = false;
+  if (const char* env_p = std::getenv("NVTE_LOG_GEMM_CONFIG") ) {
+      nvte_log_gemm_config = (strcmp(env_p, "1") == 0);
+  }
+
+  if (nvte_log_gemm_config) {
+    const bool use_fp8 = is_fp8_dtype(param.Atype) || is_fp8_dtype(param.Btype);
+    const bool a_tensor = is_tensor_scaling(inputA->scaling_mode);
+    const bool a_block  = is_block_scaling(inputA->scaling_mode);
+
+    std::cout << "m=" << m << " k=" << k << " n=" << n 
+        << " transa=" << (param.transA == HIPBLAS_OP_T ? "T" : "N")
+        << " transb=" << (param.transB == HIPBLAS_OP_T ? "T" : "N")
+        << " A_type=" << (int)(param.Atype)
+        << " B_type=" << (int)(param.Btype)
+        << " D_type=" << (int)outputD->data.dtype
+        << " bias_type=" << (int)inputBias->data.dtype
+        << " grad=" << grad
+        << " bias=" << (inputBias->data.dptr != nullptr)
+        << " gelu=" << (outputPreGelu->data.dptr != nullptr)
+        << " use_fp8=" << use_fp8
+        << " scale_mode=" << (a_tensor ? "tensor" : a_block ? "mxfp8" : "unsupported")
+        << " accumulate=" << accumulate
+        << std::endl;
+  }
+  
   void *D = outputD->data.dptr;
   void *C = D;
   void *D_scale = outputD->scale.dptr;

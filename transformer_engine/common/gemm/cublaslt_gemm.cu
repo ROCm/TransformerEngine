@@ -506,33 +506,6 @@ static void cublas_gemm_ex(const NVTETensor A, const NVTETensor B, NVTETensor D,
     NVTE_ERROR("TT layout not allowed.");
   }
 
-  bool nvte_log_gemm_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_GEMM_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_gemm_config = true;
-  }
-
-  if (nvte_log_gemm_config) {
-    float A_scale_inv, B_scale_inv;
-    (void)cudaMemcpy(&A_scale_inv, inputA->scale_inv.dptr, sizeof(float), cudaMemcpyDeviceToHost);
-    (void)cudaMemcpy(&B_scale_inv, inputB->scale_inv.dptr, sizeof(float), cudaMemcpyDeviceToHost);
-    std::cout << "m=" << m << " k=" << k << " n=" << n 
-        << " transa=" << (transa?"T":"N")
-        << " transb=" << (transb?"T":"N")
-        << " A_type=" << (int)inputA->data.dtype
-        << " B_type=" << (int)inputB->data.dtype
-        << " D_type=" << (int)outputD->data.dtype
-        << " bias_type=" << (int)biasTensor->data.dtype
-        << " grad=" << grad
-        << " bias=" << (biasTensor->data.dptr != nullptr)
-        << " gelu=" << (outputGelu->data.dptr != nullptr)
-        << " use_fp8=" << ( is_fp8_dtype(inputA->data.dtype) || is_fp8_dtype(inputB->data.dtype) )
-        << " A_scale_inverse = " <<  A_scale_inv
-        << " B_scale_inverse = " <<  B_scale_inv
-        << " accumulate=" << accumulate
-        << std::endl;
-  }
-
   cublas_gemm(inputA, inputB, outputD,  biasTensor, outputGelu, m, n, k, lda, ldb, ldd,
 #ifdef __HIP_PLATFORM_AMD__
               transa, transb,
