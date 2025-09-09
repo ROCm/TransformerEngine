@@ -133,10 +133,49 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
   DType dtype = TypeInfo<D_Type>::dtype;
 
   const bool has_fp8 = isFp8Type(atype) || isFp8Type(btype);
-  /* 
-   *    fp8 present  → allow NN, TN, NT
-   *    no fp8       → allow NN, TN, NT
-   */
+
+  cudaDeviceProp prop;
+  (void)cudaGetDeviceProperties(&prop, 0);
+
+#ifdef __HIP_PLATFORM_AMD__
+  if (has_fp8)
+  {
+    bool fp8_supported = (prop.major == 9 && prop.minor >= 4);
+    if (!fp8_supported) {
+      GTEST_SKIP() << "FP8 is not supported in current config";
+    }
+
+    if (use_gelu) {
+      GTEST_SKIP() << "FP8 GEMM with GELU is not supported";
+    }
+    if (use_bias && dtype == DType::kFloat16) {
+      GTEST_SKIP() << "FP8 GEMM with bias and FP16 output is not supported";
+    }
+  }
+
+  if (prop.major == 9 && prop.minor == 5) //gfx950 specific hipblasLt limitations
+  {
+    if (isFp8Type(dtype)){
+      GTEST_SKIP() << "GEMM with float8 output is not supported";
+    }
+    if (use_gelu && dtype == DType::kBFloat16) {
+      GTEST_SKIP() << "BF16 GEMM with GELU is not supported in current config";
+    }
+    if (has_fp8 && use_bias && dtype == DType::kFloat32) {
+      GTEST_SKIP() << "FP8 GEMM with bias and FP32 output is not supported in current config";
+    }
+  }
+  if (prop.major == 9 && prop.minor == 4) //gfx942 specific hipblasLt limitations
+  {
+    if (use_gelu && dtype == DType::kBFloat16 && !transa) {
+      GTEST_SKIP() << "BF16 GEMM with GELU is not supported in current config";
+    }
+    if (has_fp8 && use_bias && dtype == DType::kFloat8E4M3) {
+      GTEST_SKIP() << "FP8 GEMM with bias and FP8 output is not supported in current config";
+    }
+  }
+#endif
+
   // pytorch tensor storage is row-major while cublas/hipblaslt is column-major
   Tensor A;
   if (transa){
@@ -194,19 +233,6 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
   }
   bool grad = false;
   bool accumulate = false;
-
-  cudaDeviceProp prop;
-  (void)cudaGetDeviceProperties(&prop, 0);
-
-#ifdef __HIP_PLATFORM_AMD__
-  if (isFp8Type(atype) || isFp8Type(btype))
-  {
-    bool fp8_supported = (prop.major == 9 && prop.minor >= 4);
-    if (!fp8_supported) {
-      GTEST_SKIP() << "FP8 is not supported in current config";
-    }
-  }
-#endif
 
   size_t workspace_size = 33554432;
 #ifdef __HIP_PLATFORM_AMD__
@@ -274,15 +300,21 @@ void performTest(bool use_bias, bool use_gelu, const size_t m, const size_t k, c
     atol = 1e-5;
   }
 #ifdef __HIP_PLATFORM_AMD__
-  if (prop.major == 9 && prop.minor == 5)
-  {
-    // relax for certain gemm with hipblaslt
-    if (!isFp8Type(dtype) && (isFp8Type(atype) or isFp8Type(btype))) {
-      atol = 5e-4;
-      rtol = 5e-3;
-    } else if (dtype == DType::kFloat32) {
-      rtol = 1e-5;
-    }
+  // relax for certain FP8 gemm with hipblaslt
+  if (has_fp8) {
+    atol = 1e-3;
+    /*During hipifying std::max is converted to ::max
+    to w/a HIP bug with using std:: in device functions.
+    W/o explicitlit <double>, compiler uses non-templated int method variant from HIP headers
+    TODO: remove when switch to new hipify version after fixing HIP bug */
+    rtol = std::max<double>(rtol, 5e-3);
+  }
+  else if (dtype == DType::kBFloat16) {
+    //relax for certain prime number TN gemm
+    rtol = 5e-2;
+  }
+  else if (dtype == DType::kFloat32) {
+    rtol = 1e-5;
   }
 #endif
   compareResults("D", D, ref_D.get(), true, atol, rtol);

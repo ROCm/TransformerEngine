@@ -36,7 +36,7 @@ run() {
 run_default_fa() {
     #Run tests that do not use fused attention or control backend selection
     #with default backend only
-    if [ $_fus_attn = "auto" ]; then
+    if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
         run "$@"
     fi
 }
@@ -77,7 +77,7 @@ run_test_config(){
 run_test_config_mgpu(){
     #_WORKERS_COUNT=1
     #test $TEST_WORKERS = 0 && _WORKERS_COUNT=0
-    if [ $_fus_attn = "auto" ]; then
+    if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
         echo ==== Run mGPU with Fused attention backend: $_fus_attn ====
         run 3 test_fused_optimizer.py
         run 3 test_sanity_import.py
@@ -127,11 +127,13 @@ for _fus_attn in auto flash ck aotriton unfused; do
     #CK/AOTriton - no Flash attention and only corresponding Fused attention backend is enabled
     #Unfused - Flash and Fused attentions are disabled
     #Level 1 - run in auto and unfused modes
-    #Level 3 - run in all but unfused modes
+    #Level 3 - run in all but auto and unfused modes
     if [ $TEST_LEVEL -ge 3 ]; then
-        test $_fus_attn = unfused && continue
+        test $_fus_attn = auto -o $_fus_attn = unfused && continue
+        _DEFAULT_FUSED_ATTN="ck"
     else
         test $_fus_attn != auto -a $_fus_attn != unfused && continue
+        _DEFAULT_FUSED_ATTN="auto"
     fi
 
     if [ -n "$TEST_JOBS_MODE" ]; then
