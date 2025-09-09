@@ -937,8 +937,8 @@ void hipblaslt_gemm(const Tensor *inputA,
 
   if (nvte_log_gemm_config) {
     const bool use_fp8 = is_fp8_dtype(param.Atype) || is_fp8_dtype(param.Btype);
-    const bool a_tensor = is_delayed_tensor_scaling(inputA->scaling_mode);
-    const bool a_block   = is_block_scaling(inputA->scaling_mode);
+    const bool a_tensor = is_tensor_scaling(inputA->scaling_mode);
+    const bool a_block  = is_block_scaling(inputA->scaling_mode);
 
     std::cout << "m=" << m << " k=" << k << " n=" << n 
         << " transa=" << (param.transA == HIPBLAS_OP_T ? "T" : "N")
