@@ -274,7 +274,7 @@ hipError_t ck_attn_fwd(
                                          nullptr,
                                          nullptr,
                                          is_v3_api_check);
-  if(average_runtime < 0){
+  if(average_runtime < 0 && !is_v3_api_check){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");
   }
@@ -304,6 +304,8 @@ hipError_t ck_attn_varlen_fwd(
   bool uses_fwd_v3,
   int how_v3_bf16_cvt,
   bool is_v3_api_check,
+  void* cu_seqlen_padded_q_ptr,
+  void* cu_seqlen_padded_kv_ptr,
   hipStream_t stream){
 
   bool has_dropout = (is_training && dropout_probability > 0.f);
@@ -447,10 +449,10 @@ hipError_t ck_attn_varlen_fwd(
                                          has_lse,
                                          uses_fwd_v3,
                                          how_v3_bf16_cvt,
-                                         cu_seqlen_q_ptr,
-                                         cu_seqlen_kv_ptr,
+                                         cu_seqlen_padded_q_ptr,
+                                         cu_seqlen_padded_kv_ptr,
                                          is_v3_api_check);
-  if(average_runtime < 0){
+  if(average_runtime < 0 && !is_v3_api_check){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");
   }
