@@ -818,8 +818,9 @@ void fused_attn_ck_fwd_impl(
         o_stride[0], o_stride[1], o_stride[2],
         devPtrSoftmaxAux,
         nvte_ck_uses_fwd_v3,
-        stream,
-        false));
+        nvte_ck_how_v3_bf16_cvt,
+        false,
+        stream));
   }
 }
 
