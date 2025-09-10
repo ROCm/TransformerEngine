@@ -1274,13 +1274,21 @@ def test_linear_accuracy(dtype, bs, model, return_bias, bias):
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
-def test_fp8_linear_without_transpose_cache_accuracy(dtype, bs, model, fp8_model_params):
+@pytest.mark.parametrize("module_str", ["linear", "layernorm_mlp", "layernorm_linear"])
+def test_fp8_linear_without_transpose_cache_accuracy(dtype, bs, model, fp8_model_params, module_str):
     reset_rng_states()
     FP8GlobalStateManager.reset()
 
+    if module_str == "linear":
+        module = Linear
+    elif module_str == "layernorm_mlp":
+        module = LayerNormMLP
+    elif module_str == "layernorm_linear":
+        module = LayerNormLinear
+
     config = model_configs[model]
     with fp8_model_init(enabled=fp8_model_params):    
-        linear = Linear(
+        layer = module(
             config.hidden_size,
             4 * config.hidden_size,
             bias=True,
@@ -1290,7 +1298,7 @@ def test_fp8_linear_without_transpose_cache_accuracy(dtype, bs, model, fp8_model
         ).eval()
 
         reset_rng_states()
-        ref_linear = Linear(
+        ref_layer = module(
             config.hidden_size,
             4 * config.hidden_size,
             bias=True,
@@ -1299,9 +1307,8 @@ def test_fp8_linear_without_transpose_cache_accuracy(dtype, bs, model, fp8_model
             keep_fp8_weight_transpose_cache=True # defaults to True
         ).eval()
 
-
-    outputs = _test_granular_accuracy_with_fp8(linear, bs, dtype, config)
-    ref_outputs = _test_granular_accuracy_with_fp8(ref_linear, bs, dtype, config)
+    outputs = _test_granular_accuracy_with_fp8(layer, bs, dtype, config)
+    ref_outputs = _test_granular_accuracy_with_fp8(ref_layer, bs, dtype, config)
 
     # Check output.
     for te_output_no_cache, te_output_cache in zip(outputs, ref_outputs):
