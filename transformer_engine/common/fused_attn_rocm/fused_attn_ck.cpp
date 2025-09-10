@@ -759,8 +759,8 @@ void fused_attn_ck_fwd_impl(
     void* cu_seqlen_padded_kv_ptr = nullptr;
     if(pad_between_seqs){
       if(has_v3_support){
-        cu_seqlen_padded_q_ptr = devPtrCuSeqlensQ;
-        cu_seqlen_padded_kv_ptr = devPtrCuSeqlensKV;
+        cu_seqlen_padded_q_ptr = devPtrSeqOffsetsQ;
+        cu_seqlen_padded_kv_ptr = devPtrSeqOffsetsKV;
       }else{
         // remove padding for q, k, v
         remove_padding(dtype, b, h, s_q, d_qk, max_tokens_q, is_ragged, q_stride[0], q_stride[1], q_stride[2], devPtrQ, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrQWithoutPadding, stream);
@@ -802,8 +802,8 @@ void fused_attn_ck_fwd_impl(
     if(pad_between_seqs){
       if(!has_v3_support){
         add_padding(dtype, b, h, s_q, d_v, max_tokens_q, is_ragged, o_stride[0], o_stride[1], o_stride[2], devPtrOPreprocess, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrO, stream);
+        add_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
       }
-      add_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
     }else{
       add_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrCuSeqlensQ, devPtrSoftmaxAux, stream);
     }
@@ -993,13 +993,11 @@ void fused_attn_ck_bwd_impl(
       //ck requires a buffer dbias_expanded of size BHSS if bias is not BHSS
       (*workspace_size) += b*h*s_q*s_kv*nvte_dtype_size(dtype);
     }
-    if(pad_between_seqs){
+    if(pad_between_seqs && !has_v3_support){
       // remove padding for the softmax_lse
       (*workspace_size)+= h*max_tokens_q*sizeof(float);
-      if(!has_v3_support){
-        // allocate the q, k, v, o, do, dq, dk, dv,
-        (*workspace_size)+= 2*(q_storage_bytes + k_storage_bytes + v_storage_bytes + o_storage_bytes);
-      }
+      // allocate the q, k, v, o, do, dq, dk, dv,
+      (*workspace_size)+= 2*(q_storage_bytes + k_storage_bytes + v_storage_bytes + o_storage_bytes);
     }else if(is_ragged){
       // remove padding for the softmax_lse
       (*workspace_size)+= h*max_tokens_q*sizeof(float);
@@ -1225,14 +1223,15 @@ void fused_attn_ck_bwd_impl(
     void* devPtrdQPreprocess = devPtrdQ;
     void* devPtrdKPreprocess = devPtrdK;
     void* devPtrdVPreprocess = devPtrdV;
+    void* devPtrSoftmaxLSEPreprocess = devPtrSoftmaxAux;
     void* cu_seqlen_padded_q_ptr = nullptr;
     void* cu_seqlen_padded_kv_ptr = nullptr;
 
     // Remove the padding for softmax lse
     if(pad_between_seqs){
       if(has_v3_support){
-        cu_seqlen_padded_q_ptr = devPtrCuSeqlensQ;
-        cu_seqlen_padded_kv_ptr = devPtrCuSeqlensKV;
+        cu_seqlen_padded_q_ptr = devPtrSeqOffsetsQ;
+        cu_seqlen_padded_kv_ptr = devPtrSeqOffsetsKV;
       }else{
         // remove padding for q, k, v
         remove_padding(dtype, b, h, s_q, d_qk, max_tokens_q, is_ragged, q_stride[0], q_stride[1], q_stride[2], devPtrQ, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrQWithoutPadding, stream);
@@ -1252,9 +1251,11 @@ void fused_attn_ck_bwd_impl(
         devPtrdQPreprocess = devPtrdQWithoutPadding;
         devPtrdKPreprocess = devPtrdKWithoutPadding;
         devPtrdVPreprocess = devPtrdVWithoutPadding;
+        devPtrSoftmaxLSEPreprocess = devPtrSoftmaxLSEWithoutPadding;
       }
     }else{
       remove_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxLSEWithoutPadding, stream);
+      devPtrSoftmaxLSEPreprocess = devPtrSoftmaxLSEWithoutPadding;
     }
     using ck_fused_attn::ck_attn_varlen_bwd;
     NVTE_CHECK_CUDA(
@@ -1271,7 +1272,7 @@ void fused_attn_ck_bwd_impl(
         devPtrCuSeqlensQ, devPtrCuSeqlensKV, 
         devPtrOPreprocess,
         o_stride[1], s_o_stride,
-        devPtrSoftmaxLSEWithoutPadding,
+        devPtrSoftmaxLSEPreprocess,
         devPtrdOPreprocess,
         o_stride[1], s_o_stride, //dO and O share the same stride in TE
         scaling_factor, dropout_probability,
@@ -1305,9 +1306,10 @@ void fused_attn_ck_bwd_impl(
         add_padding(dtype, b, h, s_q, d_qk, max_tokens_q, is_ragged, q_stride[0], q_stride[1], q_stride[2], devPtrdQPreprocess, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrdQ, stream);
         add_padding(dtype, b, hg, s_kv, d_qk, max_tokens_kv, is_ragged, k_stride[0], k_stride[1], k_stride[2], devPtrdKPreprocess, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrdK, stream);
         add_padding(dtype, b, hg, s_kv, d_v, max_tokens_kv, is_ragged, v_stride[0], v_stride[1], v_stride[2], devPtrdVPreprocess, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrdV, stream);
+        remove_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxLSEPreprocess, stream);
       }
     }else{
-      remove_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxLSEWithoutPadding, stream);
+      remove_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxLSEPreprocess, stream);
     }
   }else{
     using ck_fused_attn::ck_attn_bwd;

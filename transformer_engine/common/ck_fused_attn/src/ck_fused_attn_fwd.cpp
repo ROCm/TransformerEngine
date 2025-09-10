@@ -262,7 +262,7 @@ hipError_t ck_attn_fwd(
     set_aiter_asm_dir();
   }
 
-  float average_runtime = aiter::mha_fwd(fmha_args,
+  float aiter_return_status = aiter::mha_fwd(fmha_args,
                                          stream_config,
                                          data_type_str,
                                          is_group_mode,
@@ -274,7 +274,8 @@ hipError_t ck_attn_fwd(
                                          nullptr,
                                          nullptr,
                                          is_v3_api_check);
-  if(average_runtime < 0 && !is_v3_api_check){
+  if(is_v3_api_check){return (hipError_t)(aiter_return_status > 0);}
+  if(aiter_return_status < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");
   }
@@ -440,7 +441,7 @@ hipError_t ck_attn_varlen_fwd(
     set_aiter_asm_dir();
   }
 
-  float average_runtime = aiter::mha_fwd(fmha_args,
+  float aiter_return_status = aiter::mha_fwd(fmha_args,
                                          stream_config,
                                          data_type_str,
                                          is_group_mode,
@@ -452,7 +453,8 @@ hipError_t ck_attn_varlen_fwd(
                                          cu_seqlen_padded_q_ptr,
                                          cu_seqlen_padded_kv_ptr,
                                          is_v3_api_check);
-  if(average_runtime < 0 && !is_v3_api_check){
+  if(is_v3_api_check){return (hipError_t)(aiter_return_status > 0);}
+  if(aiter_return_status < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");
   }
