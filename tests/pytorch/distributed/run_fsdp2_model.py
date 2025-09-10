@@ -1,8 +1,10 @@
 #!/usr/bin/python3
-
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
+
 
 import os
 import sys
@@ -19,7 +21,7 @@ from torch.distributed import DeviceMesh
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import init_device_mesh
 from contextlib import nullcontext
-
+from transformer_engine.pytorch import torch_version
 
 class SimpleNet(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
@@ -171,6 +173,12 @@ def _train(args):
         if LOCAL_RANK == 0:
             print(f"Rank {LOCAL_RANK}: Iteration {iteration} completed.")
 
+    # NOTE: In PyTorch < 2.6 there’s a teardown race where one rank may call
+    # destroy_process_group() while other ranks still have in-flight NCCL ops,
+    # which can trigger a NCCL/RCCL comm error. Newer releases (>= 2.6) fixed
+    # this, but we kept a version-guarded barrier on older Torch for stability.
+    if torch_version() < (2, 6, 0):
+        dist.barrier(device_ids=[torch.cuda.current_device()])
     dist.destroy_process_group()
     if LOCAL_RANK == 0:
         print(f"Rank {LOCAL_RANK}: Done...")

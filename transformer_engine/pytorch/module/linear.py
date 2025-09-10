@@ -356,11 +356,22 @@ class _Linear(torch.autograd.Function):
 
             # Weight with column-wise usage is needed for dgrad GEMM.
             if inp.requires_grad:
+<<<<<<< HEAD
                 if isinstance(weightmat, QuantizedTensorBase):
                     weightmat.update_usage(columnwise_usage=True)
 
             if cpu_offloading and saved_inputmat is not None:
                 mark_activation_offload(saved_inputmat)
+=======
+                if isinstance(weightmat, QuantizedTensor):
+                    weightmat.update_usage(columnwise_usage=True)
+
+            if cpu_offloading:
+                set_offloading_param(weight, "weight_offloading", True)
+                set_offloading_param(weightmat, "weight_offloading", True)
+                if saved_inputmat is not None:
+                    set_offloading_param(saved_inputmat, "activation_offloading", True)
+>>>>>>> origin/dev
 
             # Scatter intermediate/activation tensors saved for the backward pass
             # NOTE: FSDP sharding is not valid for models initialized with primary Fp8 weights
@@ -1010,6 +1021,7 @@ class Linear(TransformerEngineBaseModule):
         self.apply_bias = bias and not return_bias
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
+<<<<<<< HEAD
         self.symmetric_ar_type = symmetric_ar_type
         self.name = name
 
@@ -1017,6 +1029,9 @@ class Linear(TransformerEngineBaseModule):
             self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
+=======
+        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
+>>>>>>> origin/dev
 
         if device == "meta":
             assert parameters_split is None, "Cannot split module parameters on 'meta' device."
@@ -1207,6 +1222,10 @@ class Linear(TransformerEngineBaseModule):
         else:
             self.gemm_bias_unfused_add = False
         
+<<<<<<< HEAD
+=======
+
+>>>>>>> origin/dev
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
         super().set_meta_tensor(fwd, recipe)

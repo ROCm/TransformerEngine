@@ -204,6 +204,12 @@ class _FusedAttnRNGStateChecker:
                 f"casted to dtype {self.rng_state_dtype}. "
                 "Please use threefry/rbg/unsafe_rbg PRNG implementations to remove this warning."
             )
+            # Note that the fix for new-style RNGs is only applied for AMD GPUs
+            # seed = seed.astype(...) will still crash for new-style RNGs on CPU and other GPUs
+            if is_hip_extension() and jnp.issubdtype(seed.dtype, jax.dtypes.prng_key):
+                # New-style RNGs cannot directly be cast to integers
+                # See https://docs.jax.dev/en/latest/jep/9263-typed-keys.html for details
+                seed = jax.random.key_data(seed)
             seed = seed.astype(self.rng_state_dtype)
 
         assert seed.dtype == self.rng_state_dtype

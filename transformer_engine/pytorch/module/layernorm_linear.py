@@ -1165,6 +1165,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.name = name
         if TEDebugState.debug_enabled:
             self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
+        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
 
         if tp_group is None:
             self.tp_size = tp_size

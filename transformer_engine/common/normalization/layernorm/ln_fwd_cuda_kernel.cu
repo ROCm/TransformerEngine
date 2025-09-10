@@ -33,6 +33,11 @@ static void launch_tuned_(LaunchParams<ForwardKernelParams> &launch_params,
                                       Kernel_traits::CTAS_PER_ROW *
                                       sizeof(typename Kernel_traits::Stats::stats_t) * 2;
     }
+#ifdef __HIP_PLATFORM_AMD__
+    if (launch_params.params.mxfp8_out) {
+      launch_params.mxfp8_buffer_bytes = launch_params.params.rows * launch_params.params.cols * sizeof(compute_t);
+    }
+#endif
     return;
   }
 
@@ -56,6 +61,11 @@ static void launch_tuned_(LaunchParams<ForwardKernelParams> &launch_params,
     (void)cudaLaunchCooperativeKernel((void *)kernel, grid, block, (void **)&params_,  // NOLINT(*)
                                       Kernel_traits::SMEM_BYTES_FWD, stream);
   }
+#ifdef __HIP_PLATFORM_AMD__
+  if (launch_params.params.mxfp8_out) {
+    rocm_norm_mxfp8_quantize<compute_t>(launch_params);
+  }
+#endif
 }
 
 template <typename weight_t, typename input_t, typename output_t, typename compute_t,
@@ -86,6 +96,11 @@ static void launch_general_(LaunchParams<ForwardKernelParams> &launch_params,
       launch_params.workspace_bytes =
           (ctas_per_col * WARPS_M * ctas_per_row * sizeof(compute_t) * 2);
     }
+#ifdef __HIP_PLATFORM_AMD__
+    if (launch_params.params.mxfp8_out) {
+      launch_params.mxfp8_buffer_bytes = launch_params.params.rows * launch_params.params.cols * sizeof(compute_t);
+    }
+#endif
     return;
   }
 
@@ -100,6 +115,11 @@ static void launch_general_(LaunchParams<ForwardKernelParams> &launch_params,
     (void)cudaLaunchCooperativeKernel(reinterpret_cast<void *>(kernel), grid, block,
                                       reinterpret_cast<void **>(&params_), 0, stream);
   }
+#ifdef __HIP_PLATFORM_AMD__
+  if (launch_params.params.mxfp8_out) {
+    rocm_norm_mxfp8_quantize<compute_t>(launch_params);
+  }
+#endif
 }
 
 #define REGISTER_NORM_LAUNCHER(NORM_TYPE, NORM_STAGE, LAUNCH_TYPE, HIDDEN_SIZE, WTYPE, ITYPE,                   \
@@ -397,3 +417,103 @@ REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 8192, fp16, fp16, fp16, fp32
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 8192, fp32, fp32, fp16, fp32, 1, 4, 16);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 8192, bf16, bf16, bf16, fp32, 1, 4, 16);
 REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 8192, fp32, fp32, bf16, fp32, 1, 4, 16);
+
+#ifdef __HIP_PLATFORM_AMD__
+// ROCM uses TE normalization for e5m2
+
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 768, bf16, bf16, fp8e5m2, fp32, 1, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 1024, bf16, bf16, fp8e5m2, fp32, 1, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 1536, bf16, bf16, fp8e5m2, fp32, 1, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 2048, bf16, bf16, fp8e5m2, fp32, 1, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 2304, bf16, bf16, fp8e5m2, fp32, 1, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 3072, bf16, bf16, fp8e5m2, fp32, 1, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 3840, bf16, bf16, fp8e5m2, fp32, 1, 1, 4, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 4096, bf16, bf16, fp8e5m2, fp32, 1, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 5120, bf16, bf16, fp8e5m2, fp32, 1, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 6144, bf16, bf16, fp8e5m2, fp32, 1, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 8192, bf16, bf16, fp8e5m2, fp32, 1, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 10240, bf16, bf16, fp8e5m2, fp32, 1, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 12288, bf16, bf16, fp8e5m2, fp32, 2, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 12800, bf16, bf16, fp8e5m2, fp32, 2, 1, 4, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 15360, bf16, bf16, fp8e5m2, fp32, 2, 1, 4, 8);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 16384, bf16, bf16, fp8e5m2, fp32, 2, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 18432, bf16, bf16, fp8e5m2, fp32, 2, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 20480, bf16, bf16, fp8e5m2, fp32, 2, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 24576, bf16, bf16, fp8e5m2, fp32, 2, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 25600, bf16, bf16, fp8e5m2, fp32, 2, 1, 4, 8);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 30720, bf16, bf16, fp8e5m2, fp32, 4, 1, 4, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 32768, bf16, bf16, fp8e5m2, fp32, 4, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 40960, bf16, bf16, fp8e5m2, fp32, 4, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 49152, bf16, bf16, fp8e5m2, fp32, 4, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 65536, bf16, bf16, fp8e5m2, fp32, 8, 1, 4, 16);
+
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 768, fp16, fp16, fp8e5m2, fp32, 1, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 1024, fp16, fp16, fp8e5m2, fp32, 1, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 1536, fp16, fp16, fp8e5m2, fp32, 1, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 2048, fp16, fp16, fp8e5m2, fp32, 1, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 2304, fp16, fp16, fp8e5m2, fp32, 1, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 3072, fp16, fp16, fp8e5m2, fp32, 1, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 3840, fp16, fp16, fp8e5m2, fp32, 1, 1, 4, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 4096, fp16, fp16, fp8e5m2, fp32, 1, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 5120, fp16, fp16, fp8e5m2, fp32, 1, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 6144, fp16, fp16, fp8e5m2, fp32, 1, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 8192, fp16, fp16, fp8e5m2, fp32, 1, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 10240, fp16, fp16, fp8e5m2, fp32, 1, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 12288, fp16, fp16, fp8e5m2, fp32, 2, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 12800, fp16, fp16, fp8e5m2, fp32, 2, 1, 4, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 15360, fp16, fp16, fp8e5m2, fp32, 2, 1, 4, 8);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 16384, fp16, fp16, fp8e5m2, fp32, 2, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 18432, fp16, fp16, fp8e5m2, fp32, 2, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 20480, fp16, fp16, fp8e5m2, fp32, 2, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 24576, fp16, fp16, fp8e5m2, fp32, 2, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 25600, fp16, fp16, fp8e5m2, fp32, 2, 1, 4, 8);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 30720, fp16, fp16, fp8e5m2, fp32, 4, 1, 4, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 32768, fp16, fp16, fp8e5m2, fp32, 4, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 40960, fp16, fp16, fp8e5m2, fp32, 4, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 49152, fp16, fp16, fp8e5m2, fp32, 4, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 65536, fp16, fp16, fp8e5m2, fp32, 8, 1, 4, 16);
+
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 768, fp32, fp32, fp8e5m2, fp32, 1, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 1024, fp32, fp32, fp8e5m2, fp32, 1, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 1536, fp32, fp32, fp8e5m2, fp32, 1, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 2048, fp32, fp32, fp8e5m2, fp32, 1, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 2304, fp32, fp32, fp8e5m2, fp32, 1, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 3072, fp32, fp32, fp8e5m2, fp32, 1, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 3840, fp32, fp32, fp8e5m2, fp32, 1, 1, 4, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 4096, fp32, fp32, fp8e5m2, fp32, 1, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 5120, fp32, fp32, fp8e5m2, fp32, 1, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 6144, fp32, fp32, fp8e5m2, fp32, 1, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 8192, fp32, fp32, fp8e5m2, fp32, 1, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 10240, fp32, fp32, fp8e5m2, fp32, 1, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 12288, fp32, fp32, fp8e5m2, fp32, 2, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 12800, fp32, fp32, fp8e5m2, fp32, 2, 1, 4, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 15360, fp32, fp32, fp8e5m2, fp32, 2, 1, 4, 8);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 16384, fp32, fp32, fp8e5m2, fp32, 2, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 18432, fp32, fp32, fp8e5m2, fp32, 2, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 20480, fp32, fp32, fp8e5m2, fp32, 2, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 24576, fp32, fp32, fp8e5m2, fp32, 2, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 25600, fp32, fp32, fp8e5m2, fp32, 2, 1, 4, 8);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 30720, fp32, fp32, fp8e5m2, fp32, 4, 1, 4, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 32768, fp32, fp32, fp8e5m2, fp32, 4, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 40960, fp32, fp32, fp8e5m2, fp32, 4, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 49152, fp32, fp32, fp8e5m2, fp32, 4, 1, 4, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, tuned, 65536, fp32, fp32, fp8e5m2, fp32, 8, 1, 4, 16);
+
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 128, bf16, bf16, fp8e5m2, fp32, 4, 1, 8);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 512, bf16, bf16, fp8e5m2, fp32, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 1024, bf16, bf16, fp8e5m2, fp32, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 2048, bf16, bf16, fp8e5m2, fp32, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 8192, bf16, bf16, fp8e5m2, fp32, 1, 4, 16);
+
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 128, fp16, fp16, fp8e5m2, fp32, 4, 1, 8);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 512, fp16, fp16, fp8e5m2, fp32, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 1024, fp16, fp16, fp8e5m2, fp32, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 2048, fp16, fp16, fp8e5m2, fp32, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 8192, fp16, fp16, fp8e5m2, fp32, 1, 4, 16);
+
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 128, fp32, fp32, fp8e5m2, fp32, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 512, fp32, fp32, fp8e5m2, fp32, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 1024, fp32, fp32, fp8e5m2, fp32, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 2048, fp32, fp32, fp8e5m2, fp32, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(LayerNorm, Forward, general, 8192, fp32, fp32, fp8e5m2, fp32, 1, 4, 16);
+#endif

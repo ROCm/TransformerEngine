@@ -224,13 +224,17 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
   NVTE_CHECK(B.has_data() || B.has_columnwise_data(), "Input B does not hold any data!");
   GemmParam ret(transA, transB);
 
+  // Transpose mode with column-major ordering
+  bool is_A_transposed = transA == CUBLAS_OP_T;
+  bool is_B_transposed = transB == CUBLAS_OP_T;
+
   ret.lda = lda;
   ret.ldb = ldb;
 
   if (is_tensor_scaling(A.scaling_mode)) {
     ret.A = A.data.dptr;
     ret.A_scale_inv = A.scale_inv.dptr;
-    if (transA == CUBLAS_OP_T) {
+    if (is_A_transposed) {
       ret.Atype = A.data.dtype;
     } else {
       ret.Atype = A.has_columnwise_data() ? A.columnwise_data.dtype : A.data.dtype;
@@ -245,7 +249,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     }
     ret.B = B.data.dptr;
     ret.B_scale_inv = B.scale_inv.dptr;
-    if (transB == CUBLAS_OP_T) {
+    if (is_B_transposed) {
       ret.Btype = B.has_columnwise_data() ? B.columnwise_data.dtype : B.data.dtype;
       if (is_fp8_dtype(ret.Btype)) {
         // Hopper and Ada - we need to use columnwise_data and change transA
@@ -262,12 +266,12 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     // If not tensor scaling (which includes also high precision types), we need to
     // use the proper version of data
     // We leave the transA/B values as is, since Blackwell supports transposes
-    ret.A = transA ? A.data.dptr : A.columnwise_data.dptr;
-    ret.Atype = transA ? A.data.dtype : A.columnwise_data.dtype;
-    ret.A_scale_inv = transA ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
-    ret.B = transB ? B.columnwise_data.dptr : B.data.dptr;
-    ret.Btype = transB ? B.columnwise_data.dtype : B.data.dtype;
-    ret.B_scale_inv = transB ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
+    ret.A = is_A_transposed ? A.data.dptr : A.columnwise_data.dptr;
+    ret.Atype = is_A_transposed ? A.data.dtype : A.columnwise_data.dtype;
+    ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
+    ret.B = is_B_transposed ? B.columnwise_data.dptr : B.data.dptr;
+    ret.Btype = is_B_transposed ? B.columnwise_data.dtype : B.data.dtype;
+    ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
   }
   return ret;
 }
@@ -925,8 +929,35 @@ void hipblaslt_gemm(const Tensor *inputA,
   NVTE_CHECK(k > 0);
 
   const GemmParam &param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, k, lda, ldb);
-  void *C = outputD->data.dptr;
+
+  bool nvte_log_gemm_config = false;
+  if (const char* env_p = std::getenv("NVTE_LOG_GEMM_CONFIG") ) {
+      nvte_log_gemm_config = (strcmp(env_p, "1") == 0);
+  }
+
+  if (nvte_log_gemm_config) {
+    const bool use_fp8 = is_fp8_dtype(param.Atype) || is_fp8_dtype(param.Btype);
+    const bool a_tensor = is_tensor_scaling(inputA->scaling_mode);
+    const bool a_block  = is_block_scaling(inputA->scaling_mode);
+
+    std::cout << "m=" << m << " k=" << k << " n=" << n 
+        << " transa=" << (param.transA == HIPBLAS_OP_T ? "T" : "N")
+        << " transb=" << (param.transB == HIPBLAS_OP_T ? "T" : "N")
+        << " A_type=" << (int)(param.Atype)
+        << " B_type=" << (int)(param.Btype)
+        << " D_type=" << (int)outputD->data.dtype
+        << " bias_type=" << (int)inputBias->data.dtype
+        << " grad=" << grad
+        << " bias=" << (inputBias->data.dptr != nullptr)
+        << " gelu=" << (outputPreGelu->data.dptr != nullptr)
+        << " use_fp8=" << use_fp8
+        << " scale_mode=" << (a_tensor ? "tensor" : a_block ? "mxfp8" : "unsupported")
+        << " accumulate=" << accumulate
+        << std::endl;
+  }
+  
   void *D = outputD->data.dptr;
+  void *C = D;
   void *D_scale = outputD->scale.dptr;
   void *D_amax = outputD->amax.dptr;
   void *bias_ptr = inputBias->data.dptr;
@@ -991,6 +1022,7 @@ void hipblaslt_gemm(const Tensor *inputA,
                                                    param.transB == HIPBLAS_OP_N ? n : k,
                                                    param.ldb));
   NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutCreate(&Ddesc, D_type, m, n, ldd));
+  Cdesc = Ddesc;
 
   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescCreate(&operationDesc, gemm_compute_type, HIP_R_32F));
   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc, HIPBLASLT_MATMUL_DESC_TRANSA,
@@ -1010,45 +1042,48 @@ void hipblaslt_gemm(const Tensor *inputA,
                                                      &fastAccuMode,
                                                      sizeof(fastAccuMode)));
     */
+
+#if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
+    hipblasLtMatmulMatrixScale_t scaling_mode;
+#endif
     if ((is_delayed_tensor_scaling(inputA->scaling_mode) &&
          is_delayed_tensor_scaling(inputB->scaling_mode))) {
-      void *A_scale_inverse = param.A_scale_inv;
-      void *B_scale_inverse = param.B_scale_inv;
-      NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
-                                                           HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER,
-                                                           &A_scale_inverse, sizeof(A_scale_inverse)));
-      NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
-                                                           HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER,
-                                                           &B_scale_inverse, sizeof(B_scale_inverse)));
+#if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
+      scaling_mode = HIPBLASLT_MATMUL_MATRIX_SCALE_SCALAR_32F;
+    } else if ((is_block_scaling(inputA->scaling_mode) && is_block_scaling(inputB->scaling_mode))) {
+      scaling_mode = HIPBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
+      NVTE_CHECK(!is_fp8_dtype(outputD->data.dtype), "FP8 output is not supported with block scaling mode.");
+#endif
     } else {
       NVTE_ERROR("Not implemented scaling modes: " + to_string(inputA->scaling_mode) + " and  " +
                  to_string(inputB->scaling_mode) + ".");
     }
+    NVTE_CHECK_HIPBLASLT(
+        hipblasLtMatmulDescSetAttribute(operationDesc, HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                                        &param.A_scale_inv, sizeof(param.A_scale_inv)));
+    NVTE_CHECK_HIPBLASLT(
+        hipblasLtMatmulDescSetAttribute(operationDesc, HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                                        &param.B_scale_inv, sizeof(param.B_scale_inv)));
+#if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
+    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+        operationDesc, HIPBLASLT_MATMUL_DESC_A_SCALE_MODE, &scaling_mode, sizeof(scaling_mode)));
+    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+        operationDesc, HIPBLASLT_MATMUL_DESC_B_SCALE_MODE, &scaling_mode, sizeof(scaling_mode)));
+#endif
 
     if (is_fp8_dtype(outputD->data.dtype)) {
-      // Accumulation mode not supported for FP8 output
-      C = nullptr;
       NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
         operationDesc, HIPBLASLT_MATMUL_DESC_D_SCALE_POINTER, &D_scale, sizeof(D_scale)));
       NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
         operationDesc, HIPBLASLT_MATMUL_DESC_AMAX_D_POINTER, &D_amax, sizeof(D_amax)));
-      // To make supported gemm configs consistent with NV cublaslt
-      // For FP8 output, cuBLAS requires C_type to match bias_type and
-      // be FP16/BF16
-      const hipDataType C_type = bias ? bias_type : HIP_R_16BF;
-      NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutCreate(&Cdesc, C_type, m, n, ldd));
-    }else{
-      NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutCreate(&Cdesc, D_type, m, n, ldd));
     }
     if (bias) {
       NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
                                                        HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE,
                                                        &bias_type, sizeof(bias_type)));
     }
-  }else{
-    NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutCreate(&Cdesc, D_type, m, n, ldd));
   }
-
+  
   if (bias && gelu) {
     if (grad) {
       epilogue = HIPBLASLT_EPILOGUE_DGELU_BGRAD;
@@ -1125,7 +1160,7 @@ void hipblaslt_gemm(const Tensor *inputA,
                             preference, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
                             &workspaceSize, sizeof(workspaceSize)));
 
-    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Ddesc,
+    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Cdesc,
                                                     Ddesc, preference, algoTotalCount, algoArr.data(),
                                                     &algoTotalCount));
     algoArr.resize(algoTotalCount);
@@ -1195,8 +1230,8 @@ void hipblaslt_gemm(const Tensor *inputA,
                                             param.B,                                      /* B */
                                             Bdesc,
                                             static_cast<const void*>(&beta),        /* beta */
-                                            D,                                      /* C */
-                                            Ddesc,
+                                            C,                                      /* C */
+                                            Cdesc,
                                             D,                                      /* D */
                                             Ddesc,
                                             &algoArr[algo].algo,                    /* algo */
@@ -1217,8 +1252,8 @@ void hipblaslt_gemm(const Tensor *inputA,
                                             param.B,                                      /* B */
                                             Bdesc,
                                             static_cast<const void*>(&beta),        /* beta */
-                                            D,                                      /* C */
-                                            Ddesc,
+                                            C,                                      /* C */
+                                            Cdesc,
                                             D,                                      /* D */
                                             Ddesc,
                                             &algoArr[algo].algo,                    /* algo */
@@ -1277,8 +1312,8 @@ void hipblaslt_gemm(const Tensor *inputA,
                                    param.B,                                      /* B */
                                    Bdesc,
                                    static_cast<const void*>(&beta),        /* beta */
-                                   D,                                      /* C */
-                                   Ddesc,
+                                   C,                                      /* C */
+                                   Cdesc,
                                    D,                                      /* D */
                                    Ddesc,
                                    &cached_algo.algo.value(),              /* algo */

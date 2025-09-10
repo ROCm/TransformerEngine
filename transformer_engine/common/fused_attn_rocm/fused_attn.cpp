@@ -184,6 +184,7 @@ const std::unordered_map<NVTEDType, std::string> mNVTEDTypeStr = {
   {NVTEDType::kNVTEBFloat16, "BFloat16"},
   {NVTEDType::kNVTEFloat8E4M3, "Float8E4M3"},
   {NVTEDType::kNVTEFloat8E5M2, "Float8E5M2"},
+  {NVTEDType::kNVTEFloat8E8M0, "Float8E8M0"},
 };
 
 // for printing qkv_layout in log_fused_attn_config
@@ -203,6 +204,10 @@ const std::unordered_map<NVTE_QKV_Layout, std::string> mNVTEQKVLayoutStr = {
   {NVTE_QKV_Layout::NVTE_THD_T2HD, "THD_T2HD"},
   {NVTE_QKV_Layout::NVTE_THD_TH2D, "THD_TH2D"},
   {NVTE_QKV_Layout::NVTE_THD_THD_THD, "THD_THD_THD"},
+  {NVTE_QKV_Layout::NVTE_SBHD_BSHD_BSHD, "SBHD_BSHD_BSHD"},
+  {NVTE_QKV_Layout::NVTE_BSHD_SBHD_SBHD, "BSHD_SBHD_SBHD"},
+  {NVTE_QKV_Layout::NVTE_THD_BSHD_BSHD, "THD_BSHD_BSHD"},
+  {NVTE_QKV_Layout::NVTE_THD_SBHD_SBHD, "THD_SBHD_SBHD"},
 };
 
 // for printing bias_type in log_fused_attn_config

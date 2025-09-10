@@ -61,15 +61,16 @@ run_test_config(){
     run_default_fa 1 test_permutation.py -k "not test_permutation_mask_map_fp8 and not test_permutation_single_case"
     run_default_fa 1 test_recipe.py
     run 1 test_sanity.py
+    run_default_fa 1 test_sanity_import.py
     run_default_fa 1 fused_attn/test_fused_attn.py # Backend selection is controlled by the test
+    NVTE_CK_USES_FWD_V3=1 NVTE_CK_USES_BWD_V3=1 run_default_fa 1 fused_attn/test_fused_attn.py # Using FAv3 for forward and backward pass
     run_default_fa 1 triton_kernels/test_cast.py
     run_default_fa 1 triton_kernels/test_cast_mxfp8.py
-    run_default_fa 1 triton_kernels/test_rmsnorm.py
-    run_default_fa 1 triton_kernels/test_layernorm.py
-    run_default_fa 1 triton_kernels/test_layernorm_mxfp8.py
     run_default_fa 1 triton_kernels/test_norm_common.py
+    run_default_fa 1 triton_kernels/test_norms.py
+    NVTE_TEST_TRITON_AUTOTUNE=1 run_default_fa 3 triton_kernels/test_norms.py
     run_default_fa 1 test_parallel_cross_entropy.py
-    NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa 3 test_numerics.py
+    NVTE_USE_DEQUANTIZE_TRITON=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa 3 test_numerics.py
     NVTE_USE_RMSNORM_TRITON=1 run_default_fa 1 test_fusible_ops.py
 }
 
@@ -82,6 +83,7 @@ run_test_config_mgpu(){
         run 3 test_sanity_import.py
         run 3 distributed/test_fusible_ops.py
         run 3 distributed/test_numerics.py
+        run 3 distributed/test_torch_fsdp2.py
         run 3 fused_attn/test_fused_attn_with_cp.py
     fi
 }

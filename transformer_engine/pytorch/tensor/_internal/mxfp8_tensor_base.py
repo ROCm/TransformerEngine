@@ -7,9 +7,11 @@
 from __future__ import annotations
 from typing import Optional, Dict, Any, Tuple
 import torch
+import os
 
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from ..quantized_tensor import QuantizedTensorBase
 
@@ -31,6 +33,10 @@ class _FromMXFP8Func(torch.autograd.Function):
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
         dtype = torch_to_transformer_engine_dtype[dtype]
+
+        if IS_HIP_EXTENSION and int(os.environ.get('NVTE_USE_DEQUANTIZE_TRITON', '0')):
+            from ...triton_kernels.cast import te_dequantize_triton
+            return te_dequantize_triton(tensor, dtype)
 
         # Make sure FP8 data is in expected format
         if tensor._rowwise_data is not None:
