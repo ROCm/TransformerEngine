@@ -594,15 +594,11 @@ void fused_attn_ck_fwd_impl(
     s_v_stride = v_stride[2];
     s_o_stride = o_stride[2];
     void* dummy_softmax_lse = static_cast<void*>((int*)1);
-    void* dummy_cu_seqlen_padded_q = nullptr;
-    void* dummy_cu_seqlen_padded_kv = nullptr;
     if(pad_between_seqs){
       s_q_stride = std::min(q_stride[0], q_stride[2]);
       s_k_stride = std::min(k_stride[0], k_stride[2]);
       s_v_stride = std::min(v_stride[0], v_stride[2]);
       s_o_stride = std::min(o_stride[0], o_stride[2]);
-      dummy_cu_seqlen_padded_q = static_cast<void*>((int*)1);
-      dummy_cu_seqlen_padded_kv = static_cast<void*>((int*)1);
     }
 
     if(nvte_ck_uses_fwd_v3){
@@ -629,8 +625,8 @@ void fused_attn_ck_fwd_impl(
           nvte_ck_uses_fwd_v3,
           nvte_ck_how_v3_bf16_cvt,
           true,
-          dummy_cu_seqlen_padded_q,
-          dummy_cu_seqlen_padded_kv,
+          nullptr,
+          nullptr,
           stream) == 1;
       std::cout << "DEBUG *** V3 FWD support = " << has_v3_support << std::endl;
     }
@@ -927,8 +923,6 @@ void fused_attn_ck_bwd_impl(
     s_o_stride = o_stride[2];
     s_dk_expanded_stride = dk_expanded_stride[2];
     s_dv_expanded_stride = dv_expanded_stride[2];
-    void* dummy_cu_seqlen_padded_q = nullptr;
-    void* dummy_cu_seqlen_padded_kv = nullptr;
 
     if(pad_between_seqs){
       s_q_stride = std::min(q_stride[0], q_stride[2]);
@@ -937,8 +931,6 @@ void fused_attn_ck_bwd_impl(
       s_o_stride = std::min(o_stride[0], o_stride[2]);
       s_dk_expanded_stride = std::min(dk_expanded_stride[0], dk_expanded_stride[2]);
       s_dv_expanded_stride = std::min(dv_expanded_stride[0], dv_expanded_stride[2]);
-      dummy_cu_seqlen_padded_q = static_cast<void*>((int*)1);
-      dummy_cu_seqlen_padded_kv = static_cast<void*>((int*)1);
     }
     using ck_fused_attn::ck_attn_varlen_bwd;
     has_v3_support = ck_attn_varlen_bwd(
@@ -978,8 +970,8 @@ void fused_attn_ck_bwd_impl(
         nvte_ck_is_v3_atomic_fp32,
         nvte_ck_how_v3_bf16_cvt,
         true,
-        dummy_cu_seqlen_padded_q,
-        dummy_cu_seqlen_padded_kv,
+        nullptr,
+        nullptr,
         stream) == 1;
     std::cout << "DEBUG *** V3 BWD support = " << has_v3_support << std::endl;
   }
@@ -1237,7 +1229,6 @@ void fused_attn_ck_bwd_impl(
     void* cu_seqlen_padded_kv_ptr = nullptr;
 
     // Remove the padding for softmax lse
-    remove_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxLSEWithoutPadding, stream);
     if(pad_between_seqs){
       if(has_v3_support){
         cu_seqlen_padded_q_ptr = devPtrCuSeqlensQ;
@@ -1250,6 +1241,7 @@ void fused_attn_ck_bwd_impl(
         // o and do should be of same shape as q
         remove_padding(dtype, b, h, s_q, d_v, max_tokens_q, is_ragged, o_stride[0], o_stride[1], o_stride[2], devPtrO, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrOWithoutPadding, stream);
         remove_padding(dtype, b, h, s_q, d_v, max_tokens_q, is_ragged, o_stride[0], o_stride[1], o_stride[2], devPtrdO, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrdOWithoutPadding, stream);
+        remove_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxLSEWithoutPadding, stream);
 
         // Update values if pad_between_seqs instead
         devPtrQProcessed = devPtrQWithoutPadding;
@@ -1261,6 +1253,8 @@ void fused_attn_ck_bwd_impl(
         devPtrdKPreprocess = devPtrdKWithoutPadding;
         devPtrdVPreprocess = devPtrdVWithoutPadding;
       }
+    }else{
+      remove_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxLSEWithoutPadding, stream);
     }
     using ck_fused_attn::ck_attn_varlen_bwd;
     NVTE_CHECK_CUDA(
