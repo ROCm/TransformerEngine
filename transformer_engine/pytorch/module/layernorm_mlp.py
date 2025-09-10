@@ -447,7 +447,6 @@ class _LayerNormMLP(torch.autograd.Function):
             fc2_out = torch.empty(dim_size, dtype=activation_dtype, device=device)
 
         # FC2 GEMM
-
         _ = general_gemm(
             fc2_weight_final,
             act_out,
