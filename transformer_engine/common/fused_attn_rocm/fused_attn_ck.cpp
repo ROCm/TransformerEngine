@@ -557,13 +557,18 @@ void fused_attn_ck_fwd_impl(
       nvte_log_ck_config = true;
   }
   bool nvte_ck_uses_fwd_v3 = getenv<int>("NVTE_CK_USES_FWD_V3", 0);
-  if(layout==NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD){
+  NVTE_QKV_Format format = nvte_get_qkv_format(layout);
+  if(
+    format==NVTE_QKV_Format::NVTE_SBHD ||
+    layout==NVTE_QKV_Layout::NVTE_BSH3D ||
+    layout==NVTE_QKV_Layout::NVTE_BS3HD
+  ){
     if(nvte_ck_uses_fwd_v3 && nvte_log_ck_config){
       std::cout<<"Disable CK FWD v3 since only BSHD_BSHD_BSHD layout supported"<<std::endl;
     }
     nvte_ck_uses_fwd_v3 = false;
   }
-  bool is_ragged = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_THD; 
+  bool is_ragged = format==NVTE_QKV_Format::NVTE_THD;
 
   // extract the qkv and o storage bytes to allocate buffer for padding removing
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
