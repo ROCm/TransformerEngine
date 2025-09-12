@@ -560,8 +560,8 @@ void fused_attn_ck_fwd_impl(
   bool nvte_ck_uses_fwd_v3 = getenv<int>("NVTE_CK_USES_FWD_V3", 0);
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
   bool is_ragged = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_THD; 
-  bool has_v3_support = false;
   bool needs_workaround = false;
+  bool has_v3_support = false;
   // extract the qkv and o storage bytes to allocate buffer for padding removing
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
   size_t q_storage_bytes = max_tokens_q*h*d_qk*nvte_dtype_size(dtype); 
@@ -602,8 +602,8 @@ void fused_attn_ck_fwd_impl(
       s_o_stride = std::min(o_stride[0], o_stride[2]);
     }
 
+    // First-pass API check
     if(nvte_ck_uses_fwd_v3){
-      // First-pass API check
       using ck_fused_attn::ck_attn_varlen_fwd;
       has_v3_support = ck_attn_varlen_fwd(
           nvte_to_ck_dtype(dtype),
@@ -616,6 +616,8 @@ void fused_attn_ck_fwd_impl(
           nullptr, // devV ptr not needed for API check
           v_stride[1], s_v_stride,
           devPtrCuSeqlensQ, devPtrCuSeqlensKV,
+          nullptr,
+          nullptr,
           is_training, scaling_factor, dropout_probability,
           devPtrDropoutSeed, devPtrDropoutOffset,
           set_ck_mask(mask_type, window_size_left, window_size_right),
@@ -626,8 +628,6 @@ void fused_attn_ck_fwd_impl(
           nvte_ck_uses_fwd_v3,
           nvte_ck_how_v3_bf16_cvt,
           true,
-          nullptr,
-          nullptr,
           stream) == 1;
     }
     needs_workaround = pad_between_seqs && (!has_v3_support || !is_ragged);
@@ -789,6 +789,8 @@ void fused_attn_ck_fwd_impl(
         devPtrVProcessed,
         v_stride[1], s_v_stride,
         devPtrCuSeqlensQ, devPtrCuSeqlensKV,
+        cu_seqlen_padded_q_ptr,
+        cu_seqlen_padded_kv_ptr,
         is_training, scaling_factor, dropout_probability,
         devPtrDropoutSeed, devPtrDropoutOffset,
         set_ck_mask(mask_type, window_size_left, window_size_right),
@@ -799,8 +801,6 @@ void fused_attn_ck_fwd_impl(
         nvte_ck_uses_fwd_v3,
         nvte_ck_how_v3_bf16_cvt,
         false,
-        cu_seqlen_padded_q_ptr,
-        cu_seqlen_padded_kv_ptr,
         stream));
     if(pad_between_seqs){
       if(needs_workaround){
@@ -873,8 +873,8 @@ void fused_attn_ck_bwd_impl(
   size_t nsplits = deterministic? ceil(1.0*s_kv/kN0):1; 
 
   bool is_ragged = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_THD; 
-  bool has_v3_support = false;
   bool needs_workaround = false;
+  bool has_v3_support = false;
   // extract the qkv and o storage bytes to allocate buffer for padding removing
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
   size_t q_storage_bytes = max_tokens_q*h*d_qk*nvte_dtype_size(dtype); 
@@ -936,7 +936,7 @@ void fused_attn_ck_bwd_impl(
       s_dk_expanded_stride = std::min(dk_expanded_stride[0], dk_expanded_stride[2]);
       s_dv_expanded_stride = std::min(dv_expanded_stride[0], dv_expanded_stride[2]);
     }
-    if(nvte_ck_uses_bwd_v3){
+    if(nvte_ck_uses_bwd_v3 && workspace==nullptr){
       using ck_fused_attn::ck_attn_varlen_bwd;
       has_v3_support = ck_attn_varlen_bwd(
           nvte_to_ck_dtype(dtype),
@@ -949,6 +949,8 @@ void fused_attn_ck_bwd_impl(
           nullptr,
           v_stride[1], s_v_stride,
           devPtrCuSeqlensQ, devPtrCuSeqlensKV,
+          nullptr,
+          nullptr,
           nullptr,
           o_stride[1], s_o_stride,
           nullptr,
@@ -975,8 +977,6 @@ void fused_attn_ck_bwd_impl(
           nvte_ck_is_v3_atomic_fp32,
           nvte_ck_how_v3_bf16_cvt,
           true,
-          nullptr,
-          nullptr,
           stream) == 1;
     }
     needs_workaround = pad_between_seqs && (!has_v3_support || !is_ragged);
@@ -1280,6 +1280,8 @@ void fused_attn_ck_bwd_impl(
         devPtrVProcessed,
         v_stride[1], s_v_stride,
         devPtrCuSeqlensQ, devPtrCuSeqlensKV,
+        cu_seqlen_padded_q_ptr,
+        cu_seqlen_padded_kv_ptr,
         devPtrOPreprocess,
         o_stride[1], s_o_stride,
         devPtrSoftmaxLSEPreprocess,
@@ -1306,8 +1308,6 @@ void fused_attn_ck_bwd_impl(
         nvte_ck_is_v3_atomic_fp32,
         nvte_ck_how_v3_bf16_cvt,
         false,
-        cu_seqlen_padded_q_ptr,
-        cu_seqlen_padded_kv_ptr,
         stream));
     if(pad_between_seqs){
       if(needs_workaround){

@@ -789,6 +789,8 @@ hipError_t ck_attn_varlen_bwd(
   const void* v_ptr, 
   uint64_t stride_h_v, uint64_t stride_s_v,
   const void* cu_seqlen_q_ptr, const void* cu_seqlen_kv_ptr,
+  const void* cu_seqlen_padded_q_ptr,
+  const void* cu_seqlen_padded_kv_ptr,
   const void* o_ptr, 
   uint64_t stride_h_o, uint64_t stride_s_o,
   const void* lse_thd_ptr, 
@@ -815,8 +817,6 @@ hipError_t ck_attn_varlen_bwd(
   bool is_v3_atomic_fp32,
   int how_v3_bf16_cvt,
   bool is_v3_api_check,
-  void* cu_seqlen_padded_q_ptr,
-  void* cu_seqlen_padded_kv_ptr,
   hipStream_t stream){
 
   bool has_dropout = (dropout_probability > 0.f);
