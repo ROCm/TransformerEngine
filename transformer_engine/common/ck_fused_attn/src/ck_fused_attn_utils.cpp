@@ -41,8 +41,12 @@ void set_aiter_asm_dir() {
     dladdr((void*)set_aiter_asm_dir, &info);
     setenv("AITER_ASM_DIR",
            (std::filesystem::path(info.dli_fname).parent_path() / "aiter" / arh_str).c_str(), 1);
-    // Print the set environment variable for debugging purposes
-    std::cout << "AITER_ASM_DIR set to: " << getenv("AITER_ASM_DIR") << std::endl;
+    if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
+      if (std::string(env_p) == "1"){
+        // Print the set environment variable for debugging purposes
+        std::cout << "AITER_ASM_DIR set to: " << getenv("AITER_ASM_DIR") << std::endl;
+      }
+    }
   });
 }
 
