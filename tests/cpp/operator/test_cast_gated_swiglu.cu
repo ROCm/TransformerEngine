@@ -131,10 +131,12 @@ class CastSwiGLUTestSuite
 TEST_P(CastSwiGLUTestSuite, TestCastSwiGLU) {
   using namespace transformer_engine;
   using namespace test;
+#ifndef __HIP_PLATFORM_AMD__
   // Skip tests for pre-Blackwell architectures
   if (getDeviceComputeCapability() < blackwellComputeCapability) {
       GTEST_SKIP();
   }
+#endif
 
   const DType input_type = std::get<0>(GetParam());
   const DType output_type = std::get<1>(GetParam());

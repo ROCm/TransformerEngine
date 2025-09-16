@@ -174,11 +174,24 @@ get_test_config_list() {
     echo $_TEST_CONFIG_LIST
 }
 
+get_test_variant_tag() {
+    if [ -n "$1" -a -n "$2" ]; then
+        echo "$1/$2"
+    else
+        echo "$1$2"
+    fi
+}
+
 get_test_name_tag() {
     _fname=${1##*/}
     _test_name=${_fname%%.*}
-    test -n "$2" && _test_suffix=.$2
-    echo "$_test_name$_test_suffix"
+    _dir=${1%$_fname}
+    if [ -n "$2" ]; then
+        _tag="$_dir$_test_name.$2"
+    else
+        _tag="$_dir$_test_name"
+    fi
+    echo "$(echo $_tag | tr '/' '.')"
 }
 
 get_pytest_junitxml() {
