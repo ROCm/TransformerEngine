@@ -1003,7 +1003,7 @@ void hipblaslt_gemm(const Tensor *inputA,
   const hipDataType B_type = get_hipblaslt_dtype(param.Btype);
   const hipDataType D_type = get_hipblaslt_dtype(outputD->data.dtype);
   const hipDataType bias_type = get_hipblaslt_dtype(inputBias->data.dtype);
-  // const hipblasltDatatype_t aux_type = get_hipblaslt_dtype(outputPreGelu->data.dtype);
+  const hipblasltDatatype_t aux_type = get_hipblaslt_dtype(outputPreGelu->data.dtype);
 
   NVTE_CHECK(!is_fp8_dtype(param.Atype) || param.A_scale_inv != nullptr,
              "FP8 input to GEMM requires inverse of scale!");
@@ -1012,10 +1012,21 @@ void hipblaslt_gemm(const Tensor *inputA,
 
   // check consistency of arguments:
   // if fp8 is desired, context cannot be null
+#if HIP_VERSION <= 70000000
   // fp8 + gelu fusion + fp8 aux is unavailable right now.
   if (use_fp8) {
     NVTE_CHECK(!gelu, "fp8 gemm + gelu fusion is unavailable right now!");
   }
+#else
+  if(use_fp8 && gelu){
+    //Currently hipblasLT only supports below config for fp8 gelu_aux
+    bool allow_fp8_gemm = (A_type == HIP_R_8F_E4M3_FNUZ) &&
+                        (B_type == HIP_R_8F_E4M3_FNUZ) &&
+                        (D_type == HIP_R_8F_E4M3_FNUZ) &&
+                        (bias) ? (bias_type == HIP_R_16F) : true &&
+                        (gelu) ? (aux_type == HIP_R_16F) : false;
+    NVTE_CHECK(allow_fp8_gemm, "fp8 gemm + gelu fusion is unavailable with current config!");
+#endif
   if (is_fp8_dtype(outputD->data.dtype)) {
     NVTE_CHECK(!accumulate, "Accumulation mode not supported with FP8 GEMM output!");
   }
@@ -1064,7 +1075,7 @@ void hipblaslt_gemm(const Tensor *inputA,
                                                        &param.transB, sizeof(param.transB)));
 
   // set fp8 attributes -- input and output types should already be set to fp8 as appropriate
-  // Note: gelu fusion isn't available right now, and we don't need
+  // Note: gelu fusion is available for certain config from rocm 7.0
   // amax(D) either (next op is high precision).
 #if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
     hipblasLtMatmulMatrixScale_t scaling_mode;
@@ -1115,6 +1126,12 @@ void hipblaslt_gemm(const Tensor *inputA,
       NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
                                                        HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE,
                                                        &bias_type, sizeof(bias_type)));
+    }
+    if (gelu){
+      NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
+                                                        HIPBLASLT_MATMUL_DESC_EPILOGUE_AUX_DATA_TYPE,
+                                                        &aux_type,
+                                                        sizeof(aux_type)));
     }
   }
   
