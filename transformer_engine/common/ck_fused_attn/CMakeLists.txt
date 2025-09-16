@@ -35,7 +35,7 @@ message(STATUS "AITER V3_ASM_ARCHS: ${V3_ASM_ARCHS}")
 list(JOIN V3_ASM_ARCHS ";" V3_ASM_ARCHS_STR)
 set(ENV{GPU_ARCHS} "${V3_ASM_ARCHS_STR}")
 
-if(NOT DEFINED AITER_FUSED_ATTN_PATH)
+if(NOT DEFINED AITER_MHA_PATH)
   # compile the libmha_fwd.so and libmha_bwd.so
   set(ENV{AITER_LOG_MORE} 1)
   # fp32 to bf16 cvt env still required for MI300X
@@ -44,10 +44,10 @@ if(NOT DEFINED AITER_FUSED_ATTN_PATH)
     COMMAND python3 ${__AITER_TEST_DIR}/compile.py
   )
   # libmha_fwd.so and libmha_bwd.so will be under 3rdparty/aiter/op_tests/cpp/mha
-  set(__AITER_FUSED_ATTN_PATH ${__AITER_TEST_DIR})
+  set(__AITER_MHA_PATH ${__AITER_TEST_DIR})
 else()
     # use pre-built libmha_fwd.so libmha_bwd.so
-  set(__AITER_FUSED_ATTN_PATH ${AITER_FUSED_ATTN_PATH})
+  set(__AITER_MHA_PATH ${AITER_MHA_PATH})
 endif()
 
 set(ck_fused_attn_SOURCES)
@@ -95,15 +95,14 @@ target_include_directories(ck_fused_attn PRIVATE ${CK_INCLUDE_DIR} ${__CK_SOURCE
 target_include_directories(ck_fused_attn PRIVATE ${AITER_INCLUDE_DIR})
 
 find_package(hip)
-list(APPEND ck_fused_attn_LINKER_LIBS hip::host hip::device roctx64 ${__AITER_FUSED_ATTN_PATH}/libmha_fwd.so ${__AITER_FUSED_ATTN_PATH}/libmha_bwd.so)
+list(APPEND ck_fused_attn_LINKER_LIBS hip::host hip::device roctx64 ${__AITER_MHA_PATH}/libmha_fwd.so ${__AITER_MHA_PATH}/libmha_bwd.so)
 target_link_libraries(ck_fused_attn PUBLIC ${ck_fused_attn_LINKER_LIBS})
 target_compile_options(ck_fused_attn PRIVATE ${CK_FUSED_ATTN_COMPILE_OPTIONS})
 set_target_properties(ck_fused_attn PROPERTIES INSTALL_RPATH "$ORIGIN")
 
 include(GNUInstallDirs)
 message("CMAKE_INSTALL_INCLUDEDIR ${CMAKE_INSTALL_INCLUDEDIR}")
-install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/ck_fused_attn" DESTINATION ${CMAKE_INSTALL_PREFIX}/${CK_FUSED_ATTN_INSTALL_PREFIX}/${CMAKE_INSTALL_INCLUDEDIR})
-install(FILES ${__AITER_FUSED_ATTN_PATH}/libmha_fwd.so ${__AITER_FUSED_ATTN_PATH}/libmha_bwd.so DESTINATION ${CMAKE_INSTALL_PREFIX}/${CK_FUSED_ATTN_INSTALL_PREFIX}/lib)
+install(FILES ${__AITER_MHA_PATH}/libmha_fwd.so ${__AITER_MHA_PATH}/libmha_bwd.so DESTINATION ${CMAKE_INSTALL_PREFIX}/${CK_FUSED_ATTN_INSTALL_PREFIX}/lib)
 install(TARGETS ck_fused_attn DESTINATION ${CMAKE_INSTALL_PREFIX}/${CK_FUSED_ATTN_INSTALL_PREFIX}/lib)
 # copy v3 kernels to destination
 foreach(ARCH IN LISTS V3_ASM_ARCHS)
