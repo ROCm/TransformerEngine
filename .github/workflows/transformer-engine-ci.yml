@@ -1,0 +1,184 @@
+name: TransformerEngine CI
+
+# This workflow runs on pushes and PRs to specific branches
+on:
+  push:
+    branches:
+      - 'dev'
+      - 'release_v1.**_rocm'
+      - 'release_v2.**_rocm'
+  pull_request:
+    branches:
+      - 'dev'
+      - 'release_v1.**_rocm'
+      - 'release_v2.**_rocm'
+  # The config below allows running this workflow manually from the Actions tab
+  workflow_dispatch:
+    inputs:
+      test_level:
+        description: 'Test Level (1-3)'
+        required: true
+        default: '1'
+      node_label:
+        description: 'Runner label for tests'
+        required: true
+        default: 'gfx942'
+
+jobs:
+  build:
+    name: Build TransformerEngine
+    # This is a build job, doesn't need GPUs
+    runs-on: [self-hosted, build-only]
+    
+    outputs:
+      docker-image: ${{ steps.select-image.outputs.image-tag }}
+
+    steps:
+      - name: 📜 Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+          fetch-depth: 0 # Needed to get all branches for version detection
+
+      - name: 🖼️ Select Docker Image
+        id: select-image
+        run: |
+          # Use the target branch for PRs, otherwise use the branch name
+          BRANCH_NAME="${{ github.base_ref || github.ref_name }}"
+          echo "Determining image for branch: $BRANCH_NAME"
+          
+          DEV_DOCKER_IMAGE="compute-artifactory.amd.com:5000/rocm-plus-docker/framework/private/te-ci:rocm-6.4_0_ubuntu22_py310_torch25_jax0435qa_fa273"
+          REL613_DOCKER_IMAGE="compute-artifactory.amd.com:5000/rocm-plus-docker/framework/private/te-ci:rocm-6.4_0_ubuntu22_py310_torch25_jax0435qa_fa273"
+          LEGACY_DOCKER_IMAGE="compute-artifactory.amd.com:5000/rocm-plus-docker/framework/private/te-ci:rocm-6.3_66_ubuntu22_py310_torch25_jax0431_fa263_hipblaslt10patch.2"
+
+          IMAGE_TO_USE="$DEV_DOCKER_IMAGE" # Default
+
+          if [[ $BRANCH_NAME =~ ^release_v1\.([0-9]+)_rocm$ ]]; then
+            MINOR_VERSION=${BASH_REMATCH[1]}
+            if (( MINOR_VERSION >= 9 && MINOR_VERSION <= 12 )); then
+              IMAGE_TO_USE="$LEGACY_DOCKER_IMAGE"
+            elif (( MINOR_VERSION == 13 || MINOR_VERSION == 14 )); then
+              IMAGE_TO_USE="$REL613_DOCKER_IMAGE"
+            fi
+          fi
+          
+          echo "Selected image: $IMAGE_TO_USE"
+          echo "image-tag=$IMAGE_TO_USE" >> $GITHUB_OUTPUT
+
+      - name: 🔐 Log in to Artifactory Docker registry
+        uses: docker/login-action@v3
+        with:
+          registry: compute-artifactory.amd.com:5000
+          username: ${{ secrets.ARTIFACTORY_USER }}
+          password: ${{ secrets.ARTIFACTORY_PAT }}
+
+      - name: 📦 Build inside container and create wheel
+        uses: devcontainers/ci@v0.3
+        with:
+          imageName: ${{ steps.select-image.outputs.image-tag }}
+          runCmd: |
+            set -ex
+            
+            # Install CMake
+            CMAKE_LINK="https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0-linux-x86_64.sh"
+            wget -q -P /opt ${CMAKE_LINK}
+            chmod +x /opt/cmake-*.sh
+            bash /opt/cmake-*.sh --skip-license --prefix=/opt/cmake
+            ln -sf /opt/cmake/bin/* /usr/local/bin/
+            cmake --version
+
+            # Build Wheel
+            export PYTORCH_ROCM_ARCH=gfx942
+            export NVTE_ROCM_ARCH=gfx942
+            pip install --upgrade pip ninja
+            pip install -v .
+          
+      - name: ⬆️ Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: transformer-engine-wheel
+          path: ./*.whl
+
+  test:
+    name: Test - ${{ matrix.name }}
+    needs: build
+    # We need GPUs here
+    runs-on: [self-hosted, 4-gpus]
+    continue-on-error: true
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "PyTorch (Single-GPU)", script: "HIP_VISIBLE_DEVICES=1 ci/pytorch.sh", log_name: "torch_sgpu" }
+          - { name: "JAX (Single-GPU)", script: "HIP_VISIBLE_DEVICES=2 ci/jax.sh", log_name: "jax_sgpu" }
+          - { name: "Core (Single-GPU)", script: "HIP_VISIBLE_DEVICES=3 ci/core.sh", log_name: "core_sgpu" }
+          - { name: "PyTorch (Multi-GPU)", script: "ci/pytorch.sh", log_name: "torch_mgpu" }
+          - { name: "JAX (Multi-GPU)", script: "ci/jax.sh", log_name: "jax_mgpu" }
+          - { name: "Examples", script: |
+              set -ex
+              pip3 install -r examples/jax/mnist/requirements.txt
+              pip3 install -r examples/jax/encoder/requirements.txt
+              python examples/pytorch/mnist/main.py --use-fp8
+              python examples/jax/mnist/test_single_gpu_mnist.py --use-fp8
+              python examples/jax/encoder/test_single_gpu_encoder.py --use-fp8
+            , log_name: "examples" }
+
+    container:
+      image: ${{ needs.build.outputs.docker-image }}
+      options: --device=/dev/kfd --device=/dev/dri --group-add=video --shm-size=16g --pid=host
+
+    env:
+      TEST_LEVEL: ${{ github.event.inputs.test_level || (github.ref_name == 'dev' && '3' || '1') }}
+      TEST_SGPU: ${{ contains(matrix.name, 'Single-GPU') }}
+      TEST_MGPU: ${{ contains(matrix.name, 'Multi-GPU') }}
+      
+    steps:
+      - name: 📜 Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+          
+      - name: ⬇️ Download wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: transformer-engine-wheel
+
+      - name: 🐍 Install dependencies and wheel
+        run: |
+          pip install --upgrade pip
+          pip install ./*.whl
+
+      - name: 🧪 Run tests
+        run: |
+          set -ex
+          # Debug output
+          python --version
+          pip list | grep -E "transformer_e|torch|jax|numpy"
+          
+          # Execute the test script
+          ${{ matrix.script }}
+
+      - name: ⬆️ Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.log_name }}-logs
+          path: |
+            *.log
+        
+  report-status:
+    name: Report Final Status
+    needs: test
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Check test results
+        if: ${{ needs.test.result != 'success' }}
+        run: |
+          echo "One or more test suites failed."
+          exit 1
+      - name: Report success
+        if: ${{ needs.test.result == 'success' }}
+        run: echo "All test suites passed!"
