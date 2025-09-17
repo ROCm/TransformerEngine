@@ -345,10 +345,9 @@ class _LayerNormMLP(torch.autograd.Function):
                     update_workspace=update_workspace,
                     skip_update_flag=skip_fp8_weight_update,
                     fsdp_group=fsdp_group,
-                    create_transpose_cache=keep_fp8_weight_transpose_cache,
                 )
             if not isinstance(fc2_weight, QuantizedTensor):
-                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=True)
+                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=keep_fp8_weight_transpose_cache)
                 fc2_weight_final = module.get_weight_workspace(
                     tensor=fc2_weight,
                     quantizer=fc2_weight_quantizer,
@@ -356,7 +355,6 @@ class _LayerNormMLP(torch.autograd.Function):
                     update_workspace=update_workspace,
                     skip_update_flag=skip_fp8_weight_update,
                     fsdp_group=fsdp_group,
-                    create_transpose_cache=keep_fp8_weight_transpose_cache,
                 )
 
         # Cast biases to expected dtype
@@ -390,7 +388,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 gemm_gelu_fusion = True
             if gemm_gelu_fusion and bias_gelu_fusion:
                 gemm_gelu_fusion = False
-
+        
+        if fp8 and not keep_fp8_weight_transpose_cache:
+            assert fc1_weight_final._transpose is None or fc1_weight_final._transpose.numel() == 0, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
         fc1_outputs = general_gemm(
             fc1_weight_final,
             ln_out_total,
@@ -447,6 +447,8 @@ class _LayerNormMLP(torch.autograd.Function):
             fc2_out = torch.empty(dim_size, dtype=activation_dtype, device=device)
 
         # FC2 GEMM
+        if fp8 and not keep_fp8_weight_transpose_cache:
+            assert fc2_weight_final._transpose is None or fc2_weight_final._transpose.numel() == 0, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
         _ = general_gemm(
             fc2_weight_final,
             act_out,
@@ -1591,12 +1593,14 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc1_input_quantizer.internal = False  # temporary
             fc1_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
             fc1_weight_quantizer.internal = True
+            fc1_weight_quantizer.columnwise_usage = self.keep_fp8_weight_transpose_cache
             fc2_input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_INPUT]
             fc2_input_quantizer.set_usage(
                 rowwise=True, columnwise=isinstance(fc2_input_quantizer, MXFP8Quantizer)
             )
             fc2_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_WEIGHT]
             fc2_weight_quantizer.internal = True
+            fc2_weight_quantizer.columnwise_usage = self.keep_fp8_weight_transpose_cache
             if torch.is_grad_enabled():
                 grad_fc2_output_quantizer = self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT1

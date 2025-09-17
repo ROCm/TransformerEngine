@@ -188,8 +188,8 @@ class _Linear(torch.autograd.Function):
             if not isinstance(weight, QuantizedTensor):
                 # Configure quantizer
                 if weight_quantizer is not None:
-                    columnwise_usage = is_grad_enabled and inp.requires_grad
-                    if not columnwise_usage:
+                    columnwise_usage = is_grad_enabled and inp.requires_grad and keep_fp8_weight_transpose_cache
+                    if not columnwise_usage and keep_fp8_weight_transpose_cache:
                         columnwise_usage = (
                             is_fp8_activation_recompute_enabled()
                             and not in_fp8_activation_recompute_phase()
@@ -205,7 +205,6 @@ class _Linear(torch.autograd.Function):
                     update_workspace=update_workspace,
                     skip_update_flag=skip_fp8_weight_update,
                     fsdp_group=fsdp_group,
-                    create_transpose_cache=keep_fp8_weight_transpose_cache,
                 )
 
         # Cast bias to expected dtype
@@ -249,7 +248,8 @@ class _Linear(torch.autograd.Function):
             recipe = FP8GlobalStateManager.get_fp8_recipe()
             if hasattr(recipe, "fp8_gemm_fprop"):
                 fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
-
+            if not keep_fp8_weight_transpose_cache:
+                assert weightmat._transpose is None or weightmat._transpose.numel() == 0, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
         out, *_, rs_out = general_gemm(
             weightmat,
             inputmat_total,
@@ -1206,6 +1206,7 @@ class Linear(TransformerEngineBaseModule):
         input_quantizer.internal = False
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         weight_quantizer.internal = True
+        weight_quantizer.columnwise_usage = self.keep_fp8_weight_transpose_cache
         if fp8_output:
             output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
         if torch.is_grad_enabled():
