@@ -11,6 +11,7 @@ from operator import mul as multiply_op
 
 import torch
 
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
@@ -109,6 +110,8 @@ class _Linear(torch.autograd.Function):
         keep_fp8_weight_transpose_cache: bool,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
+        if not IS_HIP_EXTENSION:
+            keep_fp8_weight_transpose_cache = True
 
         # NVTX label for profiling
         nvtx_label = "transformer_engine._Linear.forward"
@@ -1206,7 +1209,8 @@ class Linear(TransformerEngineBaseModule):
         input_quantizer.internal = False
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         weight_quantizer.internal = True
-        weight_quantizer.columnwise_usage = self.keep_fp8_weight_transpose_cache
+        if IS_HIP_EXTENSION:
+            weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
         if fp8_output:
             output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
         if torch.is_grad_enabled():

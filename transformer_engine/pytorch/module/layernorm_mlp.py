@@ -191,6 +191,9 @@ class _LayerNormMLP(torch.autograd.Function):
         keep_fp8_weight_transpose_cache: bool,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # pylint: disable=missing-function-docstring
+        
+        if not IS_HIP_EXTENSION:
+            keep_fp8_weight_transpose_cache = True
 
         in_features, inp_shape = ln_weight.numel(), inp.shape
         # Make sure input dimensions are compatible
@@ -1593,14 +1596,16 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc1_input_quantizer.internal = False  # temporary
             fc1_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
             fc1_weight_quantizer.internal = True
-            fc1_weight_quantizer.columnwise_usage = self.keep_fp8_weight_transpose_cache
+            if IS_HIP_EXTENSION:
+                fc1_weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
             fc2_input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_INPUT]
             fc2_input_quantizer.set_usage(
                 rowwise=True, columnwise=isinstance(fc2_input_quantizer, MXFP8Quantizer)
             )
             fc2_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_WEIGHT]
             fc2_weight_quantizer.internal = True
-            fc2_weight_quantizer.columnwise_usage = self.keep_fp8_weight_transpose_cache
+            if IS_HIP_EXTENSION:
+                fc2_weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
             if torch.is_grad_enabled():
                 grad_fc2_output_quantizer = self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT1

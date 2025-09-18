@@ -924,7 +924,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     quantizer is not None
                 )  # to use primary fp8 weight one needs to use FP8 autocast with specific recipe.
                 quantizer.internal = False
-                if not self.keep_fp8_weight_transpose_cache:
+                if IS_HIP_EXTENSION and not self.keep_fp8_weight_transpose_cache:
                     quantizer.columnwise_usage=False
                 param = quantizer(param)
 
