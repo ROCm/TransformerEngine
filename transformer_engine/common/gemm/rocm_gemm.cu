@@ -506,6 +506,8 @@ public:
     int m, n, k;
     int lda, ldb, ldd;
     hipblasOperation_t transa, transb;
+    //fp8_scale is int instead of hipblasLtMatmulMatrixScale_t for compatibility with old hipblasLt
+    int fp8_scale;
     hipblasLtEpilogue_t epilogue;
 
     Key(int deviceCap_,
@@ -513,13 +515,13 @@ public:
         hipDataType d_type_, hipDataType bias_type_,
         int m_, int n_, int k_, int lda_, int ldb_, int ldd_,
         hipblasOperation_t transa_, hipblasOperation_t transb_,
-        hipblasLtEpilogue_t epilogue_):
+        int fp8_scale_, hipblasLtEpilogue_t epilogue_):
         deviceCap(deviceCap_),
         a_type(a_type_), b_type(b_type_),
         d_type(d_type_), bias_type(bias_type_),
         m(m_), n(n_), k(k_), lda(lda_), ldb(ldb_), ldd(ldd_),
         transa(transa_), transb(transb_),
-        epilogue(epilogue_) {}
+        fp8_scale(fp8_scale_), epilogue(epilogue_) {}
 
     Key() {}
 
@@ -531,7 +533,7 @@ public:
       && (m == val.m) && (n == val.n) && (k == val.k)
       && (lda == val.lda) && (ldb == val.ldb) && (ldd == val.ldd)
       && (transa == val.transa) && (transb == val.transb)
-      && (epilogue == val.epilogue) );
+      && (fp8_scale == val.fp8_scale) && (epilogue == val.epilogue) );
     }
 
     struct Comp
@@ -660,7 +662,7 @@ protected:
     csv_helper fs(ofs, csv_sep);
     fs << "dev_cap" << "m" << "n"  << "k" << "trans_a" << "trans_b" 
     << "type_a" << "type_b" << "type_d" << "bias_type" 
-    << "lda" << "ldb" << "ldd" << "epi" << "comp" << "scale"
+    << "lda" << "ldb" << "ldd" << "fp8_scale" << "epi" << "comp" << "scale"
     << "ws_min" << "ws_max" << "algo_id" << "aidx";
   }
   
@@ -727,7 +729,7 @@ protected:
       std::getline(is, type_b, csv_sep);
       std::getline(is, type_d, csv_sep);
       std::getline(is, bias_type, csv_sep);
-      is >> cfg.lda >> c >> cfg.ldb >> c >> cfg.ldd >> c;
+      is >> cfg.lda >> c >> cfg.ldb >> c >> cfg.ldd >> c >> cfg.fp8_scale >> c;
       std::getline(is, epi, csv_sep);
       std::getline(is, comp, csv_sep);
       std::getline(is, scale, csv_sep);
@@ -742,6 +744,22 @@ protected:
       if (ws_min > ws_max)
       {
         std::cout << "[WARNING] Invalid WS size at " << line << "\n";
+        continue;
+      }
+
+      //Check and filter out compute and scale types
+      if (computeNameMapper.getValue(comp, "comp") != HIPBLAS_COMPUTE_32F ||
+        typeNameMapper.getValue(scale, "scale") != HIP_R_32F)
+      {
+        continue;
+      }
+
+#if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
+      if (cfg.fp8_scale < 0 || cfg.fp8_scale >= (int)HIPBLASLT_MATMUL_MATRIX_SCALE_END)
+#else
+      if (cfg.fp8_scale != 0)
+#endif
+      {
         continue;
       }
 
@@ -767,12 +785,6 @@ protected:
       cfg.transb = transposeNameMapper.getValue(trans_b, "trans_b");
 
       cfg.epilogue = epilogueNameMapper.getValue(epi, "epi");
-      //Check and filter out compute and scale types
-      if (computeNameMapper.getValue(comp, "comp") != HIPBLAS_COMPUTE_32F ||
-        typeNameMapper.getValue(scale, "scale") != HIP_R_32F)
-      {
-        continue;
-      }
 
       if (find_(cfg, ws_min, ws_max))
       {
@@ -853,7 +865,7 @@ protected:
       << transposeNameMapper.getName(cfg.transa) << transposeNameMapper.getName(cfg.transb)
       << typeNameMapper.getName(cfg.a_type) << typeNameMapper.getName(cfg.b_type) << typeNameMapper.getName(cfg.d_type)
       << ((cfg.bias_type == (hipDataType)-1) ? "-" : typeNameMapper.getName(cfg.bias_type))
-      << cfg.lda << cfg.ldb << cfg.ldd << epilogueNameMapper.getName(cfg.epilogue)
+      << cfg.lda << cfg.ldb << cfg.ldd << cfg.fp8_scale << epilogueNameMapper.getName(cfg.epilogue)
       << computeNameMapper.getName(HIPBLAS_COMPUTE_32F) << typeNameMapper.getName(HIP_R_32F)
       << algo.ws_size_min << algo.ws_size_max << algo.algoId << algo.index << csv_helper::end() << "\n";
   }
@@ -1033,6 +1045,11 @@ void hipblaslt_gemm(const Tensor *inputA,
   // set fp8 attributes -- input and output types should already be set to fp8 as appropriate
   // Note: gelu fusion isn't available right now, and we don't need
   // amax(D) either (next op is high precision).
+#if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
+    hipblasLtMatmulMatrixScale_t scaling_mode;
+#else
+    constexpr int scaling_mode = 0;
+#endif
   if (use_fp8) {
     // Split accumulator.
     const int8_t fastAccuMode = (use_split_accumulator) ? 0 : 1;
@@ -1042,10 +1059,6 @@ void hipblaslt_gemm(const Tensor *inputA,
                                                      &fastAccuMode,
                                                      sizeof(fastAccuMode)));
     */
-
-#if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
-    hipblasLtMatmulMatrixScale_t scaling_mode;
-#endif
     if ((is_delayed_tensor_scaling(inputA->scaling_mode) &&
          is_delayed_tensor_scaling(inputB->scaling_mode))) {
 #if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
@@ -1133,7 +1146,7 @@ void hipblaslt_gemm(const Tensor *inputA,
 
   GemmAlgoCache::Key gemm_cfg(algoCache.device_cap(device_id), A_type, B_type, D_type, 
     use_fp8 ? bias_type : (hipDataType)-1,
-    m, n, k, param.lda, param.ldb, ldd, param.transA, param.transB, epilogue );
+    m, n, k, param.lda, param.ldb, ldd, param.transA, param.transB, scaling_mode, epilogue );
   GemmAlgoCache::Algo cached_algo;
   if (algoCache.find(gemm_cfg, workspaceSize, cached_algo) == 0 || !cached_algo.algo.has_value())
   {
