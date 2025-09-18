@@ -1003,7 +1003,7 @@ void hipblaslt_gemm(const Tensor *inputA,
   const hipDataType B_type = get_hipblaslt_dtype(param.Btype);
   const hipDataType D_type = get_hipblaslt_dtype(outputD->data.dtype);
   const hipDataType bias_type = get_hipblaslt_dtype(inputBias->data.dtype);
-  const hipblasltDatatype_t aux_type = get_hipblaslt_dtype(outputPreGelu->data.dtype);
+  const hipDataType aux_type = get_hipblaslt_dtype(outputPreGelu->data.dtype);
 
   NVTE_CHECK(!is_fp8_dtype(param.Atype) || param.A_scale_inv != nullptr,
              "FP8 input to GEMM requires inverse of scale!");
@@ -1023,9 +1023,10 @@ void hipblaslt_gemm(const Tensor *inputA,
     bool allow_fp8_gemm = (A_type == HIP_R_8F_E4M3_FNUZ) &&
                         (B_type == HIP_R_8F_E4M3_FNUZ) &&
                         (D_type == HIP_R_8F_E4M3_FNUZ) &&
-                        (bias) ? (bias_type == HIP_R_16F) : true &&
-                        (gelu) ? (aux_type == HIP_R_16F) : false;
+                        (!bias || bias_type == HIP_R_16F) &&
+                        (gelu && aux_type == HIP_R_16F);
     NVTE_CHECK(allow_fp8_gemm, "fp8 gemm + gelu fusion is unavailable with current config!");
+  }
 #endif
   if (is_fp8_dtype(outputD->data.dtype)) {
     NVTE_CHECK(!accumulate, "Accumulation mode not supported with FP8 GEMM output!");

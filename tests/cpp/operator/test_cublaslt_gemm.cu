@@ -194,6 +194,14 @@ void performTest(const TestParams& params) {
 
   const bool has_fp8 = isFp8Type(atype) || isFp8Type(btype);
   const bool use_mxfp8 = params.scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING;
+  auto fp8_gelu_fusion_config = has_fp8 &&
+                                params.use_bias &&
+                                params.use_gelu &&
+                                atype == DType::kFloat8E4M3 &&
+                                btype == DType::kFloat8E4M3 &&
+                                bias_type == DType::kFloat16 &&
+                                gelu_type == DType::kFloat16 &&
+                                dtype == DType::kFloat8E4M3;
 
   if (use_mxfp8)
   {
@@ -227,7 +235,7 @@ void performTest(const TestParams& params) {
       }
     }
 
-    if (params.use_gelu) {
+    if (params.use_gelu && !fp8_gelu_fusion_config) {
       GTEST_SKIP() << "FP8 GEMM with GELU is not supported";
     }
     if (params.use_bias && dtype == DType::kFloat16) {
@@ -252,7 +260,7 @@ void performTest(const TestParams& params) {
     if (params.use_gelu && dtype == DType::kBFloat16 && !params.transa) {
       GTEST_SKIP() << "BF16 GEMM with GELU is not supported in current config";
     }
-    if (has_fp8 && params.use_bias && dtype == DType::kFloat8E4M3) {
+    if (has_fp8 && params.use_bias && dtype == DType::kFloat8E4M3 && !fp8_gelu_fusion_config) {
       GTEST_SKIP() << "FP8 GEMM with bias and FP8 output is not supported in current config";
     }
   }
