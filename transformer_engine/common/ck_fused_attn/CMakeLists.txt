@@ -9,7 +9,7 @@ set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 project(ck_fused_attn LANGUAGES HIP CXX)
 
 
-set(CK_FUSED_ATTN_INSTALL_PREFIX "transformer_engine" CACHE STRING "ck_fused_attn install prefix in TE")
+set(AITER_MHA_INSTALL_PREFIX "transformer_engine" CACHE STRING "aiter mha shared lib install prefix in TE")
 
 set(__AITER_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/aiter")
 set(__AITER_TEST_DIR "${__AITER_SOURCE_DIR}/op_tests/cpp/mha")
@@ -100,19 +100,17 @@ target_link_libraries(ck_fused_attn PUBLIC ${ck_fused_attn_LINKER_LIBS})
 target_compile_options(ck_fused_attn PRIVATE ${CK_FUSED_ATTN_COMPILE_OPTIONS})
 set_target_properties(ck_fused_attn PROPERTIES INSTALL_RPATH "$ORIGIN")
 
-include(GNUInstallDirs)
-message("CMAKE_INSTALL_INCLUDEDIR ${CMAKE_INSTALL_INCLUDEDIR}")
-install(FILES ${__AITER_MHA_PATH}/libmha_fwd.so ${__AITER_MHA_PATH}/libmha_bwd.so DESTINATION ${CMAKE_INSTALL_PREFIX}/${CK_FUSED_ATTN_INSTALL_PREFIX}/lib)
-install(TARGETS ck_fused_attn DESTINATION ${CMAKE_INSTALL_PREFIX}/${CK_FUSED_ATTN_INSTALL_PREFIX}/lib)
+install(FILES ${__AITER_MHA_PATH}/libmha_fwd.so ${__AITER_MHA_PATH}/libmha_bwd.so DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib)
+install(TARGETS ck_fused_attn DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib)
 # copy v3 kernels to destination
 foreach(ARCH IN LISTS V3_ASM_ARCHS)
   install(DIRECTORY
         ${__AITER_SOURCE_DIR}/hsa/${ARCH}/fmha_v3_fwd
-        DESTINATION ${CMAKE_INSTALL_PREFIX}/${CK_FUSED_ATTN_INSTALL_PREFIX}/lib/aiter/${ARCH}/
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib/aiter/${ARCH}/
         PATTERN "codegen.py" EXCLUDE)
   install(DIRECTORY
         ${__AITER_SOURCE_DIR}/hsa/${ARCH}/fmha_v3_bwd
-        DESTINATION ${CMAKE_INSTALL_PREFIX}/${CK_FUSED_ATTN_INSTALL_PREFIX}/lib/aiter/${ARCH}/
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib/aiter/${ARCH}/
         PATTERN "codegen.py" EXCLUDE)
 endforeach()
 
