@@ -392,7 +392,7 @@ class _LayerNormMLP(torch.autograd.Function):
             if gemm_gelu_fusion and bias_gelu_fusion:
                 gemm_gelu_fusion = False
         
-        if fp8 and not keep_fp8_weight_transpose_cache:
+        if IS_HIP_EXTENSION and fp8 and not keep_fp8_weight_transpose_cache:
             assert fc1_weight_final._transpose is None or fc1_weight_final._transpose.numel() == 0, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
         fc1_outputs = general_gemm(
             fc1_weight_final,
@@ -450,7 +450,7 @@ class _LayerNormMLP(torch.autograd.Function):
             fc2_out = torch.empty(dim_size, dtype=activation_dtype, device=device)
 
         # FC2 GEMM
-        if fp8 and not keep_fp8_weight_transpose_cache:
+        if IS_HIP_EXTENSION and fp8 and not keep_fp8_weight_transpose_cache:
             assert fc2_weight_final._transpose is None or fc2_weight_final._transpose.numel() == 0, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
         _ = general_gemm(
             fc2_weight_final,

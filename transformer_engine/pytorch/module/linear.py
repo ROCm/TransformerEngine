@@ -251,7 +251,7 @@ class _Linear(torch.autograd.Function):
             recipe = FP8GlobalStateManager.get_fp8_recipe()
             if hasattr(recipe, "fp8_gemm_fprop"):
                 fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
-            if not keep_fp8_weight_transpose_cache:
+            if IS_HIP_EXTENSION and not keep_fp8_weight_transpose_cache:
                 assert weightmat._transpose is None or weightmat._transpose.numel() == 0, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
         out, *_, rs_out = general_gemm(
             weightmat,
