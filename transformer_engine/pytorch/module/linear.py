@@ -1,5 +1,9 @@
 # This file was modified for portability to AMDGPU
+<<<<<<< HEAD
 # Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+=======
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+>>>>>>> refs/rewritten/origin-dev-2
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -358,9 +362,15 @@ class _Linear(torch.autograd.Function):
                     assert not isinstance(inputmat, QuantizedTensorBase)
                 saved_inputmat = inputmat
 
+<<<<<<< HEAD
             # Weight with column-wise usage is needed for dgrad GEMM.
             if inp.requires_grad and keep_fp8_weight_transpose_cache:
                 if isinstance(weightmat, QuantizedTensorBase):
+=======
+            # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
+            if inp.requires_grad and keep_fp8_weight_transpose_cache:
+                if isinstance(weightmat, QuantizedTensor):
+>>>>>>> refs/rewritten/origin-dev-2
                     weightmat.update_usage(columnwise_usage=True)
 
             if cpu_offloading and saved_inputmat is not None:
@@ -982,7 +992,7 @@ class Linear(TransformerEngineBaseModule):
                    This can help in latency bound communication situations.
                    Requires PyTorch version 2.7.0 or higher. When set to None, standard all-reduce
                    is used.
-    keep_fp8_weight_transpose_cache: bool, default = True
+    keep_fp8_weight_transpose_cache: bool, default = `True`
                 Controls whether to cache the FP8 weight transpose buffer during training.
 
                 - If set to `True` (default), the FP8 weight transpose buffer is cached to avoid recomputation, 

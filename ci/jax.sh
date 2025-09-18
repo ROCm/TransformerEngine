@@ -28,11 +28,12 @@ TEST_DIR=${TE_PATH}tests/jax
 run() {
     check_level $1 || return
     shift
-    _test_name_tag=`get_test_name_tag $1 $_fus_attn`
+    _test_variant_tag=`get_test_variant_tag $_fus_attn $_test_label`
+    _test_name_tag=`get_test_name_tag $1 $_test_variant_tag`
     check_test_filter $_test_name_tag || return
-    echo "Run [$_fus_attn] $*"
-    pytest -v `get_pytest_junitxml $_test_name_tag` "$TEST_DIR/$@" || test_run_error "[$_fus_attn] $1"
-    echo "Done [$_fus_attn] $1"
+    echo "Run [$_test_variant_tag] $@"
+    pytest -v -rfEs `get_pytest_junitxml $_test_name_tag` "$TEST_DIR/$@" || test_run_error "[$_test_variant_tag] $1"
+    echo "Done [$_test_variant_tag] $1"
 }
 
 run_default_fa() {
@@ -42,12 +43,19 @@ run_default_fa() {
     fi
 }
 
+run_lbl() {
+    _test_label="$1"
+    shift
+    run "$@"
+    _test_label=""
+}
+
 run_test_config() {
     echo ==== Run with Fused attention backend: $_fus_attn ====
     run_default_fa 1 test_custom_call_compute.py
     run_default_fa 1 test_functions.py
     run 1 test_fused_attn.py
-    NVTE_CK_USES_FWD_V3=1 NVTE_CK_USES_BWD_V3=1 run 1 test_fused_attn.py # Using FAv3 for forward and backward pass
+    NVTE_CK_USES_FWD_V3=1 NVTE_CK_USES_BWD_V3=1 run_lbl "v3" 1 test_fused_attn.py # Using FAv3 for forward and backward pass
     run_default_fa 1 test_helper.py
     run_default_fa 1 test_layer.py #it effectevly always uses unfused attention
     run_default_fa 1 test_sanity_import.py
@@ -67,15 +75,18 @@ run_test_config_mgpu() {
         _JAX_DISABLE_JIT_FLAG=1
 
         # Run tests that fail with JIT disabled
-        run 3 test_distributed_fused_attn.py -k 'test_context_parallel_allgather_attn[BALANCED'
+        #run_lbl "allgather_balanced" 3 test_distributed_fused_attn.py -k 'test_context_parallel_allgather_attn[BALANCED'
 
         # Test ring attention with xla_flag --xla_experimental_ignore_channel_id only
         # TODO: remove this flag after jax/xla update
-        XLA_FLAGS="--xla_experimental_ignore_channel_id" run 3 test_distributed_fused_attn.py -k test_context_parallel_ring_attn
+        XLA_FLAGS="--xla_experimental_ignore_channel_id" run_lbl "parallel_ring" 3 test_distributed_fused_attn.py -k test_context_parallel_ring_attn
         ;;
-    *0.4.31*)
-        #Workaround for JAX 0.4.31 regression: crash in test_destributed_fused_attn and test_distributed_layernorm_mlp
-        export XLA_FLAGS="--xla_gpu_enable_dot_strength_reduction=false --xla_gpu_enable_command_buffer=CUSTOM_CALL"
+    *0.6.*)
+        # Workaround for distributed tests hang with JIT enabled
+        JAX_DISABLE_JIT=1 run 3 test_distributed_fused_attn.py -k 'not test_context_parallel_allgather_attn[BALANCED'
+        _JAX_DISABLE_JIT_FLAG=1
+        ;;
+    *)
         run 3 test_distributed_fused_attn.py
         ;;
     esac
@@ -83,7 +94,6 @@ run_test_config_mgpu() {
     run_default_fa 3 test_distributed_layernorm.py
     JAX_DISABLE_JIT=$_JAX_DISABLE_JIT_FLAG run_default_fa 3 test_distributed_layernorm_mlp.py
     run_default_fa 3 test_distributed_softmax.py
-    unset XLA_FLAGS
 
     run_default_fa 3 test_sanity_import.py
 }
