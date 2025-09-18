@@ -506,8 +506,8 @@ public:
     int m, n, k;
     int lda, ldb, ldd;
     hipblasOperation_t transa, transb;
-    //fp8_scale is int instead of hipblasLtMatmulMatrixScale_t for compatibility with old hipblasLt
-    int fp8_scale;
+    //Make it int instead of hipblasLtMatmulMatrixScale_t for compatibility with old hipblasLt
+    int scaling_mode;
     hipblasLtEpilogue_t epilogue;
 
     Key(int deviceCap_,
@@ -515,13 +515,13 @@ public:
         hipDataType d_type_, hipDataType bias_type_,
         int m_, int n_, int k_, int lda_, int ldb_, int ldd_,
         hipblasOperation_t transa_, hipblasOperation_t transb_,
-        int fp8_scale_, hipblasLtEpilogue_t epilogue_):
+        int scaling_mode_, hipblasLtEpilogue_t epilogue_):
         deviceCap(deviceCap_),
         a_type(a_type_), b_type(b_type_),
         d_type(d_type_), bias_type(bias_type_),
         m(m_), n(n_), k(k_), lda(lda_), ldb(ldb_), ldd(ldd_),
         transa(transa_), transb(transb_),
-        fp8_scale(fp8_scale_), epilogue(epilogue_) {}
+        scaling_mode(scaling_mode_), epilogue(epilogue_) {}
 
     Key() {}
 
@@ -533,7 +533,7 @@ public:
       && (m == val.m) && (n == val.n) && (k == val.k)
       && (lda == val.lda) && (ldb == val.ldb) && (ldd == val.ldd)
       && (transa == val.transa) && (transb == val.transb)
-      && (fp8_scale == val.fp8_scale) && (epilogue == val.epilogue) );
+      && (scaling_mode == val.scaling_mode) && (epilogue == val.epilogue) );
     }
 
     struct Comp
@@ -662,7 +662,7 @@ protected:
     csv_helper fs(ofs, csv_sep);
     fs << "dev_cap" << "m" << "n"  << "k" << "trans_a" << "trans_b" 
     << "type_a" << "type_b" << "type_d" << "bias_type" 
-    << "lda" << "ldb" << "ldd" << "fp8_scale" << "epi" << "comp" << "scale"
+    << "lda" << "ldb" << "ldd" << "scale_mode" << "epi" << "comp" << "scale_type"
     << "ws_min" << "ws_max" << "algo_id" << "aidx";
   }
   
@@ -729,7 +729,7 @@ protected:
       std::getline(is, type_b, csv_sep);
       std::getline(is, type_d, csv_sep);
       std::getline(is, bias_type, csv_sep);
-      is >> cfg.lda >> c >> cfg.ldb >> c >> cfg.ldd >> c >> cfg.fp8_scale >> c;
+      is >> cfg.lda >> c >> cfg.ldb >> c >> cfg.ldd >> c >> cfg.scaling_mode >> c;
       std::getline(is, epi, csv_sep);
       std::getline(is, comp, csv_sep);
       std::getline(is, scale, csv_sep);
@@ -755,11 +755,12 @@ protected:
       }
 
 #if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
-      if (cfg.fp8_scale < 0 || cfg.fp8_scale >= (int)HIPBLASLT_MATMUL_MATRIX_SCALE_END)
+      if (cfg.scaling_mode < 0 || cfg.scaling_mode >= (int)HIPBLASLT_MATMUL_MATRIX_SCALE_END)
 #else
-      if (cfg.fp8_scale != 0)
+      if (cfg.scaling_mode != 0)
 #endif
       {
+        std::cout << "[WARNING] Unsupported scaling mode at " << line << "\n";
         continue;
       }
 
@@ -865,7 +866,7 @@ protected:
       << transposeNameMapper.getName(cfg.transa) << transposeNameMapper.getName(cfg.transb)
       << typeNameMapper.getName(cfg.a_type) << typeNameMapper.getName(cfg.b_type) << typeNameMapper.getName(cfg.d_type)
       << ((cfg.bias_type == (hipDataType)-1) ? "-" : typeNameMapper.getName(cfg.bias_type))
-      << cfg.lda << cfg.ldb << cfg.ldd << cfg.fp8_scale << epilogueNameMapper.getName(cfg.epilogue)
+      << cfg.lda << cfg.ldb << cfg.ldd << cfg.scaling_mode << epilogueNameMapper.getName(cfg.epilogue)
       << computeNameMapper.getName(HIPBLAS_COMPUTE_32F) << typeNameMapper.getName(HIP_R_32F)
       << algo.ws_size_min << algo.ws_size_max << algo.algoId << algo.index << csv_helper::end() << "\n";
   }
