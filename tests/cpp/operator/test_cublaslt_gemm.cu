@@ -194,13 +194,11 @@ void performTest(const TestParams& params) {
 
   const bool has_fp8 = isFp8Type(atype) || isFp8Type(btype);
   const bool use_mxfp8 = params.scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING;
-  auto fp8_gelu_fusion_config = has_fp8 &&
-                                params.use_bias &&
-                                params.use_gelu &&
+  auto fp8_gelu_fusion_config = (HIP_VERSION >= 70000000) && has_fp8 &&
                                 atype == DType::kFloat8E4M3 &&
                                 btype == DType::kFloat8E4M3 &&
-                                bias_type == DType::kFloat16 &&
-                                gelu_type == DType::kFloat16 &&
+                                (params.use_gelu && gelu_type == DType::kFloat16) &&
+                                (!params.use_bias || bias_type == DType::kFloat16) &&
                                 dtype == DType::kFloat8E4M3;
 
   if (use_mxfp8)
