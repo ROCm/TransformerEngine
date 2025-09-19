@@ -197,19 +197,31 @@ def reset_global_fp8_state():
     FP8GlobalStateManager.reset()
 
 
-@pytest.fixture()
-def reset_attn_backend():
-    envs = ["NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"]
-    flags = {}
-    for env in envs:
-        if env in os.environ:
-            flags[env] = os.environ[env]
-    yield
-    for env in envs:
-        if env in flags:
-            os.environ[env] = flags[env]
+class EnvVarCleaner:
+    def __init__(self, envs_):
+        self.envs = envs_
+        self.flags = {}
+        for env in self.envs:
+          if env in os.environ:
+            self.flags[env] = os.environ[env]
+    def __del__(self):
+      for env in self.envs:
+        if env in self.flags:
+            os.environ[env] = self.flags[env]
         else:
             os.environ.pop(env, None)
+
+
+@pytest.fixture()
+def reset_env_var(request):
+    envs = getattr(request, 'param', [])
+    env = EnvVarCleaner(envs)
+    yield
+
+@pytest.fixture
+def reset_attn_backend():
+    env = EnvVarCleaner(["NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"])
+    yield
 
 
 class TorchScaledMaskedSoftmax(nn.Module):
@@ -715,6 +727,8 @@ def _test_e2e_full_recompute(
 @pytest.mark.parametrize("recipe", fp8_recipes)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_reentrant", all_boolean)
+@pytest.mark.parametrize("reset_env_var", [["NVTE_BIAS_GELU_NVFUSION"]], indirect=True)
+@pytest.mark.usefixtures("reset_env_var")
 def test_gpt_full_activation_recompute(
     dtype, bs, model, fp8, recipe, fp8_model_params, use_reentrant
 ):
