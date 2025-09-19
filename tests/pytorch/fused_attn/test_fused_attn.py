@@ -287,7 +287,6 @@ def test_dot_product_mem_calc():
     if FusedAttnBackend["CK"] not in fused_attn_backends:
         pytest.skip("This test requires the CK fused attention backend.")
 
-    os.environ["NVTE_CK_USES_FWD_V3"] = "1"
     os.environ["NVTE_FUSED_ATTN_CK"] = "1"
     os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "0"
     _, _ = _run_dot_product_attention(
@@ -300,7 +299,6 @@ def test_dot_product_mem_calc():
         pad_between_seqs,
         is_training,
     )
-    del os.environ["NVTE_CK_USES_FWD_V3"]
     del os.environ["NVTE_FUSED_ATTN_CK"]
     del os.environ["NVTE_FUSED_ATTN_AOTRITON"]
 
