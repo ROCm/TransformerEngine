@@ -83,6 +83,28 @@ def reset_global_fp8_state():
     fp8.FP8GlobalStateManager.reset()
 
 
+class EnvVarCleaner:
+    def __init__(self, envs_):
+        self.envs = envs_
+        self.flags = {}
+        for env in self.envs:
+          if env in os.environ:
+            self.flags[env] = os.environ[env]
+    def __del__(self):
+      for env in self.envs:
+        if env in self.flags:
+            os.environ[env] = self.flags[env]
+        else:
+            os.environ.pop(env, None)
+
+
+@pytest.fixture(autouse=True)
+def reset_attn_backend():
+    env = EnvVarCleaner(["NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN",
+                         "NVTE_FUSED_ATTN_CK", "NVTE_FUSED_ATTN_AOTRITON"])
+    yield
+
+
 class ModelConfig:
     def __init__(
         self,
