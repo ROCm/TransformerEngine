@@ -192,15 +192,25 @@ void performTest(const TestParams& params) {
   DType gelu_type = TypeInfo<Gelu_Type>::dtype;
   DType dtype = TypeInfo<D_Type>::dtype;
 
+  cudaDeviceProp prop;
+  (void)cudaGetDeviceProperties(&prop, 0);
+  
   const bool has_fp8 = isFp8Type(atype) || isFp8Type(btype);
   const bool use_mxfp8 = params.scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING;
-  auto fp8_gelu_fusion_config = (HIP_VERSION >= 70000000) && has_fp8 &&
-                                atype == DType::kFloat8E4M3 &&
-                                btype == DType::kFloat8E4M3 &&
-                                (params.use_gelu && gelu_type == DType::kFloat16) &&
-                                (!params.use_bias || bias_type == DType::kFloat16) &&
-                                dtype == DType::kFloat8E4M3;
-
+  
+  // Enable FP8 GEMM + GELU fusion tests only on MI300 (gfx942) with ROCm > 7.0.
+  // hipBLASLt currently supports this config only
+  bool fp8_gelu_fusion_config = false;
+  if ( (HIP_VERSION >= 70000000) && (prop.major == 9 && prop.minor == 4) ) 
+  {
+    fp8_gelu_fusion_config = has_fp8 && 
+                            atype == DType::kFloat8E4M3 &&
+                            btype == DType::kFloat8E4M3 && 
+                            dtype == DType::kFloat8E4M3 &&
+                            (params.use_gelu && gelu_type == DType::kFloat16) &&
+                            (!params.use_bias || bias_type == DType::kFloat16);
+  }
+                          
   if (use_mxfp8)
   {
     if (!has_fp8) {
@@ -210,9 +220,6 @@ void performTest(const TestParams& params) {
       GTEST_SKIP() << "MXFP8 requires M, N, K to be multiples of 32";
     }
   }
-
-  cudaDeviceProp prop;
-  (void)cudaGetDeviceProperties(&prop, 0);
 
 #ifdef __HIP_PLATFORM_AMD__
   if (has_fp8)

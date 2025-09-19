@@ -1019,7 +1019,7 @@ void hipblaslt_gemm(const Tensor *inputA,
   }
 #else
   if(use_fp8 && gelu){
-    //Currently hipblasLT only supports below config for fp8 gelu_aux
+    // Currently hipblasLT only supports fp8 gemm + gelu fusion only on MI300
     bool allow_fp8_gemm = (A_type == HIP_R_8F_E4M3_FNUZ) &&
                         (B_type == HIP_R_8F_E4M3_FNUZ) &&
                         (D_type == HIP_R_8F_E4M3_FNUZ) &&
