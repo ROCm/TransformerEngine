@@ -174,11 +174,24 @@ get_test_config_list() {
     echo $_TEST_CONFIG_LIST
 }
 
+get_test_variant_tag() {
+    if [ -n "$1" -a -n "$2" ]; then
+        echo "$1/$2"
+    else
+        echo "$1$2"
+    fi
+}
+
 get_test_name_tag() {
     _fname=${1##*/}
     _test_name=${_fname%%.*}
-    test -n "$2" && _test_suffix=.$2
-    echo "$_test_name$_test_suffix"
+    _dir=${1%$_fname}
+    if [ -n "$2" ]; then
+        _tag="$_dir$_test_name.$2"
+    else
+        _tag="$_dir$_test_name"
+    fi
+    echo "$(echo $_tag | tr '/' '.')"
 }
 
 get_pytest_junitxml() {
@@ -208,9 +221,10 @@ configure_omp_threads() {
     cpus_per_core=$(lscpu | grep "Thread(s) per core:" | awk '{print $NF}')
 
     n_physical_cores=$((n_vcpus / cpus_per_core))
+    n_parallel_jobs=$1
 
     if [ -z ${OMP_NUM_THREADS} ]; then
-        export OMP_NUM_THREADS=$n_physical_cores
+        export OMP_NUM_THREADS=$((n_physical_cores / n_parallel_jobs))
 	echo "Setting OMP_NUM_THREADS=${OMP_NUM_THREADS}"
     else
         echo "Using OMP_NUM_THREADS=${OMP_NUM_THREADS}"

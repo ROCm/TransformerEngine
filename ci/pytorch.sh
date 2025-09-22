@@ -24,20 +24,30 @@ install_prerequisites() {
 run() {
     check_level $1 || return
     shift
-    _test_name_tag=`get_test_name_tag $1 $_fus_attn`
+    _test_variant_tag=`get_test_variant_tag $_fus_attn $_test_label`
+    _test_name_tag=`get_test_name_tag $1 $_test_variant_tag`
     check_test_filter $_test_name_tag || return
-    echo "Run [$_fus_attn] $@"
+    echo "Run [$_test_variant_tag] $@"
     #: ${_WORKERS_COUNT:=1}
     #_args=-n$_WORKERS_COUNT --max-worker-restart=$_WORKERS_COUNT
-    pytest -v `get_pytest_junitxml $_test_name_tag` "$TEST_DIR/$@" || test_run_error "[$_fus_attn] $1"
-    echo "Done [$_fus_attn] $1"
+    pytest -v -rfEs `get_pytest_junitxml $_test_name_tag` "$TEST_DIR/$@" || test_run_error "[$_test_variant_tag] $1"
+    echo "Done [$_test_variant_tag] $1"
 }
 
 run_default_fa() {
     #Run tests that do not use fused attention or control backend selection
     #with default backend only
-    if [ $_fus_attn = "auto" ]; then
+    if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
         run "$@"
+    fi
+}
+
+run_default_fa_lbl() {
+    if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
+        _test_label="$1"
+        shift
+        run "$@"
+        _test_label=""
     fi
 }
 
@@ -57,27 +67,26 @@ run_test_config(){
     run 1 test_jit.py
     run_default_fa 1 test_multi_tensor.py
     run 1 test_numerics.py
-    # TODO: release test_permutation_mask_map_fp8 until upstream fixes the to_float8 error
-    run_default_fa 1 test_permutation.py -k "not test_permutation_mask_map_fp8 and not test_permutation_single_case"
+    run_default_fa 1 test_permutation.py
     run_default_fa 1 test_recipe.py
     run 1 test_sanity.py
     run_default_fa 1 test_sanity_import.py
     run_default_fa 1 fused_attn/test_fused_attn.py # Backend selection is controlled by the test
-    NVTE_CK_USES_FWD_V3=1 NVTE_CK_USES_BWD_V3=1 run_default_fa 1 fused_attn/test_fused_attn.py # Using FAv3 for forward and backward pass
+    NVTE_CK_USES_FWD_V3=1 NVTE_CK_USES_BWD_V3=1 run_default_fa_lbl "v3" 1 fused_attn/test_fused_attn.py # Using FAv3 for forward and backward pass
     run_default_fa 1 triton_kernels/test_cast.py
     run_default_fa 1 triton_kernels/test_cast_mxfp8.py
     run_default_fa 1 triton_kernels/test_norm_common.py
     run_default_fa 1 triton_kernels/test_norms.py
     NVTE_TEST_TRITON_AUTOTUNE=1 run_default_fa 3 triton_kernels/test_norms.py
     run_default_fa 1 test_parallel_cross_entropy.py
-    NVTE_USE_DEQUANTIZE_TRITON=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa 3 test_numerics.py
-    NVTE_USE_RMSNORM_TRITON=1 run_default_fa 1 test_fusible_ops.py
+    NVTE_USE_DEQUANTIZE_TRITON=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa_lbl "triton" 1 test_numerics.py
+    NVTE_USE_RMSNORM_TRITON=1 run_default_fa_lbl "triton" 1 test_fusible_ops.py
 }
 
 run_test_config_mgpu(){
     #_WORKERS_COUNT=1
     #test $TEST_WORKERS = 0 && _WORKERS_COUNT=0
-    if [ $_fus_attn = "auto" ]; then
+    if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
         echo ==== Run mGPU with Fused attention backend: $_fus_attn ====
         run 3 test_fused_optimizer.py
         run 3 test_sanity_import.py
@@ -127,11 +136,13 @@ for _fus_attn in auto flash ck aotriton unfused; do
     #CK/AOTriton - no Flash attention and only corresponding Fused attention backend is enabled
     #Unfused - Flash and Fused attentions are disabled
     #Level 1 - run in auto and unfused modes
-    #Level 3 - run in all but unfused modes
+    #Level 3 - run in all but auto and unfused modes
     if [ $TEST_LEVEL -ge 3 ]; then
-        test $_fus_attn = unfused && continue
+        test $_fus_attn = auto -o $_fus_attn = unfused && continue
+        _DEFAULT_FUSED_ATTN="ck"
     else
         test $_fus_attn != auto -a $_fus_attn != unfused && continue
+        _DEFAULT_FUSED_ATTN="auto"
     fi
 
     if [ -n "$TEST_JOBS_MODE" ]; then

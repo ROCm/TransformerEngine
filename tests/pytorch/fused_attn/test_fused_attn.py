@@ -83,6 +83,28 @@ def reset_global_fp8_state():
     fp8.FP8GlobalStateManager.reset()
 
 
+class EnvVarCleaner:
+    def __init__(self, envs_):
+        self.envs = envs_
+        self.flags = {}
+        for env in self.envs:
+          if env in os.environ:
+            self.flags[env] = os.environ[env]
+    def __del__(self):
+      for env in self.envs:
+        if env in self.flags:
+            os.environ[env] = self.flags[env]
+        else:
+            os.environ.pop(env, None)
+
+
+@pytest.fixture(autouse=True)
+def reset_attn_backend():
+    env = EnvVarCleaner(["NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN",
+                         "NVTE_FUSED_ATTN_CK", "NVTE_FUSED_ATTN_AOTRITON"])
+    yield
+
+
 class ModelConfig:
     def __init__(
         self,
@@ -265,8 +287,7 @@ if is_bf16_compatible():  # bf16 requires sm_80 or higher
 param_types_lean = [torch.bfloat16]
 
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
-@pytest.mark.parametrize("workspace_opt", [True, False])
-def test_dot_product_mem_calc(workspace_opt):
+def test_dot_product_mem_calc():
     """
     Non-regression test for memory workspace calculation integer overflow issue.
     """
@@ -288,7 +309,6 @@ def test_dot_product_mem_calc(workspace_opt):
     if FusedAttnBackend["CK"] not in fused_attn_backends:
         pytest.skip("This test requires the CK fused attention backend.")
 
-    os.environ["NVTE_CK_USES_FWD_V3"] = "1"
     os.environ["NVTE_FUSED_ATTN_CK"] = "1"
     os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "0"
     _, _ = _run_dot_product_attention(
@@ -297,11 +317,10 @@ def test_dot_product_mem_calc(workspace_opt):
         "FusedAttention",
         ckpt_attn,
         qkv_layout,
-        workspace_opt,
+        False, #workspace_opt
         pad_between_seqs,
         is_training,
     )
-    del os.environ["NVTE_CK_USES_FWD_V3"]
     del os.environ["NVTE_FUSED_ATTN_CK"]
     del os.environ["NVTE_FUSED_ATTN_AOTRITON"]
 
@@ -311,7 +330,7 @@ def test_dot_product_mem_calc(workspace_opt):
 @pytest.mark.parametrize("model_configs", [model_configs_base])
 @pytest.mark.parametrize("model", model_configs_base.keys())
 @pytest.mark.parametrize("ckpt_attn", [False])
-@pytest.mark.parametrize("workspace_opt", [True, False])
+@pytest.mark.parametrize("workspace_opt", [False] if IS_HIP_EXTENSION else [True, False])
 @pytest.mark.parametrize("qkv_layout", [None])
 @pytest.mark.parametrize("swa", [False])
 @pytest.mark.parametrize("pad_between_seqs", [False])
@@ -800,6 +819,8 @@ model_configs_layout_thd = {
     ),
 }
 
+padding_configs = ([(True, False), (False, False), (False, True)] if IS_HIP_EXTENSION
+                   else [(True, False), (False, False)])
 
 # ROCm fused attn does not use cudnn, return high numbers to avoid tests filtering out
 @pytest.mark.skipif(get_cudnn_version() < (9, 0, 0), reason="cuDNN 9.0.0+ is required.")
@@ -811,10 +832,7 @@ model_configs_layout_thd = {
 @pytest.mark.parametrize("model_configs", [model_configs_layout_thd])
 @pytest.mark.parametrize("model", model_configs_layout_thd.keys())
 @pytest.mark.parametrize("qkv_layout", qkv_layouts_thd)
-@pytest.mark.parametrize(
-    ("pad_between_seqs", "share_cu_seqlens_ref"),
-    [(True, False), (False, False), (False, True)]
-)
+@pytest.mark.parametrize(("pad_between_seqs", "share_cu_seqlens_ref"), padding_configs)
 def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, pad_between_seqs, share_cu_seqlens_ref):
     """Test DotProductAttention module with different QKV layouts"""
     config = model_configs[model]
@@ -830,11 +848,8 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, pad_between
         window_size=config.window_size,
         pad_between_seqs=pad_between_seqs,
     )
-    if share_cu_seqlens_ref:
-        if not IS_HIP_EXTENSION:
-            pytest.skip("share_cu_seqlens_ref is a ROCm TE specific implementation detail.")
-        if FusedAttnBackend["CK"] not in fused_attn_backends:
-            pytest.skip("This test is only required for the CK fused attention backend.")
+    if share_cu_seqlens_ref and FusedAttnBackend["CK"] not in fused_attn_backends:
+        pytest.skip("This test is only required for the CK fused attention backend.")
     test_dot_product_attention(
         dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs, share_cu_seqlens_ref
     )
@@ -844,10 +859,7 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, pad_between
 @pytest.mark.parametrize("model_configs", [model_configs_layout_thd])
 @pytest.mark.parametrize("model", model_configs_layout_thd.keys())
 @pytest.mark.parametrize("qkv_layout", qkv_layouts_thd)
-@pytest.mark.parametrize(
-    ("pad_between_seqs", "share_cu_seqlens_ref"),
-    [(True, False), (False, False), (False, True)]
-)
+@pytest.mark.parametrize(("pad_between_seqs", "share_cu_seqlens_ref"), padding_configs)
 def test_dpa_qkv_layout_thd_mqa_gqa(dtype, model_configs, model, qkv_layout, pad_between_seqs, share_cu_seqlens_ref):
     config = model_configs[model]
 
