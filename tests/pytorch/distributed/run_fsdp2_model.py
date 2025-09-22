@@ -104,8 +104,11 @@ def _train(args):
     # FP8 Configuration
     fp8_format = Format.HYBRID
     fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=16, amax_compute_algo="max")
+    
+    #extract the memory pickle
+    torch.cuda.memory._record_memory_history(enabled='all', context='all', stacks='all')
 
-    if not args.fp8_init:
+    if args.fp8_init:
         # Build model context (FP8 init)
         build_model_context = nullcontext
         build_model_context_args = {}
@@ -154,24 +157,48 @@ def _train(args):
             isinstance(sub_module, sub_module_to_wrap) for sub_module_to_wrap in sub_modules_to_wrap
         ):
             fully_shard(sub_module, mesh=mesh)
-    fully_shard(model, mesh=mesh)
+    fully_shard(model, mesh=mesh, reshard_after_forward=True)
     restore_custom_attrs(model, custom_attrs)
 
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    #if LOCAL_RANK==0:
+    #    for name, param in model.named_parameters():
+    #        print("param: ", name, param)
+    #        print("param size: ", name, param.size())
+    #        print("param local size: ", name, param._local_tensor.size())
+    #        print("param local dtype: ", name, param._local_tensor.dtype)
 
     for iteration in range(args.iter):
         # Zero the parameter gradients
         optimizer.zero_grad()
-        input_data = torch.randn(args.batch_size, args.input_size).to(device)
-        output = model(input_data)
+        input_data = torch.randn(args.batch_size, args.input_size, requires_grad=True).to(device)
+        with te.fp8_autocast(enabled=True):
+            output = model(input_data)
         target = torch.randn(args.batch_size, args.output_size).to(device)
         loss = F.mse_loss(output, target)
         loss.backward()
+        #if LOCAL_RANK==0 and iteration==0:
+        #    for name, param in model.named_parameters():
+        #        print("grad for param: ", name, param.grad)
+        #        print("grad size for param: ", name, param.grad.size())
+        #        print("grad local size for param: ", name, param.grad._local_tensor.size())
+        #        print("grad local dtype for param: ", name, param.grad._local_tensor.dtype)
         optimizer.step()
         if LOCAL_RANK == 0:
             print(f"Rank {LOCAL_RANK}: Iteration {iteration} completed.")
 
+    dist.barrier(device_ids=[torch.cuda.current_device()])
     dist.destroy_process_group()
+
+    snapshot = torch.cuda.memory._snapshot()
+
+    import pickle
+    with open('memory_snapshot.pickle', 'wb') as f:
+        pickle.dump(snapshot, f)
+
+    # To disable memory history recording when no longer needed
+    torch.cuda.memory._record_memory_history(enabled=None)
+
     if LOCAL_RANK == 0:
         print(f"Rank {LOCAL_RANK}: Done...")
     return 0

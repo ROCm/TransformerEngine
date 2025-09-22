@@ -935,6 +935,19 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def forward(self):
         """Needs override."""
 
+    # clear the entire weight workspace to save memory for fsdp
+    def clear_weight_workspace(
+        self,
+        cache_name: Optional[str] = None,
+    ):
+        out = None
+        if cache_name is not None:
+            out = self._fp8_workspaces.get(cache_name, None)
+        
+        if out is not None:
+            clear_tensor_data(out)    
+            del self._fp8_workspaces[cache_name]
+
     def get_weight_workspace(
         self,
         *,

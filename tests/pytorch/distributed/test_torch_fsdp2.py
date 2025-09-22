@@ -14,7 +14,8 @@ import torch
 
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
-NUM_PROCS: int = torch.cuda.device_count()
+#NUM_PROCS: int = torch.cuda.device_count()
+NUM_PROCS: int = 4
 
 
 def _run_test(fp_init, sharding_dims):

@@ -6,6 +6,7 @@
 from typing import Callable, Dict, Optional, Tuple, Union
 from functools import reduce
 from operator import mul as multiply_op
+import os
 
 import torch
 
@@ -193,6 +194,8 @@ class _Linear(torch.autograd.Function):
                             and not in_fp8_activation_recompute_phase()
                         )
                     weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
+                    if (int(os.getenv("LOCAL_RANK", "0"))) == 0:
+                        print("in linear fwd, weight_quantizer set with rowwise: ", True, ", columnwise: ", columnwise_usage)
 
                 # FP8 cast to workspace buffer
                 update_workspace = is_first_microbatch is None or is_first_microbatch
@@ -314,12 +317,17 @@ class _Linear(torch.autograd.Function):
             # TODO(ksivamani): Check memory usage
             tensors_to_save, tensor_objects = prepare_for_saving(
                 saved_inputmat,
-                weightmat,
+                # TODO: try register weightmat/_fp8_workspace later
+                #weightmat,
                 weight,
                 bias,
             )
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
+            
+            module.clear_weight_workspace(
+                cache_name=(None if is_first_microbatch is None else "weight"),
+            )
 
             ctx.activation_dtype = activation_dtype
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
@@ -350,6 +358,9 @@ class _Linear(torch.autograd.Function):
             ctx.reduce_and_update_bwd_fp8_tensors = False
             ctx.owns_input = saved_inputmat is not inp
             ctx.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
+            ctx.weight_quantizer = weight_quantizer
+            ctx.module = module
+            ctx.skip_fp8_weight_update = skip_fp8_weight_update
             if ctx.fp8 and requires_grad(inp, weight, bias):
                 _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
@@ -399,9 +410,44 @@ class _Linear(torch.autograd.Function):
                     )
 
             saved_tensors = ctx.saved_tensors
-            inputmat, weight_fp8, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
+            #inputmat, weight_fp8, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
+            #    restore_from_saved(ctx.tensor_objects, saved_tensors)
+            #)
+            inputmat, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
                 restore_from_saved(ctx.tensor_objects, saved_tensors)
             )
+            
+            # reconstruct weight_fp8 from weight
+            weight_fp8 = weight
+            if not ctx.fp8:
+                weight_fp8 = cast_if_needed(weight_fp8, ctx.activation_dtype)
+            else:
+                if not isinstance(weight, QuantizedTensor):
+                    # Configure quantizer
+                    if ctx.weight_quantizer is not None:
+                        # is_grad_enabled is definitely true here
+                        columnwise_usage = ctx.requires_dgrad
+                        if not columnwise_usage:
+                            columnwise_usage = (
+                                is_fp8_activation_recompute_enabled()
+                                and not in_fp8_activation_recompute_phase()
+                            )
+
+                        ctx.weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
+                        if (int(os.getenv("LOCAL_RANK", "0"))) == 0:
+                            print("in linear bwd, weight_quantizer set with rowwise: ", True, ", columnwise: ", columnwise_usage)
+
+                    # FP8 cast to workspace buffer
+                    update_workspace = ctx.is_first_microbatch is None or ctx.is_first_microbatch
+                    weight_fp8 = ctx.module.get_weight_workspace(
+                        tensor=weight,
+                        quantizer=ctx.weight_quantizer,
+                        cache_name=(None if ctx.is_first_microbatch is None else "weight"),
+                        update_workspace=update_workspace,
+                        skip_update_flag=ctx.skip_fp8_weight_update,
+                        fsdp_group=ctx.fsdp_group,
+                        create_transpose_cache=ctx.keep_fp8_weight_transpose_cache,
+                    )
             # Delete the references to tensor objects once they've been consumed
             # by the `restore_from_saved` method to construct back the actual tensors.
             ctx.tensor_objects = None
@@ -422,6 +468,7 @@ class _Linear(torch.autograd.Function):
             # Gather intermediate/activation tensors if needed
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
             #       shards/unshards the base weights so we don't do it ourselves
+
             nvtx_range_push(f"{nvtx_label}.fsdp_gather")
             _fsdp_gather_tensors(
                 ctx.fsdp_group,
@@ -525,6 +572,8 @@ class _Linear(torch.autograd.Function):
             dgrad = None
             dgrad_work = None
             if ctx.requires_dgrad:
+                if isinstance(weight_fp8, QuantizedTensor):
+                    weight_fp8.update_usage(columnwise_usage=True)
 
                 # Update quantizer
                 if ctx.grad_input_quantizer is not None:
@@ -699,6 +748,11 @@ class _Linear(torch.autograd.Function):
             nvtx_range_push(f"{nvtx_label}.reduce_and_update_fp8_tensors")
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
             nvtx_range_pop(f"{nvtx_label}.reduce_and_update_fp8_tensors")
+        
+        # make sure that fp8 weight workspace is cleared
+        ctx.module.clear_weight_workspace(
+            cache_name=(None if ctx.is_first_microbatch is None else "weight"),
+        )
 
         # Scatter fp8 weight buffers
         if ctx.fp8 and not isinstance(weight, QuantizedTensor):
@@ -839,7 +893,6 @@ class Linear(TransformerEngineBaseModule):
         keep_fp8_weight_transpose_cache: bool = True,
     ) -> None:
         super().__init__()
-
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.in_features = in_features
         self.out_features = out_features

@@ -445,7 +445,8 @@ class TestFusedAdam(TestFusedOptimizer):
             )
 
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-    def test_fp8_model_weight_cast(self):
+    @pytest.mark.parametrize("use_decoupled_grad", (False, True))
+    def test_fp8_model_weight_cast(self, use_decoupled_grad):
         dtype = torch.bfloat16
         with fp8_model_init(enabled=True, recipe=DelayedScaling()):
             model = MultiheadAttention(
@@ -470,13 +471,17 @@ class TestFusedAdam(TestFusedOptimizer):
         }
         ref_optim = torch.optim.Adam(ref_params, **options)
         tst_optim = te.optimizers.FusedAdam(
-            model_params, master_weights=True, use_decoupled_grad=True, **options
+            model_params, master_weights=True, use_decoupled_grad=use_decoupled_grad, **options
         )
 
         for i in range(self.iters):
             for p_ref, p in zip(ref_params, model_params):
+                print("p: ", p)
                 p_ref.grad = torch.rand_like(p_ref)
-                p.decoupled_grad = p_ref.grad.clone()
+                if use_decoupled_grad:
+                    p.decoupled_grad = p_ref.grad.clone()
+                else:
+                    p.grad = p_ref.grad.clone().to(p.dtype)
             ref_optim.step()
             tst_optim.step()
             master_params = [tst_optim.get_unscaled_state(p, "master_param") for p in model_params]
