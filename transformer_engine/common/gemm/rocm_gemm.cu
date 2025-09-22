@@ -1193,7 +1193,7 @@ void hipblaslt_gemm(const Tensor *inputA,
 
     int firstAlgo = getIntEnv("TE_HIPBLASLT_ALGO_SELECTION", 0, 0);
     int tuneLoopCount = getIntEnv("TE_HIPBLASLT_TUNING_RUN_COUNT", 0, 0);
-    int algoTuneCount = 1;
+    int algoTotalCount = 1;
     std::vector<hipblasLtMatmulHeuristicResult_t> algoArr;
 
     if (tuneLoopCount)
@@ -1202,10 +1202,9 @@ void hipblaslt_gemm(const Tensor *inputA,
        * Limit amount by default. User may override with env
        */
       static const int defaultAlgoCount = 16;
-      algoTuneCount = getIntEnv("TE_HIPBLASLT_TUNING_ALGO_COUNT", defaultAlgoCount, 1);
+      algoTotalCount = getIntEnv("TE_HIPBLASLT_TUNING_ALGO_COUNT", defaultAlgoCount, 1);
     }
-    algoTuneCount += firstAlgo;
-    int algoTotalCount = cached_algo.hasId() ? std::max(algoTuneCount, (cached_algo.index + 1)) : algoTuneCount;
+    algoTotalCount += firstAlgo;
     algoArr.resize(algoTotalCount);
 
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceCreate(&preference));
