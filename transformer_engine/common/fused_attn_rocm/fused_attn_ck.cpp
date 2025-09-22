@@ -589,13 +589,13 @@ void fused_attn_ck_fwd_impl(
   // Check whether there is native AITER support for the config or if a
   // workaround is needed.
   if(pad_between_seqs || is_ragged){
-    // Default values used if ragged
-    s_q_stride = q_stride[2];
-    s_k_stride = k_stride[2];
-    s_v_stride = v_stride[2];
-    s_o_stride = o_stride[2];
     void* dummy_softmax_lse = static_cast<void*>((int*)1);
-    if(pad_between_seqs){
+    if(is_ragged){
+      s_q_stride = q_stride[2];
+      s_k_stride = k_stride[2];
+      s_v_stride = v_stride[2];
+      s_o_stride = o_stride[2];
+    }else{
       s_q_stride = std::min(q_stride[0], q_stride[2]);
       s_k_stride = std::min(k_stride[0], k_stride[2]);
       s_v_stride = std::min(v_stride[0], v_stride[2]);
@@ -920,15 +920,14 @@ void fused_attn_ck_bwd_impl(
   // Check whether there is native AITER support for the config or if a
   // workaround is needed.
   if(pad_between_seqs || is_ragged){
-    // Default values used if ragged
-    s_q_stride = q_stride[2];
-    s_k_stride = k_stride[2];
-    s_v_stride = v_stride[2];
-    s_o_stride = o_stride[2];
-    s_dk_expanded_stride = dk_expanded_stride[2];
-    s_dv_expanded_stride = dv_expanded_stride[2];
-
-    if(pad_between_seqs){
+    if(is_ragged){
+      s_q_stride = q_stride[2];
+      s_k_stride = k_stride[2];
+      s_v_stride = v_stride[2];
+      s_o_stride = o_stride[2];
+      s_dk_expanded_stride = dk_expanded_stride[2];
+      s_dv_expanded_stride = dv_expanded_stride[2];
+    }else{
       s_q_stride = std::min(q_stride[0], q_stride[2]);
       s_k_stride = std::min(k_stride[0], k_stride[2]);
       s_v_stride = std::min(v_stride[0], v_stride[2]);
@@ -1239,7 +1238,7 @@ void fused_attn_ck_bwd_impl(
 
     // Remove the padding for softmax lse
     if(pad_between_seqs){
-      if(needs_workaround){
+      if(!needs_workaround){
         cu_seqlen_padded_q_ptr = devPtrSeqOffsetsQ;
         cu_seqlen_padded_kv_ptr = devPtrSeqOffsetsKV;
       }else{
