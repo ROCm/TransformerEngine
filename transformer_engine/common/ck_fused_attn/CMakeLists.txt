@@ -1,11 +1,8 @@
 # Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: MIT
 
-#TODO: compile to a shared library
-cmake_minimum_required(VERSION 3.28)
-set(CMAKE_CXX_STANDARD 20)
-#TODO: remove after figuring out how to install clang-scan-deps
-set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+cmake_minimum_required(VERSION 3.21)
+set(CMAKE_CXX_STANDARD 17)
 project(ck_fused_attn LANGUAGES HIP CXX)
 
 
@@ -36,6 +33,8 @@ list(JOIN V3_ASM_ARCHS ";" V3_ASM_ARCHS_STR)
 set(ENV{GPU_ARCHS} "${V3_ASM_ARCHS_STR}")
 
 if(NOT DEFINED AITER_MHA_PATH)
+  # delete the existing aiter/jit/build dir for a clean build
+  file(REMOVE_RECURSE "${__AITER_SOURCE_DIR}/aiter/jit/build")
   # compile the libmha_fwd.so and libmha_bwd.so
   set(ENV{AITER_LOG_MORE} 1)
   # fp32 to bf16 cvt env still required for MI300X
