@@ -1193,7 +1193,7 @@ void hipblaslt_gemm(const Tensor *inputA,
 
     int firstAlgo = getIntEnv("TE_HIPBLASLT_ALGO_SELECTION", 0, 0);
     int tuneLoopCount = getIntEnv("TE_HIPBLASLT_TUNING_RUN_COUNT", 0, 0);
-    int algoTotalCount = 1;
+    int algoTuneCount = 1;
     std::vector<hipblasLtMatmulHeuristicResult_t> algoArr;
 
     if (tuneLoopCount)
@@ -1202,10 +1202,10 @@ void hipblaslt_gemm(const Tensor *inputA,
        * Limit amount by default. User may override with env
        */
       static const int defaultAlgoCount = 16;
-      algoTotalCount = getIntEnv("TE_HIPBLASLT_TUNING_ALGO_COUNT", defaultAlgoCount, 1);
+      algoTuneCount = getIntEnv("TE_HIPBLASLT_TUNING_ALGO_COUNT", defaultAlgoCount, 1);
     }
-    algoTotalCount += firstAlgo;
-    algoArr.resize(algoTotalCount);
+    algoTuneCount += firstAlgo;
+    algoArr.resize(algoTuneCount);
 
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceCreate(&preference));
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceSetAttribute(
@@ -1213,9 +1213,9 @@ void hipblaslt_gemm(const Tensor *inputA,
                             &workspaceSize, sizeof(workspaceSize)));
 
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Cdesc,
-                                                    Ddesc, preference, algoTotalCount, algoArr.data(),
-                                                    &algoTotalCount));
-    algoArr.resize(algoTotalCount);
+                                                    Ddesc, preference, algoTuneCount, algoArr.data(),
+                                                    &algoTuneCount));
+    algoArr.resize(algoTuneCount);
 
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceDestroy(preference));
 
@@ -1228,7 +1228,7 @@ void hipblaslt_gemm(const Tensor *inputA,
       {
         if (logTuning)
           std::cout << "[INFO] Perform hipBLASLt algo selection on GPU" << device_id
-                    << " in range [" << firstAlgo << "-" << (algoTotalCount - 1) << "] with "
+                    << " in range [" << firstAlgo << "-" << (algoTuneCount - 1) << "] with "
                     << tuneLoopCount << " loops " << std::endl;
 
         NVTE_CHECK_CUDA(hipStreamSynchronize(stream));
@@ -1237,7 +1237,7 @@ void hipblaslt_gemm(const Tensor *inputA,
         tuning_clock::now(); //the first call takes little longer so do it outside the loop
         tuning_clock::duration bestTime = tuning_clock::duration::max();
 
-        for (int algo=firstAlgo; algo<algoTotalCount; algo++)
+        for (int algo=firstAlgo; algo<algoTuneCount; algo++)
         {
             if (algoArr[algo].state != HIPBLAS_STATUS_SUCCESS)
             {
@@ -1300,7 +1300,7 @@ void hipblaslt_gemm(const Tensor *inputA,
                       << " ns" << std::endl;
         }
       }
-      else if (firstAlgo < algoTotalCount)
+      else if (firstAlgo < algoTuneCount)
       {
         bestAlgo = firstAlgo;
       }
