@@ -935,7 +935,7 @@ void fused_attn_ck_bwd_impl(
       s_dk_expanded_stride = std::min(dk_expanded_stride[0], dk_expanded_stride[2]);
       s_dv_expanded_stride = std::min(dv_expanded_stride[0], dv_expanded_stride[2]);
     }
-    if(nvte_ck_uses_bwd_v3 && workspace==nullptr){
+    if(nvte_ck_uses_bwd_v3){
       using ck_fused_attn::ck_attn_varlen_bwd;
       has_v3_support = ck_attn_varlen_bwd(
           nvte_to_ck_dtype(dtype),
