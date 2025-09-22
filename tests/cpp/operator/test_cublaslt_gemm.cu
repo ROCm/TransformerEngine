@@ -191,25 +191,9 @@ void performTest(const TestParams& params) {
   DType bias_type = TypeInfo<Bias_Type>::dtype;
   DType gelu_type = TypeInfo<Gelu_Type>::dtype;
   DType dtype = TypeInfo<D_Type>::dtype;
-
-  cudaDeviceProp prop;
-  (void)cudaGetDeviceProperties(&prop, 0);
   
   const bool has_fp8 = isFp8Type(atype) || isFp8Type(btype);
   const bool use_mxfp8 = params.scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING;
-  
-  // Enable FP8 GEMM + GELU fusion tests only on MI300 (gfx942) with ROCm > 7.0.
-  // hipBLASLt currently supports this config only
-  bool fp8_gelu_fusion_config = false;
-  if ( (HIP_VERSION >= 70000000) && (prop.major == 9 && prop.minor == 4) ) 
-  {
-    fp8_gelu_fusion_config = has_fp8 && 
-                            atype == DType::kFloat8E4M3 &&
-                            btype == DType::kFloat8E4M3 && 
-                            dtype == DType::kFloat8E4M3 &&
-                            (params.use_gelu && gelu_type == DType::kFloat16) &&
-                            (!params.use_bias || bias_type == DType::kFloat16);
-  }
                           
   if (use_mxfp8)
   {
@@ -221,7 +205,25 @@ void performTest(const TestParams& params) {
     }
   }
 
+  cudaDeviceProp prop;
+  (void)cudaGetDeviceProperties(&prop, 0);
+
 #ifdef __HIP_PLATFORM_AMD__
+
+  // Enable FP8 GEMM + GELU fusion tests only on MI300 (gfx942) with ROCm > 7.0.
+  // hipBLASLt currently supports this config only
+  bool fp8_gelu_fusion_config = false;
+  #if HIP_VERSION >= 70000000
+    if (prop.major == 9 && prop.minor == 4)
+    {
+      fp8_gelu_fusion_config = atype == DType::kFloat8E4M3 &&
+                              btype == DType::kFloat8E4M3 &&
+                              dtype == DType::kFloat8E4M3 &&
+                              (params.use_gelu && gelu_type == DType::kFloat16) &&
+                              (!params.use_bias || bias_type == DType::kFloat16);
+    }
+  #endif
+
   if (has_fp8)
   {
     bool fp8_supported = (prop.major == 9 && prop.minor >= 4);
@@ -241,7 +243,7 @@ void performTest(const TestParams& params) {
     }
 
     if (params.use_gelu && !fp8_gelu_fusion_config) {
-      GTEST_SKIP() << "FP8 GEMM with GELU is not supported";
+      GTEST_SKIP() << "FP8 GEMM with GELU is not supported in current config";
     }
     if (params.use_bias && dtype == DType::kFloat16) {
       GTEST_SKIP() << "FP8 GEMM with bias and FP16 output is not supported";

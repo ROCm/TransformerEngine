@@ -1018,13 +1018,15 @@ void hipblaslt_gemm(const Tensor *inputA,
     NVTE_CHECK(!gelu, "fp8 gemm + gelu fusion is unavailable right now!");
   }
 #else
-  if(use_fp8 && gelu){
+  hipDeviceProp_t prop;
+  NVTE_CHECK_CUDA(hipGetDeviceProperties(&prop, 0));
+  if(use_fp8 && gelu && (prop.major == 9 && prop.minor == 4) ){
     // Currently hipblasLT only supports fp8 gemm + gelu fusion only on MI300
-    bool allow_fp8_gemm = (A_type == HIP_R_8F_E4M3_FNUZ) &&
-                        (B_type == HIP_R_8F_E4M3_FNUZ) &&
-                        (D_type == HIP_R_8F_E4M3_FNUZ) &&
-                        (!bias || bias_type == HIP_R_16F) &&
-                        (aux_type == HIP_R_16F);
+    bool allow_fp8_gemm = (param.Atype == DType::kFloat8E4M3) &&
+                        (param.Btype == DType::kFloat8E4M3) &&
+                        (param.Dtype == DType::kFloat8E4M3) &&
+                        (!bias || param.BiasType == DType::kFloat16) &&
+                        (param.GeluType == DType::kFloat16);
     NVTE_CHECK(allow_fp8_gemm, "fp8 gemm + gelu fusion is unavailable with current config!");
   }
 #endif
