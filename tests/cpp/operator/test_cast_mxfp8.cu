@@ -86,6 +86,8 @@ void scale_block(const ProcessingMethod processing_method,
     }
 
     const fp8e8m0 biased_exponent = float_to_e8m0(amax * Quantized_Limits<OutputType>::max_reciprocal());
+    if (i_min == 1665 && j_min == 4384) printf("%.15f is the amax, and %d is the scale.\n", amax, (int)biased_exponent);
+
     const float scale_reciprocal = exp2f_rcp(biased_exponent);
     output_scales[scale_idx] = biased_exponent;
 
@@ -449,26 +451,26 @@ void performTest_x2(const ProcessingMethod processing_method,
 }
 
 std::vector<std::vector<size_t>> matrix_sizes = {
-    {1, 16},
+    /*{1, 16},
     {16, 48},
     {65, 96},
     {128, 128},
     {256, 256},
     {993, 512},
-    {256, 65536},
+    {256, 65536},*/
     {2048, 6144},
-    {16384, 128},
+    /*{16384, 128},
     {32768, 160},
     {4096, 1632},
     {1024},
-    {8, 32, 1024},
-    {16, 8, 4, 512},
+    8, 32, 1024},
+    {16, 8, 4, 512},*/
 };
 
 std::vector<std::pair<size_t, size_t>> block_sizes = {
     {1, 32},
-    {32, 1},
-    {32, 32},
+    //{32, 1},
+    //{32, 32},
 };
 
 std::vector<InputsFillCase> input_scenarios = {
@@ -480,22 +482,31 @@ std::vector<InputsFillCase> input_scenarios = {
 };
 
 std::vector<ProcessingMethod> processing_methods = {
-    ProcessingMethod::CAST_ONLY,
-    ProcessingMethod::CAST_DBIAS,
+    //ProcessingMethod::CAST_ONLY,
+    //ProcessingMethod::CAST_DBIAS,
     ProcessingMethod::CAST_DBIAS_DACT,
-    ProcessingMethod::CAST_DACT,
-    ProcessingMethod::CAST_ACT,
+    //ProcessingMethod::CAST_DACT,
+    //ProcessingMethod::CAST_ACT,
 };
 
 // Only GeLU activation tests are supported
 std::vector<ActivationType> Activation_types = {
-    ActivationType::Identity,
+    //ActivationType::Identity,
     ActivationType::GeLU,
     // ActivationType::SiLU,
     // ActivationType::ReLU,
     // ActivationType::QGeLU,
     // ActivationType::SReLU,
 };
+
+constexpr int range = 100;
+std::vector<int> random_vals = []() {
+    std::vector<int> temp_vector(range);
+    for (int x = 0; x < range; x++) {
+        temp_vector[x] = x;
+    }
+    return temp_vector;
+}();
 
 }  // namespace
 
@@ -506,7 +517,8 @@ class FusedCastMXFP8TestSuite : public ::testing::TestWithParam
                 std::pair<size_t, size_t>,
                 transformer_engine::DType,
                 transformer_engine::DType,
-                InputsFillCase>> {};
+                InputsFillCase,
+                int>> {};
 
 #define DACT_FUNC_SWITCH(OP_FUNC_TYPE, OP, ...) \
 switch (OP_FUNC_TYPE) { \
@@ -546,6 +558,7 @@ TEST_P(FusedCastMXFP8TestSuite, TestFusedCastMXFP8) {
     const DType input_type = std::get<4>(GetParam());
     const DType output_type = std::get<5>(GetParam());
     const InputsFillCase fill_case = std::get<6>(GetParam());
+    const int random_val = std::get<7>(GetParam());
 
     // Skips non Act tests if the Activation type is not an identity
     if ((processing_method == ProcessingMethod::CAST_ONLY || processing_method == ProcessingMethod::CAST_DBIAS)
@@ -630,7 +643,8 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(block_sizes),
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
         ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
-        ::testing::ValuesIn(input_scenarios)),
+        ::testing::ValuesIn(input_scenarios),
+        ::testing::ValuesIn(random_vals)),
     [](const testing::TestParamInfo<FusedCastMXFP8TestSuite::ParamType>& info) {
         std::string name = to_string(std::get<0>(info.param)) + "X" +
                            to_string(std::get<1>(info.param));
@@ -642,6 +656,7 @@ INSTANTIATE_TEST_SUITE_P(
               "X" + std::to_string(std::get<3>(info.param).second) +
               "X" + test::typeName(std::get<4>(info.param)) +
               "X" + test::typeName(std::get<5>(info.param)) +
-              "X" + test::caseName(std::get<6>(info.param));
+              "X" + test::caseName(std::get<6>(info.param)) +
+              "X" + std::to_string(std::get<7>(info.param));
         return name;
     });

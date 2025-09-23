@@ -236,6 +236,7 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
             const int scale_idx =
                 global_scales_offset_Y * scale_stride_rowwise + global_scales_offset_X;
             scales_rowwise[scale_idx] = biased_exponent;
+            if (scale_idx == 319817) printf("GPU AMAX: %.10f, Biased Exponent: %d\n", subwarp_amax, int(biased_exponent));
           }
 
           const float block_scale_inverse = exp2f_rcp(biased_exponent);
