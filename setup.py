@@ -33,6 +33,7 @@ current_file_path = Path(__file__).parent.resolve()
 
 
 from setuptools.command.build_ext import build_ext as BuildExtension
+from setuptools.command.develop import develop as _develop
 
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
 
@@ -47,6 +48,25 @@ CMakeBuildExtension = get_build_ext(BuildExtension)
 if not rocm_build():
     archs = cuda_archs()
 
+# A custom develop command only used for ROCm builds
+class develop(_develop):
+    def run(self):
+        super().run()
+        if (
+            int(os.getenv("NVTE_FUSED_ATTN_CK", "1")) and
+            int(os.getenv("NVTE_FUSED_ATTN", "1"))
+        ):
+            # Ensure that the AITER ASM kernels are properly available at runtime
+            # by creating a symlink to them. This is only necessary for editable
+            # mode since our C++ code assumes the AITER ASM kernel paths relative
+            # to trasnformer_engine.so, which is different in editable installs.
+            project_dir = Path(__file__).parent
+            asm_src_dir = project_dir / 'transformer_engine' / 'aiter'
+            # Must be synced with
+            # TransformerEngine/transformer_engine/common/ck_fused_attn/src/ck_fused_attn_utils.cpp
+            asm_target_dir = project_dir / 'aiter'
+            if asm_src_dir.is_dir() and not asm_target_dir.is_dir():
+                asm_target_dir.symlink_to(asm_src_dir)
 
 class TimedBdist(bdist_wheel):
     """Helper class to measure build time"""
@@ -167,6 +187,7 @@ if __name__ == "__main__":
     with open("README.rst", encoding="utf-8") as f:
         long_description = f.read()
 
+    cmdclass = {"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist}
     # Settings for building top level empty package for dependency management.
     if bool(int(os.getenv("NVTE_BUILD_METAPACKAGE", "0"))):
         assert bool(
@@ -227,7 +248,7 @@ if __name__ == "__main__":
         long_description=long_description,
         long_description_content_type="text/x-rst",
         ext_modules=ext_modules,
-        cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist},
+        cmdclass=cmdclass,
         python_requires=">=3.8, <3.13",
         classifiers=[
             "Programming Language :: Python :: 3.8",
