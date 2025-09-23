@@ -501,9 +501,9 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
             raise ImportError("JAX version 0.5.0 or later is required for shardy sharding.")
         del out_dtype, scale_dtype, is_outer, mesh, result_types
 
-        prefix = "BaseDBiasQuantizePrimitive_"
+        prefix = "DBiasQuantize_"
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
-            len(value_types[0].shape),
+            value_types[0].shape,
             unique_var=prefix + "x",
             flatten_axis=flatten_axis,
         )
@@ -525,6 +525,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         return SdyShardingRule(
             (x_axes, ("…1",), amax),
             (out, colwise_out, scale_rules.rowwise_rule, colwise_scale_inv, amax, dbias),
+            **scale_rules.factor_sizes,
         )
 
 
