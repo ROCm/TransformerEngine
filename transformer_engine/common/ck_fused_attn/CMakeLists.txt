@@ -45,7 +45,7 @@ if(NOT DEFINED AITER_MHA_PATH)
   # libmha_fwd.so and libmha_bwd.so will be under 3rdparty/aiter/op_tests/cpp/mha
   set(__AITER_MHA_PATH ${__AITER_TEST_DIR})
 else()
-    # use pre-built libmha_fwd.so libmha_bwd.so
+  # use pre-built libmha_fwd.so libmha_bwd.so
   set(__AITER_MHA_PATH ${AITER_MHA_PATH})
 endif()
 
