@@ -158,18 +158,20 @@ def rocm_attn_tols() -> Dict[str, float]:
 
 
 def assert_allclose(
-    l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float, rtol: float = None
+    l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float = None, rtol: float = None
 ) -> bool:
     """Ensures two lists are equal."""
     assert len(l1) == len(l2), "Unequal number of outputs."
     for i, (t1, t2) in enumerate(zip(l1, l2)):
-        tols = dict(atol=atol)
+        tols = dtype_tols(t2.dtype)
         if rtol is not None:
             tols["rtol"] = rtol
+        if atol is not None:
+            tols["atol"] = atol
         result = torch.allclose(t1, t2, **tols)
         if not result:
             diff = torch.abs(t1 - t2)
-            tol = atol + (rtol * torch.abs(t2))
+            tol = tols["atol"] + (tols["rtol"] * torch.abs(t2))
             exceed_mask = diff > tol
             if exceed_mask.any():
                 indices = torch.nonzero(exceed_mask, as_tuple=True)
@@ -212,15 +214,10 @@ class EnvVarCleaner:
             os.environ.pop(env, None)
 
 
-@pytest.fixture()
-def reset_env_var(request):
-    envs = getattr(request, 'param', [])
-    env = EnvVarCleaner(envs)
-    yield
-
 @pytest.fixture
-def reset_attn_backend():
-    env = EnvVarCleaner(["NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"])
+def reset_test_envs():
+    env = EnvVarCleaner(["NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN",
+                         "NVTE_BIAS_GELU_NVFUSION"])
     yield
 
 
@@ -727,8 +724,7 @@ def _test_e2e_full_recompute(
 @pytest.mark.parametrize("recipe", fp8_recipes)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_reentrant", all_boolean)
-@pytest.mark.parametrize("reset_env_var", [["NVTE_BIAS_GELU_NVFUSION"]], indirect=True)
-@pytest.mark.usefixtures("reset_env_var")
+@pytest.mark.usefixtures("reset_test_envs")
 def test_gpt_full_activation_recompute(
     dtype, bs, model, fp8, recipe, fp8_model_params, use_reentrant
 ):
@@ -2327,7 +2323,7 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
 @pytest.mark.parametrize("module", module_inference)
 @pytest.mark.parametrize("backend", backends_inference)
 @pytest.mark.parametrize("is_paged", [False, True])
-@pytest.mark.usefixtures("reset_attn_backend")
+@pytest.mark.usefixtures("reset_test_envs")
 def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module, backend, is_paged):
     if ((backend == "FlashAttention" and os.getenv("NVTE_FLASH_ATTN", "1") == "0") or
         (backend == "FusedAttention" and os.getenv("NVTE_FUSED_ATTN", "1") == "0")):
