@@ -5639,6 +5639,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                       across each CP sub-group (e.g., via NVLink), then exchanging KV with
                       p2p between sub-groups (e.g., via IBLink).
         """
+        cp_comm_type = os.getenv("CP_COMM_TYPE", 'all_gather')
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
