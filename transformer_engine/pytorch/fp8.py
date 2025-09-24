@@ -51,13 +51,27 @@ def check_fp8_support() -> Tuple[bool, str]:
 
 def check_mxfp8_support() -> Tuple[bool, str]:
     """Return if fp8 support is available"""
-    if (not IS_HIP_EXTENSION) and get_device_compute_capability() >= (10, 0):  # blackwell and above
+    if IS_HIP_EXTENSION:
+        if os.getenv("NVTE_ROCM_ENABLE_MXFP8", "0") == "0":
+            return False, "MXFP8 is disabled on ROCm."
+        gpu_arch = get_device_compute_capability()
+        if gpu_arch == (9, 5):
+            return True, ""
+        return False, "Gfx95x is required for MXFP8 execution."
+    if get_device_compute_capability() >= (10, 0):  # blackwell and above
         return True, ""
     return False, "Device compute capability 10.0 or higher required for MXFP8 execution."
 
 
 def get_default_fp8_recipe() -> Recipe:
     """FP8 recipe with default args."""
+    if IS_HIP_EXTENSION:
+        if os.getenv("NVTE_ROCM_ENABLE_MXFP8", "0") != "2":
+            return DelayedScaling()
+        gpu_arch = get_device_compute_capability()
+        if gpu_arch == (9, 5):
+            return MXFP8BlockScaling()
+        return DelayedScaling()
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
         return MXFP8BlockScaling()
     return DelayedScaling()
