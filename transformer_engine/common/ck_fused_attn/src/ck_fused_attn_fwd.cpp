@@ -27,7 +27,11 @@ void log_fwd_config(const char* func_name,
                     const bool is_v_rowmajor,
                     const bool do_fp8_static_quant,
                     const bool uses_fwd_v3,
-                    const fmha_fwd_args& fmha_args){
+                    const fmha_fwd_args& fmha_args,
+                    const void* cu_seqlen_padded_q_ptr,
+                    const void* cu_seqlen_padded_kv_ptr,
+                    const bool how_v3_bf16_cvt
+){
   bool ck_fused_attn_log_config = false;
   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
@@ -50,6 +54,9 @@ void log_fwd_config(const char* func_name,
     std::cout<<"has_dropout: "<<has_dropout<<std::endl;
     std::cout<<"do_fp8_static_quant: "<<do_fp8_static_quant<<std::endl;
     std::cout<<"uses_fwd_v3: "<<uses_fwd_v3<<std::endl;
+    std::cout<<"how_v3_bf16_cvt: "<<how_v3_bf16_cvt<<std::endl;
+    std::cout<<"cu_seqlen_padded_q_ptr: "<<cu_seqlen_padded_q_ptr<<std::endl;
+    std::cout<<"cu_seqlen_padded_kv_ptr: "<<cu_seqlen_padded_kv_ptr<<std::endl;
 
     // debug fmha_args
     std::cout<<"fmha_args: "<<std::endl;
@@ -256,7 +263,7 @@ hipError_t ck_attn_fwd(
   }();
   
   // print ck traits and args when needed
-  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, fmha_args);
+  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, fmha_args, nullptr, nullptr, how_v3_bf16_cvt);
   if (uses_fwd_v3)
   {
     set_aiter_asm_dir();
@@ -380,7 +387,7 @@ hipError_t ck_attn_varlen_fwd(
     const ck_tile::index_t batch_stride_bias = 0;
     //TODO: randval never used, can we remove it
     const ck_tile::index_t batch_stride_randval = 0;
-    const ck_tile::index_t batch_stride_lse = 0;
+    const ck_tile::index_t batch_stride_lse = nhead * max_tokens_q;
     const ck_tile::index_t batch_stride_o = 0;
 
     return fmha_fwd_args{q_ptr,
@@ -435,7 +442,7 @@ hipError_t ck_attn_varlen_fwd(
   }();
 
   // print ck traits and args when needed
-  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, fmha_args);
+  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, fmha_args, cu_seqlen_padded_q_ptr, cu_seqlen_padded_kv_ptr, how_v3_bf16_cvt);
   if (uses_fwd_v3)
   {
     set_aiter_asm_dir();

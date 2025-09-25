@@ -243,6 +243,7 @@ void log_fused_attn_config(
     return;
   }
 
+  std::cout<<"\n";
   std::cout<<func_name<<", ";
   std::cout<<"q_dtype: "<<mNVTEDTypeStr.at(q_dtype)<<", ";
   std::cout<<"kv_dtype: "<<mNVTEDTypeStr.at(kv_dtype)<<", ";

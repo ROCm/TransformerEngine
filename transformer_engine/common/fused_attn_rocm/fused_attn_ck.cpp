@@ -18,6 +18,9 @@
 namespace transformer_engine {
 namespace fused_attn_rocm {
 
+bool has_bwd_v3_support=false;
+bool has_fwd_v3_support=false;
+
 bool get_pad_between_seqs(
   const Tensor* input_cu_seqlens,
   const Tensor* input_cu_seqlens_padded,
@@ -552,6 +555,10 @@ void fused_attn_ck_fwd_impl(
   size_t *workspace_size,
   cudaStream_t stream){
 
+  if(workspace==nullptr){
+    // Reset static variable
+    has_fwd_v3_support = false;
+  }
   bool nvte_log_ck_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
@@ -561,7 +568,6 @@ void fused_attn_ck_fwd_impl(
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
   bool is_ragged = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_THD; 
   bool needs_padding_workaround = false;
-  bool has_v3_support = false;
   // extract the qkv and o storage bytes to allocate buffer for padding removing
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
   size_t q_storage_bytes = max_tokens_q*h*d_qk*nvte_dtype_size(dtype); 
@@ -603,34 +609,35 @@ void fused_attn_ck_fwd_impl(
     }
 
     // First-pass API check
-    if(nvte_ck_uses_fwd_v3){
+    if(nvte_ck_uses_fwd_v3 && workspace==nullptr){
       using ck_fused_attn::ck_attn_varlen_fwd;
-      has_v3_support = ck_attn_varlen_fwd(
-          nvte_to_ck_dtype(dtype),
-          b, h, hg, s_q, s_kv, d_qk, d_v,
-          max_tokens_q,
-          nullptr, // devQ ptr not needed for API check
-          q_stride[1], s_q_stride,
-          nullptr, // devK ptr not needed for API check
-          k_stride[1], s_k_stride,
-          nullptr, // devV ptr not needed for API check
-          v_stride[1], s_v_stride,
-          devPtrCuSeqlensQ, devPtrCuSeqlensKV,
-          nullptr,
-          nullptr,
-          is_training, scaling_factor, dropout_probability,
-          devPtrDropoutSeed, devPtrDropoutOffset,
-          set_ck_mask(mask_type, window_size_left, window_size_right),
-          window_size_left, window_size_right,
-          nullptr, // devO ptr not needed for API check
-          o_stride[1], s_o_stride,
-          dummy_softmax_lse, // Softmax ptr is needed for API check
-          nvte_ck_uses_fwd_v3,
-          nvte_ck_how_v3_bf16_cvt,
-          true,
-          stream) == 1;
+      has_fwd_v3_support = ck_attn_varlen_fwd(
+        nvte_to_ck_dtype(dtype),
+        b, h, hg, s_q, s_kv, d_qk, d_v,
+        max_tokens_q,
+        nullptr, // Q ptr not needed for API check
+        q_stride[1], s_q_stride,
+        nullptr, // K ptr not needed for API check
+        k_stride[1], s_k_stride,
+        nullptr, // V ptr not needed for API check
+        v_stride[1], s_v_stride,
+        devPtrCuSeqlensQ, devPtrCuSeqlensKV,
+        nullptr, // cumulative seqlen Q ptr not needed for API check
+        nullptr, // cumulative seqlen KV ptr not needed for API check
+        is_training, scaling_factor, dropout_probability,
+        devPtrDropoutSeed, devPtrDropoutOffset,
+        set_ck_mask(mask_type, window_size_left, window_size_right),
+        window_size_left, window_size_right,
+        nullptr, // O ptr not needed for API check
+        o_stride[1], s_o_stride,
+        dummy_softmax_lse, // Softmax ptr is needed for API check
+        nvte_ck_uses_fwd_v3,
+        nvte_ck_how_v3_bf16_cvt,
+        true,
+        stream
+      ) == 1;
     }
-    needs_padding_workaround = pad_between_seqs && (!has_v3_support || !is_ragged);
+    needs_padding_workaround = pad_between_seqs && (!has_fwd_v3_support || !is_ragged);
   }
 
 
@@ -748,7 +755,7 @@ void fused_attn_ck_fwd_impl(
     std::cout<<"mask_type: "<<mask_type<<", ";
     std::cout<<"window_size: ("<<window_size_left<<", "<<window_size_right<<")"<<", ";
     std::cout<<"nvte_ck_uses_fwd_v3: "<<nvte_ck_uses_fwd_v3<<", ";
-    std::cout<<"has_v3_support: "<<has_v3_support<<", ";
+    std::cout<<"has_fwd_v3_support: "<<has_fwd_v3_support<<", ";
     std::cout<<"needs_padding_workaround: "<<needs_padding_workaround<<std::endl;
   }
 
@@ -863,6 +870,10 @@ void fused_attn_ck_bwd_impl(
   size_t *workspace_size,
   cudaStream_t stream) {
   
+  if(workspace==nullptr){
+    // Reset static variable
+    has_bwd_v3_support = false;
+  }
   bool nvte_log_ck_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
@@ -876,7 +887,6 @@ void fused_attn_ck_bwd_impl(
 
   bool is_ragged = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_THD; 
   bool needs_padding_workaround = false;
-  bool has_v3_support = false;
   // extract the qkv and o storage bytes to allocate buffer for padding removing
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
   size_t q_storage_bytes = max_tokens_q*h*d_qk*nvte_dtype_size(dtype); 
@@ -937,50 +947,52 @@ void fused_attn_ck_bwd_impl(
       s_dk_expanded_stride = std::min(dk_expanded_stride[0], dk_expanded_stride[2]);
       s_dv_expanded_stride = std::min(dv_expanded_stride[0], dv_expanded_stride[2]);
     }
-    if(nvte_ck_uses_bwd_v3){
+    // First-pass API check
+    if(nvte_ck_uses_bwd_v3 && workspace==nullptr){
       using ck_fused_attn::ck_attn_varlen_bwd;
-      has_v3_support = ck_attn_varlen_bwd(
-          nvte_to_ck_dtype(dtype),
-          b, h, hg, s_q, s_kv, d_qk, d_v,
-          max_tokens_q, max_tokens_kv,
-          nullptr,
-          q_stride[1], s_q_stride,
-          nullptr,
-          k_stride[1], s_k_stride,
-          nullptr,
-          v_stride[1], s_v_stride,
-          devPtrCuSeqlensQ, devPtrCuSeqlensKV,
-          nullptr,
-          nullptr,
-          nullptr,
-          o_stride[1], s_o_stride,
-          nullptr,
-          nullptr,
-          o_stride[1], s_o_stride, //dO and O share the same stride in TE
-          scaling_factor, dropout_probability,
-          devPtrDropoutSeed, devPtrDropoutOffset,
-          set_ck_mask(mask_type, window_size_left, window_size_right),
-          window_size_left, window_size_right,
-          nullptr,
-          q_stride[1], s_q_stride, //dq and q share the same stride in TE
-          nullptr,
-          nullptr,
-          nullptr,
-          dk_expanded_stride[1], s_dk_expanded_stride, //dK and K share the same stride
-          dv_expanded_stride[1], s_dv_expanded_stride, //dV and V share the same stride
-          nullptr,
-          k_stride[1], s_k_stride, //dK and K share the same stride
-          nullptr,
-          v_stride[1], s_v_stride, //dV and V share the same stride
-          nullptr, // softmax_lsed
-          deterministic,
-          nvte_ck_uses_bwd_v3,
-          nvte_ck_is_v3_atomic_fp32,
-          nvte_ck_how_v3_bf16_cvt,
-          true,
-          stream) == 1;
+      has_bwd_v3_support = ck_attn_varlen_bwd(
+        nvte_to_ck_dtype(dtype),
+        b, h, hg, s_q, s_kv, d_qk, d_v,
+        max_tokens_q, max_tokens_kv,
+        nullptr, // Q ptr not needed for API check
+        q_stride[1], s_q_stride,
+        nullptr, // K ptr not needed for API check
+        k_stride[1], s_k_stride,
+        nullptr, // V ptr not needed for API check
+        v_stride[1], s_v_stride,
+        devPtrCuSeqlensQ, devPtrCuSeqlensKV,
+        nullptr, // cumulative seqlens Q ptr not needed for API check
+        nullptr, // cumulative seqlens KV ptr not needed for API check
+        nullptr, // O ptr not needed for API check
+        o_stride[1], s_o_stride,
+        nullptr, // Softmax LSE ptr not needed for API check
+        nullptr, // dO ptr not needed for API check
+        o_stride[1], s_o_stride, //dO and O share the same stride in TE
+        scaling_factor, dropout_probability,
+        devPtrDropoutSeed, devPtrDropoutOffset,
+        set_ck_mask(mask_type, window_size_left, window_size_right),
+        window_size_left, window_size_right,
+        nullptr,
+        q_stride[1], s_q_stride, //dq and q share the same stride in TE
+        nullptr,
+        nullptr,
+        nullptr,
+        dk_expanded_stride[1], s_dk_expanded_stride,
+        dv_expanded_stride[1], s_dv_expanded_stride,
+        nullptr,
+        k_stride[1], s_k_stride, //dK and K share the same stride
+        nullptr,
+        v_stride[1], s_v_stride, //dV and V share the same stride
+        nullptr, // softmax_lsed
+        deterministic,
+        nvte_ck_uses_bwd_v3,
+        nvte_ck_is_v3_atomic_fp32,
+        nvte_ck_how_v3_bf16_cvt,
+        true,
+        stream
+      ) == 1;
     }
-    needs_padding_workaround = pad_between_seqs && (!has_v3_support || !is_ragged);
+    needs_padding_workaround = pad_between_seqs && (!has_bwd_v3_support || !is_ragged);
   }
   // Exit to request upper level API to allocate memory if needed
   if(workspace==nullptr){
@@ -1220,7 +1232,7 @@ void fused_attn_ck_bwd_impl(
     std::cout<<"nvte_ck_uses_bwd_v3: "<<nvte_ck_uses_bwd_v3<<", ";
     std::cout<<"nvte_ck_is_v3_atomic_fp32: "<<nvte_ck_is_v3_atomic_fp32<<", ";
     std::cout<<"nvte_ck_how_v3_bf16_cvt: "<<nvte_ck_how_v3_bf16_cvt<<", ";
-    std::cout<<"has_v3_support: "<<has_v3_support<<", ";
+    std::cout<<"has_bwd_v3_support: "<<has_bwd_v3_support<<", ";
     std::cout<<"needs_padding_workaround: "<<needs_padding_workaround<<std::endl;
   }
 

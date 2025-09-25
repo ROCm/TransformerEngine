@@ -15,6 +15,23 @@
 
 namespace ck_fused_attn{
 
+// no device std::upper_bound
+// in an increasing array with given size len, search for the index that:
+// array[index] <= target < array[index+1]
+// guaranteed that target >=0 and target <= cu_seqlen[end-1]
+__forceinline__ __device__ int binary_search(int32_t target, const int32_t *array, uint64_t len) {
+  int left = 1, right = len - 1;
+  while (left < right) {
+    int mid = (left + right) / 2;
+    if (array[mid] <= target) {
+      left = mid + 1;
+    } else {
+      right = mid;
+    }
+  }
+  return left - 1;
+}
+
 // define dk_dv_reduce function only for fp16 and bf16 types
 template<typename DataType>
 __global__ void dk_dv_reduce(
@@ -109,8 +126,10 @@ __global__ void dk_or_dv_reduce(
 // define dk_dv_reduce function in THD layout only for fp16 and bf16 types
 template<typename DataType>
 __global__ void dk_dv_reduce_thd(
-  uint64_t h, uint64_t hg, uint64_t d, 
+  uint64_t b, uint64_t h, uint64_t hg, uint64_t d,
   const int32_t* total_seqlen_kv_ptr,
+  const int32_t* padded_seqlen_kv_ptr,
+  const int32_t* seqlen_kv_ptr,
   const DataType *dk_expanded,
   const DataType *dv_expanded,
   uint64_t stride_h_dkv_expanded, uint64_t stride_s_dkv_expanded,
@@ -128,6 +147,14 @@ __global__ void dk_dv_reduce_thd(
   if(seqlen_idx >= *total_seqlen_kv_ptr){
     return;
   }
+  if(padded_seqlen_kv_ptr){
+    uint64_t seq_idx = binary_search(seqlen_idx, padded_seqlen_kv_ptr, b+1);
+    uint64_t unpadded_size = seqlen_kv_ptr[seq_idx+1] - seqlen_kv_ptr[seq_idx];
+    if(seqlen_idx >= padded_seqlen_kv_ptr[seq_idx] + unpadded_size){
+      return;
+    }
+  }
+
 
   // h guaranteed to be multiples of hg
   uint64_t head_idx_offset = h / hg;
@@ -181,7 +208,6 @@ __global__ void dk_or_dv_reduce_thd(
   if(seqlen_idx >= *total_seqlen_kv_ptr){
     return;
   }
-
   // h guaranteed to be multiples of hg
   uint64_t head_idx_offset = h / hg;
 
@@ -312,7 +338,10 @@ void log_bwd_config(const char* func_name,
                     const bool uses_bwd_v3,
                     const bool is_v3_atomic_fp32,
                     const int how_v3_bf16_cvt,
-                    const fmha_bwd_args& fmha_args){
+                    const fmha_bwd_args& fmha_args,
+                    const void* cu_seqlen_padded_q_ptr,
+                    const void* cu_seqlen_padded_kv_ptr
+){
 
   bool ck_fused_attn_log_config = false;
   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
@@ -337,6 +366,8 @@ void log_bwd_config(const char* func_name,
     std::cout<<"uses_bwd_v3: "<<uses_bwd_v3<<std::endl;
     std::cout<<"is_v3_atomic_fp32: "<<is_v3_atomic_fp32<<std::endl;
     std::cout<<"how_v3_bf16_cvt: "<<how_v3_bf16_cvt<<std::endl;
+    std::cout<<"cu_seqlen_padded_q_ptr: "<<cu_seqlen_padded_q_ptr<<std::endl;
+    std::cout<<"cu_seqlen_padded_kv_ptr: "<<cu_seqlen_padded_kv_ptr<<std::endl;
 
     // fmha_args debug
     std::cout<<"fmha_args: "<<std::endl;
@@ -634,7 +665,7 @@ hipError_t ck_attn_bwd(
   }();
 
   // print ck traits and args when needed
-  log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_type, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args);
+  log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_type, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args, nullptr, nullptr);
   if (uses_bwd_v3)
   {
     set_aiter_asm_dir();
@@ -986,7 +1017,7 @@ hipError_t ck_attn_varlen_bwd(
   }();
 
   // print ck traits and args when needed
-  log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_enum::no_bias, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args);
+  log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_enum::no_bias, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args, cu_seqlen_padded_q_ptr, cu_seqlen_padded_kv_ptr);
   if (uses_bwd_v3)
   {
     set_aiter_asm_dir();
@@ -1030,8 +1061,12 @@ hipError_t ck_attn_varlen_bwd(
       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
         hipLaunchKernelGGL(
           dk_dv_reduce_thd<CK_TILE_TYPE>, grid, block, 0, stream,
-          h, hg, d_qk,
-          static_cast<const int32_t*>(cu_seqlen_kv_ptr)+b,
+          b, h, hg, d_qk,
+          static_cast<const int32_t*>(
+            cu_seqlen_padded_kv_ptr? cu_seqlen_padded_kv_ptr:cu_seqlen_kv_ptr
+          )+b,
+          static_cast<const int32_t*>(cu_seqlen_padded_kv_ptr),
+          static_cast<const int32_t*>(cu_seqlen_kv_ptr),
           static_cast<CK_TILE_TYPE*>(dk_expanded_ptr),
           static_cast<CK_TILE_TYPE*>(dv_expanded_ptr),
           stride_h_dk_expanded, stride_s_dk_expanded,
