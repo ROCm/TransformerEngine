@@ -7,7 +7,6 @@
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/transformer_engine.h>
 #include <map>
-#ifdef USE_HIPBLASLT
 #include <unistd.h>
 #include <vector>
 #include <forward_list>
@@ -18,12 +17,8 @@
 #include <chrono>
 #include <optional>
 #include <hipblaslt/hipblaslt.h>
-#endif
-#ifdef USE_ROCBLAS
-#define ROCBLAS_BETA_FEATURES_API 
-#include <rocblas/rocblas.h>
-#include <hipcub/hipcub.hpp>
-#endif
+#include <hipblaslt/hipblaslt-ext.hpp>
+
 #include <iostream>
 #include <cstdlib>
 #include <string>
@@ -33,12 +28,144 @@
 #include "../util/vectorized_pointwise.h"
 #include "../util/logging.h"
 
+namespace transformer_engine {
+
 namespace {
 
-#ifdef USE_HIPBLASLT
+template<typename T> 
+struct CacheEntry {
+  T value;
+  hipEvent_t event;
+
+  constexpr CacheEntry() : value(), event(nullptr) {}
+  
+  bool isValid() const { return event != nullptr; }
+
+  bool isAvailable() const
+  {
+    if (event == nullptr)
+      return false;
+
+    hipError_t err = hipEventQuery(event);
+    if (err == hipSuccess)
+    {
+      return true;
+    }
+    else if (err == hipErrorNotReady)
+    {
+      return false;
+    }
+    else
+    {
+      NVTE_ERROR("Invalid event: err=", std::to_string(err), " ", hipGetErrorString(err));
+      return false;
+    }
+  }
+};
+
+template<typename T, typename K> 
+class ObjCache {
+public:
+  using Data = std::unordered_map<K, std::unordered_map<hipStream_t, CacheEntry<T>>>;
+  static constexpr CacheEntry<T> invalidEntry{};
+
+  const CacheEntry<T>& get(const K& key, const hipStream_t stream) const
+  {
+    auto key_itr = data.find(key); 
+    if (key_itr == data.end())
+      return invalidEntry;
+
+    auto key_item = key_itr->second;
+
+    if (auto itr = key_item.find(stream); itr != key_item.end())
+      return itr->second;
+
+    return invalidEntry;
+  }
+
+  CacheEntry<T> acquire(const K& key, hipStream_t stream, bool get_available = true)
+  {
+    auto key_itr = data.find(key); 
+    if (key_itr == data.end())
+      return invalidEntry;
+
+    auto key_item = key_itr->second;
+
+    if (auto itr = key_item.find(stream); itr != key_item.end())
+    {
+      auto ret = itr->second;
+      key_item.erase(itr);
+      return ret;
+    }
+    
+    if (!get_available)
+      return invalidEntry;
+
+    for (auto itr = key_item.begin(); itr != key_item.end(); ++itr) {
+      if (itr->second.isAvailable()) {
+        auto ret = itr->second;
+        key_item.erase(itr);
+        return ret;
+      }
+    }
+    return invalidEntry;
+  }
+
+  void set(const K& key, hipStream_t stream, const CacheEntry<T>& item)
+  { 
+    data[key][stream] = item; 
+  }
+
+  ObjCache(void (*a_offload)(const Data&)): offload(a_offload) {}
+
+  ~ObjCache()
+  {
+    if (!data.empty() && offload != nullptr)
+    {
+      offload(data);
+    }
+  }
+
+protected:
+  void (*offload)(const Data&);
+  Data data;
+};
+
+template<typename T, typename K>
+class ObjPool: public ObjCache<T, K> {
+  public:
+    const CacheEntry<T>& get(const K& key, const hipStream_t stream) const
+    {
+      std::lock_guard<std::mutex> lock(mt);
+      return ObjCache<T, K>::get(key, stream);
+    }
+
+    CacheEntry<T> acquire(const K& key, const hipStream_t stream, bool get_available = true)
+    {
+      std::lock_guard<std::mutex> lock(mt);
+      return ObjCache<T, K>::acquire(key, stream, get_available);
+    }
+
+    void store(const typename ObjCache<T, K>::Data &cache)
+    {
+      std::lock_guard<std::mutex> lock(mt);
+      for (const auto &it: cache)
+      {
+        for (const auto &it2: it.second)
+        {
+          ObjCache<T, K>::set(it.first, it2.first, it2.second);
+        }
+      }
+    }
+
+  ObjPool(): ObjCache<T, K>(nullptr) {}
+
+  private:
+    mutable std::mutex mt;
+};
+  
 
 static hipDataType get_hipblaslt_dtype(const transformer_engine::DType t) {
-  using namespace transformer_engine;
   switch (t) {
     case DType::kFloat16:
       return HIP_R_16F;
@@ -61,338 +188,95 @@ static hipDataType get_hipblaslt_dtype(const transformer_engine::DType t) {
       NVTE_ERROR("Invalid type");
   }
 }
-#endif
 
-#ifdef USE_ROCBLAS
-rocblas_datatype get_rocblas_dtype(const transformer_engine::DType t) {
+//TODO: unified with cublaslt_gemm.cu
+struct GemmParam {
+  void *A;
+  void *B;
+  cublasOperation_t transA;
+  cublasOperation_t transB;
+  transformer_engine::DType Atype;
+  transformer_engine::DType Btype;
+  void *A_scale_inv;
+  void *B_scale_inv;
+  int lda;
+  int ldb;
+
+  GemmParam(cublasOperation_t transA, cublasOperation_t transB)
+      : A(nullptr),
+        B(nullptr),
+        transA(transA),
+        transB(transB),
+        Atype(transformer_engine::DType::kNumTypes),
+        Btype(transformer_engine::DType::kNumTypes),
+        A_scale_inv(nullptr),
+        B_scale_inv(nullptr),
+        lda(0),
+        ldb(0) {}
+};
+
+GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cublasOperation_t transA,
+                                const transformer_engine::Tensor &B, const cublasOperation_t transB,
+                                const int k, const int lda, const int ldb) {
   using namespace transformer_engine;
-  switch (t) {
-    case DType::kFloat16:
-      return rocblas_datatype_f16_r;
-    case DType::kFloat32:
-      return rocblas_datatype_f32_r;
-    case DType::kBFloat16:
-      return rocblas_datatype_bf16_r;
-    case DType::kFloat8E4M3:
-      return rocblas_datatype_f8_r;
-    case DType::kFloat8E5M2:
-      return rocblas_datatype_bf8_r;
-    default:
-      NVTE_ERROR("Invalid type");
+  NVTE_CHECK(A.scaling_mode == B.scaling_mode,
+             "Inputs A and B to GEMM need to have the same scaling mode!");
+  NVTE_CHECK(A.has_data() || A.has_columnwise_data(), "Input A does not hold any data!");
+  NVTE_CHECK(B.has_data() || B.has_columnwise_data(), "Input B does not hold any data!");
+  GemmParam ret(transA, transB);
+
+  // Transpose mode with column-major ordering
+  bool is_A_transposed = transA == CUBLAS_OP_T;
+  bool is_B_transposed = transB == CUBLAS_OP_T;
+
+  ret.lda = lda;
+  ret.ldb = ldb;
+
+  if (is_tensor_scaling(A.scaling_mode)) {
+    ret.A = A.data.dptr;
+    ret.A_scale_inv = A.scale_inv.dptr;
+    if (is_A_transposed) {
+      ret.Atype = A.data.dtype;
+    } else {
+      ret.Atype = A.has_columnwise_data() ? A.columnwise_data.dtype : A.data.dtype;
+      if (is_fp8_dtype(ret.Atype)) {
+        // Hopper and Ada - we need to use columnwise_data and change transA
+        NVTE_CHECK(A.has_columnwise_data(), "Input A is not suitable for columnwise usage!");
+        ret.A = A.columnwise_data.dptr;
+        ret.transA = CUBLAS_OP_T;
+        ret.A_scale_inv = A.columnwise_scale_inv.dptr;
+        ret.lda = k;
+      }
+    }
+    ret.B = B.data.dptr;
+    ret.B_scale_inv = B.scale_inv.dptr;
+    if (is_B_transposed) {
+      ret.Btype = B.has_columnwise_data() ? B.columnwise_data.dtype : B.data.dtype;
+      if (is_fp8_dtype(ret.Btype)) {
+        // Hopper and Ada - we need to use columnwise_data and change transA
+        NVTE_CHECK(B.has_columnwise_data(), "Input B is not suitable for columnwise usage!");
+        ret.B = B.columnwise_data.dptr;
+        ret.transB = CUBLAS_OP_N;
+        ret.B_scale_inv = B.columnwise_scale_inv.dptr;
+        ret.ldb = k;
+      }
+    } else {
+      ret.Btype = B.data.dtype;
+    }
+  } else {
+    // If not tensor scaling (which includes also high precision types), we need to
+    // use the proper version of data
+    // We leave the transA/B values as is, since Blackwell supports transposes
+    ret.A = is_A_transposed ? A.data.dptr : A.columnwise_data.dptr;
+    ret.Atype = is_A_transposed ? A.data.dtype : A.columnwise_data.dtype;
+    ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
+    ret.B = is_B_transposed ? B.columnwise_data.dptr : B.data.dptr;
+    ret.Btype = is_B_transposed ? B.columnwise_data.dtype : B.data.dtype;
+    ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
   }
-}
-#endif
-
-} //namespace
-
-namespace transformer_engine {
-
-#ifdef USE_ROCBLAS
-
-namespace detail {
-
-struct Empty {};
-
-__device__ inline fp32 identity(fp32 value, const Empty&) {
-  return value;
+  return ret;
 }
 
-__inline__ __device__
-float gelu(float x, const Empty&)
-{
-  float cdf = 0.5f * (1.0f + tanhf((0.7978845608028654f * (x + 0.044715f * x * x * x))));
-  return x * cdf;
-}
-
-
-__inline__ __device__
-float gelu_forward(float x)
-{
-  float cdf = 0.5f * (1.0f + tanhf((0.7978845608028654f * (x + 0.044715f * x * x * x))));
-  return x * cdf;
-}
-
-
-template <typename T, int THREADS_PER_BLOCK>
-__global__
-void gelu_forward_kernel(const float* in, T* out, float* amax, const float* scale, int m, int n) {
-  // fp8 output flow
-  if constexpr(std::is_same<T, fp8e4m3>::value ||std::is_same<T, fp8e5m2>::value){
-    typedef hipcub::BlockReduce<float, THREADS_PER_BLOCK> BlockReduce;
-    __shared__ typename BlockReduce::TempStorage block_temp_storage;
-    float thread_amax = 0;
-    for(int id = blockIdx.x * blockDim.x + threadIdx.x; id < m * n; id += blockDim.x * gridDim.x){
-      float x = in[id];
-      float y = gelu_forward(x); 
-      out[id] = (T)((*scale)*y);
-      thread_amax=std::fmax(std::fabs(y), thread_amax);
-    }
-    float block_amax = BlockReduce(block_temp_storage).Reduce(thread_amax, hipcub::Max());
-    if(threadIdx.x==0){
-      atomicMaxFloat(amax, block_amax);
-    }
-  }else{
-    for(int id = blockIdx.x * blockDim.x + threadIdx.x; id < m * n; id += blockDim.x * gridDim.x){
-      float x = in[id];
-      float y = gelu_forward(x); 
-      out[id] = (T)(y);
-    }
-  }
-}
-
-
-template <typename T>
-void gelu_forward_kernelLauncher(const float* in, T* out, float* amax, const float* scale, int m, int n, hipStream_t stream) {
-  dim3 block, grid;
-  constexpr int THREADS_PER_BLOCK = 1024;
-  block.x = THREADS_PER_BLOCK;
-  grid.x = ceil(1.0*m * n / THREADS_PER_BLOCK);
-  hipLaunchKernelGGL(( gelu_forward_kernel<T, THREADS_PER_BLOCK>), dim3(grid), dim3(block), 0, stream, in, out, amax, scale, m, n);
-}
-
-
-__inline__ __device__
-float gelu_backward(float x, float dy){
-  constexpr float kBeta = 0.7978845608028654f; 
-  constexpr float kKappa = 0.044715f;
-  float x_sq = x * x;
-  float x_cube = x_sq * x;
-  float tanh_inner = tanhf((kBeta * (x + kKappa * x_cube)));
-
-  float left = 0.5 * x;
-  float right = 1.0f + tanh_inner;
-
-  float left_derivative = 0.5 * right;
-
-  float tanh_derivative = 1 - tanh_inner * tanh_inner;
-  float inner_derivative = kBeta * (1.0f + 3.0 * kKappa * x_sq);
-  float right_derivative = left * tanh_derivative * inner_derivative;
-
-  return dy * (left_derivative + right_derivative);
-}
-
-template <typename T, typename Taux>
-__global__ 
-void gelu_backward_kernel(const float* dy, T* out, const Taux* __restrict pre_gelu_out, int m, int n) {
-  for(int id = blockIdx.x * blockDim.x + threadIdx.x; id < m * n; id += blockDim.x * gridDim.x)
-  {
-    float x = (float)pre_gelu_out[id];
-    float dx = (float)gelu_backward(x, dy[id]); 
-    out[id] = (T)(dx);
-  }
-}
-
-template <typename T, typename Taux>
-void gelu_backward_kernelLauncher(const float* in, T* out, const Taux* pre_gelu_out, int m, int n, hipStream_t stream) {
-  int blocks_per_row = ceil(float(n)/1024);
-  dim3 grid(min(m * blocks_per_row, 65536));
-  dim3 block(min(n, 1024));
-  hipLaunchKernelGGL(( gelu_backward_kernel<T, Taux>), dim3(grid), dim3(block), 0, stream, in, out, pre_gelu_out, m, n);
-}
-
-template <typename T, typename Tb, int THREADS_PER_BLOCK>
-__global__ 
-void add_bias_kernel(const float* in, T* out, const Tb* __restrict bias, float* amax, const float* scale, int m, int n){
-  // fp8 output flow
-  if constexpr(std::is_same<T, fp8e4m3>::value ||std::is_same<T, fp8e5m2>::value){
-    typedef hipcub::BlockReduce<float, THREADS_PER_BLOCK> BlockReduce;
-    __shared__ typename BlockReduce::TempStorage block_temp_storage;
-    float thread_amax = 0;
-    for(int id = blockIdx.x * blockDim.x + threadIdx.x; id < m * n; id += blockDim.x * gridDim.x){
-      float reg_bias = (float)bias[id % n];
-      float val = in[id] + reg_bias;
-      out[id] = (T)((*scale)*val);
-      // deal with amax of D
-      thread_amax=std::fmax(std::fabs(val), thread_amax);
-    }
-    // num_valid can be ignored since each thread amax is set to 0
-    float block_amax = BlockReduce(block_temp_storage).Reduce(thread_amax, hipcub::Max());
-    if(threadIdx.x==0){
-      atomicMaxFloat(amax, block_amax);
-    }
-  }else{
-    for(int id = blockIdx.x * blockDim.x + threadIdx.x; id < m * n; id += blockDim.x * gridDim.x){
-      float reg_bias = (float)bias[id % n];
-      float val = in[id] + reg_bias;
-      out[id] = (T)(val);
-    }
-  }
-}
-
-
-template <typename T, typename Tb>
-void add_bias_kernelLauncher(const float* in, T* out, const Tb* __restrict bias, float* amax, const float* scale, int m, int n, hipStream_t stream) {
-  dim3 block, grid;
-  constexpr int THREADS_PER_BLOCK = 1024;
-  block.x = THREADS_PER_BLOCK;
-  grid.x = ceil(1.0*m * n / THREADS_PER_BLOCK);
-  hipLaunchKernelGGL(( add_bias_kernel<T, Tb, THREADS_PER_BLOCK>), dim3(grid), dim3(block), 0, stream, in, out, bias, amax, scale, m, n);
-
-}
-
-template <typename T, typename Taux, typename Tb, int THREADS_PER_BLOCK>
-__global__ 
-void add_bias_gelu_kernel(const float* in, T* out, Taux* pre_gelu_out, const Tb* __restrict bias, float* amax, const float* scale, int m, int n){
-  // fp8 output flow
-  if constexpr(std::is_same<T, fp8e4m3>::value ||std::is_same<T, fp8e5m2>::value){
-    // only need to deal with amax and scale of D, no need to deal with amax and scale of pre_gelu_out
-    typedef hipcub::BlockReduce<float, THREADS_PER_BLOCK> BlockReduce;
-    __shared__ typename BlockReduce::TempStorage block_temp_storage;
-    float thread_amax = 0;
-    for(int id = blockIdx.x * blockDim.x + threadIdx.x; id < m * n; id += blockDim.x * gridDim.x){
-      float reg_bias = (float)bias[id % n];
-      float val = in[id] + reg_bias;
-      // pre_gelu_out guaranteed not to be fp8 type
-      pre_gelu_out[id] = (Taux)(val);
-      val = gelu_forward(val);
-      out[id] = (T)((*scale)*val);
-      // deal with amax of D
-      thread_amax=std::fmax(std::fabs(val), thread_amax);
-    }
-    // num_valid can be ignored since each thread amax is set to 0
-    float block_amax = BlockReduce(block_temp_storage).Reduce(thread_amax, hipcub::Max());
-    if(threadIdx.x==0){
-      atomicMaxFloat(amax, block_amax);
-    }
-  }else{
-    for(int id = blockIdx.x * blockDim.x + threadIdx.x; id < m * n; id += blockDim.x * gridDim.x){
-      float reg_bias = (float)bias[id % n];
-      float val = in[id] + reg_bias;
-      pre_gelu_out[id] = (Taux)(val);
-      out[id] = (T)(gelu_forward(val));
-    }
-  }
-}
-
-template <typename T, typename Taux, typename Tb>
-void add_bias_gelu_kernelLauncher(const float* in, T* out, Taux* pre_gelu_out, const Tb* __restrict bias, float* amax, const float* scale, int m, int n, hipStream_t stream) {
-  dim3 block, grid;
-  constexpr int THREADS_PER_BLOCK = 1024;
-  block.x = THREADS_PER_BLOCK;
-  grid.x = ceil(1.0*m * n / THREADS_PER_BLOCK);
-  hipLaunchKernelGGL(( add_bias_gelu_kernel<T, Taux, Tb, THREADS_PER_BLOCK>), dim3(grid), dim3(block), 0, stream, in, out, pre_gelu_out, bias, amax, scale, m, n );
-
-}
-
-template <typename Tin, typename T>
-__global__ 
-void identity_kernel(const Tin* in, T* out, int n) {
-  for(int id = blockIdx.x * blockDim.x + threadIdx.x; id < n; id += blockDim.x * gridDim.x)
-  {
-    Tin val = in[id];
-    out[id] = (T)(val);
-  }
-}
-
-
-template <typename Tin, typename T>
-void identity_kernelLauncher(const Tin* in, T* out, int n, hipStream_t stream) {
-  dim3 block, grid;
-  block.x = 1024;
-  grid.x = ceil( n / 1024.);
-  hipLaunchKernelGGL(( identity_kernel<Tin, T>), dim3(grid), dim3(block), 0, stream, in, out, n );
-}
-
-template <typename T, int THREADS_PER_BLOCK>
-__global__ 
-void identity_output_kernel(const float* in, T* out, float* amax, const float* scale, int n) {
-  if constexpr(std::is_same<T, fp8e4m3>::value ||std::is_same<T, fp8e5m2>::value){
-    typedef hipcub::BlockReduce<float, THREADS_PER_BLOCK> BlockReduce;
-    __shared__ typename BlockReduce::TempStorage block_temp_storage;
-    float thread_amax = 0;
-    for(int id = blockIdx.x * blockDim.x + threadIdx.x; id < n; id += blockDim.x * gridDim.x){
-      float val = in[id];
-      out[id] = (T)((*scale)*val);
-      // deal with amax of D
-      thread_amax=std::fmax(std::fabs(val), thread_amax);
-    }
-    // num_valid can be ignored since each thread amax is set to 0
-    float block_amax = BlockReduce(block_temp_storage).Reduce(thread_amax, hipcub::Max());
-    if(threadIdx.x==0){
-      atomicMaxFloat(amax, block_amax);
-    }
-  }else{
-    for(int id = blockIdx.x * blockDim.x + threadIdx.x; id < n; id += blockDim.x * gridDim.x){
-      float val = in[id];
-      out[id] = (T)(val);
-    }
-  }
-}
-
-
-template <typename T>
-void identity_output_kernelLauncher(const float* in, T* out, float* amax, const float* scale, int n, hipStream_t stream) {
-  dim3 block, grid;
-  constexpr int THREADS_PER_BLOCK = 1024;
-  block.x = THREADS_PER_BLOCK;
-  grid.x = ceil( 1.0*n / THREADS_PER_BLOCK);
-  hipLaunchKernelGGL(( identity_output_kernel<T, THREADS_PER_BLOCK>), dim3(grid), dim3(block), 0, stream, in, out, amax, scale, n );
-}
-
-template <typename Tin, int THREADS_PER_BLOCK>
-__global__
-void bias_gradient_kernel(const Tin* in, float* out, int m, int n) {
-  typedef hipcub::BlockReduce<float, THREADS_PER_BLOCK> BlockReduce;
-  __shared__ typename BlockReduce::TempStorage block_temp_storage;
-
-  int BLOCKS_PER_COL = ceil(float(m)/THREADS_PER_BLOCK);
-  int THREADS_PER_COL = BLOCKS_PER_COL * THREADS_PER_BLOCK;
-  int idx = threadIdx.x + blockIdx.x * blockDim.x;
-  int col_idx = idx / THREADS_PER_COL;
-  int row_idx = idx % THREADS_PER_COL;
-  float thread_data;
-  if (row_idx < m)
-    thread_data = (float)in[row_idx * n + col_idx];
-  float local_sum;
-  if (row_idx < (BLOCKS_PER_COL-1) * THREADS_PER_BLOCK) {
-    local_sum = BlockReduce(block_temp_storage).Sum(thread_data);
-  }
-  else {
-    local_sum = BlockReduce(block_temp_storage).Sum(thread_data, m-(BLOCKS_PER_COL-1)*THREADS_PER_BLOCK);
-  }
-  if (threadIdx.x == 0)
-    atomicAdd(&out[col_idx], local_sum);
-}
-
-template <typename Tin>
-void bias_gradient_kernelLauncher(const Tin* in, float* out, int m, int n, bool stream_order_alloc, hipStream_t stream) { 
-  dim3 block, grid;
-  constexpr int THREADS_PER_BLOCK = 1024;
-  int BLOCKS_PER_COL = ceil(float(m)/THREADS_PER_BLOCK);
-  block.x = THREADS_PER_BLOCK;
-  grid.x = BLOCKS_PER_COL*n;
-  if(! stream_order_alloc){
-    NVTE_CHECK_CUDA( hipMemset(out, 0, n*sizeof(float)) );
-  }else{
-    NVTE_CHECK_CUDA( hipMemsetAsync(out, 0, n*sizeof(float), stream) );
-  }
-  hipLaunchKernelGGL(( bias_gradient_kernel<Tin, THREADS_PER_BLOCK>), dim3(grid), dim3(block), 0, stream, in, out, m, n);
-}
-
-} // namespace detail
-
-transformer_engine::DType get_transformer_engine_dtype(const rocblas_datatype t) {
-  using namespace transformer_engine;
-  switch (t) {
-    case rocblas_datatype_f16_r:
-      return DType::kFloat16;
-    case rocblas_datatype_f32_r:
-      return DType::kFloat32;
-    case rocblas_datatype_bf16_r:
-      return DType::kBFloat16;
-    case rocblas_datatype_f8_r:
-      return DType::kFloat8E4M3;
-    case rocblas_datatype_bf8_r:
-      return DType::kFloat8E5M2;
-    default:
-      NVTE_ERROR("Invalid type");
-  }
-}
-#endif //USE_ROCBLAS
-
-#ifdef USE_HIPBLASLT
-
-namespace {
 
 static class HandlePool {
 public:
@@ -623,6 +507,8 @@ public:
     int m, n, k;
     int lda, ldb, ldd;
     hipblasOperation_t transa, transb;
+    //Make it int instead of hipblasLtMatmulMatrixScale_t for compatibility with old hipblasLt
+    int scaling_mode;
     hipblasLtEpilogue_t epilogue;
 
     Key(int deviceCap_,
@@ -630,13 +516,13 @@ public:
         hipDataType d_type_, hipDataType bias_type_,
         int m_, int n_, int k_, int lda_, int ldb_, int ldd_,
         hipblasOperation_t transa_, hipblasOperation_t transb_,
-        hipblasLtEpilogue_t epilogue_):
+        int scaling_mode_, hipblasLtEpilogue_t epilogue_):
         deviceCap(deviceCap_),
         a_type(a_type_), b_type(b_type_),
         d_type(d_type_), bias_type(bias_type_),
         m(m_), n(n_), k(k_), lda(lda_), ldb(ldb_), ldd(ldd_),
         transa(transa_), transb(transb_),
-        epilogue(epilogue_) {}
+        scaling_mode(scaling_mode_), epilogue(epilogue_) {}
 
     Key() {}
 
@@ -648,7 +534,7 @@ public:
       && (m == val.m) && (n == val.n) && (k == val.k)
       && (lda == val.lda) && (ldb == val.ldb) && (ldd == val.ldd)
       && (transa == val.transa) && (transb == val.transb)
-      && (epilogue == val.epilogue) );
+      && (scaling_mode == val.scaling_mode) && (epilogue == val.epilogue) );
     }
 
     struct Comp
@@ -777,7 +663,7 @@ protected:
     csv_helper fs(ofs, csv_sep);
     fs << "dev_cap" << "m" << "n"  << "k" << "trans_a" << "trans_b" 
     << "type_a" << "type_b" << "type_d" << "bias_type" 
-    << "lda" << "ldb" << "ldd" << "epi" << "comp" << "scale"
+    << "lda" << "ldb" << "ldd" << "scale_mode" << "epi" << "comp" << "scale_type"
     << "ws_min" << "ws_max" << "algo_id" << "aidx";
   }
   
@@ -844,7 +730,7 @@ protected:
       std::getline(is, type_b, csv_sep);
       std::getline(is, type_d, csv_sep);
       std::getline(is, bias_type, csv_sep);
-      is >> cfg.lda >> c >> cfg.ldb >> c >> cfg.ldd >> c;
+      is >> cfg.lda >> c >> cfg.ldb >> c >> cfg.ldd >> c >> cfg.scaling_mode >> c;
       std::getline(is, epi, csv_sep);
       std::getline(is, comp, csv_sep);
       std::getline(is, scale, csv_sep);
@@ -859,6 +745,23 @@ protected:
       if (ws_min > ws_max)
       {
         std::cout << "[WARNING] Invalid WS size at " << line << "\n";
+        continue;
+      }
+
+      //Check and filter out compute and scale types
+      if (computeNameMapper.getValue(comp, "comp") != HIPBLAS_COMPUTE_32F ||
+        typeNameMapper.getValue(scale, "scale") != HIP_R_32F)
+      {
+        continue;
+      }
+
+#if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
+      if (cfg.scaling_mode < 0 || cfg.scaling_mode >= (int)HIPBLASLT_MATMUL_MATRIX_SCALE_END)
+#else
+      if (cfg.scaling_mode != 0)
+#endif
+      {
+        std::cout << "[WARNING] Unsupported scaling mode at " << line << "\n";
         continue;
       }
 
@@ -884,12 +787,6 @@ protected:
       cfg.transb = transposeNameMapper.getValue(trans_b, "trans_b");
 
       cfg.epilogue = epilogueNameMapper.getValue(epi, "epi");
-      //Check and filter out compute and scale types
-      if (computeNameMapper.getValue(comp, "comp") != HIPBLAS_COMPUTE_32F ||
-        typeNameMapper.getValue(scale, "scale") != HIP_R_32F)
-      {
-        continue;
-      }
 
       if (find_(cfg, ws_min, ws_max))
       {
@@ -970,7 +867,7 @@ protected:
       << transposeNameMapper.getName(cfg.transa) << transposeNameMapper.getName(cfg.transb)
       << typeNameMapper.getName(cfg.a_type) << typeNameMapper.getName(cfg.b_type) << typeNameMapper.getName(cfg.d_type)
       << ((cfg.bias_type == (hipDataType)-1) ? "-" : typeNameMapper.getName(cfg.bias_type))
-      << cfg.lda << cfg.ldb << cfg.ldd << epilogueNameMapper.getName(cfg.epilogue)
+      << cfg.lda << cfg.ldb << cfg.ldd << cfg.scaling_mode << epilogueNameMapper.getName(cfg.epilogue)
       << computeNameMapper.getName(HIPBLAS_COMPUTE_32F) << typeNameMapper.getName(HIP_R_32F)
       << algo.ws_size_min << algo.ws_size_max << algo.algoId << algo.index << csv_helper::end() << "\n";
   }
@@ -1003,8 +900,6 @@ static inline int getIntEnv(const char *name, int defval, int minval)
   return val;
 }
 
-} //namespace
-
 
 /* Warning: only call once per device!
  * When calling nvte_multi_stream_cublas_gemm with hipblaslt backend
@@ -1018,51 +913,82 @@ static void init_hipblaslt_handles(hipblasLtHandle_t* hipblaslt_handles) {
   }
 }
 
+
 void hipblaslt_gemm(const Tensor *inputA,
-                 const Tensor *inputB,
-                 Tensor *outputD,
-                 const Tensor *inputBias,
-                 Tensor *outputPreGelu,
-                 int m, int n, int k,
-                 int lda, int ldb, int ldd,
-                 hipblasOperation_t transa,
-                 hipblasOperation_t transb,
-                 bool grad,
-                 void* workspace,
-                 size_t workspaceSize,
-                 bool accumulate,
-                 bool use_split_accumulator,
-                 int math_sm_count,
-                 int m_split,
-                 int n_split,
-                 bool gemm_producer,
-                 const Tensor *inputCounter,
-                 hipStream_t stream,
-                 hipblasLtHandle_t handle
+                    const Tensor *inputB,
+                    Tensor *outputD,
+                    const Tensor *inputBias,
+                    Tensor *outputPreGelu,
+                    int m, int n, int k,
+                    int lda, int ldb, int ldd,
+                    hipblasOperation_t transa,
+                    hipblasOperation_t transb,
+                    bool grad,
+                    void* workspace,
+                    size_t workspaceSize,
+                    bool accumulate,
+                    bool use_split_accumulator,
+                    int math_sm_count,
+                    int m_split,
+                    int n_split,
+                    bool gemm_producer,
+                    const Tensor *inputCounter,
+                    hipStream_t stream,
+                    hipblasLtHandle_t handle
 ) {
-  void *A = inputA->data.dptr;
-  void *A_scale_inverse = inputA->scale_inv.dptr;
-  void *B = inputB->data.dptr;
-  void *B_scale_inverse = inputB->scale_inv.dptr;
+  // Return immediately if GEMM is trivial
+  if (m <= 0 || n <= 0) {
+    return;
+  }
+  NVTE_CHECK(k > 0);
+
+  const GemmParam &param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, k, lda, ldb);
+
+  bool nvte_log_gemm_config = false;
+  if (const char* env_p = std::getenv("NVTE_LOG_GEMM_CONFIG") ) {
+      nvte_log_gemm_config = (strcmp(env_p, "1") == 0);
+  }
+
+  if (nvte_log_gemm_config) {
+    const bool use_fp8 = is_fp8_dtype(param.Atype) || is_fp8_dtype(param.Btype);
+    const bool a_tensor = is_tensor_scaling(inputA->scaling_mode);
+    const bool a_block  = is_block_scaling(inputA->scaling_mode);
+
+    std::cout << "m=" << m << " k=" << k << " n=" << n 
+        << " transa=" << (param.transA == HIPBLAS_OP_T ? "T" : "N")
+        << " transb=" << (param.transB == HIPBLAS_OP_T ? "T" : "N")
+        << " A_type=" << (int)(param.Atype)
+        << " B_type=" << (int)(param.Btype)
+        << " D_type=" << (int)outputD->data.dtype
+        << " bias_type=" << (int)inputBias->data.dtype
+        << " grad=" << grad
+        << " bias=" << (inputBias->data.dptr != nullptr)
+        << " gelu=" << (outputPreGelu->data.dptr != nullptr)
+        << " use_fp8=" << use_fp8
+        << " scale_mode=" << (a_tensor ? "tensor" : a_block ? "mxfp8" : "unsupported")
+        << " accumulate=" << accumulate
+        << std::endl;
+  }
+  
   void *D = outputD->data.dptr;
-  //Added for fp8 gelu_fusion support
-  // void *D_amax = outputD->amax.dptr;
-  // void *D_scale = outputD->scale.dptr;
+  void *C = D;
+  void *D_scale = outputD->scale.dptr;
+  void *D_amax = outputD->amax.dptr;
   void *bias_ptr = inputBias->data.dptr;
   const bool bias = bias_ptr != nullptr;
   void *pre_gelu_out = outputPreGelu->data.dptr;
   const bool gelu = pre_gelu_out != nullptr;
-  const bool use_fp8 = is_fp8_dtype(inputA->data.dtype) ||
-                       is_fp8_dtype(inputB->data.dtype);
-  const hipDataType A_type = get_hipblaslt_dtype(inputA->data.dtype);
-  const hipDataType B_type = get_hipblaslt_dtype(inputB->data.dtype);
+  const bool use_fp8 = is_fp8_dtype(param.Atype) || is_fp8_dtype(param.Btype);
+
+  const hipDataType A_type = get_hipblaslt_dtype(param.Atype);
+  const hipDataType B_type = get_hipblaslt_dtype(param.Btype);
   const hipDataType D_type = get_hipblaslt_dtype(outputD->data.dtype);
   const hipDataType bias_type = get_hipblaslt_dtype(inputBias->data.dtype);
   // const hipblasltDatatype_t aux_type = get_hipblaslt_dtype(outputPreGelu->data.dtype);
 
-  NVTE_CHECK(!is_fp8_dtype(inputA->data.dtype) || A_scale_inverse != nullptr,
+  NVTE_CHECK(!is_fp8_dtype(param.Atype) || param.A_scale_inv != nullptr,
              "FP8 input to GEMM requires inverse of scale!");
-  NVTE_CHECK(!is_fp8_dtype(inputB->data.dtype) || B_scale_inverse != nullptr,
+  NVTE_CHECK(!is_fp8_dtype(param.Btype) || param.B_scale_inv != nullptr,
              "FP8 input to GEMM requires inverse of scale!");
 
   // check consistency of arguments:
@@ -1071,6 +997,10 @@ void hipblaslt_gemm(const Tensor *inputA,
   if (use_fp8) {
     NVTE_CHECK(!gelu, "fp8 gemm + gelu fusion is unavailable right now!");
   }
+  if (is_fp8_dtype(outputD->data.dtype)) {
+    NVTE_CHECK(!accumulate, "Accumulation mode not supported with FP8 GEMM output!");
+  }
+
   float one = 1.0;
   float zero = 0.0;
   float beta = (accumulate) ? one : zero;
@@ -1098,24 +1028,30 @@ void hipblaslt_gemm(const Tensor *inputA,
 
   // Create matrix descriptors. Not setting any extra attributes.
   NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutCreate(&Adesc, A_type,
-                                               transa == HIPBLAS_OP_N ? m : k,
-                                               transa == HIPBLAS_OP_N ? k : m,
-                                               lda));
+                                                   param.transA == HIPBLAS_OP_N ? m : k,
+                                                   param.transA == HIPBLAS_OP_N ? k : m,
+                                                   param.lda));
   NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutCreate(&Bdesc, B_type,
-                                               transb == HIPBLAS_OP_N ? k : n,
-                                               transb == HIPBLAS_OP_N ? n : k,
-                                               ldb));
+                                                   param.transB == HIPBLAS_OP_N ? k : n,
+                                                   param.transB == HIPBLAS_OP_N ? n : k,
+                                                   param.ldb));
   NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutCreate(&Ddesc, D_type, m, n, ldd));
+  Cdesc = Ddesc;
 
   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescCreate(&operationDesc, gemm_compute_type, HIP_R_32F));
   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc, HIPBLASLT_MATMUL_DESC_TRANSA,
-                                                   &transa, sizeof(transa)));
+                                                       &param.transA, sizeof(param.transA)));
   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc, HIPBLASLT_MATMUL_DESC_TRANSB,
-                                                   &transb, sizeof(transb)));
+                                                       &param.transB, sizeof(param.transB)));
 
   // set fp8 attributes -- input and output types should already be set to fp8 as appropriate
   // Note: gelu fusion isn't available right now, and we don't need
   // amax(D) either (next op is high precision).
+#if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
+    hipblasLtMatmulMatrixScale_t scaling_mode;
+#else
+    constexpr int scaling_mode = 0;
+#endif
   if (use_fp8) {
     // Split accumulator.
     const int8_t fastAccuMode = (use_split_accumulator) ? 0 : 1;
@@ -1125,42 +1061,44 @@ void hipblaslt_gemm(const Tensor *inputA,
                                                      &fastAccuMode,
                                                      sizeof(fastAccuMode)));
     */
-    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
-                                                     HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER,
-                                                     &A_scale_inverse,
-                                                     sizeof(A_scale_inverse)));
-    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
-                                                     HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER,
-                                                     &B_scale_inverse,
-                                                     sizeof(B_scale_inverse)));
-    //Added for fp8 gelu_fusion support
+    if ((is_delayed_tensor_scaling(inputA->scaling_mode) &&
+         is_delayed_tensor_scaling(inputB->scaling_mode))) {
+#if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
+      scaling_mode = HIPBLASLT_MATMUL_MATRIX_SCALE_SCALAR_32F;
+    } else if ((is_block_scaling(inputA->scaling_mode) && is_block_scaling(inputB->scaling_mode))) {
+      scaling_mode = HIPBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
+      NVTE_CHECK(!is_fp8_dtype(outputD->data.dtype), "FP8 output is not supported with block scaling mode.");
+#endif
+    } else {
+      NVTE_ERROR("Not implemented scaling modes: " + to_string(inputA->scaling_mode) + " and  " +
+                 to_string(inputB->scaling_mode) + ".");
+    }
+    NVTE_CHECK_HIPBLASLT(
+        hipblasLtMatmulDescSetAttribute(operationDesc, HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                                        &param.A_scale_inv, sizeof(param.A_scale_inv)));
+    NVTE_CHECK_HIPBLASLT(
+        hipblasLtMatmulDescSetAttribute(operationDesc, HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                                        &param.B_scale_inv, sizeof(param.B_scale_inv)));
+#if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
+    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+        operationDesc, HIPBLASLT_MATMUL_DESC_A_SCALE_MODE, &scaling_mode, sizeof(scaling_mode)));
+    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+        operationDesc, HIPBLASLT_MATMUL_DESC_B_SCALE_MODE, &scaling_mode, sizeof(scaling_mode)));
+#endif
 
-    // if (is_fp8_dtype(outputD->data.dtype)) {
-    //   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
-    //                                                     HIPBLASLT_MATMUL_DESC_AMAX_D_POINTER,
-    //                                                     &D_amax,
-    //                                                     sizeof(D_amax)));
-
-    //   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
-    //                                                     HIPBLASLT_MATMUL_DESC_D_SCALE_POINTER ,
-    //                                                     &D_scale,
-    //                                                     sizeof(D_scale)));
-    // }
+    if (is_fp8_dtype(outputD->data.dtype)) {
+      NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+        operationDesc, HIPBLASLT_MATMUL_DESC_D_SCALE_POINTER, &D_scale, sizeof(D_scale)));
+      NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+        operationDesc, HIPBLASLT_MATMUL_DESC_AMAX_D_POINTER, &D_amax, sizeof(D_amax)));
+    }
     if (bias) {
       NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
                                                        HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE,
                                                        &bias_type, sizeof(bias_type)));
     }
-    //Added for fp8 gelu_fusion support
-    
-    // if (gelu){
-    //   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
-    //                                                     HIPBLASLT_MATMUL_DESC_EPILOGUE_AUX_DATA_TYPE,
-    //                                                     &aux_type,
-    //                                                     sizeof(aux_type)));
-    // }
   }
-
+  
   if (bias && gelu) {
     if (grad) {
       epilogue = HIPBLASLT_EPILOGUE_DGELU_BGRAD;
@@ -1176,6 +1114,10 @@ void hipblaslt_gemm(const Tensor *inputA,
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
                                                       HIPBLASLT_MATMUL_DESC_EPILOGUE_AUX_LD,
                                                       &ld_gelumat, sizeof(ld_gelumat)));
+    // TODO: future enablement
+    //const hipDataType aux_type = get_hipblaslt_dtype(outputPreGelu->data.dtype);
+    //NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+    //  operationDesc, HIPBLASLT_MATMUL_DESC_EPILOGUE_AUX_DATA_TYPE, &aux_type, sizeof(aux_type)));
   } else if (bias) {
     if (grad) {
       // grad output is always input B
@@ -1206,15 +1148,53 @@ void hipblaslt_gemm(const Tensor *inputA,
 
   GemmAlgoCache::Key gemm_cfg(algoCache.device_cap(device_id), A_type, B_type, D_type, 
     use_fp8 ? bias_type : (hipDataType)-1,
-    m, n, k, lda, ldb, ldd, transa, transb, epilogue );
+    m, n, k, param.lda, param.ldb, ldd, param.transA, param.transB, scaling_mode, epilogue );
   GemmAlgoCache::Algo cached_algo;
   if (algoCache.find(gemm_cfg, workspaceSize, cached_algo) == 0 || !cached_algo.algo.has_value())
   {
+    bool logTuning = getIntEnv("TE_HIPBLASLT_LOG_TUNING", 0, 0) != 0;
+
+    // Find algo base algo_id directly if tuning file is set.
+    if (cached_algo.hasId())
+    {
+      std::vector<hipblasLtMatmulHeuristicResult_t> algo_arr;
+      std::vector<int> algo_index{static_cast<int>(cached_algo.algoId)};
+      
+      if (hipblaslt_ext::getAlgosFromIndex(handle, algo_index, algo_arr) == HIPBLAS_STATUS_SUCCESS &&
+          algo_arr[0].state == HIPBLAS_STATUS_SUCCESS) {
+        size_t ws_size_min = 0;
+        if (HIPBLAS_STATUS_SUCCESS == hipblaslt_ext::matmulIsAlgoSupported(
+          handle,
+          operationDesc, 
+          static_cast<const void*>(&one),
+          Adesc, 
+          Bdesc, 
+          static_cast<const void*>(&beta),
+          Ddesc,
+          Ddesc,
+          algo_arr[0].algo,
+          ws_size_min
+        )) {
+
+          if (ws_size_min <= workspaceSize && ws_size_min <= algo_arr[0].workspaceSize) {
+            cached_algo.algo = algo_arr[0].algo;
+            if (cached_algo.ws_size_min != algo_arr[0].workspaceSize) {
+              cached_algo.ws_size_min = algo_arr[0].workspaceSize;
+              algoCache.store(gemm_cfg, cached_algo);
+            }
+          }
+        }
+      }
+
+      if (logTuning && !cached_algo.algo.has_value()) {
+        std::cout << "[WARNING] Cannot get corresponding solution from cached algoId " << cached_algo.algoId << std::endl;
+      }
+    }
+
     int firstAlgo = getIntEnv("TE_HIPBLASLT_ALGO_SELECTION", 0, 0);
     int tuneLoopCount = getIntEnv("TE_HIPBLASLT_TUNING_RUN_COUNT", 0, 0);
     int algoTuneCount = 1;
     std::vector<hipblasLtMatmulHeuristicResult_t> algoArr;
-    bool logTuning = getIntEnv("TE_HIPBLASLT_LOG_TUNING", 0, 0) != 0;
 
     if (tuneLoopCount)
     {
@@ -1225,56 +1205,25 @@ void hipblaslt_gemm(const Tensor *inputA,
       algoTuneCount = getIntEnv("TE_HIPBLASLT_TUNING_ALGO_COUNT", defaultAlgoCount, 1);
     }
     algoTuneCount += firstAlgo;
-    int algoTotalCount = cached_algo.hasId() ? std::max(algoTuneCount, (cached_algo.index + 1)) : algoTuneCount;
-    algoArr.resize(algoTotalCount);
+    algoArr.resize(algoTuneCount);
 
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceCreate(&preference));
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceSetAttribute(
                             preference, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
                             &workspaceSize, sizeof(workspaceSize)));
 
-    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Ddesc,
-                                                    Ddesc, preference, algoTotalCount, algoArr.data(),
-                                                    &algoTotalCount));
-    algoArr.resize(algoTotalCount);
+    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Cdesc,
+                                                    Ddesc, preference, algoTuneCount, algoArr.data(),
+                                                    &algoTuneCount));
+    algoArr.resize(algoTuneCount);
 
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceDestroy(preference));
-
-    //If cached algo exists in persistent storage we just need to find matching hipblasLtMatmulAlgo_t
-    if (cached_algo.hasId())
-    {
-      int idx = (cached_algo.index < algoTotalCount) ? cached_algo.index : 0;
-      for (int i=0; i<algoTotalCount; i++)
-      {
-        const auto &algo = algoArr[idx];
-        if (algo.state == HIPBLAS_STATUS_SUCCESS)
-        {
-          if (cached_algo.algoId == cached_algo.getAlgoId(algo.algo))
-          {
-            cached_algo.algo = algo.algo;
-            if (algo.workspaceSize != cached_algo.ws_size_min || idx != cached_algo.index)
-            {
-              cached_algo.ws_size_min = algo.workspaceSize;
-              cached_algo.index = idx;
-              algoCache.store(gemm_cfg, cached_algo);
-            }
-            break;
-          }
-        }
-        idx = (idx + 1) % algoTotalCount;
-      }
-      if (logTuning && !cached_algo.algo.has_value())
-      {
-        std::cout << "[WARNING] Cannot find cached algoId " << cached_algo.algoId << " in hipBLASLt results" << std::endl;
-      }
-    }
 
     //No suitable entry in autotune cache or could not find matched algo in hipBLASLt results
     if (!cached_algo.algo.has_value())
     {
 
       int bestAlgo = -1;
-      algoTuneCount = std::min(algoTuneCount, algoTotalCount);
       if (tuneLoopCount > 0)
       {
         if (logTuning)
@@ -1283,8 +1232,7 @@ void hipblaslt_gemm(const Tensor *inputA,
                     << tuneLoopCount << " loops " << std::endl;
 
         NVTE_CHECK_CUDA(hipStreamSynchronize(stream));
-        hipStream_t profilingStream;
-        NVTE_CHECK_CUDA(hipStreamCreateWithFlags(&profilingStream, hipStreamNonBlocking));
+        hipStream_t &profilingStream = stream; // Reuse the stream for profiling
         using tuning_clock = std::chrono::steady_clock;
         tuning_clock::now(); //the first call takes little longer so do it outside the loop
         tuning_clock::duration bestTime = tuning_clock::duration::max();
@@ -1299,13 +1247,13 @@ void hipblaslt_gemm(const Tensor *inputA,
             NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
                                             operationDesc,
                                             static_cast<const void*>(&one),         /* alpha */
-                                            A,                                      /* A */
+                                            param.A,                                      /* A */
                                             Adesc,
-                                            B,                                      /* B */
+                                            param.B,                                      /* B */
                                             Bdesc,
                                             static_cast<const void*>(&beta),        /* beta */
-                                            D,                                      /* C */
-                                            Ddesc,
+                                            C,                                      /* C */
+                                            Cdesc,
                                             D,                                      /* D */
                                             Ddesc,
                                             &algoArr[algo].algo,                    /* algo */
@@ -1321,13 +1269,13 @@ void hipblaslt_gemm(const Tensor *inputA,
             NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
                                             operationDesc,
                                             static_cast<const void*>(&one),         /* alpha */
-                                            A,                                      /* A */
+                                            param.A,                                      /* A */
                                             Adesc,
-                                            B,                                      /* B */
+                                            param.B,                                      /* B */
                                             Bdesc,
                                             static_cast<const void*>(&beta),        /* beta */
-                                            D,                                      /* C */
-                                            Ddesc,
+                                            C,                                      /* C */
+                                            Cdesc,
                                             D,                                      /* D */
                                             Ddesc,
                                             &algoArr[algo].algo,                    /* algo */
@@ -1344,7 +1292,6 @@ void hipblaslt_gemm(const Tensor *inputA,
           }
         }
 
-        NVTE_CHECK_CUDA(hipStreamDestroy(profilingStream));
         if (bestAlgo >= 0)
         {
           if (logTuning)
@@ -1371,10 +1318,11 @@ void hipblaslt_gemm(const Tensor *inputA,
       cached_algo.ws_size_min = algoArr[bestAlgo].workspaceSize;
       cached_algo.ws_size_max = workspaceSize;
 
-      if (logTuning)
-        std::cout << "[INFO] Use hipBLASLt algo [" << bestAlgo << "] " << cached_algo.algoId << std::endl;
-
       algoCache.store(gemm_cfg, cached_algo);
+    }
+
+    if (logTuning) {
+      std::cout << "[INFO] Use hipBLASLt algo [" << cached_algo.index << "] " << cached_algo.algoId << std::endl;
     }
   }
 
@@ -1382,13 +1330,13 @@ void hipblaslt_gemm(const Tensor *inputA,
   NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
                                    operationDesc,
                                    static_cast<const void*>(&one),         /* alpha */
-                                   A,                                      /* A */
+                                   param.A,                                      /* A */
                                    Adesc,
-                                   B,                                      /* B */
+                                   param.B,                                      /* B */
                                    Bdesc,
                                    static_cast<const void*>(&beta),        /* beta */
-                                   D,                                      /* C */
-                                   Ddesc,
+                                   C,                                      /* C */
+                                   Cdesc,
                                    D,                                      /* D */
                                    Ddesc,
                                    &cached_algo.algo.value(),              /* algo */
@@ -1396,432 +1344,132 @@ void hipblaslt_gemm(const Tensor *inputA,
                                    workspaceSize,
                                    stream));                               /* stream */
 
+  // Update FP8 scale-inv in output tensor
+  // Note: This is a WAR for the case when we have fp8 output but D->scale_inv is not allocated.
+  // TODO: Changing gemm interface so that D->scale_inv is allocated and the scale_inv can be
+  // calculated here.
+  if (is_fp8_dtype(outputD->data.dtype) && outputD->scale_inv.dptr) {
+    update_tensor_scale_inv(outputD, stream);
+  }
 
   NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(Ddesc));
   NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(Bdesc));
   NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(Adesc));
   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescDestroy(operationDesc));
 }
-#endif //USE_HIPBLASLT
-
-#ifdef USE_ROCBLAS // Use rocblas + kernel, no fusion
-void rocblas_gemm(const Tensor *inputA,
-                 const Tensor *inputB,
-                 Tensor *outputD,
-                 const Tensor *inputBias,
-                 Tensor *outputPreGelu,
-                 int m, int n, int k,
-                 int lda, int ldb, int ldd,
-                 rocblas_operation transa,
-                 rocblas_operation transb,
-                 bool grad,
-                 void* workspace,
-                 size_t workspaceSize,
-                 bool accumulate,
-                 bool use_split_accumulator,
-                 int math_sm_count,
-                 int m_split,
-                 int n_split,
-                 bool gemm_producer,
-                 const Tensor *inputCounter,
-                 hipStream_t stream
-) { 
-  void *A = inputA->data.dptr;
-  void *A_scale_inverse = inputA->scale_inv.dptr;
-  void *B = inputB->data.dptr;
-  void *B_scale_inverse = inputB->scale_inv.dptr;
-  void *C = outputD->data.dptr;
-  void *D = outputD->data.dptr;
-  void *D_scale = outputD->scale.dptr;
-  void *D_amax = outputD->amax.dptr;
-  void *bias_ptr = inputBias->data.dptr;
-  const bool bias = bias_ptr != nullptr;
-  void *pre_gelu_out = outputPreGelu->data.dptr;
-  const bool gelu = pre_gelu_out != nullptr;
-  const bool use_fp8 = is_fp8_dtype(inputA->data.dtype) ||
-                       is_fp8_dtype(inputB->data.dtype);
-  const rocblas_datatype A_type = get_rocblas_dtype(inputA->data.dtype);
-  const rocblas_datatype B_type = get_rocblas_dtype(inputB->data.dtype);
-  const rocblas_datatype D_type = get_rocblas_dtype(outputD->data.dtype);
-  const rocblas_datatype bias_type = get_rocblas_dtype(inputBias->data.dtype);
-  const rocblas_datatype gelu_type = get_rocblas_dtype(outputPreGelu->data.dtype);
-  
-  // check consistency of arguments:
-  // if fp8 is desired, context cannot be null
-  // fp8 + gelu fusion + fp8 aux is unavailable right now.
-  if (use_fp8 && gelu) {
-    NVTE_CHECK(!is_fp8_dtype(outputPreGelu->data.dtype),
-             "fp8 Aux output for gemm + gelu fusion not supported!");
-  }
-  if (is_fp8_dtype(outputD->data.dtype)) {
-    NVTE_CHECK(!accumulate,
-             "Accumulation mode not supported with FP8 GEMM output!");
-  }
-  // fp8 + grad unavailable in upstream
-  NVTE_CHECK(!(use_fp8 && grad), "fp8 + grad not supported!");
-
-  float one = 1.0;
-  float zero = 0.0;
-  float beta = (accumulate) ? one : zero;
-
-  float alpha = 1.0;
-  if (use_fp8) {
-     float A_scale_inv, B_scale_inv;
-     (void)hipMemcpy(&A_scale_inv, A_scale_inverse, sizeof(float), hipMemcpyDeviceToHost);
-     (void)hipMemcpy(&B_scale_inv, B_scale_inverse, sizeof(float), hipMemcpyDeviceToHost);
-     alpha = A_scale_inv * B_scale_inv;
-  }
-
-  rocblas_handle handle;
-  NVTE_CHECK_ROCBLAS(rocblas_create_handle(&handle));
-  NVTE_CHECK_ROCBLAS(rocblas_set_stream(handle, stream));
-
-  // extract the stream order alloc env
-  bool stream_order_alloc = false;
-  if (const char* env_p = std::getenv("ROCBLAS_STREAM_ORDER_ALLOC") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      stream_order_alloc = true;
-  }
-
-  int64_t ld_gelumat = (int64_t) ldd;
 
 
-  NVTE_CHECK((A_type==rocblas_datatype_f16_r && B_type==rocblas_datatype_f16_r && D_type==rocblas_datatype_f16_r) || 
-       (A_type==rocblas_datatype_bf16_r && B_type==rocblas_datatype_bf16_r && D_type==rocblas_datatype_bf16_r) || 
-       (A_type==rocblas_datatype_f32_r && B_type==rocblas_datatype_f32_r && D_type==rocblas_datatype_f32_r) ||
-       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_f32_r) ||
-       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_f16_r) ||
-       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_bf16_r) ||
-       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_f8_r) ||
-       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_bf8_r) ||
-       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_bf8_r && D_type==rocblas_datatype_f32_r) ||
-       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_bf8_r && D_type==rocblas_datatype_f16_r) ||
-       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_bf8_r && D_type==rocblas_datatype_bf16_r) ||
-       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_bf8_r && D_type==rocblas_datatype_f8_r) ||
-       (A_type==rocblas_datatype_f8_r && B_type==rocblas_datatype_bf8_r && D_type==rocblas_datatype_bf8_r) ||
-       (A_type==rocblas_datatype_bf8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_f32_r) ||
-       (A_type==rocblas_datatype_bf8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_f16_r) ||
-       (A_type==rocblas_datatype_bf8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_bf16_r)||
-       (A_type==rocblas_datatype_bf8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_f8_r)||
-       (A_type==rocblas_datatype_bf8_r && B_type==rocblas_datatype_f8_r && D_type==rocblas_datatype_bf8_r),
-      "Only the following combinations of data types are enabled now!\n\
-1. input: fp32, output: fp32.\n\
-2. input: fp16, output: fp16.\n\
-3. input: bf16, output: bf16.\n\
-4. input: fp8/bf8, output: fp8/bf8, fp16/bf16, fp32");
+typedef unsigned long long ServiceStreamKey;
 
-
-  //If D is not fp32, then we need a temp buffer for GEMM result before applying epilogues. Otherwise, we can apply epilogues in-place.
-  // with bias or gelu, allocate fp32 D_temp if the output is not fp32
-  // with input fp8/bf8 (use_fp8) and bf16 output, need a fp32 D_temp, as rocblas does not support this case (fp8/bf8 input fp16/fp32 output is supported)
-  // with use_fp8 true and fp8/bf8 output, need fp32 D_temp to support amax and scale operation
-  void* D_temp;
-  if (((bias || gelu) && (D_type==rocblas_datatype_f16_r ||D_type==rocblas_datatype_bf16_r))|| 
-      (use_fp8 && (D_type==rocblas_datatype_bf16_r||D_type==rocblas_datatype_f8_r||D_type==rocblas_datatype_bf8_r))) {
-    if(! stream_order_alloc){
-      NVTE_CHECK_CUDA( hipMalloc(&D_temp, sizeof(float)*m*n) );
-    }else{
-      NVTE_CHECK_CUDA( hipMallocAsync(&D_temp, sizeof(float)*m*n, stream) );
-    }
-  }else {
-    D_temp = D;
-  }
-
-  // When Ti=To=fp16 and there is no bias or gelu, D_temp points to D and we would like it to be fp16
-  rocblas_datatype D_temp_type = rocblas_datatype_f32_r;
-  if (!(bias || gelu) && (A_type==rocblas_datatype_f16_r && B_type==rocblas_datatype_f16_r && D_type==rocblas_datatype_f16_r)) {
-    D_temp_type = rocblas_datatype_f16_r;
-  }
-  // When Ti=To=bf16 and there is no bias or gelu, D_temp points to D and we would like it to be bf16
-  if (!(bias || gelu) && (A_type==rocblas_datatype_bf16_r && B_type==rocblas_datatype_bf16_r && D_type==rocblas_datatype_bf16_r)) {
-    D_temp_type = rocblas_datatype_bf16_r;
-  }
-  // When Ti in fp8 or bf8, To=fp16, there is no bias or gelu, D_temp points to D and we would like it to be fp16, as rocblas support this case.
-  if ((!(bias||gelu))&& (use_fp8 && D_type==rocblas_datatype_f16_r)) {
-    D_temp_type = rocblas_datatype_f16_r;
-  }
-  
-  if(accumulate && (D_temp!=D || D_temp_type!=D_type)){
-    DType output_dtype = get_transformer_engine_dtype(D_type);
-    TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(output_dtype, OType,
-      //D_temp allocated only with fp32
-      detail::identity_kernelLauncher<OType, float>(reinterpret_cast<const OType*>(D),
-                                                    reinterpret_cast<float*>(D_temp), 
-                                                    m*n,
-                                                    stream);
-    );  
-  }
-
-  // D = alpha * (A * B) + beta * C
-  if (use_fp8) {
-    rocblas_computetype computeType = rocblas_compute_type_f32;
-    NVTE_CHECK_ROCBLAS(rocblas_gemm_ex3(handle, transa, transb, m, n, k, &alpha,
-                                       A, A_type, lda,
-                                       B, B_type, ldb,
-                                       &beta, D_temp, D_temp_type, ldd, D_temp, D_temp_type, ldd,
-                                       computeType, rocblas_gemm_algo::rocblas_gemm_algo_standard,0,0));
-  }else {
-    rocblas_datatype computeType = rocblas_datatype_f32_r;
-    uint32_t flags = rocblas_gemm_flags_none;
-    if((A_type==rocblas_datatype_f16_r && B_type==rocblas_datatype_f16_r) && grad){
-      flags = rocblas_gemm_flags_fp16_alt_impl; 
-    }
-    NVTE_CHECK_ROCBLAS(rocblas_gemm_ex(handle, transa, transb, m, n, k, &alpha,
-                                      A, A_type, lda,
-                                      B, B_type, ldb,
-                                      &beta, D_temp, D_temp_type, ldd, D_temp, D_temp_type, ldd,
-                                      computeType, rocblas_gemm_algo::rocblas_gemm_algo_standard,0,flags));
-  }
-
-  NVTE_CHECK_ROCBLAS(rocblas_destroy_handle(handle));
-
-  int batch_size, input_dim, output_dim;
-  if (bias && gelu) {
-    if (grad) {
-      // epilogue = CUBLASLT_EPILOGUE_DGELU_BGRAD;
-      // Apply GELU gradient to D_temp and store in D 
-      // Apply bias gradient to D (D is already the result of GELU gradient) and store in bias_ptr; 
-      // This case is NN
-      // D_temp is of shape is (m, n) in column major and thus is of shape (n, m) in row major
-      // The bias vector length is m. So it will be reduced along axis 0 in row major
-      // (TODO): The cublasLt doc is not very clear wrt the bias gradient here.
-      // It does not explicitly say that it goes through GELU gradient first. We will need to
-      // confirm in the future. As of now, my implementation for the bias gradient takes
-      // the GELU gradient result in lower precision (D). It might be better to take the GELU
-      // gradient result in fp32 but as it requires some kernel changes I would only do that
-      // once we confirm that this is the right form of the epilogue.
-      // This is for linear1 -> gelu -> linear2 
-      // compute dX = dY * W for linear2
-      // gemm_ex(A=W, B=dY)
-      batch_size = n;
-      input_dim = m; // input dimension of the second linear layer is the output dimension of the first linear layer
-      output_dim = k;
-      DType output_dtype = get_transformer_engine_dtype(D_type);
-      DType gelu_dtype = get_transformer_engine_dtype(gelu_type);
-      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(output_dtype, OType, 
-        TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(gelu_dtype, GType, 
-          detail::gelu_backward_kernelLauncher<OType, GType>(reinterpret_cast<const float*>(D_temp), 
-                                                             reinterpret_cast<OType*>(D), 
-                                                             reinterpret_cast<const GType*>(pre_gelu_out), 
-                                                             batch_size, 
-                                                             input_dim,
-                                                             stream);
-        );  
-      );
-
-      void* bias_tmp;
-      if (bias_type != rocblas_datatype_f32_r) {
-        if(! stream_order_alloc){
-          NVTE_CHECK_CUDA( hipMalloc(&bias_tmp, sizeof(float)*input_dim) ); // The bias gradient is for the first linear layer
-        }else{
-          NVTE_CHECK_CUDA( hipMallocAsync(&bias_tmp, sizeof(float)*input_dim, stream) );
-        }
-      }else {
-        bias_tmp = bias_ptr;
-      }
-
-      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(output_dtype, OType,
-        detail::bias_gradient_kernelLauncher<OType>(reinterpret_cast<const OType*>(D), 
-                                                    reinterpret_cast<float*>(bias_tmp), 
-                                                    batch_size, 
-                                                    input_dim,
-                                                    stream_order_alloc,
-                                                    stream);
-      );
-
-      if (bias_type != rocblas_datatype_f32_r) {
-        DType bias_dtype = get_transformer_engine_dtype(bias_type);
-        TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(bias_dtype, BType,
-          detail::identity_kernelLauncher<float, BType>(reinterpret_cast<const float*>(bias_tmp), 
-                                                        reinterpret_cast<BType*>(bias_ptr),
-                                                        input_dim,
-                                                        stream);
-        );  
-        if(! stream_order_alloc){
-          NVTE_CHECK_CUDA( hipFree(bias_tmp) ); 
-        }else{
-          NVTE_CHECK_CUDA( hipFreeAsync(bias_tmp, stream) );
-        }
-      }
-
-    } else {
-      // epilogue = CUBLASLT_EPILOGUE_GELU_AUX_BIAS;
-      // Add bias_ptr to D_temp and store in pre_gelu_out, and apply GELU to the pre_gelu_output and then store in D
-      // D_temp is of shape is (m, n) in column major and thus is of shape (n, m) in row major
-      // gemm_ex(A=W, B=X, transA=T)
-      batch_size = n;
-      input_dim = k;
-      output_dim = m;
-      DType output_dtype = get_transformer_engine_dtype(D_type);
-      DType bias_dtype = get_transformer_engine_dtype(bias_type);
-      DType gelu_dtype = get_transformer_engine_dtype(gelu_type);
-      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(output_dtype, OType,
-        TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(gelu_dtype, GType,
-          TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(bias_dtype, BType,
-            detail::add_bias_gelu_kernelLauncher<OType, GType, BType>(reinterpret_cast<const float*>(D_temp), 
-                                                                      reinterpret_cast<OType*>(D), 
-                                                                      reinterpret_cast<GType*>(pre_gelu_out), 
-                                                                      reinterpret_cast<const BType*>(bias_ptr), 
-                                                                      reinterpret_cast<float*>(D_amax),
-                                                                      reinterpret_cast<const float*>(D_scale),
-                                                                      batch_size, 
-                                                                      output_dim,
-                                                                      stream);
-          );
-        );
-      );
-    }
-  }else if (bias) {
-    if (grad) {
-      // grad output is always input B
-      // epilogue = CUBLASLT_EPILOGUE_BGRADB;
-      // Apply bias gradient to matrix B and store in bias_ptr, reduce along the k dimension, output bias length is n
-      // As B is transposed, is of shape (n, k) in column major, and is of shape (k, n) in row major.
-      // bias gradient vector length is n. So it will be reduced along axis 0 in row major.
-      // The backward pass calculate the bias gradient along with dW = dY^T * X
-      // gemm_ex(A=X, B = dY, transB=T)
-      batch_size = k;
-      input_dim = m;
-      output_dim = n;
-      void * bias_tmp;
-      if (bias_type != rocblas_datatype_f32_r) {
-        if(! stream_order_alloc){
-          NVTE_CHECK_CUDA( hipMalloc(&bias_tmp, sizeof(float)*output_dim) );
-        }else{
-          NVTE_CHECK_CUDA( hipMallocAsync(&bias_tmp, sizeof(float)*output_dim, stream) );
-        }
-      }else {
-        bias_tmp = bias_ptr;
-      }
-
-      DType input_dtype = get_transformer_engine_dtype(B_type);
-      DType output_dtype = get_transformer_engine_dtype(D_type);
-      DType bias_dtype = get_transformer_engine_dtype(bias_type);
-      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(input_dtype, IType,
-        detail::bias_gradient_kernelLauncher<IType>(reinterpret_cast<const IType*>(B), 
-                                                    reinterpret_cast<float*>(bias_tmp), 
-                                                    batch_size, 
-                                                    output_dim,
-                                                    stream_order_alloc,
-                                                    stream);
-      );
-      if (bias_type != rocblas_datatype_f32_r) {
-        TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(bias_dtype, BType,
-          detail::identity_kernelLauncher<float, BType>(reinterpret_cast<const float*>(bias_tmp), 
-                                                        reinterpret_cast<BType*>(bias_ptr),
-                                                        output_dim,
-                                                        stream);
-        );  
-        if(! stream_order_alloc){
-          NVTE_CHECK_CUDA( hipFree(bias_tmp) ); 
-        }else{
-          NVTE_CHECK_CUDA( hipFreeAsync(bias_tmp, stream) );
-        }
-      }
-      if (D_type == rocblas_datatype_f16_r || D_type == rocblas_datatype_bf16_r) {
-        TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(output_dtype, OType,
-          detail::identity_kernelLauncher<float, OType>(reinterpret_cast<const float*>(D_temp), 
-                                                        reinterpret_cast<OType*>(D),
-                                                        input_dim*output_dim,
-                                                        stream);
-        );  
-      }
-    } else {
-      // epilogue = CUBLASLT_EPILOGUE_BIAS;
-      // Broadcast bias and add it to D_temp and store in D. The bias vector length is m 
-      // D_temp is of shape is (m, n) in column major and thus is of shape (n, m) in row major
-      // gemm_ex(A=W, B=X, transA=T)
-      batch_size = n;
-      input_dim = k;
-      output_dim = m;
-      DType output_dtype = get_transformer_engine_dtype(D_type);
-      DType bias_dtype = get_transformer_engine_dtype(bias_type);
-      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(output_dtype, OType,
-        TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(bias_dtype, BType,
-          detail::add_bias_kernelLauncher<OType, BType>(reinterpret_cast<const float*>(D_temp), 
-                                                        reinterpret_cast<OType*>(D), 
-                                                        reinterpret_cast<const BType*>(bias_ptr), 
-                                                        reinterpret_cast<float*>(D_amax), 
-                                                        reinterpret_cast<const float*>(D_scale), 
-                                                        batch_size, 
-                                                        output_dim,
-                                                        stream);
-        );
-      );
-    }
-  }else if (gelu) {
-    if (grad) {
-      // epilogue = CUBLASLT_EPILOGUE_DGELU;
-      // Take input from pre_gelu_out and apply GELU gradients to D_temp and store result in D
-      // D_temp is of shape is (m, n) in column major and thus is of shape (n, m) in row major
-      // gemm_ex(A=W, B=dY) 
-      batch_size = n;
-      input_dim = m;
-      output_dim = k;
-      DType output_dtype = get_transformer_engine_dtype(D_type);
-      DType gelu_dtype = get_transformer_engine_dtype(gelu_type);
-      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(output_dtype, OType,
-        TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(gelu_dtype, GType, 
-          detail::gelu_backward_kernelLauncher<OType, GType>(reinterpret_cast<const float*>(D_temp), 
-                                                             reinterpret_cast<OType*>(D), 
-                                                             reinterpret_cast<const GType*>(pre_gelu_out), 
-                                                             batch_size, 
-                                                             input_dim,
-                                                             stream);
-        );
-      );  
-    } else {
-      // epilogue = CUBLASLT_EPILOGUE_GELU_AUX;
-      // Store (quantized) D_temp in pre_gelu_out, and apply GELU to D_temp then store in D
-      // D_temp is of shape is (m, n) in column major and thus is of shape (n, m) in row major
-      // gemm_ex(A=W, B=X, transA=T)
-      batch_size = n;
-      input_dim = k;
-      output_dim = m;
-
-      DType gelu_dtype = get_transformer_engine_dtype(gelu_type);
-      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(gelu_dtype, GType, 
-        detail::identity_kernelLauncher<float, GType>(reinterpret_cast<const float*>(D_temp), 
-                                                      reinterpret_cast<GType*>(pre_gelu_out), 
-                                                      batch_size*output_dim, 
-                                                      stream);
-      );  
-      DType output_dtype = get_transformer_engine_dtype(D_type);
-      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(output_dtype, OType,
-        detail::gelu_forward_kernelLauncher<OType>(reinterpret_cast<const float*>(D_temp), 
-                                                   reinterpret_cast<OType*>(D), 
-                                                   reinterpret_cast<float*>(D_amax), 
-                                                   reinterpret_cast<const float*>(D_scale), 
-                                                   batch_size,
-                                                   output_dim, 
-                                                   stream);
-      );  
-    }
-  } else { // No epilogue - !(bias || gelu)
-    if (use_fp8 && (D_type==rocblas_datatype_bf16_r || D_type == rocblas_datatype_f8_r || D_type == rocblas_datatype_bf8_r)) {
-      DType output_dtype = get_transformer_engine_dtype(D_type);
-      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(output_dtype, OType,
-        detail::identity_output_kernelLauncher<OType>(reinterpret_cast<const float*>(D_temp), 
-                                                      reinterpret_cast<OType*>(D),
-                                                      reinterpret_cast<float*>(D_amax), 
-                                                      reinterpret_cast<const float*>(D_scale), 
-                                                      m*n,
-                                                      stream);
-      );  
-    }
-  }
-  
-  if (((bias || gelu) && (D_type==rocblas_datatype_f16_r ||D_type==rocblas_datatype_bf16_r))||
-      (use_fp8 && (D_type==rocblas_datatype_bf16_r || D_type==rocblas_datatype_f8_r || D_type==rocblas_datatype_bf8_r))) {
-    if(! stream_order_alloc){
-      NVTE_CHECK_CUDA( hipFree(D_temp) );
-    }else{
-      NVTE_CHECK_CUDA( hipFreeAsync(D_temp, stream) );
-    }
-  }
+ServiceStreamKey make_service_stream_key(const int device_id, const int cu_count) {
+  return (static_cast<ServiceStreamKey>(device_id) << 32) | static_cast<ServiceStreamKey>(cu_count);
 }
 
-#endif //USE_ROCBLAS
+std::pair<int, int> parse_service_stream_key(const ServiceStreamKey &key) {
+  int device_id = static_cast<int>(key >> 32);
+  int cu_count = static_cast<int>(key & 0xFFFFFFFF);
+  return std::make_pair(device_id, cu_count);
+}
+
+static ObjPool<hipStream_t, ServiceStreamKey> service_stream_pool;
+
+thread_local static ObjCache<hipStream_t, ServiceStreamKey> service_stream_cache(
+  [](const ObjCache<hipStream_t, ServiceStreamKey>::Data &d) { service_stream_pool.store(d); }
+);
+
+struct ServiceStreamCtl {
+  hipStream_t stream;
+  hipEvent_t start_event;
+  hipEvent_t end_event;
+};
+
+
+bool get_service_stream(int math_sm_count, hipStream_t stream, struct ServiceStreamCtl &ctl)
+{
+  if (math_sm_count == 0)
+    return false; // No service stream needed
+
+  int device_id;
+  int device_cu_count = 0;
+  NVTE_CHECK_CUDA(hipGetDevice(&device_id));
+  NVTE_CHECK_CUDA(hipDeviceGetAttribute(&device_cu_count, hipDeviceAttributeMultiprocessorCount, device_id));
+  if (math_sm_count < 0 || math_sm_count > device_cu_count)
+  {
+    std::cerr << "[WARNING] Invalid math_sm_count: " << math_sm_count << std::endl;
+    return false; // Invalid math_sm_count
+  }
+  else if (math_sm_count == device_cu_count)
+  {
+    return false; // math_sm_count == device_cu_count is equivalent to math_sm_count == 0
+  }
+
+  // Check if stream is capturing
+  hipStreamCaptureStatus captureStatus;
+  NVTE_CHECK_CUDA(hipStreamIsCapturing(stream, &captureStatus));
+  if (captureStatus != hipStreamCaptureStatusNone)
+  {
+    std::cerr << "[WARNING] Cannot use math_sm_count with captured stream" << std::endl;
+    return false; // Cannot use service stream with captured stream
+  }
+
+  ServiceStreamKey key = make_service_stream_key(device_id, math_sm_count);
+  CacheEntry<hipStream_t> streamEntry = service_stream_cache.get(key, stream);
+  if (!streamEntry.isValid()) {
+    /* There is no entry in the cache, try the following:
+      * 1. Try to acquire any available stream form the cache.
+      * 2. If not available, try to acquire any available stream form the pool.
+      * 3. If still not available, create a new stream and event. */
+    bool b_log = false;
+    if (const char* env_p = std::getenv("NVTE_LOG_MATH_SM_COUNT") ) {
+      b_log = (env_p != nullptr) && (std::string(env_p) == "1");
+    }
+    streamEntry = service_stream_cache.acquire(key, stream);
+    if (!streamEntry.isValid()) {
+      streamEntry = service_stream_pool.acquire(key, stream);
+    }
+    if (!streamEntry.isValid())
+    {
+      const uint32_t maskSize = (math_sm_count + 31) / 32;
+      std::vector<uint32_t> mask(maskSize, (uint32_t)-1);
+      if (math_sm_count % 32 != 0)
+      {
+        mask[maskSize-1] = (1UL << (math_sm_count % 32)) - 1;
+      }
+      NVTE_CHECK_CUDA(hipExtStreamCreateWithCUMask(&streamEntry.value, maskSize, mask.data()));
+      NVTE_CHECK_CUDA(hipEventCreateWithFlags(&streamEntry.event, hipEventDisableTiming));
+      if (b_log)
+      {
+        std::cout << "[DEBUG] Created service stream for device " << device_id
+                  << " with " << math_sm_count << " CUs" << std::endl;
+      }
+    }
+    else if (b_log)
+    {
+      std::cout << "[DEBUG] Reusing service stream for device " << device_id
+                << " with " << math_sm_count << " CUs" << std::endl;
+    }
+    service_stream_cache.set(key, stream, streamEntry);
+  }
+
+  ctl.stream = streamEntry.value;
+  ctl.end_event = streamEntry.event;
+  NVTE_CHECK_CUDA(hipEventCreateWithFlags(&ctl.start_event, hipEventDisableTiming));
+  NVTE_CHECK_CUDA(hipEventRecord(ctl.start_event, stream));
+  NVTE_CHECK_CUDA(hipStreamWaitEvent(ctl.stream, ctl.start_event, 0));
+  return true; 
+}
+
+void release_service_stream(hipStream_t stream, struct ServiceStreamCtl &ctl)
+{
+    NVTE_CHECK_CUDA(hipEventRecord(ctl.end_event, ctl.stream));
+    NVTE_CHECK_CUDA(hipStreamWaitEvent(stream, ctl.end_event, 0));
+    //TODO: when event are really destroyed (documentation says on devide synchronize) and how much overhead is to create them
+    //May need to store event in eventPool and reuse them after thy are recorded
+    NVTE_CHECK_CUDA(hipEventDestroy(ctl.start_event));
+}
+
+} // namespace
+
 
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, int m, int n, int k, int lda,
@@ -1830,77 +1478,35 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  int math_sm_count, int m_split, int n_split, bool gemm_producer,
                  const Tensor *inputCounter, hipStream_t stream, int compute_stream_offset)
 {
-/*If no backend is specified with env variable use HIPBLASLT unless it is disabled
-  If HIPBLASLT backend is enabled and requested, use it despite ROCBLAS status
-  Otherwise use ROCBLAS 
-*/
-  bool use_hipblaslt = std::getenv("NVTE_USE_HIPBLASLT") != nullptr;
-  bool use_rocblas = std::getenv("NVTE_USE_ROCBLAS") != nullptr;
+  ServiceStreamCtl ss_ctl;
+  bool use_service_stream =
+      (math_sm_count != 0) ? get_service_stream(math_sm_count, stream, ss_ctl) : false;
 
-#if !defined(USE_HIPBLASLT) && !defined(USE_ROCBLAS)
-#error GEMM backend is not specified
-#elif !defined(USE_HIPBLASLT)
-  if (use_hipblaslt)
-  {
-    use_hipblaslt = false;
-    std::cout << "[NOTICE] hipBLASLt is not enabled, NVTE_USE_HIPBLASLT env is ignored\n";
+  NVTE_CHECK(compute_stream_offset >= -1 && compute_stream_offset < num_streams);
+
+  hipblasLtHandle_t handle = nullptr;
+  if (compute_stream_offset != -1) {
+    // Init hipblaslt handles (once, globally)
+    static std::once_flag init_flag;
+    static hipblasLtHandle_t hipblaslt_handles[num_streams];
+    std::call_once(init_flag, init_hipblaslt_handles, hipblaslt_handles);
+
+    handle = hipblaslt_handles[compute_stream_offset];
   }
-#elif !defined(USE_ROCBLAS)
-  if (use_rocblas)
+
+  hipblaslt_gemm(inputA, inputB, outputD, inputBias, outputPreGelu, 
+                  m, n, k, lda, ldb, ldd,
+                  (transa) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
+                  (transb) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
+                  grad,
+                  workspace, workspaceSize, accumulate, use_split_accumulator,
+                  math_sm_count, m_split, n_split, gemm_producer,
+                  inputCounter, use_service_stream ? ss_ctl.stream : stream, handle);
+
+  if (use_service_stream)
   {
-    use_rocblas = false;
-    std::cout << "[NOTICE] rocBLAS is not enabled, NVTE_USE_ROCBLAS env is ignored\n";
+    release_service_stream(stream, ss_ctl);
   }
-#else
-  if (use_hipblaslt && use_rocblas)
-  {
-    use_rocblas = false;
-    std::cout << "[NOTICE] Two GEMM backend are enabled, hipBLASLt will be used\n";
-  }
-#endif
-
-#ifdef USE_HIPBLASLT
-  if (use_hipblaslt || !use_rocblas)
-  {
-    // Check compute_stream_offset valid.
-    NVTE_CHECK(compute_stream_offset >= -1 && compute_stream_offset < num_streams);
-
-    hipblasLtHandle_t handle = nullptr;
-    if (compute_stream_offset != -1) {
-      // Init hipblaslt handles (once, globally)
-      static std::once_flag init_flag;
-      static hipblasLtHandle_t hipblaslt_handles[num_streams];
-      std::call_once(init_flag, init_hipblaslt_handles, hipblaslt_handles);
-
-      handle = hipblaslt_handles[compute_stream_offset];
-    }
-
-    hipblaslt_gemm(inputA, inputB, outputD, inputBias, outputPreGelu, 
-                   m, n, k, lda, ldb, ldd,
-                   (transa) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
-                   (transb) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
-                   grad,
-                   workspace, workspaceSize, accumulate, use_split_accumulator,
-                   math_sm_count, m_split, n_split, gemm_producer,
-                   inputCounter, stream,
-                   handle);
-
-    return;
-  }
-#endif
-
-#ifdef USE_ROCBLAS
-  {
-    rocblas_gemm(inputA, inputB, outputD, inputBias, outputPreGelu, 
-                 m, n, k, lda, ldb, ldd,
-                (transa) ? rocblas_operation_transpose : rocblas_operation_none,
-                (transb) ? rocblas_operation_transpose : rocblas_operation_none,
-                 grad,
-                 workspace, workspaceSize, accumulate, use_split_accumulator,
-                 math_sm_count, m_split, n_split, gemm_producer,
-                 inputCounter, stream);
-  }
-#endif
 }
 
 } //namespace transformer_engine

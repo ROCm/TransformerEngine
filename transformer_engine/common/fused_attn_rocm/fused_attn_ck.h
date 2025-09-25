@@ -10,6 +10,7 @@
 
 #ifndef TRANSFORMER_ENGINE_FUSED_ATTN_ROCM_FUSED_ATTN_CK_H_
 #define TRANSFORMER_ENGINE_FUSED_ATTN_ROCM_FUSED_ATTN_CK_H_
+#include "../common.h"
 #include "transformer_engine/fused_attn.h"
 
 namespace transformer_engine {

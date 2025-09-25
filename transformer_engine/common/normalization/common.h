@@ -27,6 +27,8 @@
 #include "../common.h"
 #ifndef __HIP_PLATFORM_AMD__
 #include "../cudnn_utils.h"
+#else
+#include "../util/rocm_cast_kernels.cuh"
 #endif
 #include "../util/system.h"
 
@@ -43,18 +45,33 @@ struct LaunchParams {
   size_t workspace_bytes = 0;
   size_t barrier_bytes = 0;
   size_t dgamma_part_bytes = 0;
+
   int multiprocessorCount;
   cudaStream_t stream;
+
+#ifdef __HIP_PLATFORM_AMD__
+  size_t mxfp8_buffer_bytes = 0;
+  // TE MXFP8 quantization parameters
+  Tensor *z_tensor;
+  bool training;
+#endif
 
   KernelParamsType params;
 
   size_t getTotalWorkspaceBytes(const bool _is_layernorm = true) const {
+#ifdef __HIP_PLATFORM_AMD__
+    return (workspace_bytes + barrier_bytes + size_t(_is_layernorm + 1) * dgamma_part_bytes + mxfp8_buffer_bytes);
+#else
     return (workspace_bytes + barrier_bytes + size_t(_is_layernorm + 1) * dgamma_part_bytes);
+#endif
   }
   void alignWorkspace(size_t alignment = 16) {
     workspace_bytes = DIVUP(workspace_bytes, alignment) * alignment;
     barrier_bytes = DIVUP(barrier_bytes, alignment) * alignment;
     dgamma_part_bytes = DIVUP(dgamma_part_bytes, alignment) * alignment;
+#ifdef __HIP_PLATFORM_AMD__
+    mxfp8_buffer_bytes = DIVUP(mxfp8_buffer_bytes, alignment) * alignment;
+#endif
   }
 };
 
@@ -98,7 +115,11 @@ struct KernelParamsBase {
 
 struct ForwardKernelParams : public KernelParamsBase {
   ForwardKernelParams()
+#ifdef __HIP_PLATFORM_AMD__
+      : KernelParamsBase(), z(nullptr), beta(nullptr), epsilon(0.f), fp8_out(false), mxfp8_out(false) {}
+#else
       : KernelParamsBase(), z(nullptr), beta(nullptr), epsilon(0.f), fp8_out(false) {}
+#endif
 
   // Output of LN FWD.
   void* z;
@@ -118,6 +139,10 @@ struct ForwardKernelParams : public KernelParamsBase {
 
   // Whether to compute scale and amax
   bool fp8_out;
+
+#ifdef __HIP_PLATFORM_AMD__
+  bool mxfp8_out;
+#endif
 };
 
 struct BackwardKernelParams : public KernelParamsBase {
@@ -166,9 +191,12 @@ struct TupleHash {
   }
 };
 
-TupleKeyType get_key(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype,
-                     DType otype, DType ctype, uint64_t batch_size, uint64_t hidden_size,
-                     bool zero_centered_gamma, bool is_tuned);
+// Note: the default mode here should match with the default mode with QTensor
+TupleKeyType get_key(NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType,
+                     NVTE_Norm_Stage NormStage, DType wtype, DType itype, DType otype, DType ctype,
+                     uint64_t batch_size, uint64_t hidden_size, bool zero_centered_gamma,
+                     bool is_tuned, NVTEScalingMode mode = NVTE_DELAYED_TENSOR_SCALING,
+                     bool training = true);
 
 template <typename KernelParamsType>
 class TeNormalizationRegistry {
@@ -242,7 +270,11 @@ class TeNormalizationPlan : public NormalizationPlanBase {
  public:
   TeNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype,
                       DType otype, DType ctype, const size_t batch_size, const size_t hidden_size,
-                      const size_t sm_count, const bool zero_centered_gamma, const bool is_tuned);
+                      const size_t sm_count, const bool zero_centered_gamma, const bool is_tuned
+#ifdef __HIP_PLATFORM_AMD__
+                      , const NVTEScalingMode mode, const bool training
+#endif
+                    );
   std::vector<size_t> getWorkspaceShape() const override;
 
   void execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr, void* mean_dptr,
@@ -270,7 +302,8 @@ class CudnnNormalizationPlan : public NormalizationPlanBase {
   CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype,
                          DType itype, DType otype, DType ctype, const size_t batch_size,
                          const size_t hidden_size, const size_t sm_count,
-                         const bool zero_centered_gamma);
+                         const bool zero_centered_gamma, const NVTEScalingMode mode,
+                         const bool training);
 
   std::vector<size_t> getWorkspaceShape() const override;
 
@@ -286,10 +319,17 @@ class CudnnNormalizationPlan : public NormalizationPlanBase {
   void _build() override;
 
   const bool _zero_centered, _fp8_out;
+  int _ndim_scale_block;
+  const NVTE_Norm_Stage _norm_stage;
+  const NVTE_Norm_Type _norm_type;
   std::unique_ptr<char[]> _scalar_dptr;
+  std::unique_ptr<float> _one_dptr = std::make_unique<float>(1.0f);
   // FWD
   std::shared_ptr<fe::graph::Tensor_attributes> _x, _gamma_zero, _scalar_offset, _gamma, _beta,
-      _eps, _mean, _rsigma, _z, _z_scale, _amax, _z_fp8;
+      _eps, _mean, _rsigma, _z, _z_scale, _one_for_div, _z_scale_inv, _amax, _z_fp8;
+  // MX FWD
+  std::shared_ptr<fe::graph::Tensor_attributes> _z_mx_row, _z_mx_col, _sf_row, _sf_col;
+  const bool _training;
   // BWD
   std::shared_ptr<fe::graph::Tensor_attributes> _dz, _dx, _dgamma, _dbeta;
 
@@ -306,12 +346,11 @@ class NormalizationPlanRegistry {
     return instance;
   }
 
-  NormalizationPlanBase* getNormalizationPlan(NVTE_Norm_Backend NormBackend,
-                                              NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage,
-                                              DType wtype, DType itype, DType otype,
-                                              const size_t batch_size, const size_t hidden_size,
-                                              const size_t sm_count, const bool zero_centered_gamma,
-                                              const bool is_aligned);
+  NormalizationPlanBase* getNormalizationPlan(
+      NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage,
+      DType wtype, DType itype, DType otype, const size_t batch_size, const size_t hidden_size,
+      const size_t sm_count, const bool zero_centered_gamma, const bool is_aligned,
+      const NVTEScalingMode mode = NVTE_DELAYED_TENSOR_SCALING, const bool training = true);
 
  private:
   NormalizationPlanRegistry() {}
@@ -376,14 +415,11 @@ struct TypeToDType<byte> {
   static int                                                                                                        \
       register_##NORM_TYPE##_##NORM_STAGE##_##LAUNCH_TYPE##_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE = \
           TeNormalizationRegistry<NORM_STAGE##KernelParams>::registerFunction(                                      \
-              (get_key(NVTE_Norm_Type::NORM_TYPE, NVTE_Norm_Stage::NORM_STAGE,                                      \
-                       (TypeToDType<WTYPE>::value), (TypeToDType<ITYPE>::value),                                    \
-                       (TypeToDType<OTYPE>::value), (TypeToDType<CTYPE>::value), 0, HIDDEN_SIZE,                    \
-                       0, IS_TUNED(LAUNCH_TYPE))),                                                                  \
+              (get_key(NVTE_Norm_Backend::Te, NVTE_Norm_Type::NORM_TYPE,                                            \
+                       NVTE_Norm_Stage::NORM_STAGE, (TypeToDType<WTYPE>::value),                                    \
+                       (TypeToDType<ITYPE>::value), (TypeToDType<OTYPE>::value),                                    \
+                       (TypeToDType<CTYPE>::value), 0, HIDDEN_SIZE, 0, IS_TUNED(LAUNCH_TYPE))),                     \
               FUNC_NAME)
-
-// For FP8 only
-void ComputeScaleInv(void* scale, void* scale_inv);
 
 // Alignment check
 template <size_t Alignment = 16, typename... Args>
@@ -396,8 +432,46 @@ bool use_cudnn_norm_fwd();
 bool use_cudnn_norm_bwd();
 #endif
 
-}  // namespace normalization
+#ifdef __HIP_PLATFORM_AMD__
+template <typename compute_t = float>
+void rocm_norm_mxfp8_quantize(LaunchParams<ForwardKernelParams> &launch_params) {
+  const size_t rows = launch_params.params.rows;
+  const size_t cols = launch_params.params.cols;
+  const size_t scale_dim_X_rowwise = 32;
+  const size_t scale_dim_Y_colwise = launch_params.training ? 32 : 1;
 
+  const size_t chunks_Y = DIVUP(rows, transformer_engine::MXFP8_CHUNK_DIM_Y);
+  const size_t chunks_X = DIVUP(cols, transformer_engine::MXFP8_CHUNK_DIM_X);
+  const size_t blocks_Y = DIVUP(chunks_Y, transformer_engine::MXFP8_CHUNKS_PER_BLOCK_Y);
+  const size_t blocks_X = DIVUP(chunks_X, transformer_engine::MXFP8_CHUNKS_PER_BLOCK_X);
+
+  const size_t scale_stride_rowwise = launch_params.z_tensor->scale_inv.shape[1];
+  const size_t scale_stride_colwise = launch_params.training ? launch_params.z_tensor->columnwise_scale_inv.shape[1] : 1;
+
+  e8m0_t *const scales_rowwise_ptr = reinterpret_cast<e8m0_t *>(launch_params.z_tensor->scale_inv.dptr);
+  e8m0_t *const scales_colwise_ptr =
+      launch_params.training ? reinterpret_cast<e8m0_t *>(launch_params.z_tensor->columnwise_scale_inv.dptr) : nullptr;
+  
+  const dim3 block(transformer_engine::MXFP8_THREADS_PER_CHUNK);
+  const dim3 grid(blocks_X, blocks_Y);
+
+  TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+    scale_dim_Y_colwise, SCALE_DIM_Y,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+        launch_params.z_tensor->dtype(), OType,
+        cast_mxfp8_2D_kernel<false, false, false, Empty, {}, compute_t, OType,
+                              SCALE_DIM_Y, scale_dim_X_rowwise, true><<<grid, block, 0, launch_params.stream>>>(
+            reinterpret_cast<const compute_t*>(launch_params.params.z), 
+            nullptr,
+            reinterpret_cast<OType *>(launch_params.z_tensor->data.dptr),
+            reinterpret_cast<OType *>(launch_params.z_tensor->columnwise_data.dptr),
+            scales_rowwise_ptr, scales_colwise_ptr,
+            nullptr, nullptr, nullptr,
+            rows, cols, scale_stride_rowwise, scale_stride_colwise);););
+}
+#endif 
+
+}  // namespace normalization
 }  // namespace transformer_engine
 
 #endif

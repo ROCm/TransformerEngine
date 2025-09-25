@@ -6,14 +6,18 @@
 """JAX/TE custom call"""
 from dataclasses import dataclass
 from enum import IntEnum
+from packaging import version
 
+import jax
 from jax.interpreters import mlir
-import jax.extend as jex
-
-from transformer_engine import transformer_engine_jax
 
 from .misc import is_hip_extension
+from transformer_engine import transformer_engine_jax
 from .misc import is_ffi_enabled
+if version.parse(jax.__version__) >= version.parse("0.5.0"):
+    from jax import ffi  # pylint: disable=ungrouped-imports
+else:
+    from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
 try:
     from jaxlib.hlo_helpers import custom_call
@@ -33,12 +37,11 @@ class CustomCallAPIVersion(IntEnum):
 for _name, _value in transformer_engine_jax.registrations().items():
     if _name.endswith("_ffi"):
         if is_ffi_enabled():
-            # COMMAND_BUFFER_COMPATIBLE i.e. cudaGraph enabled by default
-            jex.ffi.register_ffi_target(
+            ffi.register_ffi_target(
                 _name, _value, platform="ROCM" if is_hip_extension() else "CUDA", api_version=CustomCallAPIVersion.FFI.value
             )
     else:
-        jex.ffi.register_ffi_target(
+        ffi.register_ffi_target(
             _name, _value, platform="ROCM" if is_hip_extension() else "CUDA", api_version=CustomCallAPIVersion.OPAQUE.value
         )
 

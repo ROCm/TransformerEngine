@@ -48,21 +48,6 @@ constexpr uint32_t THREADS_PER_WARP = 32;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-#if !defined(USE_HIPBLASLT) && !defined(__HIPCC_RTC__)
-inline __device__ float2 operator+(const float2 &a, const float2 &b) {  // NOLINT(*)
-  return {a.x + b.x, a.y + b.y};
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-inline __device__ void operator+=(float2 &a, const float2 &b) {  // NOLINT(*)
-  a.x += b.x;
-  a.y += b.y;
-}
-#endif
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
 template <typename T>
 struct Sum {
   inline __device__ Sum() {}
@@ -1092,6 +1077,29 @@ __device__ __forceinline__ float warp_reduce_max(const float m) {
   return tmp;
 }
 
+__forceinline__ __device__ float warp_reduce_max_broadcast(const float val) {
+  float val_tmp = val;
+#pragma unroll
+  for (int offset = THREADS_PER_WARP / 2; offset > 0; offset /= 2) {
+#ifdef __HIP_PLATFORM_AMD__
+    const float val_other = __shfl_down(val_tmp, offset, THREADS_PER_WARP);
+#else
+    const float val_other = __shfl_down_sync(0xFFFFFFFF, val_tmp, offset);
+#endif
+    __builtin_assume(val_tmp >= 0);
+    __builtin_assume(val_other >= 0);
+    val_tmp = fmaxf(val_tmp, val_other);
+  }
+  // Broadcast the amax to other threads of the subwarp from the zero subwarp lane_id
+  constexpr int subwarp_lane_zero = 0;
+#ifdef __HIP_PLATFORM_AMD__
+  val_tmp = __shfl(val_tmp, subwarp_lane_zero, THREADS_PER_WARP);
+#else
+  val_tmp = __shfl_sync(0xFFFFFFFF, val_tmp, subwarp_lane_zero);
+#endif
+  return val_tmp;
+}
+
 template <int num_warps, typename compute_t>
 __device__ __forceinline__ compute_t reduce_max(const compute_t m, const int warpid) {
   __shared__ float staging[num_warps];
@@ -1102,12 +1110,43 @@ __device__ __forceinline__ compute_t reduce_max(const compute_t m, const int war
     staging[warpid] = my_warp_max;
   }
   __syncthreads();
-  compute_t result = 0;
+  compute_t result{0.f};
   if (warpid == 0) {
     const float my_max = threadIdx.x < num_warps ? staging[threadIdx.x] : 0;
     result = warp_reduce_max<num_warps>(my_max);
   }
   return result;
+}
+
+/**
+ * Max reduction in subwarps
+ * E.g., if nvec=4, each warp processes 128 elements (32 x 4), that covers four MXFP8 scaling factors.
+ * To compute an actual scaling factor for 32 consequentive elements, only 8 threads need to participate,
+ * thus splitting the warp into 4x smaller subwarps 8-thread width.
+ * 'Butterfly' reduction is used inside subwarps.
+ */
+template <int subwarp_width>
+__forceinline__ __device__ float subwarp_reduce_max_broadcast(const float val) {
+  float val_tmp = val;
+#pragma unroll
+  for (int offset = subwarp_width / 2; offset > 0; offset /= 2) {
+#ifdef __HIP_PLATFORM_AMD__
+    const float val_other = __shfl_down(val_tmp, offset, subwarp_width);
+#else
+    const float val_other = __shfl_down_sync(0xFFFFFFFF, val_tmp, offset, subwarp_width);
+#endif
+    __builtin_assume(val_tmp >= 0);
+    __builtin_assume(val_other >= 0);
+    val_tmp = fmaxf(val_tmp, val_other);
+  }
+  // Broadcast the amax to other threads of the subwarp from the zero subwarp lane_id
+  constexpr int subwarp_lane_zero = 0;
+#ifdef __HIP_PLATFORM_AMD__
+  val_tmp = __shfl(val_tmp, subwarp_lane_zero, subwarp_width);
+#else
+  val_tmp = __shfl_sync(0xFFFFFFFF, val_tmp, subwarp_lane_zero, subwarp_width);
+#endif
+  return val_tmp;
 }
 
 // Works only on positive values
@@ -1128,6 +1167,119 @@ __device__ __forceinline__ void reciprocal(T *value_inv, const T value) {
 template <>
 __device__ __forceinline__ void reciprocal<float>(float *value_inv, const float value) {
   *value_inv = __frcp_rn(value);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+#ifndef __HIP_PLATFORM_AMD__
+using fp8e4m3 = __nv_fp8_e4m3;
+using fp8e5m2 = __nv_fp8_e5m2;
+#else
+using fp8e4m3 = te_hip_fp8_e4m3;
+using fp8e5m2 = te_hip_fp8_e5m2;
+#endif //__HIP_PLATFORM_AMD__
+using e8m0_t = uint8_t;
+
+constexpr uint32_t FP32_MANTISSA_BITS = 23;
+constexpr uint32_t FP32_EXPONENT_BIAS = 127;
+
+enum ScalingType { ROWWISE = 0, COLWISE = 1, BIDIMENTIONAL = 2 };
+
+template <typename T>
+struct Numeric_Traits;
+
+template <>
+struct Numeric_Traits<fp8e4m3> {
+  static constexpr int maxUnbiasedExponent = 8;
+#ifndef __HIP_PLATFORM_AMD__
+  static constexpr double maxNorm = 448;
+#elif defined(__HIP_DEVICE_COMPILE__)
+  static constexpr double maxNorm = te_fp8_fnuz() ? 240 : 448;
+#elif defined(TE_DYNAMIC_HIP_FP8_TYPE)
+ // dummy declaration for correct translation;
+ // it is not defined anywhere and it's usage should be eliminated before linking
+  static double maxNorm;
+#else
+  static constexpr double maxNorm = 240;
+#endif
+};
+
+#ifdef TE_DYNAMIC_HIP_FP8_TYPE
+template <bool FNUZ>
+struct Numeric_Traits_fp8e4m3: public Numeric_Traits<fp8e4m3> {
+  static constexpr double maxNorm = FNUZ ? 240 : 448;
+};
+#endif
+
+template <>
+struct Numeric_Traits<fp8e5m2> {
+  static constexpr int maxUnbiasedExponent = 15;
+  static constexpr double maxNorm = 57344;
+};
+
+template <typename T>
+struct Quantized_Limits {
+  static constexpr int max_unbiased_exponent = Numeric_Traits<T>::maxUnbiasedExponent;
+  static constexpr float emax = 1 << max_unbiased_exponent;
+  static constexpr float emax_rcp = 1.0 / emax;
+#ifdef TE_DYNAMIC_HIP_FP8_TYPE
+  static constexpr struct {
+    operator float() const {
+      if (std::is_same<T, fp8e4m3>::value) {
+        return te_fp8_fnuz() ? Numeric_Traits_fp8e4m3<true>::maxNorm
+                           : Numeric_Traits_fp8e4m3<false>::maxNorm;
+      } else {
+        return Numeric_Traits<T>::maxNorm;
+      }
+    }
+  } max_norm = {};
+  // dummy value for kernels host path compilation
+  static constexpr float max_norm_rcp = std::numeric_limits<float>::signaling_NaN();
+#else // TE_DYNAMIC_HIP_FP8_TYPE
+  static constexpr float max_norm = Numeric_Traits<T>::maxNorm;
+  static constexpr float max_norm_rcp = 1.0 / max_norm;
+#endif // TE_DYNAMIC_HIP_FP8_TYPE
+};
+
+__device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
+  // TODO: nan/inf needs to be set for any value
+  // of nan/inf in input not just amax.
+  if (isnan(val)) {
+    return 0xFF;
+  }
+  if (isinf(val)) {
+    return 0xFE;
+  }
+#ifdef __HIP_PLATFORM_AMD__
+#define __CUDA_ARCH_HAS_FEATURE__(x) 0
+#endif //__HIP_PLATFORM_AMD__
+#if ((__CUDA_ARCH_HAS_FEATURE__(SM100_ALL)) || (__CUDA_ARCH_HAS_FEATURE__(SM101_ALL)) || \
+     (__CUDA_ARCH_HAS_FEATURE__(SM120_ALL)))
+  uint16_t out;
+  asm volatile(
+      "{\n"
+      "cvt.rp.satfinite.ue8m0x2.f32  %0, 0.0, %1;\n"
+      "}"
+      : "=h"(out)
+      : "f"(val));
+  return *reinterpret_cast<e8m0_t *>(&out);
+#else
+  if (val == 0.0f) {
+    return 0x00;
+  }
+  uint32_t val_u32 = *reinterpret_cast<uint32_t *>(&val);
+  e8m0_t exponent = (val_u32 >> FP32_MANTISSA_BITS);
+  uint32_t mantissa = val_u32 & 0x7FFFFF;
+  // Round up exponent and deal with satfinite.
+  if ((mantissa > 0 && exponent != 0xFE) && !(exponent == 0 && mantissa <= 0x400000)) {
+    ++exponent;
+  }
+  return exponent;
+#endif
+}
+
+__device__ __forceinline__ float exp2f_rcp(e8m0_t biased_exp) {
+  return (biased_exp == 0) ? 1 : exp2f(FP32_EXPONENT_BIAS - static_cast<float>(biased_exp));
 }
 
 }  // namespace transformer_engine

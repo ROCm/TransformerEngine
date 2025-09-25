@@ -37,27 +37,6 @@ return_run_results() {
     test $_run_error_count -eq 0 -a $_script_error_count -eq 0
 }
 
-configure_gemm_env() {
-    case "$1" in
-        "auto")
-            unset NVTE_USE_HIPBLASLT NVTE_USE_ROCBLAS ROCBLAS_STREAM_ORDER_ALLOC
-        ;;
-        "hipblaslt")
-            export NVTE_USE_HIPBLASLT=1
-            unset NVTE_USE_ROCBLAS ROCBLAS_STREAM_ORDER_ALLOC
-        ;;
-        "rocblas")
-            export NVTE_USE_ROCBLAS=1 ROCBLAS_STREAM_ORDER_ALLOC=1
-            unset NVTE_USE_HIPBLASLT
-        ;;
-        *)
-            script_error "Error unknown GEMM config $1"
-            return 1
-        ;;
-    esac
-    return 0
-}
-
 configure_fused_attn_env() {
     case "$1" in
         "auto")
@@ -195,11 +174,24 @@ get_test_config_list() {
     echo $_TEST_CONFIG_LIST
 }
 
+get_test_variant_tag() {
+    if [ -n "$1" -a -n "$2" ]; then
+        echo "$1/$2"
+    else
+        echo "$1$2"
+    fi
+}
+
 get_test_name_tag() {
     _fname=${1##*/}
     _test_name=${_fname%%.*}
-    test -n "$2" && _test_suffix=.$2
-    echo "$_test_name$_test_suffix"
+    _dir=${1%$_fname}
+    if [ -n "$2" ]; then
+        _tag="$_dir$_test_name.$2"
+    else
+        _tag="$_dir$_test_name"
+    fi
+    echo "$(echo $_tag | tr '/' '.')"
 }
 
 get_pytest_junitxml() {
@@ -222,4 +214,19 @@ start_message() {
     echo "Started with TEST_LEVEL=$TEST_LEVEL sGPU='$TEST_SGPU' mGPU='$TEST_MGPU' at `date`"
     echo "ROCm: `ls -d /opt/rocm-*`"
     python --version
+}
+
+configure_omp_threads() {
+    n_vcpus=$(lscpu | grep "^CPU(s):" | awk '{print $2}')
+    cpus_per_core=$(lscpu | grep "Thread(s) per core:" | awk '{print $NF}')
+
+    n_physical_cores=$((n_vcpus / cpus_per_core))
+    n_parallel_jobs=$1
+
+    if [ -z ${OMP_NUM_THREADS} ]; then
+        export OMP_NUM_THREADS=$((n_physical_cores / n_parallel_jobs))
+	echo "Setting OMP_NUM_THREADS=${OMP_NUM_THREADS}"
+    else
+        echo "Using OMP_NUM_THREADS=${OMP_NUM_THREADS}"
+    fi
 }

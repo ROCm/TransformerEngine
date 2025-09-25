@@ -2,12 +2,19 @@
 # License for AMD contributions = MIT. See LICENSE for more information
 
 import torch
-
 import triton
 import triton.language as tl
 from itertools import product
-
-from .norm_common import num_programs, block_size, use_blocked
+from .norm_common import num_programs, block_size, use_blocked, make_ln_out
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+from transformer_engine.pytorch.triton_kernels.common import (
+    te_dtype_to_torch_dtype,
+    te_dtype_to_triton_dtype,
+)
+from .common import get_fp8_max
+from ..tensor.quantized_tensor import Quantizer
+import transformer_engine_torch as tex
 
 def dg_tmp_rows(x, sm_margin=None):
     return x.shape[0] if use_blocked(x) else num_programs(x, sm_margin)
@@ -17,17 +24,43 @@ def get_autotune_config():
     return [triton.Config({'waves_per_eu': we}, num_warps=nw) for (we, nw) in product([0, 1, 2, 4], [4, 8, 16])]
 
 
-@triton.autotune(configs=get_autotune_config(), key=['n_rows', 'n_cols'], use_cuda_graph=True)
 @triton.jit
-def _rmsnorm_fwd_triton(output_ptr, input_ptr, g_ptr, rsigma_ptr, input_row_stride, output_row_stride, n_rows, n_cols, epsilon,
-                    ZERO_CENTERED_GAMMA: tl.constexpr, BLOCK_SIZE: tl.constexpr, USE_BLOCKED: tl.constexpr,
-                    NUM_PRGMS: tl.constexpr):
+def _rmsnorm_fwd_triton_impl(
+    output_ptr,
+    input_ptr,
+    g_ptr, rsigma_ptr,
+    input_row_stride,
+    output_row_stride,
+    n_rows, n_cols,
+    epsilon,
+    amax_ptr,
+    q_amax_ptr,
+    q_scale_ptr,
+    scale_inv_ptr,
+    out_transpose_ptr,
+    transpose_row_stride,
+    ZERO_CENTERED_GAMMA: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    USE_BLOCKED: tl.constexpr,
+    NUM_PRGMS: tl.constexpr,
+    IS_FP8: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+    MAKE_TRANSPOSE: tl.constexpr,
+):
+
+    # Enable the transpose cache only in FP8 mode.
+    tl.static_assert(not MAKE_TRANSPOSE or IS_FP8, "Transpose cache requires fp8 data type.")
+
     row_start = tl.program_id(0)
     col_offsets = tl.arange(0, BLOCK_SIZE)
     # as older version Triton doesn't support tl.assume and BUFF OPS, comment out for now
     # tl.assume(input_row_stride >= 0)
     # tl.assume(output_row_stride >= 0)
     # tl.assume(row_start >= 0)
+    output_type = output_ptr.type.element_ty
+    if IS_FP8:
+        scale = tl.load(q_scale_ptr)
+        amax = 0.0
 
     if USE_BLOCKED:
 
@@ -76,7 +109,15 @@ def _rmsnorm_fwd_triton(output_ptr, input_ptr, g_ptr, rsigma_ptr, input_row_stri
                     g += 1
                 rms_norm = x * norm_factor * g
                 output_ptrs = row_output_ptr + cols
-                tl.store(output_ptrs, rms_norm.to(output_ptr.type.element_ty))
+                if IS_FP8:
+                    amax_temp = tl.max(tl.abs(rms_norm), axis=-1)
+                    amax = tl.maximum(amax, amax_temp)
+                    rms_norm = rms_norm * scale
+                    rms_norm = tl.clamp(rms_norm, -FP8_MAX, FP8_MAX)
+                    if MAKE_TRANSPOSE:
+                        output_t_ptrs = out_transpose_ptr + cols * transpose_row_stride + row_idx
+                        tl.store(output_t_ptrs, rms_norm.to(output_type))
+                tl.store(output_ptrs, rms_norm.to(output_type))
 
             # Handle remainder
             cols = n_cols_blks * BLOCK_SIZE + col_offsets
@@ -89,7 +130,15 @@ def _rmsnorm_fwd_triton(output_ptr, input_ptr, g_ptr, rsigma_ptr, input_row_stri
                 g += 1
             rms_norm = x * norm_factor * g
             output_ptrs = row_output_ptr + cols
-            tl.store(output_ptrs, rms_norm.to(output_ptr.type.element_ty), mask=mask)
+            if IS_FP8:
+                amax_temp = tl.max(tl.abs(rms_norm), axis=-1)
+                amax = tl.maximum(amax, amax_temp)
+                rms_norm = rms_norm * scale
+                rms_norm = tl.clamp(rms_norm, -FP8_MAX, FP8_MAX)
+                if MAKE_TRANSPOSE:
+                    output_t_ptrs = out_transpose_ptr + cols * transpose_row_stride  + row_idx
+                    tl.store(output_t_ptrs, rms_norm.to(output_type), mask=mask)
+            tl.store(output_ptrs, rms_norm.to(output_type), mask=mask)
 
     else:
         mask = col_offsets < n_cols
@@ -112,46 +161,25 @@ def _rmsnorm_fwd_triton(output_ptr, input_ptr, g_ptr, rsigma_ptr, input_row_stri
 
             output_ptrs = output_ptr + row_idx * output_row_stride + col_offsets
             output_ptrs = tl.multiple_of(output_ptrs, (16, ))
-            tl.store(output_ptrs, rms_norm.to(output_ptr.type.element_ty), mask=mask)
+            if IS_FP8:
+                amax_temp = tl.max(tl.abs(rms_norm), axis=-1)
+                amax = tl.maximum(amax, amax_temp)
+                rms_norm = rms_norm * scale
+                rms_norm = tl.clamp(rms_norm, -FP8_MAX, FP8_MAX)
+                if MAKE_TRANSPOSE:
+                    output_t_ptrs = out_transpose_ptr + col_offsets * transpose_row_stride + row_idx
+                    tl.store(output_t_ptrs, rms_norm.to(output_type), mask=mask)
+            tl.store(output_ptrs, rms_norm.to(output_type), mask=mask)
+    if IS_FP8:
+        tl.store(amax_ptr + row_start, amax)
+        tl.atomic_max(q_amax_ptr, amax, sem="relaxed")
+        if row_start == 0:
+            scale = tl.load(q_scale_ptr)
+            scale_inv = tl.fdiv(1.0, scale)
+            tl.store(scale_inv_ptr, scale_inv)
 
-
-# TODO: currently our triton kernel has not supported fp8 yet
-def te_rmsnorm_fwd_fp8_noalloc_triton(input, weight, eps, ln_out, otype, sm_margin, zero_centered_gamma):
-    M, N = input.shape
-    rsigma = torch.empty((M, ), device='cuda', dtype=torch.float32)
-    blk_size = block_size(input)
-    USE_BLOCKED = use_blocked(input)
-    NUM_PRGMS = num_programs(input, sm_margin)
-
-    grid = lambda meta: (NUM_PRGMS, )
-    #encode the otype if ln_out is of different dtype
-    ln_out = ln_out.view(otype)
-    _rmsnorm_fwd_triton[grid](ln_out, input, weight, rsigma, input.stride(0), ln_out.stride(0), M, N, eps, zero_centered_gamma, blk_size, USE_BLOCKED, NUM_PRGMS)
-
-    return ln_out, rsigma
-
-
-# specialized version of rmsnorm fwd, with input and output of the same dtype
-def te_rmsnorm_fwd_noalloc_triton(input, weight, ln_out, eps, sm_margin, zero_centered_gamma):
-    assert input.dtype==ln_out.dtype, "input and output dtype should be the same in te_rmsnorm_fwd_noalloc_triton"
-    return te_rmsnorm_fwd_fp8_noalloc_triton(input, weight, eps, ln_out, input.dtype, sm_margin, zero_centered_gamma)
-
-
-# specialized version of rmsnorm fwd, optimized for inference
-def te_rmsnorm_fwd_inf_triton(input, weight, eps, sm_margin, zero_centered_gamma):
-    ln_out = torch.empty_like(input)
-    ln_out, _ = te_rmsnorm_fwd_noalloc_triton(input, weight, ln_out, eps, sm_margin, zero_centered_gamma)
-    return ln_out
-
-
-# may take non-contiguous input and weight
-# see rmsnorm_fwd in transformer_engine/pytorch/csrc/extensions/normalization.cu
-def te_rmsnorm_fwd_triton(input, weight, eps, sm_margin, zero_centered_gamma):
-    input_ = input.contiguous()
-    weight_ = weight.contiguous()
-    ln_out = torch.empty_like(input_)
-    return te_rmsnorm_fwd_noalloc_triton(input_, weight_, ln_out, eps, sm_margin, zero_centered_gamma)
-
+autotune_dec = triton.autotune(configs=get_autotune_config(), key=['n_rows', 'n_cols'], use_cuda_graph=True)
+_rmsnorm_fwd_triton = autotune_dec(_rmsnorm_fwd_triton_impl)
 
 @triton.jit
 def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, dg_ptr, input_row_stride, output_row_stride,
@@ -305,10 +333,9 @@ def _rmsnorm_bwd_dg_reduce_triton(dg_in_ptr, dg_out_ptr, dg_in_stride, n_rows, n
     sum_dg = tl.sum(acc, axis=0)
     tl.store(dg_out_ptr + cols, sum_dg.to(dg_out_ptr.type.element_ty), mask=cols < n_cols)
 
-
-# may take non-contiguous inputs
-# see rmsnorm_bwd in transformer_engine/pytorch/csrc/extensions/normalization.cu
+# triton drop-in replacement for transformer_engine::pytorch::rmsnorm_bwd
 def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma):
+    # may take non-contiguous inputs
     dz_ = dz.contiguous()
     x_ = x.contiguous()
     rsigma_ = rsigma.contiguous()
@@ -322,7 +349,7 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma):
     USE_BLOCKED = use_blocked(x_)
     NUM_PRGMS = num_programs(x_, sm_margin)
     need_reduction = N > 1
-    dg_tmp = torch.empty(dg_tmp_rows(x_, sm_margin), N, device='cuda', dtype=torch.float32, requires_grad=False) if need_reduction else None
+    dg_tmp = torch.empty(dg_tmp_rows(x_, sm_margin), N, device=x.device, dtype=torch.float32, requires_grad=False) if need_reduction else None
 
     grid_bwd = lambda meta: (NUM_PRGMS, )
     _rmsnorm_bwd_triton[grid_bwd](dz_, x_, gamma_, rsigma_, dx, dg_tmp if need_reduction else dgamma,
@@ -335,3 +362,105 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma):
                                                    BLOCK_SIZE_M=128, BLOCK_SIZE_N=64)
 
     return dx, dgamma
+
+# triton drop-in replacement for transformer_engine::pytorch::rmsnorm_fwd
+def te_rmsnorm_fwd_triton(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    ln_out: torch.Tensor,
+    quantizer: Quantizer,
+    otype: tex.DType,
+    sm_margin: int,
+    zero_centered_gamma: bool,
+    autotune: bool = True,
+):
+    if eps < 0:
+        raise ValueError(f"`eps` must be non-negative, but a value of {eps} was passed")
+    if len(input.shape) != 2:
+        raise ValueError(
+            f"The input must be a 2-dimensional matrix, but an input with {input.ndim} was passed.")
+
+    device = input.device
+    N, H = input.shape
+    if weight.shape[0] != H:
+        raise ValueError(
+            f"The shape of `weight` must be feature-aligned, "
+            f"but {weight.shape[0]=} while {input.shape[1]=}"
+        )
+    IS_FP8 = isinstance(quantizer, Float8Quantizer)
+    IS_MXFP8 = isinstance(quantizer, MXFP8Quantizer)
+    BLOCK_SIZE = block_size(input)
+    USE_BLOCKED = use_blocked(input)
+    NUM_PRGMS = num_programs(input, sm_margin)
+    MAKE_TRANSPOSE = False
+
+    rsigma = torch.empty((N,), dtype=torch.float32, device=device)
+    torch_out_dtype = (
+        otype if isinstance(otype, torch.dtype)
+        else te_dtype_to_torch_dtype(otype)
+    )
+    out = make_ln_out(
+        ln_out,
+        quantizer=quantizer,
+        input_shape=input.shape,
+        out_dtype=torch_out_dtype
+    )
+    if IS_FP8:
+        MAKE_TRANSPOSE = quantizer.columnwise_usage
+        amax = torch.empty((NUM_PRGMS,), dtype=torch.float32, device=device)
+        tl_dtype = te_dtype_to_triton_dtype(quantizer.dtype)
+        scale_inv_ptr = out._scale_inv
+        q_scale = quantizer.scale
+        q_amax = quantizer.amax
+        out_ptr = triton.reinterpret(out._data, tl_dtype)
+        FP8_MAX = get_fp8_max(quantizer.dtype)
+        if MAKE_TRANSPOSE:
+            if out._transpose_invalid:
+                out._transpose = torch.empty((out._data.shape[1], out._data.shape[0]), dtype=out._data.dtype, device=device)
+                out._transpose_invalid = False
+            out_transpose_ptr = triton.reinterpret(out._transpose, tl_dtype)
+            out_transpose_stride = out._transpose.stride(0)
+        else:
+            out_transpose_ptr = None
+            out_transpose_stride = None
+    else:
+        amax = None
+        tl_dtype = None
+        scale_inv_ptr = None
+        q_scale = None
+        q_amax = None
+        out_ptr = out
+        out_transpose_ptr = None
+        out_transpose_stride = None
+        FP8_MAX = None
+
+    grid_fwd = lambda meta: (NUM_PRGMS, )
+    # TODO(micky774) Implement fused MXFP8 quantization within the kernel
+    kernel = _rmsnorm_fwd_triton if autotune else _rmsnorm_fwd_triton_impl
+    kernel[grid_fwd](
+        out_ptr,
+        input,
+        weight,
+        rsigma,
+        input.stride(0),
+        out_ptr.stride(0),
+        N, H, eps,
+        amax,
+        q_amax,
+        q_scale,
+        scale_inv_ptr,
+        out_transpose_ptr,
+        out_transpose_stride,
+        zero_centered_gamma,
+        BLOCK_SIZE,
+        USE_BLOCKED,
+        NUM_PRGMS,
+        IS_FP8,
+        FP8_MAX,
+        MAKE_TRANSPOSE,
+    )
+    if IS_MXFP8:
+        out = quantizer.quantize(out, out=ln_out)
+
+    return out, None, rsigma

@@ -4,6 +4,9 @@
 import os
 import torch
 import triton
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
+from .common import te_dtype_to_torch_dtype
 
 def get_ln_sm_margin(sm_margin_type):
     assert sm_margin_type in {"FWD", "BWD", "INF"}
@@ -50,3 +53,34 @@ def block_size(x):
 
 def use_blocked(x):
     return x.shape[1] > block_size(x)
+
+
+def make_ln_out(ln_out, quantizer=None, input_shape=None, out_dtype=torch.float32):
+
+    if ln_out is None:
+        # TODO(micky774): Remove MXFP8Quantizer check when kernels
+        # properly support MXFP8 as a fused operation
+        if quantizer is None or isinstance(quantizer, MXFP8Quantizer):
+            return torch.empty(input_shape, dtype=out_dtype, device='cuda')
+        return quantizer.make_empty(input_shape, dtype=out_dtype)
+
+    # TODO(micky774): Remove when kernels properly support MXFP8 as a fused operation
+    if isinstance(ln_out, MXFP8Tensor):
+        return ln_out.dequantize(dtype=out_dtype).to("cuda")
+
+    # TODO(micky774): Remove when kernels properly support MXFP8 as a fused operation
+    if isinstance(quantizer, MXFP8Quantizer):
+        return torch.empty(input_shape, dtype=out_dtype, device='cuda')
+
+    if isinstance(ln_out, Float8Tensor):
+        if ln_out.dtype == out_dtype:
+            return ln_out
+        return quantizer.make_empty(input_shape, dtype=out_dtype)
+
+    if quantizer is not None:
+        return quantizer.create_tensor_from_data(
+                ln_out.view(te_dtype_to_torch_dtype(quantizer.dtype)),
+                fake_dtype=out_dtype
+            )
+
+    return ln_out

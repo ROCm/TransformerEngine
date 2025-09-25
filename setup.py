@@ -7,9 +7,11 @@
 """Installation script."""
 
 import os
+import sys
 import time
 from pathlib import Path
 from typing import List, Tuple
+import subprocess
 
 import setuptools
 from wheel.bdist_wheel import bdist_wheel
@@ -38,15 +40,14 @@ os.environ["NVTE_PROJECT_BUILDING"] = "1"
 
 if "pytorch" in frameworks:
     from torch.utils.cpp_extension import BuildExtension
-elif "paddle" in frameworks:
-    from paddle.utils.cpp_extension import BuildExtension
 elif "jax" in frameworks:
     install_and_import("pybind11[global]")
     from pybind11.setup_helpers import build_ext as BuildExtension
 
 
 CMakeBuildExtension = get_build_ext(BuildExtension)
-
+if not rocm_build():
+    archs = cuda_archs()
 
 class TimedBdist(bdist_wheel):
     """Helper class to measure build time"""
@@ -60,50 +61,35 @@ class TimedBdist(bdist_wheel):
 
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library"""
-    if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
-        assert (
-            os.getenv("MPI_HOME") is not None
-        ), "MPI_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
-        cmake_flags.append("-DNVTE_UB_WITH_MPI=ON")
-
-    if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
-        cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
-
-    # Project directory root
-    root_path = Path(__file__).resolve().parent
-
     cmake_flags = []
     if rocm_build():
         cmake_flags.append("-DUSE_ROCM=ON")
-        # HIPBLASLT and ROCBLAS support are controlled as follows:
-        #  If neither NVTE_USE_HIPBLASLT nor NVTE_USE_ROCBLAS are set, or both are set, both frameworks are enabled
-        #  If one is set and the other is not, then only the corresponding backend is built
-        enable_hipblaslt = os.getenv("NVTE_USE_HIPBLASLT") is not None
-        enable_rocblas = os.getenv("NVTE_USE_ROCBLAS") is not None
-        if enable_hipblaslt and not enable_rocblas:
-            cmake_flags.append("-DUSE_HIPBLASLT=ON")
-            cmake_flags.append("-DUSE_ROCBLAS=OFF")
-        elif enable_rocblas and not enable_hipblaslt:
-            cmake_flags.append("-DUSE_HIPBLASLT=OFF")
-            cmake_flags.append("-DUSE_ROCBLAS=ON")
-        else:
-            cmake_flags.append("-DUSE_HIPBLASLT=ON")
-            cmake_flags.append("-DUSE_ROCBLAS=ON")
-
         if os.getenv("NVTE_AOTRITON_PATH"):
             aotriton_path = Path(os.getenv("NVTE_AOTRITON_PATH"))
             cmake_flags.append(f"-DAOTRITON_PATH={aotriton_path}")
         cmake_flags.append(f"-DCK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT={os.getenv('NVTE_CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT', 3)}")
         if os.getenv("NVTE_CK_FUSED_ATTN_PATH"):
             ck_path = Path(os.getenv("NVTE_CK_FUSED_ATTN_PATH"))
-            cmake_flags.append(f"-DCK_FUSED_ATTN_PATH={ck_path}")
+            cmake_flags.append(f"-DAITER_MHA_PATH={ck_path}")
         if int(os.getenv("NVTE_FUSED_ATTN_AOTRITON", "1"))==0 or int(os.getenv("NVTE_FUSED_ATTN", "1"))==0:
             cmake_flags.append("-DUSE_FUSED_ATTN_AOTRITON=OFF")
         if int(os.getenv("NVTE_FUSED_ATTN_CK", "1"))==0 or int(os.getenv("NVTE_FUSED_ATTN", "1"))==0:
             cmake_flags.append("-DUSE_FUSED_ATTN_CK=OFF")
     else:
-        cmake_flags=["-DCMAKE_CUDA_ARCHITECTURES={}".format(cuda_archs())]
+        cmake_flags = ["-DCMAKE_CUDA_ARCHITECTURES={}".format(archs)]
+        if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
+            assert (
+                os.getenv("MPI_HOME") is not None
+            ), "MPI_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
+            cmake_flags.append("-DNVTE_UB_WITH_MPI=ON")
+
+        if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
+            cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
+
         cmake_flags.append("-DUSE_ROCM=OFF")
+
+    # Project directory root
+    root_path = Path(__file__).resolve().parent
 
     return CMakeExtension(
         name="transformer_engine",
@@ -131,21 +117,29 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     if not found_cmake():
         setup_reqs.append("cmake>=3.21")
     if not found_ninja():
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "ninja"])
         setup_reqs.append("ninja")
     if not found_pybind11():
         setup_reqs.append("pybind11")
 
     # Framework-specific requirements
-    if (not rocm_build()) and (not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0")))):
+    if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         if "pytorch" in frameworks:
-            install_reqs.extend(["torch"])
-            test_reqs.extend(["numpy", "onnxruntime", "torchvision", "prettytable"])
+            if rocm_build():
+                install_reqs.extend(["einops"])
+            else:
+                install_reqs.extend(["torch>=2.1"])
+                # Blackwell is not supported as of Triton 3.2.0, need custom internal build
+                # install_reqs.append("triton")
+                test_reqs.extend(["numpy", "torchvision", "prettytable", "PyYAML"])
         if "jax" in frameworks:
-            install_reqs.extend(["jax", "flax>=0.7.1"])
-            test_reqs.extend(["numpy", "praxis"])
-        if "paddle" in frameworks:
-            install_reqs.append("paddlepaddle-gpu")
-            test_reqs.append("numpy")
+            if rocm_build():
+                from build_tools.jax import jax_install_requires
+                install_reqs.extend(jax_install_requires(["flax>=0.7.1"]))
+            else:
+                install_reqs.extend(["jax", "flax>=0.7.1"])
+                # test_reqs.extend(["numpy", "praxis"])
+                test_reqs.extend(["numpy"])
 
     return [remove_dups(reqs) for reqs in [setup_reqs, install_reqs, test_reqs]]
 
@@ -161,16 +155,16 @@ if __name__ == "__main__":
         assert bool(
             int(os.getenv("NVTE_RELEASE_BUILD", "0"))
         ), "NVTE_RELEASE_BUILD env must be set for metapackage build."
+        te_cuda_vers = "rocm" if rocm_build() else "cu12"
         ext_modules = []
         cmdclass = {}
         package_data = {}
         include_package_data = False
         setup_requires = []
-        install_requires = ([f"transformer_engine_cu12=={__version__}"],)
+        install_requires = ([f"transformer_engine_{te_cuda_vers}=={__version__}"],)
         extras_require = {
             "pytorch": [f"transformer_engine_torch=={__version__}"],
             "jax": [f"transformer_engine_jax=={__version__}"],
-            "paddle": [f"transformer_engine_paddle=={__version__}"],
         }
     else:
         setup_requires, install_requires, test_requires = setup_requirements()
@@ -201,16 +195,6 @@ if __name__ == "__main__":
                     setup_jax_extension(
                         "transformer_engine/jax/csrc",
                         current_file_path / "transformer_engine" / "jax" / "csrc",
-                        current_file_path / "transformer_engine",
-                    )
-                )
-            if "paddle" in frameworks:
-                from build_tools.paddle import setup_paddle_extension
-
-                ext_modules.append(
-                    setup_paddle_extension(
-                        "transformer_engine/paddle/csrc",
-                        current_file_path / "transformer_engine" / "paddle" / "csrc",
                         current_file_path / "transformer_engine",
                     )
                 )

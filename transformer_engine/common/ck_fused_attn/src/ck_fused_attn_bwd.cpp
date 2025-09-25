@@ -10,9 +10,7 @@
 #include <type_traits>
 #include "ck_fused_attn/ck_fused_attn.hpp"
 #include "ck_tile/host.hpp"
-#include "bias.hpp"
-#include "mask.hpp"
-#include "fmha_bwd.hpp"
+#include "mha_bwd.h"
 #include "ck_fused_attn_utils.hpp"
 
 namespace ck_fused_attn{
@@ -28,7 +26,7 @@ __global__ void dk_dv_reduce(
   DataType *dv,
   //k,v, dk, dv guaranteed to have the same stride
   uint64_t stride_b_dkv, uint64_t stride_h_dkv, uint64_t stride_s_dkv){
-  
+   
   uint64_t batch_idx = blockIdx.x;
   uint64_t seqlen_idx = blockIdx.y;
   uint64_t head_k_idx = blockIdx.z;
@@ -40,7 +38,7 @@ __global__ void dk_dv_reduce(
   float sum_dk = 0.0f;
   float sum_dv = 0.0f;
 
-  assert(hdim_dix<d);
+  assert(hdim_idx<d);
   uint64_t read_idx = batch_idx*stride_b_dkv_expanded + head_k_idx*head_idx_offset*stride_h_dkv_expanded + seqlen_idx*stride_s_dkv_expanded + hdim_idx;
   uint64_t write_idx = batch_idx*stride_b_dkv + head_k_idx*stride_h_dkv + seqlen_idx* stride_s_dkv + hdim_idx;
   
@@ -86,7 +84,7 @@ __global__ void dk_or_dv_reduce(
 
   float sum_dk_or_dv = 0.0f;
 
-  assert(hdim_dix<d);
+  assert(hdim_idx<d);
   uint64_t read_idx = batch_idx*stride_b_dk_or_dv_expanded + head_k_or_v_idx*head_idx_offset*stride_h_dk_or_dv_expanded + seqlen_idx*stride_s_dk_or_dv_expanded + hdim_idx;
   uint64_t write_idx = batch_idx*stride_b_dk_or_dv + head_k_or_v_idx*stride_h_dk_or_dv + seqlen_idx* stride_s_dk_or_dv + hdim_idx;
   
@@ -125,7 +123,7 @@ __global__ void dk_dv_reduce_thd(
   uint64_t head_k_idx = blockIdx.y;
   uint64_t hdim_idx = threadIdx.x;
   
-  assert(hdim_dix<d);
+  assert(hdim_idx<d);
 
   if(seqlen_idx >= *total_seqlen_kv_ptr){
     return;
@@ -178,7 +176,7 @@ __global__ void dk_or_dv_reduce_thd(
   uint64_t head_k_or_v_idx = blockIdx.y;
   uint64_t hdim_idx = threadIdx.x;
   
-  assert(hdim_dix<d);
+  assert(hdim_idx<d);
 
   if(seqlen_idx >= *total_seqlen_kv_ptr){
     return;
@@ -302,7 +300,19 @@ __global__ void dbias_reduce_b1ss(
 }
 
 // print the fmha_traits and args passed into ck apis
-void log_bwd_config(const char* func_name, const fmha_bwd_traits& fmha_traits, const fmha_bwd_args& fmha_args){
+void log_bwd_config(const char* func_name,
+                    const std::string data_type_str,
+                    const bool is_group_mode,
+                    const mask_enum mask_type,
+                    const bias_enum bias_type,
+                    const bool has_dbias,
+                    const bool has_dropout,
+                    const bool is_store_randval,
+                    const bool is_deterministic,
+                    const bool uses_bwd_v3,
+                    const bool is_v3_atomic_fp32,
+                    const int how_v3_bf16_cvt,
+                    const fmha_bwd_args& fmha_args){
 
   bool ck_fused_attn_log_config = false;
   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
@@ -310,22 +320,23 @@ void log_bwd_config(const char* func_name, const fmha_bwd_traits& fmha_traits, c
       ck_fused_attn_log_config = true;
   }
   if (ck_fused_attn_log_config) {
-    std::cout<<std::endl<<"run ck fmha_bwd: "<<std::endl;
+    std::cout<<std::endl<<func_name<<std::endl;
+
     // fmha_traits debug
     std::cout<<"fmha_traits: "<<std::endl;
-    std::cout<<"hdim_q: "<<fmha_traits.hdim_q<<std::endl;
-    std::cout<<"hdim_v: "<<fmha_traits.hdim_v<<std::endl;
-    std::cout<<"data_type: "<<fmha_traits.data_type<<std::endl;
-    std::cout<<"is_group_mode: "<<fmha_traits.is_group_mode<<std::endl;
-    std::cout<<"mask_type: "<<static_cast<std::underlying_type<mask_enum>::type>(fmha_traits.mask_type)<<std::endl;
-    std::cout<<"bias_type: "<<static_cast<std::underlying_type<bias_enum>::type>(fmha_traits.bias_type)<<std::endl;
-    std::cout<<"has_dbias: "<<fmha_traits.has_dbias<<std::endl;
-    std::cout<<"has_dropout: "<<fmha_traits.has_dropout<<std::endl;
-    std::cout<<"is_store_randval: "<<fmha_traits.is_store_randval<<std::endl;
-    std::cout<<"is_deterministic: "<<fmha_traits.is_deterministic<<std::endl;
-    std::cout<<"uses_bwd_v3: "<<fmha_traits.uses_bwd_v3<<std::endl;
-    std::cout<<"is_v3_atomic_fp32: "<<fmha_traits.is_v3_atomic_fp32<<std::endl;
-    std::cout<<"how_v3_bf16_cvt: "<<fmha_traits.how_v3_bf16_cvt<<std::endl;
+    std::cout<<"hdim_q: "<<fmha_args.hdim_q<<std::endl;
+    std::cout<<"hdim_v: "<<fmha_args.hdim_v<<std::endl;
+    std::cout<<"data_type: "<<data_type_str<<std::endl;
+    std::cout<<"is_group_mode: "<<is_group_mode<<std::endl;
+    std::cout<<"mask_type: "<<static_cast<std::underlying_type<mask_enum>::type>(mask_type)<<std::endl;
+    std::cout<<"bias_type: "<<static_cast<std::underlying_type<bias_enum>::type>(bias_type)<<std::endl;
+    std::cout<<"has_dbias: "<<has_dbias<<std::endl;
+    std::cout<<"has_dropout: "<<has_dropout<<std::endl;
+    std::cout<<"is_store_randval: "<<is_store_randval<<std::endl;
+    std::cout<<"is_deterministic: "<<is_deterministic<<std::endl;
+    std::cout<<"uses_bwd_v3: "<<uses_bwd_v3<<std::endl;
+    std::cout<<"is_v3_atomic_fp32: "<<is_v3_atomic_fp32<<std::endl;
+    std::cout<<"how_v3_bf16_cvt: "<<how_v3_bf16_cvt<<std::endl;
 
     // fmha_args debug
     std::cout<<"fmha_args: "<<std::endl;
@@ -468,21 +479,11 @@ hipError_t ck_attn_bwd(
   bias_enum bias_type;
   BiasShape bias_shape; 
   std::tie(bias_type, bias_shape) = get_ck_bias_type_shape(attn_bias_type, b, h, bias_b, bias_h);
-
-  mask_enum mask_type;
   ck_tile::index_t left, right;
-  if (attn_mask_type == MaskType::no_mask){
-    mask_type = mask_enum::no_mask;
-  }else if(attn_mask_type == MaskType::mask_top_left){
-    mask_type = mask_enum::mask_top_left;
-  }else if(attn_mask_type == MaskType::mask_bottom_right){
-    mask_type = mask_enum::mask_bottom_right;
-  }else{
-    mask_type = mask_enum::window_generic;
-  }
   left = window_size_left;
   right = window_size_right;
  
+  mask_enum mask_type = static_cast<mask_enum>(attn_mask_type);
   bool ck_fused_attn_log_config = false;
   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
@@ -496,15 +497,6 @@ hipError_t ck_attn_bwd(
   ck_tile::index_t shape_seqlen_k = seqlen_k;
 
   std::string data_type_str = get_data_type_str(dtype);
-
-  auto fmha_traits =
-    fmha_bwd_traits{hdim_q,    hdim_v,    data_type_str, is_group_mode,
-                    mask_type, bias_type, has_dbias,     has_dropout, 
-                    s_randval, deterministic, 
-                    uses_bwd_v3, // use_bwd_v3
-                    is_v3_atomic_fp32, // is_v3_atomic_fp32
-                    how_v3_bf16_cvt //how_v3_bf16_cvt 0:RTNE; 1:RTNA; 2:RTZ
-                    };
 
   auto fmha_args = [&]() {
     // setup stride_* arguments
@@ -641,9 +633,24 @@ hipError_t ck_attn_bwd(
   }();
 
   // print ck traits and args when needed
-  log_bwd_config(__FUNCTION__, fmha_traits, fmha_args); 
-
-  float average_runtime = fmha_bwd(fmha_traits, fmha_args, stream_config);
+  log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_type, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args);
+  if (uses_bwd_v3)
+  {
+    set_aiter_asm_dir();
+  }
+  
+  float average_runtime = aiter::mha_bwd(fmha_args,
+                                         stream_config,
+                                         data_type_str,
+                                         is_group_mode,
+                                         mask_type,
+                                         bias_type,
+                                         has_dbias,
+                                         s_randval,
+                                         deterministic,
+                                         uses_bwd_v3,
+                                         is_v3_atomic_fp32,
+                                         how_v3_bf16_cvt);
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
@@ -769,7 +776,7 @@ hipError_t ck_attn_bwd(
 hipError_t ck_attn_varlen_bwd(  
   DType dtype,
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v,
-  uint64_t max_tokens_q,
+  uint64_t max_tokens_q, uint64_t max_tokens_kv,
   const void* q_ptr, 
   uint64_t stride_h_q, uint64_t stride_s_q,
   const void* k_ptr, 
@@ -823,12 +830,11 @@ hipError_t ck_attn_varlen_bwd(
   bool s_randval = false;
 
   // THD does not work with bias
-
-  mask_enum mask_type = get_ck_mask_type(attn_mask_type);
-
+  
   ck_tile::index_t left, right;
   left = window_size_left;
   right = window_size_right;
+  mask_enum mask_type = static_cast<mask_enum>(attn_mask_type);
  
   bool ck_fused_attn_log_config = false;
   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
@@ -839,15 +845,6 @@ hipError_t ck_attn_varlen_bwd(
   ck_tile::stream_config stream_config{stream, false, ck_fused_attn_log_config};
 
   std::string data_type_str = get_data_type_str(dtype);
-
-  auto fmha_traits =
-    fmha_bwd_traits{hdim_q,    hdim_v,    data_type_str, is_group_mode,
-                    mask_type, bias_enum::no_bias, has_dbias,     has_dropout, 
-                    s_randval, deterministic, 
-                    uses_bwd_v3, // use_bwd_v3
-                    is_v3_atomic_fp32, // is_v3_atomic_fp32
-                    how_v3_bf16_cvt //how_v3_bf16_cvt 0:RTNE; 1:RTNA; 2:RTZ
-                    };
 
   auto fmha_args = [&]() {
     // setup stride_* arguments
@@ -981,15 +978,30 @@ hipError_t ck_attn_varlen_bwd(
   }();
 
   // print ck traits and args when needed
-  log_bwd_config(__FUNCTION__, fmha_traits, fmha_args); 
+  log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_enum::no_bias, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args);
+  if (uses_bwd_v3)
+  {
+    set_aiter_asm_dir();
+  }
 
-  float average_runtime = fmha_bwd(fmha_traits, fmha_args, stream_config);
+  float average_runtime = aiter::mha_bwd(fmha_args,
+                                         stream_config,
+                                         data_type_str,
+                                         is_group_mode,
+                                         mask_type,
+                                         bias_enum::no_bias,
+                                         has_dbias,
+                                         s_randval,
+                                         deterministic,
+                                         uses_bwd_v3,
+                                         is_v3_atomic_fp32,
+                                         how_v3_bf16_cvt);
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
   }
   if(is_mqa_gqa){
-    dim3 grid(b*s_kv, hg);
+    dim3 grid(max_tokens_kv, hg);
     if (d_qk == d_v) {
       dim3 block(d_qk);
       if (ck_fused_attn_log_config){
@@ -1060,3 +1072,4 @@ hipError_t ck_attn_varlen_bwd(
 }
 
 }//namespace ck_fused_attn
+

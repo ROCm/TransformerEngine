@@ -30,12 +30,14 @@ from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
     QKVLayout,
+    QKVFormat,
     reorder_causal_load_balancing,
     inverse_reorder_causal_load_balancing,
     fused_attn,
     make_swa_mask,
     SequenceDescriptor,
     CPStrategy,
+    ReorderStrategy,
 )
 from transformer_engine.jax.cpp_extensions import FusedAttnHelper
 from transformer_engine.transformer_engine_jax import (
@@ -106,7 +108,8 @@ def general_dot_product_attention(
         softmax_out = softmax_out * multiplier
 
     context = jnp.einsum("...hgqk,...khd->...qhgd", softmax_out, value)
-    context = jnp.reshape(context, query.shape)
+    context_shape = query.shape[:-1] + (value.shape[-1],)
+    context = jnp.reshape(context, context_shape)
     return context
 
 
@@ -294,10 +297,12 @@ class FusedAttnRunner:
     max_seqlen_kv: int
     num_heads_q: int
     num_heads_kv: int
-    head_dim: int
+    head_dim_qk: int
+    head_dim_v: int
     attn_bias_type: AttnBiasType
     attn_mask_type: AttnMaskType
     dropout_prob: float
+    use_old_rng: bool
     dtype: DTypeLike
     is_training: bool
     qkv_layout: QKVLayout
@@ -346,18 +351,27 @@ class FusedAttnRunner:
                 "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
             )
 
+        # Test the MLA case where head dims for qk differ from head dims for v, only if the tensors
+        # are provided in BSHD_BSHD_BSHD or THD_THD_THD formats
+        if self.head_dim_qk != self.head_dim_v and not self.qkv_layout.is_separate():
+            pytest.skip(
+                "For head_dim_qk != head_dim_v, it is necessary that the QKV layout "
+                "is either BSHD_BSHD_BSHD or THD_THD_THD"
+            )
+
         self.backend = FusedAttnHelper(
             self.dtype,
             self.dtype,
-            self.qkv_layout.value,
-            self.attn_bias_type.value,
-            self.attn_mask_type.value,
+            self.qkv_layout,
+            self.attn_bias_type,
+            self.attn_mask_type,
             self.dropout_prob,
             self.num_heads_q,
             self.num_heads_kv,
             self.max_seqlen_q,
             self.max_seqlen_kv,
-            self.head_dim,
+            self.head_dim_qk,
+            self.head_dim_v,
             (-1, -1) if self.window_size is None else self.window_size,
         ).get_fused_attn_backend()
         if self.backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
@@ -387,16 +401,17 @@ class FusedAttnRunner:
         self.cp_size = self.mesh.shape.get(self.mesh_resource.cp_resource, 1)
         self.tp_size = self.mesh.shape.get(self.mesh_resource.tp_resource, 1)
 
-        key = jax.random.PRNGKey(0)
+        # only support new-style RNGs on AMD hardware since they will crash otherwise
+        if is_hip_extension() and not self.use_old_rng:
+            key = jax.random.key(0)
+        else:
+            key = jax.random.PRNGKey(0)
+
         q_key, k_key, v_key, bias_key, dropout_key = jax.random.split(key, 5)
 
-        q_shape = (self.batch_size, self.max_seqlen_q, self.num_heads_q, self.head_dim)
-        k_shape = v_shape = (
-            self.batch_size,
-            self.max_seqlen_kv,
-            self.num_heads_kv,
-            self.head_dim,
-        )
+        q_shape = (self.batch_size, self.max_seqlen_q, self.num_heads_q, self.head_dim_qk)
+        k_shape = (self.batch_size, self.max_seqlen_kv, self.num_heads_kv, self.head_dim_qk)
+        v_shape = (self.batch_size, self.max_seqlen_kv, self.num_heads_kv, self.head_dim_v)
 
         if self.attn_bias_type == AttnBiasType.NO_BIAS:
             bias_shape = None
@@ -502,7 +517,8 @@ class FusedAttnRunner:
                 self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
             )
             self.seqlens_q, self.offsets_q = get_seqlens_and_offsets(self.segment_ids_q)
-            if self.qkv_layout == QKVLayout.T3HD:
+            # TODO(rewang): record only self attention and find the reason of cross attention
+            if self.qkv_layout == QKVLayout.T3HD or self.max_seqlen_q == self.max_seqlen_kv:
                 self.segment_ids_kv = self.segment_ids_q
                 self.segment_pos_kv = self.segment_pos_q
                 self.pad_kv = self.pad_q
@@ -538,6 +554,30 @@ class FusedAttnRunner:
             self.window_size,
         )
 
+        if self.cp_size > 1 and self.cp_load_balanced:
+            if self.qkv_layout.is_thd():
+                reorder_strategy = ReorderStrategy.Striped
+            else:
+                reorder_strategy = ReorderStrategy.DualChunkSwap
+
+            seq_dim = 0 if self.qkv_layout.get_qkv_format() == QKVFormat.SBHD else 1
+            self.cp_reorder_fn = partial(
+                reorder_causal_load_balancing,
+                strategy=reorder_strategy,
+                cp_size=self.cp_size,
+                seq_dim=seq_dim,
+            )
+            self.cp_inverse_reorder_fn = partial(
+                inverse_reorder_causal_load_balancing,
+                strategy=reorder_strategy,
+                cp_size=self.cp_size,
+                seq_dim=seq_dim,
+            )
+        else:
+            # no-ops for non cp or non load balanced
+            self.cp_reorder_fn = lambda x: x
+            self.cp_inverse_reorder_fn = lambda x: x
+
         # Test different input formats
         if self.qkv_layout.is_thd():
             match self.seq_desc_format:
@@ -550,21 +590,30 @@ class FusedAttnRunner:
                     )
                 case SeqDescFormat.SegmentIDs:
                     self.sequence_desciptor = SequenceDescriptor.from_segment_ids_and_pos(
-                        (self.segment_ids_q, self.segment_ids_kv),
-                        (self.segment_pos_q, self.segment_pos_kv),
+                        (
+                            self.cp_reorder_fn(self.segment_ids_q),
+                            self.cp_reorder_fn(self.segment_ids_kv),
+                        ),
+                        (
+                            self.cp_reorder_fn(self.segment_pos_q),
+                            self.cp_reorder_fn(self.segment_pos_kv),
+                        ),
                     )
                 case _:
                     raise ValueError(f"Unknown {self.seq_desc_format=}")
         else:
             match self.seq_desc_format:
                 case SeqDescFormat.Mask:
-                    self.sequence_desciptor = make_mask(
-                        self.segment_ids_q,
-                        self.segment_ids_kv,
-                        self.segment_pos_q,
-                        self.segment_pos_kv,
-                        self.attn_mask_type,
-                    )
+                    if self.attn_mask_type == AttnMaskType.NO_MASK:
+                        self.sequence_desciptor = None
+                    else:
+                        self.sequence_desciptor = make_mask(
+                            self.segment_ids_q,
+                            self.segment_ids_kv,
+                            self.segment_pos_q,
+                            self.segment_pos_kv,
+                            self.attn_mask_type,
+                        )
                 case SeqDescFormat.Seqlens:
                     self.sequence_desciptor = SequenceDescriptor.from_seqlens(
                         (
@@ -581,7 +630,7 @@ class FusedAttnRunner:
                     raise ValueError(f"Unknown {self.seq_desc_format=}")
 
         self.dropout_rng = dropout_key if self.dropout_prob > 0 else None
-        self.scaling_factor = 1.0 / sqrt(self.head_dim)
+        self.scaling_factor = 1.0 / sqrt(self.head_dim_qk)
 
         # Setup distributed sharding specs
         # Setup shardings for distributed tests
@@ -604,7 +653,12 @@ class FusedAttnRunner:
             case _:
 
                 def to_dp_shardings(x):
-                    pspec = PartitionSpec(self.mesh_resource.dp_resource)
+                    if x.ndim == 1:
+                        pspec = PartitionSpec(self.mesh_resource.dp_resource)
+                    else:
+                        pspec = PartitionSpec(
+                            self.mesh_resource.dp_resource, self.mesh_resource.cp_resource
+                        )
                     return NamedSharding(self.mesh, pspec)
 
                 self.seq_desc_sharding = jax.tree.map(to_dp_shardings, self.sequence_desciptor)
@@ -623,9 +677,15 @@ class FusedAttnRunner:
             self.bias_pspec = PartitionSpec()
         self.bias_sharding = NamedSharding(self.mesh, self.bias_pspec)
 
-        self.dropout_rng_pspec = PartitionSpec(
-            None,
-        )
+        # New-style RNG fix is only applied for AMD GPUs
+        if is_hip_extension():
+            if self.dropout_rng is not None and jnp.issubdtype(self.dropout_rng.dtype, jax.dtypes.prng_key):
+                self.dropout_rng_pspec = PartitionSpec()
+            else:
+                self.dropout_rng_pspec = PartitionSpec(None,)
+        else:
+            self.dropout_rng_pspec = PartitionSpec(None,)
+
         self.dropout_rng_sharding = NamedSharding(self.mesh, self.dropout_rng_pspec)
 
         self.logit_scale_pspec = PartitionSpec(None, None, self.mesh_resource.cp_resource, None)
@@ -635,24 +695,6 @@ class FusedAttnRunner:
         # TODO(mgoldfarb-nvidia): Will need to handle CP cases of replicated or distributed length/offset.
         self.seq_length_offset_pspec = PartitionSpec(self.mesh_resource.dp_resource, None)
         self.seq_length_offset_sharding = NamedSharding(self.mesh, self.seq_length_offset_pspec)
-
-        # Softmax aux sharding
-
-        if self.cp_size > 1 and self.cp_load_balanced:
-            self.cp_reorder_fn = partial(
-                reorder_causal_load_balancing,
-                cp_size=self.cp_size,
-                tensor_format=self.qkv_layout.get_qkv_format(),
-            )
-            self.cp_inverse_reorder_fn = partial(
-                inverse_reorder_causal_load_balancing,
-                cp_size=self.cp_size,
-                tensor_format=self.qkv_layout.get_qkv_format(),
-            )
-        else:
-            # no-ops for non cp or non load balanced
-            self.cp_reorder_fn = lambda x: x
-            self.cp_inverse_reorder_fn = lambda x: x
 
     def test_forward(self):
         """
@@ -732,15 +774,24 @@ class FusedAttnRunner:
 
         self._setup_inputs()
 
-        def grad_func(func, *args, **kwargs):
+        def grad_func(func, *args, cp_reverse_out=False, **kwargs):
             # Gradient is small, use a gradient multiplier to amplify the gradient
             gradient_multiplier = self.max_seqlen_q * self.num_heads_q
             if self.attn_mask_type.is_causal():
                 gradient_multiplier /= 10
             # Keep only valid result for the gradient
-            ret_valid = jnp.where(
-                self.pad_q[..., jnp.newaxis, jnp.newaxis], 0, func(*args, **kwargs)
-            )
+            if not cp_reverse_out:
+                ret_valid = jnp.where(
+                    self.pad_q[..., jnp.newaxis, jnp.newaxis],
+                    0,
+                    func(*args, **kwargs),
+                )
+            else:
+                ret_valid = jnp.where(
+                    self.pad_q[..., jnp.newaxis, jnp.newaxis],
+                    0,
+                    self.cp_inverse_reorder_fn(func(*args, **kwargs)),
+                )
             return (
                 jnp.mean(ret_valid.astype(jnp.float32), dtype=jnp.float32) * gradient_multiplier
             ).astype(self.dtype)
@@ -786,7 +837,7 @@ class FusedAttnRunner:
         jitted_primitive = jit(
             value_and_grad(
                 lambda q, k, v, bias, *args: grad_func(
-                    customcall_fused_dpa, q, k, v, bias, *args, **kwargs
+                    customcall_fused_dpa, q, k, v, bias, *args, cp_reverse_out=True, **kwargs
                 ),
                 arg_nums,
             ),
@@ -904,9 +955,11 @@ class FusedAttnRunner:
     ],
 )
 @pytest.mark.parametrize(
-    "b, s_q, s_kv, h_q, h_kv, d, dtype",
+    "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype",
     [
-        pytest.param(2, 2048, 2048, 12, 12, 64, jnp.bfloat16, id="2-2048-2048-12-12-64-BF16-SELF"),
+        pytest.param(
+            2, 2048, 2048, 12, 12, 64, 64, jnp.bfloat16, id="2-2048-2048-12-12-64-64-BF16-SELF"
+        ),
         pytest.param(
             2,
             2048,
@@ -914,11 +967,33 @@ class FusedAttnRunner:
             12,
             12,
             64,
+            64,
             jnp.bfloat16,
-            id="2-2048-1024-12-12-64-BF16-CROSS",
+            id="2-2048-1024-12-12-64-64-BF16-CROSS",
         ),
-        pytest.param(2, 2048, 2048, 12, 6, 64, jnp.bfloat16, id="2-2048-2048-12-6-64-BF16-GQA"),
-        pytest.param(4, 128, 128, 16, 16, 64, jnp.float16, id="4-128-128-16-16-64-FP16-SELF"),
+        pytest.param(
+            2, 2048, 2048, 12, 6, 64, 64, jnp.bfloat16, id="2-2048-2048-12-6-64-64-BF16-GQA"
+        ),
+        pytest.param(
+            4, 128, 128, 16, 16, 64, 64, jnp.float16, id="4-128-128-16-16-64-64-FP16-SELF"
+        ),
+        pytest.param(
+            4, 128, 128, 16, 16, 64, 32, jnp.float16, id="4-128-128-16-16-64-32-FP16-SELF"
+        ),
+        pytest.param(
+            2,
+            2048,
+            1024,
+            12,
+            12,
+            64,
+            32,
+            jnp.bfloat16,
+            id="2-2048-1024-12-12-64-32-BF16-CROSS",
+        ),
+        pytest.param(
+            2, 2048, 2048, 12, 6, 128, 64, jnp.float16, id="2-2048-2048-12-6-128-64-FP16-GQA"
+        ),
     ],
 )
 @pytest.mark.parametrize(
@@ -926,6 +1001,13 @@ class FusedAttnRunner:
     [
         pytest.param(0.0, id="DROP_0.0"),
         pytest.param(0.1, id="DROP_0.1"),
+    ],
+)
+# Only testing old-style RNGs by default to reduce the # of tests but leaving the hooks in place
+@pytest.mark.parametrize(
+    "use_old_rng",
+    [
+        pytest.param(True, id="Old-style rng"),
     ],
 )
 @pytest.mark.parametrize(
@@ -972,10 +1054,12 @@ class TestFusedAttn:
         s_kv,
         h_q,
         h_kv,
-        d,
+        d_qk,
+        d_v,
         attn_bias_type,
         attn_mask_type,
         dropout_prob,
+        use_old_rng,
         dtype,
         is_training,
         qkv_layout,
@@ -997,10 +1081,12 @@ class TestFusedAttn:
             s_kv,
             h_q,
             h_kv,
-            d,
+            d_qk,
+            d_v,
             attn_bias_type,
             attn_mask_type,
             dropout_prob,
+            use_old_rng,
             dtype,
             is_training,
             qkv_layout,
@@ -1008,10 +1094,6 @@ class TestFusedAttn:
             window_size,
             seq_desc_format,
         )
-        if is_hip_extension():
-            is_padding = attn_mask_type in [AttnMaskType.PADDING_MASK, AttnMaskType.PADDING_CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK]
-            if swa and is_padding:
-                pytest.skip("Jax cannot get cu_seqlen correctly from mask with swa")
         runner.test_forward()
 
     @staticmethod
@@ -1028,10 +1110,12 @@ class TestFusedAttn:
         s_kv,
         h_q,
         h_kv,
-        d,
+        d_qk,
+        d_v,
         attn_bias_type,
         attn_mask_type,
         dropout_prob,
+        use_old_rng,
         dtype,
         qkv_layout,
         bias_shape,
@@ -1050,10 +1134,12 @@ class TestFusedAttn:
             s_kv,
             h_q,
             h_kv,
-            d,
+            d_qk,
+            d_v,
             attn_bias_type,
             attn_mask_type,
             dropout_prob,
+            use_old_rng,
             dtype,
             True,
             qkv_layout,
@@ -1061,8 +1147,37 @@ class TestFusedAttn:
             window_size,
             seq_desc_format,
         )
-        if is_hip_extension():
-            is_padding = attn_mask_type in [AttnMaskType.PADDING_MASK, AttnMaskType.PADDING_CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK]
-            if swa and is_padding:
-                pytest.skip("Jax cannot get cu_seqlen correctly from mask with swa")
         runner.test_backward()
+
+# Single test with new-style RNG
+@pytest.mark.skipif(
+    not is_hip_extension(), reason="New-style RNGs only enabled on AMD hardware"
+)
+def test_jax_new_rng():
+    """
+    Non-regression test evaluating whether
+    `_FusedAttnRNGStateChecker.check_seed` can correctly handle a new-style
+    JAX PRNG seed.
+    """
+    # Arbitrary args, except `dropout_prob` which needs to be >0
+    kwargs = dict(
+        batch_size = 2,
+        max_seqlen_q = 2048,
+        max_seqlen_kv = 2048,
+        num_heads_q = 12,
+        num_heads_kv = 12,
+        head_dim_qk = 64,
+        head_dim_v = 64,
+        attn_bias_type = AttnBiasType.NO_BIAS,
+        attn_mask_type = AttnMaskType.NO_MASK,
+        dropout_prob = 0.1,
+        use_old_rng = False,
+        dtype = jnp.bfloat16,
+        is_training = True,
+        qkv_layout = QKVLayout.BS3HD,
+        bias_shape = BiasShape._1HSS,
+        seq_desc_format = SeqDescFormat.Mask,
+        window_size = None,
+    )
+    runner = FusedAttnRunner(**kwargs)
+    runner.test_forward()

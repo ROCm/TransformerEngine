@@ -57,7 +57,8 @@ hipError_t ck_attn_fwd(
   int64_t window_size_left, int64_t window_size_right,
   void* o_ptr, 
   uint64_t stride_b_o, uint64_t stride_h_o, uint64_t stride_s_o,
-  void* lse_ptr, 
+  void* lse_ptr,
+  bool uses_fwd_v3,
   hipStream_t stream);
 
 hipError_t ck_attn_varlen_fwd(
@@ -80,6 +81,7 @@ hipError_t ck_attn_varlen_fwd(
   void* o_ptr, 
   uint64_t stride_h_o, uint64_t stride_s_o,
   void* lse_thd_ptr,
+  bool uses_fwd_v3,
   hipStream_t stream);
 
 hipError_t ck_attn_bwd(  
@@ -127,7 +129,7 @@ hipError_t ck_attn_bwd(
 hipError_t ck_attn_varlen_bwd(  
   DType dtype,
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v,
-  uint64_t max_tokens_q,
+  uint64_t max_tokens_q, uint64_t max_tokens_kv,
   const void* q_ptr, 
   uint64_t stride_h_q, uint64_t stride_s_q,
   const void* k_ptr, 
@@ -164,3 +166,4 @@ hipError_t ck_attn_varlen_bwd(
 
 }//namespace ck_fused_attn
 #endif // CK_FUSED_ATTN_H
+

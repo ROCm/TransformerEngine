@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -36,6 +38,9 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_tuned_kernel(
   using Ivec = typename Ktraits::Ivec;
   using Ovec = typename Ktraits::Ovec;
   using Wvec = typename Ktraits::Wvec;
+  #ifdef __HIP_PLATFORM_AMD__
+  using Cvec = typename Ktraits::Cvec;
+  #endif
 
   using Stats = typename Ktraits::Stats;
   using stats_t = typename Stats::stats_t;
@@ -106,6 +111,29 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_tuned_kernel(
       rs_ptr[row] = rs;
     }
 
+#ifdef __HIP_PLATFORM_AMD__
+  if (params.mxfp8_out) {
+    Cvec z[LDGS];
+    idx = row * Ktraits::VEC_COLS + c;
+#pragma unroll
+    for (int it = 0; it < LDGS; it++) {
+#pragma unroll
+      for (int jt = 0; jt < NUM_ELTS; jt++) {
+        compute_t y_ij = rs * (xf[it * NUM_ELTS + jt] - mu);
+        compute_t g_ij = gamma[it].data.elt[jt];
+        if (params.zero_centered_gamma) {
+          g_ij += 1;
+        }
+        compute_t b_ij = beta[it].data.elt[jt];
+        compute_t temp_output = g_ij * y_ij + b_ij;
+
+        z[it].data.elt[jt] = output_t(temp_output);
+      }
+      z[it].store_to(params.z, idx);
+      idx += VEC_COLS_PER_LDG;
+    }
+  } else {
+#endif
     Ovec z[LDGS];
     idx = row * Ktraits::VEC_COLS + c;
 #pragma unroll
@@ -131,6 +159,9 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_tuned_kernel(
       z[it].store_to(params.z, idx);
       idx += VEC_COLS_PER_LDG;
     }
+#ifdef __HIP_PLATFORM_AMD__
+  }
+#endif
   }
   if (params.fp8_out) {
     // Reduce amax over block
@@ -258,9 +289,17 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_general_kerne
       }
 
       // Store output
+#ifdef __HIP_PLATFORM_AMD__
+      if (params.mxfp8_out) {
+        z.store_to_elts(params.z, row * params.cols + col, params.cols - col);
+      } else {
+#endif
       Ovec z_out;
       z.to(z_out);
       z_out.store_to_elts(params.z, row * params.cols + col, params.cols - col);
+#ifdef __HIP_PLATFORM_AMD__
+      }
+#endif
     }
   }
 

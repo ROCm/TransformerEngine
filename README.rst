@@ -12,15 +12,15 @@
 Transformer Engine On ROCm and AMDGPU
 *************************************
 
-This repository enables Transformer Engine (TE) on ROCm as a library to accelerate Transformer models on AMD GPUs, including using 8-bit floating point (FP8) precision on MI300 GPUs, to provide better performance with lower memory utilization in both training and inference. 
-One of the missions is to provide an alternative to accelerate Transformer models that were previously run on NVIDIA GPUs like Hopper with best efforts to make the migration frictionless. 
+This repository enables Transformer Engine (TE) on ROCm as a library to accelerate Transformer models on AMD GPUs, including using 8-bit floating point (FP8) precision on MI300 GPUs, to provide better performance with lower memory utilization in both training and inference.
+One of the missions is to provide an alternative to accelerate Transformer models that were previously run on NVIDIA GPUs like Hopper with best efforts to make the migration frictionless.
 Moreover, we add optimizations specific to AMD GPUs to get the best performance benefits out of AMD GPUs.
 
 Feature Support Status
 ======================
 
 * Activation, cast, fused softmax, layernorm, rmsnorm, transpose, fused rope, fp8 recipe, HipRTC: fully supported
-* GEMM: partially supported with following input/output types: (fp32/fp32), (fp16/fp16), (bf16/bf16), (fp8, bf8/fp16, bf16, fp32)
+* GEMM: partially supported with following input/output types: (fp32/fp32), (fp16/fp16), (bf16/bf16), (fp8, bf8/fp16, bf16, fp32) **Note:** Support for rocBLAS as a GEMM backend has been removed; `hipBLASLt` is the only backend.
 * Attention (Flash Attention, Fused Multihead Attention): partially supported: Fused Attention with AOTriton and CK backends, FlashAttention-2 without variable sequence length feature
 * HipGraph, HipTX: partially supported
 * Tensor Parallelism, Sequence Parallelism, Context Parallelism: supported
@@ -33,7 +33,7 @@ Execute the following commands to install ROCm Transformer Engine from source on
 Known Issue with ROCm 6.4 PyTorch Release
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Using the docker image ``rocm/pytorch:rocm6.4_ubuntu22.04_py3.10_pytorch_release_2.5.1`` triggers a failure in the unit-test ``tests/pytorch/test_permutation.py`` (tracked in Jira ticket SWDEV-534311).  
+Using the docker image ``rocm/pytorch:rocm6.4_ubuntu22.04_py3.10_pytorch_release_2.5.1`` triggers a failure in the unit-test ``tests/pytorch/test_permutation.py`` (tracked in Jira ticket SWDEV-534311).
 
 Rebuilding PyTorch at commit ``f929e0d602a71aa393ca2e6097674b210bdf321c`` resolves the issue.
 
@@ -64,26 +64,22 @@ Install TE
 
   # Clone TE repo and submodules
   git clone --recursive https://github.com/ROCm/TransformerEngine.git
-  
+
   cd TransformerEngine
   export NVTE_FRAMEWORK=pytorch,jax #optionally set framework, currently only support pytorch and jax; if not set will try to detect installed frameworks
   export NVTE_ROCM_ARCH=gfx942 # CK fused attn only support MI200 and MI300 and fp8 features are only supported on MI300
-  
+
   # Build Platform Selection (optional)
   # Note: Useful when both ROCm and CUDA platforms are present in the Docker
   export NVTE_USE_ROCM=1  #Use 1 for ROCm, or set to 0 to use CUDA; If not set will try to detect installed platform, prioritizing ROCm
+  # If you are building for gfx942 variants, also specify the number of Compute Units
+  export CU_NUM=304
 
+  # Note: If the following fails with messages about missing pip packages that are installed, add "--no-build-isolation" to the command below
   pip install .
 
-The default installation above supports both rocBlas and hipBlasLt in GEMM computation. Building with single backend support can be done by setting `NVTE_USE_HIPBLASLT` or `NVTE_USE_ROCBLAS` environment variable before `pip install` as:
-
-.. code-block:: bash
-
-  export NVTE_USE_HIPBLASLT=1
-  export NVTE_USE_ROCBLAS=1
-
-If neither of the aforementioned environment variables are set or both of them are set, then both backends are built. If only one of these environment variables is set, then the other backend is not built.
-When both GEMM backends are supported the aforementioned env variables can be used to select which backend to use. If none is set hipBlasLt is used by default. The hipBlasLt backed has not yet supported all the GEMM configurations in the pytorch unit tests. 
+It is also possible to build wheels for later installation with "pip wheel ." although those wheels will not be portable to systems with
+different libraries installed. This build may also require "--no-build-isolation" and if the build still fails with this flag try installing setuptools<80.0.0
 
 Test
 ====
@@ -107,20 +103,12 @@ Note that some of operator unit tests fail in hipBLASLt config due to limited in
 Pytorch framework integration tests
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Pytorch integration pytests under tests/pytorch/ and tests/pytorch/fused_attn/ are supported 
-Except the following tests that are not supported in rocBLAS configuration
-
-* tests/pytorch/test_cuda_graph.py 
-* tests/pytorch/test_sanity.py::test_gpt_guda_graph
-
-Env `ROCBLAS_STREAM_ORDER_ALLOC=1` should be used when run tests in pytorch-rocblas configuration. 
-
-Also test_onnx_export.py does not support FP8 dues to absence of custom QDQ operatrs library
+Pytorch integration pytests under tests/pytorch/ and tests/pytorch/fused_attn/ are supported.
 
 Jax framework integration tests
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-All JAX pytests are supported. 
+All JAX pytests are supported.
 
 Examples
 ========
@@ -130,7 +118,7 @@ Pytorch
 MNIST with optional FP8
 ~~~~~~~~~~~~~~~~~~~~~~~
 .. code-block:: bash
-  
+
   cd examples/pytorch/mnist
   python main.py
   python main.py --use-te   # Linear layers from TransformerEngine
@@ -139,7 +127,7 @@ MNIST with optional FP8
 Sort with minGPT
 ~~~~~~~~~~~~~~~~
 .. code-block:: bash
-  
+
   cd examples/pytorch/minGPT
   python gptSort.py --use-te # Linear and layernorm from TransformerEngine
   python gptSort.py --use-te --ln-mlp # In addition, use LayernormMLP from transformer engine
@@ -150,7 +138,7 @@ Jax
 Flax
 ~~~~
 .. code-block:: python
-  
+
   import flax
   import jax
   import jax.numpy as jnp
@@ -193,7 +181,7 @@ Flax
 MNIST
 ~~~~~
 .. code-block:: bash
-  
+
   cd examples/jax/mnist
   python test_single_gpu_mnist.py # Use Flax to train MNIST with BF16 as usual
   python test_single_gpu_mnist.py --use-te # Use `te.DenseGeneral` provided by Transformer Engine to train MNIST with BF16
@@ -202,7 +190,7 @@ MNIST
 Encoder
 ~~~~~~~
 .. code-block:: bash
-  
+
   cd examples/jax/encoder
   python test_single_gpu_encoder.py
   python test_single_gpu_encoder.py --use-fp8
@@ -212,8 +200,8 @@ Features on ROCm Platform
 
 GEMM tuning with hipBlasLt
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
-When using GEMM with hipBlasLt, TE provides an ability to manually or automatically select GPU algorithm to use from a list generated by hipBlasLt. Selected algorithms info can be stored to file and read on further applications run.
-This ability is controlled by environment variables when call GEMM operation with specific config for the first time.
+TE provides an ability to manually or automatically select a GPU algorithm to use from a list generated by hipBlasLt. Selected algorithms info can be stored to file and read on further applications run.
+This ability is controlled by environment variables when calling GEMM operations with a specific config for the first time.
 
 * TE_HIPBLASLT_ALGO_SELECTION - algorithm index to use in the list returned by hipBlasLt for the config or the first algorithm to select from if auto-selection is enabled; default=0.
 * TE_HIPBLASLT_TUNING_RUN_COUNT - number of profiling loops for algorithm auto-selection; default=0 which means no auto-selection. For small tasks where run-to-run time variation is relatively high, using higher number of loops may give better auto-selection results.
@@ -221,9 +209,9 @@ This ability is controlled by environment variables when call GEMM operation wit
 * TE_HIPBLASLT_ALGO_LOAD - filename of algorithm selection data saved by previous GEMM operation runs; if file does not exist, algorithm selection logic proceeds as if no filename were specified
 * TE_HIPBLASLT_ALGO_SAVE - filename to save algorithm selection data to; can be the same as a filename to load in which case the file will be read first and then overwritten with updated results; filename may contain %i, that is replaced with the process ID. For example `auto_tune_%i.csv`.
 
-It is not guaranteed that algorithm selection data file created with one version of TE or hipBlasLt will work with other versions. Even if it works, it is highly recommended to perform algorithm selection tuning again when switch to new libraries versions because new hipBLASLt may have new optimized algorithms.
+It is not guaranteed that the algorithm selection data file created with one version of TE or hipBlasLt will work with other versions. Even if it works, it is highly recommended to perform algorithm selection tuning again when switching to new libraries versions because newer hipBLASLt versions may have optimized algorithms.
 
-Typical usage is the following:
+Typical usage is as follows:
 
 1. Run single iteration of training enabling algorithm selection autotuning and saving:
 
@@ -242,7 +230,7 @@ Typical usage is the following:
   export TE_HIPBLASLT_ALGO_LOAD=algo_tune.csv
   some_training_app
 
-If you want to check that only previously tuned algorithms are used by your application, it can be done by keeping selection data saving enabled. 
+If you want to check that only previously tuned algorithms are used by your application, it can be done by keeping selection data saving enabled.
 
 .. code-block:: bash
 
@@ -255,37 +243,42 @@ If you want to check that only previously tuned algorithms are used by your appl
 
 Fused Attention Backends on ROCm
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-Currently ROCm TE supports two backends, AOTriton and CK, for fused attention. 
+Currently ROCm TE supports two backends, AOTriton and CK, for fused attention.
 To enable specific backends in compilation and/or in runtime, the following environment variables can be used:
 
 * NVTE_FUSED_ATTN - enable the fused attention, default = 1;
 * NVTE_FUSED_ATTN_CK - enable the CK backend, default = 1;
 * NVTE_FUSED_ATTN_AOTRITON - enable the AOTriton backend, default = 1.
 
-Setting env NVTE_FUSED_ATTN_<BACKEND>=0 in compilation will skip the build of the specific backend, which saves the overall building time. 
-Setting env NVTE_FUSED_ATTN_<BACKEND>=0 in runtime provides the option to choose specific backends in runtime. 
-Note that one backend can be enabled in compilation but disabled in runtime. 
-However, if one backend is disabled in compilation, the same env NVTE_FUSED_ATTN_<BACKEND>=0 is required during runtime. 
-Otherwise TE will error out that the specific backend is not compiled. 
+Setting env NVTE_FUSED_ATTN_<BACKEND>=0 in compilation will skip the build of the specific backend, which saves the overall building time.
+Setting env NVTE_FUSED_ATTN_<BACKEND>=0 in runtime provides the option to choose specific backends in runtime.
+Note that one backend can be enabled in compilation but disabled in runtime.
+However, if one backend is disabled in compilation, the same env NVTE_FUSED_ATTN_<BACKEND>=0 is required during runtime.
+Otherwise TE will error out that the specific backend is not compiled.
 
-NVTE_FUSED_ATTN has higher priority than NVTE_FUSED_ATTN_CK and NVTE_FUSED_ATTN_AOTRITON. 
-NVTE_FUSED_ATTN=0 will use the TE unfused attention even if NVTE_FUSED_ATTN_CK or NVTE_FUSED_ATTN_AOTRITON is set. 
-Fused attention backends are chosen according to the match results between the actual problem config and the support matrix of the specific backend. 
-For the scenario that both backends are enabled and match the problem configuration, the CK backend will be chosen with higher priority. 
+NVTE_FUSED_ATTN has higher priority than NVTE_FUSED_ATTN_CK and NVTE_FUSED_ATTN_AOTRITON.
+NVTE_FUSED_ATTN=0 will use the TE unfused attention even if NVTE_FUSED_ATTN_CK or NVTE_FUSED_ATTN_AOTRITON is set.
+Fused attention backends are chosen according to the match results between the actual problem config and the support matrix of the specific backend.
+For the scenario that both backends are enabled and match the problem configuration, the CK backend will be chosen with higher priority.
 
-FA v3 Backward Kernels in CK Backend
+Note that when using `THD` format tensors with CK Fused Attention, one should pass `None` for `cu_seqlens_q_padded, cu_seqlens_kv_padded`
+to indicate that there is no padding between sequences. Otherwise, passing proper tensors will indicate padding between sequences. This is the case
+for both the `FusedAttention` and `DotProductAttention` modules.
+
+FA v3 Kernels in CK Backend
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-ROCm TE provides experimental support for flash-attention v3 bwd kernels using the ck backend for limited fused attention configs (currently only for hdim=128). 
+ROCm TE provides experimental support for flash-attention v3 fwd/bwd kernels using the ck backend for limited fused attention configs.
 To enable FA v3 kernels, the following environment variables can be used:
 
+* NVTE_CK_USES_FWD_V3 - by default 0, if set to 1, some cases will call the fwd v3 kernel, only applicable to the gfx942 architecture;
 * NVTE_CK_USES_BWD_V3 - by default 0, if set to 1, some cases will call the bwd v3 dqdkdv kernel;
-* NVTE_CK_IS_V3_ATOMIC_FP32 - by default 1, if set to 0 will use atomic fp16/bf16(w/o convert_dq kernel) when NVTE_CK_USES_BWD_V3 is set to 1;
-* NVTE_CK_HOW_V3_BF16_CVT - by default 1, float to bf16 convert type when bwd_v3 is set to 1, 0:RTNE; 1:RTNA; 2:RTZ.
+* NVTE_CK_IS_V3_ATOMIC_FP32 - by default 1, if set to 0 will use atomic fp16/bf16(w/o convert_dq kernel) in bwd pass when NVTE_CK_USES_BWD_V3 is set to 1;
+* NVTE_CK_HOW_V3_BF16_CVT - by default 1, float to bf16 convert type when bwd_v3 is set to 1, 0:RTNE; 1:RTNA; 2:RTZ, only applicable to the gfx942 architecture.
 
-Float to BFloat16 Conversion in CK Backend
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-How fp32 converts to bf16 affects both the performance and accuracy in ck fused attn. 
-ROCm TE provides the compile-time env NVTE_CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT with the following values available to choose from: 
+Float to BFloat16 Conversion in CK Backend (gfx942 only)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+How fp32 converts to bf16 affects both the performance and accuracy in ck fused attn.
+ROCm TE provides the compile-time env NVTE_CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT with the following values available to choose from:
 
 * 0 - standard;
 * 1 - truncate with nan;
@@ -295,15 +288,15 @@ ROCm TE provides the compile-time env NVTE_CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAU
 
 Experimental Triton Kernels on ROCm
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-Most CUDA kernels in Transformer Engine are hipified to run on ROCm. While the hipifiled CUDA kernels are functional, they are not necessarily optimal on ROCm. 
-We added some Triton kernels to TE ROCm to improve the performance over the hipified kernels. 
-Currently, we have integrated Triton kernels for cast_transpose and cast_transpose_bgrad, which are commonly used in fp8 training, and also rmsnorm kernels. 
-This feature is still experimental as it requires relatievely newer version of Pytorch (with version >= 2.4) and Triton. 
+Most CUDA kernels in Transformer Engine are hipified to run on ROCm. While the hipifiled CUDA kernels are functional, they are not necessarily optimal on ROCm.
+We added some Triton kernels to TE ROCm to improve the performance over the hipified kernels.
+Currently, we have integrated Triton kernels for cast_transpose and cast_transpose_bgrad, which are commonly used in fp8 training, and also rmsnorm kernels.
+This feature is still experimental as it requires relatievely newer version of Pytorch (with version >= 2.4) and Triton.
 Also, it only works on Pytorch extension as JAX extension does not use it.
 
 At runtime, you can enable specific triton kernels using the specific environment variables:
 
-* NVTE_USE_CAST_TRANSPOSE_TRITON=1 can be used to enable cast transpose (bgrad) triton kernels; 
+* NVTE_USE_CAST_TRANSPOSE_TRITON=1 can be used to enable cast transpose (bgrad) triton kernels;
 * NVTE_USE_LAYERNORM_TRITON=1 can be used to enable layernorm triton kernels.
 * NVTE_USE_RMSNORM_TRITON=1 can be used to enable rmsnorm triton kernels.
 
@@ -336,11 +329,12 @@ What is Transformer Engine?
 .. overview-begin-marker-do-not-remove
 
 Transformer Engine (TE) is a library for accelerating Transformer models on NVIDIA GPUs, including
-using 8-bit floating point (FP8) precision on Hopper GPUs, to provide better performance with lower
-memory utilization in both training and inference. TE provides a collection of highly optimized
-building blocks for popular Transformer architectures and an automatic mixed precision-like API that
-can be used seamlessly with your framework-specific code. TE also includes a framework agnostic
-C++ API that can be integrated with other deep learning libraries to enable FP8 support for Transformers.
+using 8-bit floating point (FP8) precision on Hopper, Ada, and Blackwell GPUs, to provide better
+performance with lower memory utilization in both training and inference. TE provides a collection
+of highly optimized building blocks for popular Transformer architectures and an automatic mixed
+precision-like API that can be used seamlessly with your framework-specific code. TE also includes a
+framework agnostic C++ API that can be integrated with other deep learning libraries to enable FP8
+support for Transformers.
 
 As the number of parameters in Transformer models continues to grow, training and inference for
 architectures such as BERT, GPT and T5 become very memory and compute-intensive. Most deep learning
@@ -354,16 +348,16 @@ not available natively in frameworks today.
 
 TE addresses the problem of FP8 support by providing APIs that integrate with popular Large Language
 Model (LLM) libraries. It provides a Python API consisting of modules to easily build a Transformer
-layer as well as a framework-agnostic library in C++ including structs and kernels needed for FP8 support.
-Modules provided by TE internally maintain scaling factors and other values needed for FP8 training, greatly
-simplifying mixed precision training for users.
+layer as well as a framework-agnostic library in C++ including structs and kernels needed for FP8
+support. Modules provided by TE internally maintain scaling factors and other values needed for FP8
+training, greatly simplifying mixed precision training for users.
 
 Highlights
 ==========
 
 * Easy-to-use modules for building Transformer layers with FP8 support
 * Optimizations (e.g. fused kernels) for Transformer models
-* Support for FP8 on NVIDIA Hopper and NVIDIA Ada GPUs
+* Support for FP8 on NVIDIA Hopper, Ada, and Blackwell GPUs
 * Support for optimizations across all precisions (FP16, BF16) on NVIDIA Ampere GPU architecture generations and later
 
 Examples
@@ -452,22 +446,22 @@ Installation
 Pre-requisites
 ^^^^^^^^^^^^^^^^^^^^
 * Linux x86_64
-* CUDA 12.0+ for Hopper and CUDA 12.1+ for Ada
-* NVIDIA Driver supporting CUDA 12.0 or later
-* cuDNN 8.1 or later
-* For fused attention, CUDA 12.1 or later, NVIDIA Driver supporting CUDA 12.1 or later, and cuDNN 8.9 or later.
+* CUDA 12.1+ (CUDA 12.8+ for Blackwell)
+* NVIDIA Driver supporting CUDA 12.1 or later
+* cuDNN 9.3 or later
 
 Docker
 ^^^^^^^^^^^^^^^^^^^^
 
 The quickest way to get started with Transformer Engine is by using Docker images on
-`NVIDIA GPU Cloud (NGC) Catalog <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch>`_. For example to use the NGC PyTorch container interactively,
+`NVIDIA GPU Cloud (NGC) Catalog <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch>`_.
+For example to use the NGC PyTorch container interactively,
 
 .. code-block:: bash
 
-    docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:23.10-py3
+    docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:25.01-py3
 
-Where 23.10 is the container version. For example, 23.10 for the October 2023 release.
+Where 25.01 (corresponding to January 2025 release) is the container version.
 
 pip
 ^^^^^^^^^^^^^^^^^^^^
@@ -475,17 +469,23 @@ To install the latest stable version of Transformer Engine,
 
 .. code-block:: bash
 
-    pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
+    pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@stable
 
-This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable NVTE_FRAMEWORK to a comma-separated list (e.g. NVTE_FRAMEWORK=jax,pytorch,paddle).
+This will automatically detect if any supported deep learning frameworks are installed and build
+Transformer Engine support for them. To explicitly specify frameworks, set the environment variable
+NVTE_FRAMEWORK to a comma-separated list (e.g. NVTE_FRAMEWORK=jax,pytorch).
 
-Alternatively, the package can be directly installed from `Transformer Engine's PyPI <https://pypi.org/project/transformer-engine/>`_, e.g.
+Alternatively, the package can be directly installed from
+`Transformer Engine's PyPI <https://pypi.org/project/transformer-engine/>`_, e.g.
 
 .. code-block:: bash
 
-    pip install transformer_engine[pytorch]
+    pip3 install transformer_engine[pytorch]
 
-To obtain the necessary Python bindings for Transformer Engine, the frameworks needed must be explicitly specified as extra dependencies in a comma-separated list (e.g. [jax,pytorch,paddle]). Transformer Engine ships wheels for the core library as well as the PaddlePaddle extensions. Source distributions are shipped for the JAX and PyTorch extensions.
+To obtain the necessary Python bindings for Transformer Engine, the frameworks needed must be
+explicitly specified as extra dependencies in a comma-separated list (e.g. [jax,pytorch]).
+Transformer Engine ships wheels for the core library. Source distributions are shipped for the JAX
+and PyTorch extensions.
 
 From source
 ^^^^^^^^^^^
@@ -493,7 +493,7 @@ From source
 
 Compiling with FlashAttention-2
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-Transformer Engine release v0.11.0 adds support for FlashAttention-2 in PyTorch for improved performance.
+Transformer Engine release v0.11.0 added support for FlashAttention-2 in PyTorch for improved performance.
 
 It is a known issue that FlashAttention-2 compilation is resource-intensive and requires a large amount of RAM (see `bug <https://github.com/Dao-AILab/flash-attention/issues/358>`_), which may lead to out of memory errors during the installation of Transformer Engine. Please try setting **MAX_JOBS=1** in the environment to circumvent the issue.
 

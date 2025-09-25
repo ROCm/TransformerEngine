@@ -13,6 +13,10 @@ if [ -z "$TEST_SGPU" ]; then
     exit 0
 fi
 
+n_parallel_jobs=4
+
+configure_omp_threads $n_parallel_jobs
+
 TEST_DIR=${TE_PATH}tests/cpp
 
 cd $TEST_DIR
@@ -27,24 +31,15 @@ fi
 check_test_filter "nongemm"
 if [ $? -eq 0 ]; then
     echo ===== Run non GEMM tests =====
-    ctest --test-dir build -j4 --output-on-failure -E "OperatorTest/GEMMTestSuite"
+    ctest --test-dir build -j"$n_parallel_jobs" -V --output-on-failure -E "OperatorTest/GEMMTestSuite"
     test $? -eq 0 || test_run_error "non-GEMM"
 fi
 
-for _gemm in hipblaslt rocblas; do
-    configure_gemm_env $_gemm || continue
-    _exclude=""
-    if [ $_gemm = "hipblaslt" ]; then
-        _exclude="-E Test(.*XTN|.*XNT|.*bf16/.*X.X1|.*fp8.*fp16/.*X1X0|.*fp8.*X.X1|.*fp8/|.*bf8/)"
-    else
-        _exclude="-E Test(.*XTN|.*XNT)"
-    fi
-    check_test_filter $_gemm
-    if [ $? -eq 0 ]; then
-        echo  ===== Run GEMM $_gemm tests =====
-        ctest --test-dir build -j4 --output-on-failure -R "OperatorTest/GEMMTestSuite" $_exclude
-        test $? -eq 0 || test_run_error "GEMM $_gemm"
-    fi
-done
+check_test_filter "gemm"
+if [ $? -eq 0 ]; then
+    echo  ===== Run GEMM tests =====
+    ctest --test-dir build -j"$n_parallel_jobs" -V --output-on-failure -R "OperatorTest/GEMMTestSuite"
+    test $? -eq 0 || test_run_error "GEMM"
+fi
 
 return_run_results

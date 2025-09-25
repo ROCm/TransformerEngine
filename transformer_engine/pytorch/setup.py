@@ -14,10 +14,9 @@ import shutil
 from pathlib import Path
 
 import setuptools
-from torch.utils.cpp_extension import BuildExtension
 
 try:
-    import torch  # pylint: disable=unused-import
+    from torch.utils.cpp_extension import BuildExtension
 except ImportError as e:
     raise RuntimeError("This package needs Torch to build.") from e
 
@@ -32,19 +31,21 @@ if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or os.path.isdir(build_tools_
 
 
 from build_tools.build_ext import get_build_ext
-from build_tools.utils import rocm_build, copy_common_headers
+from build_tools.utils import (
+    rocm_build, copy_common_headers, copy_hipify_tools, clear_hipify_tools_copy )
 from build_tools.te_version import te_version
 from build_tools.pytorch import setup_pytorch_extension
 
 
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
-CMakeBuildExtension = get_build_ext(BuildExtension)
+CMakeBuildExtension = get_build_ext(BuildExtension, True)
 
 
 if __name__ == "__main__":
     # Extensions
     common_headers_dir = "common_headers"
     copy_common_headers(current_file_path.parent, str(current_file_path / common_headers_dir))
+    copy_hipify_tools(current_file_path.parent.parent, current_file_path)
     ext_modules = [
         setup_pytorch_extension(
             "csrc", current_file_path / "csrc", current_file_path / common_headers_dir
@@ -58,9 +59,10 @@ if __name__ == "__main__":
         description="Transformer acceleration library - Torch Lib",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
-        install_requires=[] if rocm_build() else ["torch"],
-        tests_require=[] if rocm_build() else ["numpy", "onnxruntime", "torchvision"],
+        install_requires=["einops"] if rocm_build() else ["torch"],
+        tests_require=[] if rocm_build() else ["numpy", "torchvision"],
     )
     if any(x in sys.argv for x in (".", "sdist", "bdist_wheel")):
         shutil.rmtree(common_headers_dir)
         shutil.rmtree("build_tools")
+        clear_hipify_tools_copy(current_file_path)

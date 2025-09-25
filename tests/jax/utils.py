@@ -112,7 +112,7 @@ class DotProductAttention(nn.Module):
 
     Args:
         dropout_rate: dropout rate
-        dtype: the dtype of the computation (default: float32)
+        dtype: the data type used to allocate the initial parameters (default: float32).
         float32_logits: bool, if True then compute logits in float32 to avoid
         numerical issues with bfloat16.
     """
@@ -197,6 +197,7 @@ class DotProductAttention(nn.Module):
             attn_weights = attn_weights * multiplier
 
         attn_weights = attn_weights.reshape(attn_weights_with_groups_shape)
+        attn_weights = attn_weights.astype(value.dtype)
 
         # Take the linear combination of `value`.
         if self.transpose_batch_sequence:
@@ -211,7 +212,7 @@ class DenseGeneral(nn.Module):
     Attributes:
     features: tuple with numbers of output features.
     axis: tuple with axes to apply the transformation on.
-    dtype: the dtype of the computation (default: float32).
+    dtype: the data type used to allocate the initial parameters (default: float32).
     kernel_init: initializer function for the weight matrix.
     use_bias: whether to add a bias to the output (default: False).
     bias_init: initializer function for the bias vector.
@@ -228,7 +229,9 @@ class DenseGeneral(nn.Module):
 
     def __post_init__(self):
         if self.kernel_init is None:
-            self.kernel_init = nn.initializers.variance_scaling(1.0, "fan_in", "truncated_normal")
+            self.kernel_init = nn.initializers.variance_scaling(
+                1.0, "fan_in", "truncated_normal", dtype=self.dtype
+            )
         super().__post_init__()
 
     @nn.compact
@@ -241,6 +244,7 @@ class DenseGeneral(nn.Module):
         Returns:
         The transformed input.
         """
+        input_dtype = inputs.dtype
         features = _canonicalize_tuple(self.features)
         axis = _canonicalize_tuple(self.axis)
 
@@ -250,23 +254,24 @@ class DenseGeneral(nn.Module):
         kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
         kernel_param_shape = (np.prod([inputs.shape[ax] for ax in axis]), np.prod(features))
         kernel = nn_partitioning.param_with_axes(
-            "kernel", self.kernel_init, kernel_param_shape, jnp.float32, axes=self.kernel_axes
+            "kernel", self.kernel_init, kernel_param_shape, self.dtype, axes=self.kernel_axes
         )
 
-        kernel = jnp.asarray(kernel, self.dtype)
+        kernel = jnp.asarray(kernel, input_dtype)
         kernel = jnp.reshape(kernel, kernel_shape)
 
         if self.use_bias:
             bias = nn_partitioning.param_with_axes(
-                "bias", self.bias_init, self.features, jnp.float32, axes=self.bias_axes
+                "bias", self.bias_init, self.features, self.dtype, axes=self.bias_axes
             )
-            bias = bias.astype(self.dtype)
+            bias = bias.astype(input_dtype)
         else:
             bias = None
 
         contract_ind = tuple(range(0, len(axis)))
 
         y = lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
+        y = y.astype(input_dtype)
 
         if bias is not None:
             y += jnp.reshape(bias, (1,) * (y.ndim - 1) + (-1,))
@@ -283,7 +288,7 @@ class MlpBlock(nn.Module):
       kernel_init: Kernel function, passed to the dense layers.
       deterministic: Whether the dropout layers should be deterministic.
       intermediate_dropout_rate: Dropout rate used after the intermediate layers.
-      dtype: Type for the dense layer.
+      dtype: the data type used to allocate the initial parameters (default: float32).
     """
 
     transpose_batch_sequence: bool
@@ -298,7 +303,9 @@ class MlpBlock(nn.Module):
 
     def __post_init__(self):
         if self.kernel_init is None:
-            self.kernel_init = nn.initializers.variance_scaling(1.0, "fan_in", "truncated_normal")
+            self.kernel_init = nn.initializers.variance_scaling(
+                1.0, "fan_in", "truncated_normal", dtype=self.dtype
+            )
         super().__post_init__()
 
     @nn.compact
@@ -360,6 +367,9 @@ class MlpBlock(nn.Module):
             bias_axes="embed",
             name="wo",
         )(x)
+        assert (
+            output.dtype == inputs.dtype
+        ), f"input.dtype={input.dtype}, output.dtype={output.dtype}"
         return output
 
 
@@ -431,7 +441,7 @@ class MultiHeadAttention(nn.Module):
         should be divisible by the number of heads.
       num_gqa_groups: number of kv attention heads
       head_dim: dimension of each head.
-      dtype: the dtype of the computation.
+      dtype: the data type used to allocate the initial parameters (default: float32).
       dropout_rate: dropout rate
       kernel_init: initializer for the kernel of the Dense layers.
       float32_logits: bool, if True then compute logits in float32 to avoid
@@ -455,7 +465,9 @@ class MultiHeadAttention(nn.Module):
 
     def __post_init__(self):
         if self.kernel_init is None:
-            self.kernel_init = nn.initializers.variance_scaling(1.0, "fan_in", "normal")
+            self.kernel_init = nn.initializers.variance_scaling(
+                1.0, "fan_in", "normal", dtype=self.dtype
+            )
         if self.num_gqa_groups is None:
             self.num_gqa_groups = self.num_attention_heads
         super().__post_init__()
@@ -740,6 +752,9 @@ class MultiHeadAttention(nn.Module):
             dtype=self.dtype,
             name="out",
         )(x)
+        assert (
+            inputs_q.dtype == inputs_kv.dtype == out.dtype
+        ), f"q.dtype={inputs_q.dtype}, kv.dtype={inputs_kv.dtype}, out.dtype={out.dtype}"
         return out
 
 
@@ -765,13 +780,13 @@ class LayerNorm(nn.Module):
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         """Applies layer normalization on the input."""
 
-        x = jnp.asarray(x, jnp.float32)
+        input_dtype = x.dtype
         features = x.shape[-1]
 
         scale = nn_partitioning.param_with_axes(
-            "scale", self.scale_init, (features,), jnp.float32, axes=("embed",)
+            "scale", self.scale_init, (features,), self.dtype, axes=("embed",)
         )
-        scale = jnp.asarray(scale, self.dtype)
+        scale = jnp.asarray(scale, input_dtype)
 
         if self.layernorm_type == "layernorm":
             mean = jnp.mean(x, axis=-1, keepdims=True)
@@ -779,9 +794,9 @@ class LayerNorm(nn.Module):
             y = (x - mean) * lax.rsqrt(var + self.epsilon)
 
             bias = nn_partitioning.param_with_axes(
-                "ln_bias", self.bias_init, (features,), jnp.float32, axes=("embed",)
+                "ln_bias", self.bias_init, (features,), self.dtype, axes=("embed",)
             )
-            bias = jnp.asarray(bias, self.dtype)
+            bias = jnp.asarray(bias, input_dtype)
 
             if not self.zero_centered_gamma:
                 z = y * scale + bias
@@ -794,7 +809,8 @@ class LayerNorm(nn.Module):
             y = x * lax.rsqrt(mean2 + self.epsilon)
             z = y * scale
 
-        return jnp.asarray(z, self.dtype)
+        assert z.dtype == x.dtype, f"output_dtype={z.dtype}, input_dtype={x.dtype}"
+        return z
 
 
 class RelativePositionBiases(nn.Module):
@@ -807,7 +823,7 @@ class RelativePositionBiases(nn.Module):
         distance bucket.
       num_heads: Number of heads in the attention layer. Each head will get a
         different relative position weighting.
-      dtype: Type of arrays through this module.
+      dtype: the data type used to allocate the initial parameters (default: float32).
       embedding_init: initializer for relative embedding table.
     """
 
@@ -1089,6 +1105,7 @@ class EncoderLayer(nn.Module):
                 dtype=self.dtype,
                 name="output_layernorm",
             )(y)
+        assert y.dtype == inputs.dtype, f"output_dtype={y.dtype}, input_dtype={inputs.dtype}"
         return y
 
 
@@ -1295,6 +1312,7 @@ class DecoderLayer(nn.Module):
                 name="output_layernorm",
             )(z)
 
+        assert z.dtype == inputs.dtype, f"output_dtype={z.dtype}, input_dtype={inputs.dtype}"
         return z
 
 
@@ -1389,17 +1407,25 @@ def assert_tree_like_allclose(expected, actual, rtol=1e-05, atol=1e-08):
 def dtype_tols(
     dtype: Union[DType, TEDType, np.dtype],
     reference_value: float = 1.0,
+    rtol: Optional[float] = None,
+    atol: Optional[float] = None,
 ) -> Dict[str, float]:
     """Expected numerical tolerance for a data type.
 
     Args:
       dtype: data type.
       reference_value: reference value (default: 1).
+      rtol: override for relative tolerance estimate
+      atol: override for absolute tolerance estimate
 
     Returns:
       Dictionary with "rtol" and "atol" as keys
 
     """
+
+    # Return immediately if tolerances are fully specified
+    if rtol is not None and atol is not None:
+        return {"rtol": rtol, "atol": atol}
 
     # Convert to JAX dtype if needed
     if isinstance(dtype, TEDType):
@@ -1418,7 +1444,11 @@ def dtype_tols(
 
     # Expect bit-wise accuracy for integer dtypes
     if not jnp.issubdtype(dtype, jnp.floating):
-        return dict(rtol=0, atol=0)
+        if rtol is None:
+            rtol = 0.0
+        if atol is None:
+            atol = 0.0
+        return {"rtol": rtol, "atol": atol}
 
     # Estimate floating-point error
     finfo = jnp.finfo(dtype)
@@ -1431,10 +1461,11 @@ def dtype_tols(
         spacing_high = jnp.nextafter(reference_value, finfo.max) - reference_value
         spacing_low = reference_value - jnp.nextafter(reference_value, finfo.min)
         ulp = max(spacing_high.item(), spacing_low.item())
-    return dict(
-        rtol=eps_relaxed,
-        atol=max(ulp, eps_relaxed),
-    )
+    if rtol is None:
+        rtol = eps_relaxed
+    if atol is None:
+        atol = max(ulp, eps_relaxed)
+    return {"rtol": rtol, "atol": atol}
 
 
 def sync_params_values(dst, src, transformations, sep="/"):

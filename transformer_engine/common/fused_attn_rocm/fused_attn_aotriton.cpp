@@ -77,13 +77,6 @@ bool is_aotriton_backend_supported(
     return false;
   }
 
-  const int device_id = cuda::current_device();
-  const std::string sm_arch_name_ = cuda::sm_arch_name(device_id);
-  //only MI250 or MI300X supported
-  if(!((sm_arch_name_.find("gfx942")!=std::string::npos) || (sm_arch_name_.find("gfx90a")!=std::string::npos))){
-    return false;
-  }
-  
   // Q and KV must have the same data type, in fp16 or bf16
   if((q_dtype!=kv_dtype) || !((q_dtype==NVTEDType::kNVTEFloat16) || (q_dtype == NVTEDType::kNVTEBFloat16))){
     return false;
@@ -147,8 +140,9 @@ void fused_attn_aotriton_fwd_impl(
 
   // Exit to request upper level API to allocate memory if needed
   // Currently aotriton fused attn does not need workspace in fwd pass
+  // but it needs persistent atomic counter for causal mask
   if(workspace==nullptr){
-    *workspace_size = 0;
+    *workspace_size = sizeof(int32_t);
     return;
   }
 
@@ -215,6 +209,8 @@ void fused_attn_aotriton_fwd_impl(
   auto seed_output = mk_aoscalartensor(nullptr);
   auto offset_output = mk_aoscalartensor(nullptr);
   const auto is_causal = mask_type == NVTE_CAUSAL_MASK;
+  aotriton::TensorView<0> atomic_for_causal(reinterpret_cast<intptr_t>(workspace), aotriton::DType::kInt32);
+  NVTE_CHECK_CUDA(hipMemsetAsync(workspace, 0, sizeof(int32_t), stream));
   NVTE_CHECK_CUDA(attn_fwd(q_tensor,
                            k_tensor,
                            v_tensor,
@@ -230,6 +226,7 @@ void fused_attn_aotriton_fwd_impl(
                            offset_output,
                            encoded_softmax_tensor,
                            is_causal,
+                           atomic_for_causal,
                            stream));
 }
 

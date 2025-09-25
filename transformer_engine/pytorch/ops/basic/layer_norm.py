@@ -15,20 +15,12 @@ from typing import Optional
 import torch
 
 from transformer_engine_torch import layernorm_bwd, layernorm_fwd
-from ...cpp_extensions import (
-    layernorm_fwd_fp8,
-    layernorm_fwd_fp8_inf,
-    layernorm_fwd_inf,
-)
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 if IS_HIP_EXTENSION:
-  from ...triton_kernels.layernorm import (
-      te_layernorm_fwd_fp8_triton,
-      te_layernorm_fwd_triton, 
-      te_layernorm_bwd_triton, 
-  )
-from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
-from ...tensor import Float8Tensor, QuantizedTensor
+    from ...triton_kernels.layernorm import te_layernorm_fwd_triton, te_layernorm_bwd_triton
+from ...fp8 import FP8GlobalStateManager
+from ...tensor import QuantizedTensor
+from ...constants import TE_DType
 from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
@@ -222,64 +214,30 @@ class LayerNorm(BasicOperation):
         # Check if backward pass is needed
         requires_grad = ctx.requires_grad
 
-        # Check if FP8 is enabled
-        with_fp8_output = (
+        # Check if output is quantized
+        output_quantizer = None
+        if (
             FP8GlobalStateManager.is_fp8_enabled()
             and next_op is not None
-            and next_op.num_fp8_scales("input") > 0
-        )
-        output_fp8_meta = None
-        if with_fp8_output:
-            output_fp8_meta = next_op.get_fp8_meta("input")
+            and next_op.num_quantizers("forward") > 0
+        ):
+            output_quantizer = next_op.get_quantizer("forward", 0)
 
-        use_layernorm_triton = bool( int(os.environ.get('NVTE_USE_LAYERNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
         # Compute layer norm
-        y = None
-        means = None
-        rstdevs = None
         sm_margin = self._sm_margins["forward" if requires_grad else "inference"]
-        if with_fp8_output:
-            fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(forward=True)
-            fp8_dtype = get_fp8_te_dtype(output_fp8_meta["recipe"], fprop_tensor=True)
-            args = (
-                x,
-                w,
-                b,
-                self.eps,
-                output_fp8_meta[fp8_meta_key],
-                0,  # fp8_meta_index
-                fp8_dtype,
-                sm_margin,
-                self.zero_centered_gamma,
-            )
-            if requires_grad:
-                layernorm_fwd_fp8_func = te_layernorm_fwd_fp8_triton if use_layernorm_triton else layernorm_fwd_fp8
-                data, means, rstdevs = layernorm_fwd_fp8_func(*args)
-            else:
-                # triton kernel integrated in layernorm_fwd_fp8_inf
-                data = layernorm_fwd_fp8_inf(*args)
-            y = Float8Tensor(
-                data=data,
-                fp8_meta=output_fp8_meta,
-                fp8_meta_forward=True,
-                fp8_meta_index=0,
-                fp8_dtype=fp8_dtype,
-                dtype=dtype,
-            )
-        else:
-            args = (
-                x,
-                w,
-                b,
-                self.eps,
-                sm_margin,
-                self.zero_centered_gamma,
-            )
-            if requires_grad:
-                layernorm_fwd_func = te_layernorm_fwd_triton if use_layernorm_triton else layernorm_fwd
-                y, means, rstdevs = layernorm_fwd_func(*args)
-            else:
-                y = layernorm_fwd_inf(*args)
+        use_layernorm_triton = bool( int(os.environ.get('NVTE_USE_LAYERNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
+        layernorm_fwd_func = te_layernorm_fwd_triton if use_layernorm_triton else layernorm_fwd
+        y, means, rstdevs = layernorm_fwd_func(
+            x,
+            w,
+            b,
+            self.eps,
+            None,
+            output_quantizer,
+            TE_DType[dtype],
+            sm_margin,
+            self.zero_centered_gamma,
+        )
 
         # Save state for backward pass
         if requires_grad:

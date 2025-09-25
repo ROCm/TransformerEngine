@@ -5,22 +5,14 @@
  ************************************************************************/
 #pragma once
 
-#ifdef __HIPCC__
-
 #include <hip/hip_runtime.h>
-#include <hip/hip_version.h> //For RTC it should be included explicitly
 
-#if HIP_VERSION >= 60200000
-#include <hip/hip_fp8.h>
-
-#if HIP_VERSION >= 60300000
 #if !defined(__HIP_DEVICE_COMPILE__)
-#include <optional>
-#include "../util/string.h"
-
 /* Platforms that have both MI300 family and other families GPUs are unknown and not supported.
 * Thus, FP8 format is selected once by the current (any) GPU architecture.
 */
+#include <optional>
+#include "../util/string.h"
 static bool _te_check_fp8_fnuz() {
   hipDeviceProp_t prop;
   hipError_t res= hipGetDeviceProperties(&prop, 0);
@@ -39,6 +31,23 @@ static inline bool te_fp8_fnuz() {
   }
   return use_fnuz.value();
 }
+#endif //__HIP_DEVICE_COMPILE__
+
+#ifdef __HIPCC__
+
+#include <hip/hip_version.h> //For RTC it should be included explicitly
+
+#if defined(__HIP_DEVICE_COMPILE__) && HIP_VERSION < 60300000
+static constexpr inline bool te_fp8_fnuz() { return true; }
+#endif
+
+#if HIP_VERSION >= 60200000
+#include <hip/hip_fp8.h>
+
+#if HIP_VERSION >= 60300000
+#if !defined(__HIP_DEVICE_COMPILE__)
+
+#define TE_DYNAMIC_HIP_FP8_TYPE 1
 
 /* Device methods in _te_hip_fp8 are dummy and are needed for compilation
 * because HIPCC compiles __device__ and __global__ functions for host.
@@ -67,11 +76,11 @@ typedef _te_hip_fp8<__hip_fp8_e5m2_fnuz, __hip_fp8_e5m2> _te_hip_fp8_e5m2;
 #elif HIP_FP8_TYPE_FNUZ
 typedef __hip_fp8_e4m3_fnuz _te_hip_fp8_e4m3;
 typedef __hip_fp8_e5m2_fnuz _te_hip_fp8_e5m2;
-static inline bool te_fp8_fnuz() { return true; }
+static constexpr inline bool te_fp8_fnuz() { return true; }
 #elif HIP_FP8_TYPE_OCP
 typedef __hip_fp8_e4m3 _te_hip_fp8_e4m3;
 typedef __hip_fp8_e5m2 _te_hip_fp8_e5m2;
-static inline bool te_fp8_fnuz() { return false; }
+static constexpr inline bool te_fp8_fnuz() { return false; }
 #else
 #error "Unsupported HIP_FP8_TYPE"
 #endif //__HIP_DEVICE_COMPILE__

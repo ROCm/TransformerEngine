@@ -7,8 +7,6 @@
 cmake_minimum_required(VERSION 3.21)
 
 option(USE_ROCM "Use ROCm" ON)
-option(USE_HIPBLASLT "Use HIPBLASLT" ON)
-option(USE_ROCBLAS "Use ROCBLAS" ON)
 option(USE_FUSED_ATTN_AOTRITON "Use aotriton backend" ON)
 option(USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS "Build AOTriton GPU kernels" OFF)
 option(USE_FUSED_ATTN_CK "Use ck backend" ON)
@@ -20,10 +18,6 @@ if (USE_ROCM)
     message("Using AMD Platform")
   else()
     message(FATAL_ERROR "Could not find ROCm installation")
-  endif()
-    
-  if (NOT USE_HIPBLASLT AND NOT USE_ROCBLAS)
-    message(FATAL_ERROR "Need specify at least one GEMM library to use: HIPBLASLT or ROCBLAS")
   endif()
 
 else()
@@ -41,13 +35,17 @@ endif()
 # Language options
 if(USE_CUDA)
   if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
+    if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
+      set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90 100 120)
+    else ()
+      set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
+    endif()
   endif()
   set(CMAKE_CXX_STANDARD 17)
   set(CMAKE_CUDA_STANDARD 17)
   set(CMAKE_CUDA_STANDARD_REQUIRED ON)
   if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
+    set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -g -G")
   endif()
 
   # Hide non-necessary symbols in shared object.
@@ -77,12 +75,17 @@ else()
   set(CMAKE_CXX_STANDARD 17)
   project(transformer_engine LANGUAGES HIP CXX)
 
+  # If using ROCm, ninja must be installed to build TE.
+  if (NOT CMAKE_GENERATOR STREQUAL "Ninja")
+    message(FATAL_ERROR "This project requires the Ninja build system. Install it using 'pip install ninja'.")
+  endif()
+
   # Disable Asserts In Code (Can't use asserts on HIP stack.)
   add_definitions(-DNDEBUG)
   add_definitions(-DUSE_ROCM)
 
   if(NOT DEFINED ENV{NVTE_ROCM_ARCH})
-    SET(CMAKE_HIP_ARCHITECTURES gfx942)
+    SET(CMAKE_HIP_ARCHITECTURES gfx942 gfx950)
   else()
     SET(CMAKE_HIP_ARCHITECTURES $ENV{NVTE_ROCM_ARCH})
   endif()
@@ -101,7 +104,6 @@ message("${message_line}")
 message(STATUS "USE_ROCM ${USE_ROCM}")
 if(USE_ROCM)
   message(STATUS "CMAKE_HIP_ARCHITECTURES: ${CMAKE_HIP_ARCHITECTURES}")
-  message(STATUS "USE_HIPBLASLT ${USE_HIPBLASLT} USE_ROCBLAS ${USE_ROCBLAS}")
   message(STATUS "USE_FUSED_ATTN_CK ${USE_FUSED_ATTN_CK}")
   message(STATUS "USE_FUSED_ATTN_AOTRITON ${USE_FUSED_ATTN_AOTRITON}")
 endif()
@@ -129,7 +131,6 @@ if(USE_CUDA)
        activation/swiglu.cu
        fused_attn/fused_attn_fp8.cu
        fused_attn/fused_attn.cpp
-       fused_attn/thd_utils.cu
        fused_attn/utils.cu
        gemm/cublaslt_gemm.cu
        normalization/common.cpp
@@ -143,13 +144,15 @@ if(USE_CUDA)
        util/cast.cu
        util/padding.cu
        util/cuda_driver.cpp
+       util/cuda_nvml.cpp
        util/cuda_runtime.cpp
        util/rtc.cpp
-       util/system.cpp
+       swizzle/swizzle.cu
        fused_softmax/scaled_masked_softmax.cu
        fused_softmax/scaled_upper_triang_masked_softmax.cu
        fused_softmax/scaled_aligned_causal_masked_softmax.cu
        fused_rope/fused_rope.cu
+       recipe/current_scaling.cu
        recipe/delayed_scaling.cu
        comm_gemm_overlap/userbuffers/ipcsocket.cc
        comm_gemm_overlap/userbuffers/userbuffers-host.cpp
@@ -172,7 +175,6 @@ else()
        fused_attn_rocm/fused_attn_aotriton.cpp
        fused_attn_rocm/fused_attn_ck.cpp
        fused_attn_rocm/utils.cpp
-       fused_attn/thd_utils.cu
        gemm/cublaslt_gemm.cu
        gemm/rocm_gemm.cu
        normalization/common.cpp
@@ -188,11 +190,13 @@ else()
        util/cuda_driver.cpp
        util/cuda_runtime.cpp
        util/rtc.cpp
-       util/system.cpp
+       amd_detail/system.cpp
+       swizzle/swizzle.cu
        fused_softmax/scaled_masked_softmax.cu
        fused_softmax/scaled_upper_triang_masked_softmax.cu
        fused_softmax/scaled_aligned_causal_masked_softmax.cu
        fused_rope/fused_rope.cu
+       recipe/current_scaling.cu
        recipe/delayed_scaling.cu)
 
   # process source code files
@@ -203,10 +207,9 @@ else()
   message(STATUS "CMAKE_MODULE_PATH: ${CMAKE_MODULE_PATH}")
 
   set(header_include_dir
+      ${CMAKE_CURRENT_SOURCE_DIR}/..
       ${CMAKE_CURRENT_SOURCE_DIR}/include 
       ${CMAKE_CURRENT_SOURCE_DIR}/util
-      ${CMAKE_CURRENT_SOURCE_DIR}/rmsnorm
-      ${CMAKE_CURRENT_SOURCE_DIR}/layer_norm 
       ${CMAKE_CURRENT_SOURCE_DIR})
   message(STATUS "HIPIFY CUDA_SOURCE_DIR: ${CMAKE_CURRENT_SOURCE_DIR}")
   message(STATUS "HIPIFY HEADER_INCLUDE_DIR: ${header_include_dir}")
@@ -248,6 +251,8 @@ if (USE_CUDA)
   # Hack to enable dynamic loading in cuDNN frontend
   target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
 else()
+  set(GPU_TARGETS ${CMAKE_HIP_ARCHITECTURES})
+
   if(USE_FUSED_ATTN_AOTRITON)
     # This is for GPU kernel downloading
     # The AOTriton C++ runtime will be built from ../../3rdparty/aotriton
@@ -261,70 +266,55 @@ else()
       else()
         set(AOTRITON_NOIMAGE_MODE ON)
       endif()
-      set(aotriton_target_gpus "")
-      # GPU Targets
-      macro(translate_arch_to_gpu_names aotriton_target_gpus)
-        set(gfx90a_key MI200)
-        set(gfx942_key MI300X)
-        set(gfx1100_key Navi31)
 
+      string(REPLACE ";" "," ARCH_LIST_COMMA_STR "${CMAKE_HIP_ARCHITECTURES}")
+      include(ExternalProject)
+      ExternalProject_Add(aotriton_external
+        LIST_SEPARATOR ","
+        SOURCE_DIR ${TE}/3rdparty/aotriton
+        CMAKE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${__AOTRITON_INSTALL_DIR}
+        -DAOTRITON_TARGET_ARCH=${ARCH_LIST_COMMA_STR}
+        -DGPU_TARGETS=${ARCH_LIST_COMMA_STR}
+        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+        -DAOTRITON_NO_PYTHON=ON
+        -DAOTRITON_NAME_SUFFIX=${__AOTRITON_SUFFIX}
+        -DAOTRITON_NOIMAGE_MODE=${AOTRITON_NOIMAGE_MODE}
+        BUILD_BYPRODUCTS "${__AOTRITON_INSTALL_DIR}/lib/libaotriton${__AOTRITON_SUFFIX}_v2.so"
+        )
+      add_library(aotriton INTERFACE)
+      add_dependencies(aotriton aotriton_external)
+      target_link_libraries(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/lib/libaotriton${__AOTRITON_SUFFIX}_v2.so)
+      target_include_directories(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/include)
+      if(NOT USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS)
+        set(__AOTRITON_VER "0.10b")
+        set(__AOTRITON_SHA256 "1e9b3dddf0c7fc07131c6f0f5266129e83ce2331f459fa2be8c63f4ae91b0f5b")
+        string(CONCAT __AOTRITON_URL "https://github.com/ROCm/aotriton/releases/download/"
+                                    "${__AOTRITON_VER}/aotriton-"
+                                    "${__AOTRITON_VER}-manylinux_2_28"
+                                    "_x86_64-rocm7.0"
+                                    "-shared.tar.gz")
+        set(aotriton_image_dirs)
         foreach(X IN LISTS CMAKE_HIP_ARCHITECTURES)
-          set(key ${X})
-          string(APPEND key "_key")
-          set(gpu ${${key}})
-          if (gpu)
-            string(APPEND aotriton_target_gpus "${gpu}|")
-          else()
-            message(WARNING "AOTriton building is not supported for ${X}")
-          endif()
+          list(APPEND aotriton_image_dirs "${CMAKE_CURRENT_BINARY_DIR}/aotriton_tarball/lib/aotriton.images/amd-${X}")
         endforeach()
-      endmacro()
-      translate_arch_to_gpu_names(aotriton_target_gpus)
-      if (NOT aotriton_target_gpus)
-        set(USE_FUSED_ATTN_AOTRITON FALSE)
-        message(WARNING "Disable AOTriton building because no supported GPU targets found")
-      else()
-        include(ExternalProject)
-        ExternalProject_Add(aotriton_external
-          SOURCE_DIR ../../3rdparty/aotriton
-          LIST_SEPARATOR |
-          CMAKE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${__AOTRITON_INSTALL_DIR}
-          -DTARGET_GPUS=${aotriton_target_gpus}
-          -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-          -DAOTRITON_NO_PYTHON=ON
-          -DAOTRITON_NAME_SUFFIX=${__AOTRITON_SUFFIX}
-          -DAOTRITON_NOIMAGE_MODE=${AOTRITON_NOIMAGE_MODE}
-          BUILD_BYPRODUCTS "${__AOTRITON_INSTALL_DIR}/lib/libaotriton${__AOTRITON_SUFFIX}_v2.so"
-          )
-        add_library(aotriton INTERFACE)
-        add_dependencies(aotriton aotriton_external)
-        target_link_libraries(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/lib/libaotriton${__AOTRITON_SUFFIX}_v2.so)
-        target_include_directories(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/include)
-        if(NOT USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS)
-          set(__AOTRITON_VER "0.8.2b")
-          set(__AOTRITON_SHA256 "66445e6b0209b9f4080743b839cc9d424054dc5c8d07363f9f27f109231c324a")
-          string(CONCAT __AOTRITON_URL "https://github.com/ROCm/aotriton/releases/download/"
-                                      "${__AOTRITON_VER}/aotriton-"
-                                      "${__AOTRITON_VER}-manylinux_2_28"
-                                      "_x86_64-rocm6.2"
-                                      "-shared.tar.gz")
-          ExternalProject_Add(aotriton_images
-                              URL "${__AOTRITON_URL}"
-                              URL_HASH SHA256=${__AOTRITON_SHA256}
-                              SOURCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/aotriton_tarball
-                              CONFIGURE_COMMAND ""
-                              BUILD_COMMAND ""
-                              INSTALL_COMMAND ${CMAKE_COMMAND} -E copy_directory
-                              "${CMAKE_CURRENT_BINARY_DIR}/aotriton_tarball/lib/aotriton.images"
-                              "${__AOTRITON_INSTALL_DIR}/lib/aotriton.images")
-          add_dependencies(aotriton aotriton_images)
-        endif()
-        install(DIRECTORY
-                ${__AOTRITON_INSTALL_DIR}/lib
-                DESTINATION ${CMAKE_INSTALL_PREFIX}/transformer_engine
-                PATTERN "cmake" EXCLUDE
-                PATTERN "libaotriton${__AOTRITON_SUFFIX}_v2.so" EXCLUDE)
+        set(aotriton_lib_install_dir "${__AOTRITON_INSTALL_DIR}/lib/aotriton.images")
+        file(REMOVE_RECURSE ${aotriton_lib_install_dir})
+        file(MAKE_DIRECTORY ${aotriton_lib_install_dir})
+        ExternalProject_Add(aotriton_images
+                            URL "${__AOTRITON_URL}"
+                            URL_HASH SHA256=${__AOTRITON_SHA256}
+                            SOURCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/aotriton_tarball
+                            CONFIGURE_COMMAND ""
+                            BUILD_COMMAND ""
+                            BUILD_ALWAYS TRUE
+                            INSTALL_COMMAND cp -Ra ${aotriton_image_dirs} ${aotriton_lib_install_dir})
+        add_dependencies(aotriton aotriton_images)
       endif()
+      install(DIRECTORY
+              ${__AOTRITON_INSTALL_DIR}/lib
+              DESTINATION ${CMAKE_INSTALL_PREFIX}/transformer_engine
+              PATTERN "cmake" EXCLUDE
+              PATTERN "libaotriton${__AOTRITON_SUFFIX}_v2.so" EXCLUDE)
     else()
       # Use aotriton built during initial TE building/installation
       # When only need rebuild TE library itself
@@ -337,33 +327,15 @@ else()
   endif()
 
   if(USE_FUSED_ATTN_CK)
-    if(NOT DEFINED CK_FUSED_ATTN_PATH)
-      set(CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT ${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT} CACHE STRING "ck float to bf16 conversion rounding")
-      set(CK_FUSED_ATTN_TARGET_GPUS ${CMAKE_HIP_ARCHITECTURES} CACHE STRING "Target arch to compile ck fused attn backend")
-      add_subdirectory(ck_fused_attn ${CMAKE_CURRENT_BINARY_DIR}/ck_fused_attn)
-    else()
-      # Use CK built during initial TE building/installation
-      # When only need rebuild TE library itself
-      unset(CK_FUSED_ATTN_LIB CACHE)
-      find_library(CK_FUSED_ATTN_LIB NAMES ck_fused_attn PATHS ${CK_FUSED_ATTN_PATH}/lib REQUIRED NO_DEFAULT_PATH)
-      add_library( ck_fused_attn STATIC IMPORTED )
-      set_target_properties( ck_fused_attn PROPERTIES IMPORTED_LOCATION ${CK_FUSED_ATTN_LIB} )
-      target_include_directories(ck_fused_attn INTERFACE ${CK_FUSED_ATTN_PATH}/include)
-    endif()
+    add_subdirectory(ck_fused_attn ${CMAKE_CURRENT_BINARY_DIR}/ck_fused_attn)
   endif()
 
   find_package(hip)
   list(APPEND transformer_engine_LINKER_LIBS hip::host hip::device roctx64)
-  if(USE_HIPBLASLT)
-    find_package(hipblaslt)
-    target_compile_definitions(transformer_engine PUBLIC USE_HIPBLASLT)
-    list(APPEND transformer_engine_LINKER_LIBS roc::hipblaslt)
-  endif()
-  if(USE_ROCBLAS)
-    find_package(rocblas)
-    target_compile_definitions(transformer_engine PUBLIC USE_ROCBLAS)
-    list(APPEND transformer_engine_LINKER_LIBS roc::rocblas)
-  endif()
+  find_package(hiprtc)
+  list(APPEND transformer_engine_LINKER_LIBS hiprtc)
+  find_package(hipblaslt)
+  list(APPEND transformer_engine_LINKER_LIBS roc::hipblaslt)
   if(USE_FUSED_ATTN_AOTRITON)
     target_compile_definitions(transformer_engine PUBLIC USE_FUSED_ATTN_AOTRITON)
     list(APPEND transformer_engine_LINKER_LIBS aotriton)
@@ -461,10 +433,6 @@ else()
   # Ask hcc to generate device code during compilation so we can use
   # host linker to link.
   set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} -fno-gpu-rdc -Wno-defaulted-function-deleted")
-  foreach(rocm_arch ${CMAKE_HIP_ARCHITECTURES})
-    # if CMAKE_CXX_FLAGS has --offload-arch set already, better to rm first
-    set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} --offload-arch=${rocm_arch}")
-  endforeach()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${HIP_HCC_FLAGS}")
   # Hide non-necessary symbols in shared object.
   set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
@@ -473,3 +441,11 @@ endif()
 # Install library
 install(TARGETS transformer_engine DESTINATION .)
 set_target_properties(transformer_engine PROPERTIES INSTALL_RPATH "$ORIGIN/lib;$ORIGIN/transformer_engine/lib")
+
+if (USE_ROCM)
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/build_info.txt"
+    "ROCM_VERSION: ${hip_VERSION_MAJOR}.${hip_VERSION_MINOR}\n"
+    "GPU_TARGETS: ${CMAKE_HIP_ARCHITECTURES}\n"
+  )
+  install(FILES "${CMAKE_CURRENT_BINARY_DIR}/build_info.txt" DESTINATION "transformer_engine/")
+endif()

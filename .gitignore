@@ -8,7 +8,6 @@
 *.nsys-rep
 *.ncu-rep
 *.sqlite
-*.onnx
 *.eggs
 build/
 *.so
@@ -50,3 +49,8 @@ downloads/
 .pytest_cache/
 compile_commands.json
 .nfs
+**/profiler_outputs/
+**/times.csv
+tensor_dumps/
+transformer_engine/build_info.txt
+transformer_engine/common/util/hip_nvml.*

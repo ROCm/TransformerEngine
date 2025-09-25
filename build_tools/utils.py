@@ -261,7 +261,12 @@ def cuda_path() -> Tuple[str, str]:
 
 @functools.lru_cache(maxsize=None)
 def cuda_archs() -> str:
-    return os.getenv("NVTE_CUDA_ARCHS", "70;80;89;90")
+    version = cuda_version()
+    if os.getenv("NVTE_CUDA_ARCHS") is None:
+        os.environ["NVTE_CUDA_ARCHS"] = (
+            "70;80;89;90;100;120" if version >= (12, 8) else "70;80;89;90"
+        )
+    return os.getenv("NVTE_CUDA_ARCHS")
 
 
 def cuda_version() -> Tuple[int, ...]:
@@ -282,7 +287,7 @@ def cuda_version() -> Tuple[int, ...]:
 def get_frameworks() -> List[str]:
     """DL frameworks to build support for"""
     _frameworks: List[str] = []
-    supported_frameworks = ["pytorch", "jax", "paddle"]
+    supported_frameworks = ["pytorch", "jax"]
 
     # Check environment variable
     if os.getenv("NVTE_FRAMEWORK"):
@@ -311,12 +316,6 @@ def get_frameworks() -> List[str]:
             pass
         else:
             _frameworks.append("jax")
-        try:
-            import paddle
-        except ImportError:
-            pass
-        else:
-            _frameworks.append("paddle")
 
     # Special framework names
     if "all" in _frameworks:
@@ -349,10 +348,6 @@ def get_frameworks() -> List[str]:
                     if "jax" in _requested_frameworks:
                         _unsupported_frameworks.append("jax")
                     _frameworks.remove("jax")
-        if "paddle" in _frameworks:
-            if "paddle" in _requested_frameworks:
-                _unsupported_frameworks.append("paddle")
-            _frameworks.remove("paddle")
         if _unsupported_frameworks:
             raise ValueError(f"ROCm is not supported by requested frameworks: {_unsupported_frameworks}")
 
@@ -394,6 +389,35 @@ def copy_common_headers(
         shutil.copy(path, new_path)
 
 
+def copy_hipify_tools(
+    src_dir: Union[Path, str],
+    dst_dir: Union[Path, str],
+) -> None:
+    """Copy necessary hipify tools from library root
+    src_dir should be the root or Transformer Engine repository.
+    """
+    if rocm_build() and bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
+        hipify_dir = src_dir / "3rdparty" / "hipify_torch"
+        hipify_copy = dst_dir / "3rdparty" / "hipify_torch"
+        if hipify_copy.exists():
+            shutil.rmtree(hipify_copy)
+        shutil.copytree(hipify_dir, hipify_copy)
+        shutil.copy(src_dir / "hipify_custom_map.json", dst_dir / "hipify_custom_map.json")
+
+
+def clear_hipify_tools_copy(
+    dst_dir: Union[Path, str],
+) -> None:
+    """Clear temporary copies of hipify tools
+    """
+    hipify_copy = dst_dir / "3rdparty"
+    if hipify_copy.exists():
+        shutil.rmtree(hipify_copy)
+    map_copy = dst_dir / "hipify_custom_map.json"
+    if map_copy.exists():
+        map_copy.unlink()
+
+
 def install_and_import(package):
     """Install a package via pip (if not already installed) and import into globals."""
     main_package = package.split("[")[0]
@@ -409,9 +433,9 @@ def uninstall_te_wheel_packages():
             "pip",
             "uninstall",
             "-y",
+            "transformer_engine_rocm", # te_cuda_vers for ROCm build
             "transformer_engine_cu12",
             "transformer_engine_torch",
-            "transformer_engine_paddle",
             "transformer_engine_jax",
         ]
     )

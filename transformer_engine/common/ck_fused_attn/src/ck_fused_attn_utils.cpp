@@ -5,12 +5,50 @@
  ************************************************************************/
 
 #include <utility>
+#include <dlfcn.h>
+#include <filesystem>
+#include <mutex> //once_flag
 #include "ck_fused_attn_utils.hpp"
 #include "ck_fused_attn/ck_fused_attn.hpp"
 #include "mask.hpp"
 #include "bias.hpp"
 
+
 namespace ck_fused_attn{
+
+void set_aiter_asm_dir() {
+  static std::once_flag aiter_asm_dir_once;
+  std::call_once(aiter_asm_dir_once, []() {
+    hipDeviceProp_t prop;
+    hipError_t res= hipGetDeviceProperties(&prop, 0);
+    if (res != hipSuccess) {
+      throw std::runtime_error(std::string(
+        "hipGetDeviceProperties failed with error: ") + hipGetErrorString(res));
+    }
+    const char *arh_str = nullptr;
+    switch (prop.major*10 + prop.minor) {
+      case 94: // Gfx942
+        arh_str = "gfx942/"; // trailing slash is mandatory
+        break;
+      case 95: // Gfx950
+        arh_str = "gfx950/"; // trailing slash is mandatory
+        break;
+      default:
+        // Unsupported V3 architecture
+        return;
+    }
+    Dl_info info;
+    dladdr((void*)set_aiter_asm_dir, &info);
+    setenv("AITER_ASM_DIR",
+           (std::filesystem::path(info.dli_fname).parent_path() / "aiter" / arh_str).c_str(), 1);
+    if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
+      if (std::string(env_p) == "1"){
+        // Print the set environment variable for debugging purposes
+        std::cout << "AITER_ASM_DIR set to: " << getenv("AITER_ASM_DIR") << std::endl;
+      }
+    }
+  });
+}
 
 std::string get_data_type_str(DType dtype){
   std::string data_type_str;
@@ -60,22 +98,6 @@ std::pair<bias_enum, BiasShape> get_ck_bias_type_shape(BiasType attn_bias_type, 
     throw std::runtime_error("Invalid bias_type in ck_fused_attn.");
   }
   return std::make_pair(bias_type, bias_shape); 
-}
-
-//CK_FUSED_ATTN MaskType to ck_tile mask enum
-mask_enum get_ck_mask_type(MaskType attn_mask_type){
-  mask_enum mask_type;
-  if (attn_mask_type == MaskType::no_mask){
-    mask_type = mask_enum::no_mask;
-  }else if(attn_mask_type == MaskType::mask_top_left){
-    mask_type = mask_enum::mask_top_left;
-  }else if(attn_mask_type == MaskType::mask_bottom_right){
-    mask_type = mask_enum::mask_bottom_right;
-  }else{
-    mask_type = mask_enum::window_generic;
-  }
-
-  return mask_type;
 }
 
 }//namespace ck_fused_attn

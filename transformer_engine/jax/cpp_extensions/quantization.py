@@ -1,15 +1,18 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for quantization"""
 from typing import Tuple
+from packaging import version
 
 import jax
 import jax.numpy as jnp
 from jax import dtypes
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
-from jax.extend import ffi
+from .misc import is_hip_extension
 
 from transformer_engine import transformer_engine_jax
 from transformer_engine.transformer_engine_jax import DType as TEDType
@@ -24,6 +27,11 @@ from .misc import (
     is_ffi_enabled,
 )
 from ..sharding import all_reduce_max_along_all_axes_except_PP
+
+if version.parse(jax.__version__) >= version.parse("0.5.0"):
+    from jax import ffi  # pylint: disable=ungrouped-imports
+else:
+    from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
 
 __all__ = ["cast_fp8"]

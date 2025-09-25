@@ -1,0 +1,38 @@
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+
+# This Dockerfile is used to build TransformerEngine wheels for ROCm on x86_64 architecture.
+# It is based on the manylinux_2_28_x86_64 based image with ROCm installed.
+ARG BASE_IMAGE=quay.io/pypa/manylinux_2_28_x86_64:non_existent_rocm_tag
+FROM $BASE_IMAGE
+
+# Setup the build_system repo
+RUN echo -e "[build_system]\nname=ROCm\nbaseurl=https://repo.almalinux.org/build_system/8/x86_64/\nenabled=1\ngpgcheck=0" >/etc/yum.repos.d/build_system.repo
+
+# Add and enable repos
+RUN dnf update -y || true
+RUN dnf install -y epel-release elrepo-release
+RUN dnf config-manager --set-enabled build_system powertools extras epel elrepo
+
+# Setup dev packages
+RUN dnf group install -y "Development Tools" && \
+    dnf install -y git cmake llvm-toolset hipblaslt hipblaslt-devel gcc-toolset-12
+RUN dnf clean all
+RUN rm -rf /var/cache/dnf/*
+
+ENV CMAKE_PREFIX_PATH=/opt/rocm/lib/cmake
+ENV NVTE_RELEASE_BUILD=1
+
+ARG GPU_TARGETS="gfx942;gfx950"
+ENV NVTE_ROCM_ARCH=${GPU_TARGETS}
+
+ARG TARGET_BRANCH
+ENV TARGET_BRANCH=${TARGET_BRANCH}
+
+# Install TransformerEngine
+COPY build_wheels.sh /
+WORKDIR /TransformerEngine/
+RUN git clone https://github.com/ROCm/TransformerEngine.git /TransformerEngine
+
+CMD ["/bin/bash", "/build_wheels.sh", "manylinux_2_28_x86_64", "true", "true", "true", "true"]
