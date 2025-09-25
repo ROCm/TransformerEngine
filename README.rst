@@ -302,7 +302,7 @@ At runtime, you can enable specific triton kernels using the specific environmen
 
 MXFP8 support on ROCm (gfx95x only)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-MXFP8 is supported on gfx95x GPUs for limited number of configurations and it's usage is disabled by default.
+MXFP8 is supported on gfx95x GPUs for limited number of configurations and its usage is disabled by default.
 To enable MXFP8 support, use NVTE_ROCM_ENABLE_MXFP8 environment variable which can take the following values: 
 * 0 - disable MXFP8 support (default);
 * 1 - enable MXFP8 support in fp8;

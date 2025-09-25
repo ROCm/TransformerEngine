@@ -53,7 +53,7 @@ def check_mxfp8_support() -> Tuple[bool, str]:
     """Return if fp8 support is available"""
     if IS_HIP_EXTENSION:
         if os.getenv("NVTE_ROCM_ENABLE_MXFP8", "0") == "0":
-            return False, "MXFP8 is disabled on ROCm."
+            return False, "MXFP8 support is not enabled."
         gpu_arch = get_device_compute_capability()
         if gpu_arch == (9, 5):
             return True, ""
