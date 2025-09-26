@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - 'dev'
+      - 'leo/*'
       - 'release_v1.**_rocm'
       - 'release_v2.**_rocm'
   pull_request:
