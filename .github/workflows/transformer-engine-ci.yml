@@ -22,13 +22,13 @@ on:
       node_label:
         description: 'Runner label for tests'
         required: true
-        default: 'gfx942'
+        default: 'te-gfx942-4gpu'
 
 jobs:
   build:
     name: Build TransformerEngine
     # This is a build job, doesn't need GPUs
-    runs-on: [gfx942]
+    runs-on: [te-gfx942-4gpu]
     
     outputs:
       docker-image: ${{ steps.select-image.outputs.image-tag }}
@@ -53,12 +53,16 @@ jobs:
 
           IMAGE_TO_USE="$DEV_DOCKER_IMAGE" # Default
 
-          if [[ $BRANCH_NAME =~ ^release_v1\.([0-9]+)_rocm$ ]]; then
-            MINOR_VERSION=${BASH_REMATCH[1]}
-            if (( MINOR_VERSION >= 9 && MINOR_VERSION <= 12 )); then
-              IMAGE_TO_USE="$LEGACY_DOCKER_IMAGE"
-            elif (( MINOR_VERSION == 13 || MINOR_VERSION == 14 )); then
-              IMAGE_TO_USE="$REL613_DOCKER_IMAGE"
+          if [[ $BRANCH_NAME =~ ^release_v([0-9]+)\.([0-9]+)_rocm$ ]]; then
+            MAJOR_VERSION=${BASH_REMATCH[1]}
+            MINOR_VERSION=${BASH_REMATCH[2]}
+            
+            if (( MAJOR_VERSION == 1 )); then
+              if (( MINOR_VERSION >= 9 && MINOR_VERSION <= 12 )); then
+                IMAGE_TO_USE="$LEGACY_DOCKER_IMAGE"
+              elif (( MINOR_VERSION == 13 || MINOR_VERSION == 14 )); then
+                IMAGE_TO_USE="$REL613_DOCKER_IMAGE"
+              fi
             fi
           fi
           
@@ -98,75 +102,96 @@ jobs:
         with:
           name: transformer-engine-wheel
           path: ./*.whl
-
   test:
-    name: Test - ${{ matrix.name }}
-    needs: build
-    # We need GPUs here
-    runs-on: [self-hosted, 4-gpus]
-    continue-on-error: true
+      name: Test - ${{ matrix.framework }} (${{ matrix.gpu_mode }})
+      needs: build
+      runs-on: [te-gfx942-4gpu]
+      continue-on-error: true
 
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { name: "PyTorch (Single-GPU)", script: "HIP_VISIBLE_DEVICES=1 ci/pytorch.sh", log_name: "torch_sgpu" }
-          - { name: "JAX (Single-GPU)", script: "HIP_VISIBLE_DEVICES=2 ci/jax.sh", log_name: "jax_sgpu" }
-          - { name: "Core (Single-GPU)", script: "HIP_VISIBLE_DEVICES=3 ci/core.sh", log_name: "core_sgpu" }
-          - { name: "PyTorch (Multi-GPU)", script: "ci/pytorch.sh", log_name: "torch_mgpu" }
-          - { name: "JAX (Multi-GPU)", script: "ci/jax.sh", log_name: "jax_mgpu" }
-          - { name: "Examples", script: |
-              set -ex
+      strategy:
+        fail-fast: false
+        matrix:
+          # Define main test combinations
+          framework: ['PyTorch', 'JAX']
+          gpu_mode: ['Single-GPU', 'Multi-GPU']
+          # Add special, non-standard combinations
+          include:
+            - framework: 'Core'
+              gpu_mode: 'Single-GPU'
+            - framework: 'Examples'
+              gpu_mode: 'Single-GPU' # Runs on a single GPU
+
+      # Dynamically generate job name, log name, and the test script from the matrix
+      env:
+        TEST_NAME: ${{ matrix.framework }} (${{ matrix.gpu_mode }})
+        LOG_NAME: ${{ lower(matrix.framework) }}_${{ matrix.gpu_mode == 'Single-GPU' && 'sgpu' || 'mgpu' }}
+        TEST_LEVEL: ${{ github.event.inputs.test_level || (github.ref_name == 'dev' && '3' || '1') }}
+        TEST_SGPU: ${{ contains(matrix.gpu_mode, 'Single-GPU') }}
+        TEST_MGPU: ${{ contains(matrix.gpu_mode, 'Multi-GPU') }}
+
+      container:
+        image: ${{ needs.build.outputs.docker-image }}
+        options: --device=/dev/kfd --device=/dev/dri --group-add=video --shm-size=16g --pid=host
+        
+      steps:
+        - name: 📜 Checkout repository
+          uses: actions/checkout@v4
+          with:
+            submodules: 'recursive'
+            
+        - name: ⬇️ Download wheel artifact
+          uses: actions/download-artifact@v4
+          with:
+            name: transformer-engine-wheel
+
+        - name: 🐍 Install dependencies and wheel
+          run: |
+            pip install --upgrade pip
+            pip install ./*.whl
+
+        - name: 🧪 Run tests
+          run: |
+            set -ex
+            # Enhanced debug output
+            ls -d /opt/rocm*
+            python --version
+            pip list | egrep "transformer_e|torch|jax|numpy|ml_dtypes|typing_ext"
+
+            # Dynamically select and run the correct test script
+            if [ "${{ matrix.framework }}" = "PyTorch" ]; then
+              ${{ matrix.gpu_mode == 'Single-GPU' && 'HIP_VISIBLE_DEVICES=1' || '' }} ci/pytorch.sh
+            elif [ "${{ matrix.framework }}" = "JAX" ]; then
+              ${{ matrix.gpu_mode == 'Single-GPU' && 'HIP_VISIBLE_DEVICES=2' || '' }} ci/jax.sh
+            elif [ "${{ matrix.framework }}" = "Core" ]; then
+              HIP_VISIBLE_DEVICES=3 ci/core.sh
+            elif [ "${{ matrix.framework }}" = "Examples" ]; then
+              # Fully expanded examples test suite
               pip3 install -r examples/jax/mnist/requirements.txt
               pip3 install -r examples/jax/encoder/requirements.txt
+              
+              # PyTorch MNIST
+              python examples/pytorch/mnist/main.py
+              python examples/pytorch/mnist/main.py --use-te
               python examples/pytorch/mnist/main.py --use-fp8
+
+              # JAX MNIST
+              python examples/jax/mnist/test_single_gpu_mnist.py
+              python examples/jax/mnist/test_single_gpu_mnist.py --use-te
               python examples/jax/mnist/test_single_gpu_mnist.py --use-fp8
+              
+              # JAX Encoder
+              python examples/jax/encoder/test_single_gpu_encoder.py
               python examples/jax/encoder/test_single_gpu_encoder.py --use-fp8
-            , log_name: "examples" }
+            fi
 
-    container:
-      image: ${{ needs.build.outputs.docker-image }}
-      options: --device=/dev/kfd --device=/dev/dri --group-add=video --shm-size=16g --pid=host
+        - name: ⬆️ Upload logs on failure
+          if: failure()
+          uses: actions/upload-artifact@v4
+          with:
+            name: ${{ env.LOG_NAME }}-logs
+            path: |
+              *.log
 
-    env:
-      TEST_LEVEL: ${{ github.event.inputs.test_level || (github.ref_name == 'dev' && '3' || '1') }}
-      TEST_SGPU: ${{ contains(matrix.name, 'Single-GPU') }}
-      TEST_MGPU: ${{ contains(matrix.name, 'Multi-GPU') }}
-      
-    steps:
-      - name: 📜 Checkout repository
-        uses: actions/checkout@v4
-        with:
-          submodules: 'recursive'
-          
-      - name: ⬇️ Download wheel artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: transformer-engine-wheel
-
-      - name: 🐍 Install dependencies and wheel
-        run: |
-          pip install --upgrade pip
-          pip install ./*.whl
-
-      - name: 🧪 Run tests
-        run: |
-          set -ex
-          # Debug output
-          python --version
-          pip list | grep -E "transformer_e|torch|jax|numpy"
-          
-          # Execute the test script
-          ${{ matrix.script }}
-
-      - name: ⬆️ Upload logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.log_name }}-logs
-          path: |
-            *.log
-        
   report-status:
     name: Report Final Status
     needs: test
