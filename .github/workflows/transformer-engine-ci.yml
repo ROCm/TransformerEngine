@@ -28,7 +28,7 @@ jobs:
   build:
     name: Build TransformerEngine
     # This is a build job, doesn't need GPUs
-    runs-on: [self-hosted, build-only]
+    runs-on: [gfx942]
     
     outputs:
       docker-image: ${{ steps.select-image.outputs.image-tag }}
