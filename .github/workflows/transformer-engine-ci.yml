@@ -6,8 +6,8 @@ on:
     branches:
       - 'dev'
       - 'leo/*'
-      - 'release_v1.**_rocm'
-      - 'release_v2.**_rocm'
+      - 'release_v1.*_rocm'
+      - 'release_v2.*_rocm'
   pull_request:
     branches:
       - 'dev'
@@ -103,6 +103,7 @@ jobs:
         with:
           name: transformer-engine-wheel
           path: ./*.whl
+          if-no-files-found: error
   test:
       name: Test - ${{ matrix.framework }} (${{ matrix.gpu_mode }})
       needs: build
@@ -125,7 +126,7 @@ jobs:
       # Dynamically generate job name, log name, and the test script from the matrix
       env:
         TEST_NAME: ${{ matrix.framework }} (${{ matrix.gpu_mode }})
-        LOG_NAME: "${{ toLower(matrix.framework) }}_${{ matrix.gpu_mode == 'Single-GPU' && 'sgpu' || 'mgpu' }}"
+        LOG_NAME: ${{ matrix.framework }}_${{ matrix.gpu_mode == 'Single-GPU' && 'sgpu' || 'mgpu' }}
         TEST_LEVEL: ${{ github.event.inputs.test_level || (github.ref_name == 'dev' && '3' || '1') }}
         TEST_SGPU: ${{ contains(matrix.gpu_mode, 'Single-GPU') }}
         TEST_MGPU: ${{ contains(matrix.gpu_mode, 'Multi-GPU') }}
@@ -160,9 +161,17 @@ jobs:
 
             # Dynamically select and run the correct test script
             if [ "${{ matrix.framework }}" = "PyTorch" ]; then
-              ${{ matrix.gpu_mode == 'Single-GPU' && 'HIP_VISIBLE_DEVICES=1' || '' }} ci/pytorch.sh
+              if [ "${{ matrix.gpu_mode }}" = "Single-GPU" ]; then
+                HIP_VISIBLE_DEVICES=1 ci/pytorch.sh
+              else
+                ci/pytorch.sh
+              fi
             elif [ "${{ matrix.framework }}" = "JAX" ]; then
-              ${{ matrix.gpu_mode == 'Single-GPU' && 'HIP_VISIBLE_DEVICES=2' || '' }} ci/jax.sh
+              if [ "${{ matrix.gpu_mode }}" = "Single-GPU" ]; then
+                HIP_VISIBLE_DEVICES=2 ci/jax.sh
+              else
+                ci/jax.sh
+              fi
             elif [ "${{ matrix.framework }}" = "Core" ]; then
               HIP_VISIBLE_DEVICES=3 ci/core.sh
             elif [ "${{ matrix.framework }}" = "Examples" ]; then
@@ -184,7 +193,9 @@ jobs:
               python examples/jax/encoder/test_single_gpu_encoder.py
               python examples/jax/encoder/test_single_gpu_encoder.py --use-fp8
             fi
-
+        - name: Normalize LOG_NAME
+          run: |
+            echo "LOG_NAME=$(echo '${{ env.LOG_NAME }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
         - name: ⬆️ Upload logs on failure
           if: failure()
           uses: actions/upload-artifact@v4
