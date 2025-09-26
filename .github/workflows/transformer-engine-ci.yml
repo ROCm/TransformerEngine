@@ -125,7 +125,7 @@ jobs:
       # Dynamically generate job name, log name, and the test script from the matrix
       env:
         TEST_NAME: ${{ matrix.framework }} (${{ matrix.gpu_mode }})
-        LOG_NAME: ${{ lower(matrix.framework) }}_${{ matrix.gpu_mode == 'Single-GPU' && 'sgpu' || 'mgpu' }}
+        LOG_NAME: ${{ toLower(matrix.framework) }}_${{ matrix.gpu_mode == 'Single-GPU' && 'sgpu' || 'mgpu' }}
         TEST_LEVEL: ${{ github.event.inputs.test_level || (github.ref_name == 'dev' && '3' || '1') }}
         TEST_SGPU: ${{ contains(matrix.gpu_mode, 'Single-GPU') }}
         TEST_MGPU: ${{ contains(matrix.gpu_mode, 'Multi-GPU') }}
