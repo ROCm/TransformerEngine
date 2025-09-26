@@ -327,7 +327,18 @@ else()
   endif()
 
   if(USE_FUSED_ATTN_CK)
-    add_subdirectory(ck_fused_attn ${CMAKE_CURRENT_BINARY_DIR}/ck_fused_attn)
+    if(NOT DEFINED CK_FUSED_ATTN_PATH)
+      set(CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT ${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT} CACHE STRING "ck float to bf16 conversion rounding")
+      add_subdirectory(ck_fused_attn ${CMAKE_CURRENT_BINARY_DIR}/ck_fused_attn)
+    else()
+      # Use CK built during initial TE building/installation
+      # When only need rebuild TE library itself
+      unset(CK_FUSED_ATTN_LIB CACHE)
+      find_library(CK_FUSED_ATTN_LIB NAMES ck_fused_attn PATHS ${CK_FUSED_ATTN_PATH}/lib REQUIRED NO_DEFAULT_PATH)
+      add_library( ck_fused_attn STATIC IMPORTED )
+      set_target_properties( ck_fused_attn PROPERTIES IMPORTED_LOCATION ${CK_FUSED_ATTN_LIB} )
+      target_include_directories(ck_fused_attn INTERFACE ${CK_FUSED_ATTN_PATH}/include)
+    endif()
   endif()
 
   find_package(hip)
