@@ -6,6 +6,7 @@ REALPATH=realpath
 realpath $DIR >/dev/null 2>/dev/null
 test $? -ne 0 && REALPATH=echo
 
+
 : ${TE_PATH:=`$REALPATH $DIR/..`/}
 export TE_PATH
 TEST_DIR=${TE_PATH}tests/
