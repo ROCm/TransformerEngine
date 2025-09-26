@@ -387,7 +387,7 @@ hipError_t ck_attn_varlen_fwd(
     const ck_tile::index_t batch_stride_bias = 0;
     //TODO: randval never used, can we remove it
     const ck_tile::index_t batch_stride_randval = 0;
-    const ck_tile::index_t batch_stride_lse = nhead * max_tokens_q;
+    const ck_tile::index_t batch_stride_lse = 0;
     const ck_tile::index_t batch_stride_o = 0;
 
     return fmha_fwd_args{q_ptr,
