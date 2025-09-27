@@ -183,9 +183,15 @@ class _Linear(torch.autograd.Function):
         # Cast weight to expected dtype
         weightmat = weight
         if not fp8:
+            print("NOT FP8")
             weightmat = cast_if_needed(weightmat, activation_dtype)
         else:
+            print(type(weight.detach()))
+            print(weight.dtype)
+            print(weight.shape)
+            print(weight_quantizer)
             if not isinstance(weight, QuantizedTensor):
+                print("NO INIT WITH FP8")
                 # Configure quantizer
                 if weight_quantizer is not None:
                     columnwise_usage = is_grad_enabled and inp.requires_grad
@@ -207,7 +213,9 @@ class _Linear(torch.autograd.Function):
                     fsdp_group=fsdp_group,
                     create_transpose_cache=keep_fp8_weight_transpose_cache,
                 )
-
+                print(weightmat)
+            else:
+                print("INIT WITH FP8")
         # Cast bias to expected dtype
         bias_dtype = activation_dtype
         if fp8 and activation_dtype == torch.float32:

@@ -36,6 +36,7 @@ from ..distributed import (
 )
 from ..constants import dist_group_type
 from ..tensor import QuantizedTensor, Quantizer
+from ..tensor.fsdp2_float8_tensor import FSDPAGFloat8Tensor
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..utils import get_device_compute_capability
@@ -725,6 +726,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         fp8_enabled = self.fp8 or self.fp8_calibration
         self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
 
+        print("self.fp8: ", self.fp8)
         if self.fp8_parameters or fp8_enabled:
             if (
                 self.fp8_initialized
@@ -741,6 +743,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if self.fp8_parameters and not self.fp8_initialized:
             self.fp8_meta["num_gemms"] = num_gemms
             self.init_fp8_meta_tensors(self.fp8_meta["recipe"])
+            print("HERE 1")
 
         if fp8_enabled:
             # Set FP8 and other FP8 metadata
@@ -753,6 +756,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             # Allocate scales and amaxes
             self.init_fp8_meta_tensors(self.fp8_meta["recipe"])
+            print("HERE 2")
             self.fp8_initialized = True
 
             self.fp8_meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
@@ -780,6 +784,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 assert self.tp_group_initialized, "TP group not initialized."
 
             self.set_activation_dtype(inp)
+            print("PREPARING FORWARD")
             self.init_fp8_metadata(num_gemms=num_gemms)
 
             if self.fp8 and self.sequence_parallel and self.fp8_meta["recipe"].delayed():
@@ -927,6 +932,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 if not self.keep_fp8_weight_transpose_cache:
                     quantizer.columnwise_usage=False
                 param = quantizer(param)
+            if not self.primary_weights_in_fp8 and fp8_meta_index is not None:
+                param = FSDPAGFloat8Tensor(param, module=self, fp8_meta_index=fp8_meta_index)
 
             # Redo parameter wrap in case we broke it above
             # NOTE: Currently this can only be broken when primary weights are in Fp8 but
