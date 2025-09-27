@@ -22,12 +22,13 @@ from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import init_device_mesh
 from contextlib import nullcontext
 from transformer_engine.pytorch import torch_version
+from transformer_engine.pytorch.fp8 import fp8_model_init
 
 class SimpleNet(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
         super(SimpleNet, self).__init__()
-        self.fc1 = te.Linear(input_size, hidden_size)
-        self.fc2 = te.Linear(hidden_size, output_size)
+        self.fc1 = te.Linear(input_size, hidden_size, keep_fp8_weight_transpose_cache=False)
+        self.fc2 = te.Linear(hidden_size, output_size, keep_fp8_weight_transpose_cache=False)
 
     def forward(self, x):
         x = F.relu(self.fc1(x))
@@ -107,18 +108,11 @@ def _train(args):
     fp8_format = Format.HYBRID
     fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=16, amax_compute_algo="max")
 
-    if not args.fp8_init:
-        # Build model context (FP8 init)
-        build_model_context = nullcontext
-        build_model_context_args = {}
-
-        from transformer_engine.pytorch import fp8_model_init
-
-        build_model_context = fp8_model_init
-        build_model_context_args["enabled"] = True
-
+    torch.cuda.memory._record_memory_history(enabled='all', context='all', stacks='all')
+    if args.fp8_init:
+        print("FP8 INIT")
         # Build the model with the specified context
-        with build_model_context(**build_model_context_args):
+        with fp8_model_init(enabled = True):
             model = SimpleNet(args.input_size, args.hidden_size, args.output_size)
     else:
         model = SimpleNet(args.input_size, args.hidden_size, args.output_size)
@@ -156,16 +150,25 @@ def _train(args):
             isinstance(sub_module, sub_module_to_wrap) for sub_module_to_wrap in sub_modules_to_wrap
         ):
             fully_shard(sub_module, mesh=mesh)
-    fully_shard(model, mesh=mesh)
+    fully_shard(model, mesh=mesh, reshard_after_forward=True)
     restore_custom_attrs(model, custom_attrs)
 
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
+    # if LOCAL_RANK==0:
+    #    for name, param in model.named_parameters():
+    #        print("param: ", name, param)
+    #        print("param size: ", name, param.size())
+    #        print("param local size: ", name, param._local_tensor.size())
+    #        print("param local dtype: ", name, param._local_tensor.dtype)
+
     for iteration in range(args.iter):
         # Zero the parameter gradients
+        print(f"ITERATION {iteration}")
         optimizer.zero_grad()
-        input_data = torch.randn(args.batch_size, args.input_size).to(device)
-        output = model(input_data)
+        input_data = torch.randn(args.batch_size, args.input_size, requires_grad=True).to(device)
+        with te.fp8_autocast(enabled=True):
+            output = model(input_data)
         target = torch.randn(args.batch_size, args.output_size).to(device)
         loss = F.mse_loss(output, target)
         loss.backward()
@@ -180,6 +183,16 @@ def _train(args):
     if torch_version() < (2, 6, 0):
         dist.barrier(device_ids=[torch.cuda.current_device()])
     dist.destroy_process_group()
+
+    snapshot = torch.cuda.memory._snapshot()
+
+    import pickle
+    with open('memory_snapshot.pickle', 'wb') as f:
+        pickle.dump(snapshot, f)
+    
+
+    # To disable memory history recording when no longer needed
+    torch.cuda.memory._record_memory_history(enabled=None)
     if LOCAL_RANK == 0:
         print(f"Rank {LOCAL_RANK}: Done...")
     return 0
