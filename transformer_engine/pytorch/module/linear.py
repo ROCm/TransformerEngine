@@ -9,6 +9,8 @@ from typing import Callable, Dict, Optional, Tuple, Union
 from functools import reduce
 from operator import mul as multiply_op
 
+from torch.distributed.fsdp import FSDPModule
+
 import torch
 
 import transformer_engine_torch as tex
@@ -107,6 +109,7 @@ class _Linear(torch.autograd.Function):
         module: torch.nn.Module,
         skip_fp8_weight_update: bool,
         keep_fp8_weight_transpose_cache: bool,
+        is_fsdp2: bool,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
 
@@ -183,15 +186,9 @@ class _Linear(torch.autograd.Function):
         # Cast weight to expected dtype
         weightmat = weight
         if not fp8:
-            print("NOT FP8")
             weightmat = cast_if_needed(weightmat, activation_dtype)
         else:
-            print(type(weight.detach()))
-            print(weight.dtype)
-            print(weight.shape)
-            print(weight_quantizer)
             if not isinstance(weight, QuantizedTensor):
-                print("NO INIT WITH FP8")
                 # Configure quantizer
                 if weight_quantizer is not None:
                     columnwise_usage = is_grad_enabled and inp.requires_grad
@@ -213,9 +210,7 @@ class _Linear(torch.autograd.Function):
                     fsdp_group=fsdp_group,
                     create_transpose_cache=keep_fp8_weight_transpose_cache,
                 )
-                print(weightmat)
-            else:
-                print("INIT WITH FP8")
+
         # Cast bias to expected dtype
         bias_dtype = activation_dtype
         if fp8 and activation_dtype == torch.float32:
@@ -289,7 +284,7 @@ class _Linear(torch.autograd.Function):
                 saved_inputmat = inputmat
 
             # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
-            if inp.requires_grad and keep_fp8_weight_transpose_cache:
+            if inp.requires_grad and keep_fp8_weight_transpose_cache and not is_fsdp2:
                 if isinstance(weightmat, QuantizedTensor):
                     weightmat.update_usage(columnwise_usage=True)
 
@@ -322,12 +317,19 @@ class _Linear(torch.autograd.Function):
                     ctx.weight_object = weight
 
             # TODO(ksivamani): Check memory usage
-            tensors_to_save, tensor_objects = prepare_for_saving(
-                saved_inputmat,
-                weightmat,
-                weight,
-                bias,
-            )
+            if is_fsdp2:
+                tensors_to_save, tensor_objects = prepare_for_saving(
+                    saved_inputmat,
+                    weight,
+                    bias
+                )
+            else:
+                tensors_to_save, tensor_objects = prepare_for_saving(
+                    saved_inputmat,
+                    weightmat,
+                    weight,
+                    bias,
+                )
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
 
@@ -360,6 +362,7 @@ class _Linear(torch.autograd.Function):
             ctx.reduce_and_update_bwd_fp8_tensors = False
             ctx.owns_input = saved_inputmat is not inp
             ctx.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
+            ctx.is_fsdp2 = is_fsdp2
             if ctx.fp8 and requires_grad(inp, weight, bias):
                 _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
@@ -409,9 +412,15 @@ class _Linear(torch.autograd.Function):
                     )
 
             saved_tensors = ctx.saved_tensors
-            inputmat, weight_fp8, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
-                restore_from_saved(ctx.tensor_objects, saved_tensors)
-            )
+            if ctx.is_fsdp2:
+                inputmat, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
+                    restore_from_saved(ctx.tensor_objects, saved_tensors)
+                )
+                weight_fp8 = weight
+            else:
+                inputmat, weight_fp8, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
+                    restore_from_saved(ctx.tensor_objects, saved_tensors)
+                )
             # Delete the references to tensor objects once they've been consumed
             # by the `restore_from_saved` method to construct back the actual tensors.
             ctx.tensor_objects = None
@@ -746,6 +755,7 @@ class _Linear(torch.autograd.Function):
             None,  # module
             None,  # skip_fp8_weight_update
             None,  # keep_fp8_weight_transpose_cache
+            None,  # is_fsdp2
         )
 
 
@@ -1162,6 +1172,8 @@ class Linear(TransformerEngineBaseModule):
             else:
                 linear_fn = _Linear.forward
                 args = [None]
+            
+            is_fsdp2 = isinstance(self, FSDPModule)
             args += (
                 weight_tensor,
                 inp,
@@ -1195,6 +1207,7 @@ class Linear(TransformerEngineBaseModule):
                 self,
                 skip_fp8_weight_update,
                 self.keep_fp8_weight_transpose_cache,
+                is_fsdp2
             )
             out = linear_fn(*args)
         if self.gemm_bias_unfused_add:

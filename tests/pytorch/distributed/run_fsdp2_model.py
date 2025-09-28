@@ -110,7 +110,6 @@ def _train(args):
 
     torch.cuda.memory._record_memory_history(enabled='all', context='all', stacks='all')
     if args.fp8_init:
-        print("FP8 INIT")
         # Build the model with the specified context
         with fp8_model_init(enabled = True):
             model = SimpleNet(args.input_size, args.hidden_size, args.output_size)
@@ -144,14 +143,14 @@ def _train(args):
         assert False
 
     # Apply FSDP/HSDP
-    custom_attrs = save_custom_attrs(model)
+    # custom_attrs = save_custom_attrs(model)
     for sub_module in model.modules():
         if any(
             isinstance(sub_module, sub_module_to_wrap) for sub_module_to_wrap in sub_modules_to_wrap
         ):
             fully_shard(sub_module, mesh=mesh)
     fully_shard(model, mesh=mesh, reshard_after_forward=True)
-    restore_custom_attrs(model, custom_attrs)
+    # restore_custom_attrs(model, custom_attrs)
 
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
@@ -164,7 +163,6 @@ def _train(args):
 
     for iteration in range(args.iter):
         # Zero the parameter gradients
-        print(f"ITERATION {iteration}")
         optimizer.zero_grad()
         input_data = torch.randn(args.batch_size, args.input_size, requires_grad=True).to(device)
         with te.fp8_autocast(enabled=True):

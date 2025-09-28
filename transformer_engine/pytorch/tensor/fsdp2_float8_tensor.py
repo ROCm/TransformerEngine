@@ -5,7 +5,6 @@ from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 import torch.utils._pytree as pytree
 
 
-
 _ops_to_preserve_subclass = {
     torch.ops.aten.empty_like.default,
     torch.ops.aten.new_zeros.default,
@@ -24,7 +23,7 @@ _ops_to_preserve_subclass = {
 class FSDPAGFloat8Tensor(torch.Tensor):
 
     @staticmethod
-    def __new__(cls, elem: torch.Tensor, *, module: nn.Module = None, fp8_meta_index: str = None):
+    def __new__(cls, elem: torch.Tensor, **kwargs):
         # Build an "empty" wrapper with the same meta as elem
         return torch.Tensor._make_wrapper_subclass(
             cls,
@@ -43,13 +42,16 @@ class FSDPAGFloat8Tensor(torch.Tensor):
         *,
         module: nn.Module,
         fp8_meta_index: str,
+        keep_fp8_weight_transpose_cache: bool,
     ):
         #The *real* underlying tensor
         self._elem = tensor
-        # Where quantizers live:
+        # Where quantizers live
         self._module = module
         # Which quantizer to use within module.quantizers["scaling_fwd"][idx]
         self._fp8_meta_index = fp8_meta_index
+
+        self._keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
 
     
     def __repr__(self):
@@ -67,16 +69,17 @@ class FSDPAGFloat8Tensor(torch.Tensor):
             """
             # We only carry the one inner tensor.
             # We store (module, fp8_meta_index) as metadata to reconstruct.
-            return ["_elem"], (self._module, self._fp8_meta_index)
+            return ["_elem"], (self._module, self._fp8_meta_index, self._keep_fp8_weight_transpose_cache)
 
     
     @staticmethod
     def __tensor_unflatten__(inner_tensors, flatten_spec, outer_size, outer_stride):
-        module, fp8_meta_index = flatten_spec
+        module, fp8_meta_index, keep_fp8_weight_transpose_cache = flatten_spec
         return FSDPAGFloat8Tensor(
             inner_tensors["_elem"],
             module=module,
             fp8_meta_index=fp8_meta_index,
+            keep_fp8_weight_transpose_cache=keep_fp8_weight_transpose_cache
         )
 
     @classmethod
@@ -89,16 +92,16 @@ class FSDPAGFloat8Tensor(torch.Tensor):
             t = args[0]
             assert isinstance(t, cls), f"Unexpected detach input type: {type(t)}"
             detached = t._elem.detach()
-            return cls(detached, module=t._module, fp8_meta_index=t._fp8_meta_index)
+            return cls(detached, module=t._module, fp8_meta_index=t._fp8_meta_index, keep_fp8_weight_transpose_cache=t._keep_fp8_weight_transpose_cache)
 
         # Unwrap only our subclass; capture shared metadata for rewrapping
-        meta: Optional[tuple[nn.Module, str]] = None
+        meta: Optional[tuple[nn.Module, str, bool]] = None
 
         def unwrap(x):
             nonlocal meta
             if isinstance(x, cls):
                 if meta is None:
-                    meta = (x._module, x._fp8_meta_index)
+                    meta = (x._module, x._fp8_meta_index, x._keep_fp8_weight_transpose_cache)
                 else:
                     # Require consistency when multiple wrappers are involved in a single op
                     # same_mod = (meta[0] is x._module)
@@ -120,8 +123,8 @@ class FSDPAGFloat8Tensor(torch.Tensor):
 
         def rewrap(x):
             if isinstance(x, torch.Tensor):
-                mod, idx = meta
-                return cls(x, module=mod, fp8_meta_index=idx)
+                mod, idx, keep_transpose = meta
+                return cls(x, module=mod, fp8_meta_index=idx, keep_fp8_weight_transpose_cache=keep_transpose)
             return x
 
         out = pytree.tree_map_only(torch.Tensor, rewrap, out)
@@ -130,15 +133,16 @@ class FSDPAGFloat8Tensor(torch.Tensor):
     # Must return (list_of_tensors_to_all_gather, user_metadata)
     def fsdp_pre_all_gather(self, mesh):
         # Use the actual data
-        print("BEFORE ALL GATHER!! ", self._elem.shape)
         if not self._module.fp8:
             self._module.init_fp8_metadata()
         base = self._elem
         quantizer = self._module.quantizers["scaling_fwd"][self._fp8_meta_index]
+        if not self._keep_fp8_weight_transpose_cache:
+            quantizer.columnwise_usage=False
         sharded_fp8_tensor = quantizer(base)
+        transpose_to_send = sharded_fp8_tensor._transpose if sharded_fp8_tensor._transpose else torch.empty(0, dtype=base.dtype, device=base.device)
+        return (sharded_fp8_tensor._data, transpose_to_send,), (sharded_fp8_tensor._scale_inv, base.requires_grad,)
         
-        return (sharded_fp8_tensor._data,), (sharded_fp8_tensor._scale_inv, base.requires_grad)
-
     def fsdp_post_all_gather(
         self,
         all_gather_outputs: Tuple[torch.Tensor, ...],
@@ -148,7 +152,7 @@ class FSDPAGFloat8Tensor(torch.Tensor):
         out: Optional[torch.Tensor] = None,
     ):
         # Recompose the Float8Tensor from the wire format
-        (data,) = all_gather_outputs
+        (data, data_transpose) = all_gather_outputs
         (scale_inv, requires_grad) = metadata
 
         # Retrieve the same quantizer you used in pre_all_gather
@@ -170,7 +174,7 @@ class FSDPAGFloat8Tensor(torch.Tensor):
             data=data,
             fp8_scale_inv=scale_inv,
             fp8_dtype=quantizer.dtype,
-            data_transpose=None,
+            data_transpose=None if data_transpose.numel() == 0 else data_transpose,
             quantizer=quantizer,
         )
         return out_fp8, all_gather_outputs
