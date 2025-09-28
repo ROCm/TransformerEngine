@@ -10,6 +10,8 @@ from functools import reduce
 from operator import mul as multiply_op
 import warnings
 
+from torch.distributed.fsdp import FSDPModule
+
 import torch
 
 import transformer_engine_torch as tex
@@ -121,6 +123,7 @@ class _Linear(torch.autograd.Function):
         symmetric_ar_type: str,
         debug: Optional[bool] = False,
         keep_fp8_weight_transpose_cache: bool = True,
+        is_fsdp2: bool,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
 
@@ -360,8 +363,8 @@ class _Linear(torch.autograd.Function):
                     assert not isinstance(inputmat, QuantizedTensorBase)
                 saved_inputmat = inputmat
 
-            # Weight with column-wise usage is needed for dgrad GEMM.
-            if inp.requires_grad and keep_fp8_weight_transpose_cache:
+            # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
+            if inp.requires_grad and keep_fp8_weight_transpose_cache and not is_fsdp2:
                 if isinstance(weightmat, QuantizedTensorBase):
                     weightmat.update_usage(columnwise_usage=True)
 
@@ -391,12 +394,19 @@ class _Linear(torch.autograd.Function):
                     ctx.weight_object = weight
 
             # TODO(ksivamani): Check memory usage
-            tensors_to_save, tensor_objects = prepare_for_saving(
-                saved_inputmat,
-                weightmat,
-                weight,
-                bias,
-            )
+            if is_fsdp2:
+                tensors_to_save, tensor_objects = prepare_for_saving(
+                    saved_inputmat,
+                    weight,
+                    bias
+                )
+            else:
+                tensors_to_save, tensor_objects = prepare_for_saving(
+                    saved_inputmat,
+                    weightmat,
+                    weight,
+                    bias,
+                )
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
 
@@ -433,6 +443,7 @@ class _Linear(torch.autograd.Function):
 
             ctx.owns_input = saved_inputmat is not inp
             ctx.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
+            ctx.is_fsdp2 = is_fsdp2
             if ctx.fp8 and requires_grad(inp, weight, bias):
                 _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
@@ -457,10 +468,15 @@ class _Linear(torch.autograd.Function):
 
         with torch.cuda.nvtx.range("_Linear_backward"):
             saved_tensors = ctx.saved_tensors
-            inputmat, weight_fp8, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
-                restore_from_saved(ctx.tensor_objects, saved_tensors)
-            )
-
+            if ctx.is_fsdp2:
+                inputmat, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
+                    restore_from_saved(ctx.tensor_objects, saved_tensors)
+                )
+                weight_fp8 = weight
+            else:
+                inputmat, weight_fp8, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
+                    restore_from_saved(ctx.tensor_objects, saved_tensors)
+                )
             # Delete the references to tensor objects once they've been consumed
             # by the `restore_from_saved` method to construct back the actual tensors.
             ctx.tensor_objects = None
@@ -900,6 +916,7 @@ class _Linear(torch.autograd.Function):
             None,  # symmetric_ar_type
             None,  # debug
             None,  # keep_fp8_weight_transpose_cache
+            None,  # is_fsdp2
         )
 
 
@@ -1373,6 +1390,8 @@ class Linear(TransformerEngineBaseModule):
             else:
                 linear_fn = _Linear.forward
                 args = [None]
+            
+            is_fsdp2 = isinstance(self, FSDPModule)
             args += (
                 weight_tensor,
                 inp,
@@ -1410,6 +1429,7 @@ class Linear(TransformerEngineBaseModule):
                 self.symmetric_ar_type,
                 debug,
                 self.keep_fp8_weight_transpose_cache,
+                is_fsdp2
             )
             out = linear_fn(*args)
         if self.gemm_bias_unfused_add:
