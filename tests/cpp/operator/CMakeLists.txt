@@ -13,6 +13,7 @@ list(APPEND test_cuda_sources
             test_cast_mxfp8_gated_swiglu.cu
             test_qdq.cu
             test_cast_mxfp8.cu
+               test_cast_nvfp4_transpose.cu
             test_dequantize_mxfp8.cu
             test_transpose.cu
             test_cast_transpose.cu
@@ -70,6 +71,13 @@ else()
   add_executable(test_operator ${test_hip_sources})
 endif()
 
+# Add profiling and debug flags for CUDA compilation
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -lineinfo")                   # Generate line info for device code  
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -g")                          # Add debug symbols for host code
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --ptxas-options=-v")          # Add info about registers usage
+# Note: Using -lineinfo instead of -G to avoid conflicts and get line mapping
+
+# Find required packages
 find_package(OpenMP REQUIRED)
 if(USE_CUDA)
   list(APPEND test_operator_LINKER_LIBS CUDA::cudart GTest::gtest_main ${TE_LIB} CUDA::nvrtc CUDNN::cudnn)

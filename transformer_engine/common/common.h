@@ -54,7 +54,13 @@ inline bool is_delayed_tensor_scaling(const NVTEScalingMode &mode) {
   return mode == NVTE_DELAYED_TENSOR_SCALING;
 }
 
+inline bool is_nvfp4_scaling(const NVTEScalingMode &mode) { return mode == NVTE_NVFP4_1D_SCALING; }
+
+inline bool is_mxfp8_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }
+
 inline bool is_mxfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }
+
+inline bool is_nvfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_NVFP4_1D_SCALING; }
 
 inline size_t product(const std::vector<size_t> &shape, const size_t begin, const size_t end) {
   NVTE_CHECK(begin <= end && end <= shape.size(), "Attempted to access entries ", begin, " to ",
@@ -114,6 +120,7 @@ struct Tensor {
   SimpleTensor data;
   SimpleTensor columnwise_data;
   SimpleTensor amax;
+  SimpleTensor columnwise_amax;
   SimpleTensor scale;
   SimpleTensor scale_inv;
   SimpleTensor columnwise_scale_inv;
@@ -125,6 +132,7 @@ struct Tensor {
       : data(),
         columnwise_data(),
         amax(nullptr, {1}, DType::kFloat32),
+        columnwise_amax(nullptr, {1}, DType::kFloat32),
         scale(nullptr, {1}, DType::kFloat32),
         scale_inv(nullptr, {1}, DType::kFloat32),
         columnwise_scale_inv(nullptr, {1}, DType::kFloat32),
@@ -135,6 +143,7 @@ struct Tensor {
     data.clear();
     columnwise_data.clear();
     amax.clear();
+    columnwise_amax.clear();
     scale.clear();
     scale_inv.clear();
     columnwise_scale_inv.clear();
@@ -180,6 +189,7 @@ struct Tensor {
      * https://gcc.gnu.org/bugzilla/show_bug.cgi?id=109569).
      */
     switch (scaling_mode) {
+      case NVTE_NVFP4_1D_SCALING:
       case NVTE_DELAYED_TENSOR_SCALING:
         if (!has_data() && has_columnwise_data()) {
           std::vector<size_t> ret;
@@ -195,7 +205,6 @@ struct Tensor {
         }
         break;
       case NVTE_MXFP8_1D_SCALING:
-      case NVTE_FWD_NVFP4_BWD_MXFP8_SCALING:
         if (!has_data() && has_columnwise_data()) {
           return columnwise_data.shape;
         } else {
@@ -267,12 +276,18 @@ struct QuantizationConfig {
   NVTETensor noop_tensor = nullptr;
   Float8BlockScaleTensorFormat float8_block_scale_tensor_format =
       Float8BlockScaleTensorFormat::GEMM_READY;
+  NVTETensor rng_state = nullptr;
+  bool nvfp4_2d_quantization = false;
+  bool stochastic_rounding = false;
 
   static constexpr size_t attr_sizes[] = {
-      sizeof(bool),                         // force_pow_2_scales
-      sizeof(float),                        // amax_epsilon
-      sizeof(NVTETensor),                   // noop_tensor
-      sizeof(Float8BlockScaleTensorFormat)  // float8_block_scale_tensor_format
+      sizeof(bool),                          // force_pow_2_scales
+      sizeof(float),                         // amax_epsilon
+      sizeof(NVTETensor),                    // noop_tensor
+      sizeof(Float8BlockScaleTensorFormat),  // float8_block_scale_tensor_format
+      sizeof(NVTETensor),                    // rng_seed and offset
+      sizeof(bool),                          // nvfp4_2d_quantization
+      sizeof(bool)                           // stochastic_rounding
   };
 };
 
@@ -322,6 +337,8 @@ using fp8e8m0 = __nv_fp8_e8m0;
 #endif // CUDA_VERSION >= 12080
 #if FP4_TYPE_SUPPORTED
 using fp4e2m1 = __nv_fp4_e2m1;
+using fp4e2m1x2 = __nv_fp4x2_e2m1;
+using fp4e2m1x4 = __nv_fp4x4_e2m1;
 #endif //FP4_TYPE_SUPPORTED
 #else
 using bf16 = hip_bfloat16;
@@ -370,6 +387,7 @@ struct TypeExtrema;
 template <>
 struct TypeExtrema<fp4e2m1> {
   static constexpr float max = 6.0f;
+  static constexpr float max_inverse = 1.0 / max;
 };
 #endif
 
@@ -382,11 +400,13 @@ struct TypeExtrema<fp8e4m3> {
 #else
   static float maxNorm;
 #endif
+  static constexpr float max_inverse = 1.0 / max;
 };
 
 template <>
 struct TypeExtrema<fp8e5m2> {
   static constexpr float max = 57344.0f;
+  static constexpr float max_inverse = 1.0 / max;
 };
 
 template <>
@@ -600,6 +620,18 @@ struct TypeInfo {
       NVTE_ERROR("Invalid type.");                                   \
   }
 
+// Add a pack_size argument to select the packed type for FP4
+#define TRANSFORMER_ENGINE_TYPE_SWITCH_FP4x2_ONLY(dtype, pack_size, type, ...) \
+  switch (dtype) {                                                             \
+    using namespace transformer_engine;                                        \
+    case DType::kFloat4E2M1: {                                                 \
+      using type = __nv_fp4x2_storage_t;                                       \
+      { __VA_ARGS__ }                                                          \
+    } break;                                                                   \
+    default:                                                                   \
+      NVTE_ERROR("Invalid type.");                                             \
+  }
+
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(dtype, type, ...) \
   switch (dtype) {                                               \
     using namespace transformer_engine;                          \
@@ -764,10 +796,11 @@ void checkCuDriverContext(CUstream stream);
 CUtensorMapDataType get_CUtensorMapDataType(DType dtype);
 
 // Set up parameters to create TMA descriptor.
-void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
-                          const uint64_t globalY, const uint64_t globalX, const uint32_t shmemY,
-                          const uint32_t shmemX, const uint32_t stride_elems,
-                          const uint32_t offset_elems, const size_t type_num_bits);
+void create_2D_tensor_map(
+    CUtensorMap &tensorMap, const SimpleTensor &tensor, const uint64_t globalY,
+    const uint64_t globalX, const uint32_t shmemY, const uint32_t shmemX,
+    const uint32_t stride_elems, const uint32_t offset_elems, const size_t type_num_bits,
+    const CUtensorMapSwizzle swizzle = CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE);
 #endif //#ifdef __HIP_PLATFORM_AMD__
 
 bool is_supported_by_CC_100();

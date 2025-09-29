@@ -86,6 +86,7 @@ void compute_ref(const ProcessingMethod processing_method,
             // Cache computations
             for (size_t i = i_min; i < i_max; ++i) {
                 for (size_t j = j_min; j < j_max; ++j) {
+
                     const size_t idx = i * cols + j;
                     const size_t cache_idx = (i - i_min) * tile_size_X + (j - j_min);
 

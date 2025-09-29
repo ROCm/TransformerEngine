@@ -29,6 +29,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8CurrentScalingQuantizer,
 )
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.utils import is_bf16_compatible, is_fp8_fnuz
 import transformer_engine_torch as tex
@@ -36,17 +37,20 @@ import transformer_engine_torch as tex
 # Import utility functions
 _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
-from utils import dtype_tols, make_recipe
+from utils import dtype_tols, make_recipe, quantization_tols
 
 
 # Check what quantization schemes are supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+nvfp4_available, reason_for_no_nvfp4 = FP8GlobalStateManager.is_mxfp8_available()
 quantization_list: list[Optional[str]] = [None]
 if fp8_available:
     quantization_list.extend(("fp8_delayed_scaling", "fp8_current_scaling"))
 if mxfp8_available:
     quantization_list.append("mxfp8")
+if nvfp4_available:
+    quantization_list.append("nvfp4")
 
 
 @functools.cache
@@ -117,6 +121,14 @@ def make_reference_and_test_tensors(
         test = quantizer(test)
     elif quantization == "mxfp8":
         test = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)(test)
+    elif quantization == "nvfp4":
+        test = NVFP4Quantizer(
+            with_rht=False,
+            with_post_rht_amax=False,
+            with_2d_quantization=False,
+            stochastic_rounding=False,
+            with_random_sign_mask=False,
+        )(test)
     else:
         raise ValueError(f"Unsupported quantization scheme ({quantization})")
     if isinstance(test, QuantizedTensor) and not test_is_quantized:
@@ -439,7 +451,7 @@ def _test_basic_linear(
     if dtype == torch.float32:
         tols = dtype_tols(torch.float16)  # TF32 GEMM
     if quantized_compute:
-        tols = dtype_tols(tex.DType.kFloat8E4M3)
+        tols = quantization_tols(quantization)
 
     # Check results
     y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -611,7 +623,7 @@ def _test_linear(
     if dtype == torch.float32:
         tols = dtype_tols(torch.float16)  # TF32 GEMM
     if quantized_compute:
-        tols = dtype_tols(tex.DType.kFloat8E4M3)
+        tols = quantization_tols(quantization)
 
     # Check results
     y_test = y_test.to(dtype=torch.float64, device="cpu")
