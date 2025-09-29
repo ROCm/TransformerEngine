@@ -158,6 +158,14 @@ class FSDPAGFloat8Tensor(torch.Tensor):
         # Retrieve the same quantizer you used in pre_all_gather
         quantizer = self._module.quantizers["scaling_fwd"][self._fp8_meta_index]
 
+        if out is not None:
+            # If FSDP provided a pre-allocated output (e.g., a Float8Tensor),
+            # fill in the missing bits and still return the expected values.
+            assert isinstance(out, Float8Tensor), f"Unexpected out type: {type(out)}"
+            out._scale_inv = scale_inv
+            # Depending on FSDP's expected return type, return (materialized_param, aux)
+            return out, all_gather_outputs
+
         # Otherwise, construct a new Float8Tensor that wraps the gathered data
         out_fp8 = Float8Tensor(
             shape=data.shape,
