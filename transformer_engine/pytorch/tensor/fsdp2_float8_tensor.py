@@ -140,7 +140,7 @@ class FSDPAGFloat8Tensor(torch.Tensor):
         if not self._keep_fp8_weight_transpose_cache:
             quantizer.columnwise_usage=False
         sharded_fp8_tensor = quantizer(base)
-        transpose_to_send = sharded_fp8_tensor._transpose if sharded_fp8_tensor._transpose else torch.empty(0, dtype=base.dtype, device=base.device)
+        transpose_to_send = sharded_fp8_tensor._transpose if self._keep_fp8_weight_transpose_cache else torch.empty(0, dtype=base.dtype, device=base.device)
         return (sharded_fp8_tensor._data, transpose_to_send,), (sharded_fp8_tensor._scale_inv, base.requires_grad,)
         
     def fsdp_post_all_gather(

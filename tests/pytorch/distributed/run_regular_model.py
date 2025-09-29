@@ -1,4 +1,6 @@
 #!/usr/bin/python3
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.#
+# See LICENSE for license information.
 
 import os
 import sys
@@ -58,9 +60,20 @@ def _train(args):
     model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
-    for iteration in range(args.iter):
-        optimizer.zero_grad()
+    from pathlib import Path
+
+    input_path = Path("shared_input.pt")
+    if input_path.exists():
+        input_data = torch.load(input_path).to(device)
+    else:
         input_data = torch.randn(args.batch_size, args.input_size, requires_grad=True).to(device)
+        torch.save(input_data.cpu(), input_path)
+        print("Generated and saved shared input tensor.")
+
+    out_tensors = []
+    for iteration in range(args.iter):
+        print(f"Iteration {iteration}")
+        optimizer.zero_grad()
         with te.fp8_autocast(enabled=True):
             output = model(input_data)
         target = torch.randn(args.batch_size, args.output_size).to(device)
@@ -68,6 +81,11 @@ def _train(args):
         loss.backward()
         optimizer.step()
         print(f"Iteration {iteration} completed.")
+        for p in model.parameters():
+                if p.requires_grad:
+                    out_tensors.append(p.grad)
+    out_tensors.extend([output, input_data.grad])
+    torch.save(out_tensors, "all_iters_regular.pt")
 
     # Save memory snapshot
     snapshot = torch.cuda.memory._snapshot()
