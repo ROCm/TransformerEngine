@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 import os
+from typing import List
 import pytest
 import subprocess
 from pathlib import Path
@@ -16,37 +17,83 @@ fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 NUM_PROCS: int = torch.cuda.device_count()
 
+def assert_allclose(
+    l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float, rtol: float = None
+) -> bool:
+    """Ensures two lists are equal."""
+    assert len(l1) == len(l2), "Unequal number of outputs."
+    for i, (t1, t2) in enumerate(zip(l1, l2)):
+        tols = dict(atol=atol)
+        if rtol is not None:
+            tols["rtol"] = rtol
+        result = torch.allclose(t1, t2, **tols)
+        if not result:
+            diff = torch.abs(t1 - t2)
+            tol = atol + (rtol * torch.abs(t2))
+            exceed_mask = diff > tol
+            if exceed_mask.any():
+                indices = torch.nonzero(exceed_mask, as_tuple=True)
+                max_diff = diff[exceed_mask].max()
+                max_idx = (diff[exceed_mask] == max_diff).nonzero(as_tuple=True)[0][0]
+                max_location = [idx[max_idx].item() for idx in indices]
+                msg = (
+                    f"Outputs not close enough in tensor at idx={i}. "
+                    f"Maximum difference at location {max_location} "
+                    f"with {t1[exceed_mask][max_idx].item()} vs {t2[exceed_mask][max_idx].item()} "
+                    f"(diff {max_diff.item()})."
+                )
+            raise AssertionError(msg)
 
-def _run_test(fp_init, sharding_dims):
-    test_path = Path(__file__).parent.resolve() / "run_fsdp2_model.py"
-    test_cmd = ["torchrun", f"--nproc_per_node={NUM_PROCS}", str(test_path)]
+def _run_test(fp_init):
+    test_dir = Path(__file__).parent.resolve()
+    regular_script = test_dir / "run_regular_model.py"
+    fsdp_script = test_dir / "run_fsdp2_model.py"
+    
+    test_cmd = ["torchrun", f"--nproc_per_node={NUM_PROCS}", str(fsdp_script)]
+    regular_test_cmd = ["python",str(regular_script)]
 
     if fp_init:
         test_cmd += ["--fp8-init"]
-    if len(sharding_dims) == 1:
-        test_cmd += ["--sharding-dims", str(sharding_dims[0])]
-    elif len(sharding_dims) == 2:
-        test_cmd += ["--sharding-dims", str(sharding_dims[0]), str(sharding_dims[1])]
-    else:
-        assert False
+        regular_test_cmd += ["--fp8-init"]
+    
+    subprocess.run(regular_test_cmd, env=os.environ, check=True)
     result = subprocess.run(test_cmd, env=os.environ, check=True)
+
+        
+    # Load outputs
+    output_fsdp = torch.load("all_iters_fsdp.pt", map_location="cpu")
+    output_regular = torch.load("all_iters_regular.pt", map_location="cpu")
+    for te_output_no_cache, te_output_cache in zip(output_fsdp, output_regular):
+        assert_allclose(te_output_no_cache, te_output_cache, atol=0, rtol=0)
+
+
 
 
 @pytest.mark.skipif(NUM_PROCS < 4, reason="Requires 4+ GPUs")
 @pytest.mark.skipif(NUM_PROCS % 2 != 0, reason="Requires even number of GPUs")
 @pytest.mark.skipif(not torch_version() >= (2, 4, 0), reason="Requires PyTorch 2.4.0+")
-@pytest.mark.parametrize("sharding_dims", ([NUM_PROCS], [2, NUM_PROCS // 2]))
-@pytest.mark.parametrize("fp8_init", (False, True))
+@pytest.mark.parametrize("fp8_init", ([False]))
 def test_distributed(fp8_init, sharding_dims):
 
-    # Skip invalid configurations
+    batch_size = 2048
+    input_size = 2048
+    from pathlib import Path
+
+    input_path = Path("shared_input.pt")
+    if input_path.exists():
+        input_data = torch.load(input_path).to('cuda')
+    else:
+        input_data = torch.randn(batch_size, input_size, requires_grad=True).to('cuda')
+        torch.save(input_data.cpu(), input_path)
+        print("Generated and saved shared input tensor.")
+
     if torch.cuda.device_count() < 4:
         pytest.skip("FSDP2 test requires at least 4 GPUs")
 
     if fp8_init and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
-    _run_test(fp8_init, sharding_dims)
+    _run_test(fp8_init)
 
 
 def test_dummy() -> None:

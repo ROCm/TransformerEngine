@@ -27,8 +27,8 @@ from transformer_engine.pytorch.fp8 import fp8_model_init
 class SimpleNet(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
         super(SimpleNet, self).__init__()
-        self.fc1 = te.Linear(input_size, hidden_size, keep_fp8_weight_transpose_cache=False)
-        self.fc2 = te.Linear(hidden_size, output_size, keep_fp8_weight_transpose_cache=False)
+        self.fc1 = te.Linear(input_size, hidden_size, use_fsdp2=True)
+        self.fc2 = te.Linear(hidden_size, output_size, use_fsdp2=True)
 
     def forward(self, x):
         x = F.relu(self.fc1(x))
@@ -63,6 +63,16 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument(
         "--iter", type=int, default=10, help="Number of iterations for forward pass"
     )
+    parser.add_argument('--profile', action='store_true',
+                       help='Enable pytorch profiling.')
+    parser.add_argument('--profile-step-start', type=int, default=6,
+                       help='Global step to start profiling.')
+    parser.add_argument('--profile-step-end', type=int, default=7,
+                       help='Global step to stop profiling.')
+    parser.add_argument('--profile-ranks', nargs='+', type=int, default=[0],
+                       help='Global ranks to profile.')
+    parser.add_argument('--tensorboard-dir', type=str, default='./fsdp2_tensorboard',
+                       help='Write TensorBoard logs to this directory.')
     parser.add_argument("--seed", type=int, default=42, help="RNG seed.")
     # Adding hsdp_dim as a list argument, comma-separated
     parser.add_argument(
@@ -161,10 +171,43 @@ def _train(args):
     #        print("param local size: ", name, param._local_tensor.size())
     #        print("param local dtype: ", name, param._local_tensor.dtype)
 
+    from pathlib import Path
+
+    input_path = Path("shared_input.pt")
+    if input_path.exists():
+        input_data = torch.load(input_path).to(device)
+    else:
+        input_data = torch.randn(args.batch_size, args.input_size, requires_grad=True).to(device)
+        torch.save(input_data.cpu(), input_path)
+        print("Generated and saved shared input tensor.")
+    
+    out_tensors = []
+    prof = None
+    if (
+        args.profile
+        and torch.distributed.get_rank() in args.profile_ranks
+    ):
+        prof = torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            schedule=torch.profiler.schedule(
+                wait=max(args.profile_step_start - 1, 0),
+                warmup=1 if args.profile_step_start > 0 else 0,
+                active=args.profile_step_end - args.profile_step_start,
+                repeat=1,
+            ),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(args.tensorboard_dir),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+        )
+        prof.start()
     for iteration in range(args.iter):
+
+        if args.profile and torch.distributed.get_rank() in args.profile_ranks:
+            prof.step()
+
         # Zero the parameter gradients
         optimizer.zero_grad()
-        input_data = torch.randn(args.batch_size, args.input_size, requires_grad=True).to(device)
         with te.fp8_autocast(enabled=True):
             output = model(input_data)
         target = torch.randn(args.batch_size, args.output_size).to(device)
@@ -173,6 +216,19 @@ def _train(args):
         optimizer.step()
         if LOCAL_RANK == 0:
             print(f"Rank {LOCAL_RANK}: Iteration {iteration} completed.")
+            for p in model.parameters():
+                if p.requires_grad:
+                    out_tensors.append(p.grad)
+    if (
+        args.profile
+        and iteration == args.profile_step_end
+        and torch.distributed.get_rank() in args.profile_ranks
+    ):
+        prof.stop()
+
+    if LOCAL_RANK == 0:
+        out_tensors.extend([output, input_data.grad])
+        torch.save(out_tensors, "all_iters_fsdp.pt")
 
     # NOTE: In PyTorch < 2.6 there’s a teardown race where one rank may call
     # destroy_process_group() while other ranks still have in-flight NCCL ops,

@@ -109,7 +109,7 @@ class _Linear(torch.autograd.Function):
         module: torch.nn.Module,
         skip_fp8_weight_update: bool,
         keep_fp8_weight_transpose_cache: bool,
-        is_fsdp2: bool,
+        use_fsdp2: bool,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
 
@@ -284,7 +284,7 @@ class _Linear(torch.autograd.Function):
                 saved_inputmat = inputmat
 
             # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
-            if inp.requires_grad and keep_fp8_weight_transpose_cache and not is_fsdp2:
+            if inp.requires_grad and keep_fp8_weight_transpose_cache and not use_fsdp2:
                 if isinstance(weightmat, QuantizedTensor):
                     weightmat.update_usage(columnwise_usage=True)
 
@@ -317,7 +317,7 @@ class _Linear(torch.autograd.Function):
                     ctx.weight_object = weight
 
             # TODO(ksivamani): Check memory usage
-            if is_fsdp2:
+            if use_fsdp2:
                 tensors_to_save, tensor_objects = prepare_for_saving(
                     saved_inputmat,
                     weight,
@@ -362,7 +362,7 @@ class _Linear(torch.autograd.Function):
             ctx.reduce_and_update_bwd_fp8_tensors = False
             ctx.owns_input = saved_inputmat is not inp
             ctx.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
-            ctx.is_fsdp2 = is_fsdp2
+            ctx.use_fsdp2 = use_fsdp2
             if ctx.fp8 and requires_grad(inp, weight, bias):
                 _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
@@ -412,7 +412,7 @@ class _Linear(torch.autograd.Function):
                     )
 
             saved_tensors = ctx.saved_tensors
-            if ctx.is_fsdp2:
+            if ctx.use_fsdp2:
                 inputmat, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
                     restore_from_saved(ctx.tensor_objects, saved_tensors)
                 )
@@ -755,7 +755,7 @@ class _Linear(torch.autograd.Function):
             None,  # module
             None,  # skip_fp8_weight_update
             None,  # keep_fp8_weight_transpose_cache
-            None,  # is_fsdp2
+            None,  # use_fsdp2
         )
 
 
@@ -867,6 +867,7 @@ class Linear(TransformerEngineBaseModule):
         ub_bulk_wgrad: bool = False,
         ub_name: Optional[str] = None,
         keep_fp8_weight_transpose_cache: bool = True,
+        use_fsdp2: bool = False
     ) -> None:
         super().__init__()
 
@@ -880,6 +881,7 @@ class Linear(TransformerEngineBaseModule):
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
         self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
+        self.use_fsdp2 = use_fsdp2
 
         if device == "meta":
             assert parameters_split is None, "Cannot split module parameters on 'meta' device."
@@ -1173,7 +1175,6 @@ class Linear(TransformerEngineBaseModule):
                 linear_fn = _Linear.forward
                 args = [None]
             
-            is_fsdp2 = isinstance(self, FSDPModule)
             args += (
                 weight_tensor,
                 inp,
@@ -1207,7 +1208,7 @@ class Linear(TransformerEngineBaseModule):
                 self,
                 skip_fp8_weight_update,
                 self.keep_fp8_weight_transpose_cache,
-                is_fsdp2
+                self.use_fsdp2
             )
             out = linear_fn(*args)
         if self.gemm_bias_unfused_add:

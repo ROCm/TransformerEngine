@@ -425,7 +425,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fsdp_group = None
         self._fp8_workspaces: Dict[str, QuantizedTensor] = {}
         self.activation_dtype: Optional[torch.dtype] = None,
-        self.keep_fp8_weight_transpose_cache: bool = True
+        self.keep_fp8_weight_transpose_cache: bool = True,
+        self.use_fsdp2 = False
 
     # Names of attributes that can be set quickly (see __setattr__
     # method)
@@ -716,6 +717,29 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return None
         return fp8_params
 
+    def _create_fsdp2_amax_group(self):  
+        """Create FSDP2-specific distributed group for amax all-gather operations."""  
+        import torch.distributed as dist  
+        
+        if not dist.is_initialized():  
+            return None  
+        
+        # Get the current FSDP group from the module if available  
+        if hasattr(self, 'fsdp_group') and self.fsdp_group is not None:  
+            # Use the existing FSDP group for amax reduction  
+            return self.fsdp_group  
+        
+        # Fallback to data parallel group or world group  
+        world_size = dist.get_world_size()  
+        if world_size == 1:  
+            return None  
+        
+        # Create a new group with all ranks (or subset based on your FSDP strategy)  
+        ranks = list(range(world_size))  
+        amax_group = dist.new_group(ranks)  
+        
+        return amax_group
+
     # This routine is shared across FP8 and FP8_calibration paths so should not actually
     # assume FP8 execution.
     def init_fp8_metadata(self, num_gemms: int = 1) -> None:
@@ -741,6 +765,19 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         if self.fp8_parameters and not self.fp8_initialized:
             self.fp8_meta["num_gemms"] = num_gemms
+            if self.use_fsdp2:  
+                # Create a dedicated group for amax all-gather operations  
+                # This would typically be the same as your FSDP data parallel group  
+                amax_group = self._create_fsdp2_amax_group()  # You'd implement this  
+                self.fp8_meta["fp8_group"] = amax_group
+                self.fp8_meta["recipe"].reduce_amax = True
+                FP8GlobalStateManager.fp8_autocast_enter(  
+                    enabled=FP8GlobalStateManager.is_fp8_enabled(),  
+                    calibrating=FP8GlobalStateManager.is_fp8_calibration(),  
+                    fp8_recipe=self.fp8_meta["recipe"],  
+                    fp8_group=self.fp8_meta["fp8_group"],  
+                    _graph=FP8GlobalStateManager.fp8_graph_capturing(),
+                )
             self.init_fp8_meta_tensors(self.fp8_meta["recipe"])
 
         if fp8_enabled:
@@ -928,7 +965,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 if not self.keep_fp8_weight_transpose_cache:
                     quantizer.columnwise_usage=False
                 param = quantizer(param)
-            if not self.primary_weights_in_fp8 and fp8_meta_index is not None:
+            if self.use_fsdp2 and not self.primary_weights_in_fp8 and fp8_meta_index is not None:
                 param = FSDPAGFloat8Tensor(
                     param, 
                     module=self, 
