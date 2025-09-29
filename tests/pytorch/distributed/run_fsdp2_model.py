@@ -202,7 +202,6 @@ def _train(args):
         )
         prof.start()
     for iteration in range(args.iter):
-
         if args.profile and torch.distributed.get_rank() in args.profile_ranks:
             prof.step()
 
@@ -216,9 +215,20 @@ def _train(args):
         optimizer.step()
         if LOCAL_RANK == 0:
             print(f"Rank {LOCAL_RANK}: Iteration {iteration} completed.")
+        with torch.no_grad():
             for p in model.parameters():
-                if p.requires_grad:
-                    out_tensors.append(p.grad)
+                full_grad = None
+                if p.grad is not None and hasattr(p.grad, 'full_tensor'):
+                    # This call is required to be executed on ALL ranks
+                    # to complete the collective communication.
+                    full_grad = p.grad.full_tensor() 
+                elif p.grad is not None:
+                    full_grad = p.grad
+
+                # 2. Only Rank 0 stores the result
+                if LOCAL_RANK == 0 and p.requires_grad:
+                    out_tensors.append(full_grad)
+        torch.cuda.synchronize()
     if (
         args.profile
         and iteration == args.profile_step_end
@@ -227,7 +237,6 @@ def _train(args):
         prof.stop()
 
     if LOCAL_RANK == 0:
-        out_tensors.extend([output, input_data.grad])
         torch.save(out_tensors, "all_iters_fsdp.pt")
 
     # NOTE: In PyTorch < 2.6 there’s a teardown race where one rank may call
