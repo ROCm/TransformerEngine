@@ -84,7 +84,6 @@ def _train(args):
         for p in model.parameters():
                 if p.requires_grad:
                     out_tensors.append(p.grad)
-    out_tensors.extend([output, input_data.grad])
     torch.save(out_tensors, "all_iters_regular.pt")
 
     # Save memory snapshot
