@@ -138,6 +138,7 @@ class _LayerNormLinear(torch.autograd.Function):
         skip_fp8_weight_update: bool,
         symmetric_ar_type: str,
         debug: Optional[bool] = False,
+        keep_fp8_weight_transpose_cache: bool = True,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # pylint: disable=missing-function-docstring
 
@@ -298,6 +299,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
                 workspace_dtype=activation_dtype,
+                create_transpose_cache=keep_fp8_weight_transpose_cache,
             )
             weightmat.update_usage(rowwise_usage=True)
 
@@ -412,9 +414,10 @@ class _LayerNormLinear(torch.autograd.Function):
                     if isinstance(ln_out, MXFP8TensorBase) or not ctx.ln_out_needs_gather:
                         ln_out.update_usage(rowwise_usage=False)
 
-            # Weight with column-wise usage is needed for dgrad GEMM.
-            if isinstance(weightmat, QuantizedTensorBase):
-                weightmat.update_usage(columnwise_usage=True)
+            # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
+            if inp.requires_grad and keep_fp8_weight_transpose_cache:
+                if isinstance(weightmat, QuantizedTensorBase):
+                    weightmat.update_usage(columnwise_usage=True)
 
             if cpu_offloading:
                 mark_activation_offload(inputmat, mu, rsigma, ln_out)
@@ -499,6 +502,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
             ctx.wgrad_store = wgrad_store
             ctx.debug = debug
+            ctx.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
 
         # ------------------------------------------------------
         # Cached state for backward pass is ready...
@@ -693,6 +697,9 @@ class _LayerNormLinear(torch.autograd.Function):
             if ctx.grad_input_quantizer is not None:
                 ctx.grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
 
+            if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
+                create_fp8_weight_transpose_cache(weight)
+
             # Output buffers for Userbuffers reduce-scatter
             gemm_out = None
             reduce_scatter_out = None
@@ -722,6 +729,9 @@ class _LayerNormLinear(torch.autograd.Function):
                 bulk_overlap=ctx.ub_bulk_dgrad,
             )
             nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
+
+            if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
+                clear_fp8_weight_transpose_cache(weight)
 
             # Prepare grad input tensor
             # Note: Perform tensor-parallel communication
@@ -1014,6 +1024,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,  # module
             None,  # skip_fp8_weight_update
             None,  # symmetric_ar_type
+            None,  # keep_fp8_weight_transpose_cache
         )
 
 
@@ -1112,6 +1123,20 @@ class LayerNormLinear(TransformerEngineBaseModule):
                    This can help in latency bound communication situations.
                    Requires PyTorch version 2.7.0 or higher. When set to None, standard all-reduce
                    is used.
+    keep_fp8_weight_transpose_cache: bool, default = `True`
+                Controls whether to cache the FP8 weight transpose buffer during training.
+
+                - If set to `True` (default), the FP8 weight transpose buffer is cached to avoid recomputation, 
+                which can improve performance but significantly increases memory usage.
+                - If set to `False`, the buffer is not cached and the FP8 weight transpose is recomputed as needed. 
+                This reduces memory consumption, especially during checkpoint loading and runtime.
+
+                **Recommendation**: Set this to `False` when using Fully Sharded Data Parallel (FSDP) training. 
+                Caching FP8 weight transposes can double memory usage for modules such as `Linear`, 
+                `LayerNormLinear`, and `LayerNormMLP`, which may lead to excessive memory pressure and 
+                reduced efficiency of PyTorch's caching allocator.
+
+                Use this setting to balance memory usage and performance based on your training configuration.
     """
 
     def __init__(
@@ -1144,6 +1169,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
         name: str = None,
+        keep_fp8_weight_transpose_cache: bool = True,
     ) -> None:
         super().__init__()
 
@@ -1579,6 +1605,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 skip_fp8_weight_update,
                 self.symmetric_ar_type,
                 debug,
+                self.keep_fp8_weight_transpose_cache
             )
             out = fwd_fn(*args)
 

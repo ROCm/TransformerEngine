@@ -12,7 +12,8 @@ from packaging import version
 import jax
 import jax.numpy as jnp
 from jax import dtypes
-from jax.experimental.custom_partitioning import SdyShardingRule
+if version.parse(jax.__version__) >= version.parse("0.5.0"):
+    from jax.experimental.custom_partitioning import SdyShardingRule
 from jax.sharding import PartitionSpec
 
 import transformer_engine_jax
@@ -416,6 +417,8 @@ class ActLuPrimitive(BasePrimitive):
         value_types,
         result_types,
     ):
+        if version.parse(jax.__version__) < version.parse("0.5.0"):
+            raise ImportError("JAX version 0.5.0 or later is required for shardy sharding.")
         del out_dtype, act_enum, act_len, scale_dtype, is_outer, mesh, result_types
 
         x_rank = len(value_types[0].shape)
@@ -885,6 +888,8 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         value_types,
         result_types,
     ):
+        if version.parse(jax.__version__) < version.parse("0.5.0"):
+            raise ImportError("JAX version 0.5.0 or later is required for shardy sharding.")
         del out_dtype, scale_dtype, act_enum, act_len, is_outer, mesh, result_types
 
         x_rank = len(value_types[1].shape)

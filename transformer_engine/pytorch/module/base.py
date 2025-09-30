@@ -1199,8 +1199,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         update_workspace: bool = True,
         skip_update_flag: Optional[torch.Tensor] = None,
         fsdp_group: Optional[dist_group_type] = None,
-        create_transpose_cache: bool = True,
         workspace_dtype: Optional[torch.dtype] = None,
+        create_transpose_cache: bool = True,
     ) -> QuantizedTensor:
         """Get FP8 workspace buffer and maybe update its values
 

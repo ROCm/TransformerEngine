@@ -844,18 +844,11 @@ bool isFp8Type(DType type) {
   return type == DType::kFloat8E4M3 || type == DType::kFloat8E5M2 || type == DType::kFloat8E8M0;
 }
 
-<<<<<<< HEAD
-int32_t getDeviceComputeCapability() {
-  cudaDeviceProp deviceProp;
-  cudaGetDeviceProperties(&deviceProp, 0);
-  return 10 * deviceProp.major + deviceProp.minor;
-=======
 int32_t getDeviceComputeCapability()
 {
     cudaDeviceProp deviceProp;
     (void)cudaGetDeviceProperties(&deviceProp, 0);
     return 10 * deviceProp.major + deviceProp.minor;
->>>>>>> origin/dev
 }
 
 size_t first_dimension(const std::vector<size_t> &shape) {

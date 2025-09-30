@@ -134,11 +134,16 @@ def register_primitive(cls):
     outer_p.def_abstract_eval(cls.outer_abstract)
     batching.primitive_batchers[outer_p] = cls.batcher
     outer_p_lower = custom_partitioning(cls.impl, static_argnums=cls.impl_static_args)
-    outer_p_lower.def_partition(
-        infer_sharding_from_operands=cls.infer_sharding_from_operands,
-        partition=cls.partition,
-        sharding_rule=cls.shardy_sharding_rule,
-    )
+    if version.parse(jax.__version__) >= version.parse("0.5.0"):
+        outer_p_lower.def_partition(
+            infer_sharding_from_operands=cls.infer_sharding_from_operands,
+            partition=cls.partition,
+            sharding_rule=cls.shardy_sharding_rule,
+        )
+    else:
+        outer_p_lower.def_partition(
+        infer_sharding_from_operands=cls.infer_sharding_from_operands, partition=cls.partition
+        )
     mlir.register_lowering(
         outer_p, mlir.lower_fun(outer_p_lower, multiple_results=cls.multiple_results)
     )

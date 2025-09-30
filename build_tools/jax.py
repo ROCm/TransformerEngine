@@ -11,7 +11,8 @@ from pathlib import Path
 
 import setuptools
 
-from .utils import rocm_build, rocm_path, hipify, all_files_in_dir, get_cuda_include_dirs, debug_build_enabled
+from .utils import rocm_build, rocm_path, hipify
+from .utils import all_files_in_dir, get_cuda_include_dirs, debug_build_enabled
 from typing import List
 
 
@@ -46,7 +47,11 @@ def setup_jax_extension(
     sources = all_files_in_dir(extensions_dir, name_extension="cpp")
 
     # Header files
-    include_dirs = get_cuda_include_dirs()
+    if rocm_build():
+        hip_root, _ = rocm_path()
+        include_dirs = [hip_root / "include"]
+    else:
+        include_dirs = get_cuda_include_dirs()
     include_dirs.extend(
         [
             common_header_files,

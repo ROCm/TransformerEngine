@@ -8,6 +8,7 @@ import torch
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.optimizers import MultiTensorApply
+from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type, get_torch_float8_e5m2_type
 
 from references.quantize_scale_calc import scale_from_amax_tensor
 
@@ -224,7 +225,7 @@ def test_multi_tensor_unscale_l2norm(input_size_pair, applier, repeat, in_type, 
 @pytest.mark.parametrize("input_size_pair", input_size_pairs + [(1, 1)])
 @pytest.mark.parametrize("applier", appliers)
 @pytest.mark.parametrize("repeat", [1, 55])
-@pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
+@pytest.mark.parametrize("fp8_dtype", [get_torch_float8_e4m3_type(), get_torch_float8_e5m2_type()])
 @pytest.mark.parametrize("pow_2_scales", [False, True])
 @pytest.mark.parametrize("epsilon", [0.0, 100.0])
 def test_multi_tensor_compute_scale_and_scale_inv(

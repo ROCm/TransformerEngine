@@ -12,6 +12,8 @@ from transformer_engine_jax import get_device_compute_capability
 
 from .base import BasePrimitive, register_primitive
 
+from ..util import is_hip_extension
+
 from ..quantize import (
     ScaledTensor,
     ScalingMode,
@@ -28,6 +30,12 @@ num_cublas_streams = 4
 
 
 def get_cublas_workspace_size_bytes() -> None:
+    """Return workspace size needed for current architecture"""
+    if is_hip_extension():
+        """Return 64 MiB for gfx50x, 32 MiB for all other architectures."""
+        if get_device_compute_capability() == (9, 5):
+            return 67_108_864
+        return 33_554_432
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
     if get_device_compute_capability(0) >= 90:
         return 33_554_432

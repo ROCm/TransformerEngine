@@ -284,6 +284,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Generate partitioned indices for inputs in THD format",
         py::call_guard<py::gil_scoped_release>());
 
+#ifndef USE_ROCM
   // nvshmem functions
   m.def("init_nvshmem_backend", &transformer_engine::pytorch::init_nvshmem_backend,
         "Initialize nvshmem backend with Pytorch distributed process groups",
@@ -302,6 +303,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("nvshmem_finalize", &transformer_engine::pytorch::nvshmem_finalize,
         "Clean up and finalize the NVSHMEM communication backend and free associated resources",
         py::call_guard<py::gil_scoped_release>());
+#endif
 
   // multi-tensor functions
   m.def("multi_tensor_scale", &transformer_engine::pytorch::multi_tensor_scale_cuda,

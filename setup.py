@@ -75,6 +75,7 @@ def setup_common_extension() -> CMakeExtension:
         if int(os.getenv("NVTE_FUSED_ATTN_CK", "1"))==0 or int(os.getenv("NVTE_FUSED_ATTN", "1"))==0:
             cmake_flags.append("-DUSE_FUSED_ATTN_CK=OFF")
     else:
+        cmake_flags.append("-DUSE_ROCM=OFF")
         cmake_flags = ["-DCMAKE_CUDA_ARCHITECTURES={}".format(archs)]
         if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
             assert (

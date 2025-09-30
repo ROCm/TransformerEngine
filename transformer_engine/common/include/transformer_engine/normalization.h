@@ -151,7 +151,6 @@ void nvte_rmsnorm_bwd(const NVTETensor dz, const NVTETensor x, const NVTETensor 
  */
 void nvte_enable_cudnn_norm_fwd(bool enable);
 void nvte_enable_cudnn_norm_bwd(bool enable);
-#endif
 
 /*! \brief Control whether norm computes `gamma += 1.0` for zero-centered gamma
  *  in weight dtype. If set to false, it will compute in compute dtype.
@@ -162,6 +161,7 @@ void nvte_enable_cudnn_norm_bwd(bool enable);
  *  \param[in]     bool              Enable if True
  */
 void nvte_enable_zero_centered_gamma_in_weight_dtype(bool enable);
+#endif
 
 enum class NVTE_Norm_Type { LayerNorm, RMSNorm };
 

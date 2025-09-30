@@ -16,7 +16,10 @@ from typing import Tuple, Dict
 from functools import reduce
 import operator
 
-from jax.experimental.custom_partitioning import CompoundFactor
+from packaging import version
+import jax
+if version.parse(jax.__version__) >= version.parse("0.5.0"):
+    from jax.experimental.custom_partitioning import CompoundFactor
 from jax.tree_util import register_pytree_node_class
 import jax.numpy as jnp
 
@@ -288,6 +291,8 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         Returns:
             The Shardy rules for the scaling mode
         """
+        if version.parse(jax.__version__) < version.parse("0.5.0"):
+            raise ImportError("JAX version 0.5.0 or later is required for shardy sharding.") 
         input_spec = [f"x{i}" for i in range(input_rank)]
 
         # We have to use two different factors in the two CompoundFactors because of Shardy

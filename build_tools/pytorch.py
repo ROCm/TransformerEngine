@@ -12,7 +12,10 @@ import setuptools
 
 from .utils import (
     rocm_build,
+    rocm_path,
     hipify,
+)
+from .utils import (
     all_files_in_dir,
     cuda_archs,
     cuda_version,
@@ -32,7 +35,11 @@ def setup_pytorch_extension(
     sources = all_files_in_dir(Path(csrc_source_files), name_extension="cpp")
 
     # Header files
-    include_dirs = get_cuda_include_dirs()
+    if rocm_build():
+        hip_root, _ = rocm_path()
+        include_dirs = [hip_root / "include"]
+    else:
+        include_dirs = get_cuda_include_dirs()
     include_dirs.extend(
         [
             common_header_files,

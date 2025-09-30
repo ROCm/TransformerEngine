@@ -198,7 +198,7 @@ def rocm_build() -> bool:
             else:
                 raise FileNotFoundError(f"Could not find hipcc at {hipcc_bin}")
         else:
-            nvcc_bin = nvcc_path()
+            nvcc_path()
             return False
 
     # Try to detect ROCm
@@ -208,7 +208,7 @@ def rocm_build() -> bool:
 
     # Try to detect CUDA
     try:
-        nvcc_bin = nvcc_path()
+        nvcc_path()
         return False
     except FileNotFoundError:
         # If neither ROCm nor CUDA is detected, raise an error
@@ -290,10 +290,6 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
     # are bundled inside the top level cuda directory.
     if cuda_toolkit_include_path() is not None:
         return [cuda_toolkit_include_path()]
-
-    if rocm_build():
-        hip_root, _ = rocm_path()
-        return [hip_root / "include"]
 
     # Use pip wheels to include all headers.        
     try:

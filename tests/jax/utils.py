@@ -27,6 +27,7 @@ from transformer_engine.jax.attention import (
     make_swa_mask,
 )
 from transformer_engine.jax.quantize.helper import DType as TEDType
+from transformer_engine.jax.util import get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
@@ -1517,8 +1518,8 @@ def dtype_tols(
             TEDType.kFloat32: jnp.float32,
             TEDType.kFloat16: jnp.float16,
             TEDType.kBFloat16: jnp.bfloat16,
-            TEDType.kFloat8E4M3: jnp.float8_e4m3fn,
-            TEDType.kFloat8E5M2: jnp.float8_e5m2,
+            TEDType.kFloat8E4M3: get_jnp_float8_e4m3_type(),
+            TEDType.kFloat8E5M2: get_jnp_float8_e5m2_type(),
         }[dtype]
     elif isinstance(dtype, np.dtype):
         dtype = jnp.dtype(dtype)

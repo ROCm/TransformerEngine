@@ -1301,6 +1301,7 @@ def test_fp8_linear_without_transpose_cache_accuracy(dtype, bs, model, fp8_model
             bias=True,
             params_dtype=dtype,
             device="cuda",
+            keep_fp8_weight_transpose_cache=False
         ).eval()
 
         reset_rng_states()
@@ -1321,11 +1322,17 @@ def test_fp8_linear_without_transpose_cache_accuracy(dtype, bs, model, fp8_model
     for te_output_no_cache, te_output_cache in zip(outputs, ref_outputs):
         assert_allclose(te_output_no_cache, te_output_cache, atol=0, rtol=0)
 
-
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 def test_linear_accuracy_delay_wgrad_compute(dtype, bs, model, bias, fuse_wgrad_accumulation):
     config = model_configs[model]
+
+    if IS_HIP_EXTENSION:
+        if dtype not in (torch.float32,) and fuse_wgrad_accumulation and bias:
+            pytest.skip(f"Rocm does not support fused wgrad accumulation for {dtype}.")
 
     te_linear_ref = Linear(
         config.hidden_size,
@@ -1711,6 +1718,7 @@ def test_fp8_layernorm_mlp_without_transpose_cache_accuracy(dtype, bs, model, ac
         normalization=normalization,
         params_dtype=dtype,
         device="cuda",
+        keep_fp8_weight_transpose_cache = False,
     ).eval()
 
     te_ln_mlp_ref = LayerNormMLP(
@@ -2536,6 +2544,7 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
     if use_RoPE:
         pytest.skip("KV cache does not support starting positions for RoPE")
     if (
+        not IS_HIP_EXTENSION and
         backend == "FusedAttention"
         and get_device_compute_capability() == (8, 9)
         and get_cudnn_version() < (9, 11, 0)

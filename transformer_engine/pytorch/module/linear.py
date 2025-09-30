@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -118,6 +120,7 @@ class _Linear(torch.autograd.Function):
         skip_fp8_weight_update: bool,
         symmetric_ar_type: str,
         debug: Optional[bool] = False,
+        keep_fp8_weight_transpose_cache: Optional[bool] = True,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
 
@@ -243,6 +246,7 @@ class _Linear(torch.autograd.Function):
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
                 workspace_dtype=activation_dtype,
+                create_transpose_cache=keep_fp8_weight_transpose_cache,
             )
             weightmat.update_usage(rowwise_usage=True)
 
@@ -355,23 +359,12 @@ class _Linear(torch.autograd.Function):
                 saved_inputmat = inputmat
 
             # Weight with column-wise usage is needed for dgrad GEMM.
-            if inp.requires_grad:
-<<<<<<< HEAD
+            if inp.requires_grad and keep_fp8_weight_transpose_cache:
                 if isinstance(weightmat, QuantizedTensorBase):
                     weightmat.update_usage(columnwise_usage=True)
 
             if cpu_offloading and saved_inputmat is not None:
                 mark_activation_offload(saved_inputmat)
-=======
-                if isinstance(weightmat, QuantizedTensor):
-                    weightmat.update_usage(columnwise_usage=True)
-
-            if cpu_offloading:
-                set_offloading_param(weight, "weight_offloading", True)
-                set_offloading_param(weightmat, "weight_offloading", True)
-                if saved_inputmat is not None:
-                    set_offloading_param(saved_inputmat, "activation_offloading", True)
->>>>>>> origin/dev
 
             # Scatter intermediate/activation tensors saved for the backward pass
             # NOTE: FSDP sharding is not valid for models initialized with primary Fp8 weights
@@ -437,6 +430,7 @@ class _Linear(torch.autograd.Function):
             ctx.reduce_and_update_bwd_fp8_tensors = False
 
             ctx.owns_input = saved_inputmat is not inp
+            ctx.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
             if ctx.fp8 and requires_grad(inp, weight, bias):
                 _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
@@ -624,6 +618,9 @@ class _Linear(torch.autograd.Function):
                 if ctx.grad_input_quantizer is not None:
                     ctx.grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
 
+                if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
+                    create_fp8_weight_transpose_cache(weight_fp8)
+
                 # Output buffers for Userbuffers reduce-scatter
                 gemm_out = None
                 reduce_scatter_out = None
@@ -653,6 +650,9 @@ class _Linear(torch.autograd.Function):
                     bulk_overlap=ctx.ub_bulk_dgrad,
                 )
                 nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
+
+                if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
+                    clear_fp8_weight_transpose_cache(weight_fp8)
 
                 # Prepare grad input tensor
                 # Note: Perform tensor-parallel communication
@@ -900,6 +900,7 @@ class _Linear(torch.autograd.Function):
             None,  # skip_fp8_weight_update
             None,  # symmetric_ar_type
             None,  # debug
+            None,  # keep_fp8_weight_transpose_cache
         )
 
 
@@ -981,6 +982,20 @@ class Linear(TransformerEngineBaseModule):
                    This can help in latency bound communication situations.
                    Requires PyTorch version 2.7.0 or higher. When set to None, standard all-reduce
                    is used.
+    keep_fp8_weight_transpose_cache: bool, default = True
+                Controls whether to cache the FP8 weight transpose buffer during training.
+
+                - If set to `True` (default), the FP8 weight transpose buffer is cached to avoid recomputation, 
+                which can improve performance but significantly increases memory usage.
+                - If set to `False`, the buffer is not cached and the FP8 weight transpose is recomputed as needed. 
+                This reduces memory consumption, especially during checkpoint loading and runtime.
+
+                **Recommendation**: Set this to `False` when using Fully Sharded Data Parallel (FSDP) training. 
+                Caching FP8 weight transposes can double memory usage for modules such as `Linear`, 
+                `LayerNormLinear`, and `LayerNormMLP`, which may lead to excessive memory pressure and 
+                reduced efficiency of PyTorch's caching allocator.
+
+                Use this setting to balance memory usage and performance based on your training configuration.
     """
 
     def __init__(
@@ -1009,6 +1024,7 @@ class Linear(TransformerEngineBaseModule):
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
         name: Optional[str] = None,
+        keep_fp8_weight_transpose_cache: bool = True,
     ) -> None:
         super().__init__()
 
@@ -1021,7 +1037,6 @@ class Linear(TransformerEngineBaseModule):
         self.apply_bias = bias and not return_bias
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
-<<<<<<< HEAD
         self.symmetric_ar_type = symmetric_ar_type
         self.name = name
 
@@ -1029,9 +1044,7 @@ class Linear(TransformerEngineBaseModule):
             self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
-=======
         self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
->>>>>>> origin/dev
 
         if device == "meta":
             assert parameters_split is None, "Cannot split module parameters on 'meta' device."
@@ -1222,10 +1235,6 @@ class Linear(TransformerEngineBaseModule):
         else:
             self.gemm_bias_unfused_add = False
         
-<<<<<<< HEAD
-=======
-
->>>>>>> origin/dev
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
         super().set_meta_tensor(fwd, recipe)
@@ -1401,6 +1410,7 @@ class Linear(TransformerEngineBaseModule):
                 skip_fp8_weight_update,
                 self.symmetric_ar_type,
                 debug,
+                self.keep_fp8_weight_transpose_cache,
             )
             out = linear_fn(*args)
         if self.gemm_bias_unfused_add:

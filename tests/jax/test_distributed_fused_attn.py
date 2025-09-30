@@ -14,6 +14,7 @@ from distributed_test_base import (
     generate_context_parallel_configs,
     generate_collectives_count,
 )
+from packaging import version
 from transformer_engine.jax.cpp_extensions.misc import is_hip_extension
 from test_fused_attn import FusedAttnRunner, BiasShape, SeqDescFormat
 from transformer_engine.jax.attention import (
@@ -82,6 +83,7 @@ class TestDistributedSelfAttn:
             seqlen,
             seqlen,
             hidden,
+            hidden,
             None,  # no window
         ):
             pytest.skip("No FusedAttn backend found")
@@ -101,9 +103,11 @@ class TestDistributedSelfAttn:
             num_head,
             num_head,
             hidden,
+            hidden,
             attn_bias_type,
             attn_mask_type,
             dropout_prob,
+            True,
             dtype,
             is_training,
             QKVLayout.BS3HD,
@@ -175,6 +179,7 @@ class TestDistributedSelfAttn:
             pytest.param(AttnBiasType.PRE_SCALE_BIAS, BiasShape._1HSS, id="PRE_SCALE_BIAS-1HSS"),
         ],
     )
+    @pytest.mark.skipif(version.parse(jax.__version__) < version.parse("0.5.0"), reason="shardy sharding requires JAX 0.5.0")
     def test_self_attn_shardy(
         self, device_count, mesh_shape, mesh_axes, mesh_resource, attn_bias_type, bias_shape
     ):
@@ -228,6 +233,7 @@ class TestDistributedCrossAttn:
             seqlen,
             seqlen,
             hidden,
+            hidden,
             None,  # no window
         ):
             pytest.skip("No FusedAttn backend found")
@@ -239,6 +245,7 @@ class TestDistributedCrossAttn:
             seqlen,
             num_head,
             num_head,
+            hidden,
             hidden,
             attn_bias_type,
             attn_mask_type,
@@ -295,8 +302,6 @@ class TestDistributedContextParallelSelfAttn:
         use_scan_ring=False,
     ):
         if qkv_layout.is_thd():
-            if is_hip_extension():
-                pytest.skip("THD + ring on Rocm doesn't support context parallelism.")
             if cp_strategy == CPStrategy.ALL_GATHER:
                 pytest.skip("THD doesn't support all gather context parallelism.")
             if not load_balanced and cp_strategy == CPStrategy.RING:
@@ -332,6 +337,7 @@ class TestDistributedContextParallelSelfAttn:
             num_head,
             num_kv_heads,
             hidden,
+            hidden,
             attn_bias_type,
             attn_mask_type,
             dropout_prob,
@@ -362,6 +368,7 @@ class TestDistributedContextParallelSelfAttn:
                 num_kv_heads,
                 seqlen,
                 seqlen,
+                hidden,
                 hidden,
                 None,
             )  # no SWA for CP
@@ -403,6 +410,7 @@ class TestDistributedContextParallelSelfAttn:
         "qkv_layout, attn_mask_type",
         DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS,
     )
+    @pytest.mark.skipif(version.parse(jax.__version__) < version.parse("0.5.0"), reason="shardy sharding requires JAX 0.5.0")
     def test_context_parallel_allgather_attn_shardy(
         self,
         device_count,
@@ -520,6 +528,7 @@ class TestDistributedContextParallelSelfAttn:
             use_scan_ring=use_scan,
         )
 
+    @pytest.mark.skipif(version.parse(jax.__version__) < version.parse("0.5.0"), reason="shardy sharding requires JAX 0.5.0")
     @pytest.mark.parametrize(
         "device_count,mesh_shape,mesh_axes,mesh_resource", generate_context_parallel_configs()
     )

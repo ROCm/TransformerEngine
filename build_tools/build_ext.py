@@ -158,7 +158,8 @@ def get_build_ext(
         def build_extensions(self):
             # For core lib + JAX install, fix build_ext from pybind11.setup_helpers
             # to handle CUDA files correctly.
-            if "pytorch" not in get_frameworks():
+            ext_names = [ext.name for ext in self.extensions]
+            if "transformer_engine_pytorch" not in ext_names:
                 # Ensure at least an empty list of flags for 'cxx' and 'nvcc' when
                 # extra_compile_args is a dict.
                 for ext in self.extensions:
@@ -189,7 +190,6 @@ def get_build_ext(
                             os.path.splitext(src)[1] in [".cu", ".cuh"]
                             and not framework_extension_only
                         ):
-                            nvcc_bin = nvcc_path()
                             self.compiler.set_executable("compiler_so", str(nvcc_bin))
                             if isinstance(cflags, dict):
                                 cflags = cflags["nvcc"]

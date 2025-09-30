@@ -554,7 +554,6 @@ bool& _cudnn_norm_bwd_flag() {
 
 bool use_cudnn_norm_fwd() { return _cudnn_norm_fwd_flag(); }
 bool use_cudnn_norm_bwd() { return _cudnn_norm_bwd_flag(); }
-#endif
 
 bool& _zero_centered_gamma_in_weight_dtype() {
   static bool flag = transformer_engine::getenv<bool>("NVTE_ZERO_CENTERED_GAMMA_IN_WTYPE");
@@ -562,6 +561,7 @@ bool& _zero_centered_gamma_in_weight_dtype() {
 }
 
 bool& use_zero_centered_gamma_in_weight_dtype() { return _zero_centered_gamma_in_weight_dtype(); }
+#endif
 
 }  //  namespace normalization
 }  // namespace transformer_engine
@@ -576,9 +576,10 @@ void nvte_enable_cudnn_norm_bwd(bool enable) {
   NVTE_API_CALL(nvte_enable_cudnn_norm_bwd);
   transformer_engine::normalization::_cudnn_norm_bwd_flag() = enable;
 }
-#endif
 
 void nvte_enable_zero_centered_gamma_in_weight_dtype(bool enable) {
   NVTE_API_CALL(nvte_enable_zero_centered_gamma_in_weight_dtype);
   transformer_engine::normalization::_zero_centered_gamma_in_weight_dtype() = enable;
 }
+#endif
+

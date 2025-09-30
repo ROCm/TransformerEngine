@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -55,7 +57,7 @@ void compute_ref_stats(NormType norm_type,
       sum_sq += (current - m) * (current - m);
     }
 #ifdef __HIP_PLATFORM_AMD__
-    rsigma[i] = 1.0f / sqrt((sum_sq / H) + epsilon);
+    rsigma[i] = 1.0f / sqrtf((sum_sq / H) + epsilon);
 #else
     rsigma[i] = rsqrtf((sum_sq / H) + epsilon);
 #endif

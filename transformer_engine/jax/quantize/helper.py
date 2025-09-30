@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -15,7 +17,7 @@ import jax
 import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
 
-from ..util import is_hip_extension
+from ..util import is_hip_extension, get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
 
 from transformer_engine_jax import DType
 if is_hip_extension():
@@ -158,11 +160,11 @@ def _format2dtypes(format_: recipe.Format):
         A tuple of (forward_dtype, backward_dtype) for the given format
     """
     if format_ == recipe.Format.E4M3:
-        return jnp.float8_e4m3fn, jnp.float8_e4m3fn
+        return get_jnp_float8_e4m3_type(), get_jnp_float8_e4m3_type()
     if format_ == recipe.Format.E5M2:
-        return jnp.float8_e5m2, jnp.float8_e5m2
+        return get_jnp_float8_e5m2_type(), get_jnp_float8_e5m2_type()
     if format_ == recipe.Format.HYBRID:
-        return jnp.float8_e4m3fn, jnp.float8_e5m2
+        return get_jnp_float8_e4m3_type(), get_jnp_float8_e5m2_type()
     return jnp.bfloat16, jnp.bfloat16
 
 

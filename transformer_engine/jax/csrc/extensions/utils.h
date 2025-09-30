@@ -21,11 +21,16 @@ namespace transformer_engine {
 namespace jax {
 
 int GetCudaRuntimeVersion();
+#ifndef USE_ROCM
 size_t GetCudnnRuntimeVersion();
-int GetDeviceComputeCapability(int gpu_id);
-#ifdef USE_ROCM
-size_t cudnnGetVersion();
+#else
+// use a very high number for cudnn in rocm to enable all filtering
+//(99, 0, 0)
+inline size_t GetCudnnRuntimeVersion() { return 990000; }
+// TODO: Make consteval when upgrading to c++20
+constexpr size_t cudnnGetVersion() { return 990000; }
 #endif
+int GetDeviceComputeCapability(int gpu_id);
 
 class cudaDevicePropertiesManager {
  public:

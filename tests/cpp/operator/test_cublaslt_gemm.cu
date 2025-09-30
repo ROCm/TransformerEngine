@@ -261,17 +261,17 @@ void performTest(const TestParams& params) {
   // pytorch tensor storage is row-major while cublas/hipblaslt is column-major
   Tensor A;
   if (params.transa){
-    A = Tensor("A", { std::vector<size_t>params.m, params.k }, atype, true, false, params.scaling_mode);
+    A = Tensor("A", std::vector<size_t>{ params.m, params.k }, atype, true, false, params.scaling_mode);
   }else {
     // hipblaslt path need fp8-gemm with TN layout
-    A = Tensor("A", { std::vector<size_t>params.k, params.m }, atype, true, isFp8Type(atype), params.scaling_mode);
+    A = Tensor("A", std::vector<size_t>{ params.k, params.m }, atype, true, isFp8Type(atype), params.scaling_mode);
   }
   Tensor B;
   if (params.transb){
     //hipblaslt path need fp8-gemm with TN layout
     B = Tensor("B", std::vector<size_t>{ params.k, params.n }, btype, true, isFp8Type(btype), params.scaling_mode);
   }else {
-    B = Tensor("B", std::vector<size_t> params.n, params.k }, btype, true, false, params.scaling_mode);
+    B = Tensor("B", std::vector<size_t>{ params.n, params.k }, btype, true, false, params.scaling_mode);
   }
   Tensor D("D", std::vector<size_t>{ params.n, params.m }, dtype);
   Tensor bias;

@@ -115,7 +115,11 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   cudaDeviceProp prop;
   cudaGetDeviceProperties(&prop, 0);
 
-#ifndef __HIP_PLATFORM_AMD__
+#ifdef __HIP_PLATFORM_AMD__
+  if (zero_centered_gamma_in_weight_dtype) {
+    GTEST_SKIP() << "ROCm does not use zero_centered_gamma_in_weight_dtype";
+  }
+#else
 // TODO: Guard all MXFP8 tests for hip_version >= gfx9.5
   if (getDeviceComputeCapability() < blackwellComputeCapability) {
     GTEST_SKIP();
@@ -140,11 +144,13 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   fillUniform(&gamma);
   fillUniform(&beta);
 
+#ifndef __HIP_PLATFORM_AMD__
   if (zero_centered_gamma_in_weight_dtype) {
     nvte_enable_zero_centered_gamma_in_weight_dtype(true);
   } else {
     nvte_enable_zero_centered_gamma_in_weight_dtype(false);
   }
+#endif
 
   // Forward kernel
   float epsilon = 1e-5;
@@ -171,9 +177,11 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                      0);
   }
 
+#ifndef __HIP_PLATFORM_AMD__
   if (zero_centered_gamma_in_weight_dtype) {
     nvte_enable_zero_centered_gamma_in_weight_dtype(false);
   }
+#endif 
 
   Tensor dequantized_output("dequantized_output", std::vector<size_t>{ N, H }, DType::kFloat32, true, true);
 
@@ -198,6 +206,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
     ref_mu_ptr = ref_mu.get();
     ref_rsigma_ptr = ref_rsigma.get();
   }
+  // cuDNN flag does not have an effect on ROCm as zero_centered_gamma_in_weight_dtype is always false.
   compute_ref_output(norm_type, input.rowwise_cpu_dptr<InputType>(),
                      gamma.rowwise_cpu_dptr<WeightType>(),
                      beta.rowwise_cpu_dptr<WeightType>(),
@@ -288,7 +297,11 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::ValuesIn(test_cases),
     ::testing::Values(true, false),
     ::testing::Values(true, false),
+#ifdef __HIP_PLATFORM_AMD__
+    ::testing::Values(false)), // HIP does not use zero_centered_gamma_in_weight_dtype
+#else
     ::testing::Values(true, false)),
+#endif
   [](const testing::TestParamInfo<MxNormTestSuite::ParamType>& info) {
     std::string name = normToString.at(std::get<0>(info.param)) + "_" +
       test::typeName(std::get<1>(info.param)) + "X" +

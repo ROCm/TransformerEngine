@@ -24,11 +24,6 @@ int GetCudaRuntimeVersion() {
 
 #ifndef USE_ROCM
 size_t GetCudnnRuntimeVersion() { return cudnnGetVersion(); }
-#else
-// use a very high number for cudnn in rocm to enable all filtering
-//(99, 0, 0)
-size_t GetCudnnRuntimeVersion() { return 990000; }
-size_t cudnnGetVersion() { return GetCudnnRuntimeVersion(); }
 #endif
 
 int GetDeviceComputeCapability(int gpu_id) { return transformer_engine::cuda::sm_arch(gpu_id); }

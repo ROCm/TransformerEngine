@@ -19,6 +19,7 @@ from transformer_engine.jax import fp8_autocast
 from transformer_engine.common import recipe
 from transformer_engine.jax.layernorm import layernorm
 from transformer_engine.jax.quantize import QuantizerFactory, ScalingMode, is_fp8_available
+from transformer_engine.jax.util import get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
 
 
 DTYPES = [jnp.bfloat16, jnp.float32]
@@ -106,7 +107,7 @@ class TestDistributedLayernorm:
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
         epsilon = 1e-6
         ln_type = "layernorm"
-        q_dtype = jnp.float8_e4m3fn
+        q_dtype = get_jnp_float8_e4m3_type()
 
         def target_func(x, gamma, beta):
             quantizer = QuantizerFactory.create_set().x
@@ -190,7 +191,7 @@ class TestDistributedLayernorm:
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
         epsilon = 1e-6
         ln_type = "rmsnorm"
-        q_dtype = jnp.float8_e4m3fn
+        q_dtype = get_jnp_float8_e4m3_type()
 
         def target_func(x, gamma):
             quantizer = QuantizerFactory.create_set().x

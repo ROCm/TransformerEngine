@@ -14,7 +14,8 @@ from packaging import version
 import jax
 import jax.numpy as jnp
 from jax import dtypes
-from jax.experimental.custom_partitioning import SdyShardingRule
+if version.parse(jax.__version__) >= version.parse("0.5.0"):
+    from jax.experimental.custom_partitioning import SdyShardingRule
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec
 from .misc import is_hip_extension
@@ -580,6 +581,8 @@ class NormFwdPrimitive(BasePrimitive):
         value_types,
         result_types,
     ):
+        if version.parse(jax.__version__) < version.parse("0.5.0"):
+            raise ImportError("JAX version 0.5.0 or later is required for shardy sharding.")
         del (
             zero_centered_gamma,
             epsilon,

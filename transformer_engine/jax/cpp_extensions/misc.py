@@ -22,7 +22,7 @@ from jax.interpreters.mlir import dtype_to_ir_type
 import transformer_engine_jax
 
 from ..sharding import get_padded_spec as te_get_padded_spec
-from ..util import is_hip_extension
+from ..util import is_hip_extension, get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
 from ..quantize import ScaledTensorFactory, QuantizeLayout
 
 TEDType = transformer_engine_jax.DType
@@ -40,8 +40,8 @@ def te_dtype_to_jax_dtype(te_dtype):
         TEDType.kBFloat16: jnp.bfloat16,
         TEDType.kInt32: jnp.int32,
         TEDType.kInt64: jnp.int64,
-        TEDType.kFloat8E4M3: jnp.float8_e4m3fn,
-        TEDType.kFloat8E5M2: jnp.float8_e5m2,
+        TEDType.kFloat8E4M3: get_jnp_float8_e4m3_type(),
+        TEDType.kFloat8E5M2: get_jnp_float8_e5m2_type(),
         TEDType.kByte: jnp.uint8,
     }
 
@@ -77,8 +77,8 @@ def jax_dtype_to_te_dtype(jax_dtype):
         jnp.bfloat16.dtype: TEDType.kBFloat16,
         jnp.int32.dtype: TEDType.kInt32,
         jnp.int64.dtype: TEDType.kInt64,
-        jnp.float8_e4m3fn.dtype: TEDType.kFloat8E4M3,
-        jnp.float8_e5m2.dtype: TEDType.kFloat8E5M2,
+        get_jnp_float8_e4m3_type().dtype: TEDType.kFloat8E4M3,
+        get_jnp_float8_e5m2_type().dtype: TEDType.kFloat8E5M2,
         jnp.uint8.dtype: TEDType.kByte,
     }
 

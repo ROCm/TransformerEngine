@@ -45,6 +45,7 @@ from transformer_engine.jax.activation import activation
 from transformer_engine.jax.dense import dense
 from transformer_engine.jax.layernorm_dense import layernorm_dense
 from transformer_engine.jax.quantize import ScaledTensor1x, ScaledTensor2x
+from transformer_engine.jax.util import get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
 
 GEMM_CASES = [
     (256, 256, 512),
@@ -53,7 +54,11 @@ GEMM_CASES = [
     (2048, 2048, 1024),
     (2048, 1024, 1024),
 ]
-FP8_COMPUTE_TYPE = [jnp.float8_e4m3fn, jnp.float8_e5m2]
+
+jnp_float8_e4m3_type = get_jnp_float8_e4m3_type()
+jnp_float8_e5m2_type = get_jnp_float8_e5m2_type()
+
+FP8_COMPUTE_TYPE = [jnp_float8_e4m3_type, jnp_float8_e5m2_type]
 LN_CASES = [(256, 128), (128, 256)]
 DTYPES = [jnp.bfloat16, jnp.float32]
 is_fp8_supported, reason = helper.is_fp8_available()
@@ -179,7 +184,7 @@ class TestActivation:
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest_parametrize_wrapper("shape", ALL_ACTIVATION_SHAPES)
     @pytest_parametrize_wrapper("activation_type", ACTIVATION_TYPES)
-    @pytest_parametrize_wrapper("output_type", [jnp.float8_e4m3fn, jnp.float8_e5m2])
+    @pytest_parametrize_wrapper("output_type", FP8_COMPUTE_TYPE)
     @pytest_parametrize_wrapper(
         "scaling_mode", [ScalingMode.DELAYED_TENSOR_SCALING, ScalingMode.CURRENT_TENSOR_SCALING]
     )
@@ -210,7 +215,7 @@ class TestActivation:
     @pytest.mark.skipif(not is_mxfp8_supported, reason=reason)
     @pytest_parametrize_wrapper("shape", ALL_ACTIVATION_SHAPES)
     @pytest_parametrize_wrapper("activation_type", ACTIVATION_TYPES)
-    @pytest_parametrize_wrapper("output_type", [jnp.float8_e4m3fn, jnp.float8_e5m2])
+    @pytest_parametrize_wrapper("output_type", FP8_COMPUTE_TYPE)
     @pytest_parametrize_wrapper(
         "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
     )
@@ -240,7 +245,7 @@ class TestActivation:
     @pytest.mark.skipif(not is_mxfp8_supported, reason=reason)
     @pytest_parametrize_wrapper("shape", [(2, 64, 1, 256)])
     @pytest_parametrize_wrapper("activation_type", ACTIVATION_TYPES)
-    @pytest_parametrize_wrapper("output_type", [jnp.float8_e4m3fn, jnp.float8_e5m2])
+    @pytest_parametrize_wrapper("output_type", FP8_COMPUTE_TYPE)
     @pytest_parametrize_wrapper(
         "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
     )
@@ -262,8 +267,8 @@ class TestActivation:
 
 
 NORM_OUTPUT_DTYPES = {
-    "L0": [jnp.float8_e4m3fn],
-    "L2": [jnp.float8_e4m3fn, jnp.float8_e5m2],
+    "L0": [jnp_float8_e4m3_type],
+    "L2": FP8_COMPUTE_TYPE,
 }
 
 
@@ -360,7 +365,7 @@ class TestNorm:
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     # No Norm FWD E5M2 in TE backend
-    @pytest_parametrize_wrapper("out_dtype", [jnp.float8_e4m3fn])
+    @pytest_parametrize_wrapper("out_dtype", [jnp_float8_e4m3_type])
     @pytest_parametrize_wrapper(
         "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
     )
@@ -475,7 +480,7 @@ class TestNorm:
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     # No Norm FWD E5M2 in TE backend
-    @pytest_parametrize_wrapper("out_dtype", [jnp.float8_e4m3fn])
+    @pytest_parametrize_wrapper("out_dtype", [jnp_float8_e4m3_type])
     @pytest_parametrize_wrapper(
         "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
     )
@@ -510,7 +515,7 @@ class TestNorm:
         )
 
     @pytest.mark.skipif(not is_mxfp8_supported, reason=reason)
-    @pytest.mark.parametrize("out_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
+    @pytest.mark.parametrize("out_dtype", FP8_COMPUTE_TYPE)
     def test_norm_forward_with_block_scaling_fp8(
         self, n, hidden, norm_type, zero_centered_gamma, epsilon, inp_dtype, out_dtype
     ):
@@ -528,8 +533,8 @@ class TestNorm:
 
 
 QUANTIZE_OUTPUT_DTYPES = {
-    "L0": [jnp.float8_e4m3fn],
-    "L2": [jnp.float8_e4m3fn, jnp.float8_e5m2],
+    "L0": [jnp_float8_e4m3_type],
+    "L2": FP8_COMPUTE_TYPE,
 }
 
 ALL_QUANTIZE_TEST_SHAPES_AND_FLATTEN_AXES = [
@@ -560,7 +565,7 @@ QUANTIZATION_INPUT_DTYPE = {
 
 @pytest.mark.skipif(not is_fp8_supported, reason=reason)
 @pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
-@pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
+@pytest_parametrize_wrapper("q_dtype", FP8_COMPUTE_TYPE)
 @pytest_parametrize_wrapper("input_shape,flatten_axis", ALL_QUANTIZE_TEST_SHAPES_AND_FLATTEN_AXES)
 @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
 @pytest_parametrize_wrapper(
@@ -815,7 +820,7 @@ class TestDense:
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest_parametrize_wrapper("m,n,k", [(64, 32, 64)])
-    @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
+    @pytest_parametrize_wrapper("q_dtype", FP8_COMPUTE_TYPE)
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
     @pytest_parametrize_wrapper("data_layout", ["TN", "NT", "NN", "TT"])
     def test_gemm_fp8(self, m, n, k, q_dtype, scaling_mode, data_layout):
@@ -857,7 +862,7 @@ class TestDense:
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest_parametrize_wrapper("m,n,k", [(64, 32, 64)])
-    @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
+    @pytest_parametrize_wrapper("q_dtype", FP8_COMPUTE_TYPE)
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
     def test_dense_grad_fp8(self, m, n, k, q_dtype, scaling_mode):
         data_layout = "NN"
@@ -924,7 +929,7 @@ def _ref_jax_norm_impl(x, gamma, beta, norm_type, zero_centered_gamma, eps, quan
 class TestFusedDense:
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize("m,n,k", [(64, 32, 64)])
-    @pytest.mark.parametrize("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
+    @pytest.mark.parametrize("q_dtype", FP8_COMPUTE_TYPE)
     @pytest.mark.parametrize("scaling_mode", supported_scaling_modes)
     @pytest.mark.parametrize("norm_type", ["layernorm", "rmsnorm"])
     def test_layernorm_dense_grad(self, m, n, k, q_dtype, scaling_mode, norm_type):
@@ -932,7 +937,7 @@ class TestFusedDense:
         Test layernorm_dense VJP Rule
         """
         # No Norm FWD E5M2 in TE backend
-        if q_dtype == jnp.float8_e5m2 and scaling_mode in (
+        if q_dtype == jnp_float8_e5m2_type and scaling_mode in (
             ScalingMode.DELAYED_TENSOR_SCALING,
             ScalingMode.CURRENT_TENSOR_SCALING,
         ):
@@ -1010,7 +1015,7 @@ class TestFusedDense:
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize("m,n,k", [(64, 32, 64)])
     @pytest.mark.parametrize("activation_type", [("gelu",), ("gelu", "linear")])
-    @pytest.mark.parametrize("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
+    @pytest.mark.parametrize("q_dtype", FP8_COMPUTE_TYPE)
     @pytest.mark.parametrize("scaling_mode", supported_scaling_modes)
     @pytest.mark.parametrize("norm_type", ["layernorm", "rmsnorm"])
     @pytest.mark.parametrize("use_bias", [True, False])
@@ -1021,7 +1026,7 @@ class TestFusedDense:
         Test layernorm_mlp VJP Rule
         """
         # No Norm FWD E5M2 in TE backend
-        if q_dtype == jnp.float8_e5m2 and scaling_mode in (
+        if q_dtype == jnp_float8_e5m2_type and scaling_mode in (
             ScalingMode.DELAYED_TENSOR_SCALING,
             ScalingMode.CURRENT_TENSOR_SCALING,
         ):
@@ -1155,9 +1160,9 @@ def _quantize_gemm_pair(lhs, rhs, contracting_dims, lhs_quantizer, rhs_quantizer
 
 # E5M2 * E5M2 is not supported
 fwd_bwd_dtypes = [
-    [jnp.float8_e4m3fn, jnp.float8_e4m3fn],
-    [jnp.float8_e4m3fn, jnp.float8_e5m2],
-    [jnp.float8_e5m2, jnp.float8_e4m3fn],
+    [jnp_float8_e4m3_type, jnp_float8_e4m3_type],
+    FP8_COMPUTE_TYPE,
+    [jnp_float8_e5m2_type, jnp_float8_e4m3_type],
 ]
 
 """
@@ -1237,9 +1242,9 @@ class TestGroupedDense:
         ref_out = self._ref_grouped_gemm_with_jnp_dot(lhs_list, rhs_list, contracting_dims_list)
         primitive_out = tex.grouped_gemm(q_lhs_list, q_rhs_list, contracting_dims_list)
 
-        allclose_dtype = jnp.float8_e4m3fn
-        if fwd_dtype == jnp.float8_e5m2 or bwd_dtype == jnp.float8_e5m2:
-            allclose_dtype = jnp.float8_e5m2
+        allclose_dtype = jnp_float8_e4m3_type
+        if fwd_dtype == jnp_float8_e5m2_type or bwd_dtype == jnp_float8_e5m2_type:
+            allclose_dtype = jnp_float8_e5m2_type
         for i in range(len(shape_list)):
             assert_allclose(primitive_out[i], ref_out[i], dtype=allclose_dtype)
 
@@ -1302,7 +1307,7 @@ class TestGroupedDense:
         group_size = len(shape_list)
         layout_list = ["NN" for _ in range(group_size)]
         fwd_dtype, bwd_dtype = fwd_bwd_dtype
-        if fwd_dtype == jnp.float8_e5m2:
+        if fwd_dtype == jnp_float8_e5m2_type:
             pytest.skip("We never use E5M2 for fwd_dtype in training")
 
         # Question: should we use different quantizers for different groups?
@@ -1367,9 +1372,9 @@ class TestGroupedDense:
             )
         )
 
-        allclose_dtype = jnp.float8_e4m3fn
-        if fwd_dtype == jnp.float8_e5m2 or bwd_dtype == jnp.float8_e5m2:
-            allclose_dtype = jnp.float8_e5m2
+        allclose_dtype = jnp_float8_e4m3_type
+        if fwd_dtype == jnp_float8_e5m2_type or bwd_dtype == jnp_float8_e5m2_type:
+            allclose_dtype = jnp_float8_e5m2_type
         assert_allclose(primitive_out_mean, ref_out_mean, dtype=allclose_dtype)
         for i in range(group_size):
             assert_allclose(primitive_dgrad_list[i], ref_dgrad_list[i], dtype=allclose_dtype)

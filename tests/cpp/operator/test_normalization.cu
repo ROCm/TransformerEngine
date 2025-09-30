@@ -80,12 +80,14 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
 
 #ifdef __HIP_PLATFORM_AMD__
   ASSERT_FALSE(use_cudnn) << "CUDNN is not supported on ROCm";
-#else
+#endif
+
   if ((!use_cudnn || !zero_centered_gamma) && zero_centered_gamma_in_weight_dtype) {
     // Skip duplicate tests when zero_centered_gamma_in_weight_dtype is true and won't affect the implementation
     GTEST_SKIP() << "Zero-centered gamma in weight dtype is only supported with cuDNN backend";
   }
 
+#ifndef __HIP_PLATFORM_AMD__
   if (use_cudnn){
     nvte_enable_cudnn_norm_fwd(true);
     nvte_enable_cudnn_norm_bwd(true);
@@ -262,7 +264,11 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16, DType::kFloat8E4M3),
     ::testing::ValuesIn(test_cases),
     ::testing::Values(false, true),
-    ::testing::Values(false, true)),
+#ifdef __HIP_PLATFORM_AMD__
+    ::testing::Values(false)), // HIP does not use cudnn_zero_centered_gamm_in_weight_dtype
+#else
+    ::testing::Values(true, false)),
+#endif
   [](const testing::TestParamInfo<NormTestSuite::ParamType>& info) {
     auto backend = std::get<0>(info.param) == false ? "Te" : "Cudnn";
     std::string name =
