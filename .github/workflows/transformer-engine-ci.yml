@@ -86,7 +86,6 @@ jobs:
       - name: 📦 Build wheel inside container
         run: |
           set -ex
-          ls -l /opt
            
           # Install CMake
           CMAKE_LINK="https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0-linux-x86_64.sh"
@@ -98,7 +97,7 @@ jobs:
           cmake --version
           
           # Build Wheel
-          export ROCM_PATH=/opt/rocm
+          export ROCM_PATH=/opt/rocm-6.4.1
           export PATH=$ROCM_PATH/bin:$PATH
           export LD_LIBRARY_PATH=$ROCM_PATH/lib:$LD_LIBRARY_PATH
           export PYTORCH_ROCM_ARCH=gfx942
