@@ -1,5 +1,3 @@
-# This file was modified for portability to AMDGPU
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -12,12 +10,6 @@ import torch
 import triton
 import triton.language as tl
 
-from transformer_engine.pytorch.utils import is_fp8_fnuz
-from transformer_engine_torch import DType as TE_DType
-
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
-
-IS_HIP_EXTENSION = triton.language.constexpr(IS_HIP_EXTENSION)
 
 @triton.jit
 def _row_id_map_pass_1_kernel(

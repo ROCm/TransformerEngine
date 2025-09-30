@@ -270,6 +270,11 @@ class _LayerNormMLP(torch.autograd.Function):
             and not return_layernorm_output_gathered
             and not debug
         )
+
+        # ROCm does not currently support quantized norm for Float8CurrentScalingQuantizer
+        if IS_HIP_EXTENSION and isinstance(fc1_input_quantizer, Float8CurrentScalingQuantizer):
+            with_quantized_norm = False
+
         if isinstance(fc1_input_quantizer, Float8BlockQuantizer):
             # Kernels not available for norm fusion.
             with_quantized_norm = False
@@ -519,7 +524,7 @@ class _LayerNormMLP(torch.autograd.Function):
         if is_grad_enabled:
 
             # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
-            if is_grad_enabled and inp.requires_grad and keep_fp8_weight_transpose_cache:
+            if inp.requires_grad and keep_fp8_weight_transpose_cache:
                 if isinstance(fc1_weight_final, QuantizedTensorBase):
                     fc1_weight_final.update_usage(columnwise_usage=True)
                 if isinstance(fc2_weight_final, QuantizedTensorBase):
@@ -1479,7 +1484,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                    This can help in latency bound communication situations.
                    Requires PyTorch version 2.7.0 or higher. When set to None, standard all-reduce
                    is used.
-    keep_fp8_weight_transpose_cache: bool, default = True
+    keep_fp8_weight_transpose_cache: bool, default = `True`
                 Controls whether to cache the FP8 weight transpose buffer during training.
 
                 - If set to `True` (default), the FP8 weight transpose buffer is cached to avoid recomputation, 

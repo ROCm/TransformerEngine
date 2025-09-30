@@ -129,15 +129,18 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     """
 
     # Common requirements
-    setup_reqs: List[str] = [
-        "nvidia-cuda-runtime-cu12",
-        "nvidia-cublas-cu12",
-        "nvidia-cudnn-cu12",
-        "nvidia-cuda-cccl-cu12",
-        "nvidia-cuda-nvcc-cu12",
-        "nvidia-nvtx-cu12",
-        "nvidia-cuda-nvrtc-cu12",
-    ]
+    if rocm_build():
+        setup_reqs: List[str] = []
+    else:
+        setup_reqs: List[str] = [
+            "nvidia-cuda-runtime-cu12",
+            "nvidia-cublas-cu12",
+            "nvidia-cudnn-cu12",
+            "nvidia-cuda-cccl-cu12",
+            "nvidia-cuda-nvcc-cu12",
+            "nvidia-nvtx-cu12",
+            "nvidia-cuda-nvrtc-cu12",
+        ]
     install_reqs: List[str] = [
         "pydantic",
         "importlib-metadata>=1.0",
@@ -206,6 +209,8 @@ if __name__ == "__main__":
     else:
         setup_requires, install_requires, test_requires = setup_requirements()
         ext_modules = [setup_common_extension()]
+        if rocm_build():
+            cmdclass["develop"] = develop
         package_data = {"": ["VERSION.txt"]}
         include_package_data = True
         extras_require = {"test": test_requires}

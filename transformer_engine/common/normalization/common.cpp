@@ -66,7 +66,8 @@ TupleKeyType get_key(NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType,
 template <typename KernelParamsType>
 TeNormalizationPlan<KernelParamsType>::TeNormalizationPlan(
     NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype, DType otype,
-    DType ctype, const size_t batch_size, const size_t hidden_size, const size_t sm_count, const bool zero_centered_gamma, const bool is_tuned
+    DType ctype, const size_t batch_size, const size_t hidden_size, const size_t sm_count, 
+    const bool zero_centered_gamma, const bool is_tuned
 #ifdef __HIP_PLATFORM_AMD__
     , const NVTEScalingMode mode, const bool training
 #endif

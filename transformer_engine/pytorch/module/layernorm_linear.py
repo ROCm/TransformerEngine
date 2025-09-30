@@ -210,6 +210,10 @@ class _LayerNormLinear(torch.autograd.Function):
             and not force_hp_blockwise_ln_out_gather
         )
 
+        # ROCm does not currently support quantized norm for Float8CurrentScalingQuantizer
+        if IS_HIP_EXTENSION and isinstance(input_quantizer, Float8CurrentScalingQuantizer):
+            with_quantized_norm = False
+
         # Apply normalization
         nvtx_range_push(f"{nvtx_label}.norm")
         ln_out, mu, rsigma = apply_normalization(

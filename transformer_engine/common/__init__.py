@@ -321,6 +321,7 @@ te_rocm_build = False
 @functools.cache
 def is_fp8_fnuz():
     if te_rocm_build:
+        _TE_LIB_CTYPES.nvte_uses_fp8_fnuz.restype = ctypes.c_bool
         return _TE_LIB_CTYPES.nvte_uses_fp8_fnuz()
     return False
 

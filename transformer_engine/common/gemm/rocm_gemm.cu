@@ -190,89 +190,108 @@ static hipDataType get_hipblaslt_dtype(const transformer_engine::DType t) {
 
 //TODO: unified with cublaslt_gemm.cu
 struct GemmParam {
-  void *A;
-  void *B;
-  cublasOperation_t transA;
-  cublasOperation_t transB;
-  transformer_engine::DType Atype;
-  transformer_engine::DType Btype;
-  void *A_scale_inv;
-  void *B_scale_inv;
-  int lda;
-  int ldb;
-
-  GemmParam(cublasOperation_t transA, cublasOperation_t transB)
-      : A(nullptr),
-        B(nullptr),
-        transA(transA),
-        transB(transB),
-        Atype(transformer_engine::DType::kNumTypes),
-        Btype(transformer_engine::DType::kNumTypes),
-        A_scale_inv(nullptr),
-        B_scale_inv(nullptr),
-        lda(0),
-        ldb(0) {}
+  void *A = nullptr;
+  void *B = nullptr;
+  cublasOperation_t transA = CUBLAS_OP_N;
+  cublasOperation_t transB = CUBLAS_OP_N;
+  transformer_engine::DType Atype = transformer_engine::DType::kNumTypes;
+  transformer_engine::DType Btype = transformer_engine::DType::kNumTypes;
+  void *A_scale_inv = nullptr;
+  void *B_scale_inv = nullptr;
+  int lda = 0;  // A column strides
+  int ldb = 0;  // B column strides
 };
 
 GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cublasOperation_t transA,
                                 const transformer_engine::Tensor &B, const cublasOperation_t transB,
-                                const int k, const int lda, const int ldb) {
+                                const int m, const int n, const int k) {
   using namespace transformer_engine;
   NVTE_CHECK(A.scaling_mode == B.scaling_mode,
              "Inputs A and B to GEMM need to have the same scaling mode!");
   NVTE_CHECK(A.has_data() || A.has_columnwise_data(), "Input A does not hold any data!");
   NVTE_CHECK(B.has_data() || B.has_columnwise_data(), "Input B does not hold any data!");
-  GemmParam ret(transA, transB);
+  GemmParam ret;
 
   // Transpose mode with column-major ordering
   bool is_A_transposed = transA == CUBLAS_OP_T;
   bool is_B_transposed = transB == CUBLAS_OP_T;
 
-  ret.lda = lda;
-  ret.ldb = ldb;
 
   if (is_tensor_scaling(A.scaling_mode)) {
+    // Unscaled or FP8 tensor scaling
     ret.A = A.data.dptr;
+    ret.transA = transA;
+    ret.Atype = A.data.dtype;
     ret.A_scale_inv = A.scale_inv.dptr;
-    if (is_A_transposed) {
-      ret.Atype = A.data.dtype;
-    } else {
-      ret.Atype = A.has_columnwise_data() ? A.columnwise_data.dtype : A.data.dtype;
-      if (is_fp8_dtype(ret.Atype)) {
-        // Hopper and Ada - we need to use columnwise_data and change transA
-        NVTE_CHECK(A.has_columnwise_data(), "Input A is not suitable for columnwise usage!");
+    ret.lda = is_A_transposed ? k : m;
+    if (!nvte_is_non_tn_fp8_gemm_supported() && !is_A_transposed) {
+      // Hopper only supports TN GEMMs for FP8. "Column-wise data" is transpose of data.
+      if (A.has_columnwise_data() && is_fp8_dtype(A.columnwise_data.dtype)) {
         ret.A = A.columnwise_data.dptr;
         ret.transA = CUBLAS_OP_T;
+        ret.Atype = A.columnwise_data.dtype;
         ret.A_scale_inv = A.columnwise_scale_inv.dptr;
         ret.lda = k;
+      } else {
+        NVTE_CHECK(!is_fp8_dtype(ret.Atype), "Input A is missing column-wise usage");
       }
     }
-    ret.B = B.data.dptr;
-    ret.B_scale_inv = B.scale_inv.dptr;
-    if (is_B_transposed) {
-      ret.Btype = B.has_columnwise_data() ? B.columnwise_data.dtype : B.data.dtype;
-      if (is_fp8_dtype(ret.Btype)) {
-        // Hopper and Ada - we need to use columnwise_data and change transA
-        NVTE_CHECK(B.has_columnwise_data(), "Input B is not suitable for columnwise usage!");
-        ret.B = B.columnwise_data.dptr;
-        ret.transB = CUBLAS_OP_N;
-        ret.B_scale_inv = B.columnwise_scale_inv.dptr;
-        ret.ldb = k;
-      }
+  } else if (is_mxfp_scaling(A.scaling_mode)) {
+    // MXFP8
+    // Note: Row-wise and column-wise data are scaled along different
+    // dimensions (with matrix interpreted in row-major order).
+    if (is_A_transposed) {
+      NVTE_CHECK(A.has_data(), "Input A is missing row-wise usage");
     } else {
-      ret.Btype = B.data.dtype;
+      NVTE_CHECK(A.has_columnwise_data(), "Input A is missing column-wise usage");
     }
-  } else {
-    // If not tensor scaling (which includes also high precision types), we need to
-    // use the proper version of data
-    // We leave the transA/B values as is, since Blackwell supports transposes
     ret.A = is_A_transposed ? A.data.dptr : A.columnwise_data.dptr;
+    ret.transA = transA;
     ret.Atype = is_A_transposed ? A.data.dtype : A.columnwise_data.dtype;
     ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
+    ret.lda = is_A_transposed ? k : m;
+  } else {
+    NVTE_ERROR("A has unsupported scaling mode");
+  }
+
+  // Configure B matrix
+  if (is_tensor_scaling(B.scaling_mode)) {
+    // Unscaled or FP8 tensor scaling
+    ret.B = B.data.dptr;
+    ret.transB = transB;
+    ret.Btype = B.data.dtype;
+    ret.B_scale_inv = B.scale_inv.dptr;
+    ret.ldb = is_B_transposed ? n : k;
+    if (!nvte_is_non_tn_fp8_gemm_supported() && is_B_transposed) {
+      // Hopper only supports TN GEMMs for FP8. "Column-wise data" is transpose of data.
+      if (B.has_columnwise_data() && is_fp8_dtype(B.columnwise_data.dtype)) {
+        ret.B = B.columnwise_data.dptr;
+        ret.transB = CUBLAS_OP_N;
+        ret.Btype = B.columnwise_data.dtype;
+        ret.B_scale_inv = B.columnwise_scale_inv.dptr;
+        ret.ldb = k;
+      } else {
+        NVTE_CHECK(!is_fp8_dtype(ret.Btype), "Input B is missing column-wise usage");
+      }
+    }
+  } else if (is_mxfp_scaling(B.scaling_mode)) {
+    // MXFP8
+    // Note: Row-wise and column-wise data are scaled along different
+    // dimensions (with matrix interpreted in row-major order).
+    if (is_B_transposed) {
+      NVTE_CHECK(B.has_columnwise_data(), "Input B is missing column-wise usage");
+    } else {
+      NVTE_CHECK(B.has_data(), "Input B is missing row-wise usage");
+    }
     ret.B = is_B_transposed ? B.columnwise_data.dptr : B.data.dptr;
+    ret.transB = transB;
     ret.Btype = is_B_transposed ? B.columnwise_data.dtype : B.data.dtype;
     ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
+    ret.ldb = is_B_transposed ? n : k;
+  } else {
+    NVTE_ERROR("B has unsupported scaling mode");
   }
+
   return ret;
 }
 
@@ -941,7 +960,7 @@ void hipblaslt_gemm(const Tensor *inputA,
   }
   NVTE_CHECK(k > 0);
 
-  const GemmParam &param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, k, lda, ldb);
+  const GemmParam &param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k);
 
   bool nvte_log_gemm_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_GEMM_CONFIG") ) {

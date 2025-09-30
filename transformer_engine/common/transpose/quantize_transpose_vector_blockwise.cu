@@ -1,6 +1,4 @@
 /*************************************************************************
- * This file was modified for portability to AMDGPU
- * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -394,7 +392,6 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
 
 namespace transformer_engine::detail {
 
-#ifndef __HIP_PLATFORM_AMD__
 void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor& scale_inv,
                                          SimpleTensor& scale_inv_t, SimpleTensor& output,
                                          SimpleTensor& output_t, const float epsilon,
@@ -492,6 +489,5 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
       )                                             // InputType
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
-#endif // #ifndef __HIP_PLATFORM_AMD__
 
 }  // namespace transformer_engine::detail

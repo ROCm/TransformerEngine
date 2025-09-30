@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -124,7 +126,9 @@ constexpr int num_streams = 4;
  * The function will be called in the initialize phase of the related XLA custom calls.
  */
 
+#ifndef __HIP_PLATFORM_AMD__
 void nvte_cublas_handle_init();
+#endif
 
 }  // namespace transformer_engine
 
