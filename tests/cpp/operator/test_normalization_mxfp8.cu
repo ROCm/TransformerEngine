@@ -22,6 +22,7 @@
 #include <transformer_engine/cast.h>
 #include <transformer_engine/transformer_engine.h>
 #include "../test_common.h"
+#include "test_normalization.h"
 
 using namespace transformer_engine;
 using namespace test;
@@ -29,16 +30,6 @@ using namespace test;
 namespace {
 
 using fp8e8m0 = byte;
-
-enum NormType {
-  LayerNorm,
-  RMSNorm
-};
-
-std::map<NormType, std::string> normToString = {
-  {NormType::LayerNorm, "LayerNorm"},
-  {NormType::RMSNorm, "RMSNorm"}
-};
 
 template <typename InputType, typename ScaleType, typename OutputType>
 void dequantize_1x_kernel(InputType* input_ptr, ScaleType* scale_ptr, OutputType* output_ptr,
@@ -118,74 +109,17 @@ void dequantize_2x(Tensor& input, Tensor& output, bool is_training)
                          32, 1);
 }
 
-template <typename InputType>
-void compute_ref_stats(NormType norm_type,
-                       const InputType *data, float *mu, float *rsigma,
-                       const size_t N, const size_t H, const double epsilon){
-  using compute_t = float;
-
-  #pragma omp parallel for proc_bind(spread)
-  for (size_t i = 0; i < N; ++i) {
-    compute_t sum = 0;
-    for (size_t j = 0; j < H; ++j) {
-      sum += static_cast<compute_t>(data[i * H + j]);
-    }
-    compute_t m;
-    if (norm_type == LayerNorm){
-      mu[i] = sum / H;
-      m = mu[i];
-    } else { m = 0;}
-
-    compute_t sum_sq = 0;
-    for (size_t j = 0; j < H; ++j) {
-      compute_t current = static_cast<compute_t>(data[i * H + j]);
-      sum_sq += (current - m) * (current - m);
-    }
-#ifdef __HIP_PLATFORM_AMD__
-    rsigma[i] = 1.0f / sqrtf((sum_sq / H) + epsilon);
-#else
-    rsigma[i] = rsqrtf((sum_sq / H) + epsilon);
-#endif
-  }
-}
-
 template <typename InputType, typename OutputType>
-void compute_ref_output(NormType norm_type,
-                        const InputType *data, const InputType *gamma, const InputType *beta,
-                        const float *mu, const float *rsigma,
-                        const size_t N, const size_t H,
-                        OutputType* output,
-                        const bool zero_centered_gamma){
-  using compute_t = float;
-
-  #pragma omp parallel for proc_bind(spread)
-  for (size_t i = 0; i < N; ++i) {
-    for (size_t j = 0; j < H; ++j) {
-      compute_t current = static_cast<compute_t>(data[i * H + j]);
-      compute_t g = static_cast<compute_t>(gamma[j]);
-      if (zero_centered_gamma) {
-        g += 1.0;
-      }
-
-      compute_t tmp;
-      if (norm_type == LayerNorm) {
-        tmp = (current - mu[i]) * rsigma[i] * g + static_cast<compute_t>(beta[j]);
-      } else { // RMSNorm
-        tmp = current * rsigma[i] * g;
-      }
-
-      output[i * H + j] = tmp;
-    }
-  }
-}
-
-template <typename InputType, typename OutputType>
-void performTest(const size_t N, const size_t H, const bool zero_centered_gamma, NormType norm_type, bool is_training) {
+void performTest(const size_t N, const size_t H, const bool zero_centered_gamma, NormType norm_type, bool is_training, const bool zero_centered_gamma_in_weight_dtype) {
 
   cudaDeviceProp prop;
   (void)cudaGetDeviceProperties(&prop, 0);
 
-#ifndef __HIP_PLATFORM_AMD__
+#ifdef __HIP_PLATFORM_AMD__
+  if (zero_centered_gamma_in_weight_dtype) {
+    GTEST_SKIP() << "ROCm does not use zero_centered_gamma_in_weight_dtype";
+  }
+#else
 // TODO: Guard all MXFP8 tests for hip_version >= gfx9.5
   if (getDeviceComputeCapability() < blackwellComputeCapability) {
     GTEST_SKIP();
@@ -197,18 +131,26 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   DType wtype = TypeInfo<WeightType>::dtype;
   DType otype = TypeInfo<OutputType>::dtype;
 
-  Tensor input("input", { N, H }, itype);
-  Tensor z("z", { N, H }, otype, true, is_training, NVTE_MXFP8_1D_SCALING);
-  Tensor gamma("gamma", { H }, wtype);
-  Tensor beta("beta", { H }, wtype);
-  Tensor mu("mu", { N }, DType::kFloat32);
-  Tensor rsigma("rsigma", { N }, DType::kFloat32);
+  Tensor input("input", std::vector<size_t>{ N, H }, itype);
+  Tensor z("z", std::vector<size_t>{ N, H }, otype, true, is_training, NVTE_MXFP8_1D_SCALING);
+  Tensor gamma("gamma", std::vector<size_t>{ H }, wtype);
+  Tensor beta("beta", std::vector<size_t>{ H }, wtype);
+  Tensor mu("mu", std::vector<size_t>{ N }, DType::kFloat32);
+  Tensor rsigma("rsigma", std::vector<size_t>{ N }, DType::kFloat32);
   Tensor workspace;
 
 
   fillUniform(&input);
   fillUniform(&gamma);
   fillUniform(&beta);
+
+#ifndef __HIP_PLATFORM_AMD__
+  if (zero_centered_gamma_in_weight_dtype) {
+    nvte_enable_zero_centered_gamma_in_weight_dtype(true);
+  } else {
+    nvte_enable_zero_centered_gamma_in_weight_dtype(false);
+  }
+#endif
 
   // Forward kernel
   float epsilon = 1e-5;
@@ -235,7 +177,13 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                      0);
   }
 
-  Tensor dequantized_output("dequantized_output", { N, H }, DType::kFloat32, true, true);
+#ifndef __HIP_PLATFORM_AMD__
+  if (zero_centered_gamma_in_weight_dtype) {
+    nvte_enable_zero_centered_gamma_in_weight_dtype(false);
+  }
+#endif 
+
+  Tensor dequantized_output("dequantized_output", std::vector<size_t>{ N, H }, DType::kFloat32, true, true);
 
   dequantize_2x<OutputType, fp8e8m0>(z, dequantized_output, is_training);
 
@@ -258,14 +206,19 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
     ref_mu_ptr = ref_mu.get();
     ref_rsigma_ptr = ref_rsigma.get();
   }
+  // cuDNN flag does not have an effect on ROCm as zero_centered_gamma_in_weight_dtype is always false.
   compute_ref_output(norm_type, input.rowwise_cpu_dptr<InputType>(),
                      gamma.rowwise_cpu_dptr<WeightType>(),
                      beta.rowwise_cpu_dptr<WeightType>(),
+                     ref_output.get(),
                      ref_mu_ptr,
                      ref_rsigma_ptr,
                      N, H,
-                     ref_output.get(),
-                     zero_centered_gamma);
+                     nullptr, // amax
+                     1.f, // scale
+                     zero_centered_gamma,
+                     true, // CuDNN is the only MXFP8 backend currently
+                     zero_centered_gamma_in_weight_dtype);
 
   (void)cudaDeviceSynchronize();
   auto err = cudaGetLastError();
@@ -313,7 +266,7 @@ class MxNormTestSuite : public ::testing::TestWithParam< std::tuple<NormType,
                                                                     transformer_engine::DType,
                                                                     transformer_engine::DType,
                                                                     std::pair<size_t, size_t>,
-                                                                    bool, bool>> {};
+                                                                    bool, bool, bool>> {};
 
 TEST_P(MxNormTestSuite, TestMxNorm) {
   using namespace transformer_engine;
@@ -325,10 +278,11 @@ TEST_P(MxNormTestSuite, TestMxNorm) {
   const auto size = std::get<3>(GetParam());
   const bool zero_centered_gamma = std::get<4>(GetParam());
   const bool is_training = std::get<5>(GetParam());
+  const bool zero_centered_gamma_in_weight_dtype = std::get<6>(GetParam());
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,
-      performTest<InputType, OutputType>(size.first, size.second, zero_centered_gamma, norm_type, is_training);
+      performTest<InputType, OutputType>(size.first, size.second, zero_centered_gamma, norm_type, is_training, zero_centered_gamma_in_weight_dtype);
     );
   );
 }
@@ -342,7 +296,12 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Values(DType::kFloat8E5M2, DType::kFloat8E4M3),
     ::testing::ValuesIn(test_cases),
     ::testing::Values(true, false),
+    ::testing::Values(true, false),
+#ifdef __HIP_PLATFORM_AMD__
+    ::testing::Values(false)), // HIP does not use zero_centered_gamma_in_weight_dtype
+#else
     ::testing::Values(true, false)),
+#endif
   [](const testing::TestParamInfo<MxNormTestSuite::ParamType>& info) {
     std::string name = normToString.at(std::get<0>(info.param)) + "_" +
       test::typeName(std::get<1>(info.param)) + "X" +
@@ -350,6 +309,7 @@ INSTANTIATE_TEST_SUITE_P(
       std::to_string(std::get<3>(info.param).first) + "X" +
       std::to_string(std::get<3>(info.param).second) + "X" +
       std::to_string(std::get<4>(info.param)) + "out" +
-      std::to_string(int(std::get<5>(info.param)) + 1) + "x";
+      std::to_string(int(std::get<5>(info.param)) + 1) + "x" +
+      std::to_string(std::get<6>(info.param));
     return name;
   });

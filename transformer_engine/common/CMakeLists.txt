@@ -119,12 +119,22 @@ if(USE_CUDA)
        cudnn_utils.cpp
        transformer_engine.cpp
        common.cu
+       multi_tensor/adam.cu
+       multi_tensor/compute_scale.cu
+       multi_tensor/l2norm.cu
+       multi_tensor/scale.cu
+       multi_tensor/sgd.cu
        transpose/cast_transpose.cu
        transpose/transpose.cu
        transpose/cast_transpose_fusion.cu
        transpose/transpose_fusion.cu
        transpose/multi_cast_transpose.cu
+       transpose/quantize_transpose_square_blockwise.cu
+       transpose/quantize_transpose_vector_blockwise.cu
        activation/gelu.cu
+       fused_attn/flash_attn.cu
+       fused_attn/context_parallel.cu
+       fused_attn/kv_cache.cu
        fused_attn/fused_attn_f16_max512_seqlen.cu
        fused_attn/fused_attn_f16_arbitrary_seqlen.cu
        activation/relu.cu
@@ -154,6 +164,7 @@ if(USE_CUDA)
        fused_rope/fused_rope.cu
        recipe/current_scaling.cu
        recipe/delayed_scaling.cu
+       recipe/fp8_block_scaling.cu
        comm_gemm_overlap/userbuffers/ipcsocket.cc
        comm_gemm_overlap/userbuffers/userbuffers-host.cpp
        comm_gemm_overlap/userbuffers/userbuffers.cu
@@ -163,6 +174,11 @@ else()
   list(APPEND transformer_engine_SOURCES
        transformer_engine.cpp
        common.cu
+       multi_tensor/adam.cu
+       multi_tensor/compute_scale.cu
+       multi_tensor/l2norm.cu
+       multi_tensor/scale.cu
+       multi_tensor/sgd.cu
        transpose/cast_transpose.cu
        transpose/transpose.cu
        transpose/cast_transpose_fusion.cu
@@ -171,6 +187,9 @@ else()
        activation/gelu.cu
        activation/relu.cu
        activation/swiglu.cu
+       fused_attn/flash_attn.cu
+       fused_attn/context_parallel.cu
+       fused_attn/kv_cache.cu
        fused_attn_rocm/fused_attn.cpp
        fused_attn_rocm/fused_attn_aotriton.cpp
        fused_attn_rocm/fused_attn_ck.cpp
@@ -197,7 +216,8 @@ else()
        fused_softmax/scaled_aligned_causal_masked_softmax.cu
        fused_rope/fused_rope.cu
        recipe/current_scaling.cu
-       recipe/delayed_scaling.cu)
+       recipe/delayed_scaling.cu
+       recipe/fp8_block_scaling.cu)
 
   # process source code files
   set(TE ${CMAKE_CURRENT_SOURCE_DIR}/../..)
@@ -225,15 +245,19 @@ else()
   message(STATUS "nvte hipified sources: ${te_hip_sources}")
 
   add_library(transformer_engine SHARED ${te_hip_sources})
+  target_include_directories(transformer_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 endif()
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
+
+
 
 # Configure dependencies
 if (USE_CUDA)
   target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
-                      CUDA::cudart)
+                      CUDA::cudart
+                      CUDNN::cudnn_all)
   target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
@@ -358,6 +382,18 @@ else()
   target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS})
 endif()
 
+if(USE_CUDA)
+  option(NVTE_ENABLE_NVSHMEM "Compile with NVSHMEM library" OFF)
+  if (NVTE_ENABLE_NVSHMEM)
+      add_subdirectory(nvshmem_api)
+      target_link_libraries(transformer_engine PUBLIC nvshmemapi)
+      target_include_directories(transformer_engine PUBLIC ${NVSHMEMAPI_INCLUDE_DIR})
+  endif()
+
+# Hack to enable dynamic loading in cuDNN frontend
+target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
+endif()
+
 # Helper functions to make header files with C++ strings
 function(make_string_header STRING STRING_NAME)
     configure_file(util/string_header.h.in
@@ -407,6 +443,14 @@ target_include_directories(transformer_engine PRIVATE
 set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
                             fused_softmax/scaled_upper_triang_masked_softmax.cu
                             fused_softmax/scaled_aligned_causal_masked_softmax.cu
+                            multi_tensor/adam.cu
+                            multi_tensor/compute_scale.cu
+                            multi_tensor/l2norm.cu
+                            multi_tensor/scale.cu
+                            multi_tensor/sgd.cu
+                            fused_attn/flash_attn.cu
+                            fused_attn/context_parallel.cu
+                            fused_attn/kv_cache.cu
                             PROPERTIES
                             COMPILE_OPTIONS "--use_fast_math")
 if(USE_CUDA)

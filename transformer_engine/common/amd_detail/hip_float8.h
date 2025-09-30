@@ -11,12 +11,18 @@
 /* Platforms that have both MI300 family and other families GPUs are unknown and not supported.
 * Thus, FP8 format is selected once by the current (any) GPU architecture.
 */
+#include <iostream>
 #include <optional>
 #include "../util/string.h"
 static bool _te_check_fp8_fnuz() {
   hipDeviceProp_t prop;
   hipError_t res= hipGetDeviceProperties(&prop, 0);
   if (res != hipSuccess) {
+    if (res == hipErrorNoDevice) {
+      // no device, default to OCP
+      std::cerr << "No HIP device found, defaulting to OCP format for FP8\n";
+      return false;
+    }
     //TODO: better error out system
     throw std::runtime_error(transformer_engine::concat_strings(
       "hipGetDeviceProperties failed with error: ", hipGetErrorString(res)));

@@ -221,5 +221,71 @@ void generateMatrixStrides(
     }
 }
 
+__global__ void populate_rng_state_kernel(int64_t *rng_state_dst, const int64_t *const seed,
+                                          int64_t offset) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid > 0) return;
+  rng_state_dst[0] = seed[0];
+  rng_state_dst[1] = offset;
+}
+
+__global__ void get_runtime_num_segments_kernel(int32_t *cu_seqlen, size_t len, uint32_t *out) {
+  int tid = blockDim.x * blockIdx.x + threadIdx.x;
+  if (tid >= len) return;
+
+  if (cu_seqlen[tid] > 0) {
+    // atomicAdd only support 32 bits dtype
+    atomicAdd(out, 1);
+  }
+}
+
+void PopulateRngStateAsync(void *rng_state_dst, 
+                           const void *const seed,
+                           size_t batch_size, 
+                           size_t num_heads, 
+                           size_t q_max_seqlen, 
+                           size_t kv_max_seqlen,
+                           cudaStream_t stream) {
+    size_t increment = batch_size*num_heads*q_max_seqlen*kv_max_seqlen;
+    auto offset = FusedAttnOffsetManager::Instance().GetAndUpdateOffset(increment);
+    populate_rng_state_kernel<<<1, 1, 0, stream>>>(reinterpret_cast<int64_t *>(rng_state_dst),
+                                                   reinterpret_cast<const int64_t *>(seed), offset);
+    NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
+uint32_t GetRuntimeNumSegments(void *cu_seqlen, void *workspace, size_t len, cudaStream_t stream) {
+  // workspace size requires 4 bytes
+  uint32_t *dout = static_cast<uint32_t *>(workspace);
+  uint32_t hout{};
+  cudaMemsetAsync(dout, 0, sizeof(uint32_t), stream);
+  constexpr int threads = 128;
+  const int blocks = (len - 1) / threads + 1;
+  get_runtime_num_segments_kernel<<<blocks, threads, 0, stream>>>(static_cast<int32_t *>(cu_seqlen),
+                                                                  len, dout);
+  cudaMemcpyAsync(&hout, dout, sizeof(uint32_t), cudaMemcpyDeviceToHost, stream);
+  cudaStreamSynchronize(stream);
+  return hout;
+}
+
+__global__ void extract_seed_and_offset(int64_t *rng_state_ptr, bool captured, int64_t *seed_ptr,
+                                        uint64_t seed_val, int64_t *offset_ptr, uint64_t offset_val,
+                                        uint32_t offset_intragraph) {
+  if (captured) {
+    rng_state_ptr[0] = *seed_ptr;
+    rng_state_ptr[1] = static_cast<int64_t>(*offset_ptr + static_cast<int64_t>(offset_intragraph));
+  } else {
+    rng_state_ptr[0] = static_cast<int64_t>(seed_val);
+    rng_state_ptr[1] = static_cast<int64_t>(offset_val);
+  }
+}
+
 }  // namespace fused_attn_rocm
 }  // namespace transformer_engine
+
+void nvte_extract_seed_and_offset(int64_t *rng_state_ptr, int captured, int64_t *seed_ptr,
+                                  uint64_t seed_val, int64_t *offset_ptr, uint64_t offset_val,
+                                  uint32_t offset_intragraph, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_extract_seed_and_offset);
+  transformer_engine::fused_attn_rocm::extract_seed_and_offset<<<1, 1, 0, stream>>>(
+        rng_state_ptr, captured, seed_ptr, seed_val, offset_ptr, offset_val, offset_intragraph);
+}

@@ -14,6 +14,7 @@
 #include <cudnn_frontend.h>
 #include <cudnn_frontend_utils.h>
 #endif
+#include <transformer_engine/normalization.h>
 #include <transformer_engine/transformer_engine.h>
 
 #include <functional>
@@ -174,7 +175,6 @@ enum class NVTE_Norm_Backend { Te };
 #else
 enum class NVTE_Norm_Backend { Te, Cudnn };
 #endif
-enum class NVTE_Norm_Type { LayerNorm, RMSNorm };
 enum class NVTE_Norm_Stage { Forward, Backward };
 
 using TupleKeyType = std::tuple<uint64_t, uint64_t, uint64_t, bool>;
