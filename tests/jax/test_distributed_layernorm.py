@@ -4,6 +4,7 @@
 
 import warnings
 import pytest
+from packaging import version
 
 import jax
 import jax.numpy as jnp
@@ -90,7 +91,7 @@ class TestDistributedLayernorm:
     @pytest_parametrize_wrapper("zero_centered_gamma", [False, True])
     @pytest_parametrize_wrapper("shard_weights", [False, True])
     @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
-    @pytest_parametrize_wrapper("use_shardy", [False, True])
+    @pytest_parametrize_wrapper("use_shardy", [False, True] if version.parse(jax.__version__) >= version.parse("0.5.0") else [False])
     def test_layernorm(
         self,
         device_count,
@@ -175,7 +176,7 @@ class TestDistributedLayernorm:
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("shard_weights", [False, True])
     @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
-    @pytest_parametrize_wrapper("use_shardy", [False, True])
+    @pytest_parametrize_wrapper("use_shardy", [False, True] if version.parse(jax.__version__) >= version.parse("0.5.0") else [False])
     def test_rmsnorm(
         self,
         device_count,

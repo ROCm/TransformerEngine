@@ -124,7 +124,7 @@ class _Linear(torch.autograd.Function):
         skip_fp8_weight_update: bool,
         symmetric_ar_type: str,
         debug: Optional[bool] = False,
-        keep_fp8_weight_transpose_cache: Optional[bool] = True,
+        keep_fp8_weight_transpose_cache: bool = True,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
 

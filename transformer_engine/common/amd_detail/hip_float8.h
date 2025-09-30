@@ -12,22 +12,13 @@
 * Thus, FP8 format is selected once by the current (any) GPU architecture.
 */
 #include <optional>
-#include "../util/string.h"
-static bool _te_check_fp8_fnuz() {
-  hipDeviceProp_t prop;
-  hipError_t res= hipGetDeviceProperties(&prop, 0);
-  if (res != hipSuccess) {
-    //TODO: better error out system
-    throw std::runtime_error(transformer_engine::concat_strings(
-      "hipGetDeviceProperties failed with error: ", hipGetErrorString(res)));
-  }
-  return prop.major == 9 && prop.minor == 4;
-}
+
+bool te_check_fp8_fnuz();
 
 static inline bool te_fp8_fnuz() {
   static std::optional<bool> use_fnuz;
   if (!use_fnuz.has_value()) {
-    use_fnuz = _te_check_fp8_fnuz();
+    use_fnuz = te_check_fp8_fnuz();
   }
   return use_fnuz.value();
 }

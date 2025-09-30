@@ -5,6 +5,7 @@
 import warnings
 from functools import partial
 import pytest
+from packaging import version
 
 import jax
 import jax.numpy as jnp
@@ -175,6 +176,7 @@ class TestDistributedSoftmax:
     @pytest.mark.parametrize("softmax_type", [SoftmaxType.SCALED, SoftmaxType.SCALED_MASKED])
     @pytest.mark.parametrize("bad_sharding", [False, True])
     @pytest.mark.parametrize("broadcast_batch_mask", [False, True])
+    @pytest.mark.skipif(version.parse(jax.__version__) < version.parse("0.5.0"), reason="shardy sharding requires JAX 0.5.0")
     def test_softmax_shardy(
         self,
         device_count,

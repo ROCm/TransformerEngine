@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -6,6 +8,7 @@
 import os
 from typing import List, Union
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine_torch as tex
 
 from transformer_engine.pytorch.utils import (
@@ -568,7 +571,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         else:
             q_f16 = q
             if use_fused_attention:
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen" if not IS_HIP_EXTENSION else "CK"]
 
         if cp_size_a2a > 1:
             chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(cp_size_a2a, q.device)
@@ -1571,7 +1574,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             if ctx.use_fused_attention:
                 fp8_meta_kwargs = {}
                 fused_attn_dqkv_dtype = TE_DType[dout_dtype]
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen" if not IS_HIP_EXTENSION else "CK"]
 
         if cp_size_a2a > 1:
             if not ctx.use_fused_attention:
@@ -3032,7 +3035,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         else:
             if use_fused_attention:
                 fp8_meta_kwargs = {}
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen" if not IS_HIP_EXTENSION else "CK"]
 
         chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(cp_size, q.device)
         q, k, v = flash_attn_a2a_communicate(
@@ -3259,7 +3262,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             if ctx.use_fused_attention:
                 fp8_meta_kwargs = {}
                 fused_attn_dqkv_dtype = TE_DType[dout_dtype]
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen" if not IS_HIP_EXTENSION else "CK"]
 
         if not ctx.use_fused_attention:
             out = out.view(ctx.batch_size, -1, *out.shape[-2:])

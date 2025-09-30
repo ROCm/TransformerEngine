@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 from typing import Callable, Sequence, Union, Optional
 import pytest
+from packaging import version
 
 import jax
 import jax.numpy as jnp
@@ -251,6 +252,7 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("use_bias", [True, False])
+    @pytest.mark.skipif(version.parse(jax.__version__) < version.parse("0.5.0"), reason="shardy sharding requires JAX 0.5.0")
     def test_layernorm_mlp_grad_shardy(
         self, mesh_config, activation_type, use_bias, input_shape, dtype
     ):
@@ -340,7 +342,7 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("activation_type", [("gelu",), ("silu", "linear")])
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("use_bias", [True, False])
-    @pytest_parametrize_wrapper("use_shardy", [False, True])
+    @pytest_parametrize_wrapper("use_shardy", [False, True] if version.parse(jax.__version__) >= version.parse("0.5.0") else [False])
     def test_layernorm_mlp_layer(
         self, mesh_config, activation_type, use_bias, input_shape, dtype, use_shardy
     ):

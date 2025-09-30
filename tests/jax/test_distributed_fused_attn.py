@@ -302,6 +302,8 @@ class TestDistributedContextParallelSelfAttn:
         use_scan_ring=False,
     ):
         if qkv_layout.is_thd():
+            if is_hip_extension() and cp_strategy == CPStrategy.RING:
+                pytest.skip("THD + ring on Rocm doesn't support context parallelism.")
             if cp_strategy == CPStrategy.ALL_GATHER:
                 pytest.skip("THD doesn't support all gather context parallelism.")
             if not load_balanced and cp_strategy == CPStrategy.RING:
