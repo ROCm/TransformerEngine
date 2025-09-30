@@ -86,7 +86,14 @@ jobs:
       - name: 📦 Build wheel inside container
         run: |
           set -ex
-           
+          
+          # 1. Install core build tools, including the g++ compiler
+          sudo apt-get update && sudo apt-get install -y build-essential
+
+          # 2. Upgrade pip and ninja, then add the new pip to the PATH
+          pip install --upgrade pip ninja
+          export PATH=/home/runner/.local/bin:$PATH
+          
           # Install CMake
           CMAKE_LINK="https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0-linux-x86_64.sh"
           sudo wget -q -P /opt ${CMAKE_LINK}
@@ -96,13 +103,12 @@ jobs:
           sudo ln -sf /opt/cmake/bin/* /usr/local/bin/
           cmake --version
           
-          # Build Wheel
+          # 3. Set up ROCm environment and build the wheel
           export ROCM_PATH=/opt/rocm-6.4.1
           export PATH=$ROCM_PATH/bin:$PATH
           export LD_LIBRARY_PATH=$ROCM_PATH/lib:$LD_LIBRARY_PATH
           export PYTORCH_ROCM_ARCH=gfx942
           export NVTE_ROCM_ARCH=gfx942
-          pip install --upgrade pip ninja
           pip install -v .
           
       - name: ⬆️ Upload wheel artifact
