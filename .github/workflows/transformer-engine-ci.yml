@@ -69,6 +69,11 @@ jobs:
           
           echo "Selected image: $IMAGE_TO_USE"
           echo "image-tag=$IMAGE_TO_USE" >> $GITHUB_OUTPUT
+          
+      - name: 🐞 DEBUG - Attempt manual Docker login
+        run: |
+          echo "Attempting login for user: ${{ secrets.ARTIFACTORY_USER }}"
+          echo "${{ secrets.ARTIFACTORY_PAT }}" | docker login compute-artifactory.amd.com:5000 -u "${{ secrets.ARTIFACTORY_USER }}" --password-stdin
 
       - name: 🔐 Log in to Artifactory Docker registry
         uses: docker/login-action@v3
