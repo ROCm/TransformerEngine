@@ -30,6 +30,9 @@ jobs:
     name: Build TransformerEngine
     # This is a build job, doesn't need GPUs
     runs-on: [build-only]
+    container:
+      image: ${{ steps.select-image.outputs.image-tag }}
+      options: --shm-size=16g
     
     outputs:
       docker-image: ${{ steps.select-image.outputs.image-tag }}
@@ -40,11 +43,6 @@ jobs:
         with:
           submodules: 'recursive'
           fetch-depth: 0 # Needed to get all branches for version detection
-
-      - name: 🛠️ Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
 
       - name: 🖼️ Select Docker Image
         id: select-image
@@ -81,26 +79,23 @@ jobs:
           username: ${{ secrets.ARTIFACTORY_USER }}
           password: ${{ secrets.ARTIFACTORY_PAT }}
 
-      - name: 📦 Build inside container and create wheel
-        uses: devcontainers/ci@v0.3
-        with:
-          imageName: ${{ steps.select-image.outputs.image-tag }}
-          runCmd: |
-            set -ex
-            
-            # Install CMake
-            CMAKE_LINK="https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0-linux-x86_64.sh"
-            wget -q -P /opt ${CMAKE_LINK}
-            chmod +x /opt/cmake-*.sh
-            bash /opt/cmake-*.sh --skip-license --prefix=/opt/cmake
-            ln -sf /opt/cmake/bin/* /usr/local/bin/
-            cmake --version
-
-            # Build Wheel
-            export PYTORCH_ROCM_ARCH=gfx942
-            export NVTE_ROCM_ARCH=gfx942
-            pip install --upgrade pip ninja
-            pip install -v .
+      - name: 📦 Build wheel inside container
+        run: |
+          set -ex
+          
+          # Install CMake
+          CMAKE_LINK="https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0-linux-x86_64.sh"
+          wget -q -P /opt ${CMAKE_LINK}
+          chmod +x /opt/cmake-*.sh
+          bash /opt/cmake-*.sh --skip-license --prefix=/opt/cmake
+          ln -sf /opt/cmake/bin/* /usr/local/bin/
+          cmake --version
+          
+          # Build Wheel
+          export PYTORCH_ROCM_ARCH=gfx942
+          export NVTE_ROCM_ARCH=gfx942
+          pip install --upgrade pip ninja
+          pip install -v .
           
       - name: ⬆️ Upload wheel artifact
         uses: actions/upload-artifact@v4
