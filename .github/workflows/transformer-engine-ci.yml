@@ -26,23 +26,15 @@ on:
         default: 'te-gfx942-4gpu'
 
 jobs:
-  build:
-    name: Build TransformerEngine
-    # This is a build job, doesn't need GPUs
-    runs-on: [build-only]
-    container:
-      image: ${{ steps.select-image.outputs.image-tag }}
-      options: --shm-size=16g
-    
+jobs:
+  setup:
+    name: Select Docker Image
+    runs-on: ubuntu-latest
     outputs:
       docker-image: ${{ steps.select-image.outputs.image-tag }}
-
     steps:
       - name: 📜 Checkout repository
         uses: actions/checkout@v4
-        with:
-          submodules: 'recursive'
-          fetch-depth: 0 # Needed to get all branches for version detection
 
       - name: 🖼️ Select Docker Image
         id: select-image
@@ -50,17 +42,16 @@ jobs:
           # Use the target branch for PRs, otherwise use the branch name
           BRANCH_NAME="${{ github.base_ref || github.ref_name }}"
           echo "Determining image for branch: $BRANCH_NAME"
-          
+
           DEV_DOCKER_IMAGE="compute-artifactory.amd.com:5000/rocm-plus-docker/framework/private/te-ci:rocm-6.4_0_ubuntu22_py310_torch25_jax0435qa_fa273"
           REL613_DOCKER_IMAGE="compute-artifactory.amd.com:5000/rocm-plus-docker/framework/private/te-ci:rocm-6.4_0_ubuntu22_py310_torch25_jax0435qa_fa273"
           LEGACY_DOCKER_IMAGE="compute-artifactory.amd.com:5000/rocm-plus-docker/framework/private/te-ci:rocm-6.3_66_ubuntu22_py310_torch25_jax0431_fa263_hipblaslt10patch.2"
 
           IMAGE_TO_USE="$DEV_DOCKER_IMAGE" # Default
-
           if [[ $BRANCH_NAME =~ ^release_v([0-9]+)\.([0-9]+)_rocm$ ]]; then
             MAJOR_VERSION=${BASH_REMATCH[1]}
             MINOR_VERSION=${BASH_REMATCH[2]}
-            
+
             if (( MAJOR_VERSION == 1 )); then
               if (( MINOR_VERSION >= 9 && MINOR_VERSION <= 12 )); then
                 IMAGE_TO_USE="$LEGACY_DOCKER_IMAGE"
@@ -69,10 +60,24 @@ jobs:
               fi
             fi
           fi
-          
+
           echo "Selected image: $IMAGE_TO_USE"
           echo "image-tag=$IMAGE_TO_USE" >> $GITHUB_OUTPUT
-          
+  build:
+    name: Build TransformerEngine
+    # This is a build job, doesn't need GPUs
+    runs-on: [build-only]
+    container:
+      image: ${{ needs.setup.outputs.docker-image }}
+      options: --shm-size=16g
+
+    steps:
+      - name: 📜 Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+          fetch-depth: 0 # Needed to get all branches for version detection
+
       - name: 🔐 Log in to Docker registry
         uses: docker/login-action@v3
         with:
@@ -105,7 +110,7 @@ jobs:
           if-no-files-found: error
   test:
       name: Test - ${{ matrix.framework }} (${{ matrix.gpu_mode }})
-      needs: build
+      needs: [setup, build]
       runs-on: [te-gfx942-4gpu]
       continue-on-error: true
 
@@ -131,7 +136,7 @@ jobs:
         TEST_MGPU: ${{ contains(matrix.gpu_mode, 'Multi-GPU') }}
 
       container:
-        image: ${{ needs.build.outputs.docker-image }}
+        image: ${{ needs.setup.outputs.docker-image }}
         options: --device=/dev/kfd --device=/dev/dri --group-add=video --shm-size=16g --pid=host
         
       steps:
