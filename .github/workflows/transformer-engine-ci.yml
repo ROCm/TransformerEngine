@@ -26,7 +26,6 @@ on:
         default: 'te-gfx942-4gpu'
 
 jobs:
-jobs:
   setup:
     name: Select Docker Image
     runs-on: ubuntu-latest
