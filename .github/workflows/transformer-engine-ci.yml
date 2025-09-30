@@ -103,18 +103,16 @@ jobs:
           sudo ln -sf /opt/cmake/bin/* /usr/local/bin/
           cmake --version
 
-          # --- START NEW FIX ---
-          # Explicitly tell CMake which compilers to use
-          export CXX=/usr/bin/g++
-          export CC=/usr/bin/gcc
-          # --- END NEW FIX ---
-          
           # Set up ROCm environment
           export ROCM_PATH=/opt/rocm-6.4.1
           export PATH=$ROCM_PATH/bin:$PATH
           export LD_LIBRARY_PATH=$ROCM_PATH/lib:$LD_LIBRARY_PATH
           export PYTORCH_ROCM_ARCH=gfx942
           export NVTE_ROCM_ARCH=gfx942
+
+          # Explicitly tell CMake to use the ROCm HIP compiler
+          export CXX=$ROCM_PATH/bin/hipcc
+          export CC=$ROCM_PATH/bin/hipcc
           
           # Build the wheel
           pip install -v .
