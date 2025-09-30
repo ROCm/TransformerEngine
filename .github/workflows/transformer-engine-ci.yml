@@ -89,9 +89,9 @@ jobs:
           
           # Install CMake
           CMAKE_LINK="https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0-linux-x86_64.sh"
-          wget -q -P /opt ${CMAKE_LINK}
-          chmod +x /opt/cmake-*.sh
-          bash /opt/cmake-*.sh --skip-license --prefix=/opt/cmake
+          sudo wget -q -P /opt ${CMAKE_LINK}
+          sudo chmod +x /opt/cmake-*.sh
+          sudo bash /opt/cmake-*.sh --skip-license --prefix=/opt/cmake
           ln -sf /opt/cmake/bin/* /usr/local/bin/
           cmake --version
           
