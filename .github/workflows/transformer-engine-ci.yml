@@ -115,6 +115,10 @@ jobs:
           export CC=$ROCM_PATH/bin/hipcc
           
           # Build the wheel
+          CXX=$ROCM_PATH/bin/hipcc \
+          CC=$ROCM_PATH/bin/hipcc \
+          NVTE_ROCM_ARCH=gfx942 \
+          PYTORCH_ROCM_ARCH=gfx942 \
           pip install -v .
           
       - name: ⬆️ Upload wheel artifact
