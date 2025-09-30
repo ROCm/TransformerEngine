@@ -87,14 +87,13 @@ jobs:
         run: |
           set -ex
            
-          sudo su
           # Install CMake
           CMAKE_LINK="https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0-linux-x86_64.sh"
-          wget -q -P /opt ${CMAKE_LINK}
-          chmod +x /opt/cmake-*.sh
-          mkdir -p /opt/cmake
-          bash /opt/cmake-*.sh --skip-license --prefix=/opt/cmake
-          ln -sf /opt/cmake/bin/* /usr/local/bin/
+          sudo wget -q -P /opt ${CMAKE_LINK}
+          sudo chmod +x /opt/cmake-*.sh
+          sudo mkdir -p /opt/cmake
+          sudo bash /opt/cmake-*.sh --skip-license --prefix=/opt/cmake
+          sudo ln -sf /opt/cmake/bin/* /usr/local/bin/
           cmake --version
           
           # Build Wheel
@@ -160,7 +159,6 @@ jobs:
           run: |
             set -ex
             
-            sudo su
             # Enhanced debug output
             ls -d /opt/rocm*
             python --version
