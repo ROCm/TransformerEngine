@@ -155,6 +155,7 @@ def rmsnorm_fwd_ref(
     zero_centered_gamma
 ):
     # Dummy function to serve as a stand-in for a reference HIP implementation
+    input = input.to(torch.float32)
     norm_x = torch.mean(input * input, dim=1, keepdim=True)
     rsigma = torch.rsqrt(norm_x + eps)
     g_tensor = weight + int(zero_centered_gamma)

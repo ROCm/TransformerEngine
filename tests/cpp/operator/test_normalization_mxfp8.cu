@@ -113,7 +113,7 @@ template <typename InputType, typename OutputType>
 void performTest(const size_t N, const size_t H, const bool zero_centered_gamma, NormType norm_type, bool is_training, const bool zero_centered_gamma_in_weight_dtype) {
 
   cudaDeviceProp prop;
-  cudaGetDeviceProperties(&prop, 0);
+  (void)cudaGetDeviceProperties(&prop, 0);
 
 #ifdef __HIP_PLATFORM_AMD__
   if (zero_centered_gamma_in_weight_dtype) {
@@ -220,7 +220,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                      true, // CuDNN is the only MXFP8 backend currently
                      zero_centered_gamma_in_weight_dtype);
 
-  cudaDeviceSynchronize();
+  (void)cudaDeviceSynchronize();
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 

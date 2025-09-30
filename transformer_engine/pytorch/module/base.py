@@ -1279,8 +1279,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 else:
                     current_quantizer = quantizer
                     
-            assert isinstance(current_quantizer, Float8Quantizer), "`create_tranpose_buffer=False` only availabe in `Float8Quantizer`."
-
             # NOTE: Not create transpose buffer internally.
             current_quantizer.columnwise_usage = False
 

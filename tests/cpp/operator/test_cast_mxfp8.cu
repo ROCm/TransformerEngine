@@ -436,7 +436,7 @@ void performTest_x2(const ProcessingMethod processing_method,
         }
     }
 
-    cudaDeviceSynchronize();
+    (void)cudaDeviceSynchronize();
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 

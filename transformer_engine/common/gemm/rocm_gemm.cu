@@ -17,6 +17,7 @@
 #include <chrono>
 #include <optional>
 #include <hipblaslt/hipblaslt.h>
+#include <hipblaslt/hipblaslt-ext.hpp>
 
 #include <iostream>
 #include <cstdlib>
@@ -1170,11 +1171,49 @@ void hipblaslt_gemm(const Tensor *inputA,
   GemmAlgoCache::Algo cached_algo;
   if (algoCache.find(gemm_cfg, workspaceSize, cached_algo) == 0 || !cached_algo.algo.has_value())
   {
+    bool logTuning = getIntEnv("TE_HIPBLASLT_LOG_TUNING", 0, 0) != 0;
+
+    // Find algo base algo_id directly if tuning file is set.
+    if (cached_algo.hasId())
+    {
+      std::vector<hipblasLtMatmulHeuristicResult_t> algo_arr;
+      std::vector<int> algo_index{static_cast<int>(cached_algo.algoId)};
+      
+      if (hipblaslt_ext::getAlgosFromIndex(handle, algo_index, algo_arr) == HIPBLAS_STATUS_SUCCESS &&
+          algo_arr[0].state == HIPBLAS_STATUS_SUCCESS) {
+        size_t ws_size_min = 0;
+        if (HIPBLAS_STATUS_SUCCESS == hipblaslt_ext::matmulIsAlgoSupported(
+          handle,
+          operationDesc, 
+          static_cast<const void*>(&one),
+          Adesc, 
+          Bdesc, 
+          static_cast<const void*>(&beta),
+          Ddesc,
+          Ddesc,
+          algo_arr[0].algo,
+          ws_size_min
+        )) {
+
+          if (ws_size_min <= workspaceSize && ws_size_min <= algo_arr[0].workspaceSize) {
+            cached_algo.algo = algo_arr[0].algo;
+            if (cached_algo.ws_size_min != algo_arr[0].workspaceSize) {
+              cached_algo.ws_size_min = algo_arr[0].workspaceSize;
+              algoCache.store(gemm_cfg, cached_algo);
+            }
+          }
+        }
+      }
+
+      if (logTuning && !cached_algo.algo.has_value()) {
+        std::cout << "[WARNING] Cannot get corresponding solution from cached algoId " << cached_algo.algoId << std::endl;
+      }
+    }
+
     int firstAlgo = getIntEnv("TE_HIPBLASLT_ALGO_SELECTION", 0, 0);
     int tuneLoopCount = getIntEnv("TE_HIPBLASLT_TUNING_RUN_COUNT", 0, 0);
     int algoTuneCount = 1;
     std::vector<hipblasLtMatmulHeuristicResult_t> algoArr;
-    bool logTuning = getIntEnv("TE_HIPBLASLT_LOG_TUNING", 0, 0) != 0;
 
     if (tuneLoopCount)
     {
@@ -1185,8 +1224,7 @@ void hipblaslt_gemm(const Tensor *inputA,
       algoTuneCount = getIntEnv("TE_HIPBLASLT_TUNING_ALGO_COUNT", defaultAlgoCount, 1);
     }
     algoTuneCount += firstAlgo;
-    int algoTotalCount = cached_algo.hasId() ? std::max(algoTuneCount, (cached_algo.index + 1)) : algoTuneCount;
-    algoArr.resize(algoTotalCount);
+    algoArr.resize(algoTuneCount);
 
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceCreate(&preference));
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceSetAttribute(
@@ -1194,47 +1232,17 @@ void hipblaslt_gemm(const Tensor *inputA,
                             &workspaceSize, sizeof(workspaceSize)));
 
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Cdesc,
-                                                    Ddesc, preference, algoTotalCount, algoArr.data(),
-                                                    &algoTotalCount));
-    algoArr.resize(algoTotalCount);
+                                                    Ddesc, preference, algoTuneCount, algoArr.data(),
+                                                    &algoTuneCount));
+    algoArr.resize(algoTuneCount);
 
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceDestroy(preference));
-
-    //If cached algo exists in persistent storage we just need to find matching hipblasLtMatmulAlgo_t
-    if (cached_algo.hasId())
-    {
-      int idx = (cached_algo.index < algoTotalCount) ? cached_algo.index : 0;
-      for (int i=0; i<algoTotalCount; i++)
-      {
-        const auto &algo = algoArr[idx];
-        if (algo.state == HIPBLAS_STATUS_SUCCESS)
-        {
-          if (cached_algo.algoId == cached_algo.getAlgoId(algo.algo))
-          {
-            cached_algo.algo = algo.algo;
-            if (algo.workspaceSize != cached_algo.ws_size_min || idx != cached_algo.index)
-            {
-              cached_algo.ws_size_min = algo.workspaceSize;
-              cached_algo.index = idx;
-              algoCache.store(gemm_cfg, cached_algo);
-            }
-            break;
-          }
-        }
-        idx = (idx + 1) % algoTotalCount;
-      }
-      if (logTuning && !cached_algo.algo.has_value())
-      {
-        std::cout << "[WARNING] Cannot find cached algoId " << cached_algo.algoId << " in hipBLASLt results" << std::endl;
-      }
-    }
 
     //No suitable entry in autotune cache or could not find matched algo in hipBLASLt results
     if (!cached_algo.algo.has_value())
     {
 
       int bestAlgo = -1;
-      algoTuneCount = std::min(algoTuneCount, algoTotalCount);
       if (tuneLoopCount > 0)
       {
         if (logTuning)
@@ -1329,10 +1337,11 @@ void hipblaslt_gemm(const Tensor *inputA,
       cached_algo.ws_size_min = algoArr[bestAlgo].workspaceSize;
       cached_algo.ws_size_max = workspaceSize;
 
-      if (logTuning)
-        std::cout << "[INFO] Use hipBLASLt algo [" << bestAlgo << "] " << cached_algo.algoId << std::endl;
-
       algoCache.store(gemm_cfg, cached_algo);
+    }
+
+    if (logTuning) {
+      std::cout << "[INFO] Use hipBLASLt algo [" << cached_algo.index << "] " << cached_algo.algoId << std::endl;
     }
   }
 
