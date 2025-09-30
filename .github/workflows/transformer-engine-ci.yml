@@ -97,6 +97,7 @@ jobs:
           cmake --version
           
           # Build Wheel
+          export ROCM_PATH=/opt/rocm
           export PYTORCH_ROCM_ARCH=gfx942
           export NVTE_ROCM_ARCH=gfx942
           pip install --upgrade pip ninja
