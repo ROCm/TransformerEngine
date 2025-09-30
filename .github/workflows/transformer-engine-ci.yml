@@ -68,7 +68,7 @@ jobs:
     runs-on: [build-only]
     container:
       image: ${{ needs.setup.outputs.docker-image }}
-      options: --shm-size=16g
+      options: --shm-size=16g --user root
 
     steps:
       - name: 📜 Checkout repository
@@ -136,7 +136,7 @@ jobs:
 
       container:
         image: ${{ needs.setup.outputs.docker-image }}
-        options: --device=/dev/kfd --device=/dev/dri --group-add=video --shm-size=16g --pid=host
+        options: --device=/dev/kfd --device=/dev/dri --group-add=video --shm-size=16g --pid=host --user root
         
       steps:
         - name: 📜 Checkout repository
