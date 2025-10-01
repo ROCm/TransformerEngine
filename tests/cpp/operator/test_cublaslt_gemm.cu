@@ -81,12 +81,14 @@ void compute_ref(
   const float d_scale,
   size_t m, size_t k, size_t n,
   D_Type* ref_d_data,
-  float* ref_d_amax,
+  float* ref_d_amax_ptr,
   Gelu_Type* ref_gelu_data,
   bool transa,
   bool transb){
 
-  *ref_d_amax = 0;
+  float ref_d_amax = 0;
+
+  #pragma omp parallel for schedule(static) collapse(2) reduction(max: ref_d_amax) proc_bind(spread)
   for(size_t ii = 0; ii < m; ii++){
     for(size_t jj = 0; jj < n; jj++){
       float val = 0;
@@ -106,9 +108,13 @@ void compute_ref(
       // update ref_d_amax if in fp8
       DType dtype = TypeInfo<D_Type>::dtype;
       if(isFp8Type(dtype)){
-        *ref_d_amax = std::max<float>(*ref_d_amax, std::fabs(val));
+        ref_d_amax = std::max<float>(ref_d_amax, std::fabs(val));
       }
     }
+  }
+  if (ref_d_amax_ptr)
+  {
+    *ref_d_amax_ptr = ref_d_amax;
   }
 }
 
@@ -116,31 +122,31 @@ template <typename A_Type, typename B_Type, typename Bias_Type, typename Gelu_Ty
 void compute_mxfp8_ref(
   const A_Type* a_data,
   const B_Type* b_data,
-  const NVTEShape& a_scale_inv_shape,
   const fp8e8m0* a_scale_inv_data,
-  const NVTEShape& b_scale_inv_shape,
   const fp8e8m0* b_scale_inv_data,
   const Bias_Type* bias_data, //bias is of dim m
   const float d_scale,
   size_t m, size_t k, size_t n,
   D_Type* ref_d_data,
-  float* ref_d_amax,
+  float* ref_d_amax_ptr,
   Gelu_Type* ref_gelu_data,
   bool transa,
   bool transb){
 
-  *ref_d_amax = 0;
+  float ref_d_amax = 0;
+
+  #pragma omp parallel for schedule(static) collapse(2) reduction(max: ref_d_amax) proc_bind(spread)
   for(size_t ii = 0; ii < m; ii++){
     for(size_t jj = 0; jj < n; jj++){
       float val = 0;
       for(size_t kk = 0; kk < k; kk++){
-        float a_val = a_data[ii*k + kk];
-        float b_val = b_data[kk + jj*k];
-        float a_scale_inv_val =
-            (float)std::pow(2, a_scale_inv_data[ii * a_scale_inv_shape.data[1] + kk / 32] - 127);
-        float b_scale_inv_val =
-            (float)std::pow(2, b_scale_inv_data[kk / 32 + jj * b_scale_inv_shape.data[1]] - 127);
-        val += a_scale_inv_val * a_val * b_scale_inv_val * b_val;
+        size_t a_idx = transa ? (ii*k + kk) : (kk*m + ii);
+        size_t b_idx = transb ? (kk*n + jj) : (jj*k + kk);
+        float a_scale_inv_val = (float)std::pow(2,
+          a_scale_inv_data[transa ? a_idx/32 : (kk/32 * m + ii)] - 127);
+        float b_scale_inv_val = (float)std::pow(2,
+          b_scale_inv_data[transb ? (kk/32 * n + jj) : b_idx/32] - 127);
+        val += a_scale_inv_val * (float)a_data[a_idx] * b_scale_inv_val * (float)b_data[b_idx];
       }
       if(bias_data){
         val += (float)bias_data[ii];
@@ -153,9 +159,13 @@ void compute_mxfp8_ref(
       // update ref_d_amax if in fp8
       DType dtype = TypeInfo<D_Type>::dtype;
       if(isFp8Type(dtype)){
-        *ref_d_amax = std::max<float>(*ref_d_amax, std::fabs(val));
+        ref_d_amax = std::max<float>(ref_d_amax, std::fabs(val));
       }
     }
+  }
+  if (ref_d_amax_ptr)
+  {
+    *ref_d_amax_ptr = ref_d_amax;
   }
 }
 
@@ -258,49 +268,41 @@ void performTest(const TestParams& params) {
   }
 #endif
 
-  // pytorch tensor storage is row-major while cublas/hipblaslt is column-major
-  Tensor A;
-  if (params.transa){
-    A = Tensor("A", std::vector<size_t>{ params.m, params.k }, atype, true, false, params.scaling_mode);
-  }else {
-    // hipblaslt path need fp8-gemm with TN layout
-    A = Tensor("A", std::vector<size_t>{ params.k, params.m }, atype, true, isFp8Type(atype), params.scaling_mode);
-  }
-  Tensor B;
-  if (params.transb){
-    //hipblaslt path need fp8-gemm with TN layout
-    B = Tensor("B", std::vector<size_t>{ params.k, params.n }, btype, true, isFp8Type(btype), params.scaling_mode);
-  }else {
-    B = Tensor("B", std::vector<size_t>{ params.n, params.k }, btype, true, false, params.scaling_mode);
-  }
-  Tensor D("D", std::vector<size_t>{ params.n, params.m }, dtype);
+  using TShape = std::vector<size_t>;
+
+  // FP8 GEMM path needs columnwise data for A/B tensor with non TN layout
+  const bool a_colwise = !params.transa && isFp8Type(atype);
+  const bool b_colwise = params.transb && isFp8Type(btype);
+  Tensor A("A", params.transa ? TShape{ params.m, params.k } : TShape{ params.k, params.m },
+    atype, true, a_colwise, params.scaling_mode);
+  Tensor B("B", params.transb ? TShape{ params.k, params.n } : TShape{ params.n, params.k },
+    btype, true, b_colwise, params.scaling_mode);
+
+  Tensor D("D", TShape{ params.n, params.m }, dtype);
   Tensor bias;
   if(params.use_bias){
-    bias = Tensor("bias", std::vector<size_t>{params.m}, bias_type);
+    bias = Tensor("bias", TShape{params.m}, bias_type);
   }
   Tensor pre_gelu_out;
   if(params.use_gelu){
-    pre_gelu_out = Tensor("pre_gelu_out", std::vector<size_t>{ params.n, params.m }, gelu_type);
+    pre_gelu_out = Tensor("pre_gelu_out", TShape{ params.n, params.m }, gelu_type);
   }
   
   //initialize the data and scale inv of A, B
+  //fillUniform does not initialize columnwise data if rowwise data exist
   fillUniform(&A);
-  if (isFp8Type(atype) && !params.transa && !use_mxfp8) {
+  if (a_colwise) {
     // A must be of shape k, m
-    cpu_rowwise_to_columnwise(
-      params.k, params.m,
-      A.rowwise_cpu_dptr<A_Type>(),
-      A.columnwise_cpu_dptr<A_Type>());
+    cpu_rowwise_to_columnwise(params.k, params.m,
+      A.rowwise_cpu_dptr<A_Type>(), A.columnwise_cpu_dptr<A_Type>());
     // sync the columnwise data on GPU as well
     A.from_cpu();
   }
   fillUniform(&B);
-  if (isFp8Type(btype) && params.transb && !use_mxfp8) {
-    // B must be of shape k, m
-    cpu_rowwise_to_columnwise(
-      params.k, params.n,
-      B.rowwise_cpu_dptr<B_Type>(),
-      B.columnwise_cpu_dptr<B_Type>());
+  if (b_colwise) {
+    // B must be of shape k, n
+    cpu_rowwise_to_columnwise(params.k, params.n,
+      B.rowwise_cpu_dptr<B_Type>(), B.columnwise_cpu_dptr<B_Type>());
     // sync the columnwise data on GPU as well
     B.from_cpu();
   }
@@ -320,7 +322,7 @@ void performTest(const TestParams& params) {
     workspace_size = 67108864;
   }
 #endif
-  Tensor Workspace("Workspace", std::vector<size_t>{ workspace_size }, DType::kByte);
+  Tensor Workspace("Workspace", TShape{ workspace_size }, DType::kByte);
 
   //perform the gemm in GPU
   nvte_cublas_gemm(A.data(),
@@ -355,28 +357,23 @@ void performTest(const TestParams& params) {
     const A_Type *a_data;
     const B_Type *b_data;
     const fp8e8m0 *a_scale_inv_data, *b_scale_inv_data;
-    NVTEShape a_scale_inv_shape, b_scale_inv_shape;
     if (params.transa) {
       a_data = A.rowwise_cpu_dptr<A_Type>();
       a_scale_inv_data = A.rowwise_cpu_scale_inv_ptr<fp8e8m0>();
-      a_scale_inv_shape = A.rowwise_scale_inv_shape();
     } else {
       a_data = A.columnwise_cpu_dptr<A_Type>();
       a_scale_inv_data = A.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
-      a_scale_inv_shape = A.columnwise_scale_inv_shape();
     }
     if (params.transb) {
       b_data = B.columnwise_cpu_dptr<B_Type>();
       b_scale_inv_data = B.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
-      b_scale_inv_shape = B.columnwise_scale_inv_shape();
     } else {
       b_data = B.rowwise_cpu_dptr<B_Type>();
       b_scale_inv_data = B.rowwise_cpu_scale_inv_ptr<fp8e8m0>();
-      b_scale_inv_shape = B.rowwise_scale_inv_shape();
     }
 
     compute_mxfp8_ref<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(
-        a_data, b_data, a_scale_inv_shape, a_scale_inv_data, b_scale_inv_shape, b_scale_inv_data,
+        a_data, b_data, a_scale_inv_data, b_scale_inv_data,
         params.use_bias ? bias.rowwise_cpu_dptr<Bias_Type>() : nullptr,
         D.scale(), params.m, params.k, params.n, ref_D.get(), &ref_amax_d,
         params.use_gelu ? ref_pre_gelu_out.get() : nullptr,
