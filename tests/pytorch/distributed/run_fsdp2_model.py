@@ -126,7 +126,7 @@ def _train(args):
     else:
         model = SimpleNet(args.input_size, args.hidden_size, args.output_size)
     # Move the model to the correct device
-
+    model.load_state_dict(torch.load('fsdp_model.pth'))
     model.to(device)
 
     if LOCAL_RANK == 0:
