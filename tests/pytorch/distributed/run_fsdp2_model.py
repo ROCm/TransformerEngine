@@ -23,18 +23,18 @@ from torch.distributed.device_mesh import init_device_mesh
 from contextlib import nullcontext
 from transformer_engine.pytorch import torch_version
 from transformer_engine.pytorch.fp8 import fp8_model_init
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 class SimpleNet(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size):
+    def __init__(self, input_size, hidden_size, output_size, use_fsdp2):
         super(SimpleNet, self).__init__()
-        self.fc1 = te.Linear(input_size, hidden_size, use_fsdp2=True)
-        self.fc2 = te.Linear(hidden_size, output_size, use_fsdp2=True)
+        self.fc1 = te.Linear(input_size, hidden_size, use_fsdp2=use_fsdp2)
+        self.fc2 = te.Linear(hidden_size, output_size, use_fsdp2=use_fsdp2)
 
     def forward(self, x):
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
         return x
-
 
 def save_custom_attrs(module):
     custom_attrs = {}
@@ -73,7 +73,11 @@ def _parse_args(argv=None, namespace=None):
                        help='Global ranks to profile.')
     parser.add_argument('--tensorboard-dir', type=str, default='./fsdp2_tensorboard',
                        help='Write TensorBoard logs to this directory.')
+    parser.add_argument('--gradients-save-file', type=str, default='all_iters.pt',
+                       help='Write all the gradients across all the iterations to this file.')
     parser.add_argument("--seed", type=int, default=42, help="RNG seed.")
+    parser.add_argument("--use-fsdp2", action='store_true',
+                       help='Enable New FSDP2 training.')
     # Adding hsdp_dim as a list argument, comma-separated
     parser.add_argument(
         "--sharding-dims",
@@ -98,6 +102,7 @@ def _train(args):
     LOCAL_SIZE = int(os.getenv("LOCAL_WORLD_SIZE", "1"))
     assert LOCAL_SIZE == WORLD_SIZE
 
+    print("USE FSDP: ", args.use_fsdp2)
     # Set device and initialize RNG states
     torch.cuda.set_device(WORLD_RANK)
     torch.manual_seed(args.seed)
@@ -122,45 +127,49 @@ def _train(args):
     if args.fp8_init:
         # Build the model with the specified context
         with fp8_model_init(enabled = True):
-            model = SimpleNet(args.input_size, args.hidden_size, args.output_size)
+            model = SimpleNet(args.input_size, args.hidden_size, args.output_size, use_fsdp2=args.use_fsdp2)
     else:
-        model = SimpleNet(args.input_size, args.hidden_size, args.output_size)
+        model = SimpleNet(args.input_size, args.hidden_size, args.output_size, use_fsdp2=args.use_fsdp2)
     # Move the model to the correct device
     model.load_state_dict(torch.load('fsdp_model.pth'))
     model.to(device)
 
-    if LOCAL_RANK == 0:
-        print(f"Rank {LOCAL_RANK}: Applying FSDP fully_shard() to the model...")
     # Creating a DeviceMesh for fully_shard
     world_size = int(WORLD_SIZE)
     device_ids = list(range(world_size))
-    if LOCAL_RANK == 0:
-        print(f"sharding-dims:{args.sharding_dims}")
-    # Setup the sharding mesh for FSDP/HSDP
-    if args.sharding_dims == None:  # FSDP
-        mesh = DeviceMesh("cuda", device_ids)
-    elif len(args.sharding_dims) == 1:
-        assert args.sharding_dims[0] == device_ids[-1] + 1
-        mesh = DeviceMesh("cuda", device_ids)
-    elif len(args.sharding_dims) == 2:  # HSDP
-        assert args.sharding_dims[0] * args.sharding_dims[1] == device_ids[-1] + 1
-        mesh = init_device_mesh(
-            "cuda",
-            (args.sharding_dims[0], args.sharding_dims[1]),
-            mesh_dim_names=("replicate", "shard"),
-        )
-    else:
-        assert False
 
     # Apply FSDP/HSDP
-    # custom_attrs = save_custom_attrs(model)
-    for sub_module in model.modules():
-        if any(
-            isinstance(sub_module, sub_module_to_wrap) for sub_module_to_wrap in sub_modules_to_wrap
-        ):
-            fully_shard(sub_module, mesh=mesh)
-    fully_shard(model, mesh=mesh, reshard_after_forward=True)
-    # restore_custom_attrs(model, custom_attrs)
+    if args.use_fsdp2:
+        # custom_attrs = save_custom_attrs(model)
+        if LOCAL_RANK == 0:
+            print(f"Rank {LOCAL_RANK}: Applying FSDP fully_shard() to the model...")
+            print(f"sharding-dims:{args.sharding_dims}")
+        # Setup the sharding mesh for FSDP/HSDP
+        if args.sharding_dims == None:  # FSDP
+            mesh = DeviceMesh("cuda", device_ids)
+        elif len(args.sharding_dims) == 1:
+            assert args.sharding_dims[0] == device_ids[-1] + 1
+            mesh = DeviceMesh("cuda", device_ids)
+        elif len(args.sharding_dims) == 2:  # HSDP
+            assert args.sharding_dims[0] * args.sharding_dims[1] == device_ids[-1] + 1
+            mesh = init_device_mesh(
+                "cuda",
+                (args.sharding_dims[0], args.sharding_dims[1]),
+                mesh_dim_names=("replicate", "shard"),
+            )
+        else:
+            assert False
+        for sub_module in model.modules():
+            if any(
+                isinstance(sub_module, sub_module_to_wrap) for sub_module_to_wrap in sub_modules_to_wrap
+            ):
+                fully_shard(sub_module, mesh=mesh)
+        fully_shard(model, mesh=mesh, reshard_after_forward=True)
+        print("FSDP2 TIME!!")
+        # restore_custom_attrs(model, custom_attrs)
+    else:
+        model = DDP(model, device_ids=[LOCAL_RANK])
+        print("DDP TIME!!")
 
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
@@ -216,18 +225,19 @@ def _train(args):
         if LOCAL_RANK == 0:
             print(f"Rank {LOCAL_RANK}: Iteration {iteration} completed.")
         with torch.no_grad():
-            for p in model.parameters():
+            for name, p in model.named_parameters():
                 full_grad = None
                 if p.grad is not None and hasattr(p.grad, 'full_tensor'):
                     # This call is required to be executed on ALL ranks
                     # to complete the collective communication.
-                    full_grad = p.grad.full_tensor() 
+                    full_grad = p.grad.full_tensor().detach().clone()
+                    print("FULL TENSOR")
                 elif p.grad is not None:
-                    full_grad = p.grad
-
+                    full_grad = p.grad.detach().clone()
+                    print("ORIGINAL TENSOR")
                 # 2. Only Rank 0 stores the result
                 if LOCAL_RANK == 0 and p.requires_grad:
-                    out_tensors.append(full_grad)
+                    out_tensors.append((name, full_grad))
         torch.cuda.synchronize()
     if (
         args.profile
@@ -237,7 +247,7 @@ def _train(args):
         prof.stop()
 
     if LOCAL_RANK == 0:
-        torch.save(out_tensors, "all_iters_fsdp.pt")
+        torch.save(out_tensors, args.gradients_save_file)
 
     # NOTE: In PyTorch < 2.6 there’s a teardown race where one rank may call
     # destroy_process_group() while other ranks still have in-flight NCCL ops,
@@ -258,6 +268,22 @@ def _train(args):
     torch.cuda.memory._record_memory_history(enabled=None)
     if LOCAL_RANK == 0:
         print(f"Rank {LOCAL_RANK}: Done...")
+
+        for name, module in model.named_modules():  
+            if hasattr(module, 'fp8_meta') and module.fp8_meta:  
+                print(f"Module: {name}")  
+                
+                # Forward amax history  
+                if 'scaling_fwd' in module.fp8_meta:  
+                    fwd_amax_history = module.fp8_meta['scaling_fwd'].amax_history  
+                    print(f"Forward amax history shape: {fwd_amax_history.shape}")  
+                    print(f"Forward amax history:\n{fwd_amax_history}")  
+                
+                # Backward amax history    
+                if 'scaling_bwd' in module.fp8_meta:  
+                    bwd_amax_history = module.fp8_meta['scaling_bwd'].amax_history  
+                    print(f"Backward amax history shape: {bwd_amax_history.shape}")  
+                    print(f"Backward amax history:\n{bwd_amax_history}")
     return 0
 
 
