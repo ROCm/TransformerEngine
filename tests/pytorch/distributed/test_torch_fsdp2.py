@@ -9,7 +9,7 @@ import subprocess
 from pathlib import Path
 from transformer_engine.pytorch import torch_version
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-
+from run_regular_model import SimpleNet
 import torch
 
 
@@ -66,7 +66,7 @@ def _run_test(fp_init):
     
     for idx, (te_output_no_cache, te_output_cache) in enumerate(zip(output_fsdp, output_regular)):
         print(f"Comparing tensor at index {idx}...")
-        assert_allclose(te_output_no_cache, te_output_cache, atol=1e-2, rtol=1e-2)
+        assert_allclose(te_output_no_cache, te_output_cache, atol=1.3e-6, rtol=1e-5)
         print(f"Tensor at index {idx} passed comparison.")
 
 
@@ -88,6 +88,9 @@ def test_distributed(fp8_init):
         input_data = torch.randn(batch_size, input_size, requires_grad=True).to('cuda')
         torch.save(input_data.cpu(), input_path)
         print("Generated and saved shared input tensor.")
+
+    model = SimpleNet(input_size, 2048, 2048)
+    torch.save(model.state_dict(), 'fsdp_model.pth')
 
     if torch.cuda.device_count() < 4:
         pytest.skip("FSDP2 test requires at least 4 GPUs")

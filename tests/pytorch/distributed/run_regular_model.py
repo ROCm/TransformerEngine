@@ -57,6 +57,7 @@ def _train(args):
     else:
         model = SimpleNet(args.input_size, args.hidden_size, args.output_size)
 
+    model.load_state_dict(torch.load('fsdp_model.pth'))
     model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
