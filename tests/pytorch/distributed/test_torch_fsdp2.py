@@ -46,27 +46,24 @@ def assert_allclose(
 
 def _run_test(fp_init):
     test_dir = Path(__file__).parent.resolve()
-    regular_script = test_dir / "run_regular_model.py"
     fsdp_script = test_dir / "run_fsdp2_model.py"
     
     test_cmd = ["torchrun", f"--nproc_per_node={NUM_PROCS}", str(fsdp_script)]
-    regular_test_cmd = ["python",str(regular_script)]
 
     if fp_init:
         test_cmd += ["--fp8-init"]
-        regular_test_cmd += ["--fp8-init"]
     
-    subprocess.run(regular_test_cmd, env=os.environ, check=True)
-    result = subprocess.run(test_cmd, env=os.environ, check=True)
-
+    result = subprocess.run(test_cmd + ['--use-fsdp2','--gradients-save-file', 'all_iters_fsdp2.pt'], env=os.environ, check=True)
+    result = subprocess.run(test_cmd + ['--gradients-save-file', 'all_iters_dp.pt'], env=os.environ, check=True)
         
     # Load outputs
-    output_fsdp = torch.load("all_iters_fsdp.pt", map_location="cpu")
-    output_regular = torch.load("all_iters_regular.pt", map_location="cpu")
+    output_fsdp = torch.load("all_iters_fsdp2.pt", map_location="cpu")
+    output_dp = torch.load("all_iters_dp.pt", map_location="cpu")
     
-    for idx, (te_output_no_cache, te_output_cache) in enumerate(zip(output_fsdp, output_regular)):
-        print(f"Comparing tensor at index {idx}...")
-        assert_allclose(te_output_no_cache, te_output_cache, atol=1.3e-6, rtol=1e-5)
+    for idx, (te_output_no_cache, te_output_cache) in enumerate(zip(output_fsdp, output_dp)):
+    
+        print(f"Comparing FSDP {te_output_no_cache[0]}, DDP {te_output_cache[0]} at index {idx}...")
+        assert_allclose(te_output_no_cache[1], te_output_cache[1], atol=0, rtol=0)
         print(f"Tensor at index {idx} passed comparison.")
 
 

@@ -141,7 +141,7 @@ class FSDPAGFloat8Tensor(torch.Tensor):
             quantizer.columnwise_usage=False
         sharded_fp8_tensor = quantizer(base)
         transpose_to_send = sharded_fp8_tensor._transpose if self._keep_fp8_weight_transpose_cache else torch.empty(0, dtype=base.dtype, device=base.device)
-        return (sharded_fp8_tensor._data, transpose_to_send,), (sharded_fp8_tensor._scale_inv, base.requires_grad,)
+        return (sharded_fp8_tensor._data, transpose_to_send,), (base.requires_grad,)
         
     def fsdp_post_all_gather(
         self,
@@ -153,7 +153,7 @@ class FSDPAGFloat8Tensor(torch.Tensor):
     ):
         # Recompose the Float8Tensor from the wire format
         (data, data_transpose) = all_gather_outputs
-        (scale_inv, requires_grad) = metadata
+        (requires_grad) = metadata
 
         # Retrieve the same quantizer you used in pre_all_gather
         quantizer = self._module.quantizers["scaling_fwd"][self._fp8_meta_index]
@@ -162,17 +162,18 @@ class FSDPAGFloat8Tensor(torch.Tensor):
             # If FSDP provided a pre-allocated output (e.g., a Float8Tensor),
             # fill in the missing bits and still return the expected values.
             assert isinstance(out, Float8Tensor), f"Unexpected out type: {type(out)}"
-            out._scale_inv = scale_inv
+            out._scale_inv = 1 / quantizer.scale
             # Depending on FSDP's expected return type, return (materialized_param, aux)
             return out, all_gather_outputs
 
         # Otherwise, construct a new Float8Tensor that wraps the gathered data
+        print("DONE WITH ALL GATHER!")
         out_fp8 = Float8Tensor(
             shape=data.shape,
             dtype=param_dtype,                    # or self._elem.dtype
             requires_grad=requires_grad,
             data=data,
-            fp8_scale_inv=scale_inv,
+            fp8_scale_inv=1 / quantizer.scale,
             fp8_dtype=quantizer.dtype,
             data_transpose=None if data_transpose.numel() == 0 else data_transpose,
             quantizer=quantizer,

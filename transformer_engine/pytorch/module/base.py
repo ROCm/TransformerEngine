@@ -930,6 +930,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     quantizer.columnwise_usage=False
                 param = quantizer(param)
             if self.use_fsdp2 and not self.primary_weights_in_fp8 and fp8_meta_index is not None:
+                self.keep_fp8_weight_transpose_cache = False
                 param = FSDPAGFloat8Tensor(
                     param, 
                     module=self, 
