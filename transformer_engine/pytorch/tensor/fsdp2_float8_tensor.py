@@ -153,7 +153,7 @@ class FSDPAGFloat8Tensor(torch.Tensor):
     ):
         # Recompose the Float8Tensor from the wire format
         (data, data_transpose) = all_gather_outputs
-        (requires_grad) = metadata
+        (requires_grad, ) = metadata
 
         # Retrieve the same quantizer you used in pre_all_gather
         quantizer = self._module.quantizers["scaling_fwd"][self._fp8_meta_index]

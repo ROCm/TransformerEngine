@@ -9,9 +9,8 @@ import subprocess
 from pathlib import Path
 from transformer_engine.pytorch import torch_version
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from run_regular_model import SimpleNet
 import torch
-
+from run_fsdp2_model import SimpleNet
 
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 

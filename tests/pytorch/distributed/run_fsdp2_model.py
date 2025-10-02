@@ -26,7 +26,7 @@ from transformer_engine.pytorch.fp8 import fp8_model_init
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 class SimpleNet(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, use_fsdp2):
+    def __init__(self, input_size, hidden_size, output_size, use_fsdp2=False):
         super(SimpleNet, self).__init__()
         self.fc1 = te.Linear(input_size, hidden_size, use_fsdp2=use_fsdp2)
         self.fc2 = te.Linear(hidden_size, output_size, use_fsdp2=use_fsdp2)
