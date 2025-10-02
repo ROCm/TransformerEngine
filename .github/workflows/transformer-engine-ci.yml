@@ -112,15 +112,15 @@ jobs:
 
           # Explicitly tell CMake to use the ROCm HIP compiler
           export CXX=$ROCM_PATH/bin/hipcc
-          export CMAKE_CXX_COMPILER=$CXX
+          export DCMAKE_CXX_COMPILER=$CXX
           export CC=$ROCM_PATH/bin/hipcc
-          export CMAKE_CC_PATH=$CC
+          export DCMAKE_CC_PATH=$CC
           
           # Build the wheel
           CXX=$ROCM_PATH/bin/hipcc \
-          CMAKE_CXX_COMPILER=$CXX \
+          DCMAKE_CXX_COMPILER=$CXX \
           CC=$ROCM_PATH/bin/hipcc \
-          CMAKE_CC_COMPILER=$CC \
+          DCMAKE_CC_COMPILER=$CC \
           NVTE_ROCM_ARCH=gfx942 \
           PYTORCH_ROCM_ARCH=gfx942 \
           pip install -v .
