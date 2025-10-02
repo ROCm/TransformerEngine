@@ -73,6 +73,7 @@ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.utils import any_feature_enabled
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 __all__ = ["Linear"]
 
@@ -228,8 +229,8 @@ class _Linear(torch.autograd.Function):
         if fp8 or debug:
             # Configure quantizer
             if weight_quantizer is not None:
-                columnwise_usage = is_grad_enabled and inp.requires_grad
-                if not columnwise_usage:
+                columnwise_usage = is_grad_enabled and inp.requires_grad and keep_fp8_weight_transpose_cache
+                if not columnwise_usage and keep_fp8_weight_transpose_cache:
                     columnwise_usage = (
                         is_fp8_activation_recompute_enabled()
                         and not in_fp8_activation_recompute_phase()
@@ -246,7 +247,6 @@ class _Linear(torch.autograd.Function):
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
                 workspace_dtype=activation_dtype,
-                create_transpose_cache=keep_fp8_weight_transpose_cache,
             )
             weightmat.update_usage(rowwise_usage=True)
 
@@ -293,6 +293,9 @@ class _Linear(torch.autograd.Function):
         # Forward GEMM
         # Note: y = x * w^T
         # ------------------------------------------------------
+        if IS_HIP_EXTENSION and not keep_fp8_weight_transpose_cache:
+                assert weightmat._transpose is None or weightmat._transpose.numel() == 0, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
+
         nvtx_range_push(f"{nvtx_label}.gemm")
         gemm_out, *_, reduce_scatter_out = general_gemm(
             weightmat,
@@ -1027,6 +1030,8 @@ class Linear(TransformerEngineBaseModule):
         keep_fp8_weight_transpose_cache: bool = True,
     ) -> None:
         super().__init__()
+        if not IS_HIP_EXTENSION:
+            keep_fp8_weight_transpose_cache = True
 
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.in_features = in_features
@@ -1431,6 +1436,9 @@ class Linear(TransformerEngineBaseModule):
         input_quantizer.internal = True
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         weight_quantizer.internal = True
+        if IS_HIP_EXTENSION:
+            weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
+
         if fp8_output:
             output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
         if torch.is_grad_enabled():

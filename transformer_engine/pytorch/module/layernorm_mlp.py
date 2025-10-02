@@ -347,8 +347,8 @@ class _LayerNormMLP(torch.autograd.Function):
             # which handles weight caching etc.
             # FP8 cast to workspace buffer
             update_workspace = is_first_microbatch is None or is_first_microbatch
-            fc1_weight_quantizer.set_usage(rowwise=True, columnwise=True)
-            fc2_weight_quantizer.set_usage(rowwise=True, columnwise=True)
+            fc1_weight_quantizer.set_usage(rowwise=True, columnwise=keep_fp8_weight_transpose_cache)
+            fc2_weight_quantizer.set_usage(rowwise=True, columnwise=keep_fp8_weight_transpose_cache)
             fc1_weight_final = module.get_weight_workspace(
                 tensor=fc1_weight,
                 quantizer=fc1_weight_quantizer,
@@ -357,7 +357,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
                 workspace_dtype=activation_dtype,
-                create_transpose_cache=keep_fp8_weight_transpose_cache,
             )
             fc2_weight_final = module.get_weight_workspace(
                 tensor=fc2_weight,
@@ -367,7 +366,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
                 workspace_dtype=activation_dtype,
-                create_transpose_cache=keep_fp8_weight_transpose_cache,
             )
             fc1_weight_final.update_usage(rowwise_usage=True)
             fc2_weight_final.update_usage(rowwise_usage=True)
@@ -412,6 +410,10 @@ class _LayerNormMLP(torch.autograd.Function):
                 gemm_gelu_fusion = False
         if debug:
             gemm_gelu_fusion = False
+        
+        if IS_HIP_EXTENSION and fp8 and not keep_fp8_weight_transpose_cache:
+            assert fc1_weight_final._transpose is None or fc1_weight_final._transpose.numel() == 0, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
+
         fc1_outputs = general_gemm(
             fc1_weight_final,
             ln_out_total,
@@ -482,6 +484,9 @@ class _LayerNormMLP(torch.autograd.Function):
         # ------------------------------------------------------
         # FC2 GEMM
         # ------------------------------------------------------
+        if IS_HIP_EXTENSION and fp8 and not keep_fp8_weight_transpose_cache:
+            assert fc2_weight_final._transpose is None or fc2_weight_final._transpose.numel() == 0, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
+
         gemm_out, *_, reduce_scatter_out = general_gemm(
             fc2_weight_final,
             act_out,
@@ -1535,6 +1540,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
         keep_fp8_weight_transpose_cache: bool = True,
     ) -> None:
         super().__init__()
+        if not IS_HIP_EXTENSION:
+            keep_fp8_weight_transpose_cache = True
 
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
@@ -1918,6 +1925,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc1_input_quantizer.internal = True
             fc1_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
             fc1_weight_quantizer.internal = True
+            if IS_HIP_EXTENSION:
+                fc1_weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
             fc2_input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_INPUT]
             fc2_input_quantizer.set_usage(
                 rowwise=True,
@@ -1926,6 +1935,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc1_input_quantizer.internal = True
             fc2_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_WEIGHT]
             fc2_weight_quantizer.internal = True
+            if IS_HIP_EXTENSION:
+                fc2_weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
             if fp8_output:
                 fc2_output_quantizer = self.quantizers["scaling_fwd"][
                     tex.FP8FwdTensors.GEMM2_OUTPUT

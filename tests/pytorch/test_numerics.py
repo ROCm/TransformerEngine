@@ -1139,29 +1139,29 @@ def _test_granular_accuracy(block, bs, dtype, config, delay_wgrad_compute=False)
     return outputs
 
 
-def _test_granular_accuracy_with_fp8(block, bs, dtype, config):
+def _test_granular_accuracy_with_fp8(block, bs, dtype, config, num_iterations=1):
+    all_outputs = []
     reset_rng_states()
-
-    inp_hidden_states = torch.randn(
-        (config.seq_len, bs, config.hidden_size),
-        dtype=dtype,
-        device="cuda",
-        requires_grad=True,
-    )
-    inp_hidden_states.retain_grad()
-
-    with fp8_autocast(enabled=True):
-        out = block(inp_hidden_states)
-        loss = out.sum()
-        loss.backward()
-
-    torch.cuda.synchronize()
-    outputs = [out, inp_hidden_states.grad]
-    for p in block.parameters():
-        if p.requires_grad:
-            outputs.append(p.grad)
-    return outputs
-
+    for _ in range(num_iterations):
+        inp_hidden_states = torch.randn(
+            (config.seq_len, bs, config.hidden_size),
+            dtype=dtype,
+            device="cuda",
+            requires_grad=True,
+        )
+        inp_hidden_states.retain_grad()
+        with fp8_autocast(enabled=True):
+            out = block(inp_hidden_states)
+            loss = out.sum()
+            loss.backward()
+        torch.cuda.synchronize()
+        outputs = [out, inp_hidden_states.grad]
+        for p in block.parameters():
+            if p.requires_grad:
+                outputs.append(p.grad)
+        
+        all_outputs.extend(outputs)
+    return all_outputs
 
 def _test_dpa_accuracy(block, bs, dtype, config):
     reset_rng_states()
@@ -1330,8 +1330,8 @@ def test_fp8_linear_without_transpose_cache_accuracy(dtype, bs, model, fp8_model
             keep_fp8_weight_transpose_cache=True # defaults to True
         ).eval()
 
-    outputs = _test_granular_accuracy_with_fp8(layer, bs, dtype, config)
-    ref_outputs = _test_granular_accuracy_with_fp8(ref_layer, bs, dtype, config)
+    outputs = _test_granular_accuracy_with_fp8(layer, bs, dtype, config, num_iterations=2)
+    ref_outputs = _test_granular_accuracy_with_fp8(ref_layer, bs, dtype, config, num_iterations=2)
 
     # Check output.
     for te_output_no_cache, te_output_cache in zip(outputs, ref_outputs):
