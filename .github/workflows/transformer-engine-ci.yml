@@ -88,7 +88,6 @@ jobs:
           set -ex
 
           # Ensure core build tools are present
-          ls -la
           sudo apt-get update && sudo apt-get install -y build-essential
 
           # Upgrade pip and add its location to the PATH
@@ -103,7 +102,6 @@ jobs:
           sudo bash /opt/cmake-*.sh --skip-license --prefix=/opt/cmake
           sudo ln -sf /opt/cmake/bin/* /usr/local/bin/
           cmake --version
-          cat setup.py
 
           # Set up ROCm environment
           export ROCM_PATH=/opt/rocm-6.4.1
@@ -114,15 +112,11 @@ jobs:
 
           # Explicitly tell CMake to use the ROCm HIP compiler
           export CXX=$ROCM_PATH/bin/hipcc
-          export DCMAKE_CXX_COMPILER=$CXX
           export CC=$ROCM_PATH/bin/hipcc
-          export DCMAKE_CC_PATH=$CC
           
           # Build the wheel
           CXX=$ROCM_PATH/bin/hipcc \
-          DCMAKE_CXX_COMPILER=$CXX \
           CC=$ROCM_PATH/bin/hipcc \
-          DCMAKE_CC_COMPILER=$CC \
           NVTE_ROCM_ARCH=gfx942 \
           PYTORCH_ROCM_ARCH=gfx942 \
           pip install -v .
