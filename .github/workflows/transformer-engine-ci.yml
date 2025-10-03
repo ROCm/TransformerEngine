@@ -88,7 +88,7 @@ jobs:
           set -ex
 
           # Ensure core build tools are present
-          sudo apt-get update && sudo apt-get install -y build-essential
+          sudo apt-get update
 
           # Upgrade pip and add its location to the PATH
           pip install --upgrade pip ninja
@@ -104,7 +104,7 @@ jobs:
           cmake --version
 
           # Set up ROCm environment
-          export ROCM_PATH=/opt/rocm-6.4.1
+          export ROCM_PATH=/opt/rocm
           export PATH=$ROCM_PATH/bin:$PATH
           export LD_LIBRARY_PATH=$ROCM_PATH/lib:$LD_LIBRARY_PATH
           export PYTORCH_ROCM_ARCH=gfx942
