@@ -8,7 +8,7 @@
 #include <dlfcn.h>
 #include <filesystem>
 #include <mutex> //once_flag
-#include "ck_fused_attn_utils.hpp"
+#include "../include/ck_fused_attn/ck_fused_attn_utils.hpp"
 #include "ck_fused_attn/ck_fused_attn.hpp"
 #include "mask.hpp"
 #include "bias.hpp"
@@ -16,27 +16,28 @@
 
 namespace ck_fused_attn{
 
+
+std::string get_gfx(){
+  hipDeviceProp_t prop;
+  hipError_t res= hipGetDeviceProperties(&prop, 0);
+  if (res != hipSuccess) {
+    throw std::runtime_error(std::string(
+      "hipGetDeviceProperties failed with error: ") + hipGetErrorString(res));
+  }
+  switch (prop.major*10 + prop.minor) {
+    case 94: // Gfx942
+      return "gfx942/"; // trailing slash is mandatory
+    case 95: // Gfx950
+      return "gfx950/"; // trailing slash is mandatory
+    default:
+      return "";
+  }
+
+}
 void set_aiter_asm_dir() {
   static std::once_flag aiter_asm_dir_once;
   std::call_once(aiter_asm_dir_once, []() {
-    hipDeviceProp_t prop;
-    hipError_t res= hipGetDeviceProperties(&prop, 0);
-    if (res != hipSuccess) {
-      throw std::runtime_error(std::string(
-        "hipGetDeviceProperties failed with error: ") + hipGetErrorString(res));
-    }
-    const char *arh_str = nullptr;
-    switch (prop.major*10 + prop.minor) {
-      case 94: // Gfx942
-        arh_str = "gfx942/"; // trailing slash is mandatory
-        break;
-      case 95: // Gfx950
-        arh_str = "gfx950/"; // trailing slash is mandatory
-        break;
-      default:
-        // Unsupported V3 architecture
-        return;
-    }
+    std::string arh_str = get_gfx();
     Dl_info info;
     dladdr((void*)set_aiter_asm_dir, &info);
     setenv("AITER_ASM_DIR",

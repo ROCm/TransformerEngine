@@ -9,6 +9,7 @@
 #include <numeric> // Required for std::accumulate
 #ifdef USE_FUSED_ATTN_CK
 #include <ck_fused_attn/ck_fused_attn.hpp>
+#include "../ck_fused_attn/include/ck_fused_attn/ck_fused_attn_utils.hpp"
 #endif // USE_FUSED_ATTN_CK
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
@@ -1046,6 +1047,23 @@ void fused_attn_ck_bwd_impl(
   // bwd v3 is optional by enabling the following envs
   // default values follows the ck example setting
   bool nvte_ck_uses_bwd_v3 = getenv<int>("NVTE_CK_USES_BWD_V3", 0);
+
+  // TODO(micky774): Remove when AITER gfx950 BWD V3 kernels are fixed
+  // See AITER gh-1026 for details
+  ck_fused_attn::MaskType ck_mask_type = set_ck_mask(mask_type, window_size_left, window_size_right);
+  nvte_ck_uses_bwd_v3 &= (
+    ck_fused_attn::get_gfx() == "gfx950" &&
+    (devPtrAlibiSlope == nullptr) &&
+    (bias_type==NVTE_Bias_Type::NVTE_NO_BIAS) &&
+    (devPtrdBias==nullptr) &&
+    (dropout_probability == 0.0) &&
+    (!deterministic) &&
+    (d_qk == d_v) &&
+    (h % hg == 0) &&
+    (d_qk > 64 and d_qk <= 128 and d_qk % 8 == 0) &&
+    ((ck_mask_type==ck_fused_attn::MaskType::no_mask) || (s_q == s_kv))
+  );
+
   bool nvte_ck_is_v3_atomic_fp32 = getenv<int>("NVTE_CK_IS_V3_ATOMIC_FP32", 1);
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
   if (nvte_log_ck_config) {
