@@ -1028,6 +1028,8 @@ void hipblaslt_gemm(const Tensor *inputA,
                           (!bias || inputBias->data.dtype == DType::kFloat16) &&
                           (outputPreGelu->data.dtype == DType::kFloat16 || outputPreGelu->data.dtype == outputD->data.dtype);
       NVTE_CHECK(allow_fp8_gemm, "fp8 gemm + gelu fusion is unavailable with current config!");
+    } else {
+      NVTE_CHECK(false, "fp8 gemm + gelu fusion is unavailable right now!");
     }
   }
 #else
@@ -1136,7 +1138,7 @@ void hipblaslt_gemm(const Tensor *inputA,
                                                        HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE,
                                                        &bias_type, sizeof(bias_type)));
     }
-#if HIP_VERSION >= 70000000
+#if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
     if (gelu){
       NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
                                                         HIPBLASLT_MATMUL_DESC_EPILOGUE_AUX_DATA_TYPE,
