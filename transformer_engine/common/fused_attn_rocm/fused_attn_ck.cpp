@@ -1051,7 +1051,7 @@ void fused_attn_ck_bwd_impl(
   // TODO(micky774): Remove when AITER gfx950 BWD V3 kernels are fixed
   // See AITER gh-1026 for details
   ck_fused_attn::MaskType ck_mask_type = set_ck_mask(mask_type, window_size_left, window_size_right);
-  nvte_ck_uses_bwd_v3 &= (
+  nvte_ck_uses_bwd_v3 &= !(
     ck_fused_attn::get_gfx() == "gfx950" &&
     (devPtrAlibiSlope == nullptr) &&
     (bias_type==NVTE_Bias_Type::NVTE_NO_BIAS) &&

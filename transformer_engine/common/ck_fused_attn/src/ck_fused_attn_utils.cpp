@@ -26,9 +26,9 @@ std::string get_gfx(){
   }
   switch (prop.major*10 + prop.minor) {
     case 94: // Gfx942
-      return "gfx942/"; // trailing slash is mandatory
+      return "gfx942"; 
     case 95: // Gfx950
-      return "gfx950/"; // trailing slash is mandatory
+      return "gfx950";
     default:
       return "";
   }
@@ -37,7 +37,8 @@ std::string get_gfx(){
 void set_aiter_asm_dir() {
   static std::once_flag aiter_asm_dir_once;
   std::call_once(aiter_asm_dir_once, []() {
-    std::string arh_str = get_gfx();
+    // trailing slash is mandatory
+    std::string arh_str = get_gfx() + "/";
     Dl_info info;
     dladdr((void*)set_aiter_asm_dir, &info);
     setenv("AITER_ASM_DIR",
