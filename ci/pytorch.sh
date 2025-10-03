@@ -58,7 +58,7 @@ run_test_config(){
     run_default_fa 1 test_deferred_init.py
     run_default_fa 1 test_float8tensor.py
     run_default_fa 1 test_float8_current_scaling_exact.py
-    run_default_fa 1 test_cpu_offloading.py
+    NVTE_FLASH_ATTN=0 run_default_fa 1 test_cpu_offloading.py
     run_default_fa 1 test_fused_rope.py
     run_default_fa 1 test_fusible_ops.py
     run_default_fa 3 test_gemm_autotune.py

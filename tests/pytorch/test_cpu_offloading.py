@@ -29,7 +29,7 @@ EPSILON = 0.1
 
 # Flash attention saves some internal tensor for the backward pass
 # that cannot be offloaded to CPU.
-assert os.getenv("NVTE_FLASH_ATTN") == "0"
+assert os.getenv("NVTE_FLASH_ATTN", "1") == "0"
 
 # Offloading is supported for attention only for fused and flash attention backends,
 # so the use of bfloat16 is required.
