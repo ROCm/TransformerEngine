@@ -1138,7 +1138,9 @@ def _test_granular_accuracy(block, bs, dtype, config, delay_wgrad_compute=False)
                 outputs.append(p.grad)
     return outputs
 
-
+# The keep_fp8_transpose_cache flag will be evaluated over two iterations. 
+# Given that the transpose operation's cache is invalidated during the backward pass,
+# the objective of this test is to observe the subsequent forward pass behavior.
 def _test_granular_accuracy_with_fp8(block, bs, dtype, config, num_iterations=1):
     all_outputs = []
     reset_rng_states()
