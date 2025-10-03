@@ -68,7 +68,6 @@ from ..tensor.quantized_tensor import (
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from ..rocm_utils import create_fp8_weight_transpose_cache, clear_fp8_weight_transpose_cache
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...debug.pytorch.debug_state import TEDebugState
@@ -621,9 +620,6 @@ class _Linear(torch.autograd.Function):
                 if ctx.grad_input_quantizer is not None:
                     ctx.grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
 
-                if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                    create_fp8_weight_transpose_cache(weight_fp8)
-
                 # Output buffers for Userbuffers reduce-scatter
                 gemm_out = None
                 reduce_scatter_out = None
@@ -655,7 +651,8 @@ class _Linear(torch.autograd.Function):
                 nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
 
                 if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                    clear_fp8_weight_transpose_cache(weight_fp8)
+                    clear_tensor_data(weight_fp8._transpose)
+                    weight_fp8.update_usage(columnwise_usage=False)
 
                 # Prepare grad input tensor
                 # Note: Perform tensor-parallel communication

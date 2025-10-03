@@ -81,8 +81,6 @@ if IS_HIP_EXTENSION:
     from ..triton_kernels.layernorm import te_layernorm_bwd_triton
     from ..triton_kernels.rmsnorm import te_rmsnorm_bwd_triton
 
-from ..rocm_utils import create_fp8_weight_transpose_cache, clear_fp8_weight_transpose_cache
-
 
 __all__ = ["LayerNormLinear"]
 
@@ -700,8 +698,6 @@ class _LayerNormLinear(torch.autograd.Function):
             if ctx.grad_input_quantizer is not None:
                 ctx.grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
 
-            if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                create_fp8_weight_transpose_cache(weight)
 
             # Output buffers for Userbuffers reduce-scatter
             gemm_out = None
@@ -734,7 +730,8 @@ class _LayerNormLinear(torch.autograd.Function):
             nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
 
             if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                clear_fp8_weight_transpose_cache(weight)
+                clear_tensor_data(weight._transpose)
+                weight.update_usage(columnwise_usage=False)
 
             # Prepare grad input tensor
             # Note: Perform tensor-parallel communication

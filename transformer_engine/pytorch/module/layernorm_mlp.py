@@ -87,8 +87,6 @@ if IS_HIP_EXTENSION:
     from ..triton_kernels.layernorm import te_layernorm_bwd_triton
     from ..triton_kernels.rmsnorm import te_rmsnorm_bwd_triton
 
-from ..rocm_utils import create_fp8_weight_transpose_cache, clear_fp8_weight_transpose_cache
-
 __all__ = ["LayerNormMLP"]
 
 
@@ -822,12 +820,9 @@ class _LayerNormMLP(torch.autograd.Function):
             if isinstance(grad_output, QuantizedTensorBase):
                 grad_output.update_usage(rowwise_usage=True)
             if ctx.fc2_weight_quantizer is not None and isinstance(
-                ctx.fc2_weight, QuantizedTensorBase
+                fc2_weight, QuantizedTensorBase
             ):
-                ctx.fc2_weight.update_usage(columnwise_usage=True)
-
-            if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                create_fp8_weight_transpose_cache(fc2_weight)
+                fc2_weight.update_usage(columnwise_usage=True)
 
             # Perform GEMM
             gemm_output, *_ = general_gemm(
@@ -858,7 +853,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc2_dgrad = gemm_output
 
             if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                clear_fp8_weight_transpose_cache(fc2_weight)
+                clear_tensor_data(fc2_weight._transpose)
+                fc2_weight.update_usage(columnwise_usage=False)
 
             # --------------------------------------------------
             # Finished FC2 DGRAD...
@@ -1046,8 +1042,6 @@ class _LayerNormMLP(torch.autograd.Function):
                     ub_obj_fc1_wgrad = get_ub("fc1_wgrad")
                     ub_type_fc1_wgrad = tex.CommOverlapType.RS
             
-            if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                create_fp8_weight_transpose_cache(fc1_weight)
 
             # --------------------------------------------------
             # FC1 DGRAD
@@ -1055,9 +1049,9 @@ class _LayerNormMLP(torch.autograd.Function):
 
             # Make sure required data is available
             if ctx.fc1_weight_quantizer is not None and isinstance(
-                ctx.fc1_weight_quantizer, QuantizedTensorBase
+                fc1_weight, QuantizedTensorBase
             ):
-                ctx.fc1_weight.update_usage(columnwise_usage=True)
+                fc1_weight.update_usage(columnwise_usage=True)
 
             # Output buffers for Userbuffers reduce-scatter
             gemm_out = None
@@ -1087,7 +1081,8 @@ class _LayerNormMLP(torch.autograd.Function):
             )
 
             if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                clear_fp8_weight_transpose_cache(fc1_weight)
+                clear_tensor_data(fc1_weight._transpose)
+                fc1_weight.update_usage(columnwise_usage=False)
 
             # Prepare grad input tensor
             # Note: Perform tensor-parallel communication
