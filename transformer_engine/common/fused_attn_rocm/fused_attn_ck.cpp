@@ -559,6 +559,15 @@ void fused_attn_ck_fwd_impl(
   bool nvte_ck_uses_fwd_v3 = getenv<int>("NVTE_CK_USES_FWD_V3", 0);
   bool is_ragged = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_THD;
 
+
+  // TODO(micky774): Remove when AITER FWD V3 varlen kernels are fixed
+  if(
+    (is_ragged || pad_between_seqs) &&
+    (window_size_left>0 || window_size_right>0)
+  ){
+    nvte_ck_uses_fwd_v3 = false;
+  }
+
   // extract the qkv and o storage bytes to allocate buffer for padding removing
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
   size_t q_storage_bytes = max_tokens_q*h*d_qk*nvte_dtype_size(dtype); 

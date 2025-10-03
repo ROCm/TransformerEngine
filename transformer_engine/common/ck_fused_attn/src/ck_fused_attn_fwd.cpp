@@ -206,12 +206,16 @@ hipError_t ck_attn_fwd(
                          k_ptr,
                          v_ptr,
                          bias_type==bias_enum::alibi? alibi_slope_ptr :bias_ptr,
-                         nullptr,//rand_val_ptr
+                         nullptr, //rand_val_ptr
                          lse_ptr,
                          o_ptr,
-                         nullptr,//cu_seqlen_q
-                         nullptr,//cu_seqlen_kv
-                         nullptr, /* seqlen_k_ptr */
+                         nullptr, //cu_seqlen_q
+                         nullptr, //cu_seqlen_kv
+                         nullptr, // seqstart_q_ptr
+                         nullptr, // seqstart_k_ptr
+                         nullptr, // seqlen_k_ptr
+                         nullptr, // seqstart_padded_q_ptr
+                         nullptr, // seqstart_padded_k_ptr
                          max_seqlen_q,
                          max_seqlen_k,
                          batch,
@@ -285,7 +289,7 @@ hipError_t ck_attn_varlen_fwd(
   uint64_t stride_h_k, uint64_t stride_s_k,
   const void* v_ptr, 
   uint64_t stride_h_v, uint64_t stride_s_v,
-  const void* cu_seqlen_q_ptr, const void* cu_seqlen_kv_ptr,
+  void* cu_seqlen_q_ptr, void* cu_seqlen_kv_ptr,
   bool is_training,
   float scaling_factor,
   float dropout_probability,
@@ -308,6 +312,8 @@ hipError_t ck_attn_varlen_fwd(
   ck_tile::index_t nhead_k = hg;
   ck_tile::index_t hdim_v = d_v;
   ck_tile::index_t max_seqlen_q = s_q;
+  ck_tile::index_t total_seqlen_q = static_cast<ck_tile::index_t*>(cu_seqlen_q_ptr)[b];
+  ck_tile::index_t total_seqlen_kv =  static_cast<ck_tile::index_t*>(cu_seqlen_kv_ptr)[b];
 
   float scale_s = scaling_factor;
   float scale_p = 1.f;
@@ -379,11 +385,15 @@ hipError_t ck_attn_varlen_fwd(
                          nullptr,//rand_val_ptr
                          lse_thd_ptr,
                          o_ptr,
-                         cu_seqlen_q_ptr,//cu_seqlen_q
-                         cu_seqlen_kv_ptr,//cu_seqlen_kv
-                         nullptr, /* seqlen_k_ptr */
-                         0, //seqlen_q, unused in group mode
-                         0, //seqlen_kv, unused in group mode
+                         nullptr,//cu_seqlen_q
+                         nullptr,//cu_seqlen_kv
+                         cu_seqlen_q_ptr, // seqstart_q_ptr
+                         cu_seqlen_kv_ptr, // seqstart_k_ptr
+                         nullptr, // seqlen_k_ptr
+                         nullptr, // seqstart_padded_q_ptr
+                         nullptr, // seqstart_padded_k_ptr
+                         total_seqlen_q, //seqlen_q, unused in group mode
+                         total_seqlen_kv, //seqlen_kv, unused in group mode
                          batch,
                          max_seqlen_q,
                          hdim_q,

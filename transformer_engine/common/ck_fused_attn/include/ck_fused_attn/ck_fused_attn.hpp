@@ -71,7 +71,7 @@ hipError_t ck_attn_varlen_fwd(
   uint64_t stride_h_k, uint64_t stride_s_k,
   const void* v_ptr, 
   uint64_t stride_h_v, uint64_t stride_s_v,
-  const void* cu_seqlen_q_ptr, const void* cu_seqlen_kv_ptr,
+  void* cu_seqlen_q_ptr, void* cu_seqlen_kv_ptr,
   bool is_training,
   float scaling_factor,
   float dropout_probability,
