@@ -88,7 +88,7 @@ jobs:
           set -ex
 
           # Ensure core build tools are present
-          sudo apt-get update && sudo apt-get install -y build-essential tree
+          sudo apt-get update && sudo apt-get install -y build-essential
 
           # Upgrade pip and add its location to the PATH
           pip install --upgrade pip ninja setuptools wheel
@@ -102,7 +102,6 @@ jobs:
           sudo bash /opt/cmake-*.sh --skip-license --prefix=/opt/cmake
           sudo ln -sf /opt/cmake/bin/* /usr/local/bin/
           cmake --version
-          tree /opt/rocm-6.4.1
 
           # Set up ROCm environment
           export ROCM_PATH=/opt/rocm-6.4.1

@@ -64,8 +64,6 @@ def setup_common_extension() -> CMakeExtension:
         cmake_flags.append("-DUSE_ROCM=ON")
         cmake_flags.append("-DCMAKE_CXX_COMPILER=/opt/rocm-6.4.1/bin/hipcc")
         cmake_flags.append("-DHIP_ARCHITECTURES=gfx942")
-        cmake_flags.append("-DHIP_ROOT_DIR=/opt/rocm-6.4.1/hip")
-        cmake_flags.append("-DROCM_PATH=/opt/rocm-6.4.1")
         if os.getenv("NVTE_AOTRITON_PATH"):
             aotriton_path = Path(os.getenv("NVTE_AOTRITON_PATH"))
             cmake_flags.append(f"-DAOTRITON_PATH={aotriton_path}")
