@@ -803,7 +803,7 @@ protected:
       cfg.bias_type = (bias_type == "-")
                           ? (hipDataType)-1
                           : typeNameMapper.getValue(bias_type, "bias_type", fp8_filter);
-      cfg.aux_type = (aux_type_str == "-")
+      cfg.aux_type = (aux_type == "-")
                           ? (hipDataType)-1
                           : typeNameMapper.getValue(aux_type, "aux_type", fp8_filter);
 
@@ -1016,24 +1016,24 @@ void hipblaslt_gemm(const Tensor *inputA,
   NVTE_CHECK(!is_fp8_dtype(param.Btype) || param.B_scale_inv != nullptr,
              "FP8 input to GEMM requires inverse of scale!");
 
-  // check consistency of arguments:
-  // if fp8 is desired, context cannot be null
-#if HIP_VERSION <= 70000000
+#if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
+  if (use_fp8 && gelu) {
+    hipDeviceProp_t prop;
+    NVTE_CHECK_CUDA(hipGetDeviceProperties(&prop, 0));
+    // Currently hipblasLT only supports fp8 gemm + gelu fusion only on MI300
+    if (prop.major == 9 && prop.minor == 4) {
+      bool allow_fp8_gemm = (param.Atype == DType::kFloat8E4M3) &&
+                          (param.Btype == DType::kFloat8E4M3) &&
+                          (outputD->data.dtype == DType::kFloat8E4M3) &&
+                          (!bias || inputBias->data.dtype == DType::kFloat16) &&
+                          (outputPreGelu->data.dtype == DType::kFloat16 || outputPreGelu->data.dtype == outputD->data.dtype);
+      NVTE_CHECK(allow_fp8_gemm, "fp8 gemm + gelu fusion is unavailable with current config!");
+    }
+  }
+#else
   // fp8 + gelu fusion + fp8 aux is unavailable right now.
   if (use_fp8) {
     NVTE_CHECK(!gelu, "fp8 gemm + gelu fusion is unavailable right now!");
-  }
-#else
-  hipDeviceProp_t prop;
-  NVTE_CHECK_CUDA(hipGetDeviceProperties(&prop, 0));
-  if(use_fp8 && gelu && (prop.major == 9 && prop.minor == 4) ){
-    // Currently hipblasLT only supports fp8 gemm + gelu fusion only on MI300
-    bool allow_fp8_gemm = (param.Atype == DType::kFloat8E4M3) &&
-                        (param.Btype == DType::kFloat8E4M3) &&
-                        (outputD->data.dtype == DType::kFloat8E4M3) &&
-                        (!bias || inputBias->data.dtype == DType::kFloat16) &&
-                        (outputPreGelu->data.dtype == DType::kFloat16 || outputPreGelu->data.dtype == outputD->data.dtype);
-    NVTE_CHECK(allow_fp8_gemm, "fp8 gemm + gelu fusion is unavailable with current config!");
   }
 #endif
   if (is_fp8_dtype(outputD->data.dtype)) {
