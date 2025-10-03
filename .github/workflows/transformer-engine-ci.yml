@@ -113,6 +113,7 @@ jobs:
           # Explicitly tell CMake to use the ROCm HIP compiler
           export CXX=$ROCM_PATH/bin/hipcc
           export CC=$ROCM_PATH/bin/hipcc
+          export HIP_PATH=""
           
           # Build the wheel
           CXX=$ROCM_PATH/bin/hipcc \
