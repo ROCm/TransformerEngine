@@ -88,10 +88,10 @@ jobs:
           set -ex
 
           # Ensure core build tools are present
-          sudo apt-get update && sudo apt-get install -y build-essential hip-runtime-amd hip-dev
+          sudo apt-get update && sudo apt-get install -y build-essential
 
           # Upgrade pip and add its location to the PATH
-          pip install --upgrade pip ninja
+          pip install --upgrade pip ninja setuptools wheel
           export PATH=/home/runner/.local/bin:$PATH
 
           # Install custom CMake version
