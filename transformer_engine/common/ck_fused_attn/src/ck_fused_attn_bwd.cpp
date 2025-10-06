@@ -11,7 +11,7 @@
 #include "ck_fused_attn/ck_fused_attn.hpp"
 #include "ck_tile/host.hpp"
 #include "mha_bwd.h"
-#include "../include/ck_fused_attn/ck_fused_attn_utils.hpp"
+#include "ck_fused_attn_utils.hpp"
 
 namespace ck_fused_attn{
 
@@ -920,8 +920,8 @@ hipError_t ck_attn_varlen_bwd(
                          cu_seqlen_q_ptr,//cu_seqlen_q
                          cu_seqlen_kv_ptr,//cu_seqlen_kv
                          nullptr, /* seqlen_k_ptr */
-                         0, //seqlen_q, unused in group mode
-                         0, //seqlen_kv, unused in group mode
+                         max_seqlen_q, //seqlen_q, unused in group mode
+                         max_seqlen_k, //seqlen_kv, unused in group mode
                          batch,
                          max_seqlen_q,
                          max_seqlen_k,
