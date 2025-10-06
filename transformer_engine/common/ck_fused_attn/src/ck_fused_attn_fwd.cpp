@@ -312,6 +312,7 @@ hipError_t ck_attn_varlen_fwd(
   ck_tile::index_t nhead_k = hg;
   ck_tile::index_t hdim_v = d_v;
   ck_tile::index_t max_seqlen_q = s_q;
+  ck_tile::index_t max_seqlen_kv = s_kv;
 
   float scale_s = scaling_factor;
   float scale_p = 1.f;
@@ -390,8 +391,8 @@ hipError_t ck_attn_varlen_fwd(
                          nullptr, //seqlen_k_ptr
                          nullptr, //seqstart_padded_q_ptr
                          nullptr, //seqstart_padded_k_ptr
-                         0, //seqlen_q, unused in group mode
-                         0, //seqlen_kv, unused in group mode
+                         max_seqlen_q, //seqlen_q, unused in group mode
+                         max_seqlen_kv, //seqlen_kv, unused in group mode
                          batch,
                          max_seqlen_q,
                          hdim_q,
