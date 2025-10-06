@@ -732,7 +732,6 @@ class _LayerNormLinear(torch.autograd.Function):
             nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
 
             if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                clear_tensor_data(weight._transpose)
                 weight.update_usage(columnwise_usage=False)
 
             # Prepare grad input tensor

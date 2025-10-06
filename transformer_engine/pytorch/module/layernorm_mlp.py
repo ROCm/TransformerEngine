@@ -853,7 +853,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc2_dgrad = gemm_output
 
             if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                clear_tensor_data(fc2_weight._transpose)
                 fc2_weight.update_usage(columnwise_usage=False)
 
             # --------------------------------------------------
@@ -1081,7 +1080,6 @@ class _LayerNormMLP(torch.autograd.Function):
             )
 
             if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                clear_tensor_data(fc1_weight._transpose)
                 fc1_weight.update_usage(columnwise_usage=False)
 
             # Prepare grad input tensor

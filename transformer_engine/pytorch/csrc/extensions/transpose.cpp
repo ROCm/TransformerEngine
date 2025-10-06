@@ -93,7 +93,7 @@ at::Tensor fp8_transpose(at::Tensor input, DType otype, std::optional<at::Tensor
   size_t N = static_cast<size_t>(input.size(1));
 
   at::Tensor out;
-  if (output.has_value() && output->numel() > 0) {
+  if (output.has_value()) {
     out = *output;
   } else {
     out = allocateTorchTensor(input.size(1), input.size(0), DType::kByte);
