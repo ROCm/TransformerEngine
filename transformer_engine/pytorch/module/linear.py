@@ -1027,8 +1027,6 @@ class Linear(TransformerEngineBaseModule):
         keep_fp8_weight_transpose_cache: bool = True,
     ) -> None:
         super().__init__()
-        if not IS_HIP_EXTENSION:
-            keep_fp8_weight_transpose_cache = True
 
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.in_features = in_features
@@ -1046,7 +1044,7 @@ class Linear(TransformerEngineBaseModule):
             self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
-        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
+        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache if IS_HIP_EXTENSION else True
 
         if device == "meta":
             assert parameters_split is None, "Cannot split module parameters on 'meta' device."
