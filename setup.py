@@ -7,7 +7,6 @@
 """Installation script."""
 
 import os
-import sys
 import time
 from pathlib import Path
 from typing import List, Tuple
@@ -153,6 +152,8 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     if not found_cmake():
         setup_reqs.append("cmake>=3.21")
     if not found_ninja():
+        import sys
+
         subprocess.check_call([sys.executable, "-m", "pip", "install", "ninja"])
         setup_reqs.append("ninja")
     if not found_pybind11():
