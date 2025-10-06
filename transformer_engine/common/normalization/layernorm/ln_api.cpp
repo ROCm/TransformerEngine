@@ -67,14 +67,16 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
   bool is_aligned = true;
 #ifndef __HIP_PLATFORM_AMD__
   bool cudnn_backend = use_cudnn_norm_fwd() || is_mxfp_scaling(z->scaling_mode);
+#endif
 
   bool gamma_in_weight_dtype = false;
+#ifndef __HIP_PLATFORM_AMD__
   if (cudnn_backend) {
     // TODO: add check for GPU ARCH
     norm_backend = NVTE_Norm_Backend::Cudnn;
     gamma_in_weight_dtype = use_zero_centered_gamma_in_weight_dtype();
   } else 
-#else  
+#endif 
   {
 
     norm_backend = NVTE_Norm_Backend::Te;

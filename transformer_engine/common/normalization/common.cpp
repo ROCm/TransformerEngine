@@ -41,6 +41,7 @@ Compute always in FP32
 namespace transformer_engine {
 namespace normalization {
 
+#ifndef __HIP_PLATFORM_AMD__
 cudnn_frontend::NormFwdPhase_t get_cudnn_forward_phase(const bool training) {
   return training ? cudnn_frontend::NormFwdPhase_t::TRAINING
                   : cudnn_frontend::NormFwdPhase_t::INFERENCE;
