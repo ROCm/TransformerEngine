@@ -1209,17 +1209,74 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
 void fp8_quantize_arch_l_100(const Tensor &input, const Tensor *act_input, const Tensor *noop,
                              Tensor *output, Tensor *dbias, Tensor *workspace,
                              cudaStream_t stream) {
-  if (!is_tensor_scaling(output->scaling_mode) || IS_DBIAS) {
-    // zhongboz: should we just ignore IS_ACT here?
-    NVTE_ERROR("Not implemented scaling mode or fusion: " + to_string(output->scaling_mode) +
-               " on GPU with compute capability < 10.0.");
-  }
+
+  #ifndef __HIP_PLATFORM_AMD__
+    if (!is_tensor_scaling(output->scaling_mode) || IS_DBIAS) {
+      // zhongboz: should we just ignore IS_ACT here?
+      NVTE_ERROR("Not implemented scaling mode or fusion: " + to_string(output->scaling_mode) +
+                " on GPU with compute capability < 10.0.");
+    }
+  #endif //#ifndef __HIP_PLATFORM_AMD__
+
   switch (output->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
-      if (!IS_DACT) {
-        CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
-      } else {
-        CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
+      if constexpr (IS_DBIAS) {
+        // This path handles all dbias fusions for non-TMA architectures.
+        NVTE_CHECK(dbias->data.dtype == input.data.dtype, "DBias must have the same type as input.");
+        NVTE_CHECK(dbias->data.shape == std::vector<size_t>{input.flat_last_dim()},
+                   "Wrong shape of DBias.");
+        NVTE_CHECK(workspace != nullptr, "Workspace must be a tensor.");
+
+        // Workspace sizing logic (same for both dbias variants).
+        if (workspace->data.dptr == nullptr) {
+          workspace->data.shape = input.data.shape;
+          workspace->data.dtype = DType::kFloat32;
+          return;
+        }
+
+        const size_t N = product(input.data.shape);
+        const size_t rows = input.flat_first_dim();
+        const size_t cols = input.flat_last_dim();
+
+        TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+            input.dtype(), IType,
+            TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+                output->dtype(), OType,
+                constexpr auto UnaryOP = ActivationType<float, ParamOP, OP>::op;
+                constexpr int nvec = 16 / sizeof(IType);
+
+                if constexpr (IS_DACT) {
+                  // Case: dgelu + dbias fusion
+                  VectorizedCastDBiasDGeluKernelLauncher<nvec, ParamOP, UnaryOP>(
+                      reinterpret_cast<const IType *>(input.data.dptr),
+                      reinterpret_cast<const IType *>(act_input->data.dptr),
+                      reinterpret_cast<OType *>(output->data.dptr),
+                      reinterpret_cast<fp32 *>(workspace->data.dptr),
+                      reinterpret_cast<const fp32 *>(output->scale.dptr),
+                      reinterpret_cast<fp32 *>(output->amax.dptr),
+                      reinterpret_cast<fp32 *>(output->scale_inv.dptr), N, {}, stream);
+                } else {
+                  // Case: Simple dbias fusion
+                  VectorizedCastAndDBiasKernelLauncher<nvec, ParamOP, detail::identity>(
+                      reinterpret_cast<const IType *>(input.data.dptr),
+                      reinterpret_cast<OType *>(output->data.dptr),
+                      reinterpret_cast<fp32 *>(workspace->data.dptr),
+                      reinterpret_cast<const fp32 *>(output->scale.dptr),
+                      reinterpret_cast<fp32 *>(output->amax.dptr),
+                      reinterpret_cast<fp32 *>(output->scale_inv.dptr), N, {}, stream);
+                }
+
+                // The reduction step is the same for both cases.
+                reduce_dbias<IType>(reinterpret_cast<float *>(workspace->data.dptr), dbias, rows,
+                                    cols, stream);
+            ));
+
+      } else {  // Original logic for non-dbias cases
+        if (!IS_DACT) {
+          CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
+        } else {
+          CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
+        }
       }
       break;
     }
@@ -1250,19 +1307,21 @@ void fp8_quantize(const Tensor &input, const Tensor *act_input, const Tensor *no
   NVTE_CHECK(!is_fp8_dtype(input.dtype()), "Input must be in higher precision.");
   NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
 
-#ifndef __HIP_PLATFORM_AMD__
-  // Supported by the Arch >= 10.0
-  if (is_supported_by_CC_100()) {
-    fp8_quantize_arch_ge_100<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
-                                                                     dbias, workspace, stream);
-  } else {
-#endif //#ifndef __HIP_PLATFORM_AMD__
-    // Supported by the Arch < 10.0
+ #ifndef __HIP_PLATFORM_AMD__
+     // NVIDIA
+     // Supported by the Arch >= 10.0
+     if (is_supported_by_CC_100()) {
+         fp8_quantize_arch_ge_100<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
+                                                                         dbias, workspace, stream);
+     } else { // Supported by the Arch < 10.0
+         fp8_quantize_arch_l_100<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
+                                                                        dbias, workspace, stream);
+     }
+ #else
+     // AMD
     fp8_quantize_arch_l_100<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
                                                                     dbias, workspace, stream);
-#ifndef __HIP_PLATFORM_AMD__
-  }
-#endif //#ifndef __HIP_PLATFORM_AMD__
+ #endif //#ifndef __HIP_PLATFORM_AMD__
 }
 
 namespace detail {
