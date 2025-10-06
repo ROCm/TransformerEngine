@@ -191,10 +191,10 @@ void performTest(const TestParams& params) {
   DType bias_type = TypeInfo<Bias_Type>::dtype;
   DType gelu_type = TypeInfo<Gelu_Type>::dtype;
   DType dtype = TypeInfo<D_Type>::dtype;
-  
+
   const bool has_fp8 = isFp8Type(atype) || isFp8Type(btype);
   const bool use_mxfp8 = params.scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING;
-                          
+
   if (use_mxfp8)
   {
     if (!has_fp8) {
