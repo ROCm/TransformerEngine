@@ -1262,8 +1262,8 @@ void fp8_quantize_amd(const Tensor &input, const Tensor *act_input, const Tensor
                 constexpr int nvec = 16 / sizeof(IType);
 
                 if constexpr (IS_DACT) {
-                  // Case: dgelu + dbias fusion
-                  VectorizedCastDBiasDGeluKernelLauncher<nvec, ParamOP, UnaryOP>(
+                  // Case: dact + dbias fusion
+                  VectorizedCastDBiasDActKernelLauncher<nvec, ParamOP, UnaryOP>(
                       reinterpret_cast<const IType *>(input.data.dptr),
                       reinterpret_cast<const IType *>(act_input->data.dptr),
                       reinterpret_cast<OType *>(output->data.dptr),
