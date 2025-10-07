@@ -49,6 +49,7 @@ downloads/
 .pytest_cache/
 compile_commands.json
 .nfs
+<<<<<<< HEAD
 **/profiler_outputs/
 **/times.csv
 tensor_dumps/
@@ -56,3 +57,7 @@ aiter/
 transformer_engine/build_info.txt
 transformer_engine/common/util/hip_nvml.*
 transformer_engine/aiter/
+=======
+tensor_dumps/
+artifacts/
+>>>>>>> ca7407e

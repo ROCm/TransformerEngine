@@ -36,6 +36,9 @@ fi
 git checkout $TARGET_BRANCH
 git submodule update --init --recursive
 
+# Install deps
+/opt/python/cp310-cp310/bin/pip install cmake pybind11[global] ninja
+
 if $BUILD_METAPACKAGE ; then
         cd /TransformerEngine
         if [ "$ROCM_BUILD" != "1" ]; then
@@ -60,6 +63,7 @@ if $BUILD_COMMON ; then
         fi
 
         # Create the wheel.
+<<<<<<< HEAD
         ${PYBINDIR}python setup.py bdist_wheel --verbose --python-tag=py3 --plat-name=$PLATFORM 2>&1 | tee /wheelhouse/logs/common.txt
 
         # Repack the wheel for cuda specific package, i.e. cu12.
@@ -69,6 +73,17 @@ if $BUILD_COMMON ; then
         sed -i "s/Name: transformer_engine/Name: transformer_engine_${TE_CUDA_VERS}/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
         mv "${WHL_BASE}/${WHL_BASE}.dist-info" "${WHL_BASE}/transformer_engine_${TE_CUDA_VERS}-${VERSION}.dist-info"
         ${PYBINDIR}wheel pack ${WHL_BASE}
+=======
+        /opt/python/cp310-cp310/bin/python setup.py bdist_wheel --verbose --python-tag=py3 --plat-name=$PLATFORM 2>&1 | tee /wheelhouse/logs/common.txt
+
+        # Repack the wheel for cuda specific package, i.e. cu12.
+        /opt/python/cp310-cp310/bin/wheel unpack dist/*
+        # From python 3.10 to 3.11, the package name delimiter in metadata got changed from - (hyphen) to _ (underscore).
+        sed -i "s/Name: transformer-engine/Name: transformer-engine-cu12/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
+        sed -i "s/Name: transformer_engine/Name: transformer_engine_cu12/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
+        mv "${WHL_BASE}/${WHL_BASE}.dist-info" "${WHL_BASE}/transformer_engine_cu12-${VERSION}.dist-info"
+        /opt/python/cp310-cp310/bin/wheel pack ${WHL_BASE}
+>>>>>>> ca7407e
 
         # Rename the wheel to make it python version agnostic.
         whl_name=$(basename dist/*)
@@ -80,6 +95,7 @@ fi
 
 if $BUILD_PYTORCH ; then
 	cd /TransformerEngine/transformer_engine/pytorch
+<<<<<<< HEAD
 	if [ "$ROCM_BUILD" = "1" ]; then
                 ${PYBINDIR}pip install torch --index-url https://download.pytorch.org/whl/rocm6.3
         else
@@ -87,11 +103,16 @@ if $BUILD_PYTORCH ; then
                 ${PYBINDIR}pip install torch
         fi
         ${PYBINDIR}python setup.py sdist 2>&1 | tee /wheelhouse/logs/torch.txt
+=======
+        /opt/python/cp310-cp310/bin/pip install torch
+	/opt/python/cp310-cp310/bin/python setup.py sdist 2>&1 | tee /wheelhouse/logs/torch.txt
+>>>>>>> ca7407e
 	cp dist/* /wheelhouse/
 fi
 
 if $BUILD_JAX ; then
 	cd /TransformerEngine/transformer_engine/jax
+<<<<<<< HEAD
 	if [ "$ROCM_BUILD" = "1" ]; then
                 ${PYBINDIR}pip install jax
         else
@@ -99,5 +120,9 @@ if $BUILD_JAX ; then
                 ${PYBINDIR}pip install "jax[cuda12_local]" jaxlib
         fi
 	${PYBINDIR}python setup.py sdist 2>&1 | tee /wheelhouse/logs/jax.txt
+=======
+        /opt/python/cp310-cp310/bin/pip install "jax[cuda12_local]" jaxlib
+	/opt/python/cp310-cp310/bin/python setup.py sdist 2>&1 | tee /wheelhouse/logs/jax.txt
+>>>>>>> ca7407e
 	cp dist/* /wheelhouse/
 fi

@@ -20,11 +20,7 @@ from build_tools.te_version import te_version
 from build_tools.utils import (
     rocm_build,
     cuda_archs,
-    found_cmake,
-    found_ninja,
-    found_pybind11,
     get_frameworks,
-    install_and_import,
     remove_dups,
 )
 
@@ -40,7 +36,6 @@ os.environ["NVTE_PROJECT_BUILDING"] = "1"
 if "pytorch" in frameworks:
     from torch.utils.cpp_extension import BuildExtension
 elif "jax" in frameworks:
-    install_and_import("pybind11[global]")
     from pybind11.setup_helpers import build_ext as BuildExtension
 
 
@@ -112,6 +107,11 @@ def setup_common_extension() -> CMakeExtension:
         if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
             cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
 
+    # Add custom CMake arguments from environment variable
+    nvte_cmake_extra_args = os.getenv("NVTE_CMAKE_EXTRA_ARGS")
+    if nvte_cmake_extra_args:
+        cmake_flags.extend(nvte_cmake_extra_args.split())
+
     # Project directory root
     root_path = Path(__file__).resolve().parent
 
@@ -122,13 +122,14 @@ def setup_common_extension() -> CMakeExtension:
     )
 
 
-def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
+def setup_requirements() -> Tuple[List[str], List[str]]:
     """Setup Python dependencies
 
-    Returns dependencies for build, runtime, and testing.
+    Returns dependencies for runtime and testing.
     """
 
     # Common requirements
+<<<<<<< HEAD
     if rocm_build():
         setup_reqs: List[str] = []
     else:
@@ -141,6 +142,8 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
             "nvidia-nvtx-cu12",
             "nvidia-cuda-nvrtc-cu12",
         ]
+=======
+>>>>>>> ca7407e
     install_reqs: List[str] = [
         "pydantic",
         "importlib-metadata>=1.0",
@@ -148,6 +151,7 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     ]
     test_reqs: List[str] = ["pytest>=8.2.1"]
 
+<<<<<<< HEAD
     # Requirements that may be installed outside of Python
     if not found_cmake():
         setup_reqs.append("cmake>=3.21")
@@ -182,8 +186,22 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
                 setup_reqs.extend(["jax[cuda12]", "flax>=0.7.1"])
                 install_reqs.extend(["jax", "flax>=0.7.1"])
                 test_reqs.extend(["numpy"])
+=======
+    # Framework-specific requirements
+    if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
+        if "pytorch" in frameworks:
+            from build_tools.pytorch import install_requirements, test_requirements
+>>>>>>> ca7407e
 
-    return [remove_dups(reqs) for reqs in [setup_reqs, install_reqs, test_reqs]]
+            install_reqs.extend(install_requirements())
+            test_reqs.extend(test_requirements())
+        if "jax" in frameworks:
+            from build_tools.jax import install_requirements, test_requirements
+
+            install_reqs.extend(install_requirements())
+            test_reqs.extend(test_requirements())
+
+    return [remove_dups(reqs) for reqs in [install_reqs, test_reqs]]
 
 
 if __name__ == "__main__":
@@ -202,14 +220,18 @@ if __name__ == "__main__":
         ext_modules = []
         package_data = {}
         include_package_data = False
+<<<<<<< HEAD
         setup_requires = []
         install_requires = ([f"transformer_engine_{te_cuda_vers}=={__version__}"],)
+=======
+        install_requires = ([f"transformer_engine_cu12=={__version__}"],)
+>>>>>>> ca7407e
         extras_require = {
             "pytorch": [f"transformer_engine_torch=={__version__}"],
             "jax": [f"transformer_engine_jax=={__version__}"],
         }
     else:
-        setup_requires, install_requires, test_requires = setup_requirements()
+        install_requires, test_requires = setup_requirements()
         ext_modules = [setup_common_extension()]
         if rocm_build():
             cmdclass["develop"] = develop
@@ -255,6 +277,7 @@ if __name__ == "__main__":
         long_description=long_description,
         long_description_content_type="text/x-rst",
         ext_modules=ext_modules,
+<<<<<<< HEAD
         cmdclass=cmdclass,
         python_requires=">=3.8, <3.13",
         classifiers=[
@@ -265,6 +288,11 @@ if __name__ == "__main__":
             "Programming Language :: Python :: 3.12",
         ],
         setup_requires=setup_requires,
+=======
+        cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist},
+        python_requires=">=3.8",
+        classifiers=["Programming Language :: Python :: 3"],
+>>>>>>> ca7407e
         install_requires=install_requires,
         license_files=("LICENSE",),
         include_package_data=include_package_data,

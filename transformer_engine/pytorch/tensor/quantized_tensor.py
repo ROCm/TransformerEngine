@@ -12,11 +12,13 @@ import os
 from typing import Optional, Tuple, Iterable, Any, Dict, Union
 import abc
 import copy
+import warnings
 
 import torch
 from torch.utils._pytree import tree_map
 
 import transformer_engine_torch as tex
+from transformer_engine.common.recipe import Recipe
 
 
 class QuantizedTensorBase:
@@ -34,6 +36,8 @@ class QuantizedTensorBase:
     implement the functionality of the tensor, while
     XTensor should only implement the functionality needed
     to behave like regular torch.Tensor (liek __torch_dispatch__)."""
+
+    _quantizer: Optional[Quantizer]
 
     def update_usage(
         self,
@@ -72,6 +76,14 @@ class QuantizedTensorBase:
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement restore_from_saved function"
         )
+
+    def update_quantizer(self, quantizer: Quantizer):
+        """Update quantizer for the tensor"""
+        if self._quantizer is None:
+            raise RuntimeError("To be updated, quantizer must be set")
+        if self._quantizer is not quantizer:
+            warnings.warn("Quantizer is being updated, this may affect model behavior")
+            self._quantizer = quantizer
 
 
 def prepare_for_saving(
@@ -241,6 +253,16 @@ class Quantizer(abc.ABC):
     def copy(self) -> Quantizer:
         """Create shallow copy"""
         return copy.copy(self)
+
+    def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Symbolic function for ONNX export"""
+
+    def onnx_dequantize(self, tensor) -> torch.Tensor:
+        """Symbolic function for ONNX export"""
+
+    @abc.abstractmethod
+    def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
+        """Returns recipe class that is compatible with this quantizer"""
 
 
 class _QuantizeFunc(torch.autograd.Function):

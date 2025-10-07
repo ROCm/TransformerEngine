@@ -6,7 +6,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "extensions.h"
+#include "../extensions.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -27,6 +27,7 @@ pybind11::dict Registrations() {
 
   // Quantization
   dict["te_dbias_quantize_ffi"] = EncapsulateFFI(DBiasQuantizeHandler);
+  dict["te_grouped_quantize_ffi"] = EncapsulateFFI(GroupedQuantizeHandler);
   dict["te_dequantize_ffi"] = EncapsulateFFI(DequantizeHandler);
 
   // Softmax
@@ -57,6 +58,15 @@ pybind11::dict Registrations() {
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
                      pybind11::arg("execute") = EncapsulateFFI(FusedAttnBackwardHandler));
 
+<<<<<<< HEAD
+=======
+  // GEMM
+  dict["te_gemm_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(GemmHandler));
+
+  // Grouped GEMM
+>>>>>>> ca7407e
   dict["te_grouped_gemm_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
                      pybind11::arg("execute") = EncapsulateFFI(GroupedGemmHandler));
@@ -82,7 +92,11 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
 #endif
   m.def("get_cudnn_version", &GetCudnnRuntimeVersion);
   m.def("get_device_compute_capability", &GetDeviceComputeCapability);
+<<<<<<< HEAD
 #ifndef USE_ROCM
+=======
+  m.def("get_num_compute_streams", &nvte_get_num_compute_streams);
+>>>>>>> ca7407e
   m.def("get_cublasLt_version", &cublasLtGetVersion);
 #endif
   m.def("get_dact_dbias_quantize_workspace_sizes", &GetDActDBiasQuantizeWorkspaceSizes);
@@ -92,6 +106,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_fused_attn_fwd_workspace_sizes", &GetFusedAttnForwardWorkspaceSizes);
   m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
+  m.def("is_non_nt_fp8_gemm_supported", &nvte_is_non_tn_fp8_gemm_supported);
 
   pybind11::enum_<DType>(m, "DType", pybind11::module_local())
       .value("kByte", DType::kByte)

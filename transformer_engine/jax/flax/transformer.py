@@ -182,8 +182,9 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             attn_weights_without_groups_shape = (b, h * g, q, k)
             attn_weights = attn_weights.reshape(attn_weights_without_groups_shape)
 
+        # (b, h, q, k): Last two axes are always replicated
         attn_weights = with_sharding_constraint_by_logical_axes(
-            attn_weights, (BATCH_AXES, HEAD_AXES, SEQLEN_AXES, SEQLEN_AXES)
+            attn_weights, (BATCH_AXES, HEAD_AXES, None, None)
         )
 
         # When post_scale_bias is present, the computation is Softmax(attn_weights * scale + bias)
@@ -596,6 +597,12 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             seqlen_kv = seqlen_q
         else:
             seqlen_kv = key.shape[sequence_dim]
+        if qkv_layout.is_separate():
+            head_dim_qk = query.shape[-1]
+            head_dim_v = value.shape[-1]
+        else:
+            head_dim_qk = self.head_dim
+            head_dim_v = self.head_dim
 
         if qkv_layout.is_separate():
             head_dim_qk = query.shape[-1]
@@ -605,6 +612,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             head_dim_v = self.head_dim
 
         has_fused_attn_kernel = is_fused_attn_kernel_available(
+            # This needs to be fixed: TE-Jax has historically correlated training mode with deterministic mode.
+            not deterministic,
             self.dtype,
             self.dtype,
             qkv_layout,

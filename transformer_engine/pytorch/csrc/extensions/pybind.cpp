@@ -14,7 +14,9 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
-#include <stdexcept>
+#include <memory>
+#include <optional>
+#include <vector>
 
 #include "../common.h"
 #include "../extensions.h"
@@ -201,10 +203,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("weight"), py::arg("eps"), py::arg("ln_out"), py::arg("quantizer"),
         py::arg("otype"), py::arg("sm_margin"), py::arg("zero_centered_gamma"));
   m.def("rmsnorm_bwd", &transformer_engine::pytorch::rmsnorm_bwd, "Backward of RMSNorm");
-  m.def("fused_multi_quantize", &transformer_engine::pytorch::fused_multi_quantize,
-        "Fused Multi-tensor Cast + Transpose", py::arg("input_list"), py::arg("output_list"),
-        py::arg("quantizer_list"), py::arg("otype"));
-
+  m.def("multi_tensor_quantize", &transformer_engine::pytorch::multi_tensor_quantize,
+        "Multi-tensor quantize", py::arg("tensor_list"), py::arg("quantizer_list"));
+  m.def("split_quantize", &transformer_engine::pytorch::split_quantize,
+        "Split and multi-tensor quantize", py::arg("tensor"), py::arg("split_sections"),
+        py::arg("quantizer_list"));
   m.def("te_general_grouped_gemm", &transformer_engine::pytorch::te_general_grouped_gemm,
         "Grouped GEMM");
   m.def("fp8_transpose", &transformer_engine::pytorch::fp8_transpose, "Transpose with FP8 I/O",
@@ -231,6 +234,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("out_dtype"), py::call_guard<py::gil_scoped_release>());
   m.def("fused_multi_row_padding", &transformer_engine::pytorch::fused_multi_row_padding,
         "Fused Multi-tensor padding", py::call_guard<py::gil_scoped_release>());
+  m.def("fused_multi_row_unpadding", &transformer_engine::pytorch::fused_multi_row_unpadding,
+        "Fused Multi-tensor unpadding", py::call_guard<py::gil_scoped_release>());
 
   // attention kernels
   m.def("fa_prepare_fwd", &transformer_engine::pytorch::fa_prepare_fwd,
@@ -255,14 +260,45 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fused_rope_backward", &transformer_engine::pytorch::fused_rope_backward,
         "Fused Apply RoPE BWD", py::call_guard<py::gil_scoped_release>());
 
+  // fused router
+  m.def("fused_topk_with_score_function_fwd",
+        &transformer_engine::pytorch::fused_topk_with_score_function_fwd, py::arg("logits"),
+        py::arg("topk"), py::arg("use_pre_softmax"), py::arg("num_groups"), py::arg("group_topk"),
+        py::arg("scaling_factor"), py::arg("score_function"), py::arg("expert_bias"),
+        "Fused topk softmax fwd");
+  m.def("fused_topk_with_score_function_bwd",
+        &transformer_engine::pytorch::fused_topk_with_score_function_bwd, py::arg("num_tokens"),
+        py::arg("num_experts"), py::arg("routing_map"), py::arg("intermediate_output"),
+        py::arg("grad_probs"), py::arg("topk"), py::arg("use_pre_softmax"),
+        py::arg("scaling_factor"), py::arg("score_function"), "Fused topk softmax bwd");
+  m.def("fused_score_for_moe_aux_loss_fwd",
+        &transformer_engine::pytorch::fused_score_for_moe_aux_loss_fwd, py::arg("logits"),
+        py::arg("topk"), py::arg("score_function"), "Fused topk softmax fwd");
+  m.def("fused_score_for_moe_aux_loss_bwd",
+        &transformer_engine::pytorch::fused_score_for_moe_aux_loss_bwd, py::arg("num_tokens"),
+        py::arg("num_experts"), py::arg("intermediate_output"), py::arg("grad_scores"),
+        py::arg("topk"), py::arg("score_function"), "Fused topk softmax bwd");
+  m.def("fused_moe_aux_loss_fwd", &transformer_engine::pytorch::fused_moe_aux_loss_fwd,
+        py::arg("probs"), py::arg("tokens_per_expert"), py::arg("total_num_tokens"),
+        py::arg("num_experts"), py::arg("num_rows"), py::arg("num_cols"), py::arg("topk"),
+        py::arg("coeff"), "Fused aux loss fwd");
+  m.def("fused_moe_aux_loss_bwd", &transformer_engine::pytorch::fused_moe_aux_loss_bwd,
+        py::arg("Const_buf"), py::arg("tokens_per_expert"), py::arg("num_rows"),
+        py::arg("num_cols"), py::arg("grad_aux_loss"), "Fused aux loss bwd");
+
   // Misc
 #ifndef USE_ROCM
   m.def("get_cublasLt_version", &transformer_engine::pytorch::get_cublasLt_version,
         "Get cublasLt version", py::call_guard<py::gil_scoped_release>());
   m.def("get_cudnn_version", &transformer_engine::pytorch::get_cudnn_version, "Get cuDNN version",
         py::call_guard<py::gil_scoped_release>());
+<<<<<<< HEAD
 #endif
   m.attr("_num_cublas_streams") = py::int_(transformer_engine::num_streams);
+=======
+  m.def("get_num_cublas_streams", &nvte_get_num_compute_streams, "Get number of compute streams",
+        py::call_guard<py::gil_scoped_release>());
+>>>>>>> ca7407e
 
   // Support THD format for Context Parallel
   m.def("thd_read_half_tensor", &transformer_engine::pytorch::thd_read_half_tensor,
@@ -391,7 +427,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("copy_into_buffer", &CommOverlap::copy_into_buffer, py::arg("input"),
            py::arg("local_chunk") = false)
       .def("get_buffer", &CommOverlap::get_buffer, py::arg("local_chunk") = false,
-           py::arg("shape") = std::nullopt);
+           py::arg("shape") = std::nullopt)
+      .def("get_communication_stream", &CommOverlap::get_communication_stream);
 
   py::class_<CommOverlapP2P, std::shared_ptr<CommOverlapP2P>,
              transformer_engine::CommOverlapP2PBase, transformer_engine::CommOverlapCore>(
@@ -408,10 +445,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("copy_into_buffer", &CommOverlapP2P::copy_into_buffer, py::arg("input"),
            py::arg("local_chunk") = false)
       .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("local_chunk") = false,
+<<<<<<< HEAD
            py::arg("shape") = std::nullopt);
 #else
   m.def("CommOverlapHelper", &transformer_engine::pytorch::placeholder, "Dummy function for python side annotations");
   m.def("CommOverlap", &transformer_engine::pytorch::placeholder, "Dummy function for python side annotations");
   m.def("CommOverlapP2P", &transformer_engine::pytorch::placeholder, "Dummy function for python side annotations");
 #endif //USE_ROCM
+=======
+           py::arg("shape") = std::nullopt)
+      .def("get_communication_stream", &CommOverlapP2P::get_communication_stream);
+>>>>>>> ca7407e
 }
