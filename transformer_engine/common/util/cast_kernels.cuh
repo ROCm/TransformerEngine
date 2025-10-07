@@ -1209,15 +1209,31 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
 void fp8_quantize_arch_l_100(const Tensor &input, const Tensor *act_input, const Tensor *noop,
                              Tensor *output, Tensor *dbias, Tensor *workspace,
                              cudaStream_t stream) {
-
-  #ifndef __HIP_PLATFORM_AMD__
-    if (!is_tensor_scaling(output->scaling_mode) || IS_DBIAS) {
-      // zhongboz: should we just ignore IS_ACT here?
-      NVTE_ERROR("Not implemented scaling mode or fusion: " + to_string(output->scaling_mode) +
-                " on GPU with compute capability < 10.0.");
+  if (!is_tensor_scaling(output->scaling_mode) || IS_DBIAS) {
+    // zhongboz: should we just ignore IS_ACT here?
+    NVTE_ERROR("Not implemented scaling mode or fusion: " + to_string(output->scaling_mode) +
+               " on GPU with compute capability < 10.0.");
+  }
+  switch (output->scaling_mode) {
+    case NVTE_DELAYED_TENSOR_SCALING: {
+      if (!IS_DACT) {
+        CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
+      } else {
+        CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
+      }
+      break;
     }
-  #endif //#ifndef __HIP_PLATFORM_AMD__
+    default:
+      NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
+  }
+}
 
+// ROCm FP8 quantize
+template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
+          float (*OP)(float, const ParamOP &)>
+void fp8_quantize_amd(const Tensor &input, const Tensor *act_input, const Tensor *noop,
+                      Tensor *output, Tensor *dbias, Tensor *workspace,
+                      cudaStream_t stream) {
   switch (output->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
       if constexpr (IS_DBIAS) {
@@ -1319,7 +1335,7 @@ void fp8_quantize(const Tensor &input, const Tensor *act_input, const Tensor *no
      }
  #else
      // AMD
-    fp8_quantize_arch_l_100<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
+    fp8_quantize_amd<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
                                                                     dbias, workspace, stream);
  #endif //#ifndef __HIP_PLATFORM_AMD__
 }
