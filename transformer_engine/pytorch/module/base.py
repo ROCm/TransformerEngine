@@ -1179,7 +1179,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     quantizer is not None
                 )  # to use primary fp8 weight one needs to use FP8 autocast with specific recipe.
                 quantizer.internal = False
-                if not self.keep_fp8_weight_transpose_cache:
+                if IS_HIP_EXTENSION and not self.keep_fp8_weight_transpose_cache:
                     quantizer.columnwise_usage=False
                 param = quantizer(param)
 
@@ -1230,7 +1230,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         skip_update_flag: Optional[torch.Tensor] = None,
         fsdp_group: Optional[dist_group_type] = None,
         workspace_dtype: Optional[torch.dtype] = None,
-        create_transpose_cache: bool = True,
     ) -> QuantizedTensor:
         """Get FP8 workspace buffer and maybe update its values
 
@@ -1253,8 +1252,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             over `update_workspace` if provided.
         fsdp_group: bool, default = None
             FSDP process group that the weights are distributed over.
-        create_transpose_cache: bool, default = True
-            Create transpose buffer from `tensor`.
         workspace_dtype: torch.dtype, default = None
             If weight workspace contains high-precision tensor - for example
             for debug quantization, this is dtype of the tensor.
@@ -1297,19 +1294,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             and out.data.shape != tensor.data.shape
         ):
             _fsdp_gather_tensors(fsdp_group, [tensor.data.shape], out)
-
-        if not is_non_tn_fp8_gemm_supported() and not create_transpose_cache:
-            current_quantizer = None
-            if out is None:
-                current_quantizer = quantizer
-            else:
-                if hasattr(out, "quantize_"):
-                    current_quantizer = out._get_quantizer()
-                else:
-                    current_quantizer = quantizer
-                    
-            # NOTE: Not create transpose buffer internally.
-            current_quantizer.columnwise_usage = False
 
         # Construct workspace if needed
         if out is None:
