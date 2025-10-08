@@ -117,7 +117,7 @@ def cross_entropy_kernel(
     m_d_X_y_stride: The stride of m/d/X_y tensor.
     rank (int): The rank of this device in the TP group.
     world_size (int): The size of world involved in this distributed loss calculation.
-    ignore_idx (int): Tokens to be ignored for loss and gradient calculation.
+    ignore_idx (int): Tokens to be ignored for loss and gradient calculation. (default -100)
     n_cols (int): The number of columns in the input tensor.
     n_non_ignore (int): The number of non-ignored elements in the batch.
     label_smoothing (float): The amount of smoothing when computing the loss, where 0.0 means no smoothing.
@@ -281,6 +281,8 @@ def cross_entropy_forward(
 
     B, SQ, V = _input.shape
     n_rows = B * SQ
+    valid_token_count = int((target != ignore_idx).sum().item())
+    denom = max(1, valid_token_count)
 
     assert reduce(mul, list(target.size())) == (B * SQ), "Each token needs a target token ID."
 
@@ -336,14 +338,14 @@ def cross_entropy_forward(
         world_size=world_size,
         ignore_idx=ignore_idx,
         n_cols=V,
-        n_non_ignore=n_rows,
+        n_non_ignore=denom,
         reduce_loss=reduce_loss,
         label_smoothing=label_smoothing,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=NUM_WARPS,
     )
 
-    loss = torch.reshape(loss_1d, (B, SQ)) if not reduce_loss else (torch.sum(loss_1d) / n_rows)
+    loss = torch.reshape(loss_1d, (B, SQ)) if not reduce_loss else (torch.sum(loss_1d) / denom)
 
     return loss, _input
 
