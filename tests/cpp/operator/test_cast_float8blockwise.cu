@@ -479,9 +479,9 @@ class FusedCastFloat8VectorwiseTestSuite
 
 TEST_P(FusedCastFloat8BlockwiseTestSuite, TestFusedCastFloat8Blockwise) {
 #ifndef __HIP_PLATFORM_AMD__
-    if (getDeviceComputeCapability() < hopperComputeCapability) {
-      GTEST_SKIP();
-    }
+  if (getDeviceComputeCapability() < hopperComputeCapability) {
+    GTEST_SKIP();
+  }
 #endif
 
   using namespace transformer_engine;
@@ -532,9 +532,9 @@ TEST_P(FusedCastFloat8BlockwiseTestSuite, TestFusedCastFloat8Blockwise) {
 
 TEST_P(FusedCastFloat8VectorwiseTestSuite, TestFusedCastFloat8Vectorwise) {
 #ifndef __HIP_PLATFORM_AMD__
-    if (getDeviceComputeCapability() < hopperComputeCapability) {
-      GTEST_SKIP();
-    }
+  if (getDeviceComputeCapability() < hopperComputeCapability) {
+    GTEST_SKIP();
+  }
 #endif
 
   using namespace transformer_engine;

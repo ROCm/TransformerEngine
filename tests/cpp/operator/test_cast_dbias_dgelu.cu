@@ -166,10 +166,10 @@ TEST_P(CastDBiasDGeluTestSuite, TestCastDBiasDgelu) {
     using namespace test;
 
 #ifndef __HIP_PLATFORM_AMD__
-      // Skip tests for pre-Blackwell architectures
-      if (getDeviceComputeCapability() < blackwellComputeCapability) {
-          GTEST_SKIP();
-      }
+    // Skip tests for pre-Blackwell architectures
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
 #endif
 
     const DType input_type = std::get<0>(GetParam());

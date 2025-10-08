@@ -507,7 +507,7 @@ __launch_bounds__(unary_kernel_threads) __global__
 
 template <int nvec, typename Param, fp32 (*OP)(const fp32, const Param &), typename InputType,
           typename OutputType>
-void VectorizedCastAndDBiasKernelLauncher(const InputType *input, OutputType *output,
+void VectorizedCastDBiasKernelLauncher(const InputType *input, OutputType *output,
                                           fp32 *dbias_workspace, const fp32 *scale, fp32 *amax,
                                           fp32 *scale_inv, const size_t N, const Param params,
                                           cudaStream_t stream) {
@@ -574,6 +574,79 @@ void VectorizedCastDBiasDActKernelLauncher(const InputType *grad, const InputTyp
         break;
       }
     }
+  }
+}
+
+// ROCm FP8 quantize
+template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
+          float (*OP)(float, const ParamOP &)>
+void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tensor *noop,
+                      Tensor *output, Tensor *dbias, Tensor *workspace,
+                      cudaStream_t stream) {
+  switch (output->scaling_mode) {
+    case NVTE_DELAYED_TENSOR_SCALING: {
+      if constexpr (IS_DBIAS) {
+        // This path handles all dbias fusions for non-TMA architectures.
+        NVTE_CHECK(dbias->data.dtype == input.data.dtype, "DBias must have the same type as input.");
+        NVTE_CHECK(dbias->data.shape == std::vector<size_t>{input.flat_last_dim()},
+                   "Wrong shape of DBias.");
+        NVTE_CHECK(workspace != nullptr, "Workspace must be a tensor.");
+
+        // Workspace sizing logic (same for both dbias variants).
+        if (workspace->data.dptr == nullptr) {
+          workspace->data.shape = input.data.shape;
+          workspace->data.dtype = DType::kFloat32;
+          return;
+        }
+
+        const size_t N = product(input.data.shape);
+        const size_t rows = input.flat_first_dim();
+        const size_t cols = input.flat_last_dim();
+
+        TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+            input.dtype(), IType,
+            TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+                output->dtype(), OType,
+                constexpr auto UnaryOP = ActivationType<float, ParamOP, OP>::op;
+                constexpr int nvec = 16 / sizeof(IType);
+
+                if constexpr (IS_DACT) {
+                  // Case: dact + dbias fusion
+                  VectorizedCastDBiasDActKernelLauncher<nvec, ParamOP, UnaryOP>(
+                      reinterpret_cast<const IType *>(input.data.dptr),
+                      reinterpret_cast<const IType *>(act_input->data.dptr),
+                      reinterpret_cast<OType *>(output->data.dptr),
+                      reinterpret_cast<fp32 *>(workspace->data.dptr),
+                      reinterpret_cast<const fp32 *>(output->scale.dptr),
+                      reinterpret_cast<fp32 *>(output->amax.dptr),
+                      reinterpret_cast<fp32 *>(output->scale_inv.dptr), N, {}, stream);
+                } else {
+                  // Case: Simple dbias fusion
+                  VectorizedCastDBiasKernelLauncher<nvec, ParamOP, detail::identity>(
+                      reinterpret_cast<const IType *>(input.data.dptr),
+                      reinterpret_cast<OType *>(output->data.dptr),
+                      reinterpret_cast<fp32 *>(workspace->data.dptr),
+                      reinterpret_cast<const fp32 *>(output->scale.dptr),
+                      reinterpret_cast<fp32 *>(output->amax.dptr),
+                      reinterpret_cast<fp32 *>(output->scale_inv.dptr), N, {}, stream);
+                }
+
+                // The reduction step is the same for both cases.
+                reduce_dbias<IType>(reinterpret_cast<float *>(workspace->data.dptr), dbias, rows,
+                                    cols, stream);
+            ));
+
+      } else {  // Original logic for non-dbias cases
+        if (!IS_DACT) {
+          CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
+        } else {
+          CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
+        }
+      }
+      break;
+    }
+    default:
+      NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
   }
 }
 
