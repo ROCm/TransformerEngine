@@ -20,10 +20,10 @@ from torch import nn, optim
 from torch.distributed import DeviceMesh
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import init_device_mesh
-from contextlib import nullcontext
 from transformer_engine.pytorch import torch_version
 from transformer_engine.pytorch.fp8 import fp8_model_init
 from torch.nn.parallel import DistributedDataParallel as DDP
+from pathlib import Path
 
 class SimpleNet(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, use_fsdp2=False):
@@ -102,7 +102,6 @@ def _train(args):
     LOCAL_SIZE = int(os.getenv("LOCAL_WORLD_SIZE", "1"))
     assert LOCAL_SIZE == WORLD_SIZE
 
-    print("USE FSDP: ", args.use_fsdp2)
     # Set device and initialize RNG states
     torch.cuda.set_device(WORLD_RANK)
     torch.manual_seed(args.seed)
@@ -123,7 +122,6 @@ def _train(args):
     fp8_format = Format.HYBRID
     fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=16, amax_compute_algo="max")
 
-    torch.cuda.memory._record_memory_history(enabled='all', context='all', stacks='all')
     if args.fp8_init:
         # Build the model with the specified context
         with fp8_model_init(enabled = True):
@@ -140,7 +138,7 @@ def _train(args):
 
     # Apply FSDP/HSDP
     if args.use_fsdp2:
-        # custom_attrs = save_custom_attrs(model)
+        custom_attrs = save_custom_attrs(model)
         if LOCAL_RANK == 0:
             print(f"Rank {LOCAL_RANK}: Applying FSDP fully_shard() to the model...")
             print(f"sharding-dims:{args.sharding_dims}")
@@ -165,22 +163,11 @@ def _train(args):
             ):
                 fully_shard(sub_module, mesh=mesh)
         fully_shard(model, mesh=mesh, reshard_after_forward=True)
-        print("FSDP2 TIME!!")
-        # restore_custom_attrs(model, custom_attrs)
+        restore_custom_attrs(model, custom_attrs)
     else:
         model = DDP(model, device_ids=[LOCAL_RANK])
-        print("DDP TIME!!")
 
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
-
-    # if LOCAL_RANK==0:
-    #    for name, param in model.named_parameters():
-    #        print("param: ", name, param)
-    #        print("param size: ", name, param.size())
-    #        print("param local size: ", name, param._local_tensor.size())
-    #        print("param local dtype: ", name, param._local_tensor.dtype)
-
-    from pathlib import Path
 
     input_path = Path("shared_input.pt")
     if input_path.exists():
@@ -211,6 +198,7 @@ def _train(args):
         )
         prof.start()
     for iteration in range(args.iter):
+        print(f"Starting iteration...{iteration}")
         if args.profile and torch.distributed.get_rank() in args.profile_ranks:
             prof.step()
 
@@ -231,14 +219,11 @@ def _train(args):
                     # This call is required to be executed on ALL ranks
                     # to complete the collective communication.
                     full_grad = p.grad.full_tensor().detach().clone()
-                    print("FULL TENSOR")
                 elif p.grad is not None:
                     full_grad = p.grad.detach().clone()
-                    print("ORIGINAL TENSOR")
                 # 2. Only Rank 0 stores the result
                 if LOCAL_RANK == 0 and p.requires_grad:
                     out_tensors.append((name, full_grad))
-        torch.cuda.synchronize()
     if (
         args.profile
         and iteration == args.profile_step_end
@@ -257,33 +242,6 @@ def _train(args):
         dist.barrier(device_ids=[torch.cuda.current_device()])
     dist.destroy_process_group()
 
-    snapshot = torch.cuda.memory._snapshot()
-
-    import pickle
-    with open('memory_snapshot.pickle', 'wb') as f:
-        pickle.dump(snapshot, f)
-    
-
-    # To disable memory history recording when no longer needed
-    torch.cuda.memory._record_memory_history(enabled=None)
-    if LOCAL_RANK == 0:
-        print(f"Rank {LOCAL_RANK}: Done...")
-
-        for name, module in model.named_modules():  
-            if hasattr(module, 'fp8_meta') and module.fp8_meta:  
-                print(f"Module: {name}")  
-                
-                # Forward amax history  
-                if 'scaling_fwd' in module.fp8_meta:  
-                    fwd_amax_history = module.fp8_meta['scaling_fwd'].amax_history  
-                    print(f"Forward amax history shape: {fwd_amax_history.shape}")  
-                    print(f"Forward amax history:\n{fwd_amax_history}")  
-                
-                # Backward amax history    
-                if 'scaling_bwd' in module.fp8_meta:  
-                    bwd_amax_history = module.fp8_meta['scaling_bwd'].amax_history  
-                    print(f"Backward amax history shape: {bwd_amax_history.shape}")  
-                    print(f"Backward amax history:\n{bwd_amax_history}")
     return 0
 
 

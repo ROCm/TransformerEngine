@@ -19,7 +19,7 @@ _ops_to_preserve_subclass = {
 }
 
 
-# A proper wrapper subclass for stateful FSDP transport
+# A wrapper subclass for stateful FSDP transport
 class FSDPAGFloat8Tensor(torch.Tensor):
 
     @staticmethod
@@ -44,13 +44,13 @@ class FSDPAGFloat8Tensor(torch.Tensor):
         fp8_meta_index: str,
         keep_fp8_weight_transpose_cache: bool,
     ):
-        #The *real* underlying tensor
+        #The underlying tensor
         self._elem = tensor
-        # Where quantizers live
+        # Where quantizers are present
         self._module = module
         # Which quantizer to use within module.quantizers["scaling_fwd"][idx]
         self._fp8_meta_index = fp8_meta_index
-
+        # Disable or enable transpose cache for fp8 weights
         self._keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
 
     
@@ -68,7 +68,7 @@ class FSDPAGFloat8Tensor(torch.Tensor):
             Return (names_of_inner_tensors, flatten_spec_metadata).
             """
             # We only carry the one inner tensor.
-            # We store (module, fp8_meta_index) as metadata to reconstruct.
+            # We store (module, fp8_meta_index, keep_fp8_weight_transpose_cache) as metadata to reconstruct.
             return ["_elem"], (self._module, self._fp8_meta_index, self._keep_fp8_weight_transpose_cache)
 
     
@@ -106,7 +106,8 @@ class FSDPAGFloat8Tensor(torch.Tensor):
                     # Require consistency when multiple wrappers are involved in a single op
                     # same_mod = (meta[0] is x._module)
                     same_idx = (meta[1] == x._fp8_meta_index)
-                    assert same_idx, (
+                    same_flag = (meta[2] == x._keep_fp8_weight_transpose_cache)
+                    assert same_idx and same_flag, (
                         "Mixed FSDPAGFloat8Tensor metadata in one op is not supported"
                     )
                 return x._elem
@@ -114,7 +115,7 @@ class FSDPAGFloat8Tensor(torch.Tensor):
 
         unwrapped_args, unwrapped_kwargs = pytree.tree_map_only(cls, unwrap, (args, kwargs))
 
-        # Run the actual op on real tensors
+        # Run the actual op on internal tensors
         out = func(*unwrapped_args, **unwrapped_kwargs)
 
         # Rewrap outputs only for ops that need to preserve subclass identity
@@ -132,10 +133,12 @@ class FSDPAGFloat8Tensor(torch.Tensor):
 
     # Must return (list_of_tensors_to_all_gather, user_metadata)
     def fsdp_pre_all_gather(self, mesh):
-        # Use the actual data
+        # If metadata isn't initialized yet, we can't access the quantizers
         if not self._module.fp8:
             self._module.init_fp8_metadata()
+        # Use the actual data
         base = self._elem
+        # Access the quantizer using fp8_meta_index
         quantizer = self._module.quantizers["scaling_fwd"][self._fp8_meta_index]
         if not self._keep_fp8_weight_transpose_cache:
             quantizer.columnwise_usage=False
@@ -159,7 +162,7 @@ class FSDPAGFloat8Tensor(torch.Tensor):
         quantizer = self._module.quantizers["scaling_fwd"][self._fp8_meta_index]
 
         if out is not None:
-            # If FSDP provided a pre-allocated output (e.g., a Float8Tensor),
+            # If FSDP provided a pre-allocated output (happens in subsequent iterations),
             # fill in the missing bits and still return the expected values.
             assert isinstance(out, Float8Tensor), f"Unexpected out type: {type(out)}"
             out._scale_inv = 1 / quantizer.scale
@@ -167,7 +170,6 @@ class FSDPAGFloat8Tensor(torch.Tensor):
             return out, all_gather_outputs
 
         # Otherwise, construct a new Float8Tensor that wraps the gathered data
-        print("DONE WITH ALL GATHER!")
         out_fp8 = Float8Tensor(
             shape=data.shape,
             dtype=param_dtype,                    # or self._elem.dtype

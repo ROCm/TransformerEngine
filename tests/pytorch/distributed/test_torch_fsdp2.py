@@ -52,8 +52,8 @@ def _run_test(fp_init):
     if fp_init:
         test_cmd += ["--fp8-init"]
     
-    result = subprocess.run(test_cmd + ['--use-fsdp2','--gradients-save-file', 'all_iters_fsdp2.pt'], env=os.environ, check=True)
-    result = subprocess.run(test_cmd + ['--gradients-save-file', 'all_iters_dp.pt'], env=os.environ, check=True)
+    subprocess.run(test_cmd + ['--use-fsdp2','--gradients-save-file', 'all_iters_fsdp2.pt'], env=os.environ, check=True)
+    subprocess.run(test_cmd + ['--gradients-save-file', 'all_iters_dp.pt'], env=os.environ, check=True)
         
     # Load outputs
     output_fsdp = torch.load("all_iters_fsdp2.pt", map_location="cpu")
