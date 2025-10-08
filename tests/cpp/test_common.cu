@@ -737,7 +737,7 @@ void generate_data_uniformly(T* data, const size_t size, std::mt19937* gen) {
   for (int i = 0; i < size; i++) {
     data[i] = static_cast<T>(dis(*gen));
   }
-  gen->discard(size)
+  gen->discard(size);
 #else
   // Check how many RNG calls are required to generate one uniform random value
   int rng_calls_per_val = 0;
