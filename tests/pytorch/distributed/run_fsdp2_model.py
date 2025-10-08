@@ -11,7 +11,7 @@ import sys
 import argparse
 
 import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import Format, DelayedScaling
+from transformer_engine.common.recipe import Float8CurrentScaling, Format, DelayedScaling
 
 import torch
 import torch.distributed as dist
@@ -120,7 +120,7 @@ def _train(args):
 
     # FP8 Configuration
     fp8_format = Format.HYBRID
-    fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=16, amax_compute_algo="max")
+    fp8_recipe = Float8CurrentScaling(fp8_format=fp8_format)
 
     if args.fp8_init:
         # Build the model with the specified context
@@ -198,7 +198,8 @@ def _train(args):
         )
         prof.start()
     for iteration in range(args.iter):
-        print(f"Starting iteration...{iteration}")
+        if LOCAL_RANK == 0:
+            print(f"Starting iteration...{iteration}")
         if args.profile and torch.distributed.get_rank() in args.profile_ranks:
             prof.step()
 
