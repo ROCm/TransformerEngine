@@ -205,7 +205,7 @@ def _train(args):
 
         # Zero the parameter gradients
         optimizer.zero_grad()
-        with te.fp8_autocast(enabled=True):
+        with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
             output = model(input_data)
         target = torch.randn(args.batch_size, args.output_size).to(device)
         loss = F.mse_loss(output, target)

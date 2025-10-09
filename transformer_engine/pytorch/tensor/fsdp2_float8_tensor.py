@@ -1,7 +1,7 @@
 from typing import Any, Optional, Tuple
 import torch
 import torch.nn as nn
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 import torch.utils._pytree as pytree
 
@@ -143,6 +143,8 @@ class FSDPAGFloat8Tensor(torch.Tensor):
         quantizer = self._module.quantizers["scaling_fwd"][self._fp8_meta_index]
         if not self._keep_fp8_weight_transpose_cache:
             quantizer.set_usage(columnwise=False)
+        if isinstance(quantizer, Float8CurrentScalingQuantizer):
+            quantizer.with_amax_reduction = True
         sharded_fp8_tensor = quantizer(base)
         if isinstance(quantizer, MXFP8Quantizer):
             rowwise_data = sharded_fp8_tensor._rowwise_data if quantizer.rowwise_usage else torch.empty(0, dtype=torch.uint8, device=base.device)
@@ -160,7 +162,7 @@ class FSDPAGFloat8Tensor(torch.Tensor):
         *,
         out: Optional[torch.Tensor] = None,
     ):
-        # Recompose the Float8Tensor from the wire format
+        # Retrieve the same quantizer you used in pre_all_gather
         quantizer = self._module.quantizers["scaling_fwd"][self._fp8_meta_index]
         if not self._keep_fp8_weight_transpose_cache:
             quantizer.set_usage(columnwise=False)
@@ -170,33 +172,16 @@ class FSDPAGFloat8Tensor(torch.Tensor):
         else:
             (data,) = all_gather_outputs
 
-        # Retrieve the same quantizer you used in pre_all_gather
-
-        if out is not None:
-            print("OUT: ", out)
-            # If FSDP provided a pre-allocated output (happens in subsequent iterations),
-            # fill in the missing bits and still return the expected values.
-            if isinstance(quantizer, MXFP8Quantizer):
-                out._rowwise_data = rowwise_data
-                out._rowwise_scale_inv = rowwise_scale_inv
-                out._columnwise_data = columnwise_data
-                out._columnwise_scale_inv = columnwise_scale_inv
-            else:
-                out._data = data
-                out._scale_inv = 1 / quantizer.scale
-            # Depending on FSDP's expected return type, return (materialized_param, aux)
-            return out, all_gather_outputs
+        if out is None:
+            out = quantizer.make_empty(shape = data.shape, dtype=param_dtype, requires_grad=requires_grad)
 
         # Otherwise, construct a new Float8Tensor that wraps the gathered data
-        out_fp8 = quantizer.make_empty(shape = data.shape, dtype=param_dtype, requires_grad=requires_grad)
         if isinstance(quantizer, MXFP8Quantizer):
-            out_fp8._rowwise_data = rowwise_data
-            out_fp8._rowwise_scale_inv = rowwise_scale_inv 
-            out_fp8._columnwise_data = columnwise_data
-            out_fp8._columnwise_scale_inv = columnwise_scale_inv
+            out._rowwise_data = rowwise_data
+            out._rowwise_scale_inv = rowwise_scale_inv 
+            out._columnwise_data = columnwise_data
+            out._columnwise_scale_inv = columnwise_scale_inv
         else:
-            out_fp8._scale_inv = 1 / quantizer.scale
-            out_fp8._data = data
-        print("ALL GATHER!")
-        print("out_fp8: ", out_fp8)
-        return out_fp8, all_gather_outputs
+            out._scale_inv = 1 / quantizer.scale
+            out._data = data
+        return out, all_gather_outputs
