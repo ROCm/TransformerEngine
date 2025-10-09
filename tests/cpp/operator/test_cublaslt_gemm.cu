@@ -274,9 +274,9 @@ void performTest(const TestParams& params) {
   const bool a_colwise = !params.transa && isFp8Type(atype);
   const bool b_colwise = params.transb && isFp8Type(btype);
   Tensor A("A", params.transa ? TShape{ params.m, params.k } : TShape{ params.k, params.m },
-    atype, true, a_colwise, params.scaling_mode);
+    atype, (!a_colwise || !use_mxfp8), a_colwise, params.scaling_mode);
   Tensor B("B", params.transb ? TShape{ params.k, params.n } : TShape{ params.n, params.k },
-    btype, true, b_colwise, params.scaling_mode);
+    btype, (!b_colwise || !use_mxfp8), b_colwise, params.scaling_mode);
 
   Tensor D("D", TShape{ params.n, params.m }, dtype);
   Tensor bias;
@@ -291,7 +291,7 @@ void performTest(const TestParams& params) {
   //initialize the data and scale inv of A, B
   //fillUniform does not initialize columnwise data if rowwise data exist
   fillUniform(&A);
-  if (a_colwise) {
+  if (a_colwise && !use_mxfp8) {
     // A must be of shape k, m
     cpu_rowwise_to_columnwise(params.k, params.m,
       A.rowwise_cpu_dptr<A_Type>(), A.columnwise_cpu_dptr<A_Type>());
@@ -299,7 +299,7 @@ void performTest(const TestParams& params) {
     A.from_cpu();
   }
   fillUniform(&B);
-  if (b_colwise) {
+  if (b_colwise && !use_mxfp8) {
     // B must be of shape k, n
     cpu_rowwise_to_columnwise(params.k, params.n,
       B.rowwise_cpu_dptr<B_Type>(), B.columnwise_cpu_dptr<B_Type>());
