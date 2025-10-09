@@ -11,7 +11,7 @@ import sys
 import argparse
 
 import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import Float8CurrentScaling, Format, DelayedScaling
+from transformer_engine.common.recipe import Float8CurrentScaling, Format, DelayedScaling, MXFP8BlockScaling
 
 import torch
 import torch.distributed as dist
@@ -78,6 +78,14 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument("--seed", type=int, default=42, help="RNG seed.")
     parser.add_argument("--use-fsdp2", action='store_true',
                        help='Enable New FSDP2 training.')
+    parser.add_argument(
+        "--recipe",
+        type=str,
+        choices=["delayed", "mxfp8", "current"],
+        default="delayed",
+        help="Select the training recipe to use: 'delayed', 'mxfp8', or 'current'."
+    )
+
     # Adding hsdp_dim as a list argument, comma-separated
     parser.add_argument(
         "--sharding-dims",
@@ -119,8 +127,15 @@ def _train(args):
     device = torch.device(f"cuda:{LOCAL_RANK}")
 
     # FP8 Configuration
-    fp8_format = Format.HYBRID
-    fp8_recipe = Float8CurrentScaling(fp8_format=fp8_format)
+    if args.recipe == "current":
+        fp8_recipe = Float8CurrentScaling()
+    elif args.recipe == "mxfp8":
+        fp8_recipe = MXFP8BlockScaling()
+    elif args.recipe == "delayed":
+        fp8_recipe = DelayedScaling()
+    else:
+        raise ValueError(f"Unsupported recipe: {args.recipe}")
+
 
     if args.fp8_init:
         # Build the model with the specified context

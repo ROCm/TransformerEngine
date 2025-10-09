@@ -141,7 +141,7 @@ class FSDPAGFloat8Tensor(torch.Tensor):
         base = self._elem
         # Access the quantizer using fp8_meta_index
         quantizer = self._module.quantizers["scaling_fwd"][self._fp8_meta_index]
-        if not self._keep_fp8_weight_transpose_cache:
+        if not isinstance(quantizer, MXFP8Quantizer) and not self._keep_fp8_weight_transpose_cache:
             quantizer.set_usage(columnwise=False)
         if isinstance(quantizer, Float8CurrentScalingQuantizer):
             quantizer.with_amax_reduction = True
@@ -164,23 +164,26 @@ class FSDPAGFloat8Tensor(torch.Tensor):
     ):
         # Retrieve the same quantizer you used in pre_all_gather
         quantizer = self._module.quantizers["scaling_fwd"][self._fp8_meta_index]
-        if not self._keep_fp8_weight_transpose_cache:
+        shape = None
+        if  not isinstance(quantizer, MXFP8Quantizer) and not self._keep_fp8_weight_transpose_cache:
             quantizer.set_usage(columnwise=False)
         (requires_grad, ) = metadata
         if isinstance(quantizer, MXFP8Quantizer):
             (rowwise_data, rowwise_scale_inv, columnwise_data, columnwise_scale_inv,) = all_gather_outputs
+            shape = rowwise_data.shape
         else:
             (data,) = all_gather_outputs
+            shape = data.shape
 
         if out is None:
-            out = quantizer.make_empty(shape = data.shape, dtype=param_dtype, requires_grad=requires_grad)
+            out = quantizer.make_empty(shape = shape, dtype=param_dtype, requires_grad=requires_grad)
 
         # Otherwise, construct a new Float8Tensor that wraps the gathered data
         if isinstance(quantizer, MXFP8Quantizer):
             out._rowwise_data = rowwise_data
             out._rowwise_scale_inv = rowwise_scale_inv 
-            out._columnwise_data = columnwise_data
-            out._columnwise_scale_inv = columnwise_scale_inv
+            out._columnwise_data = None if columnwise_data.numel() == 0 else columnwise_data
+            out._columnwise_scale_inv =  None if columnwise_scale_inv.numel() == 0 else columnwise_scale_inv
         else:
             out._scale_inv = 1 / quantizer.scale
             out._data = data

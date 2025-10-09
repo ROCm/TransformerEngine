@@ -13,6 +13,7 @@ import torch
 from run_fsdp2_model import SimpleNet
 
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 
 NUM_PROCS: int = torch.cuda.device_count()
 
@@ -43,7 +44,7 @@ def assert_allclose(
                 )
             raise AssertionError(msg)
 
-def _run_test(fp_init):
+def _run_test(fp_init, recipe):
     test_dir = Path(__file__).parent.resolve()
     fsdp_script = test_dir / "run_fsdp2_model.py"
     
@@ -51,6 +52,7 @@ def _run_test(fp_init):
 
     if fp_init:
         test_cmd += ["--fp8-init"]
+    test_cmd += ["--recipe", recipe]
     
     subprocess.run(test_cmd + ['--use-fsdp2','--gradients-save-file', 'all_iters_fsdp2.pt'], env=os.environ, check=True)
     subprocess.run(test_cmd + ['--gradients-save-file', 'all_iters_dp.pt'], env=os.environ, check=True)
@@ -71,7 +73,8 @@ def _run_test(fp_init):
 @pytest.mark.skipif(NUM_PROCS % 2 != 0, reason="Requires even number of GPUs")
 @pytest.mark.skipif(not torch_version() >= (2, 4, 0), reason="Requires PyTorch 2.4.0+")
 @pytest.mark.parametrize("fp8_init", ([False]))
-def test_distributed(fp8_init):
+@pytest.mark.parametrize("recipe", (["delayed", "current", "mxfp8"]))
+def test_distributed(fp8_init, recipe):
 
     batch_size = 2048
     input_size = 2048
@@ -93,8 +96,10 @@ def test_distributed(fp8_init):
 
     if fp8_init and not fp8_available:
         pytest.skip(reason_for_no_fp8)
+    if recipe == "mxfp8" and not mxfp8_available:  
+        pytest.skip(reason_for_no_mxfp8)
 
-    _run_test(fp8_init)
+    _run_test(fp8_init, recipe)
 
 
 def test_dummy() -> None:
