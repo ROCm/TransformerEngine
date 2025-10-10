@@ -3,17 +3,15 @@
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
+#include <cmath>
+#include <iostream>
+#include <string>
+#include <cuda_bf16.h>
+#include <cuda_runtime.h>
+#include <gtest/gtest.h>
+#include <transformer_engine/cast.h>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/transformer_engine.h>
-#include <gtest/gtest.h>
-#include <cuda_runtime.h>
-#include <cuda_bf16.h>
-#include <memory>
-#include <iostream>
-#include <iomanip>
-#include <random>
-#include <cstring>
-#include <cmath>
 #include "../test_common.h"
 
 using namespace transformer_engine;
@@ -30,29 +28,17 @@ std::vector<std::tuple<size_t, size_t, size_t>> test_case_sizes = {
   {29, 29, 17389}, //primes
 }; 
 
+std::vector<std::tuple<size_t, size_t, size_t>> test_case_sizes_mxfp8 = {
+  {2304, 768, 4096},
+}; 
+
 //  A, B, Bias, Gelu, D
 //  Bias type choose as bf16 in use_fp8, D_type otherwise
 //  Gelu type the same as Bias_Type
-//  {DType::kFloat32, DType::kFloat32, DType::kFloat32, DType::kFloat32, DType::kFloat32},
-//  {DType::kFloat16, DType::kFloat16, DType::kFloat16, DType::kFloat16, DType::kFloat16},
-//  {DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, DType::kBFloat16},
-//  {DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kBFloat16, DType::kBFloat16, DType::kFloat32},
-//  {DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kBFloat16, DType::kBFloat16, DType::kFloat16},
-//  {DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kBFloat16, DType::kBFloat16, DType::kBFloat16},
-//  {DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kBFloat16, DType::kBFloat16, DType::kFloat8E4M3},
-//  {DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kBFloat16, DType::kBFloat16, DType::kFloat8E5M2},
-//  {DType::kFloat8E4M3, DType::kFloat8E5M2, DType::kBFloat16, DType::kBFloat16, DType::kFloat32},
-//  {DType::kFloat8E4M3, DType::kFloat8E5M2, DType::kBFloat16, DType::kBFloat16, DType::kFloat16},
-//  {DType::kFloat8E4M3, DType::kFloat8E5M2, DType::kBFloat16, DType::kBFloat16, DType::kBFloat16},
-//  {DType::kFloat8E4M3, DType::kFloat8E5M2, DType::kBFloat16, DType::kBFloat16, DType::kFloat8E4M3},
-//  {DType::kFloat8E4M3, DType::kFloat8E5M2, DType::kBFloat16, DType::kBFloat16, DType::kFloat8E5M2},
-//  {DType::kFloat8E5M2, DType::kFloat8E4M3, DType::kBFloat16, DType::kBFloat16, DType::kFloat32},
-//  {DType::kFloat8E5M2, DType::kFloat8E4M3, DType::kBFloat16, DType::kBFloat16, DType::kFloat16},
-//  {DType::kFloat8E5M2, DType::kFloat8E4M3, DType::kBFloat16, DType::kBFloat16, DType::kBFloat16},
-//  {DType::kFloat8E5M2, DType::kFloat8E4M3, DType::kBFloat16, DType::kBFloat16, DType::kFloat8E4M3},
-//  {DType::kFloat8E5M2, DType::kFloat8E4M3, DType::kBFloat16, DType::kBFloat16, DType::kFloat8E5M2},
-}  // namespace
 
+using fp32=float;
+using fp8=fp8e4m3;
+using bf8=fp8e5m2;
 
 using Layout = std::pair<bool,bool>;// {transa, transb}
 static const Layout kNN{false,false};
@@ -61,10 +47,9 @@ static const Layout kNT{false,true };
 
 static const std::vector<Layout> kLayouts = { kNN, kTN, kNT };
 
-// <A_type, B_type, Bias_Type, Gelu_Type D_type>, <m, k, n>
-class GEMMTestSuite
-    : public ::testing::TestWithParam<
-          std::tuple<std::tuple<size_t, size_t, size_t>, bool, bool, Layout, NVTEScalingMode>> {};
+using TShape = std::vector<size_t>;
+}  // namespace
+
 
 float ref_gelu(float x){
   float cdf = 0.5f * (1.0f + tanhf((0.7978845608028654f * (x + 0.044715f * x * x * x))));
@@ -182,6 +167,36 @@ void cpu_rowwise_to_columnwise(
   }
 }
 
+std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool use_mxfp8) {
+  auto [atol, rtol] = getTolerances(type);
+
+  //relax for certain prime number gemm
+  if (type == DType::kFloat32) {
+    atol = 1e-5;
+  }
+  // relax for certain FP8 gemm with hipblaslt
+  if (use_mxfp8) {
+    atol = 5e-4;
+    /*During hipifying std::max is converted to ::max
+    to w/a HIP bug with using std:: in device functions.
+    W/o explicitlit <double>, compiler uses non-templated int method variant from HIP headers
+    TODO: remove when switch to new hipify version after fixing HIP bug */
+    rtol = std::max<double>(rtol, 1e-3);
+  }
+  else if (use_fp8) {
+    atol = 1e-3;
+    //TODO: remove <double> (see comment above)
+    rtol = std::max<double>(rtol, 5e-3);
+  }
+  else if (type == DType::kBFloat16) {
+    //relax for certain prime number TN gemm
+    rtol = 5e-2;
+  }
+  else if (type == DType::kFloat32) {
+    rtol = 1e-5;
+  }
+  return {atol, rtol};
+}
 
 struct TestParams {
   size_t m;
@@ -253,8 +268,13 @@ void performTest(const TestParams& params) {
     if (params.use_gelu && dtype == DType::kBFloat16) {
       GTEST_SKIP() << "BF16 GEMM with GELU is not supported in current config";
     }
-    if (has_fp8 && params.use_bias && dtype == DType::kFloat32) {
-      GTEST_SKIP() << "FP8 GEMM with bias and FP32 output is not supported in current config";
+    if constexpr ((std::is_same<A_Type, bf8>::value || std::is_same<B_Type, bf8>::value) &&
+      std::is_same<D_Type, fp32>::value)
+    {
+      //GEMM with bias and fp32 output is not supported with bf8 A/B
+      if (params.use_bias) {
+        GTEST_SKIP() << "FP8 GEMM with bias is not supported in current config";
+      }
     }
   }
   if (prop.major == 9 && prop.minor == 4) //gfx942 specific hipblasLt limitations
@@ -267,8 +287,6 @@ void performTest(const TestParams& params) {
     }
   }
 #endif
-
-  using TShape = std::vector<size_t>;
 
   // FP8 GEMM path needs columnwise data for A/B tensor with non TN layout
   const bool a_colwise = !params.transa && isFp8Type(atype);
@@ -398,49 +416,93 @@ void performTest(const TestParams& params) {
     compareResults("D_amax", D.amax(), ref_amax_d, atol_amax, rtol_amax);
   }
 
-  auto [atol, rtol] = getTolerances(dtype);
-  //relax for certain prime number gemm
-  if (dtype == DType::kFloat32) {
-    atol = 1e-5;
-  }
-#ifdef __HIP_PLATFORM_AMD__
-  // relax for certain FP8 gemm with hipblaslt
-  if (use_mxfp8) {
-    atol = 5e-4;
-    /*During hipifying std::max is converted to ::max
-    to w/a HIP bug with using std:: in device functions.
-    W/o explicitlit <double>, compiler uses non-templated int method variant from HIP headers
-    TODO: remove when switch to new hipify version after fixing HIP bug */
-    rtol = std::max<double>(rtol, 1e-3);
-  }
-  else if (has_fp8) {
-    atol = 1e-3;
-    //TODO: remove <double> (see comment above)
-    rtol = std::max<double>(rtol, 5e-3);
-  }
-  else if (dtype == DType::kBFloat16) {
-    //relax for certain prime number TN gemm
-    rtol = 5e-2;
-  }
-  else if (dtype == DType::kFloat32) {
-    rtol = 1e-5;
-  }
-#endif
+  auto [atol, rtol] = getTestTolerances(dtype, has_fp8, use_mxfp8);
   compareResults("D", D, ref_D.get(), true, atol, rtol);
 
   if(params.use_gelu){
-    auto [atol, rtol] = getTolerances(gelu_type);
-    //relax for certain prime number gemm
-    if (dtype == DType::kFloat32) {
-      atol = 1e-5;
-    }
+    auto [atol, rtol] = getTestTolerances(gelu_type, false, false);
     compareResults("gelu", pre_gelu_out, ref_pre_gelu_out.get(), true, atol, rtol);
   }
 }
 
-using fp32=float;
-using fp8=fp8e4m3;
-using bf8=fp8e5m2;
+#ifdef __HIP_PLATFORM_AMD__
+template <typename A_Type, typename B_Type, typename D_Type>
+void performDqTest(const TestParams &params) {
+  DType atype = TypeInfo<A_Type>::dtype;
+  DType btype = TypeInfo<B_Type>::dtype;
+  DType dtype = TypeInfo<D_Type>::dtype;
+
+  GTEST_ASSERT_TRUE(isFp8Type(atype) && isFp8Type(btype)) << "FP8/BF8 input datatype is expected";
+  GTEST_ASSERT_FALSE(isFp8Type(dtype)) << "Non FP8/BF8 output datatype is expected";
+
+  if (params.m % 32 != 0 || params.n % 32 != 0 || params.k % 32 != 0) {
+    GTEST_SKIP() << "MXFP8 requires M, N, K to be multiples of 32";
+  }
+
+  cudaDeviceProp prop;
+  (void)cudaGetDeviceProperties(&prop, 0);
+
+  bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5);
+  if (!mxfp8_supported) {
+    GTEST_SKIP() << "MXFP8 is not supported in current config";
+  }
+
+  // FP8 GEMM path needs columnwise data for A/B tensor with non TN layout
+  const bool a_colwise = !params.transa;
+  const bool b_colwise = params.transb;
+  Tensor A("A", params.transa ? TShape{params.m, params.k} : TShape{params.k, params.m}, atype,
+           !a_colwise, a_colwise, NVTEScalingMode::NVTE_MXFP8_1D_SCALING);
+  Tensor B("B", params.transb ? TShape{params.k, params.n} : TShape{params.n, params.k}, btype,
+           !b_colwise, b_colwise, NVTEScalingMode::NVTE_MXFP8_1D_SCALING);
+
+  Tensor D("D", TShape{params.n, params.m}, dtype);
+
+  Tensor bias;
+  Tensor pre_gelu_out;
+
+  //initialize the data and scale inv of A, B
+  fillUniform(&A);
+  fillUniform(&B);
+
+  size_t workspace_size = 67108864;
+  Tensor Workspace("Workspace", TShape{workspace_size}, DType::kByte);
+
+  //perform FP8 gemm
+  nvte_cublas_gemm(A.data(), B.data(), D.data(), bias.data(), pre_gelu_out.data(), params.transa,
+                   params.transb, false, Workspace.data(), false, false, prop.multiProcessorCount,
+                   0);
+
+  //copy the output results from GPU memory to CPU memory
+  D.to_cpu();
+
+  using Ref_Type = fp16;
+  DType ref_type = TypeInfo<Ref_Type>::dtype;
+
+  Tensor A_ref("A", params.transa ? TShape{params.m, params.k} : TShape{params.k, params.m}, ref_type);
+  Tensor B_ref("B", params.transb ? TShape{params.k, params.n} : TShape{params.n, params.k}, ref_type);
+  Tensor D_ref("D", TShape{params.n, params.m}, dtype);
+
+  nvte_dequantize(A.data(), A_ref.data(), 0);
+  nvte_dequantize(B.data(), B_ref.data(), 0);
+
+  //perform non-FP8 gemm
+  nvte_cublas_gemm(A_ref.data(), B_ref.data(), D_ref.data(), bias.data(), pre_gelu_out.data(),
+                   params.transa, params.transb, false, Workspace.data(), false, false,
+                   prop.multiProcessorCount, 0);
+
+  //copy the output results from GPU memory to CPU memory
+  D_ref.to_cpu();
+
+  // check if error message happens in running
+  (void)cudaDeviceSynchronize();
+  auto err = cudaGetLastError();
+  ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
+  //compare results
+  auto [atol, rtol] = getTestTolerances(dtype, true, true);
+  compareResults("D", D, D_ref.rowwise_cpu_dptr<D_Type>(), true, atol, rtol);
+}
+#endif // __HIP_PLATFORM_AMD__
 
 #define MAKE_TEST_PARAMS(P_)                                                    \
   TestParams P_ = {.m = std::get<0>(std::get<0>(GetParam())),                   \
@@ -454,10 +516,13 @@ using bf8=fp8e5m2;
                                        ? NVTEScalingMode::NVTE_MXFP8_1D_SCALING \
                                        : NVTEScalingMode::NVTE_DELAYED_TENSOR_SCALING}
 
+// <m, k, n>, use_bias, use_gelu, Layout, fp8_scalinig
+class GEMMTestSuite
+    : public ::testing::TestWithParam<
+          std::tuple<std::tuple<size_t, size_t, size_t>, bool, bool, Layout, NVTEScalingMode>> {};
+
 #define MAKE_GEMM_TEST(NAME_, A_, B_, BIAS_, GELU_, D_)                     \
   TEST_P(GEMMTestSuite, NAME_) {                                            \
-    using namespace transformer_engine;                                     \
-    using namespace test;                                                   \
     MAKE_TEST_PARAMS(test_params);                                          \
     using A_Type = A_;                                                      \
     using B_Type = B_;                                                      \
@@ -504,24 +569,51 @@ MAKE_GEMM_TEST(Testbf8xfp8xbf16xbf16xfp8, bf8, fp8, bf16, bf16, fp8);
 MAKE_GEMM_TEST(Testbf8xfp8xbf16xbf16xbf8, bf8, fp8, bf16, bf16, bf8);
 
 
-INSTANTIATE_TEST_SUITE_P(
-    OperatorTest,
-    GEMMTestSuite,
-    ::testing::Combine(
-        ::testing::ValuesIn(test_case_sizes),
-        ::testing::Values(false, true), //use bias
-        ::testing::Values(false, true), //use_gelu
-        ::testing::ValuesIn(kLayouts), //transa,transb
-        ::testing::Values(false, true)), //use mxfp8
-    [](const testing::TestParamInfo<GEMMTestSuite::ParamType>& info) {
-      auto TN = [](bool v){ return v ? "T" : "N"; };
-      const auto layout = std::get<3>(info.param);
-      std::string name = std::to_string(std::get<0>(std::get<0>(info.param))) + "X" +
-                         std::to_string(std::get<1>(std::get<0>(info.param))) + "X" +
-                         std::to_string(std::get<2>(std::get<0>(info.param))) + "X" +
-                         std::to_string(std::get<1>(info.param)) + "X" +
-                         std::to_string(std::get<2>(info.param)) + "X" +
-                         TN(layout.first) + TN(layout.second) + "X" +
-                         (std::get<4>(info.param) ? "M" : "S");
-      return name;
-    });
+static inline auto TN(const Layout& layout) {
+  static const char* map[2][2] = {{"NN", "NT"}, {"TN", "TT"}};
+  return std::string(map[layout.first][layout.second]);
+}
+
+static inline auto MKN(const std::tuple<size_t, size_t, size_t>& shape) {
+  return std::to_string(std::get<0>(shape)) + "x" + std::to_string(std::get<1>(shape)) + "x" +
+         std::to_string(std::get<2>(shape));
+}
+
+INSTANTIATE_TEST_SUITE_P(OperatorTest, GEMMTestSuite,
+                         ::testing::Combine(::testing::ValuesIn(test_case_sizes),
+                                            ::testing::Values(false, true),   //use bias
+                                            ::testing::Values(false, true),   //use_gelu
+                                            ::testing::ValuesIn(kLayouts),    //transa,transb
+                                            ::testing::Values(false, true)),  //use mxfp8
+                         [](const testing::TestParamInfo<GEMMTestSuite::ParamType>& info) {
+                           return MKN(std::get<0>(info.param)) + "x" +
+                                  std::to_string(std::get<1>(info.param)) + "x" +
+                                  std::to_string(std::get<2>(info.param)) + "x" +
+                                  TN(std::get<3>(info.param)) + "x" +
+                                  (std::get<4>(info.param) ? "M" : "S");
+                         });
+
+#ifdef __HIP_PLATFORM_AMD__
+class DqGEMMTestSuite: public GEMMTestSuite {};
+
+#define MAKE_DQ_GEMM_TEST(NAME_, A_, B_, D_)            \
+  TEST_P(DqGEMMTestSuite, NAME_) {                      \
+    MAKE_TEST_PARAMS(test_params);                      \
+    using A_Type = A_;                                  \
+    using B_Type = B_;                                  \
+    using D_Type = D_;                                  \
+    performDqTest<A_Type, B_Type, D_Type>(test_params); \
+  }
+
+MAKE_DQ_GEMM_TEST(Testfp8xfp8xfp16, fp8, fp8, fp16)
+
+INSTANTIATE_TEST_SUITE_P(OperatorTest, DqGEMMTestSuite,
+                         ::testing::Combine(::testing::ValuesIn(test_case_sizes_mxfp8),
+                                            ::testing::Values(false),       // bias - unused
+                                            ::testing::Values(false),       // gelu - unused
+                                            ::testing::ValuesIn(kLayouts),  //transa,transb
+                                            ::testing::Values(true)),       //use mxfp8
+                         [](const testing::TestParamInfo<DqGEMMTestSuite::ParamType>& info) {
+                           return MKN(std::get<0>(info.param)) + "x" + TN(std::get<3>(info.param));
+                         });
+#endif  // __HIP_PLATFORM_AMD__
