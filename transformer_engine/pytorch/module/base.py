@@ -939,9 +939,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             self.fp8_meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
             if self.fp8_meta["recipe"].mxfp8():  
-                self.keep_fp8_weight_transpose_cache = True
-            else:  
-                self.keep_fp8_weight_transpose_cache = False  
+                self.keep_fp8_weight_transpose_cache = True 
 
     @contextmanager
     def prepare_forward(

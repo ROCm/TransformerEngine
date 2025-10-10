@@ -10,8 +10,6 @@ from functools import reduce
 from operator import mul as multiply_op
 import warnings
 
-from torch.distributed.fsdp import FSDPModule
-
 import torch
 
 import transformer_engine_torch as tex

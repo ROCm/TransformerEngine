@@ -205,6 +205,7 @@ class _LayerNormMLP(torch.autograd.Function):
         symmetric_ar_type: str,
         debug: Optional[bool] = False,
         keep_fp8_weight_transpose_cache: bool = True,
+        use_fsdp2: bool = False,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # pylint: disable=missing-function-docstring
 
@@ -527,7 +528,7 @@ class _LayerNormMLP(torch.autograd.Function):
         if is_grad_enabled:
 
             # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
-            if inp.requires_grad and keep_fp8_weight_transpose_cache:
+            if inp.requires_grad and keep_fp8_weight_transpose_cache and not use_fsdp2:
                 if isinstance(fc1_weight_final, QuantizedTensorBase):
                     fc1_weight_final.update_usage(columnwise_usage=True)
                 if isinstance(fc2_weight_final, QuantizedTensorBase):
@@ -562,22 +563,38 @@ class _LayerNormMLP(torch.autograd.Function):
             if not fc2_weight.requires_grad:
                 clear_tensor_data(act_out)
                 act_out = None
-            tensors_to_save, tensor_objects = prepare_for_saving(
-                inputmat,
-                ln_weight,
-                ln_out,
-                fc1_weight_final,
-                fc1_weight,
-                fc1_bias,
-                fc1_out,
-                fc1_out_without_bias,
-                act_out,
-                fc2_weight_final,
-                fc2_weight,
-                fc2_bias,
-                mu,
-                rsigma,
-            )
+            if use_fsdp2:
+                tensors_to_save, tensor_objects = prepare_for_saving(
+                    inputmat,
+                    ln_weight,
+                    ln_out,
+                    fc1_weight,
+                    fc1_bias,
+                    fc1_out,
+                    fc1_out_without_bias,
+                    act_out,
+                    fc2_weight,
+                    fc2_bias,
+                    mu,
+                    rsigma,
+                )
+            else:
+                    tensors_to_save, tensor_objects = prepare_for_saving(
+                    inputmat,
+                    ln_weight,
+                    ln_out,
+                    fc1_weight_final,
+                    fc1_weight,
+                    fc1_bias,
+                    fc1_out,
+                    fc1_out_without_bias,
+                    act_out,
+                    fc2_weight_final,
+                    fc2_weight,
+                    fc2_bias,
+                    mu,
+                    rsigma,
+                )
 
             if fuse_wgrad_accumulation:
                 ctx.fc1_main_grad = fc1_weight.main_grad if fc1_weight.requires_grad else None
@@ -636,6 +653,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.normalization = normalization
             ctx.reduce_and_update_bwd_fp8_tensors = False
             ctx.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
+            ctx.use_fsdp2 = use_fsdp2
             if ctx.fp8 and requires_grad(
                 inp, ln_weight, ln_bias, fc1_weight, fc2_weight, fc1_bias, fc2_bias
             ):
@@ -661,22 +679,40 @@ class _LayerNormMLP(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
         with torch.cuda.nvtx.range("_LayerNormMLP_backward"):
             saved_tensors = ctx.saved_tensors
-            (  # pylint: disable=unbalanced-tuple-unpacking
-                inputmat,
-                ln_weight,
-                ln_out,
-                fc1_weight,
-                origin_fc1_weight,
-                fc1_bias,
-                fc1_out,
-                fc1_out_without_bias,
-                act_out,
-                fc2_weight,
-                origin_fc2_weight,
-                fc2_bias,
-                mu,
-                rsigma,
-            ) = restore_from_saved(ctx.tensor_objects, saved_tensors)
+            if ctx.use_fsdp2:
+                (  # pylint: disable=unbalanced-tuple-unpacking
+                    inputmat,
+                    ln_weight,
+                    ln_out,
+                    origin_fc1_weight,
+                    fc1_bias,
+                    fc1_out,
+                    fc1_out_without_bias,
+                    act_out,
+                    origin_fc2_weight,
+                    fc2_bias,
+                    mu,
+                    rsigma,
+                ) = restore_from_saved(ctx.tensor_objects, saved_tensors)
+                fc1_weight = origin_fc1_weight
+                fc2_weight = origin_fc2_weight
+            else:
+                (  # pylint: disable=unbalanced-tuple-unpacking
+                    inputmat,
+                    ln_weight,
+                    ln_out,
+                    fc1_weight,
+                    origin_fc1_weight,
+                    fc1_bias,
+                    fc1_out,
+                    fc1_out_without_bias,
+                    act_out,
+                    fc2_weight,
+                    origin_fc2_weight,
+                    fc2_bias,
+                    mu,
+                    rsigma,
+                ) = restore_from_saved(ctx.tensor_objects, saved_tensors)
             # Delete the references to tensor objects once they've been consumed
             # by the `restore_from_saved` method to construct back the actual tensors.
             ctx.tensor_objects = None
@@ -1377,6 +1413,7 @@ class _LayerNormMLP(torch.autograd.Function):
             None,  # symmetric_ar_type
             None,  # debug
             None,  # keep_fp8_weight_transpose_cache
+            None,  # use_fsdp2
         )
 
 
@@ -1531,6 +1568,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
         keep_fp8_weight_transpose_cache: bool = True,
+        use_fsdp2: bool = False
     ) -> None:
         super().__init__()
 
@@ -1551,7 +1589,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.zero_centered_gamma = zero_centered_gamma
         self.symmetric_ar_type = symmetric_ar_type
         self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache if IS_HIP_EXTENSION else True
-
+        self.use_fsdp2 = use_fsdp2
         # GEMM-GELU fusion is currently only supported with split GEMM-AG overlap
         self.gemm_gelu_fusion = (
             bool(int(os.getenv("NVTE_GEMM_GELU_FUSION", "0")))
@@ -1879,6 +1917,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.symmetric_ar_type,
                 debug,
                 self.keep_fp8_weight_transpose_cache,
+                self.use_fsdp2
             )
             out = fwd_fn(*args)
 

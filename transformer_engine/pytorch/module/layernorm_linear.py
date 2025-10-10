@@ -17,7 +17,6 @@ from torch.nn import init
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine_torch as tex
-
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import torch_version
 from .base import (
@@ -137,6 +136,7 @@ class _LayerNormLinear(torch.autograd.Function):
         symmetric_ar_type: str,
         debug: Optional[bool] = False,
         keep_fp8_weight_transpose_cache: bool = True,
+        use_fsdp2: bool = False,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # pylint: disable=missing-function-docstring
 
@@ -418,7 +418,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         ln_out.update_usage(rowwise_usage=False)
 
             # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
-            if inp.requires_grad and keep_fp8_weight_transpose_cache:
+            if inp.requires_grad and keep_fp8_weight_transpose_cache and not use_fsdp2:
                 if isinstance(weightmat, QuantizedTensorBase):
                     weightmat.update_usage(columnwise_usage=True)
 
@@ -449,17 +449,27 @@ class _LayerNormLinear(torch.autograd.Function):
                     # sets for the weights. Because of this, it is not recommended to offload
                     # weights if weights are externally touched outside this module
                     ctx.weight_object = weight
-
-            tensors_to_save, tensor_objects = prepare_for_saving(
-                inputmat,
-                weightmat,
-                weight,
-                bias,
-                ln_weight,
-                ln_out,
-                mu,
-                rsigma,
-            )
+            if use_fsdp2:
+                tensors_to_save, tensor_objects = prepare_for_saving(
+                    inputmat,
+                    weight,
+                    bias,
+                    ln_weight,
+                    ln_out,
+                    mu,
+                    rsigma,
+                )
+            else:
+                tensors_to_save, tensor_objects = prepare_for_saving(
+                    inputmat,
+                    weightmat,
+                    weight,
+                    bias,
+                    ln_weight,
+                    ln_out,
+                    mu,
+                    rsigma,
+                )
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
             ctx.requires_dgrad = inp_requires_grad
@@ -506,7 +516,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.wgrad_store = wgrad_store
             ctx.debug = debug
             ctx.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
-
+            ctx.use_fsdp2 = use_fsdp2
         # ------------------------------------------------------
         # Cached state for backward pass is ready...
         # ------------------------------------------------------
@@ -532,16 +542,28 @@ class _LayerNormLinear(torch.autograd.Function):
 
         with torch.cuda.nvtx.range("_LayerNormLinear_backward"):
             saved_tensors = ctx.saved_tensors
-            (  # pylint: disable=unbalanced-tuple-unpacking
-                inputmat,
-                weight,
-                origin_weight,
-                bias,
-                ln_weight,
-                ln_out,
-                mu,
-                rsigma,
-            ) = restore_from_saved(ctx.tensor_objects, saved_tensors)
+            if ctx.use_fsdp2:
+                (  # pylint: disable=unbalanced-tuple-unpacking
+                    inputmat,
+                    origin_weight,
+                    bias,
+                    ln_weight,
+                    ln_out,
+                    mu,
+                    rsigma,
+                ) = restore_from_saved(ctx.tensor_objects, saved_tensors)
+                weight = origin_weight
+            else:
+                (  # pylint: disable=unbalanced-tuple-unpacking
+                    inputmat,
+                    weight,
+                    origin_weight,
+                    bias,
+                    ln_weight,
+                    ln_out,
+                    mu,
+                    rsigma,
+                ) = restore_from_saved(ctx.tensor_objects, saved_tensors)
             # Delete the references to tensor objects once they've been consumed
             # by the `restore_from_saved` method to construct back the actual tensors.
             ctx.tensor_objects = None
@@ -1026,6 +1048,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,  # skip_fp8_weight_update
             None,  # symmetric_ar_type
             None,  # keep_fp8_weight_transpose_cache
+            None, # use_fsdp2
         )
 
 
@@ -1171,6 +1194,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         symmetric_ar_type: Optional[str] = None,
         name: str = None,
         keep_fp8_weight_transpose_cache: bool = True,
+        use_fsdp2: bool = False
     ) -> None:
         super().__init__()
 
@@ -1192,7 +1216,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.name = name
         if TEDebugState.debug_enabled:
             self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
-        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache if IS_HIP_EXTENSION else True        
+        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache if IS_HIP_EXTENSION else True   
+        self.use_fsdp2 = use_fsdp2     
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1606,7 +1631,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 skip_fp8_weight_update,
                 self.symmetric_ar_type,
                 debug,
-                self.keep_fp8_weight_transpose_cache
+                self.keep_fp8_weight_transpose_cache,
+                self.use_fsdp2
             )
             out = fwd_fn(*args)
 
