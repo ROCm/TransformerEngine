@@ -68,11 +68,11 @@ from ..tensor.quantized_tensor import (
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from ..rocm_utils import create_fp8_weight_transpose_cache, clear_fp8_weight_transpose_cache
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.utils import any_feature_enabled
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 __all__ = ["Linear"]
 
@@ -228,8 +228,8 @@ class _Linear(torch.autograd.Function):
         if fp8 or debug:
             # Configure quantizer
             if weight_quantizer is not None:
-                columnwise_usage = is_grad_enabled and inp.requires_grad
-                if not columnwise_usage:
+                columnwise_usage = is_grad_enabled and inp.requires_grad and keep_fp8_weight_transpose_cache
+                if not columnwise_usage and keep_fp8_weight_transpose_cache:
                     columnwise_usage = (
                         is_fp8_activation_recompute_enabled()
                         and not in_fp8_activation_recompute_phase()
@@ -246,7 +246,6 @@ class _Linear(torch.autograd.Function):
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
                 workspace_dtype=activation_dtype,
-                create_transpose_cache=keep_fp8_weight_transpose_cache,
             )
             weightmat.update_usage(rowwise_usage=True)
 
@@ -293,6 +292,9 @@ class _Linear(torch.autograd.Function):
         # Forward GEMM
         # Note: y = x * w^T
         # ------------------------------------------------------
+        if IS_HIP_EXTENSION and fp8 and not keep_fp8_weight_transpose_cache:
+                assert weightmat._transpose is None or weightmat._transpose.numel() == 0, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
+
         nvtx_range_push(f"{nvtx_label}.gemm")
         gemm_out, *_, reduce_scatter_out = general_gemm(
             weightmat,
@@ -618,9 +620,6 @@ class _Linear(torch.autograd.Function):
                 if ctx.grad_input_quantizer is not None:
                     ctx.grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
 
-                if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                    create_fp8_weight_transpose_cache(weight_fp8)
-
                 # Output buffers for Userbuffers reduce-scatter
                 gemm_out = None
                 reduce_scatter_out = None
@@ -652,7 +651,7 @@ class _Linear(torch.autograd.Function):
                 nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
 
                 if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                    clear_fp8_weight_transpose_cache(weight_fp8)
+                    weight_fp8.update_usage(columnwise_usage=False)
 
                 # Prepare grad input tensor
                 # Note: Perform tensor-parallel communication
@@ -1044,7 +1043,7 @@ class Linear(TransformerEngineBaseModule):
             self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
-        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
+        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache if IS_HIP_EXTENSION else True
 
         if device == "meta":
             assert parameters_split is None, "Cannot split module parameters on 'meta' device."
@@ -1431,6 +1430,9 @@ class Linear(TransformerEngineBaseModule):
         input_quantizer.internal = True
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         weight_quantizer.internal = True
+        if IS_HIP_EXTENSION:
+            weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
+
         if fp8_output:
             output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
         if torch.is_grad_enabled():

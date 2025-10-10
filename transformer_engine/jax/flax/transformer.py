@@ -637,7 +637,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             dropout_rng = self.make_rng(self.dropout_rng_name)
 
         if self.scale_factor is None:
-            scale_factor = 1.0 / sqrt(self.head_dim_qk)
+            scale_factor = 1.0 / sqrt(head_dim_qk)
         else:
             scale_factor = self.scale_factor
         del self.scale_factor

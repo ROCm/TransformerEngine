@@ -209,6 +209,21 @@ void performTest(const TestParams& params) {
   (void)cudaGetDeviceProperties(&prop, 0);
 
 #ifdef __HIP_PLATFORM_AMD__
+
+  // Enable FP8 GEMM + GELU fusion tests only on MI300 (gfx942) with ROCm > 7.0.
+  // hipBLASLt currently supports this config only
+  bool fp8_gelu_fusion_config = false;
+  #if HIP_VERSION >= 70000000
+    if (prop.major == 9 && prop.minor == 4)
+    {
+      fp8_gelu_fusion_config = atype == DType::kFloat8E4M3 &&
+                              btype == DType::kFloat8E4M3 &&
+                              dtype == DType::kFloat8E4M3 &&
+                              (params.use_gelu && gelu_type == DType::kFloat16) &&
+                              (!params.use_bias || bias_type == DType::kFloat16);
+    }
+  #endif
+
   if (has_fp8)
   {
     bool fp8_supported = (prop.major == 9 && prop.minor >= 4);
@@ -227,8 +242,8 @@ void performTest(const TestParams& params) {
       }
     }
 
-    if (params.use_gelu) {
-      GTEST_SKIP() << "FP8 GEMM with GELU is not supported";
+    if (params.use_gelu && !fp8_gelu_fusion_config) {
+      GTEST_SKIP() << "FP8 GEMM with GELU is not supported in current config";
     }
     if (params.use_bias && dtype == DType::kFloat16) {
       GTEST_SKIP() << "FP8 GEMM with bias and FP16 output is not supported";
@@ -252,7 +267,7 @@ void performTest(const TestParams& params) {
     if (params.use_gelu && dtype == DType::kBFloat16 && !params.transa) {
       GTEST_SKIP() << "BF16 GEMM with GELU is not supported in current config";
     }
-    if (has_fp8 && params.use_bias && dtype == DType::kFloat8E4M3) {
+    if (has_fp8 && params.use_bias && dtype == DType::kFloat8E4M3 && !fp8_gelu_fusion_config) {
       GTEST_SKIP() << "FP8 GEMM with bias and FP8 output is not supported in current config";
     }
   }
@@ -506,6 +521,7 @@ MAKE_GEMM_TEST(Testbf8xfp8xbf16xbf16xfp8, bf8, fp8, bf16, bf16, fp8);
 
 MAKE_GEMM_TEST(Testbf8xfp8xbf16xbf16xbf8, bf8, fp8, bf16, bf16, bf8);
 
+MAKE_GEMM_TEST(Testfp8xfp8xfp16xfp16xfp8, fp8, fp8, fp16, fp16, fp8);
 
 INSTANTIATE_TEST_SUITE_P(
     OperatorTest,
