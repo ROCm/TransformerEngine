@@ -13,9 +13,14 @@ import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
+from ..quantized_tensor import QuantizedTensorBase
+
 from ...constants import TE_DType as torch_to_transformer_engine_dtype
 
 from ..quantized_tensor import Quantizer
+
+from ...utils import _empty_tensor
+
 
 class _FromMXFP8Func(torch.autograd.Function):
     """Cast from MXFP8 to other dtype"""
@@ -48,7 +53,7 @@ class _FromMXFP8Func(torch.autograd.Function):
         return grad, None
 
 
-class MXFP8TensorBase:
+class MXFP8TensorBase(QuantizedTensorBase):
     """Mixin class that holds data attributes of MXFP8Tensor.
 
     MXFP8Tensor inherits from the PyTorch tensor class and this mixin
@@ -86,6 +91,17 @@ class MXFP8TensorBase:
 
         return instance
 
+    def clear(self):
+        """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
+        for t in (
+            self._rowwise_data,
+            self._columnwise_data,
+            self._rowwise_scale_inv,
+            self._columnwise_scale_inv,
+        ):
+            if t is not None:
+                t.data = _empty_tensor()
+
     def get_metadata(self) -> Dict[str, Any]:
         """Get this tensor's metadata."""
         return {
@@ -99,7 +115,16 @@ class MXFP8TensorBase:
 
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], MXFP8TensorBase]:
         """Prepare the tensor base for saving for backward"""
-        tensors = [self._rowwise_data, self._columnwise_data]
+        tensors = [
+            self._rowwise_data,
+            self._columnwise_data,
+            self._rowwise_scale_inv,
+            self._columnwise_scale_inv,
+        ]
+        self._rowwise_data = None
+        self._columnwise_data = None
+        self._rowwise_scale_inv = None
+        self._columnwise_scale_inv = None
         return tensors, self
 
     def restore_from_saved(
@@ -108,7 +133,9 @@ class MXFP8TensorBase:
         """Restore the tensor base data from the saved tensors list."""
         self._rowwise_data = tensors[0]
         self._columnwise_data = tensors[1]
-        return tensors[2:]
+        self._rowwise_scale_inv = tensors[2]
+        self._columnwise_scale_inv = tensors[3]
+        return tensors[4:]
 
     def get_data_tensors(self):
         """Get this Tensor's data."""
@@ -134,3 +161,48 @@ class MXFP8TensorBase:
             f"rowwise_scale_inv={self._rowwise_scale_inv}, "
             ")"
         )
+
+    def update_usage(
+        self,
+        rowwise_usage: Optional[bool] = None,
+        columnwise_usage: Optional[bool] = None,
+    ):
+        """
+        For MXFP8, columnwise scaled output is only produced by x2
+        scaling kernels, so this function only disables usages.
+        """
+
+        # Default usage is based on available data
+        if rowwise_usage is None:
+            rowwise_usage = self._rowwise_data is not None
+        if columnwise_usage is None:
+            columnwise_usage = self._columnwise_data is not None
+
+        # Update row-scaled data
+        if rowwise_usage:
+            if self._rowwise_data is None:
+                raise RuntimeError(
+                    "Requested row-wise usage, but MXFP8Tensor is missing row-scaled FP8 data"
+                )
+            if self._rowwise_scale_inv is None:
+                raise RuntimeError(
+                    "Requested row-wise usage, but MXFP8Tensor is missing row-scaled scale-inverses"
+                )
+        else:
+            self._rowwise_data = None
+            self._rowwise_scale_inv = None
+
+        # Update column-scaled data
+        if columnwise_usage:
+            if self._columnwise_data is None:
+                raise RuntimeError(
+                    "Requested column-wise usage, but MXFP8Tensor is missing column-scaled FP8 data"
+                )
+            if self._columnwise_scale_inv is None:
+                raise RuntimeError(
+                    "Requested column-wise usage, "
+                    "but MXFP8Tensor is missing column-scaled scale-inverses"
+                )
+        else:
+            self._columnwise_data = None
+            self._columnwise_scale_inv = None

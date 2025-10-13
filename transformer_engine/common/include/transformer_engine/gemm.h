@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -118,6 +120,15 @@ void nvte_multi_stream_cublas_gemm(const NVTETensor* A, const NVTETensor* B, NVT
 namespace transformer_engine {
 
 constexpr int num_streams = 4;
+
+/*! \brief TE/JAX cudaGraph requires the cuBLAS initialization to happen outside of the capturing
+ * region. This function is a helper to call cublasCreate() which allocate memory for the handle.
+ * The function will be called in the initialize phase of the related XLA custom calls.
+ */
+
+#ifndef __HIP_PLATFORM_AMD__
+void nvte_cublas_handle_init();
+#endif
 
 }  // namespace transformer_engine
 

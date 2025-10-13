@@ -11,7 +11,7 @@ if __name__ == "__main__":
 
 def test_lazy_init():
     import jax, os, pytest, subprocess, sys
-    if not transformer_engine.jax.is_hip_extension():
+    if not transformer_engine.jax.util.is_hip_extension():
         pytest.skip("This is ROCm test")
     os.environ["NVTE_FRAMEWORK"] = "jax"
     ret = subprocess.run(

@@ -24,7 +24,8 @@ from jax import value_and_grad, jit
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from jax.typing import ArrayLike, DTypeLike
 
-from transformer_engine.jax import fp8_autocast, is_hip_extension
+from transformer_engine.jax import fp8_autocast
+from transformer_engine.jax.cpp_extensions.misc import is_hip_extension
 from transformer_engine.jax.sharding import MeshResource
 from transformer_engine.jax.attention import (
     AttnBiasType,
@@ -40,7 +41,7 @@ from transformer_engine.jax.attention import (
     ReorderStrategy,
 )
 from transformer_engine.jax.cpp_extensions import FusedAttnHelper
-from transformer_engine.transformer_engine_jax import (
+from transformer_engine_jax import (
     NVTE_Fused_Attn_Backend,
     get_cudnn_version,
 )

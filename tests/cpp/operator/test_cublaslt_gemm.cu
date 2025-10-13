@@ -209,6 +209,21 @@ void performTest(const TestParams& params) {
   (void)cudaGetDeviceProperties(&prop, 0);
 
 #ifdef __HIP_PLATFORM_AMD__
+
+  // Enable FP8 GEMM + GELU fusion tests only on MI300 (gfx942) with ROCm > 7.0.
+  // hipBLASLt currently supports this config only
+  bool fp8_gelu_fusion_config = false;
+  #if HIP_VERSION >= 70000000
+    if (prop.major == 9 && prop.minor == 4)
+    {
+      fp8_gelu_fusion_config = atype == DType::kFloat8E4M3 &&
+                              btype == DType::kFloat8E4M3 &&
+                              dtype == DType::kFloat8E4M3 &&
+                              (params.use_gelu && gelu_type == DType::kFloat16) &&
+                              (!params.use_bias || bias_type == DType::kFloat16);
+    }
+  #endif
+
   if (has_fp8)
   {
     bool fp8_supported = (prop.major == 9 && prop.minor >= 4);
@@ -227,8 +242,8 @@ void performTest(const TestParams& params) {
       }
     }
 
-    if (params.use_gelu) {
-      GTEST_SKIP() << "FP8 GEMM with GELU is not supported";
+    if (params.use_gelu && !fp8_gelu_fusion_config) {
+      GTEST_SKIP() << "FP8 GEMM with GELU is not supported in current config";
     }
     if (params.use_bias && dtype == DType::kFloat16) {
       GTEST_SKIP() << "FP8 GEMM with bias and FP16 output is not supported";
@@ -252,7 +267,7 @@ void performTest(const TestParams& params) {
     if (params.use_gelu && dtype == DType::kBFloat16 && !params.transa) {
       GTEST_SKIP() << "BF16 GEMM with GELU is not supported in current config";
     }
-    if (has_fp8 && params.use_bias && dtype == DType::kFloat8E4M3) {
+    if (has_fp8 && params.use_bias && dtype == DType::kFloat8E4M3 && !fp8_gelu_fusion_config) {
       GTEST_SKIP() << "FP8 GEMM with bias and FP8 output is not supported in current config";
     }
   }
@@ -261,26 +276,26 @@ void performTest(const TestParams& params) {
   // pytorch tensor storage is row-major while cublas/hipblaslt is column-major
   Tensor A;
   if (params.transa){
-    A = Tensor("A", { params.m, params.k }, atype, true, false, params.scaling_mode);
+    A = Tensor("A", std::vector<size_t>{ params.m, params.k }, atype, true, false, params.scaling_mode);
   }else {
     // hipblaslt path need fp8-gemm with TN layout
-    A = Tensor("A", { params.k, params.m }, atype, true, isFp8Type(atype), params.scaling_mode);
+    A = Tensor("A", std::vector<size_t>{ params.k, params.m }, atype, true, isFp8Type(atype), params.scaling_mode);
   }
   Tensor B;
   if (params.transb){
     //hipblaslt path need fp8-gemm with TN layout
-    B = Tensor("B", { params.k, params.n }, btype, true, isFp8Type(btype), params.scaling_mode);
+    B = Tensor("B", std::vector<size_t>{ params.k, params.n }, btype, true, isFp8Type(btype), params.scaling_mode);
   }else {
-    B = Tensor("B", { params.n, params.k }, btype, true, false, params.scaling_mode);
+    B = Tensor("B", std::vector<size_t>{ params.n, params.k }, btype, true, false, params.scaling_mode);
   }
-  Tensor D("D", { params.n, params.m }, dtype);
+  Tensor D("D", std::vector<size_t>{ params.n, params.m }, dtype);
   Tensor bias;
   if(params.use_bias){
-    bias = Tensor("bias", {params.m}, bias_type);
+    bias = Tensor("bias", std::vector<size_t>{params.m}, bias_type);
   }
   Tensor pre_gelu_out;
   if(params.use_gelu){
-    pre_gelu_out = Tensor("pre_gelu_out", { params.n, params.m }, gelu_type);
+    pre_gelu_out = Tensor("pre_gelu_out", std::vector<size_t>{ params.n, params.m }, gelu_type);
   }
   
   //initialize the data and scale inv of A, B
@@ -320,7 +335,7 @@ void performTest(const TestParams& params) {
     workspace_size = 67108864;
   }
 #endif
-  Tensor Workspace("Workspace", { workspace_size }, DType::kByte);
+  Tensor Workspace("Workspace", std::vector<size_t>{ workspace_size }, DType::kByte);
 
   //perform the gemm in GPU
   nvte_cublas_gemm(A.data(),
@@ -506,6 +521,7 @@ MAKE_GEMM_TEST(Testbf8xfp8xbf16xbf16xfp8, bf8, fp8, bf16, bf16, fp8);
 
 MAKE_GEMM_TEST(Testbf8xfp8xbf16xbf16xbf8, bf8, fp8, bf16, bf16, bf8);
 
+MAKE_GEMM_TEST(Testfp8xfp8xfp16xfp16xfp8, fp8, fp8, fp16, fp16, fp8);
 
 INSTANTIATE_TEST_SUITE_P(
     OperatorTest,

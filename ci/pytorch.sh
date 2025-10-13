@@ -58,7 +58,7 @@ run_test_config(){
     run_default_fa 1 test_deferred_init.py
     run_default_fa 1 test_float8tensor.py
     run_default_fa 1 test_float8_current_scaling_exact.py
-    run_default_fa 1 test_cpu_offloading.py
+    test $_fus_attn = auto -o $_fus_attn = ck -o $_fus_attn = aotriton && NVTE_FLASH_ATTN=0 run 1 test_cpu_offloading.py
     run_default_fa 1 test_fused_rope.py
     run_default_fa 1 test_fusible_ops.py
     run_default_fa 3 test_gemm_autotune.py
@@ -77,7 +77,7 @@ run_test_config(){
     run_default_fa 1 triton_kernels/test_cast_mxfp8.py
     run_default_fa 1 triton_kernels/test_norm_common.py
     run_default_fa 1 triton_kernels/test_norms.py
-    NVTE_TEST_TRITON_AUTOTUNE=1 run_default_fa 3 triton_kernels/test_norms.py
+    NVTE_TEST_TRITON_AUTOTUNE=1 run_default_fa_lbl "autotune" 3 triton_kernels/test_norms.py
     run_default_fa 1 test_parallel_cross_entropy.py
     NVTE_USE_DEQUANTIZE_TRITON=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa_lbl "triton" 1 test_numerics.py
     NVTE_USE_RMSNORM_TRITON=1 run_default_fa_lbl "triton" 1 test_fusible_ops.py

@@ -18,6 +18,9 @@ if [ -z "${TEST_SGPU}${TEST_MGPU}" ]; then
     TEST_MGPU=1
 fi
 
+#To disable some logs trimming
+export CI=1
+
 _script_error_count=0
 _run_error_count=0
 

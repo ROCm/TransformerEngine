@@ -12,11 +12,6 @@ namespace transformer_engine {
 namespace jax {
 
 template <typename T>
-pybind11::capsule EncapsulateFunction(T *fn) {
-  return pybind11::capsule(reinterpret_cast<void *>(fn), "xla._CUSTOM_CALL_TARGET");
-}
-
-template <typename T>
 pybind11::capsule EncapsulateFFI(T *fn) {
   static_assert(std::is_invocable_r_v<XLA_FFI_Error *, T, XLA_FFI_CallFrame *>,
                 "Encapsulated function must be an XLA FFI handler");
@@ -25,49 +20,13 @@ pybind11::capsule EncapsulateFFI(T *fn) {
 
 pybind11::dict Registrations() {
   pybind11::dict dict;
-  dict["te_transpose"] = EncapsulateFunction(Transpose);
-  dict["te_cast_transpose"] = EncapsulateFunction(CastTranspose);
-
-  dict["te_act_lu"] = EncapsulateFunction(ActLu);
-  dict["te_act_lu_fp8"] = EncapsulateFunction(ActLuFP8);
-  dict["te_dact_lu"] = EncapsulateFunction(DActLu);
-  dict["te_dbias_cast_transpose"] = EncapsulateFunction(DBiasCastTranspose);
-  dict["te_dact_lu_dbias_cast_transpose"] = EncapsulateFunction(DActLuDBiasCastTranspose);
-  dict["te_dgated_act_lu_cast_transpose"] = EncapsulateFunction(DGatedActLuCastTranspose);
-
-  dict["te_layernorm_forward"] = EncapsulateFunction(LayerNormForward);
-  dict["te_layernorm_forward_fp8"] = EncapsulateFunction(LayerNormForwardFP8);
-  dict["te_layernorm_backward"] = EncapsulateFunction(LayerNormBackward);
-  dict["te_rmsnorm_forward"] = EncapsulateFunction(RMSNormForward);
-  dict["te_rmsnorm_forward_fp8"] = EncapsulateFunction(RMSNormForwardFP8);
-  dict["te_rmsnorm_backward"] = EncapsulateFunction(RMSNormBackward);
-  dict["te_quantize"] = EncapsulateFunction(Quantize);
-  dict["te_dequantize"] = EncapsulateFunction(Dequantize);
-  dict["te_scaled_softmax_forward"] = EncapsulateFunction(ScaledSoftmaxForward);
-  dict["te_scaled_softmax_backward"] = EncapsulateFunction(ScaledSoftmaxBackward);
-  dict["te_scaled_masked_softmax_forward"] = EncapsulateFunction(ScaledMaskedSoftmaxForward);
-  dict["te_scaled_masked_softmax_backward"] = EncapsulateFunction(ScaledMaskedSoftmaxBackward);
-  dict["te_scaled_upper_triang_masked_softmax_forward"] =
-      EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxForward);
-  dict["te_scaled_upper_triang_masked_softmax_backward"] =
-      EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxBackward);
-  dict["te_fused_attn_forward"] = EncapsulateFunction(FusedAttnForward);
-  dict["te_fused_attn_backward"] = EncapsulateFunction(FusedAttnBackward);
-
-  // Transpose
-  dict["te_transpose_ffi"] = EncapsulateFFI(TransposeHandler);
-  dict["te_cast_transpose_ffi"] = EncapsulateFFI(CastTransposeHandler);
-  dict["te_dbias_cast_transpose_ffi"] = EncapsulateFFI(DBiasCastTransposeHandler);
 
   // Activation
   dict["te_act_lu_ffi"] = EncapsulateFFI(ActLuHandler);
-  dict["te_act_lu_fp8_ffi"] = EncapsulateFFI(ActLuFP8Handler);
-  dict["te_dact_lu_ffi"] = EncapsulateFFI(DActLuHandler);
-  dict["te_dact_lu_dbias_cast_transpose_ffi"] = EncapsulateFFI(DActLuDBiasCastTransposeHandler);
-  dict["te_dgated_act_lu_cast_transpose_ffi"] = EncapsulateFFI(DGatedActLuCastTransposeHandler);
+  dict["te_dact_dbias_quantize_ffi"] = EncapsulateFFI(DActLuDBiasQuantizeHandler);
 
   // Quantization
-  dict["te_quantize_ffi"] = EncapsulateFFI(QuantizeHandler);
+  dict["te_dbias_quantize_ffi"] = EncapsulateFFI(DBiasQuantizeHandler);
   dict["te_dequantize_ffi"] = EncapsulateFFI(DequantizeHandler);
 
   // Softmax
@@ -83,61 +42,40 @@ pybind11::dict Registrations() {
 
 #ifndef USE_ROCM
   // Normalization
-  dict["te_layernorm_forward_ffi"] =
+  dict["te_norm_forward_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
-                     pybind11::arg("execute") = EncapsulateFFI(LayerNormForwardHandler));
-  dict["te_layernorm_forward_fp8_ffi"] =
+                     pybind11::arg("execute") = EncapsulateFFI(NormForwardHandler));
+  dict["te_norm_backward_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
-                     pybind11::arg("execute") = EncapsulateFFI(LayerNormForwardFP8Handler));
-  dict["te_layernorm_backward_ffi"] =
-      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
-                     pybind11::arg("execute") = EncapsulateFFI(LayerNormBackwardHandler));
-  dict["te_rmsnorm_forward_ffi"] =
-      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
-                     pybind11::arg("execute") = EncapsulateFFI(RMSNormForwardHandler));
-  dict["te_rmsnorm_forward_fp8_ffi"] =
-      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
-                     pybind11::arg("execute") = EncapsulateFFI(RMSNormForwardFP8Handler));
-  dict["te_rmsnorm_backward_ffi"] =
-      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
-                     pybind11::arg("execute") = EncapsulateFFI(RMSNormBackwardHandler));
+                     pybind11::arg("execute") = EncapsulateFFI(NormBackwardHandler));
 
   // Attention
-  pybind11::dict fused_attn_forward_ffi;
-  fused_attn_forward_ffi["prepare"] = EncapsulateFFI(CudnnHandleInitHandler);
-  fused_attn_forward_ffi["execute"] = EncapsulateFFI(FusedAttnForwardHandler);
-  dict["te_fused_attn_forward_ffi"] = fused_attn_forward_ffi;
+  dict["te_fused_attn_forward_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(FusedAttnForwardHandler));
+  dict["te_fused_attn_backward_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(FusedAttnBackwardHandler));
 
-  pybind11::dict fused_attn_backward_ffi;
-  fused_attn_backward_ffi["prepare"] = EncapsulateFFI(CudnnHandleInitHandler);
-  fused_attn_backward_ffi["execute"] = EncapsulateFFI(FusedAttnBackwardHandler);
-  dict["te_fused_attn_backward_ffi"] = fused_attn_backward_ffi;
+  dict["te_grouped_gemm_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(GroupedGemmHandler));
 #else
   // Normalization
-  dict["te_layernorm_forward_ffi"] = EncapsulateFFI(LayerNormForwardHandler);
-  dict["te_layernorm_forward_fp8_ffi"] = EncapsulateFFI(LayerNormForwardFP8Handler);
-  dict["te_layernorm_backward_ffi"] = EncapsulateFFI(LayerNormBackwardHandler);
-  dict["te_rmsnorm_forward_ffi"] = EncapsulateFFI(RMSNormForwardHandler);
-  dict["te_rmsnorm_forward_fp8_ffi"] = EncapsulateFFI(RMSNormForwardFP8Handler);
-  dict["te_rmsnorm_backward_ffi"] = EncapsulateFFI(RMSNormBackwardHandler);
+  dict["te_norm_forward_ffi"] = EncapsulateFFI(NormForwardHandler);
+  dict["te_norm_backward_ffi"] = EncapsulateFFI(NormBackwardHandler);
 
   // Attention
   dict["te_fused_attn_forward_ffi"] = EncapsulateFFI(FusedAttnForwardHandler);
   dict["te_fused_attn_backward_ffi"] = EncapsulateFFI(FusedAttnBackwardHandler);
+
+  dict["te_grouped_gemm_ffi"] = EncapsulateFFI(GroupedGemmHandler);
 #endif
   return dict;
 }
 
 PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("registrations", &Registrations);
-  m.def("pack_common_descriptor", &PackCustomCallCommonDescriptor, pybind11::arg(), pybind11::arg(),
-        pybind11::arg(), pybind11::arg("act_num") = 0);
-  m.def("pack_common_wk_descriptor", &PackCustomCallCommonWkDescriptor, pybind11::arg(),
-        pybind11::arg(), pybind11::arg(), pybind11::arg(), pybind11::arg(),
-        pybind11::arg("act_num") = 0);
-  m.def("pack_norm_descriptor", &PackCustomCallNormDescriptor);
-  m.def("pack_softmax_descriptor", &PackCustomCallSoftmaxDescriptor);
-  m.def("pack_fused_attn_descriptor", &PackCustomCallFusedAttnDescriptor);
   m.def("get_fused_attn_backend", &GetFusedAttnBackend);
 #ifndef USE_ROCM
   m.def("get_cuda_version", &GetCudaRuntimeVersion);
@@ -147,10 +85,10 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
 #ifndef USE_ROCM
   m.def("get_cublasLt_version", &cublasLtGetVersion);
 #endif
-  m.def("get_dact_dbias_ct_workspace_sizes", &GetDActDBiasCastTransposeWorkspaceSizes);
-  m.def("get_dbias_ct_workspace_sizes", &GetDBiasCastTransposeWorkspaceSizes);
-  m.def("get_layernorm_fwd_workspace_sizes", &GetLayerNormForwardWorkspaceSizes);
-  m.def("get_layernorm_bwd_workspace_sizes", &GetLayerNormBackwardWorkspaceSizes);
+  m.def("get_dact_dbias_quantize_workspace_sizes", &GetDActDBiasQuantizeWorkspaceSizes);
+  m.def("get_dbias_quantize_workspace_sizes", &GetDBiasQuantizeWorkspaceSizes);
+  m.def("get_norm_fwd_workspace_sizes", &GetNormForwardWorkspaceSizes);
+  m.def("get_norm_bwd_workspace_sizes", &GetNormBackwardWorkspaceSizes);
   m.def("get_fused_attn_fwd_workspace_sizes", &GetFusedAttnForwardWorkspaceSizes);
   m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
@@ -217,6 +155,25 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("NVTE_AOTriton", NVTE_Fused_Attn_Backend::NVTE_AOTriton)
       .value("NVTE_CK", NVTE_Fused_Attn_Backend::NVTE_CK);
 #endif
+
+  pybind11::enum_<NVTE_Norm_Type>(m, "NVTE_Norm_Type", pybind11::module_local())
+      .value("LayerNorm", NVTE_Norm_Type::LayerNorm)
+      .value("RMSNorm", NVTE_Norm_Type::RMSNorm)
+      .export_values();
+
+  pybind11::enum_<JAXX_Scaling_Mode>(m, "JAXX_Scaling_Mode", pybind11::module_local())
+      .value("NO_SCALING", JAXX_Scaling_Mode::NO_SCALING)
+      .value("DELAYED_TENSOR_SCALING", JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING)
+      .value("MXFP8_1D_SCALING", JAXX_Scaling_Mode::MXFP8_1D_SCALING)
+      .value("CURRENT_TENSOR_SCALING", JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING)
+      .export_values();
+
+  pybind11::enum_<transformer_engine::jax::QuantizeLayout>(m, "QuantizeLayout",
+                                                           pybind11::module_local())
+      .value("ROWWISE", transformer_engine::jax::QuantizeLayout::ROWWISE)
+      .value("COLWISE", transformer_engine::jax::QuantizeLayout::COLWISE)
+      .value("ROWWISE_COLWISE", transformer_engine::jax::QuantizeLayout::ROWWISE_COLWISE)
+      .export_values();
 }
 
 }  // namespace jax
