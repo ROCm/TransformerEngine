@@ -28,8 +28,8 @@ void log_fwd_config(const char* func_name,
                     const bool do_fp8_static_quant,
                     const bool uses_fwd_v3,
                     const fmha_fwd_args& fmha_args,
-                    const void* cu_seqlen_padded_q_ptr,
-                    const void* cu_seqlen_padded_kv_ptr,
+                    const void* cu_seqlens_q_padded,
+                    const void* cu_seqlens_kv_padded,
                     const bool how_v3_bf16_cvt
 ){
   bool ck_fused_attn_log_config = false;
@@ -55,8 +55,8 @@ void log_fwd_config(const char* func_name,
     std::cout<<"do_fp8_static_quant: "<<do_fp8_static_quant<<std::endl;
     std::cout<<"uses_fwd_v3: "<<uses_fwd_v3<<std::endl;
     std::cout<<"how_v3_bf16_cvt: "<<how_v3_bf16_cvt<<std::endl;
-    std::cout<<"cu_seqlen_padded_q_ptr: "<<cu_seqlen_padded_q_ptr<<std::endl;
-    std::cout<<"cu_seqlen_padded_kv_ptr: "<<cu_seqlen_padded_kv_ptr<<std::endl;
+    std::cout<<"cu_seqlens_q_padded: "<<cu_seqlens_q_padded<<std::endl;
+    std::cout<<"cu_seqlens_kv_padded: "<<cu_seqlens_kv_padded<<std::endl;
 
     // debug fmha_args
     std::cout<<"fmha_args: "<<std::endl;
@@ -304,8 +304,8 @@ hipError_t ck_attn_varlen_fwd(
   const void* v_ptr, 
   uint64_t stride_h_v, uint64_t stride_s_v,
   const void* cu_seqlen_q_ptr, const void* cu_seqlen_kv_ptr,
-  const void* cu_seqlen_padded_q_ptr,
-  const void* cu_seqlen_padded_kv_ptr,
+  const void* cu_seqlens_q_padded,
+  const void* cu_seqlens_kv_padded,
   bool is_training,
   float scaling_factor,
   float dropout_probability,
@@ -407,8 +407,8 @@ hipError_t ck_attn_varlen_fwd(
                          cu_seqlen_q_ptr, //seqstart_q_ptr
                          cu_seqlen_kv_ptr, //seqstart_k_ptr
                          nullptr, //seqlen_k_ptr
-                         cu_seqlen_padded_q_ptr, //seqstart_padded_q_ptr
-                         cu_seqlen_padded_kv_ptr, //seqstart_padded_k_ptr
+                         cu_seqlens_q_padded, //seqstart_padded_q_ptr
+                         cu_seqlens_kv_padded, //seqstart_padded_k_ptr
                          max_seqlen_q, //seqlen_q
                          max_seqlen_kv, //seqlen_kv
                          batch,
@@ -451,7 +451,7 @@ hipError_t ck_attn_varlen_fwd(
   }();
 
   // print ck traits and args when needed
-  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, fmha_args, cu_seqlen_padded_q_ptr, cu_seqlen_padded_kv_ptr, how_v3_bf16_cvt);
+  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, fmha_args, cu_seqlens_q_padded, cu_seqlens_kv_padded, how_v3_bf16_cvt);
   if (uses_fwd_v3)
   {
     set_aiter_asm_dir();
@@ -466,8 +466,8 @@ hipError_t ck_attn_varlen_fwd(
                                          has_lse,
                                          uses_fwd_v3,
                                          how_v3_bf16_cvt,
-                                         uses_fwd_v3? cu_seqlen_padded_q_ptr:nullptr,
-                                         uses_fwd_v3? cu_seqlen_padded_kv_ptr:nullptr,
+                                         uses_fwd_v3? cu_seqlens_q_padded:nullptr,
+                                         uses_fwd_v3? cu_seqlens_kv_padded:nullptr,
                                          is_v3_api_check);
   if(is_v3_api_check){return (hipError_t)(aiter_return_status > 0);}
   if(aiter_return_status < 0){

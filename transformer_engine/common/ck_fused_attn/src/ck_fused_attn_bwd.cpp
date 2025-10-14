@@ -127,7 +127,6 @@ __global__ void dk_or_dv_reduce(
 template<typename DataType>
 __global__ void dk_dv_reduce_thd(
   uint64_t b, uint64_t h, uint64_t hg, uint64_t d,
-  const int32_t* total_seqlen_kv_ptr,
   const int32_t* padded_seqlen_kv_ptr,
   const int32_t* seqlen_kv_ptr,
   const DataType *dk_expanded,
@@ -144,7 +143,7 @@ __global__ void dk_dv_reduce_thd(
   
   assert(hdim_idx<d);
 
-  if(seqlen_idx >= *total_seqlen_kv_ptr){
+  if(seqlen_idx >= *((padded_seqlen_kv_ptr? padded_seqlen_kv_ptr:seqlen_kv_ptr) + b)){
     return;
   }
   if(padded_seqlen_kv_ptr){
@@ -1062,9 +1061,6 @@ hipError_t ck_attn_varlen_bwd(
         hipLaunchKernelGGL(
           dk_dv_reduce_thd<CK_TILE_TYPE>, grid, block, 0, stream,
           b, h, hg, d_qk,
-          static_cast<const int32_t*>(
-            cu_seqlen_padded_kv_ptr? cu_seqlen_padded_kv_ptr:cu_seqlen_kv_ptr
-          )+b,
           static_cast<const int32_t*>(cu_seqlen_padded_kv_ptr),
           static_cast<const int32_t*>(cu_seqlen_kv_ptr),
           static_cast<CK_TILE_TYPE*>(dk_expanded_ptr),
