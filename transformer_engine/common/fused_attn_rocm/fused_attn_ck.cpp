@@ -638,11 +638,13 @@ void fused_attn_ck_fwd_impl(
       ) == 1;
     }
     needs_padding_workaround = pad_between_seqs && (!has_fwd_v3_support || !is_ragged);
-    // if(needs_padding_workaround){
-    //   std::cout << "Disabling V3 to avoid applying the padding/unpadding workaround";
-    //   needs_padding_workaround = false;
-    //   nvte_ck_uses_fwd_v3 = false;
-    // }
+    if(needs_padding_workaround && is_ragged){
+      if(nvte_log_ck_config){
+        std::cout << "Disabling V3 to avoid padding/unpadding workaround.\n";
+      }
+      needs_padding_workaround = false;
+      nvte_ck_uses_fwd_v3 = false;
+    }
   }
 
 
@@ -819,7 +821,11 @@ void fused_attn_ck_fwd_impl(
         add_padding(dtype, b, h, s_q, d_v, max_tokens_q, is_ragged, o_stride[0], o_stride[1], o_stride[2], devPtrOPreprocess, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrO, stream);
         add_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
       }else{
-        add_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxLSEWithoutPadding, devPtrSeqOffsetsQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
+        if(is_ragged && !has_fwd_v3_support){
+          add_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
+        }else{
+          add_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxLSEWithoutPadding, devPtrSeqOffsetsQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
+        }
       }
     }else{
       add_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrCuSeqlensQ, devPtrSoftmaxAux, stream);
