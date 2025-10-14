@@ -407,10 +407,10 @@ hipError_t ck_attn_varlen_fwd(
                          cu_seqlen_q_ptr, //seqstart_q_ptr
                          cu_seqlen_kv_ptr, //seqstart_k_ptr
                          nullptr, //seqlen_k_ptr
-                         nullptr, //seqstart_padded_q_ptr
-                         nullptr, //seqstart_padded_k_ptr
-                         max_seqlen_q, //seqlen_q, unused in group mode
-                         max_seqlen_kv, //seqlen_kv, unused in group mode
+                         cu_seqlen_padded_q_ptr, //seqstart_padded_q_ptr
+                         cu_seqlen_padded_kv_ptr, //seqstart_padded_k_ptr
+                         max_seqlen_q, //seqlen_q
+                         max_seqlen_kv, //seqlen_kv
                          batch,
                          max_seqlen_q,
                          hdim_q,
@@ -466,8 +466,8 @@ hipError_t ck_attn_varlen_fwd(
                                          has_lse,
                                          uses_fwd_v3,
                                          how_v3_bf16_cvt,
-                                         cu_seqlen_padded_q_ptr,
-                                         cu_seqlen_padded_kv_ptr,
+                                         uses_fwd_v3? cu_seqlen_padded_q_ptr:nullptr,
+                                         uses_fwd_v3? cu_seqlen_padded_kv_ptr:nullptr,
                                          is_v3_api_check);
   if(is_v3_api_check){return (hipError_t)(aiter_return_status > 0);}
   if(aiter_return_status < 0){

@@ -638,6 +638,11 @@ void fused_attn_ck_fwd_impl(
       ) == 1;
     }
     needs_padding_workaround = pad_between_seqs && (!has_fwd_v3_support || !is_ragged);
+    // if(needs_padding_workaround){
+    //   std::cout << "Disabling V3 to avoid applying the padding/unpadding workaround";
+    //   needs_padding_workaround = false;
+    //   nvte_ck_uses_fwd_v3 = false;
+    // }
   }
 
 
@@ -1246,7 +1251,6 @@ void fused_attn_ck_bwd_impl(
     void* devPtrdQPreprocess = devPtrdQ;
     void* devPtrdKPreprocess = devPtrdK;
     void* devPtrdVPreprocess = devPtrdV;
-    void* devPtrSoftmaxLSEPreprocess = devPtrSoftmaxAux;
     void* cu_seqlen_padded_q_ptr = nullptr;
     void* cu_seqlen_padded_kv_ptr = nullptr;
 
@@ -1257,7 +1261,6 @@ void fused_attn_ck_bwd_impl(
         cu_seqlen_padded_kv_ptr = devPtrSeqOffsetsKV;
         // softmax lse format between TE and aiter are different
         remove_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrSeqOffsetsQ, devPtrSeqOffsetsQ, devPtrSoftmaxLSEWithoutPadding, stream);
-        devPtrSoftmaxLSEPreprocess = devPtrSoftmaxLSEWithoutPadding;
       }else{
         // remove padding for q, k, v
         remove_padding(dtype, b, h, s_q, d_qk, max_tokens_q, is_ragged, q_stride[0], q_stride[1], q_stride[2], devPtrQ, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrQWithoutPadding, stream);
@@ -1277,11 +1280,9 @@ void fused_attn_ck_bwd_impl(
         devPtrdQPreprocess = devPtrdQWithoutPadding;
         devPtrdKPreprocess = devPtrdKWithoutPadding;
         devPtrdVPreprocess = devPtrdVWithoutPadding;
-        devPtrSoftmaxLSEPreprocess = devPtrSoftmaxLSEWithoutPadding;
       }
     }else{
       remove_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxLSEWithoutPadding, stream);
-      devPtrSoftmaxLSEPreprocess = devPtrSoftmaxLSEWithoutPadding;
     }
     using ck_fused_attn::ck_attn_varlen_bwd;
     NVTE_CHECK_CUDA(
@@ -1300,7 +1301,7 @@ void fused_attn_ck_bwd_impl(
         cu_seqlen_padded_kv_ptr,
         devPtrOPreprocess,
         o_stride[1], s_o_stride,
-        devPtrSoftmaxLSEPreprocess,
+        devPtrSoftmaxLSEWithoutPadding,
         devPtrdOPreprocess,
         o_stride[1], s_o_stride, //dO and O share the same stride in TE
         scaling_factor, dropout_probability,
