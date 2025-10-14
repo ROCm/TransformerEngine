@@ -638,6 +638,8 @@ void fused_attn_ck_fwd_impl(
       ) == 1;
     }
     needs_padding_workaround = pad_between_seqs && (!has_fwd_v3_support || !is_ragged);
+    // We can dispatch to CK kernels with native padding support to save on
+    // having to perform a workaround transform on the TE side. 
     if(needs_padding_workaround && is_ragged){
       if(nvte_log_ck_config){
         std::cout << "Disabling V3 to avoid padding/unpadding workaround.\n";
@@ -821,6 +823,8 @@ void fused_attn_ck_fwd_impl(
         add_padding(dtype, b, h, s_q, d_v, max_tokens_q, is_ragged, o_stride[0], o_stride[1], o_stride[2], devPtrOPreprocess, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrO, stream);
         add_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
       }else{
+        // Here we must adjust the softmax LSE for group-mode native padding
+        // outputs from CK kernels, similarly to had we performed the workaround
         if(is_ragged && !has_fwd_v3_support){
           add_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
         }else{
