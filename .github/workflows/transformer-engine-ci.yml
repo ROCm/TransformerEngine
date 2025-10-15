@@ -87,8 +87,13 @@ jobs:
       - name: 📦 Build wheel inside container
         run: |
           sudo su
+          echo "--- Running as user: $(whoami) ---"
+
           set -ex
 
+          sudo su
+          echo "--- Running as user: $(whoami) ---"
+          
           # Ensure core build tools are present
           apt-get update
 
