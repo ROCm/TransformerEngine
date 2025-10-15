@@ -997,6 +997,8 @@ class _LayerNormLinear(torch.autograd.Function):
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             nvtx_range_push(f"{nvtx_label}.reduce_and_update_fp8_tensors")
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
+            if ctx.use_fsdp2:
+                FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=True)
             nvtx_range_pop(f"{nvtx_label}.reduce_and_update_fp8_tensors")
 
         # Scatter fp8 weight buffers

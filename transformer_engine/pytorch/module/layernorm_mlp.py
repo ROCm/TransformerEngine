@@ -1350,6 +1350,8 @@ class _LayerNormMLP(torch.autograd.Function):
 
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
+            if ctx.use_fsdp2:
+                FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=True)                    
 
         # FIX THIS
         # Scatter Fp8 tranposed-weight buffers

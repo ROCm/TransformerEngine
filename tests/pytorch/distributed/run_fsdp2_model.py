@@ -25,15 +25,42 @@ from transformer_engine.pytorch.fp8 import fp8_model_init
 from torch.nn.parallel import DistributedDataParallel as DDP
 from pathlib import Path
 
-class SimpleNet(nn.Module):
+class SimpleNet(nn.Module):  
     def __init__(self, input_size, hidden_size, output_size, use_fsdp2=False):
-        super(SimpleNet, self).__init__()
-        self.fc1 = te.Linear(input_size, hidden_size, use_fsdp2=use_fsdp2)
-        self.fc2 = te.Linear(hidden_size, output_size, use_fsdp2=use_fsdp2)
-
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
+        super(SimpleNet, self).__init__()  
+          
+        # LayerNormLinear: fuses LayerNorm + Linear  
+        self.ln_linear = te.LayerNormLinear(  
+            in_features=input_size,  
+            out_features=hidden_size,  
+            eps=1e-5,
+            use_fsdp2=use_fsdp2
+        )  
+          
+        # LayerNormMLP: fuses LayerNorm + FC1 + Activation + FC2  
+        self.ln_mlp = te.LayerNormMLP(  
+            hidden_size=hidden_size,  
+            ffn_hidden_size=hidden_size * 4,  # Typical 4x expansion
+            use_fsdp2=use_fsdp2
+        )  
+          
+        # Regular Linear for final projection  
+        self.fc_out = te.Linear(  
+            hidden_size,   
+            output_size,  
+            use_fsdp2=use_fsdp2
+        )  
+  
+    def forward(self, x):  
+        # LayerNormLinear: applies LayerNorm then Linear  
+        x = self.ln_linear(x)  
+          
+        # LayerNormMLP: applies LayerNorm + FC1 + GELU + FC2  
+        x = self.ln_mlp(x)  
+          
+        # Final Linear projection  
+        x = self.fc_out(x)  
+          
         return x
 
 def save_custom_attrs(module):
@@ -99,7 +126,7 @@ def _parse_args(argv=None, namespace=None):
     return args
 
 
-sub_modules_to_wrap = [te.Linear]
+sub_modules_to_wrap = [te.Linear, te.LayerNormLinear, te.LayerNormMLP]
 
 
 def _train(args):
@@ -220,7 +247,7 @@ def _train(args):
 
         # Zero the parameter gradients
         optimizer.zero_grad()
-        with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+        with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, use_fsdp2 = args.use_fsdp2):
             output = model(input_data)
         target = torch.randn(args.batch_size, args.output_size).to(device)
         loss = F.mse_loss(output, target)

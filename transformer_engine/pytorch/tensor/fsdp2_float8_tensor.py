@@ -103,14 +103,6 @@ class FSDPAGFloat8Tensor(torch.Tensor):
             if isinstance(x, cls):
                 if meta is None:
                     meta = (x._module, x._fp8_meta_index, x._keep_fp8_weight_transpose_cache)
-                else:
-                    # Require consistency when multiple wrappers are involved in a single op
-                    # same_mod = (meta[0] is x._module)
-                    same_idx = (meta[1] == x._fp8_meta_index)
-                    same_flag = (meta[2] == x._keep_fp8_weight_transpose_cache)
-                    assert same_idx and same_flag, (
-                        "Mixed FSDPAGFloat8Tensor metadata in one op is not supported"
-                    )
                 return x._elem
             return x
 
@@ -136,7 +128,13 @@ class FSDPAGFloat8Tensor(torch.Tensor):
     def fsdp_pre_all_gather(self, mesh):
         # If metadata isn't initialized yet, we can't access the quantizers
         if not self._module.fp8:
-            self._module.init_fp8_metadata()
+            module_class_name = self._module.__class__.__name__  
+            if "LayerNormMLP" in module_class_name:  
+                num_gemms = 2  
+            else:  # Linear, LayerNormLinear, etc.  
+                num_gemms = 1  
+
+            self._module.init_fp8_metadata(num_gemms=num_gemms)
         # Use the actual data
         base = self._elem
         # Access the quantizer using fp8_meta_index
