@@ -108,7 +108,7 @@ jobs:
           ROCM_PATH="/opt/rocm" \
           PATH="/opt/rocm/bin:${PATH}" \
           LD_LIBRARY_PATH="/opt/rocm/lib" \
-          CPLUS_INCLUDE_PATH="/usr/include/c++/11:/usr/include/x86_64-linux-gnu/c++/11" \
+          HIP_PATH="" \
           CXX="/opt/rocm/bin/hipcc" \
           CC="/opt/rocm/bin/hipcc" \
           PYTORCH_ROCM_ARCH="gfx942" \
