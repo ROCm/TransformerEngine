@@ -88,7 +88,7 @@ jobs:
         run: |
           sudo bash <<'EOF'
           set -ex
-          echo "--- Running as user: $(whoami) ---"
+
           # Ensure core build tools are present
           apt-get update
 
@@ -112,6 +112,7 @@ jobs:
           export CC="${ROCM_PATH}/bin/hipcc"
           export PYTORCH_ROCM_ARCH="gfx942"
           export NVTE_ROCM_ARCH="gfx942"
+          export AMDGPU_TARGETS="gfx942"
           
           # Build the wheel
           pip install -v .
