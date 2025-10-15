@@ -25,6 +25,7 @@ on:
         required: true
         default: 'te-gfx942-4gpu'
 
+
 jobs:
   setup:
     name: Select Docker Image
