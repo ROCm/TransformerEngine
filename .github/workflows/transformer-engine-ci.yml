@@ -66,7 +66,7 @@ jobs:
   build:
     name: Build TransformerEngine
     # This is a build job, doesn't need GPUs
-    runs-on: [build-only]
+    runs-on: [te-gfx942-4gpu]
     container:
       image: ${{ needs.setup.outputs.docker-image }}
       options: --shm-size=16g --user root
@@ -113,7 +113,7 @@ jobs:
           NVTE_ROCM_ARCH="gfx942" \
           AMDGPU_TARGETS="gfx942" \
           pip install -v .
-          
+
           EOF
           
       - name: ⬆️ Upload wheel artifact
