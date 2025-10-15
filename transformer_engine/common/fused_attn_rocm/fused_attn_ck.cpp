@@ -18,9 +18,6 @@
 namespace transformer_engine {
 namespace fused_attn_rocm {
 
-bool has_bwd_v3_support=false;
-bool has_fwd_v3_support=false;
-
 bool get_pad_between_seqs(
   const Tensor* input_cu_seqlens,
   const Tensor* input_cu_seqlens_padded,
@@ -555,10 +552,6 @@ void fused_attn_ck_fwd_impl(
   size_t *workspace_size,
   cudaStream_t stream){
 
-  if(workspace==nullptr){
-    // Reset static variable
-    has_fwd_v3_support = false;
-  }
   bool nvte_log_ck_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
@@ -568,6 +561,7 @@ void fused_attn_ck_fwd_impl(
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
   bool is_ragged = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_THD; 
   bool needs_padding_workaround = false;
+  bool has_fwd_v3_support=false;
   // extract the qkv and o storage bytes to allocate buffer for padding removing
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
   size_t q_storage_bytes = max_tokens_q*h*d_qk*nvte_dtype_size(dtype); 
@@ -609,7 +603,7 @@ void fused_attn_ck_fwd_impl(
     }
 
     // First-pass API check
-    if(nvte_ck_uses_fwd_v3 && workspace==nullptr){
+    if(nvte_ck_uses_fwd_v3){
       using ck_fused_attn::ck_attn_varlen_fwd;
       has_fwd_v3_support = ck_attn_varlen_fwd(
         nvte_to_ck_dtype(dtype),
@@ -885,10 +879,6 @@ void fused_attn_ck_bwd_impl(
   size_t *workspace_size,
   cudaStream_t stream) {
   
-  if(workspace==nullptr){
-    // Reset static variable
-    has_bwd_v3_support = false;
-  }
   bool nvte_log_ck_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
@@ -902,6 +892,7 @@ void fused_attn_ck_bwd_impl(
 
   bool is_ragged = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_THD; 
   bool needs_padding_workaround = false;
+  bool has_bwd_v3_support=false;
   // extract the qkv and o storage bytes to allocate buffer for padding removing
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
   size_t q_storage_bytes = max_tokens_q*h*d_qk*nvte_dtype_size(dtype); 
@@ -963,7 +954,7 @@ void fused_attn_ck_bwd_impl(
       s_dv_expanded_stride = std::min(dv_expanded_stride[0], dv_expanded_stride[2]);
     }
     // First-pass API check
-    if(nvte_ck_uses_bwd_v3 && workspace==nullptr){
+    if(nvte_ck_uses_bwd_v3){
       using ck_fused_attn::ck_attn_varlen_bwd;
       has_bwd_v3_support = ck_attn_varlen_bwd(
         nvte_to_ck_dtype(dtype),
