@@ -32,18 +32,37 @@ message(STATUS "AITER V3_ASM_ARCHS: ${V3_ASM_ARCHS}")
 list(JOIN V3_ASM_ARCHS ";" V3_ASM_ARCHS_STR)
 set(ENV{GPU_ARCHS} "${V3_ASM_ARCHS_STR}")
 
+# Handle prebuilt AITER
 if(NOT DEFINED AITER_MHA_PATH)
-  # delete the existing aiter/jit/build dir for a clean build
-  file(REMOVE_RECURSE "${__AITER_SOURCE_DIR}/aiter/jit/build")
-  # compile the libmha_fwd.so and libmha_bwd.so
-  set(ENV{AITER_LOG_MORE} 1)
-  # fp32 to bf16 cvt env still required for MI300X
-  set(ENV{CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT} ${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT})
-  execute_process(
-    COMMAND python3 ${__AITER_TEST_DIR}/compile.py
-  )
-  # libmha_fwd.so and libmha_bwd.so will be under 3rdparty/aiter/op_tests/cpp/mha
-  set(__AITER_MHA_PATH ${__AITER_TEST_DIR})
+  if(DEFINED USE_PREBUILT_AITER)
+    message(STATUS "[AITER-PREBUILT] NVTE_USE_PREBUILT_AITER is set, trying to download prebuilts...")
+    include("${CMAKE_CURRENT_LIST_DIR}/download_aiter_prebuilt.cmake")
+    # Try to fetch; fallback to build-from-source if fails
+    set(fetch_success TRUE)
+    include("${CMAKE_CURRENT_LIST_DIR}/download_aiter_prebuilt.cmake")
+    fetch_aiter_prebuilt(__AITER_MHA_PATH)
+
+    if(NOT DEFINED __AITER_MHA_PATH OR NOT EXISTS "${__AITER_MHA_PATH}/libmha_fwd.so")
+      message(WARNING "[AITER-PREBUILT] No prebuilts found, falling back to build from source.")
+      set(fetch_success FALSE)
+    else()
+      set(fetch_success TRUE)
+    endif()
+  endif()
+
+  if(NOT fetch_success)
+     # delete the existing aiter/jit/build dir for a clean build
+    file(REMOVE_RECURSE "${__AITER_SOURCE_DIR}/aiter/jit/build")
+    # compile the libmha_fwd.so and libmha_bwd.so
+    set(ENV{AITER_LOG_MORE} 1)
+    # fp32 to bf16 cvt env still required for MI300X
+    set(ENV{CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT} ${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT})
+    execute_process(
+      COMMAND python3 ${__AITER_TEST_DIR}/compile.py
+    )
+    # libmha_fwd.so and libmha_bwd.so will be under 3rdparty/aiter/op_tests/cpp/mha
+    set(__AITER_MHA_PATH ${__AITER_TEST_DIR})
+  endif()
 else()
   # use pre-built libmha_fwd.so libmha_bwd.so
   set(__AITER_MHA_PATH ${AITER_MHA_PATH})
