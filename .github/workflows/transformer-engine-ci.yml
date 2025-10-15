@@ -86,14 +86,9 @@ jobs:
 
       - name: 📦 Build wheel inside container
         run: |
-          sudo su
-          echo "--- Running as user: $(whoami) ---"
-
+          sudo bash <<'EOF'
           set -ex
-
-          sudo su
           echo "--- Running as user: $(whoami) ---"
-          
           # Ensure core build tools are present
           apt-get update
 
@@ -120,6 +115,7 @@ jobs:
           
           # Build the wheel
           pip install -v .
+          EOF
           
       - name: ⬆️ Upload wheel artifact
         uses: actions/upload-artifact@v4
