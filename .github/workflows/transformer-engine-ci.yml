@@ -104,18 +104,16 @@ jobs:
           ln -sf /opt/cmake/bin/* /usr/local/bin/
           cmake --version
 
-          # Set up ROCm build environment variables
-          export ROCM_PATH="/opt/rocm"
-          export PATH="${ROCM_PATH}/bin:${PATH}"
-          export LD_LIBRARY_PATH="${ROCM_PATH}/lib:${LD_LIBRARY_PATH}"
-          export CXX="${ROCM_PATH}/bin/hipcc"
-          export CC="${ROCM_PATH}/bin/hipcc"
-          export PYTORCH_ROCM_ARCH="gfx942"
-          export NVTE_ROCM_ARCH="gfx942"
-          export AMDGPU_TARGETS="gfx942"
-          
-          # Build the wheel
+          ROCM_PATH="/opt/rocm" \
+          PATH="/opt/rocm/bin:${PATH}" \
+          LD_LIBRARY_PATH="/opt/rocm/lib" \
+          CXX="/opt/rocm/bin/hipcc" \
+          CC="/opt/rocm/bin/hipcc" \
+          PYTORCH_ROCM_ARCH="gfx942" \
+          NVTE_ROCM_ARCH="gfx942" \
+          AMDGPU_TARGETS="gfx942" \
           pip install -v .
+          
           EOF
           
       - name: ⬆️ Upload wheel artifact
