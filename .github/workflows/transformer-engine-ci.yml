@@ -86,7 +86,7 @@ jobs:
 
       - name: 📦 Build wheel inside container
         run: |
-          echo "--- Running as user: $(whoami) ---"
+          sudo su
           set -ex
 
           # Ensure core build tools are present
