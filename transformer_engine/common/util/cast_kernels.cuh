@@ -1345,6 +1345,7 @@ void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tenso
           dbias->data.dtype, ITypeOut,
           reduce_dbias_rocm<ITypeOut>(workspace_ptr, dbias, rows, cols, stream);
       );
+      break;
     }
     case NVTE_MXFP8_1D_SCALING: {
       mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output, dbias,
@@ -1352,7 +1353,7 @@ void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tenso
       break;
     }
     default:
-    NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
+      NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
   }
 }
 
