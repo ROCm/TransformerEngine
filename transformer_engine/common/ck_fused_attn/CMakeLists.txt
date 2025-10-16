@@ -34,16 +34,16 @@ set(ENV{GPU_ARCHS} "${V3_ASM_ARCHS_STR}")
 
 # Handle prebuilt AITER
 if(NOT DEFINED AITER_MHA_PATH)
-  if(DEFINED USE_PREBUILT_AITER)
-    message(STATUS "[AITER-PREBUILT] NVTE_USE_PREBUILT_AITER is set, trying to download prebuilts...")
+
+  # Try to fetch; fallback to build-from-source if fails
+  if(DEFINED ENV{NVTE_USE_PREBUILT_AITER} AND NOT "$ENV{NVTE_USE_PREBUILT_AITER}" STREQUAL "0")
+    message(STATUS "[AITER-PREBUILT] NVTE_USE_PREBUILT_AITER is set, Attempting to download prebuilts...")
     include("${CMAKE_CURRENT_LIST_DIR}/download_aiter_prebuilt.cmake")
-    # Try to fetch; fallback to build-from-source if fails
     set(fetch_success TRUE)
-    include("${CMAKE_CURRENT_LIST_DIR}/download_aiter_prebuilt.cmake")
     fetch_aiter_prebuilt(__AITER_MHA_PATH)
 
-    if(NOT DEFINED __AITER_MHA_PATH OR NOT EXISTS "${__AITER_MHA_PATH}/libmha_fwd.so")
-      message(WARNING "[AITER-PREBUILT] No prebuilts found, falling back to build from source.")
+    if(NOT DEFINED __AITER_MHA_PATH OR NOT EXISTS "${__AITER_MHA_PATH}/libmha_fwd.so" OR NOT EXISTS "${__AITER_MHA_PATH}/libmha_bwd.so")
+      message(WARNING "[AITER-PREBUILT] No prebuilt aiter files found; Building aiter from source.")
       set(fetch_success FALSE)
     else()
       set(fetch_success TRUE)
