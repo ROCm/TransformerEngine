@@ -33,6 +33,6 @@ ENV TARGET_BRANCH=${TARGET_BRANCH}
 # Install TransformerEngine
 COPY build_wheels.sh /
 WORKDIR /TransformerEngine/
-RUN git clone https://github.com/ROCm/TransformerEngine.git /TransformerEngine
+RUN git clone https://github.com/ROCm/TransformerEngine.git -b cpattigi-test /TransformerEngine
 
 CMD ["/bin/bash", "/build_wheels.sh", "manylinux_2_28_x86_64", "true", "true", "true", "true"]
