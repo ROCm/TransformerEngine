@@ -438,6 +438,7 @@ class _Linear(torch.autograd.Function):
             ctx.requires_dgrad = inp.requires_grad
             ctx.requires_wgrad = weight.requires_grad
             ctx.reduce_and_update_bwd_fp8_tensors = False
+            ctx.autocast_fp8_reduction_skipped = False
 
             ctx.owns_input = saved_inputmat is not inp
             ctx.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
@@ -447,6 +448,7 @@ class _Linear(torch.autograd.Function):
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
                 if in_fp8_activation_recompute_phase():
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
+                ctx.autocast_fp8_reduction_skipped = FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2
             ctx.wgrad_store = wgrad_store
 
         # ------------------------------------------------------
@@ -872,7 +874,7 @@ class _Linear(torch.autograd.Function):
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             nvtx_range_push(f"{nvtx_label}.reduce_and_update_fp8_tensors")
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
-            if ctx.use_fsdp2:
+            if ctx.autocast_fp8_reduction_skipped:
                 FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=True)
             nvtx_range_pop(f"{nvtx_label}.reduce_and_update_fp8_tensors")
 
