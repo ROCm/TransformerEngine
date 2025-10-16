@@ -26,7 +26,7 @@ concurrency:
 jobs:
   setup:
     name: Select Docker Image
-    runs-on: ubuntu-latest
+    runs-on: build-only
     outputs:
       docker-image: ${{ steps.select-image.outputs.image-tag }}
     steps:
@@ -213,7 +213,7 @@ jobs:
   report-status:
     name: Report Final Status
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: build-only
     if: always()
     steps:
       - name: Check test results
