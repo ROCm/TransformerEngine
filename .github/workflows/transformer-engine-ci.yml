@@ -98,7 +98,7 @@ jobs:
           
           # Install custom CMake version
           CMAKE_LINK="https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0-linux-x86_64.sh"
-          wget -q -P /opt ${CMAKE_LINK}
+          wget -P /opt ${CMAKE_LINK}
           chmod +x /opt/cmake-*.sh
           mkdir -p /opt/cmake
           bash /opt/cmake-*.sh --skip-license --prefix=/opt/cmake
@@ -108,16 +108,9 @@ jobs:
           cmake --version
 
           # Export all variables so they are inherited by subprocesses
-          export ROCM_PATH="/opt/rocm"
-          export PATH="/opt/rocm/bin:${PATH}"
-          export LD_LIBRARY_PATH="/opt/rocm/lib"
-          export CPLUS_INCLUDE_PATH="/usr/include/c++/11"
           export HIP_PATH=""
-          export CXX="/opt/rocm/bin/hipcc"
-          export CC="/opt/rocm/bin/hipcc"
-          export PYTORCH_ROCM_ARCH="gfx942"
-          export NVTE_ROCM_ARCH="gfx942"
-          export AMDGPU_TARGETS="gfx942"
+          export PYTORCH_ROCM_ARCH=gfx942
+          export NVTE_ROCM_ARCH=gfx942
           
           # Run the build
           pip install -v .
