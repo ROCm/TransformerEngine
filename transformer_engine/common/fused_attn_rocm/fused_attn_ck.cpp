@@ -596,13 +596,14 @@ void fused_attn_ck_fwd_impl(
       (*workspace_size)+= h*sizeof(float);
     }
     if(is_batch && is_padding){
-      // cu_seqlen_padded buffers
-      (*workspace_size)+= 2*(b+1)*sizeof(float);
       // softmax_lse buffer
       (*workspace_size)+= max_tokens_q*h*sizeof(float);
       if(is_SBHD){
         // request q, k, v, o buffer without padding
         (*workspace_size)+= q_storage_bytes + k_storage_bytes + v_storage_bytes + o_storage_bytes;
+      }else{
+        // cu_seqlen_padded buffers
+        (*workspace_size)+= 2*(b+1)*sizeof(ck_tile::index_t);
       }
     }else if(is_ragged){
       // We include a softmax_lse buffer to use the kernel in order to properly reshape the lse as needed.
@@ -678,9 +679,9 @@ void fused_attn_ck_fwd_impl(
     }else{
       // cu_seqlen_padded ptrs for THD conversion
       devPtrSeqOffsetsQ = workspace_next;
-      workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + (b+1)*sizeof(float));
+      workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + (b+1)*sizeof(ck_tile::index_t));
       devPtrSeqOffsetsKV = workspace_next;
-      workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + (b+1)*sizeof(float));
+      workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + (b+1)*sizeof(ck_tile::index_t));
     }
     //determine the o buffer based on workspace next section
     devPtrOWithoutPadding = workspace_next;
