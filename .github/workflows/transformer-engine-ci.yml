@@ -103,7 +103,24 @@ jobs:
           mkdir -p /opt/cmake
           bash /opt/cmake-*.sh --skip-license --prefix=/opt/cmake
           ln -sf /opt/cmake/bin/* /usr/local/bin/
+
           cmake --version
+          
+          echo "--- 🕵️ Running diagnostics ---"
+          
+          echo "--- 1. Locating cmath file ---"
+          find /usr/include -name cmath
+          
+          echo "--- 2. Standard g++ include paths (baseline) ---"
+          g++ -E -x c++ - -v < /dev/null 2>&1 | sed -n '/#include <...>/,/End of search list/p'
+          
+          echo "--- 3. hipcc/clang++ include paths (the important one!) ---"
+          /opt/rocm/bin/hipcc -E -x c++ - -v < /dev/null 2>&1 | sed -n '/#include <...>/,/End of search list/p'
+          
+          echo "--- 4. Printing all environment variables ---"
+          env | sort
+          
+          echo "--- 🚀 Starting build ---"
 
           ROCM_PATH="/opt/rocm" \
           PATH="/opt/rocm/bin:${PATH}" \
