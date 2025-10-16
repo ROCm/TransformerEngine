@@ -460,7 +460,6 @@ class FP8GlobalStateManager:
         calibrating: bool = False,
         fp8_recipe: Optional[Recipe] = None,
         fp8_group: Optional[dist_group_type] = None,
-        use_fsdp2: Optional[bool] = False,
         _graph: bool = False,
     ) -> None:
         """Set state and tracking variables for entry into FP8 region."""
@@ -473,7 +472,6 @@ class FP8GlobalStateManager:
         cls.FP8_CALIBRATION = calibrating
         cls.FP8_RECIPE = fp8_recipe
         cls.FP8_DISTRIBUTED_GROUP = fp8_group
-        cls.SKIP_FP8_REDUCTION_FOR_FSDP2 = use_fsdp2
         cls.FP8_GRAPH_CAPTURING = _graph
 
         if cls.FP8_AUTOCAST_DEPTH == 0:
@@ -629,7 +627,6 @@ def fp8_autocast(
     calibrating: bool = False,
     fp8_recipe: Optional[Recipe] = None,
     fp8_group: Optional[dist_group_type] = None,
-    use_fsdp2: Optional[bool] = False,
     _graph: bool = False,
 ) -> None:
     """
@@ -675,7 +672,6 @@ def fp8_autocast(
         calibrating=calibrating,
         fp8_recipe=fp8_recipe,
         fp8_group=fp8_group,
-        use_fsdp2=use_fsdp2,
         _graph=_graph,
     )
     try:
