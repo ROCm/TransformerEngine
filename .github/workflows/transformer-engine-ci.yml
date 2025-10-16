@@ -1,6 +1,5 @@
 name: TransformerEngine CI
 
-# This workflow runs on pushes and PRs to specific branches
 on:
   push:
     branches:
@@ -13,18 +12,16 @@ on:
       - 'dev'
       - 'release_v1.**_rocm'
       - 'release_v2.**_rocm'
-  # The config below allows running this workflow manually from the Actions tab
   workflow_dispatch:
     inputs:
       test_level:
         description: 'Test Level (1-3)'
         required: true
         default: '1'
-      node_label:
-        description: 'Runner label for tests'
-        required: true
-        default: 'te-gfx942-4gpu'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   setup:
@@ -39,19 +36,15 @@ jobs:
       - name: 🖼️ Select Docker Image
         id: select-image
         run: |
-          # Use the target branch for PRs, otherwise use the branch name
           BRANCH_NAME="${{ github.base_ref || github.ref_name }}"
           echo "Determining image for branch: $BRANCH_NAME"
-
           DEV_DOCKER_IMAGE="compute-artifactory.amd.com:5000/rocm-plus-docker/framework/private/te-ci:rocm-6.4_0_ubuntu22_py310_torch25_jax0435qa_fa273"
           REL613_DOCKER_IMAGE="compute-artifactory.amd.com:5000/rocm-plus-docker/framework/private/te-ci:rocm-6.4_0_ubuntu22_py310_torch25_jax0435qa_fa273"
           LEGACY_DOCKER_IMAGE="compute-artifactory.amd.com:5000/rocm-plus-docker/framework/private/te-ci:rocm-6.3_66_ubuntu22_py310_torch25_jax0431_fa263_hipblaslt10patch.2"
-
-          IMAGE_TO_USE="$DEV_DOCKER_IMAGE" # Default
+          IMAGE_TO_USE="$DEV_DOCKER_IMAGE"
           if [[ $BRANCH_NAME =~ ^release_v([0-9]+)\.([0-9]+)_rocm$ ]]; then
             MAJOR_VERSION=${BASH_REMATCH[1]}
             MINOR_VERSION=${BASH_REMATCH[2]}
-
             if (( MAJOR_VERSION == 1 )); then
               if (( MINOR_VERSION >= 9 && MINOR_VERSION <= 12 )); then
                 IMAGE_TO_USE="$LEGACY_DOCKER_IMAGE"
@@ -60,23 +53,19 @@ jobs:
               fi
             fi
           fi
-
           echo "Selected image: $IMAGE_TO_USE"
           echo "image-tag=$IMAGE_TO_USE" >> $GITHUB_OUTPUT
-  build:
-    name: Build TransformerEngine
-    # This is a build job, doesn't need GPUs
-    runs-on: [build-only]
-    container:
-      image: ${{ needs.setup.outputs.docker-image }}
-      options: --shm-size=16g --user root
 
+  build:
+    name: Build TransformerEngine Wheel
+    needs: setup
+    runs-on: [te-gfx942-4gpu] # Use a runner with Docker & registry access
     steps:
       - name: 📜 Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: 'recursive'
-          fetch-depth: 0 # Needed to get all branches for version detection
+          fetch-depth: 0
 
       - name: 🔐 Log in to Docker registry
         uses: docker/login-action@v3
@@ -84,153 +73,148 @@ jobs:
           username: ${{ secrets.ARTIFACTORY_USER }}
           password: ${{ secrets.ARTIFACTORY_PAT }}
 
+      - name: 🚀 Run Build Container
+        run: |
+          docker run -dt \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            --name te-builder \
+            ${{ needs.setup.outputs.docker-image }}
+
       - name: 📦 Build wheel inside container
         run: |
-          sudo bash <<'EOF'
+          docker exec te-builder bash -c "$(cat <<'EOF'
           set -ex
 
-          # Ensure core build tools are present
           apt-get update
           apt-get install -y build-essential
 
-          # Upgrade pip and add its location to the PATH
           pip install --upgrade pip ninja
-          
-          # Install custom CMake version
+
           CMAKE_LINK="https://github.com/Kitware/CMake/releases/download/v3.31.2/cmake-3.31.2-linux-x86_64.sh"
-          wget -P /opt ${CMAKE_LINK}
+          wget -q -P /opt ${CMAKE_LINK}
           chmod +x /opt/cmake-*.sh
           mkdir -p /opt/cmake
           bash /opt/cmake-*.sh --skip-license --prefix=/opt/cmake
-          # Overwrite the system default path to ensure the correct CMake is used
-          ln -s /opt/cmake/bin/* /usr/bin/ || true
-
+          ln -sf /opt/cmake/bin/* /usr/bin/ || true
           cmake --version
 
-          # Export all variables so they are inherited by subprocesses
           export HIP_PATH=""
           export PATH=/opt/cmake/bin:$PATH
           export PYTORCH_ROCM_ARCH=gfx942
           export NVTE_ROCM_ARCH=gfx942
           
-          # Run the build
-          pip install -v .
-
+          # Build wheel and place it in the /workspace/dist directory
+          pip wheel . -v -w /workspace/dist
           EOF
-          
+          )"
+      
       - name: ⬆️ Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
           name: transformer-engine-wheel
-          path: ./*.whl
+          path: dist/*.whl
           if-no-files-found: error
+
+      - name: 🧹 Cleanup container
+        if: always()
+        run: docker rm -f te-builder || true
+
   test:
-      name: Test - ${{ matrix.framework }} (${{ matrix.gpu_mode }})
-      needs: [setup, build]
-      runs-on: [te-gfx942-4gpu]
-      continue-on-error: true
+    name: Test - ${{ matrix.framework }} (${{ matrix.gpu_mode }})
+    needs: [setup, build]
+    runs-on: [te-gfx942-4gpu]
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: ['PyTorch', 'JAX']
+        gpu_mode: ['Single-GPU', 'Multi-GPU']
+        include:
+          - framework: 'Core'
+            gpu_mode: 'Single-GPU'
+          - framework: 'Examples'
+            gpu_mode: 'Single-GPU'
 
-      strategy:
-        fail-fast: false
-        matrix:
-          # Define main test combinations
-          framework: ['PyTorch', 'JAX']
-          gpu_mode: ['Single-GPU', 'Multi-GPU']
-          # Add special, non-standard combinations
-          include:
-            - framework: 'Core'
-              gpu_mode: 'Single-GPU'
-            - framework: 'Examples'
-              gpu_mode: 'Single-GPU' # Runs on a single GPU
+    steps:
+      - name: 📜 Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
 
-      # Dynamically generate job name, log name, and the test script from the matrix
-      env:
-        TEST_NAME: ${{ matrix.framework }} (${{ matrix.gpu_mode }})
-        LOG_NAME: ${{ matrix.framework }}_${{ matrix.gpu_mode == 'Single-GPU' && 'sgpu' || 'mgpu' }}
-        TEST_LEVEL: ${{ github.event.inputs.test_level || (github.ref_name == 'dev' && '3' || '1') }}
-        TEST_SGPU: ${{ contains(matrix.gpu_mode, 'Single-GPU') }}
-        TEST_MGPU: ${{ contains(matrix.gpu_mode, 'Multi-GPU') }}
+      - name: 🔐 Log in to Docker registry
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.ARTIFACTORY_USER }}
+          password: ${{ secrets.ARTIFACTORY_PAT }}
 
-      container:
-        image: ${{ needs.setup.outputs.docker-image }}
-        options: --device=/dev/kfd --device=/dev/dri --group-add=video --shm-size=16g --pid=host --user root
-        
-      steps:
-        - name: 📜 Checkout repository
-          uses: actions/checkout@v4
-          with:
-            submodules: 'recursive'
-            
-        - name: ⬇️ Download wheel artifact
-          uses: actions/download-artifact@v4
-          with:
-            name: transformer-engine-wheel
+      - name: ⬇️ Download wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: transformer-engine-wheel
+          path: wheel
 
-        - name: 🐍 Install dependencies and wheel
-          run: |
-            pip install --upgrade pip
-            pip install ./*.whl
+      - name: 🚀 Run Test Container
+        run: |
+          docker run -dt \
+            --device=/dev/dri \
+            --device=/dev/kfd \
+            --shm-size=16G \
+            --group-add $(getent group render | cut -d: -f3) \
+            --group-add $(getent group video | cut -d: -f3) \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            --name te-tester \
+            ${{ needs.setup.outputs.docker-image }}
 
-        - name: 🧪 Run tests
-          run: |
-            set -ex
-            
-            # Enhanced debug output
-            ls -d /opt/rocm*
-            python --version
-            pip list | egrep "transformer_e|torch|jax|numpy|ml_dtypes|typing_ext"
+      - name: 🐍 Install dependencies and wheel
+        run: |
+          docker exec te-tester bash -c "pip install --upgrade pip && pip install /workspace/wheel/*.whl"
 
-            # Dynamically select and run the correct test script
-            if [ "${{ matrix.framework }}" = "PyTorch" ]; then
-              if [ "${{ matrix.gpu_mode }}" = "Single-GPU" ]; then
-                HIP_VISIBLE_DEVICES=1 ci/pytorch.sh
-              else
-                ci/pytorch.sh
-              fi
-            elif [ "${{ matrix.framework }}" = "JAX" ]; then
-              if [ "${{ matrix.gpu_mode }}" = "Single-GPU" ]; then
-                HIP_VISIBLE_DEVICES=2 ci/jax.sh
-              else
-                ci/jax.sh
-              fi
-            elif [ "${{ matrix.framework }}" = "Core" ]; then
-              HIP_VISIBLE_DEVICES=3 ci/core.sh
-            elif [ "${{ matrix.framework }}" = "Examples" ]; then
-              # Fully expanded examples test suite
-              pip3 install -r examples/jax/mnist/requirements.txt
-              pip3 install -r examples/jax/encoder/requirements.txt
+      - name: 🧪 Run tests
+        run: |
+          docker exec \
+            -e FRAMEWORK=${{ matrix.framework }} \
+            -e GPU_MODE=${{ matrix.gpu_mode }} \
+            te-tester bash -c '
+              set -ex
               
-              # PyTorch MNIST
-              python examples/pytorch/mnist/main.py
-              python examples/pytorch/mnist/main.py --use-te
-              python examples/pytorch/mnist/main.py --use-fp8
+              echo "--- 🕵️ Running tests for $FRAMEWORK ($GPU_MODE) ---"
+              ls -d /opt/rocm*
+              python --version
+              pip list | egrep "transformer_e|torch|jax|numpy|ml_dtypes|typing_ext"
 
-              # JAX MNIST
-              python examples/jax/mnist/test_single_gpu_mnist.py
-              python examples/jax/mnist/test_single_gpu_mnist.py --use-te
-              python examples/jax/mnist/test_single_gpu_mnist.py --use-fp8
-              
-              # JAX Encoder
-              python examples/jax/encoder/test_single_gpu_encoder.py
-              python examples/jax/encoder/test_single_gpu_encoder.py --use-fp8
-            fi
-        - name: Normalize LOG_NAME
-          run: |
-            echo "LOG_NAME=$(echo '${{ env.LOG_NAME }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
-        - name: ⬆️ Upload logs on failure
-          if: failure()
-          uses: actions/upload-artifact@v4
-          with:
-            name: ${{ env.LOG_NAME }}-logs
-            path: |
-              *.log
+              if [ "$FRAMEWORK" = "PyTorch" ]; then
+                if [ "$GPU_MODE" = "Single-GPU" ]; then HIP_VISIBLE_DEVICES=1 ci/pytorch.sh; else ci/pytorch.sh; fi
+              elif [ "$FRAMEWORK" = "JAX" ]; then
+                if [ "$GPU_MODE" = "Single-GPU" ]; then HIP_VISIBLE_DEVICES=2 ci/jax.sh; else ci/jax.sh; fi
+              elif [ "$FRAMEWORK" = "Core" ]; then
+                HIP_VISIBLE_DEVICES=3 ci/core.sh
+              elif [ "$FRAMEWORK" = "Examples" ]; then
+                pip3 install -r examples/jax/mnist/requirements.txt
+                pip3 install -r examples/jax/encoder/requirements.txt
+                python examples/pytorch/mnist/main.py && python examples/pytorch/mnist/main.py --use-te && python examples/pytorch/mnist/main.py --use-fp8
+                python examples/jax/mnist/test_single_gpu_mnist.py && python examples/jax/mnist/test_single_gpu_mnist.py --use-te && python examples/jax/mnist/test_single_gpu_mnist.py --use-fp8
+                python examples/jax/encoder/test_single_gpu_encoder.py && python examples/jax/encoder/test_single_gpu_encoder.py --use-fp8
+              fi
+            '
+      - name: ⬆️ Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.framework }}-${{ matrix.gpu_mode }}-logs
+          path: "*.log"
+          if-no-files-found: ignore
+
+      - name: 🧹 Cleanup container
+        if: always()
+        run: docker rm -f te-tester || true
 
   report-status:
     name: Report Final Status
     needs: test
     runs-on: ubuntu-latest
     if: always()
-
     steps:
       - name: Check test results
         if: ${{ needs.test.result != 'success' }}
