@@ -536,7 +536,7 @@ void remove_padding_softmax_lse(
 // actual fwd implementation, calling ck api directly
 void fused_attn_ck_fwd_impl(
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v, uint64_t bias_b, uint64_t bias_h,
-  bool pad_between_seqs, size_t max_tokens_q, size_t max_tokens_kv,
+  size_t max_tokens_q, size_t max_tokens_kv,
   bool is_training, float scaling_factor, float dropout_probability,
   NVTE_QKV_Layout layout,
   NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
@@ -556,10 +556,18 @@ void fused_attn_ck_fwd_impl(
     if (env_p != nullptr && std::string(env_p) == "1")
       nvte_log_ck_config = true;
   }
+
   bool nvte_ck_uses_fwd_v3 = getenv<int>("NVTE_CK_USES_FWD_V3", 0);
+  int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
 
   bool is_ragged = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_THD;
 
+  bool is_batch = (nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_BSHD || 
+                   nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_SBHD);
+  bool is_padding = (mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
+                     mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
+                     mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
+ 
   // extract the qkv and o storage bytes to allocate buffer for padding removing
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
   size_t q_storage_bytes = max_tokens_q*h*d_qk*nvte_dtype_size(dtype); 
@@ -573,7 +581,7 @@ void fused_attn_ck_fwd_impl(
     if(bias_type == NVTE_Bias_Type::NVTE_ALIBI){
       (*workspace_size)+= h*sizeof(float);
     }
-    if(pad_between_seqs){
+    if(is_batch && is_padding){
       // softmax_lse buffer
       (*workspace_size)+= max_tokens_q*h*sizeof(float);
       // request q, k, v, o buffer without padding
@@ -621,7 +629,7 @@ void fused_attn_ck_fwd_impl(
   void* devPtrKWithoutPadding = nullptr;
   void* devPtrVWithoutPadding = nullptr;
   void* devPtrOWithoutPadding = nullptr;
-  if(pad_between_seqs){
+  if(is_batch && is_padding){
     // next h*max_tokens_q*sizeof(float) in workspace are for lse buffer
     devPtrSoftmaxLSEWithoutPadding = workspace_next;
     workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + h*max_tokens_q*sizeof(float));
@@ -673,7 +681,8 @@ void fused_attn_ck_fwd_impl(
     std::cout<<"v_stride: ("<<v_stride[0]<<", "<<v_stride[1]<<", "<<v_stride[2]<<", "<<v_stride[3]<<"), ";
     std::cout<<"o_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d_v<<"), ";
     std::cout<<"o_stride: ("<<o_stride[0]<<", "<<o_stride[1]<<", "<<o_stride[2]<<", "<<o_stride[3]<<"), ";
-    std::cout<<"pad_between_seqs: "<<pad_between_seqs<<", ";
+    std::cout<<"is_batch: "<<is_batch<<", ";
+    std::cout<<"is_padding: "<<is_padding<<", ";
     std::cout<<"scaling_factor: "<<scaling_factor<<", ";
     if(is_ragged){
       std::cout<<"M_shape: ("<<h<<", "<<max_tokens_q<<"), ";
@@ -691,11 +700,11 @@ void fused_attn_ck_fwd_impl(
     std::cout<<"window_size: ("<<window_size_left<<", "<<window_size_right<<")"<<", ";
     std::cout<<"nvte_ck_uses_fwd_v3: "<<nvte_ck_uses_fwd_v3<<std::endl;
   }
-  if(pad_between_seqs){
+  if(is_batch && is_padding){
     // remove padding for q, k, v
-    remove_padding(dtype, b, h, s_q, d_qk, max_tokens_q, is_ragged, q_stride[0], q_stride[1], q_stride[2], devPtrQ, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrQWithoutPadding, stream);
-    remove_padding(dtype, b, hg, s_kv, d_qk, max_tokens_kv, is_ragged, k_stride[0], k_stride[1], k_stride[2], devPtrK, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrKWithoutPadding, stream);
-    remove_padding(dtype, b, hg, s_kv, d_v, max_tokens_kv, is_ragged, v_stride[0], v_stride[1], v_stride[2], devPtrV, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrVWithoutPadding, stream);
+    remove_padding(dtype, b, h, s_q, d_qk, max_tokens_q, false, q_stride[0], q_stride[1], q_stride[2], devPtrQ, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrQWithoutPadding, stream);
+    remove_padding(dtype, b, hg, s_kv, d_qk, max_tokens_kv, false, k_stride[0], k_stride[1], k_stride[2], devPtrK, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrKWithoutPadding, stream);
+    remove_padding(dtype, b, hg, s_kv, d_v, max_tokens_kv, false, v_stride[0], v_stride[1], v_stride[2], devPtrV, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrVWithoutPadding, stream);
     // call varlen api using without_padding ptrs
     // for BSHD/SBHD, after padding removal, THD require stride_s update
     using ck_fused_attn::ck_attn_varlen_fwd;
@@ -705,12 +714,13 @@ void fused_attn_ck_fwd_impl(
         b, h, hg, s_q, s_kv, d_qk, d_v,
         max_tokens_q,
         devPtrQWithoutPadding,
-        q_stride[1], (is_ragged? q_stride[2] : std::min(q_stride[0], q_stride[2])),
+        q_stride[1], std::min(q_stride[0], q_stride[2]),
         devPtrKWithoutPadding,
-        k_stride[1], (is_ragged? k_stride[2] : std::min(k_stride[0], k_stride[2])),
+        k_stride[1], std::min(k_stride[0], k_stride[2]),
         devPtrVWithoutPadding,
-        v_stride[1], (is_ragged? v_stride[2] : std::min(v_stride[0], v_stride[2])),
+        v_stride[1], std::min(v_stride[0], v_stride[2]),
         devPtrCuSeqlensQ, devPtrCuSeqlensKV, 
+        nullptr, nullptr, //cu_seqlen_q_padded_ptr, cu_seqlen_kv_padded_ptr
         is_training, scaling_factor, dropout_probability,
         devPtrDropoutSeed, devPtrDropoutOffset,
         set_ck_mask(mask_type, window_size_left, window_size_right),
@@ -719,12 +729,38 @@ void fused_attn_ck_fwd_impl(
         o_stride[1], (is_ragged? o_stride[2] : std::min(o_stride[0], o_stride[2])),
         devPtrSoftmaxLSEWithoutPadding,
         nvte_ck_uses_fwd_v3,
+        nvte_ck_how_v3_bf16_cvt,
+        false,
         stream));
     // add padding for o and softmax_lse
-    add_padding(dtype, b, h, s_q, d_v, max_tokens_q, is_ragged, o_stride[0], o_stride[1], o_stride[2], devPtrOWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrO, stream);
-    add_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
+    add_padding(dtype, b, h, s_q, d_v, max_tokens_q, false, o_stride[0], o_stride[1], o_stride[2], devPtrOWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrO, stream);
+    add_padding_softmax_lse(b, h, s_q, max_tokens_q, false, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
   }else if(is_ragged){
     using ck_fused_attn::ck_attn_varlen_fwd;
+    // TODO: remove the v3 api check after ck align softmax_lse with aiter asm
+    bool is_v3_supported = ck_attn_varlen_fwd(
+         nvte_to_ck_dtype(dtype),
+         b, h, hg, s_q, s_kv, d_qk, d_v,
+         max_tokens_q,
+         devPtrQ, 
+         q_stride[1], q_stride[2],
+         devPtrK, 
+         k_stride[1], k_stride[2],
+         devPtrV, 
+         v_stride[1], v_stride[2],
+         devPtrCuSeqlensQ, devPtrCuSeqlensKV, 
+         devPtrSeqOffsetsQ, devPtrSeqOffsetsKV, 
+         is_training, scaling_factor, dropout_probability,
+         devPtrDropoutSeed, devPtrDropoutOffset,
+         set_ck_mask(mask_type, window_size_left, window_size_right),
+         window_size_left, window_size_right,
+         devPtrO,
+         o_stride[1], o_stride[2],
+         devPtrSoftmaxLSEWithoutPadding,
+         nvte_ck_uses_fwd_v3,
+         nvte_ck_how_v3_bf16_cvt,
+         true, // check whether v3 is supported
+         stream)==1;
     NVTE_CHECK_CUDA(
       ck_attn_varlen_fwd(
         nvte_to_ck_dtype(dtype),
@@ -737,6 +773,7 @@ void fused_attn_ck_fwd_impl(
         devPtrV, 
         v_stride[1], v_stride[2],
         devPtrCuSeqlensQ, devPtrCuSeqlensKV, 
+        devPtrSeqOffsetsQ, devPtrSeqOffsetsKV, 
         is_training, scaling_factor, dropout_probability,
         devPtrDropoutSeed, devPtrDropoutOffset,
         set_ck_mask(mask_type, window_size_left, window_size_right),
@@ -744,9 +781,17 @@ void fused_attn_ck_fwd_impl(
         devPtrO,
         o_stride[1], o_stride[2],
         devPtrSoftmaxLSEWithoutPadding,
-        nvte_ck_uses_fwd_v3,
+        nvte_ck_uses_fwd_v3 && is_v3_supported,
+        nvte_ck_how_v3_bf16_cvt,
+        false,
         stream));
-    add_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrCuSeqlensQ, devPtrSoftmaxAux, stream);
+    if(is_v3_supported){
+      // aiter asm output softmax_lse with padding
+      add_padding_softmax_lse(b, h, s_q, max_tokens_q, true, devPtrSoftmaxLSEWithoutPadding, devPtrSeqOffsetsQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
+    }else{
+      // ck v2 output softmax_lse without padding
+      add_padding_softmax_lse(b, h, s_q, max_tokens_q, true, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
+    }
   }else{
     using ck_fused_attn::ck_attn_fwd;
     NVTE_CHECK_CUDA(
@@ -770,6 +815,7 @@ void fused_attn_ck_fwd_impl(
         o_stride[0], o_stride[1], o_stride[2],
         devPtrSoftmaxAux,
         nvte_ck_uses_fwd_v3,
+        nvte_ck_how_v3_bf16_cvt,
         stream));
   }
 }
@@ -1323,7 +1369,7 @@ void fused_attn_ck_fwd_qkvpacked(
   bool pad_between_seqs = get_pad_between_seqs(input_cu_seqlens, input_cu_seqlens_padded, is_ragged, is_padding);
   fused_attn_ck_fwd_impl(
     b, h, h, max_seqlen, max_seqlen, d, d, bias_b, bias_h,
-    pad_between_seqs, max_tokens, max_tokens,
+    max_tokens, max_tokens,
     is_training, attn_scale, dropout, 
     qkv_layout,
     bias_type, attn_mask_type,
@@ -1579,7 +1625,7 @@ void fused_attn_ck_fwd_kvpacked(
   
   fused_attn_ck_fwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, d, bias_b, bias_h,
-    pad_between_seqs, max_tokens_q, max_tokens_kv, 
+    max_tokens_q, max_tokens_kv, 
     is_training, attn_scale, dropout, 
     qkv_layout,
     bias_type, attn_mask_type,
@@ -1821,7 +1867,7 @@ void fused_attn_ck_fwd(
   
   fused_attn_ck_fwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, bias_b, bias_h,
-    pad_between_seqs, max_tokens_q, max_tokens_kv,
+    max_tokens_q, max_tokens_kv,
     is_training, attn_scale, dropout, 
     qkv_layout,
     bias_type, attn_mask_type,

@@ -59,6 +59,7 @@ hipError_t ck_attn_fwd(
   uint64_t stride_b_o, uint64_t stride_h_o, uint64_t stride_s_o,
   void* lse_ptr,
   bool uses_fwd_v3,
+  int how_v3_bf16_cvt,
   hipStream_t stream);
 
 hipError_t ck_attn_varlen_fwd(
@@ -72,6 +73,7 @@ hipError_t ck_attn_varlen_fwd(
   const void* v_ptr, 
   uint64_t stride_h_v, uint64_t stride_s_v,
   const void* cu_seqlen_q_ptr, const void* cu_seqlen_kv_ptr,
+  const void* cu_seqlen_q_padded_ptr, const void* cu_seqlen_kv_padded_ptr,
   bool is_training,
   float scaling_factor,
   float dropout_probability,
@@ -82,6 +84,8 @@ hipError_t ck_attn_varlen_fwd(
   uint64_t stride_h_o, uint64_t stride_s_o,
   void* lse_thd_ptr,
   bool uses_fwd_v3,
+  int how_v3_bf16_cvt,
+  bool is_v3_api_check,
   hipStream_t stream);
 
 hipError_t ck_attn_bwd(  
