@@ -103,7 +103,7 @@ jobs:
           mkdir -p /opt/cmake
           bash /opt/cmake-*.sh --skip-license --prefix=/opt/cmake
           # Overwrite the system default path to ensure the correct CMake is used
-          ln -sf /opt/cmake/bin/* /usr/bin/
+          ln -s /opt/cmake/bin/* /usr/bin/
 
           cmake --version
 
