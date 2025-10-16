@@ -59,7 +59,7 @@ jobs:
   build:
     name: Build TransformerEngine Wheel
     needs: setup
-    runs-on: [te-gfx942-4gpu] # Use a runner with Docker & registry access
+    runs-on: build-only
     steps:
       - name: 📜 Checkout repository
         uses: actions/checkout@v4
@@ -179,7 +179,6 @@ jobs:
             te-tester bash -c '
               set -ex
               
-              echo "--- 🕵️ Running tests for $FRAMEWORK ($GPU_MODE) ---"
               ls -d /opt/rocm*
               python --version
               pip list | egrep "transformer_e|torch|jax|numpy|ml_dtypes|typing_ext"
