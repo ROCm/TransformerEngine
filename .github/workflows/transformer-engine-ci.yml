@@ -102,7 +102,8 @@ jobs:
           chmod +x /opt/cmake-*.sh
           mkdir -p /opt/cmake
           bash /opt/cmake-*.sh --skip-license --prefix=/opt/cmake
-          ln -sf /opt/cmake/bin/* /usr/local/bin/
+          # Overwrite the system default path to ensure the correct CMake is used
+          ln -sf /opt/cmake/bin/* /usr/bin/
 
           cmake --version
 
