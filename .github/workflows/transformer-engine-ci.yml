@@ -109,8 +109,10 @@ jobs:
           ROCM_PATH="/opt/rocm" \
           PATH="/opt/rocm/bin:${PATH}" \
           LD_LIBRARY_PATH="/opt/rocm/lib" \
-          HIP_PATH="" \
           CPLUS_INCLUDE_PATH="/usr/include/c++/11" \
+          HIP_PATH="" \
+          CXX="/opt/rocm/bin/hipcc" \
+          CC="/opt/rocm/bin/hipcc" \
           PYTORCH_ROCM_ARCH="gfx942" \
           NVTE_ROCM_ARCH="gfx942" \
           AMDGPU_TARGETS="gfx942" \
