@@ -66,7 +66,7 @@ jobs:
   build:
     name: Build TransformerEngine
     # This is a build job, doesn't need GPUs
-    runs-on: [te-gfx942-4gpu]
+    runs-on: [build-only]
     container:
       image: ${{ needs.setup.outputs.docker-image }}
       options: --shm-size=16g --user root
