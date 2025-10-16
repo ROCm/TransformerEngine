@@ -826,6 +826,69 @@ void reduce_dbias(const float *workspace_ptr, Tensor *dbias, const size_t rows, 
           reinterpret_cast<IType *>(dbias->data.dptr), workspace_ptr, rows, cols);
 }
 
+#ifdef __HIP_PLATFORM_AMD__
+constexpr size_t TILE_DIM = 32;
+template <typename OType>
+__global__ void partial_reduce_kernel(const float* input, float* partial_output, int rows, int cols) {
+  __shared__ float tile[TILE_DIM][TILE_DIM];
+
+  int tile_start_col = blockIdx.x * TILE_DIM;
+  int tile_start_row = blockIdx.y * TILE_DIM;
+  int thread_col_in_tile = threadIdx.x;
+  int thread_row_in_tile = threadIdx.y;
+
+  int global_col = tile_start_col + thread_col_in_tile;
+  int global_row = tile_start_row + thread_row_in_tile;
+
+  if (global_row < rows && global_col < cols) {
+    tile[thread_row_in_tile][thread_col_in_tile] = input[global_row * cols + global_col];
+  } else {
+    tile[thread_row_in_tile][thread_col_in_tile] = 0.0f;
+  }
+  __syncthreads();
+
+  for (int stride = TILE_DIM / 2; stride > 0; stride /= 2) {
+    if (thread_row_in_tile < stride) {
+      tile[thread_row_in_tile][thread_col_in_tile] += tile[thread_row_in_tile + stride][thread_col_in_tile];
+    }
+    __syncthreads();
+  }
+
+  if (thread_row_in_tile == 0 && global_col < cols) {
+    partial_output[blockIdx.y * cols + global_col] = tile[0][thread_col_in_tile];
+  }
+}
+
+template <typename IType>
+void reduce_dbias_rocm(const float *workspace_ptr, Tensor *dbias, const size_t rows, const size_t cols,
+                  cudaStream_t stream) {
+    dim3 block_dim_partial(TILE_DIM, TILE_DIM);
+    dim3 grid_dim_partial(DIVUP(cols, TILE_DIM), DIVUP(rows, TILE_DIM));
+
+    const size_t partial_rows = grid_dim_partial.y;
+    float* partial_workspace;
+    cudaMalloc(&partial_workspace, partial_rows * cols * sizeof(float));
+
+    partial_reduce_kernel<IType><<<grid_dim_partial, block_dim_partial, 0, stream>>>(
+        workspace_ptr,
+        partial_workspace,
+        rows, cols);
+
+    constexpr int reduce_dbias_store_bytes = 8;
+    constexpr int nvec = reduce_dbias_store_bytes / sizeof(IType);
+    const size_t reduce_dbias_num_blocks = DIVUP(cols, DBIAS_THREADS_PER_BLOCK * nvec);
+
+    reduce_dbias_kernel<nvec, IType><<<reduce_dbias_num_blocks, DBIAS_THREADS_PER_BLOCK, 0, stream>>>(
+        reinterpret_cast<IType *>(dbias->data.dptr),
+        partial_workspace,
+        partial_rows,
+        cols);
+
+    cudaFree(partial_workspace);
+}
+#endif // #ifdef __HIP_PLATFORM_AMD__
+
+
 #ifndef __HIP_PLATFORM_AMD__
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
 static void cast_fp8_1D(const Tensor &input, Tensor *output, cudaStream_t stream) {
@@ -1226,6 +1289,62 @@ void fp8_quantize_arch_l_100(const Tensor &input, const Tensor *act_input, const
       NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
   }
 }
+#else
+template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
+          float (*OP)(float, const ParamOP &)>
+void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tensor *noop,
+                             Tensor *output, Tensor *dbias, Tensor *workspace,
+                             cudaStream_t stream) {
+
+  const size_t rows = input.flat_first_dim();
+  const size_t cols = input.flat_last_dim();
+
+  if (output && output->data.dptr) {
+    if constexpr (IS_DACT) {
+      NVTE_CHECK(act_input, "Gradient tensor must be provided for DACT output.");
+      CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
+    } else {
+      CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
+    }
+  }
+
+  if constexpr (!IS_DBIAS) {
+    return;
+  }
+
+  NVTE_CHECK(dbias, "DBias tensor must be provided when IS_DBIAS is true.");
+  NVTE_CHECK(workspace, "Workspace must be provided when IS_DBIAS is true.");
+
+  if (workspace->data.dptr == nullptr ||
+      workspace->data.dtype != DType::kFloat32 ||
+      workspace->data.shape != std::vector<size_t>{rows, cols}) {
+    workspace->data.shape = {rows, cols};
+    workspace->data.dtype = DType::kFloat32;
+    return;
+  }
+
+  workspace->amax = {};
+  workspace->scale = {};
+  workspace->scale_inv = {};
+
+  if constexpr (IS_DACT) {
+    // The values to reduce are the result of the dAct function.
+    NVTE_CHECK(act_input, "Gradient tensor must be provided for DBias + DACT.");
+    CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, workspace, stream);
+  } else {
+    // The values to reduce are just the input values (identity function).
+    CastVectorizedUnaryKernelLauncher<detail::Empty, nullptr>(input, noop, workspace, stream);
+  }
+
+  NVTE_CHECK(dbias->data.shape == std::vector<size_t>{cols}, "Wrong shape of DBias tensor.");
+  NVTE_CHECK(dbias->data.dtype == input.data.dtype, "DBias must have the same type as input.");
+
+  const float *workspace_ptr = reinterpret_cast<const float *>(workspace->data.dptr);
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+      dbias->data.dtype, ITypeOut,
+      reduce_dbias_rocm<ITypeOut>(workspace_ptr, dbias, rows, cols, stream);
+  );
+}
 
 #endif //#ifndef __HIP_PLATFORM_AMD__
 
@@ -1264,80 +1383,8 @@ void fp8_quantize(const Tensor &input, const Tensor *act_input, const Tensor *no
 #else
      // AMD
     fp8_quantize_rocm<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
-                                                                    dbias, workspace, stream);
+                                                              dbias, workspace, stream);
 #endif //#ifndef __HIP_PLATFORM_AMD__
-}
-
-template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
-          float (*OP)(float, const ParamOP &)>
-void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tensor *noop,
-                      Tensor *output, Tensor *dbias, Tensor *workspace,
-                      cudaStream_t stream) {
-  switch (output->scaling_mode) {
-    case NVTE_DELAYED_TENSOR_SCALING: {
-      if constexpr (IS_DBIAS) {
-        // This path handles all dbias fusions for non-TMA architectures.
-        NVTE_CHECK(dbias->data.dtype == input.data.dtype, "DBias must have the same type as input.");
-        NVTE_CHECK(dbias->data.shape == std::vector<size_t>{input.flat_last_dim()},
-                   "Wrong shape of DBias.");
-        NVTE_CHECK(workspace != nullptr, "Workspace must be a tensor.");
-
-        // Workspace sizing logic (same for both dbias variants).
-        if (workspace->data.dptr == nullptr) {
-          workspace->data.shape = input.data.shape;
-          workspace->data.dtype = DType::kFloat32;
-          return;
-        }
-
-        const size_t N = product(input.data.shape);
-        const size_t rows = input.flat_first_dim();
-        const size_t cols = input.flat_last_dim();
-
-        TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
-            input.dtype(), IType,
-            TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-                output->dtype(), OType,
-                constexpr auto UnaryOP = ActivationType<float, ParamOP, OP>::op;
-                constexpr int nvec = 16 / sizeof(IType);
-
-                if constexpr (IS_DACT) {
-                  // Case: dact + dbias fusion
-                  VectorizedCastDBiasDActKernelLauncher<nvec, ParamOP, UnaryOP>(
-                      reinterpret_cast<const IType *>(input.data.dptr),
-                      reinterpret_cast<const IType *>(act_input->data.dptr),
-                      reinterpret_cast<OType *>(output->data.dptr),
-                      reinterpret_cast<fp32 *>(workspace->data.dptr),
-                      reinterpret_cast<const fp32 *>(output->scale.dptr),
-                      reinterpret_cast<fp32 *>(output->amax.dptr),
-                      reinterpret_cast<fp32 *>(output->scale_inv.dptr), N, {}, stream);
-                } else {
-                  // Case: Simple dbias fusion
-                  VectorizedCastDBiasKernelLauncher<nvec, ParamOP, detail::identity>(
-                      reinterpret_cast<const IType *>(input.data.dptr),
-                      reinterpret_cast<OType *>(output->data.dptr),
-                      reinterpret_cast<fp32 *>(workspace->data.dptr),
-                      reinterpret_cast<const fp32 *>(output->scale.dptr),
-                      reinterpret_cast<fp32 *>(output->amax.dptr),
-                      reinterpret_cast<fp32 *>(output->scale_inv.dptr), N, {}, stream);
-                }
-
-                // The reduction step is the same for both cases.
-                reduce_dbias<IType>(reinterpret_cast<float *>(workspace->data.dptr), dbias, rows,
-                                    cols, stream);
-            ));
-
-      } else {  // Original logic for non-dbias cases
-        if (!IS_DACT) {
-          CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
-        } else {
-          CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
-        }
-      }
-      break;
-    }
-    default:
-      NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
-  }
 }
 
 namespace detail {
