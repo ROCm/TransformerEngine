@@ -575,7 +575,7 @@ void fused_attn_ck_fwd_impl(
 
   bool is_ragged = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_THD;
   bool is_SBHD = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_SBHD;
-  bool is_BSHD = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_BSHD
+  bool is_BSHD = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_BSHD;
   bool is_batch = is_BSHD || is_SBHD;
 
   bool is_padding = (mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
@@ -755,11 +755,11 @@ void fused_attn_ck_fwd_impl(
         b, h, hg, s_q, s_kv, d_qk, d_v,
         max_tokens_q,
         devPtrQWithoutPadding,
-        q_stride[1], std::min(q_stride[0], q_stride[2]),
+        q_stride[1], q_stride[0],
         devPtrKWithoutPadding,
-        k_stride[1], std::min(k_stride[0], k_stride[2]),
+        k_stride[1], k_stride[0],
         devPtrVWithoutPadding,
-        v_stride[1], std::min(v_stride[0], v_stride[2]),
+        v_stride[1], v_stride[0],
         devPtrCuSeqlensQ, devPtrCuSeqlensKV, 
         nullptr, nullptr, //cu_seqlen_q_padded_ptr, cu_seqlen_kv_padded_ptr
         is_training, scaling_factor, dropout_probability,
@@ -767,7 +767,7 @@ void fused_attn_ck_fwd_impl(
         set_ck_mask(mask_type, window_size_left, window_size_right),
         window_size_left, window_size_right,
         devPtrOWithoutPadding,
-        o_stride[1], std::min(o_stride[0], o_stride[2]),
+        o_stride[1], o_stride[0],
         devPtrSoftmaxLSEWithoutPadding,
         nvte_ck_uses_fwd_v3,
         nvte_ck_how_v3_bf16_cvt,
