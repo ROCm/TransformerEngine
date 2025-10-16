@@ -97,7 +97,7 @@ jobs:
           pip install --upgrade pip ninja
           
           # Install custom CMake version
-          CMAKE_LINK="https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0-linux-x86_64.sh"
+          CMAKE_LINK="https://github.com/Kitware/CMake/releases/download/v3.31.2/cmake-3.31.2-linux-x86_64.sh"
           wget -P /opt ${CMAKE_LINK}
           chmod +x /opt/cmake-*.sh
           mkdir -p /opt/cmake
