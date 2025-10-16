@@ -106,16 +106,19 @@ jobs:
 
           cmake --version
 
-          ROCM_PATH="/opt/rocm" \
-          PATH="/opt/rocm/bin:${PATH}" \
-          LD_LIBRARY_PATH="/opt/rocm/lib" \
-          CPLUS_INCLUDE_PATH="/usr/include/c++/11" \
-          HIP_PATH="" \
-          CXX="/opt/rocm/bin/hipcc" \
-          CC="/opt/rocm/bin/hipcc" \
-          PYTORCH_ROCM_ARCH="gfx942" \
-          NVTE_ROCM_ARCH="gfx942" \
-          AMDGPU_TARGETS="gfx942" \
+          # Export all variables so they are inherited by subprocesses
+          export ROCM_PATH="/opt/rocm"
+          export PATH="/opt/rocm/bin:${PATH}"
+          export LD_LIBRARY_PATH="/opt/rocm/lib"
+          export CPLUS_INCLUDE_PATH="/usr/include/c++/11"
+          export HIP_PATH=""
+          export CXX="/opt/rocm/bin/hipcc"
+          export CC="/opt/rocm/bin/hipcc"
+          export PYTORCH_ROCM_ARCH="gfx942"
+          export NVTE_ROCM_ARCH="gfx942"
+          export AMDGPU_TARGETS="gfx942"
+          
+          # Run the build
           pip install -v .
 
           EOF
