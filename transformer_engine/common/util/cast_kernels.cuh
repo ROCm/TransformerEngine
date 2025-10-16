@@ -1295,55 +1295,65 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
 void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tensor *noop,
                              Tensor *output, Tensor *dbias, Tensor *workspace,
                              cudaStream_t stream) {
+  switch (output->scaling_mode) {
+    case NVTE_DELAYED_TENSOR_SCALING: {
+      const size_t rows = input.flat_first_dim();
+      const size_t cols = input.flat_last_dim();
 
-  const size_t rows = input.flat_first_dim();
-  const size_t cols = input.flat_last_dim();
+      if (output && output->data.dptr) {
+        if constexpr (IS_DACT) {
+          NVTE_CHECK(act_input, "Gradient tensor must be provided for DACT output.");
+          CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
+        } else {
+          CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
+        }
+      }
 
-  if (output && output->data.dptr) {
-    if constexpr (IS_DACT) {
-      NVTE_CHECK(act_input, "Gradient tensor must be provided for DACT output.");
-      CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
-    } else {
-      CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
+      if constexpr (!IS_DBIAS) {
+        return;
+      }
+
+      NVTE_CHECK(dbias, "DBias tensor must be provided when IS_DBIAS is true.");
+      NVTE_CHECK(workspace, "Workspace must be provided when IS_DBIAS is true.");
+
+      if (workspace->data.dptr == nullptr ||
+          workspace->data.dtype != DType::kFloat32 ||
+          workspace->data.shape != std::vector<size_t>{rows, cols}) {
+        workspace->data.shape = {rows, cols};
+        workspace->data.dtype = DType::kFloat32;
+        return;
+      }
+
+      workspace->amax = {};
+      workspace->scale = {};
+      workspace->scale_inv = {};
+
+      if constexpr (IS_DACT) {
+        // The values to reduce are the result of the dAct function.
+        NVTE_CHECK(act_input, "Gradient tensor must be provided for DBias + DACT.");
+        CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, workspace, stream);
+      } else {
+        // The values to reduce are just the input values (identity function).
+        CastVectorizedUnaryKernelLauncher<detail::Empty, nullptr>(input, noop, workspace, stream);
+      }
+
+      NVTE_CHECK(dbias->data.shape == std::vector<size_t>{cols}, "Wrong shape of DBias tensor.");
+      NVTE_CHECK(dbias->data.dtype == input.data.dtype, "DBias must have the same type as input.");
+
+      const float *workspace_ptr = reinterpret_cast<const float *>(workspace->data.dptr);
+      TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+          dbias->data.dtype, ITypeOut,
+          reduce_dbias_rocm<ITypeOut>(workspace_ptr, dbias, rows, cols, stream);
+      );
     }
+    case NVTE_MXFP8_1D_SCALING: {
+      mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output, dbias,
+                                                             workspace, stream);
+      break;
+    }
+    default:
+    NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
   }
-
-  if constexpr (!IS_DBIAS) {
-    return;
-  }
-
-  NVTE_CHECK(dbias, "DBias tensor must be provided when IS_DBIAS is true.");
-  NVTE_CHECK(workspace, "Workspace must be provided when IS_DBIAS is true.");
-
-  if (workspace->data.dptr == nullptr ||
-      workspace->data.dtype != DType::kFloat32 ||
-      workspace->data.shape != std::vector<size_t>{rows, cols}) {
-    workspace->data.shape = {rows, cols};
-    workspace->data.dtype = DType::kFloat32;
-    return;
-  }
-
-  workspace->amax = {};
-  workspace->scale = {};
-  workspace->scale_inv = {};
-
-  if constexpr (IS_DACT) {
-    // The values to reduce are the result of the dAct function.
-    NVTE_CHECK(act_input, "Gradient tensor must be provided for DBias + DACT.");
-    CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, workspace, stream);
-  } else {
-    // The values to reduce are just the input values (identity function).
-    CastVectorizedUnaryKernelLauncher<detail::Empty, nullptr>(input, noop, workspace, stream);
-  }
-
-  NVTE_CHECK(dbias->data.shape == std::vector<size_t>{cols}, "Wrong shape of DBias tensor.");
-  NVTE_CHECK(dbias->data.dtype == input.data.dtype, "DBias must have the same type as input.");
-
-  const float *workspace_ptr = reinterpret_cast<const float *>(workspace->data.dptr);
-  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
-      dbias->data.dtype, ITypeOut,
-      reduce_dbias_rocm<ITypeOut>(workspace_ptr, dbias, rows, cols, stream);
-  );
 }
 
 #endif //#ifndef __HIP_PLATFORM_AMD__
