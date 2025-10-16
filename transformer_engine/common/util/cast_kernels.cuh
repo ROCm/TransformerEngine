@@ -31,6 +31,15 @@
 #include "transformer_engine/transformer_engine.h"
 #ifdef __HIP_PLATFORM_AMD__
 #include "rocm_cast_kernels.cuh"
+#define HIP_CHECK(err)                                                     \
+  do {                                                                     \
+    hipError_t err_ = (err);                                               \
+    if (err_ != hipSuccess) {                                              \
+      std::printf("HIP error %d at %s:%d. %s\n", err_, __FILE__, __LINE__, \
+                  hipGetErrorString(err_));                                \
+      throw std::runtime_error("HIP error");                               \
+    }                                                                      \
+  } while (0)
 #endif
 
 namespace transformer_engine {
@@ -862,29 +871,29 @@ __global__ void partial_reduce_kernel(const float* input, float* partial_output,
 template <typename IType>
 void reduce_dbias_rocm(const float *workspace_ptr, Tensor *dbias, const size_t rows, const size_t cols,
                   cudaStream_t stream) {
-    dim3 block_dim_partial(TILE_DIM, TILE_DIM);
-    dim3 grid_dim_partial(DIVUP(cols, TILE_DIM), DIVUP(rows, TILE_DIM));
+  dim3 block_dim_partial(TILE_DIM, TILE_DIM);
+  dim3 grid_dim_partial(DIVUP(cols, TILE_DIM), DIVUP(rows, TILE_DIM));
 
-    const size_t partial_rows = grid_dim_partial.y;
-    float* partial_workspace;
-    cudaMalloc(&partial_workspace, partial_rows * cols * sizeof(float));
+  const size_t partial_rows = grid_dim_partial.y;
+  float* partial_workspace;
+  HIP_CHECK(hipMalloc(&partial_workspace, partial_rows * cols * sizeof(float)));
 
-    partial_reduce_kernel<IType><<<grid_dim_partial, block_dim_partial, 0, stream>>>(
-        workspace_ptr,
-        partial_workspace,
-        rows, cols);
+  partial_reduce_kernel<IType><<<grid_dim_partial, block_dim_partial, 0, stream>>>(
+    workspace_ptr,
+    partial_workspace,
+    rows, cols);
 
-    constexpr int reduce_dbias_store_bytes = 8;
-    constexpr int nvec = reduce_dbias_store_bytes / sizeof(IType);
-    const size_t reduce_dbias_num_blocks = DIVUP(cols, DBIAS_THREADS_PER_BLOCK * nvec);
+  constexpr int reduce_dbias_store_bytes = 8;
+  constexpr int nvec = reduce_dbias_store_bytes / sizeof(IType);
+  const size_t reduce_dbias_num_blocks = DIVUP(cols, DBIAS_THREADS_PER_BLOCK * nvec);
 
-    reduce_dbias_kernel<nvec, IType><<<reduce_dbias_num_blocks, DBIAS_THREADS_PER_BLOCK, 0, stream>>>(
-        reinterpret_cast<IType *>(dbias->data.dptr),
-        partial_workspace,
-        partial_rows,
-        cols);
+  reduce_dbias_kernel<nvec, IType><<<reduce_dbias_num_blocks, DBIAS_THREADS_PER_BLOCK, 0, stream>>>(
+    reinterpret_cast<IType *>(dbias->data.dptr),
+    partial_workspace,
+    partial_rows,
+    cols);
 
-    cudaFree(partial_workspace);
+  HIP_CHECK(hipFree(partial_workspace));
 }
 #endif // #ifdef __HIP_PLATFORM_AMD__
 
