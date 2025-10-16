@@ -461,6 +461,13 @@ void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, 
                                   const size_t row_blocks, const size_t col_blocks, const size_t stride);
 void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
                                   const size_t N);
+#ifdef USE_ROCM
+void compare_mxfp8_results(const std::string &scale_name, const uint8_t *scale_ref, const size_t row_blocks, 
+                           const size_t col_blocks, const size_t stride, const std::string &output_name, 
+                           Tensor &output_test, const void *output_ref, const bool rowwise, 
+                           const size_t rows, const size_t cols, const float mismatch_tol = .01f, 
+                           double atol = 1e-2, double rtol = 1e-2, bool if_on_gpus = true);
+#endif
 
 std::array<size_t, 4> get_scale_tensor_dims(const size_t rows, const size_t cols,
                                             const size_t block_size_rows, const size_t block_size_cols);

@@ -60,7 +60,7 @@ if(USE_CUDA)
   set(CMAKE_CUDA_STANDARD_REQUIRED ON)
   project(transformer_engine_tests LANGUAGES CUDA CXX)
 else()
-  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CXX_STANDARD 20)
   project(transformer_engine_tests LANGUAGES HIP CXX)
   # Ask hcc to generate device code during compilation so we can use
   # host linker to link.
