@@ -24,16 +24,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  setup:
-    name: Select Docker Image
+  prepare:
+    name: Prepare Docker Image
     runs-on: build-only
     outputs:
-      docker-image: ${{ steps.select-image.outputs.image-tag }}
+      docker-image-tag: ${{ steps.select-image.outputs.image-tag }}
     steps:
       - name: 📜 Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🖼️ Select Docker Image
+      - name: 🖼️ Select Docker Image Tag
         id: select-image
         run: |
           BRANCH_NAME="${{ github.base_ref || github.ref_name }}"
@@ -46,110 +46,172 @@ jobs:
             MAJOR_VERSION=${BASH_REMATCH[1]}
             MINOR_VERSION=${BASH_REMATCH[2]}
             if (( MAJOR_VERSION == 1 )); then
-              if (( MINOR_VERSION >= 9 && MINOR_VERSION <= 12 )); then
-                IMAGE_TO_USE="$LEGACY_DOCKER_IMAGE"
-              elif (( MINOR_VERSION == 13 || MINOR_VERSION == 14 )); then
-                IMAGE_TO_USE="$REL613_DOCKER_IMAGE"
-              fi
+              if (( MINOR_VERSION >= 9 && MINOR_VERSION <= 12 )); then IMAGE_TO_USE="$LEGACY_DOCKER_IMAGE"; fi
+              if (( MINOR_VERSION == 13 || MINOR_VERSION == 14 )); then IMAGE_TO_USE="$REL613_DOCKER_IMAGE"; fi
             fi
           fi
           echo "Selected image: $IMAGE_TO_USE"
           echo "image-tag=$IMAGE_TO_USE" >> $GITHUB_OUTPUT
 
+      - name: 🔐 Log in to Docker registry and Pull Image
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.ARTIFACTORY_USER }}
+          password: ${{ secrets.ARTIFACTORY_PAT }}
+      
+      - name: Pull and Save Docker Image
+        run: |
+          docker pull ${{ steps.select-image.outputs.image-tag }}
+          docker save -o image.tar ${{ steps.select-image.outputs.image-tag }}
+      
+      - name: ⬆️ Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: image.tar
+
   build_and_test:
-    name: Build & Test - ${{ matrix.framework }} (${{ matrix.gpu_mode }})
-    needs: setup
+    name: Build and Test on GPU
+    needs: prepare
     runs-on: [te-gfx942-4gpu]
-    strategy:
-      fail-fast: false
-      matrix:
-        framework: ['PyTorch', 'JAX']
-        gpu_mode: ['Single-GPU', 'Multi-GPU']
-        include:
-          - framework: 'Core'
-            gpu_mode: 'Single-GPU'
-          - framework: 'Examples'
-            gpu_mode: 'Single-GPU'
-    
     steps:
       - name: 📜 Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: 'recursive'
 
-      - name: 🔐 Log in to Docker registry
-        uses: docker/login-action@v3
+      - name: ⬇️ Download Docker image artifact
+        uses: actions/download-artifact@v4
         with:
-          username: ${{ secrets.ARTIFACTORY_USER }}
-          password: ${{ secrets.ARTIFACTORY_PAT }}
+          name: docker-image
 
-      - name: 🚀 Run and Prepare Container
+      - name: 🐋 Load Docker image
+        run: docker load -i image.tar
+
+      - name: 🚀 Run Container
         run: |
           docker run -dt \
-            --name te-ci-runner \
+            --name te-runner \
             --device=/dev/dri --device=/dev/kfd \
             --shm-size=16G \
             --group-add $(getent group render | cut -d: -f3) \
             --group-add $(getent group video | cut -d: -f3) \
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
-            ${{ needs.setup.outputs.docker-image }}
-          
-          # Prepare the container environment once
-          docker exec te-ci-runner bash -c "apt-get update && apt-get install -y build-essential && pip install --upgrade pip ninja"
-
-      - name: 📦 Build Wheel
+            ${{ needs.prepare.outputs.docker-image-tag }}
+      
+      - name: 📦 Build Project
         run: |
-          docker exec te-ci-runner bash -c "$(cat <<'EOF'
+          docker exec te-runner bash -c "$(cat <<'EOF'
           set -ex
           
+          # Install build dependencies
+          apt-get update && apt-get install -y wget build-essential
+          
           # Install custom CMake
-          CMAKE_LINK="https://github.com/Kitware/CMake/releases/download/v3.31.2/cmake-3.31.2-linux-x86_64.sh"
-          wget -q -P /opt ${CMAKE_LINK}
+          wget -q -P /opt https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0-linux-x86_64.sh
           chmod +x /opt/cmake-*.sh
           bash /opt/cmake-*.sh --skip-license --prefix=/opt/cmake
           ln -sf /opt/cmake/bin/* /usr/bin/ || true
           
-          # Set build environment
-          export HIP_PATH=""
-          export PATH=/opt/cmake/bin:$PATH
+          # Set build environment and run build/install
           export PYTORCH_ROCM_ARCH=gfx942
           export NVTE_ROCM_ARCH=gfx942
-          
-          # Build the wheel
-          pip wheel . -v -w /workspace/dist
+          pip install --upgrade pip
+          pip install ninja
+          pip install -v .
           EOF
           )"
-          
-      - name: 🐍 Install Wheel
+
+      - name: 🧪 Run sGPU tests
         run: |
-          docker exec te-ci-runner bash -c "pip install /workspace/dist/*.whl"
+          docker exec te-runner bash -c "$(cat <<'EOF'
+          #!/usr/bin/bash
+          set -x -o pipefail
+
+          HIP_VISIBLE_DEVICES=1 JUNITXML_PREFIX=junit_reports/torch_ JUNITXML_SUFFIX=.xml ci/pytorch.sh > /workspace/torch_sgpu.log 2>&1 &
+          torch_pid=$!; echo Pytorch test pid $!
           
-      - name: 🧪 Run Tests
+          HIP_VISIBLE_DEVICES=2 JUNITXML_PREFIX=junit_reports/jax_ JUNITXML_SUFFIX=.xml ci/jax.sh > /workspace/jax_sgpu.log 2>&1 &
+          jax_pid=$!; echo JAX test pid $!
+          
+          HIP_VISIBLE_DEVICES=3 GTEST_OUTPUT="xml:/workspace/gtest_reports/" ci/core.sh > /workspace/core_sgpu.log 2>&1 &
+          core_pid=$!; echo Core test pid $!
+          
+          wait $core_pid; core_rc=$?
+          wait $jax_pid; jax_rc=$?
+          wait $torch_pid; torch_rc=$?
+          
+          if [ $torch_rc -ne 0 ]; then echo "Pytorch sGPU test FAILED."; fi
+          if [ $jax_rc -ne 0 ]; then echo "JAX sGPU test FAILED."; fi
+          if [ $core_rc -ne 0 ]; then echo "Core sGPU test FAILED."; fi
+          
+          test $torch_rc -eq 0 -a $jax_rc -eq 0 -a $core_rc -eq 0
+          EOF
+          )"
+      
+      - name: 🧪 Run mGPU tests
         run: |
-          docker exec \
-            -e FRAMEWORK=${{ matrix.framework }} \
-            -e GPU_MODE=${{ matrix.gpu_mode }} \
-            te-ci-runner bash -c '
-              set -ex
-              
-              echo "Running tests for $FRAMEWORK ($GPU_MODE)"
-              
-              if [ "$FRAMEWORK" = "PyTorch" ]; then
-                if [ "$GPU_MODE" = "Single-GPU" ]; then HIP_VISIBLE_DEVICES=1 ci/pytorch.sh; else ci/pytorch.sh; fi
-              elif [ "$FRAMEWORK" = "JAX" ]; then
-                if [ "$GPU_MODE" = "Single-GPU" ]; then HIP_VISIBLE_DEVICES=2 ci/jax.sh; else ci/jax.sh; fi
-              elif [ "$FRAMEWORK" = "Core" ]; then
-                HIP_VISIBLE_DEVICES=3 ci/core.sh
-              elif [ "$FRAMEWORK" = "Examples" ]; then
-                pip3 install -r examples/jax/mnist/requirements.txt
-                pip3 install -r examples/jax/encoder/requirements.txt
-                python examples/pytorch/mnist/main.py && python examples/pytorch/mnist/main.py --use-te && python examples/pytorch/mnist/main.py --use-fp8
-                python examples/jax/mnist/test_single_gpu_mnist.py && python examples/jax/mnist/test_single_gpu_mnist.py --use-te && python examples/jax/mnist/test_single_gpu_mnist.py --use-fp8
-                python examples/jax/encoder/test_single_gpu_encoder.py && python examples/jax/encoder/test_single_gpu_encoder.py --use-fp8
-              fi
-            '
-            
+          docker exec te-runner bash -c "$(cat <<'EOF'
+          #!/usr/bin/bash
+          set -x -o pipefail
+          
+          JUNITXML_PREFIX=junit_reports/torch_ JUNITXML_SUFFIX=.xml ci/pytorch.sh > /workspace/torch_mgpu.log 2>&1; torch_rc=$?
+          JUNITXML_PREFIX=junit_reports/jax_ JUNITXML_SUFFIX=.xml ci/jax.sh > /workspace/jax_mgpu.log 2>&1; jax_rc=$?
+          
+          if [ $torch_rc -ne 0 ]; then echo "Pytorch mGPU test FAILED."; fi
+          if [ $jax_rc -ne 0 ]; then echo "JAX mGPU test FAILED."; fi
+          
+          test $torch_rc -eq 0 -a $jax_rc -eq 0
+          EOF
+          )"
+
+      - name: 🧪 Run Examples
+        run: |
+          docker exec te-runner bash -c "$(cat <<'EOF'
+          #!/usr/bin/bash
+          set -ex -o pipefail
+
+          cd /workspace/examples/pytorch/mnist
+          python main.py
+          python main.py --use-te
+          python main.py --use-fp8
+          
+          cd /workspace/examples/jax/mnist
+          pip3 install -r requirements.txt
+          python test_single_gpu_mnist.py
+          python test_single_gpu_mnist.py --use-te
+          python test_single_gpu_mnist.py --use-fp8
+          
+          cd /workspace/examples/jax/encoder
+          pip3 install -r requirements.txt
+          python test_single_gpu_encoder.py
+          python test_single_gpu_encoder.py --use-fp8
+          EOF
+          )"
+
+      - name: 📥 Copy logs and reports from container
+        if: always()
+        run: |
+          docker cp te-runner:/workspace/junit_reports ./junit_reports || true
+          docker cp te-runner:/workspace/gtest_reports ./gtest_reports || true
+          docker cp te-runner:/workspace/torch_sgpu.log ./torch_sgpu.log || true
+          docker cp te-runner:/workspace/jax_sgpu.log ./jax_sgpu.log || true
+          docker cp te-runner:/workspace/core_sgpu.log ./core_sgpu.log || true
+          docker cp te-runner:/workspace/torch_mgpu.log ./torch_mgpu.log || true
+          docker cp te-runner:/workspace/jax_mgpu.log ./jax_mgpu.log || true
+
+      - name: ⬆️ Upload logs and test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-and-reports
+          path: |
+            junit_reports/
+            gtest_reports/
+            *.log
+          if-no-files-found: ignore
+
       - name: 🧹 Cleanup container
         if: always()
-        run: docker rm -f te-ci-runner || true
+        run: docker rm -f te-runner || true
