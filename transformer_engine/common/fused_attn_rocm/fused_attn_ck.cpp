@@ -9,7 +9,6 @@
 #include <numeric> // Required for std::accumulate
 #ifdef USE_FUSED_ATTN_CK
 #include <ck_fused_attn/ck_fused_attn.hpp>
-#include "ck_tile/host.hpp"
 #endif // USE_FUSED_ATTN_CK
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
@@ -219,8 +218,8 @@ ck_fused_attn::MaskType set_ck_mask(NVTE_Mask_Type nvte_mask_type, int64_t nvte_
 __global__
 void generate_cu_seqlen_padded(
   uint32_t s_q, uint32_t s_kv, uint32_t b,
-  ck_tile::index_t* cu_seqlen_q_padded_ptr,
-  ck_tile::index_t* cu_seqlen_kv_padded_ptr
+  int32_t* cu_seqlen_q_padded_ptr,
+  int32_t* cu_seqlen_kv_padded_ptr
 ){
   for(int i = blockIdx.x * blockDim.x + threadIdx.x; i < b+1; i += blockDim.x * gridDim.x){
     cu_seqlen_q_padded_ptr[i] = s_q * i;
@@ -603,7 +602,7 @@ void fused_attn_ck_fwd_impl(
         (*workspace_size)+= q_storage_bytes + k_storage_bytes + v_storage_bytes + o_storage_bytes;
       }else{
         // cu_seqlen_padded buffers
-        (*workspace_size)+= 2*(b+1)*sizeof(ck_tile::index_t);
+        (*workspace_size)+= 2*(b+1)*sizeof(int32_t);
       }
     }else if(is_ragged){
       // We include a softmax_lse buffer to use the kernel in order to properly reshape the lse as needed.
@@ -679,9 +678,9 @@ void fused_attn_ck_fwd_impl(
     }else{
       // cu_seqlen_padded ptrs for THD conversion
       devPtrSeqOffsetsQ = workspace_next;
-      workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + (b+1)*sizeof(ck_tile::index_t));
+      workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + (b+1)*sizeof(int32_t));
       devPtrSeqOffsetsKV = workspace_next;
-      workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + (b+1)*sizeof(ck_tile::index_t));
+      workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + (b+1)*sizeof(int32_t));
     }
     //determine the o buffer based on workspace next section
     devPtrOWithoutPadding = workspace_next;
@@ -734,10 +733,9 @@ void fused_attn_ck_fwd_impl(
     dim3 grid(ceil(1.0 * (b+1)/THREADS_PER_BLOCK));
     generate_cu_seqlen_padded<<<grid, block, 0, stream>>>(
       s_q, s_kv, b,
-      static_cast<ck_tile::index_t*>(devPtrSeqOffsetsQ),
-      static_cast<ck_tile::index_t*>(devPtrSeqOffsetsKV)
+      static_cast<int32_t*>(devPtrSeqOffsetsQ),
+      static_cast<int32_t*>(devPtrSeqOffsetsKV)
     );
-    is_ragged=true;
     if(nvte_log_ck_config){
       std::cout << "\nConverting BSHD to THD\n";
     }
@@ -777,7 +775,7 @@ void fused_attn_ck_fwd_impl(
     // add padding for o and softmax_lse
     add_padding(dtype, b, h, s_q, d_v, max_tokens_q, false, o_stride[0], o_stride[1], o_stride[2], devPtrOWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrO, stream);
     add_padding_softmax_lse(b, h, s_q, max_tokens_q, false, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
-  }else if(is_ragged){
+  }else if((is_BSHD && is_padding) || is_ragged){
     using ck_fused_attn::ck_attn_varlen_fwd;
     // TODO: remove the v3 api check after ck align softmax_lse with aiter asm
     bool is_v3_supported = ck_attn_varlen_fwd(
@@ -829,10 +827,10 @@ void fused_attn_ck_fwd_impl(
         stream));
     if(nvte_ck_uses_fwd_v3 && is_v3_supported){
       // aiter asm output softmax_lse with padding
-      add_padding_softmax_lse(b, h, s_q, max_tokens_q, true, devPtrSoftmaxLSEWithoutPadding, devPtrSeqOffsetsQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
+      add_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxLSEWithoutPadding, devPtrSeqOffsetsQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
     }else{
       // ck v2 output softmax_lse without padding
-      add_padding_softmax_lse(b, h, s_q, max_tokens_q, true, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
+      add_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
     }
   }else{
     using ck_fused_attn::ck_attn_fwd;
