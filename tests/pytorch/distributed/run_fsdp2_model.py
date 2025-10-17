@@ -34,21 +34,24 @@ class SimpleNet(nn.Module):
             in_features=input_size,  
             out_features=hidden_size,  
             eps=1e-5,
-            use_fsdp2=use_fsdp2
+            use_fsdp2=use_fsdp2,
+            keep_fp8_weight_transpose_cache=False
         )  
           
         # LayerNormMLP: fuses LayerNorm + FC1 + Activation + FC2  
         self.ln_mlp = te.LayerNormMLP(  
             hidden_size=hidden_size,  
             ffn_hidden_size=hidden_size * 4,  # Typical 4x expansion
-            use_fsdp2=use_fsdp2
+            use_fsdp2=use_fsdp2,
+            keep_fp8_weight_transpose_cache=False
         )  
           
         # Regular Linear for final projection  
         self.fc_out = te.Linear(  
             hidden_size,   
             output_size,  
-            use_fsdp2=use_fsdp2
+            use_fsdp2=use_fsdp2,
+            keep_fp8_weight_transpose_cache=False
         )  
   
     def forward(self, x):  
@@ -105,6 +108,8 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument("--seed", type=int, default=42, help="RNG seed.")
     parser.add_argument("--use-fsdp2", action='store_true',
                        help='Enable New FSDP2 training.')
+    parser.add_argument("--memory-profile", action='store_true',
+                       help='profile memory traces')
     parser.add_argument(
         "--recipe",
         type=str,
@@ -163,7 +168,8 @@ def _train(args):
     else:
         raise ValueError(f"Unsupported recipe: {args.recipe}")
 
-
+    if args.memory_profile:
+        torch.cuda.memory._record_memory_history(enabled='all', context='all', stacks='all')
     if args.fp8_init:
         # Build the model with the specified context
         with fp8_model_init(enabled = True):
@@ -171,7 +177,8 @@ def _train(args):
     else:
         model = SimpleNet(args.input_size, args.hidden_size, args.output_size, use_fsdp2=args.use_fsdp2)
     # Move the model to the correct device
-    model.load_state_dict(torch.load('fsdp_model.pth'))
+    if not args.memory_profile:
+        model.load_state_dict(torch.load('fsdp_model.pth'))
     model.to(device)
 
     # Creating a DeviceMesh for fully_shard
@@ -180,7 +187,7 @@ def _train(args):
 
     # Apply FSDP/HSDP
     if args.use_fsdp2:
-        custom_attrs = save_custom_attrs(model)
+        # custom_attrs = save_custom_attrs(model)
         if LOCAL_RANK == 0:
             print(f"Rank {LOCAL_RANK}: Applying FSDP fully_shard() to the model...")
             print(f"sharding-dims:{args.sharding_dims}")
@@ -205,7 +212,7 @@ def _train(args):
             ):
                 fully_shard(sub_module, mesh=mesh)
         fully_shard(model, mesh=mesh, reshard_after_forward=True)
-        restore_custom_attrs(model, custom_attrs)
+        # restore_custom_attrs(model, custom_attrs)
     else:
         model = DDP(model, device_ids=[LOCAL_RANK])
 
@@ -255,18 +262,20 @@ def _train(args):
         optimizer.step()
         if LOCAL_RANK == 0:
             print(f"Rank {LOCAL_RANK}: Iteration {iteration} completed.")
-        with torch.no_grad():
-            for name, p in model.named_parameters():
-                full_grad = None
-                if p.grad is not None and hasattr(p.grad, 'full_tensor'):
-                    # This call is required to be executed on ALL ranks
-                    # to complete the collective communication.
-                    full_grad = p.grad.full_tensor().detach().clone()
-                elif p.grad is not None:
-                    full_grad = p.grad.detach().clone()
-                # 2. Only Rank 0 stores the result
-                if LOCAL_RANK == 0 and p.requires_grad:
-                    out_tensors.append((name, full_grad))
+        
+        if not args.profile and not args.memory_profile:
+            with torch.no_grad():
+                for name, p in model.named_parameters():
+                    full_grad = None
+                    if p.grad is not None and hasattr(p.grad, 'full_tensor'):
+                        # This call is required to be executed on ALL ranks
+                        # to complete the collective communication.
+                        full_grad = p.grad.full_tensor().detach().clone()
+                    elif p.grad is not None:
+                        full_grad = p.grad.detach().clone()
+                    # 2. Only Rank 0 stores the result
+                    if LOCAL_RANK == 0 and p.requires_grad:
+                        out_tensors.append((name, full_grad))
     if (
         args.profile
         and iteration == args.profile_step_end
@@ -274,8 +283,16 @@ def _train(args):
     ):
         prof.stop()
 
-    if LOCAL_RANK == 0:
+    if (not args.profile and not args.memory_profile) and LOCAL_RANK == 0:
         torch.save(out_tensors, args.gradients_save_file)
+
+    if args.memory_profile:
+        snapshot = torch.cuda.memory._snapshot()
+        import pickle
+        with open('memory_snapshot.pickle', 'wb') as f:
+            pickle.dump(snapshot, f)
+        # To disable memory history recording when no longer needed
+        torch.cuda.memory._record_memory_history(enabled=None)
 
     # NOTE: In PyTorch < 2.6 there’s a teardown race where one rank may call
     # destroy_process_group() while other ranks still have in-flight NCCL ops,
