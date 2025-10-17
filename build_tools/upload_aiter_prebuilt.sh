@@ -3,11 +3,10 @@
 #
 # See LICENSE for license information
 
-if [ -z "${NVTE_PREBUILT_BASE_URL}" ]; then
-  echo "[AITER-PREBUILT] [Error] To fetch .so, set NVTE_PREBUILT_BASE_URL." >&2
+if [ -z "${NVTE_AITER_PREBUILT_BASE_URL}" ]; then
+  echo "[AITER-PREBUILT] [Error] Set NVTE_AITER_PREBUILT_BASE_URL to specify upload destination." >&2
   exit 1
 fi
-
 if [ -z "${NVTE_ARTIFACTORY_USER}" ] || [ -z "${NVTE_ARTIFACTORY_PASSWORD}" ]; then
   echo "[AITER-PREBUILT] [Error] To fetch .so, set NVTE_ARTIFACTORY_USER & NVTE_ARTIFACTORY_PASSWORD" >&2
   exit 1
@@ -23,10 +22,10 @@ AITER_SHA="$(git -C "${TE_ROOT}/3rdparty/aiter" rev-parse HEAD)"
 # Artifact key + remote path
 KEY="rocm-${ROCM_VER}_aiter-${AITER_SHA}"
 REMOTE_PATH="aiter-prebuilts/${KEY}.tar.gz"
-ARTIFACT_URL="${NVTE_PREBUILT_BASE_URL%/}/${REMOTE_PATH}"
+UPLOAD_URL="${NVTE_PREBUILT_BASE_URL%/}/${REMOTE_PATH}"
 
 # Local cache
-CACHE_ROOT="${TE_ROOT}/.cache/aiter-prebuilts"
+CACHE_ROOT="/tmp/aiter-prebuilts"
 KEY_DIR="${CACHE_ROOT}/${KEY}"
 TAR_PATH="${CACHE_ROOT}/${KEY}.tar.gz"
 
@@ -46,7 +45,7 @@ cp -f "${BWD}" "${KEY_DIR}/"
 
 # Zip and upload to artifactory
 tar -czf "${TAR_PATH}" -C "${CACHE_ROOT}" "${KEY}"
-echo "[AITER-PREBUILT] Started uploading ${REMOTE_PATH} ..."
-echo "Artifactory response:"
+echo "[AITER-PREBUILT] Started uploading ${TAR_PATH} ..."
 curl -fSL ${CURL_AUTH} -T "${TAR_PATH}" "${ARTIFACT_URL}" -w '\n'
 echo "[AITER-PREBUILT] Upload complete."
+rm -rf -- "${CACHE_ROOT}";
