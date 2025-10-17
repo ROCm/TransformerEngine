@@ -56,75 +56,10 @@ jobs:
           echo "Selected image: $IMAGE_TO_USE"
           echo "image-tag=$IMAGE_TO_USE" >> $GITHUB_OUTPUT
 
-  build:
-    name: Build TransformerEngine Wheel
+  build_and_test:
+    name: Build & Test - ${{ matrix.framework }} (${{ matrix.gpu_mode }})
     needs: setup
-    runs-on: build-only
-    steps:
-      - name: 📜 Checkout repository
-        uses: actions/checkout@v4
-        with:
-          submodules: 'recursive'
-          fetch-depth: 0
-
-      - name: 🔐 Log in to Docker registry
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.ARTIFACTORY_USER }}
-          password: ${{ secrets.ARTIFACTORY_PAT }}
-
-      - name: 🚀 Run Build Container
-        run: |
-          docker run -dt \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace \
-            --name te-builder \
-            ${{ needs.setup.outputs.docker-image }}
-
-      - name: 📦 Build wheel inside container
-        run: |
-          docker exec te-builder bash -c "$(cat <<'EOF'
-          set -ex
-
-          apt-get update
-          apt-get install -y build-essential
-
-          pip install --upgrade pip ninja
-
-          CMAKE_LINK="https://github.com/Kitware/CMake/releases/download/v3.31.2/cmake-3.31.2-linux-x86_64.sh"
-          wget -q -P /opt ${CMAKE_LINK}
-          chmod +x /opt/cmake-*.sh
-          mkdir -p /opt/cmake
-          bash /opt/cmake-*.sh --skip-license --prefix=/opt/cmake
-          ln -sf /opt/cmake/bin/* /usr/bin/ || true
-          cmake --version
-
-          export HIP_PATH=""
-          export PATH=/opt/cmake/bin:$PATH
-          export PYTORCH_ROCM_ARCH=gfx942
-          export NVTE_ROCM_ARCH=gfx942
-          
-          # Build wheel and place it in the /workspace/dist directory
-          pip wheel . -v -w /workspace/dist
-          EOF
-          )"
-      
-      - name: ⬆️ Upload wheel artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: transformer-engine-wheel
-          path: dist/*.whl
-          if-no-files-found: error
-
-      - name: 🧹 Cleanup container
-        if: always()
-        run: docker rm -f te-builder || true
-
-  test:
-    name: Test - ${{ matrix.framework }} (${{ matrix.gpu_mode }})
-    needs: [setup, build]
     runs-on: [te-gfx942-4gpu]
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -135,7 +70,7 @@ jobs:
             gpu_mode: 'Single-GPU'
           - framework: 'Examples'
             gpu_mode: 'Single-GPU'
-
+    
     steps:
       - name: 📜 Checkout repository
         uses: actions/checkout@v4
@@ -148,41 +83,58 @@ jobs:
           username: ${{ secrets.ARTIFACTORY_USER }}
           password: ${{ secrets.ARTIFACTORY_PAT }}
 
-      - name: ⬇️ Download wheel artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: transformer-engine-wheel
-          path: wheel
-
-      - name: 🚀 Run Test Container
+      - name: 🚀 Run and Prepare Container
         run: |
           docker run -dt \
-            --device=/dev/dri \
-            --device=/dev/kfd \
+            --name te-ci-runner \
+            --device=/dev/dri --device=/dev/kfd \
             --shm-size=16G \
             --group-add $(getent group render | cut -d: -f3) \
             --group-add $(getent group video | cut -d: -f3) \
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
-            --name te-tester \
             ${{ needs.setup.outputs.docker-image }}
+          
+          # Prepare the container environment once
+          docker exec te-ci-runner bash -c "apt-get update && apt-get install -y build-essential && pip install --upgrade pip ninja"
 
-      - name: 🐍 Install dependencies and wheel
+      - name: 📦 Build Wheel
         run: |
-          docker exec te-tester bash -c "pip install --upgrade pip && pip install /workspace/wheel/*.whl"
-
-      - name: 🧪 Run tests
+          docker exec te-ci-runner bash -c "$(cat <<'EOF'
+          set -ex
+          
+          # Install custom CMake
+          CMAKE_LINK="https://github.com/Kitware/CMake/releases/download/v3.31.2/cmake-3.31.2-linux-x86_64.sh"
+          wget -q -P /opt ${CMAKE_LINK}
+          chmod +x /opt/cmake-*.sh
+          bash /opt/cmake-*.sh --skip-license --prefix=/opt/cmake
+          ln -sf /opt/cmake/bin/* /usr/bin/ || true
+          
+          # Set build environment
+          export HIP_PATH=""
+          export PATH=/opt/cmake/bin:$PATH
+          export PYTORCH_ROCM_ARCH=gfx942
+          export NVTE_ROCM_ARCH=gfx942
+          
+          # Build the wheel
+          pip wheel . -v -w /workspace/dist
+          EOF
+          )"
+          
+      - name: 🐍 Install Wheel
+        run: |
+          docker exec te-ci-runner bash -c "pip install /workspace/dist/*.whl"
+          
+      - name: 🧪 Run Tests
         run: |
           docker exec \
             -e FRAMEWORK=${{ matrix.framework }} \
             -e GPU_MODE=${{ matrix.gpu_mode }} \
-            te-tester bash -c '
+            te-ci-runner bash -c '
               set -ex
               
-              ls -d /opt/rocm*
-              python --version
-              pip list | egrep "transformer_e|torch|jax|numpy|ml_dtypes|typing_ext"
-
+              echo "Running tests for $FRAMEWORK ($GPU_MODE)"
+              
               if [ "$FRAMEWORK" = "PyTorch" ]; then
                 if [ "$GPU_MODE" = "Single-GPU" ]; then HIP_VISIBLE_DEVICES=1 ci/pytorch.sh; else ci/pytorch.sh; fi
               elif [ "$FRAMEWORK" = "JAX" ]; then
@@ -197,29 +149,7 @@ jobs:
                 python examples/jax/encoder/test_single_gpu_encoder.py && python examples/jax/encoder/test_single_gpu_encoder.py --use-fp8
               fi
             '
-      - name: ⬆️ Upload logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.framework }}-${{ matrix.gpu_mode }}-logs
-          path: "*.log"
-          if-no-files-found: ignore
-
+            
       - name: 🧹 Cleanup container
         if: always()
-        run: docker rm -f te-tester || true
-
-  report-status:
-    name: Report Final Status
-    needs: test
-    runs-on: build-only
-    if: always()
-    steps:
-      - name: Check test results
-        if: ${{ needs.test.result != 'success' }}
-        run: |
-          echo "One or more test suites failed."
-          exit 1
-      - name: Report success
-        if: ${{ needs.test.result == 'success' }}
-        run: echo "All test suites passed!"
+        run: docker rm -f te-ci-runner || true
