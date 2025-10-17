@@ -447,50 +447,48 @@ void performDqTest(const TestParams &params) {
     GTEST_SKIP() << "MXFP8 is not supported in current config";
   }
 
-  // FP8 GEMM path needs columnwise data for A/B tensor with non TN layout
-  const bool a_colwise = !params.transa;
-  const bool b_colwise = params.transb;
-  Tensor A("A", params.transa ? TShape{params.m, params.k} : TShape{params.k, params.m}, atype,
-           !a_colwise, a_colwise, NVTEScalingMode::NVTE_MXFP8_1D_SCALING);
-  Tensor B("B", params.transb ? TShape{params.k, params.n} : TShape{params.n, params.k}, btype,
-           !b_colwise, b_colwise, NVTEScalingMode::NVTE_MXFP8_1D_SCALING);
+  DType ref_type = dtype;
+  TShape a_shape = params.transa ? TShape{params.m, params.k} : TShape{params.k, params.m};
+  TShape b_shape = params.transb ? TShape{params.k, params.n} : TShape{params.n, params.k};
 
-  Tensor D("D", TShape{params.n, params.m}, dtype);
+  Tensor A_src("A", a_shape, ref_type);
+  Tensor B_src("B", b_shape, ref_type);
+  //initialize A, B
+  fillUniform(&A_src);
+  fillUniform(&B_src);
+
+  // FP8 GEMM path needs columnwise data for A/B tensor with non TN layout
+  Tensor A_fp8("A_fp8", a_shape, atype, params.transa, !params.transa,
+               NVTEScalingMode::NVTE_MXFP8_1D_SCALING);
+  Tensor B_fp8("B_fp8", b_shape, btype, !params.transb, params.transb,
+               NVTEScalingMode::NVTE_MXFP8_1D_SCALING);
+  nvte_quantize(A_src.data(), A_fp8.data(), 0);
+  nvte_quantize(B_src.data(), B_fp8.data(), 0);
+
+  Tensor A_ref("A_ref", a_shape, ref_type);
+  Tensor B_ref("B_ref", b_shape, ref_type);
+  nvte_dequantize(A_fp8.data(), A_ref.data(), 0);
+  nvte_dequantize(B_fp8.data(), B_ref.data(), 0);
 
   Tensor bias;
   Tensor pre_gelu_out;
 
-  //initialize the data and scale inv of A, B
-  fillUniform(&A);
-  fillUniform(&B);
-
   size_t workspace_size = 67108864;
   Tensor Workspace("Workspace", TShape{workspace_size}, DType::kByte);
 
-  //perform FP8 gemm
-  nvte_cublas_gemm(A.data(), B.data(), D.data(), bias.data(), pre_gelu_out.data(), params.transa,
-                   params.transb, false, Workspace.data(), false, false, prop.multiProcessorCount,
-                   0);
-
-  //copy the output results from GPU memory to CPU memory
+  //perform FP8 gemm and copy the output results from GPU memory to CPU memory
+  Tensor D("D", TShape{params.n, params.m}, dtype);
+  nvte_cublas_gemm(A_fp8.data(), B_fp8.data(), D.data(), bias.data(), pre_gelu_out.data(),
+                   params.transa, params.transb, false, Workspace.data(), false, false,
+                   prop.multiProcessorCount, 0);
   D.to_cpu();
 
-  using Ref_Type = fp16;
-  DType ref_type = TypeInfo<Ref_Type>::dtype;
 
-  Tensor A_ref("A", params.transa ? TShape{params.m, params.k} : TShape{params.k, params.m}, ref_type);
-  Tensor B_ref("B", params.transb ? TShape{params.k, params.n} : TShape{params.n, params.k}, ref_type);
+  //perform non-FP8 gemm and copy the output results from GPU memory to CPU memory
   Tensor D_ref("D", TShape{params.n, params.m}, dtype);
-
-  nvte_dequantize(A.data(), A_ref.data(), 0);
-  nvte_dequantize(B.data(), B_ref.data(), 0);
-
-  //perform non-FP8 gemm
   nvte_cublas_gemm(A_ref.data(), B_ref.data(), D_ref.data(), bias.data(), pre_gelu_out.data(),
                    params.transa, params.transb, false, Workspace.data(), false, false,
                    prop.multiProcessorCount, 0);
-
-  //copy the output results from GPU memory to CPU memory
   D_ref.to_cpu();
 
   // check if error message happens in running
