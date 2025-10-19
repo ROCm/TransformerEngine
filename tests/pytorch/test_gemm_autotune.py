@@ -34,7 +34,7 @@ def analyse_storage(fname):
         next(reader)
         head = reader.fieldnames
     assert ("m" in head and "algo_id" in head and  "ws_min" in head and "ws_max" in head
-            and "aidx" in head), "Invalid CSV format"
+            ), "Invalid CSV format"
     return head
 
 def read_storage(fname):
