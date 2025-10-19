@@ -1089,7 +1089,7 @@ void hipblaslt_gemm(const Tensor *inputA,
   // Note: gelu fusion is available for certain config from rocm 7.0
   // amax(D) either (next op is high precision).
 #if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
-    hipblasLtMatmulMatrixScale_t scaling_mode;
+    hipblasLtMatmulMatrixScale_t scaling_mode = (hipblasLtMatmulMatrixScale_t)0;
 #else
     constexpr int scaling_mode = 0;
 #endif
