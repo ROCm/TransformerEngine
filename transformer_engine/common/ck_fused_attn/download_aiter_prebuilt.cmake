@@ -4,6 +4,7 @@
 
 cmake_minimum_required(VERSION 3.21)
 include(FetchContent)
+find_package(hip REQUIRED)
 
 function(fetch_aiter_prebuilt __AITER_MHA_PATH_VAR)
   # Base URL is mandatory
@@ -12,20 +13,10 @@ function(fetch_aiter_prebuilt __AITER_MHA_PATH_VAR)
     return()
   endif()
 
-  execute_process(COMMAND git rev-parse --show-toplevel
-                  WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
-                  OUTPUT_VARIABLE TE_ROOT OUTPUT_STRIP_TRAILING_WHITESPACE)
-  
   # Build a unique key based on ROCm version + AITER commit
-  set(ROCM_PATH "$ENV{ROCM_PATH}")
-  if("${ROCM_PATH}" STREQUAL "")
-    set(ROCM_PATH "/opt/rocm")
-  endif()
-  file(READ "${ROCM_PATH}/.info/version" ROCM_VER_CONTENT)
-  string(STRIP "${ROCM_VER_CONTENT}" ROCM_VER)
-
+  set(ROCM_VER "${hip_VERSION_MAJOR}.${hip_VERSION_MINOR}")
   execute_process(
-    COMMAND git -C "${TE_ROOT}/3rdparty/aiter" rev-parse HEAD
+    COMMAND git -C "${CMAKE_CURRENT_SOURCE_DIR}/../../../3rdparty/aiter" rev-parse HEAD
     OUTPUT_VARIABLE AITER_SHA OUTPUT_STRIP_TRAILING_WHITESPACE
   )
 
