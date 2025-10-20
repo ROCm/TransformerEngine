@@ -386,6 +386,8 @@ void log_bwd_config(const char* func_name,
     std::cout<<"seqstart_q_ptr: "<<fmha_args.seqstart_q_ptr<<std::endl;
     std::cout<<"seqstart_k_ptr: "<<fmha_args.seqstart_k_ptr<<std::endl;
     std::cout<<"seqlen_k_ptr: "<<fmha_args.seqlen_k_ptr<<std::endl;
+    std::cout<<"seqlen_q_ptr: "<<fmha_args.seqlen_q_ptr<<std::endl;
+    std::cout<<"seqlen_k_ptr: "<<fmha_args.seqlen_k_ptr<<std::endl;
     std::cout<<"seqlen_q: "<<fmha_args.seqlen_q<<std::endl;
     std::cout<<"seqlen_k: "<<fmha_args.seqlen_k<<std::endl;
     std::cout<<"batch: "<<fmha_args.batch<<std::endl;
@@ -957,8 +959,8 @@ hipError_t ck_attn_varlen_bwd(
                          is_mqa_gqa? dv_expanded_ptr:dv_ptr,
                          nullptr,
                          dq_acc_ptr, //dq_acc_buf
-                         cu_seqlen_padded_q_ptr? cu_seqlen_padded_q_ptr:cu_seqlen_q_ptr,//seqstart_q_ptr
-                         cu_seqlen_padded_kv_ptr? cu_seqlen_padded_kv_ptr:cu_seqlen_kv_ptr,//seqstart_kv_ptr
+                         cu_seqlen_q_ptr,//seqstart_q_ptr
+                         cu_seqlen_kv_ptr,//seqstart_kv_ptr
                          seqlen_q_ptr,//seqlen_q_ptr
                          seqlen_kv_ptr,//seqlen_k_ptr
                          max_seqlen_q, //seqlen_q, unused in group mode
