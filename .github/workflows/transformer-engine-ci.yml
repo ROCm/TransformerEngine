@@ -71,6 +71,7 @@ jobs:
         with:
           name: docker-image-chunks
           path: image.tar.*
+          retention-days: 1
 
   build_and_test:
     name: Build and Test on GPU
@@ -115,17 +116,22 @@ jobs:
         run: |
           docker exec te-runner bash -c "$(cat <<'EOF'
           set -ex
-          apt-get update && apt-get install -y wget build-essential
-          wget -q -P /opt https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0-linux-x86_64.sh
+          apt-get update && apt-get install -y build-essential
+          CMAKE_LINK="https://github.com/Kitware/CMake/releases/download/v3.31.2/cmake-3.31.2-linux-x86_64.sh"
+          wget -q -P /opt CMAKE_LINK
           chmod +x /opt/cmake-*.sh
+          mkdir -p /opt/cmake
           bash /opt/cmake-*.sh --skip-license --prefix=/opt/cmake
           ln -sf /opt/cmake/bin/* /usr/bin/ || true
           
+          export HIP_PATH=""
+          export PATH=/opt/cmake/bin:$PATH
           export PYTORCH_ROCM_ARCH=gfx942
           export NVTE_ROCM_ARCH=gfx942
           pip install --upgrade pip
           pip install ninja
-          pip install -v .
+          pip wheel . -v -w /workspace/dist
+          pip install /workspace/wheel/*.whl
           EOF
           )"
 
@@ -217,6 +223,7 @@ jobs:
             gtest_reports/
             *.log
           if-no-files-found: ignore
+          retention-days: 1
 
       - name: 🧹 Cleanup container
         if: always()
