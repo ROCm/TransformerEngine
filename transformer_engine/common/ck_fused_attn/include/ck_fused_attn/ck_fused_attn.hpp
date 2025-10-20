@@ -144,6 +144,7 @@ hipError_t ck_attn_varlen_bwd(
   const void* v_ptr, 
   uint64_t stride_h_v, uint64_t stride_s_v,
   const void* cu_seqlen_q_ptr, const void* cu_seqlen_kv_ptr,
+  const void* seqlen_q_ptr, const void* seqlen_kv_ptr,
   const void* cu_seqlens_q_padded,
   const void* cu_seqlens_kv_padded,
   const void* o_ptr, 

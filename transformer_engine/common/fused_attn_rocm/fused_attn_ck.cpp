@@ -216,6 +216,20 @@ ck_fused_attn::MaskType set_ck_mask(NVTE_Mask_Type nvte_mask_type, int64_t nvte_
 }
 
 __global__ 
+void generate_seqlen(
+  int32_t b,
+  int32_t* cu_seqlen_q_padded_ptr,
+  int32_t* cu_seqlen_kv_padded_ptr,
+  int32_t* seqlen_q_padded_ptr,
+  int32_t* seqlen_kv_padded_ptr
+){
+  for(int i = blockIdx.x * blockDim.x + threadIdx.x; i < b; i += blockDim.x * gridDim.x){
+    seqlen_q_padded_ptr[i] = cu_seqlen_q_padded_ptr[i+1] - cu_seqlen_q_padded_ptr[i];
+    seqlen_kv_padded_ptr[i] = cu_seqlen_kv_padded_ptr[i+1] - cu_seqlen_kv_padded_ptr[i];
+  }
+}
+
+__global__ 
 void generate_alibi_slope(uint64_t h, float* alibi_slope_ptr){
   for(int id = blockIdx.x * blockDim.x + threadIdx.x; id < h; id += blockDim.x * gridDim.x){
     int n = exp2(floor(log2(h)));
@@ -768,12 +782,12 @@ void fused_attn_ck_fwd_impl(
     void* devPtrKProcessed = devPtrK;
     void* devPtrVProcessed = devPtrV;
     void* devPtrOPreprocess = devPtrO;
-    void* devPtrSeqlenPaddedQ = nullptr;
-    void* devPtrSeqlenPaddedKV = nullptr;
+    void* devPtrCuSeqlenPaddedQ = nullptr;
+    void* devPtrCuSeqlenPaddedKV = nullptr;
     if(pad_between_seqs){
       if(!needs_padding_workaround){
-        devPtrSeqlenPaddedQ = devPtrSeqOffsetsQ;
-        devPtrSeqlenPaddedKV = devPtrSeqOffsetsKV;
+        devPtrCuSeqlenPaddedQ = devPtrSeqOffsetsQ;
+        devPtrCuSeqlenPaddedKV = devPtrSeqOffsetsKV;
       }else{
         // remove padding for q, k, v
         remove_padding(dtype, b, h, s_q, d_qk, max_tokens_q, is_ragged, q_stride[0], q_stride[1], q_stride[2], devPtrQ, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrQWithoutPadding, stream);
@@ -799,8 +813,8 @@ void fused_attn_ck_fwd_impl(
         devPtrVProcessed,
         v_stride[1], s_v_stride,
         devPtrCuSeqlensQ, devPtrCuSeqlensKV,
-        devPtrSeqlenPaddedQ,
-        devPtrSeqlenPaddedKV,
+        devPtrCuSeqlenPaddedQ,
+        devPtrCuSeqlenPaddedKV,
         is_training, scaling_factor, dropout_probability,
         devPtrDropoutSeed, devPtrDropoutOffset,
         set_ck_mask(mask_type, window_size_left, window_size_right),
@@ -967,6 +981,7 @@ void fused_attn_ck_bwd_impl(
         nullptr, // V ptr not needed for API check
         v_stride[1], s_v_stride,
         devPtrCuSeqlensQ, devPtrCuSeqlensKV,
+        nullptr, nullptr, //seqlen_q_ptr, seqlen_kv_ptr
         nullptr, // cumulative seqlens Q ptr not needed for API check
         nullptr, // cumulative seqlens KV ptr not needed for API check
         nullptr, // O ptr not needed for API check
@@ -1133,10 +1148,15 @@ void fused_attn_ck_bwd_impl(
   void* devPtrdQWithoutPadding = nullptr;
   void* devPtrdKWithoutPadding = nullptr;
   void* devPtrdVWithoutPadding = nullptr;
-
+  void* devPtrSeqlenQ = nullptr;
+  void* devPtrSeqlenKV = nullptr;
   if(pad_between_seqs){
     devPtrSoftmaxLSEWithoutPadding = workspace_next;
     workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + h*max_tokens_q*sizeof(float));
+    devPtrSeqlenQ = workspace_next;
+    workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + b*sizeof(int32_t));
+    devPtrSeqlenKV = workspace_next;
+    workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + b*sizeof(int32_t));
     if(needs_padding_workaround){
 
       //determine q, k, v buffer based on the workspace next ptr and layout group
@@ -1252,14 +1272,24 @@ void fused_attn_ck_bwd_impl(
     void* devPtrdQPreprocess = devPtrdQ;
     void* devPtrdKPreprocess = devPtrdK;
     void* devPtrdVPreprocess = devPtrdV;
-    void* devPtrSeqlenPaddedQ = nullptr;
-    void* devPtrSeqlenPaddedKV = nullptr;
+    void* devPtrCuSeqlenPaddedQ = nullptr;
+    void* devPtrCuSeqlenPaddedKV = nullptr;
+    constexpr int THREADS_PER_BLOCK = 256;
+    dim3 block(THREADS_PER_BLOCK);
+    dim3 grid(ceil(1.0 * b/THREADS_PER_BLOCK));
+    generate_seqlen<<<grid, block, 0, stream>>>(
+      b,
+      static_cast<int32_t*>(devPtrCuSeqlenPaddedQ? devPtrCuSeqlenPaddedQ:devPtrCuSeqlensQ),
+      static_cast<int32_t*>(devPtrCuSeqlenPaddedKV? devPtrCuSeqlenPaddedKV:devPtrCuSeqlensKV),
+      static_cast<int32_t*>(devPtrSeqlenQ),
+      static_cast<int32_t*>(devPtrSeqlenKV)
+    );
 
     // Remove the padding for softmax lse
     if(pad_between_seqs){
       if(!needs_padding_workaround){
-        devPtrSeqlenPaddedQ = devPtrSeqOffsetsQ;
-        devPtrSeqlenPaddedKV = devPtrSeqOffsetsKV;
+        devPtrCuSeqlenPaddedQ = devPtrSeqOffsetsQ;
+        devPtrCuSeqlenPaddedKV = devPtrSeqOffsetsKV;
         // softmax lse format between TE and aiter are different
         remove_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrSeqOffsetsQ, devPtrSeqOffsetsQ, devPtrSoftmaxLSEWithoutPadding, stream);
       }else{
@@ -1298,8 +1328,9 @@ void fused_attn_ck_bwd_impl(
         devPtrVProcessed,
         v_stride[1], s_v_stride,
         devPtrCuSeqlensQ, devPtrCuSeqlensKV,
-        devPtrSeqlenPaddedQ,
-        devPtrSeqlenPaddedKV,
+        devPtrCuSeqlenPaddedQ,
+        devPtrCuSeqlenPaddedKV,
+        devPtrSeqlenQ, devPtrSeqlenKV,
         devPtrOPreprocess,
         o_stride[1], s_o_stride,
         devPtrSoftmaxLSEWithoutPadding,

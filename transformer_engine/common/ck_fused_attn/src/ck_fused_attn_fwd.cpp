@@ -407,8 +407,8 @@ hipError_t ck_attn_varlen_fwd(
                          cu_seqlen_q_ptr, //seqstart_q_ptr
                          cu_seqlen_kv_ptr, //seqstart_k_ptr
                          nullptr, //seqlen_k_ptr
-                         cu_seqlens_q_padded, //seqstart_padded_q_ptr
-                         cu_seqlens_kv_padded, //seqstart_padded_k_ptr
+                         cu_seqlens_q_padded? cu_seqlens_q_padded:cu_seqlen_q_ptr, //seqstart_padded_q_ptr
+                         cu_seqlens_kv_padded? cu_seqlens_kv_padded:cu_seqlen_kv_ptr, //seqstart_padded_k_ptr
                          max_seqlen_q, //seqlen_q
                          max_seqlen_kv, //seqlen_kv
                          batch,

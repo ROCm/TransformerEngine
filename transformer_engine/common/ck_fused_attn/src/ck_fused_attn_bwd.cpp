@@ -603,9 +603,10 @@ hipError_t ck_attn_bwd(
                          is_mqa_gqa? dv_expanded_ptr:dv_ptr,
                          has_dbias? (bias_shape==BiasShape::kBHSS ? dbias_ptr: dbias_expanded_ptr): nullptr,
                          dq_acc_ptr, //dq_acc_buf
-                         nullptr,//cu_seqlen_q
-                         nullptr,//cu_seqlen_kv
-                         nullptr, /* seqlen_k_ptr */
+                         nullptr,//seqstart_q_ptr
+                         nullptr,//seqstart_k_ptr
+                         nullptr,//seqlen_q_ptr
+                         nullptr,//seqlen_k_ptr
                          shape_seqlen_q,
                          shape_seqlen_k,
                          batch,
@@ -819,6 +820,7 @@ hipError_t ck_attn_varlen_bwd(
   const void* v_ptr, 
   uint64_t stride_h_v, uint64_t stride_s_v,
   const void* cu_seqlen_q_ptr, const void* cu_seqlen_kv_ptr,
+  const void* seqlen_q_ptr, const void* seqlen_kv_ptr,
   const void* cu_seqlen_padded_q_ptr,
   const void* cu_seqlen_padded_kv_ptr,
   const void* o_ptr, 
@@ -955,9 +957,10 @@ hipError_t ck_attn_varlen_bwd(
                          is_mqa_gqa? dv_expanded_ptr:dv_ptr,
                          nullptr,
                          dq_acc_ptr, //dq_acc_buf
-                         cu_seqlen_q_ptr,//cu_seqlen_q
-                         cu_seqlen_kv_ptr,//cu_seqlen_kv
-                         nullptr, /* seqlen_k_ptr */
+                         cu_seqlen_padded_q_ptr? cu_seqlen_padded_q_ptr:cu_seqlen_q_ptr,//seqstart_q_ptr
+                         cu_seqlen_padded_kv_ptr? cu_seqlen_padded_kv_ptr:cu_seqlen_kv_ptr,//seqstart_kv_ptr
+                         seqlen_q_ptr,//seqlen_q_ptr
+                         seqlen_kv_ptr,//seqlen_k_ptr
                          max_seqlen_q, //seqlen_q, unused in group mode
                          max_seqlen_k, //seqlen_kv, unused in group mode
                          batch,
