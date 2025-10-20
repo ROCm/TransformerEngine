@@ -69,15 +69,12 @@ void log_fwd_config(const char* func_name,
     std::cout<<"lse_ptr: "<<fmha_args.lse_ptr<<std::endl;
     std::cout<<"o_ptr: "<<fmha_args.o_ptr<<std::endl;
 
-    std::cout<<"cu_seqlen_q_ptr: "<<fmha_args.cu_seqlen_q_ptr<<std::endl;
-    std::cout<<"cu_seqlen_kv_ptr: "<<fmha_args.cu_seqlen_kv_ptr<<std::endl;
-
     std::cout<<"seqstart_q_ptr: "<<fmha_args.seqstart_q_ptr<<std::endl;
     std::cout<<"seqstart_k_ptr: "<<fmha_args.seqstart_k_ptr<<std::endl;
+    std::cout<<"seqlen_q_ptr: "<<fmha_args.seqlen_q_ptr<<std::endl;
     std::cout<<"seqlen_k_ptr: "<<fmha_args.seqlen_k_ptr<<std::endl;
-
-    std::cout<<"seqstart_padded_q_ptr: "<<fmha_args.seqstart_padded_q_ptr<<std::endl;
-    std::cout<<"seqstart_padded_k_ptr: "<<fmha_args.seqstart_padded_k_ptr<<std::endl;
+    std::cout<<"cu_seqlen_q_ptr: "<<fmha_args.cu_seqlen_q_ptr<<std::endl;
+    std::cout<<"cu_seqlen_k_ptr: "<<fmha_args.cu_seqlen_k_ptr<<std::endl;
 
     std::cout<<"seqlen_q: "<<fmha_args.seqlen_q<<std::endl;
     std::cout<<"seqlen_k: "<<fmha_args.seqlen_k<<std::endl;
@@ -231,13 +228,12 @@ hipError_t ck_attn_fwd(
                          nullptr,//rand_val_ptr
                          lse_ptr,
                          o_ptr,
-                         nullptr, //cu_seqlen_q
-                         nullptr, //cu_seqlen_kv
                          nullptr, //seqstart_q_ptr
                          nullptr, //seqstart_k_ptr
+                         nullptr, //seqlen_q_ptr
                          nullptr, //seqlen_k_ptr
-                         nullptr, //seqstart_padded_q_ptr
-                         nullptr, //seqstart_padded_k_ptr
+                         nullptr, //cu_padded_q_ptr
+                         nullptr, //cu_padded_k_ptr
                          max_seqlen_q,
                          max_seqlen_k,
                          batch,
@@ -413,13 +409,12 @@ hipError_t ck_attn_varlen_fwd(
                          nullptr,//rand_val_ptr
                          lse_thd_ptr,
                          o_ptr,
-                         nullptr, //cu_seqlen_q
-                         nullptr, //cu_seqlen_kv
-                         cu_seqlen_q_ptr, //seqstart_q_ptr
-                         cu_seqlen_kv_ptr, //seqstart_k_ptr
+                         cu_seqlen_q_padded_ptr==nullptr? cu_seqlen_q_ptr: cu_seqlen_q_padded_ptr, //seqstart_q_ptr
+                         cu_seqlen_kv_padded_ptr==nullptr? cu_seqlen_kv_ptr: cu_seqlen_kv_padded_ptr, //seqstart_k_ptr
+                         nullptr, //seqlen_q_ptr
                          nullptr, //seqlen_k_ptr
-                         cu_seqlen_q_padded_ptr, //seqstart_padded_q_ptr
-                         cu_seqlen_kv_padded_ptr, //seqstart_padded_k_ptr
+                         cu_seqlen_q_ptr, //cu_seqlen_q_ptr
+                         cu_seqlen_kv_ptr, //cu_seqlen_k_ptr
                          max_seqlen_q, //seqlen_q, unused in group mode
                          max_seqlen_kv, //seqlen_kv, unused in group mode
                          batch,
