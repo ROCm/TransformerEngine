@@ -117,7 +117,7 @@ jobs:
           set -ex
           apt-get update && apt-get install -y build-essential
           CMAKE_LINK="https://github.com/Kitware/CMake/releases/download/v3.31.2/cmake-3.31.2-linux-x86_64.sh"
-          wget -q -P /opt CMAKE_LINK
+          wget -q -P /opt $CMAKE_LINK
           chmod +x /opt/cmake-*.sh
           mkdir -p /opt/cmake
           bash /opt/cmake-*.sh --skip-license --prefix=/opt/cmake
