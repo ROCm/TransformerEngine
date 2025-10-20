@@ -10,7 +10,7 @@
 # ROCM_REPO_URL - ROCm repository URL. Default: https://repo.radeon.com/rocm/rhel8/latest/main/
 # GPU_TARGETS - Semicolon separated list of target GPU architectures. Default: "gfx942;gfx950"
 # TARGET_BRANCH - Target branch for TransformerEngine. Default: none (use git default)
-# GPU_TARGETS and TARGET_BRANCH are passed as environment variables to the resulting image and can be overriden when start a container.
+# GPU_TARGETS and TARGET_BRANCH can be overriden when start a container with NVTE_ROCM_ARCH and TARGET_BRANCH environment variables.
 
 # Set base image
 ARG BASE_IMAGE=quay.io/pypa/manylinux_2_28_x86_64
