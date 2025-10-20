@@ -6,10 +6,12 @@ import pytest
 import torch
 
 from transformer_engine.pytorch.triton_kernels.cast import te_quantize_triton
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from transformer_engine.pytorch.triton_kernels.common import te_dtype_to_torch_dtype
 import transformer_engine_torch as tex
 from test_common import te_compare_results, fill_uniform, get_tolerances
+from transformer_engine.pytorch.fp8 import fp8_autocast
+from transformer_engine.common import recipe
 
 @pytest.mark.parametrize("shape", 
                          [
@@ -112,3 +114,75 @@ def test_quantize_bad_transpose(t_shape, fp8_dtype):
     quantized_output._transpose = torch.empty(t_shape, device='cuda')
 
     te_quantize_triton(input_tensor, quantizer=quantizer, output=quantized_output)
+
+
+@pytest.mark.parametrize("shape",
+                         [
+                             (16,),
+                             (16000,),
+                             (128, 128),
+                             (256, 256),
+                             (768, 1024),
+                             (256, 65536),
+                             (2048, 12288),
+                             (65536, 128),
+                             (65536, 160),
+                             (16384, 1616),
+                             (1, 128),
+                             (1, 1296),
+                             (1, 16),
+                             (5, 160),
+                             (5, 4, 3, 160),
+                             (217, 256),
+                         ])
+@pytest.mark.parametrize("in_dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("out_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
+def test_quantize_current_scaling_with_autocast(shape, in_dtype, out_dtype):
+    input_tensor = fill_uniform(shape, dtype=in_dtype)
+
+    triton_q = Float8CurrentScalingQuantizer(fp8_dtype=out_dtype, device="cuda")
+    tex_q = Float8CurrentScalingQuantizer(fp8_dtype=out_dtype, device="cuda")
+
+    # Run both quantizers under the FP8 current scaling recipe
+    with fp8_autocast(enabled=True, fp8_recipe=recipe.Float8CurrentScaling()):
+        q_triton = te_quantize_triton(input_tensor, quantizer=triton_q)
+        q_tex    = tex.quantize(input_tensor, tex_q)
+
+    # Compare quantized output and transpose
+    torch_out_dtype = te_dtype_to_torch_dtype(out_dtype)
+    atol_q, rtol_q = get_tolerances(torch_out_dtype)
+
+    te_compare_results(
+        q_triton._data.view(torch_out_dtype),
+        q_tex._data.view(torch_out_dtype),
+        atol_q, rtol_q,
+        lambda msg: f"Triton vs TEX: quantized buffer mismatch\n\n{msg}\n",
+        use_torch_semantics=True,
+    )
+
+    assert q_triton._transpose is not None, "Triton transpose is none!"
+    assert q_tex._transpose is not None, "TE transpose is none!"
+    te_compare_results(
+        q_triton._transpose.view(torch_out_dtype),
+        q_tex._transpose.view(torch_out_dtype),
+        atol_q, rtol_q,
+        lambda msg: f"Triton vs TEX: transpose buffer mismatch\n\n{msg}\n",
+        use_torch_semantics=True,
+    )
+
+    # Compare FP8 state (scale & amax)
+    atol_f32, rtol_f32 = get_tolerances(torch.float32)
+    te_compare_results(
+        q_triton._get_quantizer().scale,
+        q_tex._get_quantizer().scale,
+        atol=atol_f32, rtol=rtol_f32,
+        msg='Scale results do not match!',
+        use_torch_semantics=True
+    )
+    te_compare_results(
+        q_triton._get_quantizer().amax,
+        q_tex._get_quantizer().amax,
+        atol=atol_f32, rtol=rtol_f32,
+        msg='AMAX results do not match!',
+        use_torch_semantics=True
+    )
