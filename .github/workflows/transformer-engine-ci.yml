@@ -25,7 +25,7 @@ concurrency:
 
 jobs:
   prepare:
-    name: Prepare Docker Image
+    name: Prepare Docker Image Artifact
     runs-on: build-only
     outputs:
       docker-image-tag: ${{ steps.select-image.outputs.image-tag }}
@@ -53,7 +53,7 @@ jobs:
           echo "Selected image: $IMAGE_TO_USE"
           echo "image-tag=$IMAGE_TO_USE" >> $GITHUB_OUTPUT
 
-      - name: 🔐 Log in to Docker registry and Pull Image
+      - name: 🔐 Log in to Docker registry
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.ARTIFACTORY_USER }}
@@ -63,12 +63,14 @@ jobs:
         run: |
           docker pull ${{ steps.select-image.outputs.image-tag }}
           docker save -o image.tar ${{ steps.select-image.outputs.image-tag }}
+          # Split the tarball into 2GB chunks to avoid upload timeout
+          split -b 2G image.tar "image.tar."
       
       - name: ⬆️ Upload Docker image artifact
         uses: actions/upload-artifact@v4
         with:
-          name: docker-image
-          path: image.tar
+          name: docker-image-chunks
+          path: image.tar.*
 
   build_and_test:
     name: Build and Test on GPU
@@ -80,13 +82,22 @@ jobs:
         with:
           submodules: 'recursive'
 
-      - name: ⬇️ Download Docker image artifact
+      - name: ⬇️ Download Docker image chunks
         uses: actions/download-artifact@v4
         with:
-          name: docker-image
+          name: docker-image-chunks
 
-      - name: 🐋 Load Docker image
-        run: docker load -i image.tar
+      - name: 🐋 Reassemble and Load Image to Node Cache
+        run: |
+          # Only load the image if it's not already on the node
+          IMAGE_TAG="${{ needs.prepare.outputs.docker-image-tag }}"
+          if [ -z "$(docker images -q $IMAGE_TAG)" ]; then
+            echo "Image not found in node cache. Loading from artifact..."
+            cat image.tar.* > image.tar
+            docker load -i image.tar
+          else
+            echo "Image found in node cache. Skipping load."
+          fi
 
       - name: 🚀 Run Container
         run: |
@@ -104,17 +115,12 @@ jobs:
         run: |
           docker exec te-runner bash -c "$(cat <<'EOF'
           set -ex
-          
-          # Install build dependencies
           apt-get update && apt-get install -y wget build-essential
-          
-          # Install custom CMake
           wget -q -P /opt https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0-linux-x86_64.sh
           chmod +x /opt/cmake-*.sh
           bash /opt/cmake-*.sh --skip-license --prefix=/opt/cmake
           ln -sf /opt/cmake/bin/* /usr/bin/ || true
           
-          # Set build environment and run build/install
           export PYTORCH_ROCM_ARCH=gfx942
           export NVTE_ROCM_ARCH=gfx942
           pip install --upgrade pip
