@@ -459,15 +459,20 @@ void rocm_norm_mxfp8_quantize(LaunchParams<ForwardKernelParams> &launch_params) 
     scale_dim_Y_colwise, SCALE_DIM_Y,
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
         launch_params.z_tensor->dtype(), OType,
-        cast_mxfp8_2D_kernel<false, false, false, Empty, {}, compute_t, OType,
-                              SCALE_DIM_Y, scale_dim_X_rowwise, true><<<grid, block, 0, launch_params.stream>>>(
-            reinterpret_cast<const compute_t*>(launch_params.params.z), 
-            nullptr,
-            reinterpret_cast<OType *>(launch_params.z_tensor->data.dptr),
-            reinterpret_cast<OType *>(launch_params.z_tensor->columnwise_data.dptr),
-            scales_rowwise_ptr, scales_colwise_ptr,
-            nullptr, nullptr, nullptr,
-            rows, cols, scale_stride_rowwise, scale_stride_colwise);););
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(
+            !(cols % (4 * 32 / sizeof(OType))), IS_ALIGNED,
+              cast_mxfp8_2D_kernel<false, false, false, Empty, {}, compute_t, OType,
+                                SCALE_DIM_Y, scale_dim_X_rowwise, IS_ALIGNED, true><<<grid, block, 0, launch_params.stream>>>(
+                reinterpret_cast<const compute_t*>(launch_params.params.z),
+                nullptr,
+                reinterpret_cast<OType *>(launch_params.z_tensor->data.dptr),
+                reinterpret_cast<OType *>(launch_params.z_tensor->columnwise_data.dptr),
+                scales_rowwise_ptr, scales_colwise_ptr,
+                nullptr, nullptr, nullptr,
+                rows, cols, scale_stride_rowwise, scale_stride_colwise);
+          );
+      );
+  );
 }
 #endif 
 

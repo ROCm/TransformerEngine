@@ -90,6 +90,20 @@ namespace transformer_engine {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+struct uint32 {
+  uint4 u;
+  uint4 v;
+  uint4 s;
+  uint4 t;
+  uint4 w;
+  uint4 x;
+  uint4 y;
+  uint4 z;
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
 struct uint16 {
   uint4 u;
   uint4 v;
@@ -108,6 +122,12 @@ struct uint8 {
 
 template <int BYTES>
 struct BytesToType {};
+
+template <>
+struct BytesToType<128> {
+  using Type = uint32;
+  static_assert(sizeof(Type) == 128);
+};
 
 template <>
 struct BytesToType<64> {

@@ -205,6 +205,13 @@ void performTest_x1(const size_t rows,
     const bool colwise = (block_size_rows == 32) && (block_size_cols == 1);
     NVTE_CHECK(rowwise || colwise);
 
+#ifdef __HIP_PLATFORM_AMD__
+    // MXFP8 requires stride % 32 == 0, ROCm enforces this for optimized vectorization
+    if ((colwise && rows % 32) || rowwise && cols % 32) {
+      GTEST_SKIP();
+    }
+#endif
+
     // std::cout << "unpadded_blocks_Y: " << unpadded_blocks_Y << std::endl;
     // std::cout << "unpadded_blocks_X: " << unpadded_blocks_X << std::endl;
     // std::cout << "blocks_Y: " << blocks_Y << std::endl;
@@ -311,6 +318,13 @@ void performTest_x2(const size_t rows,
     using EncodingType = fp32;
     DType itype = TypeInfo<IType>::dtype;
     DType otype = TypeInfo<OType>::dtype;
+
+#ifdef __HIP_PLATFORM_AMD__
+    // MXFP8 requires stride % 32 == 0, ROCm enforces this for optimized vectorization
+    if (cols % 32 || rows % 32) {
+      GTEST_SKIP();
+    }
+#endif
 
     Tensor grad("grad", std::vector<size_t>{ rows, cols }, itype);
     Tensor input("input", std::vector<size_t>{ rows, cols * 2 }, itype);

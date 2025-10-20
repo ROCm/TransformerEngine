@@ -27,9 +27,6 @@ constexpr size_t MXFP8_CHUNKS_PER_BLOCK_Y = 1;
 constexpr size_t MXFP8_CHUNKS_PER_BLOCK_X = 1;
 constexpr size_t MXFP8_CHUNKS_PER_BLOCK = MXFP8_CHUNKS_PER_BLOCK_Y * MXFP8_CHUNKS_PER_BLOCK_X;
 constexpr size_t MXFP8_THREADS_PER_CHUNK = 64;
-constexpr size_t MXFP8_BUFFERS_NUM = 2;
-constexpr size_t MXFP8_PREFETCH_BUFFERS_NUM = 1;
-static_assert(MXFP8_PREFETCH_BUFFERS_NUM < MXFP8_BUFFERS_NUM);
 
 constexpr size_t ELEMS_PER_THREAD = 16;
 constexpr size_t MXFP8_BUFFER_DIM_Y = 32;                 // only 32 is supported
@@ -45,11 +42,10 @@ constexpr size_t THREADS_PER_CHUNK_X_COLWISE = MXFP8_CHUNK_DIM_X;  //  64
 constexpr size_t MXFP8_BUFF_STAGES_NUM =
     MXFP8_BUFFER_DIM_Y / THREADS_PER_CHUNK_Y_ROWWISE;                        //   2 = 32 / 16
 constexpr size_t MXFP8_ITERATIONS = MXFP8_CHUNK_DIM_Y / MXFP8_BUFFER_DIM_Y;  //   2 = 64 / 32
-static_assert(MXFP8_ITERATIONS >= MXFP8_PREFETCH_BUFFERS_NUM);
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, size_t SCALE_DIM_Y,
-          size_t SCALE_DIM_X, bool IS_NORM = false>
+          size_t SCALE_DIM_X, bool IS_ALIGNED, bool IS_NORM = false>
 __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
     cast_mxfp8_2D_kernel(const IType *input_ptr,
                          const IType *act_input_ptr,
@@ -83,7 +79,7 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
   constexpr size_t THREADS_PER_SCALE_X_ROWWISE =
       DIVUP(SCALE_DIM_X, ELEMS_PER_THREAD);                      //   2 = 32 / 16
   constexpr size_t SUBWARP_WIDTH = THREADS_PER_SCALE_X_ROWWISE;  //   2
-  constexpr size_t VECTOR_WIDTH = 16 / sizeof(OType);
+  constexpr size_t VECTOR_WIDTH = 32 / sizeof(OType);
 
   const int block_offset_Y = blockIdx.y * MXFP8_CHUNKS_PER_BLOCK_Y * MXFP8_CHUNK_DIM_Y;
   const int block_offset_X = blockIdx.x * MXFP8_CHUNKS_PER_BLOCK_X * MXFP8_CHUNK_DIM_X;
@@ -161,11 +157,11 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
       const int chunk_it_offset_x = chunk_offset_X;
       const size_t row_base = chunk_it_offset_y;
       if constexpr (IS_DACT) {
-        copy_2d_to_shared<IType, VECTOR_WIDTH, false>(&act_in_sh[0][0], act_input_ptr, 
+        copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&act_in_sh[0][0], act_input_ptr, 
                           chunk_it_offset_x, chunk_it_offset_y, cols, 
                           MXFP8_SHMEM_DIM_Y, MXFP8_SHMEM_DIM_X, rows, cols);
       }
-      copy_2d_to_shared<IType, VECTOR_WIDTH, false>(&in_sh[0][0], input_ptr, chunk_it_offset_x, 
+      copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_sh[0][0], input_ptr, chunk_it_offset_x, 
                         chunk_it_offset_y, cols, MXFP8_SHMEM_DIM_Y,
                         MXFP8_SHMEM_DIM_X, rows, cols);
       __syncthreads();
@@ -301,12 +297,12 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
       __syncthreads();
 
       if constexpr (USE_ROWWISE_SCALING) {
-        bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, false>(&out_rowwise_sh[0][0], output_rowwise, chunk_it_offset_x,
+        bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_rowwise_sh[0][0], output_rowwise, chunk_it_offset_x,
                                         chunk_it_offset_y, cols, MXFP8_SHMEM_DIM_Y,
                                         MXFP8_SHMEM_DIM_X, rows, cols);
       }
       if constexpr (USE_COLWISE_SCALING) {
-        bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, false>(&out_colwise_sh[0][0], output_colwise, chunk_it_offset_x,
+        bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_colwise_sh[0][0], output_colwise, chunk_it_offset_x,
                                         chunk_it_offset_y, cols, MXFP8_SHMEM_DIM_Y,
                                         MXFP8_SHMEM_DIM_X, rows, cols);
       }
