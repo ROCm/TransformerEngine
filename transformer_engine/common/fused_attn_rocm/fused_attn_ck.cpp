@@ -1274,17 +1274,6 @@ void fused_attn_ck_bwd_impl(
     void* devPtrdVPreprocess = devPtrdV;
     void* devPtrCuSeqlenPaddedQ = nullptr;
     void* devPtrCuSeqlenPaddedKV = nullptr;
-    constexpr int THREADS_PER_BLOCK = 256;
-    dim3 block(THREADS_PER_BLOCK);
-    dim3 grid(ceil(1.0 * b/THREADS_PER_BLOCK));
-    generate_seqlen<<<grid, block, 0, stream>>>(
-      b,
-      static_cast<int32_t*>(devPtrCuSeqlenPaddedQ? devPtrCuSeqlenPaddedQ:devPtrCuSeqlensQ),
-      static_cast<int32_t*>(devPtrCuSeqlenPaddedKV? devPtrCuSeqlenPaddedKV:devPtrCuSeqlensKV),
-      static_cast<int32_t*>(devPtrSeqlenQ),
-      static_cast<int32_t*>(devPtrSeqlenKV)
-    );
-
     // Remove the padding for softmax lse
     if(pad_between_seqs){
       if(!needs_padding_workaround){
@@ -1315,6 +1304,16 @@ void fused_attn_ck_bwd_impl(
     }else{
       remove_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxLSEWithoutPadding, stream);
     }
+    constexpr int THREADS_PER_BLOCK = 256;
+    dim3 block(THREADS_PER_BLOCK);
+    dim3 grid(ceil(1.0 * b/THREADS_PER_BLOCK));
+    generate_seqlen<<<grid, block, 0, stream>>>(
+      b,
+      static_cast<int32_t*>(devPtrCuSeqlenPaddedQ? devPtrCuSeqlenPaddedQ:devPtrCuSeqlensQ),
+      static_cast<int32_t*>(devPtrCuSeqlenPaddedKV? devPtrCuSeqlenPaddedKV:devPtrCuSeqlensKV),
+      static_cast<int32_t*>(devPtrSeqlenQ),
+      static_cast<int32_t*>(devPtrSeqlenKV)
+    );
     using ck_fused_attn::ck_attn_varlen_bwd;
     NVTE_CHECK_CUDA(
       ck_attn_varlen_bwd(
