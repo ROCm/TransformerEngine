@@ -737,7 +737,6 @@ void fused_attn_ck_fwd_impl(
     add_padding_softmax_lse(b, h, s_q, max_tokens_q, false, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
   }else if(is_ragged){
     using ck_fused_attn::ck_attn_varlen_fwd;
-    // TODO: remove the v3 api check after ck align softmax_lse with aiter asm
     bool is_v3_supported = ck_attn_varlen_fwd(
          nvte_to_ck_dtype(dtype),
          b, h, hg, s_q, s_kv, d_qk, d_v,
@@ -785,13 +784,8 @@ void fused_attn_ck_fwd_impl(
         nvte_ck_how_v3_bf16_cvt,
         false,
         stream));
-    if(is_v3_supported){
-      // aiter asm output softmax_lse with padding
-      add_padding_softmax_lse(b, h, s_q, max_tokens_q, true, devPtrSoftmaxLSEWithoutPadding, devPtrSeqOffsetsQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
-    }else{
-      // ck v2 output softmax_lse without padding
-      add_padding_softmax_lse(b, h, s_q, max_tokens_q, true, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
-    }
+    // aiter asm output softmax_lse with padding
+    add_padding_softmax_lse(b, h, s_q, max_tokens_q, true, devPtrSoftmaxLSEWithoutPadding, devPtrSeqOffsetsQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
   }else{
     using ck_fused_attn::ck_attn_fwd;
     NVTE_CHECK_CUDA(
@@ -820,6 +814,116 @@ void fused_attn_ck_fwd_impl(
   }
 }
 
+// TODO: remove v3 api checking after ck v2 fully support native padding
+bool is_ck_attn_bwd_varlen_v3_supported(
+  uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v,
+  size_t max_tokens_q, size_t max_tokens_kv,
+  float scaling_factor, float dropout_probability, 
+  NVTE_QKV_Layout layout,
+  NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+  int64_t window_size_left, int64_t window_size_right,
+  bool deterministic,
+  DType dtype,
+  bool nvte_ck_uses_bwd_v3,
+  bool nvte_ck_is_v3_atomic_fp32,
+  int nvte_ck_how_v3_bf16_cvt,
+  cudaStream_t stream){
+
+  bool is_mqa_gqa = (h > hg);
+  bool is_ragged = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_THD; 
+
+  std::array<uint64_t, 4> q_stride;
+  std::array<uint64_t, 4> k_stride;
+  std::array<uint64_t, 4> v_stride;
+  std::array<uint64_t, 4> o_stride;
+  generateMatrixStrides(b, h, s_q, s_kv, d_qk, q_stride.data(),
+                        layout, NVTE_QKV_Matrix::NVTE_Q_Matrix);
+  generateMatrixStrides(b, hg, s_q, s_kv, d_qk, k_stride.data(),
+                        layout, NVTE_QKV_Matrix::NVTE_K_Matrix);
+  generateMatrixStrides(b, hg, s_q, s_kv, d_v, v_stride.data(),
+                        layout, NVTE_QKV_Matrix::NVTE_V_Matrix);
+  generateMatrixStrides(b, h, s_q, s_kv, d_v, o_stride.data(),
+                        layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
+
+  std::array<uint64_t, 4> dk_expanded_stride;
+  std::array<uint64_t, 4> dv_expanded_stride;
+  if(is_mqa_gqa){
+    generateMatrixStrides(b, h, s_q, s_kv, d_qk, dk_expanded_stride.data(),
+                          layout, NVTE_QKV_Matrix::NVTE_K_Matrix);
+    generateMatrixStrides(b, h, s_q, s_kv, d_v, dv_expanded_stride.data(),
+                          layout, NVTE_QKV_Matrix::NVTE_V_Matrix);
+  }
+  return  ck_attn_varlen_bwd(
+    nvte_to_ck_dtype(dtype),
+    b, h, hg, s_q, s_kv, d_qk, d_v,
+    max_tokens_q, max_tokens_kv,
+    nullptr,
+    q_stride[1], (is_ragged? q_stride[2] : std::min(q_stride[0], q_stride[2])),
+    nullptr,
+    k_stride[1], (is_ragged? k_stride[2] : std::min(k_stride[0], k_stride[2])),
+    nullptr,
+    v_stride[1], (is_ragged? v_stride[2] : std::min(v_stride[0], v_stride[2])),
+    nullptr, nullptr, 
+    nullptr, nullptr, 
+    nullptr, nullptr,
+    nullptr,
+    o_stride[1], (is_ragged? o_stride[2] : std::min(o_stride[0], o_stride[2])),
+    nullptr,
+    nullptr,
+    o_stride[1], (is_ragged? o_stride[2] : std::min(o_stride[0], o_stride[2])), //dO and O share the same stride in TE
+    scaling_factor, dropout_probability,
+    nullptr, nullptr,
+    set_ck_mask(mask_type, window_size_left, window_size_right),
+    window_size_left, window_size_right,
+    nullptr,
+    q_stride[1], (is_ragged? q_stride[2] : std::min(q_stride[0], q_stride[2])), //dq and q share the same stride in TE
+    nullptr,
+    nullptr,
+    nullptr,
+    dk_expanded_stride[1], (is_ragged? dk_expanded_stride[2] : std::min(dk_expanded_stride[0], dk_expanded_stride[2])), //dK and K share the same stride
+    dv_expanded_stride[1], (is_ragged? dv_expanded_stride[2] : std::min(dv_expanded_stride[0], dv_expanded_stride[2])), //dV and V share the same stride
+    nullptr,
+    k_stride[1], (is_ragged? k_stride[2] : std::min(k_stride[0], k_stride[2])), //dK and K share the same stride
+    nullptr,
+    v_stride[1], (is_ragged? v_stride[2] : std::min(v_stride[0], v_stride[2])), //dV and V share the same stride
+    nullptr, // softmax_lsed
+    deterministic,
+    nvte_ck_uses_bwd_v3,
+    nvte_ck_is_v3_atomic_fp32,
+    nvte_ck_how_v3_bf16_cvt,
+    true, //v3_api_check, TODO: remove later
+    stream)==1;
+}
+
+__global__ 
+void cu_seqlen_to_seqlen_kernel(
+  uint64_t b, 
+  const int32_t* cu_seqlen_q_ptr, const int32_t* cu_seqlen_kv_ptr, 
+  int32_t* seqlen_q_ptr, int32_t* seqlen_kv_ptr){
+
+  for(int b_idx = blockIdx.x * blockDim.x + threadIdx.x; b_idx < b; b_idx += blockDim.x * gridDim.x){
+    seqlen_q_ptr[b_idx] = cu_seqlen_q_ptr[b_idx + 1] - cu_seqlen_q_ptr[b_idx];
+    seqlen_kv_ptr[b_idx] = cu_seqlen_kv_ptr[b_idx + 1] - cu_seqlen_kv_ptr[b_idx];
+  }
+}
+
+// kernel launcher to remove padding for softmax_lse
+void cu_seqlen_to_seqlen(
+  uint64_t b, 
+  const void* cu_seqlen_q_ptr, const void* cu_seqlen_kv_ptr, 
+  void* seqlen_q_ptr, void* seqlen_kv_ptr, 
+  hipStream_t stream){
+
+  constexpr int THREADS_PER_BLOCK = 256;
+  dim3 block(THREADS_PER_BLOCK);
+  dim3 grid(ceil(1.0 * b /THREADS_PER_BLOCK));
+  cu_seqlen_to_seqlen_kernel<<<grid, block, 0, stream>>>(
+    b,
+    static_cast<const int32_t*>(cu_seqlen_q_ptr),
+    static_cast<const int32_t*>(cu_seqlen_kv_ptr),
+    static_cast<int32_t*>(seqlen_q_ptr),
+    static_cast<int32_t*>(seqlen_kv_ptr));
+}
 void fused_attn_ck_bwd_impl(
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v, uint64_t bias_b, uint64_t bias_h,
   bool pad_between_seqs, size_t max_tokens_q, size_t max_tokens_kv,
@@ -847,6 +951,11 @@ void fused_attn_ck_bwd_impl(
     if (env_p != nullptr && std::string(env_p) == "1")
       nvte_log_ck_config = true;
   } 
+  // bwd v3 is optional by enabling the following envs
+  // default values follows the ck example setting
+  bool nvte_ck_uses_bwd_v3 = getenv<int>("NVTE_CK_USES_BWD_V3", 0);
+  bool nvte_ck_is_v3_atomic_fp32 = getenv<int>("NVTE_CK_IS_V3_ATOMIC_FP32", 1);
+  int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
 
   bool is_mqa_gqa = (h > hg);
 
@@ -854,6 +963,9 @@ void fused_attn_ck_bwd_impl(
   size_t nsplits = deterministic? ceil(1.0*s_kv/kN0):1; 
 
   bool is_ragged = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_THD; 
+  bool is_batch = (nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_BSHD || 
+                   nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_SBHD);
+ 
   // extract the qkv and o storage bytes to allocate buffer for padding removing
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
   size_t q_storage_bytes = max_tokens_q*h*d_qk*nvte_dtype_size(dtype); 
@@ -882,8 +994,22 @@ void fused_attn_ck_bwd_impl(
     if(pad_between_seqs){
       // remove padding for the softmax_lse
       (*workspace_size)+= h*max_tokens_q*sizeof(float);
-      // allocate the q, k, v, o, do, dq, dk, dv,
-      (*workspace_size)+= 2*(q_storage_bytes + k_storage_bytes + v_storage_bytes + o_storage_bytes);
+      // TODO: remove v3 check after ck v2 fully support native padding
+      bool is_v3_supported = is_ck_attn_bwd_varlen_v3_supported(b, h, hg, s_q, s_kv, d_qk, d_v, max_tokens_q, max_tokens_kv, scaling_factor, dropout_probability, layout, bias_type, mask_type, window_size_left, window_size_right, deterministic, dtype, nvte_ck_uses_bwd_v3, nvte_ck_is_v3_atomic_fp32, nvte_ck_how_v3_bf16_cvt, stream);
+      if(is_batch || is_ragged&&(!is_v3_supported)){
+        // allocate the q, k, v, o, do, dq, dk, dv,
+        (*workspace_size)+= 2*(q_storage_bytes + k_storage_bytes + v_storage_bytes + o_storage_bytes);
+        if (nvte_log_ck_config) {
+          std::cout<<std::endl<<"attn_bwd(ck) need padding/unpadding workaround"<<std::endl;
+        }
+      }else{
+        // TODO: remove after ck unify the cu_seqlen api
+        // allocate the seqlen_padded's ptr
+        (*workspace_size)+= 2*b*sizeof(int32_t);
+        if (nvte_log_ck_config) {
+          std::cout<<std::endl<<"attn_bwd(ck) ck v2 need seqlen_padded instead of cu_seqlen_padded"<<std::endl;
+        }
+      }
     }else if(is_ragged){
       // remove padding for the softmax_lse
       (*workspace_size)+= h*max_tokens_q*sizeof(float);
@@ -941,6 +1067,7 @@ void fused_attn_ck_bwd_impl(
   // First h*max_tokens_q*sizeof(float) in workspace are for lse-d
   void* lse_workspace = workspace;
   workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + h*max_tokens_q*sizeof(float));
+  NVTE_CHECK_CUDA(cudaMemsetAsync(lse_workspace, 0, h*max_tokens_q*sizeof(float), stream));
 
   // The next section are for dq_acc_ptr
   void* dq_acc_ptr = workspace_next;
@@ -1004,93 +1131,105 @@ void fused_attn_ck_bwd_impl(
   
   void* devPtrSoftmaxLSEWithoutPadding = nullptr;
   
-  void* devPtrQWithoutPadding = nullptr;
-  void* devPtrKWithoutPadding = nullptr;
-  void* devPtrVWithoutPadding = nullptr;
-  void* devPtrOWithoutPadding = nullptr;
-  void* devPtrdOWithoutPadding = nullptr;
-  void* devPtrdQWithoutPadding = nullptr;
-  void* devPtrdKWithoutPadding = nullptr;
-  void* devPtrdVWithoutPadding = nullptr;
+  void* devPtrQWithoutPadding = devPtrQ;
+  void* devPtrKWithoutPadding = devPtrK;
+  void* devPtrVWithoutPadding = devPtrV;
+  void* devPtrOWithoutPadding = devPtrO;
+  void* devPtrdOWithoutPadding = devPtrdO;
+  void* devPtrdQWithoutPadding = devPtrdQ;
+  void* devPtrdKWithoutPadding = devPtrdK;
+  void* devPtrdVWithoutPadding = devPtrdV;
+  
+  // TODO: remove after ck v2 support cu_seqlen_padded ptrs
+  void* seqlen_q_ptr = nullptr;
+  void* seqlen_kv_ptr = nullptr;
 
+  //TODO: remove v3 api check after v2 fully support native padding
+  bool is_v3_supported = false;
   if(pad_between_seqs){
     devPtrSoftmaxLSEWithoutPadding = workspace_next;
     workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + h*max_tokens_q*sizeof(float));
-    //determine q, k, v buffer based on the workspace next ptr and layout group
-    NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
-    //Q ptr always comes at first
-    devPtrQWithoutPadding = workspace_next;
-    if(layout_group==NVTE_QKV_Layout_Group::NVTE_3HD ||layout_group==NVTE_QKV_Layout_Group::NVTE_H3D){
-      //keep the start address difference the same among q, k, and v
-      devPtrKWithoutPadding = static_cast<void *>(static_cast<int8_t *>(devPtrQWithoutPadding) + (static_cast<int8_t *>(devPtrK) - static_cast<int8_t *>(devPtrQ)));
-      devPtrVWithoutPadding = static_cast<void *>(static_cast<int8_t *>(devPtrQWithoutPadding) + (static_cast<int8_t *>(devPtrV) - static_cast<int8_t *>(devPtrQ)));
-      workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + q_storage_bytes + k_storage_bytes + v_storage_bytes);
-    }else if(layout_group==NVTE_QKV_Layout_Group::NVTE_HD_2HD ||layout_group==NVTE_QKV_Layout_Group::NVTE_HD_H2D){
-      workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + q_storage_bytes);
-      //keep the start address difference the same between k and v
-      devPtrKWithoutPadding = workspace_next;
-      devPtrVWithoutPadding = static_cast<void *>(static_cast<int8_t *>(devPtrKWithoutPadding) + (static_cast<int8_t *>(devPtrV) - static_cast<int8_t *>(devPtrK)));
-      workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + k_storage_bytes + v_storage_bytes);
+
+    //TODO: remove v3 api check after v2 fully support native padding
+    is_v3_supported = is_ck_attn_bwd_varlen_v3_supported(b, h, hg, s_q, s_kv, d_qk, d_v, max_tokens_q, max_tokens_kv, scaling_factor, dropout_probability, layout, bias_type, mask_type, window_size_left, window_size_right, deterministic, dtype, nvte_ck_uses_bwd_v3, nvte_ck_is_v3_atomic_fp32, nvte_ck_how_v3_bf16_cvt, stream);
+    if(is_batch || is_ragged&&(!is_v3_supported)){
+      //determine q, k, v buffer based on the workspace next ptr and layout group
+      NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
+      //Q ptr always comes at first
+      devPtrQWithoutPadding = workspace_next;
+      if(layout_group==NVTE_QKV_Layout_Group::NVTE_3HD ||layout_group==NVTE_QKV_Layout_Group::NVTE_H3D){
+        //keep the start address difference the same among q, k, and v
+        devPtrKWithoutPadding = static_cast<void *>(static_cast<int8_t *>(devPtrQWithoutPadding) + (static_cast<int8_t *>(devPtrK) - static_cast<int8_t *>(devPtrQ)));
+        devPtrVWithoutPadding = static_cast<void *>(static_cast<int8_t *>(devPtrQWithoutPadding) + (static_cast<int8_t *>(devPtrV) - static_cast<int8_t *>(devPtrQ)));
+        workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + q_storage_bytes + k_storage_bytes + v_storage_bytes);
+      }else if(layout_group==NVTE_QKV_Layout_Group::NVTE_HD_2HD ||layout_group==NVTE_QKV_Layout_Group::NVTE_HD_H2D){
+        workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + q_storage_bytes);
+        //keep the start address difference the same between k and v
+        devPtrKWithoutPadding = workspace_next;
+        devPtrVWithoutPadding = static_cast<void *>(static_cast<int8_t *>(devPtrKWithoutPadding) + (static_cast<int8_t *>(devPtrV) - static_cast<int8_t *>(devPtrK)));
+        workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + k_storage_bytes + v_storage_bytes);
+      }else{
+        //qkv separated
+        workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + q_storage_bytes);
+        devPtrKWithoutPadding = workspace_next;
+        workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + k_storage_bytes);
+        devPtrVWithoutPadding = workspace_next;
+        workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + v_storage_bytes);
+      }
+      //determine the o, do buffer based on workspace next section
+      devPtrOWithoutPadding = workspace_next;
+      workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + o_storage_bytes);
+      devPtrdOWithoutPadding = workspace_next;
+      workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + o_storage_bytes);
+
+      //determine dq, dk, dv buffer based on the workspace next ptr and layout group
+      //dQ ptr always comes at first
+      devPtrdQWithoutPadding = workspace_next;
+      if(layout_group==NVTE_QKV_Layout_Group::NVTE_3HD ||layout_group==NVTE_QKV_Layout_Group::NVTE_H3D){
+        //keep the start address difference the same among q, k, and v
+        devPtrdKWithoutPadding = static_cast<void *>(static_cast<int8_t *>(devPtrdQWithoutPadding) + (static_cast<int8_t *>(devPtrK) - static_cast<int8_t *>(devPtrQ)));
+        devPtrdVWithoutPadding = static_cast<void *>(static_cast<int8_t *>(devPtrdQWithoutPadding) + (static_cast<int8_t *>(devPtrV) - static_cast<int8_t *>(devPtrQ)));
+        workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + q_storage_bytes + k_storage_bytes + v_storage_bytes);
+
+        // zeroing out the entire dqkv since packed
+        NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdQWithoutPadding, 0, q_storage_bytes + k_storage_bytes+ v_storage_bytes, stream));
+      }else if(layout_group==NVTE_QKV_Layout_Group::NVTE_HD_2HD ||layout_group==NVTE_QKV_Layout_Group::NVTE_HD_H2D){
+        workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + q_storage_bytes);
+        //keep the start address difference the same between k and v
+        devPtrdKWithoutPadding = workspace_next;
+        devPtrdVWithoutPadding = static_cast<void *>(static_cast<int8_t *>(devPtrdKWithoutPadding) + (static_cast<int8_t *>(devPtrV) - static_cast<int8_t *>(devPtrK)));
+        workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + k_storage_bytes + v_storage_bytes);
+
+        // zeroing out just the dq itself
+        NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdQWithoutPadding, 0, q_storage_bytes, stream));
+      }else{
+        //qkv separated
+        workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + q_storage_bytes);
+        devPtrdKWithoutPadding = workspace_next;
+        workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + k_storage_bytes);
+        devPtrdVWithoutPadding = workspace_next;
+        workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + v_storage_bytes);
+
+        // zeroing out just the dq itself
+        NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdQWithoutPadding, 0, q_storage_bytes, stream));
+      }
     }else{
-      //qkv separated
-      workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + q_storage_bytes);
-      devPtrKWithoutPadding = workspace_next;
-      workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + k_storage_bytes);
-      devPtrVWithoutPadding = workspace_next;
-      workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + v_storage_bytes);
-    }
-    //determine the o, do buffer based on workspace next section
-    devPtrOWithoutPadding = workspace_next;
-    workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + o_storage_bytes);
-    devPtrdOWithoutPadding = workspace_next;
-    workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + o_storage_bytes);
-
-    //determine dq, dk, dv buffer based on the workspace next ptr and layout group
-    //dQ ptr always comes at first
-    devPtrdQWithoutPadding = workspace_next;
-    if(layout_group==NVTE_QKV_Layout_Group::NVTE_3HD ||layout_group==NVTE_QKV_Layout_Group::NVTE_H3D){
-      //keep the start address difference the same among q, k, and v
-      devPtrdKWithoutPadding = static_cast<void *>(static_cast<int8_t *>(devPtrdQWithoutPadding) + (static_cast<int8_t *>(devPtrK) - static_cast<int8_t *>(devPtrQ)));
-      devPtrdVWithoutPadding = static_cast<void *>(static_cast<int8_t *>(devPtrdQWithoutPadding) + (static_cast<int8_t *>(devPtrV) - static_cast<int8_t *>(devPtrQ)));
-      workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + q_storage_bytes + k_storage_bytes + v_storage_bytes);
-
-      // zeroing out the entire dqkv since packed
-      NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdQWithoutPadding, 0, q_storage_bytes + k_storage_bytes+ v_storage_bytes, stream));
-    }else if(layout_group==NVTE_QKV_Layout_Group::NVTE_HD_2HD ||layout_group==NVTE_QKV_Layout_Group::NVTE_HD_H2D){
-      workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + q_storage_bytes);
-      //keep the start address difference the same between k and v
-      devPtrdKWithoutPadding = workspace_next;
-      devPtrdVWithoutPadding = static_cast<void *>(static_cast<int8_t *>(devPtrdKWithoutPadding) + (static_cast<int8_t *>(devPtrV) - static_cast<int8_t *>(devPtrK)));
-      workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + k_storage_bytes + v_storage_bytes);
-
-      // zeroing out just the dq itself
-      NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdQWithoutPadding, 0, q_storage_bytes, stream));
-    }else{
-      //qkv separated
-      workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + q_storage_bytes);
-      devPtrdKWithoutPadding = workspace_next;
-      workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + k_storage_bytes);
-      devPtrdVWithoutPadding = workspace_next;
-      workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + v_storage_bytes);
-
-      // zeroing out just the dq itself
-      NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdQWithoutPadding, 0, q_storage_bytes, stream));
+      seqlen_q_ptr = workspace_next;
+      workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + b*sizeof(int32_t));
+      seqlen_kv_ptr = workspace_next;
+      workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + b*sizeof(int32_t));
     }
   }else if(is_ragged){
     devPtrSoftmaxLSEWithoutPadding = workspace_next;
     workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + h*max_tokens_q*sizeof(float));
   }
 
-  // bwd v3 is optional by enabling the following envs
-  // default values follows the ck example setting
-  bool nvte_ck_uses_bwd_v3 = getenv<int>("NVTE_CK_USES_BWD_V3", 0);
-  bool nvte_ck_is_v3_atomic_fp32 = getenv<int>("NVTE_CK_IS_V3_ATOMIC_FP32", 1);
-  int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
   if (nvte_log_ck_config) {
     std::cout<<std::endl<<"attn_bwd(ck): ";
     std::cout<<"layout: "<<layout<<", ";
     std::cout<<"max_tokens_q: "<<max_tokens_q<<", ";
     std::cout<<"max_tokens_kv: "<<max_tokens_kv<<", ";
+    std::cout<<"is_batch: "<<is_batch<<", ";
     std::cout<<"is_ragged: "<<is_ragged<<", ";
     std::cout<<"q_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d_qk<<"), ";
     std::cout<<"q_stride: ("<<q_stride[0]<<", "<<q_stride[1]<<", "<<q_stride[2]<<", "<<q_stride[3]<<"), ";
@@ -1121,16 +1260,21 @@ void fused_attn_ck_bwd_impl(
     std::cout<<"nvte_ck_how_v3_bf16_cvt: "<<nvte_ck_how_v3_bf16_cvt<<std::endl;
   }
   if(pad_between_seqs){
-    // remove padding for q, k, v, o, do
-    remove_padding(dtype, b, h, s_q, d_qk, max_tokens_q, is_ragged, q_stride[0], q_stride[1], q_stride[2], devPtrQ, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrQWithoutPadding, stream);
-    remove_padding(dtype, b, hg, s_kv, d_qk, max_tokens_kv, is_ragged, k_stride[0], k_stride[1], k_stride[2], devPtrK, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrKWithoutPadding, stream);
-    remove_padding(dtype, b, hg, s_kv, d_v, max_tokens_kv, is_ragged, v_stride[0], v_stride[1], v_stride[2], devPtrV, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrVWithoutPadding, stream);
-    // o and do should be of same shape as q
-    remove_padding(dtype, b, h, s_q, d_v, max_tokens_q, is_ragged, o_stride[0], o_stride[1], o_stride[2], devPtrO, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrOWithoutPadding, stream);
-    remove_padding(dtype, b, h, s_q, d_v, max_tokens_q, is_ragged, o_stride[0], o_stride[1], o_stride[2], devPtrdO, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrdOWithoutPadding, stream);
-    // also remove the padding for softmax lse
-    remove_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxLSEWithoutPadding, stream);
-
+    if(is_batch || is_ragged&&(!is_v3_supported)){
+      // remove padding for q, k, v, o, do
+      remove_padding(dtype, b, h, s_q, d_qk, max_tokens_q, is_ragged, q_stride[0], q_stride[1], q_stride[2], devPtrQ, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrQWithoutPadding, stream);
+      remove_padding(dtype, b, hg, s_kv, d_qk, max_tokens_kv, is_ragged, k_stride[0], k_stride[1], k_stride[2], devPtrK, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrKWithoutPadding, stream);
+      remove_padding(dtype, b, hg, s_kv, d_v, max_tokens_kv, is_ragged, v_stride[0], v_stride[1], v_stride[2], devPtrV, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrVWithoutPadding, stream);
+      // o and do should be of same shape as q
+      remove_padding(dtype, b, h, s_q, d_v, max_tokens_q, is_ragged, o_stride[0], o_stride[1], o_stride[2], devPtrO, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrOWithoutPadding, stream);
+      remove_padding(dtype, b, h, s_q, d_v, max_tokens_q, is_ragged, o_stride[0], o_stride[1], o_stride[2], devPtrdO, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrdOWithoutPadding, stream);
+      // also remove the padding for softmax lse
+      remove_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxLSEWithoutPadding, stream);
+    }else{
+      // v3 with native padding supported
+      remove_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrSeqOffsetsQ, devPtrSeqOffsetsQ, devPtrSoftmaxLSEWithoutPadding, stream);
+      cu_seqlen_to_seqlen(b, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV, seqlen_q_ptr, seqlen_kv_ptr, stream);
+    }
     using ck_fused_attn::ck_attn_varlen_bwd;
     NVTE_CHECK_CUDA(
       ck_attn_varlen_bwd(
@@ -1144,6 +1288,9 @@ void fused_attn_ck_bwd_impl(
         devPtrVWithoutPadding,
         v_stride[1], (is_ragged? v_stride[2] : std::min(v_stride[0], v_stride[2])),
         devPtrCuSeqlensQ, devPtrCuSeqlensKV, 
+        (is_batch || is_ragged&&(!is_v3_supported))? nullptr : devPtrSeqOffsetsQ, 
+        (is_batch || is_ragged&&(!is_v3_supported))? nullptr : devPtrSeqOffsetsKV, 
+        seqlen_q_ptr, seqlen_kv_ptr,
         devPtrOWithoutPadding,
         o_stride[1], (is_ragged? o_stride[2] : std::min(o_stride[0], o_stride[2])),
         devPtrSoftmaxLSEWithoutPadding,
@@ -1169,13 +1316,15 @@ void fused_attn_ck_bwd_impl(
         nvte_ck_uses_bwd_v3,
         nvte_ck_is_v3_atomic_fp32,
         nvte_ck_how_v3_bf16_cvt,
+        false, //v3_api_check, TODO: remove later
         stream));
-    // add padding for dq, dk, dv
-    // dq, dk, dv of same shape as q, k, v
-    add_padding(dtype, b, h, s_q, d_qk, max_tokens_q, is_ragged, q_stride[0], q_stride[1], q_stride[2], devPtrdQWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrdQ, stream);
-    add_padding(dtype, b, hg, s_kv, d_qk, max_tokens_kv, is_ragged, k_stride[0], k_stride[1], k_stride[2], devPtrdKWithoutPadding, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrdK, stream);
-    add_padding(dtype, b, hg, s_kv, d_v, max_tokens_kv, is_ragged, v_stride[0], v_stride[1], v_stride[2], devPtrdVWithoutPadding, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrdV, stream);
-
+    if(is_batch || is_ragged&&(!is_v3_supported)){
+      // add padding for dq, dk, dv
+      // dq, dk, dv of same shape as q, k, v
+      add_padding(dtype, b, h, s_q, d_qk, max_tokens_q, is_ragged, q_stride[0], q_stride[1], q_stride[2], devPtrdQWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrdQ, stream);
+      add_padding(dtype, b, hg, s_kv, d_qk, max_tokens_kv, is_ragged, k_stride[0], k_stride[1], k_stride[2], devPtrdKWithoutPadding, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrdK, stream);
+      add_padding(dtype, b, hg, s_kv, d_v, max_tokens_kv, is_ragged, v_stride[0], v_stride[1], v_stride[2], devPtrdVWithoutPadding, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrdV, stream);
+    }
   }else if(is_ragged){
     remove_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxLSEWithoutPadding, stream);
 
@@ -1192,6 +1341,9 @@ void fused_attn_ck_bwd_impl(
         devPtrV,
         v_stride[1], v_stride[2],
         devPtrCuSeqlensQ, devPtrCuSeqlensKV, 
+        //devPtrSeqOffsetsQ, devPtrSeqOffsetsKV, 
+        nullptr, nullptr,
+        nullptr, nullptr,
         devPtrO,
         o_stride[1], o_stride[2],
         devPtrSoftmaxLSEWithoutPadding,
@@ -1217,6 +1369,7 @@ void fused_attn_ck_bwd_impl(
         nvte_ck_uses_bwd_v3,
         nvte_ck_is_v3_atomic_fp32,
         nvte_ck_how_v3_bf16_cvt,
+        false, //v3_api_check, TODO: remove later
         stream));
   }else{
     using ck_fused_attn::ck_attn_bwd;
