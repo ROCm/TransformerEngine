@@ -14,6 +14,7 @@ list(APPEND test_cuda_sources
             test_dequantize_mxfp8.cu
             test_cast_transpose.cu
             test_transpose.cu
+            test_cast_transpose.cu
             test_cast_transpose_current_scaling.cu
             test_cast_transpose_dbias.cu
             test_cast_transpose_dbias_dgelu.cu
@@ -28,6 +29,7 @@ list(APPEND test_cuda_sources
 	          ../test_common.cu)
 if(USE_CUDA)
   list(APPEND test_cuda_sources
+              test_cast_float8blockwise.cu
               test_cast_dbias.cu
               test_cast_dbias_dgelu.cu)
 else()

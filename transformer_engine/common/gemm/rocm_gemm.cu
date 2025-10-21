@@ -17,6 +17,7 @@
 #include <chrono>
 #include <optional>
 #include <hipblaslt/hipblaslt.h>
+#include <hipblaslt/hipblaslt-ext.hpp>
 
 #include <iostream>
 #include <cstdlib>
@@ -190,89 +191,108 @@ static hipDataType get_hipblaslt_dtype(const transformer_engine::DType t) {
 
 //TODO: unified with cublaslt_gemm.cu
 struct GemmParam {
-  void *A;
-  void *B;
-  cublasOperation_t transA;
-  cublasOperation_t transB;
-  transformer_engine::DType Atype;
-  transformer_engine::DType Btype;
-  void *A_scale_inv;
-  void *B_scale_inv;
-  int lda;
-  int ldb;
-
-  GemmParam(cublasOperation_t transA, cublasOperation_t transB)
-      : A(nullptr),
-        B(nullptr),
-        transA(transA),
-        transB(transB),
-        Atype(transformer_engine::DType::kNumTypes),
-        Btype(transformer_engine::DType::kNumTypes),
-        A_scale_inv(nullptr),
-        B_scale_inv(nullptr),
-        lda(0),
-        ldb(0) {}
+  void *A = nullptr;
+  void *B = nullptr;
+  cublasOperation_t transA = CUBLAS_OP_N;
+  cublasOperation_t transB = CUBLAS_OP_N;
+  transformer_engine::DType Atype = transformer_engine::DType::kNumTypes;
+  transformer_engine::DType Btype = transformer_engine::DType::kNumTypes;
+  void *A_scale_inv = nullptr;
+  void *B_scale_inv = nullptr;
+  int lda = 0;  // A column strides
+  int ldb = 0;  // B column strides
 };
 
 GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cublasOperation_t transA,
                                 const transformer_engine::Tensor &B, const cublasOperation_t transB,
-                                const int k, const int lda, const int ldb) {
+                                const int m, const int n, const int k) {
   using namespace transformer_engine;
   NVTE_CHECK(A.scaling_mode == B.scaling_mode,
              "Inputs A and B to GEMM need to have the same scaling mode!");
   NVTE_CHECK(A.has_data() || A.has_columnwise_data(), "Input A does not hold any data!");
   NVTE_CHECK(B.has_data() || B.has_columnwise_data(), "Input B does not hold any data!");
-  GemmParam ret(transA, transB);
+  GemmParam ret;
 
   // Transpose mode with column-major ordering
   bool is_A_transposed = transA == CUBLAS_OP_T;
   bool is_B_transposed = transB == CUBLAS_OP_T;
 
-  ret.lda = lda;
-  ret.ldb = ldb;
 
   if (is_tensor_scaling(A.scaling_mode)) {
+    // Unscaled or FP8 tensor scaling
     ret.A = A.data.dptr;
+    ret.transA = transA;
+    ret.Atype = A.data.dtype;
     ret.A_scale_inv = A.scale_inv.dptr;
-    if (is_A_transposed) {
-      ret.Atype = A.data.dtype;
-    } else {
-      ret.Atype = A.has_columnwise_data() ? A.columnwise_data.dtype : A.data.dtype;
-      if (is_fp8_dtype(ret.Atype)) {
-        // Hopper and Ada - we need to use columnwise_data and change transA
-        NVTE_CHECK(A.has_columnwise_data(), "Input A is not suitable for columnwise usage!");
+    ret.lda = is_A_transposed ? k : m;
+    if (!nvte_is_non_tn_fp8_gemm_supported() && !is_A_transposed) {
+      // Hopper only supports TN GEMMs for FP8. "Column-wise data" is transpose of data.
+      if (A.has_columnwise_data() && is_fp8_dtype(A.columnwise_data.dtype)) {
         ret.A = A.columnwise_data.dptr;
         ret.transA = CUBLAS_OP_T;
+        ret.Atype = A.columnwise_data.dtype;
         ret.A_scale_inv = A.columnwise_scale_inv.dptr;
         ret.lda = k;
+      } else {
+        NVTE_CHECK(!is_fp8_dtype(ret.Atype), "Input A is missing column-wise usage");
       }
     }
-    ret.B = B.data.dptr;
-    ret.B_scale_inv = B.scale_inv.dptr;
-    if (is_B_transposed) {
-      ret.Btype = B.has_columnwise_data() ? B.columnwise_data.dtype : B.data.dtype;
-      if (is_fp8_dtype(ret.Btype)) {
-        // Hopper and Ada - we need to use columnwise_data and change transA
-        NVTE_CHECK(B.has_columnwise_data(), "Input B is not suitable for columnwise usage!");
-        ret.B = B.columnwise_data.dptr;
-        ret.transB = CUBLAS_OP_N;
-        ret.B_scale_inv = B.columnwise_scale_inv.dptr;
-        ret.ldb = k;
-      }
+  } else if (is_mxfp_scaling(A.scaling_mode)) {
+    // MXFP8
+    // Note: Row-wise and column-wise data are scaled along different
+    // dimensions (with matrix interpreted in row-major order).
+    if (is_A_transposed) {
+      NVTE_CHECK(A.has_data(), "Input A is missing row-wise usage");
     } else {
-      ret.Btype = B.data.dtype;
+      NVTE_CHECK(A.has_columnwise_data(), "Input A is missing column-wise usage");
     }
-  } else {
-    // If not tensor scaling (which includes also high precision types), we need to
-    // use the proper version of data
-    // We leave the transA/B values as is, since Blackwell supports transposes
     ret.A = is_A_transposed ? A.data.dptr : A.columnwise_data.dptr;
+    ret.transA = transA;
     ret.Atype = is_A_transposed ? A.data.dtype : A.columnwise_data.dtype;
     ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
+    ret.lda = is_A_transposed ? k : m;
+  } else {
+    NVTE_ERROR("A has unsupported scaling mode");
+  }
+
+  // Configure B matrix
+  if (is_tensor_scaling(B.scaling_mode)) {
+    // Unscaled or FP8 tensor scaling
+    ret.B = B.data.dptr;
+    ret.transB = transB;
+    ret.Btype = B.data.dtype;
+    ret.B_scale_inv = B.scale_inv.dptr;
+    ret.ldb = is_B_transposed ? n : k;
+    if (!nvte_is_non_tn_fp8_gemm_supported() && is_B_transposed) {
+      // Hopper only supports TN GEMMs for FP8. "Column-wise data" is transpose of data.
+      if (B.has_columnwise_data() && is_fp8_dtype(B.columnwise_data.dtype)) {
+        ret.B = B.columnwise_data.dptr;
+        ret.transB = CUBLAS_OP_N;
+        ret.Btype = B.columnwise_data.dtype;
+        ret.B_scale_inv = B.columnwise_scale_inv.dptr;
+        ret.ldb = k;
+      } else {
+        NVTE_CHECK(!is_fp8_dtype(ret.Btype), "Input B is missing column-wise usage");
+      }
+    }
+  } else if (is_mxfp_scaling(B.scaling_mode)) {
+    // MXFP8
+    // Note: Row-wise and column-wise data are scaled along different
+    // dimensions (with matrix interpreted in row-major order).
+    if (is_B_transposed) {
+      NVTE_CHECK(B.has_columnwise_data(), "Input B is missing column-wise usage");
+    } else {
+      NVTE_CHECK(B.has_data(), "Input B is missing row-wise usage");
+    }
     ret.B = is_B_transposed ? B.columnwise_data.dptr : B.data.dptr;
+    ret.transB = transB;
     ret.Btype = is_B_transposed ? B.columnwise_data.dtype : B.data.dtype;
     ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
+    ret.ldb = is_B_transposed ? n : k;
+  } else {
+    NVTE_ERROR("B has unsupported scaling mode");
   }
+
   return ret;
 }
 
@@ -502,24 +522,26 @@ static class GemmAlgoCache {
 public:
   struct Key {
     int deviceCap;
-    hipDataType a_type, b_type, d_type, bias_type;
+    hipDataType a_type, b_type, d_type, bias_type, aux_type;
     int m, n, k;
     int lda, ldb, ldd;
     hipblasOperation_t transa, transb;
+    //Make it int instead of hipblasLtMatmulMatrixScale_t for compatibility with old hipblasLt
+    int scaling_mode;
     hipblasLtEpilogue_t epilogue;
 
     Key(int deviceCap_,
         hipDataType a_type_, hipDataType b_type_,
-        hipDataType d_type_, hipDataType bias_type_,
+        hipDataType d_type_, hipDataType bias_type_, hipDataType aux_type_,
         int m_, int n_, int k_, int lda_, int ldb_, int ldd_,
         hipblasOperation_t transa_, hipblasOperation_t transb_,
-        hipblasLtEpilogue_t epilogue_):
+        int scaling_mode_, hipblasLtEpilogue_t epilogue_):
         deviceCap(deviceCap_),
         a_type(a_type_), b_type(b_type_),
-        d_type(d_type_), bias_type(bias_type_),
+        d_type(d_type_), bias_type(bias_type_), aux_type(aux_type_),
         m(m_), n(n_), k(k_), lda(lda_), ldb(ldb_), ldd(ldd_),
         transa(transa_), transb(transb_),
-        epilogue(epilogue_) {}
+        scaling_mode(scaling_mode_), epilogue(epilogue_) {}
 
     Key() {}
 
@@ -528,10 +550,11 @@ public:
       return ((deviceCap == val.deviceCap)
       && (a_type == val.a_type) && (b_type == val.b_type)
       && (d_type == val.d_type) && (bias_type == val.bias_type)
+      && (aux_type == val.aux_type)
       && (m == val.m) && (n == val.n) && (k == val.k)
       && (lda == val.lda) && (ldb == val.ldb) && (ldd == val.ldd)
       && (transa == val.transa) && (transb == val.transb)
-      && (epilogue == val.epilogue) );
+      && (scaling_mode == val.scaling_mode) && (epilogue == val.epilogue) );
     }
 
     struct Comp
@@ -659,8 +682,8 @@ protected:
   {
     csv_helper fs(ofs, csv_sep);
     fs << "dev_cap" << "m" << "n"  << "k" << "trans_a" << "trans_b" 
-    << "type_a" << "type_b" << "type_d" << "bias_type" 
-    << "lda" << "ldb" << "ldd" << "epi" << "comp" << "scale"
+    << "type_a" << "type_b" << "type_d" << "bias_type" << "aux_type"
+    << "lda" << "ldb" << "ldd" << "scale_mode" << "epi" << "comp" << "scale_type"
     << "ws_min" << "ws_max" << "algo_id" << "aidx";
   }
   
@@ -701,7 +724,7 @@ protected:
       if (line.empty() || line[0] == '#') continue;
       std::istringstream is(line);
       char c;
-      std::string type_a, type_b, type_d, bias_type, trans_a, trans_b, epi, comp, scale;
+      std::string type_a, type_b, type_d, bias_type, aux_type, trans_a, trans_b, epi, comp, scale;
       int64_t algo_id;
       int algo_idx;
       size_t ws_min, ws_max;
@@ -727,7 +750,8 @@ protected:
       std::getline(is, type_b, csv_sep);
       std::getline(is, type_d, csv_sep);
       std::getline(is, bias_type, csv_sep);
-      is >> cfg.lda >> c >> cfg.ldb >> c >> cfg.ldd >> c;
+      is >> cfg.lda >> c >> cfg.ldb >> c >> cfg.ldd >> c >> cfg.scaling_mode >> c;
+      std::getline(is, aux_type, csv_sep);
       std::getline(is, epi, csv_sep);
       std::getline(is, comp, csv_sep);
       std::getline(is, scale, csv_sep);
@@ -742,6 +766,23 @@ protected:
       if (ws_min > ws_max)
       {
         std::cout << "[WARNING] Invalid WS size at " << line << "\n";
+        continue;
+      }
+
+      //Check and filter out compute and scale types
+      if (computeNameMapper.getValue(comp, "comp") != HIPBLAS_COMPUTE_32F ||
+        typeNameMapper.getValue(scale, "scale") != HIP_R_32F)
+      {
+        continue;
+      }
+
+#if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
+      if (cfg.scaling_mode < 0 || cfg.scaling_mode >= (int)HIPBLASLT_MATMUL_MATRIX_SCALE_END)
+#else
+      if (cfg.scaling_mode != 0)
+#endif
+      {
+        std::cout << "[WARNING] Unsupported scaling mode at " << line << "\n";
         continue;
       }
 
@@ -762,17 +803,14 @@ protected:
       cfg.bias_type = (bias_type == "-")
                           ? (hipDataType)-1
                           : typeNameMapper.getValue(bias_type, "bias_type", fp8_filter);
+      cfg.aux_type = (aux_type == "-")
+                          ? (hipDataType)-1
+                          : typeNameMapper.getValue(aux_type, "aux_type", fp8_filter);
 
       cfg.transa = transposeNameMapper.getValue(trans_a, "trans_a");
       cfg.transb = transposeNameMapper.getValue(trans_b, "trans_b");
 
       cfg.epilogue = epilogueNameMapper.getValue(epi, "epi");
-      //Check and filter out compute and scale types
-      if (computeNameMapper.getValue(comp, "comp") != HIPBLAS_COMPUTE_32F ||
-        typeNameMapper.getValue(scale, "scale") != HIP_R_32F)
-      {
-        continue;
-      }
 
       if (find_(cfg, ws_min, ws_max))
       {
@@ -853,7 +891,8 @@ protected:
       << transposeNameMapper.getName(cfg.transa) << transposeNameMapper.getName(cfg.transb)
       << typeNameMapper.getName(cfg.a_type) << typeNameMapper.getName(cfg.b_type) << typeNameMapper.getName(cfg.d_type)
       << ((cfg.bias_type == (hipDataType)-1) ? "-" : typeNameMapper.getName(cfg.bias_type))
-      << cfg.lda << cfg.ldb << cfg.ldd << epilogueNameMapper.getName(cfg.epilogue)
+      << ((cfg.aux_type == (hipDataType)-1) ? "-" : typeNameMapper.getName(cfg.aux_type))
+      << cfg.lda << cfg.ldb << cfg.ldd << cfg.scaling_mode << epilogueNameMapper.getName(cfg.epilogue)
       << computeNameMapper.getName(HIPBLAS_COMPUTE_32F) << typeNameMapper.getName(HIP_R_32F)
       << algo.ws_size_min << algo.ws_size_max << algo.algoId << algo.index << csv_helper::end() << "\n";
   }
@@ -928,7 +967,7 @@ void hipblaslt_gemm(const Tensor *inputA,
   }
   NVTE_CHECK(k > 0);
 
-  const GemmParam &param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, k, lda, ldb);
+  const GemmParam &param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k);
 
   bool nvte_log_gemm_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_GEMM_CONFIG") ) {
@@ -970,19 +1009,35 @@ void hipblaslt_gemm(const Tensor *inputA,
   const hipDataType B_type = get_hipblaslt_dtype(param.Btype);
   const hipDataType D_type = get_hipblaslt_dtype(outputD->data.dtype);
   const hipDataType bias_type = get_hipblaslt_dtype(inputBias->data.dtype);
-  // const hipblasltDatatype_t aux_type = get_hipblaslt_dtype(outputPreGelu->data.dtype);
+  const hipDataType aux_type = get_hipblaslt_dtype(outputPreGelu->data.dtype);
 
   NVTE_CHECK(!is_fp8_dtype(param.Atype) || param.A_scale_inv != nullptr,
              "FP8 input to GEMM requires inverse of scale!");
   NVTE_CHECK(!is_fp8_dtype(param.Btype) || param.B_scale_inv != nullptr,
              "FP8 input to GEMM requires inverse of scale!");
 
-  // check consistency of arguments:
-  // if fp8 is desired, context cannot be null
+#if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
+  if (use_fp8 && gelu) {
+    hipDeviceProp_t prop;
+    NVTE_CHECK_CUDA(hipGetDeviceProperties(&prop, 0));
+    // Currently hipblasLT only supports fp8 gemm + gelu fusion only on MI300
+    if (prop.major == 9 && prop.minor == 4) {
+      bool allow_fp8_gemm = (param.Atype == DType::kFloat8E4M3) &&
+                          (param.Btype == DType::kFloat8E4M3) &&
+                          (outputD->data.dtype == DType::kFloat8E4M3) &&
+                          (!bias || inputBias->data.dtype == DType::kFloat16) &&
+                          (outputPreGelu->data.dtype == DType::kFloat16 || outputPreGelu->data.dtype == outputD->data.dtype);
+      NVTE_CHECK(allow_fp8_gemm, "fp8 gemm + gelu fusion is unavailable with current config!");
+    } else {
+      NVTE_CHECK(false, "fp8 gemm + gelu fusion is unavailable right now!");
+    }
+  }
+#else
   // fp8 + gelu fusion + fp8 aux is unavailable right now.
   if (use_fp8) {
     NVTE_CHECK(!gelu, "fp8 gemm + gelu fusion is unavailable right now!");
   }
+#endif
   if (is_fp8_dtype(outputD->data.dtype)) {
     NVTE_CHECK(!accumulate, "Accumulation mode not supported with FP8 GEMM output!");
   }
@@ -1031,8 +1086,13 @@ void hipblaslt_gemm(const Tensor *inputA,
                                                        &param.transB, sizeof(param.transB)));
 
   // set fp8 attributes -- input and output types should already be set to fp8 as appropriate
-  // Note: gelu fusion isn't available right now, and we don't need
+  // Note: gelu fusion is available for certain config from rocm 7.0
   // amax(D) either (next op is high precision).
+#if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
+    hipblasLtMatmulMatrixScale_t scaling_mode = (hipblasLtMatmulMatrixScale_t)0;
+#else
+    constexpr int scaling_mode = 0;
+#endif
   if (use_fp8) {
     // Split accumulator.
     const int8_t fastAccuMode = (use_split_accumulator) ? 0 : 1;
@@ -1042,10 +1102,6 @@ void hipblaslt_gemm(const Tensor *inputA,
                                                      &fastAccuMode,
                                                      sizeof(fastAccuMode)));
     */
-
-#if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
-    hipblasLtMatmulMatrixScale_t scaling_mode;
-#endif
     if ((is_delayed_tensor_scaling(inputA->scaling_mode) &&
          is_delayed_tensor_scaling(inputB->scaling_mode))) {
 #if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
@@ -1082,6 +1138,14 @@ void hipblaslt_gemm(const Tensor *inputA,
                                                        HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE,
                                                        &bias_type, sizeof(bias_type)));
     }
+#if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
+    if (gelu){
+      NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(operationDesc,
+                                                        HIPBLASLT_MATMUL_DESC_EPILOGUE_AUX_DATA_TYPE,
+                                                        &aux_type,
+                                                        sizeof(aux_type)));
+    }
+#endif
   }
   
   if (bias && gelu) {
@@ -1133,15 +1197,54 @@ void hipblaslt_gemm(const Tensor *inputA,
 
   GemmAlgoCache::Key gemm_cfg(algoCache.device_cap(device_id), A_type, B_type, D_type, 
     use_fp8 ? bias_type : (hipDataType)-1,
-    m, n, k, param.lda, param.ldb, ldd, param.transA, param.transB, epilogue );
+    (use_fp8 && gelu) ? aux_type : (hipDataType)-1,
+    m, n, k, param.lda, param.ldb, ldd, param.transA, param.transB, scaling_mode, epilogue );
   GemmAlgoCache::Algo cached_algo;
   if (algoCache.find(gemm_cfg, workspaceSize, cached_algo) == 0 || !cached_algo.algo.has_value())
   {
+    bool logTuning = getIntEnv("TE_HIPBLASLT_LOG_TUNING", 0, 0) != 0;
+
+    // Find algo base algo_id directly if tuning file is set.
+    if (cached_algo.hasId())
+    {
+      std::vector<hipblasLtMatmulHeuristicResult_t> algo_arr;
+      std::vector<int> algo_index{static_cast<int>(cached_algo.algoId)};
+      
+      if (hipblaslt_ext::getAlgosFromIndex(handle, algo_index, algo_arr) == HIPBLAS_STATUS_SUCCESS &&
+          algo_arr[0].state == HIPBLAS_STATUS_SUCCESS) {
+        size_t ws_size_min = 0;
+        if (HIPBLAS_STATUS_SUCCESS == hipblaslt_ext::matmulIsAlgoSupported(
+          handle,
+          operationDesc, 
+          static_cast<const void*>(&one),
+          Adesc, 
+          Bdesc, 
+          static_cast<const void*>(&beta),
+          Ddesc,
+          Ddesc,
+          algo_arr[0].algo,
+          ws_size_min
+        )) {
+
+          if (ws_size_min <= workspaceSize && ws_size_min <= algo_arr[0].workspaceSize) {
+            cached_algo.algo = algo_arr[0].algo;
+            if (cached_algo.ws_size_min != algo_arr[0].workspaceSize) {
+              cached_algo.ws_size_min = algo_arr[0].workspaceSize;
+              algoCache.store(gemm_cfg, cached_algo);
+            }
+          }
+        }
+      }
+
+      if (logTuning && !cached_algo.algo.has_value()) {
+        std::cout << "[WARNING] Cannot get corresponding solution from cached algoId " << cached_algo.algoId << std::endl;
+      }
+    }
+
     int firstAlgo = getIntEnv("TE_HIPBLASLT_ALGO_SELECTION", 0, 0);
     int tuneLoopCount = getIntEnv("TE_HIPBLASLT_TUNING_RUN_COUNT", 0, 0);
     int algoTuneCount = 1;
     std::vector<hipblasLtMatmulHeuristicResult_t> algoArr;
-    bool logTuning = getIntEnv("TE_HIPBLASLT_LOG_TUNING", 0, 0) != 0;
 
     if (tuneLoopCount)
     {
@@ -1152,8 +1255,7 @@ void hipblaslt_gemm(const Tensor *inputA,
       algoTuneCount = getIntEnv("TE_HIPBLASLT_TUNING_ALGO_COUNT", defaultAlgoCount, 1);
     }
     algoTuneCount += firstAlgo;
-    int algoTotalCount = cached_algo.hasId() ? std::max(algoTuneCount, (cached_algo.index + 1)) : algoTuneCount;
-    algoArr.resize(algoTotalCount);
+    algoArr.resize(algoTuneCount);
 
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceCreate(&preference));
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceSetAttribute(
@@ -1161,47 +1263,17 @@ void hipblaslt_gemm(const Tensor *inputA,
                             &workspaceSize, sizeof(workspaceSize)));
 
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Cdesc,
-                                                    Ddesc, preference, algoTotalCount, algoArr.data(),
-                                                    &algoTotalCount));
-    algoArr.resize(algoTotalCount);
+                                                    Ddesc, preference, algoTuneCount, algoArr.data(),
+                                                    &algoTuneCount));
+    algoArr.resize(algoTuneCount);
 
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceDestroy(preference));
-
-    //If cached algo exists in persistent storage we just need to find matching hipblasLtMatmulAlgo_t
-    if (cached_algo.hasId())
-    {
-      int idx = (cached_algo.index < algoTotalCount) ? cached_algo.index : 0;
-      for (int i=0; i<algoTotalCount; i++)
-      {
-        const auto &algo = algoArr[idx];
-        if (algo.state == HIPBLAS_STATUS_SUCCESS)
-        {
-          if (cached_algo.algoId == cached_algo.getAlgoId(algo.algo))
-          {
-            cached_algo.algo = algo.algo;
-            if (algo.workspaceSize != cached_algo.ws_size_min || idx != cached_algo.index)
-            {
-              cached_algo.ws_size_min = algo.workspaceSize;
-              cached_algo.index = idx;
-              algoCache.store(gemm_cfg, cached_algo);
-            }
-            break;
-          }
-        }
-        idx = (idx + 1) % algoTotalCount;
-      }
-      if (logTuning && !cached_algo.algo.has_value())
-      {
-        std::cout << "[WARNING] Cannot find cached algoId " << cached_algo.algoId << " in hipBLASLt results" << std::endl;
-      }
-    }
 
     //No suitable entry in autotune cache or could not find matched algo in hipBLASLt results
     if (!cached_algo.algo.has_value())
     {
 
       int bestAlgo = -1;
-      algoTuneCount = std::min(algoTuneCount, algoTotalCount);
       if (tuneLoopCount > 0)
       {
         if (logTuning)
@@ -1296,10 +1368,11 @@ void hipblaslt_gemm(const Tensor *inputA,
       cached_algo.ws_size_min = algoArr[bestAlgo].workspaceSize;
       cached_algo.ws_size_max = workspaceSize;
 
-      if (logTuning)
-        std::cout << "[INFO] Use hipBLASLt algo [" << bestAlgo << "] " << cached_algo.algoId << std::endl;
-
       algoCache.store(gemm_cfg, cached_algo);
+    }
+
+    if (logTuning) {
+      std::cout << "[INFO] Use hipBLASLt algo [" << cached_algo.index << "] " << cached_algo.algoId << std::endl;
     }
   }
 
@@ -1449,12 +1522,30 @@ void release_service_stream(hipStream_t stream, struct ServiceStreamCtl &ctl)
 
 
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
-                 const Tensor *inputBias, Tensor *outputPreGelu, int m, int n, int k, int lda,
-                 int ldb, int ldd, bool transa, bool transb, bool grad,
+                 const Tensor *inputBias, Tensor *outputPreGelu, bool transa, bool transb, bool grad,
                  void *workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                  int math_sm_count, int m_split, int n_split, bool gemm_producer,
                  const Tensor *inputCounter, hipStream_t stream, int compute_stream_offset)
 {
+  // Tensor dims in row-major order
+  const int A0 = inputA->flat_first_dim();
+  const int A1 = inputA->flat_last_dim();
+  const int B0 = inputB->flat_first_dim();
+  const int B1 = inputB->flat_last_dim();
+
+  // GEMM dims in column-major order
+  const int m = transa ? A0 : A1;
+  const int n = transb ? B1 : B0;
+  const int k = transa ? A1 : A0;
+  NVTE_CHECK((transb ? B0 : B1) == k,
+             "GEMM inputs have incompatible dimensions (A is ", A0, "x", A1, ", B is ", B0, "x", B1,
+             ")");
+
+  const int lda = transa ? k : m;
+  const int ldb = transb ? n : k;
+  const int ldd = m;
+
+
   ServiceStreamCtl ss_ctl;
   bool use_service_stream =
       (math_sm_count != 0) ? get_service_stream(math_sm_count, stream, ss_ctl) : false;

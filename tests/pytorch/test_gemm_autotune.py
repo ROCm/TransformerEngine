@@ -34,7 +34,7 @@ def analyse_storage(fname):
         next(reader)
         head = reader.fieldnames
     assert ("m" in head and "algo_id" in head and  "ws_min" in head and "ws_max" in head
-            and "aidx" in head), "Invalid CSV format"
+            ), "Invalid CSV format"
     return head
 
 def read_storage(fname):
@@ -97,36 +97,7 @@ def test_gemm_autotune():
             assert (str(ws_min), str(ws_max)) == (algos[0]["ws_min"], algos[0]["ws_max"]), "Invalid WS size"
         else:
             warnings.warn("Cached algo Workspace size is 0")
-
-        #Modify algo index
-        algo_index = int(algo0["aidx"])
-        algos=[copy.copy(algo0)]
-        algos[0]["aidx"] = str(algo_index + 1);
-        write_storage(fname, head, algos)
-        subprocess.run(run_args)
-        algos = read_storage(ofile)
-        assert len(algos)==1, "Expected 1 cached record"
-        assert (algo0["aidx"], algo0["algo_id"]) == (algos[0]["aidx"], algos[0]["algo_id"]), "Invalid algo IDX"
-
-        # Configure autotune range so current cached algo is out of it 
-        # and cache new value
-        os.environ["TE_HIPBLASLT_ALGO_LOAD"] = ""
-        os.environ["TE_HIPBLASLT_ALGO_SAVE"] = fname
-        os.environ["TE_HIPBLASLT_ALGO_SELECTION"] = str(algo_index + 1)
-        subprocess.run(run_args)
-        algos = read_storage(fname)
-        assert len(algos)==1, "Expected 1 cached record"
-        algo1 = copy.copy(algos[0])
-        assert algo0["algo_id"] != algo1["algo_id"], "Unexpected algo ID"
-
-        #Restore autotune range begining, the new algo should still be used
-        os.environ["TE_HIPBLASLT_ALGO_LOAD"] = fname
-        del os.environ["TE_HIPBLASLT_ALGO_SELECTION"]
-        subprocess.run(run_args)
-        algos = read_storage(fname)
-        assert len(algos)==1, "Expected 1 cached record"
-        assert algo1 == algos[0], "Invalid algo ID"
-
+            
     finally:
         shutil.rmtree(storage_dir)
         pass

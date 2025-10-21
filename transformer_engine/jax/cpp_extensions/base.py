@@ -8,6 +8,7 @@ import os
 import re
 from abc import ABCMeta, abstractmethod
 from functools import partial
+from packaging import version
 
 from jax.extend import core
 from jax.interpreters import xla, mlir
@@ -16,6 +17,13 @@ from jax._src.interpreters import batching
 from jax._src import dispatch
 
 from .misc import is_hip_extension
+import jax
+import transformer_engine_jax
+
+if version.parse(jax.__version__) >= version.parse("0.5.0"):
+    from jax import ffi  # pylint: disable=ungrouped-imports
+else:
+    from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
 
 class BasePrimitive(metaclass=ABCMeta):
@@ -93,6 +101,15 @@ class BasePrimitive(metaclass=ABCMeta):
         """
         return NotImplemented
 
+    @staticmethod
+    @abstractmethod
+    def shardy_sharding_rule(*args):
+        """
+        Returns the sharding rule for this primitive.
+        """
+        del args
+        return "... -> ..."
+
 
 def register_primitive(cls):
     """
@@ -117,10 +134,21 @@ def register_primitive(cls):
     outer_p.def_abstract_eval(cls.outer_abstract)
     batching.primitive_batchers[outer_p] = cls.batcher
     outer_p_lower = custom_partitioning(cls.impl, static_argnums=cls.impl_static_args)
-    outer_p_lower.def_partition(
+    if version.parse(jax.__version__) >= version.parse("0.5.0"):
+        outer_p_lower.def_partition(
+            infer_sharding_from_operands=cls.infer_sharding_from_operands,
+            partition=cls.partition,
+            sharding_rule=cls.shardy_sharding_rule,
+        )
+    else:
+        outer_p_lower.def_partition(
         infer_sharding_from_operands=cls.infer_sharding_from_operands, partition=cls.partition
-    )
+        )
     mlir.register_lowering(
         outer_p, mlir.lower_fun(outer_p_lower, multiple_results=cls.multiple_results)
     )
     cls.outer_primitive = outer_p
+
+
+for _name, _value in transformer_engine_jax.registrations().items():
+    ffi.register_ffi_target(_name, _value, platform="ROCM" if is_hip_extension else "CUDA")

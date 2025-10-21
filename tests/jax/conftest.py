@@ -8,7 +8,7 @@ import pytest
 
 
 import transformer_engine.jax
-from transformer_engine.transformer_engine_jax import get_device_compute_capability
+from transformer_engine_jax import get_device_compute_capability
 
 
 @pytest.fixture(autouse=True, scope="function")

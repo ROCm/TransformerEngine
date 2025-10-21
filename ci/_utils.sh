@@ -18,6 +18,9 @@ if [ -z "${TEST_SGPU}${TEST_MGPU}" ]; then
     TEST_MGPU=1
 fi
 
+#To disable some logs trimming
+export CI=1
+
 _script_error_count=0
 _run_error_count=0
 
@@ -221,9 +224,10 @@ configure_omp_threads() {
     cpus_per_core=$(lscpu | grep "Thread(s) per core:" | awk '{print $NF}')
 
     n_physical_cores=$((n_vcpus / cpus_per_core))
+    n_parallel_jobs=$1
 
     if [ -z ${OMP_NUM_THREADS} ]; then
-        export OMP_NUM_THREADS=$n_physical_cores
+        export OMP_NUM_THREADS=$((n_physical_cores / n_parallel_jobs))
 	echo "Setting OMP_NUM_THREADS=${OMP_NUM_THREADS}"
     else
         echo "Using OMP_NUM_THREADS=${OMP_NUM_THREADS}"

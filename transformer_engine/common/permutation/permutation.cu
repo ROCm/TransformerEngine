@@ -8,6 +8,8 @@
 
 #include <transformer_engine/permutation.h>
 
+#include <cub/cub.cuh>
+
 #include "../common.h"
 
 static __global__ void moe_permute_row_map(const int *sorted_row_id, int *row_id_map,
@@ -63,7 +65,7 @@ __global__ void moe_unpermute_kernel(const T *input, T *unpermuted_output, const
   // Traverse along the hidden dimention
   for (int i = tid * kElementsPerAccess; i < num_cols; i += blockDim.x * kElementsPerAccess) {
     TCompute frag_elem[kElementsPerAccess];
-    TCompute frag_sum[kElementsPerAccess];
+    float frag_sum[kElementsPerAccess];
 
     int source_row = row_id_map[source_token];
 
@@ -79,17 +81,17 @@ __global__ void moe_unpermute_kernel(const T *input, T *unpermuted_output, const
 #endif
 
       for (int e = 0; e < kElementsPerAccess; e++) {
-        frag_sum[e] = TCompute(frag_load_store_ptr[e]);
+        frag_sum[e] = float(TCompute(frag_load_store_ptr[e]));
       }
 
       if (hasProb) {
         for (int e = 0; e < kElementsPerAccess; e++) {
-          frag_sum[e] = frag_sum[e] * s_prob[0];
+          frag_sum[e] = frag_sum[e] * float(s_prob[0]);
         }
       }
     } else {
       for (int e = 0; e < kElementsPerAccess; e++) {
-        frag_sum[e] = TCompute(0.0f);
+        frag_sum[e] = 0.0f;
       }
     }
 
@@ -118,7 +120,7 @@ __global__ void moe_unpermute_kernel(const T *input, T *unpermuted_output, const
       }
 
       for (int e = 0; e < kElementsPerAccess; e++) {
-        frag_sum[e] = frag_sum[e] + frag_elem[e];
+        frag_sum[e] += float(frag_elem[e]);
       }
     }
 
@@ -127,9 +129,9 @@ __global__ void moe_unpermute_kernel(const T *input, T *unpermuted_output, const
     for (int e = 0; e < kElementsPerAccess; e++) {
       if constexpr ((std::is_same_v<T, transformer_engine::fp8e4m3> || std::is_same_v<T, transformer_engine::fp8e5m2>) &&
                     (!hasProb)) {
-        frag_sum[e] = frag_sum[e] / TCompute(topK);
+        frag_sum[e] = frag_sum[e] / float(TCompute(topK));
       }
-      frag_load_store_ptr[e] = T(frag_sum[e]);
+      frag_load_store_ptr[e] = T(TCompute(frag_sum[e]));
     }
 
     *reinterpret_cast<float4 *>(dest_row_ptr + i) = frag_load_store;
@@ -357,7 +359,7 @@ void nvte_permute(const NVTETensor input, NVTETensor output, const NVTETensor so
   const transformer_engine::Tensor *input_fwd_cu =
       reinterpret_cast<const transformer_engine::Tensor *>(input_fwd);
 
-  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input_cu->data.dtype, T,
       nvte_permute_launcher(reinterpret_cast<const T *>(input_cu->data.dptr),
                             reinterpret_cast<T *>(output_cu->data.dptr),
@@ -383,11 +385,19 @@ void nvte_unpermute(const NVTETensor input, NVTETensor output, NVTETensor row_id
   const transformer_engine::Tensor *prob_cu =
       reinterpret_cast<const transformer_engine::Tensor *>(prob);
 
-  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input_cu->data.dtype, T,
       nvte_unpermute_launcher(reinterpret_cast<const T *>(input_cu->data.dptr),
                               reinterpret_cast<T *>(output_cu->data.dptr),
                               reinterpret_cast<int *>(row_id_map_cu->data.dptr),
                               reinterpret_cast<const float *>(prob_cu->data.dptr), num_rows, topK,
                               num_cols, stream););
+}
+
+void nvte_device_radix_sort_pairs(void *temp_storage, size_t *temp_storage_bytes, int *keys_in,
+                                  int *keys_out, int *values_in, int *values_out,
+                                  size_t num_items) {
+  NVTE_API_CALL(nvte_device_radix_sort_pairs);
+  cub::DeviceRadixSort::SortPairs(temp_storage, *temp_storage_bytes, keys_in, keys_out, values_in,
+                                  values_out, num_items);
 }

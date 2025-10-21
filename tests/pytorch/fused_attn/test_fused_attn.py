@@ -3,13 +3,10 @@
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-
-import functools
 import logging
 import math
 import os
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
-from importlib.metadata import version
 from typing import Any, Dict, List, Tuple, Union, Optional
 from contextlib import contextmanager
 
@@ -18,26 +15,22 @@ import torch
 
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import TransformerLayer, fp8_autocast, fp8_model_init
-from transformer_engine.pytorch.attention import (
+from transformer_engine.pytorch.attention.dot_product_attention import (
     DotProductAttention,
-    MultiheadAttention,
     _attention_backends,
 )
-from transformer_engine.pytorch.dot_product_attention.utils import (
+from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
+from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils,
     get_attention_backend,
     check_set_window_size,
     AttentionParams,
 )
-from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
-from transformer_engine.pytorch.dot_product_attention.rope import RotaryPositionEmbedding
-from transformer_engine.pytorch.constants import TE_DType
+from transformer_engine.pytorch.attention import InferenceParams
+from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 import transformer_engine.pytorch.cpp_extensions as ext
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
-    AttnBiasType,
-    AttnMaskType,
     FusedAttnBackend,
-    QKVLayout,
     fused_attn_bwd,
     fused_attn_fwd,
 )
@@ -52,9 +45,7 @@ from transformer_engine.pytorch.utils import (
 )
 from transformer_engine.pytorch.utils import get_cudnn_version
 import transformer_engine_torch as tex
-from transformer_engine_torch import NVTE_Fused_Attn_Backend
 from transformer_engine.pytorch.tensor.quantized_tensor import (
-    QuantizedTensor,
     Quantizer,
     prepare_for_saving,
     restore_from_saved,
@@ -81,6 +72,28 @@ def reset_rng_states() -> None:
 def reset_global_fp8_state():
     yield
     fp8.FP8GlobalStateManager.reset()
+
+
+class EnvVarCleaner:
+    def __init__(self, envs_):
+        self.envs = envs_
+        self.flags = {}
+        for env in self.envs:
+          if env in os.environ:
+            self.flags[env] = os.environ[env]
+    def __del__(self):
+      for env in self.envs:
+        if env in self.flags:
+            os.environ[env] = self.flags[env]
+        else:
+            os.environ.pop(env, None)
+
+
+@pytest.fixture(autouse=True)
+def reset_attn_backend():
+    env = EnvVarCleaner(["NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN",
+                         "NVTE_FUSED_ATTN_CK", "NVTE_FUSED_ATTN_AOTRITON"])
+    yield
 
 
 class ModelConfig:
@@ -265,8 +278,7 @@ if is_bf16_compatible():  # bf16 requires sm_80 or higher
 param_types_lean = [torch.bfloat16]
 
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
-@pytest.mark.parametrize("workspace_opt", [True, False])
-def test_dot_product_mem_calc(workspace_opt):
+def test_dot_product_mem_calc():
     """
     Non-regression test for memory workspace calculation integer overflow issue.
     """
@@ -288,7 +300,6 @@ def test_dot_product_mem_calc(workspace_opt):
     if FusedAttnBackend["CK"] not in fused_attn_backends:
         pytest.skip("This test requires the CK fused attention backend.")
 
-    os.environ["NVTE_CK_USES_FWD_V3"] = "1"
     os.environ["NVTE_FUSED_ATTN_CK"] = "1"
     os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "0"
     _, _ = _run_dot_product_attention(
@@ -297,11 +308,10 @@ def test_dot_product_mem_calc(workspace_opt):
         "FusedAttention",
         ckpt_attn,
         qkv_layout,
-        workspace_opt,
+        False, #workspace_opt
         pad_between_seqs,
         is_training,
     )
-    del os.environ["NVTE_CK_USES_FWD_V3"]
     del os.environ["NVTE_FUSED_ATTN_CK"]
     del os.environ["NVTE_FUSED_ATTN_AOTRITON"]
 
@@ -311,7 +321,7 @@ def test_dot_product_mem_calc(workspace_opt):
 @pytest.mark.parametrize("model_configs", [model_configs_base])
 @pytest.mark.parametrize("model", model_configs_base.keys())
 @pytest.mark.parametrize("ckpt_attn", [False])
-@pytest.mark.parametrize("workspace_opt", [True, False])
+@pytest.mark.parametrize("workspace_opt", [False] if IS_HIP_EXTENSION else [True, False])
 @pytest.mark.parametrize("qkv_layout", [None])
 @pytest.mark.parametrize("swa", [False])
 @pytest.mark.parametrize("pad_between_seqs", [False])
@@ -800,6 +810,8 @@ model_configs_layout_thd = {
     ),
 }
 
+padding_configs = ([(True, False), (False, False), (False, True)] if IS_HIP_EXTENSION
+                   else [(True, False), (False, False)])
 
 # ROCm fused attn does not use cudnn, return high numbers to avoid tests filtering out
 @pytest.mark.skipif(get_cudnn_version() < (9, 0, 0), reason="cuDNN 9.0.0+ is required.")
@@ -811,10 +823,7 @@ model_configs_layout_thd = {
 @pytest.mark.parametrize("model_configs", [model_configs_layout_thd])
 @pytest.mark.parametrize("model", model_configs_layout_thd.keys())
 @pytest.mark.parametrize("qkv_layout", qkv_layouts_thd)
-@pytest.mark.parametrize(
-    ("pad_between_seqs", "share_cu_seqlens_ref"),
-    [(True, False), (False, False), (False, True)]
-)
+@pytest.mark.parametrize(("pad_between_seqs", "share_cu_seqlens_ref"), padding_configs)
 def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, pad_between_seqs, share_cu_seqlens_ref):
     """Test DotProductAttention module with different QKV layouts"""
     config = model_configs[model]
@@ -830,11 +839,8 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, pad_between
         window_size=config.window_size,
         pad_between_seqs=pad_between_seqs,
     )
-    if share_cu_seqlens_ref:
-        if not IS_HIP_EXTENSION:
-            pytest.skip("share_cu_seqlens_ref is a ROCm TE specific implementation detail.")
-        if FusedAttnBackend["CK"] not in fused_attn_backends:
-            pytest.skip("This test is only required for the CK fused attention backend.")
+    if share_cu_seqlens_ref and FusedAttnBackend["CK"] not in fused_attn_backends:
+        pytest.skip("This test is only required for the CK fused attention backend.")
     test_dot_product_attention(
         dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs, share_cu_seqlens_ref
     )
@@ -844,10 +850,7 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, pad_between
 @pytest.mark.parametrize("model_configs", [model_configs_layout_thd])
 @pytest.mark.parametrize("model", model_configs_layout_thd.keys())
 @pytest.mark.parametrize("qkv_layout", qkv_layouts_thd)
-@pytest.mark.parametrize(
-    ("pad_between_seqs", "share_cu_seqlens_ref"),
-    [(True, False), (False, False), (False, True)]
-)
+@pytest.mark.parametrize(("pad_between_seqs", "share_cu_seqlens_ref"), padding_configs)
 def test_dpa_qkv_layout_thd_mqa_gqa(dtype, model_configs, model, qkv_layout, pad_between_seqs, share_cu_seqlens_ref):
     config = model_configs[model]
 
@@ -1769,8 +1772,8 @@ def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm, RoP
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
         )
-        if is_training:
-            out.backward(out_grad)
+    if is_training:
+        out.backward(out_grad)
 
     param_names = []
     param_names.append("hidden_states.grad")
@@ -2021,8 +2024,8 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training):
             checkpoint_core_attention=False,
             core_attention_bias_type=config.attn_bias_type,
         )
-        if is_training:
-            out.backward(out_grad)
+    if is_training:
+        out.backward(out_grad)
 
     if is_training:
         return out, (inp[0].grad, inp[1].grad, inp[2].grad)
@@ -2136,7 +2139,7 @@ def _run_custom_mha_fp8(dtype, config, backend):
     mha = Custom_MHA_FP8(config).to(dtype=dtype, device="cuda")
     with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
         out = mha(inp, cu_seqlens, config.max_seqlen_q)
-        out.backward(out_grad)
+    out.backward(out_grad)
 
     out = torch.load("out.pt")
     dqkv = torch.load("dqkv.pt")

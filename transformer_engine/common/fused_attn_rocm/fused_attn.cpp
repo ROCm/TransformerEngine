@@ -11,6 +11,7 @@
 #include "fused_attn_aotriton.h"
 #include "fused_attn_ck.h"
 #include "../common.h"
+#include "utils.h"
 
 // map NVTE_QKV_Layout to NVTE_QKV_Layout_Group
 NVTE_QKV_Layout_Group nvte_get_qkv_layout_group(NVTE_QKV_Layout qkv_layout) {
@@ -865,4 +866,18 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   }else{
     NVTE_ERROR("Invalid combination of data type and sequence length for rocm fused attention. \n");
   }
+}
+
+uint32_t nvte_get_runtime_num_segments(NVTETensor cu_seqlen, NVTETensor workspace, size_t len,
+                                       cudaStream_t stream) {
+  NVTE_API_CALL(nvte_get_runtime_num_segments);
+  return transformer_engine::fused_attn_rocm::GetRuntimeNumSegments(cu_seqlen, workspace, len, stream);
+}
+
+void nvte_populate_rng_state_async(void *rng_state_dst, const void *const seed,
+                                   size_t batch_size, size_t num_heads, size_t q_max_seqlen, 
+                                   size_t kv_max_seqlen, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_populate_rng_state_async);
+  transformer_engine::fused_attn_rocm::PopulateRngStateAsync(rng_state_dst, seed, batch_size, 
+        num_heads, q_max_seqlen, kv_max_seqlen, stream);
 }

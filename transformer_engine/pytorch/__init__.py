@@ -6,9 +6,8 @@
 
 """Transformer Engine bindings for pyTorch"""
 
-# pylint: disable=wrong-import-position,wrong-import-order
+# pylint: disable=wrong-import-position
 
-import logging
 import functools
 import sys
 import importlib
@@ -19,10 +18,7 @@ from packaging.version import Version as PkgVersion
 
 import torch
 
-from transformer_engine.common import get_te_path, is_package_installed
-from transformer_engine.common import _get_sys_extension
-
-_logger = logging.getLogger(__name__)
+from transformer_engine.common import load_framework_extension
 
 
 @functools.lru_cache(maxsize=None)
@@ -31,59 +27,10 @@ def torch_version() -> tuple[int, ...]:
     return PkgVersion(str(torch.__version__)).release
 
 
-def _load_library():
-    """Load shared library with Transformer Engine C extensions"""
-    module_name = "transformer_engine_torch"
-    te_cuda_vers = "rocm" if IS_HIP_EXTENSION else "cu12"
-
-    if is_package_installed(module_name):
-        assert is_package_installed("transformer_engine"), "Could not find `transformer-engine`."
-        assert is_package_installed(
-            f"transformer_engine_{te_cuda_vers}"
-        ), f"Could not find `transformer-engine-{te_cuda_vers}`."
-        assert (
-            version(module_name)
-            == version("transformer-engine")
-            == version(f"transformer-engine-{te_cuda_vers}")
-        ), (
-            "TransformerEngine package version mismatch. Found"
-            f" {module_name} v{version(module_name)}, transformer-engine"
-            f" v{version('transformer-engine')}, and transformer-engine-{te_cuda_vers}"
-            f" v{version(f'transformer-engine-{te_cuda_vers}')}."
-            " Install transformer-engine using 'pip install"
-            " transformer-engine[pytorch]==VERSION'"
-        )
-
-    if is_package_installed(f"transformer-engine-{te_cuda_vers}"):
-        if not is_package_installed(module_name):
-            _logger.info(
-                "Could not find package %s. Install transformer-engine using "
-                "'pip3 install transformer-engine[pytorch]==VERSION'",
-                module_name,
-            )
-
-    extension = _get_sys_extension()
-    try:
-        so_dir = get_te_path() / "transformer_engine"
-        so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
-    except StopIteration:
-        try:
-            so_dir = get_te_path() / "transformer_engine" / "wheel_lib"
-            so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
-        except StopIteration:
-            so_dir = get_te_path()
-            so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
-
-    spec = importlib.util.spec_from_file_location(module_name, so_path)
-    solib = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = solib
-    spec.loader.exec_module(solib)
-
-
 assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {torch_version()}."
 
 
-_load_library()
+load_framework_extension("torch")
 from transformer_engine.pytorch.module import LayerNormLinear
 from transformer_engine.pytorch.module import Linear
 from transformer_engine.pytorch.module import LayerNormMLP
@@ -95,7 +42,8 @@ from transformer_engine.pytorch.module import initialize_ub
 from transformer_engine.pytorch.module import destroy_ub
 from transformer_engine.pytorch.attention import DotProductAttention
 from transformer_engine.pytorch.attention import MultiheadAttention
-from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
+from transformer_engine.pytorch.attention import InferenceParams
+from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 from transformer_engine.pytorch.transformer import TransformerLayer
 from transformer_engine.pytorch.permutation import (
     moe_permute,
