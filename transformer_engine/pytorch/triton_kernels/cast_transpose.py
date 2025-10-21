@@ -110,6 +110,50 @@ def _cast_transpose_triton(A, noop_ptr, C, T, stride_am, stride_an, stride_bn, s
         scale_inv_out = tl.fdiv(1.0, scale)
         tl.store(scale_inv_ptr, scale_inv_out)
 
+
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64,  'GROUP_M': 1}, num_warps=4),
+        triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64,  'GROUP_M': 8}, num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'GROUP_M': 8}, num_warps=8),
+    ],
+    key=['M', 'N']
+)
+@triton.jit
+def _cast_transpose_triton_current_fast(A, C, T, stride_am, stride_an, stride_bn, stride_bm, M, N, scale_ptr, max_fp8: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, GROUP_M: tl.constexpr):
+    pid = tl.program_id(0)
+    scale = tl.load(scale_ptr)
+
+    grid_m = (M + BLOCK_M - 1) // BLOCK_M
+    grid_n = (N + BLOCK_N - 1) // BLOCK_N
+
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    rm = pid_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
+    rn = pid_n.to(tl.int64) * BLOCK_N + tl.arange(0, BLOCK_N)
+    A = A + rm[:, None] * stride_am + rn[None, :] * stride_an
+    mask = (rm < M)[:, None] & (rn < N)[None, :]
+    a = tl.load(A, mask=mask)
+    a = a.to(tl.float32)
+
+    scaled_a = a * scale
+    scaled_a = tl.clamp(scaled_a, -max_fp8, max_fp8)
+    fp8_a = scaled_a.to(C.type.element_ty)
+    C = C + rm[:, None] * stride_am + rn[None, :] * stride_an
+    tl.store(C, fp8_a, mask=mask)
+
+    # rematerialize to save registers
+    rm = pid_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
+    rn = pid_n.to(tl.int64) * BLOCK_N + tl.arange(0, BLOCK_N)
+    T = T + rm[:, None] * stride_bm + rn[None, :] * stride_bn
+    mask = (rm < M)[:, None] & (rn < N)[None, :]
+    tl.store(T, fp8_a, mask=mask)
+
+
 FP32_EXPONENT_BIAS = tl.constexpr(127)
 FP32_MANTISSA_BITS = tl.constexpr(23)
 @triton.jit
@@ -315,9 +359,12 @@ def te_cast_transpose_noop_triton(input, noop_flag, input_scale, cast_out, trans
         fp8_max = get_fp8_max(otype)
         s = (fp8_max / amax_out).to(input_scale.dtype)
         input_scale.copy_(s)
+        scale_inv_out.copy_(1/s)
 
-    # Delayed+current scaling
-    _cast_transpose_triton[grid](input_2d_view, noop_flag, triton.reinterpret(cast_out_2d_view, tl_dtype), triton.reinterpret(trans_out_2d_view, tl_dtype), input_stride_M, input_stride_N, trans_out_stride_M, trans_out_stride_N, num_rows, row_length, input_scale, amax_out, scale_inv_out, get_fp8_max(otype), use_noop)
+        _cast_transpose_triton_current_fast[grid](input_2d_view,  triton.reinterpret(cast_out_2d_view, tl_dtype), triton.reinterpret(trans_out_2d_view, tl_dtype), input_stride_M, input_stride_N, trans_out_stride_M, trans_out_stride_N, num_rows, row_length, input_scale, get_fp8_max(otype))
+    else:
+        # Delayed scaling
+        _cast_transpose_triton[grid](input_2d_view, noop_flag, triton.reinterpret(cast_out_2d_view, tl_dtype), triton.reinterpret(trans_out_2d_view, tl_dtype), input_stride_M, input_stride_N, trans_out_stride_M, trans_out_stride_N, num_rows, row_length, input_scale, amax_out, scale_inv_out, get_fp8_max(otype), use_noop)
 
 def te_cast_transpose_mxfp8_triton(input, out, noop_flag=None):
     row_length = input.shape[-1] if len(input.shape) > 0 else 1
