@@ -29,10 +29,10 @@ jobs:
     outputs:
       docker-image-tag: ${{ steps.select-image.outputs.image-tag }}
     steps:
-      - name: 📜 Checkout repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🖼️ Select Docker Image Tag
+      - name: Select Docker Image Tag
         id: select-image
         run: |
           BRANCH_NAME="${{ github.base_ref || github.ref_name }}"
@@ -52,7 +52,7 @@ jobs:
           echo "Selected image: $IMAGE_TO_USE"
           echo "image-tag=$IMAGE_TO_USE" >> $GITHUB_OUTPUT
 
-      - name: 🔐 Log in to Docker registry
+      - name: Log in to Docker registry
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.ARTIFACTORY_USER }}
@@ -65,7 +65,7 @@ jobs:
           # Split the tarball into 2GB chunks to avoid upload timeout
           split -b 2G image.tar "image.tar."
       
-      - name: ⬆️ Upload Docker image artifact
+      - name: Upload Docker image artifact
         uses: actions/upload-artifact@v4
         with:
           name: docker-image-chunks
@@ -77,17 +77,17 @@ jobs:
     needs: prepare
     runs-on: [te-gfx942-4gpu]
     steps:
-      - name: 📜 Checkout repository
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: 'recursive'
 
-      - name: ⬇️ Download Docker image chunks
+      - name: Download Docker image chunks
         uses: actions/download-artifact@v4
         with:
           name: docker-image-chunks
 
-      - name: 🐋 Reassemble and Load Image to Node Cache
+      - name: Reassemble and Load Image to Node Cache
         run: |
           # Only load the image if it's not already on the node
           IMAGE_TAG="${{ needs.prepare.outputs.docker-image-tag }}"
@@ -99,7 +99,7 @@ jobs:
             echo "Image found in node cache. Skipping load."
           fi
 
-      - name: 🚀 Run Container
+      - name: Run Container
         run: |
           docker run -dt \
             --name te-runner \
@@ -111,7 +111,7 @@ jobs:
             -w /workspace \
             ${{ needs.prepare.outputs.docker-image-tag }}
       
-      - name: 📦 Build Project
+      - name: Build Project
         run: |
           docker exec te-runner bash -c "$(cat <<'EOF'
           set -ex
@@ -134,7 +134,7 @@ jobs:
           EOF
           )"
 
-      - name: 🧪 Run sGPU tests
+      - name: Run sGPU tests
         run: |
           docker exec te-runner bash -c "$(cat <<'EOF'
           #!/usr/bin/bash
@@ -161,7 +161,7 @@ jobs:
           EOF
           )"
       
-      - name: 🧪 Run mGPU tests
+      - name: Run mGPU tests
         run: |
           docker exec te-runner bash -c "$(cat <<'EOF'
           #!/usr/bin/bash
@@ -177,7 +177,7 @@ jobs:
           EOF
           )"
 
-      - name: 🧪 Run Examples
+      - name: Run Examples
         run: |
           docker exec te-runner bash -c "$(cat <<'EOF'
           #!/usr/bin/bash
@@ -201,7 +201,7 @@ jobs:
           EOF
           )"
 
-      - name: 📥 Copy logs and reports from container
+      - name: Copy logs and reports from container
         if: always()
         run: |
           docker cp te-runner:/workspace/junit_reports ./junit_reports || true
@@ -212,7 +212,7 @@ jobs:
           docker cp te-runner:/workspace/torch_mgpu.log ./torch_mgpu.log || true
           docker cp te-runner:/workspace/jax_mgpu.log ./jax_mgpu.log || true
 
-      - name: ⬆️ Upload logs and test reports
+      - name: Upload logs and test reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -224,6 +224,6 @@ jobs:
           if-no-files-found: ignore
           retention-days: 1
 
-      - name: 🧹 Cleanup container
+      - name: Cleanup container
         if: always()
         run: docker rm -f te-runner || true
