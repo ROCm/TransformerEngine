@@ -563,7 +563,7 @@ class _LayerNormMLP(torch.autograd.Function):
             if not fc2_weight.requires_grad:
                 clear_tensor_data(act_out)
                 act_out = None
-                tensors_to_save, tensor_objects = prepare_for_saving(
+            tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
                 ln_weight,
                 ln_out,
