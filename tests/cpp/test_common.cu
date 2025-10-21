@@ -547,22 +547,9 @@ void compareResults_sequential(const std::string &name, const Tensor &test,
         const double mean = (t + r) / 2;
         const double mean_p = mean >= 0 ? mean * (1 + 1e-6) : mean * (1 - 1e-6);
         const double mean_m = mean >= 0 ? mean * (1 - 1e-6) : mean * (1 + 1e-6);
-#ifndef __HIP_PLATFORM_AMD__
         const double cast_mean_p = static_cast<double>(static_cast<T>(mean_p));
         const double cast_mean_m = static_cast<double>(static_cast<T>(mean_m));
         assertion = !(cast_mean_m == std::min(t, r) && cast_mean_p == std::max(t, r));
-#else
-        const double cast_mean_p =
-            static_cast<double>(static_cast<float>(static_cast<T>(static_cast<float>(mean_p))));
-        const double cast_mean_m =
-            static_cast<double>(static_cast<float>(static_cast<T>(static_cast<float>(mean_m))));
-        /*During hipifying std::max and std::min are converted to ::max and ::min
-        to w/a HIP bug with using std:: in device functions.
-        W/o explicitlit <double>, compiler uses non-templated int method variant from HIP headers
-        TODO: remove when switch to new hipify version after fixing HIP bug */
-        assertion =
-            !(cast_mean_m == std::min<double>(t, r) && cast_mean_p == std::max<double>(t, r));
-#endif
       }
       std::string direction = rowwise ? "rowwise" : "columnwise";
       ASSERT_FALSE(assertion) << "Error in tensor " << name << " in "
@@ -603,21 +590,9 @@ static size_t getFirstMismatchIdx(const DType data_type, const T* test_data, con
       const double mean = (t + r) / 2;
       const double mean_p = mean >= 0 ? mean * (1 + 1e-6) : mean * (1 - 1e-6);
       const double mean_m = mean >= 0 ? mean * (1 - 1e-6) : mean * (1 + 1e-6);
-#ifndef __HIP_PLATFORM_AMD__
       const double cast_mean_p = static_cast<double>(static_cast<T>(mean_p));
       const double cast_mean_m = static_cast<double>(static_cast<T>(mean_m));
       assertion = !(cast_mean_m == std::min(t, r) && cast_mean_p == std::max(t, r));
-#else
-      const double cast_mean_p =
-          static_cast<double>(static_cast<float>(static_cast<T>(static_cast<float>(mean_p))));
-      const double cast_mean_m =
-          static_cast<double>(static_cast<float>(static_cast<T>(static_cast<float>(mean_m))));
-      /*During hipifying std::max and std::min are converted to ::max and ::min
-        to w/a HIP bug with using std:: in device functions.
-        W/o explicitlit <double>, compiler uses non-templated int method variant from HIP headers
-        TODO: remove when switch to new hipify version after fixing HIP bug */
-      assertion = !(cast_mean_m == std::min<double>(t, r) && cast_mean_p == std::max<double>(t, r));
-#endif
     }
     if (assertion && i < first_mismatch_idx) {
       first_mismatch_idx = i;
