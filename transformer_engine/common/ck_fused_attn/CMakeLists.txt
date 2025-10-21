@@ -40,7 +40,7 @@ if(NOT DEFINED AITER_MHA_PATH)
     message(STATUS "[AITER-PREBUILT] NVTE_USE_PREBUILT_AITER is set, Attempting to download prebuilt files...")
     include("${CMAKE_CURRENT_LIST_DIR}/download_aiter_prebuilt.cmake")
     set(fetch_success TRUE)
-    fetch_aiter_prebuilt(__AITER_MHA_PATH)
+    download_aiter_prebuilt(__AITER_MHA_PATH)
 
     if(NOT DEFINED __AITER_MHA_PATH OR NOT EXISTS "${__AITER_MHA_PATH}/libmha_fwd.so" OR NOT EXISTS "${__AITER_MHA_PATH}/libmha_bwd.so")
       message(WARNING "[AITER-PREBUILT] Failed to download aiter prebuilt files; Building aiter from source.")
