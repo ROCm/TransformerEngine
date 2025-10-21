@@ -40,25 +40,27 @@ void log_fwd_config(const char* func_name,
     std::cout<<std::endl<<func_name<<std::endl;
 
     // debug fmha_traits
-    std::cout<<"fmha_traits: "<<std::endl;
+    std::cout<<std::endl<<"fmha_traits: "<<std::endl;
     std::cout<<"hdim_q: "<<fmha_args.hdim_q<<std::endl;
     std::cout<<"hdim_v: "<<fmha_args.hdim_v<<std::endl;
     std::cout<<"data_type: "<<data_type_str<<std::endl;
     std::cout<<"is_group_mode: "<<is_group_mode<<std::endl;
     std::cout<<"is_v_rowmajor: "<<is_v_rowmajor<<std::endl;
+    std::cout<<"has_logits_soft_cap: "<<has_logits_soft_cap<<std::endl;
     std::cout<<"mask_type: "<<static_cast<std::underlying_type<mask_enum>::type>(mask_type)<<std::endl;
     std::cout<<"bias_type: "<<static_cast<std::underlying_type<bias_enum>::type>(bias_type)<<std::endl;
-    std::cout<<"has_logits_soft_cap: "<<has_logits_soft_cap<<std::endl;
     std::cout<<"has_lse: "<<has_lse<<std::endl;
     std::cout<<"has_dropout: "<<has_dropout<<std::endl;
     std::cout<<"do_fp8_static_quant: "<<do_fp8_static_quant<<std::endl;
+    std::cout<<"skip_min_seqlen_q: "<<(fmha_args.min_seqlen_q != 0)<<std::endl;
     std::cout<<"uses_fwd_v3: "<<uses_fwd_v3<<std::endl;
     std::cout<<"how_v3_bf16_cvt: "<<how_v3_bf16_cvt<<std::endl;
     std::cout<<"cu_seqlen_q_padded_ptr: "<<cu_seqlen_q_padded_ptr<<std::endl;
     std::cout<<"cu_seqlen_kv_padded_ptr: "<<cu_seqlen_kv_padded_ptr<<std::endl;
 
     // debug fmha_args
-    std::cout<<"fmha_args: "<<std::endl;
+    std::cout<<std::endl<<"fmha_args: "<<std::endl;
+
     std::cout<<"q_ptr: "<<fmha_args.q_ptr<<std::endl;
     std::cout<<"k_ptr: "<<fmha_args.k_ptr<<std::endl;
     std::cout<<"v_ptr: "<<fmha_args.v_ptr<<std::endl;
@@ -66,9 +68,16 @@ void log_fwd_config(const char* func_name,
     std::cout<<"rand_val_ptr: "<<fmha_args.rand_val_ptr<<std::endl;
     std::cout<<"lse_ptr: "<<fmha_args.lse_ptr<<std::endl;
     std::cout<<"o_ptr: "<<fmha_args.o_ptr<<std::endl;
+
+    std::cout<<"cu_seqlen_q_ptr: "<<fmha_args.cu_seqlen_q_ptr<<std::endl;
+    std::cout<<"cu_seqlen_kv_ptr: "<<fmha_args.cu_seqlen_kv_ptr<<std::endl;
+
     std::cout<<"seqstart_q_ptr: "<<fmha_args.seqstart_q_ptr<<std::endl;
     std::cout<<"seqstart_k_ptr: "<<fmha_args.seqstart_k_ptr<<std::endl;
     std::cout<<"seqlen_k_ptr: "<<fmha_args.seqlen_k_ptr<<std::endl;
+
+    std::cout<<"seqstart_padded_q_ptr: "<<fmha_args.seqstart_padded_q_ptr<<std::endl;
+    std::cout<<"seqstart_padded_k_ptr: "<<fmha_args.seqstart_padded_k_ptr<<std::endl;
 
     std::cout<<"seqlen_q: "<<fmha_args.seqlen_q<<std::endl;
     std::cout<<"seqlen_k: "<<fmha_args.seqlen_k<<std::endl;
@@ -78,10 +87,13 @@ void log_fwd_config(const char* func_name,
     std::cout<<"hdim_v: "<<fmha_args.hdim_v<<std::endl;
     std::cout<<"nhead_q: "<<fmha_args.nhead_q<<std::endl;
     std::cout<<"nhead_k: "<<fmha_args.nhead_k<<std::endl;
+
     std::cout<<"scale_s: "<<fmha_args.scale_s<<std::endl;
     std::cout<<"scale_p: "<<fmha_args.scale_p<<std::endl;
     std::cout<<"scale_o: "<<fmha_args.scale_o<<std::endl;
+
     std::cout<<"logits_soft_cap: "<<fmha_args.logits_soft_cap<<std::endl;
+
     std::cout<<"stride_q: "<<fmha_args.stride_q<<std::endl;
     std::cout<<"stride_k: "<<fmha_args.stride_k<<std::endl;
     std::cout<<"stride_v: "<<fmha_args.stride_v<<std::endl;
@@ -102,12 +114,15 @@ void log_fwd_config(const char* func_name,
     std::cout<<"batch_stride_randval: "<<fmha_args.batch_stride_randval<<std::endl;
     std::cout<<"batch_stride_lse: "<<fmha_args.batch_stride_lse<<std::endl;
     std::cout<<"batch_stride_o: "<<fmha_args.batch_stride_o<<std::endl;
+
     std::cout<<"window_size_left: "<<fmha_args.window_size_left<<std::endl;
     std::cout<<"window_size_right: "<<fmha_args.window_size_right<<std::endl;
     std::cout<<"mask_type: "<<fmha_args.mask_type<<std::endl;
     std::cout<<"min_seqlen_q: "<<fmha_args.min_seqlen_q<<std::endl;
+
     std::cout<<"p_drop: "<<fmha_args.p_drop<<std::endl;
     std::cout<<"s_randval: "<<fmha_args.s_randval<<std::endl;
+
     std::cout<<"dropout_seed_ptr: "<<std::get<0>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset))<<std::endl;
     std::cout<<"dropout_offset_ptr: "<<std::get<1>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset))<<std::endl;
   }

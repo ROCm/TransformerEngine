@@ -574,6 +574,7 @@ hipError_t ck_attn_bwd(
                          dq_acc_ptr, //dq_acc_buf
                          nullptr,//cu_seqlen_q
                          nullptr,//cu_seqlen_kv
+                         nullptr, /* seqlen_q_ptr */
                          nullptr, /* seqlen_k_ptr */
                          shape_seqlen_q,
                          shape_seqlen_k,
@@ -919,6 +920,7 @@ hipError_t ck_attn_varlen_bwd(
                          dq_acc_ptr, //dq_acc_buf
                          cu_seqlen_q_ptr,//cu_seqlen_q
                          cu_seqlen_kv_ptr,//cu_seqlen_kv
+                         nullptr, /* seqlen_q_ptr */
                          nullptr, /* seqlen_k_ptr */
                          max_seqlen_q, //seqlen_q, unused in group mode
                          max_seqlen_k, //seqlen_kv, unused in group mode

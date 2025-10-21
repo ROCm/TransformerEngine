@@ -235,18 +235,13 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
   auto bias_shape = std::vector<size_t>{bias_batch, bias_heads, q_max_seqlen, kv_max_seqlen}; \
   size_t num_segments = input_batch;                                                          \
   if (is_ragged) {                                                                            \
-    auto cudnn_runtime_version = cudnnGetVersion();                                           \
-    if (cudnn_runtime_version >= 90300) {                                                     \
-      num_segments = input_batch * max_segments_per_seq;                                      \
-    } else {                                                                                  \
       size_t runtime_num_segments_q = nvte_get_runtime_num_segments(                          \
-          q_cu_seqlens, workspace, input_batch * q_max_seqlen, stream);                       \
+          q_cu_seqlens, workspace, input_batch * max_segments_per_seq, stream);               \
       size_t runtime_num_segments_kv = nvte_get_runtime_num_segments(                         \
-          kv_cu_seqlens, workspace, input_batch * kv_max_seqlen, stream);                     \
+          kv_cu_seqlens, workspace, input_batch * max_segments_per_seq, stream);              \
       NVTE_CHECK(runtime_num_segments_q == runtime_num_segments_kv);                          \
       NVTE_CHECK(runtime_num_segments_q <= input_batch * max_segments_per_seq);               \
       num_segments = runtime_num_segments_q;                                                  \
-    }                                                                                         \
   }                                                                                           \
   std::vector<size_t> seq_shape{num_segments + 1};                                            \
   auto q_cu_seqlens_tensor = TensorWrapper(q_cu_seqlens, seq_shape, DType::kInt32);           \

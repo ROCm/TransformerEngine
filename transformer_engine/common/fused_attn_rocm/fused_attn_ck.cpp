@@ -785,13 +785,8 @@ void fused_attn_ck_fwd_impl(
         nvte_ck_how_v3_bf16_cvt,
         false,
         stream));
-    if(is_v3_supported){
-      // aiter asm output softmax_lse with padding
-      add_padding_softmax_lse(b, h, s_q, max_tokens_q, true, devPtrSoftmaxLSEWithoutPadding, devPtrSeqOffsetsQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
-    }else{
-      // ck v2 output softmax_lse without padding
-      add_padding_softmax_lse(b, h, s_q, max_tokens_q, true, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
-    }
+    // aiter asm output softmax_lse with padding
+    add_padding_softmax_lse(b, h, s_q, max_tokens_q, true, devPtrSoftmaxLSEWithoutPadding, devPtrSeqOffsetsQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
   }else{
     using ck_fused_attn::ck_attn_fwd;
     NVTE_CHECK_CUDA(
