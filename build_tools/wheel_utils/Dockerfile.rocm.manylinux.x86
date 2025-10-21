@@ -26,7 +26,7 @@ RUN dnf install -y --disablerepo=epel rocm-dev hipblaslt hipblaslt-devel hipcub 
 RUN dnf group install -y "Development Tools" && dnf install -y git cmake llvm-toolset gcc-toolset-12
 
 #Uncomment the next line for ROCm 6.4 cmake workaround: remove newer incomnpatible cmake preinstalled on base image
-#rm /usr/local/bin/cmake || true 
+#RUN rm /usr/local/bin/cmake || true
 
 RUN dnf clean all
 RUN rm -rf /var/cache/dnf/*
