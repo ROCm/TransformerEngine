@@ -216,7 +216,7 @@ def _train(args):
     else:
         model = DDP(model, device_ids=[LOCAL_RANK])
 
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    optimizer =  te.optimizers.FusedAdam(model.parameters(), lr=1e-3)
 
     input_path = Path("shared_input.pt")
     if input_path.exists():

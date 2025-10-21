@@ -449,27 +449,16 @@ class _LayerNormLinear(torch.autograd.Function):
                     # sets for the weights. Because of this, it is not recommended to offload
                     # weights if weights are externally touched outside this module
                     ctx.weight_object = weight
-            if use_fsdp2:
-                tensors_to_save, tensor_objects = prepare_for_saving(
-                    inputmat,
-                    weight,
-                    bias,
-                    ln_weight,
-                    ln_out,
-                    mu,
-                    rsigma,
-                )
-            else:
-                tensors_to_save, tensor_objects = prepare_for_saving(
-                    inputmat,
-                    weightmat,
-                    weight,
-                    bias,
-                    ln_weight,
-                    ln_out,
-                    mu,
-                    rsigma,
-                )
+            tensors_to_save, tensor_objects = prepare_for_saving(
+                inputmat,
+                weightmat,
+                weight,
+                bias,
+                ln_weight,
+                ln_out,
+                mu,
+                rsigma,
+            )
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
             ctx.requires_dgrad = inp_requires_grad
@@ -544,28 +533,16 @@ class _LayerNormLinear(torch.autograd.Function):
 
         with torch.cuda.nvtx.range("_LayerNormLinear_backward"):
             saved_tensors = ctx.saved_tensors
-            if ctx.use_fsdp2:
-                (  # pylint: disable=unbalanced-tuple-unpacking
-                    inputmat,
-                    origin_weight,
-                    bias,
-                    ln_weight,
-                    ln_out,
-                    mu,
-                    rsigma,
-                ) = restore_from_saved(ctx.tensor_objects, saved_tensors)
-                weight = origin_weight
-            else:
-                (  # pylint: disable=unbalanced-tuple-unpacking
-                    inputmat,
-                    weight,
-                    origin_weight,
-                    bias,
-                    ln_weight,
-                    ln_out,
-                    mu,
-                    rsigma,
-                ) = restore_from_saved(ctx.tensor_objects, saved_tensors)
+            (  # pylint: disable=unbalanced-tuple-unpacking
+                inputmat,
+                weight,
+                origin_weight,
+                bias,
+                ln_weight,
+                ln_out,
+                mu,
+                rsigma,
+            ) = restore_from_saved(ctx.tensor_objects, saved_tensors)
             # Delete the references to tensor objects once they've been consumed
             # by the `restore_from_saved` method to construct back the actual tensors.
             ctx.tensor_objects = None

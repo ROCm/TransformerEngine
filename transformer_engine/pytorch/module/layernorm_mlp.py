@@ -563,38 +563,22 @@ class _LayerNormMLP(torch.autograd.Function):
             if not fc2_weight.requires_grad:
                 clear_tensor_data(act_out)
                 act_out = None
-            if use_fsdp2:
                 tensors_to_save, tensor_objects = prepare_for_saving(
-                    inputmat,
-                    ln_weight,
-                    ln_out,
-                    fc1_weight,
-                    fc1_bias,
-                    fc1_out,
-                    fc1_out_without_bias,
-                    act_out,
-                    fc2_weight,
-                    fc2_bias,
-                    mu,
-                    rsigma,
-                )
-            else:
-                    tensors_to_save, tensor_objects = prepare_for_saving(
-                    inputmat,
-                    ln_weight,
-                    ln_out,
-                    fc1_weight_final,
-                    fc1_weight,
-                    fc1_bias,
-                    fc1_out,
-                    fc1_out_without_bias,
-                    act_out,
-                    fc2_weight_final,
-                    fc2_weight,
-                    fc2_bias,
-                    mu,
-                    rsigma,
-                )
+                inputmat,
+                ln_weight,
+                ln_out,
+                fc1_weight_final,
+                fc1_weight,
+                fc1_bias,
+                fc1_out,
+                fc1_out_without_bias,
+                act_out,
+                fc2_weight_final,
+                fc2_weight,
+                fc2_bias,
+                mu,
+                rsigma,
+            )
 
             if fuse_wgrad_accumulation:
                 ctx.fc1_main_grad = fc1_weight.main_grad if fc1_weight.requires_grad else None
@@ -681,40 +665,23 @@ class _LayerNormMLP(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
         with torch.cuda.nvtx.range("_LayerNormMLP_backward"):
             saved_tensors = ctx.saved_tensors
-            if ctx.use_fsdp2:
-                (  # pylint: disable=unbalanced-tuple-unpacking
-                    inputmat,
-                    ln_weight,
-                    ln_out,
-                    origin_fc1_weight,
-                    fc1_bias,
-                    fc1_out,
-                    fc1_out_without_bias,
-                    act_out,
-                    origin_fc2_weight,
-                    fc2_bias,
-                    mu,
-                    rsigma,
-                ) = restore_from_saved(ctx.tensor_objects, saved_tensors)
-                fc1_weight = origin_fc1_weight
-                fc2_weight = origin_fc2_weight
-            else:
-                (  # pylint: disable=unbalanced-tuple-unpacking
-                    inputmat,
-                    ln_weight,
-                    ln_out,
-                    fc1_weight,
-                    origin_fc1_weight,
-                    fc1_bias,
-                    fc1_out,
-                    fc1_out_without_bias,
-                    act_out,
-                    fc2_weight,
-                    origin_fc2_weight,
-                    fc2_bias,
-                    mu,
-                    rsigma,
-                ) = restore_from_saved(ctx.tensor_objects, saved_tensors)
+
+            (  # pylint: disable=unbalanced-tuple-unpacking
+                inputmat,
+                ln_weight,
+                ln_out,
+                fc1_weight,
+                origin_fc1_weight,
+                fc1_bias,
+                fc1_out,
+                fc1_out_without_bias,
+                act_out,
+                fc2_weight,
+                origin_fc2_weight,
+                fc2_bias,
+                mu,
+                rsigma,
+            ) = restore_from_saved(ctx.tensor_objects, saved_tensors)
             # Delete the references to tensor objects once they've been consumed
             # by the `restore_from_saved` method to construct back the actual tensors.
             ctx.tensor_objects = None

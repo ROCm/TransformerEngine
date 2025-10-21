@@ -392,19 +392,12 @@ class _Linear(torch.autograd.Function):
                     ctx.weight_object = weight
 
             # TODO(ksivamani): Check memory usage
-            if use_fsdp2:
-                tensors_to_save, tensor_objects = prepare_for_saving(
-                    saved_inputmat,
-                    weight,
-                    bias
-                )
-            else:
-                tensors_to_save, tensor_objects = prepare_for_saving(
-                    saved_inputmat,
-                    weightmat,
-                    weight,
-                    bias,
-                )
+            tensors_to_save, tensor_objects = prepare_for_saving(
+                saved_inputmat,
+                weightmat,
+                weight,
+                bias,
+            )
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
 
@@ -468,15 +461,9 @@ class _Linear(torch.autograd.Function):
 
         with torch.cuda.nvtx.range("_Linear_backward"):
             saved_tensors = ctx.saved_tensors
-            if ctx.use_fsdp2:
-                inputmat, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
-                    restore_from_saved(ctx.tensor_objects, saved_tensors)
-                )
-                weight_fp8 = weight
-            else:
-                inputmat, weight_fp8, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
-                    restore_from_saved(ctx.tensor_objects, saved_tensors)
-                )
+            inputmat, weight_fp8, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
+                restore_from_saved(ctx.tensor_objects, saved_tensors)
+            )
             # Delete the references to tensor objects once they've been consumed
             # by the `restore_from_saved` method to construct back the actual tensors.
             ctx.tensor_objects = None

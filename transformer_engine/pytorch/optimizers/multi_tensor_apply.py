@@ -16,7 +16,7 @@ class MultiTensorApply:  # pylint: disable=too-few-public-methods
         for i, ts in enumerate(tensor_lists):
             for j, t in enumerate(ts):
                 if isinstance(t, DTensor):
-                    tensor_lists[i][j] = t._local_tensor
+                    tensor_lists[i][j] = t._local_tensor.data
 
         return op(self.chunk_size, noop_flag_buffer, tensor_lists, *args)
 
