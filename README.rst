@@ -92,11 +92,7 @@ After a successful Transformer Engine installation via `pip install`, execute th
 .. code-block:: bash
 
   cd tests/cpp
-  mkdir build
-  cd build
-  cmake ../
-  make
-  make test
+  cmake -GNinja -Bbuild . && cmake --build build
 
 Note that some of operator unit tests fail in hipBLASLt config due to limited input data configurations support
 
@@ -307,6 +303,15 @@ To enable MXFP8 support, use NVTE_ROCM_ENABLE_MXFP8 environment variable which c
 * 0 - disable MXFP8 support (default);
 * 1 - enable MXFP8 support in fp8;
 * 2 - make MXFP8 a default fp8 recipe.
+
+Switching Between TE versions
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When switching between TE versions, it is recommended to clean up the hipified files before rebuilding.
+This helps avoid linking errors, and is done with the cleanup environment variable:
+
+.. code-block:: bash
+  export NVTE_CLEAN_HIP=1
 
 
 Transformer Engine

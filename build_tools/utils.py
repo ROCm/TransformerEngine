@@ -232,7 +232,20 @@ def rocm_path() -> Tuple[str, str]:
         hipcc_bin = rocm_home / "bin" / "hipcc"
     return rocm_home, hipcc_bin
 
+def clean_hipified_files() -> None:
+    """Removes hipified files and regenerates them -- useful when switching between TE versions"""
+    hipified_patterns = ["*.hip", "*_hip.*", "hip_*"]
+    te_subdirectories = ['transformer_engine', 'tests']
+    ignore_subdirs = ["ck_fused_attn", "aotriton", "amd_detail"]
 
+    for sub in te_subdirectories:
+        path = Path(sub)
+        for p in hipified_patterns:
+            for f in path.rglob(p):
+                if any(ignore_dir in str(f) for ignore_dir in ignore_subdirs):
+                    continue
+                else:
+                    f.unlink()
 
 def cuda_toolkit_include_path() -> Tuple[str, str]:
     """Returns root path for cuda toolkit includes.

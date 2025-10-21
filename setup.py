@@ -19,6 +19,7 @@ from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.te_version import te_version
 from build_tools.utils import (
     rocm_build,
+    clean_hipified_files,
     cuda_archs,
     found_cmake,
     found_ninja,
@@ -189,6 +190,8 @@ if __name__ == "__main__":
         }
     else:
         setup_requires, install_requires, test_requires = setup_requirements()
+        if rocm_build() and bool(int(os.getenv("NVTE_CLEAN_HIP", "0"))):
+            clean_hipified_files()
         ext_modules = [setup_common_extension()]
         cmdclass = {"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist}
         package_data = {"": ["VERSION.txt"]}
