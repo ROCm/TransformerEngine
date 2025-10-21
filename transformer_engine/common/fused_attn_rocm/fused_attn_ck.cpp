@@ -966,6 +966,14 @@ void fused_attn_ck_bwd_impl(
   bool is_batch = (nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_BSHD || 
                    nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_SBHD);
  
+  //TODO: remove guard when AITER/CK THD BWD V3 issue is resolved
+  if(pad_between_seqs && is_ragged && is_padding){
+    nvte_ck_uses_bwd_v3 = false;
+    if(nvte_log_ck_config){
+      std::cout << "Disabling BWD V3" << std::endl;
+    }
+  }
+
   // extract the qkv and o storage bytes to allocate buffer for padding removing
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
   size_t q_storage_bytes = max_tokens_q*h*d_qk*nvte_dtype_size(dtype); 
