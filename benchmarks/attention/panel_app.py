@@ -10,13 +10,13 @@ def get_data():
 df=get_data().fillna("NaN")
 VARIABLES = ["dtype", "seq_desc_format"]
 def _selector_widgets():
-    for cat in ("attn_bias_type", "attn_mask_type", "qkv_layout", "bias_shape", "is_training","swa", "dropout"):
+    for cat in ("attn_bias_type", "attn_mask_type", "qkv_layout", "bias_shape", "is_training","swa", "dropout", "mode"):
         yield pn.widgets.Select(name=cat, options=list(df[cat].unique()))
 
 
 selector_widgets = list(_selector_widgets())
 
-def make_plot(attn_bias_type, attn_mask_type, qkv_layout, bias_shape, is_training, swa, dropout):
+def make_plot(attn_bias_type, attn_mask_type, qkv_layout, bias_shape, is_training, swa, dropout, mode):
     fig = Figure(figsize=(8, 8))
     ax = fig.add_subplot(111)
     
@@ -28,11 +28,11 @@ def make_plot(attn_bias_type, attn_mask_type, qkv_layout, bias_shape, is_trainin
             (df["bias_shape"]==bias_shape) &
             (df["is_training"]==is_training) &
             (df["swa"]==swa) &
-            (df["dropout"]==dropout)
+            (df["dropout"]==dropout) &
+            (df["mode"]==mode)
         )
     ]
     subset = subset[subset.time < subset.time.quantile(.95)]
-    subset = subset[subset.time > subset.time.quantile(.05)]
     if not subset.empty:
         sns.swarmplot(ax=ax, data=subset,x="seq_desc_format", y="time", hue="dtype", dodge=True)
         return fig
@@ -45,6 +45,7 @@ bound_make_plot = pn.bind(make_plot,
         is_training=selector_widgets[4],
         swa=selector_widgets[5],
         dropout=selector_widgets[6],
+        mode=selector_widgets[7],
 )
 
 template = pn.template.BootstrapTemplate(

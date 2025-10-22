@@ -4,16 +4,15 @@
 # 
 # See LICENSE for license information.
 
-import os, sys, time
+import os, sys
+from pathlib import Path
+import pandas as pd
 import argparse
 from functools import partial
 from itertools import product
 import jax
 from jax import numpy as jnp
 import csv
-from transformer_engine.transformer_engine_jax import (
-    NVTE_Fused_Attn_Backend,
-)
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
@@ -92,6 +91,7 @@ COLUMNS = [
         "bias_shape",
         "swa",
         "seq_desc_format",
+        "mode",
         "time",
     ]
 
@@ -103,9 +103,6 @@ class FusedAttnBenchRunner(FusedAttnRunner):
         Test forward without JIT
         """
         self._setup_inputs()
-
-        args = [self.q, self.k, self.v, self.bias, self.mask, self.dropout_rng]
-
         customcall_args = [
             # Put test data onto each GPU for distributed.
             # TODO(mgoldfarb-nvidia): We will need to add reordering for bias, mas and
@@ -142,15 +139,16 @@ class FusedAttnBenchRunner(FusedAttnRunner):
                 self.dropout_rng_sharding,
             ],
         )
-        times = [-1] * iters
         with self.mesh, fp8_autocast(mesh_resource=self.mesh_resource):
             for _ in range(warmup):
                 customcall_fused_dpa_jit(*customcall_args)
-            for i in range(iters):
-                attn_start = time.time()
+
+            os.environ["NVTE_DUMP_AITER_RT"] = args.timings_dir
+
+            for _ in range(iters):
                 customcall_fused_dpa_jit(*customcall_args)
-                times[i] = time.time() - attn_start
-        return times
+
+            del os.environ["NVTE_DUMP_AITER_RT"]
 
 def _filter_configs(configs):
     for config in configs:
@@ -197,7 +195,7 @@ def _filter_configs(configs):
             d_qk, d_v,
             (-1, -1) if window_size is None else window_size,
         ).get_fused_attn_backend()
-        if backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+        if backend == -1:
             continue
         if (
             attn_bias_type == AttnBiasType.POST_SCALE_BIAS
@@ -210,6 +208,7 @@ def _filter_configs(configs):
 # Runs profiler and records timing information
 def benchmark_dot_product_attention_profiler(args):
     rows = []
+    timings_path = {}
     for n, config in enumerate(_filter_configs(CONFIGS)):
         (
             shape,
@@ -263,10 +262,12 @@ def benchmark_dot_product_attention_profiler(args):
             window_size,
             seq_desc_format,
         )
-        times = runner.bench_forward(args.warmup, args.iters)
+        runner.bench_forward(args.warmup, args.iters)
 
-        rows.extend([output | {"time":t} for t in times])
-
+        timings_path["fwd"] = Path(args.fwd_timings) / 'aiter-fwd-timings.txt'
+        fwd_times = pd.read_csv(timings_path["fwd"], header=None, dtype=float)
+        os.remove(timings_path["fwd"])
+        rows.extend([output | {"mode": "fwd", "time": t} for t in fwd_times[0].to_list()])
     with open(args.output, "w", newline="") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=COLUMNS)
         writer.writeheader()
@@ -296,11 +297,12 @@ def main(args):
  
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--fwd_v3", action="store_true", help="Use NVTE_CK_USES_FWD_V3=1 for AITER fwd kernels")
-    parser.add_argument("--bwd_v3", action="store_true", help="Use NVTE_CK_USES_BWD_V3=1 for AITER bwd kernels")
+    parser.add_argument("--fwd-v3", action="store_true", help="Use NVTE_CK_USES_FWD_V3=1 for AITER fwd kernels")
+    parser.add_argument("--bwd-v3", action="store_true", help="Use NVTE_CK_USES_BWD_V3=1 for AITER bwd kernels")
     parser.add_argument("-v", action="store_true", help="Whether to include verbose debug outputs.")
     parser.add_argument("--output", type=str, help="The .csv file to output run times to.")
     parser.add_argument("--warmup", type=int, default=5, help="The number of iterations to run the kernel before logging run time.")
     parser.add_argument("--iters", type=int, default=50, help="The number of iterations to run the kernel while logging run time.")
+    parser.add_argument("--timings-dir", type=str, help="The directory containing the 'aiter-\{fwd, bwd\}-timings.txt' files.")
     args = parser.parse_args()
     main(args)
