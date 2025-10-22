@@ -38,11 +38,14 @@ jobs:
 
       - name: Select Docker Image Tag
         id: select-image
+        env:
+          DEV_IMAGE: ${{ vars.DEV_DOCKER_IMAGE }}
+          REL_IMAGE: ${{ vars.REL613_DOCKER_IMAGE }}
         run: |
           BRANCH_NAME="${{ github.base_ref || github.ref_name }}"
           echo "Determining image for branch: $BRANCH_NAME"
-          DEV_DOCKER_IMAGE="compute-artifactory.amd.com:5000/rocm-plus-docker/framework/private/te-ci:rocm-6.4_0_ubuntu22_py310_torch25_jax0435qa_fa273"
-          REL613_DOCKER_IMAGE="compute-artifactory.amd.com:5000/rocm-plus-docker/framework/private/te-ci:rocm-6.4_0_ubuntu22_py310_torch25_jax0435qa_fa273"
+          DEV_DOCKER_IMAGE="$DEV_IMAGE"
+          REL613_DOCKER_IMAGE="$REL_IMAGE"
           IMAGE_TO_USE="$DEV_DOCKER_IMAGE"
           if [[ $BRANCH_NAME =~ ^release_v([0-9]+)\.([0-9]+)_rocm$ ]]; then
             MAJOR_VERSION=${BASH_REMATCH[1]}
@@ -193,8 +196,8 @@ jobs:
           set -x -o pipefail
           ulimit -c 0 # Disable core dumps
           
-          JUNITXML_PREFIX=junit_reports/torch_ JUNITXML_SUFFIX=.xml ci/pytorch.sh > /workspace/torch_mgpu.log 2>&1; torch_rc=$?
-          JUNITXML_PREFIX=junit_reports/jax_ JUNITXML_SUFFIX=.xml ci/jax.sh > /workspace/jax_mgpu.log 2>&1; jax_rc=$?
+          ci/pytorch.sh > /workspace/torch_mgpu.log 2>&1; torch_rc=$?
+          ci/jax.sh > /workspace/jax_mgpu.log 2>&1; jax_rc=$?
           
           if [ $torch_rc -ne 0 ]; then echo "Pytorch mGPU test FAILED."; fi
           if [ $jax_rc -ne 0 ]; then echo "JAX mGPU test FAILED."; fi
