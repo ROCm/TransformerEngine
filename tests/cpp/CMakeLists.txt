@@ -64,8 +64,7 @@ else()
   project(transformer_engine_tests LANGUAGES HIP CXX)
   # Ask hcc to generate device code during compilation so we can use
   # host linker to link.
-  set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} -fno-gpu-rdc -Wno-defaulted-function-deleted")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${HIP_HCC_FLAGS}")
+  set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -fno-gpu-rdc -Wno-defaulted-function-deleted -Wno-unused-result")
 endif()
 
 add_subdirectory(../../3rdparty/googletest ${PROJECT_BINARY_DIR}/googletest)
