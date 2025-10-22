@@ -92,13 +92,12 @@ After a successful Transformer Engine installation via `pip install`, execute th
 .. code-block:: bash
 
   cd tests/cpp
-  mkdir build
-  cd build
-  cmake ../
-  make
-  make test
+  cmake -GNinja -Bbuild . && cmake --build build
+  # To run util tests
+  ./build/util/test_util
+  # To run operator tests using 64 threads
+  OMP_NUM_THREADS=64 ./build/operator/test_operator
 
-Note that some of operator unit tests fail in hipBLASLt config due to limited input data configurations support
 
 Pytorch framework integration tests
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
