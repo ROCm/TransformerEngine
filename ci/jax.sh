@@ -87,6 +87,7 @@ run_test_config_mgpu() {
         _JAX_DISABLE_JIT_FLAG=1
         ;;
     *)
+        export NCCL_COMM_SPLIT_SHARE_RESOURCE=0
         run 3 test_distributed_fused_attn.py
         ;;
     esac
