@@ -460,7 +460,12 @@ hipError_t ck_attn_varlen_fwd(
                          false,
                          std::pair<const void*, const void*>{philox_seed_ptr, philox_offset_ptr}};
   }();
-
+  // modify the max_seqlen_q for better performance in 0-length cases
+  // lse_thd_ptr used as buffer
+  if(!is_v3_api_check){
+    uint64_t runtime_max_seqlen_q = get_runtime_max_seqlen(b, cu_seqlen_q_ptr, cu_seqlen_q_padded_ptr, lse_thd_ptr, stream);
+    fmha_args.max_seqlen_q = runtime_max_seqlen_q;
+  }
   // print ck traits and args when needed
   log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, how_v3_bf16_cvt, cu_seqlen_q_padded_ptr, cu_seqlen_kv_padded_ptr, fmha_args);
   if (uses_fwd_v3)
