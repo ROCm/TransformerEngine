@@ -961,8 +961,8 @@ hipError_t ck_attn_varlen_bwd(
                          is_mqa_gqa? dv_expanded_ptr:dv_ptr,
                          nullptr,
                          dq_acc_ptr, //dq_acc_buf
-                         cu_seqlen_q_ptr,//cu_seqlen_q
-                         cu_seqlen_kv_ptr,//cu_seqlen_kv
+                         cu_seqlen_q_padded_ptr? cu_seqlen_q_padded_ptr: cu_seqlen_q_ptr,//seqstart_q_ptr
+                         cu_seqlen_kv_padded_ptr? cu_seqlen_kv_padded_ptr: cu_seqlen_kv_ptr,//seqstart_k_ptr
                          seqlen_q_ptr, /* seqlen_q_ptr */
                          seqlen_kv_ptr, /* seqlen_k_ptr */
                          max_seqlen_q, //seqlen_q, unused in group mode
