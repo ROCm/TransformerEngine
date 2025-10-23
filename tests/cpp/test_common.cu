@@ -715,9 +715,6 @@ void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, 
 void compare_e8m0_scaling_factors(const std::string &name, Tensor &output, const uint8_t *ref,
                              const size_t row_blocks, const size_t col_blocks, const size_t stride, 
                              double tol, bool rowwise, std::vector<std::tuple<size_t, size_t, int>> &mismatch_idx) {
-  constexpr bool on_gpus = true;
-  if (on_gpus) output.to_cpu();
-
   const uint8_t *const test = rowwise ? output.rowwise_cpu_scale_inv_ptr<fp8e8m0>()
                                        : output.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
 
@@ -732,7 +729,7 @@ void compare_e8m0_scaling_factors(const std::string &name, Tensor &output, const
         if (std::abs(t_scale - r_scale) == 1) {
           mismatch_idx.emplace_back(i, j, r_scale-t_scale);
         } else {
-          ASSERT_FALSE(1) << "Error in " << name << std::endl
+          GTEST_FAIL() << "Error in " << name << std::endl
           << "Mismatch: " << t_scale << " vs "
           << r_scale << " at index " << idx;
         }
