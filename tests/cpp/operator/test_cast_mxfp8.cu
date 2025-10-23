@@ -320,7 +320,7 @@ void performTest_x1(const ProcessingMethod processing_method,
                                 unpadded_blocks_Y, unpadded_blocks_X, scales_stride, 0.01, rowwise, mismatch_idx);
 
         if (mismatch_idx.size()) {
-            adjust_ref<OutputType>(mismatch_idx, ref_output_c.get(), unpadded_blocks_Y, unpadded_blocks_X, rows, cols);
+            adjust_ref(mismatch_idx, ref_output_c.get(), unpadded_blocks_Y, unpadded_blocks_X, rows, cols, otype);
         }
 
         auto [atol, rtol] = getTolerances(otype);
@@ -339,7 +339,7 @@ void performTest_x1(const ProcessingMethod processing_method,
     compare_e8m0_scaling_factors("scales", gpu_scales_ptr, ref_output_scales.get(),
                                  unpadded_blocks_Y, unpadded_blocks_X, scales_stride);
     }
-    
+
     if (processing_method == ProcessingMethod::CAST_DBIAS || processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
         auto [atol_dbias, rtol_dbias] = getTolerances(itype);
         if (itype == DType::kFloat32) {
@@ -479,14 +479,14 @@ void performTest_x2(const ProcessingMethod processing_method,
                                 unpadded_blocks_Y_rowwise, unpadded_blocks_X_rowwise, scales_stride_rowwise, 0.01, true, mismatch_idx_r);
 
         if (mismatch_idx_r.size()) {
-            adjust_ref<OutputType>(mismatch_idx_r, ref_output_c_rowwise.get(), unpadded_blocks_Y_rowwise, unpadded_blocks_X_rowwise, rows, cols);
+            adjust_ref(mismatch_idx_r, ref_output_c_rowwise.get(), unpadded_blocks_Y_rowwise, unpadded_blocks_X_rowwise, rows, cols, otype);
         }
         std::vector<std::tuple<size_t, size_t, int>> mismatch_idx_c;
         compare_e8m0_scaling_factors("scales_colwise", output, ref_scales_colwise.get(),
                                 unpadded_blocks_Y_colwise, unpadded_blocks_X_colwise, scales_stride_colwise, 0.01, false, mismatch_idx_c);
 
         if (mismatch_idx_c.size()) {
-            adjust_ref<OutputType>(mismatch_idx_c, ref_output_c_colwise.get(), unpadded_blocks_Y_colwise, unpadded_blocks_X_colwise, rows, cols);
+            adjust_ref(mismatch_idx_c, ref_output_c_colwise.get(), unpadded_blocks_Y_colwise, unpadded_blocks_X_colwise, rows, cols, otype);
         }
 
         auto [atol, rtol] = getTolerances(otype);

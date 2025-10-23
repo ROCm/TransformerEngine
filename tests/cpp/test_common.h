@@ -466,29 +466,9 @@ void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, 
 void compare_e8m0_scaling_factors(const std::string &name, Tensor &output, const uint8_t *ref,
                              const size_t row_blocks, const size_t col_blocks, const size_t stride, 
                              double tol, bool rowwise, std::vector<std::tuple<size_t, size_t, int>> &mismatch_idx);
-template <typename T>
+
 void adjust_ref(std::vector<std::tuple<size_t, size_t, int>> mismatch_idx, void *ref, const size_t row_blocks,
-                const size_t col_blocks, const size_t rows, const size_t cols) {
-  T *ref_data = reinterpret_cast<T*>(ref);
-  for (const auto &[i, j, scale_diff] : mismatch_idx) {
-    size_t ii_min = i * col_blocks;
-    const size_t ii_max = std::min(ii_min + col_blocks, rows);
-    for (; ii_min < ii_max; ii_min++) {
-      size_t jj_min = j * row_blocks;
-      const size_t jj_max = std::min(jj_min + row_blocks, cols);
-      for (; jj_min < jj_max; jj_min++) {
-        const size_t data_idx = ii_min * cols + jj_min;
-        if (scale_diff == 1) {
-          ref_data[data_idx] = static_cast<T>(static_cast<float>(ref_data[data_idx])*2);
-        } else if (scale_diff == -1) {
-          ref_data[data_idx] = static_cast<T>(static_cast<float>(ref_data[data_idx])/2);
-        } else { // Shouldn't ever reach this
-          ASSERT_FALSE(1) << "Error in adjust_ref, |scale_diff| > 1";
-        }
-      }
-    }
-  }
-}
+                const size_t col_blocks, const size_t rows, const size_t cols, DType otype);
 #endif
 
 std::array<size_t, 4> get_scale_tensor_dims(const size_t rows, const size_t cols,
