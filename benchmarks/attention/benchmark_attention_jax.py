@@ -75,25 +75,25 @@ CONFIGS = tuple(
 )
 
 COLUMNS = [
-        "batch_size",
-        "q_seq_len",
-        "kv_seq_len",
-        "q_heads",
-        "kv_heads",
-        "qk_dim",
-        "v_dim",
-        "attn_bias_type",
-        "attn_mask_type",
-        "dropout",
-        "dtype",
-        "is_training",
-        "qkv_layout",
-        "bias_shape",
-        "swa",
-        "seq_desc_format",
-        "mode",
-        "time",
-    ]
+    "batch_size",
+    "q_seq_len",
+    "kv_seq_len",
+    "q_heads",
+    "kv_heads",
+    "qk_dim",
+    "v_dim",
+    "attn_bias_type",
+    "attn_mask_type",
+    "dropout",
+    "dtype",
+    "is_training",
+    "qkv_layout",
+    "bias_shape",
+    "swa",
+    "seq_desc_format",
+    "mode",
+    "time",
+]
 
 CWD = os.getcwd()
 
@@ -104,9 +104,6 @@ class FusedAttnBenchRunner(FusedAttnRunner):
         """
         self._setup_inputs()
         customcall_args = [
-            # Put test data onto each GPU for distributed.
-            # TODO(mgoldfarb-nvidia): We will need to add reordering for bias, mas and
-            # THD params once we support those features on CP.
             jax.device_put(self.cp_reorder_fn(self.q), self.qkvo_sharding),
             jax.device_put(self.cp_reorder_fn(self.k), self.qkvo_sharding),
             jax.device_put(self.cp_reorder_fn(self.v), self.qkvo_sharding),
@@ -178,8 +175,6 @@ def _filter_configs(configs):
                 continue
         if s_q > s_kv and window_size is not None:
             continue
-        # Test the MLA case where head dims for qk differ from head dims for v, only if the tensors
-        # are provided in BSHD_BSHD_BSHD or THD_THD_THD formats
         if d_qk != d_v and not qkv_layout.is_separate():
             continue
 
