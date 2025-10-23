@@ -69,6 +69,7 @@ jobs:
         run: |
           docker run -dt \
             --name te-runner \
+            --network=host \
             --device=/dev/dri --device=/dev/kfd \
             --shm-size=16G \
             --pid=host \
