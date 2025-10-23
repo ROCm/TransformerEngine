@@ -6,9 +6,14 @@ pn.extension(design="material", sizing_mode="stretch_width")
 
 @pn.cache
 def get_data():
-  return pd.read_csv("output_main.csv")
+  df = pd.read_csv("output_main.csv")
+  df["time"] *= 1000
+  return df
+
 df=get_data().fillna("NaN")
+
 VARIABLES = ["dtype", "seq_desc_format"]
+
 def _selector_widgets():
     for cat in ("attn_bias_type", "attn_mask_type", "qkv_layout", "bias_shape", "is_training","swa", "dropout", "mode"):
         yield pn.widgets.Select(name=cat, options=list(df[cat].unique()))
@@ -34,6 +39,7 @@ def make_plot(attn_bias_type, attn_mask_type, qkv_layout, bias_shape, is_trainin
     ]
     subset = subset[subset.time < subset.time.quantile(.95)]
     if not subset.empty:
+        ax.set(xlabel='Sequence Descriptor Format', ylabel='Time (ms)')
         sns.swarmplot(ax=ax, data=subset,x="seq_desc_format", y="time", hue="dtype", dodge=True)
         return fig
 
