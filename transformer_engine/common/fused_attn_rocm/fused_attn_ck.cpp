@@ -834,7 +834,7 @@ void fused_attn_ck_fwd_impl(
         false,
         stream));
     // aiter asm output softmax_lse with padding
-    add_padding_softmax_lse(b, h, s_q, max_tokens_q, true, devPtrSoftmaxLSEWithoutPadding, devPtrSeqOffsetsQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
+    add_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxLSEWithoutPadding, devPtrSeqOffsetsQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
   }else{
     using ck_fused_attn::ck_attn_fwd;
     NVTE_CHECK_CUDA(
@@ -1030,7 +1030,7 @@ void fused_attn_ck_bwd_impl(
   bool needs_padding_conversion = (
     is_SBHD ||
     (bshd_to_thd && is_v3_supported) ||
-    (is_ragged&&is_v3_supported)
+    (is_ragged && is_v3_supported)
   );
   // Exit to request upper level API to allocate memory if needed
   if(workspace==nullptr){
