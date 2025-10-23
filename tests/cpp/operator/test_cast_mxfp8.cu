@@ -314,18 +314,21 @@ void performTest_x1(const ProcessingMethod processing_method,
 
     
 #ifdef __HIP_PLATFORM_AMD__
-    std::vector<std::tuple<size_t, size_t, int>> mismatch_idx;
-    compare_e8m0_scaling_factors("scales", output_c, ref_output_scales.get(),
-                             unpadded_blocks_Y, unpadded_blocks_X, scales_stride, 0.01, rowwise, mismatch_idx);
+    if (processing_method != ProcessingMethod::CAST_ONLY) {
+        std::vector<std::tuple<size_t, size_t, int>> mismatch_idx;
+        compare_e8m0_scaling_factors("scales", output_c, ref_output_scales.get(),
+                                unpadded_blocks_Y, unpadded_blocks_X, scales_stride, 0.01, rowwise, mismatch_idx);
 
-    if (mismatch_idx.size()) {
-        adjust_ref<OutputType>(mismatch_idx, ref_output_c.get(), unpadded_blocks_Y, unpadded_blocks_X, rows, cols);
+        if (mismatch_idx.size()) {
+            adjust_ref<OutputType>(mismatch_idx, ref_output_c.get(), unpadded_blocks_Y, unpadded_blocks_X, rows, cols);
+        }
+
+        auto [atol, rtol] = getTolerances(otype);
+        compareResults("output_c", output_c, ref_output_c.get(), rowwise, atol, rtol);
     }
-
-    auto [atol, rtol] = getTolerances(otype);
-    compareResults("output_c", output_c, ref_output_c.get(), rowwise, atol, rtol);
-    
-#else // #ifdef __HIP_PLATFORM_AMD__
+    else
+#endif // #ifdef __HIP_PLATFORM_AMD__
+    {
     auto [atol, rtol] = getTolerances(otype);
     compareResults("output_c", output_c, ref_output_c.get(), rowwise, atol, rtol);
 
@@ -335,8 +338,8 @@ void performTest_x1(const ProcessingMethod processing_method,
 
     compare_e8m0_scaling_factors("scales", gpu_scales_ptr, ref_output_scales.get(),
                                  unpadded_blocks_Y, unpadded_blocks_X, scales_stride);
-#endif // #ifdef __HIP_PLATFORM_AMD__
-
+    }
+    
     if (processing_method == ProcessingMethod::CAST_DBIAS || processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
         auto [atol_dbias, rtol_dbias] = getTolerances(itype);
         if (itype == DType::kFloat32) {
@@ -470,25 +473,28 @@ void performTest_x2(const ProcessingMethod processing_method,
                                               scales_stride_rowwise,
                                               scales_stride_colwise);
 #ifdef __HIP_PLATFORM_AMD__
-    std::vector<std::tuple<size_t, size_t, int>> mismatch_idx_r;
-    compare_e8m0_scaling_factors("scales_rowwise", output, ref_scales_rowwise.get(),
-                             unpadded_blocks_Y_rowwise, unpadded_blocks_X_rowwise, scales_stride_rowwise, 0.01, true, mismatch_idx_r);
+    if (processing_method != ProcessingMethod::CAST_ONLY) {
+        std::vector<std::tuple<size_t, size_t, int>> mismatch_idx_r;
+        compare_e8m0_scaling_factors("scales_rowwise", output, ref_scales_rowwise.get(),
+                                unpadded_blocks_Y_rowwise, unpadded_blocks_X_rowwise, scales_stride_rowwise, 0.01, true, mismatch_idx_r);
 
-    if (mismatch_idx_r.size()) {
-        adjust_ref<OutputType>(mismatch_idx_r, ref_output_c_rowwise.get(), unpadded_blocks_Y_rowwise, unpadded_blocks_X_rowwise, rows, cols);
-    }
-    std::vector<std::tuple<size_t, size_t, int>> mismatch_idx_c;
-    compare_e8m0_scaling_factors("scales_colwise", output, ref_scales_colwise.get(),
-                             unpadded_blocks_Y_colwise, unpadded_blocks_X_colwise, scales_stride_colwise, 0.01, false, mismatch_idx_c);
+        if (mismatch_idx_r.size()) {
+            adjust_ref<OutputType>(mismatch_idx_r, ref_output_c_rowwise.get(), unpadded_blocks_Y_rowwise, unpadded_blocks_X_rowwise, rows, cols);
+        }
+        std::vector<std::tuple<size_t, size_t, int>> mismatch_idx_c;
+        compare_e8m0_scaling_factors("scales_colwise", output, ref_scales_colwise.get(),
+                                unpadded_blocks_Y_colwise, unpadded_blocks_X_colwise, scales_stride_colwise, 0.01, false, mismatch_idx_c);
 
-    if (mismatch_idx_c.size()) {
-        adjust_ref<OutputType>(mismatch_idx_c, ref_output_c_colwise.get(), unpadded_blocks_Y_colwise, unpadded_blocks_X_colwise, rows, cols);
-    }
+        if (mismatch_idx_c.size()) {
+            adjust_ref<OutputType>(mismatch_idx_c, ref_output_c_colwise.get(), unpadded_blocks_Y_colwise, unpadded_blocks_X_colwise, rows, cols);
+        }
 
-    auto [atol, rtol] = getTolerances(otype);
-    compareResults("output_c_rowwise", output, ref_output_c_rowwise.get(), true, atol, rtol);
-    compareResults("output_c_colwise", output, ref_output_c_colwise.get(), false, atol, rtol);
-#else // #ifdef __HIP_PLATFORM_AMD__
+        auto [atol, rtol] = getTolerances(otype);
+        compareResults("output_c_rowwise", output, ref_output_c_rowwise.get(), true, atol, rtol);
+        compareResults("output_c_colwise", output, ref_output_c_colwise.get(), false, atol, rtol);
+    } else
+#endif // #ifdef __HIP_PLATFORM_AMD__
+    {
     auto [atol, rtol] = getTolerances(otype);
     compareResults("output_c_rowwise", output, ref_output_c_rowwise.get(), true, atol, rtol);
     compareResults("output_c_colwise", output, ref_output_c_colwise.get(), false, atol, rtol);
@@ -498,7 +504,7 @@ void performTest_x2(const ProcessingMethod processing_method,
     compare_e8m0_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
                                  ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
                                  unpadded_blocks_X_colwise, scales_stride_colwise);
-#endif // #ifdef __HIP_PLATFORM_AMD__
+    }
 
     if (processing_method == ProcessingMethod::CAST_DBIAS || processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
         auto [atol_dbias, rtol_dbias] = getTolerances(itype);
