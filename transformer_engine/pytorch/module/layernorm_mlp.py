@@ -665,7 +665,6 @@ class _LayerNormMLP(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
         with torch.cuda.nvtx.range("_LayerNormMLP_backward"):
             saved_tensors = ctx.saved_tensors
-
             (  # pylint: disable=unbalanced-tuple-unpacking
                 inputmat,
                 ln_weight,

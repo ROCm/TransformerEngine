@@ -17,6 +17,7 @@ from torch.nn import init
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine_torch as tex
+
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import torch_version
 from .base import (
@@ -449,6 +450,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     # sets for the weights. Because of this, it is not recommended to offload
                     # weights if weights are externally touched outside this module
                     ctx.weight_object = weight
+
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
                 weightmat,
