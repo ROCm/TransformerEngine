@@ -27,11 +27,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  prepare:
-    name: Prepare Docker Image Artifact
-    runs-on: build-only
-    outputs:
-      docker-image-tag: ${{ steps.select-image.outputs.image-tag }}
+  build_and_test:
+    name: Build and Test on GPU
+    runs-on: [linux-mi308-4]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -66,43 +64,6 @@ jobs:
       - name: Pull and Save Docker Image
         run: |
           docker pull ${{ steps.select-image.outputs.image-tag }}
-          docker save -o image.tar ${{ steps.select-image.outputs.image-tag }}
-          # Split the tarball into 2GB chunks to avoid upload timeout
-          split -b 2G image.tar "image.tar."
-      
-      - name: Upload Docker image artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: docker-image-chunks
-          path: image.tar.*
-          retention-days: 1
-
-  build_and_test:
-    name: Build and Test on GPU
-    needs: prepare
-    runs-on: [te-gfx942-4gpu]
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          submodules: 'recursive'
-
-      - name: Download Docker image chunks
-        uses: actions/download-artifact@v4
-        with:
-          name: docker-image-chunks
-
-      - name: Reassemble and Load Image to Node Cache
-        run: |
-          # Only load the image if it's not already on the node
-          IMAGE_TAG="${{ needs.prepare.outputs.docker-image-tag }}"
-          if [ -z "$(docker images -q $IMAGE_TAG)" ]; then
-            echo "Image not found in node cache. Loading from artifact..."
-            cat image.tar.* > image.tar
-            docker load -i image.tar
-          else
-            echo "Image found in node cache. Skipping load."
-          fi
 
       - name: Run Container
         run: |
@@ -110,11 +71,12 @@ jobs:
             --name te-runner \
             --device=/dev/dri --device=/dev/kfd \
             --shm-size=16G \
+            --pid=host \
             --group-add $(getent group render | cut -d: -f3) \
             --group-add $(getent group video | cut -d: -f3) \
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
-            ${{ needs.prepare.outputs.docker-image-tag }}
+            ${{ steps.select-image.outputs.image-tag}}
 
       - name: Determine GPU Architecture via rocminfo
         id: gpu-arch
@@ -166,7 +128,6 @@ jobs:
           ls -d /opt/rocm*
           python --version
           pip list | egrep "transformer_e|torch|jax|numpy|ml_dtypes|typing_ext"
-
 
           HIP_VISIBLE_DEVICES=1 ci/pytorch.sh > /workspace/torch_sgpu.log 2>&1 &
           torch_pid=$!; echo Pytorch test pid $!
