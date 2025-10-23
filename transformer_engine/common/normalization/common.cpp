@@ -41,12 +41,9 @@ Compute always in FP32
 namespace transformer_engine {
 namespace normalization {
 
-<<<<<<< HEAD
 #ifndef __HIP_PLATFORM_AMD__
 bool& use_zero_centered_gamma_in_weight_dtype();
 
-=======
->>>>>>> ca7407e
 cudnn_frontend::NormFwdPhase_t get_cudnn_forward_phase(const bool training) {
   return training ? cudnn_frontend::NormFwdPhase_t::TRAINING
                   : cudnn_frontend::NormFwdPhase_t::INFERENCE;

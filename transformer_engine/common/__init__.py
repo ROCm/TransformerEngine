@@ -6,14 +6,6 @@
 
 """FW agnostic user-end APIs"""
 
-<<<<<<< HEAD
-import functools
-import sys
-import glob
-import sysconfig
-import subprocess
-=======
->>>>>>> ca7407e
 import ctypes
 import functools
 import glob
