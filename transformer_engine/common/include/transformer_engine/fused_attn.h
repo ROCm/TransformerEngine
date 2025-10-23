@@ -633,7 +633,6 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          int64_t window_size_right, bool deterministic, NVTETensor workspace,
                          cudaStream_t stream);
 
-#ifndef __HIP_PLATFORM_AMD__
 /*!  \brief Update the RNG state with the seed and calculated offset.
  *
  * \warning   This API is **experimental** and subject to change.
@@ -650,23 +649,6 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
 void nvte_populate_rng_state_async(NVTETensor rng_state_dst, const NVTETensor seed,
                                    size_t q_max_seqlen, size_t kv_max_seqlen,
                                    NVTE_Fused_Attn_Backend backend, cudaStream_t stream);
-#else
-/*!  \brief Update the RNG state with the seed and calculated offset.
- *
- *  \param[in]     rng_state_dst             RNG state to store seed and offset.
- *  \param[in]     seed                      Seed for RNG state.
- *  \param[in]     batch_size                Batch size.
- *  \param[in]     num_heads                 # of attention heads.
- *  \param[in]     q_max_seqlen              Max sequence length used for computing for Q.
- *                                           it may be >= max(seqlen_q_i) for i=0,...batch_size-1.
- *  \param[in]     kv_max_seqlen             Max sequence length used for computing for K and V.
- *                                           it may be >= max(seqlen_kv_i) for i=0,...batch_size-1.
- *  \param[in]     stream                    CUDA stream used for this operation.
- */
-void nvte_populate_rng_state_async(void *rng_state_dst, const void *const seed,
-                                   size_t batch_size, size_t num_heads, size_t q_max_seqlen, 
-                                   size_t kv_max_seqlen, cudaStream_t stream);
-#endif
 
 /*!  \brief Get KV format for a given QKV layout.
  *

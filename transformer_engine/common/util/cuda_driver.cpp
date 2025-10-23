@@ -14,17 +14,17 @@
 namespace transformer_engine {
 
 namespace cuda_driver {
-
-<<<<<<< HEAD
-void *get_symbol(const char *symbol) {
-  void *entry_point;
+//TODO: hipGetDriverEntryPoint is supported in rocm 7.1
 #ifdef __HIP_PLATFORM_AMD__
+void *get_symbol(const char *symbol, int cuda_version) {
+  void *entry_point;
   hipDriverProcAddressQueryResult driver_result;
   NVTE_CHECK_CUDA(hipGetProcAddress(symbol, &entry_point, HIP_VERSION_MAJOR*100+HIP_VERSION_MINOR, 0, &driver_result));
   NVTE_CHECK(driver_result == HIP_GET_PROC_ADDRESS_SUCCESS,
              "Could not find CUDA driver entry point for ", symbol);
+  return entry_point;
+}
 #else
-=======
 typedef cudaError_t (*VersionedGetEntryPoint)(const char *, void **, unsigned int,
                                               unsigned long long,  // NOLINT(*)
                                               cudaDriverEntryPointQueryResult *);
@@ -40,7 +40,6 @@ void *get_symbol(const char *symbol, int cuda_version) {
   static VersionedGetEntryPoint driver_entrypoint_versioned_fun =
       reinterpret_cast<VersionedGetEntryPoint>(dlsym(RTLD_DEFAULT, driver_entrypoint_versioned));
 
->>>>>>> ca7407e
   cudaDriverEntryPointQueryResult driver_result;
   void *entry_point = nullptr;
   if (driver_entrypoint_versioned_fun != nullptr) {
@@ -54,9 +53,9 @@ void *get_symbol(const char *symbol, int cuda_version) {
   }
   NVTE_CHECK(driver_result == cudaDriverEntryPointSuccess,
              "Could not find CUDA driver entry point for ", symbol);
-#endif
   return entry_point;
 }
+#endif
 
 }  // namespace cuda_driver
 

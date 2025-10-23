@@ -11,12 +11,11 @@
 
 #ifndef __HIP_PLATFORM_AMD__
 #include <cudaTypedefs.h>
-<<<<<<< HEAD
-#endif //#ifndef __HIP_PLATFORM_AMD__
-=======
 #define FP4_TYPE_SUPPORTED (CUDA_VERSION >= 12080)
+#else
+#define FP4_TYPE_SUPPORTED false
+#endif //#ifndef __HIP_PLATFORM_AMD__
 
->>>>>>> ca7407e
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -301,19 +300,16 @@ using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
 #if CUDA_VERSION >= 12080
 using fp8e8m0 = __nv_fp8_e8m0;
-<<<<<<< HEAD
 #endif // CUDA_VERSION >= 12080
+#if FP4_TYPE_SUPPORTED
+using fp4e2m1 = __nv_fp4_e2m1;
+#endif //FP4_TYPE_SUPPORTED
 #else
 using bf16 = hip_bfloat16;
 using fp8e4m3 = te_hip_fp8_e4m3;
 using fp8e5m2 = te_hip_fp8_e5m2;
 #endif //__HIP_PLATFORM_AMD__
-=======
-#endif
-#if FP4_TYPE_SUPPORTED
-using fp4e2m1 = __nv_fp4_e2m1;
-#endif
->>>>>>> ca7407e
+
 using e8m0_t = uint8_t;
 
 namespace detail {
@@ -341,15 +337,11 @@ TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e4m3)
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e5m2)
 #if CUDA_VERSION >= 12080
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e8m0)
-<<<<<<< HEAD
 #endif // CUDA_VERSION >= 12080
-#endif // #ifdef __HIP_PLATFORM_AMD__
-=======
-#endif
 #if FP4_TYPE_SUPPORTED
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp4_e2m1)
 #endif
->>>>>>> ca7407e
+#endif // #ifdef __HIP_PLATFORM_AMD__
 #undef TRANSFORMER_ENGINE_TYPE_NAME
 
 template <typename T>
@@ -741,12 +733,8 @@ CUtensorMapDataType get_CUtensorMapDataType(DType dtype);
 void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
                           const uint64_t globalY, const uint64_t globalX, const uint32_t shmemY,
                           const uint32_t shmemX, const uint32_t stride_elems,
-<<<<<<< HEAD
-                          const uint32_t offset_elems, const size_t type_size);
-#endif //#ifndef __HIP_PLATFORM_AMD__
-=======
                           const uint32_t offset_elems, const size_t type_num_bits);
->>>>>>> ca7407e
+#endif //#ifndef __HIP_PLATFORM_AMD__
 
 bool is_supported_by_CC_100();
 

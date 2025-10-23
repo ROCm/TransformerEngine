@@ -639,12 +639,12 @@ static void cublas_gemm_ex(const NVTETensor A, const NVTETensor B, NVTETensor D,
                            NVTETensor workspace, bool accumulate, bool use_split_accumulator,
                            int math_sm_count, cudaStream_t stream, int compute_stream_offset = -1) {
   using namespace transformer_engine;
-  const Tensor *inputA = reinterpret_cast<const Tensor *>(A);
-  const Tensor *inputB = reinterpret_cast<const Tensor *>(B);
-  Tensor *outputD = reinterpret_cast<Tensor *>(D);
-  const Tensor *biasTensor = reinterpret_cast<const Tensor *>(bias);
-  Tensor *outputGelu = reinterpret_cast<Tensor *>(pre_gelu_out);
-  Tensor *wspace = reinterpret_cast<Tensor *>(workspace);
+  const Tensor *inputA = convertNVTETensorCheck(A);
+  const Tensor *inputB = convertNVTETensorCheck(B);
+  Tensor *outputD = convertNVTETensorCheck(D);
+  const Tensor *biasTensor = convertNVTETensorCheck(bias);
+  Tensor *outputGelu = convertNVTETensorCheck(pre_gelu_out);
+  Tensor *wspace = convertNVTETensorCheck(workspace);
 
   cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu,
 #ifdef __HIP_PLATFORM_AMD__
@@ -691,19 +691,9 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
                              int n_split, bool gemm_producer, const NVTETensor counter,
                              cudaStream_t stream) {
   NVTE_API_CALL(nvte_cublas_atomic_gemm);
-<<<<<<< HEAD
-
-#ifndef __HIP_PLATFORM_AMD__
-  int cudart_version;
-  NVTE_CHECK_CUDA(cudaRuntimeGetVersion(&cudart_version));
-  NVTE_CHECK(cudart_version >= 12020, "Cuda version 12.2 is required for atomic gemm.");
-  NVTE_CHECK(cublasLtGetVersion() >= 120205, "Cublas version 12.2.5 is required for atomic gemm.");
-#endif
-
-=======
->>>>>>> ca7407e
   using namespace transformer_engine;
 
+#ifndef __HIP_PLATFORM_AMD__
   // Check CUDA and cuBLAS versions
 #if !(CUDA_VERSION >= 12020 && CUBLAS_VERSION >= 13000)
   NVTE_ERROR("Atomic GEMM requires CUDA >=12.2.0 and <13.0.0, but compile-time CUDA verson is ",
@@ -720,6 +710,7 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
       cublas_version() >= 120205 && cublas_version() < 130000,
       "Atomic GEMM requires cuBLAS version >=12.2.5 and <13.0.0, but run-time cuBLAS verson is ",
       cublas_version());
+#endif //__HIP_PLATFORM_AMD__
 
   const Tensor *inputA = convertNVTETensorCheck(A);
   const Tensor *inputB = convertNVTETensorCheck(B);
@@ -763,15 +754,9 @@ void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVT
   }
 
   for (int i = 0; i < num_gemms; i++) {
-<<<<<<< HEAD
     cublas_gemm_ex(A[i], B[i], D[i], bias[i], pre_gelu_out[i], transa, transb, grad,
                    workspace[i % num_streams], accumulate, use_split_accumulator, math_sm_count,
-                   compute_streams[i % num_streams], i % num_streams);
-=======
-    nvte_cublas_gemm(A[i], B[i], D[i], bias[i], pre_gelu_out[i], transa, transb, grad,
-                     workspace[i % num_streams], accumulate, use_split_accumulator, math_sm_count,
-                     detail::get_compute_stream(i % num_streams));
->>>>>>> ca7407e
+                   detail::get_compute_stream(i % num_streams), i % num_streams);
   }
 
   // record events on compute streams

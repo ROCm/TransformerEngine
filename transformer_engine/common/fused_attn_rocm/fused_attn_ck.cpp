@@ -1268,7 +1268,7 @@ void fused_attn_ck_fwd_qkvpacked(
   if (Aux_CTX_Tensors->size == 0) {
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
       Aux_CTX_Tensors->size = 3;
-      Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
       if(is_ragged){
         output_S->data.shape = {max_tokens, h, 1};
@@ -1276,17 +1276,17 @@ void fused_attn_ck_fwd_qkvpacked(
         output_S->data.shape = {b, h, max_seqlen, 1};
       }
       output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
       output_rng_state->data.dptr = nullptr;
       output_rng_state->data.shape = {2};
       output_rng_state->data.dtype = DType::kInt64;
-      Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+      Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
       output_bias->data.dptr = nullptr;
       output_bias->data.shape = {bias_b, bias_h, max_seqlen, max_seqlen};
       output_bias->data.dtype = QKV_type;
     } else {
       Aux_CTX_Tensors->size = 2;
-      Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
       if(is_ragged){
         output_S->data.shape = {max_tokens, h, 1};
@@ -1294,22 +1294,22 @@ void fused_attn_ck_fwd_qkvpacked(
         output_S->data.shape = {b, h, max_seqlen, 1};
       }
       output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
       output_rng_state->data.dptr = nullptr;
       output_rng_state->data.shape = {2};
       output_rng_state->data.dtype = DType::kInt64;
     }
   } else if (Aux_CTX_Tensors->size == 2) {
-    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
     output_rng_state->data.dptr = rng_state->data.dptr;
   } else if (Aux_CTX_Tensors->size == 3) {
-    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
     output_rng_state->data.dptr = rng_state->data.dptr;
-    Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+    Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
     output_bias->data.dptr = devPtrBias;
   } else {
     NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
@@ -1523,7 +1523,7 @@ void fused_attn_ck_fwd_kvpacked(
   if (Aux_CTX_Tensors->size == 0) {
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
       Aux_CTX_Tensors->size = 3;
-      Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
       if(is_ragged){
         output_S->data.shape = {max_tokens_q, h_q, 1};
@@ -1531,17 +1531,17 @@ void fused_attn_ck_fwd_kvpacked(
         output_S->data.shape = {b, h_q, max_seqlen_q, 1};
       }
       output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
       output_rng_state->data.dptr = nullptr;
       output_rng_state->data.shape = {2};
       output_rng_state->data.dtype = DType::kInt64;
-      Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+      Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
       output_bias->data.dptr = nullptr;
       output_bias->data.shape = {bias_b, bias_h, max_seqlen_q, max_seqlen_kv};
       output_bias->data.dtype = QKV_type;
     } else {
       Aux_CTX_Tensors->size = 2;
-      Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
       if(is_ragged){
         output_S->data.shape = {max_tokens_q, h_q, 1};
@@ -1549,22 +1549,22 @@ void fused_attn_ck_fwd_kvpacked(
         output_S->data.shape = {b, h_q, max_seqlen_q, 1};
       }
       output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
       output_rng_state->data.dptr = nullptr;
       output_rng_state->data.shape = {2};
       output_rng_state->data.dtype = DType::kInt64;
     }
   } else if (Aux_CTX_Tensors->size == 2) {
-    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
     output_rng_state->data.dptr = rng_state->data.dptr;
   } else if (Aux_CTX_Tensors->size == 3) {
-    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
     output_rng_state->data.dptr = rng_state->data.dptr;
-    Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+    Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
     output_bias->data.dptr = devPtrBias;
   } else {
     NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
@@ -1766,7 +1766,7 @@ void fused_attn_ck_fwd(
   if (Aux_CTX_Tensors->size == 0) {
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
       Aux_CTX_Tensors->size = 3;
-      Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
       if(is_ragged){
         output_S->data.shape = {max_tokens_q, h_q, 1};
@@ -1774,17 +1774,17 @@ void fused_attn_ck_fwd(
         output_S->data.shape = {b, h_q, max_seqlen_q, 1};
       }
       output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
       output_rng_state->data.dptr = nullptr;
       output_rng_state->data.shape = {2};
       output_rng_state->data.dtype = DType::kInt64;
-      Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+      Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
       output_bias->data.dptr = nullptr;
       output_bias->data.shape = {bias_b, bias_h, max_seqlen_q, max_seqlen_kv};
       output_bias->data.dtype = QKV_type;
     } else {
       Aux_CTX_Tensors->size = 2;
-      Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
       if(is_ragged){
         output_S->data.shape = {max_tokens_q, h_q, 1};
@@ -1792,22 +1792,22 @@ void fused_attn_ck_fwd(
         output_S->data.shape = {b, h_q, max_seqlen_q, 1};
       }
       output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
       output_rng_state->data.dptr = nullptr;
       output_rng_state->data.shape = {2};
       output_rng_state->data.dtype = DType::kInt64;
     }
   } else if (Aux_CTX_Tensors->size == 2) {
-    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
     output_rng_state->data.dptr = rng_state->data.dptr;
   } else if (Aux_CTX_Tensors->size == 3) {
-    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
     output_rng_state->data.dptr = rng_state->data.dptr;
-    Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+    Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
     output_bias->data.dptr = devPtrBias;
   } else {
     NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
