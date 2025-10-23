@@ -41,12 +41,9 @@ Compute always in FP32
 namespace transformer_engine {
 namespace normalization {
 
-<<<<<<< HEAD
 #ifndef __HIP_PLATFORM_AMD__
 bool& use_zero_centered_gamma_in_weight_dtype();
 
-=======
->>>>>>> ca7407e
 cudnn_frontend::NormFwdPhase_t get_cudnn_forward_phase(const bool training) {
   return training ? cudnn_frontend::NormFwdPhase_t::TRAINING
                   : cudnn_frontend::NormFwdPhase_t::INFERENCE;
@@ -73,7 +70,7 @@ TupleKeyType get_key(NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType,
 template <typename KernelParamsType>
 TeNormalizationPlan<KernelParamsType>::TeNormalizationPlan(
     NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype, DType otype,
-    DType ctype, const size_t batch_size, const size_t hidden_size, const size_t sm_count, 
+    DType ctype, const size_t batch_size, const size_t hidden_size, const size_t sm_count,
     const bool zero_centered_gamma, const bool is_tuned
 #ifdef __HIP_PLATFORM_AMD__
     , const NVTEScalingMode mode, const bool training

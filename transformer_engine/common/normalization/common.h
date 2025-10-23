@@ -46,7 +46,6 @@ struct LaunchParams {
   size_t workspace_bytes = 0;
   size_t barrier_bytes = 0;
   size_t dgamma_part_bytes = 0;
-
   int multiprocessorCount;
   cudaStream_t stream;
 

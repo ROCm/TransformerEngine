@@ -239,18 +239,15 @@ __global__ void get_runtime_num_segments_kernel(int32_t *cu_seqlen, size_t len, 
   }
 }
 
-void PopulateRngStateAsync(void *rng_state_dst, 
-                           const void *const seed,
-                           size_t batch_size, 
-                           size_t num_heads, 
-                           size_t q_max_seqlen, 
-                           size_t kv_max_seqlen,
+void PopulateRngStateAsync(void *rng_state_dst, const void *seed, size_t q_max_seqlen,
+                           size_t kv_max_seqlen, NVTE_Fused_Attn_Backend backend,
                            cudaStream_t stream) {
-    size_t increment = batch_size*num_heads*q_max_seqlen*kv_max_seqlen;
-    auto offset = FusedAttnOffsetManager::Instance().GetAndUpdateOffset(increment);
-    populate_rng_state_kernel<<<1, 1, 0, stream>>>(reinterpret_cast<int64_t *>(rng_state_dst),
-                                                   reinterpret_cast<const int64_t *>(seed), offset);
-    NVTE_CHECK_CUDA(cudaGetLastError());
+  //both aiter and aotriton now follows flash-attn rng design
+  size_t increment = 16;
+  auto offset = FusedAttnOffsetManager::Instance().GetAndUpdateOffset(increment);
+  populate_rng_state_kernel<<<1, 1, 0, stream>>>(reinterpret_cast<int64_t *>(rng_state_dst),
+                                                 reinterpret_cast<const int64_t *>(seed), offset);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 uint32_t GetRuntimeNumSegments(void *cu_seqlen, void *workspace, size_t len, cudaStream_t stream) {

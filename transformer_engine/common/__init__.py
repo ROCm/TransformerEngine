@@ -6,14 +6,6 @@
 
 """FW agnostic user-end APIs"""
 
-<<<<<<< HEAD
-import functools
-import sys
-import glob
-import sysconfig
-import subprocess
-=======
->>>>>>> ca7407e
 import ctypes
 import functools
 import glob
@@ -29,7 +21,6 @@ import sysconfig
 from typing import Optional
 
 import transformer_engine
-
 
 _logger = logging.getLogger(__name__)
 
@@ -119,40 +110,9 @@ def _get_shared_object_file(library: str) -> Path:
     if so_path is not None:
         return so_path
 
-<<<<<<< HEAD
-    # Case 1: Typical user workflow: Both locations are the same, return any result.
-    if te_install_dir == site_packages_dir:
-        if so_path_in_install_dir is not None:
-            return so_path_in_install_dir
-        raise FileNotFoundError(f"Could not find shared object file for Transformer Engine {library} lib.")
-
-    # Case 2: ERR! Both locations are different but returned a valid result.
-    # NOTE: Unlike for source installations, pip does not wipe out artifacts from
-    # editable builds. In case developers are executing inside a TE directory via
-    # an inplace build, and then move to a regular build, the local shared object
-    # file will be incorrectly picked up without the following logic.
-    if so_path_in_install_dir is not None and so_path_in_default_dir is not None:
-        raise RuntimeError(
-            f"Found multiple shared object files: {so_path_in_install_dir} and"
-            f" {so_path_in_default_dir}. Remove local shared objects installed"
-            f" here {so_path_in_install_dir} or change the working directory to"
-            "execute from outside TE."
-        )
-
-    # Case 3: Typical dev workflow: Editable install
-    if so_path_in_install_dir is not None:
-        return so_path_in_install_dir
-
-    # Case 4: Executing from inside a TE directory without an inplace build available.
-    if so_path_in_default_dir is not None:
-        return so_path_in_default_dir
-
-    raise FileNotFoundError(f"Could not find shared object file for Transformer Engine {library} lib.")
-=======
     raise FileNotFoundError(
         f"Could not find shared object file for Transformer Engine {library} lib."
     )
->>>>>>> ca7407e
 
 
 @functools.lru_cache(maxsize=None)
@@ -178,7 +138,6 @@ def load_framework_extension(framework: str) -> None:
     # If the framework extension pip package is installed, it means that TE is installed via
     # PyPI. For this case we need to make sure that the metapackage, the core lib, and framework
     # extension are all installed via PyPI and have matching version.
-    '''
     if _is_pip_package_installed(module_name):
         assert _is_pip_package_installed(
             "transformer_engine"
@@ -197,7 +156,6 @@ def load_framework_extension(framework: str) -> None:
             f" v{version(f'transformer-engine-{te_cuda_vers}')}. Install transformer-engine using "
             f"'pip3 install transformer-engine[{extra_dep_name}]==VERSION'"
         )
-    '''
 
     # If the core package is installed via PyPI, log if
     # the framework extension is not found from PyPI.

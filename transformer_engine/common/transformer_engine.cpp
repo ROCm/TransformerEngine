@@ -26,7 +26,9 @@ size_t typeToNumBits(const DType type) {
 }
 
 size_t typeToSize(const DType type) {
+#ifndef __HIP_PLATFORM_AMD__
   NVTE_CHECK(type != DType::kFloat4E2M1, "typeToSize() Does not support FP4 data type.");
+#endif // #ifndef __HIP_PLATFORM_AMD__
   return typeToNumBits(type) / 8;
 }
 
@@ -46,8 +48,10 @@ std::string to_string(const DType type) {
       return "Float8E5M2";
     case DType::kFloat8E8M0:
       return "Float8E8M0";
+#ifndef __HIP_PLATFORM_AMD__
     case DType::kFloat4E2M1:
       return "Float4E2M1";
+#endif // #ifndef __HIP_PLATFORM_AMD__
     case DType::kInt16:
       return "Int16";
     case DType::kInt32:
@@ -332,6 +336,7 @@ NVTETensor nvte_create_tensor(NVTEScalingMode scaling_mode) {
   NVTETensor ret = transformer_engine::TensorAllocator::instance().Allocate(scaling_mode);
   return ret;
 }
+
 void nvte_destroy_tensor(NVTETensor tensor) {
   transformer_engine::TensorAllocator::instance().Free(tensor);
 }
@@ -543,13 +548,8 @@ void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream) {
   const auto &t = *transformer_engine::convertNVTETensorCheck(tensor);
   // Zero out tensor data if allocated
   if (t.data.dptr != nullptr) {
-<<<<<<< HEAD
-    size_t size_in_bytes = nvte_tensor_element_size(tensor) * nvte_tensor_numel(tensor);
-    (void)cudaMemsetAsync(t.data.dptr, 0, size_in_bytes, stream);
-=======
     const size_t size_in_bytes = nvte_tensor_size_bytes(tensor);
-    cudaMemsetAsync(t.data.dptr, 0, size_in_bytes, stream);
->>>>>>> ca7407e
+    (void)cudaMemsetAsync(t.data.dptr, 0, size_in_bytes, stream);
   }
   // Set amax to 0 if allocated
   if (t.amax.dptr != nullptr) {

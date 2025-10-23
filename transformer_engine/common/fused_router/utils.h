@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -11,6 +13,17 @@
 
 namespace transformer_engine {
 
+#ifdef __HIP_PLATFORM_AMD__
+// TODO: remove after rocm supports NV __syncwarp equivalent
+__device__ inline void __syncwarp()
+{
+    __builtin_amdgcn_fence(__ATOMIC_RELEASE, "wavefront");
+    __builtin_amdgcn_wave_barrier();
+    __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "wavefront");
+
+}
+
+#endif
 constexpr size_t kThreadsPerWarp = 32;
 constexpr int kThreadsPerBlock =
     128;  // Using 4 warps in 1 CTA, Each warp is responsible for 1 token.
@@ -35,15 +48,28 @@ __device__ inline T warp_reduce_on_shmem(T *data_ptr, int data_size, T (*reduce_
   volatile double val =
       lane_id < data_size ? static_cast<double>(data_ptr[lane_id]) : static_cast<double>(0);
   for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
+//TODO: release after /opt/rocm/include/hip/amd_detail/amd_hip_bfloat16.h provide bf16 constructor from double
+#ifdef __HIP_PLATFORM_AMD__
+    val = reduce_func(static_cast<T>(val), data_ptr[i]);
+#else
     val = reduce_func(val, data_ptr[i]);
+#endif
   }
 
   // Warp shuffle between threads
+#ifdef __HIP_PLATFORM_AMD__
+  val = reduce_func(static_cast<T>(val), static_cast<T>(__shfl_xor(val, 16, kThreadsPerWarp)));
+  val = reduce_func(static_cast<T>(val), static_cast<T>(__shfl_xor(val, 8, kThreadsPerWarp)));
+  val = reduce_func(static_cast<T>(val), static_cast<T>(__shfl_xor(val, 4, kThreadsPerWarp)));
+  val = reduce_func(static_cast<T>(val), static_cast<T>(__shfl_xor(val, 2, kThreadsPerWarp)));
+  val = reduce_func(static_cast<T>(val), static_cast<T>(__shfl_xor(val, 1, kThreadsPerWarp)));
+#else
   val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 16));
   val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 8));
   val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 4));
   val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 2));
   val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 1));
+#endif
   __syncwarp();
   return T(val);
 }
@@ -66,16 +92,24 @@ __device__ inline T masked_warp_reduce_on_shmem(T *data_ptr, bool *mask, int dat
                             : static_cast<double>(0);
   for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
     if (mask[i]) {
-      val = reduce_func(val, data_ptr[i]);
+      val = reduce_func(static_cast<T>(val), data_ptr[i]);
     }
   }
 
   // Warp shuffle between threads
+#ifdef __HIP_PLATFORM_AMD__
+  val = reduce_func(static_cast<T>(val), static_cast<T>(__shfl_xor(val, 16, kThreadsPerWarp)));
+  val = reduce_func(static_cast<T>(val), static_cast<T>(__shfl_xor(val, 8, kThreadsPerWarp)));
+  val = reduce_func(static_cast<T>(val), static_cast<T>(__shfl_xor(val, 4, kThreadsPerWarp)));
+  val = reduce_func(static_cast<T>(val), static_cast<T>(__shfl_xor(val, 2, kThreadsPerWarp)));
+  val = reduce_func(static_cast<T>(val), static_cast<T>(__shfl_xor(val, 1, kThreadsPerWarp)));
+#else
   val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 16));
   val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 8));
   val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 4));
   val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 2));
   val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 1));
+#endif
   __syncwarp();
   return T(val);
 }
@@ -165,8 +199,13 @@ __device__ inline void naive_topk_and_mask(T *scores, int data_size, int topk, i
     }
     // Warp shuffle between threads
     for (int s = 16; s > 0; s /= 2) {
+#ifdef __HIP_PLATFORM_AMD__
+      volatile auto shuffled_val = __shfl_xor(val, s, kThreadsPerWarp);
+      volatile auto shuffled_index = __shfl_xor(index, kThreadsPerWarp);
+#else
       volatile auto shuffled_val = __shfl_xor_sync(0xffffffff, val, s);
       volatile auto shuffled_index = __shfl_xor_sync(0xffffffff, index, s);
+#endif
       if (shuffled_val > val) {
         val = shuffled_val;
         index = shuffled_index;

@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -168,6 +170,8 @@ void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
                                                 int num_cols, int topk, float coeff,
                                                 DataType* aux_loss, float* Const_buf,
                                                 cudaStream_t stream) {
+// TODO: unblock after rocm support thread block cluster
+#ifndef __HIP_PLATFORM_AMD__
   if (cuda::sm_arch(cuda::current_device()) >= 90) {
     cudaLaunchConfig_t config = {0};
     int cluster_size = 8;
@@ -193,11 +197,14 @@ void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
                        tokens_per_expert, total_num_tokens, num_experts, num_rows, num_cols, topk,
                        coeff, aux_loss, Const_buf);
   } else {
+#endif
     size_t smem_size = sizeof(CompType) * num_cols;
     fused_moe_aux_loss_forward_kernel<DataType, IndexType>
         <<<1, 1024, smem_size, stream>>>(probs, tokens_per_expert, total_num_tokens, num_experts,
                                          num_rows, num_cols, topk, coeff, aux_loss, Const_buf);
+#ifndef __HIP_PLATFORM_AMD__
   }
+#endif
 }
 
 void fused_moe_aux_loss_forward(const Tensor& probs, const Tensor& tokens_per_expert,
