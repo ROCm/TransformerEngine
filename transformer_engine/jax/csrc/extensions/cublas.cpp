@@ -5,8 +5,13 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
+<<<<<<< HEAD
 #ifndef USE_ROCM
 #include "extensions.h"
+=======
+
+#include "../extensions.h"
+>>>>>>> ca7407e
 #include "transformer_engine/gemm.h"
 #include "xla/ffi/api/c_api.h"
 

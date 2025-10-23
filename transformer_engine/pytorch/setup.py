@@ -34,7 +34,7 @@ from build_tools.build_ext import get_build_ext
 from build_tools.utils import (
     rocm_build, copy_common_headers, copy_hipify_tools, clear_hipify_tools_copy )
 from build_tools.te_version import te_version
-from build_tools.pytorch import setup_pytorch_extension
+from build_tools.pytorch import setup_pytorch_extension, install_requirements, test_requirements
 
 
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
@@ -59,8 +59,13 @@ if __name__ == "__main__":
         description="Transformer acceleration library - Torch Lib",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
+<<<<<<< HEAD
         install_requires=["einops"] if rocm_build() else ["torch"],
         tests_require=[] if rocm_build() else ["numpy", "torchvision"],
+=======
+        install_requires=install_requirements(),
+        tests_require=test_requirements(),
+>>>>>>> ca7407e
     )
     if any(x in sys.argv for x in (".", "sdist", "bdist_wheel")):
         shutil.rmtree(common_headers_dir)

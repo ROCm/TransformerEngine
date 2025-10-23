@@ -8,6 +8,11 @@ from __future__ import annotations
 
 import torch
 
+<<<<<<< HEAD
+=======
+import transformer_engine
+import transformer_engine.common.recipe
+>>>>>>> ca7407e
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type, get_torch_float8_e5m2_type
 import transformer_engine_torch as tex
@@ -87,3 +92,25 @@ def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
     if dtype == torch.float8_e5m2 or dtype == torch.float8_e5m2fnuz:
         return dict(rtol=0.25, atol=0.125)  # epsilon = 0.152  
     raise ValueError(f"Unsupported dtype ({dtype})")
+
+
+def make_recipe(name: Optional[str]) -> Optional[Recipe]:
+    """Make recipe for quantization scheme"""
+    if name is None:
+        return None
+    if name in ("fp8", "fp8_delayed_scaling"):
+        return transformer_engine.common.recipe.DelayedScaling(
+            fp8_format=transformer_engine.common.recipe.Format.E4M3,
+            amax_history_len=8,
+        )
+    if name == "fp8_current_scaling":
+        return transformer_engine.common.recipe.Float8CurrentScaling(
+            fp8_format=transformer_engine.common.recipe.Format.E4M3,
+        )
+    if name == "mxfp8":
+        return transformer_engine.common.recipe.MXFP8BlockScaling(
+            fp8_format=transformer_engine.common.recipe.Format.E4M3,
+        )
+    if name == "fp8_block_scaling":
+        return transformer_engine.common.recipe.Float8BlockScaling()
+    raise ValueError(f"Unsupported quantization scheme ({name})")
