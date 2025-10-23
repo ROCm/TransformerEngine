@@ -43,7 +43,7 @@ from ..tensor.quantized_tensor import QuantizedTensor, QuantizedTensorBase, Quan
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from ..tensor.fsdp2_float8_tensor import FSDPAGFloat8Tensor
+from ..tensor.fsdp2_allgather_tensor import FSDPAGTensor
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..utils import get_device_compute_capability, torch_get_autocast_gpu_dtype
@@ -1162,7 +1162,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 param = quantizer(param)
             if self.use_fsdp2 and not self.primary_weights_in_fp8 and fp8_meta_index is not None:
                 self.keep_fp8_weight_transpose_cache = False
-                param = FSDPAGFloat8Tensor(
+                param = FSDPAGTensor(
                     param, 
                     module=self, 
                     fp8_meta_index=fp8_meta_index, 

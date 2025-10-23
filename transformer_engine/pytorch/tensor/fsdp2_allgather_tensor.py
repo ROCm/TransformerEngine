@@ -20,7 +20,7 @@ _ops_to_preserve_subclass = {
 
 
 # A wrapper subclass for stateful FSDP transport
-class FSDPAGFloat8Tensor(torch.Tensor):
+class FSDPAGTensor(torch.Tensor):
 
     @staticmethod
     def __new__(cls, elem: torch.Tensor, **kwargs):
@@ -59,7 +59,7 @@ class FSDPAGFloat8Tensor(torch.Tensor):
     
     def __repr__(self):
             return (
-                f"FSDPAGFloat8Tensor("
+                f"FSDPAGTensor("
                 f"elem={self._data}, "
                 f"module={self._module.__class__.__name__}, "
                 f"fp8_meta_index={self._fp8_meta_index})"
@@ -78,7 +78,7 @@ class FSDPAGFloat8Tensor(torch.Tensor):
     @staticmethod
     def __tensor_unflatten__(inner_tensors, flatten_spec, outer_size, outer_stride):
         module, fp8_meta_index, keep_fp8_weight_transpose_cache = flatten_spec
-        return FSDPAGFloat8Tensor(
+        return FSDPAGTensor(
             inner_tensors["_data"],
             module=module,
             fp8_meta_index=fp8_meta_index,
