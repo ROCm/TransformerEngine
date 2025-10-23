@@ -141,6 +141,8 @@ hipError_t ck_attn_varlen_bwd(
   const void* v_ptr, 
   uint64_t stride_h_v, uint64_t stride_s_v,
   const void* cu_seqlen_q_ptr, const void* cu_seqlen_kv_ptr,
+  const void* cu_seqlen_q_padded_ptr, const void* cu_seqlen_kv_padded_ptr,
+  const void* seqlen_q_ptr, const void* seqlen_kv_ptr,
   const void* o_ptr, 
   uint64_t stride_h_o, uint64_t stride_s_o,
   const void* lse_thd_ptr, 
@@ -166,6 +168,7 @@ hipError_t ck_attn_varlen_bwd(
   bool uses_bwd_v3,
   bool is_v3_atomic_fp32,
   int how_v3_bf16_cvt,
+  bool is_v3_api_check,
   hipStream_t stream);
 
 }//namespace ck_fused_attn
