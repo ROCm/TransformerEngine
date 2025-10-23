@@ -596,6 +596,7 @@ void fused_attn_ck_fwd_impl(
   bool is_padding = (mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
                      mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
                      mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
+  bool bshd_to_thd = is_BSHD && is_padding;
  
   // extract the qkv and o storage bytes to allocate buffer for padding removing
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
@@ -743,7 +744,7 @@ void fused_attn_ck_fwd_impl(
     std::cout<<"nvte_ck_uses_fwd_v3: "<<nvte_ck_uses_fwd_v3<<std::endl;
   }
   // If input is BSHD, we may directly convert to THD
-  if(is_BSHD && is_padding){
+  if(bshd_to_thd){
     generate_cu_seqlen_padded(s_q, s_kv, b, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV, stream);
     if(nvte_log_ck_config){
       std::cout << "\nattn_fwd(ck): Converting BSHD to THD\n";
@@ -784,7 +785,7 @@ void fused_attn_ck_fwd_impl(
     // add padding for o and softmax_lse
     add_padding(dtype, b, h, s_q, d_v, max_tokens_q, false, o_stride[0], o_stride[1], o_stride[2], devPtrOWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrO, stream);
     add_padding_softmax_lse(b, h, s_q, max_tokens_q, false, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxAux, stream);
-  }else if((is_BSHD && is_padding) || is_ragged){
+  }else if(bshd_to_thd || is_ragged){
     using ck_fused_attn::ck_attn_varlen_fwd;
     bool is_v3_supported = ck_attn_varlen_fwd(
          nvte_to_ck_dtype(dtype),
@@ -1027,11 +1028,7 @@ void fused_attn_ck_bwd_impl(
   size_t o_storage_bytes = max_tokens_q*h*d_v*nvte_dtype_size(dtype); 
 
   bool is_v3_supported = false;
-  bool needs_padding_conversion = (
-    is_SBHD ||
-    (bshd_to_thd && is_v3_supported) ||
-    (is_ragged && is_v3_supported)
-  );
+  bool needs_padding_conversion = false;
   // Exit to request upper level API to allocate memory if needed
   if(workspace==nullptr){
     size_t workspace_size_lse = max_tokens_q*h*sizeof(float);
@@ -1059,6 +1056,11 @@ void fused_attn_ck_bwd_impl(
       }
       // TODO: remove v3 check after ck v2 fully support native padding
       is_v3_supported = is_ck_attn_bwd_varlen_v3_supported(b, h, hg, s_q, s_kv, d_qk, d_v, max_tokens_q, max_tokens_kv, scaling_factor, dropout_probability, layout, is_ragged || bshd_to_thd, bias_type, mask_type, window_size_left, window_size_right, deterministic, dtype, nvte_ck_uses_bwd_v3, nvte_ck_is_v3_atomic_fp32, nvte_ck_how_v3_bf16_cvt, stream);
+      needs_padding_conversion = (
+          (is_SBHD && is_padding) ||
+          (bshd_to_thd && is_v3_supported) ||
+          (is_ragged && is_v3_supported)
+        );
       // remove padding for the softmax_lse
       (*workspace_size)+= h*max_tokens_q*sizeof(float);
       if(needs_padding_conversion){
@@ -1212,6 +1214,12 @@ void fused_attn_ck_bwd_impl(
   if(pad_between_seqs){
     devPtrSoftmaxLSEWithoutPadding = workspace_next;
     workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + h*max_tokens_q*sizeof(float));
+    is_v3_supported = is_ck_attn_bwd_varlen_v3_supported(b, h, hg, s_q, s_kv, d_qk, d_v, max_tokens_q, max_tokens_kv, scaling_factor, dropout_probability, layout, is_ragged || bshd_to_thd, bias_type, mask_type, window_size_left, window_size_right, deterministic, dtype, nvte_ck_uses_bwd_v3, nvte_ck_is_v3_atomic_fp32, nvte_ck_how_v3_bf16_cvt, stream);
+    needs_padding_conversion = (
+        (is_SBHD && is_padding) ||
+        (bshd_to_thd && is_v3_supported) ||
+        (is_ragged && is_v3_supported)
+      );
 
     if(needs_padding_conversion){
       //determine q, k, v buffer based on the workspace next ptr and layout group
