@@ -37,6 +37,7 @@
 
 // Define comm overlap handles if not using ROCm
 #ifndef USE_ROCM
+
 #define NVTE_DECLARE_COMM_OVERLAP_HANDLES(m)                                                       \
   pybind11::enum_<transformer_engine::CommOverlapType>(m, "CommOverlapType",                       \
                                                        pybind11::module_local())                   \
@@ -153,69 +154,11 @@
       .value("NVTE_Paged_KV_SBHD_SBHD_SBHD", NVTE_QKV_Layout::NVTE_Paged_KV_SBHD_SBHD_SBHD)        \
       .value("NVTE_Paged_KV_THD_BSHD_BSHD", NVTE_QKV_Layout::NVTE_Paged_KV_THD_BSHD_BSHD)          \
       .value("NVTE_Paged_KV_THD_SBHD_SBHD", NVTE_QKV_Layout::NVTE_Paged_KV_THD_SBHD_SBHD);         \
-<<<<<<< HEAD
   NVTE_DECLARE_FUSED_ATTENTION_HANDLES(m)                                                          \
-  NVTE_DECLARE_COMM_OVERLAP_HANDLES(m)
-=======
-  pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local()) \
-      .value("NVTE_F16_max512_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen)            \
-      .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)      \
-      .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8)                                        \
-      .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend);                         \
   pybind11::enum_<transformer_engine::Float8BlockScaleTensorFormat>(                               \
       m, "Float8BlockScaleTensorFormat", pybind11::module_local())                                 \
       .value("GEMM_READY", transformer_engine::Float8BlockScaleTensorFormat::GEMM_READY)           \
       .value("COMPACT", transformer_engine::Float8BlockScaleTensorFormat::COMPACT);                \
-  pybind11::enum_<transformer_engine::CommOverlapType>(m, "CommOverlapType",                       \
-                                                       pybind11::module_local())                   \
-      .value("RS", transformer_engine::CommOverlapType::RS)                                        \
-      .value("AG", transformer_engine::CommOverlapType::AG);                                       \
-  pybind11::enum_<transformer_engine::CommOverlapAlgo>(m, "CommOverlapAlgo",                       \
-                                                       pybind11::module_local())                   \
-      .value("BULK_OVERLAP_AG", transformer_engine::CommOverlapAlgo::BULK_OVERLAP_AG)              \
-      .value("BULK_OVERLAP_RS", transformer_engine::CommOverlapAlgo::BULK_OVERLAP_RS)              \
-      .value("SPLIT_PIPELINED_AG_P2P",                                                             \
-             transformer_engine::CommOverlapAlgo::SPLIT_PIPELINED_AG_P2P)                          \
-      .value("SPLIT_PIPELINED_RS", transformer_engine::CommOverlapAlgo::SPLIT_PIPELINED_RS)        \
-      .value("SPLIT_PIPELINED_RS_P2P",                                                             \
-             transformer_engine::CommOverlapAlgo::SPLIT_PIPELINED_RS_P2P)                          \
-      .value("ATOMIC_GEMM_RS", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_RS)                \
-      .value("ATOMIC_GEMM_AG_P2P", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_AG_P2P)        \
-      .value("ATOMIC_GEMM_RS_P2P", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_RS_P2P);       \
-  py::class_<transformer_engine::CommOverlapCore,                                                  \
-             std::shared_ptr<transformer_engine::CommOverlapCore>>(m, "CommOverlapCore",           \
-                                                                   pybind11::module_local())       \
-      .def(py::init([]() { return new transformer_engine::CommOverlapCore(); }),                   \
-           py::call_guard<py::gil_scoped_release>())                                               \
-      .def("is_atomic_gemm", &transformer_engine::CommOverlapCore::is_atomic_gemm,                 \
-           py::call_guard<py::gil_scoped_release>())                                               \
-      .def("is_p2p_overlap", &transformer_engine::CommOverlapCore::is_p2p_overlap,                 \
-           py::call_guard<py::gil_scoped_release>())                                               \
-      .def("is_fp8_ubuf", &transformer_engine::CommOverlapCore::is_fp8_ubuf,                       \
-           py::call_guard<py::gil_scoped_release>());                                              \
-  py::class_<transformer_engine::CommOverlapBase,                                                  \
-             std::shared_ptr<transformer_engine::CommOverlapBase>,                                 \
-             transformer_engine::CommOverlapCore>(m, "CommOverlapBase", pybind11::module_local())  \
-      .def(py::init([]() { return new transformer_engine::CommOverlapBase(); }),                   \
-           py::call_guard<py::gil_scoped_release>());                                              \
-  py::class_<transformer_engine::CommOverlapP2PBase,                                               \
-             std::shared_ptr<transformer_engine::CommOverlapP2PBase>,                              \
-             transformer_engine::CommOverlapCore>(m, "CommOverlapP2PBase",                         \
-                                                  pybind11::module_local())                        \
-      .def(py::init([]() { return new transformer_engine::CommOverlapP2PBase(); }),                \
-           py::call_guard<py::gil_scoped_release>());                                              \
-  m.def("device_supports_multicast", &transformer_engine::cuda::supports_multicast,                \
-        py::call_guard<py::gil_scoped_release>(), py::arg("device_id") = -1);                      \
-  m.def(                                                                                           \
-      "get_stream_priority_range",                                                                 \
-      [](int device_id = -1) {                                                                     \
-        int low_pri, high_pri;                                                                     \
-        transformer_engine::cuda::stream_priority_range(&low_pri, &high_pri, device_id);           \
-        return std::make_pair(low_pri, high_pri);                                                  \
-      },                                                                                           \
-      py::call_guard<py::gil_scoped_release>(), py::arg("device_id") = -1);                        \
-  m.def("ubuf_built_with_mpi", &transformer_engine::ubuf_built_with_mpi,                           \
-        py::call_guard<py::gil_scoped_release>());
->>>>>>> ca7407e
+  NVTE_DECLARE_COMM_OVERLAP_HANDLES(m)
 
 #endif

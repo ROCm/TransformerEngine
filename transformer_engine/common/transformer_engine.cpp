@@ -543,13 +543,8 @@ void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream) {
   const auto &t = *transformer_engine::convertNVTETensorCheck(tensor);
   // Zero out tensor data if allocated
   if (t.data.dptr != nullptr) {
-<<<<<<< HEAD
-    size_t size_in_bytes = nvte_tensor_element_size(tensor) * nvte_tensor_numel(tensor);
-    (void)cudaMemsetAsync(t.data.dptr, 0, size_in_bytes, stream);
-=======
     const size_t size_in_bytes = nvte_tensor_size_bytes(tensor);
-    cudaMemsetAsync(t.data.dptr, 0, size_in_bytes, stream);
->>>>>>> ca7407e
+    (void)cudaMemsetAsync(t.data.dptr, 0, size_in_bytes, stream);
   }
   // Set amax to 0 if allocated
   if (t.amax.dptr != nullptr) {

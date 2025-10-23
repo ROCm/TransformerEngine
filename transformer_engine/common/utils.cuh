@@ -22,17 +22,14 @@ using namespace __hip_internal;
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_AMD__
 typedef uint16_t hip_bfloat16x2 __attribute__((ext_vector_type(2)));
 
 #else
-=======
 #if CUDA_VERSION >= 12080
 #include <cuda_fp4.h>
 #endif
 
->>>>>>> ca7407e
 #if !defined(__CUDACC_RTC__)
 #include <cstdint>
 #else

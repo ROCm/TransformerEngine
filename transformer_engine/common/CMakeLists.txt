@@ -6,7 +6,6 @@
 
 cmake_minimum_required(VERSION 3.21)
 
-<<<<<<< HEAD
 option(USE_ROCM "Use ROCm" ON)
 option(USE_FUSED_ATTN_AOTRITON "Use aotriton backend" ON)
 option(USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS "Build AOTriton GPU kernels" OFF)
@@ -19,16 +18,6 @@ if (USE_ROCM)
     message("Using AMD Platform")
   else()
     message(FATAL_ERROR "Could not find ROCm installation")
-=======
-# Language options
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
-    set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90 100 120)
-  elseif (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
-    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90 100 120)
-  else ()
-    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
->>>>>>> ca7407e
   endif()
 
 else()
@@ -45,43 +34,46 @@ endif()
 
 # Language options
 if(USE_CUDA)
-  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
-      set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90 100 120)
-    else ()
-      set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
-    endif()
+# Removed indent to minimize code diff with NV upstream
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
+    set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90 100 120)
+  elseif (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
+    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90 100 120)
+  else ()
+    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
   endif()
-  set(CMAKE_CXX_STANDARD 17)
-  set(CMAKE_CUDA_STANDARD 17)
-  set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-  if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -g -G")
-  endif()
+endif()
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -g -G")
+endif()
 
-  # Hide non-necessary symbols in shared object.
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
-  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
- 
-  # Transformer Engine library
-  project(transformer_engine LANGUAGES CUDA CXX)
-  
-  # CUDA Toolkit
-  find_package(CUDAToolkit REQUIRED)
-  if (CUDAToolkit_VERSION VERSION_LESS 12.0)
-    message(FATAL_ERROR "CUDA 12.0+ is required, but found CUDA ${CUDAToolkit_VERSION}")
-  endif()
+# Hide non-necessary symbols in shared object.
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
 
-  # cuDNN frontend API
-  set(CUDNN_FRONTEND_INCLUDE_DIR
-      "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
-  if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
-      message(FATAL_ERROR
-              "Could not find cuDNN frontend API at ${CUDNN_FRONTEND_INCLUDE_DIR}. "
-              "Try running 'git submodule update --init --recursive' "
-              "within the Transformer Engine source.")
-  endif()
-  include(${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
+# Transformer Engine library
+project(transformer_engine LANGUAGES CUDA CXX)
+
+# CUDA Toolkit
+find_package(CUDAToolkit REQUIRED)
+if (CUDAToolkit_VERSION VERSION_LESS 12.0)
+  message(FATAL_ERROR "CUDA 12.0+ is required, but found CUDA ${CUDAToolkit_VERSION}")
+endif()
+
+# cuDNN frontend API
+set(CUDNN_FRONTEND_INCLUDE_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
+if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
+    message(FATAL_ERROR
+            "Could not find cuDNN frontend API at ${CUDNN_FRONTEND_INCLUDE_DIR}. "
+            "Try running 'git submodule update --init --recursive' "
+            "within the Transformer Engine source.")
+endif()
+include(${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
 else()
   set(CMAKE_CXX_STANDARD 17)
   project(transformer_engine LANGUAGES HIP CXX)
@@ -125,111 +117,78 @@ find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 # Configure Transformer Engine library
 include_directories(${PROJECT_SOURCE_DIR}/..)
 set(transformer_engine_SOURCES)
-<<<<<<< HEAD
+# Source files in both cuda and rocm
+list(APPEND transformer_engine_SOURCES
+     transformer_engine.cpp
+     common.cu
+     multi_tensor/adam.cu
+     multi_tensor/compute_scale.cu
+     multi_tensor/l2norm.cu
+     multi_tensor/scale.cu
+     multi_tensor/sgd.cu
+     transpose/cast_transpose.cu
+     transpose/transpose.cu
+     transpose/cast_transpose_fusion.cu
+     transpose/transpose_fusion.cu
+     transpose/multi_cast_transpose.cu
+     activation/gelu.cu
+     fused_attn/flash_attn.cu
+     fused_attn/context_parallel.cu
+     fused_attn/kv_cache.cu
+     activation/relu.cu
+     activation/swiglu.cu
+     gemm/cublaslt_gemm.cu
+     normalization/common.cpp
+     normalization/layernorm/ln_api.cpp
+     normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
+     normalization/layernorm/ln_fwd_cuda_kernel.cu
+     normalization/rmsnorm/rmsnorm_api.cpp
+     normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
+     normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
+     permutation/permutation.cu
+     util/cast.cu
+     util/padding.cu
+     util/cuda_driver.cpp
+     util/cuda_runtime.cpp
+     util/multi_stream.cpp
+     util/rtc.cpp
+     swizzle/swizzle.cu
+     fused_softmax/scaled_masked_softmax.cu
+     fused_softmax/scaled_upper_triang_masked_softmax.cu
+     fused_softmax/scaled_aligned_causal_masked_softmax.cu
+     fused_rope/fused_rope.cu
+     fused_router/fused_moe_aux_loss.cu
+     fused_router/fused_score_for_moe_aux_loss.cu
+     fused_router/fused_topk_with_score_function.cu
+     recipe/current_scaling.cu
+     recipe/delayed_scaling.cu
+     recipe/fp8_block_scaling.cu)
 if(USE_CUDA)
-  list(APPEND transformer_engine_SOURCES
-       cudnn_utils.cpp
-       transformer_engine.cpp
-       common.cu
-       multi_tensor/adam.cu
-       multi_tensor/compute_scale.cu
-       multi_tensor/l2norm.cu
-       multi_tensor/scale.cu
-       multi_tensor/sgd.cu
-       transpose/cast_transpose.cu
-       transpose/transpose.cu
-       transpose/cast_transpose_fusion.cu
-       transpose/transpose_fusion.cu
-       transpose/multi_cast_transpose.cu
-       transpose/quantize_transpose_square_blockwise.cu
-       transpose/quantize_transpose_vector_blockwise.cu
-       activation/gelu.cu
-       fused_attn/flash_attn.cu
-       fused_attn/context_parallel.cu
-       fused_attn/kv_cache.cu
-       fused_attn/fused_attn_f16_max512_seqlen.cu
-       fused_attn/fused_attn_f16_arbitrary_seqlen.cu
-       activation/relu.cu
-       activation/swiglu.cu
-       fused_attn/fused_attn_fp8.cu
-       fused_attn/fused_attn.cpp
-       fused_attn/utils.cu
-       gemm/cublaslt_gemm.cu
-       normalization/common.cpp
-       normalization/layernorm/ln_api.cpp
-       normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
-       normalization/layernorm/ln_fwd_cuda_kernel.cu
-       normalization/rmsnorm/rmsnorm_api.cpp
-       normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
-       normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
-       permutation/permutation.cu
-       util/cast.cu
-       util/padding.cu
-       util/cuda_driver.cpp
-       util/cuda_nvml.cpp
-       util/cuda_runtime.cpp
-       util/rtc.cpp
-       swizzle/swizzle.cu
-       fused_softmax/scaled_masked_softmax.cu
-       fused_softmax/scaled_upper_triang_masked_softmax.cu
-       fused_softmax/scaled_aligned_causal_masked_softmax.cu
-       fused_rope/fused_rope.cu
-       recipe/current_scaling.cu
-       recipe/delayed_scaling.cu
-       recipe/fp8_block_scaling.cu
-       comm_gemm_overlap/userbuffers/ipcsocket.cc
-       comm_gemm_overlap/userbuffers/userbuffers-host.cpp
-       comm_gemm_overlap/userbuffers/userbuffers.cu
-       comm_gemm_overlap/comm_gemm_overlap.cpp)
-  add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
+# Removed indent to minimize code diff with NV upstream
+# Files unique in cuda building
+list(APPEND transformer_engine_SOURCES
+     cudnn_utils.cpp
+     transpose/quantize_transpose_square_blockwise.cu
+     transpose/quantize_transpose_vector_blockwise.cu
+     fused_attn/fused_attn_f16_max512_seqlen.cu
+     fused_attn/fused_attn_f16_arbitrary_seqlen.cu
+     fused_attn/fused_attn_fp8.cu
+     fused_attn/fused_attn.cpp
+     fused_attn/utils.cu
+     util/cuda_nvml.cpp
+     comm_gemm_overlap/userbuffers/ipcsocket.cc
+     comm_gemm_overlap/userbuffers/userbuffers-host.cpp
+     comm_gemm_overlap/userbuffers/userbuffers.cu
+     comm_gemm_overlap/comm_gemm_overlap.cpp)
+add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 else()
   list(APPEND transformer_engine_SOURCES
-       transformer_engine.cpp
-       common.cu
-       multi_tensor/adam.cu
-       multi_tensor/compute_scale.cu
-       multi_tensor/l2norm.cu
-       multi_tensor/scale.cu
-       multi_tensor/sgd.cu
-       transpose/cast_transpose.cu
-       transpose/transpose.cu
-       transpose/cast_transpose_fusion.cu
-       transpose/transpose_fusion.cu
-       transpose/multi_cast_transpose.cu
-       activation/gelu.cu
-       activation/relu.cu
-       activation/swiglu.cu
-       fused_attn/flash_attn.cu
-       fused_attn/context_parallel.cu
-       fused_attn/kv_cache.cu
        fused_attn_rocm/fused_attn.cpp
        fused_attn_rocm/fused_attn_aotriton.cpp
        fused_attn_rocm/fused_attn_ck.cpp
        fused_attn_rocm/utils.cpp
-       gemm/cublaslt_gemm.cu
        gemm/rocm_gemm.cu
-       normalization/common.cpp
-       normalization/layernorm/ln_api.cpp
-       normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
-       normalization/layernorm/ln_fwd_cuda_kernel.cu
-       normalization/rmsnorm/rmsnorm_api.cpp
-       normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
-       normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
-       permutation/permutation.cu
-       util/cast.cu
-       util/padding.cu
-       util/cuda_driver.cpp
-       util/cuda_runtime.cpp
-       util/rtc.cpp
-       amd_detail/system.cpp
-       swizzle/swizzle.cu
-       fused_softmax/scaled_masked_softmax.cu
-       fused_softmax/scaled_upper_triang_masked_softmax.cu
-       fused_softmax/scaled_aligned_causal_masked_softmax.cu
-       fused_rope/fused_rope.cu
-       recipe/current_scaling.cu
-       recipe/delayed_scaling.cu
-       recipe/fp8_block_scaling.cu)
+       amd_detail/system.cpp)
 
   # process source code files
   set(TE ${CMAKE_CURRENT_SOURCE_DIR}/../..)
@@ -259,67 +218,6 @@ else()
   add_library(transformer_engine SHARED ${te_hip_sources})
   target_include_directories(transformer_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 endif()
-=======
-list(APPEND transformer_engine_SOURCES
-     cudnn_utils.cpp
-     transformer_engine.cpp
-     common.cu
-     multi_tensor/adam.cu
-     multi_tensor/compute_scale.cu
-     multi_tensor/l2norm.cu
-     multi_tensor/scale.cu
-     multi_tensor/sgd.cu
-     transpose/cast_transpose.cu
-     transpose/transpose.cu
-     transpose/cast_transpose_fusion.cu
-     transpose/transpose_fusion.cu
-     transpose/multi_cast_transpose.cu
-     transpose/quantize_transpose_square_blockwise.cu
-     transpose/quantize_transpose_vector_blockwise.cu
-     activation/gelu.cu
-     fused_attn/flash_attn.cu
-     fused_attn/context_parallel.cu
-     fused_attn/kv_cache.cu
-     fused_attn/fused_attn_f16_max512_seqlen.cu
-     fused_attn/fused_attn_f16_arbitrary_seqlen.cu
-     activation/relu.cu
-     activation/swiglu.cu
-     fused_attn/fused_attn_fp8.cu
-     fused_attn/fused_attn.cpp
-     fused_attn/utils.cu
-     gemm/cublaslt_gemm.cu
-     normalization/common.cpp
-     normalization/layernorm/ln_api.cpp
-     normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
-     normalization/layernorm/ln_fwd_cuda_kernel.cu
-     normalization/rmsnorm/rmsnorm_api.cpp
-     normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
-     normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
-     permutation/permutation.cu
-     util/cast.cu
-     util/padding.cu
-     util/cuda_driver.cpp
-     util/cuda_nvml.cpp
-     util/cuda_runtime.cpp
-     util/multi_stream.cpp
-     util/rtc.cpp
-     swizzle/swizzle.cu
-     fused_softmax/scaled_masked_softmax.cu
-     fused_softmax/scaled_upper_triang_masked_softmax.cu
-     fused_softmax/scaled_aligned_causal_masked_softmax.cu
-     fused_rope/fused_rope.cu
-     fused_router/fused_moe_aux_loss.cu
-     fused_router/fused_score_for_moe_aux_loss.cu
-     fused_router/fused_topk_with_score_function.cu
-     recipe/current_scaling.cu
-     recipe/delayed_scaling.cu
-     recipe/fp8_block_scaling.cu
-     comm_gemm_overlap/userbuffers/ipcsocket.cc
-     comm_gemm_overlap/userbuffers/userbuffers-host.cpp
-     comm_gemm_overlap/userbuffers/userbuffers.cu
-     comm_gemm_overlap/comm_gemm_overlap.cpp)
-add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
->>>>>>> ca7407e
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 

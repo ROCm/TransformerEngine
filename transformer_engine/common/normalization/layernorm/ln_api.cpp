@@ -72,14 +72,10 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
   if (cudnn_backend) {
     // TODO: add check for GPU ARCH
     norm_backend = NVTE_Norm_Backend::Cudnn;
-<<<<<<< HEAD
+    gamma_in_weight_dtype = use_zero_centered_gamma_in_weight_dtype();
   } else
 #endif
   {
-=======
-    gamma_in_weight_dtype = use_zero_centered_gamma_in_weight_dtype();
-  } else {
->>>>>>> ca7407e
     norm_backend = NVTE_Norm_Backend::Te;
     is_aligned = is_ptr_aligned(z->data.dptr, x.data.dptr, gamma.data.dptr, beta.data.dptr,
                                 mu->data.dptr, rsigma->data.dptr);
@@ -163,22 +159,15 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
 
   NVTE_Norm_Backend norm_backend;
   bool is_aligned = true;
-<<<<<<< HEAD
+  bool gamma_in_weight_dtype = false;
 #ifndef __HIP_PLATFORM_AMD__
   if (use_cudnn_norm_bwd()) {
     // TODO: add check for GPU ARCH
     norm_backend = NVTE_Norm_Backend::Cudnn;
+    gamma_in_weight_dtype = use_zero_centered_gamma_in_weight_dtype();
   } else
 #endif
   {
-=======
-  bool gamma_in_weight_dtype = false;
-  if (use_cudnn_norm_bwd()) {
-    // TODO: add check for GPU ARCH
-    norm_backend = NVTE_Norm_Backend::Cudnn;
-    gamma_in_weight_dtype = use_zero_centered_gamma_in_weight_dtype();
-  } else {
->>>>>>> ca7407e
     norm_backend = NVTE_Norm_Backend::Te;
     is_aligned = is_ptr_aligned(x.data.dptr, gamma.data.dptr, mu.data.dptr, rsigma.data.dptr,
                                 dx->data.dptr, dz.data.dptr, dbeta->data.dptr, dgamma->data.dptr);

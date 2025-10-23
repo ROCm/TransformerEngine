@@ -5,6 +5,7 @@
  ************************************************************************/
 #include <type_traits>
 #include <transformer_engine/gemm.h>
+#include <transformer_engine/multi_stream.h>
 #include <transformer_engine/transformer_engine.h>
 #include <map>
 #include <unistd.h>
@@ -189,7 +190,7 @@ static hipDataType get_hipblaslt_dtype(const transformer_engine::DType t) {
   }
 }
 
-//TODO: unified with cublaslt_gemm.cu
+//TODO: merge duplicated logics with cublaslt_gemm.cu
 struct GemmParam {
   void *A = nullptr;
   void *B = nullptr;
@@ -933,7 +934,7 @@ static inline int getIntEnv(const char *name, int defval, int minval)
  */
 static void init_hipblaslt_handles(hipblasLtHandle_t* hipblaslt_handles) {
   NVTE_CHECK(hipblaslt_handles != nullptr);
-  for (int i = 0; i < num_streams; i++) {
+  for (int i = 0; i < nvte_get_num_compute_streams(); i++) {
     NVTE_CHECK_HIPBLASLT(hipblasLtCreate(&hipblaslt_handles[i]));
   }
 }
@@ -1550,6 +1551,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   bool use_service_stream =
       (math_sm_count != 0) ? get_service_stream(math_sm_count, stream, ss_ctl) : false;
 
+  int num_streams = nvte_get_num_compute_streams();
   NVTE_CHECK(compute_stream_offset >= -1 && compute_stream_offset < num_streams);
 
   hipblasLtHandle_t handle = nullptr;
