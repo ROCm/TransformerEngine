@@ -826,7 +826,6 @@ void reduce_dbias(const float *workspace_ptr, Tensor *dbias, const size_t rows, 
           reinterpret_cast<IType *>(dbias->data.dptr), workspace_ptr, rows, cols);
 }
 
-
 #ifndef __HIP_PLATFORM_AMD__
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
 static void cast_fp8_1D(const Tensor &input, Tensor *output, cudaStream_t stream) {
