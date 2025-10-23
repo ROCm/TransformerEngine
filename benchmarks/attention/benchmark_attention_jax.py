@@ -240,8 +240,9 @@ def benchmark_dot_product_attention_profiler(args):
             "seq_desc_format":seq_desc_format,
         }
         if args.v:
-            print(output)
             print(f"Progress: {n+1}")
+        if args.v > 1:
+            print(output)
         runner = FusedAttnBenchRunner(
             b, s_q, s_kv,
             h_q, h_kv,
@@ -259,7 +260,7 @@ def benchmark_dot_product_attention_profiler(args):
         )
         runner.bench_forward(args.warmup, args.iters)
 
-        timings_path["fwd"] = Path(args.fwd_timings) / 'aiter-fwd-timings.txt'
+        timings_path["fwd"] = Path(args.timings_dir) / 'aiter-fwd-timings.txt'
         fwd_times = pd.read_csv(timings_path["fwd"], header=None, dtype=float)
         os.remove(timings_path["fwd"])
         rows.extend([output | {"mode": "fwd", "time": t} for t in fwd_times[0].to_list()])
@@ -268,33 +269,33 @@ def benchmark_dot_product_attention_profiler(args):
         writer.writeheader()
         writer.writerows(rows)
 
+class env_manager:
+    def __init__(self, fwd, bwd):
+        self.vals = {}
+        self.config = ((fwd, "FWD"), (bwd, "BWD"))
+
+    def __enter__(self):
+        for flag, mode in self.config:
+            if flag:
+                self.vals[mode] = os.environ.get(f"NVTE_CK_USES_{mode}_V3")
+                os.environ[f"NVTE_CK_USES_{mode}_V3"] = "1"
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        for flag, mode in self.config:
+            if flag:
+                del os.environ[f"NVTE_CK_USES_{mode}_V3"]
+                if self.vals[mode]:
+                    os.environ[f"NVTE_CK_USES_{mode}_V3"] = self.vals[mode]
 
 def main(args):
-    if args.fwd_v3:
-        use_ck_fwd_v3 = os.environ.get("NVTE_CK_USES_FWD_V3")
-        os.environ["NVTE_CK_USES_FWD_V3"] = "1"
-    if args.bwd_v3:
-        use_ck_bwd_v3 = os.environ.get("NVTE_CK_USES_BWD_V3")
-        os.environ["NVTE_CK_USES_BWD_V3"] = "1"
-
-    benchmark_dot_product_attention_profiler(args)
-
-    if args.fwd_v3:
-        if use_ck_fwd_v3:
-            os.environ["NVTE_CK_USES_FWD_V3"] = use_ck_fwd_v3
-        else:
-            del os.environ["NVTE_CK_USES_FWD_V3"]
-    if args.bwd_v3:
-        if use_ck_bwd_v3:
-            os.environ["NVTE_CK_USES_BWD_V3"] = use_ck_bwd_v3
-        else:
-            del os.environ["NVTE_CK_USES_BWD_V3"]
+    with env_manager(args.fwd_v3, args.bwd_v3):
+        benchmark_dot_product_attention_profiler(args)
  
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--fwd-v3", action="store_true", help="Use NVTE_CK_USES_FWD_V3=1 for AITER fwd kernels")
     parser.add_argument("--bwd-v3", action="store_true", help="Use NVTE_CK_USES_BWD_V3=1 for AITER bwd kernels")
-    parser.add_argument("-v", action="store_true", help="Whether to include verbose debug outputs.")
+    parser.add_argument("-v", action='count', default=0, help="Whether to include verbose debug outputs.")
     parser.add_argument("--output", type=str, help="The .csv file to output run times to.")
     parser.add_argument("--warmup", type=int, default=5, help="The number of iterations to run the kernel before logging run time.")
     parser.add_argument("--iters", type=int, default=50, help="The number of iterations to run the kernel while logging run time.")
