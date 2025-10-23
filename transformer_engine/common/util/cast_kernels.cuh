@@ -31,15 +31,6 @@
 #include "transformer_engine/transformer_engine.h"
 #ifdef __HIP_PLATFORM_AMD__
 #include "rocm_cast_kernels.cuh"
-#define HIP_CHECK(err)                                                     \
-  do {                                                                     \
-    hipError_t err_ = (err);                                               \
-    if (err_ != hipSuccess) {                                              \
-      std::printf("HIP error %d at %s:%d. %s\n", err_, __FILE__, __LINE__, \
-                  hipGetErrorString(err_));                                \
-      throw std::runtime_error("HIP error");                               \
-    }                                                                      \
-  } while (0)
 #endif
 
 namespace transformer_engine {
@@ -837,8 +828,8 @@ void reduce_dbias(const float *workspace_ptr, Tensor *dbias, const size_t rows, 
 
 #ifdef __HIP_PLATFORM_AMD__
 constexpr size_t TILE_DIM = 32;
-template <typename OType>
-__global__ void partial_reduce_kernel(const float* input, float* partial_output, int rows, int cols) {
+template <typename DTypeReduce>
+__global__ void partial_reduce_kernel(const DTypeReduce* input, float* partial_output, int rows, int cols) {
   __shared__ float tile[TILE_DIM][TILE_DIM];
 
   int tile_start_col = blockIdx.x * TILE_DIM;
@@ -850,7 +841,7 @@ __global__ void partial_reduce_kernel(const float* input, float* partial_output,
   int global_row = tile_start_row + thread_row_in_tile;
 
   if (global_row < rows && global_col < cols) {
-    tile[thread_row_in_tile][thread_col_in_tile] = input[global_row * cols + global_col];
+    tile[thread_row_in_tile][thread_col_in_tile] = static_cast<float>(input[global_row * cols + global_col]);
   } else {
     tile[thread_row_in_tile][thread_col_in_tile] = 0.0f;
   }
@@ -868,32 +859,21 @@ __global__ void partial_reduce_kernel(const float* input, float* partial_output,
   }
 }
 
-template <typename IType>
-void reduce_dbias_rocm(const float *workspace_ptr, Tensor *dbias, const size_t rows, const size_t cols,
-                  cudaStream_t stream) {
+template <typename DTypeReduce, typename DBiasTypeOut>
+void reduce_dbias_rocm(const DTypeReduce *workspace_ptr, Tensor *dbias, const size_t rows,
+                       const size_t cols, cudaStream_t stream, Tensor* partial_sum_workspace) {
   dim3 block_dim_partial(TILE_DIM, TILE_DIM);
   dim3 grid_dim_partial(DIVUP(cols, TILE_DIM), DIVUP(rows, TILE_DIM));
 
   const size_t partial_rows = grid_dim_partial.y;
-  float* partial_workspace;
-  HIP_CHECK(hipMalloc(&partial_workspace, partial_rows * cols * sizeof(float)));
+  float* partial_workspace = reinterpret_cast<float*>(partial_sum_workspace->data.dptr);
 
-  partial_reduce_kernel<IType><<<grid_dim_partial, block_dim_partial, 0, stream>>>(
+  partial_reduce_kernel<DTypeReduce><<<grid_dim_partial, block_dim_partial, 0, stream>>>(
     workspace_ptr,
     partial_workspace,
     rows, cols);
 
-  constexpr int reduce_dbias_store_bytes = 8;
-  constexpr int nvec = reduce_dbias_store_bytes / sizeof(IType);
-  const size_t reduce_dbias_num_blocks = DIVUP(cols, DBIAS_THREADS_PER_BLOCK * nvec);
-
-  reduce_dbias_kernel<nvec, IType><<<reduce_dbias_num_blocks, DBIAS_THREADS_PER_BLOCK, 0, stream>>>(
-    reinterpret_cast<IType *>(dbias->data.dptr),
-    partial_workspace,
-    partial_rows,
-    cols);
-
-  HIP_CHECK(hipFree(partial_workspace));
+  reduce_dbias<DBiasTypeOut>(partial_workspace, dbias, partial_rows, cols, stream);
 }
 #endif // #ifdef __HIP_PLATFORM_AMD__
 
@@ -1318,42 +1298,49 @@ void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tenso
         }
       }
 
-      if constexpr (!IS_DBIAS) {
-        return;
-      }
+      if constexpr (IS_DBIAS) {
+        const void *ptr_to_reduce = nullptr;
+        DType dtype_to_reduce;
 
-      NVTE_CHECK(dbias, "DBias tensor must be provided when IS_DBIAS is true.");
-      NVTE_CHECK(workspace, "Workspace must be provided when IS_DBIAS is true.");
+        NVTE_CHECK(dbias, "DBias tensor must be provided when IS_DBIAS is true.");
+        NVTE_CHECK(workspace, "Workspace must be provided when IS_DBIAS is true.");
 
-      if (workspace->data.dptr == nullptr ||
-          workspace->data.dtype != DType::kFloat32 ||
-          workspace->data.shape != std::vector<size_t>{rows, cols}) {
-        workspace->data.shape = {rows, cols};
-        workspace->data.dtype = DType::kFloat32;
-        return;
-      }
+        if (workspace->data.dptr == nullptr ||
+            workspace->data.dtype != DType::kFloat32 ||
+            workspace->data.shape != std::vector<size_t>{rows, cols}) {
+          workspace->data.shape = {rows, cols};
+          workspace->data.dtype = DType::kFloat32;
+          return;
+        }
 
-      workspace->amax = {};
-      workspace->scale = {};
-      workspace->scale_inv = {};
+        workspace->amax = {};
+        workspace->scale = {};
+        workspace->scale_inv = {};
 
-      if constexpr (IS_DACT) {
-        // The values to reduce are the result of the dAct function.
-        NVTE_CHECK(act_input, "Gradient tensor must be provided for DBias + DACT.");
-        CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, workspace, stream);
-      } else {
-        // The values to reduce are just the input values (identity function).
-        CastVectorizedUnaryKernelLauncher<detail::Empty, nullptr>(input, noop, workspace, stream);
-      }
+        if constexpr (IS_DACT) {
+          // The values to reduce are the result of the dAct function.
+          NVTE_CHECK(act_input, "Gradient tensor must be provided for DBias + DACT.");
+          CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, workspace, stream);
+          ptr_to_reduce = workspace->data.dptr;
+          dtype_to_reduce = workspace->data.dtype;
+        } else {
+          // The values to reduce are just the input values.
+          ptr_to_reduce = input.data.dptr;
+          dtype_to_reduce = input.data.dtype;
+        }
 
-      NVTE_CHECK(dbias->data.shape == std::vector<size_t>{cols}, "Wrong shape of DBias tensor.");
-      NVTE_CHECK(dbias->data.dtype == input.data.dtype, "DBias must have the same type as input.");
+        NVTE_CHECK(dbias->data.shape == std::vector<size_t>{cols}, "Wrong shape of DBias tensor.");
 
-      const float *workspace_ptr = reinterpret_cast<const float *>(workspace->data.dptr);
-      TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
-          dbias->data.dtype, ITypeOut,
-          reduce_dbias_rocm<ITypeOut>(workspace_ptr, dbias, rows, cols, stream);
-      );
+        TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+            dbias->data.dtype, DBiasTypeOut,
+            TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+              dtype_to_reduce, DTypeReduce,
+              reduce_dbias_rocm<DTypeReduce, DBiasTypeOut>(
+                reinterpret_cast<const DTypeReduce *>(ptr_to_reduce),
+                dbias, rows, cols, stream, workspace);
+            );
+        );
+        }
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
