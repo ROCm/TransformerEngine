@@ -1,5 +1,5 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
+#!/usr/bin/python3
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # See LICENSE for license information.
 
 import os

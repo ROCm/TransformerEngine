@@ -1,3 +1,7 @@
+#!/usr/bin/python3
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# See LICENSE for license information.
+
 from typing import Any, Optional, Tuple
 import torch
 import torch.nn as nn
@@ -180,10 +184,10 @@ class FSDPAGTensor(torch.Tensor):
             (data,) = all_gather_outputs
             shape = data.shape
 
+        # Construct a new low precision tensor subclass that will wrap the gathered data
         if out is None:
             out = quantizer.make_empty(shape = shape, dtype=param_dtype, requires_grad=requires_grad)
 
-        # Otherwise, construct a new Float8Tensor that wraps the gathered data
         if isinstance(quantizer, MXFP8Quantizer):
             out._rowwise_data = rowwise_data
             out._rowwise_scale_inv = rowwise_scale_inv 
