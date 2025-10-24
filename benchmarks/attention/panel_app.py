@@ -75,7 +75,7 @@ def get_data():
     return df
 
 def _selector_widgets():
-    df = get_data().fillna("NaN")
+    df = get_data()
     return {
         cat: pn.widgets.Select(name=cat, options=list(df[cat].unique()))
         for cat in ATTRIBUTES
