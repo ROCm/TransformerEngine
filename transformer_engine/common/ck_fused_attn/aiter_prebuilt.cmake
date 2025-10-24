@@ -72,11 +72,14 @@ function(download_aiter_prebuilt DOWNLOAD_SUCCESS)
     message(WARNING " [AITER-PREBUILT] Prebuild file with Key=${KEY} not available in the NVTE_AITER_PREBUILT_BASE_URL provided.")
     return()
   endif()
-
+  file(READ "/tmp/aiter_prebuilt_sha256.txt" AITER_SHA_CONTENT)
+  string(STRIP "${AITER_SHA_CONTENT}" AITER_SHA_CONTENT)
+  
   file(MAKE_DIRECTORY "${CACHE_ROOT}")
   FetchContent_Declare(
     aiter_prebuilt
     URL "${FILE_URL}"
+    URL_HASH SHA256=${AITER_SHA_CONTENT}
     SOURCE_DIR "${EXTRACT_DIR}"
     DOWNLOAD_EXTRACT_TIMESTAMP FALSE
   )
@@ -85,11 +88,11 @@ function(download_aiter_prebuilt DOWNLOAD_SUCCESS)
   FetchContent_MakeAvailable(aiter_prebuilt)
   
   if(EXISTS "${EXTRACT_DIR}/libmha_fwd.so" AND EXISTS "${EXTRACT_DIR}/libmha_bwd.so")
-    message(STATUS " [AITER-PREBUILT] Successfully downloaded.")
+    message(STATUS "[AITER-PREBUILT] Successfully downloaded.")
     set(${DOWNLOAD_SUCCESS} TRUE PARENT_SCOPE)
   else()
     file(REMOVE_RECURSE "${CACHE_ROOT}")
-    message(STATUS " [AITER-PREBUILT] Download unsuccessfull.")
+    message(STATUS "[AITER-PREBUILT] Download unsuccessfull.")
   endif()
 endfunction()
 
