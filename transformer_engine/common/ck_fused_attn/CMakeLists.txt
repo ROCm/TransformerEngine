@@ -32,40 +32,44 @@ message(STATUS "AITER V3_ASM_ARCHS: ${V3_ASM_ARCHS}")
 list(JOIN V3_ASM_ARCHS ";" V3_ASM_ARCHS_STR)
 set(ENV{GPU_ARCHS} "${V3_ASM_ARCHS_STR}")
 
-# Handle prebuilt AITER
-if(NOT DEFINED AITER_MHA_PATH)
-
-  # Try to fetch; fallback to build-from-source if fails
-  if(DEFINED ENV{NVTE_USE_PREBUILT_AITER} AND NOT "$ENV{NVTE_USE_PREBUILT_AITER}" STREQUAL "0")
-    message(STATUS "[AITER-PREBUILT] NVTE_USE_PREBUILT_AITER is set, Attempting to download prebuilt files...")
-    include("${CMAKE_CURRENT_LIST_DIR}/download_aiter_prebuilt.cmake")
-    set(fetch_success TRUE)
-    download_aiter_prebuilt(__AITER_MHA_PATH)
-
-    if(NOT DEFINED __AITER_MHA_PATH OR NOT EXISTS "${__AITER_MHA_PATH}/libmha_fwd.so" OR NOT EXISTS "${__AITER_MHA_PATH}/libmha_bwd.so")
-      message(WARNING "[AITER-PREBUILT] Failed to download aiter prebuilt files; Building aiter from source.")
-      set(fetch_success FALSE)
-    else()
-      set(fetch_success TRUE)
-    endif()
-  endif()
-
-  if(NOT fetch_success)
-     # delete the existing aiter/jit/build dir for a clean build
-    file(REMOVE_RECURSE "${__AITER_SOURCE_DIR}/aiter/jit/build")
-    # compile the libmha_fwd.so and libmha_bwd.so
-    set(ENV{AITER_LOG_MORE} 1)
-    # fp32 to bf16 cvt env still required for MI300X
-    set(ENV{CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT} ${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT})
-    execute_process(
-      COMMAND python3 ${__AITER_TEST_DIR}/compile.py
-    )
-    # libmha_fwd.so and libmha_bwd.so will be under 3rdparty/aiter/op_tests/cpp/mha
-    set(__AITER_MHA_PATH ${__AITER_TEST_DIR})
-  endif()
-else()
+if(DEFINED AITER_MHA_PATH)
+  message(STATUS "[AITER-PREBUILT] Using AITER_MHA_PATH=${AITER_MHA_PATH}")
   # use pre-built libmha_fwd.so libmha_bwd.so
-  set(__AITER_MHA_PATH ${AITER_MHA_PATH})
+  set(__AITER_MHA_PATH ${AITER_MHA_PATH} CACHE PATH "Cached AITER MHA path" FORCE)
+else()
+  set(AITER_CACHE_VALID FALSE)
+  set(AITER_PREBUILT_DOWNLOADED FALSE)
+  include("${CMAKE_CURRENT_LIST_DIR}/aiter_prebuilt.cmake")
+
+  # If cached path already exists and is valid
+  if(DEFINED __AITER_MHA_PATH)
+    is_aiter_cache_valid(AITER_CACHE_VALID)
+  endif()
+
+  if(NOT AITER_CACHE_VALID)
+    # Try downloading prebuilt files if NVTE_AITER_PREBUILT_BASE_URL is set.
+    download_aiter_prebuilt(AITER_PREBUILT_DOWNLOAD_SUCCESS)
+    
+    # If not downloaded, Fallback: Build from source
+    if(NOT AITER_PREBUILT_DOWNLOAD_SUCCESS)
+      message(STATUS " [AITER-PREBUILT] Building aiter from source.")
+      # delete the existing aiter/jit/build dir for a clean build
+      file(REMOVE_RECURSE "${__AITER_SOURCE_DIR}/aiter/jit/build")
+      # compile the libmha_fwd.so and libmha_bwd.so
+      set(ENV{AITER_LOG_MORE} 1)
+      # fp32 to bf16 cvt env still required for MI300X
+      set(ENV{CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT} ${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT})
+      execute_process(
+        COMMAND python3 ${__AITER_TEST_DIR}/compile.py
+      )
+      # libmha_fwd.so and libmha_bwd.so will be under 3rdparty/aiter/op_tests/cpp/mha 
+      cache_local_aiter_build(${__AITER_TEST_DIR})
+    endif()
+
+    # Cache __AITER_MHA_PATH
+    set(__AITER_MHA_PATH "${EXTRACT_DIR}" CACHE PATH "Cached AITER MHA path" FORCE)
+    message(STATUS "[AITER-PREBUILT] Using __AITER_MHA_PATH=${__AITER_MHA_PATH}")
+  endif()
 endif()
 
 set(ck_fused_attn_SOURCES)
@@ -131,4 +135,3 @@ foreach(ARCH IN LISTS V3_ASM_ARCHS)
         DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib/aiter/${ARCH}/
         PATTERN "codegen.py" EXCLUDE)
 endforeach()
-
