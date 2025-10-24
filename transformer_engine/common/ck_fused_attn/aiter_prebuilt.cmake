@@ -5,56 +5,71 @@
 cmake_minimum_required(VERSION 3.21)
 include(FetchContent)
 
-# Base URL is mandatory
-if(NOT DEFINED ENV{NVTE_AITER_PREBUILT_BASE_URL} OR "$ENV{NVTE_AITER_PREBUILT_BASE_URL}" STREQUAL "")
-  message(SEND_ERROR " [AITER-PREBUILT] ENV variable NVTE_AITER_PREBUILT_BASE_URL must be set.")
-  return()
-endif()
-
-execute_process(
-  COMMAND git rev-parse --show-toplevel
-  OUTPUT_VARIABLE TE_ROOT
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-
-# Build a unique key based on ROCm version + AITER commit
+# Extract ROCm version
 set(ROCM_PATH "$ENV{ROCM_PATH}")
 if("${ROCM_PATH}" STREQUAL "")
   set(ROCM_PATH "/opt/rocm")
 endif()
-
 file(READ "${ROCM_PATH}/.info/version" ROCM_VER_CONTENT)
 string(STRIP "${ROCM_VER_CONTENT}" ROCM_VER_CONTENT)
 string(REGEX MATCH "^[0-9]+\\.[0-9]+" ROCM_VER "${ROCM_VER_CONTENT}")
 
+# AITER commit
 execute_process(
-    COMMAND git -C "${TE_ROOT}/3rdparty/aiter" rev-parse HEAD
-    OUTPUT_VARIABLE AITER_SHA OUTPUT_STRIP_TRAILING_WHITESPACE
-  )
+  COMMAND git -C "${CMAKE_SOURCE_DIR}/../../3rdparty/aiter" rev-parse HEAD
+  OUTPUT_VARIABLE AITER_SHA OUTPUT_STRIP_TRAILING_WHITESPACE
+)
 
+# Cache key & local paths
 set(KEY "rocm-${ROCM_VER}_aiter-${AITER_SHA}")
-set(BASE_URL "$ENV{NVTE_AITER_PREBUILT_BASE_URL}")
-string(REGEX REPLACE "/$" "" BASE_URL "${BASE_URL}")
-set(FILE_URL "${BASE_URL}/aiter-prebuilts/${KEY}.tar.gz")
-
-set(CACHE_ROOT "${TE_ROOT}/build/aiter-prebuilts")
+set(CACHE_ROOT "${CMAKE_SOURCE_DIR}/../../build/aiter-prebuilts")
 set(EXTRACT_DIR "${CACHE_ROOT}/${KEY}")
 
+# Initialize FILE_URL
+function(init_aiter_base_url )
+  
+endfunction()
+
+# Validate existing cache path
+function(is_aiter_cache_valid CACHE_VALID)
+  if(EXISTS "${__AITER_MHA_PATH}/libmha_fwd.so" AND EXISTS "${__AITER_MHA_PATH}/libmha_bwd.so")
+    set(EXPECTED_CACHE_PATH "${EXTRACT_DIR}")    
+    if(__AITER_MHA_PATH STREQUAL EXPECTED_CACHE_PATH)
+      set(${CACHE_VALID} TRUE PARENT_SCOPE)
+      message(STATUS "[AITER-PREBUILT] Using Cached __AITER_MHA_PATH=${__AITER_MHA_PATH}")
+      return()
+    endif()
+  endif()
+
+  # Cache is invalid/outdated - clean it
+  file(REMOVE_RECURSE "${EXTRACT_DIR}")
+  unset(__AITER_MHA_PATH CACHE)
+endfunction()
+
+# Cache locally built libs
+function(cache_local_aiter_build SOURCE_DIR)
+  file(MAKE_DIRECTORY "${EXTRACT_DIR}")
+  message(STATUS "[AITER-PREBUILT] Caching locally built libs to ${EXTRACT_DIR}")
+  file(COPY "${SOURCE_DIR}/libmha_fwd.so" "${SOURCE_DIR}/libmha_bwd.so" DESTINATION "${EXTRACT_DIR}")
+endfunction()
+
 # Download prebuilt zip file
-function(download_aiter_prebuilt __AITER_MHA_PATH_VAR)
-  # Try local cache first
-  if(EXISTS "${EXTRACT_DIR}/libmha_fwd.so" AND EXISTS "${EXTRACT_DIR}/libmha_fwd.so")
-    message(STATUS "[AITER-PREBUILT] ${EXTRACT_DIR} already exists. Skipping download.")
-    set(${__AITER_MHA_PATH_VAR} "${EXTRACT_DIR}" PARENT_SCOPE)
-    message(STATUS "[AITER-PREBUILT] Using ${__AITER_MHA_PATH_VAR}='${EXTRACT_DIR}'")
+function(download_aiter_prebuilt DOWNLOAD_SUCCESS)
+  if(NOT DEFINED ENV{NVTE_AITER_PREBUILT_BASE_URL} OR "$ENV{NVTE_AITER_PREBUILT_BASE_URL}" STREQUAL "")
     return()
   endif()
 
-  # Check if prebuilt files exist in the URL provided.
-  file(DOWNLOAD "${FILE_URL}.sha256" "/tmp/aiter_prebuilt_${KEY}.sha256" STATUS sha_status LOG sha_log)
+  set(BASE_URL "$ENV{NVTE_AITER_PREBUILT_BASE_URL}")
+  string(REGEX REPLACE "/$" "" BASE_URL "${BASE_URL}")
+  set(FILE_URL "${BASE_URL}/${KEY}.tar.gz")
+
+  message(STATUS "[AITER-PREBUILT] NVTE_AITER_PREBUILT_BASE_URL is set - Attempting to download ${KEY}.tar.gz ...")
+
+  # Check if ${KEY}.tar.gz exists in the URL provided.
+  file(DOWNLOAD "${FILE_URL}.sha256" "/tmp/aiter_prebuilt_sha256.txt" STATUS sha_status LOG sha_log)
   list(GET sha_status 0 sha_code)
   if(NOT sha_code EQUAL 0)
-    message(WARNING " [AITER-PREBUILT] Prebuild file with Key=${KEY} doesn't exist in the NVTE_AITER_PREBUILT_BASE_URL provided.")
+    message(WARNING " [AITER-PREBUILT] Prebuild file with Key=${KEY} not available in the NVTE_AITER_PREBUILT_BASE_URL provided.")
     return()
   endif()
 
@@ -67,45 +82,49 @@ function(download_aiter_prebuilt __AITER_MHA_PATH_VAR)
   )
 
   # Download & extract prebuilt files
-  message(STATUS "[AITER-PREBUILT] Downloading ${KEY}.tar.gz ...")
   FetchContent_MakeAvailable(aiter_prebuilt)
-  message(STATUS "[AITER-PREBUILT] Successfully downloaded to ${EXTRACT_DIR}")
-  set(${__AITER_MHA_PATH_VAR} "${EXTRACT_DIR}" PARENT_SCOPE)
-  message(STATUS "[AITER-PREBUILT] Using ${__AITER_MHA_PATH_VAR}='${EXTRACT_DIR}'")
+  
+  if(EXISTS "${EXTRACT_DIR}/libmha_fwd.so" AND EXISTS "${EXTRACT_DIR}/libmha_bwd.so")
+    message(STATUS " [AITER-PREBUILT] Successfully downloaded.")
+    set(${DOWNLOAD_SUCCESS} TRUE PARENT_SCOPE)
+  else()
+    file(REMOVE_RECURSE "${CACHE_ROOT}")
+    message(STATUS " [AITER-PREBUILT] Download unsuccessfull.")
+  endif()
 endfunction()
 
-# Upload prebuilt zip file
+# Upload prebuilt
+# Requires: NVTE_AITER_PREBUILT_BASE_URL
+# Uses __AITER_MHA_PATH contents to create zip file and upload
 function(upload_aiter_prebuilt)  
-  file(GLOB FWD_LIST
-      "${TE_ROOT}/build/lib.*-cpython-*/transformer_engine/lib/libmha_fwd.so")
-  file(GLOB BWD_LIST
-      "${TE_ROOT}/build/lib.*-cpython-*/transformer_engine/lib/libmha_bwd.so")
-  list(GET FWD_LIST 0 FWD)
-  list(GET BWD_LIST 0 BWD)
+  if(NOT DEFINED ENV{NVTE_AITER_PREBUILT_BASE_URL} OR "$ENV{NVTE_AITER_PREBUILT_BASE_URL}" STREQUAL "")
+    message(FATAL_ERROR " [AITER-PREBUILT] ENV variable NVTE_AITER_PREBUILT_BASE_URL must be set.")
+  endif()
+
+  set(BASE_URL "$ENV{NVTE_AITER_PREBUILT_BASE_URL}")
+  string(REGEX REPLACE "/$" "" BASE_URL "${BASE_URL}")
+  set(FILE_URL "${BASE_URL}/${KEY}.tar.gz")
 
   # Locate .so files
-  if (NOT EXISTS  ${FWD})
+  if (NOT EXISTS  "${__AITER_MHA_PATH}/libmha_fwd.so")
     message(FATAL_ERROR "[AITER-PREBUILT] Missing libmha_fwd.so")
   endif()
-  if (NOT EXISTS  ${BWD})
+  if (NOT EXISTS  "${__AITER_MHA_PATH}/libmha_fwd.so")
     message(FATAL_ERROR "[AITER-PREBUILT] Missing libmha_bwd.so")
   endif()
 
-  set(TMP_DIR "/tmp/aiter-prebuilts")
-  file(MAKE_DIRECTORY "${TMP_DIR}/${KEY}")
-  file(COPY "${FWD}" "${BWD}" DESTINATION "${TMP_DIR}/${KEY}")
-  
+  # Create archive
   file(ARCHIVE_CREATE
-       OUTPUT "${TMP_DIR}/${KEY}.tar.gz"
+       OUTPUT "/tmp/${KEY}.tar.gz"
        PATHS "${KEY}"
-       WORKING_DIRECTORY "${TMP_DIR}"
+       WORKING_DIRECTORY "/tmp"
        FORMAT "gnutar"
        COMPRESSION "GZip")
 
-  message(STATUS "[AITER-PREBUILT] Uploading ${TMP_DIR}/${KEY}.tar.gz ...")
+  message(STATUS "[AITER-PREBUILT] Uploading /tmp/${KEY}.tar.gz ...")
   set(TOKEN $ENV{NVTE_AITER_ACCESS_TOKEN})
   if(NOT TOKEN STREQUAL "")
-    file(UPLOAD "${TMP_DIR}/${KEY}.tar.gz" "${FILE_URL}"
+    file(UPLOAD "/tmp/${KEY}.tar.gz" "${FILE_URL}"
          HTTPHEADER "Authorization: Bearer ${TOKEN}"
          SHOW_PROGRESS
          STATUS upload_status
@@ -113,7 +132,7 @@ function(upload_aiter_prebuilt)
          INACTIVITY_TIMEOUT 60
          TIMEOUT 300)
   else()
-    file(UPLOAD "${TMP_DIR}/${KEY}.tar.gz" "${FILE_URL}"
+    file(UPLOAD "/tmp/${KEY}.tar.gz" "${FILE_URL}"
          SHOW_PROGRESS
          STATUS upload_status
          LOG upload_log
@@ -129,9 +148,13 @@ function(upload_aiter_prebuilt)
     message(FATAL_ERROR "[AITER-PREBUILT] Upload failed.")
   endif()
 
-  file(REMOVE_RECURSE ${TMP_DIR})
+  file(REMOVE "/tmp/${KEY}.tar.gz")
 endfunction()
 
+# ------------------------------------------------------
+# Script-mode entry point (for manual upload)
+# Usage: cmake -P aiter_prebuilt.cmake -DACTION=upload
+# ------------------------------------------------------
 if (CMAKE_SCRIPT_MODE_FILE)
   if (DEFINED ACTION AND ACTION STREQUAL "upload")
     upload_aiter_prebuilt()
