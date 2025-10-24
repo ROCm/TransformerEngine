@@ -63,7 +63,7 @@ BIAS_CONFIGS = {
 
 @pn.cache
 def get_data():
-    df = pd.read_csv("results.csv").fillna("NaN")
+    df = pd.read_csv("times.csv").fillna("NaN")
     df["time"] *= 1000
     for key in CONVERTERS:
         df[key] = df[key].map(lambda x: CONVERTERS[key][x])

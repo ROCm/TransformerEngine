@@ -98,7 +98,7 @@ COLUMNS = [
 CWD = os.getcwd()
 
 class FusedAttnBenchRunner(FusedAttnRunner):
-    def bench_forward(self, warmup, iters):
+    def bench_forward(self, warmup, iters, timings_dir):
         """
         Test forward without JIT
         """
@@ -140,7 +140,7 @@ class FusedAttnBenchRunner(FusedAttnRunner):
             for _ in range(warmup):
                 customcall_fused_dpa_jit(*customcall_args)
 
-            os.environ["NVTE_DUMP_AITER_RT"] = args.timings_dir
+            os.environ["NVTE_DUMP_AITER_RT"] = str(timings_dir) + '/'
 
             for _ in range(iters):
                 customcall_fused_dpa_jit(*customcall_args)
@@ -203,7 +203,9 @@ def _filter_configs(configs):
 # Runs profiler and records timing information
 def benchmark_dot_product_attention_profiler(args):
     rows = []
-    timings_path = {}
+    src_dir = Path(__file__).parent
+    timings_dir = src_dir / "timings"
+    os.makedirs(timings_dir, exist_ok=True)
     for n, config in enumerate(_filter_configs(CONFIGS)):
         (
             shape,
@@ -258,13 +260,16 @@ def benchmark_dot_product_attention_profiler(args):
             window_size,
             seq_desc_format,
         )
-        runner.bench_forward(args.warmup, args.iters)
+        runner.bench_forward(args.warmup, args.iters, timings_dir)
 
-        timings_path["fwd"] = Path(args.timings_dir) / 'aiter-fwd-timings.txt'
-        fwd_times = pd.read_csv(timings_path["fwd"], header=None, dtype=float)
-        os.remove(timings_path["fwd"])
+        timings_path = timings_dir / 'aiter-fwd-timings.txt'
+        fwd_times = pd.read_csv(timings_path, header=None, dtype=float)
+        os.remove(timings_path)
         rows.extend([output | {"mode": "fwd", "time": t} for t in fwd_times[0].to_list()])
-    with open(args.output, "w", newline="") as csvfile:
+    os.rmdir(timings_dir)
+    output_path = Path(__file__).parent
+    os.makedirs(output_path, exist_ok=True)
+    with open(output_path / "times.csv", "w", newline="") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=COLUMNS)
         writer.writeheader()
         writer.writerows(rows)
@@ -296,9 +301,7 @@ if __name__ == "__main__":
     parser.add_argument("--fwd-v3", action="store_true", help="Use NVTE_CK_USES_FWD_V3=1 for AITER fwd kernels")
     parser.add_argument("--bwd-v3", action="store_true", help="Use NVTE_CK_USES_BWD_V3=1 for AITER bwd kernels")
     parser.add_argument("-v", action='count', default=0, help="Whether to include verbose debug outputs.")
-    parser.add_argument("--output", type=str, help="The .csv file to output run times to.")
-    parser.add_argument("--warmup", type=int, default=5, help="The number of iterations to run the kernel before logging run time.")
-    parser.add_argument("--iters", type=int, default=50, help="The number of iterations to run the kernel while logging run time.")
-    parser.add_argument("--timings-dir", type=str, help="The directory containing the 'aiter-\{fwd, bwd\}-timings.txt' files.")
+    parser.add_argument("--warmup", type=int, default=10, help="The number of iterations to run the kernel before logging run time. (default 10)")
+    parser.add_argument("--iters", type=int, default=50, help="The number of iterations to run the kernel while logging run time. (default 50)")
     args = parser.parse_args()
     main(args)
