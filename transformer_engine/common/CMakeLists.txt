@@ -381,12 +381,18 @@ else()
           BUILD_BYPRODUCTS "${__AOTRITON_INSTALL_DIR}/lib/libaotriton${__AOTRITON_SUFFIX}_v2.so"
         )
         message(STATUS "Adding AOTriton library.")
-        add_library(aotriton INTERFACE)
         add_dependencies(aotriton aotriton_external)
         target_link_libraries(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/lib/libaotriton${__AOTRITON_SUFFIX}_v2.so)
         target_include_directories(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/include)
-        target_include_directories(aotriton INTERFACE ${TE}/3rdparty/aotriton/include)
+        install(DIRECTORY
+                ${__AOTRITON_INSTALL_DIR}/lib
+                DESTINATION ${CMAKE_INSTALL_PREFIX}/transformer_engine
+                PATTERN "cmake" EXCLUDE
+        )
       endfunction()
+      add_library(aotriton INTERFACE)
+      message(STATUS "Building AOTriton from source.")
+      aotriton_build_from_source(${AOTRITON_NOIMAGE_MODE})
       if(NOT USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS)
         # aotriton_download_runtime()
         set(__AOTRITON_CHAINED_IMAGE "aotriton_external")
@@ -404,8 +410,6 @@ else()
           endforeach()
         endforeach()
       else()
-        message(STATUS "Building AOTriton from source.")
-        aotriton_build_from_source(${AOTRITON_NOIMAGE_MODE})
       endif()
 
 
