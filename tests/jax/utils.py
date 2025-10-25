@@ -21,6 +21,9 @@ from jax import lax, vmap
 from jax import nn as jax_nn
 from jax import random as jax_random
 
+#JAX 0.7 enables shardy by default but it is not supported by TE yet.
+jax.config.update('jax_use_shardy_partitioner', False)
+
 from transformer_engine.jax.attention import (
     AttnMaskType,
     canonicalize_attn_mask_type,
