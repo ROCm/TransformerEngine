@@ -30,11 +30,17 @@ fi
 
 ROCM_BUILD=`${PYBINDIR}python -c "import build_tools.utils as u; print(int(u.rocm_build()))"`
 
-if [ "$ROCM_BUILD" = "1" ]; then
-        git pull
+if [ "$LOCAL_TREE_BUILD" != "1" ]; then
+        if [ "$ROCM_BUILD" = "1" ]; then
+                git pull
+        fi
+        git checkout $TARGET_BRANCH
+        git submodule update --init --recursive
 fi
-git checkout $TARGET_BRANCH
-git submodule update --init --recursive
+
+if [ "$ROCM_BUILD" = "1" ]; then
+        ${PYBINDIR}pip install setuptools wheel
+fi
 
 # Install deps
 /opt/python/cp310-cp310/bin/pip install cmake pybind11[global] ninja
@@ -53,10 +59,10 @@ if $BUILD_COMMON ; then
         WHL_BASE="transformer_engine-${VERSION}"
         if [ "$ROCM_BUILD" = "1" ]; then
                 TE_CUDA_VERS="rocm"
-                ${PYBINDIR}pip install ninja dataclasses
-                if [ -n "$PYBINDIR" ]; then
-                        PATH="$PYBINDIR:$PATH" #hipify expects python in PATH
-                fi
+                #dataclasses, psutil are needed for AITER
+                ${PYBINDIR}pip install ninja dataclasses psutil
+                #hipify expects python in PATH, also ninja may be installed to python bindir
+                test -n "$PYBINDIR" && PATH="$PYBINDIR:$PATH" || true
         else
                 TE_CUDA_VERS="cu12"
                 PYBINDIR=/opt/python/cp38-cp38/bin/
