@@ -1200,7 +1200,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if TEDebugState.debug_enabled:
             self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
         self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache if IS_HIP_EXTENSION else True   
-        self.use_fsdp2 = use_fsdp2     
+        self.use_fsdp2 = use_fsdp2 if IS_HIP_EXTENSION else False
 
         if tp_group is None:
             self.tp_size = tp_size

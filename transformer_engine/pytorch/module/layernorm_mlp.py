@@ -1559,7 +1559,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.zero_centered_gamma = zero_centered_gamma
         self.symmetric_ar_type = symmetric_ar_type
         self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache if IS_HIP_EXTENSION else True
-        self.use_fsdp2 = use_fsdp2
+        self.use_fsdp2 = use_fsdp2 if IS_HIP_EXTENSION else False
         # GEMM-GELU fusion is currently only supported with split GEMM-AG overlap
         self.gemm_gelu_fusion = (
             bool(int(os.getenv("NVTE_GEMM_GELU_FUSION", "0")))

@@ -43,7 +43,8 @@ from ..tensor.quantized_tensor import QuantizedTensor, QuantizedTensorBase, Quan
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from ..tensor.fsdp2_allgather_tensor import FSDPAGTensor
+if IS_HIP_EXTENSION:
+    from ..tensor.fsdp2_allgather_tensor import FSDPAGTensor
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..utils import get_device_compute_capability, torch_get_autocast_gpu_dtype
@@ -907,7 +908,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         fp8_enabled = self.fp8 or self.fp8_calibration
         self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
 
-        if not FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2 and hasattr(self, 'use_fsdp2') and self.use_fsdp2:  
+        if IS_HIP_EXTENSION and not FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2 and hasattr(self, 'use_fsdp2') and self.use_fsdp2:  
             FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2 = True 
 
         if self.fp8_parameters or fp8_enabled:
@@ -1160,7 +1161,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 if IS_HIP_EXTENSION and not self.keep_fp8_weight_transpose_cache:
                     quantizer.columnwise_usage=False
                 param = quantizer(param)
-            if self.use_fsdp2 and not self.primary_weights_in_fp8 and fp8_meta_index is not None:
+            if IS_HIP_EXTENSION and self.use_fsdp2 and not self.primary_weights_in_fp8 and fp8_meta_index is not None:
                 self.keep_fp8_weight_transpose_cache = False
                 param = FSDPAGTensor(
                     param, 

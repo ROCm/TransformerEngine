@@ -1,10 +1,12 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved
+#  Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 """Multi-tensor apply entry."""
 from torch.distributed._tensor import DTensor
-
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 class MultiTensorApply:  # pylint: disable=too-few-public-methods
     """Multi-tensor apply entry."""
@@ -16,7 +18,7 @@ class MultiTensorApply:  # pylint: disable=too-few-public-methods
         for i, ts in enumerate(tensor_lists):
             for j, t in enumerate(ts):
                 if isinstance(t, DTensor):
-                    tensor_lists[i][j] = t._local_tensor.data
+                    tensor_lists[i][j] = t._local_tensor.data if IS_HIP_EXTENSION else t._local_tensor
 
         return op(self.chunk_size, noop_flag_buffer, tensor_lists, *args)
 

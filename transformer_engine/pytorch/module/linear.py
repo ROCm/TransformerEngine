@@ -1052,7 +1052,7 @@ class Linear(TransformerEngineBaseModule):
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
         self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache if IS_HIP_EXTENSION else True
-        self.use_fsdp2 = use_fsdp2
+        self.use_fsdp2 = use_fsdp2 if IS_HIP_EXTENSION else False
 
         if device == "meta":
             assert parameters_split is None, "Cannot split module parameters on 'meta' device."
