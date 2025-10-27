@@ -457,6 +457,18 @@ void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tenso
       const size_t rows = input.flat_first_dim();
       const size_t cols = input.flat_last_dim();
 
+      if constexpr (IS_DBIAS) {
+        NVTE_CHECK(dbias, "DBias tensor must be provided when IS_DBIAS is true.");
+        NVTE_CHECK(workspace, "Workspace must be provided when IS_DBIAS is true.");
+        if (workspace->data.dptr == nullptr ||
+            workspace->data.dtype != DType::kFloat32 ||
+            workspace->data.shape != std::vector<size_t>{rows, cols}) {
+          workspace->data.shape = {rows, cols};
+          workspace->data.dtype = DType::kFloat32;
+          return;
+        }
+      }
+
       if (output && output->data.dptr) {
         if constexpr (IS_DACT) {
           NVTE_CHECK(act_input, "Gradient tensor must be provided for DACT output.");
@@ -469,17 +481,6 @@ void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tenso
       if constexpr (IS_DBIAS) {
         const void *ptr_to_reduce = nullptr;
         DType dtype_to_reduce;
-
-        NVTE_CHECK(dbias, "DBias tensor must be provided when IS_DBIAS is true.");
-        NVTE_CHECK(workspace, "Workspace must be provided when IS_DBIAS is true.");
-
-        if (workspace->data.dptr == nullptr ||
-            workspace->data.dtype != DType::kFloat32 ||
-            workspace->data.shape != std::vector<size_t>{rows, cols}) {
-          workspace->data.shape = {rows, cols};
-          workspace->data.dtype = DType::kFloat32;
-          return;
-        }
 
         workspace->amax = {};
         workspace->scale = {};
@@ -508,7 +509,7 @@ void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tenso
                 dbias, rows, cols, stream, workspace);
             );
         );
-        }
+      }
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
