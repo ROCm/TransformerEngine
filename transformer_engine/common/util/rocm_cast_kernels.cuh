@@ -467,18 +467,7 @@ void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tenso
           workspace->data.dtype = DType::kFloat32;
           return;
         }
-      }
 
-      if (output && output->data.dptr) {
-        if constexpr (IS_DACT) {
-          NVTE_CHECK(act_input, "Gradient tensor must be provided for DACT output.");
-          CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
-        } else {
-          CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
-        }
-      }
-
-      if constexpr (IS_DBIAS) {
         const void *ptr_to_reduce = nullptr;
         DType dtype_to_reduce;
 
@@ -490,9 +479,15 @@ void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tenso
           // The values to reduce are the result of the dAct function.
           NVTE_CHECK(act_input, "Gradient tensor must be provided for DBias + DACT.");
           CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, workspace, stream);
+          if (output && output->data.dptr) {
+            CastVectorizedUnaryKernelLauncher<transformer_engine::Empty, nullptr>(*workspace, noop, output, stream);
+          }
           ptr_to_reduce = workspace->data.dptr;
           dtype_to_reduce = workspace->data.dtype;
         } else {
+          if (output && output->data.dptr) {
+            CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
+          }
           // The values to reduce are just the input values.
           ptr_to_reduce = input.data.dptr;
           dtype_to_reduce = input.data.dtype;
@@ -509,6 +504,15 @@ void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tenso
                 dbias, rows, cols, stream, workspace);
             );
         );
+      } else {
+        if (output && output->data.dptr) {
+          if constexpr (IS_DACT) {
+            NVTE_CHECK(act_input, "Gradient tensor must be provided for DACT output.");
+            CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
+          } else {
+            CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
+          }
+        }
       }
       break;
     }
