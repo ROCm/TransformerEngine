@@ -454,6 +454,9 @@ void Tensor::set_scale_inv(float scale_inv) {
         columnwise_cpu_scale_inv_ptr<float>()[0] = scale_inv;
       } else {
         std::uniform_int_distribution<uint8_t> dis(0, 127);
+        if (rowwise_) {
+          from_cpu(); //Need it because scale_inv_ptr getting does to_cpu()
+        }
         auto *scale_inv_ptr = columnwise_cpu_scale_inv_ptr<uint8_t>();
         for (size_t i = 0; i < num_scales; i++) {
           scale_inv_ptr[i] = dis(gen_);
