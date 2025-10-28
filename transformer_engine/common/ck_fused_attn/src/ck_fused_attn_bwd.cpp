@@ -1032,10 +1032,15 @@ hipError_t ck_attn_varlen_bwd(
 
   // modify the max_seqlen_q for better performance in 0-length cases
   // lse_thd_ptr used as buffer
-  uint64_t runtime_max_seqlen_q = get_runtime_max_seqlen(b, cu_seqlen_q_ptr, nullptr, lse_workspace_ptr, stream);
-  uint64_t runtime_max_seqlen_kv = get_runtime_max_seqlen(b, cu_seqlen_kv_ptr, nullptr, lse_workspace_ptr, stream);
-  fmha_args.max_seqlen_q = runtime_max_seqlen_q;
-  fmha_args.max_seqlen_k = runtime_max_seqlen_kv;
+  if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_MAX_SEQLEN")) {
+    if(std::string(env_p) == "1" && !is_v3_api_check){
+      if(ck_fused_attn_log_config){
+        std::cout << "attn_bwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.";
+      }
+      fmha_args.max_seqlen_q = get_runtime_max_seqlen(b, cu_seqlen_q_ptr, nullptr, lse_workspace_ptr, stream);
+      fmha_args.max_seqlen_k = get_runtime_max_seqlen(b, cu_seqlen_kv_ptr, nullptr, lse_workspace_ptr, stream);
+    }
+  }
 
   // print ck traits and args when needed
   log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_enum::no_bias, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, cu_seqlen_q_padded_ptr, cu_seqlen_kv_padded_ptr, fmha_args);

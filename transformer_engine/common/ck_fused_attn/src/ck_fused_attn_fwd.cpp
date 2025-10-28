@@ -457,9 +457,13 @@ hipError_t ck_attn_varlen_fwd(
   }();
   // modify the max_seqlen_q for better performance in 0-length cases
   // lse_thd_ptr used as buffer
-  if(!is_v3_api_check){
-    uint64_t runtime_max_seqlen_q = get_runtime_max_seqlen(b, cu_seqlen_q_ptr, cu_seqlen_q_padded_ptr, lse_thd_ptr, stream);
-    fmha_args.max_seqlen_q = runtime_max_seqlen_q;
+  if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_MAX_SEQLEN")){
+    if(std::string(env_p) == "1" && !is_v3_api_check){
+      if(ck_fused_attn_log_config){
+        std::cout << "attn_fwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.";
+      }
+      fmha_args.max_seqlen_q = get_runtime_max_seqlen(b, cu_seqlen_q_ptr, cu_seqlen_q_padded_ptr, lse_thd_ptr, stream);
+    }
   }
   // print ck traits and args when needed
   log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, how_v3_bf16_cvt, cu_seqlen_q_padded_ptr, cu_seqlen_kv_padded_ptr, fmha_args);
