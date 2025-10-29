@@ -35,16 +35,14 @@ set(ENV{GPU_ARCHS} "${V3_ASM_ARCHS_STR}")
 if(DEFINED AITER_MHA_PATH)
   message(STATUS "[AITER-PREBUILT] Using AITER_MHA_PATH=${AITER_MHA_PATH}")
   # use pre-built libmha_fwd.so libmha_bwd.so
-  set(__AITER_MHA_PATH ${AITER_MHA_PATH} CACHE PATH "Cached AITER MHA path" FORCE)
+  set(__AITER_MHA_PATH ${AITER_MHA_PATH})
 else()
   set(AITER_CACHE_VALID FALSE)
-  set(AITER_PREBUILT_DOWNLOADED FALSE)
+  set(AITER_PREBUILT_DOWNLOAD_SUCCESS FALSE)
   include("${CMAKE_CURRENT_LIST_DIR}/aiter_prebuilt.cmake")
 
   # If cached path already exists and is valid
-  if(DEFINED __AITER_MHA_PATH)
-    is_aiter_cache_valid(AITER_CACHE_VALID)
-  endif()
+  is_aiter_cache_valid(AITER_CACHE_VALID)
 
   if(NOT AITER_CACHE_VALID)
     # Try downloading prebuilt files if NVTE_AITER_PREBUILT_BASE_URL is set.
@@ -65,11 +63,9 @@ else()
       # libmha_fwd.so and libmha_bwd.so will be under 3rdparty/aiter/op_tests/cpp/mha 
       cache_local_aiter_build(${__AITER_TEST_DIR})
     endif()
-
-    # Cache __AITER_MHA_PATH
-    set(__AITER_MHA_PATH "${EXTRACT_DIR}" CACHE PATH "Cached AITER MHA path" FORCE)
-    message(STATUS "[AITER-PREBUILT] Using __AITER_MHA_PATH=${__AITER_MHA_PATH}")
   endif()
+  set(__AITER_MHA_PATH "${EXTRACT_DIR}")
+  message(STATUS "[AITER-PREBUILT] Using __AITER_MHA_PATH=${__AITER_MHA_PATH}")
 endif()
 
 set(ck_fused_attn_SOURCES)
