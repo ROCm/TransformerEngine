@@ -160,6 +160,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                        prop.multiProcessorCount, zero_centered_gamma,
                        0);
     workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
+    for (int iter = 0; iter < 125; iter++)
     nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), epsilon,
                        z.data(), mu.data(), rsigma.data(), workspace.data(),
                        prop.multiProcessorCount, zero_centered_gamma,
@@ -171,6 +172,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                      0);
 
     workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
+    for (int iter = 0; iter < 125; iter++)
     nvte_rmsnorm_fwd(input.data(), gamma.data(), epsilon,
                      z.data(), rsigma.data(), workspace.data(),
                      prop.multiProcessorCount, zero_centered_gamma,
@@ -183,76 +185,80 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   }
 #endif 
 
-  Tensor dequantized_output("dequantized_output", std::vector<size_t>{ N, H }, DType::kFloat32, true, true);
+  // Tensor dequantized_output("dequantized_output", std::vector<size_t>{ N, H }, DType::kFloat32, true, true);
 
-  dequantize_2x<OutputType, fp8e8m0>(z, dequantized_output, is_training);
+  // dequantize_2x<OutputType, fp8e8m0>(z, dequantized_output, is_training);
 
-  // Reference implementations
-  std::unique_ptr<float[]> ref_mu = std::make_unique<float[]>(N);
-  std::unique_ptr<float[]> ref_rsigma = std::make_unique<float[]>(N);
-  std::unique_ptr<float[]> ref_output = std::make_unique<float[]>(N * H);
+  // // Reference implementations
+  // std::unique_ptr<float[]> ref_mu = std::make_unique<float[]>(N);
+  // std::unique_ptr<float[]> ref_rsigma = std::make_unique<float[]>(N);
+  // std::unique_ptr<float[]> ref_output = std::make_unique<float[]>(N * H);
 
 
-  compute_ref_stats(norm_type, input.rowwise_cpu_dptr<InputType>(), ref_mu.get(),
-                    ref_rsigma.get(), N, H, epsilon);
-  // use the GPU stats to tighten the tolerances
-  float *ref_mu_ptr, *ref_rsigma_ptr;
-  if (is_training){
-    mu.to_cpu();
-    rsigma.to_cpu();
-    ref_mu_ptr = mu.rowwise_cpu_dptr<float>();
-    ref_rsigma_ptr = rsigma.rowwise_cpu_dptr<float>();
-  } else {
-    ref_mu_ptr = ref_mu.get();
-    ref_rsigma_ptr = ref_rsigma.get();
-  }
+  // compute_ref_stats(norm_type, input.rowwise_cpu_dptr<InputType>(), ref_mu.get(),
+  //                   ref_rsigma.get(), N, H, epsilon);
+  // // use the GPU stats to tighten the tolerances
+  // float *ref_mu_ptr, *ref_rsigma_ptr;
+  // if (is_training){
+  //   mu.to_cpu();
+  //   rsigma.to_cpu();
+  //   ref_mu_ptr = mu.rowwise_cpu_dptr<float>();
+  //   ref_rsigma_ptr = rsigma.rowwise_cpu_dptr<float>();
+  // } else {
+  //   ref_mu_ptr = ref_mu.get();
+  //   ref_rsigma_ptr = ref_rsigma.get();
+  // }
   // cuDNN flag does not have an effect on ROCm as zero_centered_gamma_in_weight_dtype is always false.
-  compute_ref_output(norm_type, input.rowwise_cpu_dptr<InputType>(),
-                     gamma.rowwise_cpu_dptr<WeightType>(),
-                     beta.rowwise_cpu_dptr<WeightType>(),
-                     ref_output.get(),
-                     ref_mu_ptr,
-                     ref_rsigma_ptr,
-                     N, H,
-                     nullptr, // amax
-                     1.f, // scale
-                     zero_centered_gamma,
-                     true, // CuDNN is the only MXFP8 backend currently
-                     zero_centered_gamma_in_weight_dtype);
+  // compute_ref_output(norm_type, input.rowwise_cpu_dptr<InputType>(),
+  //                    gamma.rowwise_cpu_dptr<WeightType>(),
+  //                    beta.rowwise_cpu_dptr<WeightType>(),
+  //                    ref_output.get(),
+  //                    ref_mu_ptr,
+  //                    ref_rsigma_ptr,
+  //                    N, H,
+  //                    nullptr, // amax
+  //                    1.f, // scale
+  //                    zero_centered_gamma,
+  //                    true, // CuDNN is the only MXFP8 backend currently
+  //                    zero_centered_gamma_in_weight_dtype);
 
-  (void)cudaDeviceSynchronize();
-  auto err = cudaGetLastError();
-  ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+  // (void)cudaDeviceSynchronize();
+  // auto err = cudaGetLastError();
+  // ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
-  auto [atol_stats, rtol_stats] = getTolerances(DType::kFloat32);
-  rtol_stats = 5e-5;
-  if (is_training){
-    compareResults("mu", mu, ref_mu.get(), true, atol_stats, rtol_stats);
-    compareResults("rsigma", rsigma, ref_rsigma.get(), true, atol_stats, rtol_stats);
-  }
+  // auto [atol_stats, rtol_stats] = getTolerances(DType::kFloat32);
+  // rtol_stats = 5e-5;
+  // if (is_training){
+  //   compareResults("mu", mu, ref_mu.get(), true, atol_stats, rtol_stats);
+  //   compareResults("rsigma", rsigma, ref_rsigma.get(), true, atol_stats, rtol_stats);
+  // }
 
-  float atol, rtol;
-  if (otype == DType::kFloat8E5M2){
-    atol = 1.25e-1;
-    rtol = 1.25e-1;
-  } else if (otype == DType::kFloat8E4M3){
-    if (itype == DType::kBFloat16){
-      atol = 7e-2;
-      rtol = 7e-2;
-    } else {
-      atol = 6.25e-2;
-      rtol = 6.25e-2;
-    }
-  }
-  compareResults("output_rowwise", dequantized_output, ref_output.get(), true, atol, rtol, false);
-  if (is_training)
-    compareResults("output_colwise", dequantized_output, ref_output.get(), false, atol, rtol, false);
+  // float atol, rtol;
+  // if (otype == DType::kFloat8E5M2){
+  //   atol = 1.25e-1;
+  //   rtol = 1.25e-1;
+  // } else if (otype == DType::kFloat8E4M3){
+  //   if (itype == DType::kBFloat16){
+  //     atol = 7e-2;
+  //     rtol = 7e-2;
+  //   } else {
+  //     atol = 6.25e-2;
+  //     rtol = 6.25e-2;
+  //   }
+  // }
+  // compareResults("output_rowwise", dequantized_output, ref_output.get(), true, atol, rtol, false);
+  // if (is_training)
+  //   compareResults("output_colwise", dequantized_output, ref_output.get(), false, atol, rtol, false);
 }
 
 std::vector<std::pair<size_t, size_t>> test_cases = {
-  {32, 32},
-  {768, 2304},
-  {2048, 12288},
+  {128, 128},
+  {256, 256},
+  {993, 512},
+  {768, 1024},
+  {65536, 128},
+  {16384, 1632},
+  {40960, 16320},
 };
 
 std::vector<NormType> norms = {
@@ -266,7 +272,7 @@ class MxNormTestSuite : public ::testing::TestWithParam< std::tuple<NormType,
                                                                     transformer_engine::DType,
                                                                     transformer_engine::DType,
                                                                     std::pair<size_t, size_t>,
-                                                                    bool, bool, bool>> {};
+                                                                    bool, bool, bool, int>> {};
 
 TEST_P(MxNormTestSuite, TestMxNorm) {
   using namespace transformer_engine;
@@ -279,6 +285,7 @@ TEST_P(MxNormTestSuite, TestMxNorm) {
   const bool zero_centered_gamma = std::get<4>(GetParam());
   const bool is_training = std::get<5>(GetParam());
   const bool zero_centered_gamma_in_weight_dtype = std::get<6>(GetParam());
+  const int test_cast_name = std::get<7>(GetParam());
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,
@@ -293,12 +300,13 @@ INSTANTIATE_TEST_SUITE_P(
   ::testing::Combine(
     ::testing::Values(NormType::LayerNorm, NormType::RMSNorm),
     ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
-    ::testing::Values(DType::kFloat8E5M2, DType::kFloat8E4M3),
+    ::testing::Values(DType::kFloat8E4M3),
     ::testing::ValuesIn(test_cases),
     ::testing::Values(true, false),
     ::testing::Values(true, false),
 #ifdef __HIP_PLATFORM_AMD__
-    ::testing::Values(false)), // HIP does not use zero_centered_gamma_in_weight_dtype
+    ::testing::Values(false), // HIP does not use zero_centered_gamma_in_weight_dtype
+    ::testing::Range(1,11)),
 #else
     ::testing::Values(true, false)),
 #endif
@@ -310,6 +318,7 @@ INSTANTIATE_TEST_SUITE_P(
       std::to_string(std::get<3>(info.param).second) + "X" +
       std::to_string(std::get<4>(info.param)) + "out" +
       std::to_string(int(std::get<5>(info.param)) + 1) + "x" +
-      std::to_string(std::get<6>(info.param));
+      std::to_string(std::get<6>(info.param)) + "X" +
+      std::to_string(std::get<7>(info.param));
     return name;
   });

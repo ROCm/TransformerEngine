@@ -91,6 +91,7 @@ if(USE_CUDA)
 else()
   set(GPU_TARGETS ${CMAKE_HIP_ARCHITECTURES})
   find_package(hip REQUIRED)
+  find_package(rocRAND REQUIRED)
 endif()
 
 add_subdirectory(operator)

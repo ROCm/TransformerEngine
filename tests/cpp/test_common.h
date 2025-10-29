@@ -67,7 +67,7 @@ using fp8e4m3 = te_hip_fp8_e4m3;
 using fp8e5m2 = te_hip_fp8_e5m2;
 #endif //USE_ROCM
 using fp8e8m0 = uint8_t;
-
+size_t create_seed_from_tensor_name(const std::string& tensor_name);
 template <typename T>
 struct TypeInfo{
     using types = std::tuple<byte,

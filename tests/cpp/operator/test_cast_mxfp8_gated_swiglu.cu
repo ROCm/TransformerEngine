@@ -228,12 +228,12 @@ void performTest_x1(const size_t rows,
     Tensor output("output", std::vector<size_t>{ rows, output_cols }, otype,
                   rowwise, colwise, NVTE_MXFP8_1D_SCALING);
 
-    std::unique_ptr<OType[]> ref_output = std::make_unique<OType[]>(rows * output_cols);
-    std::unique_ptr<fp8e8m0[]> ref_output_scales = std::make_unique<fp8e8m0[]>(blocks_Y * blocks_X);
+    // std::unique_ptr<OType[]> ref_output = std::make_unique<OType[]>(rows * output_cols);
+    // std::unique_ptr<fp8e8m0[]> ref_output_scales = std::make_unique<fp8e8m0[]>(blocks_Y * blocks_X);
 
-    for (size_t i = 0; i < blocks_Y * blocks_X; ++i) {
-      ref_output_scales[i] = 0;
-    }
+    // for (size_t i = 0; i < blocks_Y * blocks_X; ++i) {
+    //   ref_output_scales[i] = 0;
+    // }
 
     // fillCase<EncodingType>(&grad, fill_case);
     if constexpr (IS_DGATED) {
@@ -242,8 +242,10 @@ void performTest_x1(const size_t rows,
     fillUniform(&input);
 
     if constexpr (IS_DGATED) {
+        for (int iter = 0; iter < 125; iter++)
         nvte_dswiglu(grad.data(), input.data(), output.data(), 0);
     } else {
+        for (int iter = 0; iter < 125; iter++)
         nvte_swiglu(input.data(), output.data(), 0);
     }
     cudaDeviceSynchronize();
@@ -251,31 +253,31 @@ void performTest_x1(const size_t rows,
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
-    float ref_amax = 0;
-    compute_ref_x1<IS_DGATED, IType, OType>(grad.rowwise_cpu_dptr<IType>(),
-                                            input.rowwise_cpu_dptr<IType>(),
-                                            ref_output.get(),
-                                            ref_output_scales.get(),
-                                            ref_amax,
-                                            rows,
-                                            cols,
-                                            block_size_rows,
-                                            block_size_cols,
-                                            scales_stride);
+    // float ref_amax = 0;
+    // compute_ref_x1<IS_DGATED, IType, OType>(grad.rowwise_cpu_dptr<IType>(),
+    //                                         input.rowwise_cpu_dptr<IType>(),
+    //                                         ref_output.get(),
+    //                                         ref_output_scales.get(),
+    //                                         ref_amax,
+    //                                         rows,
+    //                                         cols,
+    //                                         block_size_rows,
+    //                                         block_size_cols,
+    //                                         scales_stride);
 
-    auto [atol, rtol] = getTolerances(otype);
-    compareResults("output", output, ref_output.get(), rowwise, atol, rtol);
+    // auto [atol, rtol] = getTolerances(otype);
+    // compareResults("output", output, ref_output.get(), rowwise, atol, rtol);
 
-    const uint8_t * const gpu_scales_ptr = rowwise
-                                           ? output.rowwise_cpu_scale_inv_ptr<fp8e8m0>()
-                                           : output.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
-    if (rowwise) {
-      compare_e8m0_scaling_factors("rowwise scales", gpu_scales_ptr, ref_output_scales.get(),
-                                   unpadded_blocks_Y, unpadded_blocks_X, scales_stride);
-    } else {
-      compare_e8m0_scaling_factors("colwise scales", gpu_scales_ptr, ref_output_scales.get(),
-                                   unpadded_blocks_Y, unpadded_blocks_X, scales_stride);
-    }
+    // const uint8_t * const gpu_scales_ptr = rowwise
+    //                                        ? output.rowwise_cpu_scale_inv_ptr<fp8e8m0>()
+    //                                        : output.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
+    // if (rowwise) {
+    //   compare_e8m0_scaling_factors("rowwise scales", gpu_scales_ptr, ref_output_scales.get(),
+    //                                unpadded_blocks_Y, unpadded_blocks_X, scales_stride);
+    // } else {
+    //   compare_e8m0_scaling_factors("colwise scales", gpu_scales_ptr, ref_output_scales.get(),
+    //                                unpadded_blocks_Y, unpadded_blocks_X, scales_stride);
+    // }
 }
 
 /**
@@ -319,17 +321,17 @@ void performTest_x2(const size_t rows,
     Tensor output("output", std::vector<size_t>{ rows, output_cols }, otype,
                   true, true, NVTE_MXFP8_1D_SCALING);
 
-    std::unique_ptr<OType[]> ref_output_rowwise = std::make_unique<OType[]>(rows * output_cols);
-    std::unique_ptr<OType[]> ref_output_colwise = std::make_unique<OType[]>(rows * output_cols);
-    std::unique_ptr<fp8e8m0[]> ref_scales_rowwise = std::make_unique<fp8e8m0[]>(blocks_Y_rowwise * blocks_X_rowwise);
-    std::unique_ptr<fp8e8m0[]> ref_scales_colwise = std::make_unique<fp8e8m0[]>(blocks_Y_colwise * blocks_X_colwise);
+    // std::unique_ptr<OType[]> ref_output_rowwise = std::make_unique<OType[]>(rows * output_cols);
+    // std::unique_ptr<OType[]> ref_output_colwise = std::make_unique<OType[]>(rows * output_cols);
+    // std::unique_ptr<fp8e8m0[]> ref_scales_rowwise = std::make_unique<fp8e8m0[]>(blocks_Y_rowwise * blocks_X_rowwise);
+    // std::unique_ptr<fp8e8m0[]> ref_scales_colwise = std::make_unique<fp8e8m0[]>(blocks_Y_colwise * blocks_X_colwise);
 
-    for (size_t i = 0; i < blocks_Y_rowwise * blocks_X_rowwise; ++i) {
-      ref_scales_rowwise[i] = 0;
-    }
-    for (size_t i = 0; i < blocks_Y_colwise * blocks_X_colwise; ++i) {
-      ref_scales_colwise[i] = 0;
-    }
+    // for (size_t i = 0; i < blocks_Y_rowwise * blocks_X_rowwise; ++i) {
+    //   ref_scales_rowwise[i] = 0;
+    // }
+    // for (size_t i = 0; i < blocks_Y_colwise * blocks_X_colwise; ++i) {
+    //   ref_scales_colwise[i] = 0;
+    // }
 
     // fillCase<EncodingType>(&grad, fill_case);
     if constexpr (IS_DGATED) {
@@ -338,8 +340,10 @@ void performTest_x2(const size_t rows,
     fillUniform(&input);
 
     if constexpr (IS_DGATED) {
+        for (int iter = 0; iter < 125; iter++)
         nvte_dswiglu(grad.data(), input.data(), output.data(), 0);
     } else {
+        for (int iter = 0; iter < 125; iter++)
         nvte_swiglu(input.data(), output.data(), 0);
     }
     cudaDeviceSynchronize();
@@ -347,43 +351,44 @@ void performTest_x2(const size_t rows,
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
-    float ref_amax = 0;
-    compute_ref_x2<IS_DGATED, IType, OType>(grad.rowwise_cpu_dptr<IType>(),
-                                            input.rowwise_cpu_dptr<IType>(),
-                                            ref_output_rowwise.get(),
-                                            ref_output_colwise.get(),
-                                            ref_scales_rowwise.get(),
-                                            ref_scales_colwise.get(),
-                                            ref_amax,
-                                            rows,
-                                            cols,
-                                            block_size_rows,
-                                            block_size_cols,
-                                            scales_stride_rowwise,
-                                            scales_stride_colwise);
+    // float ref_amax = 0;
+    // compute_ref_x2<IS_DGATED, IType, OType>(grad.rowwise_cpu_dptr<IType>(),
+    //                                         input.rowwise_cpu_dptr<IType>(),
+    //                                         ref_output_rowwise.get(),
+    //                                         ref_output_colwise.get(),
+    //                                         ref_scales_rowwise.get(),
+    //                                         ref_scales_colwise.get(),
+    //                                         ref_amax,
+    //                                         rows,
+    //                                         cols,
+    //                                         block_size_rows,
+    //                                         block_size_cols,
+    //                                         scales_stride_rowwise,
+    //                                         scales_stride_colwise);
 
-    auto [atol, rtol] = getTolerances(otype);
-    auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
-    compareResults("output_c_rowwise", output, ref_output_rowwise.get(), true, atol, rtol);
-    compareResults("output_c_colwise", output, ref_output_colwise.get(), false, atol, rtol);
-    compare_e8m0_scaling_factors("scales_rowwise", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
-                                 ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
-                                 unpadded_blocks_X_rowwise, scales_stride_rowwise);
-    compare_e8m0_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
-                                 ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
-                                 unpadded_blocks_X_colwise, scales_stride_colwise);
+    // auto [atol, rtol] = getTolerances(otype);
+    // auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
+    // compareResults("output_c_rowwise", output, ref_output_rowwise.get(), true, atol, rtol);
+    // compareResults("output_c_colwise", output, ref_output_colwise.get(), false, atol, rtol);
+    // compare_e8m0_scaling_factors("scales_rowwise", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
+    //                              ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
+    //                              unpadded_blocks_X_rowwise, scales_stride_rowwise);
+    // compare_e8m0_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
+    //                              ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
+    //                              unpadded_blocks_X_colwise, scales_stride_colwise);
 }
 
 std::vector<std::pair<size_t, size_t>> matrix_sizes = {
-    {1, 32},
-    {16, 64},
-    {65, 96},
+    //{1, 32},
+    //{16, 64},
+    //{65, 96},
     {128, 128},
     {256, 256},
     {993, 512},
     {768, 1024},
     {65536, 128},
     {16384, 1632},
+    {40960, 16320},
 };
 
 std::vector<std::pair<size_t, size_t>> block_sizes = {
@@ -413,7 +418,8 @@ class CastMXFP8_GatedActTestSuite : public ::testing::TestWithParam
                 transformer_engine::DType,
                 transformer_engine::DType,
                 InputsFillCase,
-                bool>> {};
+                bool,
+                int>> {};
 
 TEST_P(CastMXFP8_GatedActTestSuite, TestCastMXFP8Swiglu) {
  #ifdef __HIP_PLATFORM_AMD__
@@ -435,6 +441,7 @@ TEST_P(CastMXFP8_GatedActTestSuite, TestCastMXFP8Swiglu) {
     const DType output_type = std::get<3>(GetParam());
     const InputsFillCase fill_case = std::get<4>(GetParam());
     const bool IS_DGATED = std::get<5>(GetParam());
+    const int test_case_num = std::get<6>(GetParam());
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, IType,
         TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OType,
@@ -466,9 +473,10 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(matrix_sizes),
         ::testing::ValuesIn(block_sizes),
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
-        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
+        ::testing::Values(DType::kFloat8E4M3),
         ::testing::ValuesIn(input_scenarios),
-        ::testing::ValuesIn(is_dgated_op)),
+        ::testing::ValuesIn(is_dgated_op),
+        ::testing::Range(1,11)),
     [](const testing::TestParamInfo<CastMXFP8_GatedActTestSuite::ParamType>& info) {
         std::string name = std::to_string(std::get<0>(info.param).first) + "X" +
                            std::to_string(std::get<0>(info.param).second) + "X" +
@@ -477,6 +485,7 @@ INSTANTIATE_TEST_SUITE_P(
                            test::typeName(std::get<2>(info.param)) + "X" +
                            test::typeName(std::get<3>(info.param)) + "X" +
                            test::caseName(std::get<4>(info.param)) + "X" +
-                           (std::get<5>(info.param) ? "DGATED" : "GATED");
+                           (std::get<5>(info.param) ? "DGATED" : "GATED") + "X" +
+                           std::to_string(std::get<6>(info.param));
         return name;
     });

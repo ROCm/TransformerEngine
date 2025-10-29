@@ -19,6 +19,7 @@
 
 #include <gtest/gtest.h>
 #include <omp.h>
+#include <rocrand/rocrand.h>
 
 #include <transformer_engine/transformer_engine.h>
 #include "util/logging.h"
@@ -732,14 +733,57 @@ std::pair<double, double> getTolerances(const DType type) {
   return {0, 0};
 }
 
+constexpr float MIN_VAL = -2.0f;
+constexpr float MAX_VAL = 1.0f;
+constexpr float RANGE = MAX_VAL - MIN_VAL;
+
+template <typename T>
+__global__ void scale_shift_convert_kernel(float* input_data, T* output_data, size_t size) {
+    size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < size) {
+        float generated_val = input_data[i];
+        
+        // Scale and shift the fp32 value: output = min + generated_value * range
+        float final_fp32 = MIN_VAL + generated_val * RANGE;
+
+        // Convert and store based on T
+        if constexpr (std::is_same_v<T, float>) {
+            output_data[i] = final_fp32;
+        } else if constexpr (std::is_same_v<T, __half>) {
+            output_data[i] = __float2half(final_fp32);
+        } else if constexpr (std::is_same_v<T, hip_bfloat16>) {
+            output_data[i] = __float2bfloat16(final_fp32);
+        }
+    }
+}
+
 template <typename T>
 void generate_data_uniformly(T* data, const size_t size, std::mt19937* gen) {
 #ifdef __HIP_PLATFORM_AMD__
-  // TODO: Introduce a parallel RNG library (Random123, PCG, rocRAND)
-  std::uniform_real_distribution<> dis(-2.0, 1.0);
-  for (int i = 0; i < size; i++) {
-    data[i] = static_cast<T>(dis(*gen));
-  }
+    std::uniform_int_distribution<uint64_t> seed_dist;
+    uint64_t seed = seed_dist(*gen);
+
+    rocrand_generator generator;
+    rocrand_create_generator(&generator, ROCRAND_RNG_PSEUDO_MRG32K3A);
+    rocrand_set_seed(generator, seed);
+
+    float *device_fp32_data = nullptr;
+    hipMalloc((void**)&device_fp32_data, size * sizeof(float));
+    T *device_data = nullptr;
+    hipMalloc((void**)&device_data, size * sizeof(T));
+
+    rocrand_generate_uniform(generator, device_fp32_data, size);
+
+    int blockSize = 256;
+    int numBlocks = (size + blockSize - 1) / blockSize;
+    hipLaunchKernelGGL(scale_shift_convert_kernel, dim3(numBlocks), dim3(blockSize), 0, 0, 
+                       device_fp32_data, device_data, size);
+    hipGetLastError();
+
+    hipMemcpy(data, device_data, size * sizeof(T), hipMemcpyDeviceToHost);
+    hipFree(device_fp32_data);
+    hipFree(device_data);
+    rocrand_destroy_generator(generator);
 #else
   #pragma omp parallel proc_bind(spread)
   {

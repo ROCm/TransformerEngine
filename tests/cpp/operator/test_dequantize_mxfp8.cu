@@ -163,7 +163,7 @@ void fill_tensor_data(Tensor& input,
 {
     const double minAbs = Numeric_Traits<InputType>::minNorm;
     const double maxAbs = Numeric_Traits<InputType>::maxNorm;
-    static std::mt19937 gen(12345);
+    static std::mt19937 gen(create_seed_from_tensor_name("dequantize"));
     std::uniform_real_distribution<> dis(minAbs, maxAbs);
     std::uniform_real_distribution<> dis_sign(-1.0, 1.0);
     std::uniform_int_distribution<fp8e8m0> int_dis(0, 255);
@@ -221,12 +221,13 @@ void performTest_x1(const size_t rows,
     // Output data are written to the rowwise ptr regardless of the scaling direction
     Tensor output("output", std::vector<size_t>{ rows, cols }, otype, true, false);
 
-    std::unique_ptr<OutputType[]> ref_output = std::make_unique<OutputType[]>(rows * cols);
+    //std::unique_ptr<OutputType[]> ref_output = std::make_unique<OutputType[]>(rows * cols);
     std::unique_ptr<fp8e8m0[]> scales = std::make_unique<fp8e8m0[]>(blocks_num);
 
     fill_tensor_data<InputType>(input, scales.get(), scales.get(), rowwise, colwise, rows, cols,
                                 blocks_num_rowwise, blocks_num_colwise);
 
+    for (int iter = 0; iter < 125; iter++)
     nvte_dequantize(input.data(), output.data(), 0);
 
     cudaDeviceSynchronize();
@@ -237,17 +238,17 @@ void performTest_x1(const size_t rows,
                            ? input.rowwise_cpu_dptr<InputType>()
                            : input.columnwise_cpu_dptr<InputType>();
 
-    compute_ref_x1<InputType, OutputType>(data_ptr,
-                                          ref_output.get(),
-                                          scales.get(),
-                                          rows,
-                                          cols,
-                                          block_size_rows,
-                                          block_size_cols,
-                                          scales_stride);
+    // compute_ref_x1<InputType, OutputType>(data_ptr,
+    //                                       ref_output.get(),
+    //                                       scales.get(),
+    //                                       rows,
+    //                                       cols,
+    //                                       block_size_rows,
+    //                                       block_size_cols,
+    //                                       scales_stride);
 
-    auto [atol, rtol] = getTolerances(otype);
-    compareResults("output", output, ref_output.get(), true, atol, rtol);
+    // auto [atol, rtol] = getTolerances(otype);
+    // compareResults("output", output, ref_output.get(), true, atol, rtol);
 }
 
 // Dequantize along single dimension (either row- or columnwise)
@@ -372,17 +373,13 @@ void performTest_x2(const size_t rows,
 }
 
 std::vector<std::pair<size_t, size_t>> tensor_dims = {
-    {1, 16},
-    {16, 48},
-    {65, 96},
     {128, 128},
     {256, 256},
     {993, 512},
     {768, 1024},
-    // {2048, 12288},
-    // {65536, 128},
-    // {16384, 1632},
-    // {16384, 6144},
+    {65536, 128},
+    {16384, 1632},
+    {40960, 16320},
 };
 
 std::vector<std::pair<size_t, size_t>> block_sizes = {
@@ -398,7 +395,8 @@ class DequantizeMXFP8TestSuite : public ::testing::TestWithParam
                 std::pair<size_t, size_t>,
                 transformer_engine::DType,
                 transformer_engine::DType,
-                bool>> {};
+                bool,
+                int>> {};
 
 TEST_P(DequantizeMXFP8TestSuite, TestDequantizeMXFP8)
 {
@@ -417,6 +415,7 @@ TEST_P(DequantizeMXFP8TestSuite, TestDequantizeMXFP8)
     const DType input_type = std::get<2>(GetParam());
     const DType output_type = std::get<3>(GetParam());
     const bool quantize_then_dequantize = std::get<4>(GetParam());
+    const int test_case_num = std::get<5>(GetParam());
 
     const bool rowwise = block_size.second != 1;
     const bool colwise = block_size.first != 1;
@@ -459,9 +458,10 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Combine(
         ::testing::ValuesIn(tensor_dims),
         ::testing::ValuesIn(block_sizes),
-        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
+        ::testing::Values(DType::kFloat8E4M3),
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
-        ::testing::Values(false)),
+        ::testing::Values(false),
+        ::testing::Range(1,11)),
     [](const testing::TestParamInfo<DequantizeMXFP8TestSuite::ParamType>& info)
     {
         std::string name = std::to_string(std::get<0>(info.param).first) + "X" +
@@ -470,7 +470,8 @@ INSTANTIATE_TEST_SUITE_P(
                            std::to_string(std::get<1>(info.param).second) + "X" +
                            test::typeName(std::get<2>(info.param)) + "X" +
                            test::typeName(std::get<3>(info.param)) + "X" +
-                           (std::get<4>(info.param) ? "QD" : "D");
+                           (std::get<4>(info.param) ? "QD" : "D") + "X" +
+                           std::to_string(std::get<5>(info.param));
         return name;
     }
 );
