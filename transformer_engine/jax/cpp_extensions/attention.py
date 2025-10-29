@@ -585,6 +585,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
 
         q_cu_seqlen = generate_cu_seqlen(q_seqlen.flatten())
         kv_cu_seqlen = generate_cu_seqlen(kv_seqlen.flatten())
+
         output, softmax_aux, rng_state, _ = FusedAttnFwdPrimitive.inner_primitive.bind(
             q,
             k,

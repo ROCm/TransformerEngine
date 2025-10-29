@@ -234,7 +234,8 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
   auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;              \
   auto bias_shape = std::vector<size_t>{bias_batch, bias_heads, q_max_seqlen, kv_max_seqlen}; \
   size_t num_segments = input_batch;                                                          \
-  if (is_ragged) {                                                                            \
+  if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_NUM_SEGMENTS")){                        \
+    if(std::string(env_p) == "1" && is_ragged){                                               \
       size_t runtime_num_segments_q = nvte_get_runtime_num_segments(                          \
           q_cu_seqlens, workspace, input_batch * max_segments_per_seq, stream);               \
       size_t runtime_num_segments_kv = nvte_get_runtime_num_segments(                         \
@@ -242,6 +243,7 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
       NVTE_CHECK(runtime_num_segments_q == runtime_num_segments_kv);                          \
       NVTE_CHECK(runtime_num_segments_q <= input_batch * max_segments_per_seq);               \
       num_segments = runtime_num_segments_q;                                                  \
+    }                                                                                         \
   }                                                                                           \
   std::vector<size_t> seq_shape{num_segments + 1};                                            \
   auto q_cu_seqlens_tensor = TensorWrapper(q_cu_seqlens, seq_shape, DType::kInt32);           \
