@@ -125,9 +125,14 @@ class _GroupedLinear(torch.autograd.Function):
             recipe = FP8GlobalStateManager.get_fp8_recipe()
             if hasattr(recipe, "fp8_gemm_fprop"):
                 fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
-            inputmats = tex.fused_multi_quantize(
-                inputmats_no_fp8, None, input_quantizers, TE_DType[activation_dtype]
-            )
+
+            inputmats = []
+            for i, x in enumerate(inputmats_no_fp8):
+                qi = input_quantizers[i]
+                dst = qi.make_empty(x.shape, dtype=x.dtype, device=x.device, requires_grad=False)
+                qi.update_quantized(x, dst, noop_flag=None)
+                inputmats.append(dst)
+
             weights_fp8 = []
             bias_dtype = torch.bfloat16 if activation_dtype == torch.float32 else activation_dtype
             # FP8 cast to workspace buffer

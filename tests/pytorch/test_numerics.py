@@ -1955,9 +1955,6 @@ def test_grouped_linear_accuracy(
     if IS_HIP_EXTENSION:
         if dtype not in (torch.float32,) and fuse_wgrad_accumulation and not fp8:
             pytest.skip(f"Rocm does not support fused wgrad accumulation for {dtype}.")
-        use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
-        if fp8 and recipe.float8_current_scaling() and use_cast_transpose_triton:
-            pytest.skip("Float8 Current Scaling unsupported for grouped linear accuracy.")
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if fp8 and recipe.mxfp8() and not mxfp8_available:
