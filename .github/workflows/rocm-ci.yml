@@ -29,6 +29,7 @@ concurrency:
 jobs:
   build_and_test:
     name: Build and Test on GPU
+    timeout-minutes: 720
     runs-on: [linux-mi308-4]
     steps:
       - name: Checkout repository
