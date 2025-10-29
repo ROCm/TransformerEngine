@@ -139,7 +139,7 @@ def _get_shared_object_file(library: str) -> Path:
     if so_path_in_default_dir is not None:
         return so_path_in_default_dir
 
-    raise RuntimeError(f"Could not find shared object file for Transformer Engine {library} lib.")
+    raise FileNotFoundError(f"Could not find shared object file for Transformer Engine {library} lib.")
 
 
 @functools.lru_cache(maxsize=None)

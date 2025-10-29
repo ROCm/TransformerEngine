@@ -30,12 +30,12 @@ if os.getenv("NVTE_FRAMEWORK"):
 
 try:
     if _use_pytorch: from . import pytorch
-except (ImportError, FileNotFoundError, RuntimeError):
+except (ImportError, FileNotFoundError):
     pass
 
 try:
     if _use_jax: from . import jax
-except (ImportError, FileNotFoundError, RuntimeError):
+except (ImportError, FileNotFoundError):
     pass
 
 try:
