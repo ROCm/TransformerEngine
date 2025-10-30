@@ -292,13 +292,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Get cublasLt version", py::call_guard<py::gil_scoped_release>());
   m.def("get_cudnn_version", &transformer_engine::pytorch::get_cudnn_version, "Get cuDNN version",
         py::call_guard<py::gil_scoped_release>());
-<<<<<<< HEAD
 #endif
-  m.attr("_num_cublas_streams") = py::int_(transformer_engine::num_streams);
-=======
   m.def("get_num_cublas_streams", &nvte_get_num_compute_streams, "Get number of compute streams",
         py::call_guard<py::gil_scoped_release>());
->>>>>>> ca7407e
 
   // Support THD format for Context Parallel
   m.def("thd_read_half_tensor", &transformer_engine::pytorch::thd_read_half_tensor,
@@ -445,15 +441,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("copy_into_buffer", &CommOverlapP2P::copy_into_buffer, py::arg("input"),
            py::arg("local_chunk") = false)
       .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("local_chunk") = false,
-<<<<<<< HEAD
-           py::arg("shape") = std::nullopt);
+           py::arg("shape") = std::nullopt)
+      .def("get_communication_stream", &CommOverlapP2P::get_communication_stream);
 #else
   m.def("CommOverlapHelper", &transformer_engine::pytorch::placeholder, "Dummy function for python side annotations");
   m.def("CommOverlap", &transformer_engine::pytorch::placeholder, "Dummy function for python side annotations");
   m.def("CommOverlapP2P", &transformer_engine::pytorch::placeholder, "Dummy function for python side annotations");
 #endif //USE_ROCM
-=======
-           py::arg("shape") = std::nullopt)
-      .def("get_communication_stream", &CommOverlapP2P::get_communication_stream);
->>>>>>> ca7407e
 }

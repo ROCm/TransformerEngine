@@ -287,11 +287,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
             # Configure quantizer
             if weight_quantizer is not None:
-<<<<<<< HEAD
-                weight_quantizer.set_usage(rowwise=True, columnwise=keep_fp8_weight_transpose_cache)
-=======
-                weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
->>>>>>> ca7407e
+                weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled and keep_fp8_weight_transpose_cache)
 
             # Get quantized weight
             update_workspace = is_first_microbatch is None or is_first_microbatch
@@ -1647,14 +1643,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         output_quantizer = None
         input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
         input_quantizer.internal = True
-<<<<<<< HEAD
-        weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
-        weight_quantizer.internal = True
-        if IS_HIP_EXTENSION:
-            weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
-=======
         (weight_quantizer,) = self._get_weight_quantizers()
->>>>>>> ca7407e
         if fp8_output:
             output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
         if torch.is_grad_enabled():
@@ -1819,6 +1808,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
             return [None]
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         weight_quantizer.internal = True
+        if IS_HIP_EXTENSION:
+            weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
         return [weight_quantizer]
 
     def _customize_quantizers_float8_blockwise_scaling(self, fwd: bool, recipe: Recipe) -> None:

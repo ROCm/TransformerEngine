@@ -19,10 +19,6 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 if IS_HIP_EXTENSION:
     from ...triton_kernels.layernorm import te_layernorm_fwd_triton, te_layernorm_bwd_triton
 from ...fp8 import FP8GlobalStateManager
-<<<<<<< HEAD
-from ...tensor import QuantizedTensor
-=======
->>>>>>> ca7407e
 from ...constants import TE_DType
 from ...utils import (
     canonicalize_device,

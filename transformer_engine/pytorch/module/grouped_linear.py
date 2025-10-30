@@ -118,29 +118,6 @@ class _GroupedLinear(torch.autograd.Function):
             for output_quantizer in output_quantizers:
                 output_quantizer.set_usage(rowwise=True, columnwise=False)
 
-<<<<<<< HEAD
-        fprop_gemm_use_split_accumulator = _2X_ACC_FPROP
-        if fp8:
-            recipe = FP8GlobalStateManager.get_fp8_recipe()
-            if hasattr(recipe, "fp8_gemm_fprop"):
-                fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
-
-            if IS_HIP_EXTENSION and bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) ):
-                # The Triton path has no equivalent for tex.fused_multi_quantize()
-                inputmats = []
-                for i, x in enumerate(inputmats_no_fp8):
-                    qi = input_quantizers[i]
-                    dst = qi.make_empty(x.shape, dtype=x.dtype, device=x.device, requires_grad=False)
-                    qi.update_quantized(x, dst, noop_flag=None)
-                    inputmats.append(dst)
-            else:
-                inputmats = tex.fused_multi_quantize(
-                    inputmats_no_fp8, None, input_quantizers, TE_DType[activation_dtype]
-                )
-
-            weights_fp8 = []
-            bias_dtype = torch.bfloat16 if activation_dtype == torch.float32 else activation_dtype
-=======
         # Initialize input tensors
         in_features = weights[0].size(-1)
         if inp.size(-1) != in_features:
@@ -158,7 +135,6 @@ class _GroupedLinear(torch.autograd.Function):
         # Initialize weights
         weights_fp8: list
         if fp8:
->>>>>>> ca7407e
             # FP8 cast to workspace buffer
             weights_fp8 = []
             update_workspace = is_first_microbatch is None or is_first_microbatch

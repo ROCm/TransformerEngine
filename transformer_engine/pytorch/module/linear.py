@@ -1032,7 +1032,6 @@ class Linear(TransformerEngineBaseModule):
                    This can help in latency bound communication situations.
                    Requires PyTorch version 2.7.0 or higher. When set to None, standard all-reduce
                    is used.
-<<<<<<< HEAD
     keep_fp8_weight_transpose_cache: bool, default = `True`
                 Controls whether to cache the FP8 weight transpose buffer during training.
 
@@ -1047,13 +1046,11 @@ class Linear(TransformerEngineBaseModule):
                 reduced efficiency of PyTorch's caching allocator.
 
                 Use this setting to balance memory usage and performance based on your training configuration.
-=======
     save_original_input : bool, default = `False`
                        If set to `True`, always saves the original input tensor rather than the
                        cast tensor. In some scenarios, the input tensor is used by multiple modules,
                        and saving the original input tensor may reduce the memory usage.
                        Cannot work with FP8 DelayedScaling recipe.
->>>>>>> ca7407e
     """
 
     def __init__(
@@ -1473,15 +1470,7 @@ class Linear(TransformerEngineBaseModule):
         output_quantizer = None
         input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
         input_quantizer.internal = True
-<<<<<<< HEAD
-        weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
-        weight_quantizer.internal = True
-        if IS_HIP_EXTENSION:
-            weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
-
-=======
         (weight_quantizer,) = self._get_weight_quantizers()
->>>>>>> ca7407e
         if fp8_output:
             output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
         if torch.is_grad_enabled():
@@ -1651,6 +1640,8 @@ class Linear(TransformerEngineBaseModule):
             return [None]
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         weight_quantizer.internal = True
+        if IS_HIP_EXTENSION:
+            weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
         return [weight_quantizer]
 
     def _customize_quantizers_float8_blockwise_scaling(self, fwd: bool, recipe: Recipe) -> None:

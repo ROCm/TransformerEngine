@@ -265,17 +265,10 @@ class _LayerNormMLP(torch.autograd.Function):
             and not return_layernorm_output
             and not return_layernorm_output_gathered
         )
-<<<<<<< HEAD
 
         # ROCm does not currently support quantized norm for Float8CurrentScalingQuantizer
         if IS_HIP_EXTENSION and isinstance(fc1_input_quantizer, Float8CurrentScalingQuantizer):
             with_quantized_norm = False
-
-        if isinstance(fc1_input_quantizer, Float8BlockQuantizer):
-            # Kernels not available for norm fusion.
-            with_quantized_norm = False
-=======
->>>>>>> ca7407e
 
         # Apply normalization
         ln_out, mu, rsigma = apply_normalization(
@@ -346,13 +339,8 @@ class _LayerNormMLP(torch.autograd.Function):
             # which handles weight caching etc.
             # FP8 cast to workspace buffer
             update_workspace = is_first_microbatch is None or is_first_microbatch
-<<<<<<< HEAD
-            fc1_weight_quantizer.set_usage(rowwise=True, columnwise=keep_fp8_weight_transpose_cache)
-            fc2_weight_quantizer.set_usage(rowwise=True, columnwise=keep_fp8_weight_transpose_cache)
-=======
-            fc1_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
-            fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
->>>>>>> ca7407e
+            fc1_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled and keep_fp8_weight_transpose_cache)
+            fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled and keep_fp8_weight_transpose_cache)
             fc1_weight_final = module.get_weight_workspace(
                 tensor=fc1_weight,
                 quantizer=fc1_weight_quantizer,
@@ -1950,26 +1938,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
         if self.fp8:
             fc1_input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
             fc1_input_quantizer.internal = True
-<<<<<<< HEAD
-            fc1_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
-            fc1_weight_quantizer.internal = True
-            if IS_HIP_EXTENSION:
-                fc1_weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
-=======
->>>>>>> ca7407e
             fc2_input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_INPUT]
             fc2_input_quantizer.set_usage(
                 rowwise=True,
                 columnwise=isinstance(fc2_input_quantizer, (MXFP8Quantizer, Float8BlockQuantizer)),
             )
             fc1_input_quantizer.internal = True
-<<<<<<< HEAD
-            fc2_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_WEIGHT]
-            fc2_weight_quantizer.internal = True
-            if IS_HIP_EXTENSION:
-                fc2_weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
-=======
->>>>>>> ca7407e
             if fp8_output:
                 fc2_output_quantizer = self.quantizers["scaling_fwd"][
                     tex.FP8FwdTensors.GEMM2_OUTPUT
@@ -2179,8 +2153,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
             return [None, None]
         fc1_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         fc1_weight_quantizer.internal = True
+        if IS_HIP_EXTENSION:
+            fc1_weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
         fc2_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_WEIGHT]
         fc2_weight_quantizer.internal = True
+        if IS_HIP_EXTENSION:
+            fc2_weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
         return [fc1_weight_quantizer, fc2_weight_quantizer]
 
     def _customize_quantizers_float8_blockwise_scaling(self, fwd: bool, recipe: Recipe) -> None:

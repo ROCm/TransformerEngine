@@ -4,7 +4,7 @@
 import os
 import torch
 import triton
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8CurrentScalingQuantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from .common import te_dtype_to_torch_dtype
 
@@ -59,17 +59,22 @@ def make_ln_out(ln_out, quantizer=None, input_shape=None, out_dtype=torch.float3
 
     if ln_out is None:
         # TODO(micky774): Remove MXFP8Quantizer check when kernels
-        # properly support MXFP8 as a fused operation
-        if quantizer is None or isinstance(quantizer, MXFP8Quantizer):
+        # properly support MXFP8/float8_current_scaling as a fused operation
+        if quantizer is None or isinstance(quantizer, MXFP8Quantizer) or isinstance(quantizer, Float8CurrentScalingQuantizer):
             return torch.empty(input_shape, dtype=out_dtype, device='cuda')
         return quantizer.make_empty(input_shape, dtype=out_dtype)
+
+    # TODO: revisit the logic here, whether we should create dequantized/higher precision based on quantizer or quantized tensor type
 
     # TODO(micky774): Remove when kernels properly support MXFP8 as a fused operation
     if isinstance(ln_out, MXFP8Tensor):
         return ln_out.dequantize(dtype=out_dtype).to("cuda")
-
     # TODO(micky774): Remove when kernels properly support MXFP8 as a fused operation
     if isinstance(quantizer, MXFP8Quantizer):
+        return torch.empty(input_shape, dtype=out_dtype, device='cuda')
+
+    # TODO: remove when triton kernels support fp8 current scaling
+    if isinstance(quantizer, Float8CurrentScalingQuantizer):
         return torch.empty(input_shape, dtype=out_dtype, device='cuda')
 
     if isinstance(ln_out, Float8Tensor):

@@ -174,16 +174,7 @@ std::vector<py::object> fused_attn_fwd(
   // extract rng seed and offset
   auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
       rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
-#ifndef USE_ROCM
   at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
-#else
-  const transformer_engine::Tensor *input_cu_seqlens_q = reinterpret_cast<const transformer_engine::Tensor*>(te_cu_seqlens_q.data());
-  size_t batch_size = input_cu_seqlens_q->data.shape[0]-1;
-  const transformer_engine::Tensor *input_Q = reinterpret_cast<const transformer_engine::Tensor*>(te_Q.data());
-  size_t ndim = input_Q->data.shape.size();
-  size_t num_attn_heads = input_Q->data.shape[ndim-2];
-  at::PhiloxCudaState philox_args = init_philox_state(gen, batch_size*num_attn_heads*max_seqlen_q*max_seqlen_kv);
-#endif
   auto rng_state = torch::empty({2}, options.dtype(torch::kInt64));
   unpack(philox_args, static_cast<int64_t *>(rng_state.data_ptr()));
   auto te_rng_state = makeTransformerEngineTensor(rng_state);
