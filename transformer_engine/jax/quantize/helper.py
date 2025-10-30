@@ -19,21 +19,14 @@ import jax
 import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
 
-<<<<<<< HEAD
 from ..util import is_hip_extension, get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
 
 from transformer_engine_jax import DType
-if is_hip_extension():
-    from transformer_engine_jax import get_device_compute_capability
-else:
+if not is_hip_extension():
     from transformer_engine_jax import (
         get_cublasLt_version,
         get_cuda_version,
-        get_device_compute_capability,
     )
-=======
-from transformer_engine_jax import DType, get_cublasLt_version, get_cuda_version
->>>>>>> ca7407e
 from transformer_engine.common import recipe
 from transformer_engine.jax.sharding import global_shard_guard, MeshResource
 
