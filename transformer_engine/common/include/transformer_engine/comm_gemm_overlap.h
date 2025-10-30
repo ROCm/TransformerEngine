@@ -36,7 +36,8 @@ enum class CommOverlapAlgo {
   SPLIT_PIPELINED_RS_P2P = 4,
   ATOMIC_GEMM_RS = 5,
   ATOMIC_GEMM_AG_P2P = 6,
-  ATOMIC_GEMM_RS_P2P = 7
+  ATOMIC_GEMM_RS_P2P = 7,
+  SPLIT_PIPELINED_AG_RD_P2P = 8
 };
 
 class CommOverlapCore {
@@ -133,6 +134,14 @@ class CommOverlapCore {
                                 cudaStream_t stream_main) {
     NVTE_ERROR("Operation is not implemented.");
   }
+
+  virtual void split_overlap_ag_rd(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                                bool transb, TensorWrapper &D, TensorWrapper &bias,
+                                TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
+                                bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy,
+                                cudaStream_t stream_main) {
+    NVTE_ERROR("Operation is not implemented.");
+  }
 };  // CommOverlapCore
 
 class CommOverlapBase : public CommOverlapCore {
@@ -182,6 +191,17 @@ class CommOverlapBase : public CommOverlapCore {
   }
 
   /*
+  ** Split AllGather + GEMM using P2P communication using recursive doubling
+  ** This function assumes the input_b is pre-copied to _ubufs[rank_id]. This is needed to have AG
+  ** outputs in each rank to be in the contiguous memory space after all ring exchange phases.
+  */
+  void split_overlap_ag_rd(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
+                        TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
+                        TensorWrapper &workspace, bool grad, bool accumulate,
+                        bool use_split_accumulator, TensorWrapper &B_copy,
+                        cudaStream_t stream_main) override;
+
+  /*
   ** Split FPROP GEMM + ReduceScatter
   */
   void atomic_gemm_overlap_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B,
@@ -205,6 +225,7 @@ class CommOverlapP2PBase : public CommOverlapCore {
   bool _is_reduce_scatter{false};
   bool _use_multiatomic_ag{false};
   bool _aggregate;
+  bool use_rd;
   int _next_rank;
   int _prev_rank;
   int _rank_round_tp;
@@ -224,7 +245,7 @@ class CommOverlapP2PBase : public CommOverlapCore {
                      CommOverlapType comm_type, int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS,
                      int comm_cga_size = 1, int gemm_priority = 0, int comm_priority = 0,
                      int num_comm_sm = 1, bool set_sm_margin = false, bool use_ce = true,
-                     bool atomic_gemm = false, bool aggregate = false);
+                     bool atomic_gemm = false, bool aggregate = false, bool use_rd = false);
 
   virtual ~CommOverlapP2PBase();
 
@@ -255,6 +276,15 @@ class CommOverlapP2PBase : public CommOverlapCore {
   ** outputs in each rank to be in the contiguous memory space after all ring exchange phases.
   */
   void split_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
+                        TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
+                        TensorWrapper &workspace, bool grad, bool accumulate,
+                        bool use_split_accumulator, TensorWrapper &B_copy,
+                        cudaStream_t stream_main) override;
+
+  /*
+  ** Split AllGather + GEMM using P2P communication using recursive doubling
+  */
+  void split_overlap_ag_rd(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
                         TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
                         TensorWrapper &workspace, bool grad, bool accumulate,
                         bool use_split_accumulator, TensorWrapper &B_copy,

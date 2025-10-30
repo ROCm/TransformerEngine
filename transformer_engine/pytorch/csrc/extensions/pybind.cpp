@@ -371,7 +371,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .value("GRAD_OUTPUT3", transformer_engine::pytorch::FP8BwdTensors::GRAD_OUTPUT3)
       .value("GRAD_INPUT3", transformer_engine::pytorch::FP8BwdTensors::GRAD_INPUT3);
 
-#ifndef USE_ROCM
   py::class_<CommOverlapHelper>(m, "CommOverlapHelper")
       .def(py::init<>(), py::call_guard<py::gil_scoped_release>())
       .def(py::init<c10d::ProcessGroup *, std::optional<c10d::ProcessGroup *>>(),
@@ -398,20 +397,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       m, "CommOverlapP2P")
       .def(py::init<const std::vector<size_t> &, at::ScalarType, CommOverlapHelper *, int,
                     transformer_engine::CommOverlapType, int, int, int, int, int, bool, bool, bool,
-                    bool>(),
+                    bool, bool>(),
            py::call_guard<py::gil_scoped_release>(), py::arg("buffer_shape"),
            py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"), py::arg("comm_type"),
            py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS, py::arg("comm_cga_size") = 1,
            py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0, py::arg("num_comm_sm") = 1,
            py::arg("set_sm_margin") = false, py::arg("atomic_gemm") = false,
-           py::arg("use_ce") = true, py::arg("aggregate") = false)
+           py::arg("use_ce") = true, py::arg("aggregate") = false, py::arg("use_rd" = false))
       .def("copy_into_buffer", &CommOverlapP2P::copy_into_buffer, py::arg("input"),
            py::arg("local_chunk") = false)
       .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("local_chunk") = false,
-           py::arg("shape") = std::nullopt);
-#else
-  m.def("CommOverlapHelper", &transformer_engine::pytorch::placeholder, "Dummy function for python side annotations");
-  m.def("CommOverlap", &transformer_engine::pytorch::placeholder, "Dummy function for python side annotations");
-  m.def("CommOverlapP2P", &transformer_engine::pytorch::placeholder, "Dummy function for python side annotations");
-#endif //USE_ROCM
+           py::arg("shape") = std::nullopt,);
 }

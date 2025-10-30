@@ -217,7 +217,11 @@ else()
        fused_rope/fused_rope.cu
        recipe/current_scaling.cu
        recipe/delayed_scaling.cu
-       recipe/fp8_block_scaling.cu)
+       recipe/fp8_block_scaling.cu
+       comm_gemm_overlap/userbuffers/ipcsocket.cc
+       comm_gemm_overlap/userbuffers/userbuffers-host.cpp
+       comm_gemm_overlap/userbuffers/userbuffers.cu
+       comm_gemm_overlap/comm_gemm_overlap.cpp)
 
   # process source code files
   set(TE ${CMAKE_CURRENT_SOURCE_DIR}/../..)
@@ -261,17 +265,19 @@ if (USE_CUDA)
   target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
+endif()
 
-  # Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
-  # Changed
-  option(NVTE_UB_WITH_MPI "Bootstrap Userbuffers with MPI" OFF)
-  if (NVTE_UB_WITH_MPI)
-      find_package(MPI REQUIRED)
-      target_link_libraries(transformer_engine PUBLIC MPI::MPI_CXX)
-      target_include_directories(transformer_engine PRIVATE ${MPI_CXX_INCLUDES})
-      target_compile_definitions(transformer_engine PUBLIC NVTE_UB_WITH_MPI)
-  endif()
+# Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
+# Changed
+option(NVTE_UB_WITH_MPI "Bootstrap Userbuffers with MPI" OFF)
+if (NVTE_UB_WITH_MPI)
+    find_package(MPI REQUIRED)
+    target_link_libraries(transformer_engine PUBLIC MPI::MPI_CXX)
+    target_include_directories(transformer_engine PRIVATE ${MPI_CXX_INCLUDES})
+    target_compile_definitions(transformer_engine PUBLIC NVTE_UB_WITH_MPI)
+endif()
   
+if (USE_CUDA)
   # Hack to enable dynamic loading in cuDNN frontend
   target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
 else()

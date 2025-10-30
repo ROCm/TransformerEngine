@@ -14,6 +14,12 @@
 #define half_dtype half
 #endif
 
+#ifdef __HIP_PLATFORM_AMD__
+#define half_dtype hip_bfloat16
+#define __nv_fp8_e5m2 te_hip_fp8_e5m2
+#define __nv_fp8_e4m3 te_hip_fp8_e4m3
+#endif
+
 #include <assert.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -24,6 +30,7 @@
 
 #define MAX_THREADS 1024
 
+#ifndef __HIP_PLATFORM_AMD__
 #define ATOMIC_CONSUMER(chunk)                                             \
   if (counters) {                                                          \
     if (threadIdx.x == 0 && blockIdx.x == 0) {                             \
@@ -34,6 +41,18 @@
     }                                                                      \
     if (blockIdx.x == 0) __syncthreads();                                  \
   }
+#else
+#define ATOMIC_CONSUMER(chunk)                                             \
+  if (counters) {                                                          \
+    if (threadIdx.x == 0 && blockIdx.x == 0) {                             \
+      while (0 != (atomicCAS(((unsigned int *)counters) + chunk, 0, 0))) { \
+      }                                                                    \
+      ((unsigned int *)counters)[chunk] = 1;                               \
+      __threadfence();                                                     \
+    }                                                                      \
+    if (blockIdx.x == 0) __syncthreads();                                  \
+  }
+#endif
 
 #define ATOMIC_PRODUCER(chunk)             \
   if (counters) {                          \
@@ -1025,7 +1044,11 @@ __global__ void __launch_bounds__(MAX_THREADS)
 
       // reset counter for next producer.
       ((unsigned int *)counters)[0] = 1;
+#ifndef __HIP_PLATFORM_AMD__
       asm volatile("fence.sc.gpu;\n");
+#else
+      __threadfence();
+#endif
     }
   }
   __syncthreads();
@@ -1116,7 +1139,11 @@ __global__ void __launch_bounds__(MAX_THREADS)
 
         // reset counter for next producer.
         ((unsigned int *)counters)[chunk_i] = 1;
+#ifndef __HIP_PLATFORM_AMD__
         asm volatile("fence.sc.gpu;\n");
+#else
+        __threadfence();
+#endif
       }
     }
     __syncthreads();
@@ -1357,6 +1384,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
   }
 }  // fp16 inplace allgather kernel (Volta,Hopper)
 
+#ifndef __HIP_PLATFORM_AMD__
 #define SETUP_LAUNCH_CONFIG(sms, threads, stream)                                    \
   cudaLaunchConfig_t cfg = {sms, threads, 0, stream, NULL, 0};                       \
   cudaLaunchAttribute attribute_ub[2];                                               \
@@ -1662,6 +1690,244 @@ __global__ void __launch_bounds__(MAX_THREADS)
                                 userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_stride_multiatomic<x>), \
                             kernelArgs));                                                          \
   }
+#else
+#define callranks_ag(x)                                                                            \
+  if (ar_nvsize == x) {                                                                            \
+    int arg1 = op - NVTE_MAX_OPS,                                                                  \
+        arg2 = NVTE_REG0_OFFSET(comm) -                                                            \
+               (op == userbuffers_allreduceop_nonsharp ? 2 : 1) * NVTE_REG0_SINGLENODE +           \
+               NVTE_MAX_OPS,                                                                       \
+        arg3 = ar_firstgpu, arg4 = ar_nvrank, arg5 = ar_step, arg7 = elements / 8 / x,             \
+        arg6 = offset / 8 + (comm->use_rr_kernel ? 0 : arg4 * arg7);                               \
+    void **arg8 = reinterpret_cast<void **>(comm->gpu_ptrs);                                       \
+    int arg9 = handler * comm->nvsize;                                                             \
+    uint64_t arg10 = comm->ub_timeout;                                                             \
+    void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),        \
+                          reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),        \
+                          reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),        \
+                          reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),        \
+                          reinterpret_cast<void *>(&arg9), reinterpret_cast<void *>(&arg10)};      \
+    NVTE_CHECK_CUDA(cudaLaunchKernel(                                                              \
+        reinterpret_cast<void *>(comm->use_rr_kernel ? userbuffers_fp16_sum_inplace_gpu_rr_ag<x>   \
+                                                     : userbuffers_fp16_sum_inplace_gpu_rw_ag<x>), \
+        sms, threads, kernelArgs, 0, stream));                                                     \
+  }
+
+#define callranks_agMC(x)                                                               \
+  if (ar_nvsize == x) {                                                                 \
+    int arg1 = op - NVTE_MAX_OPS;                                                       \
+    int arg2 = NVTE_REG0_OFFSET(comm) -                                                 \
+               (op == userbuffers_allreduceop_nonsharp ? 2 : 1) * NVTE_REG0_SINGLENODE + \
+               NVTE_MAX_OPS;                                                            \
+    int arg3 = ar_firstgpu, arg4 = ar_nvrank, arg5 = ar_step, arg7 = elements / 8 / x;   \
+    int arg6 = offset / 8 + arg4 * arg7;                                                \
+    void **arg8 = reinterpret_cast<void **>(comm->gpu_ptrs);                             \
+    int arg9 = handler * comm->nvsize;                                                  \
+    uint4 *arg10 = reinterpret_cast<uint4 *>(comm->mc_ptr[handler]);                     \
+    uint64_t arg11 = comm->ub_timeout;                                                   \
+                                                                                        \
+    hipLaunchKernelGGL(                                                                 \
+        (userbuffers_fp16_sum_inplace_gpu_mc_ag<x>),                                    \
+        sms, threads, 0, stream,           \
+        arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11);             \
+  }
+
+#define callranks_rs(x)                                                                          \
+  if (ar_nvsize == x) {                                                                          \
+    int arg1 = op - NVTE_MAX_OPS,                                                                \
+        arg2 = NVTE_REG0_OFFSET(comm) -                                                          \
+               (op == userbuffers_allreduceop_nonsharp ? 2 : 1) * NVTE_REG0_SINGLENODE +         \
+               NVTE_MAX_OPS,                                                                     \
+        arg3 = ar_firstgpu, arg4 = ar_nvrank, arg5 = ar_step, arg7 = elements / 8 / x,           \
+        arg6 = offset / 8 + arg4 * arg7;                                                         \
+    void **arg8 = reinterpret_cast<void **>(comm->gpu_ptrs);                                     \
+    int arg9 = handler * comm->nvsize;                                                           \
+    uint64_t arg10 = comm->ub_timeout;                                                           \
+    void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),      \
+                          reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),      \
+                          reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),      \
+                          reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),      \
+                          reinterpret_cast<void *>(&arg9), reinterpret_cast<void *>(&arg10)};    \
+    NVTE_CHECK_CUDA(cudaLaunchKernel(                                                            \
+      reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs<x>),                       \
+      sms, threads, kernelArgs, 0, stream));                                                     \
+  }
+
+#define callranks_rsMC(x)                                                                         \
+  if (ar_nvsize == x) {                                                                           \
+    int arg1 = op - NVTE_MAX_OPS;                                                                 \
+    int arg2 = NVTE_REG0_OFFSET(comm) -                                                           \
+               (op == userbuffers_allreduceop_nonsharp ? 2 : 1) * NVTE_REG0_SINGLENODE +           \
+               NVTE_MAX_OPS;                                                                      \
+    int arg3 = ar_firstgpu, arg4 = ar_nvrank, arg5 = ar_step, arg7 = elements / 8 / x;              \
+    int arg6 = offset / 8 + arg4 * arg7;                                                          \
+    void **arg8 = reinterpret_cast<void **>(comm->gpu_ptrs);                                       \
+    int arg9 = handler * comm->nvsize;                                                            \
+    float4 *arg10 = reinterpret_cast<float4 *>(comm->mc_ptr[handler]);                            \
+    uint64_t arg11 = comm->ub_timeout;                                                            \
+                                                                                                  \
+    hipLaunchKernelGGL(                                                                 \
+        (userbuffers_fp16_sum_inplace_gpu_mc_rs<x>),                                               \
+        sms, threads, 0, stream,                      \
+        arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11);                       \
+  }
+
+#define callranks_rs_oop(x)                                                                   \
+  if (ar_nvsize == x) {                                                                       \
+    int arg1 = op - NVTE_MAX_OPS,                                                             \
+        arg2 = NVTE_REG0_OFFSET(comm) -                                                       \
+               (op == userbuffers_allreduceop_nonsharp ? 2 : 1) * NVTE_REG0_SINGLENODE +      \
+               NVTE_MAX_OPS,                                                                  \
+        arg3 = ar_firstgpu, arg4 = ar_nvrank, arg5 = ar_step, arg7 = elements / 8 / x,        \
+        arg6 = offset / 8 + arg4 * arg7, arg8 = rowelements / 8, arg9 = strideelements / 8;   \
+    void **arg10 = reinterpret_cast<void **>(comm->gpu_ptrs);                                 \
+    int arg11 = handler * comm->nvsize;                                                       \
+    void *arg12 = output;                                                                     \
+    uint64_t arg13 = comm->ub_timeout;                                                        \
+    void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),  \
+                          reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),  \
+                          reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),  \
+                          reinterpret_cast<void *>(&arg7),  reinterpret_cast<void *>(&arg8),  \
+                          reinterpret_cast<void *>(&arg9),  reinterpret_cast<void *>(&arg10), \
+                          reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12), \
+                          reinterpret_cast<void *>(&arg13)};                                  \
+    NVTE_CHECK_CUDA(cudaLaunchKernel(                                                         \
+        reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs_oop<x>),              \
+        sms, threads, kernelArgs, 0, stream));                                                \
+  }
+
+#define callranks_rs_oop_fp8(x)                                                                \
+  if (ar_nvsize == x) {                                                                        \
+    int arg1 = op - NVTE_MAX_OPS,                                                              \
+        arg2 = NVTE_REG0_OFFSET(comm) -                                                        \
+               (op == userbuffers_allreduceop_nonsharp ? 2 : 1) * NVTE_REG0_SINGLENODE +       \
+               NVTE_MAX_OPS,                                                                   \
+        arg3 = ar_firstgpu, arg4 = ar_nvrank, arg5 = ar_step, arg7 = elements / 16 / x,        \
+        arg6 = offset / 16 + arg4 * arg7, arg8 = rowelements / 8, arg9 = strideelements / 8;   \
+    void **arg10 = reinterpret_cast<void **>(comm->gpu_ptrs);                                  \
+    int arg11 = handler * comm->nvsize;                                                        \
+    void *arg12 = output;                                                                      \
+    float *arg13 = scale;                                                                      \
+    uint64_t arg14 = comm->ub_timeout;                                                         \
+    void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),   \
+                          reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),   \
+                          reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),   \
+                          reinterpret_cast<void *>(&arg7),  reinterpret_cast<void *>(&arg8),   \
+                          reinterpret_cast<void *>(&arg9),  reinterpret_cast<void *>(&arg10),  \
+                          reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),  \
+                          reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14)}; \
+    NVTE_CHECK_CUDA(cudaLaunchKernel(                                                          \
+        reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_fp8<x, fp8type>),  \
+        sms, threads, kernelArgs, 0, stream));                                                 \
+  }
+
+#define callranks_rs_oop_atomic_fp8(x)                                                         \
+  if (ar_nvsize == x) {                                                                        \
+    int arg1 = op - NVTE_MAX_OPS,                                                              \
+        arg2 = NVTE_REG0_OFFSET(comm) -                                                        \
+               (op == userbuffers_allreduceop_nonsharp ? 2 : 1) * NVTE_REG0_SINGLENODE +       \
+               NVTE_MAX_OPS,                                                                   \
+        arg3 = ar_firstgpu, arg4 = ar_nvrank, arg5 = ar_step, arg7 = elements / 16 / x,        \
+        arg6 = offset / 16, arg8 = rowelements / 8, arg9 = strideelements_out / 8,             \
+        arg10 = strideelements_in / 16;                                                        \
+    void **arg11 = reinterpret_cast<void **>(comm->gpu_ptrs);                                  \
+    int arg12 = handler * comm->nvsize;                                                        \
+    void *arg13 = output;                                                                      \
+    float *arg14 = scale;                                                                      \
+    void *arg15 = counters;                                                                    \
+    int arg16 = numchunks, arg17 = atomicindex;                                                \
+    uint64_t arg18 = comm->ub_timeout;                                                         \
+    void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),   \
+                          reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),   \
+                          reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),   \
+                          reinterpret_cast<void *>(&arg7),  reinterpret_cast<void *>(&arg8),   \
+                          reinterpret_cast<void *>(&arg9),  reinterpret_cast<void *>(&arg10),  \
+                          reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),  \
+                          reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),  \
+                          reinterpret_cast<void *>(&arg15), reinterpret_cast<void *>(&arg16),  \
+                          reinterpret_cast<void *>(&arg17), reinterpret_cast<void *>(&arg18)}; \
+    NVTE_CHECK_CUDA(cudaLaunchKernel(                                                          \
+        reinterpret_cast<void *>(                                                              \
+            userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_atomic_fp8<x, fp8type>),                \
+            sms, threads, kernelArgs, 0, stream));                                             \
+  }
+
+#define callranks_rs_oop_stride(x)                                                            \
+  if (ar_nvsize == x) {                                                                       \
+    int arg1 = op - NVTE_MAX_OPS,                                                             \
+        arg2 = NVTE_REG0_OFFSET(comm) -                                                       \
+               (op == userbuffers_allreduceop_nonsharp ? 2 : 1) * NVTE_REG0_SINGLENODE +      \
+               NVTE_MAX_OPS,                                                                  \
+        arg3 = ar_firstgpu, arg4 = ar_nvrank, arg5 = ar_step, arg7 = elements / 8 / x,        \
+        arg6 = offset / 8, arg8 = rowelements / 8, arg9 = strideelements / 8;                 \
+    void **arg10 = reinterpret_cast<void **>(comm->gpu_ptrs);                                 \
+    int arg11 = handler * comm->nvsize;                                                       \
+    void *arg12 = output;                                                                     \
+    uint64_t arg13 = comm->ub_timeout;                                                        \
+    void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),  \
+                          reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),  \
+                          reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),  \
+                          reinterpret_cast<void *>(&arg7),  reinterpret_cast<void *>(&arg8),  \
+                          reinterpret_cast<void *>(&arg9),  reinterpret_cast<void *>(&arg10), \
+                          reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12), \
+                          reinterpret_cast<void *>(&arg13)};                                  \
+    NVTE_CHECK_CUDA(cudaLaunchKernel(                                                         \
+        reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_stride<x>),       \
+        sms, threads, kernelArgs, 0, stream));                                                \
+  }
+
+#define callranks_rs_oop_stride_atomic(x)                                                        \
+  if (ar_nvsize == x) {                                                                          \
+    int arg1 = op - NVTE_MAX_OPS,                                                                \
+        arg2 = NVTE_REG0_OFFSET(comm) -                                                          \
+               (op == userbuffers_allreduceop_nonsharp ? 2 : 1) * NVTE_REG0_SINGLENODE +         \
+               NVTE_MAX_OPS,                                                                     \
+        arg3 = ar_firstgpu, arg4 = ar_nvrank, arg5 = ar_step, arg7 = elements / 8 / x,           \
+        arg6 = offset / 8, arg8 = rowelements / 8, arg9 = strideelements / 8, arg10 = numchunks; \
+    void **arg11 = reinterpret_cast<void **>(comm->gpu_ptrs);                                    \
+    int arg12 = handler * comm->nvsize;                                                          \
+    void *arg13 = output;                                                                        \
+    void *arg14 = counters;                                                                      \
+    uint64_t arg15 = comm->ub_timeout;                                                           \
+    void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),     \
+                          reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),     \
+                          reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),     \
+                          reinterpret_cast<void *>(&arg7),  reinterpret_cast<void *>(&arg8),     \
+                          reinterpret_cast<void *>(&arg9),  reinterpret_cast<void *>(&arg10),    \
+                          reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),    \
+                          reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),    \
+                          reinterpret_cast<void *>(&arg15)};                                     \
+    NVTE_CHECK_CUDA(cudaLaunchKernel(                                                            \
+        reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_stride_atomic<x>),   \
+        sms, threads, kernelArgs, 0, stream));                                                   \
+  }
+
+#define callranks_rs_oop_stride_multiatomic(x)                                                     \
+  if (ar_nvsize == x) {                                                                            \
+    int arg1 = op - NVTE_MAX_OPS,                                                                  \
+        arg2 = NVTE_REG0_OFFSET(comm) -                                                            \
+               (op == userbuffers_allreduceop_nonsharp ? 2 : 1) * NVTE_REG0_SINGLENODE +           \
+               NVTE_MAX_OPS,                                                                       \
+        arg3 = ar_firstgpu, arg4 = ar_nvrank, arg5 = ar_step, arg7 = elements / 8 / x,             \
+        arg6 = offset / 8, arg8 = rowelements / 8, arg9 = strideelements / 8, arg10 = numchunks;   \
+    void **arg11 = reinterpret_cast<void **>(comm->gpu_ptrs);                                      \
+    int arg12 = handler * comm->nvsize;                                                            \
+    void *arg13 = output;                                                                          \
+    void *arg14 = counters;                                                                        \
+    uint64_t arg15 = comm->ub_timeout;                                                             \
+    void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),       \
+                          reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),       \
+                          reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),       \
+                          reinterpret_cast<void *>(&arg7),  reinterpret_cast<void *>(&arg8),       \
+                          reinterpret_cast<void *>(&arg9),  reinterpret_cast<void *>(&arg10),      \
+                          reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),      \
+                          reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),      \
+                          reinterpret_cast<void *>(&arg15)};                                       \
+    NVTE_CHECK_CUDA(cudaLaunchKernel(                                                              \
+      reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_stride_multiatomic<x>),  \
+      sms, threads, kernelArgs, 0, stream));                                                       \
+  }
+#endif
 
 void reducescatter2_userbuff_strided(void *output, const int handler, const int offset,
                                      const int rowelements, const int colelements,
@@ -1680,7 +1946,11 @@ void reducescatter2_userbuff_strided(void *output, const int handler, const int 
   int warps = comm->threads / 32;
   if (warps < ar_nvsize) warps = ar_nvsize;
 
+#ifndef __HIP_PLATFORM_AMD__
   SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
+#else
+  int threads = comm->threads;
+#endif
   callranks_rs_oop_stride(2) callranks_rs_oop_stride(4) callranks_rs_oop_stride(8)
       callranks_rs_oop_stride(16) callranks_rs_oop_stride(32)
 }
@@ -1702,7 +1972,11 @@ void reducescatter2_userbuff_strided_atomic(void *output, const int handler, con
   int warps = comm->threads / 32;
   if (warps < ar_nvsize) warps = ar_nvsize;
 
+#ifndef __HIP_PLATFORM_AMD__
   SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
+#else
+  int threads = comm->threads;
+#endif
   callranks_rs_oop_stride_atomic(2) callranks_rs_oop_stride_atomic(4)
       callranks_rs_oop_stride_atomic(8) callranks_rs_oop_stride_atomic(16)
           callranks_rs_oop_stride_atomic(32)
@@ -1729,7 +2003,11 @@ void reducescatter2_userbuff_strided_universal_fp8(void *output, float *scale, c
   int warps = comm->threads / 32;
   if (warps < ar_nvsize) warps = ar_nvsize;
 
+#ifndef __HIP_PLATFORM_AMD__
   SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
+#else
+  int threads = comm->threads;
+#endif
   callranks_rs_oop_atomic_fp8(2) callranks_rs_oop_atomic_fp8(4) callranks_rs_oop_atomic_fp8(8)
       callranks_rs_oop_atomic_fp8(16) callranks_rs_oop_atomic_fp8(32)
 }
@@ -1774,7 +2052,11 @@ void reducescatter2_userbuff_strided_multiatomic(void *output, const int handler
   int warps = comm->threads / 32;
   if (warps < ar_nvsize) warps = ar_nvsize;
 
+#ifndef __HIP_PLATFORM_AMD__
   SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
+#else
+  int threads = comm->threads;
+#endif
   callranks_rs_oop_stride_multiatomic(2) callranks_rs_oop_stride_multiatomic(4)
       callranks_rs_oop_stride_multiatomic(8) callranks_rs_oop_stride_multiatomic(16)
           callranks_rs_oop_stride_multiatomic(32)
@@ -1795,6 +2077,7 @@ void allgather2_userbuff_inplace(const int handler, const int offset, const int 
   int warps = comm->threads / 32;
   if (warps < ar_nvsize) warps = ar_nvsize;
 
+#ifndef __HIP_PLATFORM_AMD__
   if (comm_launch_event) {
     SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT(sms, warps * 32, stream, comm_launch_event);
     if (comm->use_mc && (comm->memflags[handler] & NVTE_UB_MEM_MC_CREATED)) {
@@ -1810,6 +2093,13 @@ void allgather2_userbuff_inplace(const int handler, const int offset, const int 
       callranks_ag(2) callranks_ag(4) callranks_ag(8) callranks_ag(16) callranks_ag(32)
     }
   }
+#else
+  if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
+    callranks_agMC(2) callranks_agMC(4) callranks_agMC(8) callranks_agMC(16) callranks_agMC(32)
+  } else {
+    callranks_ag(2) callranks_ag(4) callranks_ag(8) callranks_ag(16) callranks_ag(32)
+  }
+#endif
 }
 
 void allgather2_userbuff_inplace_sliced(const int handler, const int offset, const int elements,
@@ -1842,6 +2132,7 @@ void reducescatter2_userbuff_inplace(const int handler, const int offset, const 
   int warps = comm->threads / 32;
   if (warps < ar_nvsize) warps = ar_nvsize;
 
+#ifndef __HIP_PLATFORM_AMD__
   if (comm_launch_event) {
     SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT(sms, warps * 32, stream, comm_launch_event);
     if (comm->use_mc && (comm->memflags[handler] & NVTE_UB_MEM_MC_CREATED)) {
@@ -1857,7 +2148,16 @@ void reducescatter2_userbuff_inplace(const int handler, const int offset, const 
       callranks_rs(2) callranks_rs(4) callranks_rs(8) callranks_rs(16) callranks_rs(32)
     }
   }
+#else
+  int threads = comm->threads;
+  if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
+    callranks_rsMC(2) callranks_rsMC(4) callranks_rsMC(8) callranks_rsMC(16) callranks_rsMC(32)
+  } else {
+    callranks_rs(2) callranks_rs(4) callranks_rs(8) callranks_rs(16) callranks_rs(32)
+  }
+#endif
 }
+
 void reducescatter2_userbuff_stridedoutput(void *output, const int handler, const int offset,
                                            const int rowelements, const int colelements,
                                            const int strideelements, communicator *comm,
@@ -1875,6 +2175,7 @@ void reducescatter2_userbuff_stridedoutput(void *output, const int handler, cons
   int warps = comm->threads / 32;
   if (warps < ar_nvsize) warps = ar_nvsize;
 
+#ifndef __HIP_PLATFORM_AMD__
   if (comm_launch_event) {
     SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT(sms, warps * 32, stream, comm_launch_event);
     if (comm->use_mc && (comm->memflags[handler] & NVTE_UB_MEM_MC_CREATED)) {
@@ -1894,7 +2195,13 @@ void reducescatter2_userbuff_stridedoutput(void *output, const int handler, cons
           callranks_rs_oop(32)
     }
   }
+#else
+  int threads = comm->threads;
+  callranks_rs_oop(2) callranks_rs_oop(4) callranks_rs_oop(8) callranks_rs_oop(16)
+    callranks_rs_oop(32)
+#endif
 }
+
 void reducescatter2_userbuff(void *output, const int handler, const int offset, const int elements,
                              communicator *comm, cudaStream_t stream,
                              cudaEvent_t comm_launch_event) {
@@ -1921,6 +2228,7 @@ void reducescatter2_userbuff_stridedoutput_fp8(void *output, float *scale, const
   int warps = comm->threads / 32;
   if (warps < ar_nvsize) warps = ar_nvsize;
 
+#ifndef __HIP_PLATFORM_AMD__
   if (comm_launch_event) {
     SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT(sms, warps * 32, stream, comm_launch_event);
     callranks_rs_oop_fp8(2) callranks_rs_oop_fp8(4) callranks_rs_oop_fp8(8) callranks_rs_oop_fp8(16)
@@ -1930,6 +2238,11 @@ void reducescatter2_userbuff_stridedoutput_fp8(void *output, float *scale, const
     callranks_rs_oop_fp8(2) callranks_rs_oop_fp8(4) callranks_rs_oop_fp8(8) callranks_rs_oop_fp8(16)
         callranks_rs_oop_fp8(32)
   }
+#else
+  int threads = comm->threads;
+  callranks_rs_oop_fp8(2) callranks_rs_oop_fp8(4) callranks_rs_oop_fp8(8) callranks_rs_oop_fp8(16)
+      callranks_rs_oop_fp8(32)
+#endif
 }
 
 template void reducescatter2_userbuff_stridedoutput_fp8<__nv_fp8_e5m2>(
@@ -2196,7 +2509,11 @@ __global__ void __launch_bounds__(MAX_THREADS)
     // Decrement atomic val to signal current output tile finish
     if (counters) {
       ((unsigned int *)counters)[0] = 0;
+#ifndef __HIP_PLATFORM_AMD__
       asm volatile("fence.sc.gpu;\n");
+#else
+      __threadfence();
+#endif    
     }
   }
 }
@@ -2267,7 +2584,11 @@ __global__ void __launch_bounds__(MAX_THREADS) kuserbuffers_pushsendrecv_multiat
       // Decrement atomic val to signal current output tile finish
       if (counters) {
         ((unsigned int *)counters)[recv_chunk_id /*chunk_i+1*/] = 0;
+#ifndef __HIP_PLATFORM_AMD__
         asm volatile("fence.sc.gpu;\n");
+#else
+        __threadfence();
+#endif      
       }
     }
 
@@ -2328,7 +2649,12 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
       NVTE_CHECK_CUDA(cudaMemcpyAsync(dstptr, srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
       // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_end_ptr));
     }
+#ifndef __HIP_PLATFORM_AMD__
     SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
+#else
+    int sms = signalonly ? 1 : comm->sms;
+    int threads = signalonly ? 1 : 1024;
+#endif
     int *arg1 = &comm->send_id[peer], *arg2 = reinterpret_cast<int *>(flagptr);
     int4 *arg3 = reinterpret_cast<int4 *>(srcptr), *arg4 = reinterpret_cast<int4 *>(dstptr);
     int arg5 = signalonly ? 0 : bytes / 16;
@@ -2336,7 +2662,10 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
                           reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),
                           reinterpret_cast<void *>(&arg5)};
     NVTE_CHECK_CUDA(
+#ifndef __HIP_PLATFORM_AMD__
         cudaLaunchKernelExC(&cfg, reinterpret_cast<void *>(kuserbuffers_pushsend), kernelArgs));
+#else
+        cudaLaunchKernel(reinterpret_cast<void *>(kuserbuffers_pushsend), sms, threads, kernelArgs, 0, stream));
   }
 }
 
@@ -2361,7 +2690,12 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
         cudaMemcpyAsync(send_dstptr, send_srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
     // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_end_ptr));
   }
+#ifndef __HIP_PLATFORM_AMD__
   SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
+#else
+  int sms = signalonly ? 1 : comm->sms;
+  int threads = signalonly ? 1 : 1024;
+#endif 
 
   int *arg1 = &comm->send_id[send_peer];
   int *arg2 = reinterpret_cast<int *>(flagptr_send);
@@ -2391,7 +2725,11 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
                         reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),
                         reinterpret_cast<void *>(&arg15)};
   NVTE_CHECK_CUDA(
+#ifndef __HIP_PLATFORM_AMD__
       cudaLaunchKernelExC(&cfg, reinterpret_cast<void *>(kuserbuffers_pushsendrecv), kernelArgs));
+#else
+      cudaLaunchKernel(reinterpret_cast<void *>(kuserbuffers_pushsendrecv), sms, threads, kernelArgs, 0, stream));
+#endif
 }
 
 void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
@@ -2417,7 +2755,12 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
         cudaMemcpyAsync(send_dstptr, send_srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
     // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_end_ptr));
   }
+#ifndef __HIP_PLATFORM_AMD__
   SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
+#else
+  int sms = signalonly ? 1 : comm->sms;
+  int threads = signalonly ? 1 : 1024;
+#endif
 
   int *arg1 = &comm->send_id[send_peer];
   int *arg2 = reinterpret_cast<int *>(flagptr_send);
@@ -2447,8 +2790,13 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
                         reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),
                         reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),
                         reinterpret_cast<void *>(&arg15), reinterpret_cast<void *>(&arg16)};
+#ifndef __HIP_PLATFORM_AMD__
   NVTE_CHECK_CUDA(cudaLaunchKernelExC(
       &cfg, reinterpret_cast<void *>(kuserbuffers_pushsendrecv_atomic), kernelArgs));
+#else
+  NVTE_CHECK_CUDA(
+      cudaLaunchKernel(reinterpret_cast<void *>(kuserbuffers_pushsendrecv_atomic), sms, threads, kernelArgs, 0, stream));
+#endif
 }
 
 void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler,
@@ -2464,7 +2812,12 @@ void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler
   void *flagptr_send = GET_SEND_PTR_BY_INDEX(send_peerlocal, comm, dsthandler, 0);
   void *flagptr_recv = GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 0);
 
+#ifndef
   SETUP_LAUNCH_CONFIG(comm->sms, 1024, stream);
+#else
+  int sms = comm->sms;
+  int threads = 1024;
+#endif
 
   int *arg1 = &comm->send_id[send_peer];
   int *arg2 = reinterpret_cast<int *>(flagptr_send);
@@ -2493,8 +2846,13 @@ void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler
                         reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),
                         reinterpret_cast<void *>(&arg15), reinterpret_cast<void *>(&arg16),
                         reinterpret_cast<void *>(&arg17), reinterpret_cast<void *>(&arg18)};
+#ifndef __HIP_PLATFORM_AMD__
   NVTE_CHECK_CUDA(cudaLaunchKernelExC(
       &cfg, reinterpret_cast<void *>(kuserbuffers_pushsendrecv_multiatomic), kernelArgs));
+#else
+  NVTE_CHECK_CUDA(
+    cudaLaunchKernel(reinterpret_cast<void *>(kuserbuffers_pushsendrecv_multiatomic), sms, threads, kernelArgs, 0, stream));
+#endif
 }
 
 void userbuffers_recv(const int srchandler, const size_t srcoffset, const int dsthandler,
@@ -2545,7 +2903,11 @@ static __global__ void producer_kernel(void *atomic_ptr, int chunk_i) {
   // COMM kernel need to explicitely flash gmem.
   // GEMM kernel already executed, and can not see gmem
   // change without COMM kernel explicitely make change
+#ifndef __HIP_PLATFORM_AMD__
   asm volatile("fence.sc.gpu;\n");
+#else
+  __threadfence();
+#endif
 }
 
 // consumer
@@ -2555,7 +2917,11 @@ static __global__ void consumer_kernel(void *atomic_ptr, int chunk_i) {
     while (0 != (atomicCAS((unsigned int *)atomic_ptr + chunk_i, 0, 0))) {
     }
     ((unsigned int *)atomic_ptr)[chunk_i] = 1;
+#ifndef __HIP_PLATFORM_AMD__
     asm volatile("fence.sc.gpu;\n");
+#else
+     __threadfence();
+#endif
   }
 }
 
@@ -2567,7 +2933,11 @@ static __global__ void consumer_batch_kernel(void *atomic_ptr, int first_chunk_i
       while (0 != (atomicCAS((unsigned int *)atomic_ptr + i, 0, 0))) {
       }
       ((unsigned int *)atomic_ptr)[i] = 1;
+#ifndef __HIP_PLATFORM_AMD__
       asm volatile("fence.sc.gpu;\n");
+#else
+      __threadfence();
+#endif    
     }
   }
 }

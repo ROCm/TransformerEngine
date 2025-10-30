@@ -399,7 +399,6 @@ void nvshmem_finalize();
 
 }  // namespace transformer_engine::pytorch
 
-#ifndef USE_ROCM
 /***************************************************************************************************
  * Comm+GEMM Overlap Wrappers
  **************************************************************************************************/
@@ -467,6 +466,5 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                         std::optional<std::vector<int64_t>> shape = std::nullopt);
 
 };  // CommOverlapP2P
-#endif // !USE_ROCM
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_

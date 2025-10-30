@@ -362,7 +362,8 @@ def initialize_ub(
                     assert rs_ag_pairs[name] in layers_atomic_ring_exchange, assert_message
 
         buffer_dtype = torch.uint8 if (use_fp8 and fp8_buf) else dtype
-        if method == "ring_exchange":
+        use_rd = method == "recursive_doubling"
+        if method == "ring_exchange" or use_rd:
             ub_obj = tex.CommOverlapP2P(
                 shape,  # Communication buffer shape
                 buffer_dtype,  # Communication buffer data type
@@ -378,6 +379,7 @@ def initialize_ub(
                 aggregate=aggregate,
                 gemm_priority=gemm_priority,
                 comm_priority=comm_priority,
+                use_rd=use_rd,
             )
         else:
             ub_obj = tex.CommOverlap(

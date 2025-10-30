@@ -5,7 +5,6 @@
  * 
  * See LICENSE for license information.
  ************************************************************************/
-#ifndef USE_ROCM
 #include "../extensions.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -227,14 +226,14 @@ CommOverlapP2P::CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::Scal
                                te::CommOverlapType comm_type, int num_max_streams,
                                int comm_cga_size, int gemm_priority, int comm_priority,
                                int num_comm_sm, bool set_sm_margin, bool atomic_gemm, bool use_ce,
-                               bool aggregate)
+                               bool aggregate, bool use_rd)
     : te::CommOverlapP2PBase(
           buffer_shape, te::pytorch::GetTransformerEngineDType(buffer_dtype), helper->myrank,
           helper->numranks, helper->mylocal, helper->numlocal, helper->mynode, helper->numnodes,
           tp_size, std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
           std::bind(&CommOverlapHelper::ub_barrier, helper, _1), comm_type, num_max_streams,
           comm_cga_size, gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce,
-          atomic_gemm, aggregate) {}
+          atomic_gemm, aggregate, use_rd) {}
 
 /*
 ** Copy input to _ubufs[0]
@@ -302,4 +301,3 @@ at::Tensor CommOverlapP2P::get_buffer(bool local_chunk, std::optional<std::vecto
   const auto dtype = transformer_engine::pytorch::GetATenDType(_ubuf.dtype());
   return torch::from_blob(ubuf_ptr, *shape, at::dtype(dtype).device(torch::kCUDA));
 }
-#endif // !USE_ROCM

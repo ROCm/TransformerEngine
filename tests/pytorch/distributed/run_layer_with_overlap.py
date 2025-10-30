@@ -28,6 +28,11 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
+import transformer_engine.pytorch.cpp_extensions as tex
+os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+if not tex.device_supports_multicast():
+    os.environ["UB_SKIPMC"] = "1"
+
 
 class multi_module_model(torch.nn.Module):
     def __init__(self, module, num_layers, *args, **kwargs):
