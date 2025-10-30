@@ -35,6 +35,7 @@ using ExtBarrierOp = std::function<void(ExtComm)>;
 #define NVTE_LAUNCH_GPU 1
 #define NVTE_LAUNCH_CPU 2
 #define NVTE_MAX_NVLINK 32
+#define NVTE_MAX_RINGS 7
 
 #define NVTE_UB_MEM_UC_CONTIG 1
 #define NVTE_UB_MEM_MC_CREATED 2
@@ -62,6 +63,28 @@ using ExtBarrierOp = std::function<void(ExtComm)>;
 #define NVTE_HF_NVRSDONE (userbuffers_op_types + 1)
 #define NVTE_HF_NVREDUCEDONE (userbuffers_op_types + 3)
 #define NVTE_MAX_SHARP 16
+
+#ifdef __HIP_PLATFORM_AMD__ // Moved to header for visibility
+// Index corresponds to the type of flag:
+// 0 - Send index counter
+// 1 - CE start index counter
+// 2 - CE end index counter
+#define GET_SEND_PTR_BY_INDEX(peerlocal, comm, dsth, index)                                 \
+  ((reinterpret_cast<char *>((comm)->peer_ptr[0][(peerlocal)])) +                           \
+   ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV + (comm)->myrank * NVTE_MAX_REGIONS + (dsth) + \
+     (index) * NVTE_MAX_NVLINK * NVTE_MAX_REGIONS) *                                        \
+    sizeof(int)))
+
+// Index corresponds to the type of flag:
+// 0 - Receive index counter
+// 1 - CE start index counter
+// 2 - CE end index counter
+#define GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsth, index)                              \
+  ((reinterpret_cast<char *>((comm)->mem_ptr[0])) +                                      \
+   ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV + (recv_peer) * NVTE_MAX_REGIONS + (dsth) + \
+     (index) * NVTE_MAX_NVLINK * NVTE_MAX_REGIONS) *                                     \
+    sizeof(int)))
+#endif // #ifdef __HIP_PLATFORM_AMD__
 
 typedef struct ub_request {
   int optype;
@@ -268,10 +291,10 @@ output is strided: row starts separated by stride elements*/
 
 void userbuffers_send(const int srchandler, const size_t srcoffset, const int dsthandler,
                       const size_t dstoffset, const size_t bytes, communicator *comm,
-                      const int peer, cudaStream_t stream = 0);
+                      const int peer, cudaStream_t stream = 0, int ring_id = 0);
 void userbuffers_recv(const int srchandler, const size_t srcoffset, const int dsthandler,
                       const size_t dstoffset, const size_t bytes, communicator *comm,
-                      const int peer, cudaStream_t stream = 0);
+                      const int peer, cudaStream_t stream = 0, int ring_id = 0);
 void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size_t send_offset,
                           const size_t recv_offset, const size_t bytes, communicator *comm,
                           const int send_peer, const int recv_peer, cudaStream_t stream = 0);

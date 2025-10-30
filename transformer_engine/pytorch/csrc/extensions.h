@@ -17,14 +17,6 @@ class CommOverlapHelper;
 class CommOverlap;
 class CommOverlapP2P;
 
-#ifdef USE_ROCM
-namespace transformer_engine {
-//dummy CommOverlapCore, CommOverlapType in rocm
-class CommOverlapCore{};
-class CommOverlapType{};
-}
-#endif
-
 namespace transformer_engine::pytorch {
 
 /***************************************************************************************************
@@ -517,7 +509,6 @@ void bulk_overlap_ag_with_external_gemm(CommOverlap &allgather_communicator, at:
 
 }  // namespace transformer_engine::pytorch
 
-#ifndef USE_ROCM
 /***************************************************************************************************
  * Comm+GEMM Overlap Wrappers
  **************************************************************************************************/
@@ -589,6 +580,5 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
   std::pair<at::Stream, at::Stream> get_communication_stream();
 
 };  // CommOverlapP2P
-#endif // !USE_ROCM
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_

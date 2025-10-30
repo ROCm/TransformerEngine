@@ -357,12 +357,12 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
   register_user_buffer_collective(&((*comm)->gpu_ptrs), LOCALSIZE, *comm, true);
   NVTE_CHECK_CUDA(
-      cudaMalloc(reinterpret_cast<void **>(&(*comm)->send_id), (*comm)->nranks * sizeof(int)));
+      cudaMalloc(reinterpret_cast<void **>(&(*comm)->send_id), (*comm)->nranks * NVTE_MAX_RINGS * sizeof(int)));
   NVTE_CHECK_CUDA(cudaMalloc(reinterpret_cast<void **>(&(*comm)->recv_id),
-                             NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
-  NVTE_CHECK_CUDA(cudaMemset((*comm)->send_id, 0, (*comm)->nranks * sizeof(int)));
+                             NVTE_MAX_REGIONS * (*comm)->nranks * NVTE_MAX_RINGS * sizeof(int)));
+  NVTE_CHECK_CUDA(cudaMemset((*comm)->send_id, 0, (*comm)->nranks * NVTE_MAX_RINGS * sizeof(int)));
   NVTE_CHECK_CUDA(
-      cudaMemset((*comm)->recv_id, 0, NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
+      cudaMemset((*comm)->recv_id, 0, NVTE_MAX_REGIONS * (*comm)->nranks * NVTE_MAX_RINGS * sizeof(int)));
   (*comm)->sms = 16;
   (*comm)->threads = 1024;
 
@@ -375,8 +375,11 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
       cudaMalloc(reinterpret_cast<void **>(&(*comm)->flags_baseptr), 2 * GPU_PAGE_SIZE));
   NVTE_CHECK_CUDA(cudaMemset((*comm)->flags_baseptr, 0, 2 * GPU_PAGE_SIZE));
   (*comm)->flags = reinterpret_cast<int *>(
+#ifdef __HIP_PLATFORM_AMD__
+      (reinterpret_cast<uintptr_t>((*comm)->flags) + GPU_PAGE_SIZE - 1) & GPU_PAGE_MASK);
+#else
       ((CUdeviceptr)(*comm)->flags_baseptr + GPU_PAGE_SIZE - 1) & GPU_PAGE_MASK);
-
+#endif
   using namespace std;
 
   sched_param param;

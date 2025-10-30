@@ -185,6 +185,7 @@ list(APPEND transformer_engine_cpp_sources
 
 list(APPEND transformer_engine_cuda_sources
      common.cu
+     comm_gemm_overlap/userbuffers/userbuffers.cu
      multi_tensor/adam.cu
      multi_tensor/compute_scale.cu
      multi_tensor/l2norm.cu
@@ -242,8 +243,7 @@ if(USE_CUDA)
         fused_attn/utils.cu
         swizzle/swizzle.cu
         swizzle/swizzle_block_scaling.cu
-        recipe/nvfp4.cu
-        comm_gemm_overlap/userbuffers/userbuffers.cu)
+        recipe/nvfp4.cu)
     list(APPEND transformer_engine_cuda_arch_specific_sources
         gemm/cutlass_grouped_gemm.cu
         transpose/quantize_transpose_square_blockwise.cu
@@ -356,11 +356,15 @@ target_include_directories(transformer_engine PRIVATE
                           ${CUTLASS_TOOLS_INCLUDE_DIR})
 
 # Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
+# Changed
 option(NVTE_UB_WITH_MPI "Bootstrap Userbuffers with MPI" OFF)
 if (NVTE_UB_WITH_MPI)
-    find_package(MPI REQUIRED)
-    target_link_libraries(transformer_engine PUBLIC MPI::MPI_CXX)
-    target_include_directories(transformer_engine PRIVATE ${MPI_CXX_INCLUDES})
+    # OpenMPI C++ headers are deprecated -- flag unused w/ MPICH
+    add_definitions(-DOMPI_SKIP_MPICXX)
+    
+    target_include_directories(transformer_engine PRIVATE "$ENV{MPI_HOME}/include")
+    target_link_directories(transformer_engine PRIVATE "$ENV{MPI_HOME}/lib")
+    target_link_libraries(transformer_engine PUBLIC mpi)
     target_compile_definitions(transformer_engine PUBLIC NVTE_UB_WITH_MPI)
 endif()
 
@@ -543,7 +547,7 @@ endif()
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --threads ${BUILD_THREADS_PER_JOB}")
 message(STATUS "Threads per parallel build job: ${BUILD_THREADS_PER_JOB}")
 else()
-  set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -O3")
+  set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -O3 -fopenmp")
   set(HIP_HCC_FLAGS "${CMAKE_HIP_FLAGS} -mavx2 -mf16c -mfma -std=c++17")
   # Ask hcc to generate device code during compilation so we can use
   # host linker to link.

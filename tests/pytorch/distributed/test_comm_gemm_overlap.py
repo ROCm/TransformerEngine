@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -9,6 +11,9 @@ import pytest
 import torch
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpp_extensions as tex
+
+from transformer_engine.jax.cpp_extensions.misc import is_hip_extension
+
 
 if torch.cuda.device_count() < 2:
     pytest.skip("Comm+GEMM overlap requires at least 2 GPUs.")
@@ -179,7 +184,7 @@ def test_bulk_overlaps(comm_type, quantization, connections):
     Test bulk overlaps with direct calls to te.cpp_extensions.gemm or te.cpp_extensions.fp8_gemm.
     """
     if connections == 8:
-        if torch.cuda.get_device_properties(0).major != 9:
+        if is_hip_extension() or torch.cuda.get_device_properties(0).major != 9:
             pytest.skip(
                 "CUDA_DEVICE_MAX_CONNECTIONS=8 test only applies to devices with compute capability"
                 " 9.0 (HOPPER ARCH)."

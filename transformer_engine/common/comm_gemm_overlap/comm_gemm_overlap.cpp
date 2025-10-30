@@ -21,6 +21,12 @@
 #define HALF_BYTES 2
 #define UB_MAX_SM 32
 
+#ifdef __HIP_PLATFORM_AMD__
+#define half_dtype hip_bfloat16
+#define __nv_fp8_e5m2 te_hip_fp8_e5m2
+#define __nv_fp8_e4m3 te_hip_fp8_e4m3
+#endif
+
 using namespace std::placeholders;
 
 namespace transformer_engine {
@@ -83,7 +89,7 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
     _gemm_priority = gemm_priority;
     _comm_priority = comm_priority;
   }
-  for (int i = 0; i < std::min(num_max_streams, num_splits); i++) {
+  for (int i = 0; i < std::max(num_max_streams, num_splits); i++) {
     cudaStream_t stream;
     NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _gemm_priority));
     _stream_compute.push_back(std::move(stream));
@@ -353,7 +359,7 @@ void CommOverlapBase::bulk_overlap(const TensorWrapper &A, bool transa, const Te
       char *rs_output_ptr = reinterpret_cast<char *>(rs_output.dptr());
       reducescatter2_userbuff_fp8<__nv_fp8_e5m2>(rs_output_ptr, _ubuf.scale_inv(), _ub_reg, 0,
                                                  comm_elements, _ub_comm, _stream_comm,
-                                                 (cudaEvent_t)_comm_launch_event);
+                                                 (cudaEvent_t)_comm_launch_event);                                         
     } else {
       reducescatter2_userbuff_inplace(_ub_reg, 0, comm_elements, _ub_comm, _stream_comm,
                                       (cudaEvent_t)_comm_launch_event);
@@ -471,7 +477,7 @@ void CommOverlapBase::atomic_gemm_overlap_rs(const TensorWrapper &A, bool transa
   NVTE_CHECK_CUDA(cudaEventRecord(_stop_comm, _stream_comm));
   NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_compute, 0));
   NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_comm, 0));
-}  // split_overlap_rs
+}  // atomic_gemm_overlap_rs
 
 /*
 ** Split FPROP GEMM + ReduceScatter
@@ -619,6 +625,7 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
 
 void CommOverlapBase::bulk_overlap_external_ag(cudaStream_t send_stream, cudaStream_t recv_stream,
                                                cudaStream_t stream_main) {
+  
   int comm_bytes = _ubuf.bytes();
   int comm_bytes_per_rank = comm_bytes / _tp_size;
 
@@ -717,10 +724,23 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
     NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _comm_priority));
     _stream_send.push_back(std::move(stream));
   }
+  for (int i = 0; i < 7; i++) {
+    cudaStream_t stream;
+    NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _comm_priority));
+    l_stream_send.push_back(std::move(stream));
+  }
+  for (int i = 0; i < 7; i++) {
+    cudaStream_t stream;
+    NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _comm_priority));
+    l_stream_recv.push_back(std::move(stream));
+  }
   NVTE_CHECK_CUDA(
       cudaStreamCreateWithPriority(&_stream_recv, cudaStreamNonBlocking, _comm_priority));
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_send, 0));
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_recv, 0));
+  for (int i = 0; i < 7; i++) {
+    NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&l_stop_recv[i], 0));
+  }
 }
 
 CommOverlapP2PBase::~CommOverlapP2PBase() {
@@ -730,6 +750,43 @@ CommOverlapP2PBase::~CommOverlapP2PBase() {
   for (size_t i = 0; i < _stream_send.size(); i++) {
     cudaStreamDestroy(_stream_send[i]);
   }
+  for (int i = 0; i < 7; i++) {
+    cudaStreamDestroy(l_stream_recv[i]);
+    cudaStreamDestroy(l_stream_send[i]);
+    cudaEventDestroy(l_stop_recv[i]);
+  }
+}
+
+void CommOverlapP2PBase::copy_into_buffer(cudaStream_t stream, const TensorWrapper &source,
+                                          bool local_chunk, bool rowwise) {
+  // Check element size
+  const size_t element_size = source.element_size();
+  NVTE_CHECK(_ubuf.element_size() == element_size,
+             "Tried to copy data into a Userbuffers buffer but dtypes are not compatible ",
+             "(source dtype has ", element_size, " bytes, UB dtype has ", _ubuf.element_size(),
+             " bytes)");
+
+  // Input data
+  const size_t source_size = source.numel();
+  const void *src_ptr = (rowwise) ? source.dptr() : source.columnwise_dptr();
+
+  // Userbuffers data
+  void *dst_ptr;
+  if (local_chunk) {
+    NVTE_CHECK(_ubufs[_tp_id].numel() == source_size,
+               "Tried to copy an invalid tensor into a local chunk of a Userbuffers buffer ",
+               "(source_size=", source_size, ", local_ubuf_size=", _ubufs[_tp_id].numel(), ")");
+    dst_ptr = _ubufs[_tp_id].dptr();
+  } else {
+    NVTE_CHECK(_ubuf.numel() == source_size,
+               "Tried to copy an invalid tensor into a Userbuffers buffer ",
+               "(source_size=", source_size, ", ubuf_size=", _ubuf.numel(), ")");
+    dst_ptr = _ubuf.dptr();
+  }
+
+  // Copy data
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(dst_ptr, src_ptr, source_size * element_size,
+                                  cudaMemcpyDeviceToDevice, stream));
 }
 
 void CommOverlapP2PBase::copy_into_buffer(cudaStream_t stream, const TensorWrapper &source,

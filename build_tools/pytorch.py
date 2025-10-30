@@ -81,14 +81,6 @@ def setup_pytorch_extension(
             if version < (12, 0):
                 raise RuntimeError("Transformer Engine requires CUDA 12.0 or newer")
 
-    if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
-        assert (
-            os.getenv("MPI_HOME") is not None
-        ), "MPI_HOME=/path/to/mpi must be set when compiling with NVTE_UB_WITH_MPI=1!"
-        mpi_path = Path(os.getenv("MPI_HOME"))
-        include_dirs.append(mpi_path / "include")
-        cxx_flags.append("-DNVTE_UB_WITH_MPI")
-
     library_dirs = []
     libraries = []
     if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", 0))):
@@ -102,12 +94,22 @@ def setup_pytorch_extension(
         cxx_flags.append("-DNVTE_ENABLE_NVSHMEM")
 
     if bool(int(os.getenv("NVTE_ENABLE_ROCSHMEM", 0))):
-        cxx_flags.append("-DNVTE_ENABLE_ROCSHMEM")
         mpi_home = Path(os.getenv("MPI_HOME", "/usr/lib/x86_64-linux-gnu/openmpi"))
         include_dirs.append(mpi_home / "include")
         library_dirs.append(mpi_home / "lib")
-        libraries.append("mpi_cxx")
+        libraries.append("mpi")
+        cxx_flags.extend(["-DNVTE_ENABLE_ROCSHMEM", "-DOMPI_SKIP_MPICXX"])
 
+    extra_link_args = []
+    if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
+        assert (
+            os.getenv("MPI_HOME") is not None
+        ), "MPI_HOME=/path/to/mpi must be set when compiling with NVTE_UB_WITH_MPI=1!"
+        mpi_path = Path(os.getenv("MPI_HOME", "/usr/lib/x86_64-linux-gnu/openmpi"))
+        include_dirs.append(mpi_path / "include")
+        library_dirs.append(mpi_path / "lib")
+        libraries.append("mpi")
+        cxx_flags.extend(["-DNVTE_UB_WITH_MPI", "-DOMPI_SKIP_MPICXX"])
 
     # Construct PyTorch CUDA extension
     sources = [str(path) for path in sources]
@@ -121,4 +123,5 @@ def setup_pytorch_extension(
         extra_compile_args={"cxx": cxx_flags},
         libraries=[str(lib) for lib in libraries],
         library_dirs=[str(lib_dir) for lib_dir in library_dirs],
+        extra_link_args=[str(arg) for arg in extra_link_args],
     )

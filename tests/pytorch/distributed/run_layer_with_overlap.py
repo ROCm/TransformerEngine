@@ -1,5 +1,7 @@
 #!/usr/bin/python3
 
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -29,6 +31,11 @@ from transformer_engine.common.recipe import (
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
+
+import transformer_engine.pytorch.cpp_extensions as tex
+os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+if not tex.device_supports_multicast():
+    os.environ["UB_SKIPMC"] = "1"
 
 
 class multi_module_model(torch.nn.Module):

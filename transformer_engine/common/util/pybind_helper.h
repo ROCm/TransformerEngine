@@ -10,10 +10,7 @@
 #define TRANSFORMER_ENGINE_COMMON_UTIL_PYBIND_HELPER_H_
 
 #include <pybind11/pybind11.h>
-//TODO: rocm does not support comm gemm overlap yet
-#ifndef USE_ROCM
 #include <transformer_engine/comm_gemm_overlap.h>
-#endif
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/transformer_engine.h>
 
@@ -35,9 +32,6 @@
         .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend); 
 #endif
 
-// Define comm overlap handles if not using ROCm
-#ifndef USE_ROCM
-
 #define NVTE_DECLARE_COMM_OVERLAP_HANDLES(m)                                                       \
   pybind11::enum_<transformer_engine::CommOverlapType>(m, "CommOverlapType",                       \
                                                        pybind11::module_local())                   \
@@ -56,7 +50,9 @@
       .value("ATOMIC_GEMM_AG_P2P", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_AG_P2P)        \
       .value("ATOMIC_GEMM_RS_P2P", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_RS_P2P)        \
       .value("EXTERNAL_BULK_OVERLAP_AG",                                                           \
-             transformer_engine::CommOverlapAlgo::EXTERNAL_BULK_OVERLAP_AG);                       \
+             transformer_engine::CommOverlapAlgo::EXTERNAL_BULK_OVERLAP_AG)                        \
+      .value("SPLIT_PIPELINED_AG_RD_P2P",                                                          \
+                transformer_engine::CommOverlapAlgo::SPLIT_PIPELINED_AG_RD_P2P);                   \
   py::class_<transformer_engine::CommOverlapCore,                                                  \
              std::shared_ptr<transformer_engine::CommOverlapCore>>(m, "CommOverlapCore",           \
                                                                    pybind11::module_local())       \
@@ -91,14 +87,6 @@
       py::call_guard<py::gil_scoped_release>(), py::arg("device_id") = -1);                        \
   m.def("ubuf_built_with_mpi", &transformer_engine::ubuf_built_with_mpi,                           \
         py::call_guard<py::gil_scoped_release>());
-#else
-#define NVTE_DECLARE_COMM_OVERLAP_HANDLES(m)                                                       \
-  pybind11::class_<transformer_engine::CommOverlapType>(m, "CommOverlapType",                      \
-                                                       pybind11::module_local());                  \
-  py::class_<transformer_engine::CommOverlapCore,                                                  \
-             std::shared_ptr<transformer_engine::CommOverlapCore>>(m, "CommOverlapCore",           \
-                                                                   pybind11::module_local());      
-#endif
 
 #define NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)                                                    \
   pybind11::enum_<transformer_engine::DType>(m, "DType", pybind11::module_local())                 \
