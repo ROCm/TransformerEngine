@@ -6,13 +6,9 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
-<<<<<<< HEAD
 import os
-from typing import Optional, Tuple
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
-=======
 from typing import Optional, Tuple, Union
->>>>>>> ca7407e
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import torch
 if IS_HIP_EXTENSION:

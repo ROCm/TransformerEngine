@@ -306,11 +306,8 @@ at::Tensor CommOverlapP2P::get_buffer(bool local_chunk, std::optional<std::vecto
   const auto dtype = transformer_engine::pytorch::GetATenDType(_ubuf.dtype());
   return torch::from_blob(ubuf_ptr, *shape, at::dtype(dtype).device(torch::kCUDA));
 }
-<<<<<<< HEAD
-#endif // !USE_ROCM
-=======
 
 at::Stream CommOverlapP2P::get_communication_stream() {
   return at::cuda::getStreamFromExternal(_stream_recv, at::cuda::current_device());
 }
->>>>>>> ca7407e
+#endif // !USE_ROCM

@@ -6,12 +6,8 @@
 
 """Tensor class with FP8 data"""
 from __future__ import annotations
-<<<<<<< HEAD
 import os
-from typing import Optional, Tuple, Iterable
-=======
 from typing import Optional, Tuple, Iterable, Union
->>>>>>> ca7407e
 import warnings
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
