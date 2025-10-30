@@ -261,7 +261,8 @@ def fused_attn_fwd(
     ), "Fused attention does not support this input combination."
 
     if IS_HIP_EXTENSION:
-        rng_elts_per_thread = 0
+        # Both CK/aiter and aotriton follow the flash-attn rng design
+        rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
     else:
         # BF16/FP16 fused attention API from fmha_v1 apex
         if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:

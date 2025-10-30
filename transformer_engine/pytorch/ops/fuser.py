@@ -25,19 +25,16 @@ from transformer_engine.pytorch.ops.fused import (
     fuse_forward_linear_bias_activation,
     fuse_forward_linear_bias_add,
 )
-<<<<<<< HEAD
 if not IS_HIP_EXTENSION:
     from transformer_engine.pytorch.ops.fused import (
         fuse_userbuffers_backward_linear,
         fuse_userbuffers_forward_linear,
     )
-=======
 from transformer_engine.pytorch.tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
 
->>>>>>> ca7407e
 
 def _split_tuple(t: tuple, idx: int) -> tuple[tuple, tuple]:
     """Split tuple at index"""

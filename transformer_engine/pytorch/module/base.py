@@ -1214,13 +1214,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     raise RuntimeError("Weight quantizer has not been initialized")
                 quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
                 quantizer.internal = False
-<<<<<<< HEAD
                 if IS_HIP_EXTENSION and not self.keep_fp8_weight_transpose_cache:
                     quantizer.columnwise_usage=False
-=======
 
                 # Quantize parameter
->>>>>>> ca7407e
                 param = quantizer(param)
 
             # Redo parameter wrap in case we broke it above

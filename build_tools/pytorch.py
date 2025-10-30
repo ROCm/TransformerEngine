@@ -10,7 +10,6 @@ from pathlib import Path
 
 import setuptools
 
-<<<<<<< HEAD
 from .utils import (
     rocm_build,
     rocm_path,
@@ -23,8 +22,6 @@ from .utils import (
     get_cuda_include_dirs,
     debug_build_enabled,
 )
-=======
-from .utils import all_files_in_dir, cuda_version, get_cuda_include_dirs, debug_build_enabled
 from typing import List
 
 
@@ -48,7 +45,6 @@ def install_requirements() -> List[str]:
 def test_requirements() -> List[str]:
     """Test dependencies for TE/JAX extensions."""
     return ["numpy", "torchvision", "transformers"]
->>>>>>> ca7407e
 
 
 def setup_pytorch_extension(

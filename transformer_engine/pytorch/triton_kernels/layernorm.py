@@ -489,8 +489,9 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
     # To update the amax ptr directly with atomic max
     APPLY_ATOMIC = M < 512
 
-    # MXFP8 is handled regularly, hence quantizer of Float8Quantizer is considered FP8
+    # MXFP8/fp8_current_scaling requires unfused quantization. 
     IS_FP8 = isinstance(quantizer, Float8Quantizer)
+    IS_FP8_CURRENT_SCALING = isinstance(quantizer, Float8CurrentScalingQuantizer)
 
     amax_temp = torch.empty((M,), dtype=torch.float32, device=device) if IS_FP8 else None
 
@@ -551,7 +552,7 @@ def te_layernorm_fwd_triton(input: torch.Tensor,
     )
 
     # For MXFP8, we do regular layernorm and then quantize it separately
-    if IS_MXFP8:
+    if IS_MXFP8 or IS_FP8_CURRENT_SCALING:
         ln_out = te_quantize_triton(ln_out, quantizer)
     
     # Reduce and find amax if "not APPLY_ATOMIC" is True.
