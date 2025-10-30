@@ -48,7 +48,7 @@ def _run_test(fp_init, recipe):
     test_dir = Path(__file__).parent.resolve()
     fsdp_script = test_dir / "run_fsdp2_fp8_model.py"
     
-    test_cmd = ["torchrun", f"--nproc_per_node={NUM_PROCS}", str(fsdp_script)]
+    test_cmd = ["torchrun", f"--nproc_per_node={NUM_PROCS}", "--master-port=29501", str(fsdp_script)]
 
     if fp_init:
         test_cmd += ["--fp8-init"]
@@ -68,12 +68,19 @@ def _run_test(fp_init, recipe):
         print(f"Tensor at index {idx} passed comparison.")
 
 
+@pytest.fixture
+def cleanup_artifacts():
+    yield  # run the test first
+    for fname in ["all_iters_fsdp2.pt", "all_iters_dp.pt", "fsdp_model.pth", "shared_input.pt"]:
+        if os.path.exists(fname):
+            os.remove(fname)
 
 @pytest.mark.skipif(NUM_PROCS < 4, reason="Requires 4+ GPUs")
 @pytest.mark.skipif(NUM_PROCS % 2 != 0, reason="Requires even number of GPUs")
 @pytest.mark.skipif(not torch_version() >= (2, 4, 0), reason="Requires PyTorch 2.4.0+")
 @pytest.mark.parametrize("fp8_init", ([False]))
 @pytest.mark.parametrize("recipe", (["delayed", "current", "mxfp8"]))
+@pytest.mark.usefixtures("cleanup_artifacts")
 def test_distributed(fp8_init, recipe):
 
     batch_size = 2048
