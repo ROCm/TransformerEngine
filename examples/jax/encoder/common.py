@@ -11,13 +11,11 @@ import jax.numpy
 import transformer_engine
 from transformer_engine_jax import get_device_compute_capability
 from transformer_engine.common import recipe
-<<<<<<< HEAD
 from transformer_engine.jax.util import is_hip_extension
 if is_hip_extension():
     from transformer_engine.jax.util import is_mi200
 =======
 import numpy as np
->>>>>>> ca7407e
 
 
 @lru_cache

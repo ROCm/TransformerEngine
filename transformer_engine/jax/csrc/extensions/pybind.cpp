@@ -58,15 +58,12 @@ pybind11::dict Registrations() {
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
                      pybind11::arg("execute") = EncapsulateFFI(FusedAttnBackwardHandler));
 
-<<<<<<< HEAD
-=======
   // GEMM
   dict["te_gemm_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
                      pybind11::arg("execute") = EncapsulateFFI(GemmHandler));
 
   // Grouped GEMM
->>>>>>> ca7407e
   dict["te_grouped_gemm_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
                      pybind11::arg("execute") = EncapsulateFFI(GroupedGemmHandler));
@@ -79,6 +76,7 @@ pybind11::dict Registrations() {
   dict["te_fused_attn_forward_ffi"] = EncapsulateFFI(FusedAttnForwardHandler);
   dict["te_fused_attn_backward_ffi"] = EncapsulateFFI(FusedAttnBackwardHandler);
 
+  dict["te_gemm_ffi"] = EncapsulateFFI(GemmHandler);
   dict["te_grouped_gemm_ffi"] = EncapsulateFFI(GroupedGemmHandler);
 #endif
   return dict;
@@ -92,11 +90,8 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
 #endif
   m.def("get_cudnn_version", &GetCudnnRuntimeVersion);
   m.def("get_device_compute_capability", &GetDeviceComputeCapability);
-<<<<<<< HEAD
-#ifndef USE_ROCM
-=======
   m.def("get_num_compute_streams", &nvte_get_num_compute_streams);
->>>>>>> ca7407e
+#ifndef USE_ROCM
   m.def("get_cublasLt_version", &cublasLtGetVersion);
 #endif
   m.def("get_dact_dbias_quantize_workspace_sizes", &GetDActDBiasQuantizeWorkspaceSizes);

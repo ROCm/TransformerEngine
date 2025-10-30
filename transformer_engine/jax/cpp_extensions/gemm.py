@@ -19,13 +19,10 @@ import transformer_engine_jax as tex
 from transformer_engine_jax import get_num_compute_streams
 
 from .base import BasePrimitive, register_primitive
-<<<<<<< HEAD
-
-from ..util import is_hip_extension
-
-=======
 from .quantization import grouped_quantize
->>>>>>> ca7407e
+
+from ..util import is_hip_extension, get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
+
 from ..quantize import (
     ScaledTensor,
     ScaledTensor2x,
@@ -42,7 +39,6 @@ from ..quantize import (
 )
 from .misc import get_padded_spec
 
-
 __all__ = [
     "gemm",
     "grouped_gemm",
@@ -52,6 +48,8 @@ __all__ = [
     "transpose_dims",
 ]
 
+jnp_float8_e4m3_type = get_jnp_float8_e4m3_type()
+jnp_float8_e5m2_type = get_jnp_float8_e5m2_type()
 
 num_cublas_streams = get_num_compute_streams()
 
@@ -60,7 +58,7 @@ def get_cublas_workspace_size_bytes() -> None:
     """Return workspace size needed for current architecture"""
     if is_hip_extension():
         """Return 64 MiB for gfx50x, 32 MiB for all other architectures."""
-        if get_device_compute_capability() == (9, 5):
+        if tex.get_device_compute_capability(0) == 95:
             return 67_108_864
         return 33_554_432
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
@@ -98,8 +96,8 @@ def _compatible_fp8_gemm_dtypes(lhs_dtype, rhs_dtype) -> bool:
         (
             lhs_dtype,
             rhs_dtype,
-            jnp.float8_e4m3fn,
-            jnp.float8_e5m2,
+            jnp_float8_e4m3_type,
+            jnp_float8_e5m2_type,
         ),
     )
 
@@ -1525,7 +1523,7 @@ def grouped_gemm(
         rhs_shape = rhs_q.original_shape
 
     assert not (
-        lhs_data.dtype == jnp.float8_e5m2 and rhs_data.dtype == jnp.float8_e5m2
+        lhs_data.dtype == jnp_float8_e5m2_type and rhs_data.dtype == jnp_float8_e5m2_type
     ), "FP8 GEMM does not support E5M2 * E5M2"
 
     # Only support FP8 GEMM with NT layout on Hopper and other earlier GPUs

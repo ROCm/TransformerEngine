@@ -204,10 +204,7 @@ class FusedAttnHelper:
             q_head_dim,
             v_head_dim,
         )
-<<<<<<< HEAD
-=======
 
->>>>>>> ca7407e
 
 @dataclass(frozen=True)
 class _FusedAttnRNGStateChecker:
@@ -788,10 +785,6 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             qk_head_dim,
             v_head_dim,
         ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
-<<<<<<< HEAD
-        
-=======
->>>>>>> ca7407e
 
         if config.attn_bias_type == AttnBiasType.NO_BIAS:
             bias_batch = bias_heads = 0

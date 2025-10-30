@@ -17,14 +17,7 @@ from functools import reduce, lru_cache
 import operator
 import numpy as np
 
-<<<<<<< HEAD
-from packaging import version
-import jax
-if version.parse(jax.__version__) >= version.parse("0.5.0"):
-    from jax.experimental.custom_partitioning import CompoundFactor
-=======
 from jax.experimental.custom_partitioning import BATCHING
->>>>>>> ca7407e
 from jax.tree_util import register_pytree_node_class
 import jax.numpy as jnp
 
@@ -496,16 +489,10 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         Returns:
             The Shardy rules for the scaling mode
         """
-<<<<<<< HEAD
-        if version.parse(jax.__version__) < version.parse("0.5.0"):
-            raise ImportError("JAX version 0.5.0 or later is required for shardy sharding.") 
-        input_spec = [f"x{i}" for i in range(input_rank)]
-=======
         del flatten_axis
         input_spec = [f"{unique_var}{i}" for i in range(input_rank)]
         rowwise = [f"{unique_var}scale_inv_rowwise{i}" for i in range(input_rank)]
         colwise = [f"{unique_var}scale_inv_colwise{i}" for i in range(input_rank)]
->>>>>>> ca7407e
 
         # NOTE (Alp): Padding the scales breaks the size relationship in CompoundFactors.
         #             Unfortunately, because Shardy rules are applied to the inner primitive, the
