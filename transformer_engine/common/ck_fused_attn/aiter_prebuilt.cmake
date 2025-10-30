@@ -35,7 +35,7 @@ function(is_aiter_cache_valid CACHE_VALID)
 
   # Cache is invalid/outdated - clean it
   file(REMOVE_RECURSE "${CACHE_ROOT}")
-  file(REMOVE_RECURSE "${CMAKE_CURRENT_LIST_DIR}/../../../build/cmake/_deps")
+  file(REMOVE_RECURSE "${CMAKE_BINARY_DIR}/_deps")
 endfunction()
 
 # Cache locally built libs
@@ -51,7 +51,7 @@ function(download_aiter_prebuilt DOWNLOAD_SUCCESS)
     return()
   endif()
 
-  string(REGEX REPLACE "/$" "" FILE_URL "$ENV{NVTE_AITER_PREBUILT_BASE_URL}/${KEY}.tar.gz")
+  set(FILE_URL "$ENV{NVTE_AITER_PREBUILT_BASE_URL}/${KEY}.tar.gz")
   message(STATUS "[AITER-PREBUILT] NVTE_AITER_PREBUILT_BASE_URL is set - Attempting to download ${KEY}.tar.gz ...")
 
   # Check if ${KEY}.tar.gz exists in the URL provided.
