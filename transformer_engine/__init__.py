@@ -30,13 +30,8 @@ if os.getenv("NVTE_FRAMEWORK"):
         _use_jax = "jax" in _frameworks
 
 try:
-<<<<<<< HEAD
     if _use_pytorch: from . import pytorch
-except (ImportError, FileNotFoundError):
-=======
-    from . import pytorch
 except ImportError:
->>>>>>> ca7407e
     pass
 except FileNotFoundError as e:
     if "Could not find shared object file" not in str(e):
@@ -62,16 +57,7 @@ except FileNotFoundError as e:
             )
 
 try:
-<<<<<<< HEAD
     if _use_jax: from . import jax
-except (ImportError, FileNotFoundError):
-    pass
-
-try:
-    if _use_jax: import transformer_engine_jax
-=======
-    from . import jax
->>>>>>> ca7407e
 except ImportError:
     pass
 except FileNotFoundError as e:

@@ -7,7 +7,6 @@
 """JAX related extensions."""
 import os
 from pathlib import Path
-from packaging import version
 
 import setuptools
 
@@ -18,7 +17,10 @@ from typing import List
 
 def install_requirements() -> List[str]:
     """Install dependencies for TE/JAX extensions."""
-    return ["jax", "flax>=0.7.1"]
+    if rocm_build():
+        return jax_install_requires(["flax>=0.7.1"])
+    else:
+        return ["jax", "flax>=0.7.1"]
 
 
 def test_requirements() -> List[str]:
@@ -32,20 +34,11 @@ def xla_path() -> str:
 
     try:
         import jax
-<<<<<<< HEAD
         from packaging import version
         if version.parse(jax.__version__) >= version.parse("0.5.0"):
             from jax import ffi
         else:
             from jax.extend import ffi
-=======
-
-        if version.parse(jax.__version__) >= version.parse("0.5.0"):
-            from jax import ffi  # pylint: disable=ungrouped-imports
-        else:
-            from jax.extend import ffi  # pylint: disable=ungrouped-imports
-
->>>>>>> ca7407e
     except ImportError:
         if os.getenv("XLA_HOME"):
             xla_home = Path(os.getenv("XLA_HOME"))
