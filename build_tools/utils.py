@@ -450,8 +450,6 @@ def copy_common_headers(
         new_path = dst_dir / path.relative_to(src_dir)
         new_path.parent.mkdir(exist_ok=True, parents=True)
         shutil.copy(path, new_path)
-<<<<<<< HEAD
-
 
 def copy_hipify_tools(
     src_dir: Union[Path, str],
@@ -549,5 +547,3 @@ def hipify(base_dir, src_dir, sources, include_dirs):
         # *never* absolute paths
         hipified_sources.add(os.path.relpath(fname, cwd))
     return list(hipified_sources)
-=======
->>>>>>> ca7407e

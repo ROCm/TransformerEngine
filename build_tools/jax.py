@@ -18,7 +18,10 @@ from typing import List
 
 def install_requirements() -> List[str]:
     """Install dependencies for TE/JAX extensions."""
-    return ["jax", "flax>=0.7.1"]
+    if rocm_build():
+        return jax_install_requires(["flax>=0.7.1"])
+    else:
+        return ["jax", "flax>=0.7.1"]
 
 
 def test_requirements() -> List[str]:

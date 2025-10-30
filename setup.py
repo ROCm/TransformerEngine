@@ -108,21 +108,6 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
     """
 
     # Common requirements
-<<<<<<< HEAD
-    if rocm_build():
-        setup_reqs: List[str] = []
-    else:
-        setup_reqs: List[str] = [
-            "nvidia-cuda-runtime-cu12",
-            "nvidia-cublas-cu12",
-            "nvidia-cudnn-cu12",
-            "nvidia-cuda-cccl-cu12",
-            "nvidia-cuda-nvcc-cu12",
-            "nvidia-nvtx-cu12",
-            "nvidia-cuda-nvrtc-cu12",
-        ]
-=======
->>>>>>> ca7407e
     install_reqs: List[str] = [
         "pydantic",
         "importlib-metadata>=1.0",
@@ -130,47 +115,10 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
     ]
     test_reqs: List[str] = ["pytest>=8.2.1"]
 
-<<<<<<< HEAD
-    # Requirements that may be installed outside of Python
-    if not found_cmake():
-        setup_reqs.append("cmake>=3.21")
-    if not found_ninja():
-        import sys
-
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "ninja"])
-        setup_reqs.append("ninja")
-    if not found_pybind11():
-        setup_reqs.append("pybind11")
-
-    # Framework-specific requirements
-    if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
-        if "pytorch" in frameworks:
-            if rocm_build():
-                install_reqs.extend(["einops"])
-            else:
-                setup_reqs.extend(["torch>=2.1"])
-                install_reqs.extend(["torch>=2.1"])
-                install_reqs.append(
-                    "nvdlfw-inspect @"
-                    " git+https://github.com/NVIDIA/nvidia-dlfw-inspect.git@v0.1#egg=nvdlfw-inspect"
-                )
-                # Blackwell is not supported as of Triton 3.2.0, need custom internal build
-                # install_reqs.append("triton")
-                test_reqs.extend(["numpy", "torchvision"])
-        if "jax" in frameworks:
-            if rocm_build():
-                from build_tools.jax import jax_install_requires
-                install_reqs.extend(jax_install_requires(["flax>=0.7.1"]))
-            else:
-                setup_reqs.extend(["jax[cuda12]", "flax>=0.7.1"])
-                install_reqs.extend(["jax", "flax>=0.7.1"])
-                test_reqs.extend(["numpy"])
-=======
     # Framework-specific requirements
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         if "pytorch" in frameworks:
             from build_tools.pytorch import install_requirements, test_requirements
->>>>>>> ca7407e
 
             install_reqs.extend(install_requirements())
             test_reqs.extend(test_requirements())
@@ -199,12 +147,7 @@ if __name__ == "__main__":
         cmdclass = {}
         package_data = {}
         include_package_data = False
-<<<<<<< HEAD
-        setup_requires = []
         install_requires = ([f"transformer_engine_{te_cuda_vers}=={__version__}"],)
-=======
-        install_requires = ([f"transformer_engine_cu12=={__version__}"],)
->>>>>>> ca7407e
         extras_require = {
             "pytorch": [f"transformer_engine_torch=={__version__}"],
             "jax": [f"transformer_engine_jax=={__version__}"],
