@@ -1,3 +1,6 @@
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# See LICENSE for license information.
+
 import pandas as pd
 import panel as pn
 import seaborn as sns

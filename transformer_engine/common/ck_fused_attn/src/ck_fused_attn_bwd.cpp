@@ -416,12 +416,10 @@ void log_bwd_config(const char* func_name,
 
 }
 
-void dump_bwd_timings(float average_runtime, hipStream_t stream){
-  if(const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT")) {
-    std::ofstream file;
-    file.open(std::string(dump_path) + "aiter-bwd-timings.txt", std::ios_base::app);
-    file << average_runtime << "\n";
-  }
+void dump_bwd_timings(const char* dump_path, float average_runtime, hipStream_t stream){
+  std::ofstream file;
+  file.open(std::string(dump_path) + "aiter-bwd-timings.txt", std::ios_base::app);
+  file << average_runtime << "\n";
 }
 
 hipError_t ck_attn_bwd(  
@@ -498,9 +496,10 @@ hipError_t ck_attn_bwd(
     if (env_p != nullptr && std::string(env_p) == "1")
       ck_fused_attn_log_config = true;
   }
+  const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
 
   // print kernel name on verbose mode
-  ck_tile::stream_config stream_config{stream, true, ck_fused_attn_log_config};
+  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, ck_fused_attn_log_config};
 
   ck_tile::index_t shape_seqlen_q = seqlen_q;
   ck_tile::index_t shape_seqlen_k = seqlen_k;
@@ -660,7 +659,9 @@ hipError_t ck_attn_bwd(
                                          uses_bwd_v3,
                                          is_v3_atomic_fp32,
                                          how_v3_bf16_cvt);
-  dump_bwd_timings(average_runtime, stream);
+  if(dump_path){
+    dump_bwd_timings(dump_path, average_runtime, stream);
+  }
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
@@ -851,8 +852,9 @@ hipError_t ck_attn_varlen_bwd(
     if (env_p != nullptr && std::string(env_p) == "1")
       ck_fused_attn_log_config = true;
   } 
+  const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
   // print kernel name on verbose mode
-  ck_tile::stream_config stream_config{stream, true, ck_fused_attn_log_config};
+  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, ck_fused_attn_log_config};
 
   std::string data_type_str = get_data_type_str(dtype);
 
@@ -1006,7 +1008,9 @@ hipError_t ck_attn_varlen_bwd(
                                          uses_bwd_v3,
                                          is_v3_atomic_fp32,
                                          how_v3_bf16_cvt);
-  dump_bwd_timings(average_runtime, stream);
+  if(dump_path){
+    dump_bwd_timings(dump_path, average_runtime, stream);
+  }
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");

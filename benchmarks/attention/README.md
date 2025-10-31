@@ -7,7 +7,7 @@ Note: Only forward timings are supported at this point.
 Run the following command to generate timing data. Please use the `-h` flag for details on the available arguments. The output csv, which will later be parsed to generate the interactive visualizations, is generated in the same directory as the script, since that is where the visualization stage expects it.
 
 ```bash
-XLA_FLAGS="--xla_gpu_graph_level=0" python benchmark_attention_jax.py --fwd-v3 --bwd-v3 -v
+python benchmark_attention_jax.py --bench-bwd --fwd-v3 --bwd-v3 -v
 ```
 
 The `XLA_FLAGS` environment variable is necessary in order to ensure that the timings can be dumped at the C++ backend level.
