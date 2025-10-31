@@ -338,28 +338,6 @@ else()
         message(STATUS "Download AOTriton pre-compiled GPU images from ${__AOTRITON_URL}.")
       endfunction()
 
-      function(aotriton_download_runtime)
-        message(STATUS "Preparing to download AOTriton runtime.")
-        string(CONCAT __AOTRITON_URL "${__AOTRITON_BASE_URL}"
-                                    "${__AOTRITON_VER}/aotriton-"
-                                    "${__AOTRITON_VER}-manylinux_2_28"
-                                    "_x86_64-rocm7.0"
-                                    "-shared.tar.gz")
-        message(STATUS "Downloading AOTriton runtime from ${__AOTRITON_URL}.")
-        ExternalProject_Add(aotriton_images
-                            URL ${__AOTRITON_URL}
-                            URL_HASH SHA256=${__AOTRITON_SHA256}
-                            SOURCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/aotriton_images
-                            INSTALL_COMMAND ${CMAKE_COMMAND} -E copy_directory
-                            "${CMAKE_CURRENT_BINARY_DIR}/aotriton_images"
-                            "${__AOTRITON_INSTALL_DIR}"
-                            BUILD_BYPRODUCTS "${__AOTRITON_INSTALL_DIR}/${__AOTRITON_LIB}"
-        )
-        add_dependencies(aotriton aotriton_images)
-        message(STATUS "Using AOTriton Runtime from pre-compiled binary ${__AOTRITON_URL}.\
-        Set env variables AOTRITON_INSTALL_FROM_SOURCE=1 to build from source.")
-      endfunction()
-
       function(aotriton_build_from_source noimage)
         if(noimage)
           SET(RECURSIVE "OFF")
@@ -394,7 +372,6 @@ else()
       message(STATUS "Building AOTriton from source.")
       aotriton_build_from_source(${AOTRITON_NOIMAGE_MODE})
       if(NOT USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS)
-        # aotriton_download_runtime()
         set(__AOTRITON_CHAINED_IMAGE "aotriton_external")
         foreach(image ${__AOTRITON_IMAGE_LIST})
           string(SUBSTRING ${image} 7 -1 gfx_pattern)
