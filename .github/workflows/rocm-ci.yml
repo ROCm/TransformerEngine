@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -102,20 +102,10 @@ jobs:
             -e GPU_ARCH=${{ steps.gpu-arch.outputs.arch }} \
             te-runner bash -c "$(cat <<'EOF'
           set -ex
-          apt-get update && apt-get install -y build-essential
-          CMAKE_LINK="https://github.com/Kitware/CMake/releases/download/v3.31.2/cmake-3.31.2-linux-x86_64.sh"
-          wget -q -P /opt $CMAKE_LINK
-          chmod +x /opt/cmake-*.sh
-          mkdir -p /opt/cmake
-          bash /opt/cmake-*.sh --skip-license --prefix=/opt/cmake
-          ln -sf /opt/cmake/bin/* /usr/bin/ || true
           
           export HIP_PATH=""
-          export PATH=/opt/cmake/bin:$PATH
           export PYTORCH_ROCM_ARCH=$GPU_ARCH
           export NVTE_ROCM_ARCH=$GPU_ARCH
-          pip install --upgrade pip
-          pip install ninja
           pip wheel . -v -w /workspace/dist
           pip install /workspace/dist/*.whl
           EOF
