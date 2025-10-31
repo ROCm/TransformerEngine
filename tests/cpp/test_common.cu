@@ -714,6 +714,74 @@ void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, 
   }
 }
 
+#ifdef __HIP_PLATFORM_AMD__
+void compare_e8m0_scaling_factors(const std::string &name, Tensor &output, const uint8_t *ref,
+                             const size_t row_blocks, const size_t col_blocks, const size_t stride, 
+                             double tol, bool rowwise, std::vector<std::tuple<size_t, size_t, int>> &mismatch_idx) {
+  const uint8_t *const test = rowwise ? output.rowwise_cpu_scale_inv_ptr<fp8e8m0>()
+                                       : output.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
+
+  const float scale_tol = std::max(1.f, row_blocks * col_blocks * tol);
+
+  for (int i = 0; i < row_blocks; i++) {
+    for (int j = 0; j < col_blocks; j++) {
+      const int idx = i * stride + j;
+      if (test[idx] != ref[idx]) {
+        int t_scale = static_cast<int>(test[idx]);
+        int r_scale = static_cast<int>(ref[idx]);
+        if (std::abs(t_scale - r_scale) == 1) {
+          mismatch_idx.emplace_back(i, j, r_scale-t_scale);
+        } else {
+          GTEST_FAIL() << "Error in " << name << std::endl
+          << "Mismatch: " << t_scale << " vs "
+          << r_scale << " at index " << idx;
+        }
+      }
+    }
+  }
+  const size_t scale_mismatches = mismatch_idx.size();
+
+  ASSERT_FALSE(scale_mismatches > scale_tol) 
+  << "Error in " << name << std::endl << std::setprecision(4)
+  << "Total scale mismatches: " << scale_mismatches << " (" << 100.*(double)scale_mismatches/(double)(row_blocks*col_blocks)
+  << "%) Exceeds tolerance of " << scale_tol << " (" << 100.*tol <<  "%) mismatches";
+
+  if (scale_mismatches) {
+    std::cout << "\x1b[33mWARNING:\x1b[0m " << scale_mismatches 
+    << " scale mismatches were found. This does not imply an accuracy issue." << std::endl;
+    }
+}
+
+void adjust_ref(std::vector<std::tuple<size_t, size_t, int>> mismatch_idx, void *ref, const size_t row_blocks,
+                const size_t col_blocks, const size_t rows, const size_t cols, DType otype) {
+  TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY( otype, T,
+    T *ref_data = reinterpret_cast<T*>(ref);
+    double scale_val;
+    const size_t col_blocks_size = cols / col_blocks;
+    const size_t row_blocks_size = rows / row_blocks;
+    for (const auto &[i, j, scale_diff] : mismatch_idx) {
+      if (scale_diff == 1) {
+        scale_val = 2.;
+      } else if (scale_diff == -1) {
+        scale_val = .5;
+      } else { // Shouldn't ever reach this
+        GTEST_FAIL() << "Error in adjust_ref, |scale_diff| > 1";
+      }
+      size_t ii_min = i * row_blocks_size;
+      const size_t ii_max = std::min(ii_min + row_blocks_size, rows);
+      for (; ii_min < ii_max; ii_min++) {
+        size_t jj_min = j * col_blocks_size;
+        const size_t jj_max = std::min(jj_min + col_blocks_size, cols);
+        for (; jj_min < jj_max; jj_min++) {
+          const size_t data_idx = ii_min * cols + jj_min;
+          ref_data[data_idx] = static_cast<T>(static_cast<double>(ref_data[data_idx]) * scale_val);
+        }
+      }
+    }
+  ); // NOLINT(*)
+}
+#endif // #ifdef __HIP_PLATFORM_AMD__
+
 std::pair<double, double> getTolerances(const DType type) {
   switch(type) {
     case DType::kFloat32:
