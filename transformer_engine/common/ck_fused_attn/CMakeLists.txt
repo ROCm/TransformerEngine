@@ -28,6 +28,13 @@ foreach(CK_TARGET_ARCH IN LISTS CMAKE_HIP_ARCHITECTURES)
 endforeach()
 message(STATUS "AITER V3_ASM_ARCHS: ${V3_ASM_ARCHS}")
 
+# Skip if no supported V3 ASM architectures found
+if(NOT V3_ASM_ARCHS)
+  message(WARNING "No supported V3 ASM architectures found. Skipping ck_fused_attn build.")
+  set(CK_FUSED_ATTN_BUILT FALSE PARENT_SCOPE)
+  return()
+endif()
+
 # pass GPU_TARGET as env into aiter codegen
 list(JOIN V3_ASM_ARCHS ";" V3_ASM_ARCHS_STR)
 set(ENV{GPU_ARCHS} "${V3_ASM_ARCHS_STR}")
@@ -112,4 +119,7 @@ foreach(ARCH IN LISTS V3_ASM_ARCHS)
         DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib/aiter/${ARCH}/
         PATTERN "codegen.py" EXCLUDE)
 endforeach()
+
+# Signal successful build to parent scope
+set(CK_FUSED_ATTN_BUILT TRUE PARENT_SCOPE)
 
