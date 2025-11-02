@@ -12,21 +12,18 @@
 #include <vector>
 #include <array>
 #include <random>
-#include <cudaTypedefs.h>
-#define FP4_TYPE_SUPPORTED (CUDA_VERSION >= 12080)
 
 #ifndef USE_ROCM
+#define FP4_TYPE_SUPPORTED (CUDA_VERSION >= 12080)
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
-<<<<<<< HEAD
-#else
-#include <hip/hip_bfloat16.h>
-#include "amd_detail/hip_float8.h"
-#include <gtest/gtest.h>
-=======
 #if FP4_TYPE_SUPPORTED
 #include <cuda_fp4.h>
->>>>>>> ca7407e
+#endif
+#else
+#define FP4_TYPE_SUPPORTED (false)
+#include <hip/hip_bfloat16.h>
+#include "amd_detail/hip_float8.h"
 #endif
 #include <cuda_runtime_api.h>
 

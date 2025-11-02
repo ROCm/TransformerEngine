@@ -369,25 +369,15 @@ void Tensor::to_cpu() const {
     auto [rowwise_scale_meta, colwise_scale_meta] =
         get_scales(s, tensor_.scaling_mode());
     if (rowwise_) {
-<<<<<<< HEAD
-      auto scale_size = product(rowwise_scale_meta.shape) * rowwise_scale_meta.type_size;
-      (void)cudaMemcpy(rowwise_scale_inv_cpu_data_.get(),
-=======
       auto scale_size = rowwise_scale_meta.bytes();
-      cudaMemcpy(rowwise_scale_inv_cpu_data_.get(),
->>>>>>> ca7407e
+      (void)cudaMemcpy(rowwise_scale_inv_cpu_data_.get(),
                  tensor_.get_rowwise_scale_inv().data_ptr,
                  scale_size,
                  cudaMemcpyDeviceToHost);
     }
     if (columnwise_) {
-<<<<<<< HEAD
-      auto scale_size = product(colwise_scale_meta.shape) * colwise_scale_meta.type_size;
-      (void)cudaMemcpy(columnwise_scale_inv_cpu_data_.get(),
-=======
       auto scale_size = colwise_scale_meta.bytes();
-      cudaMemcpy(columnwise_scale_inv_cpu_data_.get(),
->>>>>>> ca7407e
+      (void)cudaMemcpy(columnwise_scale_inv_cpu_data_.get(),
                  tensor_.get_columnwise_scale_inv().data_ptr,
                  scale_size,
                  cudaMemcpyDeviceToHost);
@@ -399,58 +389,31 @@ void Tensor::from_cpu() const {
   const NVTEShape s = tensor_.shape();
   const size_t size = bytes(s, tensor_.dtype());
   if (rowwise_) {
-<<<<<<< HEAD
-    (void)cudaMemcpy(tensor_.get_rowwise_data().data_ptr,
-               cpu_data_rowwise_.get(), size, cudaMemcpyHostToDevice);
-  }
-  if (columnwise_) {
-    (void)cudaMemcpy(tensor_.get_columnwise_data().data_ptr,
-               cpu_data_columnwise_.get(), size, cudaMemcpyHostToDevice);
-=======
-    cudaMemcpy(tensor_.get_rowwise_data().data_ptr, cpu_data_rowwise_.get(), size,
+    (void)cudaMemcpy(tensor_.get_rowwise_data().data_ptr, cpu_data_rowwise_.get(), size,
                cudaMemcpyHostToDevice);
   }
   if (columnwise_) {
-    cudaMemcpy(tensor_.get_columnwise_data().data_ptr, cpu_data_columnwise_.get(), size,
+    (void)cudaMemcpy(tensor_.get_columnwise_data().data_ptr, cpu_data_columnwise_.get(), size,
                cudaMemcpyHostToDevice);
->>>>>>> ca7407e
   }
   if (isFp8Type(dtype())) {
     if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
       if (tensor_.amax() != nullptr){
-<<<<<<< HEAD
-        (void)cudaMemcpy(tensor_.amax(), amax_cpu_data_.get(), sizeof(float),
-                  cudaMemcpyHostToDevice);
+        (void)cudaMemcpy(tensor_.amax(), amax_cpu_data_.get(), sizeof(float), cudaMemcpyHostToDevice);
       }
-      (void)cudaMemcpy(tensor_.scale(), scale_cpu_data_.get(), sizeof(float),
-                 cudaMemcpyHostToDevice);
-=======
-        cudaMemcpy(tensor_.amax(), amax_cpu_data_.get(), sizeof(float), cudaMemcpyHostToDevice);
-      }
-      cudaMemcpy(tensor_.scale(), scale_cpu_data_.get(), sizeof(float), cudaMemcpyHostToDevice);
->>>>>>> ca7407e
+      (void)cudaMemcpy(tensor_.scale(), scale_cpu_data_.get(), sizeof(float), cudaMemcpyHostToDevice);
     }
     auto [rowwise_scale_meta, colwise_scale_meta] =
         get_scales(s, tensor_.scaling_mode());
     if (rowwise_) {
-<<<<<<< HEAD
-      auto scale_size = product(rowwise_scale_meta.shape) * rowwise_scale_meta.type_size;
-      (void)cudaMemcpy(tensor_.get_rowwise_scale_inv().data_ptr,
-=======
       auto scale_size = rowwise_scale_meta.bytes();
-      cudaMemcpy(tensor_.get_rowwise_scale_inv().data_ptr,
->>>>>>> ca7407e
+      (void)cudaMemcpy(tensor_.get_rowwise_scale_inv().data_ptr,
                  rowwise_scale_inv_cpu_data_.get(), scale_size,
                  cudaMemcpyHostToDevice);
     }
     if (columnwise_) {
-<<<<<<< HEAD
-      auto scale_size = product(colwise_scale_meta.shape) * colwise_scale_meta.type_size;
-      (void)cudaMemcpy(tensor_.get_columnwise_scale_inv().data_ptr,
-=======
       auto scale_size = colwise_scale_meta.bytes();
-      cudaMemcpy(tensor_.get_columnwise_scale_inv().data_ptr,
->>>>>>> ca7407e
+      (void)cudaMemcpy(tensor_.get_columnwise_scale_inv().data_ptr,
                  columnwise_scale_inv_cpu_data_.get(), scale_size,
                  cudaMemcpyHostToDevice);
     }
@@ -819,15 +782,14 @@ std::pair<double, double> getTolerances(const DType type) {
 
 template <typename T>
 void generate_data_uniformly(T* data, const size_t size, std::mt19937* gen) {
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_AMD__
   // TODO: Introduce a parallel RNG library (Random123, PCG, rocRAND)
   std::uniform_real_distribution<> dis(-2.0, 1.0);
   for (int i = 0; i < size; i++) {
     data[i] = static_cast<T>(dis(*gen));
   }
+  gen->discard(size);
 #else
-=======
   // Check how many RNG calls are required to generate one uniform random value
   int rng_calls_per_val = 0;
   {
@@ -841,7 +803,6 @@ void generate_data_uniformly(T* data, const size_t size, std::mt19937* gen) {
   }
 
   // Generate uniform random values in parallel
->>>>>>> ca7407e
   #pragma omp parallel proc_bind(spread)
   {
     std::mt19937 gen_local = *gen;
@@ -857,12 +818,8 @@ void generate_data_uniformly(T* data, const size_t size, std::mt19937* gen) {
       data[i] = static_cast<T>(dis(gen_local));
     }
   }
-<<<<<<< HEAD
-#endif
-  gen->discard(size);
-=======
   gen->discard(size * rng_calls_per_val);
->>>>>>> ca7407e
+#endif
 }
 
 void fillUniform(Tensor *t) {

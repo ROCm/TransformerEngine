@@ -73,8 +73,12 @@ inline auto compute_gamma(InputType gamma, const bool zero_centered_gamma, const
   // Remove the use_cudnn check here when it is supported by both backends.
   const bool zero_centered_gamma_in_weight_dtype = use_cudnn && cudnn_zero_centered_gamma_in_weight_dtype;
 
+#ifdef __HIP_PLATFORM_AMD__
+  if constexpr (std::is_same_v<InputType, fp8e5m2> || std::is_same_v<InputType, fp8e4m3>){
+#else
   if constexpr (std::is_same_v<InputType, fp8e5m2> || std::is_same_v<InputType, fp8e4m3> ||
                 std::is_same_v<InputType, fp4e2m1>){
+#endif
     compute_t g = static_cast<compute_t>(gamma);
     if (zero_centered_gamma) {
       g += static_cast<compute_t>(1.f);
