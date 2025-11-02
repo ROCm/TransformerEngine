@@ -28,15 +28,11 @@ from transformer_engine.pytorch.ops.fused import (
     ForwardLinearBiasAdd,
 )
 from transformer_engine.pytorch.tensor import QuantizedTensor
-<<<<<<< HEAD
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
-=======
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Tensor,
     Float8CurrentScalingQuantizer,
     Float8Quantizer,
 )
->>>>>>> ca7407e
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine_torch as tex
@@ -1296,6 +1292,7 @@ class TestBasicOps:
             tols = dtype_tols(y_test._quantizer.dtype)
             expected_tensor_cls = {
                 Float8Quantizer:Float8Tensor,
+                Float8CurrentScalingQuantizer:Float8Tensor,
                 MXFP8Quantizer:MXFP8Tensor
             }[type(y_test._quantizer)]
             assert isinstance(y_test, expected_tensor_cls)

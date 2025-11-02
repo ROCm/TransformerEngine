@@ -302,6 +302,7 @@ def test_dot_product_mem_calc():
         qkv_layout=qkv_layout,
         window_size=config.window_size,
         pad_between_seqs=pad_between_seqs,
+        is_training=is_training,
     )
     if FusedAttnBackend["CK"] not in fused_attn_backends:
         pytest.skip("This test requires the CK fused attention backend.")
@@ -395,10 +396,7 @@ def test_dot_product_attention(
     if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
         pytest.skip("Less than two backends to compare.")
 
-<<<<<<< HEAD
     is_training = config.head_dim_qk <= 192 and config.head_dim_v <= 128
-=======
->>>>>>> ca7407e
     # UnfusedDotProductAttention backend
     if unfused_attn_supported:
         unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
@@ -530,18 +528,15 @@ model_configs_mla = {
     "mla_3_1": ModelConfig(
         8, 16, 16, 256, 1, 2048, 0.0, "no_mask", "no_bias", head_dim_v=128
     ),  # inference
-<<<<<<< HEAD
+    "mla_3_2": ModelConfig(
+        8, 16, 16, 192, 1, 2048, 0.0, "no_mask", "no_bias", head_dim_v=128
+    ),  # inference
     "mla_4_0": ModelConfig(
         10, 16, 16, 192, 4096, 4096, 0.0, "causal", "no_bias", head_dim_v=128
     ),
     "mla_4_1": ModelConfig(
         10, 16, 16, 192, 4096, 4096, 0.0, "no_mask", "no_bias", head_dim_v=128
     ),
-=======
-    "mla_3_2": ModelConfig(
-        8, 16, 16, 192, 1, 2048, 0.0, "no_mask", "no_bias", head_dim_v=128
-    ),  # inference
->>>>>>> ca7407e
 }
 
 
@@ -1317,24 +1312,15 @@ def test_transformer_layer(
     tols = dict(atol=5e-2, rtol=5e-2)
     workspace_opt = True
 
-    qkv_layout="sbh3d" if fused_qkv_params else "sb3hd"
-    # override the qkv_layout in mqa gqa mode in ROCm TE
-    if IS_HIP_EXTENSION and model_configs[model].num_gqa_groups != model_configs[model].num_heads:
-        qkv_layout = "sbhd_sbhd_sbhd"
-
     # Test backend availability
     is_training = True
     available_backends, _, fused_attn_backends = _get_attention_backends(
         config,
         qkv_dtype=dtype,
-<<<<<<< HEAD
-        qkv_layout=qkv_layout,
-=======
         qkv_layout=(
             qkv_format.replace("hd", "h3d") if fused_qkv_params else qkv_format.replace("hd", "3hd")
         ),
         is_training=is_training,
->>>>>>> ca7407e
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
     if not fused_attn_supported:

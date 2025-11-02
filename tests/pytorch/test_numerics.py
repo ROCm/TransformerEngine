@@ -2546,17 +2546,14 @@ def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
 def test_gpt_cuda_graph(dtype, bs, model):
-<<<<<<< HEAD
     if IS_HIP_EXTENSION:
         if dtype not in (torch.float32,):
             use_fa, use_aotriton, use_ck = rocm_attn_backend()
             if use_fa:
                 pytest.skip(f"ROCm flash attention does not support cuda graph with {dtype}")
 
-=======
     if NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("Cuda Graphs are not supported in debug mode.")
->>>>>>> ca7407e
     config = model_configs[model]
 
     sigma = 0.023

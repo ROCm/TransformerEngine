@@ -22,13 +22,10 @@ from transformer_engine.pytorch.fp8 import (
 )
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 import transformer_engine.pytorch.ops as te_ops
-<<<<<<< HEAD
 from transformer_engine.pytorch.utils import is_fp8_fnuz
-=======
 from transformer_engine.pytorch import Linear, LayerNormLinear, LayerNormMLP, GroupedLinear
 from transformer_engine.pytorch.distributed import fp8_autocast
 from transformer_engine.common.recipe import DelayedScaling, Float8BlockScaling, MXFP8BlockScaling
->>>>>>> ca7407e
 import transformer_engine_torch as tex
 
 # Check if FP8 is supported
