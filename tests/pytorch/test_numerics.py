@@ -753,15 +753,12 @@ def test_gpt_full_activation_recompute(
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-<<<<<<< HEAD
     if IS_HIP_EXTENSION:
         use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
         if fp8 and recipe.float8_current_scaling() and use_cast_transpose_triton:
             pytest.skip("Float8 Current Scaling unsupported for full recompute.")
-=======
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
->>>>>>> ca7407e
     if recipe.float8_block_scaling() and not fp8_block_scaling_available:
         pytest.skip(reason_for_no_fp8_block_scaling)
 
@@ -2556,17 +2553,14 @@ def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
 def test_gpt_cuda_graph(dtype, bs, model):
-<<<<<<< HEAD
     if IS_HIP_EXTENSION:
         if dtype not in (torch.float32,):
             use_fa, use_aotriton, use_ck = rocm_attn_backend()
             if use_fa:
                 pytest.skip(f"ROCm flash attention does not support cuda graph with {dtype}")
 
-=======
     if NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("Cuda Graphs are not supported in debug mode.")
->>>>>>> ca7407e
     config = model_configs[model]
 
     sigma = 0.023

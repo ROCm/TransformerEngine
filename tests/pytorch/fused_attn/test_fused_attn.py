@@ -302,6 +302,7 @@ def test_dot_product_mem_calc():
         qkv_layout=qkv_layout,
         window_size=config.window_size,
         pad_between_seqs=pad_between_seqs,
+        is_training=is_training,
     )
     if FusedAttnBackend["CK"] not in fused_attn_backends:
         pytest.skip("This test requires the CK fused attention backend.")
@@ -1304,24 +1305,15 @@ def test_transformer_layer(
     tols = dict(atol=5e-2, rtol=5e-2)
     workspace_opt = True
 
-    qkv_layout="sbh3d" if fused_qkv_params else "sb3hd"
-    # override the qkv_layout in mqa gqa mode in ROCm TE
-    if IS_HIP_EXTENSION and model_configs[model].num_gqa_groups != model_configs[model].num_heads:
-        qkv_layout = "sbhd_sbhd_sbhd"
-
     # Test backend availability
     is_training = True
     available_backends, _, fused_attn_backends = _get_attention_backends(
         config,
         qkv_dtype=dtype,
-<<<<<<< HEAD
-        qkv_layout=qkv_layout,
-=======
         qkv_layout=(
             qkv_format.replace("hd", "h3d") if fused_qkv_params else qkv_format.replace("hd", "3hd")
         ),
         is_training=is_training,
->>>>>>> ca7407e
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
     if not fused_attn_supported:

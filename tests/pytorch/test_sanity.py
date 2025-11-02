@@ -713,14 +713,11 @@ def test_sanity_gpt(
     parallel_attention_mlp,
     cpu_offload,
 ):
-<<<<<<< HEAD
     if IS_HIP_EXTENSION and cpu_offload:
       pytest.skip("cpu_offloading not supported in rocm TE")
 
-=======
     if cpu_offload and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("CPU offload is not supported in debug mode.")
->>>>>>> ca7407e
     config = model_configs[model]
 
     if fp8_recipe is not None:

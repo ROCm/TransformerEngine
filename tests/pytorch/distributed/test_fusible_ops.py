@@ -11,6 +11,7 @@ from collections.abc import Iterable
 import functools
 import itertools
 import os
+import pathlib
 import subprocess
 import sys
 from typing import Optional
@@ -29,14 +30,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
 )
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 import transformer_engine.pytorch.ops as te_ops
-<<<<<<< HEAD
-from transformer_engine.pytorch.ops._common import is_float8_tensor
 from transformer_engine.pytorch.utils import is_bf16_compatible, is_fp8_fnuz
-import transformer_engine_torch as tex
-
-# Check if FP8 is supported
-=======
-from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine_torch as tex
 
 # Import utility functions
@@ -46,7 +40,6 @@ from utils import dtype_tols, make_recipe
 
 
 # Check what quantization schemes are supported
->>>>>>> ca7407e
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 quantization_list: list[Optional[str]] = [None]
@@ -828,6 +821,7 @@ if torch.cuda.device_count() >= 2 and 2 not in _world_sizes:
 @pytest.mark.parametrize("world_size", _world_sizes)
 def test_distributed_fuser_ops(world_size: int) -> None:
     """Launch parallel job that runs parallel tests"""
+    #TODO: find out why cannot align the following two lines with NV upstream
     python_exe = sys.executable
     current_file = os.path.abspath(__file__)
     command = [
