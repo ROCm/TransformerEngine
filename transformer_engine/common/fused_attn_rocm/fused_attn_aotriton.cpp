@@ -325,20 +325,6 @@ void fused_attn_aotriton_fwd_impl(
   NVTE_CHECK_CUDA(attn_fwd(fwd_params, fwd_params.kVersion, stream));
 }
 
-// A thin conversion wrapper around eager tensor-views to lazy tensors
-template<int Rank = 4>
-struct LazyTensorContext {
-  aotriton::TensorView<Rank> tensor_view;
-};
-template<int kRank>
-struct LazyTensorFunctions {
-  static aotriton::TensorView<kRank> acquire(void* cookie) {
-    return static_cast<LazyTensorContext<kRank>*>(cookie)->tensor_view;
-  }
-  static void dispose(void* cookie) {
-  }
-};
-
 void fused_attn_aotriton_bwd_impl(
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d,
   float scaling_factor, float dropout_probability, 
