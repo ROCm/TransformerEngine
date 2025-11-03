@@ -51,6 +51,9 @@ void scale_block(const ProcessingMethod processing_method,
                  const size_t j_min,
                  const size_t j_max,
                  const size_t cols) {
+#ifdef __HIP_PLATFORM_AMD__
+    using std::isnan, std::isinf;
+#endif
     float amax = 0.0f;
 
     // Find the absolute maximum value in the block
@@ -71,17 +74,10 @@ void scale_block(const ProcessingMethod processing_method,
                 elt *= static_cast<float>(grad[idx]);
             }
             dbias[j] += elt;
-#ifndef __HIP_PLATFORM_AMD__
             if (isinf(elt) || isnan(elt)) {
                 continue;
             }
             amax = std::max(amax, std::abs(elt));
-#else // #ifdef __HIP_PLATFORM_AMD__
-            if (std::isinf(elt) || std::isnan(elt)) {
-                continue;
-            }
-            amax = fmaxf(amax, fabsf(elt));
-#endif // #ifdef __HIP_PLATFORM_AMD__
         }
     }
 
