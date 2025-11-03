@@ -107,7 +107,7 @@ function(create_upload_files)
 
   # Compute SHA256
   file(SHA256 "${OUTPUT_TGZ}" ARCHIVE_HASH)
-  file(WRITE "${OUTPUT_SHA}" "${ARCHIVE_HASH}\n")
+  file(WRITE "${OUTPUT_SHA}" "${ARCHIVE_HASH}")
   message(STATUS "[AITER-PREBUILT] tgz and sha256 files generated successfully:")
   message(STATUS "  ${OUTPUT_TGZ}")
   message(STATUS "  ${OUTPUT_SHA}")
