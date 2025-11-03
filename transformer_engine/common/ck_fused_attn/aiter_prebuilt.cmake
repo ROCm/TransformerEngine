@@ -16,8 +16,11 @@ string(REGEX MATCH "^[0-9]+\\.[0-9]+" ROCM_VER "${ROCM_VER_CONTENT}")
 
 # AITER commit
 execute_process(
-  COMMAND git -C "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/aiter" rev-parse HEAD
-  OUTPUT_VARIABLE AITER_SHA OUTPUT_STRIP_TRAILING_WHITESPACE
+  COMMAND git -c safe.directory=${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/aiter
+          -C ${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/aiter
+          rev-parse HEAD
+  OUTPUT_VARIABLE AITER_SHA
+  OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 
 # Cache key & local paths
