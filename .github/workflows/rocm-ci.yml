@@ -63,7 +63,7 @@ jobs:
         with:
           username: ${{ secrets.ARTIFACTORY_USER }}
           password: ${{ secrets.ARTIFACTORY_PAT }}
-      
+
       - name: Pull and Save Docker Image
         run: |
           docker pull ${{ steps.select-image.outputs.image-tag }}
@@ -143,7 +143,7 @@ jobs:
           test $torch_rc -eq 0 -a $jax_rc -eq 0 -a $core_rc -eq 0
           EOF
           )"
-      
+
       - name: Run mGPU tests
         run: |
           docker exec te-runner bash -c "$(cat <<'EOF'
