@@ -37,6 +37,14 @@ jobs:
           echo "Testing connection to registry-sc-harbor.amd.com..."
           openssl s_client -showcerts -connect registry-sc-harbor.amd.com:443 < /dev/null
 
+      - name: Debug Registry Connection with cURL
+        id: curl_test
+        continue-on-error: true
+        run: |
+          echo "Testing connection to registry-sc-harbor.amd.com with cURL..."
+          # The -v flag gives verbose output, including the TLS handshake
+          curl -v https://registry-sc-harbor.amd.com/v2/
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
