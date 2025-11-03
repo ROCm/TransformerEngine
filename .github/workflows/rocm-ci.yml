@@ -32,6 +32,11 @@ jobs:
     timeout-minutes: 720
     runs-on: [linux-mi325-4]
     steps:
+      - name: Debug Registry SSL Certificate
+        run: |
+          echo "Testing connection to registry-sc-harbor.amd.com..."
+          openssl s_client -showcerts -connect registry-sc-harbor.amd.com:443 < /dev/null
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
