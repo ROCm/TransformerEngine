@@ -30,7 +30,7 @@ jobs:
   build_and_test:
     name: Build and Test on GPU
     timeout-minutes: 720
-    runs-on: [linux-mi308-4]
+    runs-on: [linux-325-4]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
