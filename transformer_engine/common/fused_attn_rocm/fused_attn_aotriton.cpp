@@ -37,9 +37,9 @@ inline aotriton::TensorView<0> mk_aoscalartensor(const uint64_t* ptr)
 namespace transformer_engine {
 namespace fused_attn_rocm {
 
-  std::tuple<int, int> get_window_sizes(int window_size_left, int window_size_right, bool is_causal){
-  int window_left = 0;
-  int window_right = 0;
+  std::tuple<int32_t, int32_t> get_window_sizes(int32_t window_size_left, int32_t window_size_right, bool is_causal){
+  int32_t window_left = 0;
+  int32_t window_right = 0;
   using aotriton::v3::flash::WindowValue;
   if (is_causal) {
     window_left = WindowValue::BottomRightAligned;
@@ -141,7 +141,7 @@ aotriton::DType nvte_to_aotriton_dtype(DType t_dtype){
 void fused_attn_aotriton_fwd_impl(
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d,
   bool is_training, float scaling_factor, float dropout_probability,
-  int window_size_left, int window_size_right, NVTE_QKV_Layout layout,
+  int32_t window_size_left, int32_t window_size_right, NVTE_QKV_Layout layout,
   NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
   void *devPtrQ, void *devPtrK, void *devPtrV, 
   void *devPtrSoftmaxAux, void *devPtrO,
