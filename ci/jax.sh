@@ -78,6 +78,7 @@ run_test_config_mgpu() {
     *)
         # Workaround for distributed tests hang with xla_flag
         XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false" run 3 test_distributed_fused_attn.py
+        XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false" NVTE_CK_USES_FWD_V3=1 NVTE_CK_USES_BWD_V3=1 run 3 test_distributed_fused_attn.py
         ;;
     esac
     

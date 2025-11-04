@@ -94,6 +94,7 @@ run_test_config_mgpu(){
         run 3 distributed/test_numerics.py
         run 3 distributed/test_torch_fsdp2.py
         run 3 fused_attn/test_fused_attn_with_cp.py
+        NVTE_CK_USES_FWD_V3=1 NVTE_CK_USES_BWD_V3=1 run 3 fused_attn/test_fused_attn_with_cp.py
     fi
 }
 
