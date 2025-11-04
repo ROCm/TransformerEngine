@@ -70,6 +70,20 @@ bool get_pad_between_seqs(
   return pad_between_seqs;
 }
 
+std::tuple<int, int> get_window_sizes(int window_size_left, int window_size_right, bool is_causal){
+  int window_left = 0;
+  int window_right = 0;
+  using aotriton::v3::flash::WindowValue;
+  if (is_causal) {
+    window_left = WindowValue::BottomRightAligned;
+    window_right = WindowValue::BottomRightAligned;
+  } else if (window_size_left>0 || window_size_right>0) {
+    window_left = (window_size_left>0)? window_size_left:window_left;
+    window_right = (window_size_right>0)? window_size_right:window_right;
+  }
+  return {window_left, window_right};
+}
+
 // check the fused attn config to see whether it's aotriton backend supported
 bool is_aotriton_backend_supported(
   NVTEDType q_dtype,
@@ -231,27 +245,14 @@ void fused_attn_aotriton_fwd_impl(
   auto offset_output = mk_aoscalartensor(nullptr);
   const auto is_causal = mask_type == NVTE_CAUSAL_MASK;
   aotriton::TensorView<0> atomic_for_causal(reinterpret_cast<intptr_t>(workspace), aotriton::DType::kInt32);
-  int8_t varlen_type = 0;
-  auto qkv_format = nvte_get_qkv_format(layout);
-  if(pad_between_seqs){
-    varlen_type = 2;
-  }else if(qkv_format == NVTE_QKV_Format::NVTE_THD){
-    varlen_type = 1;
-  }
 
-  int window_left = 0;
-  int window_right = 0;
-  using aotriton::v3::flash::WindowValue;
-  if (is_causal) {
-    window_left = WindowValue::BottomRightAligned;
-    window_right = WindowValue::BottomRightAligned;
-  }
-  if (window_size_left>0 || window_size_right>0) {
-    window_left = (window_size_left>0)? window_size_left:window_left;
-    window_right = (window_size_right>0)? window_size_right:window_right;
-  }
+  using aotriton::v3::flash::VarlenType;
+  int8_t varlen_type = VarlenType::None;
+
+  auto [window_left, window_right] = get_window_sizes(window_size_left, window_size_right, is_causal);
   using aotriton::v3::flash::CausalType;
   int8_t causal_type = is_causal ? CausalType::WindowedAttention : CausalType::None;
+
   if (nvte_log_aotriton_config) {
     std::cout<<std::endl<<"attn_fwd(aotriton): ";
     std::cout<<"q_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d<<"), ";
@@ -438,7 +439,7 @@ using namespace transformer_engine::fused_attn_rocm;
 void fused_attn_aotriton_fwd_qkvpacked(
   size_t b, size_t h, size_t max_seqlen, size_t d,
   bool is_training, float attn_scale, float dropout, 
-  uint64_t window_left, uint64_t window_right,
+  int32_t window_left, int32_t window_right,
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   const Tensor* input_QKV,
   Tensor* output_O, NVTETensorPack *Aux_CTX_Tensors,
@@ -601,7 +602,7 @@ void fused_attn_aotriton_bwd_qkvpacked(
 void fused_attn_aotriton_fwd_kvpacked(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
   bool is_training, float attn_scale, float dropout, 
-  uint64_t window_left, uint64_t window_right,
+  int32_t window_left, int32_t window_right,
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   const Tensor* input_Q, const Tensor* input_KV,
   Tensor* output_O, NVTETensorPack *Aux_CTX_Tensors,
@@ -767,7 +768,7 @@ void fused_attn_aotriton_bwd_kvpacked(
 void fused_attn_aotriton_fwd(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
   bool is_training, float attn_scale, float dropout, 
-  uint64_t window_left, uint64_t window_right,
+  int32_t window_left, int32_t window_right,
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V,
   Tensor* output_O, NVTETensorPack *Aux_CTX_Tensors,

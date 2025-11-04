@@ -35,7 +35,7 @@ bool is_aotriton_backend_supported(
 void fused_attn_aotriton_fwd_qkvpacked(
   size_t b, size_t h, size_t max_seqlen, size_t d,
   bool is_training, float attn_scale, float dropout, 
-  uint64_t window_left, uint64_t window_right,
+  int32_t window_left, int32_t window_right,
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   const Tensor* input_QKV,
   Tensor* output_O, NVTETensorPack *Aux_CTX_Tensors,
@@ -59,7 +59,7 @@ void fused_attn_aotriton_bwd_qkvpacked(
 void fused_attn_aotriton_fwd_kvpacked(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
   bool is_training, float attn_scale, float dropout, 
-  uint64_t window_left, uint64_t window_right,
+  int32_t window_left, int32_t window_right,
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   const Tensor* input_Q, const Tensor* input_KV,
   Tensor* output_O, NVTETensorPack *Aux_CTX_Tensors,
@@ -85,7 +85,7 @@ void fused_attn_aotriton_bwd_kvpacked(
 void fused_attn_aotriton_fwd(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
   bool is_training, float attn_scale, float dropout, 
-  uint64_t window_left, uint64_t window_right,
+  int32_t window_left, int32_t window_right,
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V,
   Tensor* output_O, NVTETensorPack *Aux_CTX_Tensors,

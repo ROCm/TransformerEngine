@@ -278,11 +278,15 @@ else()
   set(GPU_TARGETS ${CMAKE_HIP_ARCHITECTURES})
 
   if(USE_FUSED_ATTN_AOTRITON)
+    # The AOTriton C++ runtime will be built from ../../3rdparty/aotriton
+    # Hence there is no need to add multiple ROCM version here
 
     set(__AOTRITON_INSTALL_DIR "${CMAKE_CURRENT_BINARY_DIR}/aotriton")
     set(__AOTRITON_SUFFIX "_TEprivate")
   
     if(NOT DEFINED AOTRITON_PATH)
+      # If AOTRITON_PATH is not provided, we proceed to build the runtime
+      # ourselves and either build or download the GPU kernels
       if(USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS)
         set(AOTRITON_NOIMAGE_MODE OFF)
       else()
@@ -290,9 +294,6 @@ else()
       endif()
 
       set(__AOTRITON_VER "0.11b")
-      set(__AOTRITON_SHA256
-          "a2a974e0ad929a5e5827c0f896c59bda4872459cbaf8dd8e0a00407f404491cf"  # rocm7.0
-          )
       set(__AOTRITON_IMAGE_LIST
           "amd-gfx942"
           "amd-gfx950"
@@ -303,10 +304,9 @@ else()
         )
       set(__AOTRITON_BASE_URL "https://github.com/ROCm/aotriton/releases/download/")  # @lint-ignore
       set(__AOTRITON_Z "gz")
-      # Set the default __AOTRITON_LIB path
-      set(__AOTRITON_LIB "lib/libaotriton_v2.so")
       include(ExternalProject)
 
+      # Download GPU kernels for a specific target
       function(aotriton_download_image image project)
         list(FIND __AOTRITON_IMAGE_LIST ${image} index)
         list(GET __AOTRITON_IMAGE_SHA256_LIST ${index} __AOTRITON_IMAGE_SHA256)
@@ -338,12 +338,9 @@ else()
         message(STATUS "Download AOTriton pre-compiled GPU images from ${__AOTRITON_URL}.")
       endfunction()
 
+      # Build the AOTriton runtime from source with custom suffix to avoid
+      # potential conflict with libaotriton as provided by PyTorch
       function(aotriton_build_from_source noimage)
-        if(noimage)
-          SET(RECURSIVE "OFF")
-        else()
-          SET(RECURSIVE "ON")
-        endif()
         message(STATUS "No-image mode: ${noimage}.")
         ExternalProject_Add(aotriton_external
           LIST_SEPARATOR ","
@@ -354,7 +351,7 @@ else()
           -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
           -DAOTRITON_NO_PYTHON=ON
           -DAOTRITON_NAME_SUFFIX=${__AOTRITON_SUFFIX}
-          -DAOTRITON_NOIMAGE_MODE=${AOTRITON_NOIMAGE_MODE}
+          -DAOTRITON_NOIMAGE_MODE=${noimage}
           BUILD_BYPRODUCTS "${__AOTRITON_INSTALL_DIR}/lib/libaotriton${__AOTRITON_SUFFIX}_v2.so"
         )
         message(STATUS "Adding AOTriton library.")
@@ -367,10 +364,13 @@ else()
                 PATTERN "cmake" EXCLUDE
         )
       endfunction()
-      string(REPLACE ";" "," ARCH_LIST_COMMA_STR "${CMAKE_HIP_ARCHITECTURES}")
+
       add_library(aotriton INTERFACE)
       message(STATUS "Building AOTriton from source.")
+      string(REPLACE ";" "," ARCH_LIST_COMMA_STR "${CMAKE_HIP_ARCHITECTURES}")
       aotriton_build_from_source(${AOTRITON_NOIMAGE_MODE})
+
+      # Download GPU kernels if needed
       if(NOT USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS)
         message(STATUS "Downloading AOTriton GPU Kernels.")
         set(__AOTRITON_CHAINED_IMAGE "aotriton_external")
@@ -390,7 +390,6 @@ else()
         endforeach()
       else()
       endif()
-
 
     else()
       # Use aotriton built during initial TE building/installation
