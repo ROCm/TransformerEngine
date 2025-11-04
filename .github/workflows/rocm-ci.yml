@@ -37,7 +37,7 @@ jobs:
           echo "Testing connection to registry-sc-harbor.amd.com..."
           openssl s_client -showcerts -connect registry-sc-harbor.amd.com:443 < /dev/null
 
-      - name: Debug Registry Connection with cURL
+      - name: Debug Registry Connection with cURL 
         id: curl_test
         continue-on-error: true
         run: |
