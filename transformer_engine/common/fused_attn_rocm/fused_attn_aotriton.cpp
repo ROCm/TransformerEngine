@@ -37,40 +37,7 @@ inline aotriton::TensorView<0> mk_aoscalartensor(const uint64_t* ptr)
 namespace transformer_engine {
 namespace fused_attn_rocm {
 
-bool get_pad_between_seqs(
-  const Tensor* input_cu_seqlens,
-  const Tensor* input_cu_seqlens_padded,
-  NVTE_QKV_Format qkv_format, NVTE_Mask_Type attn_mask_type
-){
-  bool is_ragged = qkv_format==NVTE_QKV_Format::NVTE_THD;
-  bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
-  // First we check whether we have a ragged array with a non-trivial
-  // input_cu_seqlens_padded tensor
-  bool pad_between_seqs = (
-    is_ragged
-    && input_cu_seqlens->data.dptr!=input_cu_seqlens_padded->data.dptr
-    && !input_cu_seqlens_padded->data.shape.empty()
-  );
-  // Next we guard against an initial workspace-allocation which occurs in the
-  // JAX TE extension. We check for both pointers being null while retaining
-  // shape data, indicating the use of dummy data in the allocation pass.
-  pad_between_seqs = pad_between_seqs || (
-    is_ragged
-    && input_cu_seqlens->data.dptr==nullptr && !input_cu_seqlens->data.shape.empty()
-    && input_cu_seqlens_padded->data.dptr==nullptr && !input_cu_seqlens_padded->data.shape.empty()
-  );
-  // Finally we check whether we have an array with padding and non-empty input_cu_seqlens
-  pad_between_seqs = pad_between_seqs || (
-    !is_ragged
-    && is_padding
-    && !input_cu_seqlens->data.shape.empty()
-  );
-  return pad_between_seqs;
-}
-
-std::tuple<int, int> get_window_sizes(int window_size_left, int window_size_right, bool is_causal){
+  std::tuple<int, int> get_window_sizes(int window_size_left, int window_size_right, bool is_causal){
   int window_left = 0;
   int window_right = 0;
   using aotriton::v3::flash::WindowValue;
@@ -175,7 +142,7 @@ void fused_attn_aotriton_fwd_impl(
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d,
   bool is_training, float scaling_factor, float dropout_probability,
   int window_size_left, int window_size_right, NVTE_QKV_Layout layout,
-  NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, bool pad_between_seqs,
+  NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
   void *devPtrQ, void *devPtrK, void *devPtrV, 
   void *devPtrSoftmaxAux, void *devPtrO,
   const uint64_t* devPtrDropoutSeed, const uint64_t* devPtrDropoutOffset,
@@ -487,19 +454,13 @@ void fused_attn_aotriton_fwd_qkvpacked(
   }
 
   size_t workspace_size = 0;
-  bool pad_between_seqs = get_pad_between_seqs(
-        input_cu_seqlens,
-        input_cu_seqlens,
-        nvte_get_qkv_format(qkv_layout),
-        attn_mask_type
-  );
 
   fused_attn_aotriton_fwd_impl(
     b, h, h, max_seqlen, max_seqlen, d,
     is_training, attn_scale, dropout, 
     window_left, window_right,
     qkv_layout,
-    bias_type, attn_mask_type, pad_between_seqs,
+    bias_type, attn_mask_type,
     devPtrQ, devPtrK, devPtrV, 
     devPtrS, devPtrO,
     reinterpret_cast<const uint64_t *>(rng_state->data.dptr), 
@@ -650,19 +611,13 @@ void fused_attn_aotriton_fwd_kvpacked(
   }
 
   size_t workspace_size = 0;
-  bool pad_between_seqs = get_pad_between_seqs(
-        input_cu_seqlens_q,
-        input_cu_seqlens_kv,
-        nvte_get_qkv_format(qkv_layout),
-        attn_mask_type
-  );
 
   fused_attn_aotriton_fwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
     is_training, attn_scale, dropout, 
     window_left, window_right,
     qkv_layout,
-    bias_type, attn_mask_type, pad_between_seqs,
+    bias_type, attn_mask_type,
     devPtrQ, devPtrK, devPtrV,
     devPtrS, devPtrO,
     reinterpret_cast<const uint64_t *>(rng_state->data.dptr), 
@@ -807,19 +762,13 @@ void fused_attn_aotriton_fwd(
   }
 
   size_t workspace_size = 0;
-  bool pad_between_seqs = get_pad_between_seqs(
-        input_cu_seqlens_q,
-        input_cu_seqlens_kv,
-        nvte_get_qkv_format(qkv_layout),
-        attn_mask_type
-  );
 
   fused_attn_aotriton_fwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
     is_training, attn_scale, dropout, 
     window_left, window_right,
     qkv_layout,
-    bias_type, attn_mask_type, pad_between_seqs,
+    bias_type, attn_mask_type,
     devPtrQ, devPtrK, devPtrV,
     devPtrS, devPtrO,
     reinterpret_cast<const uint64_t *>(rng_state->data.dptr), 
