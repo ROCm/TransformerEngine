@@ -303,7 +303,6 @@ else()
         "27fc21f6761d57987a700436de8cf29cbdd9eeee91318dfed596eeb147d219ad" # amd-gfx950
         )
       set(__AOTRITON_BASE_URL "https://github.com/ROCm/aotriton/releases/download/")  # @lint-ignore
-      set(__AOTRITON_Z "gz")
       include(ExternalProject)
 
       # Download GPU kernels for a specific target
@@ -313,14 +312,14 @@ else()
 
         string(CONCAT __AOTRITON_FILE
               "aotriton-${__AOTRITON_VER}-images-"
-              "${image}.tar.${__AOTRITON_Z}")
+              "${image}.tar.gz")
         string(CONCAT __AOTRITON_URL
               "${__AOTRITON_BASE_URL}"
               "${__AOTRITON_VER}/${__AOTRITON_FILE}")
 
         # Set up directories
-        set(__AOTRITON_DOWNLOAD_DIR ${CMAKE_CURRENT_BINARY_DIR}/aotriton_download-${image})
-        set(__AOTRITON_EXTRACT_DIR ${CMAKE_CURRENT_BINARY_DIR}/aotriton_image-${image})
+        set(__AOTRITON_DOWNLOAD_DIR ${CMAKE_CURRENT_BINARY_DIR}/aotriton/download/${image})
+        set(__AOTRITON_EXTRACT_DIR ${CMAKE_CURRENT_BINARY_DIR}/aotriton/image/${image})
 
         ExternalProject_Add(${project}
           URL "${__AOTRITON_URL}"
@@ -373,7 +372,6 @@ else()
       # Download GPU kernels if needed
       if(NOT USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS)
         message(STATUS "Downloading AOTriton GPU Kernels.")
-        set(__AOTRITON_CHAINED_IMAGE "aotriton_external")
         foreach(image ${__AOTRITON_IMAGE_LIST})
           string(SUBSTRING ${image} 7 -1 gfx_pattern)
           string(REPLACE "x" "." gfx_regex ${gfx_pattern})
@@ -382,8 +380,7 @@ else()
               message(STATUS "Downloading AOTriton image ${image}.")
               set(__AOTRITON_DOWNLOAD_TARGET aotriton_image_${gfx_pattern})
               aotriton_download_image(${image} ${__AOTRITON_DOWNLOAD_TARGET})
-              add_dependencies(${__AOTRITON_CHAINED_IMAGE} ${__AOTRITON_DOWNLOAD_TARGET})
-              set(__AOTRITON_CHAINED_IMAGE ${__AOTRITON_DOWNLOAD_TARGET})
+              add_dependencies(aotriton_external ${__AOTRITON_DOWNLOAD_TARGET})
               break()
             endif()
           endforeach()

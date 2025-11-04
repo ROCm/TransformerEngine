@@ -37,14 +37,18 @@ inline aotriton::TensorView<0> mk_aoscalartensor(const uint64_t* ptr)
 namespace transformer_engine {
 namespace fused_attn_rocm {
 
-  std::tuple<int32_t, int32_t> get_window_sizes(int32_t window_size_left, int32_t window_size_right, bool is_causal){
+std::tuple<int32_t, int32_t> get_window_sizes(
+  int32_t window_size_left,
+  int32_t window_size_right,
+  bool is_causal
+){
   int32_t window_left = 0;
   int32_t window_right = 0;
   using aotriton::v3::flash::WindowValue;
-  if (is_causal) {
+  if(is_causal){
     window_left = WindowValue::BottomRightAligned;
     window_right = WindowValue::BottomRightAligned;
-  } else if (window_size_left>0 || window_size_right>0) {
+  }else{
     window_left = (window_size_left>0)? window_size_left:window_left;
     window_right = (window_size_right>0)? window_size_right:window_right;
   }
