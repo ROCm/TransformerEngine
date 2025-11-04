@@ -15,10 +15,9 @@ string(STRIP "${ROCM_VER_CONTENT}" ROCM_VER_CONTENT)
 string(REGEX MATCH "^[0-9]+\\.[0-9]+" ROCM_VER "${ROCM_VER_CONTENT}")
 
 # AITER commit
+file(REAL_PATH "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/aiter" AITER_DIR)
 execute_process(
-  COMMAND git -c safe.directory=${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/aiter
-          -C ${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/aiter
-          rev-parse HEAD
+  COMMAND sh -c "git config --global --add safe.directory ${AITER_DIR} 2>/dev/null || true && git -C ${AITER_DIR} rev-parse HEAD"
   OUTPUT_VARIABLE AITER_SHA
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
