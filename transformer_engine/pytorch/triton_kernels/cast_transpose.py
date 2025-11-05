@@ -57,6 +57,39 @@ def _amax_reduce_triton(
     tl.atomic_max(amax_ptr, tile_amax, sem='relaxed')
 
 
+@triton.jit
+def _compute_scale_from_amax_triton(
+    amax_ptr,
+    scale_ptr,
+    inv_ptr,
+    max_fp8,
+    epsilon,
+    value_for_inf,
+    FORCE_POW_2_SCALES: tl.constexpr,
+):
+    # This implementation mimics transformer_engine::compute_scale_from_amax()
+
+    a = tl.load(amax_ptr).to(tl.float32)
+
+    # amax < epsilon -> epsilon (NaNs pass through)
+    a = tl.where(a < epsilon, epsilon, a)
+
+    # bad amax (NaN, inf, 0.0) -> scale = 1.0
+    bad = (a != a) | (tl.abs(a) == float('inf')) | (a == 0.0)
+
+    if bad:
+        s = tl.full((), 1.0, tl.float32)
+    else:
+        s = max_fp8 / a
+        # inf -> scale = value_for_inf
+        s = tl.where(tl.abs(a) == float('inf'), value_for_inf, s)
+        if FORCE_POW_2_SCALES:
+            s = tl.math.exp2(tl.floor(tl.log2(s)))
+
+    tl.store(scale_ptr, s)
+    tl.store(inv_ptr, 1.0 / s)
+
+
 @triton.autotune(
         configs=[
         triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64, 'GROUP_M': 1}, num_warps=4),
@@ -319,7 +352,7 @@ def _dequantize_mxfp8_triton(
 
 # Reshapes input of any given shape to 2D for processing, 
 # then uses the Triton kernel to perform casting and transposition efficiently.
-def te_cast_transpose_noop_triton(input, noop_flag, input_scale, cast_out, trans_out, amax_out, scale_inv_out, otype, current_scaling):
+def te_cast_transpose_noop_triton(input, noop_flag, input_scale, cast_out, trans_out, amax_out, scale_inv_out, otype, current_scaling, eps, force_pow_2_scales):
 
     row_length = input.shape[-1] if len(input.shape) > 0 else 1
     num_rows = input.numel() // row_length
@@ -357,11 +390,14 @@ def te_cast_transpose_noop_triton(input, noop_flag, input_scale, cast_out, trans
             amax_out,
         )
 
-        # Compute scale = fp8_max / amax
+        # Compute scale
         fp8_max = get_fp8_max(otype)
-        s = (fp8_max / amax_out).to(input_scale.dtype)
-        input_scale.copy_(s)
-        scale_inv_out.copy_(1/s)
+
+        _compute_scale_from_amax_triton[(1,)](
+            amax_out, input_scale, scale_inv_out,
+            fp8_max, eps, torch.finfo(torch.float32).max,
+            FORCE_POW_2_SCALES=force_pow_2_scales,
+        )
 
         _cast_transpose_triton_current_scaling[grid](input_2d_view, triton.reinterpret(cast_out_2d_view, tl_dtype), triton.reinterpret(trans_out_2d_view, tl_dtype), input_stride_M, input_stride_N, trans_out_stride_M, trans_out_stride_N, num_rows, row_length, input_scale, get_fp8_max(otype))
     else:

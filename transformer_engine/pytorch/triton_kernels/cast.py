@@ -110,6 +110,8 @@ def te_quantize_triton(
                     scale_inv_out=scale_inv_out,
                     otype=otype,
                     current_scaling=is_current_scaling,
+                    eps = getattr(quantizer, "amax_epsilon", 0.0),
+                    force_pow_2_scales = getattr(quantizer, "force_pow_2_scales", False),
                 )
                 
             else:
