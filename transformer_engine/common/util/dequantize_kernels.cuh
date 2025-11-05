@@ -311,7 +311,7 @@ static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t s
                   output->dtype(), OType,
 #ifdef __HIP_PLATFORM_AMD__
               TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                  !(cols % (4 * 32 / sizeof(IType))), IS_ALIGNED,
+                  !(cols % (32 * sizeof(OType))), IS_ALIGNED,
                   dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>
                   <<<grid, block, 0, stream>>>(reinterpret_cast<const IType *>(input_data.dptr), reinterpret_cast<OType *>(output->data.dptr), scales_ptr,
                                                rows, cols, scales_stride););  // NOLINT(*)

@@ -1000,7 +1000,7 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                   output->dtype(), OType,
 #ifdef __HIP_PLATFORM_AMD__
                 TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                  !(cols % (4 * 32 / sizeof(OType))), IS_ALIGNED,
+                  !(cols % (32 * sizeof(IType))), IS_ALIGNED,
                     cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
                                          SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED><<<grid, block, 0, stream>>>(
                       reinterpret_cast<const IType *>(input.data.dptr), 

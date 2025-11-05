@@ -220,13 +220,6 @@ void performTest_x1(const ProcessingMethod processing_method,
       GTEST_SKIP();
     }
 
-#ifdef __HIP_PLATFORM_AMD__
-    // MXFP8 requires stride % 32 == 0, ROCm enforces this for optimized vectorization
-    if ((colwise && rows % 32) || rowwise && cols % 32) {
-      GTEST_SKIP();
-    }
-#endif
-
     const size_t block_size_rows = rowwise ? 1 : 32;
     const size_t block_size_cols = colwise ? 1 : 32;
 
@@ -379,13 +372,6 @@ void performTest_x2(const ProcessingMethod processing_method,
 
     const size_t rows = first_dimension(shape);
     const size_t cols = last_dimension(shape);
-
-#ifdef __HIP_PLATFORM_AMD__
-    // MXFP8 requires stride % 32 == 0, ROCm enforces this for optimized vectorization
-    if (cols % 32 || rows % 32) {
-      GTEST_SKIP();
-    }
-#endif
 
     const std::array<size_t,4> scale_dims_rowwise = get_scale_tensor_dims(rows, cols, 1, 32);
     const std::array<size_t,4> scale_dims_colwise = get_scale_tensor_dims(rows, cols, 32, 1);

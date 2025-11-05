@@ -849,7 +849,7 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
                   output->dtype(), OType,
 #ifdef __HIP_PLATFORM_AMD__
               TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                !(cols % (4 * 32 / sizeof(OType))), IS_ALIGNED,
+                !(cols % (32 * sizeof(IType))), IS_ALIGNED,
                   const IType *tensor_map_grad = IS_DGATED ? reinterpret_cast<const IType *>(grad.data.dptr) : nullptr;
                   const IType *tensor_map_input_act = reinterpret_cast<const IType *>(gated_input.data.dptr);
                   const IType *tensor_map_input_gate = reinterpret_cast<const IType *>(gated_input.data.dptr) + cols;

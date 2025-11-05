@@ -59,7 +59,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   constexpr size_t THREADS_PER_SCALE_X_ROWWISE =
       DIVUP(SCALE_DIM_X, ELEMS_PER_THREAD);                      // 2 = 32 / 16
-  constexpr size_t VECTOR_WIDTH = 32 / sizeof(IType);
+  constexpr size_t VECTOR_WIDTH = (IS_ALIGNED ?: 2) * 8 / sizeof(IType);
 
   const int chunk_offset_Y = blockIdx.y * CHUNK_DIM_Y;
   const int chunk_offset_X = blockIdx.x * CHUNK_DIM_X;

@@ -76,7 +76,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const int tid_Y = threadIdx.x / THREADS_PER_CHUNK_X;
   const int tid_X = threadIdx.x % THREADS_PER_CHUNK_X;
 
-  constexpr size_t VECTOR_WIDTH = 32 / sizeof(OType);
+  constexpr size_t VECTOR_WIDTH = (IS_ALIGNED ?: 2) * 8 / sizeof(OType);
 
   const int thread_offset_Y = tid_Y;
   const int thread_offset_X = tid_X;
