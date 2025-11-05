@@ -637,6 +637,10 @@ void fused_attn_ck_fwd_impl(
   devPtrSoftmaxLSEWithoutPadding = workspace_next;
   workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + h*max_tokens_q*sizeof(float));
   if(is_SBHD && is_padding){
+    //determine the o buffer based on workspace next section
+    devPtrOWithoutPadding = workspace_next;
+    workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + o_storage_bytes);
+
     //determine q, k ,v buffer based on the workspace next ptr and layout group
     NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
     //Q ptr always comes at first
@@ -671,11 +675,10 @@ void fused_attn_ck_fwd_impl(
       std::cout << "\nattn_fwd(ck): Converting BSHD to THD\n";
     }
   }
-  //determine the o buffer based on workspace next section
-  devPtrOWithoutPadding = workspace_next;
-  workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + o_storage_bytes);
-  // reset the final results since padded places need to be 0
-  NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrO, 0, o_storage_bytes, stream));
+  if(is_batch && is_padding){
+    // reset the final results since padded places need to be 0
+    NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrO, 0, o_storage_bytes, stream));
+  }
 
   if (nvte_log_ck_config) {
     std::cout<<std::endl<<"attn_fwd(ck): ";
@@ -964,7 +967,6 @@ void fused_attn_ck_bwd_impl(
   // First h*max_tokens_q*sizeof(float) in workspace are for lse-d
   void* lse_workspace = workspace;
   workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + h*max_tokens_q*sizeof(float));
-  NVTE_CHECK_CUDA(cudaMemsetAsync(lse_workspace, 0, h*max_tokens_q*sizeof(float), stream));
 
   // The next section are for dq_acc_ptr
   void* dq_acc_ptr = workspace_next;
