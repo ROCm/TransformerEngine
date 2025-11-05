@@ -744,36 +744,12 @@ void fused_attn_ck_fwd_impl(
         devPtrSoftmaxLSEWithoutPadding,
         nvte_ck_uses_fwd_v3,
         nvte_ck_how_v3_bf16_cvt,
-        false,
         stream));
     // add padding for o and softmax_lse
     add_padding(dtype, b, h, s_q, d_v, max_tokens_q, false, o_stride[0], o_stride[1], o_stride[2], devPtrOWithoutPadding, devPtrCuSeqlensQ, ptrSeqOffsetsQ, devPtrO, stream);
     add_padding_softmax_lse(b, h, s_q, max_tokens_q, false, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, ptrSeqOffsetsQ, devPtrSoftmaxAux, stream);
   }else if(bshd_to_thd || is_ragged){
     using ck_fused_attn::ck_attn_varlen_fwd;
-    bool is_v3_supported = ck_attn_varlen_fwd(
-         nvte_to_ck_dtype(dtype),
-         b, h, hg, s_q, s_kv, d_qk, d_v,
-         max_tokens_q,
-         devPtrQ, 
-         q_stride[1], q_stride[2],
-         devPtrK, 
-         k_stride[1], k_stride[2],
-         devPtrV, 
-         v_stride[1], v_stride[2],
-         devPtrCuSeqlensQ, devPtrCuSeqlensKV, 
-         ptrSeqOffsetsQ, ptrSeqOffsetsKV,
-         is_training, scaling_factor, dropout_probability,
-         devPtrDropoutSeed, devPtrDropoutOffset,
-         set_ck_mask(mask_type, window_size_left, window_size_right),
-         window_size_left, window_size_right,
-         devPtrO,
-         o_stride[1], o_stride[2],
-         devPtrSoftmaxLSEWithoutPadding,
-         nvte_ck_uses_fwd_v3,
-         nvte_ck_how_v3_bf16_cvt,
-         true, // check whether v3 is supported
-         stream)==1;
     NVTE_CHECK_CUDA(
       ck_attn_varlen_fwd(
         nvte_to_ck_dtype(dtype),
@@ -794,9 +770,8 @@ void fused_attn_ck_fwd_impl(
         devPtrO,
         o_stride[1], o_stride[2],
         devPtrSoftmaxLSEWithoutPadding,
-        nvte_ck_uses_fwd_v3 && is_v3_supported,
+        nvte_ck_uses_fwd_v3,
         nvte_ck_how_v3_bf16_cvt,
-        false,
         stream));
     // aiter asm output softmax_lse with padding
     add_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxLSEWithoutPadding, ptrSeqOffsetsQ, ptrSeqOffsetsQ, devPtrSoftmaxAux, stream);
@@ -882,7 +857,6 @@ void fused_attn_ck_bwd_impl(
   size_t v_storage_bytes = max_tokens_kv*hg*d_v*nvte_dtype_size(dtype); 
   size_t o_storage_bytes = max_tokens_q*h*d_v*nvte_dtype_size(dtype); 
 
-  bool is_v3_supported = false;
   // Exit to request upper level API to allocate memory if needed
   if(workspace==nullptr){
     size_t workspace_size_lse = max_tokens_q*h*sizeof(float);
@@ -944,13 +918,15 @@ void fused_attn_ck_bwd_impl(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
   if((layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) || (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D)){
     // just memset all dq, dk, dv
-    NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdQ, 0, q_storage_bytes + k_storage_bytes+ v_storage_bytes, stream));
+    if(is_batch && is_padding){
+      NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdQ, 0, q_storage_bytes + k_storage_bytes+ v_storage_bytes, stream));
+    }
   }else{
-    // HD_2HD, HD_H2D, HD_HD_HD can just memset dq itself
-    NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdQ, 0, q_storage_bytes, stream));
     //TODO: check whether we can remove this zero-out in padding/unpadding workaround
     // for pad between seqs case, we need to reset all dq, dk, dv
     if(is_batch && is_padding){
+      // HD_2HD, HD_H2D, HD_HD_HD can just memset dq itself
+      NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdQ, 0, q_storage_bytes, stream));
       if(layout_group==NVTE_QKV_Layout_Group::NVTE_HD_2HD ||layout_group==NVTE_QKV_Layout_Group::NVTE_HD_H2D){
         //kvpacked
         NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdK, 0, k_storage_bytes + v_storage_bytes, stream));
@@ -1202,7 +1178,6 @@ void fused_attn_ck_bwd_impl(
         nvte_ck_uses_bwd_v3,
         nvte_ck_is_v3_atomic_fp32,
         nvte_ck_how_v3_bf16_cvt,
-        false, //v3_api_check, TODO: remove later
         stream));
     // add padding for dq, dk, dv
     // dq, dk, dv of same shape as q, k, v
@@ -1212,45 +1187,6 @@ void fused_attn_ck_bwd_impl(
   }else if(bshd_to_thd || is_ragged){
     remove_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, ptrSeqOffsetsQ, ptrSeqOffsetsQ, devPtrSoftmaxLSEWithoutPadding, stream);
     using ck_fused_attn::ck_attn_varlen_bwd;
-    bool is_v3_supported = ck_attn_varlen_bwd(
-          nvte_to_ck_dtype(dtype),
-          b, h, hg, s_q, s_kv, d_qk, d_v,
-          max_tokens_q, max_tokens_kv,
-          devPtrQ,
-          q_stride[1], q_stride[2],
-          devPtrK,
-          k_stride[1], k_stride[2],
-          devPtrV,
-          v_stride[1], v_stride[2],
-          devPtrCuSeqlensQ, devPtrCuSeqlensKV, 
-          ptrSeqOffsetsQ, ptrSeqOffsetsKV,
-          devPtrO,
-          o_stride[1], o_stride[2],
-          devPtrSoftmaxLSEWithoutPadding,
-          devPtrdO,
-          o_stride[1], o_stride[2], //dO and O share the same stride
-          scaling_factor, dropout_probability,
-          devPtrDropoutSeed, devPtrDropoutOffset,
-          set_ck_mask(mask_type, window_size_left, window_size_right),
-          window_size_left, window_size_right,
-          devPtrdQ,
-          q_stride[1], q_stride[2], //dQ and Q share the same stride
-          dq_acc_ptr, 
-          dk_expanded_ptr,
-          dv_expanded_ptr,
-          dk_expanded_stride[1], dk_expanded_stride[2], //dK and K share the same stride
-          dv_expanded_stride[1], dv_expanded_stride[2], //dV and V share the same stride
-          devPtrdK,
-          k_stride[1], k_stride[2], //dK and K share the same stride
-          devPtrdV,
-          v_stride[1], v_stride[2], //dV and V share the same stride
-          lse_workspace, // softmax_lsed
-          deterministic,
-          nvte_ck_uses_bwd_v3,
-          nvte_ck_is_v3_atomic_fp32,
-          nvte_ck_how_v3_bf16_cvt,
-          true, //v3_api_check, TODO: remove later
-          stream)==1;
     NVTE_CHECK_CUDA(
       ck_attn_varlen_bwd(
         nvte_to_ck_dtype(dtype),
@@ -1286,10 +1222,9 @@ void fused_attn_ck_bwd_impl(
         v_stride[1], v_stride[2], //dV and V share the same stride
         lse_workspace, // softmax_lsed
         deterministic,
-        nvte_ck_uses_bwd_v3 && is_v3_supported,
+        nvte_ck_uses_bwd_v3,
         nvte_ck_is_v3_atomic_fp32,
         nvte_ck_how_v3_bf16_cvt,
-        false, //v3_api_check, TODO: remove later
         stream));
   }else{
     using ck_fused_attn::ck_attn_bwd;

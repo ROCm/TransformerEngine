@@ -858,7 +858,6 @@ hipError_t ck_attn_varlen_bwd(
   bool uses_bwd_v3,
   bool is_v3_atomic_fp32,
   int how_v3_bf16_cvt,
-  bool is_v3_api_check,
   hipStream_t stream){
 
   bool has_dropout = (dropout_probability > 0.f);
@@ -1033,7 +1032,7 @@ hipError_t ck_attn_varlen_bwd(
   // modify the max_seqlen_q for better performance in 0-length cases
   // lse_thd_ptr used as buffer
   if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_MAX_SEQLEN")) {
-    if(std::string(env_p) == "1" && !is_v3_api_check){
+    if(std::string(env_p) == "1"){
       if(ck_fused_attn_log_config){
         std::cout << "attn_bwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.";
       }
@@ -1061,12 +1060,9 @@ hipError_t ck_attn_varlen_bwd(
     uses_bwd_v3,
     is_v3_atomic_fp32,
     how_v3_bf16_cvt,
-    uses_bwd_v3? cu_seqlen_q_padded_ptr: nullptr, 
-    uses_bwd_v3? cu_seqlen_kv_padded_ptr: nullptr,
-    is_v3_api_check);
-  if(is_v3_api_check){
-    return (hipError_t)(average_runtime_or_v3_check_status > 0);
-  }
+    nullptr,
+    nullptr,
+    false);
   if(average_runtime_or_v3_check_status < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");

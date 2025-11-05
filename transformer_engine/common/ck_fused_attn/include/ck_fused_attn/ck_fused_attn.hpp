@@ -85,7 +85,6 @@ hipError_t ck_attn_varlen_fwd(
   void* lse_thd_ptr,
   bool uses_fwd_v3,
   int how_v3_bf16_cvt,
-  bool is_v3_api_check,
   hipStream_t stream);
 
 hipError_t ck_attn_bwd(  
@@ -167,7 +166,6 @@ hipError_t ck_attn_varlen_bwd(
   bool uses_bwd_v3,
   bool is_v3_atomic_fp32,
   int how_v3_bf16_cvt,
-  bool is_v3_api_check,
   hipStream_t stream);
 
 }//namespace ck_fused_attn

@@ -324,7 +324,6 @@ hipError_t ck_attn_varlen_fwd(
   void* lse_thd_ptr,
   bool uses_fwd_v3,
   int how_v3_bf16_cvt,
-  bool is_v3_api_check,
   hipStream_t stream){
 
   bool has_dropout = (is_training && dropout_probability > 0.f);
@@ -458,7 +457,7 @@ hipError_t ck_attn_varlen_fwd(
   // modify the max_seqlen_q for better performance in 0-length cases
   // lse_thd_ptr used as buffer
   if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_MAX_SEQLEN")){
-    if(std::string(env_p) == "1" && !is_v3_api_check){
+    if(std::string(env_p) == "1"){
       if(ck_fused_attn_log_config){
         std::cout << "attn_fwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.";
       }
@@ -482,12 +481,9 @@ hipError_t ck_attn_varlen_fwd(
     has_lse,
     uses_fwd_v3, 
     how_v3_bf16_cvt,
-    uses_fwd_v3? cu_seqlen_q_padded_ptr: nullptr, 
-    uses_fwd_v3? cu_seqlen_kv_padded_ptr: nullptr,
-    is_v3_api_check);
-  if(is_v3_api_check){
-    return (hipError_t)(average_runtime_or_v3_check_status > 0);
-  }
+    nullptr,
+    nullptr,
+    false);
   if(average_runtime_or_v3_check_status < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");
