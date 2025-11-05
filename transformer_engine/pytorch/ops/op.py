@@ -547,7 +547,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             # Get state for a given FP8 tensor
             if self.num_quantizers(mode) == 0:
                 continue
-            fp8_meta = self.get_fp8_meta(mode)
+            fp8_meta = self._fp8_metas.get(mode, None)
             state[mode] = {}
 
             # Store tensors
@@ -603,7 +603,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 continue
             if self.num_quantizers(mode) == 0:
                 continue
-            fp8_meta = self.get_fp8_meta(mode)
+            fp8_meta = self._fp8_metas.get(mode, None)
             if fp8_meta is None:
                 continue
 
@@ -617,7 +617,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 del fp8_meta["global_fp8_buffer_pos_fwd_recompute"]
 
             # Load tensors
-            fp8_meta = self.get_fp8_meta(mode)
+            fp8_meta = self._fp8_metas.get(mode, None)
             if "scaling_fwd" in fp8_meta:
                 fp8_meta_fwd = fp8_meta["scaling_fwd"]
                 copy_tensor(state[mode]["scale_fwd"], fp8_meta_fwd.scale)
