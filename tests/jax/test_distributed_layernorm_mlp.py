@@ -1,9 +1,10 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 from typing import Callable, Sequence, Union, Optional
 import pytest
-from packaging import version
 
 import jax
 import jax.numpy as jnp
@@ -37,6 +38,9 @@ from transformer_engine.jax.sharding import MeshResource
 from transformer_engine.jax.quantize import QuantizerFactory
 from transformer_engine.jax.cpp_extensions.misc import get_min_device_compute_capability
 
+from transformer_engine.jax.util import get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
+jnp_float8_e4m3_type = get_jnp_float8_e4m3_type()
+jnp_float8_e5m2_type = get_jnp_float8_e5m2_type()
 
 is_fp8_supported, reason = is_fp8_available()
 is_mxfp8_supported, reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
@@ -225,8 +229,8 @@ class TestDistributedLayernormMLP:
 
                 multi_fwd, multi_grads = multi_jitter(*multi_inputs, *static_inputs, True)
 
-        fwd_test_type = dtype if fp8_recipe is None else jnp.float8_e4m3fn
-        bwd_test_type = dtype if fp8_recipe is None else jnp.float8_e5m2
+        fwd_test_type = dtype if fp8_recipe is None else jnp_float8_e4m3_type
+        bwd_test_type = dtype if fp8_recipe is None else jnp_float8_e5m2_type
         assert_allclose(multi_fwd, single_fwd, dtype=fwd_test_type)
         for i in range(len(inputs)):
             if multi_grads[i] is not None:
@@ -282,12 +286,8 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("use_bias", [True, False])
-<<<<<<< HEAD
-    @pytest.mark.skipif(version.parse(jax.__version__) < version.parse("0.5.0"), reason="shardy sharding requires JAX 0.5.0")
-=======
     @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
->>>>>>> ca7407e
     def test_layernorm_mlp_grad_shardy(
         self,
         mesh_config,
@@ -419,11 +419,7 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("activation_type", [("gelu",), ("silu", "linear")])
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("use_bias", [True, False])
-<<<<<<< HEAD
-    @pytest_parametrize_wrapper("use_shardy", [False, True] if version.parse(jax.__version__) >= version.parse("0.5.0") else [False])
-=======
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
->>>>>>> ca7407e
     def test_layernorm_mlp_layer(
         self, mesh_config, activation_type, use_bias, input_shape, dtype, with_jax_gemm
     ):
