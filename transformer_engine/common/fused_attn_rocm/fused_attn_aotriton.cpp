@@ -17,7 +17,6 @@
 #include "../util/system.h"
 #include "fused_attn_aotriton.h"
 #include "utils.h"
-#include <stdexcept>
 
 #ifdef USE_FUSED_ATTN_AOTRITON
 #if AOTRITON_ENABLE_SUFFIX
