@@ -17,6 +17,7 @@
 #include "../util/system.h"
 #include "fused_attn_aotriton.h"
 #include "utils.h"
+#include <stdexcept>
 
 #ifdef USE_FUSED_ATTN_AOTRITON
 #if AOTRITON_ENABLE_SUFFIX
@@ -37,22 +38,17 @@ inline aotriton::TensorView<0> mk_aoscalartensor(const uint64_t* ptr)
 namespace transformer_engine {
 namespace fused_attn_rocm {
 
+// TODO: Support SWA
 std::tuple<int32_t, int32_t> get_window_sizes(
   int32_t window_size_left,
   int32_t window_size_right,
   bool is_causal
 ){
-  int32_t window_left = 0;
-  int32_t window_right = 0;
   using aotriton::v3::flash::WindowValue;
   if(is_causal){
-    window_left = WindowValue::BottomRightAligned;
-    window_right = WindowValue::BottomRightAligned;
-  }else{
-    window_left = (window_size_left>0)? window_size_left:window_left;
-    window_right = (window_size_right>0)? window_size_right:window_right;
+    return {WindowValue::BottomRightAligned, WindowValue::BottomRightAligned};
   }
-  return {window_left, window_right};
+  return {-1, -1};
 }
 
 // check the fused attn config to see whether it's aotriton backend supported
