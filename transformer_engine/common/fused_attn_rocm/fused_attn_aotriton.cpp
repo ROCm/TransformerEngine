@@ -468,13 +468,13 @@ void fused_attn_aotriton_bwd_impl(
     bwd_params.Max_seqlen_q = s_q;
     bwd_params.Max_seqlen_k = s_kv;
   }
-  bwd_params.DO = o_tensor;
-  bwd_params.DK = do_tensor;
-  bwd_params.DV = dq_tensor;
-  bwd_params.DQ = dv_tensor;
+  bwd_params.DO = do_tensor;
+  bwd_params.DK = dk_tensor;
+  bwd_params.DV = dv_tensor;
+  bwd_params.DQ = dq_tensor;
   bwd_params.DB = empty_bias;
   bwd_params.L = M_tensor;
-  bwd_params.D  = delta_lazy;
+  bwd_params.D = delta_lazy;
   bwd_params.dropout_p = dropout_probability;
   bwd_params.philox_seed_ptr = seed;
   bwd_params.philox_offset1 = offset;
@@ -625,6 +625,7 @@ void fused_attn_aotriton_bwd_qkvpacked(
     devPtrO, devPtrSoftmaxStats,
     devPtrdQ, devPtrdK, devPtrdV, 
     devPtrdO, 
+    input_cu_seqlens->data.dptr, input_cu_seqlens->data.dptr,
     reinterpret_cast<const uint64_t *>(rng_state->data.dptr), 
     reinterpret_cast<const uint64_t *>(rng_state->data.dptr) + 1,
     nvte_to_aotriton_dtype(QKV_type),
@@ -787,6 +788,7 @@ void fused_attn_aotriton_bwd_kvpacked(
     devPtrO, devPtrSoftmaxStats,
     devPtrdQ, devPtrdK, devPtrdV, 
     devPtrdO,
+    input_cu_seqlens_q->data.dptr, input_cu_seqlens_kv->data.dptr,
     reinterpret_cast<const uint64_t *>(rng_state->data.dptr), 
     reinterpret_cast<const uint64_t *>(rng_state->data.dptr) + 1,
     nvte_to_aotriton_dtype(QKV_type),
@@ -928,6 +930,7 @@ void fused_attn_aotriton_bwd(
     devPtrO, devPtrSoftmaxStats,
     devPtrdQ, devPtrdK, devPtrdV, 
     devPtrdO, 
+    input_cu_seqlens_q->data.dptr, input_cu_seqlens_kv->data.dptr,
     reinterpret_cast<const uint64_t *>(rng_state->data.dptr), 
     reinterpret_cast<const uint64_t *>(rng_state->data.dptr) + 1,
     nvte_to_aotriton_dtype(QKV_type),
