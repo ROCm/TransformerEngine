@@ -344,8 +344,6 @@ void log_bwd_config(const char* func_name,
                     const bool uses_bwd_v3,
                     const bool is_v3_atomic_fp32,
                     const int how_v3_bf16_cvt,
-                    const void* cu_seqlen_q_padded_ptr,
-                    const void* cu_seqlen_kv_padded_ptr,
                     const fmha_bwd_args& fmha_args){
 
   bool ck_fused_attn_log_config = false;
@@ -371,8 +369,6 @@ void log_bwd_config(const char* func_name,
     std::cout<<"uses_bwd_v3: "<<uses_bwd_v3<<std::endl;
     std::cout<<"is_v3_atomic_fp32: "<<is_v3_atomic_fp32<<std::endl;
     std::cout<<"how_v3_bf16_cvt: "<<how_v3_bf16_cvt<<std::endl;
-    std::cout<<"cu_seqlen_q_padded_ptr: "<<cu_seqlen_q_padded_ptr<<std::endl;
-    std::cout<<"cu_seqlen_kv_padded_ptr: "<<cu_seqlen_kv_padded_ptr<<std::endl;
 
     // fmha_args debug
     std::cout<<"fmha_args: "<<std::endl;
@@ -678,7 +674,7 @@ hipError_t ck_attn_bwd(
   }();
 
   // print ck traits and args when needed
-  log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_type, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, nullptr, nullptr, fmha_args);
+  log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_type, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args);
   if (uses_bwd_v3)
   {
     set_aiter_asm_dir();
@@ -695,10 +691,7 @@ hipError_t ck_attn_bwd(
                                          deterministic,
                                          uses_bwd_v3,
                                          is_v3_atomic_fp32,
-                                         how_v3_bf16_cvt, 
-                                         nullptr, //cu_seqlen_q_padded 
-                                         nullptr, //cu_seqlen_kv_padded
-                                         false);  //v3 api check
+                                         how_v3_bf16_cvt);
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
@@ -1042,13 +1035,13 @@ hipError_t ck_attn_varlen_bwd(
   }
 
   // print ck traits and args when needed
-  log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_enum::no_bias, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, cu_seqlen_q_padded_ptr, cu_seqlen_kv_padded_ptr, fmha_args);
+  log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_enum::no_bias, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args);
   if (uses_bwd_v3)
   {
     set_aiter_asm_dir();
   }
 
-  float average_runtime_or_v3_check_status = aiter::mha_bwd(fmha_args,
+  float average_runtime = aiter::mha_bwd(fmha_args,
     stream_config,
     data_type_str,
     is_group_mode,
@@ -1059,11 +1052,8 @@ hipError_t ck_attn_varlen_bwd(
     deterministic,
     uses_bwd_v3,
     is_v3_atomic_fp32,
-    how_v3_bf16_cvt,
-    nullptr,
-    nullptr,
-    false);
-  if(average_runtime_or_v3_check_status < 0){
+    how_v3_bf16_cvt);
+  if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
   }

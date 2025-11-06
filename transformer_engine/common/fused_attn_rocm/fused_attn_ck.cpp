@@ -629,8 +629,8 @@ void fused_attn_ck_fwd_impl(
   void* devPtrKWithoutPadding = nullptr;
   void* devPtrVWithoutPadding = nullptr;
   void* devPtrOWithoutPadding = nullptr;
-  void* ptrSeqOffsetsQ = devPtrSeqOffsetsQ;
-  void* ptrSeqOffsetsKV = devPtrSeqOffsetsKV;
+  void* devPtrCuSeqlenPaddedQ = devPtrSeqOffsetsQ;
+  void* devPtrCuSeqlenPaddedKV = devPtrSeqOffsetsKV;
 
 
   // next h*max_tokens_q*sizeof(float) in workspace are for lse buffer
@@ -666,11 +666,11 @@ void fused_attn_ck_fwd_impl(
     }
   }else if(bshd_to_thd){
     // cu_seqlen_padded ptrs for THD conversion
-    ptrSeqOffsetsQ = workspace_next;
+    devPtrCuSeqlenPaddedQ = workspace_next;
     workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + (b+1)*sizeof(int32_t));
-    ptrSeqOffsetsKV = workspace_next;
+    devPtrCuSeqlenPaddedKV = workspace_next;
     workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + (b+1)*sizeof(int32_t));
-    generate_cu_seqlen_padded(s_q, s_kv, b, ptrSeqOffsetsQ, ptrSeqOffsetsKV, stream);
+    generate_cu_seqlen_padded(s_q, s_kv, b, devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedKV, stream);
     if(nvte_log_ck_config){
       std::cout << "\nattn_fwd(ck): Converting BSHD to THD\n";
     }
@@ -716,9 +716,9 @@ void fused_attn_ck_fwd_impl(
   }
   if(is_SBHD && is_padding){
     // remove padding for q, k, v
-    remove_padding(dtype, b, h, s_q, d_qk, max_tokens_q, false, q_stride[0], q_stride[1], q_stride[2], devPtrQ, devPtrCuSeqlensQ, ptrSeqOffsetsQ, devPtrQWithoutPadding, stream);
-    remove_padding(dtype, b, hg, s_kv, d_qk, max_tokens_kv, false, k_stride[0], k_stride[1], k_stride[2], devPtrK, devPtrCuSeqlensKV, ptrSeqOffsetsKV, devPtrKWithoutPadding, stream);
-    remove_padding(dtype, b, hg, s_kv, d_v, max_tokens_kv, false, v_stride[0], v_stride[1], v_stride[2], devPtrV, devPtrCuSeqlensKV, ptrSeqOffsetsKV, devPtrVWithoutPadding, stream);
+    remove_padding(dtype, b, h, s_q, d_qk, max_tokens_q, false, q_stride[0], q_stride[1], q_stride[2], devPtrQ, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, devPtrQWithoutPadding, stream);
+    remove_padding(dtype, b, hg, s_kv, d_qk, max_tokens_kv, false, k_stride[0], k_stride[1], k_stride[2], devPtrK, devPtrCuSeqlensKV, devPtrCuSeqlenPaddedKV, devPtrKWithoutPadding, stream);
+    remove_padding(dtype, b, hg, s_kv, d_v, max_tokens_kv, false, v_stride[0], v_stride[1], v_stride[2], devPtrV, devPtrCuSeqlensKV, devPtrCuSeqlenPaddedKV, devPtrVWithoutPadding, stream);
     // call varlen api using without_padding ptrs
     // for BSHD/SBHD, after padding removal, THD require stride_s update
     using ck_fused_attn::ck_attn_varlen_fwd;
@@ -746,8 +746,8 @@ void fused_attn_ck_fwd_impl(
         nvte_ck_how_v3_bf16_cvt,
         stream));
     // add padding for o and softmax_lse
-    add_padding(dtype, b, h, s_q, d_v, max_tokens_q, false, o_stride[0], o_stride[1], o_stride[2], devPtrOWithoutPadding, devPtrCuSeqlensQ, ptrSeqOffsetsQ, devPtrO, stream);
-    add_padding_softmax_lse(b, h, s_q, max_tokens_q, false, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, ptrSeqOffsetsQ, devPtrSoftmaxAux, stream);
+    add_padding(dtype, b, h, s_q, d_v, max_tokens_q, false, o_stride[0], o_stride[1], o_stride[2], devPtrOWithoutPadding, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, devPtrO, stream);
+    add_padding_softmax_lse(b, h, s_q, max_tokens_q, false, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, devPtrSoftmaxAux, stream);
   }else if(bshd_to_thd || is_ragged){
     using ck_fused_attn::ck_attn_varlen_fwd;
     NVTE_CHECK_CUDA(
@@ -762,7 +762,7 @@ void fused_attn_ck_fwd_impl(
         devPtrV, 
         v_stride[1], v_stride[2],
         devPtrCuSeqlensQ, devPtrCuSeqlensKV, 
-        ptrSeqOffsetsQ, ptrSeqOffsetsKV,
+        devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedKV,
         is_training, scaling_factor, dropout_probability,
         devPtrDropoutSeed, devPtrDropoutOffset,
         set_ck_mask(mask_type, window_size_left, window_size_right),
@@ -774,7 +774,7 @@ void fused_attn_ck_fwd_impl(
         nvte_ck_how_v3_bf16_cvt,
         stream));
     // aiter asm output softmax_lse with padding
-    add_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxLSEWithoutPadding, ptrSeqOffsetsQ, ptrSeqOffsetsQ, devPtrSoftmaxAux, stream);
+    add_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedQ, devPtrSoftmaxAux, stream);
   }else{
     using ck_fused_attn::ck_attn_fwd;
     NVTE_CHECK_CUDA(
@@ -1014,8 +1014,8 @@ void fused_attn_ck_bwd_impl(
   void* devPtrdQWithoutPadding = nullptr;
   void* devPtrdKWithoutPadding = nullptr;
   void* devPtrdVWithoutPadding = nullptr;
-  void* ptrSeqOffsetsQ = devPtrSeqOffsetsQ;
-  void* ptrSeqOffsetsKV = devPtrSeqOffsetsKV;
+  void* devPtrCuSeqlenPaddedQ = devPtrSeqOffsetsQ;
+  void* devPtrCuSeqlenPaddedKV = devPtrSeqOffsetsKV;
   
   devPtrSoftmaxLSEWithoutPadding = workspace_next;
   workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + h*max_tokens_q*sizeof(float));
@@ -1082,16 +1082,15 @@ void fused_attn_ck_bwd_impl(
     }
   }else if(bshd_to_thd){
     // cu_seqlen_padded ptrs for THD conversion
-    ptrSeqOffsetsQ = workspace_next;
+    devPtrCuSeqlenPaddedQ = workspace_next;
     workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + (b+1)*sizeof(int32_t));
-    ptrSeqOffsetsKV = workspace_next;
+    devPtrCuSeqlenPaddedKV = workspace_next;
     workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + (b+1)*sizeof(int32_t));
-    generate_cu_seqlen_padded(s_q, s_kv, b, ptrSeqOffsetsQ, ptrSeqOffsetsKV, stream);
+    generate_cu_seqlen_padded(s_q, s_kv, b, devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedKV, stream);
     if(nvte_log_ck_config){
       std::cout << "\nattn_bwd(ck): Converting BSHD to THD\n";
     }
   }
-
 
   if (nvte_log_ck_config) {
     std::cout<<std::endl<<"attn_bwd(ck): ";
@@ -1185,7 +1184,7 @@ void fused_attn_ck_bwd_impl(
     add_padding(dtype, b, hg, s_kv, d_qk, max_tokens_kv, is_ragged, k_stride[0], k_stride[1], k_stride[2], devPtrdKWithoutPadding, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrdK, stream);
     add_padding(dtype, b, hg, s_kv, d_v, max_tokens_kv, is_ragged, v_stride[0], v_stride[1], v_stride[2], devPtrdVWithoutPadding, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrdV, stream);
   }else if(bshd_to_thd || is_ragged){
-    remove_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, ptrSeqOffsetsQ, ptrSeqOffsetsQ, devPtrSoftmaxLSEWithoutPadding, stream);
+    remove_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedQ, devPtrSoftmaxLSEWithoutPadding, stream);
     using ck_fused_attn::ck_attn_varlen_bwd;
     NVTE_CHECK_CUDA(
       ck_attn_varlen_bwd(
@@ -1199,7 +1198,7 @@ void fused_attn_ck_bwd_impl(
         devPtrV,
         v_stride[1], v_stride[2],
         devPtrCuSeqlensQ, devPtrCuSeqlensKV, 
-        ptrSeqOffsetsQ, ptrSeqOffsetsKV,
+        devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedKV,
         devPtrO,
         o_stride[1], o_stride[2],
         devPtrSoftmaxLSEWithoutPadding,

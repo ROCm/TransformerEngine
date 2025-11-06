@@ -234,7 +234,7 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
   auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;              \
   auto bias_shape = std::vector<size_t>{bias_batch, bias_heads, q_max_seqlen, kv_max_seqlen}; \
   size_t num_segments = input_batch;                                                          \
-  if(is_ragged){                                                                              \
+  if (is_ragged) {                                                                            \
     auto cudnn_runtime_version = cudnnGetVersion();                                           \
     num_segments = input_batch * max_segments_per_seq;                                        \
     bool use_runtime_num_segments_check = false;                                              \

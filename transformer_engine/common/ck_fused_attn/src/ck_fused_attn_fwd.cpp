@@ -28,8 +28,6 @@ void log_fwd_config(const char* func_name,
                     const bool do_fp8_static_quant,
                     const bool uses_fwd_v3,
                     const bool how_v3_bf16_cvt,
-                    const void* cu_seqlen_q_padded_ptr,
-                    const void* cu_seqlen_kv_padded_ptr,
                     const fmha_fwd_args& fmha_args){
   bool ck_fused_attn_log_config = false;
   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
@@ -55,8 +53,6 @@ void log_fwd_config(const char* func_name,
     std::cout<<"skip_min_seqlen_q: "<<(fmha_args.min_seqlen_q != 0)<<std::endl;
     std::cout<<"uses_fwd_v3: "<<uses_fwd_v3<<std::endl;
     std::cout<<"how_v3_bf16_cvt: "<<how_v3_bf16_cvt<<std::endl;
-    std::cout<<"cu_seqlen_q_padded_ptr: "<<cu_seqlen_q_padded_ptr<<std::endl;
-    std::cout<<"cu_seqlen_kv_padded_ptr: "<<cu_seqlen_kv_padded_ptr<<std::endl;
 
     // debug fmha_args
     std::cout<<std::endl<<"fmha_args: "<<std::endl;
@@ -276,7 +272,7 @@ hipError_t ck_attn_fwd(
   }();
   
   // print ck traits and args when needed
-  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, how_v3_bf16_cvt, nullptr, nullptr, fmha_args);
+  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, how_v3_bf16_cvt, fmha_args);
   if (uses_fwd_v3)
   {
     set_aiter_asm_dir();
@@ -290,10 +286,7 @@ hipError_t ck_attn_fwd(
                                          bias_type,
                                          has_lse,
                                          uses_fwd_v3, 
-                                         how_v3_bf16_cvt,
-                                         nullptr, //cu_seqlen_q_padded
-                                         nullptr, //cu_seqlen_kv_padded
-                                         false);
+                                         how_v3_bf16_cvt);
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");
@@ -465,13 +458,13 @@ hipError_t ck_attn_varlen_fwd(
     }
   }
   // print ck traits and args when needed
-  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, how_v3_bf16_cvt, cu_seqlen_q_padded_ptr, cu_seqlen_kv_padded_ptr, fmha_args);
+  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, how_v3_bf16_cvt, fmha_args);
   if (uses_fwd_v3)
   {
     set_aiter_asm_dir();
   }
 
-  float average_runtime_or_v3_check_status = aiter::mha_fwd(
+  float average_runtime = aiter::mha_fwd(
     fmha_args,
     stream_config,
     data_type_str,
@@ -480,11 +473,8 @@ hipError_t ck_attn_varlen_fwd(
     bias_type,
     has_lse,
     uses_fwd_v3, 
-    how_v3_bf16_cvt,
-    nullptr,
-    nullptr,
-    false);
-  if(average_runtime_or_v3_check_status < 0){
+    how_v3_bf16_cvt);
+  if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");
   }
