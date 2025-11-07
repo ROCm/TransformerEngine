@@ -547,6 +547,8 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             # Get state for a given FP8 tensor
             if self.num_quantizers(mode) == 0:
                 continue
+            if self._fp8_metas is None or self._fp8_metas.get(mode, None) is None:
+                continue
             fp8_meta = self._fp8_metas.get(mode, None)
             state[mode] = {}
 
