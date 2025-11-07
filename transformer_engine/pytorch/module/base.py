@@ -51,7 +51,7 @@ if IS_HIP_EXTENSION:
 
 from ..utils import is_non_tn_fp8_gemm_supported
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
-from ...common.recipe import Recipe
+from ...common.recipe import DelayedScaling, Recipe
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
 
@@ -97,7 +97,7 @@ def get_multi_stream_cublas_workspace() -> List[torch.Tensor]:
     """Returns workspace for multi-stream cublas."""
     global _multi_stream_cublas_workspace
     if not _multi_stream_cublas_workspace:
-        for _ in range(tex._num_cublas_streams):
+        for _ in range(tex.get_num_cublas_streams()):
             _multi_stream_cublas_workspace.append(
                 torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda")
             )
@@ -654,6 +654,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             # Update quantizers with new amax pointers.
             self.quantizers[meta_key] = self.fp8_meta[meta_key].make_quantizers()
+            # Make sure weight tensors has correct quantizers
+            self._update_weight_quantizers()
 
             # Update the global buffers with new amax and history pointers.
             if FP8GlobalStateManager.get_buffer_info() in self.fp8_meta:
@@ -707,6 +709,30 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta[fp8_meta_tensor_key] = recipe_state
         self.quantizers[fp8_meta_tensor_key] = recipe_state.make_quantizers()
 
+    def _update_weight_quantizers(self) -> None:
+        """Update the quantizers for the weight tensors."""
+        weight_tensors = self._get_weight_tensors()
+        weight_quantizers = self._get_weight_quantizers()
+        assert len(weight_tensors) == len(weight_quantizers), (
+            f"Number of weight tensors ({len(weight_tensors)}) and quantizers "
+            f"({len(weight_quantizers)}) must match"
+        )
+        for weight, quantizer in zip(weight_tensors, weight_quantizers):
+            if quantizer is not None and isinstance(weight, QuantizedTensorBase):
+                weight.update_quantizer(quantizer)
+
+    def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorBase]]:
+        """Get the weight tensors of the module."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement _get_weight_tensors function"
+        )
+
+    def _get_weight_quantizers(self) -> List[Quantizer]:
+        """Get the weight quantizers of the module."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement _get_weight_quantizers function"
+        )
+
     def init_fp8_meta_tensors(self, recipe: Recipe) -> None:
         """Init scales and amaxes."""
         self.set_meta_tensor(True, recipe)
@@ -746,7 +772,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             reset("scaling_fwd")
             reset("scaling_bwd")
 
-    def get_extra_state(self) -> Optional[torch.Tensor]:
+    def get_extra_state(self) -> torch.Tensor:
         """Save before checkpointing."""
 
         # This implementation is working around a few issues:
@@ -781,7 +807,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         state = None
         fp8_checkpoint = self.fp8_meta["fp8_checkpoint"] or self.fp8 or self.fp8_calibration
         if not fp8_checkpoint:
-            return None
+            return torch.empty(0, dtype=torch.uint8)
 
         # Copy tensors to CPU and store
         state = {}
@@ -807,13 +833,18 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         state_serialized = torch.frombuffer(state_serialized, dtype=torch.uint8)
         return state_serialized
 
-    def set_extra_state(self, state: Optional[torch.Tensor]) -> None:
+    def set_extra_state(self, state: torch.Tensor) -> None:
         """Load previous state."""
+
+        # Maintain backwards compatibility with older checkpoints.
         if state is None:
             return
 
         # Load state
         if isinstance(state, torch.Tensor):
+            # No FP8 is indicated by an empty tensor we don't need to unpickle.
+            if state.numel() == 0:
+                return
             # Default format: byte tensor with pickled data
             state = pickle.loads(state.detach().cpu().numpy().tobytes())
         elif isinstance(state, io.BytesIO):
@@ -825,6 +856,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         if state is None:
             return
+
+        # TE 1.x checkpoint compatibility: add DelayedScaling recipe if missing
+        if "recipe" not in state:
+            # TE 1.x only supported delayed scaling, which was the default recipe
+            state["recipe"] = DelayedScaling()
+            # TE 1.x also saved scale_inv, which is not needed with Recipe object
+            state.pop("scale_inv_fwd", None)
+            state.pop("scale_inv_bwd", None)
 
         # Load extra items
         self.fp8_meta.update(state["extra_fp8_variables"])
@@ -899,6 +938,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     # assume FP8 execution.
     def init_fp8_metadata(self, num_gemms: int = 1) -> None:
         """Initialize fp8 related metadata and tensors during fprop."""
+        _original_recipe = self.fp8_meta.get("recipe", None)
+
         self.fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
         self.fp8 = FP8GlobalStateManager.is_fp8_enabled()
         self.fp8_calibration = FP8GlobalStateManager.is_fp8_calibration()
@@ -937,6 +978,19 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             self.fp8_meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
 
+        _current_recipe = self.fp8_meta["recipe"]
+        if _original_recipe is not None and not (
+            issubclass(_current_recipe.__class__, _original_recipe.__class__)
+            or issubclass(_original_recipe.__class__, _current_recipe.__class__)
+        ):
+            warnings.warn(
+                f"Recipe type changed from {_original_recipe.__class__.__name__} "
+                f"to {_current_recipe.__class__.__name__}. "
+                "This may affect model behavior."
+            )
+            # Clear cached workspaces as they were created with the old recipe/quantizer type
+            self._fp8_workspaces.clear()
+
     @contextmanager
     def prepare_forward(
         self,
@@ -950,6 +1004,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         to setup the forward aggregated amax reduction for every module
         just in case. The autocast exit will pick up the most recent one.
         """
+        self.forwarded_at_least_once = True
         # Activation recomputation is used and this is the second forward phase.
         if self.fp8 and in_fp8_activation_recompute_phase():
             FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
@@ -961,6 +1016,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             self.set_activation_dtype(inp)
             self.init_fp8_metadata(num_gemms=num_gemms)
+            self._check_weight_tensor_recipe_correspondence()
 
             if self.fp8 and self.sequence_parallel and self.fp8_meta["recipe"].delayed():
                 assert self.fp8_meta["recipe"].reduce_amax, (
@@ -1072,7 +1128,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if (
                 isinstance(
                     grad_output_.get_tensor(True),
-                    (QuantizedTensor, Float8TensorBase, MXFP8TensorBase),
+                    (
+                        QuantizedTensor,
+                        Float8TensorBase,
+                        MXFP8TensorBase,
+                        Float8BlockwiseQTensorBase,
+                    ),
                 )
                 and ctx.use_bias
             ):
@@ -1138,20 +1199,28 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     with get_rng_state_tracker().fork():
                         init_fn(param)
 
-            # If primary weights are in fp8, wrap the parameter as FP8Tensor
+            # Wrap parameters in QuantizedTensor if needed
             fp8_meta_index = self.param_init_meta[name].fp8_meta_index
             high_precision_init_val = None
             if self.primary_weights_in_fp8 and fp8_meta_index is not None:
+
+                # Keep high-precision values on CPU if needed
                 if self.preserve_high_precision_init_val:
                     high_precision_init_val = param.detach().cpu()
 
+                # Configure quantizer
                 quantizer = self.quantizers["scaling_fwd"][fp8_meta_index]
-                assert (
-                    quantizer is not None
-                )  # to use primary fp8 weight one needs to use FP8 autocast with specific recipe.
+                if quantizer is None:
+                    raise RuntimeError("Weight quantizer has not been initialized")
+                quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
                 quantizer.internal = False
+<<<<<<< HEAD
                 if IS_HIP_EXTENSION and not self.keep_fp8_weight_transpose_cache:
                     quantizer.columnwise_usage=False
+=======
+
+                # Quantize parameter
+>>>>>>> ca7407e
                 param = quantizer(param)
 
             # Redo parameter wrap in case we broke it above
@@ -1159,6 +1228,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             #       re-applying the nn.Parameter() wrap is a no-op when the input is already
             #       a parameter so we always re-apply it just for extra safety.
             param = torch.nn.Parameter(param)
+
+            # Keep high-precision values on CPU if needed
             if high_precision_init_val is not None:
 
                 # - Master weights are initialized from model weights, if we use fp8 primary
@@ -1202,7 +1273,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         fsdp_group: Optional[dist_group_type] = None,
         workspace_dtype: Optional[torch.dtype] = None,
     ) -> QuantizedTensor:
-        """Get FP8 workspace buffer and maybe update its values
+        """Get workspace buffer for weights and maybe update its values
 
         The workspace buffer may be cached for future function calls.
 
@@ -1228,13 +1299,16 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             for debug quantization, this is dtype of the tensor.
         """
 
-        # FP8 primary weights
+        # Handle case where weights are already quantized
+        # Note: Make sure weights have required usages, but do not
+        # destroy unnecessary usages since they may be used later.
         if isinstance(tensor, QuantizedTensor):
-            if update_workspace and quantizer is not None:
-                tensor.update_usage(
-                    rowwise_usage=quantizer.rowwise_usage,
-                    columnwise_usage=quantizer.columnwise_usage,
-                )
+            update_rowwise_usage = True if quantizer.rowwise_usage else None
+            update_columnwise_usage = True if quantizer.columnwise_usage else None
+            tensor.update_usage(
+                rowwise_usage=update_rowwise_usage,
+                columnwise_usage=update_columnwise_usage,
+            )
             return tensor
 
         # Try getting workspace from cache
@@ -1363,6 +1437,43 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 level=logging.WARNING,
             )
             self.name = f"Layer_{TEDebugState.get_layer_count()}"
+
+    def _check_weight_tensor_recipe_correspondence(self) -> None:
+        """
+        Verify that the weight tensor types match their corresponding recipe type.
+        This is invoked in the forward().
+
+        This establishes a 1:1 correspondence between recipe types and tensor types:
+        - DelayedScaling → Float8Tensor
+        - Float8CurrentScaling → Float8Tensor
+        - MXFP8BlockScaling → MXFP8Tensor
+        - Float8BlockScaling → Float8BlockTensor
+
+        Example case to check: recipe is DelayedScaling (DelayedScaling is set in fp8_autocast()),
+        but the weight tensor is MXFP8Tensor (MXFP8BlockScaling is set in fp8_model_init()).
+        """
+        if not self.fp8 and not self.fp8_calibration:
+            return
+        if not hasattr(self, "weight_names") or not self.weight_names:
+            return
+
+        recipe = self.fp8_meta["recipe"]
+        weight_tensors = [getattr(self, name) for name in self.weight_names]
+        for i, tensor in enumerate(weight_tensors):
+            if isinstance(tensor, QuantizedTensorBase):
+                quantizer = tensor._get_quantizer()
+                if quantizer is None:
+                    continue
+                compatible_recipe_class = quantizer._get_compatible_recipe()
+                if compatible_recipe_class is None:
+                    continue
+                if not isinstance(recipe, compatible_recipe_class):
+                    raise RuntimeError(
+                        f"Recipe mismatch for '{self.weight_names[i]}': tensor supports recipe"
+                        f" {compatible_recipe_class.__name__}, but got {recipe.__class__.__name__}."
+                        " Please check the recipes assigned during fp8_model_init() and"
+                        " fp8_autocast() calls."
+                    )
 
     def _turn_off_unsupported_features_in_debug(self):
         if (

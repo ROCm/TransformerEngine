@@ -7,7 +7,12 @@
  ************************************************************************/
 #ifndef USE_ROCM
 #include "transformer_engine/cudnn.h"
+<<<<<<< HEAD
 #include "extensions.h"
+=======
+
+#include "../extensions.h"
+>>>>>>> ca7407e
 #include "xla/ffi/api/c_api.h"
 
 namespace transformer_engine {
