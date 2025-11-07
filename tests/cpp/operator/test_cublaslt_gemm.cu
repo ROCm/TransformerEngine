@@ -93,7 +93,7 @@ void compute_ref(
       // update ref_d_amax if in fp8
       DType dtype = TypeInfo<D_Type>::dtype;
       if(isFp8Type(dtype)){
-        ref_d_amax = std::max<float>(ref_d_amax, std::fabs(val));
+        ref_d_amax = std::max(ref_d_amax, std::fabs(val));
       }
     }
   }
@@ -127,10 +127,8 @@ void compute_mxfp8_ref(
       for(size_t kk = 0; kk < k; kk++){
         size_t a_idx = transa ? (ii*k + kk) : (kk*m + ii);
         size_t b_idx = transb ? (kk*n + jj) : (jj*k + kk);
-        float a_scale_inv_val = (float)std::pow(2,
-          a_scale_inv_data[transa ? a_idx/32 : (kk/32 * m + ii)] - 127);
-        float b_scale_inv_val = (float)std::pow(2,
-          b_scale_inv_data[transb ? (kk/32 * n + jj) : b_idx/32] - 127);
+        float a_scale_inv_val = std::exp2f(a_scale_inv_data[transa ? a_idx/32 : (kk/32 * m + ii)] - 127);
+        float b_scale_inv_val = std::exp2f(b_scale_inv_data[transb ? (kk/32 * n + jj) : b_idx/32] - 127);
         val += a_scale_inv_val * (float)a_data[a_idx] * b_scale_inv_val * (float)b_data[b_idx];
       }
       if(bias_data){
@@ -144,7 +142,7 @@ void compute_mxfp8_ref(
       // update ref_d_amax if in fp8
       DType dtype = TypeInfo<D_Type>::dtype;
       if(isFp8Type(dtype)){
-        ref_d_amax = std::max<float>(ref_d_amax, std::fabs(val));
+        ref_d_amax = std::max(ref_d_amax, std::fabs(val));
       }
     }
   }
@@ -177,16 +175,11 @@ std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool
   // relax for certain FP8 gemm with hipblaslt
   if (use_mxfp8) {
     atol = 5e-4;
-    /*During hipifying std::max is converted to ::max
-    to w/a HIP bug with using std:: in device functions.
-    W/o explicitlit <double>, compiler uses non-templated int method variant from HIP headers
-    TODO: remove when switch to new hipify version after fixing HIP bug */
-    rtol = std::max<double>(rtol, 1e-3);
+    rtol = std::max(rtol, 1e-3);
   }
   else if (use_fp8) {
     atol = 1e-3;
-    //TODO: remove <double> (see comment above)
-    rtol = std::max<double>(rtol, 1e-2);
+    rtol = std::max(rtol, 1e-2);
   }
   else if (type == DType::kBFloat16) {
     //relax for certain prime number TN gemm
