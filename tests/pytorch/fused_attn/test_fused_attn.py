@@ -375,8 +375,7 @@ def test_dot_product_attention(
     if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
         pytest.skip("Less than two backends to compare.")
 
-    # Enable backward for standard configs and MLA HD192_HD128
-    is_training = (config.head_dim_qk <= 128 and config.head_dim_v <= 128) or (config.head_dim_qk == 192 and config.head_dim_v == 128)
+    is_training = (config.head_dim_qk <= 192 and config.head_dim_v <= 128)
     # UnfusedDotProductAttention backend
     if unfused_attn_supported:
         unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
