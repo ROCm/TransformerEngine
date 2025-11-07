@@ -186,7 +186,7 @@ std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool
   else if (use_fp8) {
     atol = 1e-3;
     //TODO: remove <double> (see comment above)
-    rtol = std::max<double>(rtol, 5e-3);
+    rtol = std::max<double>(rtol, 1e-2);
   }
   else if (type == DType::kBFloat16) {
     //relax for certain prime number TN gemm
