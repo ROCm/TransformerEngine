@@ -12,7 +12,7 @@ TEST_DIR=${TE_PATH}tests/pytorch
 #: ${TEST_WORKERS:=4}
 
 install_prerequisites() {
-    pip install 'numpy>=1.22.4,<2.0' pandas
+    pip install 'numpy>=1.22.4' pandas
     rc=$?
     if [ $rc -ne 0 ]; then
         script_error "Failed to install test prerequisites"
