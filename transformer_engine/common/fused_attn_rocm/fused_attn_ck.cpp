@@ -559,6 +559,7 @@ void fused_attn_ck_fwd_impl(
 
   bool nvte_ck_uses_fwd_v3 = getenv<int>("NVTE_CK_USES_FWD_V3", 0);
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
+  bool nvte_ck_zero_out_pad = getenv<int>("NVTE_CK_ZERO_OUT_PAD", 1);
 
   bool is_ragged = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_THD;
   bool is_SBHD = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_SBHD;
@@ -672,10 +673,10 @@ void fused_attn_ck_fwd_impl(
     workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + (b+1)*sizeof(int32_t));
     generate_cu_seqlen_padded(s_q, s_kv, b, devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedKV, stream);
     if(nvte_log_ck_config){
-      std::cout << "\nattn_fwd(ck): Converting BSHD to THD\n";
+      std::cout << "\nattn_fwd(ck): generating cu_seqlen_padded in BSHD+padding to THD+padding conversion.\n";
     }
   }
-  if(is_batch && is_padding){
+  if(is_padding && nvte_ck_zero_out_pad){
     // reset the final results since padded places need to be 0
     NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrO, 0, o_storage_bytes, stream));
   }
@@ -918,23 +919,17 @@ void fused_attn_ck_bwd_impl(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
   if((layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) || (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D)){
     // just memset all dq, dk, dv
-    if(is_batch && is_padding){
-      NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdQ, 0, q_storage_bytes + k_storage_bytes+ v_storage_bytes, stream));
-    }
+    NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdQ, 0, q_storage_bytes + k_storage_bytes+ v_storage_bytes, stream));
   }else{
-    //TODO: check whether we can remove this zero-out in padding/unpadding workaround
-    // for pad between seqs case, we need to reset all dq, dk, dv
-    if(is_batch && is_padding){
-      // HD_2HD, HD_H2D, HD_HD_HD can just memset dq itself
-      NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdQ, 0, q_storage_bytes, stream));
-      if(layout_group==NVTE_QKV_Layout_Group::NVTE_HD_2HD ||layout_group==NVTE_QKV_Layout_Group::NVTE_HD_H2D){
-        //kvpacked
-        NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdK, 0, k_storage_bytes + v_storage_bytes, stream));
-      }else{
-        //q, k, v separated
-        NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdK, 0, k_storage_bytes, stream));
-        NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdV, 0, v_storage_bytes, stream));
-      }
+    // HD_2HD, HD_H2D, HD_HD_HD can just memset dq itself
+    NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdQ, 0, q_storage_bytes, stream));
+    if(layout_group==NVTE_QKV_Layout_Group::NVTE_HD_2HD ||layout_group==NVTE_QKV_Layout_Group::NVTE_HD_H2D){
+      //kvpacked
+      NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdK, 0, k_storage_bytes + v_storage_bytes, stream));
+    }else{
+      //q, k, v separated
+      NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdK, 0, k_storage_bytes, stream));
+      NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdV, 0, v_storage_bytes, stream));
     }
   }
  
@@ -977,8 +972,6 @@ void fused_attn_ck_bwd_impl(
     } else{
       NVTE_ERROR("NVTE_3HD NVTE_H3D should have h=hg.");
     }
-    // zeroing out dkv expanded in case CK requires that
-    NVTE_CHECK_CUDA(cudaMemsetAsync(dk_expanded_ptr, 0, nvte_dtype_size(dtype)*max_tokens_kv*h*(d_qk+d_v), stream));
   }
 
   void* devPtrAlibiSlope = nullptr;
@@ -1088,7 +1081,7 @@ void fused_attn_ck_bwd_impl(
     workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + (b+1)*sizeof(int32_t));
     generate_cu_seqlen_padded(s_q, s_kv, b, devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedKV, stream);
     if(nvte_log_ck_config){
-      std::cout << "\nattn_bwd(ck): Converting BSHD to THD\n";
+      std::cout << "\nattn_bwd(ck): generating cu_seqlen_padded in BSHD+padding to THD+padding conversion.\n";
     }
   }
 
