@@ -45,7 +45,7 @@ std::tuple<int32_t, int32_t> get_window_sizes(
 ){
   using aotriton::v3::flash::WindowValue;
   if(is_causal){
-    return {WindowValue::BottomRightAligned, WindowValue::BottomRightAligned};
+    return {WindowValue::TopLeftAligned, WindowValue::TopLeftAligned};
   }
   return {-1, -1};
 }
