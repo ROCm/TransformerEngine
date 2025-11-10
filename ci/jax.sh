@@ -71,16 +71,16 @@ run_test_config_mgpu() {
     *0.4.35*)
         # Workaround for distributed tests hang with xla_flag
  	    XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false" run 3 test_distributed_fused_attn.py -k 'not test_context_parallel_ring_attn'
- 	    XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false" NVTE_CK_USES_FWD_V3=1 NVTE_CK_USES_BWD_V3=1 run 3 test_distributed_fused_attn.py -k 'not test_context_parallel_ring_attn'
+ 	    XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false" NVTE_CK_USES_FWD_V3=1 NVTE_CK_USES_BWD_V3=1 test $_fus_attn = "ck" && run 3 test_distributed_fused_attn.py -k 'not test_context_parallel_ring_attn'
  
         # Test ring attention with xla_flag --xla_experimental_ignore_channel_id only
 	    XLA_FLAGS="--xla_experimental_ignore_channel_id" run_lbl "parallel_ring" 3 test_distributed_fused_attn.py -k test_context_parallel_ring_attn
-	    XLA_FLAGS="--xla_experimental_ignore_channel_id" NVTE_CK_USES_FWD_V3=1 NVTE_CK_USES_BWD_V3=1 run_lbl "parallel_ring" 3 test_distributed_fused_attn.py -k test_context_parallel_ring_attn
+	    XLA_FLAGS="--xla_experimental_ignore_channel_id" NVTE_CK_USES_FWD_V3=1 NVTE_CK_USES_BWD_V3=1 test $_fus_attn = "ck" && run_lbl "parallel_ring" 3 test_distributed_fused_attn.py -k test_context_parallel_ring_attn
         ;;
     *)
         # Workaround for distributed tests hang with xla_flag
         XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false" run 3 test_distributed_fused_attn.py
-        XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false" NVTE_CK_USES_FWD_V3=1 NVTE_CK_USES_BWD_V3=1 run 3 test_distributed_fused_attn.py
+        XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false" NVTE_CK_USES_FWD_V3=1 NVTE_CK_USES_BWD_V3=1 test $_fus_attn = "ck" && run 3 test_distributed_fused_attn.py
         ;;
     esac
     
