@@ -1009,7 +1009,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if update_workspace and quantizer is not None:
                 tensor.update_usage(
                     rowwise_usage=quantizer.rowwise_usage,
-                    columnwise_usage=quantizer.columnwise_usage,
+                    columnwise_usage=quantizer.columnwise_usage and create_transpose_cache,
                 )
             return tensor
 

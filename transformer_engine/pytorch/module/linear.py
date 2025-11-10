@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -282,8 +284,8 @@ class _Linear(torch.autograd.Function):
                         inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
                 saved_inputmat = inputmat
 
-            # Weight with column-wise usage is needed for dgrad GEMM.
-            if inp.requires_grad:
+            # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
+            if inp.requires_grad and keep_fp8_weight_transpose_cache:
                 if isinstance(weightmat, QuantizedTensor):
                     weightmat.update_usage(columnwise_usage=True)
 
@@ -828,10 +830,20 @@ class Linear(TransformerEngineBaseModule):
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
-    keep_fp8_weight_transpose_cache: bool, default = 'True'
-                                     if set to `False`, it will not cache fp8 weight buffer instead of 
-                                     recomputing fp8 weight transpose. Recommend set to `False` when
-                                     enable FSDP parallel.
+    keep_fp8_weight_transpose_cache: bool, default = True
+                Controls whether to cache the FP8 weight transpose buffer during training.
+
+                - If set to `True` (default), the FP8 weight transpose buffer is cached to avoid recomputation, 
+                which can improve performance but significantly increases memory usage.
+                - If set to `False`, the buffer is not cached and the FP8 weight transpose is recomputed as needed. 
+                This reduces memory consumption, especially during checkpoint loading and runtime.
+
+                **Recommendation**: Set this to `False` when using Fully Sharded Data Parallel (FSDP) training. 
+                Caching FP8 weight transposes can double memory usage for modules such as `Linear`, 
+                `LayerNormLinear`, and `LayerNormMLP`, which may lead to excessive memory pressure and 
+                reduced efficiency of PyTorch's caching allocator.
+
+                Use this setting to balance memory usage and performance based on your training configuration.
 
     """
 

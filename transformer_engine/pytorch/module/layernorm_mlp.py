@@ -426,8 +426,8 @@ class _LayerNormMLP(torch.autograd.Function):
             extra_output=rs_out,
         )
 
-        # Weight with column-wise usage is needed for dgrad GEMM.
-        if is_grad_enabled:
+        # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
+        if is_grad_enabled and inp.requires_grad and keep_fp8_weight_transpose_cache:
             if isinstance(fc1_weight_final, QuantizedTensor):
                 fc1_weight_final.update_usage(columnwise_usage=True)
             if isinstance(fc2_weight_final, QuantizedTensor):
@@ -1219,10 +1219,20 @@ class LayerNormMLP(TransformerEngineBaseModule):
                      batch size per training step. Needed for JIT Warmup, a technique where jit
                      fused functions are warmed up before training to ensure same kernels are
                      used for forward propogation and activation recompute phase.
-    keep_fp8_weight_transpose_cache: bool, default = 'True'
-                                     if set to `False`, it will not cache fp8 weight buffer instead of 
-                                     recomputing fp8 weight transpose. Recommend set to `False` when
-                                     enable FSDP parallel.
+    keep_fp8_weight_transpose_cache: bool, default = True
+                Controls whether to cache the FP8 weight transpose buffer during training.
+
+                - If set to `True` (default), the FP8 weight transpose buffer is cached to avoid recomputation, 
+                which can improve performance but significantly increases memory usage.
+                - If set to `False`, the buffer is not cached and the FP8 weight transpose is recomputed as needed. 
+                This reduces memory consumption, especially during checkpoint loading and runtime.
+
+                **Recommendation**: Set this to `False` when using Fully Sharded Data Parallel (FSDP) training. 
+                Caching FP8 weight transposes can double memory usage for modules such as `Linear`, 
+                `LayerNormLinear`, and `LayerNormMLP`, which may lead to excessive memory pressure and 
+                reduced efficiency of PyTorch's caching allocator.
+
+                Use this setting to balance memory usage and performance based on your training configuration.
                                      
     """
 
