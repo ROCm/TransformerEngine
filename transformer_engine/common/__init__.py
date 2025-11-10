@@ -113,10 +113,9 @@ def _get_shared_object_file(library: str) -> Path:
 
     # Case 1: Typical user workflow: Both locations are the same, return any result.
     if te_install_dir == site_packages_dir:
-        assert (
-            so_path_in_install_dir is not None
-        ), f"Could not find shared object file for Transformer Engine {library} lib."
-        return so_path_in_install_dir
+        if so_path_in_install_dir is not None:
+            return so_path_in_install_dir
+        raise FileNotFoundError(f"Could not find shared object file for Transformer Engine {library} lib.")
 
     # Case 2: ERR! Both locations are different but returned a valid result.
     # NOTE: Unlike for source installations, pip does not wipe out artifacts from
@@ -139,7 +138,7 @@ def _get_shared_object_file(library: str) -> Path:
     if so_path_in_default_dir is not None:
         return so_path_in_default_dir
 
-    raise RuntimeError(f"Could not find shared object file for Transformer Engine {library} lib.")
+    raise FileNotFoundError(f"Could not find shared object file for Transformer Engine {library} lib.")
 
 
 @functools.lru_cache(maxsize=None)
