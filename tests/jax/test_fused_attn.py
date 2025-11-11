@@ -360,6 +360,18 @@ class FusedAttnRunner:
                 "is either BSHD_BSHD_BSHD or THD_THD_THD"
             )
 
+        if self.head_dim_qk == 192 and self.head_dim_v == 128:
+            if self.attn_bias_type != AttnBiasType.NO_BIAS or self.bias_shape is not None:
+                pytest.skip("Aiter currently supports MLA hd192_hd128 only without bias.")
+            if self.attn_mask_type not in (AttnMaskType.CAUSAL_MASK, AttnMaskType.NO_MASK):
+                pytest.skip("Aiter currently supports MLA hd192_hd128 only for CAUSAL or NO_MASK.")
+            if self.dropout_prob != 0.0:
+                pytest.skip("Aiter currently supports MLA hd192_hd128 only without dropout.")
+            if self.qkv_layout != QKVLayout.BSHD_BSHD_BSHD:
+                pytest.skip("Aiter currently supports MLA hd192_hd128 only with BSHD_BSHD_BSHD layout.")
+            if self.seq_desc_format != SeqDescFormat.Mask:
+                pytest.skip("Aiter currently supports MLA hd192_hd128 only with mask-based SeqDescFormat.")
+
         self.backend = FusedAttnHelper(
             self.dtype,
             self.dtype,
@@ -994,6 +1006,12 @@ class FusedAttnRunner:
         ),
         pytest.param(
             2, 2048, 2048, 12, 6, 128, 64, jnp.float16, id="2-2048-2048-12-6-128-64-FP16-GQA"
+        ),
+        pytest.param(
+            10, 4096, 4096, 16, 16, 192, 128, jnp.float16, id="10-4096-4096-16-16-192-128-FP16-MLA",
+        ),
+        pytest.param(
+            10, 4096, 4096, 16, 16, 192, 128, jnp.bfloat16, id="10-4096-4096-16-16-192-128-BF16-MLA",
         ),
     ],
 )
