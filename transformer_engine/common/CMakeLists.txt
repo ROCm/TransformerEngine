@@ -239,6 +239,7 @@ else()
       IGNORES "*/aotriton/*"
       IGNORES "*/ck_fused_attn/*"
       CUSTOM_MAP_FILE "${TE}/hipify_custom_map.json"
+      NO_MATH_REPLACE
   )
   get_hipified_list("${transformer_engine_SOURCES}" te_hip_sources)
   message("${message_line}")

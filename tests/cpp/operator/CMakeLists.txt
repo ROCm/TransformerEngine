@@ -60,6 +60,7 @@ else()
   hipify(CUDA_SOURCE_DIR ${cuda_source_dir} 
     HEADER_INCLUDE_DIR ${header_include_dir}
     CUSTOM_MAP_FILE "${TE}/hipify_custom_map.json"
+    NO_MATH_REPLACE
   )
   get_hipified_list("${test_cuda_sources}" test_hip_sources)
   message("${message_line}")
