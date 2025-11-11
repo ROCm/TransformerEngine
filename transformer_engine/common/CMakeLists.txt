@@ -382,6 +382,26 @@ if(USE_CUDA)
 
 # Hack to enable dynamic loading in cuDNN frontend
 target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
+else()
+  option(NVTE_ENABLE_ROCSHMEM "Compile with ROCSHMEM library" OFF)
+  if (NVTE_ENABLE_ROCSHMEM)
+    add_subdirectory(rocshmem_api)
+    if(DEFINED ENV{ROCSHMEM_HOME})
+      set(ROCSHMEM_HOME "$ENV{ROCSHMEM_HOME}" CACHE STRING "Location of ROCSHMEM installation")
+    else()
+      set(ROCSHMEM_HOME "/opt/rocm" CACHE STRING "Location of ROCSHMEM installation (default)")
+    endif()
+    target_link_options(transformer_engine PRIVATE
+        -fgpu-rdc
+    )
+    target_link_libraries(transformer_engine PUBLIC 
+        -Wl,--whole-archive
+        rocshmemapi
+        "${ROCSHMEM_HOME}/lib/librocshmem.a"
+        -Wl,--no-whole-archive
+    )
+    target_include_directories(transformer_engine PUBLIC ${ROCSHMEMAPI_INCLUDE_DIR})
+  endif()
 endif()
 
 # Helper functions to make header files with C++ strings
