@@ -8,16 +8,17 @@
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 
-#if __CUDA_ARCH__ >= 800
-#define half_dtype nv_bfloat16
-#else
-#define half_dtype half
-#endif
 
 #ifdef __HIP_PLATFORM_AMD__
 #define half_dtype hip_bfloat16
 #define __nv_fp8_e5m2 te_hip_fp8_e5m2
 #define __nv_fp8_e4m3 te_hip_fp8_e4m3
+#else
+#if __CUDA_ARCH__ >= 800
+#define half_dtype nv_bfloat16
+#else
+#define half_dtype half
+#endif
 #endif
 
 #include <assert.h>
@@ -2094,7 +2095,8 @@ void allgather2_userbuff_inplace(const int handler, const int offset, const int 
     }
   }
 #else
-  if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
+  int threads = comm->threads;
+  if (comm->use_mc && (comm->memflags[handler] & NVTE_UB_MEM_MC_CREATED)) {
     callranks_agMC(2) callranks_agMC(4) callranks_agMC(8) callranks_agMC(16) callranks_agMC(32)
   } else {
     callranks_ag(2) callranks_ag(4) callranks_ag(8) callranks_ag(16) callranks_ag(32)
@@ -2150,7 +2152,7 @@ void reducescatter2_userbuff_inplace(const int handler, const int offset, const 
   }
 #else
   int threads = comm->threads;
-  if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
+  if (comm->use_mc && (comm->memflags[handler] & NVTE_UB_MEM_MC_CREATED)) {
     callranks_rsMC(2) callranks_rsMC(4) callranks_rsMC(8) callranks_rsMC(16) callranks_rsMC(32)
   } else {
     callranks_rs(2) callranks_rs(4) callranks_rs(8) callranks_rs(16) callranks_rs(32)
@@ -2666,6 +2668,7 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
         cudaLaunchKernelExC(&cfg, reinterpret_cast<void *>(kuserbuffers_pushsend), kernelArgs));
 #else
         cudaLaunchKernel(reinterpret_cast<void *>(kuserbuffers_pushsend), sms, threads, kernelArgs, 0, stream));
+#endif
   }
 }
 
@@ -2812,7 +2815,7 @@ void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler
   void *flagptr_send = GET_SEND_PTR_BY_INDEX(send_peerlocal, comm, dsthandler, 0);
   void *flagptr_recv = GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 0);
 
-#ifndef
+#ifndef __HIP_PLATFORM_AMD__
   SETUP_LAUNCH_CONFIG(comm->sms, 1024, stream);
 #else
   int sms = comm->sms;

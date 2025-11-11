@@ -185,18 +185,14 @@ def _get_layer_args(config, tp_group, tp_size, reference=False):
 
     return args, kwargs, input_shape
 
-def create_ub_cfgs(config_file:str, tp_size: int = 8):
+def create_ub_cfgs(config_file: str, tp_size: int = 8):
     import json
     with open(config_file, 'r') as f:
         data = json.load(f)
     cfgs = {}
     _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
     layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
-
-    for name, method in data.items():
-        is_reduce_scatter = name in layers_reduce_scatter_overlap
-
-        layers_all_gather_overlap = [
+    layers_all_gather_overlap = [
                 "qkv_fprop",
                 "qkv_dgrad",
                 "proj_dgrad",
@@ -204,13 +200,14 @@ def create_ub_cfgs(config_file:str, tp_size: int = 8):
                 "fc1_dgrad",
                 "fc2_dgrad",
             ]
+
+    for name, method in data.items():
         if _MIN_STREAM_PRIORITY is None or _MAX_STREAM_PRIORITY is None:
             _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = tex.get_stream_priority_range()
         
-        
         cfg = {
             "method": method,
-            "is_reduce_scatter": is_reduce_scatter,
+            "is_reduce_scatter": name in layers_reduce_scatter_overlap,
             "num_sm": 1 if method == "ring_exchange" else 16,
             "cga_size": 1 if method == "ring_exchange" else 2,
             "set_sm_margin": False,

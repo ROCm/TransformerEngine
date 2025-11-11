@@ -187,7 +187,6 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
         std::move(swizzle_scaling_factors(B_tensor, !transb)));
 
     if (comm_overlap) {
-#ifndef USE_ROCM
       // Prepare extra output tensor
       TensorWrapper extra_output_tensor;
       if (extra_output.has_value()) {
@@ -209,6 +208,13 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
         if (comm_overlap->is_atomic_gemm()) {
           NVTE_SCOPED_GIL_RELEASE({
             comm_overlap->atomic_gemm_overlap_ag(A_tensor, transa, B_tensor, transb, D_tensor,
+                                                 bias_tensor, te_pre_gelu_out, te_workspace, grad,
+                                                 accumulate, use_split_accumulator,
+                                                 extra_output_tensor, main_stream);
+          });
+        } else if (comm_overlap->is_use_rd()) {
+          NVTE_SCOPED_GIL_RELEASE({
+            comm_overlap->split_overlap_ag_rd(A_tensor, transa, B_tensor, transb, D_tensor,
                                                  bias_tensor, te_pre_gelu_out, te_workspace, grad,
                                                  accumulate, use_split_accumulator,
                                                  extra_output_tensor, main_stream);
@@ -238,9 +244,6 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
           });
         }
       }
-#else
-    NVTE_ERROR("ROCm TE does not support comm_overlap\n");
-#endif //!USE_ROCM
     } else {
       // Launch GEMM
       NVTE_SCOPED_GIL_RELEASE({

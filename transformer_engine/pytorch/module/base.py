@@ -308,6 +308,7 @@ def initialize_ub(
             "comm_priority": _MAX_STREAM_PRIORITY,
             "gemm_priority": _MIN_STREAM_PRIORITY,
             "pipeline_rs_overlap_first_gemm": False,
+            "use_rd": False,
         }
         return default_cfg
 
@@ -326,6 +327,7 @@ def initialize_ub(
         comm_priority: int = 0,
         gemm_priority: int = 0,
         pipeline_rs_overlap_first_gemm: bool = False,
+        use_rd: bool = False,
     ) -> None:
         if atomic_gemm:
             warnings.warn(

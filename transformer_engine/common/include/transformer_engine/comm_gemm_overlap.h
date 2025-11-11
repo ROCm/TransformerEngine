@@ -58,6 +58,7 @@ class CommOverlapCore {
   int _comm_priority;
   bool _atomic_gemm{false};
   bool _is_p2p{false};
+  bool _use_rd{false};
 
   TensorWrapper _ubuf;
   TensorWrapper _counter;
@@ -92,6 +93,8 @@ class CommOverlapCore {
   bool is_atomic_gemm() { return _atomic_gemm; }
 
   bool is_p2p_overlap() { return _is_p2p; }
+
+  bool is_use_rd() { return _use_rd; }
 
   bool is_fp8_ubuf() { return _ubuf.element_size() == 1; }
 
@@ -199,7 +202,9 @@ class CommOverlapBase : public CommOverlapCore {
                         TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
                         TensorWrapper &workspace, bool grad, bool accumulate,
                         bool use_split_accumulator, TensorWrapper &B_copy,
-                        cudaStream_t stream_main) override;
+                        cudaStream_t stream_main) override {
+    NVTE_ERROR("Operation not supported.");                      
+  };
 
   /*
   ** Split FPROP GEMM + ReduceScatter

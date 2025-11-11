@@ -403,9 +403,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS, py::arg("comm_cga_size") = 1,
            py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0, py::arg("num_comm_sm") = 1,
            py::arg("set_sm_margin") = false, py::arg("atomic_gemm") = false,
-           py::arg("use_ce") = true, py::arg("aggregate") = false, py::arg("use_rd" = false))
+           py::arg("use_ce") = true, py::arg("aggregate") = false, py::arg("use_rd") = false)
       .def("copy_into_buffer", &CommOverlapP2P::copy_into_buffer, py::arg("input"),
            py::arg("local_chunk") = false)
       .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("local_chunk") = false,
-           py::arg("shape") = std::nullopt,);
+           py::arg("shape") = std::nullopt);
 }

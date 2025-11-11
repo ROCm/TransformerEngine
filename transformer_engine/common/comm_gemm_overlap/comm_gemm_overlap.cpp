@@ -21,6 +21,12 @@
 #define HALF_BYTES 2
 #define UB_MAX_SM 32
 
+#ifdef __HIP_PLATFORM_AMD__
+#define half_dtype hip_bfloat16
+#define __nv_fp8_e5m2 te_hip_fp8_e5m2
+#define __nv_fp8_e4m3 te_hip_fp8_e4m3
+#endif
+
 using namespace std::placeholders;
 
 namespace transformer_engine {
@@ -448,7 +454,7 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
                                        TensorWrapper &pre_gelu_out, TensorWrapper &workspace,
                                        bool grad, bool accumulate, bool use_split_accumulator,
                                        TensorWrapper &rs_output, cudaStream_t stream_main) {
-  printf("split_overlap_rs_pipeline");
+  printf("split_overlap_rs_pipeline\n");
   // Get GEMM dimensions
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
@@ -596,7 +602,7 @@ CommOverlapP2PBase::CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, 
                                        CommOverlapType comm_type, int num_max_streams,
                                        int comm_cga_size, int gemm_priority, int comm_priority,
                                        int num_comm_sm, bool set_sm_margin, bool use_ce,
-                                       bool atomic_gemm, bool aggregate, bool use_rd = false)
+                                       bool atomic_gemm, bool aggregate, bool use_rd)
     : CommOverlapCore(myrank, numranks, mylocal, numlocal, mynode, numnodes, tp_size,
                       allgather_handle, barrier_handle, tp_size, num_max_streams, comm_cga_size,
                       gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce,
@@ -798,7 +804,7 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
                                           TensorWrapper &workspace, bool grad, bool accumulate,
                                           bool use_split_accumulator, TensorWrapper &B_copy,
                                           cudaStream_t stream_main) {
-  printf("split_overlap_ag");
+  printf("split_overlap_ag\n");
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;
@@ -960,12 +966,12 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
 ** This function assumes the input_b is pre-copied to _ubufs[rank_id]. This is needed to have AG
 ** outputs in each rank to be in the contiguous memory space after all ring exchange phases.
 */
-void CommOverlapP2PBase::split_overlap_ag_rd(TensorWrapper &A, bool transa, TensorWrapper &B,
-                                          bool transb, TensorWrapper &D, TensorWrapper &bias,
-                                          TensorWrapper &pre_gelu_out, TensorWrapper &workspace,
-                                          bool grad, bool accumulate, bool use_split_accumulator,
-                                          TensorWrapper &B_copy, cudaStream_t stream_main) {
-  printf("split_overlap_ag_rd");
+void CommOverlapP2PBase::split_overlap_ag_rd(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                                bool transb, TensorWrapper &D, TensorWrapper &bias,
+                                TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
+                                bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy,
+                                cudaStream_t stream_main) {
+  printf("split_overlap_ag_rd\n");
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;
@@ -1025,12 +1031,12 @@ void CommOverlapP2PBase::split_overlap_ag_rd(TensorWrapper &A, bool transa, Tens
       // GEMM
       char *input_b_chunk_ptr = input_b_ptr + send_offset;
       auto input_b_chunk =
-          TensorWrapper(reinterpret_cast<void *>(input_b_chunk_ptr), {n_chunk * 2, k}, B.dtype(),
+          TensorWrapper(reinterpret_cast<void *>(input_b_chunk_ptr), std::vector<size_t>{n_chunk * 2, k}, B.dtype(),
                         nullptr, nullptr, B.scale_inv());
 
       char *output_chunk_ptr = output_ptr + (send_chunk_id * output_chunk_bytes);
       auto output_chunk = TensorWrapper(reinterpret_cast<void *>(output_chunk_ptr),
-                                        {n_chunk * 2, m}, D.dtype(), D.amax(), D.scale(), nullptr);
+                                        std::vector<size_t>{n_chunk * 2, m}, D.dtype(), D.amax(), D.scale(), nullptr);
 
       char *aux_chunk_ptr =
           (do_gelu) ? pre_gelu_out_ptr + (send_chunk_id * aux_chunk_bytes) : nullptr;
@@ -1084,12 +1090,12 @@ void CommOverlapP2PBase::split_overlap_ag_rd(TensorWrapper &A, bool transa, Tens
         cudaStream_t compute_stream = _stream_compute[chunk_id % _stream_compute.size()];
 
         auto input_b_chunk = TensorWrapper(_ubufs[chunk_id].dptr(),
-                                          {n_chunk, k}, B.dtype(),
+                                          std::vector<size_t>{n_chunk, k}, B.dtype(),
                                           nullptr, nullptr, B.scale_inv());
 
         char* output_chunk_ptr = output_ptr + (chunk_id * output_chunk_bytes);
         auto output_chunk = TensorWrapper(reinterpret_cast<void *>(output_chunk_ptr),
-                                          {n_chunk, m},
+                                          std::vector<size_t>{n_chunk, m},
                                           D.dtype(), D.amax(), D.scale(), nullptr);
 
         char *aux_chunk_ptr =
@@ -1140,12 +1146,12 @@ void CommOverlapP2PBase::split_overlap_ag_rd(TensorWrapper &A, bool transa, Tens
           cudaStream_t compute_stream = _stream_compute[new_chunk_id % _stream_compute.size()];
 
           auto input_b_chunk = TensorWrapper(_ubufs[new_chunk_id].dptr(),
-                                            {n_chunk, k}, B.dtype(),
+                                            std::vector<size_t>{n_chunk, k}, B.dtype(),
                                             nullptr, nullptr, B.scale_inv());
 
           char* output_chunk_ptr = output_ptr + (new_chunk_id * output_chunk_bytes);
           auto output_chunk = TensorWrapper(reinterpret_cast<void *>(output_chunk_ptr),
-                                            {n_chunk, m},
+                                            std::vector<size_t>{n_chunk, m},
                                             D.dtype(), D.amax(), D.scale(), nullptr);
 
           char *aux_chunk_ptr =
@@ -1271,7 +1277,7 @@ void CommOverlapP2PBase::split_overlap_rs(const TensorWrapper &A, bool transa,
                                           TensorWrapper &workspace, bool grad, bool accumulate,
                                           bool use_split_accumulator, TensorWrapper &rs_output,
                                           cudaStream_t stream_main) {
-  printf("split_overlap_rs_p2p");
+  printf("split_overlap_rs_p2p\n");
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;

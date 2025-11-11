@@ -13,14 +13,6 @@
 
 #include "common.h"
 
-#ifdef USE_ROCM
-namespace transformer_engine {
-//dummy CommOverlapCore, CommOverlapType in rocm
-class CommOverlapCore{};
-class CommOverlapType{};
-}
-#endif
-
 namespace transformer_engine::pytorch {
 
 /***************************************************************************************************
@@ -456,7 +448,7 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                  int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
                  int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 3,
                  bool set_sm_margin = true, bool atomic_gemm = false, bool use_ce = true,
-                 bool aggregate = false);
+                 bool aggregate = false, bool use_rd = false);
 
   ~CommOverlapP2P() {}
 
