@@ -627,7 +627,6 @@ TEST_P(FusedCastMXFP8TestSuite, TestFusedCastMXFP8) {
 
     const bool rowwise = block_size.second != 1;
     const bool colwise = block_size.first != 1;
-
     if (processing_method == ProcessingMethod::CAST_ACT) {
         // Forward activations
         ACT_FUNC_SWITCH(Act_type, OP,
