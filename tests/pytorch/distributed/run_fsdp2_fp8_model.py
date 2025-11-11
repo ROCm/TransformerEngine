@@ -90,6 +90,9 @@ def _parse_args(argv=None, namespace=None):
         "--fp8-init", action="store_true", default=False, help="Initialize primary weights in FP8."
     )
     parser.add_argument(
+        "--fp8-autocast", action="store_true", default=False, help="Enable FP8 autocast."
+    )
+    parser.add_argument(
         "--iter", type=int, default=10, help="Number of iterations for forward pass"
     )
     parser.add_argument('--profile', action='store_true',
@@ -215,7 +218,10 @@ def _train(args):
     else:
         model = DDP(model, device_ids=[LOCAL_RANK])
 
-    optimizer =  te.optimizers.FusedAdam(model.parameters(), lr=1e-3)
+    if args.fp8_init:
+        optimizer =  te.optimizers.FusedAdam(model.parameters(), lr=1e-3, master_weights=True, use_decoupled_grad=True)
+    else:
+        optimizer =  te.optimizers.FusedAdam(model.parameters(), lr=1e-3)
 
     input_path = Path("shared_input.pt")
     if input_path.exists():
@@ -253,7 +259,10 @@ def _train(args):
 
         # Zero the parameter gradients
         optimizer.zero_grad()
-        with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+        if args.fp8_autocast:
+            with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+                output = model(input_data)
+        else:
             output = model(input_data)
         target = torch.randn(args.batch_size, args.output_size).to(device)
         loss = F.mse_loss(output, target)
@@ -286,6 +295,9 @@ def _train(args):
         torch.save(out_tensors, args.gradients_save_file)
 
     if args.memory_profile:
+        with open('memory_summary.txt', 'w') as f:
+            f.write(torch.cuda.memory_summary(device=None, abbreviated=False))
+        
         snapshot = torch.cuda.memory._snapshot()
         import pickle
         with open('memory_snapshot.pickle', 'wb') as f:
