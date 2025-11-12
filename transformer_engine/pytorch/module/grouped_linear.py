@@ -91,23 +91,13 @@ class _GroupedLinear(torch.autograd.Function):
         # Make sure input dimensions are compatible
         in_features = weights[0].shape[-1]
         assert inp.shape[-1] == in_features, "GEMM not possible"
-        
-        # Optimization: avoid torch.split for non-FP8 path
-        inp_reshaped = inp.view(-1, in_features)
-        use_optimized_path = not fp8  # Only use optimized path when not using FP8
-        
-        if use_optimized_path:
-            # For non-FP8, keep input as single tensor - will be split in C++
-            inputmats = None
-            inp_single = cast_if_needed(inp_reshaped, activation_dtype)
-        else:
-            # For FP8, we need split tensors for fused_multi_quantize
-            inputmats = torch.split(inp_reshaped, m_splits)
+        inputmats = torch.split(inp.view(-1, in_features), m_splits)
+        if fp8:
             assert_dim_for_fp8_exec(*inputmats, *weights)
-            # Cast input to expected dtype
-            inputmats_no_fp8 = [cast_if_needed(mat, activation_dtype) for mat in inputmats]
-            inputmats = []
-            inp_single = None
+
+        # Cast input to expected dtype
+        inputmats_no_fp8 = [cast_if_needed(mat, activation_dtype) for mat in inputmats]
+        inputmats = []
 
         weight_requires_grad = weights[0].requires_grad
 
@@ -153,7 +143,7 @@ class _GroupedLinear(torch.autograd.Function):
                 weights_fp8.append(weight_fp8)
 
         else:
-            inputmats = inputmats_no_fp8 if not use_optimized_path else None
+            inputmats = inputmats_no_fp8
             bias_dtype = activation_dtype
             weights_fp8 = [cast_if_needed(weight, activation_dtype) for weight in weights]
 
@@ -165,46 +155,26 @@ class _GroupedLinear(torch.autograd.Function):
             device=device,
         )
 
-        if use_optimized_path:
-            # Use optimized path with single input tensor
-            from ..cpp_extensions import general_grouped_gemm_single_input
-            _ = general_grouped_gemm_single_input(
-                inp_single,
-                weights_fp8,
-                [out],
-                activation_dtype,
-                get_multi_stream_cublas_workspace(),
-                single_output=True,
-                m_splits=m_splits,
-                bias=biases,
-                use_bias=use_bias,
-                use_split_accumulator=fprop_gemm_use_split_accumulator,
-            )
-        else:
-            # Use standard path with split input tensors
-            _ = general_grouped_gemm(
-                weights_fp8,
-                inputmats,
-                [out],
-                activation_dtype,
-                get_multi_stream_cublas_workspace(),
-                single_output=True,
-                m_splits=m_splits,
-                bias=biases,
-                use_bias=use_bias,
-                use_split_accumulator=fprop_gemm_use_split_accumulator,
-            )
+        _ = general_grouped_gemm(
+            weights_fp8,
+            inputmats,
+            [out],
+            activation_dtype,
+            get_multi_stream_cublas_workspace(),
+            single_output=True,
+            m_splits=m_splits,
+            bias=biases,
+            use_bias=use_bias,
+            use_split_accumulator=fprop_gemm_use_split_accumulator,
+        )
 
         if fp8_calibration:
-            # For optimized path, we need to split for calibration
-            if use_optimized_path:
-                inputmats_for_calib = torch.split(inp_single, m_splits)
-            else:
-                inputmats_for_calib = inputmats
             for i in range(num_gemms):
                 # amax of input
-                input_quantizers[i].calibrate(inputmats_for_calib[i])
-                weight_quantizers[i].calibrate(weights[i])
+                for i in range(num_gemms):
+                    input_quantizers[i].calibrate(inputmats[i])
+                for i in range(num_gemms):
+                    weight_quantizers[i].calibrate(weights[i])
 
         if is_grad_enabled:
             ctx.weight_quantizers = weight_quantizers
@@ -212,10 +182,7 @@ class _GroupedLinear(torch.autograd.Function):
 
             # TODO: update after #1638 is merged. # pylint: disable=fixme
             if weight_requires_grad:
-                # For optimized path, split for usage update if needed
-                inputmats_for_update = (torch.split(inp_single, m_splits) if use_optimized_path 
-                                       else inputmats)
-                for inputmat in inputmats_for_update:
+                for inputmat in inputmats:
                     if isinstance(inputmat, QuantizedTensorBase):
                         inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
             if inp.requires_grad:
@@ -223,23 +190,12 @@ class _GroupedLinear(torch.autograd.Function):
                     if isinstance(weight, QuantizedTensorBase):
                         weight.update_usage(columnwise_usage=True)
 
-            # For optimized path, save the single input tensor instead of split
-            if use_optimized_path:
-                tensors_to_save, tensor_objects = prepare_for_saving(
-                    inp_single,
-                    *weights_fp8,
-                    *weights,
-                    *biases,
-                )
-                ctx.use_optimized_path = True
-            else:
-                tensors_to_save, tensor_objects = prepare_for_saving(
-                    *inputmats,
-                    *weights_fp8,
-                    *weights,
-                    *biases,
-                )
-                ctx.use_optimized_path = False
+            tensors_to_save, tensor_objects = prepare_for_saving(
+                *inputmats,
+                *weights_fp8,
+                *weights,
+                *biases,
+            )
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
 
@@ -279,20 +235,10 @@ class _GroupedLinear(torch.autograd.Function):
         with torch.cuda.nvtx.range("_GroupedLinear_backward"):
             saved_tensors = restore_from_saved(ctx.tensor_objects, ctx.saved_tensors)
             N = ctx.num_gemms
-            
-            # Handle optimized path where we saved a single input tensor
-            if ctx.use_optimized_path:
-                inp_single = saved_tensors[0]
-                weights = saved_tensors[1 : 1 + N]
-                origin_weights = saved_tensors[1 + N : 1 + 2 * N]
-                biases = saved_tensors[1 + 2 * N : 1 + 3 * N]
-                # Split the input for backward pass
-                inputmats = torch.split(inp_single, ctx.m_splits)
-            else:
-                inputmats = saved_tensors[:N]
-                weights = saved_tensors[N : 2 * N]
-                origin_weights = saved_tensors[2 * N : 3 * N]
-                biases = saved_tensors[3 * N : 4 * N]
+            inputmats = saved_tensors[:N]
+            weights = saved_tensors[N : 2 * N]
+            origin_weights = saved_tensors[2 * N : 3 * N]
+            biases = saved_tensors[3 * N : 4 * N]
             main_grads = ctx.main_grads
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:  # TOSO
