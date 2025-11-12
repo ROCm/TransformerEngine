@@ -396,7 +396,7 @@ def test_dot_product_attention(
     if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
         pytest.skip("Less than two backends to compare.")
 
-    is_training = config.head_dim_qk <= 128 and config.head_dim_v <= 128
+    is_training = config.head_dim_qk <= 192 and config.head_dim_v <= 128
     # UnfusedDotProductAttention backend
     if unfused_attn_supported:
         unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
@@ -521,6 +521,12 @@ model_configs_mla = {
     "mla_3_1": ModelConfig(
         8, 16, 16, 256, 1, 2048, 0.0, "no_mask", "no_bias", head_dim_v=128
     ),  # inference
+    "mla_4_0": ModelConfig(
+        10, 16, 16, 192, 4096, 4096, 0.0, "causal", "no_bias", head_dim_v=128
+    ),
+    "mla_4_1": ModelConfig(
+        10, 16, 16, 192, 4096, 4096, 0.0, "no_mask", "no_bias", head_dim_v=128
+    ),
 }
 
 
