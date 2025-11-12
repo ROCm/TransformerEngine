@@ -28,7 +28,7 @@ from transformer_engine.pytorch.utils import (
     is_bf16_compatible,
 )
 if IS_HIP_EXTENSION:
-    from transformer_engine.pytorch.utils import is_mi200, is_mi308
+    from transformer_engine.pytorch.utils import is_mi200, is_mi308, is_mi350
 
 from transformer_engine.pytorch import (
     DotProductAttention,
@@ -743,6 +743,13 @@ def test_gpt_full_activation_recompute(
             pytest.skip("Float8 Current Scaling unsupported for full recompute.")
     if recipe.float8_block_scaling() and not fp8_block_scaling_available:
         pytest.skip(reason_for_no_fp8_block_scaling)
+    if IS_HIP_EXTENSION and is_mi350():
+        if (dtype == torch.bfloat16 
+            and not fp8
+            and not use_reentrant 
+            and recipe.float8_per_tensor_scaling() 
+            ):
+            pytest.skip("hipBLASLt does not provide suitable algorithms on MI350 for this config.")
 
     config = model_configs[model]
     torch.compiler.reset() # avoid cache size limit overflow
