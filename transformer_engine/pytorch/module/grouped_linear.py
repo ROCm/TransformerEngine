@@ -43,6 +43,11 @@ from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ..cpu_offload import is_cpu_offload_enabled
 
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+import os
+
+if IS_HIP_EXTENSION:
+    from ..triton_kernels.grouped_gemm import general_grouped_gemm_triton
 from ..tensor.quantized_tensor import (
     QuantizedTensorBase,
     Quantizer,
@@ -155,7 +160,9 @@ class _GroupedLinear(torch.autograd.Function):
             device=device,
         )
 
-        _ = general_grouped_gemm(
+        use_grouped_gemm_triton = bool(int(os.environ.get('NVTE_USE_GROUPED_GEMM_TRITON', '0'))) and IS_HIP_EXTENSION
+        grouped_gemm_func = general_grouped_gemm_triton if use_grouped_gemm_triton else general_grouped_gemm
+        _ = grouped_gemm_func(
             weights_fp8,
             inputmats,
             [out],
@@ -305,7 +312,9 @@ class _GroupedLinear(torch.autograd.Function):
                             rowwise_usage=quantizer.rowwise_usage,
                             columnwise_usage=quantizer.columnwise_usage,
                         )
-                general_grouped_gemm(
+                use_grouped_gemm_triton = bool(int(os.environ.get('NVTE_USE_GROUPED_GEMM_TRITON', '0'))) and IS_HIP_EXTENSION
+                grouped_gemm_func = general_grouped_gemm_triton if use_grouped_gemm_triton else general_grouped_gemm
+                _ = grouped_gemm_func(
                     weights,
                     grad_output,
                     [dgrad],
