@@ -460,11 +460,16 @@ void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tenso
       if constexpr (IS_DBIAS) {
         NVTE_CHECK(dbias, "DBias tensor must be provided when IS_DBIAS is true.");
         NVTE_CHECK(workspace, "Workspace must be provided when IS_DBIAS is true.");
-        if (workspace->data.dptr == nullptr ||
-            workspace->data.dtype != DType::kFloat32 ||
-            workspace->data.shape != std::vector<size_t>{rows, cols}) {
-          workspace->data.shape = {rows, cols};
-          workspace->data.dtype = DType::kFloat32;
+        if (workspace->data.dptr == nullptr) {
+          if constexpr (IS_DACT) {
+            const size_t partial_rows = DIVUP(rows, TILE_DIM);
+            size_t total_elements = (rows * cols) + (partial_rows * cols);
+            workspace->data.shape = {total_elements};
+            workspace->data.dtype = DType::kFloat32;
+          } else {
+            workspace->data.shape = {rows, cols};
+            workspace->data.dtype = DType::kFloat32;
+          }
           return;
         }
 
@@ -475,15 +480,28 @@ void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tenso
         workspace->scale = {};
         workspace->scale_inv = {};
 
+        Tensor workspace_buffer;
+        Tensor partial_sum_buffer;
+
         if constexpr (IS_DACT) {
           // The values to reduce are the result of the dAct function.
           NVTE_CHECK(act_input, "Gradient tensor must be provided for DBias + DACT.");
-          CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, workspace, stream);
+
+          const size_t partial_rows = DIVUP(rows, TILE_DIM);
+          const size_t full_size_bytes = rows * cols * sizeof(float);
+          workspace_buffer = *workspace;
+          workspace_buffer.data.shape = {rows, cols};
+          partial_sum_buffer.data.dptr = reinterpret_cast<char*>(workspace->data.dptr) + full_size_bytes;
+          partial_sum_buffer.data.shape = {partial_rows, cols};
+          partial_sum_buffer.data.dtype = DType::kFloat32;
+          workspace = &partial_sum_buffer;
+
+          CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, &workspace_buffer, stream);
           if (output && output->data.dptr) {
-            CastVectorizedUnaryKernelLauncher<transformer_engine::Empty, nullptr>(*workspace, noop, output, stream);
+            CastVectorizedUnaryKernelLauncher<transformer_engine::Empty, nullptr>(workspace_buffer, noop, output, stream);
           }
-          ptr_to_reduce = workspace->data.dptr;
-          dtype_to_reduce = workspace->data.dtype;
+          ptr_to_reduce = workspace_buffer.data.dptr;
+          dtype_to_reduce = workspace_buffer.data.dtype;
         } else {
           if (output && output->data.dptr) {
             CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
