@@ -487,8 +487,16 @@ install(TARGETS transformer_engine DESTINATION .)
 set_target_properties(transformer_engine PROPERTIES INSTALL_RPATH "$ORIGIN/lib;$ORIGIN/transformer_engine/lib")
 
 if (USE_ROCM)
+  if("$ENV{ROCM_PATH}" STREQUAL "")
+    set(ROCM_PATH "/opt/rocm")
+  else()
+    set(ROCM_PATH "$ENV{ROCM_PATH}")
+  endif()
+  file(READ "${ROCM_PATH}/.info/version" ROCM_VER)
+  string(STRIP "${ROCM_VER}" ROCM_VER)
+  string(REGEX MATCH "^[0-9]+\\.[0-9]+" ROCM_VER "${ROCM_VER}")
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/build_info.txt"
-    "ROCM_VERSION: ${hip_VERSION_MAJOR}.${hip_VERSION_MINOR}\n"
+    "ROCM_VERSION: ${ROCM_VER}\n"
     "GPU_TARGETS: ${CMAKE_HIP_ARCHITECTURES}\n"
   )
   install(FILES "${CMAKE_CURRENT_BINARY_DIR}/build_info.txt" DESTINATION "transformer_engine/")
