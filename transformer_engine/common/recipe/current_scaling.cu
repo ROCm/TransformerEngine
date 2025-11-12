@@ -28,9 +28,28 @@ using bf16__ = __hip_bfloat16;
 
 constexpr int amax_kernel_threads = 512;
 
+template <int BLOCK_THREADS>
+__global__ void amax_final_reduce(const float* __restrict__ block_amax,
+                                  float* __restrict__ global_amax,
+                                  int num_blocks) {
+  float val = 0.f;
+
+  for (int i = threadIdx.x; i < num_blocks; i += BLOCK_THREADS) {
+    val = fmaxf(val, block_amax[i]);
+  }
+
+  const int warp_id = threadIdx.x / THREADS_PER_WARP;
+  const float block_max =
+      reduce_max<BLOCK_THREADS / THREADS_PER_WARP>(val, warp_id);
+
+  if (threadIdx.x == 0) {
+    *global_amax = block_max;
+  }
+}
+
 template <int nvec, bool aligned, typename InputType>
 __launch_bounds__(amax_kernel_threads) __global__
-    void amax_kernel(const InputType *input, float *amax, const size_t N,
+    void amax_kernel(const InputType *input, float* __restrict__ block_amax, const size_t N,
                      const size_t num_aligned_elements) {
   VectorizedLoader<InputType, nvec, aligned> loader(input, N);
   InputType max{0.f};
@@ -39,9 +58,10 @@ __launch_bounds__(amax_kernel_threads) __global__
 
   for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x; tid < M; tid += gridDim.x * blockDim.x) {
     loader.load(tid, N);
+    auto v = loader.separate();
 #pragma unroll
     for (int i = 0; i < nvec; ++i) {
-      const InputType val = static_cast<InputType>(loader.separate()[i]);
+      const InputType val = static_cast<InputType>(v[i]);
       __builtin_assume(max >= InputType{0.f});
       if constexpr (std::is_same_v<InputType, bf16__>) {
 #ifndef __HIP_PLATFORM_AMD__
@@ -65,7 +85,7 @@ __launch_bounds__(amax_kernel_threads) __global__
   // Reduce amax over block
   max = reduce_max<amax_kernel_threads / THREADS_PER_WARP>(max, warp_id);
   if (threadIdx.x == 0) {
-    atomicMaxFloat(amax, max);
+    block_amax[blockIdx.x] = max;
   }
 }
 
@@ -89,22 +109,34 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, cud
   constexpr size_t max_blocks = 65535;
   num_blocks = std::min(num_blocks, max_blocks);
 
+  float* block_amax = nullptr;
+  NVTE_CHECK_CUDA(cudaMalloc(&block_amax, num_blocks * sizeof(float)));
+
   // Launch kernel
   switch (align) {
     case Alignment::SAME_ALIGNED:
       amax_kernel<nvec, true, InputType>
-          <<<num_blocks, threads, 0, stream>>>(input, amax, N, num_aligned_elements);
+          <<<num_blocks, threads, 0, stream>>>(input, block_amax, N, num_aligned_elements);
       break;
     case Alignment::SAME_UNALIGNED:
       amax_kernel<nvec, false, InputType>
-          <<<num_blocks, threads, 0, stream>>>(input, amax, N, num_aligned_elements);
+          <<<num_blocks, threads, 0, stream>>>(input,  block_amax, N, num_aligned_elements);
       break;
     case Alignment::DIFFERENT: {
       // This case is a logic error, since there is only one pointer (input)
       // in the alignment check. Still safe to process without vectorization.
-      amax_kernel<1, true, InputType><<<num_blocks, threads, 0, stream>>>(input, amax, N, N);
+      amax_kernel<1, true, InputType><<<num_blocks, threads, 0, stream>>>(input,  block_amax, N, N);
       break;
     }
+  }
+
+  {
+    constexpr int FINAL_REDUCE_THREADS = 256;
+    dim3 fr_block(FINAL_REDUCE_THREADS);
+    dim3 fr_grid(1);
+
+    amax_final_reduce<FINAL_REDUCE_THREADS>
+        <<<fr_grid, fr_block, 0, stream>>>(block_amax, amax, static_cast<int>(num_blocks));
   }
 
   // Check results
