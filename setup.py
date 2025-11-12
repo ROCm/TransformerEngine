@@ -71,6 +71,8 @@ def setup_common_extension() -> CMakeExtension:
             cmake_flags.append(f"-DAITER_MHA_PATH={ck_path}")
         if int(os.getenv("NVTE_FUSED_ATTN_AOTRITON", "1"))==0 or int(os.getenv("NVTE_FUSED_ATTN", "1"))==0:
             cmake_flags.append("-DUSE_FUSED_ATTN_AOTRITON=OFF")
+        elif int(os.getenv("NVTE_AOTRITON_BUILD_GPU_KERNELS", "0")):
+            cmake_flags.append("-DUSE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS=ON")
         if int(os.getenv("NVTE_FUSED_ATTN_CK", "1"))==0 or int(os.getenv("NVTE_FUSED_ATTN", "1"))==0:
             cmake_flags.append("-DUSE_FUSED_ATTN_CK=OFF")
     else:

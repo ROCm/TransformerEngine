@@ -341,6 +341,7 @@ void fused_attn_aotriton_bwd_impl(
   std::array<uint64_t, 4> k_stride;
   std::array<uint64_t, 4> v_stride;
   std::array<uint64_t, 4> o_stride;
+  std::array<uint64_t, 4> dq_acc_stride;
   generateMatrixStrides(b, h, s_q, s_kv, d, q_stride.data(),
                         layout, NVTE_QKV_Matrix::NVTE_Q_Matrix);
   generateMatrixStrides(b, hg, s_q, s_kv, d, k_stride.data(),
@@ -349,6 +350,9 @@ void fused_attn_aotriton_bwd_impl(
                         layout, NVTE_QKV_Matrix::NVTE_V_Matrix);
   generateMatrixStrides(b, h, s_q, s_kv, d, o_stride.data(),
                         layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
+  // AOTriton expects a BSHD layout DQ_ACC matrix
+  generateMatrixStrides(b, h, s_q, s_kv, d, dq_acc_stride.data(),
+                        NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD, NVTE_QKV_Matrix::NVTE_Q_Matrix);
 
   //q and o are having the same shape
   //k and v are having the same shape
@@ -375,7 +379,7 @@ void fused_attn_aotriton_bwd_impl(
   // auxilary tensors
   auto M_tensor = aotriton::TensorView<2>(reinterpret_cast<intptr_t>(devPtrSoftmaxAux), m_shape, m_stride, aotriton::DType::kFloat32);
   auto delta_tensor = aotriton::TensorView<2>(reinterpret_cast<intptr_t>(delta), m_shape, m_stride, aotriton::DType::kFloat32);
-  auto dq_acc_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(dq_acc_ptr), q_shape, q_stride, aotriton::DType::kFloat32);
+  auto dq_acc_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(dq_acc_ptr), q_shape, dq_acc_stride, aotriton::DType::kFloat32);
   NVTE_CHECK_CUDA(hipMemsetAsync(dq_acc_ptr, 0, dq_acc_size, stream));
 
   LazyTensorContext<4> dq_acc_ctx {.tensor_view = dq_acc_tensor};
@@ -479,7 +483,7 @@ void fused_attn_aotriton_bwd_impl(
   bwd_params.philox_seed_ptr = seed;
   bwd_params.philox_offset1 = offset;
   bwd_params.philox_offset2 = 0;
-  bwd_params.causal_type = is_causal;
+  bwd_params.causal_type = causal_type;
   bwd_params.varlen_type = varlen_type;
   bwd_params.window_left = window_left;
   bwd_params.window_right = window_right;
