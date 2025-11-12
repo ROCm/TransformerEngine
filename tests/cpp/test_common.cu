@@ -696,7 +696,7 @@ void compare_e8m0_scaling_factors(const std::string &name, Tensor &output, const
   const uint8_t *const test = rowwise ? output.rowwise_cpu_scale_inv_ptr<fp8e8m0>()
                                        : output.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
 
-  const float scale_tol = std::max(1.f, row_blocks * col_blocks * tol);
+  const double scale_tol = std::max(1., row_blocks * col_blocks * tol);
 
   for (int i = 0; i < row_blocks; i++) {
     for (int j = 0; j < col_blocks; j++) {
