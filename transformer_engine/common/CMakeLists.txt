@@ -293,15 +293,15 @@ else()
         set(AOTRITON_NOIMAGE_MODE ON)
       endif()
 
-      set(__AOTRITON_VER "0.11b")
+      set(__AOTRITON_VER "0.11.1b")
       set(__AOTRITON_IMAGE_LIST
           "amd-gfx942"
           "amd-gfx950"
         )
       set(__AOTRITON_IMAGE_SHA256_LIST
-        "3a06a99971dddb7703a30378f1c5d6b41468d926ea51821156d1b6857b985bc4" # amd-gfx942
-        "27fc21f6761d57987a700436de8cf29cbdd9eeee91318dfed596eeb147d219ad" # amd-gfx950
-        )
+          "0a7bcee19d3bb6d548732248c3234f7b92736c2ab7a7aae65294b87a7fd64c06" # amd-gfx942
+          "c1ba3bfe84217fd67df3dd1f8b67c80a7f7b33d0ad4d74b41d6567036e032ace" # amd-gfx950
+      )
       set(__AOTRITON_BASE_URL "https://github.com/ROCm/aotriton/releases/download/")  # @lint-ignore
       include(ExternalProject)
 
