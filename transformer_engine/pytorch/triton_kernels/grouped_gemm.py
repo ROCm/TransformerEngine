@@ -469,7 +469,7 @@ def _grouped_gemm_forward(
         # Collect pointers
         a_addrs.append(inputmats[i].data_ptr())
         b_addrs.append(weights[i].data_ptr())
-        c_addrs.append(output[offset:offset+m_splits[i]].data_ptr())
+        c_addrs.append(output.data_ptr() + offset * output.stride(0) * output.element_size())
         
         # Collect sizes: [M, N, K] for this expert
         g_sizes += [m_splits[i], N, K]
@@ -549,8 +549,7 @@ def _grouped_gemm_backward(
         # Collect pointers
         a_addrs.append(grad_outputs[i].data_ptr())  # grad_output [M, N]
         b_addrs.append(weights[i].data_ptr())        # weight [N, K]
-        c_addrs.append(dgrad[offset:offset+m_splits[i]].data_ptr())  # dgrad [M, K]
-        
+        c_addrs.append(dgrad.data_ptr() + offset * dgrad.stride(0) * dgrad.element_size())
         # Collect sizes: [M, K, N] for this expert
         # M = rows of grad_output/dgrad
         # K = cols of dgrad/weight (in_features)
