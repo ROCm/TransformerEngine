@@ -31,7 +31,7 @@ pd.set_option("display.precision", 4)
 # Data type
 dtype = torch.bfloat16
 # Number of warmup iterations before profiling
-warmup_iters = 10
+warmup_iters = 20
 # Number of iterations after warmup iterations
 num_iters = 10
 # Checkpointing attention
@@ -61,17 +61,23 @@ columns = [
     "FusedAttention CK Kernels (fwd)",
     "FusedAttention CK Kernels (bwd)",
     "FusedAttention CK Kernels (fwd+bwd)",
+    "FusedAttention CK TFLOPs (fwd)",
+    "FusedAttention CK TFLOPs (bwd)",
 
     "FlashAttention Module",
     "FlashAttention Kernels (fwd)",
     "FlashAttention Kernels (bwd)",
     "FlashAttention Kernels (fwd+bwd)",
+    "FlashAttention TFLOPs (fwd)",
+    "FlashAttention TFLOPs (bwd)",
     "Fused vs Flash Kernels Speedup (fwd+bwd)",
 
     "FusedAttention AOTriton Module",
     "FusedAttention AOTriton Kernels (fwd)",
     "FusedAttention AOTriton Kernels (bwd)",
     "FusedAttention AOTriton Kernels (fwd+bwd)",
+    "FusedAttention AOTriton TFLOPs (fwd)",
+    "FusedAttention AOTriton TFLOPs (bwd)",
 ]
 
 # Output CSV filename
@@ -198,17 +204,24 @@ def benchmark_dot_product_attention_profiler(model, attention, column_name):
     df_times.to_csv(output_csv_path)
     torch.cuda.empty_cache()
 
+# Calculate TFLOPs for attention operations
+def calculate_attention_tflops(batch_size, seq_len, num_heads_q, head_dim_qk, fwd_time_ms, bwd_time_ms, is_causal):
+    # Calculate total fwdFLOPs
+    fwd_flops = (0.5 if is_causal else 1.0) * 4 * batch_size * seq_len * seq_len * num_heads_q * head_dim_qk / 1e12
+    # Calculate forward TFLOPs
+    fwd_tflops = fwd_flops / (fwd_time_ms / 1000.0)
+    # Calculate backward TFLOPs
+    bwd_tflops = (fwd_flops / (bwd_time_ms / 1000.0)) * 2.5
+    return fwd_tflops, bwd_tflops
+
 # Helper function to extract timing results from profiler logs
 def parse_helper(model, dirname, fwd_search_pattern, bwd_search_pattern, column_name, df_times):
     df = pd.read_csv(os.path.join(dirname, "results.stats.csv"))
-    
+
     # Extract kernel timing values
     fwd_values = df[df["Name"].str.contains(fwd_search_pattern, regex=False)]["AverageNs"].to_numpy()
     bwd_values = df[df["Name"].str.contains(bwd_search_pattern, regex=False)]["AverageNs"].to_numpy()
 
-    print(f"FWD values: {fwd_values}")
-    print(f"BWD values: {bwd_values}")
-    
     if len(fwd_values) == 0 or len(bwd_values) == 0:
         return False  # Kernels not found
     
@@ -216,10 +229,24 @@ def parse_helper(model, dirname, fwd_search_pattern, bwd_search_pattern, column_
     t_attn_avg[:len(fwd_values)] = fwd_values
     t_attn_avg[len(fwd_values):] = bwd_values
     
-    # Store results in DataFrame
-    df_times.loc[model, f"{column_name} Kernels (fwd)"] = t_attn_avg[:len(fwd_values)].sum() / 1e6
-    df_times.loc[model, f"{column_name} Kernels (bwd)"] = t_attn_avg[len(fwd_values):].sum() / 1e6
-    df_times.loc[model, f"{column_name} Kernels (fwd+bwd)"] = t_attn_avg.sum() / 1e6
+    # Store results in DataFrame (convert from ns to ms)
+    fwd_time_ms = t_attn_avg[:len(fwd_values)].sum() / 1e6
+    bwd_time_ms = t_attn_avg[len(fwd_values):].sum() / 1e6
+    
+    df_times.loc[model, f"{column_name} Kernels (fwd)"] = fwd_time_ms
+    df_times.loc[model, f"{column_name} Kernels (bwd)"] = bwd_time_ms
+    df_times.loc[model, f"{column_name} Kernels (fwd+bwd)"] = fwd_time_ms + bwd_time_ms
+    
+    # Calculate TFLOPs for both forward and backward
+    config = model_configs[model]
+    is_causal = "causal" in config.attn_mask_type.lower()
+    fwd_tflops, bwd_tflops = calculate_attention_tflops(
+        config.batch_size, config.max_seqlen_q, config.num_heads, 
+        config.head_dim_qk, fwd_time_ms, bwd_time_ms, is_causal
+    )
+    
+    df_times.loc[model, f"{column_name} TFLOPs (fwd)"] = fwd_tflops
+    df_times.loc[model, f"{column_name} TFLOPs (bwd)"] = bwd_tflops
     
     return True
 
@@ -381,16 +408,32 @@ def main(args):
 
     df_times = pd.read_csv(output_csv_path)
     df_times.index = list(model_configs.keys())
-    a = df_times[
+    timing_df = df_times[
         [
+            "FusedAttention CK Kernels (fwd)",
+            "FusedAttention CK Kernels (bwd)",
             "FusedAttention CK Kernels (fwd+bwd)",
             "FlashAttention Kernels (fwd+bwd)",
             "Fused vs Flash Kernels Speedup (fwd+bwd)",
         ]
+    ].copy()
+    timing_df.columns = [
+        "CK fwd (ms)",
+        "CK bwd (ms)",
+        "CK fwd+bwd (ms)",
+        "Flash fwd+bwd (ms)",
+        "CK/Flash Speedup",
     ]
-    a.columns = ["CK fwd+bwd (ms)", "flash-attn fwd+bwd (ms)", "CK vs flash speedup"]
+    print(timing_df)
     print()
-    print(a)    
+    tflops_df = df_times[
+        [
+            "FusedAttention CK TFLOPs (fwd)",
+            "FusedAttention CK TFLOPs (bwd)",
+        ]
+    ].copy()
+    tflops_df.columns = ["CK FWD TFLOPs", "CK BWD TFLOPs"]
+    print(tflops_df)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
