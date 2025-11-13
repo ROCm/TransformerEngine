@@ -221,6 +221,102 @@ def _kernel_grouped_gemm_forward(
         # get ready to go to the next gemm problem
         last_problem_end = last_problem_end + num_tiles
 
+@triton.autotune(
+    configs=_AMD_CONFIGS if torch.version.hip else _NV_CONFIGS,
+    key=['group_size'],
+    prune_configs_by={'early_config_prune': early_config_prune},
+)
+@triton.jit
+def _kernel_grouped_gemm_backward(
+    # device tensor of matrices pointers
+    group_a_ptrs,
+    group_b_ptrs,
+    group_c_ptrs,
+    # device tensor of gemm sizes. its shape is [group_size, 3]
+    # dim 0 is group_size, dim 1 is the values of <M, N, K> of each gemm
+    group_gemm_sizes,
+    # device tensor of leading dimension sizes. its shape is [group_size, 3]
+    # dim 0 is group_size, dim 1 is the values of <lda, ldb, ldc> of each gemm
+    g_lds,
+    # number of gemms
+    group_size,
+    # number of virtual SM
+    NUM_SM: tl.constexpr,
+    # tile sizes
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    DTYPE: tl.constexpr,
+):
+    """
+    Backward pass kernel for dgrad: dgrad = grad_output @ weight
+    - grad_output: [M, N] where N = out_features
+    - weight: [N, K] where K = in_features
+    - dgrad: [M, K]
+    Reduction is over N dimension.
+    """
+    tile_idx = tl.program_id(0)
+    last_problem_end = 0
+    for g in range(group_size):
+        # get the gemm size of the current problem (use element-based indexing)
+        gm = tl.load(group_gemm_sizes + g * 3)  # M
+        gk = tl.load(group_gemm_sizes + g * 3 + 1)  # K (out dimension)
+        gn = tl.load(group_gemm_sizes + g * 3 + 2)  # N (reduction dimension)
+        num_m_tiles = tl.cdiv(gm, BLOCK_SIZE_M)
+        num_k_tiles = tl.cdiv(gk, BLOCK_SIZE_K)
+        num_tiles = num_m_tiles * num_k_tiles
+        # iterate through the tiles in the current gemm problem
+        while (tile_idx >= last_problem_end and tile_idx < last_problem_end + num_tiles):
+            # pick up a tile from the current gemm problem
+            n = gn  # reduction dimension
+            # Load leading dimensions (element-based indexing)
+            lda = tl.load(g_lds + g * 3)      # grad_output stride
+            ldb = tl.load(g_lds + g * 3 + 1)  # weight stride
+            ldc = tl.load(g_lds + g * 3 + 2)  # dgrad stride
+            # Load pointers and cast to pointer type (matching tutorial)
+            a_ptr = tl.load(group_a_ptrs + g).to(tl.pointer_type(DTYPE))  # grad_output
+            b_ptr = tl.load(group_b_ptrs + g).to(tl.pointer_type(DTYPE))  # weight
+            c_ptr = tl.load(group_c_ptrs + g).to(tl.pointer_type(DTYPE))  # dgrad
+            # figure out tile coordinates
+            tile_idx_in_gemm = tile_idx - last_problem_end
+            tile_m_idx = tile_idx_in_gemm // num_k_tiles
+            tile_k_idx = tile_idx_in_gemm % num_k_tiles
+            
+            # Initialize accumulator
+            accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_K), dtype=tl.float32)
+            
+            # Loop over reduction dimension N (out_features)
+            for n_idx in range(0, tl.cdiv(n, BLOCK_SIZE_N)):
+                # Offsets for grad_output [M, N]
+                offs_am = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+                offs_n = n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+                
+                # Offsets for weight [N, K]
+                offs_bk = tile_k_idx * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+                
+                # Load grad_output tile: [BLOCK_M, BLOCK_N]
+                a_ptrs = a_ptr + offs_am[:, None] * lda + offs_n[None, :]
+                a = tl.load(a_ptrs)
+                
+                # Load weight tile: [BLOCK_N, BLOCK_K]
+                b_ptrs = b_ptr + offs_n[:, None] * ldb + offs_bk[None, :]
+                b = tl.load(b_ptrs)
+                
+                # Accumulate: [BLOCK_M, BLOCK_N] @ [BLOCK_N, BLOCK_K] = [BLOCK_M, BLOCK_K]
+                accumulator += tl.dot(a, b)
+            
+            # Store result to dgrad: [BLOCK_M, BLOCK_K]
+            offs_cm = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+            offs_ck = tile_k_idx * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+            c_ptrs = c_ptr + offs_cm[:, None] * ldc + offs_ck[None, :]
+            tl.store(c_ptrs, accumulator)
+            
+            # Move to next tile
+            tile_idx += NUM_SM
+        
+        # get ready to go to the next gemm problem
+        last_problem_end = last_problem_end + num_tiles
+
 # =============== Wrappers for Forward GGEMM =================
 def _grouped_gemm_forward(
     inputmats: list,  # List of input tensors, each [m_splits[i], K]
@@ -303,9 +399,95 @@ def _grouped_gemm_forward(
     # Output tensor is modified in-place, no need to return
 
 
+def _grouped_gemm_backward(
+    grad_outputs: list,  # List of grad_output tensors, each [m_splits[i], N]
+    weights: list,  # List of weight tensors, each [N, K]
+    dgrad: torch.Tensor,  # Pre-allocated dgrad tensor [M_total, K]
+    m_splits: list,  # Token counts per expert
+) -> None:
+    """
+    Backward pass grouped GEMM for dgrad: dgrad = grad_output @ weight
+    
+    Args:
+        grad_outputs: List of grad_output tensors for each expert [M_i, N]
+        weights: List of weight tensors for each expert [N, K]
+        dgrad: Pre-allocated dgrad tensor to write results [M_total, K]
+        m_splits: Token counts per expert
+    """
+    num_experts = len(weights)
+    device = dgrad.device
+    dtype = dgrad.dtype
+    tl_dtype = torch_dtype_to_triton_dtype(dtype)
+    K = dgrad.shape[1]  # in_features (output dimension)
+    N = grad_outputs[0].shape[1]  # out_features (reduction dimension)
+    
+    # Collect all metadata in one loop
+    # Skip zero-length splits to avoid garbage pointers
+    a_addrs = []
+    b_addrs = []
+    c_addrs = []
+    g_sizes = []
+    g_lds = []
+    
+    offset = 0
+    for i in range(num_experts):
+        # Skip zero-length splits (empty tensors have garbage data_ptr)
+        if m_splits[i] == 0:
+            offset += m_splits[i]
+            continue
+            
+        # Collect pointers
+        a_addrs.append(grad_outputs[i].data_ptr())  # grad_output [M, N]
+        b_addrs.append(weights[i].data_ptr())        # weight [N, K]
+        c_addrs.append(dgrad[offset:offset+m_splits[i]].data_ptr())  # dgrad [M, K]
+        
+        # Collect sizes: [M, K, N] for this expert
+        # M = rows of grad_output/dgrad
+        # K = cols of dgrad/weight (in_features)
+        # N = cols of grad_output/rows of weight (out_features, reduction dimension)
+        g_sizes += [m_splits[i], K, N]
+        
+        # Collect leading dimensions: [lda, ldb, ldc] for this expert
+        # lda: grad_output stride (N for row-major [M, N])
+        # ldb: weight stride (K for row-major [N, K])
+        # ldc: dgrad stride (K for row-major [M, K])
+        g_lds += [N, K, K]
+        
+        offset += m_splits[i]
+    
+    # Update num_experts to reflect actual non-zero experts
+    num_experts = len(a_addrs)
+    
+    # Early return if all splits were zero
+    if num_experts == 0:
+        return  # Output tensor is already zero-initialized
+    
+    # Create device tensors - single memcpy per tensor
+    a_ptrs = torch.tensor(a_addrs, dtype=torch.int64, device=device)
+    b_ptrs = torch.tensor(b_addrs, dtype=torch.int64, device=device)
+    c_ptrs = torch.tensor(c_addrs, dtype=torch.int64, device=device)
+    gemm_sizes = torch.tensor(g_sizes, dtype=torch.int32, device=device)
+    lds = torch.tensor(g_lds, dtype=torch.int32, device=device)
+    
+    # Launch kernel with 1D grid of NUM_SM
+    grid = lambda meta: (meta['NUM_SM'],)
+    
+    # Pass tensors to kernel (Triton extracts data_ptr automatically)
+    _kernel_grouped_gemm_backward[grid](
+        a_ptrs,
+        b_ptrs,
+        c_ptrs,
+        gemm_sizes,
+        lds,
+        num_experts,
+        DTYPE=tl_dtype,
+    )
+    # Output tensor is modified in-place, no need to return
+
+
 def general_grouped_gemm_triton(
     weights: list,  # List of weight tensors [out_features, in_features]
-    inputmats: list,  # List of input tensors
+    inputmats: list,  # List of input tensors or grad_outputs
     outputs: list,  # List to store output tensors
     out_dtype: torch.dtype = None,
     workspace=None,  # Unused, for compatibility
@@ -314,14 +496,20 @@ def general_grouped_gemm_triton(
     bias: list = None,
     use_bias: bool = False,
     use_split_accumulator: bool = False,  # Unused, for compatibility
+    layout: str = "TN",  # "TN" for forward, "NN" for dgrad
+    grad: bool = False,  # True for backward pass
     **kwargs,
 ) -> list:
     """
     Drop-in replacement for general_grouped_gemm using Triton persistent grouped GEMM kernel.
     
+    Supports:
+    - Forward pass (layout="TN"): output = input @ weight^T
+    - Backward pass dgrad (layout="NN", grad=True): dgrad = grad_output @ weight
+    
     Args:
         weights: List of weight tensors, each [out_features, in_features]
-        inputmats: List of input tensors, each [m_splits[i], in_features]
+        inputmats: List of input tensors (forward) or grad_output tensors (backward)
         outputs: List to populate with output tensor(s)
         out_dtype: Output dtype
         workspace: Workspace tensor (unused, for compatibility)
@@ -330,6 +518,8 @@ def general_grouped_gemm_triton(
         bias: List of bias tensors (optional)
         use_bias: Whether to apply bias
         use_split_accumulator: Unused, for compatibility
+        layout: "TN" for forward pass, "NN" for dgrad backward pass
+        grad: True for backward pass
         
     Returns:
         List of output tensors (matches outputs parameter)
@@ -345,13 +535,25 @@ def general_grouped_gemm_triton(
     # Weights are nn.Parameters, already contiguous
     # No need for redundant checks - just pass through
     
-    # Call Triton grouped GEMM kernel (modifies out in-place)
-    _grouped_gemm_forward(
-        inputmats,
-        weights,
-        out,
-        m_splits,
-    )
+    # Determine if this is dgrad backward pass
+    is_dgrad = (layout == "NN" and grad)
+    
+    if is_dgrad:
+        # Backward pass: dgrad = grad_output @ weight
+        _grouped_gemm_backward(
+            inputmats,  # grad_outputs [M, N]
+            weights,    # weights [N, K]
+            out,        # dgrad [M, K]
+            m_splits,
+        )
+    else:
+        # Forward pass: output = input @ weight^T
+        _grouped_gemm_forward(
+            inputmats,  # inputs [M, K]
+            weights,    # weights [N, K]
+            out,        # output [M, N]
+            m_splits,
+        )
     
     # Apply bias if requested
     if use_bias and bias is not None:

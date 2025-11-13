@@ -312,7 +312,12 @@ class _GroupedLinear(torch.autograd.Function):
                             rowwise_usage=quantizer.rowwise_usage,
                             columnwise_usage=quantizer.columnwise_usage,
                         )
-                general_grouped_gemm(
+                
+                # Use Triton kernel if enabled, otherwise cuBLAS
+                use_grouped_gemm_triton = bool(int(os.environ.get('NVTE_USE_GROUPED_GEMM_TRITON', '0'))) and IS_HIP_EXTENSION
+                grouped_gemm_func = general_grouped_gemm_triton if use_grouped_gemm_triton else general_grouped_gemm
+                
+                grouped_gemm_func(
                     weights,
                     grad_output,
                     [dgrad],

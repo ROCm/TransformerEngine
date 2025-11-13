@@ -335,3 +335,83 @@ def test_grouped_gemm_triton_small_splits(dtype):
         use_torch_semantics=True,
     )
 
+
+@pytest.mark.parametrize("hidden_size", [256, 768])
+@pytest.mark.parametrize("out_features", [512, 2048])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("num_gemms", [1, 4])
+def test_grouped_gemm_triton_backward(hidden_size, out_features, dtype, num_gemms):
+    """Test Triton grouped GEMM kernel backward pass (dgrad)."""
+    
+    total_tokens = 512
+    # Create equal splits for simplicity
+    tokens_per_expert = total_tokens // num_gemms
+    m_splits = [tokens_per_expert] * num_gemms
+    
+    # Create modules
+    grouped_linear_triton = GroupedLinear(
+        num_gemms,
+        hidden_size,
+        out_features,
+        bias=False,
+        params_dtype=dtype,
+        device="cuda",
+    )
+    
+    grouped_linear_cublas = GroupedLinear(
+        num_gemms,
+        hidden_size,
+        out_features,
+        bias=False,
+        params_dtype=dtype,
+        device="cuda",
+    )
+    
+    # Share weights
+    with torch.no_grad():
+        for i in range(num_gemms):
+            weight_name = f"weight{i}"
+            src_weight = getattr(grouped_linear_triton, weight_name)
+            setattr(grouped_linear_cublas, weight_name, Parameter(src_weight.clone()))
+    
+    # Create input with gradients enabled
+    torch.manual_seed(42)
+    inp_triton = torch.randn(total_tokens, hidden_size, dtype=dtype, device="cuda", requires_grad=True)
+    inp_cublas = inp_triton.clone().detach().requires_grad_(True)
+    
+    # Forward pass with Triton
+    os.environ["NVTE_USE_GROUPED_GEMM_TRITON"] = "1"
+    out_triton = grouped_linear_triton(inp_triton, m_splits)
+    
+    # Forward pass with cuBLAS
+    os.environ["NVTE_USE_GROUPED_GEMM_TRITON"] = "0"
+    out_cublas = grouped_linear_cublas(inp_cublas, m_splits)
+    
+    # Check forward outputs match
+    atol, rtol = get_tolerances(dtype)
+    te_compare_results(
+        out_triton,
+        out_cublas,
+        atol=atol,
+        rtol=rtol,
+        msg=lambda msg: f"Triton grouped GEMM forward does not match cuBLAS\n\n{msg}\n",
+        use_torch_semantics=True,
+    )
+    
+    # Backward pass with same grad_output
+    torch.manual_seed(42)
+    grad_output = torch.randn_like(out_triton)
+    
+    out_triton.backward(grad_output)
+    out_cublas.backward(grad_output)
+    
+    # Check dgrad (input gradients) match
+    te_compare_results(
+        inp_triton.grad,
+        inp_cublas.grad,
+        atol=atol,
+        rtol=rtol,
+        msg=lambda msg: f"Triton grouped GEMM dgrad does not match cuBLAS\n\n{msg}\n",
+        use_torch_semantics=True,
+    )
+
