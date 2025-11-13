@@ -1,3 +1,4 @@
+from transformer_engine.pytorch.triton_kernels.common import torch_dtype_to_triton_dtype
 import triton
 import triton.language as tl
 import torch
@@ -151,11 +152,12 @@ def _kernel_grouped_gemm_forward(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    DTYPE: tl.constexpr,
 ):
     tile_idx = tl.program_id(0)
     last_problem_end = 0
     for g in range(group_size):
-        # get the gemm size of the current problem
+        # get the gemm size of the current problem (use element-based indexing)
         gm = tl.load(group_gemm_sizes + g * 3)
         gn = tl.load(group_gemm_sizes + g * 3 + 1)
         gk = tl.load(group_gemm_sizes + g * 3 + 2)
@@ -166,13 +168,14 @@ def _kernel_grouped_gemm_forward(
         while (tile_idx >= last_problem_end and tile_idx < last_problem_end + num_tiles):
             # pick up a tile from the current gemm problem
             k = gk
+            # Load leading dimensions (element-based indexing)
             lda = tl.load(g_lds + g * 3)
             ldb = tl.load(g_lds + g * 3 + 1)
             ldc = tl.load(g_lds + g * 3 + 2)
             # Load pointers and cast to pointer type (matching tutorial)
-            a_ptr = tl.load(group_a_ptrs + g).to(tl.pointer_type(tl.float16))
-            b_ptr = tl.load(group_b_ptrs + g).to(tl.pointer_type(tl.float16))
-            c_ptr = tl.load(group_c_ptrs + g).to(tl.pointer_type(tl.float16))
+            a_ptr = tl.load(group_a_ptrs + g).to(tl.pointer_type(DTYPE))
+            b_ptr = tl.load(group_b_ptrs + g).to(tl.pointer_type(DTYPE))
+            c_ptr = tl.load(group_c_ptrs + g).to(tl.pointer_type(DTYPE))
             # figure out tile coordinates
             tile_idx_in_gemm = tile_idx - last_problem_end
             tile_m_idx = tile_idx_in_gemm // num_n_tiles
@@ -183,7 +186,8 @@ def _kernel_grouped_gemm_forward(
             offs_bn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
             offs_k = tl.arange(0, BLOCK_SIZE_K)
             a_ptrs = a_ptr + offs_am[:, None] * lda + offs_k[None, :]
-            b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_bn[None, :]
+            # Weight is [N, K], so to get W^T for gemm, load with transposed indices
+            b_ptrs = b_ptr + offs_bn[:, None] * ldb + offs_k[None, :]
             accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
             for kk in range(0, tl.cdiv(k, BLOCK_SIZE_K)):
                 # hint to Triton compiler to do proper loop pipelining
@@ -192,12 +196,15 @@ def _kernel_grouped_gemm_forward(
                 # Add masking for partial tiles
                 k_remaining = k - kk * BLOCK_SIZE_K
                 mask_a = (offs_am[:, None] < gm) & (offs_k[None, :] < k_remaining)
-                mask_b = (offs_k[:, None] < k_remaining) & (offs_bn[None, :] < gn)
+                # B is [N, K] layout, so mask is [N, K]
+                mask_b = (offs_bn[:, None] < gn) & (offs_k[None, :] < k_remaining)
                 a = tl.load(a_ptrs, mask=mask_a, other=0.0)
                 b = tl.load(b_ptrs, mask=mask_b, other=0.0)
-                accumulator += tl.dot(a, b)
+                # B is loaded as [N, K], transpose it to [K, N] for dot product
+                accumulator += tl.dot(a, b.T)
                 a_ptrs += BLOCK_SIZE_K
-                b_ptrs += BLOCK_SIZE_K * ldb
+                # B is [N, K], so increment along K dimension (columns)
+                b_ptrs += BLOCK_SIZE_K
             c = accumulator
 
             offs_cm = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -234,10 +241,12 @@ def _grouped_gemm_forward(
     num_experts = len(weights)
     device = output.device
     dtype = output.dtype
+    tl_dtype = torch_dtype_to_triton_dtype(dtype)
     N = output.shape[1]  # out_features
     K = inputmats[0].shape[1]  # in_features
     
     # Collect all metadata in one loop (matching Triton tutorial pattern)
+    # Skip zero-length splits to avoid garbage pointers
     a_addrs = []
     b_addrs = []
     c_addrs = []
@@ -246,6 +255,11 @@ def _grouped_gemm_forward(
     
     offset = 0
     for i in range(num_experts):
+        # Skip zero-length splits (empty tensors have garbage data_ptr)
+        if m_splits[i] == 0:
+            offset += m_splits[i]
+            continue
+            
         # Collect pointers
         a_addrs.append(inputmats[i].data_ptr())
         b_addrs.append(weights[i].data_ptr())
@@ -259,6 +273,13 @@ def _grouped_gemm_forward(
         
         offset += m_splits[i]
     
+    # Update num_experts to reflect actual non-zero experts
+    num_experts = len(a_addrs)
+    
+    # Early return if all splits were zero
+    if num_experts == 0:
+        return  # Output tensor is already zero-initialized
+    
     # Create device tensors - single memcpy per tensor
     a_ptrs = torch.tensor(a_addrs, dtype=torch.int64, device=device)
     b_ptrs = torch.tensor(b_addrs, dtype=torch.int64, device=device)
@@ -269,6 +290,7 @@ def _grouped_gemm_forward(
     # Launch kernel with 1D grid of NUM_SM
     grid = lambda meta: (meta['NUM_SM'],)
     
+    # Pass tensors to kernel (Triton extracts data_ptr automatically)
     _kernel_grouped_gemm_forward[grid](
         a_ptrs,
         b_ptrs,
@@ -276,6 +298,7 @@ def _grouped_gemm_forward(
         gemm_sizes,
         lds,
         num_experts,
+        DTYPE=tl_dtype,
     )
     # Output tensor is modified in-place, no need to return
 

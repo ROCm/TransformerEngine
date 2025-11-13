@@ -92,6 +92,21 @@ def te_dtype_to_triton_dtype(dtype: tex.DType):
     if dtype == tex.DType.kBFloat16:
         return tl.bfloat16
 
+def torch_dtype_to_triton_dtype(dtype: torch.dtype):
+    """Convert PyTorch dtype to Triton dtype."""
+    if dtype == torch.float32:
+        return tl.float32
+    elif dtype == torch.float16:
+        return tl.float16
+    elif dtype == torch.bfloat16:
+        return tl.bfloat16
+    elif dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
+        return tl.float8e4nv if is_cdna4() else tl.float8e4b8
+    elif dtype in (torch.float8_e5m2, torch.float8_e5m2fnuz):
+        return tl.float8e5 if is_cdna4() else tl.float8e5b16
+    else:
+        raise ValueError(f"Unsupported dtype for Triton: {dtype}")
+
 def get_fp8_max(dtype: tex.DType):
     if dtype == tex.DType.kFloat8E4M3:
         return 240.0 if not is_cdna4() else 448.0
