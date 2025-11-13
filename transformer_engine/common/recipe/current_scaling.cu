@@ -110,7 +110,7 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, cud
   num_blocks = std::min(num_blocks, max_blocks);
 
   float* block_amax = nullptr;
-  NVTE_CHECK_CUDA(cudaMalloc(&block_amax, num_blocks * sizeof(float)));
+  NVTE_CHECK_CUDA(cudaMallocAsync(&block_amax, num_blocks * sizeof(float), stream));
 
   // Launch kernel
   switch (align) {
@@ -141,6 +141,7 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, cud
 
   // Check results
   NVTE_CHECK_CUDA(cudaGetLastError());
+  NVTE_CHECK_CUDA(cudaFreeAsync(block_amax, stream));
 }
 
 }  // namespace
