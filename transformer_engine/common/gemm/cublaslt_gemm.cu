@@ -24,6 +24,16 @@
 #include "../util/logging.h"
 #include "common/util/cuda_runtime.h"
 
+#ifdef __HIP_PLATFORM_AMD__
+// Forward declaration of ROCm grouped GEMM implementation
+void hipblaslt_grouped_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+                             const NVTETensor *bias, NVTETensor *pre_gelu_out,
+                             const int num_gemms, bool transa, bool transb, bool grad,
+                             NVTETensor *workspace, bool accumulate,
+                             bool use_split_accumulator, int math_sm_count,
+                             cudaStream_t stream);
+#endif
+
 #ifndef __HIP_PLATFORM_AMD__
 namespace {
 
@@ -696,6 +706,16 @@ void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVT
                                    cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_stream_cublas_gemm);
   using namespace transformer_engine;
+
+#ifdef __HIP_PLATFORM_AMD__
+  // Use HipBLASLt Grouped GEMM for AMD GPUs
+  // This implementation uses hipBLASLt's GroupedGemm API to batch multiple GEMM operations
+  // into a single kernel launch, which is more efficient than using multiple streams.
+  // Implementation is in rocm_gemm.cu
+  hipblaslt_grouped_gemm(A, B, D, bias, pre_gelu_out, num_gemms, transa, transb, grad,
+                         workspace, accumulate, use_split_accumulator, math_sm_count, stream);
+#else
+  // Use multi-stream approach for NVIDIA GPUs
   // Inits streams and events (once, globally)
   std::call_once(init_flag, init_streams_and_events);
 
@@ -720,6 +740,7 @@ void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVT
   for (int s = 0; s < num_stream_used; s++) {
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, cublas_event[s]));
   }
+#endif // __HIP_PLATFORM_AMD__
 }
 
 #ifndef __HIP_PLATFORM_AMD__

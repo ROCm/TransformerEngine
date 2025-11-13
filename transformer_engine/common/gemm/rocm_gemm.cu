@@ -1518,8 +1518,203 @@ void release_service_stream(hipStream_t stream, struct ServiceStreamCtl &ctl)
     NVTE_CHECK_CUDA(hipEventDestroy(ctl.start_event));
 }
 
-} // namespace
+} // namespace (anonymous)
 
+} // namespace transformer_engine
+
+// HipBLASLt Grouped GEMM implementation for multi-GEMM batching
+// This replaces the multi-stream approach with a single grouped kernel
+// Note: This function must be at global scope for external linkage
+void hipblaslt_grouped_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+                             const NVTETensor *bias, NVTETensor *pre_gelu_out,
+                             const int num_gemms, bool transa, bool transb, bool grad,
+                             NVTETensor *workspace, bool accumulate,
+                             bool use_split_accumulator, int math_sm_count,
+                             hipStream_t stream) {
+  using namespace transformer_engine;
+  
+  // Initialize hipBLASLt handle (once, globally)
+  static std::once_flag init_hipblaslt_flag;
+  static hipblasLtHandle_t grouped_gemm_handle;
+  std::call_once(init_hipblaslt_flag, [&]() {
+    NVTE_CHECK_HIPBLASLT(hipblasLtCreate(&grouped_gemm_handle));
+  });
+
+  // Extract tensor information and prepare for grouped GEMM
+  std::vector<int64_t> m_vec, n_vec, k_vec, batch_count_vec;
+  std::vector<float> alpha_vec, beta_vec;
+  std::vector<hipblaslt_ext::GemmEpilogue> gemm_epilogue_vec;
+  std::vector<hipblaslt_ext::GemmInputs> gemm_inputs_vec;
+
+  hipblasOperation_t hip_trans_a = transa ? HIPBLAS_OP_T : HIPBLAS_OP_N;
+  hipblasOperation_t hip_trans_b = transb ? HIPBLAS_OP_T : HIPBLAS_OP_N;
+  
+  for (int i = 0; i < num_gemms; i++) {
+    const Tensor *inputA = reinterpret_cast<const Tensor *>(A[i]);
+    const Tensor *inputB = reinterpret_cast<const Tensor *>(B[i]);
+    Tensor *outputD = reinterpret_cast<Tensor *>(D[i]);
+    const Tensor *biasTensor = reinterpret_cast<const Tensor *>(bias[i]);
+    Tensor *outputPreGelu = reinterpret_cast<Tensor *>(pre_gelu_out[i]);
+
+    // Get tensor dimensions in row-major order
+    const int A0 = inputA->flat_first_dim();
+    const int A1 = inputA->flat_last_dim();
+    const int B0 = inputB->flat_first_dim();
+    const int B1 = inputB->flat_last_dim();
+
+    // GEMM dimensions in column-major order
+    const int m = transa ? A0 : A1;
+    const int n = transb ? B1 : B0;
+    const int k = transa ? A1 : A0;
+    
+    NVTE_CHECK((transb ? B0 : B1) == k,
+               "GEMM inputs have incompatible dimensions (A is ", A0, "x", A1, ", B is ", B0, "x", B1, ")");
+
+    m_vec.push_back(m);
+    n_vec.push_back(n);
+    k_vec.push_back(k);
+    batch_count_vec.push_back(1);  // No strided batch for now
+
+    float alpha = 1.0f;
+    float beta = accumulate ? 1.0f : 0.0f;
+    alpha_vec.push_back(alpha);
+    beta_vec.push_back(beta);
+
+    // Set up epilogue using setter methods
+    bool has_bias = (biasTensor->data.dptr != nullptr);
+    bool has_gelu = (outputPreGelu->data.dptr != nullptr);
+
+    hipblaslt_ext::GemmEpilogue epilogue;
+    hipblasLtEpilogue_t epilogue_mode;
+    if (has_bias && has_gelu) {
+      if (grad) {
+        epilogue_mode = HIPBLASLT_EPILOGUE_DGELU_BGRAD;
+      } else {
+        epilogue_mode = HIPBLASLT_EPILOGUE_GELU_AUX_BIAS;
+      }
+    } else if (has_bias) {
+      if (grad) {
+        epilogue_mode = HIPBLASLT_EPILOGUE_BGRADB;
+      } else {
+        epilogue_mode = HIPBLASLT_EPILOGUE_BIAS;
+      }
+    } else if (has_gelu) {
+      if (grad) {
+        epilogue_mode = HIPBLASLT_EPILOGUE_DGELU;
+      } else {
+        epilogue_mode = HIPBLASLT_EPILOGUE_GELU_AUX;
+      }
+    } else {
+      epilogue_mode = HIPBLASLT_EPILOGUE_DEFAULT;
+    }
+    epilogue.setMode(epilogue_mode);
+    gemm_epilogue_vec.push_back(epilogue);
+
+    // Set up inputs using setter methods
+    hipblaslt_ext::GemmInputs inputs;
+    inputs.setA(inputA->data.dptr);
+    inputs.setB(inputB->data.dptr);
+    inputs.setC(outputD->data.dptr);
+    inputs.setD(outputD->data.dptr);
+    inputs.setAlpha(&alpha_vec[i]);
+    inputs.setBeta(&beta_vec[i]);
+    if (has_bias) {
+      inputs.setBias(biasTensor->data.dptr);
+    }
+    gemm_inputs_vec.push_back(inputs);
+  }
+
+  // Determine data types
+  hipDataType in_datatype = HIP_R_32F;
+  hipDataType out_datatype = HIP_R_32F;
+  
+  // Check first tensor for actual type
+  const Tensor *first_input = reinterpret_cast<const Tensor *>(A[0]);
+  switch (first_input->data.dtype) {
+    case DType::kFloat32:
+      in_datatype = HIP_R_32F;
+      break;
+    case DType::kFloat16:
+      in_datatype = HIP_R_16F;
+      break;
+    case DType::kBFloat16:
+      in_datatype = HIP_R_16BF;
+      break;
+    default:
+      NVTE_ERROR("Unsupported input data type for grouped GEMM");
+  }
+
+  const Tensor *first_output = reinterpret_cast<const Tensor *>(D[0]);
+  switch (first_output->data.dtype) {
+    case DType::kFloat32:
+      out_datatype = HIP_R_32F;
+      break;
+    case DType::kFloat16:
+      out_datatype = HIP_R_16F;
+      break;
+    case DType::kBFloat16:
+      out_datatype = HIP_R_16BF;
+      break;
+    default:
+      NVTE_ERROR("Unsupported output data type for grouped GEMM");
+  }
+
+  // Create grouped GEMM instance
+  hipblaslt_ext::GroupedGemm groupedGemm(grouped_gemm_handle,
+                                         hip_trans_a,
+                                         hip_trans_b,
+                                         in_datatype,
+                                         in_datatype,
+                                         out_datatype,
+                                         out_datatype,
+                                         HIPBLAS_COMPUTE_32F);
+
+  // Set problem using simplified API
+  NVTE_CHECK_HIPBLASLT(groupedGemm.setProblem(m_vec,
+                                              n_vec,
+                                              k_vec,
+                                              batch_count_vec,
+                                              gemm_epilogue_vec,
+                                              gemm_inputs_vec));
+
+  // Get heuristic results for algorithm selection
+  std::vector<hipblasLtMatmulHeuristicResult_t> heuristicResult;
+  NVTE_CHECK_HIPBLASLT(hipblaslt_ext::getAllAlgos(grouped_gemm_handle,
+                                                  hipblaslt_ext::GemmType::HIPBLASLT_GROUPED_GEMM,
+                                                  hip_trans_a,
+                                                  hip_trans_b,
+                                                  in_datatype,
+                                                  in_datatype,
+                                                  out_datatype,
+                                                  out_datatype,
+                                                  HIPBLAS_COMPUTE_32F,
+                                                  heuristicResult));
+
+  // Find a suitable algorithm
+  Tensor *wspace = reinterpret_cast<Tensor *>(workspace[0]);
+  void *d_workspace = wspace->data.dptr;
+  size_t workspace_size_available = wspace->data.shape[0];
+  
+  std::vector<int> validIdx;
+  for (size_t i = 0; i < heuristicResult.size(); i++) {
+    size_t workspace_size = 0;
+    if (groupedGemm.isAlgoSupported(heuristicResult[i].algo, workspace_size) == HIPBLAS_STATUS_SUCCESS) {
+      if (workspace_size <= workspace_size_available) {
+        validIdx.push_back(i);
+      }
+    }
+  }
+
+  NVTE_CHECK(validIdx.size() > 0, "No suitable algorithm found for grouped GEMM");
+
+  // Initialize with selected algorithm
+  NVTE_CHECK_HIPBLASLT(groupedGemm.initialize(heuristicResult[validIdx[0]].algo, d_workspace, stream));
+
+  // Run grouped GEMM
+  NVTE_CHECK_HIPBLASLT(groupedGemm.run(stream));
+}
+
+namespace transformer_engine {
 
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, bool transa, bool transb, bool grad,
