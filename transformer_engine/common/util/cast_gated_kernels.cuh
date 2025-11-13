@@ -847,8 +847,9 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
               gated_input.dtype(), IType,
               TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
                   output->dtype(), OType,
-
 #ifdef __HIP_PLATFORM_AMD__
+              TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                !(cols % (32 * sizeof(IType))), IS_ALIGNED,
                   const IType *tensor_map_grad = IS_DGATED ? reinterpret_cast<const IType *>(grad.data.dptr) : nullptr;
                   const IType *tensor_map_input_act = reinterpret_cast<const IType *>(gated_input.data.dptr);
                   const IType *tensor_map_input_gate = reinterpret_cast<const IType *>(gated_input.data.dptr) + cols;
@@ -918,11 +919,19 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
 
                   NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                       (const void*)cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType,
-                                              SCALE_DIM_Y, SCALE_DIM_X>,
+                                              SCALE_DIM_Y, SCALE_DIM_X
+#ifdef __HIP_PLATFORM_AMD__
+                                              , IS_ALIGNED
+#endif
+                                              >,
                       cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
 
                   cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType,
-                                          SCALE_DIM_Y, SCALE_DIM_X>
+                                          SCALE_DIM_Y, SCALE_DIM_X
+#ifdef __HIP_PLATFORM_AMD__
+                                              , IS_ALIGNED
+#endif
+                                              >
                   <<<grid_dim, block_dim, shmem_size, stream>>>(
                       tensor_map_grad, tensor_map_input_act, tensor_map_input_gate,
                       tensor_map_output_act_rowwise, tensor_map_output_gate_rowwise,
@@ -932,6 +941,9 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
           );                                    // NOLINT(*)
       );                                        // NOLINT(*)
   );                                            // NOLINT(*)
+#ifdef __HIP_PLATFORM_AMD__
+  );                                            // NOLINT(*)
+#endif
 }
 
 template <typename ParamOP, float (*ActOP)(float, const ParamOP &)>
