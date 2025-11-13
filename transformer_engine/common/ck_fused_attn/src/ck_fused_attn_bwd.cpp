@@ -355,7 +355,7 @@ void log_bwd_config(const char* func_name,
     std::cout<<std::endl<<func_name<<std::endl;
 
     // fmha_traits debug
-    std::cout<<"fmha_traits: "<<std::endl;
+    std::cout<<std::endl<<"fmha_traits: "<<std::endl;
     std::cout<<"hdim_q: "<<fmha_args.hdim_q<<std::endl;
     std::cout<<"hdim_v: "<<fmha_args.hdim_v<<std::endl;
     std::cout<<"data_type: "<<data_type_str<<std::endl;
@@ -371,7 +371,7 @@ void log_bwd_config(const char* func_name,
     std::cout<<"how_v3_bf16_cvt: "<<how_v3_bf16_cvt<<std::endl;
 
     // fmha_args debug
-    std::cout<<"fmha_args: "<<std::endl;
+    std::cout<<std::endl<<"fmha_args: "<<std::endl;
     std::cout<<"q_ptr: "<<fmha_args.q_ptr<<std::endl;
     std::cout<<"k_ptr: "<<fmha_args.k_ptr<<std::endl;
     std::cout<<"v_ptr: "<<fmha_args.v_ptr<<std::endl;
