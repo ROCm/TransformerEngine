@@ -460,7 +460,7 @@ void rocm_norm_mxfp8_quantize(LaunchParams<ForwardKernelParams> &launch_params) 
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
         launch_params.z_tensor->dtype(), OType,
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
-            !(cols % (32 * sizeof(OType))), IS_ALIGNED,
+            !(cols % (32 * sizeof(compute_t))), IS_ALIGNED,
               cast_mxfp8_2D_kernel<false, false, false, Empty, {}, compute_t, OType,
                                 SCALE_DIM_Y, scale_dim_X_rowwise, IS_ALIGNED, true><<<grid, block, 0, launch_params.stream>>>(
                 reinterpret_cast<const compute_t*>(launch_params.params.z),
