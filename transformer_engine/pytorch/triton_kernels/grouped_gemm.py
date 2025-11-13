@@ -233,7 +233,8 @@ def _kernel_grouped_gemm_backward(
     group_b_ptrs,
     group_c_ptrs,
     # device tensor of gemm sizes. its shape is [group_size, 3]
-    # dim 0 is group_size, dim 1 is the values of <M, N, K> of each gemm
+    # dim 0 is group_size, dim 1 is the values of <M, K, N> of each gemm
+    # Note: For backward, sizes are [M, K, N] where N is reduction dimension
     group_gemm_sizes,
     # device tensor of leading dimension sizes. its shape is [group_size, 3]
     # dim 0 is group_size, dim 1 is the values of <lda, ldb, ldc> of each gemm
@@ -281,39 +282,44 @@ def _kernel_grouped_gemm_backward(
             tile_idx_in_gemm = tile_idx - last_problem_end
             tile_m_idx = tile_idx_in_gemm // num_k_tiles
             tile_k_idx = tile_idx_in_gemm % num_k_tiles
-            
-            # Initialize accumulator
+
+            # do regular gemm here (same structure as forward, but reduce over N)
+            offs_am = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+            offs_ck = tile_k_idx * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+            offs_n = tl.arange(0, BLOCK_SIZE_N)
+            a_ptrs = a_ptr + offs_am[:, None] * lda + offs_n[None, :]
+            # Weight is [N, K], load with N and K indices
+            b_ptrs = b_ptr + offs_n[:, None] * ldb + offs_ck[None, :]
             accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_K), dtype=tl.float32)
-            
-            # Loop over reduction dimension N (out_features)
             for n_idx in range(0, tl.cdiv(n, BLOCK_SIZE_N)):
-                # Offsets for grad_output [M, N]
-                offs_am = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-                offs_n = n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-                
-                # Offsets for weight [N, K]
-                offs_bk = tile_k_idx * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-                
-                # Load grad_output tile: [BLOCK_M, BLOCK_N]
-                a_ptrs = a_ptr + offs_am[:, None] * lda + offs_n[None, :]
-                a = tl.load(a_ptrs)
-                
-                # Load weight tile: [BLOCK_N, BLOCK_K]
-                b_ptrs = b_ptr + offs_n[:, None] * ldb + offs_bk[None, :]
-                b = tl.load(b_ptrs)
-                
-                # Accumulate: [BLOCK_M, BLOCK_N] @ [BLOCK_N, BLOCK_K] = [BLOCK_M, BLOCK_K]
+                # hint to Triton compiler to do proper loop pipelining
+                tl.multiple_of(a_ptrs, [16, 16])
+                tl.multiple_of(b_ptrs, [16, 16])
+                # Add masking for partial tiles
+                n_remaining = n - n_idx * BLOCK_SIZE_N
+                mask_a = (offs_am[:, None] < gm) & (offs_n[None, :] < n_remaining)
+                # B is [N, K] layout, so mask is [N, K]
+                mask_b = (offs_n[:, None] < gn) & (offs_ck[None, :] < gk)
+                a = tl.load(a_ptrs, mask=mask_a, other=0.0)
+                b = tl.load(b_ptrs, mask=mask_b, other=0.0)
+                # Only difference from forward: no transpose (a @ b instead of a @ b.T)
                 accumulator += tl.dot(a, b)
-            
-            # Store result to dgrad: [BLOCK_M, BLOCK_K]
+                a_ptrs += BLOCK_SIZE_N
+                # B is [N, K], so increment along N dimension (rows)
+                b_ptrs += BLOCK_SIZE_N
+            c = accumulator
+
             offs_cm = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             offs_ck = tile_k_idx * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-            c_ptrs = c_ptr + offs_cm[:, None] * ldc + offs_ck[None, :]
-            tl.store(c_ptrs, accumulator)
-            
-            # Move to next tile
+            c_ptrs = c_ptr + ldc * offs_cm[:, None] + offs_ck[None, :]
+
+            # Add masking for output stores
+            mask_c = (offs_cm[:, None] < gm) & (offs_ck[None, :] < gk)
+            tl.store(c_ptrs, c, mask=mask_c)
+
+            # go to the next tile by advancing NUM_SM
             tile_idx += NUM_SM
-        
+
         # get ready to go to the next gemm problem
         last_problem_end = last_problem_end + num_tiles
 
