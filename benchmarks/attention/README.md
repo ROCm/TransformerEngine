@@ -1,16 +1,12 @@
 ## JAX Fused-Attention Benchmarking
 The benchmarking process is split into two stages: *generating* the timing data, and *visualizing* the timing data. The following steps assume you are located in `TransformerEngine/benchmarks/attention` (i.e. where this README is located). First, ensure that you install requirements via `pip install -r requirements.txt`.
 
-Note: Only forward timings are supported at this point.
-
 ### Generate Timing Data
 Run the following command to generate timing data. Please use the `-h` flag for details on the available arguments. The output csv, which will later be parsed to generate the interactive visualizations, is generated in the same directory as the script, since that is where the visualization stage expects it.
 
 ```bash
 python benchmark_attention_jax.py --bench-bwd --fwd-v3 --bwd-v3 -v
 ```
-
-The `XLA_FLAGS` environment variable is necessary in order to ensure that the timings can be dumped at the C++ backend level.
 
 Note that you can also specify a target HIP device via `HIP_VISIBLE_DEVICES=<device index>` which may be useful in isolating the benchmarks to an unused GPU on a shared machine.
 
