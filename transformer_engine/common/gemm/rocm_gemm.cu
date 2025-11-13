@@ -1624,6 +1624,10 @@ void hipblaslt_grouped_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     gemm_inputs_vec.push_back(inputs);
   }
 
+  // Get device info for cache key
+  int device_id = 0;
+  NVTE_CHECK_CUDA(hipGetDevice(&device_id));
+  
   // Determine data types
   hipDataType in_datatype = HIP_R_32F;
   hipDataType out_datatype = HIP_R_32F;
@@ -1659,6 +1663,48 @@ void hipblaslt_grouped_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
       NVTE_ERROR("Unsupported output data type for grouped GEMM");
   }
 
+  // Get workspace info
+  Tensor *wspace = reinterpret_cast<Tensor *>(workspace[0]);
+  void *d_workspace = wspace->data.dptr;
+  size_t workspace_size_available = wspace->data.shape[0];
+
+  // Create cache key based on first GEMM's dimensions (assuming uniform sizes in MoE)
+  // Use representative dimensions for cache lookup
+  const Tensor *first_bias = reinterpret_cast<const Tensor *>(bias[0]);
+  const Tensor *first_gelu = reinterpret_cast<const Tensor *>(pre_gelu_out[0]);
+  bool has_bias = (first_bias->data.dptr != nullptr);
+  bool has_gelu = (first_gelu->data.dptr != nullptr);
+  
+  hipblasLtEpilogue_t epilogue_for_cache = HIPBLASLT_EPILOGUE_DEFAULT;
+  if (has_bias && has_gelu) {
+    epilogue_for_cache = grad ? HIPBLASLT_EPILOGUE_DGELU_BGRAD : HIPBLASLT_EPILOGUE_GELU_AUX_BIAS;
+  } else if (has_bias) {
+    epilogue_for_cache = grad ? HIPBLASLT_EPILOGUE_BGRADB : HIPBLASLT_EPILOGUE_BIAS;
+  } else if (has_gelu) {
+    epilogue_for_cache = grad ? HIPBLASLT_EPILOGUE_DGELU : HIPBLASLT_EPILOGUE_GELU_AUX;
+  }
+  
+  int m = m_vec[0];
+  int n = n_vec[0];
+  int k = k_vec[0];
+  int lda = transa ? k : m;
+  int ldb = transb ? n : k;
+  int ldd = m;
+  
+  GemmAlgoCache::Key gemm_cfg(
+    algoCache.device_cap(device_id),
+    in_datatype, in_datatype, out_datatype,
+    has_bias ? HIP_R_32F : (hipDataType)-1,
+    has_gelu ? HIP_R_32F : (hipDataType)-1,
+    m, n, k, lda, ldb, ldd,
+    hip_trans_a, hip_trans_b,
+    0, // scaling_mode (not used for grouped GEMM)
+    epilogue_for_cache
+  );
+  
+  GemmAlgoCache::Algo cached_algo;
+  bool found_cached = algoCache.find(gemm_cfg, workspace_size_available, cached_algo);
+
   // Create grouped GEMM instance
   hipblaslt_ext::GroupedGemm groupedGemm(grouped_gemm_handle,
                                          hip_trans_a,
@@ -1677,38 +1723,128 @@ void hipblaslt_grouped_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
                                               gemm_epilogue_vec,
                                               gemm_inputs_vec));
 
-  // Get heuristic results for algorithm selection
-  std::vector<hipblasLtMatmulHeuristicResult_t> heuristicResult;
-  NVTE_CHECK_HIPBLASLT(hipblaslt_ext::getAllAlgos(grouped_gemm_handle,
-                                                  hipblaslt_ext::GemmType::HIPBLASLT_GROUPED_GEMM,
-                                                  hip_trans_a,
-                                                  hip_trans_b,
-                                                  in_datatype,
-                                                  in_datatype,
-                                                  out_datatype,
-                                                  out_datatype,
-                                                  HIPBLAS_COMPUTE_32F,
-                                                  heuristicResult));
+  // Only call getAllAlgos if we don't have a cached algorithm
+  if (!found_cached || !cached_algo.algo.has_value()) {
+    bool logTuning = getIntEnv("TE_HIPBLASLT_LOG_TUNING_GROUPED_GEMM", 0, 0) != 0;
+    int firstAlgo = getIntEnv("TE_HIPBLASLT_ALGO_SELECTION", 0, 0);
+    int tuneLoopCount = getIntEnv("TE_HIPBLASLT_TUNING_RUN_COUNT_GROUPED_GEMM", 0, 0);
+    int algoTuneCount = 1;
+    
+    if (tuneLoopCount) {
+      /* HIPBLASLT may return hundreds of algos for some configs
+       * Limit amount by default. User may override with env
+       */
+      static const int defaultAlgoCount = 16;
+      algoTuneCount = getIntEnv("TE_HIPBLASLT_TUNING_ALGO_COUNT_GROUPED_GEMM", defaultAlgoCount, 1);
+    }
+    algoTuneCount += firstAlgo;
+    
+    // Get heuristic results for algorithm selection
+    std::vector<hipblasLtMatmulHeuristicResult_t> heuristicResult;
+    NVTE_CHECK_HIPBLASLT(hipblaslt_ext::getAllAlgos(grouped_gemm_handle,
+                                                    hipblaslt_ext::GemmType::HIPBLASLT_GROUPED_GEMM,
+                                                    hip_trans_a,
+                                                    hip_trans_b,
+                                                    in_datatype,
+                                                    in_datatype,
+                                                    out_datatype,
+                                                    out_datatype,
+                                                    HIPBLAS_COMPUTE_32F,
+                                                    heuristicResult));
 
-  // Find a suitable algorithm
-  Tensor *wspace = reinterpret_cast<Tensor *>(workspace[0]);
-  void *d_workspace = wspace->data.dptr;
-  size_t workspace_size_available = wspace->data.shape[0];
-  
-  std::vector<int> validIdx;
-  for (size_t i = 0; i < heuristicResult.size(); i++) {
-    size_t workspace_size = 0;
-    if (groupedGemm.isAlgoSupported(heuristicResult[i].algo, workspace_size) == HIPBLAS_STATUS_SUCCESS) {
-      if (workspace_size <= workspace_size_available) {
-        validIdx.push_back(i);
+    // Limit to requested count
+    if (heuristicResult.size() > static_cast<size_t>(algoTuneCount)) {
+      heuristicResult.resize(algoTuneCount);
+    }
+
+    // Find suitable algorithms
+    std::vector<int> validIdx;
+    for (size_t i = 0; i < heuristicResult.size(); i++) {
+      size_t workspace_size = 0;
+      if (groupedGemm.isAlgoSupported(heuristicResult[i].algo, workspace_size) == HIPBLAS_STATUS_SUCCESS) {
+        if (workspace_size <= workspace_size_available) {
+          validIdx.push_back(i);
+        }
       }
+    }
+
+    NVTE_CHECK(validIdx.size() > 0, "No suitable algorithm found for grouped GEMM");
+
+    int bestAlgo = -1;
+    
+    // Benchmark algorithms if tuning is enabled
+    if (tuneLoopCount > 0) {
+      if (logTuning) {
+        std::cout << "[INFO] Perform hipBLASLt grouped GEMM algo selection on GPU " << device_id
+                  << " with " << validIdx.size() << " candidates and "
+                  << tuneLoopCount << " loops" << std::endl;
+      }
+
+      NVTE_CHECK_CUDA(hipStreamSynchronize(stream));
+      using tuning_clock = std::chrono::steady_clock;
+      tuning_clock::now(); // First call takes longer
+      tuning_clock::duration bestTime = tuning_clock::duration::max();
+
+      for (int idx : validIdx) {
+        // Warmup call
+        NVTE_CHECK_HIPBLASLT(groupedGemm.initialize(heuristicResult[idx].algo, d_workspace, stream));
+        NVTE_CHECK_HIPBLASLT(groupedGemm.run(stream));
+        NVTE_CHECK_CUDA(hipStreamSynchronize(stream));
+
+        // Profiling loop
+        tuning_clock::time_point startTime = tuning_clock::now();
+        for (int loop = 0; loop < tuneLoopCount; loop++) {
+          NVTE_CHECK_HIPBLASLT(groupedGemm.run(stream));
+        }
+        NVTE_CHECK_CUDA(hipStreamSynchronize(stream));
+        tuning_clock::duration algoTime = tuning_clock::now() - startTime;
+        
+        if (algoTime < bestTime) {
+          bestAlgo = idx;
+          bestTime = algoTime;
+        }
+        
+        if (logTuning) {
+          auto avgNs = std::chrono::duration_cast<std::chrono::nanoseconds>(algoTime).count() / tuneLoopCount;
+          std::cout << "[INFO]   Algo [" << idx << "] time: " << (avgNs / 1000.0) << " us" << std::endl;
+        }
+      }
+
+      if (bestAlgo >= 0 && logTuning) {
+        auto bestNs = std::chrono::duration_cast<std::chrono::nanoseconds>(bestTime).count() / tuneLoopCount;
+        std::cout << "[INFO] Selected grouped GEMM algo [" << bestAlgo 
+                  << "] with time " << (bestNs / 1000.0) << " us" << std::endl;
+      }
+    } else if (firstAlgo < static_cast<int>(validIdx.size())) {
+      // Use specified algorithm without tuning
+      bestAlgo = validIdx[firstAlgo];
+    } else {
+      // Use first valid algorithm (heuristic default)
+      bestAlgo = validIdx[0];
+    }
+
+    if (bestAlgo < 0) {
+      throw std::runtime_error("Unable to find any suitable grouped GEMM algorithms");
+    }
+
+    // Store the selected algorithm in cache
+    cached_algo.algo = heuristicResult[bestAlgo].algo;
+    cached_algo.index = bestAlgo;
+    cached_algo.algoId = GemmAlgoCache::Algo::getAlgoId(heuristicResult[bestAlgo].algo);
+    cached_algo.ws_size_min = 0; // GroupedGemm doesn't report workspace size in same way
+    cached_algo.ws_size_max = workspace_size_available;
+    
+    algoCache.store(gemm_cfg, cached_algo);
+    
+    if (logTuning) {
+      std::cout << "[INFO] Cached grouped GEMM algo [" << cached_algo.index 
+                << "] id=" << cached_algo.algoId 
+                << " for " << num_gemms << " GEMMs (m=" << m << ",n=" << n << ",k=" << k << ")" << std::endl;
     }
   }
 
-  NVTE_CHECK(validIdx.size() > 0, "No suitable algorithm found for grouped GEMM");
-
-  // Initialize with selected algorithm
-  NVTE_CHECK_HIPBLASLT(groupedGemm.initialize(heuristicResult[validIdx[0]].algo, d_workspace, stream));
+  // Initialize with cached algorithm
+  NVTE_CHECK_HIPBLASLT(groupedGemm.initialize(cached_algo.algo.value(), d_workspace, stream));
 
   // Run grouped GEMM
   NVTE_CHECK_HIPBLASLT(groupedGemm.run(stream));
