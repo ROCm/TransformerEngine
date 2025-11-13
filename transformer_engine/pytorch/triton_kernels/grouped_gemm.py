@@ -2,6 +2,7 @@ import triton
 import triton.language as tl
 import torch
 from typing import Optional
+from triton.runtime import driver
 
 def num_sms():
     """Get the number of streaming multiprocessors/compute units on current device"""
@@ -9,46 +10,126 @@ def num_sms():
         return torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
     return 304  # Default for MI300X
 
+# NVIDIA-optimized configurations for grouped GEMM
+_NV_CONFIGS = [
+    triton.Config(
+        {
+            "BLOCK_SIZE_M": block_size_m,
+            "BLOCK_SIZE_N": block_size_n,
+            "BLOCK_SIZE_K": block_size_k,
+            "NUM_SM": num_sm,
+        },
+        num_stages=num_stages,
+        num_warps=num_warps,
+        num_ctas=num_ctas,
+    )
+    for block_size_m in [64, 128]
+    for block_size_n in [64, 128, 256]
+    for block_size_k in [64, 128, 256]
+    for num_stages in [3, 4]
+    for num_warps in [4, 8]
+    for num_sm in [84, 128]
+    for num_ctas in [1]
+]
+
+# AMD-optimized configurations for grouped GEMM
+_AMD_CONFIGS = [
+    triton.Config(
+        {
+            "BLOCK_SIZE_M": block_size_m,
+            "BLOCK_SIZE_N": block_size_n,
+            "BLOCK_SIZE_K": block_size_k,
+            "NUM_SM": num_sm,
+            "waves_per_eu": waves_per_eu,
+            "matrix_instr_nonkdim": matrix_instr_nonkdim,
+        },
+        num_stages=num_stages,
+        num_warps=num_warps,
+    )
+    for block_size_m in [32, 64, 128]
+    for block_size_n in [32, 64, 128, 256]
+    for block_size_k in [128, 256]
+    for num_stages in [1, 2]
+    for num_warps, waves_per_eu in [(4, 1), (8, 2), (16, 4)]
+    for num_sm in [304]  # MI300X
+    for matrix_instr_nonkdim in [16]
+]
+
+def early_config_prune(configs, named_args, dtsize=None, dtype=None, **kwargs):
+    """Prune configurations that are invalid or inefficient"""
+    device = torch.cuda.current_device()
+    
+    # Infer dtsize if not provided
+    if dtsize is None:
+        dtsize = 2  # float16/bfloat16 default
+    
+    pruned_configs = []
+    for config in configs:
+        kw = config.kwargs
+        BLOCK_M = kw["BLOCK_SIZE_M"]
+        BLOCK_N = kw["BLOCK_SIZE_N"]
+        BLOCK_K = kw["BLOCK_SIZE_K"]
+        num_stages = config.num_stages
+        
+        # Get group size (number of experts)
+        G = named_args.get("group_size", 64)
+        
+        # Get device properties
+        props = driver.active.utils.get_device_properties(device)
+        max_shared_memory = props["max_shared_mem"]
+        num_sm = props["multiprocessor_count"]
+        
+        # 1. Make sure we have enough shared memory
+        if torch.version.hip:
+            required_shared_memory = BLOCK_N * BLOCK_K * num_stages * dtsize
+        else:
+            required_shared_memory = (BLOCK_M + BLOCK_N) * BLOCK_K * num_stages * dtsize
+        
+        if required_shared_memory > max_shared_memory:
+            continue
+        
+        # 2. Estimate average M per group (tokens per expert)
+        # Assume roughly uniform distribution
+        M_PER_GROUP = 24576 // G  # Conservative estimate based on typical workload
+        
+        MIN_M_TILES = 32 if torch.version.hip else 64
+        
+        # Don't load M tiles that are too big
+        if BLOCK_M > MIN_M_TILES and BLOCK_M > (M_PER_GROUP * 2):
+            continue
+        
+        # Don't load M tiles that are too small
+        if BLOCK_M < 128 and BLOCK_M < (M_PER_GROUP // 2):
+            continue
+        
+        # 3. Estimate N (output features) - typically 2816 for this workload
+        N = 2816
+        N_TILES = N // BLOCK_N if BLOCK_N > 0 else 1
+        
+        MIN_N_TILES = 32 if torch.version.hip else 64
+        
+        # Don't load N tiles that are too big
+        if BLOCK_N > MIN_N_TILES and M_PER_GROUP * N_TILES < num_sm:
+            continue
+        
+        # Don't load N tiles that are too small
+        if BLOCK_N < 128 and M_PER_GROUP * N_TILES > 2 * num_sm:
+            continue
+        
+        # 4. Make sure K can be evenly divided (typical K is 2048)
+        # This is less strict - we can handle misalignment but prefer even division
+        K = 2048
+        if K % BLOCK_K != 0 and BLOCK_K > 64:
+            continue
+        
+        pruned_configs.append(config)
+    
+    return pruned_configs
+
 @triton.autotune(
-    configs=[
-        triton.Config({
-            'BLOCK_SIZE_M': 128,
-            'BLOCK_SIZE_N': 128,
-            'BLOCK_SIZE_K': 32,
-            'NUM_SM': 84,
-        }),
-        triton.Config({
-            'BLOCK_SIZE_M': 128,
-            'BLOCK_SIZE_N': 128,
-            'BLOCK_SIZE_K': 32,
-            'NUM_SM': 128,
-        }),
-        triton.Config({
-            'BLOCK_SIZE_M': 64,
-            'BLOCK_SIZE_N': 64,
-            'BLOCK_SIZE_K': 32,
-            'NUM_SM': 84,
-        }),
-        triton.Config({
-            'BLOCK_SIZE_M': 64,
-            'BLOCK_SIZE_N': 64,
-            'BLOCK_SIZE_K': 32,
-            'NUM_SM': 128,
-        }),
-        triton.Config({
-            'BLOCK_SIZE_M': 128,
-            'BLOCK_SIZE_N': 128,
-            'BLOCK_SIZE_K': 64,
-            'NUM_SM': 304,  # MI300X default
-        }),
-        triton.Config({
-            'BLOCK_SIZE_M': 64,
-            'BLOCK_SIZE_N': 128,
-            'BLOCK_SIZE_K': 64,
-            'NUM_SM': 304,  # MI300X default
-        }),
-    ],
+    configs=_AMD_CONFIGS if torch.version.hip else _NV_CONFIGS,
     key=['group_size'],
+    prune_configs_by={'early_config_prune': early_config_prune},
 )
 @triton.jit
 def _kernel_grouped_gemm_forward(
@@ -156,31 +237,33 @@ def _grouped_gemm_forward(
     N = output.shape[1]  # out_features
     K = inputmats[0].shape[1]  # in_features
     
-    # Create pointer arrays for inputs, weights, and outputs
-    a_ptrs = torch.zeros(num_experts, dtype=torch.int64, device=device)
-    b_ptrs = torch.zeros(num_experts, dtype=torch.int64, device=device)
-    c_ptrs = torch.zeros(num_experts, dtype=torch.int64, device=device)
+    # Collect all metadata in one loop (matching Triton tutorial pattern)
+    a_addrs = []
+    b_addrs = []
+    c_addrs = []
+    g_sizes = []
+    g_lds = []
     
-    # Point to slices of the pre-allocated output tensor
     offset = 0
     for i in range(num_experts):
-        a_ptrs[i] = inputmats[i].data_ptr()
-        b_ptrs[i] = weights[i].data_ptr()
-        c_ptrs[i] = output[offset:offset+m_splits[i]].data_ptr()
+        # Collect pointers
+        a_addrs.append(inputmats[i].data_ptr())
+        b_addrs.append(weights[i].data_ptr())
+        c_addrs.append(output[offset:offset+m_splits[i]].data_ptr())
+        
+        # Collect sizes: [M, N, K] for this expert
+        g_sizes += [m_splits[i], N, K]
+        
+        # Collect leading dimensions: [lda, ldb, ldc] for this expert
+        g_lds += [K, K, N]  # K for input stride, K for weight stride, N for output stride
+        
         offset += m_splits[i]
     
-    # Create flattened gemm sizes array: [M0, N0, K0, M1, N1, K1, ...]
-    # This matches the Triton tutorial format
-    g_sizes = []
-    for i in range(num_experts):
-        g_sizes += [m_splits[i], N, K]  # Flatten into 1D list
+    # Create device tensors - single memcpy per tensor
+    a_ptrs = torch.tensor(a_addrs, dtype=torch.int64, device=device)
+    b_ptrs = torch.tensor(b_addrs, dtype=torch.int64, device=device)
+    c_ptrs = torch.tensor(c_addrs, dtype=torch.int64, device=device)
     gemm_sizes = torch.tensor(g_sizes, dtype=torch.int32, device=device)
-    
-    # Create flattened leading dimensions array: [lda0, ldb0, ldc0, lda1, ldb1, ldc1, ...]
-    # For row-major: lda = K, ldb = K (weight is transposed), ldc = N
-    g_lds = []
-    for i in range(num_experts):
-        g_lds += [K, K, N]  # lda, ldb, ldc
     lds = torch.tensor(g_lds, dtype=torch.int32, device=device)
     
     # Launch kernel with 1D grid of NUM_SM
@@ -235,26 +318,14 @@ def general_grouped_gemm_triton(
     # Use pre-allocated output tensor
     out = outputs[0]
     
-    # Ensure inputs are contiguous and correct dtype
-    inputmats_processed = []
-    for inp in inputmats:
-        if inp.dtype != out_dtype:
-            inp = inp.to(out_dtype)
-        if not inp.is_contiguous():
-            inp = inp.contiguous()
-        inputmats_processed.append(inp)
-    
-    # Ensure weights are contiguous
-    weights_processed = []
-    for w in weights:
-        if not w.is_contiguous():
-            w = w.contiguous()
-        weights_processed.append(w)
+    # Inputs are already contiguous (from torch.split) and correct dtype (from cast_if_needed)
+    # Weights are nn.Parameters, already contiguous
+    # No need for redundant checks - just pass through
     
     # Call Triton grouped GEMM kernel (modifies out in-place)
     _grouped_gemm_forward(
-        inputmats_processed,
-        weights_processed,
+        inputmats,
+        weights,
         out,
         m_splits,
     )
