@@ -1935,18 +1935,9 @@ void hipblaslt_grouped_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
                 << "] id=" << cached_algo.algoId 
                 << " for " << num_gemms << " GEMMs (m=" << m << ",n=" << n << ",k=" << k << ")" << std::endl;
     }
-  } else {
-    // Cache hit!
-    if (logTuning) {
-      std::cout << "[INFO] Cache HIT for grouped GEMM - using algo [" << cached_algo.index 
-                << "] id=" << cached_algo.algoId << std::endl;
-    }
   }
 
-  // Initialize with selected or cached algorithm
-  if (logTuning) {
-    std::cout << "[INFO] Initializing grouped GEMM with algo id=" << cached_algo.algoId << std::endl;
-  }
+
   NVTE_CHECK_HIPBLASLT(groupedGemm.initialize(cached_algo.algo.value(), d_workspace, stream));
 
   // Run grouped GEMM
