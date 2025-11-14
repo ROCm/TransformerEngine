@@ -389,6 +389,7 @@ def test_dot_product_attention(
             and config.attn_mask_type in ["causal", "padding_causal"]
         )
         and (config.window_size[0] == -1 or FlashAttentionUtils.v2_3_plus)
+        and not is_mla
     ):
         flash_attn_supported = True
 
