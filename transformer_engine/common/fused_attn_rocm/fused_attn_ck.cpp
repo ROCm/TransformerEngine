@@ -562,7 +562,7 @@ void fused_attn_ck_fwd_impl(
   bool nvte_ck_zero_out_pad = getenv<int>("NVTE_CK_ZERO_OUT_PAD", 1);
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(layout);
   bool is_ragged = qkv_format==NVTE_QKV_Format::NVTE_THD;
-  bool is_SBHD = qkv_format==NVTE_QKV_Format::NVTE_SBHD;
+  bool is_SBHD = qkv_format==NVTE_QKV_Format::NVTE_SBHD || qkv_format==NVTE_QKV_Format::NVTE_SBHD_2BSHD;
   bool is_BSHD = qkv_format==NVTE_QKV_Format::NVTE_BSHD;
   bool is_batch = is_BSHD || is_SBHD;
 
@@ -846,7 +846,7 @@ void fused_attn_ck_bwd_impl(
 
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(layout);
   bool is_ragged = qkv_format==NVTE_QKV_Format::NVTE_THD;
-  bool is_SBHD = qkv_format==NVTE_QKV_Format::NVTE_SBHD;
+  bool is_SBHD = qkv_format==NVTE_QKV_Format::NVTE_SBHD || qkv_format==NVTE_QKV_Format::NVTE_SBHD_2BSHD;
   bool is_BSHD = qkv_format==NVTE_QKV_Format::NVTE_BSHD;
   bool is_batch = is_BSHD || is_SBHD;
   bool is_padding = (mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
