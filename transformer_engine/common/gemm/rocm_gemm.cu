@@ -595,6 +595,7 @@ public:
     int index;
     size_t ws_size_min;
     size_t ws_size_max;
+    
     Algo(): algo(), index(-1), algoId(), ws_size_min(0), ws_size_max(0) {}
     Algo(int idx, int64_t id, size_t ws_min, size_t ws_max): algo(), index(idx), algoId(id), ws_size_min(ws_min), ws_size_max(ws_max) {}
     inline bool hasId() { return index>=0; } const
@@ -1522,9 +1523,73 @@ void release_service_stream(hipStream_t stream, struct ServiceStreamCtl &ctl)
 
 } // namespace transformer_engine
 
+// ============================================================================
+// GroupedGemm Object Cache (separate from algorithm cache)
+// Cannot use GemmAlgoCache because its key only includes first GEMM dimensions,
+// but GroupedGemm objects are tied to the full dimension vectors (m_vec, n_vec, k_vec)
+// ============================================================================
+
+struct GroupedGemmCacheKey {
+  int device_id;
+  hipblasOperation_t trans_a;
+  hipblasOperation_t trans_b;
+  hipDataType in_dtype;
+  hipDataType out_dtype;
+  hipblasComputeType_t compute_type;
+  
+  // Full problem dimensions - must match exactly for GroupedGemm object reuse
+  std::vector<int64_t> m_vec;
+  std::vector<int64_t> n_vec;
+  std::vector<int64_t> k_vec;
+  
+  bool operator==(const GroupedGemmCacheKey& other) const {
+    return device_id == other.device_id &&
+           trans_a == other.trans_a &&
+           trans_b == other.trans_b &&
+           in_dtype == other.in_dtype &&
+           out_dtype == other.out_dtype &&
+           compute_type == other.compute_type &&
+           m_vec == other.m_vec &&
+           n_vec == other.n_vec &&
+           k_vec == other.k_vec;
+  }
+};
+
+struct GroupedGemmCacheKeyHash {
+  size_t operator()(const GroupedGemmCacheKey& key) const {
+    size_t h = std::hash<int>()(key.device_id);
+    h ^= std::hash<int>()(key.trans_a) << 1;
+    h ^= std::hash<int>()(key.trans_b) << 2;
+    h ^= std::hash<int>()(key.in_dtype) << 3;
+    h ^= std::hash<int>()(key.out_dtype) << 4;
+    h ^= std::hash<int>()(key.compute_type) << 5;
+    
+    // Hash dimension vectors efficiently
+    for (size_t i = 0; i < key.m_vec.size(); ++i) {
+      h ^= std::hash<int64_t>()(key.m_vec[i]) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    }
+    for (size_t i = 0; i < key.n_vec.size(); ++i) {
+      h ^= std::hash<int64_t>()(key.n_vec[i]) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    }
+    for (size_t i = 0; i < key.k_vec.size(); ++i) {
+      h ^= std::hash<int64_t>()(key.k_vec[i]) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    }
+    
+    return h;
+  }
+};
+
+// Global cache for GroupedGemm objects
+static std::unordered_map<GroupedGemmCacheKey, 
+                          std::shared_ptr<hipblaslt_ext::GroupedGemm>,
+                          GroupedGemmCacheKeyHash> g_groupedGemmObjectCache;
+static std::mutex g_groupedGemmCacheMutex;
+
+// ============================================================================
 // HipBLASLt Grouped GEMM implementation for multi-GEMM batching
 // This replaces the multi-stream approach with a single grouped kernel
 // Note: This function must be at global scope for external linkage
+// ============================================================================
 void hipblaslt_grouped_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
                              const NVTETensor *bias, NVTETensor *pre_gelu_out,
                              const int num_gemms, bool transa, bool transb, bool grad,
@@ -1775,15 +1840,53 @@ void hipblaslt_grouped_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   GemmAlgoCache::Algo cached_algo;
   bool found_cached = algoCache.find(gemm_cfg, workspace_size_available, cached_algo);
 
-  // Create grouped GEMM instance
-  hipblaslt_ext::GroupedGemm groupedGemm(grouped_gemm_handle,
-                                         hip_trans_a,
-                                         hip_trans_b,
-                                         in_datatype,
-                                         in_datatype,
-                                         out_datatype,
-                                         out_datatype,
-                                         HIPBLAS_COMPUTE_32F);
+  // Get or create GroupedGemm object from separate cache
+  // Must use full dimension vectors as key (not just first GEMM like algorithm cache)
+  GroupedGemmCacheKey obj_cache_key{
+    device_id,
+    hip_trans_a,
+    hip_trans_b,
+    in_datatype,
+    out_datatype,
+    HIPBLAS_COMPUTE_32F,
+    m_vec,
+    n_vec,
+    k_vec
+  };
+
+  hipblaslt_ext::GroupedGemm* groupedGemmPtr = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(g_groupedGemmCacheMutex);
+    auto it = g_groupedGemmObjectCache.find(obj_cache_key);
+    if (it != g_groupedGemmObjectCache.end()) {
+      // Reuse cached object
+      groupedGemmPtr = it->second.get();
+      if (nvte_log_grouped_gemm_config) {
+        std::cout << "[GROUPED_GEMM] Reusing cached GroupedGemm object" << std::endl;
+      }
+    } else {
+      // Create new GroupedGemm object and cache it
+      auto newGemm = std::make_shared<hipblaslt_ext::GroupedGemm>(
+        grouped_gemm_handle,
+        hip_trans_a,
+        hip_trans_b,
+        in_datatype,
+        in_datatype,
+        out_datatype,
+        out_datatype,
+        HIPBLAS_COMPUTE_32F
+      );
+      groupedGemmPtr = newGemm.get();
+      g_groupedGemmObjectCache[obj_cache_key] = newGemm;
+      
+      if (nvte_log_grouped_gemm_config) {
+        std::cout << "[GROUPED_GEMM] Created and cached new GroupedGemm object" << std::endl;
+      }
+    }
+  }
+
+  // Use reference to cached object
+  hipblaslt_ext::GroupedGemm& groupedGemm = *groupedGemmPtr;
 
   // Create problem type descriptor
   auto problemType = hipblaslt_ext::GemmProblemType{hip_trans_a,
