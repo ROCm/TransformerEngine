@@ -1542,9 +1542,17 @@ void hipblaslt_grouped_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
 
   // Extract tensor information and prepare for grouped GEMM
   std::vector<int64_t> m_vec, n_vec, k_vec, batch_count_vec;
+  std::vector<int64_t> lda_vec, ldb_vec, ldc_vec, ldd_vec;
+  std::vector<int64_t> strideA_vec, strideB_vec, strideC_vec, strideD_vec;
   std::vector<float> alpha_vec, beta_vec;
   std::vector<hipblaslt_ext::GemmEpilogue> gemm_epilogue_vec;
   std::vector<hipblaslt_ext::GemmInputs> gemm_inputs_vec;
+
+  // Pre-allocate vectors to avoid reallocation (critical for alpha/beta pointers)
+  alpha_vec.reserve(num_gemms);
+  beta_vec.reserve(num_gemms);
+  gemm_inputs_vec.reserve(num_gemms);
+  gemm_epilogue_vec.reserve(num_gemms);
 
   hipblasOperation_t hip_trans_a = transa ? HIPBLAS_OP_T : HIPBLAS_OP_N;
   hipblasOperation_t hip_trans_b = transb ? HIPBLAS_OP_T : HIPBLAS_OP_N;
@@ -1574,6 +1582,22 @@ void hipblaslt_grouped_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     n_vec.push_back(n);
     k_vec.push_back(k);
     batch_count_vec.push_back(1);  // No strided batch for now
+    
+    // Calculate leading dimensions for column-major layout
+    int64_t lda = transa ? k : m;
+    int64_t ldb = transb ? n : k;
+    int64_t ldc = m;
+    int64_t ldd = m;
+    lda_vec.push_back(lda);
+    ldb_vec.push_back(ldb);
+    ldc_vec.push_back(ldc);
+    ldd_vec.push_back(ldd);
+    
+    // No strided batch, so strides are 0
+    strideA_vec.push_back(0);
+    strideB_vec.push_back(0);
+    strideC_vec.push_back(0);
+    strideD_vec.push_back(0);
 
     float alpha = 1.0f;
     float beta = accumulate ? 1.0f : 0.0f;
@@ -1621,7 +1645,53 @@ void hipblaslt_grouped_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     if (has_bias) {
       inputs.setBias(biasTensor->data.dptr);
     }
+    if (has_gelu) {
+      inputs.setAux(outputPreGelu->data.dptr);
+    }
     gemm_inputs_vec.push_back(inputs);
+  }
+
+  bool nvte_log_grouped_gemm_config = false;
+  if (const char* env_p = std::getenv("NVTE_LOG_GROUPED_GEMM_CONFIG")) {
+    nvte_log_grouped_gemm_config = (strcmp(env_p, "1") == 0);
+  }
+
+  if (nvte_log_grouped_gemm_config) {
+    const Tensor *first_input = reinterpret_cast<const Tensor *>(A[0]);
+    const Tensor *first_output = reinterpret_cast<const Tensor *>(D[0]);
+    const Tensor *first_bias = reinterpret_cast<const Tensor *>(bias[0]);
+    const Tensor *first_gelu = reinterpret_cast<const Tensor *>(pre_gelu_out[0]);
+    
+    std::cout << "[GROUPED_GEMM] num_gemms=" << num_gemms 
+        << " m=" << m_vec[0] << " n=" << n_vec[0] << " k=" << k_vec[0]
+        << " transa=" << (transa ? "T" : "N")
+        << " transb=" << (transb ? "T" : "N")
+        << " A_type=" << (int)(first_input->data.dtype)
+        << " B_type=" << (int)(reinterpret_cast<const Tensor *>(B[0]))->data.dtype
+        << " D_type=" << (int)(first_output->data.dtype)
+        << " bias=" << (first_bias->data.dptr != nullptr)
+        << " gelu=" << (first_gelu->data.dptr != nullptr)
+        << " grad=" << grad
+        << " accumulate=" << accumulate
+        << " alpha=" << alpha_vec[0]
+        << " beta=" << beta_vec[0];
+    
+    // Log dimension variance across GEMMs
+    if (num_gemms > 1) {
+      bool uniform_m = true, uniform_n = true, uniform_k = true;
+      for (int i = 1; i < num_gemms; i++) {
+        if (m_vec[i] != m_vec[0]) uniform_m = false;
+        if (n_vec[i] != n_vec[0]) uniform_n = false;
+        if (k_vec[i] != k_vec[0]) uniform_k = false;
+      }
+      std::cout << " uniform_dims=" << (uniform_m && uniform_n && uniform_k ? "yes" : "no");
+      if (!uniform_m || !uniform_n || !uniform_k) {
+        std::cout << " (m:" << (uniform_m ? "uniform" : "varied")
+                  << " n:" << (uniform_n ? "uniform" : "varied")
+                  << " k:" << (uniform_k ? "uniform" : "varied") << ")";
+      }
+    }
+    std::cout << std::endl;
   }
 
   // Get device info for cache key
@@ -1715,18 +1785,42 @@ void hipblaslt_grouped_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
                                          out_datatype,
                                          HIPBLAS_COMPUTE_32F);
 
-  // Set problem using simplified API
+  // Create problem type descriptor
+  auto problemType = hipblaslt_ext::GemmProblemType{hip_trans_a,
+    hip_trans_b,
+    in_datatype,
+    in_datatype,
+    out_datatype,
+    out_datatype,
+    HIPBLAS_COMPUTE_32F};
+  // Set problem using FULL API with explicit leading dimensions
+  if (nvte_log_grouped_gemm_config) {
+    std::cout << "[GROUPED_GEMM] Setting problem with " << m_vec.size() << " GEMMs (with explicit leading dims)" << std::endl;
+  }
   NVTE_CHECK_HIPBLASLT(groupedGemm.setProblem(m_vec,
                                               n_vec,
                                               k_vec,
                                               batch_count_vec,
+                                              lda_vec,
+                                              ldb_vec,
+                                              ldc_vec,
+                                              ldd_vec,
+                                              strideA_vec,
+                                              strideB_vec,
+                                              strideC_vec,
+                                              strideD_vec,
                                               gemm_epilogue_vec,
-                                              gemm_inputs_vec));
+                                              gemm_inputs_vec,
+                                              problemType));
 
   // Only call getAllAlgos if we don't have a cached algorithm
+  bool logTuning = getIntEnv("TE_HIPBLASLT_LOG_TUNING_GROUPED_GEMM", 0, 0) != 0;
+  
   if (!found_cached || !cached_algo.algo.has_value()) {
-    bool logTuning = getIntEnv("TE_HIPBLASLT_LOG_TUNING_GROUPED_GEMM", 0, 0) != 0;
-    int firstAlgo = getIntEnv("TE_HIPBLASLT_ALGO_SELECTION", 0, 0);
+    if (logTuning) {
+      std::cout << "[INFO] Cache miss for grouped GEMM - performing algorithm selection" << std::endl;
+    }
+    int firstAlgo = getIntEnv("TE_HIPBLASLT_ALGO_SELECTION_GROUPED_GEMM", 0, 0);
     int tuneLoopCount = getIntEnv("TE_HIPBLASLT_TUNING_RUN_COUNT_GROUPED_GEMM", 0, 0);
     int algoTuneCount = 1;
     
@@ -1735,7 +1829,7 @@ void hipblaslt_grouped_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
        * Limit amount by default. User may override with env
        */
       static const int defaultAlgoCount = 16;
-      algoTuneCount = getIntEnv("TE_HIPBLASLT_TUNING_ALGO_COUNT_GROUPED_GEMM", defaultAlgoCount, 1);
+      algoTuneCount = getIntEnv("TE_HIPBLASLT_TUNING_ALGO_COUNT", defaultAlgoCount, 1);
     }
     algoTuneCount += firstAlgo;
     
@@ -1837,13 +1931,22 @@ void hipblaslt_grouped_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     algoCache.store(gemm_cfg, cached_algo);
     
     if (logTuning) {
-      std::cout << "[INFO] Cached grouped GEMM algo [" << cached_algo.index 
+      std::cout << "[INFO] Stored grouped GEMM algo [" << cached_algo.index 
                 << "] id=" << cached_algo.algoId 
                 << " for " << num_gemms << " GEMMs (m=" << m << ",n=" << n << ",k=" << k << ")" << std::endl;
     }
+  } else {
+    // Cache hit!
+    if (logTuning) {
+      std::cout << "[INFO] Cache HIT for grouped GEMM - using algo [" << cached_algo.index 
+                << "] id=" << cached_algo.algoId << std::endl;
+    }
   }
 
-  // Initialize with cached algorithm
+  // Initialize with selected or cached algorithm
+  if (logTuning) {
+    std::cout << "[INFO] Initializing grouped GEMM with algo id=" << cached_algo.algoId << std::endl;
+  }
   NVTE_CHECK_HIPBLASLT(groupedGemm.initialize(cached_algo.algo.value(), d_workspace, stream));
 
   // Run grouped GEMM
