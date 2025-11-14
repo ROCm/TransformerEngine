@@ -560,10 +560,10 @@ void fused_attn_ck_fwd_impl(
   bool nvte_ck_uses_fwd_v3 = getenv<int>("NVTE_CK_USES_FWD_V3", 0);
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
   bool nvte_ck_zero_out_pad = getenv<int>("NVTE_CK_ZERO_OUT_PAD", 1);
-
-  bool is_ragged = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_THD;
-  bool is_SBHD = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_SBHD;
-  bool is_BSHD = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_BSHD;
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(layout);
+  bool is_ragged = qkv_format==NVTE_QKV_Format::NVTE_THD;
+  bool is_SBHD = qkv_format==NVTE_QKV_Format::NVTE_SBHD;
+  bool is_BSHD = qkv_format==NVTE_QKV_Format::NVTE_BSHD;
   bool is_batch = is_BSHD || is_SBHD;
 
   bool is_padding = (mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
@@ -689,6 +689,8 @@ void fused_attn_ck_fwd_impl(
     std::cout<<"is_batch: "<<is_batch<<", ";
     std::cout<<"is_ragged: "<<is_ragged<<", ";
     std::cout<<"is_padding: "<<is_padding<<", ";
+    std::cout<<"is_SBHD: "<<is_SBHD<<", ";
+    std::cout<<"is_BSHD: "<<is_BSHD<<", ";
     std::cout<<"bshd_to_thd: "<<bshd_to_thd<<", ";
     std::cout<<"q_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d_qk<<"), ";
     std::cout<<"q_stride: ("<<q_stride[0]<<", "<<q_stride[1]<<", "<<q_stride[2]<<", "<<q_stride[3]<<"), ";
@@ -731,9 +733,9 @@ void fused_attn_ck_fwd_impl(
         devPtrQWithoutPadding,
         q_stride[1], q_stride[0],
         devPtrKWithoutPadding,
-        k_stride[1], k_stride[0],
+        k_stride[1], std::min(k_stride[0], k_stride[2]),
         devPtrVWithoutPadding,
-        v_stride[1], v_stride[0],
+        v_stride[1], std::min(v_stride[0], v_stride[2]),
         devPtrCuSeqlensQ, devPtrCuSeqlensKV, 
         nullptr, nullptr, //cu_seqlen_q_padded_ptr, cu_seqlen_kv_padded_ptr
         is_training, scaling_factor, dropout_probability,
@@ -842,9 +844,10 @@ void fused_attn_ck_bwd_impl(
   size_t kN0 = (d_qk <= 128)? 128:64;
   size_t nsplits = deterministic? ceil(1.0*s_kv/kN0):1; 
 
-  bool is_ragged = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_THD;
-  bool is_SBHD = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_SBHD;
-  bool is_BSHD = nvte_get_qkv_format(layout)==NVTE_QKV_Format::NVTE_BSHD;
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(layout);
+  bool is_ragged = qkv_format==NVTE_QKV_Format::NVTE_THD;
+  bool is_SBHD = qkv_format==NVTE_QKV_Format::NVTE_SBHD;
+  bool is_BSHD = qkv_format==NVTE_QKV_Format::NVTE_BSHD;
   bool is_batch = is_BSHD || is_SBHD;
   bool is_padding = (mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
                      mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
@@ -1123,14 +1126,14 @@ void fused_attn_ck_bwd_impl(
   }
   if(is_SBHD && is_padding){
     // remove padding for q, k, v, o, do
-    remove_padding(dtype, b, h, s_q, d_qk, max_tokens_q, is_ragged, q_stride[0], q_stride[1], q_stride[2], devPtrQ, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrQWithoutPadding, stream);
-    remove_padding(dtype, b, hg, s_kv, d_qk, max_tokens_kv, is_ragged, k_stride[0], k_stride[1], k_stride[2], devPtrK, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrKWithoutPadding, stream);
-    remove_padding(dtype, b, hg, s_kv, d_v, max_tokens_kv, is_ragged, v_stride[0], v_stride[1], v_stride[2], devPtrV, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrVWithoutPadding, stream);
+    remove_padding(dtype, b, h, s_q, d_qk, max_tokens_q, false, q_stride[0], q_stride[1], q_stride[2], devPtrQ, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrQWithoutPadding, stream);
+    remove_padding(dtype, b, hg, s_kv, d_qk, max_tokens_kv, false, k_stride[0], k_stride[1], k_stride[2], devPtrK, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrKWithoutPadding, stream);
+    remove_padding(dtype, b, hg, s_kv, d_v, max_tokens_kv, false, v_stride[0], v_stride[1], v_stride[2], devPtrV, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrVWithoutPadding, stream);
     // o and do should be of same shape as q
-    remove_padding(dtype, b, h, s_q, d_v, max_tokens_q, is_ragged, o_stride[0], o_stride[1], o_stride[2], devPtrO, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrOWithoutPadding, stream);
-    remove_padding(dtype, b, h, s_q, d_v, max_tokens_q, is_ragged, o_stride[0], o_stride[1], o_stride[2], devPtrdO, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrdOWithoutPadding, stream);
+    remove_padding(dtype, b, h, s_q, d_v, max_tokens_q, false, o_stride[0], o_stride[1], o_stride[2], devPtrO, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrOWithoutPadding, stream);
+    remove_padding(dtype, b, h, s_q, d_v, max_tokens_q, false, o_stride[0], o_stride[1], o_stride[2], devPtrdO, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrdOWithoutPadding, stream);
     // also remove the padding for softmax lse
-    remove_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxLSEWithoutPadding, stream);
+    remove_padding_softmax_lse(b, h, s_q, max_tokens_q, false, devPtrSoftmaxAux, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxLSEWithoutPadding, stream);
     using ck_fused_attn::ck_attn_varlen_bwd;
     NVTE_CHECK_CUDA(
       ck_attn_varlen_bwd(
@@ -1140,9 +1143,9 @@ void fused_attn_ck_bwd_impl(
         devPtrQWithoutPadding,
         q_stride[1], q_stride[0],
         devPtrKWithoutPadding,
-        k_stride[1], k_stride[0],
+        k_stride[1], std::min(k_stride[0], k_stride[2]),
         devPtrVWithoutPadding,
-        v_stride[1], v_stride[0],
+        v_stride[1], std::min(v_stride[0], v_stride[2]),
         devPtrCuSeqlensQ, devPtrCuSeqlensKV, 
         nullptr, nullptr, //cu_seqlen_q_padded_ptr, cu_seqlen_kv_padded_ptr
         devPtrOWithoutPadding,
@@ -1159,12 +1162,12 @@ void fused_attn_ck_bwd_impl(
         dq_acc_ptr,
         dk_expanded_ptr,
         dv_expanded_ptr,
-        dk_expanded_stride[1], dk_expanded_stride[0], //dK and K share the same stride
-        dv_expanded_stride[1], dv_expanded_stride[0], //dV and V share the same stride
+        dk_expanded_stride[1], std::min(dk_expanded_stride[0], dk_expanded_stride[2]), //dK and K share the same stride
+        dv_expanded_stride[1], std::min(dv_expanded_stride[0], dv_expanded_stride[2]), //dV and V share the same stride
         devPtrdKWithoutPadding,
-        k_stride[1], k_stride[0], //dK and K share the same stride
+        k_stride[1], std::min(k_stride[0], k_stride[2]), //dK and K share the same stride
         devPtrdVWithoutPadding,
-        v_stride[1], v_stride[0], //dV and V share the same stride
+        v_stride[1], std::min(v_stride[0], v_stride[2]), //dV and V share the same stride
         lse_workspace, // softmax_lsed
         deterministic,
         nvte_ck_uses_bwd_v3,
