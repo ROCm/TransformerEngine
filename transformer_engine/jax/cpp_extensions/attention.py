@@ -357,7 +357,10 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, config.max_segments_per_seq)
                 softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
             elif backend == NVTE_Fused_Attn_Backend.NVTE_CK:
-                softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
+                if config.qkv_layout.is_thd():
+                    softmax_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
+                else:
+                    softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
                 softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
             else:
                 raise ValueError(f"Unsupported {backend=}")
