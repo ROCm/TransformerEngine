@@ -338,8 +338,7 @@ def main(args):
                 "NVTE_FUSED_ATTN": "1", "NVTE_FLASH_ATTN": "0",
                 "NVTE_FUSED_ATTN_AOTRITON": "0", "NVTE_FUSED_ATTN_CK": "1", "NVTE_UNFUSED_ATTN": "0"
             })
-            if args.use_ck_bwd_v3:
-                os.environ["NVTE_CK_USES_BWD_V3"] = "1"
+            os.environ["NVTE_CK_USES_BWD_V3"] = "1" if args.use_ck_bwd_v3 else "0"
             
             # FusedAttention run
             perf_dir_fused_attn = os.path.join("profiler_outputs/", f"prof_fused_{model}")
@@ -353,8 +352,7 @@ def main(args):
             if NVTE_Fused_Attn_Backend.NVTE_AOTriton in fused_attn_backends:
                 #AOTRITON Backend
                 os.environ.update({
-                    "NVTE_FUSED_ATTN_AOTRITON": "1", "NVTE_FUSED_ATTN_CK": "0",
-                    "NVTE_CK_USES_BWD_V3": "0", "NVTE_UNFUSED_ATTN": "0"
+                    "NVTE_FUSED_ATTN_AOTRITON": "1", "NVTE_FUSED_ATTN_CK": "0", "NVTE_UNFUSED_ATTN": "0"
                 })
                 perf_dir_fused_aotriton = os.path.join("profiler_outputs/", f"prof_fused_aotriton_{model}")
                 benchmark_dot_product_attention(model, "FusedAttention", "FusedAttention AOTriton Module", perf_dir_fused_aotriton)
@@ -391,7 +389,8 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--use_ck_bwd_v3", action="store_true", help="Use NVTE_CK_USES_BWD_V3=1 for CK bwd kernels")
+    parser.add_argument("--no-use-ck-bwd-v3", action="store_false", dest="use_ck_bwd_v3", 
+                    help="Set NVTE_CK_USES_BWD_V3=0 for CK bwd kernels")
     parser.add_argument("--run_sanity_checks", action="store_true", help="After benchmarking, verify profiler outputs and Fused vs CK timing parity")
     args = parser.parse_args()
     main(args)
