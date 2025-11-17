@@ -8,12 +8,10 @@
 #ifdef NVTE_ENABLE_ROCSHMEM
 #include <mpi.h>
 #include <rocshmem_api/rocshmem_waitkernel.hpp>
-#endif
-
-#include <cuda.h>
-#include <cuda_fp8.h>
+#include <hip/hip_runtime.h>
 #include <torch/cuda.h>
 #include <torch/extension.h>
+#endif
 
 namespace transformer_engine::pytorch {
 

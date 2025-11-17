@@ -238,6 +238,7 @@ else()
       IGNORES "*/amd_detail/*"
       IGNORES "*/aotriton/*"
       IGNORES "*/ck_fused_attn/*"
+      IGNORES "*/rocshmem_api/*"
       CUSTOM_MAP_FILE "${TE}/hipify_custom_map.json"
       NO_MATH_REPLACE
   )
@@ -385,6 +386,9 @@ target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAM
 else()
   option(NVTE_ENABLE_ROCSHMEM "Compile with ROCSHMEM library" OFF)
   if (NVTE_ENABLE_ROCSHMEM)
+    find_package(MPI REQUIRED)
+    target_link_libraries(transformer_engine PUBLIC MPI::MPI_CXX)
+    target_include_directories(transformer_engine PRIVATE ${MPI_CXX_INCLUDES})
     add_subdirectory(rocshmem_api)
     if(DEFINED ENV{ROCSHMEM_HOME})
       set(ROCSHMEM_HOME "$ENV{ROCSHMEM_HOME}" CACHE STRING "Location of ROCSHMEM installation")
