@@ -30,9 +30,9 @@ jobs:
   build_and_test:
     name: Build and Test on GPU
     timeout-minutes: 720
-    runs-on: linux-mi3x-4
+    runs-on: te-gfx942-4gpu
     steps:
-      - name: Debug Registry SSL  Certificate
+      - name: Debug Registry SSL Certificate
         run: |
           echo "Testing connection to registry-sc-harbor.amd.com..."
           openssl s_client -showcerts -connect registry-sc-harbor.amd.com:443 < /dev/null
