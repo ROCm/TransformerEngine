@@ -43,6 +43,8 @@ from ..tensor.quantized_tensor import QuantizedTensor, QuantizedTensorBase, Quan
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
+if IS_HIP_EXTENSION:
+    from ..tensor.fsdp2_allgather_tensor import FSDPAGTensor
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..utils import get_device_compute_capability, torch_get_autocast_gpu_dtype
@@ -596,7 +598,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fsdp_group = None
         self._fp8_workspaces: Dict[str, QuantizedTensor] = {}
         self.activation_dtype: Optional[torch.dtype] = None,
-        self.keep_fp8_weight_transpose_cache: bool = True
+        self.keep_fp8_weight_transpose_cache: bool = True,
+        self.use_fsdp2 = False
 
         if not TEDebugState.debug_enabled:
             TEDebugState.initialize()
@@ -915,6 +918,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         fp8_enabled = self.fp8 or self.fp8_calibration
         self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
 
+        if IS_HIP_EXTENSION and not FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2 and hasattr(self, 'use_fsdp2') and self.use_fsdp2:  
+            FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2 = True 
+
         if self.fp8_parameters or fp8_enabled:
             if (
                 self.fp8_initialized
@@ -946,6 +952,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.fp8_initialized = True
 
             self.fp8_meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
+            if self.fp8_meta["recipe"].mxfp8():  
+                self.keep_fp8_weight_transpose_cache = True 
 
         _current_recipe = self.fp8_meta["recipe"]
         if _original_recipe is not None and not (
@@ -1182,6 +1190,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 if IS_HIP_EXTENSION and not self.keep_fp8_weight_transpose_cache:
                     quantizer.columnwise_usage=False
                 param = quantizer(param)
+            if IS_HIP_EXTENSION and self.use_fsdp2 and not self.primary_weights_in_fp8 and fp8_meta_index is not None:
+                self.keep_fp8_weight_transpose_cache = False
+                param = FSDPAGTensor(
+                    param, 
+                    module=self, 
+                    fp8_meta_index=fp8_meta_index, 
+                    keep_fp8_weight_transpose_cache=self.keep_fp8_weight_transpose_cache
+                )
 
             # Redo parameter wrap in case we broke it above
             # NOTE: Currently this can only be broken when primary weights are in Fp8 but

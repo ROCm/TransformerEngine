@@ -205,6 +205,7 @@ class _LayerNormMLP(torch.autograd.Function):
         symmetric_ar_type: str,
         debug: Optional[bool] = False,
         keep_fp8_weight_transpose_cache: bool = True,
+        use_fsdp2: bool = False,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # pylint: disable=missing-function-docstring
 
@@ -527,7 +528,7 @@ class _LayerNormMLP(torch.autograd.Function):
         if is_grad_enabled:
 
             # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
-            if inp.requires_grad and keep_fp8_weight_transpose_cache:
+            if inp.requires_grad and keep_fp8_weight_transpose_cache and not use_fsdp2:
                 if isinstance(fc1_weight_final, QuantizedTensorBase):
                     fc1_weight_final.update_usage(columnwise_usage=True)
                 if isinstance(fc2_weight_final, QuantizedTensorBase):
@@ -635,7 +636,9 @@ class _LayerNormMLP(torch.autograd.Function):
             )
             ctx.normalization = normalization
             ctx.reduce_and_update_bwd_fp8_tensors = False
+            ctx.autocast_fp8_reduction_skipped = False
             ctx.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
+            ctx.use_fsdp2 = use_fsdp2
             if ctx.fp8 and requires_grad(
                 inp, ln_weight, ln_bias, fc1_weight, fc2_weight, fc1_bias, fc2_bias
             ):
@@ -643,6 +646,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
                 if in_fp8_activation_recompute_phase():
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
+                ctx.autocast_fp8_reduction_skipped = FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2
 
             ctx.wgrad_store = wgrad_store
 
@@ -1314,6 +1318,8 @@ class _LayerNormMLP(torch.autograd.Function):
 
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
+            if ctx.autocast_fp8_reduction_skipped:
+                FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=True)                    
 
         # FIX THIS
         # Scatter Fp8 tranposed-weight buffers
@@ -1377,6 +1383,7 @@ class _LayerNormMLP(torch.autograd.Function):
             None,  # symmetric_ar_type
             None,  # debug
             None,  # keep_fp8_weight_transpose_cache
+            None,  # use_fsdp2
         )
 
 
@@ -1531,6 +1538,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
         keep_fp8_weight_transpose_cache: bool = True,
+        use_fsdp2: bool = False
     ) -> None:
         super().__init__()
 
@@ -1551,7 +1559,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.zero_centered_gamma = zero_centered_gamma
         self.symmetric_ar_type = symmetric_ar_type
         self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache if IS_HIP_EXTENSION else True
-
+        self.use_fsdp2 = use_fsdp2 if IS_HIP_EXTENSION else False
         # GEMM-GELU fusion is currently only supported with split GEMM-AG overlap
         self.gemm_gelu_fusion = (
             bool(int(os.getenv("NVTE_GEMM_GELU_FUSION", "0")))
@@ -1879,6 +1887,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.symmetric_ar_type,
                 debug,
                 self.keep_fp8_weight_transpose_cache,
+                self.use_fsdp2
             )
             out = fwd_fn(*args)
 
