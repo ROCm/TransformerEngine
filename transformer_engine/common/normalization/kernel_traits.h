@@ -67,6 +67,7 @@ struct Kernel_traits_finalize : public Base {
 template <typename weight_t_, typename input_t_, typename output_t_, typename compute_t_,
           typename index_t_, uint32_t HIDDEN_SIZE_, uint32_t CTAS_PER_ROW_, uint32_t WARPS_M_,
           uint32_t WARPS_N_, uint32_t BYTES_PER_LDG_ = 16,
+          typename StatsT = transformer_engine::Stats<compute_t_, CTAS_PER_ROW_, WARPS_M_, WARPS_N_>,
           typename Base =
               Kernel_traits_base<HIDDEN_SIZE_, weight_t_, input_t_, output_t_, compute_t_, index_t_,
                                  WARPS_M_ * WARPS_N_ * THREADS_PER_WARP> >
@@ -120,7 +121,7 @@ struct Kernel_traits : public Base {
   static_assert(LDGS * VEC_COLS_PER_LDG == VEC_COLS);
   // static_assert(LDGS * BYTES_PER_ROW_PER_CTA * CTAS_PER_ROW == BYTES_PER_ROW, "");
 
-  using Stats = transformer_engine::Stats<compute_t, CTAS_PER_ROW, WARPS_M, WARPS_N>;
+  using Stats = StatsT;
   enum { SMEM_BYTES_FWD = Stats::SMEM_BYTES };
 };
 

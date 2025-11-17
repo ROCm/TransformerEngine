@@ -109,6 +109,16 @@ struct uint8 {
 template <int BYTES>
 struct BytesToType {};
 
+// 新增对 128 字节的支持：以 16 个 uint8x8 为例（16*8=128B）
+struct uint8x8 { uint8_t data[8]; };
+struct uint8x8x16 { uint8x8 v[16]; };
+
+template<>
+struct BytesToType<128> {
+  using Type = uint8x8x16;
+  static_assert(sizeof(Type) == 128, "BytesToType<128> must be 128 bytes");
+};
+
 template <>
 struct BytesToType<64> {
   using Type = uint16;
@@ -151,7 +161,26 @@ struct BytesToType<1> {
   static_assert(sizeof(Type) == 1);
 };
 
+template <typename T,typename CountT = int>
+struct Vec3 {
+  T x, y;
+  CountT z;
+
+  __device__ Vec3() : x(0), y(0), z(0) {}
+  __device__ Vec3(T x_, T y_, CountT z_) : x(x_), y(y_), z(z_) {}
+
+  __device__ Vec3<T,CountT> &operator+=(const Vec3<T,CountT> &rhs) {
+    x += rhs.x;
+    y += rhs.y;
+    z += rhs.z;
+    return *this;
+  }
+};
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+template <typename T>
+struct TypeToVec3 {
+  using Type = Vec3<T,int>;
+};
 
 template <typename T>
 struct TypeToVec2 {};
@@ -859,6 +888,177 @@ struct Stats<T, 1, WARPS_M, 1> {
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+template <typename T,typename CountT>
+inline __device__ void warp_chan_upd_dynamic_ge(Vec3<T,CountT> &stat, int num_active) {
+  int highest_bit_set = (8 * sizeof(num_active)) - __clz(num_active - 1);
+
+#pragma unroll
+  for (int step = (1 << (highest_bit_set - 1)); step > 0; step /= 2) {
+    T n_b = warp_shuffle_down(stat.z, step);
+    T m_b = warp_shuffle_down(stat.x, step);
+    T m2_b = warp_shuffle_down(stat.y, step);
+
+    T n_a = stat.z;
+    T m_a = stat.x;
+    T m2_a = stat.y;
+
+    T n_ab = n_a + n_b;
+    T rn_ab = T(1.f) / n_ab;
+    T delta = m_a - m_b;
+
+    T m_ab = (n_a * m_a + n_b * m_b) * rn_ab;
+    T m2_ab = m2_a + m2_b + delta * delta * n_a * n_b * rn_ab;
+
+    stat = Vec3<T,CountT>(m_ab, m2_ab, n_ab);
+  }
+
+#ifdef __HIP_PLATFORM_AMD__
+  stat.x = __shfl(stat.x, 0, THREADS_PER_WARP);
+  stat.y = __shfl(stat.y, 0, THREADS_PER_WARP);
+  stat.z = __shfl(stat.z, 0, THREADS_PER_WARP);
+#else
+  stat.x = __shfl_sync(static_cast<uint32_t>(-1), stat.x, 0);
+  stat.y = __shfl_sync(static_cast<uint32_t>(-1), stat.y, 0);
+  stat.z = __shfl_sync(static_cast<uint32_t>(-1), stat.z, 0);
+#endif
+}
+
+template <typename T, uint32_t CTAS_PER_ROW, uint32_t WARPS_M, uint32_t WARPS_N, typename CountT>
+struct Stats_ge;
+
+
+// Warp-level Stats (Welford-based)
+template <typename T, uint32_t WARPS_M, typename CountT>
+struct Stats_ge<T, 1, WARPS_M, 1, CountT> {
+  using stats_t = Vec3<T,CountT>;  // (mu, m2, count)
+  enum { SMEM_BYTES = 0 };
+
+  template <typename Params>
+  inline __device__ Stats_ge(const Params &params, uint32_t, uint32_t,
+                          uint32_t, uint32_t warp_n, uint32_t lane, void *)
+      : warp_n_(warp_n), lane_(lane) {}
+
+//   template <uint32_t N>
+//   inline __device__ stats_t compute(const T (&elts)[N], int valid_count) {
+//     T mean = 0, m2 = 0, count = 0;
+// #pragma unroll
+//     for (int i = 0; i < N; ++i) {
+//       if (i < valid_count) {
+//         T x = elts[i];
+//         count += 1;
+//         T delta = x - mean;
+//         mean += delta / count;
+//         T delta2 = x - mean;
+//         m2 += delta * delta2;
+//       }
+//     }
+//     return reduce(Vec3<T>(mean, m2, count));
+//   }
+
+  inline __device__ stats_t reduce(Vec3<T,CountT> local_stat) {
+    warp_chan_upd_dynamic_ge(local_stat, THREADS_PER_WARP);
+    return local_stat;
+  }
+
+  uint32_t warp_n_, lane_;
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Block-level Stats (intra CTA warp reduction)
+template <typename T, uint32_t WARPS_M, uint32_t WARPS_N, typename CountT>
+struct Stats_ge<T, 1, WARPS_M, WARPS_N, CountT> {
+  using stats_t = Vec3<T,CountT>;
+  using WarpStats = Stats_ge<T, 1, WARPS_M, 1, CountT>;
+
+  enum { SMEM_BYTES = WARPS_M * WARPS_N * sizeof(stats_t) * 2 };
+
+  template <typename Params>
+  inline __device__ Stats_ge(const Params &params, uint32_t bidm, uint32_t bidn,
+                          uint32_t warp_m, uint32_t warp_n, uint32_t lane, void *smem)
+      : warp_stats_(params, bidm, bidn, warp_m, warp_n, lane, smem), use0_(true) {
+    smem0_ = static_cast<stats_t *>(smem) + warp_m * WARPS_N;
+    smem1_ = smem0_ + WARPS_M * WARPS_N;
+  }
+
+  // template <uint32_t N>
+  // inline __device__ stats_t compute(const T (&elts)[N], int valid_count) {
+  //   Vec3<T> local = warp_stats_.compute(elts, valid_count);
+  //   return reduce(local);
+  // }
+
+  inline __device__ stats_t reduce(Vec3<T,CountT> local_stat) {
+    local_stat=warp_stats_.reduce(local_stat);
+
+    stats_t *smem = use0_ ? smem0_ : smem1_;
+    use0_ = !use0_;
+    if (warp_stats_.lane_ == 0) {
+      smem[warp_stats_.warp_n_] = local_stat;
+    }
+    __syncthreads();
+
+    stats_t result{Zeros<T>::get(), Zeros<T>::get(), Zeros<CountT>::get()};
+    if (warp_stats_.lane_ < WARPS_N) {
+      result = smem[warp_stats_.lane_];
+    }
+
+    warp_chan_upd_dynamic_ge(result, WARPS_N);
+    return result;
+  }
+
+  WarpStats warp_stats_;
+  stats_t *smem0_, *smem1_;
+  bool use0_;
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Inter-CTA Stats
+template <typename T, uint32_t CTAS_PER_ROW, uint32_t WARPS_M, uint32_t WARPS_N, typename CountT>
+struct Stats_ge {
+  using stats_t = Vec3<T,CountT>;
+  using BlockStats = Stats_ge<T, 1, WARPS_M, WARPS_N, CountT>;
+
+  enum { SMEM_BYTES = BlockStats::SMEM_BYTES };
+
+  template <typename Params>
+  inline __device__ Stats_ge(const Params &params, uint32_t bidm, uint32_t bidn,
+                          uint32_t warp_m, uint32_t warp_n, uint32_t lane, void *smem)
+      : inter_cta_(params.barrier, bidm, params.ctas_per_col, CTAS_PER_ROW),
+        block_stats_(params, bidm, bidn, warp_m, warp_n, lane, smem),
+        bidn_(bidn),
+        w0_(static_cast<stats_t *>(params.workspace) + (bidm * WARPS_M + warp_m) * CTAS_PER_ROW),
+        w1_(w0_ + params.ctas_per_col * WARPS_M * CTAS_PER_ROW),
+        warp_n_(warp_n), lane_(lane) {}
+
+  // template <uint32_t N>
+  // inline __device__ stats_t compute(const T (&elts)[N], int valid_count) {
+  //   Vec3<T> local = block_stats_.compute(elts, valid_count);
+  //   return reduce(local);
+  // }
+
+  inline __device__ stats_t reduce(Vec3<T,CountT> local_stat) {
+    local_stat=block_stats_.reduce(local_stat);
+    stats_t *workspace = (inter_cta_.phase_counter_ & 0x1) ? w1_ : w0_;
+    if (warp_n_ == 0 && lane_ == 0) {
+      workspace[bidn_] = local_stat;
+    }
+    inter_cta_.sync();
+
+    stats_t result{Zeros<T>::get(), Zeros<T>::get(), Zeros<CountT>::get()};
+    if (lane_ < CTAS_PER_ROW) {
+      result = workspace[lane_];
+    }
+
+    warp_chan_upd_dynamic_ge(result, CTAS_PER_ROW);
+    return result;
+  }
+
+  InterCTASync inter_cta_;
+  BlockStats block_stats_;
+  stats_t *w0_, *w1_;
+  int bidn_, warp_n_, lane_;
+};
 
 template <int num_elems>
 __device__ __forceinline__ float warp_reduce_max(const float m) {

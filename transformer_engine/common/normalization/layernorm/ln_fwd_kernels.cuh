@@ -215,110 +215,76 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_general_kerne
   const index_t gidn = (bidn * THREADS_PER_WARP + warp_n * params.ctas_per_row * THREADS_PER_WARP +
                         lane);  // Order threads by warp x cta x lane
 
-  // Objects for stats reductions
-  using Reducer = DynamicReducer<compute_t, WARPS_M, WARPS_N>;
-  constexpr int SMEM_BYTES = Reducer::SMEM_BYTES > 0 ? Reducer::SMEM_BYTES : 1;
-  __shared__ char smem_[SMEM_BYTES];
-  Reducer reducer(params, bidm, bidn, warp_m, warp_n, lane, smem_);
-  Sum<compute_t> sum;
-  const compute_t rn = 1.f / static_cast<compute_t>(params.cols);
+  using Stats = typename Ktraits::Stats;
+  using stats_t = typename Stats::stats_t;
+  extern __shared__ char smem[];
+  Stats stats(params, bidm, bidn, warp_m, warp_n, lane, smem);
 
-  // Load weights
-  Cvec gamma[LDGS];
-  Cvec beta[LDGS];
-#pragma unroll
-  for (int it = 0, col = gidn * NUM_ELTS; it < LDGS && col < params.cols;
-       ++it, col += gdimn * NUM_ELTS) {
-    Wvec gamma_in, beta_in;
-    gamma_in.load_from_elts(params.gamma, col, params.cols - col);
-    beta_in.load_from_elts(params.beta, col, params.cols - col);
-    gamma_in.to(gamma[it]);
-    beta_in.to(beta[it]);
-  }
+  compute_t *mu_ptr = static_cast<compute_t *>(params.mu);
+  compute_t *rs_ptr = static_cast<compute_t *>(params.rs);
 
-  // fp8 factors
-  compute_t scale;
-  if (params.fp8_out) {
-    scale = *reinterpret_cast<compute_t *>(params.scale);
-  }
+  compute_t scale = params.fp8_out ? *reinterpret_cast<compute_t *>(params.scale) : 1.f;
   compute_t amax = 0;
 
   for (int cta_row = bidm * bdimm; cta_row < params.rows; cta_row += gdimm) {
-    const int row = cta_row + warp_m;
+    int row = cta_row + warp_m;
+    if (row >= params.rows) continue;
 
-    // Load input
-    Cvec x[LDGS];
-#pragma unroll
-    for (int it = 0, col = gidn * NUM_ELTS; it < LDGS && row < params.rows && col < params.cols;
-         it++, col += gdimn * NUM_ELTS) {
-      Ivec x_in;
-      x_in.load_from_elts(params.x, row * params.cols + col, params.cols - col);
-      x_in.to(x[it]);
-    }
+    compute_t mu = 0.f, m2 = 0.f;
+    int count = 0;
 
-    // Compute mean
-    compute_t mu = 0.f;
+    // Step 1: mean and m2
 #pragma unroll
-    for (int it = 0, col = gidn * NUM_ELTS; it < LDGS && row < params.rows && col < params.cols;
-         it++, col += gdimn * NUM_ELTS) {
+    for (int it = 0, col = gidn * NUM_ELTS; it < LDGS;
+         ++it, col += gdimn * NUM_ELTS) {
+      Ivec x_vec;
+      x_vec.load_from_elts(params.x, row * params.cols + col, params.cols - col);
 #pragma unroll
-      for (int jt = 0; jt < NUM_ELTS; jt++) {
-        mu += x[it].data.elt[jt];
-      }
-    }
-    mu = reducer.allreduce(mu, sum) * rn;
-
-    // Compute variance
-    compute_t sqsigma = 0.f;
-#pragma unroll
-    for (int it = 0, col = gidn * NUM_ELTS; it < LDGS && row < params.rows && col < params.cols;
-         it++, col += gdimn * NUM_ELTS) {
-#pragma unroll
-      for (int jt = 0; jt < NUM_ELTS; jt++) {
+      for (int jt = 0; jt < NUM_ELTS; ++jt) {
         if (col + jt < params.cols) {
-          compute_t diff = x[it].data.elt[jt] - mu;
-          sqsigma += diff * diff;
+          compute_t x = compute_t(x_vec.data.elt[jt]);
+          count += 1;
+          compute_t delta = x - mu;
+          mu += delta / count;
+          m2 += delta * (x - mu);
         }
       }
     }
-    sqsigma = reducer.allreduce(sqsigma, sum) * rn;
-    compute_t rs = rsqrtf(sqsigma + params.epsilon);
 
-    // Write statistics
-    if (gidn == 0 && row < params.rows) {
-      compute_t *mu_ptr = static_cast<compute_t *>(params.mu);
-      compute_t *rs_ptr = static_cast<compute_t *>(params.rs);
+    Vec3<compute_t,int> stat = stats.reduce(Vec3<compute_t,int>(mu, m2, count));
+    mu = stat.x;
+    m2 = stat.y;
+    compute_t rs = rsqrtf((m2 / stat.z) + params.epsilon);
+
+    if (gidn == 0) {
       mu_ptr[row] = mu;
       rs_ptr[row] = rs;
     }
 
-// Compute output
+    // Step 2: store output (no need to store xf[])
 #pragma unroll
-    for (int it = 0, col = gidn * NUM_ELTS; it < LDGS && row < params.rows && col < params.cols;
-         it++, col += gdimn * NUM_ELTS) {
-      // Compute output values
+    for (int it = 0, col = gidn * NUM_ELTS; it < LDGS && col < params.cols;
+         ++it, col += gdimn * NUM_ELTS) {
+      Ivec x_vec;
+      x_vec.load_from_elts(params.x, row * params.cols + col, params.cols - col);
+      Wvec g_raw, b_raw;
+      g_raw.load_from_elts(params.gamma, col, params.cols - col);
+      b_raw.load_from_elts(params.beta,  col, params.cols - col);
+
       Cvec z;
 #pragma unroll
-      for (int jt = 0; jt < NUM_ELTS; jt++) {
-        compute_t y_ij = rs * (x[it].data.elt[jt] - mu);
-        compute_t g_ij = gamma[it].data.elt[jt];
-        if (params.zero_centered_gamma) {
-          g_ij += 1;
-        }
-        compute_t b_ij = beta[it].data.elt[jt];
-        z.data.elt[jt] = g_ij * y_ij + b_ij;
-      }
-
-      // Apply fp8 factors
-      if (params.fp8_out) {
-#pragma unroll
-        for (int jt = 0; jt < NUM_ELTS; jt++) {
-          if (col + jt < params.cols) {
-            compute_t z_ij = z.data.elt[jt];
-            __builtin_assume(amax >= 0);
-            amax = fmaxf(amax, fabsf(z_ij));
-            z.data.elt[jt] = z_ij * scale;
+      for (int jt = 0; jt < NUM_ELTS; ++jt) {
+        if (col + jt < params.cols) {
+          compute_t x = compute_t(x_vec.data.elt[jt]);
+          compute_t norm = rs * (x - mu);
+          compute_t g = compute_t(g_raw.data.elt[jt]) + (params.zero_centered_gamma ? 1.f : 0.f);
+          compute_t b = compute_t(b_raw.data.elt[jt]);
+          compute_t val = g * norm + b;
+          if (params.fp8_out) {
+            amax = fmaxf(amax, fabsf(val));
+            val *= scale;
           }
+          z.data.elt[jt] = output_t(val);
         }
       }
 

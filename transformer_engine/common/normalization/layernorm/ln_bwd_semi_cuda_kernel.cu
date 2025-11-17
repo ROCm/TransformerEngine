@@ -10,6 +10,7 @@
 #include "../common.h"
 #include "../kernel_traits.h"
 #include "ln_bwd_kernels.cuh"
+#include <iostream>
 
 using namespace transformer_engine::normalization;
 
@@ -39,7 +40,9 @@ static void launch_tuned_(LaunchParams<BackwardKernelParams> &launch_params,
         launch_params.params.ctas_per_col * launch_params.params.cols * sizeof(compute_t);
     return;
   }
-
+  // std::cout<<"bwd ctas_per_row:"<< CTAS_PER_ROW<<std::endl;
+  // std::cout<<"bwd warps_n:"<< WARPS_N<<std::endl;
+  // std::cout<<"bwd bytes_per_load:"<<BYTES_PER_LDG_MAIN <<std::endl;
 #ifndef __HIP_PLATFORM_AMD__
   if (Kernel_traits::SMEM_BYTES >= 48 * 1024) {
     NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -106,7 +109,10 @@ static void launch_general_(LaunchParams<BackwardKernelParams> &launch_params,
     launch_params.dgamma_part_bytes = ctas_per_col * cols * sizeof(compute_t);
     return;
   }
-
+  // std::cout<<"bwd cols:"<<Kernel_traits::COLS<<std::endl;
+  // std::cout<<"warps_m:"<<WARPS_M<<std::endl;
+  // std::cout<<"warps_n:"<<WARPS_N<<std::endl;
+  // std::cout<<"bytes_per_load:"<<BYTES_PER_LDG_MAIN<<std::endl;
   // Launch kernel
   auto stream = launch_params.stream;
   dim3 grid(ctas_per_row * ctas_per_col);
@@ -119,17 +125,40 @@ static void launch_general_(LaunchParams<BackwardKernelParams> &launch_params,
                                       reinterpret_cast<void **>(&params_), 0, stream);
   }
 
-  // Launch finalization kernel
-  constexpr uint32_t WARPS_M_FINAL = 4;
-  constexpr uint32_t WARPS_N_FINAL = 1;
-  constexpr uint32_t ELTS_N_PER_CTA_FINAL =
-      (Kernel_traits::THREADS_PER_WARP * WARPS_N_FINAL * BYTES_PER_LDG_FINAL / sizeof(compute_t));
-  auto kernel_final =
-      &ln_bwd_finalize_general_kernel<weight_t, compute_t, WARPS_M_FINAL, WARPS_N_FINAL,
-                                      BYTES_PER_LDG_FINAL, Kernel_traits::THREADS_PER_WARP>;
-  dim3 block_final(Kernel_traits::THREADS_PER_WARP * WARPS_N_FINAL, WARPS_M_FINAL);
-  dim3 grid_final(ceil_div(cols, ELTS_N_PER_CTA_FINAL), 1);
-  kernel_final<<<grid_final, block_final, 0, stream>>>(launch_params.params);
+  // Decide which finalize kernel to launch based on column alignment
+  const bool cols_aligned = (cols % 32 == 0);
+
+  if (cols_aligned) {
+    // Launch tuned finalize kernel
+    using Kernel_traits_f = Kernel_traits_finalize<HIDDEN_SIZE, weight_t, input_t, output_t,
+                                                    compute_t, index_t,
+                                                    32 * 32,  // THREADS_PER_CTA
+                                                    BYTES_PER_LDG_FINAL>;
+
+    auto kernel_f = &ln_bwd_finalize_tuned_kernel<Kernel_traits_f>;
+
+   
+    kernel_f<<<Kernel_traits_f::CTAS, Kernel_traits_f::THREADS_PER_CTA, 0, stream>>>(
+        launch_params.params);
+
+  } else {
+    // Launch general finalize kernel
+    constexpr uint32_t WARPS_M_FINAL = 4;
+    constexpr uint32_t WARPS_N_FINAL = 1;
+    constexpr uint32_t ELTS_N_PER_CTA_FINAL =
+        (Kernel_traits::THREADS_PER_WARP * WARPS_N_FINAL * BYTES_PER_LDG_FINAL) /
+        sizeof(compute_t);
+
+    auto kernel_final = &ln_bwd_finalize_general_kernel<weight_t, compute_t,
+                                                        WARPS_M_FINAL, WARPS_N_FINAL,
+                                                        BYTES_PER_LDG_FINAL,
+                                                        Kernel_traits::THREADS_PER_WARP>;
+
+    dim3 block_final(Kernel_traits::THREADS_PER_WARP * WARPS_N_FINAL, WARPS_M_FINAL);
+    dim3 grid_final(ceil_div(cols, ELTS_N_PER_CTA_FINAL), 1);
+
+    kernel_final<<<grid_final, block_final, 0, stream>>>(launch_params.params);
+  }
 }
 
 #define REGISTER_NORM_LAUNCHER(NORM_TYPE, NORM_STAGE, LAUNCH_TYPE, HIDDEN_SIZE, WTYPE, ITYPE,                   \
@@ -157,7 +186,7 @@ REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 768, bf16, bf16, bf16, fp32, 
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 768, bf16, fp32, bf16, fp32, 1, 4, 1, 16, 4);
 
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 1024, fp32, fp32, fp32, fp32, 1, 4, 1, 16, 4);
-REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 1024, fp16, fp16, fp16, fp32, 1, 4, 1, 16, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 1024, fp16, fp16, fp16, fp32, 1, 1, 4, 4, 8);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 1024, fp16, fp32, fp16, fp32, 1, 4, 1, 16, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 1024, bf16, bf16, bf16, fp32, 1, 4, 1, 16, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 1024, bf16, fp32, bf16, fp32, 1, 4, 1, 16, 4);
@@ -165,11 +194,11 @@ REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 1024, bf16, fp32, bf16, fp32,
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 1536, fp32, fp32, fp32, fp32, 1, 1, 4, 16, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 1536, fp16, fp16, fp16, fp32, 1, 1, 4, 8, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 1536, fp16, fp32, fp16, fp32, 1, 1, 4, 16, 4);
-REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 1536, bf16, bf16, bf16, fp32, 1, 1, 4, 8, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 1536, bf16, bf16, bf16, fp32, 1, 1, 4, 8, 4);//
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 1536, bf16, fp32, bf16, fp32, 1, 1, 4, 16, 4);
 
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 2048, fp32, fp32, fp32, fp32, 1, 1, 4, 16, 4);
-REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 2048, fp16, fp16, fp16, fp32, 1, 1, 4, 16, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 2048, fp16, fp16, fp16, fp32, 2, 1, 1, 8, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 2048, fp16, fp32, fp16, fp32, 1, 1, 4, 16, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 2048, bf16, bf16, bf16, fp32, 1, 1, 4, 16, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 2048, bf16, fp32, bf16, fp32, 1, 1, 4, 16, 4);
@@ -223,7 +252,7 @@ REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 10240, bf16, bf16, bf16, fp32
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 10240, bf16, fp32, bf16, fp32, 2, 1, 4, 16, 4);
 
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 12288, fp32, fp32, fp32, fp32, 4, 1, 4, 16, 4);
-REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 12288, fp16, fp16, fp16, fp32, 4, 1, 4, 16, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 12288, fp16, fp16, fp16, fp32, 1, 1, 16, 8, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 12288, fp16, fp32, fp16, fp32, 4, 1, 4, 16, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 12288, bf16, bf16, bf16, fp32, 4, 1, 4, 16, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 12288, bf16, fp32, bf16, fp32, 4, 1, 4, 16, 4);
@@ -295,7 +324,7 @@ REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 49152, bf16, bf16, bf16, fp32
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 49152, bf16, fp32, bf16, fp32, 8, 1, 8, 16, 4);
 
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 65536, fp32, fp32, fp32, fp32, 8, 1, 8, 16, 4);
-REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 65536, fp16, fp16, fp16, fp32, 8, 1, 8, 16, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 65536, fp16, fp16, fp16, fp32, 4, 1, 16, 8, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 65536, fp16, fp32, fp16, fp32, 8, 1, 8, 16, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 65536, bf16, bf16, bf16, fp32, 8, 1, 8, 16, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 65536, bf16, fp32, bf16, fp32, 8, 1, 8, 16, 4);
@@ -317,13 +346,13 @@ REGISTER_NORM_LAUNCHER(LayerNorm, Backward, general, 512, bf16, bf16, bf16, fp32
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, general, 512, bf16, fp32, bf16, fp32, 4, 1, 16, 4);
 
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, general, 1024, fp32, fp32, fp32, fp32, 4, 1, 16, 4);
-REGISTER_NORM_LAUNCHER(LayerNorm, Backward, general, 1024, fp16, fp16, fp16, fp32, 4, 1, 16, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Backward, general, 1024, fp16, fp16, fp16, fp32, 4, 2, 16, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, general, 1024, fp16, fp32, fp16, fp32, 4, 1, 16, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, general, 1024, bf16, bf16, bf16, fp32, 4, 1, 16, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, general, 1024, bf16, fp32, bf16, fp32, 4, 1, 16, 4);
 
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, general, 2048, fp32, fp32, fp32, fp32, 1, 4, 16, 4);
-REGISTER_NORM_LAUNCHER(LayerNorm, Backward, general, 2048, fp16, fp16, fp16, fp32, 1, 4, 16, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Backward, general, 2048, fp16, fp16, fp16, fp32, 1, 4, 32, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, general, 2048, fp16, fp32, fp16, fp32, 1, 4, 16, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, general, 2048, bf16, bf16, bf16, fp32, 1, 4, 16, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, general, 2048, bf16, fp32, bf16, fp32, 1, 4, 16, 4);

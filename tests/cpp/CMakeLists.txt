@@ -94,4 +94,4 @@ else()
 endif()
 
 add_subdirectory(operator)
-add_subdirectory(util)
+# add_subdirectory(util)

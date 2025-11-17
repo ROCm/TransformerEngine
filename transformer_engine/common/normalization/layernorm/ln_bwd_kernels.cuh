@@ -227,16 +227,15 @@ __global__ __launch_bounds__(Kernel_traits::THREADS_PER_CTA) void ln_bwd_finaliz
 
   const uint32_t c = bidn * THREADS_PER_WARP + lane;
   const uint32_t c_out = bidn * THREADS_PER_WARP / 2 + lane;
-  constexpr uint32_t COL_STRIDE = Kernel_traits::CTAS * THREADS_PER_WARP;
-  for (uint32_t col = c, col_out = c_out; col < Kernel_traits::COLS;
+  const uint32_t COL_STRIDE = params.cols * THREADS_PER_WARP;
+  for (uint32_t col = c, col_out = c_out; col < params.cols;
        col += COL_STRIDE, col_out += COL_STRIDE / 2) {
     // Each thread sums over NUM_ELT columns.
     Vec<compute_t, NUM_ELT> dbeta_local, dgamma_local;
     memset(&dgamma_local, 0, sizeof(dgamma_local));
     memset(&dbeta_local, 0, sizeof(dbeta_local));
     for (uint32_t row = warp; row < params.ctas_per_col; row += Kernel_traits::ROWS_PER_CTA) {
-      index_t idx = row * Kernel_traits::COLS + col;
-
+      index_t idx = row * params.cols + col;
       Vec<compute_t, NUM_ELT> dbeta_part, dgamma_part;
       dbeta_part.load_from(params.dbeta_part, idx);
       dgamma_part.load_from(params.dgamma_part, idx);
@@ -391,7 +390,7 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_bwd_general_kerne
     }
 
     Cvec dy[LDGS];
-    Cvec y[LDGS];
+    //Cvec y[LDGS];
     compute_t mdy = 0.f;
     compute_t mdyy = 0.f;
 
@@ -411,14 +410,14 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_bwd_general_kerne
         const compute_t dz_ij = dz.data.elt[jt];
         const compute_t dy_ij = g_ij * dz_ij;
 
-        y[it].data.elt[jt] = y_ij;
+        //y[it].data.elt[jt] = y_ij;
         dy[it].data.elt[jt] = dy_ij;
 
         mdy += dy_ij;
         mdyy += dy_ij * y_ij;
 
-        dz_sum[it].data.elt[jt] += dz_ij;
-        dzy_sum[it].data.elt[jt] += dz_ij * y_ij;
+        // dz_sum[it].data.elt[jt] += dz_ij;
+        // dzy_sum[it].data.elt[jt] += dz_ij * y_ij;
       }
     }
 
@@ -432,11 +431,22 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_bwd_general_kerne
     for (int it = 0, col = gidn * NUM_ELTS; it < LDGS && row < params.rows && col < params.cols;
          it++, col += gdimn * NUM_ELTS) {
       Ivec dx;
+      
+      Ivec x;
+      Ovec dz;
+      x.load_from_elts(params.x, row * params.cols + col, params.cols - col);
+      dz.load_from_elts(params.dz, row * params.cols + col, params.cols - col);
+
 #pragma unroll
       for (int jt = 0; jt < NUM_ELTS; jt++) {
-        compute_t dy_ij = dy[it].data.elt[jt];
-        compute_t y_ij = y[it].data.elt[jt];
-        dx.data.elt[jt] = rs * (dy_ij - (mdyy * y_ij + mdy));
+        const compute_t x_ij = x.data.elt[jt];
+        const compute_t y_ij = rs * (x_ij - mu);
+        const compute_t dz_ij = dz.data.elt[jt];
+        
+        dx.data.elt[jt] = rs * (dy[it].data.elt[jt] - (mdyy * y_ij + mdy));
+        
+        dz_sum[it].data.elt[jt] += dz_ij;
+        dzy_sum[it].data.elt[jt] += dz_ij * y_ij;
       }
       dx.store_to_elts(params.dx, row * params.cols + col, params.cols - col);
     }
