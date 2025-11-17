@@ -132,6 +132,7 @@ class FP8GlobalStateManager:
     HIGH_PRECISION_INIT_VAL = False
     IS_FIRST_FP8_MODULE = False
     FP8_GRAPH_CAPTURING = False
+    SKIP_FP8_REDUCTION_FOR_FSDP2 = False
     FP8_AUTOCAST_DEPTH = 0
     global_amax_buffer = {}
     global_amax_history_buffer = {}
@@ -494,7 +495,7 @@ class FP8GlobalStateManager:
         # Reduce only the non-FP8 weight modules here.
         # FP8 weight modules are reduced at the end of the optimizer
         # step after the weight amax is populated.
-        if enabled and cls.FP8_AUTOCAST_DEPTH == 0 and not _graph and torch.is_grad_enabled():
+        if not cls.SKIP_FP8_REDUCTION_FOR_FSDP2 and enabled and cls.FP8_AUTOCAST_DEPTH == 0 and not _graph and torch.is_grad_enabled():
             # delayed scaling only function, for other recipes (current scaling with any granularity),
             # this is noop for other recipes because cls.global_amax_buffer is empty list
             cls.reduce_and_update_fp8_tensors(forward=True)
