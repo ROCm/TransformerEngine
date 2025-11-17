@@ -71,13 +71,7 @@ jobs:
           echo "Selected image: $IMAGE_TO_USE"
           echo "image-tag=$IMAGE_TO_USE" >> $GITHUB_OUTPUT
 
-      - name: Log in to Docker registry
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.ARTIFACTORY_USER }}
-          password: ${{ secrets.ARTIFACTORY_PAT }}
-
-      - name: Pull and Save Docker Image
+      - name: Pull Docker Image
         run: |
           docker pull ${{ steps.select-image.outputs.image-tag }}
 
@@ -119,8 +113,8 @@ jobs:
           export HIP_PATH=""
           export PYTORCH_ROCM_ARCH=$GPU_ARCH
           export NVTE_ROCM_ARCH=$GPU_ARCH
-          pip wheel . -v -w /workspace/dist
-          pip install /workspace/dist/*.whl
+          pip install ninja
+          pip install -v . 2>&1
           EOF
           )"
 
