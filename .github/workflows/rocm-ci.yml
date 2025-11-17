@@ -30,7 +30,7 @@ jobs:
   build_and_test:
     name: Build and Test on GPU
     timeout-minutes: 720
-    runs-on: te-gfx942-4gpu
+    runs-on: linux-mi325-4
     steps:
       - name: Debug Registry SSL Certificate
         run: |
