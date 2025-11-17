@@ -19,7 +19,7 @@
 			*transformer_engine::CommOverlapCore*;
 			*nvshmem_wait_on_stream*;
 			*nvshmemi_init_thread*;
-			*rocshmem*
+			*te_rocshmem*
 		};
 	local: *;
 };

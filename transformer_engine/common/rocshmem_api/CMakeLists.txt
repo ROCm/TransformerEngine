@@ -3,16 +3,9 @@
 cmake_minimum_required (VERSION 3.21)
 project(rocshmem LANGUAGES HIP)
 
-find_package(hipblaslt REQUIRED)
-find_package(hiprtc REQUIRED)
 find_package(hip REQUIRED)
 find_package(MPI REQUIRED)
 
-if(NOT DEFINED ENV{NVTE_ROCM_ARCH})
-  set(CMAKE_HIP_ARCHITECTURES gfx942 gfx950)
-else()
-  set(CMAKE_HIP_ARCHITECTURES $ENV{NVTE_ROCM_ARCH})
-endif()
 
 if(DEFINED ENV{ROCSHMEM_HOME})
   set(ROCSHMEM_HOME "$ENV{ROCSHMEM_HOME}" CACHE STRING "Location of ROCSHMEM installation")
@@ -31,6 +24,12 @@ target_compile_options(rocshmemapi PRIVATE
     $<$<COMPILE_LANGUAGE:HIP>:-fgpu-rdc>
 )
 
+set_target_properties(rocshmemapi PROPERTIES
+    CXX_STANDARD 17
+    HIP_STANDARD 17
+    POSITION_INDEPENDENT_CODE ON
+)
+
 target_include_directories(rocshmemapi PUBLIC
         "${ROCSHMEM_INCLUDE_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -42,16 +41,4 @@ target_link_libraries(rocshmemapi PUBLIC
     MPI::MPI_CXX
     hip::host
     hip::device
-    roctx64
-    hiprtc
-    roc::hipblaslt
 )
-
-set_target_properties(rocshmemapi PROPERTIES
-    CXX_STANDARD 17
-    HIP_STANDARD 17
-    POSITION_INDEPENDENT_CODE ON
-    HIP_SEPARABLE_COMPILATION ON
-)
-
-set(ROCSHMEMAPI_INCLUDE_DIR "${ROCSHMEM_INCLUDE_DIR}" PARENT_SCOPE)

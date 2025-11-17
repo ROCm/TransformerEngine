@@ -54,8 +54,7 @@ void te_rocshmem_wait_on_stream(uint64_t* sig_addr,
 // ### wait_until_on_stream not yet implemented for rocshmem  ###
 // ### KernelWait is robust but slightly slower due to launch ###
     case WaitKind::ROCSHMEM_WAIT:
-    printf("WARNING: rocshmem wait is not implemented yet, defaulting to
-      kernel wait.\n");
+    printf("WARNING: rocshmem wait is not implemented yet, defaulting to kernel wait.\n");
     //   rocshmem__ulonglong_wait_until_on_stream(sig_addr,
     //                                 ROCSHMEM_CMP_EQ,
     //                                 wait_value,

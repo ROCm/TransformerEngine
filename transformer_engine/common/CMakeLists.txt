@@ -400,7 +400,6 @@ else()
         "${ROCSHMEM_HOME}/lib/librocshmem.a"
         -Wl,--no-whole-archive
     )
-    target_include_directories(transformer_engine PUBLIC ${ROCSHMEMAPI_INCLUDE_DIR})
   endif()
 endif()
 
