@@ -251,10 +251,16 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_general_kerne
       }
     }
 
+
     Vec3<compute_t,int> stat = stats.reduce(Vec3<compute_t,int>(mu, m2, count));
     mu = stat.x;
     m2 = stat.y;
-    compute_t rs = rsqrtf((m2 / stat.z) + params.epsilon);
+
+    compute_t var = m2 / stat.z;
+    var = var < compute_t(0) ? compute_t(0) : var;
+    compute_t rs = rsqrtf(var + params.epsilon);
+
+    // compute_t rs = rsqrtf((m2 / stat.z) + params.epsilon);
 
     if (gidn == 0) {
       mu_ptr[row] = mu;
