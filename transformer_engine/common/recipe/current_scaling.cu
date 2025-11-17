@@ -47,9 +47,9 @@ __global__ void amax_final_reduce(const float* __restrict__ block_amax,
   }
 }
 
-template <int nvec, bool aligned, typename InputType>
+template <int nvec, bool aligned, typename InputType, bool UseBlockAmax>
 __launch_bounds__(amax_kernel_threads) __global__
-    void amax_kernel(const InputType *input, float* __restrict__ block_amax, const size_t N,
+    void amax_kernel(const InputType *input, float *amax, float* __restrict__ block_amax, const size_t N,
                      const size_t num_aligned_elements) {
   VectorizedLoader<InputType, nvec, aligned> loader(input, N);
   InputType max{0.f};
@@ -85,12 +85,17 @@ __launch_bounds__(amax_kernel_threads) __global__
   // Reduce amax over block
   max = reduce_max<amax_kernel_threads / THREADS_PER_WARP>(max, warp_id);
   if (threadIdx.x == 0) {
-    block_amax[blockIdx.x] = max;
+    if constexpr (UseBlockAmax) {
+      block_amax[blockIdx.x] = max;
+    } else {
+      atomicMaxFloat(amax, max);
+    }
   }
 }
 
 template <int nvec, typename InputType>
-void launch_amax_kernel(const InputType *input, float *amax, const size_t N, cudaStream_t stream) {
+void launch_amax_kernel(const InputType *input, float *amax, const size_t N, float *block_amax,
+                        size_t block_capacity, cudaStream_t stream) {
   // Zero out amax so we can update with atomic max
   (void)cudaMemsetAsync(amax, 0, sizeof(float), stream);
 
@@ -109,28 +114,43 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, cud
   constexpr size_t max_blocks = 65535;
   num_blocks = std::min(num_blocks, max_blocks);
 
-  float* block_amax = nullptr;
-  NVTE_CHECK_CUDA(cudaMallocAsync(&block_amax, num_blocks * sizeof(float), stream));
+  const bool UseBlockAmax = (block_amax != nullptr);
+
+  if (UseBlockAmax) {
+    NVTE_CHECK(block_capacity >= num_blocks);
+  }
 
   // Launch kernel
   switch (align) {
     case Alignment::SAME_ALIGNED:
-      amax_kernel<nvec, true, InputType>
-          <<<num_blocks, threads, 0, stream>>>(input, block_amax, N, num_aligned_elements);
+      // FIXME: this code is clumsy. Perhaps don't use the UseBlockAmax extra template argument
+      if (UseBlockAmax)
+        amax_kernel<nvec, true, InputType, true>
+          <<<num_blocks, threads, 0, stream>>>(input, amax, block_amax, N, num_aligned_elements);
+      else
+        amax_kernel<nvec, true, InputType, false>
+          <<<num_blocks, threads, 0, stream>>>(input, amax, block_amax, N, num_aligned_elements);
       break;
     case Alignment::SAME_UNALIGNED:
-      amax_kernel<nvec, false, InputType>
-          <<<num_blocks, threads, 0, stream>>>(input,  block_amax, N, num_aligned_elements);
+      if (UseBlockAmax)
+        amax_kernel<nvec, false, InputType, true>
+          <<<num_blocks, threads, 0, stream>>>(input, amax, block_amax, N, num_aligned_elements);
+      else
+        amax_kernel<nvec, false, InputType, false>
+          <<<num_blocks, threads, 0, stream>>>(input, amax, block_amax, N, num_aligned_elements);
       break;
     case Alignment::DIFFERENT: {
       // This case is a logic error, since there is only one pointer (input)
       // in the alignment check. Still safe to process without vectorization.
-      amax_kernel<1, true, InputType><<<num_blocks, threads, 0, stream>>>(input,  block_amax, N, N);
+      if (UseBlockAmax)
+        amax_kernel<1, true, InputType, true><<<num_blocks, threads, 0, stream>>>(input, amax, block_amax, N, N);
+      else
+        amax_kernel<1, true, InputType, false><<<num_blocks, threads, 0, stream>>>(input, amax, block_amax, N, N);
       break;
     }
   }
 
-  {
+  if (UseBlockAmax) {
     constexpr int FINAL_REDUCE_THREADS = 256;
     dim3 fr_block(FINAL_REDUCE_THREADS);
     dim3 fr_grid(1);
@@ -141,7 +161,6 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, cud
 
   // Check results
   NVTE_CHECK_CUDA(cudaGetLastError());
-  NVTE_CHECK_CUDA(cudaFreeAsync(block_amax, stream));
 }
 
 }  // namespace
@@ -183,11 +202,20 @@ void nvte_compute_amax(const NVTETensor input_, const NVTETensor output_, cudaSt
              to_string(output.amax.dtype), ")");
   CheckOutputTensor(output, "output_compute_amax", true);
 
+  // Interpret output.data as workspace if present
+  float *block_amax = nullptr;
+  size_t block_capacity = 0;
+  if (output.data.dptr != nullptr) {
+    block_amax     = reinterpret_cast<float*>(output.data.dptr);
+    block_capacity = output.data.numel();     // #floats in workspace
+  }
+
   // Compute amax
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.data.dtype, IType, constexpr int nvec = 32 / sizeof(IType);
       launch_amax_kernel<nvec>(reinterpret_cast<const IType *>(input.data.dptr),
-                               reinterpret_cast<float *>(output.amax.dptr), input.data.numel(),
+                               reinterpret_cast<float *>(output.amax.dptr), input.data.numel(), block_amax,
+          block_capacity,
                                stream););  // NOLINT(*)
 }
 

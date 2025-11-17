@@ -20,8 +20,25 @@ void compute_amax(const at::Tensor& tensor, at::Tensor& amax) {
 
   TORCH_CHECK(amax.scalar_type() == at::kFloat, "amax must be a float tensor");
   TORCH_CHECK(amax.numel() == 1, "amax must have exactly one element");
+
+  // Compute an upper bound on the number of blocks for this input.
+  const auto N = input_tensor.numel();
+  constexpr size_t threads = 512;  // FIXME: should grab amax_kernel_threads here
+  constexpr size_t max_blocks_hw = 65535;
+
+  // Assume worst-case vectorization (nvec = 1) as an upper bound.
+  size_t max_blocks = std::min(DIVUP(static_cast<size_t>(N), threads),
+                               max_blocks_hw);
+
+  // Allocate workspace for the fake output tensor.
+  // This will be the block_amax buffer.
+  auto ws = at::empty({static_cast<long>(max_blocks)},
+                      tensor.options().dtype(at::kFloat));
+
+  std::vector<size_t> ws_shape{static_cast<size_t>(max_blocks)};
+
   TensorWrapper fake_te_output(
-      nullptr, te_input.shape(),
+      ws.data_ptr(), ws_shape,
       DType::kFloat8E4M3,  // It doesn't matter because we only compute amax.
       amax.data_ptr<float>());
 
