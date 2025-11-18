@@ -1,19 +1,18 @@
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
+
+# This file was modified for portability to AMDGPU
 # See LICENSE for license information.
 
 """Python interface for GEMM extensions"""
-import functools
+
 from typing import Iterable, Optional, Tuple, Union, List
 import os
 import torch
 import transformer_engine_torch as tex
 from ..constants import TE_DType
-from ..utils import assert_dim_for_fp8_exec, get_sm_count
+from ..utils import get_sm_count, _empty_tensor
 
 from ..tensor.quantized_tensor import Quantizer
-from ..tensor._internal.float8_tensor_base import Float8TensorBase
-from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 
 __all__ = [
     "general_gemm",
@@ -21,50 +20,11 @@ __all__ = [
 ]
 
 
-@functools.lru_cache(maxsize=None)
-def _empty_tensor() -> torch.Tensor:
-    """Get tensor with no entries and no data"""
-    return torch.Tensor().cuda()
-
-
-def swizzle_inputs(A: torch.Tensor, B: torch.Tensor, layout: str):
-    """Swizzle gemm inputs and return original scaling factor inverses."""
-    if not isinstance(A, MXFP8TensorBase) or not isinstance(B, MXFP8TensorBase):
-        return None
-
-    original_scale_inverses = (
-        A._rowwise_scale_inv,
-        A._columnwise_scale_inv,
-        B._rowwise_scale_inv,
-        B._columnwise_scale_inv,
-    )
-
-    if layout[0] == "T":
-        A._rowwise_scale_inv = tex.rowwise_swizzle(A._rowwise_data, A._rowwise_scale_inv)
-    else:
-        A._columnwise_scale_inv = tex.columnwise_swizzle(
-            A._columnwise_data, A._columnwise_scale_inv
-        )
-
-    if layout[1] == "N":
-        B._rowwise_scale_inv = tex.rowwise_swizzle(B._rowwise_data, B._rowwise_scale_inv)
-    else:
-        B._columnwise_scale_inv = tex.columnwise_swizzle(
-            B._columnwise_data, B._columnwise_scale_inv
-        )
-
-    return original_scale_inverses
-
-
-def reset_swizzled_inputs(A, B, scale_inverses):
-    """Reset the swizzled scale inverses after GEMM."""
-    if scale_inverses is not None:
-        (
-            A._rowwise_scale_inv,
-            A._columnwise_scale_inv,
-            B._rowwise_scale_inv,
-            B._columnwise_scale_inv,
-        ) = scale_inverses
+def print_rank_0(*args, **kwargs):
+    """Print only from rank 0 to avoid duplicate logs in distributed training."""
+    import torch.distributed as dist
+    if (dist.get_rank() if dist.is_initialized() else 0) == 0:
+        print(*args, **kwargs)
 
 
 def general_gemm(
@@ -88,6 +48,114 @@ def general_gemm(
 ) -> Iterable[Optional[torch.Tensor]]:
     """GEMM supporting fp8 inputs."""
 
+    # MXFP4 forward pass dispatch to AITER
+    from ..tensor._internal.mxfp4_tensor_base import MXFP4TensorBase
+    import os
+
+    if isinstance(A, MXFP4TensorBase) and isinstance(B, MXFP4TensorBase):
+        try:
+            import aiter
+            from aiter.ops.shuffle import shuffle_weight
+        except ImportError:
+            raise ImportError(
+                "AITER library not found. Please install AITER to use MXFP4 GEMM. "
+                "Install via: pip install -e /path/to/aiter"
+            )
+
+        use_A_columnwise = layout == "NN"
+        use_B_columnwise = False  # Currently only A (weight) benefits from columnwise in dgrad
+
+        # use_A_columnwise = layout[0] == "T"
+        # use_B_columnwise = layout[1] == "T"
+        
+        if use_A_columnwise:
+            if A._columnwise_data is None or A._columnwise_scale is None:
+                raise RuntimeError(
+                    f"layout={layout} requested columnwise data from A, but A._columnwise_data is None. "
+                    "Ensure quantizer was configured with columnwise=True during forward pass."
+                )
+            weight_data = A._columnwise_data  # [K, N/2] - this is Quantize(A.T)
+            weight_scale = A._columnwise_scale  # [K, N/32]
+        else:
+            weight_data = A._rowwise_data  # [N, K/2] where N = output_features
+            weight_scale = A._rowwise_scale  # [N, K/32]
+        
+        if use_B_columnwise:
+            if B._columnwise_data is None or B._columnwise_scale is None:
+                raise RuntimeError(
+                    f"layout={layout} requested columnwise data from B, but B._columnwise_data is None."
+                )
+            input_data = B._columnwise_data
+            input_scale = B._columnwise_scale
+        else:
+            input_data = B._rowwise_data  # [M, K/2] where M = batch_size
+            input_scale = B._rowwise_scale  # [M, K/32]
+
+        M = input_data.shape[0]   # Batch dimension (from input)
+        N = weight_data.shape[0]  # Output features (from weight)
+
+        # Pad M to multiple of 32 for AITER kernel requirements
+        padded_M = (M + 31) // 32 * 32
+        
+        if out is None:
+            out = torch.empty(
+                padded_M, N,
+                dtype=out_dtype if out_dtype is not None else torch.bfloat16,
+                device=input_data.device
+            )
+
+        # Shuffle weight for FP4 layout (16x16) and call gemm_a4w4_asm
+        # AITER expects: gemm_a4w4_asm(input, weight_shuffled, input_scale, weight_scale, ...)
+        # Wrap in DisableTorchDispatch to prevent recursive dequantization, TODO revisit DisableTorchDispatch
+        with torch._C._DisableTorchDispatch():
+            weight_layout = (16, 16)
+            weight_data_shuffled = shuffle_weight(weight_data, layout=weight_layout)
+            
+            result = aiter.gemm_a4w4_asm(
+                input_data,              
+                weight_data_shuffled,    
+                input_scale,             
+                weight_scale,            
+                out,
+                "" if bias is None else bias,  
+                None,
+                bpreshuffle=True,
+                log2_k_split=0,
+            )
+            
+            # Trim padding if necessary
+            if result.shape[0] > M:
+                result = result[:M, :]
+            
+            # Reshape output back to original shape 
+            original_input_shape = getattr(B, '_original_shape', None)  # Changed from A to B (input)
+            if original_input_shape is not None and len(original_input_shape) > 2:
+                # Reshape [M, N] -> [..., N] where ... matches the original leading dims
+                output_shape = list(original_input_shape[:-1]) + [N]
+                result = result.view(output_shape)
+
+        if int(os.getenv("NVTE_MXFP4_DEBUG")) == "1":
+            print_rank_0(
+                f"[{__file__}] [MXFP4 DEBUG] Dispatching to AITER gemm_a4w4_asm:\t"
+                f"  Weight (A) shape={weight_data.shape}, dtype={weight_data.dtype}; "
+                f"scales shape={weight_scale.shape}, dtype={weight_scale.dtype}\t"
+                f"  Input (B) shape={input_data.shape}, dtype={input_data.dtype}; "
+                f"scales shape={input_scale.shape}, dtype={input_scale.dtype}\t"
+                f"  Weight shuffled shape={weight_data_shuffled.shape}\t"
+                f"  Calling aiter.gemm_a4w4_asm: M={M} (padded to {padded_M}), N={N}, "
+                f"bias={'None' if bias is None else 'provided'}, "
+                f"out_shape={out.shape}, result_shape (before reshape)={result.shape}\t"
+                f"  Original input shape: {original_input_shape}, final result shape: {result.shape}\t"
+                "  AITER gemm_a4w4_asm returned successfully"
+            )
+
+        # MXFP4 does not support GELU fusion yet
+        if gelu:
+            raise NotImplementedError("GELU fusion not supported with MXFP4")
+
+        # Return in the same format as generic_gemm (use reshaped result)
+        return result, None, None, extra_output
+
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
     transa = layout[0] == "T"
     transb = layout[1] == "T"
@@ -109,8 +177,11 @@ def general_gemm(
         if not out.is_contiguous():
             raise ValueError("Output tensor is not contiguous.")
 
+    debug_quantizer = None
+
     # Use bfloat16 as default bias_dtype
     bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]
+
 
     args = (
         A,
@@ -137,9 +208,10 @@ def general_gemm(
         "bulk_overlap": bulk_overlap,
     }
 
-    original_scale_inverses = swizzle_inputs(A, B, layout)
     out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
-    reset_swizzled_inputs(A, B, original_scale_inverses)
+
+    if debug_quantizer is not None:
+        out = debug_quantizer.process_gemm_output(out)
 
     return out, bias_grad, gelu_input, extra_output
 
@@ -168,14 +240,6 @@ def general_grouped_gemm(
 
     transa = layout[0] == "T"
     transb = layout[1] == "T"
-
-    # assert [a.is_contiguous() for a in A]
-    # assert [b.is_contiguous() for b in B]
-
-    if isinstance(A[0], Float8TensorBase):
-        for a, b in zip(A, B):
-            assert_dim_for_fp8_exec(a._data)
-            assert_dim_for_fp8_exec(b._data)
 
     empty_tensor = _empty_tensor()
     empty_tensors = [empty_tensor] * num_gemms
