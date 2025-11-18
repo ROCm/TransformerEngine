@@ -999,8 +999,10 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
               TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
                   output->dtype(), OType,
 #ifdef __HIP_PLATFORM_AMD__
-                  cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
-                                       SCALE_DIM_Y, SCALE_DIM_X><<<grid, block, 0, stream>>>(
+                TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                  !(cols % (32 * sizeof(IType))), IS_ALIGNED,
+                    cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                                         SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED><<<grid, block, 0, stream>>>(
                       reinterpret_cast<const IType *>(input.data.dptr), 
                       (IS_DACT) ? reinterpret_cast<const IType *>(act_input->data.dptr) : nullptr,
                       reinterpret_cast<OType *>(output->data.dptr),
@@ -1051,6 +1053,9 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
           );           // NOLINT(*)
       );               // NOLINT(*)
   );                   // NOLINT(*)
+#ifdef __HIP_PLATFORM_AMD__
+  );                   // NOLINT(*)
+#endif
 }
 
 namespace detail {
