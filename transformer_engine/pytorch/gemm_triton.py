@@ -5,7 +5,7 @@
 from enum import IntEnum
 import torch
 
-import transformer_engine_extensions as tex
+import transformer_engine_torch as tex
 
 import triton
 import triton.language as tl
@@ -48,6 +48,128 @@ def reinterpret_as_fp8_tensor(a: torch.Tensor, dtype: tex.DType):
     if dtype == tex.DType.kFloat8E5M2:
         return a.view(dtype=torch.float8_e5m2fnuz)
 
+def getGemmOutputShape(A, transa, B, transb):
+    A0 = A.shape[:-1]
+    A1 = A.shape[-1:]
+    B0 = B.shape[:-1]
+    B1 = B.shape[-1:]
+    if transb:
+        out_shape = B1
+    else:
+        out_shape = B0
+
+    if transa:
+        out_shape += A0
+    else:
+        out_shape += A1
+    return out_shape
+
+def product(shape):
+    ret = 1
+    for i in shape:
+        ret *= i
+    return ret
+
+def te_generic_gemm_triton(A,
+                            transa,
+                            B,
+                            transb,
+                            D,
+                            quantizer,
+                            output_dtype,
+                            bias,
+                            bias_type,
+                            gelu,
+                            gelu_in,
+                            grad,
+                            workspace,
+                            workspaceSize,
+                            accumulate,
+                            use_split_accumulator,
+                            comm_overlap,
+                            comm_type,
+                            extra_output,
+                            bulk_overlap):
+
+    #if isinstance(A, Float8Tensor) and isinstance(B, Float8Tensor):
+        #input_fp8 = True
+
+    #print('A dtype=', A.dtype)
+
+
+    ## The fp8 tensor passed from TE is in torch.uint8
+    ## Need to reinterpret as the float8 type in torch
+    #if is_fp8_dtype(A_type):
+        #A = reinterpret_as_fp8_tensor(A, A_type)
+
+    #if is_fp8_dtype(B_type):
+        #B = reinterpret_as_fp8_tensor(B, B_type)
+
+    #if is_fp8_dtype(D_type):
+        #D = reinterpret_as_fp8_tensor(D, D_type)
+
+    #if A_scale_inverse.numel():
+        #A_scale_inverse = A_scale_inverse[A_fp8_tensor]
+
+    #if B_scale_inverse.numel():
+        #B_scale_inverse = B_scale_inverse[B_fp8_tensor]
+    A0 = product(A.shape[:-1])
+    A1 = product(A.shape[-1:])
+    B0 = product(B.shape[:-1])
+    B1 = product(B.shape[-1:])
+
+    m = A0 if transa else A1
+    k = A1 if transa else A0
+    n = B1 if transb else B0
+
+    assert not (transa and transb), 'TT layout not allowed'
+
+    #assert pre_gelu_out.data_ptr() == 0, 'GEMM+Gelu is not supported yet.'
+
+    ## A and B are column major following BLAS convention
+    ## Triton matmul function assumes row major layouts
+    ## Therefore, use the trick of swapping operands again 
+    a_row_major = B.T if transb else B
+    b_row_major = A.T if transa else A
+    a_row_major = a_row_major.view(-1, a_row_major.shape[-1])
+    b_row_major = b_row_major.view(-1, b_row_major.shape[-1])
+    
+    #a_scale_triton = B_scale_inverse
+    #b_scale_triton = A_scale_inverse
+    a_scale_triton = None
+    b_scale_triton = None
+    
+
+    epilogue = 'DEFAULT'
+    #if bias.data_ptr() != 0:
+        #if grad:
+            #epilogue = 'BGRADB'
+        #else:
+            #epilogue = 'BIAS'
+    D_shape = getGemmOutputShape(A, transa, B, transb)
+    #print('A_shape=', A.shape)
+    #print('transa=', transa)
+    #print('B_shape=', B.shape)
+    #print('transb=', transa)
+    #print('D_shape=', D_shape)
+    if D is None:
+        D = torch.empty(D_shape, dtype=A.dtype, device=A.device)
+        d_row_major = D.view(-1, D.shape[-1])
+        
+        #print('D.stride(0)=', d_row_major.stride(0))
+        #print('D.stride(1)=', d_row_major.stride(1))
+
+    #input_fp8 = is_fp8_dtype(A_type) and is_fp8_dtype(B_type)
+    #output_fp8 = is_fp8_dtype(D_type)
+    input_fp8 = False
+    output_fp8 = False
+    D_scale = None
+    bias = None
+    D_amax = None
+    matmul(a_row_major, b_row_major, d_row_major, a_scale_triton, b_scale_triton, D_scale, bias, D_amax, epilogue, input_fp8, output_fp8) 
+    return D, bias, None, None
+        
+    
                             
 def te_gemm_triton(A,
                    A_scale_inverse,
@@ -155,15 +277,17 @@ def te_gemm_triton(A,
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 4, 'waves_per_eu': 0}, num_warps=8, num_stages=0),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'waves_per_eu': 0}, num_warps=8, num_stages=0),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2}, num_warps=4, num_stages=0),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2}, num_warps=8, num_stages=0),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 32, 'waves_per_eu': 2}, num_warps=4, num_stages=0),
+        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 4, 'waves_per_eu': 0}, num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'waves_per_eu': 0}, num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2}, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2}, num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 32, 'waves_per_eu': 2}, num_warps=4),
     ],
     # TODO: do we need to use different data types as key?
     key=['M', 'N', 'K'],
-    use_cuda_graph=True,
+    # Ran into stream capture error when using cuda_graph, thus disabled.
+    #use_cuda_graph=True,
+    
 )
 @triton.heuristics({
     'EVEN_K': lambda args: args['K'] % args['BLOCK_SIZE_K'] == 0,

@@ -16,6 +16,8 @@ from ..utils import get_sm_count, _empty_tensor
 from ..tensor.quantized_tensor import Quantizer
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ...debug.pytorch.debug_quantization import DebugQuantizer
+from ..gemm_triton import te_generic_gemm_triton
+#from ..gemm_triton import te_gemm_triton
 
 __all__ = [
     "general_gemm",
@@ -114,9 +116,9 @@ def general_gemm(
 
     use_gemm_triton = bool( int(os.environ.get('NVTE_USE_GEMM_TRITON', '0')) )
     if use_gemm_triton:
-        out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
-    else:
         out, bias_grad, gelu_input, extra_output = te_generic_gemm_triton(*args, **kwargs)
+    else:
+        out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
 
 
     if debug_quantizer is not None:
