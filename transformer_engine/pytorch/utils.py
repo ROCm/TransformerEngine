@@ -25,6 +25,11 @@ def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
             return True
     return False
 
+@functools.lru_cache(maxsize=None)
+def _empty_tensor() -> torch.Tensor:
+    """Get tensor with no entries and no data"""
+    return torch.Tensor().cuda()
+
 
 def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     """
