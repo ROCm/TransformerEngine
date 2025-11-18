@@ -890,7 +890,8 @@ def general_grouped_gemm_triton(
         grad: True for backward pass
         
     Returns:
-        List of output tensors (matches outputs parameter)
+        Tuple of (outputs, bias_or_grad_bias, gelu_input) to match C++ backend signature
+        - bias_or_grad_bias: List of bias/grad_bias tensors (or list of bias if passed in)
     """
     assert m_splits is not None, "m_splits required for Triton kernel"
     assert len(outputs) > 0, "Output tensor(s) must be pre-allocated and passed in outputs list"
@@ -912,10 +913,11 @@ def general_grouped_gemm_triton(
         )
         
         # Convert bias gradient tensor to list if computed
+        # To match C++ backend: always return a list (either grad_biases or bias input)
         if compute_bias_grad and bias_grad_tensor is not None:
-            grad_biases = list(torch.unbind(bias_grad_tensor, dim=0))  # More efficient than list comprehension
+            grad_biases = list(bias_grad_tensor)  # Iterate over first dimension, returns views
         else:
-            grad_biases = None
+            grad_biases = bias  # Return bias input (matches C++ behavior)
     elif is_dgrad:
         # Use pre-allocated output tensor
         out = outputs[0]
@@ -929,7 +931,7 @@ def general_grouped_gemm_triton(
             bias,       # unused for dgrad
             use_bias,   # unused for dgrad
         )
-        grad_biases = None
+        grad_biases = bias  # Return bias input (matches C++ behavior)
     else:
         # Use pre-allocated output tensor
         out = outputs[0]
@@ -942,7 +944,7 @@ def general_grouped_gemm_triton(
             bias,       # bias tensors [N] per expert
             use_bias,   # whether to apply bias
         )
-        grad_biases = None
+        grad_biases = bias  # Return bias input (matches C++ behavior)
     
-    # Return outputs, grad_biases (if computed), and None for compatibility
+    # Return outputs, grad_biases, and None for gelu_input (to match C++ backend signature)
     return outputs, grad_biases, None
