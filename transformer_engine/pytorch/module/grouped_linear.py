@@ -3,13 +3,16 @@
 # See LICENSE for license information.
 
 """GroupedLinear API"""
+import os
 from typing import Union, Optional, Callable, Tuple, List
 import warnings
 
 import functools
 import torch
 
+from transformer_engine.pytorch.triton_kernels.grouped_gemm import general_grouped_gemm_triton
 import transformer_engine_torch as tex
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from transformer_engine.common.recipe import Recipe
 from .base import (
@@ -154,8 +157,10 @@ class _GroupedLinear(torch.autograd.Function):
             dtype=activation_dtype,
             device=device,
         )
+        use_grouped_gemm_triton = bool(int(os.environ.get('NVTE_USE_GROUPED_GEMM_TRITON', '0'))) and IS_HIP_EXTENSION
+        grouped_gemm_func = general_grouped_gemm_triton if use_grouped_gemm_triton else general_grouped_gemm
 
-        _ = general_grouped_gemm(
+        _ = grouped_gemm_func(
             weights_fp8,
             inputmats,
             [out],
@@ -305,7 +310,10 @@ class _GroupedLinear(torch.autograd.Function):
                             rowwise_usage=quantizer.rowwise_usage,
                             columnwise_usage=quantizer.columnwise_usage,
                         )
-                general_grouped_gemm(
+                use_grouped_gemm_triton = bool(int(os.environ.get('NVTE_USE_GROUPED_GEMM_TRITON', '0'))) and IS_HIP_EXTENSION
+                grouped_gemm_func = general_grouped_gemm_triton if use_grouped_gemm_triton else general_grouped_gemm
+                
+                grouped_gemm_func(
                     weights,
                     grad_output,
                     [dgrad],
@@ -334,7 +342,7 @@ class _GroupedLinear(torch.autograd.Function):
                         for w in weights
                     ]
                 grouped_gemm_wgrad = functools.partial(
-                    general_grouped_gemm,
+                    grouped_gemm_func,
                     out_dtype=ctx.activation_dtype,
                     workspaces=get_multi_stream_cublas_workspace(),
                     layout="NT",
