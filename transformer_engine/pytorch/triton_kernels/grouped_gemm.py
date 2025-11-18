@@ -752,6 +752,7 @@ def _grouped_gemm_wgrad(
     wgrad: list,  # List of pre-allocated wgrad tensors, each [N, K]
     m_splits: list,  # Token counts per expert
     compute_bias_grad: bool = False,  # Whether to compute fused bias gradient
+    accumulate: bool = False,  # Whether to accumulate into existing wgrad
 ) -> torch.Tensor:
     """
     Weight gradient grouped GEMM using AITER's TGMM kernel with optional fused bias gradient.
@@ -800,15 +801,8 @@ def _grouped_gemm_wgrad(
     group_sizes = get_group_sizes_tensor(tuple(m_splits), device)
     
     # Stack wgrad tensors to write results [G, K, N]
-    wgrad_stacked = torch.stack(wgrad, dim=0).contiguous()  # [G, K, N]
-    
-    # Verify expected strides for the kernel: should be (K*N, N, 1)
-    expected_strides = (K * N, N, 1)
-    if wgrad_stacked.stride() != expected_strides:
-        print(f"WARNING: wgrad_stacked has unexpected strides {wgrad_stacked.stride()}, expected {expected_strides}")
-        print(f"Creating new contiguous tensor with correct layout")
-        # Create a properly strided tensor
-        wgrad_stacked = wgrad_stacked.contiguous()
+    # Always use a fresh buffer for kernel output since torch.stack() creates a copy
+    wgrad_stacked = torch.zeros(num_experts, K, N, dtype=dtype, device=device)
     
     # Allocate bias gradient tensor if requested (zeroed for atomic accumulation)
     # Use float32 for atomic operations (bf16 not supported), convert after kernel
@@ -846,6 +840,17 @@ def _grouped_gemm_wgrad(
         **config,  # Pass all config params: BLOCK_SIZE_M/K/N, GROUP_SIZE, GRID_DIM, num_warps, num_stages
     )
     
+    # Copy results back to original wgrad buffers
+    # This is critical because the wgrad list often points to main_grads in Megatron
+    if accumulate:
+        # Add kernel output to existing wgrad buffers
+        for i, w in enumerate(wgrad):
+            w.add_(wgrad_stacked[i])
+    else:
+        # Copy kernel output to wgrad buffers
+        for i, w in enumerate(wgrad):
+            w.copy_(wgrad_stacked[i])
+    
     # Convert bias gradient to target dtype after atomic accumulation
     if compute_bias_grad:
         bias_grad_tensor = bias_grad_tensor.to(dtype)
@@ -865,6 +870,7 @@ def general_grouped_gemm_triton(
     use_split_accumulator: bool = False,  # Unused, for compatibility
     layout: str = "TN",  # "TN" for forward, "NN" for dgrad
     grad: bool = False,  # True for backward pass
+    accumulate: bool = False,  # Whether to accumulate into wgrad (for wgrad only)
     **kwargs,
 ) -> list:
     """
@@ -903,13 +909,15 @@ def general_grouped_gemm_triton(
     if is_wgrad:
         # Backward pass: wgrad = grad_output^T @ input
         # Fused bias gradient computation if requested
-        compute_bias_grad = use_bias is not None and use_bias is not False
+        # Only compute bias grad if use_bias is explicitly True
+        compute_bias_grad = use_bias is True
         bias_grad_tensor = _grouped_gemm_wgrad(
             inputmats,  # grad_outputs [M, N]
             weights,    # inputs [M, K] - note: weights parameter is repurposed as inputs for wgrad
             outputs,    # wgrad list [N, K] per expert
             m_splits,
             compute_bias_grad=compute_bias_grad,
+            accumulate=accumulate,  # Pass accumulate parameter
         )
         
         # Convert bias gradient tensor to list if computed
