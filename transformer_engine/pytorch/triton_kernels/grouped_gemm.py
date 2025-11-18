@@ -668,9 +668,9 @@ def _grouped_gemm_forward(
 
 
 def _grouped_gemm_backward(
-    grad_outputs: list,  # List of grad_output tensors, each [m_splits[i], N]
-    weights: list,  # List of weight tensors, each [N, K]
-    dgrad: torch.Tensor,  # Pre-allocated dgrad tensor [M_total, K]
+    grad_outputs: list,  # List of grad_output tensors, each [m_splits[i], K]
+    weights: list,  # List of weight tensors, each [K, N]
+    dgrad: torch.Tensor,  # Pre-allocated dgrad tensor [M_total, N]
     m_splits: list,  # Token counts per expert
     bias: list = None,  # Unused for dgrad, for API compatibility
     use_bias: bool = False,  # Unused for dgrad, for API compatibility
@@ -700,8 +700,6 @@ def _grouped_gemm_backward(
     num_experts = len(weights)
     device = dgrad.device
     dtype = dgrad.dtype
-    K = dgrad.shape[1]  # in_features (output of this op)
-    N = grad_outputs[0].shape[1]  # out_features (input to this op)
     
     # Handle grad_outputs - either single concatenated tensor or list
     if len(grad_outputs) == 1:
@@ -710,6 +708,8 @@ def _grouped_gemm_backward(
         grad_output_tensor = torch.cat(grad_outputs, dim=0)
     
     M = grad_output_tensor.shape[0]  # total tokens
+    K = grad_output_tensor.shape[1]  # contraction dimension
+    N = weights[0].shape[1]  # output dimension
     
     # Get cached group_sizes tensor (avoids repeated host-to-device copy)
     group_sizes = get_group_sizes_tensor(tuple(m_splits), device)
@@ -727,7 +727,7 @@ def _grouped_gemm_backward(
     
     # Launch kernel with proper grid calculation
     grid = _gmm_grid(
-        K,  # N_out dimension (output columns)
+        N,  # N_out dimension (output columns)
         config["BLOCK_SIZE_M"],
         config["BLOCK_SIZE_N"],
         m_splits,  # Pass Python list to avoid GPU->CPU copy
@@ -740,8 +740,8 @@ def _grouped_gemm_backward(
         group_sizes,
         dgrad,
         bias_dummy,
-        M, N, K, num_experts,
-        TRANS_RHS=True,  # Weights are [N, K]
+        M, K, N, num_experts,
+        TRANS_RHS=False,  # Weights are [K, N]
         USE_BIAS=False,  # No bias for dgrad
         **config,
     )
