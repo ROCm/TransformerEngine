@@ -5,12 +5,10 @@ from aiter.ops.shuffle import shuffle_weight
 
 from .tensor.quantized_tensor import QuantizedTensor
 
-# CUSTOM PATHS HERE
-import sys
-sys.path.insert(0, '/root/llama3_code/quant_han')
-from mxfp4_quantization_original import convert_to_mxfp4
-from gemm import blockwise_mxfp4_gemm
-# CUSTOM PATHS HERE
+from .hadamard import HadamardFactory, HadamardTransform
+
+# Configure Hadamard for MXFP (block_size=32, deterministic)
+HadamardFactory.configure(block_size=32, randomized=False)
 
 def _dequantize_tensor(tensor):
  
@@ -19,74 +17,56 @@ def _dequantize_tensor(tensor):
     return tensor
 
 
-def _quantize_to_fp4(tensor, aiter_or_han, use_sr=False, use_2dblock=False):
-    if aiter_or_han == 0:
-        quant_func = aiter.get_triton_quant(aiter.QuantType.per_1x32)
-        fp4_data, scales = quant_func(tensor, shuffle=True)
-        return fp4_data, scales
+def _quantize_to_fp4(tensor ):
+   
+    quant_func = aiter.get_triton_quant(aiter.QuantType.per_1x32)
+    fp4_data, scales = quant_func(tensor, shuffle=True)
+    return fp4_data, scales
+
+
+
+def _fp4_gemm_core(A_fp4, A_scales, B_fp4, B_scales , out_dtype=torch.bfloat16, out_buffer=None):
+
+
+    # Step 1: Convert scales to uint8
+    A_scales_uint8 = A_scales.view(torch.uint8)
+    B_scales_uint8 = B_scales.view(torch.uint8)
+
+    # Step 2: Shuffle B (the "weight" operand in gemm_a4w4_asm)
+    weight_layout = (16, 16)
+    B_shuffled = shuffle_weight(B_fp4, layout=weight_layout)
+
+    # Step 3: Allocate output buffer with padding
+    M, K = A_fp4.shape
+    N, _ = B_fp4.shape
+
+    if out_buffer is not None:
+        out_hp = out_buffer
+        padded_M = out_buffer.shape[0]
     else:
-        fp4_data, scales = convert_to_mxfp4(tensor, block_size=32, is_2d_block=use_2dblock, use_sr=use_sr, use_asm=False)
-        return fp4_data, scales
+        padded_M = (M + 31) // 32 * 32
+        out_hp = torch.empty((padded_M, N), dtype=out_dtype, device=A_fp4.device)
 
+    # Step 4: Perform FP4 GEMM: result = A @ B^T
+    result = aiter.gemm_a4w4_asm(
+        A_fp4,
+        B_shuffled,
+        A_scales_uint8,
+        B_scales_uint8,
+        out_hp,
+        "",
+        None,
+        bpreshuffle=True,
+        log2_k_split=0
+    )
 
-def _fp4_gemm_core(A_fp4, A_scales, B_fp4, B_scales, aiter_or_han, use_2dblock=False, out_dtype=torch.bfloat16, out_buffer=None):
- 
-    if aiter_or_han == 0:
-        # Step 1: Convert scales to uint8
-        A_scales_uint8 = A_scales.view(torch.uint8)
-        B_scales_uint8 = B_scales.view(torch.uint8)
+    # Step 5: Trim padding if necessary
+    if result.shape[0] > M:
+        result = result[:M, :]
 
-        # Step 2: Shuffle B (the "weight" operand in gemm_a4w4_asm)
-        weight_layout = (16, 16)
-        B_shuffled = shuffle_weight(B_fp4, layout=weight_layout)
+    return result
 
-        # Step 3: Allocate output buffer with padding
-        M, K = A_fp4.shape
-        N, _ = B_fp4.shape
-
-        if out_buffer is not None:
-            out_hp = out_buffer
-            padded_M = out_buffer.shape[0]
-        else:
-            padded_M = (M + 31) // 32 * 32
-            out_hp = torch.empty((padded_M, N), dtype=out_dtype, device=A_fp4.device)
-
-        # Step 4: Perform FP4 GEMM: result = A @ B^T
-        result = aiter.gemm_a4w4_asm(
-            A_fp4,
-            B_shuffled,
-            A_scales_uint8,
-            B_scales_uint8,
-            out_hp,
-            "",
-            None,
-            bpreshuffle=True,
-            log2_k_split=0
-        )
-
-        # Step 5: Trim padding if necessary
-        if result.shape[0] > M:
-            result = result[:M, :]
-
-        return result
-
-    else:
-        result = blockwise_mxfp4_gemm(
-            A_fp4,
-            A_scales,
-            B_fp4,
-            B_scales,
-            use_2dblock_a=False,
-            use_2dblock_b=use_2dblock,
-            k_pack_a=True,
-            k_pack_b=True,
-            trans_a=False,
-            trans_b=True,
-            block_size=32,
-            output_dtype=out_dtype,
-        )
-        return result 
-
+    
         
 def fp4_gemm(
     pass_type,
@@ -106,11 +86,8 @@ def fp4_gemm(
  
     #TODO: # define False if type is float8 tensor
     fp4_tensor = False
-    aiter_or_han= 1 # 0: uses aiter funcs 1: uses han"s funcs
 
-    #if han enabled
-    use_2dblock=True
-    use_sr=False
+    use_hadamard=True  
 
 
     if pass_type == 'fwd':
@@ -120,12 +97,24 @@ def fp4_gemm(
             input_hp = _dequantize_tensor(input_tensor)
             weight_hp = _dequantize_tensor(weight)
 
+            # Apply Hadamard transform to BOTH input and weights
+            # right multiply) so left_mul=False
+            hadamard_transform = None
+            if use_hadamard:
+                
+                hadamard_transform = HadamardFactory.create_transform(device=input_hp.device)
+                input_hp = hadamard_transform(input_hp, left_mul=False, inverse=False)
+                weight_hp = hadamard_transform(weight_hp, left_mul=False, inverse=False)
+
             # Quantize to FP4
-            input_fp4, input_scales = _quantize_to_fp4(input_hp, aiter_or_han)
-            weight_fp4, weight_scales = _quantize_to_fp4(weight_hp, aiter_or_han, use_2dblock=use_2dblock)
+            input_fp4, input_scales = _quantize_to_fp4(input_hp   )
+            weight_fp4, weight_scales = _quantize_to_fp4(weight_hp   )
 
             # Perform FP4 GEMM
-            result = _fp4_gemm_core(input_fp4, input_scales, weight_fp4, weight_scales, aiter_or_han, use_2dblock=use_2dblock, out_dtype=out_dtype)
+            result = _fp4_gemm_core(input_fp4, input_scales, weight_fp4, weight_scales, out_dtype=out_dtype)
+
+      
+   
 
         else:
             pass
@@ -144,19 +133,32 @@ def fp4_gemm(
         return result
 
     elif pass_type == 'dgrad':
-        
+
         if not fp4_tensor:
-            # Dgrad pass: dgrad = grad_output @ weight
+            # Dgrad pass: grad_input = grad_output @ weight
             weight_hp = _dequantize_tensor(weight)
             weight_hp_t = weight_hp.T
             grad_output_hp = _dequantize_tensor(grad_output)
 
+            # Apply Hadamard transform to grad_output and weight (right multiply)
+            hadamard_transform = None
+            if use_hadamard:
+                hadamard_transform = HadamardFactory.create_transform(device=grad_output_hp.device)
+                # Apply H to grad_output: grad_output @ H
+                grad_output_hp = hadamard_transform(grad_output_hp, left_mul=False, inverse=False)
+                # Apply H to weight^T: weight^T @ H
+                weight_hp_t = hadamard_transform(weight_hp_t, left_mul=False, inverse=False)
+
             # Quantize to FP4
-            grad_fp4, grad_scales = _quantize_to_fp4(grad_output_hp, aiter_or_han, use_sr=use_sr)
-            weight_fp4, weight_scales = _quantize_to_fp4(weight_hp_t, aiter_or_han,  use_2dblock=use_2dblock)
+            grad_fp4, grad_scales = _quantize_to_fp4(grad_output_hp)
+            weight_fp4, weight_scales = _quantize_to_fp4(weight_hp_t)
 
             # Perform FP4 GEMM
-            result = _fp4_gemm_core(grad_fp4, grad_scales, weight_fp4, weight_scales, aiter_or_han, use_2dblock=use_2dblock, out_dtype=out_dtype, out_buffer=dgrad_bulk)
+            result = _fp4_gemm_core(grad_fp4, grad_scales, weight_fp4, weight_scales, out_dtype=out_dtype, out_buffer=dgrad_bulk)
+
+ 
+             
+             
 
         else:
             pass
@@ -188,12 +190,23 @@ def fp4_gemm(
             grad_output_hp = _dequantize_tensor(grad_output)
             grad_output_hp_t = grad_output_hp.T
 
+            # Apply Hadamard transform to grad_output^T and input^T (right multiply)
+            hadamard_transform = None
+            if use_hadamard:
+                hadamard_transform = HadamardFactory.create_transform(device=input_hp_t.device)
+                # Apply H to grad_output^T: grad_output^T @ H
+                grad_output_hp_t = hadamard_transform(grad_output_hp_t, left_mul=False, inverse=False)
+                # Apply H to input^T: input^T @ H
+                input_hp_t = hadamard_transform(input_hp_t, left_mul=False, inverse=False)
+
             # Quantize to FP4
-            grad_fp4, grad_scales = _quantize_to_fp4(grad_output_hp_t, aiter_or_han, use_sr=use_sr)
-            input_fp4, input_scales = _quantize_to_fp4(input_hp_t, aiter_or_han)
+            grad_fp4, grad_scales = _quantize_to_fp4(grad_output_hp_t)
+            input_fp4, input_scales = _quantize_to_fp4(input_hp_t)
 
             # Perform FP4 GEMM
-            result = _fp4_gemm_core(grad_fp4, grad_scales, input_fp4, input_scales, aiter_or_han, use_2dblock=False, out_dtype=out_dtype)
+            result = _fp4_gemm_core(grad_fp4, grad_scales, input_fp4, input_scales, out_dtype=out_dtype)
+
+
 
         else:
             pass
