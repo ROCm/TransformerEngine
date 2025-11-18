@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -110,7 +112,12 @@ def general_gemm(
         "bulk_overlap": bulk_overlap,
     }
 
-    out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
+    use_gemm_triton = bool( int(os.environ.get('NVTE_USE_GEMM_TRITON', '0')) )
+    if use_gemm_triton:
+        out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
+    else:
+        out, bias_grad, gelu_input, extra_output = te_generic_gemm_triton(*args, **kwargs)
+
 
     if debug_quantizer is not None:
         out = debug_quantizer.process_gemm_output(out)
