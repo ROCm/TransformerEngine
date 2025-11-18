@@ -26,6 +26,8 @@ from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
+from ..gemm_triton import te_generic_gemm_triton
+#from ..gemm_triton import te_gemm_triton
 
 _FP4_USE_TUNED_GEMM = int(os.environ.get("NVTE_FP4_USE_TUNED_GEMM", "1"))
 _FP4_LOG_SHAPES = int(os.environ.get("NVTE_FP4_LOG_GEMM_SHAPES", "0"))
@@ -514,9 +516,9 @@ def general_gemm(
 
     use_gemm_triton = bool( int(os.environ.get('NVTE_USE_GEMM_TRITON', '0')) )
     if use_gemm_triton:
-        out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
-    else:
         out, bias_grad, gelu_input, extra_output = te_generic_gemm_triton(*args, **kwargs)
+    else:
+        out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
 
 
     if IS_HIP_EXTENSION and use_bf16_tn_output_workaround:
