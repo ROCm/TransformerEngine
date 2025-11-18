@@ -257,7 +257,7 @@ class _Linear(torch.autograd.Function):
 
         # Check if FP4 mode is enabled via environment variable
         use_fp4 = os.environ.get('FP4', 'false').lower() in ['true', '1', 'yes']
-         
+
         if use_fp4 and fp8:
             #######################################################################
             # FP4 FORWARD GEMM REPLACEMENT FOR FP8 PATH
