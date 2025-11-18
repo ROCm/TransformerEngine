@@ -893,24 +893,6 @@ inline __device__ void warp_chan_upd_dynamic_ge(Vec3<T,CountT> &stat, int num_ac
   int highest_bit_set = (8 * sizeof(num_active)) - __clz(num_active - 1);
 
 #pragma unroll
-  // for (int step = (1 << (highest_bit_set - 1)); step > 0; step /= 2) {
-  //   T n_b = warp_shuffle_down(stat.z, step);
-  //   T m_b = warp_shuffle_down(stat.x, step);
-  //   T m2_b = warp_shuffle_down(stat.y, step);
-
-  //   T n_a = stat.z;
-  //   T m_a = stat.x;
-  //   T m2_a = stat.y;
-
-  //   T n_ab = n_a + n_b;
-  //   T rn_ab = T(1.f) / n_ab;
-  //   T delta = m_a - m_b;
-
-  //   T m_ab = (n_a * m_a + n_b * m_b) * rn_ab;
-  //   T m2_ab = m2_a + m2_b + delta * delta * n_a * n_b * rn_ab;
-
-  //   stat = Vec3<T,CountT>(m_ab, m2_ab, n_ab);
-  // }
   for (int step = (1 << (highest_bit_set - 1)); step > 0; step /= 2) {
     T n_b = warp_shuffle_down(stat.z, step);
     T m_b = warp_shuffle_down(stat.x, step);
