@@ -156,13 +156,14 @@ def benchmark_dot_product_attention(model, attention, column_name, dirname):
     os.makedirs(dirname, exist_ok=True)
     before_files = set(os.listdir(cwd))
     # Profiling command using rocprof
+    benchmark_dir = os.path.dirname(os.path.abspath(__file__))
     prof_cmd = [
             "rocprof",
             "--hip-trace",
             "--basenames off",
             "python",
             "-c",
-            f""" "import benchmark_attention_rocm;""",
+            f""" "import sys; sys.path.insert(0, '{benchmark_dir}'); import benchmark_attention_rocm;""",
             f"""benchmark_attention_rocm.benchmark_dot_product_attention_profiler("""
             f"""'{model}', '{attention}', '{column_name}')" """,
         ]
