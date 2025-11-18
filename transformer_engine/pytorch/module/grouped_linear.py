@@ -94,12 +94,25 @@ class _GroupedLinear(torch.autograd.Function):
         # Make sure input dimensions are compatible
         in_features = weights[0].shape[-1]
         assert inp.shape[-1] == in_features, "GEMM not possible"
-        inputmats = torch.split(inp.view(-1, in_features), m_splits)
-        if fp8:
-            assert_dim_for_fp8_exec(*inputmats, *weights)
-
-        # Cast input to expected dtype
-        inputmats_no_fp8 = [cast_if_needed(mat, activation_dtype) for mat in inputmats]
+        
+        # Check if using Triton kernels
+        use_grouped_gemm_triton = bool(int(os.environ.get('NVTE_USE_GROUPED_GEMM_TRITON', '0'))) and IS_HIP_EXTENSION
+        
+        # For Triton, keep tensor concatenated; for others, split per expert
+        if use_grouped_gemm_triton:
+            # Keep as single tensor - Triton kernels handle this more efficiently
+            inp_reshaped = inp.view(-1, in_features)
+            inputmats = [inp_reshaped]  # Single tensor in a list
+            if fp8:
+                assert_dim_for_fp8_exec(inp_reshaped, *weights)
+            inputmats_no_fp8 = [cast_if_needed(inp_reshaped, activation_dtype)]
+        else:
+            # Split per expert for non-Triton backends
+            inputmats = torch.split(inp.view(-1, in_features), m_splits)
+            if fp8:
+                assert_dim_for_fp8_exec(*inputmats, *weights)
+            inputmats_no_fp8 = [cast_if_needed(mat, activation_dtype) for mat in inputmats]
+        
         inputmats = []
 
         weight_requires_grad = weights[0].requires_grad
@@ -157,7 +170,7 @@ class _GroupedLinear(torch.autograd.Function):
             dtype=activation_dtype,
             device=device,
         )
-        use_grouped_gemm_triton = bool(int(os.environ.get('NVTE_USE_GROUPED_GEMM_TRITON', '0'))) and IS_HIP_EXTENSION
+        # Reuse the flag set earlier to ensure consistency
         grouped_gemm_func = general_grouped_gemm_triton if use_grouped_gemm_triton else general_grouped_gemm
 
         _ = grouped_gemm_func(
@@ -223,6 +236,9 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.sequence_parallel = sequence_parallel
             ctx.inp_shape = inp.shape
             ctx.requires_dgrad = inp.requires_grad
+            ctx.use_grouped_gemm_triton = use_grouped_gemm_triton
+            # Save number of input tensors for correct slicing in backward
+            ctx.num_input_tensors = len(inputmats)
             ctx.reduce_and_update_bwd_fp8_tensors = False
             if ctx.fp8 and requires_grad(inp, weights[0], biases[0]):
                 ctx.reduce_and_update_bwd_fp8_tensors = (
@@ -240,10 +256,12 @@ class _GroupedLinear(torch.autograd.Function):
         with torch.cuda.nvtx.range("_GroupedLinear_backward"):
             saved_tensors = restore_from_saved(ctx.tensor_objects, ctx.saved_tensors)
             N = ctx.num_gemms
-            inputmats = saved_tensors[:N]
-            weights = saved_tensors[N : 2 * N]
-            origin_weights = saved_tensors[2 * N : 3 * N]
-            biases = saved_tensors[3 * N : 4 * N]
+            # Use num_input_tensors for correct slicing (1 for Triton, N for others)
+            num_inputs = ctx.num_input_tensors
+            inputmats = saved_tensors[:num_inputs]
+            weights = saved_tensors[num_inputs : num_inputs + N]
+            origin_weights = saved_tensors[num_inputs + N : num_inputs + 2 * N]
+            biases = saved_tensors[num_inputs + 2 * N : num_inputs + 3 * N]
             main_grads = ctx.main_grads
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:  # TOSO
@@ -255,33 +273,43 @@ class _GroupedLinear(torch.autograd.Function):
             # preprocess grad_output
 
             grad_output = grad_output.contiguous()
-            grad_output_mats = torch.split(
-                grad_output.view(-1, grad_output.shape[-1]), ctx.m_splits
-            )
-            grad_output = [None] * ctx.num_gemms
-            grad_biases = [None] * ctx.num_gemms
-            if ctx.fp8:
-                if ctx.use_bias:
-                    # unfuse bgrad for now until cast_transpose + dgrad calculation is ready
-                    # for Float8BlockQuantizer.
-                    if ctx.fp8_recipe.float8_block_scaling():
-                        for i in range(ctx.num_gemms):
-                            grad_biases[i] = grad_output_mats[i].sum(dim=0)
-                            grad_output[i] = ctx.grad_output_quantizers[i](grad_output_mats[i])
-                    else:
-                        for i in range(ctx.num_gemms):
-                            grad_biases[i], grad_output[i] = tex.bgrad_quantize(
-                                grad_output_mats[i], ctx.grad_output_quantizers[i]
-                            )
-                else:
-                    grad_output = tex.fused_multi_quantize(
-                        grad_output_mats,
-                        None,
-                        ctx.grad_output_quantizers,
-                        TE_DType[ctx.activation_dtype],
-                    )
+            
+            # For Triton kernels without fp8, avoid splitting grad_output
+            if ctx.use_grouped_gemm_triton and not ctx.fp8:
+                # Keep as single tensor for Triton kernels
+                grad_output_reshaped = grad_output.view(-1, grad_output.shape[-1])
+                grad_output = [grad_output_reshaped]  # Single tensor in a list
+                # Bias gradients will be computed in the kernel wrapper if use_bias=True
+                grad_biases = [None] * ctx.num_gemms
             else:
-                grad_output = grad_output_mats
+                # Split for non-Triton backends or fp8 processing
+                grad_output_mats = torch.split(
+                    grad_output.view(-1, grad_output.shape[-1]), ctx.m_splits
+                )
+                grad_output = [None] * ctx.num_gemms
+                grad_biases = [None] * ctx.num_gemms
+                if ctx.fp8:
+                    if ctx.use_bias:
+                        # unfuse bgrad for now until cast_transpose + dgrad calculation is ready
+                        # for Float8BlockQuantizer.
+                        if ctx.fp8_recipe.float8_block_scaling():
+                            for i in range(ctx.num_gemms):
+                                grad_biases[i] = grad_output_mats[i].sum(dim=0)
+                                grad_output[i] = ctx.grad_output_quantizers[i](grad_output_mats[i])
+                        else:
+                            for i in range(ctx.num_gemms):
+                                grad_biases[i], grad_output[i] = tex.bgrad_quantize(
+                                    grad_output_mats[i], ctx.grad_output_quantizers[i]
+                                )
+                    else:
+                        grad_output = tex.fused_multi_quantize(
+                            grad_output_mats,
+                            None,
+                            ctx.grad_output_quantizers,
+                            TE_DType[ctx.activation_dtype],
+                        )
+                else:
+                    grad_output = grad_output_mats
 
             if ctx.is_first_microbatch is not None:
                 accumulate_wgrad_into_param_main_grad = (
@@ -310,8 +338,8 @@ class _GroupedLinear(torch.autograd.Function):
                             rowwise_usage=quantizer.rowwise_usage,
                             columnwise_usage=quantizer.columnwise_usage,
                         )
-                use_grouped_gemm_triton = bool(int(os.environ.get('NVTE_USE_GROUPED_GEMM_TRITON', '0'))) and IS_HIP_EXTENSION
-                grouped_gemm_func = general_grouped_gemm_triton if use_grouped_gemm_triton else general_grouped_gemm
+                # Reuse the flag from forward pass for consistency
+                grouped_gemm_func = general_grouped_gemm_triton if ctx.use_grouped_gemm_triton else general_grouped_gemm
                 
                 grouped_gemm_func(
                     weights,

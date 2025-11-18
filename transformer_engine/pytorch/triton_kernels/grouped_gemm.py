@@ -8,6 +8,45 @@ import os.path
 
 from torch import Tensor
 
+# Cache for group_sizes tensors to avoid repeated host-to-device copies
+_group_sizes_cache = {}
+
+# Cache for dummy bias tensors (used when USE_BIAS=False)
+_dummy_bias_cache = {}
+
+def get_dummy_bias_tensor(device, dtype) -> torch.Tensor:
+    """
+    Get or create a cached dummy bias tensor (used when USE_BIAS=False).
+    
+    Args:
+        device: Target device
+        dtype: Tensor dtype
+    
+    Returns:
+        Cached dummy tensor (single element)
+    """
+    cache_key = (device, dtype)
+    if cache_key not in _dummy_bias_cache:
+        _dummy_bias_cache[cache_key] = torch.zeros(1, dtype=dtype, device=device)
+    return _dummy_bias_cache[cache_key]
+
+def get_group_sizes_tensor(m_splits: tuple, device, dtype=torch.int32) -> torch.Tensor:
+    """
+    Get or create a cached group_sizes tensor to avoid repeated host-to-device copies.
+    
+    Args:
+        m_splits: Tuple of token counts per expert (must be tuple for hashing)
+        device: Target device
+        dtype: Tensor dtype (default: torch.int32)
+    
+    Returns:
+        Cached or newly created group_sizes tensor on device
+    """
+    cache_key = (m_splits, device, dtype)
+    if cache_key not in _group_sizes_cache:
+        _group_sizes_cache[cache_key] = torch.tensor(m_splits, dtype=dtype, device=device)
+    return _group_sizes_cache[cache_key]
+
 def is_power_of_2(x: int) -> bool:
     return (x > 0) and (x & (x - 1) == 0)
 
@@ -15,7 +54,7 @@ def _gmm_grid(
     N: int,
     block_size_m: int,
     block_size_n: int,
-    group_sizes: Tensor,
+    m_splits: list,  # Use Python list instead of GPU tensor to avoid host-device copy
     grid_dim: int,
 ) -> tuple[int]:
     assert N > 0, f"N must be positive, it's {N}."
@@ -25,13 +64,19 @@ def _gmm_grid(
     assert is_power_of_2(
         block_size_n
     ), f"N-dimension tile size must be a power of 2 (it's {block_size_n})."
-    assert torch.all(group_sizes >= 0).item(), "All group_sizes must be non-negative."
+    assert all(m >= 0 for m in m_splits), "All group sizes must be non-negative."
     assert grid_dim > 0, f"Grid dimension must be positive (it's {grid_dim})."
-    num_m_tiles = (group_sizes + block_size_m - 1) // block_size_m
-    assert torch.all(num_m_tiles >= 0).item(), "All num_m_tiles must be non-negative."
+    
+    # Compute on CPU using Python list to avoid GPU->CPU copy
     num_n_tiles = triton.cdiv(N, block_size_n)
     assert num_n_tiles > 0, f"num_n_tiles must be positive, it's {num_n_tiles}."
-    num_tiles = torch.sum(num_m_tiles * num_n_tiles).item()
+    
+    num_tiles = 0
+    for m in m_splits:
+        num_m_tiles = (m + block_size_m - 1) // block_size_m
+        assert num_m_tiles >= 0, f"num_m_tiles must be non-negative for m={m}."
+        num_tiles += num_m_tiles * num_n_tiles
+    
     assert num_tiles > 0, f"num_tiles must be positive, it's {num_tiles}."
     num_programs = int(min(grid_dim, num_tiles))
     assert num_programs > 0, f"num_programs must be positive, it's {num_programs}."
@@ -119,6 +164,7 @@ def gmm_kernel(
     rhs_ptr,
     group_sizes_ptr,
     out_ptr,
+    bias_ptr,
     # Tensor shapes:
     M: int,
     K: int,
@@ -132,6 +178,7 @@ def gmm_kernel(
     K_DIVISIBLE_BY_BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
     GRID_DIM: tl.constexpr,
+    USE_BIAS: tl.constexpr,
 ):
     tl.assume(M > 0)
     tl.assume(K > 0)
@@ -234,6 +281,14 @@ def gmm_kernel(
                     rhs_ptrs += BLOCK_SIZE_K * N
 
             acc = acc.to(out_ptr.type.element_ty)
+            
+            # Add bias if enabled
+            if USE_BIAS:
+                offs_bias_n = tile_n.to(tl.int64) * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+                bias_ptrs = bias_ptr + g.to(tl.int64) * N + offs_bias_n
+                bias = tl.load(bias_ptrs, mask=offs_bias_n < N, other=0.0)
+                # Broadcast bias across M dimension
+                acc += bias[None, :]
 
             offs_out_m = tile_m.to(tl.int64) * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             offs_out_n = tile_n.to(tl.int64) * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -326,6 +381,7 @@ def tgmm_persistent_kernel(
     rhs_ptr,
     group_sizes_ptr,
     out_ptr,
+    bias_grad_ptr,
     # Tensor shapes:
     M: int,
     K: int,
@@ -338,6 +394,7 @@ def tgmm_persistent_kernel(
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
     GRID_DIM: tl.constexpr,
+    COMPUTE_BIAS_GRAD: tl.constexpr,
 ):
     tl.assume(M > 0)
     tl.assume(K > 0)
@@ -413,12 +470,20 @@ def tgmm_persistent_kernel(
                 loop_m -= 1
 
             acc = tl.zeros((BLOCK_SIZE_K, BLOCK_SIZE_N), dtype=tl.float32)
+            
+            # Initialize bias accumulator unconditionally to avoid NameError
+            # Only used when COMPUTE_BIAS_GRAD=True and tile_n==0
+            bias_acc = tl.zeros((BLOCK_SIZE_K,), dtype=tl.float32)
 
             for _ in range(0, loop_m):
                 lhs = tl.load(lhs_ptrs)
                 rhs = tl.load(rhs_ptrs)
 
                 acc += tl.dot(lhs, rhs, input_precision="ieee")
+                
+                # Accumulate for bias gradient: sum lhs across M dimension
+                if COMPUTE_BIAS_GRAD and tile_n == 0:
+                    bias_acc += tl.sum(lhs, axis=1)  # Sum across M dimension [K, M] -> [K]
 
                 if TRANS_LHS:
                     lhs_ptrs += BLOCK_SIZE_M * K
@@ -438,6 +503,10 @@ def tgmm_persistent_kernel(
                 lhs = tl.load(lhs_ptrs, mask=offs_m[None, :] < m, other=0)
                 rhs = tl.load(rhs_ptrs, mask=offs_m[:, None] < m, other=0)
                 acc += tl.dot(lhs, rhs, input_precision="ieee")
+                
+                # Accumulate last chunk for bias gradient
+                if COMPUTE_BIAS_GRAD and tile_n == 0:
+                    bias_acc += tl.sum(lhs, axis=1)
 
             acc = acc.to(out_ptr.type.element_ty)
 
@@ -456,6 +525,13 @@ def tgmm_persistent_kernel(
                 acc,
                 mask=(offs_out_k[:, None] < K) & (offs_out_n[None, :] < N),
             )
+            
+            # Store bias gradient (only for first N tile, sum across all M)
+            if COMPUTE_BIAS_GRAD and tile_n == 0:
+                # Keep as float32 for atomic_add (bf16 not supported for atomics)
+                bias_grad_ptrs = bias_grad_ptr + g.to(tl.int64) * K + offs_out_k
+                # Use atomic add since multiple K-tiles may write to same expert's bias
+                tl.atomic_add(bias_grad_ptrs, bias_acc, mask=offs_out_k < K)
 
             # Go to the next tile by advancing number of programs.
             tile += GRID_DIM
@@ -521,15 +597,19 @@ def _grouped_gemm_forward(
     weights: list,  # List of weight tensors, each [N, K]
     output: torch.Tensor,  # Pre-allocated output tensor [M_total, N]
     m_splits: list,  # Token counts per expert
+    bias: list = None,  # Optional list of bias tensors, each [N]
+    use_bias: bool = False,  # Whether to use bias
 ) -> None:
     """
-    Forward pass grouped GEMM using AITER's kernel: Y = X @ W^T
+    Forward pass grouped GEMM using AITER's kernel: Y = X @ W^T + bias
     
     Args:
         inputmats: List with single concatenated input tensor for all experts
         weights: List of weight tensors for each expert
         output: Pre-allocated output tensor to write results
         m_splits: Token counts per expert
+        bias: Optional list of bias tensors for each expert [N]
+        use_bias: Whether to apply bias
     """
     # Get configuration
     config = get_gmm_config()
@@ -551,19 +631,25 @@ def _grouped_gemm_forward(
     K = input_tensor.shape[1]  # in_features
     M = input_tensor.shape[0]  # total tokens
     
-    # Create group_sizes tensor
-    group_sizes = torch.tensor(m_splits, dtype=torch.int32, device=device)
+    # Get cached group_sizes tensor (avoids repeated host-to-device copy)
+    group_sizes = get_group_sizes_tensor(tuple(m_splits), device)
     
     # Stack weights into single tensor [G, N, K] for TRANS_RHS=True access
     weights_stacked = torch.stack(weights, dim=0)  # [G, N, K]
     
+    # Handle bias
+    if use_bias and bias is not None:
+        bias_stacked = torch.stack(bias, dim=0)  # [G, N]
+    else:
+        # Get cached dummy bias (won't be used if USE_BIAS=False)
+        bias_stacked = get_dummy_bias_tensor(device, dtype)
     
     # Launch kernel
     grid = _gmm_grid(
         N,
         config["BLOCK_SIZE_M"],
         config["BLOCK_SIZE_N"],
-        group_sizes,
+        m_splits,  # Pass Python list to avoid GPU->CPU copy
         config["GRID_DIM"],
     )
 
@@ -573,8 +659,10 @@ def _grouped_gemm_forward(
         weights_stacked,
         group_sizes,
         output,
+        bias_stacked,
         M, K, N, num_experts,
         TRANS_RHS=True,  # Weights are [N, K], need transpose
+        USE_BIAS=use_bias,
         **config,
     )
 
@@ -584,6 +672,8 @@ def _grouped_gemm_backward(
     weights: list,  # List of weight tensors, each [N, K]
     dgrad: torch.Tensor,  # Pre-allocated dgrad tensor [M_total, K]
     m_splits: list,  # Token counts per expert
+    bias: list = None,  # Unused for dgrad, for API compatibility
+    use_bias: bool = False,  # Unused for dgrad, for API compatibility
 ) -> None:
     """
     Backward pass grouped GEMM for dgrad using AITER's GMM kernel.
@@ -593,11 +683,15 @@ def _grouped_gemm_backward(
     which fits GMM pattern: (m, K_in) x (K_in, N_out) = (m, N_out)
     with K_in=N, N_out=K
     
+    Note: bias is not used in dgrad computation (no gradient flows through it here)
+    
     Args:
         grad_outputs: List of grad_output tensors for each expert [M_i, N]
         weights: List of weight tensors for each expert [N, K]
         dgrad: Pre-allocated dgrad tensor to write results [M_total, K]
         m_splits: Token counts per expert
+        bias: Unused for dgrad (for API compatibility)
+        use_bias: Unused for dgrad (for API compatibility)
     """
     # Get configuration
     config = get_gmm_config()
@@ -617,8 +711,8 @@ def _grouped_gemm_backward(
     
     M = grad_output_tensor.shape[0]  # total tokens
     
-    # Create group_sizes tensor
-    group_sizes = torch.tensor(m_splits, dtype=torch.int32, device=device)
+    # Get cached group_sizes tensor (avoids repeated host-to-device copy)
+    group_sizes = get_group_sizes_tensor(tuple(m_splits), device)
     
     # For gmm_kernel: (m, K_in) x (K_in, N_out) = (m, N_out)
     # We have: (m, N) x (N, K) = (m, K)
@@ -628,12 +722,15 @@ def _grouped_gemm_backward(
     # Stack weights into single tensor [G, N, K]
     weights_stacked = torch.stack(weights, dim=0)  # [G, N, K]
     
+    # Get cached dummy bias (not used for dgrad)
+    bias_dummy = get_dummy_bias_tensor(device, dtype)
+    
     # Launch kernel with proper grid calculation
     grid = _gmm_grid(
         K,  # N_out dimension (output columns)
         config["BLOCK_SIZE_M"],
         config["BLOCK_SIZE_N"],
-        group_sizes,
+        m_splits,  # Pass Python list to avoid GPU->CPU copy
         config["GRID_DIM"],
     )
     
@@ -642,8 +739,10 @@ def _grouped_gemm_backward(
         weights_stacked,
         group_sizes,
         dgrad,
+        bias_dummy,
         M, N, K, num_experts,
         TRANS_RHS=True,  # Weights are [N, K]
+        USE_BIAS=False,  # No bias for dgrad
         **config,
     )
 
@@ -652,10 +751,12 @@ def _grouped_gemm_wgrad(
     inputs: list,  # List of input tensors, each [m_splits[i], K]
     wgrad: list,  # List of pre-allocated wgrad tensors, each [N, K]
     m_splits: list,  # Token counts per expert
-) -> None:
+    compute_bias_grad: bool = False,  # Whether to compute fused bias gradient
+) -> torch.Tensor:
     """
-    Weight gradient grouped GEMM using AITER's TGMM kernel.
+    Weight gradient grouped GEMM using AITER's TGMM kernel with optional fused bias gradient.
     Computes: wgrad = grad_output^T @ input
+    Optionally: bias_grad = sum(grad_output, dim=0) per expert (fused in kernel)
     
     This is: (N, m) @ (m, K) = (N, K) per group
     which fits TGMM pattern: (K_out, m) x (m, N_out) = (K_out, N_out)
@@ -666,12 +767,16 @@ def _grouped_gemm_wgrad(
         inputs: List of input tensors for each expert [M_i, K]
         wgrad: List of pre-allocated wgrad tensors to write results [N, K]
         m_splits: Token counts per expert
+        compute_bias_grad: Whether to compute bias gradient fused in the kernel
+    
+    Returns:
+        bias_grad: Tensor [G, K] if compute_bias_grad=True, else None
     """
     # Get configuration for PTGMM (wgrad uses persistent TGMM kernel)
     config = get_ptgmm_config()
     
     # Extract dimensions
-    num_experts = len(inputs)
+    num_experts = len(m_splits)
     device = wgrad[0].device
     dtype = wgrad[0].dtype
     
@@ -691,8 +796,8 @@ def _grouped_gemm_wgrad(
     K = grad_output_tensor.shape[1]  # out_features
     N = input_tensor.shape[1]  # in_features
     
-    # Create group_sizes tensor
-    group_sizes = torch.tensor(m_splits, dtype=torch.int32, device=device)
+    # Get cached group_sizes tensor (avoids repeated host-to-device copy)
+    group_sizes = get_group_sizes_tensor(tuple(m_splits), device)
     
     # Stack wgrad tensors to write results [G, K, N]
     wgrad_stacked = torch.stack(wgrad, dim=0).contiguous()  # [G, K, N]
@@ -704,6 +809,14 @@ def _grouped_gemm_wgrad(
         print(f"Creating new contiguous tensor with correct layout")
         # Create a properly strided tensor
         wgrad_stacked = wgrad_stacked.contiguous()
+    
+    # Allocate bias gradient tensor if requested (zeroed for atomic accumulation)
+    # Use float32 for atomic operations (bf16 not supported), convert after kernel
+    if compute_bias_grad:
+        bias_grad_tensor = torch.zeros(num_experts, K, dtype=torch.float32, device=device)  # [G, K]
+    else:
+        # Use dummy tensor (won't be accessed)
+        bias_grad_tensor = get_dummy_bias_tensor(device, torch.float32)
     
     # For TGMM: lhs[K_out, m] @ rhs[m, N_out] = out[G, K_out, N_out]
     # We need: grad_output^T[K, m] @ input[m, N] = wgrad[G, K, N]
@@ -726,10 +839,18 @@ def _grouped_gemm_wgrad(
         input_tensor,
         group_sizes,
         wgrad_stacked,
+        bias_grad_tensor,
         M, K, N, num_experts,
         TRANS_LHS=True,  # grad_output [M, K] accessed as transposed [K, M]
+        COMPUTE_BIAS_GRAD=compute_bias_grad,
         **config,  # Pass all config params: BLOCK_SIZE_M/K/N, GROUP_SIZE, GRID_DIM, num_warps, num_stages
     )
+    
+    # Convert bias gradient to target dtype after atomic accumulation
+    if compute_bias_grad:
+        bias_grad_tensor = bias_grad_tensor.to(dtype)
+    
+    return bias_grad_tensor if compute_bias_grad else None
 
 def general_grouped_gemm_triton(
     weights: list,  # List of weight tensors [out_features, in_features]
@@ -780,42 +901,48 @@ def general_grouped_gemm_triton(
     
     if is_wgrad:
         # Backward pass: wgrad = grad_output^T @ input
-        _grouped_gemm_wgrad(
+        # Fused bias gradient computation if requested
+        compute_bias_grad = use_bias is not None and use_bias is not False
+        bias_grad_tensor = _grouped_gemm_wgrad(
             inputmats,  # grad_outputs [M, N]
             weights,    # inputs [M, K] - note: weights parameter is repurposed as inputs for wgrad
             outputs,    # wgrad list [N, K] per expert
             m_splits,
+            compute_bias_grad=compute_bias_grad,
         )
+        
+        # Convert bias gradient tensor to list if computed
+        if compute_bias_grad and bias_grad_tensor is not None:
+            grad_biases = list(torch.unbind(bias_grad_tensor, dim=0))  # More efficient than list comprehension
+        else:
+            grad_biases = None
     elif is_dgrad:
         # Use pre-allocated output tensor
         out = outputs[0]
         # Backward pass: dgrad = grad_output @ weight
+        # Note: bias not needed for dgrad (no gradient flows to input through bias)
         _grouped_gemm_backward(
             inputmats,  # grad_outputs [M, N]
             weights,    # weights [N, K]
             out,        # dgrad [M, K]
             m_splits,
+            bias,       # unused for dgrad
+            use_bias,   # unused for dgrad
         )
+        grad_biases = None
     else:
         # Use pre-allocated output tensor
         out = outputs[0]
-        # Forward pass: output = input @ weight^T
+        # Forward pass: output = input @ weight^T + bias (bias fused in kernel)
         _grouped_gemm_forward(
             inputmats,  # inputs [M, K]
             weights,    # weights [N, K]
             out,        # output [M, N]
             m_splits,
+            bias,       # bias tensors [N] per expert
+            use_bias,   # whether to apply bias
         )
+        grad_biases = None
     
-    # Apply bias if requested (only for forward/dgrad, not wgrad)
-    if use_bias and bias is not None and not is_wgrad:
-        offset = 0
-        for i, count in enumerate(m_splits):
-            if bias[i] is not None:
-                bias_tensor = bias[i]
-                if bias_tensor.dtype != out_dtype:
-                    bias_tensor = bias_tensor.to(out_dtype)
-                out[offset:offset+count] += bias_tensor
-            offset += count
-    
-    return outputs, bias, None
+    # Return outputs, grad_biases (if computed), and None for compatibility
+    return outputs, grad_biases, None
