@@ -114,11 +114,7 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, flo
   constexpr size_t max_blocks = 65535;
   num_blocks = std::min(num_blocks, max_blocks);
 
-  const bool UseBlockAmax = (block_amax != nullptr);
-
-  if (UseBlockAmax) {
-    NVTE_CHECK(block_capacity >= num_blocks);
-  }
+  const bool UseBlockAmax = (block_amax != nullptr) && (block_capacity >= num_blocks);
 
   // Launch kernel
   switch (align) {
@@ -167,6 +163,10 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, flo
 }  // namespace transformer_engine
 
 void nvte_compute_amax(const NVTETensor input_, const NVTETensor output_, cudaStream_t stream) {
+  nvte_compute_amax_with_workspace(input_, output_, /*workspace=*/nullptr, stream);
+}
+
+void nvte_compute_amax_with_workspace(const NVTETensor input_, const NVTETensor output_, const NVTETensor workspace_, cudaStream_t stream) {
   NVTE_API_CALL(nvte_compute_amax);
   using namespace transformer_engine;
 
@@ -202,12 +202,19 @@ void nvte_compute_amax(const NVTETensor input_, const NVTETensor output_, cudaSt
              to_string(output.amax.dtype), ")");
   CheckOutputTensor(output, "output_compute_amax", true);
 
-  // Interpret output.data as workspace if present
-  float *block_amax = nullptr;
+  // Optional workspace
+  float* block_amax = nullptr;
   size_t block_capacity = 0;
-  if (output.data.dptr != nullptr) {
-    block_amax     = reinterpret_cast<float*>(output.data.dptr);
-    block_capacity = output.data.numel();     // #floats in workspace
+
+  if (workspace_ != nullptr) {
+    auto &workspace = *reinterpret_cast<Tensor *>(workspace_);
+    NVTE_CHECK(workspace.data.dptr != nullptr,
+               "Workspace tensor for amax computation has no data");
+    NVTE_CHECK(workspace.data.dtype == DType::kFloat32,
+               "Workspace tensor for amax computation must be FP32, got dtype=",
+               to_string(workspace.data.dtype));
+    block_amax     = reinterpret_cast<float*>(workspace.data.dptr);
+    block_capacity = workspace.data.numel();
   }
 
   // Compute amax

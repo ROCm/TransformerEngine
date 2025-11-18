@@ -30,19 +30,24 @@ void compute_amax(const at::Tensor& tensor, at::Tensor& amax) {
   size_t max_blocks = std::min(DIVUP(static_cast<size_t>(N), threads),
                                max_blocks_hw);
 
-  // Allocate workspace for the fake output tensor.
-  // This will be the block_amax buffer.
+  // Allocate workspace for the block_amax buffer.
   auto ws = at::empty({static_cast<long>(max_blocks)},
                       tensor.options().dtype(at::kFloat));
 
   std::vector<size_t> ws_shape{static_cast<size_t>(max_blocks)};
 
   TensorWrapper fake_te_output(
-      ws.data_ptr(), ws_shape,
+      nullptr, te_input.shape(),
       DType::kFloat8E4M3,  // It doesn't matter because we only compute amax.
       amax.data_ptr<float>());
 
-  nvte_compute_amax(te_input.data(), fake_te_output.data(), at::cuda::getCurrentCUDAStream());
+  TensorWrapper te_workspace(
+      ws.data_ptr(), ws_shape,
+      DType::kFloat32,
+      nullptr
+  );
+
+  nvte_compute_amax_with_workspace(te_input.data(), fake_te_output.data(), te_workspace.data(), at::cuda::getCurrentCUDAStream());
 }
 
 void fused_amax_and_scale_update_after_reduction(const at::Tensor& amax_reduction_buffer,

@@ -84,6 +84,8 @@ void nvte_delayed_scaling_recipe_amax_and_scale_update_after_reduction(
  */
 void nvte_compute_amax(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
+void nvte_compute_amax_with_workspace(const NVTETensor input_, const NVTETensor output_, const NVTETensor workspace_, cudaStream_t stream);
+
 /*! \brief Update an FP8 tensor's scale based on its amax.
  *
  *  This is only supported for FP8 tensors with per-tensor scaling.
