@@ -113,7 +113,7 @@ run_benchmark() {
         return
     fi
 
-    python "$BENCH_SCRIPT" --use_ck_bwd_v3 --run_sanity_checks || test_run_error $BENCH_SCRIPT
+    python "$BENCH_SCRIPT" --use_ck_fwd_v3 --use_ck_bwd_v3 --run_sanity_checks || test_run_error $BENCH_SCRIPT
 }
 
 # Single config mode, run it and return result

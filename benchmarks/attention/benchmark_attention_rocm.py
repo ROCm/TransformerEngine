@@ -27,19 +27,22 @@ from test_fused_attn import (
 
 pd.set_option("display.precision", 4)
 
-# data type
+# -------------------- Benchmark Settings --------------------
+# Data type
 dtype = torch.bfloat16
-# number of iterations after 3 warmup iterations
-num_iters = 3
-# checkpointing
+# Number of warmup iterations before profiling
+warmup_iters = 20
+# Number of iterations after warmup iterations
+num_iters = 10
+# Checkpointing attention
 ckpt_attn = False
-# workspace optimization path for cuDNN attention
+# Workspace optimization for attention
 workspace_opt = True
 # QKV memory layout
 qkv_layout = "bshd_bshd_bshd"
-# padding between sequences for qkv_format=thd
+# Padding between sequences for qkv_format=thd
 pad_between_seqs = False
-# training mode
+# Training mode
 is_training = True
 
 model_configs = {
@@ -48,37 +51,97 @@ model_configs = {
     "test_1": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "causal", "no_bias"),  # longer seq, mask
     "test_2": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "causal", "post_scale_bias"),  # bias
     "test_3": ModelConfig(2, 32, 4, 128, 8192, 8192, 0.0, "causal", "no_bias"),  # GQA
+    "test_4": ModelConfig(2, 128, 8, 128, 8192, 8192, 0.0, "causal_bottom_right", "no_bias")
 }
 
-# Define DataFrame indices and columns
+# DataFrame indices and columns for results
 indices = [model for model in model_configs.keys()]
 columns = [
-        "FusedAttention Module",
-        "FusedAttention Kernels (fwd)",
-        "FusedAttention Kernels (bwd)",
-        "FusedAttention Kernels (fwd+bwd)",
-        "FlashAttention Module",
-        "FlashAttention Kernels (fwd)",
-        "FlashAttention Kernels (bwd)",
-        "FlashAttention Kernels (fwd+bwd)",
-        "Fused vs Flash Kernels Speedup (fwd+bwd)",
-        "FusedAttention CK Module",
-        "FusedAttention CK Kernels (fwd)",
-        "FusedAttention CK Kernels (bwd)",
-        "FusedAttention CK Kernels (fwd+bwd)",
-        "FusedAttention AOTriton Module",
-        "FusedAttention AOTriton Kernels (fwd)",
-        "FusedAttention AOTriton Kernels (bwd)",
-        "FusedAttention AOTriton Kernels (fwd+bwd)",
-    ]
+    "FusedAttention CK Module",
+    "FusedAttention CK Kernels (fwd)",
+    "FusedAttention CK Kernels (bwd)",
+    "FusedAttention CK Kernels (fwd+bwd)",
+    "FusedAttention CK TFLOPs (fwd)",
+    "FusedAttention CK TFLOPs (bwd)",
 
-output_csv="times.csv"
+    "FlashAttention Module",
+    "FlashAttention Kernels (fwd)",
+    "FlashAttention Kernels (bwd)",
+    "FlashAttention Kernels (fwd+bwd)",
+    "FlashAttention TFLOPs (fwd)",
+    "FlashAttention TFLOPs (bwd)",
+    "Fused vs Flash Kernels Speedup (fwd+bwd)",
+
+    "FusedAttention AOTriton Module",
+    "FusedAttention AOTriton Kernels (fwd)",
+    "FusedAttention AOTriton Kernels (bwd)",
+    "FusedAttention AOTriton Kernels (fwd+bwd)",
+    "FusedAttention AOTriton TFLOPs (fwd)",
+    "FusedAttention AOTriton TFLOPs (bwd)",
+]
+
+# Output CSV filename
+output_csv = "times.csv"
+# Output directory name
+output_dir_name = "profiler_outputs"
+# Current working directory
 cwd = os.getcwd()
+
+# All attention backend environment variables
+ATTENTION_ENV_VARS = [
+    "NVTE_FUSED_ATTN",
+    "NVTE_FLASH_ATTN", 
+    "NVTE_FUSED_ATTN_AOTRITON",
+    "NVTE_FUSED_ATTN_CK",
+    "NVTE_UNFUSED_ATTN",
+    "NVTE_CK_USES_BWD_V3",
+    "NVTE_CK_USES_FWD_V3",
+    "NVTE_CK_IS_V3_ATOMIC_FP32",
+]
+
+def cleanup_env():
+    """Set all attention-related environment variables to 0."""
+    for var in ATTENTION_ENV_VARS:
+        os.environ[var] = "0"
+
+def setup_backend_env(backend_name, use_ck_bwd_v3=False, use_ck_fwd_v3=False, use_ck_v3_a16=False):
+    cleanup_env()
+    
+    if backend_name == "flash":
+        os.environ["NVTE_FLASH_ATTN"] = "1"
+    elif backend_name == "fused_ck":
+        os.environ["NVTE_FUSED_ATTN"] = "1"
+        os.environ["NVTE_FUSED_ATTN_CK"] = "1"
+        if use_ck_bwd_v3:
+            os.environ["NVTE_CK_USES_BWD_V3"] = "1"
+            os.environ["NVTE_CK_IS_V3_ATOMIC_FP32"] = "0" if use_ck_v3_a16 else "1"
+        if use_ck_fwd_v3:
+            os.environ["NVTE_CK_USES_FWD_V3"] = "1"
+    elif backend_name == "fused_aotriton":
+        os.environ["NVTE_FUSED_ATTN"] = "1"
+        os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "1"
+
+# Kernel name patterns for identifying kernels in profiler output
+KERNEL_PATTERNS = {
+    # Flash Attention patterns
+    "flash_fwd": "FmhaFwd",
+    "flash_bwd": "FmhaBwd",
+    
+    # CK patterns (v2 and v3)
+    "ck_fwd_v2": "ck_tile::FmhaFwdKernel",
+    "ck_bwd_v2": "ck_tile::FmhaBwd",
+    "ck_fwd_v3": "aiter::fmha_fwd",
+    "ck_bwd_v3": "aiter::fmha_bwd",
+
+    # AOTriton patterns
+    "aotriton_fwd": "attn_fwd",
+    "aotriton_bwd": "bwd",
+}
+
 # Runs benchmark with warmup iterations and profiles using rocprof
 def benchmark_dot_product_attention(model, attention, column_name, dirname):
     config = model_configs[model]
 
-    warmup_iters = 3
     for i in range(warmup_iters):
         attn_fwd, attn_bwd = _run_dot_product_attention(
                 dtype,
@@ -90,27 +153,30 @@ def benchmark_dot_product_attention(model, attention, column_name, dirname):
                 pad_between_seqs,
                 is_training,
             )
-    os.makedirs(dirname)
-    before_files = set(os.listdir("."))
+    os.makedirs(dirname, exist_ok=True)
+    before_files = set(os.listdir(cwd))
     # Profiling command using rocprof
+    benchmark_dir = os.path.dirname(os.path.abspath(__file__))
     prof_cmd = [
-            "env | grep NVTE; "
             "rocprof",
             "--hip-trace",
             "--basenames off",
             "python",
             "-c",
-            f""" "import benchmark_attention_rocm;""",
+            f""" "import sys; sys.path.insert(0, '{benchmark_dir}'); import benchmark_attention_rocm;""",
             f"""benchmark_attention_rocm.benchmark_dot_product_attention_profiler("""
             f"""'{model}', '{attention}', '{column_name}')" """,
         ]
     prof_cmd = " ".join(prof_cmd)
     subprocess.call(prof_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=True)
-    after_files = set(os.listdir("."))
+    after_files = set(os.listdir(cwd))
     new_files = after_files - before_files
 
     for f in new_files:
-        shutil.move(f, os.path.join(dirname, f))
+        src_path = os.path.join(cwd, f)
+        dst_path = os.path.join(dirname, f)
+        if os.path.isfile(src_path):  # Only move files, not directories
+            shutil.move(src_path, dst_path)
     torch.cuda.empty_cache()
     
 # Runs profiler and records timing information
@@ -133,75 +199,96 @@ def benchmark_dot_product_attention_profiler(model, attention, column_name):
     torch.cuda.synchronize()
     attn_time = time.time() - attn_start
 
-    df_times = pd.read_csv(output_csv, index_col=0)
+    output_csv_path = os.path.join(cwd, output_csv)
+    df_times = pd.read_csv(output_csv_path, index_col=0)
     df_times.loc[model, column_name] = attn_time * 1e3 / num_iters
-    df_times.to_csv(output_csv)
+    df_times.to_csv(output_csv_path)
     torch.cuda.empty_cache()
+
+# Calculate TFLOPs for attention operations
+def calculate_attention_tflops(batch_size, seq_len, num_heads_q, head_dim_qk, fwd_time_ms, bwd_time_ms, is_causal):
+    # Calculate total fwdFLOPs
+    fwd_flops = (0.5 if is_causal else 1.0) * 4 * batch_size * seq_len * seq_len * num_heads_q * head_dim_qk / 1e12
+    # Calculate forward TFLOPs
+    fwd_tflops = fwd_flops / (fwd_time_ms / 1000.0)
+    # Calculate backward TFLOPs
+    bwd_tflops = (fwd_flops / (bwd_time_ms / 1000.0)) * 2.5
+    return fwd_tflops, bwd_tflops
 
 # Helper function to extract timing results from profiler logs
 def parse_helper(model, dirname, fwd_search_pattern, bwd_search_pattern, column_name, df_times):
-    df = pd.read_csv(os.path.join(dirname,"results.stats.csv"))
+    df = pd.read_csv(os.path.join(dirname, "results.stats.csv"))
 
-    # Extract kernel timing values    
-    fwd_values = df[df["Name"].str.contains(fwd_search_pattern)]["AverageNs"].to_numpy()
-    bwd_values = df[df["Name"].str.contains(bwd_search_pattern)]["AverageNs"].to_numpy()
+    # Extract kernel timing values
+    fwd_values = df[df["Name"].str.contains(fwd_search_pattern, regex=False)]["AverageNs"].to_numpy()
+    bwd_values = df[df["Name"].str.contains(bwd_search_pattern, regex=False)]["AverageNs"].to_numpy()
 
-    if len(bwd_values) == 0:
-        return False  # CK V3 not supported or kernel_func not found
+    if len(fwd_values) == 0 or len(bwd_values) == 0:
+        return False  # Kernels not found
     
     t_attn_avg = np.empty(len(fwd_values) + len(bwd_values))
     t_attn_avg[:len(fwd_values)] = fwd_values
     t_attn_avg[len(fwd_values):] = bwd_values
-
-    # Store results in DataFrame
-    df_times.loc[model, f"{column_name} Kernels (fwd)"] = t_attn_avg[:len(fwd_values)].sum() / 1e6
-    df_times.loc[model, f"{column_name} Kernels (bwd)"] = t_attn_avg[len(fwd_values):].sum() / 1e6
-    df_times.loc[model, f"{column_name} Kernels (fwd+bwd)"] = t_attn_avg.sum() / 1e6
-
+    
+    # Store results in DataFrame (convert from ns to ms)
+    fwd_time_ms = t_attn_avg[:len(fwd_values)].sum() / 1e6
+    bwd_time_ms = t_attn_avg[len(fwd_values):].sum() / 1e6
+    
+    df_times.loc[model, f"{column_name} Kernels (fwd)"] = fwd_time_ms
+    df_times.loc[model, f"{column_name} Kernels (bwd)"] = bwd_time_ms
+    df_times.loc[model, f"{column_name} Kernels (fwd+bwd)"] = fwd_time_ms + bwd_time_ms
+    
+    # Calculate TFLOPs for both forward and backward
+    config = model_configs[model]
+    is_causal = "causal" in config.attn_mask_type.lower()
+    fwd_tflops, bwd_tflops = calculate_attention_tflops(
+        config.batch_size, config.max_seqlen_q, config.num_heads, 
+        config.head_dim_qk, fwd_time_ms, bwd_time_ms, is_causal
+    )
+    
+    df_times.loc[model, f"{column_name} TFLOPs (fwd)"] = fwd_tflops
+    df_times.loc[model, f"{column_name} TFLOPs (bwd)"] = bwd_tflops
+    
     return True
 
 # Parses profiler logs for different attention backends
-def parse_results(model, df_times, perf_dir_flash_attn, perf_dir_fused_attn, perf_dir_fused_ck, perf_dir_fused_aotriton, use_ck_bwd_v3):
+def parse_results(model, df_times, perf_dir_flash_attn, perf_dir_fused_ck, perf_dir_fused_aotriton, use_ck_bwd_v3, use_ck_fwd_v3):
+    # Parse Flash Attention
     if perf_dir_flash_attn:
-        parse_helper(model, perf_dir_flash_attn, "FmhaFwd", "FmhaBwd", "FlashAttention", df_times)
-
-    if perf_dir_fused_attn:
-        ck_v3_success = False
-        if use_ck_bwd_v3:
-            ck_v3_success = parse_helper(model, perf_dir_fused_ck, "FmhaFwd", "kernel_func", "FusedAttention", df_times)
-        if not ck_v3_success:
-            parse_helper(model, perf_dir_fused_ck, "FmhaFwd", "FmhaBwd", "FusedAttention", df_times)
-
-    if perf_dir_fused_attn:
-        ck_v3_success = False
-        if use_ck_bwd_v3:
-            ck_v3_success = parse_helper(model, perf_dir_fused_ck, "FmhaFwd", "kernel_func", "FusedAttention CK", df_times)
-        if not ck_v3_success:
-            parse_helper(model, perf_dir_fused_ck, "FmhaFwd", "FmhaBwd", "FusedAttention CK", df_times)
+        parse_helper(model, perf_dir_flash_attn, KERNEL_PATTERNS["flash_fwd"], KERNEL_PATTERNS["flash_bwd"], "FlashAttention", df_times)
     
+    # Parse FusedAttention CK (use v3 or v2 patterns based on flags)
+    if perf_dir_fused_ck:
+        fwd_pattern = KERNEL_PATTERNS["ck_fwd_v3"] if use_ck_fwd_v3 else KERNEL_PATTERNS["ck_fwd_v2"]
+        bwd_pattern = KERNEL_PATTERNS["ck_bwd_v3"] if use_ck_bwd_v3 else KERNEL_PATTERNS["ck_bwd_v2"]
+        parse_helper(model, perf_dir_fused_ck, fwd_pattern, bwd_pattern, "FusedAttention CK", df_times)
+    
+    # Parse AOTriton
     if perf_dir_fused_aotriton:
-        parse_helper(model, perf_dir_fused_aotriton, "attn_fwd", "bwd", "FusedAttention AOTriton", df_times)
+        parse_helper(model, perf_dir_fused_aotriton, KERNEL_PATTERNS["aotriton_fwd"], KERNEL_PATTERNS["aotriton_bwd"], "FusedAttention AOTriton", df_times)
+    
+    # Calculate speedup if both Flash and Fused CK results exist
+    if perf_dir_flash_attn and perf_dir_fused_ck:
+        flash_time = df_times.loc[model, "FlashAttention Kernels (fwd+bwd)"]
+        fused_time = df_times.loc[model, "FusedAttention CK Kernels (fwd+bwd)"]
+        if flash_time > 0 and fused_time > 0:
+            df_times.loc[model, "Fused vs Flash Kernels Speedup (fwd+bwd)"] = flash_time / fused_time
 
-    if perf_dir_flash_attn and perf_dir_fused_attn:
-        df_times.loc[model, "Fused vs Flash Kernels Speedup (fwd+bwd)"] = (
-            df_times.loc[model, "FlashAttention Kernels (fwd+bwd)"]
-            / df_times.loc[model, "FusedAttention Kernels (fwd+bwd)"]
-        )
-
-###############################################################################
 # Post-benchmark sanity checks
-###############################################################################
 def sanity_checks(
-    profiler_root: str = "profiler_outputs",
-    csv_path: str = "times.csv",
+    profiler_root: str = None,
+    csv_path: str = None,
     tolerance_pct: float = 5.0,
 ):
     """
     • Verifies that every model/backend that *should* have run produced
         profiler_root/<dir>/results.stats.csv
-    • Checks FusedAttention vs FusedAttention-CK timing within ±tolerance_pct
     • Non-zero exit code on any failure (CI friendly)
     """
+    if profiler_root is None:
+        profiler_root = output_dir_name
+    if csv_path is None:
+        csv_path = output_csv
     print("\n============= Sanity-check results =============")
     ok_overall = True
     times_csv_path = os.path.join(cwd, csv_path)
@@ -212,7 +299,6 @@ def sanity_checks(
 
     dir_pattern = {
         "FlashAttention":           "prof_flash_{model}",
-        "FusedAttention":           "prof_fused_{model}",
         "FusedAttention CK":        "prof_fused_ck_{model}",
         "FusedAttention AOTriton":  "prof_fused_aotriton_{model}",
     }
@@ -231,7 +317,6 @@ def sanity_checks(
         if flash_ok:
             expected["FlashAttention"] = dir_pattern["FlashAttention"]
         if fused_ok:
-            expected["FusedAttention"] = dir_pattern["FusedAttention"]
             if NVTE_Fused_Attn_Backend.NVTE_CK in fused_bes:
                 expected["FusedAttention CK"] = dir_pattern["FusedAttention CK"]
             if NVTE_Fused_Attn_Backend.NVTE_AOTriton in fused_bes:
@@ -247,50 +332,27 @@ def sanity_checks(
                 ok_overall = False
                 raise FileNotFoundError(f"Error while profiling {model} [{be}], results.stats.csv not found")
 
-        # Fused Vs Fused CK trace
-        if "FusedAttention" in expected and "FusedAttention CK" in expected:
-            f_fwd, f_bwd = df.loc[model, ["FusedAttention Kernels (fwd)",
-                                          "FusedAttention Kernels (bwd)"]]
-            c_fwd, c_bwd = df.loc[model, ["FusedAttention CK Kernels (fwd)",
-                                          "FusedAttention CK Kernels (bwd)"]]
-            if min(f_fwd, f_bwd, c_fwd, c_bwd) > 0:
-                rel_fwd = abs(f_fwd - c_fwd) / max(f_fwd, c_fwd)
-                rel_bwd = abs(f_bwd - c_bwd) / max(f_bwd, c_bwd)
-                if rel_fwd < tol and rel_bwd < tol:
-                    print(f"  [OK ] Fused vs CK diff <= {tolerance_pct}% "
-                          f"(fwd {rel_fwd*100:.2f} %, bwd {rel_bwd*100:.2f} %)")
-                else:
-                    ok_overall = False
-                    raise AssertionError(f" Fused vs CK kernel time diff > {tolerance_pct}% "
-                          f"(fwd {rel_fwd*100:.2f} %, bwd {rel_bwd*100:.2f} %)")
         print("-" * 60)
     return ok_overall
 
 
 def main(args):
-    output_dir = "profiler_outputs/"
-    run_dir = os.path.dirname(__file__)
+    output_dir = os.path.join(cwd, output_dir_name + "/")
+    output_csv_path = os.path.join(cwd, output_csv)
 
-    # Remove from current working directory
-    if os.path.exists(os.path.join(cwd, output_dir)):
-        shutil.rmtree(os.path.join(cwd, output_dir))
-    if os.path.exists(os.path.join(cwd, output_csv)):
-        os.remove(os.path.join(cwd, output_csv))
+    # Clean up old outputs in cwd
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir)
+    if os.path.exists(output_csv_path):
+        os.remove(output_csv_path)
 
-    # Remove from run directory
-    if os.path.exists(os.path.join(run_dir, output_dir)):
-        shutil.rmtree(os.path.join(run_dir, output_dir))
-    if os.path.exists(os.path.join(run_dir, output_csv)):
-        os.remove(os.path.join(run_dir, output_csv))
-
-    os.chdir(run_dir)
     os.makedirs(output_dir)
 
     df_times = pd.DataFrame(index=indices, columns=columns)
     df_times = df_times.infer_objects(copy=False)
     df_times.fillna(0.0, inplace=True)
     df_times.index.name = "Model"
-    df_times.to_csv(output_csv)
+    df_times.to_csv(output_csv_path)
     
     device_id = torch.cuda.current_device()
     device_properties = torch.cuda.get_device_properties(device_id)
@@ -303,7 +365,7 @@ def main(args):
     # Benchmarking starts..
     for model in model_configs.keys():
         config = model_configs[model]
-        available_backends,_, fused_attn_backends = _get_attention_backends(
+        available_backends, _, fused_attn_backends = _get_attention_backends(
             config,
             qkv_dtype=dtype,
             qkv_layout=qkv_layout,
@@ -313,86 +375,73 @@ def main(args):
         flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
         if not(fused_attn_supported or flash_attn_supported):
-            print("No attention backend's detected for ", model)
+            print(f"No attention backend detected for {model}")
             continue
 
         print(
-            f'Running {model} with {"cuDNN attention" if fused_attn_supported else ""}'
+            f'Running {model} with {"Fused Attention" if fused_attn_supported else ""}'
             f'{" and flash-attention" if flash_attn_supported else ""}...'
         )
 
-        perf_dir_flash_attn, perf_dir_fused_attn, perf_dir_fused_ck, perf_dir_fused_aotriton = None, None, None, None
+        perf_dir_flash_attn, perf_dir_fused_ck, perf_dir_fused_aotriton = None, None, None
         
-        # Benchmark for each attention backend
+        # Benchmark Flash Attention
         if flash_attn_supported:
-            os.environ.update({
-                "NVTE_FUSED_ATTN": "0", "NVTE_FLASH_ATTN": "1",
-                "NVTE_FUSED_ATTN_AOTRITON": "0", "NVTE_FUSED_ATTN_CK": "0" , "NVTE_UNFUSED_ATTN": "0"
-            })
-            perf_dir_flash_attn = os.path.join("profiler_outputs/", f"prof_flash_{model}")
+            setup_backend_env("flash")
+            perf_dir_flash_attn = os.path.join(output_dir, f"prof_flash_{model}")
             benchmark_dot_product_attention(model, "FlashAttention", "FlashAttention Module", perf_dir_flash_attn)
            
-        if fused_attn_supported:
+        # Benchmark Fused Attention CK (with v2/v3 based on flags)
+        if fused_attn_supported and NVTE_Fused_Attn_Backend.NVTE_CK in fused_attn_backends:
+            setup_backend_env("fused_ck", use_ck_bwd_v3=args.use_ck_bwd_v3, use_ck_fwd_v3=args.use_ck_fwd_v3, use_ck_v3_a16=args.use_ck_v3_a16)
+            perf_dir_fused_ck = os.path.join(output_dir, f"prof_fused_ck_{model}")
+            benchmark_dot_product_attention(model, "FusedAttention", "FusedAttention CK Module", perf_dir_fused_ck)
+        
+        # AOTriton Backend
+        if fused_attn_supported and NVTE_Fused_Attn_Backend.NVTE_AOTriton in fused_attn_backends:
+            setup_backend_env("fused_aotriton")
+            perf_dir_fused_aotriton = os.path.join(output_dir, f"prof_fused_aotriton_{model}")
+            benchmark_dot_product_attention(model, "FusedAttention", "FusedAttention AOTriton Module", perf_dir_fused_aotriton)
 
-            os.environ.update({
-                "NVTE_FUSED_ATTN": "1", "NVTE_FLASH_ATTN": "0",
-                "NVTE_FUSED_ATTN_AOTRITON": "0", "NVTE_FUSED_ATTN_CK": "1", "NVTE_UNFUSED_ATTN": "0"
-            })
-            if args.use_ck_bwd_v3:
-                os.environ["NVTE_CK_USES_BWD_V3"] = "1"
-            
-            # FusedAttention run
-            perf_dir_fused_attn = os.path.join("profiler_outputs/", f"prof_fused_{model}")
-            benchmark_dot_product_attention(model, "FusedAttention", "FusedAttention Module", perf_dir_fused_attn)
-            
-            #FusedAttention CK run
-            if NVTE_Fused_Attn_Backend.NVTE_CK in fused_attn_backends:
-                perf_dir_fused_ck = os.path.join("profiler_outputs/", f"prof_fused_ck_{model}")
-                benchmark_dot_product_attention(model, "FusedAttention", "FusedAttention CK Module", perf_dir_fused_ck)
+        df_times = pd.read_csv(output_csv_path, index_col=0)
+        parse_results(model, df_times, perf_dir_flash_attn, perf_dir_fused_ck, perf_dir_fused_aotriton, args.use_ck_bwd_v3, args.use_ck_fwd_v3)
+        df_times.to_csv(output_csv_path)
 
-            if NVTE_Fused_Attn_Backend.NVTE_AOTriton in fused_attn_backends:
-                #AOTRITON Backend
-                os.environ.update({
-                    "NVTE_FUSED_ATTN_AOTRITON": "1", "NVTE_FUSED_ATTN_CK": "0",
-                    "NVTE_CK_USES_BWD_V3": "0", "NVTE_UNFUSED_ATTN": "0"
-                })
-                perf_dir_fused_aotriton = os.path.join("profiler_outputs/", f"prof_fused_aotriton_{model}")
-                benchmark_dot_product_attention(model, "FusedAttention", "FusedAttention AOTriton Module", perf_dir_fused_aotriton)
-
-            for var in ["NVTE_CK_USES_BWD_V3", "NVTE_FUSED_ATTN_AOTRITON", "NVTE_FUSED_ATTN_CK", "NVTE_FUSED_ATTN", "NVTE_FLASH_ATTN", "NVTE_UNFUSED_ATTN"]:
-                os.environ.pop(var, None)
-
-        df_times = pd.read_csv("times.csv", index_col=0)
-        parse_results(model, df_times, perf_dir_flash_attn, perf_dir_fused_attn, perf_dir_fused_ck, perf_dir_fused_aotriton, args.use_ck_bwd_v3)
-        df_times.to_csv("times.csv")
-
-    df_times = pd.read_csv("times.csv")
+    df_times = pd.read_csv(output_csv_path)
     df_times.index = list(model_configs.keys())
-    a = df_times[
+    timing_df = df_times[
         [
-            "FusedAttention Kernels (fwd+bwd)",
+            "FusedAttention CK Kernels (fwd)",
+            "FusedAttention CK Kernels (bwd)",
+            "FusedAttention CK Kernels (fwd+bwd)",
             "FlashAttention Kernels (fwd+bwd)",
             "Fused vs Flash Kernels Speedup (fwd+bwd)",
         ]
+    ].copy()
+    timing_df.columns = [
+        "CK fwd (ms)",
+        "CK bwd (ms)",
+        "CK fwd+bwd (ms)",
+        "Flash fwd+bwd (ms)",
+        "CK/Flash Speedup",
     ]
-    a.columns = ["cuDNN fwd+bwd (ms)", "flash-attn fwd+bwd (ms)", "cuDNN vs flash speedup"]
+    print(timing_df)
     print()
-    print(a)
-    if cwd != run_dir:
-        final_profiler_dir = os.path.join(cwd, "profiler_outputs")
-        if os.path.exists(final_profiler_dir):
-            shutil.rmtree(final_profiler_dir)
-        shutil.move("profiler_outputs", final_profiler_dir)
-
-        final_csv_path = os.path.join(cwd, output_csv)
-        if os.path.exists(final_csv_path):
-            os.remove(final_csv_path)
-        shutil.move(output_csv, final_csv_path)    
+    tflops_df = df_times[
+        [
+            "FusedAttention CK TFLOPs (fwd)",
+            "FusedAttention CK TFLOPs (bwd)",
+        ]
+    ].copy()
+    tflops_df.columns = ["CK FWD TFLOPs", "CK BWD TFLOPs"]
+    print(tflops_df)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--use_ck_bwd_v3", action="store_true", help="Use NVTE_CK_USES_BWD_V3=1 for CK bwd kernels")
-    parser.add_argument("--run_sanity_checks", action="store_true", help="After benchmarking, verify profiler outputs and Fused vs CK timing parity")
+    parser.add_argument("--use_ck_fwd_v3", action="store_true", help="Use NVTE_CK_USES_FWD_V3=1 for CK fwd kernels")
+    parser.add_argument("--use_ck_v3_a16", action="store_true", help="Use NVTE_CK_IS_V3_ATOMIC_FP32=0 for atomic16. Default is 1")
+    parser.add_argument("--run_sanity_checks", action="store_true", help="After benchmarking, verify profiler outputs.")
     args = parser.parse_args()
     main(args)
     if args.run_sanity_checks:
