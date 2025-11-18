@@ -386,32 +386,13 @@ target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAM
 else()
   option(NVTE_ENABLE_ROCSHMEM "Compile with ROCSHMEM library" OFF)
   if (NVTE_ENABLE_ROCSHMEM)
-    find_package(MPI REQUIRED)
-    target_link_libraries(transformer_engine PUBLIC MPI::MPI_CXX)
-    target_include_directories(transformer_engine PRIVATE ${MPI_CXX_INCLUDES})
     add_subdirectory(rocshmem_api)
-    if(DEFINED ENV{ROCSHMEM_HOME})
-      set(ROCSHMEM_HOME "$ENV{ROCSHMEM_HOME}" CACHE STRING "Location of ROCSHMEM installation")
-    else()
-      set(ROCSHMEM_HOME "/opt/rocm" CACHE STRING "Location of ROCSHMEM installation (default)")
-    endif()
-    set(ROCSHMEM_LIBRARY_PATH "${ROCSHMEM_HOME}/lib/librocshmem.a")
-    if (EXISTS ${ROCSHMEM_LIBRARY_PATH})
-      add_library(rocshmem STATIC IMPORTED)
-      set_target_properties(rocshmem PROPERTIES
-        IMPORTED_LOCATION "${ROCSHMEM_LIBRARY_PATH}"
-        IMPORTED_LINK_INTERFACE_LANGUAGES "CXX"
-      )
-    else()
-      message(FATAL_ERROR "ROCSHMEM library not found at ${ROCSHMEM_LIBRARY_PATH}. PLease set ROCSHMEM_HOME.")
-    endif()
     target_link_options(transformer_engine PRIVATE
         -fgpu-rdc
     )
     target_link_libraries(transformer_engine PUBLIC 
         -Wl,--whole-archive
         rocshmemapi
-        rocshmem
         -Wl,--no-whole-archive
     )
   endif()
