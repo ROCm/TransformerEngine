@@ -1206,7 +1206,6 @@ void fp8_quantize_arch_ge_100(const Tensor &input, const Tensor *act_input, cons
       NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
   }
 }
-#endif //#ifndef __HIP_PLATFORM_AMD__
 
 // Supported by the Arch < 10.0
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
@@ -1232,6 +1231,7 @@ void fp8_quantize_arch_l_100(const Tensor &input, const Tensor *act_input, const
       NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
   }
 }
+#endif //#ifndef __HIP_PLATFORM_AMD__
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
@@ -1256,17 +1256,19 @@ void fp8_quantize(const Tensor &input, const Tensor *act_input, const Tensor *no
   NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
 
 #ifndef __HIP_PLATFORM_AMD__
+  // NVIDIA
   // Supported by the Arch >= 10.0
   if (is_supported_by_CC_100()) {
     fp8_quantize_arch_ge_100<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
                                                                      dbias, workspace, stream);
-  } else {
-#endif //#ifndef __HIP_PLATFORM_AMD__
-    // Supported by the Arch < 10.0
+  } else { // Supported by the Arch < 10.0
     fp8_quantize_arch_l_100<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
                                                                     dbias, workspace, stream);
-#ifndef __HIP_PLATFORM_AMD__
   }
+#else
+  // AMD
+  fp8_quantize_rocm<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
+                                                            dbias, workspace, stream);
 #endif //#ifndef __HIP_PLATFORM_AMD__
 }
 
