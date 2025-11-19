@@ -16,7 +16,7 @@ import torch
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import torch_version
-
+from ..constants import TE_DType
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_dummy_wgrad,
@@ -72,7 +72,7 @@ from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTens
 from ..tensor._internal.mxfp4_tensor_base import MXFP4TensorBase
 from ..tensor.mxfp4_tensor import MXFP4Quantizer
 from ..export import is_in_onnx_export_mode, assert_warmed_up
-from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload, set_offloading_param
 from ..rocm_utils import create_fp8_weight_transpose_cache, clear_fp8_weight_transpose_cache
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.utils import any_feature_enabled
@@ -169,6 +169,9 @@ class _Linear(torch.autograd.Function):
         inputmat_total = None  # Input tensor to pass to GEMM (gathered)
         own_quantized_input = False
         if fp8:
+            if os.getenv("NVTE_MXFP4_DEBUG_LEVEL") == "1":
+                print(f"type(inputmat): {type(inputmat)}, type(weight): {type(weight)}, backward_needs_input: {backward_needs_input}")
+
             assert_dim_for_fp8_exec(inputmat, weight)
             if save_original_input:
                 assert not isinstance(
@@ -224,8 +227,13 @@ class _Linear(torch.autograd.Function):
                     input_quantizer.set_usage(
                         rowwise=True, columnwise=backward_needs_input and not save_original_input
                     )
-                    inputmat = input_quantizer(inputmat)
-                    own_quantized_input = True
+                    if not isinstance(inputmat, QuantizedTensor):
+                        # quantize from bf16 to fp4 for fwd gemm
+                        if is_mxfp4_enabled:
+                            inputmat_mxfp4 = input_quantizer_mxfp4(inputmat)
+                        # quantizer from bf16 to fp8 for wgrad
+                        inputmat = input_quantizer(inputmat)
+                        own_quantized_input = True
             else:
                 inputmat = cast_if_needed(inp, activation_dtype)  # Cast for AMP
             inputmat_total = inputmat
@@ -236,6 +244,10 @@ class _Linear(torch.autograd.Function):
 
         # ------------------------------------------------------
         # Prepare weight tensor
+        # @TODO @sararora 
+        # - use _get_quantizers method to create the quantizers
+        # - improve overall recipe integration. 
+        # - use weight_quantizer: MXFP4Quantizer for both fwd and bwd
         # ------------------------------------------------------
         weightmat = weight
         if fp8 or debug:
@@ -325,10 +337,13 @@ class _Linear(torch.autograd.Function):
         # Choose input based on MXFP4 mode
         if is_mxfp4_enabled and fp8 and inputmat_mxfp4 is not None:
             nvtx_range_push(f"{nvtx_label}.gemm_fwd_mxfp4")
+            # Call general_gemm which dispatches to AITER via gemm.py
+            assert isinstance(weightmat, MXFP4TensorBase), "Weight must be a MXFP4TensorBase"
             gemm_out, *_, reduce_scatter_out = general_gemm(
                 weightmat,
                 inputmat_mxfp4,
                 get_workspace(),
+                layout="NN",
                 quantization_params=output_quantizer,
                 out_dtype=activation_dtype,
                 bias=bias,
@@ -738,7 +753,7 @@ class _Linear(torch.autograd.Function):
                         weight_fp8,              # Uses _columnwise_data for layout="NN"
                         grad_output_mxfp4,       # Pre-quantized MXFP4 grad_output
                         get_workspace(),   
-                        layout="NN",             # @sararora TODO: Use columnwise (transposed) weight data, make this logic better in gemm.py 
+                        layout="TN",             # @sararora TODO: Use columnwise (transposed) weight data, make this logic better in gemm.py 
                         grad=True,
                         quantization_params=ctx.grad_input_quantizer,
                         out=gemm_out,
