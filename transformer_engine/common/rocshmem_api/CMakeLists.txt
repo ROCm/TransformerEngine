@@ -7,7 +7,7 @@ project(rocshmem LANGUAGES HIP)
 find_package(hip REQUIRED)
 find_package(MPI REQUIRED)
 
-add_library(rocshmemapi OBJECT rocshmem_waitkernel.hip)
+add_library(rocshmemapi STATIC rocshmem_waitkernel.hip)
 
 target_compile_options(rocshmemapi PRIVATE
     $<$<COMPILE_LANGUAGE:HIP>:-fgpu-rdc>
