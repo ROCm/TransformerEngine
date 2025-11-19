@@ -62,11 +62,11 @@ def general_gemm(
                 "Install via: pip install -e /path/to/aiter"
             )
 
-        use_A_columnwise = layout == "NN"
-        use_B_columnwise = False  # Currently only A (weight) benefits from columnwise in dgrad
+        # use_A_columnwise = layout == "NN"
+        # use_B_columnwise = False  # Currently only A (weight) benefits from columnwise in dgrad
 
-        # use_A_columnwise = layout[0] == "T"
-        # use_B_columnwise = layout[1] == "T"
+        use_A_columnwise = layout[0] == "T"
+        use_B_columnwise = layout[1] == "T"
         
         if use_A_columnwise:
             if A._columnwise_data is None or A._columnwise_scale is None:
@@ -74,10 +74,10 @@ def general_gemm(
                     f"layout={layout} requested columnwise data from A, but A._columnwise_data is None. "
                     "Ensure quantizer was configured with columnwise=True during forward pass."
                 )
-            weight_data = A._columnwise_data  # [K, N/2] - this is Quantize(A.T)
+            weight_data = A._columnwise_data    # [K, N/2] - this is Quantize(A.T)
             weight_scale = A._columnwise_scale  # [K, N/32]
         else:
-            weight_data = A._rowwise_data  # [N, K/2] where N = output_features
+            weight_data = A._rowwise_data    # [N, K/2] where N = output_features
             weight_scale = A._rowwise_scale  # [N, K/32]
         
         if use_B_columnwise:
@@ -88,11 +88,11 @@ def general_gemm(
             input_data = B._columnwise_data
             input_scale = B._columnwise_scale
         else:
-            input_data = B._rowwise_data  # [M, K/2] where M = batch_size
+            input_data = B._rowwise_data    # [M, K/2] where M = batch_size
             input_scale = B._rowwise_scale  # [M, K/32]
 
-        M = input_data.shape[0]   # Batch dimension (from input)
-        N = weight_data.shape[0]  # Output features (from weight)
+        M = input_data.shape[0]   
+        N = weight_data.shape[0]
 
         # Pad M to multiple of 32 for AITER kernel requirements
         padded_M = (M + 31) // 32 * 32

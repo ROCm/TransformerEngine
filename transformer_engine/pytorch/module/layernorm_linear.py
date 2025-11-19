@@ -360,6 +360,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 weightmat,
                 ln_out_mxfp4,
                 get_workspace(),
+                layout="NN",
                 quantization_params=output_quantizer,
                 out_dtype=activation_dtype,
                 bias=bias,
@@ -714,7 +715,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     weight,
                     grad_output_mxfp4,
                     get_workspace(),
-                    layout="NN",       #  @sararora TODO: Use columnwise (transposed) weight data, make this logic better in gemm.py 
+                    layout="TN",       #  @sararora TODO: Use columnwise (transposed) weight data, make this logic better in gemm.py 
                     grad=True,
                     quantization_params=ctx.grad_input_quantizer,
                     out=dgrad_bulk,

@@ -14,6 +14,7 @@ import torch
 
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
+from ..constants import TE_DType
 from .base import (
     get_workspace,
     get_ub,
@@ -60,9 +61,10 @@ from ..tensor.quantized_tensor import (
 )
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor._internal.mxfp4_tensor_base import MXFP4TensorBase
-from ..tensor.mxfp4_tensor import MXFP4Quantizer
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
 from ..rocm_utils import create_fp8_weight_transpose_cache, clear_fp8_weight_transpose_cache
+
+from ..tensor.mxfp4_tensor import MXFP4Quantizer
 
 
 __all__ = ["Linear"]
@@ -139,6 +141,9 @@ class _Linear(torch.autograd.Function):
         )
         own_quantized_input = False
         if fp8:
+            if os.getenv("NVTE_MXFP4_DEBUG_LEVEL") == "1":
+                print(f"type(inputmat): {type(inputmat)}, type(weight): {type(weight)}, backward_needs_input: {backward_needs_input}")
+
             assert_dim_for_fp8_exec(inputmat, weight)
             if any([ub_overlap_ag_fprop, ub_overlap_rs_fprop]) and not (
                 FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling()
@@ -176,7 +181,7 @@ class _Linear(torch.autograd.Function):
                     # quantize from bf16 to fp4 for fwd gemm
                     if is_mxfp4_enabled:
                         inputmat_mxfp4 = input_quantizer_mxfp4(inputmat)
-                    # also quantizer from bf16 to fp8 for wgrad in fp8
+                    # quantizer from bf16 to fp8 for wgrad
                     inputmat = input_quantizer(inputmat)
                     own_quantized_input = True
                     
@@ -195,8 +200,9 @@ class _Linear(torch.autograd.Function):
         # ------------------------------------------------------
         # Prepare weight tensor
         # @TODO @saraora 
-        # - dpdate _get_quantizers method to create the quantizers properly
+        # - use _get_quantizers method to create the quantizers
         # - improve overall recipe integration. 
+        # - use weight_quantizer: MXFP4Quantizer for both fwd and bwd
         # ------------------------------------------------------
         weightmat = weight
         if not fp8:
@@ -268,10 +274,12 @@ class _Linear(torch.autograd.Function):
             nvtx_range_push(f"{nvtx_label}.gemm_fwd_fp4")
            
             # Call general_gemm which dispatches to AITER via gemm.py
+            assert isinstance(weightmat, MXFP4TensorBase), "Weight must be a MXFP4TensorBase"
             out, *_ = general_gemm(
                 weightmat,
                 inputmat_mxfp4,
                 get_workspace(),
+                layout="NN",
                 quantization_params=output_quantizer,
                 out_dtype=out_dtype,
                 bias=bias,
@@ -593,7 +601,7 @@ class _Linear(torch.autograd.Function):
                         weight_fp8,              # Uses _columnwise_data for layout="NN"
                         grad_output_mxfp4,       # torch.Size([batch, 1, out_features])
                         get_workspace(),   
-                        layout="NN",             # @sararora TODO: Use columnwise (transposed) weight data, make this logic better in gemm.py 
+                        layout="TN",             # @sararora TODO: Use columnwise (transposed) weight data, make this logic better in gemm.py 
                         grad=True,
                         quantization_params=ctx.grad_output_quantizer,
                         out=dgrad_bulk,
@@ -716,7 +724,6 @@ class _Linear(torch.autograd.Function):
                     bulk_overlap=ctx.ub_bulk_wgrad,
                 )
                 nvtx_range_pop(f"{nvtx_label}.wgrad_gemm")
-
                 if ctx.ub_bulk_wgrad:
                     if ub_obj_wgrad.is_fp8_ubuf():
                         dgrad = rs_out
@@ -1239,10 +1246,10 @@ class Linear(TransformerEngineBaseModule):
                 is_first_microbatch,
                 self.fp8,
                 self.fp8_calibration,
-                input_quantizer,                  # MXFP4Quantizer if fp4 else Float8Quantizer
-                weight_quantizer,                 # MXFP4Quantizer if fp4 else Float8Quantizer
+                input_quantizer,                  # MXFP4Quantizer if is_mxfp4_enabled else Float8Quantizer
+                weight_quantizer,                 # MXFP4Quantizer if is_mxfp4_enabled else Float8Quantizer
                 output_quantizer,                 # None
-                grad_output_quantizer,            # MXFP4Quantizer if fp4 else Float8Quantizer
+                grad_output_quantizer,            # MXFP4Quantizer if is_mxfp4_enabled else Float8Quantizer
                 grad_output_quantizer_mxfp4,      # MXFP4Quantizer
                 grad_input_quantizer,             # None 
                 self.fuse_wgrad_accumulation,
@@ -1282,6 +1289,7 @@ class Linear(TransformerEngineBaseModule):
         grad_output_quantizer_mxfp4 = None
         grad_output_quantizer = None
         output_quantizer = None
+
         if is_mxfp4_enabled and False:
             # TODO: use this code-path when enabling wgrad in fp4
             input_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True)
@@ -1297,7 +1305,7 @@ class Linear(TransformerEngineBaseModule):
             output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
         if torch.is_grad_enabled():
             if is_mxfp4_enabled:
-                grad_output_quantizer_mxfp4 = MXFP4Quantizer(rowwise=True, columnwise=False)
+                grad_output_quantizer_mxfp4 = MXFP4Quantizer(rowwise=True, columnwise=True)
                 grad_output_quantizer_mxfp4.internal = True
             
             grad_output_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]
@@ -1305,6 +1313,7 @@ class Linear(TransformerEngineBaseModule):
             if fp8_grad:
                 grad_input_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_INPUT1]
                 grad_input_quantizer.internal = True
+        
         return (
             input_quantizer,
             weight_quantizer,
