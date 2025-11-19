@@ -367,6 +367,7 @@ def tgmm_persistent_kernel(
     GROUP_SIZE: tl.constexpr,
     GRID_DIM: tl.constexpr,
     COMPUTE_BIAS_GRAD: tl.constexpr,
+    ACCUMULATE: tl.constexpr,
 ):
     tl.assume(M > 0)
     tl.assume(K > 0)
@@ -492,11 +493,14 @@ def tgmm_persistent_kernel(
                 + offs_out_n[None, :]
             )
 
-            tl.store(
-                out_ptrs,
-                acc,
-                mask=(offs_out_k[:, None] < K) & (offs_out_n[None, :] < N),
-            )
+            mask = (offs_out_k[:, None] < K) & (offs_out_n[None, :] < N)
+            if ACCUMULATE:
+                # Load existing values and add to them (like beta=1 in BLAS)
+                old_vals = tl.load(out_ptrs, mask=mask, other=0.0)
+                tl.store(out_ptrs, acc + old_vals, mask=mask)
+            else:
+                # Overwrite output (like beta=0 in BLAS)
+                tl.store(out_ptrs, acc, mask=mask)
             
             # Store bias gradient (only for first N tile, sum across all M)
             if COMPUTE_BIAS_GRAD and tile_n == 0:
@@ -795,20 +799,14 @@ def _grouped_gemm_wgrad(
         wgrad_stacked,
         bias_grad_tensor,
         M, K, N, num_experts,
-        TRANS_LHS=True,  # grad_output [M, K] accessed as transposed [K, M]
+        TRANS_LHS=True,
         COMPUTE_BIAS_GRAD=compute_bias_grad,
+        ACCUMULATE=accumulate,
         **config,
     )
     
-    # Copy results back to original wgrad buffers
-    if accumulate:
-        # Add kernel output to existing wgrad buffers
-        for i, w in enumerate(wgrad):
-            w.add_(wgrad_stacked[i])
-    else:
-        # Copy kernel output to wgrad buffers
-        for i, w in enumerate(wgrad):
-            w.copy_(wgrad_stacked[i])
+    for i, w in enumerate(wgrad):
+        w.copy_(wgrad_stacked[i])
     
     # Convert bias gradient to target dtype after atomic accumulation
     if compute_bias_grad:
