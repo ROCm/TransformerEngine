@@ -54,7 +54,7 @@ def _gmm_grid(
     N: int,
     block_size_m: int,
     block_size_n: int,
-    m_splits: list,  # Use Python list instead of GPU tensor to avoid host-device copy
+    m_splits: list,
     grid_dim: int,
 ) -> tuple[int]:
     assert N > 0, f"N must be positive, it's {N}."
@@ -67,7 +67,6 @@ def _gmm_grid(
     assert all(m >= 0 for m in m_splits), "All group sizes must be non-negative."
     assert grid_dim > 0, f"Grid dimension must be positive (it's {grid_dim})."
     
-    # Compute on CPU using Python list to avoid GPU->CPU copy
     num_n_tiles = triton.cdiv(N, block_size_n)
     assert num_n_tiles > 0, f"num_n_tiles must be positive, it's {num_n_tiles}."
     
@@ -345,33 +344,6 @@ def _ptgmm_grid(
     num_programs = min(grid_dim, num_tiles)
     assert num_programs > 0, f"num_programs must be positive, it's {num_programs}."
     return (num_programs,)
-
-def _nptgmm_grid(
-    K: int,
-    N: int,
-    G: int,
-    block_size_k: int,
-    block_size_n: int,
-) -> tuple[int, int]:
-    assert K > 0, f"K must be positive, it's {K}."
-    assert N > 0, f"N must be positive, it's {N}."
-    assert G > 0, f"G must be positive, it's {G}."
-    assert is_power_of_2(
-        block_size_k
-    ), f"K-dimension tile size must be a power of 2 (it's {block_size_k})."
-    assert is_power_of_2(
-        block_size_n
-    ), f"N-dimension tile size must be a power of 2 (it's {block_size_n})."
-    num_k_tiles = triton.cdiv(K, block_size_k)
-    assert num_k_tiles > 0, f"num_k_tiles must be positive, it's {num_k_tiles}."
-    num_n_tiles = triton.cdiv(N, block_size_n)
-    assert num_n_tiles > 0, f"num_n_tiles must be positive, it's {num_n_tiles}."
-    num_tiles_per_mm = num_k_tiles * num_n_tiles
-    assert (
-        num_tiles_per_mm > 0
-    ), f"num_tiles_per_mm must be positive, it's {num_tiles_per_mm}."
-    return (G, num_tiles_per_mm)
-
 
 
 @triton.jit
@@ -668,12 +640,12 @@ def _grouped_gemm_forward(
 
 
 def _grouped_gemm_backward(
-    grad_outputs: list,  # List of grad_output tensors, each [m_splits[i], K]
-    weights: list,  # List of weight tensors, each [K, N]
-    dgrad: torch.Tensor,  # Pre-allocated dgrad tensor [M_total, N]
-    m_splits: list,  # Token counts per expert
-    bias: list = None,  # Unused for dgrad, for API compatibility
-    use_bias: bool = False,  # Unused for dgrad, for API compatibility
+    grad_outputs: list,
+    weights: list,
+    dgrad: torch.Tensor,
+    m_splits: list,
+    bias: list = None,
+    use_bias: bool = False,
 ) -> None:
     """
     Backward pass grouped GEMM for dgrad using AITER's GMM kernel.
@@ -714,11 +686,6 @@ def _grouped_gemm_backward(
     # Get cached group_sizes tensor (avoids repeated host-to-device copy)
     group_sizes = get_group_sizes_tensor(tuple(m_splits), device)
     
-    # For gmm_kernel: (m, K_in) x (K_in, N_out) = (m, N_out)
-    # We have: (m, N) x (N, K) = (m, K)
-    # So K_in=N, N_out=K
-    # Weights are [N, K], which is already in the right layout (no transpose needed)
-    
     # Stack weights into single tensor [G, N, K]
     weights_stacked = torch.stack(weights, dim=0)  # [G, N, K]
     
@@ -727,10 +694,10 @@ def _grouped_gemm_backward(
     
     # Launch kernel with proper grid calculation
     grid = _gmm_grid(
-        N,  # N_out dimension (output columns)
+        N,
         config["BLOCK_SIZE_M"],
         config["BLOCK_SIZE_N"],
-        m_splits,  # Pass Python list to avoid GPU->CPU copy
+        m_splits,
         config["GRID_DIM"],
     )
     
@@ -741,18 +708,18 @@ def _grouped_gemm_backward(
         dgrad,
         bias_dummy,
         M, K, N, num_experts,
-        TRANS_RHS=False,  # Weights are [K, N]
-        USE_BIAS=False,  # No bias for dgrad
+        TRANS_RHS=False,
+        USE_BIAS=False,
         **config,
     )
 
 def _grouped_gemm_wgrad(
-    grad_outputs: list,  # List of grad_output tensors, each [m_splits[i], N]
-    inputs: list,  # List of input tensors, each [m_splits[i], K]
-    wgrad: list,  # List of pre-allocated wgrad tensors, each [N, K]
-    m_splits: list,  # Token counts per expert
-    compute_bias_grad: bool = False,  # Whether to compute fused bias gradient
-    accumulate: bool = False,  # Whether to accumulate into existing wgrad
+    grad_outputs: list,
+    inputs: list,
+    wgrad: list,
+    m_splits: list,
+    compute_bias_grad: bool = False,
+    accumulate: bool = False,
 ) -> torch.Tensor:
     """
     Weight gradient grouped GEMM using AITER's TGMM kernel with optional fused bias gradient.
@@ -801,21 +768,15 @@ def _grouped_gemm_wgrad(
     group_sizes = get_group_sizes_tensor(tuple(m_splits), device)
     
     # Stack wgrad tensors to write results [G, K, N]
-    # Always use a fresh buffer for kernel output since torch.stack() creates a copy
     wgrad_stacked = torch.zeros(num_experts, K, N, dtype=dtype, device=device)
     
-    # Allocate bias gradient tensor if requested (zeroed for atomic accumulation)
+    # Allocate bias gradient tensor if requested
     # Use float32 for atomic operations (bf16 not supported), convert after kernel
     if compute_bias_grad:
         bias_grad_tensor = torch.zeros(num_experts, K, dtype=torch.float32, device=device)  # [G, K]
     else:
         # Use dummy tensor (won't be accessed)
         bias_grad_tensor = get_dummy_bias_tensor(device, torch.float32)
-    
-    # For TGMM: lhs[K_out, m] @ rhs[m, N_out] = out[G, K_out, N_out]
-    # We need: grad_output^T[K, m] @ input[m, N] = wgrad[G, K, N]
-    # With TRANS_LHS=True: grad_output[M, K] -> [K, M]
-    # So: lhs[K, M], rhs[M, N], out[G, K, N]
     
     # Launch kernel
     grid = _ptgmm_grid(
@@ -827,7 +788,6 @@ def _grouped_gemm_wgrad(
         config["GRID_DIM"],
     )
     
-    # Launch kernel with all config parameters (including num_warps, num_stages)
     tgmm_persistent_kernel[grid](
         grad_output_tensor,
         input_tensor,
@@ -837,11 +797,10 @@ def _grouped_gemm_wgrad(
         M, K, N, num_experts,
         TRANS_LHS=True,  # grad_output [M, K] accessed as transposed [K, M]
         COMPUTE_BIAS_GRAD=compute_bias_grad,
-        **config,  # Pass all config params: BLOCK_SIZE_M/K/N, GROUP_SIZE, GRID_DIM, num_warps, num_stages
+        **config,
     )
     
     # Copy results back to original wgrad buffers
-    # This is critical because the wgrad list often points to main_grads in Megatron
     if accumulate:
         # Add kernel output to existing wgrad buffers
         for i, w in enumerate(wgrad):
@@ -858,33 +817,33 @@ def _grouped_gemm_wgrad(
     return bias_grad_tensor if compute_bias_grad else None
 
 def general_grouped_gemm_triton(
-    weights: list,  # List of weight tensors [out_features, in_features]
-    inputmats: list,  # List of input tensors or grad_outputs
-    outputs: list,  # List to store output tensors
+    A: list,  # Left-hand side matrices
+    B: list,  # Right-hand side matrices
+    C: list,  # Output matrices (pre-allocated)
     out_dtype: torch.dtype = None,
     workspace=None,  # Unused, for compatibility
     single_output: bool = True,
     m_splits: list = None,
     bias: list = None,
     use_bias: bool = False,
-    use_split_accumulator: bool = False,  # Unused, for compatibility
-    layout: str = "TN",  # "TN" for forward, "NN" for dgrad
-    grad: bool = False,  # True for backward pass
-    accumulate: bool = False,  # Whether to accumulate into wgrad (for wgrad only)
+    use_split_accumulator: bool = False,
+    layout: str = "TN",
+    grad: bool = False,
+    accumulate: bool = False,
     **kwargs,
 ) -> list:
     """
     Drop-in replacement for general_grouped_gemm using AITER's Triton kernels.
     
     Supports:
-    - Forward pass (layout="TN"): output = input @ weight^T
-    - Backward pass dgrad (layout="NN", grad=True): dgrad = grad_output @ weight
-    - Backward pass wgrad (layout="NT", grad=True): wgrad = grad_output^T @ input
+    - Forward pass (layout="TN"): C = B @ A^T (where A=weights, B=inputs, C=outputs)
+    - Backward pass dgrad (layout="NN", grad=True): C = B @ A (where A=weights, B=grad_output, C=dgrad)
+    - Backward pass wgrad (layout="NT", grad=True): C = B^T @ A (where A=inputs, B=grad_output, C=wgrad)
     
     Args:
-        weights: List of weight tensors, each [out_features, in_features]
-        inputmats: List of input tensors (forward) or grad_output tensors (backward)
-        outputs: List to populate with output tensor(s)
+        A: Left-hand side matrices (weights for forward/dgrad, inputs for wgrad)
+        B: Right-hand side matrices (inputs for forward, grad_outputs for backward)
+        C: Output matrices (pre-allocated)
         out_dtype: Output dtype
         workspace: Workspace tensor (unused, for compatibility)
         single_output: Whether to produce single concatenated output
@@ -894,65 +853,64 @@ def general_grouped_gemm_triton(
         use_split_accumulator: Unused, for compatibility
         layout: "TN" for forward pass, "NN" for dgrad backward pass, "NT" for wgrad backward pass
         grad: True for backward pass
+        accumulate: Whether to accumulate into C (for wgrad only)
         
     Returns:
         Tuple of (outputs, bias_or_grad_bias, gelu_input) to match C++ backend signature
         - bias_or_grad_bias: List of bias/grad_bias tensors (or list of bias if passed in)
     """
     assert m_splits is not None, "m_splits required for Triton kernel"
-    assert len(outputs) > 0, "Output tensor(s) must be pre-allocated and passed in outputs list"
+    assert len(C) > 0, "Output tensor(s) must be pre-allocated and passed in C list"
     
     # Determine operation type
     is_dgrad = (layout == "NN" and grad)
     is_wgrad = (layout == "NT" and grad)
     
     if is_wgrad:
-        # Backward pass: wgrad = grad_output^T @ input
-        # Fused bias gradient computation if requested
-        # Only compute bias grad if use_bias is explicitly True
+        # Backward pass: C = B^T @ A (wgrad = grad_output^T @ input)
+        # A=inputs, B=grad_outputs, C=wgrad
         compute_bias_grad = use_bias is True
         bias_grad_tensor = _grouped_gemm_wgrad(
-            inputmats,  # grad_outputs [M, N]
-            weights,    # inputs [M, K] - note: weights parameter is repurposed as inputs for wgrad
-            outputs,    # wgrad list [N, K] per expert
+            B,  # grad_outputs
+            A,  # inputs
+            C,  # wgrad
             m_splits,
             compute_bias_grad=compute_bias_grad,
-            accumulate=accumulate,  # Pass accumulate parameter
+            accumulate=accumulate,
         )
         
         # Convert bias gradient tensor to list if computed
         # To match C++ backend: always return a list (either grad_biases or bias input)
         if compute_bias_grad and bias_grad_tensor is not None:
-            grad_biases = list(bias_grad_tensor)  # Iterate over first dimension, returns views
+            grad_biases = list(bias_grad_tensor)
         else:
-            grad_biases = bias  # Return bias input (matches C++ behavior)
+            grad_biases = bias
     elif is_dgrad:
-        # Use pre-allocated output tensor
-        out = outputs[0]
-        # Backward pass: dgrad = grad_output @ weight
-        # Note: bias not needed for dgrad (no gradient flows to input through bias)
+        # Backward pass: C = B @ A (dgrad = grad_output @ weight)
+        # A=weights, B=grad_outputs, C=dgrad
+        out = C[0]
         _grouped_gemm_backward(
-            inputmats,  # grad_outputs [M, N]
-            weights,    # weights [N, K]
-            out,        # dgrad [M, K]
+            B,  # grad_outputs
+            A,  # weights
+            out,  # dgrad
             m_splits,
-            bias,       # unused for dgrad
-            use_bias,   # unused for dgrad
+            bias,
+            use_bias,
         )
-        grad_biases = bias  # Return bias input (matches C++ behavior)
+        grad_biases = bias
     else:
-        # Use pre-allocated output tensor
-        out = outputs[0]
-        # Forward pass: output = input @ weight^T + bias (bias fused in kernel)
+        # Forward pass: C = B @ A^T (output = input @ weight^T + bias)
+        # A=weights, B=inputs, C=outputs
+        out = C[0]
         _grouped_gemm_forward(
-            inputmats,  # inputs [M, K]
-            weights,    # weights [N, K]
-            out,        # output [M, N]
+            B,  # inputs
+            A,  # weights
+            out,  # output
             m_splits,
-            bias,       # bias tensors [N] per expert
-            use_bias,   # whether to apply bias
+            bias,
+            use_bias,
         )
-        grad_biases = bias  # Return bias input (matches C++ behavior)
+        grad_biases = bias
     
     # Return outputs, grad_biases, and None for gelu_input (to match C++ backend signature)
-    return outputs, grad_biases, None
+    return C, grad_biases, None
