@@ -196,6 +196,41 @@ TEST_P(CastCSTestSuite, TestCastCS) {
 }
 
 
+TEST(AmaxConsistencyTest, AtomicVsWorkspace) {
+  using namespace transformer_engine;
+  using namespace test;
+
+  std::vector<size_t> shape{256, 1024};
+  const size_t N = product(shape);
+
+  // Input: FP32, Output: FP8 (E4M3) with per-tensor scaling
+  Tensor input("input", shape, DType::kFloat32);
+  Tensor out_atomic("out_atomic", shape, DType::kFloat8E4M3, true, false);
+  Tensor out_ws("out_ws", shape, DType::kFloat8E4M3, true, false);
+
+  fillUniform(&input);
+
+  // Path 1: atomic-based amax (no workspace)
+  nvte_compute_amax(input.data(), out_atomic.data(), 0);
+
+  // Path 2: two-stage amax using workspace
+  // Use a workspace capacity >= number of blocks
+  std::vector<size_t> ws_shape{N};
+  Tensor workspace("workspace", ws_shape, DType::kFloat32);
+  nvte_compute_amax_with_workspace(input.data(), out_ws.data(), workspace.data(), 0);
+
+  cudaDeviceSynchronize();
+  auto err = cudaGetLastError();
+  ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
+  // Compare the resulting amax values
+  float amax_atomic = out_atomic.amax();
+  float amax_ws     = out_ws.amax();
+
+  compareResults("amax_consistency", amax_atomic, amax_ws, /*atol=*/0.0f, /*rtol=*/0.0f);
+}
+
+
 
 INSTANTIATE_TEST_SUITE_P(
   OperatorTest,
