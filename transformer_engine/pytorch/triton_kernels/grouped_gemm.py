@@ -720,7 +720,7 @@ def _grouped_gemm_backward(
 def _grouped_gemm_wgrad(
     grad_outputs: list,
     inputs: list,
-    wgrad: list,
+    wgrad,  # Union[list, torch.Tensor] - either list of [K, N] tensors or stacked [G, K, N] tensor
     m_splits: list,
     compute_bias_grad: bool = False,
     accumulate: bool = False,
@@ -737,7 +737,7 @@ def _grouped_gemm_wgrad(
     Args:
         grad_outputs: List of grad_output tensors for each expert [M_i, N]
         inputs: List of input tensors for each expert [M_i, K]
-        wgrad: List of pre-allocated wgrad tensors to write results [N, K]
+        wgrad: Either a list of [K, N] tensors OR a single stacked [G, K, N] tensor
         m_splits: Token counts per expert
         compute_bias_grad: Whether to compute bias gradient fused in the kernel
     
@@ -749,8 +749,22 @@ def _grouped_gemm_wgrad(
     
     # Extract dimensions
     num_experts = len(m_splits)
-    device = wgrad[0].device
-    dtype = wgrad[0].dtype
+    
+    # Handle wgrad - check if it's already a stacked tensor or a list
+    if isinstance(wgrad, torch.Tensor) and wgrad.dim() == 3:
+        # Already a stacked tensor [G, K, N] - optimal case!
+        wgrad_stacked = wgrad
+        device = wgrad.device
+        dtype = wgrad.dtype
+        K, N = wgrad.shape[1], wgrad.shape[2]
+        use_preallocated_stacked = True
+        wgrad_list = None  # Don't need the list
+    else:
+        # It's a list of tensors
+        device = wgrad[0].device
+        dtype = wgrad[0].dtype
+        wgrad_list = wgrad
+        K, N = wgrad[0].shape[0], wgrad[0].shape[1]
     
     # Handle grad_outputs - either single concatenated tensor or list
     if len(grad_outputs) == 1:
@@ -763,16 +777,39 @@ def _grouped_gemm_wgrad(
         input_tensor = inputs[0]
     else:
         input_tensor = torch.cat(inputs, dim=0)
-        
+
     M = grad_output_tensor.shape[0]  # total tokens
-    K = grad_output_tensor.shape[1]  # out_features
-    N = input_tensor.shape[1]  # in_features
+    
+    # Only do detection if wgrad is a list (not already a stacked tensor)
+    if wgrad_list is not None:
+        # Try to detect if wgrad list is already views of a stacked tensor (optimization)
+        # This avoids allocating a temporary tensor and copying results back
+        use_preallocated_stacked = False
+        wgrad_stacked = None
+        
+        if len(wgrad_list) == num_experts:
+            try:
+                # Try to reconstruct as a stacked tensor view
+                # If wgrad elements are contiguous views of a [num_experts, K, N] tensor,
+                # as_strided will create a view without allocation
+                wgrad_stacked = wgrad_list[0].as_strided(
+                    (num_experts, K, N),
+                    (K * N, N, 1)
+                )
+                # Verify it's actually contiguous (the pre-allocated case)
+                if wgrad_stacked.is_contiguous():
+                    use_preallocated_stacked = True
+                else:
+                    wgrad_stacked = None
+            except:
+                pass
+        
+        # If not pre-allocated, create a temporary stacked tensor
+        if not use_preallocated_stacked:
+            wgrad_stacked = torch.zeros(num_experts, K, N, dtype=dtype, device=device)
     
     # Get cached group_sizes tensor (avoids repeated host-to-device copy)
     group_sizes = get_group_sizes_tensor(tuple(m_splits), device)
-    
-    # Stack wgrad tensors to write results [G, K, N]
-    wgrad_stacked = torch.zeros(num_experts, K, N, dtype=dtype, device=device)
     
     # Allocate bias gradient tensor if requested
     # Use float32 for atomic operations (bf16 not supported), convert after kernel
@@ -805,8 +842,10 @@ def _grouped_gemm_wgrad(
         **config,
     )
     
-    for i, w in enumerate(wgrad):
-        w.copy_(wgrad_stacked[i])
+    # Copy results back only if we created a temporary stacked tensor from a list
+    if wgrad_list is not None and not use_preallocated_stacked:
+        for i, w in enumerate(wgrad_list):
+            w.copy_(wgrad_stacked[i])
     
     # Convert bias gradient to target dtype after atomic accumulation
     if compute_bias_grad:

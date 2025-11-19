@@ -364,11 +364,24 @@ class _GroupedLinear(torch.autograd.Function):
                         )
                 if ctx.fuse_wgrad_accumulation:
                     wgrad_list = main_grads
+                    wgrad_tensor = None
                 else:
-                    wgrad_list = [
-                        torch.empty(w.size(), dtype=ctx.activation_dtype, device=ctx.device)
-                        for w in weights
-                    ]
+                    # For Triton, create a single stacked tensor to avoid per-tensor event overhead
+                    if ctx.use_grouped_gemm_triton:
+                        # Weights have shape [out_features, in_features]
+                        # Create stacked tensor [num_experts, out_features, in_features]
+                        wgrad_tensor = torch.empty(
+                            (ctx.num_gemms, weights[0].size(0), weights[0].size(1)),
+                            dtype=ctx.activation_dtype,
+                            device=ctx.device
+                        )
+                        wgrad_list = None  # Will pass tensor directly
+                    else:
+                        wgrad_tensor = None
+                        wgrad_list = [
+                            torch.empty(w.size(), dtype=ctx.activation_dtype, device=ctx.device)
+                            for w in weights
+                        ]
                 grouped_gemm_wgrad = functools.partial(
                     grouped_gemm_func,
                     out_dtype=ctx.activation_dtype,
@@ -382,10 +395,13 @@ class _GroupedLinear(torch.autograd.Function):
                     accumulate=accumulate_wgrad_into_param_main_grad,
                 )
                 # WGRAD
+                # Pass stacked tensor directly for Triton to avoid per-tensor event overhead
+                wgrad_arg = wgrad_tensor if wgrad_tensor is not None else wgrad_list
+                
                 if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
-                    ctx.wgrad_store.put([inputmats, grad_output, wgrad_list], grouped_gemm_wgrad)
+                    ctx.wgrad_store.put([inputmats, grad_output, wgrad_arg], grouped_gemm_wgrad)
                 else:
-                    _, grad_biases_, _ = grouped_gemm_wgrad(inputmats, grad_output, wgrad_list)
+                    _, grad_biases_, _ = grouped_gemm_wgrad(inputmats, grad_output, wgrad_arg)
 
                     for i in range(ctx.num_gemms):
                         if grad_biases[i] is None:
@@ -422,9 +438,10 @@ class _GroupedLinear(torch.autograd.Function):
                         wgrad = None
                     return wgrad
 
+                # Convert stacked tensor to list if needed and handle custom DDP
                 wgrad_list = [
-                    handle_custom_ddp_from_mcore(weight, wgrad)
-                    for weight, wgrad in zip(origin_weights, wgrad_list)
+                    handle_custom_ddp_from_mcore(weight, wgrad_tensor[i] if wgrad_tensor is not None else wgrad_list[i])
+                    for i, weight in enumerate(origin_weights)
                 ]
             else:
                 wgrad_list = [None] * ctx.num_gemms
