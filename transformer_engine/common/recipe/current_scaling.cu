@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <limits>
 #include <type_traits>
+#include <cstdlib>
 
 #include "../common.h"
 #include "../util/logging.h"
@@ -27,6 +28,19 @@ using bf16__ = __hip_bfloat16;
 #endif //__HIP_PLATFORM_AMD__
 
 constexpr int amax_kernel_threads = 512;
+
+// FIXME: Should this be covered by __HIP_PLATFORM_AMD__ ?
+inline bool nvte_use_atomic_amax() {
+  static int cached = -1;
+  if (cached == -1) {
+    cached = 0;
+    const char *env_p = std::getenv("NVTE_USE_ATOMIC_AMAX");
+    if (env_p && std::string(env_p) == "1") {
+      cached = 1;
+    }
+  }
+  return cached == 1;
+}
 
 template <int BLOCK_THREADS>
 __global__ void amax_final_reduce(const float* __restrict__ block_amax,
@@ -114,7 +128,10 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, flo
   constexpr size_t max_blocks = 65535;
   num_blocks = std::min(num_blocks, max_blocks);
 
-  const bool UseBlockAmax = (block_amax != nullptr) && (block_capacity >= num_blocks);
+  const bool UseBlockAmax =
+      (block_amax != nullptr) &&
+      (block_capacity >= num_blocks) &&
+      !nvte_use_atomic_amax();
 
   // Launch kernel
   switch (align) {
