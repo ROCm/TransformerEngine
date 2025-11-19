@@ -104,7 +104,7 @@ def cleanup_env():
     for var in ATTENTION_ENV_VARS:
         os.environ[var] = "0"
 
-def setup_backend_env(backend_name, use_ck_bwd_v3=False, use_ck_fwd_v3=False, use_ck_v3_a16=False):
+def setup_backend_env(backend_name, use_ck_bwd_v3=True, use_ck_fwd_v3=True, use_ck_v3_a16=False):
     cleanup_env()
     
     if backend_name == "flash":
@@ -112,11 +112,10 @@ def setup_backend_env(backend_name, use_ck_bwd_v3=False, use_ck_fwd_v3=False, us
     elif backend_name == "fused_ck":
         os.environ["NVTE_FUSED_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN_CK"] = "1"
+        os.environ["NVTE_CK_USES_BWD_V3"] = "1" if use_ck_bwd_v3 else "0"
         if use_ck_bwd_v3:
-            os.environ["NVTE_CK_USES_BWD_V3"] = "1"
             os.environ["NVTE_CK_IS_V3_ATOMIC_FP32"] = "0" if use_ck_v3_a16 else "1"
-        if use_ck_fwd_v3:
-            os.environ["NVTE_CK_USES_FWD_V3"] = "1"
+        os.environ["NVTE_CK_USES_FWD_V3"] = "1" if use_ck_fwd_v3 else "0"
     elif backend_name == "fused_aotriton":
         os.environ["NVTE_FUSED_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "1"
@@ -359,7 +358,7 @@ def main(args):
     print(
         f"Device {device_id}: "
         f"{device_properties.name} GPU, "
-        f"sm{device_properties.major}{device_properties.minor} compute capability, "
+        f"{device_properties.gcnArchName.split(':')[0]} architecture, "
         f"{device_properties.total_memory/1024**3:.1f}GB memory"
     )
     # Benchmarking starts..
@@ -438,8 +437,8 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--use_ck_bwd_v3", action="store_true", help="Use NVTE_CK_USES_BWD_V3=1 for CK bwd kernels")
-    parser.add_argument("--use_ck_fwd_v3", action="store_true", help="Use NVTE_CK_USES_FWD_V3=1 for CK fwd kernels")
+    parser.add_argument("--no_ck_bwd_v3", action="store_false", dest="use_ck_bwd_v3", help="Set NVTE_CK_USES_BWD_V3=0 for CK bwd kernels")
+    parser.add_argument("--no_ck_fwd_v3", action="store_false", dest="use_ck_fwd_v3", help="Set NVTE_CK_USES_FWD_V3=0 for CK fwd kernels")
     parser.add_argument("--use_ck_v3_a16", action="store_true", help="Use NVTE_CK_IS_V3_ATOMIC_FP32=0 for atomic16. Default is 1")
     parser.add_argument("--run_sanity_checks", action="store_true", help="After benchmarking, verify profiler outputs.")
     args = parser.parse_args()
