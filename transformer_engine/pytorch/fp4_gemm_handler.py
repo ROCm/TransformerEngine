@@ -1,9 +1,10 @@
- 
+
 import torch
 import aiter
 from aiter.ops.shuffle import shuffle_weight
 
 from .tensor.quantized_tensor import QuantizedTensor
+from .tensor._internal.float8_tensor_base import Float8TensorBase
 
 from .hadamard import HadamardFactory, HadamardTransform
 
@@ -11,8 +12,10 @@ from .hadamard import HadamardFactory, HadamardTransform
 HadamardFactory.configure(block_size=32, randomized=False)
 
 def _dequantize_tensor(tensor):
- 
+
     if isinstance(tensor, QuantizedTensor):
+        return tensor.dequantize()
+    elif isinstance(tensor, Float8TensorBase):
         return tensor.dequantize()
     return tensor
 
