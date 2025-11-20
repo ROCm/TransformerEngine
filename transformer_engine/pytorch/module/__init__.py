@@ -6,6 +6,7 @@
 from .layernorm_linear import LayerNormLinear
 from .linear import Linear
 from .grouped_linear import GroupedLinear
+from .grouped_linear_v2 import GroupedLinearV2
 from .layernorm_mlp import LayerNormMLP
 from .layernorm import LayerNorm
 from .rmsnorm import RMSNorm
