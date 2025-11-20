@@ -94,7 +94,7 @@ class _GroupedLinearV2(torch.autograd.Function):
         biases = [bias_stacked[i] for i in range(num_gemms)] if use_bias else [torch.Tensor()] * num_gemms
         
         # Make sure input dimensions are compatible
-        in_features = weight_stacked.shape[-1]
+        in_features = weight_stacked.size(-1)
         assert inp.shape[-1] == in_features, "GEMM not possible"
         
         # Check if using Triton kernels
@@ -191,7 +191,7 @@ class _GroupedLinearV2(torch.autograd.Function):
 
         if is_grad_enabled:
             ctx.weight_quantizers = weight_quantizers
-            ctx.weights_shape = weight_stacked.shape
+            ctx.weights_shape = weight_stacked.size()
 
             if weight_requires_grad:
                 for inputmat in inputmats:

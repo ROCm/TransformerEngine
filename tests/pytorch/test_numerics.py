@@ -36,6 +36,7 @@ from transformer_engine.pytorch import (
     LayerNormMLP,
     Linear,
     GroupedLinear,
+    GroupedLinearV2,
     MultiheadAttention,
     RMSNorm,
     TransformerLayer,
@@ -1902,7 +1903,7 @@ def _test_grouped_linear_accuracy(
         m_splits = torch.tensor([config.seq_len])
 
     with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
-        if isinstance(block, GroupedLinear):
+        if isinstance(block, (GroupedLinear, GroupedLinearV2)):
             m_splits = m_splits * bs
             out = block(inp_hidden_states, m_splits.tolist())
         else:
@@ -2043,6 +2044,139 @@ def test_grouped_linear_accuracy(
 def test_grouped_linear_accuracy_single_gemm(recipe):
     """Split the tests to save CI time"""
     test_grouped_linear_accuracy(
+        dtype=torch.float32,
+        num_gemms=1,
+        bs=2,
+        model="126m",
+        recipe=recipe,
+        fp8_model_params=True,
+        fuse_wgrad_accumulation=True,
+        bias=True,
+        delay_wgrad_compute=False,
+    )
+
+
+@pytest.mark.parametrize("dtype", param_types, ids=str)
+@pytest.mark.parametrize("num_gemms", [3, 6])
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", ["126m"])
+@pytest.mark.parametrize("recipe", fp8_recipes + [None])
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
+@pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
+@pytest.mark.parametrize("bias", all_boolean)
+@pytest.mark.parametrize("delay_wgrad_compute", all_boolean)
+def test_grouped_linear_v2_accuracy(
+    dtype,
+    num_gemms,
+    bs,
+    model,
+    recipe,
+    fp8_model_params,
+    fuse_wgrad_accumulation,
+    bias,
+    delay_wgrad_compute,
+    parallel_mode=None,
+):
+    """Test GroupedLinearV2 (optimized stacked parameters version) for accuracy"""
+    fp8 = recipe is not None
+
+    if IS_HIP_EXTENSION:
+        if dtype not in (torch.float32,) and fuse_wgrad_accumulation and not fp8:
+            pytest.skip(f"Rocm does not support fused wgrad accumulation for {dtype}.")
+        use_cast_transpose_triton = bool(int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')))
+        if fp8 and recipe.float8_current_scaling() and use_cast_transpose_triton:
+            pytest.skip("Float8 Current Scaling unsupported for grouped linear accuracy.")
+    if fp8 and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if fp8 and recipe.mxfp8() and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    if fp8 and recipe.float8_block_scaling() and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
+
+    config = model_configs[model]
+    if config.seq_len % 16 != 0 and fp8:
+        pytest.skip("FP8 requires sequence length to be divisible by 16.")
+
+    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+        # GroupedLinearV2 - optimized version with stacked parameters
+        grouped_linear_v2 = GroupedLinearV2(
+            num_gemms,
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=bias,
+            params_dtype=dtype,
+            parallel_mode=parallel_mode,
+            device="cuda",
+            fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+            delay_wgrad_compute=delay_wgrad_compute,
+        ).eval()
+        
+        # Reference: Sequential Linear layers
+        sequential_linear = torch.nn.ModuleList(
+            [
+                Linear(
+                    config.hidden_size,
+                    4 * config.hidden_size,
+                    bias=bias,
+                    params_dtype=dtype,
+                    parallel_mode=parallel_mode,
+                    device="cuda",
+                    fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+                ).eval()
+                for _ in range(num_gemms)
+            ]
+        )
+
+    # Share params - V2 uses stacked parameters
+    with torch.no_grad():
+        for i in range(num_gemms):
+            # GroupedLinearV2 uses indexed access: weight[i] instead of weight{i}
+            sequential_linear[i].weight = Parameter(grouped_linear_v2.weight[i].clone())
+            if bias:
+                sequential_linear[i].bias = Parameter(grouped_linear_v2.bias[i].clone())
+            if fuse_wgrad_accumulation:
+                # For V2, main_grad is on the stacked parameter
+                if not hasattr(grouped_linear_v2.weight, 'main_grad') or grouped_linear_v2.weight.main_grad is None:
+                    grouped_linear_v2.weight.main_grad = torch.rand_like(
+                        grouped_linear_v2.weight, dtype=torch.float32
+                    )
+                sequential_linear[i].weight.main_grad = grouped_linear_v2.weight.main_grad[i].clone()
+
+    # Run reference test
+    outputs_ref = _test_grouped_linear_accuracy(
+        sequential_linear,
+        num_gemms,
+        bs,
+        dtype,
+        config,
+        recipe,
+        fp8,
+        fuse_wgrad_accumulation,
+        delay_wgrad_compute,
+    )
+    
+    # Run GroupedLinearV2 test
+    outputs = _test_grouped_linear_accuracy(
+        grouped_linear_v2,
+        num_gemms,
+        bs,
+        dtype,
+        config,
+        recipe,
+        fp8,
+        fuse_wgrad_accumulation,
+        delay_wgrad_compute,
+    )
+
+    # Should be bit-wise match (same as original GroupedLinear)
+    for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("recipe", fp8_recipes + [None])
+def test_grouped_linear_v2_accuracy_single_gemm(recipe):
+    """Split the tests to save CI time - V2 version"""
+    test_grouped_linear_v2_accuracy(
         dtype=torch.float32,
         num_gemms=1,
         bs=2,
