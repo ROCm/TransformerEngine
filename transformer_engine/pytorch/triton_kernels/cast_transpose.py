@@ -189,6 +189,82 @@ def _cast_transpose_triton_current_scaling(A, C, T, stride_am, stride_an, stride
     tl.store(T, fp8_a, mask=mask)
 
 
+
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64,  'GROUP_M': 1}, num_warps=4),
+        triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64,  'GROUP_M': 8}, num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'GROUP_M': 8}, num_warps=8),
+    ],
+    key=['M', 'N'],
+)
+@triton.jit
+def _amax_reduce_triton_stage1(
+    A,
+    stride_am, stride_an,
+    M, N,
+    block_amax,              # float32[workspace_size], index 0 stores num_programs
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    pid = tl.program_id(0)
+
+    grid_m = (M + BLOCK_M - 1) // BLOCK_M
+    grid_n = (N + BLOCK_N - 1) // BLOCK_N
+
+    width = GROUP_M * grid_n
+    group_id   = pid // width
+    group_size = tl.minimum(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    rm = pid_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
+    rn = pid_n.to(tl.int64) * BLOCK_N + tl.arange(0, BLOCK_N)
+
+    A_ptrs = A + rm[:, None] * stride_am + rn[None, :] * stride_an
+    mask = (rm < M)[:, None] & (rn < N)[None, :]
+
+    a = tl.load(A_ptrs, mask=mask, other=0).to(tl.float32)
+    tile_amax = tl.max(tl.abs(a))
+
+    # Store per-program amax in workspace at index pid)
+    tl.store(block_amax + pid, tile_amax)
+
+    # Program 0 also writes the number of programs into block_amax[0]
+    # if pid == 0:
+    #     num_progs = tl.num_programs(0)
+    #     tl.store(block_amax + 0, num_progs.to(tl.float32))
+
+
+@triton.jit
+def _amax_reduce_triton_stage2(
+    block_amax,   # float32[workspace_size], index 0 = num_programs
+    num_blocks,
+    amax_ptr,     # float32[1]
+    BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    # We launch with grid=(1,), so pid should always be 0.
+    # block_amax[0] holds the number of valid per-tile maxima.
+    # num_blocks_f = tl.load(block_amax + 0)
+    # num_blocks = num_blocks_f.to(tl.int32)
+
+    acc = tl.full((), -float('inf'), tl.float32)
+    offset = 0
+
+    while offset < num_blocks:
+        idx = offset + tl.arange(0, BLOCK)
+        mask = idx < num_blocks
+        vals = tl.load(block_amax + 1 + idx, mask=mask, other=-float('inf'))
+        # Reduce this chunk and update global accumulator
+        acc = tl.maximum(acc, tl.max(vals))
+        offset += BLOCK
+
+    # Final result
+    tl.store(amax_ptr, acc)
+
+
 FP32_EXPONENT_BIAS = tl.constexpr(127)
 FP32_MANTISSA_BITS = tl.constexpr(23)
 @triton.jit
@@ -381,17 +457,40 @@ def te_cast_transpose_noop_triton(input, noop_flag, input_scale, cast_out, trans
         #   2) compute current scale
         #   3) cast+transpose with that current scale (otherwise same as delayed)
 
-        # global amax
-        amax_out.fill_(-float("inf"))
-        _amax_reduce_triton[grid](
+        # ---- 2-stage amax: stage 1 writes per-tile maxima into workspace ----
+        # Use the smallest BLOCK_M/BLOCK_N in the autotune configs as a safe upper bound.
+        MIN_BLOCK_M = 64
+        MIN_BLOCK_N = 64
+        max_tiles_m = triton.cdiv(num_rows, MIN_BLOCK_M)
+        max_tiles_n = triton.cdiv(row_length, MIN_BLOCK_N)
+        max_num_programs = max_tiles_m * max_tiles_n
+
+        block_amax = torch.empty(
+            max_num_programs,
+            device=input.device,
+            dtype=torch.float32,
+        )
+
+        # Stage 1: per-program tile amax
+        _amax_reduce_triton_stage1[grid](
             input_2d_view,
             input_stride_M, input_stride_N,
             num_rows, row_length,
+            block_amax,
+        )
+
+        # Stage 2: reduce per-program maxima into amax_out
+        amax_out.fill_(-float("inf"))
+        fp8_max = get_fp8_max(otype)
+
+        _amax_reduce_triton_stage2[(1,)](
+            block_amax,
+            block_amax.numel(),
             amax_out,
+            BLOCK=1024,
         )
 
         # Compute scale
-        fp8_max = get_fp8_max(otype)
 
         _compute_scale_from_amax_triton[(1,)](
             amax_out, input_scale, scale_inv_out,
