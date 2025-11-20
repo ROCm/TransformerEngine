@@ -139,7 +139,13 @@ jobs:
         id: sgpu-tests
         continue-on-error: true
         run: |
-          docker exec te-runner bash -c "$(cat <<'EOF'
+          # Cleanup previous failure markers if any. Don't actually do anything on k8s pods
+          rm -f FAIL_*
+
+          docker exec \
+            -e TEST_SGPU=1 \
+            -e TEST_LEVEL=${{ inputs.test_level || '1' }} \
+            te-runner bash -c "$(cat <<'EOF'
           #!/usr/bin/bash
           set -x -o pipefail
           ulimit -c 0 # Disable core dumps
@@ -162,12 +168,14 @@ jobs:
           wait $jax_pid; jax_rc=$?
           wait $torch_pid; torch_rc=$?
           
+          # /workspace/FAIL_* files are for failure markers we can extract to the host runner and process later
           # Check PyTorch
           if [ $torch_rc -ne 0 ]; then 
             echo "::group::[FAILED] PyTorch sGPU Log"
             cat /workspace/torch_sgpu.log
             echo "::endgroup::"
             echo "::error::Pytorch sGPU test FAILED."
+            touch /workspace/FAIL_TORCH_SGPU
           fi
 
           # Check JAX
@@ -176,6 +184,7 @@ jobs:
             cat /workspace/jax_sgpu.log
             echo "::endgroup::"
             echo "::error::JAX sGPU test FAILED."
+            touch /workspace/FAIL_JAX_SGPU
           fi
 
           # Check Core
@@ -184,17 +193,26 @@ jobs:
             cat /workspace/core_sgpu.log
             echo "::endgroup::"
             echo "::error::Core sGPU test FAILED."
+            touch /workspace/FAIL_CORE_SGPU
           fi
           
           test $torch_rc -eq 0 -a $jax_rc -eq 0 -a $core_rc -eq 0
           EOF
           )"
+          
+          # Export failed tests statuses to host runner
+          if [ -f FAIL_TORCH_SGPU ]; then echo "torch=fail" >> $GITHUB_OUTPUT; fi
+          if [ -f FAIL_JAX_SGPU ];   then echo "jax=fail"   >> $GITHUB_OUTPUT; fi
+          if [ -f FAIL_CORE_SGPU ];  then echo "core=fail"  >> $GITHUB_OUTPUT; fi
 
       - name: Run mGPU tests
         id: mgpu-tests
         continue-on-error: true
         run: |
-          docker exec te-runner bash -c "$(cat <<'EOF'
+          docker exec \
+            -e TEST_MGPU=1 \
+            -e TEST_LEVEL=${{ inputs.test_level || '1' }} \
+            te-runner bash -c "$(cat <<'EOF'
           #!/usr/bin/bash
           set -x -o pipefail
           ulimit -c 0 # Disable core dumps
@@ -207,11 +225,13 @@ jobs:
           ci/jax.sh > /workspace/jax_mgpu.log 2>&1
           jax_rc=$?
           
+          # /workspace/FAIL_* files are for failure markers we can extract to the host runner and process later
           if [ $torch_rc -ne 0 ]; then 
             echo "::group::[FAILED] PyTorch mGPU Log"
             cat /workspace/torch_mgpu.log
             echo "::endgroup::"
             echo "::error::Pytorch mGPU test FAILED."
+            touch /workspace/FAIL_TORCH_MGPU
           fi
 
           if [ $jax_rc -ne 0 ]; then 
@@ -219,11 +239,16 @@ jobs:
             cat /workspace/jax_mgpu.log
             echo "::endgroup::"
             echo "::error::JAX mGPU test FAILED."
+            touch /workspace/FAIL_JAX_MGPU
           fi
           
           test $torch_rc -eq 0 -a $jax_rc -eq 0
           EOF
           )"
+
+          # Export failed tests statuses to host runner
+          if [ -f FAIL_TORCH_MGPU ]; then echo "torch=fail" >> $GITHUB_OUTPUT; fi
+          if [ -f FAIL_JAX_MGPU ];   then echo "jax=fail"   >> $GITHUB_OUTPUT; fi
 
       - name: Run Examples
         id: examples-tests
@@ -255,18 +280,35 @@ jobs:
       - name: Check Test Failure Status
         if: always()
         run: |
+          EXIT_STATUS=0
+
           # Check outcomes of the specific test steps
           # "outcome" will be 'failure' even if continue-on-error was true
-          if [[ "${{ steps.sgpu-tests.outcome }}" == "failure" ]]; then
-            echo "::error::sGPU Tests Failed."
+          # sGPU CHECKS
+          if [[ "${{ steps.sgpu-tests.outputs.core }}" == "fail" ]]; then
+            echo "::error::Core sGPU Tests Failed."
+            EXIT_STATUS=1
+          fi
+          if [[ "${{ steps.sgpu-tests.outputs.torch }}" == "fail" ]]; then
+            echo "::error::PyTorch sGPU Tests Failed."
+            EXIT_STATUS=1
+          fi
+          if [[ "${{ steps.sgpu-tests.outputs.jax }}" == "fail" ]]; then
+            echo "::error::JAX sGPU Tests Failed."
             EXIT_STATUS=1
           fi
 
-          if [[ "${{ steps.mgpu-tests.outcome }}" == "failure" ]]; then
-            echo "::error::mGPU Tests Failed."
+          # mGPU CHECKS
+          if [[ "${{ steps.mgpu-tests.outputs.torch }}" == "fail" ]]; then
+            echo "::error::PyTorch mGPU Tests Failed."
+            EXIT_STATUS=1
+          fi
+          if [[ "${{ steps.mgpu-tests.outputs.jax }}" == "fail" ]]; then
+            echo "::error::JAX mGPU Tests Failed."
             EXIT_STATUS=1
           fi
 
+          # EXAMPLES CHECK
           if [[ "${{ steps.examples-tests.outcome }}" == "failure" ]]; then
             echo "::error::Example Tests Failed."
             EXIT_STATUS=1
