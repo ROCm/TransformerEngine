@@ -72,7 +72,7 @@ if IS_HIP_EXTENSION:
     from ..triton_kernels.rmsnorm import te_rmsnorm_bwd_triton
 
 from ..rocm_utils import create_fp8_weight_transpose_cache, clear_fp8_weight_transpose_cache
-
+from ..fp4_gemm_handler import fp4_gemm
 
 __all__ = ["LayerNormLinear"]
 
@@ -330,26 +330,51 @@ class _LayerNormLinear(torch.autograd.Function):
                 assert ub_obj.is_fp8_ubuf(), "AG overlap with FP8 GEMM inputs requires FP8 buffer."
             ln_out_total = ub_obj.get_buffer(input_quantizer)
 
-        nvtx_range_push(f"{nvtx_label}.gemm")
-        fprop_gemm_use_split_accumulator = _2X_ACC_FPROP
-        if fp8:
-            recipe = FP8GlobalStateManager.get_fp8_recipe()
-            if hasattr(recipe, "fp8_gemm_fprop"):
-                fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
+        # Check if FP4 GEMM is enabled
+        import os
+        use_fp4 = os.environ.get('FP4', 'false').lower() in ['true', '1', 'yes']
 
-        out, *_, rs_out = general_gemm(
-            weightmat,
-            ln_out_total,
-            get_workspace(),
-            quantization_params=output_quantizer,
-            out_dtype=activation_dtype,
-            bias=bias,
-            use_split_accumulator=fprop_gemm_use_split_accumulator,
-            ub=ub_obj,
-            ub_type=ub_type,
-            extra_output=rs_out,
-        )
-        nvtx_range_pop(f"{nvtx_label}.gemm")
+        if use_fp4 and fp8:
+            # FP4 GEMM Forward Path
+            nvtx_range_push(f"{nvtx_label}.fprop_gemm")
+            out = fp4_gemm(
+                pass_type='fwd',
+                weight=weightmat,
+                input_tensor=ln_out_total,
+                grad_output=None,
+                output_quantizer=output_quantizer,
+                grad_input_quantizer=None,
+                bias=bias,
+                out_dtype=activation_dtype,
+                dgrad_bulk=None,
+                main_grad=None,
+                fuse_wgrad_accumulation=False,
+                accumulate_wgrad_into_param_main_grad=False,
+            )
+            rs_out = None
+            nvtx_range_pop(f"{nvtx_label}.fprop_gemm")
+        else:
+            # Standard FP8/Non-FP8 GEMM Forward Path
+            nvtx_range_push(f"{nvtx_label}.gemm")
+            fprop_gemm_use_split_accumulator = _2X_ACC_FPROP
+            if fp8:
+                recipe = FP8GlobalStateManager.get_fp8_recipe()
+                if hasattr(recipe, "fp8_gemm_fprop"):
+                    fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
+
+            out, *_, rs_out = general_gemm(
+                weightmat,
+                ln_out_total,
+                get_workspace(),
+                quantization_params=output_quantizer,
+                out_dtype=activation_dtype,
+                bias=bias,
+                use_split_accumulator=fprop_gemm_use_split_accumulator,
+                ub=ub_obj,
+                ub_type=ub_type,
+                extra_output=rs_out,
+            )
+            nvtx_range_pop(f"{nvtx_label}.gemm")
 
         if not weight.requires_grad:
             if not return_layernorm_output:
@@ -656,29 +681,53 @@ class _LayerNormLinear(torch.autograd.Function):
             if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
                 create_fp8_weight_transpose_cache(weight)
 
-            nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
-            dgrad_gemm_use_split_accumulator = _2X_ACC_DGRAD
-            if ctx.fp8:
-                recipe = ctx.fp8_recipe
-                if hasattr(recipe, "fp8_gemm_dgrad"):
-                    dgrad_gemm_use_split_accumulator = recipe.fp8_gemm_dgrad.use_split_accumulator
+            # Check if FP4 GEMM is enabled
+            import os
+            use_fp4 = os.environ.get('FP4', 'false').lower() in ['true', '1', 'yes']
 
-            dgrad, *_ = general_gemm(
-                weight,
-                grad_output,
-                get_workspace(),
-                layout="NN",
-                grad=True,
-                quantization_params=ctx.grad_input_quantizer,
-                out=dgrad_bulk,
-                out_dtype=ctx.activation_dtype,
-                use_split_accumulator=dgrad_gemm_use_split_accumulator,
-                ub=ub_obj_dgrad,
-                ub_type=ub_type_dgrad,
-                extra_output=rs_out,
-                bulk_overlap=ctx.ub_bulk_dgrad,
-            )
-            nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
+            if use_fp4 and ctx.fp8:
+                # FP4 GEMM Dgrad Path
+                nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
+                dgrad = fp4_gemm(
+                    pass_type='dgrad',
+                    weight=weight,
+                    input_tensor=None,
+                    grad_output=grad_output,
+                    output_quantizer=None,
+                    grad_input_quantizer=ctx.grad_input_quantizer,
+                    bias=None,
+                    out_dtype=ctx.activation_dtype,
+                    dgrad_bulk=dgrad_bulk,
+                    main_grad=None,
+                    fuse_wgrad_accumulation=False,
+                    accumulate_wgrad_into_param_main_grad=False,
+                )
+                nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
+            else:
+                # Standard FP8/Non-FP8 GEMM Dgrad Path
+                nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
+                dgrad_gemm_use_split_accumulator = _2X_ACC_DGRAD
+                if ctx.fp8:
+                    recipe = ctx.fp8_recipe
+                    if hasattr(recipe, "fp8_gemm_dgrad"):
+                        dgrad_gemm_use_split_accumulator = recipe.fp8_gemm_dgrad.use_split_accumulator
+
+                dgrad, *_ = general_gemm(
+                    weight,
+                    grad_output,
+                    get_workspace(),
+                    layout="NN",
+                    grad=True,
+                    quantization_params=ctx.grad_input_quantizer,
+                    out=dgrad_bulk,
+                    out_dtype=ctx.activation_dtype,
+                    use_split_accumulator=dgrad_gemm_use_split_accumulator,
+                    ub=ub_obj_dgrad,
+                    ub_type=ub_type_dgrad,
+                    extra_output=rs_out,
+                    bulk_overlap=ctx.ub_bulk_dgrad,
+                )
+                nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
 
             if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
                 clear_fp8_weight_transpose_cache(weight)
@@ -734,36 +783,63 @@ class _LayerNormLinear(torch.autograd.Function):
                         dgrad_shape, dtype=ctx.activation_dtype, device=inputmat.device
                     )
 
-                # wgrad GEMM
-                # Note: Fuse with bgrad computation if needed
-                nvtx_range_push(f"{nvtx_label}.wgrad_gemm")
-                wgrad_gemm_use_split_accumulator = _2X_ACC_WGRAD
-                if ctx.fp8:
-                    recipe = ctx.fp8_recipe
-                    if hasattr(recipe, "fp8_gemm_wgrad"):
-                        wgrad_gemm_use_split_accumulator = (
-                            recipe.fp8_gemm_wgrad.use_split_accumulator
-                        )
+                # Check if FP4 GEMM is enabled
+                import os
+                use_fp4 = os.environ.get('FP4', 'false').lower() in ['true', '1', 'yes']
 
-                wgrad, grad_bias_, *_, rs_out = general_gemm(
-                    ln_out_total,
-                    grad_output,
-                    get_workspace(),
-                    layout="NT",
-                    grad=True,
-                    out_dtype=(
-                        main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
-                    ),
-                    bias=(bias if (grad_bias is None and not ctx.fp8) else None),
-                    out=main_grad if ctx.fuse_wgrad_accumulation else None,
-                    use_split_accumulator=wgrad_gemm_use_split_accumulator,
-                    accumulate=accumulate_wgrad_into_param_main_grad,
-                    ub=ub_obj_wgrad,
-                    ub_type=ub_type_wgrad,
-                    extra_output=rs_out,
-                    bulk_overlap=ctx.ub_bulk_wgrad,
-                )
-                nvtx_range_pop(f"{nvtx_label}.wgrad_gemm")
+                if use_fp4 and ctx.fp8:
+                    # FP4 GEMM Wgrad Path
+                    nvtx_range_push(f"{nvtx_label}.wgrad_gemm")
+                    wgrad = fp4_gemm(
+                        pass_type='wgrad',
+                        weight=None,
+                        input_tensor=ln_out_total,
+                        grad_output=grad_output,
+                        output_quantizer=None,
+                        grad_input_quantizer=None,
+                        bias=(bias if (grad_bias is None and not ctx.fp8) else None),
+                        out_dtype=(
+                            main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
+                        ),
+                        dgrad_bulk=None,
+                        main_grad=main_grad if ctx.fuse_wgrad_accumulation else None,
+                        fuse_wgrad_accumulation=ctx.fuse_wgrad_accumulation,
+                        accumulate_wgrad_into_param_main_grad=accumulate_wgrad_into_param_main_grad,
+                    )
+                    grad_bias_ = None
+                    rs_out = None
+                    nvtx_range_pop(f"{nvtx_label}.wgrad_gemm")
+                else:
+                    # Standard FP8/Non-FP8 GEMM Wgrad Path
+                    # Note: Fuse with bgrad computation if needed
+                    nvtx_range_push(f"{nvtx_label}.wgrad_gemm")
+                    wgrad_gemm_use_split_accumulator = _2X_ACC_WGRAD
+                    if ctx.fp8:
+                        recipe = ctx.fp8_recipe
+                        if hasattr(recipe, "fp8_gemm_wgrad"):
+                            wgrad_gemm_use_split_accumulator = (
+                                recipe.fp8_gemm_wgrad.use_split_accumulator
+                            )
+
+                    wgrad, grad_bias_, *_, rs_out = general_gemm(
+                        ln_out_total,
+                        grad_output,
+                        get_workspace(),
+                        layout="NT",
+                        grad=True,
+                        out_dtype=(
+                            main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
+                        ),
+                        bias=(bias if (grad_bias is None and not ctx.fp8) else None),
+                        out=main_grad if ctx.fuse_wgrad_accumulation else None,
+                        use_split_accumulator=wgrad_gemm_use_split_accumulator,
+                        accumulate=accumulate_wgrad_into_param_main_grad,
+                        ub=ub_obj_wgrad,
+                        ub_type=ub_type_wgrad,
+                        extra_output=rs_out,
+                        bulk_overlap=ctx.ub_bulk_wgrad,
+                    )
+                    nvtx_range_pop(f"{nvtx_label}.wgrad_gemm")
 
                 if ctx.ub_bulk_wgrad:
                     if ub_obj_wgrad.is_fp8_ubuf():
