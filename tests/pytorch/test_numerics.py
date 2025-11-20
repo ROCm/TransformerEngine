@@ -1916,7 +1916,7 @@ def _test_grouped_linear_accuracy(
     loss = out.sum()
     loss.backward()
     if delay_wgrad_compute:
-        if isinstance(block, GroupedLinear):
+        if isinstance(block, GroupedLinear) or isinstance(block, GroupedLinearV2):
             block.backward_dw()
         else:
             for i in range(num_gemms):
@@ -1924,13 +1924,42 @@ def _test_grouped_linear_accuracy(
 
     torch.cuda.synchronize()
     outputs = [out, inp_hidden_states.grad]
-    for p in block.parameters():
-        if p.requires_grad:
-            if getattr(p, "main_grad", None) is not None:
-                outputs.append(p.main_grad)
-                assert p.grad is None  # grad should be None if fuse_wgrad_accumulation is True
-            else:
-                outputs.append(p.grad)
+    
+    # For GroupedLinearV2, collect weight and bias gradients separately to interleave them
+    if isinstance(block, GroupedLinearV2):
+        weight_grads = []
+        bias_grads = []
+        for p in block.parameters():
+            if p.requires_grad:
+                if getattr(p, "main_grad", None) is not None:
+                    grad = p.main_grad
+                    assert p.grad is None  # grad should be None if fuse_wgrad_accumulation is True
+                else:
+                    grad = p.grad
+                
+                if grad is not None and grad.dim() > 0 and grad.shape[0] == num_gemms:
+                    # Split [num_gemms, M, N] into list of [M, N] tensors or [num_gemms, M] into list of [M] tensors
+                    grad_list = [grad[j] for j in range(num_gemms)]
+                    # First parameter is weight, second is bias
+                    if len(weight_grads) == 0:
+                        weight_grads = grad_list
+                    else:
+                        bias_grads = grad_list
+        
+        # Interleave weight and bias gradients to match sequential order: weight0, bias0, weight1, bias1, ...
+        for i in range(num_gemms):
+            outputs.append(weight_grads[i])
+            if bias_grads:
+                outputs.append(bias_grads[i])
+    else:
+        # Sequential linear: parameters already alternate weight/bias
+        for p in block.parameters():
+            if p.requires_grad:
+                if getattr(p, "main_grad", None) is not None:
+                    outputs.append(p.main_grad)
+                    assert p.grad is None  # grad should be None if fuse_wgrad_accumulation is True
+                else:
+                    outputs.append(p.grad)
     return outputs
 
 

@@ -799,7 +799,33 @@ class GroupedLinearV2(TransformerEngineBaseModule):
             del tensor_list
 
     def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
-        """Customize quantizers for Float8 current scaling"""
-        # Similar implementation to GroupedLinear
-        pass
+        """Customize quantizers based on current scaling recipe + linear."""
+        assert (
+            recipe.float8_current_scaling()
+        ), "current scaling recipe quantizer customization here"
+        if fwd:
+            for i in range(self.num_gemms):
+                # set configs about amax epsilon and power_2_scale
+                self.quantizers["scaling_fwd"][
+                    self._offsets["input"] + i * self._num_fp8_tensors_per_gemm["fwd"]
+                ].force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
+                self.quantizers["scaling_fwd"][
+                    self._offsets["input"] + i * self._num_fp8_tensors_per_gemm["fwd"]
+                ].amax_epsilon = recipe.fp8_quant_fwd_inp.amax_epsilon
+                # also set weight quantizer with same amax_epsilon & power_2_scale
+                self.quantizers["scaling_fwd"][
+                    self._offsets["weight"] + i * self._num_fp8_tensors_per_gemm["fwd"]
+                ].force_pow_2_scales = recipe.fp8_quant_fwd_weight.power_2_scale
+                self.quantizers["scaling_fwd"][
+                    self._offsets["weight"] + i * self._num_fp8_tensors_per_gemm["fwd"]
+                ].amax_epsilon = recipe.fp8_quant_fwd_weight.amax_epsilon
+        else:
+            for i in range(self.num_gemms):
+                # set grad_output_quantizer with amax epsilon and power_2_scale
+                self.quantizers["scaling_bwd"][
+                    self._offsets["input"] + i * self._num_fp8_tensors_per_gemm["bwd"]
+                ].force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
+                self.quantizers["scaling_bwd"][
+                    self._offsets["input"] + i * self._num_fp8_tensors_per_gemm["bwd"]
+                ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
 
