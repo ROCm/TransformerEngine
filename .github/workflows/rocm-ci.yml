@@ -98,6 +98,13 @@ jobs:
             -w /workspace \
             ${{ steps.select-image.outputs.image-tag}}
 
+      - name: Diagnostics
+        run: |
+          # On the runner
+          rocm-smi
+          # In the container
+          docker exec te-runner rocm-smi
+
       - name: Determine GPU Architecture via rocminfo
         id: gpu-arch
         run: |
