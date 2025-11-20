@@ -100,14 +100,20 @@ class _GroupedLinearV2(torch.autograd.Function):
         # Check if using Triton kernels
         use_grouped_gemm_triton = bool(int(os.environ.get('NVTE_USE_GROUPED_GEMM_TRITON', '0'))) and IS_HIP_EXTENSION
         
-        # For Triton, keep tensor concatenated; for others, split per expert
-        inputmats = torch.split(inp.view(-1, in_features), m_splits)
-        if fp8:
-            assert_dim_for_fp8_exec(*inputmats, *weights)
-
-        # Cast input to expected dtype
-        inputmats_no_fp8 = [cast_if_needed(mat, activation_dtype) for mat in inputmats]
-        inputmats = []
+        # For Triton non-FP8, keep tensor concatenated; for others, split per expert
+        if use_grouped_gemm_triton and not fp8:
+            # Keep concatenated for Triton non-FP8 (concatenation handled in grouped_gemm.py)
+            inp_reshaped = inp.view(-1, in_features)
+            inputmats_no_fp8 = [cast_if_needed(inp_reshaped, activation_dtype)]
+            inputmats = []
+        else:
+            # Split for FP8 or non-Triton paths
+            inputmats = torch.split(inp.view(-1, in_features), m_splits)
+            if fp8:
+                assert_dim_for_fp8_exec(*inputmats, *weights)
+            # Cast input to expected dtype
+            inputmats_no_fp8 = [cast_if_needed(mat, activation_dtype) for mat in inputmats]
+            inputmats = []
         
         weight_requires_grad = weight_stacked.requires_grad
 
@@ -271,33 +277,41 @@ class _GroupedLinearV2(torch.autograd.Function):
                     weight_stacked = w
             
             grad_output = grad_output.contiguous()
-            grad_output_mats = torch.split(
-                grad_output.view(-1, grad_output.shape[-1]), ctx.m_splits
-            )
-            grad_output = [None] * ctx.num_gemms
-            grad_biases = [None] * ctx.num_gemms
-            if ctx.fp8:
-                if ctx.use_bias:
-                    # unfuse bgrad for now until cast_transpose + dgrad calculation is ready
-                    # for Float8BlockQuantizer.
-                    if ctx.fp8_recipe.float8_block_scaling():
-                        for i in range(ctx.num_gemms):
-                            grad_biases[i] = grad_output_mats[i].sum(dim=0)
-                            grad_output[i] = ctx.grad_output_quantizers[i](grad_output_mats[i])
-                    else:
-                        for i in range(ctx.num_gemms):
-                            grad_biases[i], grad_output[i] = tex.bgrad_quantize(
-                                grad_output_mats[i], ctx.grad_output_quantizers[i]
-                            )
-                else:
-                    grad_output = tex.fused_multi_quantize(
-                        grad_output_mats,
-                        None,
-                        ctx.grad_output_quantizers,
-                        TE_DType[ctx.activation_dtype],
-                    )
+            
+            # For Triton non-FP8, keep tensor concatenated (concatenation handled in grouped_gemm.py)
+            if ctx.use_grouped_gemm_triton and not ctx.fp8:
+                grad_output_reshaped = grad_output.view(-1, grad_output.shape[-1])
+                grad_output = [grad_output_reshaped]
+                grad_biases = [None] * ctx.num_gemms
             else:
-                grad_output = grad_output_mats
+                # Split for FP8 or non-Triton paths
+                grad_output_mats = torch.split(
+                    grad_output.view(-1, grad_output.shape[-1]), ctx.m_splits
+                )
+                grad_output = [None] * ctx.num_gemms
+                grad_biases = [None] * ctx.num_gemms
+                if ctx.fp8:
+                    if ctx.use_bias:
+                        # unfuse bgrad for now until cast_transpose + dgrad calculation is ready
+                        # for Float8BlockQuantizer.
+                        if ctx.fp8_recipe.float8_block_scaling():
+                            for i in range(ctx.num_gemms):
+                                grad_biases[i] = grad_output_mats[i].sum(dim=0)
+                                grad_output[i] = ctx.grad_output_quantizers[i](grad_output_mats[i])
+                        else:
+                            for i in range(ctx.num_gemms):
+                                grad_biases[i], grad_output[i] = tex.bgrad_quantize(
+                                    grad_output_mats[i], ctx.grad_output_quantizers[i]
+                                )
+                    else:
+                        grad_output = tex.fused_multi_quantize(
+                            grad_output_mats,
+                            None,
+                            ctx.grad_output_quantizers,
+                            TE_DType[ctx.activation_dtype],
+                        )
+                else:
+                    grad_output = grad_output_mats
 
             if ctx.is_first_microbatch is not None:
                 accumulate_wgrad_into_param_main_grad = (
