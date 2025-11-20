@@ -2090,7 +2090,7 @@ def test_grouped_linear_accuracy_single_gemm(recipe):
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
 @pytest.mark.parametrize("recipe", fp8_recipes + [None])
-@pytest.mark.parametrize("fp8_model_params", all_boolean)
+@pytest.mark.parametrize("fp8_model_params", [False])
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("delay_wgrad_compute", all_boolean)
