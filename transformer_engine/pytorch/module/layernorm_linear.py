@@ -1810,3 +1810,4 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT1
                 ].amax_reduction_group = self.tp_group
+
