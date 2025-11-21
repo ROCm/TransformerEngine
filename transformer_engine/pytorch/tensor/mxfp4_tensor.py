@@ -14,7 +14,7 @@ from transformer_engine_torch import DType as TE_DType
 
 from ..constants import MXFP8_BLOCK_SCALING_SIZE  # MXFP4 uses same block size
 from ..utils import devices_match
-
+from ..utils import nvtx_range_push, nvtx_range_pop
 from ._internal.mxfp4_tensor_base import MXFP4TensorBase, _FromMXFP4Func
 from .quantized_tensor import QuantizedTensor, Quantizer
 
@@ -129,6 +129,7 @@ class MXFP4Quantizer(Quantizer):
 
             # Store columnwise quantized data (if needed)
             if dst._columnwise_data is not None:
+                nvtx_range_push("MXFP4Quantizer.update_quantized.columnwise")
                 # For columnwise, we need to transpose first, then quantize
                 # Columnwise quant == Quantize(Transpose(src), rowwise=True)
                 src_t = src.t().contiguous()
@@ -137,7 +138,7 @@ class MXFP4Quantizer(Quantizer):
                 )
                 dst._columnwise_data.copy_(fp4_data_t)
                 dst._columnwise_scale.copy_(e8m0_scale_t)
-
+                nvtx_range_pop("MXFP4Quantizer.update_quantized.columnwise")
         # Update FP4 dtype
         dst._fp4_dtype = self.dtype
         

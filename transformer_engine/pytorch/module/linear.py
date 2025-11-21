@@ -141,8 +141,7 @@ class _Linear(torch.autograd.Function):
         )
         own_quantized_input = False
         if fp8:
-            if os.getenv("NVTE_MXFP4_DEBUG_LEVEL") == "1":
-                print(f"type(inputmat): {type(inputmat)}, type(weight): {type(weight)}, backward_needs_input: {backward_needs_input}")
+
 
             assert_dim_for_fp8_exec(inputmat, weight)
             if any([ub_overlap_ag_fprop, ub_overlap_rs_fprop]) and not (
@@ -178,10 +177,6 @@ class _Linear(torch.autograd.Function):
                         columnwise=backward_needs_input,
                     )
                 if not isinstance(inputmat, QuantizedTensor):
-                    # quantize from bf16 to fp4 for fwd gemm
-                    # if is_mxfp4_enabled:
-                    #     inputmat_mxfp4 = input_quantizer_mxfp4(inputmat)
-                    # quantizer from bf16 to fp8 for wgrad
                     inputmat = input_quantizer(inputmat)
                     own_quantized_input = True
                     
@@ -311,6 +306,10 @@ class _Linear(torch.autograd.Function):
             )
             nvtx_range_pop(f"{nvtx_label}.gemm")
 
+        
+        # ------------------------------------------------------
+        # Cache state for backward pass
+        # ------------------------------------------------------
         if is_grad_enabled:
             saved_inputmat = None
 
