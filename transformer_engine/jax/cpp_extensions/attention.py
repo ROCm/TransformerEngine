@@ -30,7 +30,7 @@ from transformer_engine.jax.attention import (
     SequenceDescriptor,
 )
 
-from .misc import is_hip_extension
+from ..util import is_hip_extension
 from .base import BasePrimitive, register_primitive
 from .misc import (
     check_valid_batch_dims,

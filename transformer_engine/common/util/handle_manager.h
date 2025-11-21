@@ -11,13 +11,13 @@
 
 #include <vector>
 
+#ifndef __HIP_PLATFORM_AMD__
 #include "cuda_runtime.h"
 #include "logging.h"
-
-namespace transformer_engine::cuda {
-int current_device();                      
-int num_devices();                     
-}  // namespace transformer_engine::cuda
+#else
+#include "util/cuda_runtime.h"
+#include "util/logging.h"
+#endif
 
 namespace transformer_engine::detail {
 

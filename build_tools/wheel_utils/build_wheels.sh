@@ -43,7 +43,7 @@ if [ "$ROCM_BUILD" = "1" ]; then
 fi
 
 # Install deps
-/opt/python/cp310-cp310/bin/pip install cmake pybind11[global] ninja
+${PYBINDIR}pip install cmake pybind11[global] ninja
 
 if $BUILD_METAPACKAGE ; then
         cd /TransformerEngine
@@ -88,25 +88,25 @@ if $BUILD_COMMON ; then
 fi
 
 if $BUILD_PYTORCH ; then
-	cd /TransformerEngine/transformer_engine/pytorch
-	if [ "$ROCM_BUILD" = "1" ]; then
+  cd /TransformerEngine/transformer_engine/pytorch
+  if [ "$ROCM_BUILD" = "1" ]; then
     ${PYBINDIR}pip install torch --index-url https://download.pytorch.org/whl/rocm6.3
   else
     PYBINDIR=/opt/python/cp38-cp38/bin/
     ${PYBINDIR}pip install torch
   fi
   ${PYBINDIR}python setup.py sdist 2>&1 | tee /wheelhouse/logs/torch.txt
-	cp dist/* /wheelhouse/
+  cp dist/* /wheelhouse/
 fi
 
 if $BUILD_JAX ; then
-	cd /TransformerEngine/transformer_engine/jax
-	if [ "$ROCM_BUILD" = "1" ]; then
+  cd /TransformerEngine/transformer_engine/jax
+  if [ "$ROCM_BUILD" = "1" ]; then
     ${PYBINDIR}pip install jax
   else
     PYBINDIR=/opt/python/cp310-cp310/bin/
     ${PYBINDIR}pip install "jax[cuda12_local]" jaxlib
   fi
-	${PYBINDIR}python setup.py sdist 2>&1 | tee /wheelhouse/logs/jax.txt
-	cp dist/* /wheelhouse/
+  ${PYBINDIR}python setup.py sdist 2>&1 | tee /wheelhouse/logs/jax.txt
+  cp dist/* /wheelhouse/
 fi

@@ -14,7 +14,6 @@ from transformer_engine.common import recipe
 from transformer_engine.jax.util import is_hip_extension
 if is_hip_extension():
     from transformer_engine.jax.util import is_mi200
-=======
 import numpy as np
 
 

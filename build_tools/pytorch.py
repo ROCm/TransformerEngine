@@ -27,7 +27,7 @@ from typing import List
 
 def install_requirements() -> List[str]:
     """Install dependencies for TE/PyTorch extensions."""
-    reqs = ["torch>=2.1", "einops", "onnxscript"]
+    reqs = ["einops"]
     reqs.append(
         "nvdlfw-inspect @"
         " git+https://github.com/NVIDIA/nvidia-dlfw-inspect.git@v0.1#egg=nvdlfw-inspect"

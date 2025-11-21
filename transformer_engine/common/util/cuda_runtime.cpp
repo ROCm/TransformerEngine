@@ -158,7 +158,6 @@ bool supports_multicast(int device_id) {
 #endif
 }
 
-
 const std::string &include_directory(bool required) {
   static std::string path;
 
@@ -223,7 +222,6 @@ const std::string &include_directory(bool required) {
   // Return cached path
   return path;
 }
-#endif // __HIP_PLATFORM_AMD__
 
 int cudart_version() {
   auto get_version = []() -> int {
@@ -234,6 +232,7 @@ int cudart_version() {
   static int version = get_version();
   return version;
 }
+#endif // __HIP_PLATFORM_AMD__
 
 }  // namespace cuda
 

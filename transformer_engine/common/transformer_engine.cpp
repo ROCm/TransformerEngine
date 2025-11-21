@@ -26,9 +26,7 @@ size_t typeToNumBits(const DType type) {
 }
 
 size_t typeToSize(const DType type) {
-#ifndef __HIP_PLATFORM_AMD__
   NVTE_CHECK(type != DType::kFloat4E2M1, "typeToSize() Does not support FP4 data type.");
-#endif // #ifndef __HIP_PLATFORM_AMD__
   return typeToNumBits(type) / 8;
 }
 
@@ -48,10 +46,8 @@ std::string to_string(const DType type) {
       return "Float8E5M2";
     case DType::kFloat8E8M0:
       return "Float8E8M0";
-#ifndef __HIP_PLATFORM_AMD__
     case DType::kFloat4E2M1:
       return "Float4E2M1";
-#endif // #ifndef __HIP_PLATFORM_AMD__
     case DType::kInt16:
       return "Int16";
     case DType::kInt32:

@@ -1558,7 +1558,6 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   if (compute_stream_offset != -1) {
     // Init hipblaslt handles (once, globally)
     static std::once_flag init_flag;
-    // comply with upstream change in num_streams from constexpr int to int
     static std::vector<hipblasLtHandle_t> hipblaslt_handles(num_streams);
     std::call_once(init_flag, init_hipblaslt_handles, hipblaslt_handles.data());
 

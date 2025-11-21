@@ -46,11 +46,9 @@ DType convert_ffi_datatype_to_te_dtype(const xla::ffi::DataType &type) {
 #endif
       return DType::kFloat8E4M3;
       break;
-#ifndef USE_ROCM
     case xla::ffi::DataType::F8E8M0FNU:
       return DType::kFloat8E8M0;
       break;
-#endif
     default:
       auto type_num = static_cast<XLA_FFI_DataType>(type);
       NVTE_ERROR("TE does not support conversion of XLA_FFI_DataType %d",

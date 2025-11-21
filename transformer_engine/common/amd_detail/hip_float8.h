@@ -4,7 +4,6 @@
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 #pragma once
-
 #include <hip/hip_runtime.h>
 
 #if !defined(__HIP_DEVICE_COMPILE__)
