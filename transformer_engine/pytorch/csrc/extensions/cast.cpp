@@ -60,7 +60,7 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
     constexpr size_t max_blocks_hw = 65535;
 
     // Worst-case (nvec = 1) upper bound on number of blocks
-    size_t max_blocks = std::min(DIVUP(N, amax_kernel_threads), max_blocks_hw);
+    size_t max_blocks = std::min(DIVUP(N, static_cast<size_t>(amax_kernel_threads)), max_blocks_hw);
 
     // Allocate FP32 workspace for block-wise amax
     auto ws = at::empty({static_cast<long>(max_blocks)},

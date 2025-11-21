@@ -28,7 +28,7 @@ void compute_amax(const at::Tensor& tensor, at::Tensor& amax) {
   constexpr size_t max_blocks_hw = 65535;
 
   // Assume worst-case vectorization (nvec = 1) as an upper bound.
-  size_t max_blocks = std::min(DIVUP(static_cast<size_t>(N), amax_kernel_threads),
+  size_t max_blocks = std::min(DIVUP(static_cast<size_t>(N), static_cast<size_t>(amax_kernel_threads)),
                                max_blocks_hw);
 
   // Allocate workspace for the block_amax buffer.
