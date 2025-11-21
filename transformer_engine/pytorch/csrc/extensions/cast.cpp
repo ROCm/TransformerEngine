@@ -55,13 +55,12 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
     // my_quantizer here has to be a Float8CurrentScalingQuantizer
     auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
 
-    // workspace for nvte_compute_amax_with_workspace
+    // Workspace for nvte_compute_amax_with_workspace
     const auto N = static_cast<size_t>(input_tensor.numel());
-    constexpr size_t threads = 512;          // FIXME: should match amax_kernel_threads
     constexpr size_t max_blocks_hw = 65535;
 
-    // Worst-case (nvec = 1) upper bound on number of blocks.
-    size_t max_blocks = std::min(DIVUP(N, threads), max_blocks_hw);
+    // Worst-case (nvec = 1) upper bound on number of blocks
+    size_t max_blocks = std::min(DIVUP(N, amax_kernel_threads), max_blocks_hw);
 
     // Allocate FP32 workspace for block-wise amax
     auto ws = at::empty({static_cast<long>(max_blocks)},

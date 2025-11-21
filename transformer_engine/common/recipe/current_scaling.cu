@@ -27,9 +27,8 @@ using bf16__ = __nv_bfloat16;
 using bf16__ = __hip_bfloat16;
 #endif //__HIP_PLATFORM_AMD__
 
-constexpr int amax_kernel_threads = 512;
 
-inline bool nvte_use_atomic_amax() {
+static inline bool nvte_use_atomic_amax() {
   static int cached = -1;
   if (cached == -1) {
     cached = 0;

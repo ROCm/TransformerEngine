@@ -97,6 +97,9 @@ void nvte_compute_amax_with_workspace(const NVTETensor input_, const NVTETensor 
  *  \param[in]     config           Quantization configuration.
  *  \param[in]     stream           CUDA stream used for the operation.
  */
+
+constexpr int amax_kernel_threads = 512;
+
 void nvte_compute_scale_from_amax(NVTETensor output, const NVTEQuantizationConfig config,
                                   cudaStream_t stream);
 
