@@ -169,8 +169,7 @@ class _Linear(torch.autograd.Function):
         inputmat_total = None  # Input tensor to pass to GEMM (gathered)
         own_quantized_input = False
         if fp8:
-            if os.getenv("NVTE_MXFP4_DEBUG_LEVEL") == "1":
-                print(f"type(inputmat): {type(inputmat)}, type(weight): {type(weight)}, backward_needs_input: {backward_needs_input}")
+
 
             assert_dim_for_fp8_exec(inputmat, weight)
             if save_original_input:
@@ -229,7 +228,6 @@ class _Linear(torch.autograd.Function):
                         columnwise=backward_needs_input,
                     )
                 if not isinstance(inputmat, QuantizedTensor):
-                    # quantizer from bf16 to fp8 for wgrad
                     inputmat = input_quantizer(inputmat)
                     own_quantized_input = True
                     
@@ -405,6 +403,10 @@ class _Linear(torch.autograd.Function):
         # Cache state for backward pass
         # ------------------------------------------------------
 
+        
+        # ------------------------------------------------------
+        # Cache state for backward pass
+        # ------------------------------------------------------
         if is_grad_enabled:
             if save_original_input:
                 inputmat = inp
