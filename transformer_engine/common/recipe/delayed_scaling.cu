@@ -36,10 +36,8 @@ inline float fp8_dtype_max(DType dtype) {
     case DType::kFloat8E4M3:
 #ifndef __HIP_PLATFORM_AMD__
       return 448;
-#elif HIP_VERSION >= 60300000
-      return te_fp8_fnuz() ? 240 : 448;
 #else
-      return 240; // default to true for older versions compatibility
+      return te_fp8_fnuz() ? 240 : 448;
 #endif
     case DType::kFloat8E5M2:
       return 57344;

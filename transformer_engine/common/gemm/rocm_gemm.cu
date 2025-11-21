@@ -173,17 +173,10 @@ static hipDataType get_hipblaslt_dtype(const transformer_engine::DType t) {
       return HIP_R_32F;
     case DType::kBFloat16:
       return HIP_R_16BF;
-#if HIP_VERSION >= 60300000
     case DType::kFloat8E4M3:
       return te_fp8_fnuz() ? HIP_R_8F_E4M3_FNUZ : HIP_R_8F_E4M3;
     case DType::kFloat8E5M2:
       return te_fp8_fnuz() ? HIP_R_8F_E5M2_FNUZ: HIP_R_8F_E5M2;
-#else
-    case DType::kFloat8E4M3:
-      return HIP_R_8F_E4M3_FNUZ;
-    case DType::kFloat8E5M2:
-      return HIP_R_8F_E5M2_FNUZ;
-#endif
     default:
       NVTE_ERROR("Invalid type");
   }
@@ -489,10 +482,8 @@ static std::unordered_map<hipDataType, std::string_view> type_name_map = {
   {HIP_R_16BF, "bfloat16"},
   {HIP_R_8F_E4M3_FNUZ, "float8e4m3"},
   {HIP_R_8F_E5M2_FNUZ, "float8e5m2"},
-#if HIP_VERSION >= 60300000
   {HIP_R_8F_E4M3, "float8e4m3"},
   {HIP_R_8F_E5M2, "float8e5m2"},
-#endif
 };
 static NameMapper<hipDataType> typeNameMapper(type_name_map);
 
@@ -786,16 +777,12 @@ protected:
         continue;
       }
 
-#if HIP_VERSION >= 60300000
       auto fp8_filter = te_fp8_fnuz()
                             ? [](const hipDataType& val) 
                                 { return (val != HIP_R_8F_E4M3 && val != HIP_R_8F_E5M2); }
                             : [](const hipDataType& val) {
                                 return (val != HIP_R_8F_E4M3_FNUZ && val != HIP_R_8F_E5M2_FNUZ);
                               };
-#else
-      auto fp8_filter = nullptr;
-#endif
 
       cfg.a_type = typeNameMapper.getValue(type_a, "type_a", fp8_filter);
       cfg.b_type = typeNameMapper.getValue(type_b, "type_b", fp8_filter);

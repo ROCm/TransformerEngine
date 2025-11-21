@@ -42,17 +42,9 @@ static inline bool te_fp8_fnuz() {
 #ifdef __HIPCC__
 
 #include <hip/hip_version.h> //For RTC it should be included explicitly
-
-#if defined(__HIP_DEVICE_COMPILE__) && HIP_VERSION < 60300000
-static constexpr inline bool te_fp8_fnuz() { return true; }
-#endif
-
 #include <hip/hip_fp8.h>
 
-#if HIP_VERSION >= 60300000
 #if !defined(__HIP_DEVICE_COMPILE__)
-
-#define TE_DYNAMIC_HIP_FP8_TYPE 1
 
 /* Device methods in _te_hip_fp8 are dummy and are needed for compilation
 * because HIPCC compiles __device__ and __global__ functions for host.
@@ -89,11 +81,6 @@ static constexpr inline bool te_fp8_fnuz() { return false; }
 #else
 #error "Unsupported HIP_FP8_TYPE"
 #endif //__HIP_DEVICE_COMPILE__
-
-#else //HIP_VERSION >= 60300000
-typedef __hip_fp8_e4m3_fnuz _te_hip_fp8_e4m3;
-typedef __hip_fp8_e5m2_fnuz _te_hip_fp8_e5m2;
-#endif //HIP_VERSION >= 60300000
 
 struct te_hip_fp8_e4m3 {  
   _te_hip_fp8_e4m3 data;
