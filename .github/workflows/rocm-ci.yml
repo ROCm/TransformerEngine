@@ -149,7 +149,7 @@ jobs:
 
           docker exec \
             -e TEST_SGPU=1 \
-            -e TEST_LEVEL=${{ inputs.test_level || '1' }} \
+            -e TEST_LEVEL=${{ inputs.test_level || '3' }} \
             te-runner bash -c "$(cat <<'EOF'
           #!/usr/bin/bash
           set -x -o pipefail
@@ -216,7 +216,7 @@ jobs:
         run: |
           docker exec \
             -e TEST_MGPU=1 \
-            -e TEST_LEVEL=${{ inputs.test_level || '1' }} \
+            -e TEST_LEVEL=${{ inputs.test_level || '3' }} \
             te-runner bash -c "$(cat <<'EOF'
           #!/usr/bin/bash
           set -x -o pipefail
