@@ -421,8 +421,6 @@ else()
                               string_code_transpose_rtc_transpose_cu)
   make_string_header_from_file(amd_detail/hip_float8.h
                                string_code_amd_detail_hip_float8_h)
-  make_string_header_from_file(amd_detail/hip_f8_impl.h
-                               string_code_amd_detail_hip_f8_impl_h)
 endif()
 make_string_header_from_file(util/math.h
                              string_code_util_math_h)
