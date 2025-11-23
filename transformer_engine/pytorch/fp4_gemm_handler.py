@@ -8,27 +8,7 @@ from .tensor._internal.float8_tensor_base import Float8TensorBase
 from .hadamard import HadamardFactory, HadamardTransform
 # Configure Hadamard for MXFP (block_size=32, deterministic)
 HadamardFactory.configure(block_size=32, randomized=False)
-
-def print_tensor_sparsity(tensor, name="Tensor"):
-    """
-    Simple function to print sparsity of a tensor.
-    """
-    if tensor is None:
-        print(f"{name}: None")
-        return
-
-    # Calculate sparsity
-    total_elements = tensor.numel()
-    zero_elements = (tensor == 0).sum().item()
-    sparsity_percent = (zero_elements / total_elements) * 100
-
-    # Print info
-    print(f"\n{name} Sparsity Info:")
-    print(f"  Shape: {tensor.shape}")
-    print(f"  Total elements: {total_elements:,}")
-    print(f"  Zero elements: {zero_elements:,}")
-    print(f"  Sparsity: {sparsity_percent:.2f}%")
-    print(f"  Non-zero elements: {total_elements - zero_elements:,} ({100-sparsity_percent:.2f}%)")
+ 
 
 def _dequantize_tensor(tensor):
 
