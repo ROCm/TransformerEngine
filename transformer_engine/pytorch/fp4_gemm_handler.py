@@ -2,14 +2,33 @@
 import torch
 import aiter
 from aiter.ops.shuffle import shuffle_weight
-
+ 
 from .tensor.quantized_tensor import QuantizedTensor
 from .tensor._internal.float8_tensor_base import Float8TensorBase
-
 from .hadamard import HadamardFactory, HadamardTransform
-
 # Configure Hadamard for MXFP (block_size=32, deterministic)
 HadamardFactory.configure(block_size=32, randomized=False)
+
+def print_tensor_sparsity(tensor, name="Tensor"):
+    """
+    Simple function to print sparsity of a tensor.
+    """
+    if tensor is None:
+        print(f"{name}: None")
+        return
+
+    # Calculate sparsity
+    total_elements = tensor.numel()
+    zero_elements = (tensor == 0).sum().item()
+    sparsity_percent = (zero_elements / total_elements) * 100
+
+    # Print info
+    print(f"\n{name} Sparsity Info:")
+    print(f"  Shape: {tensor.shape}")
+    print(f"  Total elements: {total_elements:,}")
+    print(f"  Zero elements: {zero_elements:,}")
+    print(f"  Sparsity: {sparsity_percent:.2f}%")
+    print(f"  Non-zero elements: {total_elements - zero_elements:,} ({100-sparsity_percent:.2f}%)")
 
 def _dequantize_tensor(tensor):
 
@@ -23,7 +42,7 @@ def _dequantize_tensor(tensor):
 def _quantize_to_fp4(tensor ):
    
     quant_func = aiter.get_triton_quant(aiter.QuantType.per_1x32)
-    fp4_data, scales = quant_func(tensor, shuffle=True)
+    fp4_data, scales = quant_func(tensor, shuffle=True )
     return fp4_data, scales
 
 
@@ -84,13 +103,19 @@ def fp4_gemm(
     main_grad=None,
     fuse_wgrad_accumulation=False,
     accumulate_wgrad_into_param_main_grad=False,
- 
+    # New parameters for pre-computed FP4 weights, inputs and grad_output
+    weight_fp4_t=None,
+    weight_scales_t=None,
+    input_fp4_t=None,
+    input_scales_t=None,
+    grad_fp4_t=None,
+    grad_scales_t=None,
 ):
  
     #TODO: # define False if type is float8 tensor
     fp4_tensor = False
 
-    use_hadamard=True  
+    #use_hadamard=True
 
 
     if pass_type == 'fwd':
@@ -99,19 +124,16 @@ def fp4_gemm(
             # Forward pass: output = input @ weight^T + bias
             input_hp = _dequantize_tensor(input_tensor)
             weight_hp = _dequantize_tensor(weight)
-
-            # Apply Hadamard transform to BOTH input and weights
-            # right multiply) so left_mul=False
-            hadamard_transform = None
-            if use_hadamard:
-                
-                hadamard_transform = HadamardFactory.create_transform(device=input_hp.device)
-                input_hp = hadamard_transform(input_hp, left_mul=False, inverse=False)
-                weight_hp = hadamard_transform(weight_hp, left_mul=False, inverse=False)
-
+           
             # Quantize to FP4
             input_fp4, input_scales = _quantize_to_fp4(input_hp   )
+            input_hp_t=input_hp.T
+            input_fp4_t, input_scales_t = _quantize_to_fp4(input_hp_t)
+
+
             weight_fp4, weight_scales = _quantize_to_fp4(weight_hp   )
+            weight_hp_t = weight_hp.T
+            weight_fp4_t, weight_scales_t = _quantize_to_fp4(weight_hp_t)
 
             # Perform FP4 GEMM
             result = _fp4_gemm_core(input_fp4, input_scales, weight_fp4, weight_scales, out_dtype=out_dtype)
@@ -133,31 +155,25 @@ def fp4_gemm(
         # Handle output quantization
         if output_quantizer is not None:
             return output_quantizer(result)
-        return result
+        return result,weight_fp4_t,weight_scales_t,input_fp4_t,input_scales_t
 
     elif pass_type == 'dgrad':
 
         if not fp4_tensor:
             # Dgrad pass: grad_input = grad_output @ weight
-            weight_hp = _dequantize_tensor(weight)
-            weight_hp_t = weight_hp.T
+
+
             grad_output_hp = _dequantize_tensor(grad_output)
+            grad_output_hp_t = grad_output_hp.T
 
-            # Apply Hadamard transform to grad_output and weight (right multiply)
-            hadamard_transform = None
-            if use_hadamard:
-                hadamard_transform = HadamardFactory.create_transform(device=grad_output_hp.device)
-                # Apply H to grad_output: grad_output @ H
-                grad_output_hp = hadamard_transform(grad_output_hp, left_mul=False, inverse=False)
-                # Apply H to weight^T: weight^T @ H
-                weight_hp_t = hadamard_transform(weight_hp_t, left_mul=False, inverse=False)
-
-            # Quantize to FP4
-            grad_fp4, grad_scales = _quantize_to_fp4(grad_output_hp)
-            weight_fp4, weight_scales = _quantize_to_fp4(weight_hp_t)
+            # Quantize to FP4 - use mode 1 for grad_output with same min/max
+            grad_fp4_t, grad_scales_t = _quantize_to_fp4(grad_output_hp_t )
+            # Quantize to FP4 - use mode 1 for grad_output with same min/max
+            grad_fp4, grad_scales = _quantize_to_fp4(grad_output_hp )
+    
 
             # Perform FP4 GEMM
-            result = _fp4_gemm_core(grad_fp4, grad_scales, weight_fp4, weight_scales, out_dtype=out_dtype, out_buffer=dgrad_bulk)
+            result = _fp4_gemm_core(grad_fp4, grad_scales, weight_fp4_t, weight_scales_t, out_dtype=out_dtype, out_buffer=dgrad_bulk)
 
  
              
@@ -172,7 +188,7 @@ def fp4_gemm(
         # Handle output quantization
         if grad_input_quantizer is not None:
             return grad_input_quantizer(result)
-        return result
+        return result,grad_fp4_t,grad_scales_t
 
     elif pass_type == 'wgrad':
         # Wgrad pass: wgrad = grad_output^T @ input
@@ -180,36 +196,13 @@ def fp4_gemm(
         #TODO: make this more efficient
         # Dequantize and transpose input
         if not fp4_tensor:
-            if input_tensor._data is not None:
-                input_hp_t = _dequantize_tensor(input_tensor).T
-            elif hasattr(input_tensor, '_transpose') and input_tensor._transpose is not None:
-                # Swap to dequantize transpose directly
-                saved_data = input_tensor._data
-                input_tensor._data = input_tensor._transpose
-                input_hp_t = input_tensor.dequantize()
-                input_tensor._data = saved_data
-    
-            # Dequantize and transpose grad_output
-            grad_output_hp = _dequantize_tensor(grad_output)
-            grad_output_hp_t = grad_output_hp.T
-
-            # Apply Hadamard transform to grad_output^T and input^T (right multiply)
-            hadamard_transform = None
-            if use_hadamard:
-                hadamard_transform = HadamardFactory.create_transform(device=input_hp_t.device)
-                # Apply H to grad_output^T: grad_output^T @ H
-                grad_output_hp_t = hadamard_transform(grad_output_hp_t, left_mul=False, inverse=False)
-                # Apply H to input^T: input^T @ H
-                input_hp_t = hadamard_transform(input_hp_t, left_mul=False, inverse=False)
-
-            # Quantize to FP4
-            grad_fp4, grad_scales = _quantize_to_fp4(grad_output_hp_t)
-            input_fp4, input_scales = _quantize_to_fp4(input_hp_t)
-
+ 
             # Perform FP4 GEMM
-            result = _fp4_gemm_core(grad_fp4, grad_scales, input_fp4, input_scales, out_dtype=out_dtype)
+            result = _fp4_gemm_core(grad_fp4_t, grad_scales_t, input_fp4_t, input_scales_t, out_dtype=out_dtype)
 
-
+            
+                
+   
 
         else:
             pass
