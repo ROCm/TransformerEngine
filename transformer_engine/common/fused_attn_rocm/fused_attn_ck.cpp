@@ -633,7 +633,6 @@ void fused_attn_ck_fwd_impl(
   void* devPtrCuSeqlenPaddedQ = devPtrSeqOffsetsQ;
   void* devPtrCuSeqlenPaddedKV = devPtrSeqOffsetsKV;
 
-
   // next h*max_tokens_q*sizeof(float) in workspace are for lse buffer
   devPtrSoftmaxLSEWithoutPadding = workspace_next;
   workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + h*max_tokens_q*sizeof(float));
@@ -838,7 +837,6 @@ void fused_attn_ck_bwd_impl(
   bool nvte_ck_uses_bwd_v3 = getenv<int>("NVTE_CK_USES_BWD_V3", 0);
   bool nvte_ck_is_v3_atomic_fp32 = getenv<int>("NVTE_CK_IS_V3_ATOMIC_FP32", 1);
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
-  bool nvte_ck_zero_out_pad = getenv<int>("NVTE_CK_ZERO_OUT_PAD", 1);
 
   bool is_mqa_gqa = (h > hg);
 
@@ -927,7 +925,7 @@ void fused_attn_ck_bwd_impl(
   }else{
     // HD_2HD, HD_H2D, HD_HD_HD can just memset dq itself
     NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdQ, 0, q_storage_bytes, stream));
-    if(is_padding && nvte_ck_zero_out_pad){
+    if(is_padding){
       if(layout_group==NVTE_QKV_Layout_Group::NVTE_HD_2HD ||layout_group==NVTE_QKV_Layout_Group::NVTE_HD_H2D){
         //kvpacked
         NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdK, 0, k_storage_bytes + v_storage_bytes, stream));
