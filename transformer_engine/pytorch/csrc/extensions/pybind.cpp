@@ -303,6 +303,25 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("nvshmem_finalize", &transformer_engine::pytorch::nvshmem_finalize,
         "Clean up and finalize the NVSHMEM communication backend and free associated resources",
         py::call_guard<py::gil_scoped_release>());
+#else
+  // nvshmem/rocshmem wrappers      
+  m.def("init_nvshmem_backend", &transformer_engine::pytorch::init_rocshmem_backend,
+        "Initialize ROCSHMEM backend with Pytorch distributed process groups",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("create_nvshmem_tensor", &transformer_engine::pytorch::create_rocshmem_tensor,
+        "Create a tensor in ROCSHMEM shared memory", py::call_guard<py::gil_scoped_release>());
+  m.def("nvshmem_send_on_current_stream",
+        &transformer_engine::pytorch::rocshmem_send_on_current_stream,
+        "Asynchronously send tensor data to a remote PE using ROCSHMEM on the current HIP stream",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("nvshmem_wait_on_current_stream",
+        &transformer_engine::pytorch::rocshmem_wait_on_current_stream,
+        "Wait for a signal value to be updated by a remote PE using ROCSHMEM on the current HIP "
+        "stream",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("nvshmem_finalize", &transformer_engine::pytorch::rocshmem_finalize,
+        "Clean up and finalize the ROCSHMEM communication backend and free associated resources",
+        py::call_guard<py::gil_scoped_release>());
 #endif
 
   // multi-tensor functions
