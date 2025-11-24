@@ -94,6 +94,14 @@ def setup_pytorch_extension(
         libraries.append("nvshmem_host")
         cxx_flags.append("-DNVTE_ENABLE_NVSHMEM")
 
+    if bool(int(os.getenv("NVTE_ENABLE_ROCSHMEM", 0))):
+        cxx_flags.append("-DNVTE_ENABLE_ROCSHMEM")
+        mpi_home = Path(os.getenv("MPI_HOME", "/usr/lib/x86_64-linux-gnu/openmpi"))
+        include_dirs.append(mpi_home / "include")
+        library_dirs.append(mpi_home / "lib")
+        libraries.append("mpi_cxx")
+
+
     # Construct PyTorch CUDA extension
     sources = [str(path) for path in sources]
     include_dirs = [str(path) for path in include_dirs]
