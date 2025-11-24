@@ -43,7 +43,7 @@ jobs:
           fetch-depth: 0
         
       - name: Merge origin/dev
-        # Only run on PRs targeting dev, or manual runs where we didn't skip  it
+        # Only run on PRs targeting dev, or manual runs where we didn't skip it
         if: |
           (github.event_name == 'pull_request' && github.base_ref == 'dev') ||
           (github.event_name == 'workflow_dispatch' && inputs.skip_dev_merge != 'true' && github.ref == 'refs/heads/dev')
@@ -286,34 +286,37 @@ jobs:
         if: always()
         run: |
           EXIT_STATUS=0
-
           # Check outcomes of the specific test steps
           # "outcome" will be 'failure' even if continue-on-error was true
+
           # sGPU CHECKS
-          if [[ "${{ steps.sgpu-tests.outputs.core }}" == "fail" ]]; then
+          # We check for the file existence directly because the 'Run sGPU tests' step 
+          # halts immediately on docker failure, skipping the lines that set step outputs.
+          if [[ -f FAIL_CORE_SGPU ]]; then
             echo "::error::Core sGPU Tests Failed."
             EXIT_STATUS=1
           fi
-          if [[ "${{ steps.sgpu-tests.outputs.torch }}" == "fail" ]]; then
+          if [[ -f FAIL_TORCH_SGPU ]]; then
             echo "::error::PyTorch sGPU Tests Failed."
             EXIT_STATUS=1
           fi
-          if [[ "${{ steps.sgpu-tests.outputs.jax }}" == "fail" ]]; then
+          if [[ -f FAIL_JAX_SGPU ]]; then
             echo "::error::JAX sGPU Tests Failed."
             EXIT_STATUS=1
           fi
-
+          
           # mGPU CHECKS
-          if [[ "${{ steps.mgpu-tests.outputs.torch }}" == "fail" ]]; then
+          if [[ -f FAIL_TORCH_MGPU ]]; then
             echo "::error::PyTorch mGPU Tests Failed."
             EXIT_STATUS=1
           fi
-          if [[ "${{ steps.mgpu-tests.outputs.jax }}" == "fail" ]]; then
+          if [[ -f FAIL_JAX_MGPU ]]; then
             echo "::error::JAX mGPU Tests Failed."
             EXIT_STATUS=1
           fi
 
           # EXAMPLES CHECK
+          # Examples script does not use marker files, so we rely on step outcome
           if [[ "${{ steps.examples-tests.outcome }}" == "failure" ]]; then
             echo "::error::Example Tests Failed."
             EXIT_STATUS=1
