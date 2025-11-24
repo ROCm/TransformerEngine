@@ -28,18 +28,6 @@ using bf16__ = __hip_bfloat16;
 #endif //__HIP_PLATFORM_AMD__
 
 
-static inline bool nvte_use_atomic_amax() {
-  static int cached = -1;
-  if (cached == -1) {
-    cached = 0;
-    const char *env_p = std::getenv("NVTE_USE_ATOMIC_AMAX");
-    if (env_p && std::string(env_p) == "1") {
-      cached = 1;
-    }
-  }
-  return cached == 1;
-}
-
 template <int BLOCK_THREADS>
 __global__ void amax_final_reduce(const float* __restrict__ block_amax,
                                   float* __restrict__ global_amax,

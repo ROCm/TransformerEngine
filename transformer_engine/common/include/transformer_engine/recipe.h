@@ -75,6 +75,20 @@ void nvte_delayed_scaling_recipe_amax_and_scale_update_after_reduction(
     std::vector<NVTETensor> scales, const char* amax_compute_algo, NVTEDType fp8_dtype,
     float margin, cudaStream_t stream);
 
+constexpr int amax_kernel_threads = 512;
+
+inline bool nvte_use_atomic_amax() {
+  static int cached = -1;
+  if (cached == -1) {
+    cached = 0;
+    const char *env_p = std::getenv("NVTE_USE_ATOMIC_AMAX");
+    if (env_p && std::string(env_p) == "1") {
+      cached = 1;
+    }
+  }
+  return cached == 1;
+}
+
 /*! \brief Compute an FP8 tensor's amax.
  *
  *  The amax (maximum absolute value) of the input tensor is computed
@@ -97,8 +111,6 @@ void nvte_compute_amax_with_workspace(const NVTETensor input_, const NVTETensor 
  *  \param[in]     config           Quantization configuration.
  *  \param[in]     stream           CUDA stream used for the operation.
  */
-
-constexpr int amax_kernel_threads = 512;
 
 void nvte_compute_scale_from_amax(NVTETensor output, const NVTEQuantizationConfig config,
                                   cudaStream_t stream);
