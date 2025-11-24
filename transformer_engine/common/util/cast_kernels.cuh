@@ -999,8 +999,10 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
               TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
                   output->dtype(), OType,
 #ifdef __HIP_PLATFORM_AMD__
-                  cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
-                                       SCALE_DIM_Y, SCALE_DIM_X><<<grid, block, 0, stream>>>(
+                TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                  !(cols % (32 * sizeof(IType))), IS_ALIGNED,
+                    cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                                         SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED><<<grid, block, 0, stream>>>(
                       reinterpret_cast<const IType *>(input.data.dptr), 
                       (IS_DACT) ? reinterpret_cast<const IType *>(act_input->data.dptr) : nullptr,
                       reinterpret_cast<OType *>(output->data.dptr),
@@ -1051,6 +1053,9 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
           );           // NOLINT(*)
       );               // NOLINT(*)
   );                   // NOLINT(*)
+#ifdef __HIP_PLATFORM_AMD__
+  );                   // NOLINT(*)
+#endif
 }
 
 namespace detail {
@@ -1201,7 +1206,6 @@ void fp8_quantize_arch_ge_100(const Tensor &input, const Tensor *act_input, cons
       NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
   }
 }
-#endif //#ifndef __HIP_PLATFORM_AMD__
 
 // Supported by the Arch < 10.0
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
@@ -1227,6 +1231,7 @@ void fp8_quantize_arch_l_100(const Tensor &input, const Tensor *act_input, const
       NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
   }
 }
+#endif //#ifndef __HIP_PLATFORM_AMD__
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
@@ -1251,17 +1256,19 @@ void fp8_quantize(const Tensor &input, const Tensor *act_input, const Tensor *no
   NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
 
 #ifndef __HIP_PLATFORM_AMD__
+  // NVIDIA
   // Supported by the Arch >= 10.0
   if (is_supported_by_CC_100()) {
     fp8_quantize_arch_ge_100<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
                                                                      dbias, workspace, stream);
-  } else {
-#endif //#ifndef __HIP_PLATFORM_AMD__
-    // Supported by the Arch < 10.0
+  } else { // Supported by the Arch < 10.0
     fp8_quantize_arch_l_100<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
                                                                     dbias, workspace, stream);
-#ifndef __HIP_PLATFORM_AMD__
   }
+#else
+  // AMD
+  fp8_quantize_rocm<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
+                                                            dbias, workspace, stream);
 #endif //#ifndef __HIP_PLATFORM_AMD__
 }
 

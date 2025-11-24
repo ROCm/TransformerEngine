@@ -535,7 +535,8 @@ def hipify(base_dir, src_dir, sources, include_dirs):
         extra_files=[],
         is_pytorch_extension=True,
         hipify_extra_files_only=False,
-        show_detailed=False)
+        show_detailed=False,
+        no_math_replace=True)
 
     # Because hipify output_directory == project_directory
     # Original sources list may contain previous hipifying results that ends up with duplicated entries

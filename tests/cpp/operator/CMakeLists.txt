@@ -19,6 +19,8 @@ list(APPEND test_cuda_sources
             test_cast_transpose_dbias.cu
             test_cast_transpose_dbias_dgelu.cu
             test_cast_transpose_dgeglu.cu
+            test_cast_dbias.cu
+            test_cast_dbias_dgelu.cu
             test_act.cu
             test_normalization.cu
             test_normalization_mxfp8.cu
@@ -29,9 +31,7 @@ list(APPEND test_cuda_sources
 	          ../test_common.cu)
 if(USE_CUDA)
   list(APPEND test_cuda_sources
-              test_cast_float8blockwise.cu
-              test_cast_dbias.cu
-              test_cast_dbias_dgelu.cu)
+              test_cast_float8blockwise.cu)
 else()
   list(APPEND test_cuda_sources
               test_cublaslt_gemm.cu)
@@ -60,6 +60,7 @@ else()
   hipify(CUDA_SOURCE_DIR ${cuda_source_dir} 
     HEADER_INCLUDE_DIR ${header_include_dir}
     CUSTOM_MAP_FILE "${TE}/hipify_custom_map.json"
+    NO_MATH_REPLACE
   )
   get_hipified_list("${test_cuda_sources}" test_hip_sources)
   message("${message_line}")

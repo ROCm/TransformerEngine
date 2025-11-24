@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -8,6 +10,7 @@ import warnings
 
 import functools
 import torch
+import os
 
 import transformer_engine_torch as tex
 
@@ -49,6 +52,7 @@ from ..tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 __all__ = ["GroupedLinear"]
 
@@ -125,9 +129,20 @@ class _GroupedLinear(torch.autograd.Function):
             recipe = FP8GlobalStateManager.get_fp8_recipe()
             if hasattr(recipe, "fp8_gemm_fprop"):
                 fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
-            inputmats = tex.fused_multi_quantize(
-                inputmats_no_fp8, None, input_quantizers, TE_DType[activation_dtype]
-            )
+
+            if IS_HIP_EXTENSION and bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) ):
+                # The Triton path has no equivalent for tex.fused_multi_quantize()
+                inputmats = []
+                for i, x in enumerate(inputmats_no_fp8):
+                    qi = input_quantizers[i]
+                    dst = qi.make_empty(x.shape, dtype=x.dtype, device=x.device, requires_grad=False)
+                    qi.update_quantized(x, dst, noop_flag=None)
+                    inputmats.append(dst)
+            else:
+                inputmats = tex.fused_multi_quantize(
+                    inputmats_no_fp8, None, input_quantizers, TE_DType[activation_dtype]
+                )
+
             weights_fp8 = []
             bias_dtype = torch.bfloat16 if activation_dtype == torch.float32 else activation_dtype
             # FP8 cast to workspace buffer
