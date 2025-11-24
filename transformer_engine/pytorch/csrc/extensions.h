@@ -395,6 +395,20 @@ void nvshmem_send_on_current_stream(at::Tensor src, at::Tensor dst, int peer, at
 void nvshmem_wait_on_current_stream(at::Tensor signal, const std::string &wait_kind);
 
 void nvshmem_finalize();
+#else
+/***************************************************************************************************
+ * ROCSHMEM APIs
+ **************************************************************************************************/
+
+void init_rocshmem_backend(c10d::ProcessGroup *process_group);
+
+at::Tensor create_rocshmem_tensor(const std::vector<int64_t> &shape, c10::ScalarType dtype);
+
+void rocshmem_send_on_current_stream(at::Tensor src, at::Tensor dst, int peer, at::Tensor signal);
+
+void rocshmem_wait_on_current_stream(at::Tensor signal, const std::string &wait_kind);
+
+void rocshmem_finalize();
 #endif
 
 }  // namespace transformer_engine::pytorch

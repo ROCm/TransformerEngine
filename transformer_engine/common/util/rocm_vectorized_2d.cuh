@@ -10,13 +10,11 @@
 
 namespace transformer_engine {
 // These 2d copy functions replace TMA tensormap async copies for AMD GPUs.
-template <typename T, int N_VEC, bool aligned = false>
+template <typename T, int N_VEC, bool ALIGNED_ACCESS>
 __device__ inline void copy_2d_to_shared(T *sh_ptr_base, const T *g_ptr, size_t g_start_col,
                                           size_t g_start_row, size_t g_stride, size_t chunk_dim_y,
                                           size_t chunk_dim_x, size_t total_rows,
                                           size_t total_cols) {
-// TODO: Manage edge cases where "aligned = true" causes into issues
-    constexpr bool ALIGNED_ACCESS = aligned;
     size_t chunk_dim_x_vec_elements = (chunk_dim_x + N_VEC - 1) / N_VEC;
     const size_t l_idx = threadIdx.x;
 
@@ -51,12 +49,11 @@ __device__ inline void copy_2d_to_shared(T *sh_ptr_base, const T *g_ptr, size_t 
     }
 }
 
-template <typename T, int N_VEC, bool aligned = false>
+template <typename T, int N_VEC, bool ALIGNED_ACCESS>
 __device__ inline void bulk_tensor_2d_shared_to_global(const T *sh_ptr_base, T *g_ptr, size_t g_start_col,
                                                          size_t g_start_row, size_t g_stride, size_t chunk_dim_y,
                                                          size_t chunk_dim_x, size_t total_rows,
                                                          size_t total_cols) {
-  constexpr bool ALIGNED_ACCESS = aligned;
   const size_t chunk_dim_x_vec_elements = (chunk_dim_x + N_VEC - 1) / N_VEC;
   const size_t l_idx = threadIdx.x;
 
