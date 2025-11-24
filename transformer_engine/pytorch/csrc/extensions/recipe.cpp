@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -23,11 +25,10 @@ void compute_amax(const at::Tensor& tensor, at::Tensor& amax) {
 
   // Compute an upper bound on the number of blocks for this input.
   const auto N = input_tensor.numel();
-  constexpr size_t threads = 512;  // FIXME: should grab amax_kernel_threads here
   constexpr size_t max_blocks_hw = 65535;
 
   // Assume worst-case vectorization (nvec = 1) as an upper bound.
-  size_t max_blocks = std::min(DIVUP(static_cast<size_t>(N), threads),
+  size_t max_blocks = std::min(DIVUP(static_cast<size_t>(N), static_cast<size_t>(amax_kernel_threads)),
                                max_blocks_hw);
 
   // Allocate workspace for the block_amax buffer.
