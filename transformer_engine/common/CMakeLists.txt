@@ -238,7 +238,9 @@ else()
       IGNORES "*/amd_detail/*"
       IGNORES "*/aotriton/*"
       IGNORES "*/ck_fused_attn/*"
+      IGNORES "*/rocshmem_api/*"
       CUSTOM_MAP_FILE "${TE}/hipify_custom_map.json"
+      NO_MATH_REPLACE
   )
   get_hipified_list("${transformer_engine_SOURCES}" te_hip_sources)
   message("${message_line}")
@@ -293,15 +295,15 @@ else()
         set(AOTRITON_NOIMAGE_MODE ON)
       endif()
 
-      set(__AOTRITON_VER "0.11b")
+      set(__AOTRITON_VER "0.11.1b")
       set(__AOTRITON_IMAGE_LIST
           "amd-gfx942"
           "amd-gfx950"
         )
       set(__AOTRITON_IMAGE_SHA256_LIST
-        "3a06a99971dddb7703a30378f1c5d6b41468d926ea51821156d1b6857b985bc4" # amd-gfx942
-        "27fc21f6761d57987a700436de8cf29cbdd9eeee91318dfed596eeb147d219ad" # amd-gfx950
-        )
+          "0a7bcee19d3bb6d548732248c3234f7b92736c2ab7a7aae65294b87a7fd64c06" # amd-gfx942
+          "c1ba3bfe84217fd67df3dd1f8b67c80a7f7b33d0ad4d74b41d6567036e032ace" # amd-gfx950
+      )
       set(__AOTRITON_BASE_URL "https://github.com/ROCm/aotriton/releases/download/")  # @lint-ignore
       include(ExternalProject)
 
@@ -430,6 +432,19 @@ if(USE_CUDA)
 
 # Hack to enable dynamic loading in cuDNN frontend
 target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
+else()
+  option(NVTE_ENABLE_ROCSHMEM "Compile with ROCSHMEM library" OFF)
+  if (NVTE_ENABLE_ROCSHMEM)
+    add_subdirectory(rocshmem_api)
+    target_link_options(transformer_engine PRIVATE
+        -fgpu-rdc
+    )
+    target_link_libraries(transformer_engine PUBLIC 
+        -Wl,--whole-archive
+        rocshmemapi
+        -Wl,--no-whole-archive
+    )
+  endif()
 endif()
 
 # Helper functions to make header files with C++ strings
@@ -536,8 +551,16 @@ install(TARGETS transformer_engine DESTINATION .)
 set_target_properties(transformer_engine PROPERTIES INSTALL_RPATH "$ORIGIN/lib;$ORIGIN/transformer_engine/lib")
 
 if (USE_ROCM)
+  if("$ENV{ROCM_PATH}" STREQUAL "")
+    set(ROCM_PATH "/opt/rocm")
+  else()
+    set(ROCM_PATH "$ENV{ROCM_PATH}")
+  endif()
+  file(READ "${ROCM_PATH}/.info/version" ROCM_VER)
+  string(STRIP "${ROCM_VER}" ROCM_VER)
+  string(REGEX MATCH "^[0-9]+\\.[0-9]+" ROCM_VER "${ROCM_VER}")
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/build_info.txt"
-    "ROCM_VERSION: ${hip_VERSION_MAJOR}.${hip_VERSION_MINOR}\n"
+    "ROCM_VERSION: ${ROCM_VER}\n"
     "GPU_TARGETS: ${CMAKE_HIP_ARCHITECTURES}\n"
   )
   install(FILES "${CMAKE_CURRENT_BINARY_DIR}/build_info.txt" DESTINATION "transformer_engine/")

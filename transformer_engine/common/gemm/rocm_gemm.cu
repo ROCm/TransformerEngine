@@ -750,8 +750,8 @@ protected:
       std::getline(is, type_b, csv_sep);
       std::getline(is, type_d, csv_sep);
       std::getline(is, bias_type, csv_sep);
-      is >> cfg.lda >> c >> cfg.ldb >> c >> cfg.ldd >> c >> cfg.scaling_mode >> c;
       std::getline(is, aux_type, csv_sep);
+      is >> cfg.lda >> c >> cfg.ldb >> c >> cfg.ldd >> c >> cfg.scaling_mode >> c;
       std::getline(is, epi, csv_sep);
       std::getline(is, comp, csv_sep);
       std::getline(is, scale, csv_sep);

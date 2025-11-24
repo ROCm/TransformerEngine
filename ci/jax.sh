@@ -50,12 +50,18 @@ run_lbl() {
     _test_label=""
 }
 
+run_default_fa_lbl() {
+    if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
+        run_lbl "$@"
+    fi
+}
+
 run_test_config() {
     echo ==== Run with Fused attention backend: $_fus_attn ====
     run_default_fa 1 test_custom_call_compute.py
     run_default_fa 1 test_functions.py
     run 1 test_fused_attn.py
-    NVTE_CK_USES_FWD_V3=1 NVTE_CK_USES_BWD_V3=1 run_lbl "v3" 1 test_fused_attn.py # Using FAv3 for forward and backward pass
+    NVTE_CK_USES_FWD_V3=0 NVTE_CK_USES_BWD_V3=0 run_default_fa_lbl "v2" 3 test_fused_attn.py # Using FAv2 for forward and backward pass
     run_default_fa 1 test_helper.py
     run_default_fa 1 test_layer.py #it effectevly always uses unfused attention
     run_default_fa 1 test_sanity_import.py
@@ -66,33 +72,23 @@ run_test_config() {
 run_test_config_mgpu() {
     echo ==== Run mGPU with Fused attention backend: $_fus_attn ====
     
-    _JAX_DISABLE_JIT_FLAG=${JAX_DISABLE_JIT:-0}
     _ver=$(pip show jaxlib | grep Version)
     case "$_ver" in
     *0.4.35*)
-        # Workaround for distributed tests hang with JIT enabled
-        JAX_DISABLE_JIT=1 run 3 test_distributed_fused_attn.py -k 'not (test_context_parallel_allgather_attn[BALANCED or test_context_parallel_ring_attn)'
-        _JAX_DISABLE_JIT_FLAG=1
-
-        # Run tests that fail with JIT disabled
-        #run_lbl "allgather_balanced" 3 test_distributed_fused_attn.py -k 'test_context_parallel_allgather_attn[BALANCED'
-
+        # Workaround for distributed tests hang with xla_flag
+ 	    XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false" run 3 test_distributed_fused_attn.py -k 'not test_context_parallel_ring_attn'
+ 
         # Test ring attention with xla_flag --xla_experimental_ignore_channel_id only
-        # TODO: remove this flag after jax/xla update
-        XLA_FLAGS="--xla_experimental_ignore_channel_id" run_lbl "parallel_ring" 3 test_distributed_fused_attn.py -k test_context_parallel_ring_attn
-        ;;
-    *0.6.*)
-        # Workaround for distributed tests hang with JIT enabled
-        JAX_DISABLE_JIT=1 run 3 test_distributed_fused_attn.py -k 'not test_context_parallel_allgather_attn[BALANCED'
-        _JAX_DISABLE_JIT_FLAG=1
+	    XLA_FLAGS="--xla_experimental_ignore_channel_id" run_lbl "parallel_ring" 3 test_distributed_fused_attn.py -k test_context_parallel_ring_attn
         ;;
     *)
-        run 3 test_distributed_fused_attn.py
+        # Workaround for distributed tests hang with xla_flag
+        XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false" run 3 test_distributed_fused_attn.py
         ;;
     esac
     
     run_default_fa 3 test_distributed_layernorm.py
-    JAX_DISABLE_JIT=$_JAX_DISABLE_JIT_FLAG run_default_fa 3 test_distributed_layernorm_mlp.py
+    XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false" run_default_fa 3 test_distributed_layernorm_mlp.py
     run_default_fa 3 test_distributed_softmax.py
 
     run_default_fa 3 test_sanity_import.py

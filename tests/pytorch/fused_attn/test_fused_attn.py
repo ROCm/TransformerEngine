@@ -92,7 +92,8 @@ class EnvVarCleaner:
 @pytest.fixture(autouse=True)
 def reset_attn_backend():
     env = EnvVarCleaner(["NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN",
-                         "NVTE_FUSED_ATTN_CK", "NVTE_FUSED_ATTN_AOTRITON"])
+                         "NVTE_FUSED_ATTN_CK", "NVTE_FUSED_ATTN_AOTRITON",
+                         "NVTE_CK_USES_FWD_V3", "NVTE_CK_USES_BWD_V3"])
     yield
 
 
@@ -375,7 +376,7 @@ def test_dot_product_attention(
     if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
         pytest.skip("Less than two backends to compare.")
 
-    is_training = config.head_dim_qk <= 128 and config.head_dim_v <= 128
+    is_training = config.head_dim_qk <= 192 and config.head_dim_v <= 128
     # UnfusedDotProductAttention backend
     if unfused_attn_supported:
         unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
@@ -421,6 +422,8 @@ def test_dot_product_attention(
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
             os.environ["NVTE_FUSED_ATTN_CK"] = "1"
             os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "0"
+            os.environ["NVTE_CK_USES_FWD_V3"] = "1"
+            os.environ["NVTE_CK_USES_BWD_V3"] = "1"
             fused_attn_fwd_1, fused_attn_bwd_1 = _run_dot_product_attention(
                 dtype,
                 config,
@@ -432,8 +435,21 @@ def test_dot_product_attention(
                 is_training,
                 share_cu_seqlens_ref,
             )
-            del os.environ["NVTE_FUSED_ATTN_CK"]
-            del os.environ["NVTE_FUSED_ATTN_AOTRITON"]
+            if IS_HIP_EXTENSION:
+                os.environ["NVTE_CK_USES_FWD_V3"] = "0"
+                os.environ["NVTE_CK_USES_BWD_V3"] = "0"
+                fused_attn_fwd_2, fused_attn_bwd_2 = _run_dot_product_attention(
+                    dtype,
+                    config,
+                    "FusedAttention",
+                    ckpt_attn,
+                    qkv_layout,
+                    workspace_opt,
+                    pad_between_seqs,
+                    is_training,
+                    share_cu_seqlens_ref,
+                )
+
 
     # FlashAttention backend
     if flash_attn_supported:
@@ -469,6 +485,11 @@ def test_dot_product_attention(
         torch.testing.assert_close(fused_attn_fwd, fused_attn_fwd_1, **tols)
         for i, _ in enumerate(fused_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], fused_attn_bwd_1[i], **tols)
+        if IS_HIP_EXTENSION:
+            logging.info("[test_dot_product_attention]: fused attn backend 0 vs 2")
+            torch.testing.assert_close(fused_attn_fwd, fused_attn_fwd_2, **tols)
+            for i, _ in enumerate(fused_attn_bwd):
+                torch.testing.assert_close(fused_attn_bwd[i], fused_attn_bwd_2[i], **tols)
 
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
@@ -500,6 +521,12 @@ model_configs_mla = {
     "mla_3_1": ModelConfig(
         8, 16, 16, 256, 1, 2048, 0.0, "no_mask", "no_bias", head_dim_v=128
     ),  # inference
+    "mla_4_0": ModelConfig(
+        10, 16, 16, 192, 4096, 4096, 0.0, "causal", "no_bias", head_dim_v=128
+    ),
+    "mla_4_1": ModelConfig(
+        10, 16, 16, 192, 4096, 4096, 0.0, "no_mask", "no_bias", head_dim_v=128
+    ),
 }
 
 

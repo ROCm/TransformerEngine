@@ -96,6 +96,10 @@ def te_quantize_triton(
                 cast_out = out._data
                 trans_out = out._transpose
                 scale_inv_out = out._scale_inv
+
+                from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
+                is_current_scaling = isinstance(quantizer, Float8CurrentScalingQuantizer)
+
                 te_cast_transpose_noop_triton(
                     input_tensor,
                     noop_flag,
@@ -104,7 +108,10 @@ def te_quantize_triton(
                     trans_out=trans_out,
                     amax_out=amax_out,
                     scale_inv_out=scale_inv_out,
-                    otype=otype
+                    otype=otype,
+                    current_scaling=is_current_scaling,
+                    eps = getattr(quantizer, "amax_epsilon", 0.0),
+                    force_pow_2_scales = getattr(quantizer, "force_pow_2_scales", False),
                 )
                 
             else:

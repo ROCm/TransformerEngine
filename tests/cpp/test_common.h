@@ -19,6 +19,7 @@
 #else
 #include <hip/hip_bfloat16.h>
 #include "amd_detail/hip_float8.h"
+#include <gtest/gtest.h>
 #endif
 #include <cuda_runtime_api.h>
 
@@ -461,6 +462,14 @@ void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, 
                                   const size_t row_blocks, const size_t col_blocks, const size_t stride);
 void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
                                   const size_t N);
+#ifdef USE_ROCM
+void compare_e8m0_scaling_factors(const std::string &name, Tensor &output, const uint8_t *ref,
+                             const size_t row_blocks, const size_t col_blocks, const size_t stride, 
+                             double tol, bool rowwise, std::vector<std::tuple<size_t, size_t, int>> &mismatch_idx);
+
+void adjust_ref(std::vector<std::tuple<size_t, size_t, int>> mismatch_idx, void *ref, const size_t row_blocks,
+                const size_t col_blocks, const size_t rows, const size_t cols, DType otype);
+#endif
 
 std::array<size_t, 4> get_scale_tensor_dims(const size_t rows, const size_t cols,
                                             const size_t block_size_rows, const size_t block_size_cols);
