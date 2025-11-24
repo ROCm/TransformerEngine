@@ -35,9 +35,11 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
     return;
   }
 
+#ifndef __HIP_PLATFORM_AMD__
   if (getDeviceComputeCapability() < blackwellComputeCapability && use_cudnn) {
     GTEST_SKIP() << "cuDNN normalizations not supported on pre-Blackwell GPUs yet!";
   }
+#endif
 
   using WeightType = InputType;
   DType itype = TypeInfo<InputType>::dtype;
@@ -112,7 +114,6 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
     nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), epsilon,
                        z.data(), mu.data(), rsigma.data(), workspace_fwd.data(),
                        prop.multiProcessorCount, zero_centered_gamma, 0);
-
     nvte_layernorm_bwd(dz.data(), input.data(),
                        mu.data(), rsigma.data(), gamma.data(),
                        dx.data(), dgamma.data(), dbeta.data(),
@@ -218,17 +219,18 @@ std::vector<std::pair<size_t, size_t>> test_cases = {
   // {71, 229},
   // {29, 541},
   // {768, 6144},
-  //{2048, 12288},
-  //{71,3571}
-  //{168,184}
-  // {768,1024},
-  // {256,65536},
-  // {128,6144},
-  // {64,2304},
-  // {229,541},
-  // {71, 3571},
-  {512,768}
-  //{76800,1600}
+  {2048, 12288},
+  {768,1024},
+  {256,65536},
+  {128,6144},
+  {64,2304},
+  {229,541},
+  {71, 3571},
+  {29,17389},
+  {76800,1600}
+  // {512,768},
+  // {71,3571},
+  // {168,184}
 };
 
 }  // namespace

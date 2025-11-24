@@ -40,10 +40,7 @@ static void launch_tuned_(LaunchParams<ForwardKernelParams> &launch_params,
 #endif
     return;
   }
-  std::cout<<"tuned fwd ctas_per_row:"<< CTAS_PER_ROW<<std::endl;
-  std::cout<<"tuned fwd warps_m:"<< WARPS_M<<std::endl;
-  std::cout<<"tuned fwd warps_n:"<< WARPS_N<<std::endl;
-  std::cout<<"tuned fwd bytes_per_load:"<<BYTES_PER_LDG <<std::endl;
+
 #ifndef __HIP_PLATFORM_AMD__
   if (Kernel_traits::SMEM_BYTES_FWD >= 48 * 1024) {
     NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -107,9 +104,7 @@ static void launch_general_(LaunchParams<ForwardKernelParams> &launch_params,
 #endif
     return;
   }
-  // std::cout<<"warps_m:"<<WARPS_M<<std::endl;
-  // std::cout<<"warps_n:"<<WARPS_N<<std::endl;
-  // std::cout<<"bytes_per_load:"<<BYTES_PER_LDG<<std::endl;
+
   // Launch kernel
   auto stream = launch_params.stream;
   dim3 grid(ctas_per_row * ctas_per_col);
