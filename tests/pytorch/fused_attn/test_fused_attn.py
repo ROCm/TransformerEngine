@@ -277,6 +277,8 @@ if is_bf16_compatible():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 param_types_lean = [torch.bfloat16]
 
+# TODO: Enable config support in other backend(s) -- currently only the CK
+# backend is capable of supporting it.
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
 def test_gqa_mla_thd():
     """
