@@ -531,13 +531,13 @@ void compareResults_sequential(const std::string &name, const Tensor &test,
     const T *test_data = rowwise ? test.rowwise_cpu_dptr<T>() : test.columnwise_cpu_dptr<T>();
     const T *ref_data = reinterpret_cast<const T*>(ref);
     for (size_t i = 0; i < N; ++i) {
-      #ifndef __HIP_PLATFORM_AMD__
+#ifndef __HIP_PLATFORM_AMD__
       double t = static_cast<double>(test_data[i]);
       double r = static_cast<double>(ref_data[i]);
-      #else
+#else
       double t = static_cast<double>(static_cast<float>(test_data[i]));
       double r = static_cast<double>(static_cast<float>(ref_data[i]));
-      #endif
+#endif
       bool mismatch = fabs(t - r) > atol && (r == 0 || fabs((t - r) / r) > rtol);
       /* For Float32 the floating point comparison is enough to error out */
       bool assertion = mismatch && test.dtype() == DType::kFloat32;

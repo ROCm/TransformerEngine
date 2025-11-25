@@ -27,9 +27,6 @@ constexpr size_t MXFP8_CHUNKS_PER_BLOCK_Y = 1;
 constexpr size_t MXFP8_CHUNKS_PER_BLOCK_X = 1;
 constexpr size_t MXFP8_CHUNKS_PER_BLOCK = MXFP8_CHUNKS_PER_BLOCK_Y * MXFP8_CHUNKS_PER_BLOCK_X;
 constexpr size_t MXFP8_THREADS_PER_CHUNK = 64;
-constexpr size_t MXFP8_BUFFERS_NUM = 2;
-constexpr size_t MXFP8_PREFETCH_BUFFERS_NUM = 1;
-static_assert(MXFP8_PREFETCH_BUFFERS_NUM < MXFP8_BUFFERS_NUM);
 
 constexpr size_t ELEMS_PER_THREAD = 16;
 constexpr size_t MXFP8_BUFFER_DIM_Y = 32;                 // only 32 is supported
@@ -45,11 +42,10 @@ constexpr size_t THREADS_PER_CHUNK_X_COLWISE = MXFP8_CHUNK_DIM_X;  //  64
 constexpr size_t MXFP8_BUFF_STAGES_NUM =
     MXFP8_BUFFER_DIM_Y / THREADS_PER_CHUNK_Y_ROWWISE;                        //   2 = 32 / 16
 constexpr size_t MXFP8_ITERATIONS = MXFP8_CHUNK_DIM_Y / MXFP8_BUFFER_DIM_Y;  //   2 = 64 / 32
-static_assert(MXFP8_ITERATIONS >= MXFP8_PREFETCH_BUFFERS_NUM);
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, size_t SCALE_DIM_Y,
-          size_t SCALE_DIM_X, bool IS_NORM = false>
+          size_t SCALE_DIM_X, bool IS_ALIGNED, bool IS_NORM = false>
 __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
     cast_mxfp8_2D_kernel(const IType *input_ptr,
                          const IType *act_input_ptr,
@@ -83,7 +79,7 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
   constexpr size_t THREADS_PER_SCALE_X_ROWWISE =
       DIVUP(SCALE_DIM_X, ELEMS_PER_THREAD);                      //   2 = 32 / 16
   constexpr size_t SUBWARP_WIDTH = THREADS_PER_SCALE_X_ROWWISE;  //   2
-  constexpr size_t VECTOR_WIDTH = 16 / sizeof(OType);
+  constexpr size_t VECTOR_WIDTH = (IS_ALIGNED ?: 2) * 8 / sizeof(OType);
 
   const int block_offset_Y = blockIdx.y * MXFP8_CHUNKS_PER_BLOCK_Y * MXFP8_CHUNK_DIM_Y;
   const int block_offset_X = blockIdx.x * MXFP8_CHUNKS_PER_BLOCK_X * MXFP8_CHUNK_DIM_X;
@@ -161,11 +157,11 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
       const int chunk_it_offset_x = chunk_offset_X;
       const size_t row_base = chunk_it_offset_y;
       if constexpr (IS_DACT) {
-        copy_2d_to_shared<IType, VECTOR_WIDTH, false>(&act_in_sh[0][0], act_input_ptr, 
+        copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&act_in_sh[0][0], act_input_ptr, 
                           chunk_it_offset_x, chunk_it_offset_y, cols, 
                           MXFP8_SHMEM_DIM_Y, MXFP8_SHMEM_DIM_X, rows, cols);
       }
-      copy_2d_to_shared<IType, VECTOR_WIDTH, false>(&in_sh[0][0], input_ptr, chunk_it_offset_x, 
+      copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_sh[0][0], input_ptr, chunk_it_offset_x, 
                         chunk_it_offset_y, cols, MXFP8_SHMEM_DIM_Y,
                         MXFP8_SHMEM_DIM_X, rows, cols);
       __syncthreads();
@@ -301,12 +297,12 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
       __syncthreads();
 
       if constexpr (USE_ROWWISE_SCALING) {
-        bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, false>(&out_rowwise_sh[0][0], output_rowwise, chunk_it_offset_x,
+        bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_rowwise_sh[0][0], output_rowwise, chunk_it_offset_x,
                                         chunk_it_offset_y, cols, MXFP8_SHMEM_DIM_Y,
                                         MXFP8_SHMEM_DIM_X, rows, cols);
       }
       if constexpr (USE_COLWISE_SCALING) {
-        bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, false>(&out_colwise_sh[0][0], output_colwise, chunk_it_offset_x,
+        bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_colwise_sh[0][0], output_colwise, chunk_it_offset_x,
                                         chunk_it_offset_y, cols, MXFP8_SHMEM_DIM_Y,
                                         MXFP8_SHMEM_DIM_X, rows, cols);
       }
@@ -382,6 +378,165 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
 
   if (threadIdx.x == 0 && amax_ptr != nullptr) {
     atomicMaxFloat(amax_ptr, block_amax);
+  }
+}
+
+// Forward declaration of functions defined in `cast_kernels.cuh`
+template <typename IType>
+void reduce_dbias(const float *workspace_ptr, Tensor *dbias, const size_t rows, const size_t cols,
+                  cudaStream_t stream);
+
+template <typename ParamOP, float (*OP)(float, const ParamOP &)>
+void CastVectorizedUnaryKernelLauncher(const Tensor &input, const Tensor *noop, Tensor *output,
+                                       cudaStream_t stream);
+
+template <typename ParamOP, float (*OP)(float, const ParamOP &)>
+void CastVectorizedUnaryGradKernelLauncher(const Tensor &grad, const Tensor *input, Tensor *output,
+                                           cudaStream_t stream);
+
+constexpr size_t TILE_DIM = 32;
+template <typename DTypeReduce>
+__global__ void partial_reduce_kernel(const DTypeReduce* input, float* partial_output, int rows, int cols) {
+  __shared__ float tile[TILE_DIM][TILE_DIM];
+
+  int tile_start_col = blockIdx.x * TILE_DIM;
+  int tile_start_row = blockIdx.y * TILE_DIM;
+  int thread_col_in_tile = threadIdx.x;
+  int thread_row_in_tile = threadIdx.y;
+
+  int global_col = tile_start_col + thread_col_in_tile;
+  int global_row = tile_start_row + thread_row_in_tile;
+
+  if (global_row < rows && global_col < cols) {
+    tile[thread_row_in_tile][thread_col_in_tile] = static_cast<float>(input[global_row * cols + global_col]);
+  } else {
+    tile[thread_row_in_tile][thread_col_in_tile] = 0.0f;
+  }
+  __syncthreads();
+
+  for (int stride = TILE_DIM / 2; stride > 0; stride /= 2) {
+    if (thread_row_in_tile < stride) {
+      tile[thread_row_in_tile][thread_col_in_tile] += tile[thread_row_in_tile + stride][thread_col_in_tile];
+    }
+    __syncthreads();
+  }
+
+  if (thread_row_in_tile == 0 && global_col < cols) {
+    partial_output[blockIdx.y * cols + global_col] = tile[0][thread_col_in_tile];
+  }
+}
+
+template <typename DTypeReduce, typename DBiasTypeOut>
+void reduce_dbias_rocm(const DTypeReduce *workspace_ptr, Tensor *dbias, const size_t rows,
+                       const size_t cols, cudaStream_t stream, Tensor* partial_sum_workspace) {
+  dim3 block_dim_partial(TILE_DIM, TILE_DIM);
+  dim3 grid_dim_partial(DIVUP(cols, TILE_DIM), DIVUP(rows, TILE_DIM));
+
+  const size_t partial_rows = grid_dim_partial.y;
+  float* partial_workspace = reinterpret_cast<float*>(partial_sum_workspace->data.dptr);
+
+  partial_reduce_kernel<DTypeReduce><<<grid_dim_partial, block_dim_partial, 0, stream>>>(
+    workspace_ptr,
+    partial_workspace,
+    rows, cols);
+
+  reduce_dbias<DBiasTypeOut>(partial_workspace, dbias, partial_rows, cols, stream);
+}
+
+template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
+          float (*OP)(float, const ParamOP &)>
+void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tensor *noop,
+                             Tensor *output, Tensor *dbias, Tensor *workspace,
+                             cudaStream_t stream) {
+  switch (output->scaling_mode) {
+    case NVTE_DELAYED_TENSOR_SCALING: {
+      const size_t rows = input.flat_first_dim();
+      const size_t cols = input.flat_last_dim();
+
+      if constexpr (IS_DBIAS) {
+        NVTE_CHECK(dbias, "DBias tensor must be provided when IS_DBIAS is true.");
+        NVTE_CHECK(workspace, "Workspace must be provided when IS_DBIAS is true.");
+        if (workspace->data.dptr == nullptr) {
+          if constexpr (IS_DACT) {
+            const size_t partial_rows = DIVUP(rows, TILE_DIM);
+            size_t total_elements = (rows * cols) + (partial_rows * cols);
+            workspace->data.shape = {total_elements};
+            workspace->data.dtype = DType::kFloat32;
+          } else {
+            workspace->data.shape = {rows, cols};
+            workspace->data.dtype = DType::kFloat32;
+          }
+          return;
+        }
+
+        const void *ptr_to_reduce = nullptr;
+        DType dtype_to_reduce;
+
+        workspace->amax = {};
+        workspace->scale = {};
+        workspace->scale_inv = {};
+
+        Tensor workspace_buffer;
+        Tensor partial_sum_buffer;
+
+        if constexpr (IS_DACT) {
+          // The values to reduce are the result of the dAct function.
+          NVTE_CHECK(act_input, "Gradient tensor must be provided for DBias + DACT.");
+
+          const size_t partial_rows = DIVUP(rows, TILE_DIM);
+          const size_t full_size_bytes = rows * cols * sizeof(float);
+          workspace_buffer = *workspace;
+          workspace_buffer.data.shape = {rows, cols};
+          partial_sum_buffer.data.dptr = reinterpret_cast<char*>(workspace->data.dptr) + full_size_bytes;
+          partial_sum_buffer.data.shape = {partial_rows, cols};
+          partial_sum_buffer.data.dtype = DType::kFloat32;
+          workspace = &partial_sum_buffer;
+
+          CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, &workspace_buffer, stream);
+          if (output && output->data.dptr) {
+            CastVectorizedUnaryKernelLauncher<transformer_engine::Empty, nullptr>(workspace_buffer, noop, output, stream);
+          }
+          ptr_to_reduce = workspace_buffer.data.dptr;
+          dtype_to_reduce = workspace_buffer.data.dtype;
+        } else {
+          if (output && output->data.dptr) {
+            CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
+          }
+          // The values to reduce are just the input values.
+          ptr_to_reduce = input.data.dptr;
+          dtype_to_reduce = input.data.dtype;
+        }
+
+        NVTE_CHECK(dbias->data.shape == std::vector<size_t>{cols}, "Wrong shape of DBias tensor.");
+
+        TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+            dbias->data.dtype, DBiasTypeOut,
+            TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+              dtype_to_reduce, DTypeReduce,
+              reduce_dbias_rocm<DTypeReduce, DBiasTypeOut>(
+                reinterpret_cast<const DTypeReduce *>(ptr_to_reduce),
+                dbias, rows, cols, stream, workspace);
+            );
+        );
+      } else {
+        if (output && output->data.dptr) {
+          if constexpr (IS_DACT) {
+            NVTE_CHECK(act_input, "Gradient tensor must be provided for DACT output.");
+            CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
+          } else {
+            CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
+          }
+        }
+      }
+      break;
+    }
+    case NVTE_MXFP8_1D_SCALING: {
+      mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output, dbias,
+                                                             workspace, stream);
+      break;
+    }
+    default:
+      NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
   }
 }
 
