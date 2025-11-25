@@ -25,6 +25,10 @@ on:
         description: 'Skip merging dev branch'
         type: boolean
         default: false
+      docker_image_override:
+        description: 'Manual Docker Image (Leave empty to use config file value)'
+        required: false
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -105,6 +109,14 @@ jobs:
                 IMAGE_TO_USE="$REL613_DOCKER_IMAGE"
               fi
             fi
+          fi
+
+          # Check for manual override
+          MANUAL_OVERRIDE="${{ inputs.docker_image_override }}"
+
+          if [[ -n "$MANUAL_OVERRIDE" ]]; then
+            echo "::notice::Manual override detected: $MANUAL_OVERRIDE"
+            IMAGE_TO_USE="$MANUAL_OVERRIDE"
           fi
           
           echo "Selected image: $IMAGE_TO_USE"
