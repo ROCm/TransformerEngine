@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -9,6 +11,7 @@
 #include "c10/util/ArrayRef.h"
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
+#include "common/common.h"
 
 namespace transformer_engine::pytorch {
 
@@ -275,6 +278,23 @@ std::vector<size_t> convertShape(const NVTEShape& shape) {
 int roundup(const int value, const int multiple) {
   assert(multiple > 0);
   return ((value + multiple - 1) / multiple) * multiple;
+}
+
+TensorWrapper allocate_amax_workspace(const TensorWrapper& input_tensor) {
+  if (nvte_use_atomic_amax() || input_tensor.numel() == 0) {
+    // User chose atomic path, or empty tensor -> no need for workspace
+    return TensorWrapper{};
+  }
+
+  const auto N = static_cast<size_t>(input_tensor.numel());
+  constexpr size_t max_blocks_hw = 65535;
+
+  size_t max_blocks = DIVUP(N, static_cast<size_t>(amax_kernel_threads));
+  size_t workspace_blocks = std::min(max_blocks, max_blocks_hw);
+
+  at::Tensor ws = at::empty({static_cast<long>(workspace_blocks)}, at::CUDA(at::kFloat));
+
+  return makeTransformerEngineTensor(ws);
 }
 
 }  // namespace transformer_engine::pytorch

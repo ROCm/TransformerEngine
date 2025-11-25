@@ -374,6 +374,8 @@ std::vector<size_t> convertShape(const NVTEShape& shape);
 
 int roundup(const int value, const int multiple);
 
+TensorWrapper allocate_amax_workspace(const TensorWrapper& input_tensor);
+
 }  // namespace transformer_engine::pytorch
 
 namespace std {

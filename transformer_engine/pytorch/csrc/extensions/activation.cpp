@@ -38,33 +38,14 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
     auto [te_output_act, out_act] =
         my_quantizer_none->create_tensor(input_shape, GetTransformerEngineDType(fake_tensor_type));
 
-    if (nvte_use_atomic_amax()) {
-       NVTE_SCOPED_GIL_RELEASE({
-        act_func(te_input.data(), te_output_act.data(), at::cuda::getCurrentCUDAStream());
-        // use te_output_act as input to the compute amax and find the amax of activated tensor
-        nvte_compute_amax(te_output_act.data(), te_output.data(),
-                          at::cuda::getCurrentCUDAStream());
-      });
-    } else {
-      // Workspace for nvte_compute_amax_with_workspace
-      const auto N = static_cast<size_t>(input_tensor.numel());
-      constexpr size_t max_blocks_hw = 65535;
+    auto workspace = allocate_amax_workspace(te_input);
 
-      // Worst-case (nvec = 1) upper bound on number of blocks
-      size_t max_blocks = std::min(DIVUP(N, static_cast<size_t>(amax_kernel_threads)), max_blocks_hw);
-
-      // Allocate FP32 workspace for block-wise amax
-      auto ws = at::empty({static_cast<long>(max_blocks)}, at::CUDA(at::kFloat));
-
-      TensorWrapper te_workspace = makeTransformerEngineTensor(ws);
-
-      NVTE_SCOPED_GIL_RELEASE({
-        act_func(te_input.data(), te_output_act.data(), at::cuda::getCurrentCUDAStream());
-        // use te_output_act as input to the compute amax and find the amax of activated tensor
-        nvte_compute_amax_with_workspace(te_output_act.data(), te_output.data(),
-                          te_workspace.data(), at::cuda::getCurrentCUDAStream());
-      });
-    }
+    NVTE_SCOPED_GIL_RELEASE({
+      act_func(te_input.data(), te_output_act.data(), at::cuda::getCurrentCUDAStream());
+      // use te_output_act as input to the compute amax and find the amax of activated tensor
+      nvte_compute_amax_with_workspace(te_output_act.data(), te_output.data(),
+                        workspace.data(), at::cuda::getCurrentCUDAStream());
+    });
 
     // my_quantizer here has to be a Float8CurrentScalingQuantizer
     auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
