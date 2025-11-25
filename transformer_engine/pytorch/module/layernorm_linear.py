@@ -177,8 +177,6 @@ class _LayerNormLinear(torch.autograd.Function):
         with_input_all_gather = parallel_mode == "column" and sequence_parallel
 
         is_mxfp4_enabled = os.environ.get('FP4', 'false').lower() in ['true', '1', 'yes']
-        if is_mxfp4_enabled:
-            input_quantizer_mxfp4 = MXFP4Quantizer(rowwise=True, columnwise=backward_needs_input)
 
         if fp8:
             if input_quantizer is None:
@@ -251,9 +249,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 with_quantized_all_gather = False
             if fp8:
                 input_quantizer.set_usage(rowwise=True, columnwise=False)
-                # Quantize from bf16 to fp4 for fwd gemm (before fp8 quantization and gathering)
-                if is_mxfp4_enabled and not isinstance(ln_out, QuantizedTensor):
-                    ln_out_mxfp4_local = input_quantizer_mxfp4(ln_out)
             # ln_out in this has two possibilities:
             # 1. in FP8 low precision, the cast was done by fusing quantization into layernorm kernel
             # 2. in high precision, then we need to cast it and then gather in FP8
@@ -263,9 +258,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 tp_group,
                 quantizer=(input_quantizer if with_quantized_all_gather else None),
             )
-            # Gather MXFP4 tensor if needed
-            if is_mxfp4_enabled and fp8 and not isinstance(ln_out, QuantizedTensor):
-                ln_out_mxfp4, _ = gather_along_first_dim(ln_out_mxfp4_local, tp_group)
             if return_layernorm_output and return_layernorm_output_gathered:
                 ln_out_return = ln_out_total
             if fp8 or debug:
@@ -275,10 +267,7 @@ class _LayerNormLinear(torch.autograd.Function):
             if (fp8 or debug) and not with_quantized_norm:
                 if fp8:
                     if not isinstance(ln_out, QuantizedTensor):
-                        # Quantize from bf16 to fp4 for fwd gemm (before fp8 quantization)
-                        if is_mxfp4_enabled:
-                            ln_out_mxfp4 = input_quantizer_mxfp4(ln_out)
-                        # Quantize from bf16 to fp8 for wgrad
+                        # Quantize from bf16 to fp8/fp4 using input_quantizer
                         input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input)
                         ln_out = input_quantizer(ln_out)
                     elif backward_needs_input:
@@ -581,8 +570,6 @@ class _LayerNormLinear(torch.autograd.Function):
             nvtx_label = f"{nvtx_label}.{ctx.ub_name}"
 
         is_mxfp4_enabled = os.environ.get('FP4', 'false').lower() in ['true', '1', 'yes']
-        if is_mxfp4_enabled:
-            grad_output_quantizer_mxfp4 = ctx.grad_output_quantizer_mxfp4
 
         with torch.cuda.nvtx.range("_LayerNormLinear_backward"):
             saved_tensors = ctx.saved_tensors
@@ -677,10 +664,6 @@ class _LayerNormLinear(torch.autograd.Function):
             # Prepare grad output tensor
             # Note: Cast to expected dtype and perform tensor-parallel communication
             nvtx_range_push(f"{nvtx_label}.grad_output_preprocess")
-            
-            if is_mxfp4_enabled:
-                grad_output_mxfp4 = grad_output_quantizer_mxfp4(grad_outputs[0])
-            
             (
                 grad_output,
                 grad_bias,
@@ -778,7 +761,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 nvtx_range_push(f"{nvtx_label}.dgrad_gemm_mxfp4")
                 gemm_out, *_, reduce_scatter_out = general_gemm(
                     weight,
-                    grad_output_mxfp4,
+                    grad_output,
                     get_workspace(),
                     layout="TN",       #  @sararora TODO: Use columnwise (transposed) weight data, make this logic better in gemm.py 
                     grad=True,
@@ -921,7 +904,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 # wGrad GEMM
                 # ------------------------------------------------------
                 # Note: Fuse with bgrad computation if needed
-                nvtx_range_push(f"{nvtx_label}.wgrad_gemm")
                 wgrad_gemm_use_split_accumulator = _2X_ACC_WGRAD
                 if ctx.fp8:
                     recipe = ctx.fp8_recipe
@@ -930,25 +912,48 @@ class _LayerNormLinear(torch.autograd.Function):
                             recipe.fp8_gemm_wgrad.use_split_accumulator
                         )
 
-                wgrad, grad_bias_, *_, reduce_scatter_out = general_gemm(
-                    ln_out_total,
-                    grad_output,
-                    get_workspace(),
-                    layout="NT",
-                    grad=True,
-                    out_dtype=(
-                        main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
-                    ),
-                    bias=(bias if (grad_bias is None and not ctx.fp8) else None),
-                    out=main_grad if ctx.fuse_wgrad_accumulation else None,
-                    use_split_accumulator=wgrad_gemm_use_split_accumulator,
-                    accumulate=accumulate_wgrad_into_param_main_grad,
-                    ub=ub_obj_wgrad,
-                    ub_type=ub_type_wgrad,
-                    extra_output=reduce_scatter_out,
-                    bulk_overlap=ctx.ub_bulk_wgrad,
-                )
-                nvtx_range_pop(f"{nvtx_label}.wgrad_gemm")
+                if is_mxfp4_enabled and ctx.fp8:
+                    nvtx_range_push(f"{nvtx_label}.wgrad_gemm_mxfp4")
+                    wgrad, grad_bias_, *_, reduce_scatter_out = general_gemm(
+                        ln_out_total,
+                        grad_output,
+                        get_workspace(),
+                        layout="TT",
+                        grad=True,
+                        out_dtype=(
+                            main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
+                        ),
+                        bias=(bias if (grad_bias is None and not ctx.fp8) else None),
+                        out=main_grad if ctx.fuse_wgrad_accumulation else None,
+                        use_split_accumulator=wgrad_gemm_use_split_accumulator,
+                        accumulate=accumulate_wgrad_into_param_main_grad,
+                        ub=ub_obj_wgrad,
+                        ub_type=ub_type_wgrad,
+                        extra_output=reduce_scatter_out,
+                        bulk_overlap=ctx.ub_bulk_wgrad,
+                    )
+                    nvtx_range_pop(f"{nvtx_label}.wgrad_gemm_mxfp4")
+                else:
+                    nvtx_range_push(f"{nvtx_label}.wgrad_gemm")
+                    wgrad, grad_bias_, *_, reduce_scatter_out = general_gemm(
+                        ln_out_total,
+                        grad_output,
+                        get_workspace(),
+                        layout="NT",
+                        grad=True,
+                        out_dtype=(
+                            main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
+                        ),
+                        bias=(bias if (grad_bias is None and not ctx.fp8) else None),
+                        out=main_grad if ctx.fuse_wgrad_accumulation else None,
+                        use_split_accumulator=wgrad_gemm_use_split_accumulator,
+                        accumulate=accumulate_wgrad_into_param_main_grad,
+                        ub=ub_obj_wgrad,
+                        ub_type=ub_type_wgrad,
+                        extra_output=reduce_scatter_out,
+                        bulk_overlap=ctx.ub_bulk_wgrad,
+                    )
+                    nvtx_range_pop(f"{nvtx_label}.wgrad_gemm")
 
                 # Update grad bias if needed
                 if grad_bias is None:
@@ -1593,15 +1598,16 @@ class LayerNormLinear(TransformerEngineBaseModule):
             # Get concatenated weight and bias tensors
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
 
+            is_mxfp4_enabled = os.environ.get("FP4", "false").lower() in ["true", "1", "yes"]
             quantizers = (
-                self._get_quantizers(fp8_output)
+                self._get_quantizers(fp8_output, is_mxfp4_enabled)
                 if not debug
-                else self._get_debug_quantizers(fp8_output)
+                else self._get_debug_quantizers(fp8_output, is_mxfp4_enabled)
             )
             if debug:
                 if not any_feature_enabled(quantizers):
                     # If no feature is used, then run faster implementation with debug = False.
-                    quantizers = self._get_quantizers(fp8_output)
+                    quantizers = self._get_quantizers(fp8_output, is_mxfp4_enabled)
                     debug = False
 
                 if isinstance(weight_tensor, QuantizedTensor):
@@ -1614,7 +1620,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 grad_output_quantizer,
                 grad_output_quantizer_mxfp4,
                 grad_input_quantizer,
-            ) = quantizers
+            ) = self._get_quantizers(fp8_output, is_mxfp4_enabled)
 
             if torch.is_grad_enabled():
                 fwd_fn = _LayerNormLinear.apply
@@ -1685,19 +1691,21 @@ class LayerNormLinear(TransformerEngineBaseModule):
             return out, ln_out
         return out
 
-    def _get_quantizers(self, fp8_output):
+    def _get_quantizers(self, fp8_output, is_mxfp4_enabled: bool):
         if not self.fp8:
-            return [None] * 6
+            return (None, None, None, None, None, None)
         grad_input_quantizer = None
         grad_output_quantizer_mxfp4 = None
         grad_output_quantizer = None
         output_quantizer = None
         
-        input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
+        if is_mxfp4_enabled:
+            input_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True)
+        else:
+            input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
         input_quantizer.internal = False
         
-        fp4 = os.getenv("FP4", "False") == "True"
-        if fp4:
+        if is_mxfp4_enabled:
             weight_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True)
         else:
             weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
@@ -1706,12 +1714,12 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if fp8_output:
             output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
         if torch.is_grad_enabled():
-            if fp4:
-                grad_output_quantizer_mxfp4 = MXFP4Quantizer(rowwise=True, columnwise=False)
-                grad_output_quantizer_mxfp4.internal = True
-            
-            grad_output_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]
-            grad_output_quantizer.internal = True
+            if is_mxfp4_enabled:
+                grad_output_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True)
+                grad_output_quantizer.internal = True
+            else:
+                grad_output_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]
+                grad_output_quantizer.internal = True
 
         return (
             input_quantizer,
@@ -1722,8 +1730,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
             grad_input_quantizer,
         )
 
-    def _get_debug_quantizers(self, fp8_output):
-        original_quantizers = self._get_quantizers(fp8_output)
+    def _get_debug_quantizers(self, fp8_output, is_mxfp4_enabled: bool):
+        original_quantizers = self._get_quantizers(fp8_output, is_mxfp4_enabled)
         assert TEDebugState.debug_enabled
         from ...debug.pytorch.debug_quantization import DebugQuantizer
 
@@ -1758,12 +1766,13 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         assert not TEDebugState.debug_enabled, "Debug mode is not supported in ONNX export"
         assert_warmed_up(self)
+        is_mxfp4_enabled = os.environ.get("FP4", "false").lower() in ["true", "1", "yes"]
         (
             input_quantizer,
             weight_quantizer,
             output_quantizer,
             *_,
-        ) = self._get_quantizers(fp8_output)
+        ) = self._get_quantizers(fp8_output, is_mxfp4_enabled)
         inp_dtype = inp.dtype
 
         weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
