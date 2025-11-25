@@ -295,6 +295,7 @@ else()
         set(AOTRITON_NOIMAGE_MODE ON)
       endif()
 
+      set(AOTRITON_CI_SUPPLIED_SHA1 "98371989e8a23267e284c94e95156a139e4b33c4")
       set(__AOTRITON_VER "0.11.1b")
       set(__AOTRITON_IMAGE_LIST
           "amd-gfx942"
