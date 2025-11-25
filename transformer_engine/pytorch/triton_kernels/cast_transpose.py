@@ -2,9 +2,28 @@
 # License for AMD contributions = MIT. See LICENSE for more information
 
 import torch
+from typing import Optional
 
-from ..constants import MXFP8_BLOCK_SCALING_SIZE
-import transformer_engine_torch as tex
+try:
+    from ..constants import MXFP8_BLOCK_SCALING_SIZE
+    from .common import (
+        te_dtype_to_triton_dtype,
+        te_dtype_to_torch_dtype,
+        get_fp8_max,
+    )
+except Exception:  # pragma: no cover - fallback for standalone benchmarking
+    MXFP8_BLOCK_SCALING_SIZE = 32
+
+    def _missing(*args, **kwargs):
+        raise ImportError(
+            "transformer_engine dependencies not available. "
+            "Ensure transformer_engine_torch is installed."
+        )
+
+    te_dtype_to_triton_dtype = _missing  # type: ignore
+    te_dtype_to_torch_dtype = _missing  # type: ignore
+    get_fp8_max = _missing  # type: ignore
+
 import triton
 import triton.language as tl
 from .common import (
@@ -398,6 +417,318 @@ def _cast_transpose_triton_mxfp8(
                 colwise_y_ptr_current_chunk = colwise_y_ptr + offsets_Y[:, None] * stride_rowwise_row + offsets_X[None, :] * stride_rowwise_col
                 tl.store(colwise_y_ptr_current_chunk, y_chunk_colwise_scaled.to(colwise_y_ptr.type.element_ty), mask=mask)
 
+##########################################
+#### cast_transpose_mxfp4
+##########################################
+
+@triton.jit
+def _cast_transpose_triton_mxfp4(
+    x_ptr,
+    rowwise_fp4_ptr,
+    rowwise_scale_ptr,
+    colwise_fp4_ptr,
+    colwise_scale_ptr,
+    stride_x_m,
+    stride_x_n,
+    stride_rowwise_fp4_m,
+    stride_rowwise_fp4_n,
+    stride_rowwise_scale_m,
+    stride_rowwise_scale_n,
+    stride_colwise_fp4_m,
+    stride_colwise_fp4_n,
+    stride_colwise_scale_m,
+    stride_colwise_scale_n,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    rowwise_scale_N: tl.constexpr,
+    rowwise_scale_M_pad: tl.constexpr,
+    rowwise_scale_N_pad: tl.constexpr,
+    colwise_scale_M: tl.constexpr,
+    colwise_scale_N: tl.constexpr,
+    colwise_scale_M_pad: tl.constexpr,
+    colwise_scale_N_pad: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    MXFP4_BLOCK_SIZE: tl.constexpr,
+    USE_ROWWISE: tl.constexpr,
+    USE_COLWISE: tl.constexpr,
+    SHUFFLE_ROWWISE: tl.constexpr,
+    SHUFFLE_COLWISE: tl.constexpr,
+):
+    """
+    MXFP4 cast + transpose (rowwise + columnwise) following the MXFP8 fused pattern.
+
+    Example to keep in mind:
+        Input  (M, N)    = (4096, 6144) bf16
+        Rowwise output   = (M, N/2) uint8  (two FP4 packed per byte)
+        Colwise output   = (N, M/2) uint8
+
+    Grid layout:
+        BLOCK_M x BLOCK_N tile (default 128 x 128).
+        Inside the tile we iterate over 32 x 32 MXFP4 blocks.
+
+    Strides:
+        - stride_x_m / stride_x_n point into the source matrix.
+        - stride_rowwise_fp4_* index rowwise packed bytes.
+        - stride_colwise_fp4_* index columnwise packed bytes.
+    """
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+
+    stride_x_m = tl.cast(stride_x_m, tl.int64)
+    stride_x_n = tl.cast(stride_x_n, tl.int64)
+    stride_rowwise_fp4_m = tl.cast(stride_rowwise_fp4_m, tl.int64)
+    stride_rowwise_fp4_n = tl.cast(stride_rowwise_fp4_n, tl.int64)
+    stride_colwise_fp4_m = tl.cast(stride_colwise_fp4_m, tl.int64)
+    stride_colwise_fp4_n = tl.cast(stride_colwise_fp4_n, tl.int64)
+
+    num_chunks_m = BLOCK_M // MXFP4_BLOCK_SIZE
+    num_chunks_n = BLOCK_N // MXFP4_BLOCK_SIZE
+
+    base_m = pid_m * BLOCK_M
+    base_n = pid_n * BLOCK_N
+
+    # Each BLOCK_M covers BLOCK_M / 32 MXFP4 row blocks.
+    row_block_base = (base_m // MXFP4_BLOCK_SIZE)
+
+    E8_BIAS = tl.constexpr(127)
+    E2_BIAS = tl.constexpr(1)
+
+    for chunk_m in range(num_chunks_m):
+        offs_m = base_m + chunk_m * MXFP4_BLOCK_SIZE + tl.arange(0, MXFP4_BLOCK_SIZE)
+        row_mask = offs_m < M
+
+        for chunk_n in range(num_chunks_n):
+            offs_n = base_n + chunk_n * MXFP4_BLOCK_SIZE + tl.arange(0, MXFP4_BLOCK_SIZE)
+            col_mask = offs_n < N
+
+            mask = row_mask[:, None] & col_mask[None, :]
+
+            # Load a 32x32 bf16 tile (promoted to fp32) so both row/col passes reuse the same data. TODO @saraora to double check if this is necessary.
+            #   offs_m = 128*k + [0..31]
+            #   offs_n = 128*l + [0..31]
+            # This chunk is reused for both rowwise and columnwise passes.
+            x_chunk = tl.load(
+                x_ptr + offs_m[:, None] * stride_x_m + offs_n[None, :] * stride_x_n,
+                mask=mask,
+                other=0.0,
+            ).to(tl.float32)
+
+            # ---------- Rowwise path ----------
+            if USE_ROWWISE:
+                # For each row in the current tile (base_m + row0), process the elements in [base_n : base_n + 31].
+                # Compute one E8M0 scale per row (32 elements).
+                amax_row = tl.max(tl.abs(x_chunk), axis=1, keep_dims=True)
+                amax_row = amax_row.to(tl.int32, bitcast=True)
+                amax_row = (amax_row + 0x200000).to(tl.uint32, bitcast=True) & 0xFF800000
+                amax_row = amax_row.to(tl.float32, bitcast=True)
+                scale_unbiased_row = tl.log2(amax_row).floor() - 2
+                scale_unbiased_row = tl.clamp(scale_unbiased_row, min=-127, max=127)
+                quant_scale_row = tl.exp2(-scale_unbiased_row)
+
+                qx_row = x_chunk * quant_scale_row
+                bs_row = scale_unbiased_row.to(tl.uint8) + 127
+
+                qx_row_u32 = qx_row.to(tl.uint32, bitcast=True)
+                s_row = qx_row_u32 & 0x80000000
+                e_row = (qx_row_u32 >> 23) & 0xFF
+                m_row = qx_row_u32 & 0x7FFFFF
+
+                adjusted_row = tl.core.sub(E8_BIAS, e_row + 1, sanitize_overflow=False)
+                m_row = tl.where(e_row < E8_BIAS, (0x400000 | (m_row >> 1)) >> adjusted_row, m_row)
+                e_row = tl.maximum(e_row, E8_BIAS - E2_BIAS) - (E8_BIAS - E2_BIAS)
+
+                e2m1_row = tl.minimum((((e_row << 2) | (m_row >> 21)) + 1) >> 1, 0x7)
+                e2m1_row = ((s_row >> 28) | e2m1_row).to(tl.uint8)
+
+                # Pack columns (C0,C1) -> byte0, (C2,C3) -> byte1, etc.
+                row_pairs = tl.reshape(
+                    e2m1_row, [MXFP4_BLOCK_SIZE, MXFP4_BLOCK_SIZE // 2, 2]
+                )
+                vals_even, vals_odd = tl.split(row_pairs)
+                packed_row = vals_even | (vals_odd << 4)
+
+                row_out_rows = offs_m
+                row_out_cols = (
+                    (pid_n * BLOCK_N) // 2
+                    + chunk_n * (MXFP4_BLOCK_SIZE // 2)
+                    + tl.arange(0, MXFP4_BLOCK_SIZE // 2)
+                )
+                row_store_mask = (
+                    (row_out_rows < M)[:, None]
+                    & (row_out_cols < (N // 2))[None, :]
+                )
+
+                tl.store(
+                    rowwise_fp4_ptr
+                    + row_out_rows[:, None] * stride_rowwise_fp4_m
+                    + row_out_cols[None, :] * stride_rowwise_fp4_n,
+                    packed_row,
+                    mask=row_store_mask,
+                )
+
+                scale_offset_x = (pid_n * num_chunks_n) + chunk_n
+                scale_rows = offs_m
+
+                if SHUFFLE_ROWWISE:
+                    # Rowwise shuffle matches AITER's e8m0_shuffle:
+                    # view(sm//32, 2, 16, sn//8, 2, 4) -> permute(0, 3, 5, 2, 4, 1) -> view(sm, sn)
+                    # where sm = M (rows), sn = N/32 (scale columns)
+                    #
+                    # For input (row=scale_rows, col=scale_offset_x):
+                    #   i0 = row // 32
+                    #   i1 = (row % 32) // 16
+                    #   i2 = row % 16
+                    #   i3 = col // 8
+                    #   i4 = (col % 8) // 4
+                    #   i5 = col % 4
+                    # Output linear = i0*(sn//8*256) + i3*256 + i5*64 + i2*4 + i4*2 + i1
+                    i0 = scale_rows[:, None] // 32
+                    i1 = (scale_rows[:, None] % 32) // 16
+                    i2 = scale_rows[:, None] % 16
+                    i3 = scale_offset_x // 8
+                    i4 = (scale_offset_x % 8) // 4
+                    i5 = scale_offset_x % 4
+                    
+                    # rowwise_scale_N_pad is already (N/32) rounded up to multiple of 8
+                    bs_offs = (
+                        i0 * (rowwise_scale_N_pad // 8 * 256) +
+                        i3 * 256 +
+                        i5 * 64 +
+                        i2 * 4 +
+                        i4 * 2 +
+                        i1
+                    )
+                    mask_valid = (scale_rows < M)[:, None] & (
+                        scale_offset_x < rowwise_scale_N
+                    )
+                    mask_pad = (scale_rows < rowwise_scale_M_pad)[:, None] & (
+                        scale_offset_x < rowwise_scale_N_pad
+                    )
+                    vals = tl.where(mask_valid, bs_row, 127)
+                    tl.store(rowwise_scale_ptr + bs_offs, vals, mask=mask_pad)
+                else:
+                    scale_mask = (scale_rows < M)[:, None] & (
+                        scale_offset_x < rowwise_scale_N
+                    )
+                    tl.store(
+                        rowwise_scale_ptr
+                        + scale_rows[:, None] * stride_rowwise_scale_m
+                        + scale_offset_x * stride_rowwise_scale_n,
+                        bs_row,
+                        mask=scale_mask,
+                    )
+
+            # ---------- Columnwise path ----------
+            if USE_COLWISE:
+                # Treat columns as rows by transposing to reuse the same per-row logic.
+                # Instead of manually transposing indices, view the tile transposed.
+                x_col = tl.trans(x_chunk)
+                amax_col = tl.max(tl.abs(x_col), axis=1, keep_dims=True)
+                amax_col = amax_col.to(tl.int32, bitcast=True)
+                amax_col = (amax_col + 0x200000).to(tl.uint32, bitcast=True) & 0xFF800000
+                amax_col = amax_col.to(tl.float32, bitcast=True)
+                scale_unbiased_col = tl.log2(amax_col).floor() - 2
+                scale_unbiased_col = tl.clamp(scale_unbiased_col, min=-127, max=127)
+                quant_scale_col = tl.exp2(-scale_unbiased_col)
+
+                qx_col = x_col * quant_scale_col
+                bs_col = scale_unbiased_col.to(tl.uint8) + 127
+
+                qx_col_u32 = qx_col.to(tl.uint32, bitcast=True)
+                s_col = qx_col_u32 & 0x80000000
+                e_col = (qx_col_u32 >> 23) & 0xFF
+                m_col = qx_col_u32 & 0x7FFFFF
+
+                adjusted_col = tl.core.sub(E8_BIAS, e_col + 1, sanitize_overflow=False)
+                m_col = tl.where(e_col < E8_BIAS, (0x400000 | (m_col >> 1)) >> adjusted_col, m_col)
+                e_col = tl.maximum(e_col, E8_BIAS - E2_BIAS) - (E8_BIAS - E2_BIAS)
+
+                e2m1_col = tl.minimum((((e_col << 2) | (m_col >> 21)) + 1) >> 1, 0x7)
+                e2m1_col = ((s_col >> 28) | e2m1_col).to(tl.uint8)
+
+                # After transpose, each row in x_col is one column from the original tile.
+                col_pairs = tl.reshape(
+                    e2m1_col, [MXFP4_BLOCK_SIZE, MXFP4_BLOCK_SIZE // 2, 2]
+                )
+                vals_even, vals_odd = tl.split(col_pairs)
+                packed_col = vals_even | (vals_odd << 4)  # [cols, row_pairs]
+
+                col_indices = (
+                    base_n + chunk_n * MXFP4_BLOCK_SIZE + tl.arange(0, MXFP4_BLOCK_SIZE)
+                )
+                row_pairs = tl.arange(0, MXFP4_BLOCK_SIZE // 2)
+                rowpair_base = (base_m // 2) + chunk_m * (MXFP4_BLOCK_SIZE // 2)
+                rowpair_indices = rowpair_base + row_pairs
+
+                # col_indices: [base_n + chunk_n*MXFP4_BLOCK_SIZE + i for i in range(MXFP4_BLOCK_SIZE)]
+                # rowpair_indices: [base_m // 2 + chunk_m*(MXFP4_BLOCK_SIZE//2) + j for j in range(MXFP4_BLOCK_SIZE//2)]
+                col_fp4_mask = (col_indices < N)[:, None] & (
+                    rowpair_indices < (M // 2)
+                )[None, :]
+
+                # Store directly into the [N, M/2] layout expected by columnwise tensors.
+                tl.store(
+                    colwise_fp4_ptr
+                    + col_indices[:, None] * stride_colwise_fp4_m
+                    + rowpair_indices[None, :] * stride_colwise_fp4_n,
+                    packed_col,
+                    mask=col_fp4_mask,
+                )
+
+                scale_chunk = (pid_m * num_chunks_m) + chunk_m
+
+                if SHUFFLE_COLWISE:
+                    # Columnwise shuffle matches AITER's e8m0_shuffle:
+                    # view(sm//32, 2, 16, sn//8, 2, 4) -> permute(0, 3, 5, 2, 4, 1) -> view(sm, sn)
+                    # where sm = colwise_scale_M (N), sn = colwise_scale_N (M/32)
+                    #
+                    # For input (row=col_indices, col=scale_chunk):
+                    #   i0 = row // 32
+                    #   i1 = (row % 32) // 16
+                    #   i2 = row % 16
+                    #   i3 = col // 8
+                    #   i4 = (col % 8) // 4
+                    #   i5 = col % 4
+                    # Output linear = i0*(sn//8*256) + i3*256 + i5*64 + i2*4 + i4*2 + i1
+                    bs_col_1d = tl.reshape(bs_col, [MXFP4_BLOCK_SIZE])
+                    i0 = col_indices // 32
+                    i1 = (col_indices % 32) // 16
+                    i2 = col_indices % 16
+                    i3 = scale_chunk // 8
+                    i4 = (scale_chunk % 8) // 4
+                    i5 = scale_chunk % 4
+                    
+                    # colwise_scale_N_pad is already (M/32) rounded up to multiple of 8
+                    bs_offs = (
+                        i0 * (colwise_scale_N_pad // 8 * 256) +
+                        i3 * 256 +
+                        i5 * 64 +
+                        i2 * 4 +
+                        i4 * 2 +
+                        i1
+                    )
+                    mask_valid = (col_indices < colwise_scale_M) & (
+                        scale_chunk < colwise_scale_N
+                    )
+                    mask_pad = (col_indices < colwise_scale_M_pad) & (
+                        scale_chunk < colwise_scale_N_pad
+                    )
+                    vals = tl.where(mask_valid, bs_col_1d, 127)
+                    tl.store(colwise_scale_ptr + bs_offs, vals, mask=mask_pad)
+                else:
+                    # Simple row-major layout: each column has scale_chunk entries along the N-dimension.
+                    scale_mask = (col_indices < colwise_scale_M)[:, None] & (
+                        scale_chunk < colwise_scale_N
+                    )
+                    tl.store(
+                        colwise_scale_ptr
+                        + col_indices[:, None] * stride_colwise_scale_m
+                        + scale_chunk * stride_colwise_scale_n,
+                        bs_col,
+                        mask=scale_mask,
+                    )
+
 @triton.jit
 def _dequantize_mxfp8_triton(
     x_ptr, y_ptr,
@@ -579,6 +910,176 @@ def te_cast_transpose_mxfp8_triton(input, out, noop_flag=None):
         colwise_scale_inv_ptr, colwise_scale_stride_M, colwise_scale_stride_N,
         colwise_scale_M, colwise_scale_N,
         max_fp8, BLOCK_X, BLOCK_Y, GROUP_Y, MXFP8_BLOCK_SCALING_SIZE, USE_ROWWISE_SCALING, USE_COLWISE_SCALING)
+
+def te_cast_transpose_mxfp4_triton(
+    input: torch.Tensor,
+    rowwise_fp4_out: Optional[torch.Tensor] = None,
+    rowwise_scale_out: Optional[torch.Tensor] = None,
+    colwise_fp4_out: Optional[torch.Tensor] = None,
+    colwise_scale_out: Optional[torch.Tensor] = None,
+    shuffle_rowwise: bool = True,
+    shuffle_colwise: bool = True,
+) -> tuple:
+    """
+    Fused MXFP4 quantization with optional transpose
+    
+    Performs quantization for both rowwise and columnwise layouts
+    
+    Args:
+        input: Input tensor [M, N] in BF16/FP16
+        rowwise_fp4_out: Optional pre-allocated rowwise FP4 output [M, N/2]
+        rowwise_scale_out: Optional pre-allocated rowwise E8M0 scales
+        colwise_fp4_out: Optional pre-allocated colwise FP4 output [N, M/2]
+        colwise_scale_out: Optional pre-allocated colwise E8M0 scales
+        shuffle_rowwise: Whether to apply shuffle permutation to rowwise scales
+        shuffle_colwise: Whether to apply shuffle permutation to colwise scales
+    
+    Returns:
+        (rowwise_fp4, rowwise_scale, colwise_fp4, colwise_scale)
+    """
+    # Reshape input to 2D
+    original_shape = input.shape
+    if input.dim() > 2:
+        input = input.view(-1, input.shape[-1])
+    if input.dim() != 2:
+        raise ValueError(f"Input must be 2D or reshapeable to 2D, got shape {original_shape}")
+    
+    M, N = input.shape
+    MXFP4_BLOCK_SIZE = 32
+    BLOCK_M = 128
+    BLOCK_N = 128
+    
+    # Validate dimensions
+    assert N % MXFP4_BLOCK_SIZE == 0, f"N={N} must be divisible by {MXFP4_BLOCK_SIZE}"
+    
+    device = input.device
+    USE_ROWWISE = rowwise_fp4_out is not None or colwise_fp4_out is None
+    USE_COLWISE = colwise_fp4_out is not None
+    
+    # Allocate rowwise outputs (matching AITER layout)
+    if USE_ROWWISE:
+        if rowwise_fp4_out is None:
+            rowwise_fp4_out = torch.empty(M, N // 2, dtype=torch.uint8, device=device)
+        
+        scaleN_row = triton.cdiv(N, MXFP4_BLOCK_SIZE)
+        if rowwise_scale_out is None:
+            if shuffle_rowwise:
+                # AITER shuffled layout
+                scaleM = triton.cdiv(M, 32) * 32
+                scaleN = triton.cdiv(scaleN_row, 8) * 8
+                rowwise_scale_out = torch.empty(
+                    triton.cdiv(M, 256) * 256, scaleN,
+                    dtype=torch.uint8, device=device
+                )
+            else:
+                # Non-shuffled layout
+                rowwise_scale_out = torch.empty(M, scaleN_row, dtype=torch.uint8, device=device)
+        
+        scaleM_pad = triton.cdiv(M, 32) * 32
+        scaleN_pad = triton.cdiv(scaleN_row, 8) * 8
+    else:
+        scaleN_row = 1
+        scaleM_pad = scaleN_pad = 1
+    
+    colwise_scale_tmp = None
+    kernel_colwise_scale = None
+    kernel_colwise_scale_M = kernel_colwise_scale_N = 1
+    kernel_colwise_scale_M_pad = kernel_colwise_scale_N_pad = 1
+
+    # Allocate columnwise outputs (transposed)
+    if USE_COLWISE:
+        if colwise_fp4_out is None:
+            colwise_fp4_out = torch.empty(N, M // 2, dtype=torch.uint8, device=device)
+        
+        scaleN_colwise_valid = triton.cdiv(M, MXFP4_BLOCK_SIZE)
+        if colwise_scale_out is None:
+            if shuffle_colwise:
+                # AITER shuffled layout for colwise
+                scaleM_colwise_pad = triton.cdiv(N, 32) * 32
+                scaleN_colwise_pad = triton.cdiv(scaleN_colwise_valid, 8) * 8
+                colwise_scale_out = torch.empty(
+                    triton.cdiv(N, 256) * 256, scaleN_colwise_pad,
+                    dtype=torch.uint8, device=device
+                )
+            else:
+                # Non-shuffled layout
+                colwise_scale_out = torch.empty(N, scaleN_colwise_valid, dtype=torch.uint8, device=device)
+        
+        if shuffle_colwise:
+            scaleM_colwise_pad = triton.cdiv(N, 256) * 256
+            scaleN_colwise_pad = triton.cdiv(scaleN_colwise_valid, 8) * 8
+        else:
+            scaleM_colwise_pad = N
+            scaleN_colwise_pad = scaleN_colwise_valid
+
+        if shuffle_colwise:
+            # Allocate padded temporary tensor for shuffled output
+            colwise_scale_tmp = torch.empty(
+                scaleM_colwise_pad,
+                scaleN_colwise_pad,
+                dtype=torch.uint8,
+                device=device,
+            )
+            kernel_colwise_scale = colwise_scale_tmp
+            kernel_colwise_scale_M = N  # Valid (non-padded) dimension
+            kernel_colwise_scale_N = scaleN_colwise_valid  # Valid (non-padded) dimension
+            kernel_colwise_scale_M_pad = scaleM_colwise_pad
+            kernel_colwise_scale_N_pad = scaleN_colwise_pad
+        else:
+            kernel_colwise_scale = colwise_scale_out
+            kernel_colwise_scale_M = colwise_scale_out.shape[0]
+            kernel_colwise_scale_N = colwise_scale_out.shape[1]
+            kernel_colwise_scale_M_pad = scaleM_colwise_pad
+            kernel_colwise_scale_N_pad = scaleN_colwise_pad
+    else:
+        scaleM_colwise_pad = scaleN_colwise_pad = 1
+        kernel_colwise_scale = colwise_scale_out
+    
+    # Ensure input is contiguous
+    if not input.is_contiguous():
+        input = input.contiguous()
+    
+    # Launch kernel with (M_blocks, N_blocks)
+    grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
+    
+    _cast_transpose_triton_mxfp4[grid](
+        input,
+        rowwise_fp4_out if USE_ROWWISE else None,
+        rowwise_scale_out if USE_ROWWISE else None,
+        colwise_fp4_out if USE_COLWISE else None,
+        kernel_colwise_scale if USE_COLWISE else None,
+        input.stride(0), input.stride(1),
+        rowwise_fp4_out.stride(0) if USE_ROWWISE else 1,
+        rowwise_fp4_out.stride(1) if USE_ROWWISE else 1,
+        rowwise_scale_out.stride(0) if USE_ROWWISE else 1,
+        rowwise_scale_out.stride(1) if USE_ROWWISE else 1,
+        colwise_fp4_out.stride(0) if USE_COLWISE else 1,
+        colwise_fp4_out.stride(1) if USE_COLWISE else 1,
+        kernel_colwise_scale.stride(0) if USE_COLWISE else 1,
+        kernel_colwise_scale.stride(1) if USE_COLWISE else 1,
+        M=M,
+        N=N,
+        rowwise_scale_N=scaleN_row,
+        rowwise_scale_M_pad=scaleM_pad,
+        rowwise_scale_N_pad=scaleN_pad,
+        colwise_scale_M=kernel_colwise_scale_M,
+        colwise_scale_N=kernel_colwise_scale_N,
+        colwise_scale_M_pad=kernel_colwise_scale_M_pad,
+        colwise_scale_N_pad=kernel_colwise_scale_N_pad,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        MXFP4_BLOCK_SIZE=MXFP4_BLOCK_SIZE,
+        USE_ROWWISE=USE_ROWWISE,
+        USE_COLWISE=USE_COLWISE,
+        SHUFFLE_ROWWISE=shuffle_rowwise,
+        SHUFFLE_COLWISE=shuffle_colwise,
+    )
+    
+    # Copy shuffled columnwise scales to output tensor (trim padding)
+    if USE_COLWISE and shuffle_colwise:
+        colwise_scale_out[:N, :scaleN_colwise_valid] = kernel_colwise_scale[:N, :scaleN_colwise_valid]
+    
+    return rowwise_fp4_out, rowwise_scale_out, colwise_fp4_out, colwise_scale_out
 
 def te_dequantize_mxfp8_triton(input, dtype):
     input_metadata = input.get_metadata()
