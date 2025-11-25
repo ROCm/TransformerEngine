@@ -76,22 +76,37 @@ jobs:
 
       - name: Select Docker Image Tag
         id: select-image
-        env:
-          DEV_IMAGE: ${{ vars.DEV_DOCKER_IMAGE }}
-          REL_IMAGE: ${{ vars.REL613_DOCKER_IMAGE }}
         run: |
+          # Donload config from the dev branch
+          # We force fetch from 'dev' so all release branches/forks get the latest image tags instantly
+          CONFIG_URL="https://raw.githubusercontent.com/Your-Org/Your-Repo/dev/ci/ci_config.json"
+          
+          echo "Fetching image config from: $CONFIG_URL"
+          curl -s -f -o docker_config.json "$CONFIG_URL" || { echo "::error::Failed to fetch config from dev branch"; exit 1; }
+
+          # Extract vars
+          DEV_DOCKER_IMAGE=$(jq -r '.dev_docker_image' ci_config.json)
+          REL613_DOCKER_IMAGE=$(jq -r '.rel613_docker_image' ci_config.json)
+
+          # Determine branch and read json
           BRANCH_NAME="${{ github.base_ref || github.ref_name }}"
           echo "Determining image for branch: $BRANCH_NAME"
-          DEV_DOCKER_IMAGE="$DEV_IMAGE"
-          REL613_DOCKER_IMAGE="$REL_IMAGE"
+          
+          # Default to dev image
           IMAGE_TO_USE="$DEV_DOCKER_IMAGE"
+          
+          # Check for release patterns
           if [[ $BRANCH_NAME =~ ^release_v([0-9]+)\.([0-9]+)_rocm$ ]]; then
             MAJOR_VERSION=${BASH_REMATCH[1]}
             MINOR_VERSION=${BASH_REMATCH[2]}
             if (( MAJOR_VERSION == 1 )); then
-              if (( MINOR_VERSION == 13 || MINOR_VERSION == 14 )); then IMAGE_TO_USE="$REL613_DOCKER_IMAGE"; fi
+              # If 1.13 or 1.14, switch to the REL613 image
+              if (( MINOR_VERSION == 13 || MINOR_VERSION == 14 )); then 
+                IMAGE_TO_USE="$REL613_DOCKER_IMAGE"
+              fi
             fi
           fi
+          
           echo "Selected image: $IMAGE_TO_USE"
           echo "image-tag=$IMAGE_TO_USE" >> $GITHUB_OUTPUT
 
