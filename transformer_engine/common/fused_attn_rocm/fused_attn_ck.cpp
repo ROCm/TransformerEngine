@@ -564,7 +564,6 @@ void fused_attn_ck_fwd_impl(
   bool is_ragged = qkv_format==NVTE_QKV_Format::NVTE_THD;
   bool is_SBHD = qkv_format==NVTE_QKV_Format::NVTE_SBHD || qkv_format==NVTE_QKV_Format::NVTE_SBHD_2BSHD;
   bool is_BSHD = qkv_format==NVTE_QKV_Format::NVTE_BSHD;
-  bool is_batch = is_BSHD || is_SBHD;
 
   bool is_padding = (mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
                      mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
@@ -584,13 +583,19 @@ void fused_attn_ck_fwd_impl(
     if(bias_type == NVTE_Bias_Type::NVTE_ALIBI){
       (*workspace_size)+= h*sizeof(float);
     }
-    (*workspace_size)+= max_tokens_q*h*sizeof(float);
     if(is_SBHD && is_padding){
+      // Softmax LSE buffer
+      (*workspace_size)+= max_tokens_q*h*sizeof(float);
       // request q, k, v, o buffer without padding
       (*workspace_size)+= q_storage_bytes + k_storage_bytes + v_storage_bytes + o_storage_bytes;
     }else if(bshd_to_thd){
+      // Softmax LSE buffer
+      (*workspace_size)+= max_tokens_q*h*sizeof(float);
       // cu_seqlen_padded buffers
       (*workspace_size)+= 2*(b+1)*sizeof(int32_t);
+    }else if(is_ragged){
+      // Softmax LSE buffer
+      (*workspace_size)+= max_tokens_q*h*sizeof(float);
     }
     if (nvte_log_ck_config) {
       std::cout<<std::endl<<"attn_fwd(ck) requested workspace of size "<<*workspace_size<<std::endl;
@@ -633,9 +638,11 @@ void fused_attn_ck_fwd_impl(
   void* devPtrCuSeqlenPaddedQ = devPtrSeqOffsetsQ;
   void* devPtrCuSeqlenPaddedKV = devPtrSeqOffsetsKV;
 
-  // next h*max_tokens_q*sizeof(float) in workspace are for lse buffer
-  devPtrSoftmaxLSEWithoutPadding = workspace_next;
-  workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + h*max_tokens_q*sizeof(float));
+  if((is_SBHD && is_padding) || bshd_to_thd || is_ragged){
+    // next h*max_tokens_q*sizeof(float) in workspace are for lse buffer
+    devPtrSoftmaxLSEWithoutPadding = workspace_next;
+    workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + h*max_tokens_q*sizeof(float));
+  }
   if(is_SBHD && is_padding){
     //determine the o buffer based on workspace next section
     devPtrOWithoutPadding = workspace_next;
@@ -685,7 +692,6 @@ void fused_attn_ck_fwd_impl(
     std::cout<<"layout: "<<layout<<", ";
     std::cout<<"max_tokens_q: "<<max_tokens_q<<", ";
     std::cout<<"max_tokens_kv: "<<max_tokens_kv<<", ";
-    std::cout<<"is_batch: "<<is_batch<<", ";
     std::cout<<"is_ragged: "<<is_ragged<<", ";
     std::cout<<"is_padding: "<<is_padding<<", ";
     std::cout<<"is_SBHD: "<<is_SBHD<<", ";
@@ -847,7 +853,6 @@ void fused_attn_ck_bwd_impl(
   bool is_ragged = qkv_format==NVTE_QKV_Format::NVTE_THD;
   bool is_SBHD = qkv_format==NVTE_QKV_Format::NVTE_SBHD || qkv_format==NVTE_QKV_Format::NVTE_SBHD_2BSHD;
   bool is_BSHD = qkv_format==NVTE_QKV_Format::NVTE_BSHD;
-  bool is_batch = is_BSHD || is_SBHD;
   bool is_padding = (mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
                      mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
                      mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
@@ -862,10 +867,8 @@ void fused_attn_ck_bwd_impl(
 
   // Exit to request upper level API to allocate memory if needed
   if(workspace==nullptr){
-    size_t workspace_size_lse = max_tokens_q*h*sizeof(float);
     // CK requires dq_acc ptr, dq_acc depends on is deterministic
-    size_t workspace_size_dq_acc = nsplits*h*max_tokens_q*d_qk*sizeof(float);
-    *workspace_size = workspace_size_lse + workspace_size_dq_acc;
+    *workspace_size = nsplits*h*max_tokens_q*d_qk*sizeof(float);
     if(is_mqa_gqa){
       // allocate dk, dv (or dkv) as if h=hg
       size_t dkv_expanded_size = max_tokens_kv*h*(d_qk+d_v)*nvte_dtype_size(dtype);
@@ -881,14 +884,21 @@ void fused_attn_ck_bwd_impl(
     // remove padding for the softmax_lse
     (*workspace_size)+= h*max_tokens_q*sizeof(float);
     if(is_SBHD && is_padding){
-        // allocate the q, k, v, o, do, dq, dk, dv,
-        (*workspace_size)+= 2*(q_storage_bytes + k_storage_bytes + v_storage_bytes + o_storage_bytes);
-        if (nvte_log_ck_config) {
-          std::cout<<std::endl<<"attn_bwd(ck) need padding/unpadding workaround"<<std::endl;
-        }
+      // Softmax LSE buffer
+      *workspace_size += max_tokens_q*h*sizeof(float);
+      // allocate the q, k, v, o, do, dq, dk, dv,
+      (*workspace_size)+= 2*(q_storage_bytes + k_storage_bytes + v_storage_bytes + o_storage_bytes);
+      if (nvte_log_ck_config) {
+        std::cout<<std::endl<<"attn_bwd(ck) need padding/unpadding workaround"<<std::endl;
+      }
     }else if(bshd_to_thd){
+      // Softmax LSE buffer
+      *workspace_size += max_tokens_q*h*sizeof(float);
       // cu_seqlen_padded buffers
       (*workspace_size)+= 2*(b+1)*sizeof(int32_t);
+    }else if(is_ragged){
+      // Softmax LSE buffer
+      *workspace_size += max_tokens_q*h*sizeof(float);
     }
     if (nvte_log_ck_config) {
       std::cout<<std::endl<<"attn_bwd(ck) requested workspace of size "<<*workspace_size<<std::endl;
@@ -1014,8 +1024,11 @@ void fused_attn_ck_bwd_impl(
   void* devPtrCuSeqlenPaddedQ = devPtrSeqOffsetsQ;
   void* devPtrCuSeqlenPaddedKV = devPtrSeqOffsetsKV;
   
-  devPtrSoftmaxLSEWithoutPadding = workspace_next;
-  workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + h*max_tokens_q*sizeof(float));
+  if((is_SBHD && is_padding) || bshd_to_thd || is_ragged){
+    // next h*max_tokens_q*sizeof(float) in workspace are for lse buffer
+    devPtrSoftmaxLSEWithoutPadding = workspace_next;
+    workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + h*max_tokens_q*sizeof(float));
+  }
   if(is_SBHD && is_padding){
     //determine q, k, v buffer based on the workspace next ptr and layout group
     NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
@@ -1094,7 +1107,6 @@ void fused_attn_ck_bwd_impl(
     std::cout<<"layout: "<<layout<<", ";
     std::cout<<"max_tokens_q: "<<max_tokens_q<<", ";
     std::cout<<"max_tokens_kv: "<<max_tokens_kv<<", ";
-    std::cout<<"is_batch: "<<is_batch<<", ";
     std::cout<<"is_ragged: "<<is_ragged<<", ";
     std::cout<<"is_padding: "<<is_padding<<", ";
     std::cout<<"bshd_to_thd: "<<bshd_to_thd<<", ";
