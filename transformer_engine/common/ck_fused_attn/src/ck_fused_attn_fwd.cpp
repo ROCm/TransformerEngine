@@ -108,7 +108,7 @@ void log_fwd_config(const char* func_name,
   }
 }
 
-void dump_fwd_timings(const char* dump_path, float average_runtime, hipStream_t stream){
+void dump_fwd_timings(const char* dump_path, float average_runtime){
   std::ofstream file;
   file.open(std::string(dump_path) + "aiter-fwd-timings.txt", std::ios_base::app);
   file << average_runtime << "\n";
@@ -280,7 +280,7 @@ hipError_t ck_attn_fwd(
                                          has_lse,
                                          uses_fwd_v3);
   if(dump_path){
-    dump_fwd_timings(dump_path, average_runtime, stream);
+    dump_fwd_timings(dump_path, average_runtime);
   }
   if(average_runtime < 0){
     //TODO: better error out system
@@ -458,7 +458,7 @@ hipError_t ck_attn_varlen_fwd(
                                          has_lse,
                                          uses_fwd_v3);
   if(dump_path){
-    dump_fwd_timings(dump_path, average_runtime, stream);
+    dump_fwd_timings(dump_path, average_runtime);
   }
   if(average_runtime < 0){
     //TODO: better error out system
