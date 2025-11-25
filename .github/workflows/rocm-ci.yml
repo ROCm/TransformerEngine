@@ -1,0 +1,361 @@
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+
+name: TransformerEngine CI
+
+on:
+  push:
+    branches:
+      - 'dev'
+      - 'release_v1.*_rocm'
+      - 'release_v2.*_rocm'
+  pull_request:
+    branches:
+      - 'dev'
+      - 'release_v1.**_rocm'
+      - 'release_v2.**_rocm'
+  workflow_dispatch:
+    inputs:
+      test_level:
+        description: 'Test Level (1-3)'
+        required: true
+        default: '1'
+      skip_dev_merge:
+        description: 'Skip merging dev branch'
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_and_test:
+    name: Build and Test on GPU
+    timeout-minutes: 720
+    runs-on: linux-mi325-8
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+          fetch-depth: 0
+        
+      - name: Merge origin/dev
+        # Only run on PRs targeting dev, or manual runs where we didn't skip it
+        if: |
+          (github.event_name == 'pull_request' && github.base_ref == 'dev') ||
+          (github.event_name == 'workflow_dispatch' && inputs.skip_dev_merge != 'true' && github.ref == 'refs/heads/dev')
+        run: |
+          echo "Attempting to merge origin/dev..."
+          git config --global user.email "amd@amd.com"
+          git config --global user.name "AMD CI"
+          
+          # Fetch dev specifically
+          git fetch origin dev
+
+          # Attempt merge; this will exit with error code 1 if there is a conflict, failing the job
+          git merge origin/dev
+
+          # Update submodules after merge to ensure new files are present
+          echo "Updating submodules after merge..."
+          git submodule update --init --recursive
+
+          echo "Merge successful."
+
+      - name: Print Environment and Variables
+        run: |
+          echo "::group::Shell Environment Variables"
+          env | sort
+          echo "::endgroup::"
+
+          echo "::group::Repository Variables (vars context)"
+          echo '${{ toJSON(vars) }}'
+          echo "::endgroup::"
+
+      - name: Select Docker Image Tag
+        id: select-image
+        env:
+          DEV_IMAGE: ${{ vars.DEV_DOCKER_IMAGE }}
+          REL_IMAGE: ${{ vars.REL613_DOCKER_IMAGE }}
+        run: |
+          BRANCH_NAME="${{ github.base_ref || github.ref_name }}"
+          echo "Determining image for branch: $BRANCH_NAME"
+          DEV_DOCKER_IMAGE="$DEV_IMAGE"
+          REL613_DOCKER_IMAGE="$REL_IMAGE"
+          IMAGE_TO_USE="$DEV_DOCKER_IMAGE"
+          if [[ $BRANCH_NAME =~ ^release_v([0-9]+)\.([0-9]+)_rocm$ ]]; then
+            MAJOR_VERSION=${BASH_REMATCH[1]}
+            MINOR_VERSION=${BASH_REMATCH[2]}
+            if (( MAJOR_VERSION == 1 )); then
+              if (( MINOR_VERSION == 13 || MINOR_VERSION == 14 )); then IMAGE_TO_USE="$REL613_DOCKER_IMAGE"; fi
+            fi
+          fi
+          echo "Selected image: $IMAGE_TO_USE"
+          echo "image-tag=$IMAGE_TO_USE" >> $GITHUB_OUTPUT
+
+      - name: Pull Docker Image
+        run: |
+          docker pull ${{ steps.select-image.outputs.image-tag }}
+
+      - name: Run Container
+        run: |
+          docker run -dt \
+            --name te-runner \
+            --network=host \
+            --device=/dev/dri --device=/dev/kfd \
+            --shm-size=16G \
+            --pid=host \
+            --group-add $(getent group render | cut -d: -f3) \
+            --group-add $(getent group video | cut -d: -f3) \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            ${{ steps.select-image.outputs.image-tag}}
+
+      - name: ROCM Diagnostics
+        run: |
+          # On the runner
+          rocm-smi
+          # In the container
+          docker exec te-runner rocm-smi
+
+      - name: Determine GPU Architecture via rocminfo
+        id: gpu-arch
+        run: |
+          # Run rocminfo inside the container and capture the output
+          ARCH=$(docker exec te-runner bash -c "rocminfo | grep -m 1 -oP 'gfx[0-9a-fA-F]+'")
+          if [ -z "$ARCH" ]; then
+            echo "::error::Could not determine GPU architecture using rocminfo inside the container."
+            # Optional: Print full rocminfo output for debugging
+            docker exec te-runner rocminfo
+            exit 1
+          fi
+          echo "Detected GPU Arch: $ARCH"
+          echo "arch=$ARCH" >> $GITHUB_OUTPUT
+
+      - name: Build Project
+        run: |
+          docker exec \
+            -e GPU_ARCH=${{ steps.gpu-arch.outputs.arch }} \
+            te-runner bash -c "$(cat <<'EOF'
+          set -ex
+          
+          export HIP_PATH=""
+          export PYTORCH_ROCM_ARCH=$GPU_ARCH
+          export NVTE_ROCM_ARCH=$GPU_ARCH
+          export NVTE_AITER_PREBUILT_BASE_URL=https://compute-artifactory.amd.com:5000/artifactory/rocm-generic-local/te-ci/aiter-prebuilts
+          pip install ninja
+          pip install --no-build-isolation -v . 2>&1
+          EOF
+          )"
+
+      - name: Run sGPU tests
+        id: sgpu-tests
+        continue-on-error: true
+        run: |
+          # Cleanup previous failure markers if any. Don't actually do anything on k8s pods
+          rm -f FAIL_*
+
+          docker exec \
+            -e TEST_SGPU=1 \
+            -e TEST_LEVEL=${{ inputs.test_level || '1' }} \
+            te-runner bash -c "$(cat <<'EOF'
+          #!/usr/bin/bash
+          set -x -o pipefail
+          ulimit -c 0 # Disable core dumps
+
+          # debug output
+          ls -d /opt/rocm*
+          python --version
+          pip list | egrep "transformer_e|torch|jax|numpy|ml_dtypes|typing_ext"
+
+          HIP_VISIBLE_DEVICES=1 ci/pytorch.sh > /workspace/torch_sgpu.log 2>&1 &
+          torch_pid=$!; echo Pytorch test pid $!
+          
+          HIP_VISIBLE_DEVICES=2 ci/jax.sh > /workspace/jax_sgpu.log 2>&1 &
+          jax_pid=$!; echo JAX test pid $!
+          
+          HIP_VISIBLE_DEVICES=3 ci/core.sh > /workspace/core_sgpu.log 2>&1 &
+          core_pid=$!; echo Core test pid $!
+          
+          wait $core_pid; core_rc=$?
+          wait $jax_pid; jax_rc=$?
+          wait $torch_pid; torch_rc=$?
+          
+          # /workspace/FAIL_* files are for failure markers we can extract to the host runner and process later
+          # Check PyTorch
+          if [ $torch_rc -ne 0 ]; then 
+            echo "::group::[FAILED] PyTorch sGPU Log"
+            cat /workspace/torch_sgpu.log
+            echo "::endgroup::"
+            echo "::error::Pytorch sGPU test FAILED."
+            touch /workspace/FAIL_TORCH_SGPU
+          fi
+
+          # Check JAX
+          if [ $jax_rc -ne 0 ]; then 
+            echo "::group::[FAILED] JAX sGPU Log"
+            cat /workspace/jax_sgpu.log
+            echo "::endgroup::"
+            echo "::error::JAX sGPU test FAILED."
+            touch /workspace/FAIL_JAX_SGPU
+          fi
+
+          # Check Core
+          if [ $core_rc -ne 0 ]; then 
+            echo "::group::[FAILED] Core sGPU Log"
+            cat /workspace/core_sgpu.log
+            echo "::endgroup::"
+            echo "::error::Core sGPU test FAILED."
+            touch /workspace/FAIL_CORE_SGPU
+          fi
+          
+          test $torch_rc -eq 0 -a $jax_rc -eq 0 -a $core_rc -eq 0
+          EOF
+          )"
+          
+          # Export failed tests statuses to host runner
+          if [ -f FAIL_TORCH_SGPU ]; then echo "torch=fail" >> $GITHUB_OUTPUT; fi
+          if [ -f FAIL_JAX_SGPU ];   then echo "jax=fail"   >> $GITHUB_OUTPUT; fi
+          if [ -f FAIL_CORE_SGPU ];  then echo "core=fail"  >> $GITHUB_OUTPUT; fi
+
+      - name: Run mGPU tests
+        id: mgpu-tests
+        continue-on-error: true
+        run: |
+          docker exec \
+            -e TEST_MGPU=1 \
+            -e TEST_LEVEL=${{ inputs.test_level || '1' }} \
+            te-runner bash -c "$(cat <<'EOF'
+          #!/usr/bin/bash
+          set -x -o pipefail
+          ulimit -c 0 # Disable core dumps
+          
+          # Run PyTorch
+          ci/pytorch.sh > /workspace/torch_mgpu.log 2>&1
+          torch_rc=$?
+          
+          # Run JAX
+          ci/jax.sh > /workspace/jax_mgpu.log 2>&1
+          jax_rc=$?
+          
+          # /workspace/FAIL_* files are for failure markers we can extract to the host runner and process later
+          if [ $torch_rc -ne 0 ]; then 
+            echo "::group::[FAILED] PyTorch mGPU Log"
+            cat /workspace/torch_mgpu.log
+            echo "::endgroup::"
+            echo "::error::Pytorch mGPU test FAILED."
+            touch /workspace/FAIL_TORCH_MGPU
+          fi
+
+          if [ $jax_rc -ne 0 ]; then 
+            echo "::group::[FAILED] JAX mGPU Log"
+            cat /workspace/jax_mgpu.log
+            echo "::endgroup::"
+            echo "::error::JAX mGPU test FAILED."
+            touch /workspace/FAIL_JAX_MGPU
+          fi
+          
+          test $torch_rc -eq 0 -a $jax_rc -eq 0
+          EOF
+          )"
+
+          # Export failed tests statuses to host runner
+          if [ -f FAIL_TORCH_MGPU ]; then echo "torch=fail" >> $GITHUB_OUTPUT; fi
+          if [ -f FAIL_JAX_MGPU ];   then echo "jax=fail"   >> $GITHUB_OUTPUT; fi
+
+      - name: Run Examples
+        id: examples-tests
+        continue-on-error: true
+        run: |
+          docker exec te-runner bash -c "$(cat <<'EOF'
+          #!/usr/bin/bash
+          set -ex -o pipefail
+          ulimit -c 0 # Disable core dumps
+
+          cd /workspace/examples/pytorch/mnist
+          python main.py 2>&1 | tee /workspace/examples.log
+          python main.py --use-te 2>&1 | tee -a /workspace/examples.log
+          python main.py --use-fp8 2>&1 | tee -a /workspace/examples.log
+          
+          cd /workspace/examples/jax/mnist
+          pip3 install -r requirements.txt
+          python test_single_gpu_mnist.py 2>&1 | tee -a /workspace/examples.log
+          python test_single_gpu_mnist.py --use-te 2>&1 | tee -a /workspace/examples.log
+          python test_single_gpu_mnist.py --use-fp8 2>&1 | tee -a /workspace/examples.log
+          
+          cd /workspace/examples/jax/encoder
+          pip3 install -r requirements.txt
+          python test_single_gpu_encoder.py 2>&1 | tee -a /workspace/examples.log
+          python test_single_gpu_encoder.py --use-fp8 2>&1 | tee -a /workspace/examples.log
+          EOF
+          )"
+
+      - name: Check Test Failure Status
+        if: always()
+        run: |
+          EXIT_STATUS=0
+          # Check outcomes of the specific test steps
+          # "outcome" will be 'failure' even if continue-on-error was true
+
+          # sGPU CHECKS
+          # We check for the file existence directly because the 'Run sGPU tests' step 
+          # halts immediately on docker failure, skipping the lines that set step outputs.
+          if [[ -f FAIL_CORE_SGPU ]]; then
+            echo "::error::Core sGPU Tests Failed."
+            EXIT_STATUS=1
+          fi
+          if [[ -f FAIL_TORCH_SGPU ]]; then
+            echo "::error::PyTorch sGPU Tests Failed."
+            EXIT_STATUS=1
+          fi
+          if [[ -f FAIL_JAX_SGPU ]]; then
+            echo "::error::JAX sGPU Tests Failed."
+            EXIT_STATUS=1
+          fi
+          
+          # mGPU CHECKS
+          if [[ -f FAIL_TORCH_MGPU ]]; then
+            echo "::error::PyTorch mGPU Tests Failed."
+            EXIT_STATUS=1
+          fi
+          if [[ -f FAIL_JAX_MGPU ]]; then
+            echo "::error::JAX mGPU Tests Failed."
+            EXIT_STATUS=1
+          fi
+
+          # EXAMPLES CHECK
+          # Examples script does not use marker files, so we rely on step outcome
+          if [[ "${{ steps.examples-tests.outcome }}" == "failure" ]]; then
+            echo "::error::Example Tests Failed."
+            EXIT_STATUS=1
+          fi
+
+          # Fail the job if any errors were detected
+          if [[ "$EXIT_STATUS" == "1" ]]; then
+            exit 1
+          fi
+
+      - name: Copy logs and reports from container
+        if: always()
+        run: |
+          docker cp te-runner:/workspace/torch_sgpu.log ./torch_sgpu.log || true
+          docker cp te-runner:/workspace/jax_sgpu.log ./jax_sgpu.log || true
+          docker cp te-runner:/workspace/core_sgpu.log ./core_sgpu.log || true
+          docker cp te-runner:/workspace/torch_mgpu.log ./torch_mgpu.log || true
+          docker cp te-runner:/workspace/jax_mgpu.log ./jax_mgpu.log || true
+
+      - name: Upload logs and test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-and-reports
+          path: |
+            *.log
+          if-no-files-found: ignore
+          retention-days: 5
+
+      - name: Cleanup container
+        if: always()
+        run: docker rm -f te-runner || true
