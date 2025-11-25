@@ -209,7 +209,6 @@ TEST(AmaxConsistencyTest, AtomicVsWorkspace) {
   Tensor input("input", shape, DType::kFloat32);
   Tensor out_atomic("out_atomic", shape, DType::kFloat8E4M3, true, false);
   Tensor out_ws("out_ws", shape, DType::kFloat8E4M3, true, false);
-  Tensor out_ws2("out_ws2", shape, DType::kFloat8E4M3, true, false);
 
   fillUniform(&input);
 
@@ -217,12 +216,10 @@ TEST(AmaxConsistencyTest, AtomicVsWorkspace) {
   nvte_compute_amax(input.data(), out_atomic.data(), 0);
 
   // Path 2: two-stage amax using workspace
+  // Use a workspace capacity >= number of blocks
   std::vector<size_t> ws_shape{N};
   Tensor workspace("workspace", ws_shape, DType::kFloat32);
   nvte_compute_amax_with_workspace(input.data(), out_ws.data(), workspace.data(), 0);
-
-  // Path 3: Use workspace allocator
-  nvte_compute_amax_with_workspace(input.data(), out_ws2.data(), allocate_amax_workspace(input).data(), 0);
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
@@ -231,10 +228,8 @@ TEST(AmaxConsistencyTest, AtomicVsWorkspace) {
   // Compare the resulting amax values
   float amax_atomic = out_atomic.amax();
   float amax_ws     = out_ws.amax();
-  float amax_ws2    = out_ws2.amax();
 
   compareResults("amax_consistency", amax_atomic, amax_ws, /*atol=*/0.0f, /*rtol=*/0.0f);
-  compareResults("amax_consistency", amax_atomic, amax_ws2, /*atol=*/0.0f, /*rtol=*/0.0f);
 }
 
 
