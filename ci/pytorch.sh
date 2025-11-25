@@ -60,7 +60,7 @@ run_test_config(){
     run_default_fa 1 test_float8_current_scaling_exact.py
     test $_fus_attn = auto -o $_fus_attn = ck -o $_fus_attn = aotriton && NVTE_FLASH_ATTN=0 run 1 test_cpu_offloading.py
     run_default_fa 1 test_fused_rope.py
-    run 1 test_fused_router.py
+    run_default_fa 1 test_fused_router.py
     run_default_fa 1 test_fusible_ops.py
     run_default_fa 3 test_gemm_autotune.py
     run_default_fa 3 test_gemm_sm_count.py
