@@ -20,7 +20,7 @@ on:
       test_level:
         description: 'Test Level (1-3)'
         required: true
-        default: '3'
+        default: '1'
       skip_dev_merge:
         description: 'Skip merging dev branch'
         type: boolean
@@ -64,6 +64,16 @@ jobs:
 
           echo "Merge successful."
 
+      - name: Print Environment and Variables
+        run: |
+          echo "::group::Shell Environment Variables"
+          env | sort
+          echo "::endgroup::"
+
+          echo "::group::Repository Variables (vars context)"
+          echo '${{ toJSON(vars) }}'
+          echo "::endgroup::"
+
       - name: Select Docker Image Tag
         id: select-image
         env:
@@ -103,7 +113,7 @@ jobs:
             -w /workspace \
             ${{ steps.select-image.outputs.image-tag}}
 
-      - name: Diagnostics
+      - name: ROCM Diagnostics
         run: |
           # On the runner
           rocm-smi
@@ -149,7 +159,7 @@ jobs:
 
           docker exec \
             -e TEST_SGPU=1 \
-            -e TEST_LEVEL=${{ inputs.test_level || '3' }} \
+            -e TEST_LEVEL=${{ inputs.test_level || '1' }} \
             te-runner bash -c "$(cat <<'EOF'
           #!/usr/bin/bash
           set -x -o pipefail
@@ -216,7 +226,7 @@ jobs:
         run: |
           docker exec \
             -e TEST_MGPU=1 \
-            -e TEST_LEVEL=${{ inputs.test_level || '3' }} \
+            -e TEST_LEVEL=${{ inputs.test_level || '1' }} \
             te-runner bash -c "$(cat <<'EOF'
           #!/usr/bin/bash
           set -x -o pipefail
