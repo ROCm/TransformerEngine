@@ -464,6 +464,8 @@ def _make_graphed_callables(
                 # Update FP8 scale factors if needed
                 if ctx.is_first_module:
                     FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
+                    if FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2:
+                        FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=True)
 
                 # Input args that didn't require grad expect a None gradient.
                 assert isinstance(static_grad_inputs, tuple)

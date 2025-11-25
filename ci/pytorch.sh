@@ -12,7 +12,7 @@ TEST_DIR=${TE_PATH}tests/pytorch
 #: ${TEST_WORKERS:=4}
 
 install_prerequisites() {
-    pip install 'numpy>=1.22.4,<2.0' pandas
+    pip install 'numpy>=1.22.4' pandas
     rc=$?
     if [ $rc -ne 0 ]; then
         script_error "Failed to install test prerequisites"
@@ -72,7 +72,6 @@ run_test_config(){
     run 1 test_sanity.py
     run_default_fa 1 test_sanity_import.py
     run_default_fa 1 fused_attn/test_fused_attn.py # Backend selection is controlled by the test
-    NVTE_CK_USES_FWD_V3=1 NVTE_CK_USES_BWD_V3=1 run_default_fa_lbl "v3" 1 fused_attn/test_fused_attn.py # Using FAv3 for forward and backward pass
     run_default_fa 1 triton_kernels/test_cast.py
     run_default_fa 1 triton_kernels/test_cast_mxfp8.py
     run_default_fa 1 triton_kernels/test_norm_common.py
@@ -81,6 +80,7 @@ run_test_config(){
     run_default_fa 1 test_parallel_cross_entropy.py
     NVTE_USE_DEQUANTIZE_TRITON=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa_lbl "triton" 1 test_numerics.py
     NVTE_USE_RMSNORM_TRITON=1 run_default_fa_lbl "triton" 1 test_fusible_ops.py
+    NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "triton" 1 test_float8_current_scaling_exact.py
 }
 
 run_test_config_mgpu(){
@@ -93,6 +93,7 @@ run_test_config_mgpu(){
         run 3 distributed/test_fusible_ops.py
         run 3 distributed/test_numerics.py
         run 3 distributed/test_torch_fsdp2.py
+        run 3 distributed/test_torch_fsdp2_fp8.py
         run 3 fused_attn/test_fused_attn_with_cp.py
     fi
 }
@@ -111,7 +112,7 @@ run_benchmark() {
         return
     fi
 
-    python "$BENCH_SCRIPT" --use_ck_bwd_v3 --run_sanity_checks || test_run_error $BENCH_SCRIPT
+    python "$BENCH_SCRIPT" --run_sanity_checks || test_run_error $BENCH_SCRIPT
 }
 
 # Single config mode, run it and return result
