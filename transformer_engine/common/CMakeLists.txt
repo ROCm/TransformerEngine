@@ -238,6 +238,7 @@ else()
       IGNORES "*/amd_detail/*"
       IGNORES "*/aotriton/*"
       IGNORES "*/ck_fused_attn/*"
+      IGNORES "*/rocshmem_api/*"
       CUSTOM_MAP_FILE "${TE}/hipify_custom_map.json"
       NO_MATH_REPLACE
   )
@@ -382,6 +383,19 @@ if(USE_CUDA)
 
 # Hack to enable dynamic loading in cuDNN frontend
 target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
+else()
+  option(NVTE_ENABLE_ROCSHMEM "Compile with ROCSHMEM library" OFF)
+  if (NVTE_ENABLE_ROCSHMEM)
+    add_subdirectory(rocshmem_api)
+    target_link_options(transformer_engine PRIVATE
+        -fgpu-rdc
+    )
+    target_link_libraries(transformer_engine PUBLIC 
+        -Wl,--whole-archive
+        rocshmemapi
+        -Wl,--no-whole-archive
+    )
+  endif()
 endif()
 
 # Helper functions to make header files with C++ strings
