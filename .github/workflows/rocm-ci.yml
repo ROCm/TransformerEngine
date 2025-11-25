@@ -81,9 +81,9 @@ jobs:
       - name: Select Docker Image Tag
         id: select-image
         run: |
-          # Donload config from the dev branch
+          # Download config from the dev branch
           # We force fetch from 'dev' so all release branches/forks get the latest image tags instantly
-          CONFIG_URL="https://raw.githubusercontent.com/Your-Org/Your-Repo/dev/ci/ci_config.json"
+          CONFIG_URL="https://raw.githubusercontent.com/ROCm/TransformerEngine/dev/ci/ci_config.json"
           
           echo "Fetching image config from: $CONFIG_URL"
           curl -s -f -o docker_config.json "$CONFIG_URL" || { echo "::error::Failed to fetch config from dev branch"; exit 1; }
