@@ -11,7 +11,6 @@
 #include <algorithm>
 #include <limits>
 #include <type_traits>
-#include <cstdlib>
 
 #include "../common.h"
 #include "../util/logging.h"
@@ -46,10 +45,11 @@ __global__ void amax_final_reduce(const float* __restrict__ block_amax,
     *global_amax = block_max;
   }
 }
+
 template <int nvec, bool aligned, typename InputType>
 __launch_bounds__(amax_kernel_threads) __global__
     void amax_kernel(const InputType *input, float *amax, float* __restrict__ block_amax, const size_t N,
-                     const size_t num_aligned_elements, bool use_block_amax) {
+                     const size_t num_aligned_elements) {
   VectorizedLoader<InputType, nvec, aligned> loader(input, N);
   InputType max{0.f};
   const int warp_id = threadIdx.x / THREADS_PER_WARP;
@@ -57,10 +57,9 @@ __launch_bounds__(amax_kernel_threads) __global__
 
   for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x; tid < M; tid += gridDim.x * blockDim.x) {
     loader.load(tid, N);
-    auto v = loader.separate();
 #pragma unroll
     for (int i = 0; i < nvec; ++i) {
-      const InputType val = static_cast<InputType>(v[i]);
+      const InputType val = static_cast<InputType>(loader.separate()[i]);
       __builtin_assume(max >= InputType{0.f});
       if constexpr (std::is_same_v<InputType, bf16__>) {
 #ifndef __HIP_PLATFORM_AMD__
@@ -84,9 +83,11 @@ __launch_bounds__(amax_kernel_threads) __global__
   // Reduce amax over block
   max = reduce_max<amax_kernel_threads / THREADS_PER_WARP>(max, warp_id);
   if (threadIdx.x == 0) {
-    if (use_block_amax) {
+    if (block_amax != nullptr) {
+      // 2-stage: write per-block result
       block_amax[blockIdx.x] = max;
     } else {
+      // Atomic path: directly update global amax
       atomicMaxFloat(amax, max);
     }
   }
@@ -122,20 +123,16 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, flo
   switch (align) {
     case Alignment::SAME_ALIGNED:
       amax_kernel<nvec, true, InputType>
-          <<<num_blocks, threads, 0, stream>>>(
-              input, amax, block_amax, N, num_aligned_elements, UseBlockAmax);
+          <<<num_blocks, threads, 0, stream>>>(input, amax, block_amax, N, num_aligned_elements);
       break;
     case Alignment::SAME_UNALIGNED:
       amax_kernel<nvec, false, InputType>
-          <<<num_blocks, threads, 0, stream>>>(
-              input, amax, block_amax, N, num_aligned_elements, UseBlockAmax);
+          <<<num_blocks, threads, 0, stream>>>(input, amax, block_amax, N, num_aligned_elements);
       break;
     case Alignment::DIFFERENT: {
       // This case is a logic error, since there is only one pointer (input)
       // in the alignment check. Still safe to process without vectorization.
-      amax_kernel<1, true, InputType>
-          <<<num_blocks, threads, 0, stream>>>(
-              input, amax, block_amax, N, N, UseBlockAmax);
+      amax_kernel<1, true, InputType><<<num_blocks, threads, 0, stream>>>(input, amax, block_amax, N, N);
       break;
     }
   }
