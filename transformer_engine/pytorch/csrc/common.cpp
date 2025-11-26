@@ -284,6 +284,14 @@ int roundup(const int value, const int multiple) {
 }
 
 #ifdef __HIP_PLATFORM_AMD__
+
+inline bool nvte_use_atomic_amax() {
+  const char *env_p = std::getenv("NVTE_USE_ATOMIC_AMAX");
+  if (env_p && std::string(env_p) == "1")
+    return true;
+  return false;
+}
+
 TensorWrapper allocate_amax_workspace(const TensorWrapper& input_tensor) {
   if (nvte_use_atomic_amax() || input_tensor.numel() == 0) {
     // User chose atomic path, or empty tensor -> no need for workspace
@@ -300,6 +308,7 @@ TensorWrapper allocate_amax_workspace(const TensorWrapper& input_tensor) {
 
   return makeTransformerEngineTensor(ws);
 }
+
 #endif
 
 }  // namespace transformer_engine::pytorch

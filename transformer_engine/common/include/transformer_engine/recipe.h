@@ -79,18 +79,6 @@ void nvte_delayed_scaling_recipe_amax_and_scale_update_after_reduction(
 
 constexpr int amax_kernel_threads = 512;
 
-inline bool nvte_use_atomic_amax() {
-  static int cached = -1;
-  if (cached == -1) {
-    cached = 0;
-    const char *env_p = std::getenv("NVTE_USE_ATOMIC_AMAX");
-    if (env_p && std::string(env_p) == "1") {
-      cached = 1;
-    }
-  }
-  return cached == 1;
-}
-
 #endif
 
 /*! \brief Compute an FP8 tensor's amax.

@@ -128,10 +128,8 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, flo
   num_blocks = std::min(num_blocks, max_blocks);
 
 #ifdef __HIP_PLATFORM_AMD__
-  const bool UseBlockAmax =
-      (block_amax != nullptr) &&
-      (block_capacity >= num_blocks) &&
-      !nvte_use_atomic_amax();
+  if (block_capacity < num_blocks)
+    block_amax = nullptr;
 #endif
 
   // Launch kernel
@@ -167,7 +165,7 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, flo
   }
 
 #ifdef __HIP_PLATFORM_AMD__
-  if (UseBlockAmax) {
+  if (block_amax != nullptr) {
     constexpr int FINAL_REDUCE_THREADS = 256;
     dim3 fr_block(FINAL_REDUCE_THREADS);
     dim3 fr_grid(1);
