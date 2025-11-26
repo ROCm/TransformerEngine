@@ -239,26 +239,51 @@ def _amax_reduce_triton_stage1(
         tl.store(num_blocks, tl.num_programs(0))
 
 @triton.jit
-def _amax_reduce_triton_stage2(
-    block_amax,   # float32[workspace_size]
-    amax_ptr,     # float32[1]
-    num_blocks,   # int32[1]
-    BLOCK: tl.constexpr,
+def _amax_reduce_and_compute_scale_triton(
+    block_amax,      # float32[num_blocks]
+    num_blocks,  # int32[1]
+    amax_ptr,        # float32[1]
+    scale_ptr,       # float32[1]
+    inv_ptr,         # float32[1]
+    max_fp8,         # scalar (float32)
+    epsilon,         # scalar (float32)
+    value_for_inf,   # scalar (float32)
+    FORCE_POW_2_SCALES: tl.constexpr,
+    BLOCKSIZE: tl.constexpr,
 ):
-    acc = tl.full((), -float('inf'), tl.float32)
+    # Reduce per-block amaxes
+    a = tl.full((), -float('inf'), tl.float32)
     offset = 0
     num_blocks = tl.load(num_blocks)
 
     while offset < num_blocks:
-        idx = offset + tl.arange(0, BLOCK)
+        idx  = offset + tl.arange(0, BLOCKSIZE)
         mask = idx < num_blocks
         vals = tl.load(block_amax + idx, mask=mask, other=-float('inf'))
-        # Reduce this chunk and update global accumulator
-        acc = tl.maximum(acc, tl.max(vals))
-        offset += BLOCK
+        a  = tl.maximum(a, tl.max(vals))
+        offset += BLOCKSIZE
 
-    # Final result
-    tl.store(amax_ptr, acc)
+    tl.store(amax_ptr, a)
+
+    # Compute scale + inv_scale from amax
+
+    # amax < epsilon -> epsilon (NaNs pass through)
+    a = tl.where(a < epsilon, epsilon, a)
+
+    # bad amax (NaN, inf, 0.0) -> scale = 1.0
+    bad = (a != a) | (tl.abs(a) == float('inf')) | (a == 0.0)
+
+    if bad:
+        s = tl.full((), 1.0, tl.float32)
+    else:
+        s = max_fp8 / a
+        # inf -> scale = value_for_inf
+        s = tl.where(tl.abs(a) == float('inf'), value_for_inf, s)
+        if FORCE_POW_2_SCALES:
+            s = tl.math.exp2(tl.floor(tl.log2(s)))
+
+    tl.store(scale_ptr, s)
+    tl.store(inv_ptr, 1.0 / s)
 
 
 FP32_EXPONENT_BIAS = tl.constexpr(127)
@@ -449,15 +474,24 @@ def te_cast_transpose_noop_triton(input, noop_flag, input_scale, cast_out, trans
 
     if current_scaling:
         amax_out.fill_(-float("inf"))
+        fp8_max = get_fp8_max(otype)
 
         nvte_use_atomic_amax =  bool( int(os.environ.get('NVTE_USE_ATOMIC_AMAX', '0')) )
 
         if nvte_use_atomic_amax:
+            # Compute global amax
             _amax_reduce_triton[grid](
                 input_2d_view,
                 input_stride_M, input_stride_N,
                 num_rows, row_length,
                 amax_out,
+            )
+
+            # Compute scale
+            _compute_scale_from_amax_triton[(1,)](
+                amax_out, input_scale, scale_inv_out,
+                fp8_max, eps, torch.finfo(torch.float32).max,
+                FORCE_POW_2_SCALES=force_pow_2_scales,
             )
         else:
             # 2-stage amax
@@ -480,22 +514,14 @@ def te_cast_transpose_noop_triton(input, noop_flag, input_scale, cast_out, trans
                 block_amax, num_blocks,
             )
 
-            # Stage 2: reduce per-program maxima into amax_out
-            _amax_reduce_triton_stage2[(1,)](
-                block_amax,
-                amax_out,
-                num_blocks,
-                BLOCK=512,
+            # Stage 2: reduce per-program maxima into amax_out and compute scale
+            _amax_reduce_and_compute_scale_triton[(1,)](
+                block_amax, num_blocks,
+                amax_out, input_scale, scale_inv_out,
+                fp8_max, eps, torch.finfo(torch.float32).max,
+                FORCE_POW_2_SCALES=force_pow_2_scales,
+                BLOCKSIZE=512,
             )
-
-        # Compute scale
-        fp8_max = get_fp8_max(otype)
-
-        _compute_scale_from_amax_triton[(1,)](
-            amax_out, input_scale, scale_inv_out,
-            fp8_max, eps, torch.finfo(torch.float32).max,
-            FORCE_POW_2_SCALES=force_pow_2_scales,
-        )
 
         _cast_transpose_triton_current_scaling[grid](input_2d_view, triton.reinterpret(cast_out_2d_view, tl_dtype), triton.reinterpret(trans_out_2d_view, tl_dtype), input_stride_M, input_stride_N, trans_out_stride_M, trans_out_stride_N, num_rows, row_length, input_scale, get_fp8_max(otype))
     else:
