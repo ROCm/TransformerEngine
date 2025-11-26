@@ -11,7 +11,10 @@
 #include "c10/util/ArrayRef.h"
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
+
+#ifdef __HIP_PLATFORM_AMD__
 #include "common/common.h"
+#endif
 
 namespace transformer_engine::pytorch {
 
@@ -280,6 +283,7 @@ int roundup(const int value, const int multiple) {
   return ((value + multiple - 1) / multiple) * multiple;
 }
 
+#ifdef __HIP_PLATFORM_AMD__
 TensorWrapper allocate_amax_workspace(const TensorWrapper& input_tensor) {
   if (nvte_use_atomic_amax() || input_tensor.numel() == 0) {
     // User chose atomic path, or empty tensor -> no need for workspace
@@ -296,5 +300,6 @@ TensorWrapper allocate_amax_workspace(const TensorWrapper& input_tensor) {
 
   return makeTransformerEngineTensor(ws);
 }
+#endif
 
 }  // namespace transformer_engine::pytorch

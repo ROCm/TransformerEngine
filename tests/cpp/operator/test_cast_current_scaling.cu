@@ -197,6 +197,7 @@ TEST_P(CastCSTestSuite, TestCastCS) {
   );
 }
 
+#ifdef __HIP_PLATFORM_AMD__
 
 TEST(AmaxConsistencyTest, AtomicVsWorkspace) {
   using namespace transformer_engine;
@@ -216,7 +217,6 @@ TEST(AmaxConsistencyTest, AtomicVsWorkspace) {
   nvte_compute_amax(input.data(), out_atomic.data(), 0);
 
   // Path 2: two-stage amax using workspace
-  // Use a workspace capacity >= number of blocks
   std::vector<size_t> ws_shape{N};
   Tensor workspace("workspace", ws_shape, DType::kFloat32);
   nvte_compute_amax_with_workspace(input.data(), out_ws.data(), workspace.data(), 0);
@@ -231,6 +231,8 @@ TEST(AmaxConsistencyTest, AtomicVsWorkspace) {
 
   compareResults("amax_consistency", amax_atomic, amax_ws, /*atol=*/0.0f, /*rtol=*/0.0f);
 }
+
+#endif
 
 
 

@@ -55,9 +55,13 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
     // my_quantizer here has to be a Float8CurrentScalingQuantizer
     auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
     NVTE_SCOPED_GIL_RELEASE({
+#ifdef __HIP_PLATFORM_AMD__
       nvte_compute_amax_with_workspace(te_input.data(), te_output.data(),
                                        allocate_amax_workspace(te_input).data(),
                                        at::cuda::getCurrentCUDAStream());
+#else
+      nvte_compute_amax(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
+#endif
     });
     // check if we need to do amax reudction (depending on model parallel configs)
     if (my_quantizer_cs->with_amax_reduction) {
