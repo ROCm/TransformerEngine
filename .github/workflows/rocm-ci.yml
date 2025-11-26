@@ -29,6 +29,10 @@ on:
         description: 'Manual Docker Image (Leave empty to use config file value)'
         required: false
         type: string
+      test_config_from_source:
+        description: 'DEBUG: Use config.json from current source branch instead of dev'
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -68,52 +72,87 @@ jobs:
 
           echo "Merge successful."
 
-      - name: Print Environment and Variables
+      - name: Host Diagnostics & Environment Setup
+        id: host-setup
         run: |
-          echo "::group::Shell Environment Variables"
-          env | sort
+          # Host Activity Checks
+          echo "::group::Host Diagnostics"
+
+          echo ">>> Active Containers:"
+          docker ps -a
+
+          echo ">>> ROCm Installation:"
+          ls -l /opt/rocm* || echo "No /opt/rocm found"
+          echo ">>> GPU info:"
+          ls -l /dev/dri
+          ls -l /dev/kfd
+          rocm-smi
+
+          echo ">>> Kernel Command Line:"
+          cat /proc/cmdline
           echo "::endgroup::"
 
-          echo "::group::Repository Variables (vars context)"
-          echo '${{ toJSON(vars) }}'
+          # Calculate Test Level
+          # Default to input (or '1' if input is missing/null)
+          CALC_LEVEL="${{ inputs.test_level || '1' }}"
+
+          # If this is a Push event to 'dev', force Level 3
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_name }}" == "dev" ]]; then
+            echo "::notice::Push to dev detected. Forcing Test Level to 3."
+            CALC_LEVEL="3"
+          fi
+          echo "TEST_LEVEL=$CALC_LEVEL" >> $GITHUB_ENV
+
+          # Print Final Environment
+          echo "::group::Environment & Parameters"
+          echo "Final Test Level: $CALC_LEVEL"
+          echo "Event Name: ${{ github.event_name }}"
+          echo "Ref Name: ${{ github.ref_name }}"
+          env | sort
           echo "::endgroup::"
 
       - name: Select Docker Image Tag
         id: select-image
         run: |
-          # Download config from the dev branch
-          # We force fetch from 'dev' so all release branches/forks get the latest image tags instantly
-          CONFIG_URL="https://raw.githubusercontent.com/ROCm/TransformerEngine/dev/ci/ci_config.json"
+          # Determine config source
+          # Default to fetching from 'dev' branch
+          CONFIG_BRANCH="dev"
+          
+          # If manual run requesting source config, switch branch
+          if [[ "${{ inputs.test_config_from_source }}" == "true" ]]; then
+             CONFIG_BRANCH="${{ github.ref_name }}"
+             echo "::notice::Debugging mode: Fetching config from current branch ($CONFIG_BRANCH)"
+          fi
+
+          # Download config
+          CONFIG_URL="https://raw.githubusercontent.com/ROCm/TransformerEngine/${CONFIG_BRANCH}/ci/ci_config.json"
           
           echo "Fetching image config from: $CONFIG_URL"
-          curl -s -f -o docker_config.json "$CONFIG_URL" || { echo "::error::Failed to fetch config from dev branch"; exit 1; }
+          curl -s -f -o docker_config.json "$CONFIG_URL" || { echo "::error::Failed to fetch config"; exit 1; }
 
-          # Extract vars
-          DEV_DOCKER_IMAGE=$(jq -r '.dev_docker_image' ci_config.json)
-          REL613_DOCKER_IMAGE=$(jq -r '.rel613_docker_image' ci_config.json)
-
-          # Determine branch and read json
+          # Determine image key
           BRANCH_NAME="${{ github.base_ref || github.ref_name }}"
           echo "Determining image for branch: $BRANCH_NAME"
           
-          # Default to dev image
-          IMAGE_TO_USE="$DEV_DOCKER_IMAGE"
+          # Logic: Check if branch matches "release_vX.X". 
+          # If so, look for that key in JSON. Otherwise default.
+          JSON_KEY="default"
           
-          # Check for release patterns
-          if [[ $BRANCH_NAME =~ ^release_v([0-9]+)\.([0-9]+)_rocm$ ]]; then
-            MAJOR_VERSION=${BASH_REMATCH[1]}
-            MINOR_VERSION=${BASH_REMATCH[2]}
-            if (( MAJOR_VERSION == 1 )); then
-              # If 1.13 or 1.14, switch to the REL613 image
-              if (( MINOR_VERSION == 13 || MINOR_VERSION == 14 )); then 
-                IMAGE_TO_USE="$REL613_DOCKER_IMAGE"
-              fi
+          if [[ $BRANCH_NAME =~ ^release_v([0-9]+\.[0-9]+)_rocm$ ]]; then
+            VERSION_KEY="release_v${BASH_REMATCH[1]}"
+            # Check if this specific version key exists in the JSON
+            if [[ $(jq "(.docker_images | has(\"$VERSION_KEY\"))" docker_config.json) == "true" ]]; then
+               JSON_KEY="$VERSION_KEY"
             fi
           fi
+          
+          echo "Selected config key: $JSON_KEY"
 
-          # Check for manual override
+          # Extract image name from json
+          IMAGE_TO_USE=$(jq -r ".docker_images.\"$JSON_KEY\"" docker_config.json)
+
+          # Check input from workflow_dispatch overriding the image
           MANUAL_OVERRIDE="${{ inputs.docker_image_override }}"
-
           if [[ -n "$MANUAL_OVERRIDE" ]]; then
             echo "::notice::Manual override detected: $MANUAL_OVERRIDE"
             IMAGE_TO_USE="$MANUAL_OVERRIDE"
@@ -140,31 +179,41 @@ jobs:
             -w /workspace \
             ${{ steps.select-image.outputs.image-tag}}
 
-      - name: ROCM Diagnostics
+      - name: Container Diagnostics & GPU Setup
+        id: container-diag
         run: |
-          # On the runner
-          rocm-smi
-          # In the container
-          docker exec te-runner rocm-smi
+          echo "::group::Container Configuration"
+          # Check Shared Memory Size inside container
+          echo ">>> /dev/shm size:"
+          docker exec te-runner df -h /dev/shm
+          
+          # Check OS/Kernel inside container
+          echo ">>> Container OS:"
+          docker exec te-runner cat /etc/os-release | grep PRETTY_NAME
+          echo "::endgroup::"
 
-      - name: Determine GPU Architecture via rocminfo
-        id: gpu-arch
-        run: |
+          echo "::group::ROCm Diagnostics (Host vs Container)"
+          echo ">>> CONTAINER rocm-smi:"
+          docker exec te-runner rocm-smi || true
+          echo "::endgroup::"
+
+          # Determine Architecture
           # Run rocminfo inside the container and capture the output
           ARCH=$(docker exec te-runner bash -c "rocminfo | grep -m 1 -oP 'gfx[0-9a-fA-F]+'")
+          
           if [ -z "$ARCH" ]; then
             echo "::error::Could not determine GPU architecture using rocminfo inside the container."
-            # Optional: Print full rocminfo output for debugging
             docker exec te-runner rocminfo
             exit 1
           fi
+          
           echo "Detected GPU Arch: $ARCH"
           echo "arch=$ARCH" >> $GITHUB_OUTPUT
 
       - name: Build Project
         run: |
           docker exec \
-            -e GPU_ARCH=${{ steps.gpu-arch.outputs.arch }} \
+            -e GPU_ARCH=${{ steps.container-diag.outputs.arch }} \
             te-runner bash -c "$(cat <<'EOF'
           set -ex
           
@@ -186,7 +235,7 @@ jobs:
 
           docker exec \
             -e TEST_SGPU=1 \
-            -e TEST_LEVEL=${{ inputs.test_level || '1' }} \
+            -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
             te-runner bash -c "$(cat <<'EOF'
           #!/usr/bin/bash
           set -x -o pipefail
@@ -253,7 +302,7 @@ jobs:
         run: |
           docker exec \
             -e TEST_MGPU=1 \
-            -e TEST_LEVEL=${{ inputs.test_level || '1' }} \
+            -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
             te-runner bash -c "$(cat <<'EOF'
           #!/usr/bin/bash
           set -x -o pipefail
