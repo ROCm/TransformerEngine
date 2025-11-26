@@ -298,13 +298,13 @@ TensorWrapper allocate_amax_workspace(const TensorWrapper& input_tensor) {
     return TensorWrapper{};
   }
 
-  const auto N = static_cast<size_t>(input_tensor.numel());
+  const auto N = input_tensor.numel();
   constexpr size_t max_blocks_hw = 65535;
 
   size_t max_blocks = DIVUP(N, static_cast<size_t>(amax_kernel_threads));
   size_t workspace_blocks = std::min(max_blocks, max_blocks_hw);
 
-  at::Tensor ws = at::empty({static_cast<long>(workspace_blocks)}, at::CUDA(at::kFloat));
+  at::Tensor ws = at::empty(workspace_blocks, at::CUDA(at::kFloat));
 
   return makeTransformerEngineTensor(ws);
 }
