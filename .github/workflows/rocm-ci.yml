@@ -100,7 +100,11 @@ jobs:
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_name }}" == "dev" ]]; then
             echo "::notice::Push to dev detected. Forcing Test Level to 3."
             CALC_LEVEL="3"
+          elif [[ "${{ github.event_name }}" == "pull_request" && "${{ github.base_ref }}" == "dev" ]]; then
+            echo "::notice::PR targeting dev detected. Forcing Test Level to 3."
+            CALC_LEVEL="3"
           fi
+          
           echo "TEST_LEVEL=$CALC_LEVEL" >> $GITHUB_ENV
 
           # Print Final Environment
