@@ -8,7 +8,6 @@ cmake_minimum_required(VERSION 3.21)
 
 option(USE_ROCM "Use ROCm" ON)
 option(USE_FUSED_ATTN_AOTRITON "Use aotriton backend" ON)
-option(USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS "Build AOTriton GPU kernels" OFF)
 option(USE_FUSED_ATTN_CK "Use ck backend" ON)
 set(USE_CUDA OFF)
 
@@ -289,7 +288,8 @@ else()
     if(NOT DEFINED AOTRITON_PATH)
       # If AOTRITON_PATH is not provided, we proceed to build the runtime
       # ourselves and either build or download the GPU kernels
-      if(USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS)
+      set(AOTRITON_BUILD_GPU_KERNELS $ENV{NVTE_AOTRITON_BUILD_GPU_KERNELS})
+      if(AOTRITON_BUILD_GPU_KERNELS)
         set(AOTRITON_NOIMAGE_MODE OFF)
       else()
         set(AOTRITON_NOIMAGE_MODE ON)
@@ -372,7 +372,7 @@ else()
       aotriton_build_from_source(${AOTRITON_NOIMAGE_MODE})
 
       # Download GPU kernels if needed
-      if(NOT USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS)
+      if(NOT AOTRITON_BUILD_GPU_KERNELS)
         message(STATUS "Downloading AOTriton GPU Kernels.")
         foreach(image ${__AOTRITON_IMAGE_LIST})
           string(SUBSTRING ${image} 7 -1 gfx_pattern)
