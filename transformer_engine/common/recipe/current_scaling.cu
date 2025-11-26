@@ -233,13 +233,13 @@ void nvte_compute_amax_with_workspace(const NVTETensor input_, const NVTETensor 
 
   if (workspace_ != nullptr) {
     auto &workspace = *reinterpret_cast<Tensor *>(workspace_);
-    NVTE_CHECK(workspace.data.dptr != nullptr,
-               "Workspace tensor for amax computation has no data");
-    NVTE_CHECK(workspace.data.dtype == DType::kFloat32,
-               "Workspace tensor for amax computation must be FP32, got dtype=",
-               to_string(workspace.data.dtype));
-    block_amax     = reinterpret_cast<float*>(workspace.data.dptr);
-    block_capacity = workspace.data.numel();
+    if (workspace.data.dptr != nullptr) {
+      NVTE_CHECK(workspace.data.dtype == DType::kFloat32,
+                "Workspace tensor for amax computation must be FP32, got dtype=",
+                to_string(workspace.data.dtype));
+      block_amax     = reinterpret_cast<float*>(workspace.data.dptr);
+      block_capacity = workspace.data.numel();
+    }
   }
 #endif
 
