@@ -12,6 +12,8 @@ from .common import (
     te_dtype_to_torch_dtype,
     get_fp8_max,
 )
+import os
+
 ##########################################
 #### cast_transpose
 ##########################################
@@ -446,40 +448,49 @@ def te_cast_transpose_noop_triton(input, noop_flag, input_scale, cast_out, trans
     grid = lambda META: (triton.cdiv(num_rows, META['BLOCK_M']) * triton.cdiv(row_length, META['BLOCK_N']),)
 
     if current_scaling:
-        # {{{ 2-stage amax
-
-        max_num_amax_stage1_programs = max(
-            triton.cdiv(num_rows, cfg.kwargs['BLOCK_M']) *
-            triton.cdiv(row_length, cfg.kwargs['BLOCK_N'])
-            for cfg in AMAX_STAGE1_CONFIGS
-        )
-
-        block_amax = torch.empty(max_num_amax_stage1_programs, device=input.device,
-                                 dtype=torch.float32)
-
-        num_blocks = torch.empty(1, device=input.device, dtype=torch.int32)
-
-        # Stage 1: per-program tile amax
-        _amax_reduce_triton_stage1[grid](
-            input_2d_view,
-            input_stride_M, input_stride_N,
-            num_rows, row_length,
-            block_amax, num_blocks,
-        )
-
-        # Stage 2: reduce per-program maxima into amax_out
         amax_out.fill_(-float("inf"))
-        _amax_reduce_triton_stage2[(1,)](
-            block_amax,
-            amax_out,
-            num_blocks,
-            BLOCK=512,
-        )
 
-        # }}}
+        nvte_use_atomic_amax =  bool( int(os.environ.get('NVTE_USE_ATOMIC_AMAX', '0')) )
+
+        if nvte_use_atomic_amax:
+            _amax_reduce_triton[grid](
+                input_2d_view,
+                input_stride_M, input_stride_N,
+                num_rows, row_length,
+                amax_out,
+            )
+        else:
+            # 2-stage amax
+            max_num_amax_stage1_programs = max(
+                triton.cdiv(num_rows, cfg.kwargs['BLOCK_M']) *
+                triton.cdiv(row_length, cfg.kwargs['BLOCK_N'])
+                for cfg in AMAX_STAGE1_CONFIGS
+            )
+
+            block_amax = torch.empty(max_num_amax_stage1_programs, device=input.device,
+                                    dtype=torch.float32)
+
+            num_blocks = torch.empty(1, device=input.device, dtype=torch.int32)
+
+            # Stage 1: per-program tile amax
+            _amax_reduce_triton_stage1[grid](
+                input_2d_view,
+                input_stride_M, input_stride_N,
+                num_rows, row_length,
+                block_amax, num_blocks,
+            )
+
+            # Stage 2: reduce per-program maxima into amax_out
+            _amax_reduce_triton_stage2[(1,)](
+                block_amax,
+                amax_out,
+                num_blocks,
+                BLOCK=512,
+            )
 
         # Compute scale
         fp8_max = get_fp8_max(otype)
+
         _compute_scale_from_amax_triton[(1,)](
             amax_out, input_scale, scale_inv_out,
             fp8_max, eps, torch.finfo(torch.float32).max,
