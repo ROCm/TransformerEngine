@@ -115,7 +115,7 @@ jobs:
         id: select-image
         run: |
           # Determine config source
-          # Default to fetching from 'dev' branch
+          # Default we are fetching from 'dev' branch
           CONFIG_BRANCH="dev"
           
           # If manual run requesting source config, switch branch
@@ -126,9 +126,22 @@ jobs:
 
           # Download config
           CONFIG_URL="https://raw.githubusercontent.com/ROCm/TransformerEngine/${CONFIG_BRANCH}/ci/ci_config.json"
+          echo "Attempting to fetch image config from: $CONFIG_URL"
           
-          echo "Fetching image config from: $CONFIG_URL"
-          curl -s -f -o docker_config.json "$CONFIG_URL" || { echo "::error::Failed to fetch config"; exit 1; }
+          if curl -s -f -o docker_config.json "$CONFIG_URL"; then
+             echo "Successfully downloaded config from $CONFIG_BRANCH."
+          else
+             echo "::warning::Failed to fetch config from $CONFIG_BRANCH (File might not exist yet)."
+             
+             # Fallback: Check source branch file
+             if [[ -f "ci/ci_config.json" ]]; then
+                echo "::notice::Falling back to local 'ci/ci_config.json' from checkout."
+                cp ci/ci_config.json docker_config.json
+             else
+                echo "::error::Config file not found in $CONFIG_BRANCH OR locally."
+                exit 1
+             fi
+          fi
 
           # Determine image key
           BRANCH_NAME="${{ github.base_ref || github.ref_name }}"
