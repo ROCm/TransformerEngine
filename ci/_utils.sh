@@ -18,6 +18,8 @@ if [ -z "${TEST_SGPU}${TEST_MGPU}" ]; then
     TEST_MGPU=1
 fi
 
+TEST_START_TS=`date +%s`
+
 #To disable some logs trimming
 export CI=1
 
@@ -232,4 +234,22 @@ configure_omp_threads() {
     else
         echo "Using OMP_NUM_THREADS=${OMP_NUM_THREADS}"
     fi
+}
+
+time_elapsed() {
+    _arg=$1
+    date -d @$((`date +%s` - _arg)) +%${2:-T}
+}
+
+pytest_run() {
+    #args: tag1 tag2 level ...
+    check_level $3 || return
+    _test_variant_tag=`get_test_variant_tag $1 $2`
+    shift 3
+    _test_name_tag=`get_test_name_tag $1 $_test_variant_tag`
+    check_test_filter $_test_name_tag || return
+    _start_ts=`date +%s`
+    echo "Run [$_test_variant_tag] $@ at `time_elapsed $TEST_START_TS`"
+    pytest -v -rfEs `get_pytest_junitxml $_test_name_tag` $TEST_PYTEST_ARGS "$TEST_DIR/$@" || test_run_error "[$_test_variant_tag] $1"
+    echo "Done [$_test_variant_tag] $1 in `time_elapsed $_start_ts`"
 }
