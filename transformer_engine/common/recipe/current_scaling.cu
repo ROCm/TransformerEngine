@@ -11,7 +11,6 @@
 #include <algorithm>
 #include <limits>
 #include <type_traits>
-#include <cstdlib>
 
 #include "../common.h"
 #include "../util/logging.h"
@@ -28,17 +27,7 @@ using bf16__ = __hip_bfloat16;
 #endif //__HIP_PLATFORM_AMD__
 
 
-static inline bool nvte_use_atomic_amax() {
-  static int cached = -1;
-  if (cached == -1) {
-    cached = 0;
-    const char *env_p = std::getenv("NVTE_USE_ATOMIC_AMAX");
-    if (env_p && std::string(env_p) == "1") {
-      cached = 1;
-    }
-  }
-  return cached == 1;
-}
+#ifdef __HIP_PLATFORM_AMD__
 
 template <int BLOCK_THREADS>
 __global__ void amax_final_reduce(const float* __restrict__ block_amax,
@@ -58,10 +47,18 @@ __global__ void amax_final_reduce(const float* __restrict__ block_amax,
     *global_amax = block_max;
   }
 }
+
+#endif
+
 template <int nvec, bool aligned, typename InputType>
 __launch_bounds__(amax_kernel_threads) __global__
+#ifdef __HIP_PLATFORM_AMD__
     void amax_kernel(const InputType *input, float *amax, float* __restrict__ block_amax, const size_t N,
-                     const size_t num_aligned_elements, bool use_block_amax) {
+                     const size_t num_aligned_elements) {
+#else
+    void amax_kernel(const InputType *input, float *amax, const size_t N,
+                     const size_t num_aligned_elements) {
+#endif
   VectorizedLoader<InputType, nvec, aligned> loader(input, N);
   InputType max{0.f};
   const int warp_id = threadIdx.x / THREADS_PER_WARP;
@@ -69,10 +66,9 @@ __launch_bounds__(amax_kernel_threads) __global__
 
   for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x; tid < M; tid += gridDim.x * blockDim.x) {
     loader.load(tid, N);
-    auto v = loader.separate();
 #pragma unroll
     for (int i = 0; i < nvec; ++i) {
-      const InputType val = static_cast<InputType>(v[i]);
+      const InputType val = static_cast<InputType>(loader.separate()[i]);
       __builtin_assume(max >= InputType{0.f});
       if constexpr (std::is_same_v<InputType, bf16__>) {
 #ifndef __HIP_PLATFORM_AMD__
@@ -96,11 +92,17 @@ __launch_bounds__(amax_kernel_threads) __global__
   // Reduce amax over block
   max = reduce_max<amax_kernel_threads / THREADS_PER_WARP>(max, warp_id);
   if (threadIdx.x == 0) {
-    if (use_block_amax) {
+#ifdef __HIP_PLATFORM_AMD__
+    if (block_amax != nullptr) {
+      // 2-stage: write per-block result
       block_amax[blockIdx.x] = max;
     } else {
+      // Atomic path: directly update global amax
       atomicMaxFloat(amax, max);
     }
+#else
+  atomicMaxFloat(amax, max);
+#endif
   }
 }
 
@@ -125,34 +127,45 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, flo
   constexpr size_t max_blocks = 65535;
   num_blocks = std::min(num_blocks, max_blocks);
 
-  const bool UseBlockAmax =
-      (block_amax != nullptr) &&
-      (block_capacity >= num_blocks) &&
-      !nvte_use_atomic_amax();
+#ifdef __HIP_PLATFORM_AMD__
+  if (block_capacity < num_blocks)
+    block_amax = nullptr;
+#endif
 
   // Launch kernel
   switch (align) {
     case Alignment::SAME_ALIGNED:
+#ifdef __HIP_PLATFORM_AMD__
       amax_kernel<nvec, true, InputType>
-          <<<num_blocks, threads, 0, stream>>>(
-              input, amax, block_amax, N, num_aligned_elements, UseBlockAmax);
+          <<<num_blocks, threads, 0, stream>>>(input, amax, block_amax, N, num_aligned_elements);
+#else
+      amax_kernel<nvec, true, InputType>
+          <<<num_blocks, threads, 0, stream>>>(input, amax, N, num_aligned_elements);
+#endif
       break;
     case Alignment::SAME_UNALIGNED:
+#ifdef __HIP_PLATFORM_AMD__
       amax_kernel<nvec, false, InputType>
-          <<<num_blocks, threads, 0, stream>>>(
-              input, amax, block_amax, N, num_aligned_elements, UseBlockAmax);
+          <<<num_blocks, threads, 0, stream>>>(input, amax, block_amax, N, num_aligned_elements);
+#else
+      amax_kernel<nvec, false, InputType>
+          <<<num_blocks, threads, 0, stream>>>(input, amax, N, num_aligned_elements);
+#endif
       break;
     case Alignment::DIFFERENT: {
       // This case is a logic error, since there is only one pointer (input)
       // in the alignment check. Still safe to process without vectorization.
-      amax_kernel<1, true, InputType>
-          <<<num_blocks, threads, 0, stream>>>(
-              input, amax, block_amax, N, N, UseBlockAmax);
+#ifdef __HIP_PLATFORM_AMD__
+      amax_kernel<1, true, InputType><<<num_blocks, threads, 0, stream>>>(input, amax, block_amax, N, N);
+#else
+      amax_kernel<1, true, InputType><<<num_blocks, threads, 0, stream>>>(input, amax, N, N);
+#endif
       break;
     }
   }
 
-  if (UseBlockAmax) {
+#ifdef __HIP_PLATFORM_AMD__
+  if (block_amax != nullptr) {
     constexpr int FINAL_REDUCE_THREADS = 256;
     dim3 fr_block(FINAL_REDUCE_THREADS);
     dim3 fr_grid(1);
@@ -160,6 +173,7 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, flo
     amax_final_reduce<FINAL_REDUCE_THREADS>
         <<<fr_grid, fr_block, 0, stream>>>(block_amax, amax, static_cast<int>(num_blocks));
   }
+#endif
 
   // Check results
   NVTE_CHECK_CUDA(cudaGetLastError());
@@ -169,10 +183,12 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, flo
 }  // namespace transformer_engine
 
 void nvte_compute_amax(const NVTETensor input_, const NVTETensor output_, cudaStream_t stream) {
+#ifdef __HIP_PLATFORM_AMD__
   nvte_compute_amax_with_workspace(input_, output_, /*workspace=*/nullptr, stream);
 }
 
 void nvte_compute_amax_with_workspace(const NVTETensor input_, const NVTETensor output_, const NVTETensor workspace_, cudaStream_t stream) {
+#endif
   NVTE_API_CALL(nvte_compute_amax);
   using namespace transformer_engine;
 
@@ -208,27 +224,31 @@ void nvte_compute_amax_with_workspace(const NVTETensor input_, const NVTETensor 
              to_string(output.amax.dtype), ")");
   CheckOutputTensor(output, "output_compute_amax", true);
 
+#ifdef __HIP_PLATFORM_AMD__
   // Optional workspace
   float* block_amax = nullptr;
   size_t block_capacity = 0;
 
   if (workspace_ != nullptr) {
     auto &workspace = *reinterpret_cast<Tensor *>(workspace_);
-    NVTE_CHECK(workspace.data.dptr != nullptr,
-               "Workspace tensor for amax computation has no data");
-    NVTE_CHECK(workspace.data.dtype == DType::kFloat32,
-               "Workspace tensor for amax computation must be FP32, got dtype=",
-               to_string(workspace.data.dtype));
-    block_amax     = reinterpret_cast<float*>(workspace.data.dptr);
-    block_capacity = workspace.data.numel();
+    if (workspace.data.dptr != nullptr) {
+      NVTE_CHECK(workspace.data.dtype == DType::kFloat32,
+                "Workspace tensor for amax computation must be FP32, got dtype=",
+                to_string(workspace.data.dtype));
+      block_amax     = reinterpret_cast<float*>(workspace.data.dptr);
+      block_capacity = workspace.data.numel();
+    }
   }
+#endif
 
   // Compute amax
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.data.dtype, IType, constexpr int nvec = 32 / sizeof(IType);
       launch_amax_kernel<nvec>(reinterpret_cast<const IType *>(input.data.dptr),
-                               reinterpret_cast<float *>(output.amax.dptr), input.data.numel(), block_amax,
-          block_capacity,
+                               reinterpret_cast<float *>(output.amax.dptr), input.data.numel(),
+#ifdef __HIP_PLATFORM_AMD__
+                               block_amax, block_capacity,
+#endif
                                stream););  // NOLINT(*)
 }
 

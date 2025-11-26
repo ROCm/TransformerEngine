@@ -37,6 +37,19 @@ inline aotriton::TensorView<0> mk_aoscalartensor(const uint64_t* ptr)
 namespace transformer_engine {
 namespace fused_attn_rocm {
 
+// TODO: Support SWA
+std::tuple<int32_t, int32_t> get_window_sizes(
+  int32_t window_size_left,
+  int32_t window_size_right,
+  bool is_causal
+){
+  using aotriton::v3::flash::WindowValue;
+  if(is_causal){
+    return {WindowValue::TopLeftAligned, WindowValue::TopLeftAligned};
+  }
+  return {-1, -1};
+}
+
 // check the fused attn config to see whether it's aotriton backend supported
 bool is_aotriton_backend_supported(
   NVTEDType q_dtype,
@@ -127,12 +140,12 @@ aotriton::DType nvte_to_aotriton_dtype(DType t_dtype){
 void fused_attn_aotriton_fwd_impl(
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d,
   bool is_training, float scaling_factor, float dropout_probability,
-  NVTE_QKV_Layout layout,
+  int32_t window_size_left, int32_t window_size_right, NVTE_QKV_Layout layout,
   NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
   void *devPtrQ, void *devPtrK, void *devPtrV, 
   void *devPtrSoftmaxAux, void *devPtrO,
   const uint64_t* devPtrDropoutSeed, const uint64_t* devPtrDropoutOffset,
-  //void* devPtrCuSeqlensQ, void* devPtrCuSeqlensKV,
+  void* devPtrCuSeqlensQ, void* devPtrCuSeqlensKV,
   aotriton::DType dtype,
   void *workspace, 
   size_t *workspace_size,
@@ -163,6 +176,11 @@ void fused_attn_aotriton_fwd_impl(
   auto k_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrK), kv_shape, k_stride, dtype);
   auto v_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(devPtrV), kv_shape, v_stride, dtype);
 
+  // Cumulative seqlen tensors
+  std::array<uint64_t, 1> cu_seqlens_shape{b+1};
+  std::array<uint64_t, 1> cu_seqlens_stride{1};
+  auto cu_seqlens_q = aotriton::TensorView<1>(reinterpret_cast<intptr_t>(devPtrCuSeqlensQ), cu_seqlens_shape, cu_seqlens_stride, aotriton::DType::kInt32);
+  auto cu_seqlens_k = aotriton::TensorView<1>(reinterpret_cast<intptr_t>(devPtrCuSeqlensKV), cu_seqlens_shape, cu_seqlens_stride, aotriton::DType::kInt32);
 
   std::array<uint64_t, 4> o_stride;
   generateMatrixStrides(b, h, s_q, s_kv, d, o_stride.data(),
@@ -185,6 +203,22 @@ void fused_attn_aotriton_fwd_impl(
     if (env_p != nullptr && std::string(env_p) == "1")
       nvte_log_aotriton_config = true;
   }
+  aotriton::TensorView<4> empty_bias(0, {0,0,0,0}, {0,0,0,0}, dtype);
+  using aotriton::v3::flash::attn_fwd;
+  auto seed = mk_aoscalartensor(devPtrDropoutSeed);
+  auto offset1 = mk_aoscalartensor(devPtrDropoutOffset);
+  auto seed_output = mk_aoscalartensor(nullptr);
+  auto offset_output = mk_aoscalartensor(nullptr);
+  const auto is_causal = mask_type == NVTE_CAUSAL_MASK;
+  aotriton::TensorView<0> atomic_for_causal(reinterpret_cast<intptr_t>(workspace), aotriton::DType::kInt32);
+
+  using aotriton::v3::flash::VarlenType;
+  int8_t varlen_type = VarlenType::None;
+
+  auto [window_left, window_right] = get_window_sizes(window_size_left, window_size_right, is_causal);
+  using aotriton::v3::flash::CausalType;
+  int8_t causal_type = is_causal ? CausalType::WindowedAttention : CausalType::None;
+
   if (nvte_log_aotriton_config) {
     std::cout<<std::endl<<"attn_fwd(aotriton): ";
     std::cout<<"q_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d<<"), ";
@@ -192,42 +226,70 @@ void fused_attn_aotriton_fwd_impl(
     std::cout<<"kv_shape: ("<<b<<", "<<hg<<", "<<s_kv<<", "<<d<<"), ";
     std::cout<<"k_stride: ("<<k_stride[0]<<", "<<k_stride[1]<<", "<<k_stride[2]<<", "<<k_stride[3]<<"), ";
     std::cout<<"v_stride: ("<<v_stride[0]<<", "<<v_stride[1]<<", "<<v_stride[2]<<", "<<v_stride[3]<<"), ";
-    std::cout<<"scaling_factor: "<<scaling_factor<<", ";
     std::cout<<"M_shape: ("<<b*h<<", "<<s_q<<"), ";
     std::cout<<"M_stride: ("<<s_q<<", "<<1<<"), ";
     std::cout<<"o_shape: ("<<b<<", "<<h<<", "<<s_q<<", "<<d<<"), ";
     std::cout<<"o_stride: ("<<o_stride[0]<<", "<<o_stride[1]<<", "<<o_stride[2]<<", "<<o_stride[3]<<"), ";
     std::cout<<"is_training: "<<is_training<<", ";
-    std::cout<<"dropout_p: "<<dropout_probability<<", ";
-    std::cout<<"causal mask: "<<(mask_type==NVTE_CAUSAL_MASK)<<std::endl;
+
+    std::cout<< "\nAOTriton attn_fwd_params:\n";
+    std::cout<<"Q: "<<q_tensor.data_ptr()<<"\n";
+    std::cout<<"K: "<<k_tensor.data_ptr()<<"\n";
+    std::cout<<"V: "<<v_tensor.data_ptr()<<"\n";
+    std::cout<<"B: "<<empty_bias.data_ptr()<<"\n";
+    std::cout<<"Sm_scale: "<<scaling_factor<<"\n";
+    std::cout<<"L: "<<M_tensor.data_ptr()<<"\n";
+    std::cout<<"Out: "<<o_tensor.data_ptr()<<"\n";
+    if(varlen_type){
+      std::cout<<"cu_seqlens_q: "<<cu_seqlens_q.data_ptr()<<"\n";
+      std::cout<<"cu_seqlens_k: "<<cu_seqlens_k.data_ptr()<<"\n";
+      std::cout<<"Max_seqlen_q: "<<s_q<<"\n";
+      std::cout<<"Max_seqlen_k: "<<s_kv<<"\n";
+    }
+    std::cout<<"dropout_p: "<<(is_training? dropout_probability : 0)<<"\n";
+    std::cout<<"philox_seed: "<<*devPtrDropoutSeed<<"\n";
+    std::cout<<"philox_offset1: "<<*devPtrDropoutOffset<<"\n";
+    std::cout<<"philox_offset2: "<<0<<"\n";
+    std::cout<<"philox_seed_output_ptr: "<<seed_output.data_ptr()<<"\n";
+    std::cout<<"philox_offset_output_ptr: "<<offset_output.data_ptr()<<"\n";
+    std::cout<<"encoded_softmax_ptr: "<<encoded_softmax_tensor.data_ptr()<<"\n";
+    std::cout<<"persistent_atomic_counter_ptr: "<<atomic_for_causal.data_ptr()<<"\n";
+    std::cout<<"causal_type: "<<+causal_type<<"\n";
+    std::cout<<"varlen_type: "<<+varlen_type<<"\n";
+    std::cout<<"window_left: "<<window_left<<"\n";
+    std::cout<<"window_right: "<<window_right<<"\n";
   }
-  aotriton::TensorView<4> empty_bias(0, {0,0,0,0}, {0,0,0,0}, dtype);
-  using aotriton::v2::flash::attn_fwd;
-  auto seed = mk_aoscalartensor(devPtrDropoutSeed);
-  auto offset1 = mk_aoscalartensor(devPtrDropoutOffset);
-  auto offset2 = 0;
-  auto seed_output = mk_aoscalartensor(nullptr);
-  auto offset_output = mk_aoscalartensor(nullptr);
-  const auto is_causal = mask_type == NVTE_CAUSAL_MASK;
-  aotriton::TensorView<0> atomic_for_causal(reinterpret_cast<intptr_t>(workspace), aotriton::DType::kInt32);
+
+  aotriton::v3::flash::attn_fwd_params fwd_params{};
+  fwd_params.Q = q_tensor;
+  fwd_params.K = k_tensor;
+  fwd_params.V = v_tensor;
+  // fwd_params.B = empty_bias;
+  // fwd_params.A = nullptr; // Alibi slopes, currently unused
+  fwd_params.Sm_scale = scaling_factor;
+  fwd_params.L = M_tensor;
+  fwd_params.Out = o_tensor;
+  if(varlen_type){
+    fwd_params.cu_seqlens_q = cu_seqlens_q;
+    fwd_params.cu_seqlens_k = cu_seqlens_k;
+    fwd_params.Max_seqlen_q  = s_q; // Unused if cu_seqlens_q is empty
+    fwd_params.Max_seqlen_k  = s_kv; // Unused if cu_seqlens_k is empty
+  }
+  fwd_params.dropout_p = is_training? dropout_probability : 0;
+  fwd_params.philox_seed_ptr = seed;
+  fwd_params.philox_offset1 = offset1;
+  fwd_params.philox_offset2 = 0;
+  fwd_params.philox_seed_output = seed_output;
+  fwd_params.philox_offset_output = offset_output;
+  fwd_params.encoded_softmax = encoded_softmax_tensor;
+  fwd_params.persistent_atomic_counter = atomic_for_causal;
+  fwd_params.causal_type = causal_type;
+  fwd_params.varlen_type = varlen_type;
+  fwd_params.window_left = window_left;
+  fwd_params.window_right = window_right;
+
   NVTE_CHECK_CUDA(hipMemsetAsync(workspace, 0, sizeof(int32_t), stream));
-  NVTE_CHECK_CUDA(attn_fwd(q_tensor,
-                           k_tensor,
-                           v_tensor,
-                           empty_bias,
-                           scaling_factor,
-                           M_tensor,
-                           o_tensor,
-                           is_training? dropout_probability : 0,
-                           seed,
-                           offset1,
-                           offset2,
-                           seed_output,
-                           offset_output,
-                           encoded_softmax_tensor,
-                           is_causal,
-                           atomic_for_causal,
-                           stream));
+  NVTE_CHECK_CUDA(attn_fwd(fwd_params, fwd_params.kVersion, stream));
 }
 
 void fused_attn_aotriton_bwd_impl(
@@ -343,6 +405,7 @@ using namespace transformer_engine::fused_attn_rocm;
 void fused_attn_aotriton_fwd_qkvpacked(
   size_t b, size_t h, size_t max_seqlen, size_t d,
   bool is_training, float attn_scale, float dropout, 
+  int32_t window_left, int32_t window_right,
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   const Tensor* input_QKV,
   Tensor* output_O, NVTETensorPack *Aux_CTX_Tensors,
@@ -394,12 +457,14 @@ void fused_attn_aotriton_fwd_qkvpacked(
   fused_attn_aotriton_fwd_impl(
     b, h, h, max_seqlen, max_seqlen, d,
     is_training, attn_scale, dropout, 
+    window_left, window_right,
     qkv_layout,
     bias_type, attn_mask_type,
     devPtrQ, devPtrK, devPtrV, 
     devPtrS, devPtrO,
     reinterpret_cast<const uint64_t *>(rng_state->data.dptr), 
     reinterpret_cast<const uint64_t *>(rng_state->data.dptr) + 1,
+    input_cu_seqlens->data.dptr, input_cu_seqlens->data.dptr,
     nvte_to_aotriton_dtype(QKV_type),
     workspace->data.dptr,
     &workspace_size,
@@ -460,7 +525,6 @@ void fused_attn_aotriton_bwd_qkvpacked(
   void *devPtrdV = static_cast<void *>(static_cast<int8_t *>(devPtrdQKV) + 2 * stride);
   
   size_t workspace_size = 0;
-
   fused_attn_aotriton_bwd_impl(
     b, h, h, max_seqlen, max_seqlen, d,
     attn_scale, dropout, 
@@ -498,6 +562,7 @@ void fused_attn_aotriton_bwd_qkvpacked(
 void fused_attn_aotriton_fwd_kvpacked(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
   bool is_training, float attn_scale, float dropout, 
+  int32_t window_left, int32_t window_right,
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   const Tensor* input_Q, const Tensor* input_KV,
   Tensor* output_O, NVTETensorPack *Aux_CTX_Tensors,
@@ -549,12 +614,14 @@ void fused_attn_aotriton_fwd_kvpacked(
   fused_attn_aotriton_fwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
     is_training, attn_scale, dropout, 
+    window_left, window_right,
     qkv_layout,
     bias_type, attn_mask_type,
     devPtrQ, devPtrK, devPtrV,
     devPtrS, devPtrO,
     reinterpret_cast<const uint64_t *>(rng_state->data.dptr), 
     reinterpret_cast<const uint64_t *>(rng_state->data.dptr) + 1,
+    input_cu_seqlens_q->data.dptr, input_cu_seqlens_kv->data.dptr,
     nvte_to_aotriton_dtype(QKV_type),
     workspace->data.dptr,
     &workspace_size,
@@ -618,7 +685,6 @@ void fused_attn_aotriton_bwd_kvpacked(
   void *devPtrSoftmaxStats = output_S->data.dptr;
 
   size_t workspace_size = 0;
-
   fused_attn_aotriton_bwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
     attn_scale, dropout, 
@@ -656,6 +722,7 @@ void fused_attn_aotriton_bwd_kvpacked(
 void fused_attn_aotriton_fwd(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
   bool is_training, float attn_scale, float dropout, 
+  int32_t window_left, int32_t window_right,
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V,
   Tensor* output_O, NVTETensorPack *Aux_CTX_Tensors,
@@ -698,12 +765,14 @@ void fused_attn_aotriton_fwd(
   fused_attn_aotriton_fwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
     is_training, attn_scale, dropout, 
+    window_left, window_right,
     qkv_layout,
     bias_type, attn_mask_type,
-    devPtrQ, devPtrK, devPtrV, 
+    devPtrQ, devPtrK, devPtrV,
     devPtrS, devPtrO,
     reinterpret_cast<const uint64_t *>(rng_state->data.dptr), 
     reinterpret_cast<const uint64_t *>(rng_state->data.dptr) + 1,
+    input_cu_seqlens_q->data.dptr, input_cu_seqlens_kv->data.dptr,
     nvte_to_aotriton_dtype(QKV_type),
     workspace->data.dptr,
     &workspace_size,
@@ -755,7 +824,6 @@ void fused_attn_aotriton_bwd(
   void *devPtrSoftmaxStats = output_S->data.dptr;
 
   size_t workspace_size = 0;
-
   fused_attn_aotriton_bwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
     attn_scale, dropout, 

@@ -22,33 +22,18 @@ void compute_amax(const at::Tensor& tensor, at::Tensor& amax) {
 
   TORCH_CHECK(amax.scalar_type() == at::kFloat, "amax must be a float tensor");
   TORCH_CHECK(amax.numel() == 1, "amax must have exactly one element");
-
-  // Compute an upper bound on the number of blocks for this input.
-  const auto N = input_tensor.numel();
-  constexpr size_t max_blocks_hw = 65535;
-
-  // Assume worst-case vectorization (nvec = 1) as an upper bound.
-  size_t max_blocks = std::min(DIVUP(static_cast<size_t>(N), static_cast<size_t>(amax_kernel_threads)),
-                               max_blocks_hw);
-
-  // Allocate workspace for the block_amax buffer.
-  auto ws = at::empty({static_cast<long>(max_blocks)},
-                      tensor.options().dtype(at::kFloat));
-
-  std::vector<size_t> ws_shape{static_cast<size_t>(max_blocks)};
-
   TensorWrapper fake_te_output(
       nullptr, te_input.shape(),
       DType::kFloat8E4M3,  // It doesn't matter because we only compute amax.
       amax.data_ptr<float>());
 
-  TensorWrapper te_workspace(
-      ws.data_ptr(), ws_shape,
-      DType::kFloat32,
-      nullptr
-  );
-
-  nvte_compute_amax_with_workspace(te_input.data(), fake_te_output.data(), te_workspace.data(), at::cuda::getCurrentCUDAStream());
+#ifdef __HIP_PLATFORM_AMD__
+  nvte_compute_amax_with_workspace(te_input.data(), fake_te_output.data(),
+                                   allocate_amax_workspace(te_input).data(),
+                                   at::cuda::getCurrentCUDAStream());
+#else
+  nvte_compute_amax(te_input.data(), fake_te_output.data(), at::cuda::getCurrentCUDAStream());
+#endif
 }
 
 void fused_amax_and_scale_update_after_reduction(const at::Tensor& amax_reduction_buffer,

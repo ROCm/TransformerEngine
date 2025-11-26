@@ -26,14 +26,7 @@ install_prerequisites() {
 TEST_DIR=${TE_PATH}tests/jax
 
 run() {
-    check_level $1 || return
-    shift
-    _test_variant_tag=`get_test_variant_tag $_fus_attn $_test_label`
-    _test_name_tag=`get_test_name_tag $1 $_test_variant_tag`
-    check_test_filter $_test_name_tag || return
-    echo "Run [$_test_variant_tag] $@"
-    pytest -v -rfEs `get_pytest_junitxml $_test_name_tag` "$TEST_DIR/$@" || test_run_error "[$_test_variant_tag] $1"
-    echo "Done [$_test_variant_tag] $1"
+    pytest_run $_fus_attn "" "$@"
 }
 
 run_default_fa() {
@@ -44,10 +37,7 @@ run_default_fa() {
 }
 
 run_lbl() {
-    _test_label="$1"
-    shift
-    run "$@"
-    _test_label=""
+    pytest_run $_fus_attn "$@"
 }
 
 run_default_fa_lbl() {
@@ -71,24 +61,16 @@ run_test_config() {
 
 run_test_config_mgpu() {
     echo ==== Run mGPU with Fused attention backend: $_fus_attn ====
-    
-    _ver=$(pip show jaxlib | grep Version)
-    case "$_ver" in
-    *0.4.35*)
-        # Workaround for distributed tests hang with xla_flag
- 	    XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false" run 3 test_distributed_fused_attn.py -k 'not test_context_parallel_ring_attn'
- 
-        # Test ring attention with xla_flag --xla_experimental_ignore_channel_id only
-	    XLA_FLAGS="--xla_experimental_ignore_channel_id" run_lbl "parallel_ring" 3 test_distributed_fused_attn.py -k test_context_parallel_ring_attn
-        ;;
-    *)
-        # Workaround for distributed tests hang with xla_flag
-        XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false" run 3 test_distributed_fused_attn.py
-        ;;
-    esac
-    
+    configure_omp_threads 8
+    if [ $_fus_attn = $_DEFAULT_FUSED_ATTN ]; then
+        _dfa_level=2
+    else
+        _dfa_level=3
+    fi
+    # Workaround for distributed tests hang with xla_flag
+    XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false" run $_dfa_level test_distributed_fused_attn.py
     run_default_fa 3 test_distributed_layernorm.py
-    XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false" run_default_fa 3 test_distributed_layernorm_mlp.py
+    XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false" run_default_fa 2 test_distributed_layernorm_mlp.py
     run_default_fa 3 test_distributed_softmax.py
 
     run_default_fa 3 test_sanity_import.py
@@ -112,15 +94,19 @@ pip list | egrep "flax|fidle|jax|ml_dtypes|numpy|transformer_e|typing_ext"
 for _fus_attn in auto ck aotriton; do
     configure_fused_attn_env $_fus_attn || continue
 
-    #On basic (1) level tests are run with ck
-    #On full (3) level they are run with auto/aotriton
+    #On basic (1) level tests are run with auto
+    #On medium (2) level they are run with ck and aotriton
+    #On full (3) level they are run with auto and aotriton
     #Do not use unfused becaue JAX tests either do not use FA or enforce it
     if [ $TEST_LEVEL -ge 3 ]; then
         _DEFAULT_FUSED_ATTN="auto"
         test $_fus_attn = "ck" && continue
-    else
+    elif [ $TEST_LEVEL -ge 2 ]; then
         _DEFAULT_FUSED_ATTN="ck"
-        test $_fus_attn != "ck" && continue
+        test $_fus_attn = "auto" && continue
+    else
+        _DEFAULT_FUSED_ATTN="auto"
+        test $_fus_attn != "auto" && continue
     fi
 
     if [ -n "$TEST_JOBS_MODE" ]; then

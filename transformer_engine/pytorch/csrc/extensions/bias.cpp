@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -48,24 +50,15 @@ std::vector<py::object> bgrad_quantize(const at::Tensor& input, py::handle py_qu
   if (detail::IsFloat8CurrentScalingQuantizers(py_quantizer.ptr())) {
     // my_quantizer here has to be a Float8CurrentScalingQuantizer
     auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(quantizer.get());
-
-    // Workspace for nvte_compute_amax_with_workspace
-    const auto N = static_cast<size_t>(input_tensor.numel());
-    constexpr size_t max_blocks_hw = 65535;
-
-    // Worst-case (nvec = 1) upper bound on number of blocks
-    size_t max_blocks = std::min(DIVUP(N, static_cast<size_t>(amax_kernel_threads)), max_blocks_hw);
-
-    // Allocate FP32 workspace for block-wise amax
-    auto ws = at::empty({static_cast<long>(max_blocks)}, at::CUDA(at::kFloat));
-
-    TensorWrapper te_workspace = makeTransformerEngineTensor(ws);
-
     NVTE_SCOPED_GIL_RELEASE({
+#ifdef __HIP_PLATFORM_AMD__
       nvte_compute_amax_with_workspace(input_tensor.data(), out_tensor.data(),
-                        te_workspace.data(), at::cuda::getCurrentCUDAStream());
+                                       allocate_amax_workspace(input_tensor).data(),
+                                       at::cuda::getCurrentCUDAStream());
+#else
+      nvte_compute_amax(input_tensor.data(), out_tensor.data(), at::cuda::getCurrentCUDAStream());
+#endif
     });
-
     // check if we need to do amax reudction (depending on model parallel configs)
     if (my_quantizer_cs->with_amax_reduction) {
       c10::intrusive_ptr<dist_group_type> process_group_ptr = my_quantizer_cs->amax_reduction_group;

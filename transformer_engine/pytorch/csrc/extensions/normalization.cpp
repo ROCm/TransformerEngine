@@ -143,22 +143,15 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     if (IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
       // my_quantizer here has to be a Float8CurrentScalingQuantizer
       auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer *>(my_quantizer.get());
-
-      // Workspace for nvte_compute_amax_with_workspace
-      const auto N = static_cast<size_t>(unquantized_out_cu.numel());
-      constexpr size_t max_blocks_hw = 65535;
-
-      // Worst-case (nvec = 1) upper bound on number of blocks
-      size_t max_blocks = std::min(DIVUP(N, static_cast<size_t>(amax_kernel_threads)), max_blocks_hw);
-
-      // Allocate FP32 workspace for block-wise amax
-      auto ws = at::empty({static_cast<long>(max_blocks)}, at::CUDA(at::kFloat));
-
-      TensorWrapper te_workspace = makeTransformerEngineTensor(ws);
-
       NVTE_SCOPED_GIL_RELEASE({
+#ifdef __HIP_PLATFORM_AMD__
         nvte_compute_amax_with_workspace(unquantized_out_cu.data(), out_cu.data(),
-                          te_workspace.data(), at::cuda::getCurrentCUDAStream());
+                                         allocate_amax_workspace(unquantized_out_cu).data(),
+                          at::cuda::getCurrentCUDAStream());
+#else
+        nvte_compute_amax(unquantized_out_cu.data(), out_cu.data(),
+                          at::cuda::getCurrentCUDAStream());
+#endif
       });
       // check if we need to do amax reudction (depending on model parallel configs)
       if (my_quantizer_cs->with_amax_reduction) {
@@ -314,22 +307,15 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     if (IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
       // my_quantizer here has to be a Float8CurrentScalingQuantizer
       auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer *>(my_quantizer.get());
-
-      // Workspace for nvte_compute_amax_with_workspace
-      const auto N = static_cast<size_t>(unquantized_out_cu.numel());
-      constexpr size_t max_blocks_hw = 65535;
-
-      // Worst-case (nvec = 1) upper bound on number of blocks
-      size_t max_blocks = std::min(DIVUP(N, static_cast<size_t>(amax_kernel_threads)), max_blocks_hw);
-
-      // Allocate FP32 workspace for block-wise amax
-      auto ws = at::empty({static_cast<long>(max_blocks)}, at::CUDA(at::kFloat));
-
-      TensorWrapper te_workspace = makeTransformerEngineTensor(ws);
-
       NVTE_SCOPED_GIL_RELEASE({
+#ifdef __HIP_PLATFORM_AMD__
         nvte_compute_amax_with_workspace(unquantized_out_cu.data(), out_cu.data(),
-                          te_workspace.data(), at::cuda::getCurrentCUDAStream());
+                                         allocate_amax_workspace(unquantized_out_cu).data(),
+                          at::cuda::getCurrentCUDAStream());
+#else
+        nvte_compute_amax(unquantized_out_cu.data(), out_cu.data(),
+                          at::cuda::getCurrentCUDAStream());
+#endif
       });
       // check if we need to do amax reudction (depending on model parallel configs)
       if (my_quantizer_cs->with_amax_reduction) {
