@@ -60,7 +60,7 @@ jobs:
           docker ps -a
 
           echo ">>> ROCm Installation:"
-          ls -l /opt/rocm* || echo "No /opt/rocm found"
+          ls -d /opt/rocm* || echo "No /opt/rocm found"
           echo ">>> GPU info:"
           ls -l /dev/dri
           ls -l /dev/kfd
