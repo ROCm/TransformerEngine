@@ -50,28 +50,6 @@ jobs:
           submodules: 'recursive'
           fetch-depth: 0
         
-      - name: Merge origin/dev
-        # Only run on PRs targeting dev, or manual runs where we didn't skip it
-        if: |
-          (github.event_name == 'pull_request' && github.base_ref == 'dev') ||
-          (github.event_name == 'workflow_dispatch' && inputs.skip_dev_merge != 'true' && github.ref == 'refs/heads/dev')
-        run: |
-          echo "Attempting to merge origin/dev..."
-          git config --global user.email "amd@amd.com"
-          git config --global user.name "AMD CI"
-          
-          # Fetch dev specifically
-          git fetch origin dev
-
-          # Attempt merge; this will exit with error code 1 if there is a conflict, failing the job
-          git merge origin/dev
-
-          # Update submodules after merge to ensure new files are present
-          echo "Updating submodules after merge..."
-          git submodule update --init --recursive
-
-          echo "Merge successful."
-
       - name: Host Diagnostics & Environment Setup
         id: host-setup
         run: |
@@ -96,13 +74,17 @@ jobs:
           # Default to input (or '1' if input is missing/null)
           CALC_LEVEL="${{ inputs.test_level || '1' }}"
 
-          # If this is a Push event to 'dev', force Level 3
-          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_name }}" == "dev" ]]; then
-            echo "::notice::Push to dev detected. Forcing Test Level to 3."
-            CALC_LEVEL="3"
+          # Check for scenarios that require forcing Level 3
+          #    Scenario A: Push event to dev or one of the monitored branches
+          #    Scenario B: PR event targeting dev
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+             if [[ "${{ github.ref_name }}" == "dev" || "${{ github.ref_name }}" =~ ^release_v.*_rocm$ ]]; then
+                echo "::notice::Push to monitored branch (${{ github.ref_name }}) detected. Forcing Level 3."
+                CALC_LEVEL="3"
+             fi
           elif [[ "${{ github.event_name }}" == "pull_request" && "${{ github.base_ref }}" == "dev" ]]; then
-            echo "::notice::PR targeting dev detected. Forcing Test Level to 3."
-            CALC_LEVEL="3"
+             echo "::notice::PR targeting dev detected. Forcing Level 3."
+             CALC_LEVEL="3"
           fi
           
           echo "TEST_LEVEL=$CALC_LEVEL" >> $GITHUB_ENV
@@ -112,6 +94,7 @@ jobs:
           echo "Final Test Level: $CALC_LEVEL"
           echo "Event Name: ${{ github.event_name }}"
           echo "Ref Name: ${{ github.ref_name }}"
+          echo "Base Ref: ${{ github.base_ref }}"
           env | sort
           echo "::endgroup::"
 
