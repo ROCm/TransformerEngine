@@ -45,7 +45,6 @@ jobs:
       - name: Merge origin/dev
         # Only run on PRs targeting dev, or manual runs where we didn't skip it
         if: |
-          (github.event_name == 'pull_request' && github.base_ref == 'dev') ||
           (github.event_name == 'workflow_dispatch' && inputs.skip_dev_merge != 'true' && github.ref == 'refs/heads/dev')
         run: |
           echo "Attempting to merge origin/dev..."
