@@ -74,17 +74,12 @@ jobs:
           # Default to input (or '1' if input is missing/null)
           CALC_LEVEL="${{ inputs.test_level || '1' }}"
 
-          # Check for scenarios that require forcing Level 3
-          #    Scenario A: Push event to dev or one of the monitored branches
-          #    Scenario B: PR event targeting dev
+          # COnly force Level 3 if this is a direct PUSH to dev or a release branch
           if [[ "${{ github.event_name }}" == "push" ]]; then
              if [[ "${{ github.ref_name }}" == "dev" || "${{ github.ref_name }}" =~ ^release_v.*_rocm$ ]]; then
                 echo "::notice::Push to monitored branch (${{ github.ref_name }}) detected. Forcing Level 3."
                 CALC_LEVEL="3"
              fi
-          elif [[ "${{ github.event_name }}" == "pull_request" && "${{ github.base_ref }}" == "dev" ]]; then
-             echo "::notice::PR targeting dev detected. Forcing Level 3."
-             CALC_LEVEL="3"
           fi
           
           echo "TEST_LEVEL=$CALC_LEVEL" >> $GITHUB_ENV
