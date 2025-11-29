@@ -4,6 +4,11 @@
 
 cmake_minimum_required(VERSION 3.21)
 include(FetchContent)
+# Check if CMP0135 exists (introduced in CMake 3.24)
+if(POLICY CMP0135)
+  # For CMake >= 3.24, set NEW behavior for DOWNLOAD_EXTRACT_TIMESTAMP explicitly
+  cmake_policy(SET CMP0135 NEW)
+endif()
 
 # Extract ROCm version
 set(ROCM_PATH "$ENV{ROCM_PATH}")
@@ -16,11 +21,7 @@ string(REGEX MATCH "^[0-9]+\\.[0-9]+" ROCM_VER "${ROCM_VER_CONTENT}")
 
 # AITER commit
 file(REAL_PATH "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/aiter" AITER_DIR)
-execute_process(
-  COMMAND sh -c "git config --global --add safe.directory ${AITER_DIR} 2>/dev/null || true && git -C ${AITER_DIR} rev-parse HEAD"
-  OUTPUT_VARIABLE AITER_SHA
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-)
+get_git_commit(${AITER_DIR} AITER_SHA)
 
 # Cache key & local paths
 set(KEY "rocm-${ROCM_VER}_aiter-${AITER_SHA}")
@@ -72,7 +73,6 @@ function(download_aiter_prebuilt DOWNLOAD_SUCCESS)
     URL "${FILE_URL}"
     URL_HASH SHA256=${AITER_SHA_CONTENT}
     SOURCE_DIR "${EXTRACT_DIR}"
-    DOWNLOAD_EXTRACT_TIMESTAMP FALSE
   )
 
   # Download & extract prebuilt files

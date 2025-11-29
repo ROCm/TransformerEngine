@@ -279,6 +279,17 @@ if (USE_CUDA)
 else()
   set(GPU_TARGETS ${CMAKE_HIP_ARCHITECTURES})
 
+  function(get_git_commit REPO_DIR COMMIT_ID_VAR)
+    execute_process(
+      COMMAND sh -c "export GIT_CONFIG_GLOBAL=$(mktemp /tmp/gitconfig.XXXXXX);
+      git config --global --add safe.directory ${REPO_DIR} && git -C ${REPO_DIR} rev-parse HEAD;
+      rm $GIT_CONFIG_GLOBAL"
+      OUTPUT_VARIABLE ${COMMIT_ID_VAR}
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    SET(${COMMIT_ID_VAR} ${${COMMIT_ID_VAR}} PARENT_SCOPE)
+  endfunction()
+
   if(USE_FUSED_ATTN_AOTRITON)
     # The AOTriton C++ runtime will be built from ../../3rdparty/aotriton
     # Hence there is no need to add multiple ROCM version here
