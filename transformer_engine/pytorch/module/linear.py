@@ -12,7 +12,6 @@ from operator import mul as multiply_op
 import warnings
 
 import torch
-
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import torch_version
@@ -77,6 +76,7 @@ from ..rocm_utils import create_fp8_weight_transpose_cache, clear_fp8_weight_tra
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.utils import any_feature_enabled
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
+from .fp4_handler_gemm import fp4_gemm
 
 __all__ = ["Linear"]
 
@@ -228,7 +228,8 @@ class _Linear(torch.autograd.Function):
                         columnwise=backward_needs_input,
                     )
                 if not isinstance(inputmat, QuantizedTensor):
-                    inputmat = input_quantizer(inputmat)
+                    _pre_out = input_quantizer.make_empty(inputmat.shape, dtype=inputmat.dtype, device="cuda")
+                    inputmat = input_quantizer.quantize(inputmat, out=_pre_out)
                     own_quantized_input = True
                     
                 elif backward_needs_input:
@@ -339,23 +340,17 @@ class _Linear(torch.autograd.Function):
 
         # Choose input based on MXFP4 mode
         if is_mxfp4_enabled and fp8:
-            nvtx_range_push(f"{nvtx_label}.gemm_fwd_mxfp4")
-            # Call general_gemm which dispatches to AITER via gemm.py
-            assert isinstance(weightmat, MXFP4TensorBase), "Weight must be a MXFP4TensorBase"
-            gemm_out, *_, reduce_scatter_out = general_gemm(
-                weightmat,
-                inputmat_total,
-                get_workspace(),
-                layout="NN",
-                quantization_params=output_quantizer,
-                out_dtype=activation_dtype,
+            nvtx_range_push(f"{nvtx_label}.gemm_fwd_fp4")
+            gemm_out = fp4_gemm(
+                pass_type='fwd',
+                weight=weightmat,
+                input_tensor=inputmat_total,
                 bias=bias,
-                use_split_accumulator=use_split_accumulator,
-                ub=ub_obj,
-                ub_type=ub_type,
-                extra_output=reduce_scatter_out,
+                out_dtype=activation_dtype,
+                op_type="Linear",
             )
-            nvtx_range_pop(f"{nvtx_label}.gemm_fwd_mxfp4")
+            nvtx_range_pop(f"{nvtx_label}.gemm_fwd_fp4")
+            reduce_scatter_out = None
         else:
             nvtx_range_push(f"{nvtx_label}.gemm")
             gemm_out, *_, reduce_scatter_out = general_gemm(
@@ -621,18 +616,29 @@ class _Linear(torch.autograd.Function):
                     quantizer.set_usage(columnwise=False)
 
             # Prepare grad output tensor
-            nvtx_range_push(f"{nvtx_label}.grad_output_preprocess")
-            
-            (
-                grad_output,
-                grad_bias,
-            ) = TransformerEngineBaseModule.grad_output_preprocess(
-                ctx,
-                grad_output,
-                ctx.parallel_mode == "row",
-                ctx.grad_output_quantizer,
-            )
-            nvtx_range_pop(f"{nvtx_label}.grad_output_preprocess")
+            if is_mxfp4_enabled and ctx.fp8:
+                nvtx_range_push(f"{nvtx_label}.grad_output_mxfp4")
+                grad_output = ctx.grad_output_quantizer(grad_output)
+                grad_bias = None
+                nvtx_range_pop(f"{nvtx_label}.grad_output_mxfp4")
+            else:
+                if ctx.grad_output_quantizer is not None:
+                    # Reduce duplicated transpose, which is performed in grad_output.update_usage
+                    if ctx.ub_overlap_ag and ctx.fp8_recipe.float8_per_tensor_scaling():
+                        ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
+                    else:
+                        ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
+                nvtx_range_push(f"{nvtx_label}.grad_output_preprocess")
+                (
+                    grad_output,
+                    grad_bias,
+                ) = TransformerEngineBaseModule.grad_output_preprocess(
+                    ctx,
+                    grad_output,
+                    ctx.parallel_mode == "row",
+                    ctx.grad_output_quantizer,
+                )
+                nvtx_range_pop(f"{nvtx_label}.grad_output_preprocess")
 
             # --------------------------------------------------
             # Grad output tensor is ready for computing grad input...
@@ -746,23 +752,15 @@ class _Linear(torch.autograd.Function):
                 # Note: dx = dy * w
                 if is_mxfp4_enabled and ctx.fp8:
                     nvtx_range_push(f"{nvtx_label}.dgrad_gemm_mxfp4")
-                    # Call general_gemm with layout="NN" to use columnwise data
-                    # gemm.py will dispatch to AITER with weight_fp8._columnwise_data (the quantized transpose)
-                    gemm_out, *_, reduce_scatter_out = general_gemm(
-                        weight_fp8,              # Uses _columnwise_data for layout="NN"
-                        grad_output,             # torch.Size([batch, 1, out_features])
-                        get_workspace(),   
-                        layout="TN",             # @sararora TODO: Use columnwise (transposed) weight data, make this logic better in gemm.py 
-                        grad=True,
-                        quantization_params=ctx.grad_input_quantizer,
-                        out=gemm_out,
+                    gemm_out = fp4_gemm(
+                        pass_type='dgrad',
+                        weight=weight_fp8,
+                        grad_output=grad_output,
                         out_dtype=ctx.activation_dtype,
-                        use_split_accumulator=use_split_accumulator,
-                        ub=ub_obj_dgrad,
-                        ub_type=ub_type_dgrad,
-                        extra_output=reduce_scatter_out,
-                        bulk_overlap=ctx.ub_bulk_dgrad,
+                        dgrad_bulk=ctx.ub_bulk_dgrad,
+                        op_type="Linear",
                     )
+                    reduce_scatter_out = None
                     nvtx_range_pop(f"{nvtx_label}.dgrad_gemm_mxfp4")
                 else:
                     nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
@@ -880,26 +878,19 @@ class _Linear(torch.autograd.Function):
                 # ------------------------------------------------------
                 # wGrad GEMM
                 # ------------------------------------------------------
-                if is_mxfp4_enabled:
+                if is_mxfp4_enabled and ctx.fp8:
                     nvtx_range_push(f"{nvtx_label}.wgrad_gemm_mxfp4")
-                    wgrad, grad_bias_, *_, reduce_scatter_out = general_gemm(
-                        inputmat_total,
-                        grad_output,
-                        get_workspace(),
-                        layout="TT",
-                        grad=True,
-                        out_dtype=(
-                            main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
-                        ),
-                        bias=(bias if (grad_bias is None and not ctx.fp8) else None),
-                        out=main_grad if ctx.fuse_wgrad_accumulation else None,
-                        use_split_accumulator=use_split_accumulator,
-                        accumulate=accumulate_wgrad_into_param_main_grad,
-                        ub=ub_obj_wgrad,
-                        ub_type=ub_type_wgrad,
-                        extra_output=reduce_scatter_out,
-                        bulk_overlap=ctx.ub_bulk_wgrad,
+                    wgrad = fp4_gemm(
+                        pass_type='wgrad',
+                        input_tensor=inputmat_total,
+                        grad_output=grad_output,
+                        out_dtype=ctx.activation_dtype,
+                        main_grad=main_grad,
+                        fuse_wgrad_accumulation=ctx.fuse_wgrad_accumulation,
+                        accumulate_wgrad_into_param_main_grad=accumulate_wgrad_into_param_main_grad,
+                        op_type="Linear",
                     )
+                    grad_bias_ = None
                     nvtx_range_pop(f"{nvtx_label}.wgrad_gemm_mxfp4")
                 else:
                     nvtx_range_push(f"{nvtx_label}.wgrad_gemm")
@@ -1555,19 +1546,16 @@ class Linear(TransformerEngineBaseModule):
         output_quantizer = None
 
         if is_mxfp4_enabled:
-            input_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True)
+            # Input: used as A in fprop, B in wgrad - can't pre-shuffle (shuffle in wgrad only)
+            input_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True, shuffle_B_matrix_for_aiter=False)
         else:
             input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
             input_quantizer.internal = True
         
         # Weight quantizer
         if is_mxfp4_enabled:
-            # Weight: always used as B (fprop and dgrad) - can pre-shuffle for AITER
-            weight_quantizer = MXFP4Quantizer(
-                rowwise=True, 
-                columnwise=True,
-                shuffle_B_matrix_for_aiter=True
-            )
+            # Weight: always used as B (fprop and dgrad) - can pre-shuffle
+            weight_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True, shuffle_B_matrix_for_aiter=True)
             weight_quantizer.internal = True
         else:
             (weight_quantizer,) = self._get_weight_quantizers()
@@ -1577,7 +1565,7 @@ class Linear(TransformerEngineBaseModule):
         
         if torch.is_grad_enabled():
             if is_mxfp4_enabled:
-                grad_output_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True)
+                grad_output_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True)  # No shuffle for grad
                 grad_output_quantizer.internal = True
             else:
                 grad_output_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]
