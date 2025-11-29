@@ -231,7 +231,29 @@ std::vector<py::object> dbias_dqgelu(const at::Tensor &grad_output, const at::Te
 std::vector<py::object> dbias_dsrelu(const at::Tensor &grad_output, const at::Tensor &act_input,
                                      py::handle quantizer);
 
+ 
+
+
+/***************************************************************************************************
+ * MXFP4 Quantization
+ **************************************************************************************************/
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+cast_transpose_mxfp4_fused_shuffle(
+    at::Tensor input,
+    std::optional<at::Tensor> rowwise_fp4_out,
+    std::optional<at::Tensor> rowwise_scale_out,
+    std::optional<at::Tensor> colwise_fp4_out,
+    std::optional<at::Tensor> colwise_scale_out,
+    bool shuffle_rowwise_scale,
+    bool shuffle_colwise_scale,
+    bool shuffle_rowwise_fp4,
+    bool shuffle_colwise_fp4,
+    bool use_hadamard);
+
 }  // namespace transformer_engine::pytorch
+
+
 
 /***************************************************************************************************
  * Softmax
