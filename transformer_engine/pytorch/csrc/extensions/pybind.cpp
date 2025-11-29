@@ -172,6 +172,25 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("ln_out"), py::arg("quantizer"), py::arg("otype"), py::arg("sm_margin"),
         py::arg("zero_centered_gamma"));
   m.def("rmsnorm_bwd", &rmsnorm_bwd, "Backward of RMSNorm");
+
+  
+  m.def("cast_transpose_mxfp4_fused_shuffle",
+        &transformer_engine::pytorch::cast_transpose_mxfp4_fused_shuffle,
+        "MXFP4 cast and transpose with fused weight shuffle for GEMM",
+        py::arg("input"),
+        py::arg("rowwise_fp4_out") = py::none(),
+        py::arg("rowwise_scale_out") = py::none(),
+        py::arg("colwise_fp4_out") = py::none(),
+        py::arg("colwise_scale_out") = py::none(),
+        py::arg("shuffle_rowwise_scale") = true,
+        py::arg("shuffle_colwise_scale") = true,
+        py::arg("shuffle_rowwise_fp4") = true,
+        py::arg("shuffle_colwise_fp4") = true,
+        py::arg("use_hadamard") = false);
+
+
+
+  
   m.def("fused_multi_quantize", &fused_multi_quantize, "Fused Multi-tensor Cast + Transpose",
         py::arg("input_list"), py::arg("output_list"), py::arg("quantizer_list"), py::arg("otype"));
 
