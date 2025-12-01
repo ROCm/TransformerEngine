@@ -101,7 +101,7 @@ __launch_bounds__(amax_kernel_threads) __global__
       atomicMaxFloat(amax, max);
     }
 #else
-  atomicMaxFloat(amax, max);
+    atomicMaxFloat(amax, max);
 #endif
   }
 }
