@@ -72,10 +72,8 @@ def setup_common_extension() -> CMakeExtension:
 
         if int(os.getenv("NVTE_FUSED_ATTN_AOTRITON", "1"))==0 or int(os.getenv("NVTE_FUSED_ATTN", "1"))==0:
             cmake_flags.append("-DUSE_FUSED_ATTN_AOTRITON=OFF")
-        else:
-            os.environ["AOTRITON_CI_SUPPLIED_SHA1"] = "98371989e8a23267e284c94e95156a139e4b33c4"
-            if os.getenv("NVTE_FUSED_ATTN_AOTRITON") or os.getenv("NVTE_FUSED_ATTN"):
-                cmake_flags.append("-DUSE_FUSED_ATTN_AOTRITON=ON")
+        elif os.getenv("NVTE_FUSED_ATTN_AOTRITON") or os.getenv("NVTE_FUSED_ATTN"):
+            cmake_flags.append("-DUSE_FUSED_ATTN_AOTRITON=ON")
 
         if int(os.getenv("NVTE_FUSED_ATTN_CK", "1"))==0 or int(os.getenv("NVTE_FUSED_ATTN", "1"))==0:
             cmake_flags.append("-DUSE_FUSED_ATTN_CK=OFF")
