@@ -96,7 +96,7 @@ class MXFP4Quantizer(Quantizer):
                 shuffle_colwise_scale=True,
                 shuffle_rowwise_fp4=self.shuffle_B_matrix_for_aiter,
                 shuffle_colwise_fp4=self.shuffle_B_matrix_for_aiter,
-                use_hadamard=True,
+                use_hadamard=False,
             )
 
 
