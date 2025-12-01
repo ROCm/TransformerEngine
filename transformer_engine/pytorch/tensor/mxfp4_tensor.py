@@ -21,7 +21,8 @@ from .quantized_tensor import QuantizedTensor, Quantizer
 MXFP4_BLOCK_SCALING_SIZE = MXFP8_BLOCK_SCALING_SIZE
 
 aten = torch.ops.aten
-
+import os
+use_hadamard = os.environ.get("USE_HADAMARD", "0").lower() in ("1", "true", "yes")
 
 class MXFP4Quantizer(Quantizer):
     """Builder class for FP4 tensors with MX block scaling
@@ -96,7 +97,7 @@ class MXFP4Quantizer(Quantizer):
                 shuffle_colwise_scale=True,
                 shuffle_rowwise_fp4=self.shuffle_B_matrix_for_aiter,
                 shuffle_colwise_fp4=self.shuffle_B_matrix_for_aiter,
-                use_hadamard=False,
+                use_hadamard=use_hadamard,
             )
 
 
