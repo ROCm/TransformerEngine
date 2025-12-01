@@ -241,7 +241,7 @@ def _amax_reduce_triton_stage1(
 @triton.jit
 def _amax_reduce_and_compute_scale_triton(
     block_amax,      # float32[num_blocks]
-    num_blocks,  # int32[1]
+    num_blocks,      # int32[1]
     amax_ptr,        # float32[1]
     scale_ptr,       # float32[1]
     inv_ptr,         # float32[1]

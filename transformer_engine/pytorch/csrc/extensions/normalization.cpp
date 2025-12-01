@@ -144,14 +144,8 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
       // my_quantizer here has to be a Float8CurrentScalingQuantizer
       auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer *>(my_quantizer.get());
       NVTE_SCOPED_GIL_RELEASE({
-#ifdef __HIP_PLATFORM_AMD__
-        nvte_compute_amax_with_workspace(unquantized_out_cu.data(), out_cu.data(),
-                                         allocate_amax_workspace(unquantized_out_cu).data(),
-                          at::cuda::getCurrentCUDAStream());
-#else
         nvte_compute_amax(unquantized_out_cu.data(), out_cu.data(),
                           at::cuda::getCurrentCUDAStream());
-#endif
       });
       // check if we need to do amax reudction (depending on model parallel configs)
       if (my_quantizer_cs->with_amax_reduction) {
@@ -308,14 +302,8 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
       // my_quantizer here has to be a Float8CurrentScalingQuantizer
       auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer *>(my_quantizer.get());
       NVTE_SCOPED_GIL_RELEASE({
-#ifdef __HIP_PLATFORM_AMD__
-        nvte_compute_amax_with_workspace(unquantized_out_cu.data(), out_cu.data(),
-                                         allocate_amax_workspace(unquantized_out_cu).data(),
-                          at::cuda::getCurrentCUDAStream());
-#else
         nvte_compute_amax(unquantized_out_cu.data(), out_cu.data(),
                           at::cuda::getCurrentCUDAStream());
-#endif
       });
       // check if we need to do amax reudction (depending on model parallel configs)
       if (my_quantizer_cs->with_amax_reduction) {
