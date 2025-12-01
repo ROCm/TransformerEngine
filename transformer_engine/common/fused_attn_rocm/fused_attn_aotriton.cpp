@@ -293,14 +293,10 @@ void fused_attn_aotriton_fwd_impl(
 }
 
 // A thin conversion wrapper around eager tensor-views to lazy tensors
-template<int Rank = 4>
-struct LazyTensorContext {
-  aotriton::TensorView<Rank> tensor_view;
-};
 template<int kRank>
 struct LazyTensorFunctions {
   static aotriton::TensorView<kRank> acquire(void* cookie) {
-    return static_cast<LazyTensorContext<kRank>*>(cookie)->tensor_view;
+    return *static_cast<aotriton::TensorView<kRank>*>(cookie);
   }
   static void dispose(void* cookie) {
   }
@@ -382,15 +378,13 @@ void fused_attn_aotriton_bwd_impl(
   auto dq_acc_tensor = aotriton::TensorView<4>(reinterpret_cast<intptr_t>(dq_acc_ptr), q_shape, dq_acc_stride, aotriton::DType::kFloat32);
   NVTE_CHECK_CUDA(hipMemsetAsync(dq_acc_ptr, 0, dq_acc_size, stream));
 
-  LazyTensorContext<4> dq_acc_ctx {.tensor_view = dq_acc_tensor};
-  LazyTensorContext<2> delta_ctx {.tensor_view = delta_tensor};
   auto dq_acc_lazy = aotriton::LazyTensor<4> {
-    .cookie = &dq_acc_ctx,
+    .cookie = &dq_acc_tensor,
     .acquire = &LazyTensorFunctions<4>::acquire,
     .dispose = &LazyTensorFunctions<4>::dispose
   };
   auto delta_lazy = aotriton::LazyTensor<2> {
-    .cookie = &delta_ctx,
+    .cookie = &delta_tensor,
     .acquire = &LazyTensorFunctions<2>::acquire,
     .dispose = &LazyTensorFunctions<2>::dispose
   };
@@ -448,7 +442,7 @@ void fused_attn_aotriton_bwd_impl(
     std::cout<<"DQ: "<<dq_tensor.data_ptr()<<"\n";
     std::cout<<"DB: "<<empty_bias.data_ptr()<<"\n";
     std::cout<<"L: "<<M_tensor.data_ptr()<<"\n";
-    std::cout<<"D: "<<static_cast<LazyTensorContext<4>*>(delta_lazy.cookie)->tensor_view.data_ptr()<<"\n";
+    std::cout<<"D: "<<delta_tensor.data_ptr()<<"\n";
     std::cout<<"dropout_p: "<<dropout_probability<<"\n";
     std::cout<<"philox_seed_ptr: "<<seed.data_ptr()<<"\n";
     std::cout<<"philox_offset1: "<<offset.data_ptr()<<"\n";
@@ -457,7 +451,7 @@ void fused_attn_aotriton_bwd_impl(
     std::cout<<"varlen_type: "<<+varlen_type<<"\n";
     std::cout<<"window_left: "<<window_left<<"\n";
     std::cout<<"window_right: "<<window_right<<"\n";
-    std::cout<<"DQ_ACC: "<<static_cast<LazyTensorContext<4>*>(dq_acc_lazy.cookie)->tensor_view.data_ptr()<<"\n";
+    std::cout<<"DQ_ACC: "<<dq_acc_tensor.data_ptr()<<"\n";
   }
   aotriton::v3::flash::attn_bwd_params bwd_params{};
   bwd_params.Q = q_tensor;
