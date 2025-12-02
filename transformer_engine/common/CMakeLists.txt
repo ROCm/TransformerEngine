@@ -271,9 +271,12 @@ endif()
 # Changed
 option(NVTE_UB_WITH_MPI "Bootstrap Userbuffers with MPI" OFF)
 if (NVTE_UB_WITH_MPI)
-    find_package(MPI REQUIRED)
-    target_link_libraries(transformer_engine PUBLIC MPI::MPI_CXX)
-    target_include_directories(transformer_engine PRIVATE ${MPI_CXX_INCLUDES})
+    # OpenMPI C++ headers are deprecated -- flag unused w/ MPICH
+    add_definitions(-DOMPI_SKIP_MPICXX)
+    
+    target_include_directories(transformer_engine PRIVATE "$ENV{MPI_HOME}/include")
+    target_link_directories(transformer_engine PRIVATE "$ENV{MPI_HOME}/lib")
+    target_link_libraries(transformer_engine PUBLIC mpi)
     target_compile_definitions(transformer_engine PUBLIC NVTE_UB_WITH_MPI)
 endif()
   

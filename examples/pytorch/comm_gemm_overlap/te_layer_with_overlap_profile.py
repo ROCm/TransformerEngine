@@ -98,7 +98,7 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument(
         "--bootstrap-backend",
         type=str.lower,
-        default="nccl",
+        default="mpi",
         choices=["gloo", "mpi", "nccl"],
         help="Communications backend for host tensor collectives during Userbuffers bootstrapping.",
     )

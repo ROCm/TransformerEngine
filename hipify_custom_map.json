@@ -7,7 +7,8 @@
         "CUfunc_cache" : "hipFuncCache_t", 
         "<nvtx3/nvToolsExt.h>" : "<roctracer/roctx.h>",
         "cudaLaunchKernel": "hipLaunchKernel",
-        "CUmemGenericAllocationHandle": "hipMemGenericAllocationHandle_t"
+        "CUmemGenericAllocationHandle": "hipMemGenericAllocationHandle_t",
+        "\"cuda_runtime.h\"": "\"hip_runtime.h\""
  }
 }
 

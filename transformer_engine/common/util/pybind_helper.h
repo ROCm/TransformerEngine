@@ -14,11 +14,7 @@
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/transformer_engine.h>
 
-#ifdef __HIP_PLATFORM_AMD__
-#include "hip_runtime.h"
-#else
 #include "cuda_runtime.h"
-#endif
 
 // Define fused-attention handles separately for USE_ROCM
 #ifndef USE_ROCM

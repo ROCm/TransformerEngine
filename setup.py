@@ -60,6 +60,12 @@ class TimedBdist(bdist_wheel):
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library"""
     cmake_flags = []
+    if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
+            assert (
+                os.getenv("MPI_HOME") is not None
+            ), "MPI_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
+            cmake_flags.append("-DNVTE_UB_WITH_MPI=ON")
+    
     if rocm_build():
         cmake_flags.append("-DUSE_ROCM=ON")
         if os.getenv("NVTE_AOTRITON_PATH"):
@@ -76,11 +82,6 @@ def setup_common_extension() -> CMakeExtension:
     else:
         cmake_flags.append("-DUSE_ROCM=OFF")
         cmake_flags = ["-DCMAKE_CUDA_ARCHITECTURES={}".format(archs)]
-        if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
-            assert (
-                os.getenv("MPI_HOME") is not None
-            ), "MPI_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
-            cmake_flags.append("-DNVTE_UB_WITH_MPI=ON")
 
         if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))):
             assert (
