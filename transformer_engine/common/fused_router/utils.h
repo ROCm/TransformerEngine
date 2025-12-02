@@ -200,7 +200,7 @@ __device__ inline void naive_topk_and_mask(T *scores, int data_size, int topk, i
     // Warp shuffle between threads
     for (int s = 16; s > 0; s /= 2) {
 #ifdef __HIP_PLATFORM_AMD__
-      volatile auto shuffled_val   = __shfl_xor(val, s, kThreadsPerWarp);
+      volatile auto shuffled_val = __shfl_xor(val, s, kThreadsPerWarp);
       volatile auto shuffled_index = __shfl_xor(index, s, kThreadsPerWarp);
 #else
       volatile auto shuffled_val = __shfl_xor_sync(0xffffffff, val, s);

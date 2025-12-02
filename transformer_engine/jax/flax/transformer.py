@@ -1,5 +1,3 @@
-# This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -597,13 +595,6 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             seqlen_kv = seqlen_q
         else:
             seqlen_kv = key.shape[sequence_dim]
-        if qkv_layout.is_separate():
-            head_dim_qk = query.shape[-1]
-            head_dim_v = value.shape[-1]
-        else:
-            head_dim_qk = self.head_dim
-            head_dim_v = self.head_dim
-
         if qkv_layout.is_separate():
             head_dim_qk = query.shape[-1]
             head_dim_v = value.shape[-1]

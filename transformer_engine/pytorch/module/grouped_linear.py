@@ -1,5 +1,3 @@
-# This file was modified for portability to AMDGPU
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -10,7 +8,6 @@ import warnings
 
 import functools
 import torch
-import os
 
 import transformer_engine_torch as tex
 
@@ -52,7 +49,6 @@ from ..tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 __all__ = ["GroupedLinear"]
 

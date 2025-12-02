@@ -5,7 +5,6 @@
 # See LICENSE for license information.
 """JAX/TE miscellaneous for custom ops"""
 
-import jax
 import os
 import functools
 from typing import Tuple

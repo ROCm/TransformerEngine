@@ -1,5 +1,3 @@
-# This file was modified for portability to AMDGPU
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -9,11 +7,6 @@
 # pylint: disable=wrong-import-position
 
 import functools
-import sys
-import importlib
-import importlib.util
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
-from importlib.metadata import version
 from packaging.version import Version as PkgVersion
 
 import torch

@@ -34,6 +34,7 @@ from .._common import maybe_autocast_dtype, maybe_dequantize
 from ...export import is_in_onnx_export_mode
 from ...tensor import Quantizer
 
+
 class RMSNorm(BasicOperation):
     r"""Root Mean Square Layer Normalization
 
@@ -243,7 +244,6 @@ class RMSNorm(BasicOperation):
 
         # Compute RMSNorm backward pass
         rmsnorm_bwd_func = te_rmsnorm_bwd_triton if self.use_rmsnorm_triton else rmsnorm_bwd
-        
         dx, dw = rmsnorm_bwd_func(
             dy,
             x,

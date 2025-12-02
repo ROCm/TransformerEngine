@@ -54,6 +54,10 @@ run_default_fa_lbl() {
 run_test_config(){
     echo ==== Run with Fused attention backend: $_fus_attn ====
     #_WORKERS_COUNT=$TEST_WORKERS
+    mkdir -p ${TEST_DIR}/checkpoint
+    python ${TEST_DIR}/test_checkpoint.py --save-checkpoint all --checkpoint-dir ${TEST_DIR}/checkpoint
+    NVTE_TEST_CHECKPOINT_ARTIFACT_PATH=${TEST_DIR}/checkpoint run 1 test_checkpoint.py
+    rm -rf ${TEST_DIR}/checkpoint
     run 1 test_cuda_graphs.py
     run_default_fa 1 test_deferred_init.py
     run_default_fa 1 test_float8tensor.py
