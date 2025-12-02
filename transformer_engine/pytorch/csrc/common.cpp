@@ -299,10 +299,7 @@ TensorWrapper allocate_amax_workspace(const TensorWrapper& input_tensor) {
   }
 
   const auto N = input_tensor.numel();
-  constexpr size_t max_blocks_hw = 65535;
-
-  size_t max_blocks = DIVUP(N, static_cast<size_t>(amax_kernel_threads));
-  size_t workspace_blocks = std::min(max_blocks, max_blocks_hw);
+  size_t workspace_blocks = nvte_amax_workspace_size(N);
 
   at::Tensor ws = at::empty(workspace_blocks, at::CUDA(at::kFloat));
 

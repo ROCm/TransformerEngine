@@ -94,6 +94,8 @@ void nvte_compute_amax(const NVTETensor input, NVTETensor output, cudaStream_t s
 
 #ifdef __HIP_PLATFORM_AMD__
 
+size_t nvte_amax_workspace_size(size_t N);
+
 /*! \brief Compute an FP8 tensor's amax.
  *
  *  The amax (maximum absolute value) of the input tensor is computed

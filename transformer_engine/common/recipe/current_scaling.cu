@@ -26,10 +26,7 @@ using bf16__ = __nv_bfloat16;
 using bf16__ = __hip_bfloat16;
 #endif //__HIP_PLATFORM_AMD__
 
-#ifndef __HIP_PLATFORM_AMD__
-// Defined in include/transformer_engine/recipe.h for AMD
 constexpr int amax_kernel_threads = 512;
-#endif
 
 #ifdef __HIP_PLATFORM_AMD__
 
@@ -125,13 +122,16 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, flo
   auto align = CheckAlignment(N, nvec, input);
   size_t num_aligned_elements = get_num_aligned_elements(input, N, nvec, sizeof(InputType));
 
+#ifndef __HIP_PLATFORM_AMD__
   // Figure out CUDA blocks
   constexpr size_t threads = amax_kernel_threads;
   size_t num_blocks = DIVUP(num_aligned_elements, threads);
   constexpr size_t max_blocks = 65535;
   num_blocks = std::min(num_blocks, max_blocks);
 
-#ifdef __HIP_PLATFORM_AMD__
+#else
+  constexpr size_t threads = amax_kernel_threads;
+  size_t num_blocks = nvte_amax_workspace_size(num_aligned_elements);
   if (block_capacity < num_blocks)
     block_amax = nullptr;
 #endif
@@ -185,6 +185,19 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, flo
 
 }  // namespace
 }  // namespace transformer_engine
+
+
+#ifdef __HIP_PLATFORM_AMD__
+
+size_t nvte_amax_workspace_size(size_t N) {
+  constexpr size_t max_blocks_hw = 65535;
+
+  size_t max_blocks = transformer_engine::DIVUP(N, static_cast<size_t>(amax_kernel_threads));
+  size_t workspace_blocks = std::min(max_blocks, max_blocks_hw);
+  return workspace_blocks;
+}
+
+#endif
 
 void nvte_compute_amax(const NVTETensor input_, const NVTETensor output_, cudaStream_t stream) {
 #ifdef __HIP_PLATFORM_AMD__
