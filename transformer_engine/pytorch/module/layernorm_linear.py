@@ -1530,13 +1530,15 @@ class LayerNormLinear(TransformerEngineBaseModule):
         output_quantizer = None
         
         if is_mxfp4_enabled:
-            input_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True)
+            # Input: used as A in fprop, B in wgrad - don't pre-shuffle (shuffle on-the-fly if needed)
+            input_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True, shuffle_B_matrix_for_aiter=False)
         else:
             input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
         input_quantizer.internal = False
         
         if is_mxfp4_enabled:
-            weight_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True)
+            # Weight: always used as B in fprop and dgrad - pre-shuffle during quantization
+            weight_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True, shuffle_B_matrix_for_aiter=True)
         else:
             weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         weight_quantizer.internal = True
@@ -1545,7 +1547,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
             output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
         if torch.is_grad_enabled():
             if is_mxfp4_enabled:
-                grad_output_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True)
+                # Grad output: always used as A - no shuffle needed
+                grad_output_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True, shuffle_B_matrix_for_aiter=False)
                 grad_output_quantizer.internal = True
             else:
                 grad_output_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]

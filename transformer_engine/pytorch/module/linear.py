@@ -6,11 +6,34 @@
 
 """Linear API"""
 import os
+import sys
 from typing import Callable, Dict, Optional, Tuple, Union
 from functools import reduce
 from operator import mul as multiply_op
 
 import torch
+
+NVTE_MXFP4_DEBUG = os.environ.get("NVTE_MXFP4_DEBUG", "0").lower() in ("1", "true", "yes")
+
+# Debug logging helper
+def _fp4_log(location, **kwargs):
+    """Log MXFP4 linear layer debug information (lightweight, rank 0 only)"""
+    if not NVTE_MXFP4_DEBUG:
+        return
+    # Only log from rank 0 to avoid multi-GPU noise
+    try:
+        import torch.distributed as dist
+        if dist.is_initialized() and dist.get_rank() != 0:
+            return
+    except:
+        pass
+    msg = f"[MXFP4_LINEAR:{location}] "
+    for k, v in kwargs.items():
+        if isinstance(v, torch.Tensor):
+            msg += f"{k}=shape{tuple(v.shape)} "
+        else:
+            msg += f"{k}={v} "
+    print(msg, file=sys.stderr, flush=True)
 
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
@@ -270,6 +293,12 @@ class _Linear(torch.autograd.Function):
            
             # Call general_gemm which dispatches to AITER via gemm.py
             assert isinstance(weightmat, MXFP4TensorBase), "Weight must be a MXFP4TensorBase"
+            _fp4_log("linear_fwd_before_gemm", 
+                     weightmat_row=weightmat._rowwise_data if hasattr(weightmat, '_rowwise_data') else "None",
+                     weightmat_col=weightmat._columnwise_data if hasattr(weightmat, '_columnwise_data') else "None",
+                     inputmat_row=inputmat_total._rowwise_data if hasattr(inputmat_total, '_rowwise_data') else "None",
+                     inputmat_col=inputmat_total._columnwise_data if hasattr(inputmat_total, '_columnwise_data') else "None",
+                     layout="NN")
             out, *_ = general_gemm(
                 weightmat,
                 inputmat_total,
@@ -280,6 +309,7 @@ class _Linear(torch.autograd.Function):
                 bias=bias,
                 use_split_accumulator=_2X_ACC_FPROP,
             )
+            _fp4_log("linear_fwd_after_gemm", out=out)
             
             nvtx_range_pop(f"{nvtx_label}.gemm_fwd_fp4")
             
@@ -1310,12 +1340,14 @@ class Linear(TransformerEngineBaseModule):
         output_quantizer = None
 
         if is_mxfp4_enabled:
-            input_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True)
+            # Input: used as A in fprop, B in wgrad - don't pre-shuffle (shuffle on-the-fly if needed)
+            input_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True, shuffle_B_matrix_for_aiter=False)
         else:
             input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
         input_quantizer.internal = False
         if is_mxfp4_enabled:
-            weight_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True)
+            # Weight: always used as B in fprop and dgrad - pre-shuffle during quantization
+            weight_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True, shuffle_B_matrix_for_aiter=True)
         else:
             weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         weight_quantizer.internal = True
@@ -1323,7 +1355,8 @@ class Linear(TransformerEngineBaseModule):
             output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
         if torch.is_grad_enabled():
             if is_mxfp4_enabled:
-                grad_output_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True)
+                # Grad output: always used as A - no shuffle needed
+                grad_output_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True, shuffle_B_matrix_for_aiter=False)
                 grad_output_quantizer.internal = True
             else:
                 grad_output_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]

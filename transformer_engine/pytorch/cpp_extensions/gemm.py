@@ -7,12 +7,35 @@
 
 from typing import Iterable, Optional, Tuple, Union, List
 import os
+import sys
 import torch
 import transformer_engine_torch as tex
 from ..constants import TE_DType
 from ..utils import get_sm_count, _empty_tensor
 
 from ..tensor.quantized_tensor import Quantizer
+
+NVTE_MXFP4_DEBUG = os.environ.get("NVTE_MXFP4_DEBUG", "0").lower() in ("1", "true", "yes")
+
+# Debug logging helper
+def _fp4_log(location, **kwargs):
+    """Log MXFP4 GEMM debug information (lightweight, rank 0 only)"""
+    if not NVTE_MXFP4_DEBUG:
+        return
+    # Only log from rank 0 to avoid multi-GPU noise
+    try:
+        import torch.distributed as dist
+        if dist.is_initialized() and dist.get_rank() != 0:
+            return
+    except:
+        pass
+    msg = f"[MXFP4_GEMM:{location}] "
+    for k, v in kwargs.items():
+        if isinstance(v, torch.Tensor):
+            msg += f"{k}=shape{tuple(v.shape)} "
+        else:
+            msg += f"{k}={v} "
+    print(msg, file=sys.stderr, flush=True)
 
 __all__ = [
     "general_gemm",
@@ -52,7 +75,11 @@ def general_gemm(
     from ..tensor._internal.mxfp4_tensor_base import MXFP4TensorBase
     import os
 
+    _fp4_log("general_gemm_entry", A_type=type(A).__name__, B_type=type(B).__name__, layout=layout)
+    
     if isinstance(A, MXFP4TensorBase) and isinstance(B, MXFP4TensorBase):
+        _fp4_log("general_gemm_mxfp4_path", layout=layout)
+        
         try:
             import aiter
             from aiter.ops.shuffle import shuffle_weight
@@ -67,6 +94,8 @@ def general_gemm(
 
         use_A_columnwise = layout[0] == "T"
         use_B_columnwise = layout[1] == "T"
+        
+        _fp4_log("general_gemm_layout_parsed", use_A_columnwise=use_A_columnwise, use_B_columnwise=use_B_columnwise)
         
         if use_A_columnwise:
             if A._columnwise_data is None or A._columnwise_scale is None:
@@ -104,28 +133,61 @@ def general_gemm(
                 device=input_data.device
             )
 
-        # Shuffle weight for FP4 layout (16x16) and call gemm_a4w4_asm
+        # Check if weight matrix (A in general_gemm) is pre-shuffled during quantization
         # AITER expects: gemm_a4w4_asm(input, weight_shuffled, input_scale, weight_scale, ...)
-        # Wrap in DisableTorchDispatch to prevent recursive dequantization, TODO revisit DisableTorchDispatch
+        # Wrap in DisableTorchDispatch to prevent recursive dequantization
         with torch._C._DisableTorchDispatch():
+            # IMPORTANT: FP4 data must be shuffled here for AITER compatibility
+            # The quantization kernel handles scale shuffling, but FP4 data
+            # shuffling is performed here to match AITER's expected tile layout
+            
+            _fp4_log("gemm_shuffle_check", layout=layout, weight_data=weight_data)
+            
+            # Shuffle FP4 data into 16x16 tile layout expected by AITER
             weight_layout = (16, 16)
-            weight_data_shuffled = shuffle_weight(weight_data, layout=weight_layout)
+            weight_data_for_aiter = shuffle_weight(weight_data, layout=weight_layout)
+            _fp4_log("gemm_shuffled_for_aiter", weight_data_shuffled=weight_data_for_aiter)
+            
+            # Select appropriate AITER kernel based on layout
+            # Forward (NN): 128x512, Dgrad (TN): 128x512, Wgrad (TT): 256x256
+            if layout == "TT":
+                kernel_name = "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E"
+            else:
+                kernel_name = "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_128x512E"
+            
+            # Convert scales to uint8 views (AITER expects uint8 E8M0 format)
+            input_scale_uint8 = input_scale.view(torch.uint8)
+            weight_scale_uint8 = weight_scale.view(torch.uint8)
+            
+            _fp4_log("gemm_before_aiter", 
+                     A_input=input_data, B_weight=weight_data_for_aiter,
+                     A_scale=input_scale_uint8, B_scale=weight_scale_uint8,
+                     kernel=kernel_name, has_bias=bias is not None)
             
             result = aiter.gemm_a4w4_asm(
                 input_data,              
-                weight_data_shuffled,    
-                input_scale,             
-                weight_scale,            
+                weight_data_for_aiter,    
+                input_scale_uint8,       
+                weight_scale_uint8,      
                 out,
-                "" if bias is None else bias,  
+                kernel_name,  # Kernel name, NOT bias!
                 None,
                 bpreshuffle=True,
                 log2_k_split=0,
             )
             
+            _fp4_log("gemm_after_aiter", result_before_trim=result)
+            
             # Trim padding if necessary
             if result.shape[0] > M:
                 result = result[:M, :]
+                _fp4_log("gemm_after_trim", result=result)
+            
+            # Add bias after GEMM if provided
+            if bias is not None:
+                bias_casted = bias if bias.dtype == out_dtype else bias.to(out_dtype)
+                result = result + bias_casted
+                _fp4_log("gemm_after_bias", result=result)
             
             # Reshape output back to original shape 
             original_input_shape = getattr(B, '_original_shape', None)  # Changed from A to B (input)

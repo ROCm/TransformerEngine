@@ -7,6 +7,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 import math
 from typing import Optional
+import sys
 
 import torch
 import transformer_engine_torch as tex
@@ -21,6 +22,28 @@ from .quantized_tensor import QuantizedTensor, Quantizer
 MXFP4_BLOCK_SCALING_SIZE = MXFP8_BLOCK_SCALING_SIZE
 
 aten = torch.ops.aten
+import os
+NVTE_MXFP4_DEBUG = os.environ.get("NVTE_MXFP4_DEBUG", "0").lower() in ("1", "true", "yes")
+
+# Debug logging helper
+def _fp4_log(location, **kwargs):
+    """Log MXFP4 quantization debug information (lightweight, rank 0 only)"""
+    if not NVTE_MXFP4_DEBUG:
+        return
+    # Only log from rank 0 to avoid multi-GPU noise
+    try:
+        import torch.distributed as dist
+        if dist.is_initialized() and dist.get_rank() != 0:
+            return
+    except:
+        pass
+    msg = f"[MXFP4_QUANT:{location}] "
+    for k, v in kwargs.items():
+        if isinstance(v, torch.Tensor):
+            msg += f"{k}=shape{tuple(v.shape)} "
+        else:
+            msg += f"{k}={v} "
+    print(msg, file=sys.stderr, flush=True)
 
 
 class MXFP4Quantizer(Quantizer):
@@ -44,9 +67,11 @@ class MXFP4Quantizer(Quantizer):
         *,
         rowwise: bool = True,
         columnwise: bool = True,
+        shuffle_B_matrix_for_aiter: bool = False,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = fp4_dtype
+        self.shuffle_B_matrix_for_aiter = shuffle_B_matrix_for_aiter
         assert self.dtype == tex.DType.kFloat4E2M1, "Only E2M1 format supported for MXFP4"
 
     def update_quantized(
@@ -77,33 +102,45 @@ class MXFP4Quantizer(Quantizer):
                 f"Biases and other 1D tensors should not be quantized with MXFP4."
             )
 
-        # Use fused Triton kernel for both rowwise and columnwise quantization
-        # This provides 2-4x speedup over separate AITER calls
-        use_fused_kernel = True  # Set to False to fallback to AITER
+        _fp4_log("quantize_start", src=src, shuffle_scales=True, shuffle_fp4_data=False)
+
+        # Use fused quantization kernel for both rowwise and columnwise layouts
+        # This provides 2-4x speedup over separate quantization calls
+        use_fused_kernel = True
         
         if use_fused_kernel:
-            # Import fused kernel
+            # Import fused cast+transpose kernel
             from ..triton_kernels.cast_transpose import te_cast_transpose_mxfp4_triton
             
             # Wrap in DisableTorchDispatch to prevent recursive dequantization
             with torch._C._DisableTorchDispatch():
-                # Convert FP4 dtypes to uint8 for Triton kernel (it doesn't recognize FP4 dtypes)
+                # Let kernel allocate scales with correct shuffle layout
+                # Pre-allocate FP4 data tensors to indicate which outputs are needed
                 rowwise_fp4_uint8 = dst._rowwise_data.view(torch.uint8) if dst._rowwise_data is not None else None
-                rowwise_scale_uint8 = dst._rowwise_scale.view(torch.uint8) if dst._rowwise_scale is not None else None
                 colwise_fp4_uint8 = dst._columnwise_data.view(torch.uint8) if dst._columnwise_data is not None else None
-                colwise_scale_uint8 = dst._columnwise_scale.view(torch.uint8) if dst._columnwise_scale is not None else None
                 
-                # Single fused kernel call for both rowwise and columnwise
                 (fp4_rowwise, scale_rowwise, 
                  fp4_colwise, scale_colwise) = te_cast_transpose_mxfp4_triton(
                     src,
                     rowwise_fp4_out=rowwise_fp4_uint8,
-                    rowwise_scale_out=rowwise_scale_uint8,
+                    rowwise_scale_out=None,  # Kernel allocates with shuffle
                     colwise_fp4_out=colwise_fp4_uint8,
-                    colwise_scale_out=colwise_scale_uint8,
-                    shuffle_rowwise=True,
-                    shuffle_colwise=True,
+                    colwise_scale_out=None,  # Kernel allocates with shuffle
+                    shuffle_rowwise=True,  # Always shuffle scales for AITER
+                    shuffle_colwise=True,  # Always shuffle scales for AITER
                 )
+                
+                # Copy scale results to destination tensors
+                if dst._rowwise_scale is not None and scale_rowwise is not None:
+                    dst._rowwise_scale.copy_(scale_rowwise.view(dst._rowwise_scale.dtype))
+                if dst._columnwise_scale is not None and scale_colwise is not None:
+                    dst._columnwise_scale.copy_(scale_colwise.view(dst._columnwise_scale.dtype))
+                # FP4 data is already written to dst tensors since we passed them as outputs
+                
+                _fp4_log("quantize_done", 
+                         scales_shuffled=True, fp4_data_shuffled=False,
+                         rowwise_data=dst._rowwise_data if dst._rowwise_data is not None else "None",
+                         columnwise_data=dst._columnwise_data if dst._columnwise_data is not None else "None")
                 
                 # Results are already written to the uint8 views, which update the FP4 tensors
                 # No need to copy back since we passed views of the original tensors
