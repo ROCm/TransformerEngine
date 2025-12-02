@@ -12,10 +12,6 @@
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
 
-#ifdef __HIP_PLATFORM_AMD__
-#include "common/common.h"
-#endif
-
 namespace transformer_engine::pytorch {
 
 std::vector<size_t> getTensorShape(at::Tensor t) {
@@ -284,6 +280,11 @@ int roundup(const int value, const int multiple) {
 }
 
 #ifdef __HIP_PLATFORM_AMD__
+
+template <typename T>
+constexpr T DIVUP(const T &x, const T &y) {
+  return (((x) + ((y)-1)) / (y));
+}
 
 inline bool nvte_use_atomic_amax() {
   const char *env_p = std::getenv("NVTE_USE_ATOMIC_AMAX");
