@@ -26,6 +26,10 @@ using bf16__ = __nv_bfloat16;
 using bf16__ = __hip_bfloat16;
 #endif //__HIP_PLATFORM_AMD__
 
+#ifndef __HIP_PLATFORM_AMD__
+// Defined in include/transformer_engine/recipe.h for AMD
+constexpr int amax_kernel_threads = 512;
+#endif
 
 #ifdef __HIP_PLATFORM_AMD__
 
