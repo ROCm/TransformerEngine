@@ -299,7 +299,7 @@ TensorWrapper allocate_amax_workspace(const TensorWrapper& input_tensor) {
   }
 
   const auto N = input_tensor.numel();
-  size_t workspace_blocks = nvte_amax_workspace_size(N);
+  size_t workspace_blocks = nvte_amax_workspace_num_blocks(N);
 
   at::Tensor ws = at::empty(workspace_blocks, at::CUDA(at::kFloat));
 

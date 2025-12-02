@@ -131,7 +131,7 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, flo
 
 #else
   constexpr size_t threads = amax_kernel_threads;
-  size_t num_blocks = nvte_amax_workspace_size(num_aligned_elements);
+  size_t num_blocks = nvte_amax_workspace_num_blocks(num_aligned_elements);
   if (block_capacity < num_blocks)
     block_amax = nullptr;
 #endif
@@ -189,7 +189,7 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, flo
 
 #ifdef __HIP_PLATFORM_AMD__
 
-size_t nvte_amax_workspace_size(size_t N) {
+size_t nvte_amax_workspace_num_blocks(size_t N) {
   constexpr size_t max_blocks_hw = 65535;
 
   size_t max_blocks = transformer_engine::DIVUP(N, static_cast<size_t>(amax_kernel_threads));
