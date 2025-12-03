@@ -644,10 +644,6 @@ void fused_attn_ck_fwd_impl(
     workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + h*max_tokens_q*sizeof(float));
   }
   if(is_SBHD && is_padding){
-    //determine the o buffer based on workspace next section
-    devPtrOWithoutPadding = workspace_next;
-    workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + o_storage_bytes);
-
     //determine q, k ,v buffer based on the workspace next ptr and layout group
     NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
     //Q ptr always comes at first
@@ -671,6 +667,9 @@ void fused_attn_ck_fwd_impl(
       devPtrVWithoutPadding = workspace_next;
       workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + v_storage_bytes);
     }
+    //determine the o buffer based on workspace next section
+    devPtrOWithoutPadding = workspace_next;
+    workspace_next = static_cast<void *>(static_cast<int8_t *>(workspace_next) + o_storage_bytes);
   }else if(bshd_to_thd){
     // cu_seqlen_padded ptrs for THD conversion
     devPtrCuSeqlenPaddedQ = workspace_next;
