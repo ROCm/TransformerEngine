@@ -50,6 +50,8 @@ void set_aiter_asm_dir() {
   });
 }
 
+bool aiter_asm_dir_loaded = (set_aiter_asm_dir(), true);
+
 std::string get_data_type_str(DType dtype){
   std::string data_type_str;
   if(dtype==DType::kFloat16){
