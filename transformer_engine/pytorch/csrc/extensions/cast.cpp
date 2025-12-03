@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -42,10 +44,19 @@ void quantize_impl(const TensorWrapper &input, py::handle &quantizer_py,
   // Recipe-specific configuration
   QuantizationConfigWrapper quant_config;
   quant_config.set_noop_tensor(noop_flag.data());
+
   if (detail::IsFloat8CurrentScalingQuantizers(quantizer_py.ptr())) {
+    // my_quantizer here has to be a Float8CurrentScalingQuantizer
     auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
-    NVTE_SCOPED_GIL_RELEASE(
-        { nvte_compute_amax(input.data(), output.data(), at::cuda::getCurrentCUDAStream()); });
+    NVTE_SCOPED_GIL_RELEASE({
+#ifdef __HIP_PLATFORM_AMD__
+      nvte_compute_amax_with_workspace(input.data(), output.data(),
+                                       allocate_amax_workspace(input).data(),
+                                       at::cuda::getCurrentCUDAStream());
+#else
+      nvte_compute_amax(input.data(), output.data(), at::cuda::getCurrentCUDAStream());
+#endif
+    });
     // check if we need to do amax reudction (depending on model parallel configs)
     if (my_quantizer_cs->with_amax_reduction) {
       c10::intrusive_ptr<dist_group_type> process_group_ptr = my_quantizer_cs->amax_reduction_group;
