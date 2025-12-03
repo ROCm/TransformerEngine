@@ -66,8 +66,17 @@ def setup_common_extension() -> CMakeExtension:
             cmake_flags.append(f"-DAITER_MHA_PATH={ck_path}")
         if int(os.getenv("NVTE_FUSED_ATTN_AOTRITON", "1"))==0 or int(os.getenv("NVTE_FUSED_ATTN", "1"))==0:
             cmake_flags.append("-DUSE_FUSED_ATTN_AOTRITON=OFF")
+        else:
+            os.environ["AOTRITON_CI_SUPPLIED_SHA1"] = "98371989e8a23267e284c94e95156a139e4b33c4"
         if int(os.getenv("NVTE_FUSED_ATTN_CK", "1"))==0 or int(os.getenv("NVTE_FUSED_ATTN", "1"))==0:
             cmake_flags.append("-DUSE_FUSED_ATTN_CK=OFF")
+        if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))) and os.getenv("NVTE_ENABLE_ROCSHMEM") is None:
+            os.environ["NVTE_ENABLE_ROCSHMEM"] = '1'
+            os.environ["NVTE_ENABLE_NVSHMEM"] = '0'
+            print("Turning NVTE_ENABLE_ROCSHMEM on, disabling NVTE_ENABLE_NVSHMEM")
+        if bool(int(os.getenv("NVTE_ENABLE_ROCSHMEM", "0"))):
+            cmake_flags.append("-DNVTE_ENABLE_ROCSHMEM=ON")
+
     else:
         cmake_flags.append("-DUSE_ROCM=OFF")
         cmake_flags = ["-DCMAKE_CUDA_ARCHITECTURES={}".format(archs)]

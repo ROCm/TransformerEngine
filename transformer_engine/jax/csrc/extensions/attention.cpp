@@ -57,9 +57,9 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
 #ifndef USE_ROCM
   if (backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
 #endif
-// ROCm fused attn has two backends: aotriton and ck
-// They both have the same shape and stride for softmax and rng aux tensors
-// CK now support bias features
+    // ROCm fused attn has two backends: aotriton and ck
+    // They both have the same shape and stride for softmax and rng aux tensors
+    // CK now support bias features
     tensor_pack->size = 2;
     NVTETensor &rng_state_aux = tensor_pack->tensors[1];
     NVTEBasicTensor rng_state_aux_data;

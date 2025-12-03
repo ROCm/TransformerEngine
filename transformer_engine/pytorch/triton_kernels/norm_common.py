@@ -58,8 +58,7 @@ def use_blocked(x):
 def make_ln_out(ln_out, quantizer=None, input_shape=None, out_dtype=torch.float32):
 
     if ln_out is None:
-        # TODO(micky774): Remove MXFP8Quantizer check when kernels
-        # properly support MXFP8/float8_current_scaling as a fused operation
+        # TODO(micky774): Remove corresponding FP8Quantizer check when kernels properly support MXFP8/float8_current_scaling as a fused operation
         if quantizer is None or isinstance(quantizer, MXFP8Quantizer) or isinstance(quantizer, Float8CurrentScalingQuantizer):
             return torch.empty(input_shape, dtype=out_dtype, device='cuda')
         return quantizer.make_empty(input_shape, dtype=out_dtype)

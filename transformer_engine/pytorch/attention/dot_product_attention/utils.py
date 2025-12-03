@@ -279,6 +279,8 @@ def get_attention_backend(
     ----------
     use_flash_attention: bool
         Whether the `FlashAttention` backend has been selected.
+    flash_attention_backend: PkgVersion
+        If `use_flash_attention = True`, the version of the selected `FlashAttention` backend.
     use_fused_attention: bool
         Whether the `FusedAttention` backend has been selected.
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend

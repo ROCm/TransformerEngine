@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -80,6 +82,8 @@ class Fp8Padding(torch.nn.Module):
                  the alignment size for the input tensor. If not provided, the alignment size will
                  be determined by the FP8 recipe (32 for MXFP8 and 16 for others) in the first
                  forward pass.
+
+    TODO: invesitgate the alignment requirement for non-mxfp8 cases on ROCm
     """
 
     def __init__(

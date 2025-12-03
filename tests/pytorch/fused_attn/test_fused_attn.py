@@ -220,8 +220,8 @@ def _get_attention_backends(
         )
         (
             use_flash_attention,
-            use_fused_attention,
             flash_attention_backend,
+            use_fused_attention,
             fused_attention_backend,
             use_unfused_attention,
             available_backends,
@@ -358,7 +358,7 @@ def test_dot_product_attention(
         config.window_size = [2, 2]
     config.window_size = check_set_window_size(config.attn_mask_type, config.window_size)
 
-    is_training = True
+    is_training = config.head_dim_qk <= 192 and config.head_dim_v <= 128
     available_backends, _, fused_attn_backends = _get_attention_backends(
         config,
         qkv_dtype=dtype,
@@ -390,6 +390,7 @@ def test_dot_product_attention(
             and config.attn_mask_type in ["causal", "padding_causal"]
         )
         and (config.window_size[0] == -1 or FlashAttentionUtils.v2_3_plus)
+        and not is_mla
     ):
         flash_attn_supported = True
 
@@ -397,7 +398,6 @@ def test_dot_product_attention(
     if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
         pytest.skip("Less than two backends to compare.")
 
-    is_training = config.head_dim_qk <= 192 and config.head_dim_v <= 128
     # UnfusedDotProductAttention backend
     if unfused_attn_supported:
         unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(

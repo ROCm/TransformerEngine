@@ -401,7 +401,9 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
   } else if(fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_AOTriton){
     fused_attn_aotriton_fwd_qkvpacked(
       b, h, max_seqlen, d,
-      is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
+      is_training, attn_scale, dropout,
+      window_size_left, window_size_right,
+      qkv_layout, bias_type, attn_mask_type,
       input_QKV, 
       output_O, Aux_CTX_Tensors,
       input_cu_seqlens,
@@ -576,6 +578,7 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
     fused_attn_aotriton_fwd_kvpacked(
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
       is_training, attn_scale, dropout, 
+      window_size_left, window_size_right,
       qkv_layout, bias_type, attn_mask_type,
       input_Q, input_KV, 
       output_O, Aux_CTX_Tensors,
@@ -759,6 +762,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
     fused_attn_aotriton_fwd(
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk,
       is_training, attn_scale, dropout, 
+      window_size_left, window_size_right,
       qkv_layout, bias_type, attn_mask_type,
       input_Q, input_K, input_V, 
       output_O, Aux_CTX_Tensors,

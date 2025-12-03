@@ -18,20 +18,10 @@ install_prerequisites() {
         script_error "Failed to install test prerequisites"
         exit $rc
     fi
-    NVTE_USE_ROCM=1 bash $TEST_DIR/custom_ort_ops/build.sh
 }
 
 run() {
-    check_level $1 || return
-    shift
-    _test_variant_tag=`get_test_variant_tag $_fus_attn $_test_label`
-    _test_name_tag=`get_test_name_tag $1 $_test_variant_tag`
-    check_test_filter $_test_name_tag || return
-    echo "Run [$_test_variant_tag] $@"
-    #: ${_WORKERS_COUNT:=1}
-    #_args=-n$_WORKERS_COUNT --max-worker-restart=$_WORKERS_COUNT
-    pytest -v -rfEs `get_pytest_junitxml $_test_name_tag` "$TEST_DIR/$@" || test_run_error "[$_test_variant_tag] $1"
-    echo "Done [$_test_variant_tag] $1"
+    pytest_run $_fus_attn "" "$@"
 }
 
 run_default_fa() {
@@ -44,10 +34,7 @@ run_default_fa() {
 
 run_default_fa_lbl() {
     if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
-        _test_label="$1"
-        shift
-        run "$@"
-        _test_label=""
+        pytest_run $_fus_attn "$@"
     fi
 }
 
@@ -66,8 +53,8 @@ run_test_config(){
     run_default_fa 1 test_fused_rope.py
     run_default_fa 1 test_fused_router.py
     run_default_fa 1 test_fusible_ops.py
-    run_default_fa 3 test_gemm_autotune.py
-    run_default_fa 3 test_gemm_sm_count.py
+    run_default_fa 1 test_gemm_autotune.py
+    run_default_fa 1 test_gemm_sm_count.py
     run 1 test_gqa.py
     run 1 test_jit.py
     run_default_fa 1 test_multi_tensor.py
@@ -83,24 +70,22 @@ run_test_config(){
     run_default_fa 1 triton_kernels/test_norms.py
     NVTE_TEST_TRITON_AUTOTUNE=1 run_default_fa_lbl "autotune" 3 triton_kernels/test_norms.py
     run_default_fa 1 test_parallel_cross_entropy.py
-    NVTE_USE_DEQUANTIZE_TRITON=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa_lbl "triton" 1 test_numerics.py
+    NVTE_USE_DEQUANTIZE_TRITON=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa_lbl "triton" 3 test_numerics.py
     NVTE_USE_RMSNORM_TRITON=1 run_default_fa_lbl "triton" 1 test_fusible_ops.py
     NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "triton" 1 test_float8_current_scaling_exact.py
 }
 
 run_test_config_mgpu(){
-    #_WORKERS_COUNT=1
-    #test $TEST_WORKERS = 0 && _WORKERS_COUNT=0
-    if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
-        echo ==== Run mGPU with Fused attention backend: $_fus_attn ====
-        run 3 test_fused_optimizer.py
-        run 3 test_sanity_import.py
-        run 3 distributed/test_fusible_ops.py
-        run 3 distributed/test_numerics.py
-        run 3 distributed/test_torch_fsdp2.py
-        run 3 distributed/test_torch_fsdp2_fp8.py
-        run 3 fused_attn/test_fused_attn_with_cp.py
-    fi
+    echo ==== Run mGPU with Fused attention backend: $_fus_attn ====
+    configure_omp_threads 8
+    run_default_fa 1 test_fused_optimizer.py
+    run_default_fa 3 test_sanity_import.py
+    run_default_fa 2 distributed/test_fusible_ops.py
+    run_default_fa 2 distributed/test_numerics.py
+    run_default_fa 1 distributed/test_torch_fsdp2.py
+    run_default_fa 2 distributed/test_torch_fsdp2_fp8.py
+    run_default_fa_lbl "flash" 3 fused_attn/test_fused_attn_with_cp.py -k "with_flash"
+    run_default_fa_lbl "fused" 2 fused_attn/test_fused_attn_with_cp.py -k "with_fused"
 }
 
 run_benchmark() {
@@ -141,13 +126,17 @@ for _fus_attn in auto flash ck aotriton unfused; do
     #Flash - Fused attention is disabled
     #CK/AOTriton - no Flash attention and only corresponding Fused attention backend is enabled
     #Unfused - Flash and Fused attentions are disabled
-    #Level 1 - run in auto and unfused modes
-    #Level 3 - run in all but auto and unfused modes
+    #Level 1 - run in auto mode only
+    #Level 2 - run in ck and aotriton modes
+    #Level 3 - run in all but auto modes
     if [ $TEST_LEVEL -ge 3 ]; then
-        test $_fus_attn = auto -o $_fus_attn = unfused && continue
+        test $_fus_attn = auto && continue
+        _DEFAULT_FUSED_ATTN="ck"
+    elif [ $TEST_LEVEL -eq 2 ]; then
+        test $_fus_attn != aotriton -a $_fus_attn != ck && continue
         _DEFAULT_FUSED_ATTN="ck"
     else
-        test $_fus_attn != auto -a $_fus_attn != unfused && continue
+        test $_fus_attn != auto && continue
         _DEFAULT_FUSED_ATTN="auto"
     fi
 

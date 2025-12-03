@@ -43,7 +43,11 @@ if [ "$ROCM_BUILD" = "1" ]; then
 fi
 
 # Install deps
-${PYBINDIR}pip install cmake pybind11[global] ninja
+if [ "$ROCM_BUILD" = "1" ]; then
+  ${PYBINDIR}pip install pybind11[global] ninja
+else
+  ${PYBINDIR}pip install cmake pybind11[global] ninja
+fi
 
 if $BUILD_METAPACKAGE ; then
         cd /TransformerEngine
@@ -60,7 +64,7 @@ if $BUILD_COMMON ; then
         if [ "$ROCM_BUILD" = "1" ]; then
                 TE_CUDA_VERS="rocm"
                 #dataclasses, psutil are needed for AITER
-                ${PYBINDIR}pip install ninja dataclasses psutil
+                ${PYBINDIR}pip install dataclasses psutil
                 #hipify expects python in PATH, also ninja may be installed to python bindir
                 test -n "$PYBINDIR" && PATH="$PYBINDIR:$PATH" || true
         else
