@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -73,6 +75,12 @@ void nvte_delayed_scaling_recipe_amax_and_scale_update_after_reduction(
     std::vector<NVTETensor> scales, const char* amax_compute_algo, NVTEDType fp8_dtype,
     float margin, cudaStream_t stream);
 
+#ifdef __HIP_PLATFORM_AMD__
+
+constexpr int amax_kernel_threads = 512;
+
+#endif
+
 /*! \brief Compute an FP8 tensor's amax.
  *
  *  The amax (maximum absolute value) of the input tensor is computed
@@ -83,6 +91,24 @@ void nvte_delayed_scaling_recipe_amax_and_scale_update_after_reduction(
  *  \param[in]     stream           CUDA stream used for the operation.
  */
 void nvte_compute_amax(const NVTETensor input, NVTETensor output, cudaStream_t stream);
+
+#ifdef __HIP_PLATFORM_AMD__
+
+size_t nvte_amax_workspace_num_blocks(size_t N);
+
+/*! \brief Compute an FP8 tensor's amax.
+ *
+ *  The amax (maximum absolute value) of the input tensor is computed
+ *  and written to the amax buffer of the output tensor.
+ *
+ *  \param[in]     input            Input tensor. Must be unquantized.
+ *  \param[in,out] output           Output tensor. Must be an FP8 tensor with per-tensor scaling.
+ *  \param[out]    workspace        Output tensor. Must be FP32.
+ *  \param[in]     stream           CUDA stream used for the operation.
+ */
+void nvte_compute_amax_with_workspace(const NVTETensor input, NVTETensor output, NVTETensor workspace, cudaStream_t stream);
+
+#endif
 
 /*! \brief Update an FP8 tensor's scale based on its amax.
  *
