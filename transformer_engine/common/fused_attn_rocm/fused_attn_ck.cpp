@@ -883,17 +883,22 @@ void fused_attn_ck_bwd_impl(
       //ck requires a buffer dbias_expanded of size BHSS if bias is not BHSS
       (*workspace_size) += b*h*s_q*s_kv*nvte_dtype_size(dtype);
     }
-    // remove padding for the softmax_lse
-    (*workspace_size)+= h*max_tokens_q*sizeof(float);
     if(is_SBHD && is_padding){
+      // remove padding for the softmax_lse
+      (*workspace_size)+= h*max_tokens_q*sizeof(float);
       // allocate the q, k, v, o, do, dq, dk, dv,
       (*workspace_size)+= 2*(q_storage_bytes + k_storage_bytes + v_storage_bytes + o_storage_bytes);
       if (nvte_log_ck_config) {
         std::cout<<std::endl<<"attn_bwd(ck) need padding/unpadding workaround"<<std::endl;
       }
     }else if(bshd_to_thd){
+      // remove padding for the softmax_lse
+      (*workspace_size)+= h*max_tokens_q*sizeof(float);
       // cu_seqlen_padded buffers
       (*workspace_size)+= 2*(b+1)*sizeof(int32_t);
+    }else if(is_ragged){
+      // remove padding for the softmax_lse
+      (*workspace_size)+= h*max_tokens_q*sizeof(float);
     }
     if (nvte_log_ck_config) {
       std::cout<<std::endl<<"attn_bwd(ck) requested workspace of size "<<*workspace_size<<std::endl;
