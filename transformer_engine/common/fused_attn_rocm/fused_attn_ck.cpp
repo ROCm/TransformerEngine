@@ -579,23 +579,18 @@ void fused_attn_ck_fwd_impl(
 
   // Exit to request upper level API to allocate memory if needed
   if(workspace==nullptr){
+    // Softmax LSE buffer
+    (*workspace_size) = max_tokens_q*h*sizeof(float);
     // ck requires an alibi slope array even if in standard (vanilla) mode
     if(bias_type == NVTE_Bias_Type::NVTE_ALIBI){
       (*workspace_size)+= h*sizeof(float);
     }
     if(is_SBHD && is_padding){
-      // Softmax LSE buffer
-      (*workspace_size)+= max_tokens_q*h*sizeof(float);
       // request q, k, v, o buffer without padding
       (*workspace_size)+= q_storage_bytes + k_storage_bytes + v_storage_bytes + o_storage_bytes;
     }else if(bshd_to_thd){
-      // Softmax LSE buffer
-      (*workspace_size)+= max_tokens_q*h*sizeof(float);
       // cu_seqlen_padded buffers
       (*workspace_size)+= 2*(b+1)*sizeof(int32_t);
-    }else if(is_ragged){
-      // Softmax LSE buffer
-      (*workspace_size)+= max_tokens_q*h*sizeof(float);
     }
     if (nvte_log_ck_config) {
       std::cout<<std::endl<<"attn_fwd(ck) requested workspace of size "<<*workspace_size<<std::endl;
@@ -869,6 +864,8 @@ void fused_attn_ck_bwd_impl(
   if(workspace==nullptr){
     // CK requires dq_acc ptr, dq_acc depends on is deterministic
     *workspace_size = nsplits*h*max_tokens_q*d_qk*sizeof(float);
+    // Softmax LSE buffer
+    *workspace_size += max_tokens_q*h*sizeof(float);
     if(is_mqa_gqa){
       // allocate dk, dv (or dkv) as if h=hg
       size_t dkv_expanded_size = max_tokens_kv*h*(d_qk+d_v)*nvte_dtype_size(dtype);
@@ -884,21 +881,14 @@ void fused_attn_ck_bwd_impl(
     // remove padding for the softmax_lse
     (*workspace_size)+= h*max_tokens_q*sizeof(float);
     if(is_SBHD && is_padding){
-      // Softmax LSE buffer
-      *workspace_size += max_tokens_q*h*sizeof(float);
       // allocate the q, k, v, o, do, dq, dk, dv,
       (*workspace_size)+= 2*(q_storage_bytes + k_storage_bytes + v_storage_bytes + o_storage_bytes);
       if (nvte_log_ck_config) {
         std::cout<<std::endl<<"attn_bwd(ck) need padding/unpadding workaround"<<std::endl;
       }
     }else if(bshd_to_thd){
-      // Softmax LSE buffer
-      *workspace_size += max_tokens_q*h*sizeof(float);
       // cu_seqlen_padded buffers
       (*workspace_size)+= 2*(b+1)*sizeof(int32_t);
-    }else if(is_ragged){
-      // Softmax LSE buffer
-      *workspace_size += max_tokens_q*h*sizeof(float);
     }
     if (nvte_log_ck_config) {
       std::cout<<std::endl<<"attn_bwd(ck) requested workspace of size "<<*workspace_size<<std::endl;
