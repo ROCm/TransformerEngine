@@ -367,8 +367,8 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # Deallocate GEMM input tensor if no longer needed
         if not weight.requires_grad and not return_layernorm_output:
-            ln_out = ln_out_total = None
             clear_tensor_data(ln_out, ln_out_total)
+            ln_out = ln_out_total = None
 
         # ------------------------------------------------------
         # Prepare output tensor
