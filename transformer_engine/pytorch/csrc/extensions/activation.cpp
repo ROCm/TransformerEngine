@@ -39,7 +39,7 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
         my_quantizer_none->create_tensor(input_shape, GetTransformerEngineDType(fake_tensor_type));
 
 #ifdef __HIP_PLATFORM_AMD__
-    auto workspace = allocate_amax_workspace(te_input);
+    auto workspace = allocate_amax_workspace(te_output_act);
 #endif
     NVTE_SCOPED_GIL_RELEASE({
       act_func(te_input.data(), te_output_act.data(), at::cuda::getCurrentCUDAStream());
