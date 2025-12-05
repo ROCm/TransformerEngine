@@ -28,7 +28,52 @@ Feature Support Status
 Installation
 ============
 
+Install from manylinux wheels
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Starting from ROCm 7.0, we provide manylinux wheels for Transformer Engine releases on `https://repo.radeon.com/rocm/manylinux`. For example, the wheels for ROCm 7.1.1 are at `https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1/`. From the page, you can find four files related to Transformer Engine:
+
+* transformer_engine_rocm-*-py3-none-manylinux_2_28_x86_64.whl - This is the wheel file for installing the common library.
+* transformer_engine-*-py3-none-any.whl - This is the wheel file for installing the (Pytorch and JAX) extensions.
+* transformer_engine_jax-*.tar.gz - This is the source tar ball for the JAX extension.
+* transformer_engine_torch-*.tar.gz - This is the source tar ball for the Pytorch extension.
+
+Below are the example commands to download and install the wheels:
+
+.. code-block:: bash
+
+  wget https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1/transformer_engine_rocm-2.2.0-py3-none-manylinux_2_28_x86_64.whl
+  wget https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1/transformer_engine-2.2.0-py3-none-any.whl
+  wget https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1/transformer_engine_jax-2.2.0.tar.gz
+  wget https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1/transformer_engine_torch-2.2.0.tar.gz
+
+  pip install ./transformer_engine* --no-build-isolation
+
+Install TE from source
+^^^^^^^^^^^^^^^^^^
+
 Execute the following commands to install ROCm Transformer Engine from source on AMDGPUs:
+
+.. code-block:: bash
+
+  # Clone TE repo and submodules
+  git clone --recursive https://github.com/ROCm/TransformerEngine.git
+
+  cd TransformerEngine
+  export NVTE_FRAMEWORK=pytorch,jax #optionally set framework, currently only support pytorch and jax; if not set will try to detect installed frameworks
+  export NVTE_ROCM_ARCH=gfx942 # CK fused attn only support MI200 and MI300 and fp8 features are only supported on MI300
+
+  # Build Platform Selection (optional)
+  # Note: Useful when both ROCm and CUDA platforms are present in the Docker
+  export NVTE_USE_ROCM=1  #Use 1 for ROCm, or set to 0 to use CUDA; If not set will try to detect installed platform, prioritizing ROCm
+  # If you are building for gfx942 variants, also specify the number of Compute Units
+  export CU_NUM=304
+
+  # Note: If the following fails with messages about missing pip packages that are installed, add "--no-build-isolation" to the command below
+  pip install .
+
+It is also possible to build wheels for later installation with "pip wheel ." although those wheels will not be portable to systems with
+different libraries installed. This build may also require "--no-build-isolation" and if the build still fails with this flag try installing setuptools<80.0.0
 
 Known Issue with ROCm 6.4 PyTorch Release
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -56,30 +101,6 @@ Re-install PyTorch
   # Build and install
   ./tools/amd_build/build_amd.py
   BUILD_TEST=0 python3 setup.py install
-
-Install TE
-^^^^^^^^^^^^^^^^^^
-
-.. code-block:: bash
-
-  # Clone TE repo and submodules
-  git clone --recursive https://github.com/ROCm/TransformerEngine.git
-
-  cd TransformerEngine
-  export NVTE_FRAMEWORK=pytorch,jax #optionally set framework, currently only support pytorch and jax; if not set will try to detect installed frameworks
-  export NVTE_ROCM_ARCH=gfx942 # CK fused attn only support MI200 and MI300 and fp8 features are only supported on MI300
-
-  # Build Platform Selection (optional)
-  # Note: Useful when both ROCm and CUDA platforms are present in the Docker
-  export NVTE_USE_ROCM=1  #Use 1 for ROCm, or set to 0 to use CUDA; If not set will try to detect installed platform, prioritizing ROCm
-  # If you are building for gfx942 variants, also specify the number of Compute Units
-  export CU_NUM=304
-
-  # Note: If the following fails with messages about missing pip packages that are installed, add "--no-build-isolation" to the command below
-  pip install .
-
-It is also possible to build wheels for later installation with "pip wheel ." although those wheels will not be portable to systems with
-different libraries installed. This build may also require "--no-build-isolation" and if the build still fails with this flag try installing setuptools<80.0.0
 
 Test
 ====
