@@ -64,12 +64,17 @@ def setup_common_extension() -> CMakeExtension:
         if os.getenv("NVTE_CK_FUSED_ATTN_PATH"):
             ck_path = Path(os.getenv("NVTE_CK_FUSED_ATTN_PATH"))
             cmake_flags.append(f"-DAITER_MHA_PATH={ck_path}")
+
         if int(os.getenv("NVTE_FUSED_ATTN_AOTRITON", "1"))==0 or int(os.getenv("NVTE_FUSED_ATTN", "1"))==0:
             cmake_flags.append("-DUSE_FUSED_ATTN_AOTRITON=OFF")
-        else:
-            os.environ["AOTRITON_CI_SUPPLIED_SHA1"] = "98371989e8a23267e284c94e95156a139e4b33c4"
+        elif os.getenv("NVTE_FUSED_ATTN_AOTRITON") or os.getenv("NVTE_FUSED_ATTN"):
+            cmake_flags.append("-DUSE_FUSED_ATTN_AOTRITON=ON")
+
         if int(os.getenv("NVTE_FUSED_ATTN_CK", "1"))==0 or int(os.getenv("NVTE_FUSED_ATTN", "1"))==0:
             cmake_flags.append("-DUSE_FUSED_ATTN_CK=OFF")
+        elif os.getenv("NVTE_FUSED_ATTN_CK") or os.getenv("NVTE_FUSED_ATTN"):
+            cmake_flags.append("-DUSE_FUSED_ATTN_CK=ON")
+
         if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))) and os.getenv("NVTE_ENABLE_ROCSHMEM") is None:
             os.environ["NVTE_ENABLE_ROCSHMEM"] = '1'
             os.environ["NVTE_ENABLE_NVSHMEM"] = '0'

@@ -37,19 +37,6 @@ inline aotriton::TensorView<0> mk_aoscalartensor(const uint64_t* ptr)
 namespace transformer_engine {
 namespace fused_attn_rocm {
 
-// TODO: Support SWA
-std::tuple<int32_t, int32_t> get_window_sizes(
-  int32_t window_size_left,
-  int32_t window_size_right,
-  bool is_causal
-){
-  using aotriton::v3::flash::WindowValue;
-  if(is_causal){
-    return {WindowValue::TopLeftAligned, WindowValue::TopLeftAligned};
-  }
-  return {-1, -1};
-}
-
 // check the fused attn config to see whether it's aotriton backend supported
 bool is_aotriton_backend_supported(
   NVTEDType q_dtype,
@@ -130,6 +117,19 @@ bool is_aotriton_backend_supported(
 
 
 #ifdef USE_FUSED_ATTN_AOTRITON
+// TODO: Support SWA
+static std::tuple<int32_t, int32_t> get_window_sizes(
+  int32_t window_size_left,
+  int32_t window_size_right,
+  bool is_causal
+){
+  using aotriton::v3::flash::WindowValue;
+  if(is_causal){
+    return {WindowValue::TopLeftAligned, WindowValue::TopLeftAligned};
+  }
+  return {-1, -1};
+}
+
 aotriton::DType nvte_to_aotriton_dtype(DType t_dtype){
 #define CAST_TYPE(aname, dtname) if (t_dtype == DType::aname) return aotriton::DType::dtname
   CAST_TYPE(kByte, kUInt8);
