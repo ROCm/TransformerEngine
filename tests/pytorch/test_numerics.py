@@ -1348,11 +1348,20 @@ def test_fp8_linear_without_transpose_cache_accuracy(dtype, bs, model, fp8_model
             keep_fp8_weight_transpose_cache=True # defaults to True
         ).eval()
 
-    outputs = _test_granular_accuracy_with_fp8(layer, bs, dtype, config)
-    ref_outputs = _test_granular_accuracy_with_fp8(ref_layer, bs, dtype, config)
+    # The keep_fp8_transpose_cache flag will be evaluated over two iterations. 
+    # Given that the transpose operation's cache is invalidated during the backward pass,
+    # the objective of this test is to observe the subsequent forward pass behavior.
+    num_iterations = 2
+    all_outputs = []
+    all_ref_outputs = []
+    for _ in range(num_iterations):
+        outputs = _test_granular_accuracy_with_fp8(layer, bs, dtype, config)
+        ref_outputs = _test_granular_accuracy_with_fp8(ref_layer, bs, dtype, config)
+        all_outputs.append(outputs)
+        all_ref_outputs.append(ref_outputs)
 
     # Check output.
-    for te_output_no_cache, te_output_cache in zip(outputs, ref_outputs):
+    for te_output_no_cache, te_output_cache in zip(all_outputs, all_ref_outputs):
         assert_allclose(te_output_no_cache, te_output_cache, atol=0, rtol=0)
 
 @pytest.mark.parametrize("dtype", param_types)

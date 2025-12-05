@@ -81,8 +81,6 @@ if IS_HIP_EXTENSION:
     from ..triton_kernels.layernorm import te_layernorm_bwd_triton
     from ..triton_kernels.rmsnorm import te_rmsnorm_bwd_triton
 
-from ..rocm_utils import create_fp8_weight_transpose_cache, clear_fp8_weight_transpose_cache
-
 
 __all__ = ["LayerNormLinear"]
 
@@ -139,6 +137,7 @@ class _LayerNormLinear(torch.autograd.Function):
         symmetric_ar_type: str,
         debug: Optional[bool] = False,
         keep_fp8_weight_transpose_cache: bool = True,
+        use_fsdp2: bool = False,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # pylint: disable=missing-function-docstring
 
@@ -292,7 +291,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
             # Configure quantizer
             if weight_quantizer is not None:
-                weight_quantizer.set_usage(rowwise=True, columnwise=True)
+                weight_quantizer.set_usage(rowwise=True, columnwise=keep_fp8_weight_transpose_cache)
 
             # Get quantized weight
             update_workspace = is_first_microbatch is None or is_first_microbatch
@@ -304,7 +303,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
                 workspace_dtype=activation_dtype,
-                create_transpose_cache=keep_fp8_weight_transpose_cache,
             )
             weightmat.update_usage(rowwise_usage=True)
 
@@ -351,6 +349,8 @@ class _LayerNormLinear(torch.autograd.Function):
         # Forward GEMM
         # Note: y = x * w^T
         # ------------------------------------------------------
+        if IS_HIP_EXTENSION and fp8 and not keep_fp8_weight_transpose_cache:
+            assert weightmat._transpose is None or weightmat._transpose.numel() == 0, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
         nvtx_range_push(f"{nvtx_label}.gemm")
         gemm_out, *_, reduce_scatter_out = general_gemm(
             weightmat,
@@ -420,7 +420,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         ln_out.update_usage(rowwise_usage=False)
 
             # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
-            if inp.requires_grad and keep_fp8_weight_transpose_cache:
+            if inp.requires_grad and keep_fp8_weight_transpose_cache and not use_fsdp2:
                 if isinstance(weightmat, QuantizedTensorBase):
                     weightmat.update_usage(columnwise_usage=True)
 
@@ -500,15 +500,17 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.requires_dgrad = inp_requires_grad
             ctx.normalization = normalization
             ctx.reduce_and_update_bwd_fp8_tensors = False
+            ctx.autocast_fp8_reduction_skipped = False
             if ctx.fp8 and requires_grad(inp, ln_weight, ln_bias, weight, bias):
                 _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
                 if in_fp8_activation_recompute_phase():
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
+                ctx.autocast_fp8_reduction_skipped = FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2
             ctx.wgrad_store = wgrad_store
             ctx.debug = debug
             ctx.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
-
+            ctx.use_fsdp2 = use_fsdp2
         # ------------------------------------------------------
         # Cached state for backward pass is ready...
         # ------------------------------------------------------
@@ -702,8 +704,6 @@ class _LayerNormLinear(torch.autograd.Function):
             if ctx.grad_input_quantizer is not None:
                 ctx.grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
 
-            if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                create_fp8_weight_transpose_cache(weight)
 
             # Output buffers for Userbuffers reduce-scatter
             gemm_out = None
@@ -736,7 +736,7 @@ class _LayerNormLinear(torch.autograd.Function):
             nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
 
             if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                clear_fp8_weight_transpose_cache(weight)
+                weight.update_usage(columnwise_usage=False)
 
             # Prepare grad input tensor
             # Note: Perform tensor-parallel communication
@@ -979,6 +979,8 @@ class _LayerNormLinear(torch.autograd.Function):
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             nvtx_range_push(f"{nvtx_label}.reduce_and_update_fp8_tensors")
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
+            if ctx.autocast_fp8_reduction_skipped:
+                FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=True)
             nvtx_range_pop(f"{nvtx_label}.reduce_and_update_fp8_tensors")
 
         # Scatter fp8 weight buffers
@@ -1030,6 +1032,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,  # skip_fp8_weight_update
             None,  # symmetric_ar_type
             None,  # keep_fp8_weight_transpose_cache
+            None, # use_fsdp2
         )
 
 
@@ -1175,6 +1178,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         symmetric_ar_type: Optional[str] = None,
         name: str = None,
         keep_fp8_weight_transpose_cache: bool = True,
+        use_fsdp2: bool = False
     ) -> None:
         super().__init__()
 
@@ -1196,7 +1200,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.name = name
         if TEDebugState.debug_enabled:
             self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
-        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
+        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache if IS_HIP_EXTENSION else True   
+        self.use_fsdp2 = use_fsdp2 if IS_HIP_EXTENSION else False
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1610,7 +1615,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 skip_fp8_weight_update,
                 self.symmetric_ar_type,
                 debug,
-                self.keep_fp8_weight_transpose_cache
+                self.keep_fp8_weight_transpose_cache,
+                self.use_fsdp2
             )
             out = fwd_fn(*args)
 
@@ -1639,6 +1645,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
         input_quantizer.internal = True
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         weight_quantizer.internal = True
+        if IS_HIP_EXTENSION:
+            weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
         if fp8_output:
             output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
         if torch.is_grad_enabled():
