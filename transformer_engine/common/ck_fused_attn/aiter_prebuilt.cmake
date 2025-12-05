@@ -87,7 +87,7 @@ function(create_upload_files)
   if (NOT EXISTS  "${EXTRACT_DIR}/libmha_fwd.so")
     message(FATAL_ERROR "[AITER-PREBUILT] Missing libmha_fwd.so")
   endif()
-  if (NOT EXISTS  "${EXTRACT_DIR}/libmha_fwd.so")
+  if (NOT EXISTS  "${EXTRACT_DIR}/libmha_bwd.so")
     message(FATAL_ERROR "[AITER-PREBUILT] Missing libmha_bwd.so")
   endif()
 
