@@ -315,7 +315,7 @@ The first stage computes a per-block amax, and the second stage performs a small
 reduction over these block-wise maxima. This implementation reduces contention from
 atomic operations and provides higher performance in many cases.
 
-If needed (e.g., for debugging or compatibility), you can restore the
+If needed (e.g., for debugging or performance comparisons), you can restore the
 legacy single-stage atomic kernel by setting:
 
     NVTE_USE_ATOMIC_AMAX=1
