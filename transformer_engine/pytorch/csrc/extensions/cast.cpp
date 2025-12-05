@@ -54,10 +54,15 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
   if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
     // my_quantizer here has to be a Float8CurrentScalingQuantizer
     auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
+#ifdef __HIP_PLATFORM_AMD__
+    at::Tensor ws = allocate_amax_workspace(te_input);
+    TensorWrapper tw = makeTransformerEngineTensor(ws);
+#endif
+
     NVTE_SCOPED_GIL_RELEASE({
 #ifdef __HIP_PLATFORM_AMD__
       nvte_compute_amax_with_workspace(te_input.data(), te_output.data(),
-                                       allocate_amax_workspace(te_input).data(),
+                                       tw.data(),
                                        at::cuda::getCurrentCUDAStream());
 #else
       nvte_compute_amax(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());

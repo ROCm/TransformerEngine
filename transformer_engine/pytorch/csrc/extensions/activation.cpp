@@ -39,14 +39,15 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
         my_quantizer_none->create_tensor(input_shape, GetTransformerEngineDType(fake_tensor_type));
 
 #ifdef __HIP_PLATFORM_AMD__
-    auto workspace = allocate_amax_workspace(te_output_act);
+    at::Tensor ws = allocate_amax_workspace(te_output_act);
+    TensorWrapper tw = makeTransformerEngineTensor(ws);
 #endif
     NVTE_SCOPED_GIL_RELEASE({
       act_func(te_input.data(), te_output_act.data(), at::cuda::getCurrentCUDAStream());
       // use te_output_act as input to the compute amax and find the amax of activated tensor
 #ifdef __HIP_PLATFORM_AMD__
       nvte_compute_amax_with_workspace(te_output_act.data(), te_output.data(),
-                        workspace.data(), at::cuda::getCurrentCUDAStream());
+                        tw.data(), at::cuda::getCurrentCUDAStream());
 #else
       nvte_compute_amax(te_output_act.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
 #endif

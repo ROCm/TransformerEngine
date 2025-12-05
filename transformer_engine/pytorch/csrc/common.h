@@ -375,7 +375,7 @@ std::vector<size_t> convertShape(const NVTEShape& shape);
 int roundup(const int value, const int multiple);
 
 #ifdef __HIP_PLATFORM_AMD__
-TensorWrapper allocate_amax_workspace(const TensorWrapper& input_tensor);
+at::Tensor allocate_amax_workspace(const TensorWrapper& input_tensor);
 #endif
 }  // namespace transformer_engine::pytorch
 
