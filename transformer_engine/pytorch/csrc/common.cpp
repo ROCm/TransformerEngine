@@ -292,18 +292,16 @@ inline bool nvte_use_atomic_amax() {
   return false;
 }
 
-TensorWrapper allocate_amax_workspace(const TensorWrapper& input_tensor) {
+at::Tensor allocate_amax_workspace(const TensorWrapper& input_tensor) {
   if (nvte_use_atomic_amax() || input_tensor.numel() == 0) {
     // User chose atomic path, or empty tensor -> no need for workspace
-    return TensorWrapper{};
+    return at::Tensor();
   }
 
   const auto N = input_tensor.numel();
   size_t workspace_blocks = nvte_amax_workspace_num_blocks(N);
 
-  at::Tensor ws = at::empty(workspace_blocks, at::CUDA(at::kFloat));
-
-  return makeTransformerEngineTensor(ws);
+  return at::empty(workspace_blocks, at::CUDA(at::kFloat));
 }
 
 #endif
