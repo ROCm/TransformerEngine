@@ -16,19 +16,40 @@ def benchmark_grouped_linear():
     num_gemms = 64  # Number of experts (grouped GEMMs)
     dtype = torch.bfloat16
     
-    # Create m_splits that sum to 24576
-    # For simplicity, split evenly across experts
-    # In practice, this would come from the router
-    m_splits = [m // num_gemms] * num_gemms  # Each expert gets 384 tokens
+    # Create uneven m_splits that sum to 24576
+    # Simulate real MoE routing with power law distribution
+    # Some experts get more tokens than others (realistic workload)
+    import random
+    random.seed(42)  # For reproducibility
+    
+    # Generate uneven distribution using power law
+    weights = [1.0 / (i + 1)**0.5 for i in range(num_gemms)]
+    total_weight = sum(weights)
+    m_splits = []
+    for i in range(num_gemms - 1):
+        tokens = int(m * weights[i] / total_weight)
+        m_splits.append(tokens)
+    # Last expert gets remainder to ensure exact sum
+    m_splits.append(m - sum(m_splits))
+    
+    # Shuffle to make it more realistic (not sorted by size)
+    random.shuffle(m_splits)
+    
+    # Verify that m_splits sums to exactly m
+    assert sum(m_splits) == m, f"m_splits sum {sum(m_splits)} != {m}"
     
     print(f"Benchmark Configuration:")
     print(f"  Total tokens: {m}")
     print(f"  Number of experts (num_gemms): {num_gemms}")
-    print(f"  Tokens per expert: {m // num_gemms}")
+    print(f"  Token distribution: UNEVEN (power law)")
+    print(f"    Min tokens per expert: {min(m_splits)}")
+    print(f"    Max tokens per expert: {max(m_splits)}")
+    print(f"    Avg tokens per expert: {sum(m_splits) / len(m_splits):.1f}")
+    print(f"    Sum of m_splits: {sum(m_splits)} (verified == {m})")
     print(f"  Input shape: [{m}, {in_features}]")
     print(f"  Output features per expert: {out_features}")
     print(f"  Output shape: [{m}, {out_features}]")
-    print(f"  m_splits (first 5): {m_splits[:5]}...")
+    print(f"  m_splits (first 10): {m_splits[:10]}...")
     print(f"  dtype: {dtype}")
     print(f"  Device: cuda")
     print()
