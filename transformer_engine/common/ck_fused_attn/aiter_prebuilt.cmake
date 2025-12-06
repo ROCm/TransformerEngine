@@ -20,8 +20,7 @@ string(STRIP "${ROCM_VER_CONTENT}" ROCM_VER_CONTENT)
 string(REGEX MATCH "^[0-9]+\\.[0-9]+" ROCM_VER "${ROCM_VER_CONTENT}")
 
 # AITER commit
-file(REAL_PATH "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/aiter" AITER_DIR)
-get_git_commit(${AITER_DIR} AITER_SHA)
+get_git_commit("${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/aiter" AITER_SHA)
 
 # Cache key & local paths
 set(KEY "rocm-${ROCM_VER}_aiter-${AITER_SHA}")
@@ -87,7 +86,7 @@ function(create_upload_files)
   if (NOT EXISTS  "${EXTRACT_DIR}/libmha_fwd.so")
     message(FATAL_ERROR "[AITER-PREBUILT] Missing libmha_fwd.so")
   endif()
-  if (NOT EXISTS  "${EXTRACT_DIR}/libmha_fwd.so")
+  if (NOT EXISTS  "${EXTRACT_DIR}/libmha_bwd.so")
     message(FATAL_ERROR "[AITER-PREBUILT] Missing libmha_bwd.so")
   endif()
 
