@@ -54,8 +54,7 @@ run_test_config(){
     test $_fus_attn = auto -o $_fus_attn = ck -o $_fus_attn = aotriton && NVTE_FLASH_ATTN=0 run 1 test_cpu_offloading.py
     run_default_fa 1 test_fused_rope.py
     run_default_fa 1 test_fused_router.py
-    #TODO: use atomic amax to skip newly introduced pytest failures in v2.6
-    NVTE_USE_ATOMIC_AMAX=1 run_default_fa 1 test_fusible_ops.py
+    run_default_fa 1 test_fusible_ops.py
     run_default_fa 1 test_gemm_autotune.py
     run_default_fa 1 test_gemm_sm_count.py
     run 1 test_gqa.py
@@ -76,6 +75,7 @@ run_test_config(){
     NVTE_USE_DEQUANTIZE_TRITON=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa_lbl "triton" 3 test_numerics.py
     NVTE_USE_RMSNORM_TRITON=1 run_default_fa_lbl "triton" 1 test_fusible_ops.py
     NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "triton" 1 test_float8_current_scaling_exact.py
+    NVTE_USE_ATOMIC_AMAX=1 run_default_fa 3 test_fusible_ops.py
 }
 
 run_test_config_mgpu(){

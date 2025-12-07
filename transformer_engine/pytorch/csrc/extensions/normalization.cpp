@@ -110,9 +110,9 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     }
   }
   TensorWrapper unquantized_out_cu;
+  py::object unquantized_out;
   if (force_unfused_kernel) {
     NoneQuantizer q{none};
-    py::object unquantized_out;
     std::tie(unquantized_out_cu, unquantized_out) = q.create_tensor(size, out_dtype);
   }
   TensorWrapper &kernel_out_cu = force_unfused_kernel ? unquantized_out_cu : out_cu;
@@ -145,10 +145,15 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     if (IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
       // my_quantizer here has to be a Float8CurrentScalingQuantizer
       auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer *>(my_quantizer.get());
+#ifdef __HIP_PLATFORM_AMD__
+      at::Tensor ws = allocate_amax_workspace(unquantized_out_cu);
+      TensorWrapper tw = makeTransformerEngineTensor(ws);
+#endif
+  
       NVTE_SCOPED_GIL_RELEASE({
 #ifdef __HIP_PLATFORM_AMD__
         nvte_compute_amax_with_workspace(unquantized_out_cu.data(), out_cu.data(),
-                                         allocate_amax_workspace(unquantized_out_cu).data(),
+                                         tw.data(),
                           at::cuda::getCurrentCUDAStream());
 #else
         nvte_compute_amax(unquantized_out_cu.data(), out_cu.data(),
@@ -277,9 +282,9 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     }
   }
   TensorWrapper unquantized_out_cu;
+  py::object unquantized_out;
   if (force_unfused_kernel) {
     NoneQuantizer q{none};
-    py::object unquantized_out;
     std::tie(unquantized_out_cu, unquantized_out) = q.create_tensor(size, out_dtype);
   }
   TensorWrapper &kernel_out_cu = force_unfused_kernel ? unquantized_out_cu : out_cu;
@@ -312,10 +317,15 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     if (IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
       // my_quantizer here has to be a Float8CurrentScalingQuantizer
       auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer *>(my_quantizer.get());
+#ifdef __HIP_PLATFORM_AMD__
+      at::Tensor ws = allocate_amax_workspace(unquantized_out_cu);
+      TensorWrapper tw = makeTransformerEngineTensor(ws);
+#endif
+
       NVTE_SCOPED_GIL_RELEASE({
 #ifdef __HIP_PLATFORM_AMD__
         nvte_compute_amax_with_workspace(unquantized_out_cu.data(), out_cu.data(),
-                                         allocate_amax_workspace(unquantized_out_cu).data(),
+                                         tw.data(),
                           at::cuda::getCurrentCUDAStream());
 #else
         nvte_compute_amax(unquantized_out_cu.data(), out_cu.data(),

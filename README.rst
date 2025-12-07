@@ -72,11 +72,8 @@ Install TE
   # Build Platform Selection (optional)
   # Note: Useful when both ROCm and CUDA platforms are present in the Docker
   export NVTE_USE_ROCM=1  #Use 1 for ROCm, or set to 0 to use CUDA; If not set will try to detect installed platform, prioritizing ROCm
-  # If you are building for gfx942 variants, also specify the number of Compute Units
-  export CU_NUM=304
 
-  # Note: If the following fails with messages about missing pip packages that are installed, add "--no-build-isolation" to the command below
-  pip install .
+  pip install --no-build-isolation .
 
 It is also possible to build wheels for later installation with "pip wheel ." although those wheels will not be portable to systems with
 different libraries installed. This build may also require "--no-build-isolation" and if the build still fails with this flag try installing setuptools<80.0.0
@@ -306,6 +303,19 @@ To enable MXFP8 support, use NVTE_ROCM_ENABLE_MXFP8 environment variable which c
 * 0 - disable MXFP8 support (default);
 * 1 - enable MXFP8 support in fp8;
 * 2 - make MXFP8 a default fp8 recipe.
+
+Two-stage amax Kernel
+^^^^^^^^^^^^^^^^^^^^^
+
+Transformer Engine uses an optimized two-stage amax kernel by default.
+The first stage computes a per-block amax, and the second stage performs a small
+reduction over these block-wise maxima. This implementation reduces contention from
+atomic operations and provides higher performance in many cases.
+
+If needed (e.g., for debugging or performance comparisons), you can restore the
+legacy single-stage atomic kernel by setting:
+
+    NVTE_USE_ATOMIC_AMAX=1
 
 
 Transformer Engine

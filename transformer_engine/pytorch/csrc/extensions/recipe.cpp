@@ -28,8 +28,10 @@ void compute_amax(const at::Tensor& tensor, at::Tensor& amax) {
       amax.data_ptr<float>());
 
 #ifdef __HIP_PLATFORM_AMD__
+  at::Tensor ws = allocate_amax_workspace(te_input);
+  TensorWrapper tw = makeTransformerEngineTensor(ws);
   nvte_compute_amax_with_workspace(te_input.data(), fake_te_output.data(),
-                                   allocate_amax_workspace(te_input).data(),
+                                   tw.data(),
                                    at::cuda::getCurrentCUDAStream());
 #else
   nvte_compute_amax(te_input.data(), fake_te_output.data(), at::cuda::getCurrentCUDAStream());

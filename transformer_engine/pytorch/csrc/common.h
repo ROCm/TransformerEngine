@@ -388,7 +388,7 @@ int roundup(const int value, const int multiple);
 NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape);
 
 #ifdef __HIP_PLATFORM_AMD__
-TensorWrapper allocate_amax_workspace(const TensorWrapper& input_tensor);
+at::Tensor allocate_amax_workspace(const TensorWrapper& input_tensor);
 #endif
 }  // namespace transformer_engine::pytorch
 

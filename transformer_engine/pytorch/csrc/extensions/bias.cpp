@@ -50,10 +50,15 @@ std::vector<py::object> bgrad_quantize(const at::Tensor& input, py::handle py_qu
   if (detail::IsFloat8CurrentScalingQuantizers(py_quantizer.ptr())) {
     // my_quantizer here has to be a Float8CurrentScalingQuantizer
     auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(quantizer.get());
+#ifdef __HIP_PLATFORM_AMD__
+    at::Tensor ws = allocate_amax_workspace(input_tensor);
+    TensorWrapper tw = makeTransformerEngineTensor(ws);
+#endif
+
     NVTE_SCOPED_GIL_RELEASE({
 #ifdef __HIP_PLATFORM_AMD__
       nvte_compute_amax_with_workspace(input_tensor.data(), out_tensor.data(),
-                                       allocate_amax_workspace(input_tensor).data(),
+                                       tw.data(),
                                        at::cuda::getCurrentCUDAStream());
 #else
       nvte_compute_amax(input_tensor.data(), out_tensor.data(), at::cuda::getCurrentCUDAStream());
