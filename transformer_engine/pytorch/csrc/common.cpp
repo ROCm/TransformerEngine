@@ -308,8 +308,8 @@ inline bool nvte_use_atomic_amax() {
 
 at::Tensor allocate_amax_workspace(const TensorWrapper& input_tensor) {
   if (nvte_use_atomic_amax() || input_tensor.numel() == 0) {
-    // User chose atomic path, or empty tensor -> no need for workspace
-    return at::Tensor();
+    // User chose atomic path, or empty tensor -> return a size-0 empty tensor
+    return at::empty(0, at::CUDA(at::kFloat));
   }
 
   const auto N = input_tensor.numel();
