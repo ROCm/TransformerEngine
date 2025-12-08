@@ -75,7 +75,7 @@ run_test_config_mgpu() {
     # Mitigate distributed tests hang by adding 5min timeout
     _timeout_args="--timeout 300 --timeout-method thread"
     # Workaround for some distributed tests hang/abotrion
-    export XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=true"
+    export XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false"
 
     run 3 test_distributed_fused_attn.py $_timeout_args
     run_default_fa 3 test_distributed_layernorm.py
