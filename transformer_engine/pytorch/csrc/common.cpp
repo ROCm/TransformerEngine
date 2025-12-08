@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -9,6 +11,10 @@
 #include "c10/util/ArrayRef.h"
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
+
+#ifdef __HIP_PLATFORM_AMD__
+#include "common/common.h"
+#endif
 
 namespace transformer_engine::pytorch {
 
@@ -276,5 +282,28 @@ int roundup(const int value, const int multiple) {
   assert(multiple > 0);
   return ((value + multiple - 1) / multiple) * multiple;
 }
+
+#ifdef __HIP_PLATFORM_AMD__
+
+inline bool nvte_use_atomic_amax() {
+  const char *env_p = std::getenv("NVTE_USE_ATOMIC_AMAX");
+  if (env_p && std::string(env_p) == "1")
+    return true;
+  return false;
+}
+
+at::Tensor allocate_amax_workspace(const TensorWrapper& input_tensor) {
+  if (nvte_use_atomic_amax() || input_tensor.numel() == 0) {
+    // User chose atomic path, or empty tensor -> no need for workspace
+    return at::Tensor();
+  }
+
+  const auto N = input_tensor.numel();
+  size_t workspace_blocks = nvte_amax_workspace_num_blocks(N);
+
+  return at::empty(workspace_blocks, at::CUDA(at::kFloat));
+}
+
+#endif
 
 }  // namespace transformer_engine::pytorch
