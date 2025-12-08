@@ -6,8 +6,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include "../extensions.h"
 #include "common.h"
-#include "extensions.h"
 #include "pybind.h"
 
 namespace transformer_engine::pytorch {

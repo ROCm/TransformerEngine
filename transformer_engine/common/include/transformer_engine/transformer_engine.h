@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -22,17 +24,24 @@ extern "C" {
  *  \brief TE datatype.
  */
 enum NVTEDType {
-  kNVTEByte = 0,       /*!< Byte */
-  kNVTEInt16 = 1,      /*!< 16-bit integer */
-  kNVTEInt32 = 2,      /*!< 32-bit integer */
-  kNVTEInt64 = 3,      /*!< 64-bit integer */
-  kNVTEFloat32 = 4,    /*!< 32-bit float */
-  kNVTEFloat16 = 5,    /*!< 16-bit float (E5M10) */
-  kNVTEBFloat16 = 6,   /*!< 16-bit bfloat (E8M7) */
-  kNVTEFloat8E4M3 = 7, /*!< 8-bit float (E4M3) */
-  kNVTEFloat8E5M2 = 8, /*!< 8-bit float (E5M2) */
-  kNVTEFloat8E8M0 = 9, /*!< 8-bit float (E8M0) */
-  kNVTENumTypes        /*!< Number of supported types */
+  kNVTEByte = 0,        /*!< Byte */
+  kNVTEInt16 = 1,       /*!< 16-bit integer */
+  kNVTEInt32 = 2,       /*!< 32-bit integer */
+  kNVTEInt64 = 3,       /*!< 64-bit integer */
+  kNVTEFloat32 = 4,     /*!< 32-bit float */
+  kNVTEFloat16 = 5,     /*!< 16-bit float (E5M10) */
+  kNVTEBFloat16 = 6,    /*!< 16-bit bfloat (E8M7) */
+  kNVTEFloat8E4M3 = 7,  /*!< 8-bit float (E4M3) */
+  kNVTEFloat8E5M2 = 8,  /*!< 8-bit float (E5M2) */
+  kNVTEFloat8E8M0 = 9,  /*!< 8-bit float (E8M0) */
+#ifndef __HIP_PLATFORM_AMD__
+  kNVTEFloat4E2M1 = 10, /*!< 4-bit float (E2M1) */
+  kNVTENumTypes         /*!< Number of supported types */
+#else
+  //switch the order since rocm platform does not support e2m1
+  kNVTENumTypes = 10,   /*!< Number of supported types */
+  kNVTEFloat4E2M1 = 11  /*!< 4-bit float (E2M1) */
+#endif // #ifndef __HIP_PLATFORM_AMD__
 };
 
 /*! \struct NVTEShape
@@ -87,6 +96,10 @@ enum NVTEScalingMode {
    */
   NVTE_BLOCK_SCALING_1D = 2,
   NVTE_BLOCK_SCALING_2D = 3,
+  /*! Single NVFP4 scale per block of 16 contiguous elements in forward pass (FWD),
+    and single MXFP8 scale per block of 32 contiguous elements in backward pass (BWD).
+  */
+  NVTE_FWD_NVFP4_BWD_MXFP8_SCALING = 4,
   NVTE_INVALID_SCALING = 100
 };
 
@@ -177,6 +190,14 @@ size_t nvte_tensor_ndims(const NVTETensor tensor);
  */
 size_t nvte_tensor_size(const NVTETensor tensor, const size_t dim);
 
+/*! \brief Get the byte size for the tensor.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return Byte size of the tensor.
+ */
+size_t nvte_tensor_size_bytes(const NVTETensor tensor);
+
 /*! \brief Get a tensor's total number of elements.
  *
  *  \param[in] tensor Tensor.
@@ -192,6 +213,14 @@ size_t nvte_tensor_numel(const NVTETensor tensor);
  *  \return Byte size of the tensor's data type.
  */
 size_t nvte_tensor_element_size(const NVTETensor tensor);
+
+/*! \brief Get the bit size for the tensor's data type.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return Bit size of the tensor's data type.
+ */
+size_t nvte_tensor_element_size_bits(const NVTETensor tensor);
 
 /*! \brief Get a tensor's data type.
  *
@@ -302,6 +331,13 @@ enum NVTEQuantizationConfigAttribute {
    conditional early even when captured in a static CUDA graph.
   */
   kNVTEQuantizationConfigNoopTensor = 2,
+  /*! Data format for an FP8 block-scaled tensor
+   *
+   *  This is not the right design since the tensor format is a
+   *  property of the tensor, not the quantization. This enum will
+   *  likely be refactored away in the future.
+   */
+  kNVTEQuantizationConfigFloat8BlockScaleTensorFormat = 3,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -383,7 +419,13 @@ enum class DType {
   kFloat8E4M3 = 7,
   kFloat8E5M2 = 8,
   kFloat8E8M0 = 9,
+#ifndef __HIP_PLATFORM_AMD__
+  kFloat4E2M1 = 10,
   kNumTypes
+#else
+  kNumTypes = 10,
+  kFloat4E2M1
+#endif // #ifndef __HIP_PLATFORM_AMD__
 };
 
 /*! \brief Check if TE datatype is FP8
@@ -391,7 +433,21 @@ enum class DType {
  * Return true if TE datatype is FP8
  *  \param[in] DType      TE Datatype of interest
  */
-bool is_fp8_dtype(const DType t);
+inline bool is_fp8_dtype(const DType t) {
+  return t == DType::kFloat8E4M3 || t == DType::kFloat8E5M2;
+}
+
+#ifndef __HIP_PLATFORM_AMD__
+/*! \brief Check if TE datatype is FP4
+ *
+ * Return true if TE datatype is FP4
+ *  \param[in] DType      TE Datatype of interest
+ */
+inline bool is_fp4_dtype(const DType t) { return t == DType::kFloat4E2M1; }
+#else
+//TODO: fp4 types not supported on AMD GPUs
+inline bool is_fp4_dtype(const DType t) { return false; }
+#endif // #ifndef __HIP_PLATFORM_AMD__
 
 /*! \struct TensorWrapper
  *  \brief C++ wrapper for the NVTETensor class.
@@ -620,6 +676,15 @@ class TensorWrapper {
     return nvte_tensor_element_size(tensor_);
   }
 
+  /*! \brief Get the tensor's element size in bits.
+   *
+   *  \return Element size in bits.
+   */
+  size_t element_size_bits() const noexcept {
+    if (tensor_ == nullptr) return 0;
+    return nvte_tensor_element_size_bits(tensor_);
+  }
+
   /*! \brief Get the tensor's allocated size in bytes. This will return 0 for tensors with nullptr
    *         data even if the TensorWrapper has a non-zero shape and valid dtype.
    *
@@ -627,7 +692,7 @@ class TensorWrapper {
    */
   size_t bytes() const noexcept {
     if (tensor_ == nullptr || this->dptr() == nullptr) return 0;
-    return nvte_tensor_numel(tensor_) * nvte_tensor_element_size(tensor_);
+    return nvte_tensor_size_bytes(tensor_);
   }
 
   /*! \brief Get the data type of this TensorWrapper.
@@ -721,6 +786,16 @@ class TensorWrapper {
   NVTETensor tensor_ = nullptr;
 };
 
+/*! \enum Float8BlockScaleTensorFormat
+ *  \brief Data format for an FP8 block-scaled tensor
+ */
+enum class Float8BlockScaleTensorFormat {
+  /*! FP8 data is transposed if needed and scales are swizzled */
+  GEMM_READY = 0,
+  /*! FP8 data is untransposed and scales are not swizzled or padded */
+  COMPACT = 1
+};
+
 /*! \struct QuantizationConfigWrapper
  *  \brief C++ wrapper for NVTEQuantizationConfigWrapper.
  */
@@ -772,6 +847,13 @@ class QuantizationConfigWrapper {
   void set_noop_tensor(NVTETensor noop_tensor) {
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNoopTensor, &noop_tensor,
                                            sizeof(NVTETensor));
+  }
+
+  /*! \brief Set FP8 block-scaled tensor format */
+  void set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat format) {
+    nvte_set_quantization_config_attribute(config_,
+                                           kNVTEQuantizationConfigFloat8BlockScaleTensorFormat,
+                                           &format, sizeof(Float8BlockScaleTensorFormat));
   }
 
  private:

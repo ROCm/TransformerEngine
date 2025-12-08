@@ -373,6 +373,7 @@ class FusedAttnRunner:
                 pytest.skip("Aiter currently supports MLA hd192_hd128 only with mask-based SeqDescFormat.")
 
         self.backend = FusedAttnHelper(
+            self.is_training,
             self.dtype,
             self.dtype,
             self.qkv_layout,
