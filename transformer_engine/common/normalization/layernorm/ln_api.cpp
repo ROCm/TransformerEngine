@@ -69,6 +69,11 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
   bool cudnn_backend = use_cudnn_norm_fwd() || is_mxfp_scaling(z->scaling_mode);
 #endif //__HIP_PLATFORM_AMD__
 
+  if (!is_fp8_dtype(z->data.dtype) && z->amax.dptr != nullptr) {
+    NVTE_CHECK(!cudnn_backend,
+               "cuDNN does not currently support amax output for non quantized output");
+  }
+
   bool gamma_in_weight_dtype = false;
 #ifndef __HIP_PLATFORM_AMD__
   if (cudnn_backend) {
@@ -191,7 +196,8 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
   } else {
     NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
     plan->execute(x.data.dptr, gamma.data.dptr, mu.data.dptr, rsigma.data.dptr, dx->data.dptr,
-                  dz.data.dptr, dbeta->data.dptr, dgamma->data.dptr, workspace->data.dptr, stream);
+                  dz.data.dptr, nullptr /*add*/, dbeta->data.dptr, dgamma->data.dptr,
+                  workspace->data.dptr, stream);
   }
   return;
 }
