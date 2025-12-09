@@ -39,8 +39,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  build_wheels:
+    name: Build TE Wheels
+    runs-on: linux-mi325-8
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build Wheel Builder Image
+        run: |
+          cd build_tools/wheel_utils
+          docker build -f Dockerfile.rocm.manylinux.x86 \
+            --build-arg ROCM_REPO_URL=https://repo.radeon.com/rocm/rhel8/latest/main/ \
+            -t te-builder .
+
+      - name: Generate Wheels
+        run: |
+          mkdir -p dist
+          docker run --rm \
+            -v $(pwd)/dist:/wheelhouse \
+            -v ${{ github.workspace }}:/TransformerEngine \
+            -e LOCAL_TREE_BUILD=1 \
+            te-builder
+
+      - name: Upload Wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: te-wheels
+          path: dist/*
+          retention-days: 5
+
   build_and_test:
     name: Build and Test on GPU
+    needs: build_wheels
     timeout-minutes: 720
     runs-on: linux-mi325-8
     steps:
@@ -160,6 +193,12 @@ jobs:
         run: |
           docker pull ${{ steps.select-image.outputs.image-tag }}
 
+      - name: Download Wheels
+        uses: actions/download-artifact@v4
+        with:
+          name: te-wheels
+          path: downloaded_wheels
+
       - name: Run Container
         run: |
           docker run -dt \
@@ -218,7 +257,7 @@ jobs:
           export NVTE_AITER_PREBUILT_BASE_URL=https://compute-artifactory.amd.com:5000/artifactory/rocm-generic-local/te-ci/aiter-prebuilts
           pip install ninja
           git config --global --add safe.directory '*'
-          pip install --no-build-isolation -v . 2>&1
+          pip install /wheelhouse_mount/transformer_engine*.whl --no-build-isolation --force-reinstall 2>&1
           EOF
           )"
 
