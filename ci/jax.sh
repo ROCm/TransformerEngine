@@ -21,6 +21,12 @@ install_prerequisites() {
         script_error "Failed to install Flax and dependencies"
         return $rc
     fi
+    pip install pytest-timeout
+    rc=$?
+    if [ $rc -ne 0 ]; then
+        script_error "Failed to install test prerequisites"
+        exit $rc
+    fi
 }
 
 TEST_DIR=${TE_PATH}tests/jax
@@ -65,24 +71,15 @@ run_test_config() {
 
 run_test_config_mgpu() {
     echo ==== Run mGPU with Fused attention backend: $_fus_attn ====
-    
-    _ver=$(pip show jaxlib | grep Version)
-    case "$_ver" in
-    *0.4.35*)
-        # Workaround for distributed tests hang with xla_flag
- 	    XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false" run 3 test_distributed_fused_attn.py -k 'not test_context_parallel_ring_attn'
- 
-        # Test ring attention with xla_flag --xla_experimental_ignore_channel_id only
-	    XLA_FLAGS="--xla_experimental_ignore_channel_id" run_lbl "parallel_ring" 3 test_distributed_fused_attn.py -k test_context_parallel_ring_attn
-        ;;
-    *)
-        # Workaround for distributed tests hang with xla_flag
-        XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false" run 3 test_distributed_fused_attn.py
-        ;;
-    esac
-    
+
+    # Mitigate distributed tests hang by adding 5min timeout
+    _timeout_args="--timeout 300 --timeout-method thread"
+    # Workaround for some distributed tests hang/abotrion
+    export XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false"
+
+    run 3 test_distributed_fused_attn.py $_timeout_args
     run_default_fa 3 test_distributed_layernorm.py
-    XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false" run_default_fa 3 test_distributed_layernorm_mlp.py
+    run_default_fa 3 test_distributed_layernorm_mlp.py $_timeout_args
     run_default_fa 3 test_distributed_softmax.py
 
     run_default_fa 3 test_sanity_import.py
