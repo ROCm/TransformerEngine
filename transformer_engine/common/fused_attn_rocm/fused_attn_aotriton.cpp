@@ -37,19 +37,6 @@ inline aotriton::TensorView<0> mk_aoscalartensor(const uint64_t* ptr)
 namespace transformer_engine {
 namespace fused_attn_rocm {
 
-// TODO: Support SWA
-std::tuple<int32_t, int32_t> get_window_sizes(
-  int32_t window_size_left,
-  int32_t window_size_right,
-  bool is_causal
-){
-  using aotriton::v3::flash::WindowValue;
-  if(is_causal){
-    return {WindowValue::TopLeftAligned, WindowValue::TopLeftAligned};
-  }
-  return {-1, -1};
-}
-
 // check the fused attn config to see whether it's aotriton backend supported
 bool is_aotriton_backend_supported(
   NVTEDType q_dtype,
@@ -68,6 +55,10 @@ bool is_aotriton_backend_supported(
 #ifdef USE_FUSED_ATTN_AOTRITON
   //TODO: release after AOTriton support support Multi-latent attention
   if(head_dim_qk != head_dim_v){
+    return false;
+  }
+
+  if(head_dim_qk >= 512 || head_dim_v >= 512){
     return false;
   }
 
@@ -126,6 +117,19 @@ bool is_aotriton_backend_supported(
 
 
 #ifdef USE_FUSED_ATTN_AOTRITON
+// TODO: Support SWA
+static std::tuple<int32_t, int32_t> get_window_sizes(
+  int32_t window_size_left,
+  int32_t window_size_right,
+  bool is_causal
+){
+  using aotriton::v3::flash::WindowValue;
+  if(is_causal){
+    return {WindowValue::TopLeftAligned, WindowValue::TopLeftAligned};
+  }
+  return {-1, -1};
+}
+
 aotriton::DType nvte_to_aotriton_dtype(DType t_dtype){
 #define CAST_TYPE(aname, dtname) if (t_dtype == DType::aname) return aotriton::DType::dtname
   CAST_TYPE(kByte, kUInt8);
@@ -522,18 +526,18 @@ void fused_attn_aotriton_fwd_qkvpacked(
 
   if (Aux_CTX_Tensors->size == 0) {
     Aux_CTX_Tensors->size = 2;
-    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     output_S->data.dptr = nullptr;
     output_S->data.shape = {b, h, max_seqlen, 1};
     output_S->data.dtype = DType::kFloat32;
-    Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
     output_rng_state->data.dptr = nullptr;
     output_rng_state->data.shape = {2};
     output_rng_state->data.dtype = DType::kInt64;
   } else if (Aux_CTX_Tensors->size == 2) {
-    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
     output_rng_state->data.dptr = rng_state->data.dptr;
   } else {
     NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
@@ -682,18 +686,18 @@ void fused_attn_aotriton_fwd_kvpacked(
 
   if (Aux_CTX_Tensors->size == 0) {
     Aux_CTX_Tensors->size = 2;
-    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     output_S->data.dptr = nullptr;
     output_S->data.shape = {b, h_q, max_seqlen_q, 1};
     output_S->data.dtype = DType::kFloat32;
-    Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
     output_rng_state->data.dptr = nullptr;
     output_rng_state->data.shape = {2};
     output_rng_state->data.dtype = DType::kInt64;
   } else if (Aux_CTX_Tensors->size == 2) {
-    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
     output_rng_state->data.dptr = rng_state->data.dptr;
   } else {
     NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
@@ -836,18 +840,18 @@ void fused_attn_aotriton_fwd(
  
   if (Aux_CTX_Tensors->size == 0) {
       Aux_CTX_Tensors->size = 2;
-      Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
       output_S->data.shape = {b, h_q, max_seqlen_q, 1};
       output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
       output_rng_state->data.dptr = nullptr;
       output_rng_state->data.shape = {2};
       output_rng_state->data.dtype = DType::kInt64;
   } else if (Aux_CTX_Tensors->size == 2) {
-    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
     output_rng_state->data.dptr = rng_state->data.dptr;
   } else {
     NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");

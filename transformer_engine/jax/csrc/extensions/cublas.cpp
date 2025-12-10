@@ -6,7 +6,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 #ifndef USE_ROCM
-#include "extensions.h"
+#include "../extensions.h"
 #include "transformer_engine/gemm.h"
 #include "xla/ffi/api/c_api.h"
 

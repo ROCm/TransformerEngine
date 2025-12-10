@@ -17,6 +17,7 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
 from ..utils import get_default_init_method
+from ..export import is_in_onnx_export_mode
 
 if IS_HIP_EXTENSION:
     from ..triton_kernels.layernorm import te_layernorm_fwd_triton, te_layernorm_bwd_triton
@@ -182,6 +183,8 @@ def noop_cat(
         raise ValueError("Attempted to concatenate 0 tensors")
     if len(tensors) == 1:
         return tensors[0]
+    if is_in_onnx_export_mode():
+        return torch.cat(tensors, dim=dim)
     return _NoopCatFunc.apply(dim, *tensors)
 
 

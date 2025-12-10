@@ -159,7 +159,7 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
   // Choose whether to compile to PTX or cubin
   const int sm_arch_ = cuda::sm_arch(device_id);
   const int compile_sm_arch = std::min(sm_arch_, max_supported_sm_arch());
-  const bool compile_ptx = (CUDA_VERSION <= 11000) || (sm_arch_ != compile_sm_arch);
+  const bool compile_ptx = sm_arch_ != compile_sm_arch;
 #endif // __HIP_PLATFORM_AMD__
 
   // Compilation flags

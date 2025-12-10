@@ -1,11 +1,13 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
+#include "../extensions.h"
 #include "common.h"
-#include "extensions.h"
 #include "pybind.h"
 
 namespace transformer_engine::pytorch {
@@ -36,10 +38,19 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
     auto [te_output_act, out_act] =
         my_quantizer_none->create_tensor(input_shape, GetTransformerEngineDType(fake_tensor_type));
 
+#ifdef __HIP_PLATFORM_AMD__
+    at::Tensor ws = allocate_amax_workspace(te_output_act);
+    TensorWrapper tw = makeTransformerEngineTensor(ws);
+#endif
     NVTE_SCOPED_GIL_RELEASE({
       act_func(te_input.data(), te_output_act.data(), at::cuda::getCurrentCUDAStream());
       // use te_output_act as input to the compute amax and find the amax of activated tensor
+#ifdef __HIP_PLATFORM_AMD__
+      nvte_compute_amax_with_workspace(te_output_act.data(), te_output.data(),
+                        tw.data(), at::cuda::getCurrentCUDAStream());
+#else
       nvte_compute_amax(te_output_act.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
+#endif
     });
 
     // my_quantizer here has to be a Float8CurrentScalingQuantizer

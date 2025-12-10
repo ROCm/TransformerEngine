@@ -26,6 +26,10 @@ using namespace __hip_internal;
 typedef uint16_t hip_bfloat16x2 __attribute__((ext_vector_type(2)));
 
 #else
+#if CUDA_VERSION >= 12080
+#include <cuda_fp4.h>
+#endif
+
 #if !defined(__CUDACC_RTC__)
 #include <cstdint>
 #else

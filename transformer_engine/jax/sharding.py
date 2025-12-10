@@ -14,10 +14,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional
+import warnings
 from jax.interpreters import pxla
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec
+import numpy as np
 
 _PXLA_THREAD_RESOURCES = pxla.thread_resources
 
@@ -116,7 +118,9 @@ def with_sharding_constraint_by_logical_axes(
     x: jnp.array, logical_axis_names: Optional[tuple | list]
 ):
     """
-    A wrapper function to jax.lax.with_sharding_constraint to accept logical axes.
+    A wrapper function to flax.linen.with_logical_constraint.
+
+    DEPRECATED USE CASE: If no Flax logical axis rules are available, this function falls back to jax.lax.with_sharding_constraint using a hardcoded logical axis rule table from TE rules, such as BATCH_AXES. This functionality will be removed in the future.
 
     If logical_axis_names = None, this means no sharding constraint is applied.
 
@@ -132,6 +136,28 @@ def with_sharding_constraint_by_logical_axes(
     if not logical_axis_names:
         return x
 
+    try:
+        # Check if Flax logical axis rules are available, if so use them
+        import flax
+
+        flax_rules = flax.linen.get_logical_axis_rules()
+        if len(flax_rules) > 0:
+            return flax.linen.with_logical_constraint(
+                x, logical_axis_names, fallback=flax.linen.spmd.RulesFallback.NO_CONSTRAINT
+            )
+    except ImportError:
+        pass
+
+    warnings.warn(
+        "TransformerEngine logical axes, such as BATCH_AXES, SEQLEN_AXES, etc. are deprecated and"
+        " will be removed in a future version. Please use Flax logical axes with a"
+        " flax.linen.logical_axis_rules context and optionally use"
+        " transformer_engine.jax.flax.extend_logical_axis_rules to add BATCH_AXES, etc. to your"
+        " rules.",
+        DeprecationWarning,
+    )
+
+    # If no logical axis rules are available from Flax, fallback to TE's hardcoded logical axis rule table
     assert len(x.shape) == len(logical_axis_names)
     pspec = generate_pspec(logical_axis_names)
     return with_sharding_constraint(x, pspec)
@@ -199,6 +225,31 @@ def get_mesh_axis_rank(axis: str, mesh=None):
         return 0
     _, axis_name = _get_mesh_info(axis, mesh)
     return jax.lax.axis_index(axis_name)
+
+
+def get_mesh_axis_rank_host(axis, mesh) -> int:
+    """
+    Same as get_mesh_axis_rank(), but return a host value instead of a
+    traced device value.
+    """
+    if axis not in mesh.axis_names:
+        raise ValueError(f"Axis {axis} not found in mesh axis names: {mesh.axis_names}")
+
+    axis_index = mesh.axis_names.index(axis)
+
+    # Convert mesh.devices (ndarray of Device objects) to flat list
+    devices = mesh.devices
+    local_device = jax.devices()[jax.process_index()]  # Pick one device on this host
+
+    # Find index of local_device in mesh.devices
+    coords = np.argwhere(devices == local_device)
+    if coords.size == 0:
+        raise ValueError(f"Local device {local_device} not found in mesh.devices.")
+    coords = tuple(coords[0])  # Coordinates in the mesh array
+
+    # Get the mesh rank along the specified axis
+    rank = coords[axis_index]
+    return int(rank)
 
 
 @dataclass

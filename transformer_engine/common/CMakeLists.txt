@@ -33,43 +33,46 @@ endif()
 
 # Language options
 if(USE_CUDA)
-  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
-      set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90 100 120)
-    else ()
-      set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
-    endif()
+# Removed indent to minimize code diff with NV upstream
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
+    set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90 100 120)
+  elseif (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
+    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90 100 120)
+  else ()
+    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
   endif()
-  set(CMAKE_CXX_STANDARD 17)
-  set(CMAKE_CUDA_STANDARD 17)
-  set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-  if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -g -G")
-  endif()
+endif()
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -g -G")
+endif()
 
-  # Hide non-necessary symbols in shared object.
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
-  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
- 
-  # Transformer Engine library
-  project(transformer_engine LANGUAGES CUDA CXX)
-  
-  # CUDA Toolkit
-  find_package(CUDAToolkit REQUIRED)
-  if (CUDAToolkit_VERSION VERSION_LESS 12.0)
-    message(FATAL_ERROR "CUDA 12.0+ is required, but found CUDA ${CUDAToolkit_VERSION}")
-  endif()
+# Hide non-necessary symbols in shared object.
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
 
-  # cuDNN frontend API
-  set(CUDNN_FRONTEND_INCLUDE_DIR
-      "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
-  if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
-      message(FATAL_ERROR
-              "Could not find cuDNN frontend API at ${CUDNN_FRONTEND_INCLUDE_DIR}. "
-              "Try running 'git submodule update --init --recursive' "
-              "within the Transformer Engine source.")
-  endif()
-  include(${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
+# Transformer Engine library
+project(transformer_engine LANGUAGES CUDA CXX)
+
+# CUDA Toolkit
+find_package(CUDAToolkit REQUIRED)
+if (CUDAToolkit_VERSION VERSION_LESS 12.0)
+  message(FATAL_ERROR "CUDA 12.0+ is required, but found CUDA ${CUDAToolkit_VERSION}")
+endif()
+
+# cuDNN frontend API
+set(CUDNN_FRONTEND_INCLUDE_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
+if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
+    message(FATAL_ERROR
+            "Could not find cuDNN frontend API at ${CUDNN_FRONTEND_INCLUDE_DIR}. "
+            "Try running 'git submodule update --init --recursive' "
+            "within the Transformer Engine source.")
+endif()
+include(${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
 else()
   set(CMAKE_CXX_STANDARD 17)
   project(transformer_engine LANGUAGES HIP CXX)
@@ -113,110 +116,78 @@ find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 # Configure Transformer Engine library
 include_directories(${PROJECT_SOURCE_DIR}/..)
 set(transformer_engine_SOURCES)
+# Source files in both cuda and rocm
+list(APPEND transformer_engine_SOURCES
+     transformer_engine.cpp
+     common.cu
+     multi_tensor/adam.cu
+     multi_tensor/compute_scale.cu
+     multi_tensor/l2norm.cu
+     multi_tensor/scale.cu
+     multi_tensor/sgd.cu
+     transpose/cast_transpose.cu
+     transpose/transpose.cu
+     transpose/cast_transpose_fusion.cu
+     transpose/transpose_fusion.cu
+     transpose/multi_cast_transpose.cu
+     activation/gelu.cu
+     fused_attn/flash_attn.cu
+     fused_attn/context_parallel.cu
+     fused_attn/kv_cache.cu
+     activation/relu.cu
+     activation/swiglu.cu
+     gemm/cublaslt_gemm.cu
+     normalization/common.cpp
+     normalization/layernorm/ln_api.cpp
+     normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
+     normalization/layernorm/ln_fwd_cuda_kernel.cu
+     normalization/rmsnorm/rmsnorm_api.cpp
+     normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
+     normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
+     permutation/permutation.cu
+     util/cast.cu
+     util/padding.cu
+     util/cuda_driver.cpp
+     util/cuda_runtime.cpp
+     util/multi_stream.cpp
+     util/rtc.cpp
+     swizzle/swizzle.cu
+     fused_softmax/scaled_masked_softmax.cu
+     fused_softmax/scaled_upper_triang_masked_softmax.cu
+     fused_softmax/scaled_aligned_causal_masked_softmax.cu
+     fused_rope/fused_rope.cu
+     fused_router/fused_moe_aux_loss.cu
+     fused_router/fused_score_for_moe_aux_loss.cu
+     fused_router/fused_topk_with_score_function.cu
+     recipe/current_scaling.cu
+     recipe/delayed_scaling.cu
+     recipe/fp8_block_scaling.cu)
 if(USE_CUDA)
-  list(APPEND transformer_engine_SOURCES
-       cudnn_utils.cpp
-       transformer_engine.cpp
-       common.cu
-       multi_tensor/adam.cu
-       multi_tensor/compute_scale.cu
-       multi_tensor/l2norm.cu
-       multi_tensor/scale.cu
-       multi_tensor/sgd.cu
-       transpose/cast_transpose.cu
-       transpose/transpose.cu
-       transpose/cast_transpose_fusion.cu
-       transpose/transpose_fusion.cu
-       transpose/multi_cast_transpose.cu
-       transpose/quantize_transpose_square_blockwise.cu
-       transpose/quantize_transpose_vector_blockwise.cu
-       activation/gelu.cu
-       fused_attn/flash_attn.cu
-       fused_attn/context_parallel.cu
-       fused_attn/kv_cache.cu
-       fused_attn/fused_attn_f16_max512_seqlen.cu
-       fused_attn/fused_attn_f16_arbitrary_seqlen.cu
-       activation/relu.cu
-       activation/swiglu.cu
-       fused_attn/fused_attn_fp8.cu
-       fused_attn/fused_attn.cpp
-       fused_attn/utils.cu
-       gemm/cublaslt_gemm.cu
-       normalization/common.cpp
-       normalization/layernorm/ln_api.cpp
-       normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
-       normalization/layernorm/ln_fwd_cuda_kernel.cu
-       normalization/rmsnorm/rmsnorm_api.cpp
-       normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
-       normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
-       permutation/permutation.cu
-       util/cast.cu
-       util/padding.cu
-       util/cuda_driver.cpp
-       util/cuda_nvml.cpp
-       util/cuda_runtime.cpp
-       util/rtc.cpp
-       swizzle/swizzle.cu
-       fused_softmax/scaled_masked_softmax.cu
-       fused_softmax/scaled_upper_triang_masked_softmax.cu
-       fused_softmax/scaled_aligned_causal_masked_softmax.cu
-       fused_rope/fused_rope.cu
-       recipe/current_scaling.cu
-       recipe/delayed_scaling.cu
-       recipe/fp8_block_scaling.cu
-       comm_gemm_overlap/userbuffers/ipcsocket.cc
-       comm_gemm_overlap/userbuffers/userbuffers-host.cpp
-       comm_gemm_overlap/userbuffers/userbuffers.cu
-       comm_gemm_overlap/comm_gemm_overlap.cpp)
-  add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
+# Removed indent to minimize code diff with NV upstream
+# Files unique in cuda building
+list(APPEND transformer_engine_SOURCES
+     cudnn_utils.cpp
+     transpose/quantize_transpose_square_blockwise.cu
+     transpose/quantize_transpose_vector_blockwise.cu
+     fused_attn/fused_attn_f16_max512_seqlen.cu
+     fused_attn/fused_attn_f16_arbitrary_seqlen.cu
+     fused_attn/fused_attn_fp8.cu
+     fused_attn/fused_attn.cpp
+     fused_attn/utils.cu
+     util/cuda_nvml.cpp
+     comm_gemm_overlap/userbuffers/ipcsocket.cc
+     comm_gemm_overlap/userbuffers/userbuffers-host.cpp
+     comm_gemm_overlap/userbuffers/userbuffers.cu
+     comm_gemm_overlap/comm_gemm_overlap.cpp)
+add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 else()
   list(APPEND transformer_engine_SOURCES
-       transformer_engine.cpp
-       common.cu
-       multi_tensor/adam.cu
-       multi_tensor/compute_scale.cu
-       multi_tensor/l2norm.cu
-       multi_tensor/scale.cu
-       multi_tensor/sgd.cu
-       transpose/cast_transpose.cu
-       transpose/transpose.cu
-       transpose/cast_transpose_fusion.cu
-       transpose/transpose_fusion.cu
-       transpose/multi_cast_transpose.cu
-       activation/gelu.cu
-       activation/relu.cu
-       activation/swiglu.cu
-       fused_attn/flash_attn.cu
-       fused_attn/context_parallel.cu
-       fused_attn/kv_cache.cu
        fused_attn_rocm/fused_attn.cpp
        fused_attn_rocm/fused_attn_aotriton.cpp
        fused_attn_rocm/fused_attn_ck.cpp
        fused_attn_rocm/utils.cpp
-       gemm/cublaslt_gemm.cu
        gemm/rocm_gemm.cu
-       normalization/common.cpp
-       normalization/layernorm/ln_api.cpp
-       normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
-       normalization/layernorm/ln_fwd_cuda_kernel.cu
-       normalization/rmsnorm/rmsnorm_api.cpp
-       normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
-       normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
-       permutation/permutation.cu
-       util/cast.cu
-       util/padding.cu
-       util/cuda_driver.cpp
-       util/cuda_runtime.cpp
-       util/rtc.cpp
-       amd_detail/system.cpp
-       swizzle/swizzle.cu
-       fused_softmax/scaled_masked_softmax.cu
-       fused_softmax/scaled_upper_triang_masked_softmax.cu
-       fused_softmax/scaled_aligned_causal_masked_softmax.cu
-       fused_rope/fused_rope.cu
-       recipe/current_scaling.cu
-       recipe/delayed_scaling.cu
-       recipe/fp8_block_scaling.cu)
+       amd_detail/system.cpp)
 
   # process source code files
   set(TE ${CMAKE_CURRENT_SOURCE_DIR}/../..)
@@ -237,6 +208,8 @@ else()
       IGNORES "*/amd_detail/*"
       IGNORES "*/aotriton/*"
       IGNORES "*/ck_fused_attn/*"
+      IGNORES "*/pytorch/csrc/*"
+      IGNORES "*/jax/csrc/*"
       IGNORES "*/rocshmem_api/*"
       CUSTOM_MAP_FILE "${TE}/hipify_custom_map.json"
       NO_MATH_REPLACE
@@ -255,150 +228,62 @@ target_include_directories(transformer_engine PUBLIC
 
 # Configure dependencies
 if (USE_CUDA)
-  target_link_libraries(transformer_engine PUBLIC
+target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cudart
                       CUDNN::cudnn_all)
-  target_include_directories(transformer_engine PRIVATE
+target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
+target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
 
-  # Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
-  # Changed
-  option(NVTE_UB_WITH_MPI "Bootstrap Userbuffers with MPI" OFF)
-  if (NVTE_UB_WITH_MPI)
-      find_package(MPI REQUIRED)
-      target_link_libraries(transformer_engine PUBLIC MPI::MPI_CXX)
-      target_include_directories(transformer_engine PRIVATE ${MPI_CXX_INCLUDES})
-      target_compile_definitions(transformer_engine PUBLIC NVTE_UB_WITH_MPI)
-  endif()
-  
-  # Hack to enable dynamic loading in cuDNN frontend
-  target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
+# Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
+option(NVTE_UB_WITH_MPI "Bootstrap Userbuffers with MPI" OFF)
+if (NVTE_UB_WITH_MPI)
+    find_package(MPI REQUIRED)
+    target_link_libraries(transformer_engine PUBLIC MPI::MPI_CXX)
+    target_include_directories(transformer_engine PRIVATE ${MPI_CXX_INCLUDES})
+    target_compile_definitions(transformer_engine PUBLIC NVTE_UB_WITH_MPI)
+endif()
+
+option(NVTE_ENABLE_NVSHMEM "Compile with NVSHMEM library" OFF)
+if (NVTE_ENABLE_NVSHMEM)
+    add_subdirectory(nvshmem_api)
+    target_link_libraries(transformer_engine PUBLIC nvshmemapi)
+    target_include_directories(transformer_engine PUBLIC ${NVSHMEMAPI_INCLUDE_DIR})
+endif()
+
+# Hack to enable dynamic loading in cuDNN frontend
+target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
+
 else()
+  option(NVTE_ENABLE_ROCSHMEM "Compile with ROCSHMEM library" OFF)
+  if (NVTE_ENABLE_ROCSHMEM)
+    add_subdirectory(rocshmem_api)
+    target_link_options(transformer_engine PRIVATE
+        -fgpu-rdc
+    )
+    target_link_libraries(transformer_engine PUBLIC 
+        -Wl,--whole-archive
+        rocshmemapi
+        -Wl,--no-whole-archive
+    )
+  endif()
   set(GPU_TARGETS ${CMAKE_HIP_ARCHITECTURES})
 
+  function(get_git_commit REPO_DIR COMMIT_ID_VAR)
+    file(REAL_PATH "${REPO_DIR}" REPO_DIR)
+    execute_process(
+      COMMAND sh -c "export GIT_CONFIG_GLOBAL=$(mktemp /tmp/gitconfig.XXXXXX);
+      git config --global --add safe.directory ${REPO_DIR} && git -C ${REPO_DIR} rev-parse HEAD;
+      rm $GIT_CONFIG_GLOBAL"
+      OUTPUT_VARIABLE ${COMMIT_ID_VAR}
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    SET(${COMMIT_ID_VAR} ${${COMMIT_ID_VAR}} PARENT_SCOPE)
+  endfunction()
+
   if(USE_FUSED_ATTN_AOTRITON)
-    # The AOTriton C++ runtime will be built from ../../3rdparty/aotriton
-    # Hence there is no need to add multiple ROCM version here
-
-    set(__AOTRITON_INSTALL_DIR "${CMAKE_CURRENT_BINARY_DIR}/aotriton")
-    set(__AOTRITON_SUFFIX "_TEprivate")
-  
-    if(NOT DEFINED AOTRITON_PATH)
-      # If AOTRITON_PATH is not provided, we proceed to build the runtime
-      # ourselves and either build or download the GPU kernels
-      set(AOTRITON_BUILD_GPU_KERNELS $ENV{NVTE_AOTRITON_BUILD_GPU_KERNELS})
-      if(AOTRITON_BUILD_GPU_KERNELS)
-        set(AOTRITON_NOIMAGE_MODE OFF)
-      else()
-        set(AOTRITON_NOIMAGE_MODE ON)
-      endif()
-
-      set(__AOTRITON_VER "0.11.1b")
-      set(__AOTRITON_IMAGE_LIST
-          "amd-gfx942"
-          "amd-gfx950"
-        )
-      set(__AOTRITON_IMAGE_SHA256_LIST
-          "0a7bcee19d3bb6d548732248c3234f7b92736c2ab7a7aae65294b87a7fd64c06" # amd-gfx942
-          "c1ba3bfe84217fd67df3dd1f8b67c80a7f7b33d0ad4d74b41d6567036e032ace" # amd-gfx950
-      )
-      set(__AOTRITON_BASE_URL "https://github.com/ROCm/aotriton/releases/download/")  # @lint-ignore
-      include(ExternalProject)
-
-      # Download GPU kernels for a specific target
-      function(aotriton_download_image image project)
-        list(FIND __AOTRITON_IMAGE_LIST ${image} index)
-        list(GET __AOTRITON_IMAGE_SHA256_LIST ${index} __AOTRITON_IMAGE_SHA256)
-
-        string(CONCAT __AOTRITON_FILE
-              "aotriton-${__AOTRITON_VER}-images-"
-              "${image}.tar.gz")
-        string(CONCAT __AOTRITON_URL
-              "${__AOTRITON_BASE_URL}"
-              "${__AOTRITON_VER}/${__AOTRITON_FILE}")
-
-        # Set up directories
-        set(__AOTRITON_DOWNLOAD_DIR ${CMAKE_CURRENT_BINARY_DIR}/aotriton/download/${image})
-        set(__AOTRITON_EXTRACT_DIR ${CMAKE_CURRENT_BINARY_DIR}/aotriton/image/${image})
-
-        ExternalProject_Add(${project}
-          URL "${__AOTRITON_URL}"
-          URL_HASH SHA256=${__AOTRITON_IMAGE_SHA256}
-          DOWNLOAD_DIR ${__AOTRITON_DOWNLOAD_DIR}
-          SOURCE_DIR ${__AOTRITON_EXTRACT_DIR}
-          CONFIGURE_COMMAND ""
-          BUILD_COMMAND ""
-          INSTALL_COMMAND ${CMAKE_COMMAND} -E copy_directory
-          "${__AOTRITON_EXTRACT_DIR}"
-          "${__AOTRITON_INSTALL_DIR}"
-          BUILD_BYPRODUCTS
-          "${__AOTRITON_INSTALL_DIR}/lib/aotriton.images/${image}/__signature__"
-        )
-        message(STATUS "Download AOTriton pre-compiled GPU images from ${__AOTRITON_URL}.")
-      endfunction()
-
-      # Build the AOTriton runtime from source with custom suffix to avoid
-      # potential conflict with libaotriton as provided by PyTorch
-      function(aotriton_build_from_source noimage)
-        message(STATUS "No-image mode: ${noimage}.")
-        ExternalProject_Add(aotriton_external
-          LIST_SEPARATOR ","
-          SOURCE_DIR ${TE}/3rdparty/aotriton
-          CMAKE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${__AOTRITON_INSTALL_DIR}
-          -DAOTRITON_TARGET_ARCH=${ARCH_LIST_COMMA_STR}
-          -DGPU_TARGETS=${ARCH_LIST_COMMA_STR}
-          -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-          -DAOTRITON_NO_PYTHON=ON
-          -DAOTRITON_NAME_SUFFIX=${__AOTRITON_SUFFIX}
-          -DAOTRITON_NOIMAGE_MODE=${noimage}
-          BUILD_BYPRODUCTS "${__AOTRITON_INSTALL_DIR}/lib/libaotriton${__AOTRITON_SUFFIX}_v2.so"
-        )
-        message(STATUS "Adding AOTriton library.")
-        add_dependencies(aotriton aotriton_external)
-        target_link_libraries(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/lib/libaotriton${__AOTRITON_SUFFIX}_v2.so)
-        target_include_directories(aotriton INTERFACE ${__AOTRITON_INSTALL_DIR}/include)
-        install(DIRECTORY
-                ${__AOTRITON_INSTALL_DIR}/lib
-                DESTINATION ${CMAKE_INSTALL_PREFIX}/transformer_engine
-                PATTERN "cmake" EXCLUDE
-        )
-      endfunction()
-
-      add_library(aotriton INTERFACE)
-      message(STATUS "Building AOTriton from source.")
-      string(REPLACE ";" "," ARCH_LIST_COMMA_STR "${CMAKE_HIP_ARCHITECTURES}")
-      aotriton_build_from_source(${AOTRITON_NOIMAGE_MODE})
-
-      # Download GPU kernels if needed
-      if(NOT AOTRITON_BUILD_GPU_KERNELS)
-        message(STATUS "Downloading AOTriton GPU Kernels.")
-        foreach(image ${__AOTRITON_IMAGE_LIST})
-          string(SUBSTRING ${image} 7 -1 gfx_pattern)
-          string(REPLACE "x" "." gfx_regex ${gfx_pattern})
-          foreach(target ${ARCH_LIST_COMMA_STR})
-            if(target MATCHES ${gfx_regex})
-              message(STATUS "Downloading AOTriton image ${image}.")
-              set(__AOTRITON_DOWNLOAD_TARGET aotriton_image_${gfx_pattern})
-              aotriton_download_image(${image} ${__AOTRITON_DOWNLOAD_TARGET})
-              add_dependencies(aotriton_external ${__AOTRITON_DOWNLOAD_TARGET})
-              break()
-            endif()
-          endforeach()
-        endforeach()
-      else()
-      endif()
-
-    else()
-      # Use aotriton built during initial TE building/installation
-      # When only need rebuild TE library itself
-      unset(AOTRITON_LIB CACHE)
-      find_library(AOTRITON_LIB NAMES aotriton aotriton${__AOTRITON_SUFFIX}_v2 PATHS ${AOTRITON_PATH}/lib REQUIRED NO_DEFAULT_PATH)
-      add_library( aotriton SHARED IMPORTED )
-      set_target_properties( aotriton PROPERTIES IMPORTED_LOCATION ${AOTRITON_LIB} )
-      target_include_directories(aotriton INTERFACE ${AOTRITON_PATH}/include)
-    endif()
+    add_subdirectory(aotriton ${CMAKE_CURRENT_BINARY_DIR}/aotriton)
   endif()
 
   if(USE_FUSED_ATTN_CK)
@@ -422,31 +307,6 @@ else()
   target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS})
 endif()
 
-if(USE_CUDA)
-  option(NVTE_ENABLE_NVSHMEM "Compile with NVSHMEM library" OFF)
-  if (NVTE_ENABLE_NVSHMEM)
-      add_subdirectory(nvshmem_api)
-      target_link_libraries(transformer_engine PUBLIC nvshmemapi)
-      target_include_directories(transformer_engine PUBLIC ${NVSHMEMAPI_INCLUDE_DIR})
-  endif()
-
-# Hack to enable dynamic loading in cuDNN frontend
-target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
-else()
-  option(NVTE_ENABLE_ROCSHMEM "Compile with ROCSHMEM library" OFF)
-  if (NVTE_ENABLE_ROCSHMEM)
-    add_subdirectory(rocshmem_api)
-    target_link_options(transformer_engine PRIVATE
-        -fgpu-rdc
-    )
-    target_link_libraries(transformer_engine PUBLIC 
-        -Wl,--whole-archive
-        rocshmemapi
-        -Wl,--no-whole-archive
-    )
-  endif()
-endif()
-
 # Helper functions to make header files with C++ strings
 function(make_string_header STRING STRING_NAME)
     configure_file(util/string_header.h.in
@@ -461,18 +321,18 @@ function(make_string_header_from_file file_ STRING_NAME)
 endfunction()
 
 if(USE_CUDA)
-  # Header files with C++ strings
-  list(GET CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES 0 cuda_include_path)
-  make_string_header("${cuda_include_path}"
-                    string_path_cuda_include)
-  make_string_header_from_file(transpose/rtc/cast_transpose_fusion.cu
-                              string_code_transpose_rtc_cast_transpose_fusion_cu)
-  make_string_header_from_file(transpose/rtc/cast_transpose.cu
-                              string_code_transpose_rtc_cast_transpose_cu)
-  make_string_header_from_file(transpose/rtc/transpose.cu
-                              string_code_transpose_rtc_transpose_cu)
-  make_string_header_from_file(utils.cuh
-                              string_code_utils_cuh)
+# Header files with C++ strings
+list(GET CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES 0 cuda_include_path)
+make_string_header("${cuda_include_path}"
+                   string_path_cuda_include)
+make_string_header_from_file(transpose/rtc/cast_transpose_fusion.cu
+                             string_code_transpose_rtc_cast_transpose_fusion_cu)
+make_string_header_from_file(transpose/rtc/cast_transpose.cu
+                             string_code_transpose_rtc_cast_transpose_cu)
+make_string_header_from_file(transpose/rtc/transpose.cu
+                             string_code_transpose_rtc_transpose_cu)
+make_string_header_from_file(utils.cuh
+                             string_code_utils_cuh)
 else()
   make_string_header_from_file(utils_hip.cuh
                                string_code_utils_cuh)
@@ -507,34 +367,34 @@ set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
                             PROPERTIES
                             COMPILE_OPTIONS "--use_fast_math")
 if(USE_CUDA)
-  option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" OFF)
-  if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
-    set_source_files_properties(activation/gelu.cu
-                                activation/relu.cu
-                                activation/swiglu.cu
-                                PROPERTIES
-                                COMPILE_OPTIONS "--use_fast_math")
-  endif()
-  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
-  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
+option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" OFF)
+if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
+  set_source_files_properties(activation/gelu.cu
+                              activation/relu.cu
+                              activation/swiglu.cu
+                              PROPERTIES
+                              COMPILE_OPTIONS "--use_fast_math")
+endif()
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 
-  # Number of parallel build jobs
-  if(ENV{MAX_JOBS})
-    set(BUILD_JOBS_STR "$ENV{MAX_JOBS}")
-  elseif(ENV{NVTE_BUILD_MAX_JOBS})
-    set(BUILD_JOBS_STR "$ENV{NVTE_BUILD_MAX_JOBS}")
-  else()
-    set(BUILD_JOBS_STR "max")
-  endif()
-  message(STATUS "Parallel build jobs: ${BUILD_JOBS_STR}")
-  
-  # Number of threads per parallel build job
-  set(BUILD_THREADS_PER_JOB $ENV{NVTE_BUILD_THREADS_PER_JOB})
-  if (NOT BUILD_THREADS_PER_JOB)
-    set(BUILD_THREADS_PER_JOB 1)
-  endif()
-  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --threads ${BUILD_THREADS_PER_JOB}")
-  message(STATUS "Threads per parallel build job: ${BUILD_THREADS_PER_JOB}")
+# Number of parallel build jobs
+if(ENV{MAX_JOBS})
+  set(BUILD_JOBS_STR "$ENV{MAX_JOBS}")
+elseif(ENV{NVTE_BUILD_MAX_JOBS})
+  set(BUILD_JOBS_STR "$ENV{NVTE_BUILD_MAX_JOBS}")
+else()
+  set(BUILD_JOBS_STR "max")
+endif()
+message(STATUS "Parallel build jobs: ${BUILD_JOBS_STR}")
+
+# Number of threads per parallel build job
+set(BUILD_THREADS_PER_JOB $ENV{NVTE_BUILD_THREADS_PER_JOB})
+if (NOT BUILD_THREADS_PER_JOB)
+  set(BUILD_THREADS_PER_JOB 1)
+endif()
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --threads ${BUILD_THREADS_PER_JOB}")
+message(STATUS "Threads per parallel build job: ${BUILD_THREADS_PER_JOB}")
 else()
   set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -O3")
   set(HIP_HCC_FLAGS "${CMAKE_HIP_FLAGS} -mavx2 -mf16c -mfma -std=c++17")
@@ -548,9 +408,8 @@ endif()
 
 # Install library
 install(TARGETS transformer_engine DESTINATION .)
-set_target_properties(transformer_engine PROPERTIES INSTALL_RPATH "$ORIGIN/lib;$ORIGIN/transformer_engine/lib")
-
 if (USE_ROCM)
+  set_target_properties(transformer_engine PROPERTIES INSTALL_RPATH "$ORIGIN/lib;$ORIGIN/transformer_engine/lib")
   if("$ENV{ROCM_PATH}" STREQUAL "")
     set(ROCM_PATH "/opt/rocm")
   else()
