@@ -249,7 +249,7 @@ void performTest_x1(const size_t rows,
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
     float ref_amax = 0;
-    compute_ref<IType, OType>(grad.rowwise_cpu_dptr<IType>(),//PIV TODO: AMD path
+    compute_ref<IType, OType>(grad.rowwise_cpu_dptr<IType>(),
                               input.rowwise_cpu_dptr<IType>(),
                               ref_output.get(),
                               ref_output.get(),
@@ -264,6 +264,7 @@ void performTest_x1(const size_t rows,
                               rowwise,
                               colwise);
 
+    std::vector<size_t> mismatches_scales;
     size_t mismatches_scales = 0;
     const size_t scale_diff_abs_tolerance = 0;
     const double abs_tolerable_mismatches_limit = 1.0;
@@ -275,6 +276,7 @@ void performTest_x1(const size_t rows,
     if (rowwise) {
       compare_e8m0_scaling_factors("rowwise scales", gpu_scales_ptr, ref_output_scales.get(),
                                    unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
+                                   mismatches_scales_indices,
                                    mismatches_scales,
                                    scale_diff_abs_tolerance,
                                    abs_tolerable_mismatches_limit,
@@ -282,11 +284,19 @@ void performTest_x1(const size_t rows,
     } else {
       compare_e8m0_scaling_factors("colwise scales", gpu_scales_ptr, ref_output_scales.get(),
                                    unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
+                                   mismatches_scales_indices,
                                    mismatches_scales,
                                    scale_diff_abs_tolerance,
                                    abs_tolerable_mismatches_limit,
                                    rel_tolerable_mismatches_limit);
     }
+
+#ifdef __HIP_PLATFORM_AMD__
+    adjust_ref_for_e8m0_scale_error("scales", mismatches_scales_indices, gpu_scales_ptr,
+                                    ref_output_scales.get(), unpadded_blocks_Y, unpadded_blocks_X,
+                                    scales_stride, rows, cols, ref_output.get(), otype);
+    mismatches_scales = 0;
+#endif
 
     const size_t mismatches_elts = 32 * mismatches_scales;
     auto [atol, rtol] = getTolerances(otype);
@@ -364,7 +374,7 @@ void performTest_x2(const size_t rows,
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
     float ref_amax = 0;
-    compute_ref<IType, OType>(grad.rowwise_cpu_dptr<IType>(),//PIV TODO: AMD path
+    compute_ref<IType, OType>(grad.rowwise_cpu_dptr<IType>(),
                               input.rowwise_cpu_dptr<IType>(),
                               ref_output_rowwise.get(),
                               ref_output_colwise.get(),
@@ -383,22 +393,39 @@ void performTest_x2(const size_t rows,
     const double abs_tolerable_mismatches_limit = 1.0;
     const double rel_tolerable_mismatches_limit = 1.0e-4;
 
+    std::vector<size_t> mismatches_scales_indices_rowwise;
     size_t mismatches_scales_rowwise = 0;
     compare_e8m0_scaling_factors("scales_rowwise", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
                                  ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
                                  unpadded_blocks_X_rowwise, scales_stride_rowwise,
-                                 mismatches_scales_rowwise,
+                                 mismatches_scales_indices_rowwise, mismatches_scales_rowwise,
                                  scale_diff_abs_tolerance,
                                  abs_tolerable_mismatches_limit,
                                  rel_tolerable_mismatches_limit);
+    std::vector<size_t> mismatches_scales_indices_colwise;
     size_t mismatches_scales_colwise = 0;
     compare_e8m0_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
                                  ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
                                  unpadded_blocks_X_colwise, scales_stride_colwise,
-                                 mismatches_scales_colwise,
+                                 mismatches_scales_indices_colwise, mismatches_scales_colwise,
                                  scale_diff_abs_tolerance,
                                  abs_tolerable_mismatches_limit,
                                  rel_tolerable_mismatches_limit);
+
+#ifdef __HIP_PLATFORM_AMD__
+    adjust_ref_for_e8m0_scale_error("scales_rowwise", mismatches_scales_indices_rowwise,
+                                    output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
+                                    ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
+                                    unpadded_blocks_X_rowwise, scales_stride_rowwise, rows, cols,
+                                    ref_output_rowwise.get(), otype);
+    mismatches_scales_rowwise = 0;
+    adjust_ref_for_e8m0_scale_error("scales_colwise", mismatches_scales_indices_colwise,
+                                    output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
+                                    ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
+                                    unpadded_blocks_X_colwise, scales_stride_colwise, rows, cols,
+                                    ref_output_colwise.get(), otype);
+    mismatches_scales_colwise = 0;
+#endif
 
     const size_t mismatches_elts_rowwise = 32 * mismatches_scales_rowwise;
     const size_t mismatches_elts_colwise = 32 * mismatches_scales_colwise;

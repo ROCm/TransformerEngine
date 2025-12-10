@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -118,6 +120,9 @@ __device__ __forceinline__ float exp2f(e8m0_t biased_exp) {
 }
 
 __device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
+#ifdef __HIP_PLATFORM_AMD__
+#define __CUDA_ARCH_HAS_FEATURE__(x) 0
+#endif
 #if ((__CUDA_ARCH_HAS_FEATURE__(SM100_ALL)) || (__CUDA_ARCH_HAS_FEATURE__(SM101_ALL)) || \
      (__CUDA_ARCH_HAS_FEATURE__(SM120_ALL)))
   uint16_t out;

@@ -22,7 +22,9 @@
 namespace transformer_engine {
 namespace gated_kernels {
 
-constexpr size_t ALIGNMENT_SIZE = 128;
+namespace mxfp8_kernel {
+
+  constexpr size_t ALIGNMENT_SIZE = 128;
 // TODO: Identify optimal chunk/thread size for MI350+
 constexpr size_t CHUNK_DIM_Y = 64;
 constexpr size_t CHUNK_DIM_X = 64;
@@ -43,7 +45,9 @@ __device__ inline float sigmoidf(const float x) { return __frcp_rn(1.0f + __expf
 
 template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &), typename IType, typename OType,
-          size_t SCALE_DIM_Y, size_t SCALE_DIM_X, bool IS_ALIGNED>
+          size_t SCALE_DIM_Y, size_t SCALE_DIM_X,
+          size_t THREADS_PER_CHUNK, //to match CUDA declaration
+          bool IS_ALIGNED>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     cast_mxfp8_gated_kernel(const IType *grad_ptr,
                             const IType *input_act,
@@ -197,8 +201,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           float amax = fabsf(after_dgate_reg[stage]);
           const float mx_block_X_amax = warp_reduce_max_broadcast(amax);
           const e8m0_t biased_exponent_X =
-              float_to_e8m0(mx_block_X_amax * Quantized_Limits<OType>::max_norm_rcp);
-          const float scale_reciprocal_X = exp2f_rcp(biased_exponent_X);
+              ptx::float_to_e8m0(mx_block_X_amax * Quantized_Limits<OType>::max_norm_rcp);
+          const float scale_reciprocal_X = ptx::exp2f_rcp(biased_exponent_X);
 
           out_gate_rowwise_sh[shmem_idx] =
               static_cast<OType>(scale_reciprocal_X * after_dgate_reg[stage]);
@@ -217,8 +221,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         float amax = fabsf(after_dact_reg[stage]);
         const float mx_block_X_amax = warp_reduce_max_broadcast(amax);
         const e8m0_t biased_exponent_X =
-            float_to_e8m0(mx_block_X_amax * Quantized_Limits<OType>::max_norm_rcp);
-        const float scale_reciprocal_X = exp2f_rcp(biased_exponent_X);
+            ptx::float_to_e8m0(mx_block_X_amax * Quantized_Limits<OType>::max_norm_rcp);
+        const float scale_reciprocal_X = ptx::exp2f_rcp(biased_exponent_X);
 
         out_act_rowwise_sh[shmem_idx] =
             static_cast<OType>(scale_reciprocal_X * after_dact_reg[stage]);
@@ -273,8 +277,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         }
 
         const e8m0_t biased_exponent =
-            float_to_e8m0(mx_block_Y_amax * Quantized_Limits<OType>::max_norm_rcp);
-        const float scale_reciprocal = exp2f_rcp(biased_exponent);
+            ptx::float_to_e8m0(mx_block_Y_amax * Quantized_Limits<OType>::max_norm_rcp);
+        const float scale_reciprocal = ptx::exp2f_rcp(biased_exponent);
 
         // Only single thread writes the computed scaling factor
         // Also assuming one iteration covers exactly 32 rows
@@ -319,8 +323,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       }
 
       const e8m0_t biased_exponent =
-          float_to_e8m0(mx_block_Y_amax * Quantized_Limits<OType>::max_norm_rcp);
-      const float scale_reciprocal = exp2f_rcp(biased_exponent);
+          ptx::float_to_e8m0(mx_block_Y_amax * Quantized_Limits<OType>::max_norm_rcp);
+      const float scale_reciprocal = ptx::exp2f_rcp(biased_exponent);
 
       // Only single thread writes the computed scaling factor
       // Also assuming one iteration covers exactly 32 rows
@@ -366,5 +370,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     __syncthreads();
   }
 }
+} // namespace mxfp8_kernel
 } // namespace gated_kernels
 } // namespace transformer_engine

@@ -2046,7 +2046,7 @@ def test_grouped_linear_accuracy(
     if IS_HIP_EXTENSION:
         if dtype not in (torch.float32,) and fuse_wgrad_accumulation and not fp8:
             pytest.skip(f"Rocm does not support fused wgrad accumulation for {dtype}.")
-    if fp8 and fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED://PIV TODO FP8 support check
+    if fp8 and fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
 
     config = model_configs[model]

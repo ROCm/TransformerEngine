@@ -231,7 +231,7 @@ class TestDistributedLayernormMLP:
 
                 multi_fwd, multi_grads = multi_jitter(*multi_inputs, *static_inputs, True)
         
-        # TODO: skip cases with single fwd as nan/inf//PIV TODO: is it AMD path?
+        # TODO: skip cases with single fwd as nan/inf
         if jnp.any(jnp.isnan(single_fwd)) or jnp.any(jnp.isinf(single_fwd)):
             pytest.skip("skip tests with nan/inf single fwd.")
             

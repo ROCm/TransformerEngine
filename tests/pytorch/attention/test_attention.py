@@ -95,8 +95,6 @@ def reset_attn_backend():
                          "NVTE_CK_USES_FWD_V3", "NVTE_CK_USES_BWD_V3"])
     yield
 
-#PIV TODO: _get_attention_backends is moved to attention_utils.py
-
 
 model_configs_base = {
     #     test:             b,  h, hg,  d,  sq, skv,   p,      mask,      bias
@@ -376,12 +374,10 @@ model_configs_mla = {
     "mla_3_2": ModelConfig(8, 1, 16, 192, max_seqlen_kv=2048, head_dim_v=128),  # inference
     "mla_3_3": ModelConfig(8, 1, 16, 160, max_seqlen_kv=2048, head_dim_v=128),  # inference
     "mla_3_4": ModelConfig(8, 1, 16, 160, max_seqlen_kv=2048, head_dim_v=160),  # inference
-    "mla_4_0": ModelConfig( #PIV TODO
-        10, 16, 16, 192, 4096, 4096, 0.0, "causal", "no_bias", head_dim_v=128
-    ),
-    "mla_4_1": ModelConfig(
-        10, 16, 16, 192, 4096, 4096, 0.0, "no_mask", "no_bias", head_dim_v=128
-    ),
+    #"mla_4_0": ModelConfig(#PIV TODO: do cross 0 and cross 1 cover it
+    #    10, 4096, 16, 192, max_seqlen_kv=4096, attn_mask_type="causal", head_dim_v=128
+    #),
+    #"mla_4_1": ModelConfig(10, 4096, 16, 192, max_seqlen_kv=4096, head_dim_v=128),
 }
 
 

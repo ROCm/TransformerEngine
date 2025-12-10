@@ -6,7 +6,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#pragma once
+#ifndef TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_
+#define TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_
 
 #include <cuda_runtime_api.h>
 #ifdef __HIP_PLATFORM_AMD__

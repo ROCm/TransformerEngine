@@ -29,7 +29,7 @@
 #ifndef __HIP_PLATFORM_AMD__
 #include "../cudnn_utils.h"
 #else
-#include "../util/rocm_cast_kernels.cuh"
+//#include "../util/rocm_cast_kernels.cuh"
 #endif
 #include "../util/system.h"
 

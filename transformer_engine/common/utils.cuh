@@ -1041,7 +1041,6 @@ struct Quantized_Limits {
   static constexpr float max_norm_rcp = 1.0 / max_norm;
 #endif // TE_DYNAMIC_HIP_FP8_TYPE
 };
-//PIV TODO: code moved to ptx.cuh
 
 }  // namespace transformer_engine
 
