@@ -118,6 +118,7 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
 }
 }  // extern "C"
 
+#ifndef __HIP_PLATFORM_AMD__
 void checkCuDriverContext(CUstream stream) {
   // Ensure the thread's "current" CUDA context is set.
   cuda_driver::ensure_context_exists();
@@ -142,7 +143,6 @@ void checkCuDriverContext(CUstream stream) {
   }
 }
 
-#ifndef __HIP_PLATFORM_AMD__
 CUtensorMapDataType get_CUtensorMapDataType(DType dtype) {
   static const std::unordered_map<DType, CUtensorMapDataType> dtypeMapping = []() {
     std::unordered_map<DType, CUtensorMapDataType> typeMapping = {

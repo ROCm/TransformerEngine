@@ -9,6 +9,9 @@
 #include "../common.h"
 #include "../kernel_traits.h"
 #include "ln_fwd_kernels.cuh"
+#ifdef __HIP_PLATFORM_AMD__
+#include "util/rocm_cast_kernels.cuh"
+#endif
 
 using namespace transformer_engine::normalization;
 

@@ -22,9 +22,7 @@
 namespace transformer_engine {
 namespace gated_kernels {
 
-namespace mxfp8_kernel {
-
-  constexpr size_t ALIGNMENT_SIZE = 128;
+constexpr size_t ALIGNMENT_SIZE = 128;
 // TODO: Identify optimal chunk/thread size for MI350+
 constexpr size_t CHUNK_DIM_Y = 64;
 constexpr size_t CHUNK_DIM_X = 64;
@@ -45,9 +43,7 @@ __device__ inline float sigmoidf(const float x) { return __frcp_rn(1.0f + __expf
 
 template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &), typename IType, typename OType,
-          size_t SCALE_DIM_Y, size_t SCALE_DIM_X,
-          size_t THREADS_PER_CHUNK, //to match CUDA declaration
-          bool IS_ALIGNED>
+          size_t SCALE_DIM_Y, size_t SCALE_DIM_X, bool IS_ALIGNED>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     cast_mxfp8_gated_kernel(const IType *grad_ptr,
                             const IType *input_act,
@@ -370,6 +366,5 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     __syncthreads();
   }
 }
-} // namespace mxfp8_kernel
 } // namespace gated_kernels
 } // namespace transformer_engine

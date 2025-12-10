@@ -146,7 +146,6 @@ list(APPEND transformer_engine_SOURCES
      activation/relu.cu
      activation/swiglu.cu
      gemm/cublaslt_gemm.cu
-     gemm/cutlass_grouped_gemm.cu
      normalization/common.cpp
      normalization/layernorm/ln_api.cpp
      normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
@@ -184,6 +183,7 @@ list(APPEND transformer_engine_SOURCES
      fused_attn/fused_attn_fp8.cu
      fused_attn/fused_attn.cpp
      fused_attn/utils.cu
+     gemm/cutlass_grouped_gemm.cu
      util/cuda_nvml.cpp
      comm_gemm_overlap/userbuffers/ipcsocket.cc
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp

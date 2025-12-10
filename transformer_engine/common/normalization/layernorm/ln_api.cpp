@@ -67,12 +67,12 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
   bool is_aligned = true;
 #ifndef __HIP_PLATFORM_AMD__
   bool cudnn_backend = use_cudnn_norm_fwd() || is_mxfp_scaling(z->scaling_mode);
-#endif //__HIP_PLATFORM_AMD__
 
   if (!is_fp8_dtype(z->data.dtype) && z->amax.dptr != nullptr) {
     NVTE_CHECK(!cudnn_backend,
                "cuDNN does not currently support amax output for non quantized output");
   }
+#endif //__HIP_PLATFORM_AMD__
 
   bool gamma_in_weight_dtype = false;
 #ifndef __HIP_PLATFORM_AMD__

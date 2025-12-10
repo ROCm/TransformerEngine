@@ -197,9 +197,9 @@ namespace {
 
 void compute_amax_impl(const NVTETensor input_, const NVTETensor output_, cudaStream_t stream,
 #ifdef __HIP_PLATFORM_AMD__
-                       [[maybe_unused]] const NVTETensor workspace, //PIV TODO remove maybe unused
+                       [[maybe_unused]] const NVTETensor workspace_, //PIV TODO remove maybe unused
 #else
-                       [[maybe_unused]] const NVTETensor workspace,
+                       [[maybe_unused]] const NVTETensor workspace_,
 #endif
                        const NVTEQuantizationConfig config_) {
   using namespace transformer_engine;

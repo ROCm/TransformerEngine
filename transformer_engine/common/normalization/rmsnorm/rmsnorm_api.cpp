@@ -53,12 +53,12 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
   bool is_aligned = true;
 #ifndef __HIP_PLATFORM_AMD__
   bool cudnn_backend = use_cudnn_norm_fwd() || is_mxfp_scaling(z->scaling_mode);
-#endif
 
   if (!is_fp8_dtype(z->data.dtype) && z->amax.dptr != nullptr) {
     NVTE_CHECK(!cudnn_backend,
                "cuDNN does not currently support amax output for non quantized output");
   }
+#endif
 
   bool training =
       is_delayed_tensor_scaling(z->scaling_mode) || (z->columnwise_data).dptr != nullptr;
@@ -216,9 +216,11 @@ void rmsnorm_bwd_add(const Tensor &dz, const Tensor &x, const Tensor &add, const
   // cuDNN does not currently support fused backward+add
   NVTE_Norm_Backend norm_backend = NVTE_Norm_Backend::Te;
 
+#ifndef __HIP_PLATFORM_AMD__
   // TE backend does not currently support zero_centered_gamma_in_weight_dtype
   NVTE_CHECK(!use_zero_centered_gamma_in_weight_dtype(),
              "zero_centered_gamma_in_weight_dtype is currently not supported for rmsnorm_bwd_add");
+#endif
 
   bool is_aligned = is_ptr_aligned(x.data.dptr, gamma.data.dptr, rsigma.data.dptr, dx->data.dptr,
                                    dz.data.dptr, dgamma->data.dptr, add.data.dptr);
