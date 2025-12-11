@@ -44,6 +44,13 @@ if [ "$ROCM_BUILD" = "1" ]; then
         ${PYBINDIR}pip install setuptools wheel
 fi
 
+# Install deps
+if [ "$ROCM_BUILD" = "1" ]; then
+  ${PYBINDIR}pip install pybind11[global] ninja
+else
+  ${PYBINDIR}pip install cmake pybind11[global] ninja
+fi
+
 if $BUILD_METAPACKAGE ; then
         cd /TransformerEngine
         if [ "$ROCM_BUILD" != "1" ]; then
@@ -59,7 +66,7 @@ if $BUILD_COMMON ; then
         if [ "$ROCM_BUILD" = "1" ]; then
                 TE_CUDA_VERS="rocm"
                 #dataclasses, psutil are needed for AITER
-                ${PYBINDIR}pip install ninja dataclasses psutil
+                ${PYBINDIR}pip install dataclasses psutil
                 #hipify expects python in PATH, also ninja may be installed to python bindir
                 test -n "$PYBINDIR" && PATH="$PYBINDIR:$PATH" || true
         else
@@ -87,25 +94,25 @@ if $BUILD_COMMON ; then
 fi
 
 if $BUILD_PYTORCH ; then
-	cd /TransformerEngine/transformer_engine/pytorch
-	if [ "$ROCM_BUILD" = "1" ]; then
-                ${PYBINDIR}pip install torch --index-url https://download.pytorch.org/whl/rocm6.3
-        else
-                PYBINDIR=/opt/python/cp38-cp38/bin/
-                ${PYBINDIR}pip install torch
-        fi
-        ${PYBINDIR}python setup.py sdist 2>&1 | tee /wheelhouse/logs/torch.txt
-	cp dist/* /wheelhouse/
+  cd /TransformerEngine/transformer_engine/pytorch
+  if [ "$ROCM_BUILD" = "1" ]; then
+    ${PYBINDIR}pip install torch --index-url https://download.pytorch.org/whl/rocm6.3
+  else
+    PYBINDIR=/opt/python/cp38-cp38/bin/
+    ${PYBINDIR}pip install torch
+  fi
+  ${PYBINDIR}python setup.py sdist 2>&1 | tee /wheelhouse/logs/torch.txt
+  cp dist/* /wheelhouse/
 fi
 
 if $BUILD_JAX ; then
-	cd /TransformerEngine/transformer_engine/jax
-	if [ "$ROCM_BUILD" = "1" ]; then
-                ${PYBINDIR}pip install jax
-        else
-                PYBINDIR=/opt/python/cp310-cp310/bin/
-                ${PYBINDIR}pip install "jax[cuda12_local]" jaxlib
-        fi
-	${PYBINDIR}python setup.py sdist 2>&1 | tee /wheelhouse/logs/jax.txt
-	cp dist/* /wheelhouse/
+  cd /TransformerEngine/transformer_engine/jax
+  if [ "$ROCM_BUILD" = "1" ]; then
+    ${PYBINDIR}pip install jax
+  else
+    PYBINDIR=/opt/python/cp310-cp310/bin/
+    ${PYBINDIR}pip install "jax[cuda12_local]" jaxlib
+  fi
+  ${PYBINDIR}python setup.py sdist 2>&1 | tee /wheelhouse/logs/jax.txt
+  cp dist/* /wheelhouse/
 fi

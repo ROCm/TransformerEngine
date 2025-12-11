@@ -60,6 +60,8 @@ def check_mxfp8_support() -> Tuple[bool, str]:
         if gpu_arch == (9, 5):
             return True, ""
         return False, "Gfx95x is required for MXFP8 execution."
+    if get_device_compute_capability() >= (12, 0):
+        return False, "MXFP8 (for all gemm layouts) is not supported on 12.0+ architectures yet."
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
         return True, ""
     return False, "Device compute capability 10.0 or higher required for MXFP8 execution."
@@ -87,7 +89,11 @@ def get_default_fp8_recipe() -> Recipe:
         if gpu_arch == (9, 5):
             return MXFP8BlockScaling()
         return DelayedScaling()
-    if get_device_compute_capability() >= (10, 0):  # blackwell and above
+    if check_mxfp8_support()[0]:
+        # This is a temporary restriction until MXFP8 is supported for all
+        # gemm layouts.
+        if get_device_compute_capability() >= (12, 0):
+            return Float8BlockScaling()
         return MXFP8BlockScaling()
     return DelayedScaling()
 

@@ -1,5 +1,3 @@
-# This file was modified for portability to AMDGPU
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -14,7 +12,6 @@ import jax
 import jax.numpy as jnp
 from jax import dtypes
 from jax.sharding import PartitionSpec, NamedSharding
-from .misc import is_hip_extension
 
 from .base import BasePrimitive, register_primitive
 from .misc import get_padded_spec, check_valid_batch_dims
@@ -812,13 +809,7 @@ def jax_scaled_masked_softmax(logits: jnp.ndarray, mask: jnp.ndarray, scale_fact
     """
     JAX based implementation of scaled and masked softmax
     """
-    if mask is not None:
-        logits += jax.lax.select(
-            mask > 0,
-            jnp.full(mask.shape, -1e10).astype(logits.dtype),
-            jnp.full(mask.shape, 0.0).astype(logits.dtype),
-        )
-    return jax.nn.softmax(logits * scale_factor)
+    return jax.nn.softmax(logits * scale_factor, where=mask != 1)
 
 
 def jax_scaled_upper_triang_masked_softmax(logits: jnp.ndarray, scale_factor: float):
@@ -826,12 +817,7 @@ def jax_scaled_upper_triang_masked_softmax(logits: jnp.ndarray, scale_factor: fl
     JAX based implementation of scaled and upper triangle masked softmax
     """
     mask = 1 - jnp.tril(jnp.ones_like(logits))
-    logits += jax.lax.select(
-        mask > 0,
-        jnp.full(mask.shape, -1e10).astype(logits.dtype),
-        jnp.full(mask.shape, 0.0).astype(logits.dtype),
-    )
-    return jax.nn.softmax(logits * scale_factor)
+    return jax_scaled_masked_softmax(logits, mask, scale_factor)
 
 
 def scaled_softmax_fwd(logits: jnp.ndarray, scale_factor: float) -> jnp.ndarray:

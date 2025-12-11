@@ -7,14 +7,15 @@
 """Tensor class with FP8 data"""
 from __future__ import annotations
 import os
-from typing import Optional, Tuple, Iterable
+from typing import Optional, Tuple, Iterable, Union
 import warnings
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import torch
 import transformer_engine_torch as tex
-
 from transformer_engine_torch import DType as TE_DType
+
+from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling, Recipe
 from ..utils import canonicalize_process_group, devices_match
 from ._internal.float8_tensor_base import Float8TensorBase, _FromFloat8Func
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
@@ -176,6 +177,24 @@ class Float8Quantizer(Quantizer):
             data_transpose=None,
             quantizer=self,
         )
+
+    def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Function using primitives with ONNX defined translations."""
+        # Q inputs are currently constrained to FP32 due to a similar limitation in ORT
+        # custom ops, so cast the input if needed.
+        if tensor.dtype != torch.float32:
+            tensor = tensor.to(torch.float32)
+        data = torch.ops.tex.fp8_quantize(tensor, self.scale.item())
+        return self.create_tensor_from_data(data, fake_dtype=torch.float32)
+
+    def onnx_dequantize(self, tensor: QuantizedTensor) -> torch.Tensor:
+        """Function using primitives with ONNX defined translations."""
+        out = torch.ops.tex.fp8_dequantize(tensor._data, self.scale.item())
+        out = out.to(tensor.dtype)
+        return out
+
+    def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
+        return DelayedScaling
 
 
 class Float8CurrentScalingQuantizer(Quantizer):
@@ -340,9 +359,24 @@ class Float8CurrentScalingQuantizer(Quantizer):
             quantizer=self,
         )
 
+    def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Function using primitives with ONNX defined translations."""
+        raise NotImplementedError(
+            "Float8CurrentScalingQuantizer does not support ONNX quantization yet."
+        )
+
+    def onnx_dequantize(self, tensor: QuantizedTensor) -> torch.Tensor:
+        """Function using primitives with ONNX defined translations."""
+        raise NotImplementedError(
+            "Float8CurrentScalingQuantizer does not support ONNX dequantization yet."
+        )
+
     def _canonicalized_amax_reduction_group(self) -> dist_group_type:
         """Get process group for amax reduction"""
         return canonicalize_process_group(self.amax_reduction_group)
+
+    def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
+        return Float8CurrentScaling
 
 
 class Float8Tensor(Float8TensorBase, QuantizedTensor):

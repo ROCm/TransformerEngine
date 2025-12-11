@@ -12,7 +12,6 @@ list(APPEND test_cuda_sources
             test_qdq.cu
             test_cast_mxfp8.cu
             test_dequantize_mxfp8.cu
-            test_cast_transpose.cu
             test_transpose.cu
             test_cast_transpose.cu
             test_cast_transpose_current_scaling.cu
@@ -26,6 +25,7 @@ list(APPEND test_cuda_sources
             test_normalization_mxfp8.cu
             test_multi_cast_transpose.cu
             test_multi_padding.cu
+            test_multi_unpadding.cu
             test_causal_softmax.cu
             test_swizzle.cu
 	          ../test_common.cu)

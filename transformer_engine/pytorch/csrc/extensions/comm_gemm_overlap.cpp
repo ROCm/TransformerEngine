@@ -2,7 +2,7 @@
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * 
+ *
  * See LICENSE for license information.
  ************************************************************************/
 #ifndef USE_ROCM
@@ -218,6 +218,10 @@ at::Tensor CommOverlap::get_buffer(bool local_chunk, std::optional<std::vector<i
   return torch::from_blob(ubuf_ptr, *shape, at::dtype(dtype).device(torch::kCUDA));
 }
 
+at::Stream CommOverlap::get_communication_stream() {
+  return at::cuda::getStreamFromExternal(_stream_comm, at::cuda::current_device());
+}
+
 /***************************************************************************************************
  * CommOverlapP2P
  **************************************************************************************************/
@@ -301,5 +305,9 @@ at::Tensor CommOverlapP2P::get_buffer(bool local_chunk, std::optional<std::vecto
   // Construct PyTorch tensor
   const auto dtype = transformer_engine::pytorch::GetATenDType(_ubuf.dtype());
   return torch::from_blob(ubuf_ptr, *shape, at::dtype(dtype).device(torch::kCUDA));
+}
+
+at::Stream CommOverlapP2P::get_communication_stream() {
+  return at::cuda::getStreamFromExternal(_stream_recv, at::cuda::current_device());
 }
 #endif // !USE_ROCM
