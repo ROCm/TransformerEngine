@@ -78,51 +78,72 @@ __global__ void compute_ref_kernel(
   const size_t jj = blockIdx.x * blockDim.x + threadIdx.x;
   const size_t ii = blockIdx.y * blockDim.y + threadIdx.y;
 
-  if (ii >= m || jj >= n)
-    return;
+  const bool in_range = (ii < m) && (jj < n);
 
   float val = 0.0f;
 
-  for (size_t kk = 0; kk < k; ++kk) {
-    const size_t a_idx = transa ? (ii * k + kk) : (kk * m + ii);
-    const size_t b_idx = transb ? (kk * n + jj) : (jj * k + kk);
+  if (in_range) {
+    for (size_t kk = 0; kk < k; ++kk) {
+      const size_t a_idx = transa ? (ii * k + kk) : (kk * m + ii);
+      const size_t b_idx = transb ? (kk * n + jj) : (jj * k + kk);
 
-    float a_scale_inv_val = a_scale_inv_scalar;
-    float b_scale_inv_val = b_scale_inv_scalar;
+      float a_scale_inv_val = a_scale_inv_scalar;
+      float b_scale_inv_val = b_scale_inv_scalar;
 
-    if (a_scale_inv_mxfp8) {
-      const size_t a_scale_idx =
-        transa ? (a_idx / 32) : ((kk / 32) * m + ii);
-      const size_t b_scale_idx =
-        transb ? ((kk / 32) * n + jj) : (b_idx / 32);
+      if (a_scale_inv_mxfp8) {
+        const size_t a_scale_idx =
+          transa ? (a_idx / 32) : ((kk / 32) * m + ii);
+        const size_t b_scale_idx =
+          transb ? ((kk / 32) * n + jj) : (b_idx / 32);
 
-      const float a_byte = static_cast<float>(a_scale_inv_mxfp8[a_scale_idx]);
-      const float b_byte = static_cast<float>(b_scale_inv_mxfp8[b_scale_idx]);
+        const float a_byte = static_cast<float>(a_scale_inv_mxfp8[a_scale_idx]);
+        const float b_byte = static_cast<float>(b_scale_inv_mxfp8[b_scale_idx]);
 
-      a_scale_inv_val = exp2f(a_byte - 127.0f);
-      b_scale_inv_val = exp2f(b_byte - 127.0f);
+        a_scale_inv_val = exp2f(a_byte - 127.0f);
+        b_scale_inv_val = exp2f(b_byte - 127.0f);
+      }
+
+      const float a_val = static_cast<float>(a_data[a_idx]);
+      const float b_val = static_cast<float>(b_data[b_idx]);
+
+      val += a_scale_inv_val * a_val * b_scale_inv_val * b_val;
     }
 
-    const float a_val = a_data[a_idx];
-    const float b_val = b_data[b_idx];
+    if (bias_data) {
+      val += static_cast<float>(bias_data[ii]);
+    }
 
-    val += a_scale_inv_val * a_val * b_scale_inv_val * b_val;
+    if (gelu_data) {
+      gelu_data[ii + jj * m] = static_cast<Gelu_Type>(val);
+      val = ref_gelu(val);
+    }
+
+    const float scaled = val * d_scale;
+    d_data[ii + jj * m] = static_cast<D_Type>(scaled);
   }
 
-  if (bias_data) {
-    val += (float)bias_data[ii];
-  }
-
-  if (gelu_data) {
-    gelu_data[ii + jj * m] = val;
-    val = ref_gelu(val);
-  }
-
-  const float scaled = val * d_scale;
-  d_data[ii + jj * m] = scaled;
-
+  // Blockwise reduction for amax
   if (is_fp8_output && d_amax) {
-    atomicMax(d_amax, fabsf(val));
+    const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    const int nthreads = blockDim.x * blockDim.y;
+
+    extern __shared__ float s_amax[];
+
+    // Out-of-range threads contribute 0
+    s_amax[tid] = in_range ? fabsf(val) : 0.0f;
+    __syncthreads();
+
+    for (int offset = nthreads / 2; offset > 0; offset /= 2) {
+      if (tid < offset) {
+        s_amax[tid] = fmaxf(s_amax[tid], s_amax[tid + offset]);
+      }
+      __syncthreads();
+    }
+
+    if (tid == 0) {
+      const float block_max = s_amax[0];
+      atomicMax(d_amax, block_max);
+    }
   }
 }
 
@@ -214,8 +235,11 @@ static void compute_ref_impl(
   dim3 block(16, 16);
   dim3 grid((n + block.x - 1) / block.x, (m + block.y - 1) / block.y);
 
+  const int nthreads = block.x * block.y;
+  size_t shmem_bytes = nthreads * sizeof(float);
+
   compute_ref_kernel<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>
-      <<<grid, block, 0, 0>>>(
+      <<<grid, block, shmem_bytes, 0>>>(
           dA,
           dB,
           a_scale_inv_scalar,
