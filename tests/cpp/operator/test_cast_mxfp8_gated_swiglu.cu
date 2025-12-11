@@ -294,7 +294,7 @@ void performTest_x1(const size_t rows,
 #ifdef __HIP_PLATFORM_AMD__
     adjust_ref_for_e8m0_scale_error("scales", mismatches_scales_indices, gpu_scales_ptr,
                                     ref_output_scales.get(), unpadded_blocks_Y, unpadded_blocks_X,
-                                    scales_stride, rows, cols, ref_output.get(), otype);
+                                    scales_stride, rows, output_cols, ref_output.get(), otype);
     mismatches_scales = 0;
 #endif
 
@@ -413,16 +413,24 @@ void performTest_x2(const size_t rows,
                                  rel_tolerable_mismatches_limit);
 
 #ifdef __HIP_PLATFORM_AMD__
+if (mismatches_scales_colwise > 0){
+    GTEST_LOG_(INFO) << "Colwise mismatches: " << mismatches_scales_colwise <<
+    " unpadded blocks Y: " << unpadded_blocks_Y_colwise <<
+    " unpadded blocks X: " << unpadded_blocks_X_colwise <<
+    " scales stride: " << scales_stride_colwise <<
+    " rows: " << rows <<
+    " cols: " << cols << "output cols: " << output_cols;
+}
     adjust_ref_for_e8m0_scale_error("scales_rowwise", mismatches_scales_indices_rowwise,
                                     output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
                                     ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
-                                    unpadded_blocks_X_rowwise, scales_stride_rowwise, rows, cols,
+                                    unpadded_blocks_X_rowwise, scales_stride_rowwise, rows, output_cols,
                                     ref_output_rowwise.get(), otype);
     mismatches_scales_rowwise = 0;
     adjust_ref_for_e8m0_scale_error("scales_colwise", mismatches_scales_indices_colwise,
                                     output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
                                     ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
-                                    unpadded_blocks_X_colwise, scales_stride_colwise, rows, cols,
+                                    unpadded_blocks_X_colwise, scales_stride_colwise, rows, output_cols,
                                     ref_output_colwise.get(), otype);
     mismatches_scales_colwise = 0;
 #endif

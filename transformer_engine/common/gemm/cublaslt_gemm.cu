@@ -778,6 +778,7 @@ using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublas
 void nvte_cublas_handle_init() { auto _ = cublasHandleManager::Instance().GetHandle(); }
 
 }  //  namespace transformer_engine
+#endif // __HIP_PLATFORM_AMD__
 
 void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
                             const NVTETensor *bias, NVTETensor *pre_gelu_out, const int num_gemms,
@@ -786,6 +787,10 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
                             cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_tensor_gemm);
 
+#ifdef __HIP_PLATFORM_AMD__
+    multi_stream_cublas_gemm(A, B, D, bias, pre_gelu_out, num_gemms, transa, transb, grad,
+                             workspace, accumulate, use_split_accumulator, math_sm_count, stream);
+#else
   const int current_device = transformer_engine::cuda::current_device();
   const bool is_hopper = (transformer_engine::cuda::sm_arch(current_device) == 90);
   const bool use_cutlass = transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPED_GEMM", false);
@@ -859,5 +864,5 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     }
     cublas_path();
   }
+#endif  // __HIP_PLATFORM_AMD__
 }
-#endif
