@@ -490,19 +490,17 @@ void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, 
                                   const double rel_tolerable_mismatches_limit = 0);
 
 #ifdef USE_ROCM
-void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
-                                  const size_t row_blocks, const size_t col_blocks, const size_t stride,
-                                  size_t& mismatches_num
-                                  const size_t scale_diff_abs_tolerance = 0,
-                                  const double abs_tolerable_mismatches_limit = 0,
-                                  const double rel_tolerable_mismatches_limit = 0
-                                  )
-{
+static inline void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test,
+                                                const uint8_t *ref, const size_t row_blocks,
+                                                const size_t col_blocks, const size_t stride,
+                                                size_t &mismatches_num,
+                                                const size_t scale_diff_abs_tolerance = 0,
+                                                const double abs_tolerable_mismatches_limit = 0,
+                                                const double rel_tolerable_mismatches_limit = 0) {
   std::vector<size_t> mismatch_indices;
-  compare_e8m0_scaling_factors(name, test, ref, row_blocks, col_blocks, stride,
-                               mismatch_indices, mismatches_num, scale_diff_abs_tolerance,
-                               abs_tolerable_mismatches_limit,
-                               rel_tolerable_mismatches_limit);
+  compare_e8m0_scaling_factors(name, test, ref, row_blocks, col_blocks, stride, mismatch_indices,
+                               mismatches_num, scale_diff_abs_tolerance,
+                               abs_tolerable_mismatches_limit, rel_tolerable_mismatches_limit);
 }
 
 void adjust_ref_for_e8m0_scale_error(const std::string &name,

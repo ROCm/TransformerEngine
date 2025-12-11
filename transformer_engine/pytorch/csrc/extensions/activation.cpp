@@ -12,7 +12,7 @@
 
 namespace transformer_engine::pytorch {
 
-template <void (*act_func)(const NVTETensor, NVTETensor, cudaStream_t)>//PIV TODO: amax moved somewhere else
+template <void (*act_func)(const NVTETensor, NVTETensor, cudaStream_t)>
 py::object activation_helper(const at::Tensor& input, py::handle quantizer, int shape_divisor = 1) {
   init_extension();
 

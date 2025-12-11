@@ -6,21 +6,21 @@
 
 #pragma once
 
+#include <cfloat>
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include <transformer_engine/cast.h>
-
-#include <cfloat>
 #include <limits>
 
-#include "../common.h"
-#include "../transpose/cast_transpose.h"
-#include "../util/vectorized_pointwise.h"
-#include "../utils.cuh"
+#include "common.h"
 #include "math.h"
+#include "ptx.cuh"
+#include "rocm_vectorized_2d.cuh"
 #include "transformer_engine/activation.h"
+#include "transformer_engine/cast.h"
+#include "transpose/cast_transpose.h"
 #include "transformer_engine/transpose.h"
-#include "../util/rocm_vectorized_2d.cuh"
+#include "utils.cuh"
+#include "vectorized_pointwise.h"
 
 namespace transformer_engine {
 
@@ -102,7 +102,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
     const int scale_idx = scale_offset_Y * scales_stride + scale_offset_X;
     const e8m0_t biased_exponent = scales_ptr[scale_idx];
-    const float block_scale = exp2f(static_cast<float>(biased_exponent) - FP32_EXPONENT_BIAS);
+    const float block_scale = ptx::exp2f(static_cast<float>(biased_exponent) - ptx::FP32_EXPONENT_BIAS);
 
     if constexpr (USE_ROWWISE_SCALING) {
       Vec<IType, ELEMS_PER_THREAD> in;

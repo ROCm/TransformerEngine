@@ -55,7 +55,7 @@ void compute_ref(const ProcessingMethod processing_method,
                  const size_t scales_stride_rowwise,
                  const size_t scales_stride_colwise)
 {
-#ifdef 0 //__HIP_PLATFORM_AMD__//PIV TODO
+#ifdef __HIP_PLATFORM_AMD__
     using std::isnan, std::isinf;
 #endif
     const size_t tile_size_Y = 32;
@@ -326,7 +326,7 @@ void performTest_x1(const ProcessingMethod processing_method,
 #ifdef __HIP_PLATFORM_AMD__
     adjust_ref_for_e8m0_scale_error("scales", mismatches_scales_indices, gpu_scales_ptr,
                                     ref_output_scales.get(), unpadded_blocks_Y, unpadded_blocks_X,
-                                    scales_stride, rows, cols, ref_output.get(), otype);
+                                    scales_stride, rows, cols, ref_output_c.get(), otype);
     mismatches_scales = 0;
 #endif
 
@@ -518,13 +518,13 @@ void performTest_x2(const ProcessingMethod processing_method,
                                     output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
                                     ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
                                     unpadded_blocks_X_rowwise, scales_stride_rowwise, rows, cols,
-                                    ref_output_rowwise.get(), otype);
+                                    ref_output_c_rowwise.get(), otype);
     mismatches_scales_rowwise = 0;
     adjust_ref_for_e8m0_scale_error("scales_colwise", mismatches_scales_indices_colwise,
                                     output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
                                     ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
                                     unpadded_blocks_X_colwise, scales_stride_colwise, rows, cols,
-                                    ref_output_colwise.get(), otype);
+                                    ref_output_c_colwise.get(), otype);
     mismatches_scales_colwise = 0;
 #endif
 

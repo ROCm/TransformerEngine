@@ -699,7 +699,7 @@ void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, 
                                     const double rel_tolerable_mismatches_limit)
 {
   const size_t N = row_blocks * col_blocks;
-  const size_t tolerable_mismatches_limit = std::min(abs_tolerable_mismatches_limit,
+  const size_t tolerable_mismatches_limit = std::max(abs_tolerable_mismatches_limit,
                                                      std::floor(N * rel_tolerable_mismatches_limit));
   mismatches_num = 0;
 

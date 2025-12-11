@@ -55,7 +55,7 @@ template <int nvec, bool aligned, typename InputType>
 __launch_bounds__(amax_kernel_threads) __global__
     void amax_kernel(const InputType *input, float *amax,
 #ifdef __HIP_PLATFORM_AMD__
-                     [[maybe_unused]] float* __restrict__ block_amax,//PIV TODO: remove maybe_unused
+                     float* __restrict__ block_amax,
 #else
                      [[maybe_unused]] void* __restrict__ block_amax,
 #endif
@@ -197,7 +197,7 @@ namespace {
 
 void compute_amax_impl(const NVTETensor input_, const NVTETensor output_, cudaStream_t stream,
 #ifdef __HIP_PLATFORM_AMD__
-                       [[maybe_unused]] const NVTETensor workspace_, //PIV TODO remove maybe unused
+                       const NVTETensor workspace_,
 #else
                        [[maybe_unused]] const NVTETensor workspace_,
 #endif

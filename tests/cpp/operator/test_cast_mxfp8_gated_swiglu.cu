@@ -264,7 +264,7 @@ void performTest_x1(const size_t rows,
                               rowwise,
                               colwise);
 
-    std::vector<size_t> mismatches_scales;
+    std::vector<size_t> mismatches_scales_indices;
     size_t mismatches_scales = 0;
     const size_t scale_diff_abs_tolerance = 0;
     const double abs_tolerable_mismatches_limit = 1.0;

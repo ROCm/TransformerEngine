@@ -12,7 +12,6 @@
 #include <cuda.h>
 #endif // #ifndef __HIP_PLATFORM_AMD__
 
-//PIV TODO #include <iostream>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/multi_stream.h>
 #include <transformer_engine/transformer_engine.h>

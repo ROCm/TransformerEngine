@@ -5,22 +5,27 @@
  ************************************************************************/
 #pragma once
 
+#include <cfloat>
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include <transformer_engine/cast.h>
-
-#include <cfloat>
 
 #include "common.h"
-#include "transpose/cast_transpose.h"
-#include "util/vectorized_pointwise.h"
-#include "utils.cuh"
 #include "math.h"
-#include "transformer_engine/transformer_engine.h"
-#include "rocm_vectorized_2d.cuh"
 #include "ptx.cuh"
+#include "rocm_vectorized_2d.cuh"
+#include "transformer_engine/cast.h"
+#include "transpose/cast_transpose.h"
+#include "vectorized_pointwise.h"
+#include "utils.cuh"
 
 namespace transformer_engine {
+
+// Forward declaration, definition is in cast_kernels.cuh
+template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
+          float (*OP)(float, const ParamOP &)>
+void mxfp8_quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop,
+                    Tensor *output, Tensor *dbias, Tensor *workspace, cudaStream_t stream);
+
 
 constexpr size_t MXFP8_CHUNK_DIM_Y = 64;
 constexpr size_t MXFP8_CHUNK_DIM_X = 64;
@@ -541,52 +546,5 @@ void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tenso
   }
 }
 
-#if 0
-namespace normalization {
-
-template <typename compute_t = float>
-void x_rocm_norm_mxfp8_quantize(LaunchParams<ForwardKernelParams> &launch_params) {
-  const size_t rows = launch_params.params.rows;
-  const size_t cols = launch_params.params.cols;
-  const size_t scale_dim_X_rowwise = 32;
-  const size_t scale_dim_Y_colwise = launch_params.training ? 32 : 1;
-
-  const size_t chunks_Y = DIVUP(rows, transformer_engine::MXFP8_CHUNK_DIM_Y);
-  const size_t chunks_X = DIVUP(cols, transformer_engine::MXFP8_CHUNK_DIM_X);
-  const size_t blocks_Y = DIVUP(chunks_Y, transformer_engine::MXFP8_CHUNKS_PER_BLOCK_Y);
-  const size_t blocks_X = DIVUP(chunks_X, transformer_engine::MXFP8_CHUNKS_PER_BLOCK_X);
-
-  const size_t scale_stride_rowwise = launch_params.z_tensor->scale_inv.shape[1];
-  const size_t scale_stride_colwise = launch_params.training ? launch_params.z_tensor->columnwise_scale_inv.shape[1] : 1;
-
-  e8m0_t *const scales_rowwise_ptr = reinterpret_cast<e8m0_t *>(launch_params.z_tensor->scale_inv.dptr);
-  e8m0_t *const scales_colwise_ptr =
-      launch_params.training ? reinterpret_cast<e8m0_t *>(launch_params.z_tensor->columnwise_scale_inv.dptr) : nullptr;
-  
-  const dim3 block(transformer_engine::MXFP8_THREADS_PER_CHUNK);
-  const dim3 grid(blocks_X, blocks_Y);
-
-  TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
-    scale_dim_Y_colwise, SCALE_DIM_Y,
-      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-        launch_params.z_tensor->dtype(), OType,
-          TRANSFORMER_ENGINE_SWITCH_CONDITION(
-            !(cols % (32 * sizeof(compute_t))), IS_ALIGNED,
-              cast_mxfp8_2D_kernel<false, false, false, Empty, {}, compute_t, OType,
-                                SCALE_DIM_Y, scale_dim_X_rowwise, IS_ALIGNED, true><<<grid, block, 0, launch_params.stream>>>(
-                reinterpret_cast<const compute_t*>(launch_params.params.z),
-                nullptr,
-                reinterpret_cast<OType *>(launch_params.z_tensor->data.dptr),
-                reinterpret_cast<OType *>(launch_params.z_tensor->columnwise_data.dptr),
-                scales_rowwise_ptr, scales_colwise_ptr,
-                nullptr, nullptr, nullptr,
-                rows, cols, scale_stride_rowwise, scale_stride_colwise);
-          );
-      );
-  );
-}
-
-}  // namespace normalization
-#endif
 
 } // namespace transformer_engine

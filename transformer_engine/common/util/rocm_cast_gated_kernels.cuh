@@ -6,18 +6,18 @@
 
 #pragma once
 
+#include <cfloat>
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include <transformer_engine/activation.h>
-#include <transformer_engine/cast.h>
 
-#include <cfloat>
-
-#include "../common.h"
-#include "../util/vectorized_pointwise.h"
-#include "../utils.cuh"
+#include "common.h"
 #include "math.h"
-#include "../util/rocm_vectorized_2d.cuh"
+#include "ptx.cuh"
+#include "rocm_vectorized_2d.cuh"
+#include "transformer_engine/activation.h"
+#include "transformer_engine/cast.h"
+#include "vectorized_pointwise.h"
+#include "utils.cuh"
 
 namespace transformer_engine {
 namespace gated_kernels {
