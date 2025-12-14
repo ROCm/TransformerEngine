@@ -16,40 +16,6 @@
 
 namespace ck_fused_attn{
 
-void set_aiter_asm_dir() {
-  static std::once_flag aiter_asm_dir_once;
-  std::call_once(aiter_asm_dir_once, []() {
-    hipDeviceProp_t prop;
-    hipError_t res= hipGetDeviceProperties(&prop, 0);
-    if (res != hipSuccess) {
-      throw std::runtime_error(std::string(
-        "hipGetDeviceProperties failed with error: ") + hipGetErrorString(res));
-    }
-    const char *arh_str = nullptr;
-    switch (prop.major*10 + prop.minor) {
-      case 94: // Gfx942
-        arh_str = "gfx942/"; // trailing slash is mandatory
-        break;
-      case 95: // Gfx950
-        arh_str = "gfx950/"; // trailing slash is mandatory
-        break;
-      default:
-        // Unsupported V3 architecture
-        return;
-    }
-    Dl_info info;
-    dladdr((void*)set_aiter_asm_dir, &info);
-    setenv("AITER_ASM_DIR",
-           (std::filesystem::path(info.dli_fname).parent_path() / "aiter" / arh_str).c_str(), 1);
-    if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
-      if (std::string(env_p) == "1"){
-        // Print the set environment variable for debugging purposes
-        std::cout << "AITER_ASM_DIR set to: " << getenv("AITER_ASM_DIR") << std::endl;
-      }
-    }
-  });
-}
-
 std::string get_data_type_str(DType dtype){
   std::string data_type_str;
   if(dtype==DType::kFloat16){
