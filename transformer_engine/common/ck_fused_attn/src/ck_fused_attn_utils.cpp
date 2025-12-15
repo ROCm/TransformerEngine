@@ -5,9 +5,6 @@
  ************************************************************************/
 
 #include <utility>
-#include <dlfcn.h>
-#include <filesystem>
-#include <mutex> //once_flag
 #include "ck_fused_attn_utils.hpp"
 #include "ck_fused_attn/ck_fused_attn.hpp"
 #include "mask.hpp"
