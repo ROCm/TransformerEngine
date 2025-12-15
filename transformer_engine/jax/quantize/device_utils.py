@@ -36,7 +36,8 @@ def is_fp8_gemm_with_all_layouts_supported() -> bool:
     """Return True if using Blackwell architecture, False otherwise."""
     compute_capability = get_device_compute_capability()
     # Enable once FP8 GEMM layout coverage is validated with hipblaslt.
-    # if is_hip_extension():
+    if is_hip_extension():
         # gfx950 --> NV blackwell
         # return compute_capability == 95
+        return False
     return 100 <= compute_capability < 120

@@ -28,7 +28,7 @@ from transformer_engine.pytorch.utils import (
     is_bf16_compatible,
 )
 if IS_HIP_EXTENSION:
-    from transformer_engine.pytorch.utils import is_mi200, is_mi308, is_mi350
+    from transformer_engine.pytorch.utils import is_mi200, is_mi308
 
 from transformer_engine.pytorch import (
     DotProductAttention,
@@ -757,7 +757,7 @@ def test_gpt_full_activation_recompute(
         pytest.skip("FP8 parameters are not supported in debug mode.")
     if recipe.float8_block_scaling() and not fp8_block_scaling_available:
         pytest.skip(reason_for_no_fp8_block_scaling)
-    if IS_HIP_EXTENSION and is_mi350():
+    if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5):
         if (dtype == torch.bfloat16 
             and not fp8
             and not use_reentrant 

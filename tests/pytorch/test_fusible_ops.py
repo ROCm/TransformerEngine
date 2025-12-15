@@ -35,10 +35,9 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
 )
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from transformer_engine.pytorch.utils import is_bf16_compatible
+from transformer_engine.pytorch.utils import get_device_compute_capability
 import transformer_engine_torch as tex
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
-if IS_HIP_EXTENSION:
-    from transformer_engine.pytorch.utils import is_mi350
 
 # Import utility functions
 _current_file = pathlib.Path(__file__).resolve()
@@ -921,7 +920,7 @@ class TestBasicOps:
         quantized_grad_input: bool,
     ) -> None:
         """GEMM with FP8 inputs and outputs"""
-        if IS_HIP_EXTENSION and is_mi350():
+        if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5):
             if (
                 quantization
                 and quantization.startswith("fp8")
