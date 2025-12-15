@@ -456,12 +456,6 @@ if IS_HIP_EXTENSION:
       import re
       return (re.search('AMD Instinct MI308', torch.cuda.get_device_name(torch.cuda.current_device())) is not None)
 
-    @functools.lru_cache(maxsize=None)
-    def is_mi350():
-      """check whether this machine is mi35x"""
-      props = torch.cuda.get_device_properties(torch.cuda.current_device())
-      return (props.major, props.minor) == (9, 5) 
-
 @functools.lru_cache(maxsize=None)
 def is_fp8_fnuz():
     return IS_HIP_EXTENSION and get_device_compute_capability() == (9, 4)
