@@ -72,6 +72,7 @@ class TestDistributedSelfAttn:
         batch, seqlen, num_head, hidden = data_shape
 
         if not is_fused_attn_kernel_available(
+            is_training,
             dtype,
             dtype,
             QKVLayout.BS3HD,
@@ -222,6 +223,7 @@ class TestDistributedCrossAttn:
         batch, seqlen, num_head, hidden = data_shape
 
         if not is_fused_attn_kernel_available(
+            is_training,
             dtype,
             dtype,
             QKVLayout.BSHD_BS2HD,
@@ -300,6 +302,7 @@ class TestDistributedContextParallelSelfAttn:
         cp_strategy,
         use_shardy,
         use_scan_ring=False,
+        window_size=None,
     ):
         if qkv_layout.is_thd():
             if is_hip_extension() and cp_strategy == CPStrategy.RING:
@@ -348,7 +351,7 @@ class TestDistributedContextParallelSelfAttn:
             is_training,
             qkv_layout,
             bias_shape,
-            None,
+            window_size,
             SeqDescFormat.SegmentIDs,
             number_of_devices=device_count,
             mesh_shape=mesh_shape,
@@ -360,6 +363,7 @@ class TestDistributedContextParallelSelfAttn:
 
         def check_has_backend_for_mask(mask_type):
             return is_fused_attn_kernel_available(
+                is_training,
                 dtype,
                 dtype,
                 qkv_layout,
@@ -500,6 +504,13 @@ class TestDistributedContextParallelSelfAttn:
         "use_scan",
         [pytest.param(False, id="NO_SCAN"), pytest.param(True, id="USE_SCAN")],
     )
+    @pytest.mark.parametrize(
+        "window_size",
+        [
+            pytest.param((-1, -1), id="window_size(-1, -1)"),
+            pytest.param((20, 0), id="window_size(20, 0)"),
+        ],
+    )
     def test_context_parallel_ring_attn(
         self,
         device_count,
@@ -513,7 +524,15 @@ class TestDistributedContextParallelSelfAttn:
         qkv_layout,
         load_balanced,
         use_scan,
+        window_size,
     ):
+        if window_size != (-1, -1) and not qkv_layout.is_thd():
+            pytest.skip("Sliding window attention is only supported for THD layout")
+        if window_size != (-1, -1) and qkv_layout.is_thd() and use_scan:
+            pytest.skip(
+                "When context parallelism and sliding window attention are used, "
+                "scanloop is not supported"
+            )
         self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
@@ -528,6 +547,7 @@ class TestDistributedContextParallelSelfAttn:
             CPStrategy.RING,
             use_shardy=False,
             use_scan_ring=use_scan,
+            window_size=window_size,
         )
 
     @pytest.mark.skipif(version.parse(jax.__version__) < version.parse("0.5.0"), reason="shardy sharding requires JAX 0.5.0")

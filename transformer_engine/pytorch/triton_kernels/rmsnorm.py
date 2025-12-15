@@ -6,7 +6,7 @@ import triton
 import triton.language as tl
 from itertools import product
 from .norm_common import num_programs, block_size, use_blocked, make_ln_out
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.triton_kernels.common import (
     te_dtype_to_torch_dtype,
@@ -389,6 +389,7 @@ def te_rmsnorm_fwd_triton(
             f"but {weight.shape[0]=} while {input.shape[1]=}"
         )
     IS_FP8 = isinstance(quantizer, Float8Quantizer)
+    IS_FP8_CURRENT_SCALING = isinstance(quantizer, Float8CurrentScalingQuantizer)
     IS_MXFP8 = isinstance(quantizer, MXFP8Quantizer)
     BLOCK_SIZE = block_size(input)
     USE_BLOCKED = use_blocked(input)
@@ -460,7 +461,7 @@ def te_rmsnorm_fwd_triton(
         FP8_MAX,
         MAKE_TRANSPOSE,
     )
-    if IS_MXFP8:
+    if IS_MXFP8 or IS_FP8_CURRENT_SCALING:
         out = quantizer.quantize(out, out=ln_out)
 
     return out, None, rsigma

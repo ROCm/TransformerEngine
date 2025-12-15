@@ -275,10 +275,10 @@ void log_fused_attn_config(
 
 // select a backend for fused attention
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
-    NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type attn_mask_type, float dropout, size_t num_attn_heads, size_t num_gqa_groups,
-    size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v,
-    int64_t window_size_left, int64_t window_size_right) {
+    bool is_training, NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, float dropout, size_t num_attn_heads,
+    size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
+    size_t head_dim_v, int64_t window_size_left, int64_t window_size_right) {
   using namespace transformer_engine;
   
   // by default, fused attn is enabled
@@ -350,14 +350,14 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
   NVTE_API_CALL(nvte_flash_attn_fwd_qkvpacked);
   using namespace transformer_engine;
 
-  const Tensor *input_cu_seqlens = reinterpret_cast<const Tensor*>(cu_seqlens);
-  const Tensor *input_cu_seqlens_padded = reinterpret_cast<const Tensor *>(cu_seqlens_padded);
-  const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(rng_state);
-  const Tensor *input_QKV = reinterpret_cast<const Tensor*>(QKV);
-  const Tensor *input_Bias = reinterpret_cast<const Tensor*>(Bias);
-  Tensor *input_output_S = reinterpret_cast<Tensor*>(S);
-  Tensor *output_O = reinterpret_cast<Tensor*>(O);
-  Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
+  const Tensor *input_cu_seqlens = convertNVTETensorCheck(cu_seqlens);
+  const Tensor *input_cu_seqlens_padded = convertNVTETensorCheck(cu_seqlens_padded);
+  const Tensor *input_rng_state = convertNVTETensorCheck(rng_state);
+  const Tensor *input_QKV = convertNVTETensorCheck(QKV);
+  const Tensor *input_Bias = convertNVTETensorCheck(Bias);
+  Tensor *input_output_S = convertNVTETensorCheck(S);
+  Tensor *output_O = convertNVTETensorCheck(O);
+  Tensor *wkspace = convertNVTETensorCheck(workspace);
 
   auto ndim = input_QKV->data.shape.size();
   size_t b = input_cu_seqlens->data.shape[0] - 1;
@@ -384,8 +384,8 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
-      QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, dropout, h, h, max_seqlen,
-      max_seqlen, d, d, window_size_left, window_size_right);
+      is_training, QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, dropout, h, h, 
+      max_seqlen, max_seqlen, d, d, window_size_left, window_size_right);
   
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd_qkvpacked(
@@ -401,7 +401,9 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
   } else if(fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_AOTriton){
     fused_attn_aotriton_fwd_qkvpacked(
       b, h, max_seqlen, d,
-      is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
+      is_training, attn_scale, dropout,
+      window_size_left, window_size_right,
+      qkv_layout, bias_type, attn_mask_type,
       input_QKV, 
       output_O, Aux_CTX_Tensors,
       input_cu_seqlens,
@@ -426,19 +428,19 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
   NVTE_API_CALL(nvte_flash_attn_bwd_qkvpacked);
   using namespace transformer_engine;
 
-  const Tensor *input_cu_seqlens = reinterpret_cast<const Tensor*>(cu_seqlens);
-  const Tensor *input_cu_seqlens_padded = reinterpret_cast<const Tensor *>(cu_seqlens_padded);
-  const Tensor *input_QKV = reinterpret_cast<const Tensor*>(QKV);
-  const Tensor *input_O = reinterpret_cast<const Tensor*>(O);
-  const Tensor *input_dO = reinterpret_cast<const Tensor*>(dO);
-  Tensor *output_dQKV = reinterpret_cast<Tensor*>(dQKV);
-  Tensor *output_dBias = reinterpret_cast<Tensor *>(dBias);
-  Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
+  const Tensor *input_cu_seqlens = convertNVTETensorCheck(cu_seqlens);
+  const Tensor *input_cu_seqlens_padded = convertNVTETensorCheck(cu_seqlens_padded);
+  const Tensor *input_QKV = convertNVTETensorCheck(QKV);
+  const Tensor *input_O = convertNVTETensorCheck(O);
+  const Tensor *input_dO = convertNVTETensorCheck(dO);
+  Tensor *output_dQKV = convertNVTETensorCheck(dQKV);
+  Tensor *output_dBias = convertNVTETensorCheck(dBias);
+  Tensor *wkspace = convertNVTETensorCheck(workspace);
 
   // auxiliary tensors
-  const Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]); //softmax lse
+  const Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]); //softmax lse
   //extract the saved rng state from aux_ctx_tensor
-  const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[1]);
+  const Tensor *input_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
   Tensor *input_Bias = nullptr;
 
   auto ndim = input_QKV->data.shape.size();
@@ -466,12 +468,12 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
-      QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, dropout, h, h, max_seqlen,
+      true, QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, dropout, h, h, max_seqlen,
       max_seqlen, d, d, window_size_left, window_size_right);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     if((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)){
-      input_Bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+      input_Bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
     }
     fused_attn_ck_bwd_qkvpacked(
       b, h, max_seqlen, d,
@@ -513,18 +515,18 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
                                   cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd_kvpacked);
   using namespace transformer_engine;
-  const Tensor *input_cu_seqlens_q = reinterpret_cast<const Tensor*>(cu_seqlens_q);
-  const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor*>(cu_seqlens_kv);
-  const Tensor *input_cu_seqlens_q_padded = reinterpret_cast<const Tensor *>(cu_seqlens_q_padded);
-  const Tensor *input_cu_seqlens_kv_padded = reinterpret_cast<const Tensor *>(cu_seqlens_kv_padded);
-  const Tensor *input_page_table_k = reinterpret_cast<const Tensor *>(page_table_k);
-  const Tensor *input_page_table_v = reinterpret_cast<const Tensor *>(page_table_v);
-  const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(rng_state);
-  const Tensor *input_Q = reinterpret_cast<const Tensor*>(Q);
-  const Tensor *input_KV = reinterpret_cast<const Tensor*>(KV);
-  const Tensor *input_Bias = reinterpret_cast<const Tensor*>(Bias);
-  Tensor *output_O = reinterpret_cast<Tensor*>(O);
-  Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
+  const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
+  const Tensor *input_cu_seqlens_kv = convertNVTETensorCheck(cu_seqlens_kv);
+  const Tensor *input_cu_seqlens_q_padded = convertNVTETensorCheck(cu_seqlens_q_padded);
+  const Tensor *input_cu_seqlens_kv_padded = convertNVTETensorCheck(cu_seqlens_kv_padded);
+  const Tensor *input_page_table_k = convertNVTETensorCheck(page_table_k);
+  const Tensor *input_page_table_v = convertNVTETensorCheck(page_table_v);
+  const Tensor *input_rng_state = convertNVTETensorCheck(rng_state);
+  const Tensor *input_Q = convertNVTETensorCheck(Q);
+  const Tensor *input_KV = convertNVTETensorCheck(KV);
+  const Tensor *input_Bias = convertNVTETensorCheck(Bias);
+  Tensor *output_O = convertNVTETensorCheck(O);
+  Tensor *wkspace = convertNVTETensorCheck(workspace);
   
   size_t b = input_cu_seqlens_q->data.shape[0] - 1;
   auto ndim = input_Q->data.shape.size();
@@ -554,8 +556,8 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
-      Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
-      max_seqlen_kv, d, d, window_size_left, window_size_right);
+      is_training, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, 
+      max_seqlen_q, max_seqlen_kv, d, d, window_size_left, window_size_right);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd_kvpacked(
@@ -576,6 +578,7 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
     fused_attn_aotriton_fwd_kvpacked(
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
       is_training, attn_scale, dropout, 
+      window_size_left, window_size_right,
       qkv_layout, bias_type, attn_mask_type,
       input_Q, input_KV, 
       output_O, Aux_CTX_Tensors,
@@ -601,22 +604,22 @@ void nvte_fused_attn_bwd_kvpacked(
     cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd_kvpacked);
   using namespace transformer_engine;
-  const Tensor *input_cu_seqlens_q = reinterpret_cast<const Tensor*>(cu_seqlens_q);
-  const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor*>(cu_seqlens_kv);
-  const Tensor *input_cu_seqlens_q_padded = reinterpret_cast<const Tensor *>(cu_seqlens_q_padded);
-  const Tensor *input_cu_seqlens_kv_padded = reinterpret_cast<const Tensor *>(cu_seqlens_kv_padded);
-  const Tensor *input_Q = reinterpret_cast<const Tensor*>(Q);
-  const Tensor *input_KV = reinterpret_cast<const Tensor*>(KV);
-  const Tensor *input_O = reinterpret_cast<const Tensor*>(O);
-  const Tensor *input_dO = reinterpret_cast<const Tensor*>(dO);
-  Tensor *output_dQ = reinterpret_cast<Tensor*>(dQ);
-  Tensor *output_dKV = reinterpret_cast<Tensor*>(dKV);
-  Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
-  Tensor *output_dBias = reinterpret_cast<Tensor *>(dBias);
+  const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
+  const Tensor *input_cu_seqlens_kv = convertNVTETensorCheck(cu_seqlens_kv);
+  const Tensor *input_cu_seqlens_q_padded = convertNVTETensorCheck(cu_seqlens_q_padded);
+  const Tensor *input_cu_seqlens_kv_padded = convertNVTETensorCheck(cu_seqlens_kv_padded);
+  const Tensor *input_Q = convertNVTETensorCheck(Q);
+  const Tensor *input_KV = convertNVTETensorCheck(KV);
+  const Tensor *input_O = convertNVTETensorCheck(O);
+  const Tensor *input_dO = convertNVTETensorCheck(dO);
+  Tensor *output_dQ = convertNVTETensorCheck(dQ);
+  Tensor *output_dKV = convertNVTETensorCheck(dKV);
+  Tensor *wkspace = convertNVTETensorCheck(workspace);
+  Tensor *output_dBias = convertNVTETensorCheck(dBias);
 
   // auxiliary tensors (to be propagated to the backward pass later)
-  const Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]); //softmax lse
-  const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[1]);
+  const Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]); //softmax lse
+  const Tensor *input_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
   Tensor *input_Bias = nullptr;
 
   size_t b = input_cu_seqlens_q->data.shape[0] - 1;
@@ -647,12 +650,12 @@ void nvte_fused_attn_bwd_kvpacked(
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
-      Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
+      true, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
       max_seqlen_kv, d, d, window_size_left, window_size_right);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
-      input_Bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+      input_Bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
     }
     fused_attn_ck_bwd_kvpacked(
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
@@ -703,19 +706,19 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd);
   using namespace transformer_engine;
-  const Tensor *input_cu_seqlens_q = reinterpret_cast<const Tensor*>(cu_seqlens_q);
-  const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor*>(cu_seqlens_kv);
-  const Tensor *input_cu_seqlens_q_padded = reinterpret_cast<const Tensor *>(cu_seqlens_q_padded);
-  const Tensor *input_cu_seqlens_kv_padded = reinterpret_cast<const Tensor *>(cu_seqlens_kv_padded);
-  const Tensor *input_page_table_k = reinterpret_cast<const Tensor *>(page_table_k);
-  const Tensor *input_page_table_v = reinterpret_cast<const Tensor *>(page_table_v);
-  const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(rng_state);
-  const Tensor *input_Q = reinterpret_cast<const Tensor*>(Q);
-  const Tensor *input_K = reinterpret_cast<const Tensor*>(K);
-  const Tensor *input_V = reinterpret_cast<const Tensor*>(V);
-  const Tensor *input_Bias = reinterpret_cast<const Tensor*>(Bias);
-  Tensor *output_O = reinterpret_cast<Tensor*>(O);
-  Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
+  const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
+  const Tensor *input_cu_seqlens_kv = convertNVTETensorCheck(cu_seqlens_kv);
+  const Tensor *input_cu_seqlens_q_padded = convertNVTETensorCheck(cu_seqlens_q_padded);
+  const Tensor *input_cu_seqlens_kv_padded = convertNVTETensorCheck(cu_seqlens_kv_padded);
+  const Tensor *input_page_table_k = convertNVTETensorCheck(page_table_k);
+  const Tensor *input_page_table_v = convertNVTETensorCheck(page_table_v);
+  const Tensor *input_rng_state = convertNVTETensorCheck(rng_state);
+  const Tensor *input_Q = convertNVTETensorCheck(Q);
+  const Tensor *input_K = convertNVTETensorCheck(K);
+  const Tensor *input_V = convertNVTETensorCheck(V);
+  const Tensor *input_Bias = convertNVTETensorCheck(Bias);
+  Tensor *output_O = convertNVTETensorCheck(O);
+  Tensor *wkspace = convertNVTETensorCheck(workspace);
 
   auto ndim = input_Q->data.shape.size();
   size_t b = input_cu_seqlens_q->data.shape[0] - 1;
@@ -737,8 +740,8 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
-      Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
-      max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right);
+      is_training, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, 
+      max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd(
@@ -759,6 +762,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
     fused_attn_aotriton_fwd(
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk,
       is_training, attn_scale, dropout, 
+      window_size_left, window_size_right,
       qkv_layout, bias_type, attn_mask_type,
       input_Q, input_K, input_V, 
       output_O, Aux_CTX_Tensors,
@@ -786,24 +790,24 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd);
   using namespace transformer_engine;
-  const Tensor *input_cu_seqlens_q = reinterpret_cast<const Tensor*>(cu_seqlens_q);
-  const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor*>(cu_seqlens_kv);
-  const Tensor *input_cu_seqlens_q_padded = reinterpret_cast<const Tensor *>(cu_seqlens_q_padded);
-  const Tensor *input_cu_seqlens_kv_padded = reinterpret_cast<const Tensor *>(cu_seqlens_kv_padded);
-  const Tensor *input_Q = reinterpret_cast<const Tensor*>(Q);
-  const Tensor *input_K = reinterpret_cast<const Tensor*>(K);
-  const Tensor *input_V = reinterpret_cast<const Tensor*>(V);
-  const Tensor *input_O = reinterpret_cast<const Tensor*>(O);
-  const Tensor *input_dO = reinterpret_cast<const Tensor*>(dO);
+  const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
+  const Tensor *input_cu_seqlens_kv = convertNVTETensorCheck(cu_seqlens_kv);
+  const Tensor *input_cu_seqlens_q_padded = convertNVTETensorCheck(cu_seqlens_q_padded);
+  const Tensor *input_cu_seqlens_kv_padded = convertNVTETensorCheck(cu_seqlens_kv_padded);
+  const Tensor *input_Q = convertNVTETensorCheck(Q);
+  const Tensor *input_K = convertNVTETensorCheck(K);
+  const Tensor *input_V = convertNVTETensorCheck(V);
+  const Tensor *input_O = convertNVTETensorCheck(O);
+  const Tensor *input_dO = convertNVTETensorCheck(dO);
 
-  Tensor *output_dQ = reinterpret_cast<Tensor*>(dQ);
-  Tensor *output_dK = reinterpret_cast<Tensor*>(dK);
-  Tensor *output_dV = reinterpret_cast<Tensor*>(dV);
-  Tensor *output_dBias = reinterpret_cast<Tensor *>(dBias);
-  Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
+  Tensor *output_dQ = convertNVTETensorCheck(dQ);
+  Tensor *output_dK = convertNVTETensorCheck(dK);
+  Tensor *output_dV = convertNVTETensorCheck(dV);
+  Tensor *output_dBias = convertNVTETensorCheck(dBias);
+  Tensor *wkspace = convertNVTETensorCheck(workspace);
 
-  const Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]); //softmax lse
-  const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[1]);
+  const Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]); //softmax lse
+  const Tensor *input_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
   Tensor *input_Bias = nullptr;
 
   auto ndim = input_Q->data.shape.size();
@@ -826,12 +830,12 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
-      Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
+      true, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
       max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
-      input_Bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+      input_Bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
     }
     fused_attn_ck_bwd(
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v,
@@ -874,10 +878,10 @@ uint32_t nvte_get_runtime_num_segments(NVTETensor cu_seqlen, NVTETensor workspac
   return transformer_engine::fused_attn_rocm::GetRuntimeNumSegments(cu_seqlen, workspace, max_batch_size, stream);
 }
 
-void nvte_populate_rng_state_async(void *rng_state_dst, const void *const seed,
-                                   size_t batch_size, size_t num_heads, size_t q_max_seqlen, 
-                                   size_t kv_max_seqlen, cudaStream_t stream) {
+void nvte_populate_rng_state_async(NVTETensor rng_state_dst, const NVTETensor seed,
+                                   size_t q_max_seqlen, size_t kv_max_seqlen,
+                                   NVTE_Fused_Attn_Backend backend, cudaStream_t stream) {
   NVTE_API_CALL(nvte_populate_rng_state_async);
-  transformer_engine::fused_attn_rocm::PopulateRngStateAsync(rng_state_dst, seed, batch_size, 
-        num_heads, q_max_seqlen, kv_max_seqlen, stream);
+  using namespace transformer_engine::fused_attn_rocm;
+  PopulateRngStateAsync(rng_state_dst, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 }

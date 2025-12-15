@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -10,6 +12,10 @@
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
 
+#ifdef __HIP_PLATFORM_AMD__
+#include "common/common.h"
+#endif
+
 namespace transformer_engine::pytorch {
 
 std::vector<size_t> getTensorShape(at::Tensor t) {
@@ -18,6 +24,20 @@ std::vector<size_t> getTensorShape(at::Tensor t) {
     shape.push_back(s);
   }
   return shape;
+}
+
+NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape) {
+  NVTEShape ret;
+  ret.ndim = torch_shape.size();
+  constexpr int max_dimensions = sizeof(ret.data) / sizeof(size_t);
+  NVTE_CHECK(ret.ndim < max_dimensions,
+             "Torch tensor has too many dimensions. Max supported: ", max_dimensions, " and got ",
+             ret.ndim, ".");
+  for (size_t i = 0; i < ret.ndim; ++i) {
+    const auto& v = torch_shape[i];
+    ret.data[i] = static_cast<size_t>(v);
+  }
+  return ret;
 }
 
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer) {
@@ -276,5 +296,28 @@ int roundup(const int value, const int multiple) {
   assert(multiple > 0);
   return ((value + multiple - 1) / multiple) * multiple;
 }
+
+#ifdef __HIP_PLATFORM_AMD__
+
+inline bool nvte_use_atomic_amax() {
+  const char *env_p = std::getenv("NVTE_USE_ATOMIC_AMAX");
+  if (env_p && std::string(env_p) == "1")
+    return true;
+  return false;
+}
+
+at::Tensor allocate_amax_workspace(const TensorWrapper& input_tensor) {
+  if (nvte_use_atomic_amax() || input_tensor.numel() == 0) {
+    // User chose atomic path, or empty tensor -> return a size-0 empty tensor
+    return at::empty(0, at::CUDA(at::kFloat));
+  }
+
+  const auto N = input_tensor.numel();
+  size_t workspace_blocks = nvte_amax_workspace_num_blocks(N);
+
+  return at::empty(workspace_blocks, at::CUDA(at::kFloat));
+}
+
+#endif
 
 }  // namespace transformer_engine::pytorch
