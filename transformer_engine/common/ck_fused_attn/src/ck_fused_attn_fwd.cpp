@@ -82,8 +82,6 @@ void log_fwd_config(const char* func_name,
     std::cout<<"nhead_k: "<<fmha_args.nhead_k<<std::endl;
 
     std::cout<<"scale_s: "<<fmha_args.scale_s<<std::endl;
-    std::cout<<"scale_p: "<<fmha_args.scale_p<<std::endl;
-    std::cout<<"scale_o: "<<fmha_args.scale_o<<std::endl;
 
     std::cout<<"logits_soft_cap: "<<fmha_args.logits_soft_cap<<std::endl;
 
@@ -158,8 +156,6 @@ hipError_t ck_attn_fwd(
   ck_tile::index_t max_seqlen_q = s_q;
   ck_tile::index_t max_seqlen_k = s_kv;
   float scale_s = scaling_factor;
-  float scale_p = 1.f;
-  float scale_o = 1.f;
   float logits_soft_cap = 0.f;
   float p_drop = dropout_probability;
   bool is_group_mode = false;
@@ -221,6 +217,9 @@ hipError_t ck_attn_fwd(
                          k_ptr,
                          v_ptr,
                          bias_type==bias_enum::alibi? alibi_slope_ptr :bias_ptr,
+                         nullptr, //q_descale_ptr
+                         nullptr, //k_descale_ptr
+                         nullptr, //v_descale_ptr
                          nullptr,//rand_val_ptr
                          lse_ptr,
                          o_ptr,
@@ -239,8 +238,6 @@ hipError_t ck_attn_fwd(
                          nhead,
                          nhead_k,
                          scale_s,
-                         scale_p,
-                         scale_o,
                          logits_soft_cap,
                          stride_q,
                          stride_k,
@@ -285,6 +282,7 @@ hipError_t ck_attn_fwd(
                                          mask_type,
                                          bias_type,
                                          has_lse,
+                                         quant_scale_enum::no_scale,
                                          uses_fwd_v3, 
                                          how_v3_bf16_cvt);
   if(average_runtime < 0){
@@ -332,8 +330,6 @@ hipError_t ck_attn_varlen_fwd(
   ck_tile::index_t max_seqlen_kv = s_kv;
 
   float scale_s = scaling_factor;
-  float scale_p = 1.f;
-  float scale_o = 1.f;
   float logits_soft_cap = 0.f;
   float p_drop = dropout_probability;
   bool is_group_mode = true;
@@ -398,6 +394,9 @@ hipError_t ck_attn_varlen_fwd(
                          k_ptr,
                          v_ptr,
                          nullptr,//bias_ptr
+                         nullptr, //q_descale_ptr
+                         nullptr, //k_descale_ptr
+                         nullptr, //v_descale_ptr
                          nullptr,//rand_val_ptr
                          lse_thd_ptr,
                          o_ptr,
@@ -416,8 +415,6 @@ hipError_t ck_attn_varlen_fwd(
                          nhead,
                          nhead_k,
                          scale_s,
-                         scale_p,
-                         scale_o,
                          logits_soft_cap,
                          stride_q,
                          stride_k,
@@ -472,6 +469,7 @@ hipError_t ck_attn_varlen_fwd(
     mask_type,
     bias_type,
     has_lse,
+    quant_scale_enum::no_scale,
     uses_fwd_v3, 
     how_v3_bf16_cvt);
   if(average_runtime < 0){
