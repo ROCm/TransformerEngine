@@ -473,6 +473,10 @@ def te_cast_transpose_noop_triton(input, noop_flag, input_scale, cast_out, trans
     grid = lambda META: (triton.cdiv(num_rows, META['BLOCK_M']) * triton.cdiv(row_length, META['BLOCK_N']),)
 
     if current_scaling:
+        # 1) global amax reduction
+        # 2) compute current scale
+        # 3) cast+transpose with that current scale (otherwise same as delayed)
+
         amax_out.fill_(-float("inf"))
         fp8_max = get_fp8_max(otype)
 
