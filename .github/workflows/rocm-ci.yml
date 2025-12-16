@@ -44,6 +44,7 @@ jobs:
     timeout-minutes: 720
     runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         runner: [linux-mi325-8, linux-mi355-8]
     steps:
