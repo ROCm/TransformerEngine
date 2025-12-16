@@ -40,9 +40,12 @@ concurrency:
 
 jobs:
   build_and_test:
-    name: Build and Test on GPU
+    name: Build and Test on GPU (${{ matrix.runner }})
     timeout-minutes: 720
-    runs-on: linux-mi325-8
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        runner: [linux-mi325-8, linux-mi355-8]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
