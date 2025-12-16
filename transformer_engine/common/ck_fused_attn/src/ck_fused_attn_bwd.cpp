@@ -675,10 +675,6 @@ hipError_t ck_attn_bwd(
 
   // print ck traits and args when needed
   log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_type, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args);
-  if (uses_bwd_v3)
-  {
-    set_aiter_asm_dir();
-  }
   
   float average_runtime = aiter::mha_bwd(fmha_args,
                                          stream_config,
@@ -1036,10 +1032,6 @@ hipError_t ck_attn_varlen_bwd(
 
   // print ck traits and args when needed
   log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_enum::no_bias, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args);
-  if (uses_bwd_v3)
-  {
-    set_aiter_asm_dir();
-  }
 
   float average_runtime = aiter::mha_bwd(fmha_args,
     stream_config,
