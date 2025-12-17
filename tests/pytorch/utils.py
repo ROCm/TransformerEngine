@@ -25,6 +25,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     AttentionLogging,
 )
 from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 torch_float8_e4m3_type = get_torch_float8_e4m3_type()
 torch_float8_e5m2_type = get_torch_float8_e5m2_type()
@@ -198,6 +199,20 @@ def logging_context(highest_level=logging.WARNING):
     finally:
         logging.disable(previous_level)
 
+if IS_HIP_EXTENSION:
+    class EnvVarCleaner:
+        def __init__(self, envs_):
+            self.envs = envs_
+            self.flags = {}
+            for env in self.envs:
+              if env in os.environ:
+                self.flags[env] = os.environ[env]
+        def __del__(self):
+          for env in self.envs:
+            if env in self.flags:
+                os.environ[env] = self.flags[env]
+            else:
+                os.environ.pop(env, None)
 
 def get_available_attention_backends(
     config: ModelConfig,
@@ -287,14 +302,31 @@ def get_available_attention_backends(
         _attention_backends["backend_selection_requires_update"] = False
         return available_backends, flash_attention_backend, fused_attention_backend
 
-    backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
-    if AttentionLogging._is_logging_setup is False:
-        AttentionLogging.setup_logging()
-    with logging_context(highest_level=AttentionLogging._log_level):
-        for i in range(3):
-            os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
-            _attention_backends["backend_selection_requires_update"] = True
-            available_backends, flash_attention_backend, fused_attention_backend = test()
-            if fused_attention_backend == FusedAttnBackend[backends[i]]:
-                fused_attn_backends.append(fused_attention_backend)
+    if IS_HIP_EXTENSION:
+        backends = {"AOTriton": "AOTRITON", "CK": "CK"}
+        if AttentionLogging._is_logging_setup is False:
+            AttentionLogging.setup_logging()
+        with logging_context(highest_level=AttentionLogging._log_level):
+            for i in backends.keys():
+                for k in backends.keys():
+                    os.environ["NVTE_FUSED_ATTN_"+backends[k]] = "0"
+                os.environ["NVTE_FUSED_ATTN_"+backends[i]] = "1"
+                _attention_backends["backend_selection_requires_update"] = True
+                available_backends, flash_attention_backend, fused_attention_backend = test()
+                if fused_attention_backend == FusedAttnBackend[i]:
+                    fused_attn_backends.append(fused_attention_backend)
+        for i in backends.keys():
+            del os.environ["NVTE_FUSED_ATTN_"+backends[i]]
+        available_backends[1] = len(fused_attn_backends) > 0
+    else:
+        backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
+        if AttentionLogging._is_logging_setup is False:
+            AttentionLogging.setup_logging()
+        with logging_context(highest_level=AttentionLogging._log_level):
+            for i in range(3):
+                os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
+                _attention_backends["backend_selection_requires_update"] = True
+                available_backends, flash_attention_backend, fused_attention_backend = test()
+                if fused_attention_backend == FusedAttnBackend[backends[i]]:
+                    fused_attn_backends.append(fused_attention_backend)
     return available_backends, flash_attention_backend, fused_attn_backends

@@ -47,15 +47,11 @@ if IS_HIP_EXTENSION:
     from ..tensor.fsdp2_allgather_tensor import FSDPAGTensor
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-<<<<<<< HEAD
 from ..utils import get_device_compute_capability, torch_get_autocast_gpu_dtype
 if IS_HIP_EXTENSION:
     from ..triton_kernels.cast import te_quantize_triton
 
 from ..utils import is_non_tn_fp8_gemm_supported
-=======
-from ..utils import is_non_tn_fp8_gemm_supported, torch_get_autocast_gpu_dtype
->>>>>>> upstream/release_v2.6
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ...common.recipe import DelayedScaling, Recipe
 from ...debug.pytorch.debug_state import TEDebugState

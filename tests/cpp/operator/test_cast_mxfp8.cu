@@ -45,85 +45,6 @@ void compute_ref(const ProcessingMethod processing_method,
                  const bool colwise,
                  const InputType* input,
                  const InputType* grad,
-<<<<<<< HEAD
-                 OutputType* output_c,
-                 float* dbias,
-                 fp8e8m0* output_scales,
-                 const size_t scale_idx,
-                 const size_t i_min,
-                 const size_t i_max,
-                 const size_t j_min,
-                 const size_t j_max,
-                 const size_t cols) {
-#ifdef __HIP_PLATFORM_AMD__
-    using std::isnan, std::isinf;
-#endif
-    float amax = 0.0f;
-
-    // Find the absolute maximum value in the block
-    for (size_t i = i_min; i < i_max; ++i) {
-        for (size_t j = j_min; j < j_max; ++j) {
-            const size_t idx = i * cols + j;
-            float elt = static_cast<float>(input[idx]);
-            if (processing_method == ProcessingMethod::CAST_DBIAS) {
-              // grad is the input
-              elt = static_cast<float>(grad[idx]);
-            }
-            if (processing_method != ProcessingMethod::CAST_ONLY
-                && processing_method != ProcessingMethod::CAST_DBIAS) {
-                elt = OP(elt);
-            }
-            if (processing_method == ProcessingMethod::CAST_DACT ||
-                processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
-                elt *= static_cast<float>(grad[idx]);
-            }
-            dbias[j] += elt;
-            if (isinf(elt) || isnan(elt)) {
-                continue;
-            }
-            amax = std::max(amax, std::abs(elt));
-        }
-    }
-
-    const fp8e8m0 biased_exponent = float_to_e8m0(amax * Quantized_Limits<OutputType>::max_reciprocal());
-    const float scale_reciprocal = exp2f_rcp(biased_exponent);
-    output_scales[scale_idx] = biased_exponent;
-
-    // Quantize elements in the block
-    for (size_t i = i_min; i < i_max; ++i) {
-        for (size_t j = j_min; j < j_max; ++j) {
-            const size_t idx = i * cols + j;
-            float elt = static_cast<float>(input[idx]);
-            if (processing_method == ProcessingMethod::CAST_DBIAS) {
-              // grad is the input
-              elt = static_cast<float>(grad[idx]);
-            }
-            if (processing_method != ProcessingMethod::CAST_ONLY
-                && processing_method != ProcessingMethod::CAST_DBIAS) {
-                elt = OP(elt);
-            }
-            if (processing_method == ProcessingMethod::CAST_DACT ||
-                processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
-                elt *= static_cast<float>(grad[idx]);
-            }
-            output_c[idx] = static_cast<OutputType>(elt * scale_reciprocal);
-        }
-    }
-}
-
-template <typename InputType, typename OutputType, float (*OP)(const float)>
-void compute_ref_x1(const ProcessingMethod processing_method,
-                    const InputType* input,
-                    const InputType* grad,
-                    OutputType* output_c,
-                    fp8e8m0* output_scales,
-                    InputType* output_dbias,
-                    const size_t rows,
-                    const size_t cols,
-                    const size_t block_size_Y,
-                    const size_t block_size_X,
-                    const size_t scales_stride)
-=======
                  OutputType* output_rowwise,
                  OutputType* output_colwise,
                  fp8e8m0* output_scales_rowwise,
@@ -133,8 +54,11 @@ void compute_ref_x1(const ProcessingMethod processing_method,
                  const size_t cols,
                  const size_t scales_stride_rowwise,
                  const size_t scales_stride_colwise)
->>>>>>> upstream/release_v2.6
 {
+#ifdef __HIP_PLATFORM_AMD__
+    using std::isnan, std::isinf;
+#endif
+
     const size_t tile_size_Y = 32;
     const size_t tile_size_X = 32;
     const size_t tiles_num_Y = (rows + tile_size_Y - 1) / tile_size_Y;
@@ -181,9 +105,11 @@ void compute_ref_x1(const ProcessingMethod processing_method,
                     }
                     thread_dbias[j] += elt;
 
+#ifndef __HIP_PLATFORM_AMD__
+                    // This is actually not the exact same behavior in GPU kernels
                     // Numerical truncation: after downcast to InputType (BF16/FP16), upcast it back to FP32
                     elt = static_cast<float>(static_cast<InputType>(elt));
-
+#endif
                     cache_buffer[cache_idx] = elt;
                     if (isinf(elt) || isnan(elt)) {
                         continue;
@@ -367,39 +293,6 @@ void performTest_x1(const ProcessingMethod processing_method,
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
-<<<<<<< HEAD
-    compute_ref_x1<InputType, OutputType, OP>(processing_method,
-                                              input.rowwise_cpu_dptr<InputType>(),
-                                              grad.rowwise_cpu_dptr<InputType>(),
-                                              ref_output_c.get(),
-                                              ref_output_scales.get(),
-                                              ref_output_dbias.get(),
-                                              rows,
-                                              cols,
-                                              block_size_rows,
-                                              block_size_cols,
-                                              scales_stride);
-
-    
-#ifdef __HIP_PLATFORM_AMD__
-    if (processing_method != ProcessingMethod::CAST_ONLY) {
-        std::vector<std::tuple<size_t, size_t, int>> mismatch_idx;
-        compare_e8m0_scaling_factors("scales", output_c, ref_output_scales.get(),
-                                unpadded_blocks_Y, unpadded_blocks_X, scales_stride, 0.01, rowwise, mismatch_idx);
-
-        if (mismatch_idx.size()) {
-            adjust_ref(mismatch_idx, ref_output_c.get(), unpadded_blocks_Y, unpadded_blocks_X, rows, cols, otype);
-        }
-
-        auto [atol, rtol] = getTolerances(otype);
-        compareResults("output_c", output_c, ref_output_c.get(), rowwise, atol, rtol);
-    }
-    else
-#endif // #ifdef __HIP_PLATFORM_AMD__
-    {
-    auto [atol, rtol] = getTolerances(otype);
-    compareResults("output_c", output_c, ref_output_c.get(), rowwise, atol, rtol);
-=======
     compute_ref<InputType, OutputType>(processing_method,
                                        OP,
                                        rowwise,
@@ -415,30 +308,48 @@ void performTest_x1(const ProcessingMethod processing_method,
                                        cols,
                                        scales_stride,
                                        scales_stride);
->>>>>>> upstream/release_v2.6
 
     const uint8_t * const gpu_scales_ptr = rowwise
                                            ? output_c.rowwise_cpu_scale_inv_ptr<fp8e8m0>()
                                            : output_c.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
 
-<<<<<<< HEAD
-    compare_e8m0_scaling_factors("scales", gpu_scales_ptr, ref_output_scales.get(),
-                                 unpadded_blocks_Y, unpadded_blocks_X, scales_stride);
-    }
-=======
     const size_t scale_diff_abs_tolerance = 0;
+#ifdef __HIP_PLATFORM_AMD__
+    double abs_tolerable_mismatches_limit = 0.0;
+    double rel_tolerable_mismatches_limit = 0.0;
+    if (processing_method != ProcessingMethod::CAST_ONLY) {
+      abs_tolerable_mismatches_limit = 1;
+      rel_tolerable_mismatches_limit = 1.0e-4;
+    }
+#else
     const double abs_tolerable_mismatches_limit = 0.0;
     const double rel_tolerable_mismatches_limit = 0.0;
->>>>>>> upstream/release_v2.6
+#endif // #ifdef __HIP_PLATFORM_AMD__
 
     size_t mismatches_scales = 0;
+#ifdef __HIP_PLATFORM_AMD__
+    std::vector<size_t> mismatches_scales_indices;
+#endif // #ifdef __HIP_PLATFORM_AMD__
     compare_e8m0_scaling_factors("scales", gpu_scales_ptr, ref_output_scales.get(),
                                  unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
+#ifdef __HIP_PLATFORM_AMD__
+                                 mismatches_scales_indices,
+#endif // #ifdef __HIP_PLATFORM_AMD__
                                  mismatches_scales,
                                  scale_diff_abs_tolerance,
                                  abs_tolerable_mismatches_limit,
                                  rel_tolerable_mismatches_limit);
-
+#ifdef __HIP_PLATFORM_AMD__
+    if (processing_method != ProcessingMethod::CAST_ONLY) {
+      adjust_ref_for_e8m0_scale_error("scales", mismatches_scales_indices, gpu_scales_ptr,
+                                      ref_output_scales.get(), unpadded_blocks_Y, unpadded_blocks_X,
+                                      scales_stride, rows, cols, ref_output_c.get(), otype);
+      mismatches_scales = 0;
+    }else{
+      // should not have scale mismatch for cast only cases 
+      ASSERT_EQ(mismatches_scales, 0) <<"expect no scale mismatches for cast only cases"<<std::endl;
+    }
+#endif // #ifdef __HIP_PLATFORM_AMD__
     const size_t mismatches_elts = 32 * mismatches_scales;
     auto [atol, rtol] = getTolerances(otype);
     compareResults("output_c", output_c, ref_output_c.get(), rowwise, atol, rtol, true, mismatches_elts);
@@ -582,48 +493,6 @@ void performTest_x2(const ProcessingMethod processing_method,
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
-<<<<<<< HEAD
-    compute_ref_x2<InputType, OutputType, OP>(processing_method,
-                                              input.rowwise_cpu_dptr<InputType>(),
-                                              grad.rowwise_cpu_dptr<InputType>(),
-                                              ref_output_c_rowwise.get(),
-                                              ref_output_c_colwise.get(),
-                                              ref_scales_rowwise.get(),
-                                              ref_scales_colwise.get(),
-                                              ref_output_dbias.get(),
-                                              rows,
-                                              cols,
-                                              block_size_rows,
-                                              block_size_cols,
-                                              scales_stride_rowwise,
-                                              scales_stride_colwise);
-#ifdef __HIP_PLATFORM_AMD__
-    if (processing_method != ProcessingMethod::CAST_ONLY) {
-        std::vector<std::tuple<size_t, size_t, int>> mismatch_idx_r;
-        compare_e8m0_scaling_factors("scales_rowwise", output, ref_scales_rowwise.get(),
-                                unpadded_blocks_Y_rowwise, unpadded_blocks_X_rowwise, scales_stride_rowwise, 0.01, true, mismatch_idx_r);
-
-        if (mismatch_idx_r.size()) {
-            adjust_ref(mismatch_idx_r, ref_output_c_rowwise.get(), unpadded_blocks_Y_rowwise, unpadded_blocks_X_rowwise, rows, cols, otype);
-        }
-        std::vector<std::tuple<size_t, size_t, int>> mismatch_idx_c;
-        compare_e8m0_scaling_factors("scales_colwise", output, ref_scales_colwise.get(),
-                                unpadded_blocks_Y_colwise, unpadded_blocks_X_colwise, scales_stride_colwise, 0.01, false, mismatch_idx_c);
-
-        if (mismatch_idx_c.size()) {
-            adjust_ref(mismatch_idx_c, ref_output_c_colwise.get(), unpadded_blocks_Y_colwise, unpadded_blocks_X_colwise, rows, cols, otype);
-        }
-
-        auto [atol, rtol] = getTolerances(otype);
-        compareResults("output_c_rowwise", output, ref_output_c_rowwise.get(), true, atol, rtol);
-        compareResults("output_c_colwise", output, ref_output_c_colwise.get(), false, atol, rtol);
-    } else
-#endif // #ifdef __HIP_PLATFORM_AMD__
-    {
-    auto [atol, rtol] = getTolerances(otype);
-    compareResults("output_c_rowwise", output, ref_output_c_rowwise.get(), true, atol, rtol);
-    compareResults("output_c_colwise", output, ref_output_c_colwise.get(), false, atol, rtol);
-=======
     compute_ref<InputType, OutputType>(processing_method,
                                        OP,
                                        true,
@@ -645,29 +514,53 @@ void performTest_x2(const ProcessingMethod processing_method,
     const double rel_tolerable_mismatches_limit = 0.0;
 
     size_t mismatches_scales_rowwise = 0;
->>>>>>> upstream/release_v2.6
+#ifdef __HIP_PLATFORM_AMD__
+    std::vector<size_t> mismatches_scales_indices_rowwise;
+#endif // #ifdef __HIP_PLATFORM_AMD__
     compare_e8m0_scaling_factors("scales_rowwise", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
                                  ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
                                  unpadded_blocks_X_rowwise, scales_stride_rowwise,
+#ifdef __HIP_PLATFORM_AMD__
+                                 mismatches_scales_indices_rowwise,
+#endif // #ifdef __HIP_PLATFORM_AMD__
+
                                  mismatches_scales_rowwise,
                                  scale_diff_abs_tolerance,
                                  abs_tolerable_mismatches_limit,
                                  rel_tolerable_mismatches_limit);
 
     size_t mismatches_scales_colwise = 0;
+#ifdef __HIP_PLATFORM_AMD__
+    std::vector<size_t> mismatches_scales_indices_colwise;
+#endif // #ifdef __HIP_PLATFORM_AMD__
     compare_e8m0_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
                                  ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
-<<<<<<< HEAD
-                                 unpadded_blocks_X_colwise, scales_stride_colwise);
-    }
-=======
                                  unpadded_blocks_X_colwise, scales_stride_colwise,
+#ifdef __HIP_PLATFORM_AMD__
+                                 mismatches_scales_indices_colwise,
+#endif // #ifdef __HIP_PLATFORM_AMD__
                                  mismatches_scales_colwise,
                                  scale_diff_abs_tolerance,
                                  abs_tolerable_mismatches_limit,
                                  rel_tolerable_mismatches_limit);
->>>>>>> upstream/release_v2.6
 
+#ifdef __HIP_PLATFORM_AMD__
+    if (processing_method != ProcessingMethod::CAST_ONLY) {
+      adjust_ref_for_e8m0_scale_error("scales_rowwise", mismatches_scales_indices_rowwise, output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
+                                      ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise, unpadded_blocks_X_rowwise,
+                                      scales_stride_rowwise, rows, cols, ref_output_c_rowwise.get(), otype);
+      adjust_ref_for_e8m0_scale_error("scales_colwise", mismatches_scales_indices_colwise, output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
+                                      ref_scales_colwise.get(), unpadded_blocks_Y_colwise, unpadded_blocks_X_colwise,
+                                      scales_stride_colwise, rows, cols, ref_output_c_colwise.get(), otype);
+ 
+      mismatches_scales_rowwise = 0;
+      mismatches_scales_colwise = 0;
+    }else{
+      // should not have scale mismatch for cast only cases 
+      ASSERT_EQ(mismatches_scales_rowwise, 0) <<"expect no scale mismatches for cast only cases"<<std::endl;
+      ASSERT_EQ(mismatches_scales_colwise, 0) <<"expect no scale mismatches for cast only cases"<<std::endl;
+    }
+#endif
     const size_t mismatches_elts_rowwise = 32 * mismatches_scales_rowwise;
     const size_t mismatches_elts_colwise = 32 * mismatches_scales_colwise;
 

@@ -197,8 +197,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           float amax = fabsf(after_dgate_reg[stage]);
           const float mx_block_X_amax = warp_reduce_max_broadcast(amax);
           const e8m0_t biased_exponent_X =
-              float_to_e8m0(mx_block_X_amax * Quantized_Limits<OType>::max_norm_rcp);
-          const float scale_reciprocal_X = exp2f_rcp(biased_exponent_X);
+              ptx::float_to_e8m0(mx_block_X_amax * Quantized_Limits<OType>::max_norm_rcp);
+          const float scale_reciprocal_X = ptx::exp2f_rcp(biased_exponent_X);
 
           out_gate_rowwise_sh[shmem_idx] =
               static_cast<OType>(scale_reciprocal_X * after_dgate_reg[stage]);
@@ -217,8 +217,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         float amax = fabsf(after_dact_reg[stage]);
         const float mx_block_X_amax = warp_reduce_max_broadcast(amax);
         const e8m0_t biased_exponent_X =
-            float_to_e8m0(mx_block_X_amax * Quantized_Limits<OType>::max_norm_rcp);
-        const float scale_reciprocal_X = exp2f_rcp(biased_exponent_X);
+            ptx::float_to_e8m0(mx_block_X_amax * Quantized_Limits<OType>::max_norm_rcp);
+        const float scale_reciprocal_X = ptx::exp2f_rcp(biased_exponent_X);
 
         out_act_rowwise_sh[shmem_idx] =
             static_cast<OType>(scale_reciprocal_X * after_dact_reg[stage]);
@@ -273,8 +273,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         }
 
         const e8m0_t biased_exponent =
-            float_to_e8m0(mx_block_Y_amax * Quantized_Limits<OType>::max_norm_rcp);
-        const float scale_reciprocal = exp2f_rcp(biased_exponent);
+            ptx::float_to_e8m0(mx_block_Y_amax * Quantized_Limits<OType>::max_norm_rcp);
+        const float scale_reciprocal = ptx::exp2f_rcp(biased_exponent);
 
         // Only single thread writes the computed scaling factor
         // Also assuming one iteration covers exactly 32 rows
@@ -319,8 +319,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       }
 
       const e8m0_t biased_exponent =
-          float_to_e8m0(mx_block_Y_amax * Quantized_Limits<OType>::max_norm_rcp);
-      const float scale_reciprocal = exp2f_rcp(biased_exponent);
+          ptx::float_to_e8m0(mx_block_Y_amax * Quantized_Limits<OType>::max_norm_rcp);
+      const float scale_reciprocal = ptx::exp2f_rcp(biased_exponent);
 
       // Only single thread writes the computed scaling factor
       // Also assuming one iteration covers exactly 32 rows

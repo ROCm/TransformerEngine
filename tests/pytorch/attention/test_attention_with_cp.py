@@ -6,12 +6,9 @@
 
 import os
 import subprocess
-<<<<<<< HEAD:tests/pytorch/fused_attn/test_fused_attn_with_cp.py
-=======
 import sys
 import pathlib
 
->>>>>>> upstream/release_v2.6:tests/pytorch/attention/test_attention_with_cp.py
 import pytest
 import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
