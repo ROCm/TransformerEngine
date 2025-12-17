@@ -175,8 +175,8 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
   } else {
     opts.push_back(concat_strings("--gpu-architecture=sm_", compile_sm_arch));
   }
-  opts.push_back(concat_strings("-I", cuda::include_directory(true)));
 #endif //__HIP_PLATFORM_AMD__
+  opts.push_back(concat_strings("-I", cuda::include_directory(true)));
 
   std::vector<const char*> opts_ptrs;
   for (const auto& opt : opts) {
