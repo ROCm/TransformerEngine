@@ -41,12 +41,19 @@ run_default_fa_lbl() {
 run_test_config(){
     echo ==== Run with Fused attention backend: $_fus_attn ====
     #_WORKERS_COUNT=$TEST_WORKERS
+    if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
+        mkdir -p ${TEST_DIR}/checkpoint
+        python ${TEST_DIR}/test_checkpoint.py --save-checkpoint all --checkpoint-dir ${TEST_DIR}/checkpoint
+        NVTE_TEST_CHECKPOINT_ARTIFACT_PATH=${TEST_DIR}/checkpoint run 1 test_checkpoint.py
+        rm -rf ${TEST_DIR}/checkpoint
+    fi
     run 1 test_cuda_graphs.py
     run_default_fa 1 test_deferred_init.py
     run_default_fa 1 test_float8tensor.py
     run_default_fa 1 test_float8_current_scaling_exact.py
     test $_fus_attn = auto -o $_fus_attn = ck -o $_fus_attn = aotriton && NVTE_FLASH_ATTN=0 run 1 test_cpu_offloading.py
     run_default_fa 1 test_fused_rope.py
+    run_default_fa 1 test_fused_router.py
     run_default_fa 1 test_fusible_ops.py
     run_default_fa 1 test_gemm_autotune.py
     run_default_fa 1 test_gemm_sm_count.py
@@ -68,6 +75,8 @@ run_test_config(){
     NVTE_USE_DEQUANTIZE_TRITON=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa_lbl "triton" 3 test_numerics.py
     NVTE_USE_RMSNORM_TRITON=1 run_default_fa_lbl "triton" 1 test_fusible_ops.py
     NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "triton" 1 test_float8_current_scaling_exact.py
+    NVTE_USE_ATOMIC_AMAX=1 run_default_fa 3 test_numerics.py
+    NVTE_USE_ATOMIC_AMAX=1 run_default_fa 3 test_fusible_ops.py
 }
 
 run_test_config_mgpu(){

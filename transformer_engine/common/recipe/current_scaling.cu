@@ -211,7 +211,7 @@ void nvte_compute_amax_with_workspace(const NVTETensor input_, const NVTETensor 
 
   // Check input tensor
   NVTE_CHECK(input_ != nullptr, "Invalid input tensor (got NULL)");
-  const auto &input = *reinterpret_cast<const Tensor *>(input_);
+  const auto &input = *convertNVTETensorCheck(input_);
   NVTE_CHECK(input.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
              "Input tensor for amax computation must unquantized, "
              "but got scaling_mode=",
@@ -224,7 +224,7 @@ void nvte_compute_amax_with_workspace(const NVTETensor input_, const NVTETensor 
 
   // Check output tensor
   NVTE_CHECK(output_ != nullptr, "Invalid output tensor (got NULL)");
-  auto &output = *reinterpret_cast<Tensor *>(output_);
+  auto &output = *convertNVTETensorCheck(output_);
   NVTE_CHECK(output.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
              "Output tensor for amax computation must be FP8 tensor with per-tensor scaling, "
              "but got scaling_mode=",
@@ -247,7 +247,7 @@ void nvte_compute_amax_with_workspace(const NVTETensor input_, const NVTETensor 
   size_t block_capacity = 0;
 
   if (workspace_ != nullptr) {
-    auto &workspace = *reinterpret_cast<Tensor *>(workspace_);
+    auto &workspace = *convertNVTETensorCheck(workspace_);
     if (workspace.data.dptr != nullptr) {
       NVTE_CHECK(workspace.data.dtype == DType::kFloat32,
                 "Workspace tensor for amax computation must be FP32, got dtype=",
@@ -289,7 +289,7 @@ void nvte_compute_scale_from_amax(NVTETensor output_, const NVTEQuantizationConf
 
   // Check output tensor
   NVTE_CHECK(output_ != nullptr, "Invalid output tensor (got NULL)");
-  auto &output = *reinterpret_cast<Tensor *>(output_);
+  auto &output = *convertNVTETensorCheck(output_);
   NVTE_CHECK(output.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
              "Tensor must be FP8 tensor with per-tensor scaling, "
              "but got scaling_mode=",

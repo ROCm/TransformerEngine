@@ -26,6 +26,20 @@ std::vector<size_t> getTensorShape(at::Tensor t) {
   return shape;
 }
 
+NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape) {
+  NVTEShape ret;
+  ret.ndim = torch_shape.size();
+  constexpr int max_dimensions = sizeof(ret.data) / sizeof(size_t);
+  NVTE_CHECK(ret.ndim < max_dimensions,
+             "Torch tensor has too many dimensions. Max supported: ", max_dimensions, " and got ",
+             ret.ndim, ".");
+  for (size_t i = 0; i < ret.ndim; ++i) {
+    const auto& v = torch_shape[i];
+    ret.data[i] = static_cast<size_t>(v);
+  }
+  return ret;
+}
+
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer) {
   init_extension();
   if (quantizer.is_none()) {
@@ -292,18 +306,16 @@ inline bool nvte_use_atomic_amax() {
   return false;
 }
 
-TensorWrapper allocate_amax_workspace(const TensorWrapper& input_tensor) {
+at::Tensor allocate_amax_workspace(const TensorWrapper& input_tensor) {
   if (nvte_use_atomic_amax() || input_tensor.numel() == 0) {
-    // User chose atomic path, or empty tensor -> no need for workspace
-    return TensorWrapper{};
+    // User chose atomic path, or empty tensor -> return a size-0 empty tensor
+    return at::empty(0, at::CUDA(at::kFloat));
   }
 
   const auto N = input_tensor.numel();
   size_t workspace_blocks = nvte_amax_workspace_num_blocks(N);
 
-  at::Tensor ws = at::empty(workspace_blocks, at::CUDA(at::kFloat));
-
-  return makeTransformerEngineTensor(ws);
+  return at::empty(workspace_blocks, at::CUDA(at::kFloat));
 }
 
 #endif
