@@ -81,7 +81,7 @@ def setup_pytorch_extension(
         sources = hipify(base_dir, csrc_source_files, sources, include_dirs[1:])
 
     # Compiler flags
-    cxx_flags = ["-O3", "-fvisibility=hidden"]
+    cxx_flags = ["-O3", "-fvisibility=default"]
     if debug_build_enabled():
         cxx_flags.append("-g")
         cxx_flags.append("-UNDEBUG")
