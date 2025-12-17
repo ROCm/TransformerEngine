@@ -220,10 +220,7 @@ def register_primitive(cls):
 
 
 for _name, _value in transformer_engine_jax.registrations().items():
-<<<<<<< HEAD
     ffi.register_ffi_target(_name, _value, platform="ROCM" if is_hip_extension else "CUDA")
-=======
-    ffi.register_ffi_target(_name, _value, platform="CUDA")
 
 
 def manage_primitives(enable_names=None, disable_names=None, disable_all_first=False):
@@ -269,4 +266,3 @@ def manage_primitives(enable_names=None, disable_names=None, disable_all_first=F
             cls.set_enabled(False)
         else:
             raise ValueError(f"Primitive not found in registry: {name}")
->>>>>>> upstream/release_v2.6

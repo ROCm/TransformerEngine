@@ -27,98 +27,6 @@ namespace {
 template <typename IType, typename OType>
 void compute_ref(const IType* grad,
                  const IType* input,
-<<<<<<< HEAD
-                 OType* output,
-                 fp8e8m0* output_scales,
-                 const size_t scale_idx,
-                 const size_t scale_idx_gate,
-                 float& thread_amax,
-                 const size_t i_min,
-                 const size_t i_max,
-                 const size_t j_min,
-                 const size_t j_max,
-                 const size_t cols) {
-
-    float block_amax = 0.0f;
-    float block_amax_gate = 0.0f;
-    const size_t stride = cols * 2;
-
-
-    // Find the absolute maximum value in the block
-    for (size_t i = i_min; i < i_max; ++i) {
-        for (size_t j = j_min; j < j_max; ++j) {
-            float silu_elt = static_cast<float>(input[i * stride + j]);
-            float gate_elt = static_cast<float>(input[i * stride + cols + j]);
-            float gated_amax_act = 0;
-            float gated_amax_gate = 0;
-
-            if constexpr (IS_DGATED) {
-                const float grad_elt = static_cast<float>(grad[i * cols + j]);
-                const float after_dsilu = dsilu(silu_elt) * grad_elt * gate_elt;
-                const float after_dgate = silu(silu_elt) * grad_elt;
-                gated_amax_act = abs(after_dsilu);
-                gated_amax_gate = abs(after_dgate);
-            } else {
-                const float after_silu = silu(silu_elt) * gate_elt;
-                gated_amax_act = abs(after_silu);
-            }
-
-            if (gated_amax_act > block_amax) { block_amax = gated_amax_act; }
-            if (gated_amax_gate > block_amax_gate) { block_amax_gate = gated_amax_gate; }
-        }
-    }
-
-    const fp8e8m0 biased_exponent = float_to_e8m0(block_amax *
-                                                  Quantized_Limits<OType>::max_reciprocal());
-    const float scale_reciprocal = exp2f_rcp(biased_exponent);
-    output_scales[scale_idx] = biased_exponent;
-    float scale_reciprocal_gate = 1;
-    if constexpr (IS_DGATED) {
-      const fp8e8m0 biased_exponent = float_to_e8m0(block_amax_gate *
-                                                    Quantized_Limits<OType>::max_reciprocal());
-      scale_reciprocal_gate = exp2f_rcp(biased_exponent);
-      output_scales[scale_idx_gate] = biased_exponent;
-    }
-
-
-    // Quantize elements in the block
-    for (size_t i = i_min; i < i_max; ++i) {
-        for (size_t j = j_min; j < j_max; ++j) {
-            float silu_elt = static_cast<float>(input[i * stride + j]);
-            float gate_elt = static_cast<float>(input[i * stride + cols + j]);
-
-            if constexpr (IS_DGATED) {
-                const float grad_elt = static_cast<float>(grad[i * cols + j]);
-                const float after_dsilu = dsilu(silu_elt) * grad_elt * gate_elt;
-                const float after_dgate = silu(silu_elt) * grad_elt;
-                output[i * stride + j] = static_cast<OType>(after_dsilu * scale_reciprocal);
-                output[i * stride + cols + j] = static_cast<OType>(after_dgate *
-                                                                   scale_reciprocal_gate);
-            } else {
-                const float after_silu = silu(silu_elt) * gate_elt;
-                output[i * cols + j] = static_cast<OType>(after_silu * scale_reciprocal);
-            }
-
-        }
-    }
-    thread_amax = std::max(thread_amax, block_amax);
-    thread_amax = std::max(thread_amax, block_amax_gate);
-}
-
-template <bool IS_DGATED, typename IType, typename OType>
-void compute_ref_x1(const IType* grad,
-                    const IType* input,
-                    OType* output,
-                    fp8e8m0* output_scales,
-                    float& ref_amax,
-                    const size_t rows,
-                    const size_t cols,
-                    const size_t block_size_Y,
-                    const size_t block_size_X,
-                    const size_t scales_stride) {
-    const size_t tile_size_Y = std::max(32lu, block_size_Y);
-    const size_t tile_size_X = std::max(64lu, block_size_X);
-=======
                  OType* output_rowwise,
                  OType* output_colwise,
                  fp8e8m0* output_scales_rowwise,
@@ -133,7 +41,6 @@ void compute_ref_x1(const IType* grad,
                  const bool is_colwise) {
     constexpr size_t tile_size_Y = 32;
     constexpr size_t tile_size_X = 32;
->>>>>>> upstream/release_v2.6
     const size_t tiles_num_Y = (rows + tile_size_Y - 1) / tile_size_Y;
     const size_t tiles_num_X = (cols + tile_size_X - 1) / tile_size_X;
     float amax = 0;
@@ -342,36 +249,6 @@ void performTest_x1(const size_t rows,
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
     float ref_amax = 0;
-<<<<<<< HEAD
-    compute_ref_x1<IS_DGATED, IType, OType>(grad.rowwise_cpu_dptr<IType>(),
-                                            input.rowwise_cpu_dptr<IType>(),
-                                            ref_output.get(),
-                                            ref_output_scales.get(),
-                                            ref_amax,
-                                            rows,
-                                            cols,
-                                            block_size_rows,
-                                            block_size_cols,
-                                            scales_stride);
-#ifdef __HIP_PLATFORM_AMD__
-    std::vector<std::tuple<size_t, size_t, int>> mismatch_idx;
-    if (rowwise) {
-      compare_e8m0_scaling_factors("rowwise scales", output, ref_output_scales.get(),
-                                   unpadded_blocks_Y, unpadded_blocks_X, scales_stride, 0.01, true, mismatch_idx);
-    } else {
-      compare_e8m0_scaling_factors("colwise scales", output, ref_output_scales.get(),
-                                   unpadded_blocks_Y, unpadded_blocks_X, scales_stride, 0.01, false, mismatch_idx);
-    }
-    if (mismatch_idx.size()) {
-        adjust_ref(mismatch_idx, ref_output.get(), unpadded_blocks_Y, unpadded_blocks_X, rows, cols, otype);
-    }
-
-    auto [atol, rtol] = getTolerances(otype);
-    compareResults("output", output, ref_output.get(), rowwise, atol, rtol);
-#else // #ifdef __HIP_PLATFORM_AMD__
-    auto [atol, rtol] = getTolerances(otype);
-    compareResults("output", output, ref_output.get(), rowwise, atol, rtol);
-=======
     compute_ref<IType, OType>(grad.rowwise_cpu_dptr<IType>(),
                               input.rowwise_cpu_dptr<IType>(),
                               ref_output.get(),
@@ -388,10 +265,18 @@ void performTest_x1(const size_t rows,
                               colwise);
 
     size_t mismatches_scales = 0;
+#ifdef __HIP_PLATFORM_AMD__
+    std::vector<size_t> mismatches_scales_indices;
+#endif // #ifdef __HIP_PLATFORM_AMD__
+
     const size_t scale_diff_abs_tolerance = 0;
+#ifdef __HIP_PLATFORM_AMD__
     const double abs_tolerable_mismatches_limit = 1.0;
     const double rel_tolerable_mismatches_limit = 1.0e-4;
->>>>>>> upstream/release_v2.6
+#else
+    const double abs_tolerable_mismatches_limit = 0.0;
+    const double rel_tolerable_mismatches_limit = 0.0;
+#endif // #ifdef __HIP_PLATFORM_AMD__
 
     const uint8_t * const gpu_scales_ptr = rowwise
                                            ? output.rowwise_cpu_scale_inv_ptr<fp8e8m0>()
@@ -399,6 +284,9 @@ void performTest_x1(const size_t rows,
     if (rowwise) {
       compare_e8m0_scaling_factors("rowwise scales", gpu_scales_ptr, ref_output_scales.get(),
                                    unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
+#ifdef __HIP_PLATFORM_AMD__
+                                   mismatches_scales_indices,
+#endif // #ifdef __HIP_PLATFORM_AMD__
                                    mismatches_scales,
                                    scale_diff_abs_tolerance,
                                    abs_tolerable_mismatches_limit,
@@ -406,19 +294,24 @@ void performTest_x1(const size_t rows,
     } else {
       compare_e8m0_scaling_factors("colwise scales", gpu_scales_ptr, ref_output_scales.get(),
                                    unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
+#ifdef __HIP_PLATFORM_AMD__
+                                   mismatches_scales_indices,
+#endif // #ifdef __HIP_PLATFORM_AMD__
                                    mismatches_scales,
                                    scale_diff_abs_tolerance,
                                    abs_tolerable_mismatches_limit,
                                    rel_tolerable_mismatches_limit);
     }
-<<<<<<< HEAD
+#ifdef __HIP_PLATFORM_AMD__
+    adjust_ref_for_e8m0_scale_error("scales", mismatches_scales_indices, gpu_scales_ptr,
+                                    ref_output_scales.get(), unpadded_blocks_Y, unpadded_blocks_X,
+                                    scales_stride, rows, cols, ref_output.get(), otype);
+    mismatches_scales = 0;
 #endif // #ifdef __HIP_PLATFORM_AMD__
-=======
 
     const size_t mismatches_elts = 32 * mismatches_scales;
     auto [atol, rtol] = getTolerances(otype);
     compareResults("output", output, ref_output.get(), rowwise, atol, rtol, true, mismatches_elts);
->>>>>>> upstream/release_v2.6
 }
 
 /**
@@ -492,26 +385,6 @@ void performTest_x2(const size_t rows,
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
     float ref_amax = 0;
-<<<<<<< HEAD
-    compute_ref_x2<IS_DGATED, IType, OType>(grad.rowwise_cpu_dptr<IType>(),
-                                            input.rowwise_cpu_dptr<IType>(),
-                                            ref_output_rowwise.get(),
-                                            ref_output_colwise.get(),
-                                            ref_scales_rowwise.get(),
-                                            ref_scales_colwise.get(),
-                                            ref_amax,
-                                            rows,
-                                            cols,
-                                            block_size_rows,
-                                            block_size_cols,
-                                            scales_stride_rowwise,
-                                            scales_stride_colwise);
-#ifdef __HIP_PLATFORM_AMD__
-    std::vector<std::tuple<size_t, size_t, int>> mismatch_idx_r;
-    compare_e8m0_scaling_factors("scales_rowwise", output,
-                                 ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
-                                 unpadded_blocks_X_rowwise, scales_stride_rowwise, 0.01, true, mismatch_idx_r);
-=======
     compute_ref<IType, OType>(grad.rowwise_cpu_dptr<IType>(),
                               input.rowwise_cpu_dptr<IType>(),
                               ref_output_rowwise.get(),
@@ -528,64 +401,64 @@ void performTest_x2(const size_t rows,
                               true);
 
     const size_t scale_diff_abs_tolerance = 0;
+#ifdef __HIP_PLATFORM_AMD__
     const double abs_tolerable_mismatches_limit = 1.0;
     const double rel_tolerable_mismatches_limit = 1.0e-4;
+#else
+    const double abs_tolerable_mismatches_limit = 0.0;
+    const double rel_tolerable_mismatches_limit = 0.0;
+#endif // #ifdef __HIP_PLATFORM_AMD__
 
     size_t mismatches_scales_rowwise = 0;
+#ifdef __HIP_PLATFORM_AMD__
+    std::vector<size_t> mismatches_scales_indices_rowwise;
+#endif // #ifdef __HIP_PLATFORM_AMD__
+
     compare_e8m0_scaling_factors("scales_rowwise", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
                                  ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
                                  unpadded_blocks_X_rowwise, scales_stride_rowwise,
+#ifdef __HIP_PLATFORM_AMD__
+                                 mismatches_scales_indices_rowwise,
+#endif // #ifdef __HIP_PLATFORM_AMD__
                                  mismatches_scales_rowwise,
                                  scale_diff_abs_tolerance,
                                  abs_tolerable_mismatches_limit,
                                  rel_tolerable_mismatches_limit);
+
     size_t mismatches_scales_colwise = 0;
+#ifdef __HIP_PLATFORM_AMD__
+    std::vector<size_t> mismatches_scales_indices_colwise;
+#endif // #ifdef __HIP_PLATFORM_AMD__
     compare_e8m0_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
                                  ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
                                  unpadded_blocks_X_colwise, scales_stride_colwise,
+#ifdef __HIP_PLATFORM_AMD__
+                                 mismatches_scales_indices_colwise,
+#endif // #ifdef __HIP_PLATFORM_AMD__
                                  mismatches_scales_colwise,
                                  scale_diff_abs_tolerance,
                                  abs_tolerable_mismatches_limit,
                                  rel_tolerable_mismatches_limit);
 
+#ifdef __HIP_PLATFORM_AMD__
+    adjust_ref_for_e8m0_scale_error("scales_rowwise", mismatches_scales_indices_rowwise, output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
+                                    ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise, unpadded_blocks_X_rowwise,
+                                    scales_stride_rowwise, rows, cols, ref_output_rowwise.get(), otype);
+    adjust_ref_for_e8m0_scale_error("scales_colwise", mismatches_scales_indices_colwise, output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
+                                    ref_scales_colwise.get(), unpadded_blocks_Y_colwise, unpadded_blocks_X_colwise,
+                                    scales_stride_colwise, rows, cols, ref_output_colwise.get(), otype);
+
+    mismatches_scales_rowwise = 0;
+    mismatches_scales_colwise = 0;
+#endif // #ifdef __HIP_PLATFORM_AMD__
+
     const size_t mismatches_elts_rowwise = 32 * mismatches_scales_rowwise;
     const size_t mismatches_elts_colwise = 32 * mismatches_scales_colwise;
->>>>>>> upstream/release_v2.6
-
-    if (mismatch_idx_r.size()) {
-        adjust_ref(mismatch_idx_r, ref_output_colwise.get(), unpadded_blocks_Y_rowwise, unpadded_blocks_X_rowwise, rows, cols, otype);
-    }
-
-    std::vector<std::tuple<size_t, size_t, int>> mismatch_idx_c;
-    compare_e8m0_scaling_factors("scales_colwise", output,
-                                 ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
-                                 unpadded_blocks_X_colwise, scales_stride_colwise, 0.01, false, mismatch_idx_c);
-
-    if (mismatch_idx_c.size()) {
-        adjust_ref(mismatch_idx_c, ref_output_rowwise.get(), unpadded_blocks_Y_colwise, unpadded_blocks_X_colwise, rows, cols, otype);
-    }
 
     auto [atol, rtol] = getTolerances(otype);
     auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
-    compareResults("output_c_rowwise", output, ref_output_rowwise.get(), true, atol, rtol);
-    compareResults("output_c_colwise", output, ref_output_colwise.get(), false, atol, rtol);
-#else // #ifdef __HIP_PLATFORM_AMD__
-    auto [atol, rtol] = getTolerances(otype);
-    auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
-<<<<<<< HEAD
-    compareResults("output_c_rowwise", output, ref_output_rowwise.get(), true, atol, rtol);
-    compareResults("output_c_colwise", output, ref_output_colwise.get(), false, atol, rtol);
-    compare_e8m0_scaling_factors("scales_rowwise", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
-                                 ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
-                                 unpadded_blocks_X_rowwise, scales_stride_rowwise);
-    compare_e8m0_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
-                                 ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
-                                 unpadded_blocks_X_colwise, scales_stride_colwise);
-#endif // #ifdef __HIP_PLATFORM_AMD__
-=======
     compareResults("output_c_rowwise", output, ref_output_rowwise.get(), true, atol, rtol, true, mismatches_elts_rowwise);
     compareResults("output_c_colwise", output, ref_output_colwise.get(), false, atol, rtol, true, mismatches_elts_colwise);
->>>>>>> upstream/release_v2.6
 }
 
 std::vector<std::pair<size_t, size_t>> matrix_sizes = {
@@ -630,10 +503,10 @@ class CastMXFP8_GatedActTestSuite : public ::testing::TestWithParam
                 bool>> {};
 
 TEST_P(CastMXFP8_GatedActTestSuite, TestCastMXFP8Swiglu) {
- #ifdef __HIP_PLATFORM_AMD__
+#ifdef __HIP_PLATFORM_AMD__
     omp_set_num_threads(std::min(128, omp_get_max_threads())); // Using threads = # of vcpus causes occasional errors.
 #else // #ifdef __HIP_PLATFORM_AMD__
-   // Skip tests for pre-Blackwell architectures
+    // Skip tests for pre-Blackwell architectures
     if (getDeviceComputeCapability() < blackwellComputeCapability) {
         GTEST_SKIP();
     }

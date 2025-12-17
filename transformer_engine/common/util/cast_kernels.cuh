@@ -35,20 +35,8 @@
 
 namespace transformer_engine {
 
-<<<<<<< HEAD
 #ifndef __HIP_PLATFORM_AMD__
-constexpr size_t MXFP8_CHUNK_DIM_Y = 64;
-constexpr size_t MXFP8_CHUNK_DIM_X = 64;
-constexpr size_t MXFP8_CHUNKS_PER_BLOCK_Y = 1;
-constexpr size_t MXFP8_CHUNKS_PER_BLOCK_X = 1;
-constexpr size_t MXFP8_CHUNKS_PER_BLOCK = MXFP8_CHUNKS_PER_BLOCK_Y * MXFP8_CHUNKS_PER_BLOCK_X;
-constexpr size_t MXFP8_THREADS_PER_CHUNK = 64;
-constexpr size_t MXFP8_BUFFERS_NUM = 2;
-constexpr size_t MXFP8_PREFETCH_BUFFERS_NUM = 1;
-static_assert(MXFP8_PREFETCH_BUFFERS_NUM < MXFP8_BUFFERS_NUM);
-=======
 namespace mxfp8_kernel {
->>>>>>> upstream/release_v2.6
 
 constexpr size_t SCALE_DIM_Y = 32;
 constexpr size_t SCALE_DIM_X = 32;
@@ -1021,7 +1009,9 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
 void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                     const Tensor *noop,  // TODO (ksivamani)
                     Tensor *output, Tensor *dbias, Tensor *workspace, cudaStream_t stream) {
+#ifndef __HIP_PLATFORM_AMD__
   using namespace mxfp8_kernel;
+#endif // #ifndef __HIP_PLATFORM_AMD__
   bool use_rowwise_scaling = output->has_data();
   bool use_colwise_scaling = output->has_columnwise_data();
 #ifndef __HIP_PLATFORM_AMD__
@@ -1045,6 +1035,7 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
 
   constexpr bool CAST_DBIAS_ONLY = IS_DBIAS && (!IS_DACT) && (!IS_ACT);
 
+#ifndef __HIP_PLATFORM_AMD__
   constexpr size_t CHUNK_DIM_Y = CAST_DBIAS_ONLY ? 128 : 64;
   constexpr size_t CHUNK_DIM_X = CAST_DBIAS_ONLY ? 128 : 64;
   constexpr size_t THREADS_PER_CHUNK = CAST_DBIAS_ONLY ? 128 : 64;
@@ -1056,8 +1047,19 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
 
   const size_t blocks_Y = DIVUP(rows, CHUNK_DIM_Y);
   const size_t blocks_X = DIVUP(cols, CHUNK_DIM_X);
+#else
+  const size_t chunks_Y = DIVUP(rows, MXFP8_CHUNK_DIM_Y);
+  const size_t chunks_X = DIVUP(cols, MXFP8_CHUNK_DIM_X);
+  const size_t blocks_Y = DIVUP(chunks_Y, MXFP8_CHUNKS_PER_BLOCK_Y);
+  const size_t blocks_X = DIVUP(chunks_X, MXFP8_CHUNKS_PER_BLOCK_X);
+#endif // #ifndef __HIP_PLATFORM_AMD__
+
   const dim3 grid(blocks_X, blocks_Y);
+#ifndef __HIP_PLATFORM_AMD__
   const size_t block_size = THREADS_PER_CHUNK;
+#else
+  const size_t block_size = MXFP8_THREADS_PER_CHUNK;
+#endif // #ifndef __HIP_PLATFORM_AMD__
 
   const size_t scale_stride_rowwise = use_rowwise_scaling ? output->scale_inv.shape[1] : 1;
   const size_t scale_stride_colwise =
@@ -1070,6 +1072,7 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
   const size_t dbias_rows = blocks_Y;
   const size_t dbias_cols = cols;
 
+#ifndef __HIP_PLATFORM_AMD__
   ScalingType scaling_type;
   if (use_rowwise_scaling && (!use_colwise_scaling)) {
     scaling_type = ScalingType::ROWWISE;
@@ -1078,6 +1081,7 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
   } else if (use_rowwise_scaling && use_colwise_scaling) {
     scaling_type = ScalingType::BIDIMENSIONAL;
   }
+#endif // #ifndef __HIP_PLATFORM_AMD__
 
   if constexpr (IS_DBIAS) {
     NVTE_CHECK(dbias->data.dtype == input.dtype(), "DBias must have the same type as input.");
@@ -1099,35 +1103,28 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
       input.dtype(), IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
           output->dtype(), OType,
-
-<<<<<<< HEAD
-  TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
-      scale_dim_Y_colwise, SCALE_DIM_Y,
-      TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
-          scale_dim_X_rowwise, SCALE_DIM_X,
-          TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
-              input.dtype(), IType,
-              TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-                  output->dtype(), OType,
 #ifdef __HIP_PLATFORM_AMD__
-                TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                  !(cols % (32 * sizeof(IType))), IS_ALIGNED,
-                    cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
-                                         SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED><<<grid, block, 0, stream>>>(
-                      reinterpret_cast<const IType *>(input.data.dptr), 
-                      (IS_DACT) ? reinterpret_cast<const IType *>(act_input->data.dptr) : nullptr,
-                      reinterpret_cast<OType *>(output->data.dptr),
-                      reinterpret_cast<OType *>(output->columnwise_data.dptr),
-                      scales_rowwise_ptr, scales_colwise_ptr,
-                      reinterpret_cast<const float *>(noop->data.dptr), workspace_ptr, amax_ptr,
-                      rows, cols, scale_stride_rowwise, scale_stride_colwise);
+          TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+            (use_colwise_scaling ? 32 : 1), SCALE_DIM_Y,
+            TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+              (use_rowwise_scaling ? 32 : 1), SCALE_DIM_X,
+              TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                !(cols % (32 * sizeof(IType))), IS_ALIGNED,
+                  cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                                       SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED><<<grid, block_size, 0, stream>>>(
+                    reinterpret_cast<const IType *>(input.data.dptr), 
+                    (IS_DACT) ? reinterpret_cast<const IType *>(act_input->data.dptr) : nullptr,
+                    reinterpret_cast<OType *>(output->data.dptr),
+                    reinterpret_cast<OType *>(output->columnwise_data.dptr),
+                    scales_rowwise_ptr, scales_colwise_ptr,
+                    reinterpret_cast<const float *>(noop->data.dptr), workspace_ptr, amax_ptr,
+                    rows, cols, scale_stride_rowwise, scale_stride_colwise);
+          ))); // NOLINT(*)
 #else // #ifdef __HIP_PLATFORM_AMD__
-=======
           alignas(64) CUtensorMap tensor_map_input{};
           alignas(64) CUtensorMap tensor_map_act_input{};
           alignas(64) CUtensorMap tensor_map_output_rowwise{};
           alignas(64) CUtensorMap tensor_map_output_colwise{};
->>>>>>> upstream/release_v2.6
 
           constexpr size_t input_type_bit_size = TypeInfo<IType>::size;
           constexpr size_t output_type_bit_size = TypeInfo<OType>::size;
@@ -1180,23 +1177,6 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                                    false, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>
                   <<<grid, block_size, dshmem_size, stream>>>(
                       tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-<<<<<<< HEAD
-                      tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr,
-                      reinterpret_cast<const float *>(noop->data.dptr), workspace_ptr, amax_ptr,
-                      rows, cols, scale_stride_rowwise, scale_stride_colwise);
-#endif // #ifdef __HIP_PLATFORM_AMD__
-
-                  if constexpr (IS_DBIAS) {
-                    reduce_dbias<IType>(workspace_ptr, dbias, dbias_rows, dbias_cols, stream);
-
-                  });  // NOLINT(*)
-          );           // NOLINT(*)
-      );               // NOLINT(*)
-  );                   // NOLINT(*)
-#ifdef __HIP_PLATFORM_AMD__
-  );                   // NOLINT(*)
-#endif
-=======
                       tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
                       workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
                       scale_stride_colwise);
@@ -1230,12 +1210,12 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                       scale_stride_colwise);
               break;
           }
+#endif // #ifdef __HIP_PLATFORM_AMD__
 
           if constexpr (IS_DBIAS) {
             reduce_dbias<IType>(workspace_ptr, dbias, dbias_rows, dbias_cols, stream);
           });  // NOLINT(*)
   );           // NOLINT(*)
->>>>>>> upstream/release_v2.6
 }
 
 namespace detail {

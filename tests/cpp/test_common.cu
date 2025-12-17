@@ -593,35 +593,14 @@ static size_t getFirstMismatchIdx(const DType data_type, const T* test_data, con
     size_t thread_mismatches = 0;
     #pragma omp for schedule(static)
     for (size_t i = 0; i < N; ++i) {
+#ifndef __HIP_PLATFORM_AMD__
       double t = static_cast<double>(test_data[i]);
       double r = static_cast<double>(ref_data[i]);
-
-<<<<<<< HEAD
-#ifndef __HIP_PLATFORM_AMD__
-    double t = static_cast<double>(test_data[i]);
-    double r = static_cast<double>(ref_data[i]);
 #else
-    double t = static_cast<double>(static_cast<float>(test_data[i]));
-    double r = static_cast<double>(static_cast<float>(ref_data[i]));
+      double t = static_cast<double>(static_cast<float>(test_data[i]));
+      double r = static_cast<double>(static_cast<float>(ref_data[i]));
 #endif
- 
-    bool mismatch = fabs(t - r) > atol && (r == 0 || fabs((t - r) / r) > rtol);
-    /* For Float32 the floating point comparison is enough to error out */
-    bool assertion = mismatch && (data_type == DType::kFloat32);
-    if (mismatch && !assertion) {
-      /* Check if it is just a failure of round to nearest choosing different
-          side of the real value */
-      const double mean = (t + r) / 2;
-      const double mean_p = mean >= 0 ? mean * (1 + 1e-6) : mean * (1 - 1e-6);
-      const double mean_m = mean >= 0 ? mean * (1 - 1e-6) : mean * (1 + 1e-6);
-      const double cast_mean_p = static_cast<double>(static_cast<T>(mean_p));
-      const double cast_mean_m = static_cast<double>(static_cast<T>(mean_m));
-      assertion = !(cast_mean_m == std::min(t, r) && cast_mean_p == std::max(t, r));
-    }
-    if (assertion && i < first_mismatch_idx) {
-      first_mismatch_idx = i;
-      is_mismatch_found = true;
-=======
+
       bool mismatch = fabs(t - r) > atol && (r == 0 || fabs((t - r) / r) > rtol);
       /* For Float32 the floating point comparison is enough to error out */
       bool assertion = mismatch && (data_type == DType::kFloat32);
@@ -641,7 +620,6 @@ static size_t getFirstMismatchIdx(const DType data_type, const T* test_data, con
         }
         thread_mismatches++;
       }
->>>>>>> upstream/release_v2.6
     }
     mismatches += thread_mismatches;
   }
@@ -658,7 +636,6 @@ void compareResults_parallel(const std::string &name, const Tensor &test, const 
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(test.dtype(), T,
     const T *test_data = rowwise ? test.rowwise_cpu_dptr<T>() : test.columnwise_cpu_dptr<T>();
     const T *ref_data = reinterpret_cast<const T*>(ref);
-
     const size_t i = getFirstMismatchIdx<T>(test.dtype(), test_data, ref_data, N, atol, rtol, mismatches);
     if ((i != N) && (mismatches > tolerable_mismatches_limit)) {
       const double t = static_cast<double>(test_data[i]);
@@ -720,15 +697,26 @@ void compareResults(const std::string &name, const uint8_t *test, const uint8_t 
 
 void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
                                     const size_t row_blocks, const size_t col_blocks, const size_t stride,
+#ifdef __HIP_PLATFORM_AMD__
+                                    std::vector<size_t> &mismatch_indices,
+#endif
                                     size_t& mismatches_num, const size_t atol,
                                     const double abs_tolerable_mismatches_limit,
                                     const double rel_tolerable_mismatches_limit)
 {
   const size_t N = row_blocks * col_blocks;
-  const size_t tolerable_mismatches_limit = std::min(abs_tolerable_mismatches_limit,
-                                                     std::floor(N * rel_tolerable_mismatches_limit));
+  const size_t tolerable_mismatches_limit = 
+#ifndef __HIP_PLATFORM_AMD__
+    std::min(
+#else
+    std::max(
+#endif
+      abs_tolerable_mismatches_limit,
+      std::floor(N * rel_tolerable_mismatches_limit));
   mismatches_num = 0;
+#ifndef __HIP_PLATFORM_AMD__
   std::vector<int> mismatch_indices;
+#endif
 
   for (int i = 0; i < row_blocks; ++i) {
     for (int j = 0; j < col_blocks; ++j) {
@@ -756,70 +744,41 @@ void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, 
 }
 
 #ifdef __HIP_PLATFORM_AMD__
-void compare_e8m0_scaling_factors(const std::string &name, Tensor &output, const uint8_t *ref,
-                             const size_t row_blocks, const size_t col_blocks, const size_t stride, 
-                             double tol, bool rowwise, std::vector<std::tuple<size_t, size_t, int>> &mismatch_idx) {
-  const uint8_t *const test = rowwise ? output.rowwise_cpu_scale_inv_ptr<fp8e8m0>()
-                                       : output.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
-
-  const double scale_tol = std::max(1., row_blocks * col_blocks * tol);
-
-  for (int i = 0; i < row_blocks; i++) {
-    for (int j = 0; j < col_blocks; j++) {
-      const int idx = i * stride + j;
-      if (test[idx] != ref[idx]) {
-        int t_scale = static_cast<int>(test[idx]);
-        int r_scale = static_cast<int>(ref[idx]);
-        if (std::abs(t_scale - r_scale) == 1) {
-          mismatch_idx.emplace_back(i, j, r_scale-t_scale);
-        } else {
-          GTEST_FAIL() << "Error in " << name << std::endl
-          << "Mismatch: " << t_scale << " vs "
-          << r_scale << " at index " << idx;
-        }
+void adjust_ref_for_e8m0_scale_error(const std::string &name,
+                                     const std::vector<size_t> &mismatch_idx,
+                                     const uint8_t *test_scale, const uint8_t *ref_scale,
+                                     const size_t row_blocks, const size_t col_blocks,
+                                     const size_t stride, const size_t rows, const size_t cols,
+                                     void *ref_ptr, DType otype) {
+  double scale_val;
+  const size_t col_blocks_size = cols / col_blocks;
+  const size_t row_blocks_size = rows / row_blocks;
+  for (const auto scale_idx : mismatch_idx) {
+    const int scale_diff = ref_scale[scale_idx] - test_scale[scale_idx];
+    if (scale_diff == 1) {
+      scale_val = 2.;
+    } else if (scale_diff == -1) {
+      scale_val = .5;
+    } else {
+      GTEST_FAIL() << "Error in " << name << ": mismatch " << test_scale[scale_idx] << " vs "
+                   << ref_scale[scale_idx] << " at index " << scale_idx;
+    }
+    const int i = scale_idx / stride;
+    const int j = scale_idx % stride;
+    size_t ii_min = i * row_blocks_size;
+    const size_t ii_max = std::min(ii_min + row_blocks_size, rows);
+    for (; ii_min < ii_max; ii_min++) {
+      size_t jj_min = j * col_blocks_size;
+      const size_t jj_max = std::min(jj_min + col_blocks_size, cols);
+      for (; jj_min < jj_max; jj_min++) {
+        const size_t data_idx = ii_min * cols + jj_min;
+        TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(otype, T, {
+          T *ref_data = reinterpret_cast<T *>(ref_ptr);
+          ref_data[data_idx] = static_cast<T>(static_cast<double>(ref_data[data_idx]) * scale_val);
+        });  // NOLINT(*)
       }
     }
   }
-  const size_t scale_mismatches = mismatch_idx.size();
-
-  ASSERT_FALSE(scale_mismatches > scale_tol) 
-  << "Error in " << name << std::endl << std::setprecision(4)
-  << "Total scale mismatches: " << scale_mismatches << " (" << 100.*(double)scale_mismatches/(double)(row_blocks*col_blocks)
-  << "%) Exceeds tolerance of " << scale_tol << " (" << 100.*tol <<  "%) mismatches";
-
-  if (scale_mismatches) {
-    std::cout << "\x1b[33mWARNING:\x1b[0m " << scale_mismatches 
-    << " scale mismatches were found. This does not imply an accuracy issue." << std::endl;
-    }
-}
-
-void adjust_ref(std::vector<std::tuple<size_t, size_t, int>> mismatch_idx, void *ref, const size_t row_blocks,
-                const size_t col_blocks, const size_t rows, const size_t cols, DType otype) {
-  TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY( otype, T,
-    T *ref_data = reinterpret_cast<T*>(ref);
-    double scale_val;
-    const size_t col_blocks_size = cols / col_blocks;
-    const size_t row_blocks_size = rows / row_blocks;
-    for (const auto &[i, j, scale_diff] : mismatch_idx) {
-      if (scale_diff == 1) {
-        scale_val = 2.;
-      } else if (scale_diff == -1) {
-        scale_val = .5;
-      } else { // Shouldn't ever reach this
-        GTEST_FAIL() << "Error in adjust_ref, |scale_diff| > 1";
-      }
-      size_t ii_min = i * row_blocks_size;
-      const size_t ii_max = std::min(ii_min + row_blocks_size, rows);
-      for (; ii_min < ii_max; ii_min++) {
-        size_t jj_min = j * col_blocks_size;
-        const size_t jj_max = std::min(jj_min + col_blocks_size, cols);
-        for (; jj_min < jj_max; jj_min++) {
-          const size_t data_idx = ii_min * cols + jj_min;
-          ref_data[data_idx] = static_cast<T>(static_cast<double>(ref_data[data_idx]) * scale_val);
-        }
-      }
-    }
-  ); // NOLINT(*)
 }
 #endif // #ifdef __HIP_PLATFORM_AMD__
 
@@ -978,11 +937,10 @@ bool isFp8Type(DType type) {
   return type == DType::kFloat8E4M3 || type == DType::kFloat8E5M2 || type == DType::kFloat8E8M0;
 }
 
-int32_t getDeviceComputeCapability()
-{
-    cudaDeviceProp deviceProp;
-    (void)cudaGetDeviceProperties(&deviceProp, 0);
-    return 10 * deviceProp.major + deviceProp.minor;
+int32_t getDeviceComputeCapability() {
+  cudaDeviceProp deviceProp;
+  (void)cudaGetDeviceProperties(&deviceProp, 0);
+  return 10 * deviceProp.major + deviceProp.minor;
 }
 
 size_t first_dimension(const std::vector<size_t> &shape) {
