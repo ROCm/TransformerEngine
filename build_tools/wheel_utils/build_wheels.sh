@@ -14,6 +14,8 @@ BUILD_JAX=${5:-true}
 
 export NVTE_RELEASE_BUILD=1
 export TARGET_BRANCH=${TARGET_BRANCH:-}
+export NVTE_FUSED_ATTN_CK=0 
+export NVTE_NO_LOCAL_VERSION=1
 mkdir -p /wheelhouse/logs
 
 # Generate wheels for common library.
@@ -96,7 +98,13 @@ fi
 if $BUILD_PYTORCH ; then
   cd /TransformerEngine/transformer_engine/pytorch
   if [ "$ROCM_BUILD" = "1" ]; then
-    ${PYBINDIR}pip install torch --index-url https://download.pytorch.org/whl/rocm6.3
+    ${PYBINDIR}pip install networkx MarkupSafe Jinja2 numpy pillow
+    ${PYBINDIR}pip install \
+  -i https://rocm.nightlies.amd.com/v2-staging/gfx94X-dcgpu/ \
+  torch==2.9.1+rocm7.11.0a20251210 \
+  torchaudio==2.9.0+rocm7.11.0a20251210 \
+  torchvision \
+  pytorch-triton-rocm==3.5.1+rocm7.11.0a20251210
   else
     PYBINDIR=/opt/python/cp38-cp38/bin/
     ${PYBINDIR}pip install torch

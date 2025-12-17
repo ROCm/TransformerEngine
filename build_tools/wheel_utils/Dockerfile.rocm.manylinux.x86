@@ -16,14 +16,28 @@
 ARG BASE_IMAGE=quay.io/pypa/manylinux_2_28_x86_64
 FROM $BASE_IMAGE
 
-ARG ROCM_REPO_URL=https://repo.radeon.com/rocm/rhel8/latest/main/
+ENV ROCM_VERSION=7.11.0a20251210
+ENV GFX_FAMILY="gfx94X-dcgpu"
+ENV THEROCK_TARBALL=https://rocm.nightlies.amd.com/tarball/therock-dist-linux-gfx94X-dcgpu-7.11.0a20251210.tar.gz
 
-# Set up ROCm repo
-RUN echo -e "[rocm]\nname=ROCm\nbaseurl=${ROCM_REPO_URL}\nenabled=1\ngpgcheck=0" > /etc/yum.repos.d/rocm.repo
+RUN dnf group install -y "Development Tools" && dnf install -y git cmake llvm-toolset gcc-toolset-12 wget git-lfs
 
-# Setup packages
-RUN dnf install -y --disablerepo=epel rocm-dev hipblaslt hipblaslt-devel hipcub hipcub-devel
-RUN dnf group install -y "Development Tools" && dnf install -y git cmake llvm-toolset gcc-toolset-12
+RUN mkdir -p /opt/rocm \
+    && cd /opt/rocm \
+    && wget ${THEROCK_TARBALL} \
+    && tar -xvf *.tar.gz -C /opt/rocm \
+    && rm *.tar.gz
+
+# Setup ROCm stack related envs
+ENV PATH="/opt/rocm/bin:$PATH"
+ENV LD_LIBRARY_PATH=/opt/rocm/lib
+ENV ROCM_PATH=/opt/rocm
+ENV HIP_PLATFORM=amd
+ENV HIP_DEVICE_LIB_PATH=/opt/rocm/lib/llvm/amdgcn/bitcode
+RUN ln -s $ROCM_PATH/lib/rocm_sysdeps/lib/libnuma.so  /opt/rocm/lib/libnuma.so.1
+
+# Update ROCm version file.
+RUN hipconfig --version > /opt/rocm/.info/version
 
 #Uncomment the next line for ROCm 6.4 cmake workaround: remove newer incomnpatible cmake preinstalled on base image
 #RUN rm /usr/local/bin/cmake || true
@@ -33,6 +47,7 @@ RUN rm -rf /var/cache/dnf/*
 
 ENV CMAKE_PREFIX_PATH=/opt/rocm/lib/cmake
 ENV NVTE_RELEASE_BUILD=1
+ENV PATH=/opt/python/cp310-cp310/bin:$PATH
 
 ARG GPU_TARGETS="gfx942;gfx950"
 ENV NVTE_ROCM_ARCH=${GPU_TARGETS}
@@ -45,4 +60,4 @@ COPY build_wheels.sh /
 WORKDIR /TransformerEngine/
 RUN git clone https://github.com/ROCm/TransformerEngine.git /TransformerEngine
 
-CMD ["/bin/bash", "/build_wheels.sh", "manylinux_2_28_x86_64", "true", "true", "true", "true"]
+CMD ["/bin/bash", "/build_wheels.sh", "manylinux_2_28_x86_64", "true", "true", "true", "false"]
