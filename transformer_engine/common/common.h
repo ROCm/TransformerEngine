@@ -278,6 +278,7 @@ struct QuantizationConfig {
 
 cudaDataType_t get_cuda_dtype(const transformer_engine::DType t);
 
+#ifndef __HIP_PLATFORM_AMD__
 template <typename T>
 constexpr T DIVUP(const T &x, const T &y) {
   return (((x) + ((y)-1)) / (y));
@@ -289,6 +290,22 @@ constexpr __device__ __host__ __forceinline__ uint64_t DIVUP_TO_MULTIPLE(const T
                 "Integral type required.");
   return DIVUP(static_cast<uint64_t>(N), static_cast<uint64_t>(M)) * M;
 }
+#else
+// DIVUP is called with integral types only for which passing by value is preferred.
+// It also allows using of constexpr arguments w/o needing to create storage for references.
+template <typename T>
+constexpr T DIVUP(T x, T y) {
+  static_assert(std::is_integral<T>::value, "Integral type required.");
+  return (((x) + ((y)-1)) / (y));
+}
+
+template <typename T1, typename T2>
+constexpr __device__ __host__ __forceinline__ uint64_t DIVUP_TO_MULTIPLE(T1 N, T2 M) {
+  static_assert(std::is_integral<T1>::value && std::is_integral<T2>::value,
+                "Integral type required.");
+  return DIVUP(static_cast<uint64_t>(N), static_cast<uint64_t>(M)) * M;
+}
+#endif //__HIP_PLATFORM_AMD__
 
 using byte = uint8_t;
 using int16 = int16_t;
