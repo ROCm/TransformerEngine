@@ -2813,14 +2813,11 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
             max_seqlen_kv=config.seq_len,
         )
 
-        if IS_HIP_EXTENSION:
+        if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5):
             tols_thd = dtype_tols(dtype)
-            if dtype in (torch.float16, torch.bfloat16):
-                # ROCm fused attention (CK) on THD can produce slightly larger error
-                tols_thd["atol"] = 2e-3
-                _, use_aotriton, use_ck = rocm_attn_backend()
-                if use_aotriton and not use_ck:
-                    tols_thd["rtol"] = tols_thd["rtol"] * 3
+            # On gfx950 the results for THD are different 
+            # that results in lower final result precision
+            tols_thd["atol"] = 2e-3
             torch.testing.assert_close(
                 y_bshd,
                 y_thd.reshape(bs, config.seq_len, config.hidden_size).contiguous(),
