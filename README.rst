@@ -79,7 +79,8 @@ switching between installing from source and installing from wheels. Here is the
 
 .. code-block:: bash
 
-  pip list | grep transformer_engine | xargs pip uninstall -y
+  # The package name pattern might be transformer_engine or transformer-engine depending on setuptools version
+  pip list | grep transformer.engine | xargs pip uninstall -y
 
 Known Issue with ROCm 6.4 PyTorch Release
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
