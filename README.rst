@@ -33,12 +33,12 @@ Install from manylinux wheels
 
 Starting from ROCm 7.0, we provide manylinux wheels for Transformer Engine releases on `https://repo.radeon.com/rocm/manylinux`. For example, the wheels for ROCm 7.1.1 are at `https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1/`. From the page, you can find four files related to Transformer Engine:
 
-* transformer_engine_rocm-*-py3-none-manylinux_2_28_x86_64.whl - This is the wheel file for installing the common library.
-* transformer_engine-*-py3-none-any.whl - This is the wheel file for installing the (Pytorch and JAX) extensions.
+* transformer_engine_rocm-*-py3-none-manylinux_2_28_x86_64.whl - This is the wheel file for installing the common library. It should not be installed by itself.
+* transformer_engine-*-py3-none-any.whl - This is the wheel file for installing the common TE Python package.
 * transformer_engine_jax-*.tar.gz - This is the source tar ball for the JAX extension.
 * transformer_engine_torch-*.tar.gz - This is the source tar ball for the Pytorch extension.
 
-Below are the example commands to download and install the wheels:
+Below are the example commands to download and install the wheels. They install both Pytorch and JAX extensions on the system where both frameworks are installed.
 
 .. code-block:: bash
 
@@ -61,7 +61,7 @@ Execute the following commands to install ROCm Transformer Engine from source on
 
   cd TransformerEngine
   export NVTE_FRAMEWORK=pytorch,jax #optionally set framework, currently only support pytorch and jax; if not set will try to detect installed frameworks
-  export NVTE_ROCM_ARCH=gfx942 # CK fused attn only support MI200 and MI300 and fp8 features are only supported on MI300
+  export NVTE_ROCM_ARCH=gfx942,gfx950 # gfx942 for support of MI300/MI325, and gfx950 for support of MI350
 
   # Build Platform Selection (optional)
   # Note: Useful when both ROCm and CUDA platforms are present in the Docker
@@ -71,6 +71,15 @@ Execute the following commands to install ROCm Transformer Engine from source on
 
 It is also possible to build wheels for later installation with "pip wheel ." although those wheels will not be portable to systems with
 different libraries installed. If the build still fails with the "--no-build-isolation" flag try installing setuptools<80.0.0
+
+Note on Switching between Installation from Source and Installation from Wheels
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Sometimes, issues might occur when installing from source on a system where a previous installation with wheels, or vice versa. It is safe to uninstall TE first before 
+switching between installing from source and installing from wheels. Here is the example command:
+
+.. code-block:: bash
+
+  pip list | grep transformer_engine | xargs pip uninstall -y
 
 Known Issue with ROCm 6.4 PyTorch Release
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
