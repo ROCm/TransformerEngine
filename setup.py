@@ -171,7 +171,7 @@ if __name__ == "__main__":
         ext_modules = [setup_common_extension()]
         cmdclass = {"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist}
         package_data = {"": ["VERSION.txt"]}
-        include_package_data = True
+        include_package_data = False
         extras_require = {"test": test_requires}
 
         if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
@@ -219,6 +219,6 @@ if __name__ == "__main__":
         license_files=("LICENSE",),
         include_package_data=include_package_data,
         package_data={
-            "transformer_engine": ["VERSION.txt", "common/**/*.h", "common/**/*.cuh", "common/**/*.cpp"],
+            "transformer_engine": ["VERSION.txt", "common/*.h", "common/**/*.h", "common/*.cuh", "common/**/*.cuh", "common/*.cpp", "common/**/*.cpp"],
         },
     )
