@@ -62,6 +62,7 @@ if __name__ == "__main__":
         cmdclass={"build_ext": CMakeBuildExtension},
         install_requires=install_requirements(),
         tests_require=test_requirements(),
+        include_package_data=True,
     )
     if any(x in sys.argv for x in (".", "sdist", "bdist_wheel")):
         shutil.rmtree(common_headers_dir)
