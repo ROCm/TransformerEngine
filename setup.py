@@ -218,5 +218,7 @@ if __name__ == "__main__":
         install_requires=install_requires,
         license_files=("LICENSE",),
         include_package_data=include_package_data,
-        package_data=package_data,
+        package_data={
+            "transformer_engine": ["VERSION.txt", "common/**/*.h", "common/**/*.cuh", "common/**/*.cpp"],
+        },
     )
