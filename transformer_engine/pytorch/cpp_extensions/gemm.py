@@ -13,6 +13,8 @@ from ..constants import TE_DType
 from ..utils import get_sm_count, _empty_tensor
 
 from ..tensor.quantized_tensor import Quantizer
+from ..tensor._internal.mxfp4_tensor_base import MXFP4TensorBase
+import os
 
 __all__ = [
     "general_gemm",
@@ -48,10 +50,33 @@ def general_gemm(
 ) -> Iterable[Optional[torch.Tensor]]:
     """GEMM supporting fp8 inputs."""
 
+    # ================= FP4 Path =============================================
+    if isinstance(A, MXFP4TensorBase) and isinstance(B, MXFP4TensorBase):
+        from ..module.fp4_handler_gemm import fp4_gemm_layout
+        
+        # For FP4 tensors, we don't call update_usage here because:
+        # 1. They should already have both orientations from quantization
+        # 2. Unlike FP8, FP4 can't add orientations dynamically
+        # The usage flags will be set appropriately during quantization in linear.py
+        
+        # Call FP4 GEMM with layout
+        result = fp4_gemm_layout(
+            A, B,
+            layout=layout,
+            out_dtype=out_dtype if out_dtype is not None else torch.bfloat16,
+            bias=bias,
+            out=out,
+            grad=grad,
+            accumulate=accumulate,
+        )
+        
+        # Return in same format as general_gemm
+        return result, None, None, None
+    
+    # ================= FP8 Path =============================================
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
     transa = layout[0] == "T"
     transb = layout[1] == "T"
-    # assert quantization_params is None, "FP8 output not supported yet"
 
     if ub_type is not None:
         assert ub is not None, (

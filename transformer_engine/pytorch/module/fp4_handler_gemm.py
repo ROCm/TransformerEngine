@@ -2,24 +2,20 @@
 import torch
 import aiter
 from aiter.ops.shuffle import shuffle_weight
-from ..tensor.quantized_tensor import QuantizedTensor
-from ..tensor._internal.float8_tensor_base import Float8TensorBase
-from ..tensor._internal.mxfp4_tensor_base import MXFP4TensorBase
 from ..utils import cast_if_needed
 
 
-def _select_kernel(op_type: str) -> str:
-    if "LayerNormLinear" in op_type:
-        if op_type.endswith("_wgrad"):
-            return "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_128x512E"
-        else:
-            return "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E"
-    elif "Linear" in op_type:
-        if op_type.endswith("_wgrad"):
-            return "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E"
-        else:
-            return "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_128x512E"
-    return ""
+def _select_kernel(layout: str, grad: bool) -> str:
+    """Select kernel based on GEMM layout.
+    
+    Args:
+        layout: GEMM layout (TN=fprop, NN=dgrad, NT=wgrad)
+        grad: Whether this is a gradient computation
+    """
+    if layout == "NT" and grad:
+        return "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E"
+    else:
+        return "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_128x512E"
 
 
 def _fp4_gemm_core(A_fp4, A_scales, B_fp4, B_scales, out_dtype=torch.bfloat16, out_buffer=None, kernel_name="", b_pre_shuffled=True):
@@ -60,64 +56,77 @@ def _fp4_gemm_core(A_fp4, A_scales, B_fp4, B_scales, out_dtype=torch.bfloat16, o
     return result
 
 
-def fp4_gemm(
-    pass_type,
-    weight=None,
-    input_tensor=None,
-    grad_output=None,
-    output_quantizer=None,
-    grad_input_quantizer=None,
+def fp4_gemm_layout(
+    A,
+    B,
+    layout: str = "TN",
+    out_dtype: torch.dtype = torch.bfloat16,
     bias=None,
-    out_dtype=torch.bfloat16,
-    dgrad_bulk=None,
-    main_grad=None,
-    fuse_wgrad_accumulation=False,
-    accumulate_wgrad_into_param_main_grad=False,
-    op_type="",
+    out=None,
+    grad: bool = False,
+    accumulate: bool = False,
 ):
+    """FP4 GEMM using layout notation (TN/NN/NT).
+    
+    Layout mapping:
+        TN: A=weight, B=input       → fprop: input @ weight^T
+        NN: A=weight, B=grad_output → dgrad: grad_output @ weight  
+        NT: A=input, B=grad_output  → wgrad: grad_output^T @ input
+    """
     with torch._C._DisableTorchDispatch():
-        if pass_type == 'fwd':
-            A_fp4 = input_tensor._rowwise_data
-            A_scales = input_tensor._rowwise_scale
-            B_fp4 = weight._rowwise_data  # Weight is pre-shuffled
-            B_scales = weight._rowwise_scale
-
-            kernel_name = _select_kernel(op_type + "_fprop") if op_type else ""
-            result = _fp4_gemm_core(A_fp4, A_scales, B_fp4, B_scales, out_dtype=out_dtype, kernel_name=kernel_name, b_pre_shuffled=True)
-
-            if bias is not None:
-                bias_casted = cast_if_needed(bias, out_dtype)
+        kernel_name = _select_kernel(layout, grad)
+        
+        if layout == "TN":
+            # Forward: input @ weight^T
+            A_fp4 = B._rowwise_data
+            A_scales = B._rowwise_scale
+            B_fp4 = A._rowwise_data
+            B_scales = A._rowwise_scale
+            b_pre_shuffled = True
+            
+        elif layout == "NN":
+            # Dgrad: grad_output @ weight
+            A_fp4 = B._rowwise_data
+            A_scales = B._rowwise_scale
+            B_fp4 = A._columnwise_data
+            B_scales = A._columnwise_scale
+            b_pre_shuffled = True
+            
+        elif layout == "NT":
+            # Wgrad: grad_output^T @ input
+            A_fp4 = B._columnwise_data
+            A_scales = B._columnwise_scale
+            B_fp4 = A._columnwise_data
+            B_scales = A._columnwise_scale
+            b_pre_shuffled = False
+            
+        else:
+            raise ValueError(f"Unsupported layout for FP4 GEMM: {layout}")
+        
+        # Execute GEMM with optional accumulation
+        if accumulate and out is not None:
+            result = _fp4_gemm_core(
+                A_fp4, A_scales, B_fp4, B_scales,
+                out_dtype=out.dtype if out is not None else out_dtype,
+                out_buffer=None,
+                kernel_name=kernel_name,
+                b_pre_shuffled=b_pre_shuffled
+            )
+            out.add_(result)
+            result = None
+        else:
+            result = _fp4_gemm_core(
+                A_fp4, A_scales, B_fp4, B_scales,
+                out_dtype=out_dtype,
+                out_buffer=out,
+                kernel_name=kernel_name,
+                b_pre_shuffled=b_pre_shuffled
+            )
+        
+        # Add bias for forward pass only
+        if bias is not None and layout == "TN" and not grad:
+            bias_casted = cast_if_needed(bias, out_dtype)
+            if result is not None:
                 result = result + bias_casted
-
-            return result
-
-        elif pass_type == 'dgrad':
-            A_fp4 = grad_output._rowwise_data
-            A_scales = grad_output._rowwise_scale
-            B_fp4 = weight._columnwise_data  # Weight is pre-shuffled
-            B_scales = weight._columnwise_scale
-
-            kernel_name = _select_kernel(op_type + "_dgrad") if op_type else ""
-            result = _fp4_gemm_core(A_fp4, A_scales, B_fp4, B_scales, out_dtype=out_dtype, out_buffer=dgrad_bulk, kernel_name=kernel_name, b_pre_shuffled=True)
-
-            return result
-
-        elif pass_type == 'wgrad':
-            A_fp4 = grad_output._columnwise_data
-            A_scales = grad_output._columnwise_scale
-            B_fp4 = input_tensor._columnwise_data  # Input is NOT pre-shuffled
-            B_scales = input_tensor._columnwise_scale
-
-            kernel_name = _select_kernel(op_type + "_wgrad") if op_type else ""
-
-            if fuse_wgrad_accumulation and main_grad is not None:
-                if accumulate_wgrad_into_param_main_grad:
-                    result = _fp4_gemm_core(A_fp4, A_scales, B_fp4, B_scales, out_dtype=main_grad.dtype, kernel_name=kernel_name, b_pre_shuffled=False)
-                    main_grad.add_(result)
-                else:
-                    _fp4_gemm_core(A_fp4, A_scales, B_fp4, B_scales, out_dtype=main_grad.dtype, out_buffer=main_grad, kernel_name=kernel_name, b_pre_shuffled=False)
-                return None
-
-            result = _fp4_gemm_core(A_fp4, A_scales, B_fp4, B_scales, out_dtype=out_dtype, kernel_name=kernel_name, b_pre_shuffled=False)
-            return result
-
+        
+        return result
