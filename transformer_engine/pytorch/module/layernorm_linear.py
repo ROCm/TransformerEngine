@@ -88,7 +88,6 @@ from ..rocm_utils import create_fp8_weight_transpose_cache, clear_fp8_weight_tra
 
 from ..tensor.mxfp4_tensor import MXFP4Quantizer
 from ..tensor._internal.mxfp4_tensor_base import MXFP4TensorBase
-from .fp4_handler_gemm import fp4_gemm
 
 __all__ = ["LayerNormLinear"]
 
@@ -205,18 +204,27 @@ class _LayerNormLinear(torch.autograd.Function):
 
         if with_quantized_norm:
             if with_input_all_gather:
-                input_quantizer.set_usage(rowwise=True, columnwise=False)
+                if not is_mxfp4_enabled:
+                    input_quantizer.set_usage(rowwise=True, columnwise=False)
                 if isinstance(input_quantizer, MXFP8Quantizer):
                     with_quantized_norm = False
             else:
-                input_quantizer.set_usage(
-                    rowwise=True,
-                    columnwise=backward_needs_input,
-                )
+                if not is_mxfp4_enabled:
+                    input_quantizer.set_usage(
+                        rowwise=True,
+                        columnwise=backward_needs_input,
+                    )
 
         # Reduce duplicated transpose in `_fix_gathered_fp8_transpose`
         # Note: This optimization is only valid for FP8 per-tensor scaling with ub_bulk_dgrad
         # For MXFP4, we skip this since transpose logic differs
+        if (
+            fp8
+            and not is_mxfp4_enabled
+            and FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling()
+            and ub_bulk_dgrad
+        ):
+            input_quantizer.set_usage(rowwise=True, columnwise=False)
 
         # ROCm does not currently support quantized norm for Float8CurrentScalingQuantizer
         if IS_HIP_EXTENSION and isinstance(input_quantizer, Float8CurrentScalingQuantizer):
@@ -258,7 +266,7 @@ class _LayerNormLinear(torch.autograd.Function):
             with_quantized_all_gather = fp8
             if return_layernorm_output and return_layernorm_output_gathered:
                 with_quantized_all_gather = False
-            if fp8:
+            if fp8 and not is_mxfp4_enabled:
                 input_quantizer.set_usage(rowwise=True, columnwise=False)
                 # Quantize from bf16 to fp4 for fwd gemm (before gathering)
                 # Skip if fused kernel already provided ln_out_mxfp4_local
@@ -294,7 +302,8 @@ class _LayerNormLinear(torch.autograd.Function):
                             ln_out = ln_out_mxfp4
                         else:
                             # Quantize from bf16 to fp8 for wgrad
-                            input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input)
+                            if not is_mxfp4_enabled:
+                                input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input)
                             ln_out = input_quantizer(ln_out)
                     elif backward_needs_input:
                         ln_out.update_usage(rowwise_usage=True, columnwise_usage=True)
@@ -470,7 +479,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
             # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
             if inp.requires_grad and keep_fp8_weight_transpose_cache and not use_fsdp2:
-                if isinstance(weightmat, QuantizedTensorBase):
+                if isinstance(weightmat, QuantizedTensorBase) and not isinstance(weightmat, MXFP4TensorBase):
                     weightmat.update_usage(columnwise_usage=True)
 
             if cpu_offloading:
@@ -704,7 +713,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ln_out_total_work = None
             if ctx.ln_out_needs_gather:
                 quantizer = None
-                if ctx.input_quantizer is not None:
+                if ctx.fp8 and not is_mxfp4_enabled:
                     quantizer = ctx.input_quantizer
                     if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
                         # If data is in FP8, we compute FP8 transposes manually
@@ -750,7 +759,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
             # Choose whether to use GEMM kernel with split accumulator
             use_split_accumulator = _2X_ACC_DGRAD
-            if ctx.fp8:
+            if ctx.fp8 and not is_mxfp4_enabled:
                 recipe = ctx.fp8_recipe
                 if hasattr(recipe, "fp8_gemm_dgrad"):
                     use_split_accumulator = recipe.fp8_gemm_dgrad.use_split_accumulator
@@ -913,9 +922,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 # wGrad GEMM
                 # ------------------------------------------------------
                 # Note: Fuse with bgrad computation if needed
-                nvtx_range_push(f"{nvtx_label}.wgrad_gemm")
                 wgrad_gemm_use_split_accumulator = _2X_ACC_WGRAD
-                if ctx.fp8:
+                if ctx.fp8 and not is_mxfp4_enabled:
                     recipe = ctx.fp8_recipe
                     if hasattr(recipe, "fp8_gemm_wgrad"):
                         wgrad_gemm_use_split_accumulator = (

@@ -16,6 +16,7 @@ from ..tensor.quantized_tensor import Quantizer
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ..tensor._internal.mxfp4_tensor_base import MXFP4TensorBase
 from ...debug.pytorch.debug_quantization import DebugQuantizer
+import os
 
 __all__ = [
     "general_gemm",
@@ -159,7 +160,6 @@ def general_gemm(
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
     transa = layout[0] == "T"
     transb = layout[1] == "T"
-    # assert quantization_params is None, "FP8 output not supported yet"
 
     if ub_type is not None:
         assert ub is not None, (

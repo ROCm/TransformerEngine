@@ -169,8 +169,6 @@ class _Linear(torch.autograd.Function):
         inputmat_total = None  # Input tensor to pass to GEMM (gathered)
         own_quantized_input = False
         if fp8:
-
-
             assert_dim_for_fp8_exec(inputmat, weight)
             if save_original_input:
                 assert not isinstance(
@@ -216,17 +214,19 @@ class _Linear(torch.autograd.Function):
                     tp_group,
                 )
             else:
-                if (
-                    FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling()
-                    and ub_bulk_dgrad
-                ):
-                    # reduce duplicated transpose in `_fix_gathered_fp8_transpose`
-                    input_quantizer.set_usage(rowwise=True, columnwise=False)
-                else:
-                    input_quantizer.set_usage(
-                        rowwise=True,
-                        columnwise=backward_needs_input,
-                    )
+                # For FP4, quantizer is already configured with both orientations; don't override
+                if not is_mxfp4_enabled:
+                    if (
+                        FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling()
+                        and ub_bulk_dgrad
+                    ):
+                        # reduce duplicated transpose in `_fix_gathered_fp8_transpose`
+                        input_quantizer.set_usage(rowwise=True, columnwise=False)
+                    else:
+                        input_quantizer.set_usage(
+                            rowwise=True,
+                            columnwise=backward_needs_input,
+                        )
                 if not isinstance(inputmat, QuantizedTensor):
                     _pre_out = input_quantizer.make_empty(inputmat.shape, dtype=inputmat.dtype, device="cuda")
                     inputmat = input_quantizer.quantize(inputmat, out=_pre_out)
