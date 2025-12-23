@@ -383,10 +383,17 @@ class _GroupedLinear(torch.autograd.Function):
                 if ctx.fuse_wgrad_accumulation:
                     wgrad_list = main_grads
                 else:
-                    wgrad_list = [
-                        torch.empty(w.size(), dtype=ctx.activation_dtype, device=ctx.device)
-                        for w in weights
-                    ]
+                    if not ctx.use_grouped_gemm_triton:
+                        wgrad_list = [
+                            torch.empty(w.size(), dtype=ctx.activation_dtype, device=ctx.device)
+                            for w in weights
+                        ]
+                    else:
+                        wgrad_list = torch.empty(
+                            (ctx.num_gemms, weights[0].size(0), weights[0].size(1)),
+                            dtype=ctx.activation_dtype,
+                            device=ctx.device
+                        )
 
                 if ctx.save_original_input:
                     inp = inputmats[0]
@@ -465,8 +472,8 @@ class _GroupedLinear(torch.autograd.Function):
                     return wgrad
 
                 wgrad_list = [
-                    handle_custom_ddp_from_mcore(weight, wgrad)
-                    for weight, wgrad in zip(origin_weights, wgrad_list)
+                    handle_custom_ddp_from_mcore(weight, wgrad_list[i])
+                    for i, weight in enumerate(origin_weights)
                 ]
             else:
                 wgrad_list = [None] * ctx.num_gemms

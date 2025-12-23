@@ -14,18 +14,35 @@ def benchmark_grouped_linear():
     dtype = torch.bfloat16
     
     # Create m_splits that sum to 24576
-    # For simplicity, split evenly across experts
+    # Randomize to simulate real MoE routing distribution
     # In practice, this would come from the router
-    m_splits = [m // num_gemms] * num_gemms  # Each expert gets 384 tokens
+    torch.manual_seed(42)  # For reproducibility
+    random_weights = torch.rand(num_gemms)
+    m_splits_float = (random_weights / random_weights.sum()) * m
+    m_splits = m_splits_float.int().tolist()
+    
+    # Adjust for rounding errors to ensure exact sum
+    diff = m - sum(m_splits)
+    if diff > 0:
+        # Add remaining tokens to the first 'diff' experts
+        for i in range(diff):
+            m_splits[i] += 1
+    elif diff < 0:
+        # Remove excess tokens from the first 'abs(diff)' experts
+        for i in range(abs(diff)):
+            if m_splits[i] > 1:  # Ensure we don't go below 1
+                m_splits[i] -= 1
     
     print(f"Benchmark Configuration:")
     print(f"  Total tokens: {m}")
     print(f"  Number of experts (num_gemms): {num_gemms}")
-    print(f"  Tokens per expert: {m // num_gemms}")
+    print(f"  Tokens per expert (avg): {m / num_gemms:.1f}")
+    print(f"  Tokens per expert (min/max): {min(m_splits)}/{max(m_splits)}")
+    print(f"  m_splits sum verification: {sum(m_splits)}")
     print(f"  Input shape: [{m}, {in_features}]")
     print(f"  Output features per expert: {out_features}")
     print(f"  Output shape: [{m}, {out_features}]")
-    print(f"  m_splits (first 5): {m_splits[:5]}...")
+    print(f"  m_splits (first 10): {m_splits[:10]}...")
     print(f"  dtype: {dtype}")
     print(f"  Device: cuda")
     print()

@@ -67,7 +67,7 @@ def general_grouped_gemm_triton(
         # A=inputs (list of (m_i, in_features)), B=grad_outputs (list of (m_i, out_features))
         A_tensor = A[0] if len(A) == 1 else torch.cat(A, dim=0)  # (M, in_features)
         B_tensor = B[0] if len(B) == 1 else torch.cat(B, dim=0)  # (M, out_features)
-        out_tensor_3d = torch.stack(out, dim=0)  # (G, out_features, in_features)
+        out_tensor_3d = out  # (G, out_features, in_features)
         
         # Allocate bias_grad OUTPUT buffer if needed (kernel writes to this)
         bias_grad_tensor = None
@@ -88,10 +88,6 @@ def general_grouped_gemm_triton(
             bias_grad=bias_grad_tensor,  # OUTPUT: (G, out_features) or None
             accumulate=accumulate,
         )
-        
-        # Copy 3D results back to original out list (in-place)
-        for i in range(len(out)):
-            out[i].copy_(out_tensor_3d[i])
         
         # Convert bias_grad to list to match C++ backend signature
         if use_bias and bias_grad_tensor is not None:
