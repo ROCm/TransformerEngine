@@ -171,8 +171,8 @@ class _GroupedLinear(torch.autograd.Function):
 
         # Perform GEMM
         # Check if Triton kernel should be used
-        use_triton = os.getenv("USE_TRITON_GROUPED_GEMM", "0") == "1"
-        general_grouped_gemm_func = general_grouped_gemm_triton if use_triton else general_grouped_gemm
+        use_grouped_gemm_triton = os.getenv("USE_TRITON_GROUPED_GEMM", "0") == "1"
+        general_grouped_gemm_func = general_grouped_gemm_triton if use_grouped_gemm_triton else general_grouped_gemm
         _ = general_grouped_gemm_func(
             weights_fp8,
             inputmats,
@@ -348,8 +348,8 @@ class _GroupedLinear(torch.autograd.Function):
                             rowwise_usage=quantizer.rowwise_usage,
                             columnwise_usage=quantizer.columnwise_usage,
                         )
-                use_triton = os.getenv("USE_TRITON_GROUPED_GEMM", "0") == "1"
-                general_grouped_gemm_func = general_grouped_gemm_triton if use_triton else general_grouped_gemm
+                use_grouped_gemm_triton = os.getenv("USE_TRITON_GROUPED_GEMM", "0") == "1"
+                general_grouped_gemm_func = general_grouped_gemm_triton if use_grouped_gemm_triton else general_grouped_gemm
                 general_grouped_gemm_func(
                     weights,
                     grad_output,

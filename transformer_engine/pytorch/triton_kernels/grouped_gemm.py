@@ -63,74 +63,103 @@ def general_grouped_gemm_triton(
     
     
     if is_wgrad:
-        A_tensor = torch.cat(A, dim=0)
-        B_tensor = torch.cat(B, dim=0)
-        out_tensor = torch.stack(out, dim=0)
-        # Check if bias exists and contains non-empty tensors
-        if bias is not None and len(bias) > 0 and bias[0].numel() > 0:
-            bias_tensor = torch.stack(bias, dim=0)  # Use stack for 3D (G, N)
-        else:
-            bias_tensor = None
-        group_sizes = torch.tensor(m_splits, dtype=torch.int32, device="cuda")
-        print("B_tensor.shape", B_tensor.shape)
-        print("A_tensor.shape", A_tensor.shape)
-        print("group_sizes", group_sizes)
-        print("out_tensor.shape", out_tensor.shape)
+        # WGRAD: ptgmm expects lhs=(K,M), rhs=(M,N), out=(G,K,N)
+        # A=inputs (list of (m_i, in_features)), B=grad_outputs (list of (m_i, out_features))
+        A_tensor = torch.cat(A, dim=0)  # (M, in_features)
+        B_tensor = torch.cat(B, dim=0)  # (M, out_features)
+        out_tensor_3d = torch.stack(out, dim=0)  # (G, out_features, in_features)
+        
+        # Allocate bias_grad OUTPUT buffer if needed (kernel writes to this)
+        bias_grad_tensor = None
+        if use_bias:
+            G = len(m_splits)
+            K = B_tensor.shape[1]  # out_features
+            bias_grad_tensor = torch.zeros(G, K, dtype=torch.float32, device=B_tensor.device)
+        
+        group_sizes = torch.tensor(m_splits, dtype=torch.int32, device=A[0].device)
+        
         # Backward pass: C = B^T @ A (wgrad = grad_output^T @ input)
-        # A=inputs, B=grad_outputs, C=wgrad
+        # ptgmm expects lhs shape (K, M), so we need to transpose
         ptgmm(
-            lhs=B_tensor.transpose(0, 1),  # grad_outputs
-            rhs=A_tensor,  # inputs
+            lhs=B_tensor.t(),  # (out_features, M) - transpose to get correct shape
+            rhs=A_tensor,      # (M, in_features)
             group_sizes=group_sizes,
             preferred_element_type=out_dtype,
-            existing_out=out_tensor,  # wgrad
+            existing_out=out_tensor_3d,  # (G, out_features, in_features)
             config=None,
-            bias_grad=bias_tensor,
+            bias_grad=bias_grad_tensor,  # OUTPUT: (G, out_features) or None
             accumulate=accumulate,
         )
+        
+        # Copy 3D results back to original out list (in-place)
+        for i in range(len(out)):
+            out[i].copy_(out_tensor_3d[i])
+        
+        # Convert bias_grad to list to match C++ backend signature
+        if use_bias and bias_grad_tensor is not None:
+            grad_biases = list(torch.unbind(bias_grad_tensor, dim=0))
+        else:
+            grad_biases = [None] * len(out) if bias is None else bias
+        
+        # Return appropriate output format
+        return_out = out_tensor_3d.view(-1, out_tensor_3d.shape[-1]) if single_output else out
+        return return_out, grad_biases, None
 
     elif is_dgrad:
-        A_tensor = torch.stack(A, dim=0)
-        B_tensor = torch.cat(B, dim=0)
-        out_tensor = torch.cat(out, dim=0)
-        # Check if bias exists and contains non-empty tensors
+        # DGRAD: gmm expects lhs=(M,K), rhs=(G,K,N), out=(M,N)
+        # A=weights (list of (out_features, in_features)), B=grad_outputs (list of (m_i, out_features))
+        A_tensor_3d = torch.stack(A, dim=0)  # (G, out_features, in_features)
+        B_tensor = torch.cat(B, dim=0)  # (M, out_features)
+        out_tensor = out[0] if len(out) == 1 else torch.cat(out, dim=0)  # (M, in_features)
+        
+        # Stack bias into 3D if provided
+        bias_tensor = None
         if bias is not None and len(bias) > 0 and bias[0].numel() > 0:
-            bias_tensor = torch.stack(bias, dim=0)  # Use stack for 3D (G, N)
-        else:
-            bias_tensor = None
-        group_sizes = torch.tensor(m_splits, dtype=torch.int32, device="cuda")
+            bias_tensor = torch.stack(bias, dim=0)  # (G, in_features)
+        
+        group_sizes = torch.tensor(m_splits, dtype=torch.int32, device=A[0].device)
+        
         # Backward pass: C = B @ A (dgrad = grad_output @ weight)
-        # A=weights, B=grad_outputs, C=dgrad
         gmm(
-            lhs=B_tensor,  # grad_outputs
-            rhs=A_tensor,  # weights
+            lhs=B_tensor,      # (M, out_features)
+            rhs=A_tensor_3d,   # (G, out_features, in_features)
             group_sizes=group_sizes,
             preferred_element_type=out_dtype,
-            existing_out=out_tensor,  # dgrad
+            existing_out=out_tensor,  # (M, in_features)
             config=None,
             bias=bias_tensor,
         )
+        
+        grad_biases = [None] * len(m_splits) if bias is None else bias
+        return_out = out_tensor if single_output else out
+        return return_out, grad_biases, None
+        
     else:
+        # FORWARD: gmm expects lhs=(M,K), rhs=(G,K,N), out=(M,N)
         # Forward pass: C = B @ A^T (output = input @ weight^T + bias)
-        # A=weights, B=inputs, C=outputs
-        A_tensor = torch.stack(A, dim=0).transpose(1, 2)
-        B_tensor = torch.cat(B, dim=0)
-        out_tensor = torch.cat(out, dim=0)
-        # Check if bias exists and contains non-empty tensors
+        # A=weights (list of (out_features, in_features)), B=inputs (list of (m_i, in_features))
+        A_tensor_3d = torch.stack(A, dim=0)  # (G, out_features, in_features)
+        A_tensor_3d = A_tensor_3d.transpose(1, 2)  # (G, in_features, out_features) for TN layout
+        B_tensor = torch.cat(B, dim=0)  # (M, in_features)
+        out_tensor = out[0] if len(out) == 1 else torch.cat(out, dim=0)  # (M, out_features)
+        
+        # Stack bias into 3D if provided
+        bias_tensor = None
         if bias is not None and len(bias) > 0 and bias[0].numel() > 0:
-            bias_tensor = torch.stack(bias, dim=0)  # Use stack for 3D (G, N)
-        else:
-            bias_tensor = None
-        group_sizes = torch.tensor(m_splits, dtype=torch.int32, device="cuda")
+            bias_tensor = torch.stack(bias, dim=0)  # (G, out_features)
+        
+        group_sizes = torch.tensor(m_splits, dtype=torch.int32, device=A[0].device)
+        
         gmm(
-            lhs=B_tensor,  # inputs
-            rhs=A_tensor,  # weights
+            lhs=B_tensor,      # (M, in_features)
+            rhs=A_tensor_3d,   # (G, in_features, out_features)
             group_sizes=group_sizes,
             preferred_element_type=out_dtype,
-            existing_out=out_tensor,  # output
+            existing_out=out_tensor,  # (M, out_features)
             config=None,
             bias=bias_tensor,
         )
-    
-    # Return outputs, grad_biases, and None for gelu_input (to match C++ backend signature)
-    return out_tensor, bias, None
+        
+        grad_biases = [None] * len(m_splits) if bias is None else bias
+        return_out = out_tensor if single_output else out
+        return return_out, grad_biases, None
