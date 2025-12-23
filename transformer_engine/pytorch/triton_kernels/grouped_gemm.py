@@ -16,7 +16,7 @@ def general_grouped_gemm_triton(
     out_dtype: torch.dtype,
     workspaces: List[torch.Tensor],
     layout: str = "TN",
-    m_splits: Optional[List[int]] = None,
+    m_splits: torch.Tensor = None,
     gelu: bool = False,
     grad=False,
     accumulate: bool = False,
@@ -72,18 +72,16 @@ def general_grouped_gemm_triton(
         # Allocate bias_grad OUTPUT buffer if needed (kernel writes to this)
         bias_grad_tensor = None
         if use_bias:
-            G = len(m_splits)
+            G = m_splits.shape[0]
             K = B_tensor.shape[1]  # out_features
             bias_grad_tensor = torch.zeros(G, K, dtype=torch.float32, device=B_tensor.device)
-        
-        group_sizes = torch.tensor(m_splits, dtype=torch.int32, device=A[0].device)
         
         # Backward pass: C = B^T @ A (wgrad = grad_output^T @ input)
         # ptgmm expects lhs shape (K, M), so we need to transpose
         ptgmm(
             lhs=B_tensor.t(),  # (out_features, M) - transpose to get correct shape
             rhs=A_tensor,      # (M, in_features)
-            group_sizes=group_sizes,
+            group_sizes=m_splits,
             preferred_element_type=out_dtype,
             existing_out=out_tensor_3d,  # (G, out_features, in_features)
             config=None,
@@ -117,13 +115,11 @@ def general_grouped_gemm_triton(
         if bias is not None and len(bias) > 0 and bias[0].numel() > 0:
             bias_tensor = torch.stack(bias, dim=0)  # (G, in_features)
         
-        group_sizes = torch.tensor(m_splits, dtype=torch.int32, device=A[0].device)
-        
         # Backward pass: C = B @ A (dgrad = grad_output @ weight)
         gmm(
             lhs=B_tensor,      # (M, out_features)
             rhs=A_tensor_3d,   # (G, out_features, in_features)
-            group_sizes=group_sizes,
+            group_sizes=m_splits,
             preferred_element_type=out_dtype,
             existing_out=out_tensor,  # (M, in_features)
             config=None,
@@ -148,12 +144,10 @@ def general_grouped_gemm_triton(
         if bias is not None and len(bias) > 0 and bias[0].numel() > 0:
             bias_tensor = torch.stack(bias, dim=0)  # (G, out_features)
         
-        group_sizes = torch.tensor(m_splits, dtype=torch.int32, device=A[0].device)
-        
         gmm(
             lhs=B_tensor,      # (M, in_features)
             rhs=A_tensor_3d,   # (G, in_features, out_features)
-            group_sizes=group_sizes,
+            group_sizes=m_splits,
             preferred_element_type=out_dtype,
             existing_out=out_tensor,  # (M, out_features)
             config=None,

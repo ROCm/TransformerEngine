@@ -173,6 +173,7 @@ class _GroupedLinear(torch.autograd.Function):
         # Check if Triton kernel should be used
         use_grouped_gemm_triton = os.getenv("USE_TRITON_GROUPED_GEMM", "0") == "1"
         general_grouped_gemm_func = general_grouped_gemm_triton if use_grouped_gemm_triton else general_grouped_gemm
+        m_splits_tensor = torch.tensor(m_splits, dtype=torch.int32, device=inputmats[0].device) if use_grouped_gemm_triton else m_splits
         _ = general_grouped_gemm_func(
             weights_fp8,
             inputmats,
@@ -180,7 +181,7 @@ class _GroupedLinear(torch.autograd.Function):
             activation_dtype,
             get_multi_stream_cublas_workspace(),
             single_output=True,
-            m_splits=m_splits,
+            m_splits=m_splits_tensor,
             bias=biases,
             use_bias=use_bias,
             use_split_accumulator=use_split_accumulator,
@@ -240,6 +241,7 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.device = device
             ctx.grad_output_quantizers = grad_output_quantizers
             ctx.m_splits = m_splits
+            ctx.m_splits_tensor = m_splits_tensor
             ctx.num_gemms = num_gemms
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
@@ -358,7 +360,7 @@ class _GroupedLinear(torch.autograd.Function):
                     get_multi_stream_cublas_workspace(),
                     single_output=True,
                     layout="NN",
-                    m_splits=ctx.m_splits,
+                    m_splits=ctx.m_splits_tensor,
                     grad=True,
                     use_split_accumulator=dgrad_gemm_use_split_accumulator,
                 )
@@ -405,7 +407,7 @@ class _GroupedLinear(torch.autograd.Function):
                     workspaces=get_multi_stream_cublas_workspace(),
                     layout="NT",
                     grad=True,
-                    m_splits=ctx.m_splits,
+                    m_splits=ctx.m_splits_tensor,
                     use_bias=ctx.use_bias if grad_biases[0] is None else None,
                     bias=biases,
                     use_split_accumulator=wgrad_gemm_use_split_accumulator,
