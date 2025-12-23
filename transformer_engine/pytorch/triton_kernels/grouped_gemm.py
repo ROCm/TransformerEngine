@@ -65,8 +65,8 @@ def general_grouped_gemm_triton(
     if is_wgrad:
         # WGRAD: ptgmm expects lhs=(K,M), rhs=(M,N), out=(G,K,N)
         # A=inputs (list of (m_i, in_features)), B=grad_outputs (list of (m_i, out_features))
-        A_tensor = torch.cat(A, dim=0)  # (M, in_features)
-        B_tensor = torch.cat(B, dim=0)  # (M, out_features)
+        A_tensor = A[0] if len(A) == 1 else torch.cat(A, dim=0)  # (M, in_features)
+        B_tensor = B[0] if len(B) == 1 else torch.cat(B, dim=0)  # (M, out_features)
         out_tensor_3d = torch.stack(out, dim=0)  # (G, out_features, in_features)
         
         # Allocate bias_grad OUTPUT buffer if needed (kernel writes to this)
@@ -107,7 +107,7 @@ def general_grouped_gemm_triton(
         # DGRAD: gmm expects lhs=(M,K), rhs=(G,K,N), out=(M,N)
         # A=weights (list of (out_features, in_features)), B=grad_outputs (list of (m_i, out_features))
         A_tensor_3d = torch.stack(A, dim=0)  # (G, out_features, in_features)
-        B_tensor = torch.cat(B, dim=0)  # (M, out_features)
+        B_tensor = B[0] if len(B) == 1 else torch.cat(B, dim=0)  # (M, out_features)
         out_tensor = out[0] if len(out) == 1 else torch.cat(out, dim=0)  # (M, in_features)
         
         # Stack bias into 3D if provided
@@ -136,7 +136,7 @@ def general_grouped_gemm_triton(
         # A=weights (list of (out_features, in_features)), B=inputs (list of (m_i, in_features))
         A_tensor_3d = torch.stack(A, dim=0)  # (G, out_features, in_features)
         A_tensor_3d = A_tensor_3d.transpose(1, 2)  # (G, in_features, out_features) for TN layout
-        B_tensor = torch.cat(B, dim=0)  # (M, in_features)
+        B_tensor = B[0] if len(B) == 1 else torch.cat(B, dim=0)  # (M, in_features)
         out_tensor = out[0] if len(out) == 1 else torch.cat(out, dim=0)  # (M, out_features)
         
         # Stack bias into 3D if provided

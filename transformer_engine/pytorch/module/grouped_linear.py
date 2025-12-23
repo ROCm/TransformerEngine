@@ -86,6 +86,8 @@ class _GroupedLinear(torch.autograd.Function):
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
 
+        # Check if Triton kernel should be used
+        use_grouped_gemm_triton = os.getenv("USE_TRITON_GROUPED_GEMM", "0") == "1" and not fp8
         num_gemms = len(m_splits)
         weights = weights_and_biases[:num_gemms]
         biases = weights_and_biases[num_gemms:]
@@ -128,8 +130,10 @@ class _GroupedLinear(torch.autograd.Function):
         if fp8:
             inputmats = tex.split_quantize(inp_view, m_splits, input_quantizers)
         else:
-            inputmats = torch.split(cast_if_needed(inp_view, activation_dtype), m_splits)
-
+            if not use_grouped_gemm_triton:
+                inputmats = torch.split(cast_if_needed(inp_view, activation_dtype), m_splits)
+            else:
+                inputmats = [cast_if_needed(inp_view, activation_dtype)]
         # Initialize weights
         weights_fp8: list
         if fp8:
@@ -170,10 +174,8 @@ class _GroupedLinear(torch.autograd.Function):
                 use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
 
         # Perform GEMM
-        # Check if Triton kernel should be used
-        use_grouped_gemm_triton = os.getenv("USE_TRITON_GROUPED_GEMM", "0") == "1"
         general_grouped_gemm_func = general_grouped_gemm_triton if use_grouped_gemm_triton else general_grouped_gemm
-        m_splits_tensor = torch.tensor(m_splits, dtype=torch.int32, device=inputmats[0].device) if use_grouped_gemm_triton else m_splits
+        m_splits_tensor = torch.tensor(m_splits, dtype=torch.int32, device=device) if use_grouped_gemm_triton else m_splits
         _ = general_grouped_gemm_func(
             weights_fp8,
             inputmats,
@@ -262,6 +264,8 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.wgrad_store = wgrad_store
             ctx.save_original_input = save_original_input
             ctx.input_quantizers = input_quantizers
+            ctx.use_grouped_gemm_triton = use_grouped_gemm_triton
+            ctx.num_input_tensors = len(inputmats)
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         return out.view(-1, *inp.shape[1:-1], out.shape[-1])
@@ -272,10 +276,11 @@ class _GroupedLinear(torch.autograd.Function):
         with torch.cuda.nvtx.range("_GroupedLinear_backward"):
             saved_tensors = restore_from_saved(ctx.tensor_objects, ctx.saved_tensors)
             N = ctx.num_gemms
-            inputmats = saved_tensors[:N]
-            weights = saved_tensors[N : 2 * N]
-            origin_weights = saved_tensors[2 * N : 3 * N]
-            biases = saved_tensors[3 * N : 4 * N]
+            num_inputs = ctx.num_input_tensors
+            inputmats = saved_tensors[:num_inputs]
+            weights = saved_tensors[num_inputs: num_inputs + N]
+            origin_weights = saved_tensors[num_inputs + N : num_inputs + 2 * N]
+            biases = saved_tensors[num_inputs + 2 * N : num_inputs + 3 * N]
             main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
@@ -318,10 +323,13 @@ class _GroupedLinear(torch.autograd.Function):
             else:
                 # Only split grad output. Grad bias is fused with
                 # wgrad GEMM.
-                grad_output = torch.split(
+                if not ctx.use_grouped_gemm_triton:
+                    grad_output = torch.split(
                     cast_if_needed(grad_output_view, ctx.activation_dtype),
                     ctx.m_splits,
                 )
+                else:
+                    grad_output = [cast_if_needed(grad_output_view, ctx.activation_dtype)]
 
             if ctx.is_first_microbatch is not None:
                 accumulate_wgrad_into_param_main_grad = (
@@ -350,8 +358,7 @@ class _GroupedLinear(torch.autograd.Function):
                             rowwise_usage=quantizer.rowwise_usage,
                             columnwise_usage=quantizer.columnwise_usage,
                         )
-                use_grouped_gemm_triton = os.getenv("USE_TRITON_GROUPED_GEMM", "0") == "1"
-                general_grouped_gemm_func = general_grouped_gemm_triton if use_grouped_gemm_triton else general_grouped_gemm
+                general_grouped_gemm_func = general_grouped_gemm_triton if ctx.use_grouped_gemm_triton else general_grouped_gemm
                 general_grouped_gemm_func(
                     weights,
                     grad_output,
@@ -397,9 +404,12 @@ class _GroupedLinear(torch.autograd.Function):
                     if ctx.fp8:
                         inputmats = tex.split_quantize(inp_view, ctx.m_splits, ctx.input_quantizers)
                     else:
-                        inputmats = torch.split(
-                            cast_if_needed(inp_view, ctx.activation_dtype), ctx.m_splits
-                        )
+                        if not ctx.use_grouped_gemm_triton:
+                            inputmats = torch.split(
+                                cast_if_needed(inp_view, ctx.activation_dtype), ctx.m_splits
+                            )
+                        else:
+                            inputmats = [cast_if_needed(inp_view, ctx.activation_dtype)]
 
                 grouped_gemm_wgrad = functools.partial(
                     general_grouped_gemm_func,
