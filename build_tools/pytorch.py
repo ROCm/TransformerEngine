@@ -27,6 +27,7 @@ from typing import List
 
 def install_requirements() -> List[str]:
     """Install dependencies for TE/PyTorch extensions."""
+<<<<<<< HEAD
     reqs = ["einops"]
     if not rocm_build():
         reqs.append(
@@ -41,6 +42,9 @@ def install_requirements() -> List[str]:
         ]
     )
     return reqs
+=======
+    return ["torch>=2.1", "einops", "onnxscript==0.3.1", "onnx"]
+>>>>>>> upstream/release_v2.6
 
 
 def test_requirements() -> List[str]:

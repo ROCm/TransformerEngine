@@ -984,10 +984,7 @@ using fp8e5m2 = te_hip_fp8_e5m2;
 #endif //__HIP_PLATFORM_AMD__
 using e8m0_t = uint8_t;
 
-constexpr uint32_t FP32_MANTISSA_BITS = 23;
-constexpr uint32_t FP32_EXPONENT_BIAS = 127;
-
-enum ScalingType { ROWWISE = 0, COLWISE = 1, BIDIMENTIONAL = 2 };
+enum ScalingType { ROWWISE = 0, COLWISE = 1, BIDIMENSIONAL = 2 };
 
 template <typename T>
 struct Numeric_Traits;
@@ -1045,6 +1042,7 @@ struct Quantized_Limits {
 #endif // TE_DYNAMIC_HIP_FP8_TYPE
 };
 
+<<<<<<< HEAD
 __device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
   // TODO: nan/inf needs to be set for any value
   // of nan/inf in input not just amax.
@@ -1086,6 +1084,8 @@ __device__ __forceinline__ float exp2f_rcp(e8m0_t biased_exp) {
   return (biased_exp == 0) ? 1 : exp2f(FP32_EXPONENT_BIAS - static_cast<float>(biased_exp));
 }
 
+=======
+>>>>>>> upstream/release_v2.6
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_COMMON_UTILS_CUH_
