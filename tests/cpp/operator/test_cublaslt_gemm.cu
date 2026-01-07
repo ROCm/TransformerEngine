@@ -228,6 +228,14 @@ void performTest(const TestParams& params) {
 
 #ifdef __HIP_PLATFORM_AMD__
 
+  #if HIP_VERSION < 70200000
+    if (prop.major == 9 && prop.minor == 5 &&
+        params.transa && !params.transb &&
+        params.m == 2304 && params.k == 768 && params.n == 4096) {
+      GTEST_SKIP() << "Skip TN 2304x768x4096 on gfx950 for ROCm < 7.2";
+    }
+  #endif
+
   // Enable FP8 GEMM + GELU fusion tests only on MI300 (gfx942) with ROCm > 7.0.
   // hipBLASLt currently supports this config only
   bool fp8_gelu_fusion_config = false;
