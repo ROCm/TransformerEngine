@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -1111,7 +1111,11 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
           const size_t in_mem = grad_mem + in_act_mem + in_gate_mem;
 
           const size_t out_act_mem = buff_size_aligned_out;
+#ifdef __HIP_PLATFORM_AMD__
+          const size_t out_gate_mem = buff_size_aligned_out;
+#else
           const size_t out_gate_mem = (IS_DGATED ? buff_size_aligned_out : 0);
+#endif          
           size_t out_mem = out_act_mem + out_gate_mem;
           if (USE_ROWWISE_SCALING && USE_COLWISE_SCALING) { out_mem *= 2; }
 

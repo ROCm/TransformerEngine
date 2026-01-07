@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -1036,13 +1036,17 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
   const size_t rows = input.flat_first_dim();
   const size_t cols = input.flat_last_dim();
 
+#ifdef __HIP_PLATFORM_AMD__
+  constexpr size_t CHUNK_DIM_Y = MXFP8_CHUNK_DIM_Y;
+  constexpr size_t CHUNK_DIM_X = MXFP8_CHUNK_DIM_X;
+  constexpr size_t THREADS_PER_CHUNK = MXFP8_THREADS_PER_CHUNK;
+#else
   constexpr bool CAST_DBIAS_ONLY = IS_DBIAS && (!IS_DACT) && (!IS_ACT);
 
   constexpr size_t CHUNK_DIM_Y = CAST_DBIAS_ONLY ? 128 : 64;
   constexpr size_t CHUNK_DIM_X = CAST_DBIAS_ONLY ? 128 : 64;
   constexpr size_t THREADS_PER_CHUNK = CAST_DBIAS_ONLY ? 128 : 64;
 
-#ifndef __HIP_PLATFORM_AMD__
   constexpr size_t THREADS_X = CHUNK_DIM_X / SCALE_DIM_X;
   constexpr size_t THREADS_Y = THREADS_PER_CHUNK / THREADS_X;
   constexpr size_t BUFF_DIM_Y = THREADS_Y;
@@ -1113,6 +1117,7 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                       scales_rowwise_ptr, scales_colwise_ptr,
                       reinterpret_cast<const float *>(noop->data.dptr), workspace_ptr, amax_ptr,
                       rows, cols, scale_stride_rowwise, scale_stride_colwise);
+                  NVTE_CHECK_CUDA(cudaGetLastError());
           )));  // NOLINT(*)
 #else // #ifdef __HIP_PLATFORM_AMD__
 
