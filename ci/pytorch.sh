@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -66,6 +66,8 @@ run_test_config(){
     run 1 test_sanity.py
     run_default_fa 1 test_sanity_import.py
     run_default_fa 1 attention/test_attention.py # Backend selection is controlled by the test
+    run_default_fa 1 attention/test_cp_utils.py
+    run_default_fa 1 attention/test_kv_cache.py
     run_default_fa 1 triton_kernels/test_cast.py
     run_default_fa 1 triton_kernels/test_cast_mxfp8.py
     run_default_fa 1 triton_kernels/test_norm_common.py
@@ -77,9 +79,6 @@ run_test_config(){
     NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "triton" 1 test_float8_current_scaling_exact.py
     NVTE_USE_ATOMIC_AMAX=1 run_default_fa 3 test_numerics.py
     NVTE_USE_ATOMIC_AMAX=1 run_default_fa 3 test_fusible_ops.py
-    #PIV
-    run_default_fa 1 attention/test_cp_utils.py
-    run_default_fa 1 attention/test_kv_cache.py
 }
 
 run_test_config_mgpu(){

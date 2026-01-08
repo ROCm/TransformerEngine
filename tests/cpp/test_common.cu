@@ -539,13 +539,8 @@ void compareResults_sequential(const std::string &name, const Tensor &test,
     const T *test_data = rowwise ? test.rowwise_cpu_dptr<T>() : test.columnwise_cpu_dptr<T>();
     const T *ref_data = reinterpret_cast<const T*>(ref);
     for (size_t i = 0; i < N; ++i) {
-#if 1 //ndef __HIP_PLATFORM_AMD__//PIV TODO static_cast<double>(static_cast<float>
       double t = static_cast<double>(test_data[i]);
       double r = static_cast<double>(ref_data[i]);
-#else
-      double t = static_cast<double>(static_cast<float>(test_data[i]));
-      double r = static_cast<double>(static_cast<float>(ref_data[i]));
-#endif
       bool mismatch = fabs(t - r) > atol && (r == 0 || fabs((t - r) / r) > rtol);
       /* For Float32 the floating point comparison is enough to error out */
       bool assertion = mismatch && test.dtype() == DType::kFloat32;
@@ -593,7 +588,7 @@ static size_t getFirstMismatchIdx(const DType data_type, const T* test_data, con
     size_t thread_mismatches = 0;
     #pragma omp for schedule(static)
     for (size_t i = 0; i < N; ++i) {
-      double t = static_cast<double>(test_data[i]);//PIV TODO: static_cast<double>(static_cast<float>(test_data[i])
+      double t = static_cast<double>(test_data[i]);
       double r = static_cast<double>(ref_data[i]);
 
       bool mismatch = fabs(t - r) > atol && (r == 0 || fabs((t - r) / r) > rtol);

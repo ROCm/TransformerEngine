@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -566,9 +566,6 @@ def test_sanity_gpt(
     normalization,
     parallel_attention_mlp,
 ):
-    if IS_HIP_EXTENSION and cpu_offload:
-      pytest.skip("cpu_offloading not supported in rocm TE")
-
     config = model_configs[model]
 
     if fp8_recipe is not None:

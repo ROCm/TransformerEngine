@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -128,10 +128,11 @@ def test_dot_product_mem_calc():
     if not is_bf16_compatible():
         pytest.skip("This test requires bf16 support.")
     dtype = torch.bfloat16
-    config = ModelConfig(16, 128, 8, 128, 8192, 8192, 0.0, "causal", "no_bias")
+    # b, sq, q, dqk
+    config = ModelConfig(16, 8192, 128, 128, num_gqa_groups=8, attn_mask_type="causal")
     is_training = config.head_dim_qk <= 128 and config.head_dim_v <= 128
     qkv_layout = "sbhd_sbhd_sbhd"
-    _, _, fused_attn_backends = _get_attention_backends(
+    _, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,
@@ -811,15 +812,17 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, pad_between
     if (pad_between_seqs==False and get_cudnn_version() < (9, 3, 0)):
         pytest.skip("cuDNN 9.3.0+ is required to run pad_between_seqs = False");
 
-    _, _, fused_attn_backends = _get_attention_backends(
-        config,
-        qkv_dtype=dtype,
-        qkv_layout=qkv_layout,
-        window_size=config.window_size,
-        pad_between_seqs=pad_between_seqs,
-    )
-    if share_cu_seqlens_ref and FusedAttnBackend["CK"] not in fused_attn_backends:
-        pytest.skip("This test is only required for the CK fused attention backend.")
+    if share_cu_seqlens_ref: #ROCm specific config
+        _, _, fused_attn_backends = get_available_attention_backends(
+            config,
+            qkv_dtype=dtype,
+            qkv_layout=qkv_layout,
+            window_size=config.window_size,
+            pad_between_seqs=pad_between_seqs,
+        )
+        if FusedAttnBackend["CK"] not in fused_attn_backends:
+            pytest.skip("This test is only required for the CK fused attention backend.")
+
     test_dot_product_attention(
         dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs, share_cu_seqlens_ref
     )
@@ -833,15 +836,16 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, pad_between
 def test_dpa_qkv_layout_thd_mqa_gqa(dtype, model_configs, model, qkv_layout, pad_between_seqs, share_cu_seqlens_ref):
     config = model_configs[model]
 
-    _, _, fused_attn_backends = _get_attention_backends(
-        config,
-        qkv_dtype=dtype,
-        qkv_layout=qkv_layout,
-        window_size=config.window_size,
-        pad_between_seqs=pad_between_seqs,
-    )
-    if share_cu_seqlens_ref and FusedAttnBackend["CK"] not in fused_attn_backends:
-        pytest.skip("This test is only required for the CK fused attention backend.")
+    if share_cu_seqlens_ref:
+        _, _, fused_attn_backends = get_available_attention_backends(
+            config,
+            qkv_dtype=dtype,
+            qkv_layout=qkv_layout,
+            window_size=config.window_size,
+            pad_between_seqs=pad_between_seqs,
+        )
+        if FusedAttnBackend["CK"] not in fused_attn_backends:
+            pytest.skip("This test is only required for the CK fused attention backend.")
 
     def find_factors(x):
         f = []

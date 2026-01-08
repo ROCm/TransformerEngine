@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -14,6 +16,7 @@ import pytest
 import torch
 
 from torch.distributions import Exponential
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from transformer_engine.pytorch import make_graphed_callables
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import fp8_autocast, fp8_model_init
@@ -401,6 +404,11 @@ def get_tols(config, module, backend, dtype):
 @pytest.mark.parametrize("is_cuda_graph", [False, True])
 @pytest.mark.parametrize("is_fp8", [False, True])
 def test_kv_cache(dtype, model, qkv_format, is_paged, backend, module, is_cuda_graph, is_fp8):
+    if IS_HIP_EXTENSION:
+        if is_paged and backend == "FusedAttention":
+            pytest.skip("Paged KV cache is not supported for FusedAttention on ROCm")
+        if qkv_format == "thd" and backend == "FusedAttention":
+            pytest.skip("THD KV cache is not supported for FusedAttention on ROCm")
     reset_rng_states()
     logger = logging.getLogger("test_kv_cache")
     fp8_recipe = recipe.DelayedScaling(
