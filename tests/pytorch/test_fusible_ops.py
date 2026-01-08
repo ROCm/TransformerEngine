@@ -35,7 +35,9 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
 )
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from transformer_engine.pytorch.utils import is_bf16_compatible
+from transformer_engine.pytorch.utils import get_device_compute_capability
 import transformer_engine_torch as tex
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 # Import utility functions
 _current_file = pathlib.Path(__file__).resolve()
@@ -918,6 +920,16 @@ class TestBasicOps:
         quantized_grad_input: bool,
     ) -> None:
         """GEMM with FP8 inputs and outputs"""
+        if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5):
+            if (
+                quantization
+                and quantization.startswith("fp8")
+                and quantized_compute
+                and (quantized_grad_input or quantized_output)
+            ):
+                pytest.skip(
+                    "hipBLASLt does not provide suitable algorithms on gfx950 for this config."
+                )
         if quantization is None:
             pytest.skip("Skipping case without quantization")
         self._test_basic_linear(
