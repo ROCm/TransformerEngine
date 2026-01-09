@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -50,7 +50,7 @@ __device__ __forceinline__ uint32_t bytewise_less_than(uint32_t a, uint32_t b) {
 #else
  // AMD GPU: Use bitwise ops to get answer in MSBs
   uint32_t mask = (a ^ b);
-  result = (mask | b) | ~(mask | result);
+  result = (mask & b) | ~(mask | result);
 #endif
 
   // Mask out everything except MSBs and return

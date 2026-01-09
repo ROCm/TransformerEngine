@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -29,7 +31,8 @@ std::vector<py::object> dropout_fwd(const py::handle &input, float dropout_proba
   // Allocate output tensor if needed
   if (!out) {
     at::ScalarType dtype = GetATenDType(input_nvte.dtype());
-    if (dtype == at::kFloat8_e4m3fn || dtype == at::kFloat8_e5m2) {
+    if (dtype == at::kFloat8_e4m3fn || dtype == at::kFloat8_e5m2 || 
+        dtype == at::kFloat8_e4m3fnuz || dtype == at::kFloat8_e5m2fnuz) {
       dtype = input.attr("dtype").cast<at::ScalarType>();
     }
     const auto shape_uint64 = convertShape(input_nvte.shape());
