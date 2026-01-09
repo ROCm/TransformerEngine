@@ -1,10 +1,13 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 #include "transformer_engine/gemm.h"
 
+#include <initializer_list>
 #include <memory>
 #include <string_view>
 #include <tuple>
@@ -20,6 +23,13 @@
 
 namespace transformer_engine {
 namespace jax {
+
+#ifdef USE_ROCM
+// hipblaslt GEMM is not graph-capture safe on ROCm.
+constexpr auto GemmFFI_CudaGraph_Traits = std::initializer_list<xla::ffi::Traits>{};
+#else
+constexpr auto GemmFFI_CudaGraph_Traits = FFI_CudaGraph_Traits;
+#endif
 
 static uint8_t *move_ptr_to_next_256B_aligned(uint8_t *ptr) {
   // Move the pointer to the next 256B aligned address
@@ -200,7 +210,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmHandler, GemmFFI,
                                   .Attr<bool>("fuse_gelu")
                                   .Attr<bool>("grad")
                                   .Attr<bool>("use_split_accumulator"),
-                              FFI_CudaGraph_Traits);
+                              GemmFFI_CudaGraph_Traits);
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
                           Buffer_Type rhs_data, Buffer_Type rhs_sinv, Buffer_Type bias,
@@ -593,7 +603,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<bool>("has_bias")
                                   .Attr<bool>("is_grouped_dense_wgrad"),
-                              FFI_CudaGraph_Traits);
+                              GemmFFI_CudaGraph_Traits);
 
 }  // namespace jax
 }  // namespace transformer_engine
