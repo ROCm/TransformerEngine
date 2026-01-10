@@ -64,11 +64,45 @@ void compute_ref_stats(NormType norm_type,
   }
 }
 
+// template <typename InputType>
+// inline auto compute_gamma(InputType gamma, const bool zero_centered_gamma, const bool use_cudnn, const bool cudnn_zero_centered_gamma_in_weight_dtype) {
+
+//   using compute_t = float;
+
+//   // Zero-centered gamma in weight dtype is only supported in CuDNN backend currently
+//   // Remove the use_cudnn check here when it is supported by both backends.
+//   const bool zero_centered_gamma_in_weight_dtype = use_cudnn && cudnn_zero_centered_gamma_in_weight_dtype;
+
+//   if constexpr (std::is_same_v<InputType, fp8e5m2> || std::is_same_v<InputType, fp8e4m3>){
+//     compute_t g = static_cast<compute_t>(gamma);
+//     if (zero_centered_gamma) {
+//       g += static_cast<compute_t>(1.f);
+//     }
+//     return g;
+//   } else {
+//     if (zero_centered_gamma_in_weight_dtype){
+//       compute_t g = static_cast<compute_t>(0.f);
+//       InputType gi = gamma;
+//       if (zero_centered_gamma) {
+//         gi = gi + static_cast<InputType>(1.f);
+//       }
+//       g = static_cast<compute_t>(gi);
+//       return g;
+//     } else {
+//       compute_t g = static_cast<compute_t>(gamma);
+//       if (zero_centered_gamma) {
+//         g += static_cast<compute_t>(1.f);
+//       }
+//       return g;
+//     }
+//   }
+// }
+
 template <typename InputType>
-inline auto compute_gamma(InputType gamma, const bool zero_centered_gamma, const bool use_cudnn, const bool cudnn_zero_centered_gamma_in_weight_dtype) {
+inline auto compute_gamma(InputType gamma, const bool zero_centered_gamma, const bool use_cudnn, const bool cudnn_zero_centered_gamma_in_weight_dtype){
 
   using compute_t = float;
-
+  
   // Zero-centered gamma in weight dtype is only supported in CuDNN backend currently
   // Remove the use_cudnn check here when it is supported by both backends.
   const bool zero_centered_gamma_in_weight_dtype = use_cudnn && cudnn_zero_centered_gamma_in_weight_dtype;
@@ -84,6 +118,9 @@ inline auto compute_gamma(InputType gamma, const bool zero_centered_gamma, const
     }
     return g;
   } else {
+#ifdef __HIP_PLATFORM_AMD__
+    (void)zero_centered_gamma_in_weight_dtype;  // Parameter is unused on AMD platform
+#else
     if (zero_centered_gamma_in_weight_dtype){
       compute_t g = static_cast<compute_t>(0.f);
       InputType gi = gamma;
@@ -92,7 +129,9 @@ inline auto compute_gamma(InputType gamma, const bool zero_centered_gamma, const
       }
       g = static_cast<compute_t>(gi);
       return g;
-    } else {
+    } else
+#endif
+    {
       compute_t g = static_cast<compute_t>(gamma);
       if (zero_centered_gamma) {
         g += static_cast<compute_t>(1.f);
