@@ -49,26 +49,230 @@ def reinterpret_as_fp8_tensor(a: torch.Tensor, dtype: tex.DType):
         return a.view(dtype=torch.float8_e5m2fnuz)
 
 def getGemmOutputShape(A, transa, B, transb):
-    A0 = A.shape[:-1]
-    A1 = A.shape[-1:]
-    B0 = B.shape[:-1]
-    B1 = B.shape[-1:]
-    if transb:
-        out_shape = B1
-    else:
-        out_shape = B0
+    """
+    Compute output shape for GEMM following the C++ backend logic.
 
-    if transa:
-        out_shape += A0
+    Matches getGemmOutputShape in transformer_engine/pytorch/csrc/extensions/gemm.cpp
+
+    Why Does This Preserve B's Batch Dimensions?
+    =============================================
+
+    This is a deliberate API design choice that makes the interface consistent and
+    predictable for neural network operations.
+
+    Usage Patterns in Linear Layer:
+
+    1. Forward Pass (fprop) - Layout: TN (default)
+       output = general_gemm(weight, input)
+       - A = weight: [out_features, in_features] - no batch dims
+       - B = input: [batch, seq_len, in_features] - HAS batch dims
+       - Output: [batch, seq_len, out_features] - preserves B's batch ✓
+
+    2. Input Gradient (dgrad) - Layout: NN
+       grad_input = general_gemm(weight, grad_output)
+       - A = weight: [out_features, in_features] - no batch dims
+       - B = grad_output: [batch, seq_len, out_features] - HAS batch dims
+       - Output: [batch, seq_len, in_features] - preserves B's batch ✓
+
+    3. Weight Gradient (wgrad) - Layout: NT
+       grad_weight = general_gemm(input, grad_output)
+       - A = input: [batch, seq_len, in_features] - batch dims
+       - B = grad_output: [batch, seq_len, out_features] - batch dims
+       - Output: [out_features, in_features] - NO batch (transb=True) ✓
+
+    Key Insight:
+    The calling code consistently places the tensor with desired output batch
+    structure as the B operand.
+    - For fprop/dgrad: B has batch dimensions → output keeps them
+    - For wgrad: Both have batch, use transb=True → output flattens them (reduction over batch)
+
+    Why This Convention?
+    - Consistency: Always put batched activations as B
+    - Predictability: Output shape always relates to B's structure
+    - Simplicity: Caller controls output shape by choosing B and transb
+    - Efficiency: Avoids extra reshapes in common cases
+
+    Could It Be Different?
+    Yes! The API could preserve A's batch instead, but then all calling code would
+    need to swap operands. The math would work the same, just with reversed convention.
+    """
+    # Handle both tensors and torch.Size objects
+    A_shape = A if isinstance(A, torch.Size) else A.shape
+    B_shape = B if isinstance(B, torch.Size) else B.shape
+
+    # Calculate flattened dimensions (product of all leading dims)
+    A0 = product(A_shape[:-1])  # Product of all leading dims
+    A1 = A_shape[-1]
+    B0 = product(B_shape[:-1])
+    B1 = B_shape[-1]
+
+    # Construct output shape following C++ logic:
+    # if (transb) { ret = [B1] }
+    # else { ret = [B_shape[0], B_shape[1], ..., B_shape[-2]] }  // Unflatten B0
+    # if (transa) { ret.append(A0) }
+    # else { ret.append(A1) }
+
+    ret = []
+
+    # First part: from B
+    if transb:
+        ret.append(B1)
     else:
-        out_shape += A1
-    return out_shape
+        # Preserve B's batch structure (all dims except last)
+        for i in range(len(B_shape) - 1):
+            ret.append(B_shape[i])
+
+    # Second part: from A
+    if transa:
+        ret.append(A0)  # Flattened A
+    else:
+        ret.append(A1)  # A's last dim
+
+    return torch.Size(ret)
 
 def product(shape):
     ret = 1
     for i in shape:
         ret *= i
     return ret
+
+
+class Float8TensorWrapper:
+    """
+    Python equivalent of C++ TensorWrapper for Float8Tensor.
+
+    Mimics the behavior of NVTETensorFromFloat8Tensor in type_converters_hip.cpp,
+    which stores pointers to both rowwise (_data) and columnwise (_transpose) data
+    without modifying them, similar to how the C++ TensorWrapper holds both formats.
+    """
+
+    def __init__(self, tensor):
+        """
+        Create wrapper from Float8Tensor, Float8TensorBase, or regular tensor.
+
+        Args:
+            tensor: Input tensor (Float8Tensor, Float8TensorBase, or torch.Tensor)
+        """
+        # Import here to avoid circular dependency
+        try:
+            from transformer_engine.pytorch.float8_tensor import Float8Tensor
+            from transformer_engine.pytorch.tensor._internal.float8_tensor_base import Float8TensorBase
+            is_fp8_tensor = isinstance(tensor, (Float8Tensor, Float8TensorBase))
+        except ImportError:
+            is_fp8_tensor = False
+
+        if is_fp8_tensor:
+            # Extract FP8 components (similar to NVTETensorFromFloat8Tensor in C++)
+            self._is_fp8 = True
+
+            # Rowwise data (_data) - may be None
+            self._rowwise_data = tensor._data if tensor._data is not None else None
+
+            # Columnwise data (_transpose) - may be None
+            self._columnwise_data = None
+            transpose_valid = (
+                hasattr(tensor, '_transpose') and
+                tensor._transpose is not None and
+                not getattr(tensor, '_transpose_invalid', False)
+            )
+            if transpose_valid:
+                self._columnwise_data = tensor._transpose
+
+            # Check that we have at least one data format
+            if self._rowwise_data is None and self._columnwise_data is None:
+                raise RuntimeError(
+                    "Float8Tensor has neither valid rowwise (_data) nor columnwise (_transpose) data."
+                )
+
+            # FP8 metadata
+            self._fp8_dtype = tensor._fp8_dtype
+            self._scale_inv = tensor._scale_inv
+
+            # Nominal dtype (may not exist for Float8TensorBase)
+            self._nominal_dtype = getattr(tensor, 'dtype', None)
+
+            # Compute logical size (in rowwise format)
+            if self._rowwise_data is not None:
+                self._size = self._rowwise_data.size()
+            else:
+                # Only columnwise available
+                # Columnwise format: [K, M, *batch_dims] (matrix dims first, batch dims at end)
+                # Rowwise format: [*batch_dims, M, K] (batch dims first, matrix dims at end)
+                self._original_columnwise_shape = self._columnwise_data.size()
+                ndim = self._columnwise_data.dim()
+
+                if ndim == 2:
+                    # Simple 2D case: just transpose
+                    rowwise_data = self._columnwise_data.transpose(0, 1).contiguous()
+                else:
+                    # Batch dimensions exist (at the end of columnwise)
+                    # Move batch dims to front and swap matrix dims: [K,M,b1,b2,...] -> [b1,b2,...,M,K]
+                    # Create permutation: (2, 3, ..., ndim-1, 1, 0)
+                    batch_dims = list(range(2, ndim))  # [2, 3, ..., ndim-1]
+                    perm = batch_dims + [1, 0]  # [2,3,...,ndim-1, 1, 0]
+                    rowwise_data = self._columnwise_data.permute(*perm).contiguous()
+
+                # Store the rowwise data for use in get_data_for_gemm()
+                self._rowwise_data = rowwise_data
+                self._size = rowwise_data.size()
+        else:
+            # Regular tensor - simple wrapper
+            self._is_fp8 = False
+            self._rowwise_data = tensor
+            self._columnwise_data = None
+            self._fp8_dtype = None
+            self._scale_inv = torch.Tensor()  # Empty tensor (data_ptr() == 0)
+            self._nominal_dtype = tensor.dtype
+            self._size = tensor.size()
+
+    def size(self):
+        """Get logical tensor size (in rowwise format)."""
+        return self._size
+
+    @property
+    def is_fp8(self):
+        """Check if this is an FP8 tensor."""
+        return self._is_fp8
+
+    @property
+    def fp8_dtype(self):
+        """Get FP8 dtype (tex.DType)."""
+        return self._fp8_dtype
+
+    @property
+    def scale_inv(self):
+        """Get scale inverse tensor."""
+        return self._scale_inv
+
+    @property
+    def nominal_dtype(self):
+        """Get nominal dtype (what the FP8 tensor represents, e.g., bfloat16)."""
+        return self._nominal_dtype
+
+    def get_data_for_gemm(self, will_transpose):
+        """
+        Get appropriate data tensor for GEMM operation.
+
+        Always returns data in rowwise orientation to match self._size.
+
+        Args:
+            will_transpose: Whether the GEMM operation will transpose this operand
+                           (currently unused - kept for future optimization)
+
+        Returns:
+            torch.Tensor: Data tensor in rowwise orientation (uint8 for FP8, regular dtype otherwise)
+        """
+        if not self._is_fp8:
+            return self._rowwise_data
+
+        # For FP8 tensors, always return rowwise orientation to match self._size
+        if self._rowwise_data is not None:
+            return self._rowwise_data
+        else:
+            # Only columnwise available - transpose back to rowwise
+            # Columnwise has matrix dims (first 2) transposed, so transpose(0,1) gives rowwise
+            return self._columnwise_data.transpose(0, 1).contiguous()
+
 
 def te_generic_gemm_triton(A,
                             transa,
@@ -91,32 +295,35 @@ def te_generic_gemm_triton(A,
                             extra_output,
                             bulk_overlap):
 
-    #if isinstance(A, Float8Tensor) and isinstance(B, Float8Tensor):
-        #input_fp8 = True
+    # Wrap inputs to handle Float8Tensor uniformly
+    # This mimics how C++ makeTransformerEngineTensor creates a TensorWrapper
+    A_wrapper = Float8TensorWrapper(A)
+    B_wrapper = Float8TensorWrapper(B)
 
-    #print('A dtype=', A.dtype)
+    # Extract underlying data (uint8 for FP8, regular tensor otherwise)
+    A_data = A_wrapper.get_data_for_gemm(will_transpose=transa)
+    B_data = B_wrapper.get_data_for_gemm(will_transpose=transb)
 
+    # Get FP8 metadata
+    # Note: Scales will be swapped later for row-major conversion
+    a_fp8_dtype = A_wrapper.fp8_dtype
+    b_fp8_dtype = B_wrapper.fp8_dtype
+    a_scale_inv = A_wrapper.scale_inv
+    b_scale_inv = B_wrapper.scale_inv
 
-    ## The fp8 tensor passed from TE is in torch.uint8
-    ## Need to reinterpret as the float8 type in torch
-    #if is_fp8_dtype(A_type):
-        #A = reinterpret_as_fp8_tensor(A, A_type)
+    # Reinterpret uint8 as native FP8 types for Triton
+    # The FP8 tensor data is stored as torch.uint8 but Triton needs torch.float8_e4m3fnuz
+    if a_fp8_dtype is not None:
+        A_data = reinterpret_as_fp8_tensor(A_data, a_fp8_dtype)
+    if b_fp8_dtype is not None:
+        B_data = reinterpret_as_fp8_tensor(B_data, b_fp8_dtype)
 
-    #if is_fp8_dtype(B_type):
-        #B = reinterpret_as_fp8_tensor(B, B_type)
-
-    #if is_fp8_dtype(D_type):
-        #D = reinterpret_as_fp8_tensor(D, D_type)
-
-    #if A_scale_inverse.numel():
-        #A_scale_inverse = A_scale_inverse[A_fp8_tensor]
-
-    #if B_scale_inverse.numel():
-        #B_scale_inverse = B_scale_inverse[B_fp8_tensor]
-    A0 = product(A.shape[:-1])
-    A1 = product(A.shape[-1:])
-    B0 = product(B.shape[:-1])
-    B1 = product(B.shape[-1:])
+    # Compute dimensions using wrapper sizes
+    # Wrapper handles Float8TensorBase which doesn't have .shape attribute
+    A0 = product(A_wrapper.size()[:-1])
+    A1 = product(A_wrapper.size()[-1:])
+    B0 = product(B_wrapper.size()[:-1])
+    B1 = product(B_wrapper.size()[-1:])
 
     m = A0 if transa else A1
     k = A1 if transa else A0
@@ -124,21 +331,28 @@ def te_generic_gemm_triton(A,
 
     assert not (transa and transb), 'TT layout not allowed'
 
-    #assert pre_gelu_out.data_ptr() == 0, 'GEMM+Gelu is not supported yet.'
+    ## general_gemm() follows BLAS convention: tensors are interpreted as column-major
+    ## PyTorch tensors are stored row-major in memory, but BLAS APIs treat them as column-major
+    ## Triton matmul kernel expects row-major layout
+    ## Convert using the standard trick: swap operands and transpose as needed
+    ##
+    ## For column-major interpretation:
+    ##   TN: compute B @ A.T (transpose A, not B)
+    ##   NN: compute B @ A (no transposes)
+    ##   NT: compute B.T @ A (transpose B, not A)
 
-    ## A and B are column major following BLAS convention
-    ## Triton matmul function assumes row major layouts
-    ## Therefore, use the trick of swapping operands again 
-    a_row_major = B.T if transb else B
-    b_row_major = A.T if transa else A
-    a_row_major = a_row_major.view(-1, a_row_major.shape[-1])
-    b_row_major = b_row_major.view(-1, b_row_major.shape[-1])
-    
-    #a_scale_triton = B_scale_inverse
-    #b_scale_triton = A_scale_inverse
-    a_scale_triton = None
-    b_scale_triton = None
-    
+    # For multi-dimensional tensors: flatten leading dims first, then transpose
+    # This implements "flattened multi-dimensional matmul" semantics
+    A_flat = A_data.reshape(-1, A_data.shape[-1])  # [prod(batch dims), last_dim]
+    B_flat = B_data.reshape(-1, B_data.shape[-1])
+
+    # Swap operands to convert column-major to row-major for Triton
+    a_row_major = B_flat.T if transb else B_flat
+    b_row_major = A_flat.T if transa else A_flat
+
+    # Scales are swapped to match operand swap (B→a, A→b in row-major)
+    a_scale_triton = b_scale_inv
+    b_scale_triton = a_scale_inv
 
     epilogue = 'DEFAULT'
     #if bias.data_ptr() != 0:
@@ -146,27 +360,44 @@ def te_generic_gemm_triton(A,
             #epilogue = 'BGRADB'
         #else:
             #epilogue = 'BIAS'
-    D_shape = getGemmOutputShape(A, transa, B, transb)
-    #print('A_shape=', A.shape)
-    #print('transa=', transa)
-    #print('B_shape=', B.shape)
-    #print('transb=', transa)
-    #print('D_shape=', D_shape)
-    if D is None:
-        D = torch.empty(D_shape, dtype=A.dtype, device=A.device)
-        d_row_major = D.view(-1, D.shape[-1])
-        
-        #print('D.stride(0)=', d_row_major.stride(0))
-        #print('D.stride(1)=', d_row_major.stride(1))
 
-    #input_fp8 = is_fp8_dtype(A_type) and is_fp8_dtype(B_type)
-    #output_fp8 = is_fp8_dtype(D_type)
-    input_fp8 = False
-    output_fp8 = False
-    D_scale = None
-    bias = None
-    D_amax = None
-    matmul(a_row_major, b_row_major, d_row_major, a_scale_triton, b_scale_triton, D_scale, bias, D_amax, epilogue, input_fp8, output_fp8) 
+    # Compute output shape using wrapper sizes
+    D_shape = getGemmOutputShape(A_wrapper.size(), transa, B_wrapper.size(), transb)
+
+    if D is None:
+        # Determine output dtype
+        if output_dtype is not None:
+            # Use explicitly provided output dtype (from TE_DType)
+            out_dtype = te_to_torch_dtype(output_dtype)
+        elif A_wrapper.is_fp8:
+            # FP8 input: use nominal dtype if available
+            if A_wrapper.nominal_dtype is None:
+                raise RuntimeError(
+                    "FP8 input detected (Float8TensorBase without nominal dtype) but output_dtype "
+                    "parameter is not provided. Please explicitly provide the output_dtype parameter "
+                    "to general_gemm()."
+                )
+            out_dtype = A_wrapper.nominal_dtype
+        else:
+            # Regular input: use A's dtype
+            out_dtype = A_data.dtype
+
+        D = torch.empty(D_shape, dtype=out_dtype, device=A_data.device)
+
+    d_row_major = D.view(-1, D.shape[-1])
+
+    # Set FP8 flags
+    input_fp8 = A_wrapper.is_fp8 and B_wrapper.is_fp8
+    output_fp8 = False  # Not supporting FP8 output yet
+
+    # Empty tensors for unused parameters (matching C++ empty tensor pattern)
+    D_scale = torch.Tensor()
+    bias_tensor = torch.Tensor()
+    D_amax = torch.Tensor()
+
+    matmul(a_row_major, b_row_major, d_row_major, a_scale_triton, b_scale_triton,
+           D_scale, bias_tensor, D_amax, epilogue, input_fp8, output_fp8)
+
     return D, bias, None, None
         
     
