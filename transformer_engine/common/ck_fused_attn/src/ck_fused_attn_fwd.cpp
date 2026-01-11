@@ -57,12 +57,19 @@ void log_fwd_config(const char* func_name,
     std::cout<<"k_ptr: "<<fmha_args.k_ptr<<std::endl;
     std::cout<<"v_ptr: "<<fmha_args.v_ptr<<std::endl;
     std::cout<<"bias_ptr: "<<fmha_args.bias_ptr<<std::endl;
+    std::cout<<"q_descale_ptr: "<<fmha_args.q_descale_ptr<<std::endl;
+    std::cout<<"k_descale_ptr: "<<fmha_args.k_descale_ptr<<std::endl;
+    std::cout<<"v_descale_ptr: "<<fmha_args.v_descale_ptr<<std::endl;
     std::cout<<"rand_val_ptr: "<<fmha_args.rand_val_ptr<<std::endl;
     std::cout<<"lse_ptr: "<<fmha_args.lse_ptr<<std::endl;
     std::cout<<"o_ptr: "<<fmha_args.o_ptr<<std::endl;
+
     std::cout<<"seqstart_q_ptr: "<<fmha_args.seqstart_q_ptr<<std::endl;
     std::cout<<"seqstart_k_ptr: "<<fmha_args.seqstart_k_ptr<<std::endl;
+    std::cout<<"seqlen_q_ptr: "<<fmha_args.seqlen_q_ptr<<std::endl;
     std::cout<<"seqlen_k_ptr: "<<fmha_args.seqlen_k_ptr<<std::endl;
+    std::cout<<"cu_seqlen_q_ptr: "<<fmha_args.cu_seqlen_q_ptr<<std::endl;
+    std::cout<<"cu_seqlen_k_ptr: "<<fmha_args.cu_seqlen_k_ptr<<std::endl;
 
     std::cout<<"seqlen_q: "<<fmha_args.seqlen_q<<std::endl;
     std::cout<<"seqlen_k: "<<fmha_args.seqlen_k<<std::endl;
@@ -72,10 +79,10 @@ void log_fwd_config(const char* func_name,
     std::cout<<"hdim_v: "<<fmha_args.hdim_v<<std::endl;
     std::cout<<"nhead_q: "<<fmha_args.nhead_q<<std::endl;
     std::cout<<"nhead_k: "<<fmha_args.nhead_k<<std::endl;
+
     std::cout<<"scale_s: "<<fmha_args.scale_s<<std::endl;
-    std::cout<<"scale_p: "<<fmha_args.scale_p<<std::endl;
-    std::cout<<"scale_o: "<<fmha_args.scale_o<<std::endl;
     std::cout<<"logits_soft_cap: "<<fmha_args.logits_soft_cap<<std::endl;
+
     std::cout<<"stride_q: "<<fmha_args.stride_q<<std::endl;
     std::cout<<"stride_k: "<<fmha_args.stride_k<<std::endl;
     std::cout<<"stride_v: "<<fmha_args.stride_v<<std::endl;
@@ -96,12 +103,15 @@ void log_fwd_config(const char* func_name,
     std::cout<<"batch_stride_randval: "<<fmha_args.batch_stride_randval<<std::endl;
     std::cout<<"batch_stride_lse: "<<fmha_args.batch_stride_lse<<std::endl;
     std::cout<<"batch_stride_o: "<<fmha_args.batch_stride_o<<std::endl;
+
     std::cout<<"window_size_left: "<<fmha_args.window_size_left<<std::endl;
     std::cout<<"window_size_right: "<<fmha_args.window_size_right<<std::endl;
     std::cout<<"mask_type: "<<fmha_args.mask_type<<std::endl;
     std::cout<<"min_seqlen_q: "<<fmha_args.min_seqlen_q<<std::endl;
+
     std::cout<<"p_drop: "<<fmha_args.p_drop<<std::endl;
     std::cout<<"s_randval: "<<fmha_args.s_randval<<std::endl;
+
     std::cout<<"dropout_seed_ptr: "<<std::get<0>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset))<<std::endl;
     std::cout<<"dropout_offset_ptr: "<<std::get<1>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset))<<std::endl;
   }
@@ -143,8 +153,6 @@ hipError_t ck_attn_fwd(
   ck_tile::index_t max_seqlen_q = s_q;
   ck_tile::index_t max_seqlen_k = s_kv;
   float scale_s = scaling_factor;
-  float scale_p = 1.f;
-  float scale_o = 1.f;
   float logits_soft_cap = 0.f;
   float p_drop = dropout_probability;
   bool is_group_mode = false;
@@ -206,16 +214,18 @@ hipError_t ck_attn_fwd(
                          k_ptr,
                          v_ptr,
                          bias_type==bias_enum::alibi? alibi_slope_ptr :bias_ptr,
-                         nullptr,//rand_val_ptr
+                         nullptr, //q_descale_ptr
+                         nullptr, //k_descale_ptr
+                         nullptr, //v_descale_ptr
+                         nullptr, //rand_val_ptr
                          lse_ptr,
                          o_ptr,
-                         nullptr, //cu_seqlen_q
-                         nullptr, //cu_seqlen_kv
                          nullptr, //seqstart_q_ptr
                          nullptr, //seqstart_k_ptr
+                         nullptr, //seqlen_q_ptr
                          nullptr, //seqlen_k_ptr
-                         nullptr, //seqstart_padded_q_ptr
-                         nullptr, //seqstart_padded_k_ptr
+                         nullptr, //cu_seqlen_q
+                         nullptr, //cu_seqlen_kv
                          max_seqlen_q,
                          max_seqlen_k,
                          batch,
@@ -225,8 +235,6 @@ hipError_t ck_attn_fwd(
                          nhead,
                          nhead_k,
                          scale_s,
-                         scale_p,
-                         scale_o,
                          logits_soft_cap,
                          stride_q,
                          stride_k,
@@ -267,6 +275,7 @@ hipError_t ck_attn_fwd(
                                          mask_type,
                                          bias_type,
                                          has_lse,
+                                         quant_scale_enum::no_scale,
                                          uses_fwd_v3);
   if(average_runtime < 0){
     //TODO: better error out system
@@ -311,8 +320,6 @@ hipError_t ck_attn_varlen_fwd(
   ck_tile::index_t max_seqlen_kv = s_kv;
 
   float scale_s = scaling_factor;
-  float scale_p = 1.f;
-  float scale_o = 1.f;
   float logits_soft_cap = 0.f;
   float p_drop = dropout_probability;
   bool is_group_mode = true;
@@ -376,17 +383,19 @@ hipError_t ck_attn_varlen_fwd(
     return fmha_fwd_args{q_ptr,
                          k_ptr,
                          v_ptr,
-                         nullptr,//bias_ptr
-                         nullptr,//rand_val_ptr
+                         nullptr, //bias_ptr
+                         nullptr, //q_descale_ptr
+                         nullptr, //k_descale_ptr
+                         nullptr, //v_descale_ptr
+                         nullptr, //rand_val_ptr
                          lse_thd_ptr,
                          o_ptr,
-                         nullptr, //cu_seqlen_q
-                         nullptr, //cu_seqlen_kv
                          cu_seqlen_q_ptr, //seqstart_q_ptr
                          cu_seqlen_kv_ptr, //seqstart_k_ptr
+                         nullptr, //seqlen_q_ptr
                          nullptr, //seqlen_k_ptr
-                         nullptr, //seqstart_padded_q_ptr
-                         nullptr, //seqstart_padded_k_ptr
+                         cu_seqlen_q_ptr, //cu_seqlen_q_ptr
+                         cu_seqlen_kv_ptr, //cu_seqlen_k_ptr
                          max_seqlen_q, //seqlen_q, unused in group mode
                          max_seqlen_kv, //seqlen_kv, unused in group mode
                          batch,
@@ -396,8 +405,6 @@ hipError_t ck_attn_varlen_fwd(
                          nhead,
                          nhead_k,
                          scale_s,
-                         scale_p,
-                         scale_o,
                          logits_soft_cap,
                          stride_q,
                          stride_k,
@@ -438,6 +445,7 @@ hipError_t ck_attn_varlen_fwd(
                                          mask_type,
                                          bias_type,
                                          has_lse,
+                                         quant_scale_enum::no_scale,
                                          uses_fwd_v3);
   if(average_runtime < 0){
     //TODO: better error out system

@@ -353,9 +353,15 @@ void log_bwd_config(const char* func_name,
     std::cout<<"dk_ptr: "<<fmha_args.dk_ptr<<std::endl;
     std::cout<<"dv_ptr: "<<fmha_args.dv_ptr<<std::endl;
     std::cout<<"dbias_ptr: "<<fmha_args.dbias_ptr<<std::endl;
+    std::cout<<"dq_acc_ptr: "<<fmha_args.dq_acc_ptr<<std::endl;
+
     std::cout<<"seqstart_q_ptr: "<<fmha_args.seqstart_q_ptr<<std::endl;
     std::cout<<"seqstart_k_ptr: "<<fmha_args.seqstart_k_ptr<<std::endl;
+    std::cout<<"seqlen_q_ptr: "<<fmha_args.seqlen_q_ptr<<std::endl;
     std::cout<<"seqlen_k_ptr: "<<fmha_args.seqlen_k_ptr<<std::endl;
+    std::cout<<"cu_seqlen_q_ptr: "<<fmha_args.cu_seqlen_q_ptr<<std::endl;
+    std::cout<<"cu_seqlen_k_ptr: "<<fmha_args.cu_seqlen_k_ptr<<std::endl;
+
     std::cout<<"seqlen_q: "<<fmha_args.seqlen_q<<std::endl;
     std::cout<<"seqlen_k: "<<fmha_args.seqlen_k<<std::endl;
     std::cout<<"batch: "<<fmha_args.batch<<std::endl;
@@ -572,9 +578,12 @@ hipError_t ck_attn_bwd(
                          is_mqa_gqa? dv_expanded_ptr:dv_ptr,
                          has_dbias? (bias_shape==BiasShape::kBHSS ? dbias_ptr: dbias_expanded_ptr): nullptr,
                          dq_acc_ptr, //dq_acc_buf
-                         nullptr,//cu_seqlen_q
-                         nullptr,//cu_seqlen_kv
-                         nullptr, /* seqlen_k_ptr */
+                         nullptr, //seqstart_q_ptr
+                         nullptr, //seqstart_k_ptr
+                         nullptr, //seqlen_q_ptr
+                         nullptr, //seqlen_k_ptr
+                         nullptr, //cu_seqlen_q_ptr
+                         nullptr, //cu_seqlen_k_ptr
                          shape_seqlen_q,
                          shape_seqlen_k,
                          batch,
@@ -913,9 +922,12 @@ hipError_t ck_attn_varlen_bwd(
                          is_mqa_gqa? dv_expanded_ptr:dv_ptr,
                          nullptr,
                          dq_acc_ptr, //dq_acc_buf
-                         cu_seqlen_q_ptr,//cu_seqlen_q
-                         cu_seqlen_kv_ptr,//cu_seqlen_kv
-                         nullptr, /* seqlen_k_ptr */
+                         cu_seqlen_q_ptr, //seqstart_q_ptr
+                         cu_seqlen_kv_ptr, //seqstart_k_ptr
+                         nullptr, // seqlen_q_ptr
+                         nullptr, // seqlen_k_ptr
+                         cu_seqlen_q_ptr, //cu_seqlen_q_ptr
+                         cu_seqlen_kv_ptr, //cu_seqlen_k_ptr
                          max_seqlen_q, //seqlen_q, unused in group mode
                          max_seqlen_k, //seqlen_kv, unused in group mode
                          batch,
