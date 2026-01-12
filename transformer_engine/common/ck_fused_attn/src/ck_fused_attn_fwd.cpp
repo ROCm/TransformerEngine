@@ -281,6 +281,7 @@ hipError_t ck_attn_fwd(
                                          has_lse,
                                          quant_scale_enum::no_scale,
                                          uses_fwd_v3, 
+                                         false,//has_sink
                                          how_v3_bf16_cvt);
   if(average_runtime < 0){
     //TODO: better error out system
@@ -465,6 +466,7 @@ hipError_t ck_attn_varlen_fwd(
     has_lse,
     quant_scale_enum::no_scale,
     uses_fwd_v3, 
+    false,//has_sink
     how_v3_bf16_cvt);
   if(average_runtime < 0){
     //TODO: better error out system
