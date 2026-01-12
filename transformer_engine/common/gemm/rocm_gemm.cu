@@ -1360,7 +1360,50 @@ void hipblaslt_gemm(const Tensor *inputA,
     }
 
     if (logTuning) {
-      std::cout << "[INFO] Use hipBLASLt algo [" << cached_algo.index << "] " << cached_algo.algoId << std::endl;
+      // Check if this is rank 0
+      const char* local_rank_env = std::getenv("LOCAL_RANK");
+      const char* rank_env = std::getenv("RANK");
+      int rank = 0;
+      if (local_rank_env != nullptr) {
+        rank = std::atoi(local_rank_env);
+      } else if (rank_env != nullptr) {
+        rank = std::atoi(rank_env);
+      }
+      
+      if (rank == 0) {
+        std::cout << "[INFO] Use hipBLASLt algo [" << cached_algo.index << "] " << cached_algo.algoId << std::endl;
+      }
+    }
+  }
+
+  // Debug printing for specific algorithm (only on rank 0)
+  if (cached_algo.algoId == 620054) {
+    // Check if this is rank 0
+    const char* local_rank_env = std::getenv("LOCAL_RANK");
+    const char* rank_env = std::getenv("RANK");
+    int rank = 0;
+    if (local_rank_env != nullptr) {
+      rank = std::atoi(local_rank_env);
+    } else if (rank_env != nullptr) {
+      rank = std::atoi(rank_env);
+    }
+    
+    if (rank == 0) {
+      std::cout << "[DEBUG] Algorithm 620054 chosen for FP8 GEMM:" << std::endl;
+      std::cout << "  A shape: m=" << m << " k=" << k << " (lda=" << param.lda << ")" << std::endl;
+      std::cout << "  B shape: k=" << k << " n=" << n << " (ldb=" << param.ldb << ")" << std::endl;
+      std::cout << "  A_scale_inv ptr: " << param.A_scale_inv << std::endl;
+      std::cout << "  B_scale_inv ptr: " << param.B_scale_inv << std::endl;
+      if (param.A_scale_inv) {
+        float a_scale_inv_val;
+        hipMemcpy(&a_scale_inv_val, param.A_scale_inv, sizeof(float), hipMemcpyDeviceToHost);
+        std::cout << "  A_scale_inv value: " << a_scale_inv_val << std::endl;
+      }
+      if (param.B_scale_inv) {
+        float b_scale_inv_val;
+        hipMemcpy(&b_scale_inv_val, param.B_scale_inv, sizeof(float), hipMemcpyDeviceToHost);
+        std::cout << "  B_scale_inv value: " << b_scale_inv_val << std::endl;
+      }
     }
   }
 
