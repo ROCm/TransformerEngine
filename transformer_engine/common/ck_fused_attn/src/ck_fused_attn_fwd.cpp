@@ -261,6 +261,7 @@ hipError_t ck_attn_fwd(
                          batch_stride_o,
                          left,
                          right,
+                         0, // sink_size
                          static_cast<ck_tile::index_t>(mask_type),
                          0, // min_seqlen_q
                          p_drop,
@@ -434,6 +435,7 @@ hipError_t ck_attn_varlen_fwd(
                          batch_stride_o,
                          left,
                          right,
+                         0, // sink_size
                          static_cast<ck_tile::index_t>(mask_type),
                          0, // min_seqlen_q
                          p_drop,
