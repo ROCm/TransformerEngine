@@ -92,7 +92,7 @@ std::vector<py::object> bgrad_quantize(const at::Tensor &grad_output, py::handle
 
 namespace {
 
-std::vector<py::object> dact_dbias(//PIV TODO: amax
+std::vector<py::object> dact_dbias(
     void (*dact_dbias_func)(const NVTETensor, const NVTETensor, NVTETensor, NVTETensor, NVTETensor,
                             cudaStream_t),
     void (*dact_func)(const NVTETensor, const NVTETensor, NVTETensor, cudaStream_t),

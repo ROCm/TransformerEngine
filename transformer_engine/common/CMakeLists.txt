@@ -146,7 +146,6 @@ list(APPEND transformer_engine_SOURCES
      activation/relu.cu
      activation/swiglu.cu
      gemm/cublaslt_gemm.cu
-     gemm/cutlass_grouped_gemm.cu
      normalization/common.cpp
      normalization/layernorm/ln_api.cpp
      normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
@@ -184,6 +183,7 @@ list(APPEND transformer_engine_SOURCES
      fused_attn/fused_attn_fp8.cu
      fused_attn/fused_attn.cpp
      fused_attn/utils.cu
+     gemm/cutlass_grouped_gemm.cu
      util/cuda_nvml.cpp
      comm_gemm_overlap/userbuffers/ipcsocket.cc
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp
@@ -237,9 +237,11 @@ else()
   add_library(transformer_engine SHARED ${te_hip_sources})
   target_include_directories(transformer_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 endif()
+
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
+if (USE_CUDA)
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
   set_source_files_properties(
     "gemm/cutlass_grouped_gemm.cu"
@@ -249,6 +251,7 @@ if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
 else()
   message(FATAL_ERROR "cutlass gemm/cutlass_grouped_gemm.cu kernel required sm 90a")
 endif()
+endif() #USE_CUDA
 
 # Configure dependencies
 if (USE_CUDA)
@@ -393,6 +396,8 @@ else()
                               string_code_transpose_rtc_cast_transpose_cu)
   make_string_header_from_file(transpose/rtc/transpose.hip
                               string_code_transpose_rtc_transpose_cu)
+  make_string_header_from_file(transpose/rtc/swap_first_dims.hip
+                              string_code_transpose_rtc_swap_first_dims_cu)
   make_string_header_from_file(amd_detail/hip_float8.h
                                string_code_amd_detail_hip_float8_h)
   make_string_header_from_file(amd_detail/hip_f8_impl.h

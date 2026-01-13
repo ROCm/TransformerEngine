@@ -157,6 +157,8 @@ bool supports_multicast(int device_id) {
   return false;
 #endif
 }
+#endif // __HIP_PLATFORM_AMD__
+
 
 const std::string &include_directory(bool required) {
   static std::string path;
@@ -169,16 +171,28 @@ const std::string &include_directory(bool required) {
   if (need_to_check_env) {
     // Search for CUDA headers in common paths
     using Path = std::filesystem::path;
+#ifdef __HIP_PLATFORM_AMD__
+    std::vector<std::pair<std::string, Path>> search_paths = {{"ROCM_PATH", ""},
+                                                              {"HIP_PATH", ""},
+                                                              {"", "/opt/rocm"}};
+#else
     std::vector<std::pair<std::string, Path>> search_paths = {{"NVTE_CUDA_INCLUDE_DIR", ""},
                                                               {"CUDA_HOME", ""},
                                                               {"CUDA_DIR", ""},
                                                               {"", string_path_cuda_include},
                                                               {"", "/usr/local/cuda"}};
+#endif
     for (auto &[env, p] : search_paths) {
       if (p.empty()) {
         p = getenv<Path>(env.c_str());
       }
       if (!p.empty()) {
+#ifdef __HIP_PLATFORM_AMD__
+        if (file_exists(p / "include" / "hip" / "hip_runtime.h")) {
+          path = p / "include";
+          break;
+        }
+#else
         if (file_exists(p / "cuda_runtime.h")) {
           path = p;
           break;
@@ -187,6 +201,7 @@ const std::string &include_directory(bool required) {
           path = p / "include";
           break;
         }
+#endif
       }
     }
 
@@ -194,7 +209,11 @@ const std::string &include_directory(bool required) {
     if (path.empty() && required) {
       std::string message;
       message.reserve(2048);
+#ifdef __HIP_PLATFORM_AMD__
+      message += "Could not find hip/hip_runtime.h in";
+#else
       message += "Could not find cuda_runtime.h in";
+#endif
       bool is_first = true;
       for (const auto &[env, p] : search_paths) {
         message += is_first ? " " : ", ";
@@ -209,11 +228,18 @@ const std::string &include_directory(bool required) {
           message += p;
         }
       }
+#ifdef __HIP_PLATFORM_AMD__
+      message +=
+          (". "
+           "Specify path to ROCM headers with ROCM_PATH "
+           "or disable NVRTC support with NVTE_DISABLE_NVRTC=1.");
+#else
       message +=
           (". "
            "Specify path to CUDA Toolkit headers "
            "with NVTE_CUDA_INCLUDE_DIR "
            "or disable NVRTC support with NVTE_DISABLE_NVRTC=1.");
+#endif
       NVTE_ERROR(message);
     }
     need_to_check_env = false;
@@ -223,6 +249,7 @@ const std::string &include_directory(bool required) {
   return path;
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 int cudart_version() {
   auto get_version = []() -> int {
     int version;

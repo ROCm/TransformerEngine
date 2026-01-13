@@ -28,6 +28,7 @@ __global__ void __launch_bounds__(1)
 
 }  // namespace
 
+#ifndef __HIP_PLATFORM_AMD__
 cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
   using namespace transformer_engine;
   switch (t) {
@@ -45,6 +46,7 @@ cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
       NVTE_ERROR("Invalid type");
   }
 }
+#endif
 
 void update_tensor_scale_inv(Tensor *t, cudaStream_t stream) {
   if (is_fp8_dtype(t->data.dtype) && is_tensor_scaling(t->scaling_mode)) {
@@ -116,6 +118,7 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
 }
 }  // extern "C"
 
+#ifndef __HIP_PLATFORM_AMD__
 void checkCuDriverContext(CUstream stream) {
   // Ensure the thread's "current" CUDA context is set.
   cuda_driver::ensure_context_exists();
@@ -140,7 +143,6 @@ void checkCuDriverContext(CUstream stream) {
   }
 }
 
-#ifndef __HIP_PLATFORM_AMD__
 CUtensorMapDataType get_CUtensorMapDataType(DType dtype) {
   static const std::unordered_map<DType, CUtensorMapDataType> dtypeMapping = []() {
     std::unordered_map<DType, CUtensorMapDataType> typeMapping = {

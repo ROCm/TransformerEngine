@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -17,7 +17,7 @@ template <typename weight_t, typename input_t, typename output_t, typename compu
           typename index_t, int HIDDEN_SIZE, int CTAS_PER_ROW, int WARPS_M, int WARPS_N,
           int BYTES_PER_LDG_MAIN, int BYTES_PER_LDG_FINAL>
 void launch_ln_bwd_tuned_(LaunchParams<BackwardKernelParams> &launch_params,
-                          const bool configure_params) {  // NOLINT(*)//PIV TODO: static
+                          const bool configure_params) {  // NOLINT(*)
   using Kernel_traits = Kernel_traits<weight_t, input_t, output_t, compute_t, index_t, HIDDEN_SIZE,
                                       CTAS_PER_ROW, WARPS_M, WARPS_N, BYTES_PER_LDG_MAIN>;
   auto kernel = &ln_bwd_tuned_kernel<Kernel_traits>;

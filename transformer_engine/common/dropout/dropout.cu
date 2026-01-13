@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -41,9 +43,15 @@ __device__ __forceinline__ uint32_t bytewise_less_than(uint32_t a, uint32_t b) {
   // MSBs are 0 if the low bits of a are less than the low bits of b.
   uint32_t result = (a | 0x80808080) - (b & 0x7F7F7F7F);
 
+#ifndef __HIP_PLATFORM_AMD__
   // Bitwise logical op to get answer in MSBs
   // Equivalent logic: result = (a == b) ? !result : b
   asm("lop3.b32 %0, %1, %2, %3, 0x4D;\n\t" : "=r"(result) : "r"(a), "r"(b), "r"(result));
+#else
+ // AMD GPU: Use bitwise ops to get answer in MSBs
+  uint32_t mask = (a ^ b);
+  result = (mask & b) | ~(mask | result);
+#endif
 
   // Mask out everything except MSBs and return
   result &= 0x80808080;

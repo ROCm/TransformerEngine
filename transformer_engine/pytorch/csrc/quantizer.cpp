@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -497,8 +499,16 @@ void Float8CurrentScalingQuantizer::quantize_impl(const TensorWrapper& input, Te
 
   // Compute amax
   if (compute_amax) {
+#ifdef __HIP_PLATFORM_AMD__
+    at::Tensor ws = allocate_amax_workspace(input);
+    TensorWrapper tw = makeTransformerEngineTensor(ws);
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_compute_amax_with_workspace(input.data(), out.data(), tw.data(), quant_config, stream);
+    });
+#else
     NVTE_SCOPED_GIL_RELEASE(
         { nvte_compute_amax_with_config(input.data(), out.data(), quant_config, stream); });
+#endif
   }
 
   // Perform amax reduction if needed

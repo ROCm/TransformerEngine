@@ -1,23 +1,23 @@
 /*************************************************************************
- * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
 #pragma once
 
+#include <cfloat>
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include <transformer_engine/activation.h>
-#include <transformer_engine/cast.h>
 
-#include <cfloat>
-
-#include "../common.h"
-#include "../util/vectorized_pointwise.h"
-#include "../utils.cuh"
+#include "common.h"
 #include "math.h"
-#include "../util/rocm_vectorized_2d.cuh"
+#include "ptx.cuh"
+#include "rocm_vectorized_2d.cuh"
+#include "transformer_engine/activation.h"
+#include "transformer_engine/cast.h"
+#include "vectorized_pointwise.h"
+#include "utils.cuh"
 
 namespace transformer_engine {
 namespace gated_kernels {
@@ -170,6 +170,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
       float act_elt = static_cast<float>(in_act_sh[shmem_idx]);
       float gate_elt = static_cast<float>(in_gate_sh[shmem_idx]);
+      float after_act_elt;
+      float after_gate_elt;
 
       if constexpr (IS_DGATED) {
         float grad_elt = static_cast<float>(in_grad_sh[shmem_idx]);
@@ -185,20 +187,31 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           act_x = ActOP(x, {});
           dact_x = DActOP(x, {});
         }
-        after_dact_reg[stage] = dact_x * grad_elt * gate_elt;
-        after_dgate_reg[stage] = act_x * grad_elt;
+        after_act_elt = dact_x * grad_elt * gate_elt;
+        after_gate_elt = act_x * grad_elt;
+        after_dact_reg[stage] = after_act_elt;
+        after_dgate_reg[stage] = after_gate_elt;
       } else {
-        after_dact_reg[stage] = ActOP(act_elt, {}) * gate_elt;
+        after_act_elt = ActOP(act_elt, {}) * gate_elt;
+        after_dact_reg[stage] = after_act_elt;
+      }
+
+      // Numerical truncation: downcast to IType (BF16/FP16) and upcast back to FP32
+      if constexpr (!std::is_same_v<IType, float>) {
+        after_act_elt = static_cast<float>(static_cast<IType>(after_act_elt));
+        if constexpr (IS_DGATED) {
+          after_gate_elt = static_cast<float>(static_cast<IType>(after_gate_elt));
+        }
       }
 
       if constexpr (USE_ROWWISE_SCALING) {
         if constexpr (IS_DGATED) {
           // dgate
-          float amax = fabsf(after_dgate_reg[stage]);
+          float amax = fabsf(after_gate_elt);
           const float mx_block_X_amax = warp_reduce_max_broadcast(amax);
           const e8m0_t biased_exponent_X =
-              float_to_e8m0(mx_block_X_amax * Quantized_Limits<OType>::max_norm_rcp);
-          const float scale_reciprocal_X = exp2f_rcp(biased_exponent_X);
+              ptx::float_to_e8m0(mx_block_X_amax * Quantized_Limits<OType>::max_norm_rcp);
+          const float scale_reciprocal_X = ptx::exp2f_rcp(biased_exponent_X);
 
           out_gate_rowwise_sh[shmem_idx] =
               static_cast<OType>(scale_reciprocal_X * after_dgate_reg[stage]);
@@ -214,11 +227,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             scales_rowwise[scale_idx] = biased_exponent_X;
           }
         }
-        float amax = fabsf(after_dact_reg[stage]);
+        float amax = fabsf(after_act_elt);
         const float mx_block_X_amax = warp_reduce_max_broadcast(amax);
         const e8m0_t biased_exponent_X =
-            float_to_e8m0(mx_block_X_amax * Quantized_Limits<OType>::max_norm_rcp);
-        const float scale_reciprocal_X = exp2f_rcp(biased_exponent_X);
+            ptx::float_to_e8m0(mx_block_X_amax * Quantized_Limits<OType>::max_norm_rcp);
+        const float scale_reciprocal_X = ptx::exp2f_rcp(biased_exponent_X);
 
         out_act_rowwise_sh[shmem_idx] =
             static_cast<OType>(scale_reciprocal_X * after_dact_reg[stage]);
@@ -237,10 +250,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       if constexpr (USE_COLWISE_SCALING) {
         __builtin_assume(thread_Y_mx_block_amax >= 0);
         __builtin_assume(thread_Y_mx_block_amax_gate >= 0);
-        thread_Y_mx_block_amax = fmaxf(thread_Y_mx_block_amax, fabsf(after_dact_reg[stage]));
+        thread_Y_mx_block_amax = fmaxf(thread_Y_mx_block_amax, fabsf(after_act_elt));
         if constexpr (IS_DGATED) {
           thread_Y_mx_block_amax_gate =
-              fmaxf(thread_Y_mx_block_amax_gate, fabsf(after_dgate_reg[stage]));
+              fmaxf(thread_Y_mx_block_amax_gate, fabsf(after_gate_elt));
         }
       }
     }
@@ -273,8 +286,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         }
 
         const e8m0_t biased_exponent =
-            float_to_e8m0(mx_block_Y_amax * Quantized_Limits<OType>::max_norm_rcp);
-        const float scale_reciprocal = exp2f_rcp(biased_exponent);
+            ptx::float_to_e8m0(mx_block_Y_amax * Quantized_Limits<OType>::max_norm_rcp);
+        const float scale_reciprocal = ptx::exp2f_rcp(biased_exponent);
 
         // Only single thread writes the computed scaling factor
         // Also assuming one iteration covers exactly 32 rows
@@ -319,8 +332,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       }
 
       const e8m0_t biased_exponent =
-          float_to_e8m0(mx_block_Y_amax * Quantized_Limits<OType>::max_norm_rcp);
-      const float scale_reciprocal = exp2f_rcp(biased_exponent);
+          ptx::float_to_e8m0(mx_block_Y_amax * Quantized_Limits<OType>::max_norm_rcp);
+      const float scale_reciprocal = ptx::exp2f_rcp(biased_exponent);
 
       // Only single thread writes the computed scaling factor
       // Also assuming one iteration covers exactly 32 rows

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -65,7 +65,9 @@ run_test_config(){
     run_default_fa 1 test_recipe.py
     run 1 test_sanity.py
     run_default_fa 1 test_sanity_import.py
-    run_default_fa 1 fused_attn/test_fused_attn.py # Backend selection is controlled by the test
+    run_default_fa 1 attention/test_attention.py # Backend selection is controlled by the test
+    run_default_fa 1 attention/test_cp_utils.py
+    run_default_fa 1 attention/test_kv_cache.py
     run_default_fa 1 triton_kernels/test_cast.py
     run_default_fa 1 triton_kernels/test_cast_mxfp8.py
     run_default_fa 1 triton_kernels/test_norm_common.py
@@ -88,8 +90,8 @@ run_test_config_mgpu(){
     run_default_fa 2 distributed/test_numerics.py
     run_default_fa 1 distributed/test_torch_fsdp2.py
     run_default_fa 2 distributed/test_torch_fsdp2_fp8.py
-    run_default_fa_lbl "flash" 3 fused_attn/test_fused_attn_with_cp.py -k "with_flash"
-    run_default_fa_lbl "fused" 2 fused_attn/test_fused_attn_with_cp.py -k "with_fused"
+    run_default_fa_lbl "flash" 3 attention/test_attention_with_cp.py -k "with_flash"
+    run_default_fa_lbl "fused" 2 attention/test_attention_with_cp.py -k "with_fused"
 }
 
 run_benchmark() {

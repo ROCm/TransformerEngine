@@ -11,7 +11,7 @@
 #include <cublas_v2.h>
 #include <cuda.h>
 #endif // #ifndef __HIP_PLATFORM_AMD__
-#include <iostream>
+
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/multi_stream.h>
 #include <transformer_engine/transformer_engine.h>
@@ -24,7 +24,9 @@
 #include "../util/logging.h"
 #include "../util/multi_stream.h"
 #include "common/util/cuda_runtime.h"
+#ifndef __HIP_PLATFORM_AMD__
 #include "cutlass_grouped_gemm.cuh"
+#endif
 
 #ifndef __HIP_PLATFORM_AMD__
 namespace {
@@ -227,10 +229,11 @@ namespace transformer_engine {
 #ifdef __HIP_PLATFORM_AMD__
 //Forward declaration. The implementation is in rocm_gemm.cu
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
-                 const Tensor *inputBias, Tensor *outputPreGelu, bool transa, bool transb, bool grad,
-                 void* workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator,
-                 int math_sm_count, int m_split, int n_split, bool gemm_producer,
-                 const Tensor *inputCounter, hipStream_t stream, int compute_stream_offset = -1);
+                 const Tensor *inputBias, Tensor *outputPreGelu, cublasOperation_t transa,
+                 cublasOperation_t transb, bool grad, void* workspace, size_t workspaceSize,
+                 float alpha, float beta, bool use_split_accumulator, int math_sm_count,
+                 int m_split, int n_split, bool gemm_producer, const Tensor *inputCounter,
+                 hipStream_t stream, int compute_stream_offset = -1);
 #else // Use cublasLt
 
 using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
@@ -612,33 +615,6 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 
 }  // namespace transformer_engine
 
-// compute_stream_offset = -1 means the stream from outer rather than compute_streams
-static void cublas_gemm_ex(const NVTETensor A, const NVTETensor B, NVTETensor D, const NVTETensor bias,
-                           NVTETensor pre_gelu_out, bool transa, bool transb, bool grad,
-                           NVTETensor workspace, bool accumulate, bool use_split_accumulator,
-                           int math_sm_count, cudaStream_t stream, int compute_stream_offset = -1) {
-  using namespace transformer_engine;
-  const Tensor *inputA = convertNVTETensorCheck(A);
-  const Tensor *inputB = convertNVTETensorCheck(B);
-  Tensor *outputD = convertNVTETensorCheck(D);
-  const Tensor *biasTensor = convertNVTETensorCheck(bias);
-  Tensor *outputGelu = convertNVTETensorCheck(pre_gelu_out);
-  Tensor *wspace = convertNVTETensorCheck(workspace);
-
-  cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu,
-#ifdef __HIP_PLATFORM_AMD__
-              transa, transb,
-#else
-              (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N,
-#endif //__HIP_PLATFORM_AMD__
-              grad, wspace->data.dptr, wspace->data.shape[0],
-              accumulate, use_split_accumulator, math_sm_count, 0, 0, false, nullptr, stream
-#ifdef __HIP_PLATFORM_AMD__
-              , compute_stream_offset
-#endif //__HIP_PLATFORM_AMD__
-            );
-}
-
 void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, const NVTETensor bias,
                       NVTETensor pre_gelu_out, bool transa, bool transb, bool grad,
                       NVTETensor workspace, bool accumulate, bool use_split_accumulator,
@@ -652,14 +628,8 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
   Tensor *outputGelu = convertNVTETensor(pre_gelu_out);
   Tensor *wspace = convertNVTETensor(workspace);
 
-  cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, 
-#ifdef __HIP_PLATFORM_AMD__
-              transa, transb,
-#else
-              (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
-              (transb) ? CUBLAS_OP_T : CUBLAS_OP_N,
-#endif
-              grad, wspace->data.dptr, wspace->data.shape[0],
+  cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
+              (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad, wspace->data.dptr, wspace->data.shape[0],
               1.0f, (accumulate) ? 1.0f : 0.0f, use_split_accumulator, math_sm_count, 0, 0, false,
               nullptr, stream);
 }
@@ -724,13 +694,8 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
   NVTE_CHECK(is_delayed_tensor_scaling(inputA->scaling_mode) &&
                  is_delayed_tensor_scaling(inputB->scaling_mode),
              "Atomic GEMM only supports delayed scaling.");
-  cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, 
-#ifdef __HIP_PLATFORM_AMD__
-              transa, transb,
-#else
-              (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N,
-#endif //__HIP_PLATFORM_AMD__    
-              grad, wspace->data.dptr, wspace->data.shape[0],
+  cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
+              (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad, wspace->data.dptr, wspace->data.shape[0],
               1.0f, (accumulate) ? 1.0f : 0.0f, use_split_accumulator, math_sm_count, m_split,
               n_split, gemm_producer, inputCounter, stream);
 }
@@ -753,9 +718,26 @@ void multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETens
   }
 
   for (int i = 0; i < num_gemms; i++) {
-    cublas_gemm_ex(A[i], B[i], D[i], bias[i], pre_gelu_out[i], transa, transb, grad,
-                   workspace[i % num_streams], accumulate, use_split_accumulator, math_sm_count,
-                   detail::get_compute_stream(i % num_streams), i % num_streams);
+#ifdef __HIP_PLATFORM_AMD__
+    {
+      const Tensor *inputA = convertNVTETensorCheck(A[i]);
+      const Tensor *inputB = convertNVTETensorCheck(B[i]);
+      Tensor *outputD = convertNVTETensorCheck(D[i]);
+      const Tensor *biasTensor = convertNVTETensorCheck(bias[i]);
+      Tensor *outputGelu = convertNVTETensorCheck(pre_gelu_out[i]);
+      Tensor *wspace = convertNVTETensorCheck(workspace[i % num_streams]);
+
+      cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu,
+                  (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad,
+                  wspace->data.dptr, wspace->data.shape[0], 1.0f, (accumulate) ? 1.0f : 0.0f,
+                  use_split_accumulator, math_sm_count, 0, 0, false, nullptr,
+                  detail::get_compute_stream(i % num_streams), i % num_streams);
+    }
+#else
+    nvte_cublas_gemm(A[i], B[i], D[i], bias[i], pre_gelu_out[i], transa, transb, grad,
+                     workspace[i % num_streams], accumulate, use_split_accumulator, math_sm_count,
+                     detail::get_compute_stream(i % num_streams));
+#endif
   }
 
   // record events on compute streams
@@ -796,6 +778,7 @@ using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublas
 void nvte_cublas_handle_init() { auto _ = cublasHandleManager::Instance().GetHandle(); }
 
 }  //  namespace transformer_engine
+#endif // __HIP_PLATFORM_AMD__
 
 void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
                             const NVTETensor *bias, NVTETensor *pre_gelu_out, const int num_gemms,
@@ -804,6 +787,10 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
                             cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_tensor_gemm);
 
+#ifdef __HIP_PLATFORM_AMD__
+    multi_stream_cublas_gemm(A, B, D, bias, pre_gelu_out, num_gemms, transa, transb, grad,
+                             workspace, accumulate, use_split_accumulator, math_sm_count, stream);
+#else
   const int current_device = transformer_engine::cuda::current_device();
   const bool is_hopper = (transformer_engine::cuda::sm_arch(current_device) == 90);
   const bool use_cutlass = transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPED_GEMM", false);
@@ -877,5 +864,5 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     }
     cublas_path();
   }
+#endif  // __HIP_PLATFORM_AMD__
 }
-#endif

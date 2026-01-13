@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -12,6 +12,7 @@ from contextlib import contextmanager
 
 import pytest
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine
 import transformer_engine.common.recipe
@@ -286,6 +287,24 @@ def get_available_attention_backends(
         _attention_backends["use_unfused_attention"] = use_unfused_attention
         _attention_backends["backend_selection_requires_update"] = False
         return available_backends, flash_attention_backend, fused_attention_backend
+
+    if IS_HIP_EXTENSION:
+        backends = {"AOTriton": "AOTRITON", "CK": "CK"}
+        if AttentionLogging._is_logging_setup is False:
+            AttentionLogging.setup_logging()
+        with logging_context(highest_level=AttentionLogging._log_level):
+            for i in backends.keys():
+                for k in backends.keys():
+                    os.environ["NVTE_FUSED_ATTN_"+backends[k]] = "0"
+                os.environ["NVTE_FUSED_ATTN_"+backends[i]] = "1"
+                _attention_backends["backend_selection_requires_update"] = True
+                available_backends, flash_attention_backend, fused_attention_backend = test()
+                if fused_attention_backend == FusedAttnBackend[i]:
+                    fused_attn_backends.append(fused_attention_backend)
+        for i in backends.keys():
+            del os.environ["NVTE_FUSED_ATTN_"+backends[i]]
+        available_backends[1] = len(fused_attn_backends) > 0
+        return available_backends, flash_attention_backend, fused_attn_backends
 
     backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
     if AttentionLogging._is_logging_setup is False:

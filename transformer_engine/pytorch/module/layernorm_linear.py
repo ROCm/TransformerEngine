@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -67,6 +67,7 @@ from ..tensor.quantized_tensor import (
 )
 from ...debug.pytorch.debug_state import TEDebugState
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase

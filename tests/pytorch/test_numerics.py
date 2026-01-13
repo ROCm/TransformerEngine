@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -163,6 +163,8 @@ def is_fused_attn_available(
         is_training=is_training,
         deterministic=deterministic,
     )
+    if IS_HIP_EXTENSION:
+        return fused_attn_backends != []
     return FusedAttnBackend["F16_arbitrary_seqlen"] in fused_attn_backends
 
 
@@ -1180,7 +1182,7 @@ def _test_granular_accuracy_with_fp8(block, bs, dtype, config):
     reset_rng_states()
 
     inp_hidden_states = torch.randn(
-        (config.seq_len, bs, config.hidden_size),
+        (config.max_seqlen_q, bs, config.hidden_size),
         dtype=dtype,
         device="cuda",
         requires_grad=True,
@@ -2046,7 +2048,7 @@ def test_grouped_linear_accuracy(
     if IS_HIP_EXTENSION:
         if dtype not in (torch.float32,) and fuse_wgrad_accumulation and not fp8:
             pytest.skip(f"Rocm does not support fused wgrad accumulation for {dtype}.")
-    if fp8 and fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED://PIV TODO FP8 support check
+    if fp8 and fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
 
     config = model_configs[model]
@@ -2323,8 +2325,8 @@ def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, r
         breaks = sorted(random.sample(range(1, total_sum), n - 1))
         random_numbers = (
             [breaks[0]]
-            [breaks[i] - breaks[i - 1] for i in range(1, n - 1)]#PIV TODO: fix changes
-            [total_sum - breaks[-1]]
+            + [breaks[i] - breaks[i - 1] for i in range(1, n - 1)]
+            + [total_sum - breaks[-1]]
         )
 
         return random_numbers

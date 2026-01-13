@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2023-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -484,17 +484,17 @@ void compareResults(const std::string &name, const uint8_t *test, const uint8_t 
                     size_t N, float mismatch_rate_tol = 0.);
 void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
                                   const size_t row_blocks, const size_t col_blocks, const size_t stride,
-                                  size_t& mismatches_num,
+                                  std::vector<size_t> &mismatch_indices, size_t& mismatches_num,
                                   const size_t scale_diff_abs_tolerance = 0,
                                   const double abs_tolerable_mismatches_limit = 0,
                                   const double rel_tolerable_mismatches_limit = 0);
-#ifdef USE_ROCM
-void compare_e8m0_scaling_factors(const std::string &name, Tensor &output, const uint8_t *ref,
-                             const size_t row_blocks, const size_t col_blocks, const size_t stride, 
-                             double tol, bool rowwise, std::vector<std::tuple<size_t, size_t, int>> &mismatch_idx);
 
-void adjust_ref(std::vector<std::tuple<size_t, size_t, int>> mismatch_idx, void *ref, const size_t row_blocks,
-                const size_t col_blocks, const size_t rows, const size_t cols, DType otype);
+#ifdef USE_ROCM
+void adjust_ref_for_e8m0_scale_error(const std::string &name,
+                                     const std::vector<size_t> &mismatch_idx,
+                                     const uint8_t *test_scale, const uint8_t *ref_scale,
+                                     const size_t scale_stride, const size_t rows,
+                                     const size_t cols, bool rowwise, void *ref_ptr, DType otype);
 #endif
 
 std::array<size_t, 4> get_scale_tensor_dims(const size_t rows, const size_t cols,
