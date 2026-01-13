@@ -73,7 +73,9 @@ __global__ void compute_ref_kernel(
   Gelu_Type* __restrict__ gelu_data,
   bool transa,
   bool transb,
-  bool is_fp8_output)
+  bool is_fp8_output,
+  bool a_is_colwise,
+  bool b_is_colwise)
 {
   const size_t jj = blockIdx.x * blockDim.x + threadIdx.x;
   const size_t ii = blockIdx.y * blockDim.y + threadIdx.y;
@@ -84,17 +86,26 @@ __global__ void compute_ref_kernel(
 
   if (in_range) {
     for (size_t kk = 0; kk < k; ++kk) {
-      const size_t a_idx = transa ? (ii * k + kk) : (kk * m + ii);
-      const size_t b_idx = transb ? (kk * n + jj) : (jj * k + kk);
+      // Indexing depends on which backing buffer we passed in
+      const size_t a_idx =
+          a_is_colwise ? (ii * k + kk)
+                       : (transa ? (ii * k + kk) : (kk * m + ii));
+
+      const size_t b_idx =
+          b_is_colwise ? (jj * k + kk)
+                       : (transb ? (kk * n + jj) : (jj * k + kk));
 
       float a_scale_inv_val = a_scale_inv_scalar;
       float b_scale_inv_val = b_scale_inv_scalar;
 
       if (a_scale_inv_mxfp8) {
         const size_t a_scale_idx =
-          transa ? (a_idx / 32) : ((kk / 32) * m + ii);
+            a_is_colwise ? (a_idx / 32)
+                         : (transa ? (a_idx / 32) : ((kk / 32) * m + ii));
+
         const size_t b_scale_idx =
-          transb ? ((kk / 32) * n + jj) : (b_idx / 32);
+            b_is_colwise ? (b_idx / 32)
+                         : (transb ? ((kk / 32) * n + jj) : (b_idx / 32));
 
         const float a_byte = static_cast<float>(a_scale_inv_mxfp8[a_scale_idx]);
         const float b_byte = static_cast<float>(b_scale_inv_mxfp8[b_scale_idx]);
@@ -147,215 +158,144 @@ __global__ void compute_ref_kernel(
   }
 }
 
-// Common implementation used by both tensor-wise and MXFP8 frontends
+
+struct TestParams {
+  size_t m;
+  size_t k;
+  size_t n;
+  bool use_bias;
+  bool use_gelu;
+  bool transa;
+  bool transb;
+  NVTEScalingMode scaling_mode;
+};
+
+
 template <typename A_Type, typename B_Type, typename Bias_Type,
           typename Gelu_Type, typename D_Type>
-static void compute_ref_impl(
-  const A_Type* a_data,
-  const B_Type* b_data,
-  float a_scale_inv_scalar,              // used when mxfp8 == false
-  float b_scale_inv_scalar,
-  const fp8e8m0* a_scale_inv_mxfp8,      // used when mxfp8 == true
-  const fp8e8m0* b_scale_inv_mxfp8,
-  const Bias_Type* bias_data,
-  float d_scale,
-  size_t m, size_t k, size_t n,
-  D_Type* d_data,
-  float* d_amax_host,
-  Gelu_Type* gelu_data,
-  bool transa,
-  bool transb)
+static void run_reference(
+    const TestParams& params,
+    const Tensor& A,
+    const Tensor& B,
+    const Tensor* Bias,                 // nullable
+    float d_scale,
+    std::unique_ptr<D_Type[]>& ref_D,   // m*n
+    float* ref_amax_d,
+    std::unique_ptr<Gelu_Type[]>& ref_pre_gelu_out) // nullable
 {
-  using transformer_engine::DType;
-  using ::TypeInfo;
-  using ::isFp8Type;
+  const bool use_mxfp8 = (params.scaling_mode == NVTE_MXFP8_1D_SCALING);
 
-  const bool use_mxfp8 = (a_scale_inv_mxfp8 != nullptr);
+  Gelu_Type* ref_gelu_host = (params.use_gelu ? ref_pre_gelu_out.get() : nullptr);
 
-  const DType dtype = TypeInfo<D_Type>::dtype;
-  const bool is_fp8_output = isFp8Type(dtype);
+  const bool is_fp8_output = test::isFp8Type(test::TypeInfo<D_Type>::dtype);
 
-  const size_t lenA    = m * k;
-  const size_t lenB    = k * n;
-  const size_t lenD    = m * n;
-  const size_t lenBias = m;
-  const size_t lenGelu = m * n;
+  const bool a_use_colwise = (!params.transa) && A.columnwise();
+  const bool b_use_colwise = ( params.transb) && B.columnwise();
 
-  const size_t lenA_scale = use_mxfp8 ? (lenA + 31) / 32 : 0;
-  const size_t lenB_scale = use_mxfp8 ? (lenB + 31) / 32 : 0;
+  const A_Type* a_dev = static_cast<const A_Type*>(
+      a_use_colwise ? A.columnwise_dptr() : A.rowwise_dptr());
 
-  A_Type*    dA        = nullptr;
-  B_Type*    dB        = nullptr;
-  Bias_Type* dBias     = nullptr;
-  D_Type*    dD        = nullptr;
-  Gelu_Type* dGelu     = nullptr;
-  float*     dAmax     = nullptr;
-  fp8e8m0*   dA_scale  = nullptr;
-  fp8e8m0*   dB_scale  = nullptr;
+  const B_Type* b_dev = static_cast<const B_Type*>(
+      b_use_colwise ? B.columnwise_dptr() : B.rowwise_dptr());
 
-  // Allocations and H2D transfers
-  NVTE_CHECK_CUDA(cudaMalloc(&dA, lenA * sizeof(A_Type)));
-  NVTE_CHECK_CUDA(cudaMalloc(&dB, lenB * sizeof(B_Type)));
-  NVTE_CHECK_CUDA(cudaMalloc(&dD, lenD * sizeof(D_Type)));
+  // scaling inputs 
+  float a_scale_inv_scalar = 1.0f;
+  float b_scale_inv_scalar = 1.0f;
 
-  NVTE_CHECK_CUDA(cudaMemcpy(
-      dA, a_data, lenA * sizeof(A_Type), cudaMemcpyHostToDevice));
-  NVTE_CHECK_CUDA(cudaMemcpy(
-      dB, b_data, lenB * sizeof(B_Type), cudaMemcpyHostToDevice));
-
-  if (bias_data) {
-    NVTE_CHECK_CUDA(cudaMalloc(&dBias, lenBias * sizeof(Bias_Type)));
-    NVTE_CHECK_CUDA(cudaMemcpy(
-        dBias, bias_data, lenBias * sizeof(Bias_Type),
-        cudaMemcpyHostToDevice));
-  }
-
-  if (gelu_data) {
-    NVTE_CHECK_CUDA(cudaMalloc(&dGelu, lenGelu * sizeof(Gelu_Type)));
-    NVTE_CHECK_CUDA(cudaMemset(dGelu, 0, lenGelu * sizeof(Gelu_Type)));
-  }
+  const fp8e8m0* a_scale_dev = nullptr;
+  const fp8e8m0* b_scale_dev = nullptr;
 
   if (use_mxfp8) {
-    NVTE_CHECK_CUDA(cudaMalloc(&dA_scale, lenA_scale * sizeof(fp8e8m0)));
-    NVTE_CHECK_CUDA(cudaMalloc(&dB_scale, lenB_scale * sizeof(fp8e8m0)));
-    NVTE_CHECK_CUDA(cudaMemcpy(
-        dA_scale, a_scale_inv_mxfp8, lenA_scale * sizeof(fp8e8m0),
-        cudaMemcpyHostToDevice));
-    NVTE_CHECK_CUDA(cudaMemcpy(
-        dB_scale, b_scale_inv_mxfp8, lenB_scale * sizeof(fp8e8m0),
-        cudaMemcpyHostToDevice));
+    a_scale_dev = params.transa
+        ? (const fp8e8m0*) A.rowwise_scale_inv_dptr()
+        : (const fp8e8m0*) A.columnwise_scale_inv_dptr();
+
+    b_scale_dev = params.transb
+        ? (const fp8e8m0*) B.columnwise_scale_inv_dptr()
+        : (const fp8e8m0*) B.rowwise_scale_inv_dptr();
+  } else {
+    a_scale_inv_scalar = A.rowwise_scale_inv();
+    b_scale_inv_scalar = B.rowwise_scale_inv();
   }
 
-  if (is_fp8_output && d_amax_host) {
-    NVTE_CHECK_CUDA(cudaMalloc(&dAmax, sizeof(float)));
-    NVTE_CHECK_CUDA(cudaMemset(dAmax, 0, sizeof(float)));
+  // optional bias device pointer
+  const Bias_Type* bias_dev = nullptr;
+  if (Bias) {
+    bias_dev = static_cast<const Bias_Type*>(Bias->rowwise_dptr());
+  }
+
+  // allocate device outputs
+  const size_t lenD = params.m * params.n;
+  const size_t bytesD = lenD * sizeof(D_Type);
+
+  D_Type* d_refD = nullptr;
+  Gelu_Type* d_refGelu = nullptr;
+  float* d_refAmax = nullptr;
+
+  NVTE_CHECK_CUDA(cudaMalloc(&d_refD, bytesD));
+  if (ref_gelu_host) {
+    NVTE_CHECK_CUDA(cudaMalloc(&d_refGelu, lenD * sizeof(Gelu_Type)));
+  }
+  if (is_fp8_output && ref_amax_d) {
+    NVTE_CHECK_CUDA(cudaMalloc(&d_refAmax, sizeof(float)));
+    NVTE_CHECK_CUDA(cudaMemset(d_refAmax, 0, sizeof(float)));
   }
 
   // Kernel launch
   dim3 block(16, 16);
-  dim3 grid((n + block.x - 1) / block.x, (m + block.y - 1) / block.y);
+  dim3 grid((unsigned)((params.n + block.x - 1) / block.x),
+            (unsigned)((params.m + block.y - 1) / block.y));
 
-  const int nthreads = block.x * block.y;
-  size_t shmem_bytes = nthreads * sizeof(float);
+  const size_t shmem_bytes = size_t(block.x) * size_t(block.y) * sizeof(float);
 
   compute_ref_kernel<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>
       <<<grid, block, shmem_bytes, 0>>>(
-          dA,
-          dB,
+          a_dev,
+          b_dev,
           a_scale_inv_scalar,
           b_scale_inv_scalar,
-          dA_scale,
-          dB_scale,
-          dBias,
+          a_scale_dev,
+          b_scale_dev,
+          bias_dev,
           d_scale,
-          m, k, n,
-          dD,
-          dAmax,
-          dGelu,
-          transa,
-          transb,
-          is_fp8_output);
+          params.m, params.k, params.n,
+          d_refD,
+          d_refAmax,
+          d_refGelu,
+          params.transa,
+          params.transb,
+          is_fp8_output,
+          a_use_colwise,
+          b_use_colwise);
 
   NVTE_CHECK_CUDA(cudaGetLastError());
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 
-  // D2H copies
-  NVTE_CHECK_CUDA(cudaMemcpy(
-      d_data, dD, lenD * sizeof(D_Type), cudaMemcpyDeviceToHost));
+  // copy outputs back
+  NVTE_CHECK_CUDA(cudaMemcpy(ref_D.get(), d_refD, bytesD, cudaMemcpyDeviceToHost));
 
-  if (gelu_data) {
-    NVTE_CHECK_CUDA(cudaMemcpy(
-        gelu_data, dGelu, lenGelu * sizeof(Gelu_Type),
-        cudaMemcpyDeviceToHost));
+  if (ref_gelu_host) {
+    NVTE_CHECK_CUDA(cudaMemcpy(ref_gelu_host, d_refGelu, lenD * sizeof(Gelu_Type),
+                               cudaMemcpyDeviceToHost));
   }
 
-  if (is_fp8_output && d_amax_host) {
-    NVTE_CHECK_CUDA(cudaMemcpy(
-        d_amax_host, dAmax, sizeof(float), cudaMemcpyDeviceToHost));
-  } else if (d_amax_host) {
-    *d_amax_host = 0.0f;
+  if (ref_amax_d) {
+    if (is_fp8_output) {
+      NVTE_CHECK_CUDA(cudaMemcpy(ref_amax_d, d_refAmax, sizeof(float),
+                                 cudaMemcpyDeviceToHost));
+    } else {
+      *ref_amax_d = 0.0f;
+    }
   }
 
   // cleanup
-  NVTE_CHECK_CUDA(cudaFree(dA));
-  NVTE_CHECK_CUDA(cudaFree(dB));
-  NVTE_CHECK_CUDA(cudaFree(dD));
-  if (dBias)
-    NVTE_CHECK_CUDA(cudaFree(dBias));
-  if (dGelu)
-    NVTE_CHECK_CUDA(cudaFree(dGelu));
-  if (dAmax)
-    NVTE_CHECK_CUDA(cudaFree(dAmax));
-  if (dA_scale)
-    NVTE_CHECK_CUDA(cudaFree(dA_scale));
-  if (dB_scale)
-    NVTE_CHECK_CUDA(cudaFree(dB_scale));
+  NVTE_CHECK_CUDA(cudaFree(d_refD));
+  if (d_refGelu)
+    NVTE_CHECK_CUDA(cudaFree(d_refGelu));
+  if (d_refAmax)
+    NVTE_CHECK_CUDA(cudaFree(d_refAmax));
 }
 
-
-template <typename A_Type, typename B_Type, typename Bias_Type, typename Gelu_Type, typename D_Type>
-void compute_ref(
-  const A_Type* a_data,
-  const B_Type* b_data,
-  const float a_scale_inv,
-  const float b_scale_inv,
-  const Bias_Type* bias_data, //bias is of dim m
-  const float d_scale,
-  size_t m, size_t k, size_t n,
-  D_Type* ref_d_data,
-  float* ref_d_amax_ptr,
-  Gelu_Type* ref_gelu_data,
-  bool transa,
-  bool transb){
-
-  compute_ref_impl<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(
-      a_data,
-      b_data,
-      /*a_scale_inv_scalar=*/a_scale_inv,
-      /*b_scale_inv_scalar=*/b_scale_inv,
-      /*a_scale_inv_mxfp8=*/nullptr,
-      /*b_scale_inv_mxfp8=*/nullptr,
-      bias_data,
-      d_scale,
-      m, k, n,
-      ref_d_data,
-      ref_d_amax_ptr,
-      ref_gelu_data,
-      transa,
-      transb);
-}
-
-template <typename A_Type, typename B_Type, typename Bias_Type, typename Gelu_Type, typename D_Type>
-void compute_mxfp8_ref(
-  const A_Type* a_data,
-  const B_Type* b_data,
-  const fp8e8m0* a_scale_inv_data,
-  const fp8e8m0* b_scale_inv_data,
-  const Bias_Type* bias_data, //bias is of dim m
-  const float d_scale,
-  size_t m, size_t k, size_t n,
-  D_Type* ref_d_data,
-  float* ref_d_amax_ptr,
-  Gelu_Type* ref_gelu_data,
-  bool transa,
-  bool transb){
-
-  compute_ref_impl<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(
-    a_data,
-    b_data,
-    /*a_scale_inv_scalar=*/1.0f,
-    /*b_scale_inv_scalar=*/1.0f,
-    /*a_scale_inv_mxfp8=*/a_scale_inv_data,
-    /*b_scale_inv_mxfp8=*/b_scale_inv_data,
-    bias_data,
-    d_scale,
-    m, k, n,
-    ref_d_data,
-    ref_d_amax_ptr,
-    ref_gelu_data,
-    transa,
-    transb);
-}
 
 template <typename Type>
 void cpu_rowwise_to_columnwise(
@@ -396,16 +336,6 @@ std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool
   return {atol, rtol};
 }
 
-struct TestParams {
-  size_t m;
-  size_t k;
-  size_t n;
-  bool use_bias;
-  bool use_gelu;
-  bool transa;
-  bool transb;
-  NVTEScalingMode scaling_mode;
-};
 
 template <typename A_Type, typename B_Type, typename Bias_Type, typename Gelu_Type, typename D_Type>
 void performTest(const TestParams& params) {
@@ -588,40 +518,17 @@ void performTest(const TestParams& params) {
   }
 
   float ref_amax_d;
-  if (use_mxfp8) {
-    const A_Type *a_data;
-    const B_Type *b_data;
-    const fp8e8m0 *a_scale_inv_data, *b_scale_inv_data;
-    if (params.transa) {
-      a_data = A.rowwise_cpu_dptr<A_Type>();
-      a_scale_inv_data = A.rowwise_cpu_scale_inv_ptr<fp8e8m0>();
-    } else {
-      a_data = A.columnwise_cpu_dptr<A_Type>();
-      a_scale_inv_data = A.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
-    }
-    if (params.transb) {
-      b_data = B.columnwise_cpu_dptr<B_Type>();
-      b_scale_inv_data = B.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
-    } else {
-      b_data = B.rowwise_cpu_dptr<B_Type>();
-      b_scale_inv_data = B.rowwise_cpu_scale_inv_ptr<fp8e8m0>();
-    }
 
-    compute_mxfp8_ref<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(
-        a_data, b_data, a_scale_inv_data, b_scale_inv_data,
-        params.use_bias ? bias.rowwise_cpu_dptr<Bias_Type>() : nullptr,
-        D.scale(), params.m, params.k, params.n, ref_D.get(), &ref_amax_d,
-        params.use_gelu ? ref_pre_gelu_out.get() : nullptr,
-        params.transa, params.transb);
-  } else {
-    compute_ref<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(
-        A.rowwise_cpu_dptr<A_Type>(), B.rowwise_cpu_dptr<B_Type>(),
-        A.rowwise_scale_inv(), B.rowwise_scale_inv(),
-        params.use_bias ? bias.rowwise_cpu_dptr<Bias_Type>() : nullptr,
-        D.scale(), params.m, params.k, params.n, ref_D.get(), &ref_amax_d,
-        params.use_gelu ? ref_pre_gelu_out.get() : nullptr,
-        params.transa, params.transb);
-  }
+  run_reference<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(
+    params,
+    A,
+    B,
+    params.use_bias ? &bias : nullptr,
+    D.scale(),
+    ref_D,
+    &ref_amax_d,
+    ref_pre_gelu_out);
+
   // check if error message happens in running                             
   (void)cudaDeviceSynchronize();
   auto err = cudaGetLastError();

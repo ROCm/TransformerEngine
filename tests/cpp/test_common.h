@@ -224,6 +224,16 @@ class Tensor {
     return reinterpret_cast<T *>(cpu_data_columnwise_.get());
   }
 
+  void *rowwise_scale_inv_dptr() const {
+    NVTE_CHECK(rowwise_, "Tensor does not have rowwise data!");
+    return tensor_.get_rowwise_scale_inv().data_ptr;
+  }
+
+  void *columnwise_scale_inv_dptr() const {
+    NVTE_CHECK(columnwise_, "Tensor does not have columnwise data!");
+    return tensor_.get_columnwise_scale_inv().data_ptr;
+  }
+
   float amax() const {
     if(amax_cpu_data_) {
       to_cpu();
@@ -244,7 +254,7 @@ class Tensor {
   }
 
   template <typename T>
-  T *rowwise_cpu_scale_inv_ptr(){
+  T *rowwise_cpu_scale_inv_ptr() const {
     if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING){
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
     } else if (tensor_.scaling_mode() == NVTE_BLOCK_SCALING_1D || tensor_.scaling_mode() == NVTE_BLOCK_SCALING_2D) {
@@ -269,7 +279,7 @@ class Tensor {
     return reinterpret_cast<T*>(columnwise_scale_inv_cpu_data_.get());
   }
 
-  float rowwise_scale_inv(){
+  float rowwise_scale_inv() const {
     if(rowwise_scale_inv_cpu_data_) {
       float scale_inv = rowwise_cpu_scale_inv_ptr<float>()[0];
       return scale_inv;
