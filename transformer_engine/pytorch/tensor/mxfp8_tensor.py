@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -110,7 +112,8 @@ class MXFP8Quantizer(Quantizer):
 
         # Allocate FP8 data
         data = torch.empty(shape, dtype=torch.uint8, device=device)
-        scale_inv = torch.empty(
+        # ROCm TE does not implement fuse padding zeros so use zero tensor here
+        scale_inv = torch.zeros(
             round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
             round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
             dtype=torch.uint8,
@@ -122,7 +125,8 @@ class MXFP8Quantizer(Quantizer):
         columnwise_scale_inv = None
         if self.columnwise_usage:
             columnwise_data = torch.empty_like(data)
-            columnwise_scale_inv = torch.empty(
+            # ROCm TE does not implement fuse padding zeros so use zero tensor here
+            columnwise_scale_inv = torch.zeros(
                 round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
                 round_up_to_nearest_multiple(shape[-1], 128),
                 dtype=torch.uint8,
