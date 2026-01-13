@@ -193,7 +193,7 @@ def test_dot_product_attention(
         config.window_size = [2, 2]
     config.window_size = check_set_window_size(config.attn_mask_type, config.window_size)
 
-    is_training = True #PIV TODO: config.head_dim_qk <= 192 and config.head_dim_v <= 128
+    is_training = True
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtype,
@@ -375,10 +375,6 @@ model_configs_mla = {
     "mla_3_2": ModelConfig(8, 1, 16, 192, max_seqlen_kv=2048, head_dim_v=128),  # inference
     "mla_3_3": ModelConfig(8, 1, 16, 160, max_seqlen_kv=2048, head_dim_v=128),  # inference
     "mla_3_4": ModelConfig(8, 1, 16, 160, max_seqlen_kv=2048, head_dim_v=160),  # inference
-    #"mla_4_0": ModelConfig(#PIV TODO: do cross 0 and cross 1 cover it
-    #    10, 4096, 16, 192, max_seqlen_kv=4096, attn_mask_type="causal", head_dim_v=128
-    #),
-    #"mla_4_1": ModelConfig(10, 4096, 16, 192, max_seqlen_kv=4096, head_dim_v=128),
 }
 
 

@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -92,6 +92,9 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
         )
     if "p2p" not in cp_comm_type and config.head_dim_qk != config.head_dim_v:
         pytest.skip("MLA CP currently only support KV P2P!")
+    if IS_HIP_EXTENSION:
+        if config.head_dim_qk != config.head_dim_v and not FlashAttentionUtils.v3_is_installed:
+            pytest.skip("MLA FlashAttention requires v3+!")
 
     subprocess.run(
         get_bash_arguments(
