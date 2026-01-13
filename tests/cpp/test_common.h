@@ -344,20 +344,18 @@ struct Numeric_Traits<fp8e4m3> {
     static constexpr double minSubnorm = 1.0   / static_cast<double>(1 << 9);   // std::pow(2.0, -9.0);
     static constexpr double maxSubnorm = 0.875 / static_cast<double>(1 << 6);   // std::pow(2.0, -6.0);
     static constexpr double minNorm    = 1.0   / static_cast<double>(1 << 6);   // std::pow(2.0, -6.0);
-    #ifndef USE_ROCM
+#ifndef USE_ROCM
     static constexpr double maxNorm    = 448.0;
-    #elif HIP_VERSION >= 60300000
+#else
     static const double maxNorm;
-    #else
-    static constexpr double maxNorm = 240.0;
-    #endif //USE_ROCM
+#endif //USE_ROCM
     static const double artifInf;                        // artificial Infinity
     static constexpr int maxBiasedExponentAsFP32 = 8 + FP32_EXPONENT_BIAS;
     static constexpr int maxUnbiasedExponentAsFP32 = 8;
     static constexpr int maxExpNorm    = 1 << maxUnbiasedExponentAsFP32;
 };
 
-#if defined(USE_ROCM) && (HIP_VERSION >= 60300000)
+#ifdef USE_ROCM
 inline const double Numeric_Traits<fp8e4m3>::maxNorm = te_fp8_fnuz() ? 240.0 : 448.0;
 #endif
 

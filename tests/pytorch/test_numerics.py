@@ -768,6 +768,13 @@ def test_gpt_full_activation_recompute(
 ):
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
+    if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5):
+        if (dtype == torch.bfloat16
+            and not fp8
+            and not use_reentrant
+            and recipe.float8_per_tensor_scaling()
+            ):
+            pytest.skip("hipBLASLt does not provide suitable algorithms on GFX950 for this config.")
 
     config = model_configs[model]
     torch.compiler.reset() # avoid cache size limit overflow
@@ -2829,10 +2836,21 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
             max_seqlen_kv=config.max_seqlen_kv,
         )
 
-        torch.testing.assert_close(
-            y_bshd,
-            y_thd.reshape(bs, config.max_seqlen_q, config.hidden_size).contiguous(),
-        )
+        if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5):
+            tols_thd = dtype_tols(dtype)
+            # On gfx950 the results for THD are different
+            # that results in lower final result precision
+            tols_thd["atol"] = 2e-3
+            torch.testing.assert_close(
+                y_bshd,
+                y_thd.reshape(bs, config.max_seqlen_q, config.hidden_size).contiguous(),
+                **tols_thd,
+            )
+        else:
+            torch.testing.assert_close(
+                y_bshd,
+                y_thd.reshape(bs, config.max_seqlen_q, config.hidden_size).contiguous(),
+            )
 
 
 @pytest.mark.parametrize(

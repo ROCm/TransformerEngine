@@ -996,16 +996,14 @@ struct Numeric_Traits<fp8e4m3> {
   static constexpr double maxNorm = 448;
 #elif defined(__HIP_DEVICE_COMPILE__)
   static constexpr double maxNorm = te_fp8_fnuz() ? 240 : 448;
-#elif defined(TE_DYNAMIC_HIP_FP8_TYPE)
+#else
  // dummy declaration for correct translation;
  // it is not defined anywhere and it's usage should be eliminated before linking
   static double maxNorm;
-#else
-  static constexpr double maxNorm = 240;
 #endif
 };
 
-#ifdef TE_DYNAMIC_HIP_FP8_TYPE
+#if !defined(__HIP_DEVICE_COMPILE__)
 template <bool FNUZ>
 struct Numeric_Traits_fp8e4m3: public Numeric_Traits<fp8e4m3> {
   static constexpr double maxNorm = FNUZ ? 240 : 448;
@@ -1023,7 +1021,7 @@ struct Quantized_Limits {
   static constexpr int max_unbiased_exponent = Numeric_Traits<T>::maxUnbiasedExponent;
   static constexpr float emax = 1 << max_unbiased_exponent;
   static constexpr float emax_rcp = 1.0 / emax;
-#ifdef TE_DYNAMIC_HIP_FP8_TYPE
+#if !defined(__HIP_DEVICE_COMPILE__)
   static constexpr struct {
     operator float() const {
       if (std::is_same<T, fp8e4m3>::value) {
@@ -1036,10 +1034,10 @@ struct Quantized_Limits {
   } max_norm = {};
   // dummy value for kernels host path compilation
   static constexpr float max_norm_rcp = std::numeric_limits<float>::signaling_NaN();
-#else // TE_DYNAMIC_HIP_FP8_TYPE
+#else // !defined(__HIP_DEVICE_COMPILE__)
   static constexpr float max_norm = Numeric_Traits<T>::maxNorm;
   static constexpr float max_norm_rcp = 1.0 / max_norm;
-#endif // TE_DYNAMIC_HIP_FP8_TYPE
+#endif // !defined(__HIP_DEVICE_COMPILE__)
 };
 
 }  // namespace transformer_engine
