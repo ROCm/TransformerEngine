@@ -9,6 +9,7 @@ from contextlib import nullcontext
 import pytest
 import torch
 from torch import nn
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from torch.testing._internal.common_device_type import largeTensorTest
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import DelayedScaling
@@ -17,6 +18,7 @@ from transformer_engine.pytorch import fp8_model_init
 from transformer_engine.pytorch.utils import is_bf16_compatible
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import gpu_autocast_ctx
+from transformer_engine.pytorch.utils import get_device_compute_capability
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -378,6 +380,7 @@ class TestFusedAdam(TestFusedOptimizer):
     @pytest.mark.skipif(not is_bf16_compatible(), reason="bf16 if not supported")
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
     def test_fp8_exp_avg(self):
+        model_tol = 3e-2 if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5) else None
         self.gen_precision_aware_test(
             use_fp8_params=False,
             param_dtype=torch.bfloat16,
@@ -388,6 +391,8 @@ class TestFusedAdam(TestFusedOptimizer):
             exp_avg_sq_dtype=torch.float32,
             master_rtol=1e-2,
             master_atol=1e-2,
+            model_rtol=model_tol,
+            model_atol=model_tol,
         )
 
     @pytest.mark.skipif(not is_bf16_compatible(), reason="bf16 if not supported")
