@@ -46,6 +46,8 @@ def _rmsnorm_fwd_triton_impl(
     IS_FP8: tl.constexpr,
     FP8_MAX: tl.constexpr,
     MAKE_TRANSPOSE: tl.constexpr,
+    INPUT_ALIGNED_16: tl.constexpr,
+    OUTPUT_ALIGNED_16: tl.constexpr,
 ):
 
     # Enable the transpose cache only in FP8 mode.
@@ -78,7 +80,8 @@ def _rmsnorm_fwd_triton_impl(
             for blk_idx in tl.range(0, n_cols_blks, num_stages=2):
                 cols = blk_idx * BLOCK_SIZE + col_offsets
                 input_ptrs = row_input_ptr + cols
-                input_ptrs = tl.multiple_of(input_ptrs, (16, ))
+                if INPUT_ALIGNED_16:
+                    input_ptrs = tl.multiple_of(input_ptrs, (16, ))
                 x = tl.load(input_ptrs).to(tl.float32)
                 sum_squares += tl.sum(x * x, axis=0)
 
@@ -86,7 +89,8 @@ def _rmsnorm_fwd_triton_impl(
             cols = n_cols_blks * BLOCK_SIZE + col_offsets
             mask = cols < n_cols
             input_ptrs = row_input_ptr + cols
-            input_ptrs = tl.multiple_of(input_ptrs, (16, ))
+            if INPUT_ALIGNED_16:
+                input_ptrs = tl.multiple_of(input_ptrs, (16, ))
             x = tl.load(input_ptrs, mask=mask, other=0.0, cache_modifier=".cg").to(tl.float32)
             sum_squares += tl.sum(x * x, axis=0)
 
@@ -101,7 +105,8 @@ def _rmsnorm_fwd_triton_impl(
             for blk_idx in tl.range(0, n_cols_blks, num_stages=2):
                 cols = blk_idx * BLOCK_SIZE + col_offsets
                 input_ptrs = row_input_ptr + cols
-                input_ptrs = tl.multiple_of(input_ptrs, (16, ))
+                if INPUT_ALIGNED_16:
+                    input_ptrs = tl.multiple_of(input_ptrs, (16, ))
                 x = tl.load(input_ptrs).to(tl.float32)
                 g_ptrs = g_ptr + cols
                 g = tl.load(g_ptrs).to(tl.float32)
@@ -144,7 +149,8 @@ def _rmsnorm_fwd_triton_impl(
         mask = col_offsets < n_cols
         for row_idx in tl.range(row_start, n_rows, NUM_PRGMS, num_stages=2):
             input_ptrs = input_ptr + row_idx * input_row_stride + col_offsets
-            input_ptrs = tl.multiple_of(input_ptrs, (16, ))
+            if INPUT_ALIGNED_16:
+                input_ptrs = tl.multiple_of(input_ptrs, (16, ))
             row = tl.load(input_ptrs, mask=mask, other=0.0, cache_modifier=".cg").to(tl.float32)
             g = tl.load(g_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
             row_norm = row * row
@@ -160,7 +166,8 @@ def _rmsnorm_fwd_triton_impl(
             rms_norm = row * norm_factor * g
 
             output_ptrs = output_ptr + row_idx * output_row_stride + col_offsets
-            output_ptrs = tl.multiple_of(output_ptrs, (16, ))
+            if OUTPUT_ALIGNED_16:
+                output_ptrs = tl.multiple_of(output_ptrs, (16, ))
             if IS_FP8:
                 amax_temp = tl.max(tl.abs(rms_norm), axis=-1)
                 amax = tl.maximum(amax, amax_temp)
@@ -184,7 +191,8 @@ _rmsnorm_fwd_triton = autotune_dec(_rmsnorm_fwd_triton_impl)
 @triton.jit
 def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, dg_ptr, input_row_stride, output_row_stride,
                         n_rows, n_cols, ZERO_CENTERED_GAMMA: tl.constexpr, BLOCK_SIZE: tl.constexpr,
-                        USE_BLOCKED: tl.constexpr, NUM_PRGMS: tl.constexpr):
+                        USE_BLOCKED: tl.constexpr, NUM_PRGMS: tl.constexpr,
+                        INPUT_ALIGNED_16: tl.constexpr, GRAD_OUTPUT_ALIGNED_16: tl.constexpr):
     row_start = tl.program_id(0)
     col_offsets = tl.arange(0, BLOCK_SIZE)
     #   tl.assume(input_row_stride >= 0)
@@ -209,8 +217,10 @@ def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, d
                 input_ptrs = row_input_ptr + cols
                 grad_output_ptrs = row_grad_output_ptr + cols
 
-                input_ptrs = tl.multiple_of(input_ptrs, (16, ))
-                grad_output_ptrs = tl.multiple_of(grad_output_ptrs, (16, ))
+                if INPUT_ALIGNED_16:
+                    input_ptrs = tl.multiple_of(input_ptrs, (16, ))
+                if GRAD_OUTPUT_ALIGNED_16:
+                    grad_output_ptrs = tl.multiple_of(grad_output_ptrs, (16, ))
 
                 x = tl.load(input_ptrs).to(tl.float32)
                 grad_output = tl.load(grad_output_ptrs).to(tl.float32)
@@ -241,9 +251,11 @@ def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, d
                 input_ptrs = row_input_ptr + cols
                 grad_output_ptrs = row_grad_output_ptr + cols
 
-                input_ptrs = tl.multiple_of(input_ptrs, (16, ))
-                grad_output_ptrs = tl.multiple_of(grad_output_ptrs, (16, ))
-
+                if INPUT_ALIGNED_16:
+                    input_ptrs = tl.multiple_of(input_ptrs, (16, ))
+                if GRAD_OUTPUT_ALIGNED_16:
+                    grad_output_ptrs = tl.multiple_of(grad_output_ptrs, (16, ))
+                
                 x = tl.load(input_ptrs).to(tl.float32)
                 grad_output = tl.load(grad_output_ptrs).to(tl.float32)
 
@@ -292,9 +304,10 @@ def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, d
             grad_output_ptrs = grad_output_ptr + row_idx * output_row_stride + col_offsets
             dx_ptrs = dx_ptr + row_idx * input_row_stride + col_offsets
 
-            input_ptrs = tl.multiple_of(input_ptrs, (16, ))
-            grad_output_ptrs = tl.multiple_of(grad_output_ptrs, (16, ))
-            dx_ptrs = tl.multiple_of(dx_ptrs, (16, ))
+            if INPUT_ALIGNED_16:
+                input_ptrs = tl.multiple_of(input_ptrs, (16, ))
+            if GRAD_OUTPUT_ALIGNED_16:
+                grad_output_ptrs = tl.multiple_of(grad_output_ptrs, (16, ))
 
             x = tl.load(input_ptrs, mask=mask, other=0.0).to(tl.float32)
             grad_output = tl.load(grad_output_ptrs, mask=mask, other=0.0).to(tl.float32)
@@ -352,9 +365,11 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma):
     dg_tmp = torch.empty(dg_tmp_rows(x_, sm_margin), N, device=x.device, dtype=torch.float32, requires_grad=False) if need_reduction else None
 
     grid_bwd = lambda meta: (NUM_PRGMS, )
+    input_aligned_16 = (x_.data_ptr() % 16 == 0) and (x_.stride(-1) % 16 == 0)
+    grad_output_aligned_16 = (dz_.data_ptr() % 16 == 0) and (dz_.stride(-1) % 16 == 0)
     _rmsnorm_bwd_triton[grid_bwd](dz_, x_, gamma_, rsigma_, dx, dg_tmp if need_reduction else dgamma,
                                   x_.stride(0), dz_.stride(0), M, N, zero_centered_gamma, blk_size,
-                                  USE_BLOCKED, NUM_PRGMS, num_warps=8)
+                                  USE_BLOCKED, NUM_PRGMS, input_aligned_16, grad_output_aligned_16, num_warps=8)
 
     if need_reduction:
         grid_reduce = lambda meta: [triton.cdiv(N, meta['BLOCK_SIZE_N'])]
@@ -438,6 +453,11 @@ def te_rmsnorm_fwd_triton(
     grid_fwd = lambda meta: (NUM_PRGMS, )
     # TODO(micky774) Implement fused MXFP8 quantization within the kernel
     kernel = _rmsnorm_fwd_triton if autotune else _rmsnorm_fwd_triton_impl
+    input_aligned_16 = (input.data_ptr() % 16 == 0) and (input.stride(-1) % 16 == 0)
+    out_alignment_tensor = out._data if hasattr(out, "_data") else out
+    output_aligned_16 = (out_alignment_tensor.data_ptr() % 16 == 0) and (
+        out_alignment_tensor.stride(-1) % 16 == 0
+    )
     kernel[grid_fwd](
         out_ptr,
         input,
@@ -459,6 +479,8 @@ def te_rmsnorm_fwd_triton(
         IS_FP8,
         FP8_MAX,
         MAKE_TRANSPOSE,
+        input_aligned_16,
+        output_aligned_16,
     )
     if IS_MXFP8:
         out = quantizer.quantize(out, out=ln_out)

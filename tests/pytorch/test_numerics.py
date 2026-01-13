@@ -768,6 +768,14 @@ def test_gpt_full_activation_recompute(
         dtype in (torch.float16, torch.bfloat16) and rocm_attn_backend()[2]):
         pytest.skip("Test is not supported on GFX950 with current parameters and CK fused attention backend and non-zero dropout.")
 
+    if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5):
+        if (dtype == torch.bfloat16 
+            and not fp8
+            and not use_reentrant 
+            and recipe.float8_per_tensor_scaling() 
+            ):
+            pytest.skip("hipBLASLt does not provide suitable algorithms on MI350 for this config.")        
+    
     config = model_configs[model]
     torch.compiler.reset() # avoid cache size limit overflow
 
