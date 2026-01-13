@@ -27,6 +27,7 @@ void log_fwd_config(const char* func_name,
                     const bool is_v_rowmajor,
                     const bool do_fp8_static_quant,
                     const bool uses_fwd_v3,
+                    const bool how_v3_bf16_cvt,
                     const fmha_fwd_args& fmha_args){
   bool ck_fused_attn_log_config = false;
   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
@@ -37,22 +38,25 @@ void log_fwd_config(const char* func_name,
     std::cout<<std::endl<<func_name<<std::endl;
 
     // debug fmha_traits
-    std::cout<<"fmha_traits: "<<std::endl;
+    std::cout<<std::endl<<"fmha_traits: "<<std::endl;
     std::cout<<"hdim_q: "<<fmha_args.hdim_q<<std::endl;
     std::cout<<"hdim_v: "<<fmha_args.hdim_v<<std::endl;
     std::cout<<"data_type: "<<data_type_str<<std::endl;
     std::cout<<"is_group_mode: "<<is_group_mode<<std::endl;
     std::cout<<"is_v_rowmajor: "<<is_v_rowmajor<<std::endl;
+    std::cout<<"has_logits_soft_cap: "<<has_logits_soft_cap<<std::endl;
     std::cout<<"mask_type: "<<static_cast<std::underlying_type<mask_enum>::type>(mask_type)<<std::endl;
     std::cout<<"bias_type: "<<static_cast<std::underlying_type<bias_enum>::type>(bias_type)<<std::endl;
-    std::cout<<"has_logits_soft_cap: "<<has_logits_soft_cap<<std::endl;
     std::cout<<"has_lse: "<<has_lse<<std::endl;
     std::cout<<"has_dropout: "<<has_dropout<<std::endl;
     std::cout<<"do_fp8_static_quant: "<<do_fp8_static_quant<<std::endl;
+    std::cout<<"skip_min_seqlen_q: "<<(fmha_args.min_seqlen_q != 0)<<std::endl;
     std::cout<<"uses_fwd_v3: "<<uses_fwd_v3<<std::endl;
+    std::cout<<"how_v3_bf16_cvt: "<<how_v3_bf16_cvt<<std::endl;
 
     // debug fmha_args
-    std::cout<<"fmha_args: "<<std::endl;
+    std::cout<<std::endl<<"fmha_args: "<<std::endl;
+
     std::cout<<"q_ptr: "<<fmha_args.q_ptr<<std::endl;
     std::cout<<"k_ptr: "<<fmha_args.k_ptr<<std::endl;
     std::cout<<"v_ptr: "<<fmha_args.v_ptr<<std::endl;
@@ -60,9 +64,13 @@ void log_fwd_config(const char* func_name,
     std::cout<<"rand_val_ptr: "<<fmha_args.rand_val_ptr<<std::endl;
     std::cout<<"lse_ptr: "<<fmha_args.lse_ptr<<std::endl;
     std::cout<<"o_ptr: "<<fmha_args.o_ptr<<std::endl;
+
     std::cout<<"seqstart_q_ptr: "<<fmha_args.seqstart_q_ptr<<std::endl;
     std::cout<<"seqstart_k_ptr: "<<fmha_args.seqstart_k_ptr<<std::endl;
+    std::cout<<"seqlen_q_ptr: "<<fmha_args.seqlen_q_ptr<<std::endl;
     std::cout<<"seqlen_k_ptr: "<<fmha_args.seqlen_k_ptr<<std::endl;
+    std::cout<<"cu_seqlen_q_ptr: "<<fmha_args.cu_seqlen_q_ptr<<std::endl;
+    std::cout<<"cu_seqlen_k_ptr: "<<fmha_args.cu_seqlen_k_ptr<<std::endl;
 
     std::cout<<"seqlen_q: "<<fmha_args.seqlen_q<<std::endl;
     std::cout<<"seqlen_k: "<<fmha_args.seqlen_k<<std::endl;
@@ -72,10 +80,11 @@ void log_fwd_config(const char* func_name,
     std::cout<<"hdim_v: "<<fmha_args.hdim_v<<std::endl;
     std::cout<<"nhead_q: "<<fmha_args.nhead_q<<std::endl;
     std::cout<<"nhead_k: "<<fmha_args.nhead_k<<std::endl;
+
     std::cout<<"scale_s: "<<fmha_args.scale_s<<std::endl;
-    std::cout<<"scale_p: "<<fmha_args.scale_p<<std::endl;
-    std::cout<<"scale_o: "<<fmha_args.scale_o<<std::endl;
+
     std::cout<<"logits_soft_cap: "<<fmha_args.logits_soft_cap<<std::endl;
+
     std::cout<<"stride_q: "<<fmha_args.stride_q<<std::endl;
     std::cout<<"stride_k: "<<fmha_args.stride_k<<std::endl;
     std::cout<<"stride_v: "<<fmha_args.stride_v<<std::endl;
@@ -96,12 +105,15 @@ void log_fwd_config(const char* func_name,
     std::cout<<"batch_stride_randval: "<<fmha_args.batch_stride_randval<<std::endl;
     std::cout<<"batch_stride_lse: "<<fmha_args.batch_stride_lse<<std::endl;
     std::cout<<"batch_stride_o: "<<fmha_args.batch_stride_o<<std::endl;
+
     std::cout<<"window_size_left: "<<fmha_args.window_size_left<<std::endl;
     std::cout<<"window_size_right: "<<fmha_args.window_size_right<<std::endl;
     std::cout<<"mask_type: "<<fmha_args.mask_type<<std::endl;
     std::cout<<"min_seqlen_q: "<<fmha_args.min_seqlen_q<<std::endl;
+
     std::cout<<"p_drop: "<<fmha_args.p_drop<<std::endl;
     std::cout<<"s_randval: "<<fmha_args.s_randval<<std::endl;
+
     std::cout<<"dropout_seed_ptr: "<<std::get<0>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset))<<std::endl;
     std::cout<<"dropout_offset_ptr: "<<std::get<1>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset))<<std::endl;
   }
@@ -129,6 +141,7 @@ hipError_t ck_attn_fwd(
   uint64_t stride_b_o, uint64_t stride_h_o, uint64_t stride_s_o,
   void* lse_ptr,
   bool uses_fwd_v3,
+  int how_v3_bf16_cvt,
   hipStream_t stream){
 
   bool has_dropout = (is_training && dropout_probability > 0.f);
@@ -143,8 +156,6 @@ hipError_t ck_attn_fwd(
   ck_tile::index_t max_seqlen_q = s_q;
   ck_tile::index_t max_seqlen_k = s_kv;
   float scale_s = scaling_factor;
-  float scale_p = 1.f;
-  float scale_o = 1.f;
   float logits_soft_cap = 0.f;
   float p_drop = dropout_probability;
   bool is_group_mode = false;
@@ -206,16 +217,18 @@ hipError_t ck_attn_fwd(
                          k_ptr,
                          v_ptr,
                          bias_type==bias_enum::alibi? alibi_slope_ptr :bias_ptr,
+                         nullptr, //q_descale_ptr
+                         nullptr, //k_descale_ptr
+                         nullptr, //v_descale_ptr
                          nullptr,//rand_val_ptr
                          lse_ptr,
                          o_ptr,
-                         nullptr, //cu_seqlen_q
-                         nullptr, //cu_seqlen_kv
                          nullptr, //seqstart_q_ptr
                          nullptr, //seqstart_k_ptr
+                         nullptr, //seqlen_q_ptr
                          nullptr, //seqlen_k_ptr
-                         nullptr, //seqstart_padded_q_ptr
-                         nullptr, //seqstart_padded_k_ptr
+                         nullptr, //cu_padded_q_ptr
+                         nullptr, //cu_padded_k_ptr
                          max_seqlen_q,
                          max_seqlen_k,
                          batch,
@@ -225,8 +238,6 @@ hipError_t ck_attn_fwd(
                          nhead,
                          nhead_k,
                          scale_s,
-                         scale_p,
-                         scale_o,
                          logits_soft_cap,
                          stride_q,
                          stride_k,
@@ -250,6 +261,7 @@ hipError_t ck_attn_fwd(
                          batch_stride_o,
                          left,
                          right,
+                         0, // sink_size
                          static_cast<ck_tile::index_t>(mask_type),
                          0, // min_seqlen_q
                          p_drop,
@@ -258,11 +270,7 @@ hipError_t ck_attn_fwd(
   }();
   
   // print ck traits and args when needed
-  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, fmha_args);
-  if (uses_fwd_v3)
-  {
-    set_aiter_asm_dir();
-  }
+  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, how_v3_bf16_cvt, fmha_args);
 
   float average_runtime = aiter::mha_fwd(fmha_args,
                                          stream_config,
@@ -271,7 +279,10 @@ hipError_t ck_attn_fwd(
                                          mask_type,
                                          bias_type,
                                          has_lse,
-                                         uses_fwd_v3);
+                                         quant_scale_enum::no_scale,
+                                         uses_fwd_v3, 
+                                         false,//has_sink
+                                         how_v3_bf16_cvt);
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");
@@ -290,6 +301,7 @@ hipError_t ck_attn_varlen_fwd(
   const void* v_ptr, 
   uint64_t stride_h_v, uint64_t stride_s_v,
   const void* cu_seqlen_q_ptr, const void* cu_seqlen_kv_ptr,
+  const void* cu_seqlen_q_padded_ptr, const void* cu_seqlen_kv_padded_ptr,
   bool is_training,
   float scaling_factor,
   float dropout_probability,
@@ -300,6 +312,7 @@ hipError_t ck_attn_varlen_fwd(
   uint64_t stride_h_o, uint64_t stride_s_o,
   void* lse_thd_ptr,
   bool uses_fwd_v3,
+  int how_v3_bf16_cvt,
   hipStream_t stream){
 
   bool has_dropout = (is_training && dropout_probability > 0.f);
@@ -315,8 +328,6 @@ hipError_t ck_attn_varlen_fwd(
   ck_tile::index_t max_seqlen_kv = s_kv;
 
   float scale_s = scaling_factor;
-  float scale_p = 1.f;
-  float scale_o = 1.f;
   float logits_soft_cap = 0.f;
   float p_drop = dropout_probability;
   bool is_group_mode = true;
@@ -381,16 +392,18 @@ hipError_t ck_attn_varlen_fwd(
                          k_ptr,
                          v_ptr,
                          nullptr,//bias_ptr
+                         nullptr, //q_descale_ptr
+                         nullptr, //k_descale_ptr
+                         nullptr, //v_descale_ptr
                          nullptr,//rand_val_ptr
                          lse_thd_ptr,
                          o_ptr,
-                         nullptr, //cu_seqlen_q
-                         nullptr, //cu_seqlen_kv
-                         cu_seqlen_q_ptr, //seqstart_q_ptr
-                         cu_seqlen_kv_ptr, //seqstart_k_ptr
+                         cu_seqlen_q_padded_ptr==nullptr? cu_seqlen_q_ptr: cu_seqlen_q_padded_ptr, //seqstart_q_ptr
+                         cu_seqlen_kv_padded_ptr==nullptr? cu_seqlen_kv_ptr: cu_seqlen_kv_padded_ptr, //seqstart_k_ptr
+                         nullptr, //seqlen_q_ptr
                          nullptr, //seqlen_k_ptr
-                         nullptr, //seqstart_padded_q_ptr
-                         nullptr, //seqstart_padded_k_ptr
+                         cu_seqlen_q_ptr, //cu_seqlen_q_ptr
+                         cu_seqlen_kv_ptr, //cu_seqlen_k_ptr
                          max_seqlen_q, //seqlen_q, unused in group mode
                          max_seqlen_kv, //seqlen_kv, unused in group mode
                          batch,
@@ -400,8 +413,6 @@ hipError_t ck_attn_varlen_fwd(
                          nhead,
                          nhead_k,
                          scale_s,
-                         scale_p,
-                         scale_o,
                          logits_soft_cap,
                          stride_q,
                          stride_k,
@@ -425,28 +436,38 @@ hipError_t ck_attn_varlen_fwd(
                          batch_stride_o,
                          left,
                          right,
+                         0, // sink_size
                          static_cast<ck_tile::index_t>(mask_type),
                          0, // min_seqlen_q
                          p_drop,
                          false,
                          std::pair<const void*, const void*>{philox_seed_ptr, philox_offset_ptr}};
   }();
-
-  // print ck traits and args when needed
-  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, fmha_args);
-  if (uses_fwd_v3)
-  {
-    set_aiter_asm_dir();
+  // modify the max_seqlen_q for better performance in 0-length cases
+  // lse_thd_ptr used as buffer
+  if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_MAX_SEQLEN")){
+    if(std::string(env_p) == "1"){
+      if(ck_fused_attn_log_config){
+        std::cout << "attn_fwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.";
+      }
+      fmha_args.max_seqlen_q = get_runtime_max_seqlen(b, cu_seqlen_q_ptr, cu_seqlen_q_padded_ptr, lse_thd_ptr, stream);
+    }
   }
+  // print ck traits and args when needed
+  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, how_v3_bf16_cvt, fmha_args);
 
-  float average_runtime = aiter::mha_fwd(fmha_args,
-                                         stream_config,
-                                         data_type_str,
-                                         is_group_mode,
-                                         mask_type,
-                                         bias_type,
-                                         has_lse,
-                                         uses_fwd_v3);
+  float average_runtime = aiter::mha_fwd(
+    fmha_args,
+    stream_config,
+    data_type_str,
+    is_group_mode,
+    mask_type,
+    bias_type,
+    has_lse,
+    quant_scale_enum::no_scale,
+    uses_fwd_v3, 
+    false,//has_sink
+    how_v3_bf16_cvt);
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");

@@ -100,4 +100,39 @@ std::pair<bias_enum, BiasShape> get_ck_bias_type_shape(BiasType attn_bias_type, 
   return std::make_pair(bias_type, bias_shape); 
 }
 
+__global__ void get_runtime_max_seqlen_kernel(
+  uint64_t b,
+  const int32_t* cu_seqlen_ptr, 
+  const int32_t* cu_seqlen_padded_ptr, 
+  uint64_t *out) {
+
+  int tid = blockDim.x * blockIdx.x + threadIdx.x;
+  if(tid >= b){
+    return;
+  }
+  if(cu_seqlen_padded_ptr){
+    atomicMax(out, cu_seqlen_padded_ptr[tid+1] - cu_seqlen_padded_ptr[tid]);
+  }else{
+    atomicMax(out, cu_seqlen_ptr[tid+1] - cu_seqlen_ptr[tid]);
+  }
+}
+
+uint64_t get_runtime_max_seqlen(uint64_t b, const void* cu_seqlen_ptr, const void* cu_seqlen_padded_ptr, void* workspace, hipStream_t stream){
+  uint64_t* runtime_max_seqlen_ptr = static_cast<uint64_t*>(workspace);
+  uint64_t runtime_max_seqlen;
+  //reset the result buffer to 0
+  hipMemsetAsync(runtime_max_seqlen_ptr, 0, sizeof(uint64_t), stream);
+  constexpr int threads = 128;
+  // in case b ==0
+  const int blocks = (static_cast<int64_t>(b) - 1) / threads + 1; // ceil
+  get_runtime_max_seqlen_kernel<<<blocks, threads, 0, stream>>>(
+    b, 
+    static_cast<const int32_t*>(cu_seqlen_ptr),
+    static_cast<const int32_t*>(cu_seqlen_padded_ptr),
+    runtime_max_seqlen_ptr);
+  hipMemcpyAsync(&runtime_max_seqlen, runtime_max_seqlen_ptr, sizeof(uint64_t), hipMemcpyDeviceToHost, stream);
+  hipStreamSynchronize(stream);
+  return runtime_max_seqlen;
+}
+
 }//namespace ck_fused_attn
