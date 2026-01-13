@@ -5,6 +5,14 @@ from typing import Iterable, Optional, Tuple, Union, List
 import functools
 import json
 import os.path
+import sys
+from pathlib import Path
+
+# Add local 3rdparty/aiter to path to import from local version instead of installed package
+_AITER_PATH = Path(__file__).parents[3] / "3rdparty" / "aiter"
+if str(_AITER_PATH) not in sys.path:
+    sys.path.insert(0, str(_AITER_PATH))
+
 from aiter.ops.triton.gmm import gmm, ptgmm, nptgmm
 from torch import Tensor
 import transformer_engine_torch as tex
@@ -120,6 +128,7 @@ def general_grouped_gemm_triton(
             existing_out=out_tensor,  # (M, in_features)
             config=None,
             bias=bias_tensor,
+            group_sizes_list=kwargs.get("m_splits_list", []),
         )
         
         grad_biases = [None] * len(m_splits) if bias is None else bias
@@ -148,6 +157,7 @@ def general_grouped_gemm_triton(
             existing_out=out_tensor,  # (M, out_features)
             config=None,
             bias=bias_tensor,
+            group_sizes_list=kwargs.get("m_splits_list", []),
         )
         
         grad_biases = [None] * len(m_splits) if bias is None else bias
