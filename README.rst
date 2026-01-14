@@ -28,7 +28,59 @@ Feature Support Status
 Installation
 ============
 
+Install from manylinux wheels
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Starting from ROCm 7.0, we provide manylinux wheels for Transformer Engine releases on `https://repo.radeon.com/rocm/manylinux`. For example, the wheels for ROCm 7.1.1 are at `https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1/`. From the page, you can find four files related to Transformer Engine:
+
+* transformer_engine_rocm-*-py3-none-manylinux_2_28_x86_64.whl - This is the wheel file for installing the common library. It should not be installed by itself.
+* transformer_engine-*-py3-none-any.whl - This is the wheel file for installing the common TE Python package.
+* transformer_engine_jax-*.tar.gz - This is the source tar ball for the JAX extension.
+* transformer_engine_torch-*.tar.gz - This is the source tar ball for the Pytorch extension.
+
+Below are the example commands to download and install the wheels. They install both Pytorch and JAX extensions on the system where both frameworks are installed.
+
+.. code-block:: bash
+
+  wget https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1/transformer_engine_rocm-2.2.0-py3-none-manylinux_2_28_x86_64.whl
+  wget https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1/transformer_engine-2.2.0-py3-none-any.whl
+  wget https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1/transformer_engine_jax-2.2.0.tar.gz
+  wget https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1/transformer_engine_torch-2.2.0.tar.gz
+
+  pip install ./transformer_engine* --no-build-isolation
+
+Install TE from source
+^^^^^^^^^^^^^^^^^^
+
 Execute the following commands to install ROCm Transformer Engine from source on AMDGPUs:
+
+.. code-block:: bash
+
+  # Clone TE repo and submodules
+  git clone --recursive https://github.com/ROCm/TransformerEngine.git
+
+  cd TransformerEngine
+  export NVTE_FRAMEWORK=pytorch,jax #optionally set framework, currently only support pytorch and jax; if not set will try to detect installed frameworks
+  export NVTE_ROCM_ARCH=gfx942,gfx950 # gfx942 for support of MI300/MI325, and gfx950 for support of MI350
+
+  # Build Platform Selection (optional)
+  # Note: Useful when both ROCm and CUDA platforms are present in the Docker
+  export NVTE_USE_ROCM=1  #Use 1 for ROCm, or set to 0 to use CUDA; If not set will try to detect installed platform, prioritizing ROCm
+
+  pip install . --no-build-isolation
+
+It is also possible to build wheels for later installation with "pip wheel ." although those wheels will not be portable to systems with
+different libraries installed. If the build still fails with the "--no-build-isolation" flag try installing setuptools<80.0.0
+
+Note on Switching between Installation from Source and Installation from Wheels
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Sometimes, issues might occur when installing from source on a system where a previous installation with wheels, or vice versa. It is safe to uninstall TE first before 
+switching between installing from source and installing from wheels. Here is the example command:
+
+.. code-block:: bash
+
+  # The package name pattern might be transformer_engine or transformer-engine depending on setuptools version
+  pip list | grep transformer.engine | xargs pip uninstall -y
 
 Known Issue with ROCm 6.4 PyTorch Release
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -56,30 +108,6 @@ Re-install PyTorch
   # Build and install
   ./tools/amd_build/build_amd.py
   BUILD_TEST=0 python3 setup.py install
-
-Install TE
-^^^^^^^^^^^^^^^^^^
-
-.. code-block:: bash
-
-  # Clone TE repo and submodules
-  git clone --recursive https://github.com/ROCm/TransformerEngine.git
-
-  cd TransformerEngine
-  export NVTE_FRAMEWORK=pytorch,jax #optionally set framework, currently only support pytorch and jax; if not set will try to detect installed frameworks
-  export NVTE_ROCM_ARCH=gfx942 # CK fused attn only support MI200 and MI300 and fp8 features are only supported on MI300
-
-  # Build Platform Selection (optional)
-  # Note: Useful when both ROCm and CUDA platforms are present in the Docker
-  export NVTE_USE_ROCM=1  #Use 1 for ROCm, or set to 0 to use CUDA; If not set will try to detect installed platform, prioritizing ROCm
-  # If you are building for gfx942 variants, also specify the number of Compute Units
-  export CU_NUM=304
-
-  # Note: If the following fails with messages about missing pip packages that are installed, add "--no-build-isolation" to the command below
-  pip install .
-
-It is also possible to build wheels for later installation with "pip wheel ." although those wheels will not be portable to systems with
-different libraries installed. This build may also require "--no-build-isolation" and if the build still fails with this flag try installing setuptools<80.0.0
 
 Test
 ====
@@ -264,6 +292,12 @@ Note that when using `THD` format tensors with CK Fused Attention, one should pa
 to indicate that there is no padding between sequences. Otherwise, passing proper tensors will indicate padding between sequences. This is the case
 for both the `FusedAttention` and `DotProductAttention` modules.
 
+Certain settings can be enabled to potentially optimize workloads depending on the nature of the inputs and expected outputs:
+
+* NVTE_CK_RUNTIME_NUM_SEGMENTS - by default 0, if set to 1 then the JAX integration will calculate the number of segments at runtime. Enabling this requires also disabling the GPU graph by setting `XLA_FLAGS="--xla_gpu_graph_level=0"`.
+* NVTE_CK_RUNTIME_MAX_SEQLEN - by default 0, if set to 1 then the max sequence length will be calculated at runtime. This can result in speedups in cases where there are many zero-length sequences. Enabling this while using the JAX integration requires also disabling the GPU graph by setting `XLA_FLAGS="--xla_gpu_graph_level=0"`.
+* NVTE_CK_ZERO_OUT_PAD - by default 1, if set to 0 then the output of the FA forward pass will not be initialized to zero, meaning invalid regions (representing padding) may take nonzero values. Only used if input has padding.
+
 AITER FA v3 Kernels
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 ROCm TE supports flash-attention v3 fwd/bwd kernels on gfx942 and gfx950 using AITER backend.
@@ -306,6 +340,19 @@ To enable MXFP8 support, use NVTE_ROCM_ENABLE_MXFP8 environment variable which c
 * 0 - disable MXFP8 support (default);
 * 1 - enable MXFP8 support in fp8;
 * 2 - make MXFP8 a default fp8 recipe.
+
+Two-stage amax Kernel
+^^^^^^^^^^^^^^^^^^^^^
+
+Transformer Engine uses an optimized two-stage amax kernel by default.
+The first stage computes a per-block amax, and the second stage performs a small
+reduction over these block-wise maxima. This implementation reduces contention from
+atomic operations and provides higher performance in many cases.
+
+If needed (e.g., for debugging or performance comparisons), you can restore the
+legacy single-stage atomic kernel by setting:
+
+    NVTE_USE_ATOMIC_AMAX=1
 
 
 Transformer Engine
@@ -449,7 +496,7 @@ Installation
 ============
 
 System Requirements
-^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^
 
 * **Hardware:** Blackwell, Hopper, Grace Hopper/Blackwell, Ada, Ampere
 
@@ -467,10 +514,10 @@ System Requirements
 * **Notes:** FP8 features require Compute Capability 8.9+ (Ada/Hopper/Blackwell)
 
 Installation Methods
-^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^
 
 Docker (Recommended)
-^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^
 The quickest way to get started with Transformer Engine is by using Docker images on
 `NVIDIA GPU Cloud (NGC) Catalog <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch>`_.
 
@@ -495,7 +542,7 @@ Where 25.04 (corresponding to April 2025 release) is the container version.
 * NGC PyTorch 23.08+ containers include FlashAttention-2
 
 pip Installation
-^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^
 
 **Prerequisites for pip installation:**
 
@@ -519,13 +566,25 @@ Alternatively, install directly from the GitHub repository:
 
 .. code-block:: bash
 
-    pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
+    pip install --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@stable
 
 When installing from GitHub, you can explicitly specify frameworks using the environment variable:
 
 .. code-block:: bash
 
-    NVTE_FRAMEWORK=pytorch,jax pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
+    NVTE_FRAMEWORK=pytorch,jax pip install --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@stable
+
+conda Installation
+^^^^^^^^^^^^^^^^^^
+
+To install the latest stable version with conda from conda-forge:
+
+.. code-block:: bash
+
+    # For PyTorch integration
+    conda install -c conda-forge transformer-engine-torch
+    
+    # JAX integration (coming soon)
 
 Source Installation
 ^^^^^^^^^^^^^^^^^^^
@@ -533,7 +592,7 @@ Source Installation
 `See the installation guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/installation.html#installation-from-source>`_
 
 Environment Variables
-^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^
 These environment variables can be set before installation to customize the build process:
 
 * **CUDA_PATH**: Path to CUDA installation
@@ -544,7 +603,7 @@ These environment variables can be set before installation to customize the buil
 * **NVTE_BUILD_THREADS_PER_JOB**: Control threads per build job
 
 Compiling with FlashAttention
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Transformer Engine supports both FlashAttention-2 and FlashAttention-3 in PyTorch for improved performance. FlashAttention-3 was added in release v1.11 and is prioritized over FlashAttention-2 when both are present in the environment.
 
 You can verify which FlashAttention version is being used by setting these environment variables:
@@ -556,8 +615,9 @@ You can verify which FlashAttention version is being used by setting these envir
 It is a known issue that FlashAttention-2 compilation is resource-intensive and requires a large amount of RAM (see `bug <https://github.com/Dao-AILab/flash-attention/issues/358>`_), which may lead to out of memory errors during the installation of Transformer Engine. Please try setting **MAX_JOBS=1** in the environment to circumvent the issue.
 
 .. troubleshooting-begin-marker-do-not-remove
+
 Troubleshooting
-^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^
 
 **Common Issues and Solutions:**
 
@@ -691,7 +751,7 @@ Papers
 Videos
 ======
 
-* `Stable and Scalable FP8 Deep Learning Training on Blackwell | GTC 2025 <https://www.nvidia.com/en-us/on-demand/session/gtc24-s62457/>`_
+* `Stable and Scalable FP8 Deep Learning Training on Blackwell | GTC 2025 <https://www.nvidia.com/en-us/on-demand/session/gtc24-s62457/>`__
 * `Blackwell Numerics for AI | GTC 2025 <https://www.nvidia.com/en-us/on-demand/session/gtc25-s72458/>`_
 * `Building LLMs: Accelerating Pretraining of Foundational Models With FP8 Precision | GTC 2025 <https://www.nvidia.com/gtc/session-catalog/?regcode=no-ncid&ncid=no-ncid&tab.catalogallsessionstab=16566177511100015Kus&search=zoho#/session/1726152813607001vnYK>`_
 * `From FP8 LLM Training to Inference: Language AI at Scale | GTC 2025 <https://www.nvidia.com/en-us/on-demand/session/gtc25-s72799/>`_

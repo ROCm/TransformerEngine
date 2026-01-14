@@ -68,10 +68,11 @@ void stream_priority_range(int *low_priority, int *high_priority, int device_id 
  * \return CUDA multicast support flag
  */
 bool supports_multicast(int device_id = -1);
+#endif
 
-/* \brief Path to CUDA Toolkit headers
+/* \brief Path to CUDA/ROCm Toolkit headers
  *
- * The path can be configured by setting NVTE_CUDA_INCLUDE_DIR in the
+ * On CUDA platform the path can be configured by setting NVTE_CUDA_INCLUDE_DIR in the
  * environment. Otherwise searches in common install paths.
  *
  * \param[in] required Whether to throw exception if not found
@@ -79,6 +80,13 @@ bool supports_multicast(int device_id = -1);
  * \return Path to include directory, or an empty string if not found
  */
 const std::string &include_directory(bool required = false);
+
+#ifndef __HIP_PLATFORM_AMD__
+/* \brief CUDA Runtime version number at run-time
+ *
+ * Versions may differ between compile-time and run-time.
+ */
+int cudart_version();
 #endif
 
 }  // namespace cuda

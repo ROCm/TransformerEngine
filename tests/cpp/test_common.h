@@ -14,12 +14,16 @@
 #include <random>
 
 #ifndef USE_ROCM
+#define FP4_TYPE_SUPPORTED (CUDA_VERSION >= 12080)
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
+#if FP4_TYPE_SUPPORTED
+#include <cuda_fp4.h>
+#endif
 #else
+#define FP4_TYPE_SUPPORTED (false)
 #include <hip/hip_bfloat16.h>
 #include "amd_detail/hip_float8.h"
-#include <gtest/gtest.h>
 #endif
 #include <cuda_runtime_api.h>
 
@@ -68,19 +72,32 @@ using fp8e4m3 = te_hip_fp8_e4m3;
 using fp8e5m2 = te_hip_fp8_e5m2;
 #endif //USE_ROCM
 using fp8e8m0 = uint8_t;
+#if FP4_TYPE_SUPPORTED
+using fp4e2m1 = __nv_fp4_e2m1;
+#endif
 
 template <typename T>
-struct TypeInfo{
-    using types = std::tuple<byte,
-                             int16,
-                             int32,
-                             int64,
-                             fp32,
-                             fp16,
-                             bf16,
-                             fp8e4m3,
-                             fp8e5m2,
-                             fp8e8m0>;
+struct BitsNumber;
+
+#if FP4_TYPE_SUPPORTED
+template <>
+struct BitsNumber<fp4e2m1> {
+  static constexpr size_t num_bits = 4;
+};
+#endif
+
+template <typename T>
+struct BitsNumber {
+  static constexpr size_t num_bits = 8 * sizeof(T);
+};
+
+template <typename T>
+struct TypeInfo {
+#if FP4_TYPE_SUPPORTED
+    using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2, fp8e8m0, fp4e2m1>;
+#else
+    using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2, fp8e8m0>;
+#endif
 
     template <typename U, DType current>
     struct Helper {
@@ -107,7 +124,7 @@ struct TypeInfo{
     }
 
     constexpr static DType dtype = getType<T>();
-    constexpr static size_t size = sizeof(T);
+    constexpr static size_t size = BitsNumber<T>::num_bits;;
 };
 
 class Tensor {
@@ -327,20 +344,18 @@ struct Numeric_Traits<fp8e4m3> {
     static constexpr double minSubnorm = 1.0   / static_cast<double>(1 << 9);   // std::pow(2.0, -9.0);
     static constexpr double maxSubnorm = 0.875 / static_cast<double>(1 << 6);   // std::pow(2.0, -6.0);
     static constexpr double minNorm    = 1.0   / static_cast<double>(1 << 6);   // std::pow(2.0, -6.0);
-    #ifndef USE_ROCM
+#ifndef USE_ROCM
     static constexpr double maxNorm    = 448.0;
-    #elif HIP_VERSION >= 60300000
+#else
     static const double maxNorm;
-    #else
-    static constexpr double maxNorm = 240.0;
-    #endif //USE_ROCM
+#endif //USE_ROCM
     static const double artifInf;                        // artificial Infinity
     static constexpr int maxBiasedExponentAsFP32 = 8 + FP32_EXPONENT_BIAS;
     static constexpr int maxUnbiasedExponentAsFP32 = 8;
     static constexpr int maxExpNorm    = 1 << maxUnbiasedExponentAsFP32;
 };
 
-#if defined(USE_ROCM) && (HIP_VERSION >= 60300000)
+#ifdef USE_ROCM
 inline const double Numeric_Traits<fp8e4m3>::maxNorm = te_fp8_fnuz() ? 240.0 : 448.0;
 #endif
 
@@ -443,9 +458,10 @@ inline float dsilu(const float x)    { return x * dsigmoid(x) + sigmoid(x); }
 inline float srelu(const float x)    { return x > 0 ? x * x : 0; }
 inline float dsrelu(const float x)   { return fmaxf(0, 2 * x); }
 
-size_t typeToSize(DType type);
+size_t typeToNumBits(DType type);
 size_t product(const NVTEShape &shape);
 size_t product(const std::vector<size_t> &shape);
+size_t bytes(const NVTEShape& shape, const DType type);
 
 size_t first_dimension(const std::vector<size_t> &shape);
 size_t last_dimension(const std::vector<size_t> &shape);
@@ -499,6 +515,16 @@ constexpr int32_t blackwellComputeCapability = 100;
 
 }  // namespace test
 
+#if FP4_TYPE_SUPPORTED
+#define SWITCH_FP4_TYPE_HANDLE(type, ...) \
+  case DType::kFloat4E2M1: {              \
+    using type = fp4e2m1;                 \
+    { __VA_ARGS__ }                       \
+  } break;
+#else
+#define SWITCH_FP4_TYPE_HANDLE(type, ...) // do nothing
+#endif
+
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(dtype, type, ...) \
     switch (dtype) { \
         using namespace transformer_engine; \
@@ -550,8 +576,16 @@ constexpr int32_t blackwellComputeCapability = 100;
                 {__VA_ARGS__} \
             } \
         break; \
+        case DType::kFloat8E8M0: \
+            { \
+                using type = fp8e8m0; \
+                {__VA_ARGS__} \
+            } \
+        break; \
+        SWITCH_FP4_TYPE_HANDLE(type, __VA_ARGS__) \
         default: \
-            NVTE_ERROR("Invalid type."); \
+            printf("dtype: %d\n", static_cast<int>(dtype)); \
+            NVTE_ERROR("Invalid type MARKED TEST."); \
     }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(dtype, type, ...) \
@@ -570,7 +604,15 @@ constexpr int32_t blackwellComputeCapability = 100;
             } \
         break; \
         default: \
-            NVTE_ERROR("Invalid type."); \
+            NVTE_ERROR("Invalid type MARKED TEST 2."); \
+    }
+
+#define TRANSFORMER_ENGINE_TYPE_SWITCH_FP4_ONLY(dtype, type, ...) \
+    switch (dtype) { \
+        using namespace transformer_engine; \
+        SWITCH_FP4_HANDLE(type, __VA_ARGS__) \
+        default: \
+            NVTE_ERROR("Invalid type MARKED TEST 3."); \
     }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(dtype, type, ...) \
@@ -595,5 +637,5 @@ constexpr int32_t blackwellComputeCapability = 100;
             } \
         break; \
         default: \
-            NVTE_ERROR("Invalid type."); \
+            NVTE_ERROR("Invalid type MARKED TEST 4."); \
     }

@@ -5,6 +5,7 @@
  ************************************************************************/
 #include <type_traits>
 #include <transformer_engine/gemm.h>
+#include <transformer_engine/multi_stream.h>
 #include <transformer_engine/transformer_engine.h>
 #include <map>
 #include <unistd.h>
@@ -173,23 +174,16 @@ static hipDataType get_hipblaslt_dtype(const transformer_engine::DType t) {
       return HIP_R_32F;
     case DType::kBFloat16:
       return HIP_R_16BF;
-#if HIP_VERSION >= 60300000
     case DType::kFloat8E4M3:
       return te_fp8_fnuz() ? HIP_R_8F_E4M3_FNUZ : HIP_R_8F_E4M3;
     case DType::kFloat8E5M2:
       return te_fp8_fnuz() ? HIP_R_8F_E5M2_FNUZ: HIP_R_8F_E5M2;
-#else
-    case DType::kFloat8E4M3:
-      return HIP_R_8F_E4M3_FNUZ;
-    case DType::kFloat8E5M2:
-      return HIP_R_8F_E5M2_FNUZ;
-#endif
     default:
       NVTE_ERROR("Invalid type");
   }
 }
 
-//TODO: unified with cublaslt_gemm.cu
+//TODO: merge duplicated logics with cublaslt_gemm.cu
 struct GemmParam {
   void *A = nullptr;
   void *B = nullptr;
@@ -489,10 +483,8 @@ static std::unordered_map<hipDataType, std::string_view> type_name_map = {
   {HIP_R_16BF, "bfloat16"},
   {HIP_R_8F_E4M3_FNUZ, "float8e4m3"},
   {HIP_R_8F_E5M2_FNUZ, "float8e5m2"},
-#if HIP_VERSION >= 60300000
   {HIP_R_8F_E4M3, "float8e4m3"},
   {HIP_R_8F_E5M2, "float8e5m2"},
-#endif
 };
 static NameMapper<hipDataType> typeNameMapper(type_name_map);
 
@@ -786,16 +778,12 @@ protected:
         continue;
       }
 
-#if HIP_VERSION >= 60300000
       auto fp8_filter = te_fp8_fnuz()
                             ? [](const hipDataType& val) 
                                 { return (val != HIP_R_8F_E4M3 && val != HIP_R_8F_E5M2); }
                             : [](const hipDataType& val) {
                                 return (val != HIP_R_8F_E4M3_FNUZ && val != HIP_R_8F_E5M2_FNUZ);
                               };
-#else
-      auto fp8_filter = nullptr;
-#endif
 
       cfg.a_type = typeNameMapper.getValue(type_a, "type_a", fp8_filter);
       cfg.b_type = typeNameMapper.getValue(type_b, "type_b", fp8_filter);
@@ -933,7 +921,7 @@ static inline int getIntEnv(const char *name, int defval, int minval)
  */
 static void init_hipblaslt_handles(hipblasLtHandle_t* hipblaslt_handles) {
   NVTE_CHECK(hipblaslt_handles != nullptr);
-  for (int i = 0; i < num_streams; i++) {
+  for (int i = 0; i < nvte_get_num_compute_streams(); i++) {
     NVTE_CHECK_HIPBLASLT(hipblasLtCreate(&hipblaslt_handles[i]));
   }
 }
@@ -1550,14 +1538,15 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   bool use_service_stream =
       (math_sm_count != 0) ? get_service_stream(math_sm_count, stream, ss_ctl) : false;
 
+  int num_streams = nvte_get_num_compute_streams();
   NVTE_CHECK(compute_stream_offset >= -1 && compute_stream_offset < num_streams);
 
   hipblasLtHandle_t handle = nullptr;
   if (compute_stream_offset != -1) {
     // Init hipblaslt handles (once, globally)
     static std::once_flag init_flag;
-    static hipblasLtHandle_t hipblaslt_handles[num_streams];
-    std::call_once(init_flag, init_hipblaslt_handles, hipblaslt_handles);
+    static std::vector<hipblasLtHandle_t> hipblaslt_handles(num_streams);
+    std::call_once(init_flag, init_hipblaslt_handles, hipblaslt_handles.data());
 
     handle = hipblaslt_handles[compute_stream_offset];
   }

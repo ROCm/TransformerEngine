@@ -6,27 +6,27 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "extensions.h"
+#include "../extensions.h"
 #include "transformer_engine/fused_attn.h"
+#include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
 namespace jax {
 
-NVTE_Fused_Attn_Backend GetFusedAttnBackend(DType q_dtype, DType kv_dtype,
+NVTE_Fused_Attn_Backend GetFusedAttnBackend(bool is_training, DType q_dtype, DType kv_dtype,
                                             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
                                             NVTE_Mask_Type mask_type, float dropout_probability,
                                             size_t q_attn_heads, size_t kv_attn_heads,
                                             size_t q_max_seqlen, size_t kv_max_seqlen,
-                                            size_t qk_head_dim, size_t v_head_dim, 
-                                            int64_t window_size_left, int64_t window_size_right){
+                                            size_t qk_head_dim, size_t v_head_dim,
+                                            int64_t window_size_left, int64_t window_size_right) {
   auto backend = nvte_get_fused_attn_backend(
-      static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout, bias_type,
-      mask_type, dropout_probability, q_attn_heads, kv_attn_heads, q_max_seqlen, kv_max_seqlen,
-      qk_head_dim, v_head_dim, window_size_left, window_size_right);
+      is_training, static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout,
+      bias_type, mask_type, dropout_probability, q_attn_heads, kv_attn_heads, q_max_seqlen,
+      kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right);
   return backend;
 }
 
-#ifndef USE_ROCM
 /*
     NOTE: PrepareFusedAttnForwardAuxTensors unifies the auxiliary tensor pack logic from the fused
     attention forward kernels in:
@@ -43,69 +43,54 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
   // all backends need softmax but expect different shapes/dtypes
   // start with the max512 sequence length softmax shape/dtype and correct later
   tensor_pack->size = 1;
-  Tensor *softmax_aux = reinterpret_cast<Tensor *>(tensor_pack->tensors[0]);
-  softmax_aux->data.dptr = softmax_buf;
-  softmax_aux->data.shape =
-      std::vector<size_t>{input_batch, attn_heads, q_max_seqlen, kv_max_seqlen};
-  softmax_aux->data.dtype = dtype;
+  NVTETensor &softmax_aux = tensor_pack->tensors[0];
+  NVTEBasicTensor softmax_aux_data;
+  softmax_aux_data.data_ptr = softmax_buf;
+  softmax_aux_data.shape.ndim = 4;
+  softmax_aux_data.shape.data[0] = input_batch;
+  softmax_aux_data.shape.data[1] = attn_heads;
+  softmax_aux_data.shape.data[2] = q_max_seqlen;
+  softmax_aux_data.shape.data[3] = kv_max_seqlen;
+  softmax_aux_data.dtype = static_cast<NVTEDType>(dtype);
 
   // arbitrary sequence length backend needs the RNG state and a different shape/dtype softmax
+#ifndef USE_ROCM
   if (backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
+#endif
+    // ROCm fused attn has two backends: aotriton and ck
+    // They both have the same shape and stride for softmax and rng aux tensors
+    // CK now support bias features
     tensor_pack->size = 2;
-    Tensor *rng_state_aux = reinterpret_cast<Tensor *>(tensor_pack->tensors[1]);
-    rng_state_aux->data.dptr = rng_state_buf;
-    rng_state_aux->data.shape = std::vector<size_t>{2};
-    rng_state_aux->data.dtype = DType::kInt64;
+    NVTETensor &rng_state_aux = tensor_pack->tensors[1];
+    NVTEBasicTensor rng_state_aux_data;
+    rng_state_aux_data.data_ptr = rng_state_buf;
+    rng_state_aux_data.shape = {};
+    rng_state_aux_data.shape.ndim = 2;
+    rng_state_aux_data.dtype = static_cast<NVTEDType>(DType::kInt64);
+    nvte_set_tensor_param(&rng_state_aux, kNVTERowwiseData, &rng_state_aux_data);
     // correct softmax shape/dtype
-    softmax_aux->data.shape.at(3) = 1;  // {B,H,Qs,Ks} -> {B,H,Qs,1}
-    softmax_aux->data.dtype = DType::kFloat32;
+    softmax_aux_data.shape.data[3] = 1;  // {B,H,Qs,Ks} -> {B,H,Qs,1}
+    softmax_aux_data.dtype = static_cast<NVTEDType>(DType::kFloat32);
 
     // include bias if enabled
     if (bias_type != NVTE_Bias_Type::NVTE_NO_BIAS && bias_type != NVTE_Bias_Type::NVTE_ALIBI) {
       tensor_pack->size = 3;
-      Tensor *bias_aux = reinterpret_cast<Tensor *>(tensor_pack->tensors[2]);
-      bias_aux->data.dptr = bias_buf;
-      bias_aux->data.shape =
-          std::vector<size_t>{bias_batch, bias_heads, q_max_seqlen, kv_max_seqlen};
-      bias_aux->data.dtype = dtype;
+      NVTETensor &bias_aux = tensor_pack->tensors[2];
+      NVTEBasicTensor bias_aux_data;
+      bias_aux_data.data_ptr = bias_buf;
+      bias_aux_data.shape.ndim = 4;
+      bias_aux_data.shape.data[0] = bias_batch;
+      bias_aux_data.shape.data[1] = bias_heads;
+      bias_aux_data.shape.data[2] = q_max_seqlen;
+      bias_aux_data.shape.data[3] = kv_max_seqlen;
+      bias_aux_data.dtype = static_cast<NVTEDType>(dtype);
+      nvte_set_tensor_param(&bias_aux, kNVTERowwiseData, &bias_aux_data);
     }
+#ifndef USE_ROCM
   }
-}
-#else
-// ROCm fused attn has two backends: aotriton and ck
-// They both have the same shape and stride for softmax and rng aux tensors
-// CK now support bias features
-void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t input_batch,
-                                       const size_t bias_batch, const size_t attn_heads,
-                                       const size_t bias_heads, const size_t q_max_seqlen,
-                                       const size_t kv_max_seqlen, DType dtype,
-                                       NVTE_Bias_Type bias_type, NVTE_Fused_Attn_Backend backend,
-                                       void *softmax_buf, void *rng_state_buf = nullptr,
-                                       void *bias_buf = nullptr) {
-  tensor_pack->size = 2;
-  Tensor *softmax_aux = reinterpret_cast<Tensor *>(tensor_pack->tensors[0]);
-  softmax_aux->data.dptr = softmax_buf;
-  softmax_aux->data.shape =
-      std::vector<size_t>{input_batch, attn_heads, q_max_seqlen, 1};
-  softmax_aux->data.dtype = DType::kFloat32;
-
-  Tensor *rng_state_aux = reinterpret_cast<Tensor *>(tensor_pack->tensors[1]);
-  rng_state_aux->data.dptr = rng_state_buf;
-  rng_state_aux->data.shape = std::vector<size_t>{2};
-  rng_state_aux->data.dtype = DType::kInt64;
-
-  // include bias if enabled
-  if (bias_type != NVTE_Bias_Type::NVTE_NO_BIAS && bias_type != NVTE_Bias_Type::NVTE_ALIBI) {
-    tensor_pack->size = 3;
-    Tensor *bias_aux = reinterpret_cast<Tensor *>(tensor_pack->tensors[2]);
-    bias_aux->data.dptr = bias_buf;
-    bias_aux->data.shape =
-        std::vector<size_t>{bias_batch, bias_heads, q_max_seqlen, kv_max_seqlen};
-    bias_aux->data.dtype = dtype;
-  }
-}
 #endif
-
+  nvte_set_tensor_param(&softmax_aux, kNVTERowwiseData, &softmax_aux_data);
+}
 /*
     NOTE: Backward fused attention kernels accept auxiliary tensors as explicit function arguments
     instead of an NVTETensorPack and nvte_fused_attn_bwd() API does all the logic for pulling the
@@ -135,16 +120,18 @@ void PrepareFusedAttnBackwardAuxTensors(NVTETensorPack *tensor_pack, const size_
 #ifndef USE_ROCM
   // correct softmax shape for max512 sequence length kernel
   if (backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
-    Tensor *softmax_aux = reinterpret_cast<Tensor *>(tensor_pack->tensors[0]);
-    softmax_aux->data.shape.at(3) = kv_max_seqlen;  // {B,H,Qs,1} -> {B,H,Qs,Ks}
-    softmax_aux->data.dtype = dtype;
+    NVTEBasicTensor softmax_aux_data =
+        nvte_get_tensor_param(tensor_pack->tensors[0], kNVTERowwiseData);
+    softmax_aux_data.shape.data[3] = kv_max_seqlen;  // {B,H,Qs,1} -> {B,H,Qs,Ks}
+    softmax_aux_data.dtype = static_cast<NVTEDType>(dtype);
+    nvte_set_tensor_param(&(tensor_pack->tensors[0]), kNVTERowwiseData, &softmax_aux_data);
   }
 #endif
 }
 
 pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
-    size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t qk_head_dim, 
+    size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t qk_head_dim,
     size_t v_head_dim, float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, NVTE_QKV_Layout qkv_layout, DType dtype, bool is_training,
     size_t max_segments_per_seq, int64_t window_size_left, int64_t window_size_right) {
@@ -226,6 +213,8 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     }
   }
 
+  nvte_tensor_pack_destroy(&aux_output_tensors);
+
   auto workspace_shape = MakeShapeVector(query_workspace_tensor.shape());
   return pybind11::make_tuple(workspace_shape, query_workspace_tensor.dtype());
 }
@@ -236,13 +225,16 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
   size_t num_segments = input_batch;                                                          \
   if (is_ragged) {                                                                            \
     auto cudnn_runtime_version = cudnnGetVersion();                                           \
-    if (cudnn_runtime_version >= 90300) {                                                     \
-      num_segments = input_batch * max_segments_per_seq;                                      \
-    } else {                                                                                  \
+    num_segments = input_batch * max_segments_per_seq;                                        \
+    bool use_runtime_num_segments_check = false;                                              \
+    if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_NUM_SEGMENTS")){                      \
+      use_runtime_num_segments_check = std::string(env_p) == "1";                             \
+    }                                                                                         \
+    if(cudnn_runtime_version < 90300 || use_runtime_num_segments_check){                      \
       size_t runtime_num_segments_q = nvte_get_runtime_num_segments(                          \
-          q_cu_seqlens, workspace, input_batch * q_max_seqlen, stream);                       \
+          q_cu_seqlens, workspace, input_batch * max_segments_per_seq, stream);               \
       size_t runtime_num_segments_kv = nvte_get_runtime_num_segments(                         \
-          kv_cu_seqlens, workspace, input_batch * kv_max_seqlen, stream);                     \
+          kv_cu_seqlens, workspace, input_batch * max_segments_per_seq, stream);              \
       NVTE_CHECK(runtime_num_segments_q == runtime_num_segments_kv);                          \
       NVTE_CHECK(runtime_num_segments_q <= input_batch * max_segments_per_seq);               \
       num_segments = runtime_num_segments_q;                                                  \
@@ -288,14 +280,10 @@ static void FusedAttnForwardImpl(
   /* Prepare RNG state */
   auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
   auto backend = nvte_get_fused_attn_backend(
-      static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
-      mask_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
-      qk_head_dim, v_head_dim, window_size_left, window_size_right);
-#ifndef USE_ROCM
+      is_training, static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout,
+      bias_type, mask_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen,
+      kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right);
   nvte_populate_rng_state_async(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
-#else
-  nvte_populate_rng_state_async(rng_state, seed, input_batch, attn_heads, q_max_seqlen, kv_max_seqlen, stream);
-#endif
 
   /* Auxiliary tensors (to be propagated to the backward pass later) */
   NVTETensorPack aux_output_tensors;
@@ -422,7 +410,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnForwardHandler, FusedAttnForwardFFI,
 
 pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
-    size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t qk_head_dim, 
+    size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t qk_head_dim,
     size_t v_head_dim, float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, NVTE_QKV_Layout qkv_layout, DType dtype, bool is_training,
     bool deterministic, size_t max_segments_per_seq, int64_t window_size_left,
@@ -518,6 +506,8 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     }
   }
 
+  nvte_tensor_pack_destroy(&aux_input_tensors);
+
   auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
   return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
@@ -527,7 +517,7 @@ static void FusedAttnBackwardImpl(
     void *output, void *doutput, void *q_cu_seqlens, void *kv_cu_seqlens, void *q_seq_offsets,
     void *k_seq_offsets, void *dq, void *dk, void *dv, void *dbias, void *workspace,
     size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
-    size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t qk_head_dim, 
+    size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t qk_head_dim,
     size_t v_head_dim, size_t max_segments_per_seq, size_t wkspace_size, float scaling_factor,
     float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
     NVTE_QKV_Layout qkv_layout, DType dtype, DType wkspace_dtype, bool is_training,
@@ -547,9 +537,9 @@ static void FusedAttnBackwardImpl(
   NVTETensorPack aux_input_tensors;
   nvte_tensor_pack_create(&aux_input_tensors);
   auto backend = nvte_get_fused_attn_backend(
-      static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
-      mask_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
-      qk_head_dim, v_head_dim, window_size_left, window_size_right);
+      is_training, static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout,
+      bias_type, mask_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen,
+      kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right);
   PrepareFusedAttnBackwardAuxTensors(&aux_input_tensors, input_batch, bias_batch, attn_heads,
                                      bias_heads, q_max_seqlen, kv_max_seqlen, dtype, backend,
                                      softmax_aux, rng_state, bias);

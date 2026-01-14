@@ -1,13 +1,11 @@
 /*************************************************************************
- * This file was modified for portability to AMDGPU
- * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
+#include "../extensions.h"
 #include "common.h"
-#include "extensions.h"
 #include "pybind.h"
 
 namespace {
@@ -26,12 +24,12 @@ void mha_fill(const transformer_engine::TensorWrapper &self, const at::Tensor &s
 
   NVTE_CHECK(fcd_size % block_size == 0, "input size not aligned to block size");
 
-  size_t element_size = transformer_engine::pytorch::typeToSize(self.dtype());
+  size_t element_size_bits = transformer_engine::pytorch::typeToNumBits(self.dtype());
   int32_t start_row = start_index.data_ptr<int32_t>()[0];
   void *base_ptr = static_cast<char *>(self.get_rowwise_data().data_ptr) +
-                   static_cast<size_t>(start_row) * fcd_size * element_size;
+                   static_cast<size_t>(start_row) * fcd_size * element_size_bits / 8;
   size_t num_rows_to_zero = max_tokens - start_row;
-  size_t total_bytes = num_rows_to_zero * fcd_size * element_size;
+  size_t total_bytes = num_rows_to_zero * fcd_size * element_size_bits / 8;
 
   NVTE_SCOPED_GIL_RELEASE(
       { nvte_memset(base_ptr, 0, total_bytes, at::cuda::getCurrentCUDAStream()); });
@@ -59,14 +57,14 @@ namespace transformer_engine::pytorch {
 
 // get the fused attention backend
 NVTE_Fused_Attn_Backend get_fused_attn_backend(
-    const DType q_dtype, const DType kv_dtype, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type attn_mask_type, float p_dropout, size_t num_attn_heads, size_t num_gqa_groups,
-    size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v,
-    int64_t window_size_left, int64_t window_size_right) {
+    bool is_training, const DType q_dtype, const DType kv_dtype, NVTE_QKV_Layout qkv_layout,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, float p_dropout, size_t num_attn_heads,
+    size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
+    size_t head_dim_v, int64_t window_size_left, int64_t window_size_right) {
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
-      static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout, bias_type,
-      attn_mask_type, p_dropout, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv,
-      head_dim_qk, head_dim_v, window_size_left, window_size_right);
+      is_training, static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout,
+      bias_type, attn_mask_type, p_dropout, num_attn_heads, num_gqa_groups, max_seqlen_q,
+      max_seqlen_kv, head_dim_qk, head_dim_v, window_size_left, window_size_right);
   return fused_attention_backend;
 }
 
@@ -174,16 +172,7 @@ std::vector<py::object> fused_attn_fwd(
   // extract rng seed and offset
   auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
       rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
-#ifndef USE_ROCM
   at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
-#else
-  const transformer_engine::Tensor *input_cu_seqlens_q = reinterpret_cast<const transformer_engine::Tensor*>(te_cu_seqlens_q.data());
-  size_t batch_size = input_cu_seqlens_q->data.shape[0]-1;
-  const transformer_engine::Tensor *input_Q = reinterpret_cast<const transformer_engine::Tensor*>(te_Q.data());
-  size_t ndim = input_Q->data.shape.size();
-  size_t num_attn_heads = input_Q->data.shape[ndim-2];
-  at::PhiloxCudaState philox_args = init_philox_state(gen, batch_size*num_attn_heads*max_seqlen_q*max_seqlen_kv);
-#endif
   auto rng_state = torch::empty({2}, options.dtype(torch::kInt64));
   unpack(philox_args, static_cast<int64_t *>(rng_state.data_ptr()));
   auto te_rng_state = makeTransformerEngineTensor(rng_state);
