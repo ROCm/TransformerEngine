@@ -427,6 +427,11 @@ void performTest(const TestParams& params) {
         GTEST_SKIP() << "FP8 GEMM with bias is not supported in current config";
       }
     }
+
+    if (use_mxfp8 && (isFp8Type(atype) || isFp8Type(btype)) && (params.transa != true || params.transb != false)) {
+      GTEST_SKIP() << "On gfx950, MXFP8 FP8/BF8 GEMM currently requires TN (SwizzleScale limitation).";
+    }
+
   }
   if (prop.major == 9 && prop.minor == 4) //gfx942 specific hipblasLt limitations
   {
