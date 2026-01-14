@@ -107,11 +107,9 @@ __global__ void compute_ref_kernel(
             b_is_colwise ? (b_idx / 32)
                          : (transb ? ((kk / 32) * n + jj) : (b_idx / 32));
 
-        const float a_byte = static_cast<float>(a_scale_inv_mxfp8[a_scale_idx]);
-        const float b_byte = static_cast<float>(b_scale_inv_mxfp8[b_scale_idx]);
-
-        a_scale_inv_val = exp2f(a_byte - 127.0f);
-        b_scale_inv_val = exp2f(b_byte - 127.0f);
+        // scale_inv is stored as an e8m0 biased exponent; convert to 2^(127-exp)
+        a_scale_inv_val = exp2f_rcp(a_scale_inv_mxfp8[a_scale_idx]);
+        b_scale_inv_val = exp2f_rcp(b_scale_inv_mxfp8[b_scale_idx]);
       }
 
       const float a_val = static_cast<float>(a_data[a_idx]);

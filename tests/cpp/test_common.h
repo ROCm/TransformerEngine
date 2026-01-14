@@ -446,7 +446,7 @@ inline fp8e8m0 float_to_e8m0(float val) {
   return exponent;
 }
 
-inline float exp2f_rcp(fp8e8m0 biased_exp) {
+__device__ __host__ __forceinline__ float exp2f_rcp(fp8e8m0 biased_exp) {
   return (biased_exp == 0) ? 1 : exp2f(FP32_EXPONENT_BIAS - static_cast<float>(biased_exp));
 }
 
