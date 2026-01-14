@@ -56,9 +56,6 @@ def te_quantize_triton(
     Quantizes the input tensor using a specified quantizer,
     with an option to utilize Triton-based `cast_transpose` for performance.
     """
-    from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
-    if isinstance(quantizer, Float8CurrentScalingQuantizer):
-      return tex.quantize(tensor, quantizer, output, noop_flag)
     input_tensor = tensor.contiguous()
     fake_tensor_type = input_tensor.dtype
     if not fake_tensor_type.is_floating_point:

@@ -284,6 +284,29 @@ if is_bf16_compatible():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 param_types_lean = [torch.bfloat16]
 
+# TODO: Enable config support in other backend(s) -- currently only the CK
+# backend is capable of supporting it.
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
+def test_gqa_mla_thd():
+    """
+    Explicitly test dk_or_dv_reduce_thd as part of TE's CK integration
+    post-processing for BWD FA with native padding support.
+    """
+    config = ModelConfig(8, 16, 4, 128, 128, 128, 0.0, "padding", "no_bias", head_dim_v=64)
+    qkv_layout = "thd_thd_thd"
+    dtype = torch.float16
+    _, _, fused_attn_backends = _get_attention_backends(
+        config,
+        qkv_dtype=dtype,
+        qkv_layout=qkv_layout,
+        window_size=config.window_size,
+        pad_between_seqs=True,
+    )
+    if FusedAttnBackend["CK"] not in fused_attn_backends:
+        pytest.skip("This test requires the CK fused attention backend.")
+
+    test_dot_product_attention(dtype, {"layout_1": config}, "layout_1", False, False, qkv_layout, False, True, False)
+
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
 def test_dot_product_mem_calc():
     """

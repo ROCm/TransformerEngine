@@ -167,3 +167,45 @@ def test_compute_scale_from_amax(amax_val, force_pow_2_scales, epsilon, fp8_dtyp
 
     torch.testing.assert_close(scale_triton, scale_ref[0], rtol=0.0, atol=0.0)
     torch.testing.assert_close(scale_inv_triton, scale_inv_ref[0], rtol=0.0, atol=0.0)
+
+
+@pytest.mark.parametrize("shape", ((1, 1), (7, 13), (256, 257), (1024, 1024), (2048, 4097)))
+@pytest.mark.parametrize("in_dtype", (torch.float16, torch.bfloat16))
+@pytest.mark.parametrize("out_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
+def test_amax_atomic_vs_two_stage(shape, in_dtype, out_dtype):
+    import os
+    device = "cuda"
+    input_tensor = fill_uniform(shape, dtype=in_dtype)
+
+    quantizer_atomic = Float8CurrentScalingQuantizer(fp8_dtype=out_dtype, device=device)
+    quantizer_2stage = Float8CurrentScalingQuantizer(fp8_dtype=out_dtype, device=device)
+
+    env_key = "NVTE_USE_ATOMIC_AMAX"
+    old_env_val = os.environ.get(env_key)
+
+    try:
+        # atomic amax
+        os.environ[env_key] = "1"
+
+        with fp8_autocast(enabled=True, fp8_recipe=recipe.Float8CurrentScaling()):
+            out_atomic = te_quantize_triton(input_tensor, quantizer=quantizer_atomic)
+
+        # 2-stage amax
+        os.environ[env_key] = "0"
+
+        with fp8_autocast(enabled=True, fp8_recipe=recipe.Float8CurrentScaling()):
+            out_2stage = te_quantize_triton(input_tensor, quantizer=quantizer_2stage)
+
+        te_compare_results(
+            out_atomic._get_quantizer().amax,
+            out_2stage._get_quantizer().amax,
+            atol=0.0, rtol=0.0,
+            msg='AMAX results do not match!',
+            use_torch_semantics=True
+        )
+    finally:
+        # Restore environment
+        if old_env_val is None:
+            os.environ.pop(env_key, None)
+        else:
+            os.environ[env_key] = old_env_val
