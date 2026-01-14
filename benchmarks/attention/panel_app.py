@@ -101,7 +101,7 @@ def make_plot(hue, indep, percentile, **kwargs):
             df[(df[indep]==idx) & (df[hue]==jdx)] = subset[subset.time < subset.time.quantile(percentile)]
 
     if not df.empty:
-        ax.set(xlabel=indep, ylabel='Time (ms)')
+        ax.set(xlabel=indep, ylabel='Time (μs)')
         sns.swarmplot(ax=ax, data=df, x=indep, y="time", hue=hue, dodge=True)
         return fig
 
