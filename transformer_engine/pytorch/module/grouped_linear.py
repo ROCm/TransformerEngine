@@ -89,7 +89,7 @@ class _GroupedLinear(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
 
         # Check if Triton kernel should be used
-        use_grouped_gemm_triton = IS_HIP_EXTENSION and os.getenv("USE_TRITON_GROUPED_GEMM", "0") == "1" and not fp8 and not fuse_wgrad_accumulation
+        use_grouped_gemm_triton = IS_HIP_EXTENSION and os.getenv("NVTE_USE_GROUPED_GEMM_TRITON", "0") == "1" and not fp8 and not fuse_wgrad_accumulation
         num_gemms = len(m_splits)
         weights = weights_and_biases[:num_gemms]
         biases = weights_and_biases[num_gemms:]

@@ -1,3 +1,8 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# License for AMD contributions = MIT. See LICENSE for more information
+
+"""Triton kernels for grouped GEMM"""
+
 import triton
 import triton.language as tl
 import torch
