@@ -58,9 +58,10 @@ def get_config(
         k_n_ratio = K / N if N > 0 else 1.0
         n_k_ratio = N / K if K > 0 else 1.0
         
-        # Very large M with small N (e.g., 3M+ x 1408)
-        if G <= 4:
+        # Prioritize small shapes first (before ratio checks)
+        if M < 10000 and (N <= 2048 or K <= 2048):
             key = "tiny_shapes"
+        # Very large M with small N (e.g., 3M+ x 1408)
         elif M >= 300000 and N <= 2048:
             key = "very_large_m"
         # Small shapes (M < 50k, small N)
@@ -85,9 +86,10 @@ def get_config(
     if bwd:
         k_n_ratio = K / N if N > 0 else 1.0
 
-        # Very large M with small N (e.g., 393k x 1408)
-        if G <= 4:
+        # Prioritize small shapes first (before ratio checks)
+        if M < 10000 and (N <= 2048 or K <= 2048):
             key = "tiny_shapes"
+        # Very large M with small N (e.g., 393k x 1408)
         elif M >= 300000 and N <= 2048:
             key = "very_large_m_small_n_bwd"
         # K >> N (e.g., 32768x16384x6144, 32768x14336x4096)
