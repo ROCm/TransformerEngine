@@ -4,6 +4,7 @@
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
+#include <fstream>
 #include <iostream>
 #include <cstdlib>
 #include <stdexcept>
@@ -119,6 +120,12 @@ void log_fwd_config(const char* func_name,
   }
 }
 
+void dump_fwd_timings(const char* dump_path, float average_runtime){
+  std::ofstream file;
+  file.open(std::string(dump_path) + "aiter-fwd-timings.txt", std::ios_base::app);
+  file << average_runtime << "\n";
+}
+
 hipError_t ck_attn_fwd(
   DType dtype,
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v, uint64_t bias_b, uint64_t bias_h,
@@ -177,9 +184,9 @@ hipError_t ck_attn_fwd(
     if (env_p != nullptr && std::string(env_p) == "1")
       ck_fused_attn_log_config = true;
   }
-
+  const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
   // print kernel name on verbose mode
-  ck_tile::stream_config stream_config{stream, false, ck_fused_attn_log_config};
+  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, ck_fused_attn_log_config};
 
   std::string data_type_str = get_data_type_str(dtype);
 
@@ -283,6 +290,9 @@ hipError_t ck_attn_fwd(
                                          uses_fwd_v3, 
                                          false,//has_sink
                                          how_v3_bf16_cvt);
+  if(dump_path){
+    dump_fwd_timings(dump_path, average_runtime);
+  }
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");
@@ -349,9 +359,9 @@ hipError_t ck_attn_varlen_fwd(
     if (env_p != nullptr && std::string(env_p) == "1")
       ck_fused_attn_log_config = true;
   }
-
+  const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
   // print kernel name on verbose mode
-  ck_tile::stream_config stream_config{stream, false, ck_fused_attn_log_config};
+  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, ck_fused_attn_log_config};
 
 
   std::string data_type_str = get_data_type_str(dtype);
@@ -468,6 +478,9 @@ hipError_t ck_attn_varlen_fwd(
     uses_fwd_v3, 
     false,//has_sink
     how_v3_bf16_cvt);
+  if(dump_path){
+    dump_fwd_timings(dump_path, average_runtime);
+  }
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");
