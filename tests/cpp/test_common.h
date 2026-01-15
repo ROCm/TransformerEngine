@@ -224,16 +224,6 @@ class Tensor {
     return reinterpret_cast<T *>(cpu_data_columnwise_.get());
   }
 
-  void *rowwise_scale_inv_dptr() const {
-    NVTE_CHECK(rowwise_, "Tensor does not have rowwise data!");
-    return tensor_.get_rowwise_scale_inv().data_ptr;
-  }
-
-  void *columnwise_scale_inv_dptr() const {
-    NVTE_CHECK(columnwise_, "Tensor does not have columnwise data!");
-    return tensor_.get_columnwise_scale_inv().data_ptr;
-  }
-
   float amax() const {
     if(amax_cpu_data_) {
       to_cpu();
@@ -446,7 +436,7 @@ inline fp8e8m0 float_to_e8m0(float val) {
   return exponent;
 }
 
-__device__ __host__ __forceinline__ float exp2f_rcp(fp8e8m0 biased_exp) {
+inline float exp2f_rcp(fp8e8m0 biased_exp) {
   return (biased_exp == 0) ? 1 : exp2f(FP32_EXPONENT_BIAS - static_cast<float>(biased_exp));
 }
 

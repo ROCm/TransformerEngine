@@ -203,7 +203,7 @@ static void run_reference(
   const B_Type* b_dev = static_cast<const B_Type*>(
       b_use_colwise ? B.columnwise_dptr() : B.rowwise_dptr());
 
-  // scaling inputs 
+  // scaling inputs
   float a_scale_inv_scalar = 1.0f;
   float b_scale_inv_scalar = 1.0f;
 
