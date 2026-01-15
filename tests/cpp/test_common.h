@@ -267,7 +267,7 @@ class Tensor {
   }
 
   template <typename T>
-  T *columnwise_cpu_scale_inv_ptr(){
+  T *columnwise_cpu_scale_inv_ptr() const {
     if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING){
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
     } else if (tensor_.scaling_mode() == NVTE_BLOCK_SCALING_1D || tensor_.scaling_mode() == NVTE_BLOCK_SCALING_2D) {

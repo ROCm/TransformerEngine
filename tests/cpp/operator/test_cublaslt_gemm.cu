@@ -75,8 +75,10 @@ __global__ void compute_ref_kernel(
   bool transb,
   bool is_fp8_output,
   bool a_is_colwise,
-  bool b_is_colwise)
+  bool b_is_colwise,
+  bool use_mxfp8)
 {
+  const size_t k_chunks = k / 32;
   const size_t jj = blockIdx.x * blockDim.x + threadIdx.x;
   const size_t ii = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -86,30 +88,33 @@ __global__ void compute_ref_kernel(
 
   if (in_range) {
     for (size_t kk = 0; kk < k; ++kk) {
-      // Indexing depends on which backing buffer we passed in
-      const size_t a_idx =
-          a_is_colwise ? (ii * k + kk)
-                       : (transa ? (ii * k + kk) : (kk * m + ii));
+      size_t a_idx = 0;
+      size_t b_idx = 0;
 
-      const size_t b_idx =
-          b_is_colwise ? (jj * k + kk)
-                       : (transb ? (kk * n + jj) : (jj * k + kk));
+      if (use_mxfp8) {
+        a_idx = transa ? (ii * k + kk) : (kk * m + ii);
+        b_idx = transb ? (kk * n + jj) : (jj * k + kk);
+      } else {
+        // Non-MXFP8 FP8 path may use explicit transpose buffers (cpu_rowwise_to_columnwise),
+        // so indexing depends on which backing buffer is passed in.
+        a_idx = a_is_colwise ? (ii * k + kk)
+                             : (transa ? (ii * k + kk) : (kk * m + ii));
+
+        b_idx = b_is_colwise ? (jj * k + kk)
+                             : (transb ? (kk * n + jj) : (jj * k + kk));
+      }
 
       float a_scale_inv_val = a_scale_inv_scalar;
       float b_scale_inv_val = b_scale_inv_scalar;
 
       if (a_scale_inv_mxfp8) {
-        const size_t a_scale_idx =
-            a_is_colwise ? (a_idx / 32)
-                         : (transa ? (a_idx / 32) : ((kk / 32) * m + ii));
+        const size_t kc = kk / 32;
 
-        const size_t b_scale_idx =
-            b_is_colwise ? (b_idx / 32)
-                         : (transb ? ((kk / 32) * n + jj) : (b_idx / 32));
+        const size_t a_scale_idx = ii * k_chunks + kc;
+        const size_t b_scale_idx = jj * k_chunks + kc;
 
-        // scale_inv is stored as an e8m0 biased exponent; convert to 2^(127-exp)
-        a_scale_inv_val = exp2f_rcp(a_scale_inv_mxfp8[a_scale_idx]);
-        b_scale_inv_val = exp2f_rcp(b_scale_inv_mxfp8[b_scale_idx]);
+        a_scale_inv_val = exp2f(a_scale_inv_mxfp8[a_scale_idx] - 127.0f);
+        b_scale_inv_val = exp2f(b_scale_inv_mxfp8[b_scale_idx] - 127.0f);
       }
 
       const float a_val = static_cast<float>(a_data[a_idx]);
@@ -183,6 +188,8 @@ static void run_reference(
 {
   const bool use_mxfp8 = (params.scaling_mode == NVTE_MXFP8_1D_SCALING);
 
+  const size_t k_chunks = params.k / 32;
+
   Gelu_Type* ref_gelu_host = (params.use_gelu ? ref_pre_gelu_out.get() : nullptr);
 
   const bool is_fp8_output = test::isFp8Type(test::TypeInfo<D_Type>::dtype);
@@ -203,14 +210,51 @@ static void run_reference(
   const fp8e8m0* a_scale_dev = nullptr;
   const fp8e8m0* b_scale_dev = nullptr;
 
-  if (use_mxfp8) {
-    a_scale_dev = params.transa
-        ? (const fp8e8m0*) A.rowwise_scale_inv_dptr()
-        : (const fp8e8m0*) A.columnwise_scale_inv_dptr();
+  // If MXFP8, pack scale_inv into tight [row][kc] buffers on host, then transfer to device
+  std::vector<fp8e8m0> a_scale_packed;
+  std::vector<fp8e8m0> b_scale_packed;
+  fp8e8m0* d_a_scale_packed = nullptr;
+  fp8e8m0* d_b_scale_packed = nullptr;
 
-    b_scale_dev = params.transb
-        ? (const fp8e8m0*) B.columnwise_scale_inv_dptr()
-        : (const fp8e8m0*) B.rowwise_scale_inv_dptr();
+  if (use_mxfp8) {
+    const fp8e8m0* a_scale_cpu = params.transa
+        ? A.rowwise_cpu_scale_inv_ptr<fp8e8m0>()
+        : A.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
+    const fp8e8m0* b_scale_cpu = params.transb
+        ? B.columnwise_cpu_scale_inv_ptr<fp8e8m0>()
+        : B.rowwise_cpu_scale_inv_ptr<fp8e8m0>();
+
+    // Pack into row-major [row][kc]:
+    //   A_packed[ii, kc] and B_packed[jj, kc]
+    a_scale_packed.resize(params.m * k_chunks);
+    b_scale_packed.resize(params.n * k_chunks);
+
+    for (size_t ii = 0; ii < params.m; ++ii) {
+      for (size_t kc = 0; kc < k_chunks; ++kc) {
+        const size_t src_idx = params.transa ? (ii * k_chunks + kc) : (kc * params.m + ii);
+        a_scale_packed[ii * k_chunks + kc] = a_scale_cpu[src_idx];
+      }
+    }
+
+    for (size_t jj = 0; jj < params.n; ++jj) {
+      for (size_t kc = 0; kc < k_chunks; ++kc) {
+        const size_t src_idx = params.transb ? (kc * params.n + jj) : (jj * k_chunks + kc);
+        b_scale_packed[jj * k_chunks + kc] = b_scale_cpu[src_idx];
+      }
+    }
+
+    NVTE_CHECK_CUDA(cudaMalloc(&d_a_scale_packed, a_scale_packed.size() * sizeof(fp8e8m0)));
+    NVTE_CHECK_CUDA(cudaMalloc(&d_b_scale_packed, b_scale_packed.size() * sizeof(fp8e8m0)));
+
+    NVTE_CHECK_CUDA(cudaMemcpy(d_a_scale_packed, a_scale_packed.data(),
+                               a_scale_packed.size() * sizeof(fp8e8m0),
+                               cudaMemcpyHostToDevice));
+    NVTE_CHECK_CUDA(cudaMemcpy(d_b_scale_packed, b_scale_packed.data(),
+                               b_scale_packed.size() * sizeof(fp8e8m0),
+                               cudaMemcpyHostToDevice));
+
+    a_scale_dev = d_a_scale_packed;
+    b_scale_dev = d_b_scale_packed;
   } else {
     a_scale_inv_scalar = A.rowwise_scale_inv();
     b_scale_inv_scalar = B.rowwise_scale_inv();
@@ -264,7 +308,8 @@ static void run_reference(
           params.transb,
           is_fp8_output,
           a_use_colwise,
-          b_use_colwise);
+          b_use_colwise,
+          use_mxfp8);
 
   NVTE_CHECK_CUDA(cudaGetLastError());
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
@@ -292,6 +337,10 @@ static void run_reference(
     NVTE_CHECK_CUDA(cudaFree(d_refGelu));
   if (d_refAmax)
     NVTE_CHECK_CUDA(cudaFree(d_refAmax));
+  if (d_a_scale_packed)
+    NVTE_CHECK_CUDA(cudaFree(d_a_scale_packed));
+  if (d_b_scale_packed)
+    NVTE_CHECK_CUDA(cudaFree(d_b_scale_packed));
 }
 
 
