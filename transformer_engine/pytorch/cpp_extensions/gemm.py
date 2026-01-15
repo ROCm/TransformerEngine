@@ -150,6 +150,7 @@ def general_grouped_gemm(
     use_split_accumulator: bool = False,
     D_dtype: Optional[tex.DType] = None,
     single_output=False,
+    **kwargs,
 ) -> Tuple[List[torch.Tensor], ...]:
     """
     TN layout Grouped GEMM with fp8 inputs.

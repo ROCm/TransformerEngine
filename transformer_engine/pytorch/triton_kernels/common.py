@@ -5,6 +5,7 @@ import torch
 import triton
 import triton.language as tl
 import transformer_engine_torch as tex
+from functools import lru_cache
 
 def is_cdna4():
     return triton.runtime.driver.active.get_current_target().arch == "gfx950"
@@ -98,3 +99,6 @@ def get_fp8_max(dtype: tex.DType):
     if dtype == tex.DType.kFloat8E5M2:
         return 57344.0
 
+@lru_cache(maxsize=1)
+def get_arch():
+    return triton.runtime.driver.active.get_current_target().arch
