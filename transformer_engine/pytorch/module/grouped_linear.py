@@ -82,6 +82,7 @@ class _GroupedLinear(torch.autograd.Function):
         module,
         skip_fp8_weight_update,
         save_original_input,
+        m_splits_tensor: Optional[torch.Tensor], # Optional GPU tensor for triton kernel
         *weights_and_biases,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
@@ -175,7 +176,13 @@ class _GroupedLinear(torch.autograd.Function):
 
         # Perform GEMM
         general_grouped_gemm_func = general_grouped_gemm_triton if use_grouped_gemm_triton else general_grouped_gemm
-        m_splits_tensor = torch.tensor(m_splits, dtype=torch.int32, device=device) if use_grouped_gemm_triton else m_splits
+        # Prepare m_splits for each backend
+        m_splits_for_kernel = m_splits
+        if use_grouped_gemm_triton:
+            # Triton kernel needs GPU tensor
+            if m_splits_tensor is None:
+                m_splits_tensor = torch.tensor(m_splits, dtype=torch.int32, device=device)
+            m_splits_for_kernel = m_splits_tensor
         _ = general_grouped_gemm_func(
             weights_fp8,
             inputmats,
@@ -183,7 +190,7 @@ class _GroupedLinear(torch.autograd.Function):
             activation_dtype,
             get_multi_stream_cublas_workspace(),
             single_output=True,
-            m_splits=m_splits_tensor,
+            m_splits=m_splits_for_kernel,
             bias=biases,
             use_bias=use_bias,
             use_split_accumulator=use_split_accumulator,
@@ -512,6 +519,7 @@ class _GroupedLinear(torch.autograd.Function):
             None,
             None,
             None,
+            None,
             *wgrad_list,
             *grad_biases,
         )
@@ -734,6 +742,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         inp: torch.Tensor,
         m_splits: List[int],
         is_first_microbatch: Optional[bool] = None,
+        m_splits_tensor: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply the linear transformation to the input.
@@ -826,6 +835,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 self,
                 skip_fp8_weight_update,
                 self.save_original_input,
+                m_splits_tensor,
                 *weight_tensors,
                 *bias_tensors,
             )

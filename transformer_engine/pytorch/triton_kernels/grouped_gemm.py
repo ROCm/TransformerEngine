@@ -8,13 +8,7 @@ import os.path
 import sys
 from pathlib import Path
 
-# Add local 3rdparty/aiter to path to import from local version instead of installed package
-_AITER_PATH = Path(__file__).parents[3] / "3rdparty" / "aiter"
-if str(_AITER_PATH) not in sys.path:
-    sys.path.insert(0, str(_AITER_PATH))
-
-from aiter.ops.triton.gmm import gmm, ptgmm, nptgmm
-from torch import Tensor
+from .gmm.gmm_wrapper import gmm, ptgmm, nptgmm
 import transformer_engine_torch as tex
 
 def general_grouped_gemm_triton(
