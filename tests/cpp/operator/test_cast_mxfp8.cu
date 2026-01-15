@@ -311,8 +311,13 @@ void performTest_x1(const ProcessingMethod processing_method,
                                            : output_c.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
 
     const size_t scale_diff_abs_tolerance = 0;
+#ifdef __HIP_PLATFORM_AMD__
     const double abs_tolerable_mismatches_limit = 1.0;
     const double rel_tolerable_mismatches_limit = 1.0e-4;
+#else
+    const double abs_tolerable_mismatches_limit = 0.0;
+    const double rel_tolerable_mismatches_limit = 0.0;
+#endif
 
     std::vector<size_t> mismatches_scales_indices;
     size_t mismatches_scales = 0;
@@ -491,8 +496,13 @@ void performTest_x2(const ProcessingMethod processing_method,
                                        scales_stride_colwise);
 
     const size_t scale_diff_abs_tolerance = 0;
+#ifdef __HIP_PLATFORM_AMD__
     const double abs_tolerable_mismatches_limit = 1.0;
     const double rel_tolerable_mismatches_limit = 1.0e-4;
+#else
+    const double abs_tolerable_mismatches_limit = 0.0;
+    const double rel_tolerable_mismatches_limit = 0.0;
+#endif
 
     std::vector<size_t> mismatches_scales_indices_rowwise;
     size_t mismatches_scales_rowwise = 0;

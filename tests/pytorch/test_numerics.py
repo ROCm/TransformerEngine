@@ -56,6 +56,8 @@ from transformer_engine.pytorch.utils import get_device_compute_capability
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 from utils import ModelConfig, reset_rng_states, get_available_attention_backends
+if IS_HIP_EXTENSION:
+    from utils import EnvVarCleaner
 
 
 # Only run FP8 tests on supported devices.
@@ -234,28 +236,6 @@ def assert_allclose(
 def reset_global_fp8_state():
     yield
     FP8GlobalStateManager.reset()
-
-
-class EnvVarCleaner:
-    def __init__(self, envs_):
-        self.envs = envs_
-        self.flags = {}
-        for env in self.envs:
-          if env in os.environ:
-            self.flags[env] = os.environ[env]
-    def __del__(self):
-      for env in self.envs:
-        if env in self.flags:
-            os.environ[env] = self.flags[env]
-        else:
-            os.environ.pop(env, None)
-
-
-@pytest.fixture
-def reset_test_envs():
-    env = EnvVarCleaner(["NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN",
-                         "NVTE_BIAS_GELU_NVFUSION"])
-    yield
 
 
 class TorchScaledMaskedSoftmax(nn.Module):
@@ -765,7 +745,6 @@ def _test_e2e_full_recompute(
 @pytest.mark.parametrize("recipe", fp8_recipes)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_reentrant", all_boolean)
-@pytest.mark.usefixtures("reset_test_envs")
 def test_gpt_full_activation_recompute(
     dtype, bs, model, fp8, recipe, fp8_model_params, use_reentrant
 ):
@@ -785,6 +764,8 @@ def test_gpt_full_activation_recompute(
     torch.compiler.reset() # avoid cache size limit overflow
 
     if not use_reentrant:
+        if IS_HIP_EXTENSION:
+            env = EnvVarCleaner(["NVTE_BIAS_GELU_NVFUSION"])
         # Non-reentrant checkpoint becomes non-deterministic with bias+GELU fusion
         os.environ["NVTE_BIAS_GELU_NVFUSION"] = "0"
 

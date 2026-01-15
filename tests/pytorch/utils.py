@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -200,6 +200,25 @@ def logging_context(highest_level=logging.WARNING):
         logging.disable(previous_level)
 
 
+if IS_HIP_EXTENSION:
+    class EnvVarCleaner:
+        def __init__(self, envs_):
+            print("PIV create envs:", envs_)
+            self.envs = envs_
+            self.flags = {}
+            for env in self.envs:
+              if env in os.environ:
+                self.flags[env] = os.environ[env]
+
+        def __del__(self):
+          print("PIV destroty envs:", self.envs)
+          for env in self.envs:
+            if env in self.flags:
+                os.environ[env] = self.flags[env]
+            else:
+                os.environ.pop(env, None)
+
+
 def get_available_attention_backends(
     config: ModelConfig,
     qkv_dtype: torch.dtype,
@@ -214,6 +233,9 @@ def get_available_attention_backends(
     inference_params: Optional[InferenceParams] = None,
 ) -> Tuple[List, List]:
     """Check for all available attention backends that support a model configuration"""
+    if IS_HIP_EXTENSION:
+        env = EnvVarCleaner(["NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN",
+                             "NVTE_FUSED_ATTN_AOTRITON", "NVTE_FUSED_ATTN_CK"])
 
     os.environ["NVTE_FLASH_ATTN"] = "1"
     os.environ["NVTE_FUSED_ATTN"] = "1"
@@ -301,8 +323,6 @@ def get_available_attention_backends(
                 available_backends, flash_attention_backend, fused_attention_backend = test()
                 if fused_attention_backend == FusedAttnBackend[i]:
                     fused_attn_backends.append(fused_attention_backend)
-        for i in backends.keys():
-            del os.environ["NVTE_FUSED_ATTN_"+backends[i]]
         available_backends[1] = len(fused_attn_backends) > 0
         return available_backends, flash_attention_backend, fused_attn_backends
 

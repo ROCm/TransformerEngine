@@ -5,7 +5,6 @@
 import warnings
 from functools import partial
 import pytest
-from packaging import version
 
 import jax
 import jax.numpy as jnp
@@ -135,7 +134,6 @@ class TestDistributedSoftmax:
                             f"{str(w)}"
                         )
 
-    @pytest.mark.skipif(version.parse(jax.__version__) < version.parse("0.5.0"), reason="shardy sharding requires JAX 0.5.0")
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
     @pytest.mark.parametrize("data_shape", [[32, 12, 128, 128], [8, 8, 1024, 1024]])
     @pytest.mark.parametrize(

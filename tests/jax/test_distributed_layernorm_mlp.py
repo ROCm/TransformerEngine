@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -38,7 +38,11 @@ from transformer_engine.jax.sharding import MeshResource
 from transformer_engine.jax.quantize import QuantizerFactory
 from transformer_engine.jax.cpp_extensions.misc import get_min_device_compute_capability
 
-from transformer_engine.jax.util import get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
+from transformer_engine.jax.util import (
+    is_hip_extension,
+    get_jnp_float8_e4m3_type,
+    get_jnp_float8_e5m2_type,
+)
 jnp_float8_e4m3_type = get_jnp_float8_e4m3_type()
 jnp_float8_e5m2_type = get_jnp_float8_e5m2_type()
 
@@ -232,7 +236,8 @@ class TestDistributedLayernormMLP:
                 multi_fwd, multi_grads = multi_jitter(*multi_inputs, *static_inputs, True)
         
         # TODO: skip cases with single fwd as nan/inf
-        if jnp.any(jnp.isnan(single_fwd)) or jnp.any(jnp.isinf(single_fwd)):
+        if is_hip_extension() and (jnp.any(jnp.isnan(single_fwd)) or
+                                   jnp.any(jnp.isinf(single_fwd))):
             pytest.skip("skip tests with nan/inf single fwd.")
             
         fwd_test_type = dtype if fp8_recipe is None else jnp_float8_e4m3_type
