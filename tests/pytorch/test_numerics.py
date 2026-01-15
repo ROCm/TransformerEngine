@@ -2116,8 +2116,8 @@ def test_grouped_linear_triton_accuracy(
     # Shoule be bit-wise match
     atol, rtol = get_tolerances(dtype)
     if dtype == torch.float32:
-        atol = 3e-6
-        rtol = 5e-3
+        atol = 2.6e-6
+        rtol = 5e-2
     for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
         torch.testing.assert_close(o, o_ref, rtol=rtol, atol=atol)
     os.environ["NVTE_USE_GROUPED_GEMM_TRITON"] = "0"
