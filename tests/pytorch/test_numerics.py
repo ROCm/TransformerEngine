@@ -2120,6 +2120,7 @@ def test_grouped_linear_triton_accuracy(
         rtol = 5e-3
     for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
         torch.testing.assert_close(o, o_ref, rtol=rtol, atol=atol)
+    os.environ["NVTE_USE_GROUPED_GEMM_TRITON"] = "0"
 
 
 @pytest.mark.parametrize("dtype", param_types, ids=str)
