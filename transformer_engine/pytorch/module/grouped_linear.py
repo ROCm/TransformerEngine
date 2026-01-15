@@ -51,6 +51,7 @@ from ..tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 __all__ = ["GroupedLinear"]
 
@@ -88,7 +89,7 @@ class _GroupedLinear(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
 
         # Check if Triton kernel should be used
-        use_grouped_gemm_triton = os.getenv("USE_TRITON_GROUPED_GEMM", "0") == "1" and not fp8
+        use_grouped_gemm_triton = IS_HIP_EXTENSION and os.getenv("USE_TRITON_GROUPED_GEMM", "0") == "1" and not fp8 and not fuse_wgrad_accumulation
         num_gemms = len(m_splits)
         weights = weights_and_biases[:num_gemms]
         biases = weights_and_biases[num_gemms:]
@@ -251,7 +252,7 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.device = device
             ctx.grad_output_quantizers = grad_output_quantizers
             ctx.m_splits = m_splits
-            ctx.m_splits_tensor = m_splits_tensor
+            ctx.m_splits_for_kernel = m_splits_for_kernel
             ctx.num_gemms = num_gemms
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
@@ -375,7 +376,7 @@ class _GroupedLinear(torch.autograd.Function):
                     get_multi_stream_cublas_workspace(),
                     single_output=True,
                     layout="NN",
-                    m_splits=ctx.m_splits_tensor,
+                    m_splits=ctx.m_splits_for_kernel,
                     grad=True,
                     use_split_accumulator=dgrad_gemm_use_split_accumulator,
                     m_splits_list=ctx.m_splits,
@@ -433,7 +434,7 @@ class _GroupedLinear(torch.autograd.Function):
                     workspaces=get_multi_stream_cublas_workspace(),
                     layout="NT",
                     grad=True,
-                    m_splits=ctx.m_splits_tensor,
+                    m_splits=ctx.m_splits_for_kernel,
                     use_bias=ctx.use_bias if grad_biases[0] is None else None,
                     bias=biases,
                     use_split_accumulator=wgrad_gemm_use_split_accumulator,

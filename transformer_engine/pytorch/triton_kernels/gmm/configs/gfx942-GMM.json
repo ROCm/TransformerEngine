@@ -9,6 +9,15 @@
             "num_warps": 8,
             "num_stages": 1
         },
+        "tiny_shapes": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_K": 64,
+            "BLOCK_SIZE_N": 64,
+            "GROUP_SIZE": 4,
+            "GRID_DIM": 304,
+            "num_warps": 4,
+            "num_stages": 1
+        },
         "k_heavy": {
             "BLOCK_SIZE_M": 256,
             "BLOCK_SIZE_K": 128,

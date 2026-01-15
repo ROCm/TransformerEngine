@@ -185,10 +185,6 @@ def gen_group_sizes(
         num_used_tokens + num_unused_tokens == M
     ), f"Unused + used tokens don't add up total tokens ({num_used_tokens} + {num_unused_tokens} != {M})."
 
-    if num_unused_tokens > 0:
-        print(
-            f"Group sizes generation: dropped {num_unused_tokens} token{'s' if num_unused_tokens > 1 else ''}.",
-        )
 
     if unused_experts_prob > 0:
         # Some experts may have zero tokens assigned to them.
@@ -211,11 +207,6 @@ def gen_group_sizes(
     assert (
         num_unused_experts + num_used_experts == G
     ), f"Unused + used experts don't add up total experts ({num_unused_experts} + {num_used_experts} != {G})."
-
-    if num_unused_experts > 0:
-        print(
-            f"Group sizes generation: dropped {num_unused_experts} expert{'s' if num_unused_experts > 1 else ''}.",
-        )
 
     group_sizes = torch.bincount(
         used_experts[
