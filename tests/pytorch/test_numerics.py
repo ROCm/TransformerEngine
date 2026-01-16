@@ -726,6 +726,13 @@ def test_gpt_full_activation_recompute(
         use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
         if fp8 and recipe.float8_current_scaling() and use_cast_transpose_triton:
             pytest.skip("Float8 Current Scaling unsupported for full recompute.")
+    if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5):
+        if (dtype == torch.bfloat16 
+            and not fp8
+            and not use_reentrant 
+            and recipe.float8_per_tensor_scaling() 
+            ):
+            pytest.skip("hipBLASLt does not provide suitable algorithms on MI350 for this config.")
 
     config = model_configs[model]
     torch.compiler.reset() # avoid cache size limit overflow
