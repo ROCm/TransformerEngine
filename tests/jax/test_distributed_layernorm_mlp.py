@@ -4,6 +4,8 @@
 #
 # See LICENSE for license information.
 from typing import Callable, Sequence, Union, Optional
+from packaging import version
+
 import pytest
 
 import jax
@@ -163,6 +165,12 @@ class TestDistributedLayernormMLP:
         use_shardy,
         with_jax_gemm,
     ):
+        if (
+            with_jax_gemm
+            and version.parse(jax.__version__) < version.parse("0.8.0")
+            and isinstance(fp8_recipe, recipe.MXFP8BlockScaling)
+        ):
+            pytest.skip("MXFP8 not supported by JAX GEMM yet.")
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
         device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
         layernorm_type = "rmsnorm"
@@ -327,6 +335,12 @@ class TestDistributedLayernormMLP:
         use_shardy,
         with_jax_gemm,
     ):
+        if (
+            with_jax_gemm
+            and version.parse(jax.__version__) < version.parse("0.8.0")
+            and isinstance(fp8_recipe, recipe.MXFP8BlockScaling)
+        ):
+            pytest.skip("MXFP8 not supported by JAX GEMM yet.")
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
         batch, seqlen, hidden_in = input_shape
         layernorm_type = "rmsnorm"

@@ -324,9 +324,9 @@ class NormFwdPrimitive(BasePrimitive):
         # Slice out the padding for mxfp8 - the ROCm kernel writes to strided
         # 2D positions, not contiguous.
         # For 1D MXFP8: allocated [padded_rows, padded_cols], kernel writes [:actual_rows, :actual_cols]
-        scale_inv = scale_inv[tuple(slice(0, dim) for dim in rowwise_scale_inv_shape)]
+        scale_inv = jax.lax.slice(scale_inv, [0] * scale_inv.ndim, rowwise_scale_inv_shape)
         if is_2x:
-            colwise_scale_inv = colwise_scale_inv[tuple(slice(0, dim) for dim in colwise_scale_inv_shape)]
+            colwise_scale_inv = jax.lax.slice(colwise_scale_inv, [0] * colwise_scale_inv.ndim, colwise_scale_inv_shape)
         return (
             out,
             colwise_out,
@@ -994,20 +994,6 @@ def layernorm_fwd(
         )
         colwise_scale_inv = rowwise_scale_inv
 
-    # cuDNN MXFP8 Norm does not support padding but we enforced padded scale inputs for nvte APIs.
-    # So here we need to slice out the zero tail and reshape it to the unpadded scale shape.
-    # The ScaledTensorFactory takes care of padding when creating the ScaledTensor
-    if quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING:
-        rowwise_unpadded_shape, colwise_unpadded_shape = quantizer.get_scale_shapes(
-            x.shape, is_padded=False
-        )
-        rowwise_scale_inv = rowwise_scale_inv.flatten()[
-            : reduce(operator.mul, rowwise_unpadded_shape)
-        ].reshape(rowwise_unpadded_shape)
-        colwise_scale_inv = colwise_scale_inv.flatten()[
-            : reduce(operator.mul, colwise_unpadded_shape)
-        ].reshape(colwise_unpadded_shape)
-
     scaled_tensor = ScaledTensorFactory.create(
         data=rowwise_casted_output,
         scale_inv=rowwise_scale_inv,
@@ -1193,20 +1179,6 @@ def rmsnorm_fwd(
             rowwise_casted_output, (-1, *range(rowwise_casted_output.ndim - 1))
         )
         colwise_scale_inv = rowwise_scale_inv
-
-    # cuDNN MXFP8 Norm does not support padding but we enforced padded scale inputs for nvte APIs.
-    # So here we need to slice out the zero tail and reshape it to the unpadded scale shape.
-    # The ScaledTensorFactory takes care of padding when creating the ScaledTensor
-    if quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING:
-        rowwise_unpadded_shape, colwise_unpadded_shape = quantizer.get_scale_shapes(
-            x.shape, is_padded=False
-        )
-        rowwise_scale_inv = rowwise_scale_inv.flatten()[
-            : reduce(operator.mul, rowwise_unpadded_shape)
-        ].reshape(rowwise_unpadded_shape)
-        colwise_scale_inv = colwise_scale_inv.flatten()[
-            : reduce(operator.mul, colwise_unpadded_shape)
-        ].reshape(colwise_unpadded_shape)
 
     scaled_tensor = ScaledTensorFactory.create(
         data=rowwise_casted_output,

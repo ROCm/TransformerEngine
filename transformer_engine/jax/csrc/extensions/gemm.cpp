@@ -360,11 +360,13 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   auto bias_shape = std::vector<size_t>{has_bias ? n : 0};
   const int arch = cuda::sm_arch();
 
+  #ifndef __HIP_PLATFORM_AMD__
   if (arch < 100 && is_fp8_gemm) {
     NVTE_CHECK(!lhs_is_trans && rhs_is_trans,
                "For SM90 or older archs and FP8 input, only NT (row-major) GEMM is supported, ",
                "got lhs_is_trans=", lhs_is_trans, ", rhs_is_trans=", rhs_is_trans);
   }
+  #endif
 
   // These lists are to keep the TensorWrapper objects alive
   std::vector<TensorWrapper> lhs_wrapper_list;

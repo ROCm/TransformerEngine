@@ -11,6 +11,7 @@ from jax import jit, value_and_grad
 from functools import reduce
 from typing import Union
 import operator
+from packaging import version
 
 from utils import (
     assert_allclose,
@@ -96,7 +97,7 @@ def assert_bitwise_scaled_tensors(a: ScaledTensor, b: ScaledTensor):
             assert_allclose(a.scale_inv, b.scale_inv, dtype=a.dq_dtype)
         elif a.scaling_mode == ScalingMode.MXFP8_1D_SCALING:
             # Compare MXFP8 scales as uint8
-            assert_allclose(a.scale_inv.astype(jnp.uint8), b.scale_inv.astype(jnp.uint8))
+            assert_allclose(a.scale_inv.view(jnp.uint8), b.scale_inv.view(jnp.uint8))
         else:
             raise ValueError(f"Unsupported scaling mode {a.scaling_mode}")
         assert_allclose(a.data, b.data)
@@ -874,6 +875,22 @@ def _use_jax_fp8_gemm(enabled=False):
     elif "NVTE_JAX_CUSTOM_CALLS_RE" in os.environ:
         os.environ.pop("NVTE_JAX_CUSTOM_CALLS_RE")
 
+def _check_mxfp8_gemm_support(
+    with_jax_gemm,
+    m, n, k,
+    x_qtype=jnp_float8_e4m3_type,
+    w_qtype=jnp_float8_e4m3_type
+):
+    if not with_jax_gemm:
+        if jnp_float8_e5m2_type in (x_qtype, w_qtype):
+            pytest.skip("Float8E5M2 is not recommended for MXFP8 GEMM.")
+        if (m % 16 != 0) or (n % 16 != 0) or (k % 128 != 0):
+            pytest.skip(
+                f"Input shape {(m, k)} x {(k, n)} is not supported by MXFP8 GEMM."
+            )
+    else:
+        if version.parse(jax.__version__) < version.parse("0.8.0"):
+            pytest.skip("MXFP8 not supported by JAX GEMM yet.")
 
 class TestDense:
     def _ref_gemm_with_jnp_dot(self, a, b, data_layout):
@@ -919,12 +936,8 @@ class TestDense:
     @pytest_parametrize_wrapper("data_layout", ["TN", "NT", "NN", "TT"])
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_gemm_fp8(self, m, n, k, x_qtype, w_qtype, scaling_mode, data_layout, with_jax_gemm):
-        if (
-            not with_jax_gemm
-            and scaling_mode.is_1d_block_scaling()
-            and jnp_float8_e5m2_type in (x_qtype, w_qtype)
-        ):
-            pytest.skip("Float8E5M2 is not recommended for MXFP8 GEMM.")
+        if scaling_mode.is_1d_block_scaling():
+            _check_mxfp8_gemm_support(with_jax_gemm, m, n, k, x_qtype, w_qtype)
 
         x, w, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)
         quantizer_set = QuantizerFactory.create_set(
@@ -981,6 +994,8 @@ class TestDense:
     def test_dense_grad_fp8(self, m, n, k, scaling_mode, with_jax_gemm):
         data_layout = "NN"
         x, w, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)
+        if scaling_mode.is_1d_block_scaling():
+            _check_mxfp8_gemm_support(with_jax_gemm, m, n, k)
 
         key = jax.random.PRNGKey(1)
         bias = jax.random.uniform(key, n, dtype=jnp.bfloat16)
@@ -1054,6 +1069,8 @@ class TestFusedDense:
         """
         Test layernorm_dense VJP Rule
         """
+        if scaling_mode.is_1d_block_scaling():
+            _check_mxfp8_gemm_support(with_jax_gemm, m, n, k)
         # zero_centered_gamma is already tested in TestNorm
         zero_centered_gamma = False
         eps = 1e-6
@@ -1137,6 +1154,8 @@ class TestFusedDense:
         """
         Test layernorm_mlp VJP Rule
         """
+        if scaling_mode.is_1d_block_scaling():
+            _check_mxfp8_gemm_support(with_jax_gemm, m, n, k)
         # zero_centered_gamma is already tested in TestNorm
         zero_centered_gamma = False
         eps = 1e-6
@@ -1344,6 +1363,9 @@ class TestGroupedDense:
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
     @pytest_parametrize_wrapper("layout", ["NN"])
     def test_grouped_gemm_fp8(self, fwd_bwd_dtype, scaling_mode, input_shape, layout):
+        if scaling_mode.is_1d_block_scaling():
+            pytest.skip("MXFP8 grouped GEMM is not fully supported yet in ROCm.")
+
         fwd_dtype, bwd_dtype = fwd_bwd_dtype
         quantizer_set = QuantizerFactory.create_set(
             scaling_mode=scaling_mode,
@@ -1429,6 +1451,9 @@ class TestGroupedDense:
     )
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
     def test_grouped_dense_grad_fp8(self, fwd_bwd_dtype, scaling_mode, input_shape):
+        if scaling_mode.is_1d_block_scaling():
+            pytest.skip("MXFP8 grouped GEMM is not fully supported yet in ROCm.")
+
         fwd_dtype, bwd_dtype = fwd_bwd_dtype
         dtype = jnp.bfloat16
         x, kernel, group_sizes, contracting_dims, bias = self._generate_grouped_dense_input(
