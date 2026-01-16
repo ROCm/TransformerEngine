@@ -872,10 +872,10 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   }
 }
 
-uint32_t nvte_get_runtime_num_segments(NVTETensor cu_seqlen, NVTETensor workspace, size_t len,
+uint32_t nvte_get_runtime_num_segments(NVTETensor cu_seqlen, NVTETensor workspace, size_t max_batch_size,
                                        cudaStream_t stream) {
   NVTE_API_CALL(nvte_get_runtime_num_segments);
-  return transformer_engine::fused_attn_rocm::GetRuntimeNumSegments(cu_seqlen, workspace, len, stream);
+  return transformer_engine::fused_attn_rocm::GetRuntimeNumSegments(cu_seqlen, workspace, max_batch_size, stream);
 }
 
 void nvte_populate_rng_state_async(NVTETensor rng_state_dst, const NVTETensor seed,
