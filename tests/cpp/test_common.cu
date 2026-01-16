@@ -822,21 +822,71 @@ void generate_data_uniformly(T* data, const size_t size, std::mt19937* gen) {
 #endif
 }
 
+#ifdef __HIP_PLATFORM_AMD__
+#include <rocrand/rocrand.h>
+
+template <typename T>
+__global__ void affine_transform_and_cast(float* __restrict__ in, T* __restrict__ out, size_t n, float lo, float hi) {
+  // Clamp values in *in* to [lo, hi] and cast to type *T* for *out*.
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx < n) {
+    in[idx] = lo + (hi - lo) * in[idx];
+    out[idx] = static_cast<T>(in[idx]);
+  }
+}
+
+void fillUniformDevice(Tensor* t) {
+  void* dst = t->rowwise() ? t->rowwise_dptr() : t->columnwise_dptr();
+  const auto shape = t->rowwise() ? t->rowwise_shape() : t->columnwise_shape();
+  const size_t N = product(shape);
+
+  float* tmp = nullptr;
+  hipMalloc(&tmp, N * sizeof(float));
+
+  // per-tensor deterministic seed
+  const unsigned long long seed = static_cast<unsigned long long>(t->gen()());
+  rocrand_generator gen;
+  rocrand_create_generator(&gen, ROCRAND_RNG_PSEUDO_PHILOX4_32_10);
+  rocrand_set_seed(gen, seed);
+
+  rocrand_generate_uniform(gen, tmp, N);
+
+  // map to [-2, 1] (like generate_data_uniformly) and cast into tensor dtype
+  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(t->dtype(), T, {
+    dim3 block(256);
+    dim3 grid((N + block.x - 1) / block.x);
+    hipLaunchKernelGGL(affine_transform_and_cast<T>, grid, block, 0, 0,
+                       tmp, reinterpret_cast<T*>(dst), N, -2.0f, 1.0f);
+  });
+
+  rocrand_destroy_generator(gen);
+  hipFree(tmp);
+}
+#endif
+
 void fillUniform(Tensor *t) {
   if (t->rowwise()) {
     const size_t size = product(t->rowwise_shape());
     TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(t->dtype(), T,
       {
+#ifdef __HIP_PLATFORM_AMD__
+        fillUniformDevice(t);
+#else
         T *data = t->rowwise_cpu_dptr<T>();
         generate_data_uniformly(data, size, &(t->gen()));
+#endif
       }
     );
   } else {
     const size_t size = product(t->columnwise_shape());
     TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(t->dtype(), T,
       {
+#ifdef __HIP_PLATFORM_AMD__
+        fillUniformDevice(t);
+#else
         T *data = t->columnwise_cpu_dptr<T>();
         generate_data_uniformly(data, size, &(t->gen()));
+#endif
       }
     );
   }
