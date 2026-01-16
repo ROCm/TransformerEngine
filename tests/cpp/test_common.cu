@@ -783,7 +783,6 @@ std::pair<double, double> getTolerances(const DType type) {
 template <typename T>
 void generate_data_uniformly(T* data, const size_t size, std::mt19937* gen) {
 #ifdef __HIP_PLATFORM_AMD__
-  // TODO: Introduce a parallel RNG library (Random123, PCG, rocRAND)
   std::uniform_real_distribution<> dis(-2.0, 1.0);
   for (int i = 0; i < size; i++) {
     data[i] = static_cast<T>(dis(*gen));
@@ -851,7 +850,7 @@ void fillUniformDevice(Tensor* t) {
 
   rocrand_generate_uniform(gen, tmp, N);
 
-  // map to [-2, 1] (like generate_data_uniformly) and cast into tensor dtype
+  // map to [-2.0, 1.0] (like generate_data_uniformly) and cast into tensor dtype
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(t->dtype(), T, {
     dim3 block(256);
     dim3 grid((N + block.x - 1) / block.x);
