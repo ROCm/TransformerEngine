@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -177,14 +177,18 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   const int sm_count = transformer_engine::cuda::sm_count(device_id);
   int num_math_sms = sm_count - transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", sm_count);
 
+#ifndef USE_ROCM
   // Keep the swizzled scaling factor tensors alive during the GEMM.
   std::vector<std::optional<at::Tensor>> swizzled_scale_inverses_list;
+#endif
   auto main_stream = at::cuda::getCurrentCUDAStream();
   if (A_tensor.numel() != 0 && B_tensor.numel() != 0) {
+#ifndef USE_ROCM
     // Optionally swizzle the scaling factors
     swizzled_scale_inverses_list.emplace_back(std::move(swizzle_scaling_factors(A_tensor, transa)));
     swizzled_scale_inverses_list.emplace_back(
         std::move(swizzle_scaling_factors(B_tensor, !transb)));
+#endif
 
     if (comm_overlap) {
 #ifndef USE_ROCM
@@ -334,8 +338,10 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
       te_pre_gelu_out_vector, te_workspace_vector;
   std::vector<TensorWrapper> wrappers;
   std::vector<at::Tensor> D_vectors;
+#ifndef USE_ROCM
   // Keep the swizzled scaling factor tensors alive during the GEMMs.
   std::vector<std::optional<at::Tensor>> swizzled_scale_inverses_list;
+#endif
 
   auto none = py::none();
 
@@ -402,9 +408,11 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
       continue;
     }
 
+#ifndef USE_ROCM
     // Optionally swizzle the scaling factors
     swizzled_scale_inverses_list.emplace_back(std::move(swizzle_scaling_factors(te_A, transa)));
     swizzled_scale_inverses_list.emplace_back(std::move(swizzle_scaling_factors(te_B, !transb)));
+#endif
 
     auto te_D = makeTransformerEngineTensor(out_tensor);
     auto te_bias = makeTransformerEngineTensor(bias[i]);
