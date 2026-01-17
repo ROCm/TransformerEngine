@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -215,14 +215,18 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   const int sm_count = transformer_engine::cuda::sm_count(device_id);
   int num_math_sms = sm_count - transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", sm_count);
 
+#ifndef USE_ROCM
   // Keep the swizzled scaling factor tensors alive during the GEMM.
   std::vector<std::optional<at::Tensor>> swizzled_scale_inverses_list;
+#endif
   auto main_stream = at::cuda::getCurrentCUDAStream();
   if (A_tensor.numel() != 0 && B_tensor.numel() != 0) {
+#ifndef USE_ROCM
     // Optionally swizzle the scaling factors
     swizzled_scale_inverses_list.emplace_back(std::move(swizzle_scaling_factors(A_tensor, transa)));
     swizzled_scale_inverses_list.emplace_back(
         std::move(swizzle_scaling_factors(B_tensor, !transb)));
+#endif
 
     if (comm_overlap) {
 #ifndef USE_ROCM
@@ -469,10 +473,12 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     wrappers.emplace_back(std::move(te_pre_gelu_out));
   }
 
+#ifndef USE_ROCM
   // Optionally swizzle the scaling factors
   // Keep the swizzled scaling factor tensors alive during the GEMMs.
   auto swizzled_scale_inv_A = multi_tensor_swizzle_scaling_factors(te_A_wrappers, transa);
   auto swizzled_scale_inv_B = multi_tensor_swizzle_scaling_factors(te_B_wrappers, !transb);
+#endif
 
   for (size_t i = 0; i < workspace.size(); i++) {
     auto wsp = makeTransformerEngineTensor(workspace[i].data_ptr(),

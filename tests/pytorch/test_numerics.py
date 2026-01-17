@@ -636,9 +636,6 @@ def _test_e2e_selective_recompute(
 def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, recipe, fp8_model_params):
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
-    if (IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5) and
-        dtype in (torch.float16, torch.bfloat16) and rocm_attn_backend()[2]):
-        pytest.skip("Test is not supported on GFX950 with current parameters and CK fused attention backend and non-zero dropout.")
 
     config = model_configs[model]
 
@@ -757,8 +754,6 @@ def test_gpt_full_activation_recompute(
             and recipe.float8_per_tensor_scaling()
             ):
             pytest.skip("hipBLASLt does not provide suitable algorithms on GFX950 for this config.")
-        if (dtype in (torch.float16, torch.bfloat16) and rocm_attn_backend()[2]):
-            pytest.skip("Test is not supported on GFX950 with current parameters and CK fused attention backend and non-zero dropout.")
 
     config = model_configs[model]
     torch.compiler.reset() # avoid cache size limit overflow
@@ -912,9 +907,6 @@ def test_gpt_checkpointing(dtype, bs, model):
     config = model_configs[model]
     if not is_fused_attn_available(config, dtype, deterministic=True):
         pytest.skip("No attention backend available.")
-    if (IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5) and
-        dtype in (torch.float16, torch.bfloat16) and rocm_attn_backend()[2]):
-        pytest.skip("Test is not supported on GFX950 with current parameters and CK fused attention backend and non-zero dropout.")
 
     outputs = _test_e2e_checkpointing(bs, dtype, config, checkpoint=False)
     outputs_checkpoint = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
@@ -2675,9 +2667,6 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params, recipe):
 def test_gpt_fp8_parameters(dtype, bs, model, recipe):
     if NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
-    if (IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5) and
-        dtype in (torch.float16, torch.bfloat16) and rocm_attn_backend()[2]):
-        pytest.skip("Test is not supported on GFX950 with current parameters and CK fused attention backend and non-zero dropout.")
 
     config = model_configs[model]
 
@@ -2966,7 +2955,9 @@ def test_fp8gemm_with_unfused_quantization(N, datatype, input_quantizer, out_qua
     if is_mxfp8_needed and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
     if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5):
-        if isinstance(out_quantizer, Float8Quantizer):
+        if isinstance(input_quantizer, MXFP8Quantizer):
+            N = math.ceil(N / 128) * 128 #hipBlasLt supports K which is multiple of 128 for MXFP8
+        if not is_mxfp8_needed and isinstance(out_quantizer, Float8Quantizer):
             pytest.skip("hipBLASLt does not provide suitable algorithms on GFX950 for this config.")
     inp_fp8 = input_quantizer(torch.randn(N, N, device="cuda", dtype=datatype))
     weight_fp8 = input_quantizer(torch.randn(N, N, device="cuda", dtype=datatype))

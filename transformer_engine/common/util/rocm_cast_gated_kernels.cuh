@@ -170,8 +170,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
       float act_elt = static_cast<float>(in_act_sh[shmem_idx]);
       float gate_elt = static_cast<float>(in_gate_sh[shmem_idx]);
-      float after_act_elt;
-      float after_gate_elt;
 
       if constexpr (IS_DGATED) {
         float grad_elt = static_cast<float>(in_grad_sh[shmem_idx]);
@@ -187,27 +185,24 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           act_x = ActOP(x, {});
           dact_x = DActOP(x, {});
         }
-        after_act_elt = dact_x * grad_elt * gate_elt;
-        after_gate_elt = act_x * grad_elt;
-        after_dact_reg[stage] = after_act_elt;
-        after_dgate_reg[stage] = after_gate_elt;
+        after_dact_reg[stage] = dact_x * grad_elt * gate_elt;
+        after_dgate_reg[stage] = act_x * grad_elt;
       } else {
-        after_act_elt = ActOP(act_elt, {}) * gate_elt;
-        after_dact_reg[stage] = after_act_elt;
+        after_dact_reg[stage] = ActOP(act_elt, {}) * gate_elt;
       }
 
       // Numerical truncation: downcast to IType (BF16/FP16) and upcast back to FP32
       if constexpr (!std::is_same_v<IType, float>) {
-        after_act_elt = static_cast<float>(static_cast<IType>(after_act_elt));
+        after_dact_reg[stage] = static_cast<float>(static_cast<IType>(after_dact_reg[stage]));
         if constexpr (IS_DGATED) {
-          after_gate_elt = static_cast<float>(static_cast<IType>(after_gate_elt));
+          after_dgate_reg[stage] = static_cast<float>(static_cast<IType>(after_dgate_reg[stage]));
         }
       }
 
       if constexpr (USE_ROWWISE_SCALING) {
         if constexpr (IS_DGATED) {
           // dgate
-          float amax = fabsf(after_gate_elt);
+          float amax = fabsf(after_dgate_reg[stage]);
           const float mx_block_X_amax = warp_reduce_max_broadcast(amax);
           const e8m0_t biased_exponent_X =
               ptx::float_to_e8m0(mx_block_X_amax * Quantized_Limits<OType>::max_norm_rcp);
@@ -227,7 +222,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             scales_rowwise[scale_idx] = biased_exponent_X;
           }
         }
-        float amax = fabsf(after_act_elt);
+        float amax = fabsf(after_dact_reg[stage]);
         const float mx_block_X_amax = warp_reduce_max_broadcast(amax);
         const e8m0_t biased_exponent_X =
             ptx::float_to_e8m0(mx_block_X_amax * Quantized_Limits<OType>::max_norm_rcp);
@@ -250,10 +245,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       if constexpr (USE_COLWISE_SCALING) {
         __builtin_assume(thread_Y_mx_block_amax >= 0);
         __builtin_assume(thread_Y_mx_block_amax_gate >= 0);
-        thread_Y_mx_block_amax = fmaxf(thread_Y_mx_block_amax, fabsf(after_act_elt));
+        thread_Y_mx_block_amax = fmaxf(thread_Y_mx_block_amax, fabsf(after_dact_reg[stage]));
         if constexpr (IS_DGATED) {
           thread_Y_mx_block_amax_gate =
-              fmaxf(thread_Y_mx_block_amax_gate, fabsf(after_gate_elt));
+              fmaxf(thread_Y_mx_block_amax_gate, fabsf(after_dgate_reg[stage]));
         }
       }
     }

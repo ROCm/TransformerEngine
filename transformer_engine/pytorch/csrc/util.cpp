@@ -1,8 +1,12 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
+
+#ifndef USE_ROCM
 
 #include "util.h"
 
@@ -170,3 +174,5 @@ std::optional<at::Tensor> multi_tensor_swizzle_scaling_factors(
 
   return buffer;
 }
+
+#endif  //!USE_ROCM
