@@ -33,6 +33,4 @@ std::optional<at::Tensor> multi_tensor_swizzle_scaling_factors(
 
 #endif  //!USE_ROCM
 
-#endif  //!USE_ROCM
-
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_UTIL_H_
