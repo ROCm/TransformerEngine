@@ -28,12 +28,33 @@ __global__ void __launch_bounds__(1)
 
 }  // namespace
 
+#ifndef __HIP_PLATFORM_AMD__
+cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
+  using namespace transformer_engine;
+  switch (t) {
+    case DType::kFloat16:
+      return CUDA_R_16F;
+    case DType::kFloat32:
+      return CUDA_R_32F;
+    case DType::kBFloat16:
+      return CUDA_R_16BF;
+    case DType::kFloat8E4M3:
+      return CUDA_R_8F_E4M3;
+    case DType::kFloat8E5M2:
+      return CUDA_R_8F_E5M2;
+    default:
+      NVTE_ERROR("Invalid type");
+  }
+}
+#endif
+
 void update_tensor_scale_inv(Tensor *t, cudaStream_t stream) {
   if (is_fp8_dtype(t->data.dtype) && is_tensor_scaling(t->scaling_mode)) {
     NVTE_CHECK(t->scale_inv.dptr != nullptr, "Tensor should have allocated scale_inv.");
     update_tensor_scale_inv_kernel<<<1, 1, 0, stream>>>(
         reinterpret_cast<const float *>(t->scale.dptr),
         reinterpret_cast<float *>(t->scale_inv.dptr));
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
@@ -75,6 +96,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     dim3 grid(numBlocks, 1, 1);                                                              \
     memset_kernel<vectorizedType>                                                            \
         <<<grid, kThreadsPerBlock, 0, stream>>>(ptr, value, size_in_bytes);                  \
+    NVTE_CHECK_CUDA(cudaGetLastError());                                                     \
     return;                                                                                  \
   }
 
@@ -85,7 +107,7 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
 
   if (size_in_bytes > 4096) {
     // Use cudaMemsetAsync for larger sizes.
-    cudaMemsetAsync(ptr, value, size_in_bytes, stream);
+    NVTE_CHECK_CUDA(cudaMemsetAsync(ptr, value, size_in_bytes, stream));
     return;
   }
 
@@ -96,7 +118,11 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
 }
 }  // extern "C"
 
+#ifndef __HIP_PLATFORM_AMD__
 void checkCuDriverContext(CUstream stream) {
+  // Ensure the thread's "current" CUDA context is set.
+  cuda_driver::ensure_context_exists();
+
   CUcontext ctx;
   const CUresult driver_status = cuda_driver::call("cuStreamGetCtx", stream, &ctx);
   switch (driver_status) {
@@ -117,7 +143,6 @@ void checkCuDriverContext(CUstream stream) {
   }
 }
 
-#ifndef __HIP_PLATFORM_AMD__
 CUtensorMapDataType get_CUtensorMapDataType(DType dtype) {
   static const std::unordered_map<DType, CUtensorMapDataType> dtypeMapping = []() {
     std::unordered_map<DType, CUtensorMapDataType> typeMapping = {
@@ -165,10 +190,10 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
   void *dataPtr = reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(tensor.dptr) +
                                            (offset_elems * type_num_bits) / 8);
 
-  NVTE_CHECK(is_aligned_ptr(dataPtr, TMA_gmem_alignment),
+  NVTE_CHECK(is_aligned_ptr(dataPtr, TMA_GMEM_ALIGNMENT),
              "Tensor data pointer must be 16B aligned");
 
-  const int TMA_needed_size = (TMA_gmem_alignment * 8) / type_num_bits;
+  const int TMA_needed_size = (TMA_GMEM_ALIGNMENT * 8) / type_num_bits;
   NVTE_CHECK(globalX % TMA_needed_size == 0, "Shape not supported. For ", type_num_bits,
              "-bit data type, expected multiple of ", TMA_needed_size, ", got ", globalX);
 

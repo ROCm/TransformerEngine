@@ -49,7 +49,7 @@ pyTorch
 
 .. autoapifunction:: transformer_engine.pytorch.moe_permute
 
-.. autoapifunction:: transformer_engine.pytorch.moe_permute_with_probs  
+.. autoapifunction:: transformer_engine.pytorch.moe_permute_with_probs
 
 .. autoapifunction:: transformer_engine.pytorch.moe_unpermute
 
@@ -63,3 +63,6 @@ pyTorch
 
 .. autoapifunction:: transformer_engine.pytorch.destroy_ub
 .. autoapifunction:: transformer_engine.pytorch.moe_sort_chunks_by_index
+
+.. autoapiclass:: transformer_engine.pytorch.UserBufferQuantizationMode
+  :members: FP8, NONE

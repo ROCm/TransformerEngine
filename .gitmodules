@@ -20,3 +20,6 @@
 [submodule "examples/pytorch/nanogpt"]
 	path = examples/pytorch/nanogpt
 	url = https://github.com/floraamd/nanoGPTwTE.git
+[submodule "3rdparty/cutlass"]
+	path = 3rdparty/cutlass
+	url = https://github.com/NVIDIA/cutlass.git

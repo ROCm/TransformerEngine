@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -44,6 +44,7 @@ from transformer_engine.jax.cpp_extensions import FusedAttnHelper
 from transformer_engine_jax import (
     NVTE_Fused_Attn_Backend,
     get_cudnn_version,
+    get_device_compute_capability,
 )
 
 from distributed_test_base import assert_equal_collectives
@@ -352,6 +353,14 @@ class FusedAttnRunner:
                 "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
             )
 
+        if (
+            get_device_compute_capability(0) == 100
+            and self.dropout_prob == 0.1
+            and self.attn_bias_type is not AttnBiasType.NO_BIAS
+        ):
+            pytest.skip(
+                "For sm100, bprop kernel support for dropout + determinism (bias) is not supported"
+            )
         # Test the MLA case where head dims for qk differ from head dims for v, only if the tensors
         # are provided in BSHD_BSHD_BSHD or THD_THD_THD formats
         if self.head_dim_qk != self.head_dim_v and not self.qkv_layout.is_separate():
@@ -388,8 +397,12 @@ class FusedAttnRunner:
             self.head_dim_v,
             (-1, -1) if self.window_size is None else self.window_size,
         ).get_fused_attn_backend()
-        if self.backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
-            pytest.skip("Unsupported inputs combination or device compute capability.")
+        if is_hip_extension():
+            if self.backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+                pytest.skip("Unsupported inputs combination or device compute capability.")
+        else:
+            if self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
+                pytest.skip("Unsupported inputs combination or device compute capability.")
 
         if (
             self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS
@@ -413,7 +426,7 @@ class FusedAttnRunner:
         self.mesh = Mesh(self.devices, self.mesh_axes)
         self.dp_size = self.mesh.shape.get(self.mesh_resource.dp_resource, 1)
         self.cp_size = self.mesh.shape.get(self.mesh_resource.cp_resource, 1)
-        self.tp_size = self.mesh.shape.get(self.mesh_resource.tp_resource, 1)
+        self.tp_size = self.mesh.shape.get(self.mesh_resource.tpsp_resource, 1)
 
         # only support new-style RNGs on AMD hardware since they will crash otherwise
         if is_hip_extension() and not self.use_old_rng:
@@ -651,7 +664,7 @@ class FusedAttnRunner:
         self.qkvo_psec = PartitionSpec(
             self.mesh_resource.dp_resource,
             self.mesh_resource.cp_resource,
-            self.mesh_resource.tp_resource,
+            self.mesh_resource.tpsp_resource,
             None,
         )
         self.qkvo_sharding = NamedSharding(self.mesh, self.qkvo_psec)
@@ -679,7 +692,7 @@ class FusedAttnRunner:
 
         if self.bias_shape == BiasShape._1HSS:
             self.bias_pspec = PartitionSpec(
-                None, self.mesh_resource.tp_resource, self.mesh_resource.cp_resource, None
+                None, self.mesh_resource.tpsp_resource, self.mesh_resource.cp_resource, None
             )
         elif self.bias_shape == BiasShape._B1SS:
             self.bias_pspec = PartitionSpec(

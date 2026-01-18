@@ -229,11 +229,11 @@ __global__ void populate_rng_state_kernel(int64_t *rng_state_dst, const int64_t 
   rng_state_dst[1] = offset;
 }
 
-__global__ void get_runtime_num_segments_kernel(int32_t *cu_seqlen, size_t len, uint32_t *out) {
+__global__ void get_runtime_num_segments_kernel(int32_t *cu_seqlen, size_t max_batch_size, uint32_t *out) {
   int tid = blockDim.x * blockIdx.x + threadIdx.x;
-  if (tid >= len) return;
+  if (tid >= max_batch_size) return;
 
-  if (cu_seqlen[tid] > 0) {
+  if (cu_seqlen[tid+1] - cu_seqlen[tid] > 0) {
     // atomicAdd only support 32 bits dtype
     atomicAdd(out, 1);
   }
@@ -250,15 +250,15 @@ void PopulateRngStateAsync(void *rng_state_dst, const void *seed, size_t q_max_s
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-uint32_t GetRuntimeNumSegments(void *cu_seqlen, void *workspace, size_t len, cudaStream_t stream) {
+uint32_t GetRuntimeNumSegments(void *cu_seqlen, void *workspace, size_t max_batch_size, cudaStream_t stream) {
   // workspace size requires 4 bytes
   uint32_t *dout = static_cast<uint32_t *>(workspace);
   uint32_t hout{};
   cudaMemsetAsync(dout, 0, sizeof(uint32_t), stream);
   constexpr int threads = 128;
-  const int blocks = (len - 1) / threads + 1;
+  const int blocks = (max_batch_size - 1) / threads + 1; // ceil
   get_runtime_num_segments_kernel<<<blocks, threads, 0, stream>>>(static_cast<int32_t *>(cu_seqlen),
-                                                                  len, dout);
+                                                                  max_batch_size, dout);
   cudaMemcpyAsync(&hout, dout, sizeof(uint32_t), cudaMemcpyDeviceToHost, stream);
   cudaStreamSynchronize(stream);
   return hout;

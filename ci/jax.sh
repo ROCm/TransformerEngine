@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -54,6 +54,7 @@ run_default_fa_lbl() {
 
 run_test_config() {
     echo ==== Run with Fused attention backend: $_fus_attn ====
+    export NVTE_JAX_UNITTEST_LEVEL=L0 # this env variable controls parameters set for some tests
     run_default_fa 1 test_custom_call_compute.py
     run_default_fa 1 test_functions.py
     run 1 test_fused_attn.py
@@ -61,7 +62,6 @@ run_test_config() {
     run_default_fa 1 test_helper.py
     run_default_fa 1 test_layer.py #it effectevly always uses unfused attention
     run_default_fa 1 test_sanity_import.py
-    run_default_fa 1 test_sharding.py
     run_default_fa 1 test_softmax.py
 }
 
@@ -76,8 +76,10 @@ run_test_config_mgpu() {
 
     if [ $_fus_attn = $_DEFAULT_FUSED_ATTN ]; then
         _dfa_level=2
+        export NVTE_JAX_UNITTEST_LEVEL=L1
     else
         _dfa_level=3
+        export NVTE_JAX_UNITTEST_LEVEL=L2
     fi
     run $_dfa_level test_distributed_fused_attn.py $_timeout_args
     run_default_fa 3 test_distributed_layernorm.py

@@ -6,7 +6,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#pragma once
+#ifndef TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_
+#define TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_
 
 #include <cuda_runtime_api.h>
 #ifdef __HIP_PLATFORM_AMD__
@@ -17,8 +18,13 @@
 #endif // __HIP_PLATFORM_AMD__
 #include <nvrtc.h>
 
+#ifdef NVTE_WITH_CUBLASMP
+#include <cublasmp.h>
+#endif  // NVTE_WITH_CUBLASMP
+
 #include <iostream>
 #include <stdexcept>
+#include <string>
 
 #include "../util/string.h"
 
@@ -102,3 +108,17 @@
       NVTE_ERROR("NVRTC Error: ", nvrtcGetErrorString(status_NVTE_CHECK_NVRTC)); \
     }                                                                            \
   } while (false)
+
+#ifdef NVTE_WITH_CUBLASMP
+
+#define NVTE_CHECK_CUBLASMP(expr)                             \
+  do {                                                        \
+    const cublasMpStatus_t status = (expr);                   \
+    if (status != CUBLASMP_STATUS_SUCCESS) {                  \
+      NVTE_ERROR("cuBLASMp Error: ", std::to_string(status)); \
+    }                                                         \
+  } while (false)
+
+#endif  // NVTE_WITH_CUBLASMP
+
+#endif  // TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_
