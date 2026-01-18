@@ -1,3 +1,6 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
 name: AITER Prebuilt Upload
 
 on:
@@ -23,19 +26,6 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Host Diagnostics (upload)
-        run: |
-          echo "::group::Host Diagnostics"
-          echo ">>> Active Containers:"
-          docker ps -a
-          echo ">>> ROCm Installation:"
-          ls -d /opt/rocm* || echo "No /opt/rocm found"
-          echo ">>> GPU info:"
-          ls -l /dev/dri
-          ls -l /dev/kfd
-          rocm-smi || true
-          echo "::endgroup::"
-
       - name: Resolve docker image
         id: cfg
         run: |
@@ -55,6 +45,7 @@ jobs:
       - name: Run container
         run: |
           docker run -dt \
+            --rm \
             --name te-aiter-upload \
             --network=host \
             --device=/dev/dri --device=/dev/kfd \
@@ -71,22 +62,15 @@ jobs:
           NVTE_AITER_PREBUILT_BASE_URL: https://compute-artifactory.amd.com:5000/artifactory/rocm-generic-local/te-ci/aiter-prebuilts
           NVTE_AITER_PREBUILT_UPLOAD_TOKEN: ${{ secrets.AITER_ARTIFACTORY_TOKEN }}
         run: |
-          if [ -z "${NVTE_AITER_PREBUILT_UPLOAD_TOKEN}" ]; then
-            echo "Missing secrets.AITER_ARTIFACTORY_TOKEN" >&2
-            exit 1
-          fi
-
           docker exec \
             -e NVTE_AITER_PREBUILT_BASE_URL=${NVTE_AITER_PREBUILT_BASE_URL} \
             -e NVTE_AITER_PREBUILT_UPLOAD_TOKEN=${NVTE_AITER_PREBUILT_UPLOAD_TOKEN} \
-            -e GPU_ARCHS_INPUT="${{ inputs.gpu_archs }}" \
+            -e GPU_ARCHS="${{ inputs.gpu_archs }}" \
             te-aiter-upload bash -c 'set -ex
+              if [ -z "${NVTE_AITER_PREBUILT_UPLOAD_TOKEN}" ]; then
+                echo "Missing secrets.AITER_ARTIFACTORY_TOKEN" >&2
+                exit 1
+              fi
               export HIP_PATH=""
-              export GPU_ARCHS="$GPU_ARCHS_INPUT"
-              ci/aiter_upload.sh --build
+              .github/scripts/aiter_upload.sh --build
             '
-
-      - name: Cleanup container
-        if: always()
-        run: docker rm -f te-aiter-upload || true
-
