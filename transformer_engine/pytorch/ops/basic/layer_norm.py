@@ -18,8 +18,10 @@ from transformer_engine_torch import layernorm_bwd, layernorm_fwd
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 if IS_HIP_EXTENSION:
     from ...triton_kernels.layernorm import te_layernorm_fwd_triton, te_layernorm_bwd_triton
-from ...fp8 import FP8GlobalStateManager
 from ...constants import TE_DType
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ...export import is_in_onnx_export_mode
+from ...tensor import Quantizer
 from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
@@ -28,8 +30,6 @@ from ...utils import (
 )
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_autocast_dtype, maybe_dequantize
-from ...export import is_in_onnx_export_mode
-from ...tensor import Quantizer
 
 
 class LayerNorm(BasicOperation):
@@ -173,8 +173,8 @@ class LayerNorm(BasicOperation):
         self.weight = weight
         self.bias = bias
 
-    def pre_first_forward(self, *args, **kwargs) -> None:
-        super().pre_first_forward(*args, **kwargs)
+    def pre_first_fuser_forward(self) -> None:
+        super().pre_first_fuser_forward()
         if self.weight.device.type == "meta" or self.bias.device.type == "meta":
             self.reset_parameters()
 
@@ -182,7 +182,7 @@ class LayerNorm(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op_grad_input_quantizer: Optional[Quantizer],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
     ) -> torch.Tensor:
         if is_in_onnx_export_mode():
@@ -205,17 +205,8 @@ class LayerNorm(BasicOperation):
         w = maybe_dequantize(self.weight, dtype).view((inner_dim,))
         b = maybe_dequantize(self.bias, dtype).view((inner_dim,))
 
-        # Check if backward pass is needed
-        requires_grad = ctx.requires_grad
-
-        # Check if output is quantized
-        output_quantizer = None
-        with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
-        if with_quantized_compute:
-            output_quantizer = next_op_input_quantizer
-
         # Compute layer norm
-        sm_margin = self._sm_margins["forward" if requires_grad else "inference"]
+        sm_margin = self._sm_margins["forward" if ctx.requires_grad else "inference"]
         use_layernorm_triton = bool( int(os.environ.get('NVTE_USE_LAYERNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
         layernorm_fwd_func = te_layernorm_fwd_triton if use_layernorm_triton else layernorm_fwd
         y, means, rstdevs = layernorm_fwd_func(
@@ -224,14 +215,16 @@ class LayerNorm(BasicOperation):
             b,
             self.eps,
             None,
-            output_quantizer,
+            next_op_input_quantizer,
             TE_DType[dtype],
             sm_margin,
             self.zero_centered_gamma,
         )
 
         # Save state for backward pass
-        if requires_grad:
+        if ctx.requires_grad:
+            if is_cpu_offload_enabled():
+                mark_activation_offload(x, means, rstdevs)
             ctx.save_for_backward(x, means, rstdevs)
             ctx.dtype = dtype
 

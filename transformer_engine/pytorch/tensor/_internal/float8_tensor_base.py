@@ -86,7 +86,7 @@ class Float8TensorBase(QuantizedTensorBase):
         else:
             instance = super().__new__(cls, *args, **kwargs)
         instance._data = data
-        instance._quantizer = quantizer
+        instance._quantizer = quantizer.copy() if quantizer is not None else None
         instance._fp8_dtype = fp8_dtype
         instance._scale_inv = fp8_scale_inv
         instance._transpose = data_transpose
@@ -95,8 +95,13 @@ class Float8TensorBase(QuantizedTensorBase):
         return instance
 
     def clear(self):
-        """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
-        for t in (self._data, self._transpose, self._scale_inv):
+        """Deallocate this tensor's memory. Typically not needed and must be used carefully.
+
+        Scale-inv tensor is not deallocated because it's often shared
+        between multiple FP8 tensors.
+
+        """
+        for t in (self._data, self._transpose):
             if t is not None:
                 t.data = _empty_tensor()
         self._transpose_invalid = True
@@ -128,9 +133,15 @@ class Float8TensorBase(QuantizedTensorBase):
         self._scale_inv = tensors[2]
         return tensors[3:]
 
-    def get_data_tensors(self):
+    def get_data_tensors(self, rowwise_data: bool = True, columnwise_data: bool = True):
         """Get this Tensor's data."""
-        return self._data, self._transpose
+        if rowwise_data and columnwise_data:
+            return self._data, self._transpose
+        if rowwise_data:
+            return self._data
+        if columnwise_data:
+            return self._transpose
+        raise ValueError("No data to get, both rowwise_data and columnwise_data are False")
 
     def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
         """Dequantize to a higher precision."""

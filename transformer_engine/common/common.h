@@ -276,6 +276,9 @@ struct QuantizationConfig {
   };
 };
 
+cudaDataType_t get_cuda_dtype(const transformer_engine::DType t);
+
+#ifndef __HIP_PLATFORM_AMD__
 template <typename T>
 constexpr T DIVUP(const T &x, const T &y) {
   return (((x) + ((y)-1)) / (y));
@@ -287,6 +290,22 @@ constexpr __device__ __host__ __forceinline__ uint64_t DIVUP_TO_MULTIPLE(const T
                 "Integral type required.");
   return DIVUP(static_cast<uint64_t>(N), static_cast<uint64_t>(M)) * M;
 }
+#else
+// DIVUP is called with integral types only for which passing by value is preferred.
+// It also allows using of constexpr arguments w/o needing to create storage for references.
+template <typename T>
+constexpr T DIVUP(T x, T y) {
+  static_assert(std::is_integral<T>::value, "Integral type required.");
+  return (((x) + ((y)-1)) / (y));
+}
+
+template <typename T1, typename T2>
+constexpr __device__ __host__ __forceinline__ uint64_t DIVUP_TO_MULTIPLE(T1 N, T2 M) {
+  static_assert(std::is_integral<T1>::value && std::is_integral<T2>::value,
+                "Integral type required.");
+  return DIVUP(static_cast<uint64_t>(N), static_cast<uint64_t>(M)) * M;
+}
+#endif //__HIP_PLATFORM_AMD__
 
 using byte = uint8_t;
 using int16 = int16_t;
@@ -407,9 +426,19 @@ struct BitsNumber {
 template <typename T>
 struct TypeInfo {
 #if FP4_TYPE_SUPPORTED
-  using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2, fp4e2m1>;
+  using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2, fp4e2m1
+#if CUDA_VERSION >= 12080
+                           ,
+                           fp8e8m0
+#endif
+                           >;
 #else
-  using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2>;
+  using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2
+#if CUDA_VERSION >= 12080
+                           ,
+                           fp8e8m0
+#endif
+                           >;
 #endif
 
   template <typename U, DType current>
@@ -692,8 +721,11 @@ constexpr size_t scale_tensor_alignment_Y_rowwise = 128;
 constexpr size_t scale_tensor_alignment_X_colwise = 128;
 constexpr size_t scale_tensor_alignment_Y_colwise = 4;
 
+#ifndef __HIP_PLATFORM_AMD__
 // Alignment requirements for the Tensor Memory Accelerator (TMA)
-constexpr int TMA_gmem_alignment = 16;  // global memory address alignment
+constexpr size_t TMA_GMEM_ALIGNMENT = 16;    // global memory address alignment
+constexpr size_t TMA_SHMEM_ALIGNMENT = 128;  // shared memory address alignment
+#endif
 
 inline bool is_aligned_ptr(const void *ptr, size_t alignment) {
   return reinterpret_cast<uintptr_t>(ptr) % alignment == 0;
@@ -724,9 +756,11 @@ void update_tensor_scale_inv(Tensor *t, cudaStream_t stream);
 #define NVTE_API_CALL(api_name) \
   transformer_engine::nvtx::NVTXWrapper _##api_name##_nvtx_wrapper(#api_name);
 
+#ifdef __HIP_PLATFORM_AMD__
+#define checkCuDriverContext(stream) {}
+#else
 void checkCuDriverContext(CUstream stream);
 
-#ifndef __HIP_PLATFORM_AMD__
 CUtensorMapDataType get_CUtensorMapDataType(DType dtype);
 
 // Set up parameters to create TMA descriptor.
@@ -734,7 +768,7 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
                           const uint64_t globalY, const uint64_t globalX, const uint32_t shmemY,
                           const uint32_t shmemX, const uint32_t stride_elems,
                           const uint32_t offset_elems, const size_t type_num_bits);
-#endif //#ifndef __HIP_PLATFORM_AMD__
+#endif //#ifdef __HIP_PLATFORM_AMD__
 
 bool is_supported_by_CC_100();
 

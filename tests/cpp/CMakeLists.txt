@@ -64,7 +64,7 @@ else()
   project(transformer_engine_tests LANGUAGES HIP CXX)
   # Ask hcc to generate device code during compilation so we can use
   # host linker to link.
-  set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -fno-gpu-rdc -Wno-defaulted-function-deleted -Wno-unused-result -ftemplate-backtrace-limit=0")
+  set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -fno-gpu-rdc -Wno-defaulted-function-deleted -Wno-unused-result -Wno-unused-value -ftemplate-backtrace-limit=0")
 endif()
 
 add_subdirectory(../../3rdparty/googletest ${PROJECT_BINARY_DIR}/googletest)
@@ -85,6 +85,7 @@ find_library(TE_LIB NAMES transformer_engine PATHS "${TE_LIB_PATH}/.." ${TE_LIB_
 message(STATUS "Found transformer_engine library: ${TE_LIB}")
 include_directories(../../transformer_engine/common/include)
 include_directories(../../transformer_engine/common)
+include_directories(../../transformer_engine)
 include_directories(${CMAKE_SOURCE_DIR})
 
 if(USE_CUDA)

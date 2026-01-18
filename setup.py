@@ -6,6 +6,7 @@
 
 """Installation script."""
 
+from importlib import metadata
 import os
 import time
 from pathlib import Path
@@ -23,6 +24,7 @@ from build_tools.utils import (
     all_files_in_dir,
     hipify,
     cuda_archs,
+    cuda_version,
     get_frameworks,
     remove_dups,
 )
@@ -111,6 +113,18 @@ def setup_common_extension() -> CMakeExtension:
 
         if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
             cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
+
+    if bool(int(os.getenv("NVTE_WITH_CUBLASMP", "0"))):
+        cmake_flags.append("-DNVTE_WITH_CUBLASMP=ON")
+        cublasmp_dir = os.getenv("CUBLASMP_HOME") or metadata.distribution(
+            f"nvidia-cublasmp-cu{cuda_version()[0]}"
+        ).locate_file(f"nvidia/cublasmp/cu{cuda_version()[0]}")
+        cmake_flags.append(f"-DCUBLASMP_DIR={cublasmp_dir}")
+        nvshmem_dir = os.getenv("NVSHMEM_HOME") or metadata.distribution(
+            f"nvidia-nvshmem-cu{cuda_version()[0]}"
+        ).locate_file("nvidia/nvshmem")
+        cmake_flags.append(f"-DNVSHMEM_DIR={nvshmem_dir}")
+        print("CMAKE_FLAGS:", cmake_flags[-2:])
 
     # Add custom CMake arguments from environment variable
     nvte_cmake_extra_args = os.getenv("NVTE_CMAKE_EXTRA_ARGS")
