@@ -203,7 +203,6 @@ def logging_context(highest_level=logging.WARNING):
 if IS_HIP_EXTENSION:
     class EnvVarCleaner:
         def __init__(self, envs_):
-            print("PIV create envs:", envs_)
             self.envs = envs_
             self.flags = {}
             for env in self.envs:
@@ -211,7 +210,6 @@ if IS_HIP_EXTENSION:
                 self.flags[env] = os.environ[env]
 
         def __del__(self):
-          print("PIV destroty envs:", self.envs)
           for env in self.envs:
             if env in self.flags:
                 os.environ[env] = self.flags[env]
