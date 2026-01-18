@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 
-# Copyright (C) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 
 # This file is from aiter project (https://github.com/ROCm/aiter)
 # commit:8dfaf0a, directory: aiter/ops/triton/utils/_triton/pid_preprocessing.py

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (C) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
 
 # This file is from aiter project (https://github.com/ROCm/aiter)
 # commit:04dc719, directory: aiter/ops/triton/utils/gmm_common.py

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (C) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
 
 # This file is from aiter project (https://github.com/ROCm/aiter) and modified for compatibility with transformer_engine.
 # commit: 56f4d93, directory: aiter/ops/triton/_triton_kernels/gmm.py
