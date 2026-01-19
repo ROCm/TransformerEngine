@@ -1,4 +1,4 @@
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
 """Python interface for cast extensions"""
@@ -115,6 +115,7 @@ def te_quantize_triton(
                 )
                 
             else:
+                out.remove_caches() #Make sure to remove transpose if it is marked as invalid
                 out = tex.quantize(input_tensor, quantizer, out, noop_flag)
     elif isinstance(out, MXFP8TensorBase):
         te_cast_transpose_mxfp8_triton(input_tensor, out)

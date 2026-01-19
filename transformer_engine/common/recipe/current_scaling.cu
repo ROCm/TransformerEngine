@@ -53,13 +53,17 @@ __global__ void amax_final_reduce(const float* __restrict__ block_amax,
 
 template <int nvec, bool aligned, typename InputType>
 __launch_bounds__(amax_kernel_threads) __global__
+    void amax_kernel(const InputType *input, float *amax,
 #ifdef __HIP_PLATFORM_AMD__
-    void amax_kernel(const InputType *input, float *amax, float* __restrict__ block_amax, const size_t N,
-                     const size_t num_aligned_elements) {
+                     float* __restrict__ block_amax,
 #else
-    void amax_kernel(const InputType *input, float *amax, const size_t N,
-                     const size_t num_aligned_elements) {
+                     [[maybe_unused]] void* __restrict__ block_amax,
 #endif
+                     const size_t N, const size_t num_aligned_elements, const float *noop_ptr) {
+  if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
+    return;
+  }
+
   VectorizedLoader<InputType, nvec, aligned> loader(input, N);
   InputType max{0.f};
   const int warp_id = threadIdx.x / THREADS_PER_WARP;
@@ -108,10 +112,13 @@ __launch_bounds__(amax_kernel_threads) __global__
 }
 
 template <int nvec, typename InputType>
-void launch_amax_kernel(const InputType *input, float *amax, const size_t N, float *block_amax,
-                        size_t block_capacity, cudaStream_t stream) {
+void launch_amax_kernel(const InputType *input, float *amax, const size_t N,
+#ifdef __HIP_PLATFORM_AMD__
+                        float *block_amax, size_t block_capacity,
+#endif
+                        const float *noop_ptr, cudaStream_t stream) {
   // Zero out amax so we can update with atomic max
-  (void)cudaMemsetAsync(amax, 0, sizeof(float), stream);
+  NVTE_CHECK_CUDA(cudaMemsetAsync(amax, 0, sizeof(float), stream));
 
   // Return immediately if tensor is empty
   if (N == 0) {
@@ -128,7 +135,7 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, flo
   size_t num_blocks = DIVUP(num_aligned_elements, threads);
   constexpr size_t max_blocks = 65535;
   num_blocks = std::min(num_blocks, max_blocks);
-
+  constexpr void* block_amax = nullptr;
 #else
   constexpr size_t threads = amax_kernel_threads;
   size_t num_blocks = nvte_amax_workspace_num_blocks(num_aligned_elements);
@@ -139,31 +146,18 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, flo
   // Launch kernel
   switch (align) {
     case Alignment::SAME_ALIGNED:
-#ifdef __HIP_PLATFORM_AMD__
       amax_kernel<nvec, true, InputType>
-          <<<num_blocks, threads, 0, stream>>>(input, amax, block_amax, N, num_aligned_elements);
-#else
-      amax_kernel<nvec, true, InputType>
-          <<<num_blocks, threads, 0, stream>>>(input, amax, N, num_aligned_elements);
-#endif
+          <<<num_blocks, threads, 0, stream>>>(input, amax, block_amax, N, num_aligned_elements, noop_ptr);
       break;
     case Alignment::SAME_UNALIGNED:
-#ifdef __HIP_PLATFORM_AMD__
       amax_kernel<nvec, false, InputType>
-          <<<num_blocks, threads, 0, stream>>>(input, amax, block_amax, N, num_aligned_elements);
-#else
-      amax_kernel<nvec, false, InputType>
-          <<<num_blocks, threads, 0, stream>>>(input, amax, N, num_aligned_elements);
-#endif
+          <<<num_blocks, threads, 0, stream>>>(input, amax, block_amax, N, num_aligned_elements, noop_ptr);
       break;
     case Alignment::DIFFERENT: {
       // This case is a logic error, since there is only one pointer (input)
       // in the alignment check. Still safe to process without vectorization.
-#ifdef __HIP_PLATFORM_AMD__
-      amax_kernel<1, true, InputType><<<num_blocks, threads, 0, stream>>>(input, amax, block_amax, N, N);
-#else
-      amax_kernel<1, true, InputType><<<num_blocks, threads, 0, stream>>>(input, amax, N, N);
-#endif
+      amax_kernel<1, true, InputType>
+          <<<num_blocks, threads, 0, stream>>>(input, amax, block_amax, N, N, noop_ptr);
       break;
     }
   }
@@ -199,14 +193,15 @@ size_t nvte_amax_workspace_num_blocks(size_t N) {
 
 #endif
 
-void nvte_compute_amax(const NVTETensor input_, const NVTETensor output_, cudaStream_t stream) {
-#ifdef __HIP_PLATFORM_AMD__
-  nvte_compute_amax_with_workspace(input_, output_, /*workspace=*/nullptr, stream);
-}
+namespace {
 
-void nvte_compute_amax_with_workspace(const NVTETensor input_, const NVTETensor output_, const NVTETensor workspace_, cudaStream_t stream) {
+void compute_amax_impl(const NVTETensor input_, const NVTETensor output_, cudaStream_t stream,
+#ifdef __HIP_PLATFORM_AMD__
+                       const NVTETensor workspace_,
+#else
+                       [[maybe_unused]] const NVTETensor workspace_,
 #endif
-  NVTE_API_CALL(nvte_compute_amax);
+                       const NVTEQuantizationConfig config_) {
   using namespace transformer_engine;
 
   // Check input tensor
@@ -258,6 +253,16 @@ void nvte_compute_amax_with_workspace(const NVTETensor input_, const NVTETensor 
   }
 #endif
 
+  float *noop_ptr = nullptr;
+  if (config_ != nullptr) {
+    const QuantizationConfig *config_cpp = reinterpret_cast<const QuantizationConfig *>(config_);
+
+    // extract noop tensor from quant_config_cpp if it's not null
+    const NVTETensor noop = config_cpp ? config_cpp->noop_tensor : nullptr;
+    noop_ptr = reinterpret_cast<float *>(
+        (noop != nullptr ? convertNVTETensorCheck(noop)->data.dptr : nullptr));
+  }
+
   // Compute amax
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.data.dtype, IType, constexpr int nvec = 32 / sizeof(IType);
@@ -266,15 +271,41 @@ void nvte_compute_amax_with_workspace(const NVTETensor input_, const NVTETensor 
 #ifdef __HIP_PLATFORM_AMD__
                                block_amax, block_capacity,
 #endif
-                               stream););  // NOLINT(*)
+                               noop_ptr, stream););  // NOLINT(*)
 }
+
+}  // anonymous namespace
+
+void nvte_compute_amax(const NVTETensor input_, const NVTETensor output_, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_compute_amax);
+  compute_amax_impl(input_, output_, stream, nullptr, nullptr);
+}
+
+void nvte_compute_amax_with_config(const NVTETensor input_, const NVTETensor output_,
+                                   const NVTEQuantizationConfig config_, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_compute_amax_with_config);
+  compute_amax_impl(input_, output_, stream, nullptr, config_);
+}
+
+#ifdef __HIP_PLATFORM_AMD__
+void nvte_compute_amax_with_workspace(const NVTETensor input_, const NVTETensor output_,
+                                      NVTETensor workspace_, const NVTEQuantizationConfig config_,
+                                      cudaStream_t stream) {
+  NVTE_API_CALL(nvte_compute_amax_with_workspace);
+  compute_amax_impl(input_, output_, stream, workspace_, config_);
+}
+#endif
 
 namespace transformer_engine {
 namespace {
 
 __global__ void compute_scale_from_amax_kernel(const float *amax_ptr, float *scale_ptr,
                                                const float max_fp8, const bool force_pow_2_scales,
-                                               const float epsilon) {
+                                               const float epsilon, const float *noop_ptr) {
+  if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
+    return;
+  }
+
   *scale_ptr = compute_scale_from_amax(*amax_ptr, max_fp8, force_pow_2_scales, epsilon,
                                        std::numeric_limits<float>::max());
 }
@@ -320,10 +351,21 @@ void nvte_compute_scale_from_amax(NVTETensor output_, const NVTEQuantizationConf
   TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(output.data.dtype, DType,
                                          max_fp8 = Quantized_Limits<DType>::max_norm;);
 
+  // noop tensor for cuda graph
+  float *noop_ptr = nullptr;
+  if (config_ != nullptr) {
+    const QuantizationConfig *config_cpp = reinterpret_cast<const QuantizationConfig *>(config_);
+
+    // extract noop tensor from quant_config_cpp if it's not null
+    const NVTETensor noop = config_cpp ? config_cpp->noop_tensor : nullptr;
+    noop_ptr = reinterpret_cast<float *>(
+        (noop != nullptr ? convertNVTETensorCheck(noop)->data.dptr : nullptr));
+  }
+
   // Update scale
   compute_scale_from_amax_kernel<<<1, 1, 0, stream>>>(
       reinterpret_cast<const float *>(output.amax.dptr),
       reinterpret_cast<float *>(output.scale.dptr), max_fp8, config.force_pow_2_scales,
-      config.amax_epsilon);
+      config.amax_epsilon, noop_ptr);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
