@@ -1,4 +1,4 @@
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -25,6 +25,8 @@ export CI=1
 
 _script_error_count=0
 _run_error_count=0
+_ignored_error_count=0
+TEST_ERROR_IGNORE=""
 
 script_error() {
     _script_error_count=$((_script_error_count+1))
@@ -32,6 +34,11 @@ script_error() {
 }
 
 test_run_error() {
+    if [ -n "$TEST_ERROR_IGNORE" ]; then
+        _ignored_error_count=$((_ignored_error_count+1))
+        test -n "$@" && echo "Ignore error in test $@" >&2
+        return
+    fi
     _run_error_count=$((_run_error_count+1))
     test -n "$@" && echo "Error in test $@" >&2
 }
@@ -39,6 +46,7 @@ test_run_error() {
 return_run_results() {
     test $_script_error_count -ne 0 && echo Detected $_script_error_count script errors during tests run at level $TEST_LEVEL >&2
     test $_run_error_count -ne 0 && echo Got $_run_error_count test errors during run at level $TEST_LEVEL >&2
+    test $_ignored_error_count -ne 0 && echo Ignored $_ignored_error_count test errors during run at level $TEST_LEVEL >&2
     test $_run_error_count -eq 0 -a $_script_error_count -eq 0
 }
 
