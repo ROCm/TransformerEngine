@@ -11,12 +11,12 @@ from jax import jit, value_and_grad
 from functools import reduce
 from typing import Union
 import operator
-from packaging import version
 
 from utils import (
     assert_allclose,
     pytest_parametrize_wrapper,
     use_jax_gemm,
+    _check_mxfp8_gemm_support,
 )
 from transformer_engine.jax.layernorm import layernorm
 from transformer_engine.jax.layernorm_mlp import layernorm_mlp
@@ -875,22 +875,6 @@ def _use_jax_fp8_gemm(enabled=False):
     elif "NVTE_JAX_CUSTOM_CALLS_RE" in os.environ:
         os.environ.pop("NVTE_JAX_CUSTOM_CALLS_RE")
 
-def _check_mxfp8_gemm_support(
-    with_jax_gemm,
-    m, n, k,
-    x_qtype=jnp_float8_e4m3_type,
-    w_qtype=jnp_float8_e4m3_type
-):
-    if not with_jax_gemm:
-        # if jnp_float8_e5m2_type in (x_qtype, w_qtype):
-        #     pytest.skip("Float8E5M2 is not recommended for MXFP8 GEMM.")
-        if (m % 16 != 0) or (n % 16 != 0) or (k % 128 != 0):
-            pytest.skip(
-                f"Input shape {(m, k)} x {(k, n)} is not supported by MXFP8 GEMM."
-            )
-    else:
-        if version.parse(jax.__version__) < version.parse("0.8.0"):
-            pytest.skip("MXFP8 not supported by JAX GEMM yet.")
 
 class TestDense:
     def _ref_gemm_with_jnp_dot(self, a, b, data_layout):
@@ -937,7 +921,7 @@ class TestDense:
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_gemm_fp8(self, m, n, k, x_qtype, w_qtype, scaling_mode, data_layout, with_jax_gemm):
         if scaling_mode.is_1d_block_scaling():
-            _check_mxfp8_gemm_support(with_jax_gemm, m, n, k, x_qtype, w_qtype)
+            _check_mxfp8_gemm_support(with_jax_gemm, m, n, k)
 
         x, w, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)
         quantizer_set = QuantizerFactory.create_set(

@@ -11,6 +11,7 @@ import math
 import operator
 from typing import Any, Callable, Dict, Tuple, Sequence, Union, Iterable, Optional, NewType
 from contextlib import contextmanager
+from packaging import version
 
 import jax
 import jax.numpy as jnp
@@ -47,6 +48,23 @@ def is_devices_enough(required):
     Check if the available GPUs is enough
     """
     return len(jax.devices()) >= required
+
+
+def _check_mxfp8_gemm_support(with_jax_gemm, m, n, k, use_bias=False):
+    if not with_jax_gemm:
+        if (m % 16 != 0) or (n % 16 != 0) or (k % 128 != 0):
+            pytest.skip(
+                f"Input shape {(m, k)} x {(k, n)} is not supported by hipblaslt MXFP8 GEMM."
+            )
+        if use_bias:
+            pytest.skip("hipblaslt GEMM does not yet support MXFP8 with bias.")
+    else:
+        jax_version = version.parse(jax.__version__)
+        if jax_version < version.parse("0.8.0"):
+            pytest.skip(
+                "MXFP8 support for JAX GEMM is added in version 0.8.0, "
+                f"but the current detected version is {jax_version}."
+            )
 
 
 def _generate_drop_path_shape(shape: Sequence[int], batch_dim: int) -> Sequence[int]:

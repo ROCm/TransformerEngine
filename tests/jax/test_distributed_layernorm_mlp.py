@@ -18,6 +18,7 @@ from utils import (
     is_devices_enough,
     pytest_parametrize_wrapper,
     use_jax_gemm,
+    _check_mxfp8_gemm_support,
 )
 
 from transformer_engine.common import recipe
@@ -55,7 +56,7 @@ if is_mxfp8_supported:
     SUPPORTED_RECIPES.append(pytest.param(recipe.MXFP8BlockScaling(), id="MXFP8BlockScaling"))
 
 DTYPES = [jnp.bfloat16, jnp.float16]
-INPUT_SHAPE = [[4, 64, 128]]  # [batch, seqlen, hidden_in]
+INPUT_SHAPE = [[4, 64, 256]]  # [batch, seqlen, hidden_in]
 
 LAYERNORM_INPUT_AXES = (BATCH_AXES, SEQLEN_TP_AXES, HIDDEN_AXES)
 DOT_1_INPUT_AXES = (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES)
@@ -66,9 +67,9 @@ LN_SCALE_AXES = (W_NO_SHARD_AXES,)
 LN_BIAS_AXES = (W_NO_SHARD_AXES,)
 BIAS_1_AXES = (W_JOINED_AXES, W_TP_AXES)
 BIAS_2_AXES = (W_NO_SHARD_AXES,)
-# We set to 128 to ensure compatibility with MXFP8 GEMM which requires the
-# reduction dim to be multiple of 128
-INTERMEDIATE = 128
+# We set to 256 to ensure compatibility with MXFP8 GEMM which requires the
+# reduction dim to be multiple of 128 after sharding.
+INTERMEDIATE = 128 * 2
 
 
 # Only test with FSDP and TP as DP is not used
@@ -156,6 +157,77 @@ class TestDistributedLayernormMLP:
             )
         )
 
+    def _check_mxfp8_layernorm_mlp_support(
+        self,
+        batch_size,
+        intermediate_size,
+        activation_size,
+        hidden_in,
+        hidden_out,
+        mesh_config,
+        use_bias,
+        with_jax_gemm
+    ):
+        # Check input shape compatibility with MXFP8 GEMMs
+        # FWD 1
+        m = batch_size
+        k = hidden_in // mesh_config[1][1] # Account for TP sharding
+        n = activation_size
+        _check_mxfp8_gemm_support(
+            with_jax_gemm,
+            m, n, k,
+            use_bias
+        )
+        # FWD 2
+        k = intermediate_size // mesh_config[1][1]  # Account for TP sharding
+        n = hidden_out
+        _check_mxfp8_gemm_support(
+            with_jax_gemm,
+            m, n, k,
+            use_bias
+        )
+
+    def _check_mxfp8_layernorm_mlp_grad_support(
+        self,
+        batch_size,
+        intermediate_size,
+        activation_size,
+        hidden_in,
+        hidden_out,
+        mesh_config,
+        use_bias,
+        with_jax_gemm
+    ):
+        # Check forwards
+        self._check_mxfp8_layernorm_mlp_support(
+            batch_size,
+            intermediate_size,
+            activation_size,
+            hidden_in,
+            hidden_out,
+            mesh_config,
+            use_bias,
+            with_jax_gemm,
+        )
+        # BWD 1
+        m = batch_size
+        k = hidden_out // mesh_config[1][1]  # Account for TP sharding
+        n = intermediate_size
+        _check_mxfp8_gemm_support(
+            with_jax_gemm,
+            m, n, k,
+            use_bias
+        )
+        # BWD 2
+        m = intermediate_size
+        k = batch_size // mesh_config[1][1]  # Account for TP sharding
+        n = hidden_out
+        _check_mxfp8_gemm_support(
+            with_jax_gemm,
+            m, n, k,
+            use_bias
+        )
+
     def _test_layernorm_mlp_grad(
         self,
         mesh_config,
@@ -167,19 +239,29 @@ class TestDistributedLayernormMLP:
         use_shardy,
         with_jax_gemm,
     ):
-        if (
-            with_jax_gemm
-            and version.parse(jax.__version__) < version.parse("0.8.0")
-            and isinstance(fp8_recipe, recipe.MXFP8BlockScaling)
-        ):
-            pytest.skip("MXFP8 not supported by JAX GEMM yet.")
+        inputs = [x, gamma, k1, k2, b1, b2] = self.generate_inputs(
+            input_shape, activation_type, use_bias, dtype
+        )
+        if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
+            batch_size = x.shape[0]*x.shape[1]
+            intermediate_size = k2.shape[0]
+            activation_size = k1.shape[1]*k1.shape[2]
+            hidden_in = x.shape[2]
+            hidden_out = hidden_in
+            self._check_mxfp8_layernorm_mlp_grad_support(
+                batch_size,
+                intermediate_size,
+                activation_size,
+                hidden_in,
+                hidden_in,
+                mesh_config,
+                use_bias,
+                with_jax_gemm
+            )
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
         device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
         layernorm_type = "rmsnorm"
 
-        inputs = [x, gamma, k1, k2, b1, b2] = self.generate_inputs(
-            input_shape, activation_type, use_bias, dtype
-        )
         static_inputs = [layernorm_type, activation_type]
 
         with use_jax_gemm(enabled=with_jax_gemm):
@@ -337,12 +419,17 @@ class TestDistributedLayernormMLP:
         use_shardy,
         with_jax_gemm,
     ):
-        if (
-            with_jax_gemm
-            and version.parse(jax.__version__) < version.parse("0.8.0")
-            and isinstance(fp8_recipe, recipe.MXFP8BlockScaling)
-        ):
-            pytest.skip("MXFP8 not supported by JAX GEMM yet.")
+        if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
+            self._check_mxfp8_layernorm_mlp_support(
+                input_shape[0]*input_shape[1],
+                INTERMEDIATE,
+                2*INTERMEDIATE,
+                input_shape[2],
+                input_shape[2],
+                mesh_config,
+                use_bias,
+                with_jax_gemm
+            )
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
         batch, seqlen, hidden_in = input_shape
         layernorm_type = "rmsnorm"
