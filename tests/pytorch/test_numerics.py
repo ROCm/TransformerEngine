@@ -2038,19 +2038,12 @@ def test_grouped_linear_triton_accuracy(
 
         if IS_HIP_EXTENSION:
             if dtype not in (torch.float32,) and fuse_wgrad_accumulation and not fp8:
-                os.environ["NVTE_USE_GROUPED_GEMM_TRITON"] = "0"
                 pytest.skip(f"Rocm does not support fused wgrad accumulation for {dtype}.")
-        if fp8 and not fp8_available:
-            pytest.skip(reason_for_no_fp8)
-        if fp8 and recipe.mxfp8() and not mxfp8_available:
-            pytest.skip(reason_for_no_mxfp8)
-        if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
+        if fp8 and fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
             pytest.skip("FP8 parameters are not supported in debug mode.")
-        if fp8 and recipe.float8_block_scaling() and not fp8_block_scaling_available:
-            pytest.skip(reason_for_no_fp8_block_scaling)
 
         config = model_configs[model]
-        if config.seq_len % 16 != 0 and fp8:
+        if config.max_seqlen_q % 16 != 0 and fp8:
             pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
         with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
@@ -2115,12 +2108,11 @@ def test_grouped_linear_triton_accuracy(
             delay_wgrad_compute,
         )
 
-        # Shoule be bit-wise match
         atol, rtol = get_tolerances(dtype)
         if dtype == torch.float32:
             atol = 2.6e-6
             rtol = 5e-2
-        for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
+        for o, o_ref in zip(outputs, outputs_ref):
             torch.testing.assert_close(o, o_ref, rtol=rtol, atol=atol)
     finally:
         os.environ.pop("NVTE_USE_GROUPED_GEMM_TRITON", None)
