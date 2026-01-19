@@ -23,6 +23,10 @@
 #include <transformer_engine/transformer_engine.h>
 #include "util/logging.h"
 
+#ifdef __HIP_PLATFORM_AMD__
+#include <rocrand/rocrand.h>
+#endif
+
 namespace test {
 
 size_t create_seed_from_tensor_name(const std::string& tensor_name) {
@@ -828,8 +832,6 @@ void generate_data_uniformly(T* data, const size_t size, std::mt19937* gen) {
 }
 
 #ifdef __HIP_PLATFORM_AMD__
-#include <rocrand/rocrand.h>
-
 template <typename T>
 __global__ void affine_transform_and_cast(float* __restrict__ in, T* __restrict__ out, size_t n, float lo, float hi) {
   // Clamp values in *in* to [lo, hi] and cast to type *T* for *out*.
@@ -846,7 +848,7 @@ void fillUniformDevice(Tensor* t) {
   const size_t N = product(shape);
 
   float* tmp = nullptr;
-  hipMalloc(&tmp, N * sizeof(float));
+  cudaMalloc(&tmp, N * sizeof(float));
 
   // per-tensor deterministic seed
   const unsigned long long seed = static_cast<unsigned long long>(t->gen()());
@@ -860,12 +862,17 @@ void fillUniformDevice(Tensor* t) {
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(t->dtype(), T, {
     dim3 block(256);
     dim3 grid((N + block.x - 1) / block.x);
-    hipLaunchKernelGGL(affine_transform_and_cast<T>, grid, block, 0, 0,
-                       tmp, reinterpret_cast<T*>(dst), N, -2.0f, 1.0f);
+    affine_transform_and_cast<T><<<grid, block, 0, 0>>>(
+      tmp, reinterpret_cast<T*>(dst), N, -2.0f, 1.0f);
+
+    // Copy into the CPU mirror. We could use Tensor::to_cpu() here,
+    // but that does more than just copying the data.
+    T* cpu_dst = t->rowwise() ? t->rowwise_cpu_dptr<T>() : t->columnwise_cpu_dptr<T>();
+    cudaMemcpy(cpu_dst, dst, N * sizeof(T), hipMemcpyDeviceToHost);
   });
 
   rocrand_destroy_generator(gen);
-  hipFree(tmp);
+  cudaFree(tmp);
 }
 #endif
 
@@ -896,7 +903,7 @@ void fillUniform(Tensor *t) {
     );
   }
 #ifndef __HIP_PLATFORM_AMD__
-// Data is already on device on AMDGPU
+  // Data is already on device on AMDGPU
   t->from_cpu();
 #endif
   std::uniform_real_distribution<> dis(-2.0, 1.0);
