@@ -7,6 +7,8 @@
 list(APPEND test_cuda_sources
             test_cast.cu
             test_cast_current_scaling.cu
+            test_cast_dbias.cu
+            test_cast_dbias_dgelu.cu
             test_cast_gated_swiglu.cu
             test_cast_mxfp8_gated_swiglu.cu
             test_qdq.cu
@@ -18,8 +20,6 @@ list(APPEND test_cuda_sources
             test_cast_transpose_dbias.cu
             test_cast_transpose_dbias_dgelu.cu
             test_cast_transpose_dgeglu.cu
-            test_cast_dbias.cu
-            test_cast_dbias_dgelu.cu
             test_act.cu
             test_normalization.cu
             test_normalization_mxfp8.cu
@@ -28,6 +28,7 @@ list(APPEND test_cuda_sources
             test_multi_unpadding.cu
             test_causal_softmax.cu
             test_swizzle.cu
+            test_swap_first_dims.cu
 	          ../test_common.cu)
 if(USE_CUDA)
   list(APPEND test_cuda_sources

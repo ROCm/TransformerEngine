@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2023-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -528,21 +528,19 @@ std::vector<size_t> unravel(const size_t i, const NVTEShape &shape) {
 
 void compareResults_sequential(const std::string &name, const Tensor &test,
                                const void *ref, const bool rowwise,
-                               double atol, double rtol, bool if_on_gpus) {
+                               double atol, double rtol, bool if_on_gpus,
+                               const size_t tolerable_mismatches_limit) {
   if (if_on_gpus) test.to_cpu();
   const auto& shape = rowwise ? test.rowwise_shape() : test.columnwise_shape();
   const size_t N = product(shape);
+  size_t mismatches_num = 0;
+  int first_mismatch_idx = -1;
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(test.dtype(), T,
     const T *test_data = rowwise ? test.rowwise_cpu_dptr<T>() : test.columnwise_cpu_dptr<T>();
     const T *ref_data = reinterpret_cast<const T*>(ref);
     for (size_t i = 0; i < N; ++i) {
-#ifndef __HIP_PLATFORM_AMD__
       double t = static_cast<double>(test_data[i]);
       double r = static_cast<double>(ref_data[i]);
-#else
-      double t = static_cast<double>(static_cast<float>(test_data[i]));
-      double r = static_cast<double>(static_cast<float>(ref_data[i]));
-#endif
       bool mismatch = fabs(t - r) > atol && (r == 0 || fabs((t - r) / r) > rtol);
       /* For Float32 the floating point comparison is enough to error out */
       bool assertion = mismatch && test.dtype() == DType::kFloat32;
@@ -557,85 +555,102 @@ void compareResults_sequential(const std::string &name, const Tensor &test,
         assertion = !(cast_mean_m == std::min(t, r) && cast_mean_p == std::max(t, r));
       }
       std::string direction = rowwise ? "rowwise" : "columnwise";
-      ASSERT_FALSE(assertion) << "Error in tensor " << name << " in "
-                              << direction << " direction." << std::endl
-                              << "Mismatch at place " << to_string(unravel(i, shape))
-                              << " (" << std::to_string(i) << "): " << t << " vs " << r;
+      if (assertion) {
+        mismatches_num++;
+        if (first_mismatch_idx == -1) {
+          first_mismatch_idx = i;
+        }
+      }
+      if (mismatches_num > tolerable_mismatches_limit) {
+        const double first_mismatch_t = static_cast<double>(test_data[first_mismatch_idx]);
+        const double first_mismatch_r = static_cast<double>(ref_data[first_mismatch_idx]);
+
+        GTEST_FAIL() << mismatches_num << " mismatche(s) which is more than tolerable mismatch limit of "
+                    << tolerable_mismatches_limit << "." << std::endl
+                    << "Error in tensor " << name << " in "
+                    << direction << " direction." << std::endl
+                     << "First mismatch at place " << to_string(unravel(first_mismatch_idx, shape))
+                     << " (" << std::to_string(first_mismatch_idx) << "): "
+                     << first_mismatch_t << " vs " << first_mismatch_r;
+      }
     }
   );
 }
 
 template <typename T>
 static size_t getFirstMismatchIdx(const DType data_type, const T* test_data, const T* ref_data,
-                                  const size_t N, const double atol, const double rtol) {
+                                  const size_t N, const double atol, const double rtol,
+                                  size_t& mismatches) {
   int first_mismatch_idx = N;
 
-  bool is_mismatch_found = false;
-  #pragma omp parallel for schedule(static) firstprivate(is_mismatch_found) \
-    reduction(min: first_mismatch_idx) proc_bind(spread)
-  for (size_t i = 0; i < N; ++i) {
-    if (is_mismatch_found) {    // early escape of the omp thread
-      continue;
-    }
+  #pragma omp parallel reduction(min: first_mismatch_idx) reduction(+: mismatches) proc_bind(spread)
+  {
+    size_t thread_mismatches = 0;
+    #pragma omp for schedule(static)
+    for (size_t i = 0; i < N; ++i) {
+      double t = static_cast<double>(test_data[i]);
+      double r = static_cast<double>(ref_data[i]);
 
-#ifndef __HIP_PLATFORM_AMD__
-    double t = static_cast<double>(test_data[i]);
-    double r = static_cast<double>(ref_data[i]);
-#else
-    double t = static_cast<double>(static_cast<float>(test_data[i]));
-    double r = static_cast<double>(static_cast<float>(ref_data[i]));
-#endif
- 
-    bool mismatch = fabs(t - r) > atol && (r == 0 || fabs((t - r) / r) > rtol);
-    /* For Float32 the floating point comparison is enough to error out */
-    bool assertion = mismatch && (data_type == DType::kFloat32);
-    if (mismatch && !assertion) {
-      /* Check if it is just a failure of round to nearest choosing different
-          side of the real value */
-      const double mean = (t + r) / 2;
-      const double mean_p = mean >= 0 ? mean * (1 + 1e-6) : mean * (1 - 1e-6);
-      const double mean_m = mean >= 0 ? mean * (1 - 1e-6) : mean * (1 + 1e-6);
-      const double cast_mean_p = static_cast<double>(static_cast<T>(mean_p));
-      const double cast_mean_m = static_cast<double>(static_cast<T>(mean_m));
-      assertion = !(cast_mean_m == std::min(t, r) && cast_mean_p == std::max(t, r));
+      bool mismatch = fabs(t - r) > atol && (r == 0 || fabs((t - r) / r) > rtol);
+      /* For Float32 the floating point comparison is enough to error out */
+      bool assertion = mismatch && (data_type == DType::kFloat32);
+      if (mismatch && !assertion) {
+        /* Check if it is just a failure of round to nearest choosing different
+            side of the real value */
+        const double mean = (t + r) / 2;
+        const double mean_p = mean >= 0 ? mean * (1 + 1e-6) : mean * (1 - 1e-6);
+        const double mean_m = mean >= 0 ? mean * (1 - 1e-6) : mean * (1 + 1e-6);
+        const double cast_mean_p = static_cast<double>(static_cast<T>(mean_p));
+        const double cast_mean_m = static_cast<double>(static_cast<T>(mean_m));
+        assertion = !(cast_mean_m == std::min(t,r) && cast_mean_p == std::max(t,r));
+      }
+      if (assertion) {
+        if (i < first_mismatch_idx) {
+          first_mismatch_idx = i;
+        }
+        thread_mismatches++;
+      }
     }
-    if (assertion && i < first_mismatch_idx) {
-      first_mismatch_idx = i;
-      is_mismatch_found = true;
-    }
+    mismatches += thread_mismatches;
   }
   return first_mismatch_idx;
 }
 
 void compareResults_parallel(const std::string &name, const Tensor &test, const void *ref,
-                             const bool rowwise, double atol, double rtol, bool if_on_gpus) {
+                             const bool rowwise, double atol, double rtol, bool if_on_gpus,
+                             const size_t tolerable_mismatches_limit) {
   if (if_on_gpus) test.to_cpu();
   const auto& shape = rowwise ? test.rowwise_shape() : test.columnwise_shape();
   const size_t N = product(shape);
+  size_t mismatches = 0;
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(test.dtype(), T,
     const T *test_data = rowwise ? test.rowwise_cpu_dptr<T>() : test.columnwise_cpu_dptr<T>();
     const T *ref_data = reinterpret_cast<const T*>(ref);
 
-    const size_t i = getFirstMismatchIdx<T>(test.dtype(), test_data, ref_data, N, atol, rtol);
-    if (i != N) {
+    const size_t i = getFirstMismatchIdx<T>(test.dtype(), test_data, ref_data, N, atol, rtol, mismatches);
+    if ((i != N) && (mismatches > tolerable_mismatches_limit)) {
       const double t = static_cast<double>(test_data[i]);
       const double r = static_cast<double>(ref_data[i]);
       std::string direction = rowwise ? "rowwise" : "columnwise";
-      ASSERT_FALSE(true) << "Error in tensor " << name << " in "
-                         << direction << " direction." << std::endl
-                         << "Mismatch at place " << to_string(unravel(i, shape))
-                         << " (" << std::to_string(i) << "): " << t << " vs " << r;
+
+      GTEST_FAIL() << mismatches << " mismatche(s) which is more than tolerable mismatch limit of "
+                   << tolerable_mismatches_limit << "." << std::endl
+                   << "Error in tensor " << name << " in "
+                   << direction << " direction." << std::endl
+                   << "Mismatch at place " << to_string(unravel(i, shape))
+                   << " (" << std::to_string(i) << "): " << t << " vs " << r;
     }
   );
 }
 
 void compareResults(const std::string &name, const Tensor &test, const void *ref,
-                    const bool rowwise, double atol, double rtol, bool if_on_gpus) {
+                    const bool rowwise, double atol, double rtol, bool if_on_gpus,
+                    const size_t tolerable_mismatches_limit) {
   constexpr bool sequential = false;
   if constexpr (sequential) {
-    compareResults_sequential(name, test, ref, rowwise, atol, rtol, if_on_gpus);
+    compareResults_sequential(name, test, ref, rowwise, atol, rtol, if_on_gpus, tolerable_mismatches_limit);
   } else {
-    compareResults_parallel(name, test, ref, rowwise, atol, rtol, if_on_gpus);
+    compareResults_parallel(name, test, ref, rowwise, atol, rtol, if_on_gpus, tolerable_mismatches_limit);
   }
 }
 
@@ -672,93 +687,84 @@ void compareResults(const std::string &name, const uint8_t *test, const uint8_t 
 }
 
 void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
-                                  const size_t row_blocks, const size_t col_blocks, const size_t stride)
+                                    const size_t row_blocks, const size_t col_blocks, const size_t stride,
+                                    std::vector<size_t> &mismatch_indices,
+                                    size_t& mismatches_num, const size_t atol,
+                                    const double abs_tolerable_mismatches_limit,
+                                    const double rel_tolerable_mismatches_limit)
 {
+  const size_t N = row_blocks * col_blocks;
+  const size_t tolerable_mismatches_limit = std::min(abs_tolerable_mismatches_limit,
+                                                     std::floor(N * rel_tolerable_mismatches_limit));
+  mismatches_num = 0;
+
   for (int i = 0; i < row_blocks; ++i) {
     for (int j = 0; j < col_blocks; ++j) {
       const int idx = i * stride + j;
-      ASSERT_FALSE(test[idx] != ref[idx]) << "Error in " << name << std::endl
-        << "Mismatch: " << static_cast<int>(test[idx]) << " vs "
-        << static_cast<int>(ref[idx]) << " at index " << idx;
+      const int test_val = static_cast<int>(test[idx]);
+      const int ref_val = static_cast<int>(ref[idx]);
+      const int abs_delta = std::abs(test_val - ref_val);
+
+      if (abs_delta > atol) {
+        mismatches_num++;
+        mismatch_indices.push_back(idx);
+      }
+      if (mismatches_num > tolerable_mismatches_limit) {
+        std::cout << "Error in " << name << std::endl;
+        for (const int index : mismatch_indices) {
+          std::cout << "Mismatch at (" << index << "):"
+                    << static_cast<int>(test[index]) << " vs "
+                    << static_cast<int>(ref[index]) << std::endl;
+        }
+        GTEST_FAIL() << mismatches_num << " mismatche(s) which is more than tolerable mismatch limit of "
+                     << tolerable_mismatches_limit << ".";
+      }
     }
   }
 }
 
-void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
-                                  const size_t N)
-{
-  for (int i = 0; i < N; i++) {
-    ASSERT_FALSE(test[i] != ref[i]) << "Error in " << name << std::endl
-      << "Mismatch: " << static_cast<int>(test[i]) << " vs "
-      << static_cast<int>(ref[i]) << " at index " << i;
-  }
-}
 
 #ifdef __HIP_PLATFORM_AMD__
-void compare_e8m0_scaling_factors(const std::string &name, Tensor &output, const uint8_t *ref,
-                             const size_t row_blocks, const size_t col_blocks, const size_t stride, 
-                             double tol, bool rowwise, std::vector<std::tuple<size_t, size_t, int>> &mismatch_idx) {
-  const uint8_t *const test = rowwise ? output.rowwise_cpu_scale_inv_ptr<fp8e8m0>()
-                                       : output.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
-
-  const double scale_tol = std::max(1., row_blocks * col_blocks * tol);
-
-  for (int i = 0; i < row_blocks; i++) {
-    for (int j = 0; j < col_blocks; j++) {
-      const int idx = i * stride + j;
-      if (test[idx] != ref[idx]) {
-        int t_scale = static_cast<int>(test[idx]);
-        int r_scale = static_cast<int>(ref[idx]);
-        if (std::abs(t_scale - r_scale) == 1) {
-          mismatch_idx.emplace_back(i, j, r_scale-t_scale);
-        } else {
-          GTEST_FAIL() << "Error in " << name << std::endl
-          << "Mismatch: " << t_scale << " vs "
-          << r_scale << " at index " << idx;
-        }
+void adjust_ref_for_e8m0_scale_error(const std::string &name,
+                                     const std::vector<size_t> &mismatch_idx,
+                                     const uint8_t *test_scale, const uint8_t *ref_scale,
+                                     const size_t scale_stride, const size_t rows,
+                                     const size_t cols, bool rowwise, void *ref_ptr, DType otype) {
+  if (mismatch_idx.size() == 0) {
+    return;
+  }
+  const size_t col_blocks_size = rowwise ? 32 : 1;
+  const size_t row_blocks_size = rowwise ? 1 : 32;
+  GTEST_LOG_(INFO) << "Adjusting reference data for " << mismatch_idx.size()
+                   << " scale mismatches in tensor " << name << " "
+                   << (rowwise ? "rowwise" : "colwise") << " direction." << std::endl;
+  for (const auto scale_idx : mismatch_idx) {
+    const int scale_diff = ref_scale[scale_idx] - test_scale[scale_idx];
+    double scale_val;
+    if (scale_diff == 1) {
+      scale_val = 2.;
+    } else if (scale_diff == -1) {
+      scale_val = .5;
+    } else {
+      GTEST_FAIL() << "Error in " << name << ": mismatch " << test_scale[scale_idx] << " vs "
+                   << ref_scale[scale_idx] << " at index " << scale_idx;
+    }
+    const int i = scale_idx / scale_stride;
+    const int j = scale_idx % scale_stride;
+    size_t ii_min = i * row_blocks_size;
+    const size_t ii_max = std::min(ii_min + row_blocks_size, rows);
+    for (; ii_min < ii_max; ii_min++) {
+      size_t jj_min = j * col_blocks_size;
+      const size_t jj_max = std::min(jj_min + col_blocks_size, cols);
+      for (; jj_min < jj_max; jj_min++) {
+        const size_t data_idx = ii_min * cols + jj_min;
+        TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(otype, T, {
+          T *ref_data = reinterpret_cast<T *>(ref_ptr);
+          ref_data[data_idx] = static_cast<T>(static_cast<double>(ref_data[data_idx]) * scale_val);
+        });  // NOLINT(*)
       }
     }
   }
-  const size_t scale_mismatches = mismatch_idx.size();
-
-  ASSERT_FALSE(scale_mismatches > scale_tol) 
-  << "Error in " << name << std::endl << std::setprecision(4)
-  << "Total scale mismatches: " << scale_mismatches << " (" << 100.*(double)scale_mismatches/(double)(row_blocks*col_blocks)
-  << "%) Exceeds tolerance of " << scale_tol << " (" << 100.*tol <<  "%) mismatches";
-
-  if (scale_mismatches) {
-    std::cout << "\x1b[33mWARNING:\x1b[0m " << scale_mismatches 
-    << " scale mismatches were found. This does not imply an accuracy issue." << std::endl;
-    }
-}
-
-void adjust_ref(std::vector<std::tuple<size_t, size_t, int>> mismatch_idx, void *ref, const size_t row_blocks,
-                const size_t col_blocks, const size_t rows, const size_t cols, DType otype) {
-  TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY( otype, T,
-    T *ref_data = reinterpret_cast<T*>(ref);
-    double scale_val;
-    const size_t col_blocks_size = cols / col_blocks;
-    const size_t row_blocks_size = rows / row_blocks;
-    for (const auto &[i, j, scale_diff] : mismatch_idx) {
-      if (scale_diff == 1) {
-        scale_val = 2.;
-      } else if (scale_diff == -1) {
-        scale_val = .5;
-      } else { // Shouldn't ever reach this
-        GTEST_FAIL() << "Error in adjust_ref, |scale_diff| > 1";
-      }
-      size_t ii_min = i * row_blocks_size;
-      const size_t ii_max = std::min(ii_min + row_blocks_size, rows);
-      for (; ii_min < ii_max; ii_min++) {
-        size_t jj_min = j * col_blocks_size;
-        const size_t jj_max = std::min(jj_min + col_blocks_size, cols);
-        for (; jj_min < jj_max; jj_min++) {
-          const size_t data_idx = ii_min * cols + jj_min;
-          ref_data[data_idx] = static_cast<T>(static_cast<double>(ref_data[data_idx]) * scale_val);
-        }
-      }
-    }
-  ); // NOLINT(*)
 }
 #endif // #ifdef __HIP_PLATFORM_AMD__
 
@@ -946,9 +952,18 @@ void fillCase(Tensor *t, const InputsFillCase fill_case) {
   }
 }
 
+template void fillCase<byte>(Tensor *t, const InputsFillCase fill_case);
+template void fillCase<int16>(Tensor *t, const InputsFillCase fill_case);
+template void fillCase<int32>(Tensor *t, const InputsFillCase fill_case);
+template void fillCase<int64>(Tensor *t, const InputsFillCase fill_case);
+template void fillCase<fp32>(Tensor *t, const InputsFillCase fill_case);
+template void fillCase<fp16>(Tensor *t, const InputsFillCase fill_case);
+template void fillCase<bf16>(Tensor *t, const InputsFillCase fill_case);
 template void fillCase<fp8e4m3>(Tensor *t, const InputsFillCase fill_case);
 template void fillCase<fp8e5m2>(Tensor *t, const InputsFillCase fill_case);
-template void fillCase<fp32>(Tensor *t, const InputsFillCase fill_case);
+#if FP4_TYPE_SUPPORTED
+template void fillCase<fp4e2m1>(Tensor *t, const InputsFillCase fill_case);
+#endif
 
 void setRandomScale(Tensor *t) {
   std::uniform_real_distribution<> dis(-2.0, 1.0);

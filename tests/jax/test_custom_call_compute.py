@@ -34,6 +34,7 @@ from transformer_engine.jax.cpp_extensions.misc import get_cudnn_version
 from transformer_engine.jax import cpp_extensions as tex
 from transformer_engine.jax.cpp_extensions.misc import is_hip_extension
 from transformer_engine.jax.quantize import (
+    NoScaleTensor,
     ScaledTensor,
     ScaledTensor1x,
     ScaledTensor2x,
@@ -86,8 +87,14 @@ def is_shape_supported_by_mxfp8(input_shape):
         return False
 
 
-def assert_bitwise_scaled_tensors(a: ScaledTensor, b: ScaledTensor):
+def assert_bitwise_scaled_tensors(
+    a: ScaledTensor, b: ScaledTensor, precise_comparison: bool = True
+):
     if isinstance(a, ScaledTensor1x) and isinstance(b, ScaledTensor1x):
+        if not precise_comparison:
+            assert_allclose(a.dequantize(), b.dequantize(), dtype=a.data.dtype)
+            return
+
         assert a.scaling_mode == b.scaling_mode
         assert a.scale_inv.dtype == b.scale_inv.dtype
         if a.scaling_mode.is_tensor_scaling():
@@ -102,8 +109,12 @@ def assert_bitwise_scaled_tensors(a: ScaledTensor, b: ScaledTensor):
         assert_allclose(a.data, b.data)
 
     elif isinstance(a, ScaledTensor2x) and isinstance(b, ScaledTensor2x):
-        assert_bitwise_scaled_tensors(a.rowwise_tensor, b.rowwise_tensor)
-        assert_bitwise_scaled_tensors(a.colwise_tensor, b.colwise_tensor)
+        assert_bitwise_scaled_tensors(
+            a.rowwise_tensor, b.rowwise_tensor, precise_comparison=precise_comparison
+        )
+        assert_bitwise_scaled_tensors(
+            a.colwise_tensor, b.colwise_tensor, precise_comparison=precise_comparison
+        )
     else:
         pytest.fail("Unsupported input types")
 
@@ -180,7 +191,7 @@ ACTIVATION_TYPES = {
 
 class TestActivation:
     def ref_act(self, x, activation_type):
-        return _jax_act_lu(x, activation_type)
+        return _jax_act_lu(x, activation_type).data
 
     def value_n_grad_ref_func(self, x, activation_type):
         jitted_reference = jit(
@@ -335,8 +346,8 @@ class TestNorm:
                 ln_out, _ = _jax_rmsnorm(x, gamma, zero_centered_gamma, eps, quantizer)
             else:
                 ln_out, _, _ = _jax_layernorm(x, gamma, beta, zero_centered_gamma, eps, quantizer)
-            # if isinstance(ln_out, ScaledTensor):
-            #     ln_out = ln_out.dequantize()
+            # This is a no-op for non-quantized data
+            ln_out = ln_out.dequantize()
             return ln_out
 
         key = jax.random.PRNGKey(0)
@@ -462,14 +473,23 @@ class TestNorm:
                 x, gamma, beta, zero_centered_gamma, epsilon, quantizer=quantizer
             )
             ref_out, ref_mu, ref_rsigma = _jax_layernorm(
-                x, gamma, beta, zero_centered_gamma, epsilon, quantizer=ref_quantizer
+                x,
+                gamma,
+                beta,
+                zero_centered_gamma,
+                epsilon,
+                quantizer=ref_quantizer,
             )
         else:
             output, rsigma = tex.rmsnorm_fwd(
                 x, gamma, zero_centered_gamma, epsilon, quantizer=quantizer
             )
             ref_out, ref_rsigma = _jax_rmsnorm(
-                x, gamma, zero_centered_gamma, epsilon, quantizer=ref_quantizer
+                x,
+                gamma,
+                zero_centered_gamma,
+                epsilon,
+                quantizer=ref_quantizer,
             )
             ref_mu = None
 
@@ -489,24 +509,7 @@ class TestNorm:
             # if the input dtype is not float32
             precise_comparison = False
 
-        if precise_comparison:
-            assert_bitwise_scaled_tensors(output, ref_out)
-        else:
-            if isinstance(ref_out, ScaledTensor1x):
-                assert_allclose(output.dequantize(), ref_out.dequantize(), dtype=out_dtype)
-            elif isinstance(ref_out, ScaledTensor2x):
-                assert_allclose(
-                    output.rowwise_tensor.dequantize(),
-                    ref_out.rowwise_tensor.dequantize(),
-                    dtype=out_dtype,
-                )
-                assert_allclose(
-                    output.colwise_tensor.dequantize(),
-                    ref_out.colwise_tensor.dequantize(),
-                    dtype=out_dtype,
-                )
-            else:
-                pytest.fail("Unsupported output type")
+        assert_bitwise_scaled_tensors(output, ref_out, precise_comparison=precise_comparison)
 
         assert_allclose(rsigma, ref_rsigma, dtype=inp_dtype)
         if norm_type == "layernorm":
@@ -688,10 +691,6 @@ class TestGroupedQuantize:
             n_groups=n_groups,
         )
 
-        # grouped_quantize does not work with cudaGraph yet, so the jitting will breaks
-        # To test it locally, export XLA_FLAGS="--xla_gpu_enable_command_buffer= $XLA_FLAGS" to
-        # disable cudaGraph, then use the following jitted function
-
         scaled_tensor = tex.grouped_quantize(
             x, group_sizes=group_sizes, flatten_axis=flatten_axis, quantizer=grouped_quantizer
         )
@@ -776,12 +775,26 @@ class TestFusedQuantize:
         )(dz, x)
 
         if is_casted_output:
-            assert_bitwise_scaled_tensors(te_output, jax_output)
+            # TE kernels cast the intermediate results to the input dtype which reduces precision compared to the JAX implementation
+            precise_comparison = not (
+                in_dtype != jnp.float32 and scaling_mode.is_1d_block_scaling()
+            )
+            assert_bitwise_scaled_tensors(
+                te_output, jax_output, precise_comparison=precise_comparison
+            )
         else:
-            assert_allclose(te_output, jax_output)
+            assert isinstance(te_output, NoScaleTensor)
+            assert isinstance(jax_output, NoScaleTensor)
+            assert_allclose(te_output.data, jax_output.data)
 
         if is_dbias:
-            assert_allclose(te_dbias, jax_dbias)
+            # TE kernels cast the intermediate results to the input dtype which reduces precision compared to the JAX implementation, for dbias this typically only affects bfloat16.
+            precise_comparison = not (
+                in_dtype == jnp.bfloat16 and scaling_mode.is_1d_block_scaling()
+            )
+            assert_allclose(
+                te_dbias, jax_dbias, dtype=in_dtype if precise_comparison else out_dtype
+            )
 
     @pytest_parametrize_wrapper("activation_type", ACTIVATION_TYPES)
     @pytest_parametrize_wrapper("input_shape", ALL_ACTIVATION_SHAPES)
@@ -864,15 +877,6 @@ valid_fp8_gemm_operand_types = [
     (jnp_float8_e5m2_type, jnp_float8_e4m3_type),
     (jnp_float8_e4m3_type, jnp_float8_e5m2_type),
 ]
-
-
-def _use_jax_fp8_gemm(enabled=False):
-    import os
-
-    if enabled:
-        os.environ["NVTE_JAX_CUSTOM_CALLS_RE"] = "^(?!GemmPrimitive$).+$"
-    elif "NVTE_JAX_CUSTOM_CALLS_RE" in os.environ:
-        os.environ.pop("NVTE_JAX_CUSTOM_CALLS_RE")
 
 
 class TestDense:
@@ -1039,8 +1043,7 @@ def _ref_jax_norm_impl(x, gamma, beta, norm_type, zero_centered_gamma, eps, quan
         ln_out, _ = _jax_rmsnorm(x, gamma, zero_centered_gamma, eps, quantizer)
     else:
         ln_out, _, _ = _jax_layernorm(x, gamma, beta, zero_centered_gamma, eps, quantizer)
-    if isinstance(ln_out, ScaledTensor):
-        ln_out = ln_out.dequantize()
+    ln_out = ln_out.dequantize()
     return ln_out
 
 
@@ -1196,7 +1199,7 @@ class TestFusedDense:
                 bias_1_shape = (1,) * (linear_1_out.ndim - bias_1.ndim) + bias_1.shape
                 linear_1_out += jnp.reshape(bias_1, bias_1_shape)
 
-            x = _jax_act_lu(linear_1_out, activation_type)
+            x = _jax_act_lu(linear_1_out, activation_type).data
             linear_2_out = jax.lax.dot_general(x, kernel_2, (((1,), (0,)), ((), ())))
             if use_bias:
                 bias_2_shape = (1,) * (linear_2_out.ndim - bias_2.ndim) + bias_2.shape
@@ -1327,16 +1330,14 @@ class TestGroupedDense:
         )
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
-        # grouped_gemm does not work with cudaGraph yet, so the jitting will breaks
-        # To test it locally, export XLA_FLAGS="--xla_gpu_enable_command_buffer= $XLA_FLAGS" to
-        # disable cudaGraph, then use the following jitted function
-
         # jitting grouped_gemm
-        # prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
-        #     lhs, rhs, group_sizes, contracting_dims,
-        # )
+        prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
+            lhs,
+            rhs,
+            group_sizes,
+            contracting_dims,
+        )
 
-        prim_out = tex.grouped_gemm(lhs, rhs, group_sizes, contracting_dims)
         self._assert_grouped_gemm_output(prim_out, group_sizes, ref_out, dtype)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
@@ -1365,12 +1366,7 @@ class TestGroupedDense:
         )
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
-        # jitting grouped_gemm
-        # prim_out = jax.jit(tex.grouped_gemm, static_argnames=('contracting_dims',))(
-        #         lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
-        #         )
-
-        prim_out = tex.grouped_gemm(
+        prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
             lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
         )
 
@@ -1406,9 +1402,9 @@ class TestGroupedDense:
 
         value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_dense, (0, 1, 2))
         # jitting the grouped_dense
-        # value_n_grad_prim_func = jit(value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)),
-        #                              static_argnums=(4,))
-        value_n_grad_prim_func = value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2))
+        value_n_grad_prim_func = jit(
+            value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)), static_argnums=(4,)
+        )
 
         ref_out_sum, (ref_dgrad, ref_wgrad, ref_dbias) = value_n_grad_ref_func(
             x, kernel, bias, group_sizes, contracting_dims
@@ -1447,9 +1443,9 @@ class TestGroupedDense:
         value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_dense, (0, 1, 2))
 
         # jitting the grouped_dense
-        # value_n_grad_prim_func = jit(value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)),
-        #                              static_argnums=(4,))
-        value_n_grad_prim_func = value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2))
+        value_n_grad_prim_func = jit(
+            value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)), static_argnums=(4,)
+        )
 
         ref_out_sum, (ref_dgrad, ref_wgrad, ref_dbias) = value_n_grad_ref_func(
             x,
