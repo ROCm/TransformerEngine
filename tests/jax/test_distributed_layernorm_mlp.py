@@ -66,7 +66,9 @@ LN_SCALE_AXES = (W_NO_SHARD_AXES,)
 LN_BIAS_AXES = (W_NO_SHARD_AXES,)
 BIAS_1_AXES = (W_JOINED_AXES, W_TP_AXES)
 BIAS_2_AXES = (W_NO_SHARD_AXES,)
-INTERMEDIATE = 64
+# We set to 128 to ensure compatibility with MXFP8 GEMM which requires the
+# reduction dim to be multiple of 128
+INTERMEDIATE = 128
 
 
 # Only test with FSDP and TP as DP is not used

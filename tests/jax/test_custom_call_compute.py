@@ -57,7 +57,7 @@ GEMM_CASES = [
     (2048, 2048, 1024),
     (2048, 1024, 1024),
 ]
-
+TEST_SHAPES = [(64, 32, 64), (128, 64, 128), (128, 256, 256)]
 jnp_float8_e4m3_type = get_jnp_float8_e4m3_type()
 jnp_float8_e5m2_type = get_jnp_float8_e5m2_type()
 
@@ -882,8 +882,8 @@ def _check_mxfp8_gemm_support(
     w_qtype=jnp_float8_e4m3_type
 ):
     if not with_jax_gemm:
-        if jnp_float8_e5m2_type in (x_qtype, w_qtype):
-            pytest.skip("Float8E5M2 is not recommended for MXFP8 GEMM.")
+        # if jnp_float8_e5m2_type in (x_qtype, w_qtype):
+        #     pytest.skip("Float8E5M2 is not recommended for MXFP8 GEMM.")
         if (m % 16 != 0) or (n % 16 != 0) or (k % 128 != 0):
             pytest.skip(
                 f"Input shape {(m, k)} x {(k, n)} is not supported by MXFP8 GEMM."
@@ -930,7 +930,7 @@ class TestDense:
         assert_allclose(primitive_out, ref_out, dtype=jnp.bfloat16)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
-    @pytest_parametrize_wrapper("m,n,k", [(64, 32, 64)])
+    @pytest_parametrize_wrapper("m,n,k", TEST_SHAPES)
     @pytest_parametrize_wrapper("x_qtype,w_qtype", valid_fp8_gemm_operand_types)
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
     @pytest_parametrize_wrapper("data_layout", ["TN", "NT", "NN", "TT"])
@@ -988,17 +988,21 @@ class TestDense:
         assert_allclose(primitive_w_grad, ref_w_grad, dtype=jnp.bfloat16)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
-    @pytest_parametrize_wrapper("m,n,k", [(64, 32, 64)])
+    @pytest_parametrize_wrapper("m,n,k", TEST_SHAPES)
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_dense_grad_fp8(self, m, n, k, scaling_mode, with_jax_gemm):
         data_layout = "NN"
         x, w, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)
-        if scaling_mode.is_1d_block_scaling():
-            _check_mxfp8_gemm_support(with_jax_gemm, m, n, k)
-
         key = jax.random.PRNGKey(1)
-        bias = jax.random.uniform(key, n, dtype=jnp.bfloat16)
+        if scaling_mode.is_1d_block_scaling():
+            # Check for first GEMM
+            _check_mxfp8_gemm_support(with_jax_gemm, m, n, k)
+            # Check for second GEMM
+            _check_mxfp8_gemm_support(with_jax_gemm, m, k, n)
+            bias = None
+        else:
+            bias = jax.random.uniform(key, n, dtype=jnp.bfloat16)
 
         def primitive_func(x, w, bias, contracting_dims, quantizer_set):
             primitive_out = dense(
@@ -1007,9 +1011,10 @@ class TestDense:
             return jnp.mean(primitive_out)
 
         def ref_func(x, w, bias, data_layout):
-            return jnp.mean(
-                self._ref_gemm_with_jnp_dot(x, w, data_layout) + jnp.expand_dims(bias, axis=0)
-            )
+            out = self._ref_gemm_with_jnp_dot(x, w, data_layout)
+            if bias is not None:
+                out = out + jnp.expand_dims(bias, axis=0)
+            return jnp.mean(out)
 
         value_n_grad_primitive_func = value_and_grad(primitive_func, (0, 1, 2))
         value_n_grad_ref_func = value_and_grad(ref_func, (0, 1, 2))
@@ -1035,7 +1040,8 @@ class TestDense:
         assert_allclose(primitive_out, ref_out, dtype=jnp_float8_e4m3_type)
         assert_allclose(primitive_x_grad, ref_x_grad, dtype=jnp_float8_e5m2_type)
         assert_allclose(primitive_w_grad, ref_w_grad, dtype=jnp_float8_e5m2_type)
-        assert_allclose(primitive_bias_grad, ref_bias_grad, dtype=jnp_float8_e5m2_type)
+        if bias is not None:
+            assert_allclose(primitive_bias_grad, ref_bias_grad, dtype=jnp_float8_e5m2_type)
 
 
 @pytest.fixture(name="random_inputs")
@@ -1061,7 +1067,7 @@ def _ref_jax_norm_impl(x, gamma, beta, norm_type, zero_centered_gamma, eps, quan
 
 class TestFusedDense:
     @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
-    @pytest.mark.parametrize("m,n,k", [(64, 32, 64)])
+    @pytest.mark.parametrize("m,n,k", TEST_SHAPES)
     @pytest.mark.parametrize("scaling_mode", supported_scaling_modes)
     @pytest.mark.parametrize("norm_type", ["layernorm", "rmsnorm"])
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
@@ -1070,7 +1076,10 @@ class TestFusedDense:
         Test layernorm_dense VJP Rule
         """
         if scaling_mode.is_1d_block_scaling():
+            # Check for fwd GEMM
             _check_mxfp8_gemm_support(with_jax_gemm, m, n, k)
+            # Check for bwd GEMM
+            _check_mxfp8_gemm_support(with_jax_gemm, m, k, n)
         # zero_centered_gamma is already tested in TestNorm
         zero_centered_gamma = False
         eps = 1e-6
@@ -1142,7 +1151,7 @@ class TestFusedDense:
             assert_allclose(prim_beta_grad, ref_beta_grad, dtype=jnp_float8_e5m2_type)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
-    @pytest.mark.parametrize("m,n,k", [(64, 32, 64)])
+    @pytest.mark.parametrize("m,n,k", TEST_SHAPES)
     @pytest.mark.parametrize("activation_type", [("gelu",), ("gelu", "linear")])
     @pytest.mark.parametrize("scaling_mode", supported_scaling_modes)
     @pytest.mark.parametrize("norm_type", ["layernorm", "rmsnorm"])
@@ -1155,7 +1164,12 @@ class TestFusedDense:
         Test layernorm_mlp VJP Rule
         """
         if scaling_mode.is_1d_block_scaling():
+            # Check for first GEMM
             _check_mxfp8_gemm_support(with_jax_gemm, m, n, k)
+            # Check for second GEMM
+            _check_mxfp8_gemm_support(with_jax_gemm, m, k, n)
+            if use_bias:
+                pytest.skip("Bias is not supported for MXFP8 GEMM.")
         # zero_centered_gamma is already tested in TestNorm
         zero_centered_gamma = False
         eps = 1e-6
