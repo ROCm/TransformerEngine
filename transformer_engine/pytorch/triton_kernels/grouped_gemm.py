@@ -23,7 +23,7 @@ def general_grouped_gemm_triton(
     out_dtype: torch.dtype,
     workspaces: List[torch.Tensor],
     layout: str = "TN",
-    m_splits: torch.Tensor = None,
+    m_splits: List[int] = None,
     gelu: bool = False,
     grad=False,
     accumulate: bool = False,
@@ -63,11 +63,13 @@ def general_grouped_gemm_triton(
     """
     assert m_splits is not None, "m_splits required for Triton kernel"
     assert len(out) > 0, "Output tensor(s) must be pre-allocated and passed in C list"
-    
+    m_splits_tensor = kwargs.get("m_splits_tensor", None)
     # Determine operation type
     is_dgrad = (layout == "NN" and grad)
     is_wgrad = (layout == "NT" and grad)
-    
+    # Triton kernel needs GPU tensor
+    if m_splits_tensor is None:
+        m_splits_tensor = torch.tensor(m_splits, dtype=torch.int32, device=out[0].device)
     
     if is_wgrad:
         # WGRAD: ptgmm expects lhs=(K,M), rhs=(M,N), out=(G,K,N)
@@ -79,7 +81,7 @@ def general_grouped_gemm_triton(
         # Allocate bias_grad OUTPUT buffer if needed (kernel writes to this)
         bias_grad_tensor = None
         if use_bias:
-            G = m_splits.shape[0]
+            G = len(m_splits)
             K = B_tensor.shape[1]  # out_features
             bias_grad_tensor = torch.zeros(G, K, dtype=torch.float32, device=B_tensor.device)
         
@@ -88,7 +90,7 @@ def general_grouped_gemm_triton(
         ptgmm(
             lhs=B_tensor.t(),  # (out_features, M) - transpose to get correct shape
             rhs=A_tensor,      # (M, in_features)
-            group_sizes=m_splits,
+            group_sizes=m_splits_tensor,
             preferred_element_type=out_dtype,
             existing_out=out_tensor_3d,  # (G, out_features, in_features)
             config=None,
@@ -122,12 +124,12 @@ def general_grouped_gemm_triton(
         gmm(
             lhs=B_tensor,      # (M, out_features)
             rhs=A_tensor_3d,   # (G, out_features, in_features)
-            group_sizes=m_splits,
+            group_sizes=m_splits_tensor,
             preferred_element_type=out_dtype,
             existing_out=out_tensor,  # (M, in_features)
             config=None,
             bias=bias_tensor,
-            group_sizes_list=kwargs.get("m_splits_list", []),
+            group_sizes_list=m_splits,
         )
         
         grad_biases = [None] * len(m_splits) if bias is None else bias
@@ -151,12 +153,12 @@ def general_grouped_gemm_triton(
         gmm(
             lhs=B_tensor,      # (M, in_features)
             rhs=A_tensor_3d,   # (G, in_features, out_features)
-            group_sizes=m_splits,
+            group_sizes=m_splits_tensor,
             preferred_element_type=out_dtype,
             existing_out=out_tensor,  # (M, out_features)
             config=None,
             bias=bias_tensor,
-            group_sizes_list=kwargs.get("m_splits_list", []),
+            group_sizes_list=m_splits,
         )
         
         grad_biases = [None] * len(m_splits) if bias is None else bias

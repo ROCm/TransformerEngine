@@ -133,11 +133,10 @@ class _GroupedLinear(torch.autograd.Function):
         inputmats: list
         if fp8:
             inputmats = tex.split_quantize(inp_view, m_splits, input_quantizers)
+        elif use_grouped_gemm_triton:
+            inputmats = [cast_if_needed(inp_view, activation_dtype)]
         else:
-            if not use_grouped_gemm_triton:
-                inputmats = torch.split(cast_if_needed(inp_view, activation_dtype), m_splits)
-            else:
-                inputmats = [cast_if_needed(inp_view, activation_dtype)]
+            inputmats = torch.split(cast_if_needed(inp_view, activation_dtype), m_splits)
         # Initialize weights
         weights_fp8: list
         if fp8:
@@ -180,12 +179,6 @@ class _GroupedLinear(torch.autograd.Function):
         # Perform GEMM
         general_grouped_gemm_func = general_grouped_gemm_triton if use_grouped_gemm_triton else general_grouped_gemm
         # Prepare m_splits for each backend
-        m_splits_for_kernel = m_splits
-        if use_grouped_gemm_triton:
-            # Triton kernel needs GPU tensor
-            if m_splits_tensor is None:
-                m_splits_tensor = torch.tensor(m_splits, dtype=torch.int32, device=device)
-            m_splits_for_kernel = m_splits_tensor
         _ = general_grouped_gemm_func(
             weights_fp8,
             inputmats,
@@ -193,11 +186,11 @@ class _GroupedLinear(torch.autograd.Function):
             activation_dtype,
             get_multi_stream_cublas_workspace(),
             single_output=True,
-            m_splits=m_splits_for_kernel,
+            m_splits=m_splits,
             bias=biases,
             use_bias=use_bias,
             use_split_accumulator=use_split_accumulator,
-            m_splits_list=m_splits,
+            m_splits_tensor=m_splits_tensor,
         )
 
         if fp8_calibration:
@@ -254,7 +247,7 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.device = device
             ctx.grad_output_quantizers = grad_output_quantizers
             ctx.m_splits = m_splits
-            ctx.m_splits_for_kernel = m_splits_for_kernel
+            ctx.m_splits_tensor = m_splits_tensor
             ctx.num_gemms = num_gemms
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
@@ -378,10 +371,10 @@ class _GroupedLinear(torch.autograd.Function):
                     get_multi_stream_cublas_workspace(),
                     single_output=True,
                     layout="NN",
-                    m_splits=ctx.m_splits_for_kernel,
+                    m_splits=ctx.m_splits,
                     grad=True,
                     use_split_accumulator=dgrad_gemm_use_split_accumulator,
-                    m_splits_list=ctx.m_splits,
+                    m_splits_tensor=ctx.m_splits_tensor,
                 )
 
             if ctx.weights_requires_grad:
@@ -436,11 +429,12 @@ class _GroupedLinear(torch.autograd.Function):
                     workspaces=get_multi_stream_cublas_workspace(),
                     layout="NT",
                     grad=True,
-                    m_splits=ctx.m_splits_for_kernel,
+                    m_splits=ctx.m_splits,
                     use_bias=ctx.use_bias if grad_biases[0] is None else None,
                     bias=biases,
                     use_split_accumulator=wgrad_gemm_use_split_accumulator,
                     accumulate=accumulate_wgrad_into_param_main_grad,
+                    m_splits_tensor=ctx.m_splits_tensor,
                 )
                 # WGRAD
                 if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
