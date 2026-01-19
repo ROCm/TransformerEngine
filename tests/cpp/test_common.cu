@@ -895,7 +895,10 @@ void fillUniform(Tensor *t) {
       }
     );
   }
+#ifndef __HIP_PLATFORM_AMD__
+// Data is already on device on AMDGPU
   t->from_cpu();
+#endif
   std::uniform_real_distribution<> dis(-2.0, 1.0);
   t->set_scale_inv(dis(t->gen()));
 }
