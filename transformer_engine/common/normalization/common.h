@@ -158,6 +158,9 @@ struct BackwardKernelParams : public KernelParamsBase {
   // Input: gradient wrt. LN FWD output.
   void* dz;
 
+  // Input: extra tensor to add for fused backward+add
+  void* add;
+
   // Workspace for Wgrad pre-reduction.
   void* dbeta_part;
   void* dgamma_part;
@@ -169,12 +172,14 @@ struct BackwardKernelParams : public KernelParamsBase {
   void* dgamma;
 };
 
+using BackwardAddKernelParams = BackwardKernelParams;
+
 #ifdef __HIP_PLATFORM_AMD__
 enum class NVTE_Norm_Backend { Te };
 #else
 enum class NVTE_Norm_Backend { Te, Cudnn };
 #endif
-enum class NVTE_Norm_Stage { Forward, Backward };
+enum class NVTE_Norm_Stage { Forward, Backward, BackwardAdd };
 
 using TupleKeyType = std::tuple<uint64_t, uint64_t, uint64_t, bool>;
 struct TupleHash {
@@ -257,8 +262,8 @@ class NormalizationPlanBase {
                        cudaStream_t stream) = 0;
 
   virtual void execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr,
-                       void* dx_dptr, void* dz_dptr, void* dbeta_dptr, void* dgamma_dptr,
-                       void* workspace_dptr, cudaStream_t stream) = 0;
+                       void* dx_dptr, void* dz_dptr, void* add_dptr, void* dbeta_dptr,
+                       void* dgamma_dptr, void* workspace_dptr, cudaStream_t stream) = 0;
 
  private:
   virtual void _build() = 0;
@@ -281,8 +286,8 @@ class TeNormalizationPlan : public NormalizationPlanBase {
                cudaStream_t stream) override;
 
   void execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr, void* dx_dptr,
-               void* dz_dptr, void* dbeta_dptr, void* dgamma_dptr, void* workspace_dptr,
-               cudaStream_t stream) override;
+               void* dz_dptr, void* add_dptr, void* dbeta_dptr, void* dgamma_dptr,
+               void* workspace_dptr, cudaStream_t stream) override;
 
  private:
   void _set_workspace();
@@ -311,8 +316,8 @@ class CudnnNormalizationPlan : public NormalizationPlanBase {
                cudaStream_t stream) override;
 
   void execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr, void* dx_dptr,
-               void* dz_dptr, void* dbeta_dptr, void* dgamma_dptr, void* workspace_dptr,
-               cudaStream_t stream) override;
+               void* dz_dptr, void* add_dptr, void* dbeta_dptr, void* dgamma_dptr,
+               void* workspace_dptr, cudaStream_t stream) override;
 
  private:
   void _build() override;

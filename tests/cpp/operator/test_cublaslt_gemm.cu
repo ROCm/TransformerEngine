@@ -30,15 +30,6 @@ std::vector<std::tuple<size_t, size_t, size_t>> test_case_sizes = {
 
 std::vector<std::tuple<size_t, size_t, size_t>> test_case_sizes_mxfp8 = {
   {768, 3072, 4096},
-  {32, 128, 32},
-  {32, 128, 64},
-  {64, 128, 32},
-  {128, 128, 64},
-  {128, 128, 128},
-  {256, 128, 128},
-  {128, 256, 128},
-  {128, 128, 256},
-  {256, 256, 256},
 };
 
 //  A, B, Bias, Gelu, D

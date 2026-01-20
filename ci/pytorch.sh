@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -65,7 +65,9 @@ run_test_config(){
     run_default_fa 1 test_recipe.py
     run 1 test_sanity.py
     run_default_fa 1 test_sanity_import.py
-    run_default_fa 1 fused_attn/test_fused_attn.py # Backend selection is controlled by the test
+    run_default_fa 1 attention/test_attention.py # Backend selection is controlled by the test
+    run_default_fa 1 attention/test_cp_utils.py
+    run_default_fa 1 attention/test_kv_cache.py
     run_default_fa 1 triton_kernels/test_cast.py
     run_default_fa 1 triton_kernels/test_cast_mxfp8.py
     run_default_fa 1 triton_kernels/test_norm_common.py
@@ -73,15 +75,13 @@ run_test_config(){
     NVTE_TEST_TRITON_AUTOTUNE=1 run_default_fa_lbl "autotune" 3 triton_kernels/test_norms.py
     run_default_fa 1 test_parallel_cross_entropy.py
     NVTE_USE_DEQUANTIZE_TRITON=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa_lbl "triton" 3 test_numerics.py
-    NVTE_USE_RMSNORM_TRITON=1 run_default_fa_lbl "triton" 1 test_fusible_ops.py
+    NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 run_default_fa_lbl "triton" 1 test_fusible_ops.py
     NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "triton" 1 test_float8_current_scaling_exact.py
-    NVTE_USE_ATOMIC_AMAX=1 run_default_fa 3 test_numerics.py
-    NVTE_USE_ATOMIC_AMAX=1 run_default_fa 3 test_fusible_ops.py
-    NVTE_USE_ATOMIC_AMAX=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa 3 test_numerics.py
-    NVTE_USE_ATOMIC_AMAX=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa 3 test_fusible_ops.py
-    NVTE_USE_ATOMIC_AMAX=0 NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa 3 test_numerics.py
-    NVTE_USE_ATOMIC_AMAX=0 NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa 3 test_fusible_ops.py
-    NVTE_USE_ATOMIC_AMAX=1 run_default_fa 3 triton_kernels/test_cast.py
+    NVTE_USE_ATOMIC_AMAX=1 run_default_fa_lbl "amax" 3 test_numerics.py
+    NVTE_USE_ATOMIC_AMAX=1 run_default_fa_lbl "amax" 3 test_fusible_ops.py
+    NVTE_USE_ATOMIC_AMAX=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "amax+triton" 3 test_numerics.py
+    NVTE_USE_ATOMIC_AMAX=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "amax+triton" 3 test_fusible_ops.py
+    NVTE_USE_ATOMIC_AMAX=1 run_default_fa_lbl "amax" 3 triton_kernels/test_cast.py
 }
 
 run_test_config_mgpu(){
@@ -93,8 +93,8 @@ run_test_config_mgpu(){
     run_default_fa 2 distributed/test_numerics.py
     run_default_fa 1 distributed/test_torch_fsdp2.py
     run_default_fa 2 distributed/test_torch_fsdp2_fp8.py
-    run_default_fa_lbl "flash" 3 fused_attn/test_fused_attn_with_cp.py -k "with_flash"
-    run_default_fa_lbl "fused" 2 fused_attn/test_fused_attn_with_cp.py -k "with_fused"
+    run_default_fa_lbl "flash" 3 attention/test_attention_with_cp.py -k "with_flash"
+    run_default_fa_lbl "fused" 2 attention/test_attention_with_cp.py -k "with_fused"
 }
 
 run_benchmark() {

@@ -219,7 +219,7 @@ TEST(AmaxConsistencyTest, AtomicVsWorkspace) {
   // Path 2: two-stage amax using workspace
   std::vector<size_t> ws_shape{N};
   Tensor workspace("workspace", ws_shape, DType::kFloat32);
-  nvte_compute_amax_with_workspace(input.data(), out_ws.data(), workspace.data(), 0);
+  nvte_compute_amax_with_workspace(input.data(), out_ws.data(), workspace.data(), nullptr, 0);
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
