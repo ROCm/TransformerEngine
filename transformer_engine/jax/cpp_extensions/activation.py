@@ -912,9 +912,12 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         dbias = x_axes[-2:] if is_dbias else (prefix + "dbias",)
         amax = (prefix + "amax",)
 
+        # When is_2x==False, colwise_scale_inv needs a different factor
+        colwise_scale_inv_rule = scale_rules.colwise_rule if is_2x else (prefix + "x_colwise_scale_inv",)
+
         return SdyShardingRule(
             (dz_axes, x_axes, ("…2",)),
-            (out, colwise_out, scale_rules.rowwise_rule, scale_rules.colwise_rule, amax, dbias),
+            (out, colwise_out, scale_rules.rowwise_rule, colwise_scale_inv_rule, amax, dbias),
         )
 
 

@@ -603,13 +603,16 @@ class NormFwdPrimitive(BasePrimitive):
         mu = (prefix + "mu",) if norm_type == NVTE_Norm_Type.RMSNorm else rsigma
         amax = (prefix + "amax",)
 
+        # When is_2x==False, colwise_scale_inv needs a different factor
+        colwise_scale_inv_rule = scale_rules.colwise_rule if is_2x else (prefix + "x_colwise_scale_inv",)
+
         return SdyShardingRule(
             (x_axes, ("…1",), ("…2",), ("…3",)),
             (
                 out,
                 colwise_out,
                 scale_rules.rowwise_rule,
-                scale_rules.colwise_rule,
+                colwise_scale_inv_rule,
                 amax,
                 mu,
                 rsigma,
