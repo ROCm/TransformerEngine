@@ -790,15 +790,9 @@ std::pair<double, double> getTolerances(const DType type) {
   return {0, 0};
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 template <typename T>
 void generate_data_uniformly(T* data, const size_t size, std::mt19937* gen) {
-#ifdef __HIP_PLATFORM_AMD__
-  std::uniform_real_distribution<> dis(-2.0, 1.0);
-  for (int i = 0; i < size; i++) {
-    data[i] = static_cast<T>(dis(*gen));
-  }
-  gen->discard(size);
-#else
   // Check how many RNG calls are required to generate one uniform random value
   int rng_calls_per_val = 0;
   {
@@ -828,8 +822,8 @@ void generate_data_uniformly(T* data, const size_t size, std::mt19937* gen) {
     }
   }
   gen->discard(size * rng_calls_per_val);
-#endif
 }
+#endif
 
 #ifdef __HIP_PLATFORM_AMD__
 template <typename T>
