@@ -979,18 +979,18 @@ class TestDense:
     @pytest_parametrize_wrapper("m,n,k", TEST_SHAPES)
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
-    def test_dense_grad_fp8(self, m, n, k, scaling_mode, with_jax_gemm):
+    @pytest_parametrize_wrapper("use_bias", [False, True])
+    def test_dense_grad_fp8(self, m, n, k, scaling_mode, with_jax_gemm, use_bias):
         data_layout = "NN"
         x, w, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)
         key = jax.random.PRNGKey(1)
         if scaling_mode.is_1d_block_scaling():
             # Check for first GEMM
-            _check_mxfp8_gemm_support(with_jax_gemm, m, n, k)
+            _check_mxfp8_gemm_support(with_jax_gemm, m, n, k, use_bias)
             # Check for second GEMM
-            _check_mxfp8_gemm_support(with_jax_gemm, m, k, n)
-            bias = None
-        else:
-            bias = jax.random.uniform(key, n, dtype=jnp.bfloat16)
+            _check_mxfp8_gemm_support(with_jax_gemm, m, k, n, use_bias)
+
+        bias = jax.random.uniform(key, n, dtype=jnp.bfloat16) if use_bias else None
 
         def primitive_func(x, w, bias, contracting_dims, quantizer_set):
             primitive_out = dense(
