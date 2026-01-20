@@ -836,37 +836,54 @@ __global__ void affine_transform_and_cast(float* __restrict__ in, T* __restrict_
   }
 }
 
-void fillUniformDevice(Tensor* t) {
-  void* dst = t->rowwise() ? t->rowwise_dptr() : t->columnwise_dptr();
-  const auto shape = t->rowwise() ? t->rowwise_shape() : t->columnwise_shape();
-  const size_t N = product(shape);
+template <typename T>
+static void fillUniformLinearBufferDevice(T* dst_dev,
+                                          T* dst_cpu,              // nullable
+                                          size_t N,
+                                          unsigned long long seed,
+                                          float lo, float hi) {
+  // Fill a linear device buffer with uniform randoms in [*lo*, *hi*] and cast them to *T*.
+  // Optionally mirror the result into a provided CPU pointer.
+  if (N == 0)
+    return;
 
   float* tmp = nullptr;
-  cudaMalloc(&tmp, N * sizeof(float));
+  NVTE_CHECK_CUDA(cudaMalloc(&tmp, N * sizeof(float)));
+
+  rocrand_generator gen;
+  NVTE_CHECK(rocrand_create_generator(&gen, ROCRAND_RNG_PSEUDO_PHILOX4_32_10) == ROCRAND_STATUS_SUCCESS);
+  NVTE_CHECK(rocrand_set_seed(gen, seed) == ROCRAND_STATUS_SUCCESS);
+  NVTE_CHECK(rocrand_generate_uniform(gen, tmp, N) == ROCRAND_STATUS_SUCCESS);
+
+  dim3 block(256);
+  dim3 grid((N + block.x - 1) / block.x);
+  affine_transform_and_cast<T><<<grid, block, 0, 0>>>(
+      tmp, reinterpret_cast<T*>(dst_dev), N, lo, hi);
+  NVTE_CHECK(cudaGetLastError() == hipSuccess);
+
+  if (dst_cpu != nullptr) {
+    NVTE_CHECK_CUDA(cudaMemcpy(dst_cpu, dst_dev, N * sizeof(T), cudaMemcpyDeviceToHost));
+  }
+
+  NVTE_CHECK(rocrand_destroy_generator(gen) == ROCRAND_STATUS_SUCCESS);
+  NVTE_CHECK_CUDA(cudaFree(tmp));
+}
+
+static void fillUniformTensorDevice(Tensor* t) {
+  void* dst_dev_void = t->rowwise() ? t->rowwise_dptr() : t->columnwise_dptr();
+  const auto shape   = t->rowwise() ? (t->rowwise_shape()) : (t->columnwise_shape());
+  const size_t N      = product(shape);
 
   // per-tensor deterministic seed
   const unsigned long long seed = static_cast<unsigned long long>(t->gen()());
-  rocrand_generator gen;
-  rocrand_create_generator(&gen, ROCRAND_RNG_PSEUDO_PHILOX4_32_10);
-  rocrand_set_seed(gen, seed);
 
-  rocrand_generate_uniform(gen, tmp, N);
-
-  // map to [-2.0, 1.0] (like generate_data_uniformly) and cast into tensor dtype
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(t->dtype(), T, {
-    dim3 block(256);
-    dim3 grid((N + block.x - 1) / block.x);
-    affine_transform_and_cast<T><<<grid, block, 0, 0>>>(
-      tmp, reinterpret_cast<T*>(dst), N, -2.0f, 1.0f);
-
-    // Copy into the CPU mirror. We could use Tensor::to_cpu() here,
+    T* dst_dev = reinterpret_cast<T*>(dst_dev_void);
+    // Keep the CPU mirror in sync. We could use Tensor::to_cpu() here,
     // but that does more than just copying the data.
-    T* cpu_dst = t->rowwise() ? t->rowwise_cpu_dptr<T>() : t->columnwise_cpu_dptr<T>();
-    cudaMemcpy(cpu_dst, dst, N * sizeof(T), hipMemcpyDeviceToHost);
+    T* dst_cpu = t->rowwise() ? t->rowwise_cpu_dptr<T>() : t->columnwise_cpu_dptr<T>();
+    fillUniformLinearBufferDevice<T>(dst_dev, dst_cpu, N, seed, /*lo=*/-2.0f, /*hi=*/1.0f);
   });
-
-  rocrand_destroy_generator(gen);
-  cudaFree(tmp);
 }
 #endif
 
@@ -876,7 +893,7 @@ void fillUniform(Tensor *t) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(t->dtype(), T,
       {
 #ifdef __HIP_PLATFORM_AMD__
-        fillUniformDevice(t);
+        fillUniformTensorDevice(t);
 #else
         T *data = t->rowwise_cpu_dptr<T>();
         generate_data_uniformly(data, size, &(t->gen()));
@@ -888,7 +905,7 @@ void fillUniform(Tensor *t) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(t->dtype(), T,
       {
 #ifdef __HIP_PLATFORM_AMD__
-        fillUniformDevice(t);
+        fillUniformTensorDevice(t);
 #else
         T *data = t->columnwise_cpu_dptr<T>();
         generate_data_uniformly(data, size, &(t->gen()));
