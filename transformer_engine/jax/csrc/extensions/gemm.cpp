@@ -516,18 +516,6 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 
   size_t num_non_empty_gemms = lhs_list.size();
 
-  // if (is_mxfp8_scaling) {
-  //   for (int i = 0; i < num_non_empty_gemms; i++) {
-  //     // The i-th GEMM will use the (i % num_streams)-th stream to compute,
-  //     // use the same stream to swizzle the scaling factors to make sure that
-  //     // the swizzling is done before the GEMM computation starts.
-  //     int stream_id = i % num_streams;
-  //     cudaStream_t stream_i = nvte_get_compute_stream(stream_id);
-  //     nvte_swizzle_scaling_factors(lhs_swizzle_list[i], lhs_list[i], stream_i);
-  //     nvte_swizzle_scaling_factors(rhs_swizzle_list[i], rhs_list[i], stream_i);
-  //   }
-  // }
-
   // Launch zero-out kernels before the GEMM calls to use the sync in the multi-stream GEMM
   size_t num_zero_outs = zero_out_dptr_list.size();
   for (int i = 0; i < num_zero_outs; i++) {
