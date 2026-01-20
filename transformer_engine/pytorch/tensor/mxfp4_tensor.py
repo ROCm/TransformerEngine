@@ -77,12 +77,10 @@ class MXFP4Quantizer(Quantizer):
                 f"Biases and other 1D tensors should not be quantized with MXFP4."
             )
 
-        # Use fused Triton kernel for both rowwise and columnwise quantization
-        # This provides 2-4x speedup over separate AITER calls
-        use_fused_kernel = True  # Set to False to fallback to AITER
+        import os
+        use_fused_kernel = os.environ.get("USE_TRITON_FUSED_CAST_TRANSPOSE", "0") == "1"
         
         if use_fused_kernel:
-            # Import fused kernel
             from ..triton_kernels.cast_transpose import te_cast_transpose_mxfp4_triton
             
             # Wrap in DisableTorchDispatch to prevent recursive dequantization
@@ -94,6 +92,7 @@ class MXFP4Quantizer(Quantizer):
                 colwise_scale_uint8 = dst._columnwise_scale.view(torch.uint8) if dst._columnwise_scale is not None else None
                 
                 # Single fused kernel call for both rowwise and columnwise
+                # Disable shuffle since we're not allocating padded scale tensors
                 (fp4_rowwise, scale_rowwise, 
                  fp4_colwise, scale_colwise) = te_cast_transpose_mxfp4_triton(
                     src,
@@ -101,8 +100,8 @@ class MXFP4Quantizer(Quantizer):
                     rowwise_scale_out=rowwise_scale_uint8,
                     colwise_fp4_out=colwise_fp4_uint8,
                     colwise_scale_out=colwise_scale_uint8,
-                    shuffle_rowwise=True,
-                    shuffle_colwise=True,
+                    shuffle_rowwise=False,
+                    shuffle_colwise=False,
                 )
                 
                 # Results are already written to the uint8 views, which update the FP4 tensors
@@ -219,6 +218,13 @@ class MXFP4Quantizer(Quantizer):
     def calibrate(self, tensor: torch.Tensor) -> None:
         # No calibration needed for MXFP4 (uses per-block current scaling)
         pass
+
+    def _get_compatible_recipe(self):
+        """Returns recipe class that is compatible with this quantizer.
+        
+        MXFP4 doesn't have a dedicated recipe yet, return None for now.
+        """
+        return None
 
 
 class MXFP4Tensor(MXFP4TensorBase, QuantizedTensor):
