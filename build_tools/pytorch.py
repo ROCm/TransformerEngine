@@ -44,6 +44,8 @@ def setup_pytorch_extension(
 
     # Source files
     sources = all_files_in_dir(Path(csrc_source_files), name_extension="cpp")
+    # Also include CUDA/HIP kernel files (.cu) from extensions
+    sources.extend(all_files_in_dir(Path(csrc_source_files), name_extension="cu"))
 
     # Header files
     if rocm_build():
