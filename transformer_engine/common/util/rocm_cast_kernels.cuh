@@ -232,7 +232,6 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
           const float subwarp_amax = subwarp_reduce_max_broadcast<SUBWARP_WIDTH>(thread_amax);
           const e8m0_t biased_exponent =
               ptx::float_to_e8m0(subwarp_amax * Quantized_Limits<OType>::max_norm_rcp);
-
           // Only single thread writes the computed scaling factor
           if (tid_rowwise_X % THREADS_PER_SCALE_X_ROWWISE == 0) {
             const int global_scales_offset_Y =
