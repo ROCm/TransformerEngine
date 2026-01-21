@@ -880,12 +880,15 @@ static void fillUniformLinearBufferDevice(T* dst_dev,
 
   dim3 block(256);
   dim3 grid((N + block.x - 1) / block.x);
+
   affine_transform_and_cast<T><<<grid, block, 0, 0>>>(
       tmp, reinterpret_cast<T*>(dst_dev), N, lo, hi);
+
   if (random_sign) {
     apply_random_sign<T><<<grid, block, 0, 0>>>(
           reinterpret_cast<T*>(dst_dev), tmp_sign, N);
   }
+
   NVTE_CHECK_CUDA(cudaGetLastError());
 
   if (dst_cpu != nullptr) {
