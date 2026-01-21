@@ -917,8 +917,11 @@ def te_cast_transpose_mxfp4_triton(
     rowwise_scale_out: Optional[torch.Tensor] = None,
     colwise_fp4_out: Optional[torch.Tensor] = None,
     colwise_scale_out: Optional[torch.Tensor] = None,
-    shuffle_rowwise: bool = True,
-    shuffle_colwise: bool = True,
+    shuffle_rowwise_scale: bool = False,
+    shuffle_colwise_scale: bool = False,
+    shuffle_rowwise_fp4: bool = False,
+    shuffle_colwise_fp4: bool = False,
+    use_hadamard: bool = False,
 ) -> tuple:
     """
     Fused MXFP4 quantization with optional transpose
@@ -931,12 +934,21 @@ def te_cast_transpose_mxfp4_triton(
         rowwise_scale_out: Optional pre-allocated rowwise E8M0 scales
         colwise_fp4_out: Optional pre-allocated colwise FP4 output [N, M/2]
         colwise_scale_out: Optional pre-allocated colwise E8M0 scales
-        shuffle_rowwise: Whether to apply shuffle permutation to rowwise scales
-        shuffle_colwise: Whether to apply shuffle permutation to colwise scales
+        shuffle_rowwise_scale: Whether to apply shuffle permutation to rowwise scales
+        shuffle_colwise_scale: Whether to apply shuffle permutation to colwise scales
+        shuffle_rowwise_fp4: Whether to apply shuffle permutation to rowwise FP4 data
+        shuffle_colwise_fp4: Whether to apply shuffle permutation to colwise FP4 data
+        use_hadamard: Whether to apply Hadamard transform before quantization
     
     Returns:
         (rowwise_fp4, rowwise_scale, colwise_fp4, colwise_scale)
     """
+    # Check for unsupported features
+    if use_hadamard:
+        raise NotImplementedError("Fused Hadamard transform is not supported in Triton MXFP4 kernel")
+    if shuffle_rowwise_fp4 or shuffle_colwise_fp4:
+        raise NotImplementedError("FP4 data shuffle is not supported in Triton MXFP4 kernel")
+    
     # Reshape input to 2D
     original_shape = input.shape
     if input.dim() > 2:
@@ -963,7 +975,7 @@ def te_cast_transpose_mxfp4_triton(
         
         scaleN_row = triton.cdiv(N, MXFP4_BLOCK_SIZE)
         if rowwise_scale_out is None:
-            if shuffle_rowwise:
+            if shuffle_rowwise_scale:
                 # AITER shuffled layout
                 scaleM = triton.cdiv(M, 32) * 32
                 scaleN = triton.cdiv(scaleN_row, 8) * 8
@@ -993,7 +1005,7 @@ def te_cast_transpose_mxfp4_triton(
         
         scaleN_colwise_valid = triton.cdiv(M, MXFP4_BLOCK_SIZE)
         if colwise_scale_out is None:
-            if shuffle_colwise:
+            if shuffle_colwise_scale:
                 # AITER shuffled layout for colwise
                 scaleM_colwise_pad = triton.cdiv(N, 32) * 32
                 scaleN_colwise_pad = triton.cdiv(scaleN_colwise_valid, 8) * 8
@@ -1005,14 +1017,14 @@ def te_cast_transpose_mxfp4_triton(
                 # Non-shuffled layout
                 colwise_scale_out = torch.empty(N, scaleN_colwise_valid, dtype=torch.uint8, device=device)
         
-        if shuffle_colwise:
+        if shuffle_colwise_scale:
             scaleM_colwise_pad = triton.cdiv(N, 256) * 256
             scaleN_colwise_pad = triton.cdiv(scaleN_colwise_valid, 8) * 8
         else:
             scaleM_colwise_pad = N
             scaleN_colwise_pad = scaleN_colwise_valid
 
-        if shuffle_colwise:
+        if shuffle_colwise_scale:
             # Allocate padded temporary tensor for shuffled output
             colwise_scale_tmp = torch.empty(
                 scaleM_colwise_pad,
@@ -1071,12 +1083,12 @@ def te_cast_transpose_mxfp4_triton(
         MXFP4_BLOCK_SIZE=MXFP4_BLOCK_SIZE,
         USE_ROWWISE=USE_ROWWISE,
         USE_COLWISE=USE_COLWISE,
-        SHUFFLE_ROWWISE=shuffle_rowwise,
-        SHUFFLE_COLWISE=shuffle_colwise,
+        SHUFFLE_ROWWISE=shuffle_rowwise_scale,
+        SHUFFLE_COLWISE=shuffle_colwise_scale,
     )
     
     # Copy shuffled columnwise scales to output tensor (trim padding)
-    if USE_COLWISE and shuffle_colwise:
+    if USE_COLWISE and shuffle_colwise_scale:
         colwise_scale_out[:N, :scaleN_colwise_valid] = kernel_colwise_scale[:N, :scaleN_colwise_valid]
     
     return rowwise_fp4_out, rowwise_scale_out, colwise_fp4_out, colwise_scale_out

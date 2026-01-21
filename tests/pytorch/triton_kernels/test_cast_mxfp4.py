@@ -1,6 +1,7 @@
 # Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
+import math
 import pytest
 import torch
 import numpy as np
@@ -8,13 +9,13 @@ import os
 
 os.environ["USE_TRITON_FUSED_CAST_TRANSPOSE"] = "1"
 
-from transformer_engine.pytorch.tensor.mxfp4_tensor import MXFP4Quantizer
+from transformer_engine.pytorch.tensor.mxfp4_tensor import MXFP4Quantizer, MXFP4_BLOCK_SCALING_SIZE
 from transformer_engine.pytorch.triton_kernels.cast import te_quantize_triton
 from test_common import te_compare_results, fill_uniform
 
 
 def mxfp4_quantize_cpu(input_tensor, axis='row'):
-    """CPU reference for MXFP4 quantization matching Triton kernel behavior."""
+    """CPU reference for MXFP4 quantization matching Triton kernel behavior with shuffle."""
     original_shape = input_tensor.shape
     if input_tensor.dim() > 2:
         input_tensor = input_tensor.view(-1, input_tensor.shape[-1])
@@ -71,8 +72,17 @@ def mxfp4_quantize_cpu(input_tensor, axis='row'):
     fp4_odd = fp4_flat[:, 1::2]
     fp4_packed = ((fp4_odd << 4) | fp4_even).astype(np.uint8)
     
+    def cdiv(a, b): return (a + b - 1) // b
+    
+    scale_M_pad = cdiv(M, 256) * 256
+    scale_N_pad = cdiv(num_blocks, 8) * 8
+    scales_padded = np.full((scale_M_pad, scale_N_pad), 127, dtype=np.uint8)
+    
+    # Copy scales directly (no data shuffle support in Triton kernel)
+    scales_padded[:M, :num_blocks] = scales
+    
     fp4_packed_torch = torch.from_numpy(fp4_packed).to(input_tensor.device)
-    scales_torch = torch.from_numpy(scales).to(input_tensor.device)
+    scales_torch = torch.from_numpy(scales_padded).to(input_tensor.device)
     
     return fp4_packed_torch, scales_torch
 
@@ -94,11 +104,22 @@ def mxfp4_quantize_cpu(input_tensor, axis='row'):
     (False, True), 
     (True, False)
 ])
-def test_quantize_mxfp4(shape, in_dtype, rowwise, columnwise):
-    """Test MXFP4 quantization for rowwise/columnwise modes."""
+@pytest.mark.parametrize("shuffle_B_matrix", [False, True])
+def test_quantize_mxfp4(shape, in_dtype, rowwise, columnwise, shuffle_B_matrix):
+    """Test MXFP4 quantization for rowwise/columnwise modes with/without FP4 shuffle.
+    
+    Note: FP4 data shuffle (shuffle_B_matrix_for_aiter) is not yet supported in Triton kernel.
+    """
+    if shuffle_B_matrix:
+        pytest.skip("FP4 data shuffle not yet supported in Triton kernel")
+    
     input_tensor = fill_uniform(shape, dtype=in_dtype)
 
-    quantizer = MXFP4Quantizer(rowwise=rowwise, columnwise=columnwise)
+    quantizer = MXFP4Quantizer(
+        rowwise=rowwise, 
+        columnwise=columnwise,
+        shuffle_B_matrix_for_aiter=shuffle_B_matrix
+    )
     out = quantizer.make_empty(input_tensor.shape, dtype=in_dtype)
     quantized_out = te_quantize_triton(input_tensor, quantizer=quantizer, output=out)
 
@@ -108,6 +129,9 @@ def test_quantize_mxfp4(shape, in_dtype, rowwise, columnwise):
 
     if rowwise:
         ref_data, ref_scale = mxfp4_quantize_cpu(input_tensor, axis='row')
+        M = math.prod(input_tensor.shape[:-1])
+        K = input_tensor.shape[-1]
+        num_blocks = K // MXFP4_BLOCK_SCALING_SIZE
         
         te_compare_results(
             quantized_out._rowwise_data.view(torch.uint8),
@@ -118,9 +142,10 @@ def test_quantize_mxfp4(shape, in_dtype, rowwise, columnwise):
             use_torch_semantics=True
         )
         
+        # Compare only valid (non-padded) region - no shuffle extraction needed
         te_compare_results(
-            quantized_out._rowwise_scale.view(torch.uint8),
-            ref_scale,
+            quantized_out._rowwise_scale.view(torch.uint8)[:M, :num_blocks],
+            ref_scale[:M, :num_blocks],
             atol=scale_atol,
             rtol=0.0,
             msg="rowwise E8M0 scales mismatch",
@@ -129,6 +154,9 @@ def test_quantize_mxfp4(shape, in_dtype, rowwise, columnwise):
     
     if columnwise:
         ref_data, ref_scale = mxfp4_quantize_cpu(input_tensor, axis='col')
+        M = math.prod(input_tensor.shape[:-1])
+        K = input_tensor.shape[-1]
+        num_blocks = M // MXFP4_BLOCK_SCALING_SIZE
         
         te_compare_results(
             quantized_out._columnwise_data.view(torch.uint8),
@@ -139,9 +167,10 @@ def test_quantize_mxfp4(shape, in_dtype, rowwise, columnwise):
             use_torch_semantics=True
         )
         
+        # Compare only valid (non-padded) region - no shuffle extraction needed
         te_compare_results(
-            quantized_out._columnwise_scale.view(torch.uint8),
-            ref_scale,
+            quantized_out._columnwise_scale.view(torch.uint8)[:K, :num_blocks],
+            ref_scale[:K, :num_blocks],
             atol=scale_atol,
             rtol=0.0,
             msg="columnwise E8M0 scales mismatch",

@@ -44,9 +44,11 @@ class MXFP4Quantizer(Quantizer):
         *,
         rowwise: bool = True,
         columnwise: bool = True,
+        shuffle_B_matrix_for_aiter: bool = False,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = fp4_dtype
+        self.shuffle_B_matrix_for_aiter = shuffle_B_matrix_for_aiter
         assert self.dtype == tex.DType.kFloat4E2M1, "Only E2M1 format supported for MXFP4"
 
     def update_quantized(
@@ -65,11 +67,10 @@ class MXFP4Quantizer(Quantizer):
         if not src.is_contiguous():
             src = src.contiguous()
 
-        # MXFP4 only supports 2D tensors (matrices) for AITER gemm_a4w4
-        # Reshape if needed (e.g. [N, 1, K] -> [N, K])
         original_shape = src.shape
         if src.dim() > 2:
             src = src.view(-1, src.shape[-1])
+
         if src.dim() != 2:
             raise ValueError(
                 f"MXFP4 quantization requires 2D tensors for AITER gemm_a4w4, "
@@ -77,77 +78,33 @@ class MXFP4Quantizer(Quantizer):
                 f"Biases and other 1D tensors should not be quantized with MXFP4."
             )
 
-        import os
-        use_fused_kernel = os.environ.get("USE_TRITON_FUSED_CAST_TRANSPOSE", "0") == "1"
-        
-        if use_fused_kernel:
+
+
+        with torch._C._DisableTorchDispatch():
+            rowwise_fp4_uint8 = dst._rowwise_data.view(torch.uint8) if dst._rowwise_data is not None else None
+            rowwise_scale_uint8 = dst._rowwise_scale.view(torch.uint8) if dst._rowwise_scale is not None else None
+            colwise_fp4_uint8 = dst._columnwise_data.view(torch.uint8) if dst._columnwise_data is not None else None
+            colwise_scale_uint8 = dst._columnwise_scale.view(torch.uint8) if dst._columnwise_scale is not None else None
+            
+            # Triton kernel path - API aligned with HIP
             from ..triton_kernels.cast_transpose import te_cast_transpose_mxfp4_triton
             
-            # Wrap in DisableTorchDispatch to prevent recursive dequantization
-            with torch._C._DisableTorchDispatch():
-                # Convert FP4 dtypes to uint8 for Triton kernel (it doesn't recognize FP4 dtypes)
-                rowwise_fp4_uint8 = dst._rowwise_data.view(torch.uint8) if dst._rowwise_data is not None else None
-                rowwise_scale_uint8 = dst._rowwise_scale.view(torch.uint8) if dst._rowwise_scale is not None else None
-                colwise_fp4_uint8 = dst._columnwise_data.view(torch.uint8) if dst._columnwise_data is not None else None
-                colwise_scale_uint8 = dst._columnwise_scale.view(torch.uint8) if dst._columnwise_scale is not None else None
-                
-                # Single fused kernel call for both rowwise and columnwise
-                # Disable shuffle since we're not allocating padded scale tensors
-                (fp4_rowwise, scale_rowwise, 
-                 fp4_colwise, scale_colwise) = te_cast_transpose_mxfp4_triton(
-                    src,
-                    rowwise_fp4_out=rowwise_fp4_uint8,
-                    rowwise_scale_out=rowwise_scale_uint8,
-                    colwise_fp4_out=colwise_fp4_uint8,
-                    colwise_scale_out=colwise_scale_uint8,
-                    shuffle_rowwise=False,
-                    shuffle_colwise=False,
-                )
-                
-                # Results are already written to the uint8 views, which update the FP4 tensors
-                # No need to copy back since we passed views of the original tensors
-        else:
-            # Fallback to AITER's separate kernel calls
-            try:
-                import aiter
-            except ImportError:
-                raise ImportError(
-                    "AITER library not found. Please install AITER to use MXFP4 quantization. "
-                    "Install via: pip install -e /path/to/aiter"
-                )
+            te_cast_transpose_mxfp4_triton(
+                src,
+                rowwise_fp4_out=rowwise_fp4_uint8,
+                rowwise_scale_out=rowwise_scale_uint8,
+                colwise_fp4_out=colwise_fp4_uint8,
+                colwise_scale_out=colwise_scale_uint8,
+                shuffle_rowwise_scale=False,  # Not yet supported
+                shuffle_colwise_scale=False,  # Not yet supported
+                shuffle_rowwise_fp4=self.shuffle_B_matrix_for_aiter,
+                shuffle_colwise_fp4=self.shuffle_B_matrix_for_aiter,
+                use_hadamard=False,  # Not yet supported
+            )
 
-            # Quantize using AITER's triton quantizer
-            # Wrap in DisableTorchDispatch to prevent recursive dequantization
-            with torch._C._DisableTorchDispatch():
-                quantizer = aiter.get_triton_quant(aiter.QuantType.per_1x32)
-                fp4_data, e8m0_scale = quantizer(
-                    src, shuffle=True
-                )
-
-                # Store rowwise quantized data
-                if dst._rowwise_data is not None:
-                    dst._rowwise_data.copy_(fp4_data)
-                    dst._rowwise_scale.copy_(e8m0_scale)
-
-                # Store columnwise quantized data (if needed)
-                if dst._columnwise_data is not None:
-                    # For columnwise, we need to transpose first, then quantize
-                    src_t = src.t().contiguous()
-                    fp4_data_t, e8m0_scale_t = quantizer(
-                        src_t, shuffle=True
-                    )
-                    dst._columnwise_data.copy_(fp4_data_t)
-                    dst._columnwise_scale.copy_(e8m0_scale_t)
 
         # Update FP4 dtype
         dst._fp4_dtype = self.dtype
-        
-        # Store original shape if it was 3D (for reshaping output after GEMM)
-        if len(original_shape) > 2:
-            dst._original_shape = original_shape
-        
-        # Cache high-precision tensor for potential dequantization
-        dst._data = src
 
         return dst
 
@@ -186,19 +143,32 @@ class MXFP4Quantizer(Quantizer):
         M = math.prod(shape[:-1])
         K = shape[-1]
 
-        # Allocate FP4 data: [M, K/2] with proper FP4 dtype (not uint8!)
-        # AITER returns torch.float4_e2m1fn_x2, so we must use that dtype
+        def cdiv(a, b):
+            return (a + b - 1) // b
+
+        # Allocate FP4 data: [M, K/2]
         rowwise_data = torch.empty(M, K // 2, dtype=torch.float4_e2m1fn_x2, device=device)
-        rowwise_scale = torch.empty(M, K // MXFP4_BLOCK_SCALING_SIZE, dtype=torch.float8_e8m0fnu, device=device)
+        
+        # Allocate PADDED scale tensors for shuffle compatibility
+        rowwise_scale_N = K // MXFP4_BLOCK_SCALING_SIZE
+        rowwise_scale_M_pad = cdiv(M, 256) * 256
+        rowwise_scale_N_pad = cdiv(rowwise_scale_N, 8) * 8
+        rowwise_scale = torch.empty(
+            rowwise_scale_M_pad, rowwise_scale_N_pad, 
+            dtype=torch.float8_e8m0fnu, device=device
+        )
 
         # Allocate FP4 data transpose if needed
         columnwise_data = None
         columnwise_scale = None
         if self.columnwise_usage:
-            # For columnwise: [K, M/2] and [K, M/32]
             columnwise_data = torch.empty(K, M // 2, dtype=torch.float4_e2m1fn_x2, device=device)
+            colwise_scale_N = M // MXFP4_BLOCK_SCALING_SIZE
+            colwise_scale_M_pad = cdiv(K, 256) * 256
+            colwise_scale_N_pad = cdiv(colwise_scale_N, 8) * 8
             columnwise_scale = torch.empty(
-                K, M // MXFP4_BLOCK_SCALING_SIZE, dtype=torch.float8_e8m0fnu, device=device
+                colwise_scale_M_pad, colwise_scale_N_pad,
+                dtype=torch.float8_e8m0fnu, device=device
             )
 
         # Construct FP4 tensor
