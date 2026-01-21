@@ -21,7 +21,7 @@ find_package(OpenMP REQUIRED)
 if(USE_CUDA)
 target_link_libraries(test_util PUBLIC CUDA::cudart GTest::gtest_main ${TE_LIB} CUDA::nvrtc CUDNN::cudnn OpenMP::OpenMP_CXX)
 else()
-target_link_libraries(test_util PUBLIC hip::host hip::device GTest::gtest_main ${TE_LIB} OpenMP::OpenMP_CXX rocrand)
+target_link_libraries(test_util PUBLIC hip::host hip::device GTest::gtest_main ${TE_LIB} OpenMP::OpenMP_CXX hiprand)
 endif()
 target_compile_options(test_util PRIVATE -O2 -fopenmp)
 

@@ -24,7 +24,7 @@
 #include "util/logging.h"
 
 #ifdef __HIP_PLATFORM_AMD__
-#include <rocrand/rocrand.h>
+#include <curand.h>
 #endif
 
 namespace test {
@@ -869,13 +869,13 @@ static void fillUniformLinearBufferDevice(T* dst_dev,
     NVTE_CHECK_CUDA(cudaMalloc(&tmp_sign, N * sizeof(float)));
   }
 
-  rocrand_generator gen;
-  NVTE_CHECK(rocrand_create_generator(&gen, ROCRAND_RNG_PSEUDO_PHILOX4_32_10) == ROCRAND_STATUS_SUCCESS);
-  NVTE_CHECK(rocrand_set_seed(gen, seed) == ROCRAND_STATUS_SUCCESS);
-  NVTE_CHECK(rocrand_generate_uniform(gen, tmp, N) == ROCRAND_STATUS_SUCCESS);
+  curandGenerator_t gen;
+  NVTE_CHECK(curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_PHILOX4_32_10) == CURAND_STATUS_SUCCESS);
+  NVTE_CHECK(curandSetPseudoRandomGeneratorSeed(gen, seed) == CURAND_STATUS_SUCCESS);
+  NVTE_CHECK(curandGenerateUniform(gen, tmp, N) == CURAND_STATUS_SUCCESS);
 
   if (random_sign) {
-    NVTE_CHECK(rocrand_generate_uniform(gen, tmp_sign, N) == ROCRAND_STATUS_SUCCESS);
+    NVTE_CHECK(curandGenerateUniform(gen, tmp_sign, N) == CURAND_STATUS_SUCCESS);
   }
 
   dim3 block(256);
@@ -886,16 +886,16 @@ static void fillUniformLinearBufferDevice(T* dst_dev,
     apply_random_sign<T><<<grid, block, 0, 0>>>(
           reinterpret_cast<T*>(dst_dev), tmp_sign, N);
   }
-  NVTE_CHECK(cudaGetLastError() == hipSuccess);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 
   if (dst_cpu != nullptr) {
     NVTE_CHECK_CUDA(cudaMemcpy(dst_cpu, dst_dev, N * sizeof(T), cudaMemcpyDeviceToHost));
   }
 
-  NVTE_CHECK(rocrand_destroy_generator(gen) == ROCRAND_STATUS_SUCCESS);
+  NVTE_CHECK(curandDestroyGenerator(gen) == CURAND_STATUS_SUCCESS);
   NVTE_CHECK_CUDA(cudaFree(tmp));
   if (tmp_sign)
-    cudaFree(tmp_sign);
+    NVTE_CHECK_CUDA(cudaFree(tmp_sign));
 }
 
 static void fillUniformTensorDevice(Tensor* t, double lo=-2.0f,
