@@ -23,9 +23,7 @@
 #include <transformer_engine/transformer_engine.h>
 #include "util/logging.h"
 
-#ifdef __HIP_PLATFORM_AMD__
 #include <curand.h>
-#endif
 
 namespace test {
 
