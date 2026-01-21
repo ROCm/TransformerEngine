@@ -18,7 +18,8 @@ from utils import (
     is_devices_enough,
     pytest_parametrize_wrapper,
     use_jax_gemm,
-    _check_mxfp8_gemm_support,
+    _check_mxfp8_layernorm_mlp_grad_support,
+    _check_mxfp8_layernorm_mlp_support,
 )
 
 from transformer_engine.common import recipe
@@ -161,76 +162,6 @@ class TestDistributedLayernormMLP:
             )
         )
 
-    def _check_mxfp8_layernorm_mlp_support(
-        self,
-        batch_size,
-        intermediate_size,
-        activation_size,
-        hidden_in,
-        hidden_out,
-        mesh_config,
-        use_bias,
-        with_jax_gemm
-    ):
-        # Check input shape compatibility with MXFP8 GEMMs
-        # FWD 1
-        m = batch_size
-        k = hidden_in // mesh_config[1][1] # Account for TP sharding
-        n = activation_size
-        _check_mxfp8_gemm_support(
-            with_jax_gemm,
-            m, n, k,
-            use_bias
-        )
-        # FWD 2
-        k = intermediate_size // mesh_config[1][1]  # Account for TP sharding
-        n = hidden_out
-        _check_mxfp8_gemm_support(
-            with_jax_gemm,
-            m, n, k,
-            use_bias
-        )
-
-    def _check_mxfp8_layernorm_mlp_grad_support(
-        self,
-        batch_size,
-        intermediate_size,
-        activation_size,
-        hidden_in,
-        hidden_out,
-        mesh_config,
-        use_bias,
-        with_jax_gemm
-    ):
-        # Check forwards
-        self._check_mxfp8_layernorm_mlp_support(
-            batch_size,
-            intermediate_size,
-            activation_size,
-            hidden_in,
-            hidden_out,
-            mesh_config,
-            use_bias,
-            with_jax_gemm,
-        )
-        # BWD 1
-        m = batch_size
-        k = hidden_out // mesh_config[1][1]  # Account for TP sharding
-        n = intermediate_size
-        _check_mxfp8_gemm_support(
-            with_jax_gemm,
-            m, n, k,
-            use_bias
-        )
-        # BWD 2
-        m = intermediate_size
-        k = batch_size // mesh_config[1][1]  # Account for TP sharding
-        n = hidden_out
-        _check_mxfp8_gemm_support(
-            with_jax_gemm,
-            m, n, k,
-            use_bias
-        )
 
     def _test_layernorm_mlp_grad(
         self,
@@ -254,13 +185,13 @@ class TestDistributedLayernormMLP:
         ):
             pytest.xfail("Skip known failure case.")
         if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
-            self._check_mxfp8_layernorm_mlp_grad_support(
+            _check_mxfp8_layernorm_mlp_grad_support(
                 input_shape[0]*input_shape[1],
                 INTERMEDIATE,
                 len(activation_type)*INTERMEDIATE,
                 input_shape[2],
                 input_shape[2],
-                mesh_config,
+                mesh_config[1][1],
                 use_bias,
                 with_jax_gemm
             )
@@ -434,13 +365,13 @@ class TestDistributedLayernormMLP:
         with_jax_gemm,
     ):
         if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
-            self._check_mxfp8_layernorm_mlp_support(
+            _check_mxfp8_layernorm_mlp_support(
                 input_shape[0]*input_shape[1],
                 INTERMEDIATE,
                 len(activation_type)*INTERMEDIATE,
                 input_shape[2],
                 input_shape[2],
-                mesh_config,
+                mesh_config[1][1],
                 use_bias,
                 with_jax_gemm
             )

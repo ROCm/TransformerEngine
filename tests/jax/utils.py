@@ -66,6 +66,74 @@ def _check_mxfp8_gemm_support(with_jax_gemm, m, n, k, use_bias=False):
                 f"but the current detected version is {jax_version}."
             )
 
+def _check_mxfp8_layernorm_mlp_support(
+    batch_size,
+    intermediate_size,
+    activation_size,
+    hidden_in,
+    hidden_out,
+    n_tp_shards=1,
+    use_bias=False,
+    with_jax_gemm=False,
+):
+    # Check input shape compatibility with MXFP8 GEMMs
+    # FWD 1
+    m = batch_size
+    k = hidden_in // n_tp_shards # Account for TP sharding
+    n = activation_size
+    _check_mxfp8_gemm_support(
+        with_jax_gemm,
+        m, n, k,
+        use_bias
+    )
+    # FWD 2
+    k = intermediate_size // n_tp_shards  # Account for TP sharding
+    n = hidden_out
+    _check_mxfp8_gemm_support(
+        with_jax_gemm,
+        m, n, k,
+        use_bias
+    )
+
+def _check_mxfp8_layernorm_mlp_grad_support(
+    batch_size,
+    intermediate_size,
+    activation_size,
+    hidden_in,
+    hidden_out,
+    n_tp_shards=1,
+    use_bias=False,
+    with_jax_gemm=False,
+):
+    # Check forwards
+    _check_mxfp8_layernorm_mlp_support(
+        batch_size,
+        intermediate_size,
+        activation_size,
+        hidden_in,
+        hidden_out,
+        n_tp_shards,
+        use_bias,
+        with_jax_gemm,
+    )
+    # BWD 1
+    m = batch_size
+    k = hidden_out // n_tp_shards  # Account for TP sharding
+    n = intermediate_size
+    _check_mxfp8_gemm_support(
+        with_jax_gemm,
+        m, n, k,
+        use_bias
+    )
+    # BWD 2
+    m = intermediate_size
+    k = batch_size // n_tp_shards  # Account for TP sharding
+    n = hidden_out
+    _check_mxfp8_gemm_support(
+        with_jax_gemm,
+        m, n, k,
+        use_bias
+    )
 
 def _generate_drop_path_shape(shape: Sequence[int], batch_dim: int) -> Sequence[int]:
     # Generate broadcast dims for drop_path.
