@@ -2015,12 +2015,13 @@ def _test_grouped_linear_accuracy(
 @pytest.mark.parametrize("num_gemms", [3, 6])
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
-@pytest.mark.parametrize("recipe", [None])
-@pytest.mark.parametrize("fp8_model_params", [False])
-@pytest.mark.parametrize("fuse_wgrad_accumulation", [False])
+@pytest.mark.parametrize("recipe", fp8_recipes + [None])
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
+@pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("delay_wgrad_compute", all_boolean)
-def test_grouped_linear_triton_accuracy(
+@pytest.mark.parametrize("use_triton", all_boolean)
+def test_grouped_linear_accuracy(
     dtype,
     num_gemms,
     bs,
@@ -2030,11 +2031,16 @@ def test_grouped_linear_triton_accuracy(
     fuse_wgrad_accumulation,
     bias,
     delay_wgrad_compute,
+    use_triton,
     parallel_mode=None,
+    use_cutlass=False,
 ):
-    os.environ["NVTE_USE_GROUPED_GEMM_TRITON"] = "1"
+    if use_triton:
+        os.environ["NVTE_USE_GROUPED_GEMM_TRITON"] = "1"
     try:
         fp8 = recipe is not None
+        if not IS_HIP_EXTENSION and use_triton:
+            pytest.skip("Triton grouped gemm is only supported on HIP.")
 
         if IS_HIP_EXTENSION:
             if dtype not in (torch.float32,) and fuse_wgrad_accumulation and not fp8:
@@ -2108,118 +2114,19 @@ def test_grouped_linear_triton_accuracy(
             delay_wgrad_compute,
         )
 
-        atol, rtol = get_tolerances(dtype)
-        if dtype == torch.float32:
-            atol = 2.6e-6
-            rtol = 5e-2
+        atol, rtol = 0, 0
+        if use_cutlass:
+            atol, rtol = 1e-3, 1e-3
+        if use_triton:
+            atol, rtol = get_tolerances(dtype)
+            if dtype == torch.float32:
+                atol = 2.6e-6
+                rtol = 5e-2
         for o, o_ref in zip(outputs, outputs_ref):
             torch.testing.assert_close(o, o_ref, rtol=rtol, atol=atol)
     finally:
-        os.environ.pop("NVTE_USE_GROUPED_GEMM_TRITON", None)
-
-
-@pytest.mark.parametrize("dtype", param_types, ids=str)
-@pytest.mark.parametrize("num_gemms", [3, 6])
-@pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", ["126m"])
-@pytest.mark.parametrize("recipe", fp8_recipes + [None])
-@pytest.mark.parametrize("fp8_model_params", all_boolean)
-@pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
-@pytest.mark.parametrize("bias", all_boolean)
-@pytest.mark.parametrize("delay_wgrad_compute", all_boolean)
-def test_grouped_linear_accuracy(
-    dtype,
-    num_gemms,
-    bs,
-    model,
-    recipe,
-    fp8_model_params,
-    fuse_wgrad_accumulation,
-    bias,
-    delay_wgrad_compute,
-    parallel_mode=None,
-    use_cutlass=False,
-):
-    fp8 = recipe is not None
-
-    if IS_HIP_EXTENSION:
-        if dtype not in (torch.float32,) and fuse_wgrad_accumulation and not fp8:
-            pytest.skip(f"Rocm does not support fused wgrad accumulation for {dtype}.")
-    if fp8 and fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
-        pytest.skip("FP8 parameters are not supported in debug mode.")
-
-    config = model_configs[model]
-    if config.max_seqlen_q % 16 != 0 and fp8:
-        pytest.skip("FP8 requires sequence length to be divisible by 16.")
-
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
-        grouped_linear = GroupedLinear(
-            num_gemms,
-            config.hidden_size,
-            4 * config.hidden_size,
-            bias=bias,
-            params_dtype=dtype,
-            parallel_mode=parallel_mode,
-            device="cuda",
-            fuse_wgrad_accumulation=fuse_wgrad_accumulation,
-            delay_wgrad_compute=delay_wgrad_compute,
-            save_original_input=False,
-        ).eval()
-        sequential_linear = torch.nn.ModuleList(
-            [
-                Linear(
-                    config.hidden_size,
-                    4 * config.hidden_size,
-                    bias=bias,
-                    params_dtype=dtype,
-                    parallel_mode=parallel_mode,
-                    device="cuda",
-                    fuse_wgrad_accumulation=fuse_wgrad_accumulation,
-                ).eval()
-                for _ in range(num_gemms)
-            ]
-        )
-
-    # Share params
-    with torch.no_grad():
-        for i in range(num_gemms):
-            sequential_linear[i].weight = Parameter(getattr(grouped_linear, f"weight{i}").clone())
-            if bias:
-                sequential_linear[i].bias = Parameter(getattr(grouped_linear, f"bias{i}").clone())
-            if fuse_wgrad_accumulation:
-                weight_i = getattr(grouped_linear, f"weight{i}")
-                weight_i.main_grad = torch.rand_like(weight_i, dtype=torch.float32)
-                sequential_linear[i].weight.main_grad = weight_i.main_grad.clone()
-
-    outputs_ref = _test_grouped_linear_accuracy(
-        sequential_linear,
-        num_gemms,
-        bs,
-        dtype,
-        config,
-        recipe,
-        fp8,
-        fuse_wgrad_accumulation,
-        delay_wgrad_compute,
-    )
-    outputs = _test_grouped_linear_accuracy(
-        grouped_linear,
-        num_gemms,
-        bs,
-        dtype,
-        config,
-        recipe,
-        fp8,
-        fuse_wgrad_accumulation,
-        delay_wgrad_compute,
-    )
-
-    for o, o_ref in zip(outputs, outputs_ref):
-        if use_cutlass:
-            torch.testing.assert_close(o, o_ref, rtol=1e-3, atol=1e-3)
-        else:
-            # cuBLAS implementation should be bit-wise match
-            torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+        if use_triton:
+            os.environ.pop("NVTE_USE_GROUPED_GEMM_TRITON", None)
 
 
 @pytest.mark.skipif(
@@ -2251,6 +2158,7 @@ def test_grouped_linear_accuracy_cutlass(
         fuse_wgrad_accumulation,
         False,
         delay_wgrad_compute,
+        False,
         None,
         use_cutlass=True,
     )
@@ -2368,6 +2276,7 @@ def test_grouped_linear_accuracy_single_gemm(recipe):
         fuse_wgrad_accumulation=True,
         bias=True,
         delay_wgrad_compute=False,
+        use_triton=False,
     )
 
 

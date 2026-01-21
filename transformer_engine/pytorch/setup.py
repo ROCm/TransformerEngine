@@ -155,16 +155,6 @@ if __name__ == "__main__":
         name=PACKAGE_NAME,
         version=te_version(),
         description="Transformer acceleration library - Torch Lib",
-        packages=[
-            "transformer_engine",
-            "transformer_engine.pytorch",
-            "transformer_engine.pytorch.triton_kernels",
-            "transformer_engine.pytorch.triton_kernels.gmm",
-        ],
-        package_dir={"": str(current_file_path.parent.parent)},
-        package_data={
-            "transformer_engine.pytorch.triton_kernels.gmm": ["configs/*.json"],
-        },
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": CachedWheelsCommand},
         install_requires=install_requirements(),
