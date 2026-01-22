@@ -246,8 +246,8 @@ jobs:
           python --version
           pip list | egrep "transformer_e|torch|jax|numpy|ml_dtypes|typing_ext"
 
-          HIP_VISIBLE_DEVICES=1 ci/pytorch.sh > /workspace/torch_sgpu.log 2>&1 &
-          torch_pid=$!; echo Pytorch test pid $!
+          HIP_VISIBLE_DEVICES=1 ci/pytorch.sh > /workspace/torch_sgpu.log 2>&1
+          torch_rc=$?
           
           HIP_VISIBLE_DEVICES=2 ci/jax.sh > /workspace/jax_sgpu.log 2>&1 &
           jax_pid=$!; echo JAX test pid $!
@@ -257,7 +257,6 @@ jobs:
           
           wait $core_pid; core_rc=$?
           wait $jax_pid; jax_rc=$?
-          wait $torch_pid; torch_rc=$?
           
           # /workspace/FAIL_* files are for failure markers we can extract to the host runner and process later
           # Check PyTorch
