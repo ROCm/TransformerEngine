@@ -6,10 +6,6 @@ name: AITER Prebuilt Upload
 on:
   workflow_dispatch:
     inputs:
-      gpu_archs:
-        description: "GPU arch list for aiter build"
-        required: true
-        default: "gfx942;gfx950"
       docker_image:
         description: "Docker image"
         required: false
@@ -65,12 +61,11 @@ jobs:
           docker exec \
             -e NVTE_AITER_PREBUILT_BASE_URL=${NVTE_AITER_PREBUILT_BASE_URL} \
             -e NVTE_AITER_PREBUILT_UPLOAD_TOKEN=${NVTE_AITER_PREBUILT_UPLOAD_TOKEN} \
-            -e GPU_ARCHS="${{ inputs.gpu_archs }}" \
             te-aiter-upload bash -c 'set -ex
               if [ -z "${NVTE_AITER_PREBUILT_UPLOAD_TOKEN}" ]; then
                 echo "Missing secrets.AITER_ARTIFACTORY_TOKEN" >&2
                 exit 1
               fi
               export HIP_PATH=""
-              .github/scripts/aiter_upload.sh --build
+              .github/scripts/aiter_prebuild_upload.sh --build
             '

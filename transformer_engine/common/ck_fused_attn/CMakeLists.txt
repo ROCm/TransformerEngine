@@ -51,14 +51,12 @@ else()
     # If not downloaded, Fallback: Build from source
     if(NOT AITER_PREBUILT_DOWNLOAD_SUCCESS)
       message(STATUS " [AITER-PREBUILT] Building aiter from source.")
-      # delete the existing aiter/jit/build dir for a clean build
-      file(REMOVE_RECURSE "${__AITER_SOURCE_DIR}/aiter/jit/build")
-      # compile the libmha_fwd.so and libmha_bwd.so
-      set(ENV{AITER_LOG_MORE} 1)
-      # fp32 to bf16 cvt env still required for MI300X
-      set(ENV{CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT} ${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT})
       execute_process(
-        COMMAND python3 ${__AITER_TEST_DIR}/compile.py
+        COMMAND bash ${CMAKE_CURRENT_LIST_DIR}/aiter_build.sh
+                --aiter-dir ${__AITER_SOURCE_DIR}
+                --aiter-test-dir ${__AITER_TEST_DIR}
+                --gpu-archs ${V3_ASM_ARCHS_STR}
+                --ck-tile-bf16 ${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT}
       )
       # libmha_fwd.so and libmha_bwd.so will be under 3rdparty/aiter/op_tests/cpp/mha 
       cache_local_aiter_build(${__AITER_TEST_DIR})

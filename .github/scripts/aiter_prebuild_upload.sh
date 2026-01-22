@@ -37,21 +37,20 @@ REMOTE_URL=""
 if [[ ${HAS_UPLOAD} -eq 1 ]]; then
   REMOTE_URL="${NVTE_AITER_PREBUILT_BASE_URL}/${KEY}.tar.gz"
   if curl -sIf "${REMOTE_URL}" >/dev/null; then
-    echo "[aiter-upload] Remote prebuilt already present at ${REMOTE_URL}; nothing to do."
+    echo "[aiter-upload] Remote prebuilt already exists at ${REMOTE_URL}; nothing to do."
     exit 0
   fi
 fi
 
-# Optional build stage (uses GPU_ARCHS if set, else gfx942;gfx950)
+# Optional build stage
 if [[ "${1:-}" == "--build" ]]; then
   shift
-  ARCHS="${GPU_ARCHS:-gfx942;gfx950}"
-  echo "[AITER-PREBUILT] Building aiter libs for ${ARCHS} ..."
-  rm -rf "${AITER_DIR}/aiter/jit/build"
-  AITER_LOG_MORE=1 \
-  CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=3 \
-  GPU_ARCHS="${ARCHS}" \
-  python3 "${ROOT_DIR}/3rdparty/aiter/op_tests/cpp/mha/compile.py"
+  GPU_ARCHS="gfx942;gfx950"
+  echo "[AITER-PREBUILT] Building aiter libs for ${GPU_ARCHS} ..."
+  bash "${ROOT_DIR}/transformer_engine/common/ck_fused_attn/aiter_build.sh" \
+    --aiter-dir "${ROOT_DIR}/3rdparty/aiter" \
+    --aiter-test-dir "${ROOT_DIR}/3rdparty/aiter/op_tests/cpp/mha" \
+    --gpu-archs "${GPU_ARCHS}"
   mkdir -p "${EXTRACT_DIR}"
   cp "${ROOT_DIR}/3rdparty/aiter/op_tests/cpp/mha/libmha_fwd.so" "${EXTRACT_DIR}/"
   cp "${ROOT_DIR}/3rdparty/aiter/op_tests/cpp/mha/libmha_bwd.so" "${EXTRACT_DIR}/"
