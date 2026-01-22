@@ -177,7 +177,13 @@ class _GroupedLinear(torch.autograd.Function):
                 use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
 
         # Perform GEMM
-        general_grouped_gemm_func = general_grouped_gemm_triton if use_grouped_gemm_triton else general_grouped_gemm
+        # Perform GEMM
+        if use_grouped_gemm_triton:
+            general_grouped_gemm_func = general_grouped_gemm_triton
+            kwargs = {"m_splits_tensor": m_splits_tensor}
+        else:
+            general_grouped_gemm_func = general_grouped_gemm
+            kwargs = {}
         # Prepare m_splits for each backend
         _ = general_grouped_gemm_func(
             weights_fp8,
@@ -190,7 +196,7 @@ class _GroupedLinear(torch.autograd.Function):
             bias=biases,
             use_bias=use_bias,
             use_split_accumulator=use_split_accumulator,
-            m_splits_tensor=m_splits_tensor,
+            **kwargs,
         )
 
         if fp8_calibration:
@@ -362,7 +368,12 @@ class _GroupedLinear(torch.autograd.Function):
                             rowwise_usage=quantizer.rowwise_usage,
                             columnwise_usage=quantizer.columnwise_usage,
                         )
-                general_grouped_gemm_func = general_grouped_gemm_triton if ctx.use_grouped_gemm_triton else general_grouped_gemm
+                if ctx.use_grouped_gemm_triton:
+                    general_grouped_gemm_func = general_grouped_gemm_triton
+                    kwargs = {"m_splits_tensor": ctx.m_splits_tensor}
+                else:
+                    general_grouped_gemm_func = general_grouped_gemm
+                    kwargs = {}
                 general_grouped_gemm_func(
                     weights,
                     grad_output,
@@ -374,7 +385,7 @@ class _GroupedLinear(torch.autograd.Function):
                     m_splits=ctx.m_splits,
                     grad=True,
                     use_split_accumulator=dgrad_gemm_use_split_accumulator,
-                    m_splits_tensor=ctx.m_splits_tensor,
+                    **kwargs,
                 )
 
             if ctx.weights_requires_grad:
@@ -423,6 +434,12 @@ class _GroupedLinear(torch.autograd.Function):
                         else:
                             inputmats = [cast_if_needed(inp_view, ctx.activation_dtype)]
 
+                if ctx.use_grouped_gemm_triton:
+                    general_grouped_gemm_func = general_grouped_gemm_triton
+                    kwargs = {"m_splits_tensor": ctx.m_splits_tensor}
+                else:
+                    general_grouped_gemm_func = general_grouped_gemm
+                    kwargs = {}
                 grouped_gemm_wgrad = functools.partial(
                     general_grouped_gemm_func,
                     out_dtype=ctx.activation_dtype,
@@ -434,7 +451,7 @@ class _GroupedLinear(torch.autograd.Function):
                     bias=biases,
                     use_split_accumulator=wgrad_gemm_use_split_accumulator,
                     accumulate=accumulate_wgrad_into_param_main_grad,
-                    m_splits_tensor=ctx.m_splits_tensor,
+                    **kwargs,
                 )
                 # WGRAD
                 if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
