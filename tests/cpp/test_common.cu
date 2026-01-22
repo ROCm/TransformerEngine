@@ -824,26 +824,23 @@ void generate_data_uniformly(T* data, const size_t size, std::mt19937* gen) {
 #endif
 
 #ifdef __HIP_PLATFORM_AMD__
-template <typename T>
-__global__ void affine_transform_and_cast(const float* __restrict__ in,
-                                          T* __restrict__ out, size_t n, double lo,
-                                          double hi) {
-  // Clamp values in *in* to [lo, hi] and cast to type *T* for *out*.
+template <typename T, bool RandomSign>
+__global__ void affine_transform_cast_signs(const float* __restrict__ in,
+                                            const float* __restrict__ signs,
+                                            T* __restrict__ out,
+                                            size_t n, double lo, double hi) {
+  // Map values in *in* from [0, 1) to [lo, hi) and cast to type *T* for *out*.
+  // Potentially flip signs if RandomSign==true.
   size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < n) {
-    out[idx] = static_cast<T>(lo + (hi - lo) * in[idx]);
-  }
-}
+    float val = lo + (hi - lo) * in[idx];
 
-template <typename T>
-__global__ void apply_random_sign(T* __restrict__ data,
-                                 const float* __restrict__ signs,
-                                 size_t n) {
-  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx < n) {
-    if (signs[idx] < 0.5f) {
-      data[idx] = static_cast<T>(-static_cast<float>(data[idx]));
+    if constexpr (RandomSign) {
+      if (signs[idx] < 0.5f)
+        val = -val;
     }
+
+    out[idx] = static_cast<T>(val);
   }
 }
 
@@ -879,13 +876,12 @@ static void fillUniformLinearBufferDevice(T* dst_dev,
   dim3 block(256);
   dim3 grid((N + block.x - 1) / block.x);
 
-  affine_transform_and_cast<T><<<grid, block, 0, 0>>>(
-      tmp, reinterpret_cast<T*>(dst_dev), N, lo, hi);
-
-  if (random_sign) {
-    apply_random_sign<T><<<grid, block, 0, 0>>>(
-          reinterpret_cast<T*>(dst_dev), tmp_sign, N);
-  }
+  if (random_sign)
+    affine_transform_cast_signs<T, true><<<grid, block, 0, 0>>>(
+      tmp, tmp_sign, reinterpret_cast<T*>(dst_dev), N, lo, hi);
+  else
+    affine_transform_cast_signs<T, false><<<grid, block, 0, 0>>>(
+      tmp, nullptr, reinterpret_cast<T*>(dst_dev), N, lo, hi);
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 
