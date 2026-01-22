@@ -28,7 +28,59 @@ Feature Support Status
 Installation
 ============
 
+Install from manylinux wheels
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Starting from ROCm 7.0, we provide manylinux wheels for Transformer Engine releases on `https://repo.radeon.com/rocm/manylinux`. For example, the wheels for ROCm 7.1.1 are at `https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1/`. From the page, you can find four files related to Transformer Engine:
+
+* transformer_engine_rocm-*-py3-none-manylinux_2_28_x86_64.whl - This is the wheel file for installing the common library. It should not be installed by itself.
+* transformer_engine-*-py3-none-any.whl - This is the wheel file for installing the common TE Python package.
+* transformer_engine_jax-*.tar.gz - This is the source tar ball for the JAX extension.
+* transformer_engine_torch-*.tar.gz - This is the source tar ball for the Pytorch extension.
+
+Below are the example commands to download and install the wheels. They install both Pytorch and JAX extensions on the system where both frameworks are installed.
+
+.. code-block:: bash
+
+  wget https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1/transformer_engine_rocm-2.2.0-py3-none-manylinux_2_28_x86_64.whl
+  wget https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1/transformer_engine-2.2.0-py3-none-any.whl
+  wget https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1/transformer_engine_jax-2.2.0.tar.gz
+  wget https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1/transformer_engine_torch-2.2.0.tar.gz
+
+  pip install ./transformer_engine* --no-build-isolation
+
+Install TE from source
+^^^^^^^^^^^^^^^^^^
+
 Execute the following commands to install ROCm Transformer Engine from source on AMDGPUs:
+
+.. code-block:: bash
+
+  # Clone TE repo and submodules
+  git clone --recursive https://github.com/ROCm/TransformerEngine.git
+
+  cd TransformerEngine
+  export NVTE_FRAMEWORK=pytorch,jax #optionally set framework, currently only support pytorch and jax; if not set will try to detect installed frameworks
+  export NVTE_ROCM_ARCH=gfx942,gfx950 # gfx942 for support of MI300/MI325, and gfx950 for support of MI350
+
+  # Build Platform Selection (optional)
+  # Note: Useful when both ROCm and CUDA platforms are present in the Docker
+  export NVTE_USE_ROCM=1  #Use 1 for ROCm, or set to 0 to use CUDA; If not set will try to detect installed platform, prioritizing ROCm
+
+  pip install . --no-build-isolation
+
+It is also possible to build wheels for later installation with "pip wheel ." although those wheels will not be portable to systems with
+different libraries installed. If the build still fails with the "--no-build-isolation" flag try installing setuptools<80.0.0
+
+Note on Switching between Installation from Source and Installation from Wheels
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Sometimes, issues might occur when installing from source on a system where a previous installation with wheels, or vice versa. It is safe to uninstall TE first before 
+switching between installing from source and installing from wheels. Here is the example command:
+
+.. code-block:: bash
+
+  # The package name pattern might be transformer_engine or transformer-engine depending on setuptools version
+  pip list | grep transformer.engine | xargs pip uninstall -y
 
 Known Issue with ROCm 6.4 PyTorch Release
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -56,27 +108,6 @@ Re-install PyTorch
   # Build and install
   ./tools/amd_build/build_amd.py
   BUILD_TEST=0 python3 setup.py install
-
-Install TE
-^^^^^^^^^^^^^^^^^^
-
-.. code-block:: bash
-
-  # Clone TE repo and submodules
-  git clone --recursive https://github.com/ROCm/TransformerEngine.git
-
-  cd TransformerEngine
-  export NVTE_FRAMEWORK=pytorch,jax #optionally set framework, currently only support pytorch and jax; if not set will try to detect installed frameworks
-  export NVTE_ROCM_ARCH=gfx942 # CK fused attn only support MI200 and MI300 and fp8 features are only supported on MI300
-
-  # Build Platform Selection (optional)
-  # Note: Useful when both ROCm and CUDA platforms are present in the Docker
-  export NVTE_USE_ROCM=1  #Use 1 for ROCm, or set to 0 to use CUDA; If not set will try to detect installed platform, prioritizing ROCm
-
-  pip install --no-build-isolation .
-
-It is also possible to build wheels for later installation with "pip wheel ." although those wheels will not be portable to systems with
-different libraries installed. This build may also require "--no-build-isolation" and if the build still fails with this flag try installing setuptools<80.0.0
 
 Test
 ====
@@ -260,6 +291,12 @@ For the scenario that both backends are enabled and match the problem configurat
 Note that when using `THD` format tensors with CK Fused Attention, one should pass `None` for `cu_seqlens_q_padded, cu_seqlens_kv_padded`
 to indicate that there is no padding between sequences. Otherwise, passing proper tensors will indicate padding between sequences. This is the case
 for both the `FusedAttention` and `DotProductAttention` modules.
+
+Certain settings can be enabled to potentially optimize workloads depending on the nature of the inputs and expected outputs:
+
+* NVTE_CK_RUNTIME_NUM_SEGMENTS - by default 0, if set to 1 then the JAX integration will calculate the number of segments at runtime. Enabling this requires also disabling the GPU graph by setting `XLA_FLAGS="--xla_gpu_graph_level=0"`.
+* NVTE_CK_RUNTIME_MAX_SEQLEN - by default 0, if set to 1 then the max sequence length will be calculated at runtime. This can result in speedups in cases where there are many zero-length sequences. Enabling this while using the JAX integration requires also disabling the GPU graph by setting `XLA_FLAGS="--xla_gpu_graph_level=0"`.
+* NVTE_CK_ZERO_OUT_PAD - by default 1, if set to 0 then the output of the FA forward pass will not be initialized to zero, meaning invalid regions (representing padding) may take nonzero values. Only used if input has padding.
 
 AITER FA v3 Kernels
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -489,15 +526,15 @@ For example to use the NGC PyTorch container interactively,
 
 .. code-block:: bash
 
-    docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:25.04-py3
+    docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:25.08-py3
 
 For example to use the NGC JAX container interactively,
 
 .. code-block:: bash
 
-    docker run --gpus all -it --rm nvcr.io/nvidia/jax:25.04-py3
+    docker run --gpus all -it --rm nvcr.io/nvidia/jax:25.08-py3
 
-Where 25.04 (corresponding to April 2025 release) is the container version.
+Where 25.08 (corresponding to August 2025 release) is the container version.
 
 **Benefits of using NGC containers:**
 

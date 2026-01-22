@@ -199,7 +199,8 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
     }
   } else {
     NVTE_CHECK(t.scale.dptr == nullptr, "Scale is not supported for non-FP8 output ", name);
-    NVTE_CHECK(t.amax.dptr == nullptr, "Amax is not supported for non-FP8 output ", name);
+    // Note: amax is supported for non-FP8 output as it can be fused into the computation
+    //       and later used for quantization with no need to compute it separately
     NVTE_CHECK(t.scale_inv.dptr == nullptr, "Scale_inv is not supported for non-FP8 output ", name);
     NVTE_CHECK(t.columnwise_scale_inv.dptr == nullptr,
                "Scale_inv is not supported for non-FP8 input ", name);
@@ -545,11 +546,11 @@ void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream) {
   // Zero out tensor data if allocated
   if (t.data.dptr != nullptr) {
     const size_t size_in_bytes = nvte_tensor_size_bytes(tensor);
-    (void)cudaMemsetAsync(t.data.dptr, 0, size_in_bytes, stream);
+    NVTE_CHECK_CUDA(cudaMemsetAsync(t.data.dptr, 0, size_in_bytes, stream));
   }
   // Set amax to 0 if allocated
   if (t.amax.dptr != nullptr) {
-    (void)cudaMemsetAsync(t.amax.dptr, 0, sizeof(float), stream);
+    NVTE_CHECK_CUDA(cudaMemsetAsync(t.amax.dptr, 0, sizeof(float), stream));
   }
 }
 

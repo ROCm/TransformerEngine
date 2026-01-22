@@ -1,25 +1,31 @@
 /*************************************************************************
- * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 #pragma once
 
+#include <cfloat>
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include <transformer_engine/cast.h>
 
-#include <cfloat>
-
-#include "../common.h"
-#include "../transpose/cast_transpose.h"
-#include "../util/vectorized_pointwise.h"
-#include "../utils.cuh"
+#include "common.h"
 #include "math.h"
-#include "transformer_engine/transformer_engine.h"
-#include "../util/rocm_vectorized_2d.cuh"
+#include "ptx.cuh"
+#include "rocm_vectorized_2d.cuh"
+#include "transformer_engine/cast.h"
+#include "transpose/cast_transpose.h"
+#include "vectorized_pointwise.h"
+#include "utils.cuh"
 
 namespace transformer_engine {
+
+// Forward declaration, definition is in cast_kernels.cuh
+template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
+          float (*OP)(float, const ParamOP &)>
+void mxfp8_quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop,
+                    Tensor *output, Tensor *dbias, Tensor *workspace, cudaStream_t stream);
+
 
 constexpr size_t MXFP8_CHUNK_DIM_Y = 64;
 constexpr size_t MXFP8_CHUNK_DIM_X = 64;
@@ -45,7 +51,7 @@ constexpr size_t MXFP8_ITERATIONS = MXFP8_CHUNK_DIM_Y / MXFP8_BUFFER_DIM_Y;  // 
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, size_t SCALE_DIM_Y,
-          size_t SCALE_DIM_X, bool IS_ALIGNED, bool IS_NORM = false>
+          size_t SCALE_DIM_X, bool IS_ALIGNED>
 __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
     cast_mxfp8_2D_kernel(const IType *input_ptr,
                          const IType *act_input_ptr,
@@ -209,6 +215,10 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
                 partial_dbias_rowwise[chunk_X].data.elt[j] += elt;
               }
             }
+            // Numerical truncation: downcast to IType (BF16/FP16) and upcast back to FP32
+            if constexpr (!std::is_same_v<IType, float>) {
+              elt = static_cast<float>(static_cast<IType>(elt));
+            }
             in_compute[j] = elt;
             if (!out_of_bounds) {
               thread_amax = fmaxf(thread_amax, fabsf(elt));
@@ -221,8 +231,7 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
 
           const float subwarp_amax = subwarp_reduce_max_broadcast<SUBWARP_WIDTH>(thread_amax);
           const e8m0_t biased_exponent =
-              float_to_e8m0(subwarp_amax * Quantized_Limits<OType>::max_norm_rcp) + (IS_NORM ? 1 : 0); // Normalization requires a +1 scale to avoid saturation
-
+              ptx::float_to_e8m0(subwarp_amax * Quantized_Limits<OType>::max_norm_rcp);
           // Only single thread writes the computed scaling factor
           if (tid_rowwise_X % THREADS_PER_SCALE_X_ROWWISE == 0) {
             const int global_scales_offset_Y =
@@ -234,7 +243,7 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
             scales_rowwise[scale_idx] = biased_exponent;
           }
 
-          const float block_scale_inverse = exp2f_rcp(biased_exponent);
+          const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
 
 #pragma unroll
           for (int j = 0; j < ELEMS_PER_THREAD; j++) {
@@ -268,6 +277,10 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
               partial_dbias_colwise[chunk_X] += elt;
             }
           }
+          // Numerical truncation: downcast to IType (BF16/FP16) and upcast back to FP32
+          if constexpr (!std::is_same_v<IType, float>) {
+            elt = static_cast<float>(static_cast<IType>(elt));
+          }
           in_compute[i] = elt;
           if (!out_of_bounds) {
             amax = fmaxf(amax, fabsf(elt));
@@ -278,7 +291,7 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
         __builtin_assume(amax >= 0);
         block_amax = fmaxf(block_amax, amax);
 
-        const e8m0_t biased_exponent = float_to_e8m0(amax * Quantized_Limits<OType>::max_norm_rcp) + (IS_NORM ? 1 : 0); // Normalization requires a +1 scale to avoid saturation
+        const e8m0_t biased_exponent = ptx::float_to_e8m0(amax * Quantized_Limits<OType>::max_norm_rcp);
 
         const int global_scales_offset_Y = scales_colwise_chunk_offset_Y + iter;
         const int global_scales_offset_X = scales_colwise_chunk_offset_X + tid_colwise_X;
@@ -286,7 +299,7 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
             global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
         scales_colwise[scale_idx] = biased_exponent;
 
-        const float block_scale_inverse = exp2f_rcp(biased_exponent);
+        const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
 #pragma unroll
         for (int i = 0; i < SCALE_DIM_Y; i++) {
           out_colwise_sh[i][tid_colwise_X] =
@@ -539,5 +552,6 @@ void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tenso
       NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
   }
 }
+
 
 } // namespace transformer_engine
