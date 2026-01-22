@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
@@ -65,6 +65,10 @@ __global__ void compute_ref_kernel(
   float b_scale_inv_scalar,
   const fp8e8m0* __restrict__ a_scale_inv_mxfp8,  // used when mxfp8 == true
   const fp8e8m0* __restrict__ b_scale_inv_mxfp8,
+  size_t a_scale_ld,
+  size_t b_scale_ld,
+  bool a_scale_is_colwise,
+  bool b_scale_is_colwise,
   const Bias_Type* __restrict__ bias_data,
   float d_scale,
   size_t m, size_t k, size_t n,
@@ -110,8 +114,10 @@ __global__ void compute_ref_kernel(
       if (a_scale_inv_mxfp8) {
         const size_t kc = kk / 32;
 
-        const size_t a_scale_idx = ii * k_chunks + kc;
-        const size_t b_scale_idx = jj * k_chunks + kc;
+        const size_t a_scale_idx =
+            a_scale_is_colwise ? (kc * a_scale_ld + ii) : (ii * a_scale_ld + kc);
+        const size_t b_scale_idx =
+            b_scale_is_colwise ? (kc * b_scale_ld + jj) : (jj * b_scale_ld + kc);
 
         a_scale_inv_val = exp2f(a_scale_inv_mxfp8[a_scale_idx] - 127.0f);
         b_scale_inv_val = exp2f(b_scale_inv_mxfp8[b_scale_idx] - 127.0f);
@@ -209,52 +215,22 @@ static void run_reference(
 
   const fp8e8m0* a_scale_dev = nullptr;
   const fp8e8m0* b_scale_dev = nullptr;
-
-  // If MXFP8, pack scale_inv into tight [row][kc] buffers on host, then transfer to device
-  std::vector<fp8e8m0> a_scale_packed;
-  std::vector<fp8e8m0> b_scale_packed;
-  fp8e8m0* d_a_scale_packed = nullptr;
-  fp8e8m0* d_b_scale_packed = nullptr;
+  size_t a_scale_ld = 0;
+  size_t b_scale_ld = 0;
+  bool a_scale_is_colwise = !params.transa;
+  bool b_scale_is_colwise =  params.transb;
 
   if (use_mxfp8) {
-    const fp8e8m0* a_scale_cpu = params.transa
-        ? A.rowwise_cpu_scale_inv_ptr<fp8e8m0>()
-        : A.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
-    const fp8e8m0* b_scale_cpu = params.transb
-        ? B.columnwise_cpu_scale_inv_ptr<fp8e8m0>()
-        : B.rowwise_cpu_scale_inv_ptr<fp8e8m0>();
+    a_scale_dev = static_cast<const fp8e8m0*>(
+        a_scale_is_colwise ? A.columnwise_scale_inv_dptr() : A.rowwise_scale_inv_dptr());
+    b_scale_dev = static_cast<const fp8e8m0*>(
+        b_scale_is_colwise ? B.columnwise_scale_inv_dptr() : B.rowwise_scale_inv_dptr());
 
-    // Pack into row-major [row][kc]:
-    //   A_packed[ii, kc] and B_packed[jj, kc]
-    a_scale_packed.resize(params.m * k_chunks);
-    b_scale_packed.resize(params.n * k_chunks);
-
-    for (size_t ii = 0; ii < params.m; ++ii) {
-      for (size_t kc = 0; kc < k_chunks; ++kc) {
-        const size_t src_idx = params.transa ? (ii * k_chunks + kc) : (kc * params.m + ii);
-        a_scale_packed[ii * k_chunks + kc] = a_scale_cpu[src_idx];
-      }
-    }
-
-    for (size_t jj = 0; jj < params.n; ++jj) {
-      for (size_t kc = 0; kc < k_chunks; ++kc) {
-        const size_t src_idx = params.transb ? (kc * params.n + jj) : (jj * k_chunks + kc);
-        b_scale_packed[jj * k_chunks + kc] = b_scale_cpu[src_idx];
-      }
-    }
-
-    NVTE_CHECK_CUDA(cudaMalloc(&d_a_scale_packed, a_scale_packed.size() * sizeof(fp8e8m0)));
-    NVTE_CHECK_CUDA(cudaMalloc(&d_b_scale_packed, b_scale_packed.size() * sizeof(fp8e8m0)));
-
-    NVTE_CHECK_CUDA(cudaMemcpy(d_a_scale_packed, a_scale_packed.data(),
-                               a_scale_packed.size() * sizeof(fp8e8m0),
-                               cudaMemcpyHostToDevice));
-    NVTE_CHECK_CUDA(cudaMemcpy(d_b_scale_packed, b_scale_packed.data(),
-                               b_scale_packed.size() * sizeof(fp8e8m0),
-                               cudaMemcpyHostToDevice));
-
-    a_scale_dev = d_a_scale_packed;
-    b_scale_dev = d_b_scale_packed;
+    const NVTEShape a_s = a_scale_is_colwise ? A.columnwise_scale_inv_shape() : A.rowwise_scale_inv_shape();
+    const NVTEShape b_s = b_scale_is_colwise ? B.columnwise_scale_inv_shape() : B.rowwise_scale_inv_shape();
+    NVTE_CHECK(a_s.ndim == 2 && b_s.ndim == 2, "Expected 2D MXFP8 scale_inv");
+    a_scale_ld = a_s.data[1];
+    b_scale_ld = b_s.data[1];
   } else {
     a_scale_inv_scalar = A.rowwise_scale_inv();
     b_scale_inv_scalar = B.rowwise_scale_inv();
@@ -266,20 +242,25 @@ static void run_reference(
     bias_dev = static_cast<const Bias_Type*>(Bias->rowwise_dptr());
   }
 
-  // allocate device outputs
+  // allocate device outputs as test::Tensor objects
   const size_t lenD = params.m * params.n;
   const size_t bytesD = lenD * sizeof(D_Type);
 
-  D_Type* d_refD = nullptr;
+  Tensor RefD("RefD", TShape{params.n, params.m}, TypeInfo<D_Type>::dtype);
+  D_Type* d_refD = static_cast<D_Type*>(RefD.rowwise_dptr());
+
+  Tensor RefGelu;
+  Tensor RefAmax;
   Gelu_Type* d_refGelu = nullptr;
   float* d_refAmax = nullptr;
 
-  NVTE_CHECK_CUDA(cudaMalloc(&d_refD, bytesD));
   if (ref_gelu_host) {
-    NVTE_CHECK_CUDA(cudaMalloc(&d_refGelu, lenD * sizeof(Gelu_Type)));
+    RefGelu = Tensor("RefGelu", TShape{params.n, params.m}, TypeInfo<Gelu_Type>::dtype);
+    d_refGelu = static_cast<Gelu_Type*>(RefGelu.rowwise_dptr());
   }
   if (is_fp8_output && ref_amax_d) {
-    NVTE_CHECK_CUDA(cudaMalloc(&d_refAmax, sizeof(float)));
+    RefAmax = Tensor("RefAmax", TShape{1}, DType::kFloat32);
+    d_refAmax = static_cast<float*>(RefAmax.rowwise_dptr());
     NVTE_CHECK_CUDA(cudaMemset(d_refAmax, 0, sizeof(float)));
   }
 
@@ -298,6 +279,10 @@ static void run_reference(
           b_scale_inv_scalar,
           a_scale_dev,
           b_scale_dev,
+          a_scale_ld,
+          b_scale_ld,
+          a_scale_is_colwise,
+          b_scale_is_colwise,
           bias_dev,
           d_scale,
           params.m, params.k, params.n,
@@ -315,32 +300,22 @@ static void run_reference(
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 
   // copy outputs back
-  NVTE_CHECK_CUDA(cudaMemcpy(ref_D.get(), d_refD, bytesD, cudaMemcpyDeviceToHost));
+  RefD.to_cpu();
+  memcpy(ref_D.get(), RefD.rowwise_cpu_dptr<D_Type>(), bytesD);
 
   if (ref_gelu_host) {
-    NVTE_CHECK_CUDA(cudaMemcpy(ref_gelu_host, d_refGelu, lenD * sizeof(Gelu_Type),
-                               cudaMemcpyDeviceToHost));
+    RefGelu.to_cpu();
+    memcpy(ref_gelu_host, RefGelu.rowwise_cpu_dptr<Gelu_Type>(), lenD * sizeof(Gelu_Type));
   }
 
   if (ref_amax_d) {
     if (is_fp8_output) {
-      NVTE_CHECK_CUDA(cudaMemcpy(ref_amax_d, d_refAmax, sizeof(float),
-                                 cudaMemcpyDeviceToHost));
+      RefAmax.to_cpu();
+      *ref_amax_d = RefAmax.rowwise_cpu_dptr<float>()[0];
     } else {
       *ref_amax_d = 0.0f;
     }
   }
-
-  // cleanup
-  NVTE_CHECK_CUDA(cudaFree(d_refD));
-  if (d_refGelu)
-    NVTE_CHECK_CUDA(cudaFree(d_refGelu));
-  if (d_refAmax)
-    NVTE_CHECK_CUDA(cudaFree(d_refAmax));
-  if (d_a_scale_packed)
-    NVTE_CHECK_CUDA(cudaFree(d_a_scale_packed));
-  if (d_b_scale_packed)
-    NVTE_CHECK_CUDA(cudaFree(d_b_scale_packed));
 }
 
 

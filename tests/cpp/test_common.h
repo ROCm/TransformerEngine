@@ -298,6 +298,16 @@ class Tensor {
 
   std::mt19937& gen() { return gen_; }
 
+  void *rowwise_scale_inv_dptr() const {
+    NVTE_CHECK(rowwise_, "Tensor does not have rowwise data!");
+    return tensor_.scale_inv();  // rowwise scale_inv backing storage
+  }
+
+  void *columnwise_scale_inv_dptr() const {
+    NVTE_CHECK(columnwise_, "Tensor does not have columnwise data!");
+    return tensor_.get_columnwise_scale_inv().data_ptr;
+  }
+
  private:
   TensorWrapper tensor_;
   std::unique_ptr<unsigned char[]> cpu_data_rowwise_;
