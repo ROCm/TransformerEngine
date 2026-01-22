@@ -131,8 +131,6 @@ __device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
 #ifdef __HIP_PLATFORM_AMD__
 #define __CUDA_ARCH_HAS_FEATURE__(x) 0
 #endif
-#if ((__CUDA_ARCH_HAS_FEATURE__(SM100_ALL)) || (__CUDA_ARCH_HAS_FEATURE__(SM101_ALL)) || \
-     (__CUDA_ARCH_HAS_FEATURE__(SM120_ALL)))
 #if CUDA_ARCH_HAS_FEATURE_SM10X_ALL
 
   uint16_t out;

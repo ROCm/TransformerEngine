@@ -17,7 +17,9 @@
 #include <cuda_runtime_api.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#ifndef USE_ROCM
 #include <transformer_engine/comm_gemm_overlap.h>
+#endif
 #include <transformer_engine/normalization.h>
 #include <transformer_engine/transformer_engine.h>
 

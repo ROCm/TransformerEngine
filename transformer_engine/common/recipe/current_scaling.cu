@@ -279,7 +279,7 @@ void compute_amax_impl(const NVTETensor input_, const NVTETensor output_, cudaSt
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.data.dtype, IType, constexpr int nvec = 32 / sizeof(IType);
       launch_amax_kernel<nvec>(reinterpret_cast<const IType *>(input.data.dptr),
-                               amax.dptr, input.data.numel(),
+                               amax_ptr, input.data.numel(),
 #ifdef __HIP_PLATFORM_AMD__
                                block_amax, block_capacity,
 #endif

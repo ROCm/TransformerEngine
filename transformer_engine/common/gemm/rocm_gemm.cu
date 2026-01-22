@@ -939,7 +939,7 @@ void hipblaslt_gemm(const Tensor *inputA,
                     bool grad,
                     void* workspace,
                     size_t workspaceSize,
-                    float alpha, float beta,
+                    const void *alpha, const void *beta,
                     bool use_split_accumulator,
                     int math_sm_count,
                     hipStream_t stream,
@@ -975,7 +975,7 @@ void hipblaslt_gemm(const Tensor *inputA,
         << " gelu=" << (outputPreGelu->data.dptr != nullptr)
         << " use_fp8=" << use_fp8
         << " scale_mode=" << (a_tensor ? "tensor" : a_block ? "mxfp8" : "unsupported")
-        << " alpha=" << alpha << " beta=" << beta
+        << " alpha=" << *reinterpret_cast<const float *>(alpha) << " beta=" << *reinterpret_cast<const float *>(beta)
         << std::endl;
   }
   
@@ -1193,10 +1193,10 @@ void hipblaslt_gemm(const Tensor *inputA,
         if (HIPBLAS_STATUS_SUCCESS == hipblaslt_ext::matmulIsAlgoSupported(
           handle,
           operationDesc, 
-          static_cast<const void*>(&alpha),
+          alpha,
           Adesc, 
           Bdesc, 
-          static_cast<const void*>(&beta),
+          beta,
           Ddesc,
           Ddesc,
           algo_arr[0].algo,
@@ -1273,12 +1273,12 @@ void hipblaslt_gemm(const Tensor *inputA,
             // Warm-up call
             NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
                                             operationDesc,
-                                            static_cast<const void*>(&alpha),         /* alpha */
+                                            alpha,                                 /* alpha */
                                             param.A,                                      /* A */
                                             Adesc,
                                             param.B,                                      /* B */
                                             Bdesc,
-                                            static_cast<const void*>(&beta),        /* beta */
+                                            beta,                                   /* beta */
                                             C,                                      /* C */
                                             Cdesc,
                                             D,                                      /* D */
@@ -1295,12 +1295,12 @@ void hipblaslt_gemm(const Tensor *inputA,
           {
             NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
                                             operationDesc,
-                                            static_cast<const void*>(&alpha),         /* alpha */
+                                            alpha,                                       /* alpha */
                                             param.A,                                      /* A */
                                             Adesc,
                                             param.B,                                      /* B */
                                             Bdesc,
-                                            static_cast<const void*>(&beta),        /* beta */
+                                            beta,                                    /* beta */
                                             C,                                      /* C */
                                             Cdesc,
                                             D,                                      /* D */
@@ -1356,12 +1356,12 @@ void hipblaslt_gemm(const Tensor *inputA,
   // D = alpha * (A * B) + beta * C
   NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
                                    operationDesc,
-                                   static_cast<const void*>(&alpha),         /* alpha */
+                                   alpha,                                   /* alpha */
                                    param.A,                                      /* A */
                                    Adesc,
                                    param.B,                                      /* B */
                                    Bdesc,
-                                   static_cast<const void*>(&beta),        /* beta */
+                                   beta,                                   /* beta */
                                    C,                                      /* C */
                                    Cdesc,
                                    D,                                      /* D */
@@ -1501,7 +1501,7 @@ void release_service_stream(hipStream_t stream, struct ServiceStreamCtl &ctl)
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, cublasOperation_t transa,
                  cublasOperation_t transb, bool grad, void *workspace, size_t workspaceSize,
-                 float alpha, float beta, bool use_split_accumulator, int math_sm_count,
+                 const void *alpha, const void *beta, bool use_split_accumulator, int math_sm_count,
                  [[maybe_unused]] int m_split, [[maybe_unused]] int n_split,
                  [[maybe_unused]] bool gemm_producer, [[maybe_unused]] const Tensor *inputCounter,
                  hipStream_t stream, int compute_stream_offset)

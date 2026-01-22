@@ -11,6 +11,7 @@
 #ifndef TRANSFORMER_ENGINE_NVFP4_TRANSPOSE_CUH_
 #define TRANSFORMER_ENGINE_NVFP4_TRANSPOSE_CUH_
 
+#ifndef __HIP_PLATFORM_AMD__
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cuda_runtime.h>
@@ -1513,4 +1514,5 @@ void nvfp4_quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *o
 }
 }  // namespace transformer_engine
 
+#endif // !__HIP_PLATFORM_AMD__
 #endif  // TRANSFORMER_ENGINE_NVFP4_TRANSPOSE_CUH_

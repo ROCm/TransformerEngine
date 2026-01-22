@@ -215,7 +215,6 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   const int sm_count = transformer_engine::cuda::sm_count(device_id);
   int num_math_sms = sm_count - transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", sm_count);
 
-#ifndef USE_ROCM
   // Construct GEMM config
   transformer_engine::MatmulConfigWrapper config;
   if (grad) {
@@ -228,7 +227,8 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   config.set_epilogue_aux_tensor(te_pre_gelu_out.data());
   config.set_use_split_accumulator(use_split_accumulator);
   config.set_sm_count(num_math_sms);
-
+  
+#ifndef USE_ROCM
   // Keep the swizzled scaling factor tensors alive during the GEMM.
   std::vector<std::optional<at::Tensor>> swizzled_scale_inverses_list;
 #endif

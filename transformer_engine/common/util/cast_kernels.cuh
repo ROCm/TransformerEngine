@@ -16,6 +16,7 @@
 #include <cuda.h>
 #ifndef __HIP_PLATFORM_AMD__
 #include <cudaTypedefs.h>
+#include "nvfp4_transpose.cuh"
 #endif //#ifndef __HIP_PLATFORM_AMD__
 #include <cuda_runtime.h>
 #include <transformer_engine/cast.h>
@@ -27,7 +28,6 @@
 #include "../util/vectorized_pointwise.h"
 #include "../utils.cuh"
 #include "math.h"
-#include "nvfp4_transpose.cuh"
 #include "ptx.cuh"
 #include "transformer_engine/transformer_engine.h"
 #ifdef __HIP_PLATFORM_AMD__
@@ -1749,6 +1749,7 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
   );           // NOLINT(*)
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 // This kernel supports only two scaling cases:
 // 1. r16c0  - Rowwise NVFP4
 // 2. r16c32 - Rowwise NVFP4 AND Colwise MXFP8
@@ -1883,6 +1884,7 @@ void nvfp4_quantize(const Tensor &input, const Tensor *noop, Tensor *output, cud
           });  // NOLINT(*)
   );           // NOLINT(*)
 }
+#endif //#ifndef __HIP_PLATFORM_AMD__
 
 namespace detail {
 

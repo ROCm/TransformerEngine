@@ -15,13 +15,17 @@
 #include <tuple>
 
 #include "../extensions.h"
+#ifndef USE_ROCM
 #include "cgemm_helper.h"
+#endif
 #include "common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/string.h"
 #include "common/util/system.h"
 #include "cuda_runtime.h"
+#ifndef USE_ROCM
 #include "nccl.h"
+#endif
 #include "transformer_engine/swizzle.h"
 #include "xla/ffi/api/c_api.h"
 
@@ -82,6 +86,7 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
   return std::make_tuple(std::move(input), input_shape);
 }
 
+#ifndef USE_ROCM
 Error_Type CollectiveGemmInitFFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
                                  Buffer_Type rhs_scale_inv, Buffer_Type bias,
                                  Buffer_Type gelu_input, Result_Type output, Result_Type bias_grad,
@@ -143,6 +148,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(CollectiveGemmInitHandler, CollectiveGemmInitFFI,
                                   .Attr<bool>("grad")
                                   .Attr<bool>("use_split_accumulator")
                                   .Attr<JAXX_Collective_Op>("collective_op"));
+#endif
 
 Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
                    Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type gelu_input,
@@ -217,6 +223,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                      rhs_transposed, lhs_transposed, grad, workspace_.data(), false,
                      use_split_accumulator, num_math_sm, stream);
   } else {
+#ifndef USE_ROCM
     std::vector<size_t> buffer_shape{0, 0};
     DType buffer_dtype = out_dtype;
     auto &comm_handler = CommunicatorHandler::get();
@@ -260,6 +267,9 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
       executor->split_overlap_ag(rhs_, rhs_transposed, lhs_, lhs_transposed, out_, bias_, pre_gelu_,
                                  workspace_, grad, false, use_split_accumulator, aux_out_, stream);
     }
+#else
+    NVTE_ERROR("Collective GEMM operations are not supported on ROCm");
+#endif
   }
 
   return ffi_with_cuda_error_check();

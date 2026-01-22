@@ -98,7 +98,7 @@ enum class JAXX_Collective_Op : int64_t {
   ALL_GATHER = 1,
   REDUCE_SCATTER = 2,
 };
-
+#ifndef USE_ROCM
 static CommOverlapType get_nvte_collective_op(const JAXX_Collective_Op &op) {
   switch (op) {
     case JAXX_Collective_Op::ALL_GATHER:
@@ -112,6 +112,6 @@ static CommOverlapType get_nvte_collective_op(const JAXX_Collective_Op &op) {
       break;
   }
 }
-
+#endif
 }  // namespace jax
 }  // namespace transformer_engine

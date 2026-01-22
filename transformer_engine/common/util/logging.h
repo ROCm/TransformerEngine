@@ -18,7 +18,9 @@
 #endif // __HIP_PLATFORM_AMD__
 #include <nvrtc.h>
 
+#ifndef __HIP_PLATFORM_AMD__
 #include "nccl.h"
+#endif // !__HIP_PLATFORM_AMD__
 
 #ifdef NVTE_WITH_CUBLASMP
 #include <cublasmp.h>
@@ -123,6 +125,7 @@
 
 #endif  // NVTE_WITH_CUBLASMP
 
+#ifndef __HIP_PLATFORM_AMD__
 #define NVTE_CHECK_NCCL(expr)                                                 \
   do {                                                                        \
     const ncclResult_t status_NVTE_CHECK_NCCL = (expr);                       \
@@ -130,5 +133,6 @@
       NVTE_ERROR("NCCL Error: ", ncclGetErrorString(status_NVTE_CHECK_NCCL)); \
     }                                                                         \
   } while (false)
+#endif // !__HIP_PLATFORM_AMD__
 
 #endif  // TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_

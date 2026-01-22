@@ -3,6 +3,7 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
+ #ifndef USE_ROCM
 
 #include "cgemm_helper.h"
 
@@ -257,3 +258,4 @@ CommunicatorHandler::~CommunicatorHandler() {
 
 }  // namespace jax
 }  // namespace transformer_engine
+#endif

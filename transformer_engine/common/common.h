@@ -395,12 +395,14 @@ template <>
 struct TypeExtrema<fp8e4m3> {
 #ifndef __HIP_PLATFORM_AMD__
   static constexpr float max = 448.0f;
+  static constexpr float max_inverse = 1.0 / max;
 #elif defined(__HIP_DEVICE_COMPILE__)
   static constexpr float maxNorm = te_fp8_fnuz() ? 240.0f : 448.0f;
+  static constexpr float max_inverse = 1.0 / maxNorm;
 #else
   static float maxNorm;
+  static constexpr float max_inverse = 1.0 / 448.0f;
 #endif
-  static constexpr float max_inverse = 1.0 / max;
 };
 
 template <>

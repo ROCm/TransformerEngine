@@ -120,26 +120,28 @@ endif()
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
-# NVIDIA MathDX include directory (from Python package install location)
-if(NOT DEFINED MATHDX_INCLUDE_DIR)
-  execute_process(
-    COMMAND ${Python_EXECUTABLE} -m pip show nvidia-mathdx
-    OUTPUT_VARIABLE _PIP_SHOW_MATHDX
-    ERROR_VARIABLE _PIP_SHOW_MATHDX_ERR
-    RESULT_VARIABLE _PIP_SHOW_MATHDX_RES
-    OUTPUT_STRIP_TRAILING_WHITESPACE)
-  if(NOT _PIP_SHOW_MATHDX_RES EQUAL 0)
-    message(FATAL_ERROR "Failed to query 'nvidia-mathdx' with pip (using ${Python_EXECUTABLE}): ${_PIP_SHOW_MATHDX_ERR}")
+if(USE_CUDA)
+  # NVIDIA MathDX include directory (from Python package install location)
+  if(NOT DEFINED MATHDX_INCLUDE_DIR)
+    execute_process(
+      COMMAND ${Python_EXECUTABLE} -m pip show nvidia-mathdx
+      OUTPUT_VARIABLE _PIP_SHOW_MATHDX
+      ERROR_VARIABLE _PIP_SHOW_MATHDX_ERR
+      RESULT_VARIABLE _PIP_SHOW_MATHDX_RES
+      OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT _PIP_SHOW_MATHDX_RES EQUAL 0)
+      message(FATAL_ERROR "Failed to query 'nvidia-mathdx' with pip (using ${Python_EXECUTABLE}): ${_PIP_SHOW_MATHDX_ERR}")
+    endif()
+    string(REGEX MATCH "Location: ([^\n\r]+)" _MATHDX_LOC_MATCH "${_PIP_SHOW_MATHDX}")
+    if(NOT _MATHDX_LOC_MATCH)
+      message(FATAL_ERROR "Could not parse installation location for 'nvidia-mathdx'. Output was:\n${_PIP_SHOW_MATHDX}")
+    endif()
+    set(MATHDX_LOCATION "${CMAKE_MATCH_1}")
+    set(MATHDX_INCLUDE_DIR "${MATHDX_LOCATION}/nvidia/mathdx/include")
   endif()
-  string(REGEX MATCH "Location: ([^\n\r]+)" _MATHDX_LOC_MATCH "${_PIP_SHOW_MATHDX}")
-  if(NOT _MATHDX_LOC_MATCH)
-    message(FATAL_ERROR "Could not parse installation location for 'nvidia-mathdx'. Output was:\n${_PIP_SHOW_MATHDX}")
+  if(NOT EXISTS "${MATHDX_INCLUDE_DIR}")
+    message(FATAL_ERROR "MATHDX include directory not found at ${MATHDX_INCLUDE_DIR}. Set MATHDX_INCLUDE_DIR or ensure 'nvidia-mathdx' is installed for ${Python_EXECUTABLE}.")
   endif()
-  set(MATHDX_LOCATION "${CMAKE_MATCH_1}")
-  set(MATHDX_INCLUDE_DIR "${MATHDX_LOCATION}/nvidia/mathdx/include")
-endif()
-if(NOT EXISTS "${MATHDX_INCLUDE_DIR}")
-  message(FATAL_ERROR "MATHDX include directory not found at ${MATHDX_INCLUDE_DIR}. Set MATHDX_INCLUDE_DIR or ensure 'nvidia-mathdx' is installed for ${Python_EXECUTABLE}.")
 endif()
 
 # Configure Transformer Engine library
@@ -160,7 +162,6 @@ list(APPEND transformer_engine_SOURCES
      transpose/transpose_fusion.cu
      transpose/multi_cast_transpose.cu
      transpose/swap_first_dims.cu
-     transpose/quantize_transpose_vector_blockwise_fp4.cu
      activation/gelu.cu
      dropout/dropout.cu
      fused_attn/flash_attn.cu
@@ -202,6 +203,7 @@ list(APPEND transformer_engine_SOURCES
      cudnn_utils.cpp
      transpose/quantize_transpose_square_blockwise.cu
      transpose/quantize_transpose_vector_blockwise.cu
+     transpose/quantize_transpose_vector_blockwise_fp4.cu
      fused_attn/fused_attn_f16_max512_seqlen.cu
      fused_attn/fused_attn_f16_arbitrary_seqlen.cu
      fused_attn/fused_attn_fp8.cu
