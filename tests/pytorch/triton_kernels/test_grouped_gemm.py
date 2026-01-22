@@ -80,7 +80,7 @@ OUTPUT_DTYPES_STR: set[str] = {"o" + dtype_str for dtype_str in SUPPORTED_DTYPES
 
 # Transpositions.
 
-TRANS_LSH_STR: set[str] = {f"tlhs{b}" for b in {"F", "T"}}
+TRANS_LHS_STR: set[str] = {f"tlhs{b}" for b in {"F", "T"}}
 TRANS_RHS_STR: set[str] = {f"trhs{b}" for b in {"F", "T"}}
 
 
@@ -325,7 +325,7 @@ def torch_tgmm(
 @pytest.mark.parametrize("M, K, N, G", TEST_SHAPES)
 @pytest.mark.parametrize("in_dtype_str", INPUT_DTYPES_STR)
 @pytest.mark.parametrize("out_dtype_str", OUTPUT_DTYPES_STR)
-@pytest.mark.parametrize("trans_lhs_str", TRANS_LSH_STR)
+@pytest.mark.parametrize("trans_lhs_str", TRANS_LHS_STR)
 @pytest.mark.parametrize("rng_seed_str", RNG_SEED_STR)
 def test_tgmm(
     persistent_str: str,
