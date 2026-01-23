@@ -99,6 +99,7 @@ Error_Type CollectiveGemmInitFFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buf
 
   // Init UB buffer
   if (collective_op != JAXX_Collective_Op::NONE) {
+#ifndef USE_ROCM
     auto &comm_handler = CommunicatorHandler::get();
     std::vector<size_t> lhs_shape = {
         product(lhs.dimensions(), 0, lhs_axis_boundary),
@@ -122,6 +123,9 @@ Error_Type CollectiveGemmInitFFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buf
     }
     auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, buffer_dtype,
                                                                     collective_op);
+#else
+    NVTE_ERROR("Collective GEMM operations are not supported on ROCm");
+#endif
   }
   return ffi_with_cuda_error_check();
 }

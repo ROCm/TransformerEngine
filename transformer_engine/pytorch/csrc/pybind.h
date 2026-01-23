@@ -40,9 +40,11 @@ extern PyTypeObject *MXFP8QuantizerClass;
 extern PyTypeObject *Float8BlockwiseQTensorPythonClass;
 extern PyTypeObject *Float8BlockwiseQTensorBasePythonClass;
 extern PyTypeObject *Float8BlockwiseQuantizerClass;
+#ifndef USE_ROCM
 extern PyTypeObject *NVFP4TensorPythonClass;
 extern PyTypeObject *NVFP4TensorBasePythonClass;
 extern PyTypeObject *NVFP4QuantizerClass;
+#endif
 
 void init_extension();
 
@@ -68,16 +70,20 @@ inline bool IsFloat8BlockwiseQuantizers(PyObject *obj) {
   return Py_TYPE(obj) == Float8BlockwiseQuantizerClass;
 }
 
+#ifndef USE_ROCM
 inline bool IsNVFP4Quantizers(PyObject *obj) { return Py_TYPE(obj) == NVFP4QuantizerClass; }
+#endif
 
 inline bool IsFloat8BlockwiseQTensor(PyObject *obj) {
   return Py_TYPE(obj) == Float8BlockwiseQTensorPythonClass ||
          Py_TYPE(obj) == Float8BlockwiseQTensorBasePythonClass;
 }
 
+#ifndef USE_ROCM
 inline bool IsNVFP4Tensor(PyObject *obj) {
   return Py_TYPE(obj) == NVFP4TensorPythonClass || Py_TYPE(obj) == NVFP4TensorBasePythonClass;
 }
+#endif
 
 TensorWrapper NVTETensorFromFloat8Tensor(py::handle tensor, Quantizer *quantizer);
 
@@ -93,12 +99,15 @@ std::unique_ptr<Quantizer> CreateMXFP8Params(const py::handle params);
 TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor,
                                                    Quantizer *quantization_params);
 
+#ifndef USE_ROCM
 TensorWrapper NVTETensorFromNVFP4Tensor(py::handle tensor, Quantizer *quantizer);
+#endif
 
 inline bool IsFloatingPointType(at::ScalarType type) {
   return type == at::kFloat || type == at::kHalf || type == at::kBFloat16;
 }
 
+#ifndef USE_ROCM
 constexpr std::array custom_types_converters = {
     std::make_tuple(IsFloat8Tensor, IsFloat8Quantizers, NVTETensorFromFloat8Tensor,
                     CreateQuantizer<Float8Quantizer>),
@@ -110,6 +119,17 @@ constexpr std::array custom_types_converters = {
                     NVTETensorFromFloat8BlockwiseQTensor, CreateQuantizer<Float8BlockQuantizer>),
     std::make_tuple(IsNVFP4Tensor, IsNVFP4Quantizers, NVTETensorFromNVFP4Tensor,
                     CreateQuantizer<NVFP4Quantizer>)};
+#else
+constexpr std::array custom_types_converters = {
+    std::make_tuple(IsFloat8Tensor, IsFloat8Quantizers, NVTETensorFromFloat8Tensor,
+                    CreateQuantizer<Float8Quantizer>),
+    std::make_tuple(IsFloat8Tensor, IsFloat8CurrentScalingQuantizers, NVTETensorFromFloat8Tensor,
+                    CreateQuantizer<Float8CurrentScalingQuantizer>),
+    std::make_tuple(IsMXFP8Tensor, IsMXFP8Quantizers, NVTETensorFromMXFP8Tensor,
+                    CreateQuantizer<MXFP8Quantizer>),
+    std::make_tuple(IsFloat8BlockwiseQTensor, IsFloat8BlockwiseQuantizers,
+                    NVTETensorFromFloat8BlockwiseQTensor, CreateQuantizer<Float8BlockQuantizer>)};
+#endif
 }  // namespace detail
 
 }  // namespace transformer_engine::pytorch

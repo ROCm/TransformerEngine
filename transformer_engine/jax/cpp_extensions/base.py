@@ -9,6 +9,7 @@ import re
 import warnings
 from abc import ABCMeta, abstractmethod
 from functools import partial
+from packaging import version
 
 from jax.extend import core
 from jax.interpreters import xla, mlir

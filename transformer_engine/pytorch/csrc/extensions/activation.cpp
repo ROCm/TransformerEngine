@@ -33,13 +33,21 @@ py::object activation_forward(void (*act_func)(const NVTETensor, NVTETensor, cud
   auto [out_nvte, out_py] = quantizer_cpp->create_tensor(output_shape, fake_dtype);
 
   // Choose implementation
-  enum class Impl { UNFUSED, FULLY_FUSED, FUSED_ACTIVATION_AMAX_FP8, FUSED_ACTIVATION_AMAX_NVFP4 };
+  enum class Impl {
+    UNFUSED,
+    FULLY_FUSED,
+    FUSED_ACTIVATION_AMAX_FP8,
+#ifndef USE_ROCM
+    FUSED_ACTIVATION_AMAX_NVFP4
+#endif
+  };
   Impl impl = Impl::UNFUSED;
   if (quantizer.is_none() || detail::IsFloat8Quantizers(quantizer.ptr()) ||
       detail::IsMXFP8Quantizers(quantizer.ptr())) {
     impl = Impl::FULLY_FUSED;
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
     impl = Impl::FUSED_ACTIVATION_AMAX_FP8;
+#ifndef USE_ROCM
   } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
     auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer*>(quantizer_cpp.get());
     NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
@@ -49,6 +57,7 @@ py::object activation_forward(void (*act_func)(const NVTETensor, NVTETensor, cud
     } else {
       impl = Impl::FUSED_ACTIVATION_AMAX_NVFP4;
     }
+#endif
   }
 
   // Perform compute
@@ -79,6 +88,7 @@ py::object activation_forward(void (*act_func)(const NVTETensor, NVTETensor, cud
         fp8_quantizer_cpp->quantize_with_amax(temp_nvte, out_nvte);
       }
       break;
+#ifndef USE_ROCM
     case Impl::FUSED_ACTIVATION_AMAX_NVFP4:
       // Compute activation and amax in high precision, then quantize to NVFP4
       {
@@ -90,6 +100,7 @@ py::object activation_forward(void (*act_func)(const NVTETensor, NVTETensor, cud
         nvfp4_quantizer_cpp->quantize_with_amax(temp_nvte, out_nvte);
       }
       break;
+#endif
     default:
       NVTE_ERROR("Invalid activation implementation (", static_cast<int>(impl), ")");
   }
@@ -118,13 +129,21 @@ py::object activation_backward(void (*dact_func)(const NVTETensor, const NVTETen
   auto [grad_input_nvte, grad_input_py] = quantizer_cpp->create_tensor(input_shape, fake_dtype);
 
   // Choose implementation
-  enum class Impl { UNFUSED, FULLY_FUSED, FUSED_ACTIVATION_AMAX_FP8, FUSED_ACTIVATION_AMAX_NVFP4 };
+  enum class Impl {
+    UNFUSED,
+    FULLY_FUSED,
+    FUSED_ACTIVATION_AMAX_FP8,
+#ifndef USE_ROCM
+    FUSED_ACTIVATION_AMAX_NVFP4
+#endif
+  };
   Impl impl = Impl::UNFUSED;
   if (quantizer.is_none() || detail::IsFloat8Quantizers(quantizer.ptr()) ||
       detail::IsMXFP8Quantizers(quantizer.ptr())) {
     impl = Impl::FULLY_FUSED;
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
     impl = Impl::FUSED_ACTIVATION_AMAX_FP8;
+#ifndef USE_ROCM
   } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
     auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer*>(quantizer_cpp.get());
     NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
@@ -134,6 +153,7 @@ py::object activation_backward(void (*dact_func)(const NVTETensor, const NVTETen
     } else {
       impl = Impl::FUSED_ACTIVATION_AMAX_NVFP4;
     }
+#endif
   }
 
   // Perform compute
@@ -170,6 +190,7 @@ py::object activation_backward(void (*dact_func)(const NVTETensor, const NVTETen
         fp8_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte);
       }
       break;
+#ifndef USE_ROCM
     case Impl::FUSED_ACTIVATION_AMAX_NVFP4:
       // Compute activation and amax in high precision, then quantize to NVFP4
       {
@@ -182,6 +203,7 @@ py::object activation_backward(void (*dact_func)(const NVTETensor, const NVTETen
         nvfp4_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte);
       }
       break;
+#endif
     default:
       NVTE_ERROR("Invalid activation implementation (", static_cast<int>(impl), ")");
   }

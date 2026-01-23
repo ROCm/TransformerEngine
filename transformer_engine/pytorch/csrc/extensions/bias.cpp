@@ -151,6 +151,7 @@ std::vector<py::object> dact_dbias(
     impl = Impl::FUSED_DACT_DBIAS_QUANTIZE;
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer_py.ptr())) {
     impl = Impl::FUSED_DACT_AMAX_FP8;
+#ifndef USE_ROCM
   } else if (detail::IsNVFP4Quantizers(quantizer_py.ptr())) {
     auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer *>(quantizer_cpp.get());
     NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
@@ -160,6 +161,7 @@ std::vector<py::object> dact_dbias(
     } else {
       impl = Impl::FUSED_DACT_AMAX_NVFP4;
     }
+#endif
   }
 
   // Perform compute
@@ -220,6 +222,7 @@ std::vector<py::object> dact_dbias(
         fp8_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte);
         break;
       }
+#ifndef USE_ROCM
     case Impl::FUSED_DACT_AMAX_NVFP4:
       // Fused dact-amax kernel, unfused dbias and NVFP4 quantize
       {
@@ -237,6 +240,7 @@ std::vector<py::object> dact_dbias(
         nvfp4_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte);
         break;
       }
+#endif
     default:
       NVTE_ERROR("Invalid implementation");
   }

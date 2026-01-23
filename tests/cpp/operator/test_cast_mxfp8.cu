@@ -322,7 +322,7 @@ void performTest_x1(const ProcessingMethod processing_method,
 
     std::vector<size_t> mismatches_scales_indices;
     size_t mismatches_scales = 0;
-    compare_e8m0_scaling_factors("scales", gpu_scales_ptr, ref_output_scales.get(),
+    compare_scaling_factors("scales", gpu_scales_ptr, ref_output_scales.get(),
                                  unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
                                  mismatches_scales_indices, mismatches_scales,
                                  scale_diff_abs_tolerance,
@@ -507,7 +507,7 @@ void performTest_x2(const ProcessingMethod processing_method,
 
     std::vector<size_t> mismatches_scales_indices_rowwise;
     size_t mismatches_scales_rowwise = 0;
-    compare_e8m0_scaling_factors("scales_rowwise", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
+    compare_scaling_factors("scales_rowwise", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
                                  ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
                                  unpadded_blocks_X_rowwise, scales_stride_rowwise,
                                  mismatches_scales_indices_rowwise, mismatches_scales_rowwise,
@@ -517,7 +517,7 @@ void performTest_x2(const ProcessingMethod processing_method,
 
     std::vector<size_t> mismatches_scales_indices_colwise;
     size_t mismatches_scales_colwise = 0;
-    compare_e8m0_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
+    compare_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
                                  ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
                                  unpadded_blocks_X_colwise, scales_stride_colwise,
                                  mismatches_scales_indices_colwise, mismatches_scales_colwise,

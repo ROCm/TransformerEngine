@@ -9,6 +9,7 @@ from functools import reduce
 from typing import Tuple, Optional, Union
 import math
 from enum import Enum
+from packaging import version
 
 
 import jax

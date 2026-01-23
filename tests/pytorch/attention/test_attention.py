@@ -106,12 +106,6 @@ model_configs_base = {
 }
 
 
-<<<<<<< HEAD
-param_types = [torch.float16]
-if is_bf16_compatible():  # bf16 requires sm_80 or higher
-    param_types.append(torch.bfloat16)
-param_types_lean = [torch.bfloat16]
-
 # TODO: Enable config support in other backend(s) -- currently only the CK
 # backend is capable of supporting it.
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
@@ -128,7 +122,6 @@ def test_gqa_mla_thd():
         config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,
-        window_size=config.window_size,
         pad_between_seqs=True,
     )
     if FusedAttnBackend["CK"] not in fused_attn_backends:
@@ -154,7 +147,6 @@ def test_dot_product_mem_calc():
         config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,
-        window_size=config.window_size,
         pad_between_seqs=pad_between_seqs,
         is_training=is_training,
     )
@@ -177,8 +169,6 @@ def test_dot_product_mem_calc():
     del os.environ["NVTE_FUSED_ATTN_AOTRITON"]
 
 
-=======
->>>>>>> 33b4fa70 ([PyTorch] Add sink attention support from cuDNN (#2148))
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_base])
@@ -453,7 +443,7 @@ model_configs_softmax = {
 def test_dpa_softmax(dtype, model_configs, model):
     """Test DotProductAttention module with different softmax types"""
     test_dot_product_attention(
-        dtype, model_configs, model, True, True, "bshd_bshd_bshd", False, False
+        dtype, model_configs, model, True, True, "bshd_bshd_bshd", False, False, False
     )
 
 
@@ -908,7 +898,6 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, pad_between
             config,
             qkv_dtype=dtype,
             qkv_layout=qkv_layout,
-            window_size=config.window_size,
             pad_between_seqs=pad_between_seqs,
         )
         if FusedAttnBackend["CK"] not in fused_attn_backends:
@@ -932,7 +921,6 @@ def test_dpa_qkv_layout_thd_mqa_gqa(dtype, model_configs, model, qkv_layout, pad
             config,
             qkv_dtype=dtype,
             qkv_layout=qkv_layout,
-            window_size=config.window_size,
             pad_between_seqs=pad_between_seqs,
         )
         if FusedAttnBackend["CK"] not in fused_attn_backends:

@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved. 
+ * Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved. 
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -115,6 +115,16 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
 #ifndef USE_ROCM
   m.def("initialize_cgemm_communicator", &InitializeCgemmCommunicator);
   m.def("get_cgemm_num_max_streams", &GetCgemmNumMaxStreams);
+#else
+  // ROCm stub functions for collective GEMM communicator
+  // These are no-ops since collective GEMM is not supported on ROCm
+  m.def("initialize_cgemm_communicator",
+        [](int, int, int, int, int, int, int, int, bool, bool) {
+          // No-op for ROCm - collective GEMM not supported
+        },
+        "Initialize collective GEMM communicator (no-op on ROCm)");
+  m.def("get_cgemm_num_max_streams", []() { return 0; },
+        "Get collective GEMM max streams (returns 0 on ROCm)");
 #endif
 
   pybind11::enum_<DType>(m, "DType", pybind11::module_local())
@@ -199,13 +209,14 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("ROWWISE_COLWISE", transformer_engine::jax::QuantizeLayout::ROWWISE_COLWISE)
       .export_values();
 
-#ifndef USE_ROCM
+  // Export JAXX_Collective_Op enum for both CUDA and ROCm
+  // Note: Collective GEMM operations (ALL_GATHER, REDUCE_SCATTER) are only supported on CUDA
+  // On ROCm, only NONE is functional - others will raise runtime errors
   pybind11::enum_<JAXX_Collective_Op>(m, "JAXX_Collective_Op", pybind11::module_local())
       .value("NONE", JAXX_Collective_Op::NONE)
       .value("ALL_GATHER", JAXX_Collective_Op::ALL_GATHER)
       .value("REDUCE_SCATTER", JAXX_Collective_Op::REDUCE_SCATTER)
       .export_values();
-#endif
 }
 
 }  // namespace jax

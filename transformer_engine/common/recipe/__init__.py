@@ -53,7 +53,7 @@ class Format(Enum):
             FP8 tensors in the forward pass are in e4m3 format,
             FP8 tensors in the backward pass are in e5m2 format
     """
-    E2M1 = _FormatHelper(max_fwd=6, max_bwd=6)
+    E2M1 = _FormatHelper(fwd=(6, 6), bwd=(6, 6))
     E4M3 = _FormatHelper(fwd=_FormatMaxVals.E4M3.value, bwd=_FormatMaxVals.E4M3.value) 
     E5M2 = _FormatHelper(fwd=_FormatMaxVals.E5M2.value, bwd=_FormatMaxVals.E5M2.value)
     HYBRID = _FormatHelper(fwd=E4M3.fwd, bwd=E5M2.bwd)
