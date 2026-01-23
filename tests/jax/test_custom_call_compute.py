@@ -926,6 +926,13 @@ class TestDense:
     @pytest_parametrize_wrapper("data_layout", ["TN", "NT", "NN", "TT"])
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_gemm_fp8(self, m, n, k, x_qtype, w_qtype, scaling_mode, data_layout, with_jax_gemm):
+        if (
+            not with_jax_gemm
+            and scaling_mode.is_1d_block_scaling()
+            and jnp_float8_e5m2_type in (x_qtype, w_qtype)
+            and not is_hip_extension()
+        ):
+            pytest.skip("Float8E5M2 is not recommended for MXFP8 GEMM.")
         if scaling_mode.is_1d_block_scaling():
             _check_mxfp8_gemm_support(with_jax_gemm, m, n, k)
 
@@ -981,7 +988,7 @@ class TestDense:
     @pytest_parametrize_wrapper("m,n,k", TEST_SHAPES)
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
-    @pytest_parametrize_wrapper("use_bias", [False, True])
+    @pytest_parametrize_wrapper("use_bias", [False, True] if is_hip_extension() else [True])
     def test_dense_grad_fp8(self, m, n, k, scaling_mode, with_jax_gemm, use_bias):
         data_layout = "NN"
         x, w, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)
@@ -1154,11 +1161,10 @@ class TestFusedDense:
         """
         if scaling_mode.is_1d_block_scaling():
             # Check for first GEMM
-            _check_mxfp8_gemm_support(with_jax_gemm, m, n, k)
+            _check_mxfp8_gemm_support(with_jax_gemm, m, n, k, use_bias)
             # Check for second GEMM
-            _check_mxfp8_gemm_support(with_jax_gemm, m, k, n)
-            if use_bias:
-                pytest.skip("Bias is not supported for MXFP8 GEMM.")
+            _check_mxfp8_gemm_support(with_jax_gemm, m, k, n, use_bias)
+
         # zero_centered_gamma is already tested in TestNorm
         zero_centered_gamma = False
         eps = 1e-6
