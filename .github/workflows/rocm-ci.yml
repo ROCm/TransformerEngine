@@ -256,7 +256,7 @@ jobs:
           core_pid=$?
           
           wait $jax_pid; jax_rc=$?
-          wait $torch_rc; torch_rc=$?
+          wait $torch_pid; torch_rc=$?
           
           # /workspace/FAIL_* files are for failure markers we can extract to the host runner and process later
           # Check PyTorch
