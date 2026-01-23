@@ -17,11 +17,12 @@ from torch import Tensor
 # pytest
 import pytest
 
+# Test utilities
+from test_common import str_to_torch_dtype
+
 # AITER: GMM defaults and utility functions
 from transformer_engine.pytorch.triton_kernels.gmm.gmm_common import (
-    SUPPORTED_DTYPES_STR,
     DTYPE,
-    dtype_from_str,
     check_input_device_dtype,
     gen_gmm_tensors,
     get_gmm_shape,
@@ -74,6 +75,8 @@ TEST_SHAPES: list[tuple[int, int, int, int]] = TEST_ONLY_SHAPES + REAL_SHAPES
 
 # Input and output types.
 
+# Define string dtypes that match SUPPORTED_DTYPES from gmm_common
+SUPPORTED_DTYPES_STR: set[str] = {"fp32", "fp16", "bf16"}
 INPUT_DTYPES_STR: set[str] = {"i" + dtype_str for dtype_str in SUPPORTED_DTYPES_STR}
 OUTPUT_DTYPES_STR: set[str] = {"o" + dtype_str for dtype_str in SUPPORTED_DTYPES_STR}
 
@@ -196,8 +199,8 @@ def test_gmm(
     rng_seed_str: str,
     use_bias: bool,
 ):
-    in_dtype = dtype_from_str(in_dtype_str)
-    out_dtype = dtype_from_str(out_dtype_str)
+    in_dtype = str_to_torch_dtype(in_dtype_str)
+    out_dtype = str_to_torch_dtype(out_dtype_str)
     trans_rhs = trans_rhs_from_str(trans_rhs_str)
     rng_seed = rng_seed_from_str(rng_seed_str)
 
@@ -342,8 +345,8 @@ def test_tgmm(
     assert persistent_str in {"p", "np"}
     persistent: bool = persistent_str == "p"
 
-    in_dtype = dtype_from_str(in_dtype_str)
-    out_dtype = dtype_from_str(out_dtype_str)
+    in_dtype = str_to_torch_dtype(in_dtype_str)
+    out_dtype = str_to_torch_dtype(out_dtype_str)
     trans_lhs = trans_lhs_from_str(trans_lhs_str)
     rng_seed = rng_seed_from_str(rng_seed_str)
 
