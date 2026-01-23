@@ -78,7 +78,7 @@ INTERMEDIATE = 128
 # We set to 256 to ensure compatibility with hipblaslt MXFP8 GEMM which
 # requires the reduction dim to be multiple of 128 after sharding.
 if is_hip_extension():
-    INPUT_SHAPE = [[4, 64, 256]]
+    INPUT_SHAPE += [[4, 64, 256]]
     INTERMEDIATE = INTERMEDIATE * 2
 
 
