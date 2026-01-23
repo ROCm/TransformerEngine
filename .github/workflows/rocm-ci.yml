@@ -253,7 +253,7 @@ jobs:
           jax_pid=$!; echo JAX test pid $!
           
           ci/core.sh > /workspace/core_sgpu.log 2>&1 
-          core_pid=$?
+          core_rc=$?
           
           wait $jax_pid; jax_rc=$?
           wait $torch_pid; torch_rc=$?
