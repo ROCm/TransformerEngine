@@ -13,7 +13,7 @@ if [ -z "$TEST_SGPU" ]; then
     exit 0
 fi
 
-n_parallel_jobs=4
+n_parallel_jobs=8
 
 configure_omp_threads $n_parallel_jobs
 
