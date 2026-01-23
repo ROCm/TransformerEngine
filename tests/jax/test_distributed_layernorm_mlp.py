@@ -61,7 +61,7 @@ if is_mxfp8_supported:
     SUPPORTED_RECIPES.append(pytest.param(recipe.MXFP8BlockScaling(), id="MXFP8BlockScaling"))
 
 DTYPES = [jnp.bfloat16, jnp.float16]
-INPUT_SHAPE = [[4, 64, 256]]  # [batch, seqlen, hidden_in]
+INPUT_SHAPE = [[4, 64, 128]]  # [batch, seqlen, hidden_in]
 
 LAYERNORM_INPUT_AXES = (BATCH_AXES, SEQLEN_TP_AXES, HIDDEN_AXES)
 DOT_1_INPUT_AXES = (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES)
@@ -72,9 +72,14 @@ LN_SCALE_AXES = (W_NO_SHARD_AXES,)
 LN_BIAS_AXES = (W_NO_SHARD_AXES,)
 BIAS_1_AXES = (W_JOINED_AXES, W_TP_AXES)
 BIAS_2_AXES = (W_NO_SHARD_AXES,)
-# We set to 256 to ensure compatibility with MXFP8 GEMM which requires the
-# reduction dim to be multiple of 128 after sharding.
-INTERMEDIATE = 128 * 2
+
+INTERMEDIATE = 128
+
+# We set to 256 to ensure compatibility with hipblaslt MXFP8 GEMM which
+# requires the reduction dim to be multiple of 128 after sharding.
+if is_hip_extension():
+    INPUT_SHAPE = [[4, 64, 256]]
+    INTERMEDIATE = INTERMEDIATE * 2
 
 
 # Only test with FSDP and TPSP as DP is not used

@@ -321,7 +321,7 @@ class NormFwdPrimitive(BasePrimitive):
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
         ).get_scale_shape_2x(x.shape, is_padded=False)
-        # Slice out the padding for mxfp8 - the ROCm kernel writes to strided
+        # Slice out the padding for mxfp8 -- the kernel writes to strided
         # 2D positions, not contiguous.
         # For 1D MXFP8: allocated [padded_rows, padded_cols], kernel writes [:actual_rows, :actual_cols]
         scale_inv = jax.lax.slice(scale_inv, [0] * scale_inv.ndim, rowwise_scale_inv_shape)

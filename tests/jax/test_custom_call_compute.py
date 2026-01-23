@@ -58,7 +58,9 @@ GEMM_CASES = [
     (2048, 2048, 1024),
     (2048, 1024, 1024),
 ]
-TEST_SHAPES = [(64, 32, 64), (128, 64, 128), (128, 256, 256)]
+TEST_SHAPES = [(64, 32, 64)]
+if is_hip_extension():
+    TEST_SHAPES += [(128, 64, 128), (128, 256, 256)]
 jnp_float8_e4m3_type = get_jnp_float8_e4m3_type()
 jnp_float8_e5m2_type = get_jnp_float8_e5m2_type()
 

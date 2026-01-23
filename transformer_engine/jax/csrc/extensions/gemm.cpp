@@ -321,13 +321,13 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   auto bias_shape = std::vector<size_t>{has_bias ? n : 0};
   const int arch = cuda::sm_arch();
 
-  #ifndef __HIP_PLATFORM_AMD__
+#ifndef __HIP_PLATFORM_AMD__
   if (arch < 100 && is_fp8_gemm) {
     NVTE_CHECK(!lhs_is_trans && rhs_is_trans,
                "For SM90 or older archs and FP8 input, only NT (row-major) GEMM is supported, ",
                "got lhs_is_trans=", lhs_is_trans, ", rhs_is_trans=", rhs_is_trans);
   }
-  #endif
+#endif
 
   // These lists are to keep the TensorWrapper objects alive
   std::vector<TensorWrapper> lhs_wrapper_list;
@@ -516,7 +516,21 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 
   size_t num_non_empty_gemms = lhs_list.size();
 
-  // Launch zero-out kernels before the GEMM calls to use the sync in the multi-stream GEMM
+#ifndef __HIP_PLATFORM_AMD__
+  if (is_mxfp8_scaling) {
+    for (int i = 0; i < num_non_empty_gemms; i++) {
+      // The i-th GEMM will use the (i % num_streams)-th stream to compute,
+      // use the same stream to swizzle the scaling factors to make sure that
+      // the swizzling is done before the GEMM computation starts.
+      int stream_id = i % num_streams;
+      cudaStream_t stream_i = nvte_get_compute_stream(stream_id);
+      nvte_swizzle_scaling_factors(lhs_swizzle_list[i], lhs_list[i], stream_i);
+      nvte_swizzle_scaling_factors(rhs_swizzle_list[i], rhs_list[i], stream_i);
+    }
+  }
+#endif
+
+// Launch zero-out kernels before the GEMM calls to use the sync in the multi-stream GEMM
   size_t num_zero_outs = zero_out_dptr_list.size();
   for (int i = 0; i < num_zero_outs; i++) {
     int stream_id = i % num_streams;

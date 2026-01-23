@@ -29,6 +29,7 @@ from transformer_engine.jax.attention import (
 )
 from transformer_engine.jax.quantize.helper import DType as TEDType
 from transformer_engine.jax.util import get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
+from transformer_engine.jax.cpp_extensions.misc import is_hip_extension
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
@@ -51,6 +52,9 @@ def is_devices_enough(required):
 
 
 def _check_mxfp8_gemm_support(with_jax_gemm, m, n, k, use_bias=False):
+    if not is_hip_extension():
+        return
+
     if not with_jax_gemm:
         if (m % 16 != 0) or (n % 16 != 0) or (k % 128 != 0):
             pytest.skip(
