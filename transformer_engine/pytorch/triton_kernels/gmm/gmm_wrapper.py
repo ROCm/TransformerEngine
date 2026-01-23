@@ -153,7 +153,7 @@ def gmm(
     trans_rhs, _ = get_gmm_transposition(lhs, rhs, out)
 
     if config is None:
-        config = get_config("gmm", M, K, N, G, accumulate=False, trans_rhs=trans_rhs)
+        config = get_config("gmm", M, K, N, G, accumulate=False, trans_rhs=trans_rhs, dtype=lhs.dtype)
 
     assert all(
         key in config
@@ -327,7 +327,7 @@ def ptgmm(
     trans_lhs, _ = get_tgmm_transposition(lhs, rhs, out)
 
     if config is None:
-        config = get_config("ptgmm", M, K, N, G, accumulate)
+        config = get_config("ptgmm", M, K, N, G, accumulate, dtype=lhs.dtype)
 
     assert all(
         key in config
@@ -521,7 +521,7 @@ def nptgmm(
     )
 
     if config is None:
-        config = get_config("nptgmm", M, K, N, G, accumulate)
+        config = get_config("nptgmm", M, K, N, G, accumulate, dtype=lhs.dtype)
 
     assert all(
         key in config

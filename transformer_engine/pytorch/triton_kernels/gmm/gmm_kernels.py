@@ -16,6 +16,9 @@ from ..common import get_arch
 import triton
 import triton.language as tl
 
+# PyTorch
+import torch
+
 # AITER
 from .pid_preprocessing import pid_grid, remap_xcd
 
@@ -33,6 +36,7 @@ def get_config(
     G: int,
     accumulate: bool = False,
     trans_rhs: bool = False,
+    dtype = None,
 ) -> dict[str, int]:
     assert gmm_type in {
         "gmm",
@@ -149,8 +153,16 @@ def get_config(
     assert (
         key in get_config._config_dict[gmm_type]
     ), f"Configuration key '{key}' is absent for {gmm_type}."
-    return get_config._config_dict[gmm_type][key]
-
+    
+    config = get_config._config_dict[gmm_type][key].copy()
+    
+    # Adapt block sizes to fit within hardware shared memory limits
+    if dtype == torch.float32:
+        config["BLOCK_SIZE_M"] = max(1, config["BLOCK_SIZE_M"] // 2)
+        config["BLOCK_SIZE_K"] = max(1, config["BLOCK_SIZE_K"] // 2)
+        config["BLOCK_SIZE_N"] = max(1, config["BLOCK_SIZE_N"] // 2)
+    
+    return config
 
 # Common code shared by GMM and TGMM kernels.
 # ------------------------------------------------------------------------------

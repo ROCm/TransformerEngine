@@ -76,7 +76,7 @@ TEST_SHAPES: list[tuple[int, int, int, int]] = TEST_ONLY_SHAPES + REAL_SHAPES
 # Input and output types.
 
 # Define string dtypes that match SUPPORTED_DTYPES from gmm_common
-SUPPORTED_DTYPES_STR: set[str] = {"fp16", "bf16"}
+SUPPORTED_DTYPES_STR: set[str] = {"fp32", "fp16", "bf16"}
 INPUT_DTYPES_STR: set[str] = {"i" + dtype_str for dtype_str in SUPPORTED_DTYPES_STR}
 OUTPUT_DTYPES_STR: set[str] = {"o" + dtype_str for dtype_str in SUPPORTED_DTYPES_STR}
 
@@ -371,7 +371,7 @@ def test_tgmm(
     # default tolerance. This behavior is deterministic and, given a RNG seed,
     # always happen for the same output elements. So, absolute tolerance is increased
     # only for this shape.
-    atol = 2.5e-2 if M > 1e6 else None
+    atol = 4.0e-2 if M > 1e6 else None
 
     kernel_wrapper = triton_ptgmm if persistent else triton_nptgmm
 

@@ -16,7 +16,7 @@ from torch import Tensor
 # ------------------------------------------------------------------------------
 
 # Supported data types, as PyTorch types.
-SUPPORTED_DTYPES: set[torch.dtype] = {torch.float16, torch.bfloat16}
+SUPPORTED_DTYPES: set[torch.dtype] = {torch.float32, torch.float16, torch.bfloat16}
 
 
 # Default data type, as PyTorch type.
