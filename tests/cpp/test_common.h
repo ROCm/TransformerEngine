@@ -233,6 +233,10 @@ class Tensor {
     }
   }
 
+  void *amax_dptr() const {
+    return tensor_.amax();
+  }
+
   float scale() const {
     if(scale_cpu_data_) {
       NVTE_CHECK(tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING, "Invalid scaling_mode!");

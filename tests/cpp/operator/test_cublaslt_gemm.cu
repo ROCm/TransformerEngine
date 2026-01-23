@@ -82,7 +82,6 @@ __global__ void compute_ref_kernel(
   bool b_is_colwise,
   bool use_mxfp8)
 {
-  const size_t k_chunks = k / 32;
   const size_t jj = blockIdx.x * blockDim.x + threadIdx.x;
   const size_t ii = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -187,16 +186,13 @@ static void run_reference(
     const Tensor& A,
     const Tensor& B,
     const Tensor* Bias,                 // nullable
-    float d_scale,
-    std::unique_ptr<D_Type[]>& ref_D,   // m*n
-    float* ref_amax_d,
-    std::unique_ptr<Gelu_Type[]>& ref_pre_gelu_out) // nullable
+    const Tensor& D_for_scale,
+    Tensor& RefD,
+    Tensor* RefPreGeluOut)              // nullable
 {
   const bool use_mxfp8 = (params.scaling_mode == NVTE_MXFP8_1D_SCALING);
 
-  const size_t k_chunks = params.k / 32;
-
-  Gelu_Type* ref_gelu_host = (params.use_gelu ? ref_pre_gelu_out.get() : nullptr);
+  const float d_scale = D_for_scale.scale();
 
   const bool is_fp8_output = test::isFp8Type(test::TypeInfo<D_Type>::dtype);
 
@@ -242,26 +238,19 @@ static void run_reference(
     bias_dev = static_cast<const Bias_Type*>(Bias->rowwise_dptr());
   }
 
-  // allocate device outputs as test::Tensor objects
-  const size_t lenD = params.m * params.n;
-  const size_t bytesD = lenD * sizeof(D_Type);
-
-  Tensor RefD("RefD", TShape{params.n, params.m}, TypeInfo<D_Type>::dtype);
   D_Type* d_refD = static_cast<D_Type*>(RefD.rowwise_dptr());
 
-  Tensor RefGelu;
-  Tensor RefAmax;
   Gelu_Type* d_refGelu = nullptr;
   float* d_refAmax = nullptr;
 
-  if (ref_gelu_host) {
-    RefGelu = Tensor("RefGelu", TShape{params.n, params.m}, TypeInfo<Gelu_Type>::dtype);
-    d_refGelu = static_cast<Gelu_Type*>(RefGelu.rowwise_dptr());
+  if (RefPreGeluOut) {
+    d_refGelu = static_cast<Gelu_Type*>(RefPreGeluOut->rowwise_dptr());
   }
-  if (is_fp8_output && ref_amax_d) {
-    RefAmax = Tensor("RefAmax", TShape{1}, DType::kFloat32);
-    d_refAmax = static_cast<float*>(RefAmax.rowwise_dptr());
-    NVTE_CHECK_CUDA(cudaMemset(d_refAmax, 0, sizeof(float)));
+
+  if (is_fp8_output) {
+    d_refAmax = static_cast<float*>(RefD.amax_dptr());
+    if (d_refAmax)
+      NVTE_CHECK_CUDA(cudaMemset(d_refAmax, 0, sizeof(float)));
   }
 
   // Kernel launch
@@ -297,25 +286,6 @@ static void run_reference(
           use_mxfp8);
 
   NVTE_CHECK_CUDA(cudaGetLastError());
-  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-
-  // copy outputs back
-  RefD.to_cpu();
-  memcpy(ref_D.get(), RefD.rowwise_cpu_dptr<D_Type>(), bytesD);
-
-  if (ref_gelu_host) {
-    RefGelu.to_cpu();
-    memcpy(ref_gelu_host, RefGelu.rowwise_cpu_dptr<Gelu_Type>(), lenD * sizeof(Gelu_Type));
-  }
-
-  if (ref_amax_d) {
-    if (is_fp8_output) {
-      RefAmax.to_cpu();
-      *ref_amax_d = RefAmax.rowwise_cpu_dptr<float>()[0];
-    } else {
-      *ref_amax_d = 0.0f;
-    }
-  }
 }
 
 
@@ -541,23 +511,21 @@ void performTest(const TestParams& params) {
   }
 
   //perform the reference gemm on GPU
-  std::unique_ptr<D_Type[]> ref_D = std::make_unique<D_Type[]>(params.m*params.n);
-  std::unique_ptr<Gelu_Type[]> ref_pre_gelu_out;
-  if(params.use_gelu){
-    ref_pre_gelu_out = std::make_unique<Gelu_Type[]>(params.m*params.n);
-  }
+  Tensor RefD("RefD", TShape{ params.n, params.m }, dtype);
+  Tensor RefPreGeluOut;
 
-  float ref_amax_d;
+  if (params.use_gelu) {
+    RefPreGeluOut = Tensor("RefPreGeluOut", TShape{ params.n, params.m }, gelu_type);
+  }
 
   run_reference<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(
     params,
     A,
     B,
     params.use_bias ? &bias : nullptr,
-    D.scale(),
-    ref_D,
-    &ref_amax_d,
-    ref_pre_gelu_out);
+    D,
+    RefD,
+    params.use_gelu ? &RefPreGeluOut : nullptr);
 
   // check if error message happens in running                             
   (void)cudaDeviceSynchronize();
@@ -567,15 +535,18 @@ void performTest(const TestParams& params) {
   //compare results
   auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
   if (isFp8Type(dtype)) {
+    const float ref_amax_d = RefD.amax();
     compareResults("D_amax", D.amax(), ref_amax_d, atol_amax, rtol_amax);
   }
 
   auto [atol, rtol] = getTestTolerances(dtype, has_fp8, use_mxfp8);
-  compareResults("D", D, ref_D.get(), true, atol, rtol);
+  RefD.to_cpu();
+  compareResults("D", D, RefD.rowwise_cpu_dptr<D_Type>(), true, atol, rtol);
 
   if(params.use_gelu){
     auto [atol, rtol] = getTestTolerances(gelu_type, false, false);
-    compareResults("gelu", pre_gelu_out, ref_pre_gelu_out.get(), true, atol, rtol);
+    RefPreGeluOut.to_cpu();
+    compareResults("gelu", pre_gelu_out, RefPreGeluOut.rowwise_cpu_dptr<Gelu_Type>(), true, atol, rtol);
   }
 }
 
