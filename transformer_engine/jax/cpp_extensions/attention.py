@@ -10,11 +10,10 @@ import warnings
 from dataclasses import dataclass, replace
 from functools import partial, reduce
 from typing import Optional, Tuple
-from packaging import version
 
 import jax
 import jax.numpy as jnp
-from jax import dtypes, lax
+from jax import dtypes, lax, ffi
 from jax.sharding import PartitionSpec, NamedSharding
 if version.parse(jax.__version__) >= version.parse("0.5.0"):
     from jax.experimental.custom_partitioning import SdyShardingRule
@@ -51,12 +50,6 @@ from ..sharding import (
     num_of_devices,
     with_sharding_constraint,
 )
-
-
-if version.parse(jax.__version__) >= version.parse("0.5.0"):
-    from jax import ffi  # pylint: disable=ungrouped-imports
-else:
-    from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
 
 __all__ = [
@@ -1818,6 +1811,9 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
         )
         arg_shardings = [arg_i.sharding for arg_i in arg_infos]
         arg_shardings[4] = seed_sharding
+        # Ensure segment_pos gets same sharding as ID.
+        arg_shardings[-1] = arg_shardings[-3]
+        arg_shardings[-2] = arg_shardings[-4]
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
 
@@ -1854,7 +1850,7 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
 
             # RNG shape should be the shared shape. This is unused for ring attention as we do not
             # support dropout currently.
-            rng_state_shape = (result_infos[2].shape[0] // mesh.size, *result_infos[2].shape[1:])
+            rng_state_shape = (seed.shape[0], *result_infos[2].shape[1:])
             rng_state = jnp.zeros(rng_state_shape).astype(result_infos[2].dtype)
 
             def scan_kv_block(idx, carry):
@@ -2025,7 +2021,13 @@ class FusedRingAttnBwdPrimitive(FusedAttnBwdPrimitive):
         dk_sharding = NamedSharding(mesh, PartitionSpec(*k_spec))
         dv_sharding = NamedSharding(mesh, PartitionSpec(*v_spec))
         dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
-        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+
+        arg_shardings = [arg_i.sharding for arg_i in arg_infos]
+        # Ensure segment_pos gets same sharding as ID.
+        arg_shardings[-1] = arg_shardings[-3]
+        arg_shardings[-2] = arg_shardings[-4]
+        arg_shardings = tuple(arg_shardings)
+
         out_shardings = (dq_sharding, dk_sharding, dv_sharding, dbias_sharding)
 
         helper = _FusedAttnCPWithP2PHelper(mesh, config)
@@ -2299,6 +2301,9 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
         )
         arg_shardings = [arg_i.sharding for arg_i in arg_infos]
         arg_shardings[4] = seed_sharding
+        # Ensure segment_pos gets same sharding as ID.
+        arg_shardings[-1] = arg_shardings[-3]
+        arg_shardings[-2] = arg_shardings[-4]
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
 
@@ -2340,7 +2345,7 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
 
             # RNG shape should be the shared shape. This is unused for ring attention as we do not
             # support dropout currently.
-            rng_state_shape = (result_infos[2].shape[0] // mesh.size, *result_infos[2].shape[1:])
+            rng_state_shape = (seed.shape[0], *result_infos[2].shape[1:])
             rng_state = jnp.zeros(rng_state_shape).astype(result_infos[2].dtype)
 
             def scan_kv_block(idx, carry):
@@ -2437,7 +2442,11 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
         if not is_context_parallel:
             return FusedAttnBwdPrimitive.partition(config, mesh, arg_infos, result_infos)
 
-        arg_shardings = tuple(arg.sharding for arg in arg_infos)
+        arg_shardings = [arg_i.sharding for arg_i in arg_infos]
+        # Ensure segment_pos gets same sharding as ID.
+        arg_shardings[-1] = arg_shardings[-3]
+        arg_shardings[-2] = arg_shardings[-4]
+        arg_shardings = tuple(arg_shardings)
         # dq, dk, dv, dbias sharding = q, k, v, bias sharding
         out_shardings = tuple(arg.sharding for arg in arg_infos[:4])
 
@@ -2773,10 +2782,13 @@ def fused_attn_bwd(
         assert bias is None
         bias = jnp.zeros(0, dtype=qkv[0].dtype)
 
-    if 100 in get_all_device_compute_capability():
+    # TODO(KshitijLakhani): Add a check for cuDNN version when determinism does get supported on
+    # sm100+
+    compute_capabilities = get_all_device_compute_capability()
+    if any(x >= 100 for x in compute_capabilities):
         assert not (
             attn_bias_type != AttnBiasType.NO_BIAS and dropout_probability != 0
-        ), "For sm100, bprop kernel support for dropout + determinism (bias) is not supported"
+        ), "For sm100+, bprop kernel support for dropout + determinism (bias) is not supported"
 
     fused_config = _FusedAttnConfig(
         attn_bias_type=attn_bias_type,

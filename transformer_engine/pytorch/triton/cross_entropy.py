@@ -4,7 +4,7 @@
 #
 # See LICENSE for license information.
 
-"""Efficient Cross Entropy kernels written with OpenAI Triton."""
+"""PyTorch wrapper functions for Cross Entropy Triton kernels."""
 
 from typing import Union
 from functools import reduce
@@ -14,6 +14,7 @@ import torch
 import torch.distributed as dist
 
 import triton
+<<<<<<< HEAD
 import triton.language as tl
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
@@ -222,7 +223,14 @@ def cross_entropy_kernel(
             tl.store(X_ptr + y - vocab_start_idx, X_y)
 
     tl.store(loss_ptr, loss)
+=======
+>>>>>>> 389a6b
 
+from transformer_engine.common.triton.cross_entropy import (
+    online_softmax_kernel,
+    cross_entropy_kernel,
+    element_mul_kernel,
+)
 
 # The optimal maximum block size depends on your hardware, your kernel, and your dtype
 MAX_FUSED_SIZE = 65536 // 2
@@ -230,44 +238,6 @@ if IS_HIP_EXTENSION:
     NUM_WARPS = 16
 else:
     NUM_WARPS = 32
-
-@triton.jit
-def element_mul_kernel(
-    X_ptr,
-    X_stride,
-    grad_output_ptr,
-    grad_output_stride,
-    n_cols,
-    BLOCK_SIZE: tl.constexpr,
-):
-    """
-    This function multiplies each element of the tensor pointed by X_ptr with the value pointed by grad_output_ptr.
-    The multiplication is performed in-place on the tensor pointed by X_ptr.
-
-    Parameters:
-    X_ptr: Pointer to the input tensor.
-    X_stride (int): The stride of the input tensor.
-    grad_output_ptr: Pointer to the gradient output value.
-    n_cols (int): The number of columns in the input tensor.
-    BLOCK_SIZE (int): The block size for Triton operations.
-    """
-
-    # Get the program ID and convert it to int64 to avoid overflow
-    program_id = tl.program_id(0).to(tl.int64)
-
-    # Locate the start index
-    X_ptr += program_id * X_stride
-
-    # Load the gradient output value
-    grad_output_ptr += program_id * grad_output_stride
-    grad_output = tl.load(grad_output_ptr)
-
-    # Perform the element-wise multiplication
-    for i in range(0, n_cols, BLOCK_SIZE):
-        X_offsets = i + tl.arange(0, BLOCK_SIZE)
-        X_block = tl.load(X_ptr + X_offsets, mask=X_offsets < n_cols)
-        tl.store(X_ptr + X_offsets, X_block * grad_output, mask=X_offsets < n_cols)
-
 
 def cross_entropy_forward(
     _input: torch.Tensor,

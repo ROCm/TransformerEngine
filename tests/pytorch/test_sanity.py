@@ -11,18 +11,16 @@ import pytest
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import os
 
-import transformer_engine.pytorch
-from transformer_engine.pytorch.fp8 import (
-    fp8_autocast,
-    FP8GlobalStateManager,
-    fp8_model_init,
-)
+import transformer_engine
+import transformer_engine.pytorch as te
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
-    is_bf16_compatible,
 )
 from transformer_engine.pytorch import (
+    autocast,
+    quantized_model_init,
     LayerNormLinear,
     Linear,
     GroupedLinear,
@@ -30,26 +28,25 @@ from transformer_engine.pytorch import (
     TransformerLayer,
     RMSNorm,
     LayerNorm,
+    Float8CurrentScalingQuantizer,
+    Float8Quantizer,
+    Float8Tensor,
+    MXFP8Tensor,
+    checkpoint,
+    QuantizedTensor,
+    is_bf16_available,
 )
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.module.base import get_workspace
-from transformer_engine.pytorch.tensor import QuantizedTensor
-from transformer_engine.pytorch.tensor.float8_tensor import (
-    Float8CurrentScalingQuantizer,
-    Float8Quantizer,
-    Float8Tensor,
-)
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
-from transformer_engine.pytorch.distributed import checkpoint
 from utils import ModelConfig
 
 # Only run FP8 tests on supported devices.
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-fp8_block_scaling_available, _ = FP8GlobalStateManager.is_fp8_block_scaling_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+fp8_block_scaling_available, _ = te.is_fp8_block_scaling_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 
 # Record initial RNG state from script run.
 seed = 1234
@@ -90,9 +87,19 @@ model_configs = {
     "large": ModelConfig(2, 128, 4, 128, num_layers=1),
 }
 
+
+def nvfp4_vanilla():
+    nvfp4_recipe = recipe.NVFP4BlockScaling()
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
+
 fp8_recipes = []
 if mxfp8_available:
     fp8_recipes.append(recipe.MXFP8BlockScaling())
+    fp8_recipes.append(nvfp4_vanilla())  # TODO: fix check for this
 if fp8_block_scaling_available:
     fp8_recipes.append(recipe.Float8BlockScaling())
 if fp8_available:
@@ -101,7 +108,7 @@ if fp8_available:
 fp8_recipes.append(None)
 
 param_types = [torch.float32, torch.float16]
-if is_bf16_compatible():  # bf16 requires sm_80 or higher
+if is_bf16_available():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 
 all_boolean = [True, False]
@@ -118,6 +125,7 @@ all_activations = [
     "sreglu",
     "silu",
     "swiglu",
+    "clamped_swiglu",
 ]
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
@@ -153,7 +161,7 @@ def _test_sanity_e2e_amp(block, dtype, config, fp8_recipe, skip_wgrad):
 
     use_fp8 = fp8_recipe is not None
     with torch.autocast(device_type="cuda", enabled=True, dtype=dtype):
-        with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+        with autocast(enabled=use_fp8, recipe=fp8_recipe):
             te_out = block(te_inp_hidden_states, attention_mask=te_inp_attn_mask)
         loss = te_out.sum()
 
@@ -192,7 +200,7 @@ def _test_sanity_e2e_gradient_accumulation_fusion(block, dtype, config, fp8_reci
             p.main_grad = torch.zeros_like(p)
 
     use_fp8 = fp8_recipe is not None
-    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+    with autocast(enabled=use_fp8, recipe=fp8_recipe):
         te_out = block(te_inp_hidden_states, attention_mask=te_inp_attn_mask)
     loss = te_out.sum()
     loss.backward()
@@ -220,7 +228,7 @@ def _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad):
         _disable_wgrads(block)
 
     use_fp8 = fp8_recipe is not None
-    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+    with autocast(enabled=use_fp8, recipe=fp8_recipe):
         te_out = block(te_inp_hidden_states)
     loss = te_out.sum()
     loss.backward()
@@ -246,7 +254,7 @@ def _test_sanity_e2e_bert(block, dtype, config, fp8_recipe, skip_wgrad):
         _disable_wgrads(block)
 
     use_fp8 = fp8_recipe is not None
-    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+    with autocast(enabled=use_fp8, recipe=fp8_recipe):
         te_out = block(te_inp_hidden_states, attention_mask=te_inp_attn_mask)
     loss = te_out.sum()
     loss.backward()
@@ -278,7 +286,7 @@ def _test_sanity_e2e_T5(block, dtype, config, fp8_recipe, skip_wgrad):
         _disable_wgrads(block)
 
     use_fp8 = fp8_recipe is not None
-    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+    with autocast(enabled=use_fp8, recipe=fp8_recipe):
         te_out = block(
             te_inp_hidden_states,
             attention_mask=te_inp_attn_mask,
@@ -307,7 +315,7 @@ def _test_sanity_common(
         _disable_wgrads(block)
 
     use_fp8 = fp8_recipe is not None
-    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+    with autocast(enabled=use_fp8, recipe=fp8_recipe):
         if not microbatching:
             te_out = block(te_inp)
         else:
@@ -382,6 +390,8 @@ def test_sanity_layernorm_linear(
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -410,6 +420,8 @@ def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad, microba
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
 
     sigma = 0.023
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
@@ -440,9 +452,11 @@ def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
 
     use_fp8 = fp8_recipe is not None
-    with fp8_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
+    with quantized_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
         te_linear = Linear(
             config.hidden_size, ffn_hidden_size, bias=use_bias, params_dtype=dtype
         ).cuda()
@@ -450,7 +464,7 @@ def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_
     inp_hidden_states = torch.randn(
         num_tokens, config.hidden_size, dtype=dtype, requires_grad=True
     ).cuda()
-    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+    with autocast(enabled=use_fp8, recipe=fp8_recipe):
         out = te_linear(inp_hidden_states)
     loss = out.sum()
     loss.backward()
@@ -479,9 +493,11 @@ def test_sanity_grouped_linear(
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4():
+            pytest.skip("NVFP4 not supported for grouped linear")
 
     use_fp8 = fp8_recipe is not None
-    with fp8_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
+    with quantized_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
         te_grouped_linear = GroupedLinear(
             num_gemms, config.hidden_size, ffn_hidden_size, bias=use_bias, params_dtype=dtype
         ).cuda()
@@ -497,7 +513,7 @@ def test_sanity_grouped_linear(
     elif empty_split == "middle":
         m_splits[num_gemms // 2] = 0
 
-    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+    with autocast(enabled=use_fp8, recipe=fp8_recipe):
         out = te_grouped_linear(inp_hidden_states, m_splits)
     loss = out.sum()
     loss.backward()
@@ -529,11 +545,13 @@ def test_sanity_layernorm_mlp(
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
-
+    activation_params = None if activation != "clamped_swiglu" else {"limit": 7.0, "alpha": 1.702}
     block = LayerNormMLP(
         config.hidden_size,
         4 * config.hidden_size,
@@ -541,6 +559,7 @@ def test_sanity_layernorm_mlp(
         output_layer_init_method=output_layer_init_method,
         zero_centered_gamma=zero_centered_gamma,
         activation=activation,
+        activation_params=activation_params,
         normalization=normalization,
         params_dtype=dtype,
         device="cuda",
@@ -571,6 +590,8 @@ def test_sanity_gpt(
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -632,6 +653,8 @@ def test_sanity_bert(dtype, fp8_recipe, model, skip_wgrad, normalization):
             pytest.skip(reason_for_no_fp8)
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -686,6 +709,8 @@ def test_sanity_T5(dtype, fp8_recipe, model, skip_wgrad, normalization):
             pytest.skip(reason_for_no_fp8)
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -737,6 +762,8 @@ def test_sanity_amp_and_nvfuser(dtype, fp8_recipe, model, skip_wgrad):
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -767,6 +794,8 @@ def test_sanity_drop_path(dtype, fp8_recipe, model):
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -801,6 +830,8 @@ def test_sanity_fused_qkv_params(dtype, fp8_recipe, model, skip_wgrad):
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -835,6 +866,8 @@ def test_sanity_gradient_accumulation_fusion(dtype, fp8_recipe, model, skip_wgra
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -945,9 +978,9 @@ def test_replace_raw_data_for_float8tensor():
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-def test_fp8_model_init_high_precision_init_val():
-    """Test fp8_model_init with preserve_high_precision_init_val=True"""
-    with fp8_model_init(preserve_high_precision_init_val=True):
+def test_quantized_model_init_high_precision_init_val():
+    """Test quantized_model_init with preserve_high_precision_init_val=True"""
+    with quantized_model_init(preserve_high_precision_init_val=True):
         model = Linear(768, 768)
 
     weight = model.weight
@@ -1020,7 +1053,7 @@ def test_linear_frozen_weights_memory_default_recipe():
     linear.weight.requires_grad = False
 
     # Forward and backward pass with FP8
-    with fp8_autocast():
+    with autocast():
         o = linear(x)
         g_o = torch.randn_like(o)
 
@@ -1074,7 +1107,7 @@ def test_inference_mode(
     # Construct module
     module = None
     with torch.no_grad():
-        with fp8_model_init(enabled=with_quantization, recipe=quantization_recipe):
+        with quantized_model_init(enabled=with_quantization, recipe=quantization_recipe):
             if module_name == "Linear":
                 module = Linear(hidden_size, hidden_size)
             elif module_name == "LayerNormLinear":
@@ -1109,6 +1142,6 @@ def test_inference_mode(
         kwargs = {}
         if module_name == "GroupedLinear":
             kwargs["m_splits"] = [sequence_length]
-        with fp8_autocast(enabled=with_quantization, fp8_recipe=quantization_recipe):
+        with autocast(enabled=with_quantization, recipe=quantization_recipe):
             y = module(x, **kwargs)
     check_weights()

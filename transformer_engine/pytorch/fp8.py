@@ -4,19 +4,32 @@
 #
 # See LICENSE for license information.
 
-"""FP8 utilities for TransformerEngine"""
-from __future__ import annotations
+"""
+DEPRECATED in favor of `transformer_engine.pytorch.quantization.py`.
+"""
 
-import abc
-import itertools
-import os
-from contextlib import contextmanager
-from collections import deque
-from typing import Callable, List, Optional, Dict, Any, Tuple, Union
+# pylint: disable=wrong-import-position,unused-import
 
+<<<<<<< HEAD
 import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine_torch as tex
+=======
+import warnings
+
+warnings.warn(
+    "Using deprecated internal API from Transformer Engine. "
+    "transformer_engine.pytorch.fp8 will be removed in a "
+    "future release.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
+
+# There are some users indirectly importing these classes
+# from fp8.py. This ensure backwards compatibility.
+# https://github.com/Lightning-AI/lightning-thunder/pull/2635.
+>>>>>>> 389a6b
 from transformer_engine.common.recipe import (
     Recipe,
     DelayedScaling,
@@ -24,8 +37,11 @@ from transformer_engine.common.recipe import (
     MXFP8BlockScaling,
     Float8CurrentScaling,
     Float8BlockScaling,
+    NVFP4BlockScaling,
+    CustomRecipe,
 )
 
+<<<<<<< HEAD
 from .constants import dist_group_type
 from .utils import get_device_compute_capability, get_torch_float8_e4m3_type, get_torch_float8_e5m2_type
 from .jit import jit_fuser
@@ -1108,3 +1124,38 @@ class Float8BlockScalingRecipeState(RecipeState):
                 ]
             )
         )
+=======
+
+# Importing each function instead of 'import *' allows us specify '__all__' in
+# quantize.py and also makes any newer additions to quantize.py invisible via
+# fp8.py so that we don't reinforce importing internal TE functions.
+from .quantization import (
+    check_fp8_support,
+    check_mxfp8_support,
+    check_nvfp4_support,
+    check_fp8_block_scaling_support,
+    check_recipe_support,
+    get_default_fp8_recipe,
+    get_fp8_torch_dtype,
+    get_fp8_te_dtype,
+    get_fp4_te_dtype,
+    get_fp8_max,
+    FP8GlobalStateManager,
+    fp8_model_init,
+    fp8_autocast,
+    _update_amax_history,
+    _default_get_amax_and_update_history,
+    _default_sf_compute,
+    _compute_amax_and_update_history,
+    _compute_scaling_factor,
+    _amax_and_scale_update,
+    split_and_copy,
+    RecipeState,
+    DelayedScalingRecipeState,
+    Float8CurrentScalingRecipeState,
+    MXFP8BlockScalingRecipeState,
+    Float8BlockScalingRecipeState,
+    NVFP4BlockScalingRecipeState,
+    CustomRecipeState,
+)
+>>>>>>> 389a6b

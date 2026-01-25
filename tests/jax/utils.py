@@ -367,9 +367,9 @@ class MlpBlock(nn.Module):
 
     transpose_batch_sequence: bool
     intermediate_dim: int = 2048
-    activations: Sequence[Union[str, Callable]] = ("relu",)
+    activations: Sequence[Union[str, Callable]] = ("gelu",)
     kernel_init: Initializer = None
-    intermediate_dropout_rate: float = 0.1
+    intermediate_dropout_rate: float = 0.0
     intermediate_dropout_dims: Sequence[int] = ()
     use_bias: bool = False
     dtype: Any = jnp.float32
@@ -1038,14 +1038,14 @@ class EncoderLayer(nn.Module):
     hidden_dropout: float = 0.1
     hidden_dropout_dims: Sequence[int] = ()
     attention_dropout: float = 0.1
-    intermediate_dropout: float = 0.1
+    intermediate_dropout: float = 0.0
     intermediate_dropout_dims: Sequence[int] = ()
     transpose_batch_sequence: bool = True
     float32_attention_logits: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
     mlp_dim: int = 2048
-    mlp_activations: Sequence[str] = ("relu",)
+    mlp_activations: Sequence[str] = ("gelu",)
     use_bias: bool = False
     dtype: Any = jnp.float32
     apply_residual_connection_post_layernorm: bool = False
@@ -1202,14 +1202,14 @@ class DecoderLayer(nn.Module):
     hidden_dropout: float = 0.1
     hidden_dropout_dims: Sequence[int] = ()
     attention_dropout: float = 0.1
-    intermediate_dropout: float = 0.1
+    intermediate_dropout: float = 0.0
     intermediate_dropout_dims: Sequence[int] = ()
     transpose_batch_sequence: bool = True
     float32_attention_logits: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
     mlp_dim: int = 2048
-    mlp_activations: Sequence[str] = ("relu",)
+    mlp_activations: Sequence[str] = ("gelu",)
     use_bias: bool = False
     dtype: Any = jnp.float32
     apply_residual_connection_post_layernorm: bool = False
@@ -1547,6 +1547,12 @@ def dtype_tols(
         rtol = eps_relaxed
     if atol is None:
         atol = max(ulp, eps_relaxed)
+
+    # Manually set tols for nvfp4
+    if dtype == jnp.float4_e2m1fn:
+        atol = 0.05
+        rtol = 0.1
+
     return {"rtol": rtol, "atol": atol}
 
 

@@ -6,20 +6,21 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-/*! \file dequantize_kernels.cuh
- *  \brief CUDA kernels to cast from MXFP8.
+/*! \file dequantize_mxfp8.cuh
+ *  \brief CUDA kernels to dequantize from MXFP8.
  */
 
-#ifndef TRANSFORMER_ENGINE_DEQUANTIZE_KERNELS_CUH_
-#define TRANSFORMER_ENGINE_DEQUANTIZE_KERNELS_CUH_
+#ifndef TRANSFORMER_ENGINE_DEQUANTIZE_MXFP8_CUH_
+#define TRANSFORMER_ENGINE_DEQUANTIZE_MXFP8_CUH_
 
 #include <cuda.h>
 #ifndef __HIP_PLATFORM_AMD__
 #include <cudaTypedefs.h>
 #endif //#ifndef __HIP_PLATFORM_AMD__
 #include <cuda_runtime.h>
-#include <transformer_engine/cast.h>
+#include <transformer_engine/transformer_engine.h>
 
+<<<<<<< HEAD:transformer_engine/common/util/dequantize_kernels.cuh
 #include <cfloat>
 #include <limits>
 
@@ -34,10 +35,17 @@
 #ifdef __HIP_PLATFORM_AMD__
 #include "rocm_dequantize_kernels.cuh"
 #endif
+=======
+#include "../../common.h"
+#include "../../util/math.h"
+#include "../../util/ptx.cuh"
+#include "../../utils.cuh"
+>>>>>>> 389a6b:transformer_engine/common/cast/mxfp8/dequantize_mxfp8.cuh
 
 namespace transformer_engine {
-
-namespace dequantization {
+namespace dispatch {
+namespace mxfp8 {
+namespace dequantize_kernel {
 
 #ifndef __HIP_PLATFORM_AMD__
 template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X>
@@ -217,30 +225,14 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   }
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
+<<<<<<< HEAD:transformer_engine/common/util/dequantize_kernels.cuh
 #endif // #ifndef __HIP_PLATFORM_AMD__
+=======
+}  // namespace dequantize_kernel
+>>>>>>> 389a6b:transformer_engine/common/cast/mxfp8/dequantize_mxfp8.cuh
 
-static void fp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
-  NVTE_CHECK(is_fp8_dtype(input.data.dtype), "Input must have FP8 type.");
-  NVTE_CHECK(!is_fp8_dtype(output->data.dtype), "Output must be in higher precision.");
-  NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
-
-  const size_t N = product(input.data.shape);
-  TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-      input.data.dtype, IType,
-      TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-          output->data.dtype, OType,
-
-          constexpr int nvec = 32 / sizeof(OType);
-          detail::DequantizeParam p;
-          p.scale_inv = reinterpret_cast<const fp32 *>(input.scale_inv.dptr);
-          VectorizedUnaryKernelLauncher<nvec, detail::DequantizeParam, detail::dequantize_func>(
-              reinterpret_cast<const IType *>(input.data.dptr), nullptr,
-              reinterpret_cast<OType *>(output->data.dptr), nullptr, nullptr, nullptr, N, p,
-              stream););  // NOLINT(*)
-  );                      // NOLINT(*)
-}
-
-static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
+inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
+  using namespace dequantize_kernel;
   bool use_rowwise_scaling = input.has_data();
   bool use_colwise_scaling = input.has_columnwise_data();
 #ifndef __HIP_PLATFORM_AMD__
@@ -336,6 +328,7 @@ static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t s
 #endif
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
+<<<<<<< HEAD:transformer_engine/common/util/dequantize_kernels.cuh
 }  // namespace dequantization
 
 namespace detail {
@@ -364,6 +357,10 @@ void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t stream)
 
 }  // namespace detail
 
+=======
+}  // namespace mxfp8
+}  // namespace dispatch
+>>>>>>> 389a6b:transformer_engine/common/cast/mxfp8/dequantize_mxfp8.cuh
 }  // namespace transformer_engine
 
-#endif  // TRANSFORMER_ENGINE_DEQUANTIZE_KERNELS_CUH_
+#endif  // TRANSFORMER_ENGINE_DEQUANTIZE_MXFP8_CUH_

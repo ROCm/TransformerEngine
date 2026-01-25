@@ -30,7 +30,7 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
                    const int multiprocessorCount, const bool zero_centered_gamma,
                    cudaStream_t stream) {
   if (is_fp8_dtype(z->data.dtype) && !is_delayed_tensor_scaling(z->scaling_mode) &&
-      !is_mxfp_scaling(z->scaling_mode)) {
+      !is_mxfp8_scaling(z->scaling_mode)) {
     NVTE_ERROR("Not implemented scaling mode: " + to_string(z->scaling_mode) + ".");
   }
 
@@ -65,8 +65,12 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
 
   NVTE_Norm_Backend norm_backend;
   bool is_aligned = true;
+<<<<<<< HEAD
 #ifndef __HIP_PLATFORM_AMD__
   bool cudnn_backend = use_cudnn_norm_fwd() || is_mxfp_scaling(z->scaling_mode);
+=======
+  bool cudnn_backend = use_cudnn_norm_fwd() || is_mxfp8_scaling(z->scaling_mode);
+>>>>>>> 389a6b
 
   if (!is_fp8_dtype(z->data.dtype) && z->amax.dptr != nullptr) {
     NVTE_CHECK(!cudnn_backend,

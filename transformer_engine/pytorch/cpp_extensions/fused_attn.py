@@ -15,9 +15,10 @@ from transformer_engine_torch import (
     NVTE_QKV_Format,
     NVTE_Bias_Type,
     NVTE_Mask_Type,
+    NVTE_Softmax_Type,
     NVTE_Fused_Attn_Backend,
 )
-from ..tensor.quantized_tensor import Quantizer
+from ..quantized_tensor import Quantizer
 
 
 __all__ = [
@@ -89,6 +90,7 @@ AttnMaskType = {
     "padding_causal_bottom_right": NVTE_Mask_Type.NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
 }
 
+<<<<<<< HEAD
 if not IS_HIP_EXTENSION:
     FusedAttnBackend = {
         "F16_max512_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen,
@@ -102,6 +104,20 @@ else:
         "CK": NVTE_Fused_Attn_Backend.NVTE_CK,
         "No_Backend": NVTE_Fused_Attn_Backend.NVTE_No_Backend,
     }
+=======
+SoftmaxType = {
+    "vanilla": NVTE_Softmax_Type.NVTE_VANILLA_SOFTMAX,
+    "off-by-one": NVTE_Softmax_Type.NVTE_OFF_BY_ONE_SOFTMAX,
+    "learnable": NVTE_Softmax_Type.NVTE_LEARNABLE_SOFTMAX,
+}
+
+FusedAttnBackend = {
+    "F16_max512_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen,
+    "F16_arbitrary_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+    "FP8": NVTE_Fused_Attn_Backend.NVTE_FP8,
+    "No_Backend": NVTE_Fused_Attn_Backend.NVTE_No_Backend,
+}
+>>>>>>> 389a6b
 
 BACKEND_F16m512_FP8_THREADS_PER_CTA = 128
 BACKEND_F16arb_ELTS_PER_THREADS = 16
@@ -112,9 +128,6 @@ META_O = tex.FP8FwdTensors.GEMM2_INPUT
 META_DO = tex.FP8BwdTensors.GRAD_INPUT2
 META_S = tex.FP8FwdTensors.GEMM3_OUTPUT
 META_DP = tex.FP8BwdTensors.GRAD_INPUT3
-# repurpose some unused amax history buffers for partial results of CP fwd and bwd
-META_O_CP = tex.FP8FwdTensors.GEMM2_OUTPUT
-META_DQKV_CP = tex.FP8BwdTensors.GRAD_INPUT1
 
 def fused_attn_fwd(
     is_training: bool,
@@ -140,8 +153,12 @@ def fused_attn_fwd(
     qkv_layout: str = "sbh3d",
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
+    softmax_type: str = "vanilla",
     window_size: Tuple[int, int] = (-1, -1),
     rng_gen: torch.Generator = None,
+    softmax_offset: torch.Tensor = None,
+    return_max_logit: bool = False,
+    cuda_graph: bool = False,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention FWD for separate QKV input.
 
@@ -206,6 +223,8 @@ def fused_attn_fwd(
                 type of the bias; {"no_bias", "pre_scale_bias", "post_scale_bias", "alibi"}
     attn_mask_type: str, default = "padding"
                 type of the attention mask; {"padding", "causal", "padding_causal", "no_mask"}
+    softmax_type: str, default = "vanilla"
+                type of the attention softmax; {"vanilla", "off-by-one", "learnable"}
     window_size: Tuple[int, int], default = (-1, -1)
                 sliding window size for local attention, where query at position i attends to keys
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
@@ -214,6 +233,13 @@ def fused_attn_fwd(
     rng_gen: torch.Generator, default = None
                 random number generator;
                 if None, uses the default CUDA generator from PyTorch; otherwise, uses rng_gen
+    softmax_offset: torch.Tensor, default = None
+                softmax offset tensor in shape [1, h_q, 1, 1].
+                See softmax_type in DotProductAttention for details.
+    return_max_logit: bool, default = False
+                      whether to return the maximum attention score
+    cuda_graph: bool, default = False
+                whether or not cuda graph capture is enabled.
 
     Returns
     ----------
@@ -244,6 +270,7 @@ def fused_attn_fwd(
                 rng_state: torch.Tensor, optional, if backend is not F16_max512_seqlen
                     state of the random number generator;
                     [seed, offset], dtype uint64
+    max_logit: if return_max_logit = True, shape [h] and same data type as O; otherwise None
     """
 
     if attn_scale is None:
@@ -299,6 +326,7 @@ def fused_attn_fwd(
         QKVLayout[qkv_layout],
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
+        SoftmaxType[softmax_type],
         window_size,
         cu_seqlens_q,
         cu_seqlens_kv,
@@ -313,9 +341,25 @@ def fused_attn_fwd(
         s_quantizer,
         o_quantizer,
         attn_bias,
+        softmax_offset,
         rng_gen,
         rng_elts_per_thread,
+        return_max_logit,
+        cuda_graph,
     )
+
+    if return_max_logit:
+        qkv_format = qkv_layout.replace("3", "").replace("2", "").split("_")[0]
+        # thd:  output_tensors: out [tq, h, d],    Max [tq, h, 1],    Sum_Exp [tq, h, 1]
+        # bshd: output_tensors: out [b, sq, h, d], Max [b, h, sq, 1], Sum_Exp [b, h, sq, 1]
+        # sbhd: output_tensors: out [sq, b, h, d], Max [b, h, sq, 1], Sum_Exp [b, h, sq, 1]
+        stats = output_tensors[1] + torch.log(output_tensors[2])
+        amax_dims = (0, 2) if qkv_format == "thd" else (0, 2, 3)
+        # Max -> max_logit [h]
+        max_logit = torch.amax(output_tensors[1], dim=amax_dims).to(dtype=output_tensors[0].dtype)
+        aux_ctx_tensors = [stats]
+        aux_ctx_tensors.extend(output_tensors[3:])
+        return output_tensors[0], aux_ctx_tensors, max_logit
 
     # out, aux_ctx_tensors
     return output_tensors[0], output_tensors[1:]
@@ -346,8 +390,10 @@ def fused_attn_bwd(
     qkv_layout: str = "sbh3d",
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
+    softmax_type: str = "vanilla",
     window_size: Tuple[int, int] = (-1, -1),
     deterministic: bool = False,
+    cuda_graph: bool = False,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention BWD for packed KV input.
 
@@ -411,6 +457,8 @@ def fused_attn_bwd(
                 type of the bias; {"no_bias", "pre_scale_bias", "post_scale_bias", "alibi"}
     attn_mask_type: str, default = "padding"
                 type of the attention mask; {"padding", "causal", "padding_causal", "no_mask"}
+    softmax_type: str, default = "vanilla"
+                type of the attention softmax; {"vanilla", "off-by-one", "learnable"}
     window_size: Tuple[int, int], default = (-1, -1)
                 sliding window size for local attention, where query at position i attends to keys
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
@@ -418,6 +466,8 @@ def fused_attn_bwd(
                 window and causal mask specifically.
     deterministic: bool, default = False
                 whether to execute the backward pass with deterministic behaviours.
+    cuda_graph: bool, default = False
+                whether or not cuda graph capture is enabled.
 
     Returns
     ----------
@@ -430,6 +480,9 @@ def fused_attn_bwd(
     d_bias: torch.Tensor, optional
                 gradient tensor of Bias when attn_bias_type is "pre_scale_bias"
                 or "post_scale_bias"; same data type and shape as Bias
+    d_softmax_offset: torch.Tensor, optional
+                gradient tensor of softmax offset in shape [1, h_q, 1, 1].
+                See softmax_type in DotProductAttention for details.
     """
     if attn_scale is None:
         d = q.size(-1)
@@ -468,6 +521,7 @@ def fused_attn_bwd(
         QKVLayout[qkv_layout],
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
+        SoftmaxType[softmax_type],
         window_size,
         deterministic,
         cu_seqlens_q,
@@ -485,6 +539,7 @@ def fused_attn_bwd(
         s_quantizer,
         dp_quantizer,
         dqkv_quantizer,
+        cuda_graph,
     )
 
     return output_tensors

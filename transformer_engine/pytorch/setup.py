@@ -47,8 +47,12 @@ if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or os.path.isdir(build_tools_
 
 
 from build_tools.build_ext import get_build_ext
+<<<<<<< HEAD
 from build_tools.utils import (
     rocm_build, copy_common_headers, copy_hipify_tools, clear_hipify_tools_copy )
+=======
+from build_tools.utils import copy_common_headers, min_python_version_str
+>>>>>>> 389a6b
 from build_tools.te_version import te_version
 from build_tools.pytorch import (
     setup_pytorch_extension,
@@ -150,14 +154,25 @@ if __name__ == "__main__":
         )
     ]
 
+    # Setup version and requirements.
+    # Having the framework extension depend on the core lib allows
+    # us to detect CUDA version dynamically during compilation and
+    # choose the correct wheel for te core lib.
+    __version__ = te_version()
+    cuda_major_version = parse(torch.version.cuda).major
+    assert cuda_major_version in (12, 13), f"Unsupported cuda version {torch.version.cuda}."
+    te_core = f"transformer_engine_cu{cuda_major_version}=={__version__}"
+    install_requires = install_requirements() + [te_core]
+
     # Configure package
     setuptools.setup(
         name=PACKAGE_NAME,
-        version=te_version(),
+        version=__version__,
         description="Transformer acceleration library - Torch Lib",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": CachedWheelsCommand},
-        install_requires=install_requirements(),
+        python_requires=f">={min_python_version_str()}",
+        install_requires=install_requires,
         tests_require=test_requirements(),
     )
     if any(x in sys.argv for x in (".", "sdist", "bdist_wheel")):
