@@ -241,6 +241,14 @@ endif()
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
+set(CK_ROOT ${CMAKE_SOURCE_DIR}/../../3rdparty/aiter/3rdparty/composable_kernel)
+
+target_include_directories(transformer_engine
+  BEFORE PRIVATE
+    ${CK_ROOT}/include
+)
+
+
 if (USE_CUDA)
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
   set_source_files_properties(

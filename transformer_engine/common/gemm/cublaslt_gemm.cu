@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -24,8 +24,11 @@
 #include "../util/logging.h"
 #include "../util/multi_stream.h"
 #include "common/util/cuda_runtime.h"
+#include "common/util/system.h"
 #ifndef __HIP_PLATFORM_AMD__
 #include "cutlass_grouped_gemm.cuh"
+#else
+#include "ck_grouped_gemm.cuh"
 #endif
 
 #ifndef __HIP_PLATFORM_AMD__
@@ -788,7 +791,38 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   NVTE_API_CALL(nvte_multi_tensor_gemm);
 
 #ifdef __HIP_PLATFORM_AMD__
-    multi_stream_cublas_gemm(A, B, D, bias, pre_gelu_out, num_gemms, transa, transb, grad,
+  const bool use_ck = transformer_engine::getenv<bool>("NVTE_USE_CK_GROUPED_GEMM", false);
+  const bool warn_fallback =
+      transformer_engine::getenv<bool>("NVTE_CK_GROUPED_GEMM_WARN_FALLBACK", false);
+
+  auto is_supported_dtype = [&]() -> bool {
+    auto *inputA = transformer_engine::convertNVTETensorCheck(A[0]);
+    auto *inputB = transformer_engine::convertNVTETensorCheck(B[0]);
+    auto *OutputD = transformer_engine::convertNVTETensorCheck(D[0]);
+    auto A_dt = inputA->data.dtype;
+    auto B_dt = inputB->data.dtype;
+    auto D_dt = OutputD->data.dtype;
+
+    return (A_dt == B_dt) && (A_dt == D_dt) &&
+           (A_dt == transformer_engine::DType::kFloat16 ||
+            A_dt == transformer_engine::DType::kBFloat16);
+  };
+
+  if (use_ck &&
+      is_supported_dtype() &&
+      !accumulate) {
+
+    if (grouped_gemm_ck_tile(A, B, D, num_gemms, transa, transb, workspace, stream)) {
+      printf("grouped_gemm_ck_tile done.\n");
+      return;
+    } else if (warn_fallback) {
+      NVTE_WARN("Fallback to hipBLASLt grouped GEMM (grouped_gemm_ck_tile returned false).");
+    }
+  }
+
+  NVTE_WARN("Fallback to hipBLASLt grouped GEMM (CK config unsupported).\n");
+
+  multi_stream_cublas_gemm(A, B, D, bias, pre_gelu_out, num_gemms, transa, transb, grad,
                              workspace, accumulate, use_split_accumulator, math_sm_count, stream);
 #else
   const int current_device = transformer_engine::cuda::current_device();
