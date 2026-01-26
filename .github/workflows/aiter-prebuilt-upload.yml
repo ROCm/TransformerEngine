@@ -67,5 +67,5 @@ jobs:
                 exit 1
               fi
               export HIP_PATH=""
-              .github/scripts/aiter_prebuild_upload.sh --build
+              bash .github/scripts/aiter_prebuild_upload.sh --build
             '
