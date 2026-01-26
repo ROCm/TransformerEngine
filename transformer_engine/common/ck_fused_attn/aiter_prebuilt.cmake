@@ -57,7 +57,7 @@ function(download_aiter_prebuilt DOWNLOAD_SUCCESS)
   message(STATUS "[AITER-PREBUILT] NVTE_AITER_PREBUILT_BASE_URL is set - Attempting to download ${KEY}.tar.gz ...")
 
   # Check if ${KEY}.tar.gz exists in the URL provided.
-  file(DOWNLOAD "${FILE_URL}.sha256" "/tmp/aiter_prebuilt_sha256.txt" STATUS sha_status LOG sha_log)
+  file(DOWNLOAD "${FILE_URL}.sha256" "/tmp/aiter_prebuilt_sha256.txt" STATUS sha_status LOG sha_log SHOW_PROGRESS)
   list(GET sha_status 0 sha_code)
   if(NOT sha_code EQUAL 0)
     message(WARNING " [AITER-PREBUILT] Prebuild file with Key=${KEY} not available in the NVTE_AITER_PREBUILT_BASE_URL provided.")
