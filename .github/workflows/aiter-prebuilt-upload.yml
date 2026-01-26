@@ -1,0 +1,71 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+name: AITER Prebuilt Upload
+
+on:
+  workflow_dispatch:
+    inputs:
+      docker_image:
+        description: "Docker image"
+        required: false
+        default: ""
+
+jobs:
+  upload:
+    runs-on: linux-mi325-8
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Resolve docker image
+        id: cfg
+        run: |
+          IMAGE="${{ inputs.docker_image }}"
+          if [ -z "$IMAGE" ]; then
+            IMAGE="${{ vars.DEV_DOCKER_IMAGE }}"
+          fi
+          if [ -z "$IMAGE" ]; then
+            echo "No docker image provided and vars.DEV_DOCKER_IMAGE is empty." >&2
+            exit 1
+          fi
+          echo "image=${IMAGE}" >> $GITHUB_OUTPUT
+
+      - name: Pull docker image
+        run: docker pull ${{ steps.cfg.outputs.image }}
+
+      - name: Run container
+        run: |
+          docker run -dt \
+            --rm \
+            --name te-aiter-upload \
+            --network=host \
+            --device=/dev/dri --device=/dev/kfd \
+            --shm-size=16G \
+            --pid=host \
+            --group-add $(getent group render | cut -d: -f3) \
+            --group-add $(getent group video | cut -d: -f3) \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            ${{ steps.cfg.outputs.image }}
+
+      - name: Build and upload aiter prebuilt
+        env:
+          NVTE_AITER_PREBUILT_BASE_URL: https://compute-artifactory.amd.com:5000/artifactory/rocm-generic-local/te-ci/aiter-prebuilts
+          NVTE_AITER_PREBUILT_UPLOAD_TOKEN: ${{ secrets.AITER_ARTIFACTORY_TOKEN }}
+        run: |
+          docker exec \
+            -e NVTE_AITER_PREBUILT_BASE_URL=${NVTE_AITER_PREBUILT_BASE_URL} \
+            -e NVTE_AITER_PREBUILT_UPLOAD_TOKEN=${NVTE_AITER_PREBUILT_UPLOAD_TOKEN} \
+            te-aiter-upload bash -c 'set -ex
+              if [ -z "${NVTE_AITER_PREBUILT_UPLOAD_TOKEN}" ]; then
+                echo "Missing secrets.AITER_ARTIFACTORY_TOKEN" >&2
+                exit 1
+              fi
+              export HIP_PATH=""
+              bash .github/scripts/aiter_prebuild_upload.sh --build
+            '
