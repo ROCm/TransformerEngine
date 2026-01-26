@@ -13,7 +13,8 @@ on:
 
 jobs:
   upload:
-    runs-on: linux-mi325-8
+    runs-on:
+      group: Default
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
