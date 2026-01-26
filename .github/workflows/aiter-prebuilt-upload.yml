@@ -4,12 +4,16 @@
 name: AITER Prebuilt Upload
 
 on:
-  workflow_dispatch:
-    inputs:
-      docker_image:
-        description: "Docker image"
-        required: false
-        default: ""
+  push:
+    branches:
+      - 'dev'
+      - 'release_v1.*_rocm'
+      - 'release_v2.*_rocm'
+  pull_request:
+    branches:
+      - 'dev'
+      - 'release_v1.**_rocm'
+      - 'release_v2.**_rocm'
 
 jobs:
   upload:
