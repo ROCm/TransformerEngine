@@ -72,3 +72,7 @@ jobs:
           bash .github/scripts/aiter_prebuild_upload.sh --build
           EOF
           )"
+
+      - name: Cleanup container
+        if: always()
+        run: docker rm -f te-aiter-upload || true
