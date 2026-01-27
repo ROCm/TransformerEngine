@@ -53,6 +53,9 @@ def general_gemm(
     # ================= FP4 Path =============================================
     if isinstance(A, MXFP4TensorBase) and isinstance(B, MXFP4TensorBase):
         from ..module.fp4_handler_gemm import fp4_gemm_layout
+
+        if os.environ.get('NVTE_MXFP4_DEBUG', '0') == '1':
+            rank0_print(f"[DEBUG GEMM] FP4_entry\tlayout={layout}\tA_shape={A.shape}\tB_shape={B.shape}\tA_rowwise={A._rowwise_data is not None}\tA_colwise={A._columnwise_data is not None}\tB_rowwise={B._rowwise_data is not None}\tB_colwise={B._columnwise_data is not None}\tgrad={grad}")
         
         # For FP4 tensors, we don't call update_usage here because:
         # 1. They should already have both orientations from quantization
