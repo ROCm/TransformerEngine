@@ -18,7 +18,7 @@ ROCM_VER="$(head -n1 "${ROCM_PATH}/.info/version" | sed -n 's/^\([0-9]\+\.[0-9]\
 AITER_DIR="${ROOT_DIR}/3rdparty/aiter"
 GIT_CONFIG_GLOBAL="$(mktemp /tmp/gitconfig.XXXXXX)"
 trap 'rm -f "${GIT_CONFIG_GLOBAL}"' EXIT
-git config --global --add safe.directory "${AITER_DIR}" --file "${GIT_CONFIG_GLOBAL}" >/dev/null 2>&1 || true
+git config --file "${GIT_CONFIG_GLOBAL}" --add safe.directory "${AITER_DIR}"
 AITER_SHA="$(GIT_CONFIG_GLOBAL=${GIT_CONFIG_GLOBAL} git -C "${AITER_DIR}" rev-parse HEAD)"
 
 KEY="rocm-${ROCM_VER}_aiter-${AITER_SHA}"
