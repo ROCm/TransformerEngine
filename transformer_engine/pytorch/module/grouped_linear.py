@@ -12,7 +12,6 @@ import warnings
 import functools
 import torch
 
-from transformer_engine.pytorch.triton_kernels.grouped_gemm import general_grouped_gemm_triton
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
@@ -54,6 +53,10 @@ from ..tensor.quantized_tensor import (
     restore_from_saved,
 )
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
+if IS_HIP_EXTENSION:
+    from transformer_engine.pytorch.triton_kernels.grouped_gemm import general_grouped_gemm_triton
+
 
 __all__ = ["GroupedLinear"]
 
