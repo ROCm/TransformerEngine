@@ -6,6 +6,7 @@ from enum import IntEnum
 import torch
 
 import transformer_engine_torch as tex
+from transformer_engine.pytorch.constants import MXFP8_BLOCK_SCALING_SIZE
 
 import triton
 import triton.language as tl
@@ -274,6 +275,152 @@ class Float8TensorWrapper:
             return self._columnwise_data.transpose(0, 1).contiguous()
 
 
+class MXFP8TensorWrapper:
+    """
+    Python equivalent of C++ TensorWrapper for MXFP8Tensor.
+
+    Mimics NVTETensorFromMXFP8Tensor in type_converters.cpp, extracting
+    both rowwise and columnwise data/scales.
+    """
+
+    def __init__(self, tensor):
+        """
+        Create wrapper from MXFP8Tensor or MXFP8TensorBase.
+
+        Args:
+            tensor: Input tensor (MXFP8Tensor, MXFP8TensorBase, or regular tensor)
+        """
+        # Import here to avoid circular dependency
+        try:
+            from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
+            from transformer_engine.pytorch.tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
+            is_mxfp8_tensor = isinstance(tensor, (MXFP8Tensor, MXFP8TensorBase))
+        except ImportError:
+            is_mxfp8_tensor = False
+
+        if is_mxfp8_tensor:
+            # Extract MXFP8 components (matching NVTETensorFromMXFP8Tensor)
+            self._is_mxfp8 = True
+
+            # Rowwise data and scales
+            self._rowwise_data = tensor._rowwise_data if hasattr(tensor, '_rowwise_data') and tensor._rowwise_data is not None else None
+            self._rowwise_scale_inv = tensor._rowwise_scale_inv if hasattr(tensor, '_rowwise_scale_inv') and tensor._rowwise_scale_inv is not None else None
+
+            # Columnwise data and scales
+            self._columnwise_data = tensor._columnwise_data if hasattr(tensor, '_columnwise_data') and tensor._columnwise_data is not None else None
+            self._columnwise_scale_inv = tensor._columnwise_scale_inv if hasattr(tensor, '_columnwise_scale_inv') and tensor._columnwise_scale_inv is not None else None
+
+            # Verify we have at least one format
+            if self._rowwise_data is None and self._columnwise_data is None:
+                raise RuntimeError(
+                    "MXFP8Tensor has neither rowwise nor columnwise data"
+                )
+
+            # FP8 metadata
+            self._fp8_dtype = tensor._fp8_dtype
+            self._nominal_dtype = tensor.dtype if hasattr(tensor, 'dtype') else torch.float32
+
+            # Determine logical size from available data
+            if self._rowwise_data is not None:
+                self._size = self._rowwise_data.size()
+            else:
+                # Convert columnwise shape to rowwise: [K,M,*batch] -> [*batch,M,K]
+                ndim = self._columnwise_data.dim()
+                if ndim == 2:
+                    self._size = torch.Size([self._columnwise_data.size(1), self._columnwise_data.size(0)])
+                else:
+                    # Has batch dims at end, need to move to front and swap matrix dims
+                    batch_dims = list(self._columnwise_data.size()[2:])
+                    m_dim = self._columnwise_data.size(1)
+                    k_dim = self._columnwise_data.size(0)
+                    self._size = torch.Size(batch_dims + [m_dim, k_dim])
+        else:
+            # Not MXFP8 - wrap as regular tensor
+            self._is_mxfp8 = False
+            self._rowwise_data = tensor
+            self._columnwise_data = None
+            self._rowwise_scale_inv = None
+            self._columnwise_scale_inv = None
+            self._fp8_dtype = None
+            self._nominal_dtype = tensor.dtype
+            self._size = tensor.size()
+
+    def size(self):
+        """Get logical tensor size (in rowwise format)."""
+        return self._size
+
+    @property
+    def is_mxfp8(self):
+        """Check if this is an MXFP8 tensor."""
+        return self._is_mxfp8
+
+    @property
+    def fp8_dtype(self):
+        """Get FP8 dtype."""
+        return self._fp8_dtype
+
+    @property
+    def nominal_dtype(self):
+        """Get nominal dtype (what the MXFP8 tensor represents)."""
+        return self._nominal_dtype
+
+    def get_data_and_scale_for_gemm(self, will_transpose):
+        """
+        Get appropriate data and scale tensors for GEMM based on transpose flag.
+
+        Matches C++ logic in cublaslt_gemm.cu:128-200 for MXFP8 scaling mode.
+        Returns data in rowwise orientation for Triton (row-major).
+
+        Args:
+            will_transpose: Whether this operand will be transposed in GEMM
+
+        Returns:
+            tuple: (data_tensor, scale_inv_tensor) both in rowwise orientation
+        """
+        if not self._is_mxfp8:
+            # Regular tensor - no scales
+            return self._rowwise_data, None
+
+        # MXFP8 selection logic (matching C++ cublaslt_gemm.cu:128-141 for A, 187-200 for B)
+        # For operand A: transposed ? rowwise : columnwise
+        # For operand B: transposed ? columnwise : rowwise
+        #
+        # However, we need to determine which operand we are (A or B).
+        # The caller knows this context. For now, we'll use a conservative approach:
+        # - Prefer rowwise if available
+        # - Fall back to columnwise and convert to rowwise
+
+        # Try rowwise first
+        if self._rowwise_data is not None:
+            return self._rowwise_data, self._rowwise_scale_inv
+
+        # Only columnwise available - need to convert to rowwise for Triton
+        # Columnwise: [K, M, *batch] -> Rowwise: [*batch, M, K]
+        ndim = self._columnwise_data.dim()
+        if ndim == 2:
+            rowwise_data = self._columnwise_data.transpose(0, 1).contiguous()
+        else:
+            # Move batch dims to front and swap matrix dims
+            batch_dims = list(range(2, ndim))
+            perm = batch_dims + [1, 0]
+            rowwise_data = self._columnwise_data.permute(*perm).contiguous()
+
+        # Convert columnwise scale to rowwise scale
+        # Scale shape follows data shape pattern
+        if self._columnwise_scale_inv is not None:
+            scale_ndim = self._columnwise_scale_inv.dim()
+            if scale_ndim == 2:
+                rowwise_scale = self._columnwise_scale_inv.transpose(0, 1).contiguous()
+            else:
+                batch_dims = list(range(2, scale_ndim))
+                perm = batch_dims + [1, 0]
+                rowwise_scale = self._columnwise_scale_inv.permute(*perm).contiguous()
+        else:
+            rowwise_scale = None
+
+        return rowwise_data, rowwise_scale
+
+
 def te_generic_gemm_triton(A,
                             transa,
                             B,
@@ -295,21 +442,48 @@ def te_generic_gemm_triton(A,
                             extra_output,
                             bulk_overlap):
 
-    # Wrap inputs to handle Float8Tensor uniformly
-    # This mimics how C++ makeTransformerEngineTensor creates a TensorWrapper
-    A_wrapper = Float8TensorWrapper(A)
-    B_wrapper = Float8TensorWrapper(B)
+    # Wrap inputs to handle Float8Tensor and MXFP8Tensor uniformly
+    # Try MXFP8 first, then Float8, then regular
+    try:
+        from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
+        from transformer_engine.pytorch.tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
+        is_mxfp8_a = isinstance(A, (MXFP8Tensor, MXFP8TensorBase))
+        is_mxfp8_b = isinstance(B, (MXFP8Tensor, MXFP8TensorBase))
+    except ImportError:
+        is_mxfp8_a = False
+        is_mxfp8_b = False
 
-    # Extract underlying data (uint8 for FP8, regular tensor otherwise)
-    A_data = A_wrapper.get_data_for_gemm(will_transpose=transa)
-    B_data = B_wrapper.get_data_for_gemm(will_transpose=transb)
+    if is_mxfp8_a or is_mxfp8_b:
+        # Use MXFP8TensorWrapper
+        A_wrapper = MXFP8TensorWrapper(A)
+        B_wrapper = MXFP8TensorWrapper(B)
 
-    # Get FP8 metadata
-    # Note: Scales will be swapped later for row-major conversion
-    a_fp8_dtype = A_wrapper.fp8_dtype
-    b_fp8_dtype = B_wrapper.fp8_dtype
-    a_scale_inv = A_wrapper.scale_inv
-    b_scale_inv = B_wrapper.scale_inv
+        # Validate both are MXFP8
+        if A_wrapper.is_mxfp8 != B_wrapper.is_mxfp8:
+            raise ValueError("Mixed MXFP8 and non-MXFP8 inputs not supported")
+
+        # Extract data and scales
+        A_data, a_scale_inv = A_wrapper.get_data_and_scale_for_gemm(will_transpose=transa)
+        B_data, b_scale_inv = B_wrapper.get_data_and_scale_for_gemm(will_transpose=transb)
+
+        a_fp8_dtype = A_wrapper.fp8_dtype
+        b_fp8_dtype = B_wrapper.fp8_dtype
+
+        input_mxfp8 = True
+    else:
+        # Use Float8TensorWrapper (existing code)
+        A_wrapper = Float8TensorWrapper(A)
+        B_wrapper = Float8TensorWrapper(B)
+
+        A_data = A_wrapper.get_data_for_gemm(will_transpose=transa)
+        B_data = B_wrapper.get_data_for_gemm(will_transpose=transb)
+
+        a_fp8_dtype = A_wrapper.fp8_dtype
+        b_fp8_dtype = B_wrapper.fp8_dtype
+        a_scale_inv = A_wrapper.scale_inv
+        b_scale_inv = B_wrapper.scale_inv
+
+        input_mxfp8 = False
 
     # Reinterpret uint8 as native FP8 types for Triton
     # The FP8 tensor data is stored as torch.uint8 but Triton needs torch.float8_e4m3fnuz
@@ -369,8 +543,11 @@ def te_generic_gemm_triton(A,
         if output_dtype is not None:
             # Use explicitly provided output dtype (from TE_DType)
             out_dtype = te_to_torch_dtype(output_dtype)
-        elif A_wrapper.is_fp8:
-            # FP8 input: use nominal dtype if available
+        elif hasattr(A_wrapper, 'is_mxfp8') and A_wrapper.is_mxfp8:
+            # MXFP8 input: use nominal dtype
+            out_dtype = A_wrapper.nominal_dtype
+        elif hasattr(A_wrapper, 'is_fp8') and A_wrapper.is_fp8:
+            # Regular FP8 input: use nominal dtype if available
             if A_wrapper.nominal_dtype is None:
                 raise RuntimeError(
                     "FP8 input detected (Float8TensorBase without nominal dtype) but output_dtype "
@@ -387,7 +564,9 @@ def te_generic_gemm_triton(A,
     d_row_major = D.view(-1, D.shape[-1])
 
     # Set FP8 flags
-    input_fp8 = A_wrapper.is_fp8 and B_wrapper.is_fp8
+    is_fp8_wrapper = hasattr(A_wrapper, 'is_fp8') and A_wrapper.is_fp8 and B_wrapper.is_fp8
+    is_mxfp8_wrapper = hasattr(A_wrapper, 'is_mxfp8') and A_wrapper.is_mxfp8 and B_wrapper.is_mxfp8
+    input_fp8 = is_fp8_wrapper or is_mxfp8_wrapper
     output_fp8 = False  # Not supporting FP8 output yet
 
     # Empty tensors for unused parameters (matching C++ empty tensor pattern)
@@ -395,8 +574,22 @@ def te_generic_gemm_triton(A,
     bias_tensor = torch.Tensor()
     D_amax = torch.Tensor()
 
-    matmul(a_row_major, b_row_major, d_row_major, a_scale_triton, b_scale_triton,
-           D_scale, bias_tensor, D_amax, epilogue, input_fp8, output_fp8)
+    # Dispatch to appropriate kernel based on input type
+    if input_mxfp8:
+        # Call MXFP8 kernel with block scaling
+        # Note: a_scale_triton and b_scale_triton are already swapped for row-major
+        # They contain E8M0 scales from the MXFP8 tensors
+        mxfp8_matmul(
+            a_row_major, a_scale_triton,  # A data and scales
+            b_row_major, b_scale_triton,  # B data and scales
+            d_row_major,                  # Output
+            m, n, k,                      # Dimensions
+            a_fp8_dtype, b_fp8_dtype      # FP8 formats (e4m3 or e5m2)
+        )
+    else:
+        # Call regular FP8 or standard matmul kernel
+        matmul(a_row_major, b_row_major, d_row_major, a_scale_triton, b_scale_triton,
+               D_scale, bias_tensor, D_amax, epilogue, input_fp8, output_fp8)
 
     return D, bias, None, None
         
@@ -504,7 +697,205 @@ def te_gemm_triton(A,
 
     input_fp8 = is_fp8_dtype(A_type) and is_fp8_dtype(B_type)
     output_fp8 = is_fp8_dtype(D_type)
-    matmul(a_row_major, b_row_major, D, a_scale_triton, b_scale_triton, D_scale, bias, D_amax, epilogue, input_fp8, output_fp8) 
+    matmul(a_row_major, b_row_major, D, a_scale_triton, b_scale_triton, D_scale, bias, D_amax, epilogue, input_fp8, output_fp8)
+
+
+# MXFP8 (Microscaling FP8) Matmul Kernel and Wrapper
+# Uses Triton's tl.dot_scaled() for native block-scaled FP8 matmul
+
+@triton.autotune(
+    configs=[
+        # Simpler configs for MXFP8 - BLOCK_K must be multiple of 32 (VEC_SIZE)
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 4}),
+        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 4}),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4}),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4}),
+    ],
+    key=['M', 'N', 'K'],
+)
+@triton.heuristics({
+    'EVEN_K': lambda args: args['K'] % args['BLOCK_SIZE_K'] == 0,
+})
+@triton.jit
+def mxfp8_matmul_kernel(
+    # Data pointers
+    a_ptr, b_ptr, c_ptr,
+    # Scale pointers (E8M0 format, uint8)
+    a_scale_ptr, b_scale_ptr,
+    # Matrix dimensions
+    M, N, K,
+    # Data strides
+    stride_am, stride_ak,
+    stride_bk, stride_bn,
+    stride_cm, stride_cn,
+    # Scale strides
+    stride_a_scale_m, stride_a_scale_k,
+    stride_b_scale_k, stride_b_scale_n,
+    # Meta-parameters
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    EVEN_K: tl.constexpr,
+    FP8_FORMAT_A: tl.constexpr,  # "e4m3" or "e5m2"
+    FP8_FORMAT_B: tl.constexpr,  # "e4m3" or "e5m2"
+):
+    """
+    MXFP8 matmul kernel using tl.dot_scaled() for block-scaled FP8 computation.
+
+    Scales are stored in E8M0 format (uint8 biased exponents) and converted to FP32.
+    """
+    VEC_SIZE = 32  # MXFP8_BLOCK_SCALING_SIZE
+
+    # Program ID
+    pid = tl.program_id(axis=0)
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+
+    # Swizzled block mapping for better L2 cache utilization
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + (pid % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
+
+    # Initialize accumulator
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+
+    # Compute block offsets
+    offs_am = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_bn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    offs_k = tl.arange(0, BLOCK_SIZE_K)
+
+    # Data pointers
+    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
+    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+
+    # K-loop
+    num_k_blocks = tl.cdiv(K, BLOCK_SIZE_K)
+    for k in range(num_k_blocks):
+        # Load FP8 data
+        if EVEN_K:
+            a = tl.load(a_ptrs)
+            b = tl.load(b_ptrs)
+        else:
+            k_remaining = K - k * BLOCK_SIZE_K
+            mask_k = offs_k < k_remaining
+            a = tl.load(a_ptrs, mask=mask_k[None, :], other=0.0)
+            b = tl.load(b_ptrs, mask=mask_k[:, None], other=0.0)
+
+        # Load E8M0 scales for this K-block
+        # Scale shape: [M, K//VEC_SIZE] for A, [K//VEC_SIZE, N] for B
+        # We need: [BLOCK_SIZE_M, BLOCK_SIZE_K // VEC_SIZE] for tl.dot_scaled
+
+        k_block_start = k * (BLOCK_SIZE_K // VEC_SIZE)
+        num_k_scale_blocks = BLOCK_SIZE_K // VEC_SIZE
+
+        # A scales: [BLOCK_SIZE_M, num_k_scale_blocks]
+        offs_a_scale_k = k_block_start + tl.arange(0, num_k_scale_blocks)
+        a_scale_ptrs = a_scale_ptr + (offs_am[:, None] * stride_a_scale_m +
+                                       offs_a_scale_k[None, :] * stride_a_scale_k)
+
+        # Check bounds for scale loading
+        mask_a_scale_m = offs_am < M
+        mask_a_scale_k = offs_a_scale_k < tl.cdiv(K, VEC_SIZE)
+        a_scale_mask = mask_a_scale_m[:, None] & mask_a_scale_k[None, :]
+        a_scale_e8m0 = tl.load(a_scale_ptrs, mask=a_scale_mask, other=0)
+
+        # B scales: [num_k_scale_blocks, BLOCK_SIZE_N]
+        offs_b_scale_k = k_block_start + tl.arange(0, num_k_scale_blocks)
+        b_scale_ptrs = b_scale_ptr + (offs_b_scale_k[:, None] * stride_b_scale_k +
+                                       offs_bn[None, :] * stride_b_scale_n)
+
+        mask_b_scale_k = offs_b_scale_k < tl.cdiv(K, VEC_SIZE)
+        mask_b_scale_n = offs_bn < N
+        b_scale_mask = mask_b_scale_k[:, None] & mask_b_scale_n[None, :]
+        b_scale_e8m0 = tl.load(b_scale_ptrs, mask=b_scale_mask, other=0)
+
+        # Convert E8M0 to FP32 scales
+        # E8M0 format: biased_exponent → scale = 2^(biased_exponent - 127)
+        a_scale_fp32 = tl.where(a_scale_e8m0 == 0, 1.0,
+                                 tl.exp2(a_scale_e8m0.to(tl.float32) - 127.0))
+        b_scale_fp32 = tl.where(b_scale_e8m0 == 0, 1.0,
+                                 tl.exp2(b_scale_e8m0.to(tl.float32) - 127.0))
+
+        # Block-scaled matmul using Triton's native instruction
+        accumulator = tl.dot_scaled(
+            a,              # [BLOCK_SIZE_M, BLOCK_SIZE_K] FP8
+            a_scale_fp32,   # [BLOCK_SIZE_M, BLOCK_SIZE_K // VEC_SIZE] FP32
+            FP8_FORMAT_A,   # "e4m3" or "e5m2"
+            b.T,            # [BLOCK_SIZE_K, BLOCK_SIZE_N] FP8 transposed
+            b_scale_fp32.T, # [BLOCK_SIZE_N, BLOCK_SIZE_K // VEC_SIZE] FP32 transposed
+            FP8_FORMAT_B,   # "e4m3" or "e5m2"
+            accumulator     # [BLOCK_SIZE_M, BLOCK_SIZE_N] FP32
+        )
+
+        # Advance data pointers
+        a_ptrs += BLOCK_SIZE_K * stride_ak
+        b_ptrs += BLOCK_SIZE_K * stride_bk
+
+    # Store output (convert to target dtype)
+    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+
+    c = accumulator.to(c_ptr.type.element_ty)
+    tl.store(c_ptrs, c, mask=c_mask)
+
+
+def mxfp8_matmul(a, a_scale, b, b_scale, c, M, N, K, a_fp8_dtype, b_fp8_dtype):
+    """
+    MXFP8 matmul wrapper using tl.dot_scaled()
+
+    Args:
+        a: FP8 data tensor [M, K] (uint8)
+        a_scale: E8M0 scale tensor [M, K//32] (uint8)
+        b: FP8 data tensor [K, N] (uint8)
+        b_scale: E8M0 scale tensor [K//32, N] (uint8)
+        c: Output tensor [M, N] (fp32/bf16/fp16)
+        M, N, K: Matrix dimensions
+        a_fp8_dtype: FP8 dtype for A (tex.DType.kFloat8E4M3 or kFloat8E5M2)
+        b_fp8_dtype: FP8 dtype for B
+    """
+    # Validate that a_scale and b_scale exist
+    if a_scale is None or b_scale is None:
+        raise RuntimeError("MXFP8 matmul requires both a_scale and b_scale to be provided")
+
+    # Validate BLOCK_SIZE_K will be multiple of VEC_SIZE (32)
+    # This is enforced by the autotune configs
+
+    # Convert TE DType to Triton format string
+    def te_dtype_to_triton_format(dtype):
+        if dtype == tex.DType.kFloat8E4M3:
+            return "e4m3"
+        elif dtype == tex.DType.kFloat8E5M2:
+            return "e5m2"
+        else:
+            raise ValueError(f"Unsupported FP8 dtype for MXFP8: {dtype}")
+
+    fp8_format_a = te_dtype_to_triton_format(a_fp8_dtype)
+    fp8_format_b = te_dtype_to_triton_format(b_fp8_dtype)
+
+    # Launch kernel
+    grid = lambda META: (
+        triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']),
+    )
+
+    mxfp8_matmul_kernel[grid](
+        a, b, c,
+        a_scale, b_scale,
+        M, N, K,
+        a.stride(0), a.stride(1),
+        b.stride(0), b.stride(1),
+        c.stride(0), c.stride(1),
+        a_scale.stride(0), a_scale.stride(1),
+        b_scale.stride(0), b_scale.stride(1),
+        FP8_FORMAT_A=fp8_format_a,
+        FP8_FORMAT_B=fp8_format_b,
+    )
+
 
 @triton.autotune(
     configs=[
