@@ -77,6 +77,20 @@ from ..rocm_utils import create_fp8_weight_transpose_cache, clear_fp8_weight_tra
 from ..tensor.mxfp4_tensor import MXFP4Quantizer
 from ..tensor._internal.mxfp4_tensor_base import MXFP4TensorBase
 
+# Rank 0 print helper with debug flag check
+def _rank0_print(*args, **kwargs):
+    import os
+    if os.environ.get('NVTE_MXFP4_DEBUG', '0') != '1':
+        return
+    try:
+        import torch.distributed as dist
+        if dist.is_initialized() and dist.get_rank() == 0:
+            print(*args, **kwargs)
+        elif not dist.is_initialized():
+            print(*args, **kwargs)
+    except:
+        print(*args, **kwargs)
+
 __all__ = ["LayerNormLinear"]
 
 
@@ -232,9 +246,6 @@ class _LayerNormLinear(torch.autograd.Function):
         ln_out_mxfp4 = None  # Will be set by fused kernel if MXFP4 enabled
         ln_out_mxfp4_local = None
 
- 
-
-         
         ln_out, mu, rsigma = apply_normalization(
             inputmat,
             ln_out,
@@ -316,10 +327,30 @@ class _LayerNormLinear(torch.autograd.Function):
         # Cast weight to expected dtype
         weightmat = weight
         quantized_weight = False
+        
         if not fp8:
             weightmat = cast_if_needed(weightmat, activation_dtype)
         else:
-            if not isinstance(weight, QuantizedTensor):
+            # Check if weight needs MXFP4 conversion
+            need_mxfp4_conversion = (
+                is_mxfp4_enabled 
+                and isinstance(weight, QuantizedTensor) 
+                and not isinstance(weight, MXFP4TensorBase)
+            )
+            
+            if need_mxfp4_conversion:
+                # Weight is FP8 but we need MXFP4 - dequantize and requantize
+                
+                high_prec_weight = weight.dequantize()
+                quantized_weight = True
+                
+                # Directly use the quantizer to convert to MXFP4
+                # MXFP4 quantizer doesn't support get_weight_workspace
+                if weight_quantizer is not None:
+                    weightmat = weight_quantizer.quantize(high_prec_weight)
+                else:
+                    weightmat = high_prec_weight
+            elif not isinstance(weight, QuantizedTensor):
                 quantized_weight = True
 
                 # Configure quantizer
@@ -337,6 +368,9 @@ class _LayerNormLinear(torch.autograd.Function):
                     fsdp_group=fsdp_group,
                     create_transpose_cache=keep_fp8_weight_transpose_cache,
                 )
+            else:
+                # Weight is already in correct format
+                pass
 
         # Cast bias to expected dtype
         bias_dtype = activation_dtype
@@ -456,7 +490,7 @@ class _LayerNormLinear(torch.autograd.Function):
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
                 weightmat,
-                weight,
+                None if need_mxfp4_conversion else weight,  # Skip for MXFP4 SFT
                 bias,
                 ln_weight,
                 ln_out.clone() if ub_overlap_ag_fprop else ln_out,  # avoid saving a UB buffer
@@ -705,7 +739,12 @@ class _LayerNormLinear(torch.autograd.Function):
                 ctx.grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
 
             if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                create_fp8_weight_transpose_cache(weight)
+                # Skip transpose cache creation for MXFP4 tensors
+                if not isinstance(weight, MXFP4TensorBase):
+                    _rank0_print(f"[LayerNormLinear BWD] Creating FP8 transpose cache\tweight_type={type(weight).__name__}")
+                    create_fp8_weight_transpose_cache(weight)
+                else:
+                    _rank0_print(f"[LayerNormLinear BWD] Skipping FP8 cache for MXFP4\tweight_type={type(weight).__name__}")
 
             # ------------------------------------------------------
             # dGrad GEMM
@@ -736,7 +775,9 @@ class _LayerNormLinear(torch.autograd.Function):
             nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
 
             if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                clear_fp8_weight_transpose_cache(weight)
+                # Skip transpose cache clearing for MXFP4 tensors
+                if not isinstance(weight, MXFP4TensorBase):
+                    clear_fp8_weight_transpose_cache(weight)
 
             # Launch tensor-parallel communication
             dgrad_work = None
@@ -1510,7 +1551,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         fp4 = os.getenv("FP4", "False") == "True"
         if fp4:
             # Input: used as A in fprop, B in wgrad - can't pre-shuffle
-            input_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True, shuffle_B_matrix_for_aiter=False)
+            input_quantizer = MXFP4Quantizer(rowwise=True, columnwise=False, shuffle_B_matrix_for_aiter=False)
         else:
             input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
         input_quantizer.internal = False
@@ -1526,7 +1567,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
         if torch.is_grad_enabled():
             if fp4:
-                grad_output_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True)  # No shuffle for grad
+                grad_output_quantizer = MXFP4Quantizer(rowwise=True, columnwise=False)  # No shuffle for grad
                 grad_output_quantizer.internal = True
             else:
                 grad_output_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]

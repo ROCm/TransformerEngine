@@ -198,7 +198,25 @@ class _Linear(torch.autograd.Function):
         if not fp8:
             weightmat = cast_if_needed(weightmat, activation_dtype)
         else:
-            if not isinstance(weight, QuantizedTensor):
+            # Check if weight needs MXFP4 conversion (SFT with FP8 checkpoint)
+            need_mxfp4_conversion = (
+                is_mxfp4_enabled 
+                and isinstance(weight, QuantizedTensor) 
+                and not isinstance(weight, MXFP4TensorBase)
+            )
+            
+            if need_mxfp4_conversion:
+                # Weight is FP8 but we need MXFP4 - dequantize and requantize
+                
+                high_prec_weight = weight.dequantize()
+                
+                # Directly use the quantizer to convert to MXFP4
+                # MXFP4 quantizer doesn't support get_weight_workspace
+                if weight_quantizer is not None:
+                    weightmat = weight_quantizer.quantize(high_prec_weight)
+                else:
+                    weightmat = high_prec_weight
+            elif not isinstance(weight, QuantizedTensor):
                 # Configure quantizer
                 if weight_quantizer is not None:
                     columnwise_usage = is_grad_enabled and inp.requires_grad
@@ -222,6 +240,9 @@ class _Linear(torch.autograd.Function):
                     fsdp_group=fsdp_group,
                     create_transpose_cache=keep_fp8_weight_transpose_cache,
                 )
+            else:
+                # Weight is already in correct format
+                pass
 
         # Cast bias to expected dtype
         bias_dtype = activation_dtype
@@ -294,7 +315,7 @@ class _Linear(torch.autograd.Function):
                 weight.requires_grad and parallel_mode == "column" and sequence_parallel
             )
 
-            if backward_needs_input:
+            if backward_needs_input: # false for LORA 
                 if own_quantized_input and isinstance(inputmat, QuantizedTensor):
                     # For sequence parallel in vanilla FP8, rowwise data is
                     # to gather the input. For MXFP8, columnwise only data
@@ -342,7 +363,7 @@ class _Linear(torch.autograd.Function):
             tensors_to_save, tensor_objects = prepare_for_saving(
                 saved_inputmat, # quantized input, required for wgrad (if backward_needs_input is True)
                 weightmat,      # quantized weight
-                weight,         # high precision weight
+                None if need_mxfp4_conversion else weight,         # high precision weight
                 bias,
             )
             ctx.save_for_backward(*tensors_to_save)
@@ -505,6 +526,7 @@ class _Linear(torch.autograd.Function):
 
             # Prepare grad output tensor
             # Note: Cast to expected dtype and perform tensor-parallel communication
+            
             if is_mxfp4_enabled and ctx.fp8:
                 nvtx_range_push(f"{nvtx_label}.grad_output_mxfp4")
                 grad_output = ctx.grad_output_quantizer(grad_output)
@@ -568,7 +590,9 @@ class _Linear(torch.autograd.Function):
                     ctx.grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
 
                 if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                    create_fp8_weight_transpose_cache(weight_fp8)
+                    # Skip transpose cache creation for MXFP4 tensors
+                    if not isinstance(weight_fp8, MXFP4TensorBase):
+                        create_fp8_weight_transpose_cache(weight_fp8)
 
                 # dgrad GEMM - unified path for both FP8 and FP4
                 nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
@@ -598,7 +622,9 @@ class _Linear(torch.autograd.Function):
                 nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
 
                 if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
-                    clear_fp8_weight_transpose_cache(weight_fp8)
+                    # Skip transpose cache clearing for MXFP4 tensors
+                    if not isinstance(weight_fp8, MXFP4TensorBase):
+                        clear_fp8_weight_transpose_cache(weight_fp8)
 
                 # Launch tensor-parallel communication
                 if ctx.ub_overlap_rs_dgrad:
@@ -1184,10 +1210,12 @@ class Linear(TransformerEngineBaseModule):
             ) = self._get_quantizers(fp8_output, fp8_grad, is_mxfp4_enabled) 
 
             # Make sure weight tensor has correct quantizer
-            # Note: Quantizer might have changed if quantization
-            # recipe changed
+            # Note: Quantizer might have changed if quantization recipe changed
+            # Skip for MXFP4: Float8Tensor from checkpoint should keep its FP8 quantizer
+            # (we handle FP8->MXFP4 conversion separately in _Linear.forward)
             if weight_quantizer is not None and isinstance(weight_tensor, QuantizedTensor):
-                weight_tensor._quantizer = weight_quantizer
+                if not is_mxfp4_enabled:
+                    weight_tensor._quantizer = weight_quantizer
 
             if torch.is_grad_enabled():
                 linear_fn = _Linear.apply
@@ -1241,7 +1269,7 @@ class Linear(TransformerEngineBaseModule):
 
     def _get_quantizers(self, fp8_output, fp8_grad, is_mxfp4_enabled):
         if not self.fp8:
-            return [None] * 5
+            return [None] * 6
         grad_input_quantizer = None
         grad_output_quantizer_mxfp4 = None
         grad_output_quantizer = None
@@ -1249,7 +1277,7 @@ class Linear(TransformerEngineBaseModule):
 
         if is_mxfp4_enabled:
             # Input: used as A in fprop, B in wgrad - can't pre-shuffle (shuffle in wgrad only)
-            input_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True, shuffle_B_matrix_for_aiter=False)
+            input_quantizer = MXFP4Quantizer(rowwise=True, columnwise=False, shuffle_B_matrix_for_aiter=False)
         else:
             input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
         input_quantizer.internal = False
@@ -1263,7 +1291,7 @@ class Linear(TransformerEngineBaseModule):
             output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
         if torch.is_grad_enabled():
             if is_mxfp4_enabled:
-                grad_output_quantizer = MXFP4Quantizer(rowwise=True, columnwise=True)  # No shuffle for grad
+                grad_output_quantizer = MXFP4Quantizer(rowwise=True, columnwise=False)  # No shuffle for grad
                 grad_output_quantizer.internal = True
             else:
                 grad_output_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]
