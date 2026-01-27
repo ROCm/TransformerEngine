@@ -131,10 +131,10 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   DType wtype = TypeInfo<WeightType>::dtype;
   DType otype = TypeInfo<OutputType>::dtype;
 
-  Tensor input("input2", std::vector<size_t>{ N, H }, itype);
+  Tensor input("input", std::vector<size_t>{ N, H }, itype);
   Tensor z("z", std::vector<size_t>{ N, H }, otype, true, is_training, NVTE_MXFP8_1D_SCALING);
-  Tensor gamma("gamma2", std::vector<size_t>{ H }, wtype);
-  Tensor beta("beta2", std::vector<size_t>{ H }, wtype);
+  Tensor gamma("gamma", std::vector<size_t>{ H }, wtype);
+  Tensor beta("beta", std::vector<size_t>{ H }, wtype);
   Tensor mu("mu", std::vector<size_t>{ N }, DType::kFloat32);
   Tensor rsigma("rsigma", std::vector<size_t>{ N }, DType::kFloat32);
   Tensor workspace;

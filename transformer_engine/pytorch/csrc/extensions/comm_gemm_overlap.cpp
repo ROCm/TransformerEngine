@@ -321,4 +321,3 @@ void transformer_engine::pytorch::bulk_overlap_ag_with_external_gemm(
                                                   at::cuda::CUDAStream(recv_stream), main_stream);
 }
 #endif
-  
