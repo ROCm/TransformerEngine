@@ -5,7 +5,6 @@
 # See LICENSE for license information.
 
 """GroupedLinear API"""
-import os
 from typing import Union, Optional, Callable, Tuple, List
 import warnings
 
@@ -56,7 +55,7 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 if IS_HIP_EXTENSION:
     from transformer_engine.pytorch.triton_kernels.grouped_gemm import general_grouped_gemm_triton
-
+    import os
 
 __all__ = ["GroupedLinear"]
 
