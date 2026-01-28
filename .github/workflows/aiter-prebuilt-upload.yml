@@ -61,11 +61,18 @@ jobs:
           docker exec \
             -e NVTE_AITER_PREBUILT_BASE_URL=${NVTE_AITER_PREBUILT_BASE_URL} \
             -e NVTE_AITER_PREBUILT_UPLOAD_TOKEN=${NVTE_AITER_PREBUILT_UPLOAD_TOKEN} \
-            te-aiter-upload bash -c 'set -ex
-              if [ -z "${NVTE_AITER_PREBUILT_UPLOAD_TOKEN}" ]; then
-                echo "Missing secrets.AITER_ARTIFACTORY_TOKEN" >&2
-                exit 1
-              fi
-              export HIP_PATH=""
-              bash .github/scripts/aiter_prebuild_upload.sh --build
-            '
+            te-aiter-upload bash -c "$(cat <<'EOF'
+          set -ex
+          if [ -z "${NVTE_AITER_PREBUILT_UPLOAD_TOKEN}" ]; then
+            echo "Missing secrets.AITER_ARTIFACTORY_TOKEN" >&2
+            exit 1
+          fi
+          export HIP_PATH=""
+          git config --global --add safe.directory '*'
+          bash .github/scripts/aiter_prebuild_upload.sh --build
+          EOF
+          )"
+
+      - name: Cleanup container
+        if: always()
+        run: docker rm -f te-aiter-upload || true
