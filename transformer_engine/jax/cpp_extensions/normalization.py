@@ -324,9 +324,17 @@ class NormFwdPrimitive(BasePrimitive):
         # Slice out the padding for mxfp8 -- the kernel writes to strided 2D
         # positions, not contiguous. For 1D MXFP8: allocated [padded_rows,
         # padded_cols], kernel writes [:actual_rows, :actual_cols]
-        scale_inv = jax.lax.slice(scale_inv, [0] * scale_inv.ndim, rowwise_scale_inv_shape)
+        scale_inv = jax.lax.slice(
+            scale_inv,
+            [0] * scale_inv.ndim,
+            rowwise_scale_inv_shape
+        )
         if is_2x:
-            colwise_scale_inv = jax.lax.slice(colwise_scale_inv, [0] * colwise_scale_inv.ndim, colwise_scale_inv_shape)
+            colwise_scale_inv = jax.lax.slice(
+                colwise_scale_inv,
+                [0] * colwise_scale_inv.ndim,
+                colwise_scale_inv_shape
+            )
         return (
             out,
             colwise_out,
