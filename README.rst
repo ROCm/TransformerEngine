@@ -12,7 +12,7 @@
 Transformer Engine On ROCm and AMDGPU
 *************************************
 
-This repository enables Transformer Engine (TE) on ROCm as a library to accelerate Transformer models on AMD GPUs, including using 8-bit floating point (FP8) precision on MI300 GPUs, to provide better performance with lower memory utilization in both training and inference.
+This repository enables Transformer Engine (TE) on ROCm as a library to accelerate Transformer models on AMD graphics processing units (GPUs), including using 8-bit floating point (FP8) precision on MI300 GPUs, to provide better performance with lower memory utilization in both training and inference.
 One of the missions is to provide an alternative to accelerate Transformer models that were previously run on NVIDIA GPUs like Hopper with best efforts to make the migration frictionless.
 Moreover, we add optimizations specific to AMD GPUs to get the best performance benefits out of AMD GPUs.
 
