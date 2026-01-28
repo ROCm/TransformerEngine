@@ -1117,9 +1117,6 @@ def _run_dot_product_attention(
     if not is_training:
         block = block.eval()
 
-    cu_seqlens_q_padded = None
-    cu_seqlens_kv_padded = None
-
     # Run a forward and backward pass
     if backend in ["FlashAttention", "UnfusedDotProductAttention"]:
         q = inp_orig[0]
@@ -1131,9 +1128,6 @@ def _run_dot_product_attention(
         k = inp[1]
         v = inp[2]
         d_out = out_grad
-        if pad_between_seqs:
-            cu_seqlens_q_padded = cu_seqlens_q_after_pad
-            cu_seqlens_kv_padded = cu_seqlens_kv_after_pad
     out = block(
         q,
         k,
@@ -1145,8 +1139,8 @@ def _run_dot_product_attention(
         max_seqlen_kv=config.max_seqlen_kv,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_kv=cu_seqlens_kv,
-        cu_seqlens_q_padded=cu_seqlens_q_padded,
-        cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+        cu_seqlens_q_padded=cu_seqlens_q_after_pad if backend == "FusedAttention" else None,
+        cu_seqlens_kv_padded=cu_seqlens_kv_after_pad if backend == "FusedAttention" else None,
         attn_mask_type=config.attn_mask_type,
         checkpoint_core_attention=ckpt_attn,
         core_attention_bias_type=config.attn_bias_type,
