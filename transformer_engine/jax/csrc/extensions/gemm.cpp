@@ -327,6 +327,12 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                "For SM90 or older archs and FP8 input, only NT (row-major) GEMM is supported, ",
                "got lhs_is_trans=", lhs_is_trans, ", rhs_is_trans=", rhs_is_trans);
   }
+#else
+  if (arch < 95 && is_fp8_gemm) {
+    NVTE_CHECK(!lhs_is_trans && rhs_is_trans,
+               "For FP8 input on gfx942, only NT (row-major) GEMM is supported, ",
+               "got lhs_is_trans=", lhs_is_trans, ", rhs_is_trans=", rhs_is_trans);
+  }
 #endif
 
   // These lists are to keep the TensorWrapper objects alive
