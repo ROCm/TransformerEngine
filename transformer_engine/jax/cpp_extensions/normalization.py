@@ -321,8 +321,7 @@ class NormFwdPrimitive(BasePrimitive):
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
         ).get_scale_shape_2x(x.shape, is_padded=False)
-        # Slice out the padding for mxfp8 -- the kernel writes to strided
-        # 2D positions, not contiguous.
+        # Slice out the padding for mxfp8 -- the kernel writes to strided 2D positions, not contiguous.
         # For 1D MXFP8: allocated [padded_rows, padded_cols], kernel writes [:actual_rows, :actual_cols]
         scale_inv = jax.lax.slice(scale_inv, [0] * scale_inv.ndim, rowwise_scale_inv_shape)
         if is_2x:
@@ -581,6 +580,7 @@ class NormFwdPrimitive(BasePrimitive):
     ):
         if version.parse(jax.__version__) < version.parse("0.5.0"):
             raise ImportError("JAX version 0.5.0 or later is required for shardy sharding.")
+        print(f"DEBUG RESULT SHAPES *** rowwise_scale_inv={tuple(result_types[2].shape)}, colwise_scale_inv={tuple(result_types[3].shape)}")
         del (
             zero_centered_gamma,
             epsilon,
@@ -596,7 +596,6 @@ class NormFwdPrimitive(BasePrimitive):
             len(value_types[0].shape), unique_var=prefix + "x", flatten_axis=-1
         )
         x_axes = scale_rules.input_spec
-
         out = x_axes
         colwise_out = out if is_2x else (prefix + "out_colwise",)
         rsigma = x_axes[:-1]
@@ -604,15 +603,15 @@ class NormFwdPrimitive(BasePrimitive):
         amax = (prefix + "amax",)
 
         # When is_2x==False, colwise_scale_inv needs a different factor
-        colwise_scale_inv_rule = scale_rules.colwise_rule if is_2x else (prefix + "x_colwise_scale_inv",)
-
+        # colwise_scale_inv_rule = scale_rules.colwise_rule if is_2x else (prefix + "x_colwise_scale_inv",)
+        print(f"DEBUG *** {scale_rules.rowwise_rule=} | {scale_rules.colwise_rule=}")
         return SdyShardingRule(
             (x_axes, ("…1",), ("…2",), ("…3",)),
             (
                 out,
                 colwise_out,
                 scale_rules.rowwise_rule,
-                colwise_scale_inv_rule,
+                scale_rules.colwise_rule,
                 amax,
                 mu,
                 rsigma,

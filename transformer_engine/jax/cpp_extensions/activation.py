@@ -912,6 +912,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         dbias = x_axes[-2:] if is_dbias else (prefix + "dbias",)
         amax = (prefix + "amax",)
 
+        # TODO(micky774): Investigate the necessity of separate colwise_scale_inv rule.
         # When is_2x==False, colwise_scale_inv needs a different factor
         colwise_scale_inv_rule = scale_rules.colwise_rule if is_2x else (prefix + "x_colwise_scale_inv",)
 

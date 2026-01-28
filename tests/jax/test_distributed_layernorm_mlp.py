@@ -4,7 +4,6 @@
 #
 # See LICENSE for license information.
 from typing import Callable, Sequence, Union, Optional
-from packaging import version
 
 import pytest
 
@@ -73,13 +72,14 @@ LN_BIAS_AXES = (W_NO_SHARD_AXES,)
 BIAS_1_AXES = (W_JOINED_AXES, W_TP_AXES)
 BIAS_2_AXES = (W_NO_SHARD_AXES,)
 
-INTERMEDIATE = 128
+INTERMEDIATE = 64
 
 # We set to 256 to ensure compatibility with hipblaslt MXFP8 GEMM which
 # requires the reduction dim to be multiple of 128 after sharding.
 if is_hip_extension():
     INPUT_SHAPE += [[4, 64, 256]]
-    INTERMEDIATE = INTERMEDIATE * 2
+    # TODO: Calculate intermediate size dynamically based on mesh config tpsp axis
+    INTERMEDIATE = 128 * 2
 
 
 # Only test with FSDP and TPSP as DP is not used
@@ -167,7 +167,6 @@ class TestDistributedLayernormMLP:
             )
         )
 
-
     def _test_layernorm_mlp_grad(
         self,
         mesh_config,
@@ -179,14 +178,12 @@ class TestDistributedLayernormMLP:
         use_shardy,
         with_jax_gemm,
     ):
-        inputs = [x, gamma, k1, k2, b1, b2] = self.generate_inputs(
-            input_shape, activation_type, use_bias, dtype
-        )
         if (
-            (not with_jax_gemm)
+            is_hip_extension()
+            and (not with_jax_gemm)
             and use_bias
-            and fp8_recipe is None
-            and dtype == jnp.bfloat16
+            and (fp8_recipe is None)
+            and (dtype == jnp.bfloat16)
         ):
             pytest.xfail("Skip known failure case.")
         if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
@@ -204,6 +201,9 @@ class TestDistributedLayernormMLP:
         device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
         layernorm_type = "rmsnorm"
 
+        inputs = [x, gamma, k1, k2, b1, b2] = self.generate_inputs(
+            input_shape, activation_type, use_bias, dtype
+        )
         static_inputs = [layernorm_type, activation_type]
 
         with use_jax_gemm(enabled=with_jax_gemm):
