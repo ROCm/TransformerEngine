@@ -203,8 +203,8 @@ def _te_norm_fwd_triton(
     elif kernel == "rms":
         kwargs["USE_BLOCKED"]=USE_BLOCKED
         kwargs["NUM_PRGMS"]=NUM_PRGMS
-        kwargs["INPUT_ALIGNED_16"]=(input_tensor.data_ptr() % 16 == 0) and (input_row_stride % 16 == 0)
-        kwargs["OUTPUT_ALIGNED_16"]=(out_ptr.data_ptr() % 16 == 0) and (output_row_stride % 16 == 0)
+        kwargs["INPUT_ALIGNED_16"]=(input_tensor.data_ptr() % 16 == 0) and (input_row_stride * input_tensor.dtype.itemsize % 16 == 0)
+        kwargs["OUTPUT_ALIGNED_16"]=(out_ptr.data_ptr() % 16 == 0) and (output_row_stride * out_ptr.dtype.itemsize % 16 == 0)
 
     kernel_func[grid_fwd](**kwargs)
 
@@ -240,11 +240,11 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma):
     dg_tmp_rows =  x_.shape[0] if use_blocked(x_) else num_programs(x_, sm_margin)
     dg_tmp = torch.empty(dg_tmp_rows, N, device=x.device, dtype=torch.float32, requires_grad=False) if need_reduction else None
 
-    input_aligned_16 = (x_.data_ptr() % 16 == 0) and (x_.stride(0) % 16 == 0)
-    grad_output_aligned_16 = (dz_.data_ptr() % 16 == 0) and (dz_.stride(0) % 16 == 0)
-    dx_aligned_16 = (dx.data_ptr() % 16 == 0) and (dx.stride(0) % 16 == 0)
+    input_aligned_16 = (x_.data_ptr() % 16 == 0) and (x_.stride(0) * x_.dtype.itemsize % 16 == 0)
+    grad_output_aligned_16 = (dz_.data_ptr() % 16 == 0) and (dz_.stride(0) * dz_.dtype.itemsize % 16 == 0)
+    dx_aligned_16 = (dx.data_ptr() % 16 == 0) and (dx.stride(0) * dx.dtype.itemsize % 16 == 0)
     dg_target = dg_tmp if need_reduction else dgamma
-    dg_aligned_16 = (dg_target.data_ptr() % 16 == 0) and (dg_target.stride(0) % 16 == 0)
+    dg_aligned_16 = (dg_target.data_ptr() % 16 == 0) and (dg_target.stride(0) * dg_target.dtype.itemsize % 16 == 0)
     grid_bwd = lambda meta: (NUM_PRGMS, )
     _rmsnorm_bwd_triton[grid_bwd](dz_, x_, gamma_, rsigma_, dx, dg_tmp if need_reduction else dgamma,
                                   x_.stride(0), dz_.stride(0), M, N, zero_centered_gamma, blk_size,
