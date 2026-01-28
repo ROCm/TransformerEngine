@@ -48,6 +48,8 @@ def te_rmsnorm_fwd_triton(
     sm_margin: int,
     zero_centered_gamma: bool,
     autotune: bool = True,
+    INPUT_ALIGNED_16: bool = False,
+    OUTPUT_ALIGNED_16: bool = False,
 ):
     return te_norm_fwd_triton(
         kernel='rms',
@@ -61,6 +63,8 @@ def te_rmsnorm_fwd_triton(
         sm_margin=sm_margin,
         zero_centered_gamma=zero_centered_gamma,
         autotune=autotune,
+        INPUT_ALIGNED_16=INPUT_ALIGNED_16,
+        OUTPUT_ALIGNED_16=OUTPUT_ALIGNED_16,
     )
 
 # triton drop-in replacement for transformer_engine::pytorch::rmsnorm_fwd
@@ -103,6 +107,8 @@ def te_norm_fwd_triton(
     sm_margin: int,
     zero_centered_gamma: bool,
     autotune: bool = True,
+    INPUT_ALIGNED_16: bool = False,
+    OUTPUT_ALIGNED_16: bool = False,
 ):
     if kernel not in {'rms', 'layer'}:
         raise ValueError(f"Expected `kernel` in ('rms', 'layer') but got {kernel=} instead.")
@@ -199,6 +205,8 @@ def te_norm_fwd_triton(
     elif kernel == "rms":
         kwargs["USE_BLOCKED"]=USE_BLOCKED
         kwargs["NUM_PRGMS"]=NUM_PRGMS
+        kwargs["INPUT_ALIGNED_16"]=INPUT_ALIGNED_16
+        kwargs["OUTPUT_ALIGNED_16"]=OUTPUT_ALIGNED_16
 
     kernel_func[grid_fwd](**kwargs)
 
@@ -216,7 +224,16 @@ def te_norm_fwd_triton(
 
 
 # triton drop-in replacement for transformer_engine::pytorch::rmsnorm_bwd
-def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma):
+def te_rmsnorm_bwd_triton(
+    dz, x,
+    rsigma, gamma,
+    sm_margin,
+    zero_centered_gamma,
+    INPUT_ALIGNED_16=False,
+    GRAD_OUTPUT_ALIGNED_16=False,
+    DX_ALIGNED_16=False,
+    DG_ALIGNED_16=False,
+):
     # may take non-contiguous inputs
     dz_ = dz.contiguous()
     x_ = x.contiguous()
@@ -237,7 +254,8 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma):
     grid_bwd = lambda meta: (NUM_PRGMS, )
     _rmsnorm_bwd_triton[grid_bwd](dz_, x_, gamma_, rsigma_, dx, dg_tmp if need_reduction else dgamma,
                                   x_.stride(0), dz_.stride(0), M, N, zero_centered_gamma, blk_size,
-                                  USE_BLOCKED, NUM_PRGMS, num_warps=8)
+                                  USE_BLOCKED, NUM_PRGMS, INPUT_ALIGNED_16, GRAD_OUTPUT_ALIGNED_16,
+                                  DX_ALIGNED_16, DG_ALIGNED_16, num_warps=8)
 
     if need_reduction:
         grid_reduce = lambda meta: [triton.cdiv(N, meta['BLOCK_SIZE_N'])]
