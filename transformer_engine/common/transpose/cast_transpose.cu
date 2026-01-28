@@ -429,6 +429,7 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
                       static_cast<const CType *>(output.scale.dptr),
                       static_cast<CType *>(output.amax.dptr),
                       static_cast<CType *>(output.scale_inv.dptr), row_length, num_rows);
+              NVTE_CHECK_CUDA(cudaGetLastError());
             }
           } else {
             NVTE_ERROR("Not implemented scaling mode: ", to_string(output.scaling_mode));
@@ -442,15 +443,15 @@ void nvte_cast_transpose(const NVTETensor input, NVTETensor output, cudaStream_t
   NVTE_API_CALL(nvte_cast_transpose);
   using namespace transformer_engine;
   auto noop = Tensor();
-  transformer_engine::detail::cast_transpose(*reinterpret_cast<const Tensor *>(input), noop,
-                                             reinterpret_cast<Tensor *>(output), stream);
+  transformer_engine::detail::cast_transpose(*convertNVTETensorCheck(input), noop,
+                                             convertNVTETensor(output), stream);
 }
 
 void nvte_cast_transpose_with_noop(const NVTETensor input, const NVTETensor noop, NVTETensor output,
                                    cudaStream_t stream) {
   NVTE_API_CALL(nvte_cast_transpose_with_noop);
   using namespace transformer_engine;
-  transformer_engine::detail::cast_transpose(*reinterpret_cast<const Tensor *>(input),
-                                             *reinterpret_cast<const Tensor *>(noop),
-                                             reinterpret_cast<Tensor *>(output), stream);
+  transformer_engine::detail::cast_transpose(*convertNVTETensorCheck(input),
+                                             *convertNVTETensorCheck(noop),
+                                             convertNVTETensor(output), stream);
 }

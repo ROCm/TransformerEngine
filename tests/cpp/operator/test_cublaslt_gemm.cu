@@ -1,19 +1,17 @@
 /*************************************************************************
- * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
+#include <cmath>
+#include <iostream>
+#include <string>
+#include <cuda_bf16.h>
+#include <cuda_runtime.h>
+#include <gtest/gtest.h>
+#include <transformer_engine/cast.h>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/transformer_engine.h>
-#include <gtest/gtest.h>
-#include <cuda_runtime.h>
-#include <cuda_bf16.h>
-#include <memory>
-#include <iostream>
-#include <iomanip>
-#include <random>
-#include <cstring>
-#include <cmath>
 #include "../test_common.h"
 
 using namespace transformer_engine;
@@ -30,29 +28,17 @@ std::vector<std::tuple<size_t, size_t, size_t>> test_case_sizes = {
   {29, 29, 17389}, //primes
 }; 
 
+std::vector<std::tuple<size_t, size_t, size_t>> test_case_sizes_mxfp8 = {
+  {768, 3072, 4096},
+};
+
 //  A, B, Bias, Gelu, D
 //  Bias type choose as bf16 in use_fp8, D_type otherwise
 //  Gelu type the same as Bias_Type
-//  {DType::kFloat32, DType::kFloat32, DType::kFloat32, DType::kFloat32, DType::kFloat32},
-//  {DType::kFloat16, DType::kFloat16, DType::kFloat16, DType::kFloat16, DType::kFloat16},
-//  {DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, DType::kBFloat16},
-//  {DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kBFloat16, DType::kBFloat16, DType::kFloat32},
-//  {DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kBFloat16, DType::kBFloat16, DType::kFloat16},
-//  {DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kBFloat16, DType::kBFloat16, DType::kBFloat16},
-//  {DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kBFloat16, DType::kBFloat16, DType::kFloat8E4M3},
-//  {DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kBFloat16, DType::kBFloat16, DType::kFloat8E5M2},
-//  {DType::kFloat8E4M3, DType::kFloat8E5M2, DType::kBFloat16, DType::kBFloat16, DType::kFloat32},
-//  {DType::kFloat8E4M3, DType::kFloat8E5M2, DType::kBFloat16, DType::kBFloat16, DType::kFloat16},
-//  {DType::kFloat8E4M3, DType::kFloat8E5M2, DType::kBFloat16, DType::kBFloat16, DType::kBFloat16},
-//  {DType::kFloat8E4M3, DType::kFloat8E5M2, DType::kBFloat16, DType::kBFloat16, DType::kFloat8E4M3},
-//  {DType::kFloat8E4M3, DType::kFloat8E5M2, DType::kBFloat16, DType::kBFloat16, DType::kFloat8E5M2},
-//  {DType::kFloat8E5M2, DType::kFloat8E4M3, DType::kBFloat16, DType::kBFloat16, DType::kFloat32},
-//  {DType::kFloat8E5M2, DType::kFloat8E4M3, DType::kBFloat16, DType::kBFloat16, DType::kFloat16},
-//  {DType::kFloat8E5M2, DType::kFloat8E4M3, DType::kBFloat16, DType::kBFloat16, DType::kBFloat16},
-//  {DType::kFloat8E5M2, DType::kFloat8E4M3, DType::kBFloat16, DType::kBFloat16, DType::kFloat8E4M3},
-//  {DType::kFloat8E5M2, DType::kFloat8E4M3, DType::kBFloat16, DType::kBFloat16, DType::kFloat8E5M2},
-}  // namespace
 
+using fp32=float;
+using fp8=fp8e4m3;
+using bf8=fp8e5m2;
 
 using Layout = std::pair<bool,bool>;// {transa, transb}
 static const Layout kNN{false,false};
@@ -61,113 +47,121 @@ static const Layout kNT{false,true };
 
 static const std::vector<Layout> kLayouts = { kNN, kTN, kNT };
 
-// <A_type, B_type, Bias_Type, Gelu_Type D_type>, <m, k, n>
-class GEMMTestSuite
-    : public ::testing::TestWithParam<
-          std::tuple<std::tuple<size_t, size_t, size_t>, bool, bool, Layout, NVTEScalingMode>> {};
+using TShape = std::vector<size_t>;
+}  // namespace
 
-float ref_gelu(float x){
+
+__device__ __host__ __forceinline__ float ref_gelu(float x){
   float cdf = 0.5f * (1.0f + tanhf((0.7978845608028654f * (x + 0.044715f * x * x * x))));
   return x * cdf;
 }
 
-template <typename A_Type, typename B_Type, typename Bias_Type, typename Gelu_Type, typename D_Type>
-void compute_ref(
-  const A_Type* a_data,
-  const B_Type* b_data,
-  const float a_scale_inv,
-  const float b_scale_inv,
-  const Bias_Type* bias_data, //bias is of dim m
-  const float d_scale,
+template <typename A_Type, typename B_Type, typename Bias_Type,
+          typename Gelu_Type, typename D_Type>
+__global__ void compute_ref_kernel(
+  const A_Type* __restrict__ a_data,
+  const B_Type* __restrict__ b_data,
+  float a_scale_inv_scalar,                       // used when mxfp8 == false
+  float b_scale_inv_scalar,
+  const fp8e8m0* __restrict__ a_scale_inv_mxfp8,  // used when mxfp8 == true
+  const fp8e8m0* __restrict__ b_scale_inv_mxfp8,
+  size_t a_scale_ld,
+  size_t b_scale_ld,
+  bool a_scale_is_colwise,
+  bool b_scale_is_colwise,
+  const Bias_Type* __restrict__ bias_data,
+  float d_scale,
   size_t m, size_t k, size_t n,
-  D_Type* ref_d_data,
-  float* ref_d_amax,
-  Gelu_Type* ref_gelu_data,
+  D_Type* __restrict__ d_data,
+  float* __restrict__ d_amax,
+  Gelu_Type* __restrict__ gelu_data,
   bool transa,
-  bool transb){
+  bool transb,
+  bool is_fp8_output,
+  bool a_is_colwise,
+  bool b_is_colwise,
+  bool use_mxfp8)
+{
+  const size_t jj = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t ii = blockIdx.y * blockDim.y + threadIdx.y;
 
-  *ref_d_amax = 0;
-  for(size_t ii = 0; ii < m; ii++){
-    for(size_t jj = 0; jj < n; jj++){
-      float val = 0;
-      for(size_t kk = 0; kk < k; kk++){
-        float a_val = transa ? a_data[kk + ii*k] : a_data[ii + kk*m];
-        float b_val = transb ? b_data[jj + kk*n] : b_data[kk + jj*k];
-        val += a_scale_inv*a_val*b_scale_inv*b_val;
+  const bool in_range = (ii < m) && (jj < n);
+
+  float val = 0.0f;
+
+  if (in_range) {
+    for (size_t kk = 0; kk < k; ++kk) {
+      size_t a_idx = 0;
+      size_t b_idx = 0;
+
+      if (use_mxfp8) {
+        a_idx = transa ? (ii * k + kk) : (kk * m + ii);
+        b_idx = transb ? (kk * n + jj) : (jj * k + kk);
+      } else {
+        // Non-MXFP8 FP8 path may use explicit transpose buffers (cpu_rowwise_to_columnwise),
+        // so indexing depends on which backing buffer is passed in.
+        a_idx = a_is_colwise ? (ii * k + kk)
+                             : (transa ? (ii * k + kk) : (kk * m + ii));
+
+        b_idx = b_is_colwise ? (jj * k + kk)
+                             : (transb ? (kk * n + jj) : (jj * k + kk));
       }
-      if(bias_data){
-        val += (float)bias_data[ii];
+
+      float a_scale_inv_val = a_scale_inv_scalar;
+      float b_scale_inv_val = b_scale_inv_scalar;
+
+      if (a_scale_inv_mxfp8) {
+        const size_t kc = kk / 32;
+
+        const size_t a_scale_idx =
+            a_scale_is_colwise ? (kc * a_scale_ld + ii) : (ii * a_scale_ld + kc);
+        const size_t b_scale_idx =
+            b_scale_is_colwise ? (kc * b_scale_ld + jj) : (jj * b_scale_ld + kc);
+
+        a_scale_inv_val = exp2f(a_scale_inv_mxfp8[a_scale_idx] - 127.0f);
+        b_scale_inv_val = exp2f(b_scale_inv_mxfp8[b_scale_idx] - 127.0f);
       }
-      if(ref_gelu_data){
-        ref_gelu_data[ii + jj*m] = (Gelu_Type)(val);
-        val = ref_gelu(val);
-      }
-      ref_d_data[ii+jj*m] = (D_Type)(val*d_scale);
-      // update ref_d_amax if in fp8
-      DType dtype = TypeInfo<D_Type>::dtype;
-      if(isFp8Type(dtype)){
-        *ref_d_amax = std::max<float>(*ref_d_amax, std::fabs(val));
-      }
+
+      const float a_val = static_cast<float>(a_data[a_idx]);
+      const float b_val = static_cast<float>(b_data[b_idx]);
+
+      val += a_scale_inv_val * a_val * b_scale_inv_val * b_val;
     }
-  }
-}
 
-template <typename A_Type, typename B_Type, typename Bias_Type, typename Gelu_Type, typename D_Type>
-void compute_mxfp8_ref(
-  const A_Type* a_data,
-  const B_Type* b_data,
-  const NVTEShape& a_scale_inv_shape,
-  const fp8e8m0* a_scale_inv_data,
-  const NVTEShape& b_scale_inv_shape,
-  const fp8e8m0* b_scale_inv_data,
-  const Bias_Type* bias_data, //bias is of dim m
-  const float d_scale,
-  size_t m, size_t k, size_t n,
-  D_Type* ref_d_data,
-  float* ref_d_amax,
-  Gelu_Type* ref_gelu_data,
-  bool transa,
-  bool transb){
-
-  *ref_d_amax = 0;
-  for(size_t ii = 0; ii < m; ii++){
-    for(size_t jj = 0; jj < n; jj++){
-      float val = 0;
-      for(size_t kk = 0; kk < k; kk++){
-        float a_val = a_data[ii*k + kk];
-        float b_val = b_data[kk + jj*k];
-        float a_scale_inv_val =
-            (float)std::pow(2, a_scale_inv_data[ii * a_scale_inv_shape.data[1] + kk / 32] - 127);
-        float b_scale_inv_val =
-            (float)std::pow(2, b_scale_inv_data[kk / 32 + jj * b_scale_inv_shape.data[1]] - 127);
-        val += a_scale_inv_val * a_val * b_scale_inv_val * b_val;
-      }
-      if(bias_data){
-        val += (float)bias_data[ii];
-      }
-      if(ref_gelu_data){
-        ref_gelu_data[ii + jj*m] = (Gelu_Type)(val);
-        val = ref_gelu(val);
-      }
-      ref_d_data[ii+jj*m] = (D_Type)(val*d_scale);
-      // update ref_d_amax if in fp8
-      DType dtype = TypeInfo<D_Type>::dtype;
-      if(isFp8Type(dtype)){
-        *ref_d_amax = std::max<float>(*ref_d_amax, std::fabs(val));
-      }
+    if (bias_data) {
+      val += static_cast<float>(bias_data[ii]);
     }
-  }
-}
 
-template <typename Type>
-void cpu_rowwise_to_columnwise(
-  size_t m, size_t n,
-  const Type* rowwise_ptr, 
-  Type* columnwise_ptr){
-  
-  for(size_t ii = 0; ii < m; ii++){
-    for(size_t jj = 0; jj < n; jj++){
-      columnwise_ptr[jj*m + ii] = rowwise_ptr[ii*n + jj];
+    if (gelu_data) {
+      gelu_data[ii + jj * m] = static_cast<Gelu_Type>(val);
+      val = ref_gelu(val);
+    }
+
+    const float scaled = val * d_scale;
+    d_data[ii + jj * m] = static_cast<D_Type>(scaled);
+  }
+
+  // Blockwise reduction for amax
+  if (is_fp8_output && d_amax) {
+    const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    const int nthreads = blockDim.x * blockDim.y;
+
+    extern __shared__ float s_amax[];
+
+    // Out-of-range threads contribute 0
+    s_amax[tid] = in_range ? fabsf(val) : 0.0f;
+    __syncthreads();
+
+    for (int offset = nthreads / 2; offset > 0; offset /= 2) {
+      if (tid < offset) {
+        s_amax[tid] = fmaxf(s_amax[tid], s_amax[tid + offset]);
+      }
+      __syncthreads();
+    }
+
+    if (tid == 0) {
+      const float block_max = s_amax[0];
+      atomicMax(d_amax, block_max);
     }
   }
 }
@@ -183,6 +177,157 @@ struct TestParams {
   bool transb;
   NVTEScalingMode scaling_mode;
 };
+
+
+template <typename A_Type, typename B_Type, typename Bias_Type,
+          typename Gelu_Type, typename D_Type>
+static void run_reference(
+    const TestParams& params,
+    const Tensor& A,
+    const Tensor& B,
+    const Tensor* Bias,                 // nullable
+    const Tensor& D_for_scale,
+    Tensor& RefD,
+    Tensor* RefPreGeluOut)              // nullable
+{
+  const bool use_mxfp8 = (params.scaling_mode == NVTE_MXFP8_1D_SCALING);
+
+  const float d_scale = D_for_scale.scale();
+
+  const bool is_fp8_output = test::isFp8Type(test::TypeInfo<D_Type>::dtype);
+
+  const bool a_use_colwise = (!params.transa) && A.columnwise();
+  const bool b_use_colwise = ( params.transb) && B.columnwise();
+
+  const A_Type* a_dev = static_cast<const A_Type*>(
+      a_use_colwise ? A.columnwise_dptr() : A.rowwise_dptr());
+
+  const B_Type* b_dev = static_cast<const B_Type*>(
+      b_use_colwise ? B.columnwise_dptr() : B.rowwise_dptr());
+
+  // scaling inputs
+  float a_scale_inv_scalar = 1.0f;
+  float b_scale_inv_scalar = 1.0f;
+
+  const fp8e8m0* a_scale_dev = nullptr;
+  const fp8e8m0* b_scale_dev = nullptr;
+  size_t a_scale_ld = 0;
+  size_t b_scale_ld = 0;
+  bool a_scale_is_colwise = !params.transa;
+  bool b_scale_is_colwise =  params.transb;
+
+  if (use_mxfp8) {
+    a_scale_dev = static_cast<const fp8e8m0*>(
+        a_scale_is_colwise ? A.columnwise_scale_inv_dptr() : A.rowwise_scale_inv_dptr());
+    b_scale_dev = static_cast<const fp8e8m0*>(
+        b_scale_is_colwise ? B.columnwise_scale_inv_dptr() : B.rowwise_scale_inv_dptr());
+
+    const NVTEShape a_s = a_scale_is_colwise ? A.columnwise_scale_inv_shape() : A.rowwise_scale_inv_shape();
+    const NVTEShape b_s = b_scale_is_colwise ? B.columnwise_scale_inv_shape() : B.rowwise_scale_inv_shape();
+    NVTE_CHECK(a_s.ndim == 2 && b_s.ndim == 2, "Expected 2D MXFP8 scale_inv");
+    a_scale_ld = a_s.data[1];
+    b_scale_ld = b_s.data[1];
+  } else {
+    a_scale_inv_scalar = A.rowwise_scale_inv();
+    b_scale_inv_scalar = B.rowwise_scale_inv();
+  }
+
+  // optional bias device pointer
+  const Bias_Type* bias_dev = nullptr;
+  if (Bias) {
+    bias_dev = static_cast<const Bias_Type*>(Bias->rowwise_dptr());
+  }
+
+  D_Type* d_refD = static_cast<D_Type*>(RefD.rowwise_dptr());
+
+  Gelu_Type* d_refGelu = nullptr;
+  float* d_refAmax = nullptr;
+
+  if (RefPreGeluOut) {
+    d_refGelu = static_cast<Gelu_Type*>(RefPreGeluOut->rowwise_dptr());
+  }
+
+  if (is_fp8_output) {
+    d_refAmax = static_cast<float*>(RefD.amax_dptr());
+    if (d_refAmax)
+      NVTE_CHECK_CUDA(cudaMemset(d_refAmax, 0, sizeof(float)));
+  }
+
+  // Kernel launch
+  dim3 block(16, 16);
+  dim3 grid((unsigned)((params.n + block.x - 1) / block.x),
+            (unsigned)((params.m + block.y - 1) / block.y));
+
+  const size_t shmem_bytes = size_t(block.x) * size_t(block.y) * sizeof(float);
+
+  compute_ref_kernel<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>
+      <<<grid, block, shmem_bytes, 0>>>(
+          a_dev,
+          b_dev,
+          a_scale_inv_scalar,
+          b_scale_inv_scalar,
+          a_scale_dev,
+          b_scale_dev,
+          a_scale_ld,
+          b_scale_ld,
+          a_scale_is_colwise,
+          b_scale_is_colwise,
+          bias_dev,
+          d_scale,
+          params.m, params.k, params.n,
+          d_refD,
+          d_refAmax,
+          d_refGelu,
+          params.transa,
+          params.transb,
+          is_fp8_output,
+          a_use_colwise,
+          b_use_colwise,
+          use_mxfp8);
+
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
+
+template <typename Type>
+void cpu_rowwise_to_columnwise(
+  size_t m, size_t n,
+  const Type* rowwise_ptr, 
+  Type* columnwise_ptr){
+  
+  for(size_t ii = 0; ii < m; ii++){
+    for(size_t jj = 0; jj < n; jj++){
+      columnwise_ptr[jj*m + ii] = rowwise_ptr[ii*n + jj];
+    }
+  }
+}
+
+std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool use_mxfp8) {
+  auto [atol, rtol] = getTolerances(type);
+
+  //relax for certain prime number gemm
+  if (type == DType::kFloat32) {
+    atol = 1e-5;
+  }
+  // relax for certain FP8 gemm with hipblaslt
+  if (use_mxfp8) {
+    atol = 5e-4;
+    rtol = std::max(rtol, 1e-3);
+  }
+  else if (use_fp8) {
+    atol = 1e-3;
+    rtol = std::max(rtol, 1e-2);
+  }
+  else if (type == DType::kBFloat16) {
+    //relax for certain prime number TN gemm
+    rtol = 5e-2;
+  }
+  else if (type == DType::kFloat32) {
+    rtol = 1e-5;
+  }
+  return {atol, rtol};
+}
+
 
 template <typename A_Type, typename B_Type, typename Bias_Type, typename Gelu_Type, typename D_Type>
 void performTest(const TestParams& params) {
@@ -209,6 +354,29 @@ void performTest(const TestParams& params) {
   (void)cudaGetDeviceProperties(&prop, 0);
 
 #ifdef __HIP_PLATFORM_AMD__
+
+  #if HIP_VERSION < 70200000
+    if (prop.major == 9 && prop.minor == 5 &&
+        params.transa && !params.transb &&
+        params.m == 2304 && params.k == 768 && params.n == 4096) {
+      GTEST_SKIP() << "Skip TN 2304x768x4096 on gfx950 for ROCm < 7.2";
+    }
+  #endif
+
+  // Enable FP8 GEMM + GELU fusion tests only on MI300 (gfx942) with ROCm > 7.0.
+  // hipBLASLt currently supports this config only
+  bool fp8_gelu_fusion_config = false;
+  #if HIP_VERSION >= 70000000
+    if (prop.major == 9 && prop.minor == 4)
+    {
+      fp8_gelu_fusion_config = atype == DType::kFloat8E4M3 &&
+                              btype == DType::kFloat8E4M3 &&
+                              dtype == DType::kFloat8E4M3 &&
+                              (params.use_gelu && gelu_type == DType::kFloat16) &&
+                              (!params.use_bias || bias_type == DType::kFloat16);
+    }
+  #endif
+
   if (has_fp8)
   {
     bool fp8_supported = (prop.major == 9 && prop.minor >= 4);
@@ -227,8 +395,8 @@ void performTest(const TestParams& params) {
       }
     }
 
-    if (params.use_gelu) {
-      GTEST_SKIP() << "FP8 GEMM with GELU is not supported";
+    if (params.use_gelu && !fp8_gelu_fusion_config) {
+      GTEST_SKIP() << "FP8 GEMM with GELU is not supported in current config";
     }
     if (params.use_bias && dtype == DType::kFloat16) {
       GTEST_SKIP() << "FP8 GEMM with bias and FP16 output is not supported";
@@ -243,64 +411,63 @@ void performTest(const TestParams& params) {
     if (params.use_gelu && dtype == DType::kBFloat16) {
       GTEST_SKIP() << "BF16 GEMM with GELU is not supported in current config";
     }
-    if (has_fp8 && params.use_bias && dtype == DType::kFloat32) {
-      GTEST_SKIP() << "FP8 GEMM with bias and FP32 output is not supported in current config";
+    if constexpr ((std::is_same<A_Type, bf8>::value || std::is_same<B_Type, bf8>::value) &&
+      std::is_same<D_Type, fp32>::value)
+    {
+      //GEMM with bias and fp32 output is not supported with bf8 A/B
+      if (params.use_bias) {
+        GTEST_SKIP() << "FP8 GEMM with bias is not supported in current config";
+      }
     }
   }
   if (prop.major == 9 && prop.minor == 4) //gfx942 specific hipblasLt limitations
   {
+#if HIP_VERSION < 70100000
     if (params.use_gelu && dtype == DType::kBFloat16 && !params.transa) {
       GTEST_SKIP() << "BF16 GEMM with GELU is not supported in current config";
     }
-    if (has_fp8 && params.use_bias && dtype == DType::kFloat8E4M3) {
-      GTEST_SKIP() << "FP8 GEMM with bias and FP8 output is not supported in current config";
+#endif
+    if constexpr (std::is_same<D_Type, fp8>::value && std::is_same<Bias_Type, bf16>::value) {
+      if (params.use_bias && !fp8_gelu_fusion_config) {
+        GTEST_SKIP() << "GEMM with BF16 bias and FP8 output is not supported in current config";
+      }
     }
   }
 #endif
 
-  // pytorch tensor storage is row-major while cublas/hipblaslt is column-major
-  Tensor A;
-  if (params.transa){
-    A = Tensor("A", { params.m, params.k }, atype, true, false, params.scaling_mode);
-  }else {
-    // hipblaslt path need fp8-gemm with TN layout
-    A = Tensor("A", { params.k, params.m }, atype, true, isFp8Type(atype), params.scaling_mode);
-  }
-  Tensor B;
-  if (params.transb){
-    //hipblaslt path need fp8-gemm with TN layout
-    B = Tensor("B", { params.k, params.n }, btype, true, isFp8Type(btype), params.scaling_mode);
-  }else {
-    B = Tensor("B", { params.n, params.k }, btype, true, false, params.scaling_mode);
-  }
-  Tensor D("D", { params.n, params.m }, dtype);
+  // FP8 GEMM path needs columnwise data for A/B tensor with non TN layout
+  const bool a_colwise = !params.transa && isFp8Type(atype);
+  const bool b_colwise = params.transb && isFp8Type(btype);
+  Tensor A("A", params.transa ? TShape{ params.m, params.k } : TShape{ params.k, params.m },
+    atype, (!a_colwise || !use_mxfp8), a_colwise, params.scaling_mode);
+  Tensor B("B", params.transb ? TShape{ params.k, params.n } : TShape{ params.n, params.k },
+    btype, (!b_colwise || !use_mxfp8), b_colwise, params.scaling_mode);
+
+  Tensor D("D", TShape{ params.n, params.m }, dtype);
   Tensor bias;
   if(params.use_bias){
-    bias = Tensor("bias", {params.m}, bias_type);
+    bias = Tensor("bias", TShape{params.m}, bias_type);
   }
   Tensor pre_gelu_out;
   if(params.use_gelu){
-    pre_gelu_out = Tensor("pre_gelu_out", { params.n, params.m }, gelu_type);
+    pre_gelu_out = Tensor("pre_gelu_out", TShape{ params.n, params.m }, gelu_type);
   }
   
   //initialize the data and scale inv of A, B
+  //fillUniform does not initialize columnwise data if rowwise data exist
   fillUniform(&A);
-  if (isFp8Type(atype) && !params.transa && !use_mxfp8) {
+  if (a_colwise && !use_mxfp8) {
     // A must be of shape k, m
-    cpu_rowwise_to_columnwise(
-      params.k, params.m,
-      A.rowwise_cpu_dptr<A_Type>(),
-      A.columnwise_cpu_dptr<A_Type>());
+    cpu_rowwise_to_columnwise(params.k, params.m,
+      A.rowwise_cpu_dptr<A_Type>(), A.columnwise_cpu_dptr<A_Type>());
     // sync the columnwise data on GPU as well
     A.from_cpu();
   }
   fillUniform(&B);
-  if (isFp8Type(btype) && params.transb && !use_mxfp8) {
-    // B must be of shape k, m
-    cpu_rowwise_to_columnwise(
-      params.k, params.n,
-      B.rowwise_cpu_dptr<B_Type>(),
-      B.columnwise_cpu_dptr<B_Type>());
+  if (b_colwise && !use_mxfp8) {
+    // B must be of shape k, n
+    cpu_rowwise_to_columnwise(params.k, params.n,
+      B.rowwise_cpu_dptr<B_Type>(), B.columnwise_cpu_dptr<B_Type>());
     // sync the columnwise data on GPU as well
     B.from_cpu();
   }
@@ -320,7 +487,7 @@ void performTest(const TestParams& params) {
     workspace_size = 67108864;
   }
 #endif
-  Tensor Workspace("Workspace", { workspace_size }, DType::kByte);
+  Tensor Workspace("Workspace", TShape{ workspace_size }, DType::kByte);
 
   //perform the gemm in GPU
   nvte_cublas_gemm(A.data(),
@@ -343,53 +510,23 @@ void performTest(const TestParams& params) {
     pre_gelu_out.to_cpu();
   }
 
-  //perform the gemm in CPU
-  std::unique_ptr<D_Type[]> ref_D = std::make_unique<D_Type[]>(params.m*params.n);
-  std::unique_ptr<Gelu_Type[]> ref_pre_gelu_out;
-  if(params.use_gelu){
-    ref_pre_gelu_out = std::make_unique<Gelu_Type[]>(params.m*params.n);
+  //perform the reference gemm on GPU
+  Tensor RefD("RefD", TShape{ params.n, params.m }, dtype);
+  Tensor RefPreGeluOut;
+
+  if (params.use_gelu) {
+    RefPreGeluOut = Tensor("RefPreGeluOut", TShape{ params.n, params.m }, gelu_type);
   }
 
-  float ref_amax_d;
-  if (use_mxfp8) {
-    const A_Type *a_data;
-    const B_Type *b_data;
-    const fp8e8m0 *a_scale_inv_data, *b_scale_inv_data;
-    NVTEShape a_scale_inv_shape, b_scale_inv_shape;
-    if (params.transa) {
-      a_data = A.rowwise_cpu_dptr<A_Type>();
-      a_scale_inv_data = A.rowwise_cpu_scale_inv_ptr<fp8e8m0>();
-      a_scale_inv_shape = A.rowwise_scale_inv_shape();
-    } else {
-      a_data = A.columnwise_cpu_dptr<A_Type>();
-      a_scale_inv_data = A.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
-      a_scale_inv_shape = A.columnwise_scale_inv_shape();
-    }
-    if (params.transb) {
-      b_data = B.columnwise_cpu_dptr<B_Type>();
-      b_scale_inv_data = B.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
-      b_scale_inv_shape = B.columnwise_scale_inv_shape();
-    } else {
-      b_data = B.rowwise_cpu_dptr<B_Type>();
-      b_scale_inv_data = B.rowwise_cpu_scale_inv_ptr<fp8e8m0>();
-      b_scale_inv_shape = B.rowwise_scale_inv_shape();
-    }
+  run_reference<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(
+    params,
+    A,
+    B,
+    params.use_bias ? &bias : nullptr,
+    D,
+    RefD,
+    params.use_gelu ? &RefPreGeluOut : nullptr);
 
-    compute_mxfp8_ref<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(
-        a_data, b_data, a_scale_inv_shape, a_scale_inv_data, b_scale_inv_shape, b_scale_inv_data,
-        params.use_bias ? bias.rowwise_cpu_dptr<Bias_Type>() : nullptr,
-        D.scale(), params.m, params.k, params.n, ref_D.get(), &ref_amax_d,
-        params.use_gelu ? ref_pre_gelu_out.get() : nullptr,
-        params.transa, params.transb);
-  } else {
-    compute_ref<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(
-        A.rowwise_cpu_dptr<A_Type>(), B.rowwise_cpu_dptr<B_Type>(),
-        A.rowwise_scale_inv(), B.rowwise_scale_inv(),
-        params.use_bias ? bias.rowwise_cpu_dptr<Bias_Type>() : nullptr,
-        D.scale(), params.m, params.k, params.n, ref_D.get(), &ref_amax_d,
-        params.use_gelu ? ref_pre_gelu_out.get() : nullptr,
-        params.transa, params.transb);
-  }
   // check if error message happens in running                             
   (void)cudaDeviceSynchronize();
   auto err = cudaGetLastError();
@@ -398,52 +535,97 @@ void performTest(const TestParams& params) {
   //compare results
   auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
   if (isFp8Type(dtype)) {
+    const float ref_amax_d = RefD.amax();
     compareResults("D_amax", D.amax(), ref_amax_d, atol_amax, rtol_amax);
   }
 
-  auto [atol, rtol] = getTolerances(dtype);
-  //relax for certain prime number gemm
-  if (dtype == DType::kFloat32) {
-    atol = 1e-5;
-  }
-#ifdef __HIP_PLATFORM_AMD__
-  // relax for certain FP8 gemm with hipblaslt
-  if (use_mxfp8) {
-    atol = 5e-4;
-    /*During hipifying std::max is converted to ::max
-    to w/a HIP bug with using std:: in device functions.
-    W/o explicitlit <double>, compiler uses non-templated int method variant from HIP headers
-    TODO: remove when switch to new hipify version after fixing HIP bug */
-    rtol = std::max<double>(rtol, 1e-3);
-  }
-  else if (has_fp8) {
-    atol = 1e-3;
-    //TODO: remove <double> (see comment above)
-    rtol = std::max<double>(rtol, 5e-3);
-  }
-  else if (dtype == DType::kBFloat16) {
-    //relax for certain prime number TN gemm
-    rtol = 5e-2;
-  }
-  else if (dtype == DType::kFloat32) {
-    rtol = 1e-5;
-  }
-#endif
-  compareResults("D", D, ref_D.get(), true, atol, rtol);
+  auto [atol, rtol] = getTestTolerances(dtype, has_fp8, use_mxfp8);
+  RefD.to_cpu();
+  compareResults("D", D, RefD.rowwise_cpu_dptr<D_Type>(), true, atol, rtol);
 
   if(params.use_gelu){
-    auto [atol, rtol] = getTolerances(gelu_type);
-    //relax for certain prime number gemm
-    if (dtype == DType::kFloat32) {
-      atol = 1e-5;
-    }
-    compareResults("gelu", pre_gelu_out, ref_pre_gelu_out.get(), true, atol, rtol);
+    auto [atol, rtol] = getTestTolerances(gelu_type, false, false);
+    RefPreGeluOut.to_cpu();
+    compareResults("gelu", pre_gelu_out, RefPreGeluOut.rowwise_cpu_dptr<Gelu_Type>(), true, atol, rtol);
   }
 }
 
-using fp32=float;
-using fp8=fp8e4m3;
-using bf8=fp8e5m2;
+#ifdef __HIP_PLATFORM_AMD__
+template <typename A_Type, typename B_Type, typename D_Type>
+void performDqTest(const TestParams &params) {
+  DType atype = TypeInfo<A_Type>::dtype;
+  DType btype = TypeInfo<B_Type>::dtype;
+  DType dtype = TypeInfo<D_Type>::dtype;
+
+  GTEST_ASSERT_TRUE(isFp8Type(atype) && isFp8Type(btype)) << "FP8/BF8 input datatype is expected";
+  GTEST_ASSERT_FALSE(isFp8Type(dtype)) << "Non FP8/BF8 output datatype is expected";
+
+  if (params.m % 32 != 0 || params.n % 32 != 0 || params.k % 32 != 0) {
+    GTEST_SKIP() << "MXFP8 requires M, N, K to be multiples of 32";
+  }
+
+  cudaDeviceProp prop;
+  (void)cudaGetDeviceProperties(&prop, 0);
+
+  bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5);
+  if (!mxfp8_supported) {
+    GTEST_SKIP() << "MXFP8 is not supported in current config";
+  }
+
+  DType ref_type = dtype;
+  TShape a_shape = params.transa ? TShape{params.m, params.k} : TShape{params.k, params.m};
+  TShape b_shape = params.transb ? TShape{params.k, params.n} : TShape{params.n, params.k};
+
+  Tensor A_src("A", a_shape, ref_type);
+  Tensor B_src("B", b_shape, ref_type);
+  //initialize A, B
+  fillUniform(&A_src);
+  fillUniform(&B_src);
+
+  // FP8 GEMM path needs columnwise data for A/B tensor with non TN layout
+  Tensor A_fp8("A_fp8", a_shape, atype, params.transa, !params.transa,
+               NVTEScalingMode::NVTE_MXFP8_1D_SCALING);
+  Tensor B_fp8("B_fp8", b_shape, btype, !params.transb, params.transb,
+               NVTEScalingMode::NVTE_MXFP8_1D_SCALING);
+  nvte_quantize(A_src.data(), A_fp8.data(), 0);
+  nvte_quantize(B_src.data(), B_fp8.data(), 0);
+
+  Tensor A_ref("A_ref", a_shape, ref_type);
+  Tensor B_ref("B_ref", b_shape, ref_type);
+  nvte_dequantize(A_fp8.data(), A_ref.data(), 0);
+  nvte_dequantize(B_fp8.data(), B_ref.data(), 0);
+
+  Tensor bias;
+  Tensor pre_gelu_out;
+
+  size_t workspace_size = 67108864;
+  Tensor Workspace("Workspace", TShape{workspace_size}, DType::kByte);
+
+  //perform FP8 gemm and copy the output results from GPU memory to CPU memory
+  Tensor D("D", TShape{params.n, params.m}, dtype);
+  nvte_cublas_gemm(A_fp8.data(), B_fp8.data(), D.data(), bias.data(), pre_gelu_out.data(),
+                   params.transa, params.transb, false, Workspace.data(), false, false,
+                   prop.multiProcessorCount, 0);
+  D.to_cpu();
+
+
+  //perform non-FP8 gemm and copy the output results from GPU memory to CPU memory
+  Tensor D_ref("D", TShape{params.n, params.m}, dtype);
+  nvte_cublas_gemm(A_ref.data(), B_ref.data(), D_ref.data(), bias.data(), pre_gelu_out.data(),
+                   params.transa, params.transb, false, Workspace.data(), false, false,
+                   prop.multiProcessorCount, 0);
+  D_ref.to_cpu();
+
+  // check if error message happens in running
+  (void)cudaDeviceSynchronize();
+  auto err = cudaGetLastError();
+  ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
+  //compare results
+  auto [atol, rtol] = getTestTolerances(dtype, true, true);
+  compareResults("D", D, D_ref.rowwise_cpu_dptr<D_Type>(), true, atol, rtol);
+}
+#endif // __HIP_PLATFORM_AMD__
 
 #define MAKE_TEST_PARAMS(P_)                                                    \
   TestParams P_ = {.m = std::get<0>(std::get<0>(GetParam())),                   \
@@ -457,10 +639,13 @@ using bf8=fp8e5m2;
                                        ? NVTEScalingMode::NVTE_MXFP8_1D_SCALING \
                                        : NVTEScalingMode::NVTE_DELAYED_TENSOR_SCALING}
 
+// <m, k, n>, use_bias, use_gelu, Layout, fp8_scalinig
+class GEMMTestSuite
+    : public ::testing::TestWithParam<
+          std::tuple<std::tuple<size_t, size_t, size_t>, bool, bool, Layout, NVTEScalingMode>> {};
+
 #define MAKE_GEMM_TEST(NAME_, A_, B_, BIAS_, GELU_, D_)                     \
   TEST_P(GEMMTestSuite, NAME_) {                                            \
-    using namespace transformer_engine;                                     \
-    using namespace test;                                                   \
     MAKE_TEST_PARAMS(test_params);                                          \
     using A_Type = A_;                                                      \
     using B_Type = B_;                                                      \
@@ -506,25 +691,53 @@ MAKE_GEMM_TEST(Testbf8xfp8xbf16xbf16xfp8, bf8, fp8, bf16, bf16, fp8);
 
 MAKE_GEMM_TEST(Testbf8xfp8xbf16xbf16xbf8, bf8, fp8, bf16, bf16, bf8);
 
+MAKE_GEMM_TEST(Testfp8xfp8xfp16xfp16xfp8, fp8, fp8, fp16, fp16, fp8);
 
-INSTANTIATE_TEST_SUITE_P(
-    OperatorTest,
-    GEMMTestSuite,
-    ::testing::Combine(
-        ::testing::ValuesIn(test_case_sizes),
-        ::testing::Values(false, true), //use bias
-        ::testing::Values(false, true), //use_gelu
-        ::testing::ValuesIn(kLayouts), //transa,transb
-        ::testing::Values(false, true)), //use mxfp8
-    [](const testing::TestParamInfo<GEMMTestSuite::ParamType>& info) {
-      auto TN = [](bool v){ return v ? "T" : "N"; };
-      const auto layout = std::get<3>(info.param);
-      std::string name = std::to_string(std::get<0>(std::get<0>(info.param))) + "X" +
-                         std::to_string(std::get<1>(std::get<0>(info.param))) + "X" +
-                         std::to_string(std::get<2>(std::get<0>(info.param))) + "X" +
-                         std::to_string(std::get<1>(info.param)) + "X" +
-                         std::to_string(std::get<2>(info.param)) + "X" +
-                         TN(layout.first) + TN(layout.second) + "X" +
-                         (std::get<4>(info.param) ? "M" : "S");
-      return name;
-    });
+static inline auto TN(const Layout& layout) {
+  static const char* map[2][2] = {{"NN", "NT"}, {"TN", "TT"}};
+  return std::string(map[layout.first][layout.second]);
+}
+
+static inline auto MKN(const std::tuple<size_t, size_t, size_t>& shape) {
+  return std::to_string(std::get<0>(shape)) + "x" + std::to_string(std::get<1>(shape)) + "x" +
+         std::to_string(std::get<2>(shape));
+}
+
+INSTANTIATE_TEST_SUITE_P(OperatorTest, GEMMTestSuite,
+                         ::testing::Combine(::testing::ValuesIn(test_case_sizes),
+                                            ::testing::Values(false, true),   //use bias
+                                            ::testing::Values(false, true),   //use_gelu
+                                            ::testing::ValuesIn(kLayouts),    //transa,transb
+                                            ::testing::Values(false, true)),  //use mxfp8
+                         [](const testing::TestParamInfo<GEMMTestSuite::ParamType>& info) {
+                           return MKN(std::get<0>(info.param)) + "x" +
+                                  std::to_string(std::get<1>(info.param)) + "x" +
+                                  std::to_string(std::get<2>(info.param)) + "x" +
+                                  TN(std::get<3>(info.param)) + "x" +
+                                  (std::get<4>(info.param) ? "M" : "S");
+                         });
+
+#ifdef __HIP_PLATFORM_AMD__
+class DqGEMMTestSuite: public GEMMTestSuite {};
+
+#define MAKE_DQ_GEMM_TEST(NAME_, A_, B_, D_)            \
+  TEST_P(DqGEMMTestSuite, NAME_) {                      \
+    MAKE_TEST_PARAMS(test_params);                      \
+    using A_Type = A_;                                  \
+    using B_Type = B_;                                  \
+    using D_Type = D_;                                  \
+    performDqTest<A_Type, B_Type, D_Type>(test_params); \
+  }
+
+MAKE_DQ_GEMM_TEST(Testfp8xfp8xfp16, fp8, fp8, fp16)
+
+INSTANTIATE_TEST_SUITE_P(OperatorTest, DqGEMMTestSuite,
+                         ::testing::Combine(::testing::ValuesIn(test_case_sizes_mxfp8),
+                                            ::testing::Values(false),       // bias - unused
+                                            ::testing::Values(false),       // gelu - unused
+                                            ::testing::ValuesIn(kLayouts),  //transa,transb
+                                            ::testing::Values(true)),       //use mxfp8
+                         [](const testing::TestParamInfo<DqGEMMTestSuite::ParamType>& info) {
+                           return MKN(std::get<0>(info.param)) + "x" + TN(std::get<3>(info.param));
+                         });
+#endif  // __HIP_PLATFORM_AMD__

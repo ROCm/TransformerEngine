@@ -6,9 +6,21 @@
 
 """Compound tensor operation supported by the operation fuser."""
 
+from .backward_activation_bias import (
+    BackwardActivationBias,
+    fuse_backward_activation_bias,
+)
+from .backward_add_rmsnorm import (
+    BackwardAddRMSNorm,
+    fuse_backward_add_rmsnorm,
+)
 from .backward_linear_add import (
     BackwardLinearAdd,
     fuse_backward_linear_add,
+)
+from .backward_linear_scale import (
+    BackwardLinearScale,
+    fuse_backward_linear_scale,
 )
 from .forward_linear_bias_activation import (
     ForwardLinearBiasActivation,
@@ -17,6 +29,10 @@ from .forward_linear_bias_activation import (
 from .forward_linear_bias_add import (
     ForwardLinearBiasAdd,
     fuse_forward_linear_bias_add,
+)
+from .forward_linear_scale_add import (
+    ForwardLinearScaleAdd,
+    fuse_forward_linear_scale_add,
 )
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 if not IS_HIP_EXTENSION:

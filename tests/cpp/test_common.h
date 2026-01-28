@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2023-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -14,9 +14,14 @@
 #include <random>
 
 #ifndef USE_ROCM
+#define FP4_TYPE_SUPPORTED (CUDA_VERSION >= 12080)
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
+#if FP4_TYPE_SUPPORTED
+#include <cuda_fp4.h>
+#endif
 #else
+#define FP4_TYPE_SUPPORTED (false)
 #include <hip/hip_bfloat16.h>
 #include "amd_detail/hip_float8.h"
 #endif
@@ -52,6 +57,7 @@ struct BytesToType<8> {
 };
 
 using byte = uint8_t;
+using int16 = int16_t;
 using int32 = int32_t;
 using int64 = int64_t;
 using fp32 = float;
@@ -66,18 +72,32 @@ using fp8e4m3 = te_hip_fp8_e4m3;
 using fp8e5m2 = te_hip_fp8_e5m2;
 #endif //USE_ROCM
 using fp8e8m0 = uint8_t;
+#if FP4_TYPE_SUPPORTED
+using fp4e2m1 = __nv_fp4_e2m1;
+#endif
 
 template <typename T>
-struct TypeInfo{
-    using types = std::tuple<byte,
-                             int32,
-                             int64,
-                             fp32,
-                             fp16,
-                             bf16,
-                             fp8e4m3,
-                             fp8e5m2,
-                             fp8e8m0>;
+struct BitsNumber;
+
+#if FP4_TYPE_SUPPORTED
+template <>
+struct BitsNumber<fp4e2m1> {
+  static constexpr size_t num_bits = 4;
+};
+#endif
+
+template <typename T>
+struct BitsNumber {
+  static constexpr size_t num_bits = 8 * sizeof(T);
+};
+
+template <typename T>
+struct TypeInfo {
+#if FP4_TYPE_SUPPORTED
+    using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2, fp8e8m0, fp4e2m1>;
+#else
+    using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2, fp8e8m0>;
+#endif
 
     template <typename U, DType current>
     struct Helper {
@@ -104,7 +124,7 @@ struct TypeInfo{
     }
 
     constexpr static DType dtype = getType<T>();
-    constexpr static size_t size = sizeof(T);
+    constexpr static size_t size = BitsNumber<T>::num_bits;;
 };
 
 class Tensor {
@@ -121,7 +141,7 @@ class Tensor {
          const bool rowwise = true,
          const bool columnwise = false,
          const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING) :
-    Tensor(name, NVTEShape{shape.data(), shape.size()}, type, rowwise, columnwise, mode) {}
+    Tensor(name, nvte_make_shape(shape.data(), shape.size()), type, rowwise, columnwise, mode) {}
 
   Tensor() {}
 
@@ -156,17 +176,11 @@ class Tensor {
     }
   }
 
-  NVTETensor data() const noexcept {
-    return tensor_.data();
-  }
+  NVTETensor data() const noexcept { return tensor_.data(); }
 
-  NVTEShape rowwise_shape() const noexcept {
-    return tensor_.get_rowwise_data().shape;
-  }
+  NVTEShape rowwise_shape() const noexcept { return tensor_.get_rowwise_data().shape; }
 
-  NVTEShape columnwise_shape() const noexcept {
-    return tensor_.get_columnwise_data().shape;
-  }
+  NVTEShape columnwise_shape() const noexcept { return tensor_.get_columnwise_data().shape; }
 
   NVTEShape rowwise_scale_inv_shape() const {
     NVTE_CHECK(rowwise_, "Tensor does not have rowwise data!");
@@ -219,6 +233,10 @@ class Tensor {
     }
   }
 
+  void *amax_dptr() const {
+    return tensor_.amax();
+  }
+
   float scale() const {
     if(scale_cpu_data_) {
       NVTE_CHECK(tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING, "Invalid scaling_mode!");
@@ -230,8 +248,10 @@ class Tensor {
   }
 
   template <typename T>
-  T *rowwise_cpu_scale_inv_ptr(){
+  T *rowwise_cpu_scale_inv_ptr() const {
     if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING){
+      NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
+    } else if (tensor_.scaling_mode() == NVTE_BLOCK_SCALING_1D || tensor_.scaling_mode() == NVTE_BLOCK_SCALING_2D) {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
     } else {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kByte, "Invalid type!");
@@ -241,8 +261,10 @@ class Tensor {
   }
 
   template <typename T>
-  T *columnwise_cpu_scale_inv_ptr(){
+  T *columnwise_cpu_scale_inv_ptr() const {
     if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING){
+      NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
+    } else if (tensor_.scaling_mode() == NVTE_BLOCK_SCALING_1D || tensor_.scaling_mode() == NVTE_BLOCK_SCALING_2D) {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
     } else {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kByte, "Invalid type!");
@@ -251,7 +273,7 @@ class Tensor {
     return reinterpret_cast<T*>(columnwise_scale_inv_cpu_data_.get());
   }
 
-  float rowwise_scale_inv(){
+  float rowwise_scale_inv() const {
     if(rowwise_scale_inv_cpu_data_) {
       float scale_inv = rowwise_cpu_scale_inv_ptr<float>()[0];
       return scale_inv;
@@ -279,6 +301,16 @@ class Tensor {
   void shareFP8Meta(const Tensor &other);
 
   std::mt19937& gen() { return gen_; }
+
+  void *rowwise_scale_inv_dptr() const {
+    NVTE_CHECK(rowwise_, "Tensor does not have rowwise data!");
+    return tensor_.scale_inv();  // rowwise scale_inv backing storage
+  }
+
+  void *columnwise_scale_inv_dptr() const {
+    NVTE_CHECK(columnwise_, "Tensor does not have columnwise data!");
+    return tensor_.get_columnwise_scale_inv().data_ptr;
+  }
 
  private:
   TensorWrapper tensor_;
@@ -326,20 +358,18 @@ struct Numeric_Traits<fp8e4m3> {
     static constexpr double minSubnorm = 1.0   / static_cast<double>(1 << 9);   // std::pow(2.0, -9.0);
     static constexpr double maxSubnorm = 0.875 / static_cast<double>(1 << 6);   // std::pow(2.0, -6.0);
     static constexpr double minNorm    = 1.0   / static_cast<double>(1 << 6);   // std::pow(2.0, -6.0);
-    #ifndef USE_ROCM
+#ifndef USE_ROCM
     static constexpr double maxNorm    = 448.0;
-    #elif HIP_VERSION >= 60300000
+#else
     static const double maxNorm;
-    #else
-    static constexpr double maxNorm = 240.0;
-    #endif //USE_ROCM
+#endif //USE_ROCM
     static const double artifInf;                        // artificial Infinity
     static constexpr int maxBiasedExponentAsFP32 = 8 + FP32_EXPONENT_BIAS;
     static constexpr int maxUnbiasedExponentAsFP32 = 8;
     static constexpr int maxExpNorm    = 1 << maxUnbiasedExponentAsFP32;
 };
 
-#if defined(USE_ROCM) && (HIP_VERSION >= 60300000)
+#ifdef USE_ROCM
 inline const double Numeric_Traits<fp8e4m3>::maxNorm = te_fp8_fnuz() ? 240.0 : 448.0;
 #endif
 
@@ -421,7 +451,12 @@ inline fp8e8m0 float_to_e8m0(float val) {
 }
 
 inline float exp2f_rcp(fp8e8m0 biased_exp) {
-  return (biased_exp == 0) ? 1 : exp2f(FP32_EXPONENT_BIAS - static_cast<float>(biased_exp));
+  if (biased_exp == 0) {
+    return 1.0f;
+  }
+  int32_t int_val = (254 - biased_exp) << FP32_MANTISSA_BITS;   // 127 - (biased_exp - 127)
+  float fp32_val = *reinterpret_cast<float*>(&int_val);
+  return fp32_val;
 }
 
 inline float identity(const float x) { return x; }
@@ -442,9 +477,10 @@ inline float dsilu(const float x)    { return x * dsigmoid(x) + sigmoid(x); }
 inline float srelu(const float x)    { return x > 0 ? x * x : 0; }
 inline float dsrelu(const float x)   { return fmaxf(0, 2 * x); }
 
-size_t typeToSize(DType type);
+size_t typeToNumBits(DType type);
 size_t product(const NVTEShape &shape);
 size_t product(const std::vector<size_t> &shape);
+size_t bytes(const NVTEShape& shape, const DType type);
 
 size_t first_dimension(const std::vector<size_t> &shape);
 size_t last_dimension(const std::vector<size_t> &shape);
@@ -452,15 +488,26 @@ size_t last_dimension(const std::vector<size_t> &shape);
 bool areShapesEqual(const NVTEShape &s1, const NVTEShape &s2);
 
 void compareResults(const std::string &name, const Tensor &test, const void *ref,
-                    bool rowwise, double atol = 1e-5, double rtol = 1e-8, bool if_on_gpus = true);
+                    bool rowwise, double atol = 1e-5, double rtol = 1e-8, bool if_on_gpus = true,
+                    const size_t tolerable_mismatches_limit = 0);
 void compareResults(const std::string &name, const float test, const float ref,
                     double atol = 1e-5, double rtol = 1e-8);
 void compareResults(const std::string &name, const uint8_t *test, const uint8_t *ref,
                     size_t N, float mismatch_rate_tol = 0.);
 void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
-                                  const size_t row_blocks, const size_t col_blocks, const size_t stride);
-void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
-                                  const size_t N);
+                                  const size_t row_blocks, const size_t col_blocks, const size_t stride,
+                                  std::vector<size_t> &mismatch_indices, size_t& mismatches_num,
+                                  const size_t scale_diff_abs_tolerance = 0,
+                                  const double abs_tolerable_mismatches_limit = 0,
+                                  const double rel_tolerable_mismatches_limit = 0);
+
+#ifdef USE_ROCM
+void adjust_ref_for_e8m0_scale_error(const std::string &name,
+                                     const std::vector<size_t> &mismatch_idx,
+                                     const uint8_t *test_scale, const uint8_t *ref_scale,
+                                     const size_t scale_stride, const size_t rows,
+                                     const size_t cols, bool rowwise, void *ref_ptr, DType otype);
+#endif
 
 std::array<size_t, 4> get_scale_tensor_dims(const size_t rows, const size_t cols,
                                             const size_t block_size_rows, const size_t block_size_cols);
@@ -485,9 +532,20 @@ extern std::vector<DType> all_fp_types;
 bool isFp8Type(DType type);
 
 int32_t getDeviceComputeCapability();
+constexpr int32_t hopperComputeCapability = 90;
 constexpr int32_t blackwellComputeCapability = 100;
 
 }  // namespace test
+
+#if FP4_TYPE_SUPPORTED
+#define SWITCH_FP4_TYPE_HANDLE(type, ...) \
+  case DType::kFloat4E2M1: {              \
+    using type = fp4e2m1;                 \
+    { __VA_ARGS__ }                       \
+  } break;
+#else
+#define SWITCH_FP4_TYPE_HANDLE(type, ...) // do nothing
+#endif
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(dtype, type, ...) \
     switch (dtype) { \
@@ -540,8 +598,16 @@ constexpr int32_t blackwellComputeCapability = 100;
                 {__VA_ARGS__} \
             } \
         break; \
+        case DType::kFloat8E8M0: \
+            { \
+                using type = fp8e8m0; \
+                {__VA_ARGS__} \
+            } \
+        break; \
+        SWITCH_FP4_TYPE_HANDLE(type, __VA_ARGS__) \
         default: \
-            NVTE_ERROR("Invalid type."); \
+            printf("dtype: %d\n", static_cast<int>(dtype)); \
+            NVTE_ERROR("Invalid type MARKED TEST."); \
     }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(dtype, type, ...) \
@@ -560,7 +626,15 @@ constexpr int32_t blackwellComputeCapability = 100;
             } \
         break; \
         default: \
-            NVTE_ERROR("Invalid type."); \
+            NVTE_ERROR("Invalid type MARKED TEST 2."); \
+    }
+
+#define TRANSFORMER_ENGINE_TYPE_SWITCH_FP4_ONLY(dtype, type, ...) \
+    switch (dtype) { \
+        using namespace transformer_engine; \
+        SWITCH_FP4_HANDLE(type, __VA_ARGS__) \
+        default: \
+            NVTE_ERROR("Invalid type MARKED TEST 3."); \
     }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(dtype, type, ...) \
@@ -585,5 +659,5 @@ constexpr int32_t blackwellComputeCapability = 100;
             } \
         break; \
         default: \
-            NVTE_ERROR("Invalid type."); \
+            NVTE_ERROR("Invalid type MARKED TEST 4."); \
     }

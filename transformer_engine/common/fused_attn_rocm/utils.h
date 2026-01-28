@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
@@ -36,6 +36,35 @@ void generateMatrixStrides(
 
 size_t nvte_dtype_size(DType t_dtype);
 
+class FusedAttnOffsetManager {
+ public:
+  static FusedAttnOffsetManager &Instance() {
+    static thread_local FusedAttnOffsetManager instance;
+    return instance;
+  }
+
+  size_t GetAndUpdateOffset(size_t increment) {
+    size_t ret = offset_;
+    offset_ += increment;
+    return ret;
+  }
+
+  FusedAttnOffsetManager(FusedAttnOffsetManager const &) = delete;
+  void operator=(FusedAttnOffsetManager const &) = delete;
+
+ private:
+  FusedAttnOffsetManager() {}
+  size_t offset_ = 0;
+};
+
+void PopulateRngStateAsync(void *rng_state_dst, 
+                           const void *const seed,
+                           size_t q_max_seqlen, 
+                           size_t kv_max_seqlen,
+                           NVTE_Fused_Attn_Backend backend,
+                           cudaStream_t stream);
+
+uint32_t GetRuntimeNumSegments(void *cu_seqlen, void *workspace, size_t len, cudaStream_t stream);
 
 }  // namespace fused_attn_rocm
 }  // namespace transformer_engine

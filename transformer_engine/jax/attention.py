@@ -13,11 +13,11 @@ import jax
 import jax.numpy as jnp
 from flax.linen import make_attention_mask
 
-from transformer_engine.transformer_engine_jax import NVTE_Bias_Type
-from transformer_engine.transformer_engine_jax import NVTE_Mask_Type
-from transformer_engine.transformer_engine_jax import NVTE_QKV_Layout
-from transformer_engine.transformer_engine_jax import NVTE_QKV_Format
-from transformer_engine.transformer_engine_jax import nvte_get_qkv_format
+from transformer_engine_jax import NVTE_Bias_Type
+from transformer_engine_jax import NVTE_Mask_Type
+from transformer_engine_jax import NVTE_QKV_Layout
+from transformer_engine_jax import NVTE_QKV_Format
+from transformer_engine_jax import nvte_get_qkv_format
 
 from . import cpp_extensions as tex
 
@@ -277,6 +277,7 @@ def canonicalize_attn_mask_type(attn_mask_type: str):
 
 
 def is_fused_attn_kernel_available(
+    is_training,
     q_dtype,
     kv_dtype,
     qkv_layout,
@@ -297,6 +298,7 @@ def is_fused_attn_kernel_available(
 
     def make_helper(attn_mask_type):
         return tex.FusedAttnHelper(
+            is_training,
             q_dtype,
             kv_dtype,
             qkv_layout,
@@ -380,6 +382,44 @@ def _mask_to_seqlens_offset(mask, max_segments_per_seq):
     return q_seqlen, q_offset, kv_seqlen, kv_offset
 
 
+def _fast_causal_adjust_seqlen_and_offsets(
+    segment_pos_q, q_len, q_offset, segment_pos_kv, kv_len, kv_offset
+):
+    # The assumption is that for any segment tokens respect causal ordering except at the ends
+    # of the segment. This allows us to tweak the length and offset by only looking at the start
+    # and end tokens between segments.
+    is_active_segment = jnp.logical_and(q_len > 0, kv_len > 0)
+
+    q_seq_id_start = jnp.take(segment_pos_q, q_offset[..., :-1], fill_value=-1)
+    kv_seq_id_start = jnp.take(segment_pos_kv, kv_offset[..., :-1], fill_value=-1)
+    skip_start_token = jnp.logical_and(kv_seq_id_start > q_seq_id_start, is_active_segment).astype(
+        jnp.int32
+    )
+
+    q_len -= skip_start_token
+    q_offset += jnp.insert(skip_start_token, skip_start_token.shape[-1], 0, axis=-1)
+
+    q_seq_id_end = jnp.take(segment_pos_q, q_offset[..., 1:] - 1, fill_value=-1)
+    kv_seq_id_end = jnp.take(segment_pos_kv, kv_offset[..., 1:] - 1, fill_value=-1)
+    skip_end_token = jnp.logical_and(kv_seq_id_end > q_seq_id_end, is_active_segment).astype(
+        jnp.int32
+    )
+
+    kv_len -= skip_end_token
+
+    return q_len, kv_len, q_offset, kv_offset
+
+
+def _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
+    segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
+):
+    q_len, q_offset = _get_seqlens_and_offsets(segment_ids_q, max_segments_per_seq)
+    kv_len, kv_offset = _get_seqlens_and_offsets(segment_ids_kv, max_segments_per_seq)
+    return _fast_causal_adjust_seqlen_and_offsets(
+        segment_pos_q, q_len, q_offset, segment_pos_kv, kv_len, kv_offset
+    )
+
+
 def _segment_ids_pos_to_seqlens_offsets(
     segment_ids_q,
     segment_ids_kv,
@@ -389,6 +429,25 @@ def _segment_ids_pos_to_seqlens_offsets(
     window_size,
     max_segments_per_seq,
 ):
+    # TODO(mgoldfarb-nvidia): Consider an opt-in for arbitrary masking if needed here.
+    # Computing the full mask is expensive due to quadratic expansion of Q * KV masking.
+
+    # Assumptions for cudnn causal mask correctness.
+    # 1. Segments are monotonic [4 4 4 0 0 5 5 5 6 6 0 0]
+    # 2. No intra-segment padding, only inter-segment paddding allowed
+    # 3. Only start or end token within a segment may violate the causal order relationship
+    #        1 5 9     0 4 8 10    0 4 8
+    #    0             x           x
+    #    4   x         x x         x x
+    #    8   x x       x x x       x x x
+    #
+    # This fast path avoids expanding the mask to Q * KV matrix and instead allows us to
+    # examine only O(Q+KV) elements.
+    if attn_mask_type.is_causal() and window_size is None or window_size == (-1, -1):
+        return _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
+            segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
+        )
+
     # (1 = attend, 0 = masked)
     segment_mask = make_attention_mask(
         segment_ids_q,
@@ -796,7 +855,7 @@ def fused_attn_thd(
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14))
+@partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15))
 def _fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
@@ -813,6 +872,7 @@ def _fused_attn(
     context_parallel_strategy: CPStrategy,
     context_parallel_causal_load_balanced: bool,
     context_parallel_axis: str,
+    context_checkpoint_name: str = "context",
 ):
     output, _ = _fused_attn_fwd_rule(
         qkv,
@@ -830,6 +890,7 @@ def _fused_attn(
         context_parallel_strategy,
         context_parallel_causal_load_balanced,
         context_parallel_axis,
+        context_checkpoint_name=context_checkpoint_name,
     )
     return output
 
@@ -850,6 +911,7 @@ def _fused_attn_fwd_rule(
     context_parallel_strategy,
     context_parallel_causal_load_balanced,
     context_parallel_axis,
+    context_checkpoint_name,
 ):
     output, softmax_aux, rng_state = tex.fused_attn_fwd(
         qkv,
@@ -868,9 +930,9 @@ def _fused_attn_fwd_rule(
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
     )
-    output = checkpoint_name(output, "context")
-    softmax_aux = checkpoint_name(softmax_aux, "context")
-    rng_state = checkpoint_name(rng_state, "context")
+    output = checkpoint_name(output, context_checkpoint_name)
+    softmax_aux = checkpoint_name(softmax_aux, context_checkpoint_name)
+    rng_state = checkpoint_name(rng_state, context_checkpoint_name)
     return output, (
         qkv,
         bias,
@@ -893,9 +955,11 @@ def _fused_attn_bwd_rule(
     context_parallel_strategy,
     context_parallel_causal_load_balanced,
     context_parallel_axis,
+    context_checkpoint_name,
     ctx,
     dz,
 ):
+    del context_checkpoint_name
     (
         qkv,
         bias,
@@ -953,6 +1017,7 @@ def fused_attn(
     context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
+    context_checkpoint_name: str = "context",
 ):
     """
     Perform cuDNN fused attention.
@@ -985,6 +1050,7 @@ def fused_attn(
         context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
+        context_checkpoint_name (str): The name of the context checkpoint for the custom VJP forward pass.
     Returns:
         (jnp.ndarray): The output tensor from the fused attention.
 
@@ -1057,6 +1123,7 @@ def fused_attn(
         context_parallel_strategy=context_parallel_strategy,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
+        context_checkpoint_name=context_checkpoint_name,
     )
 
     return output

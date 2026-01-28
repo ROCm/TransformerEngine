@@ -1,5 +1,3 @@
-# This file was modified for portability to AMDGPU
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -100,6 +98,9 @@ class RMSNorm(_RMSNormOp):
                 )
             kwargs["dtype"] = params_dtype
 
+        # Flag for sequence parallelism (custom Megatron-LM integration)
+        self.sequence_parallel: Optional[bool] = sequence_parallel
+
         # Initialize RMSNorm operation
         super().__init__(
             normalized_shape,
@@ -107,11 +108,6 @@ class RMSNorm(_RMSNormOp):
             zero_centered_gamma=zero_centered_gamma,
             **kwargs,
         )
-
-        # Flag for sequence parallelism (custom Megatron-LM integration)
-        self.sequence_parallel: Optional[bool] = sequence_parallel
-        if sequence_parallel is not None:
-            self.weight.sequence_parallel = sequence_parallel
 
     def reset_rms_norm_parameters(self) -> None:
         """Deprecated"""
@@ -141,7 +137,7 @@ class RMSNorm(_RMSNormOp):
         super().reset_parameters()
 
         # Flag for sequence parallelism (custom Megatron-LM integration)
-        if getattr(self, "sequence_parallel", None) is not None:
+        if self.sequence_parallel is not None:
             self.weight.sequence_parallel = self.sequence_parallel
 
     @property

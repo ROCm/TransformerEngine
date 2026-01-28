@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -9,13 +11,13 @@
 
 #include <vector>
 
+#ifndef __HIP_PLATFORM_AMD__
 #include "cuda_runtime.h"
 #include "logging.h"
-
-namespace transformer_engine::cuda {
-int current_device();                      
-int num_devices();                     
-}  // namespace transformer_engine::cuda
+#else
+#include "util/cuda_runtime.h"
+#include "util/logging.h"
+#endif
 
 namespace transformer_engine::detail {
 

@@ -8,15 +8,16 @@ import os
 import pytest
 import jax
 import jax.numpy as jnp
-import numpy as np
 from jax import random
 from distributed_test_base import (
     generate_configs,
-    generate_context_parallel_configs,
+    generate_context_parallel_configs_for_attn,
     generate_collectives_count,
 )
-from transformer_engine.jax import is_hip_extension
+from packaging import version
+from transformer_engine.jax.cpp_extensions.misc import is_hip_extension
 from test_fused_attn import FusedAttnRunner, BiasShape, SeqDescFormat
+from utils import pytest_parametrize_wrapper
 from transformer_engine.jax.attention import (
     is_fused_attn_kernel_available,
     AttnBiasType,
@@ -32,6 +33,12 @@ from transformer_engine.jax.attention import (
 
 DTYPES = [jnp.bfloat16]
 
+DISTRIBUTED_SELF_ATTN_DATA_SHAPES = {
+    "L0": [()],
+    "L1": [(32, 1024, 16, 128)],
+    "L2": [(32, 512, 12, 64)],
+}
+
 
 class TestDistributedSelfAttn:
 
@@ -42,8 +49,8 @@ class TestDistributedSelfAttn:
         _, seqlen, heads, _ = shape
         is_dp_enabled = mesh_resource.dp_resource is not None
         tp_size = 1
-        if mesh_resource.tp_resource is not None:
-            idx = mesh_axes.index(mesh_resource.tp_resource)
+        if mesh_resource.tpsp_resource is not None:
+            idx = mesh_axes.index(mesh_resource.tpsp_resource)
             tp_size = mesh_shape[idx]
 
         all_reduce_loss_bytes = 4  # 1 * FP32
@@ -52,31 +59,7 @@ class TestDistributedSelfAttn:
         # for loss and dbias
         return generate_collectives_count(allreduce=allreduce_total_bytes, allgather=0, other=0)
 
-    @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
-    @pytest.mark.parametrize(
-        "data_shape",
-        [
-            pytest.param((32, 512, 12, 64), id="32-512-12-64"),
-            pytest.param((32, 1024, 16, 128), id="32-1024-16-128"),
-        ],
-    )
-    @pytest.mark.parametrize(
-        "attn_bias_type, bias_shape",
-        [
-            pytest.param(AttnBiasType.NO_BIAS, None, id="NO_BIAS"),
-            pytest.param(AttnBiasType.PRE_SCALE_BIAS, BiasShape._1HSS, id="PRE_SCALE_BIAS-1HSS"),
-            pytest.param(AttnBiasType.POST_SCALE_BIAS, BiasShape._1HSS, id="POST_SCALE_BIAS-1HSS"),
-        ],
-    )
-    @pytest.mark.parametrize(
-        "attn_mask_type",
-        [
-            pytest.param(AttnMaskType.PADDING_MASK, id="PADDING_MASK"),
-            pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL_MASK"),
-        ],
-    )
-    @pytest.mark.parametrize("dtype", DTYPES)
-    def test_self_attn(
+    def impl_test_self_attn(
         self,
         device_count,
         mesh_shape,
@@ -87,13 +70,15 @@ class TestDistributedSelfAttn:
         bias_shape,
         attn_mask_type,
         dtype,
+        use_shardy,
     ):
+        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         dropout_prob = 0.0
         is_training = True
-
         batch, seqlen, num_head, hidden = data_shape
 
         if not is_fused_attn_kernel_available(
+            is_training,
             dtype,
             dtype,
             QKVLayout.BS3HD,
@@ -108,7 +93,7 @@ class TestDistributedSelfAttn:
             hidden,
             None,  # no window
         ):
-            pytest.skip(f"No FusedAttn backend found")
+            pytest.skip("No FusedAttn backend found")
 
         col_ref = self.generate_collectives_count_ref(
             mesh_shape,
@@ -144,6 +129,82 @@ class TestDistributedSelfAttn:
         )
         runner.test_backward()
 
+    @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
+    @pytest_parametrize_wrapper("data_shape", DISTRIBUTED_SELF_ATTN_DATA_SHAPES)
+    @pytest.mark.parametrize(
+        "attn_bias_type, bias_shape",
+        [
+            pytest.param(AttnBiasType.NO_BIAS, None, id="NO_BIAS"),
+            pytest.param(AttnBiasType.PRE_SCALE_BIAS, BiasShape._1HSS, id="PRE_SCALE_BIAS-1HSS"),
+            pytest.param(AttnBiasType.POST_SCALE_BIAS, BiasShape._1HSS, id="POST_SCALE_BIAS-1HSS"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "attn_mask_type",
+        [
+            pytest.param(AttnMaskType.PADDING_MASK, id="PADDING_MASK"),
+            pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL_MASK"),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", DTYPES)
+    def test_self_attn(
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        data_shape,
+        attn_bias_type,
+        bias_shape,
+        attn_mask_type,
+        dtype,
+    ):
+        self.impl_test_self_attn(
+            device_count,
+            mesh_shape,
+            mesh_axes,
+            mesh_resource,
+            data_shape,
+            attn_bias_type,
+            bias_shape,
+            attn_mask_type,
+            dtype,
+            use_shardy=False,
+        )
+
+    @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
+    @pytest.mark.parametrize(
+        "attn_bias_type, bias_shape",
+        [
+            pytest.param(AttnBiasType.NO_BIAS, None, id="NO_BIAS"),
+            pytest.param(AttnBiasType.PRE_SCALE_BIAS, BiasShape._1HSS, id="PRE_SCALE_BIAS-1HSS"),
+        ],
+    )
+    @pytest.mark.skipif(version.parse(jax.__version__) < version.parse("0.5.0"), reason="shardy sharding requires JAX 0.5.0")
+    def test_self_attn_shardy(
+        self, device_count, mesh_shape, mesh_axes, mesh_resource, attn_bias_type, bias_shape
+    ):
+        data_shape = (32, 512, 12, 64)
+        self.impl_test_self_attn(
+            device_count,
+            mesh_shape,
+            mesh_axes,
+            mesh_resource,
+            data_shape,
+            attn_bias_type,
+            bias_shape,
+            AttnMaskType.PADDING_MASK,
+            jnp.bfloat16,
+            use_shardy=True,
+        )
+
+
+DISTRIBUTED_CROSS_ATTN_DATA_SHAPES = {
+    "L0": [()],
+    "L1": [[32, 512, 16, 64]],
+    "L2": [[32, 128, 12, 64]],
+}
+
 
 class TestDistributedCrossAttn:
 
@@ -153,7 +214,7 @@ class TestDistributedCrossAttn:
         return generate_collectives_count(allreduce=all_reduce_loss_bytes, allgather=0, other=0)
 
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
-    @pytest.mark.parametrize("data_shape", [[32, 128, 12, 64], [32, 512, 16, 64]])
+    @pytest_parametrize_wrapper("data_shape", DISTRIBUTED_CROSS_ATTN_DATA_SHAPES)
     @pytest.mark.parametrize(
         "attn_mask_type", [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK]
     )
@@ -169,6 +230,7 @@ class TestDistributedCrossAttn:
         batch, seqlen, num_head, hidden = data_shape
 
         if not is_fused_attn_kernel_available(
+            is_training,
             dtype,
             dtype,
             QKVLayout.BSHD_BS2HD,
@@ -183,7 +245,7 @@ class TestDistributedCrossAttn:
             hidden,
             None,  # no window
         ):
-            pytest.skip(f"No FusedAttn backend found")
+            pytest.skip("No FusedAttn backend found")
 
         col_ref = self.generate_collectives_count_ref()
         runner = FusedAttnRunner(
@@ -213,37 +275,23 @@ class TestDistributedCrossAttn:
         runner.test_backward()
 
 
-@pytest.mark.parametrize(
-    "device_count,mesh_shape,mesh_axes,mesh_resource", generate_context_parallel_configs()
-)
-@pytest.mark.parametrize(
-    "data_shape",
-    [
-        # Sequence lengths will be scaled by CP so that we don't run with tiny sizes.
-        pytest.param([2, 128, 8, 128], id="2-128xCP-8-128"),
-        pytest.param([4, 256, 16, 64], id="4-256xCP-16-64"),
-    ],
-)
-@pytest.mark.parametrize("kv_groups", [1, 8])
-@pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
-@pytest.mark.parametrize(
-    "qkv_layout, attn_mask_type",
-    [
-        pytest.param(QKVLayout.BSHD_BS2HD, AttnMaskType.CAUSAL_MASK, id="BSHD_KVPACKED-CAUSAL"),
-        pytest.param(QKVLayout.BSHD_BSHD_BSHD, AttnMaskType.CAUSAL_MASK, id="BSHD_SEPARATE-CAUSAL"),
-        pytest.param(QKVLayout.BSHD_BS2HD, AttnMaskType.NO_MASK, id="HD_KVPACKED-NO_MASK"),
-        pytest.param(QKVLayout.BSHD_BSHD_BSHD, AttnMaskType.NO_MASK, id="BSHD_SEPARATE-NO_MASK"),
-        pytest.param(
-            QKVLayout.THD_THD_THD,
-            AttnMaskType.PADDING_CAUSAL_MASK,
-            id="THD_SEPARATE-PADDING_CAUSAL",
-        ),
-    ],
-)
-@pytest.mark.parametrize(
-    "load_balanced",
-    [pytest.param(True, id="BALANCED"), pytest.param(False, id="UNBALANCED")],
-)
+DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS = [
+    pytest.param(QKVLayout.BSHD_BS2HD, AttnMaskType.CAUSAL_MASK, id="BSHD_KVPACKED-CAUSAL"),
+    pytest.param(QKVLayout.BSHD_BSHD_BSHD, AttnMaskType.CAUSAL_MASK, id="BSHD_SEPARATE-CAUSAL"),
+    pytest.param(QKVLayout.BSHD_BS2HD, AttnMaskType.NO_MASK, id="HD_KVPACKED-NO_MASK"),
+    pytest.param(QKVLayout.BSHD_BSHD_BSHD, AttnMaskType.NO_MASK, id="BSHD_SEPARATE-NO_MASK"),
+    pytest.param(
+        QKVLayout.THD_THD_THD, AttnMaskType.PADDING_CAUSAL_MASK, id="THD_SEPARATE-PADDING_CAUSAL"
+    ),
+]
+
+DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES = [
+    # Sequence lengths will be scaled by CP so that we don't run with tiny sizes.
+    pytest.param([2, 128, 8, 128], id="2-128xCP-8-128"),
+    pytest.param([4, 256, 16, 64], id="4-256xCP-16-64"),
+]
+
+
 class TestDistributedContextParallelSelfAttn:
 
     def impl_test_context_parallel_attn(
@@ -259,13 +307,31 @@ class TestDistributedContextParallelSelfAttn:
         qkv_layout,
         load_balanced,
         cp_strategy,
+        use_shardy,
+        use_scan_ring=False,
+        window_size=None,
     ):
+        if qkv_layout.is_thd():
+            if is_hip_extension() and cp_strategy == CPStrategy.RING:
+                pytest.skip("THD + ring on Rocm doesn't support context parallelism.")
+            if cp_strategy == CPStrategy.ALL_GATHER:
+                pytest.skip("THD doesn't support all gather context parallelism.")
+            if not load_balanced and cp_strategy == CPStrategy.RING:
+                pytest.skip("THD + ring doesn't support unbalanced context parallelism.")
+
+        assert not use_scan_ring or cp_strategy == CPStrategy.RING
+
+        if use_scan_ring:
+            os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "1"
+        else:
+            os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "0"
+
+        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         attn_bias_type = AttnBiasType.NO_BIAS
         bias_shape = None
         dropout_prob = 0.0
         is_training = True
         dp_size, cp_size, tp_size = mesh_shape
-        qkv_format = qkv_layout.get_qkv_format()
 
         batch, seqlen, num_head, hidden = data_shape
 
@@ -292,7 +358,7 @@ class TestDistributedContextParallelSelfAttn:
             is_training,
             qkv_layout,
             bias_shape,
-            None,
+            window_size,
             SeqDescFormat.SegmentIDs,
             number_of_devices=device_count,
             mesh_shape=mesh_shape,
@@ -304,6 +370,7 @@ class TestDistributedContextParallelSelfAttn:
 
         def check_has_backend_for_mask(mask_type):
             return is_fused_attn_kernel_available(
+                is_training,
                 dtype,
                 dtype,
                 qkv_layout,
@@ -345,7 +412,61 @@ class TestDistributedContextParallelSelfAttn:
                 pytest.skip(f"Skipping CAUSAL_MASK and CP={mesh_shape[1]} for AOTriton")
 
         runner.test_backward()
+        del os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"]
 
+    @pytest_parametrize_wrapper(
+        "device_count,mesh_shape,mesh_axes,mesh_resource",
+        generate_context_parallel_configs_for_attn(),
+    )
+    @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES[:1])
+    @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
+    @pytest.mark.parametrize(
+        "qkv_layout, attn_mask_type",
+        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS,
+    )
+    @pytest.mark.skipif(version.parse(jax.__version__) < version.parse("0.5.0"), reason="shardy sharding requires JAX 0.5.0")
+    def test_context_parallel_allgather_attn_shardy(
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        data_shape,
+        attn_mask_type,
+        dtype,
+        qkv_layout,
+    ):
+        kv_groups = 8
+        self.impl_test_context_parallel_attn(
+            device_count,
+            mesh_shape,
+            mesh_axes,
+            mesh_resource,
+            data_shape,
+            kv_groups,
+            attn_mask_type,
+            dtype,
+            qkv_layout,
+            load_balanced=True,
+            cp_strategy=CPStrategy.ALL_GATHER,
+            use_shardy=True,
+        )
+
+    @pytest_parametrize_wrapper(
+        "device_count,mesh_shape,mesh_axes,mesh_resource",
+        generate_context_parallel_configs_for_attn(),
+    )
+    @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES)
+    @pytest.mark.parametrize("kv_groups", [1, 8])
+    @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
+    @pytest.mark.parametrize(
+        "qkv_layout, attn_mask_type",
+        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS,
+    )
+    @pytest.mark.parametrize(
+        "load_balanced",
+        [pytest.param(True, id="BALANCED"), pytest.param(False, id="UNBALANCED")],
+    )
     def test_context_parallel_allgather_attn(
         self,
         device_count,
@@ -359,9 +480,7 @@ class TestDistributedContextParallelSelfAttn:
         qkv_layout,
         load_balanced,
     ):
-        if qkv_layout.is_thd():
-            pytest.skip("THD doesn't support all gather context parallelism.")
-        return self.impl_test_context_parallel_attn(
+        self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
             mesh_axes,
@@ -373,11 +492,34 @@ class TestDistributedContextParallelSelfAttn:
             qkv_layout,
             load_balanced,
             CPStrategy.ALL_GATHER,
+            use_shardy=False,
         )
 
+    @pytest_parametrize_wrapper(
+        "device_count,mesh_shape,mesh_axes,mesh_resource",
+        generate_context_parallel_configs_for_attn(),
+    )
+    @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES)
+    @pytest.mark.parametrize("kv_groups", [1, 8])
+    @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
+    @pytest.mark.parametrize(
+        "qkv_layout, attn_mask_type",
+        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS,
+    )
+    @pytest.mark.parametrize(
+        "load_balanced",
+        [pytest.param(True, id="BALANCED"), pytest.param(False, id="UNBALANCED")],
+    )
     @pytest.mark.parametrize(
         "use_scan",
         [pytest.param(False, id="NO_SCAN"), pytest.param(True, id="USE_SCAN")],
+    )
+    @pytest.mark.parametrize(
+        "window_size",
+        [
+            pytest.param((-1, -1), id="window_size(-1, -1)"),
+            pytest.param((20, 0), id="window_size(20, 0)"),
+        ],
     )
     def test_context_parallel_ring_attn(
         self,
@@ -392,19 +534,16 @@ class TestDistributedContextParallelSelfAttn:
         qkv_layout,
         load_balanced,
         use_scan,
+        window_size,
     ):
-        if use_scan:
-            os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "1"
-        else:
-            os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "0"
-
-        if is_hip_extension() and qkv_layout.is_thd():
-            pytest.skip("THD + ring on Rocm doesn't support context parallelism.")
-
-        if qkv_layout.is_thd() and not load_balanced:
-            pytest.skip("THD + ring doesn't support unbalanced context parallelism.")
-
-        return self.impl_test_context_parallel_attn(
+        if window_size != (-1, -1) and not qkv_layout.is_thd():
+            pytest.skip("Sliding window attention is only supported for THD layout")
+        if window_size != (-1, -1) and qkv_layout.is_thd() and use_scan:
+            pytest.skip(
+                "When context parallelism and sliding window attention are used, "
+                "scanloop is not supported"
+            )
+        self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
             mesh_axes,
@@ -416,20 +555,61 @@ class TestDistributedContextParallelSelfAttn:
             qkv_layout,
             load_balanced,
             CPStrategy.RING,
+            use_shardy=False,
+            use_scan_ring=use_scan,
+            window_size=window_size,
         )
-        del os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"]
+
+    @pytest.mark.skipif(version.parse(jax.__version__) < version.parse("0.5.0"), reason="shardy sharding requires JAX 0.5.0")
+    @pytest_parametrize_wrapper(
+        "device_count,mesh_shape,mesh_axes,mesh_resource",
+        generate_context_parallel_configs_for_attn(),
+    )
+    @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES[:1])
+    @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
+    @pytest.mark.parametrize(
+        "qkv_layout, attn_mask_type",
+        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS,
+    )
+    def test_context_parallel_ring_attn_shardy(
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        data_shape,
+        attn_mask_type,
+        dtype,
+        qkv_layout,
+    ):
+        kv_groups = 8
+        self.impl_test_context_parallel_attn(
+            device_count,
+            mesh_shape,
+            mesh_axes,
+            mesh_resource,
+            data_shape,
+            kv_groups,
+            attn_mask_type,
+            dtype,
+            qkv_layout,
+            load_balanced=True,
+            cp_strategy=CPStrategy.RING,
+            use_shardy=False,
+            use_scan_ring=True,
+        )
+
+
+REORDER_CAUSAL_LOAD_BALANCING_DATA_SHAPES = {
+    "L0": [[]],
+    "L1": [[3, 32, 8, 64]],
+    "L2": [[4, 32, 12, 32], [1, 16, 1, 1]],
+}
 
 
 class TestReorderCausalLoadBalancing:
     @pytest.mark.parametrize("cp_size", [2, 4, 8])
-    @pytest.mark.parametrize(
-        "shape",
-        [
-            pytest.param([1, 16, 1, 1], id="1-16-1-1"),
-            pytest.param([4, 32, 12, 32], id="4-32-12-32"),
-            pytest.param([3, 32, 8, 64], id="3-32-8-64"),
-        ],
-    )
+    @pytest_parametrize_wrapper("shape", REORDER_CAUSAL_LOAD_BALANCING_DATA_SHAPES)
     @pytest.mark.parametrize("qkv_format", [QKVFormat.BSHD, QKVFormat.SBHD])
     @pytest.mark.parametrize(
         "reorder_strategy",

@@ -30,11 +30,26 @@ fi
 
 ROCM_BUILD=`${PYBINDIR}python -c "import build_tools.utils as u; print(int(u.rocm_build()))"`
 
-if [ "$ROCM_BUILD" = "1" ]; then
-        git pull
+if [ "$LOCAL_TREE_BUILD" != "1" ]; then
+        if [ "$ROCM_BUILD" = "1" ]; then
+                git pull
+        fi
+        git checkout $TARGET_BRANCH
+        git submodule update --init --recursive
+else
+        git submodule status --recursive | cut -d' ' -f3 | xargs -l -P1 -I_SUB_ git config --global --add safe.directory /TransformerEngine/_SUB_
 fi
-git checkout $TARGET_BRANCH
-git submodule update --init --recursive
+
+if [ "$ROCM_BUILD" = "1" ]; then
+        ${PYBINDIR}pip install setuptools wheel
+fi
+
+# Install deps
+if [ "$ROCM_BUILD" = "1" ]; then
+  ${PYBINDIR}pip install pybind11[global] ninja
+else
+  ${PYBINDIR}pip install cmake pybind11[global] ninja
+fi
 
 if $BUILD_METAPACKAGE ; then
         cd /TransformerEngine
@@ -50,10 +65,10 @@ if $BUILD_COMMON ; then
         WHL_BASE="transformer_engine-${VERSION}"
         if [ "$ROCM_BUILD" = "1" ]; then
                 TE_CUDA_VERS="rocm"
-                ${PYBINDIR}pip install ninja dataclasses
-                if [ -n "$PYBINDIR" ]; then
-                        PATH="$PYBINDIR:$PATH" #hipify expects python in PATH
-                fi
+                #dataclasses, psutil are needed for AITER
+                ${PYBINDIR}pip install dataclasses psutil
+                #hipify expects python in PATH, also ninja may be installed to python bindir
+                test -n "$PYBINDIR" && PATH="$PYBINDIR:$PATH" || true
         else
                 TE_CUDA_VERS="cu12"
                 PYBINDIR=/opt/python/cp38-cp38/bin/
@@ -79,25 +94,25 @@ if $BUILD_COMMON ; then
 fi
 
 if $BUILD_PYTORCH ; then
-	cd /TransformerEngine/transformer_engine/pytorch
-	if [ "$ROCM_BUILD" = "1" ]; then
-                ${PYBINDIR}pip install torch --index-url https://download.pytorch.org/whl/rocm6.3
-        else
-                PYBINDIR=/opt/python/cp38-cp38/bin/
-                ${PYBINDIR}pip install torch
-        fi
-        ${PYBINDIR}python setup.py sdist 2>&1 | tee /wheelhouse/logs/torch.txt
-	cp dist/* /wheelhouse/
+  cd /TransformerEngine/transformer_engine/pytorch
+  if [ "$ROCM_BUILD" = "1" ]; then
+    ${PYBINDIR}pip install torch --index-url https://download.pytorch.org/whl/rocm6.3
+  else
+    PYBINDIR=/opt/python/cp38-cp38/bin/
+    ${PYBINDIR}pip install torch
+  fi
+  ${PYBINDIR}python setup.py sdist 2>&1 | tee /wheelhouse/logs/torch.txt
+  cp dist/* /wheelhouse/
 fi
 
 if $BUILD_JAX ; then
-	cd /TransformerEngine/transformer_engine/jax
-	if [ "$ROCM_BUILD" = "1" ]; then
-                ${PYBINDIR}pip install jax
-        else
-                PYBINDIR=/opt/python/cp310-cp310/bin/
-                ${PYBINDIR}pip install "jax[cuda12_local]" jaxlib
-        fi
-	${PYBINDIR}python setup.py sdist 2>&1 | tee /wheelhouse/logs/jax.txt
-	cp dist/* /wheelhouse/
+  cd /TransformerEngine/transformer_engine/jax
+  if [ "$ROCM_BUILD" = "1" ]; then
+    ${PYBINDIR}pip install jax
+  else
+    PYBINDIR=/opt/python/cp310-cp310/bin/
+    ${PYBINDIR}pip install "jax[cuda12_local]" jaxlib
+  fi
+  ${PYBINDIR}python setup.py sdist 2>&1 | tee /wheelhouse/logs/jax.txt
+  cp dist/* /wheelhouse/
 fi

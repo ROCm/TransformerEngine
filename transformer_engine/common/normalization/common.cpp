@@ -42,6 +42,8 @@ namespace transformer_engine {
 namespace normalization {
 
 #ifndef __HIP_PLATFORM_AMD__
+bool& use_zero_centered_gamma_in_weight_dtype();
+
 cudnn_frontend::NormFwdPhase_t get_cudnn_forward_phase(const bool training) {
   return training ? cudnn_frontend::NormFwdPhase_t::TRAINING
                   : cudnn_frontend::NormFwdPhase_t::INFERENCE;
@@ -51,20 +53,25 @@ cudnn_frontend::NormFwdPhase_t get_cudnn_forward_phase(const bool training) {
 TupleKeyType get_key(NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType,
                      NVTE_Norm_Stage NormStage, DType wtype, DType itype, DType otype, DType ctype,
                      uint64_t batch_size, uint64_t hidden_size, bool zero_centered_gamma,
-                     bool is_tuned, NVTEScalingMode mode, bool training) {
-  // TODO: Add scaling_mode to general_key is needed
-  uint64_t general_key = static_cast<uint32_t>(itype) | (static_cast<uint32_t>(otype) << 3) |
-                         (static_cast<uint32_t>(ctype) << 6) | (static_cast<uint32_t>(wtype) << 9) |
-                         (uint32_t(NormType) << 12) | (uint32_t(NormStage)) << 14 |
-                         (uint32_t(NormBackend) << 16) | (uint32_t(zero_centered_gamma) << 18) |
-                         (uint32_t(mode) << 19) | (uint32_t(training) << 22);
+                     bool is_tuned, NVTEScalingMode mode, bool training,
+                     bool gamma_in_weight_dtype) {
+  static_assert(NVTE_INVALID_SCALING < 1024,
+                "This function assumes at most 10 bits used in the scaling mode.");
+  static_assert(kNVTENumTypes < 32, "This function assumes at most 5 bits used in the NVTEDType");
+  uint64_t general_key = static_cast<uint64_t>(itype) | (static_cast<uint64_t>(otype) << 5) |
+                         (static_cast<uint64_t>(ctype) << 10) |
+                         (static_cast<uint64_t>(wtype) << 15) | (uint64_t(NormType) << 20) |
+                         (uint64_t(NormStage)) << 22 | (uint64_t(NormBackend) << 24) |
+                         (uint64_t(zero_centered_gamma) << 26) | (uint64_t(mode) << 27) |
+                         (uint64_t(training) << 37) | (uint64_t(gamma_in_weight_dtype) << 38);
   return std::make_tuple(general_key, batch_size, hidden_size, is_tuned);
 }
 
 template <typename KernelParamsType>
 TeNormalizationPlan<KernelParamsType>::TeNormalizationPlan(
     NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype, DType otype,
-    DType ctype, const size_t batch_size, const size_t hidden_size, const size_t sm_count, const bool zero_centered_gamma, const bool is_tuned
+    DType ctype, const size_t batch_size, const size_t hidden_size, const size_t sm_count,
+    const bool zero_centered_gamma, const bool is_tuned
 #ifdef __HIP_PLATFORM_AMD__
     , const NVTEScalingMode mode, const bool training
 #endif
@@ -159,8 +166,8 @@ void TeNormalizationPlan<KernelParamsType>::_set_workspace() {
     if (_launch_params.barrier_bytes > 0) {
       _launch_params.params.barrier =
           reinterpret_cast<int*>(workspace_dptr + _launch_params.workspace_bytes);
-      (void)cudaMemsetAsync(_launch_params.params.barrier, 0, _launch_params.barrier_bytes,
-                            _launch_params.stream);
+      NVTE_CHECK_CUDA(cudaMemsetAsync(_launch_params.params.barrier, 0,
+                                      _launch_params.barrier_bytes, _launch_params.stream));
     }
 #ifdef __HIP_PLATFORM_AMD__
     if constexpr (std::is_same_v<KernelParamsType, ForwardKernelParams>) {
@@ -185,7 +192,7 @@ void TeNormalizationPlan<KernelParamsType>::_set_workspace() {
 template <>
 void TeNormalizationPlan<ForwardKernelParams>::execute(void* x_dptr, void* gamma_dptr,
                                                        void* mean_dptr, void* rsigma_dptr,
-                                                       void* dx_dptr, void* dz_dptr,
+                                                       void* dx_dptr, void* dz_dptr, void* add_dptr,
                                                        void* dbeta_dptr, void* dgamma_dptr,
                                                        void* workspace_dptr, cudaStream_t stream) {
   NVTE_ERROR("Forward normalization should not call the backward execute function!");
@@ -195,8 +202,9 @@ template <>
 void TeNormalizationPlan<BackwardKernelParams>::execute(void* x_dptr, void* gamma_dptr,
                                                         void* mean_dptr, void* rsigma_dptr,
                                                         void* dx_dptr, void* dz_dptr,
-                                                        void* dbeta_dptr, void* dgamma_dptr,
-                                                        void* workspace_dptr, cudaStream_t stream) {
+                                                        void* add_dptr, void* dbeta_dptr,
+                                                        void* dgamma_dptr, void* workspace_dptr,
+                                                        cudaStream_t stream) {
   _launch_params.stream = stream;
 
   auto& kernel_params = _launch_params.params;
@@ -206,6 +214,7 @@ void TeNormalizationPlan<BackwardKernelParams>::execute(void* x_dptr, void* gamm
   kernel_params.rs = rsigma_dptr;
   kernel_params.dx = dx_dptr;
   kernel_params.dz = dz_dptr;
+  kernel_params.add = add_dptr;
   kernel_params.dgamma = dgamma_dptr;
 
   if (_is_layernorm) {
@@ -241,9 +250,15 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
     _ndim_scale_block = 1;
   }
 
-  _scalar_dptr = std::make_unique<char[]>(typeToSize(wtype));
+  const auto gamma_dtype = use_zero_centered_gamma_in_weight_dtype() ? wtype : ctype;
+  NVTE_CHECK(gamma_dtype == DType::kFloat32 || gamma_dtype == DType::kFloat16 ||
+                 gamma_dtype == DType::kBFloat16,
+             "Gamma of type FP4 is not supported");
+
+  _scalar_dptr = std::make_unique<char[]>(typeToNumBits(gamma_dtype) / 8);
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
-      wtype, cpp_dtype, *(reinterpret_cast<cpp_dtype*>(_scalar_dptr.get())) = (cpp_dtype)1.0f;);
+      gamma_dtype, cpp_dtype,
+      *(reinterpret_cast<cpp_dtype*>(_scalar_dptr.get())) = (cpp_dtype)1.0f;);
 
   _handle = cudnnExecutionPlanManager::Instance().GetHandle();
 
@@ -273,13 +288,13 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
                                        .set_name("one")
                                        .set_dim({1, 1, 1, 1})
                                        .set_stride({1, 1, 1, 1})
-                                       .set_data_type(get_cudnn_fe_dtype(wtype))
+                                       .set_data_type(get_cudnn_fe_dtype(gamma_dtype))
                                        .set_is_pass_by_value(true));
     auto centered_options = fe::graph::Pointwise_attributes()
                                 .set_mode(fe::PointwiseMode_t::ADD)
                                 .set_compute_data_type(get_cudnn_fe_dtype(ctype));
     _gamma = _graph.pointwise(_gamma_zero, _scalar_offset, centered_options);
-    _gamma->set_output(false).set_data_type(get_cudnn_fe_dtype(wtype));
+    _gamma->set_output(false).set_data_type(get_cudnn_fe_dtype(gamma_dtype));
   } else {
     _gamma = _gamma_zero;
   }
@@ -471,8 +486,11 @@ void CudnnNormalizationPlan::execute(Tensor* z, void* x_dptr, void* gamma_dptr, 
 
 void CudnnNormalizationPlan::execute(void* x_dptr, void* gamma_dptr, void* mean_dptr,
                                      void* rsigma_dptr, void* dx_dptr, void* dz_dptr,
-                                     void* dbeta_dptr, void* dgamma_dptr, void* workspace_dptr,
-                                     cudaStream_t stream) {
+                                     void* add_dptr, void* dbeta_dptr, void* dgamma_dptr,
+                                     void* workspace_dptr, cudaStream_t stream) {
+  // cuDNN does not currently support fused backward+add
+  NVTE_CHECK(add_dptr == nullptr);
+
   // Binding data pointers to graph tensors
   _variant_pack = {
       {_x, x_dptr}, {_rsigma, rsigma_dptr}, {_dz, dz_dptr}, {_dgamma, dgamma_dptr}, {_dx, dx_dptr}};
@@ -496,11 +514,12 @@ NormalizationPlanBase* NormalizationPlanRegistry::getNormalizationPlan(
     NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype,
     DType itype, DType otype, const size_t batch_size, const size_t hidden_size,
     const size_t sm_count, const bool zero_centered_gamma, const bool is_aligned,
-    const NVTEScalingMode mode, const bool training) {
+    const NVTEScalingMode mode, const bool training, const bool gamma_in_weight_dtype) {
   const DType ctype = DType::kFloat32;
   bool is_tuned = is_aligned && (batch_size % 4 == 0);
-  auto key = get_key(NormBackend, NormType, NormStage, wtype, itype, otype, ctype, batch_size,
-                     hidden_size, zero_centered_gamma, is_tuned, mode, training);
+  auto key =
+      get_key(NormBackend, NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size,
+              zero_centered_gamma, is_tuned, mode, training, gamma_in_weight_dtype);
 
   auto it = normalizationPlanMap.find(key);
   if (it != normalizationPlanMap.end()) {
@@ -549,6 +568,13 @@ bool& _cudnn_norm_bwd_flag() {
 
 bool use_cudnn_norm_fwd() { return _cudnn_norm_fwd_flag(); }
 bool use_cudnn_norm_bwd() { return _cudnn_norm_bwd_flag(); }
+
+bool& _zero_centered_gamma_in_weight_dtype() {
+  static bool flag = transformer_engine::getenv<bool>("NVTE_ZERO_CENTERED_GAMMA_IN_WTYPE");
+  return flag;
+}
+
+bool& use_zero_centered_gamma_in_weight_dtype() { return _zero_centered_gamma_in_weight_dtype(); }
 #endif
 
 }  //  namespace normalization
@@ -564,4 +590,11 @@ void nvte_enable_cudnn_norm_bwd(bool enable) {
   NVTE_API_CALL(nvte_enable_cudnn_norm_bwd);
   transformer_engine::normalization::_cudnn_norm_bwd_flag() = enable;
 }
+
+// Only for testing, not thread-safe
+void nvte_enable_zero_centered_gamma_in_weight_dtype(bool enable) {
+  NVTE_API_CALL(nvte_enable_zero_centered_gamma_in_weight_dtype);
+  transformer_engine::normalization::_zero_centered_gamma_in_weight_dtype() = enable;
+}
 #endif
+

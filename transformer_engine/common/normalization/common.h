@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -14,6 +14,7 @@
 #include <cudnn_frontend.h>
 #include <cudnn_frontend_utils.h>
 #endif
+#include <transformer_engine/normalization.h>
 #include <transformer_engine/transformer_engine.h>
 
 #include <functional>
@@ -45,7 +46,6 @@ struct LaunchParams {
   size_t workspace_bytes = 0;
   size_t barrier_bytes = 0;
   size_t dgamma_part_bytes = 0;
-
   int multiprocessorCount;
   cudaStream_t stream;
 
@@ -158,6 +158,9 @@ struct BackwardKernelParams : public KernelParamsBase {
   // Input: gradient wrt. LN FWD output.
   void* dz;
 
+  // Input: extra tensor to add for fused backward+add
+  void* add;
+
   // Workspace for Wgrad pre-reduction.
   void* dbeta_part;
   void* dgamma_part;
@@ -169,13 +172,14 @@ struct BackwardKernelParams : public KernelParamsBase {
   void* dgamma;
 };
 
+using BackwardAddKernelParams = BackwardKernelParams;
+
 #ifdef __HIP_PLATFORM_AMD__
 enum class NVTE_Norm_Backend { Te };
 #else
 enum class NVTE_Norm_Backend { Te, Cudnn };
 #endif
-enum class NVTE_Norm_Type { LayerNorm, RMSNorm };
-enum class NVTE_Norm_Stage { Forward, Backward };
+enum class NVTE_Norm_Stage { Forward, Backward, BackwardAdd };
 
 using TupleKeyType = std::tuple<uint64_t, uint64_t, uint64_t, bool>;
 struct TupleHash {
@@ -196,7 +200,7 @@ TupleKeyType get_key(NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType,
                      NVTE_Norm_Stage NormStage, DType wtype, DType itype, DType otype, DType ctype,
                      uint64_t batch_size, uint64_t hidden_size, bool zero_centered_gamma,
                      bool is_tuned, NVTEScalingMode mode = NVTE_DELAYED_TENSOR_SCALING,
-                     bool training = true);
+                     bool training = true, bool gamma_in_weight_dtype = false);
 
 template <typename KernelParamsType>
 class TeNormalizationRegistry {
@@ -258,8 +262,8 @@ class NormalizationPlanBase {
                        cudaStream_t stream) = 0;
 
   virtual void execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr,
-                       void* dx_dptr, void* dz_dptr, void* dbeta_dptr, void* dgamma_dptr,
-                       void* workspace_dptr, cudaStream_t stream) = 0;
+                       void* dx_dptr, void* dz_dptr, void* add_dptr, void* dbeta_dptr,
+                       void* dgamma_dptr, void* workspace_dptr, cudaStream_t stream) = 0;
 
  private:
   virtual void _build() = 0;
@@ -282,8 +286,8 @@ class TeNormalizationPlan : public NormalizationPlanBase {
                cudaStream_t stream) override;
 
   void execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr, void* dx_dptr,
-               void* dz_dptr, void* dbeta_dptr, void* dgamma_dptr, void* workspace_dptr,
-               cudaStream_t stream) override;
+               void* dz_dptr, void* add_dptr, void* dbeta_dptr, void* dgamma_dptr,
+               void* workspace_dptr, cudaStream_t stream) override;
 
  private:
   void _set_workspace();
@@ -312,8 +316,8 @@ class CudnnNormalizationPlan : public NormalizationPlanBase {
                cudaStream_t stream) override;
 
   void execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr, void* dx_dptr,
-               void* dz_dptr, void* dbeta_dptr, void* dgamma_dptr, void* workspace_dptr,
-               cudaStream_t stream) override;
+               void* dz_dptr, void* add_dptr, void* dbeta_dptr, void* dgamma_dptr,
+               void* workspace_dptr, cudaStream_t stream) override;
 
  private:
   void _build() override;
@@ -350,7 +354,8 @@ class NormalizationPlanRegistry {
       NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage,
       DType wtype, DType itype, DType otype, const size_t batch_size, const size_t hidden_size,
       const size_t sm_count, const bool zero_centered_gamma, const bool is_aligned,
-      const NVTEScalingMode mode = NVTE_DELAYED_TENSOR_SCALING, const bool training = true);
+      const NVTEScalingMode mode = NVTE_DELAYED_TENSOR_SCALING, const bool training = true,
+      const bool gamma_in_weight_dtype = false);
 
  private:
   NormalizationPlanRegistry() {}
@@ -430,6 +435,8 @@ bool is_ptr_aligned(const Args*... ptrs) {
 #ifndef __HIP_PLATFORM_AMD__
 bool use_cudnn_norm_fwd();
 bool use_cudnn_norm_bwd();
+
+bool& use_zero_centered_gamma_in_weight_dtype();
 #endif
 
 #ifdef __HIP_PLATFORM_AMD__
@@ -459,15 +466,20 @@ void rocm_norm_mxfp8_quantize(LaunchParams<ForwardKernelParams> &launch_params) 
     scale_dim_Y_colwise, SCALE_DIM_Y,
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
         launch_params.z_tensor->dtype(), OType,
-        cast_mxfp8_2D_kernel<false, false, false, Empty, {}, compute_t, OType,
-                              SCALE_DIM_Y, scale_dim_X_rowwise, true><<<grid, block, 0, launch_params.stream>>>(
-            reinterpret_cast<const compute_t*>(launch_params.params.z), 
-            nullptr,
-            reinterpret_cast<OType *>(launch_params.z_tensor->data.dptr),
-            reinterpret_cast<OType *>(launch_params.z_tensor->columnwise_data.dptr),
-            scales_rowwise_ptr, scales_colwise_ptr,
-            nullptr, nullptr, nullptr,
-            rows, cols, scale_stride_rowwise, scale_stride_colwise);););
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(
+            !(cols % (32 * sizeof(compute_t))), IS_ALIGNED,
+              cast_mxfp8_2D_kernel<false, false, false, Empty, {}, compute_t, OType,
+                                SCALE_DIM_Y, scale_dim_X_rowwise, IS_ALIGNED><<<grid, block, 0, launch_params.stream>>>(
+                reinterpret_cast<const compute_t*>(launch_params.params.z),
+                nullptr,
+                reinterpret_cast<OType *>(launch_params.z_tensor->data.dptr),
+                reinterpret_cast<OType *>(launch_params.z_tensor->columnwise_data.dptr),
+                scales_rowwise_ptr, scales_colwise_ptr,
+                nullptr, nullptr, nullptr,
+                rows, cols, scale_stride_rowwise, scale_stride_colwise);
+          );
+      );
+  );
 }
 #endif 
 

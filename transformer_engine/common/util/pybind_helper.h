@@ -37,6 +37,7 @@
 
 // Define comm overlap handles if not using ROCm
 #ifndef USE_ROCM
+
 #define NVTE_DECLARE_COMM_OVERLAP_HANDLES(m)                                                       \
   pybind11::enum_<transformer_engine::CommOverlapType>(m, "CommOverlapType",                       \
                                                        pybind11::module_local())                   \
@@ -53,7 +54,9 @@
              transformer_engine::CommOverlapAlgo::SPLIT_PIPELINED_RS_P2P)                          \
       .value("ATOMIC_GEMM_RS", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_RS)                \
       .value("ATOMIC_GEMM_AG_P2P", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_AG_P2P)        \
-      .value("ATOMIC_GEMM_RS_P2P", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_RS_P2P);       \
+      .value("ATOMIC_GEMM_RS_P2P", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_RS_P2P)        \
+      .value("EXTERNAL_BULK_OVERLAP_AG",                                                           \
+             transformer_engine::CommOverlapAlgo::EXTERNAL_BULK_OVERLAP_AG);                       \
   py::class_<transformer_engine::CommOverlapCore,                                                  \
              std::shared_ptr<transformer_engine::CommOverlapCore>>(m, "CommOverlapCore",           \
                                                                    pybind11::module_local())       \
@@ -154,6 +157,10 @@
       .value("NVTE_Paged_KV_THD_BSHD_BSHD", NVTE_QKV_Layout::NVTE_Paged_KV_THD_BSHD_BSHD)          \
       .value("NVTE_Paged_KV_THD_SBHD_SBHD", NVTE_QKV_Layout::NVTE_Paged_KV_THD_SBHD_SBHD);         \
   NVTE_DECLARE_FUSED_ATTENTION_HANDLES(m)                                                          \
+  pybind11::enum_<transformer_engine::Float8BlockScaleTensorFormat>(                               \
+      m, "Float8BlockScaleTensorFormat", pybind11::module_local())                                 \
+      .value("GEMM_READY", transformer_engine::Float8BlockScaleTensorFormat::GEMM_READY)           \
+      .value("COMPACT", transformer_engine::Float8BlockScaleTensorFormat::COMPACT);                \
   NVTE_DECLARE_COMM_OVERLAP_HANDLES(m)
 
 #endif

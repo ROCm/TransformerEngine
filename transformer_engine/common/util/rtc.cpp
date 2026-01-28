@@ -29,7 +29,6 @@ namespace {
 
 #ifdef __HIP_PLATFORM_AMD__
 #include "string_code_amd_detail_hip_float8_h.h"
-#include "string_code_amd_detail_hip_f8_impl_h.h"
 #endif // __HIP_PLATFORM_AMD__
 
 #ifndef __HIP_PLATFORM_AMD__
@@ -159,7 +158,7 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
   // Choose whether to compile to PTX or cubin
   const int sm_arch_ = cuda::sm_arch(device_id);
   const int compile_sm_arch = std::min(sm_arch_, max_supported_sm_arch());
-  const bool compile_ptx = (CUDA_VERSION <= 11000) || (sm_arch_ != compile_sm_arch);
+  const bool compile_ptx = sm_arch_ != compile_sm_arch;
 #endif // __HIP_PLATFORM_AMD__
 
   // Compilation flags
@@ -175,8 +174,8 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
   } else {
     opts.push_back(concat_strings("--gpu-architecture=sm_", compile_sm_arch));
   }
-  opts.push_back(concat_strings("-I", cuda::include_directory(true)));
 #endif //__HIP_PLATFORM_AMD__
+  opts.push_back(concat_strings("-I", cuda::include_directory(true)));
 
   std::vector<const char*> opts_ptrs;
   for (const auto& opt : opts) {
@@ -186,9 +185,9 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
   // Compile source
   nvrtcProgram program;
 #ifdef __HIP_PLATFORM_AMD__
-  constexpr int num_headers = 4;
-  const char* headers[num_headers] = {string_code_utils_cuh, string_code_util_math_h, string_code_amd_detail_hip_float8_h, string_code_amd_detail_hip_f8_impl_h};
-  const char* include_names[num_headers] = {"utils_hip.cuh", "util/math.h", "amd_detail/hip_float8.h", "amd_detail/hip_f8_impl.h"};
+  constexpr int num_headers = 3;
+  const char* headers[num_headers] = {string_code_utils_cuh, string_code_util_math_h, string_code_amd_detail_hip_float8_h};
+  const char* include_names[num_headers] = {"utils_hip.cuh", "util/math.h", "amd_detail/hip_float8.h"};
 #else
   constexpr int num_headers = 2;
   constexpr const char* headers[num_headers] = {string_code_utils_cuh, string_code_util_math_h};

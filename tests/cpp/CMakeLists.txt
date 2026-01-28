@@ -64,8 +64,7 @@ else()
   project(transformer_engine_tests LANGUAGES HIP CXX)
   # Ask hcc to generate device code during compilation so we can use
   # host linker to link.
-  set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} -fno-gpu-rdc -Wno-defaulted-function-deleted")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${HIP_HCC_FLAGS}")
+  set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -fno-gpu-rdc -Wno-defaulted-function-deleted -Wno-unused-result -Wno-unused-value -ftemplate-backtrace-limit=0")
 endif()
 
 add_subdirectory(../../3rdparty/googletest ${PROJECT_BINARY_DIR}/googletest)
@@ -75,15 +74,18 @@ enable_testing()
 include_directories(${gtest_SOURCE_DIR}/include ${gtest_SOURCE_DIR})
 
 if(NOT DEFINED TE_LIB_PATH)
-    execute_process(COMMAND bash -c "pip3 show transformer-engine | grep Location | cut -d ' ' -f 2 | tr -d '\n'"
-                    OUTPUT_VARIABLE TE_LIB_PATH)
+    execute_process(COMMAND bash -c "python3 -c 'import transformer_engine as te; print(te.__file__)'"
+                    OUTPUT_VARIABLE TE_LIB_FILE
+                    OUTPUT_STRIP_TRAILING_WHITESPACE)
+    get_filename_component(TE_LIB_PATH ${TE_LIB_FILE} DIRECTORY)
 endif()
 
-find_library(TE_LIB NAMES transformer_engine PATHS "${TE_LIB_PATH}/transformer_engine" ${TE_LIB_PATH} ENV TE_LIB_PATH REQUIRED)
+find_library(TE_LIB NAMES transformer_engine PATHS "${TE_LIB_PATH}/.." ${TE_LIB_PATH} ENV TE_LIB_PATH REQUIRED)
 
 message(STATUS "Found transformer_engine library: ${TE_LIB}")
 include_directories(../../transformer_engine/common/include)
 include_directories(../../transformer_engine/common)
+include_directories(../../transformer_engine)
 include_directories(${CMAKE_SOURCE_DIR})
 
 if(USE_CUDA)

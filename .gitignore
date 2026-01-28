@@ -49,9 +49,9 @@ downloads/
 .pytest_cache/
 compile_commands.json
 .nfs
+tensor_dumps/
+artifacts/
 **/profiler_outputs/
 **/times.csv
-tensor_dumps/
 transformer_engine/build_info.txt
 transformer_engine/common/util/hip_nvml.*
-transformer_engine/aiter/

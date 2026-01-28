@@ -81,7 +81,7 @@ void performTest(const std::vector<size_t>& shape) {
 
   Tensor output_c("output_c", shape, otype);
   // dbias has the same data type with "output grad"
-  Tensor dbias("dbias", {H}, itype);
+  Tensor dbias("dbias", std::vector<size_t>{H}, itype);
 
   fillUniform(&input);
   fillUniform(&grad);
@@ -164,10 +164,13 @@ class CastDBiasDGeluTestSuite : public ::testing::TestWithParam<std::tuple<trans
 TEST_P(CastDBiasDGeluTestSuite, TestCastDBiasDgelu) {
     using namespace transformer_engine;
     using namespace test;
+
+#ifndef __HIP_PLATFORM_AMD__
     // Skip tests for pre-Blackwell architectures
     if (getDeviceComputeCapability() < blackwellComputeCapability) {
         GTEST_SKIP();
     }
+#endif
 
     const DType input_type = std::get<0>(GetParam());
     const DType output_type = std::get<1>(GetParam());

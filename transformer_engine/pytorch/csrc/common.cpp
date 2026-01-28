@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -9,14 +11,33 @@
 #include "c10/util/ArrayRef.h"
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
+
+#ifdef __HIP_PLATFORM_AMD__
+#include "common/common.h"
+#endif
+
 namespace transformer_engine::pytorch {
 
-std::vector<size_t> getTensorShape(at::Tensor t) {
+std::vector<size_t> getTensorShape(const at::Tensor& t) {
   std::vector<size_t> shape;
   for (auto s : t.sizes()) {
     shape.push_back(s);
   }
   return shape;
+}
+
+NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape) {
+  NVTEShape ret;
+  ret.ndim = torch_shape.size();
+  constexpr int max_dimensions = sizeof(ret.data) / sizeof(size_t);
+  NVTE_CHECK(ret.ndim < max_dimensions,
+             "Torch tensor has too many dimensions. Max supported: ", max_dimensions, " and got ",
+             ret.ndim, ".");
+  for (size_t i = 0; i < ret.ndim; ++i) {
+    const auto& v = torch_shape[i];
+    ret.data[i] = static_cast<size_t>(v);
+  }
+  return ret;
 }
 
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer) {
@@ -95,6 +116,43 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor)
     shape.push_back(s);
   }
   return makeTransformerEngineTensor(tensor.data_ptr(), shape, dtype);
+}
+
+std::tuple<std::vector<transformer_engine::TensorWrapper>, std::vector<std::vector<NVTETensor>>,
+           std::vector<NVTETensor*>, size_t, size_t>
+makeTransformerEngineTensorList(std::vector<std::vector<at::Tensor>> at_tensor_lists) {
+  size_t num_lists = at_tensor_lists.size();
+
+  NVTE_CHECK(num_lists > 0, "List of tensors is empty.");
+
+  size_t num_tensors = at_tensor_lists[0].size();
+
+  std::vector<std::vector<NVTETensor>> nvte_tensor_lists;
+  std::vector<NVTETensor*> nvte_tensor_list_ptrs;
+  std::vector<transformer_engine::TensorWrapper> tensorWrappers;
+  nvte_tensor_lists.reserve(num_lists);
+  nvte_tensor_list_ptrs.reserve(num_lists);
+  tensorWrappers.reserve(num_lists * num_tensors);
+
+  for (const auto& at_list : at_tensor_lists) {
+    NVTE_CHECK(at_list.size() == num_tensors, "Wrong number of tensors");
+    std::vector<NVTETensor> te_list;
+    te_list.reserve(num_tensors);
+
+    for (const auto& at_tensor : at_list) {
+      tensorWrappers.push_back(makeTransformerEngineTensor(at_tensor));
+      te_list.push_back(tensorWrappers.back().data());
+    }
+
+    nvte_tensor_lists.push_back(std::move(te_list));
+  }
+
+  for (auto& te_tensor_list : nvte_tensor_lists) {
+    nvte_tensor_list_ptrs.push_back(te_tensor_list.data());
+  }
+
+  return std::make_tuple(std::move(tensorWrappers), std::move(nvte_tensor_lists),
+                         std::move(nvte_tensor_list_ptrs), num_lists, num_tensors);
 }
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(
@@ -234,9 +292,32 @@ std::vector<size_t> convertShape(const NVTEShape& shape) {
   return std::vector<size_t>(shape.data, shape.data + shape.ndim);
 }
 
-int roundup(const int value, const int multiple) {
+size_t roundup(const size_t value, const size_t multiple) {
   assert(multiple > 0);
   return ((value + multiple - 1) / multiple) * multiple;
 }
+
+#ifdef __HIP_PLATFORM_AMD__
+
+inline bool nvte_use_atomic_amax() {
+  const char *env_p = std::getenv("NVTE_USE_ATOMIC_AMAX");
+  if (env_p && std::string(env_p) == "1")
+    return true;
+  return false;
+}
+
+at::Tensor allocate_amax_workspace(const TensorWrapper& input_tensor) {
+  if (nvte_use_atomic_amax() || input_tensor.numel() == 0) {
+    // User chose atomic path, or empty tensor -> return a size-0 empty tensor
+    return at::empty(0, at::CUDA(at::kFloat));
+  }
+
+  const auto N = input_tensor.numel();
+  size_t workspace_blocks = nvte_amax_workspace_num_blocks(N);
+
+  return at::empty(workspace_blocks, at::CUDA(at::kFloat));
+}
+
+#endif
 
 }  // namespace transformer_engine::pytorch

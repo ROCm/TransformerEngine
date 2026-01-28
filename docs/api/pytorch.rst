@@ -32,6 +32,7 @@ pyTorch
   :members: forward, set_context_parallel_group, set_tensor_parallel_group
 
 .. autoapiclass:: transformer_engine.pytorch.dot_product_attention.inference.InferenceParams(max_batch_size, max_sequence_length)
+  :members: reset, allocate_memory, pre_step, get_seqlens_pre_step, convert_paged_to_nonpaged, step
 
 .. autoapiclass:: transformer_engine.pytorch.CudaRNGStatesTracker()
   :members: reset, get_states, set_states, add, fork
@@ -48,7 +49,7 @@ pyTorch
 
 .. autoapifunction:: transformer_engine.pytorch.moe_permute
 
-.. autoapifunction:: transformer_engine.pytorch.moe_permute_with_probs  
+.. autoapifunction:: transformer_engine.pytorch.moe_permute_with_probs
 
 .. autoapifunction:: transformer_engine.pytorch.moe_unpermute
 
@@ -62,3 +63,6 @@ pyTorch
 
 .. autoapifunction:: transformer_engine.pytorch.destroy_ub
 .. autoapifunction:: transformer_engine.pytorch.moe_sort_chunks_by_index
+
+.. autoapiclass:: transformer_engine.pytorch.UserBufferQuantizationMode
+  :members: FP8, NONE

@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -24,7 +24,8 @@ from jax import value_and_grad, jit
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from jax.typing import ArrayLike, DTypeLike
 
-from transformer_engine.jax import fp8_autocast, is_hip_extension
+from transformer_engine.jax import fp8_autocast
+from transformer_engine.jax.cpp_extensions.misc import is_hip_extension
 from transformer_engine.jax.sharding import MeshResource
 from transformer_engine.jax.attention import (
     AttnBiasType,
@@ -40,9 +41,10 @@ from transformer_engine.jax.attention import (
     ReorderStrategy,
 )
 from transformer_engine.jax.cpp_extensions import FusedAttnHelper
-from transformer_engine.transformer_engine_jax import (
+from transformer_engine_jax import (
     NVTE_Fused_Attn_Backend,
     get_cudnn_version,
+    get_device_compute_capability,
 )
 
 from distributed_test_base import assert_equal_collectives
@@ -351,6 +353,14 @@ class FusedAttnRunner:
                 "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
             )
 
+        if (
+            get_device_compute_capability(0) == 100
+            and self.dropout_prob == 0.1
+            and self.attn_bias_type is not AttnBiasType.NO_BIAS
+        ):
+            pytest.skip(
+                "For sm100, bprop kernel support for dropout + determinism (bias) is not supported"
+            )
         # Test the MLA case where head dims for qk differ from head dims for v, only if the tensors
         # are provided in BSHD_BSHD_BSHD or THD_THD_THD formats
         if self.head_dim_qk != self.head_dim_v and not self.qkv_layout.is_separate():
@@ -359,7 +369,20 @@ class FusedAttnRunner:
                 "is either BSHD_BSHD_BSHD or THD_THD_THD"
             )
 
+        if self.head_dim_qk == 192 and self.head_dim_v == 128:
+            if self.attn_bias_type != AttnBiasType.NO_BIAS or self.bias_shape is not None:
+                pytest.skip("Aiter currently supports MLA hd192_hd128 only without bias.")
+            if self.attn_mask_type not in (AttnMaskType.CAUSAL_MASK, AttnMaskType.NO_MASK):
+                pytest.skip("Aiter currently supports MLA hd192_hd128 only for CAUSAL or NO_MASK.")
+            if self.dropout_prob != 0.0:
+                pytest.skip("Aiter currently supports MLA hd192_hd128 only without dropout.")
+            if self.qkv_layout != QKVLayout.BSHD_BSHD_BSHD:
+                pytest.skip("Aiter currently supports MLA hd192_hd128 only with BSHD_BSHD_BSHD layout.")
+            if self.seq_desc_format != SeqDescFormat.Mask:
+                pytest.skip("Aiter currently supports MLA hd192_hd128 only with mask-based SeqDescFormat.")
+
         self.backend = FusedAttnHelper(
+            self.is_training,
             self.dtype,
             self.dtype,
             self.qkv_layout,
@@ -374,8 +397,12 @@ class FusedAttnRunner:
             self.head_dim_v,
             (-1, -1) if self.window_size is None else self.window_size,
         ).get_fused_attn_backend()
-        if self.backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
-            pytest.skip("Unsupported inputs combination or device compute capability.")
+        if is_hip_extension():
+            if self.backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+                pytest.skip("Unsupported inputs combination or device compute capability.")
+        else:
+            if self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
+                pytest.skip("Unsupported inputs combination or device compute capability.")
 
         if (
             self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS
@@ -399,7 +426,7 @@ class FusedAttnRunner:
         self.mesh = Mesh(self.devices, self.mesh_axes)
         self.dp_size = self.mesh.shape.get(self.mesh_resource.dp_resource, 1)
         self.cp_size = self.mesh.shape.get(self.mesh_resource.cp_resource, 1)
-        self.tp_size = self.mesh.shape.get(self.mesh_resource.tp_resource, 1)
+        self.tp_size = self.mesh.shape.get(self.mesh_resource.tpsp_resource, 1)
 
         # only support new-style RNGs on AMD hardware since they will crash otherwise
         if is_hip_extension() and not self.use_old_rng:
@@ -637,7 +664,7 @@ class FusedAttnRunner:
         self.qkvo_psec = PartitionSpec(
             self.mesh_resource.dp_resource,
             self.mesh_resource.cp_resource,
-            self.mesh_resource.tp_resource,
+            self.mesh_resource.tpsp_resource,
             None,
         )
         self.qkvo_sharding = NamedSharding(self.mesh, self.qkvo_psec)
@@ -665,7 +692,7 @@ class FusedAttnRunner:
 
         if self.bias_shape == BiasShape._1HSS:
             self.bias_pspec = PartitionSpec(
-                None, self.mesh_resource.tp_resource, self.mesh_resource.cp_resource, None
+                None, self.mesh_resource.tpsp_resource, self.mesh_resource.cp_resource, None
             )
         elif self.bias_shape == BiasShape._B1SS:
             self.bias_pspec = PartitionSpec(
@@ -993,6 +1020,12 @@ class FusedAttnRunner:
         ),
         pytest.param(
             2, 2048, 2048, 12, 6, 128, 64, jnp.float16, id="2-2048-2048-12-6-128-64-FP16-GQA"
+        ),
+        pytest.param(
+            10, 4096, 4096, 16, 16, 192, 128, jnp.float16, id="10-4096-4096-16-16-192-128-FP16-MLA",
+        ),
+        pytest.param(
+            10, 4096, 4096, 16, 16, 192, 128, jnp.bfloat16, id="10-4096-4096-16-16-192-128-BF16-MLA",
         ),
     ],
 )

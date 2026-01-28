@@ -1,4 +1,4 @@
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
 """Python interface for cast extensions"""
@@ -8,7 +8,7 @@ import functools
 import torch
 import warnings
 
-from ..utils import non_tn_fp8_gemm_supported
+from ..utils import is_non_tn_fp8_gemm_supported
 
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from .cast_transpose import te_cast_transpose_mxfp8_triton, te_cast_transpose_noop_triton, te_dequantize_mxfp8_triton
@@ -29,7 +29,7 @@ def _setup_conditional_transpose_storage(
 
         # Allocate FP8 data transpose if needed
         data_transpose = None
-        create_transpose = quantizer.columnwise_usage and not non_tn_fp8_gemm_supported(); 
+        create_transpose = quantizer.columnwise_usage and not is_non_tn_fp8_gemm_supported(); 
         if quantizer.columnwise_usage and create_transpose:
             if tensor.ndim == 0:
                 # If the original tensor is a scalar, its transpose is also a scalar.
@@ -96,6 +96,10 @@ def te_quantize_triton(
                 cast_out = out._data
                 trans_out = out._transpose
                 scale_inv_out = out._scale_inv
+
+                from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
+                is_current_scaling = isinstance(quantizer, Float8CurrentScalingQuantizer)
+
                 te_cast_transpose_noop_triton(
                     input_tensor,
                     noop_flag,
@@ -104,10 +108,14 @@ def te_quantize_triton(
                     trans_out=trans_out,
                     amax_out=amax_out,
                     scale_inv_out=scale_inv_out,
-                    otype=otype
+                    otype=otype,
+                    current_scaling=is_current_scaling,
+                    eps = getattr(quantizer, "amax_epsilon", 0.0),
+                    force_pow_2_scales = getattr(quantizer, "force_pow_2_scales", False),
                 )
                 
             else:
+                out.remove_caches() #Make sure to remove transpose if it is marked as invalid
                 out = tex.quantize(input_tensor, quantizer, out, noop_flag)
     elif isinstance(out, MXFP8TensorBase):
         te_cast_transpose_mxfp8_triton(input_tensor, out)

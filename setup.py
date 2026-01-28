@@ -1,33 +1,32 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 """Installation script."""
 
+from importlib import metadata
 import os
-import sys
 import time
 from pathlib import Path
 from typing import List, Tuple
 import subprocess
 
 import setuptools
+from setuptools.command.egg_info import egg_info
 from wheel.bdist_wheel import bdist_wheel
 
 from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.te_version import te_version
 from build_tools.utils import (
     rocm_build,
+    all_files_in_dir,
+    hipify,
     cuda_archs,
-    found_cmake,
-    found_ninja,
-    found_pybind11,
+    cuda_version,
     get_frameworks,
-    install_and_import,
     remove_dups,
-    uninstall_te_wheel_packages,
 )
 
 frameworks = get_frameworks()
@@ -41,14 +40,21 @@ os.environ["NVTE_PROJECT_BUILDING"] = "1"
 if "pytorch" in frameworks:
     from torch.utils.cpp_extension import BuildExtension
 elif "jax" in frameworks:
-    install_and_import("pybind11[global]")
     from pybind11.setup_helpers import build_ext as BuildExtension
 
+class HipifyMeta(egg_info):
+    """Custom egg_info command to hipify source files before packaging."""
+
+    def run(self):
+        if rocm_build():
+            print("Running hipification of installable headers for ROCm build...")
+            common_headers_dir = current_file_path / "transformer_engine/common/include"
+            hipify(current_file_path, common_headers_dir, all_files_in_dir(common_headers_dir), [])
+        super().run()
 
 CMakeBuildExtension = get_build_ext(BuildExtension)
 if not rocm_build():
     archs = cuda_archs()
-
 
 class TimedBdist(bdist_wheel):
     """Helper class to measure build time"""
@@ -71,12 +77,27 @@ def setup_common_extension() -> CMakeExtension:
         cmake_flags.append(f"-DCK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT={os.getenv('NVTE_CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT', 3)}")
         if os.getenv("NVTE_CK_FUSED_ATTN_PATH"):
             ck_path = Path(os.getenv("NVTE_CK_FUSED_ATTN_PATH"))
-            cmake_flags.append(f"-DCK_FUSED_ATTN_PATH={ck_path}")
+            cmake_flags.append(f"-DAITER_MHA_PATH={ck_path}")
+
         if int(os.getenv("NVTE_FUSED_ATTN_AOTRITON", "1"))==0 or int(os.getenv("NVTE_FUSED_ATTN", "1"))==0:
             cmake_flags.append("-DUSE_FUSED_ATTN_AOTRITON=OFF")
+        elif os.getenv("NVTE_FUSED_ATTN_AOTRITON") or os.getenv("NVTE_FUSED_ATTN"):
+            cmake_flags.append("-DUSE_FUSED_ATTN_AOTRITON=ON")
+
         if int(os.getenv("NVTE_FUSED_ATTN_CK", "1"))==0 or int(os.getenv("NVTE_FUSED_ATTN", "1"))==0:
             cmake_flags.append("-DUSE_FUSED_ATTN_CK=OFF")
+        elif os.getenv("NVTE_FUSED_ATTN_CK") or os.getenv("NVTE_FUSED_ATTN"):
+            cmake_flags.append("-DUSE_FUSED_ATTN_CK=ON")
+
+        if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))) and os.getenv("NVTE_ENABLE_ROCSHMEM") is None:
+            os.environ["NVTE_ENABLE_ROCSHMEM"] = '1'
+            os.environ["NVTE_ENABLE_NVSHMEM"] = '0'
+            print("Turning NVTE_ENABLE_ROCSHMEM on, disabling NVTE_ENABLE_NVSHMEM")
+        if bool(int(os.getenv("NVTE_ENABLE_ROCSHMEM", "0"))):
+            cmake_flags.append("-DNVTE_ENABLE_ROCSHMEM=ON")
+
     else:
+        cmake_flags.append("-DUSE_ROCM=OFF")
         cmake_flags = ["-DCMAKE_CUDA_ARCHITECTURES={}".format(archs)]
         if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
             assert (
@@ -84,10 +105,31 @@ def setup_common_extension() -> CMakeExtension:
             ), "MPI_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
             cmake_flags.append("-DNVTE_UB_WITH_MPI=ON")
 
+        if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))):
+            assert (
+                os.getenv("NVSHMEM_HOME") is not None
+            ), "NVSHMEM_HOME must be set when compiling with NVTE_ENABLE_NVSHMEM=1"
+            cmake_flags.append("-DNVTE_ENABLE_NVSHMEM=ON")
+
         if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
             cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
 
-        cmake_flags.append("-DUSE_ROCM=OFF")
+    if bool(int(os.getenv("NVTE_WITH_CUBLASMP", "0"))):
+        cmake_flags.append("-DNVTE_WITH_CUBLASMP=ON")
+        cublasmp_dir = os.getenv("CUBLASMP_HOME") or metadata.distribution(
+            f"nvidia-cublasmp-cu{cuda_version()[0]}"
+        ).locate_file(f"nvidia/cublasmp/cu{cuda_version()[0]}")
+        cmake_flags.append(f"-DCUBLASMP_DIR={cublasmp_dir}")
+        nvshmem_dir = os.getenv("NVSHMEM_HOME") or metadata.distribution(
+            f"nvidia-nvshmem-cu{cuda_version()[0]}"
+        ).locate_file("nvidia/nvshmem")
+        cmake_flags.append(f"-DNVSHMEM_DIR={nvshmem_dir}")
+        print("CMAKE_FLAGS:", cmake_flags[-2:])
+
+    # Add custom CMake arguments from environment variable
+    nvte_cmake_extra_args = os.getenv("NVTE_CMAKE_EXTRA_ARGS")
+    if nvte_cmake_extra_args:
+        cmake_flags.extend(nvte_cmake_extra_args.split())
 
     # Project directory root
     root_path = Path(__file__).resolve().parent
@@ -99,14 +141,13 @@ def setup_common_extension() -> CMakeExtension:
     )
 
 
-def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
+def setup_requirements() -> Tuple[List[str], List[str]]:
     """Setup Python dependencies
 
-    Returns dependencies for build, runtime, and testing.
+    Returns dependencies for runtime and testing.
     """
 
     # Common requirements
-    setup_reqs: List[str] = []
     install_reqs: List[str] = [
         "pydantic",
         "importlib-metadata>=1.0",
@@ -114,35 +155,20 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     ]
     test_reqs: List[str] = ["pytest>=8.2.1"]
 
-    # Requirements that may be installed outside of Python
-    if not found_cmake():
-        setup_reqs.append("cmake>=3.21")
-    if not found_ninja():
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "ninja"])
-        setup_reqs.append("ninja")
-    if not found_pybind11():
-        setup_reqs.append("pybind11")
-
     # Framework-specific requirements
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         if "pytorch" in frameworks:
-            if rocm_build():
-                install_reqs.extend(["einops"])
-            else:
-                install_reqs.extend(["torch>=2.1"])
-                # Blackwell is not supported as of Triton 3.2.0, need custom internal build
-                # install_reqs.append("triton")
-                test_reqs.extend(["numpy", "torchvision", "prettytable", "PyYAML"])
-        if "jax" in frameworks:
-            if rocm_build():
-                from build_tools.jax import jax_install_requires
-                install_reqs.extend(jax_install_requires(["flax>=0.7.1"]))
-            else:
-                install_reqs.extend(["jax", "flax>=0.7.1"])
-                # test_reqs.extend(["numpy", "praxis"])
-                test_reqs.extend(["numpy"])
+            from build_tools.pytorch import install_requirements, test_requirements
 
-    return [remove_dups(reqs) for reqs in [setup_reqs, install_reqs, test_reqs]]
+            install_reqs.extend(install_requirements())
+            test_reqs.extend(test_requirements())
+        if "jax" in frameworks:
+            from build_tools.jax import install_requirements, test_requirements
+
+            install_reqs.extend(install_requirements())
+            test_reqs.extend(test_requirements())
+
+    return [remove_dups(reqs) for reqs in [install_reqs, test_reqs]]
 
 
 if __name__ == "__main__":
@@ -161,14 +187,13 @@ if __name__ == "__main__":
         cmdclass = {}
         package_data = {}
         include_package_data = False
-        setup_requires = []
         install_requires = ([f"transformer_engine_{te_cuda_vers}=={__version__}"],)
         extras_require = {
             "pytorch": [f"transformer_engine_torch=={__version__}"],
             "jax": [f"transformer_engine_jax=={__version__}"],
         }
     else:
-        setup_requires, install_requires, test_requires = setup_requirements()
+        install_requires, test_requires = setup_requirements()
         ext_modules = [setup_common_extension()]
         cmdclass = {"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist}
         package_data = {"": ["VERSION.txt"]}
@@ -176,9 +201,6 @@ if __name__ == "__main__":
         extras_require = {"test": test_requires}
 
         if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
-            # Remove residual FW packages since compiling from source
-            # results in a single binary with FW extensions included.
-            uninstall_te_wheel_packages()
             if "pytorch" in frameworks:
                 from build_tools.pytorch import setup_pytorch_extension
 
@@ -216,16 +238,9 @@ if __name__ == "__main__":
         long_description=long_description,
         long_description_content_type="text/x-rst",
         ext_modules=ext_modules,
-        cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist},
-        python_requires=">=3.8, <3.13",
-        classifiers=[
-            "Programming Language :: Python :: 3.8",
-            "Programming Language :: Python :: 3.9",
-            "Programming Language :: Python :: 3.10",
-            "Programming Language :: Python :: 3.11",
-            "Programming Language :: Python :: 3.12",
-        ],
-        setup_requires=setup_requires,
+        cmdclass={"egg_info": HipifyMeta, "build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist},
+        python_requires=">=3.8",
+        classifiers=["Programming Language :: Python :: 3"],
         install_requires=install_requires,
         license_files=("LICENSE",),
         include_package_data=include_package_data,

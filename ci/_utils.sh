@@ -1,4 +1,4 @@
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -18,8 +18,15 @@ if [ -z "${TEST_SGPU}${TEST_MGPU}" ]; then
     TEST_MGPU=1
 fi
 
+TEST_START_TS=`date +%s`
+
+#To disable some logs trimming
+export CI=1
+
 _script_error_count=0
 _run_error_count=0
+_ignored_error_count=0
+TEST_ERROR_IGNORE=""
 
 script_error() {
     _script_error_count=$((_script_error_count+1))
@@ -27,6 +34,11 @@ script_error() {
 }
 
 test_run_error() {
+    if [ -n "$TEST_ERROR_IGNORE" ]; then
+        _ignored_error_count=$((_ignored_error_count+1))
+        test -n "$@" && echo "Ignore error in test $@" >&2
+        return
+    fi
     _run_error_count=$((_run_error_count+1))
     test -n "$@" && echo "Error in test $@" >&2
 }
@@ -34,6 +46,7 @@ test_run_error() {
 return_run_results() {
     test $_script_error_count -ne 0 && echo Detected $_script_error_count script errors during tests run at level $TEST_LEVEL >&2
     test $_run_error_count -ne 0 && echo Got $_run_error_count test errors during run at level $TEST_LEVEL >&2
+    test $_ignored_error_count -ne 0 && echo Ignored $_ignored_error_count test errors during run at level $TEST_LEVEL >&2
     test $_run_error_count -eq 0 -a $_script_error_count -eq 0
 }
 
@@ -174,11 +187,24 @@ get_test_config_list() {
     echo $_TEST_CONFIG_LIST
 }
 
+get_test_variant_tag() {
+    if [ -n "$1" -a -n "$2" ]; then
+        echo "$1/$2"
+    else
+        echo "$1$2"
+    fi
+}
+
 get_test_name_tag() {
     _fname=${1##*/}
     _test_name=${_fname%%.*}
-    test -n "$2" && _test_suffix=.$2
-    echo "$_test_name$_test_suffix"
+    _dir=${1%$_fname}
+    if [ -n "$2" ]; then
+        _tag="$_dir$_test_name.$2"
+    else
+        _tag="$_dir$_test_name"
+    fi
+    echo "$(echo $_tag | tr '/' '.')"
 }
 
 get_pytest_junitxml() {
@@ -208,11 +234,30 @@ configure_omp_threads() {
     cpus_per_core=$(lscpu | grep "Thread(s) per core:" | awk '{print $NF}')
 
     n_physical_cores=$((n_vcpus / cpus_per_core))
+    n_parallel_jobs=$1
 
     if [ -z ${OMP_NUM_THREADS} ]; then
-        export OMP_NUM_THREADS=$n_physical_cores
+        export OMP_NUM_THREADS=$((n_physical_cores / n_parallel_jobs))
 	echo "Setting OMP_NUM_THREADS=${OMP_NUM_THREADS}"
     else
         echo "Using OMP_NUM_THREADS=${OMP_NUM_THREADS}"
     fi
+}
+
+time_elapsed() {
+    _arg=$1
+    date -d @$((`date +%s` - _arg)) +%${2:-T}
+}
+
+pytest_run() {
+    #args: tag1 tag2 level ...
+    check_level $3 || return
+    _test_variant_tag=`get_test_variant_tag $1 $2`
+    shift 3
+    _test_name_tag=`get_test_name_tag $1 $_test_variant_tag`
+    check_test_filter $_test_name_tag || return
+    _start_ts=`date +%s`
+    echo "Run [$_test_variant_tag] $@ at `time_elapsed $TEST_START_TS`"
+    pytest -v -rfEs `get_pytest_junitxml $_test_name_tag` $TEST_PYTEST_ARGS "$TEST_DIR/$@" || test_run_error "[$_test_variant_tag] $1"
+    echo "Done [$_test_variant_tag] $1 in `time_elapsed $_start_ts`"
 }

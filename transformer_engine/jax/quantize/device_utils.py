@@ -1,0 +1,43 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+"""
+Device utility functions for JAX quantization.
+
+This module provides utility functions for checking device capabilities and compatibility
+for quantization operations in JAX.
+"""
+
+import functools
+
+import transformer_engine_jax
+
+from ..util import is_hip_extension
+
+__all__ = [
+    "get_device_compute_capability",
+    "is_fp8_gemm_with_all_layouts_supported",
+]
+
+
+@functools.lru_cache(maxsize=None)
+def get_device_compute_capability(gpu_id: int = 0) -> int:
+    """
+    Get the compute capability of the device.
+    """
+    return transformer_engine_jax.get_device_compute_capability(gpu_id)
+
+
+@functools.lru_cache(maxsize=None)
+def is_fp8_gemm_with_all_layouts_supported() -> bool:
+    """Return True if using Blackwell architecture, False otherwise."""
+    compute_capability = get_device_compute_capability()
+    # Enable once FP8 GEMM layout coverage is validated with hipblaslt.
+    if is_hip_extension():
+        # gfx950 --> NV blackwell
+        # return compute_capability == 95
+        return False
+    return 100 <= compute_capability < 120
