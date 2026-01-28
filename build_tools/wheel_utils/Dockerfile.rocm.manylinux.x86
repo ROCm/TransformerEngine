@@ -22,7 +22,7 @@ ARG ROCM_REPO_URL=https://repo.radeon.com/rocm/rhel8/latest/main/
 RUN echo -e "[rocm]\nname=ROCm\nbaseurl=${ROCM_REPO_URL}\nenabled=1\ngpgcheck=0" > /etc/yum.repos.d/rocm.repo
 
 # Setup packages
-RUN dnf install -y --disablerepo=epel rocm-dev hipblaslt hipblaslt-devel hipcub hipcub-devel
+RUN dnf install -y --disablerepo=epel rocm-dev hipblaslt hipblaslt-devel hipcub hipcub-devel hiprand-devel rocrand-devel
 RUN dnf group install -y "Development Tools" && dnf install -y git cmake llvm-toolset gcc-toolset-12
 
 #Uncomment the next line for ROCm 6.4 cmake workaround: remove newer incomnpatible cmake preinstalled on base image
