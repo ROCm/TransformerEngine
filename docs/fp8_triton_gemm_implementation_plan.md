@@ -264,6 +264,24 @@ The goal is to extend `te_generic_gemm_triton()` to detect Float8Tensor inputs, 
 
 ## Data Type Conversion Flow
 
+### Architecture-Specific FP8 Format Selection
+
+AMD GPUs use different FP8 formats depending on the architecture:
+
+**gfx942 (MI300/MI325) - Compute Capability 9.4:**
+- Uses NANOO FP8 formats
+- E4M3: `torch.float8_e4m3fnuz`
+- E5M2: `torch.float8_e5m2fnuz`
+
+**gfx950 (MI350) - Compute Capability 9.5:**
+- Uses OCP standard FP8 formats (same as NVIDIA)
+- E4M3: `torch.float8_e4m3fn`
+- E5M2: `torch.float8_e5m2`
+
+The `_get_fp8_dtypes()` helper function automatically detects the GPU architecture using `torch.cuda.get_device_capability()` and returns the appropriate FP8 dtypes. This is cached for efficiency.
+
+Both format families map to the same Transformer Engine dtypes (`tex.DType.kFloat8E4M3` and `tex.DType.kFloat8E5M2`) internally, but use different PyTorch native types when passed to Triton kernels.
+
 ### Input Flow (FP8 → Native PyTorch FP8)
 ```
 Float8Tensor (nominal dtype: torch.float32)
@@ -271,15 +289,20 @@ Float8Tensor (nominal dtype: torch.float32)
   ├─ _fp8_dtype: tex.DType.kFloat8E4M3 or kFloat8E5M2
   └─ _scale_inv: torch.float32
 
-↓ (reinterpret_as_fp8_tensor)
+↓ (reinterpret_as_fp8_tensor - architecture-aware)
 
-torch.float8_e4m3fnuz or torch.float8_e5m2fnuz
+[gfx942] torch.float8_e4m3fnuz or torch.float8_e5m2fnuz (NANOO FP8)
+     OR
+[gfx950] torch.float8_e4m3fn or torch.float8_e5m2 (OCP FP8)
   └─ (Triton kernel can handle native PyTorch FP8)
 ```
 
 ### Output Flow (Native PyTorch FP8 → Float8Tensor)
 ```
-Triton kernel output: torch.float8_e4m3fnuz or torch.float8_e5m2fnuz
+Triton kernel output:
+  [gfx942] torch.float8_e4m3fnuz or torch.float8_e5m2fnuz
+       OR
+  [gfx950] torch.float8_e4m3fn or torch.float8_e5m2
 
 ↓ (view as uint8)
 
