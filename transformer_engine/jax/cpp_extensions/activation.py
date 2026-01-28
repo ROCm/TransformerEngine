@@ -914,7 +914,10 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
 
         # TODO(micky774): Investigate the necessity of separate colwise_scale_inv rule.
         # When is_2x==False, colwise_scale_inv needs a different factor
-        colwise_scale_inv_rule = scale_rules.colwise_rule if is_2x else (prefix + "x_colwise_scale_inv",)
+        colwise_scale_inv_rule = (
+            scale_rules.colwise_rule if is_2x
+            else (prefix + "x_colwise_scale_inv",)
+        )
 
         return SdyShardingRule(
             (dz_axes, x_axes, ("…2",)),
