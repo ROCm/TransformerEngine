@@ -51,7 +51,7 @@ def te_rmsnorm_fwd_triton(
     INPUT_ALIGNED_16: bool = False,
     OUTPUT_ALIGNED_16: bool = False,
 ):
-    return te_norm_fwd_triton(
+    return _te_norm_fwd_triton(
         kernel='rms',
         input_tensor=input,
         weight=weight,
@@ -67,7 +67,7 @@ def te_rmsnorm_fwd_triton(
         OUTPUT_ALIGNED_16=OUTPUT_ALIGNED_16,
     )
 
-# triton drop-in replacement for transformer_engine::pytorch::rmsnorm_fwd
+# triton drop-in replacement for transformer_engine::pytorch::layernorm_fwd
 def te_layernorm_fwd_triton(
     input: torch.Tensor,
     weight: torch.Tensor,
@@ -80,7 +80,7 @@ def te_layernorm_fwd_triton(
     zero_centered_gamma: bool,
     autotune: bool = True,
 ):
-    return te_norm_fwd_triton(
+    return _te_norm_fwd_triton(
         kernel='layer',
         input_tensor=input,
         weight=weight,
@@ -94,8 +94,7 @@ def te_layernorm_fwd_triton(
         autotune=autotune,
     )
 
-# triton drop-in replacement for transformer_engine::pytorch::rmsnorm_fwd
-def te_norm_fwd_triton(
+def _te_norm_fwd_triton(
     kernel: str,
     input_tensor: torch.Tensor,
     weight: torch.Tensor,
