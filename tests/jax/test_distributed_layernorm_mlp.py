@@ -4,7 +4,6 @@
 #
 # See LICENSE for license information.
 from typing import Callable, Sequence, Union, Optional
-
 import pytest
 
 import jax
@@ -71,7 +70,6 @@ LN_SCALE_AXES = (W_NO_SHARD_AXES,)
 LN_BIAS_AXES = (W_NO_SHARD_AXES,)
 BIAS_1_AXES = (W_JOINED_AXES, W_TP_AXES)
 BIAS_2_AXES = (W_NO_SHARD_AXES,)
-
 INTERMEDIATE = 64
 
 # We set to 256 to ensure compatibility with hipblaslt MXFP8 GEMM which

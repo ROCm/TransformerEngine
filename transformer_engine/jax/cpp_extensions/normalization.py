@@ -589,7 +589,6 @@ class NormFwdPrimitive(BasePrimitive):
     ):
         if version.parse(jax.__version__) < version.parse("0.5.0"):
             raise ImportError("JAX version 0.5.0 or later is required for shardy sharding.")
-        print(f"DEBUG RESULT SHAPES *** rowwise_scale_inv={tuple(result_types[2].shape)}, colwise_scale_inv={tuple(result_types[3].shape)}")
         del (
             zero_centered_gamma,
             epsilon,
@@ -605,6 +604,7 @@ class NormFwdPrimitive(BasePrimitive):
             len(value_types[0].shape), unique_var=prefix + "x", flatten_axis=-1
         )
         x_axes = scale_rules.input_spec
+
         out = x_axes
         colwise_out = out if is_2x else (prefix + "out_colwise",)
         rsigma = x_axes[:-1]
