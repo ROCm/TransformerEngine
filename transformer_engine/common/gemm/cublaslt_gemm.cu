@@ -808,19 +808,16 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
             A_dt == transformer_engine::DType::kBFloat16);
   };
 
-  if (use_ck &&
-      is_supported_dtype() &&
-      !accumulate) {
-
-    if (grouped_gemm_ck_tile(A, B, D, num_gemms, transa, transb, workspace, stream)) {
-      printf("grouped_gemm_ck_tile done.\n");
+  if (use_ck && is_supported_dtype()) {
+    if (grouped_gemm_ck_tile(A, B, D, num_gemms, transa, transb, workspace, accumulate, stream)) {
+      // NVTE_WARN("grouped_gemm_ck_tile done.\n");
       return;
     } else if (warn_fallback) {
       NVTE_WARN("Fallback to hipBLASLt grouped GEMM (grouped_gemm_ck_tile returned false).");
     }
+  } else if (warn_fallback) {
+    NVTE_WARN("Fallback to hipBLASLt grouped GEMM (CK config unsupported or CK disabled). use_ck=", use_ck, " is_supported_dtype=", is_supported_dtype());
   }
-
-  NVTE_WARN("Fallback to hipBLASLt grouped GEMM (CK config unsupported).\n");
 
   multi_stream_cublas_gemm(A, B, D, bias, pre_gelu_out, num_gemms, transa, transb, grad,
                              workspace, accumulate, use_split_accumulator, math_sm_count, stream);
