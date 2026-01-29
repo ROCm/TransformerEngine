@@ -174,17 +174,10 @@ static hipDataType get_hipblaslt_dtype(const transformer_engine::DType t) {
       return HIP_R_32F;
     case DType::kBFloat16:
       return HIP_R_16BF;
-#if HIP_VERSION >= 60300000
     case DType::kFloat8E4M3:
       return te_fp8_fnuz() ? HIP_R_8F_E4M3_FNUZ : HIP_R_8F_E4M3;
     case DType::kFloat8E5M2:
       return te_fp8_fnuz() ? HIP_R_8F_E5M2_FNUZ: HIP_R_8F_E5M2;
-#else
-    case DType::kFloat8E4M3:
-      return HIP_R_8F_E4M3_FNUZ;
-    case DType::kFloat8E5M2:
-      return HIP_R_8F_E5M2_FNUZ;
-#endif
     default:
       NVTE_ERROR("Invalid type");
   }
@@ -490,10 +483,8 @@ static std::unordered_map<hipDataType, std::string_view> type_name_map = {
   {HIP_R_16BF, "bfloat16"},
   {HIP_R_8F_E4M3_FNUZ, "float8e4m3"},
   {HIP_R_8F_E5M2_FNUZ, "float8e5m2"},
-#if HIP_VERSION >= 60300000
   {HIP_R_8F_E4M3, "float8e4m3"},
   {HIP_R_8F_E5M2, "float8e5m2"},
-#endif
 };
 static NameMapper<hipDataType> typeNameMapper(type_name_map);
 
@@ -787,16 +778,12 @@ protected:
         continue;
       }
 
-#if HIP_VERSION >= 60300000
       auto fp8_filter = te_fp8_fnuz()
                             ? [](const hipDataType& val) 
                                 { return (val != HIP_R_8F_E4M3 && val != HIP_R_8F_E5M2); }
                             : [](const hipDataType& val) {
                                 return (val != HIP_R_8F_E4M3_FNUZ && val != HIP_R_8F_E5M2_FNUZ);
                               };
-#else
-      auto fp8_filter = nullptr;
-#endif
 
       cfg.a_type = typeNameMapper.getValue(type_a, "type_a", fp8_filter);
       cfg.b_type = typeNameMapper.getValue(type_b, "type_b", fp8_filter);
@@ -952,13 +939,9 @@ void hipblaslt_gemm(const Tensor *inputA,
                     bool grad,
                     void* workspace,
                     size_t workspaceSize,
-                    bool accumulate,
+                    float alpha, float beta,
                     bool use_split_accumulator,
                     int math_sm_count,
-                    int m_split,
-                    int n_split,
-                    bool gemm_producer,
-                    const Tensor *inputCounter,
                     hipStream_t stream,
                     hipblasLtHandle_t handle
 ) {
@@ -992,7 +975,7 @@ void hipblaslt_gemm(const Tensor *inputA,
         << " gelu=" << (outputPreGelu->data.dptr != nullptr)
         << " use_fp8=" << use_fp8
         << " scale_mode=" << (a_tensor ? "tensor" : a_block ? "mxfp8" : "unsupported")
-        << " accumulate=" << accumulate
+        << " alpha=" << alpha << " beta=" << beta
         << std::endl;
   }
   
@@ -1039,13 +1022,6 @@ void hipblaslt_gemm(const Tensor *inputA,
     NVTE_CHECK(!gelu, "fp8 gemm + gelu fusion is unavailable right now!");
   }
 #endif
-  if (is_fp8_dtype(outputD->data.dtype)) {
-    NVTE_CHECK(!accumulate, "Accumulation mode not supported with FP8 GEMM output!");
-  }
-
-  float one = 1.0;
-  float zero = 0.0;
-  float beta = (accumulate) ? one : zero;
 
   int device_id;
   NVTE_CHECK_CUDA(hipGetDevice(&device_id));
@@ -1217,7 +1193,7 @@ void hipblaslt_gemm(const Tensor *inputA,
         if (HIPBLAS_STATUS_SUCCESS == hipblaslt_ext::matmulIsAlgoSupported(
           handle,
           operationDesc, 
-          static_cast<const void*>(&one),
+          static_cast<const void*>(&alpha),
           Adesc, 
           Bdesc, 
           static_cast<const void*>(&beta),
@@ -1297,7 +1273,7 @@ void hipblaslt_gemm(const Tensor *inputA,
             // Warm-up call
             NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
                                             operationDesc,
-                                            static_cast<const void*>(&one),         /* alpha */
+                                            static_cast<const void*>(&alpha),         /* alpha */
                                             param.A,                                      /* A */
                                             Adesc,
                                             param.B,                                      /* B */
@@ -1319,7 +1295,7 @@ void hipblaslt_gemm(const Tensor *inputA,
           {
             NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
                                             operationDesc,
-                                            static_cast<const void*>(&one),         /* alpha */
+                                            static_cast<const void*>(&alpha),         /* alpha */
                                             param.A,                                      /* A */
                                             Adesc,
                                             param.B,                                      /* B */
@@ -1380,7 +1356,7 @@ void hipblaslt_gemm(const Tensor *inputA,
   // D = alpha * (A * B) + beta * C
   NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
                                    operationDesc,
-                                   static_cast<const void*>(&one),         /* alpha */
+                                   static_cast<const void*>(&alpha),         /* alpha */
                                    param.A,                                      /* A */
                                    Adesc,
                                    param.B,                                      /* B */
@@ -1523,10 +1499,12 @@ void release_service_stream(hipStream_t stream, struct ServiceStreamCtl &ctl)
 
 
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
-                 const Tensor *inputBias, Tensor *outputPreGelu, bool transa, bool transb, bool grad,
-                 void *workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator,
-                 int math_sm_count, int m_split, int n_split, bool gemm_producer,
-                 const Tensor *inputCounter, hipStream_t stream, int compute_stream_offset)
+                 const Tensor *inputBias, Tensor *outputPreGelu, cublasOperation_t transa,
+                 cublasOperation_t transb, bool grad, void *workspace, size_t workspaceSize,
+                 float alpha, float beta, bool use_split_accumulator, int math_sm_count,
+                 [[maybe_unused]] int m_split, [[maybe_unused]] int n_split,
+                 [[maybe_unused]] bool gemm_producer, [[maybe_unused]] const Tensor *inputCounter,
+                 hipStream_t stream, int compute_stream_offset)
 {
   // Tensor dims in row-major order
   const int A0 = inputA->flat_first_dim();
@@ -1534,18 +1512,20 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   const int B0 = inputB->flat_first_dim();
   const int B1 = inputB->flat_last_dim();
 
+  const bool is_transa = transa == CUBLAS_OP_T;
+  const bool is_transb = transb == CUBLAS_OP_T;
+
   // GEMM dims in column-major order
-  const int m = transa ? A0 : A1;
-  const int n = transb ? B1 : B0;
-  const int k = transa ? A1 : A0;
-  NVTE_CHECK((transb ? B0 : B1) == k,
+  const int m = is_transa ? A0 : A1;
+  const int n = is_transb ? B1 : B0;
+  const int k = is_transa ? A1 : A0;
+  NVTE_CHECK((is_transb ? B0 : B1) == k,
              "GEMM inputs have incompatible dimensions (A is ", A0, "x", A1, ", B is ", B0, "x", B1,
              ")");
 
-  const int lda = transa ? k : m;
-  const int ldb = transb ? n : k;
+  const int lda = is_transa ? k : m;
+  const int ldb = is_transb ? n : k;
   const int ldd = m;
-
 
   ServiceStreamCtl ss_ctl;
   bool use_service_stream =
@@ -1564,14 +1544,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     handle = hipblaslt_handles[compute_stream_offset];
   }
 
-  hipblaslt_gemm(inputA, inputB, outputD, inputBias, outputPreGelu, 
-                  m, n, k, lda, ldb, ldd,
-                  (transa) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
-                  (transb) ? HIPBLAS_OP_T : HIPBLAS_OP_N,
-                  grad,
-                  workspace, workspaceSize, accumulate, use_split_accumulator,
-                  math_sm_count, m_split, n_split, gemm_producer,
-                  inputCounter, use_service_stream ? ss_ctl.stream : stream, handle);
+  hipblaslt_gemm(inputA, inputB, outputD, inputBias, outputPreGelu, m, n, k, lda, ldb, ldd, transa,
+                 transb, grad, workspace, workspaceSize, alpha, beta, use_split_accumulator,
+                 math_sm_count, use_service_stream ? ss_ctl.stream : stream, handle);
 
   if (use_service_stream)
   {

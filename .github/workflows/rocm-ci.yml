@@ -40,9 +40,13 @@ concurrency:
 
 jobs:
   build_and_test:
-    name: Build and Test on GPU
+    name: Build and Test on GPU (${{ matrix.runner }})
     timeout-minutes: 720
-    runs-on: linux-mi325-8
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [linux-mi325-8, linux-mi355-8]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -248,10 +252,9 @@ jobs:
           HIP_VISIBLE_DEVICES=2 ci/jax.sh > /workspace/jax_sgpu.log 2>&1 &
           jax_pid=$!; echo JAX test pid $!
           
-          HIP_VISIBLE_DEVICES=3 ci/core.sh > /workspace/core_sgpu.log 2>&1 &
-          core_pid=$!; echo Core test pid $!
+          ci/core.sh > /workspace/core_sgpu.log 2>&1 
+          core_rc=$?
           
-          wait $core_pid; core_rc=$?
           wait $jax_pid; jax_rc=$?
           wait $torch_pid; torch_rc=$?
           
@@ -422,7 +425,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs-and-reports
+          name: logs-and-reports-${{ matrix.runner }}
           path: |
             *.log
           if-no-files-found: ignore

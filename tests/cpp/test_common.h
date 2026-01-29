@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2023-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -233,6 +233,10 @@ class Tensor {
     }
   }
 
+  void *amax_dptr() const {
+    return tensor_.amax();
+  }
+
   float scale() const {
     if(scale_cpu_data_) {
       NVTE_CHECK(tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING, "Invalid scaling_mode!");
@@ -244,7 +248,7 @@ class Tensor {
   }
 
   template <typename T>
-  T *rowwise_cpu_scale_inv_ptr(){
+  T *rowwise_cpu_scale_inv_ptr() const {
     if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING){
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
     } else if (tensor_.scaling_mode() == NVTE_BLOCK_SCALING_1D || tensor_.scaling_mode() == NVTE_BLOCK_SCALING_2D) {
@@ -257,7 +261,7 @@ class Tensor {
   }
 
   template <typename T>
-  T *columnwise_cpu_scale_inv_ptr(){
+  T *columnwise_cpu_scale_inv_ptr() const {
     if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING){
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
     } else if (tensor_.scaling_mode() == NVTE_BLOCK_SCALING_1D || tensor_.scaling_mode() == NVTE_BLOCK_SCALING_2D) {
@@ -269,7 +273,7 @@ class Tensor {
     return reinterpret_cast<T*>(columnwise_scale_inv_cpu_data_.get());
   }
 
-  float rowwise_scale_inv(){
+  float rowwise_scale_inv() const {
     if(rowwise_scale_inv_cpu_data_) {
       float scale_inv = rowwise_cpu_scale_inv_ptr<float>()[0];
       return scale_inv;
@@ -297,6 +301,16 @@ class Tensor {
   void shareFP8Meta(const Tensor &other);
 
   std::mt19937& gen() { return gen_; }
+
+  void *rowwise_scale_inv_dptr() const {
+    NVTE_CHECK(rowwise_, "Tensor does not have rowwise data!");
+    return tensor_.scale_inv();  // rowwise scale_inv backing storage
+  }
+
+  void *columnwise_scale_inv_dptr() const {
+    NVTE_CHECK(columnwise_, "Tensor does not have columnwise data!");
+    return tensor_.get_columnwise_scale_inv().data_ptr;
+  }
 
  private:
   TensorWrapper tensor_;
@@ -344,20 +358,18 @@ struct Numeric_Traits<fp8e4m3> {
     static constexpr double minSubnorm = 1.0   / static_cast<double>(1 << 9);   // std::pow(2.0, -9.0);
     static constexpr double maxSubnorm = 0.875 / static_cast<double>(1 << 6);   // std::pow(2.0, -6.0);
     static constexpr double minNorm    = 1.0   / static_cast<double>(1 << 6);   // std::pow(2.0, -6.0);
-    #ifndef USE_ROCM
+#ifndef USE_ROCM
     static constexpr double maxNorm    = 448.0;
-    #elif HIP_VERSION >= 60300000
+#else
     static const double maxNorm;
-    #else
-    static constexpr double maxNorm = 240.0;
-    #endif //USE_ROCM
+#endif //USE_ROCM
     static const double artifInf;                        // artificial Infinity
     static constexpr int maxBiasedExponentAsFP32 = 8 + FP32_EXPONENT_BIAS;
     static constexpr int maxUnbiasedExponentAsFP32 = 8;
     static constexpr int maxExpNorm    = 1 << maxUnbiasedExponentAsFP32;
 };
 
-#if defined(USE_ROCM) && (HIP_VERSION >= 60300000)
+#ifdef USE_ROCM
 inline const double Numeric_Traits<fp8e4m3>::maxNorm = te_fp8_fnuz() ? 240.0 : 448.0;
 #endif
 
@@ -439,7 +451,12 @@ inline fp8e8m0 float_to_e8m0(float val) {
 }
 
 inline float exp2f_rcp(fp8e8m0 biased_exp) {
-  return (biased_exp == 0) ? 1 : exp2f(FP32_EXPONENT_BIAS - static_cast<float>(biased_exp));
+  if (biased_exp == 0) {
+    return 1.0f;
+  }
+  int32_t int_val = (254 - biased_exp) << FP32_MANTISSA_BITS;   // 127 - (biased_exp - 127)
+  float fp32_val = *reinterpret_cast<float*>(&int_val);
+  return fp32_val;
 }
 
 inline float identity(const float x) { return x; }
@@ -471,22 +488,25 @@ size_t last_dimension(const std::vector<size_t> &shape);
 bool areShapesEqual(const NVTEShape &s1, const NVTEShape &s2);
 
 void compareResults(const std::string &name, const Tensor &test, const void *ref,
-                    bool rowwise, double atol = 1e-5, double rtol = 1e-8, bool if_on_gpus = true);
+                    bool rowwise, double atol = 1e-5, double rtol = 1e-8, bool if_on_gpus = true,
+                    const size_t tolerable_mismatches_limit = 0);
 void compareResults(const std::string &name, const float test, const float ref,
                     double atol = 1e-5, double rtol = 1e-8);
 void compareResults(const std::string &name, const uint8_t *test, const uint8_t *ref,
                     size_t N, float mismatch_rate_tol = 0.);
 void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
-                                  const size_t row_blocks, const size_t col_blocks, const size_t stride);
-void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
-                                  const size_t N);
-#ifdef USE_ROCM
-void compare_e8m0_scaling_factors(const std::string &name, Tensor &output, const uint8_t *ref,
-                             const size_t row_blocks, const size_t col_blocks, const size_t stride, 
-                             double tol, bool rowwise, std::vector<std::tuple<size_t, size_t, int>> &mismatch_idx);
+                                  const size_t row_blocks, const size_t col_blocks, const size_t stride,
+                                  std::vector<size_t> &mismatch_indices, size_t& mismatches_num,
+                                  const size_t scale_diff_abs_tolerance = 0,
+                                  const double abs_tolerable_mismatches_limit = 0,
+                                  const double rel_tolerable_mismatches_limit = 0);
 
-void adjust_ref(std::vector<std::tuple<size_t, size_t, int>> mismatch_idx, void *ref, const size_t row_blocks,
-                const size_t col_blocks, const size_t rows, const size_t cols, DType otype);
+#ifdef USE_ROCM
+void adjust_ref_for_e8m0_scale_error(const std::string &name,
+                                     const std::vector<size_t> &mismatch_idx,
+                                     const uint8_t *test_scale, const uint8_t *ref_scale,
+                                     const size_t scale_stride, const size_t rows,
+                                     const size_t cols, bool rowwise, void *ref_ptr, DType otype);
 #endif
 
 std::array<size_t, 4> get_scale_tensor_dims(const size_t rows, const size_t cols,

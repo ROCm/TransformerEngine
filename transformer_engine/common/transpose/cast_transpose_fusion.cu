@@ -336,6 +336,7 @@ void reduce_dbias(const Tensor &workspace, Tensor *dbias, const size_t row_lengt
           reinterpret_cast<InputType *>(dbias->data.dptr),
           reinterpret_cast<const fp32 *>(workspace.data.dptr), reduce_dbias_row_length,
           reduce_dbias_num_rows);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 #ifdef __HIP_PLATFORM_AMD__
   }
 #endif
@@ -849,15 +850,16 @@ void cast_transpose_fused(const Tensor &input, const Tensor *act_input, Tensor *
             NVTE_CHECK(num_rows % nvec_out == 0, "Unsupported shape.");
 
 #ifndef __HIP_PLATFORM_AMD__
-            cudaFuncSetAttribute(
+            NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                 cast_transpose_fused_kernel_notaligned<IS_DBIAS, IS_DACT, IS_ACT, ComputeType,
                                                        Param, nvec_in, nvec_out, Empty, OP>,
-                cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+                cudaFuncAttributePreferredSharedMemoryCarveout, 100));
 #endif
             cast_transpose_fused_kernel_notaligned<IS_DBIAS, IS_DACT, IS_ACT, ComputeType, Param,
                                                    nvec_in, nvec_out, Empty, OP>
                 <<<num_blocks, cast_transpose_num_threads, shared_size_transpose, stream>>>(
                     param, row_length, num_rows, num_tiles);
+            NVTE_CHECK_CUDA(cudaGetLastError());
           }
 
           if constexpr (IS_DBIAS) {
@@ -1311,10 +1313,10 @@ void dgated_act_cast_transpose(const Tensor &input, const Tensor &gated_act_inpu
                                     (THREADS_PER_WARP + 1) * sizeof(Vec<OutputType, nvec_out>);
           if (full_tile) {
 #ifndef __HIP_PLATFORM_AMD__
-            cudaFuncSetAttribute(
+            NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                 dgated_act_cast_transpose_kernel<nvec_in, nvec_out, ComputeType, InputType,
                                                  OutputType, Empty, OP1, OP2>,
-                cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+                cudaFuncAttributePreferredSharedMemoryCarveout, 100));
 #endif
 
             dgated_act_cast_transpose_kernel<nvec_in, nvec_out, ComputeType, InputType, OutputType,
@@ -1328,12 +1330,13 @@ void dgated_act_cast_transpose(const Tensor &input, const Tensor &gated_act_inpu
                     reinterpret_cast<fp32 *>(output->amax.dptr),
                     reinterpret_cast<fp32 *>(output->scale_inv.dptr), row_length, num_rows,
                     n_tiles);
+            NVTE_CHECK_CUDA(cudaGetLastError());
           } else {
 #ifndef __HIP_PLATFORM_AMD__
-            cudaFuncSetAttribute(
+            NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                 dgated_act_cast_transpose_kernel_notaligned<nvec_in, nvec_out, ComputeType,
                                                             InputType, OutputType, Empty, OP1, OP2>,
-                cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+                cudaFuncAttributePreferredSharedMemoryCarveout, 100));
 #endif
             dgated_act_cast_transpose_kernel_notaligned<nvec_in, nvec_out, ComputeType, InputType,
                                                         OutputType, Empty, OP1, OP2>
@@ -1346,6 +1349,7 @@ void dgated_act_cast_transpose(const Tensor &input, const Tensor &gated_act_inpu
                     reinterpret_cast<fp32 *>(output->amax.dptr),
                     reinterpret_cast<fp32 *>(output->scale_inv.dptr), row_length, num_rows,
                     n_tiles);
+            NVTE_CHECK_CUDA(cudaGetLastError());
           });  // NOLINT(*)
   );           // NOLINT(*)
 }

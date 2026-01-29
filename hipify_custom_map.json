@@ -5,7 +5,8 @@
         "util/cuda_runtime.h" : "util/hip_runtime.h",
         "ATen/cudnn/Handle.h" : "ATen/miopen/Handle.h",
         "CUfunc_cache" : "hipFuncCache_t", 
-        "<nvtx3/nvToolsExt.h>" : "<roctracer/roctx.h>"
+        "<nvtx3/nvToolsExt.h>" : "<roctracer/roctx.h>",
+        "cudaFuncSetAttribute(" : "hipFuncSetAttribute((const void*)"
  }
 }
 

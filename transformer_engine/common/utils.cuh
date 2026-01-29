@@ -984,10 +984,7 @@ using fp8e5m2 = te_hip_fp8_e5m2;
 #endif //__HIP_PLATFORM_AMD__
 using e8m0_t = uint8_t;
 
-constexpr uint32_t FP32_MANTISSA_BITS = 23;
-constexpr uint32_t FP32_EXPONENT_BIAS = 127;
-
-enum ScalingType { ROWWISE = 0, COLWISE = 1, BIDIMENTIONAL = 2 };
+enum ScalingType { ROWWISE = 0, COLWISE = 1, BIDIMENSIONAL = 2 };
 
 template <typename T>
 struct Numeric_Traits;
@@ -999,16 +996,14 @@ struct Numeric_Traits<fp8e4m3> {
   static constexpr double maxNorm = 448;
 #elif defined(__HIP_DEVICE_COMPILE__)
   static constexpr double maxNorm = te_fp8_fnuz() ? 240 : 448;
-#elif defined(TE_DYNAMIC_HIP_FP8_TYPE)
+#else
  // dummy declaration for correct translation;
  // it is not defined anywhere and it's usage should be eliminated before linking
   static double maxNorm;
-#else
-  static constexpr double maxNorm = 240;
 #endif
 };
 
-#ifdef TE_DYNAMIC_HIP_FP8_TYPE
+#if !defined(__HIP_DEVICE_COMPILE__)
 template <bool FNUZ>
 struct Numeric_Traits_fp8e4m3: public Numeric_Traits<fp8e4m3> {
   static constexpr double maxNorm = FNUZ ? 240 : 448;
@@ -1026,7 +1021,7 @@ struct Quantized_Limits {
   static constexpr int max_unbiased_exponent = Numeric_Traits<T>::maxUnbiasedExponent;
   static constexpr float emax = 1 << max_unbiased_exponent;
   static constexpr float emax_rcp = 1.0 / emax;
-#ifdef TE_DYNAMIC_HIP_FP8_TYPE
+#if !defined(__HIP_DEVICE_COMPILE__)
   static constexpr struct {
     operator float() const {
       if (std::is_same<T, fp8e4m3>::value) {
@@ -1039,52 +1034,11 @@ struct Quantized_Limits {
   } max_norm = {};
   // dummy value for kernels host path compilation
   static constexpr float max_norm_rcp = std::numeric_limits<float>::signaling_NaN();
-#else // TE_DYNAMIC_HIP_FP8_TYPE
+#else // !defined(__HIP_DEVICE_COMPILE__)
   static constexpr float max_norm = Numeric_Traits<T>::maxNorm;
   static constexpr float max_norm_rcp = 1.0 / max_norm;
-#endif // TE_DYNAMIC_HIP_FP8_TYPE
+#endif // !defined(__HIP_DEVICE_COMPILE__)
 };
-
-__device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
-  // TODO: nan/inf needs to be set for any value
-  // of nan/inf in input not just amax.
-  if (isnan(val)) {
-    return 0xFF;
-  }
-  if (isinf(val)) {
-    return 0xFE;
-  }
-#ifdef __HIP_PLATFORM_AMD__
-#define __CUDA_ARCH_HAS_FEATURE__(x) 0
-#endif //__HIP_PLATFORM_AMD__
-#if ((__CUDA_ARCH_HAS_FEATURE__(SM100_ALL)) || (__CUDA_ARCH_HAS_FEATURE__(SM101_ALL)) || \
-     (__CUDA_ARCH_HAS_FEATURE__(SM120_ALL)))
-  uint16_t out;
-  asm volatile(
-      "{\n"
-      "cvt.rp.satfinite.ue8m0x2.f32  %0, 0.0, %1;\n"
-      "}"
-      : "=h"(out)
-      : "f"(val));
-  return *reinterpret_cast<e8m0_t *>(&out);
-#else
-  if (val == 0.0f) {
-    return 0x00;
-  }
-  uint32_t val_u32 = *reinterpret_cast<uint32_t *>(&val);
-  e8m0_t exponent = (val_u32 >> FP32_MANTISSA_BITS);
-  uint32_t mantissa = val_u32 & 0x7FFFFF;
-  // Round up exponent and deal with satfinite.
-  if ((mantissa > 0 && exponent != 0xFE) && !(exponent == 0 && mantissa <= 0x400000)) {
-    ++exponent;
-  }
-  return exponent;
-#endif
-}
-
-__device__ __forceinline__ float exp2f_rcp(e8m0_t biased_exp) {
-  return (biased_exp == 0) ? 1 : exp2f(FP32_EXPONENT_BIAS - static_cast<float>(biased_exp));
-}
 
 }  // namespace transformer_engine
 

@@ -140,7 +140,7 @@ def eval_model(state, test_ds, batch_size, var_collect):
 
 def get_datasets():
     """Load MNIST train and test datasets into memory."""
-    train_ds = load_dataset("mnist", split="train", trust_remote_code=True)
+    train_ds = load_dataset("ylecun/mnist", split="train", trust_remote_code=True)
     train_ds.set_format(type="np")
     batch_size = train_ds["image"].shape[0]
     shape = (batch_size, IMAGE_H, IMAGE_W, IMAGE_C)
@@ -148,7 +148,7 @@ def get_datasets():
         "image": train_ds["image"].astype(np.float32).reshape(shape) / 255.0,
         "label": train_ds["label"],
     }
-    test_ds = load_dataset("mnist", split="test", trust_remote_code=True)
+    test_ds = load_dataset("ylecun/mnist", split="test", trust_remote_code=True)
     test_ds.set_format(type="np")
     batch_size = test_ds["image"].shape[0]
     shape = (batch_size, IMAGE_H, IMAGE_W, IMAGE_C)
@@ -193,7 +193,9 @@ def train_and_evaluate(args):
     else:
         fp8_recipe = None
 
-    with te.fp8_autocast(enabled=args.use_fp8, fp8_recipe=fp8_recipe):
+    with te.fp8_autocast(
+        enabled=args.use_fp8, fp8_recipe=fp8_recipe, mesh_resource=te.sharding.MeshResource()
+    ):
         cnn = Net(args.use_te)
         var_collect = cnn.init(init_rngs, jnp.empty(input_shape, dtype=jnp.bfloat16))
         tx = optax.sgd(args.lr, args.momentum)

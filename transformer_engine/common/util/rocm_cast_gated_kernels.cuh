@@ -1,23 +1,23 @@
 /*************************************************************************
- * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
 #pragma once
 
+#include <cfloat>
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include <transformer_engine/activation.h>
-#include <transformer_engine/cast.h>
 
-#include <cfloat>
-
-#include "../common.h"
-#include "../util/vectorized_pointwise.h"
-#include "../utils.cuh"
+#include "common.h"
 #include "math.h"
-#include "../util/rocm_vectorized_2d.cuh"
+#include "ptx.cuh"
+#include "rocm_vectorized_2d.cuh"
+#include "transformer_engine/activation.h"
+#include "transformer_engine/cast.h"
+#include "vectorized_pointwise.h"
+#include "utils.cuh"
 
 namespace transformer_engine {
 namespace gated_kernels {
@@ -191,14 +191,22 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         after_dact_reg[stage] = ActOP(act_elt, {}) * gate_elt;
       }
 
+      // Numerical truncation: downcast to IType (BF16/FP16) and upcast back to FP32
+      if constexpr (!std::is_same_v<IType, float>) {
+        after_dact_reg[stage] = static_cast<float>(static_cast<IType>(after_dact_reg[stage]));
+        if constexpr (IS_DGATED) {
+          after_dgate_reg[stage] = static_cast<float>(static_cast<IType>(after_dgate_reg[stage]));
+        }
+      }
+
       if constexpr (USE_ROWWISE_SCALING) {
         if constexpr (IS_DGATED) {
           // dgate
           float amax = fabsf(after_dgate_reg[stage]);
           const float mx_block_X_amax = warp_reduce_max_broadcast(amax);
           const e8m0_t biased_exponent_X =
-              float_to_e8m0(mx_block_X_amax * Quantized_Limits<OType>::max_norm_rcp);
-          const float scale_reciprocal_X = exp2f_rcp(biased_exponent_X);
+              ptx::float_to_e8m0(mx_block_X_amax * Quantized_Limits<OType>::max_norm_rcp);
+          const float scale_reciprocal_X = ptx::exp2f_rcp(biased_exponent_X);
 
           out_gate_rowwise_sh[shmem_idx] =
               static_cast<OType>(scale_reciprocal_X * after_dgate_reg[stage]);
@@ -217,8 +225,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         float amax = fabsf(after_dact_reg[stage]);
         const float mx_block_X_amax = warp_reduce_max_broadcast(amax);
         const e8m0_t biased_exponent_X =
-            float_to_e8m0(mx_block_X_amax * Quantized_Limits<OType>::max_norm_rcp);
-        const float scale_reciprocal_X = exp2f_rcp(biased_exponent_X);
+            ptx::float_to_e8m0(mx_block_X_amax * Quantized_Limits<OType>::max_norm_rcp);
+        const float scale_reciprocal_X = ptx::exp2f_rcp(biased_exponent_X);
 
         out_act_rowwise_sh[shmem_idx] =
             static_cast<OType>(scale_reciprocal_X * after_dact_reg[stage]);
@@ -273,8 +281,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         }
 
         const e8m0_t biased_exponent =
-            float_to_e8m0(mx_block_Y_amax * Quantized_Limits<OType>::max_norm_rcp);
-        const float scale_reciprocal = exp2f_rcp(biased_exponent);
+            ptx::float_to_e8m0(mx_block_Y_amax * Quantized_Limits<OType>::max_norm_rcp);
+        const float scale_reciprocal = ptx::exp2f_rcp(biased_exponent);
 
         // Only single thread writes the computed scaling factor
         // Also assuming one iteration covers exactly 32 rows
@@ -319,8 +327,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       }
 
       const e8m0_t biased_exponent =
-          float_to_e8m0(mx_block_Y_amax * Quantized_Limits<OType>::max_norm_rcp);
-      const float scale_reciprocal = exp2f_rcp(biased_exponent);
+          ptx::float_to_e8m0(mx_block_Y_amax * Quantized_Limits<OType>::max_norm_rcp);
+      const float scale_reciprocal = ptx::exp2f_rcp(biased_exponent);
 
       // Only single thread writes the computed scaling factor
       // Also assuming one iteration covers exactly 32 rows
