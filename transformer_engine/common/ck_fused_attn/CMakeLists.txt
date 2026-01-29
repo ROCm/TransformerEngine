@@ -30,7 +30,6 @@ message(STATUS "AITER V3_ASM_ARCHS: ${V3_ASM_ARCHS}")
 
 # pass GPU_TARGET as env into aiter codegen
 list(JOIN V3_ASM_ARCHS ";" V3_ASM_ARCHS_STR)
-set(ENV{GPU_ARCHS} "${V3_ASM_ARCHS_STR}")
 
 if(DEFINED AITER_MHA_PATH)
   message(STATUS "[AITER-PREBUILT] Using AITER_MHA_PATH=${AITER_MHA_PATH}")
@@ -55,7 +54,7 @@ else()
         COMMAND bash ${CMAKE_CURRENT_LIST_DIR}/aiter_build.sh
                 --aiter-dir ${__AITER_SOURCE_DIR}
                 --aiter-test-dir ${__AITER_TEST_DIR}
-                --gpu-archs ${V3_ASM_ARCHS_STR}
+                --gpu-archs "${V3_ASM_ARCHS_STR}"
                 --ck-tile-bf16 ${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT}
       )
       # libmha_fwd.so and libmha_bwd.so will be under 3rdparty/aiter/op_tests/cpp/mha 
