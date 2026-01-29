@@ -121,8 +121,9 @@ def _te_norm_fwd_triton(
             f"The shape of `weight` must be feature-aligned, "
             f"but {weight.shape[0]=} while {input_tensor.shape[1]=}"
         )
-    IS_FP8 = isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer))
+    IS_FP8 = isinstance(quantizer, Float8Quantizer)
     IS_MXFP8 = isinstance(quantizer, MXFP8Quantizer)
+    IS_FP8_CURRENT_SCALING = isinstance(quantizer, Float8CurrentScalingQuantizer)
     BLOCK_SIZE = block_size(input_tensor)
     USE_BLOCKED = use_blocked(input_tensor)
     NUM_PRGMS = num_programs(input_tensor, sm_margin)
@@ -215,7 +216,7 @@ def _te_norm_fwd_triton(
             quantizer.amax,
             N, ATOMIC_REDUCTION_BLOCK_SIZE,
         )
-    elif IS_MXFP8:
+    elif IS_MXFP8 or IS_FP8_CURRENT_SCALING:
         out = quantizer.quantize(out, out=ln_out)
 
     return out, mu, rsigma
