@@ -54,7 +54,7 @@ else()
         COMMAND bash ${CMAKE_CURRENT_LIST_DIR}/aiter_build.sh
                 --aiter-dir ${__AITER_SOURCE_DIR}
                 --aiter-test-dir ${__AITER_TEST_DIR}
-		            --gpu-archs "${V3_ASM_ARCHS_STR}"
+		          --gpu-archs "${V3_ASM_ARCHS_STR}"
                 --ck-tile-bf16 ${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT}
       )
       # libmha_fwd.so and libmha_bwd.so will be under 3rdparty/aiter/op_tests/cpp/mha 
