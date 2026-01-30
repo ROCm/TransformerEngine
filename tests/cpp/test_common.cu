@@ -878,10 +878,10 @@ static void fillUniformLinearBufferDevice(T* dst_dev,
 
   if (random_sign)
     affine_transform_cast_signs<T, true><<<grid, block, 0, 0>>>(
-      tmp, tmp_sign, reinterpret_cast<T*>(dst_dev), N, lo, hi);
+      tmp, tmp_sign, dst_dev, N, lo, hi);
   else
     affine_transform_cast_signs<T, false><<<grid, block, 0, 0>>>(
-      tmp, nullptr, reinterpret_cast<T*>(dst_dev), N, lo, hi);
+      tmp, nullptr, dst_dev, N, lo, hi);
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 
@@ -895,6 +895,7 @@ static void fillUniformLinearBufferDevice(T* dst_dev,
     NVTE_CHECK_CUDA(cudaFree(tmp_sign));
 }
 
+template <typename T>
 static void fillUniformTensorDevice(Tensor* t, double lo=-2.0f,
                                     double hi=1.0f, bool random_sign=false) {
   void* dst_dev_void = t->rowwise() ? t->rowwise_dptr() : t->columnwise_dptr();
@@ -904,13 +905,11 @@ static void fillUniformTensorDevice(Tensor* t, double lo=-2.0f,
   // per-tensor deterministic seed
   const unsigned long long seed = static_cast<unsigned long long>(t->gen()());
 
-  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(t->dtype(), T, {
-    T* dst_dev = reinterpret_cast<T*>(dst_dev_void);
-    // Keep the CPU mirror in sync. We could use Tensor::to_cpu() here,
-    // but that does more than just copying the data.
-    T* dst_cpu = t->rowwise() ? t->rowwise_cpu_dptr<T>() : t->columnwise_cpu_dptr<T>();
-    fillUniformLinearBufferDevice(dst_dev, dst_cpu, N, seed, lo, hi, random_sign);
-  });
+  T* dst_dev = reinterpret_cast<T*>(dst_dev_void);
+  // Keep the CPU mirror in sync. We could use Tensor::to_cpu() here,
+  // but that does more than just copying the data.
+  T* dst_cpu = t->rowwise() ? t->rowwise_cpu_dptr<T>() : t->columnwise_cpu_dptr<T>();
+  fillUniformLinearBufferDevice(dst_dev, dst_cpu, N, seed, lo, hi, random_sign);
 }
 #endif
 
@@ -920,7 +919,7 @@ void fillUniform(Tensor *t) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(t->dtype(), T,
       {
 #ifdef __HIP_PLATFORM_AMD__
-        fillUniformTensorDevice(t);
+        fillUniformTensorDevice<T>(t);
 #else
         T *data = t->rowwise_cpu_dptr<T>();
         generate_data_uniformly(data, size, &(t->gen()));
@@ -932,7 +931,7 @@ void fillUniform(Tensor *t) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(t->dtype(), T,
       {
 #ifdef __HIP_PLATFORM_AMD__
-        fillUniformTensorDevice(t);
+        fillUniformTensorDevice<T>(t);
 #else
         T *data = t->columnwise_cpu_dptr<T>();
         generate_data_uniformly(data, size, &(t->gen()));
