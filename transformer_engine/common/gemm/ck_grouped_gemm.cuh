@@ -82,11 +82,11 @@ public:
 
 template <typename Kernel>
 static inline void launch_tileloop_kernel(const ck_tile::stream_config& s,
+                                          dim3 grids,
                                           ck_tile::index_t group_num,
                                           void* kargs_dev)
 {
   const dim3 blocks = Kernel::BlockSize();
-  const dim3 grids  = Kernel::MaxOccupancyGridSize(s);
 
   ck_tile::launch_kernel(
       s,
@@ -169,6 +169,7 @@ static bool run_grouped_impl(const transformer_engine::Tensor* const* A_use,
         stride_E);
   }
 
+  const dim3 grids = Kernel::GridSize(descs);
   auto kargs = Kernel::MakeKargs(descs);
   if (!Kernel::IsSupportedArgument(kargs)) {
     NVTE_ERROR("grouped_gemm_ck_tile: CK-Tile kernel arguments not supported for this config.");
@@ -182,7 +183,7 @@ static bool run_grouped_impl(const transformer_engine::Tensor* const* A_use,
                                 stream));
 
   const ck_tile::stream_config s{stream};
-  launch_tileloop_kernel<Kernel>(s, group_num, workspace);
+  launch_tileloop_kernel<Kernel>(s, grids, group_num, workspace);
   return true;
 }
 

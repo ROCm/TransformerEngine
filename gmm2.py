@@ -20,7 +20,7 @@ M_total = sum(m_splits)
 x = torch.randn(M_total, K, device=device, dtype=dtype)
 
 # Timing helper
-def bench_cuda(fn, warmup=20, iters=100, name=""):
+def bench_cuda(fn, warmup=20, iters=100):
     # Warmup
     for _ in range(warmup):
         fn()
@@ -34,8 +34,6 @@ def bench_cuda(fn, warmup=20, iters=100, name=""):
     end = time.time()
 
     avg_ms = (end - start) * 1000.0 / iters
-    if name:
-        print(f"{name}: {avg_ms:.3f} ms (avg over {iters} runs, {warmup} warmup)")
     return avg_ms
 
 # TE GroupedLinear
@@ -44,7 +42,7 @@ glinear = te.GroupedLinear(E, K, N, bias=False).to(device=device, dtype=dtype)
 def te_run():
     return glinear(x, m_splits=m_splits)
 
-te_ms = bench_cuda(te_run, warmup=20, iters=100, name="TE GroupedLinear")
+te_ms = bench_cuda(te_run, warmup=20, iters=100)
 
 # Grab weights for reference path
 Ws = [getattr(glinear, f"weight{e}") for e in range(E)]  # each [N, K]
@@ -69,7 +67,7 @@ def torch_run():
         y_ref_buf[o:o+m].copy_(x[o:o+m] @ W[e].transpose(0, 1))
     return y_ref_buf
 
-torch_ms = bench_cuda(torch_run, warmup=20, iters=100, name="Torch loop (prealloc out)")
+torch_ms = bench_cuda(torch_run, warmup=20, iters=100)
 
 # Compare outputs
 y_te = te_run()
@@ -79,7 +77,7 @@ diff = (y_te.float() - y_ref.float())
 max_abs = diff.abs().max().item()
 rel = (diff.abs() / (y_ref.float().abs() + 1e-6)).max().item()
 
-print(f"\nErrors:")
+print(f"Errors:")
 print(f"  {y_te.shape=}, {y_ref.shape=}")
 print("  max_abs_err:", max_abs)
 print("  max_rel_err:", rel)
