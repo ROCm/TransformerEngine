@@ -20,7 +20,7 @@ if(NOT DEFINED AOTRITON_PATH)
         set(AOTRITON_NOIMAGE_MODE ON)
     endif()
 
-    set(__AOTRITON_VER "0.11.1b")
+    set(__AOTRITON_VER "0.11.2b")
     set(__AOTRITON_IMAGE_LIST
         "amd-gfx942"
         "amd-gfx950"
