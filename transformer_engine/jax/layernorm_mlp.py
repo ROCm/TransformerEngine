@@ -260,7 +260,7 @@ def _layernorm_mlp_fwd_rule(
     assert x.shape[x_contracting_dims[0]] == kernel_1.shape[k_contracting_dims[0]]
 
     use_bias_1 = bias_1 is not None
-    use_bias_2 = bias_1 is not None
+    use_bias_2 = bias_2 is not None
 
     x = with_sharding_constraint_by_logical_axes(x, norm_input_axes)
 
