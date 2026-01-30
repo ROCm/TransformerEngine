@@ -155,7 +155,7 @@ def _te_norm_fwd_triton(
         MAKE_TRANSPOSE = quantizer.columnwise_usage
         amax = (
             quantizer.amax if APPLY_ATOMIC else
-            torch.empty((NUM_PRGMS,), dtype=torch.float32, device=device)
+            torch.empty((N,), dtype=torch.float32, device=device)
         )
         tl_dtype = te_dtype_to_triton_dtype(quantizer.dtype)
         scale_inv_ptr = out._scale_inv
@@ -204,8 +204,14 @@ def _te_norm_fwd_triton(
     elif kernel == "rms":
         kwargs["USE_BLOCKED"]=USE_BLOCKED
         kwargs["NUM_PRGMS"]=NUM_PRGMS
-        kwargs["INPUT_ALIGNED_16"]=(input_tensor.data_ptr() % 16 == 0) and (input_row_stride * input_tensor.dtype.itemsize % 16 == 0)
-        kwargs["OUTPUT_ALIGNED_16"]=(out_ptr.data_ptr() % 16 == 0) and (output_row_stride * out_ptr.dtype.itemsize % 16 == 0)
+        kwargs["INPUT_ALIGNED_16"]=(
+            input_tensor.data_ptr() % 16 == 0 and
+            input_row_stride * getattr(input_tensor.dtype, 'itemsize', 1) % 16 == 0
+        )
+        kwargs["OUTPUT_ALIGNED_16"]=(
+            out_ptr.data_ptr() % 16 == 0 and
+            output_row_stride * getattr(out_ptr.dtype, 'itemsize', 1) % 16 == 0
+        )
 
     kernel_func[grid_fwd](**kwargs)
 

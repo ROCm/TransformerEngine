@@ -443,9 +443,6 @@ class TestNorms:
             if not isinstance(out_triton, MXFP8Tensor):
                 raise ValueError(f"Expected a MXFP8Tensor but got {type(out_triton)} instead.")
 
-            # TODO(micky774): Figure out if we need to apply the same view
-            # trick to MXFP8 data as we do to FP8 transpose data.
-            # I suspect not.
             if out_hip._rowwise_data is not None:
                 compare_func(
                     actual=out_triton,
@@ -475,8 +472,8 @@ class TestNorms:
                 raise ValueError(msg)
             if has_rscale_triton:
                 compare_func(
-                    actual=out_triton._rowwise_scale_inv.view(te_dtype_to_torch_dtype(out_triton._fp8_dtype)),
-                    expected=out_hip._rowwise_scale_inv.view(te_dtype_to_torch_dtype(out_triton._fp8_dtype)),
+                    actual=out_triton._rowwise_scale_inv.view(torch.uint8),
+                    expected=out_hip._rowwise_scale_inv.view(torch.uint8),
                     msg=lambda msg: f"Output rowwise scale inverse does not match triton <-> hip\n\n{msg}\n",
                 )
 
@@ -490,8 +487,8 @@ class TestNorms:
                 raise ValueError(msg)
             if has_cscale_triton:
                 compare_func(
-                    actual=out_triton._columnwise_scale_inv.view(te_dtype_to_torch_dtype(out_triton._fp8_dtype)),
-                    expected=out_hip._columnwise_scale_inv.view(te_dtype_to_torch_dtype(out_triton._fp8_dtype)),
+                    actual=out_triton._columnwise_scale_inv.view(torch.uint8),
+                    expected=out_hip._columnwise_scale_inv.view(torch.uint8),
                     msg=lambda msg: f"Output columnwise scale inverse does not match triton <-> hip\n\n{msg}\n",
                 )
 
