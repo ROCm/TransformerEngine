@@ -8,6 +8,7 @@ import torch.nn as nn
 from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 import torch.utils._pytree as pytree
+from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensorBase
 
 _ops_to_preserve_subclass = {
     torch.ops.aten.empty_like.default,
@@ -48,8 +49,12 @@ class FSDPAGTensor(torch.Tensor):
         fp8_meta_index: str,
         keep_fp8_weight_transpose_cache: bool,
     ):
-        #The underlying tensor
-        self._data = tensor
+        # Guard against double-wrapping - this should never happen
+        if type(tensor).__name__ == 'FSDPAGTensor':
+            raise ValueError(f"Cannot wrap FSDPAGTensor around another FSDPAGTensor. This indicates a bug.")
+        
+        # The underlying tensor (renamed from _data to avoid collision with Float8Tensor._data)
+        self._elem = tensor
         # Where quantizers are present
         self._module = module
         # Which quantizer to use within module.quantizers["scaling_fwd"][idx]
@@ -59,12 +64,39 @@ class FSDPAGTensor(torch.Tensor):
 
     @property
     def data(self) -> torch.Tensor:
-        return self._data.detach()
+        return self._elem.detach()
+    
+    def __getattr__(self, name):
+        """Forward Float8Tensor-specific attributes to the underlying tensor."""
+        # Avoid recursion by checking __dict__ directly
+        if '_elem' not in self.__dict__:
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+        
+        # Forward to the wrapped tensor
+        return getattr(self.__dict__['_elem'], name)
+    
+    def __setattr__(self, name, value):
+        """Forward Float8Tensor-specific attribute writes to the underlying tensor."""
+        # FSDPAGTensor's own attributes - always set on self
+        if name in ['_elem', '_module', '_fp8_meta_index', '_keep_fp8_weight_transpose_cache']:
+            object.__setattr__(self, name, value)
+        else:
+            # Try to forward to underlying tensor if it exists
+            if '_elem' in self.__dict__:
+                elem = self.__dict__['_elem']
+                # Forward to Float8Tensor if it has this attribute
+                if hasattr(elem, name):
+                    setattr(elem, name, value)
+                else:
+                    object.__setattr__(self, name, value)
+            else:
+                # _elem doesn't exist yet (during __init__), set on self
+                object.__setattr__(self, name, value)
     
     def __repr__(self):
             return (
                 f"FSDPAGTensor("
-                f"elem={self._data}, "
+                f"elem={self._elem}, "
                 f"module={self._module.__class__.__name__}, "
                 f"fp8_meta_index={self._fp8_meta_index})"
             )
@@ -76,14 +108,18 @@ class FSDPAGTensor(torch.Tensor):
             """
             # We only carry the one inner tensor.
             # We store (module, fp8_meta_index, keep_fp8_weight_transpose_cache) as metadata to reconstruct.
-            return ["_data"], (self._module, self._fp8_meta_index, self._keep_fp8_weight_transpose_cache)
+            return ["_elem"], (self._module, self._fp8_meta_index, self._keep_fp8_weight_transpose_cache)
 
     
     @staticmethod
     def __tensor_unflatten__(inner_tensors, flatten_spec, outer_size, outer_stride):
         module, fp8_meta_index, keep_fp8_weight_transpose_cache = flatten_spec
+        elem = inner_tensors["_elem"]
+        # Avoid double-wrapping if elem is already FSDPAGTensor
+        if type(elem).__name__ == 'FSDPAGTensor':
+            return elem
         return FSDPAGTensor(
-            inner_tensors["_data"],
+            elem,
             module=module,
             fp8_meta_index=fp8_meta_index,
             keep_fp8_weight_transpose_cache=keep_fp8_weight_transpose_cache
@@ -97,19 +133,31 @@ class FSDPAGTensor(torch.Tensor):
         # detach
         if func is torch.ops.aten.detach.default:
             t = args[0]
-            assert isinstance(t, cls), f"Unexpected detach input type: {type(t)}"
-            detached = t._data.detach()
-            return cls(detached, module=t._module, fp8_meta_index=t._fp8_meta_index, keep_fp8_weight_transpose_cache=t._keep_fp8_weight_transpose_cache)
+            assert type(t).__name__ == 'FSDPAGTensor', f"Unexpected detach input type: {type(t)}"
+            # Access via object.__getattribute__ to avoid __getattr__ issues
+            t_dict = object.__getattribute__(t, '__dict__')
+            elem = t_dict['_elem']
+            detached = elem.detach()
+            return cls(detached, module=t_dict['_module'], fp8_meta_index=t_dict['_fp8_meta_index'], keep_fp8_weight_transpose_cache=t_dict['_keep_fp8_weight_transpose_cache'])
 
         # Unwrap only our subclass; capture shared metadata for rewrapping
         meta: Optional[tuple[nn.Module, str, bool]] = None
 
         def unwrap(x):
             nonlocal meta
-            if isinstance(x, cls):
-                if meta is None:
-                    meta = (x._module, x._fp8_meta_index, x._keep_fp8_weight_transpose_cache)
-                return x._data
+            # Recursively unwrap FSDPAGTensor (in case of nested wrapping)
+            # Use type() check to avoid isinstance() issues
+            while type(x).__name__ == 'FSDPAGTensor':
+                x_dict = object.__getattribute__(x, '__dict__')
+                if meta is None and '_module' in x_dict:
+                    # Capture metadata from the outermost FSDPAGTensor
+                    meta = (x_dict['_module'], x_dict['_fp8_meta_index'], x_dict['_keep_fp8_weight_transpose_cache'])
+                # Access _elem directly from __dict__
+                if '_elem' in x_dict:
+                    x = x_dict['_elem']
+                else:
+                    # _elem not initialized yet, return as-is
+                    break
             return x
 
         unwrapped_args, unwrapped_kwargs = pytree.tree_map_only(cls, unwrap, (args, kwargs))
@@ -122,6 +170,10 @@ class FSDPAGTensor(torch.Tensor):
             return out
 
         def rewrap(x):
+            # Don't double-wrap FSDPAGTensor - check type name to be safe
+            if type(x).__name__ == 'FSDPAGTensor':
+                return x
+            # Wrap other tensors (including Float8Tensor)
             if isinstance(x, torch.Tensor):
                 mod, idx, keep_transpose = meta
                 return cls(x, module=mod, fp8_meta_index=idx, keep_fp8_weight_transpose_cache=keep_transpose)
@@ -141,24 +193,29 @@ class FSDPAGTensor(torch.Tensor):
                 num_gemms = 1  
 
             self._module.init_fp8_metadata(num_gemms=num_gemms)
-        if not self._module.fp8:
-            return (self._data,), (self._data.requires_grad,)
+        if not self._module.fp8 and not self._module.primary_weights_in_fp8:
+            return (self._elem,), (self._elem.requires_grad, None)
         # Use the actual data
-        base = self._data
+        base = self._elem
+        print("BASE: ", base)
         # Access the quantizer using fp8_meta_index
-        quantizer = self._module.quantizers["scaling_fwd"][self._fp8_meta_index]
+        if not isinstance(self._elem, QuantizedTensorBase):
+            quantizer = self._module.quantizers["scaling_fwd"][self._fp8_meta_index]
+            sharded_fp8_tensor = quantizer(self._elem)
+        else:
+            quantizer = self._elem._get_quantizer()
+            sharded_fp8_tensor = self._elem
         if not isinstance(quantizer, MXFP8Quantizer) and not self._keep_fp8_weight_transpose_cache:
             quantizer.set_usage(columnwise=False)
         if isinstance(quantizer, Float8CurrentScalingQuantizer):
             quantizer.with_amax_reduction = True
-        sharded_fp8_tensor = quantizer(base)
         if isinstance(quantizer, MXFP8Quantizer):
             rowwise_data = sharded_fp8_tensor._rowwise_data if quantizer.rowwise_usage else torch.empty(0, dtype=torch.uint8, device=base.device)
             rowwise_scale_inv = sharded_fp8_tensor._rowwise_scale_inv if quantizer.rowwise_usage else torch.empty(0, dtype=torch.uint8, device=base.device)
             columnwise_data = sharded_fp8_tensor._columnwise_data if quantizer.columnwise_usage else torch.empty(0, dtype=torch.uint8, device=base.device)
             columnwise_scale_inv = sharded_fp8_tensor._columnwise_scale_inv if quantizer.columnwise_usage else torch.empty(0, dtype=torch.uint8, device=base.device)
             return (rowwise_data, rowwise_scale_inv, columnwise_data, columnwise_scale_inv, ), (base.requires_grad,)
-        return (sharded_fp8_tensor._data,), (base.requires_grad,)
+        return (sharded_fp8_tensor._data,), (base.requires_grad,quantizer)
         
     def fsdp_post_all_gather(
         self,
@@ -168,12 +225,11 @@ class FSDPAGTensor(torch.Tensor):
         *,
         out: Optional[torch.Tensor] = None,
     ):
-        (requires_grad, ) = metadata
-        if not self._module.fp8:
+        (requires_grad, quantizer) = metadata
+        if not self._module.fp8 and not self._module.primary_weights_in_fp8:
             (data,) = all_gather_outputs
             return data, all_gather_outputs
         # Retrieve the same quantizer you used in pre_all_gather
-        quantizer = self._module.quantizers["scaling_fwd"][self._fp8_meta_index]
         shape = None
         if  not isinstance(quantizer, MXFP8Quantizer) and not self._keep_fp8_weight_transpose_cache:
             quantizer.set_usage(columnwise=False)
