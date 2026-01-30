@@ -126,7 +126,7 @@ def _te_norm_fwd_triton(
     IS_FP8_CURRENT_SCALING = isinstance(quantizer, Float8CurrentScalingQuantizer)
     BLOCK_SIZE = block_size(input_tensor)
     USE_BLOCKED = use_blocked(input_tensor)
-    NUM_PRGMS = num_programs(input_tensor, sm_margin)
+    NUM_PRGMS = N if kernel=='layer' else num_programs(input_tensor, sm_margin)
     MAKE_TRANSPOSE = False
     APPLY_ATOMIC = N < 512 or kernel == 'rms'
     ATOMIC_REDUCTION_BLOCK_SIZE=256
@@ -172,7 +172,7 @@ def _te_norm_fwd_triton(
             out_transpose_ptr = triton.reinterpret(out._transpose, tl_dtype)
             out_transpose_stride = out._transpose.stride(0)
 
-    grid_fwd = lambda meta: (N if kernel=='layer' else NUM_PRGMS,)
+    grid_fwd = lambda meta: (NUM_PRGMS,)
     kernel_func = _norm_kernels[kernel][autotune]
     input_row_stride = input_tensor.stride(0)
     output_row_stride=out_ptr.stride(0)
