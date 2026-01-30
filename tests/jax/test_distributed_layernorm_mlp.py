@@ -16,6 +16,8 @@ from utils import (
     is_devices_enough,
     pytest_parametrize_wrapper,
     use_jax_gemm,
+    _check_mxfp8_layernorm_mlp_grad_support,
+    _check_mxfp8_layernorm_mlp_support,
 )
 
 from transformer_engine.common import recipe
@@ -69,6 +71,13 @@ LN_BIAS_AXES = (W_NO_SHARD_AXES,)
 BIAS_1_AXES = (W_JOINED_AXES, W_TP_AXES)
 BIAS_2_AXES = (W_NO_SHARD_AXES,)
 INTERMEDIATE = 64
+
+# We set to 256 to ensure compatibility with hipblaslt MXFP8 GEMM which
+# requires the reduction dim to be multiple of 128 after sharding.
+if is_hip_extension():
+    INPUT_SHAPE += [[4, 64, 256]]
+    # TODO: Calculate intermediate size dynamically based on mesh config tpsp axis
+    INTERMEDIATE = 128 * 2
 
 
 # Only test with FSDP and TPSP as DP is not used
@@ -167,6 +176,25 @@ class TestDistributedLayernormMLP:
         use_shardy,
         with_jax_gemm,
     ):
+        if (
+            is_hip_extension()
+            and (not with_jax_gemm)
+            and use_bias
+            and (fp8_recipe is None)
+            and (dtype == jnp.bfloat16)
+        ):
+            pytest.xfail("Skip known failure case.")
+        if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
+            _check_mxfp8_layernorm_mlp_grad_support(
+                input_shape[0]*input_shape[1],
+                INTERMEDIATE,
+                len(activation_type)*INTERMEDIATE,
+                input_shape[2],
+                input_shape[2],
+                mesh_config[1][1],
+                use_bias,
+                with_jax_gemm
+            )
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
         device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
         layernorm_type = "rmsnorm"
@@ -339,6 +367,17 @@ class TestDistributedLayernormMLP:
         use_shardy,
         with_jax_gemm,
     ):
+        if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
+            _check_mxfp8_layernorm_mlp_support(
+                input_shape[0]*input_shape[1],
+                INTERMEDIATE,
+                len(activation_type)*INTERMEDIATE,
+                input_shape[2],
+                input_shape[2],
+                mesh_config[1][1],
+                use_bias,
+                with_jax_gemm
+            )
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
         batch, seqlen, hidden_in = input_shape
         layernorm_type = "rmsnorm"
