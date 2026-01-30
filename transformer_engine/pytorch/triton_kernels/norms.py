@@ -155,7 +155,7 @@ def _te_norm_fwd_triton(
         MAKE_TRANSPOSE = quantizer.columnwise_usage
         amax = (
             quantizer.amax if APPLY_ATOMIC else
-            torch.empty((N,), dtype=torch.float32, device=device)
+            torch.empty((NUM_PRGMS,), dtype=torch.float32, device=device)
         )
         tl_dtype = te_dtype_to_triton_dtype(quantizer.dtype)
         scale_inv_ptr = out._scale_inv
