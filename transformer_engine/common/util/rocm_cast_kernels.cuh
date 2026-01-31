@@ -15,6 +15,7 @@
 #include "../transpose/cast_transpose.h"
 #include "../util/vectorized_pointwise.h"
 #include "../utils.cuh"
+#include "../util/ptx.cuh"
 #include "math.h"
 #include "transformer_engine/transformer_engine.h"
 #include "../util/rocm_vectorized_2d.cuh"

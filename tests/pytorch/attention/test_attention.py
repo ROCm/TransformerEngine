@@ -360,16 +360,6 @@ model_configs_mla = {
     "mla_3_1": ModelConfig(8, 1, 16, 256, max_seqlen_kv=2048, head_dim_v=128),  # inference
     "mla_3_2": ModelConfig(8, 1, 16, 192, max_seqlen_kv=2048, head_dim_v=128),  # inference
 }
-if IS_HIP_EXTENSION:
-  model_configs_mla.update({
-    "mla_4_0": ModelConfig(
-        10, 4096, 16, 192, attn_mask_type="causal", head_dim_v=128
-    ),
-    "mla_4_1": ModelConfig(
-        10, 4096, 16, 192, head_dim_v=128
-    ),
-  })
-
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)

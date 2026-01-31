@@ -747,14 +747,19 @@ void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, 
 void adjust_ref_for_e8m0_scale_error(const std::string &name,
                                      const std::vector<size_t> &mismatch_idx,
                                      const uint8_t *test_scale, const uint8_t *ref_scale,
-                                     const size_t row_blocks, const size_t col_blocks,
-                                     const size_t stride, const size_t rows, const size_t cols,
-                                     void *ref_ptr, DType otype) {
-  double scale_val;
-  const size_t col_blocks_size = cols / col_blocks;
-  const size_t row_blocks_size = rows / row_blocks;
+                                     const size_t scale_stride, const size_t rows,
+                                     const size_t cols, bool rowwise, void *ref_ptr, DType otype) {
+  if (mismatch_idx.size() == 0) {
+    return;
+  }
+  const size_t col_blocks_size = rowwise ? 32 : 1;
+  const size_t row_blocks_size = rowwise ? 1 : 32;
+  GTEST_LOG_(INFO) << "Adjusting reference data for " << mismatch_idx.size()
+                   << " scale mismatches in tensor " << name << " "
+                   << (rowwise ? "rowwise" : "colwise") << " direction." << std::endl;
   for (const auto scale_idx : mismatch_idx) {
     const int scale_diff = ref_scale[scale_idx] - test_scale[scale_idx];
+    double scale_val;
     if (scale_diff == 1) {
       scale_val = 2.;
     } else if (scale_diff == -1) {
@@ -763,8 +768,8 @@ void adjust_ref_for_e8m0_scale_error(const std::string &name,
       GTEST_FAIL() << "Error in " << name << ": mismatch " << test_scale[scale_idx] << " vs "
                    << ref_scale[scale_idx] << " at index " << scale_idx;
     }
-    const int i = scale_idx / stride;
-    const int j = scale_idx % stride;
+    const int i = scale_idx / scale_stride;
+    const int j = scale_idx % scale_stride;
     size_t ii_min = i * row_blocks_size;
     const size_t ii_max = std::min(ii_min + row_blocks_size, rows);
     for (; ii_min < ii_max; ii_min++) {

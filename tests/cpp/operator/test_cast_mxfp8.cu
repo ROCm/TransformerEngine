@@ -339,8 +339,8 @@ void performTest_x1(const ProcessingMethod processing_method,
 #ifdef __HIP_PLATFORM_AMD__
     if (processing_method != ProcessingMethod::CAST_ONLY) {
       adjust_ref_for_e8m0_scale_error("scales", mismatches_scales_indices, gpu_scales_ptr,
-                                      ref_output_scales.get(), unpadded_blocks_Y, unpadded_blocks_X,
-                                      scales_stride, rows, cols, ref_output_c.get(), otype);
+                                      ref_output_scales.get(), scales_stride, rows, cols, rowwise,
+                                      ref_output_c.get(), otype);
       mismatches_scales = 0;
     }else{
       // should not have scale mismatch for cast only cases 
@@ -548,13 +548,15 @@ void performTest_x2(const ProcessingMethod processing_method,
 
 #ifdef __HIP_PLATFORM_AMD__
     if (processing_method != ProcessingMethod::CAST_ONLY) {
-      adjust_ref_for_e8m0_scale_error("scales_rowwise", mismatches_scales_indices_rowwise, output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
-                                      ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise, unpadded_blocks_X_rowwise,
-                                      scales_stride_rowwise, rows, cols, ref_output_c_rowwise.get(), otype);
-      adjust_ref_for_e8m0_scale_error("scales_colwise", mismatches_scales_indices_colwise, output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
-                                      ref_scales_colwise.get(), unpadded_blocks_Y_colwise, unpadded_blocks_X_colwise,
-                                      scales_stride_colwise, rows, cols, ref_output_c_colwise.get(), otype);
- 
+      adjust_ref_for_e8m0_scale_error("scales_rowwise", mismatches_scales_indices_rowwise,
+                                      output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
+                                      ref_scales_rowwise.get(), scales_stride_rowwise, rows, cols,
+                                      true, ref_output_c_rowwise.get(), otype);
+      adjust_ref_for_e8m0_scale_error("scales_colwise", mismatches_scales_indices_colwise,
+                                      output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
+                                      ref_scales_colwise.get(), scales_stride_colwise, rows, cols,
+                                      false, ref_output_c_colwise.get(), otype);
+
       mismatches_scales_rowwise = 0;
       mismatches_scales_colwise = 0;
     }else{

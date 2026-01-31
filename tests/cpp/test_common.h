@@ -496,9 +496,8 @@ void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, 
 void adjust_ref_for_e8m0_scale_error(const std::string &name,
                                      const std::vector<size_t> &mismatch_idx,
                                      const uint8_t *test_scale, const uint8_t *ref_scale,
-                                     const size_t row_blocks, const size_t col_blocks,
-                                     const size_t stride, const size_t rows, const size_t cols,
-                                     void *ref_ptr, DType otype);
+                                     const size_t scale_stride, const size_t rows,
+                                     const size_t cols, bool rowwise, void *ref_ptr, DType otype);
 #endif
 
 std::array<size_t, 4> get_scale_tensor_dims(const size_t rows, const size_t cols,

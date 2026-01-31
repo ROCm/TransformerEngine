@@ -54,8 +54,8 @@ model_configs = {
     "test_0": ModelConfig(2, 512, 16, 64),  # short seq
     "test_1": ModelConfig(2, 2048, 16, 128, attn_mask_type="causal"),  # longer seq, mask
     "test_2": ModelConfig(2, 2048, 16, 128, attn_mask_type="causal", attn_bias_type="post_scale_bias"),  # bias
-    "test_3": ModelConfig(2, 8192, 32, 128, num_gqa_groups=8, attn_mask_type="causal"),  # GQA
-    "test_4": ModelConfig(2, 8192, 128, 128, num_gqa_groups=16, attn_mask_type="causal_bottom_right")
+    "test_3": ModelConfig(2, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="causal"),  # GQA
+    "test_4": ModelConfig(2, 8192, 128, 128, num_gqa_groups=8, attn_mask_type="causal_bottom_right")
 }
 
 # DataFrame indices and columns for results
