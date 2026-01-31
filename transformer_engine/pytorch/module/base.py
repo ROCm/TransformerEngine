@@ -1324,9 +1324,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 self.keep_fp8_weight_transpose_cache = False
                 param = FSDPAGTensor(
                     param, 
-                    module=self, 
-                    fp8_meta_index=fp8_meta_index, 
-                    keep_fp8_weight_transpose_cache=self.keep_fp8_weight_transpose_cache
+                    fp8_meta_index=fp8_meta_index,
                 )
 
             # Redo parameter wrap in case we broke it above

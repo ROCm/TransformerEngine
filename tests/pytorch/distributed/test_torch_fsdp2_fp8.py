@@ -44,7 +44,7 @@ def assert_allclose(
                 )
             raise AssertionError(msg)
 
-def _run_test(fp_init, recipe):
+def _run_test(fp_init, fp8_autocast, recipe):
     test_dir = Path(__file__).parent.resolve()
     fsdp_script = test_dir / "run_fsdp2_fp8_model.py"
     
@@ -52,7 +52,10 @@ def _run_test(fp_init, recipe):
 
     if fp_init:
         test_cmd += ["--fp8-init"]
-    test_cmd += ["--recipe", recipe]
+    if fp8_autocast:
+        test_cmd += ["--fp8-autocast"]
+    if fp8_autocast or fp_init:
+        test_cmd += ["--recipe", recipe]
     
     subprocess.run(test_cmd + ['--use-fsdp2','--gradients-save-file', 'all_iters_fsdp2.pt'], env=os.environ, check=True)
     subprocess.run(test_cmd + ['--gradients-save-file', 'all_iters_dp.pt'], env=os.environ, check=True)
@@ -75,13 +78,24 @@ def cleanup_artifacts():
         if os.path.exists(fname):
             os.remove(fname)
 
+# Define test cases explicitly
+test_cases = []
+# All FP8 enabled cases (all recipes)
+for fp8_init in [True, False]:
+    for fp8_autocast in [True, False]:
+        if fp8_init or fp8_autocast:
+            for recipe in ["delayed", "current", "mxfp8"]:
+                test_cases.append((fp8_init, fp8_autocast, recipe))
+# FP8 disabled case (only once)
+test_cases.append((False, False, "delayed"))
+
+
 @pytest.mark.skipif(NUM_PROCS < 4, reason="Requires 4+ GPUs")
 @pytest.mark.skipif(NUM_PROCS % 2 != 0, reason="Requires even number of GPUs")
 @pytest.mark.skipif(not torch_version() >= (2, 4, 0), reason="Requires PyTorch 2.4.0+")
-@pytest.mark.parametrize("fp8_init", ([False]))
-@pytest.mark.parametrize("recipe", (["delayed", "current", "mxfp8"]))
+@pytest.mark.parametrize("fp8_init,fp8_autocast,recipe", test_cases)
 @pytest.mark.usefixtures("cleanup_artifacts")
-def test_distributed(fp8_init, recipe):
+def test_distributed(fp8_init, fp8_autocast, recipe):
 
     batch_size = 2048
     input_size = 2048
@@ -106,7 +120,7 @@ def test_distributed(fp8_init, recipe):
     if recipe == "mxfp8" and not mxfp8_available:  
         pytest.skip(reason_for_no_mxfp8)
 
-    _run_test(fp8_init, recipe)
+    _run_test(fp8_init, fp8_autocast, recipe)
 
 
 def test_dummy() -> None:

@@ -172,14 +172,35 @@ def _train(args):
 
     if args.memory_profile:
         torch.cuda.memory._record_memory_history(enabled='all', context='all', stacks='all')
+    
+    prof = None
+    if (
+        args.profile
+        and torch.distributed.get_rank() in args.profile_ranks
+    ):
+        prof = torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            schedule=torch.profiler.schedule(
+                wait=max(args.profile_step_start - 1, 0),
+                warmup=1 if args.profile_step_start > 0 else 0,
+                active=args.profile_step_end - args.profile_step_start,
+                repeat=1,
+            ),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(args.tensorboard_dir),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+        )
+        prof.start()
+        
     if args.fp8_init:
         # Build the model with the specified context
-        with fp8_model_init(enabled = True):
+        with fp8_model_init(enabled = True, recipe=fp8_recipe):
             model = SimpleNet(args.input_size, args.hidden_size, args.output_size, use_fsdp2=args.use_fsdp2)
     else:
         model = SimpleNet(args.input_size, args.hidden_size, args.output_size, use_fsdp2=args.use_fsdp2)
     # Move the model to the correct device
-    if not args.memory_profile:
+    if not args.memory_profile and not args.profile:
         model.load_state_dict(torch.load('fsdp_model.pth'))
     model.to(device)
 
@@ -232,25 +253,6 @@ def _train(args):
         print("Generated and saved shared input tensor.")
     
     out_tensors = []
-    prof = None
-    if (
-        args.profile
-        and torch.distributed.get_rank() in args.profile_ranks
-    ):
-        prof = torch.profiler.profile(
-            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-            schedule=torch.profiler.schedule(
-                wait=max(args.profile_step_start - 1, 0),
-                warmup=1 if args.profile_step_start > 0 else 0,
-                active=args.profile_step_end - args.profile_step_start,
-                repeat=1,
-            ),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(args.tensorboard_dir),
-            record_shapes=True,
-            profile_memory=True,
-            with_stack=True,
-        )
-        prof.start()
     for iteration in range(args.iter):
         if LOCAL_RANK == 0:
             print(f"Starting iteration...{iteration}")
