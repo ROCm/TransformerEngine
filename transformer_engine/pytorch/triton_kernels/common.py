@@ -1,14 +1,18 @@
-# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
 import torch
 import triton
 import triton.language as tl
 import transformer_engine_torch as tex
-from functools import lru_cache
+from functools import cache
+
+@cache
+def get_arch():
+    return triton.runtime.driver.active.get_current_target().arch
 
 def is_cdna4():
-    return triton.runtime.driver.active.get_current_target().arch == "gfx950"
+    return get_arch() == "gfx950"
 
 get_torch_e4m3_type = lambda: torch.float8_e4m3fn if is_cdna4() else torch.float8_e4m3fnuz
 get_torch_e5m2_type = lambda: torch.float8_e5m2 if is_cdna4() else torch.float8_e5m2fnuz
@@ -98,7 +102,3 @@ def get_fp8_max(dtype: tex.DType):
         return 240.0 if not is_cdna4() else 448.0
     if dtype == tex.DType.kFloat8E5M2:
         return 57344.0
-
-@lru_cache(maxsize=1)
-def get_arch():
-    return triton.runtime.driver.active.get_current_target().arch

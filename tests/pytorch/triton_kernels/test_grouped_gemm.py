@@ -8,6 +8,7 @@
 # ------------------------------------------------------------------------------
 
 # Python standard library
+import os
 from functools import partial
 
 # PyTorch
@@ -69,8 +70,9 @@ REAL_SHAPES: list[tuple[int, int, int, int]] = [
 ]
 # fmt: on
 
-# Test shapes are test only + real ones.
-TEST_SHAPES: list[tuple[int, int, int, int]] = TEST_ONLY_SHAPES + REAL_SHAPES
+# Test shapes are test only + real ones (real shapes only for TEST_LEVEL >= 2).
+TEST_LEVEL = int(os.environ.get("TEST_LEVEL", "1"))
+TEST_SHAPES: list[tuple[int, int, int, int]] = TEST_ONLY_SHAPES + (REAL_SHAPES if TEST_LEVEL >= 2 else [])
 
 
 # Input and output types.
