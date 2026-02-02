@@ -2036,7 +2036,6 @@ def test_grouped_linear_accuracy(
     use_cutlass=False,
 ):
     if use_triton:
-        env = EnvVarCleaner(["NVTE_USE_GROUPED_GEMM_TRITON"])
         os.environ["NVTE_USE_GROUPED_GEMM_TRITON"] = "1"
 
     fp8 = recipe is not None
@@ -2126,6 +2125,8 @@ def test_grouped_linear_accuracy(
     for o, o_ref in zip(outputs, outputs_ref):
         torch.testing.assert_close(o, o_ref, rtol=rtol, atol=atol)
 
+    if use_triton:
+        os.environ.pop("NVTE_USE_GROUPED_GEMM_TRITON", None)
 
 @pytest.mark.skipif(
     torch.cuda.get_device_capability() != (9, 0),
