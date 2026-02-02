@@ -179,7 +179,6 @@ class _GroupedLinear(torch.autograd.Function):
                 use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
 
         # Perform GEMM
-        # Perform GEMM
         if use_grouped_gemm_triton:
             general_grouped_gemm_func = general_grouped_gemm_triton
             kwargs = {"m_splits_tensor": m_splits_tensor}

@@ -2035,8 +2035,6 @@ def test_grouped_linear_accuracy(
     parallel_mode=None,
     use_cutlass=False,
 ):
-    if use_triton:
-        os.environ["NVTE_USE_GROUPED_GEMM_TRITON"] = "1"
 
     fp8 = recipe is not None
     if not IS_HIP_EXTENSION and use_triton:
@@ -2051,6 +2049,9 @@ def test_grouped_linear_accuracy(
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
+
+    if use_triton:
+        os.environ["NVTE_USE_GROUPED_GEMM_TRITON"] = "1"
 
     with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = GroupedLinear(
@@ -2114,6 +2115,9 @@ def test_grouped_linear_accuracy(
         delay_wgrad_compute,
     )
 
+    if use_triton:
+        os.environ.pop("NVTE_USE_GROUPED_GEMM_TRITON", None)
+
     atol, rtol = 0, 0
     if use_cutlass:
         atol, rtol = 1e-3, 1e-3
@@ -2125,8 +2129,6 @@ def test_grouped_linear_accuracy(
     for o, o_ref in zip(outputs, outputs_ref):
         torch.testing.assert_close(o, o_ref, rtol=rtol, atol=atol)
 
-    if use_triton:
-        os.environ.pop("NVTE_USE_GROUPED_GEMM_TRITON", None)
 
 @pytest.mark.skipif(
     torch.cuda.get_device_capability() != (9, 0),
