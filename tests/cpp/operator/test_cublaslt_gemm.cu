@@ -740,4 +740,47 @@ INSTANTIATE_TEST_SUITE_P(OperatorTest, DqGEMMTestSuite,
                          [](const testing::TestParamInfo<DqGEMMTestSuite::ParamType>& info) {
                            return MKN(std::get<0>(info.param)) + "x" + TN(std::get<3>(info.param));
                          });
+
+TEST(InputGenTest, FillUniform_DoesNotGetOverwrittenByFromCpu) {
+  const size_t rows = 128;
+  const size_t cols = 256;
+  const size_t N = rows * cols;
+
+  test::Tensor t("fillUniform_regression_fp32",
+           std::vector<size_t>{rows, cols},
+           transformer_engine::DType::kFloat32,
+           /*rowwise=*/true,
+           /*columnwise=*/false);
+
+  // Tensor constructor initializes CPU mirror + device to zero.
+  // If GPU generation happens but CPU mirror is not updated,
+  // any later test::Tensor::from_cpu() will overwrite device back to zeros.
+  fillUniform(&t);
+
+  // Check the CPU mirror has *actual* generated values, not all zeros
+  const float* cpu = t.rowwise_cpu_dptr<float>();
+
+  bool any_nonzero = false;
+  for (size_t i = 0; i < N; ++i) {
+    any_nonzero |= (cpu[i] != 0.0f);
+    if (any_nonzero)
+      break;
+  }
+
+  ASSERT_TRUE(any_nonzero) << "CPU mirror is all zeros. "
+                           << "Likely GPU-generated data got overwritten by from_cpu().";
+
+  // Check device matches CPU mirror after fillUniform completes
+  std::vector<float> dev(N, 0.0f);
+  NVTE_CHECK_CUDA(cudaMemcpy(dev.data(),
+                           t.rowwise_dptr(),
+                           N * sizeof(float),
+                           cudaMemcpyDeviceToHost));
+
+  for (size_t i = 0; i < N; ++i) {
+    ASSERT_EQ(dev[i], cpu[i]) << "Mismatch at i=" << i
+                              << " dev=" << dev[i] << " cpu=" << cpu[i];
+  }
+}
+
 #endif  // __HIP_PLATFORM_AMD__
