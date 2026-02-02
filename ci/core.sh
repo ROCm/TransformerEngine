@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -13,7 +13,7 @@ if [ -z "$TEST_SGPU" ]; then
     exit 0
 fi
 
-n_parallel_jobs=8
+n_parallel_jobs=4
 
 configure_omp_threads $n_parallel_jobs
 
