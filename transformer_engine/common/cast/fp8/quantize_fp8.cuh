@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -12,7 +14,9 @@
 #define TRANSFORMER_ENGINE_QUANTIZE_FP8_CUH_
 
 #include <cuda.h>
+#ifndef __HIP_PLATFORM_AMD__
 #include <cudaTypedefs.h>
+#endif //#ifndef __HIP_PLATFORM_AMD__
 #include <cuda_runtime.h>
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
@@ -35,6 +39,58 @@
 namespace transformer_engine {
 namespace dispatch {
 namespace fp8 {
+#ifdef __HIP_PLATFORM_AMD__
+constexpr size_t TILE_DIM = 32;
+template <typename DTypeReduce>
+__global__ void partial_reduce_kernel(const DTypeReduce* input, float* partial_output, int rows, int cols) {
+  __shared__ float tile[TILE_DIM][TILE_DIM];
+
+  int tile_start_col = blockIdx.x * TILE_DIM;
+  int tile_start_row = blockIdx.y * TILE_DIM;
+  int thread_col_in_tile = threadIdx.x;
+  int thread_row_in_tile = threadIdx.y;
+
+  int global_col = tile_start_col + thread_col_in_tile;
+  int global_row = tile_start_row + thread_row_in_tile;
+
+  if (global_row < rows && global_col < cols) {
+    tile[thread_row_in_tile][thread_col_in_tile] = static_cast<float>(input[global_row * cols + global_col]);
+  } else {
+    tile[thread_row_in_tile][thread_col_in_tile] = 0.0f;
+  }
+  __syncthreads();
+
+  for (int stride = TILE_DIM / 2; stride > 0; stride /= 2) {
+    if (thread_row_in_tile < stride) {
+      tile[thread_row_in_tile][thread_col_in_tile] += tile[thread_row_in_tile + stride][thread_col_in_tile];
+    }
+    __syncthreads();
+  }
+
+  if (thread_row_in_tile == 0 && global_col < cols) {
+    partial_output[blockIdx.y * cols + global_col] = tile[0][thread_col_in_tile];
+  }
+}
+
+template <typename DTypeReduce, typename DBiasTypeOut>
+void reduce_dbias_rocm(const DTypeReduce *workspace_ptr, Tensor *dbias, const size_t rows,
+                       const size_t cols, cudaStream_t stream, Tensor* partial_sum_workspace) {
+  dim3 block_dim_partial(TILE_DIM, TILE_DIM);
+  dim3 grid_dim_partial(DIVUP(cols, TILE_DIM), DIVUP(rows, TILE_DIM));
+
+  const size_t partial_rows = grid_dim_partial.y;
+  float* partial_workspace = reinterpret_cast<float*>(partial_sum_workspace->data.dptr);
+
+  partial_reduce_kernel<DTypeReduce><<<grid_dim_partial, block_dim_partial, 0, stream>>>(
+    workspace_ptr,
+    partial_workspace,
+    rows, cols);
+
+  common::reduce_dbias<DBiasTypeOut>(partial_workspace, dbias, partial_rows, cols, stream);
+}
+
+
+#else
 namespace quantize_2D_kernel {
 
 constexpr size_t FP8_CHUNK_DIM_Y = 128;
@@ -454,16 +510,33 @@ void quantize_2D(const Tensor &input, const Tensor *act_input, Tensor *output, T
           });  // NOLINT(*)
   );           // NOLINT(*)
 }
+#endif //#ifdef __HIP_PLATFORM_AMD__
 
 namespace detail {
 using Empty = transformer_engine::Empty;
 __device__ inline float identity(float value, const Empty &) { return value; }
 }  // namespace detail
 
+/* HIPCC has strict rules for __device__ functions usage on host.
+   It forbids not only calling but also other ODR-use assigning to variables
+   https://github.com/llvm/llvm-project/issues/105825
+   Use templated struct wrapper to work around
+ */
+template<typename ComputeType, typename ParamOP, ComputeType (*OP)(ComputeType, const ParamOP &)>
+struct ActivationType
+{
+    static constexpr auto op = OP;
+};
+
+
 template <typename ParamOP, float (*OP)(float, const ParamOP &)>
 void CastVectorizedUnaryKernelLauncher(const Tensor &input, const Tensor *noop, Tensor *output,
                                        cudaStream_t stream) {
+#ifdef __HIP_PLATFORM_AMD__
+  constexpr float (*UnaryOP)(float, const ParamOP &) = (ActivationType<float, ParamOP, OP>::op == nullptr) ? ActivationType<float, ParamOP, detail::identity>::op : ActivationType<float, ParamOP, OP>::op;
+#else //#ifdef __HIP_PLATFORM_AMD__
   constexpr float (*UnaryOP)(float, const ParamOP &) = (OP == nullptr) ? detail::identity : OP;
+#endif //#ifdef __HIP_PLATFORM_AMD__
   const size_t N = product(input.data.shape);
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.data.dtype, IType,
@@ -487,7 +560,11 @@ void CastVectorizedUnaryKernelLauncher(const Tensor &input, const Tensor *noop, 
 template <typename ParamOP, float (*OP)(float, const ParamOP &)>
 void CastVectorizedUnaryGradKernelLauncher(const Tensor &grad, const Tensor *input, Tensor *output,
                                            cudaStream_t stream) {
+#ifdef __HIP_PLATFORM_AMD__
+  constexpr float (*UnaryOP)(float, const ParamOP &) = (ActivationType<float, ParamOP, OP>::op == nullptr) ? ActivationType<float, ParamOP, detail::identity>::op : ActivationType<float, ParamOP, OP>::op;
+#else //#ifdef __HIP_PLATFORM_AMD__
   constexpr float (*UnaryOP)(float, const ParamOP &) = (OP == nullptr) ? detail::identity : OP;
+#endif //#ifdef __HIP_PLATFORM_AMD__
   const size_t N = product(input->data.shape);
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input->data.dtype, IType,
@@ -512,7 +589,9 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
 void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, Tensor *output,
               Tensor *dbias, Tensor *workspace, cudaStream_t stream) {
+#ifndef __HIP_PLATFORM_AMD__
   using namespace quantize_1D_kernel;
+#endif //#ifndef __HIP_PLATFORM_AMD__
   CheckNoopTensor(*noop, "cast_noop");
   CheckInputTensor(input, "cast_input");
   CheckOutputTensor(*output, "cast_output");
@@ -531,6 +610,85 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
   NVTE_CHECK(!is_fp8_dtype(input.dtype()), "Input must be in higher precision.");
   NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
 
+#ifdef __HIP_PLATFORM_AMD__
+  const size_t rows = input.flat_first_dim();
+  const size_t cols = input.flat_last_dim();
+
+  if constexpr (IS_DBIAS) {
+    NVTE_CHECK(workspace, "Workspace must be provided when IS_DBIAS is true.");
+    if (workspace->data.dptr == nullptr) {
+      if constexpr (IS_DACT) {
+        const size_t partial_rows = DIVUP(rows, TILE_DIM);
+        size_t total_elements = (rows * cols) + (partial_rows * cols);
+        workspace->data.shape = {total_elements};
+        workspace->data.dtype = DType::kFloat32;
+      } else {
+        workspace->data.shape = {rows, cols};
+        workspace->data.dtype = DType::kFloat32;
+      }
+      return;
+    }
+
+    const void *ptr_to_reduce = nullptr;
+    DType dtype_to_reduce;
+
+    workspace->amax = {};
+    workspace->scale = {};
+    workspace->scale_inv = {};
+
+    Tensor workspace_buffer;
+    Tensor partial_sum_buffer;
+
+    if constexpr (IS_DACT) {
+      // The values to reduce are the result of the dAct function.
+      NVTE_CHECK(act_input, "Gradient tensor must be provided for DBias + DACT.");
+
+      const size_t partial_rows = DIVUP(rows, TILE_DIM);
+      const size_t full_size_bytes = rows * cols * sizeof(float);
+      workspace_buffer = *workspace;
+      workspace_buffer.data.shape = {rows, cols};
+      partial_sum_buffer.data.dptr = reinterpret_cast<char*>(workspace->data.dptr) + full_size_bytes;
+      partial_sum_buffer.data.shape = {partial_rows, cols};
+      partial_sum_buffer.data.dtype = DType::kFloat32;
+      workspace = &partial_sum_buffer;
+
+      CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, &workspace_buffer, stream);
+      if (output && output->data.dptr) {
+        CastVectorizedUnaryKernelLauncher<transformer_engine::Empty, nullptr>(workspace_buffer, noop, output, stream);
+      }
+      ptr_to_reduce = workspace_buffer.data.dptr;
+      dtype_to_reduce = workspace_buffer.data.dtype;
+    } else {
+      if (output && output->data.dptr) {
+        CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
+      }
+      // The values to reduce are just the input values.
+      ptr_to_reduce = input.data.dptr;
+      dtype_to_reduce = input.data.dtype;
+    }
+
+    NVTE_CHECK(dbias->data.shape == std::vector<size_t>{cols}, "Wrong shape of DBias tensor.");
+
+    TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+        dbias->data.dtype, DBiasTypeOut,
+        TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+          dtype_to_reduce, DTypeReduce,
+          reduce_dbias_rocm<DTypeReduce, DBiasTypeOut>(
+            reinterpret_cast<const DTypeReduce *>(ptr_to_reduce),
+            dbias, rows, cols, stream, workspace);
+        );
+    );
+  } else {
+    if (output && output->data.dptr) {
+      if constexpr (IS_DACT) {
+        NVTE_CHECK(act_input, "Gradient tensor must be provided for DACT output.");
+        CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
+      } else {
+        CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
+      }
+    }
+  }
+#else
   // Supported by the Arch >= 10.0
   if (is_supported_by_CC_100()) {
     if (!IS_DBIAS && !IS_DACT) {
@@ -571,6 +729,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
       CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
     }
   }
+#endif //#ifdef __HIP_PLATFORM_AMD__
 }
 
 }  // namespace fp8

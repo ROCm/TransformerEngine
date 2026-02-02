@@ -27,15 +27,10 @@
 #include "../util/handle_manager.h"
 #include "../util/logging.h"
 #include "../util/multi_stream.h"
-<<<<<<< HEAD
-#include "common/util/cuda_runtime.h"
-#ifndef __HIP_PLATFORM_AMD__
-#include "cutlass_grouped_gemm.cuh"
-#endif
-=======
 #include "./config.h"
+#ifndef __HIP_PLATFORM_AMD__
 #include "./cutlass_grouped_gemm.cuh"
->>>>>>> 389a6b
+#endif
 
 #ifndef __HIP_PLATFORM_AMD__
 namespace {
@@ -333,7 +328,7 @@ namespace transformer_engine {
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, cublasOperation_t transa,
                  cublasOperation_t transb, bool grad, void* workspace, size_t workspaceSize,
-                 float alpha, float beta, bool use_split_accumulator, int math_sm_count,
+                 const void* alpha_ptr, const void* beta_ptr, bool use_split_accumulator, int math_sm_count,
                  int m_split, int n_split, bool gemm_producer, const Tensor *inputCounter,
                  hipStream_t stream, int compute_stream_offset = -1);
 #else // Use cublasLt
@@ -928,12 +923,9 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
                              cudaStream_t stream) {
   NVTE_API_CALL(nvte_cublas_atomic_gemm);
   using namespace transformer_engine;
-<<<<<<< HEAD
 
 #ifndef __HIP_PLATFORM_AMD__
   // Check CUDA and cuBLAS versions
-=======
->>>>>>> 389a6b
 #if !(CUDA_VERSION >= 12020 && CUDA_VERSION < 13000)
   NVTE_ERROR("Atomic GEMM requires CUDA >=12.2.0 and <13.0.0, but compile-time CUDA version is ",
              CUDA_VERSION);
@@ -951,7 +943,7 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
       cublas_version() >= 120205 && cublas_version() < 130000,
       "Atomic GEMM requires cuBLAS version >=12.2.5 and <13.0.0, but run-time cuBLAS version is ",
       cublas_version());
-#endif //__HIP_PLATFORM_AMD__
+#endif 
 
   const Tensor *inputA = convertNVTETensorCheck(A);
   const Tensor *inputB = convertNVTETensorCheck(B);
@@ -971,7 +963,7 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
               (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad, wspace->data.dptr, wspace->data.shape[0],
               alpha_ptr, beta_ptr, use_split_accumulator, math_sm_count, m_split, n_split,
               gemm_producer, inputCounter, stream);
-#endif
+#endif //#ifndef __HIP_PLATFORM_AMD__
 }
 
 void multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
@@ -992,28 +984,24 @@ void multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETens
   }
 
   for (int i = 0; i < num_gemms; i++) {
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_AMD__
-    {
-      const Tensor *inputA = convertNVTETensorCheck(A[i]);
-      const Tensor *inputB = convertNVTETensorCheck(B[i]);
-      Tensor *outputD = convertNVTETensorCheck(D[i]);
-      const Tensor *biasTensor = convertNVTETensorCheck(bias[i]);
-      Tensor *outputGelu = convertNVTETensorCheck(pre_gelu_out[i]);
-      Tensor *wspace = convertNVTETensorCheck(workspace[i % num_streams]);
+    const Tensor *inputA = convertNVTETensorCheck(A[i]);
+    const Tensor *inputB = convertNVTETensorCheck(B[i]);
+    Tensor *outputD = convertNVTETensorCheck(D[i]);
+    const Tensor *biasTensor = convertNVTETensorCheck(bias[i]);
+    Tensor *outputGelu = convertNVTETensorCheck(pre_gelu_out[i]);
+    Tensor *wspace = convertNVTETensorCheck(workspace[i % num_streams]);
 
-      cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu,
-                  (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad,
-                  wspace->data.dptr, wspace->data.shape[0], 1.0f, (accumulate) ? 1.0f : 0.0f,
-                  use_split_accumulator, math_sm_count, 0, 0, false, nullptr,
-                  detail::get_compute_stream(i % num_streams), i % num_streams);
-    }
+    // Scales
+    const float alpha = 1;
+    const float beta = accumulate ? 1 : 0;
+
+    cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu,
+                (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad,
+                wspace->data.dptr, wspace->data.shape[0], &alpha, &beta,
+                use_split_accumulator, math_sm_count, 0, 0, false, nullptr,
+                detail::get_compute_stream(i % num_streams), i % num_streams);
 #else
-    nvte_cublas_gemm(A[i], B[i], D[i], bias[i], pre_gelu_out[i], transa, transb, grad,
-                     workspace[i % num_streams], accumulate, use_split_accumulator, math_sm_count,
-                     detail::get_compute_stream(i % num_streams));
-#endif
-=======
     // Check whether GELU or dGELU epilogue is requested
     Tensor *pre_gelu_tensor = convertNVTETensor(pre_gelu_out[i]);
     bool with_gelu_dgelu_epilogue =
@@ -1038,7 +1026,7 @@ void multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETens
     nvte_cublas_gemm_v2(transa, transb, &alpha, A[i], B[i], &beta, D[i], D[i],
                         workspace[i % num_streams], &config,
                         detail::get_compute_stream(i % num_streams));
->>>>>>> 389a6b
+#endif
   }
 
   // record events on compute streams

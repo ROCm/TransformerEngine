@@ -20,34 +20,18 @@
 #include <cuda_runtime.h>
 #include <transformer_engine/transformer_engine.h>
 
-<<<<<<< HEAD:transformer_engine/common/util/dequantize_kernels.cuh
-#include <cfloat>
-#include <limits>
-
-#include "../common.h"
-#include "../transpose/cast_transpose.h"
-#include "../util/vectorized_pointwise.h"
-#include "../utils.cuh"
-#include "math.h"
-#include "ptx.cuh"
-#include "transformer_engine/activation.h"
-#include "transformer_engine/transpose.h"
-#ifdef __HIP_PLATFORM_AMD__
-#include "rocm_dequantize_kernels.cuh"
-#endif
-=======
 #include "../../common.h"
 #include "../../util/math.h"
 #include "../../util/ptx.cuh"
 #include "../../utils.cuh"
->>>>>>> 389a6b:transformer_engine/common/cast/mxfp8/dequantize_mxfp8.cuh
 
 namespace transformer_engine {
 namespace dispatch {
 namespace mxfp8 {
 namespace dequantize_kernel {
-
-#ifndef __HIP_PLATFORM_AMD__
+#ifdef __HIP_PLATFORM_AMD__
+#include "rocm_dequantize_mxfp8.cuh"
+#else
 template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     dequantize_mxfp8_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
@@ -225,11 +209,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   }
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
-<<<<<<< HEAD:transformer_engine/common/util/dequantize_kernels.cuh
 #endif // #ifndef __HIP_PLATFORM_AMD__
-=======
 }  // namespace dequantize_kernel
->>>>>>> 389a6b:transformer_engine/common/cast/mxfp8/dequantize_mxfp8.cuh
 
 inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
   using namespace dequantize_kernel;
@@ -328,39 +309,9 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
 #endif
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
-<<<<<<< HEAD:transformer_engine/common/util/dequantize_kernels.cuh
-}  // namespace dequantization
 
-namespace detail {
-
-void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t stream) {
-  CheckInputTensor(input, "cast_input");
-  CheckOutputTensor(*output, "cast_output");
-
-  if (is_tensor_scaling(input.scaling_mode)) {
-    dequantization::fp8_dequantize(input, output, stream);
-  } else if (is_mxfp_scaling(input.scaling_mode)) {
-#ifdef __HIP_PLATFORM_AMD__
-    if (1) {
-#else
-    if (is_supported_by_CC_100()) {
-#endif
-      dequantization::mxfp8_dequantize(input, output, stream);
-    } else {
-      NVTE_ERROR("MXFP8 Dequantization is NOT supported by architectures < 10.0");
-    }
-  } else {
-    // TODO(kwyss): Move dequantization code from torch to C++ for NVTE_BLOCK_SCALING
-    NVTE_ERROR("Not implemented scaling mode: " + to_string(input.scaling_mode) + ".");
-  }
-}
-
-}  // namespace detail
-
-=======
 }  // namespace mxfp8
 }  // namespace dispatch
->>>>>>> 389a6b:transformer_engine/common/cast/mxfp8/dequantize_mxfp8.cuh
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_DEQUANTIZE_MXFP8_CUH_

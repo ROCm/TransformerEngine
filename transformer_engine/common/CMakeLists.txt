@@ -33,20 +33,8 @@ else()
 endif()
 
 # Language options
-<<<<<<< HEAD
 if(USE_CUDA)
 # Removed indent to minimize code diff with NV upstream
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
-    set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90 100 120)
-  elseif (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
-    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90 100 120)
-  else ()
-    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
-  endif()
-endif()
-=======
->>>>>>> 389a6b
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
@@ -180,31 +168,21 @@ find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 # Configure Transformer Engine library
 include_directories(${PROJECT_SOURCE_DIR}/..)
 set(transformer_engine_SOURCES)
-<<<<<<< HEAD
-# Source files in both cuda and rocm
-list(APPEND transformer_engine_SOURCES
-=======
 set(transformer_engine_cpp_sources)
 set(transformer_engine_cuda_sources)
 set(transformer_engine_cuda_arch_specific_sources)
 
+# Source files in both cuda and rocm
 list(APPEND transformer_engine_cpp_sources
-     cudnn_utils.cpp
->>>>>>> 389a6b
      transformer_engine.cpp
-     fused_attn/fused_attn.cpp
      gemm/config.cpp
      normalization/common.cpp
      normalization/layernorm/ln_api.cpp
      normalization/rmsnorm/rmsnorm_api.cpp
      util/cuda_driver.cpp
-     util/cuda_nvml.cpp
      util/cuda_runtime.cpp
      util/multi_stream.cpp
-     util/rtc.cpp
-     comm_gemm_overlap/userbuffers/ipcsocket.cc
-     comm_gemm_overlap/userbuffers/userbuffers-host.cpp
-     comm_gemm_overlap/comm_gemm_overlap.cpp)
+     util/rtc.cpp)
 
 list(APPEND transformer_engine_cuda_sources
      common.cu
@@ -218,43 +196,18 @@ list(APPEND transformer_engine_cuda_sources
      transpose/cast_transpose_fusion.cu
      transpose/transpose_fusion.cu
      transpose/multi_cast_transpose.cu
-<<<<<<< HEAD
-=======
-     transpose/quantize_transpose_vector_blockwise.cu
->>>>>>> 389a6b
      transpose/swap_first_dims.cu
      dropout/dropout.cu
      fused_attn/flash_attn.cu
      fused_attn/context_parallel.cu
      fused_attn/kv_cache.cu
-<<<<<<< HEAD
-     activation/relu.cu
-     activation/swiglu.cu
      gemm/cublaslt_gemm.cu
-     normalization/common.cpp
-     normalization/layernorm/ln_api.cpp
-=======
-     fused_attn/fused_attn_f16_max512_seqlen.cu
-     fused_attn/fused_attn_f16_arbitrary_seqlen.cu
-     fused_attn/fused_attn_fp8.cu
-     fused_attn/utils.cu
-     gemm/cublaslt_gemm.cu
->>>>>>> 389a6b
      normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
      normalization/layernorm/ln_fwd_cuda_kernel.cu
      normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
      normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
      permutation/permutation.cu
      util/padding.cu
-<<<<<<< HEAD
-     util/cuda_driver.cpp
-     util/cuda_runtime.cpp
-     util/multi_stream.cpp
-     util/rtc.cpp
-=======
->>>>>>> 389a6b
-     swizzle/swizzle.cu
-     swizzle/swizzle_block_scaling.cu
      fused_softmax/scaled_masked_softmax.cu
      fused_softmax/scaled_upper_triang_masked_softmax.cu
      fused_softmax/scaled_aligned_causal_masked_softmax.cu
@@ -264,41 +217,51 @@ list(APPEND transformer_engine_cuda_sources
      fused_router/fused_topk_with_score_function.cu
      recipe/current_scaling.cu
      recipe/delayed_scaling.cu
-<<<<<<< HEAD
      recipe/fp8_block_scaling.cu)
-if(USE_CUDA)
-# Removed indent to minimize code diff with NV upstream
-# Files unique in cuda building
-list(APPEND transformer_engine_SOURCES
-     cudnn_utils.cpp
-     transpose/quantize_transpose_square_blockwise.cu
-     transpose/quantize_transpose_vector_blockwise.cu
-     fused_attn/fused_attn_f16_max512_seqlen.cu
-     fused_attn/fused_attn_f16_arbitrary_seqlen.cu
-     fused_attn/fused_attn_fp8.cu
-     fused_attn/fused_attn.cpp
-     fused_attn/utils.cu
-     gemm/cutlass_grouped_gemm.cu
-     util/cuda_nvml.cpp
-     comm_gemm_overlap/userbuffers/ipcsocket.cc
-     comm_gemm_overlap/userbuffers/userbuffers-host.cpp
-     comm_gemm_overlap/userbuffers/userbuffers.cu
-     comm_gemm_overlap/comm_gemm_overlap.cpp)
-=======
-     recipe/fp8_block_scaling.cu
-     recipe/nvfp4.cu
-     comm_gemm_overlap/userbuffers/userbuffers.cu)
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
-     gemm/cutlass_grouped_gemm.cu
      cast/cast.cu
      activation/gelu.cu
      activation/relu.cu
-     activation/swiglu.cu
-     transpose/quantize_transpose_square_blockwise.cu
-     transpose/quantize_transpose_vector_blockwise_fp4.cu
-     hadamard_transform/hadamard_transform.cu
-     hadamard_transform/hadamard_transform_cast_fusion.cu)
+     activation/swiglu.cu)
+
+if(USE_CUDA)
+#NV specific source codes
+    list(APPEND transformer_engine_cpp_sources
+        cudnn_utils.cpp
+        fused_attn/fused_attn.cpp
+        util/cuda_nvml.cpp
+        comm_gemm_overlap/userbuffers/ipcsocket.cc
+        comm_gemm_overlap/userbuffers/userbuffers-host.cpp
+        comm_gemm_overlap/comm_gemm_overlap.cpp)
+    list(APPEND transformer_engine_cuda_sources
+        transpose/quantize_transpose_vector_blockwise.cu
+        fused_attn/fused_attn_f16_max512_seqlen.cu
+        fused_attn/fused_attn_f16_arbitrary_seqlen.cu
+        fused_attn/fused_attn_fp8.cu
+        fused_attn/utils.cu
+        swizzle/swizzle.cu
+        swizzle/swizzle_block_scaling.cu
+        recipe/nvfp4.cu
+        comm_gemm_overlap/userbuffers/userbuffers.cu)
+    list(APPEND transformer_engine_cuda_arch_specific_sources
+        gemm/cutlass_grouped_gemm.cu
+        transpose/quantize_transpose_square_blockwise.cu
+        transpose/quantize_transpose_vector_blockwise_fp4.cu
+        hadamard_transform/hadamard_transform.cu
+        hadamard_transform/hadamard_transform_cast_fusion.cu)
+else()
+#ROCm specific source codes
+    list(APPEND transformer_engine_cpp_sources
+        fused_attn_rocm/fused_attn.cpp
+        gemm/rocm_gemm.cu
+        amd_detail/system.cpp)
+    list(APPEND transformer_engine_cuda_sources
+        fused_attn_rocm/fused_attn_aotriton.cpp
+        fused_attn_rocm/fused_attn_ck.cpp
+        fused_attn_rocm/utils.cpp)
+endif()
+
 
 # Compiling the files with the worst compilation time first to hopefully overlap
 # better with the faster-compiling cpp files
@@ -306,6 +269,7 @@ list(APPEND transformer_engine_SOURCES ${transformer_engine_cuda_arch_specific_s
                                        ${transformer_engine_cuda_sources}
                                        ${transformer_engine_cpp_sources})
 
+if(USE_CUDA)
 # Set compile options for CUDA sources with generic architectures
 foreach(cuda_source IN LISTS transformer_engine_cuda_sources)
   set(arch_compile_options)
@@ -339,7 +303,6 @@ foreach(cuda_source IN LISTS transformer_engine_cuda_arch_specific_sources)
     )
   endif()
 endforeach()
->>>>>>> 389a6b
 
 if (NVTE_WITH_CUBLASMP)
 list(APPEND transformer_engine_SOURCES
@@ -347,14 +310,8 @@ list(APPEND transformer_engine_SOURCES
 endif()
 
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
+
 else()
-  list(APPEND transformer_engine_SOURCES
-       fused_attn_rocm/fused_attn.cpp
-       fused_attn_rocm/fused_attn_aotriton.cpp
-       fused_attn_rocm/fused_attn_ck.cpp
-       fused_attn_rocm/utils.cpp
-       gemm/rocm_gemm.cu
-       amd_detail/system.cpp)
 
   # process source code files
   set(TE ${CMAKE_CURRENT_SOURCE_DIR}/../..)
@@ -386,32 +343,20 @@ else()
   message(STATUS "nvte hipified sources: ${te_hip_sources}")
 
   add_library(transformer_engine SHARED ${te_hip_sources})
-  target_include_directories(transformer_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+  target_include_directories(transformer_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
-<<<<<<< HEAD
 if (USE_CUDA)
-if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
-  set_source_files_properties(
-    "gemm/cutlass_grouped_gemm.cu"
-    PROPERTIES
-    COMPILE_FLAGS
-    "-gencode arch=compute_90a,code=sm_90a")
-else()
-  message(FATAL_ERROR "cutlass gemm/cutlass_grouped_gemm.cu kernel required sm 90a")
-endif()
-endif() #USE_CUDA
-=======
 # CUTLASS kernels require SM90a and cause hang in debug build
 set_property(
   SOURCE gemm/cutlass_grouped_gemm.cu
   APPEND
   PROPERTY
   COMPILE_OPTIONS "--generate-code=arch=compute_90a,code=sm_90a;-g0")
->>>>>>> 389a6b
+endif() #USE_CUDA
 
 # Configure dependencies
 if (USE_CUDA)
@@ -567,22 +512,7 @@ target_include_directories(transformer_engine PRIVATE
                            "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
 
 # Compiler options
-<<<<<<< HEAD
-set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
-                            fused_softmax/scaled_upper_triang_masked_softmax.cu
-                            fused_softmax/scaled_aligned_causal_masked_softmax.cu
-                            multi_tensor/adam.cu
-                            multi_tensor/compute_scale.cu
-                            multi_tensor/l2norm.cu
-                            multi_tensor/scale.cu
-                            multi_tensor/sgd.cu
-                            fused_attn/flash_attn.cu
-                            fused_attn/context_parallel.cu
-                            fused_attn/kv_cache.cu
-                            PROPERTIES
-                            COMPILE_OPTIONS "--use_fast_math")
 if(USE_CUDA)
-=======
 set(nvte_sources_with_fast_math)
 list(APPEND nvte_sources_with_fast_math fused_softmax/scaled_masked_softmax.cu
                                         fused_softmax/scaled_upper_triang_masked_softmax.cu
@@ -596,7 +526,6 @@ list(APPEND nvte_sources_with_fast_math fused_softmax/scaled_masked_softmax.cu
                                         fused_attn/context_parallel.cu
                                         fused_attn/kv_cache.cu)
 
->>>>>>> 389a6b
 option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" OFF)
 if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
   list(APPEND nvte_sources_with_fast_math activation/gelu.cu

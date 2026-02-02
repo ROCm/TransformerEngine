@@ -12,7 +12,9 @@
 #define TRANSFORMER_ENGINE_QUANTIZE_CORE_COMMON_CUH_
 
 #include <cuda.h>
+#ifndef __HIP_PLATFORM_AMD__
 #include <cudaTypedefs.h>
+#endif //#ifndef __HIP_PLATFORM_AMD__
 #include <cuda_runtime.h>
 #include <transformer_engine/transformer_engine.h>
 

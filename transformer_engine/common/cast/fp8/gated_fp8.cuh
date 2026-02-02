@@ -12,7 +12,9 @@
 #define TRANSFORMER_ENGINE_GATED_FP8_CUH_
 
 #include <cuda.h>
+#ifndef __HIP_PLATFORM_AMD__
 #include <cudaTypedefs.h>
+#endif //#ifndef __HIP_PLATFORM_AMD__
 #include <cuda_runtime.h>
 #include <transformer_engine/transformer_engine.h>
 
@@ -25,6 +27,7 @@
 namespace transformer_engine {
 namespace dispatch {
 namespace fp8 {
+#ifndef __HIP_PLATFORM_AMD__
 namespace kernel {
 
 constexpr size_t CHUNK_DIM_Y = 128;
@@ -348,6 +351,7 @@ void cast_gated_tma(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
           NVTE_CHECK_CUDA(cudaGetLastError()););  // NOLINT(*)
   );                                              // NOLINT(*)
 }
+#endif //#ifndef __HIP_PLATFORM_AMD__
 
 template <typename ParamOP, float (*ActOP)(float, const ParamOP &)>
 void cast_gated_fwd(const Tensor &input, Tensor *output, ParamOP &p, cudaStream_t stream) {

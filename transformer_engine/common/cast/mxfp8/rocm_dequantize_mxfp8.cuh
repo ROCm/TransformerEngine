@@ -5,26 +5,7 @@
  ************************************************************************/
 
 #pragma once
-
-#include <cfloat>
-#include <cuda.h>
-#include <cuda_runtime.h>
-#include <limits>
-
-#include "common.h"
-#include "math.h"
-#include "ptx.cuh"
-#include "rocm_vectorized_2d.cuh"
-#include "transformer_engine/activation.h"
-#include "transformer_engine/cast.h"
-#include "transpose/cast_transpose.h"
-#include "transformer_engine/transpose.h"
-#include "utils.cuh"
-#include "vectorized_pointwise.h"
-
-namespace transformer_engine {
-
-namespace dequantization {
+// drop-in rocm replacement for mxfp8 dequantize kernel
 
 constexpr size_t CHUNK_DIM_Y = 128;
 constexpr size_t CHUNK_DIM_X = 128;
@@ -127,12 +108,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
     __syncthreads();
 
-    bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_sh[0][0], output_ptr, chunk_it_offset_x,
+    ptx::bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_sh[0][0], output_ptr, chunk_it_offset_x,
                                     chunk_it_offset_y, cols, SHMEM_DIM_Y,
                                     SHMEM_DIM_X, rows, cols);
 
     __syncthreads();
   }
 }
-} // namespace dequantization
-} // namespace transformer_engine
+

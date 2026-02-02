@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -45,6 +47,9 @@ void quantize_gated_fwd_helper(const NVTETensor nvte_input, NVTETensor nvte_outp
 
   switch (output->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
+#ifdef __HIP_PLATFORM_AMD__
+      fp8::cast_gated_fwd<ParamOP, ActOP>(input, output, p, stream);
+#else
       const bool use_tma_kernels = (cols % 32 == 0) && is_supported_by_CC_100();
       if (use_tma_kernels) {
         Tensor dummy_grad_tensor;
@@ -53,6 +58,7 @@ void quantize_gated_fwd_helper(const NVTETensor nvte_input, NVTETensor nvte_outp
       } else {
         fp8::cast_gated_fwd<ParamOP, ActOP>(input, output, p, stream);
       }
+#endif //#ifdef __HIP_PLATFORM_AMD__
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
@@ -68,8 +74,12 @@ void quantize_gated_fwd_helper(const NVTETensor nvte_input, NVTETensor nvte_outp
         NVTE_CHECK(is_fp8_dtype(output->columnwise_data.dtype),
                    "The type of the columnwise output tensor should be FP8.");
       }
+#ifdef __HIP_PLATFORM_AMD__
+      //TODO: add gfx950 equivalent checking
+#else
       NVTE_CHECK(is_supported_by_CC_100(),
                  "Gated FWD NVTE_MXFP8_1D_SCALING is only supported on SM 10.0+");
+#endif
       Tensor dummy_grad_tensor;
       mxfp8::quantize_gated</*IS_BWD=*/false, ParamOP, ActOP, nullptr>(input, dummy_grad_tensor,
                                                                        output, p, stream);
@@ -122,6 +132,9 @@ void quantize_gated_bwd_helper(const NVTETensor nvte_grad, const NVTETensor nvte
 
   switch (output->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
+#ifdef __HIP_PLATFORM_AMD__
+      fp8::cast_gated_bwd<ParamOP, ActOP, DActOP>(gated_input, grad, output, p, stream);
+#else
       const bool use_tma_kernels = (cols % 32 == 0) && is_supported_by_CC_100();
       if (use_tma_kernels) {
         fp8::cast_gated_tma</*IS_BWD=*/true, ParamOP, ActOP, DActOP>(gated_input, grad, output, p,
@@ -129,6 +142,7 @@ void quantize_gated_bwd_helper(const NVTETensor nvte_grad, const NVTETensor nvte
       } else {
         fp8::cast_gated_bwd<ParamOP, ActOP, DActOP>(gated_input, grad, output, p, stream);
       }
+#endif  //#ifdef __HIP_PLATFORM_AMD__
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
@@ -144,8 +158,12 @@ void quantize_gated_bwd_helper(const NVTETensor nvte_grad, const NVTETensor nvte
         NVTE_CHECK(is_fp8_dtype(output->columnwise_data.dtype),
                    "The type of the columnwise output tensor should be FP8.");
       }
+#ifdef __HIP_PLATFORM_AMD__
+      // add gfx950 equivalent check
+#else
       NVTE_CHECK(is_supported_by_CC_100(),
                  "Gated BWD NVTE_MXFP8_1D_SCALING is only supported on SM 10.0+");
+#endif  //#ifdef __HIP_PLATFORM_AMD__
 
       mxfp8::quantize_gated</*IS_BWD=*/true, ParamOP, ActOP, DActOP>(gated_input, grad, output, p,
                                                                      stream);

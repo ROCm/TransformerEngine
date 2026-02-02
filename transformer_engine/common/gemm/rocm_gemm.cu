@@ -1501,7 +1501,7 @@ void release_service_stream(hipStream_t stream, struct ServiceStreamCtl &ctl)
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, cublasOperation_t transa,
                  cublasOperation_t transb, bool grad, void *workspace, size_t workspaceSize,
-                 float alpha, float beta, bool use_split_accumulator, int math_sm_count,
+                 const void* alpha_ptr, const void* beta_ptr, bool use_split_accumulator, int math_sm_count,
                  [[maybe_unused]] int m_split, [[maybe_unused]] int n_split,
                  [[maybe_unused]] bool gemm_producer, [[maybe_unused]] const Tensor *inputCounter,
                  hipStream_t stream, int compute_stream_offset)
@@ -1526,6 +1526,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   const int lda = is_transa ? k : m;
   const int ldb = is_transb ? n : k;
   const int ldd = m;
+
+  float alpha = *reinterpret_cast<const float *>(alpha_ptr);  // Assumed to be on CPU
+  float beta = *reinterpret_cast<const float *>(beta_ptr);  // Assumed to be on CPU
 
   ServiceStreamCtl ss_ctl;
   bool use_service_stream =

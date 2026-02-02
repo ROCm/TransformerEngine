@@ -26,6 +26,7 @@ bool is_ck_backend_supported(
   NVTE_QKV_Layout qkv_layout,
   NVTE_Bias_Type bias_type,
   NVTE_Mask_Type attn_mask_type,
+  NVTE_Softmax_Type softmax_type,
   float dropout,
   size_t num_attn_heads, size_t num_gqa_groups,
   size_t max_seqlen_q, size_t max_seqlen_kv,
@@ -76,6 +77,14 @@ bool is_ck_backend_supported(
   if(head_dim_qk >= 512 || head_dim_v >= 512){
     if(nvte_log_ck_config){
       std::cout<<"AITER/CK fused attn does not support head dim >=512 yet"<<std::endl;
+    }
+    return false;
+  }
+
+  // filter based on softmax type
+  if(softmax_type!=NVTE_VANILLA_SOFTMAX){
+    if(nvte_log_ck_config){
+      std::cout<<"AITER/CK fused attn does not support learnable sink yet"<<std::endl;
     }
     return false;
   }

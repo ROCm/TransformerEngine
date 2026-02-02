@@ -6,7 +6,8 @@
         "ATen/cudnn/Handle.h" : "ATen/miopen/Handle.h",
         "CUfunc_cache" : "hipFuncCache_t", 
         "<nvtx3/nvToolsExt.h>" : "<roctracer/roctx.h>",
-        "cudaFuncSetAttribute(" : "hipFuncSetAttribute((const void*)"
+        "cudaFuncSetAttribute(" : "hipFuncSetAttribute((const void*)",
+        "__nv_bfloat162":"__hip_bfloat162"
  }
 }
 

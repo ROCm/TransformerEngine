@@ -5,22 +5,7 @@
  ************************************************************************/
 
 #pragma once
-
-#include <cfloat>
-#include <cuda.h>
-#include <cuda_runtime.h>
-
-#include "common.h"
-#include "math.h"
-#include "ptx.cuh"
-#include "rocm_vectorized_2d.cuh"
-#include "transformer_engine/activation.h"
-#include "transformer_engine/cast.h"
-#include "vectorized_pointwise.h"
-#include "utils.cuh"
-
-namespace transformer_engine {
-namespace gated_kernels {
+// drop-in rocm replacement for mxfp8 gated quantize kernel
 
 constexpr size_t ALIGNMENT_SIZE = 128;
 // TODO: Identify optimal chunk/thread size for MI350+
@@ -45,16 +30,17 @@ template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP 
           float (*DActOP)(float, const ParamOP &), typename IType, typename OType,
           size_t SCALE_DIM_Y, size_t SCALE_DIM_X, bool IS_ALIGNED>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
-    cast_mxfp8_gated_kernel(const IType *grad_ptr,
-                            const IType *input_act,
-                            const IType *input_gate,
-                            OType *output_act_rowwise,
-                            OType *output_gate_rowwise,
-                            OType *output_act_colwise,
-                            OType *output_gate_colwise,
-                            e8m0_t *const scales_rowwise, e8m0_t *const scales_colwise,
-                            const size_t rows, const size_t cols, const size_t scale_stride_rowwise,
-                            const size_t scale_stride_colwise) {
+    quantize_gated_mxfp8_kernel(
+      const IType *grad_ptr,
+      const IType *input_act,
+      const IType *input_gate,
+      OType *output_act_rowwise,
+      OType *output_gate_rowwise,
+      OType *output_act_colwise,
+      OType *output_gate_colwise,
+      e8m0_t *const scales_rowwise, e8m0_t *const scales_colwise,
+      const size_t rows, const size_t cols, const size_t scale_stride_rowwise,
+      const size_t scale_stride_colwise, const ParamOP p) {
   constexpr bool USE_ROWWISE_SCALING = SCALE_DIM_X > 1;
   constexpr bool USE_COLWISE_SCALING = SCALE_DIM_Y > 1;
   constexpr bool COMPUTE_IN_ROWWISE_SECTION = !USE_COLWISE_SCALING;
@@ -171,24 +157,39 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       float act_elt = static_cast<float>(in_act_sh[shmem_idx]);
       float gate_elt = static_cast<float>(in_gate_sh[shmem_idx]);
 
+      bool dgate_elt = true;  // gating is ideally an identity function
+      if constexpr (std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
+        // In case of GPT OSS, clamp the activation and gate values
+        dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;  // Derivative of clamp
+        gate_elt = min(max(-p.limit, gate_elt), p.limit) + 1.0f;
+      }
+
       if constexpr (IS_DGATED) {
         float grad_elt = static_cast<float>(in_grad_sh[shmem_idx]);
         const float x = act_elt;
         float act_x;
         float dact_x;
 
-        if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
-          const float s = sigmoidf(x);
+        if constexpr (std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
+          const float x = min(act_elt, p.limit);
+          const float s = sigmoidf(p.alpha * x);
           act_x = x * s;
-          dact_x = x * s * (1 - s) + s;
+          dact_x = act_elt <= p.limit ? s + s * (1 - s) * p.alpha * x : 0.0f;
         } else {
-          act_x = ActOP(x, {});
-          dact_x = DActOP(x, {});
+          if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
+            const float s = sigmoidf(x);
+            act_x = x * s;
+            dact_x = x * s * (1 - s) + s;
+          } else {
+            act_x = ActOP(x, p);
+            dact_x = DActOP(x, p);
+          }
         }
+        
         after_dact_reg[stage] = dact_x * grad_elt * gate_elt;
-        after_dgate_reg[stage] = act_x * grad_elt;
+        after_dgate_reg[stage] = dgate_elt ? act_x * grad_elt : 0.0f;
       } else {
-        after_dact_reg[stage] = ActOP(act_elt, {}) * gate_elt;
+        after_dact_reg[stage] = ActOP(act_elt, p) * gate_elt;
       }
 
       // Numerical truncation: downcast to IType (BF16/FP16) and upcast back to FP32
@@ -355,24 +356,22 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     __syncthreads();
 
     if constexpr (USE_ROWWISE_SCALING) {
-      bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_act_rowwise_sh[0], output_act_rowwise, chunk_it_offset_x,
+      ptx::bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_act_rowwise_sh[0], output_act_rowwise, chunk_it_offset_x,
                                       chunk_it_offset_y, output_cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
       if constexpr (IS_DGATED) {
-      bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_gate_rowwise_sh[0], output_gate_rowwise, chunk_it_offset_x,
+      ptx::bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_gate_rowwise_sh[0], output_gate_rowwise, chunk_it_offset_x,
                                       chunk_it_offset_y, output_cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
       }
     }
     
     if constexpr (USE_COLWISE_SCALING) {
-      bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_act_colwise_sh[0], output_act_colwise, chunk_it_offset_x,
+      ptx::bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_act_colwise_sh[0], output_act_colwise, chunk_it_offset_x,
                                       chunk_it_offset_y, output_cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
       if constexpr (IS_DGATED) {
-      bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_gate_colwise_sh[0], output_gate_colwise, chunk_it_offset_x,
+      ptx::bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_gate_colwise_sh[0], output_gate_colwise, chunk_it_offset_x,
                                       chunk_it_offset_y, output_cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
       }
     }
     __syncthreads();
   }
 }
-} // namespace gated_kernels
-} // namespace transformer_engine

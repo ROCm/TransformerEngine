@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -19,8 +21,10 @@
 #include "../core/common.cuh"
 #include "../fp8/quantize_fp8.cuh"
 #include "../mxfp8/quantize_mxfp8.cuh"
+#ifndef __HIP_PLATFORM_AMD__
 #include "../nvfp4/quantize_nvfp4.cuh"
 #include "../nvfp4/quantize_transpose_nvfp4.cuh"
+#endif //#ifndef __HIP_PLATFORM_AMD__
 
 namespace transformer_engine {
 namespace dispatch {
@@ -87,6 +91,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
           dummy_workspace_tensor, stream);
       break;
     }
+#ifndef __HIP_PLATFORM_AMD__
     case NVTE_NVFP4_1D_SCALING: {
       NVTE_CHECK(!IS_ACT, "IS_ACT is not supported by FWD NVTE_NVFP4_1D_SCALING");
 
@@ -167,6 +172,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
           columnwise_option, force_pow_2_scales, noop_tensor->data, stream);
       break;
     }
+#endif//#ifndef __HIP_PLATFORM_AMD__
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(output_tensor->scaling_mode) + ".");
   }
@@ -232,6 +238,7 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
           stream);
       break;
     }
+#ifndef __HIP_PLATFORM_AMD__
     case NVTE_NVFP4_1D_SCALING: {
       NVTE_CHECK((!IS_DBIAS && !IS_DACT),
                  "IS_DBIAS and IS_DACT are not supported by BWD NVTE_NVFP4_1D_SCALING");
@@ -315,6 +322,7 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
           columnwise_option, force_pow_2_scales, noop_tensor->data, stream);
       break;
     }
+#endif //#ifndef __HIP_PLATFORM_AMD__
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(output_tensor->scaling_mode) + ".");
   }
