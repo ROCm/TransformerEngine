@@ -20,18 +20,14 @@
 namespace transformer_engine {
 namespace {
 
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_AMD__
 #define __ldg(x) (*(x))
 #endif
 
-#ifndef __HIP_PLATFORM_AMD__
-constexpr __device__ __host__ int MXFP8_BLOCK_SIZE = 32;
-=======
 constexpr int MXFP8_BLOCK_SIZE = 32;
+#ifndef __HIP_PLATFORM_AMD__
 constexpr int NVFP4_BLOCK_SIZE = 16;
 
->>>>>>> 389a6b
 constexpr __device__ __host__ int TB_DIM = 32;
 constexpr __device__ __host__ int NEW_SF_TILE_DIM_K = 16;
 constexpr __device__ __host__ int N_SF_PER_TD_PER_TILE = 4;
@@ -42,7 +38,6 @@ constexpr __device__ __host__ int NEW_SF_TILE_DIM_M_I32 = 32;
 #else
 // HIPCC does not support __host__ qualifier for variables
 // and constexpr values do not need __device__ qualifier because they are compile-time constants
-constexpr int MXFP8_BLOCK_SIZE = 32;
 constexpr int TB_DIM = 32;
 constexpr int NEW_SF_TILE_DIM_K = 16;
 constexpr int N_SF_PER_TD_PER_TILE = 4;
@@ -376,138 +371,11 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
   bool nvfp4 = scaling_mode == NVTE_NVFP4_1D_SCALING;
 
   // 1D block scaling, row-wise or colum-wise
-<<<<<<< HEAD
-  if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
-    const int m =
-        input->has_data() ? input->scale_inv.shape[0] : input->columnwise_scale_inv.shape[1];
-    const int k =
-        input->has_data() ? input->scale_inv.shape[1] : input->columnwise_scale_inv.shape[0];
 
-    constexpr int SF_TILE_DIM_M = 128;
-    constexpr int SF_TILE_DIM_K = 4;
-
-    NVTE_CHECK(m % SF_TILE_DIM_M == 0, "Input should be padded in M/N dimension!");
-    NVTE_CHECK(k % SF_TILE_DIM_K == 0, "Input should be padded in K dimension!");
-    NVTE_CHECK(k > 0, "Input scale inverse should be 2D!");
-    if (output->has_data()) {
-      NVTE_CHECK(m * k == std::accumulate(output->scale_inv.shape.begin(),
-                                          output->scale_inv.shape.end(), 1, std::multiplies<int>()),
-                 "Input.scale_inv size is not equal to Output.scale_inv size!");
-    }
-    if (output->has_columnwise_data()) {
-      NVTE_CHECK(m * k == std::accumulate(output->columnwise_scale_inv.shape.begin(),
-                                          output->columnwise_scale_inv.shape.end(), 1,
-                                          std::multiplies<int>()),
-                 "Input.columnwise_scale_inv size is not equal to "
-                 "Output.columnwise_scale_inv size!");
-    }
-
-    int num_tiles_m = m / SF_TILE_DIM_M;
-    int num_tiles_k = k / SF_TILE_DIM_K;
-
-    dim3 block_size(TB_DIM, TB_DIM);
-    if (input->has_data()) {
-      int vec_load_size = (num_tiles_k - 1) % 4 + 1;
-      /* there is no int3 and misaligned if using int4/int2 */
-      if (vec_load_size == 3) vec_load_size = 1;
-      int n_tiles_in_tb = TB_DIM * vec_load_size;
-      dim3 num_blocks(DIVUP(num_tiles_k, n_tiles_in_tb), num_tiles_m);
-      int slm_size = n_tiles_in_tb * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t);
-      const int original_M = input->flat_first_dim();
-      const int original_K = input->flat_last_dim() / MXFP8_BLOCK_SIZE;
-      switch (vec_load_size) {
-        case 4:
-#ifndef __HIP_PLATFORM_AMD__
-          NVTE_CHECK_CUDA(
-              cudaFuncSetAttribute(swizzle_row_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-                                   cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-#endif
-          swizzle_row_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
-              <<<num_blocks, block_size, slm_size, stream>>>(
-                  input->scale_inv.dptr, output->scale_inv.dptr, m, k, original_M, original_K);
-          break;
-        case 2:
-#ifndef __HIP_PLATFORM_AMD__
-          NVTE_CHECK_CUDA(
-              cudaFuncSetAttribute(swizzle_row_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-                                   cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-#endif
-          swizzle_row_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
-              <<<num_blocks, block_size, slm_size, stream>>>(
-                  input->scale_inv.dptr, output->scale_inv.dptr, m, k, original_M, original_K);
-          break;
-        case 1:
-#ifndef __HIP_PLATFORM_AMD__
-          NVTE_CHECK_CUDA(
-              cudaFuncSetAttribute(swizzle_row_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-                                   cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-#endif
-          swizzle_row_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
-              <<<num_blocks, block_size, slm_size, stream>>>(
-                  input->scale_inv.dptr, output->scale_inv.dptr, m, k, original_M, original_K);
-          break;
-        default:
-          NVTE_ERROR("Not valid vec_load_size.");
-          break;
-      }
-      NVTE_CHECK_CUDA(cudaGetLastError());
-    }
-    if (input->has_columnwise_data()) {
-      int vec_load_size = (num_tiles_m - 1) % 4 + 1;
-      if (vec_load_size == 3) vec_load_size = 1; /* no int3 and misaligned if using int4/int2 */
-      int n_tiles_in_tb = TB_DIM * vec_load_size;
-      dim3 num_blocks(DIVUP(num_tiles_k, TB_DIM), DIVUP(num_tiles_m, vec_load_size));
-      int slm_size = n_tiles_in_tb * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t);
-      const int original_M = input->flat_last_dim();
-      const int original_K = input->flat_first_dim() / MXFP8_BLOCK_SIZE;
-      switch (vec_load_size) {
-        case 4:
-#ifndef __HIP_PLATFORM_AMD__
-          NVTE_CHECK_CUDA(
-              cudaFuncSetAttribute(swizzle_col_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-                                   cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-#endif
-          swizzle_col_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
-              <<<num_blocks, block_size, slm_size, stream>>>(input->columnwise_scale_inv.dptr,
-                                                             output->columnwise_scale_inv.dptr, m,
-                                                             k, original_M, original_K);
-          break;
-        case 2:
-#ifndef __HIP_PLATFORM_AMD__
-          NVTE_CHECK_CUDA(
-              cudaFuncSetAttribute(swizzle_col_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-                                   cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-#endif
-          swizzle_col_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
-              <<<num_blocks, block_size, slm_size, stream>>>(input->columnwise_scale_inv.dptr,
-                                                             output->columnwise_scale_inv.dptr, m,
-                                                             k, original_M, original_K);
-          break;
-        case 1:
-#ifndef __HIP_PLATFORM_AMD__
-          NVTE_CHECK_CUDA(
-              cudaFuncSetAttribute(swizzle_col_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-                                   cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-#endif
-          swizzle_col_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
-              <<<num_blocks, block_size, slm_size, stream>>>(input->columnwise_scale_inv.dptr,
-                                                             output->columnwise_scale_inv.dptr, m,
-                                                             k, original_M, original_K);
-          break;
-        default:
-          NVTE_ERROR("Not valid vec_load_size.");
-          break;
-      }
-      NVTE_CHECK_CUDA(cudaGetLastError());
-    }
-
-    // 2D block scaling
-=======
   int m, k;
   if (input->has_data()) {
     m = input->scale_inv.shape[0];
     k = input->scale_inv.shape[1];
->>>>>>> 389a6b
   } else {
     if (nvfp4) {
       m = input->columnwise_scale_inv.shape[0];

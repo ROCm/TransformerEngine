@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -41,6 +41,9 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
     impl = Impl::FULLY_FUSED;
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
     impl = Impl::FUSED_ACTIVATION_AMAX_FP8;
+#ifdef USE_ROCM
+  }
+#else
   } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
     auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer*>(quantizer_cpp.get());
     NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
@@ -51,6 +54,7 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
       impl = Impl::FUSED_ACTIVATION_AMAX_NVFP4;
     }
   }
+#endif 
 
   // Perform compute
   auto stream = at::cuda::getCurrentCUDAStream();
@@ -101,6 +105,7 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
         fp8_quantizer_cpp->quantize_with_amax(temp_nvte, out_nvte);
       }
       break;
+#ifndef USE_ROCM
     case Impl::FUSED_ACTIVATION_AMAX_NVFP4:
       // Compute activation and amax in high precision, then quantize to NVFP4
       {
@@ -119,6 +124,7 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
         nvfp4_quantizer_cpp->quantize_with_amax(temp_nvte, out_nvte);
       }
       break;
+#endif
     default:
       NVTE_ERROR("Invalid activation implementation (", static_cast<int>(impl), ")");
   }
@@ -153,6 +159,9 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
     impl = Impl::FULLY_FUSED;
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
     impl = Impl::FUSED_ACTIVATION_AMAX_FP8;
+#ifdef USE_ROCM
+  }
+#else
   } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
     auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer*>(quantizer_cpp.get());
     NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
@@ -163,6 +172,7 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
       impl = Impl::FUSED_ACTIVATION_AMAX_NVFP4;
     }
   }
+#endif
 
   // Perform compute
   auto stream = at::cuda::getCurrentCUDAStream();
@@ -213,6 +223,7 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
         fp8_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte);
       }
       break;
+#ifndef USE_ROCM
     case Impl::FUSED_ACTIVATION_AMAX_NVFP4:
       // Compute activation and amax in high precision, then quantize to NVFP4
       {
@@ -231,6 +242,7 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
         nvfp4_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte);
       }
       break;
+#endif
     default:
       NVTE_ERROR("Invalid activation implementation (", static_cast<int>(impl), ")");
   }

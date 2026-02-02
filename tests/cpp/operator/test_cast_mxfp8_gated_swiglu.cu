@@ -264,7 +264,9 @@ void performTest_x1(const size_t rows,
                               rowwise,
                               colwise);
 
+#ifdef __HIP_PLATFORM_AMD__
     std::vector<size_t> mismatches_scales_indices;
+#endif
     size_t mismatches_scales = 0;
     const size_t scale_diff_abs_tolerance = 0;
     const double abs_tolerable_mismatches_limit = 1.0;
@@ -274,25 +276,11 @@ void performTest_x1(const size_t rows,
                                            ? output.rowwise_cpu_scale_inv_ptr<fp8e8m0>()
                                            : output.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
     if (rowwise) {
-<<<<<<< HEAD
-      compare_e8m0_scaling_factors("rowwise scales", gpu_scales_ptr, ref_output_scales.get(),
-                                   unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
-                                   mismatches_scales_indices,
-                                   mismatches_scales,
-                                   scale_diff_abs_tolerance,
-                                   abs_tolerable_mismatches_limit,
-                                   rel_tolerable_mismatches_limit);
-    } else {
-      compare_e8m0_scaling_factors("colwise scales", gpu_scales_ptr, ref_output_scales.get(),
-                                   unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
-                                   mismatches_scales_indices,
-                                   mismatches_scales,
-                                   scale_diff_abs_tolerance,
-                                   abs_tolerable_mismatches_limit,
-                                   rel_tolerable_mismatches_limit);
-=======
       compare_scaling_factors("rowwise scales", gpu_scales_ptr, ref_output_scales.get(),
                               unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
+#ifdef __HIP_PLATFORM_AMD__
+                              mismatches_scales_indices,
+#endif  //#ifdef __HIP_PLATFORM_AMD__
                               mismatches_scales,
                               scale_diff_abs_tolerance,
                               abs_tolerable_mismatches_limit,
@@ -300,12 +288,13 @@ void performTest_x1(const size_t rows,
     } else {
       compare_scaling_factors("colwise scales", gpu_scales_ptr, ref_output_scales.get(),
                               unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
+#ifdef __HIP_PLATFORM_AMD__
+                              mismatches_scales_indices,
+#endif  //#ifdef __HIP_PLATFORM_AMD__
                               mismatches_scales,
                               scale_diff_abs_tolerance,
                               abs_tolerable_mismatches_limit,
                               rel_tolerable_mismatches_limit);
-
->>>>>>> 389a6b
     }
 
 #ifdef __HIP_PLATFORM_AMD__
@@ -411,43 +400,34 @@ void performTest_x2(const size_t rows,
     const double abs_tolerable_mismatches_limit = 1.0;
     const double rel_tolerable_mismatches_limit = 1.0e-4;
 
+#ifdef __HIP_PLATFORM_AMD__
     std::vector<size_t> mismatches_scales_indices_rowwise;
+#endif
     size_t mismatches_scales_rowwise = 0;
-<<<<<<< HEAD
-    compare_e8m0_scaling_factors("scales_rowwise", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
-                                 ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
-                                 unpadded_blocks_X_rowwise, scales_stride_rowwise,
-                                 mismatches_scales_indices_rowwise, mismatches_scales_rowwise,
-                                 scale_diff_abs_tolerance,
-                                 abs_tolerable_mismatches_limit,
-                                 rel_tolerable_mismatches_limit);
-    std::vector<size_t> mismatches_scales_indices_colwise;
-    size_t mismatches_scales_colwise = 0;
-    compare_e8m0_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
-                                 ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
-                                 unpadded_blocks_X_colwise, scales_stride_colwise,
-                                 mismatches_scales_indices_colwise, mismatches_scales_colwise,
-                                 scale_diff_abs_tolerance,
-                                 abs_tolerable_mismatches_limit,
-                                 rel_tolerable_mismatches_limit);
-=======
     compare_scaling_factors("scales_rowwise", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
                             ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
                             unpadded_blocks_X_rowwise, scales_stride_rowwise,
+#ifdef __HIP_PLATFORM_AMD__
+                            mismatches_scales_indices_rowwise,
+#endif
                             mismatches_scales_rowwise,
                             scale_diff_abs_tolerance,
                             abs_tolerable_mismatches_limit,
                             rel_tolerable_mismatches_limit);
+#ifdef __HIP_PLATFORM_AMD__
+    std::vector<size_t> mismatches_scales_indices_colwise;
+#endif
     size_t mismatches_scales_colwise = 0;
     compare_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
                             ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
                             unpadded_blocks_X_colwise, scales_stride_colwise,
+#ifdef __HIP_PLATFORM_AMD__
+                            mismatches_scales_indices_colwise, 
+#endif
                             mismatches_scales_colwise,
                             scale_diff_abs_tolerance,
                             abs_tolerable_mismatches_limit,
                             rel_tolerable_mismatches_limit);
-
->>>>>>> 389a6b
 
 #ifdef __HIP_PLATFORM_AMD__
     if (::testing::Test::HasFatalFailure()) return;
@@ -514,7 +494,7 @@ class CastMXFP8_GatedActTestSuite : public ::testing::TestWithParam
                 bool>> {};
 
 TEST_P(CastMXFP8_GatedActTestSuite, TestCastMXFP8Swiglu) {
- #ifdef __HIP_PLATFORM_AMD__
+#ifdef __HIP_PLATFORM_AMD__
     omp_set_num_threads(std::min(128, omp_get_max_threads())); // Using threads = # of vcpus causes occasional errors.
 #else // #ifdef __HIP_PLATFORM_AMD__
    // Skip tests for pre-Blackwell architectures

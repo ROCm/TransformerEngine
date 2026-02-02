@@ -1,19 +1,13 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 """Internal function used by multiple modules."""
 
-<<<<<<< HEAD
-import os
-from typing import Any, List, Optional, Tuple, Union, Callable
-from dataclasses import dataclass
 
-=======
 import dataclasses
->>>>>>> 389a6b
 import queue
 from typing import Any, Callable, List, Optional, Tuple, Union
 
@@ -28,6 +22,7 @@ from ..utils import get_default_init_method
 if IS_HIP_EXTENSION:
     from ..triton_kernels.layernorm import te_layernorm_fwd_triton, te_layernorm_bwd_triton
     from ..triton_kernels.rmsnorm import te_rmsnorm_bwd_triton, te_rmsnorm_fwd_triton
+    import os
 
 def _get_normalization_func(normalization: str, forward: bool):
     use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ) and IS_HIP_EXTENSION

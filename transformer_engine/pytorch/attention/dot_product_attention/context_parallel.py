@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -1191,43 +1191,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             dQKV_quantizer,
             dO_quantizer,
             dP_quantizer,
-<<<<<<< HEAD
-        ) = dpa_utils.get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=True)
-
-        if fp8:
-            if use_fused_attention:
-                fused_attn_backend = FusedAttnBackend["FP8"]
-
-                assert isinstance(k, q.__class__) and isinstance(
-                    v, q.__class__
-                ), "q, k, and v must have the same type."
-                is_input_fp8 = isinstance(q, Float8Tensor)
-                is_output_fp8 = fp8_meta is not None and fp8_meta["recipe"].fp8_mha
-                if is_input_fp8:
-                    QKV_quantizer = q._quantizer
-                    q, k, v = q._data, k._data, v._data
-                else:
-                    q_f16, k_f16, v_f16 = q, k, v
-                    if cp_size_a2a == 1 or int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
-                        q = QKV_quantizer(q_f16)._data
-                    if int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
-                        k, v = [QKV_quantizer(x)._data for x in [k_f16, v_f16]]
-                amax_per_step = torch.zeros((2, cp_size), dtype=torch.float32, device=q.device)
-                # partial result quantizer
-                for i in range(cp_size):
-                    S_quantizer_per_step[i] = S_quantizer.copy()
-                    S_quantizer_per_step[i].amax = amax_per_step[0][i].reshape((1,))
-                    O_CP_quantizer_per_step[i] = O_CP_quantizer.copy()
-                    O_CP_quantizer_per_step[i].amax = amax_per_step[1][i].reshape((1,))
-            else:
-                assert False, "FP8 is only supported with Fused Attention!"
-        else:
-            q_f16 = q
-            if use_fused_attention:
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen" if not IS_HIP_EXTENSION else "CK"]
-=======
         ) = dpa_utils.get_attention_quantizers(fp8, quantizers)
->>>>>>> 389a6b
 
         q_f16 = None
         q_fp8, k_fp8, v_fp8 = (None, None, None)
@@ -1293,7 +1257,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             # q, k, v: torch.Tensor, dtype=fwd_nominal_dtype
             q_f16 = q
             if use_fused_attention:
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen" if not IS_HIP_EXTENSION else "CK"]
             if return_max_logit:
                 max_logit_per_step = [
                     torch.empty(q.shape[-2], dtype=q.dtype, device=q.device) for _ in range(cp_size)
@@ -2080,14 +2044,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             ]
             p2p_comm_buffers[0][0].copy_(kv)
             if ctx.use_fused_attention:
-<<<<<<< HEAD
-                fp8_meta_kwargs = {}
-                fused_attn_dqkv_dtype = TE_DType[dout_dtype]
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen" if not IS_HIP_EXTENSION else "CK"]
-=======
                 bwd_output_te_dtype = TE_DType[bwd_nominal_dtype]
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
->>>>>>> 389a6b
+                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen" if not IS_HIP_EXTENSION else "CK"]
 
         # communicate for the 'a2a' part of 'a2a+p2p'
         if cp_size_a2a > 1:
@@ -3527,13 +3485,8 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 dout = dout.dequantize(dtype=bwd_nominal_dtype)
             if ctx.use_fused_attention:
                 fp8_meta_kwargs = {}
-<<<<<<< HEAD
-                fused_attn_dqkv_dtype = TE_DType[dout_dtype]
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen" if not IS_HIP_EXTENSION else "CK"]
-=======
                 dqkv_te_dtype = TE_DType[dout.dtype]
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
->>>>>>> 389a6b
+                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen" if not IS_HIP_EXTENSION else "CK"]
 
         if not ctx.use_fused_attention:
             out = out.view(ctx.batch_size, -1, *out.shape[-2:])

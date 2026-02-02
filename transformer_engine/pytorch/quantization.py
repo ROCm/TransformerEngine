@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -31,6 +33,8 @@ from .constants import dist_group_type
 from .utils import get_device_compute_capability
 from .jit import jit_fuser
 
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+from .utils import get_torch_float8_e4m3_type, get_torch_float8_e5m2_type
 
 __all__ = [
     "autocast",
@@ -46,6 +50,12 @@ __all__ = [
 @functools.lru_cache(maxsize=None)
 def check_fp8_support() -> Tuple[bool, str]:
     """Return if fp8 support is available"""
+    if IS_HIP_EXTENSION:
+        gpu_arch = get_device_compute_capability()
+        if gpu_arch in ((9, 4), (9, 5)):
+            return True, ""
+        else:
+            return False, "Device arch gfx94x or gfx95x required for FP8 execution."
     if get_device_compute_capability() >= (9, 0):  # hopper and above
         return True, ""
     if get_device_compute_capability() < (8, 9):  # pre-ada
@@ -60,6 +70,13 @@ def check_fp8_support() -> Tuple[bool, str]:
 @functools.lru_cache(maxsize=None)
 def check_mxfp8_support() -> Tuple[bool, str]:
     """Return if fp8 support is available"""
+    if IS_HIP_EXTENSION:
+        if os.getenv("NVTE_ROCM_ENABLE_MXFP8", "0") == "0":
+            return False, "MXFP8 support is not enabled."
+        gpu_arch = get_device_compute_capability()
+        if gpu_arch == (9, 5):
+            return True, ""
+        return False, "Gfx95x is required for MXFP8 execution."
     if get_device_compute_capability() >= (12, 0):
         return False, "MXFP8 (for all gemm layouts) is not supported on 12.0+ architectures yet."
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
@@ -69,6 +86,8 @@ def check_mxfp8_support() -> Tuple[bool, str]:
 
 @functools.lru_cache(maxsize=None)
 def check_nvfp4_support() -> Tuple[bool, str]:
+    if IS_HIP_EXTENSION:
+        return False, "ROCm TE currently not supporting NVFP4"
     """Return if nvfp4 support is available"""
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
         return True, ""
@@ -78,6 +97,8 @@ def check_nvfp4_support() -> Tuple[bool, str]:
 @functools.lru_cache(maxsize=None)
 def check_fp8_block_scaling_support() -> Tuple[bool, str]:
     """Return if fp8 block scaling support is available"""
+    if IS_HIP_EXTENSION:
+        return False, "FP8 block scaled gemm not yet supported for ROCm"
     if get_device_compute_capability() >= (9, 0) and float(torch.version.cuda) >= 12.9:
         return True, ""
     return (
@@ -101,6 +122,13 @@ def check_recipe_support(recipe: Recipe) -> None:
 
 def get_default_fp8_recipe() -> Recipe:
     """FP8 recipe with default args."""
+    if IS_HIP_EXTENSION:
+        if os.getenv("NVTE_ROCM_ENABLE_MXFP8", "0") != "2":
+            return DelayedScaling()
+        gpu_arch = get_device_compute_capability()
+        if gpu_arch == (9, 5):
+            return MXFP8BlockScaling()
+        return DelayedScaling()
     if check_mxfp8_support()[0]:
         return MXFP8BlockScaling()
     if get_device_compute_capability() >= (12, 0):
@@ -119,8 +147,8 @@ def get_fp8_torch_dtype(fp8_recipe: Recipe, fprop_tensor: bool = True) -> torch.
     if fp8_recipe.fp8_format == Format.E4M3 or (
         fp8_recipe.fp8_format == Format.HYBRID and fprop_tensor
     ):
-        return torch.float8_e4m3fn
-    return torch.float8_e5m2
+        return get_torch_float8_e4m3_type()
+    return get_torch_float8_e5m2_type()
 
 
 def get_fp8_te_dtype(fp8_recipe: Recipe, fprop_tensor: bool = True) -> tex.DType:
@@ -234,6 +262,7 @@ class FP8GlobalStateManager:
     HIGH_PRECISION_INIT_VAL = False
     IS_FIRST_FP8_MODULE = False
     FP8_GRAPH_CAPTURING = False
+    SKIP_FP8_REDUCTION_FOR_FSDP2 = False
     AUTOCAST_DEPTH = 0
     global_amax_buffer = {}
     global_amax_history_buffer = {}

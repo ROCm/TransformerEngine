@@ -31,9 +31,6 @@ std::optional<at::Tensor> swizzle_scaling_factors(transformer_engine::TensorWrap
 std::optional<at::Tensor> multi_tensor_swizzle_scaling_factors(
     std::vector<transformer_engine::TensorWrapper> &inputs, bool rowwise);
 
-<<<<<<< HEAD
-#endif  //!USE_ROCM
-=======
 /*! \brief Convert a block scaling tensor to an mxfp8 tensor in-place.
  *
  * If rowwise==false, the columnwise data will be reinterpreted as rowwise data to avoid
@@ -45,6 +42,6 @@ std::optional<at::Tensor> multi_tensor_swizzle_scaling_factors(
  */
 at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapper &input,
                                                  bool rowwise);
->>>>>>> 389a6b
+#endif  //!USE_ROCM
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_UTIL_H_

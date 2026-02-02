@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2023-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -293,6 +293,7 @@ class MXFP8Quantizer : public Quantizer {
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 };
 
+#ifndef __HIP_PLATFORM_AMD__
 class NVFP4Quantizer : public Quantizer {
  public:
   // fp4 dtype
@@ -346,6 +347,7 @@ class NVFP4Quantizer : public Quantizer {
   void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
                      const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
 };
+#endif // #ifndef __HIP_PLATFORM_AMD__
 
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer);
 
@@ -505,11 +507,10 @@ size_t roundup(const size_t value, const size_t multiple);
 
 NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape);
 
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_AMD__
 at::Tensor allocate_amax_workspace(const TensorWrapper& input_tensor);
 #endif
-=======
+
 std::vector<size_t> convert_shape_back_from_fp4(const std::vector<size_t>& shape, bool transpose);
 
 // unpack the PhiloxCudaState into CUDA tensor
@@ -518,7 +519,6 @@ void philox_unpack(at::PhiloxCudaState arg, int64_t* rng_state_ptr);
 // extract PhiloxCudaState from CUDA random number generator
 at::PhiloxCudaState init_philox_state(at::CUDAGeneratorImpl* gen, size_t elts_per_thread);
 
->>>>>>> 389a6b
 }  // namespace transformer_engine::pytorch
 
 namespace std {

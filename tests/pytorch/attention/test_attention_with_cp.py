@@ -12,12 +12,10 @@ import logging
 
 import pytest
 import torch
-<<<<<<< HEAD
+
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
-from transformer_engine.pytorch.utils import (
-=======
+
 from transformer_engine.pytorch import (
->>>>>>> 389a6b
     get_device_compute_capability,
     get_cudnn_version,
 )
@@ -26,6 +24,7 @@ from transformer_engine.common.recipe import (
     Float8CurrentScaling,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils
+from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type
 
 _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
@@ -87,13 +86,8 @@ if test_essential:
 
 
 @pytest.mark.skipif(not FlashAttentionUtils.v2_plus, reason="Flash-attn 2.0+ is required.")
-<<<<<<< HEAD
 @pytest.mark.skipif(not IS_HIP_EXTENSION and get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
-@pytest.mark.parametrize("dtype", ["bf16", "fp16"])
-=======
-@pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", dtypes)
->>>>>>> 389a6b
 @pytest.mark.parametrize("model", model_configs_flash_attn.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("cp_comm_type", cp_comm_types)
@@ -123,11 +117,9 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
         )
     if "p2p" not in cp_comm_type and config.head_dim_qk != config.head_dim_v:
         pytest.skip("MLA CP currently only support KV P2P!")
-<<<<<<< HEAD
     if IS_HIP_EXTENSION:
         if config.head_dim_qk != config.head_dim_v and not FlashAttentionUtils.v3_is_installed:
             pytest.skip("MLA FlashAttention requires v3+!")
-=======
     dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16}
     available_backends, *_ = get_available_attention_backends(
         config,
@@ -137,7 +129,6 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
     flash_attn_supported, *_ = available_backends
     if not flash_attn_supported:
         pytest.skip("No attention backend available.")
->>>>>>> 389a6b
 
     subprocess.run(
         get_bash_arguments(
@@ -154,8 +145,8 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
 
 model_configs_fused_attn = {
     # test: ModelConfig(b, sq, hq, dqk)
-    "cp_1_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", return_max_logit=True),  # MHA
-    "cp_1_1": ModelConfig(2, 4096, 12, 128, return_max_logit=True),  # MHA
+    "cp_1_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", return_max_logit=not IS_HIP_EXTENSION),  # MHA
+    "cp_1_1": ModelConfig(2, 4096, 12, 128, return_max_logit=not IS_HIP_EXTENSION),  # MHA
     "cp_1_2": ModelConfig(
         2, 4096, 12, 128, attn_mask_type="causal", attn_bias_type="post_scale_bias"
     ),  # MHA
@@ -207,13 +198,8 @@ if test_essential:
 
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
-<<<<<<< HEAD
 @pytest.mark.skipif(not IS_HIP_EXTENSION and get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
-@pytest.mark.parametrize("dtype", ["bf16", "fp16", "fp8"])
-=======
-@pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", dtypes)
->>>>>>> 389a6b
 @pytest.mark.parametrize("model", model_configs_fused_attn.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("cp_comm_type", cp_comm_types)
@@ -235,15 +221,12 @@ def test_cp_with_fused_attention(
         pytest.skip("CP implementation with KV all-gather is only supported with cuDNN >= 9.3.0!")
     if (not IS_HIP_EXTENSION) and dtype == "fp8" and get_device_compute_capability() < (9, 0):
         pytest.skip("FP8 attention is only supported on sm90+!")
-<<<<<<< HEAD
     if IS_HIP_EXTENSION and dtype == "fp8":
-        pytest.skip("FP8 attention has not been supported on ROCm yet!")
-=======
+        pytest.skip("FP8 attention is not supported on ROCm yet!")
     if dtype == "fp8" and not fp8_dpa and fp8_mha:
         pytest.skip("Duplicate tests to fp8_dpa=True and fp8_mha=True!")
     if dtype != "fp8" and fp8_bwd:
         pytest.skip("Only fp8 works with fp8_bwd=True!")
->>>>>>> 389a6b
 
     config = model_configs_fused_attn[model]
     config.context_parallel = True
@@ -323,7 +306,7 @@ def test_cp_with_fused_attention(
         ]
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
-        qkv_dtype=dtypes[dtype] if dtype != "fp8" else torch.float8_e4m3fn,
+        qkv_dtype=dtypes[dtype] if dtype != "fp8" else get_torch_float8_e4m3_type(),
         qkv_layout="_".join([qkv_format] * 3),
         fp8=fp8,
         fp8_meta=fp8_meta,

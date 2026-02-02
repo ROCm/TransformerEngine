@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -8,18 +8,20 @@
 from __future__ import annotations
 import os
 from enum import Enum
-<<<<<<< HEAD
-from typing import Optional, Union, Callable, NamedTuple
-from typing_extensions import Literal
-=======
 from typing import Any, Literal, Optional, Union, Callable, NamedTuple
 from dataclasses import field
->>>>>>> 389a6b
 from pydantic.dataclasses import dataclass
-from transformer_engine.common import is_fp8_fnuz
+from transformer_engine.common import is_fp8_fnuz, te_rocm_build
 
 
 class _FormatHelper(NamedTuple):
+    """
+    Stores max FP8 values for fprop and bprop a `Format`.
+    """
+    max_fwd: float
+    max_bwd: float
+
+class _FormatHelperFP8(NamedTuple):
     """
     Stores max FP8 values for fprop and bprop a `Format`.
     """
@@ -58,17 +60,10 @@ class Format(Enum):
             FP8 tensors in the forward pass are in e4m3 format,
             FP8 tensors in the backward pass are in e5m2 format
     """
-<<<<<<< HEAD
-    E4M3 = _FormatHelper(fwd=_FormatMaxVals.E4M3.value, bwd=_FormatMaxVals.E4M3.value) 
-    E5M2 = _FormatHelper(fwd=_FormatMaxVals.E5M2.value, bwd=_FormatMaxVals.E5M2.value)
-    HYBRID = _FormatHelper(fwd=E4M3.fwd, bwd=E5M2.bwd)
-=======
-
     E2M1 = _FormatHelper(max_fwd=6, max_bwd=6)
-    E4M3 = _FormatHelper(max_fwd=448, max_bwd=448)
-    E5M2 = _FormatHelper(max_fwd=57344, max_bwd=57344)
-    HYBRID = _FormatHelper(max_fwd=E4M3.max_fwd, max_bwd=E5M2.max_bwd)
->>>>>>> 389a6b
+    E4M3 = _FormatHelperFP8(fwd=_FormatMaxVals.E4M3.value, bwd=_FormatMaxVals.E4M3.value)
+    E5M2 = _FormatHelperFP8(fwd=_FormatMaxVals.E5M2.value, bwd=_FormatMaxVals.E5M2.value)
+    HYBRID = _FormatHelperFP8(fwd=E4M3.fwd, bwd=E5M2.bwd)
 
 
 @dataclass(frozen=True)

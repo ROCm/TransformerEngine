@@ -29,16 +29,12 @@ from transformer_engine.pytorch.ops.fused import (
     fuse_forward_linear_bias_add,
     fuse_forward_linear_scale_add,
 )
-<<<<<<< HEAD
 if not IS_HIP_EXTENSION:
     from transformer_engine.pytorch.ops.fused import (
         fuse_userbuffers_backward_linear,
         fuse_userbuffers_forward_linear,
     )
-from transformer_engine.pytorch.tensor.quantized_tensor import (
-=======
 from transformer_engine.pytorch.quantized_tensor import (
->>>>>>> 389a6b
     prepare_for_saving,
     restore_from_saved,
 )

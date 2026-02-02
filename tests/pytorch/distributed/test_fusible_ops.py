@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -31,10 +31,7 @@ from transformer_engine.pytorch import (
     is_bf16_available,
 )
 import transformer_engine.pytorch.ops as te_ops
-<<<<<<< HEAD
-from transformer_engine.pytorch.utils import is_bf16_compatible, is_fp8_fnuz
-=======
->>>>>>> 389a6b
+from transformer_engine.pytorch.utils import is_fp8_fnuz
 import transformer_engine_torch as tex
 
 # Import utility functions

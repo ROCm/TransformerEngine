@@ -1,4 +1,4 @@
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
 
@@ -10,7 +10,7 @@ import torch
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ..constants import TE_DType
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
-from ..tensor.quantized_tensor import Quantizer
+from ..quantized_tensor import Quantizer
 from ..triton_kernels.cast import te_quantize_triton
 import triton
 import triton.language as tl

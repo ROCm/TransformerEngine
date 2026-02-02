@@ -219,9 +219,6 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   const int sm_count = transformer_engine::cuda::sm_count(device_id);
   int num_math_sms = sm_count - transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", sm_count);
 
-<<<<<<< HEAD
-#ifndef USE_ROCM
-=======
   // Construct GEMM config
   transformer_engine::MatmulConfigWrapper config;
   if (grad) {
@@ -235,7 +232,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   config.set_use_split_accumulator(use_split_accumulator);
   config.set_sm_count(num_math_sms);
 
->>>>>>> 389a6b
+#ifndef USE_ROCM
   // Keep the swizzled scaling factor tensors alive during the GEMM.
   std::vector<std::optional<at::Tensor>> swizzled_scale_inverses_list;
 #endif
@@ -246,7 +243,6 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
     swizzled_scale_inverses_list.emplace_back(std::move(swizzle_scaling_factors(A_tensor, transa)));
     swizzled_scale_inverses_list.emplace_back(
         std::move(swizzle_scaling_factors(B_tensor, !transb)));
-#endif
 
     // Emulate the FP8 block scaling recipe with MXFP8 on Blackwell and newer
     // as it is not natively supported by cublasLt
@@ -260,6 +256,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
       transa = true;
       transb = false;
     }
+#endif
 
     if (comm_overlap) {
 #ifndef USE_ROCM
@@ -494,17 +491,9 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     te_pre_gelu_out_wrappers.emplace_back(std::move(te_pre_gelu_out));
   }
 
-<<<<<<< HEAD
 #ifndef USE_ROCM
-  // Optionally swizzle the scaling factors
-  // Keep the swizzled scaling factor tensors alive during the GEMMs.
-  auto swizzled_scale_inv_A = multi_tensor_swizzle_scaling_factors(te_A_wrappers, transa);
-  auto swizzled_scale_inv_B = multi_tensor_swizzle_scaling_factors(te_B_wrappers, !transb);
-#endif
-=======
   // Keep the swizzled scaling factor tensors alive during the GEMM.
   std::vector<std::optional<at::Tensor>> swizzled_scale_inverses_list;
->>>>>>> 389a6b
 
   // Optionally swizzle the scaling factors
   swizzled_scale_inverses_list.emplace_back(
@@ -544,6 +533,7 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
       transb = false;
     }
   }
+#endif
 
   std::vector<NVTETensor> te_A_vector, te_B_vector, te_D_vector, te_bias_vector,
       te_pre_gelu_out_vector;

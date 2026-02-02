@@ -53,8 +53,6 @@ constexpr uint32_t THREADS_PER_WARP = 32;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-<<<<<<< HEAD
-=======
 // Device-side error
 #define NVTE_DEVICE_ERROR(message)                                                                 \
   do {                                                                                             \
@@ -88,7 +86,6 @@ inline __device__ void operator+=(float2 &a, const float2 &b) {  // NOLINT(*)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
->>>>>>> 389a6b
 template <typename T>
 struct Sum {
   inline __device__ Sum() {}

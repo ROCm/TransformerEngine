@@ -15,12 +15,6 @@ import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine
-<<<<<<< HEAD
-import transformer_engine.common.recipe
-import transformer_engine.pytorch as te
-from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type, get_torch_float8_e5m2_type
-=======
->>>>>>> 389a6b
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import InferenceParams
@@ -32,6 +26,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     check_set_window_size,
 )
 from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
+from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type, get_torch_float8_e5m2_type
 
 torch_float8_e4m3_type = get_torch_float8_e4m3_type()
 torch_float8_e5m2_type = get_torch_float8_e5m2_type()
@@ -105,15 +100,10 @@ def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
         return dict(rtol=1.3e-6, atol=1e-5)
     if dtype == torch.float64:
         return dict(rtol=1e-7, atol=1e-7)
-    if dtype == torch.float8_e4m3fn or dtype == torch.float8_e4m3fnuz:
+    if dtype == torch_float8_e4m3_type:
         return dict(rtol=0.125, atol=0.0675)  # epsilon = 0.0625
-<<<<<<< HEAD
-    if dtype == torch.float8_e5m2 or dtype == torch.float8_e5m2fnuz:
-        return dict(rtol=0.25, atol=0.125)  # epsilon = 0.152  
-=======
-    if dtype == torch.float8_e5m2:
+    if dtype == torch_float8_e5m2_type:
         return dict(rtol=0.25, atol=0.125)  # epsilon = 0.125
->>>>>>> 389a6b
     raise ValueError(f"Unsupported dtype ({dtype})")
 
 

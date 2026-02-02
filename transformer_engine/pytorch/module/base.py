@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -19,11 +19,8 @@ from types import MethodType
 
 import torch
 import torch.nn.functional as F
-<<<<<<< HEAD
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
-=======
 from torch.distributed.tensor import DTensor
->>>>>>> 389a6b
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
@@ -49,21 +46,13 @@ from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantize
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-<<<<<<< HEAD
 if IS_HIP_EXTENSION:
     from ..tensor.fsdp2_allgather_tensor import FSDPAGTensor
-from ..tensor._internal.float8_tensor_base import Float8TensorBase
-from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-if IS_HIP_EXTENSION:
     from ..triton_kernels.cast import te_quantize_triton
-from ..utils import get_device_compute_capability, is_non_tn_fp8_gemm_supported, torch_get_autocast_gpu_dtype
-from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
-=======
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
-from ..utils import is_non_tn_fp8_gemm_supported, torch_get_autocast_gpu_dtype
+from ..utils import get_device_compute_capability, is_non_tn_fp8_gemm_supported, torch_get_autocast_gpu_dtype
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
->>>>>>> 389a6b
 from ...common.recipe import DelayedScaling, Recipe
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
@@ -1328,11 +1317,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     raise RuntimeError("Weight quantizer has not been initialized")
                 quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
                 quantizer.internal = False
-<<<<<<< HEAD
                 if IS_HIP_EXTENSION and not self.keep_fp8_weight_transpose_cache:
                     quantizer.columnwise_usage=False
 
-=======
                 if is_dtensor and isinstance(quantizer, Float8CurrentScalingQuantizer):
                     device_mesh = dtensor_param.device_mesh
                     amax_reduction_group = (
@@ -1342,7 +1329,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     )
                     quantizer.amax_reduction_group = amax_reduction_group
                     quantizer.with_amax_reduction = True
->>>>>>> 389a6b
                 # Quantize parameter
                 param = quantizer(param)
             if IS_HIP_EXTENSION and self.use_fsdp2 and not self.primary_weights_in_fp8 and fp8_meta_index is not None:

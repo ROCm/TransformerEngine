@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -20,6 +22,8 @@ import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 from utils import ModelConfig
 import transformer_engine_torch as tex
+
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 # Check supported quantization schemes
 fp8_available, _ = FP8GlobalStateManager.is_fp8_available()
@@ -46,15 +50,9 @@ NUM_HEADS = model_config["small"].num_heads
 NUM_LAYERS = model_config["small"].num_layers
 EPSILON = model_config["small"].eps
 
-<<<<<<< HEAD
-# Flash attention saves some internal tensor for the backward pass
-# that cannot be offloaded to CPU.
-assert os.getenv("NVTE_FLASH_ATTN", "1") == "0"
-=======
 # Disable garbage collection to tests if there are reference cycles.
 # We do not want them, because they can result in CUDA out of memory errors.
 import gc
->>>>>>> 389a6b
 
 gc.disable()
 
@@ -631,6 +629,13 @@ class TestTELayers:
             pytest.skip(
                 "Fused attention + cuda graphs is temporarily broken, not because of cpu offloading"
             )
+
+        if (IS_HIP_EXTENSION
+            and backend == "FusedAttention"
+            and not use_cuda_graphs
+            and layer_type in ("multihead_attention", "transformer_layer")
+           ):
+           pytest.skip("No dot product attention backend is available for the provided inputs")
 
         os.environ["NVTE_FLASH_ATTN"] = "0"
         os.environ["NVTE_FUSED_ATTN"] = "0"

@@ -253,16 +253,10 @@ class _Linear(torch.autograd.Function):
         weightmat = weight
         if fp8 or debug:
             # Configure quantizer
-<<<<<<< HEAD
-            if weight_quantizer is not None:
-                columnwise_usage = is_grad_enabled and inp.requires_grad and keep_fp8_weight_transpose_cache
-                if not columnwise_usage and keep_fp8_weight_transpose_cache:
-=======
             # No need to set the quantizer states if weight is already quantized
             if weight_quantizer is not None and not isinstance(weight, QuantizedTensor):
-                columnwise_usage = is_grad_enabled and inp.requires_grad
-                if not columnwise_usage:
->>>>>>> 389a6b
+                columnwise_usage = is_grad_enabled and inp.requires_grad and keep_fp8_weight_transpose_cache
+                if not columnwise_usage and keep_fp8_weight_transpose_cache:
                     columnwise_usage = (
                         is_fp8_activation_recompute_enabled()
                         and not in_fp8_activation_recompute_phase()
@@ -414,14 +408,11 @@ class _Linear(torch.autograd.Function):
             if backward_needs_input:
                 saved_inputmat = inputmat
 
-<<<<<<< HEAD
             # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
             if inp.requires_grad and keep_fp8_weight_transpose_cache and not use_fsdp2:
-                if isinstance(weightmat, QuantizedTensorBase):
+                if isinstance(weightmat, QuantizedTensorStorage):
                     weightmat.update_usage(columnwise_usage=True)
 
-=======
->>>>>>> 389a6b
             if cpu_offloading and saved_inputmat is not None:
                 mark_activation_offload(saved_inputmat)
 

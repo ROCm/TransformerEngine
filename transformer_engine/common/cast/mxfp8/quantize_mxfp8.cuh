@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -12,7 +14,9 @@
 #define TRANSFORMER_ENGINE_QUANTIZE_MXFP8_CUH_
 
 #include <cuda.h>
+#ifndef __HIP_PLATFORM_AMD__
 #include <cudaTypedefs.h>
+#endif //#ifndef __HIP_PLATFORM_AMD__
 #include <cuda_runtime.h>
 #include <transformer_engine/transformer_engine.h>
 
@@ -22,11 +26,17 @@
 #include "../../utils.cuh"
 #include "../core/common.cuh"
 
+#ifdef __HIP_PLATFORM_AMD__
+#include "./rocm_vectorized_2d.cuh"
+#endif
+
 namespace transformer_engine {
 namespace dispatch {
 namespace mxfp8 {
 namespace quantize_kernel {
-
+#ifdef __HIP_PLATFORM_AMD__
+#include "rocm_quantize_mxfp8.cuh"
+#else
 constexpr size_t SCALE_DIM_Y = 32;
 constexpr size_t SCALE_DIM_X = 32;
 
@@ -536,6 +546,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   destroy_barriers<STAGES>(mbar, is_master_thread);
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
+#endif //#ifndef __HIP_PLATFORM_AMD__
 }  // namespace quantize_kernel
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
@@ -543,7 +554,9 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
 void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop,  // TODO (ksivamani)
               Tensor *output, Tensor *dbias, Tensor *workspace, cudaStream_t stream) {
   using namespace quantize_kernel;
+#ifndef __HIP_PLATFORM_AMD__
   checkCuDriverContext(stream);
+#endif
 
   bool use_rowwise_scaling = output->has_data();
   bool use_colwise_scaling = output->has_columnwise_data();
@@ -562,6 +575,11 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
   const size_t rows = input.flat_first_dim();
   const size_t cols = input.flat_last_dim();
 
+#ifdef __HIP_PLATFORM_AMD__
+  constexpr size_t CHUNK_DIM_Y = MXFP8_CHUNK_DIM_Y;
+  constexpr size_t CHUNK_DIM_X = MXFP8_CHUNK_DIM_X;
+  constexpr size_t THREADS_PER_CHUNK = MXFP8_THREADS_PER_CHUNK;
+#else
   constexpr bool CAST_DBIAS_ONLY = IS_DBIAS && (!IS_DACT) && (!IS_ACT);
 
   constexpr size_t CHUNK_DIM_Y = CAST_DBIAS_ONLY ? 128 : 64;
@@ -572,6 +590,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
   constexpr size_t THREADS_Y = THREADS_PER_CHUNK / THREADS_X;
   constexpr size_t BUFF_DIM_Y = THREADS_Y;
   constexpr size_t BUFF_DIM_X = CHUNK_DIM_X;
+#endif
 
   const size_t blocks_Y = DIVUP(rows, CHUNK_DIM_Y);
   const size_t blocks_X = DIVUP(cols, CHUNK_DIM_X);
@@ -589,6 +608,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
   const size_t dbias_rows = blocks_Y;
   const size_t dbias_cols = cols;
 
+#ifndef __HIP_PLATFORM_AMD__
   ScalingType scaling_type;
   if (use_rowwise_scaling && (!use_colwise_scaling)) {
     scaling_type = ScalingType::ROWWISE;
@@ -597,6 +617,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
   } else if (use_rowwise_scaling && use_colwise_scaling) {
     scaling_type = ScalingType::BIDIMENSIONAL;
   }
+#endif
 
   if constexpr (IS_DBIAS) {
     NVTE_CHECK(dbias->data.dtype == input.dtype(), "DBias must have the same type as input.");
@@ -619,6 +640,26 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
           output->dtype(), OType,
 
+#ifdef __HIP_PLATFORM_AMD__
+          TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+            (use_colwise_scaling ? 32 : 1), SCALE_DIM_Y,
+            TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+              (use_rowwise_scaling ? 32 : 1), SCALE_DIM_X,
+                TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                  !(cols % (32 * sizeof(IType))), IS_ALIGNED,
+                  quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                                      SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>
+                    <<<grid, block_size, 0, stream>>>(
+                      reinterpret_cast<const IType *>(input.data.dptr), 
+                      (IS_DACT) ? reinterpret_cast<const IType *>(act_input->data.dptr) : nullptr,
+                      reinterpret_cast<OType *>(output->data.dptr),
+                      reinterpret_cast<OType *>(output->columnwise_data.dptr),
+                      scales_rowwise_ptr, scales_colwise_ptr,
+                      reinterpret_cast<const float *>(noop->data.dptr), workspace_ptr, amax_ptr,
+                      rows, cols, scale_stride_rowwise, scale_stride_colwise);
+                  NVTE_CHECK_CUDA(cudaGetLastError());
+          )));  // NOLINT(*)
+#else // #ifdef __HIP_PLATFORM_AMD__
           alignas(64) CUtensorMap tensor_map_input{};
           alignas(64) CUtensorMap tensor_map_act_input{};
           alignas(64) CUtensorMap tensor_map_output_rowwise{};
@@ -708,6 +749,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
               break;
             }
           }
+#endif // #ifdef __HIP_PLATFORM_AMD__
 
           if constexpr (IS_DBIAS) {
             common::reduce_dbias<IType>(workspace_ptr, dbias, dbias_rows, dbias_cols, stream);

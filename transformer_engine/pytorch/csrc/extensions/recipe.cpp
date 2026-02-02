@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -28,7 +28,7 @@ void compute_amax(const at::Tensor& tensor, at::Tensor& amax) {
       DType::kFloat8E4M3,  // It doesn't matter because we only compute amax.
       amax_ptr);
 
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
   at::Tensor ws = allocate_amax_workspace(te_input);
   TensorWrapper tw = makeTransformerEngineTensor(ws);
   nvte_compute_amax_with_workspace(te_input.data(), fake_te_output.data(),

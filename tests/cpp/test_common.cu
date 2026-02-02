@@ -412,20 +412,13 @@ void Tensor::to_cpu() const {
                cudaMemcpyDeviceToHost);
   }
   if (columnwise_) {
-<<<<<<< HEAD
-    (void)cudaMemcpy(cpu_data_columnwise_.get(),
-               tensor_.get_columnwise_data().data_ptr,
-               size,
-               cudaMemcpyDeviceToHost);
-=======
     const DType colwise_type = tensor_.dtype();
 
     const size_t colwise_size = bytes(s, colwise_type);
-    cudaMemcpy(cpu_data_columnwise_.get(),
+    (void)cudaMemcpy(cpu_data_columnwise_.get(),
                 tensor_.get_columnwise_data().data_ptr,
                 colwise_size,
                 cudaMemcpyDeviceToHost);
->>>>>>> 389a6b
   }
   if (isFp8Type(dtype()) || isFp4Type(dtype())) {
     if ((tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING)) {
@@ -759,14 +752,6 @@ void compareResults(const std::string &name, const uint8_t *test, const uint8_t 
   }
 }
 
-<<<<<<< HEAD
-void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
-                                    const size_t row_blocks, const size_t col_blocks, const size_t stride,
-                                    std::vector<size_t> &mismatch_indices,
-                                    size_t& mismatches_num, const size_t atol,
-                                    const double abs_tolerable_mismatches_limit,
-                                    const double rel_tolerable_mismatches_limit)
-=======
 template <typename T>
 struct CastToType;
 
@@ -783,10 +768,12 @@ struct CastToType<fp8e4m3> {
 template <typename T>
 void compare_scaling_factors(const std::string &name, const T *test, const T *ref,
                              const size_t row_blocks, const size_t col_blocks, const size_t stride,
+#ifdef __HIP_PLATFORM_AMD__
+                             std::vector<size_t> &mismatch_indices,
+#endif  //#ifdef __HIP_PLATFORM_AMD__
                              size_t& mismatches_num, const size_t atol,
                              const double abs_tolerable_mismatches_limit,
                              const double rel_tolerable_mismatches_limit)
->>>>>>> 389a6b
 {
   using UpcastType = typename CastToType<T>::type;
   auto [atol_fp8e4m3, rtol_fp8e4m3] = getTolerances(DType::kFloat8E4M3);
@@ -796,6 +783,9 @@ void compare_scaling_factors(const std::string &name, const T *test, const T *re
   const size_t tolerable_mismatches_limit = std::min(abs_tolerable_mismatches_limit,
                                                      std::floor(N * rel_tolerable_mismatches_limit));
   mismatches_num = 0;
+#ifndef __HIP_PLATFORM_AMD__
+  std::vector<int> mismatch_indices;
+#endif  //#ifndef __HIP_PLATFORM_AMD__
 
   for (int i = 0; i < row_blocks; ++i) {
     for (int j = 0; j < col_blocks; ++j) {
@@ -842,8 +832,6 @@ void compare_scaling_factors(const std::string &name, const T *test, const T *re
   }
 }
 
-<<<<<<< HEAD
-
 #ifdef __HIP_PLATFORM_AMD__
 void adjust_ref_for_e8m0_scale_error(const std::string &name,
                                      const std::vector<size_t> &mismatch_idx,
@@ -887,11 +875,13 @@ void adjust_ref_for_e8m0_scale_error(const std::string &name,
   }
 }
 #endif // #ifdef __HIP_PLATFORM_AMD__
-=======
 // Instantiate templates
 template
 void compare_scaling_factors<uint8_t>(const std::string &name, const uint8_t *test, const uint8_t *ref,
                                       const size_t row_blocks, const size_t col_blocks, const size_t stride,
+#ifdef __HIP_PLATFORM_AMD__
+                                      std::vector<size_t> &mismatch_indices,
+#endif  //#ifdef __HIP_PLATFORM_AMD__
                                       size_t& mismatches_num, const size_t atol,
                                       const double abs_tolerable_mismatches_limit,
                                       const double rel_tolerable_mismatches_limit);
@@ -899,11 +889,13 @@ void compare_scaling_factors<uint8_t>(const std::string &name, const uint8_t *te
 template
 void compare_scaling_factors<fp8e4m3>(const std::string &name, const fp8e4m3 *test, const fp8e4m3 *ref,
                                       const size_t row_blocks, const size_t col_blocks, const size_t stride,
+#ifdef __HIP_PLATFORM_AMD__
+                                      std::vector<size_t> &mismatch_indices,
+#endif  //#ifdef __HIP_PLATFORM_AMD__
                                       size_t& mismatches_num, const size_t atol,
                                       const double abs_tolerable_mismatches_limit,
                                       const double rel_tolerable_mismatches_limit);
 
->>>>>>> 389a6b
 
 std::pair<double, double> getTolerances(const DType type) {
   switch(type) {
@@ -1069,13 +1061,6 @@ bool isFp8Type(DType type) {
   return type == DType::kFloat8E4M3 || type == DType::kFloat8E5M2 || type == DType::kFloat8E8M0;
 }
 
-<<<<<<< HEAD
-int32_t getDeviceComputeCapability()
-{
-    cudaDeviceProp deviceProp;
-    (void)cudaGetDeviceProperties(&deviceProp, 0);
-    return 10 * deviceProp.major + deviceProp.minor;
-=======
 bool isFp4Type(DType type) {
   return type == DType::kFloat4E2M1;
 }
@@ -1084,7 +1069,6 @@ int32_t getDeviceComputeCapability() {
   cudaDeviceProp deviceProp;
   cudaGetDeviceProperties(&deviceProp, 0);
   return 10 * deviceProp.major + deviceProp.minor;
->>>>>>> 389a6b
 }
 
 size_t first_dimension(const std::vector<size_t> &shape) {

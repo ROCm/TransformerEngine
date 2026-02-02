@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -90,7 +90,12 @@ AttnMaskType = {
     "padding_causal_bottom_right": NVTE_Mask_Type.NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
 }
 
-<<<<<<< HEAD
+SoftmaxType = {
+    "vanilla": NVTE_Softmax_Type.NVTE_VANILLA_SOFTMAX,
+    "off-by-one": NVTE_Softmax_Type.NVTE_OFF_BY_ONE_SOFTMAX,
+    "learnable": NVTE_Softmax_Type.NVTE_LEARNABLE_SOFTMAX,
+}
+
 if not IS_HIP_EXTENSION:
     FusedAttnBackend = {
         "F16_max512_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen,
@@ -104,20 +109,6 @@ else:
         "CK": NVTE_Fused_Attn_Backend.NVTE_CK,
         "No_Backend": NVTE_Fused_Attn_Backend.NVTE_No_Backend,
     }
-=======
-SoftmaxType = {
-    "vanilla": NVTE_Softmax_Type.NVTE_VANILLA_SOFTMAX,
-    "off-by-one": NVTE_Softmax_Type.NVTE_OFF_BY_ONE_SOFTMAX,
-    "learnable": NVTE_Softmax_Type.NVTE_LEARNABLE_SOFTMAX,
-}
-
-FusedAttnBackend = {
-    "F16_max512_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen,
-    "F16_arbitrary_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
-    "FP8": NVTE_Fused_Attn_Backend.NVTE_FP8,
-    "No_Backend": NVTE_Fused_Attn_Backend.NVTE_No_Backend,
-}
->>>>>>> 389a6b
 
 BACKEND_F16m512_FP8_THREADS_PER_CTA = 128
 BACKEND_F16arb_ELTS_PER_THREADS = 16
@@ -272,6 +263,10 @@ def fused_attn_fwd(
                     [seed, offset], dtype uint64
     max_logit: if return_max_logit = True, shape [h] and same data type as O; otherwise None
     """
+
+    if IS_HIP_EXTENSION:
+        assert not return_max_logit, "ROCm does not support return_max_logit yet."
+        assert not cuda_graph, "ROCm does not support cuda_graph."
 
     if attn_scale is None:
         d = q.size(-1)

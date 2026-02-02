@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -12,7 +14,9 @@
 #define TRANSFORMER_ENGINE_DEQUANTIZE_FP8_CUH_
 
 #include <cuda.h>
+#ifndef __HIP_PLATFORM_AMD__
 #include <cudaTypedefs.h>
+#endif // #ifndef __HIP_PLATFORM_AMD__
 #include <cuda_runtime.h>
 #include <transformer_engine/transformer_engine.h>
 

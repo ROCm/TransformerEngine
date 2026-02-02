@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -30,12 +30,7 @@ from transformer_engine.pytorch.quantization import (
     _amax_and_scale_update,
 )
 import transformer_engine.pytorch.ops as te_ops
-<<<<<<< HEAD
 from transformer_engine.pytorch.utils import is_fp8_fnuz
-from transformer_engine.pytorch import Linear, LayerNormLinear, LayerNormMLP, GroupedLinear
-from transformer_engine.pytorch.distributed import fp8_autocast
-=======
->>>>>>> 389a6b
 from transformer_engine.common.recipe import DelayedScaling, Float8BlockScaling, MXFP8BlockScaling
 import transformer_engine_torch as tex
 

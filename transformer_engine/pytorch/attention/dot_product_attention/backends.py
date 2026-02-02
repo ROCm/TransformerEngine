@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -15,12 +15,8 @@ import logging
 from packaging.version import Version as PkgVersion
 
 import torch
-<<<<<<< HEAD
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
-
-=======
 import torch.nn.functional as F
->>>>>>> 389a6b
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
@@ -223,6 +219,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
         softmax_type: str = "vanilla",
         return_max_logit: Optional[bool] = False,
     ) -> None:
+        if IS_HIP_EXTENSION:
+            assert not return_max_logit, "ROCm does not support return_max_logit yet."
         super().__init__()
 
         self.softmax_scale = softmax_scale
@@ -1680,6 +1678,8 @@ class FusedAttention(torch.nn.Module):
         softmax_type: str = "vanilla",
         return_max_logit: Optional[bool] = False,
     ) -> None:
+        if IS_HIP_EXTENSION:
+            assert not return_max_logit, "ROCm does not support return_max_logit yet."
         super().__init__()
 
         self.softmax_scale = softmax_scale

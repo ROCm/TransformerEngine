@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -10,23 +10,16 @@ import logging
 from contextlib import nullcontext
 import torch
 import torch.distributed as dist
-<<<<<<< HEAD
+import warnings
+
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
-from transformer_engine.pytorch.attention import DotProductAttention
-=======
->>>>>>> 389a6b
+
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     get_cu_seqlens_on_cp_rank,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import combine_and_quantize
 import transformer_engine_torch as tex
 from test_attention_with_cp import model_configs_flash_attn, model_configs_fused_attn
-<<<<<<< HEAD
-from transformer_engine.pytorch.fp8 import fp8_autocast
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
-from transformer_engine.common.recipe import DelayedScaling
-import warnings
-=======
 from transformer_engine.pytorch import (
     autocast,
     DotProductAttention,
@@ -35,7 +28,6 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling
 from utils import ModelConfig, compare_and_assert
->>>>>>> 389a6b
 
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
@@ -336,16 +328,11 @@ def run_dpa_with_cp(
             core_attention_bias=bias,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
-<<<<<<< HEAD
             cu_seqlens_q_padded=None if cu_seqlens_q_padded is None else cu_seqlens_q_padded[:-1],
             cu_seqlens_kv_padded=(
                 None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1]
             ),
-=======
-            cu_seqlens_q_padded=cu_seqlens_q_padded,
-            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
             fp8_output=fp8_mha,
->>>>>>> 389a6b
         )
         if config.return_max_logit:
             out, max_logit = out
@@ -438,16 +425,11 @@ def run_dpa_with_cp(
             core_attention_bias=bias_,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
-<<<<<<< HEAD
             cu_seqlens_q_padded=None if cu_seqlens_q_padded is None else cu_seqlens_q_padded[:-1],
             cu_seqlens_kv_padded=(
                 None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1]
             ),
-=======
-            cu_seqlens_q_padded=cu_seqlens_q_padded,
-            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
             fp8_output=fp8_mha,
->>>>>>> 389a6b
         )
         if config.return_max_logit:
             out_, max_logit_ = out_
@@ -469,7 +451,8 @@ def run_dpa_with_cp(
             tensors_to_deq[i] = tensor.dequantize()
         if not fp8_bwd:
             tensors[0], tensors[4] = tensors_to_deq
-    for tensor in tensors:
+    i = 0
+    for tensor in tensors[4:]:
         assert torch.all(~torch.isnan(tensor))
         assert torch.all(~torch.isinf(tensor))
     out, dq, dk, dv, out_, dq_, dk_, dv_ = tensors
@@ -491,17 +474,10 @@ def run_dpa_with_cp(
             for x in [dq_, dk_, dv_, out_]
         ]
     elif qkv_format == "thd":
-<<<<<<< HEAD
-        dq, out = [x.index_select(0, seq_idx_q).contiguous() for x in [q.grad, out]]
-        dk, dv = [x.index_select(0, seq_idx_kv).contiguous() for x in [k.grad, v.grad]]
-        dq_, dk_, dv_, out_ = [q_.grad, k_.grad, v_.grad, out_]
-        cu_seqlens_q_padded = cu_seqlens_q_padded[:-1] // world_size
-=======
         dq, out = [x.index_select(0, seq_idx_q).contiguous() for x in [dq, out]]
         dk, dv = [x.index_select(0, seq_idx_kv).contiguous() for x in [dk, dv]]
         dq_, dk_, dv_, out_ = [dq_, dk_, dv_, out_]
-        cu_seqlens_q_padded = cu_seqlens_q_padded // world_size
->>>>>>> 389a6b
+        cu_seqlens_q_padded = cu_seqlens_q_padded[:-1] // world_size
         cu_seqlens_q = get_cu_seqlens_on_cp_rank(
             cu_seqlens_q, cu_seqlens_q_padded, world_size, rank, True, True
         )

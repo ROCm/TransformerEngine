@@ -1,4 +1,4 @@
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
 import torch
@@ -13,7 +13,7 @@ from transformer_engine.pytorch.triton_kernels.common import (
     te_dtype_to_triton_dtype,
 )
 from .common import get_fp8_max
-from ..tensor.quantized_tensor import Quantizer
+from ..quantized_tensor import Quantizer
 import transformer_engine_torch as tex
 
 def dg_tmp_rows(x, sm_margin=None):

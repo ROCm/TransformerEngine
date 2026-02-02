@@ -26,6 +26,7 @@ class _QuantizeFunc(torch.autograd.Function):
         quantize_impl: Callable,
     ) -> QuantizedTensor:
         # pylint: disable=missing-function-docstring
+        # TODO: bring back triton based quantization
         return quantize_impl(tensor)
 
     @staticmethod

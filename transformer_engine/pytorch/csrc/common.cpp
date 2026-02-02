@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -12,7 +12,7 @@
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
 
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
 #include "common/common.h"
 #endif
 
@@ -312,8 +312,7 @@ size_t roundup(const size_t value, const size_t multiple) {
   return ((value + multiple - 1) / multiple) * multiple;
 }
 
-<<<<<<< HEAD
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
 
 inline bool nvte_use_atomic_amax() {
   const char *env_p = std::getenv("NVTE_USE_ATOMIC_AMAX");
@@ -336,7 +335,6 @@ at::Tensor allocate_amax_workspace(const TensorWrapper& input_tensor) {
 
 #endif
 
-=======
 void philox_unpack(at::PhiloxCudaState arg, int64_t* rng_state_ptr) {
   NVTE_SCOPED_GIL_RELEASE({
     nvte_extract_seed_and_offset(rng_state_ptr, arg.captured_, arg.seed_.ptr, arg.seed_.val,
@@ -353,5 +351,4 @@ at::PhiloxCudaState init_philox_state(at::CUDAGeneratorImpl* gen, size_t elts_pe
   return philox_args;
 }
 
->>>>>>> 389a6b
 }  // namespace transformer_engine::pytorch

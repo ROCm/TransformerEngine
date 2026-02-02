@@ -307,15 +307,12 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
 
 /*! \brief Compute the backward of the dot product attention with packed QKV input.
  *
-<<<<<<< HEAD
+ * \deprecated Please use `nvte_fused_attn_bwd` with separate Q, K, V tensors instead.
  * Support Matrix for ROCm AOTriton:
    \verbatim
    | backend | precision |        qkv layout       |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
    | aotriton| FP16/BF16 | BS3HD,SB3HD,BSH3D,SBH3D | NO                       | NO/CAUSAL                             |   Yes   |  arbitrary        | arbitrary        |
    \endverbatim
-=======
- * \deprecated Please use `nvte_fused_attn_bwd` with separate Q, K, V tensors instead.
->>>>>>> 389a6b
  *
  * Support Matrix:
    \verbatim
@@ -462,15 +459,12 @@ void nvte_fused_attn_fwd_kvpacked(
 
 /*! \brief Compute the backward of the dot product attention with packed KV input.
  *
-<<<<<<< HEAD
+ * \deprecated Please use `nvte_fused_attn_bwd` with separate Q, K, V tensors instead.
  * Support Matrix for ROCm AOTriton:
    \verbatim
    | backend | precision |                 qkv layout                  |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
    | aotriton| FP16/BF16 | BSHD_BS2HD,BSHD_BSH2D,SBHD_SB2HD,SBHD_SBH2D | NO                       | NO/CAUSAL                             |   Yes   |  arbitrary        | arbitrary        |
    \endverbatim
-=======
- * \deprecated Please use `nvte_fused_attn_bwd` with separate Q, K, V tensors instead.
->>>>>>> 389a6b
  *
  * Support Matrix:
    \verbatim

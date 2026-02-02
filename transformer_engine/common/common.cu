@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -230,13 +230,13 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
       // Any element that is outside of bounds will be set to zero by the TMA transfer.
       CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
 }
-#endif //#ifndef __HIP_PLATFORM_AMD__
 
 bool is_supported_by_CC_100() {
   int deviceComputeCapability = cuda::sm_arch(cuda::current_device());
 
   return deviceComputeCapability >= 100;
 }
+#endif //#ifndef __HIP_PLATFORM_AMD__
 
 std::vector<std::vector<Tensor *>> convert_tensor_array(NVTETensor **nvte_tensors,
                                                         size_t outer_size, size_t inner_size) {

@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -46,12 +46,8 @@ if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or os.path.isdir(build_tools_
 
 
 from build_tools.build_ext import get_build_ext
-<<<<<<< HEAD
-from build_tools.utils import ( rocm_build, copy_common_headers, copy_hipify_tools,
-                               clear_hipify_tools_copy)
-=======
 from build_tools.utils import copy_common_headers, min_python_version_str
->>>>>>> 389a6b
+from build_tools.utils import rocm_build, copy_hipify_tools, clear_hipify_tools_copy
 from build_tools.te_version import te_version
 from build_tools.jax import setup_jax_extension, install_requirements, test_requirements
 
@@ -126,7 +122,10 @@ if __name__ == "__main__":
     # us to detect CUDA version dynamically during compilation and
     # choose the correct wheel for te core lib.
     __version__ = te_version()
-    te_core = f"transformer_engine_cu{get_cuda_major_version()}=={__version__}"
+    if not rocm_build():
+        te_core = f"transformer_engine_cu{get_cuda_major_version()}=={__version__}"
+    else:
+        te_core = f"transformer_engine_rocm=={__version__}"
     install_requires = install_requirements() + [te_core]
 
     # Configure package

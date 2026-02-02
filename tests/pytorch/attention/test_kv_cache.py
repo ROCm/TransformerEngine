@@ -15,19 +15,13 @@ import math
 import pytest
 import torch
 
-from torch.distributions import Exponential
-<<<<<<< HEAD
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
-from transformer_engine.pytorch import make_graphed_callables
-from transformer_engine.common import recipe
-from transformer_engine.pytorch import fp8_autocast, fp8_model_init
-from transformer_engine.pytorch.transformer import (
-=======
+
+from torch.distributions import Exponential
 from transformer_engine.pytorch import (
     make_graphed_callables,
     autocast,
     quantized_model_init,
->>>>>>> 389a6b
     TransformerLayer,
     DotProductAttention,
     InferenceParams,

@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -105,7 +105,7 @@ def setup_jax_extension(
         sources=[str(path) for path in sources],
         include_dirs=[str(path) for path in include_dirs],
         extra_compile_args=cxx_flags,
-        libraries=["nccl"],
+        libraries=["nccl"] if not rocm_build() else [],
     )
 
 

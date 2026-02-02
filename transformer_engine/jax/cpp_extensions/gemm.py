@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -24,8 +24,8 @@ from transformer_engine_jax import (
     get_num_compute_streams,
     JAXX_Collective_Op,
     get_device_compute_capability,
-    initialize_cgemm_communicator,
-    get_cgemm_num_max_streams,
+    #initialize_cgemm_communicator,
+    #get_cgemm_num_max_streams,
 )
 
 from .base import BasePrimitive, register_primitive
@@ -83,7 +83,7 @@ def get_cublas_workspace_size_bytes() -> None:
     """Return workspace size needed for current architecture"""
     if is_hip_extension():
         """Return 64 MiB for gfx50x, 32 MiB for all other architectures."""
-        if tex.get_device_compute_capability(0) == 95:
+        if get_device_compute_capability(0) == 95:
             return 67_108_864
         return 33_554_432
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
@@ -285,7 +285,8 @@ def collective_gemm_bootstrap(
         and before any collective GEMM operations. Each process should call
         this function with its own unique process_id.
     """
-
+    if is_hip_extension():
+        assert 0, "collective_gemm_bootstrap is not supported for ROCm yet."
     assert (
         num_devices_per_process == 1 and jax.local_device_count() == 1
     ), "Only single device per process is supported at the moment!"

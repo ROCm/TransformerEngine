@@ -24,12 +24,8 @@ from jax import value_and_grad, jit
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from jax.typing import ArrayLike, DTypeLike
 
-<<<<<<< HEAD
-from transformer_engine.jax import fp8_autocast
 from transformer_engine.jax.cpp_extensions.misc import is_hip_extension
-=======
 from transformer_engine.jax import autocast
->>>>>>> 389a6b
 from transformer_engine.jax.sharding import MeshResource
 from transformer_engine.jax.attention import (
     AttnBiasType,
@@ -391,6 +387,7 @@ class FusedAttnRunner:
             get_device_compute_capability(0) >= 100
             and self.dropout_prob == 0.1
             and self.attn_bias_type is not AttnBiasType.NO_BIAS
+            and not is_hip_extension()
         ):
             pytest.skip(
                 "For sm100+, bprop kernel support for dropout + determinism (bias) is not supported"
@@ -1030,14 +1027,14 @@ class FusedAttnRunner:
         ),
         pytest.param(
             2,
-            512,
+            2048,
             1024,
             12,
             12,
             64,
             64,
             jnp.bfloat16,
-            id="2-512-1024-12-12-64-64-BF16-CROSS",
+            id="2-2048-1024-12-12-64-64-BF16-CROSS",
         ),
         pytest.param(
             2, 2048, 2048, 12, 6, 64, 64, jnp.bfloat16, id="2-2048-2048-12-6-64-64-BF16-GQA"

@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -34,7 +36,7 @@ EPSILON = model_config["small"].eps
 
 # Flash attention saves some internal tensor for the backward pass
 # that cannot be offloaded to CPU.
-assert os.getenv("NVTE_FLASH_ATTN") == "0"
+assert os.getenv("NVTE_FLASH_ATTN", "1") == "0"
 
 # CPU offload v1 code path is enabled
 assert os.environ.get("NVTE_CPU_OFFLOAD_V1", "0") == "1"

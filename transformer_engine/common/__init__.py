@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -17,16 +17,9 @@ import platform
 import subprocess
 import sys
 import sysconfig
-<<<<<<< HEAD
-from typing import Optional
+from typing import Optional, Tuple
 
 import transformer_engine
-
-_logger = logging.getLogger(__name__)
-=======
-from typing import Optional, Tuple
->>>>>>> 389a6b
-
 
 @functools.lru_cache(maxsize=None)
 def _is_package_installed(package) -> bool:
@@ -145,8 +138,10 @@ def get_te_core_package_info() -> Tuple[bool, str, str]:
     Check if Tranformer Engine core package is installed.
     Returns the module name and version if found.
     """
-
+    
     te_core_packages = ("transformer-engine-cu12", "transformer-engine-cu13")
+    if te_rocm_build:
+        te_core_packages = ("transformer-engine-rocm")
     for package in te_core_packages:
         if _is_package_installed(package):
             return True, package, version(package)
@@ -171,42 +166,6 @@ def load_framework_extension(framework: str) -> None:
     if framework == "torch":
         extra_dep_name = "pytorch"
 
-<<<<<<< HEAD
-    te_cuda_vers = "rocm" if te_rocm_build else "cu12"
-
-    # If the framework extension pip package is installed, it means that TE is installed via
-    # PyPI. For this case we need to make sure that the metapackage, the core lib, and framework
-    # extension are all installed via PyPI and have matching version.
-    if _is_pip_package_installed(module_name):
-        assert _is_pip_package_installed(
-            "transformer_engine"
-        ), "Could not find `transformer-engine`."
-        assert _is_pip_package_installed(
-            f"transformer_engine_{te_cuda_vers}"
-        ), f"Could not find `transformer-engine-{te_cuda_vers}`."
-        assert (
-            version(module_name)
-            == version("transformer-engine")
-            == version(f"transformer-engine-{te_cuda_vers}")
-        ), (
-            "TransformerEngine package version mismatch. Found"
-            f" {module_name} v{version(module_name)}, transformer-engine"
-            f" v{version('transformer-engine')}, and transformer-engine-{te_cuda_vers}"
-            f" v{version(f'transformer-engine-{te_cuda_vers}')}. Install transformer-engine using "
-            f"'pip3 install transformer-engine[{extra_dep_name}]==VERSION'"
-        )
-
-    # If the core package is installed via PyPI, log if
-    # the framework extension is not found from PyPI.
-    # Note: Should we error? This is a rare use case.
-    if _is_pip_package_installed(f"transformer-engine-{te_cuda_vers}"):
-        if not _is_pip_package_installed(module_name):
-            _logger.info(
-                "Could not find package %s. Install transformer-engine using "
-                f"'pip3 install transformer-engine[{extra_dep_name}]==VERSION'",
-                module_name,
-            )
-=======
     # Find the TE packages. The core and framework packages can only be installed via PyPI.
     # For the `transformer-engine` package, we need to check explicity.
     te_core_installed, te_core_package_name, te_core_version = get_te_core_package_info()
@@ -230,7 +189,6 @@ def load_framework_extension(framework: str) -> None:
             f" v{te_core_version}. Install transformer-engine using "
             f"'pip3 install --no-build-isolation transformer-engine[{extra_dep_name}]==VERSION'"
         )
->>>>>>> 389a6b
 
     # After all checks are completed, load the shared object file.
     spec = importlib.util.spec_from_file_location(module_name, _get_shared_object_file(framework))
@@ -438,7 +396,6 @@ def _load_core_library():
 
 
 if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
-<<<<<<< HEAD
     try:
         _CUDNN_LIB_CTYPES = _load_cudnn()
         _NVRTC_LIB_CTYPES = _load_nvrtc()
@@ -446,9 +403,6 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
         _CUBLAS_LIB_CTYPES = _load_nvidia_cuda_library("cublas")
         _CUDART_LIB_CTYPES = _load_nvidia_cuda_library("cuda_runtime")
 
-        # Needed to find the correct headers for NVRTC kernels.
-        if not os.getenv("NVTE_CUDA_INCLUDE_DIR") and _nvidia_cudart_include_dir():
-            os.environ["NVTE_CUDA_INCLUDE_DIR"] = _nvidia_cudart_include_dir()
     except (OSError, subprocess.CalledProcessError):
         pass
     finally:
@@ -473,13 +427,4 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
             assert (rocm_version == build_rocm_version), f"ROCm {'.'.join(rocm_version)} is detected but the library is built for {'.'.join(build_rocm_version)}"
         except FileNotFoundError:
             pass
-=======
-    sanity_checks_for_pypi_installation()
-    _CUDNN_LIB_CTYPES = _load_cudnn()
-    _NVRTC_LIB_CTYPES = _load_nvrtc()
-    _CURAND_LIB_CTYPES = _load_curand()
-    _CUBLAS_LIB_CTYPES = _load_nvidia_cuda_library("cublas")
-    _CUDART_LIB_CTYPES = _load_nvidia_cuda_library("cuda_runtime")
-    _TE_LIB_CTYPES = _load_core_library()
->>>>>>> 389a6b
 

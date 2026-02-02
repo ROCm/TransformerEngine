@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -11,14 +11,8 @@ from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
-<<<<<<< HEAD
-from jax import dtypes
-if version.parse(jax.__version__) >= version.parse("0.5.0"):
-    from jax.experimental.custom_partitioning import SdyShardingRule
-=======
 from jax import dtypes, ffi
 from jax.experimental.custom_partitioning import SdyShardingRule, BATCHING
->>>>>>> 389a6b
 from jax.sharding import PartitionSpec
 
 import numpy as np
@@ -579,15 +573,6 @@ class ActLuPrimitive(BasePrimitive):
         value_types,
         result_types,
     ):
-<<<<<<< HEAD
-        if version.parse(jax.__version__) < version.parse("0.5.0"):
-            raise ImportError("JAX version 0.5.0 or later is required for shardy sharding.")
-        del out_dtype, act_enum, act_len, scale_dtype, is_outer, mesh, result_types
-        prefix = "ActLuPrimitive_"
-        x_rank = len(value_types[0].shape)
-        scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
-            x_rank - 1, unique_var=prefix + "x", flatten_axis=-2
-=======
         del (
             out_dtype,
             act_enum,
@@ -600,7 +585,6 @@ class ActLuPrimitive(BasePrimitive):
             is_outer,
             mesh,
             result_types,
->>>>>>> 389a6b
         )
         prefix = "ActLu"
         input_shape = value_types[0].shape
@@ -1134,25 +1118,6 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         value_types,
         result_types,
     ):
-<<<<<<< HEAD
-        if version.parse(jax.__version__) < version.parse("0.5.0"):
-            raise ImportError("JAX version 0.5.0 or later is required for shardy sharding.")
-        del out_dtype, scale_dtype, act_enum, act_len, is_outer, mesh, result_types
-        prefix = "BaseDActLuDBiasQuantizePrimitive_"
-        scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
-            len(value_types[1].shape), unique_var=prefix + "x", flatten_axis=-2
-        )
-        x_axes = scale_rules.input_spec
-        dz_axes = (*x_axes[:-2], x_axes[-1])
-        out = x_axes
-        colwise_out = (prefix + "out_colwise",)
-        if is_2x:
-            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
-                colwise_out = tuple(multidim_transpose(x_axes, transpose_axis=-2))
-            else:
-                colwise_out = out
-=======
->>>>>>> 389a6b
 
         del (
             out_dtype,

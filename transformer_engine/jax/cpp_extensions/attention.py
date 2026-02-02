@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -9,6 +9,7 @@ import os
 import warnings
 from dataclasses import dataclass, replace
 from functools import partial, reduce
+from packaging import version
 from typing import Optional, Tuple
 
 import jax
@@ -2785,7 +2786,7 @@ def fused_attn_bwd(
     # TODO(KshitijLakhani): Add a check for cuDNN version when determinism does get supported on
     # sm100+
     compute_capabilities = get_all_device_compute_capability()
-    if any(x >= 100 for x in compute_capabilities):
+    if any(x >= 100 for x in compute_capabilities) and not is_hip_extension():
         assert not (
             attn_bias_type != AttnBiasType.NO_BIAS and dropout_probability != 0
         ), "For sm100+, bprop kernel support for dropout + determinism (bias) is not supported"

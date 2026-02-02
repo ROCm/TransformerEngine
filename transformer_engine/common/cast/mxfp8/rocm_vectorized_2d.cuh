@@ -1,12 +1,12 @@
 /*************************************************************************
- * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
 #pragma once
 
-#include "../util/vectorized_pointwise.h"
+#include "../../util/vectorized_pointwise.h"
 
 namespace transformer_engine {
 // These 2d copy functions replace TMA tensormap async copies for AMD GPUs.

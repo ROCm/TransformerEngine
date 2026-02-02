@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -28,7 +28,6 @@ using bf16__ = __hip_bfloat16;
 
 constexpr int amax_kernel_threads = 512;
 
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_AMD__
 
 template <int BLOCK_THREADS>
@@ -52,7 +51,6 @@ __global__ void amax_final_reduce(const float* __restrict__ block_amax,
 
 #endif
 
-=======
 __launch_bounds__(1) __global__ void zero_amax_kernel(float *amax_ptr, const float *noop_ptr) {
   if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
     return;
@@ -60,7 +58,6 @@ __launch_bounds__(1) __global__ void zero_amax_kernel(float *amax_ptr, const flo
   *amax_ptr = 0;
 }
 
->>>>>>> 389a6b
 template <int nvec, bool aligned, typename InputType>
 __launch_bounds__(amax_kernel_threads) __global__
     void amax_kernel(const InputType *input, float *amax,
@@ -280,19 +277,13 @@ void compute_amax_impl(const NVTETensor input_, const NVTETensor output_, cudaSt
   float *amax_ptr = reinterpret_cast<float *>(
       (output.amax.dptr != nullptr) ? output.amax.dptr : output.columnwise_amax.dptr);
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
-<<<<<<< HEAD
       input.data.dtype, IType, constexpr int nvec = 32 / sizeof(IType);
-      launch_amax_kernel<nvec>(reinterpret_cast<const IType *>(input.data.dptr),
-                               reinterpret_cast<float *>(output.amax.dptr), input.data.numel(),
+      launch_amax_kernel<nvec>(
+          reinterpret_cast<const IType *>(input.data.dptr), amax_ptr, input.data.numel(),
 #ifdef __HIP_PLATFORM_AMD__
-                               block_amax, block_capacity,
+          block_amax, block_capacity,
 #endif
-                               noop_ptr, stream););  // NOLINT(*)
-=======
-      input.data.dtype, IType, constexpr int nvec = 32 / sizeof(IType); launch_amax_kernel<nvec>(
-          reinterpret_cast<const IType *>(input.data.dptr), amax_ptr, input.data.numel(), noop_ptr,
-          stream););  // NOLINT(*)
->>>>>>> 389a6b
+          noop_ptr, stream););  // NOLINT(*)
 }
 
 }  // anonymous namespace

@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -614,16 +614,12 @@ class TestNorm:
         )
 
     @pytest.mark.skipif(not is_mxfp8_supported, reason=mxfp8_unsupported_reason)
-<<<<<<< HEAD
-    @pytest.mark.parametrize("out_dtype", FP8_COMPUTE_TYPE)
-=======
     @pytest.mark.parametrize(
         "out_dtype",
         [
-            jnp.float8_e4m3fn,
+            jnp_float8_e4m3_type if is_hip_extension() else jnp.float8_e4m3fn,
         ],
     )
->>>>>>> 389a6b
     def test_norm_forward_with_block_scaling_fp8(
         self, n, hidden, norm_type, zero_centered_gamma, epsilon, inp_dtype, out_dtype
     ):
@@ -640,15 +636,9 @@ class TestNorm:
         )
 
 
-<<<<<<< HEAD
-QUANTIZE_OUTPUT_DTYPES = {
+QUANTIZE_OUTPUT_FP8_DTYPES = {
     "L0": [jnp_float8_e4m3_type],
     "L2": FP8_COMPUTE_TYPE,
-=======
-QUANTIZE_OUTPUT_FP8_DTYPES = {
-    "L0": [jnp.float8_e4m3fn],
-    "L2": [jnp.float8_e4m3fn, jnp.float8_e5m2],
->>>>>>> 389a6b
 }
 QUANTIZE_OUTPUT_DTYPES = {
     test_level: QUANTIZE_OUTPUT_FP8_DTYPES[test_level] + [jnp.float4_e2m1fn]
@@ -692,11 +682,7 @@ QUANTIZATION_INPUT_DTYPE = {
 
 @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
 @pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
-<<<<<<< HEAD
 @pytest_parametrize_wrapper("q_dtype", FP8_COMPUTE_TYPE)
-=======
-@pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2, jnp.float4_e2m1fn])
->>>>>>> 389a6b
 @pytest_parametrize_wrapper("input_shape,flatten_axis", ALL_QUANTIZE_TEST_SHAPES_AND_FLATTEN_AXES)
 @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
 @pytest_parametrize_wrapper(
@@ -1085,13 +1071,8 @@ class TestRandomizedHadamardTransform:
 @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
 @pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
 @pytest_parametrize_wrapper("input_shape", [(8, 16, 32)])
-<<<<<<< HEAD
 @pytest_parametrize_wrapper("q_dtype", [jnp_float8_e4m3_type])
-@pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
-=======
-@pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn])
 @pytest_parametrize_wrapper("scaling_mode", non_fp4_supported_scaling_modes)
->>>>>>> 389a6b
 @pytest_parametrize_wrapper("flatten_axis", [-1])
 @pytest_parametrize_wrapper("with_group_sizes", [True, False])
 @pytest_parametrize_wrapper(
@@ -1487,17 +1468,10 @@ class TestDense:
         value_n_grad_ref_func = value_and_grad(ref_func, (0, 1, 2))
 
         quantizer_set = QuantizerFactory.create_set(
-<<<<<<< HEAD
-            scaling_mode=scaling_mode,
-            fwd_dtype=jnp_float8_e4m3_type,
-            bwd_dtype=jnp_float8_e5m2_type if scaling_mode.is_tensor_scaling() else jnp_float8_e4m3_type,
-            is_2x2x=True,
-=======
             fp8_recipe=recipe,
             quantize_meta_set=QuantizeMetaSet(
                 x=QuantizeMeta(), kernel=QuantizeMeta(), grad=QuantizeMeta()
             ),
->>>>>>> 389a6b
         )
 
         n_iterations = 3 if recipe.delayed() else 1
@@ -1511,17 +1485,10 @@ class TestDense:
             x, w, bias, data_layout
         )
 
-<<<<<<< HEAD
-        assert_allclose(primitive_out, ref_out, dtype=jnp_float8_e4m3_type)
-        assert_allclose(primitive_x_grad, ref_x_grad, dtype=jnp_float8_e5m2_type)
-        assert_allclose(primitive_w_grad, ref_w_grad, dtype=jnp_float8_e5m2_type)
-        assert_allclose(primitive_bias_grad, ref_bias_grad, dtype=jnp_float8_e5m2_type)
-=======
         assert_allclose(primitive_out, ref_out, dtype=quantizer_set.x.q_dtype)
         assert_allclose(primitive_x_grad, ref_x_grad, dtype=quantizer_set.dgrad.q_dtype)
         assert_allclose(primitive_w_grad, ref_w_grad, dtype=quantizer_set.dgrad.q_dtype)
         assert_allclose(primitive_bias_grad, ref_bias_grad, dtype=quantizer_set.dgrad.q_dtype)
->>>>>>> 389a6b
 
 
 @pytest.fixture(name="random_inputs")
@@ -1568,17 +1535,10 @@ class TestFusedDense:
         gamma = jax.random.normal(subkeys[2], (k,)).astype(jnp.bfloat16)
 
         quantizer_set = QuantizerFactory.create_set(
-<<<<<<< HEAD
-            scaling_mode=scaling_mode,
-            fwd_dtype=jnp_float8_e4m3_type,
-            bwd_dtype=jnp_float8_e5m2_type if scaling_mode.is_tensor_scaling() else jnp_float8_e4m3_type,
-            is_2x2x=True,
-=======
             fp8_recipe=recipe,
             quantize_meta_set=QuantizeMetaSet(
                 x=QuantizeMeta(), kernel=QuantizeMeta(), grad=QuantizeMeta()
             ),
->>>>>>> 389a6b
         )
 
         if norm_type == "layernorm":
@@ -1624,21 +1584,12 @@ class TestFusedDense:
                     prim_beta_grad,
                 ) = value_n_grad_prim_func(x, w, gamma, beta)
 
-<<<<<<< HEAD
-        assert_allclose(prim_out, ref_out, dtype=jnp_float8_e4m3_type)
-        assert_allclose(prim_x_grad, ref_x_grad, dtype=jnp_float8_e5m2_type)
-        assert_allclose(prim_w_grad, ref_w_grad, dtype=jnp_float8_e5m2_type)
-        assert_allclose(prim_gamma_grad, ref_gamma_grad, dtype=jnp_float8_e5m2_type)
-        if beta is not None:
-            assert_allclose(prim_beta_grad, ref_beta_grad, dtype=jnp_float8_e5m2_type)
-=======
         assert_allclose(prim_out, ref_out, dtype=quantizer_set.x.q_dtype)
         assert_allclose(prim_x_grad, ref_x_grad, dtype=quantizer_set.dgrad.q_dtype)
         assert_allclose(prim_w_grad, ref_w_grad, dtype=quantizer_set.dgrad.q_dtype)
         assert_allclose(prim_gamma_grad, ref_gamma_grad, dtype=quantizer_set.dgrad.q_dtype)
         if beta is not None:
             assert_allclose(prim_beta_grad, ref_beta_grad, dtype=quantizer_set.dgrad.q_dtype)
->>>>>>> 389a6b
 
     @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
     @pytest.mark.parametrize("m,n,k", [(64, 128, 128)])
@@ -1676,17 +1627,10 @@ class TestFusedDense:
 
         quantizer_sets = QuantizerFactory.create_set(
             n_quantizer_sets=2,
-<<<<<<< HEAD
-            scaling_mode=scaling_mode,
-            fwd_dtype=jnp_float8_e4m3_type,
-            bwd_dtype=jnp_float8_e5m2_type if scaling_mode.is_tensor_scaling() else jnp_float8_e4m3_type,
-            is_2x2x=True,
-=======
             fp8_recipe=recipe,
             quantize_meta_set=QuantizeMetaSet(
                 x=QuantizeMeta(), kernel=QuantizeMeta(), grad=QuantizeMeta()
             ),
->>>>>>> 389a6b
         )
 
         if norm_type == "layernorm":
@@ -1754,20 +1698,6 @@ class TestFusedDense:
             ref_bias_2_grad,
         ) = value_n_grad_ref_func(x, gamma, kernel_1, kernel_2, bias_1, bias_2)
 
-<<<<<<< HEAD
-        assert_allclose(prim_out, ref_out, dtype=jnp_float8_e4m3_type)
-
-        assert_allclose(prim_kernel_2_grad, ref_kernel_2_grad, dtype=jnp_float8_e5m2_type)
-        if use_bias:
-            assert_allclose(prim_bias_2_grad, ref_bias_2_grad, dtype=jnp_float8_e5m2_type)
-
-        assert_allclose(prim_kernel_1_grad, ref_kernel_1_grad, dtype=jnp_float8_e5m2_type)
-        if use_bias:
-            assert_allclose(prim_bias_1_grad, ref_bias_1_grad, dtype=jnp_float8_e5m2_type)
-
-        assert_allclose(prim_gamma_grad, ref_gamma_grad, dtype=jnp_float8_e5m2_type)
-        assert_allclose(prim_x_grad, ref_x_grad, dtype=jnp_float8_e5m2_type)
-=======
         fwd_dtype = quantizer_sets[0].x.q_dtype
         bwd_dtype = quantizer_sets[0].dgrad.q_dtype
         assert_allclose(prim_out, ref_out, dtype=fwd_dtype)
@@ -1778,7 +1708,6 @@ class TestFusedDense:
         if use_bias:
             assert_allclose(prim_bias_2_grad, ref_bias_2_grad, dtype=bwd_dtype)
             assert_allclose(prim_bias_1_grad, ref_bias_1_grad, dtype=bwd_dtype)
->>>>>>> 389a6b
 
 
 # E5M2 * E5M2 is not supported
@@ -1857,15 +1786,19 @@ class TestGroupedDense:
 
     @pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16])
     @pytest_parametrize_wrapper("layout", ["NN"])
-    def test_grouped_gemm_fp16(self, dtype, input_shape, layout):
+    @pytest_parametrize_wrapper("use_async_d2h_group_size", [True, False])
+    def test_grouped_gemm_fp16(self, dtype, input_shape, layout, use_async_d2h_group_size):
         lhs, rhs, group_sizes, contracting_dims, _ = self._generate_grouped_dense_input(
             dtype, input_shape, layout
         )
-        num_gemms = input_shape[0]
-        _ = jax.jit(tex.grouped_gemm_copy_group_sizes, static_argnames=("num_gemms",))(
-            group_sizes,
-            num_gemms=num_gemms,
-        )
+        if use_async_d2h_group_size:
+            if is_hip_extension():
+                pytest.skip("ROCm does not support use_async_d2h_group_sizes yet.")
+            num_gemms = input_shape[0]
+            _ = jax.jit(tex.grouped_gemm_copy_group_sizes, static_argnames=("num_gemms",))(
+                group_sizes,
+                num_gemms=num_gemms,
+            )
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
         # jitting grouped_gemm
@@ -1876,7 +1809,7 @@ class TestGroupedDense:
             rhs,
             group_sizes,
             contracting_dims,
-            use_async_d2h_group_sizes=True,
+            use_async_d2h_group_sizes=use_async_d2h_group_size,
         )
 
         self._assert_grouped_gemm_output(prim_out, group_sizes, ref_out, dtype)
