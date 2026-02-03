@@ -182,12 +182,11 @@ if __name__ == "__main__":
         assert bool(
             int(os.getenv("NVTE_RELEASE_BUILD", "0"))
         ), "NVTE_RELEASE_BUILD env must be set for metapackage build."
-        te_cuda_vers = "rocm" if rocm_build() else "cu12"
         ext_modules = []
         cmdclass = {}
         package_data = {}
         include_package_data = False
-        install_requires = ([f"transformer_engine_{te_cuda_vers}=={__version__}"],)
+        install_requires = ([f"transformer_engine_cu12=={__version__}"],)
         extras_require = {
             "pytorch": [f"transformer_engine_torch=={__version__}"],
             "jax": [f"transformer_engine_jax=={__version__}"],
@@ -222,9 +221,21 @@ if __name__ == "__main__":
                     )
                 )
 
+    PACKAGE_NAME="transformer_engine"
+    if rocm_build():
+        if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
+            if bool(int(os.getenv("NVTE_BUILD_METAPACKAGE", "0"))):
+                install_requires = ([f"transformer_engine_rocm=={__version__}"],)
+            else:
+                PACKAGE_NAME="transformer_engine_rocm"
+            #On ROCm make add extra to core package too so it can be installed w/o metapackage
+            extras_require = {
+                "pytorch": [f"transformer_engine_rocm_torch=={__version__}"],
+                "jax": [f"transformer_engine_rocm_jax=={__version__}"],
+            }
     # Configure package
     setuptools.setup(
-        name="transformer_engine",
+        name=PACKAGE_NAME,
         version=__version__,
         packages=setuptools.find_packages(
             include=[
@@ -239,7 +250,7 @@ if __name__ == "__main__":
         long_description_content_type="text/x-rst",
         ext_modules=ext_modules,
         cmdclass={"egg_info": HipifyMeta, "build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist},
-        python_requires=">=3.8",
+        python_requires=">=3.9",
         classifiers=["Programming Language :: Python :: 3"],
         install_requires=install_requires,
         license_files=("LICENSE",),

@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -55,6 +55,9 @@ from build_tools.pytorch import (
     install_requirements,
     test_requirements,
 )
+
+if rocm_build():
+    PACKAGE_NAME = "transformer_engine_rocm_torch"
 
 
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
@@ -112,6 +115,10 @@ class CachedWheelsCommand(_bdist_wheel):
     """
 
     def run(self):
+        if rocm_build():
+            print("ROCm build detected, building from source...")
+            return super().run()
+
         if FORCE_BUILD:
             super().run()
 

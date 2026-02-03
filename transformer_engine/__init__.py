@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -83,4 +83,4 @@ except FileNotFoundError as e:
                 category=RuntimeWarning,
             )
 
-__version__ = str(metadata.version("transformer_engine"))
+__version__ = str(metadata.version("transformer_engine_rocm" if transformer_engine.common.te_rocm_build else "transformer_engine"))

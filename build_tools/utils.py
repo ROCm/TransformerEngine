@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -208,6 +208,7 @@ def rocm_build() -> bool:
         # If neither ROCm nor CUDA is detected, raise an error
         raise FileNotFoundError("Could not detect ROCm or CUDA platform")
 
+
 @functools.lru_cache(maxsize=None)
 def rocm_path() -> Tuple[str, str]:
     """ROCm root path and HIPCC binary path as a tuple"""
@@ -226,6 +227,18 @@ def rocm_path() -> Tuple[str, str]:
         hipcc_bin = rocm_home / "bin" / "hipcc"
     return rocm_home, hipcc_bin
 
+
+def rocm_version() -> Tuple[int, ...]:
+    """ROCm version as a (major, minor) tuple.
+    Try to get ROCm version by parsing .info/version.
+    """
+    rocm_home, _ = rocm_path()
+    try:
+        with open(rocm_home / ".info" / "version", "r") as f:
+            rocm_version= f.read().strip().split('.')[:2]
+        return tuple(int(v) for v in rocm_version)
+    except FileNotFoundError:
+        raise RuntimeError("Could not determine ROCm version.")
 
 
 def cuda_toolkit_include_path() -> Tuple[str, str]:
@@ -495,10 +508,13 @@ def uninstall_te_wheel_packages():
             "pip",
             "uninstall",
             "-y",
-            "transformer_engine_rocm", # te_cuda_vers for ROCm build
+            "transformer_engine",
             "transformer_engine_cu12",
             "transformer_engine_torch",
             "transformer_engine_jax",
+            "transformer_engine_rocm",
+            "transformer_engine_rocm_jax",
+            "transformer_engine_rocm_torch",
         ]
     )
 
