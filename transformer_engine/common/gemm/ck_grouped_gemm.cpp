@@ -2,6 +2,9 @@
 
 #include <hip/hip_runtime.h>
 
+#include <transformer_engine/transformer_engine.h>
+#include "../common.h"
+
 #include "ck_tile/core.hpp"
 #include "ck_tile/ops/epilogue.hpp"
 #include "ck_tile/ops/gemm.hpp"
@@ -233,7 +236,7 @@ static inline bool infer_gemm_mode_group0(const transformer_engine::Tensor* cons
     return (M == Dm) && (N == Dn) && (K == Kb);
   };
 
-  // Try all candidates; prefer "no swap" first, then swap.
+  // Try all candidates; prefer "no swap" first, then swap
   for (bool do_swap : {false, true}) {
     for (bool ta : {false, true}) {
       for (bool tb : {false, true}) {
@@ -250,101 +253,6 @@ static inline bool infer_gemm_mode_group0(const transformer_engine::Tensor* cons
 
   // Nothing matched D = op(A) * op(B)
   return false;
-}
-
-bool grouped_gemm_ck_tile(const transformer_engine::Tensor* const* A,
-                          const transformer_engine::Tensor* const* B,
-                          transformer_engine::Tensor* const* D,
-                          int group_num,
-                          bool transA,
-                          bool transB,
-                          void* workspace,
-                          size_t workspace_bytes,
-                          bool accumulate,
-                          hipStream_t stream)
-{
-  const transformer_engine::Tensor* const* A_use = A;
-  const transformer_engine::Tensor* const* B_use = B;
-  bool transA_use = transA;
-  bool transB_use = transB;
-
-  // If TE's flags disagree with storage, infer the correct mode from shapes.
-  if (!infer_gemm_mode_group0(A, B, D, group_num, A_use, B_use, transA_use, transB_use)) {
-    const auto& a0 = data_view(*A[0]);
-    const auto& b0 = data_view(*B[0]);
-    const auto& d0 = data_view(*D[0]);
-    NVTE_ERROR("grouped_gemm_ck_tile: could not infer a consistent GEMM mode from shapes. ",
-              "A0=[", a0.shape[0], ",", a0.shape[1], "] ",
-              "B0=[", b0.shape[0], ",", b0.shape[1], "] ",
-              "D0=[", d0.shape[0], ",", d0.shape[1], "] ",
-              "given flags transA=", transA, " transB=", transB);
-    return false;
-  }
-
-  const auto a_dtype = A_use[0]->dtype();
-
-  const auto memop = accumulate ? ck_tile::memory_operation_enum::atomic_add
-                                : ck_tile::memory_operation_enum::set;
-
-  if (a_dtype == transformer_engine::DType::kFloat16) {
-    using T = TeDTypeToCk<transformer_engine::DType::kFloat16>::type;
-
-    if (!transA_use && !transB_use)
-      return (memop == ck_tile::memory_operation_enum::set)
-        ? run_grouped_impl<T, RowMajor, RowMajor, RowMajor, ck_tile::memory_operation_enum::set>(
-            A_use, B_use, D, group_num, false, false, workspace, workspace_bytes, stream)
-        : run_grouped_impl<T, RowMajor, RowMajor, RowMajor, ck_tile::memory_operation_enum::atomic_add>(
-            A_use, B_use, D, group_num, false, false, workspace, workspace_bytes, stream);
-
-    if (!transA_use && transB_use)
-      return (memop == ck_tile::memory_operation_enum::set)
-        ? run_grouped_impl<T, RowMajor, ColMajor, RowMajor, ck_tile::memory_operation_enum::set>(
-            A_use, B_use, D, group_num, false, true, workspace, workspace_bytes, stream)
-        : run_grouped_impl<T, RowMajor, ColMajor, RowMajor, ck_tile::memory_operation_enum::atomic_add>(
-            A_use, B_use, D, group_num, false, true, workspace, workspace_bytes, stream);
-
-    if (transA_use && !transB_use)
-      return (memop == ck_tile::memory_operation_enum::set)
-        ? run_grouped_impl<T, ColMajor, RowMajor, RowMajor, ck_tile::memory_operation_enum::set>(
-            A_use, B_use, D, group_num, true, false, workspace, workspace_bytes, stream)
-        : run_grouped_impl<T, ColMajor, RowMajor, RowMajor, ck_tile::memory_operation_enum::atomic_add>(
-            A_use, B_use, D, group_num, true, false, workspace, workspace_bytes, stream);
-
-    return (memop == ck_tile::memory_operation_enum::set)
-      ? run_grouped_impl<T, ColMajor, ColMajor, RowMajor, ck_tile::memory_operation_enum::set>(
-          A_use, B_use, D, group_num, true, true, workspace, workspace_bytes, stream)
-      : run_grouped_impl<T, ColMajor, ColMajor, RowMajor, ck_tile::memory_operation_enum::atomic_add>(
-          A_use, B_use, D, group_num, true, true, workspace, workspace_bytes, stream);
-  } else {
-    using T = TeDTypeToCk<transformer_engine::DType::kBFloat16>::type;
-
-    if (!transA_use && !transB_use)
-      return (memop == ck_tile::memory_operation_enum::set)
-        ? run_grouped_impl<T, RowMajor, RowMajor, RowMajor, ck_tile::memory_operation_enum::set>(
-            A_use, B_use, D, group_num, false, false, workspace, workspace_bytes, stream)
-        : run_grouped_impl<T, RowMajor, RowMajor, RowMajor, ck_tile::memory_operation_enum::atomic_add>(
-            A_use, B_use, D, group_num, false, false, workspace, workspace_bytes, stream);
-
-    if (!transA_use && transB_use)
-      return (memop == ck_tile::memory_operation_enum::set)
-        ? run_grouped_impl<T, RowMajor, ColMajor, RowMajor, ck_tile::memory_operation_enum::set>(
-            A_use, B_use, D, group_num, false, true, workspace, workspace_bytes, stream)
-        : run_grouped_impl<T, RowMajor, ColMajor, RowMajor, ck_tile::memory_operation_enum::atomic_add>(
-            A_use, B_use, D, group_num, false, true, workspace, workspace_bytes, stream);
-
-    if (transA_use && !transB_use)
-      return (memop == ck_tile::memory_operation_enum::set)
-        ? run_grouped_impl<T, ColMajor, RowMajor, RowMajor, ck_tile::memory_operation_enum::set>(
-            A_use, B_use, D, group_num, true, false, workspace, workspace_bytes, stream)
-        : run_grouped_impl<T, ColMajor, RowMajor, RowMajor, ck_tile::memory_operation_enum::atomic_add>(
-            A_use, B_use, D, group_num, true, false, workspace, workspace_bytes, stream);
-
-    return (memop == ck_tile::memory_operation_enum::set)
-      ? run_grouped_impl<T, ColMajor, ColMajor, RowMajor, ck_tile::memory_operation_enum::set>(
-          A_use, B_use, D, group_num, true, true, workspace, workspace_bytes, stream)
-      : run_grouped_impl<T, ColMajor, ColMajor, RowMajor, ck_tile::memory_operation_enum::atomic_add>(
-          A_use, B_use, D, group_num, true, true, workspace, workspace_bytes, stream);
-  }
 }
 
 bool grouped_gemm_ck_tile(const NVTETensor* A,
@@ -377,11 +285,96 @@ bool grouped_gemm_ck_tile(const NVTETensor* A,
   if (workspace) {
     auto* ws_te = transformer_engine::convertNVTETensorCheck(*workspace);
     ws_ptr   = ws_te->data.dptr;
-    ws_bytes = ws_te->data.numel() * transformer_engine::typeToSize(ws_te->data.dtype);
+    ws_bytes = ws_te->data.numel() *
+               transformer_engine::typeToSize(ws_te->data.dtype);
   }
 
-  return grouped_gemm_ck_tile(A_te.data(), B_te.data(), D_te.data(),
-                              group_num, transA, transB,
-                              ws_ptr, ws_bytes, accumulate,
-                              stream);
+  const transformer_engine::Tensor* const* A_use = A_te.data();
+  const transformer_engine::Tensor* const* B_use = B_te.data();
+  bool transA_use = transA;
+  bool transB_use = transB;
+
+  // If TE's flags disagree with storage, infer the correct mode from shapes.
+  if (!infer_gemm_mode_group0(A_te.data(), B_te.data(), D_te.data(),
+                              group_num, A_use, B_use, transA_use, transB_use)) {
+    const auto& a0 = data_view(*A_te[0]);
+    const auto& b0 = data_view(*B_te[0]);
+    const auto& d0 = data_view(*D_te[0]);
+    NVTE_ERROR("grouped_gemm_ck_tile: could not infer a consistent GEMM mode from shapes. ",
+              "A0=[", a0.shape[0], ",", a0.shape[1], "] ",
+              "B0=[", b0.shape[0], ",", b0.shape[1], "] ",
+              "D0=[", d0.shape[0], ",", d0.shape[1], "] ",
+              "given flags transA=", transA, " transB=", transB);
+    return false;
+  }
+
+  const auto a_dtype = A_use[0]->dtype();
+
+  const auto memop = accumulate ? ck_tile::memory_operation_enum::atomic_add
+                                : ck_tile::memory_operation_enum::set;
+
+  if (a_dtype == transformer_engine::DType::kFloat16) {
+    using T = TeDTypeToCk<transformer_engine::DType::kFloat16>::type;
+
+    if (!transA_use && !transB_use)
+      return (memop == ck_tile::memory_operation_enum::set)
+        ? run_grouped_impl<T, RowMajor, RowMajor, RowMajor, ck_tile::memory_operation_enum::set>(
+            A_use, B_use, D_te.data(), group_num, false, false, ws_ptr, ws_bytes, stream)
+        : run_grouped_impl<T, RowMajor, RowMajor, RowMajor, ck_tile::memory_operation_enum::atomic_add>(
+            A_use, B_use, D_te.data(), group_num, false, false, ws_ptr, ws_bytes, stream);
+
+    if (!transA_use && transB_use)
+      return (memop == ck_tile::memory_operation_enum::set)
+        ? run_grouped_impl<T, RowMajor, ColMajor, RowMajor, ck_tile::memory_operation_enum::set>(
+            A_use, B_use, D_te.data(), group_num, false, true, ws_ptr, ws_bytes, stream)
+        : run_grouped_impl<T, RowMajor, ColMajor, RowMajor, ck_tile::memory_operation_enum::atomic_add>(
+            A_use, B_use, D_te.data(), group_num, false, true, ws_ptr, ws_bytes, stream);
+
+    if (transA_use && !transB_use)
+      return (memop == ck_tile::memory_operation_enum::set)
+        ? run_grouped_impl<T, ColMajor, RowMajor, RowMajor, ck_tile::memory_operation_enum::set>(
+            A_use, B_use, D_te.data(), group_num, true, false, ws_ptr, ws_bytes, stream)
+        : run_grouped_impl<T, ColMajor, RowMajor, RowMajor, ck_tile::memory_operation_enum::atomic_add>(
+            A_use, B_use, D_te.data(), group_num, true, false, ws_ptr, ws_bytes, stream);
+
+    return (memop == ck_tile::memory_operation_enum::set)
+      ? run_grouped_impl<T, ColMajor, ColMajor, RowMajor, ck_tile::memory_operation_enum::set>(
+          A_use, B_use, D_te.data(), group_num, true, true, ws_ptr, ws_bytes, stream)
+      : run_grouped_impl<T, ColMajor, ColMajor, RowMajor, ck_tile::memory_operation_enum::atomic_add>(
+          A_use, B_use, D_te.data(), group_num, true, true, ws_ptr, ws_bytes, stream);
+
+  } else if (a_dtype == transformer_engine::DType::kBFloat16) {
+    using T = TeDTypeToCk<transformer_engine::DType::kBFloat16>::type;
+
+    if (!transA_use && !transB_use)
+      return (memop == ck_tile::memory_operation_enum::set)
+        ? run_grouped_impl<T, RowMajor, RowMajor, RowMajor, ck_tile::memory_operation_enum::set>(
+            A_use, B_use, D_te.data(), group_num, false, false, ws_ptr, ws_bytes, stream)
+        : run_grouped_impl<T, RowMajor, RowMajor, RowMajor, ck_tile::memory_operation_enum::atomic_add>(
+            A_use, B_use, D_te.data(), group_num, false, false, ws_ptr, ws_bytes, stream);
+
+    if (!transA_use && transB_use)
+      return (memop == ck_tile::memory_operation_enum::set)
+        ? run_grouped_impl<T, RowMajor, ColMajor, RowMajor, ck_tile::memory_operation_enum::set>(
+            A_use, B_use, D_te.data(), group_num, false, true, ws_ptr, ws_bytes, stream)
+        : run_grouped_impl<T, RowMajor, ColMajor, RowMajor, ck_tile::memory_operation_enum::atomic_add>(
+            A_use, B_use, D_te.data(), group_num, false, true, ws_ptr, ws_bytes, stream);
+
+    if (transA_use && !transB_use)
+      return (memop == ck_tile::memory_operation_enum::set)
+        ? run_grouped_impl<T, ColMajor, RowMajor, RowMajor, ck_tile::memory_operation_enum::set>(
+            A_use, B_use, D_te.data(), group_num, true, false, ws_ptr, ws_bytes, stream)
+        : run_grouped_impl<T, ColMajor, RowMajor, RowMajor, ck_tile::memory_operation_enum::atomic_add>(
+            A_use, B_use, D_te.data(), group_num, true, false, ws_ptr, ws_bytes, stream);
+
+    return (memop == ck_tile::memory_operation_enum::set)
+      ? run_grouped_impl<T, ColMajor, ColMajor, RowMajor, ck_tile::memory_operation_enum::set>(
+          A_use, B_use, D_te.data(), group_num, true, true, ws_ptr, ws_bytes, stream)
+      : run_grouped_impl<T, ColMajor, ColMajor, RowMajor, ck_tile::memory_operation_enum::atomic_add>(
+          A_use, B_use, D_te.data(), group_num, true, true, ws_ptr, ws_bytes, stream);
+
+  } else {
+    NVTE_ERROR("grouped_gemm_ck_tile: unsupported dtype (expected FP16/BF16).");
+    return false;
+  }
 }

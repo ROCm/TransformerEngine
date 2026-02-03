@@ -5,8 +5,8 @@ import transformer_engine.pytorch as te
 
 torch.manual_seed(0)
 
-os.environ["NVTE_USE_CK_GROUPED_GEMM"] = "1"
-os.environ["NVTE_CK_GROUPED_GEMM_WARN_FALLBACK"] = "1"
+os.environ["NVTE_USE_CUTLASS_GROUPED_GEMM"] = "1"
+os.environ["NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK"] = "1"
 
 device = "cuda"
 dtype  = torch.bfloat16

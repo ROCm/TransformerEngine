@@ -203,6 +203,7 @@ else()
        fused_attn_rocm/fused_attn_ck.cpp
        fused_attn_rocm/utils.cpp
        gemm/rocm_gemm.cu
+       gemm/ck_grouped_gemm.cpp
        amd_detail/system.cpp)
 
   # process source code files
@@ -241,14 +242,6 @@ endif()
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
-set(CK_ROOT ${CMAKE_SOURCE_DIR}/../../3rdparty/aiter/3rdparty/composable_kernel)
-
-target_include_directories(transformer_engine
-  BEFORE PRIVATE
-    ${CK_ROOT}/include
-)
-
-
 if (USE_CUDA)
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
   set_source_files_properties(
@@ -259,6 +252,9 @@ if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
 else()
   message(FATAL_ERROR "cutlass gemm/cutlass_grouped_gemm.cu kernel required sm 90a")
 endif()
+else()
+  set(CK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/aiter/3rdparty/composable_kernel)
+  target_include_directories(transformer_engine PRIVATE ${CK_ROOT}/include)
 endif() #USE_CUDA
 
 # Configure dependencies

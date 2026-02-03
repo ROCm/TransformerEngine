@@ -28,7 +28,7 @@
 #ifndef __HIP_PLATFORM_AMD__
 #include "cutlass_grouped_gemm.cuh"
 #else
-#include "ck_grouped_gemm.cuh"
+#include "ck_grouped_gemm.h"
 #endif
 
 #ifndef __HIP_PLATFORM_AMD__
@@ -791,9 +791,9 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   NVTE_API_CALL(nvte_multi_tensor_gemm);
 
 #ifdef __HIP_PLATFORM_AMD__
-  const bool use_ck = transformer_engine::getenv<bool>("NVTE_USE_CK_GROUPED_GEMM", false);
+  const bool use_ck = transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPED_GEMM", false);
   const bool warn_fallback =
-      transformer_engine::getenv<bool>("NVTE_CK_GROUPED_GEMM_WARN_FALLBACK", false);
+      transformer_engine::getenv<bool>("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", false);
 
   auto is_supported_dtype = [&]() -> bool {
     auto *inputA = transformer_engine::convertNVTETensorCheck(A[0]);
