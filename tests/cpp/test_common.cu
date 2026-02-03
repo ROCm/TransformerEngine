@@ -23,6 +23,8 @@
 #include <transformer_engine/transformer_engine.h>
 #include "util/logging.h"
 
+#include <curand.h>
+
 namespace test {
 
 size_t create_seed_from_tensor_name(const std::string& tensor_name) {
@@ -786,16 +788,9 @@ std::pair<double, double> getTolerances(const DType type) {
   return {0, 0};
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 template <typename T>
 void generate_data_uniformly(T* data, const size_t size, std::mt19937* gen) {
-#ifdef __HIP_PLATFORM_AMD__
-  // TODO: Introduce a parallel RNG library (Random123, PCG, rocRAND)
-  std::uniform_real_distribution<> dis(-2.0, 1.0);
-  for (int i = 0; i < size; i++) {
-    data[i] = static_cast<T>(dis(*gen));
-  }
-  gen->discard(size);
-#else
   // Check how many RNG calls are required to generate one uniform random value
   int rng_calls_per_val = 0;
   {
@@ -825,28 +820,129 @@ void generate_data_uniformly(T* data, const size_t size, std::mt19937* gen) {
     }
   }
   gen->discard(size * rng_calls_per_val);
-#endif
 }
+#endif
+
+#ifdef __HIP_PLATFORM_AMD__
+template <typename T, bool RandomSign>
+__global__ void affine_transform_cast_signs(const float* __restrict__ in,
+                                            const float* __restrict__ signs,
+                                            T* __restrict__ out,
+                                            size_t n, double lo, double hi) {
+  // Map values in *in* from [0, 1) to [lo, hi) and cast to type *T* for *out*.
+  // Potentially flip signs if RandomSign==true.
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx < n) {
+    float val = lo + (hi - lo) * in[idx];
+
+    if constexpr (RandomSign) {
+      if (signs[idx] < 0.5f)
+        val = -val;
+    }
+
+    out[idx] = static_cast<T>(val);
+  }
+}
+
+template <typename T>
+static void fillUniformLinearBufferDevice(T* dst_dev,
+                                          T* dst_cpu, // nullable
+                                          size_t N,
+                                          unsigned long long seed,
+                                          double lo, double hi,
+                                          bool random_sign=false) {
+  // Fill a linear device buffer with uniform randoms in [*lo*, *hi*] and cast them to *T*.
+  // Optionally mirror the result into a provided CPU pointer.
+  if (N == 0)
+    return;
+
+  float* tmp = nullptr;
+  NVTE_CHECK_CUDA(cudaMalloc(&tmp, N * sizeof(float)));
+
+  float* tmp_sign = nullptr;
+  if (random_sign) {
+    NVTE_CHECK_CUDA(cudaMalloc(&tmp_sign, N * sizeof(float)));
+  }
+
+  curandGenerator_t gen;
+  NVTE_CHECK(curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_PHILOX4_32_10) == CURAND_STATUS_SUCCESS);
+  NVTE_CHECK(curandSetPseudoRandomGeneratorSeed(gen, seed) == CURAND_STATUS_SUCCESS);
+  NVTE_CHECK(curandGenerateUniform(gen, tmp, N) == CURAND_STATUS_SUCCESS);
+
+  if (random_sign) {
+    NVTE_CHECK(curandGenerateUniform(gen, tmp_sign, N) == CURAND_STATUS_SUCCESS);
+  }
+
+  dim3 block(256);
+  dim3 grid((N + block.x - 1) / block.x);
+
+  if (random_sign)
+    affine_transform_cast_signs<T, true><<<grid, block, 0, 0>>>(
+      tmp, tmp_sign, dst_dev, N, lo, hi);
+  else
+    affine_transform_cast_signs<T, false><<<grid, block, 0, 0>>>(
+      tmp, nullptr, dst_dev, N, lo, hi);
+
+  NVTE_CHECK_CUDA(cudaGetLastError());
+
+  if (dst_cpu != nullptr) {
+    NVTE_CHECK_CUDA(cudaMemcpy(dst_cpu, dst_dev, N * sizeof(T), cudaMemcpyDeviceToHost));
+  }
+
+  NVTE_CHECK(curandDestroyGenerator(gen) == CURAND_STATUS_SUCCESS);
+  NVTE_CHECK_CUDA(cudaFree(tmp));
+  if (tmp_sign)
+    NVTE_CHECK_CUDA(cudaFree(tmp_sign));
+}
+
+template <typename T>
+static void fillUniformTensorDevice(Tensor* t, double lo=-2.0f,
+                                    double hi=1.0f, bool random_sign=false) {
+  void* dst_dev_void = t->rowwise() ? t->rowwise_dptr() : t->columnwise_dptr();
+  const auto shape   = t->rowwise() ? (t->rowwise_shape()) : (t->columnwise_shape());
+  const size_t N      = product(shape);
+
+  // per-tensor deterministic seed
+  const unsigned long long seed = static_cast<unsigned long long>(t->gen()());
+
+  T* dst_dev = reinterpret_cast<T*>(dst_dev_void);
+  // Keep the CPU mirror in sync. We could use Tensor::to_cpu() here,
+  // but that does more than just copying the data.
+  T* dst_cpu = t->rowwise() ? t->rowwise_cpu_dptr<T>() : t->columnwise_cpu_dptr<T>();
+  fillUniformLinearBufferDevice(dst_dev, dst_cpu, N, seed, lo, hi, random_sign);
+}
+#endif
 
 void fillUniform(Tensor *t) {
   if (t->rowwise()) {
     const size_t size = product(t->rowwise_shape());
     TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(t->dtype(), T,
       {
+#ifdef __HIP_PLATFORM_AMD__
+        fillUniformTensorDevice<T>(t);
+#else
         T *data = t->rowwise_cpu_dptr<T>();
         generate_data_uniformly(data, size, &(t->gen()));
+#endif
       }
     );
   } else {
     const size_t size = product(t->columnwise_shape());
     TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(t->dtype(), T,
       {
+#ifdef __HIP_PLATFORM_AMD__
+        fillUniformTensorDevice<T>(t);
+#else
         T *data = t->columnwise_cpu_dptr<T>();
         generate_data_uniformly(data, size, &(t->gen()));
+#endif
       }
     );
   }
+#ifndef __HIP_PLATFORM_AMD__
+  // Data is already on device on AMDGPU
   t->from_cpu();
+#endif
   std::uniform_real_distribution<> dis(-2.0, 1.0);
   t->set_scale_inv(dis(t->gen()));
 }
@@ -857,10 +953,18 @@ void fillCase_special(Tensor *t) {
 
   if constexpr (Case == InputsFillCase::zeros) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(t->dtype(), InputType, {
+#ifdef __HIP_PLATFORM_AMD__
+      // Fill device and CPU mirror
+      void* dst_dev = t->rowwise_dptr();
+      NVTE_CHECK_CUDA(cudaMemset(dst_dev, 0, size * sizeof(InputType)));
+      InputType* dst_cpu = t->rowwise_cpu_dptr<InputType>();
+      std::fill_n(dst_cpu, size, static_cast<InputType>(0));
+#else
       InputType *data = t->rowwise_cpu_dptr<InputType>();
       for (size_t i = 0; i < size; ++i) {
         data[i] = static_cast<InputType>(0);
       }
+#endif
     });
   } else {
     double minAbs = -2.0;
@@ -869,22 +973,32 @@ void fillCase_special(Tensor *t) {
       minAbs = Quantized_Limits<InputEncoding>::ranges[Case];
       maxAbs = Quantized_Limits<InputEncoding>::ranges[Case + 1];
     }
-    std::uniform_real_distribution<> dis(minAbs, maxAbs);
-    std::uniform_real_distribution<> dis_sign(-1.0, 1.0);
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(t->dtype(), InputType, {
-      InputType *data = t->rowwise_cpu_dptr<InputType>();
-      for (size_t idx = 0; idx < size; ++idx) {
-        const bool is_negative = (dis_sign(t->gen()) < 0.0);
-        double val = dis(t->gen());
-        if (is_negative) {
-          val = -val;
-        }
-        data[idx] = static_cast<InputType>(val);
-      }
+#ifdef __HIP_PLATFORM_AMD__
+      const unsigned long long seed = static_cast<unsigned long long>(t->gen()());
+      InputType* dst_dev = static_cast<InputType*>(t->rowwise_dptr());
+      InputType* dst_cpu = static_cast<InputType*>(t->rowwise_cpu_dptr<InputType>());
+      fillUniformLinearBufferDevice(dst_dev, dst_cpu, size, seed,
+                                    minAbs, maxAbs, /*random_sign=*/true);
+#else
+      std::uniform_real_distribution<> dis(minAbs, maxAbs);
+      std::uniform_real_distribution<> dis_sign(-1.0, 1.0);
+       InputType *data = t->rowwise_cpu_dptr<InputType>();
+       for (size_t idx = 0; idx < size; ++idx) {
+         const bool is_negative = (dis_sign(t->gen()) < 0.0);
+         double val = dis(t->gen());
+         if (is_negative) {
+           val = -val;
+         }
+         data[idx] = static_cast<InputType>(val);
+       }
+#endif
     });
   }
   t->set_scale_inv(1.0);
+#ifndef __HIP_PLATFORM_AMD__
   t->from_cpu();
+#endif
 }
 
 template <typename InputEncoding>
