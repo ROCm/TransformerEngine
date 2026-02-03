@@ -189,6 +189,7 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
   NVTE_DIM_CHECK(chunk_height > 0 && chunk_width > 0, "Attempted to get empty tensor chunk");
   NVTE_DIM_CHECK(chunk_height <= height && chunk_width <= width,
                  "Attempted to get out-of-bounds tensor chunk");
+#ifndef __HIP_PLATFORM_AMD__
   if (scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING) {
     // MXFP8 scale-inverses are padded to a 2D matrix with dims that
     // are divisible by 128. UB doesn't handle this padding yet.
@@ -197,6 +198,7 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
     NVTE_DIM_CHECK(chunk_height % 128 == 0 && chunk_width % 128 == 0,
                    "Userbuffers requires MXFP8 tensor chunk dims that are divisible by 128");
   }
+#endif
 #undef NVTE_DIM_CHECK
 
   // Construct tensor chunk

@@ -83,7 +83,11 @@ constexpr struct BlockSize {
 constexpr struct Alignment {
   size_t x;
   size_t y;
+#ifndef __HIP_PLATFORM_AMD__
 } MXFP8_ALIGNMENT{128, 4};
+#else
+} MXFP8_ALIGNMENT{1, 1};
+#endif
 
 std::vector<size_t> get_mxfp8_scale_shape(size_t M, size_t N, bool is_colwise);
 

@@ -715,16 +715,22 @@ template <>
 struct is_fp4<fp4e2m1> : std::true_type {};
 #endif
 
+#ifndef __HIP_PLATFORM_AMD__
 // [128,4] rowwise and [4,128] colwise alignment requirements for the tensor with scaling factors
 constexpr size_t scale_tensor_alignment_X_rowwise = 4;
 constexpr size_t scale_tensor_alignment_Y_rowwise = 128;
 constexpr size_t scale_tensor_alignment_X_colwise = 128;
 constexpr size_t scale_tensor_alignment_Y_colwise = 4;
 
-#ifndef __HIP_PLATFORM_AMD__
 // Alignment requirements for the Tensor Memory Accelerator (TMA)
 constexpr size_t TMA_GMEM_ALIGNMENT = 16;    // global memory address alignment
 constexpr size_t TMA_SHMEM_ALIGNMENT = 128;  // shared memory address alignment
+#else
+// HIP does not use scale padding
+constexpr size_t scale_tensor_alignment_X_rowwise = 1;
+constexpr size_t scale_tensor_alignment_Y_rowwise = 1;
+constexpr size_t scale_tensor_alignment_X_colwise = 1;
+constexpr size_t scale_tensor_alignment_Y_colwise = 1;
 #endif
 
 inline bool is_aligned_ptr(const void *ptr, size_t alignment) {

@@ -147,7 +147,11 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 
     scale_inv_meta ret_rowwise, ret_colwise;
 
+#ifndef __HIP_PLATFORM_AMD__
     auto block_alignment = std::vector<size_t>{128ul, 4ul};
+#else
+    auto block_alignment = std::vector<size_t>{1ul, 1ul};
+#endif
     {
       auto alignment = block_alignment[0];
       auto scale_dim_0 = DIVUP(DIVUP(first_dim, static_cast<size_t>(1)), alignment) * alignment;
@@ -181,12 +185,20 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 
     {
       auto scale_dim_0 = DIVUP(first_dim, static_cast<size_t>(128));
+#ifdef __HIP_PLATFORM_AMD__
+      auto scale_dim_1 = DIVUP(last_dim, static_cast<size_t>(128));
+#else
       auto scale_dim_1 = DIVUP(DIVUP(last_dim, static_cast<size_t>(128)), 4) * 4;
+#endif
       ret_rowwise.shape = {scale_dim_0, scale_dim_1};
     }
     {
       auto scale_dim_0 = DIVUP(last_dim, static_cast<size_t>(128));
+#ifdef __HIP_PLATFORM_AMD__
+      auto scale_dim_1 = DIVUP(first_dim, static_cast<size_t>(128));
+#else
       auto scale_dim_1 = DIVUP(DIVUP(first_dim, static_cast<size_t>(128)), 4) * 4;
+#endif
       ret_colwise.shape = {scale_dim_0, scale_dim_1};
     }
     ret_rowwise.type = DType::kFloat32;
@@ -207,12 +219,20 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 
     {
       auto scale_dim_0 = DIVUP(last_dim, static_cast<size_t>(128));
+#ifdef __HIP_PLATFORM_AMD__
+      auto scale_dim_1 = first_dim;
+#else 
       auto scale_dim_1 = DIVUP(first_dim, 4) * 4;
+#endif
       ret_rowwise.shape = {scale_dim_0, scale_dim_1};
     }
     {
       auto scale_dim_0 = DIVUP(first_dim, static_cast<size_t>(128));
+#ifdef __HIP_PLATFORM_AMD__
+      auto scale_dim_1 = last_dim;
+#else 
       auto scale_dim_1 = DIVUP(last_dim, 4) * 4;
+#endif
       ret_colwise.shape = {scale_dim_0, scale_dim_1};
     }
     ret_rowwise.type = DType::kFloat32;

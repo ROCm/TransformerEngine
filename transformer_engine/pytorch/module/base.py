@@ -602,7 +602,7 @@ def fill_userbuffers_buffer_for_all_gather(
         comm.copy_into_buffer(local_data, local_chunk=True)
 
         # Gather scaling-inverses
-        if math.prod(local_shape[:-1]) % 128 != 0:
+        if math.prod(local_shape[:-1]) % 128 != 0 and not IS_HIP_EXTENSION:
             raise ValueError(
                 "Userbuffers requires MXFP8 tensor dims that are divisible by 128, "
                 f"but got MXFP8 tensor with shape={tuple(local_shape)}"
