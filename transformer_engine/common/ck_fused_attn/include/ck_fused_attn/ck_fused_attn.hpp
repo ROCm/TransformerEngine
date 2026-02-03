@@ -37,35 +37,6 @@ enum class BiasType{
 };
 
 
-hipError_t _ck_attn_fwd_impl(
-  DType dtype,
-  uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v, uint64_t bias_b, uint64_t bias_h,
-  uint64_t max_tokens_q,
-  const void* q_ptr, 
-  uint64_t stride_b_q, uint64_t stride_h_q, uint64_t stride_s_q,
-  const void* k_ptr, 
-  uint64_t stride_b_k, uint64_t stride_h_k, uint64_t stride_s_k,
-  const void* v_ptr, 
-  uint64_t stride_b_v, uint64_t stride_h_v, uint64_t stride_s_v,
-  const void* bias_ptr,
-  const void* alibi_slope_ptr,
-  const void* cu_seqlen_q_ptr, const void* cu_seqlen_kv_ptr,
-  const void* cu_seqlen_q_padded_ptr, const void* cu_seqlen_kv_padded_ptr,
-  bool is_training,
-  float scaling_factor,
-  float dropout_probability,
-  void* philox_seed_ptr, void* philox_offset_ptr,
-  BiasType attn_bias_type,
-  MaskType attn_mask_type,
-  int64_t window_size_left, int64_t window_size_right,
-  void* o_ptr, 
-  uint64_t stride_b_o, uint64_t stride_h_o, uint64_t stride_s_o,
-  void* lse_ptr,
-  bool uses_fwd_v3,
-  int how_v3_bf16_cvt,
-  bool is_group_mode,
-  hipStream_t stream);
-
 hipError_t ck_attn_fwd(
   DType dtype,
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v, uint64_t bias_b, uint64_t bias_h,

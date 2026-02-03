@@ -345,7 +345,7 @@ void log_bwd_config(const char* func_name,
                     const bool uses_bwd_v3,
                     const bool is_v3_atomic_fp32,
                     const int how_v3_bf16_cvt,
-                    const fmha_bwd_args& fmha_args){
+                    const aiter::mha_bwd_args& fmha_args){
 
   bool ck_fused_attn_log_config = false;
   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
@@ -360,16 +360,16 @@ void log_bwd_config(const char* func_name,
     std::cout<<"hdim_q: "<<fmha_args.hdim_q<<std::endl;
     std::cout<<"hdim_v: "<<fmha_args.hdim_v<<std::endl;
     std::cout<<"data_type: "<<data_type_str<<std::endl;
-    std::cout<<"is_group_mode: "<<is_group_mode<<std::endl;
+    std::cout<<"is_group_mode: "<<fmha_args.is_group_mode<<std::endl;
     std::cout<<"mask_type: "<<static_cast<std::underlying_type<mask_enum>::type>(mask_type)<<std::endl;
     std::cout<<"bias_type: "<<static_cast<std::underlying_type<bias_enum>::type>(bias_type)<<std::endl;
     std::cout<<"has_dbias: "<<has_dbias<<std::endl;
     std::cout<<"has_dropout: "<<has_dropout<<std::endl;
     std::cout<<"is_store_randval: "<<is_store_randval<<std::endl;
     std::cout<<"is_deterministic: "<<is_deterministic<<std::endl;
-    std::cout<<"uses_bwd_v3: "<<uses_bwd_v3<<std::endl;
-    std::cout<<"is_v3_atomic_fp32: "<<is_v3_atomic_fp32<<std::endl;
-    std::cout<<"how_v3_bf16_cvt: "<<how_v3_bf16_cvt<<std::endl;
+    std::cout<<"uses_bwd_v3: "<<fmha_args.uses_bwd_v3<<std::endl;
+    std::cout<<"is_v3_atomic_fp32: "<<fmha_args.is_v3_atomic_fp32<<std::endl;
+    std::cout<<"how_v3_bf16_cvt: "<<fmha_args.how_v3_bf16_cvt<<std::endl;
 
     // fmha_args debug
     std::cout<<std::endl<<"fmha_args: "<<std::endl;
@@ -460,6 +460,237 @@ void dump_bwd_timings(const char* dump_path, float average_runtime){
   file << average_runtime << "\n";
 }
 
+hipError_t _ck_attn_bwd_impl(  
+  DType dtype,
+  uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv,
+  uint64_t d_qk, uint64_t d_v,
+  uint64_t bias_b, uint64_t bias_h,
+  uint64_t max_tokens_q, uint64_t max_tokens_kv,
+  const void* q_ptr, 
+  uint64_t stride_b_q, uint64_t stride_h_q, uint64_t stride_s_q,
+  const void* k_ptr, 
+  uint64_t stride_b_k, uint64_t stride_h_k, uint64_t stride_s_k,
+  const void* v_ptr, 
+  uint64_t stride_b_v, uint64_t stride_h_v, uint64_t stride_s_v,
+  const void* bias_ptr,
+  const void* alibi_slope_ptr,
+  const void* cu_seqlen_q_ptr, const void* cu_seqlen_kv_ptr,
+  const void* cu_seqlen_q_padded_ptr, const void* cu_seqlen_kv_padded_ptr,
+  const void* o_ptr, 
+  uint64_t stride_b_o, uint64_t stride_h_o, uint64_t stride_s_o,
+  const void* lse_ptr,
+  const void* lse_thd_ptr,
+  const void* do_ptr, 
+  uint64_t stride_b_do, uint64_t stride_h_do, uint64_t stride_s_do,
+  float scaling_factor, float dropout_probability,
+  void* philox_seed_ptr, void* philox_offset_ptr,
+  BiasType attn_bias_type,
+  MaskType attn_mask_type,
+  int64_t window_size_left, int64_t window_size_right,
+  void* dq_ptr, 
+  uint64_t stride_b_dq, uint64_t stride_h_dq, uint64_t stride_s_dq,
+  void* dq_acc_ptr,
+  void* dk_expanded_ptr,
+  void* dv_expanded_ptr,
+  uint64_t stride_b_dk_expanded, uint64_t stride_h_dk_expanded, uint64_t stride_s_dk_expanded,
+  uint64_t stride_b_dv_expanded, uint64_t stride_h_dv_expanded, uint64_t stride_s_dv_expanded,
+  void* dk_ptr, 
+  uint64_t stride_b_dk, uint64_t stride_h_dk, uint64_t stride_s_dk,
+  void* dv_ptr, 
+  uint64_t stride_b_dv, uint64_t stride_h_dv, uint64_t stride_s_dv,
+  void* dbias_expanded_ptr,
+  void* dbias_ptr,
+  void* lse_workspace_ptr,
+  bool deterministic,
+  bool uses_bwd_v3,
+  bool is_v3_atomic_fp32,
+  int how_v3_bf16_cvt,
+  bool is_group_mode,
+  hipStream_t stream){
+
+  bool has_dropout = (dropout_probability > 0.f);
+  bool has_dbias = dbias_ptr != nullptr;
+  bool is_mqa_gqa = (h > hg);
+
+  /* CK input parameters */
+  ck_tile::index_t batch = b;
+  ck_tile::index_t seqlen_q = s_q;
+  ck_tile::index_t nhead = h;
+  ck_tile::index_t hdim_q = d_qk;
+  ck_tile::index_t seqlen_k = s_kv;
+  ck_tile::index_t nhead_k = hg;
+  ck_tile::index_t hdim_v = d_v;
+  ck_tile::index_t max_seqlen_q = s_q;
+  ck_tile::index_t max_seqlen_k = s_kv;
+  float scale_s = scaling_factor;
+  float p_drop = dropout_probability;
+  float p_undrop = 1.0 - p_drop;
+  bool s_randval = false;
+
+  bias_enum bias_type = bias_enum::no_bias;
+  BiasShape bias_shape = BiasShape::k11SS;
+  if (!is_group_mode) {
+    std::tie(bias_type, bias_shape) = get_ck_bias_type_shape(attn_bias_type, b, h, bias_b, bias_h);
+  }
+
+  ck_tile::index_t left, right;
+  left = window_size_left;
+  right = window_size_right;
+  mask_enum mask_type = static_cast<mask_enum>(attn_mask_type);
+
+  bool ck_fused_attn_log_config = false;
+  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
+    if (env_p != nullptr && std::string(env_p) == "1")
+      ck_fused_attn_log_config = true;
+  }
+  const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
+
+  // print kernel name on verbose mode
+  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, ck_fused_attn_log_config};
+
+  std::string data_type_str = get_data_type_str(dtype);
+
+  aiter::mha_bwd_args fmha_args{};
+  fmha_args.mask_type = static_cast<int>(mask_type);
+  fmha_args.use_asm_v3 = uses_bwd_v3;
+  fmha_args.v3_atomic_fp32 = is_v3_atomic_fp32;
+  fmha_args.v3_bf16_cvt = how_v3_bf16_cvt;
+  fmha_args.v3_api_check = false;
+
+  fmha_args.hdim_q = hdim_q;
+  fmha_args.hdim_v = hdim_v;
+  fmha_args.data_type = data_type_str;
+  fmha_args.is_group_mode = is_group_mode;
+  fmha_args.ck_mask_type = static_cast<int>(mask_type);
+  fmha_args.bias_type = static_cast<int>(bias_type);
+  fmha_args.has_dbias = (!is_group_mode) && has_dbias;
+  fmha_args.has_dropout = has_dropout;
+  fmha_args.is_store_randval = s_randval;
+  fmha_args.is_deterministic = deterministic;
+
+  fmha_args.q_ptr = q_ptr;
+  fmha_args.k_ptr = k_ptr;
+  fmha_args.v_ptr = v_ptr;
+  fmha_args.bias_ptr = (bias_type==bias_enum::no_bias || is_group_mode) ? nullptr
+                         : (bias_type==bias_enum::alibi? alibi_slope_ptr : bias_ptr);
+  fmha_args.o_ptr = o_ptr;
+  fmha_args.lse_ptr = is_group_mode ? lse_thd_ptr : lse_ptr;
+  fmha_args.do_ptr = do_ptr;
+  fmha_args.d_ptr = lse_workspace_ptr;
+  fmha_args.rand_val_ptr = nullptr;
+  fmha_args.dq_ptr = dq_ptr;
+  fmha_args.dk_ptr = is_mqa_gqa? dk_expanded_ptr:dk_ptr;
+  fmha_args.dv_ptr = is_mqa_gqa? dv_expanded_ptr:dv_ptr;
+  fmha_args.dbias_ptr = ((!is_group_mode) && has_dbias)
+                          ? (bias_shape==BiasShape::kBHSS ? dbias_ptr: dbias_expanded_ptr)
+                          : nullptr;
+  fmha_args.dq_acc_ptr = dq_acc_ptr;
+
+  if (is_group_mode) {
+    fmha_args.seqstart_q_ptr = cu_seqlen_q_padded_ptr==nullptr? cu_seqlen_q_ptr: cu_seqlen_q_padded_ptr;
+    fmha_args.seqstart_k_ptr = cu_seqlen_kv_padded_ptr==nullptr? cu_seqlen_kv_ptr: cu_seqlen_kv_padded_ptr;
+    fmha_args.seqlen_q_ptr = nullptr;
+    fmha_args.seqlen_k_ptr = nullptr;
+    fmha_args.cu_seqlen_q_ptr = cu_seqlen_q_ptr;
+    fmha_args.cu_seqlen_k_ptr = cu_seqlen_kv_ptr;
+  } else {
+    fmha_args.seqstart_q_ptr = nullptr;
+    fmha_args.seqstart_k_ptr = nullptr;
+    fmha_args.seqlen_q_ptr = nullptr;
+    fmha_args.seqlen_k_ptr = nullptr;
+    fmha_args.cu_seqlen_q_ptr = nullptr;
+    fmha_args.cu_seqlen_k_ptr = nullptr;
+  }
+
+  fmha_args.seqlen_q = is_group_mode ? max_seqlen_q : seqlen_q;
+  fmha_args.seqlen_k = is_group_mode ? max_seqlen_k : seqlen_k;
+  fmha_args.batch = batch;
+  fmha_args.max_seqlen_q = max_seqlen_q;
+  fmha_args.max_seqlen_k = max_seqlen_k;
+  fmha_args.nhead_q = nhead;
+  fmha_args.nhead_k = nhead_k;
+  fmha_args.scale = scale_s;
+
+  // setup stride_* arguments
+  fmha_args.stride_q = stride_s_q;
+  fmha_args.stride_k = stride_s_k;
+  fmha_args.stride_v = stride_s_v;
+  fmha_args.stride_bias = (!is_group_mode && bias_type!=bias_enum::alibi) ? max_seqlen_k : 0;
+  fmha_args.stride_o = stride_s_o;
+  fmha_args.stride_randval = max_seqlen_k;
+  fmha_args.stride_do = stride_s_do;
+  fmha_args.stride_dq_acc = d_qk;
+  fmha_args.stride_dq = stride_s_dq;
+  fmha_args.stride_dk = is_mqa_gqa? stride_s_dk_expanded:stride_s_dk;
+  fmha_args.stride_dv = is_mqa_gqa? stride_s_dv_expanded:stride_s_dv;
+  fmha_args.stride_dbias = (!is_group_mode && bias_type!=bias_enum::alibi) ? max_seqlen_k : 0;
+
+  // setup nhead_stride_* arguments
+  fmha_args.nhead_stride_q = stride_h_q;
+  fmha_args.nhead_stride_k = stride_h_k;
+  fmha_args.nhead_stride_v = stride_h_v;
+  fmha_args.nhead_stride_bias = (!is_group_mode && (bias_shape==BiasShape::k1HSS || bias_shape==BiasShape::kBHSS))
+                                  ? max_seqlen_q * max_seqlen_k
+                                  : 0;
+  fmha_args.nhead_stride_o = stride_h_o;
+  fmha_args.nhead_stride_randval = is_group_mode ? 0 : seqlen_q * max_seqlen_k;
+  fmha_args.nhead_stride_do = stride_h_do;
+  fmha_args.nhead_stride_lsed = is_group_mode ? max_tokens_q : max_seqlen_q;
+  fmha_args.nhead_stride_dq_acc = static_cast<int64_t>((is_group_mode ? max_tokens_q : s_q) * d_qk);
+  fmha_args.nhead_stride_dq = stride_h_dq;
+  fmha_args.nhead_stride_dk = is_mqa_gqa? stride_h_dk_expanded:stride_h_dk;
+  fmha_args.nhead_stride_dv = is_mqa_gqa? stride_h_dv_expanded:stride_h_dv;
+  fmha_args.nhead_stride_dbias = (!is_group_mode) ? max_seqlen_q * max_seqlen_k : 0;
+
+  // setup batch_stride_* arguments
+  fmha_args.batch_stride_q = is_group_mode ? 0 : stride_b_q;
+  fmha_args.batch_stride_k = is_group_mode ? 0 : stride_b_k;
+  fmha_args.batch_stride_v = is_group_mode ? 0 : stride_b_v;
+  fmha_args.batch_stride_bias = (!is_group_mode && (bias_shape==BiasShape::k11SS || bias_shape==BiasShape::k1HSS))
+                                  ? 0
+                                  : (is_group_mode ? 0 : bias_h * max_seqlen_q * max_seqlen_k);
+  fmha_args.batch_stride_o = is_group_mode ? 0 : stride_b_o;
+  fmha_args.batch_stride_randval = is_group_mode ? 0 : nhead * seqlen_q * max_seqlen_k;
+  fmha_args.batch_stride_do = is_group_mode ? 0 : stride_b_do;
+  fmha_args.batch_stride_lsed = is_group_mode ? 0 : nhead * max_seqlen_q;
+  fmha_args.batch_stride_dq_acc = is_group_mode ? 0 : static_cast<int64_t>(h * s_q * d_qk);
+  fmha_args.batch_stride_dq = is_group_mode ? 0 : stride_b_dq;
+  fmha_args.batch_stride_dk = is_group_mode ? 0 : (is_mqa_gqa? stride_b_dk_expanded:stride_b_dk);
+  fmha_args.batch_stride_dv = is_group_mode ? 0 : (is_mqa_gqa? stride_b_dv_expanded:stride_b_dv);
+  fmha_args.batch_stride_dbias = is_group_mode ? 0 : h * max_seqlen_q * max_seqlen_k;
+  fmha_args.split_stride_dq_acc = static_cast<int>(is_group_mode ? (max_tokens_q * h * d_qk) : (b * h * s_q * d_qk));
+
+  fmha_args.window_size_left = left;
+  fmha_args.window_size_right = right;
+  fmha_args.p_drop = p_drop;
+  fmha_args.p_undrop = p_undrop;
+  fmha_args.drop_seed_offset = std::pair<const void*, const void*>{philox_seed_ptr, philox_offset_ptr};
+
+  // modify the max_seqlen_q for better performance in 0-length cases
+  // lse_thd_ptr used as buffer
+  if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_MAX_SEQLEN")) {
+    if(std::string(env_p) == "1"){
+      if(ck_fused_attn_log_config){
+        std::cout << "attn_bwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.";
+      }
+      fmha_args.max_seqlen_q = get_runtime_max_seqlen(b, cu_seqlen_q_ptr, nullptr, lse_workspace_ptr, stream);
+      fmha_args.max_seqlen_k = get_runtime_max_seqlen(b, cu_seqlen_kv_ptr, nullptr, lse_workspace_ptr, stream);
+    }
+  }
+
+  // print ck traits and args when needed
+  log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_type, fmha_args.has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args);
+
+  float average_runtime = aiter::mha_bwd(fmha_args, stream_config);
+  if(dump_path){
+    dump_bwd_timings(dump_path, average_runtime);
+  }
+  if(average_runtime < 0){
+    //TODO: better error out system
+    throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
+  }
+  return hipSuccess;
+}
 hipError_t ck_attn_bwd(  
   DType dtype,
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v, uint64_t bias_b, uint64_t bias_h,
@@ -504,204 +735,64 @@ hipError_t ck_attn_bwd(
   bool has_dropout = (dropout_probability > 0.f);
   bool has_dbias = dbias_ptr!=nullptr;
   bool is_mqa_gqa = (h > hg);
-
-  /* CK input parameters */
-  ck_tile::index_t batch = b;
-  ck_tile::index_t seqlen_q = s_q;
-  ck_tile::index_t nhead = h;
-  ck_tile::index_t hdim_q = d_qk;
-  ck_tile::index_t seqlen_k = s_kv;
-  ck_tile::index_t nhead_k = hg;
-  ck_tile::index_t hdim_v = d_v;
-  ck_tile::index_t max_seqlen_q = s_q;
-  ck_tile::index_t max_seqlen_k = s_kv;
-  float scale_s = scaling_factor;
-  float p_drop = dropout_probability;
-  float p_undrop = 1.0 - p_drop;
-  bool is_group_mode = false;
-  bool s_randval = false;
-
   bias_enum bias_type;
   BiasShape bias_shape; 
   std::tie(bias_type, bias_shape) = get_ck_bias_type_shape(attn_bias_type, b, h, bias_b, bias_h);
-  ck_tile::index_t left, right;
-  left = window_size_left;
-  right = window_size_right;
- 
-  mask_enum mask_type = static_cast<mask_enum>(attn_mask_type);
+
   bool ck_fused_attn_log_config = false;
   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
       ck_fused_attn_log_config = true;
   }
-  const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
 
-  // print kernel name on verbose mode
-  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, ck_fused_attn_log_config};
-
-  ck_tile::index_t shape_seqlen_q = seqlen_q;
-  ck_tile::index_t shape_seqlen_k = seqlen_k;
-
-  std::string data_type_str = get_data_type_str(dtype);
-
-  auto fmha_args = [&]() {
-    // setup stride_* arguments
-    const ck_tile::index_t stride_q = stride_s_q;
-    const ck_tile::index_t stride_k = stride_s_k;
-    const ck_tile::index_t stride_v = stride_s_v;
-    // bias of shape (bias_b, bias_h, s_q, s_kv)
-    const ck_tile::index_t stride_bias = max_seqlen_k;
-    const ck_tile::index_t stride_o = stride_s_o;
-    const ck_tile::index_t stride_randval = max_seqlen_k;
-    const ck_tile::index_t stride_do = stride_s_do;
-    const ck_tile::index_t stride_dq = stride_s_dq;
-    const ck_tile::index_t stride_dk = stride_s_dk;
-    const ck_tile::index_t stride_dv = stride_s_dv;
-    const ck_tile::index_t stride_dk_expanded = stride_s_dk_expanded;
-    const ck_tile::index_t stride_dv_expanded = stride_s_dv_expanded;
-    const ck_tile::index_t stride_dq_acc = d_qk; //dq_acc of shape (nsplits, B, H, S, D)
-    // dbias is of the same shape as bias
-    // but ck only take dbias with BHSS
-    const ck_tile::index_t stride_dbias = max_seqlen_k;
-    // setup nhead_stride_* arguments
-    const ck_tile::index_t nhead_stride_q = stride_h_q;
-    const ck_tile::index_t nhead_stride_k = stride_h_k;
-    const ck_tile::index_t nhead_stride_v = stride_h_v;
-    // bias input can be of different shapes (11SS, 1HSS, B1SS, and BHSS), but dbias must be of BHSS
-    const ck_tile::index_t nhead_stride_bias = (bias_shape==BiasShape::k1HSS || bias_shape==BiasShape::kBHSS) ? max_seqlen_q * max_seqlen_k: 0;
-    const ck_tile::index_t nhead_stride_o = stride_h_o;
-    const ck_tile::index_t nhead_stride_randval =
-        shape_seqlen_q * max_seqlen_k;
-    const ck_tile::index_t nhead_stride_do = stride_h_do;
-    const ck_tile::index_t nhead_stride_lsed = max_seqlen_q;
-    const ck_tile::index_t nhead_stride_dq = stride_h_dq;
-    const ck_tile::index_t nhead_stride_dk = stride_h_dk;
-    const ck_tile::index_t nhead_stride_dv = stride_h_dv;
-    const ck_tile::index_t nhead_stride_dk_expanded = stride_h_dk_expanded;
-    const ck_tile::index_t nhead_stride_dv_expanded = stride_h_dv_expanded;
-    // dbias can only be of BHSS
-    const ck_tile::index_t nhead_stride_dbias = max_seqlen_q * max_seqlen_k;
-    const ck_tile::index_t nhead_stride_dq_acc = s_q*d_qk; //dq_acc of shape (nsplits, B, H, S, D)
-    // setup batch_stride_* arguments
-    const ck_tile::index_t batch_stride_q = stride_b_q;
-    const ck_tile::index_t batch_stride_k = stride_b_k;
-    const ck_tile::index_t batch_stride_v = stride_b_v;
-    // bias input can be of different shapes (11SS, 1HSS, B1SS, and BHSS), but dbias must be of BHSS
-    // for B1SS and BHSS, batch stride for bias are both bias_h x s_q x s_kv (bias_h==1 for B1SS and bias_h == h for BHSS)
-    const ck_tile::index_t batch_stride_bias = (bias_shape==BiasShape::k11SS || bias_shape==BiasShape::k1HSS) ? 0: bias_h* max_seqlen_q * max_seqlen_k;
-    const ck_tile::index_t batch_stride_o = stride_b_o;
-    const ck_tile::index_t batch_stride_randval =
-        nhead * shape_seqlen_q * max_seqlen_k;
-    const ck_tile::index_t batch_stride_do = stride_b_do;
-    const ck_tile::index_t batch_stride_lsed = nhead * max_seqlen_q;
-    const ck_tile::index_t batch_stride_dq = stride_b_dq;
-    const ck_tile::index_t batch_stride_dk = stride_b_dk;
-    const ck_tile::index_t batch_stride_dv = stride_b_dv;
-    const ck_tile::index_t batch_stride_dk_expanded = stride_b_dk_expanded;
-    const ck_tile::index_t batch_stride_dv_expanded = stride_b_dv_expanded;
-    // for dbias, use h since h can be different from bias_h
-    const ck_tile::index_t batch_stride_dbias = h* max_seqlen_q * max_seqlen_k;
-    const ck_tile::index_t batch_stride_dq_acc = h*s_q*d_qk; //dq_acc of shape (nsplits, B, H, S, D)
-    const ck_tile::index_t split_stride_dq_acc = b * h * s_q * d_qk;
-
-    return fmha_bwd_args{q_ptr,
-                         k_ptr,
-                         v_ptr,
-                         bias_type==bias_enum::no_bias? nullptr : (bias_type==bias_enum::alibi? alibi_slope_ptr :bias_ptr),
-                         o_ptr,
-                         lse_ptr,
-                         do_ptr,
-                         lse_workspace_ptr,
-                         nullptr,
-                         dq_ptr,
-                         is_mqa_gqa? dk_expanded_ptr:dk_ptr,
-                         is_mqa_gqa? dv_expanded_ptr:dv_ptr,
-                         has_dbias? (bias_shape==BiasShape::kBHSS ? dbias_ptr: dbias_expanded_ptr): nullptr,
-                         dq_acc_ptr, //dq_acc_buf
-                         nullptr,//seqstart_q_ptr
-                         nullptr,//seqstart_k_ptr
-                         nullptr, /* seqlen_q_ptr */
-                         nullptr, /* seqlen_k_ptr */
-                         nullptr, //cu_seqlen_q_ptr
-                         nullptr, //cu_seqlen_k_ptr
-                         shape_seqlen_q,
-                         shape_seqlen_k,
-                         batch,
-                         max_seqlen_q,
-                         max_seqlen_k,
-                         hdim_q,
-                         hdim_v,
-                         nhead,
-                         nhead_k,
-                         scale_s,
-                         stride_q,
-                         stride_k,
-                         stride_v,
-                         bias_type==bias_enum::alibi? 0: stride_bias,
-                         stride_o,
-                         stride_randval,
-                         stride_do,
-                         stride_dq_acc,//stride_dq_acc
-                         stride_dq,//stride_dq
-                         is_mqa_gqa? stride_dk_expanded:stride_dk,
-                         is_mqa_gqa? stride_dv_expanded:stride_dv,
-                         stride_dbias,
-                         nhead_stride_q,
-                         nhead_stride_k,
-                         nhead_stride_v,
-                         nhead_stride_bias,
-                         nhead_stride_o,
-                         nhead_stride_randval,
-                         nhead_stride_do,
-                         nhead_stride_lsed,
-                         nhead_stride_dq_acc, //nhead_stride_dq_acc
-                         nhead_stride_dq,
-                         is_mqa_gqa? nhead_stride_dk_expanded:nhead_stride_dk,
-                         is_mqa_gqa? nhead_stride_dv_expanded:nhead_stride_dv,
-                         nhead_stride_dbias,
-                         batch_stride_q,
-                         batch_stride_k,
-                         batch_stride_v,
-                         batch_stride_bias,
-                         batch_stride_o,
-                         batch_stride_randval,
-                         batch_stride_do,
-                         batch_stride_lsed,
-                         batch_stride_dq_acc, //batch_stride_dq_acc
-                         batch_stride_dq,
-                         is_mqa_gqa? batch_stride_dk_expanded:batch_stride_dk,
-                         is_mqa_gqa? batch_stride_dv_expanded:batch_stride_dv,
-                         batch_stride_dbias,
-                         split_stride_dq_acc,
-                         left,
-                         right,
-                         static_cast<ck_tile::index_t>(mask_type),
-                         p_drop,
-                         p_undrop,
-                         std::pair<const void*, const void*>{philox_seed_ptr, philox_offset_ptr}};
-  }();
-
-  // print ck traits and args when needed
-  log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_type, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args);
-  
-  float average_runtime = aiter::mha_bwd(fmha_args,
-                                         stream_config,
-                                         data_type_str,
-                                         is_group_mode,
-                                         mask_type,
-                                         bias_type,
-                                         has_dbias,
-                                         s_randval,
-                                         deterministic,
-                                         uses_bwd_v3,
-                                         is_v3_atomic_fp32,
-                                         how_v3_bf16_cvt);
-  if(dump_path){
-    dump_bwd_timings(dump_path, average_runtime);
-  }
-  if(average_runtime < 0){
-    //TODO: better error out system
-    throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
+  hipError_t impl_status = _ck_attn_bwd_impl(
+    dtype,
+    b, h, hg, s_q, s_kv, d_qk, d_v,
+    bias_b, bias_h,
+    s_q, s_kv,
+    q_ptr,
+    stride_b_q, stride_h_q, stride_s_q,
+    k_ptr,
+    stride_b_k, stride_h_k, stride_s_k,
+    v_ptr,
+    stride_b_v, stride_h_v, stride_s_v,
+    bias_ptr,
+    alibi_slope_ptr,
+    nullptr, nullptr,
+    nullptr, nullptr,
+    o_ptr,
+    stride_b_o, stride_h_o, stride_s_o,
+    lse_ptr,
+    nullptr,
+    do_ptr,
+    stride_b_do, stride_h_do, stride_s_do,
+    scaling_factor, dropout_probability,
+    philox_seed_ptr, philox_offset_ptr,
+    attn_bias_type,
+    attn_mask_type,
+    window_size_left, window_size_right,
+    dq_ptr,
+    stride_b_dq, stride_h_dq, stride_s_dq,
+    dq_acc_ptr,
+    dk_expanded_ptr,
+    dv_expanded_ptr,
+    stride_b_dk_expanded, stride_h_dk_expanded, stride_s_dk_expanded,
+    stride_b_dv_expanded, stride_h_dv_expanded, stride_s_dv_expanded,
+    dk_ptr,
+    stride_b_dk, stride_h_dk, stride_s_dk,
+    dv_ptr,
+    stride_b_dv, stride_h_dv, stride_s_dv,
+    dbias_expanded_ptr,
+    dbias_ptr,
+    lse_workspace_ptr,
+    deterministic,
+    uses_bwd_v3,
+    is_v3_atomic_fp32,
+    how_v3_bf16_cvt,
+    false,
+    stream);
+  if (impl_status != hipSuccess) {
+    return impl_status;
   }
   if(is_mqa_gqa){
     dim3 grid(b, s_kv, hg);
@@ -859,210 +950,62 @@ hipError_t ck_attn_varlen_bwd(
   bool is_v3_atomic_fp32,
   int how_v3_bf16_cvt,
   hipStream_t stream){
-
-  bool has_dropout = (dropout_probability > 0.f);
-  bool has_dbias = false;
   bool is_mqa_gqa = (h > hg);
 
-  /* CK input parameters */
-  ck_tile::index_t batch = b;
-  ck_tile::index_t nhead = h;
-  ck_tile::index_t hdim_q = d_qk;
-  ck_tile::index_t nhead_k = hg;
-  ck_tile::index_t hdim_v = d_v;
-  ck_tile::index_t max_seqlen_q = s_q;
-  ck_tile::index_t max_seqlen_k = s_kv;
-  float scale_s = scaling_factor;
-  float p_drop = dropout_probability;
-  float p_undrop = 1.0 - p_drop;
-  bool is_group_mode = true;
-  bool s_randval = false;
-
-  // THD does not work with bias
-  
-  ck_tile::index_t left, right;
-  left = window_size_left;
-  right = window_size_right;
-  mask_enum mask_type = static_cast<mask_enum>(attn_mask_type);
- 
   bool ck_fused_attn_log_config = false;
   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
       ck_fused_attn_log_config = true;
-  } 
-  const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
-  // print kernel name on verbose mode
-  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, ck_fused_attn_log_config};
-
-  std::string data_type_str = get_data_type_str(dtype);
-
-  auto fmha_args = [&]() {
-    // setup stride_* arguments
-    const ck_tile::index_t stride_q = stride_s_q;
-    const ck_tile::index_t stride_k = stride_s_k;
-    const ck_tile::index_t stride_v = stride_s_v;
-    // bias not used in THD qkv layout
-    const ck_tile::index_t stride_bias = 0;
-    const ck_tile::index_t stride_o = stride_s_o;
-    const ck_tile::index_t stride_randval = max_seqlen_k;
-    const ck_tile::index_t stride_do = stride_s_do;
-    const ck_tile::index_t stride_dq = stride_s_dq;
-    const ck_tile::index_t stride_dk = stride_s_dk;
-    const ck_tile::index_t stride_dv = stride_s_dv;
-    const ck_tile::index_t stride_dk_expanded = stride_s_dk_expanded;
-    const ck_tile::index_t stride_dv_expanded = stride_s_dv_expanded;
-    const ck_tile::index_t stride_dq_acc = d_qk; //dq_acc of shape (nsplits, H, max_tokens_q, D_qk)
-    // bias not used in THD qkv layout
-    const ck_tile::index_t stride_dbias = 0;
-    // setup nhead_stride_* arguments
-    const ck_tile::index_t nhead_stride_q = stride_h_q;
-    const ck_tile::index_t nhead_stride_k = stride_h_k;
-    const ck_tile::index_t nhead_stride_v = stride_h_v;
-    // bias not used in THD qkv layout
-    const ck_tile::index_t nhead_stride_bias = 0;
-    const ck_tile::index_t nhead_stride_o = stride_h_o;
-    const ck_tile::index_t nhead_stride_randval = 0;
-    const ck_tile::index_t nhead_stride_do = stride_h_do;
-    // use packed lse
-    const ck_tile::index_t nhead_stride_lsed = max_tokens_q;
-    const ck_tile::index_t nhead_stride_dq = stride_h_dq;
-    const ck_tile::index_t nhead_stride_dk = stride_h_dk;
-    const ck_tile::index_t nhead_stride_dv = stride_h_dv;
-    const ck_tile::index_t nhead_stride_dk_expanded = stride_h_dk_expanded;
-    const ck_tile::index_t nhead_stride_dv_expanded = stride_h_dv_expanded;
-    // bias not used in THD qkv layout
-    const ck_tile::index_t nhead_stride_dbias = 0;
-    const ck_tile::index_t nhead_stride_dq_acc = max_tokens_q*d_qk; //dq_acc of shape (nsplits, H, max_tokens_q, D_qk)
-    // setup batch_stride_* arguments
-    const ck_tile::index_t batch_stride_q = 0;
-    const ck_tile::index_t batch_stride_k = 0;
-    const ck_tile::index_t batch_stride_v = 0;
-    // bias not used in THD qkv layout
-    const ck_tile::index_t batch_stride_bias = 0;
-    const ck_tile::index_t batch_stride_o = 0;
-    const ck_tile::index_t batch_stride_randval = 0;
-    const ck_tile::index_t batch_stride_do = 0;
-    const ck_tile::index_t batch_stride_lsed = 0;
-    const ck_tile::index_t batch_stride_dq = 0;
-    const ck_tile::index_t batch_stride_dk = 0;
-    const ck_tile::index_t batch_stride_dv = 0;
-    const ck_tile::index_t batch_stride_dk_expanded = 0;
-    const ck_tile::index_t batch_stride_dv_expanded = 0;
-    // bias not used in THD qkv layout
-    const ck_tile::index_t batch_stride_dbias = 0;
-    const ck_tile::index_t batch_stride_dq_acc = 0; //dq_acc of shape (nsplits, T, H, D)
-    const ck_tile::index_t split_stride_dq_acc = max_tokens_q*h*d_qk;
-
-    return fmha_bwd_args{q_ptr,
-                         k_ptr,
-                         v_ptr,
-                         nullptr,
-                         o_ptr,
-                         lse_thd_ptr,
-                         do_ptr,
-                         lse_workspace_ptr,
-                         nullptr,
-                         dq_ptr,
-                         is_mqa_gqa? dk_expanded_ptr:dk_ptr,
-                         is_mqa_gqa? dv_expanded_ptr:dv_ptr,
-                         nullptr, //dbias_ptr
-                         dq_acc_ptr, //dq_acc_buf
-                         cu_seqlen_q_padded_ptr==nullptr? cu_seqlen_q_ptr: cu_seqlen_q_padded_ptr, //seqstart_q_ptr
-                         cu_seqlen_kv_padded_ptr==nullptr? cu_seqlen_kv_ptr: cu_seqlen_kv_padded_ptr, //seqstart_k_ptr
-                         nullptr, /* seqlen_q_ptr */
-                         nullptr, /* seqlen_k_ptr */
-                         cu_seqlen_q_ptr, //cu_seqlen_q_ptr
-                         cu_seqlen_kv_ptr, //cu_seqlen_k_ptr
-                         max_seqlen_q, //seqlen_q, unused in group mode
-                         max_seqlen_k, //seqlen_kv, unused in group mode
-                         batch,
-                         max_seqlen_q,
-                         max_seqlen_k,
-                         hdim_q,
-                         hdim_v,
-                         nhead,
-                         nhead_k,
-                         scale_s,
-                         stride_q,
-                         stride_k,
-                         stride_v,
-                         stride_bias,
-                         stride_o,
-                         stride_randval,
-                         stride_do,
-                         stride_dq_acc,//stride_dq_acc
-                         stride_dq,//stride_dq
-                         is_mqa_gqa? stride_dk_expanded:stride_dk,
-                         is_mqa_gqa? stride_dv_expanded:stride_dv,
-                         stride_dbias,
-                         nhead_stride_q,
-                         nhead_stride_k,
-                         nhead_stride_v,
-                         nhead_stride_bias,
-                         nhead_stride_o,
-                         nhead_stride_randval,
-                         nhead_stride_do,
-                         nhead_stride_lsed,
-                         nhead_stride_dq_acc, //nhead_stride_dq_acc
-                         nhead_stride_dq,
-                         is_mqa_gqa? nhead_stride_dk_expanded:nhead_stride_dk,
-                         is_mqa_gqa? nhead_stride_dv_expanded:nhead_stride_dv,
-                         nhead_stride_dbias,
-                         batch_stride_q,
-                         batch_stride_k,
-                         batch_stride_v,
-                         batch_stride_bias,
-                         batch_stride_o,
-                         batch_stride_randval,
-                         batch_stride_do,
-                         batch_stride_lsed,
-                         batch_stride_dq_acc, //batch_stride_dq_acc
-                         batch_stride_dq,
-                         is_mqa_gqa? batch_stride_dk_expanded:batch_stride_dk,
-                         is_mqa_gqa? batch_stride_dv_expanded:batch_stride_dv,
-                         batch_stride_dbias,
-                         split_stride_dq_acc,
-                         left,
-                         right,
-                         static_cast<ck_tile::index_t>(mask_type),
-                         p_drop,
-                         p_undrop,
-                         std::pair<const void*, const void*>{philox_seed_ptr, philox_offset_ptr}};
-  }();
-
-  // modify the max_seqlen_q for better performance in 0-length cases
-  // lse_thd_ptr used as buffer
-  if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_MAX_SEQLEN")) {
-    if(std::string(env_p) == "1"){
-      if(ck_fused_attn_log_config){
-        std::cout << "attn_bwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.";
-      }
-      fmha_args.max_seqlen_q = get_runtime_max_seqlen(b, cu_seqlen_q_ptr, nullptr, lse_workspace_ptr, stream);
-      fmha_args.max_seqlen_k = get_runtime_max_seqlen(b, cu_seqlen_kv_ptr, nullptr, lse_workspace_ptr, stream);
-    }
   }
 
-  // print ck traits and args when needed
-  log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_enum::no_bias, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args);
-
-  float average_runtime = aiter::mha_bwd(fmha_args,
-    stream_config,
-    data_type_str,
-    is_group_mode,
-    mask_type,
-    bias_enum::no_bias,
-    has_dbias,
-    s_randval,
+  hipError_t impl_status = _ck_attn_bwd_impl(
+    dtype,
+    b, h, hg, s_q, s_kv, d_qk, d_v,
+    0, 0,
+    max_tokens_q, max_tokens_kv,
+    q_ptr,
+    0, stride_h_q, stride_s_q,
+    k_ptr,
+    0, stride_h_k, stride_s_k,
+    v_ptr,
+    0, stride_h_v, stride_s_v,
+    nullptr,
+    nullptr,
+    cu_seqlen_q_ptr, cu_seqlen_kv_ptr,
+    cu_seqlen_q_padded_ptr, cu_seqlen_kv_padded_ptr,
+    o_ptr,
+    0, stride_h_o, stride_s_o,
+    nullptr,
+    lse_thd_ptr,
+    do_ptr,
+    0, stride_h_do, stride_s_do,
+    scaling_factor, dropout_probability,
+    philox_seed_ptr, philox_offset_ptr,
+    BiasType::no_bias,
+    attn_mask_type,
+    window_size_left, window_size_right,
+    dq_ptr,
+    0, stride_h_dq, stride_s_dq,
+    dq_acc_ptr,
+    dk_expanded_ptr,
+    dv_expanded_ptr,
+    0, stride_h_dk_expanded, stride_s_dk_expanded,
+    0, stride_h_dv_expanded, stride_s_dv_expanded,
+    dk_ptr,
+    0, stride_h_dk, stride_s_dk,
+    dv_ptr,
+    0, stride_h_dv, stride_s_dv,
+    nullptr,
+    nullptr,
+    lse_workspace_ptr,
     deterministic,
     uses_bwd_v3,
     is_v3_atomic_fp32,
-    how_v3_bf16_cvt);
-  if(dump_path){
-    dump_bwd_timings(dump_path, average_runtime);
-  }
-  if(average_runtime < 0){
-    //TODO: better error out system
-    throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
+    how_v3_bf16_cvt,
+    true,
+    stream);
+  if (impl_status != hipSuccess) {
+    return impl_status;
   }
   if(is_mqa_gqa){
     dim3 grid(max_tokens_kv, hg);
