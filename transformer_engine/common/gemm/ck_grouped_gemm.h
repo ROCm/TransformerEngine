@@ -1,6 +1,6 @@
 /* Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved. */
 
-bool grouped_gemm_ck_tile(const NVTETensor* A,
+bool ck_tile_grouped_gemm(const NVTETensor* A,
                           const NVTETensor* B,
                           NVTETensor* D,
                           int group_num,

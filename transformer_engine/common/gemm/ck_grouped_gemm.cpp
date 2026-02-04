@@ -269,7 +269,7 @@ static inline bool dispatch_grouped(bool transA_use,
 #undef CALL
 }
 
-bool grouped_gemm_ck_tile(const NVTETensor* A,
+bool ck_tile_grouped_gemm(const NVTETensor* A,
                           const NVTETensor* B,
                           NVTETensor* D,
                           int group_num,

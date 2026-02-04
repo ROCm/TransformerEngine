@@ -791,9 +791,27 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   NVTE_API_CALL(nvte_multi_tensor_gemm);
 
 #ifdef __HIP_PLATFORM_AMD__
-  const bool use_ck = transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPED_GEMM", false);
+  const bool use_cutlass = transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPED_GEMM", false);
   const bool warn_fallback =
       transformer_engine::getenv<bool>("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", false);
+
+  auto cublas_path = [&]() {
+    multi_stream_cublas_gemm(A, B, D, bias, pre_gelu_out, num_gemms, transa, transb, grad,
+                             workspace, accumulate, use_split_accumulator, math_sm_count, stream);
+  };
+
+  if (!use_cutlass) {
+    cublas_path();
+    return;
+  }
+
+  auto is_empty_arr = [&](const NVTETensor *p) -> bool {
+    if (p == nullptr) return true;
+    for (int i = 0; i < num_gemms; ++i) {
+      if (transformer_engine::convertNVTETensor(p[i])->has_data()) return false;
+    }
+    return true;
+  };
 
   auto is_supported_dtype = [&]() -> bool {
     auto *inputA = transformer_engine::convertNVTETensorCheck(A[0]);
@@ -808,19 +826,22 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
             A_dt == transformer_engine::DType::kBFloat16);
   };
 
-  if (use_ck && is_supported_dtype()) {
-    if (grouped_gemm_ck_tile(A, B, D, num_gemms, transa, transb, workspace, accumulate, stream)) {
-      // NVTE_WARN("grouped_gemm_ck_tile done.\n");
-      return;
-    } else if (warn_fallback) {
-      NVTE_WARN("Fallback to hipBLASLt grouped GEMM (grouped_gemm_ck_tile returned false).");
+  // CK_Tile Grouped GEMM fast path
+  // Conditions:
+  //  - No fused epilogue: both bias and pre_gelu_out are empty.
+  //  - Supported dtypes only: FP16/BF16 (FP32 accumulate).
+  //  - use_split_accumulator is ignored for FP16/BF16.
+  //  - grad is irrelevant when bias/pre_gelu_out are empty.
+  //
+  // Otherwise, fall back to cuBLAS.
+ if (is_empty_arr(bias) && is_empty_arr(pre_gelu_out) && is_supported_dtype()) {
+    ck_tile_grouped_gemm(A, B, D, num_gemms, transa, transb, workspace, accumulate, stream);
+  } else {
+    if (warn_fallback) {
+      NVTE_WARN("Fallback to cuBLAS grouped GEMM.");
     }
-  } else if (warn_fallback) {
-    NVTE_WARN("Fallback to hipBLASLt grouped GEMM (CK config unsupported or CK disabled). use_ck=", use_ck, " is_supported_dtype=", is_supported_dtype());
+    cublas_path();
   }
-
-  multi_stream_cublas_gemm(A, B, D, bias, pre_gelu_out, num_gemms, transa, transb, grad,
-                             workspace, accumulate, use_split_accumulator, math_sm_count, stream);
 #else
   const int current_device = transformer_engine::cuda::current_device();
   const bool is_hopper = (transformer_engine::cuda::sm_arch(current_device) == 90);
