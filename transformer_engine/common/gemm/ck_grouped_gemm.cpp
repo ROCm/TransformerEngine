@@ -44,6 +44,8 @@ struct TileCfg_basic {
   static constexpr ck_tile::index_t TilePartitionerM01      = 1;
 };
 
+// This class instantiates CK_Tile's grouped GEMM pipeline.
+// See e.g. https://github.com/ROCm/composable_kernel/blob/develop/example/ck_tile/03_gemm/universal_gemm_invoker.hpp for reference.
 template <typename AType, typename BType, typename CType,
           typename ALayout, typename BLayout, typename CLayout,
           typename TileCfg, ck_tile::memory_operation_enum MemOp,
@@ -94,8 +96,7 @@ static bool run_grouped_impl(const transformer_engine::Tensor* const* A_use,
                              size_t workspace_bytes,
                              hipStream_t stream)
 {
-  using R = Runner<T, T, T, ALayout, BLayout, CLayout, TileCfg_basic, MemOp>;
-  using Kernel = typename R::Kernel;
+  using Kernel = typename Runner<T, T, T, ALayout, BLayout, CLayout, TileCfg_basic, MemOp>::Kernel;
 
   const size_t needed = Kernel::GetWorkSpaceSize(group_num);
   if (!workspace || workspace_bytes < needed) {
@@ -158,7 +159,7 @@ static bool run_grouped_impl(const transformer_engine::Tensor* const* A_use,
   const dim3 grids = Kernel::GridSize(descs);
   auto kargs = Kernel::MakeKargs(descs);
   if (!Kernel::IsSupportedArgument(kargs)) {
-    NVTE_ERROR("grouped_gemm_ck_tile: CK-Tile kernel arguments not supported for this config.");
+    NVTE_ERROR("grouped_gemm_ck_tile: CK_Tile kernel arguments not supported for this config.");
     return false;
   }
 
