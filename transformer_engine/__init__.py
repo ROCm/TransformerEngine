@@ -83,4 +83,9 @@ except FileNotFoundError as e:
                 category=RuntimeWarning,
             )
 
-__version__ = str(metadata.version("transformer_engine_rocm" if transformer_engine.common.te_rocm_build else "transformer_engine"))
+try:
+    __version__ = str(metadata.version("transformer_engine"))
+except metadata.PackageNotFoundError:
+    if not transformer_engine.common.te_rocm_build:
+        raise
+    __version__ = str(metadata.version("transformer_engine_rocm"))

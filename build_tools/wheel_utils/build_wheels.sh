@@ -39,7 +39,7 @@ fi
 
 if [ "$LOCAL_TREE_BUILD" != "1" ]; then
         git config --global --add safe.directory $TE_ROOT
-        if [ "$SKIP_REPO_UPDATE" = "1" ]; then
+        if [ "$NO_REPO_UPDATE" = "1" ]; then
                 git submodule status --recursive | cut -d' ' -f3 | xargs -l -P1 -I_SUB_ git config --global --add safe.directory $TE_ROOT/_SUB_
         else
                 if [ $ROCM_BUILD ]; then
