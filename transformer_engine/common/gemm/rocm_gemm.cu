@@ -197,9 +197,59 @@ struct GemmParam {
   int ldb = 0;  // B column strides
 };
 
+__global__ void unpad_mxfp8_scales_kernel(float* data, const size_t rows, const size_t cols, 
+                                          const size_t padded_stride) {
+  int total_elements = rows * cols;
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (tid < total_elements) {
+    int r = tid / cols;
+    int c = tid % cols;
+
+    int src_idx = r * padded_stride + c;
+
+    float val = data[src_idx];
+    __threadfence();
+    data[tid] = val;
+  }
+}
+
+// Checks if scales have been padded and unpads.
+// Necessary for NV checkpoint load with extra cuBLASlt padding
+void unpad_mxfp8_checkpoint(const transformer_engine::Tensor &M_const, bool transM,
+                            const int m, const int n, const int k, hipStream_t stream) {
+
+  auto &M_tensor     = const_cast<transformer_engine::Tensor&>(M_const);
+  auto &scale_tensor = transM ? M_tensor.scale_inv : M_tensor.columnwise_scale_inv;
+
+  size_t unpadded_rows = transM ? k : m;
+  size_t unpadded_cols = ((transM ? m : k) + 31) / 32; // Change if MXFP8 block size changes
+  size_t padded_rows   = scale_tensor.shape[0];
+  size_t padded_cols   = scale_tensor.shape.size() > 1 ? scale_tensor.shape[1] : 1;
+
+  bool is_padded = ( padded_rows == (unpadded_rows + 127) / 128*128 &&
+                     padded_cols == (unpadded_cols + 3) / 4*4       &&
+                    (padded_rows > unpadded_rows || padded_cols > unpadded_cols));
+
+  if (is_padded) {
+    float *scale_dptr = (float*)(scale_tensor.dptr);
+
+    const size_t total_elements = unpadded_rows * unpadded_cols;
+    const size_t threads        = 256;
+    const size_t blocks         = (total_elements + threads - 1) / threads;
+
+    unpad_mxfp8_scales_kernel<<<blocks, threads, 0, stream>>>
+                (scale_dptr, unpadded_rows, unpadded_cols, padded_cols);
+
+    NVTE_CHECK_CUDA(hipStreamSynchronize(stream));
+
+    scale_tensor.shape = {unpadded_rows, unpadded_cols};
+  }
+}
+
 GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cublasOperation_t transA,
                                 const transformer_engine::Tensor &B, const cublasOperation_t transB,
-                                const int m, const int n, const int k) {
+                                const int m, const int n, const int k, hipStream_t stream) {
   using namespace transformer_engine;
   NVTE_CHECK(A.scaling_mode == B.scaling_mode,
              "Inputs A and B to GEMM need to have the same scaling mode!");
@@ -235,6 +285,9 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     // MXFP8
     // Note: Row-wise and column-wise data are scaled along different
     // dimensions (with matrix interpreted in row-major order).
+
+    unpad_mxfp8_checkpoint(A, is_A_transposed, m, n, k, stream);
+
     if (is_A_transposed) {
       NVTE_CHECK(A.has_data(), "Input A is missing row-wise usage");
     } else {
@@ -273,6 +326,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     // MXFP8
     // Note: Row-wise and column-wise data are scaled along different
     // dimensions (with matrix interpreted in row-major order).
+    unpad_mxfp8_checkpoint(B, is_B_transposed, m, n, k, stream);
     if (is_B_transposed) {
       NVTE_CHECK(B.has_columnwise_data(), "Input B is missing column-wise usage");
     } else {
@@ -951,7 +1005,7 @@ void hipblaslt_gemm(const Tensor *inputA,
   }
   NVTE_CHECK(k > 0);
 
-  const GemmParam &param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k);
+  const GemmParam &param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k, stream);
 
   bool nvte_log_gemm_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_GEMM_CONFIG") ) {
