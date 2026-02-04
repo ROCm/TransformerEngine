@@ -100,7 +100,7 @@ static bool run_grouped_impl(const transformer_engine::Tensor* const* A_use,
 
   const size_t needed = Kernel::GetWorkSpaceSize(group_num);
   if (!workspace || workspace_bytes < needed) {
-    NVTE_ERROR("grouped_gemm_ck_tile: insufficient workspace. Needed bytes=", needed);
+    NVTE_ERROR("ck_tile_grouped_gemm: insufficient workspace. Needed bytes=", needed);
     return false;
   }
 
@@ -113,7 +113,7 @@ static bool run_grouped_impl(const transformer_engine::Tensor* const* A_use,
     const auto& d = data_view(*D[i]);
 
     if (a.shape.size() != 2 || b.shape.size() != 2 || d.shape.size() != 2) {
-      NVTE_ERROR("grouped_gemm_ck_tile: expected all groups to be 2D.");
+      NVTE_ERROR("ck_tile_grouped_gemm: expected all groups to be 2D.");
       return false;
     }
 
@@ -128,12 +128,12 @@ static bool run_grouped_impl(const transformer_engine::Tensor* const* A_use,
     const int64_t Kb = transB_use ? Bd1 : Bd0;
 
     if (Kb != K) {
-      NVTE_ERROR("grouped_gemm_ck_tile: K mismatch between A and B in group ", i);
+      NVTE_ERROR("ck_tile_grouped_gemm: K mismatch between A and B in group ", i);
       return false;
     }
 
     if (d.shape[0] != M || d.shape[1] != N) {
-      NVTE_ERROR("grouped_gemm_ck_tile: D shape mismatch in group ", i);
+      NVTE_ERROR("ck_tile_grouped_gemm: D shape mismatch in group ", i);
       return false;
     }
 
@@ -159,7 +159,7 @@ static bool run_grouped_impl(const transformer_engine::Tensor* const* A_use,
   const dim3 grids = Kernel::GridSize(descs);
   auto kargs = Kernel::MakeKargs(descs);
   if (!Kernel::IsSupportedArgument(kargs)) {
-    NVTE_ERROR("grouped_gemm_ck_tile: CK_Tile kernel arguments not supported for this config.");
+    NVTE_ERROR("ck_tile_grouped_gemm: CK_Tile kernel arguments not supported for this config.");
     return false;
   }
 
@@ -315,7 +315,7 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
     const auto& a0 = data_view(*A_te[0]);
     const auto& b0 = data_view(*B_te[0]);
     const auto& d0 = data_view(*D_te[0]);
-    NVTE_ERROR("grouped_gemm_ck_tile: could not infer a consistent GEMM mode from shapes. ",
+    NVTE_ERROR("ck_tile_grouped_gemm: could not infer a consistent GEMM mode from shapes. ",
               "A0=[", a0.shape[0], ",", a0.shape[1], "] ",
               "B0=[", b0.shape[0], ",", b0.shape[1], "] ",
               "D0=[", d0.shape[0], ",", d0.shape[1], "] ",
