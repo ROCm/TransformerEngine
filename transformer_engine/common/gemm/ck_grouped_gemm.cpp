@@ -16,6 +16,17 @@ template <typename TeScalar> struct TeTypeToCkType;
 template <> struct TeTypeToCkType<transformer_engine::fp16> { using type = ck_tile::half_t; };
 template <> struct TeTypeToCkType<transformer_engine::bf16> { using type = ck_tile::bfloat16_t; };
 
+// Treat TE tensors as generalized 2D matrices by flattening:
+// (D1, D2, ..., Dn) -> (D1*...*D(n-1), Dn), consistent with TE Tensor::flat_*_dim.
+static inline bool get_flat_2d_dims(const transformer_engine::Tensor& t,
+                                   int64_t& d0, int64_t& d1) {
+  // Require at least a matrix (rank >= 2). Higher ranks are flattened.
+  if (t.shape().size() < 2)
+    return false;
+  d0 = static_cast<int64_t>(t.flat_first_dim());
+  d1 = static_cast<int64_t>(t.flat_last_dim());
+  return true;
+}
 
 static inline const transformer_engine::SimpleTensor& data_view(const transformer_engine::Tensor& t) {
   return t.data; // rowwise data view
@@ -112,15 +123,13 @@ static bool run_grouped_impl(const transformer_engine::Tensor* const* A_use,
     const auto& b = data_view(*B_use[i]);
     const auto& d = data_view(*D[i]);
 
-    if (a.shape.size() != 2 || b.shape.size() != 2 || d.shape.size() != 2) {
-      NVTE_ERROR("ck_tile_grouped_gemm: expected all groups to be 2D.");
+    int64_t Ad0 = 0, Ad1 = 0, Bd0 = 0, Bd1 = 0, Dd0 = 0, Dd1 = 0;
+    if (!get_flat_2d_dims(*A_use[i], Ad0, Ad1) ||
+        !get_flat_2d_dims(*B_use[i], Bd0, Bd1) ||
+        !get_flat_2d_dims(*D[i],     Dd0, Dd1)) {
+      NVTE_ERROR("ck_tile_grouped_gemm: expected all groups to be rank>=2 (2D or higher).");
       return false;
     }
-
-    const int64_t Ad0 = a.shape[0];
-    const int64_t Ad1 = a.shape[1];
-    const int64_t Bd0 = b.shape[0];
-    const int64_t Bd1 = b.shape[1];
 
     const int64_t M  = transA_use ? Ad1 : Ad0;
     const int64_t K  = transA_use ? Ad0 : Ad1;
@@ -132,14 +141,15 @@ static bool run_grouped_impl(const transformer_engine::Tensor* const* A_use,
       return false;
     }
 
-    if (d.shape[0] != M || d.shape[1] != N) {
+    if (Dd0 != M || Dd1 != N) {
       NVTE_ERROR("ck_tile_grouped_gemm: D shape mismatch in group ", i);
       return false;
     }
 
-    const ck_tile::index_t stride_A = a.shape[1];
-    const ck_tile::index_t stride_B = b.shape[1];
-    const ck_tile::index_t stride_E = d.shape[1];
+    // Leading dimensions under the flattened-contiguous interpretation
+    const ck_tile::index_t stride_A = Ad1;
+    const ck_tile::index_t stride_B = Bd1;
+    const ck_tile::index_t stride_E = Dd1;
 
     descs.emplace_back(
         a.dptr,
@@ -198,20 +208,12 @@ static inline bool infer_gemm_mode_group0(const transformer_engine::Tensor* cons
   if (group_num <= 0)
     return true;
 
-  const auto& a0 = data_view(*A[0]);
-  const auto& b0 = data_view(*B[0]);
-  const auto& d0 = data_view(*D[0]);
-
-  if (a0.shape.size() != 2 || b0.shape.size() != 2 || d0.shape.size() != 2) {
+  int64_t Ad0 = 0, Ad1 = 0, Bd0 = 0, Bd1 = 0, Dm = 0, Dn = 0;
+  if (!get_flat_2d_dims(*A[0], Ad0, Ad1) ||
+      !get_flat_2d_dims(*B[0], Bd0, Bd1) ||
+      !get_flat_2d_dims(*D[0], Dm,  Dn)) {
     return false;
   }
-
-  const int64_t Ad0 = a0.shape[0];
-  const int64_t Ad1 = a0.shape[1];
-  const int64_t Bd0 = b0.shape[0];
-  const int64_t Bd1 = b0.shape[1];
-  const int64_t Dm  = d0.shape[0];
-  const int64_t Dn  = d0.shape[1];
 
   auto check = [&](bool do_swap, bool ta, bool tb) -> bool {
     const int64_t A0d0 = do_swap ? Bd0 : Ad0;
@@ -312,13 +314,14 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
   // If TE's flags disagree with storage, infer the correct mode from shapes.
   if (!infer_gemm_mode_group0(A_te.data(), B_te.data(), D_te.data(),
                               group_num, A_use, B_use, transA_use, transB_use)) {
-    const auto& a0 = data_view(*A_te[0]);
-    const auto& b0 = data_view(*B_te[0]);
-    const auto& d0 = data_view(*D_te[0]);
+    int64_t Ad0 = 0, Ad1 = 0, Bd0 = 0, Bd1 = 0, Dd0 = 0, Dd1 = 0;
+    (void)get_flat_2d_dims(*A_te[0], Ad0, Ad1);
+    (void)get_flat_2d_dims(*B_te[0], Bd0, Bd1);
+    (void)get_flat_2d_dims(*D_te[0], Dd0, Dd1);
     NVTE_ERROR("ck_tile_grouped_gemm: could not infer a consistent GEMM mode from shapes. ",
-              "A0=[", a0.shape[0], ",", a0.shape[1], "] ",
-              "B0=[", b0.shape[0], ",", b0.shape[1], "] ",
-              "D0=[", d0.shape[0], ",", d0.shape[1], "] ",
+              "A0(flat)=[", Ad0, ",", Ad1, "] ",
+              "B0(flat)=[", Bd0, ",", Bd1, "] ",
+              "D0(flat)=[", Dd0, ",", Dd1, "] ",
               "given flags transA=", transA, " transB=", transB);
     return false;
   }
