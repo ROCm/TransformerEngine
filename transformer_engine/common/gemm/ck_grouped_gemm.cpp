@@ -12,10 +12,10 @@
 using RowMajor = ck_tile::tensor_layout::gemm::RowMajor;
 using ColMajor = ck_tile::tensor_layout::gemm::ColumnMajor;
 
-template <transformer_engine::DType TeDtype>
-struct TeDTypeToCk;
-template <> struct TeDTypeToCk<transformer_engine::DType::kFloat16> { using type = ck_tile::half_t; };
-template <> struct TeDTypeToCk<transformer_engine::DType::kBFloat16>{ using type = ck_tile::bfloat16_t; };
+template <typename TeScalar> struct TeTypeToCkType;
+template <> struct TeTypeToCkType<transformer_engine::fp16> { using type = ck_tile::half_t; };
+template <> struct TeTypeToCkType<transformer_engine::bf16> { using type = ck_tile::bfloat16_t; };
+
 
 static inline const transformer_engine::SimpleTensor& data_view(const transformer_engine::Tensor& t) {
   return t.data; // rowwise data view
@@ -48,8 +48,7 @@ template <typename AType, typename BType, typename CType,
           typename ALayout, typename BLayout, typename CLayout,
           typename TileCfg, ck_tile::memory_operation_enum MemOp,
           typename AccType = float>
-class Runner{
-public:
+struct Runner{
   using GemmShape = ck_tile::TileGemmShape<
       ck_tile::sequence<TileCfg::M_Tile, TileCfg::N_Tile, TileCfg::K_Tile>,
       ck_tile::sequence<TileCfg::M_Warp, TileCfg::N_Warp, TileCfg::K_Warp>,
@@ -82,22 +81,6 @@ public:
 
   using Kernel = ck_tile::GroupedGemmKernel<Partitioner, Pipeline, Epilogue>;
 };
-
-template <typename Kernel>
-static inline void launch_tileloop_kernel(const ck_tile::stream_config& s,
-                                          dim3 grids,
-                                          ck_tile::index_t group_num,
-                                          void* kargs_dev)
-{
-  const dim3 blocks = Kernel::BlockSize();
-
-  ck_tile::launch_kernel(
-      s,
-      ck_tile::make_kernel<1>(
-          Kernel{}, grids, blocks, 0,
-          ck_tile::cast_pointer_to_constant_address_space(kargs_dev),
-          group_num));
-}
 
 template <typename T, typename ALayout, typename BLayout, typename CLayout,
           ck_tile::memory_operation_enum MemOp>
@@ -186,7 +169,14 @@ static bool run_grouped_impl(const transformer_engine::Tensor* const* A_use,
                                 stream));
 
   const ck_tile::stream_config s{stream};
-  launch_tileloop_kernel<Kernel>(s, grids, group_num, workspace);
+  const dim3 blocks = Kernel::BlockSize();
+
+  ck_tile::launch_kernel(
+      s,
+      ck_tile::make_kernel<1>(
+          Kernel{}, grids, blocks, 0,
+          ck_tile::cast_pointer_to_constant_address_space(workspace),
+          group_num));
   return true;
 }
 
@@ -255,6 +245,30 @@ static inline bool infer_gemm_mode_group0(const transformer_engine::Tensor* cons
   return false;
 }
 
+template <typename T, typename CLayout, ck_tile::memory_operation_enum MemOp>
+static inline bool dispatch_grouped(bool transA_use,
+                                    bool transB_use,
+                                    const transformer_engine::Tensor* const* A_use,
+                                    const transformer_engine::Tensor* const* B_use,
+                                    transformer_engine::Tensor* const* D,
+                                    int group_num,
+                                    void* workspace,
+                                    size_t workspace_bytes,
+                                    hipStream_t stream) {
+
+// FIXME: This could be a templated lambda function in C++20.
+#define CALL(ALayout_, BLayout_, ta_, tb_)                                    \
+  return run_grouped_impl<T, ALayout_, BLayout_, CLayout, MemOp>(             \
+      A_use, B_use, D, group_num, (ta_), (tb_), workspace, workspace_bytes, stream)
+  
+  if (!transA_use && !transB_use) { CALL(RowMajor, RowMajor, false, false); }
+  if (!transA_use &&  transB_use) { CALL(RowMajor, ColMajor, false, true ); }
+  if ( transA_use && !transB_use) { CALL(ColMajor, RowMajor, true,  false); }
+  /* transA_use && transB_use */  { CALL(ColMajor, ColMajor, true,  true ); }
+
+#undef CALL
+}
+
 bool grouped_gemm_ck_tile(const NVTETensor* A,
                           const NVTETensor* B,
                           NVTETensor* D,
@@ -268,7 +282,7 @@ bool grouped_gemm_ck_tile(const NVTETensor* A,
   if (group_num <= 0)
     return true;
 
-  // Convert A/B/D arrays into TE Tensor* arrays
+  // Convert A/B/D arrays into TE Tensor arrays
   std::vector<const transformer_engine::Tensor*> A_te(group_num);
   std::vector<const transformer_engine::Tensor*> B_te(group_num);
   std::vector<transformer_engine::Tensor*>       D_te(group_num);
@@ -310,71 +324,16 @@ bool grouped_gemm_ck_tile(const NVTETensor* A,
 
   const auto a_dtype = A_use[0]->dtype();
 
-  const auto memop = accumulate ? ck_tile::memory_operation_enum::atomic_add
-                                : ck_tile::memory_operation_enum::set;
+  TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(a_dtype, te_type, {
+    using T = typename TeTypeToCkType<te_type>::type;
 
-  if (a_dtype == transformer_engine::DType::kFloat16) {
-    using T = TeDTypeToCk<transformer_engine::DType::kFloat16>::type;
-
-    if (!transA_use && !transB_use)
-      return (memop == ck_tile::memory_operation_enum::set)
-        ? run_grouped_impl<T, RowMajor, RowMajor, RowMajor, ck_tile::memory_operation_enum::set>(
-            A_use, B_use, D_te.data(), group_num, false, false, ws_ptr, ws_bytes, stream)
-        : run_grouped_impl<T, RowMajor, RowMajor, RowMajor, ck_tile::memory_operation_enum::atomic_add>(
-            A_use, B_use, D_te.data(), group_num, false, false, ws_ptr, ws_bytes, stream);
-
-    if (!transA_use && transB_use)
-      return (memop == ck_tile::memory_operation_enum::set)
-        ? run_grouped_impl<T, RowMajor, ColMajor, RowMajor, ck_tile::memory_operation_enum::set>(
-            A_use, B_use, D_te.data(), group_num, false, true, ws_ptr, ws_bytes, stream)
-        : run_grouped_impl<T, RowMajor, ColMajor, RowMajor, ck_tile::memory_operation_enum::atomic_add>(
-            A_use, B_use, D_te.data(), group_num, false, true, ws_ptr, ws_bytes, stream);
-
-    if (transA_use && !transB_use)
-      return (memop == ck_tile::memory_operation_enum::set)
-        ? run_grouped_impl<T, ColMajor, RowMajor, RowMajor, ck_tile::memory_operation_enum::set>(
-            A_use, B_use, D_te.data(), group_num, true, false, ws_ptr, ws_bytes, stream)
-        : run_grouped_impl<T, ColMajor, RowMajor, RowMajor, ck_tile::memory_operation_enum::atomic_add>(
-            A_use, B_use, D_te.data(), group_num, true, false, ws_ptr, ws_bytes, stream);
-
-    return (memop == ck_tile::memory_operation_enum::set)
-      ? run_grouped_impl<T, ColMajor, ColMajor, RowMajor, ck_tile::memory_operation_enum::set>(
-          A_use, B_use, D_te.data(), group_num, true, true, ws_ptr, ws_bytes, stream)
-      : run_grouped_impl<T, ColMajor, ColMajor, RowMajor, ck_tile::memory_operation_enum::atomic_add>(
-          A_use, B_use, D_te.data(), group_num, true, true, ws_ptr, ws_bytes, stream);
-
-  } else if (a_dtype == transformer_engine::DType::kBFloat16) {
-    using T = TeDTypeToCk<transformer_engine::DType::kBFloat16>::type;
-
-    if (!transA_use && !transB_use)
-      return (memop == ck_tile::memory_operation_enum::set)
-        ? run_grouped_impl<T, RowMajor, RowMajor, RowMajor, ck_tile::memory_operation_enum::set>(
-            A_use, B_use, D_te.data(), group_num, false, false, ws_ptr, ws_bytes, stream)
-        : run_grouped_impl<T, RowMajor, RowMajor, RowMajor, ck_tile::memory_operation_enum::atomic_add>(
-            A_use, B_use, D_te.data(), group_num, false, false, ws_ptr, ws_bytes, stream);
-
-    if (!transA_use && transB_use)
-      return (memop == ck_tile::memory_operation_enum::set)
-        ? run_grouped_impl<T, RowMajor, ColMajor, RowMajor, ck_tile::memory_operation_enum::set>(
-            A_use, B_use, D_te.data(), group_num, false, true, ws_ptr, ws_bytes, stream)
-        : run_grouped_impl<T, RowMajor, ColMajor, RowMajor, ck_tile::memory_operation_enum::atomic_add>(
-            A_use, B_use, D_te.data(), group_num, false, true, ws_ptr, ws_bytes, stream);
-
-    if (transA_use && !transB_use)
-      return (memop == ck_tile::memory_operation_enum::set)
-        ? run_grouped_impl<T, ColMajor, RowMajor, RowMajor, ck_tile::memory_operation_enum::set>(
-            A_use, B_use, D_te.data(), group_num, true, false, ws_ptr, ws_bytes, stream)
-        : run_grouped_impl<T, ColMajor, RowMajor, RowMajor, ck_tile::memory_operation_enum::atomic_add>(
-            A_use, B_use, D_te.data(), group_num, true, false, ws_ptr, ws_bytes, stream);
-
-    return (memop == ck_tile::memory_operation_enum::set)
-      ? run_grouped_impl<T, ColMajor, ColMajor, RowMajor, ck_tile::memory_operation_enum::set>(
-          A_use, B_use, D_te.data(), group_num, true, true, ws_ptr, ws_bytes, stream)
-      : run_grouped_impl<T, ColMajor, ColMajor, RowMajor, ck_tile::memory_operation_enum::atomic_add>(
-          A_use, B_use, D_te.data(), group_num, true, true, ws_ptr, ws_bytes, stream);
-
-  } else {
-    NVTE_ERROR("grouped_gemm_ck_tile: unsupported dtype (expected FP16/BF16).");
-    return false;
-  }
+    if (accumulate)
+      return dispatch_grouped<T, RowMajor, ck_tile::memory_operation_enum::atomic_add>(transA_use, transB_use,
+                                     A_use, B_use, D_te.data(), group_num,
+                                     ws_ptr, ws_bytes, stream);
+    else
+      return dispatch_grouped<T, RowMajor, ck_tile::memory_operation_enum::set>(transA_use, transB_use,
+                                     A_use, B_use, D_te.data(), group_num,
+                                     ws_ptr, ws_bytes, stream);
+  });
 }
