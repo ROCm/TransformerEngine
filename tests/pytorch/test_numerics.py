@@ -1211,7 +1211,6 @@ def _test_dpa_accuracy(block, bs, dtype, config):
     query.retain_grad()
     key.retain_grad()
     value.retain_grad()
-
     out = block(query, key, value, attention_mask=mask)
     loss = out.sum()
     loss.backward()
@@ -1255,7 +1254,8 @@ def test_dpa_accuracy(dtype, bs, model):
     else:
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
 
-    for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
+    for idx, outs in enumerate(zip(te_outputs[1:], torch_outputs[1:])):
+        te_output, torch_output = outs
         assert_allclose(te_output, torch_output, atol=5e-2, rtol=1e-2)
 
 
