@@ -191,63 +191,6 @@ static bool run_grouped_impl(const transformer_engine::Tensor* const* A_use,
   return true;
 }
 
-static inline bool infer_gemm_mode_group0(const transformer_engine::Tensor* const* A,
-                                          const transformer_engine::Tensor* const* B,
-                                          transformer_engine::Tensor* const* D,
-                                          int group_num,
-                                          const transformer_engine::Tensor* const*&  A_use,
-                                          const transformer_engine::Tensor* const*&  B_use,
-                                          bool& transA_use,
-                                          bool& transB_use)
-{
-  A_use = A;
-  B_use = B;
-  transA_use = false;
-  transB_use = false;
-
-  if (group_num <= 0)
-    return true;
-
-  int64_t Ad0 = 0, Ad1 = 0, Bd0 = 0, Bd1 = 0, Dm = 0, Dn = 0;
-  if (!get_flat_2d_dims(*A[0], Ad0, Ad1) ||
-      !get_flat_2d_dims(*B[0], Bd0, Bd1) ||
-      !get_flat_2d_dims(*D[0], Dm,  Dn)) {
-    return false;
-  }
-
-  auto check = [&](bool do_swap, bool ta, bool tb) -> bool {
-    const int64_t A0d0 = do_swap ? Bd0 : Ad0;
-    const int64_t A0d1 = do_swap ? Bd1 : Ad1;
-    const int64_t B0d0 = do_swap ? Ad0 : Bd0;
-    const int64_t B0d1 = do_swap ? Ad1 : Bd1;
-
-    const int64_t M  = ta ? A0d1 : A0d0;
-    const int64_t K  = ta ? A0d0 : A0d1;
-    const int64_t N  = tb ? B0d0 : B0d1;
-    const int64_t Kb = tb ? B0d1 : B0d0;
-
-    return (M == Dm) && (N == Dn) && (K == Kb);
-  };
-
-  // Try all candidates; prefer "no swap" first, then swap
-  for (bool do_swap : {false, true}) {
-    for (bool ta : {false, true}) {
-      for (bool tb : {false, true}) {
-        if (check(do_swap, ta, tb)) {
-          A_use = do_swap ? B : A;
-          B_use = do_swap ? A : B;
-          transA_use = ta;
-          transB_use = tb;
-          return true;
-        }
-      }
-    }
-  }
-
-  // Nothing matched D = op(A) * op(B)
-  return false;
-}
-
 template <typename T, typename CLayout, ck_tile::memory_operation_enum MemOp>
 static inline bool dispatch_grouped(bool transA_use,
                                     bool transB_use,
@@ -306,25 +249,12 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
                transformer_engine::typeToSize(ws_te->data.dtype);
   }
 
-  const transformer_engine::Tensor* const* A_use = A_te.data();
-  const transformer_engine::Tensor* const* B_use = B_te.data();
-  bool transA_use = transA;
-  bool transB_use = transB;
-
-  // If TE's flags disagree with storage, infer the correct mode from shapes.
-  if (!infer_gemm_mode_group0(A_te.data(), B_te.data(), D_te.data(),
-                              group_num, A_use, B_use, transA_use, transB_use)) {
-    int64_t Ad0 = 0, Ad1 = 0, Bd0 = 0, Bd1 = 0, Dd0 = 0, Dd1 = 0;
-    (void)get_flat_2d_dims(*A_te[0], Ad0, Ad1);
-    (void)get_flat_2d_dims(*B_te[0], Bd0, Bd1);
-    (void)get_flat_2d_dims(*D_te[0], Dd0, Dd1);
-    NVTE_ERROR("ck_tile_grouped_gemm: could not infer a consistent GEMM mode from shapes. ",
-              "A0(flat)=[", Ad0, ",", Ad1, "] ",
-              "B0(flat)=[", Bd0, ",", Bd1, "] ",
-              "D0(flat)=[", Dd0, ",", Dd1, "] ",
-              "given flags transA=", transA, " transB=", transB);
-    return false;
-  }
+  // Normalize similar to upstream
+  // See https://github.com/NVIDIA/TransformerEngine/blob/59f6f3876767d07045152bfae07b5dd4c54e1725/transformer_engine/common/gemm/cutlass_grouped_gemm.cu#L54-L68
+  const transformer_engine::Tensor* const* A_use = B_te.data();
+  const transformer_engine::Tensor* const* B_use = A_te.data();
+  const bool transA_use = transB;
+  const bool transB_use = transA;
 
   const auto a_dtype = A_use[0]->dtype();
 
