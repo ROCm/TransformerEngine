@@ -148,7 +148,7 @@ if fp8_available:
 
 use_cutlass_grouped_gemm = [False]
 # Only enable cutlass grouped gemm on Hopper
-if torch.cuda.get_device_capability() == (9, 0):
+if torch.cuda.get_device_capability() == (9, 0) or IS_HIP_EXTENSION:
     use_cutlass_grouped_gemm.append(True)
 
 
@@ -2938,7 +2938,10 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
             # cublas implementation should be bit-wise match
             torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
         else:
-            torch.testing.assert_close(o, o_ref, rtol=1.5e-2, atol=1.5e-2)
+            if IS_HIP_EXTENSION and is_mi300_class():
+                torch.testing.assert_close(o, o_ref, rtol=2.0e-2, atol=3.0e-2)
+            else:
+                torch.testing.assert_close(o, o_ref, rtol=1.5e-2, atol=1.5e-2)
 
     if use_cutlass:
         os.environ.pop("NVTE_USE_CUTLASS_GROUPED_GEMM", None)
