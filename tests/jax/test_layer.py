@@ -17,8 +17,12 @@ from utils import (
     dtype_tols,
     sync_params_values,
 )
-from utils import DecoderLayer as RefDecoderLayer
-from utils import EncoderLayer as RefEncoderLayer
+from utils import (
+    DecoderLayer as RefDecoderLayer,
+    EncoderLayer as RefEncoderLayer,
+    _check_mxfp8_layernorm_mlp_grad_support,
+    _check_mxfp8_layernorm_mlp_support,
+    )
 
 from transformer_engine.common import recipe
 from transformer_engine.jax.flax import TransformerLayer, TransformerLayerType
@@ -521,6 +525,15 @@ class BaseTester:
     @pytest.mark.parametrize("fp8_recipe", QUANTIZE_RECIPES)
     def test_forward_with_fp8(self, data_shape, dtype, attrs, fp8_recipe):
         """Test forward with fp8 enabled"""
+        if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
+            _check_mxfp8_layernorm_mlp_support(
+                data_shape[0]*data_shape[1],
+                2048,
+                2048,
+                data_shape[2],
+                data_shape[2],
+                use_bias=attrs.get(_KEY_OF_USE_BIAS, False),
+            )
         # Empty MeshResource is used as we are running on a single device
         with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, mesh_resource=MeshResource()):
             self.runner(attrs).test_forward(data_shape, dtype, rtol=1e-4, atol=1e-3)
@@ -529,6 +542,15 @@ class BaseTester:
     @pytest.mark.parametrize("fp8_recipe", QUANTIZE_RECIPES)
     def test_backward_with_fp8(self, data_shape, dtype, attrs, fp8_recipe):
         """Test backward with fp8 enabled"""
+        if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
+            _check_mxfp8_layernorm_mlp_grad_support(
+                data_shape[0]*data_shape[1],
+                2048,
+                2048,
+                data_shape[2],
+                data_shape[2],
+                use_bias=attrs.get(_KEY_OF_USE_BIAS, False),
+            )
         # Empty MeshResource is used as we are running on a single device
         with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, mesh_resource=MeshResource()):
             self.runner(attrs).test_backward(data_shape, dtype, rtol=1e-4, atol=1e-3)
