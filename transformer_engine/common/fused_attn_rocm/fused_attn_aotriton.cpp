@@ -208,7 +208,6 @@ void fused_attn_aotriton_fwd_impl(
       nvte_log_aotriton_config = true;
   }
   aotriton::TensorView<4> empty_bias(0, {0,0,0,0}, {0,0,0,0}, dtype);
-  using aotriton::v3::flash::attn_fwd;
   auto seed = mk_aoscalartensor(devPtrDropoutSeed);
   auto offset1 = mk_aoscalartensor(devPtrDropoutOffset);
   auto seed_output = mk_aoscalartensor(nullptr);
@@ -293,6 +292,7 @@ void fused_attn_aotriton_fwd_impl(
   fwd_params.window_right = window_right;
 
   NVTE_CHECK_CUDA(hipMemsetAsync(workspace, 0, sizeof(int32_t), stream));
+  using aotriton::v3::flash::attn_fwd;
   NVTE_CHECK_CUDA(attn_fwd(fwd_params, fwd_params.kVersion, stream));
 }
 
@@ -341,7 +341,6 @@ void fused_attn_aotriton_bwd_impl(
   std::array<uint64_t, 4> k_stride;
   std::array<uint64_t, 4> v_stride;
   std::array<uint64_t, 4> o_stride;
-  std::array<uint64_t, 4> dq_acc_stride;
   generateMatrixStrides(b, h, s_q, s_kv, d, q_stride.data(),
                         layout, NVTE_QKV_Matrix::NVTE_Q_Matrix);
   generateMatrixStrides(b, hg, s_q, s_kv, d, k_stride.data(),
@@ -350,9 +349,8 @@ void fused_attn_aotriton_bwd_impl(
                         layout, NVTE_QKV_Matrix::NVTE_V_Matrix);
   generateMatrixStrides(b, h, s_q, s_kv, d, o_stride.data(),
                         layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
-  // AOTriton expects a BSHD layout DQ_ACC matrix
-  generateMatrixStrides(b, h, s_q, s_kv, d, dq_acc_stride.data(),
-                        NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD, NVTE_QKV_Matrix::NVTE_Q_Matrix);
+  // AOTriton expects a **BHSD** layout DQ_ACC matrix
+  std::array<uint64_t, 4> dq_acc_stride {h * s_q * d, s_q * d, d, 1};
 
   //q and o are having the same shape
   //k and v are having the same shape
@@ -405,7 +403,6 @@ void fused_attn_aotriton_bwd_impl(
       nvte_log_aotriton_config = true;
   }
   aotriton::TensorView<4> empty_bias(0, {0,0,0,0}, {0,0,0,0}, dtype);
-  using aotriton::v2::flash::attn_bwd;
   auto seed = mk_aoscalartensor(devPtrDropoutSeed);
   auto offset = mk_aoscalartensor(devPtrDropoutOffset);
   const auto is_causal = mask_type == NVTE_CAUSAL_MASK;
@@ -487,6 +484,7 @@ void fused_attn_aotriton_bwd_impl(
   bwd_params.window_right = window_right;
   bwd_params.DQ_ACC = dq_acc_lazy;
 
+  using aotriton::v3::flash::attn_bwd;
   NVTE_CHECK_CUDA(attn_bwd(bwd_params, bwd_params.kVersion, stream));
 }
 #endif // USE_FUSED_ATTN_AOTRITON
