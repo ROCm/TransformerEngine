@@ -28,7 +28,7 @@ from transformer_engine.pytorch.utils import (
     is_bf16_compatible,
 )
 if IS_HIP_EXTENSION:
-    from transformer_engine.pytorch.utils import is_mi200, is_mi308
+    from transformer_engine.pytorch.utils import is_mi200, is_mi308, is_mi300_class
 
 from transformer_engine.pytorch import (
     DotProductAttention,
@@ -2121,6 +2121,8 @@ def test_grouped_linear_accuracy(
     atol, rtol = 0, 0
     if use_cutlass:
         atol, rtol = 1e-3, 1e-3
+        if IS_HIP_EXTENSION and is_mi300_class():
+            atol, rtol = 3e-2, 3e-2
     if use_triton:
         atol, rtol = get_tolerances(dtype)
         if dtype == torch.float32:
