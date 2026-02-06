@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
@@ -312,6 +312,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         qkv_layout,
         bias_type,
         attn_mask_type,
+        softmax_type,
         dropout,
         num_attn_heads, num_gqa_groups,
         max_seqlen_q, max_seqlen_kv,
@@ -326,6 +327,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
               qkv_layout,
               bias_type,
               attn_mask_type,
+              softmax_type,
               dropout,
               num_attn_heads, num_gqa_groups,
               max_seqlen_q, max_seqlen_kv,
