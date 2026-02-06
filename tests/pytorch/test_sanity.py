@@ -41,7 +41,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
     Float8Tensor,
 )
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
 from transformer_engine.pytorch.distributed import checkpoint
 from utils import ModelConfig
@@ -912,6 +912,78 @@ def test_sanity_fp8_gemm_with_unalignment(N, datatype):
         use_split_accumulator=False,
     )
     torch.cuda.synchronize()
+
+@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+@pytest.mark.parametrize("N", [32])
+@pytest.mark.parametrize("K", [128])
+@pytest.mark.parametrize("M", [32])
+@pytest.mark.parametrize("datatype", [torch.float16, torch.bfloat16])
+def test_sanity_mxfp8_gemm_with_padding(N, K, M, datatype):
+    """Test the unpadding functionality in rocm"""
+    dtype = tex.DType.kFloat8E4M3
+    quantizer = MXFP8Quantizer(dtype)
+
+    input_dtype  = torch.randn(M, K, device="cuda", dtype=datatype)
+    weight_dtype = torch.randn(N, K, device="cuda", dtype=datatype)
+
+    input_data  = quantizer.make_empty((M, K), device="cuda")
+    weight_data = quantizer.make_empty((N, K), device="cuda")
+
+    quantizer.update_quantized(input_dtype, input_data)
+    quantizer.update_quantized(weight_dtype, weight_data)
+
+    out_ref = general_gemm(
+        weight_data,
+        input_data,
+        get_workspace(),
+        datatype,
+        bias=None,
+        use_split_accumulator=False,
+    )
+    torch.cuda.synchronize()
+
+    row_scale_inv = input_data._rowwise_scale_inv
+    rows, cols = row_scale_inv.shape
+    row_padded_scale_inv = torch.zeros((128, 4), dtype=row_scale_inv.dtype, device="cuda")
+    row_padded_scale_inv[:rows, :cols] = row_scale_inv
+
+    col_scale_inv = input_data._columnwise_scale_inv
+    rows, cols = col_scale_inv.shape
+    col_padded_scale_inv = torch.zeros((4, 128), dtype=col_scale_inv.dtype, device="cuda")
+    col_padded_scale_inv[:rows, :cols] = col_scale_inv
+
+
+    input_padded = MXFP8Tensor(
+        shape=input_data.shape,
+        rowwise_data=input_data._rowwise_data.clone(),
+        rowwise_scale_inv=row_padded_scale_inv,
+        columnwise_data=input_data._columnwise_data.clone(),
+        columnwise_scale_inv=col_padded_scale_inv,
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        quantizer=quantizer,
+        dtype=datatype
+    )
+
+    out_pass1 = general_gemm(
+        weight_data,
+        input_padded,
+        get_workspace(),
+        datatype,
+        bias=None,
+        use_split_accumulator=False
+    )
+    torch.cuda.synchronize()
+
+    assert row_scale_inv.shape == input_padded._rowwise_scale_inv.shape, \
+        ("Shape mismatch in rowwise scales")
+    assert col_scale_inv.shape == input_padded._columnwise_scale_inv.shape, \
+        ("Shape mismatch in colwise scales")
+    torch.testing.assert_close(row_scale_inv, input_padded._rowwise_scale_inv,
+                               rtol=1e-7, atol=1e-7, msg="rowwise scale mismatch")
+    torch.testing.assert_close(col_scale_inv, input_padded._columnwise_scale_inv,
+                               rtol=1e-7, atol=1e-7, msg="colwise scale mismatch")
+    torch.testing.assert_close(out_pass1[0], out_ref[0],
+                               rtol=1e-2, atol=1e-2, msg="GEMM output mismatch")
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)

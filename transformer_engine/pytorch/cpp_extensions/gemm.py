@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -5,13 +7,17 @@
 """Python interface for GEMM extensions"""
 
 from typing import Iterable, Optional, Tuple, Union, List
+import math
 import os
 import torch
 import transformer_engine_torch as tex
 from ..constants import TE_DType
 from ..utils import get_sm_count, _empty_tensor
 
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
 from ..tensor.quantized_tensor import Quantizer
+from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 
@@ -28,6 +34,42 @@ def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
     if scale not in (0.0, None):
         raise ValueError("scale must be zero")
     return 0.0
+
+
+def unpad_scales(tensor: torch.Tensor, transpose: bool) -> torch.Tensor:
+    """Removes padding from scales in MXFP8 Tensors if present"""
+    if isinstance(tensor, MXFP8TensorBase):
+        block_size = 32
+    elif isinstance(tensor, Float8BlockwiseQTensorBase):
+        block_size = 128
+    else:
+        raise ValueError("Only MXFP8 and FP8 Block scaling can be unpadded")
+
+    if tensor._rowwise_scale_inv is not None:
+        if transpose:
+            rows, cols = tensor._rowwise_data.shape[1], tensor._rowwise_data.shape[0]
+        else:
+            rows, cols = tensor._rowwise_data.shape[0], tensor._rowwise_data.shape[1]
+
+        actual_scale_shape   = tensor._rowwise_scale_inv.shape
+        expected_scale_shape = (rows, math.ceil(cols / block_size))
+
+        if actual_scale_shape != expected_scale_shape:
+            tensor._rowwise_scale_inv = tensor._rowwise_scale_inv[:expected_scale_shape[0], :expected_scale_shape[1]]
+
+    if tensor._columnwise_scale_inv is not None:
+        if transpose:
+            rows, cols = tensor._columnwise_data.shape[1], tensor._columnwise_data.shape[0]
+        else:
+            rows, cols = tensor._columnwise_data.shape[0], tensor._columnwise_data.shape[1]
+
+        actual_scale_shape   = tensor._columnwise_scale_inv.shape
+        expected_scale_shape = (math.ceil(rows / block_size), cols)
+
+        if actual_scale_shape != expected_scale_shape:
+            tensor._columnwise_scale_inv = tensor._columnwise_scale_inv[:expected_scale_shape[0], :expected_scale_shape[1]]
+
+    return tensor
 
 
 def general_gemm(
@@ -60,6 +102,12 @@ def general_gemm(
 
     alpha = validate_gemm_scale(alpha, True)
     beta = validate_gemm_scale(beta, accumulate)
+
+    if IS_HIP_EXTENSION:
+        if isinstance(A, (MXFP8TensorBase, Float8BlockwiseQTensorBase)):
+            A = unpad_scales(A, transa)
+        if isinstance(B, (MXFP8TensorBase, Float8BlockwiseQTensorBase)):
+            A = unpad_scales(B, transb)
 
     if ub_type is not None:
         assert ub is not None, (
