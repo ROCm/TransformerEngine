@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2023-2026, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
@@ -197,10 +197,9 @@ struct GemmParam {
   int ldb = 0;  // B column strides
 };
 
-
 GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cublasOperation_t transA,
                                 const transformer_engine::Tensor &B, const cublasOperation_t transB,
-                                const int m, const int n, const int k, hipStream_t stream) {
+                                const int m, const int n, const int k) {
   using namespace transformer_engine;
   NVTE_CHECK(A.scaling_mode == B.scaling_mode,
              "Inputs A and B to GEMM need to have the same scaling mode!");
@@ -236,9 +235,6 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     // MXFP8
     // Note: Row-wise and column-wise data are scaled along different
     // dimensions (with matrix interpreted in row-major order).
-
-    unpad_mxfp8_checkpoint(A, is_A_transposed, m, n, k, stream);
-
     if (is_A_transposed) {
       NVTE_CHECK(A.has_data(), "Input A is missing row-wise usage");
     } else {
@@ -277,7 +273,6 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     // MXFP8
     // Note: Row-wise and column-wise data are scaled along different
     // dimensions (with matrix interpreted in row-major order).
-    unpad_mxfp8_checkpoint(B, is_B_transposed, m, n, k, stream);
     if (is_B_transposed) {
       NVTE_CHECK(B.has_columnwise_data(), "Input B is missing column-wise usage");
     } else {
@@ -956,7 +951,7 @@ void hipblaslt_gemm(const Tensor *inputA,
   }
   NVTE_CHECK(k > 0);
 
-  const GemmParam &param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k, stream);
+  const GemmParam &param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k);
 
   bool nvte_log_gemm_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_GEMM_CONFIG") ) {
