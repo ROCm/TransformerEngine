@@ -1,4 +1,4 @@
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
 
@@ -10,27 +10,20 @@ from itertools import product
 
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch import cpp_extensions as tex
-from transformer_engine.pytorch.triton_kernels.norm_common import get_ln_sm_margin
+from transformer_engine.pytorch.triton_kernels.utils import get_ln_sm_margin
 from transformer_engine.pytorch.triton_kernels.common import (
     torch_dtype_to_te_dtype,
     te_dtype_to_torch_dtype
 )
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8Tensor
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
-from transformer_engine.pytorch.triton_kernels.norms import (
+from transformer_engine.pytorch.triton_kernels.norms_common import (
     te_layernorm_bwd_triton,
     te_layernorm_fwd_triton,
     te_rmsnorm_bwd_triton,
     te_rmsnorm_fwd_triton,
 )
 from test_common import dtype_tols, te_compare_results, str_to_torch_dtype, fill_uniform
-
-def _compare_func(actual, expected, atol, rtol, msg, use_torch_semantics=False):
-    try:
-        te_compare_results(actual, expected, atol, rtol, msg, use_torch_semantics)
-    except AssertionError as e:
-        if "Tensor 'expected' has" in str(e) and "NaN" in str(e):
-            pytest.skip("HIP reference tensor contains NaN values.")
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -411,7 +404,7 @@ class TestNorms:
         quantization, fp8_dtype
         ):
         tols = dtype_tols(out_triton.dtype if quantization is None else fp8_dtype)
-        compare_func = partial(_compare_func, **tols, use_torch_semantics=True)
+        compare_func = partial(te_compare_results, **tols, use_torch_semantics=True)
 
         dq_out_triton = out_triton.dequantize()
         dq_out_hip = out_hip.dequantize()
@@ -454,7 +447,7 @@ class TestNorms:
                 assert out_triton._rowwise_data is None, "Expected no rowwise data."
 
         # We use higher precision for the scales
-        compare_func = partial(_compare_func, atol=1e-6, rtol=5e-5, use_torch_semantics=True)
+        compare_func = partial(te_compare_results, atol=1e-6, rtol=5e-5, use_torch_semantics=True)
         if quantization == "fp8":
             compare_func(
                 actual=out_triton._scale_inv,
@@ -499,7 +492,7 @@ class TestNorms:
         quantization
     ):
         if quantization is None: return
-        compare_func = partial(_compare_func, atol=1e-6, rtol=5e-5, use_torch_semantics=True)
+        compare_func = partial(te_compare_results, atol=1e-6, rtol=5e-5, use_torch_semantics=True)
 
         if quantizer_triton.dtype != quantizer_hip.dtype:
             raise ValueError("Expected matching quantizer dtypes, but got "
@@ -531,7 +524,7 @@ class TestNorms:
         norm
     ):
         # We use higher precision for the remaining outputs
-        compare_func = partial(_compare_func, atol=1e-6, rtol=5e-5, use_torch_semantics=True)
+        compare_func = partial(te_compare_results, atol=1e-6, rtol=5e-5, use_torch_semantics=True)
 
         compare_func(
             actual=rsigma_triton,
@@ -581,7 +574,7 @@ class TestNorms:
         dbeta_triton, dbeta_hip,
         norm
     ):
-        compare_func = partial(_compare_func, atol=1.5e-4, rtol=1e-4, use_torch_semantics=True)
+        compare_func = partial(te_compare_results, atol=1.5e-4, rtol=1e-4, use_torch_semantics=True)
 
         compare_func(
             actual=dx_triton,

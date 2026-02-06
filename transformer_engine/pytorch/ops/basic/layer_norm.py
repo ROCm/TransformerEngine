@@ -17,7 +17,7 @@ import torch
 from transformer_engine_torch import layernorm_bwd, layernorm_fwd
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 if IS_HIP_EXTENSION:
-    from ...triton_kernels.norms import te_layernorm_fwd_triton, te_layernorm_bwd_triton
+    from ...triton_kernels.norms_common import te_layernorm_fwd_triton, te_layernorm_bwd_triton
 from ...fp8 import FP8GlobalStateManager
 from ...tensor import QuantizedTensor
 from ...constants import TE_DType

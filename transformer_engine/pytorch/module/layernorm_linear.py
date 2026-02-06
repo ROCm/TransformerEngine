@@ -79,7 +79,7 @@ from ..cpp_extensions import (
 )
 
 if IS_HIP_EXTENSION:
-    from ..triton_kernels.norms import te_layernorm_bwd_triton, te_rmsnorm_bwd_triton
+    from ..triton_kernels.norms_common import te_layernorm_bwd_triton, te_rmsnorm_bwd_triton
 
 
 __all__ = ["LayerNormLinear"]

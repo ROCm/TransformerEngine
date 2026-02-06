@@ -20,7 +20,7 @@ from ..utils import get_default_init_method
 from ..export import is_in_onnx_export_mode
 
 if IS_HIP_EXTENSION:
-    from ..triton_kernels.norms import (
+    from ..triton_kernels.norms_common import (
         te_layernorm_fwd_triton,
         te_layernorm_bwd_triton,
         te_rmsnorm_fwd_triton,
