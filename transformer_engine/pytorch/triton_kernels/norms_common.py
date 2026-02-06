@@ -223,7 +223,12 @@ def _te_norm_fwd_triton(
             N, ATOMIC_REDUCTION_BLOCK_SIZE,
         )
     elif IS_MXFP8 or IS_FP8_CURRENT_SCALING:
-        out = quantizer.quantize(out, out=ln_out)
+        _out = quantizer.make_empty(
+            input_tensor.shape,
+            dtype=te_dtype_to_torch_dtype(otype),
+            device=input_tensor.device
+        )
+        out = quantizer.quantize(out, out=_out)
 
     return out, mu, rsigma
 

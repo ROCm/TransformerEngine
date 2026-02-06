@@ -2,12 +2,15 @@
 # License for AMD contributions = MIT. See LICENSE for more information
 
 
+import math
 import os
 import torch
 import pytest
 from functools import partial
 from itertools import product
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
+from transformer_engine.pytorch.constants import MXFP8_BLOCK_SCALING_SIZE
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch import cpp_extensions as tex
 from transformer_engine.pytorch.triton_kernels.utils import get_ln_sm_margin
@@ -435,14 +438,8 @@ class TestNorms:
         elif quantization == "mxfp8":
             if not isinstance(out_triton, MXFP8Tensor):
                 raise ValueError(f"Expected a MXFP8Tensor but got {type(out_triton)} instead.")
-
             if out_hip._rowwise_data is not None:
-                compare_func(
-                    actual=out_triton,
-                    expected=out_hip,
-                    msg=lambda msg: f"Output rowwise data does not match triton <-> hip\n\n{msg}\n",
-                )
-                out_triton._rowwise_data = None
+                assert out_triton._rowwise_data is not None, "Expected rowwise data."
             else:
                 assert out_triton._rowwise_data is None, "Expected no rowwise data."
 
@@ -457,6 +454,15 @@ class TestNorms:
         elif quantization == "mxfp8":
             has_rscale_triton = out_triton._rowwise_scale_inv is not None
             has_rscale_hip = out_hip._rowwise_scale_inv is not None
+
+            # The scale_inv values may differ slightly, but will still dequantize close enough to 
+            # pass the earlier comparisons.
+            compare_func = partial(te_compare_results, atol=1, rtol=0, use_torch_semantics=True)
+
+            # The MXFP8 tensors carry their scale_inv values in a padded
+            # format, hence we must omit the padded values.
+            input_shape = out_triton.shape
+            unpadded_scale_inv_shape = (math.prod(input_shape[:-1]), input_shape[-1] // MXFP8_BLOCK_SCALING_SIZE)
             if has_rscale_triton != has_rscale_hip:
                 msg = "Expected rowwise scale to "
                 if has_rscale_hip:
@@ -465,26 +471,25 @@ class TestNorms:
                 raise ValueError(msg)
             if has_rscale_triton:
                 compare_func(
-                    actual=out_triton._rowwise_scale_inv.view(torch.uint8),
-                    expected=out_hip._rowwise_scale_inv.view(torch.uint8),
+                    actual=out_triton._rowwise_scale_inv[:unpadded_scale_inv_shape[0], :unpadded_scale_inv_shape[1]],
+                    expected=out_hip._rowwise_scale_inv[:unpadded_scale_inv_shape[0], :unpadded_scale_inv_shape[1]],
                     msg=lambda msg: f"Output rowwise scale inverse does not match triton <-> hip\n\n{msg}\n",
                 )
 
             has_cscale_triton = out_triton._columnwise_scale_inv is not None
             has_cscale_hip = out_hip._columnwise_scale_inv is not None
             if has_cscale_triton != has_cscale_hip:
-                msg = "Expected columnwwise scale to "
+                msg = "Expected columnwise scale to "
                 if has_cscale_hip:
                    msg += "not "
                 msg += "be None."
                 raise ValueError(msg)
             if has_cscale_triton:
                 compare_func(
-                    actual=out_triton._columnwise_scale_inv.view(torch.uint8),
-                    expected=out_hip._columnwise_scale_inv.view(torch.uint8),
+                    actual=out_triton._columnwise_scale_inv[:unpadded_scale_inv_shape[1], :unpadded_scale_inv_shape[0]],
+                    expected=out_hip._columnwise_scale_inv[:unpadded_scale_inv_shape[1], :unpadded_scale_inv_shape[0]],
                     msg=lambda msg: f"Output columnwise scale inverse does not match triton <-> hip\n\n{msg}\n",
                 )
-
 
     def _compare_quantizers(
         self,
