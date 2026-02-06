@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -45,7 +45,7 @@ if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or os.path.isdir(build_tools_
     shutil.copytree(build_tools_dir, build_tools_copy)
 
 
-from build_tools.build_ext import get_build_ext
+from build_tools.build_ext import get_build_ext, SdistWithLocalVersion
 from build_tools.utils import ( rocm_build, copy_common_headers, copy_hipify_tools,
                                clear_hipify_tools_copy)
 from build_tools.te_version import te_version
@@ -103,7 +103,7 @@ if __name__ == "__main__":
         version=te_version(),
         description="Transformer acceleration library - Jax Lib",
         ext_modules=ext_modules,
-        cmdclass={"build_ext": CMakeBuildExtension},
+        cmdclass={"build_ext": CMakeBuildExtension, "sdist": SdistWithLocalVersion},
         install_requires=install_requirements(),
         tests_require=test_requirements(),
     )
