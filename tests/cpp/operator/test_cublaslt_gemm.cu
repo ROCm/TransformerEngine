@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
@@ -295,11 +295,15 @@ void performTest(const TestParams& params) {
   }
   if (prop.major == 9 && prop.minor == 4) //gfx942 specific hipblasLt limitations
   {
+#if HIP_VERSION < 70100000
     if (params.use_gelu && dtype == DType::kBFloat16 && !params.transa) {
       GTEST_SKIP() << "BF16 GEMM with GELU is not supported in current config";
     }
-    if (has_fp8 && params.use_bias && dtype == DType::kFloat8E4M3 && !fp8_gelu_fusion_config) {
-      GTEST_SKIP() << "FP8 GEMM with bias and FP8 output is not supported in current config";
+#endif
+    if constexpr (std::is_same<D_Type, fp8>::value && std::is_same<Bias_Type, bf16>::value) {
+      if (params.use_bias && !fp8_gelu_fusion_config) {
+        GTEST_SKIP() << "GEMM with BF16 bias and FP8 output is not supported in current config";
+      }
     }
   }
 #endif
