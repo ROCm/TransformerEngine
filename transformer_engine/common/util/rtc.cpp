@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2023-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -175,8 +175,8 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
   } else {
     opts.push_back(concat_strings("--gpu-architecture=sm_", compile_sm_arch));
   }
-  opts.push_back(concat_strings("-I", cuda::include_directory(true)));
 #endif //__HIP_PLATFORM_AMD__
+  opts.push_back(concat_strings("-I", cuda::include_directory(true)));
 
   std::vector<const char*> opts_ptrs;
   for (const auto& opt : opts) {

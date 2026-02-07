@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -8,7 +10,8 @@ from itertools import product
 import pytest
 
 import jax
-from jax.experimental.pjit import pjit, _UNSPECIFIED
+from jax._src.pjit import pjit
+from jax._src.sharding_impls import UNSPECIFIED as _UNSPECIFIED
 
 from transformer_engine.jax.sharding import MeshResource
 
