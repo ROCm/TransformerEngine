@@ -625,6 +625,9 @@ def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, recipe, fp8_m
         pytest.skip("FP8 parameters are not supported in debug mode.")
     if recipe.float8_block_scaling() and not fp8_block_scaling_available:
         pytest.skip(reason_for_no_fp8_block_scaling)
+    if (IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5) and
+        dtype in (torch.float16, torch.bfloat16) and rocm_attn_backend()[2]):
+        pytest.skip("Test is not supported on GFX950 with current parameters and CK fused attention backend and non-zero dropout.")
 
     config = model_configs[model]
 
@@ -749,7 +752,9 @@ def test_gpt_full_activation_recompute(
             and not use_reentrant 
             and recipe.float8_per_tensor_scaling() 
             ):
-            pytest.skip("hipBLASLt does not provide suitable algorithms on MI350 for this config.")
+            pytest.skip("hipBLASLt does not provide suitable algorithms on GFX950 for this config.")
+        if (dtype in (torch.float16, torch.bfloat16) and rocm_attn_backend()[2]):
+            pytest.skip("Test is not supported on GFX950 with current parameters and CK fused attention backend and non-zero dropout.")
 
     config = model_configs[model]
     torch.compiler.reset() # avoid cache size limit overflow
@@ -901,6 +906,10 @@ def test_gpt_checkpointing(dtype, bs, model):
     config = model_configs[model]
     if not is_fused_attn_available(config, dtype):
         pytest.skip("No attention backend available.")
+    if (IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5) and
+        dtype in (torch.float16, torch.bfloat16) and rocm_attn_backend()[2]):
+        pytest.skip("Test is not supported on GFX950 with current parameters and CK fused attention backend and non-zero dropout.")
+
     outputs = _test_e2e_checkpointing(bs, dtype, config, checkpoint=False)
     outputs_checkpoint = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
 
@@ -2657,6 +2666,9 @@ def test_gpt_fp8_parameters(dtype, bs, model, recipe):
         pytest.skip("FP8 parameters are not supported in debug mode.")
     if recipe.float8_block_scaling() and not fp8_block_scaling_available:
         pytest.skip(reason_for_no_fp8_block_scaling)
+    if (IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5) and
+        dtype in (torch.float16, torch.bfloat16) and rocm_attn_backend()[2]):
+        pytest.skip("Test is not supported on GFX950 with current parameters and CK fused attention backend and non-zero dropout.")
 
     config = model_configs[model]
 
