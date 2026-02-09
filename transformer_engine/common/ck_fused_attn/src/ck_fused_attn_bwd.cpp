@@ -56,12 +56,12 @@ __global__ void dk_dv_reduce(
   DataType *dv,
   //k,v, dk, dv guaranteed to have the same stride
   uint64_t stride_b_dkv, uint64_t stride_h_dkv, uint64_t stride_s_dkv){
-   
+
   uint64_t batch_idx = blockIdx.x;
   uint64_t seqlen_idx = blockIdx.y;
   uint64_t head_k_idx = blockIdx.z;
   uint64_t hdim_idx = threadIdx.x;
-  
+
   // h guaranteed to be multiples of hg
   uint64_t head_idx_offset = h / hg;
 
@@ -71,7 +71,7 @@ __global__ void dk_dv_reduce(
   assert(hdim_idx<d);
   uint64_t read_idx = batch_idx*stride_b_dkv_expanded + head_k_idx*head_idx_offset*stride_h_dkv_expanded + seqlen_idx*stride_s_dkv_expanded + hdim_idx;
   uint64_t write_idx = batch_idx*stride_b_dkv + head_k_idx*stride_h_dkv + seqlen_idx* stride_s_dkv + hdim_idx;
-  
+
   for(uint64_t ii = 0; ii < head_idx_offset; ii++){
     // bf16 requires special casting in CK
     if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
@@ -103,12 +103,12 @@ __global__ void dk_or_dv_reduce(
   DataType *dk_or_dv,
   //k,v, dk, dv guaranteed to have the same stride
   uint64_t stride_b_dk_or_dv, uint64_t stride_h_dk_or_dv, uint64_t stride_s_dk_or_dv){
-  
+
   uint64_t batch_idx = blockIdx.x;
   uint64_t seqlen_idx = blockIdx.y;
   uint64_t head_k_or_v_idx = blockIdx.z;
   uint64_t hdim_idx = threadIdx.x;
-  
+
   // h guaranteed to be multiples of hg
   uint64_t head_idx_offset = h / hg;
 
@@ -117,7 +117,7 @@ __global__ void dk_or_dv_reduce(
   assert(hdim_idx<d);
   uint64_t read_idx = batch_idx*stride_b_dk_or_dv_expanded + head_k_or_v_idx*head_idx_offset*stride_h_dk_or_dv_expanded + seqlen_idx*stride_s_dk_or_dv_expanded + hdim_idx;
   uint64_t write_idx = batch_idx*stride_b_dk_or_dv + head_k_or_v_idx*stride_h_dk_or_dv + seqlen_idx* stride_s_dk_or_dv + hdim_idx;
-  
+
   for(uint64_t ii = 0; ii < head_idx_offset; ii++){
     // bf16 requires special casting in CK
     if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
@@ -153,9 +153,9 @@ __global__ void dk_dv_reduce_thd(
   uint64_t seqlen_idx = blockIdx.x;
   uint64_t head_k_idx = blockIdx.y;
   uint64_t hdim_idx = threadIdx.x;
-  
+
   assert(hdim_idx<d);
-  
+
   if(seqlen_idx >= *((cu_seqlen_kv_padded_ptr? cu_seqlen_kv_padded_ptr: cu_seqlen_kv_ptr)+b)){
     return;
   }
@@ -175,7 +175,7 @@ __global__ void dk_dv_reduce_thd(
 
   uint64_t read_idx = head_k_idx*head_idx_offset*stride_h_dkv_expanded + seqlen_idx*stride_s_dkv_expanded + hdim_idx;
   uint64_t write_idx = head_k_idx*stride_h_dkv + seqlen_idx* stride_s_dkv + hdim_idx;
-  
+
   for(uint64_t ii = 0; ii < head_idx_offset; ii++){
     // bf16 requires special casting in CK
     if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
@@ -213,7 +213,7 @@ __global__ void dk_or_dv_reduce_thd(
   uint64_t seqlen_idx = blockIdx.x;
   uint64_t head_k_or_v_idx = blockIdx.y;
   uint64_t hdim_idx = threadIdx.x;
-  
+
   assert(hdim_idx<d);
 
   if(seqlen_idx >= *((cu_seqlen_kv_padded_ptr? cu_seqlen_kv_padded_ptr: cu_seqlen_kv_ptr)+b)){
@@ -233,7 +233,7 @@ __global__ void dk_or_dv_reduce_thd(
 
   uint64_t read_idx = head_k_or_v_idx*head_idx_offset*stride_h_dk_or_dv_expanded + seqlen_idx*stride_s_dk_or_dv_expanded + hdim_idx;
   uint64_t write_idx = head_k_or_v_idx*stride_h_dk_or_dv + seqlen_idx* stride_s_dk_or_dv + hdim_idx;
-  
+
   for(uint64_t ii = 0; ii < head_idx_offset; ii++){
     // bf16 requires special casting in CK
     if constexpr (std::is_same_v<DataType, ck_tile::bf16_t>){
@@ -259,7 +259,7 @@ __global__ void dbias_reduce_11ss(
   uint64_t b, uint64_t h, uint64_t s_q, uint64_t s_kv,
   const DataType *dbias_expanded,
   DataType *dbias){
-  
+
   const uint64_t stride_h = s_q*s_kv;
   const uint64_t stride_b = h*s_q*s_kv;
   for(uint64_t ss_idx = blockIdx.x*blockDim.x + threadIdx.x; ss_idx < s_q*s_kv; ss_idx += blockDim.x * gridDim.x){
@@ -289,7 +289,7 @@ __global__ void dbias_reduce_1hss(
   uint64_t b, uint64_t h, uint64_t s_q, uint64_t s_kv,
   const DataType *dbias_expanded,
   DataType *dbias){
-  
+
   const uint64_t stride_h = s_q*s_kv;
   const uint64_t stride_b = h*s_q*s_kv;
   for(uint64_t ss_idx = blockIdx.x*blockDim.x + threadIdx.x; ss_idx < s_q*s_kv; ss_idx += blockDim.x * gridDim.x){
@@ -319,7 +319,7 @@ __global__ void dbias_reduce_b1ss(
   uint64_t b, uint64_t h, uint64_t s_q, uint64_t s_kv,
   const DataType *dbias_expanded,
   DataType *dbias){
-  
+
   const uint64_t stride_h = s_q*s_kv;
   const uint64_t stride_b = h*s_q*s_kv;
   for(uint64_t ss_idx = blockIdx.x*blockDim.x + threadIdx.x; ss_idx < s_q*s_kv; ss_idx += blockDim.x * gridDim.x){
@@ -464,42 +464,42 @@ void dump_bwd_timings(const char* dump_path, float average_runtime){
   file << average_runtime << "\n";
 }
 
-hipError_t _ck_attn_bwd_impl(  
+hipError_t _ck_attn_bwd_impl(
   DType dtype,
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv,
   uint64_t d_qk, uint64_t d_v,
   uint64_t bias_b, uint64_t bias_h,
   uint64_t max_tokens_q, uint64_t max_tokens_kv,
-  const void* q_ptr, 
+  const void* q_ptr,
   uint64_t stride_b_q, uint64_t stride_h_q, uint64_t stride_s_q,
-  const void* k_ptr, 
+  const void* k_ptr,
   uint64_t stride_b_k, uint64_t stride_h_k, uint64_t stride_s_k,
-  const void* v_ptr, 
+  const void* v_ptr,
   uint64_t stride_b_v, uint64_t stride_h_v, uint64_t stride_s_v,
   const void* bias_ptr,
   const void* alibi_slope_ptr,
   const void* cu_seqlen_q_ptr, const void* cu_seqlen_kv_ptr,
   const void* cu_seqlen_q_padded_ptr, const void* cu_seqlen_kv_padded_ptr,
-  const void* o_ptr, 
+  const void* o_ptr,
   uint64_t stride_b_o, uint64_t stride_h_o, uint64_t stride_s_o,
   const void* lse_ptr,
-  const void* do_ptr, 
+  const void* do_ptr,
   uint64_t stride_b_do, uint64_t stride_h_do, uint64_t stride_s_do,
   float scaling_factor, float dropout_probability,
   void* philox_seed_ptr, void* philox_offset_ptr,
   BiasType attn_bias_type,
   MaskType attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,
-  void* dq_ptr, 
+  void* dq_ptr,
   uint64_t stride_b_dq, uint64_t stride_h_dq, uint64_t stride_s_dq,
   void* dq_acc_ptr,
   void* dk_expanded_ptr,
   void* dv_expanded_ptr,
   uint64_t stride_b_dk_expanded, uint64_t stride_h_dk_expanded, uint64_t stride_s_dk_expanded,
   uint64_t stride_b_dv_expanded, uint64_t stride_h_dv_expanded, uint64_t stride_s_dv_expanded,
-  void* dk_ptr, 
+  void* dk_ptr,
   uint64_t stride_b_dk, uint64_t stride_h_dk, uint64_t stride_s_dk,
-  void* dv_ptr, 
+  void* dv_ptr,
   uint64_t stride_b_dv, uint64_t stride_h_dv, uint64_t stride_s_dv,
   void* dbias_expanded_ptr,
   void* dbias_ptr,
@@ -691,37 +691,37 @@ hipError_t _ck_attn_bwd_impl(
   }
   return hipSuccess;
 }
-hipError_t ck_attn_bwd(  
+hipError_t ck_attn_bwd(
   DType dtype,
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v, uint64_t bias_b, uint64_t bias_h,
-  const void* q_ptr, 
+  const void* q_ptr,
   uint64_t stride_b_q, uint64_t stride_h_q, uint64_t stride_s_q,
-  const void* k_ptr, 
+  const void* k_ptr,
   uint64_t stride_b_k, uint64_t stride_h_k, uint64_t stride_s_k,
-  const void* v_ptr, 
+  const void* v_ptr,
   uint64_t stride_b_v, uint64_t stride_h_v, uint64_t stride_s_v,
   const void* bias_ptr,
   const void* alibi_slope_ptr,
-  const void* o_ptr, 
+  const void* o_ptr,
   uint64_t stride_b_o, uint64_t stride_h_o, uint64_t stride_s_o,
-  const void* lse_ptr, 
-  const void* do_ptr, 
+  const void* lse_ptr,
+  const void* do_ptr,
   uint64_t stride_b_do, uint64_t stride_h_do, uint64_t stride_s_do,
   float scaling_factor, float dropout_probability,
   void* philox_seed_ptr, void* philox_offset_ptr,
   BiasType attn_bias_type,
   MaskType attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,
-  void* dq_ptr, 
+  void* dq_ptr,
   uint64_t stride_b_dq, uint64_t stride_h_dq, uint64_t stride_s_dq,
   void* dq_acc_ptr,
   void* dk_expanded_ptr,
   void* dv_expanded_ptr,
   uint64_t stride_b_dk_expanded, uint64_t stride_h_dk_expanded, uint64_t stride_s_dk_expanded,
   uint64_t stride_b_dv_expanded, uint64_t stride_h_dv_expanded, uint64_t stride_s_dv_expanded,
-  void* dk_ptr, 
+  void* dk_ptr,
   uint64_t stride_b_dk, uint64_t stride_h_dk, uint64_t stride_s_dk,
-  void* dv_ptr, 
+  void* dv_ptr,
   uint64_t stride_b_dv, uint64_t stride_h_dv, uint64_t stride_s_dv,
   void* dbias_expanded_ptr,
   void* dbias_ptr,
@@ -736,7 +736,7 @@ hipError_t ck_attn_bwd(
   bool has_dbias = dbias_ptr!=nullptr;
   bool is_mqa_gqa = (h > hg);
   bias_enum bias_type;
-  BiasShape bias_shape; 
+  BiasShape bias_shape;
   std::tie(bias_type, bias_shape) = get_ck_bias_type_shape(attn_bias_type, b, h, bias_b, bias_h);
 
   bool ck_log_config = false;
@@ -883,7 +883,7 @@ hipError_t ck_attn_bwd(
           dbias_reduce_11ss<CK_TILE_TYPE>, grid, block, 0, stream,
           b, h, s_q, s_kv,
           static_cast<CK_TILE_TYPE*>(dbias_expanded_ptr),
-          static_cast<CK_TILE_TYPE*>(dbias_ptr));); 
+          static_cast<CK_TILE_TYPE*>(dbias_ptr)););
     }else if(bias_shape==BiasShape::k1HSS){
       if (ck_log_config){
         std::cout<<std::endl<<"run dbias_reduce_1HSS: "<<std::endl;
@@ -895,7 +895,7 @@ hipError_t ck_attn_bwd(
           dbias_reduce_1hss<CK_TILE_TYPE>, grid, block, 0, stream,
           b, h, s_q, s_kv,
           static_cast<CK_TILE_TYPE*>(dbias_expanded_ptr),
-          static_cast<CK_TILE_TYPE*>(dbias_ptr));); 
+          static_cast<CK_TILE_TYPE*>(dbias_ptr)););
     }else if(bias_shape==BiasShape::kB1SS){
       if (ck_log_config){
         std::cout<<std::endl<<"run dbias_reduce_B1SS: "<<std::endl;
@@ -907,43 +907,43 @@ hipError_t ck_attn_bwd(
           dbias_reduce_b1ss<CK_TILE_TYPE>, grid, block, 0, stream,
           b, h, s_q, s_kv,
           static_cast<CK_TILE_TYPE*>(dbias_expanded_ptr),
-          static_cast<CK_TILE_TYPE*>(dbias_ptr));); 
+          static_cast<CK_TILE_TYPE*>(dbias_ptr)););
     }
   }
   return hipSuccess;
 }
 
-hipError_t ck_attn_varlen_bwd(  
+hipError_t ck_attn_varlen_bwd(
   DType dtype,
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v,
   uint64_t max_tokens_q, uint64_t max_tokens_kv,
-  const void* q_ptr, 
+  const void* q_ptr,
   uint64_t stride_h_q, uint64_t stride_s_q,
-  const void* k_ptr, 
+  const void* k_ptr,
   uint64_t stride_h_k, uint64_t stride_s_k,
-  const void* v_ptr, 
+  const void* v_ptr,
   uint64_t stride_h_v, uint64_t stride_s_v,
   const void* cu_seqlen_q_ptr, const void* cu_seqlen_kv_ptr,
   const void* cu_seqlen_q_padded_ptr, const void* cu_seqlen_kv_padded_ptr,
-  const void* o_ptr, 
+  const void* o_ptr,
   uint64_t stride_h_o, uint64_t stride_s_o,
-  const void* lse_thd_ptr, 
-  const void* do_ptr, 
+  const void* lse_thd_ptr,
+  const void* do_ptr,
   uint64_t stride_h_do, uint64_t stride_s_do,
   float scaling_factor, float dropout_probability,
   void* philox_seed_ptr, void* philox_offset_ptr,
   MaskType attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,
-  void* dq_ptr, 
+  void* dq_ptr,
   uint64_t stride_h_dq, uint64_t stride_s_dq,
   void* dq_acc_ptr,
   void* dk_expanded_ptr,
   void* dv_expanded_ptr,
   uint64_t stride_h_dk_expanded, uint64_t stride_s_dk_expanded,
   uint64_t stride_h_dv_expanded, uint64_t stride_s_dv_expanded,
-  void* dk_ptr, 
+  void* dk_ptr,
   uint64_t stride_h_dk, uint64_t stride_s_dk,
-  void* dv_ptr, 
+  void* dv_ptr,
   uint64_t stride_h_dv, uint64_t stride_s_dv,
   void* lse_workspace_ptr,
   bool deterministic,

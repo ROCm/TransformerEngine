@@ -130,7 +130,7 @@ hipError_t _ck_attn_fwd_impl(
   BiasType attn_bias_type,
   MaskType attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,
-  void* o_ptr, 
+  void* o_ptr,
   uint64_t stride_b_o, uint64_t stride_h_o, uint64_t stride_s_o,
   void* lse_ptr,
   bool uses_fwd_v3,
@@ -154,12 +154,12 @@ hipError_t _ck_attn_fwd_impl(
   float scale_s = scaling_factor;
   float logits_soft_cap = 0.f;
   float p_drop = dropout_probability;
- 
+
   ck_tile::index_t left, right;
   left = window_size_left;
   right = window_size_right;
   mask_enum mask_type = static_cast<mask_enum>(attn_mask_type);
-  
+
   bool ck_log_config = false;
   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
@@ -277,7 +277,7 @@ hipError_t _ck_attn_fwd_impl(
   fmha_args.min_seqlen_q     = 0;
   fmha_args.block_scale_size_q  = 0;
   fmha_args.block_scale_size_kv = 0;
-  
+
   // print ck traits and fmha_args when needed
   log_fwd_config(func_name, has_dropout, fmha_args, ck_log_config);
   float average_runtime = aiter::mha_fwd(fmha_args, stream_config);
@@ -294,11 +294,11 @@ hipError_t _ck_attn_fwd_impl(
 hipError_t ck_attn_fwd(
   DType dtype,
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v, uint64_t bias_b, uint64_t bias_h,
-  const void* q_ptr, 
+  const void* q_ptr,
   uint64_t stride_b_q, uint64_t stride_h_q, uint64_t stride_s_q,
-  const void* k_ptr, 
+  const void* k_ptr,
   uint64_t stride_b_k, uint64_t stride_h_k, uint64_t stride_s_k,
-  const void* v_ptr, 
+  const void* v_ptr,
   uint64_t stride_b_v, uint64_t stride_h_v, uint64_t stride_s_v,
   const void* bias_ptr,
   const void* alibi_slope_ptr,
@@ -309,7 +309,7 @@ hipError_t ck_attn_fwd(
   BiasType attn_bias_type,
   MaskType attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,
-  void* o_ptr, 
+  void* o_ptr,
   uint64_t stride_b_o, uint64_t stride_h_o, uint64_t stride_s_o,
   void* lse_ptr,
   bool uses_fwd_v3,
@@ -349,11 +349,11 @@ hipError_t ck_attn_varlen_fwd(
   DType dtype,
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v,
   uint64_t max_tokens_q,
-  const void* q_ptr, 
+  const void* q_ptr,
   uint64_t stride_h_q, uint64_t stride_s_q,
-  const void* k_ptr, 
+  const void* k_ptr,
   uint64_t stride_h_k, uint64_t stride_s_k,
-  const void* v_ptr, 
+  const void* v_ptr,
   uint64_t stride_h_v, uint64_t stride_s_v,
   const void* cu_seqlen_q_ptr, const void* cu_seqlen_kv_ptr,
   const void* cu_seqlen_q_padded_ptr, const void* cu_seqlen_kv_padded_ptr,
@@ -363,7 +363,7 @@ hipError_t ck_attn_varlen_fwd(
   void* philox_seed_ptr, void* philox_offset_ptr,
   MaskType attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,
-  void* o_ptr, 
+  void* o_ptr,
   uint64_t stride_h_o, uint64_t stride_s_o,
   void* lse_thd_ptr,
   bool uses_fwd_v3,
