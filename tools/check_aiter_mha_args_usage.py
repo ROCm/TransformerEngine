@@ -2,6 +2,7 @@ import argparse
 import re
 from pathlib import Path
 from typing import List, Set
+import sys
 
 def parse_with_skip_comments(buffer, line, regex, outputs):
     # skip comments
@@ -93,4 +94,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
