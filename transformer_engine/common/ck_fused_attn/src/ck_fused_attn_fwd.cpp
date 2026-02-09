@@ -218,6 +218,7 @@ hipError_t _ck_attn_fwd_impl(
   fmha_args.seqstart_q_ptr = seqstart_q_ptr;
   fmha_args.seqstart_k_ptr = seqstart_k_ptr;
   fmha_args.seqlen_k_ptr = nullptr;
+  fmha_args.seqlen_q_ptr = nullptr;
   fmha_args.cu_seqlen_q_ptr = is_group_mode ? cu_seqlen_q_ptr : nullptr;
   fmha_args.cu_seqlen_k_ptr = is_group_mode ? cu_seqlen_kv_ptr : nullptr;
   fmha_args.block_scale_seqstart_q_ptr = nullptr;

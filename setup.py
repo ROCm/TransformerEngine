@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import List, Tuple
 import subprocess
+import sys
 
 import setuptools
 from setuptools.command.egg_info import egg_info
@@ -88,6 +89,7 @@ def setup_common_extension() -> CMakeExtension:
             cmake_flags.append("-DUSE_FUSED_ATTN_CK=OFF")
         elif os.getenv("NVTE_FUSED_ATTN_CK") or os.getenv("NVTE_FUSED_ATTN"):
             cmake_flags.append("-DUSE_FUSED_ATTN_CK=ON")
+            subprocess.run(sys.executable + " tools/check_aiter_mha_args_usage.py --mode both", shell=True, check=True)
 
         if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))) and os.getenv("NVTE_ENABLE_ROCSHMEM") is None:
             os.environ["NVTE_ENABLE_ROCSHMEM"] = '1'
