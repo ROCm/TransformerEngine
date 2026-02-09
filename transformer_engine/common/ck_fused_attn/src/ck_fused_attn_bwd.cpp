@@ -16,6 +16,17 @@
 
 namespace ck_fused_attn{
 
+int ck_to_aiter_mask_type(mask_enum mask_type, ck_tile::index_t left, ck_tile::index_t right){
+  if(
+    mask_type == mask_enum::no_mask ||
+    mask_type == mask_enum::window_generic
+  ) return 0;
+  if(left == -1 && right == 0){
+    return mask_type == mask_enum::mask_top_left ? 1 : 2;
+  }
+  return 3;
+}
+
 // TODO: unify with binary search in TE/common/fused_attn(rocm)/util
 // no device std::upper_bound
 // in an increasing array with given size len, search for the index that:
@@ -433,6 +444,7 @@ void log_bwd_config(const char* func_name, const aiter::mha_bwd_args& fmha_args,
   log_value("window_size_left", fmha_args.window_size_left);
   log_value("window_size_right", fmha_args.window_size_right);
   log_value("mask_type", fmha_args.mask_type);
+  log_value("ck_mask_type", fmha_args.ck_mask_type);
   log_value("bias_type", fmha_args.bias_type);
   log_value("p_drop", fmha_args.p_drop);
   log_value("p_undrop", fmha_args.p_undrop);
@@ -539,7 +551,7 @@ hipError_t _ck_attn_bwd_impl(
   std::string data_type_str = get_data_type_str(dtype);
 
   aiter::mha_bwd_args fmha_args{};
-  fmha_args.mask_type = static_cast<int>(mask_type);
+  fmha_args.mask_type = ck_to_aiter_mask_type(mask_type, left, right);
   fmha_args.use_asm_v3 = uses_bwd_v3;
   fmha_args.v3_atomic_fp32 = is_v3_atomic_fp32;
   fmha_args.v3_bf16_cvt = how_v3_bf16_cvt;
