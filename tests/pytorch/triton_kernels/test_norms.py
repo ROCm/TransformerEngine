@@ -1,4 +1,4 @@
-# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
 
@@ -8,7 +8,6 @@ import torch
 import pytest
 from functools import partial
 from itertools import product
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from transformer_engine.pytorch.constants import MXFP8_BLOCK_SCALING_SIZE
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
@@ -462,7 +461,7 @@ class TestNorms:
             # The MXFP8 tensors carry their scale_inv values in a padded
             # format, hence we must omit the padded values.
             input_shape = out_triton.shape
-            unpadded_scale_inv_shape = (math.prod(input_shape[:-1]), input_shape[-1] // MXFP8_BLOCK_SCALING_SIZE)
+            unpad_rscale_inv_shape = (math.prod(input_shape[:-1]), input_shape[-1] // MXFP8_BLOCK_SCALING_SIZE)
             if has_rscale_triton != has_rscale_hip:
                 msg = "Expected rowwise scale to "
                 if has_rscale_hip:
@@ -471,8 +470,8 @@ class TestNorms:
                 raise ValueError(msg)
             if has_rscale_triton:
                 compare_func(
-                    actual=out_triton._rowwise_scale_inv[:unpadded_scale_inv_shape[0], :unpadded_scale_inv_shape[1]],
-                    expected=out_hip._rowwise_scale_inv[:unpadded_scale_inv_shape[0], :unpadded_scale_inv_shape[1]],
+                    actual=out_triton._rowwise_scale_inv[:unpad_rscale_inv_shape[0], :unpad_rscale_inv_shape[1]],
+                    expected=out_hip._rowwise_scale_inv[:unpad_rscale_inv_shape[0], :unpad_rscale_inv_shape[1]],
                     msg=lambda msg: f"Output rowwise scale inverse does not match triton <-> hip\n\n{msg}\n",
                 )
 
@@ -486,8 +485,8 @@ class TestNorms:
                 raise ValueError(msg)
             if has_cscale_triton:
                 compare_func(
-                    actual=out_triton._columnwise_scale_inv[:unpadded_scale_inv_shape[1], :unpadded_scale_inv_shape[0]],
-                    expected=out_hip._columnwise_scale_inv[:unpadded_scale_inv_shape[1], :unpadded_scale_inv_shape[0]],
+                    actual=out_triton._columnwise_scale_inv[:unpad_rscale_inv_shape[1], :unpad_rscale_inv_shape[0]],
+                    expected=out_hip._columnwise_scale_inv[:unpad_rscale_inv_shape[1], :unpad_rscale_inv_shape[0]],
                     msg=lambda msg: f"Output columnwise scale inverse does not match triton <-> hip\n\n{msg}\n",
                 )
 
