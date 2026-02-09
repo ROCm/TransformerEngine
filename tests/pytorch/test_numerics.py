@@ -10,6 +10,7 @@ from typing import Dict, List, Tuple, Optional
 import pytest
 import random
 
+from triton_kernels.test_common import get_tolerances
 import torch
 import torch.nn as nn
 from torch.nn import Parameter
@@ -2019,6 +2020,7 @@ def _test_grouped_linear_accuracy(
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("delay_wgrad_compute", all_boolean)
+@pytest.mark.parametrize("use_triton", all_boolean)
 def test_grouped_linear_accuracy(
     dtype,
     num_gemms,
@@ -2029,10 +2031,14 @@ def test_grouped_linear_accuracy(
     fuse_wgrad_accumulation,
     bias,
     delay_wgrad_compute,
+    use_triton,
     parallel_mode=None,
     use_cutlass=False,
 ):
+
     fp8 = recipe is not None
+    if not IS_HIP_EXTENSION and use_triton:
+        pytest.skip("Triton grouped gemm is only supported on HIP.")
 
     if IS_HIP_EXTENSION:
         if dtype not in (torch.float32,) and fuse_wgrad_accumulation and not fp8:
@@ -2043,6 +2049,9 @@ def test_grouped_linear_accuracy(
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
+
+    if use_triton:
+        os.environ["NVTE_USE_GROUPED_GEMM_TRITON"] = "1"
 
     with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = GroupedLinear(
@@ -2106,12 +2115,19 @@ def test_grouped_linear_accuracy(
         delay_wgrad_compute,
     )
 
+    if use_triton:
+        os.environ.pop("NVTE_USE_GROUPED_GEMM_TRITON", None)
+
+    atol, rtol = 0, 0
+    if use_cutlass:
+        atol, rtol = 1e-3, 1e-3
+    if use_triton:
+        atol, rtol = get_tolerances(dtype)
+        if dtype == torch.float32:
+            atol = 2.6e-6
+            rtol = 5e-2
     for o, o_ref in zip(outputs, outputs_ref):
-        if use_cutlass:
-            torch.testing.assert_close(o, o_ref, rtol=1e-3, atol=1e-3)
-        else:
-            # cuBLAS implementation should be bit-wise match
-            torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+        torch.testing.assert_close(o, o_ref, rtol=rtol, atol=atol)
 
 
 @pytest.mark.skipif(
@@ -2143,6 +2159,7 @@ def test_grouped_linear_accuracy_cutlass(
         fuse_wgrad_accumulation,
         False,
         delay_wgrad_compute,
+        False,
         None,
         use_cutlass=True,
     )
@@ -2260,6 +2277,7 @@ def test_grouped_linear_accuracy_single_gemm(recipe):
         fuse_wgrad_accumulation=True,
         bias=True,
         delay_wgrad_compute=False,
+        use_triton=False,
     )
 
 
