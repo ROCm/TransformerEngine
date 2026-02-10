@@ -1497,11 +1497,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         super()._load_from_state_dict(
             state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
         )
-        for name, param in self.named_parameters(recurse=False):
-            if isinstance(param, MXFP8TensorBase):
-                unpad_scales(param, transpose=getattr(self, "layout", "N")=="T", block_size=32)
-            elif isinstance(param, Float8BlockwiseQTensorBase):
-                unpad_scales(param, transpose=getattr(self, "layout", "N")=="T", block_size=128)
+        if IS_HIP_EXTENSION:
+            for name, param in self.named_parameters(recurse=False):
+                if isinstance(param, MXFP8TensorBase):
+                    unpad_scales(param, transpose=getattr(self, "layout", "N")=="T", block_size=32)
+                elif isinstance(param, Float8BlockwiseQTensorBase):
+                    unpad_scales(param, transpose=getattr(self, "layout", "N")=="T", block_size=128)
 
     def register_wgrad_accumulation_and_reduce_hooks(self, wgrad_accumulation_and_reduce_hook):
         """

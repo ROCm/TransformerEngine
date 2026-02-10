@@ -128,7 +128,7 @@ def get_fp8_te_dtype(fp8_recipe: Recipe, fprop_tensor: bool = True) -> tex.DType
     return tex.DType.kFloat8E5M2
 
 
-def get_fp8_max(fp8_recipe: Recipe, fprop_tensor: bool = True) -> texs.DType:
+def get_fp8_max(fp8_recipe: Recipe, fprop_tensor: bool = True) -> tex.DType:
     """Get max representible FP8 value."""
     if fp8_recipe.fp8_format == Format.E4M3 or (
         fp8_recipe.fp8_format == Format.HYBRID and fprop_tensor
