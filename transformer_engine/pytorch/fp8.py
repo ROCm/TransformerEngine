@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -128,13 +128,42 @@ def get_fp8_te_dtype(fp8_recipe: Recipe, fprop_tensor: bool = True) -> tex.DType
     return tex.DType.kFloat8E5M2
 
 
-def get_fp8_max(fp8_recipe: Recipe, fprop_tensor: bool = True) -> tex.DType:
+def get_fp8_max(fp8_recipe: Recipe, fprop_tensor: bool = True) -> texs.DType:
     """Get max representible FP8 value."""
     if fp8_recipe.fp8_format == Format.E4M3 or (
         fp8_recipe.fp8_format == Format.HYBRID and fprop_tensor
     ):
         return Format.E4M3.value.max_fwd
     return Format.E5M2.value.max_fwd
+
+
+def unpad_scales(tensor: torch.Tensor, transpose: bool, block_size: int) -> torch.Tensor:
+    """Removes padding from scales in Tensors if present"""
+    if tensor._rowwise_scale_inv is not None:
+        if transpose:
+            rows, cols = tensor._rowwise_data.shape[1], tensor._rowwise_data.shape[0]
+        else:
+            rows, cols = tensor._rowwise_data.shape[0], tensor._rowwise_data.shape[1]
+
+        actual_scale_shape   = tensor._rowwise_scale_inv.shape
+        expected_scale_shape = (rows, math.ceil(cols / block_size))
+
+        if actual_scale_shape != expected_scale_shape:
+            tensor._rowwise_scale_inv = tensor._rowwise_scale_inv[:expected_scale_shape[0], :expected_scale_shape[1]]
+
+    if tensor._columnwise_scale_inv is not None:
+        if transpose:
+            rows, cols = tensor._columnwise_data.shape[1], tensor._columnwise_data.shape[0]
+        else:
+            rows, cols = tensor._columnwise_data.shape[0], tensor._columnwise_data.shape[1]
+
+        actual_scale_shape   = tensor._columnwise_scale_inv.shape
+        expected_scale_shape = (math.ceil(rows / block_size), cols)
+
+        if actual_scale_shape != expected_scale_shape:
+            tensor._columnwise_scale_inv = tensor._columnwise_scale_inv[:expected_scale_shape[0], :expected_scale_shape[1]]
+
+    return tensor
 
 
 class FP8GlobalStateManager:
