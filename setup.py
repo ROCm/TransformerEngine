@@ -245,15 +245,15 @@ if __name__ == "__main__":
         cmdclass = {}
         package_data = {}
         include_package_data = False
-<<<<<<< HEAD
-        install_requires = ([f"transformer_engine_{te_cuda_vers}=={__version__}"],)
-=======
         install_requires = []
->>>>>>> 389a6b
         extras_require = {
             "core": [f"transformer_engine_cu12=={__version__}"],
             "core_cu12": [f"transformer_engine_cu12=={__version__}"],
             "core_cu13": [f"transformer_engine_cu13=={__version__}"],
+            "pytorch": [f"transformer_engine_torch=={__version__}"],
+            "jax": [f"transformer_engine_jax=={__version__}"],
+        } if not rocm_build() else {
+            "core": [f"transformer_engine_{te_cuda_vers}=={__version__}"],
             "pytorch": [f"transformer_engine_torch=={__version__}"],
             "jax": [f"transformer_engine_jax=={__version__}"],
         }
@@ -303,13 +303,8 @@ if __name__ == "__main__":
         long_description=long_description,
         long_description_content_type="text/x-rst",
         ext_modules=ext_modules,
-<<<<<<< HEAD
-        cmdclass={"egg_info": HipifyMeta, "build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist},
-        python_requires=">=3.8",
-=======
-        cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist},
+        cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist} if not rocm_build() else {"egg_info": HipifyMeta, "build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist},
         python_requires=f">={min_python_version_str()}",
->>>>>>> 389a6b
         classifiers=["Programming Language :: Python :: 3"],
         install_requires=install_requires,
         license_files=("LICENSE",),
