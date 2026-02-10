@@ -90,7 +90,12 @@ AttnMaskType = {
     "padding_causal_bottom_right": NVTE_Mask_Type.NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
 }
 
-<<<<<<< HEAD
+SoftmaxType = {
+    "vanilla": NVTE_Softmax_Type.NVTE_VANILLA_SOFTMAX,
+    "off-by-one": NVTE_Softmax_Type.NVTE_OFF_BY_ONE_SOFTMAX,
+    "learnable": NVTE_Softmax_Type.NVTE_LEARNABLE_SOFTMAX,
+}
+
 if not IS_HIP_EXTENSION:
     FusedAttnBackend = {
         "F16_max512_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen,
@@ -104,20 +109,6 @@ else:
         "CK": NVTE_Fused_Attn_Backend.NVTE_CK,
         "No_Backend": NVTE_Fused_Attn_Backend.NVTE_No_Backend,
     }
-=======
-SoftmaxType = {
-    "vanilla": NVTE_Softmax_Type.NVTE_VANILLA_SOFTMAX,
-    "off-by-one": NVTE_Softmax_Type.NVTE_OFF_BY_ONE_SOFTMAX,
-    "learnable": NVTE_Softmax_Type.NVTE_LEARNABLE_SOFTMAX,
-}
-
-FusedAttnBackend = {
-    "F16_max512_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen,
-    "F16_arbitrary_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
-    "FP8": NVTE_Fused_Attn_Backend.NVTE_FP8,
-    "No_Backend": NVTE_Fused_Attn_Backend.NVTE_No_Backend,
-}
->>>>>>> 389a6b
 
 BACKEND_F16m512_FP8_THREADS_PER_CTA = 128
 BACKEND_F16arb_ELTS_PER_THREADS = 16

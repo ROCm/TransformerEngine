@@ -371,22 +371,17 @@ class _LayerNormMLP(torch.autograd.Function):
             # which handles weight caching etc.
             # FP8 cast to workspace buffer
             update_workspace = is_first_microbatch is None or is_first_microbatch
-<<<<<<< HEAD
-            fc1_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled and keep_fp8_weight_transpose_cache)
-            fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled and keep_fp8_weight_transpose_cache)
-=======
             # No need to set the quantizer states if weights are already quantized
             if isinstance(fc1_weight, QuantizedTensorStorage):
                 fc1_weight_quantizer = fc1_weight._quantizer
             elif fc1_weight_quantizer is not None:
-                fc1_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
+                fc1_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled and keep_fp8_weight_transpose_cache)
 
             if isinstance(fc2_weight, QuantizedTensorStorage):
                 fc2_weight_quantizer = fc2_weight._quantizer
             elif fc2_weight_quantizer is not None:
-                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
+                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled and keep_fp8_weight_transpose_cache)
 
->>>>>>> 389a6b
             fc1_weight_final = module.get_weight_workspace(
                 tensor=fc1_weight,
                 quantizer=fc1_weight_quantizer,
@@ -579,8 +574,6 @@ class _LayerNormMLP(torch.autograd.Function):
 
         # Cache state for backward pass
         if is_grad_enabled:
-<<<<<<< HEAD
-
             # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
             if inp.requires_grad and keep_fp8_weight_transpose_cache and not use_fsdp2:
                 if isinstance(fc1_weight_final, QuantizedTensorBase):
@@ -588,8 +581,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 if isinstance(fc2_weight_final, QuantizedTensorBase):
                     fc2_weight_final.update_usage(columnwise_usage=True)
 
-=======
->>>>>>> 389a6b
             if cpu_offloading:
                 mark_activation_offload(
                     inputmat, mu, rsigma, ln_out, fc1_out, fc1_out_without_bias, act_out
@@ -906,11 +897,7 @@ class _LayerNormMLP(torch.autograd.Function):
             if isinstance(grad_output, QuantizedTensorStorage):
                 grad_output.update_usage(rowwise_usage=True)
             if ctx.fc2_weight_quantizer is not None and isinstance(
-<<<<<<< HEAD
-                fc2_weight, QuantizedTensorBase
-=======
                 ctx.fc2_weight, QuantizedTensorStorage
->>>>>>> 389a6b
             ):
                 fc2_weight.update_usage(columnwise_usage=True)
 
@@ -1168,11 +1155,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
             # Make sure required data is available
             if ctx.fc1_weight_quantizer is not None and isinstance(
-<<<<<<< HEAD
-                fc1_weight, QuantizedTensorBase
-=======
                 ctx.fc1_weight_quantizer, QuantizedTensorStorage
->>>>>>> 389a6b
             ):
                 fc1_weight.update_usage(columnwise_usage=True)
 

@@ -468,7 +468,15 @@ def is_fp8_fnuz():
 get_torch_float8_e4m3_type = lambda: torch.float8_e4m3fnuz if is_fp8_fnuz() else torch.float8_e4m3fn
 get_torch_float8_e5m2_type = lambda: torch.float8_e5m2fnuz if is_fp8_fnuz() else torch.float8_e5m2
 
-<<<<<<< HEAD
+def assert_dim_for_all_gather(
+    tensor: torch.Tensor, with_all_gather: bool, quantizer: Quantizer
+) -> None:
+    """Assert that tensor dimensions are supported for all-gather"""
+    if with_all_gather:
+        assert quantizer.is_quantizable(tensor), (
+            "All-gather requires quantizable tensor for quantizer " + quantizer.__class__.__name__
+        )
+
 def is_bf16_compatible() -> None:
     if IS_HIP_EXTENSION:
         # only MI200 and newer machines support bf16
@@ -481,24 +489,6 @@ def is_bf16_compatible() -> None:
         check on device compute capability to enforce sm_80 or higher.
         """
         return torch.cuda.get_device_capability()[0] >= 8
-=======
-def assert_dim_for_all_gather(
-    tensor: torch.Tensor, with_all_gather: bool, quantizer: Quantizer
-) -> None:
-    """Assert that tensor dimensions are supported for all-gather"""
-    if with_all_gather:
-        assert quantizer.is_quantizable(tensor), (
-            "All-gather requires quantizable tensor for quantizer " + quantizer.__class__.__name__
-        )
-
-
-def is_bf16_compatible() -> bool:
-    """Replaces torch.cuda.is_bf16_compatible() with an explicit
-    check on device compute capability to enforce sm_80 or higher.
-    """
-    return torch.cuda.get_device_capability()[0] >= 8
->>>>>>> 389a6b
-
 
 def is_bf16_available(return_reason: bool = False) -> Union[bool, Tuple[bool, str]]:
     """
@@ -535,14 +525,11 @@ def is_non_tn_fp8_gemm_supported() -> bool:
 @functools.lru_cache(maxsize=None)
 def get_cudnn_version() -> Tuple[int, int, int]:
     """Runtime cuDNN version (major, minor, patch)"""
-<<<<<<< HEAD
     # ROCm fused attn does not use cudnn, return high numbers to avoid tests filtering out
     if IS_HIP_EXTENSION:
         return (99, 0, 0)
-=======
     import transformer_engine.pytorch.cpp_extensions as ext
 
->>>>>>> 389a6b
     encoded_version = ext.get_cudnn_version()
     major_version_magnitude = 1000 if encoded_version < 90000 else 10000
     major, encoded_version = divmod(encoded_version, major_version_magnitude)

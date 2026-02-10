@@ -331,86 +331,12 @@ class Quantizer(abc.ABC):
         """Returns whether or not given tensor can be quantized"""
         return True
 
-<<<<<<< HEAD:transformer_engine/pytorch/tensor/quantized_tensor.py
-class _QuantizeFunc(torch.autograd.Function):
-    """Cast to FP8 from other dtype"""
-
-    @staticmethod
-    def forward(
-        _ctx: Optional[torch.autograd.function.FunctionCtx],  # unused
-        tensor: torch.Tensor,
-        quantizer: Quantizer,
-    ) -> QuantizedTensor:
-        # pylint: disable=missing-function-docstring
-        if IS_HIP_EXTENSION:
-            from ..triton_kernels.cast import te_quantize_triton
-            use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
-            quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
-            return quantize_func(tensor, quantizer)
-        else:
-            return tex.quantize(tensor, quantizer)
-
-    @staticmethod
-    def backward(
-        _ctx: torch.autograd.function.FunctionCtx, grad: torch.Tensor  # unused
-    ) -> Tuple[Optional[torch.Tensor], ...]:
-        # pylint: disable=missing-function-docstring
-        # Assume that we want gradients in full precision
-        return grad, None
-
-
-class _IdentityFunc(torch.autograd.Function):
-    """Identity function
-
-    If constructor keyword-arguments are provided, then construct a
-    new Float8Tensor using the provided tensor's attributes.
-
-    """
-
-    @staticmethod
-    def forward(
-        ctx, tensor: QuantizedTensor, init_kwargs: Optional[Dict[str, Any]] = None
-    ) -> QuantizedTensor:
-        # pylint: disable=missing-function-docstring
-
-        # Return input tensor if constructor kwargs are not provided
-        if init_kwargs is None:
-            return tensor.detach()
-
-        # Construct new tensor if constructor kwargs are provided
-        ctx.input_dtype = tensor.dtype
-        kwargs = tensor.get_metadata()
-        for key, val in init_kwargs.items():
-            kwargs[key] = val
-        return type(tensor)(tensor.shape, tensor.dtype, **kwargs)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        # pylint: disable=missing-function-docstring
-        grad_input = grad_output
-        if grad_input.dtype == ctx.input_dtype:
-            grad_input = grad_input.detach()
-        else:
-            grad_input = grad_input.to(ctx.input_dtype)
-        return grad_input, None
-
-
-def _stride_from_shape(shape: list[int]):
-    if len(shape) == 0:
-        return []
-    rstride = [1]
-    for d in reversed(shape[1:]):
-        rstride.append(rstride[-1] * d)
-    return list(reversed(rstride))
-=======
     def get_usages(self) -> Dict[str, bool]:
         """Get the usage of the quantizer"""
         return {
             "rowwise": self.rowwise_usage,
             "columnwise": self.columnwise_usage,
         }
->>>>>>> 389a6b:transformer_engine/pytorch/quantized_tensor.py
-
 
 class QuantizedTensor(torch.Tensor):
     """Abstract base class for tensor with quantized data

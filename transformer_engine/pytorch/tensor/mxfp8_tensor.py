@@ -8,22 +8,12 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
-<<<<<<< HEAD
-import os
-from typing import Optional, Tuple, Union
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
-import torch
-if IS_HIP_EXTENSION:
-    from ..triton_kernels.cast import te_quantize_triton
-
-=======
 from typing import Optional, Tuple, Union, Any
 import warnings
 
 import torch
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
->>>>>>> 389a6b
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
@@ -33,6 +23,11 @@ from ..utils import devices_match, round_up_to_nearest_multiple
 from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
+
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+if IS_HIP_EXTENSION:
+    import os
+    from ..triton_kernels.cast import te_quantize_triton
 
 aten = torch.ops.aten
 
@@ -89,7 +84,13 @@ class MXFP8Quantizer(Quantizer):
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
-        return tex.quantize(tensor, self)
+        if IS_HIP_EXTENSION:
+            from ..triton_kernels.cast import te_quantize_triton
+            use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+            quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
+            return quantize_func(tensor, self)
+        else:
+            return tex.quantize(tensor, self)
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""
@@ -124,41 +125,26 @@ class MXFP8Quantizer(Quantizer):
         )
 
         # Allocate FP8 data
-<<<<<<< HEAD
-        data = torch.empty(shape, dtype=torch.uint8, device=device)
-        # ROCm TE does not implement fuse padding zeros so use zero tensor here
-        scale_inv = torch.zeros(
-            round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
-            round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
-            dtype=torch.uint8,
-            device=device,
-        )
-=======
         data = None
         scale_inv = None
         if self.rowwise_usage:
             data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
-            scale_inv = torch.empty(
+            # ROCm TE does not implement fuse padding zeros so use zero tensor here
+            scale_inv = torch.zeros(
                 round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
                 round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
                 dtype=torch.uint8,
                 device=device,
                 pin_memory=pin_memory,
             )
->>>>>>> 389a6b
 
         # Allocate FP8 data transpose if needed
         columnwise_data = None
         columnwise_scale_inv = None
         if self.columnwise_usage:
-<<<<<<< HEAD
             columnwise_data = torch.empty_like(data)
             # ROCm TE does not implement fuse padding zeros so use zero tensor here
             columnwise_scale_inv = torch.zeros(
-=======
-            columnwise_data = torch.empty_like(data, pin_memory=pin_memory)
-            columnwise_scale_inv = torch.empty(
->>>>>>> 389a6b
                 round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
                 round_up_to_nearest_multiple(shape[-1], 128),
                 dtype=torch.uint8,

@@ -190,9 +190,6 @@ std::optional<at::Tensor> multi_tensor_swizzle_scaling_factors(
   return buffer;
 }
 
-<<<<<<< HEAD
-#endif  //!USE_ROCM
-=======
 at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapper& input,
                                                  bool rowwise) {
   using namespace transformer_engine::pytorch;
@@ -261,4 +258,4 @@ at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapp
   input = std::move(output_cu);
   return swizzled_scale_inv;
 }
->>>>>>> 389a6b
+#endif  //!USE_ROCM

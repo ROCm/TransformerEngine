@@ -15,12 +15,8 @@ import logging
 from packaging.version import Version as PkgVersion
 
 import torch
-<<<<<<< HEAD
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
-
-=======
 import torch.nn.functional as F
->>>>>>> 389a6b
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
