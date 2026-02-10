@@ -5,14 +5,11 @@
 """Python interface for GEMM extensions"""
 
 from typing import Iterable, Optional, Tuple, Union, List
-import math
 import os
 import torch
 import transformer_engine_torch as tex
 from ..constants import TE_DType
 from ..utils import get_sm_count, _empty_tensor
-
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from ..tensor.quantized_tensor import Quantizer
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
@@ -63,7 +60,6 @@ def general_gemm(
 
     alpha = validate_gemm_scale(alpha, True)
     beta = validate_gemm_scale(beta, accumulate)
-
 
     if ub_type is not None:
         assert ub is not None, (
