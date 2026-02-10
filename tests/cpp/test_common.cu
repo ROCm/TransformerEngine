@@ -147,10 +147,10 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 
     scale_inv_meta ret_rowwise, ret_colwise;
 
-#ifndef __HIP_PLATFORM_AMD__
-    auto block_alignment = std::vector<size_t>{128ul, 4ul};
-#else
+#ifdef __HIP_PLATFORM_AMD__
     auto block_alignment = std::vector<size_t>{1ul, 1ul};
+#else
+    auto block_alignment = std::vector<size_t>{128ul, 4ul};
 #endif
     {
       auto alignment = block_alignment[0];
