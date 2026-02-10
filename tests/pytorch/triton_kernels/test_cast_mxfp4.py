@@ -7,7 +7,7 @@ import torch
 import numpy as np
 import os
 
-os.environ["USE_TRITON_FUSED_CAST_TRANSPOSE"] = "1"
+os.environ["NVTE_USE_CAST_TRANSPOSE_TRITON"] = "1"
 
 from transformer_engine.pytorch.tensor.mxfp4_tensor import MXFP4Quantizer, MXFP4_BLOCK_SCALING_SIZE
 from transformer_engine.pytorch.triton_kernels.cast import te_quantize_triton
@@ -97,6 +97,10 @@ def mxfp4_quantize_cpu(input_tensor, axis='row'):
     (4096, 1632),
     (8, 32, 1024),
     (16, 8, 4, 512),
+    # MXFP4 requires: shape[-1] % 32 == 0 and prod(shape[:-1]) % 32 == 0
+    (32, 3221),   # Last dimension 3221 (prime) not divisible by 32
+    (2333, 32),   # First dimension 2333 (prime) not divisible by 32 when flattened
+    (1481, 677),  # Both dimensions are primes, neither divisible by 32
 ])
 @pytest.mark.parametrize("in_dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize(("rowwise", "columnwise"), [
@@ -108,18 +112,28 @@ def mxfp4_quantize_cpu(input_tensor, axis='row'):
 def test_quantize_mxfp4(shape, in_dtype, rowwise, columnwise, shuffle_B_matrix):
     """Test MXFP4 quantization for rowwise/columnwise modes with/without FP4 shuffle.
     
+    MXFP4 requires dimensions divisible by 32 for per-block scaling compatibility with AITER gemm_a4w4.
+    
     Note: FP4 data shuffle (shuffle_B_matrix_for_aiter) is not yet supported in Triton kernel.
     """
     if shuffle_B_matrix:
         pytest.skip("FP4 data shuffle not yet supported in Triton kernel")
     
     input_tensor = fill_uniform(shape, dtype=in_dtype)
-
     quantizer = MXFP4Quantizer(
         rowwise=rowwise, 
         columnwise=columnwise,
         shuffle_B_matrix_for_aiter=shuffle_B_matrix
     )
+    
+    # Test invalid shapes are rejected
+    if not quantizer.is_quantizable(input_tensor):
+        assert not quantizer.is_quantizable(input_tensor), \
+            f"is_quantizable() should return False for invalid shape {shape}"
+        with pytest.raises(AssertionError, match="must be divisible by"):
+            quantizer.make_empty(shape, dtype=in_dtype)
+        return
+    
     out = quantizer.make_empty(input_tensor.shape, dtype=in_dtype)
     quantized_out = te_quantize_triton(input_tensor, quantizer=quantizer, output=out)
 
