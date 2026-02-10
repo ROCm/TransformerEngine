@@ -74,16 +74,10 @@ def jax_dtype_to_te_dtype(jax_dtype):
         jnp.bfloat16.dtype: TEDType.kBFloat16,
         jnp.int32.dtype: TEDType.kInt32,
         jnp.int64.dtype: TEDType.kInt64,
-<<<<<<< HEAD
         get_jnp_float8_e4m3_type().dtype: TEDType.kFloat8E4M3,
         get_jnp_float8_e5m2_type().dtype: TEDType.kFloat8E5M2,
-        jnp.uint8.dtype: TEDType.kByte,
-=======
-        jnp.float8_e4m3fn.dtype: TEDType.kFloat8E4M3,
-        jnp.float8_e5m2.dtype: TEDType.kFloat8E5M2,
         jnp.float8_e8m0fnu.dtype: TEDType.kFloat8E8M0,
         jnp.float4_e2m1fn.dtype: TEDType.kFloat4E2M1,
->>>>>>> 389a6b
     }
 
     if jax_dtype not in converter:

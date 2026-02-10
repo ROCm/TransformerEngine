@@ -7,7 +7,9 @@
  ************************************************************************/
 
 #include "../extensions.h"
+#ifndef USE_ROCM
 #include "cgemm_helper.h"
+#endif //#ifndef USE_ROCM
 #include "common/util/cuda_runtime.h"
 
 namespace transformer_engine {
@@ -78,12 +80,15 @@ pybind11::dict Registrations() {
   dict["te_grouped_gemm_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
                      pybind11::arg("execute") = EncapsulateFFI(GroupedGemmHandler));
+  // Amax
+  dict["te_rht_amax_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") = EncapsulateFFI(RHTAmaxCalculationInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(RHTAmaxCalculationHandler));
 #else
   // Normalization
   dict["te_norm_forward_ffi"] = EncapsulateFFI(NormForwardHandler);
   dict["te_norm_backward_ffi"] = EncapsulateFFI(NormBackwardHandler);
 
-<<<<<<< HEAD
   // Attention
   dict["te_fused_attn_forward_ffi"] = EncapsulateFFI(FusedAttnForwardHandler);
   dict["te_fused_attn_backward_ffi"] = EncapsulateFFI(FusedAttnBackwardHandler);
@@ -91,13 +96,6 @@ pybind11::dict Registrations() {
   dict["te_gemm_ffi"] = EncapsulateFFI(GemmHandler);
   dict["te_grouped_gemm_ffi"] = EncapsulateFFI(GroupedGemmHandler);
 #endif
-=======
-  // Amax
-  dict["te_rht_amax_ffi"] = pybind11::dict(
-      pybind11::arg("initialize") = EncapsulateFFI(RHTAmaxCalculationInitializeHandler),
-      pybind11::arg("execute") = EncapsulateFFI(RHTAmaxCalculationHandler));
-
->>>>>>> 389a6b
   return dict;
 }
 
@@ -121,8 +119,10 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
   m.def("is_non_nt_fp8_gemm_supported", &nvte_is_non_tn_fp8_gemm_supported);
+#ifndef USE_ROCM
   m.def("initialize_cgemm_communicator", &InitializeCgemmCommunicator);
   m.def("get_cgemm_num_max_streams", &GetCgemmNumMaxStreams);
+#endif
 
   pybind11::enum_<DType>(m, "DType", pybind11::module_local())
       .value("kByte", DType::kByte)

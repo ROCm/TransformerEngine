@@ -12,14 +12,8 @@ import math
 
 import jax
 import jax.numpy as jnp
-<<<<<<< HEAD
-from jax import dtypes
-if version.parse(jax.__version__) >= version.parse("0.5.0"):
-    from jax.experimental.custom_partitioning import SdyShardingRule
-=======
 from jax import dtypes, ffi
 from jax.experimental.custom_partitioning import SdyShardingRule, BATCHING
->>>>>>> 389a6b
 from jax.sharding import PartitionSpec
 
 import transformer_engine_jax
@@ -639,17 +633,6 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         value_types,
         result_types,
     ):
-<<<<<<< HEAD
-        if version.parse(jax.__version__) < version.parse("0.5.0"):
-            raise ImportError("JAX version 0.5.0 or later is required for shardy sharding.")
-        del out_dtype, scale_dtype, is_outer, mesh, result_types
-
-        prefix = "BaseDBiasQuantizePrimitive_"
-        scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
-            len(value_types[0].shape),
-            unique_var=prefix + "x",
-            flatten_axis=flatten_axis,
-=======
         del (
             out_dtype,
             scale_dtype,
@@ -658,7 +641,6 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
             use_rht,
             mesh,
             result_types,
->>>>>>> 389a6b
         )
 
         prefix = "DBiasQuantize"

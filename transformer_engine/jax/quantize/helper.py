@@ -26,7 +26,6 @@ import jax
 import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
 
-<<<<<<< HEAD
 from ..util import is_hip_extension, get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
 
 from transformer_engine_jax import DType
@@ -35,10 +34,6 @@ if not is_hip_extension():
         get_cublasLt_version,
         get_cuda_version,
     )
-from transformer_engine.common import recipe
-from transformer_engine.jax.sharding import global_shard_guard, MeshResource
-=======
-from transformer_engine_jax import DType, get_cublasLt_version, get_cuda_version
 from transformer_engine.common.recipe import (
     Recipe,
     DelayedScaling,
@@ -54,7 +49,6 @@ from transformer_engine.jax.sharding import (
     get_all_mesh_axes,
     with_sharding_constraint,
 )
->>>>>>> 389a6b
 
 from .metadata import QuantizeMeta
 from .scaling_modes import ScalingMode
@@ -102,16 +96,11 @@ def _check_delayed_scaling_fp8_support(gpu_arch) -> Tuple[bool, str]:
     Returns:
         A tuple of (bool, str) indicating support and any error message
     """
-<<<<<<< HEAD
     if is_hip_extension():
         if gpu_arch in [94, 95]:
             return True, ""
         else:
             return False, "Device arch gfx94x or gfx95x required for FP8 execution."
-    if gpu_arch >= 90:  # hopper and above
-        return True, ""
-=======
->>>>>>> 389a6b
     if gpu_arch < 89:  # pre-ada
         return False, "Device compute capability 8.9 or higher required for FP8 execution."
     if get_cublasLt_version() < 120103:
@@ -130,13 +119,8 @@ def _check_block_scaling_fp8_support(gpu_arch) -> Tuple[bool, str]:
     Returns:
         A tuple of (bool, str) indicating support and any error message
     """
-<<<<<<< HEAD
     if is_hip_extension():
         return False, "FP8 block scaled gemm not yet supported for ROCm"
-    if gpu_arch >= 100:  # blackwell and above
-        return True, ""
-=======
->>>>>>> 389a6b
     if gpu_arch < 99:  # pre-blackwell
         return False, "Device compute capability 9.9 or higher required for MXFP8 execution."
     if get_cublasLt_version() < 120800:
@@ -259,23 +243,14 @@ def _format2dtypes(format_: Format):
     Returns:
         A tuple of (forward_dtype, backward_dtype) for the given format
     """
-<<<<<<< HEAD
-    if format_ == recipe.Format.E4M3:
-        return get_jnp_float8_e4m3_type(), get_jnp_float8_e4m3_type()
-    if format_ == recipe.Format.E5M2:
-        return get_jnp_float8_e5m2_type(), get_jnp_float8_e5m2_type()
-    if format_ == recipe.Format.HYBRID:
-        return get_jnp_float8_e4m3_type(), get_jnp_float8_e5m2_type()
-=======
     if format_ == Format.E4M3:
-        return jnp.float8_e4m3fn, jnp.float8_e4m3fn
+        return get_jnp_float8_e4m3_type(), get_jnp_float8_e4m3_type()
     if format_ == Format.E5M2:
-        return jnp.float8_e5m2, jnp.float8_e5m2
+        return get_jnp_float8_e5m2_type(), get_jnp_float8_e5m2_type()
     if format_ == Format.HYBRID:
-        return jnp.float8_e4m3fn, jnp.float8_e5m2
+        return get_jnp_float8_e4m3_type(), get_jnp_float8_e5m2_type()
     if format_ == Format.E2M1:
         return jnp.float4_e2m1fn, jnp.float4_e2m1fn
->>>>>>> 389a6b
     return jnp.bfloat16, jnp.bfloat16
 
 

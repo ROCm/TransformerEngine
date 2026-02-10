@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -12,14 +12,8 @@ from typing import Optional, Union
 
 import jax
 import jax.numpy as jnp
-<<<<<<< HEAD
-from jax import dtypes
-if version.parse(jax.__version__) >= version.parse("0.5.0"):
-    from jax.experimental.custom_partitioning import SdyShardingRule
-=======
 from jax import dtypes, ffi
 from jax.experimental.custom_partitioning import SdyShardingRule, BATCHING
->>>>>>> 389a6b
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec
 from .misc import is_hip_extension

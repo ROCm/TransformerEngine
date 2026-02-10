@@ -15,13 +15,17 @@
 #include <tuple>
 
 #include "../extensions.h"
+#ifndef USE_ROCM
 #include "cgemm_helper.h"
+#endif //#ifndef USE_ROCM
 #include "common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/string.h"
 #include "common/util/system.h"
 #include "cuda_runtime.h"
+#ifndef USE_ROCM
 #include "nccl.h"
+#endif //#ifndef USE_ROCM
 #include "transformer_engine/swizzle.h"
 #include "xla/ffi/api/c_api.h"
 
@@ -98,6 +102,7 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
   return std::make_tuple(std::move(input), input_shape);
 }
 
+#ifndef USE_ROCM
 Error_Type CollectiveGemmInitFFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
                                  Buffer_Type rhs_scale_inv, Buffer_Type bias,
                                  Buffer_Type gelu_input, Buffer_Type alpha, Buffer_Type beta,
@@ -162,6 +167,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(CollectiveGemmInitHandler, CollectiveGemmInitFFI,
                                   .Attr<bool>("grad")
                                   .Attr<bool>("use_split_accumulator")
                                   .Attr<JAXX_Collective_Op>("collective_op"));
+#endif //#ifndef USE_ROCM
 
 Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
                    Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type gelu_input,
@@ -273,6 +279,10 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                         rhs_.data() /*A*/, lhs_.data() /*B*/, beta_ptr, out_.data() /*C*/,
                         out_.data() /*D*/, workspace_.data(), config, stream);
   } else {
+#ifdef USE_ROCM
+    //TODO: better assert
+    std::cerr<<"ROCm TE jax does not integrate userbuffer for now"<<std::endl;
+#else
     std::vector<size_t> buffer_shape{0, 0};
     DType buffer_dtype = out_dtype;
     auto &comm_handler = CommunicatorHandler::get();
@@ -318,6 +328,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
       executor->split_overlap_ag(rhs_, rhs_transposed, lhs_, lhs_transposed, out_, bias_, pre_gelu_,
                                  workspace_, grad, false, use_split_accumulator, aux_out_, stream);
     }
+#endif //#ifdef USE_ROCM
   }
 
   return ffi_with_cuda_error_check();
@@ -346,14 +357,9 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmHandler, GemmFFI,
                                   .Attr<bool>("fuse_bias")
                                   .Attr<bool>("fuse_gelu")
                                   .Attr<bool>("grad")
-<<<<<<< HEAD
-                                  .Attr<bool>("use_split_accumulator"),
-                              GemmFFI_CudaGraph_Traits);
-=======
                                   .Attr<bool>("use_split_accumulator")
                                   .Attr<JAXX_Collective_Op>("collective_op"),
-                              FFI_CudaGraph_Traits);
->>>>>>> 389a6b
+                              GemmFFI_CudaGraph_Traits);
 
 size_t GroupedGemmGetGroupSizes(cudaStream_t stream, size_t num_gemms, int32_t *dev_group_sizes,
                                 int32_t *host_group_sizes) {

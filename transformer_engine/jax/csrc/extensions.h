@@ -17,7 +17,9 @@
 #include <cuda_runtime_api.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#ifndef USE_ROCM
 #include <transformer_engine/comm_gemm_overlap.h>
+#endif
 #include <transformer_engine/normalization.h>
 #include <transformer_engine/transformer_engine.h>
 
@@ -143,14 +145,11 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(CollectiveGemmInitHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmD2HGroupSizesHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);
 
-<<<<<<< HEAD
 #ifndef USE_ROCM
-=======
 // Amax
 XLA_FFI_DECLARE_HANDLER_SYMBOL(RHTAmaxCalculationInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(RHTAmaxCalculationHandler);
 
->>>>>>> 389a6b
 // Cudnn helpers
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CudnnHandleInitHandler);
 
