@@ -70,6 +70,7 @@ run_test_config(){
     run_default_fa 1 triton_kernels/test_cast.py
     run_default_fa 1 triton_kernels/test_cast_mxfp8.py
     run_default_fa 1 triton_kernels/test_cast_mxfp4.py
+    run_default_fa 1 triton_kernels/test_grouped_gemm.py
     run_default_fa 1 triton_kernels/test_norm_common.py
     run_default_fa 1 triton_kernels/test_norms.py
     NVTE_TEST_TRITON_AUTOTUNE=1 run_default_fa_lbl "autotune" 3 triton_kernels/test_norms.py

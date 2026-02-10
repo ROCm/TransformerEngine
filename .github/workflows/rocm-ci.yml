@@ -21,10 +21,6 @@ on:
         description: 'Test Level (1-3)'
         required: true
         default: '1'
-      skip_dev_merge:
-        description: 'Skip merging dev branch'
-        type: boolean
-        default: false
       docker_image_override:
         description: 'Manual Docker Image (Leave empty to use config file value)'
         required: false
@@ -49,10 +45,9 @@ jobs:
         runner: [linux-mi325-8, linux-mi355-8]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           submodules: 'recursive'
-          fetch-depth: 0
         
       - name: Host Diagnostics & Environment Setup
         id: host-setup
@@ -78,7 +73,7 @@ jobs:
           # Default to input (or '1' if input is missing/null)
           CALC_LEVEL="${{ inputs.test_level || '1' }}"
 
-          # COnly force Level 3 if this is a direct PUSH to dev or a release branch
+          # Only force Level 3 if this is a direct PUSH to dev or a release branch
           if [[ "${{ github.event_name }}" == "push" ]]; then
              if [[ "${{ github.ref_name }}" == "dev" || "${{ github.ref_name }}" =~ ^release_v.*_rocm$ ]]; then
                 echo "::notice::Push to monitored branch (${{ github.ref_name }}) detected. Forcing Level 3."
