@@ -488,23 +488,16 @@ void compareResults(const std::string &name, const float test, const float ref,
                     double atol = 1e-5, double rtol = 1e-8);
 void compareResults(const std::string &name, const uint8_t *test, const uint8_t *ref,
                     size_t N, float mismatch_rate_tol = 0.);
-<<<<<<< HEAD
-void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
-                                  const size_t row_blocks, const size_t col_blocks, const size_t stride,
-                                  std::vector<size_t> &mismatch_indices, size_t& mismatches_num,
-                                  const size_t scale_diff_abs_tolerance = 0,
-                                  const double abs_tolerable_mismatches_limit = 0,
-                                  const double rel_tolerable_mismatches_limit = 0);
-=======
 template <typename T>
 void compare_scaling_factors(const std::string &name, const T *test, const T *ref,
                              const size_t row_blocks, const size_t col_blocks, const size_t stride,
+#ifdef USE_ROCM
+                             std::vector<size_t>& mismatch_indices, 
+#endif  //#ifdef USE_ROCM
                              size_t& mismatches_num,
                              const size_t scale_diff_abs_tolerance = 0,
                              const double abs_tolerable_mismatches_limit = 0,
                              const double rel_tolerable_mismatches_limit = 0);
-
->>>>>>> 389a6b
 
 #ifdef USE_ROCM
 void adjust_ref_for_e8m0_scale_error(const std::string &name,
