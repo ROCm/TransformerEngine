@@ -83,11 +83,4 @@ except FileNotFoundError as e:
                 category=RuntimeWarning,
             )
 
-# Set AITER_ASM_DIR to point to the asm dir in the installed package
-local_asm_dir = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "..", "3rdparty", "aiter", "hsa",
-)
-if "AITER_ASM_DIR" not in os.environ:
-    os.environ["AITER_ASM_DIR"] = local_asm_dir
 __version__ = str(metadata.version("transformer_engine"))
