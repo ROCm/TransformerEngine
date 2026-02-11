@@ -4,26 +4,8 @@
 import torch
 from typing import Optional
 
-try:
-    from ..constants import MXFP8_BLOCK_SCALING_SIZE
-    from .common import (
-        te_dtype_to_triton_dtype,
-        te_dtype_to_torch_dtype,
-        get_fp8_max,
-    )
-except Exception:  # pragma: no cover - fallback for standalone benchmarking
-    MXFP8_BLOCK_SCALING_SIZE = 32
-
-    def _missing(*args, **kwargs):
-        raise ImportError(
-            "transformer_engine dependencies not available. "
-            "Ensure transformer_engine_torch is installed."
-        )
-
-    te_dtype_to_triton_dtype = _missing  # type: ignore
-    te_dtype_to_torch_dtype = _missing  # type: ignore
-    get_fp8_max = _missing  # type: ignore
-
+from ..constants import MXFP8_BLOCK_SCALING_SIZE
+import transformer_engine_torch as tex
 import triton
 import triton.language as tl
 from .common import (
@@ -417,6 +399,54 @@ def _cast_transpose_triton_mxfp8(
                 colwise_y_ptr_current_chunk = colwise_y_ptr + offsets_Y[:, None] * stride_rowwise_row + offsets_X[None, :] * stride_rowwise_col
                 tl.store(colwise_y_ptr_current_chunk, y_chunk_colwise_scaled.to(colwise_y_ptr.type.element_ty), mask=mask)
 
+@triton.jit
+def _dequantize_mxfp8_triton(
+    x_ptr, y_ptr,
+    stride_row, stride_col, 
+    n_rows, n_cols, 
+    scale_inv_ptr, stride_scale_inv_row, stride_scale_inv_col,
+    scale_n_rows, scale_n_cols,
+    BLOCK_X: tl.constexpr, BLOCK_Y: tl.constexpr, GROUP_Y: tl.constexpr, USE_ROWWISE_SCALING: tl.constexpr, MXFP8_BLOCK_SCALING_SIZE: tl.constexpr):
+   
+    pid = tl.program_id(0)
+
+    num_pid_along_Y = tl.cdiv(n_rows, BLOCK_Y)
+    num_pid_along_X = tl.cdiv(n_cols, BLOCK_X)
+    num_pid_in_group = GROUP_Y * num_pid_along_X
+
+    group_id = pid // num_pid_in_group
+    group_size = min(num_pid_along_Y - group_id * GROUP_Y, GROUP_Y)
+    pid_m = group_id * GROUP_Y + ((pid % num_pid_in_group) % group_size)
+    pid_n = (pid % num_pid_in_group) // group_size
+
+    global_offset_Y_base = pid_m.to(tl.int64) * BLOCK_Y
+    global_offset_X_base = pid_n.to(tl.int64) * BLOCK_X
+    
+    num_chunks_in_block_Y = BLOCK_Y // MXFP8_BLOCK_SCALING_SIZE
+    num_chunks_in_block_X = BLOCK_X // MXFP8_BLOCK_SCALING_SIZE
+
+    for chunk_id_y in range(0, num_chunks_in_block_Y):
+        offsets_Y = global_offset_Y_base + chunk_id_y * MXFP8_BLOCK_SCALING_SIZE + tl.arange(0, MXFP8_BLOCK_SCALING_SIZE)
+        for chunk_id_x in range(0, num_chunks_in_block_X):
+            offsets_X = global_offset_X_base  + chunk_id_x * MXFP8_BLOCK_SCALING_SIZE + tl.arange(0, MXFP8_BLOCK_SCALING_SIZE)
+            x_ptr_current_chunk = x_ptr + offsets_Y[:, None] * stride_row + offsets_X[None, :] * stride_col
+            mask = (offsets_Y < n_rows)[:, None] & (offsets_X < n_cols)[None, :]
+            x_chunk = tl.load(x_ptr_current_chunk, mask=mask)
+
+            if USE_ROWWISE_SCALING:
+                scale_offset_X = (pid_n * num_chunks_in_block_X) + chunk_id_x
+                scale_inv_store_offsets = (offsets_Y[:, None] * stride_scale_inv_row) + scale_offset_X * stride_scale_inv_col 
+                scale_inv_store_mask = (offsets_Y < scale_n_rows)[:, None] & (scale_offset_X < scale_n_cols)
+            else:
+                scale_offset_Y = (pid_m * num_chunks_in_block_Y) + chunk_id_y
+                scale_inv_store_offsets = scale_offset_Y * stride_scale_inv_row + (offsets_X[None, :] * stride_scale_inv_col) 
+                scale_inv_store_mask = (scale_offset_Y < scale_n_rows) & (offsets_X < scale_n_cols)[None, :]
+                
+            biased_exponent = tl.load(scale_inv_ptr + scale_inv_store_offsets, mask=scale_inv_store_mask, other=127)
+            block_scale = tl.exp2(biased_exponent.to(tl.float32) - 127)
+            y_chunk_scaled = x_chunk.to(tl.float32) * block_scale
+            y_ptr_current_chunk = y_ptr + offsets_Y[:, None] * stride_row + offsets_X[None, :] * stride_col
+            tl.store(y_ptr_current_chunk, y_chunk_scaled.to(y_ptr.type.element_ty), mask=mask)
 ##########################################
 #### cast_transpose_mxfp4
 ##########################################
@@ -488,12 +518,6 @@ def _cast_transpose_triton_mxfp4(
     base_m = pid_m * BLOCK_M
     base_n = pid_n * BLOCK_N
 
-    # Each BLOCK_M covers BLOCK_M / 32 MXFP4 row blocks.
-    row_block_base = (base_m // MXFP4_BLOCK_SIZE)
-
-    E8_BIAS = tl.constexpr(127)
-    E2_BIAS = tl.constexpr(1)
-
     for chunk_m in range(num_chunks_m):
         offs_m = base_m + chunk_m * MXFP4_BLOCK_SIZE + tl.arange(0, MXFP4_BLOCK_SIZE)
         row_mask = offs_m < M
@@ -504,10 +528,7 @@ def _cast_transpose_triton_mxfp4(
 
             mask = row_mask[:, None] & col_mask[None, :]
 
-            # Load a 32x32 bf16 tile (promoted to fp32) so both row/col passes reuse the same data. TODO @saraora to double check if this is necessary.
-            #   offs_m = 128*k + [0..31]
-            #   offs_n = 128*l + [0..31]
-            # This chunk is reused for both rowwise and columnwise passes.
+            # Load a 32x32 bf16 tile (promoted to fp32) so both row/col passes reuse the same data.
             x_chunk = tl.load(
                 x_ptr + offs_m[:, None] * stride_x_m + offs_n[None, :] * stride_x_n,
                 mask=mask,
@@ -519,27 +540,37 @@ def _cast_transpose_triton_mxfp4(
                 # For each row in the current tile (base_m + row0), process the elements in [base_n : base_n + 31].
                 # Compute one E8M0 scale per row (32 elements).
                 amax_row = tl.max(tl.abs(x_chunk), axis=1, keep_dims=True)
-                amax_row = amax_row.to(tl.int32, bitcast=True)
-                amax_row = (amax_row + 0x200000).to(tl.uint32, bitcast=True) & 0xFF800000
-                amax_row = amax_row.to(tl.float32, bitcast=True)
-                scale_unbiased_row = tl.log2(amax_row).floor() - 2
-                scale_unbiased_row = tl.clamp(scale_unbiased_row, min=-127, max=127)
+                
+                # FIX 1: Use tl.uint32 (not tl.int32) to match HIP kernel
+                amax_u32 = amax_row.to(tl.uint32, bitcast=True)
+                amax_u32 = (amax_u32 + 0x200000) & 0xFF800000
+                amax_rounded = amax_u32.to(tl.float32, bitcast=True)
+                
+                scale_unbiased_row = tl.log2(tl.maximum(amax_rounded, 1e-45)).floor() - 2
+                scale_unbiased_row = tl.clamp(scale_unbiased_row, min=-127.0, max=127.0)
                 quant_scale_row = tl.exp2(-scale_unbiased_row)
 
                 qx_row = x_chunk * quant_scale_row
-                bs_row = scale_unbiased_row.to(tl.uint8) + 127
+                bs_row = (scale_unbiased_row + 127.0).to(tl.uint8)
+                
+                bs_row = tl.where(amax_row == 0.0, 127, bs_row)
 
-                qx_row_u32 = qx_row.to(tl.uint32, bitcast=True)
-                s_row = qx_row_u32 & 0x80000000
-                e_row = (qx_row_u32 >> 23) & 0xFF
-                m_row = qx_row_u32 & 0x7FFFFF
-
-                adjusted_row = tl.core.sub(E8_BIAS, e_row + 1, sanitize_overflow=False)
-                m_row = tl.where(e_row < E8_BIAS, (0x400000 | (m_row >> 1)) >> adjusted_row, m_row)
-                e_row = tl.maximum(e_row, E8_BIAS - E2_BIAS) - (E8_BIAS - E2_BIAS)
-
-                e2m1_row = tl.minimum((((e_row << 2) | (m_row >> 21)) + 1) >> 1, 0x7)
-                e2m1_row = ((s_row >> 28) | e2m1_row).to(tl.uint8)
+                # FIX 3: Use lookup table for FP4 encoding
+                abs_qx_row = tl.abs(qx_row)
+                sign_row = (qx_row < 0.0).to(tl.uint8)
+                
+                # Nearest-neighbor quantization to E2M1 values
+                # E2M1 representable values: {0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0}
+                idx_row = tl.zeros([MXFP4_BLOCK_SIZE, MXFP4_BLOCK_SIZE], dtype=tl.uint8)
+                idx_row = tl.where(abs_qx_row >= 0.25, 1, idx_row)  # → 0.5
+                idx_row = tl.where(abs_qx_row >= 0.75, 2, idx_row)  # → 1.0
+                idx_row = tl.where(abs_qx_row >= 1.25, 3, idx_row)  # → 1.5
+                idx_row = tl.where(abs_qx_row >= 1.75, 4, idx_row)  # → 2.0
+                idx_row = tl.where(abs_qx_row >= 2.5,  5, idx_row)  # → 3.0
+                idx_row = tl.where(abs_qx_row >= 3.5,  6, idx_row)  # → 4.0
+                idx_row = tl.where(abs_qx_row >= 5.0,  7, idx_row)  # → 6.0
+                
+                e2m1_row = (sign_row << 3) | idx_row
 
                 # Pack columns (C0,C1) -> byte0, (C2,C3) -> byte1, etc.
                 row_pairs = tl.reshape(
@@ -622,30 +653,37 @@ def _cast_transpose_triton_mxfp4(
             # ---------- Columnwise path ----------
             if USE_COLWISE:
                 # Treat columns as rows by transposing to reuse the same per-row logic.
-                # Instead of manually transposing indices, view the tile transposed.
                 x_col = tl.trans(x_chunk)
                 amax_col = tl.max(tl.abs(x_col), axis=1, keep_dims=True)
-                amax_col = amax_col.to(tl.int32, bitcast=True)
-                amax_col = (amax_col + 0x200000).to(tl.uint32, bitcast=True) & 0xFF800000
-                amax_col = amax_col.to(tl.float32, bitcast=True)
-                scale_unbiased_col = tl.log2(amax_col).floor() - 2
-                scale_unbiased_col = tl.clamp(scale_unbiased_col, min=-127, max=127)
+                
+                amax_u32 = amax_col.to(tl.uint32, bitcast=True)
+                amax_u32 = (amax_u32 + 0x200000) & 0xFF800000
+                amax_rounded = amax_u32.to(tl.float32, bitcast=True)
+                
+                scale_unbiased_col = tl.log2(tl.maximum(amax_rounded, 1e-45)).floor() - 2
+                scale_unbiased_col = tl.clamp(scale_unbiased_col, min=-127.0, max=127.0)
                 quant_scale_col = tl.exp2(-scale_unbiased_col)
 
                 qx_col = x_col * quant_scale_col
-                bs_col = scale_unbiased_col.to(tl.uint8) + 127
+                bs_col = (scale_unbiased_col + 127.0).to(tl.uint8)
+                
+                # Explicit zero-block handling (amax_col has shape [MXFP4_BLOCK_SIZE, 1])
+                bs_col = tl.where(amax_col == 0.0, 127, bs_col)
 
-                qx_col_u32 = qx_col.to(tl.uint32, bitcast=True)
-                s_col = qx_col_u32 & 0x80000000
-                e_col = (qx_col_u32 >> 23) & 0xFF
-                m_col = qx_col_u32 & 0x7FFFFF
-
-                adjusted_col = tl.core.sub(E8_BIAS, e_col + 1, sanitize_overflow=False)
-                m_col = tl.where(e_col < E8_BIAS, (0x400000 | (m_col >> 1)) >> adjusted_col, m_col)
-                e_col = tl.maximum(e_col, E8_BIAS - E2_BIAS) - (E8_BIAS - E2_BIAS)
-
-                e2m1_col = tl.minimum((((e_col << 2) | (m_col >> 21)) + 1) >> 1, 0x7)
-                e2m1_col = ((s_col >> 28) | e2m1_col).to(tl.uint8)
+                # Use lookup table for FP4 encoding
+                abs_qx_col = tl.abs(qx_col)
+                sign_col = (qx_col < 0.0).to(tl.uint8)
+                
+                idx_col = tl.zeros([MXFP4_BLOCK_SIZE, MXFP4_BLOCK_SIZE], dtype=tl.uint8)
+                idx_col = tl.where(abs_qx_col >= 0.25, 1, idx_col)
+                idx_col = tl.where(abs_qx_col >= 0.75, 2, idx_col)
+                idx_col = tl.where(abs_qx_col >= 1.25, 3, idx_col)
+                idx_col = tl.where(abs_qx_col >= 1.75, 4, idx_col)
+                idx_col = tl.where(abs_qx_col >= 2.5,  5, idx_col)
+                idx_col = tl.where(abs_qx_col >= 3.5,  6, idx_col)
+                idx_col = tl.where(abs_qx_col >= 5.0,  7, idx_col)
+                
+                e2m1_col = (sign_col << 3) | idx_col
 
                 # After transpose, each row in x_col is one column from the original tile.
                 col_pairs = tl.reshape(
@@ -661,8 +699,6 @@ def _cast_transpose_triton_mxfp4(
                 rowpair_base = (base_m // 2) + chunk_m * (MXFP4_BLOCK_SIZE // 2)
                 rowpair_indices = rowpair_base + row_pairs
 
-                # col_indices: [base_n + chunk_n*MXFP4_BLOCK_SIZE + i for i in range(MXFP4_BLOCK_SIZE)]
-                # rowpair_indices: [base_m // 2 + chunk_m*(MXFP4_BLOCK_SIZE//2) + j for j in range(MXFP4_BLOCK_SIZE//2)]
                 col_fp4_mask = (col_indices < N)[:, None] & (
                     rowpair_indices < (M // 2)
                 )[None, :]
@@ -728,55 +764,6 @@ def _cast_transpose_triton_mxfp4(
                         bs_col,
                         mask=scale_mask,
                     )
-
-@triton.jit
-def _dequantize_mxfp8_triton(
-    x_ptr, y_ptr,
-    stride_row, stride_col, 
-    n_rows, n_cols, 
-    scale_inv_ptr, stride_scale_inv_row, stride_scale_inv_col,
-    scale_n_rows, scale_n_cols,
-    BLOCK_X: tl.constexpr, BLOCK_Y: tl.constexpr, GROUP_Y: tl.constexpr, USE_ROWWISE_SCALING: tl.constexpr, MXFP8_BLOCK_SCALING_SIZE: tl.constexpr):
-   
-    pid = tl.program_id(0)
-
-    num_pid_along_Y = tl.cdiv(n_rows, BLOCK_Y)
-    num_pid_along_X = tl.cdiv(n_cols, BLOCK_X)
-    num_pid_in_group = GROUP_Y * num_pid_along_X
-
-    group_id = pid // num_pid_in_group
-    group_size = min(num_pid_along_Y - group_id * GROUP_Y, GROUP_Y)
-    pid_m = group_id * GROUP_Y + ((pid % num_pid_in_group) % group_size)
-    pid_n = (pid % num_pid_in_group) // group_size
-
-    global_offset_Y_base = pid_m.to(tl.int64) * BLOCK_Y
-    global_offset_X_base = pid_n.to(tl.int64) * BLOCK_X
-    
-    num_chunks_in_block_Y = BLOCK_Y // MXFP8_BLOCK_SCALING_SIZE
-    num_chunks_in_block_X = BLOCK_X // MXFP8_BLOCK_SCALING_SIZE
-
-    for chunk_id_y in range(0, num_chunks_in_block_Y):
-        offsets_Y = global_offset_Y_base + chunk_id_y * MXFP8_BLOCK_SCALING_SIZE + tl.arange(0, MXFP8_BLOCK_SCALING_SIZE)
-        for chunk_id_x in range(0, num_chunks_in_block_X):
-            offsets_X = global_offset_X_base  + chunk_id_x * MXFP8_BLOCK_SCALING_SIZE + tl.arange(0, MXFP8_BLOCK_SCALING_SIZE)
-            x_ptr_current_chunk = x_ptr + offsets_Y[:, None] * stride_row + offsets_X[None, :] * stride_col
-            mask = (offsets_Y < n_rows)[:, None] & (offsets_X < n_cols)[None, :]
-            x_chunk = tl.load(x_ptr_current_chunk, mask=mask)
-
-            if USE_ROWWISE_SCALING:
-                scale_offset_X = (pid_n * num_chunks_in_block_X) + chunk_id_x
-                scale_inv_store_offsets = (offsets_Y[:, None] * stride_scale_inv_row) + scale_offset_X * stride_scale_inv_col 
-                scale_inv_store_mask = (offsets_Y < scale_n_rows)[:, None] & (scale_offset_X < scale_n_cols)
-            else:
-                scale_offset_Y = (pid_m * num_chunks_in_block_Y) + chunk_id_y
-                scale_inv_store_offsets = scale_offset_Y * stride_scale_inv_row + (offsets_X[None, :] * stride_scale_inv_col) 
-                scale_inv_store_mask = (scale_offset_Y < scale_n_rows) & (offsets_X < scale_n_cols)[None, :]
-                
-            biased_exponent = tl.load(scale_inv_ptr + scale_inv_store_offsets, mask=scale_inv_store_mask, other=127)
-            block_scale = tl.exp2(biased_exponent.to(tl.float32) - 127)
-            y_chunk_scaled = x_chunk.to(tl.float32) * block_scale
-            y_ptr_current_chunk = y_ptr + offsets_Y[:, None] * stride_row + offsets_X[None, :] * stride_col
-            tl.store(y_ptr_current_chunk, y_chunk_scaled.to(y_ptr.type.element_ty), mask=mask)
 
 # Reshapes input of any given shape to 2D for processing, 
 # then uses the Triton kernel to perform casting and transposition efficiently.
@@ -910,6 +897,46 @@ def te_cast_transpose_mxfp8_triton(input, out, noop_flag=None):
         colwise_scale_inv_ptr, colwise_scale_stride_M, colwise_scale_stride_N,
         colwise_scale_M, colwise_scale_N,
         max_fp8, BLOCK_X, BLOCK_Y, GROUP_Y, MXFP8_BLOCK_SCALING_SIZE, USE_ROWWISE_SCALING, USE_COLWISE_SCALING)
+
+def te_dequantize_mxfp8_triton(input, dtype):
+    input_metadata = input.get_metadata()
+    use_rowwise_scaling = input_metadata["rowwise_data"] is not None
+    x_ptr = None
+    scale_inv_ptr = None
+    
+    if use_rowwise_scaling:
+        x_ptr = input_metadata["rowwise_data"]
+        row_length = x_ptr.shape[-1] if len(x_ptr.shape) > 0 else 1
+        num_rows = x_ptr.numel() // row_length
+        x_ptr = x_ptr.reshape(num_rows, row_length)
+        scale_inv_ptr = input_metadata["rowwise_scale_inv"]
+    else:
+        x_ptr = input_metadata["columnwise_data"]
+        row_length = x_ptr.shape[-1] if len(x_ptr.shape) > 0 else 1
+        num_rows = x_ptr.numel() // row_length
+        x_ptr = x_ptr.reshape(num_rows, row_length)
+        scale_inv_ptr = input_metadata["columnwise_scale_inv"]
+    
+    fp8_dtype = input_metadata["fp8_dtype"]
+    scale_M, scale_N = scale_inv_ptr.shape
+    dtype = te_dtype_to_torch_dtype(dtype)
+    out = torch.zeros(input.shape, dtype=dtype, device=x_ptr.device)
+
+    BLOCK_X = 64
+    BLOCK_Y = 64
+    GROUP_Y = 4
+    tl_dtype = te_dtype_to_triton_dtype(fp8_dtype)
+
+    grid = lambda META: (triton.cdiv(num_rows, META['BLOCK_Y']) * triton.cdiv(row_length, META['BLOCK_X']),)
+    _dequantize_mxfp8_triton[grid](
+    triton.reinterpret(x_ptr, tl_dtype), out,
+    x_ptr.stride(0), x_ptr.stride(1), 
+    num_rows, row_length, 
+    scale_inv_ptr, scale_inv_ptr.stride(0), scale_inv_ptr.stride(1),
+    scale_M, scale_N,
+    BLOCK_X, BLOCK_Y, GROUP_Y, use_rowwise_scaling, MXFP8_BLOCK_SCALING_SIZE)
+
+    return out
 
 def te_cast_transpose_mxfp4_triton(
     input: torch.Tensor,
@@ -1051,24 +1078,74 @@ def te_cast_transpose_mxfp4_triton(
     if not input.is_contiguous():
         input = input.contiguous()
     
+    # Convert tensors to Triton pointers
+    input_ptr = input
+    rowwise_fp4_ptr = None
+    rowwise_scale_ptr = None
+    colwise_fp4_ptr = None
+    colwise_scale_ptr = None
+    
+    # Compute strides and convert to pointers
+    input_stride_M = input.stride(0)
+    input_stride_N = input.stride(1)
+    
+    if USE_ROWWISE:
+        rowwise_fp4_ptr = triton.reinterpret(rowwise_fp4_out, tl.uint8)
+        stride_rowwise_fp4_m = rowwise_fp4_out.stride(0)
+        stride_rowwise_fp4_n = rowwise_fp4_out.stride(1)
+        if rowwise_scale_out is not None:
+            # Scale tensor should already be uint8, but ensure it is
+            scale_tensor = rowwise_scale_out if rowwise_scale_out.dtype == torch.uint8 else rowwise_scale_out.view(torch.uint8)
+            rowwise_scale_ptr = triton.reinterpret(scale_tensor, tl.uint8)
+            stride_rowwise_scale_m = scale_tensor.stride(0)
+            stride_rowwise_scale_n = scale_tensor.stride(1)
+        else:
+            stride_rowwise_scale_m = 1
+            stride_rowwise_scale_n = 1
+    else:
+        stride_rowwise_fp4_m = 1
+        stride_rowwise_fp4_n = 1
+        stride_rowwise_scale_m = 1
+        stride_rowwise_scale_n = 1
+    
+    if USE_COLWISE:
+        colwise_fp4_ptr = triton.reinterpret(colwise_fp4_out, tl.uint8)
+        stride_colwise_fp4_m = colwise_fp4_out.stride(0)
+        stride_colwise_fp4_n = colwise_fp4_out.stride(1)
+        if kernel_colwise_scale is not None:
+            # Scale tensor should already be uint8, but ensure it is
+            scale_tensor = kernel_colwise_scale if kernel_colwise_scale.dtype == torch.uint8 else kernel_colwise_scale.view(torch.uint8)
+            colwise_scale_ptr = triton.reinterpret(scale_tensor, tl.uint8)
+            stride_colwise_scale_m = scale_tensor.stride(0)
+            stride_colwise_scale_n = scale_tensor.stride(1)
+        else:
+            stride_colwise_scale_m = 1
+            stride_colwise_scale_n = 1
+    else:
+        stride_colwise_fp4_m = 1
+        stride_colwise_fp4_n = 1
+        stride_colwise_scale_m = 1
+        stride_colwise_scale_n = 1
+    
     # Launch kernel with (M_blocks, N_blocks)
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
     
     _cast_transpose_triton_mxfp4[grid](
-        input,
-        rowwise_fp4_out if USE_ROWWISE else None,
-        rowwise_scale_out if USE_ROWWISE else None,
-        colwise_fp4_out if USE_COLWISE else None,
-        kernel_colwise_scale if USE_COLWISE else None,
-        input.stride(0), input.stride(1),
-        rowwise_fp4_out.stride(0) if USE_ROWWISE else 1,
-        rowwise_fp4_out.stride(1) if USE_ROWWISE else 1,
-        rowwise_scale_out.stride(0) if USE_ROWWISE else 1,
-        rowwise_scale_out.stride(1) if USE_ROWWISE else 1,
-        colwise_fp4_out.stride(0) if USE_COLWISE else 1,
-        colwise_fp4_out.stride(1) if USE_COLWISE else 1,
-        kernel_colwise_scale.stride(0) if USE_COLWISE else 1,
-        kernel_colwise_scale.stride(1) if USE_COLWISE else 1,
+        input_ptr,
+        rowwise_fp4_ptr,
+        rowwise_scale_ptr,
+        colwise_fp4_ptr,
+        colwise_scale_ptr,
+        input_stride_M,
+        input_stride_N,
+        stride_rowwise_fp4_m,
+        stride_rowwise_fp4_n,
+        stride_rowwise_scale_m,
+        stride_rowwise_scale_n,
+        stride_colwise_fp4_m,
+        stride_colwise_fp4_n,
+        stride_colwise_scale_m,
+        stride_colwise_scale_n,
         M=M,
         N=N,
         rowwise_scale_N=scaleN_row,
@@ -1092,46 +1169,6 @@ def te_cast_transpose_mxfp4_triton(
         colwise_scale_out[:N, :scaleN_colwise_valid] = kernel_colwise_scale[:N, :scaleN_colwise_valid]
     
     return rowwise_fp4_out, rowwise_scale_out, colwise_fp4_out, colwise_scale_out
-
-def te_dequantize_mxfp8_triton(input, dtype):
-    input_metadata = input.get_metadata()
-    use_rowwise_scaling = input_metadata["rowwise_data"] is not None
-    x_ptr = None
-    scale_inv_ptr = None
-    
-    if use_rowwise_scaling:
-        x_ptr = input_metadata["rowwise_data"]
-        row_length = x_ptr.shape[-1] if len(x_ptr.shape) > 0 else 1
-        num_rows = x_ptr.numel() // row_length
-        x_ptr = x_ptr.reshape(num_rows, row_length)
-        scale_inv_ptr = input_metadata["rowwise_scale_inv"]
-    else:
-        x_ptr = input_metadata["columnwise_data"]
-        row_length = x_ptr.shape[-1] if len(x_ptr.shape) > 0 else 1
-        num_rows = x_ptr.numel() // row_length
-        x_ptr = x_ptr.reshape(num_rows, row_length)
-        scale_inv_ptr = input_metadata["columnwise_scale_inv"]
-    
-    fp8_dtype = input_metadata["fp8_dtype"]
-    scale_M, scale_N = scale_inv_ptr.shape
-    dtype = te_dtype_to_torch_dtype(dtype)
-    out = torch.zeros(input.shape, dtype=dtype, device=x_ptr.device)
-
-    BLOCK_X = 64
-    BLOCK_Y = 64
-    GROUP_Y = 4
-    tl_dtype = te_dtype_to_triton_dtype(fp8_dtype)
-
-    grid = lambda META: (triton.cdiv(num_rows, META['BLOCK_Y']) * triton.cdiv(row_length, META['BLOCK_X']),)
-    _dequantize_mxfp8_triton[grid](
-    triton.reinterpret(x_ptr, tl_dtype), out,
-    x_ptr.stride(0), x_ptr.stride(1), 
-    num_rows, row_length, 
-    scale_inv_ptr, scale_inv_ptr.stride(0), scale_inv_ptr.stride(1),
-    scale_M, scale_N,
-    BLOCK_X, BLOCK_Y, GROUP_Y, use_rowwise_scaling, MXFP8_BLOCK_SCALING_SIZE)
-
-    return out
 
 ##########################################
 #### cast_transpose_dbias
@@ -1246,5 +1283,3 @@ def te_cast_transpose_dbias_triton(input, input_scale, amax_out, scale_inv_out, 
 
     dbias_out = reduce_dbias_kernel(partial_dbias[0:triton.cdiv(M, block_m_1)], input.dtype)
     return dbias_out, cast_out, trans_out
-
-    
