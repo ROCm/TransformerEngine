@@ -247,6 +247,22 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
 
 py::object dequantize(const py::handle &input, DType otype);
 
+/***************************************************************************************************
+ * MXFP4 Quantization
+ **************************************************************************************************/
+
+std::vector<py::object> cast_transpose_mxfp4_fused_shuffle(
+    at::Tensor input,
+    std::optional<at::Tensor> rowwise_fp4_out,
+    std::optional<at::Tensor> rowwise_scale_out,
+    std::optional<at::Tensor> colwise_fp4_out,
+    std::optional<at::Tensor> colwise_scale_out,
+    bool shuffle_rowwise_scale,
+    bool shuffle_colwise_scale,
+    bool shuffle_rowwise_fp4,
+    bool shuffle_colwise_fp4,
+    bool use_hadamard);
+
 std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
                                               std::vector<py::handle> quantizer_list);
 

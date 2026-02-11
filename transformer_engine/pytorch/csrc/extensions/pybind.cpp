@@ -31,6 +31,9 @@ PyTypeObject *Float8CurrentScalingQuantizerClass = nullptr;
 PyTypeObject *MXFP8TensorPythonClass = nullptr;  /// TODO Remove
 PyTypeObject *MXFP8TensorBasePythonClass = nullptr;
 PyTypeObject *MXFP8QuantizerClass = nullptr;
+PyTypeObject *MXFP4TensorPythonClass = nullptr;
+PyTypeObject *MXFP4TensorBasePythonClass = nullptr;
+PyTypeObject *MXFP4QuantizerClass = nullptr;
 PyTypeObject *Float8BlockwiseQTensorPythonClass = nullptr;
 PyTypeObject *Float8BlockwiseQTensorBasePythonClass = nullptr;
 PyTypeObject *Float8BlockwiseQuantizerClass = nullptr;
@@ -67,6 +70,21 @@ void init_mxfp8_extension() {
              "Internal error: could not initialize pyTorch MXFP8 extension.");
 }
 
+void init_mxfp4_extension() {
+  if (MXFP4TensorPythonClass) return;
+  auto fp4_module = py::module_::import("transformer_engine.pytorch.tensor.mxfp4_tensor");
+  MXFP4QuantizerClass =
+      reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp4_module.ptr(), "MXFP4Quantizer"));
+  MXFP4TensorPythonClass =
+      reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp4_module.ptr(), "MXFP4Tensor"));
+  auto fp4_base_module =
+      py::module_::import("transformer_engine.pytorch.tensor._internal.mxfp4_tensor_base");
+  MXFP4TensorBasePythonClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(fp4_base_module.ptr(), "MXFP4TensorBase"));
+  NVTE_CHECK(MXFP4TensorPythonClass != nullptr,
+             "Internal error: could not initialize pyTorch MXFP4 extension.");
+}
+
 void init_float8blockwise_extension() {
   if (Float8BlockwiseQTensorBasePythonClass) return;
   auto fp8_module =
@@ -91,6 +109,7 @@ void init_float8blockwise_extension() {
 void init_extension() {
   init_float8_extension();
   init_mxfp8_extension();
+  init_mxfp4_extension();
   init_float8blockwise_extension();
 }
 
@@ -221,6 +240,22 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("rmsnorm_bwd", &transformer_engine::pytorch::rmsnorm_bwd, "Backward of RMSNorm");
   m.def("rmsnorm_bwd_add", &transformer_engine::pytorch::rmsnorm_bwd_add,
         "Fused backward of RMSNorm + add");
+
+  // MXFP4 Quantization
+  m.def("cast_transpose_mxfp4_fused_shuffle",
+        &transformer_engine::pytorch::cast_transpose_mxfp4_fused_shuffle,
+        "MXFP4 cast and transpose with fused weight shuffle for GEMM",
+        py::arg("input"),
+        py::arg("rowwise_fp4_out") = py::none(),
+        py::arg("rowwise_scale_out") = py::none(),
+        py::arg("colwise_fp4_out") = py::none(),
+        py::arg("colwise_scale_out") = py::none(),
+        py::arg("shuffle_rowwise_scale") = true,
+        py::arg("shuffle_colwise_scale") = true,
+        py::arg("shuffle_rowwise_fp4") = true,
+        py::arg("shuffle_colwise_fp4") = true,
+        py::arg("use_hadamard") = false,
+        py::call_guard<py::gil_scoped_release>());
   m.def("multi_tensor_quantize", &transformer_engine::pytorch::multi_tensor_quantize,
         "Multi-tensor quantize", py::arg("tensor_list"), py::arg("quantizer_list"));
   m.def("split_quantize", &transformer_engine::pytorch::split_quantize,

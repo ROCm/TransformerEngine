@@ -13,6 +13,7 @@ from ..utils import get_sm_count, _empty_tensor
 
 from ..tensor.quantized_tensor import Quantizer
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
+from ..tensor._internal.mxfp4_tensor_base import MXFP4TensorBase
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 
 __all__ = [
@@ -86,6 +87,24 @@ def general_gemm(
 
     # Use bfloat16 as default bias_dtype
     bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]
+
+    # MXFP4 GEMM detection and routing
+    # Check if both inputs are MXFP4 tensors - route to FP4 handler
+    if isinstance(A, MXFP4TensorBase) and isinstance(B, MXFP4TensorBase):
+        from ..module.fp4_handler_gemm import fp4_gemm_layout
+        
+        result = fp4_gemm_layout(
+            A, B,
+            layout=layout,
+            out_dtype=out_dtype if out_dtype is not None else torch.bfloat16,
+            bias=bias,
+            out=out,
+            grad=grad,
+            accumulate=accumulate,
+        )
+        # Return format: (out, bias_grad, gelu_input, extra_output)
+        # MXFP4 GEMM doesn't support gelu or extra_output, and bias_grad is handled separately
+        return result, None, None, None
 
     if isinstance(A, Float8BlockwiseQTensorBase) or isinstance(B, Float8BlockwiseQTensorBase):
         # There is not use_split_accumulator == False
