@@ -808,7 +808,7 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
 
   // Currently only support cutlass group gemm on Hopper Arch
 #ifdef __HIP_PLATFORM_AMD__
-  if (!use_cutlass) {
+  if (!use_cutlass || num_gemms == 1) {
 #else
   if (!(is_hopper && use_cutlass)) {
 #endif
