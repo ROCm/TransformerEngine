@@ -15,6 +15,7 @@ from .cast_transpose import te_cast_transpose_mxfp8_triton, te_cast_transpose_no
 import transformer_engine_torch as tex
 from ..tensor.quantized_tensor import QuantizedTensor, Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
+from ..tensor._internal.mxfp4_tensor_base import MXFP4TensorBase
 
 @functools.lru_cache(maxsize=None)
 def _empty_tensor() -> torch.Tensor:
@@ -119,6 +120,9 @@ def te_quantize_triton(
                 out = tex.quantize(input_tensor, quantizer, out, noop_flag)
     elif isinstance(out, MXFP8TensorBase):
         te_cast_transpose_mxfp8_triton(input_tensor, out)
+    elif isinstance(out, MXFP4TensorBase):
+        # MXFP4 uses AITER quantization directly - bypass C++ tex.quantize
+        out = quantizer.update_quantized(input_tensor, out, noop_flag=noop_flag)
     else:
         raise NotImplementedError(f"Not implemented for tensor type: '{type(out).__name__}'")
 
@@ -129,6 +133,13 @@ def te_dequantize_triton(input, dtype: tex.DType):
         return te_dequantize_mxfp8_triton(input, dtype)
     elif isinstance(input, Float8TensorBase):
         return tex.dequantize(input, dtype)
+    elif isinstance(input, MXFP4TensorBase):
+        # MXFP4 dequantization handled by tensor's dequantize method
+        # This path should not be hit in forward-only MXFP4 training
+        raise NotImplementedError(
+            "MXFP4 dequantization from packed FP4 not yet implemented. "
+            "This should only be called during model teardown with cached high-precision data."
+        )
     else:
         raise NotImplementedError(f"Not implemented for tensor type: '{type(input).__name__}'")
 
