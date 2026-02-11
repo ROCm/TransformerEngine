@@ -12,12 +12,9 @@ from typing import Any, Dict, Tuple, Union
 import pytest
 import torch
 
-<<<<<<< HEAD
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
-=======
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager, get_fp8_te_dtype
->>>>>>> 389a6b
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import (
     TransformerLayer,
@@ -91,7 +88,6 @@ def reset_global_fp8_state():
     FP8GlobalStateManager.reset()
 
 
-<<<<<<< HEAD
 if IS_HIP_EXTENSION:
     from utils import EnvVarCleaner
     @pytest.fixture(autouse=True)
@@ -101,13 +97,11 @@ if IS_HIP_EXTENSION:
                             "NVTE_CK_USES_FWD_V3", "NVTE_CK_USES_BWD_V3", "NVTE_FP8_DPA_BWD"])
         yield
 
-=======
 # Define F16 data types to test
 param_types = [torch.float16]
 if is_bf16_available():
     param_types.append(torch.bfloat16)
 param_types_lean = [torch.bfloat16]
->>>>>>> 389a6b
 
 model_configs_base = {
     # test: ModelConfig(b, sq, hq, dqk)
@@ -126,7 +120,6 @@ model_configs_base = {
 }
 
 
-<<<<<<< HEAD
 param_types = [torch.float16]
 if is_bf16_compatible():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
@@ -136,10 +129,8 @@ param_types_lean = [torch.bfloat16]
 # backend is capable of supporting it.
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
 def test_gqa_mla_thd():
-    """
-    Explicitly test dk_or_dv_reduce_thd as part of TE's CK integration
-    post-processing for BWD FA with native padding support.
-    """
+    """Explicitly test dk_or_dv_reduce_thd as part of TE's CK integration
+    post-processing for BWD FA with native padding support."""
     # b, sq, h, dqk
     config = ModelConfig(8, 128, 16, 128, num_gqa_groups= 4, head_dim_v=64, attn_mask_type="padding")
     qkv_layout = "thd_thd_thd"
@@ -156,11 +147,10 @@ def test_gqa_mla_thd():
 
     test_dot_product_attention(dtype, {"layout_1": config}, "layout_1", False, False, qkv_layout, False, True, False)
 
+
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
 def test_dot_product_mem_calc():
-    """
-    Non-regression test for memory workspace calculation integer overflow issue.
-    """
+    """Non-regression test for memory workspace calculation integer overflow issue."""
     ckpt_attn = False
     pad_between_seqs = False
     if not is_bf16_compatible():
@@ -197,8 +187,6 @@ def test_dot_product_mem_calc():
     del os.environ["NVTE_FUSED_ATTN_AOTRITON"]
 
 
-=======
->>>>>>> 389a6b
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_base])
@@ -306,13 +294,9 @@ def test_dot_product_attention(
             )
         if len(fused_attn_backends) == 2:
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
-<<<<<<< HEAD
             os.environ["NVTE_FUSED_ATTN_CK"] = "0"
             os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "1"
-            fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
-=======
             fused_attn_fwd, _, fused_attn_bwd = _run_dot_product_attention(
->>>>>>> 389a6b
                 dtype,
                 config,
                 "FusedAttention",
@@ -324,15 +308,11 @@ def test_dot_product_attention(
                 share_cu_seqlens_ref, # Not used by AOT
             )
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
-<<<<<<< HEAD
             os.environ["NVTE_FUSED_ATTN_CK"] = "1"
             os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "0"
             os.environ["NVTE_CK_USES_FWD_V3"] = "1"
             os.environ["NVTE_CK_USES_BWD_V3"] = "1"
-            fused_attn_fwd_1, fused_attn_bwd_1 = _run_dot_product_attention(
-=======
             fused_attn_fwd_1, _, fused_attn_bwd_1 = _run_dot_product_attention(
->>>>>>> 389a6b
                 dtype,
                 config,
                 "FusedAttention",
@@ -1926,37 +1906,7 @@ qkv_layout_fp8_vs_f16 = ["sbh3d", "bshd_bshd_bshd", "sbhd_sbhd_sbhd"]
 qkv_format_fp8_vs_f16 = ["bshd", "sbhd"]
 
 
-<<<<<<< HEAD
-def _rmse(a, b):
-    return math.sqrt((torch.pow((a - b), 2) / a.numel()).sum())
-
-
-def _error(a, b, name_a, name_b, atol, rtol, rmse_tol):
-    logging.debug(name_a + " min {:.6f} max {:.6f}".format(a.min().item(), a.max().item()))
-    logging.debug(name_b + " min {:.6f} max {:.6f}".format(b.min().item(), b.max().item()))
-    try:
-        if a.dtype != b.dtype:
-            a = a.to(b.dtype)
-        torch.testing.assert_close(a, b, atol=atol, rtol=rtol)
-    except Exception as e:
-        logging.debug(e)
-
-    rmse = _rmse(a, b)
-    logging.debug(name_a + " vs " + name_b + " RMSE: {:.6f}".format(rmse))
-    rmse_range = max(a.max().item(), b.max().item()) - min(a.min().item(), b.min().item())
-    assert rmse < rmse_tol * rmse_range, (
-        name_a
-        + " vs "
-        + name_b
-        + " RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
-            rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
-        )
-    )
-
-
 @pytest.mark.skipif(IS_HIP_EXTENSION, reason="FP8 Fused attention is not supported on ROCm")
-=======
->>>>>>> 389a6b
 @pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
 @pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)

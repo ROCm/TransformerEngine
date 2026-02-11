@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -17,6 +17,7 @@ from transformer_engine.common.recipe import (
     Float8CurrentScaling,
     MXFP8BlockScaling,
 )
+from transformer_engine.pytorch import torch_version
 
 import torch
 import torch.distributed as dist
@@ -28,23 +29,8 @@ from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import init_device_mesh
 from transformer_engine.pytorch import QuantizedTensor
 from contextlib import nullcontext
-<<<<<<< HEAD
-from transformer_engine.pytorch import torch_version
-
-class SimpleNet(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size):
-        super(SimpleNet, self).__init__()
-        self.fc1 = te.Linear(input_size, hidden_size)
-        self.fc2 = te.Linear(hidden_size, output_size)
-
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
-=======
 
 LOCAL_RANK = None
->>>>>>> 389a6b
 
 
 def dist_print(msg):

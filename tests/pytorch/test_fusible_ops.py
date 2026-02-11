@@ -35,12 +35,7 @@ from transformer_engine.pytorch import (
     NVFP4Quantizer,
     is_bf16_available,
 )
-<<<<<<< HEAD
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
-from transformer_engine.pytorch.utils import is_bf16_compatible
 from transformer_engine.pytorch.utils import get_device_compute_capability
-=======
->>>>>>> 389a6b
 import transformer_engine_torch as tex
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
@@ -1377,20 +1372,8 @@ class TestBasicOps:
         # Expected numerical error
         tols = dtype_tols(dtype)
 
-        # Explicit checks for quantization
         if quantized_compute:
-<<<<<<< HEAD
-            tols = dtype_tols(y_test._quantizer.dtype)
-            expected_tensor_cls = {
-                Float8Quantizer:Float8Tensor,
-                Float8CurrentScalingQuantizer:Float8Tensor,
-                MXFP8Quantizer:MXFP8Tensor
-            }[type(y_test._quantizer)]
-            assert isinstance(y_test, expected_tensor_cls)
-            y_test = y_test.dequantize(dtype=torch.float32)
-=======
             tols = quantization_tols(quantization)
->>>>>>> 389a6b
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")

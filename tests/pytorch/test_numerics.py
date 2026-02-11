@@ -38,15 +38,6 @@ from transformer_engine.pytorch import (
     LayerNorm,
     Fp8Padding,
     Fp8Unpadding,
-<<<<<<< HEAD
-)
-from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils as fa_utils
-from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
-from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
-from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
-from transformer_engine.pytorch.tensor.float8_tensor import (
-=======
->>>>>>> 389a6b
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
     MXFP8Quantizer,
@@ -57,19 +48,15 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
     is_bf16_available,
     is_nvfp4_available,
 )
+from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils as fa_utils
 from transformer_engine.pytorch import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
-<<<<<<< HEAD
-from utils import ModelConfig, reset_rng_states, get_available_attention_backends
+from utils import ModelConfig, reset_rng_states
 if IS_HIP_EXTENSION:
     from utils import EnvVarCleaner
-=======
-from utils import ModelConfig, reset_rng_states
->>>>>>> 389a6b
-
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
@@ -202,28 +189,6 @@ if torch.cuda.get_device_capability() == (9, 0):
     use_cutlass_grouped_gemm.append(True)
 
 
-<<<<<<< HEAD
-def is_fused_attn_available(
-    config: ModelConfig,
-    dtype: torch.dtype,
-    qkv_layout="bshd_bshd_bshd",
-    is_training=True,
-    deterministic=False,
-):
-    _, _, fused_attn_backends = get_available_attention_backends(
-        config,
-        qkv_dtype=dtype,
-        qkv_layout=qkv_layout,
-        is_training=is_training,
-        deterministic=deterministic,
-    )
-    if IS_HIP_EXTENSION:
-        return fused_attn_backends != []
-    return FusedAttnBackend["F16_arbitrary_seqlen"] in fused_attn_backends
-
-
-=======
->>>>>>> 389a6b
 def get_causal_attn_mask(sq: int) -> torch.Tensor:
     return torch.triu(torch.ones(sq, sq, device="cuda"), diagonal=1).bool()
 
@@ -806,7 +771,6 @@ def test_gpt_full_activation_recompute(
 ):
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
-<<<<<<< HEAD
     if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5):
         if (dtype == torch.bfloat16
             and not fp8
@@ -814,13 +778,11 @@ def test_gpt_full_activation_recompute(
             and recipe.float8_per_tensor_scaling()
             ):
             pytest.skip("hipBLASLt does not provide suitable algorithms on GFX950 for this config.")
-=======
     if fp8 and recipe.nvfp4():
         if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
             pytest.skip(
                 f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
             )
->>>>>>> 389a6b
 
     config = model_configs[model]
     torch.compiler.reset() # avoid cache size limit overflow
@@ -972,12 +934,6 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
 @pytest.mark.parametrize("model", ["126m"])
 def test_gpt_checkpointing(dtype, bs, model):
     config = model_configs[model]
-<<<<<<< HEAD
-    if not is_fused_attn_available(config, dtype, deterministic=True):
-        pytest.skip("No attention backend available.")
-
-=======
->>>>>>> 389a6b
     outputs = _test_e2e_checkpointing(bs, dtype, config, checkpoint=False)
     outputs_checkpoint = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
 

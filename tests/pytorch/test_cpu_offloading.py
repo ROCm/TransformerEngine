@@ -46,15 +46,9 @@ NUM_HEADS = model_config["small"].num_heads
 NUM_LAYERS = model_config["small"].num_layers
 EPSILON = model_config["small"].eps
 
-<<<<<<< HEAD
-# Flash attention saves some internal tensor for the backward pass
-# that cannot be offloaded to CPU.
-assert os.getenv("NVTE_FLASH_ATTN", "1") == "0"
-=======
 # Disable garbage collection to tests if there are reference cycles.
 # We do not want them, because they can result in CUDA out of memory errors.
 import gc
->>>>>>> 389a6b
 
 gc.disable()
 

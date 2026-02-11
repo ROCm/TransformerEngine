@@ -9,15 +9,8 @@ import pytest
 
 import transformer_engine.pytorch as te
 
-<<<<<<< HEAD
-import transformer_engine_torch as tex
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.common.recipe import Float8CurrentScaling, Format
-from transformer_engine.pytorch.fp8 import fp8_autocast, get_fp8_torch_dtype
-=======
 from transformer_engine.common.recipe import Float8CurrentScaling
 from transformer_engine.pytorch.quantization import autocast, get_fp8_torch_dtype
->>>>>>> 389a6b
 
 
 # read env variable NVTE_TEST_FLOAT8_CURRENT_SCALING_EXACT_TENSOR_DUMP_DIR to override the default tensor dump directory

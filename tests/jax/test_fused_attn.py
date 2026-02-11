@@ -24,12 +24,8 @@ from jax import value_and_grad, jit
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from jax.typing import ArrayLike, DTypeLike
 
-<<<<<<< HEAD
-from transformer_engine.jax import fp8_autocast
 from transformer_engine.jax.cpp_extensions.misc import is_hip_extension
-=======
 from transformer_engine.jax import autocast
->>>>>>> 389a6b
 from transformer_engine.jax.sharding import MeshResource
 from transformer_engine.jax.attention import (
     AttnBiasType,

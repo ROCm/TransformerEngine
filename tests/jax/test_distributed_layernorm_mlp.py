@@ -275,23 +275,16 @@ class TestDistributedLayernormMLP:
                 )  # +1 for multi_gpus
 
                 multi_fwd, multi_grads = multi_jitter(*multi_inputs, *static_inputs, True)
-<<<<<<< HEAD
         
         # TODO: skip cases with single fwd as nan/inf
         if is_hip_extension() and (jnp.any(jnp.isnan(single_fwd)) or
                                    jnp.any(jnp.isinf(single_fwd))):
             pytest.skip("skip tests with nan/inf single fwd.")
-            
-        fwd_test_type = dtype if fp8_recipe is None else jnp_float8_e4m3_type
-        bwd_test_type = dtype if fp8_recipe is None else jnp_float8_e5m2_type
-=======
-
         fwd_test_type = bwd_test_type = dtype
         if quantization_recipe is not None:
             quantize_config = get_quantize_config_with_recipe(quantization_recipe)
             fwd_test_type = quantize_config.FWD_DTYPE
             bwd_test_type = quantize_config.BWD_DTYPE
->>>>>>> 389a6b
 
         if fwd_test_type == jnp.float16 and use_bias:
             assert_allclose(multi_fwd, single_fwd, atol=0.04, rtol=1.5)
