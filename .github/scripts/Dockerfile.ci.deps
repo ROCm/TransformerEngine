@@ -1,0 +1,27 @@
+# TE CI Dockerfile
+ARG BASE_DOCKER=registry-sc-harbor.amd.com/framework/compute-rocm-rel-7.2:57_ubuntu22.04_py3.11_pytorch_release-2.8_08d38866
+FROM $BASE_DOCKER
+WORKDIR /
+
+RUN pip install setuptools wheel
+RUN pip install ipython pytest fire pydantic pybind11 ninja pandas
+RUN apt-get update && apt-get install -y vim
+
+ARG PYTORCH_ROCM_ARCH=gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101;gfx1200;gfx1201;gfx950;gfx1151
+
+# Install flash-attention v2.8.1
+ENV GPU_ARCHS=gfx90a;gfx950;gfx942
+RUN git clone --branch v2.8.1 --depth 1 https://github.com/Dao-AILab/flash-attention.git \
+    && cd flash-attention \
+    && FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE && FLASH_ATTENTION_SKIP_CK_BUILD=FALSE python setup.py install \
+    && cd ..
+
+
+RUN pip install \
+    https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/jax_rocm7_pjrt-0.8.0%2Brocm7.2.0-py3-none-manylinux_2_28_x86_64.whl \
+    https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/jax_rocm7_plugin-0.8.0%2Brocm7.2.0-cp311-cp311-manylinux_2_28_x86_64.whl \
+    jax==0.8.0 \
+    https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/jaxlib-0.8.0%2Brocm7.2.0-cp311-cp311-manylinux_2_27_x86_64.whl
+
+WORKDIR /workspace/
+CMD ["/bin/bash"]
