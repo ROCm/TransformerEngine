@@ -1,5 +1,3 @@
-# This file was modified for portability to AMDGPU
-# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -15,19 +13,12 @@ from typing import Any, Optional
 
 import torch
 
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
-
 from transformer_engine.common.recipe import Recipe
 from ..fp8 import (
     FP8GlobalStateManager,
     RecipeState,
     fp8_autocast,
-    unpad_scales,
 )
-
-from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
-
 from ..tensor import Quantizer
 
 
@@ -674,12 +665,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         if extra_state_key in state_dict:
             self.set_extra_state(state_dict[extra_state_key])
         super()._load_from_state_dict(*args, **kwargs)
-        if IS_HIP_EXTENSION:
-            for name, param in self.named_parameters(recurse=False):
-                if isinstance(param, MXFP8TensorBase):
-                    unpad_scales(param, transpose=getattr(self, "layout", "N")=="T", block_size=32)
-                elif isinstance(param, Float8BlockwiseQTensorBase):
-                    unpad_scales(param, transpose=getattr(self, "layout", "N")=="T", block_size=128)
 
 
 class FusedOperation(FusibleOperation):
