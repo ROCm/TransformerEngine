@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -444,8 +444,10 @@ def run_dpa_with_cp(
         if not fp8_bwd:
             tensors[0], tensors[4] = tensors_to_deq
     for tensor in tensors:
-        assert torch.all(~torch.isnan(tensor))
-        assert torch.all(~torch.isinf(tensor))
+        # For THD format, only check non-padding regions as gradients in padding regions are undefined
+        tensor_to_check = tensor[:cu_seqlens_q[-1]] if qkv_format == "thd" else tensor
+        assert torch.all(~torch.isnan(tensor_to_check))
+        assert torch.all(~torch.isinf(tensor_to_check))
     out, dq, dk, dv, out_, dq_, dk_, dv_ = tensors
 
     ############  compare results between CP and no-CP ############
