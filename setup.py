@@ -12,7 +12,6 @@ import time
 from pathlib import Path
 from typing import List, Tuple
 import subprocess
-import sys
 
 import setuptools
 from setuptools.command.egg_info import egg_info
@@ -35,8 +34,6 @@ current_file_path = Path(__file__).parent.resolve()
 
 
 from setuptools.command.build_ext import build_ext as BuildExtension
-from setuptools.command.editable_wheel import editable_wheel
-from setuptools.command.build import SubCommand
 
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
 
@@ -58,25 +55,6 @@ class HipifyMeta(egg_info):
 CMakeBuildExtension = get_build_ext(BuildExtension)
 if not rocm_build():
     archs = cuda_archs()
-
-# A custom develop command only used for ROCm builds
-class EditableWheel(editable_wheel, SubCommand):
-    def run(self):
-        super().run()
-        if (
-            int(os.getenv("NVTE_FUSED_ATTN_CK", "1")) and
-            int(os.getenv("NVTE_FUSED_ATTN", "1"))
-        ):
-            # Ensure that the AITER ASM kernels are properly available at runtime
-            # by creating a symlink to them.
-            project_dir = Path(__file__).parent
-            asm_src_dir = project_dir / '3rdparty' / 'aiter' / 'hsa'
-            # Must be synced with
-            # TransformerEngine/transformer_engine/common/ck_fused_attn/src/ck_fused_attn_utils.cpp
-            asm_target_dir = project_dir / 'transformer_engine' / 'lib' / 'aiter'
-            if asm_src_dir.is_dir() and not asm_target_dir.is_dir():
-                print(f"Setting up symlink for AITER ASM kernels: {asm_target_dir} -> {asm_src_dir}")
-                asm_target_dir.symlink_to(asm_src_dir)
 
 class TimedBdist(bdist_wheel):
     """Helper class to measure build time"""
@@ -110,14 +88,6 @@ def setup_common_extension() -> CMakeExtension:
             cmake_flags.append("-DUSE_FUSED_ATTN_CK=OFF")
         elif os.getenv("NVTE_FUSED_ATTN_CK") or os.getenv("NVTE_FUSED_ATTN"):
             cmake_flags.append("-DUSE_FUSED_ATTN_CK=ON")
-            try:
-                subprocess.run(
-                    sys.executable + " tools/check_aiter_mha_args_usage.py --mode both",
-                    shell=True, check=True
-                )
-            except subprocess.CalledProcessError:
-                print("Error checking AITER mha_args usage.")
-                sys.exit(1)
 
         if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))) and os.getenv("NVTE_ENABLE_ROCSHMEM") is None:
             os.environ["NVTE_ENABLE_ROCSHMEM"] = '1'
@@ -207,7 +177,6 @@ if __name__ == "__main__":
     with open("README.rst", encoding="utf-8") as f:
         long_description = f.read()
 
-    cmdclass = {"egg_info": HipifyMeta, "build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist}
     # Settings for building top level empty package for dependency management.
     if bool(int(os.getenv("NVTE_BUILD_METAPACKAGE", "0"))):
         assert bool(
@@ -215,6 +184,7 @@ if __name__ == "__main__":
         ), "NVTE_RELEASE_BUILD env must be set for metapackage build."
         te_cuda_vers = "rocm" if rocm_build() else "cu12"
         ext_modules = []
+        cmdclass = {}
         package_data = {}
         include_package_data = False
         install_requires = ([f"transformer_engine_{te_cuda_vers}=={__version__}"],)
@@ -225,7 +195,7 @@ if __name__ == "__main__":
     else:
         install_requires, test_requires = setup_requirements()
         ext_modules = [setup_common_extension()]
-        cmdclass["editable_wheel"] = EditableWheel
+        cmdclass = {"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist}
         package_data = {
             "": ["VERSION.txt"],
             "transformer_engine.pytorch.triton_kernels.gmm": ["configs/*.json"],
@@ -271,7 +241,7 @@ if __name__ == "__main__":
         long_description=long_description,
         long_description_content_type="text/x-rst",
         ext_modules=ext_modules,
-        cmdclass=cmdclass,
+        cmdclass={"egg_info": HipifyMeta, "build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist},
         python_requires=">=3.8",
         classifiers=["Programming Language :: Python :: 3"],
         install_requires=install_requires,

@@ -8,6 +8,9 @@
 #include <dlfcn.h>
 #include <filesystem>
 #include <mutex> //once_flag
+
+#include <hip/hip_runtime_api.h>
+
 #include "ck_fused_attn_utils.hpp"
 #include "ck_fused_attn/ck_fused_attn.hpp"
 #include "mask.hpp"
@@ -19,34 +22,28 @@ namespace ck_fused_attn{
 void set_aiter_asm_dir() {
   static std::once_flag aiter_asm_dir_once;
   std::call_once(aiter_asm_dir_once, []() {
-    hipDeviceProp_t prop;
-    hipError_t res= hipGetDeviceProperties(&prop, 0);
-    if (res != hipSuccess) {
-      throw std::runtime_error(std::string(
-        "hipGetDeviceProperties failed with error: ") + hipGetErrorString(res));
-    }
-    switch (prop.major*10 + prop.minor) {
-      case 94: // Gfx942
-      case 95: // Gfx950
-        break;
-      default:
-        // Unsupported V3 architecture
-        return;
-    }
     Dl_info info;
     dladdr((void*)set_aiter_asm_dir, &info);
-    setenv("AITER_ASM_DIR",
-           (std::filesystem::path(info.dli_fname).parent_path() / "aiter").c_str(), 1);
-    if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG")) {
-      if (std::string(env_p) == "1"){
-        // Print the set environment variable for debugging purposes
-        std::cout << "AITER_ASM_DIR set to: " << getenv("AITER_ASM_DIR") << std::endl;
+    auto install_lib_path = std::filesystem::path(info.dli_fname).parent_path() / "aiter";
+    const char* log_ck_config = std::getenv("NVTE_LOG_CK_CONFIG");
+    auto editable_install_path = std::filesystem::path(info.dli_fname).parent_path().parent_path().parent_path() / "3rdparty" / "aiter" / "hsa";
+    for(const auto& path : {install_lib_path, editable_install_path}) {
+      if(std::filesystem::exists(path)) {
+        setenv("AITER_ASM_DIR", path.c_str(), 1);
+        if (log_ck_config && log_ck_config == std::string("1")) {
+          std::cout << "AITER_ASM_DIR set to: " << getenv("AITER_ASM_DIR") << std::endl;
+        }
+        return;
+      }
+      if(log_ck_config && log_ck_config == std::string("1")) {
+        std::cout << "Checked AITER_ASM_DIR path: " << path << " does not exist." << std::endl;
       }
     }
   });
 }
 
-bool aiter_asm_dir_loaded = (set_aiter_asm_dir(), true);
+
+const bool aiterAsmDirInitialized = (set_aiter_asm_dir(), true);
 
 std::string get_data_type_str(DType dtype){
   std::string data_type_str;
