@@ -8,6 +8,10 @@ project(aotriton LANGUAGES CXX)
 # The AOTriton C++ runtime will be built from {TE}/3rdparty/aotriton
 # Hence there is no need to add multiple ROCM version here
 
+if(DEFINED ENV{AOTRITON_PATH})
+    set(AOTRITON_PATH $ENV{AOTRITON_PATH})
+endif()
+
 set(__AOTRITON_INSTALL_DIR "${CMAKE_CURRENT_BINARY_DIR}/aotriton")
 set(__AOTRITON_SUFFIX "_TEprivate")
 
@@ -113,8 +117,9 @@ if(NOT DEFINED AOTRITON_PATH)
 else()
     # Use aotriton built during initial TE building/installation
     # When only need rebuild TE library itself
+    message(STATUS "Using existing AOTriton lib at $ENV{AOTRITON_PATH}")
     unset(AOTRITON_LIB CACHE)
-    find_library(AOTRITON_LIB NAMES aotriton aotriton${__AOTRITON_SUFFIX}_v2 PATHS ${AOTRITON_PATH}/lib REQUIRED NO_DEFAULT_PATH)
+    find_library(AOTRITON_LIB NAMES aotriton aotriton${__AOTRITON_SUFFIX}_v2 PATHS ${AOTRITON_PATH} REQUIRED NO_DEFAULT_PATH)
     add_library( aotriton SHARED IMPORTED )
     set_target_properties( aotriton PROPERTIES IMPORTED_LOCATION ${AOTRITON_LIB} )
     target_include_directories(aotriton INTERFACE ${AOTRITON_PATH}/include)
