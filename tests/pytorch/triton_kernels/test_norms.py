@@ -1,29 +1,29 @@
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
 
+import math
 import os
 import torch
 import pytest
 from functools import partial
 from itertools import product
 
+from transformer_engine.pytorch.constants import MXFP8_BLOCK_SCALING_SIZE
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch import cpp_extensions as tex
-from transformer_engine.pytorch.triton_kernels.norm_common import get_ln_sm_margin
+from transformer_engine.pytorch.triton_kernels.utils import get_ln_sm_margin
 from transformer_engine.pytorch.triton_kernels.common import (
     torch_dtype_to_te_dtype,
     te_dtype_to_torch_dtype
 )
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8Tensor
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
-from transformer_engine.pytorch.triton_kernels.rmsnorm import (
-    te_rmsnorm_bwd_triton,
-    te_rmsnorm_fwd_triton,
-)
-from transformer_engine.pytorch.triton_kernels.layernorm import (
+from transformer_engine.pytorch.triton_kernels.norms_common import (
     te_layernorm_bwd_triton,
     te_layernorm_fwd_triton,
+    te_rmsnorm_bwd_triton,
+    te_rmsnorm_fwd_triton,
 )
 from test_common import dtype_tols, te_compare_results, str_to_torch_dtype, fill_uniform
 
@@ -406,11 +406,11 @@ class TestNorms:
         quantization, fp8_dtype
         ):
         tols = dtype_tols(out_triton.dtype if quantization is None else fp8_dtype)
-        _compare_func = partial(te_compare_results, **tols, use_torch_semantics=True)
+        compare_func = partial(te_compare_results, **tols, use_torch_semantics=True)
 
         dq_out_triton = out_triton.dequantize()
         dq_out_hip = out_hip.dequantize()
-        _compare_func(
+        compare_func(
             actual=dq_out_triton,
             expected=dq_out_hip,
             msg=lambda msg: f"Output does not match triton <-> hip\n\n{msg}\n",
@@ -428,7 +428,7 @@ class TestNorms:
             if not out_hip._transpose_invalid:
                 # The transpose data are generally uint8 so we must convert
                 # them for floating point comparison.
-                _compare_func(
+                compare_func(
                     actual=out_triton._transpose.view(te_dtype_to_torch_dtype(out_triton._fp8_dtype)).to(torch.float32),
                     expected=out_hip._transpose.view(te_dtype_to_torch_dtype(out_triton._fp8_dtype)).to(torch.float32),
                     msg=lambda msg: f"Output transpose does not match triton <-> hip\n\n{msg}\n",
@@ -437,24 +437,15 @@ class TestNorms:
         elif quantization == "mxfp8":
             if not isinstance(out_triton, MXFP8Tensor):
                 raise ValueError(f"Expected a MXFP8Tensor but got {type(out_triton)} instead.")
-
-            # TODO(micky774): Figure out if we need to apply the same view
-            # trick to MXFP8 data as we do to FP8 transpose data.
-            # I suspect not.
             if out_hip._rowwise_data is not None:
-                _compare_func(
-                    actual=out_triton,
-                    expected=out_hip,
-                    msg=lambda msg: f"Output rowwise data does not match triton <-> hip\n\n{msg}\n",
-                )
-                out_triton._rowwise_data = None
+                assert out_triton._rowwise_data is not None, "Expected rowwise data."
             else:
                 assert out_triton._rowwise_data is None, "Expected no rowwise data."
 
         # We use higher precision for the scales
-        _compare_func = partial(te_compare_results, atol=1e-6, rtol=5e-5, use_torch_semantics=True)
+        compare_func = partial(te_compare_results, atol=1e-6, rtol=5e-5, use_torch_semantics=True)
         if quantization == "fp8":
-            _compare_func(
+            compare_func(
                 actual=out_triton._scale_inv,
                 expected=out_hip._scale_inv,
                 msg=lambda msg: f"Output scale inverse does not match triton <-> hip\n\n{msg}\n",
@@ -462,6 +453,15 @@ class TestNorms:
         elif quantization == "mxfp8":
             has_rscale_triton = out_triton._rowwise_scale_inv is not None
             has_rscale_hip = out_hip._rowwise_scale_inv is not None
+
+            # The scale_inv values may differ slightly, but will still dequantize close enough to 
+            # pass the earlier comparisons.
+            compare_func = partial(te_compare_results, atol=1, rtol=0, use_torch_semantics=True)
+
+            # The MXFP8 tensors carry their scale_inv values in a padded
+            # format, hence we must omit the padded values.
+            input_shape = out_triton.shape
+            unpad_rscale_inv_shape = (math.prod(input_shape[:-1]), input_shape[-1] // MXFP8_BLOCK_SCALING_SIZE)
             if has_rscale_triton != has_rscale_hip:
                 msg = "Expected rowwise scale to "
                 if has_rscale_hip:
@@ -469,27 +469,26 @@ class TestNorms:
                 msg += "be None."
                 raise ValueError(msg)
             if has_rscale_triton:
-                _compare_func(
-                    actual=out_triton._rowwise_scale_inv.view(te_dtype_to_torch_dtype(out_triton._fp8_dtype)),
-                    expected=out_hip._rowwise_scale_inv.view(te_dtype_to_torch_dtype(out_triton._fp8_dtype)),
+                compare_func(
+                    actual=out_triton._rowwise_scale_inv[:unpad_rscale_inv_shape[0], :unpad_rscale_inv_shape[1]],
+                    expected=out_hip._rowwise_scale_inv[:unpad_rscale_inv_shape[0], :unpad_rscale_inv_shape[1]],
                     msg=lambda msg: f"Output rowwise scale inverse does not match triton <-> hip\n\n{msg}\n",
                 )
 
             has_cscale_triton = out_triton._columnwise_scale_inv is not None
             has_cscale_hip = out_hip._columnwise_scale_inv is not None
             if has_cscale_triton != has_cscale_hip:
-                msg = "Expected columnwwise scale to "
+                msg = "Expected columnwise scale to "
                 if has_cscale_hip:
                    msg += "not "
                 msg += "be None."
                 raise ValueError(msg)
             if has_cscale_triton:
-                _compare_func(
-                    actual=out_triton._columnwise_scale_inv.view(te_dtype_to_torch_dtype(out_triton._fp8_dtype)),
-                    expected=out_hip._columnwise_scale_inv.view(te_dtype_to_torch_dtype(out_triton._fp8_dtype)),
+                compare_func(
+                    actual=out_triton._columnwise_scale_inv[:unpad_rscale_inv_shape[1], :unpad_rscale_inv_shape[0]],
+                    expected=out_hip._columnwise_scale_inv[:unpad_rscale_inv_shape[1], :unpad_rscale_inv_shape[0]],
                     msg=lambda msg: f"Output columnwise scale inverse does not match triton <-> hip\n\n{msg}\n",
                 )
-
 
     def _compare_quantizers(
         self,
@@ -497,7 +496,7 @@ class TestNorms:
         quantization
     ):
         if quantization is None: return
-        _compare_func = partial(te_compare_results, atol=1e-6, rtol=5e-5, use_torch_semantics=True)
+        compare_func = partial(te_compare_results, atol=1e-6, rtol=5e-5, use_torch_semantics=True)
 
         if quantizer_triton.dtype != quantizer_hip.dtype:
             raise ValueError("Expected matching quantizer dtypes, but got "
@@ -511,12 +510,12 @@ class TestNorms:
                 raise ValueError(f"Expected matching quantizer {usage} but got {qt_usage=} != {qh_usage=}")
 
         if quantization == "fp8":
-            _compare_func(
+            compare_func(
                 actual=quantizer_triton.scale,
                 expected=quantizer_hip.scale,
                 msg=lambda msg: f"Quantizer scale does not match triton <-> hip\n\n{msg}\n",
             )
-            _compare_func(
+            compare_func(
                 actual=quantizer_triton.amax,
                 expected=quantizer_hip.amax,
                 msg=lambda msg: f"Quantizer amax does not match triton <-> hip\n\n{msg}\n",
@@ -529,15 +528,15 @@ class TestNorms:
         norm
     ):
         # We use higher precision for the remaining outputs
-        _compare_func = partial(te_compare_results, atol=1e-6, rtol=5e-5, use_torch_semantics=True)
+        compare_func = partial(te_compare_results, atol=1e-6, rtol=5e-5, use_torch_semantics=True)
 
-        _compare_func(
+        compare_func(
             actual=rsigma_triton,
             expected=rsigma_hip,
             msg=lambda msg: f"rsigma does not match triton <-> hip\n\n{msg}\n",
         )
         if norm == "layer":
-            _compare_func(
+            compare_func(
                 actual=mu_triton,
                 expected=mu_hip,
                 msg=lambda msg: f"mu does not match triton <-> hip\n\n{msg}\n",
@@ -579,20 +578,20 @@ class TestNorms:
         dbeta_triton, dbeta_hip,
         norm
     ):
-        _compare_func = partial(te_compare_results, atol=1.5e-4, rtol=1e-4, use_torch_semantics=True)
+        compare_func = partial(te_compare_results, atol=1.5e-4, rtol=1e-4, use_torch_semantics=True)
 
-        _compare_func(
+        compare_func(
             actual=dx_triton,
             expected=dx_hip,
             msg=lambda msg: f"dx does not match triton <-> hip\n\n{msg}\n",
         )
-        _compare_func(
+        compare_func(
             actual=dgamma_triton,
             expected=dgamma_hip,
             msg=lambda msg: f"dgamma does not match triton <-> hip\n\n{msg}\n",
         )
         if norm == "layer":
-            _compare_func(
+            compare_func(
                 actual=dbeta_triton,
                 expected=dbeta_hip,
                 msg=lambda msg: f"dbeta does not match triton <-> hip\n\n{msg}\n",
