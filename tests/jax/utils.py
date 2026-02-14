@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -68,6 +68,11 @@ def _check_mxfp8_gemm_support(with_jax_gemm, m, n, k, use_bias=False):
             pytest.skip(
                 "MXFP8 support for JAX GEMM is added in version 0.8.0, "
                 f"but the current detected version is {jax_version}."
+            )
+        if k < 64:
+            pytest.skip(
+                f"Input shape {(m, k)} x {(k, n)} with K={k} is not supported by "
+                f"ROCm jax.nn.scaled_matmul. K must be at least 64."
             )
 
 def _check_mxfp8_layernorm_mlp_support(
