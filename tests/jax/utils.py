@@ -64,9 +64,9 @@ def _check_mxfp8_gemm_support(with_jax_gemm, m, n, k, use_bias=False):
             pytest.skip("hipblaslt GEMM does not yet support MXFP8 with bias.")
     else:
         jax_version = version.parse(jax.__version__)
-        if jax_version < version.parse("0.8.0"):
+        if jax_version < version.parse("0.8.2"):
             pytest.skip(
-                "MXFP8 support for JAX GEMM is added in version 0.8.0, "
+                "MXFP8 support for JAX GEMM is added in version 0.8.2, "
                 f"but the current detected version is {jax_version}."
             )
         if k < 64:
