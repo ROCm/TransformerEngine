@@ -37,7 +37,7 @@ if [[ -z "${AITER_DIR}" || -z "${AITER_TEST_DIR}" || -z "${GPU_ARCHS_VAL}" ]]; t
 fi
 
 rm -rf "${AITER_DIR}/aiter/jit/build"
-AITER_LOG_MORE=1 \
+AITER_LOG_MORE=0 \
 CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT="${CK_TILE_BF16_DEFAULT}" \
 GPU_ARCHS="${GPU_ARCHS_VAL}" \
 python3 "${AITER_TEST_DIR}/compile.py"
