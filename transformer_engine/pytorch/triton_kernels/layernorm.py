@@ -7,11 +7,13 @@ from itertools import product
 import triton
 import triton.language as tl
 
-def get_autotune_config(full_tuning_space=False):
+def get_autotune_config(safe_tuning=False, full_tuning_space=False):
     if full_tuning_space:
         tuning_space = product([1, 2, 4], [4, 8, 16])
     else:
         tuning_space = [(1, 8), (1, 16), (2, 16), (4, 4), (4, 8), (4, 16)]
+    if safe_tuning:
+        tuning_space = [(w, nw) for (w, nw) in tuning_space if w <= 2 and nw <= 8]
     return [
         triton.Config({"waves_per_eu": waves_per_eu}, num_warps=num_warps, num_stages=1)
         for waves_per_eu, num_warps in tuning_space
@@ -159,7 +161,7 @@ def _layernorm_fwd_triton_impl(
         else:
             tl.store(q_amax_ptr + pid, amax)
 
-autotune_dec = triton.autotune(configs=get_autotune_config(), key=["n_rows", "n_cols"], use_cuda_graph=True)
+autotune_dec = triton.autotune(configs=get_autotune_config(safe_tuning=True), key=["n_rows", "n_cols"], use_cuda_graph=True)
 _layernorm_fwd_triton = autotune_dec(_layernorm_fwd_triton_impl)
 
 @triton.jit
