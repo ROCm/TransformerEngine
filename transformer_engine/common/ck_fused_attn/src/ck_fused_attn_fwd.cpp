@@ -278,15 +278,24 @@ hipError_t _ck_attn_fwd_impl(
   fmha_args.block_scale_size_q  = 0;
   fmha_args.block_scale_size_kv = 0;
 
+  if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_MAX_SEQLEN")){
+    if(is_group_mode && std::string(env_p) == "1"){
+      if(ck_log_config){
+        std::cout << "attn_fwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.";
+      }
+      fmha_args.max_seqlen_q = get_runtime_max_seqlen(b, cu_seqlen_q_ptr, cu_seqlen_q_padded_ptr, lse_ptr, stream);
+    }
+  }
+
   // print ck traits and fmha_args when needed
   log_fwd_config(func_name, has_dropout, fmha_args, ck_log_config);
   float average_runtime = aiter::mha_fwd(fmha_args, stream_config);
-  if(dump_path){
-    dump_fwd_timings(dump_path, average_runtime);
-  }
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");
+  }
+  if(dump_path){
+    dump_fwd_timings(dump_path, average_runtime);
   }
   return hipSuccess;
 }

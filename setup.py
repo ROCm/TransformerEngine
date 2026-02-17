@@ -89,6 +89,9 @@ def setup_common_extension() -> CMakeExtension:
             cmake_flags.append("-DUSE_FUSED_ATTN_CK=OFF")
         elif os.getenv("NVTE_FUSED_ATTN_CK") or os.getenv("NVTE_FUSED_ATTN"):
             cmake_flags.append("-DUSE_FUSED_ATTN_CK=ON")
+            # Dynamically set AITER_LOG_MORE based on PIP_VERBOSE to avoid excessive logging during build.
+            os.environ["AITER_LOG_MORE"] = str(max(int(os.environ.get('PIP_VERBOSE', '0')) - 1, 0))
+            # Explicitly checks the AITER API usage
             try:
                 subprocess.run(
                     sys.executable + " tools/check_aiter_mha_args_usage.py --mode both",
@@ -97,6 +100,7 @@ def setup_common_extension() -> CMakeExtension:
             except subprocess.CalledProcessError:
                 print("Error checking AITER mha_args usage.")
                 sys.exit(1)
+
         if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))) and os.getenv("NVTE_ENABLE_ROCSHMEM") is None:
             os.environ["NVTE_ENABLE_ROCSHMEM"] = '1'
             os.environ["NVTE_ENABLE_NVSHMEM"] = '0'

@@ -627,7 +627,7 @@ hipError_t _ck_attn_bwd_impl(
   fmha_args.nhead_stride_dq = stride_h_dq;
   fmha_args.nhead_stride_dk = is_mqa_gqa? stride_h_dk_expanded:stride_h_dk;
   fmha_args.nhead_stride_dv = is_mqa_gqa? stride_h_dv_expanded:stride_h_dv;
-  fmha_args.nhead_stride_dbias = (!is_group_mode) ? max_seqlen_q * max_seqlen_k : 0;
+  fmha_args.nhead_stride_dbias = is_group_mode? 0: max_seqlen_q * max_seqlen_k;
 
   // setup batch_stride_* arguments
   fmha_args.batch_stride_q = is_group_mode ? 0 : stride_b_q;
@@ -656,7 +656,7 @@ hipError_t _ck_attn_bwd_impl(
   // modify the max_seqlen_q for better performance in 0-length cases
   // lse_thd_ptr used as buffer
   if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_MAX_SEQLEN")) {
-    if(std::string(env_p) == "1"){
+    if(is_group_mode && std::string(env_p) == "1"){
       if(ck_log_config){
         std::cout << "attn_bwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.";
       }
@@ -667,14 +667,13 @@ hipError_t _ck_attn_bwd_impl(
 
   // print ck traits and args when needed
   log_bwd_config(func_name, fmha_args, ck_log_config);
-
   float average_runtime = aiter::mha_bwd(fmha_args, stream_config);
-  if(dump_path){
-    dump_bwd_timings(dump_path, average_runtime);
-  }
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
+  }
+  if(dump_path){
+    dump_bwd_timings(dump_path, average_runtime);
   }
   return hipSuccess;
 }
