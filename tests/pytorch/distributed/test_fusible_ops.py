@@ -43,7 +43,7 @@ from utils import dtype_tols, make_recipe, quantization_tols
 # Check what quantization schemes are supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
-nvfp4_available, reason_for_no_nvfp4 = FP8GlobalStateManager.is_mxfp8_available()
+nvfp4_available, reason_for_no_nvfp4 = FP8GlobalStateManager.is_nvfp4_available()
 quantization_list: list[Optional[str]] = [None]
 if fp8_available:
     quantization_list.extend(("fp8_delayed_scaling", "fp8_current_scaling"))

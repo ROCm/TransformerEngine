@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -70,6 +70,8 @@ def check_mxfp8_support() -> Tuple[bool, str]:
 
 def check_nvfp4_support() -> Tuple[bool, str]:
     """Return if nvfp4 support is available"""
+    if IS_HIP_EXTENSION:
+        return False, "NVFP4 is not yet supported on ROCm."
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
         return True, ""
     return False, "Device compute capability 10.0 or higher required for NVFP4 execution."
