@@ -842,13 +842,21 @@ std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size
       NVTE_CHECK(data_format == Float8BlockScaleTensorFormat::GEMM_READY,
                  "2D scaling is always GEMM_READY for now.");
       sinv0 = (m_dim + kBlockLen - 1) / kBlockLen;
+#ifdef __HIP_PLATFORM_AMD__
+      sinv1 = (k_dim + kBlockLen - 1) / kBlockLen;
+#else
       sinv1 = roundup((k_dim + kBlockLen - 1) / kBlockLen, 4);
+#endif
     } else if (block_scaling_dim == 1) {
       // 1D scaling can be GEMM_READY or COMPACT
       bool rowwise_compact = data_format == Float8BlockScaleTensorFormat::COMPACT;
       // default rowwise scaling factor shape already transpose the scaling factor so it's GEMM_READY
       sinv0 = (k_dim + kBlockLen - 1) / kBlockLen;
+#ifdef __HIP_PLATFORM_AMD__
+      sinv1 = m_dim;
+#else
       sinv1 = rowwise_compact ? m_dim : roundup(m_dim, 4);
+#endif
       // if the rowwise format is compact, the scaling factor is not be transposed
       if (rowwise_compact) {
         std::swap(sinv0, sinv1);
@@ -869,12 +877,20 @@ std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size
       NVTE_CHECK(data_format == Float8BlockScaleTensorFormat::GEMM_READY,
                  "2D scaling is always GEMM_READY for now.");
       sinv0 = (k_dim + kBlockLen - 1) / kBlockLen;
+#ifdef __HIP_PLATFORM_AMD__
+      sinv1 = (m_dim + kBlockLen - 1) / kBlockLen;
+#else
       sinv1 = roundup((m_dim + kBlockLen - 1) / kBlockLen, 4);
+#endif
     } else if (block_scaling_dim == 1) {
       // 1D scaling can be GEMM_READY or COMPACT
       bool columnwise_compact = data_format == Float8BlockScaleTensorFormat::COMPACT;
       sinv0 = (m_dim + kBlockLen - 1) / kBlockLen;
+#ifdef __HIP_PLATFORM_AMD__
+      sinv1 = k_dim;
+#else
       sinv1 = columnwise_compact ? k_dim : roundup(k_dim, 4);
+#endif
       // GEMM READY case: scaling factor is [sinv0, sinv1], already transposed here for CuBLAS
       // for COMPACT case, since we apply 128x1 scaling here without transposing columnwise data, scaling factor is also [sinv0, sinv1]
       // so no need to swap sinv0 and sinv1 here
@@ -1107,11 +1123,14 @@ std::vector<size_t> MXFP8Quantizer::get_scale_shape(const std::vector<size_t>& s
   NVTE_CHECK(last_dim % MXFP8_BLOCK_SIZE == 0 && (numel / last_dim) % MXFP8_BLOCK_SIZE == 0,
              "MXFP8 requires tensor dims that are divisble by ", MXFP8_BLOCK_SIZE,
              " (got shape=", shape, ")");
-
+#ifdef __HIP_PLATFORM_AMD__
+  return !columnwise 
+         ? std::vector<size_t>{numel / last_dim, last_dim / MXFP8_BLOCK_SIZE} 
+         : std::vector<size_t>{numel / last_dim / MXFP8_BLOCK_SIZE, last_dim};
+#else
   std::vector<size_t> scale_shape;
 
   bool rowwise_usage = !columnwise;
-
   if (rowwise_usage) {
     // rowwise scaling factor shape
     size_t sinv0 = roundup(numel / last_dim, 128);
@@ -1124,6 +1143,7 @@ std::vector<size_t> MXFP8Quantizer::get_scale_shape(const std::vector<size_t>& s
     scale_shape = {sinv0, sinv1};
   }
   return scale_shape;
+#endif
 }
 
 }  // namespace transformer_engine::pytorch

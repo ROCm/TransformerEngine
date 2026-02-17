@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved. 
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -83,7 +85,11 @@ constexpr struct BlockSize {
 constexpr struct Alignment {
   size_t x;
   size_t y;
+#ifndef __HIP_PLATFORM_AMD__
 } MXFP8_ALIGNMENT{128, 4};
+#else
+} MXFP8_ALIGNMENT{1, 1};
+#endif
 
 std::vector<size_t> get_mxfp8_scale_shape(size_t M, size_t N, bool is_colwise);
 

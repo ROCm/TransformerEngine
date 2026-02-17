@@ -113,12 +113,20 @@ class MXFP8Quantizer(Quantizer):
         # Allocate FP8 data
         data = torch.empty(shape, dtype=torch.uint8, device=device)
         # ROCm TE does not implement fuse padding zeros so use zero tensor here
-        scale_inv = torch.zeros(
-            round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
-            round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
-            dtype=torch.uint8,
-            device=device,
-        )
+        if IS_HIP_EXTENSION:
+            scale_inv = torch.zeros(
+                math.prod(shape[:-1]), 
+                math.ceil(shape[-1] / MXFP8_BLOCK_SCALING_SIZE),
+                dtype=torch.uint8,
+                device=device,
+            )
+        else:
+            scale_inv = torch.empty(
+                round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
+                round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
+                dtype=torch.uint8,
+                device=device,
+            )
 
         # Allocate FP8 data transpose if needed
         columnwise_data = None
@@ -126,12 +134,20 @@ class MXFP8Quantizer(Quantizer):
         if self.columnwise_usage:
             columnwise_data = torch.empty_like(data)
             # ROCm TE does not implement fuse padding zeros so use zero tensor here
-            columnwise_scale_inv = torch.zeros(
-                round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
-                round_up_to_nearest_multiple(shape[-1], 128),
-                dtype=torch.uint8,
-                device=device,
-            )
+            if IS_HIP_EXTENSION:
+                columnwise_scale_inv = torch.zeros(
+                    math.ceil(math.prod(shape[:-1]) / MXFP8_BLOCK_SCALING_SIZE),
+                    shape[-1],
+                    dtype=torch.uint8,
+                    device=device,
+                )
+            else:
+                columnwise_scale_inv = torch.empty(
+                    round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
+                    round_up_to_nearest_multiple(shape[-1], 128),
+                    dtype=torch.uint8,
+                    device=device,
+                )
 
         # Construct FP8 tensor
         return MXFP8Tensor(
