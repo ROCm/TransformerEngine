@@ -8,6 +8,8 @@ from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from .common import te_dtype_to_torch_dtype
 
+SAFE_TUNING = os.environ.get("NVTE_TRITON_SAFE_TUNING", "1") == "1"
+
 def get_ln_sm_margin(sm_margin_type):
     assert sm_margin_type in {"FWD", "BWD", "INF"}
     try:

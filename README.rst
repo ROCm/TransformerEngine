@@ -332,6 +332,9 @@ At runtime, you can enable specific triton kernels using the specific environmen
 * NVTE_USE_CAST_TRANSPOSE_TRITON=1 can be used to enable cast transpose (bgrad) triton kernels;
 * NVTE_USE_LAYERNORM_TRITON=1 can be used to enable layernorm triton kernels.
 * NVTE_USE_RMSNORM_TRITON=1 can be used to enable rmsnorm triton kernels.
+* NVTE_TRITON_SAFE_TUNING=0 can be used to enable aggressive tuning configs for layernorm and
+  rmsnorm triton kernels, which may provide better performance on some workloads at the risk
+  of memory access issues on larger workloads.
 
 MXFP8 support on ROCm (gfx95x only)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

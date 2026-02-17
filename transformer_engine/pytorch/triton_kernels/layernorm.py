@@ -6,8 +6,9 @@ from itertools import product
 
 import triton
 import triton.language as tl
+from .utils import SAFE_TUNING
 
-def get_autotune_config(safe_tuning=False, full_tuning_space=False):
+def get_autotune_config(safe_tuning=SAFE_TUNING, full_tuning_space=False):
     if full_tuning_space:
         tuning_space = product([1, 2, 4], [4, 8, 16])
     else:
@@ -161,7 +162,7 @@ def _layernorm_fwd_triton_impl(
         else:
             tl.store(q_amax_ptr + pid, amax)
 
-autotune_dec = triton.autotune(configs=get_autotune_config(safe_tuning=True), key=["n_rows", "n_cols"], use_cuda_graph=True)
+autotune_dec = triton.autotune(configs=get_autotune_config(), key=["n_rows", "n_cols"], use_cuda_graph=True)
 _layernorm_fwd_triton = autotune_dec(_layernorm_fwd_triton_impl)
 
 @triton.jit

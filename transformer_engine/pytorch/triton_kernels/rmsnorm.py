@@ -5,10 +5,15 @@ import torch
 import triton
 import triton.language as tl
 from itertools import product
+from .utils import SAFE_TUNING
 
-def get_autotune_config():
-    return [triton.Config({'waves_per_eu': we}, num_warps=nw) for (we, nw) in product([0, 1, 2, 4], [4, 8, 16])]
-
+def get_autotune_config(safe_tuning=SAFE_TUNING):
+    waves_per_eu = [0, 1, 2]
+    num_warps = [4, 8]
+    if not safe_tuning:
+        waves_per_eu.append(4)
+        num_warps.append(16)
+    return [triton.Config({'waves_per_eu': we}, num_warps=nw) for (we, nw) in product(waves_per_eu, num_warps)]
 
 # TODO(micky774) Implement fused MXFP8 quantization within the kernel
 @triton.jit
