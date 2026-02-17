@@ -1,0 +1,12 @@
+name: TransformerEngine CI Level 3
+
+on:
+  pull_request:
+    types: [ labeled, synchronize, reopened ]
+
+jobs:
+  build_and_test:
+    if: ${{ contains(github.event.pull_request.labels.*.name, 'Level 3') }}
+    uses: ./.github/workflows/rocm-ci.yml
+    with:
+      test_level: '3'

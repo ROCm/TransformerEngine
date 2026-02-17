@@ -15,6 +15,22 @@ on:
       - 'dev'
       - 'release_v1.**_rocm'
       - 'release_v2.**_rocm'
+  workflow_call:
+    inputs:
+      test_level:
+        description: 'Test Level (1-3)'
+        required: false
+        default: '1'
+        type: string
+      docker_image_override:
+        description: 'Manual Docker Image (Leave empty to use config file value)'
+        required: false
+        type: string
+      test_config_from_source:
+        description: 'DEBUG: Use config.json from current source branch instead of dev'
+        required: false
+        default: false
+        type: boolean
   workflow_dispatch:
     inputs:
       test_level:
