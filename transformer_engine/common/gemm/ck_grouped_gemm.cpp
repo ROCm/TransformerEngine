@@ -261,13 +261,16 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
   TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(a_dtype, te_type, {
     using T = typename TeTypeToCkType<te_type>::type;
 
-    if (accumulate)
+    if (accumulate) {
+      // FIXME: The accumulate path is currently disabled in nvte_multi_tensor_gemm
+      // due to instability on MI325.
       return dispatch_grouped<T, RowMajor, ck_tile::memory_operation_enum::atomic_add>(transA_use, transB_use,
                                      A_use, B_use, D_te.data(), group_num,
                                      ws_ptr, ws_bytes, stream);
-    else
+    } else {
       return dispatch_grouped<T, RowMajor, ck_tile::memory_operation_enum::set>(transA_use, transB_use,
                                      A_use, B_use, D_te.data(), group_num,
                                      ws_ptr, ws_bytes, stream);
+    }
   });
 }

@@ -806,10 +806,11 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
                              workspace, accumulate, use_split_accumulator, math_sm_count, stream);
   };
 
-  // Currently only support cutlass group gemm on Hopper Arch
 #ifdef __HIP_PLATFORM_AMD__
-  if (!use_cutlass || num_gemms == 1) {
+  // FIXME: The accumulate path is currently disabled due to instability on MI325.
+  if (!use_cutlass || num_gemms == 1 || accumulate == true) {
 #else
+  // Currently only support cutlass group gemm on Hopper Arch
   if (!(is_hopper && use_cutlass)) {
 #endif
     cublas_path();
