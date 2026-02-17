@@ -520,12 +520,6 @@ hipError_t _ck_attn_bwd_impl(
   float p_undrop = 1.0 - p_drop;
   bool s_randval = false;
 
-  bias_enum bias_type = bias_enum::no_bias;
-  BiasShape bias_shape = BiasShape::k11SS;
-  if (!is_group_mode) {
-    std::tie(bias_type, bias_shape) = get_ck_bias_type_shape(attn_bias_type, b, h, bias_b, bias_h);
-  }
-
   ck_tile::index_t left, right;
   left = window_size_left;
   right = window_size_right;
@@ -537,6 +531,42 @@ hipError_t _ck_attn_bwd_impl(
   ck_tile::stream_config stream_config{stream, dump_path!=nullptr, ck_log_config};
 
   std::string data_type_str = get_data_type_str(dtype);
+
+  bias_enum bias_type = bias_enum::no_bias;
+  BiasShape bias_shape = BiasShape::k11SS;
+  if (!is_group_mode) {
+    std::tie(bias_type, bias_shape) = get_ck_bias_type_shape(attn_bias_type, b, h, bias_b, bias_h);
+  }
+  const ck_tile::index_t batch_stride_bias = [&]() -> ck_tile::index_t {
+    if(is_group_mode){
+      return 0;
+    }
+    switch (bias_shape) {
+      case BiasShape::k11SS:
+      case BiasShape::k1HSS:
+        return 0;
+      case BiasShape::kBHSS:
+      case BiasShape::kB1SS:
+        return bias_h * max_seqlen_q * max_seqlen_k;
+      default:
+        throw std::runtime_error("Invalid bias shape");
+    }
+  }();
+  const ck_tile::index_t nhead_stride_bias = [&]() -> ck_tile::index_t {
+    if(is_group_mode){
+      return 0;
+    }
+    switch (bias_shape) {
+      case BiasShape::k1HSS:
+      case BiasShape::kBHSS:
+        return max_seqlen_q * max_seqlen_k;
+      case BiasShape::k11SS:
+      case BiasShape::kB1SS:
+        return 0;
+      default:
+        throw std::runtime_error("Invalid bias shape");
+    }
+  }();
 
   aiter::mha_bwd_args fmha_args{};
   fmha_args.mask_type = static_cast<int>(mask_type);
@@ -616,9 +646,7 @@ hipError_t _ck_attn_bwd_impl(
   fmha_args.nhead_stride_q = stride_h_q;
   fmha_args.nhead_stride_k = stride_h_k;
   fmha_args.nhead_stride_v = stride_h_v;
-  fmha_args.nhead_stride_bias = (!is_group_mode && (bias_shape==BiasShape::k1HSS || bias_shape==BiasShape::kBHSS))
-                                  ? max_seqlen_q * max_seqlen_k
-                                  : 0;
+  fmha_args.nhead_stride_bias = nhead_stride_bias;
   fmha_args.nhead_stride_o = stride_h_o;
   fmha_args.nhead_stride_randval = is_group_mode ? 0 : seqlen_q * max_seqlen_k;
   fmha_args.nhead_stride_do = stride_h_do;
@@ -633,9 +661,7 @@ hipError_t _ck_attn_bwd_impl(
   fmha_args.batch_stride_q = is_group_mode ? 0 : stride_b_q;
   fmha_args.batch_stride_k = is_group_mode ? 0 : stride_b_k;
   fmha_args.batch_stride_v = is_group_mode ? 0 : stride_b_v;
-  fmha_args.batch_stride_bias = (!is_group_mode && (bias_shape==BiasShape::k11SS || bias_shape==BiasShape::k1HSS))
-                                  ? 0
-                                  : (is_group_mode ? 0 : bias_h * max_seqlen_q * max_seqlen_k);
+  fmha_args.batch_stride_bias = batch_stride_bias;
   fmha_args.batch_stride_o = is_group_mode ? 0 : stride_b_o;
   fmha_args.batch_stride_randval = is_group_mode ? 0 : nhead * seqlen_q * max_seqlen_k;
   fmha_args.batch_stride_do = is_group_mode ? 0 : stride_b_do;

@@ -174,20 +174,47 @@ hipError_t _ck_attn_fwd_impl(
   // Handle bias
   ck_tile::index_t _nhead_stride_bias = 0;
   ck_tile::index_t _batch_stride_bias = 0;
-  bias_enum bias_type = bias_enum::no_bias;
   const void* seqstart_q_ptr = nullptr;
   const void* seqstart_k_ptr = nullptr;
+  bias_enum bias_type = bias_enum::no_bias;
+  BiasShape bias_shape = BiasShape::k11SS;
   if(is_group_mode){
     seqstart_q_ptr = cu_seqlen_q_padded_ptr==nullptr? cu_seqlen_q_ptr: cu_seqlen_q_padded_ptr;
     seqstart_k_ptr = cu_seqlen_kv_padded_ptr==nullptr? cu_seqlen_kv_ptr: cu_seqlen_kv_padded_ptr;
   }else{
-    BiasShape bias_shape;
     std::tie(bias_type, bias_shape) = get_ck_bias_type_shape(attn_bias_type, b, h, bias_b, bias_h);
-    _nhead_stride_bias = (bias_shape==BiasShape::k1HSS || bias_shape==BiasShape::kBHSS) ? max_seqlen_q * max_seqlen_k: 0;
-    _batch_stride_bias = (bias_shape==BiasShape::k11SS || bias_shape==BiasShape::k1HSS) ? 0: (bias_shape==BiasShape::kBHSS? bias_h* max_seqlen_q * max_seqlen_k: max_seqlen_q*max_seqlen_k);
   }
-  const ck_tile::index_t nhead_stride_bias = _nhead_stride_bias;
-  const ck_tile::index_t batch_stride_bias = _batch_stride_bias;
+  const ck_tile::index_t batch_stride_bias = [&]() -> ck_tile::index_t {
+    if(is_group_mode){
+      return 0;
+    }
+    switch (bias_shape) {
+      case BiasShape::k11SS:
+      case BiasShape::k1HSS:
+        return 0;
+      case BiasShape::kBHSS:
+        return bias_h * max_seqlen_q * max_seqlen_k;
+      case BiasShape::kB1SS:
+        return max_seqlen_q * max_seqlen_k;
+      default:
+        throw std::runtime_error("Invalid bias shape");
+    }
+  }();
+  const ck_tile::index_t nhead_stride_bias = [&]() -> ck_tile::index_t {
+    if(is_group_mode){
+      return 0;
+    }
+    switch (bias_shape) {
+      case BiasShape::k1HSS:
+      case BiasShape::kBHSS:
+        return max_seqlen_q * max_seqlen_k;
+      case BiasShape::k11SS:
+      case BiasShape::kB1SS:
+        return 0;
+      default:
+        throw std::runtime_error("Invalid bias shape");
+    }
+  }();
 
   aiter::mha_fwd_args fmha_args{};
   fmha_args.q_ptr = q_ptr;
