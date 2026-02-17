@@ -52,6 +52,7 @@ concurrency:
 
 jobs:
   build_and_test:
+    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'Level 3')) }}
     name: Build and Test on GPU (${{ matrix.runner }})
     timeout-minutes: 720
     runs-on: ${{ matrix.runner }}
