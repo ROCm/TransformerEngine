@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -44,7 +44,7 @@ if IS_HIP_EXTENSION:
     from ..triton_kernels.cast import te_quantize_triton
 
 from ..utils import non_tn_fp8_gemm_supported
-from ..tensor.float8_tensor import Float8Quantizer 
+from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer 
 
 __all__ = ["initialize_ub", "destroy_ub"]
 
@@ -1046,7 +1046,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 else:
                     current_quantizer = quantizer
                     
-            assert isinstance(current_quantizer, Float8Quantizer), "`create_tranpose_buffer=False` only availabe in `Float8Quantizer`."
+            assert isinstance(current_quantizer, Float8Quantizer) or  isinstance(current_quantizer, Float8CurrentScalingQuantizer), f"`create_tranpose_buffer=False` only availabe in `Float8Quantizer`. Not available in {current_quantizer.__class__.__name__}."
 
             # NOTE: Not create transpose buffer internally.
             current_quantizer.columnwise_usage = False
