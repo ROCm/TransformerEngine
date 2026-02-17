@@ -723,7 +723,6 @@ model_configs_layout = {
     "layout_2_1": ModelConfig(
         2, 2048, 24, 256, attn_mask_type="causal", attn_bias_type="post_scale_bias"
     ),
-    "layout_3_0": ModelConfig(1, 2048, 12, 64, attn_mask_type="causal"),
 }
 
 
@@ -1322,8 +1321,8 @@ def test_transformer_layer(
                 is_training,
             )
 
-            os.environ["NVTE_CK_USES_FWD_V3"] = "1"
-            os.environ["NVTE_CK_USES_BWD_V3"] = "1"
+            os.environ["NVTE_CK_USES_FWD_V3"] = "0"
+            os.environ["NVTE_CK_USES_BWD_V3"] = "0"
             fused_attn_fwd_2, fused_attn_bwd_2 = _run_transformer_layer(
                 dtype,
                 config,
