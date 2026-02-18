@@ -124,7 +124,7 @@ def _te_norm_fwd_triton(
     IS_FP8 = isinstance(quantizer, Float8Quantizer)
     IS_MXFP8 = isinstance(quantizer, MXFP8Quantizer)
     IS_FP8_CURRENT_SCALING = isinstance(quantizer, Float8CurrentScalingQuantizer)
-    BLOCK_SIZE = block_size(input_tensor)
+    BLOCK_SIZE = block_size(input_tensor, norm=kernel)
     USE_BLOCKED = use_blocked(input_tensor)
     NUM_PRGMS = N if kernel=='layer' else num_programs(input_tensor, sm_margin)
     MAKE_TRANSPOSE = False
