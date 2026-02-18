@@ -42,8 +42,11 @@ def setup_pytorch_extension(
 ) -> setuptools.Extension:
     """Setup CUDA extension for PyTorch support"""
 
-    # Source files
+    # Source files - include both .cpp and .cu files
+    # .cu files will be hipified to .hip for ROCm builds
     sources = all_files_in_dir(Path(csrc_source_files), name_extension="cpp")
+    cu_sources = all_files_in_dir(Path(csrc_source_files), name_extension="cu")
+    sources.extend(cu_sources)
 
     # Header files
     if rocm_build():
