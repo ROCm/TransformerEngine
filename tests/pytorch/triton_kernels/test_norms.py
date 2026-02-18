@@ -134,7 +134,14 @@ def layernorm_fwd_ref(
     x_normed = (input - mu) * inv_var * g_tensor + bias
 
     assert isinstance(quantizer, MXFP8Quantizer)
-    out = quantizer.quantize(x_normed.to(te_dtype_to_torch_dtype(otype)))
+    out = (
+        quantizer.make_empty(
+            input.shape,
+            dtype=te_dtype_to_torch_dtype(otype),
+            device=input.device
+        )
+    )
+    out = quantizer.quantize(x_normed, out=out)
     return out, mu.squeeze(1), inv_var.squeeze(1)
 
 def rmsnorm_fwd_ref(
@@ -155,7 +162,14 @@ def rmsnorm_fwd_ref(
     x_normed = input * rsigma * g_tensor
 
     assert isinstance(quantizer, MXFP8Quantizer)
-    out = quantizer.quantize(x_normed.to(te_dtype_to_torch_dtype(otype)))
+    out = (
+        quantizer.make_empty(
+            input.shape,
+            dtype=te_dtype_to_torch_dtype(otype),
+            device=input.device
+        )
+    )
+    out = quantizer.quantize(x_normed, out=out)
     return out, None, rsigma.squeeze(1)
 
 
