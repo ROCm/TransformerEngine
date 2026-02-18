@@ -5,16 +5,6 @@
 name: TransformerEngine CI
 
 on:
-  push:
-    branches:
-      - 'dev'
-      - 'release_v1.*_rocm'
-      - 'release_v2.*_rocm'
-  pull_request:
-    branches:
-      - 'dev'
-      - 'release_v1.**_rocm'
-      - 'release_v2.**_rocm'
   workflow_call:
     inputs:
       test_level:
@@ -47,13 +37,12 @@ on:
         default: false
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.event_name == 'workflow_call' && format('{0}-{1}-{2}', github.workflow, github.ref, github.run_id) || format('{0}-{1}', github.workflow, github.ref) }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_call' }}
 
 jobs:
   build_and_test:
-    if: ${{ inputs.test_level == '3' || !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'Level 3')) }}
-    name: Build and Test on GPU (${{ matrix.runner }})
+    name: Build and Test on GPU (${{ matrix.runner }}) - Level ${{ inputs.test_level || '1' }}
     timeout-minutes: 720
     runs-on: ${{ matrix.runner }}
     strategy:
