@@ -745,41 +745,54 @@ def te_generic_gemm_triton(A,
         #   Use: A_data, B_data^T or columnwise
 
         # Use output dimensions to get correct M, N
-        # The kernel computes: C[M,N] = A[M,K] @ B[K,N]
+        # After operand swap and transpose handling:
+        # - a_row_major: [M, K] (first operand for Triton)
+        # - b_row_major: [K, N] (second operand for Triton)
+        # - d_row_major: [M, N] (output)
         actual_m = d_row_major.shape[0]
         actual_n = d_row_major.shape[1]
-        actual_k = a_row_major.shape[1]  # K dimension from first operand
+
+        # K must match between operands
+        assert a_row_major.shape[1] == b_row_major.shape[0], \
+            f"Dimension mismatch after swap/transpose: {a_row_major.shape} @ {b_row_major.shape}"
+        actual_k = a_row_major.shape[1]
 
         # Debug output
         import os
         if os.getenv("DEBUG_MXFP8_GEMM"):
             print(f"\n[DEBUG] MXFP8 GEMM call:")
-            print(f"  Input: A_wrapper.size()={A_wrapper.size()}, B_wrapper.size()={B_wrapper.size()}")
-            print(f"  Transpose: transa={transa}, transb={transb}")
-            print(f"  BLAS dims: m={m}, n={n}, k={k}")
-            print(f"  a_row_major: shape={a_row_major.shape}, stride={a_row_major.stride()}, contig={a_row_major.is_contiguous()}")
-            print(f"  b_row_major: shape={b_row_major.shape}, stride={b_row_major.stride()}, contig={b_row_major.is_contiguous()}")
-            print(f"  d_row_major: shape={d_row_major.shape}")
-            if a_scale_triton is not None:
-                print(f"  a_scale: shape={a_scale_triton.shape}, stride={a_scale_triton.stride()}, contig={a_scale_triton.is_contiguous()}")
-                print(f"    Expected: [{actual_m}, {actual_k}//32] = [{actual_m}, {actual_k//32}]")
-                if a_scale_triton.shape[1] != actual_k//32:
-                    print(f"    ⚠ SCALE SHAPE MISMATCH!")
-            if b_scale_triton is not None:
-                print(f"  b_scale: shape={b_scale_triton.shape}, stride={b_scale_triton.stride()}, contig={b_scale_triton.is_contiguous()}")
-                print(f"    Expected: [{actual_k}//32, {actual_n}] = [{actual_k//32}, {actual_n}]")
-                if b_scale_triton.shape != (actual_k//32, actual_n):
-                    print(f"    ⚠ SCALE SHAPE MISMATCH!")
-            print(f"  Kernel will compute: [{actual_m}, {actual_n}] = [{actual_m}, {actual_k}] @ [{actual_k}, {actual_n}]")
+            print(f"  BLAS API: A{A_wrapper.size()}, B{B_wrapper.size()}, trans={'T' if transa else 'N'}{'T' if transb else 'N'}")
+            print(f"  After operand swap and transpose for Triton:")
+            print(f"    First operand: {a_row_major.shape} (from B, transb={transb})")
+            print(f"    Second operand: {b_row_major.shape} (from A, transa={transa})")
+            print(f"    Output: {d_row_major.shape}")
+            print(f"  Actual dimensions: M={actual_m}, N={actual_n}, K={actual_k}")
+            if a_scale_triton is not None and b_scale_triton is not None:
+                print(f"  Scale shapes: {a_scale_triton.shape}, {b_scale_triton.shape}")
+                # Check scale compatibility
+                expected_a_scale = (actual_m, actual_k // 32)
+                expected_b_scale = (actual_k // 32, actual_n)
+                if a_scale_triton.shape[:2] != expected_a_scale:
+                    print(f"    ⚠ First scale mismatch: {a_scale_triton.shape} vs expected {expected_a_scale}")
+                if b_scale_triton.shape[:2] != expected_b_scale:
+                    print(f"    ⚠ Second scale mismatch: {b_scale_triton.shape} vs expected {expected_b_scale}")
 
-        # Call kernel with swapped operands
-        # Since we swapped A and B, we need to pass the FP8 formats in the right order
-        # a_row_major comes from B, b_row_major comes from A
+        # Call kernel with correct dimensions
+        # Use the actual output dimensions and inner dimension
+        # After swapping and transpose, we have:
+        # a_row_major: [M, K] (first operand)
+        # b_row_major: [K, N] (second operand)
+        # d_row_major: [M, N] (output)
+
+        # Verify dimensions match
+        assert a_row_major.shape[1] == b_row_major.shape[0], \
+            f"Inner dimensions don't match: {a_row_major.shape} @ {b_row_major.shape}"
+
         mxfp8_matmul(
             a_row_major, a_scale_triton,  # First operand (from B)
             b_row_major, b_scale_triton,  # Second operand (from A)
             d_row_major,                  # Output
-            a_row_major.shape[0], b_row_major.shape[1], a_row_major.shape[1], # M, N, K
+            actual_m, actual_n, actual_k,  # Use pre-computed dimensions
             b_fp8_dtype, a_fp8_dtype      # Swap FP8 formats to match swapped operands
         )
     else:
