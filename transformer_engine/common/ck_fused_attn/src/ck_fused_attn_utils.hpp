@@ -10,6 +10,7 @@
 #include<iostream>
 #include<cstdint>
 #include<hip/hip_runtime.h>
+#include "ck_tile/host.hpp"
 
 //forward declaration for ck_tile enum
 enum class mask_enum;
@@ -58,7 +59,8 @@ uint64_t get_runtime_max_seqlen(uint64_t b, const void* cu_seqlen_ptr, const voi
 
 // This helper merely standardizes the logging to make it a bit easier to parse
 // through it at a glance while guaranteeing uniformity.
-void log_value(const char* label, const auto& value) {
+template<typename T>
+void log_value(const char* label, const T& value) {
     std::cout << label << ": " << value << "\n";
   };
 

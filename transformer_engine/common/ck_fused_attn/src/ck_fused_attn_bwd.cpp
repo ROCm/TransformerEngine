@@ -10,7 +10,6 @@
 #include <stdexcept>
 #include <type_traits>
 #include "ck_fused_attn/ck_fused_attn.hpp"
-#include "ck_tile/host.hpp"
 #include "mha_bwd.h"
 #include "ck_fused_attn_utils.hpp"
 
