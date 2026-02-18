@@ -617,7 +617,7 @@ hipError_t _ck_attn_bwd_impl(
   fmha_args.nhead_stride_k = stride_h_k;
   fmha_args.nhead_stride_v = stride_h_v;
   // bias input can be of different shapes (11SS, 1HSS, B1SS, and BHSS), but dbias must be of BHSS
-  fmha_args.nhead_stride_bias = get_nhead_stride_bias(bias_h, bias_shape, max_seqlen_q, max_seqlen_k, is_group_mode);
+  fmha_args.nhead_stride_bias = get_nhead_stride_bias(bias_shape, max_seqlen_q, max_seqlen_k, is_group_mode);
   fmha_args.nhead_stride_o = stride_h_o;
   fmha_args.nhead_stride_randval = is_group_mode ? 0 : seqlen_q * max_seqlen_k;
   fmha_args.nhead_stride_do = stride_h_do;
@@ -633,7 +633,7 @@ hipError_t _ck_attn_bwd_impl(
   fmha_args.batch_stride_q = is_group_mode ? 0 : stride_b_q;
   fmha_args.batch_stride_k = is_group_mode ? 0 : stride_b_k;
   fmha_args.batch_stride_v = is_group_mode ? 0 : stride_b_v;
-  fmha_args.batch_stride_bias = get_batch_stride_bias(bias_shape, max_seqlen_q, max_seqlen_k, is_group_mode);
+  fmha_args.batch_stride_bias = get_batch_stride_bias(bias_h, bias_shape, max_seqlen_q, max_seqlen_k, is_group_mode, false);
   fmha_args.batch_stride_o = is_group_mode ? 0 : stride_b_o;
   fmha_args.batch_stride_randval = is_group_mode ? 0 : nhead * seqlen_q * max_seqlen_k;
   fmha_args.batch_stride_do = is_group_mode ? 0 : stride_b_do;

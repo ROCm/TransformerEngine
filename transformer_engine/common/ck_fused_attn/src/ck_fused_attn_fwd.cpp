@@ -165,52 +165,8 @@ hipError_t _ck_attn_fwd_impl(
   // print kernel name on verbose mode
   ck_tile::stream_config stream_config{stream, dump_path!=nullptr, ck_log_config};
 
-  std::string data_type_str = get_data_type_str(dtype);
-
-  // Handle bias
-  ck_tile::index_t _nhead_stride_bias = 0;
-  ck_tile::index_t _batch_stride_bias = 0;
-  const void* seqstart_q_ptr = nullptr;
-  const void* seqstart_k_ptr = nullptr;
   bias_enum bias_type = bias_enum::no_bias;
   BiasShape bias_shape = BiasShape::k11SS;
-  if(is_group_mode){
-    seqstart_q_ptr = cu_seqlen_q_padded_ptr==nullptr? cu_seqlen_q_ptr: cu_seqlen_q_padded_ptr;
-    seqstart_k_ptr = cu_seqlen_kv_padded_ptr==nullptr? cu_seqlen_kv_ptr: cu_seqlen_kv_padded_ptr;
-  }else{
-    std::tie(bias_type, bias_shape) = get_ck_bias_type_shape(attn_bias_type, b, h, bias_b, bias_h);
-  }
-  const ck_tile::index_t batch_stride_bias = [&]() -> ck_tile::index_t {
-    if(is_group_mode){
-      return 0;
-    }
-    switch (bias_shape) {
-      case BiasShape::k11SS:
-      case BiasShape::k1HSS:
-        return 0;
-      case BiasShape::kBHSS:
-        return bias_h * max_seqlen_q * max_seqlen_k;
-      case BiasShape::kB1SS:
-        return max_seqlen_q * max_seqlen_k;
-      default:
-        throw std::runtime_error("Invalid bias shape");
-    }
-  }();
-  const ck_tile::index_t nhead_stride_bias = [&]() -> ck_tile::index_t {
-    if(is_group_mode){
-      return 0;
-    }
-    switch (bias_shape) {
-      case BiasShape::k1HSS:
-      case BiasShape::kBHSS:
-        return max_seqlen_q * max_seqlen_k;
-      case BiasShape::k11SS:
-      case BiasShape::kB1SS:
-        return 0;
-      default:
-        throw std::runtime_error("Invalid bias shape");
-    }
-  }();
 
   aiter::mha_fwd_args fmha_args{};
   fmha_args.q_ptr = q_ptr;
@@ -234,16 +190,27 @@ hipError_t _ck_attn_fwd_impl(
   fmha_args.batch_stride_k = stride_b_k;
   fmha_args.batch_stride_v = stride_b_v;
 
+  if (is_group_mode) {
+    fmha_args.seqstart_q_ptr = cu_seqlen_q_padded_ptr==nullptr? cu_seqlen_q_ptr: cu_seqlen_q_padded_ptr;
+    fmha_args.seqstart_k_ptr = cu_seqlen_kv_padded_ptr==nullptr? cu_seqlen_kv_ptr: cu_seqlen_kv_padded_ptr;
+    fmha_args.seqlen_q_ptr = nullptr;
+    fmha_args.seqlen_k_ptr = nullptr;
+    fmha_args.cu_seqlen_q_ptr = cu_seqlen_q_ptr;
+    fmha_args.cu_seqlen_k_ptr = cu_seqlen_kv_ptr;
+  } else {
+    fmha_args.seqstart_q_ptr = nullptr;
+    fmha_args.seqstart_k_ptr = nullptr;
+    fmha_args.seqlen_q_ptr = nullptr;
+    fmha_args.seqlen_k_ptr = nullptr;
+    fmha_args.cu_seqlen_q_ptr = nullptr;
+    fmha_args.cu_seqlen_k_ptr = nullptr;
+    std::tie(bias_type, bias_shape) = get_ck_bias_type_shape(attn_bias_type, b, h, bias_b, bias_h);
+  }
+
   fmha_args.bias_ptr = bias_type==bias_enum::alibi? alibi_slope_ptr :bias_ptr;
   fmha_args.lse_ptr  = lse_ptr;
   fmha_args.o_ptr    = o_ptr;
 
-  fmha_args.seqstart_q_ptr  = seqstart_q_ptr;
-  fmha_args.seqstart_k_ptr  = seqstart_k_ptr;
-  fmha_args.seqlen_k_ptr    = nullptr;
-  fmha_args.seqlen_q_ptr    = nullptr;
-  fmha_args.cu_seqlen_q_ptr = is_group_mode ? cu_seqlen_q_ptr : nullptr;
-  fmha_args.cu_seqlen_k_ptr = is_group_mode ? cu_seqlen_kv_ptr : nullptr;
   fmha_args.block_scale_seqstart_q_ptr = nullptr;
   fmha_args.block_scale_seqstart_k_ptr = nullptr;
   fmha_args.sink_ptr = nullptr;
@@ -257,8 +224,8 @@ hipError_t _ck_attn_fwd_impl(
   // bias is of shape [b, h , s_q, s_kv]
   fmha_args.stride_bias = is_group_mode? 0 : (bias_type==bias_enum::alibi? 0: max_seqlen_k);
   fmha_args.stride_o          = stride_s_o;
-  fmha_args.nhead_stride_bias = nhead_stride_bias;
-  fmha_args.batch_stride_bias = batch_stride_bias;
+  fmha_args.nhead_stride_bias = get_nhead_stride_bias(bias_shape, max_seqlen_q, max_seqlen_k, is_group_mode);
+  fmha_args.batch_stride_bias = get_batch_stride_bias(bias_h, bias_shape, max_seqlen_q, max_seqlen_k, is_group_mode, true);
   // softmax_lse is of shape [b, h, s_q]
   fmha_args.nhead_stride_lse  = is_group_mode? max_tokens_q : max_seqlen_q;
   fmha_args.batch_stride_lse  = is_group_mode? 0 : nhead * max_seqlen_q;
@@ -288,7 +255,7 @@ hipError_t _ck_attn_fwd_impl(
   fmha_args.use_asm_v3      = uses_fwd_v3;
   fmha_args.how_v3_bf16_cvt = how_v3_bf16_cvt;
   fmha_args.v3_api_check    = false;
-  fmha_args.data_type       = data_type_str;
+  fmha_args.data_type       = get_data_type_str(dtype);
   fmha_args.is_group_mode   = is_group_mode;
   fmha_args.bias_type       = static_cast<int>(bias_type);
   fmha_args.has_lse         = lse_ptr!=nullptr;

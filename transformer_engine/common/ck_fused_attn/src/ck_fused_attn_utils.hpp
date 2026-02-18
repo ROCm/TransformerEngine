@@ -62,8 +62,20 @@ void log_value(const char* label, const auto& value) {
     std::cout << label << ": " << value << "\n";
   };
 
-ck_tile::index_t get_nhead_stride_bias(ck_tile::index_t bias_h, BiasShape bias_shape, ck_tile::index_t max_seqlen_q, ck_tile::index_t max_seqlen_k, bool is_group_mode);
-ck_tile::index_t get_batch_stride_bias(BiasShape bias_shape, ck_tile::index_t max_seqlen_q, ck_tile::index_t max_seqlen_k, bool is_group_mode);
+ck_tile::index_t get_batch_stride_bias(
+  ck_tile::index_t bias_h,
+  BiasShape bias_shape,
+  ck_tile::index_t max_seqlen_q,
+  ck_tile::index_t max_seqlen_k,
+  bool is_group_mode,
+  bool is_fwd
+);
+ck_tile::index_t get_nhead_stride_bias(
+  BiasShape bias_shape,
+  ck_tile::index_t max_seqlen_q,
+  ck_tile::index_t max_seqlen_k,
+  bool is_group_mode
+);
 
 }//namespace ck_fused_attn
 #endif // CK_FUSED_ATTN_UTILS_H

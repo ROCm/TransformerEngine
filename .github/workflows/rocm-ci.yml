@@ -215,6 +215,7 @@ jobs:
           export PYTORCH_ROCM_ARCH=$GPU_ARCH
           export NVTE_ROCM_ARCH=$GPU_ARCH
           export NVTE_AITER_PREBUILT_BASE_URL=https://compute-artifactory.amd.com:5000/artifactory/rocm-generic-local/te-ci/aiter-prebuilts
+          export AITER_LOG_MORE=1
           pip install ninja
           git config --global --add safe.directory '*'
           pip install --no-build-isolation -v . 2>&1

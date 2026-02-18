@@ -89,8 +89,6 @@ def setup_common_extension() -> CMakeExtension:
             cmake_flags.append("-DUSE_FUSED_ATTN_CK=OFF")
         elif os.getenv("NVTE_FUSED_ATTN_CK") or os.getenv("NVTE_FUSED_ATTN"):
             cmake_flags.append("-DUSE_FUSED_ATTN_CK=ON")
-            # Dynamically set AITER_LOG_MORE based on PIP_VERBOSE to avoid excessive logging during build.
-            os.environ["AITER_LOG_MORE"] = str(max(int(os.environ.get('PIP_VERBOSE', '0')) - 1, 0))
             # This helper script scans semi-hard-coded files wrt TE source-code in order to directly compare
             # AITER's internal API and our attempt at utilizing it.
             try:
