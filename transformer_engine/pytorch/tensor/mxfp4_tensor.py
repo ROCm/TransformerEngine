@@ -17,6 +17,8 @@ from ..utils import devices_match
 
 from ._internal.mxfp4_tensor_base import MXFP4TensorBase, _FromMXFP4Func
 from .quantized_tensor import QuantizedTensor, Quantizer
+from transformer_engine.common.recipe import Recipe
+from typing import Union
 
 MXFP4_BLOCK_SCALING_SIZE = MXFP8_BLOCK_SCALING_SIZE
 
@@ -186,6 +188,13 @@ class MXFP4Quantizer(Quantizer):
     def calibrate(self, tensor: torch.Tensor) -> None:
         # No calibration needed for MXFP4 (uses per-block current scaling)
         pass
+
+    def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
+        """Returns recipe class that is compatible with this quantizer
+        
+        Returns None since MXFP4 is currently used without recipes (hardcoded path).
+        """
+        return None
 
 
 class MXFP4Tensor(MXFP4TensorBase, QuantizedTensor):

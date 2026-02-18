@@ -251,7 +251,7 @@ py::object dequantize(const py::handle &input, DType otype);
  * MXFP4 Quantization
  **************************************************************************************************/
 
-std::vector<py::object> cast_transpose_mxfp4_fused_shuffle(
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> cast_transpose_mxfp4_fused_shuffle(
     at::Tensor input,
     std::optional<at::Tensor> rowwise_fp4_out,
     std::optional<at::Tensor> rowwise_scale_out,
