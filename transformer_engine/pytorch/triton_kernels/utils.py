@@ -45,9 +45,9 @@ def num_programs(x, sm_margin=None):
     return min(x.shape[0], get_num_sms(sm_margin))
 
 
-def block_size(x):
-    max_fused_size = 65536 // x.element_size()
-    block_size = min(max_fused_size, triton.next_power_of_2(x.shape[1]))
+def block_size(x, norm="layer"):
+    max_fused_size = (65536 if norm=="rms" else 16384) // x.element_size()
+    block_size = min(max_fused_size, triton.next_power_of_2(x.shape[1]), 1024)
     return block_size
 
 
