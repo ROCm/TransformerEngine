@@ -1,3 +1,11 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+
+"""
+This script is run during setup through setup.py, and can be run independently
+to check that the fields defined in the mha_{fwd,bwd}_args structs in the AITER
+headers are correctly referenced in the source code.
+"""
+
 import argparse
 import re
 from pathlib import Path

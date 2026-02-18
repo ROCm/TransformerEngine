@@ -56,5 +56,14 @@ std::pair<bias_enum, BiasShape> get_ck_bias_type_shape(BiasType attn_bias_type, 
 
 uint64_t get_runtime_max_seqlen(uint64_t b, const void* cu_seqlen_ptr, const void* cu_seqlen_padded_ptr, void* workspace, hipStream_t stream);
 
+// This helper merely standardizes the logging to make it a bit easier to parse
+// through it at a glance while guaranteeing uniformity.
+void log_value(const char* label, const auto& value) {
+    std::cout << label << ": " << value << "\n";
+  };
+
+ck_tile::index_t get_nhead_stride_bias(ck_tile::index_t bias_h, BiasShape bias_shape, ck_tile::index_t max_seqlen_q, ck_tile::index_t max_seqlen_k, bool is_group_mode);
+ck_tile::index_t get_batch_stride_bias(BiasShape bias_shape, ck_tile::index_t max_seqlen_q, ck_tile::index_t max_seqlen_k, bool is_group_mode);
+
 }//namespace ck_fused_attn
 #endif // CK_FUSED_ATTN_UTILS_H

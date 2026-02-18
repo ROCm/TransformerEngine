@@ -22,10 +22,6 @@ void log_fwd_config(const char* func_name, bool has_dropout, const aiter::mha_fw
     return;
   }
 
-  auto log_value = [](const char* label, const auto& value) {
-    std::cout << label << ": " << value << "\n";
-  };
-
   std::cout << "\n" << func_name << "\n";
 
   // debug fmha_traits
@@ -242,10 +238,10 @@ hipError_t _ck_attn_fwd_impl(
   fmha_args.lse_ptr  = lse_ptr;
   fmha_args.o_ptr    = o_ptr;
 
-  fmha_args.seqstart_q_ptr = seqstart_q_ptr;
-  fmha_args.seqstart_k_ptr = seqstart_k_ptr;
-  fmha_args.seqlen_k_ptr = nullptr;
-  fmha_args.seqlen_q_ptr = nullptr;
+  fmha_args.seqstart_q_ptr  = seqstart_q_ptr;
+  fmha_args.seqstart_k_ptr  = seqstart_k_ptr;
+  fmha_args.seqlen_k_ptr    = nullptr;
+  fmha_args.seqlen_q_ptr    = nullptr;
   fmha_args.cu_seqlen_q_ptr = is_group_mode ? cu_seqlen_q_ptr : nullptr;
   fmha_args.cu_seqlen_k_ptr = is_group_mode ? cu_seqlen_kv_ptr : nullptr;
   fmha_args.block_scale_seqstart_q_ptr = nullptr;
@@ -276,7 +272,8 @@ hipError_t _ck_attn_fwd_impl(
   fmha_args.rand_val_ptr = nullptr;
 
   fmha_args.stride_randval       = max_seqlen_k;
-  fmha_args.nhead_stride_randval = 0; // Unused
+  // Unused
+  fmha_args.nhead_stride_randval = 0; 
   fmha_args.batch_stride_randval = 0;
   fmha_args.nhead_stride_q_descale = 0;
   fmha_args.nhead_stride_k_descale = 0;
@@ -361,8 +358,8 @@ hipError_t ck_attn_fwd(
     v_ptr, stride_b_v, stride_h_v, stride_s_v,
     bias_ptr,
     alibi_slope_ptr,
-    nullptr, nullptr,
-    nullptr, nullptr,
+    nullptr, nullptr, // cu_seqlen_q_ptr, cu_seqlen_kv_ptr,
+    nullptr, nullptr, // cu_seqlen_q_padded_ptr, cu_seqlen_kv_padded_ptr
     is_training,
     scaling_factor,
     dropout_probability,
@@ -413,8 +410,8 @@ hipError_t ck_attn_varlen_fwd(
     q_ptr, 0, stride_h_q, stride_s_q,
     k_ptr, 0, stride_h_k, stride_s_k,
     v_ptr, 0, stride_h_v, stride_s_v,
-    nullptr,
-    nullptr,
+    nullptr, // bias_ptr,
+    nullptr, // alibi_slope_ptr
     cu_seqlen_q_ptr, cu_seqlen_kv_ptr,
     cu_seqlen_q_padded_ptr, cu_seqlen_kv_padded_ptr,
     is_training,
