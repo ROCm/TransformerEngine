@@ -363,16 +363,10 @@ class MXFP8TensorWrapper:
             if self._rowwise_data is not None:
                 self._size = self._rowwise_data.size()
             else:
-                # Convert columnwise shape to rowwise: [K,M,*batch] -> [*batch,M,K]
-                ndim = self._columnwise_data.dim()
-                if ndim == 2:
-                    self._size = torch.Size([self._columnwise_data.size(1), self._columnwise_data.size(0)])
-                else:
-                    # Has batch dims at end, need to move to front and swap matrix dims
-                    batch_dims = list(self._columnwise_data.size()[2:])
-                    m_dim = self._columnwise_data.size(1)
-                    k_dim = self._columnwise_data.size(0)
-                    self._size = torch.Size(batch_dims + [m_dim, k_dim])
+                # IMPORTANT: For MXFP8, columnwise has the SAME shape as rowwise
+                # (unlike Float8Tensor where columnwise is transposed)
+                # Both rowwise and columnwise have shape [*batch, M, K]
+                self._size = self._columnwise_data.size()
         else:
             # Not MXFP8 - wrap as regular tensor
             self._is_mxfp8 = False
@@ -752,9 +746,14 @@ def te_generic_gemm_triton(A,
         actual_m = d_row_major.shape[0]
         actual_n = d_row_major.shape[1]
 
-        # K must match between operands
-        assert a_row_major.shape[1] == b_row_major.shape[0], \
-            f"Dimension mismatch after swap/transpose: {a_row_major.shape} @ {b_row_major.shape}"
+        # Verify operands are compatible for matmul
+        if a_row_major.shape[1] != b_row_major.shape[0]:
+            print(f"[ERROR] Dimension mismatch after swap/transpose:")
+            print(f"  a_row_major: {a_row_major.shape}")
+            print(f"  b_row_major: {b_row_major.shape}")
+            print(f"  Cannot multiply: {a_row_major.shape} @ {b_row_major.shape}")
+            print(f"  Original: A{A_wrapper.size()}, B{B_wrapper.size()}, trans={'T' if transa else 'N'}{'T' if transb else 'N'}")
+            assert False, f"Dimension mismatch: {a_row_major.shape} @ {b_row_major.shape}"
         actual_k = a_row_major.shape[1]
 
         # Debug output
@@ -762,6 +761,27 @@ def te_generic_gemm_triton(A,
         if os.getenv("DEBUG_MXFP8_GEMM"):
             print(f"\n[DEBUG] MXFP8 GEMM call:")
             print(f"  BLAS API: A{A_wrapper.size()}, B{B_wrapper.size()}, trans={'T' if transa else 'N'}{'T' if transb else 'N'}")
+
+            # Identify the operation type based on shapes and transpose flags
+            op_type = "unknown"
+            if transa and not transb:
+                op_type = "fprop (TN)"
+            elif not transa and not transb:
+                op_type = "dgrad (NN)"
+            elif not transa and transb:
+                op_type = "wgrad (NT)"
+
+            # For wgrad, provide more details about the tensor interpretation
+            if op_type == "wgrad (NT)":
+                print(f"  Interpreting wgrad tensors:")
+                print(f"    A (grad_output): original shape {A_wrapper.size()}")
+                print(f"      After flatten: {A_flat.shape}")
+                print(f"    B (input): original shape {B_wrapper.size()}")
+                print(f"      After flatten: {B_flat.shape}")
+                print(f"    Expected: dY^T @ X where dY=[batch*seq, out_feat], X=[batch*seq, in_feat]")
+
+            print(f"  Operation type: {op_type}")
+            print(f"  Expected output shape: {D_shape}")
             print(f"  After operand swap and transpose for Triton:")
             print(f"    First operand: {a_row_major.shape} (from B, transb={transb})")
             print(f"    Second operand: {b_row_major.shape} (from A, transa={transa})")
