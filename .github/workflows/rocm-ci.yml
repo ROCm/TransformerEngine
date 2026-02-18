@@ -5,6 +5,11 @@
 name: TransformerEngine CI
 
 on:
+  push:
+    branches:
+      - 'dev'
+      - 'release_v1.*_rocm'
+      - 'release_v2.*_rocm'
   workflow_call:
     inputs:
       test_level:
