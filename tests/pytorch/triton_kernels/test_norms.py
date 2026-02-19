@@ -458,10 +458,6 @@ class TestNorms:
             # pass the earlier comparisons.
             compare_func = partial(te_compare_results, atol=1, rtol=0, use_torch_semantics=True)
 
-            # The MXFP8 tensors carry their scale_inv values in a padded
-            # format, hence we must omit the padded values.
-            input_shape = out_triton.shape
-            unpad_rscale_inv_shape = (math.prod(input_shape[:-1]), input_shape[-1] // MXFP8_BLOCK_SCALING_SIZE)
             if has_rscale_triton != has_rscale_hip:
                 msg = "Expected rowwise scale to "
                 if has_rscale_hip:
@@ -470,8 +466,8 @@ class TestNorms:
                 raise ValueError(msg)
             if has_rscale_triton:
                 compare_func(
-                    actual=out_triton._rowwise_scale_inv[:unpad_rscale_inv_shape[0], :unpad_rscale_inv_shape[1]],
-                    expected=out_hip._rowwise_scale_inv[:unpad_rscale_inv_shape[0], :unpad_rscale_inv_shape[1]],
+                    actual=out_triton._rowwise_scale_inv,
+                    expected=out_hip._rowwise_scale_inv,
                     msg=lambda msg: f"Output rowwise scale inverse does not match triton <-> hip\n\n{msg}\n",
                 )
 
@@ -485,8 +481,8 @@ class TestNorms:
                 raise ValueError(msg)
             if has_cscale_triton:
                 compare_func(
-                    actual=out_triton._columnwise_scale_inv[:unpad_rscale_inv_shape[1], :unpad_rscale_inv_shape[0]],
-                    expected=out_hip._columnwise_scale_inv[:unpad_rscale_inv_shape[1], :unpad_rscale_inv_shape[0]],
+                    actual=out_triton._columnwise_scale_inv,
+                    expected=out_hip._columnwise_scale_inv,
                     msg=lambda msg: f"Output columnwise scale inverse does not match triton <-> hip\n\n{msg}\n",
                 )
 
