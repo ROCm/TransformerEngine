@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
@@ -10,17 +10,13 @@
 #include <stdexcept>
 #include <type_traits>
 #include "ck_fused_attn/ck_fused_attn.hpp"
-#include "ck_tile/host.hpp"
 #include "mha_fwd.h"
 #include "ck_fused_attn_utils.hpp"
 
 namespace ck_fused_attn{
 
 // print the fmha traits and fmha_args when calling ck apis
-void log_fwd_config(const char* func_name, bool has_dropout, const aiter::mha_fwd_args& fmha_args, bool ck_log_config){
-  if (!ck_log_config) {
-    return;
-  }
+void log_fwd_config(const char* func_name, bool has_dropout, const aiter::mha_fwd_args& fmha_args){
 
   std::cout << "\n" << func_name << "\n";
 
@@ -279,7 +275,9 @@ hipError_t _ck_attn_fwd_impl(
   }
 
   // print ck traits and fmha_args when needed
-  log_fwd_config(func_name, has_dropout, fmha_args, ck_log_config);
+  if(ck_log_config){
+     log_fwd_config(func_name, has_dropout, fmha_args);
+  }
   float average_runtime = aiter::mha_fwd(fmha_args, stream_config);
   if(average_runtime < 0){
     //TODO: better error out system

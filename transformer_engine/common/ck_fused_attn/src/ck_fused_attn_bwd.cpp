@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
@@ -332,10 +332,7 @@ __global__ void dbias_reduce_b1ss(
 }
 
 // print the fmha_traits and args passed into ck apis
-void log_bwd_config(const char* func_name, const aiter::mha_bwd_args& fmha_args, bool ck_log_config){
-  if (!ck_log_config) {
-    return;
-  }
+void log_bwd_config(const char* func_name, const aiter::mha_bwd_args& fmha_args){
 
   std::cout << "\n" << func_name << "\n";
 
@@ -664,7 +661,9 @@ hipError_t _ck_attn_bwd_impl(
   }
 
   // print ck traits and args when needed
-  log_bwd_config(func_name, fmha_args, ck_log_config);
+  if(ck_log_config){
+    log_bwd_config(func_name, fmha_args);
+  }
   float average_runtime = aiter::mha_bwd(fmha_args, stream_config);
   if(average_runtime < 0){
     //TODO: better error out system
@@ -675,6 +674,7 @@ hipError_t _ck_attn_bwd_impl(
   }
   return hipSuccess;
 }
+
 hipError_t ck_attn_bwd(
   DType dtype,
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v, uint64_t bias_b, uint64_t bias_h,
