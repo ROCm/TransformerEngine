@@ -62,7 +62,7 @@ uint64_t get_runtime_max_seqlen(uint64_t b, const void* cu_seqlen_ptr, const voi
 template<typename T>
 void log_value(const char* label, const T& value) {
     std::cout << label << ": " << value << "\n";
-  };
+}
 
 ck_tile::index_t get_batch_stride_bias(
   ck_tile::index_t bias_h,
