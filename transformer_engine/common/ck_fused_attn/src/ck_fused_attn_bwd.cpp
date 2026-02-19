@@ -16,6 +16,22 @@
 
 namespace ck_fused_attn{
 
+// We want to cache and reuse the log stream so we use thread_local here.
+namespace {
+std::ofstream* get_bwd_log_stream() {
+  thread_local std::ofstream log_file;
+  thread_local bool attempted = false;
+  if (!attempted) {
+    attempted = true;
+    open_ck_fused_attn_log_file(log_file, "ck_fused_attn_bwd");
+  }
+  if (!log_file.is_open()) {
+    return nullptr;
+  }
+  return &log_file;
+}
+}  // namespace
+
 // TODO: unify with binary search in TE/common/fused_attn(rocm)/util
 // no device std::upper_bound
 // in an increasing array with given size len, search for the index that:
@@ -346,110 +362,104 @@ void log_bwd_config(const char* func_name,
                     const bool is_v3_atomic_fp32,
                     const int how_v3_bf16_cvt,
                     const fmha_bwd_args& fmha_args){
-
-  bool ck_fused_attn_log_config = false;
-  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      ck_fused_attn_log_config = true;
-  }
-  if (ck_fused_attn_log_config) {
-    std::cout<<std::endl<<func_name<<std::endl;
+  if (auto* log_file = get_bwd_log_stream()) {
+    *log_file << "\n" << func_name << "\n";
 
     // fmha_traits debug
-    std::cout<<std::endl<<"fmha_traits: "<<std::endl;
-    std::cout<<"hdim_q: "<<fmha_args.hdim_q<<std::endl;
-    std::cout<<"hdim_v: "<<fmha_args.hdim_v<<std::endl;
-    std::cout<<"data_type: "<<data_type_str<<std::endl;
-    std::cout<<"is_group_mode: "<<is_group_mode<<std::endl;
-    std::cout<<"mask_type: "<<static_cast<std::underlying_type<mask_enum>::type>(mask_type)<<std::endl;
-    std::cout<<"bias_type: "<<static_cast<std::underlying_type<bias_enum>::type>(bias_type)<<std::endl;
-    std::cout<<"has_dbias: "<<has_dbias<<std::endl;
-    std::cout<<"has_dropout: "<<has_dropout<<std::endl;
-    std::cout<<"is_store_randval: "<<is_store_randval<<std::endl;
-    std::cout<<"is_deterministic: "<<is_deterministic<<std::endl;
-    std::cout<<"uses_bwd_v3: "<<uses_bwd_v3<<std::endl;
-    std::cout<<"is_v3_atomic_fp32: "<<is_v3_atomic_fp32<<std::endl;
-    std::cout<<"how_v3_bf16_cvt: "<<how_v3_bf16_cvt<<std::endl;
+    *log_file << "\n" << "fmha_traits: " << "\n";
+    *log_file << "hdim_q: " << fmha_args.hdim_q << "\n";
+    *log_file << "hdim_v: " << fmha_args.hdim_v << "\n";
+    *log_file << "data_type: " << data_type_str << "\n";
+    *log_file << "is_group_mode: " << is_group_mode << "\n";
+    *log_file << "mask_type: " << static_cast<std::underlying_type<mask_enum>::type>(mask_type) << "\n";
+    *log_file << "bias_type: " << static_cast<std::underlying_type<bias_enum>::type>(bias_type) << "\n";
+    *log_file << "has_dbias: " << has_dbias << "\n";
+    *log_file << "has_dropout: " << has_dropout << "\n";
+    *log_file << "is_store_randval: " << is_store_randval << "\n";
+    *log_file << "is_deterministic: " << is_deterministic << "\n";
+    *log_file << "uses_bwd_v3: " << uses_bwd_v3 << "\n";
+    *log_file << "is_v3_atomic_fp32: " << is_v3_atomic_fp32 << "\n";
+    *log_file << "how_v3_bf16_cvt: " << how_v3_bf16_cvt << "\n";
 
     // fmha_args debug
-    std::cout<<std::endl<<"fmha_args: "<<std::endl;
-    std::cout<<"q_ptr: "<<fmha_args.q_ptr<<std::endl;
-    std::cout<<"k_ptr: "<<fmha_args.k_ptr<<std::endl;
-    std::cout<<"v_ptr: "<<fmha_args.v_ptr<<std::endl;
-    std::cout<<"bias_ptr: "<<fmha_args.bias_ptr<<std::endl;
-    std::cout<<"o_ptr: "<<fmha_args.o_ptr<<std::endl;
-    std::cout<<"lse_ptr: "<<fmha_args.lse_ptr<<std::endl;
-    std::cout<<"do_ptr: "<<fmha_args.do_ptr<<std::endl;
-    std::cout<<"d_ptr: "<<fmha_args.d_ptr<<std::endl;
-    std::cout<<"rand_val_ptr: "<<fmha_args.rand_val_ptr<<std::endl;
-    std::cout<<"dq_ptr: "<<fmha_args.dq_ptr<<std::endl;
-    std::cout<<"dk_ptr: "<<fmha_args.dk_ptr<<std::endl;
-    std::cout<<"dv_ptr: "<<fmha_args.dv_ptr<<std::endl;
-    std::cout<<"dbias_ptr: "<<fmha_args.dbias_ptr<<std::endl;
-    std::cout<<"dq_acc_ptr: "<<fmha_args.dq_acc_ptr<<std::endl;
+    *log_file << "\n" << "fmha_args: " << "\n";
+    *log_file << "q_ptr: " << fmha_args.q_ptr << "\n";
+    *log_file << "k_ptr: " << fmha_args.k_ptr << "\n";
+    *log_file << "v_ptr: " << fmha_args.v_ptr << "\n";
+    *log_file << "bias_ptr: " << fmha_args.bias_ptr << "\n";
+    *log_file << "o_ptr: " << fmha_args.o_ptr << "\n";
+    *log_file << "lse_ptr: " << fmha_args.lse_ptr << "\n";
+    *log_file << "do_ptr: " << fmha_args.do_ptr << "\n";
+    *log_file << "d_ptr: " << fmha_args.d_ptr << "\n";
+    *log_file << "rand_val_ptr: " << fmha_args.rand_val_ptr << "\n";
+    *log_file << "dq_ptr: " << fmha_args.dq_ptr << "\n";
+    *log_file << "dk_ptr: " << fmha_args.dk_ptr << "\n";
+    *log_file << "dv_ptr: " << fmha_args.dv_ptr << "\n";
+    *log_file << "dbias_ptr: " << fmha_args.dbias_ptr << "\n";
+    *log_file << "dq_acc_ptr: " << fmha_args.dq_acc_ptr << "\n";
 
-    std::cout<<"seqstart_q_ptr: "<<fmha_args.seqstart_q_ptr<<std::endl;
-    std::cout<<"seqstart_k_ptr: "<<fmha_args.seqstart_k_ptr<<std::endl;
-    std::cout<<"seqlen_q_ptr: "<<fmha_args.seqlen_q_ptr<<std::endl;
-    std::cout<<"seqlen_k_ptr: "<<fmha_args.seqlen_k_ptr<<std::endl;
-    std::cout<<"cu_seqlen_q_ptr: "<<fmha_args.cu_seqlen_q_ptr<<std::endl;
-    std::cout<<"cu_seqlen_k_ptr: "<<fmha_args.cu_seqlen_k_ptr<<std::endl;
+    *log_file << "seqstart_q_ptr: " << fmha_args.seqstart_q_ptr << "\n";
+    *log_file << "seqstart_k_ptr: " << fmha_args.seqstart_k_ptr << "\n";
+    *log_file << "seqlen_q_ptr: " << fmha_args.seqlen_q_ptr << "\n";
+    *log_file << "seqlen_k_ptr: " << fmha_args.seqlen_k_ptr << "\n";
+    *log_file << "cu_seqlen_q_ptr: " << fmha_args.cu_seqlen_q_ptr << "\n";
+    *log_file << "cu_seqlen_k_ptr: " << fmha_args.cu_seqlen_k_ptr << "\n";
 
-    std::cout<<"seqlen_q: "<<fmha_args.seqlen_q<<std::endl;
-    std::cout<<"seqlen_k: "<<fmha_args.seqlen_k<<std::endl;
-    std::cout<<"batch: "<<fmha_args.batch<<std::endl;
-    std::cout<<"max_seqlen_q: "<<fmha_args.max_seqlen_q<<std::endl;
-    std::cout<<"max_seqlen_k: "<<fmha_args.max_seqlen_k<<std::endl;
-    std::cout<<"hdim_q: "<<fmha_args.hdim_q<<std::endl;
-    std::cout<<"hdim_v: "<<fmha_args.hdim_v<<std::endl;
-    std::cout<<"nhead_q: "<<fmha_args.nhead_q<<std::endl;
-    std::cout<<"nhead_k: "<<fmha_args.nhead_k<<std::endl;
-    std::cout<<"scale: "<<fmha_args.scale<<std::endl;
-    std::cout<<"stride_q: "<<fmha_args.stride_q<<std::endl;
-    std::cout<<"stride_k: "<<fmha_args.stride_k<<std::endl;
-    std::cout<<"stride_v: "<<fmha_args.stride_v<<std::endl;
-    std::cout<<"stride_bias: "<<fmha_args.stride_bias<<std::endl;
-    std::cout<<"stride_o: "<<fmha_args.stride_o<<std::endl;
-    std::cout<<"stride_randval: "<<fmha_args.stride_randval<<std::endl;
-    std::cout<<"stride_do: "<<fmha_args.stride_do<<std::endl;
-    std::cout<<"stride_dq_acc: "<<fmha_args.stride_dq_acc<<std::endl;
-    std::cout<<"stride_dq: "<<fmha_args.stride_dq<<std::endl;
-    std::cout<<"stride_dk: "<<fmha_args.stride_dk<<std::endl;
-    std::cout<<"stride_dv: "<<fmha_args.stride_dv<<std::endl;
-    std::cout<<"stride_dbias: "<<fmha_args.stride_dbias<<std::endl;
-    std::cout<<"nhead_stride_q: "<<fmha_args.nhead_stride_q<<std::endl;
-    std::cout<<"nhead_stride_k: "<<fmha_args.nhead_stride_k<<std::endl;
-    std::cout<<"nhead_stride_v: "<<fmha_args.nhead_stride_v<<std::endl;
-    std::cout<<"nhead_stride_bias: "<<fmha_args.nhead_stride_bias<<std::endl;
-    std::cout<<"nhead_stride_o: "<<fmha_args.nhead_stride_o<<std::endl;
-    std::cout<<"nhead_stride_randval: "<<fmha_args.nhead_stride_randval<<std::endl;
-    std::cout<<"nhead_stride_do: "<<fmha_args.nhead_stride_do<<std::endl;
-    std::cout<<"nhead_stride_lsed: "<<fmha_args.nhead_stride_lsed<<std::endl;
-    std::cout<<"nhead_stride_dq_acc: "<<fmha_args.nhead_stride_dq_acc<<std::endl;
-    std::cout<<"nhead_stride_dq: "<<fmha_args.nhead_stride_dq<<std::endl;
-    std::cout<<"nhead_stride_dk: "<<fmha_args.nhead_stride_dk<<std::endl;
-    std::cout<<"nhead_stride_dv: "<<fmha_args.nhead_stride_dv<<std::endl;
-    std::cout<<"nhead_stride_dbias: "<<fmha_args.nhead_stride_dbias<<std::endl;
-    std::cout<<"batch_stride_q: "<<fmha_args.batch_stride_q<<std::endl;
-    std::cout<<"batch_stride_k: "<<fmha_args.batch_stride_k<<std::endl;
-    std::cout<<"batch_stride_v: "<<fmha_args.batch_stride_v<<std::endl;
-    std::cout<<"batch_stride_bias: "<<fmha_args.batch_stride_bias<<std::endl;
-    std::cout<<"batch_stride_o: "<<fmha_args.batch_stride_o<<std::endl;
-    std::cout<<"batch_stride_randval: "<<fmha_args.batch_stride_randval<<std::endl;
-    std::cout<<"batch_stride_do: "<<fmha_args.batch_stride_do<<std::endl;
-    std::cout<<"batch_stride_lsed: "<<fmha_args.batch_stride_lsed<<std::endl;
-    std::cout<<"batch_stride_dq_acc: "<<fmha_args.batch_stride_dq_acc<<std::endl;
-    std::cout<<"batch_stride_dq: "<<fmha_args.batch_stride_dq<<std::endl;
-    std::cout<<"batch_stride_dk: "<<fmha_args.batch_stride_dk<<std::endl;
-    std::cout<<"batch_stride_dv: "<<fmha_args.batch_stride_dv<<std::endl;
-    std::cout<<"batch_stride_dbias: "<<fmha_args.batch_stride_dbias<<std::endl;
-    std::cout<<"window_size_left: "<<fmha_args.window_size_left<<std::endl;
-    std::cout<<"window_size_right: "<<fmha_args.window_size_right<<std::endl;
-    std::cout<<"mask_type: "<<fmha_args.mask_type<<std::endl;
-    std::cout<<"p_drop: "<<fmha_args.p_drop<<std::endl;
-    std::cout<<"p_undrop: "<<fmha_args.p_undrop<<std::endl;
-    std::cout<<"dropout_seed_ptr: "<<std::get<0>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset))<<std::endl;
-    std::cout<<"dropout_offset_ptr: "<<std::get<1>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset))<<std::endl;
+    *log_file << "seqlen_q: " << fmha_args.seqlen_q << "\n";
+    *log_file << "seqlen_k: " << fmha_args.seqlen_k << "\n";
+    *log_file << "batch: " << fmha_args.batch << "\n";
+    *log_file << "max_seqlen_q: " << fmha_args.max_seqlen_q << "\n";
+    *log_file << "max_seqlen_k: " << fmha_args.max_seqlen_k << "\n";
+    *log_file << "hdim_q: " << fmha_args.hdim_q << "\n";
+    *log_file << "hdim_v: " << fmha_args.hdim_v << "\n";
+    *log_file << "nhead_q: " << fmha_args.nhead_q << "\n";
+    *log_file << "nhead_k: " << fmha_args.nhead_k << "\n";
+    *log_file << "scale: " << fmha_args.scale << "\n";
+    *log_file << "stride_q: " << fmha_args.stride_q << "\n";
+    *log_file << "stride_k: " << fmha_args.stride_k << "\n";
+    *log_file << "stride_v: " << fmha_args.stride_v << "\n";
+    *log_file << "stride_bias: " << fmha_args.stride_bias << "\n";
+    *log_file << "stride_o: " << fmha_args.stride_o << "\n";
+    *log_file << "stride_randval: " << fmha_args.stride_randval << "\n";
+    *log_file << "stride_do: " << fmha_args.stride_do << "\n";
+    *log_file << "stride_dq_acc: " << fmha_args.stride_dq_acc << "\n";
+    *log_file << "stride_dq: " << fmha_args.stride_dq << "\n";
+    *log_file << "stride_dk: " << fmha_args.stride_dk << "\n";
+    *log_file << "stride_dv: " << fmha_args.stride_dv << "\n";
+    *log_file << "stride_dbias: " << fmha_args.stride_dbias << "\n";
+    *log_file << "nhead_stride_q: " << fmha_args.nhead_stride_q << "\n";
+    *log_file << "nhead_stride_k: " << fmha_args.nhead_stride_k << "\n";
+    *log_file << "nhead_stride_v: " << fmha_args.nhead_stride_v << "\n";
+    *log_file << "nhead_stride_bias: " << fmha_args.nhead_stride_bias << "\n";
+    *log_file << "nhead_stride_o: " << fmha_args.nhead_stride_o << "\n";
+    *log_file << "nhead_stride_randval: " << fmha_args.nhead_stride_randval << "\n";
+    *log_file << "nhead_stride_do: " << fmha_args.nhead_stride_do << "\n";
+    *log_file << "nhead_stride_lsed: " << fmha_args.nhead_stride_lsed << "\n";
+    *log_file << "nhead_stride_dq_acc: " << fmha_args.nhead_stride_dq_acc << "\n";
+    *log_file << "nhead_stride_dq: " << fmha_args.nhead_stride_dq << "\n";
+    *log_file << "nhead_stride_dk: " << fmha_args.nhead_stride_dk << "\n";
+    *log_file << "nhead_stride_dv: " << fmha_args.nhead_stride_dv << "\n";
+    *log_file << "nhead_stride_dbias: " << fmha_args.nhead_stride_dbias << "\n";
+    *log_file << "batch_stride_q: " << fmha_args.batch_stride_q << "\n";
+    *log_file << "batch_stride_k: " << fmha_args.batch_stride_k << "\n";
+    *log_file << "batch_stride_v: " << fmha_args.batch_stride_v << "\n";
+    *log_file << "batch_stride_bias: " << fmha_args.batch_stride_bias << "\n";
+    *log_file << "batch_stride_o: " << fmha_args.batch_stride_o << "\n";
+    *log_file << "batch_stride_randval: " << fmha_args.batch_stride_randval << "\n";
+    *log_file << "batch_stride_do: " << fmha_args.batch_stride_do << "\n";
+    *log_file << "batch_stride_lsed: " << fmha_args.batch_stride_lsed << "\n";
+    *log_file << "batch_stride_dq_acc: " << fmha_args.batch_stride_dq_acc << "\n";
+    *log_file << "batch_stride_dq: " << fmha_args.batch_stride_dq << "\n";
+    *log_file << "batch_stride_dk: " << fmha_args.batch_stride_dk << "\n";
+    *log_file << "batch_stride_dv: " << fmha_args.batch_stride_dv << "\n";
+    *log_file << "batch_stride_dbias: " << fmha_args.batch_stride_dbias << "\n";
+    *log_file << "window_size_left: " << fmha_args.window_size_left << "\n";
+    *log_file << "window_size_right: " << fmha_args.window_size_right << "\n";
+    *log_file << "mask_type: " << fmha_args.mask_type << "\n";
+    *log_file << "p_drop: " << fmha_args.p_drop << "\n";
+    *log_file << "p_undrop: " << fmha_args.p_undrop << "\n";
+    *log_file << "dropout_seed_ptr: " << std::get<0>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset)) << "\n";
+    *log_file << "dropout_offset_ptr: " << std::get<1>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset)) << "\n";
   }
 
 }
@@ -531,7 +541,7 @@ hipError_t ck_attn_bwd(
   mask_enum mask_type = static_cast<mask_enum>(attn_mask_type);
   bool ck_fused_attn_log_config = false;
   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
+    if (env_p != nullptr && std::string(env_p) != "")
       ck_fused_attn_log_config = true;
   }
   const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
@@ -708,17 +718,19 @@ hipError_t ck_attn_bwd(
     if (d_qk == d_v) {
       dim3 block(d_qk);
       if (ck_fused_attn_log_config){
-        std::cout<<std::endl<<"run dk_dv_reduce: "<<std::endl;
-        std::cout<<"dk_expanded_ptr: "<<dk_expanded_ptr<<std::endl;
-        std::cout<<"dv_expanded_ptr: "<<dv_expanded_ptr<<std::endl;
-        std::cout<<"stride_b_dkv_expanded: "<<stride_b_dk_expanded<<std::endl;
-        std::cout<<"stride_h_dkv_expanded: "<<stride_h_dk_expanded<<std::endl;
-        std::cout<<"stride_s_dkv_expanded: "<<stride_s_dk_expanded<<std::endl;
-        std::cout<<"dk_ptr: "<<dk_ptr<<std::endl;
-        std::cout<<"dv_ptr: "<<dv_ptr<<std::endl;
-        std::cout<<"stride_b_dk: "<<stride_b_dk<<std::endl;
-        std::cout<<"stride_h_dk: "<<stride_h_dk<<std::endl;
-        std::cout<<"stride_s_dk: "<<stride_s_dk<<std::endl;
+        if (auto* log_file = get_bwd_log_stream()) {
+          *log_file << "\n" << "run dk_dv_reduce: " << "\n";
+          *log_file << "dk_expanded_ptr: " << dk_expanded_ptr << "\n";
+          *log_file << "dv_expanded_ptr: " << dv_expanded_ptr << "\n";
+          *log_file << "stride_b_dkv_expanded: " << stride_b_dk_expanded << "\n";
+          *log_file << "stride_h_dkv_expanded: " << stride_h_dk_expanded << "\n";
+          *log_file << "stride_s_dkv_expanded: " << stride_s_dk_expanded << "\n";
+          *log_file << "dk_ptr: " << dk_ptr << "\n";
+          *log_file << "dv_ptr: " << dv_ptr << "\n";
+          *log_file << "stride_b_dk: " << stride_b_dk << "\n";
+          *log_file << "stride_h_dk: " << stride_h_dk << "\n";
+          *log_file << "stride_s_dk: " << stride_s_dk << "\n";
+        }
       }
       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
         hipLaunchKernelGGL(
@@ -733,15 +745,17 @@ hipError_t ck_attn_bwd(
     } else {
       dim3 block_dk(d_qk);
       if (ck_fused_attn_log_config){
-        std::cout<<std::endl<<"run dk_or_dv_reduce on dk: "<<std::endl;
-        std::cout<<"dk_expanded_ptr: "<<dk_expanded_ptr<<std::endl;
-        std::cout<<"stride_b_dk_expanded: "<<stride_b_dk_expanded<<std::endl;
-        std::cout<<"stride_h_dk_expanded: "<<stride_h_dk_expanded<<std::endl;
-        std::cout<<"stride_s_dk_expanded: "<<stride_s_dk_expanded<<std::endl;
-        std::cout<<"dk_ptr: "<<dk_ptr<<std::endl;
-        std::cout<<"stride_b_dk: "<<stride_b_dk<<std::endl;
-        std::cout<<"stride_h_dk: "<<stride_h_dk<<std::endl;
-        std::cout<<"stride_s_dk: "<<stride_s_dk<<std::endl;
+        if (auto* log_file = get_bwd_log_stream()) {
+          *log_file << "\n" << "run dk_or_dv_reduce on dk: " << "\n";
+          *log_file << "dk_expanded_ptr: " << dk_expanded_ptr << "\n";
+          *log_file << "stride_b_dk_expanded: " << stride_b_dk_expanded << "\n";
+          *log_file << "stride_h_dk_expanded: " << stride_h_dk_expanded << "\n";
+          *log_file << "stride_s_dk_expanded: " << stride_s_dk_expanded << "\n";
+          *log_file << "dk_ptr: " << dk_ptr << "\n";
+          *log_file << "stride_b_dk: " << stride_b_dk << "\n";
+          *log_file << "stride_h_dk: " << stride_h_dk << "\n";
+          *log_file << "stride_s_dk: " << stride_s_dk << "\n";
+        }
       }
       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
         hipLaunchKernelGGL(
@@ -754,15 +768,17 @@ hipError_t ck_attn_bwd(
 
       dim3 block_dv(d_v);
       if (ck_fused_attn_log_config){
-        std::cout<<std::endl<<"run dk_or_dv_reduce on dv: "<<std::endl;
-        std::cout<<"dv_expanded_ptr: "<<dv_expanded_ptr<<std::endl;
-        std::cout<<"stride_b_dv_expanded: "<<stride_b_dv_expanded<<std::endl;
-        std::cout<<"stride_h_dv_expanded: "<<stride_h_dv_expanded<<std::endl;
-        std::cout<<"stride_s_dv_expanded: "<<stride_s_dv_expanded<<std::endl;
-        std::cout<<"dv_ptr: "<<dv_ptr<<std::endl;
-        std::cout<<"stride_b_dv: "<<stride_b_dv<<std::endl;
-        std::cout<<"stride_h_dv: "<<stride_h_dv<<std::endl;
-        std::cout<<"stride_s_dv: "<<stride_s_dv<<std::endl;
+        if (auto* log_file = get_bwd_log_stream()) {
+          *log_file << "\n" << "run dk_or_dv_reduce on dv: " << "\n";
+          *log_file << "dv_expanded_ptr: " << dv_expanded_ptr << "\n";
+          *log_file << "stride_b_dv_expanded: " << stride_b_dv_expanded << "\n";
+          *log_file << "stride_h_dv_expanded: " << stride_h_dv_expanded << "\n";
+          *log_file << "stride_s_dv_expanded: " << stride_s_dv_expanded << "\n";
+          *log_file << "dv_ptr: " << dv_ptr << "\n";
+          *log_file << "stride_b_dv: " << stride_b_dv << "\n";
+          *log_file << "stride_h_dv: " << stride_h_dv << "\n";
+          *log_file << "stride_s_dv: " << stride_s_dv << "\n";
+        }
       }
       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
         hipLaunchKernelGGL(
@@ -782,9 +798,11 @@ hipError_t ck_attn_bwd(
     dim3 grid(ceil(1.0 * s_q * s_kv/THREADS_PER_BLOCK));
     if(bias_shape==BiasShape::k11SS){
       if (ck_fused_attn_log_config){
-        std::cout<<std::endl<<"run dbias_reduce_11SS: "<<std::endl;
-        std::cout<<"dbias_ptr: "<<dbias_ptr<<std::endl;
-        std::cout<<"dbias_expanded_ptr: "<<dbias_expanded_ptr<<std::endl;
+        if (auto* log_file = get_bwd_log_stream()) {
+          *log_file << "\n" << "run dbias_reduce_11SS: " << "\n";
+          *log_file << "dbias_ptr: " << dbias_ptr << "\n";
+          *log_file << "dbias_expanded_ptr: " << dbias_expanded_ptr << "\n";
+        }
       }
       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
         hipLaunchKernelGGL(
@@ -794,9 +812,11 @@ hipError_t ck_attn_bwd(
           static_cast<CK_TILE_TYPE*>(dbias_ptr));); 
     }else if(bias_shape==BiasShape::k1HSS){
       if (ck_fused_attn_log_config){
-        std::cout<<std::endl<<"run dbias_reduce_1HSS: "<<std::endl;
-        std::cout<<"dbias_ptr: "<<dbias_ptr<<std::endl;
-        std::cout<<"dbias_expanded_ptr: "<<dbias_expanded_ptr<<std::endl;
+        if (auto* log_file = get_bwd_log_stream()) {
+          *log_file << "\n" << "run dbias_reduce_1HSS: " << "\n";
+          *log_file << "dbias_ptr: " << dbias_ptr << "\n";
+          *log_file << "dbias_expanded_ptr: " << dbias_expanded_ptr << "\n";
+        }
       }
       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
         hipLaunchKernelGGL(
@@ -806,9 +826,11 @@ hipError_t ck_attn_bwd(
           static_cast<CK_TILE_TYPE*>(dbias_ptr));); 
     }else if(bias_shape==BiasShape::kB1SS){
       if (ck_fused_attn_log_config){
-        std::cout<<std::endl<<"run dbias_reduce_B1SS: "<<std::endl;
-        std::cout<<"dbias_ptr: "<<dbias_ptr<<std::endl;
-        std::cout<<"dbias_expanded_ptr: "<<dbias_expanded_ptr<<std::endl;
+        if (auto* log_file = get_bwd_log_stream()) {
+          *log_file << "\n" << "run dbias_reduce_B1SS: " << "\n";
+          *log_file << "dbias_ptr: " << dbias_ptr << "\n";
+          *log_file << "dbias_expanded_ptr: " << dbias_expanded_ptr << "\n";
+        }
       }
       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
         hipLaunchKernelGGL(
@@ -887,7 +909,7 @@ hipError_t ck_attn_varlen_bwd(
  
   bool ck_fused_attn_log_config = false;
   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
+    if (env_p != nullptr && std::string(env_p) != "")
       ck_fused_attn_log_config = true;
   } 
   const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
@@ -1069,17 +1091,19 @@ hipError_t ck_attn_varlen_bwd(
     if (d_qk == d_v) {
       dim3 block(d_qk);
       if (ck_fused_attn_log_config){
-        std::cout<<std::endl<<"run dk_dv_reduce_thd: "<<std::endl;
-        std::cout<<"cu_seqlen_kv_ptr: "<<cu_seqlen_kv_ptr<<std::endl;
-        std::cout<<"cu_seqlen_kv_padded_ptr: "<<cu_seqlen_kv_padded_ptr<<std::endl;
-        std::cout<<"dk_expanded_ptr: "<<dk_expanded_ptr<<std::endl;
-        std::cout<<"dv_expanded_ptr: "<<dv_expanded_ptr<<std::endl;
-        std::cout<<"stride_h_dkv_expanded: "<<stride_h_dk_expanded<<std::endl;
-        std::cout<<"stride_s_dkv_expanded: "<<stride_s_dk_expanded<<std::endl;
-        std::cout<<"dk_ptr: "<<dk_ptr<<std::endl;
-        std::cout<<"dv_ptr: "<<dv_ptr<<std::endl;
-        std::cout<<"stride_h_dk: "<<stride_h_dk<<std::endl;
-        std::cout<<"stride_s_dk: "<<stride_s_dk<<std::endl;
+        if (auto* log_file = get_bwd_log_stream()) {
+          *log_file << "\n" << "run dk_dv_reduce_thd: " << "\n";
+          *log_file << "cu_seqlen_kv_ptr: " << cu_seqlen_kv_ptr << "\n";
+          *log_file << "cu_seqlen_kv_padded_ptr: " << cu_seqlen_kv_padded_ptr << "\n";
+          *log_file << "dk_expanded_ptr: " << dk_expanded_ptr << "\n";
+          *log_file << "dv_expanded_ptr: " << dv_expanded_ptr << "\n";
+          *log_file << "stride_h_dkv_expanded: " << stride_h_dk_expanded << "\n";
+          *log_file << "stride_s_dkv_expanded: " << stride_s_dk_expanded << "\n";
+          *log_file << "dk_ptr: " << dk_ptr << "\n";
+          *log_file << "dv_ptr: " << dv_ptr << "\n";
+          *log_file << "stride_h_dk: " << stride_h_dk << "\n";
+          *log_file << "stride_s_dk: " << stride_s_dk << "\n";
+        }
       }
       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
         hipLaunchKernelGGL(
@@ -1096,15 +1120,17 @@ hipError_t ck_attn_varlen_bwd(
     } else {
       dim3 block_dk(d_qk);
       if (ck_fused_attn_log_config){
-        std::cout<<std::endl<<"run dk_or_dv_reduce_thd on dk: "<<std::endl;
-        std::cout<<"cu_seqlen_kv_ptr: "<<cu_seqlen_kv_ptr<<std::endl;
-        std::cout<<"cu_seqlen_kv_padded_ptr: "<<cu_seqlen_kv_padded_ptr<<std::endl;
-        std::cout<<"dk_expanded_ptr: "<<dk_expanded_ptr<<std::endl;
-        std::cout<<"stride_h_dk_expanded: "<<stride_h_dk_expanded<<std::endl;
-        std::cout<<"stride_s_dk_expanded: "<<stride_s_dk_expanded<<std::endl;
-        std::cout<<"dk_ptr: "<<dk_ptr<<std::endl;
-        std::cout<<"stride_h_dk: "<<stride_h_dk<<std::endl;
-        std::cout<<"stride_s_dk: "<<stride_s_dk<<std::endl;
+        if (auto* log_file = get_bwd_log_stream()) {
+          *log_file << "\n" << "run dk_or_dv_reduce_thd on dk: " << "\n";
+          *log_file << "cu_seqlen_kv_ptr: " << cu_seqlen_kv_ptr << "\n";
+          *log_file << "cu_seqlen_kv_padded_ptr: " << cu_seqlen_kv_padded_ptr << "\n";
+          *log_file << "dk_expanded_ptr: " << dk_expanded_ptr << "\n";
+          *log_file << "stride_h_dk_expanded: " << stride_h_dk_expanded << "\n";
+          *log_file << "stride_s_dk_expanded: " << stride_s_dk_expanded << "\n";
+          *log_file << "dk_ptr: " << dk_ptr << "\n";
+          *log_file << "stride_h_dk: " << stride_h_dk << "\n";
+          *log_file << "stride_s_dk: " << stride_s_dk << "\n";
+        }
       }
       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
         hipLaunchKernelGGL(
@@ -1119,15 +1145,17 @@ hipError_t ck_attn_varlen_bwd(
 
       dim3 block_dv(d_v);
       if (ck_fused_attn_log_config){
-        std::cout<<std::endl<<"run dk_or_dv_reduce_thd on dv: "<<std::endl;
-        std::cout<<"cu_seqlen_kv_ptr: "<<cu_seqlen_kv_ptr<<std::endl;
-        std::cout<<"cu_seqlen_kv_padded_ptr: "<<cu_seqlen_kv_padded_ptr<<std::endl;
-        std::cout<<"dv_expanded_ptr: "<<dv_expanded_ptr<<std::endl;
-        std::cout<<"stride_h_dv_expanded: "<<stride_h_dv_expanded<<std::endl;
-        std::cout<<"stride_s_dv_expanded: "<<stride_s_dv_expanded<<std::endl;
-        std::cout<<"dv_ptr: "<<dv_ptr<<std::endl;
-        std::cout<<"stride_h_dv: "<<stride_h_dv<<std::endl;
-        std::cout<<"stride_s_dv: "<<stride_s_dv<<std::endl;
+        if (auto* log_file = get_bwd_log_stream()) {
+          *log_file << "\n" << "run dk_or_dv_reduce_thd on dv: " << "\n";
+          *log_file << "cu_seqlen_kv_ptr: " << cu_seqlen_kv_ptr << "\n";
+          *log_file << "cu_seqlen_kv_padded_ptr: " << cu_seqlen_kv_padded_ptr << "\n";
+          *log_file << "dv_expanded_ptr: " << dv_expanded_ptr << "\n";
+          *log_file << "stride_h_dv_expanded: " << stride_h_dv_expanded << "\n";
+          *log_file << "stride_s_dv_expanded: " << stride_s_dv_expanded << "\n";
+          *log_file << "dv_ptr: " << dv_ptr << "\n";
+          *log_file << "stride_h_dv: " << stride_h_dv << "\n";
+          *log_file << "stride_s_dv: " << stride_s_dv << "\n";
+        }
       }
       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
         hipLaunchKernelGGL(
