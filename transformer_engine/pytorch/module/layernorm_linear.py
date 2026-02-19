@@ -341,6 +341,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 # For FP4, quantizer is already configured; don't override
                 if not is_mxfp4_enabled:
                     ln_out = input_quantizer(ln_out)
+                    ln_out_total = ln_out
                 else:
                     # MXFP4: quantize if not already quantized
                     if input_quantizer_mxfp4 is not None and not isinstance(ln_out, QuantizedTensor):
@@ -394,9 +395,9 @@ class _LayerNormLinear(torch.autograd.Function):
                     fsdp_group=fsdp_group,
                     workspace_dtype=activation_dtype,
                 )
-            # For MXFP4, skip update_usage (tensors are pre-configured)
-            if not isinstance(weightmat, MXFP4TensorBase):
-                weightmat.update_usage(rowwise_usage=True)
+                # For MXFP4, skip update_usage (tensors are pre-configured)
+                if not isinstance(weightmat, MXFP4TensorBase):
+                    weightmat.update_usage(rowwise_usage=True)
 
         else:
             weightmat = cast_if_needed(weightmat, activation_dtype)  # Cast for AMP
@@ -441,7 +442,7 @@ class _LayerNormLinear(torch.autograd.Function):
         # Forward GEMM
         # Note: y = x * w^T
         # ------------------------------------------------------
-        if IS_HIP_EXTENSION and fp8 and not keep_fp8_weight_transpose_cache:
+        if IS_HIP_EXTENSION and fp8 and not keep_fp8_weight_transpose_cache and not isinstance(weightmat, MXFP4TensorBase):
             assert weightmat._transpose is None or weightmat._transpose.numel() == 0, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
         nvtx_range_push(f"{nvtx_label}.gemm")
         gemm_out, *_, reduce_scatter_out = general_gemm(
@@ -1860,7 +1861,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         assert TEDebugState.debug_enabled
         from ...debug.pytorch.debug_quantization import DebugQuantizer
 
-        names = ["activation", "weight", "output", "dgrad", "wgrad", "gradient"]
+        names = ["activation", "weight", "output", "dgrad", "wgrad", "gradient", "gradient_mxfp4"]
         return tuple(
             DebugQuantizer(self.name, name, q, self.tp_group)
             for name, q in zip(names, original_quantizers)

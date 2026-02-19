@@ -304,7 +304,9 @@ class _Linear(torch.autograd.Function):
                     fsdp_group=fsdp_group,
                     workspace_dtype=activation_dtype,
                 )
-                weightmat.update_usage(rowwise_usage=True)
+                # For MXFP4, skip update_usage (tensors are pre-configured)
+                if not isinstance(weightmat, MXFP4TensorBase):
+                    weightmat.update_usage(rowwise_usage=True)
             # For MXFP4, weightmat is already set from conversion above
 
         else:
@@ -350,7 +352,7 @@ class _Linear(torch.autograd.Function):
         # Forward GEMM
         # Note: y = x * w^T
         # ------------------------------------------------------
-        if IS_HIP_EXTENSION and fp8 and not keep_fp8_weight_transpose_cache:
+        if IS_HIP_EXTENSION and fp8 and not keep_fp8_weight_transpose_cache and not isinstance(weightmat, MXFP4TensorBase):
                 assert weightmat._transpose is None or weightmat._transpose.numel() == 0, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
 
         nvtx_range_push(f"{nvtx_label}.gemm")
@@ -398,6 +400,9 @@ class _Linear(torch.autograd.Function):
             nvtx_range_pop(f"{nvtx_label}.row_parallel_comm")
         else:
             out = gemm_out
+        # Reshape MXFP4 output to match input batch dims (fp4_gemm_layout returns 2D)
+        if is_mxfp4_enabled:
+            out = out.view(-1, *inp.shape[1:-1], out_features)
         # ------------------------------------------------------
         # Output tensor is ready to return...
         # ------------------------------------------------------
@@ -1614,7 +1619,7 @@ class Linear(TransformerEngineBaseModule):
         if not self.fp8:
             if is_mxfp4_enabled:
                 return [None] * 7  # 7 quantizers for MXFP4
-            return [None] * 6
+            return [None] * 7
         
         if is_mxfp4_enabled:
             # MXFP4 quantizers
@@ -1691,7 +1696,7 @@ class Linear(TransformerEngineBaseModule):
         assert TEDebugState.debug_enabled
         from ...debug.pytorch.debug_quantization import DebugQuantizer
 
-        names = ["activation", "weight", "output", "dgrad", "wgrad", "gradient"]
+        names = ["activation", "weight", "output", "dgrad", "wgrad", "gradient", "gradient_mxfp4"]
         return tuple(
             DebugQuantizer(self.name, name, q, self.tp_group)
             for name, q in zip(names, original_quantizers)
