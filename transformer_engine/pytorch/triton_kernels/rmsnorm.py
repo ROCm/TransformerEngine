@@ -13,7 +13,7 @@ from transformer_engine.pytorch.triton_kernels.common import (
     te_dtype_to_triton_dtype,
 )
 from .common import get_fp8_max
-from ..tensor.quantized_tensor import Quantizer
+from ..quantized_tensor import Quantizer
 import transformer_engine_torch as tex
 
 def dg_tmp_rows(x, sm_margin=None):

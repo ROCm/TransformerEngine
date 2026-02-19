@@ -576,9 +576,9 @@ class _LayerNormMLP(torch.autograd.Function):
         if is_grad_enabled:
             # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
             if inp.requires_grad and keep_fp8_weight_transpose_cache and not use_fsdp2:
-                if isinstance(fc1_weight_final, QuantizedTensorBase):
+                if isinstance(fc1_weight_final, QuantizedTensorStorage):
                     fc1_weight_final.update_usage(columnwise_usage=True)
-                if isinstance(fc2_weight_final, QuantizedTensorBase):
+                if isinstance(fc2_weight_final, QuantizedTensorStorage):
                     fc2_weight_final.update_usage(columnwise_usage=True)
 
             if cpu_offloading:
@@ -897,7 +897,7 @@ class _LayerNormMLP(torch.autograd.Function):
             if isinstance(grad_output, QuantizedTensorStorage):
                 grad_output.update_usage(rowwise_usage=True)
             if ctx.fc2_weight_quantizer is not None and isinstance(
-                ctx.fc2_weight, QuantizedTensorStorage
+                fc2_weight, QuantizedTensorStorage
             ):
                 fc2_weight.update_usage(columnwise_usage=True)
 
@@ -1155,7 +1155,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
             # Make sure required data is available
             if ctx.fc1_weight_quantizer is not None and isinstance(
-                ctx.fc1_weight_quantizer, QuantizedTensorStorage
+                fc1_weight, QuantizedTensorStorage # this fixes a bug with upstream usage of fc1_weight_quantizer
             ):
                 fc1_weight.update_usage(columnwise_usage=True)
 

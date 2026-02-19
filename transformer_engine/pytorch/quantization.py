@@ -260,6 +260,7 @@ class FP8GlobalStateManager:
     HIGH_PRECISION_INIT_VAL = False
     IS_FIRST_FP8_MODULE = False
     FP8_GRAPH_CAPTURING = False
+    SKIP_FP8_REDUCTION_FOR_FSDP2 = False
     AUTOCAST_DEPTH = 0
     global_amax_buffer = {}
     global_amax_history_buffer = {}

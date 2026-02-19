@@ -293,6 +293,7 @@ class MXFP8Quantizer : public Quantizer {
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 };
 
+#ifndef __HIP_PLATFORM_AMD__
 class NVFP4Quantizer : public Quantizer {
  public:
   // fp4 dtype
@@ -346,6 +347,7 @@ class NVFP4Quantizer : public Quantizer {
   void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
                      const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
 };
+#endif // #ifndef __HIP_PLATFORM_AMD__
 
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer);
 

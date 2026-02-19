@@ -33,6 +33,7 @@ class _FormatMaxVals(Enum):
     """
     Tuples of FP8 (OCP, FNUZ) values for different formats.
     """
+    E2M1 = (6, 6)
     E4M3 = (448, 240)
     E5M2 = (57344, 57344)
 
@@ -53,12 +54,11 @@ class Format(Enum):
             FP8 tensors in the forward pass are in e4m3 format,
             FP8 tensors in the backward pass are in e5m2 format
     """
-    #TODO: bring E2M1 back after rocm support MXFP4
-    if not te_rocm_build:
-        E2M1 = _FormatHelper(max_fwd=6, max_bwd=6)
-    E4M3 = _FormatHelper(max_fwd=_FormatMaxVals.E4M3.value, max_bwd=_FormatMaxVals.E4M3.value)
-    E5M2 = _FormatHelper(max_fwd=_FormatMaxVals.E5M2.value, max_bwd=_FormatMaxVals.E5M2.value)
-    HYBRID = _FormatHelper(max_fwd=E4M3.max_fwd, max_bwd=E5M2.max_bwd)
+    #TODO: Change max vals after rocm support MXFP4
+    E2M1 = _FormatHelper(fwd=_FormatMaxVals.E2M1.value, bwd=_FormatMaxVals.E2M1.value)
+    E4M3 = _FormatHelper(fwd=_FormatMaxVals.E4M3.value, bwd=_FormatMaxVals.E4M3.value)
+    E5M2 = _FormatHelper(fwd=_FormatMaxVals.E5M2.value, bwd=_FormatMaxVals.E5M2.value)
+    HYBRID = _FormatHelper(fwd=_FormatMaxVals.E4M3.value, bwd=_FormatMaxVals.E5M2.value)
 
 
 @dataclass(frozen=True)

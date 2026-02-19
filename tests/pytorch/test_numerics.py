@@ -1196,7 +1196,7 @@ def _test_granular_accuracy_with_fp8(block, bs, dtype, config):
     )
     inp_hidden_states.retain_grad()
 
-    with fp8_autocast(enabled=True):
+    with autocast(enabled=True):
         out = block(inp_hidden_states)
         loss = out.sum()
         loss.backward()
@@ -1357,10 +1357,11 @@ def test_fp8_linear_without_transpose_cache_accuracy(dtype, bs, model, fp8_model
         module = LayerNormLinear
 
     config = model_configs[model]
-    with fp8_model_init(enabled=fp8_model_params):    
+    with quantized_model_init(enabled=fp8_model_params):    
         layer = module(
             config.hidden_size,
             4 * config.hidden_size,
+            config.eps,
             bias=True,
             params_dtype=dtype,
             device="cuda",
@@ -1371,6 +1372,7 @@ def test_fp8_linear_without_transpose_cache_accuracy(dtype, bs, model, fp8_model
         ref_layer = module(
             config.hidden_size,
             4 * config.hidden_size,
+            config.eps,
             bias=True,
             params_dtype=dtype,
             device="cuda",

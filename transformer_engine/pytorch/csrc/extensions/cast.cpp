@@ -493,6 +493,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
   return retval;
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 // allocate fp4 data, fp8 scalings, and amax values
 // layout: [fp4_data0, ..., fp4_dataN, fp8_scaling0, ..., fp8_scalingN, amax0, ..., amaxN]
 // amax buffer will be zeroed out by later amax kernels, so we can use empty to allocate
@@ -693,6 +694,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_nv
 
   return retval;
 }
+#endif // #ifndef __HIP_PLATFORM_AMD__
 
 }  // namespace
 
@@ -791,6 +793,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       }
       std::tie(output_py_list, output_cpp_list) =
           bulk_allocate_mxfp8_tensors(split_shapes, quantizer_list, mxfp8_quantizers);
+#ifndef __HIP_PLATFORM_AMD__
     } else if (is_nvfp4) {
       // NVFP4: construct output tensors with bulk allocations
       std::vector<NVFP4Quantizer *> nvfp4_quantizers;
@@ -799,6 +802,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       }
       std::tie(output_py_list, output_cpp_list) =
           bulk_allocate_nvfp4_tensors(split_shapes, quantizer_list, nvfp4_quantizers);
+#endif
     } else {
       NVTE_CHECK(false, "Expected either FP8 block-scaling or MXFP8 quantizer");
     }

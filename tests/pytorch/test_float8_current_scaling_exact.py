@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -9,7 +11,7 @@ import pytest
 
 import transformer_engine.pytorch as te
 
-from transformer_engine.common.recipe import Float8CurrentScaling
+from transformer_engine.common.recipe import Float8CurrentScaling, Format
 from transformer_engine.pytorch.quantization import autocast, get_fp8_torch_dtype
 
 
@@ -847,7 +849,7 @@ class TestFP8CurrentScalingLargeNumel:
             pytest.skip(f"Skipping {shape}: insufficient device memory for allocation.")
 
         try:
-            with fp8_autocast(enabled=True, fp8_recipe=recipe):
+            with autocast(enabled=True, recipe=recipe):
                 y = layer(x)
         except torch.OutOfMemoryError:
             pytest.skip(f"Skipping {shape}: OOM during forward.")

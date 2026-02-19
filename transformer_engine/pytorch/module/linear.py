@@ -410,7 +410,7 @@ class _Linear(torch.autograd.Function):
 
             # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
             if inp.requires_grad and keep_fp8_weight_transpose_cache and not use_fsdp2:
-                if isinstance(weightmat, QuantizedTensorBase):
+                if isinstance(weightmat, QuantizedTensorStorage):
                     weightmat.update_usage(columnwise_usage=True)
 
             if cpu_offloading and saved_inputmat is not None:

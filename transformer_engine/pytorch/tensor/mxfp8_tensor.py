@@ -142,7 +142,9 @@ class MXFP8Quantizer(Quantizer):
         columnwise_data = None
         columnwise_scale_inv = None
         if self.columnwise_usage:
-            columnwise_data = torch.empty_like(data)
+            columnwise_data = torch.empty(
+                shape, dtype=torch.uint8, device=device, pin_memory=pin_memory
+            )
             # ROCm TE does not implement fuse padding zeros so use zero tensor here
             columnwise_scale_inv = torch.zeros(
                 round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
