@@ -13,6 +13,28 @@
 
 namespace ck_fused_attn{
 
+bool open_ck_fused_attn_log_file(std::ofstream& log_file, const char* file_prefix) {
+  const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG");
+  if (env_p == nullptr) {
+    return false;
+  }
+  const std::string log_dir_str(env_p);
+  if (log_dir_str.empty() || log_dir_str == "0") {
+    return false;
+  }
+  std::filesystem::path log_dir(log_dir_str);
+  std::error_code ec;
+  std::filesystem::create_directories(log_dir, ec);
+  if(ec){
+    std::cerr << "Failed to create log directory: " << log_dir_str << ", error: " << ec.message() << std::endl;
+    return false;
+  }
+  std::ostringstream filename;
+  filename << file_prefix << "_" << getpid() << "_" << std::this_thread::get_id() << ".log";
+  log_file.open(log_dir / filename.str(), std::ios_base::app);
+  return log_file.is_open();
+}
+
 std::string get_data_type_str(DType dtype){
   std::string data_type_str;
   if(dtype==DType::kFloat16){

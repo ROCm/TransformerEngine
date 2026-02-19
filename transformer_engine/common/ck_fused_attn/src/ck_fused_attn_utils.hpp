@@ -60,27 +60,7 @@ std::pair<bias_enum, BiasShape> get_ck_bias_type_shape(BiasType attn_bias_type, 
 
 uint64_t get_runtime_max_seqlen(uint64_t b, const void* cu_seqlen_ptr, const void* cu_seqlen_padded_ptr, void* workspace, hipStream_t stream);
 
-inline bool open_ck_fused_attn_log_file(std::ofstream& log_file, const char* file_prefix) {
-  const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG");
-  if (env_p == nullptr) {
-    return false;
-  }
-  const std::string log_dir_str(env_p);
-  if (log_dir_str.empty() || log_dir_str == "0") {
-    return false;
-  }
-  std::filesystem::path log_dir(log_dir_str);
-  std::error_code ec;
-  std::filesystem::create_directories(log_dir, ec);
-  if(ec){
-    std::cerr << "Failed to create log directory: " << log_dir_str << ", error: " << ec.message() << std::endl;
-    return false;
-  }
-  std::ostringstream filename;
-  filename << file_prefix << "_" << getpid() << "_" << std::this_thread::get_id() << ".log";
-  log_file.open(log_dir / filename.str(), std::ios_base::app);
-  return log_file.is_open();
-}
+bool open_ck_fused_attn_log_file(std::ofstream& log_file, const char* file_prefix);
 
 }//namespace ck_fused_attn
 #endif // CK_FUSED_ATTN_UTILS_H
