@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
@@ -29,8 +29,8 @@ std::vector<std::tuple<size_t, size_t, size_t>> test_case_sizes = {
 }; 
 
 std::vector<std::tuple<size_t, size_t, size_t>> test_case_sizes_mxfp8 = {
-  {2304, 768, 4096},
-}; 
+  {768, 3072, 4096},
+};
 
 //  A, B, Bias, Gelu, D
 //  Bias type choose as bf16 in use_fp8, D_type otherwise
@@ -228,6 +228,14 @@ void performTest(const TestParams& params) {
 
 #ifdef __HIP_PLATFORM_AMD__
 
+  #if HIP_VERSION < 70200000
+    if (prop.major == 9 && prop.minor == 5 &&
+        params.transa && !params.transb &&
+        params.m == 2304 && params.k == 768 && params.n == 4096) {
+      GTEST_SKIP() << "Skip TN 2304x768x4096 on gfx950 for ROCm < 7.2";
+    }
+  #endif
+
   // Enable FP8 GEMM + GELU fusion tests only on MI300 (gfx942) with ROCm > 7.0.
   // hipBLASLt currently supports this config only
   bool fp8_gelu_fusion_config = false;
@@ -287,11 +295,15 @@ void performTest(const TestParams& params) {
   }
   if (prop.major == 9 && prop.minor == 4) //gfx942 specific hipblasLt limitations
   {
+#if HIP_VERSION < 70100000
     if (params.use_gelu && dtype == DType::kBFloat16 && !params.transa) {
       GTEST_SKIP() << "BF16 GEMM with GELU is not supported in current config";
     }
-    if (has_fp8 && params.use_bias && dtype == DType::kFloat8E4M3 && !fp8_gelu_fusion_config) {
-      GTEST_SKIP() << "FP8 GEMM with bias and FP8 output is not supported in current config";
+#endif
+    if constexpr (std::is_same<D_Type, fp8>::value && std::is_same<Bias_Type, bf16>::value) {
+      if (params.use_bias && !fp8_gelu_fusion_config) {
+        GTEST_SKIP() << "GEMM with BF16 bias and FP8 output is not supported in current config";
+      }
     }
   }
 #endif

@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # 
 # See LICENSE for license information.
@@ -13,15 +13,19 @@ import torch
 import transformer_engine
 from transformer_engine_torch import NVTE_Fused_Attn_Backend
 
-# Add test_fused_attn to the sys path 
+# Add paths tests/pytorch/ and tests/pytorch/attention to the sys path 
 tests_path = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../../tests/pytorch/fused_attn")
+    os.path.join(os.path.dirname(__file__), "../../tests")
 )
-sys.path.append(tests_path)
+sys.path.append(tests_path + "/pytorch")
+sys.path.append(tests_path + "/pytorch/attention")
 
-from test_fused_attn import (
+# Add tests/pytorch/utils.py path into sys path
+from utils import (
     ModelConfig,
-    _get_attention_backends,
+    get_available_attention_backends,
+)
+from test_attention import (
     _run_dot_product_attention,
 )
 
@@ -46,12 +50,12 @@ pad_between_seqs = False
 is_training = True
 
 model_configs = {
-    #   test:             b,  h, hg,   d,   sq,  skv,   p,     mask,              bias
-    "test_0": ModelConfig(2, 16, 16, 64, 512, 512, 0.0, "no_mask", "no_bias"),  # short seq
-    "test_1": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "causal", "no_bias"),  # longer seq, mask
-    "test_2": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "causal", "post_scale_bias"),  # bias
-    "test_3": ModelConfig(2, 32, 4, 128, 8192, 8192, 0.0, "causal", "no_bias"),  # GQA
-    "test_4": ModelConfig(2, 128, 8, 128, 8192, 8192, 0.0, "causal_bottom_right", "no_bias")
+    #   test:             b,  sq, h, d
+    "test_0": ModelConfig(2, 512, 16, 64),  # short seq
+    "test_1": ModelConfig(2, 2048, 16, 128, attn_mask_type="causal"),  # longer seq, mask
+    "test_2": ModelConfig(2, 2048, 16, 128, attn_mask_type="causal", attn_bias_type="post_scale_bias"),  # bias
+    "test_3": ModelConfig(2, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="causal"),  # GQA
+    "test_4": ModelConfig(2, 8192, 128, 128, num_gqa_groups=8, attn_mask_type="causal_bottom_right")
 }
 
 # DataFrame indices and columns for results
@@ -303,7 +307,7 @@ def sanity_checks(
     }
 
     for model, cfg in model_configs.items():
-        avail, _, fused_bes = _get_attention_backends(
+        avail, _, fused_bes = get_available_attention_backends(
             cfg,
             qkv_dtype=dtype,
             qkv_layout=qkv_layout,
@@ -364,7 +368,7 @@ def main(args):
     # Benchmarking starts..
     for model in model_configs.keys():
         config = model_configs[model]
-        available_backends, _, fused_attn_backends = _get_attention_backends(
+        available_backends, _, fused_attn_backends = get_available_attention_backends(
             config,
             qkv_dtype=dtype,
             qkv_layout=qkv_layout,

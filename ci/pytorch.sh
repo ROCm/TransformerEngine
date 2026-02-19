@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -56,7 +56,6 @@ run_test_config(){
     run_default_fa 1 test_fused_router.py
     run_default_fa 1 test_fusible_ops.py
     run_default_fa 1 test_gemm_autotune.py
-    run_default_fa 1 test_gemm_sm_count.py
     run 1 test_gqa.py
     run 1 test_jit.py
     run_default_fa 1 test_multi_tensor.py
@@ -65,7 +64,7 @@ run_test_config(){
     run_default_fa 1 test_recipe.py
     run 1 test_sanity.py
     run_default_fa 1 test_sanity_import.py
-    run_default_fa 1 fused_attn/test_fused_attn.py # Backend selection is controlled by the test
+    run_default_fa 1 attention/test_attention.py # Backend selection is controlled by the test
     run_default_fa 1 triton_kernels/test_cast.py
     run_default_fa 1 triton_kernels/test_cast_mxfp8.py
     run_default_fa 1 triton_kernels/test_norm_common.py
@@ -83,13 +82,18 @@ run_test_config_mgpu(){
     echo ==== Run mGPU with Fused attention backend: $_fus_attn ====
     configure_omp_threads 8
     run_default_fa 1 test_fused_optimizer.py
+    #this test is not really mGPU but time sensitive so run it here because sGPU tests
+    #run in parallel on CI and it affects timing
+    run_default_fa 1 test_gemm_sm_count.py
     run_default_fa 3 test_sanity_import.py
+    # TODO: bring back distributed/test_sanity.py after tensor not allocated error fixed
+    #run_default_fa 1 distributed/test_sanity.py
     run_default_fa 2 distributed/test_fusible_ops.py
     run_default_fa 2 distributed/test_numerics.py
     run_default_fa 1 distributed/test_torch_fsdp2.py
     run_default_fa 2 distributed/test_torch_fsdp2_fp8.py
-    run_default_fa_lbl "flash" 3 fused_attn/test_fused_attn_with_cp.py -k "with_flash"
-    run_default_fa_lbl "fused" 2 fused_attn/test_fused_attn_with_cp.py -k "with_fused"
+    run_default_fa_lbl "flash" 3 attention/test_attention_with_cp.py -k "with_flash"
+    run_default_fa_lbl "fused" 2 attention/test_attention_with_cp.py -k "with_fused"
 }
 
 run_benchmark() {
