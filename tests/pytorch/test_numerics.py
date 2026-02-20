@@ -148,7 +148,7 @@ if fp8_available:
 
 use_cutlass_grouped_gemm = [False]
 # Only enable cutlass grouped gemm on Hopper
-if torch.cuda.get_device_capability() == (9, 0):
+if not IS_HIP_EXTENSION and torch.cuda.get_device_capability() == (9, 0):
     use_cutlass_grouped_gemm.append(True)
 
 
@@ -2131,7 +2131,7 @@ def test_grouped_linear_accuracy(
 
 
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() != (9, 0),
+    IS_HIP_EXTENSION or torch.cuda.get_device_capability() != (9, 0),
     reason="Only enable CUTLASS grouped gemm on Hopper",
 )
 @pytest.mark.parametrize("dtype", param_types, ids=str)
