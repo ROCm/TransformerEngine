@@ -9,10 +9,6 @@
 
 #include<cstdlib>
 #include<fstream>
-#include<filesystem>
-#include<sstream>
-#include<thread>
-#include<unistd.h>
 #include<hip/hip_runtime.h>
 
 //forward declaration for ck_tile enum

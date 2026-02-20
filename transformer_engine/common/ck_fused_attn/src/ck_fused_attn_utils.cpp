@@ -5,6 +5,10 @@
  ************************************************************************/
 
 #include <utility>
+#include <filesystem>
+#include <sstream>
+#include <thread>
+#include <unistd.h>
 #include "ck_fused_attn_utils.hpp"
 #include "ck_fused_attn/ck_fused_attn.hpp"
 #include "mask.hpp"
@@ -23,12 +27,6 @@ bool open_ck_fused_attn_log_file(std::ofstream& log_file, const char* file_prefi
     return false;
   }
   std::filesystem::path log_dir(log_dir_str);
-  std::error_code ec;
-  std::filesystem::create_directories(log_dir, ec);
-  if(ec){
-    std::cerr << "Failed to create log directory: " << log_dir_str << ", error: " << ec.message() << std::endl;
-    return false;
-  }
   std::ostringstream filename;
   filename << file_prefix << "_" << getpid() << "_" << std::this_thread::get_id() << ".log";
   log_file.open(log_dir / filename.str(), std::ios_base::app);
