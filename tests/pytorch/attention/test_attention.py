@@ -240,7 +240,12 @@ def test_dot_product_attention(
         flash_attn_supported = True
 
     # Skip if only unfused backend is supported
-    if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
+    # Double-count the CK backend since we want to compare V2/V3 kernels
+    if (
+        len(fused_attn_backends) +
+        int(IS_HIP_EXTENSION and FusedAttnBackend["CK"] in fused_attn_backends) +
+        flash_attn_supported + unfused_attn_supported
+    ) < 2:
         pytest.skip("Less than two backends to compare.")
 
     # UnfusedDotProductAttention backend
@@ -1276,7 +1281,12 @@ def test_transformer_layer(
         flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
     # Skip if only unfused backend is supported
-    if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
+    # Double-count the CK backend since we want to compare V2/V3 kernels
+    if (
+        len(fused_attn_backends) +
+        int(IS_HIP_EXTENSION and FusedAttnBackend["CK"] in fused_attn_backends) +
+        flash_attn_supported + unfused_attn_supported
+    ) < 2:
         pytest.skip("Less than two backends to compare.")
     # Skip if qkv_format = thd and "padding" not in attn_mask_type
     if qkv_format == "thd" and "padding" not in config.attn_mask_type:
