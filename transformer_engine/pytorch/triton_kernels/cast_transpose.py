@@ -53,10 +53,10 @@ def _amax_reduce_triton(
     A_ptrs = A + rm[:, None] * stride_am + rn[None, :] * stride_an
     mask = (rm < M)[:, None] & (rn < N)[None, :]
 
-    a = tl.load(A_ptrs, mask=mask, other=0).to(tl.float32)
+    a = tl.load(A_ptrs, mask=mask, other=0)
     tile_amax = tl.max(tl.abs(a))
     # accumulate tile-wise max into global amax
-    tl.atomic_max(amax_ptr, tile_amax, sem='relaxed')
+    tl.atomic_max(amax_ptr, tile_amax.to(tl.float32), sem='relaxed')
 
 
 @triton.jit
@@ -229,11 +229,11 @@ def _amax_reduce_triton_stage1(
     A_ptrs = A + rm[:, None] * stride_am + rn[None, :] * stride_an
     mask = (rm < M)[:, None] & (rn < N)[None, :]
 
-    a = tl.load(A_ptrs, mask=mask, other=0).to(tl.float32)
+    a = tl.load(A_ptrs, mask=mask, other=0)
     tile_amax = tl.max(tl.abs(a))
 
     # Store per-program amax in workspace
-    tl.store(block_amax + pid, tile_amax)
+    tl.store(block_amax + pid, tile_amax.to(tl.float32))
 
     if pid == 0:
         tl.store(num_blocks, tl.num_programs(0))
