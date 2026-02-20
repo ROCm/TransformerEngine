@@ -258,7 +258,7 @@ def test_dot_product_attention(
 
     # FusedAttention backend
     if fused_attn_supported:
-        if len(fused_attn_backends) == 1 and FusedAttnBackend["CK"] not in fused_attn_backends:
+        if len(fused_attn_backends) == 1:
             fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
                 dtype,
                 config,
@@ -269,32 +269,20 @@ def test_dot_product_attention(
                 pad_between_seqs,
                 is_training,
             )
-        # We can consider the CK backend as being two, since we have V2/V3 kernels
-        elif len(fused_attn_backends) == 1:
-            os.environ["NVTE_FUSED_ATTN_CK"] = "1"
-            os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "0"
-            fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
-                dtype,
-                config,
-                "FusedAttention",
-                ckpt_attn,
-                qkv_layout,
-                workspace_opt,
-                pad_between_seqs,
-                is_training,
-            )
-            os.environ["NVTE_CK_USES_FWD_V3"] = "0"
-            os.environ["NVTE_CK_USES_BWD_V3"] = "0"
-            fused_attn_fwd_1, fused_attn_bwd_1 = _run_dot_product_attention(
-                dtype,
-                config,
-                "FusedAttention",
-                ckpt_attn,
-                qkv_layout,
-                workspace_opt,
-                pad_between_seqs,
-                is_training,
-            )
+            # We can consider the CK backend as being two, since we have V2/V3 kernels
+            if IS_HIP_EXTENSION and FusedAttnBackend["CK"] in fused_attn_backends:
+                os.environ["NVTE_CK_USES_FWD_V3"] = "0"
+                os.environ["NVTE_CK_USES_BWD_V3"] = "0"
+                fused_attn_fwd_1, fused_attn_bwd_1 = _run_dot_product_attention(
+                    dtype,
+                    config,
+                    "FusedAttention",
+                    ckpt_attn,
+                    qkv_layout,
+                    workspace_opt,
+                    pad_between_seqs,
+                    is_training,
+                )
         elif len(fused_attn_backends) == 2:
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
             os.environ["NVTE_FUSED_ATTN_CK"] = "0"
