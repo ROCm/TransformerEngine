@@ -117,3 +117,13 @@ set_target_properties(ck_fused_attn PROPERTIES INSTALL_RPATH "$ORIGIN")
 
 install(FILES ${__AITER_MHA_PATH}/libmha_fwd.so ${__AITER_MHA_PATH}/libmha_bwd.so DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib)
 install(TARGETS ck_fused_attn DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib)
+# copy v3 kernels to destination
+foreach(ARCH IN LISTS V3_ASM_ARCHS)
+  foreach(KERNEL_TYPE IN ITEMS fmha_v3_fwd fmha_v3_bwd)
+    file(REMOVE_RECURSE ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib/aiter/${ARCH}/${KERNEL_TYPE})
+    install(DIRECTORY
+          ${__AITER_SOURCE_DIR}/hsa/${ARCH}/${KERNEL_TYPE}
+          DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib/aiter/${ARCH}/
+          PATTERN "codegen.py" EXCLUDE)
+  endforeach()
+endforeach()

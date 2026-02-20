@@ -73,20 +73,28 @@ void set_aiter_asm_dir() {
   std::call_once(aiter_asm_dir_once, []() {
     Dl_info info;
     dladdr((void*)set_aiter_asm_dir, &info);
+    const char* log_ck_config_env = std::getenv("NVTE_LOG_CK_CONFIG");
+    bool log_ck_config = log_ck_config_env && std::string(log_ck_config_env) == "1";
+    // Check if user has set AITER_ASM_DIR, if yes, skip auto setting and log
+    // the value if NVTE_LOG_CK_CONFIG is set
+    const char* aiter_asm_dir = std::getenv("AITER_ASM_DIR");
+    if (aiter_asm_dir) {
+      if (log_ck_config) {
+        std::cout << "AITER_ASM_DIR is set by user to: " << aiter_asm_dir << std::endl;
+      }
+      return;
+    }
+    // Check standard path
     auto install_lib_path = std::filesystem::path(info.dli_fname).parent_path() / "aiter";
-    const char* log_ck_config = std::getenv("NVTE_LOG_CK_CONFIG");
-    auto editable_install_path = std::filesystem::path(info.dli_fname).parent_path().parent_path().parent_path() / "3rdparty" / "aiter" / "hsa";
-    for(const auto& path : {install_lib_path, editable_install_path}) {
-      if(std::filesystem::exists(path)) {
-        setenv("AITER_ASM_DIR", path.c_str(), 1);
-        if (log_ck_config && log_ck_config == std::string("1")) {
-          std::cout << "AITER_ASM_DIR set to: " << getenv("AITER_ASM_DIR") << std::endl;
-        }
-        return;
+    if(std::filesystem::exists(install_lib_path)) {
+      setenv("AITER_ASM_DIR", install_lib_path.c_str(), 1);
+      if (log_ck_config) {
+        std::cout << "AITER_ASM_DIR set to: " << getenv("AITER_ASM_DIR") << std::endl;
       }
-      if(log_ck_config && log_ck_config == std::string("1")) {
-        std::cout << "Checked AITER_ASM_DIR path: " << path << " does not exist." << std::endl;
-      }
+      return;
+    }
+    if(log_ck_config) {
+      std::cout << "Checked AITER_ASM_DIR path: " << install_lib_path << " does not exist." << std::endl;
     }
   });
 }
