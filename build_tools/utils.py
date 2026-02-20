@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -526,7 +526,7 @@ def hipify(base_dir, src_dir, sources, include_dirs):
         output_directory=src_dir,
         includes=["*"],
         ignores=["*/amd_detail/*", "*/aotriton/*", "*/ck_fused_attn/*"],
-        header_include_dirs=include_dirs,
+        header_include_dirs=[d for d in include_dirs if Path(d).is_relative_to(base_dir)],
         custom_map_list=base_dir / "hipify_custom_map.json",
         extra_files=[],
         is_pytorch_extension=True,
