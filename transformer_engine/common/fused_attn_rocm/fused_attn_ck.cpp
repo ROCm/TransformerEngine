@@ -257,7 +257,7 @@ __forceinline__ __device__ int binary_search(int32_t target, const int32_t *arra
   return left - 1;
 }
 
-constexpr int THREADS_PER_WAVEFRONT = 64;
+constexpr int THREADS_PER_WAVEFRONT = 32;
 // kernel to remove padding for q, k, v, o (dq, dk, dv, do)
 // each wavefront is in charge of one token index (h*d*sizeof(DataType) bytes copy)
 // one workitem (thread) in one wavefront is charge of one element in 32 segment trunk of h*d

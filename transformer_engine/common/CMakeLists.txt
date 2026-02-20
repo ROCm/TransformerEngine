@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -80,6 +80,12 @@ set(CUTLASS_TOOLS_INCLUDE_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cutlass/tools/util/include")
 
 else()
+  if(NOT DEFINED ENV{NVTE_ROCM_ARCH})
+    SET(CMAKE_HIP_ARCHITECTURES gfx942 gfx950)
+  else()
+    SET(CMAKE_HIP_ARCHITECTURES $ENV{NVTE_ROCM_ARCH})
+  endif()
+
   set(CMAKE_CXX_STANDARD 17)
   project(transformer_engine LANGUAGES HIP CXX)
 
@@ -91,12 +97,6 @@ else()
   # Disable Asserts In Code (Can't use asserts on HIP stack.)
   add_definitions(-DNDEBUG)
   add_definitions(-DUSE_ROCM)
-
-  if(NOT DEFINED ENV{NVTE_ROCM_ARCH})
-    SET(CMAKE_HIP_ARCHITECTURES gfx942 gfx950)
-  else()
-    SET(CMAKE_HIP_ARCHITECTURES $ENV{NVTE_ROCM_ARCH})
-  endif()
 
   # build error will be dup-ed parallel-jobs times
   # set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -parallel-jobs=4")
