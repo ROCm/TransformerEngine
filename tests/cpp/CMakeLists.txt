@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -94,6 +94,35 @@ if(USE_CUDA)
 else()
   set(GPU_TARGETS ${CMAKE_HIP_ARCHITECTURES})
   find_package(hip REQUIRED)
+endif()
+
+if(USE_ROCM)
+  set(TE ${CMAKE_CURRENT_SOURCE_DIR}/../..)
+  set(THIRDPARTY ${TE}/3rdparty)
+  list(APPEND CMAKE_MODULE_PATH "${THIRDPARTY}/hipify_torch/cmake")
+  include(Hipify)
+  message(STATUS "CMAKE_MODULE_PATH: ${CMAKE_MODULE_PATH}")
+
+  #hipify parameters should match those used in TE CMakeLists.txt
+  set(header_include_dir
+    ${TE}/transformer_engine/common/include
+    ${TE}/transformer_engine/common
+    ${TE}/transformer_engine)
+
+  set(cuda_source_dir ${PROJECT_SOURCE_DIR} )
+  message(STATUS "Run hipify on ${cuda_source_dir}")
+  hipify(CUDA_SOURCE_DIR ${cuda_source_dir} 
+    HEADER_INCLUDE_DIR ${header_include_dir}
+    IGNORES "*/pytorch/csrc/*"
+    IGNORES "*/jax/csrc/*"
+    IGNORES "*/amd_detail/*"
+    IGNORES "*/aotriton/*"
+    IGNORES "*/ck_fused_attn/*"
+    IGNORES "*/rocshmem_api/*"
+    CUSTOM_MAP_FILE "${TE}/hipify_custom_map.json"
+    NO_MATH_REPLACE
+    V2
+  )
 endif()
 
 add_subdirectory(operator)

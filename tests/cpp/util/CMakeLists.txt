@@ -4,16 +4,18 @@
 #
 # See LICENSE for license information.
 
-if(USE_CUDA)
-add_executable(test_util
+list(APPEND test_cuda_sources
                test_nvrtc.cpp
                test_string.cpp
                ../test_common.cu)
-else()
-add_executable(test_util
-               test_nvrtc_hip.cpp
-               test_string.cpp
-               ../test_common.hip)
+if(USE_CUDA)
+    add_executable(test_util ${test_cuda_sources})
+else()  
+    get_hipified_list("${test_cuda_sources}" test_hip_sources)
+    message("${message_line}")
+    message(STATUS "test_util hipified sources: ${test_hip_sources}")
+
+    add_executable(test_util ${test_hip_sources})
 endif()
 
 find_package(OpenMP REQUIRED)

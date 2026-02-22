@@ -49,7 +49,10 @@ class HipifyMeta(egg_info):
         if rocm_build():
             print("Running hipification of installable headers for ROCm build...")
             common_headers_dir = current_file_path / "transformer_engine/common/include"
-            hipify(current_file_path, common_headers_dir, all_files_in_dir(common_headers_dir), [])
+            #TODO: some installable headers refer non installable headers (i.e not from common/include)
+            #so we need add extra include paths here to match hipification results with build process
+            hipify(current_file_path, common_headers_dir, all_files_in_dir(common_headers_dir),
+                   [common_headers_dir, current_file_path / "transformer_engine"])
         super().run()
 
 CMakeBuildExtension = get_build_ext(BuildExtension)
