@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -211,13 +211,13 @@ else()
   include(Hipify)
   message(STATUS "CMAKE_MODULE_PATH: ${CMAKE_MODULE_PATH}")
 
+  # Parameters for hipify here should match hipify from build_tools/utils.py
+  # Because CMake hipify doesn't support INCLUDES we explicitly add pytorch and jax to IGNORES
   set(header_include_dir
       ${CMAKE_CURRENT_SOURCE_DIR}/..
-      ${CMAKE_CURRENT_SOURCE_DIR}/include 
-      ${CMAKE_CURRENT_SOURCE_DIR}/util
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
       ${CMAKE_CURRENT_SOURCE_DIR})
-  message(STATUS "HIPIFY CUDA_SOURCE_DIR: ${CMAKE_CURRENT_SOURCE_DIR}")
-  message(STATUS "HIPIFY HEADER_INCLUDE_DIR: ${header_include_dir}")
+  message(STATUS "Run hipify on ${CMAKE_CURRENT_SOURCE_DIR}")
   hipify(CUDA_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}
       HEADER_INCLUDE_DIR ${header_include_dir}
       IGNORES "*/amd_detail/*"
@@ -228,13 +228,13 @@ else()
       IGNORES "*/rocshmem_api/*"
       CUSTOM_MAP_FILE "${TE}/hipify_custom_map.json"
       NO_MATH_REPLACE
+      V2
   )
   get_hipified_list("${transformer_engine_SOURCES}" te_hip_sources)
   message("${message_line}")
   message(STATUS "nvte hipified sources: ${te_hip_sources}")
 
   add_library(transformer_engine SHARED ${te_hip_sources})
-  target_include_directories(transformer_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 endif()
 
 target_include_directories(transformer_engine PUBLIC

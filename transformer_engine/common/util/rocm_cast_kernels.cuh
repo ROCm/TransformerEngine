@@ -6,17 +6,16 @@
 #pragma once
 
 #include <cfloat>
-#include <cuda.h>
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
-#include "common.h"
+#include "../common.h"
 #include "math.h"
 #include "ptx.cuh"
 #include "rocm_vectorized_2d.cuh"
 #include "transformer_engine/cast.h"
-#include "transpose/cast_transpose.h"
+#include "../transpose/cast_transpose.h"
 #include "vectorized_pointwise.h"
-#include "utils.cuh"
+#include "../utils.cuh"
 
 namespace transformer_engine {
 
@@ -24,7 +23,7 @@ namespace transformer_engine {
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
 void mxfp8_quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop,
-                    Tensor *output, Tensor *dbias, Tensor *workspace, cudaStream_t stream);
+                    Tensor *output, Tensor *dbias, Tensor *workspace, hipStream_t stream);
 
 
 constexpr size_t MXFP8_CHUNK_DIM_Y = 64;
@@ -401,15 +400,15 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
 // Forward declaration of functions defined in `cast_kernels.cuh`
 template <typename IType>
 void reduce_dbias(const float *workspace_ptr, Tensor *dbias, const size_t rows, const size_t cols,
-                  cudaStream_t stream);
+                  hipStream_t stream);
 
 template <typename ParamOP, float (*OP)(float, const ParamOP &)>
 void CastVectorizedUnaryKernelLauncher(const Tensor &input, const Tensor *noop, Tensor *output,
-                                       cudaStream_t stream);
+                                       hipStream_t stream);
 
 template <typename ParamOP, float (*OP)(float, const ParamOP &)>
 void CastVectorizedUnaryGradKernelLauncher(const Tensor &grad, const Tensor *input, Tensor *output,
-                                           cudaStream_t stream);
+                                           hipStream_t stream);
 
 constexpr size_t TILE_DIM = 32;
 template <typename DTypeReduce>
@@ -445,7 +444,7 @@ __global__ void partial_reduce_kernel(const DTypeReduce* input, float* partial_o
 
 template <typename DTypeReduce, typename DBiasTypeOut>
 void reduce_dbias_rocm(const DTypeReduce *workspace_ptr, Tensor *dbias, const size_t rows,
-                       const size_t cols, cudaStream_t stream, Tensor* partial_sum_workspace) {
+                       const size_t cols, hipStream_t stream, Tensor* partial_sum_workspace) {
   dim3 block_dim_partial(TILE_DIM, TILE_DIM);
   dim3 grid_dim_partial(DIVUP(cols, TILE_DIM), DIVUP(rows, TILE_DIM));
 
@@ -464,7 +463,7 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
 void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tensor *noop,
                              Tensor *output, Tensor *dbias, Tensor *workspace,
-                             cudaStream_t stream) {
+                             hipStream_t stream) {
   switch (output->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
       const size_t rows = input.flat_first_dim();

@@ -502,30 +502,17 @@ def uninstall_te_wheel_packages():
         ]
     )
 
-def detect_hipify_v2():
-    try:
-        from torch.utils.hipify import __version__
-        from packaging.version import Version
-        if Version(__version__) >= Version("2.0.0"):
-            return True
-    except Exception as e:
-        print("failed to detect pytorch hipify version, defaulting to version 1.0.0 behavior")
-        print(e)
-    return False
-
 def hipify(base_dir, src_dir, sources, include_dirs):
     cwd = os.getcwd()
-    if detect_hipify_v2():
-        hipify_module = importlib.import_module("3rdparty.hipify_torch.hipify_torch.v2.hipify_python")
-    else:
-        hipify_module = importlib.import_module("3rdparty.hipify_torch.hipify_torch.hipify_python")
+    hipify_module = importlib.import_module("3rdparty.hipify_torch.hipify_torch.v2.hipify_python")
     do_hipify = hipify_module.hipify
+    print(f"Run hipify on {src_dir}")
 
     hipify_result = do_hipify(
         project_directory=src_dir,
         output_directory=src_dir,
-        includes=["*"],
-        ignores=["*/amd_detail/*", "*/aotriton/*", "*/ck_fused_attn/*"],
+        includes=["*/common/*", str(src_dir)+"/*"],
+        ignores=["*/amd_detail/*", "*/aotriton/*", "*/ck_fused_attn/*", "*/rocshmem_api/*"],
         header_include_dirs=[d for d in include_dirs if Path(d).is_relative_to(base_dir)],
         custom_map_list=base_dir / "hipify_custom_map.json",
         extra_files=[],
