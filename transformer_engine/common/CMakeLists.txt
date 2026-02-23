@@ -8,7 +8,6 @@ cmake_minimum_required(VERSION 3.21)
 
 option(USE_ROCM "Use ROCm" ON)
 option(USE_FUSED_ATTN_AOTRITON "Use aotriton backend" ON)
-option(USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS "Build AOTriton GPU kernels" OFF)
 option(USE_FUSED_ATTN_CK "Use ck backend" ON)
 set(USE_CUDA OFF)
 
