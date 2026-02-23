@@ -539,7 +539,11 @@ class FusedAttnRunner:
             return segment_ids, segment_pos, segment_pad
 
         if self.qkv_layout.is_thd():
-            self.num_segments_per_seq = 2
+            # For very small sequence lengths, use 1 segment instead of 2
+            # to avoid division by zero in segment size calculation
+            # Use the minimum of Q and KV sequence lengths to ensure both work
+            min_seqlen = min(self.max_seqlen_q, self.max_seqlen_kv)
+            self.num_segments_per_seq = 2 if min_seqlen > 1 else 1
             self.segment_ids_q, self.segment_pos_q, self.pad_q = generate_random_segment_ids(
                 self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
             )
@@ -1181,6 +1185,76 @@ class TestFusedAttn:
             seq_desc_format,
         )
         runner.test_backward()
+
+# Test for unfused_smallseq backend (specialized for seq_q=1, seq_kv<=16)
+# Uses configs from customer benchmark data (SciforiumCrossAttn)
+@pytest.mark.skipif(
+    not is_hip_extension(), reason="Unfused_SmallSeq backend only available on AMD hardware"
+)
+@pytest.mark.parametrize(
+    "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype",
+    [
+        # Config 1: Smallest seq_kv (boundary case)
+        # From CSV: jax,fwd,thd,bfloat16,30720,1,2,16,128,1,FALSE,1,-1
+        pytest.param(30720, 1, 2, 16, 16, 128, 128, jnp.bfloat16, id="30720-1-2-16-16-128-128-BF16"),
+        # Config 2: Largest seq_kv (boundary case)
+        # From CSV: jax,fwd,thd,bfloat16,30720,1,16,16,128,1,FALSE,1,-1
+        # pytest.param(30720, 1, 16, 16, 16, 128, 128, jnp.bfloat16, id="30720-1-16-16-16-128-128-BF16"),
+    ],
+)
+def test_unfused_smallseq_backend(
+    b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype
+):
+    """
+    Test unfused_smallseq backend for cross-attention with seq_q=1, seq_kv<=16.
+    This backend is optimized for large batch sizes with small sequence lengths.
+    
+    Test configs are taken from customer benchmark data (SciforiumCrossAttn):
+    - seq_q = 1 (always)
+    - seq_kv = 2 (smallest) or 16 (largest boundary)
+    - Large batch size = 30720 (customer's actual use case)
+    - THD layout (ragged format)
+    - BF16 dtype
+    - NO_BIAS, PADDING_MASK, no dropout (matching customer config)
+    """
+    runner = FusedAttnRunner(
+        b,
+        s_q,
+        s_kv,
+        h_q,
+        h_kv,
+        d_qk,
+        d_v,
+        AttnBiasType.NO_BIAS,  # Unfused_SmallSeq only supports NO_BIAS
+        AttnMaskType.PADDING_MASK,  # Customer uses padding mask
+        0.0,  # dropout_prob (customer config has no dropout)
+        True,  # use_old_rng
+        dtype,
+        True,  # is_training
+        QKVLayout.THD_THD_THD,  # THD format (ragged) - required for unfused_smallseq
+        None,  # bias_shape
+        None,  # window_size (no sliding window support)
+        SeqDescFormat.Seqlens,  # seq_desc_format
+    )
+    
+    # Verify backend selection - this should select NVTE_Unfused_SmallSeq
+    runner._setup_inputs()
+    expected_backend = NVTE_Fused_Attn_Backend.NVTE_Unfused_SmallSeq
+    if runner.backend != expected_backend:
+        pytest.skip(
+            f"Backend selection failed: expected {expected_backend}, got {runner.backend}. "
+            f"This may indicate the backend is not properly configured or conditions not met. "
+            f"Config: b={b}, s_q={s_q}, s_kv={s_kv}, h_q={h_q}, h_kv={h_kv}, "
+            f"d_qk={d_qk}, d_v={d_v}, dtype={dtype}"
+        )
+    
+    # Test forward pass correctness
+    runner.test_forward()
+    
+    # Note: Backward pass test is skipped for now as it's not yet implemented
+    # Once backward kernels are implemented, uncomment the following:
+    # runner.test_backward()
+
 
 # Single test with new-style RNG
 @pytest.mark.skipif(

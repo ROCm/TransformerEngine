@@ -148,6 +148,8 @@ enum NVTE_Fused_Attn_Backend {
     NVTE_AOTriton = 0,
     /*! CK fused attn */
     NVTE_CK = 1,
+    /*! Unfused attention optimized for small sequences (seq_q=1, seq_kv<=16) */
+    NVTE_Unfused_SmallSeq = 2,
 };
 #endif
 

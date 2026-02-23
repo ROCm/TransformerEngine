@@ -200,6 +200,7 @@ else()
        fused_attn_rocm/fused_attn.cpp
        fused_attn_rocm/fused_attn_aotriton.cpp
        fused_attn_rocm/fused_attn_ck.cpp
+       fused_attn_rocm/fused_attn_unfused_smallseq.cpp
        fused_attn_rocm/utils.cpp
        gemm/rocm_gemm.cu
        amd_detail/system.cpp)

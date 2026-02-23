@@ -163,7 +163,8 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local())
       .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend)
       .value("NVTE_AOTriton", NVTE_Fused_Attn_Backend::NVTE_AOTriton)
-      .value("NVTE_CK", NVTE_Fused_Attn_Backend::NVTE_CK);
+      .value("NVTE_CK", NVTE_Fused_Attn_Backend::NVTE_CK)
+      .value("NVTE_Unfused_SmallSeq", NVTE_Fused_Attn_Backend::NVTE_Unfused_SmallSeq);
 #endif
 
   pybind11::enum_<NVTE_Norm_Type>(m, "NVTE_Norm_Type", pybind11::module_local())

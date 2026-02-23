@@ -7,9 +7,11 @@
 #include <iostream>
 #include <string>
 #include <tuple>
+#include <numeric>
 #include "transformer_engine/fused_attn.h"
 #include "fused_attn_aotriton.h"
 #include "fused_attn_ck.h"
+#include "fused_attn_unfused_smallseq.h"
 #include "../common.h"
 #include "utils.h"
 
@@ -288,10 +290,15 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
       nvte_fused_attn = false;
   }
 
-  // by default, both ck and aotriton backends are enabled by nvte_fused_attn
+  // by default, all backends are enabled by nvte_fused_attn
+  bool nvte_fused_attn_unfused_smallseq = nvte_fused_attn;
   bool nvte_fused_attn_ck = nvte_fused_attn;
   bool nvte_fused_attn_aotriton = nvte_fused_attn;
 
+  if (const char* env_p = std::getenv("NVTE_FUSED_ATTN_UNFUSED_SMALLSEQ") ) {
+    if (env_p != nullptr && std::string(env_p) == "0")
+      nvte_fused_attn_unfused_smallseq = false;
+  }
   if (const char* env_p = std::getenv("NVTE_FUSED_ATTN_CK") ) {
     if (env_p != nullptr && std::string(env_p) == "0")
       nvte_fused_attn_ck = false;
@@ -304,8 +311,23 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   // fix the incompatible window size from upstream frameworks pytorch/jax
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
 
-  // first check whether ck can be used, then check aotriton
-  if(nvte_fused_attn_ck && fused_attn_rocm::is_ck_backend_supported(
+  // first check whether unfused_smallseq can be used (highest priority for its specific use case)
+  // then check ck, then aotriton
+  if(nvte_fused_attn_unfused_smallseq && fused_attn_rocm::is_unfused_smallseq_backend_supported(
+        q_dtype,
+        kv_dtype,
+        qkv_layout,
+        bias_type,
+        attn_mask_type,
+        dropout,
+        num_attn_heads, num_gqa_groups,
+        max_seqlen_q, max_seqlen_kv,
+        head_dim_qk,
+        head_dim_v,
+        window_size_left,
+        window_size_right)){
+    return NVTE_Fused_Attn_Backend::NVTE_Unfused_SmallSeq;
+  }else if(nvte_fused_attn_ck && fused_attn_rocm::is_ck_backend_supported(
         q_dtype,
         kv_dtype,
         qkv_layout,
@@ -560,7 +582,41 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
       is_training, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, 
       max_seqlen_q, max_seqlen_kv, d, d, window_size_left, window_size_right);
 
-  if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
+  if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_Unfused_SmallSeq) {
+    // For kvpacked layout, we need to extract K and V from the packed tensor
+    // Create temporary tensors for K and V (they point to the same memory as KV)
+    void *devPtrKV = input_KV->data.dptr;
+    NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+    size_t stride = 0;
+    if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
+      stride = fused_attn_rocm::nvte_dtype_size(input_KV->data.dtype) * h_kv * d;
+    } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
+      stride = fused_attn_rocm::nvte_dtype_size(input_KV->data.dtype) * d;
+    }
+    void *devPtrK = devPtrKV;
+    void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrKV) + stride);
+    
+    // Create temporary Tensor structures for K and V
+    Tensor temp_K = *input_KV;
+    temp_K.data.dptr = devPtrK;
+    Tensor temp_V = *input_KV;
+    temp_V.data.dptr = devPtrV;
+    
+    fused_attn_rocm::fused_attn_unfused_smallseq_fwd(
+      b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, d,
+      is_training, attn_scale, dropout, 
+      qkv_layout, bias_type, attn_mask_type,
+      window_size_left, window_size_right,
+      input_Q, &temp_K, &temp_V, input_Bias, 
+      output_O, Aux_CTX_Tensors,
+      input_cu_seqlens_q,
+      input_cu_seqlens_kv,
+      input_cu_seqlens_q_padded,
+      input_cu_seqlens_kv_padded,
+      input_rng_state,
+      wkspace,
+      stream);
+  } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd_kvpacked(
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
       is_training, attn_scale, dropout, 
@@ -654,7 +710,51 @@ void nvte_fused_attn_bwd_kvpacked(
       true, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
       max_seqlen_kv, d, d, window_size_left, window_size_right);
 
-  if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
+  if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_Unfused_SmallSeq) {
+    // For kvpacked layout, we need to extract K and V from the packed tensor
+    void *devPtrKV = input_KV->data.dptr;
+    NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+    size_t stride = 0;
+    if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
+      stride = fused_attn_rocm::nvte_dtype_size(input_KV->data.dtype) * h_kv * d;
+    } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
+      stride = fused_attn_rocm::nvte_dtype_size(input_KV->data.dtype) * d;
+    }
+    void *devPtrK = devPtrKV;
+    void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrKV) + stride);
+    
+    // Create temporary Tensor structures for K and V
+    Tensor temp_K = *input_KV;
+    temp_K.data.dptr = devPtrK;
+    Tensor temp_V = *input_KV;
+    temp_V.data.dptr = devPtrV;
+    
+    // Create temporary Tensor structures for gradients
+    // dK and dV are written to output_dKV at the same offsets as K and V
+    Tensor temp_dK = *output_dKV;
+    temp_dK.data.dptr = static_cast<void *>(static_cast<int8_t *>(output_dKV->data.dptr));
+    Tensor temp_dV = *output_dKV;
+    temp_dV.data.dptr = static_cast<void *>(static_cast<int8_t *>(output_dKV->data.dptr) + stride);
+    
+    fused_attn_rocm::fused_attn_unfused_smallseq_bwd(
+      b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, d,
+      attn_scale, dropout, 
+      qkv_layout, bias_type, attn_mask_type,
+      window_size_left, window_size_right,
+      deterministic,
+      input_Q, &temp_K, &temp_V, 
+      input_O, input_dO, input_Bias, 
+      output_S,
+      output_dQ, &temp_dK, &temp_dV,
+      output_dBias,
+      input_cu_seqlens_q,
+      input_cu_seqlens_kv,
+      input_cu_seqlens_q_padded,
+      input_cu_seqlens_kv_padded,
+      input_rng_state,
+      wkspace,
+      stream);
+  } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
       input_Bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
     }
@@ -745,7 +845,27 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       is_training, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, 
       max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right);
 
-  if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
+  // Do NOT call get_runtime_max_seqlen_q_kv() here when Unfused_SmallSeq is selected: it uses
+  // hipStreamSynchronize(stream), which breaks HIP stream capture and causes
+  // hipErrorStreamCaptureInvalidated (901) / hipErrorStreamCaptureUnjoined (904) when this path
+  // is used from JAX. Rely on the passed-in max_seqlen_q and max_seqlen_kv (valid for JAX/callers).
+
+  if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_Unfused_SmallSeq) {
+    fused_attn_rocm::fused_attn_unfused_smallseq_fwd(
+      b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v,
+      is_training, attn_scale, dropout, 
+      qkv_layout, bias_type, attn_mask_type,
+      window_size_left, window_size_right,
+      input_Q, input_K, input_V, input_Bias, 
+      output_O, Aux_CTX_Tensors,
+      input_cu_seqlens_q,
+      input_cu_seqlens_kv,
+      input_cu_seqlens_q_padded,
+      input_cu_seqlens_kv_padded,
+      input_rng_state,
+      wkspace,
+      stream);
+  } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd(
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v,
       is_training, attn_scale, dropout, 
@@ -835,7 +955,26 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       true, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
       max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right);
 
-  if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
+  if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_Unfused_SmallSeq) {
+    fused_attn_rocm::fused_attn_unfused_smallseq_bwd(
+      b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v,
+      attn_scale, dropout, 
+      qkv_layout, bias_type, attn_mask_type,
+      window_size_left, window_size_right,
+      deterministic,
+      input_Q, input_K, input_V, 
+      input_O, input_dO, input_Bias, 
+      output_S,
+      output_dQ, output_dK, output_dV,
+      output_dBias,
+      input_cu_seqlens_q,
+      input_cu_seqlens_kv,
+      input_cu_seqlens_q_padded,
+      input_cu_seqlens_kv_padded,
+      input_rng_state,
+      wkspace,
+      stream);
+  } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
       input_Bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
     }

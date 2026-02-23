@@ -1,0 +1,122 @@
+============================= test session starts ==============================
+platform linux -- Python 3.11.14, pytest-7.3.2, pluggy-1.6.0 -- /opt/venv/bin/python
+cachedir: .pytest_cache
+hypothesis profile 'default' -> database=DirectoryBasedExampleDatabase('/workspace/TransformerEngine/.hypothesis/examples')
+rootdir: /workspace/TransformerEngine/tests/jax
+configfile: pytest.ini
+plugins: cpp-2.3.0, rerunfailures-14.0, hypothesis-5.35.1, xdoctest-1.1.0, flakefinder-1.1.0, subtests-0.13.1, xdist-3.3.1, shard-0.1.2
+collecting ... collected 1 item
+Running 1 items in this shard: test_fused_attn.py::test_unfused_smallseq_backend[30720-1-2-16-16-128-128-BF16]
+
+tests/jax/test_fused_attn.py::test_unfused_smallseq_backend[30720-1-2-16-16-128-128-BF16] FAILED [100%]
+
+=================================== FAILURES ===================================
+_________ test_unfused_smallseq_backend[30720-1-2-16-16-128-128-BF16] __________
+
+b = 30720, s_q = 1, s_kv = 2, h_q = 16, h_kv = 16, d_qk = 128, d_v = 128
+dtype = <class 'jax.numpy.bfloat16'>
+
+    @pytest.mark.skipif(
+        not is_hip_extension(), reason="Unfused_SmallSeq backend only available on AMD hardware"
+    )
+    @pytest.mark.parametrize(
+        "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype",
+        [
+            # Config 1: Smallest seq_kv (boundary case)
+            # From CSV: jax,fwd,thd,bfloat16,30720,1,2,16,128,1,FALSE,1,-1
+            pytest.param(30720, 1, 2, 16, 16, 128, 128, jnp.bfloat16, id="30720-1-2-16-16-128-128-BF16"),
+            # Config 2: Largest seq_kv (boundary case)
+            # From CSV: jax,fwd,thd,bfloat16,30720,1,16,16,128,1,FALSE,1,-1
+            # pytest.param(30720, 1, 16, 16, 16, 128, 128, jnp.bfloat16, id="30720-1-16-16-16-128-128-BF16"),
+        ],
+    )
+    def test_unfused_smallseq_backend(
+        b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype
+    ):
+        """
+        Test unfused_smallseq backend for cross-attention with seq_q=1, seq_kv<=16.
+        This backend is optimized for large batch sizes with small sequence lengths.
+    
+        Test configs are taken from customer benchmark data (SciforiumCrossAttn):
+        - seq_q = 1 (always)
+        - seq_kv = 2 (smallest) or 16 (largest boundary)
+        - Large batch size = 30720 (customer's actual use case)
+        - THD layout (ragged format)
+        - BF16 dtype
+        - NO_BIAS, PADDING_MASK, no dropout (matching customer config)
+        """
+        runner = FusedAttnRunner(
+            b,
+            s_q,
+            s_kv,
+            h_q,
+            h_kv,
+            d_qk,
+            d_v,
+            AttnBiasType.NO_BIAS,  # Unfused_SmallSeq only supports NO_BIAS
+            AttnMaskType.PADDING_MASK,  # Customer uses padding mask
+            0.0,  # dropout_prob (customer config has no dropout)
+            True,  # use_old_rng
+            dtype,
+            True,  # is_training
+            QKVLayout.THD_THD_THD,  # THD format (ragged) - required for unfused_smallseq
+            None,  # bias_shape
+            None,  # window_size (no sliding window support)
+            SeqDescFormat.Seqlens,  # seq_desc_format
+        )
+    
+        # Verify backend selection - this should select NVTE_Unfused_SmallSeq
+        runner._setup_inputs()
+        expected_backend = NVTE_Fused_Attn_Backend.NVTE_Unfused_SmallSeq
+        if runner.backend != expected_backend:
+            pytest.skip(
+                f"Backend selection failed: expected {expected_backend}, got {runner.backend}. "
+                f"This may indicate the backend is not properly configured or conditions not met. "
+                f"Config: b={b}, s_q={s_q}, s_kv={s_kv}, h_q={h_q}, h_kv={h_kv}, "
+                f"d_qk={d_qk}, d_v={d_v}, dtype={dtype}"
+            )
+    
+        # Test forward pass correctness
+>       runner.test_forward()
+
+tests/jax/test_fused_attn.py:1252: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/jax/test_fused_attn.py:789: in test_forward
+    assert_allclose(primitive_valid, reference_valid, dtype=self.dtype)
+tests/jax/utils.py:1558: in assert_allclose
+    np.testing.assert_allclose(actual, desired, **tols, **kwargs)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+args = (<function assert_allclose.<locals>.compare at 0x7f8c7399aca0>, array([[[[0., 0., 0., ..., 0., 0., 0.],
+         [0., ...      [ 0.39257812,  0.14648438,  0.11621094, ...,  0.5703125 ,
+           0.14648438,  0.1015625 ]]]], dtype=float32))
+kwds = {'equal_nan': True, 'err_msg': '', 'header': 'Not equal to tolerance rtol=0.0393725, atol=0.0393725', 'strict': False, ...}
+
+    @wraps(func)
+    def inner(*args, **kwds):
+        with self._recreate_cm():
+>           return func(*args, **kwds)
+E           AssertionError: 
+E           Not equal to tolerance rtol=0.0393725, atol=0.0393725
+E           
+E           Mismatched elements: 58512199 / 62914560 (93%)
+E           Max absolute difference among violations: 1.
+E           Max relative difference among violations: 1.
+E            ACTUAL: array([[[[0., 0., 0., ..., 0., 0., 0.],
+E                    [0., 0., 0., ..., 0., 0., 0.],
+E                    [0., 0., 0., ..., 0., 0., 0.],...
+E            DESIRED: array([[[[-0.05127 , -0.574219,  0.414062, ...,  0.193359,  0.015137,
+E                      0.375   ],
+E                    [-0.46875 ,  0.369141, -0.734375, ..., -0.223633,  0.636719,...
+
+/usr/lib/python3.11/contextlib.py:81: AssertionError
+=============================== warnings summary ===============================
+../../opt/venv/lib/python3.11/site-packages/triton/runtime/autotuner.py:97
+../../opt/venv/lib/python3.11/site-packages/triton/runtime/autotuner.py:97
+  /opt/venv/lib/python3.11/site-packages/triton/runtime/autotuner.py:97: DeprecationWarning: warmup, rep, and use_cuda_graph parameters are deprecated. See https://github.com/triton-lang/triton/pull/4496 for details.
+    warnings.warn(("warmup, rep, and use_cuda_graph parameters are deprecated. See "
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/jax/test_fused_attn.py::test_unfused_smallseq_backend[30720-1-2-16-16-128-128-BF16]
+======================== 1 failed, 2 warnings in 10.09s ========================

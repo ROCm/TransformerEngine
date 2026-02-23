@@ -370,6 +370,19 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 else:
                     softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
                 softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
+            elif backend == NVTE_Fused_Attn_Backend.NVTE_Unfused_SmallSeq:
+                # Unfused_SmallSeq stores attention weights (not softmax_LSE) in Aux_CTX_Tensors
+                # Shape: [batch, heads, q_seqlen, kv_seqlen] for BSHD or [max_tokens_q, heads, kv_seqlen] for THD
+                if config.qkv_layout.is_thd():
+                    # For THD: C++ uses [max_tokens_q, h_q, max_seqlen_kv] where max_tokens_q = batch_size for seq_q=1
+                    # In JAX, we use (*batch_shape, q_max_seqlen, attn_heads, kv_max_seqlen) to match tensor layout
+                    # This is [batch, q_seqlen, heads, kv_seqlen] = [b, 1, h_q, kv_max_seqlen]
+                    softmax_shape = (*batch_shape, q_max_seqlen, attn_heads, kv_max_seqlen)
+                else:
+                    # For BSHD: shape is [batch, h_q, q_max_seqlen, kv_max_seqlen]
+                    softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, kv_max_seqlen)
+                # Attention weights use the same dtype as QKV (BF16/FP16), not float32
+                softmax_dtype = q_dtype
             else:
                 raise ValueError(f"Unsupported {backend=}")
         softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=softmax_dtype)
@@ -603,6 +616,12 @@ class FusedAttnFwdPrimitive(BasePrimitive):
 
         q_cu_seqlen = generate_cu_seqlen(q_seqlen.flatten())
         kv_cu_seqlen = generate_cu_seqlen(kv_seqlen.flatten())
+
+        # For THD with from_seqlens (no explicit offsets), C++ expects padded offsets = start
+        # token index per batch, which is exactly the cumulative seqlens.
+        if config.qkv_layout.is_thd() and (q_seq_offsets.size == 0 or k_seq_offsets.size == 0):
+            q_seq_offsets = q_cu_seqlen
+            k_seq_offsets = kv_cu_seqlen
 
         output, softmax_aux, rng_state, _ = FusedAttnFwdPrimitive.inner_primitive.bind(
             q,
@@ -1024,6 +1043,11 @@ class FusedAttnBwdPrimitive(BasePrimitive):
 
         q_cu_seqlen = generate_cu_seqlen(q_seqlen.flatten())
         kv_cu_seqlen = generate_cu_seqlen(kv_seqlen.flatten())
+
+        # For THD with from_seqlens (no explicit offsets), use cumulative seqlens as padded offsets.
+        if config.qkv_layout.is_thd() and (q_seq_offsets.size == 0 or k_seq_offsets.size == 0):
+            q_seq_offsets = q_cu_seqlen
+            k_seq_offsets = kv_cu_seqlen
 
         dq, dk, dv, dbias, _ = FusedAttnBwdPrimitive.inner_primitive.bind(
             q,
