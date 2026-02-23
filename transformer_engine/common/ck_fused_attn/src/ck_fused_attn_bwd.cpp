@@ -18,15 +18,27 @@ namespace ck_fused_attn{
 
 // We want to cache and reuse the log stream so we use thread_local here.
 namespace {
-std::ofstream* get_bwd_log_stream() {
+std::ostream* get_bwd_log_stream() {
   thread_local std::ofstream log_file;
   thread_local bool attempted = false;
+  thread_local bool opened = false;
+  thread_local bool requested = false;
+  thread_local std::string log_dir_str;
   if (!attempted) {
     attempted = true;
-    open_ck_fused_attn_log_file(log_file, "ck_fused_attn_bwd");
+    if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG")) {
+      log_dir_str = std::string(env_p);
+      requested = !log_dir_str.empty() && log_dir_str != "0";
+    }
+    if (requested) {
+      opened = open_ck_fused_attn_log_file(log_file, "ck_fused_attn_bwd", log_dir_str);
+    }
   }
-  if (!log_file.is_open()) {
+  if (!requested) {
     return nullptr;
+  }
+  if (!opened) {
+    return &std::cout;
   }
   return &log_file;
 }
@@ -539,15 +551,10 @@ hipError_t ck_attn_bwd(
   right = window_size_right;
  
   mask_enum mask_type = static_cast<mask_enum>(attn_mask_type);
-  bool ck_fused_attn_log_config = false;
-  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) != "")
-      ck_fused_attn_log_config = true;
-  }
   const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
 
   // print kernel name on verbose mode
-  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, ck_fused_attn_log_config};
+  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, get_bwd_log_stream() != nullptr};
 
   ck_tile::index_t shape_seqlen_q = seqlen_q;
   ck_tile::index_t shape_seqlen_k = seqlen_k;
@@ -717,20 +724,18 @@ hipError_t ck_attn_bwd(
     dim3 grid(b, s_kv, hg);
     if (d_qk == d_v) {
       dim3 block(d_qk);
-      if (ck_fused_attn_log_config){
-        if (auto* log_file = get_bwd_log_stream()) {
-          *log_file << "\n" << "run dk_dv_reduce: " << "\n";
-          *log_file << "dk_expanded_ptr: " << dk_expanded_ptr << "\n";
-          *log_file << "dv_expanded_ptr: " << dv_expanded_ptr << "\n";
-          *log_file << "stride_b_dkv_expanded: " << stride_b_dk_expanded << "\n";
-          *log_file << "stride_h_dkv_expanded: " << stride_h_dk_expanded << "\n";
-          *log_file << "stride_s_dkv_expanded: " << stride_s_dk_expanded << "\n";
-          *log_file << "dk_ptr: " << dk_ptr << "\n";
-          *log_file << "dv_ptr: " << dv_ptr << "\n";
-          *log_file << "stride_b_dk: " << stride_b_dk << "\n";
-          *log_file << "stride_h_dk: " << stride_h_dk << "\n";
-          *log_file << "stride_s_dk: " << stride_s_dk << "\n";
-        }
+      if (auto* log_file = get_bwd_log_stream()) {
+        *log_file << "\n" << "run dk_dv_reduce: " << "\n";
+        *log_file << "dk_expanded_ptr: " << dk_expanded_ptr << "\n";
+        *log_file << "dv_expanded_ptr: " << dv_expanded_ptr << "\n";
+        *log_file << "stride_b_dkv_expanded: " << stride_b_dk_expanded << "\n";
+        *log_file << "stride_h_dkv_expanded: " << stride_h_dk_expanded << "\n";
+        *log_file << "stride_s_dkv_expanded: " << stride_s_dk_expanded << "\n";
+        *log_file << "dk_ptr: " << dk_ptr << "\n";
+        *log_file << "dv_ptr: " << dv_ptr << "\n";
+        *log_file << "stride_b_dk: " << stride_b_dk << "\n";
+        *log_file << "stride_h_dk: " << stride_h_dk << "\n";
+        *log_file << "stride_s_dk: " << stride_s_dk << "\n";
       }
       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
         hipLaunchKernelGGL(
@@ -744,18 +749,16 @@ hipError_t ck_attn_bwd(
           stride_b_dk, stride_h_dk, stride_s_dk););
     } else {
       dim3 block_dk(d_qk);
-      if (ck_fused_attn_log_config){
-        if (auto* log_file = get_bwd_log_stream()) {
-          *log_file << "\n" << "run dk_or_dv_reduce on dk: " << "\n";
-          *log_file << "dk_expanded_ptr: " << dk_expanded_ptr << "\n";
-          *log_file << "stride_b_dk_expanded: " << stride_b_dk_expanded << "\n";
-          *log_file << "stride_h_dk_expanded: " << stride_h_dk_expanded << "\n";
-          *log_file << "stride_s_dk_expanded: " << stride_s_dk_expanded << "\n";
-          *log_file << "dk_ptr: " << dk_ptr << "\n";
-          *log_file << "stride_b_dk: " << stride_b_dk << "\n";
-          *log_file << "stride_h_dk: " << stride_h_dk << "\n";
-          *log_file << "stride_s_dk: " << stride_s_dk << "\n";
-        }
+      if (auto* log_file = get_bwd_log_stream()) {
+        *log_file << "\n" << "run dk_or_dv_reduce on dk: " << "\n";
+        *log_file << "dk_expanded_ptr: " << dk_expanded_ptr << "\n";
+        *log_file << "stride_b_dk_expanded: " << stride_b_dk_expanded << "\n";
+        *log_file << "stride_h_dk_expanded: " << stride_h_dk_expanded << "\n";
+        *log_file << "stride_s_dk_expanded: " << stride_s_dk_expanded << "\n";
+        *log_file << "dk_ptr: " << dk_ptr << "\n";
+        *log_file << "stride_b_dk: " << stride_b_dk << "\n";
+        *log_file << "stride_h_dk: " << stride_h_dk << "\n";
+        *log_file << "stride_s_dk: " << stride_s_dk << "\n";
       }
       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
         hipLaunchKernelGGL(
@@ -767,18 +770,16 @@ hipError_t ck_attn_bwd(
           stride_b_dk, stride_h_dk, stride_s_dk););
 
       dim3 block_dv(d_v);
-      if (ck_fused_attn_log_config){
-        if (auto* log_file = get_bwd_log_stream()) {
-          *log_file << "\n" << "run dk_or_dv_reduce on dv: " << "\n";
-          *log_file << "dv_expanded_ptr: " << dv_expanded_ptr << "\n";
-          *log_file << "stride_b_dv_expanded: " << stride_b_dv_expanded << "\n";
-          *log_file << "stride_h_dv_expanded: " << stride_h_dv_expanded << "\n";
-          *log_file << "stride_s_dv_expanded: " << stride_s_dv_expanded << "\n";
-          *log_file << "dv_ptr: " << dv_ptr << "\n";
-          *log_file << "stride_b_dv: " << stride_b_dv << "\n";
-          *log_file << "stride_h_dv: " << stride_h_dv << "\n";
-          *log_file << "stride_s_dv: " << stride_s_dv << "\n";
-        }
+      if (auto* log_file = get_bwd_log_stream()) {
+        *log_file << "\n" << "run dk_or_dv_reduce on dv: " << "\n";
+        *log_file << "dv_expanded_ptr: " << dv_expanded_ptr << "\n";
+        *log_file << "stride_b_dv_expanded: " << stride_b_dv_expanded << "\n";
+        *log_file << "stride_h_dv_expanded: " << stride_h_dv_expanded << "\n";
+        *log_file << "stride_s_dv_expanded: " << stride_s_dv_expanded << "\n";
+        *log_file << "dv_ptr: " << dv_ptr << "\n";
+        *log_file << "stride_b_dv: " << stride_b_dv << "\n";
+        *log_file << "stride_h_dv: " << stride_h_dv << "\n";
+        *log_file << "stride_s_dv: " << stride_s_dv << "\n";
       }
       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
         hipLaunchKernelGGL(
@@ -797,12 +798,10 @@ hipError_t ck_attn_bwd(
     dim3 block(THREADS_PER_BLOCK);
     dim3 grid(ceil(1.0 * s_q * s_kv/THREADS_PER_BLOCK));
     if(bias_shape==BiasShape::k11SS){
-      if (ck_fused_attn_log_config){
-        if (auto* log_file = get_bwd_log_stream()) {
-          *log_file << "\n" << "run dbias_reduce_11SS: " << "\n";
-          *log_file << "dbias_ptr: " << dbias_ptr << "\n";
-          *log_file << "dbias_expanded_ptr: " << dbias_expanded_ptr << "\n";
-        }
+      if (auto* log_file = get_bwd_log_stream()) {
+        *log_file << "\n" << "run dbias_reduce_11SS: " << "\n";
+        *log_file << "dbias_ptr: " << dbias_ptr << "\n";
+        *log_file << "dbias_expanded_ptr: " << dbias_expanded_ptr << "\n";
       }
       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
         hipLaunchKernelGGL(
@@ -811,12 +810,10 @@ hipError_t ck_attn_bwd(
           static_cast<CK_TILE_TYPE*>(dbias_expanded_ptr),
           static_cast<CK_TILE_TYPE*>(dbias_ptr));); 
     }else if(bias_shape==BiasShape::k1HSS){
-      if (ck_fused_attn_log_config){
-        if (auto* log_file = get_bwd_log_stream()) {
-          *log_file << "\n" << "run dbias_reduce_1HSS: " << "\n";
-          *log_file << "dbias_ptr: " << dbias_ptr << "\n";
-          *log_file << "dbias_expanded_ptr: " << dbias_expanded_ptr << "\n";
-        }
+      if (auto* log_file = get_bwd_log_stream()) {
+        *log_file << "\n" << "run dbias_reduce_1HSS: " << "\n";
+        *log_file << "dbias_ptr: " << dbias_ptr << "\n";
+        *log_file << "dbias_expanded_ptr: " << dbias_expanded_ptr << "\n";
       }
       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
         hipLaunchKernelGGL(
@@ -825,12 +822,10 @@ hipError_t ck_attn_bwd(
           static_cast<CK_TILE_TYPE*>(dbias_expanded_ptr),
           static_cast<CK_TILE_TYPE*>(dbias_ptr));); 
     }else if(bias_shape==BiasShape::kB1SS){
-      if (ck_fused_attn_log_config){
-        if (auto* log_file = get_bwd_log_stream()) {
-          *log_file << "\n" << "run dbias_reduce_B1SS: " << "\n";
-          *log_file << "dbias_ptr: " << dbias_ptr << "\n";
-          *log_file << "dbias_expanded_ptr: " << dbias_expanded_ptr << "\n";
-        }
+      if (auto* log_file = get_bwd_log_stream()) {
+        *log_file << "\n" << "run dbias_reduce_B1SS: " << "\n";
+        *log_file << "dbias_ptr: " << dbias_ptr << "\n";
+        *log_file << "dbias_expanded_ptr: " << dbias_expanded_ptr << "\n";
       }
       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
         hipLaunchKernelGGL(
@@ -907,14 +902,9 @@ hipError_t ck_attn_varlen_bwd(
   right = window_size_right;
   mask_enum mask_type = static_cast<mask_enum>(attn_mask_type);
  
-  bool ck_fused_attn_log_config = false;
-  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) != "")
-      ck_fused_attn_log_config = true;
-  } 
   const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
   // print kernel name on verbose mode
-  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, ck_fused_attn_log_config};
+  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, get_bwd_log_stream() != nullptr};
 
   std::string data_type_str = get_data_type_str(dtype);
 
@@ -1056,8 +1046,9 @@ hipError_t ck_attn_varlen_bwd(
   // lse_thd_ptr used as buffer
   if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_MAX_SEQLEN")) {
     if(std::string(env_p) == "1"){
-      if(ck_fused_attn_log_config){
-        std::cout << "attn_bwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.";
+      if (auto* log_file = get_bwd_log_stream()) {
+        *log_file
+            << "attn_bwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.\n";
       }
       fmha_args.max_seqlen_q = get_runtime_max_seqlen(b, cu_seqlen_q_ptr, nullptr, lse_workspace_ptr, stream);
       fmha_args.max_seqlen_k = get_runtime_max_seqlen(b, cu_seqlen_kv_ptr, nullptr, lse_workspace_ptr, stream);
@@ -1090,20 +1081,18 @@ hipError_t ck_attn_varlen_bwd(
     dim3 grid(max_tokens_kv, hg);
     if (d_qk == d_v) {
       dim3 block(d_qk);
-      if (ck_fused_attn_log_config){
-        if (auto* log_file = get_bwd_log_stream()) {
-          *log_file << "\n" << "run dk_dv_reduce_thd: " << "\n";
-          *log_file << "cu_seqlen_kv_ptr: " << cu_seqlen_kv_ptr << "\n";
-          *log_file << "cu_seqlen_kv_padded_ptr: " << cu_seqlen_kv_padded_ptr << "\n";
-          *log_file << "dk_expanded_ptr: " << dk_expanded_ptr << "\n";
-          *log_file << "dv_expanded_ptr: " << dv_expanded_ptr << "\n";
-          *log_file << "stride_h_dkv_expanded: " << stride_h_dk_expanded << "\n";
-          *log_file << "stride_s_dkv_expanded: " << stride_s_dk_expanded << "\n";
-          *log_file << "dk_ptr: " << dk_ptr << "\n";
-          *log_file << "dv_ptr: " << dv_ptr << "\n";
-          *log_file << "stride_h_dk: " << stride_h_dk << "\n";
-          *log_file << "stride_s_dk: " << stride_s_dk << "\n";
-        }
+      if (auto* log_file = get_bwd_log_stream()) {
+        *log_file << "\n" << "run dk_dv_reduce_thd: " << "\n";
+        *log_file << "cu_seqlen_kv_ptr: " << cu_seqlen_kv_ptr << "\n";
+        *log_file << "cu_seqlen_kv_padded_ptr: " << cu_seqlen_kv_padded_ptr << "\n";
+        *log_file << "dk_expanded_ptr: " << dk_expanded_ptr << "\n";
+        *log_file << "dv_expanded_ptr: " << dv_expanded_ptr << "\n";
+        *log_file << "stride_h_dkv_expanded: " << stride_h_dk_expanded << "\n";
+        *log_file << "stride_s_dkv_expanded: " << stride_s_dk_expanded << "\n";
+        *log_file << "dk_ptr: " << dk_ptr << "\n";
+        *log_file << "dv_ptr: " << dv_ptr << "\n";
+        *log_file << "stride_h_dk: " << stride_h_dk << "\n";
+        *log_file << "stride_s_dk: " << stride_s_dk << "\n";
       }
       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
         hipLaunchKernelGGL(
@@ -1119,18 +1108,16 @@ hipError_t ck_attn_varlen_bwd(
           stride_h_dk, stride_s_dk););
     } else {
       dim3 block_dk(d_qk);
-      if (ck_fused_attn_log_config){
-        if (auto* log_file = get_bwd_log_stream()) {
-          *log_file << "\n" << "run dk_or_dv_reduce_thd on dk: " << "\n";
-          *log_file << "cu_seqlen_kv_ptr: " << cu_seqlen_kv_ptr << "\n";
-          *log_file << "cu_seqlen_kv_padded_ptr: " << cu_seqlen_kv_padded_ptr << "\n";
-          *log_file << "dk_expanded_ptr: " << dk_expanded_ptr << "\n";
-          *log_file << "stride_h_dk_expanded: " << stride_h_dk_expanded << "\n";
-          *log_file << "stride_s_dk_expanded: " << stride_s_dk_expanded << "\n";
-          *log_file << "dk_ptr: " << dk_ptr << "\n";
-          *log_file << "stride_h_dk: " << stride_h_dk << "\n";
-          *log_file << "stride_s_dk: " << stride_s_dk << "\n";
-        }
+      if (auto* log_file = get_bwd_log_stream()) {
+        *log_file << "\n" << "run dk_or_dv_reduce_thd on dk: " << "\n";
+        *log_file << "cu_seqlen_kv_ptr: " << cu_seqlen_kv_ptr << "\n";
+        *log_file << "cu_seqlen_kv_padded_ptr: " << cu_seqlen_kv_padded_ptr << "\n";
+        *log_file << "dk_expanded_ptr: " << dk_expanded_ptr << "\n";
+        *log_file << "stride_h_dk_expanded: " << stride_h_dk_expanded << "\n";
+        *log_file << "stride_s_dk_expanded: " << stride_s_dk_expanded << "\n";
+        *log_file << "dk_ptr: " << dk_ptr << "\n";
+        *log_file << "stride_h_dk: " << stride_h_dk << "\n";
+        *log_file << "stride_s_dk: " << stride_s_dk << "\n";
       }
       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
         hipLaunchKernelGGL(
@@ -1144,18 +1131,16 @@ hipError_t ck_attn_varlen_bwd(
           stride_h_dk, stride_s_dk););
 
       dim3 block_dv(d_v);
-      if (ck_fused_attn_log_config){
-        if (auto* log_file = get_bwd_log_stream()) {
-          *log_file << "\n" << "run dk_or_dv_reduce_thd on dv: " << "\n";
-          *log_file << "cu_seqlen_kv_ptr: " << cu_seqlen_kv_ptr << "\n";
-          *log_file << "cu_seqlen_kv_padded_ptr: " << cu_seqlen_kv_padded_ptr << "\n";
-          *log_file << "dv_expanded_ptr: " << dv_expanded_ptr << "\n";
-          *log_file << "stride_h_dv_expanded: " << stride_h_dv_expanded << "\n";
-          *log_file << "stride_s_dv_expanded: " << stride_s_dv_expanded << "\n";
-          *log_file << "dv_ptr: " << dv_ptr << "\n";
-          *log_file << "stride_h_dv: " << stride_h_dv << "\n";
-          *log_file << "stride_s_dv: " << stride_s_dv << "\n";
-        }
+      if (auto* log_file = get_bwd_log_stream()) {
+        *log_file << "\n" << "run dk_or_dv_reduce_thd on dv: " << "\n";
+        *log_file << "cu_seqlen_kv_ptr: " << cu_seqlen_kv_ptr << "\n";
+        *log_file << "cu_seqlen_kv_padded_ptr: " << cu_seqlen_kv_padded_ptr << "\n";
+        *log_file << "dv_expanded_ptr: " << dv_expanded_ptr << "\n";
+        *log_file << "stride_h_dv_expanded: " << stride_h_dv_expanded << "\n";
+        *log_file << "stride_s_dv_expanded: " << stride_s_dv_expanded << "\n";
+        *log_file << "dv_ptr: " << dv_ptr << "\n";
+        *log_file << "stride_h_dv: " << stride_h_dv << "\n";
+        *log_file << "stride_s_dv: " << stride_s_dv << "\n";
       }
       CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, CK_TILE_TYPE,
         hipLaunchKernelGGL(

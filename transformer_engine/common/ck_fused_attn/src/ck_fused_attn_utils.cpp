@@ -17,20 +17,20 @@
 
 namespace ck_fused_attn{
 
-bool open_ck_fused_attn_log_file(std::ofstream& log_file, const char* file_prefix) {
-  const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG");
-  if (env_p == nullptr) {
-    return false;
-  }
-  const std::string log_dir_str(env_p);
-  if (log_dir_str.empty() || log_dir_str == "0") {
+bool open_ck_fused_attn_log_file(std::ofstream& log_file, const char* file_prefix, const std::string& log_dir_str) {
+  // Explicitly use std::cout as a fallback
+  if (log_dir_str == "1") {
     return false;
   }
   std::filesystem::path log_dir(log_dir_str);
   std::ostringstream filename;
   filename << file_prefix << "_" << getpid() << "_" << std::this_thread::get_id() << ".log";
   log_file.open(log_dir / filename.str(), std::ios_base::app);
-  return log_file.is_open();
+  if (!log_file.is_open()) {
+    std::cerr << "Failed to open log file: " << (log_dir / filename.str()) << "\n";
+    return false;
+  }
+  return true;
 }
 
 std::string get_data_type_str(DType dtype){

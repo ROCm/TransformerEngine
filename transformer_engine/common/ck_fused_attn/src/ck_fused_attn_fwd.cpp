@@ -17,15 +17,27 @@
 namespace ck_fused_attn{
 
 namespace {
-std::ofstream* get_fwd_log_stream() {
+std::ostream* get_fwd_log_stream() {
   thread_local std::ofstream log_file;
   thread_local bool attempted = false;
+  thread_local bool opened = false;
+  thread_local bool requested = false;
+  thread_local std::string log_dir_str;
   if (!attempted) {
     attempted = true;
-    open_ck_fused_attn_log_file(log_file, "ck_fused_attn_fwd");
+    if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG")) {
+      log_dir_str = std::string(env_p);
+      requested = !log_dir_str.empty() && log_dir_str != "0";
+    }
+    if (requested) {
+      opened = open_ck_fused_attn_log_file(log_file, "ck_fused_attn_fwd", log_dir_str);
+    }
   }
-  if (!log_file.is_open()) {
+  if (!requested) {
     return nullptr;
+  }
+  if (!opened) {
+    return &std::cout;
   }
   return &log_file;
 }
@@ -189,14 +201,9 @@ hipError_t ck_attn_fwd(
   right = window_size_right;
   mask_enum mask_type = static_cast<mask_enum>(attn_mask_type);
   
-  bool ck_fused_attn_log_config = false;
-  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) != "")
-      ck_fused_attn_log_config = true;
-  }
   const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
   // print kernel name on verbose mode
-  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, ck_fused_attn_log_config};
+  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, get_fwd_log_stream() != nullptr};
 
   std::string data_type_str = get_data_type_str(dtype);
 
@@ -364,14 +371,9 @@ hipError_t ck_attn_varlen_fwd(
   
   bias_enum bias_type = bias_enum::no_bias;
   
-  bool ck_fused_attn_log_config = false;
-  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) != "")
-      ck_fused_attn_log_config = true;
-  }
   const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
   // print kernel name on verbose mode
-  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, ck_fused_attn_log_config};
+  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, get_fwd_log_stream() != nullptr};
 
 
   std::string data_type_str = get_data_type_str(dtype);
@@ -467,8 +469,9 @@ hipError_t ck_attn_varlen_fwd(
   // lse_thd_ptr used as buffer
   if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_MAX_SEQLEN")){
     if(std::string(env_p) == "1"){
-      if(ck_fused_attn_log_config){
-        std::cout << "attn_fwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.";
+      if (auto* log_file = get_fwd_log_stream()) {
+        *log_file
+            << "attn_fwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.\n";
       }
       fmha_args.max_seqlen_q = get_runtime_max_seqlen(b, cu_seqlen_q_ptr, cu_seqlen_q_padded_ptr, lse_thd_ptr, stream);
     }
