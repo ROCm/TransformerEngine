@@ -4,15 +4,7 @@
 cmake_minimum_required(VERSION 3.21)
 set(CMAKE_CXX_STANDARD 17)
 project(ck_fused_attn LANGUAGES HIP CXX)
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
-execute_process(
-  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/check_aiter_mha_args.py
-  RESULT_VARIABLE AITER_API_COMPAT
-)
-if(NOT AITER_API_COMPAT EQUAL 0)
-  message(FATAL_ERROR "check_aiter_mha_args.py failed with code ${AITER_API_COMPAT}")
-endif()
 
 set(AITER_MHA_INSTALL_PREFIX "transformer_engine" CACHE STRING "aiter mha shared lib install prefix in TE")
 
@@ -66,16 +58,11 @@ else()
                 --ck-tile-bf16 ${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT}
       )
       # libmha_fwd.so and libmha_bwd.so will be under 3rdparty/aiter/op_tests/cpp/mha 
-      cache_local_aiter_build(${__AITER_TEST_DIR} ${__AITER_SOURCE_DIR}/hsa)
+      cache_local_aiter_build(${__AITER_TEST_DIR})
     endif()
   endif()
   set(__AITER_MHA_PATH "${EXTRACT_DIR}")
   message(STATUS "[AITER-PREBUILT] Using __AITER_MHA_PATH=${__AITER_MHA_PATH}")
-endif()
-
-set(AITER_KERNELS_ROOT "${__AITER_SOURCE_DIR}/hsa")
-if(EXISTS "${__AITER_MHA_PATH}/hsa")
-  set(AITER_KERNELS_ROOT "${__AITER_MHA_PATH}/hsa")
 endif()
 
 set(ck_fused_attn_SOURCES)
@@ -127,21 +114,6 @@ list(APPEND ck_fused_attn_LINKER_LIBS hip::host hip::device roctx64 ${__AITER_MH
 target_link_libraries(ck_fused_attn PUBLIC ${ck_fused_attn_LINKER_LIBS})
 target_compile_options(ck_fused_attn PRIVATE ${CK_FUSED_ATTN_COMPILE_OPTIONS})
 set_target_properties(ck_fused_attn PROPERTIES INSTALL_RPATH "$ORIGIN")
-
-# Install v3 kernels (source build, cached build, or prebuilt download)
-message(STATUS "Copying AITER kernels from ${AITER_KERNELS_ROOT}")
-foreach(ARCH IN LISTS V3_ASM_ARCHS)
-  install(DIRECTORY
-    ${AITER_KERNELS_ROOT}/${ARCH}/fmha_v3_fwd
-    DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib/aiter/${ARCH}/
-    FILE_PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ OWNER_EXECUTE GROUP_EXECUTE WORLD_EXECUTE
-    )
-  install(DIRECTORY
-    ${AITER_KERNELS_ROOT}/${ARCH}/fmha_v3_bwd
-    DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib/aiter/${ARCH}/
-    FILE_PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ OWNER_EXECUTE GROUP_EXECUTE WORLD_EXECUTE
-    )
-endforeach()
 
 install(FILES ${__AITER_MHA_PATH}/libmha_fwd.so ${__AITER_MHA_PATH}/libmha_bwd.so DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib)
 install(TARGETS ck_fused_attn DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib)
