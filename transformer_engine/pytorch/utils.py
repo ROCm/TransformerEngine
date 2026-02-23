@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -455,14 +455,6 @@ if IS_HIP_EXTENSION:
       """check whether this machine is mi308"""
       import re
       return (re.search('AMD Instinct MI308', torch.cuda.get_device_name(torch.cuda.current_device())) is not None)
-
-    def is_mi300_class():
-        """check whether the current device is of the gfx942 class"""
-        return get_device_compute_capability() == (9, 4)
-
-    def is_mi350_class():
-        """check whether the current device is of the gfx950 class"""
-        return get_device_compute_capability() == (9, 5)
 
 @functools.lru_cache(maxsize=None)
 def is_fp8_fnuz():

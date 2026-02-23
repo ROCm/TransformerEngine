@@ -28,7 +28,7 @@ from transformer_engine.pytorch.utils import (
     is_bf16_compatible,
 )
 if IS_HIP_EXTENSION:
-    from transformer_engine.pytorch.utils import is_mi200, is_mi308, is_mi300_class
+    from transformer_engine.pytorch.utils import is_mi200, is_mi308
 
 from transformer_engine.pytorch import (
     DotProductAttention,
@@ -2121,7 +2121,8 @@ def test_grouped_linear_accuracy(
     atol, rtol = 0, 0
     if use_cutlass:
         atol, rtol = 1e-3, 1e-3
-        if IS_HIP_EXTENSION and is_mi300_class():
+        if IS_HIP_EXTENSION and torch.cuda.get_device_capability() == (9, 4):
+            # gfx942
             atol, rtol = 3e-2, 3e-2
     if use_triton:
         atol, rtol = get_tolerances(dtype)
@@ -2938,7 +2939,8 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
             # cublas implementation should be bit-wise match
             torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
         else:
-            if IS_HIP_EXTENSION and is_mi300_class():
+            if IS_HIP_EXTENSION and torch.cuda.get_device_capability() == (9, 4):
+                # gfx942
                 torch.testing.assert_close(o, o_ref, rtol=2.0e-2, atol=3.0e-2)
             else:
                 torch.testing.assert_close(o, o_ref, rtol=1.5e-2, atol=1.5e-2)
