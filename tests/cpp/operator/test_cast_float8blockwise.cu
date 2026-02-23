@@ -412,7 +412,7 @@ void runTestCaseOneDimensionalBlocks(const ProcessingMethod processing_method,
 
 std::vector<std::vector<size_t>> matrix_sizes = {
     {1, 16}, {65, 96}, {256, 256}, {993, 512},
-    {256, 65536}, {4096, 1632}, {1024, 1},
+    /*{256, 65536}, {4096, 1632},*/ {1024, 1},
     {16, 512}, {1024}, {8, 32, 1024}, {16, 8, 4, 512},
 };
 

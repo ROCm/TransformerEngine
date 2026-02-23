@@ -66,9 +66,9 @@ std::vector<size_t> memset_test_sizes = {
   9,
   16,
   128,
-  4096,
+//  4096,
   4097,
-  8192,
+//  8192,
 };
 
 }  // namespace

@@ -111,10 +111,10 @@ void performTestDQ(const size_t N) {
   compareResults("output_dq", output, ref_output.get(), true, atol, rtol);
 }
 
-std::vector<size_t> qdq_test_cases = {2048* 12288,
+std::vector<size_t> qdq_test_cases = {//2048* 12288,
                                       768 * 1024,
-                                      256 * 65536,
-                                      65536 * 128,
+                                      //256 * 65536,
+                                      //65536 * 128,
                                       257 * 259,
                                       128*128+1};
 

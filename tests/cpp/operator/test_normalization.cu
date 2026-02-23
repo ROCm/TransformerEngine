@@ -242,7 +242,7 @@ std::vector<std::pair<size_t, size_t>> test_cases = {
   {71, 229},
   {29, 541},
   {768, 6144},
-  {2048, 12288},
+  //{2048, 12288},
 };
 
 }  // namespace

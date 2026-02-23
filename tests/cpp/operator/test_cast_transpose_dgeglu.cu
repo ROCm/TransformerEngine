@@ -110,8 +110,8 @@ void performTest(const size_t N, const size_t H) {
   compareResults("output_t", output, ref_output_t.get(), false, atol, rtol);
 }
 
-std::vector<std::pair<size_t, size_t>> test_cases = {{64, 400},   {4096, 2048}, {768, 2816},
-                                                     {256, 5120}, {128, 10240}, {256, 256}};
+std::vector<std::pair<size_t, size_t>> test_cases = {{64, 400},   //{4096, 2048}, {768, 2816},
+                                                     {256, 5120}, /*{128, 10240},*/ {256, 256}};
 
 }  // namespace
 

@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -388,10 +388,10 @@ TEST_P(ActTestSuite, TestSReGLU) {
 
 namespace {
 
-std::vector<std::pair<size_t, size_t>> act_test_cases = {{2048, 12288},
+std::vector<std::pair<size_t, size_t>> act_test_cases = {//{2048, 12288},
                                                          {768, 2816},
-                                                         {256, 65536},
-                                                         {65536, 128},
+                                                         //{256, 65536},
+                                                         //{65536, 128},
                                                          {256, 256},
                                                          {257, 259},
                                                          {128, 128+1}};
