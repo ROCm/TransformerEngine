@@ -1,4 +1,4 @@
-name: TransformerEngine CI Dispatch
+name: PR Automatic CI
 
 on:
   pull_request:
@@ -29,20 +29,24 @@ jobs:
             const labels = (context.payload.pull_request.labels || [])
               .map(label => label.name.toLowerCase());
 
+            // Determine if a CI level label was removed and what level it was   
             const removedLabel = (context.payload.label?.name || '').toLowerCase();
             let removedLevel = 0;
             if (removedLabel === 'ci-level 3') removedLevel = 3;
             else if (removedLabel === 'ci-level 2') removedLevel = 2;
             else if (removedLabel === 'ci-level 1') removedLevel = 1;
 
+            // Determine the current highest CI level from remaining labels
             let level = '';
             if (labels.includes('ci-level 3')) level = '3';
             else if (labels.includes('ci-level 2')) level = '2';
             else if (labels.includes('ci-level 1')) level = '1';
 
+            // Check if the removed level was higher than the current level
             const currentLevel = level ? Number(level) : 0;
             const removedWasHighest = removedLevel > 0 && removedLevel > currentLevel;
 
+            // Set outputs for use in later jobs
             core.setOutput('test_level', level);
             core.setOutput('has_level', level ? 'true' : 'false');
             core.setOutput('removed_level', String(removedLevel));
@@ -59,18 +63,23 @@ jobs:
           CURRENT_LEVEL: ${{ needs.determine_level.outputs.test_level }}
         with:
           script: |
+            // Cancel other runs for the same PR that are queued or
+            // in progress and have a lower CI level
             const prNumber = context.payload.pull_request.number;
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const currentRunId = context.runId;
             const currentLevel = Number(process.env.CURRENT_LEVEL || 0);
             const action = context.payload.action;
+            
+            // If a label was added, determine its level to compare against other runs
             const addedLabel = (context.payload.label?.name || '').toLowerCase();
             let addedLevel = 0;
             if (addedLabel === 'ci-level 3') addedLevel = 3;
             else if (addedLabel === 'ci-level 2') addedLevel = 2;
             else if (addedLabel === 'ci-level 1') addedLevel = 1;
 
+            // Fetch all workflow runs for this workflow and PR
             const runs = await github.rest.actions.listWorkflowRuns({
               owner,
               repo,
@@ -79,23 +88,29 @@ jobs:
               per_page: 100,
             });
 
+            // Filter runs to find those that are for the same PR,
+            // are queued or in progress, and have a lower CI level
             const toCancel = runs.data.workflow_runs.filter(run => {
               const prMatch = (run.pull_requests || []).some(pr => pr.number === prNumber);
               const active = run.status === 'queued' || run.status === 'in_progress';
               if (action === 'synchronize') {
                 return prMatch && active && run.id !== currentRunId;
               }
+              // For labeled/unlabeled actions, compare the CI levels
               const title = run.display_title || '';
               const match = title.match(/CI Level (\d+)/i);
               const runLevel = match ? Number(match[1]) : 0;
+              // If a label was added, cancel runs with a lower level than the added label
               if (action === 'labeled') {
                 const isLowerThanAdded = runLevel > 0 && runLevel < addedLevel;
                 return prMatch && active && isLowerThanAdded && run.id !== currentRunId;
               }
+              // If a label was removed, cancel runs with a lower level than the current level
               const isLower = runLevel > 0 && runLevel < currentLevel;
               return prMatch && active && isLower && run.id !== currentRunId;
             });
 
+            // Cancel the identified runs
             for (const run of toCancel) {
               core.info(`Canceling dispatch run ${run.id} for PR #${prNumber}`);
               await github.rest.actions.cancelWorkflowRun({
