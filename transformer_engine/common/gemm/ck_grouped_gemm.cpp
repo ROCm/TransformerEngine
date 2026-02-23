@@ -206,17 +206,16 @@ static inline bool dispatch_grouped(bool transA_use,
                                     size_t workspace_bytes,
                                     hipStream_t stream) {
 
-// FIXME: This could be a templated lambda function in C++20.
-#define CALL(ALayout_, BLayout_, ta_, tb_)                                    \
-  return run_grouped_impl<T, ALayout_, BLayout_, CLayout, MemOp>(             \
-      A_use, B_use, D, group_num, (ta_), (tb_), workspace, workspace_bytes, stream)
-  
-  if (!transA_use && !transB_use) { CALL(RowMajor, RowMajor, false, false); }
-  if (!transA_use &&  transB_use) { CALL(RowMajor, ColMajor, false, true ); }
-  if ( transA_use && !transB_use) { CALL(ColMajor, RowMajor, true,  false); }
-  /* transA_use && transB_use */  { CALL(ColMajor, ColMajor, true,  true ); }
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(transA_use, kTransA, {
+    using ALayout = std::conditional_t<kTransA, ColMajor, RowMajor>;
 
-#undef CALL
+    TRANSFORMER_ENGINE_SWITCH_CONDITION(transB_use, kTransB, {
+      using BLayout = std::conditional_t<kTransB, ColMajor, RowMajor>;
+
+      return run_grouped_impl<T, ALayout, BLayout, CLayout, MemOp>(
+        A_use, B_use, D, group_num, kTransA, kTransB, workspace, workspace_bytes, stream);
+    });
+  });
 }
 
 bool ck_tile_grouped_gemm(const NVTETensor* A,
