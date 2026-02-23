@@ -1,4 +1,7 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+
 
 """
 This script is run during setup through setup.py, and can be run independently

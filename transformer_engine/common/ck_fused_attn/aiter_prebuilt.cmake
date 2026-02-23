@@ -41,10 +41,14 @@ function(is_aiter_cache_valid CACHE_VALID)
 endfunction()
 
 # Cache locally built libs
-function(cache_local_aiter_build SOURCE_DIR)
+function(cache_local_aiter_build SOURCE_DIR KERNELS_ROOT)
   file(MAKE_DIRECTORY "${EXTRACT_DIR}")
   message(STATUS "[AITER-PREBUILT] Caching locally built libs to ${EXTRACT_DIR}")
   file(COPY "${SOURCE_DIR}/libmha_fwd.so" "${SOURCE_DIR}/libmha_bwd.so" DESTINATION "${EXTRACT_DIR}")
+  if(EXISTS "${KERNELS_ROOT}")
+    message(STATUS "[AITER-PREBUILT] Caching locally built kernels from ${KERNELS_ROOT} to ${EXTRACT_DIR}/hsa")
+    file(COPY "${KERNELS_ROOT}" DESTINATION "${EXTRACT_DIR}")
+  endif()
 endfunction()
 
 # Download prebuilt tgz file
