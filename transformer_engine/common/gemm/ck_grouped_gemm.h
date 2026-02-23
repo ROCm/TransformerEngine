@@ -1,4 +1,8 @@
-/* Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved. */
+/*************************************************************************
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+ *
+ * License for AMD contributions = MIT. See LICENSE for more information
+ ************************************************************************/
 
 bool ck_tile_grouped_gemm(const NVTETensor* A,
                           const NVTETensor* B,
