@@ -121,7 +121,13 @@ jobs:
             }
 
   dispatch:
-    if: ${{ (github.event.action != 'unlabeled' && needs.determine_level.outputs.has_level == 'true') || (github.event.action == 'unlabeled' && needs.determine_level.outputs.removed_was_highest == 'true' && needs.determine_level.outputs.has_level == 'true') }}
+    # Run this job if there is a valid level to test (has_level == true),
+    # and any of the following are true:
+    # - A level label was added 
+    # - A commit was pushed
+    # - The PR was reopened
+    # - The highest level label was removed
+    if: ${{ needs.determine_level.outputs.has_level == 'true' && ((github.event.action != 'unlabeled') || (github.event.action == 'unlabeled' && needs.determine_level.outputs.removed_was_highest == 'true')) }}
     needs: [determine_level, cancel_others]
     name: CI Level ${{ needs.determine_level.outputs.test_level }}
     uses: ./.github/workflows/rocm-ci.yml
