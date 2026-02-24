@@ -92,16 +92,23 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     __syncthreads();
 
     const int scale_offset_Y =
-        USE_ROWWISE_SCALING ? (scales_rowwise_chunk_offset_Y + iter * BUFFER_DIM_Y + tid_rowwise_Y)
-                            : (scales_colwise_chunk_offset_Y + (iter * BUFFER_DIM_Y) / SCALE_DIM_Y);
+      USE_ROWWISE_SCALING ? (scales_rowwise_chunk_offset_Y + iter * BUFFER_DIM_Y + tid_rowwise_Y)
+                : (scales_colwise_chunk_offset_Y + (iter * BUFFER_DIM_Y) / SCALE_DIM_Y);
 
     const int scale_offset_X =
-        USE_ROWWISE_SCALING
-            ? (scales_rowwise_chunk_offset_X + tid_rowwise_X / THREADS_PER_SCALE_X_ROWWISE)
-            : (scales_colwise_chunk_offset_X + tid_colwise_X);
+      USE_ROWWISE_SCALING
+        ? (scales_rowwise_chunk_offset_X + tid_rowwise_X / THREADS_PER_SCALE_X_ROWWISE)
+        : (scales_colwise_chunk_offset_X + tid_colwise_X);
 
-    const int scale_idx = scale_offset_Y * scales_stride + scale_offset_X;
-    const e8m0_t biased_exponent = scales_ptr[scale_idx];
+    const size_t scales_rows = USE_ROWWISE_SCALING ? rows : DIVUP(rows, SCALE_DIM_Y);
+    const size_t scales_cols = USE_ROWWISE_SCALING ? DIVUP(cols, SCALE_DIM_X) : cols;
+
+    e8m0_t biased_exponent = static_cast<e8m0_t>(127);
+    if (static_cast<size_t>(scale_offset_Y) < scales_rows &&
+      static_cast<size_t>(scale_offset_X) < scales_cols) {
+      const int scale_idx = scale_offset_Y * scales_stride + scale_offset_X;
+      biased_exponent = scales_ptr[scale_idx];
+    }
     const float block_scale = ptx::exp2f(biased_exponent);
 
     if constexpr (USE_ROWWISE_SCALING) {
