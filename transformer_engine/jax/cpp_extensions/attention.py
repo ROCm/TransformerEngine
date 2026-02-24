@@ -358,12 +358,39 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
             elif backend == NVTE_Fused_Attn_Backend.NVTE_CK:
                 if config.qkv_layout.is_thd():
-                    softmax_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
+                    # THD only: check env; run small-seq logic only when enabled
+                    if os.environ.get("NVTE_FUSED_ATTN_CK_SMALLSEQ", "0") != "1":
+                        softmax_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
+                        softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
+                    else:
+                        batch_size = reduce(operator.mul, batch_shape)
+                        ck_standard_softmax_aux_size = (
+                            batch_size * attn_heads * q_max_seqlen * 1
+                        )
+                        ck_smallseq_softmax_aux_size = (
+                            batch_size * attn_heads * q_max_seqlen
+                            * min(kv_max_seqlen, 16) * 2
+                        )  # 2 bytes for bf16/fp16
+                        if ck_standard_softmax_aux_size >= ck_smallseq_softmax_aux_size:
+                            softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
+                            softmax_dtype = dtypes.canonicalize_dtype(q_dtype)
+                        else:
+                            softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, min(kv_max_seqlen, 16))
+                            softmax_dtype = dtypes.canonicalize_dtype(q_dtype)
                 else:
                     softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
-                softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
+                    softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
             else:
                 raise ValueError(f"Unsupported {backend=}")
+
+        if os.environ.get("NVTE_LOG_CK_CONFIG", "0") == "1":
+            jax.debug.print(
+                "attn_fwd(ck small-seq JAX abstract): batch_shape: {}, softmax_shape: {}, softmax_dtype: {}",
+                batch_shape,
+                softmax_shape,
+                softmax_dtype,
+            )
+        
         softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=softmax_dtype)
 
         # JAX does not enable 64-bit int by default so we get XLA to allocate x8 memory with

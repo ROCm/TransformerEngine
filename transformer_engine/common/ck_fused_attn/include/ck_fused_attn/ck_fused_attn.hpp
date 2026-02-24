@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
@@ -169,6 +169,12 @@ hipError_t ck_attn_varlen_bwd(
   int how_v3_bf16_cvt,
   bool is_v3_api_check,
   hipStream_t stream);
+
+uint64_t get_runtime_max_seqlen(uint64_t b,
+                                const void* cu_seqlen_ptr,
+                                const void* cu_seqlen_padded_ptr,
+                                void* workspace,
+                                hipStream_t stream);
 
 }//namespace ck_fused_attn
 #endif // CK_FUSED_ATTN_H

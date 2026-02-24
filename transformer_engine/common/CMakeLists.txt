@@ -193,6 +193,7 @@ else()
        fused_attn_rocm/fused_attn.cpp
        fused_attn_rocm/fused_attn_aotriton.cpp
        fused_attn_rocm/fused_attn_ck.cpp
+       fused_attn_rocm/fused_attn_smallseq.cpp
        fused_attn_rocm/utils.cpp
        gemm/cublaslt_gemm.cu
        gemm/rocm_gemm.cu
