@@ -155,6 +155,10 @@ class FP8GlobalStateManager:
     global_amax_buffer = {}
     global_amax_history_buffer = {}
     global_scale_buffer = {}
+    # Contiguous amax buffers and layout (built after first pass to avoid cat in later passes).
+    global_amax_contiguous = {}
+    global_amax_offsets = {}
+    global_amax_registration_count = {}
     fp8_tensors_recompute_buffer = []
     fp8_available = None
     reason_for_no_fp8 = ""
@@ -182,6 +186,9 @@ class FP8GlobalStateManager:
         cls.global_amax_buffer = {}
         cls.global_amax_history_buffer = {}
         cls.global_scale_buffer = {}
+        cls.global_amax_contiguous = {}
+        cls.global_amax_offsets = {}
+        cls.global_amax_registration_count = {}
         cls.fp8_tensors_recompute_buffer = []
         cls.fp8_available = None
         cls.reason_for_no_fp8 = ""
@@ -309,18 +316,32 @@ class FP8GlobalStateManager:
 
             key = cls.get_key_in_buffer(forward, fp8_meta["recipe"], fp8_meta["fp8_group"])
 
-            if key not in cls.global_amax_buffer:
+            if key in cls.global_amax_contiguous:
+                # Layout known from a previous pass: write into contiguous buffer by offset (no append, no cat).
+                idx = cls.global_amax_registration_count.get(key, 0)
+                offsets = cls.global_amax_offsets[key]
+                start = sum(offsets[:idx])
+                end = start + offsets[idx]
+                cls.global_amax_contiguous[key][start:end].copy_(
+                    fp8_meta[fp8_meta_tensor_key].amax_history[0]
+                )
+                cls.global_amax_registration_count[key] = idx + 1
+                fp8_meta[index_in_buffer].append(idx)
+                fp8_meta[index_in_buffer].append(key)
+            elif key not in cls.global_amax_buffer:
                 cls.global_amax_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history[0]]
                 cls.global_amax_history_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history]
                 cls.global_scale_buffer[key] = [fp8_meta[fp8_meta_tensor_key].scale]
+                fp8_meta[index_in_buffer].append(0)
+                fp8_meta[index_in_buffer].append(key)
             else:
                 cls.global_amax_buffer[key].append(fp8_meta[fp8_meta_tensor_key].amax_history[0])
                 cls.global_amax_history_buffer[key].append(
                     fp8_meta[fp8_meta_tensor_key].amax_history
                 )
                 cls.global_scale_buffer[key].append(fp8_meta[fp8_meta_tensor_key].scale)
-            fp8_meta[index_in_buffer].append(len(cls.global_amax_buffer[key]) - 1)
-            fp8_meta[index_in_buffer].append(key)
+                fp8_meta[index_in_buffer].append(len(cls.global_amax_buffer[key]) - 1)
+                fp8_meta[index_in_buffer].append(key)
 
     @classmethod
     def is_fp8_enabled(cls) -> bool:
@@ -410,19 +431,24 @@ class FP8GlobalStateManager:
         cls,
         forward: bool = True,
     ) -> None:
-        """Delayed scaling only. Concatenate, reduce, and split amaxes in the global buffer."""
+        """Delayed scaling only. Reduce and split amaxes in the global buffer.
+        Contiguous buffer is built once after the first pass; later passes use it (no cat).
+        """
         # global_amax_buffer should only be non-empty for fp8 delayed scaling
         for buffer_key, amax_buffer in cls.global_amax_buffer.items():
-            # Check for forward or backward reduction.
             fwd_update, autocast_key = cls.split_key_in_buffer(buffer_key)
             if fwd_update != forward:
                 continue
             if len(amax_buffer) == 0:
                 continue
 
-            # Retrieve autocast specific args and concat amaxes.
+            # Use pre-allocated contiguous buffer if layout was built in a previous pass; else cat once.
+            if buffer_key in cls.global_amax_contiguous:
+                contiguous_amax = cls.global_amax_contiguous[buffer_key]
+            else:
+                contiguous_amax = torch.cat(amax_buffer)
+
             recipe, group = cls.autocast_arguments[autocast_key]
-            contiguous_amax = torch.cat(amax_buffer)
 
             # Reduction.
             if (
@@ -458,6 +484,14 @@ class FP8GlobalStateManager:
                     _amax_and_scale_update(
                         amax_history, scale, get_fp8_max(recipe, forward), recipe
                     )
+
+            # After first pass: build contiguous layout so next pass uses write-by-offset (no cat).
+            if buffer_key not in cls.global_amax_contiguous:
+                total_numel = contiguous_amax.numel()
+                cls.global_amax_contiguous[buffer_key] = contiguous_amax.new_empty(total_numel)
+                cls.global_amax_contiguous[buffer_key].copy_(contiguous_amax)
+                cls.global_amax_offsets[buffer_key] = [x.numel() for x in amax_buffer]
+            cls.global_amax_registration_count[buffer_key] = 0
 
     @classmethod
     def get_unique_autocast_key(
