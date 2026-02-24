@@ -325,6 +325,9 @@ class FusedAttnRunner:
     # dictionary of expected collective comm bytes
     coll_count_ref: Optional[Dict[str, int]] = None
 
+    # When set, use this for THD num_segments_per_seq (e.g. 1 for s_q=1 small-seq tests)
+    thd_num_segments_per_seq: Optional[int] = None
+
     # See https://docs.nvidia.com/deeplearning/cudnn/latest/release-notes.html#cudnn-9-4-0 for known issue
     # generating zero-length ragged tensors. This setting adjusts the test to avoid the zero-length cases.
     def _get_max_segments_per_sequence(self):
@@ -539,7 +542,9 @@ class FusedAttnRunner:
             return segment_ids, segment_pos, segment_pad
 
         if self.qkv_layout.is_thd():
-            self.num_segments_per_seq = 2
+            self.num_segments_per_seq = (
+                self.thd_num_segments_per_seq if self.thd_num_segments_per_seq is not None else 2
+            )
             self.segment_ids_q, self.segment_pos_q, self.pad_q = generate_random_segment_ids(
                 self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
             )
@@ -1181,6 +1186,61 @@ class TestFusedAttn:
             seq_desc_format,
         )
         runner.test_backward()
+
+
+# ROCm CK internal small-seq (varlen unfused) branch tests.
+# Uses a dedicated test and thd_num_segments_per_seq=1 so that s_q=1 THD configs are valid.
+@pytest.mark.skipif(
+    not is_hip_extension(), reason="CK unfused smallseq backend only available on AMD hardware"
+)
+@pytest.mark.parametrize(
+    "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype",
+    [
+        pytest.param(30720, 1, 2, 16, 16, 128, 128, jnp.bfloat16, id="30720-1-2-16-16-128-128-BF16"),
+        pytest.param(30720, 1, 4, 16, 16, 128, 128, jnp.bfloat16, id="30720-1-4-16-16-128-128-BF16"),
+        pytest.param(30720, 1, 6, 16, 16, 128, 128, jnp.bfloat16, id="30720-1-6-16-16-128-128-BF16"),
+        pytest.param(30720, 1, 8, 16, 16, 128, 128, jnp.bfloat16, id="30720-1-8-16-16-128-128-BF16"),
+        pytest.param(30720, 1, 12, 16, 16, 128, 128, jnp.bfloat16, id="30720-1-12-16-16-128-128-BF16"),
+        pytest.param(30720, 1, 16, 16, 16, 128, 128, jnp.bfloat16, id="30720-1-16-16-16-128-128-BF16"),
+    ],
+)
+def test_ck_unfused_smallseq_backend(b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype):
+    """
+    Test the CK unfused small-seq (varlen) path on ROCm: s_q=1, s_kv<=16, THD layout.
+    Uses THD_T2HD (kv packed) so the C++ kvpacked API is called, where the varlen
+    kernel is wired. thd_num_segments_per_seq=1 for single-query-per-batch THD.
+    """
+    runner = FusedAttnRunner(
+        batch_size=b,
+        max_seqlen_q=s_q,
+        max_seqlen_kv=s_kv,
+        num_heads_q=h_q,
+        num_heads_kv=h_kv,
+        head_dim_qk=d_qk,
+        head_dim_v=d_v,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=AttnMaskType.PADDING_MASK,
+        dropout_prob=0.0,
+        use_old_rng=True,
+        dtype=dtype,
+        is_training=True,
+        qkv_layout=QKVLayout.THD_T2HD,
+        bias_shape=None,
+        window_size=None,
+        seq_desc_format=SeqDescFormat.Seqlens,
+        thd_num_segments_per_seq=1,
+    )
+    runner._setup_inputs()
+    expected_backend = NVTE_Fused_Attn_Backend.NVTE_CK
+    if runner.backend != expected_backend:
+        pytest.skip(
+            f"Backend selection failed: expected {expected_backend}, got {runner.backend}. "
+            f"Config: b={b}, s_q={s_q}, s_kv={s_kv}, h_q={h_q}, h_kv={h_kv}, "
+            f"d_qk={d_qk}, d_v={d_v}, dtype={dtype}"
+        )
+    runner.test_forward()
+    runner.test_backward()
+
 
 # Single test with new-style RNG
 @pytest.mark.skipif(

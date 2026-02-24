@@ -9,6 +9,7 @@
 #include <numeric> // Required for std::accumulate
 #ifdef USE_FUSED_ATTN_CK
 #include <ck_fused_attn/ck_fused_attn.hpp>
+#include <ck_fused_attn/varlen_attn.hpp>
 #endif // USE_FUSED_ATTN_CK
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
@@ -1586,7 +1587,28 @@ void fused_attn_ck_fwd_kvpacked(
   size_t max_tokens_q = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_q/d;
   size_t max_tokens_kv = std::accumulate((input_KV->data).shape.begin(), (input_KV->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_kv/d/2;
 
-  bool is_ragged = nvte_get_qkv_format(qkv_layout)==NVTE_QKV_Format::NVTE_THD; 
+  bool is_ragged = nvte_get_qkv_format(qkv_layout)==NVTE_QKV_Format::NVTE_THD;
+
+  // For kvpacked (T2HD), K/V tokens are interleaved: stride between consecutive tokens
+  // is 2*h_kv*d elements.  For separate THD, it would be h_kv*d.
+  const size_t kv_stride_elts = (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD ||
+                                 layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D)
+                                    ? 2 * h_kv * d : h_kv * d;
+
+  // Varlen path only supports HD_2HD (T2HD) kvpacked or separate THD because the
+  // kernel indexes K/V heads as contiguous (head_idx * head_dim).  HD_H2D interleaves
+  // K and V within each head (head stride = 2*d) which the kernel cannot handle.
+  const bool varlen_possible = (max_seqlen_q == 1 && max_seqlen_kv <= 16 && is_ragged &&
+      layout_group != NVTE_QKV_Layout_Group::NVTE_HD_H2D &&
+      (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS || bias_type == NVTE_Bias_Type::NVTE_ALIBI) &&
+      (d == 64 || d == 128) && QKV_type == DType::kBFloat16);
+
+  if (std::getenv("NVTE_DEBUG_VARLEN_ATTN")) {
+    std::cerr << "[CK varlen FWD] entered: varlen_possible=" << varlen_possible
+              << " workspace.dptr=" << (workspace->data.dptr != nullptr)
+              << " b=" << b << " h_q=" << h_q << " max_seqlen_q=" << max_seqlen_q
+              << " max_seqlen_kv=" << max_seqlen_kv << " d=" << d << std::endl;
+  }
 
   if (Aux_CTX_Tensors->size == 0) {
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
@@ -1611,12 +1633,16 @@ void fused_attn_ck_fwd_kvpacked(
       Aux_CTX_Tensors->size = 2;
       Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
-      if(is_ragged){
+      if (varlen_possible) {
+        output_S->data.shape = {max_tokens_q, h_q, 1, 16};
+        output_S->data.dtype = QKV_type;
+      } else if(is_ragged){
         output_S->data.shape = {max_tokens_q, h_q, 1};
+        output_S->data.dtype = DType::kFloat32;
       }else{
         output_S->data.shape = {b, h_q, max_seqlen_q, 1};
+        output_S->data.dtype = DType::kFloat32;
       }
-      output_S->data.dtype = DType::kFloat32;
       Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
       output_rng_state->data.dptr = nullptr;
       output_rng_state->data.shape = {2};
@@ -1640,20 +1666,90 @@ void fused_attn_ck_fwd_kvpacked(
   
   size_t workspace_size = 0;
 
-  bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
+  bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
-  
+
+  if (workspace->data.dptr != nullptr && varlen_possible) {
+    const size_t max_seqlen_workspace = 16;
+    // Q is not packed in the same way; this path only applies when max_seqlen_q==1.
+    assert(max_seqlen_q == 1 && "varlen path requires max_seqlen_q == 1");
+    const uint64_t runtime_max_seqlen_q = 1;
+    // THD API may pass segment-level cu_seqlens (length b = batch*max_segments_per_seq+1).
+    // The varlen kernel expects sequence-level batch: one query per sequence, so use
+    // max_tokens_q as the batch size (number of sequences) for the varlen path.
+    const size_t b_varlen = max_tokens_q;
+    // Use padded KV offsets so max segment length is correct; do not pass nullptr.
+    uint64_t runtime_max_seqlen_kv = ck_fused_attn::get_runtime_max_seqlen(
+        b_varlen, devPtrCuSeqlensKV, devPtrSeqOffsetsKV,
+        static_cast<char*>(workspace->data.dptr) + 8, stream);
+    if (std::getenv("NVTE_DEBUG_VARLEN_ATTN")) {
+      std::cerr << "[CK varlen FWD] runtime_max_seqlen_q=" << runtime_max_seqlen_q
+                << " runtime_max_seqlen_kv=" << runtime_max_seqlen_kv
+                << " b_varlen=" << b_varlen << std::endl;
+    }
+    if (runtime_max_seqlen_kv <= 16) {
+      if (std::getenv("NVTE_DEBUG_VARLEN_ATTN")) {
+        std::cerr << "[CK varlen FWD] specialized kernel called: b_varlen=" << b_varlen
+                  << " h_q=" << h_q << " h_kv=" << h_kv << " d=" << d
+                  << " runtime_max_seqlen_kv=" << runtime_max_seqlen_kv
+                  << " dropout=" << (is_training ? dropout : 0.0f)
+                  << " attn_scale=" << attn_scale
+                  << " max_tokens_q=" << max_tokens_q << " max_tokens_kv=" << max_tokens_kv
+                  << " Q=" << devPtrQ << " K=" << devPtrK << " V=" << devPtrV
+                  << " O=" << devPtrO << " output_S=" << devPtrS
+                  << " cu_seqlens_kv=" << devPtrCuSeqlensKV
+                  << " cu_seqlens_kv_padded=" << devPtrSeqOffsetsKV << std::endl;
+
+        Tensor *dbg_output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
+        std::cerr << "[CK varlen FWD] output_S shape: [";
+        for (size_t si = 0; si < dbg_output_S->data.shape.size(); si++) {
+            if (si > 0) std::cerr << ", ";
+            std::cerr << dbg_output_S->data.shape[si];
+        }
+        std::cerr << "] dtype=" << (int)dbg_output_S->data.dtype << std::endl;
+        size_t output_S_elts = 1;
+        for (auto s : dbg_output_S->data.shape) output_S_elts *= s;
+        std::cerr << "[CK varlen FWD] output_S total elements=" << output_S_elts
+                  << " total bytes=" << output_S_elts * 2 << std::endl;
+
+        size_t Q_total = max_tokens_q * h_q * d;
+        size_t KV_total = max_tokens_kv * h_kv * d;
+        std::cerr << "[CK varlen FWD] Q total elements=" << Q_total
+                  << " bytes=" << Q_total * 2 << std::endl;
+        std::cerr << "[CK varlen FWD] K/V total elements each=" << KV_total
+                  << " bytes=" << KV_total * 2 << std::endl;
+        std::cerr << "[CK varlen FWD] O total elements=" << Q_total
+                  << " bytes=" << Q_total * 2 << std::endl;
+      }
+      const float sqr_dk_scale = attn_scale;
+      ck_fused_attn::run_varlen_attn_fwd(
+          devPtrQ, devPtrK, devPtrV,
+          nullptr,
+          is_training ? dropout : 0.0f,
+          sqr_dk_scale,
+          devPtrO, devPtrS,
+          static_cast<const int*>(devPtrCuSeqlensKV),
+          static_cast<const int*>(devPtrSeqOffsetsKV),
+          b_varlen, h_q, d, kv_stride_elts, stream);
+      return;
+    }
+    if (std::getenv("NVTE_DEBUG_VARLEN_ATTN")) {
+      std::cerr << "[CK varlen FWD] using fused path (runtime max_kv=" << runtime_max_seqlen_kv
+                << " > 16)" << std::endl;
+    }
+  }
+
   fused_attn_ck_fwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, d, bias_b, bias_h,
-    max_tokens_q, max_tokens_kv, 
-    is_training, attn_scale, dropout, 
+    max_tokens_q, max_tokens_kv,
+    is_training, attn_scale, dropout,
     qkv_layout,
     bias_type, attn_mask_type,
     window_size_left, window_size_right,
     devPtrQ, devPtrK, devPtrV, devPtrBias,
     devPtrS, devPtrO,
-    rng_state->data.dptr, 
+    rng_state->data.dptr,
     reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr) + 1),
     devPtrCuSeqlensQ, devPtrCuSeqlensKV,
     devPtrSeqOffsetsQ, devPtrSeqOffsetsKV,
@@ -1661,6 +1757,13 @@ void fused_attn_ck_fwd_kvpacked(
     workspace->data.dptr,
     &workspace_size,
     stream);
+
+  if (varlen_possible) {
+    const size_t varlen_ws = ck_fused_attn::varlen_attn_bwd_workspace_size(max_tokens_q, h_q, d) + 16;
+    if (varlen_ws > workspace_size) {
+      workspace_size = varlen_ws;
+    }
+  }
 
   if (workspace_size > 0) {
     if (workspace->data.dptr == nullptr) {
@@ -1739,36 +1842,107 @@ void fused_attn_ck_bwd_kvpacked(
 
   size_t workspace_size = 0;
 
-  bool is_ragged = nvte_get_qkv_format(qkv_layout)==NVTE_QKV_Format::NVTE_THD; 
-  bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
+  bool is_ragged = nvte_get_qkv_format(qkv_layout)==NVTE_QKV_Format::NVTE_THD;
+
+  const size_t kv_stride_elts = (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD ||
+                                 layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D)
+                                    ? 2 * h_kv * d : h_kv * d;
+
+  const bool varlen_possible = (max_seqlen_q == 1 && max_seqlen_kv <= 16 && is_ragged &&
+      layout_group != NVTE_QKV_Layout_Group::NVTE_HD_H2D &&
+      (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS || bias_type == NVTE_Bias_Type::NVTE_ALIBI) &&
+      (d == 64 || d == 128) && QKV_type == DType::kBFloat16);
+
+  if (std::getenv("NVTE_DEBUG_VARLEN_ATTN")) {
+    std::cerr << "[CK varlen BWD] entered: varlen_possible=" << varlen_possible
+              << " workspace.dptr=" << (workspace->data.dptr != nullptr)
+              << " b=" << b << " h_q=" << h_q << " max_seqlen_q=" << max_seqlen_q
+              << " max_seqlen_kv=" << max_seqlen_kv << " d=" << d << std::endl;
+  }
+
+  if (workspace->data.dptr != nullptr && varlen_possible) {
+    assert(max_seqlen_q == 1 && "varlen path requires max_seqlen_q == 1");
+    const uint64_t runtime_max_seqlen_q = 1;
+    const size_t max_tokens_q_bwd = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_q/d;
+    const size_t b_varlen = max_tokens_q_bwd;
+    // Use padded KV offsets so max segment length is correct; do not pass nullptr.
+    uint64_t runtime_max_seqlen_kv = ck_fused_attn::get_runtime_max_seqlen(
+        b_varlen, devPtrCuSeqlensKV, devPtrSeqOffsetsKV,
+        static_cast<char*>(workspace->data.dptr) + 8, stream);
+    if (std::getenv("NVTE_DEBUG_VARLEN_ATTN")) {
+      std::cerr << "[CK varlen BWD] runtime_max_seqlen_q=" << runtime_max_seqlen_q
+                << " runtime_max_seqlen_kv=" << runtime_max_seqlen_kv
+                << " b_varlen=" << b_varlen << std::endl;
+    }
+    if (runtime_max_seqlen_kv <= 16) {
+      const float sqr_dk_scale = attn_scale;
+      const size_t varlen_ws = ck_fused_attn::varlen_attn_bwd_workspace_size(b_varlen, h_q, d);
+      void* varlen_workspace = static_cast<char*>(workspace->data.dptr) + 16;
+      if (std::getenv("NVTE_DEBUG_VARLEN_ATTN")) {
+        const size_t max_tokens_kv = std::accumulate((input_KV->data).shape.begin(), (input_KV->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_kv/d/2;
+        std::cerr << "[CK varlen BWD] specialized kernel called: b_varlen=" << b_varlen
+                  << " h_q=" << h_q << " h_kv=" << h_kv << " d=" << d
+                  << " runtime_max_seqlen_kv=" << runtime_max_seqlen_kv
+                  << " dropout=" << dropout << " attn_scale=" << attn_scale
+                  << " max_tokens_q=" << max_tokens_q_bwd << " max_tokens_kv=" << max_tokens_kv
+                  << " Q=" << devPtrQ << " K=" << devPtrK << " V=" << devPtrV
+                  << " O=" << devPtrO << " dO=" << devPtrdO << " attn_weights=" << devPtrSoftmaxStats
+                  << " dQ=" << devPtrdQ << " dK=" << devPtrdK << " dV=" << devPtrdV
+                  << " workspace=" << varlen_workspace
+                  << " cu_seqlens_kv=" << devPtrCuSeqlensKV
+                  << " cu_seqlens_kv_padded=" << devPtrSeqOffsetsKV << std::endl;
+      }
+      ck_fused_attn::run_varlen_attn_bwd(
+          devPtrQ, devPtrK, devPtrV,
+          devPtrdO, devPtrSoftmaxStats,
+          nullptr, dropout, sqr_dk_scale,
+          devPtrdQ, devPtrdK, devPtrdV,
+          varlen_workspace,
+          static_cast<const int*>(devPtrCuSeqlensKV),
+          static_cast<const int*>(devPtrSeqOffsetsKV),
+          b_varlen, h_q, d, kv_stride_elts, stream);
+      return;
+    }
+    if (std::getenv("NVTE_DEBUG_VARLEN_ATTN")) {
+      std::cerr << "[CK varlen BWD] using fused path (runtime max_kv=" << runtime_max_seqlen_kv
+                << " > 16)" << std::endl;
+    }
+  }
+
+  bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
-  
-  // extract the max_tokens for padding/unpadding and softmax_lse buffer
-  // b from cu_seqlen and max_seqlen are not the actual storage batch and seqlen for pad_between_seqs case
+
   size_t max_tokens_q = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_q/d;
   size_t max_tokens_kv = std::accumulate((input_KV->data).shape.begin(), (input_KV->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_kv/d/2;
-  
+
   fused_attn_ck_bwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, d, bias_b, bias_h,
-    max_tokens_q, max_tokens_kv, 
-    attn_scale, dropout, 
+    max_tokens_q, max_tokens_kv,
+    attn_scale, dropout,
     qkv_layout,
     bias_type, attn_mask_type,
     window_size_left, window_size_right,
     deterministic,
-    devPtrQ, devPtrK, devPtrV, 
+    devPtrQ, devPtrK, devPtrV,
     devPtrO, devPtrSoftmaxStats, devPtrBias,
-    devPtrdQ, devPtrdK, devPtrdV, 
+    devPtrdQ, devPtrdK, devPtrdV,
     devPtrdO, devPtrdBias,
-    rng_state->data.dptr, 
+    rng_state->data.dptr,
     reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr) + 1),
-    devPtrCuSeqlensQ, devPtrCuSeqlensKV, 
+    devPtrCuSeqlensQ, devPtrCuSeqlensKV,
     devPtrSeqOffsetsQ, devPtrSeqOffsetsKV,
     QKV_type,
     workspace->data.dptr,
     &workspace_size,
     stream);
+
+  if (varlen_possible) {
+    const size_t varlen_ws = ck_fused_attn::varlen_attn_bwd_workspace_size(max_tokens_q, h_q, d) + 16;
+    if (varlen_ws > workspace_size) {
+      workspace_size = varlen_ws;
+    }
+  }
 
   if (workspace_size > 0) {
     if (workspace->data.dptr == nullptr) {

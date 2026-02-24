@@ -348,6 +348,9 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
                                    int64_t window_size_left, int64_t window_size_right,
                                    NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd_qkvpacked);
+  if (std::getenv("NVTE_DEBUG_VARLEN_ATTN")) {
+    std::cerr << "[NVTE FWD] nvte_fused_attn_fwd_qkvpacked entered (qkv packed)" << std::endl;
+  }
   using namespace transformer_engine;
 
   const Tensor *input_cu_seqlens = convertNVTETensorCheck(cu_seqlens);
@@ -387,6 +390,10 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
       is_training, QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, dropout, h, h, 
       max_seqlen, max_seqlen, d, d, window_size_left, window_size_right);
   
+  if (std::getenv("NVTE_DEBUG_VARLEN_ATTN")) {
+    std::cerr << "[NVTE FWD qkvpacked] backend=" << (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK ? "CK" : "AOTriton")
+              << " b=" << b << " h=" << h << " max_seqlen=" << max_seqlen << " d=" << d << std::endl;
+  }
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd_qkvpacked(
       b, h, max_seqlen, d,
@@ -426,6 +433,9 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
                                    int64_t window_size_left, int64_t window_size_right,
                                    bool deterministic, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd_qkvpacked);
+  if (std::getenv("NVTE_DEBUG_VARLEN_ATTN")) {
+    std::cerr << "[NVTE BWD] nvte_fused_attn_bwd_qkvpacked entered (qkv packed)" << std::endl;
+  }
   using namespace transformer_engine;
 
   const Tensor *input_cu_seqlens = convertNVTETensorCheck(cu_seqlens);
@@ -471,6 +481,10 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
       true, QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, dropout, h, h, max_seqlen,
       max_seqlen, d, d, window_size_left, window_size_right);
 
+  if (std::getenv("NVTE_DEBUG_VARLEN_ATTN")) {
+    std::cerr << "[NVTE BWD qkvpacked] backend=" << (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK ? "CK" : "AOTriton")
+              << " b=" << b << " h=" << h << " max_seqlen=" << max_seqlen << " d=" << d << std::endl;
+  }
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     if((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)){
       input_Bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
@@ -515,6 +529,9 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
                                   int64_t window_size_left, int64_t window_size_right, NVTETensor workspace, 
                                   cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd_kvpacked);
+  if (std::getenv("NVTE_DEBUG_VARLEN_ATTN")) {
+    std::cerr << "[NVTE FWD] nvte_fused_attn_fwd_kvpacked entered (kv packed)" << std::endl;
+  }
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = convertNVTETensorCheck(cu_seqlens_kv);
@@ -560,6 +577,11 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
       is_training, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, 
       max_seqlen_q, max_seqlen_kv, d, d, window_size_left, window_size_right);
 
+  if (std::getenv("NVTE_DEBUG_VARLEN_ATTN")) {
+    std::cerr << "[NVTE FWD kvpacked] backend=" << (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK ? "CK" : "AOTriton")
+              << " b=" << b << " h_q=" << h_q << " h_kv=" << h_kv << " max_sq=" << max_seqlen_q
+              << " max_skv=" << max_seqlen_kv << " d=" << d << std::endl;
+  }
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd_kvpacked(
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
@@ -604,6 +626,9 @@ void nvte_fused_attn_bwd_kvpacked(
     int64_t window_size_left, int64_t window_size_right, bool deterministic, NVTETensor workspace,
     cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd_kvpacked);
+  if (std::getenv("NVTE_DEBUG_VARLEN_ATTN")) {
+    std::cerr << "[NVTE BWD] nvte_fused_attn_bwd_kvpacked entered (kv packed)" << std::endl;
+  }
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = convertNVTETensorCheck(cu_seqlens_kv);
@@ -654,6 +679,11 @@ void nvte_fused_attn_bwd_kvpacked(
       true, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
       max_seqlen_kv, d, d, window_size_left, window_size_right);
 
+  if (std::getenv("NVTE_DEBUG_VARLEN_ATTN")) {
+    std::cerr << "[NVTE BWD kvpacked] backend=" << (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK ? "CK" : "AOTriton")
+              << " b=" << b << " h_q=" << h_q << " h_kv=" << h_kv << " max_sq=" << max_seqlen_q
+              << " max_skv=" << max_seqlen_kv << " d=" << d << std::endl;
+  }
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
       input_Bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
@@ -707,6 +737,9 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          int64_t window_size_left, int64_t window_size_right, NVTETensor workspace,
                          cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd);
+  if (std::getenv("NVTE_DEBUG_VARLEN_ATTN")) {
+    std::cerr << "[NVTE FWD] nvte_fused_attn_fwd entered (unpacked Q,K,V)" << std::endl;
+  }
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = convertNVTETensorCheck(cu_seqlens_kv);
@@ -745,6 +778,11 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       is_training, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, 
       max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right);
 
+  if (std::getenv("NVTE_DEBUG_VARLEN_ATTN")) {
+    std::cerr << "[NVTE FWD unpacked] backend=" << (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK ? "CK" : "AOTriton")
+              << " b=" << b << " h_q=" << h_q << " h_kv=" << h_kv << " max_sq=" << max_seqlen_q
+              << " max_skv=" << max_seqlen_kv << " d_qk=" << d_qk << " d_v=" << d_v << std::endl;
+  }
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd(
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v,
@@ -791,6 +829,9 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          int64_t window_size_right, bool deterministic, NVTETensor workspace,
                          cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd);
+  if (std::getenv("NVTE_DEBUG_VARLEN_ATTN")) {
+    std::cerr << "[NVTE BWD] nvte_fused_attn_bwd entered (unpacked Q,K,V)" << std::endl;
+  }
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = convertNVTETensorCheck(cu_seqlens_kv);
@@ -835,6 +876,11 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       true, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
       max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right);
 
+  if (std::getenv("NVTE_DEBUG_VARLEN_ATTN")) {
+    std::cerr << "[NVTE BWD unpacked] backend=" << (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK ? "CK" : "AOTriton")
+              << " b=" << b << " h_q=" << h_q << " h_kv=" << h_kv << " max_sq=" << max_seqlen_q
+              << " max_skv=" << max_seqlen_kv << " d_qk=" << d_qk << " d_v=" << d_v << std::endl;
+  }
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
       input_Bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);

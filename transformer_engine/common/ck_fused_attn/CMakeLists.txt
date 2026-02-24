@@ -69,7 +69,9 @@ set(ck_fused_attn_SOURCES)
 list(APPEND ck_fused_attn_SOURCES
        src/ck_fused_attn_fwd.cpp
        src/ck_fused_attn_bwd.cpp
-       src/ck_fused_attn_utils.cpp)
+       src/ck_fused_attn_utils.cpp
+       src/varlen_attn_fwd.cpp
+       src/varlen_attn_bwd.cpp)
 
 message(STATUS "Found the following fused attention files:")
 foreach(file ${ck_fused_attn_SOURCES})

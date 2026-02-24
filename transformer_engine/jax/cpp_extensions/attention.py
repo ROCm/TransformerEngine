@@ -365,11 +365,27 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, config.max_segments_per_seq)
                 softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
             elif backend == NVTE_Fused_Attn_Backend.NVTE_CK:
-                if config.qkv_layout.is_thd():
+                # Varlen (unfused) path uses softmax_aux as attn workspace.
+                # For THD layout, q_max_seqlen from tensor shape is total tokens (not
+                # per-sequence seqlen), so we cannot check per-seq seqlen at trace time.
+                # Allocate the larger varlen workspace whenever the varlen path could
+                # potentially be taken; the C++ runtime check decides which path runs.
+                varlen_softmax = (
+                    config.qkv_layout.is_thd()
+                    and config.attn_bias_type == AttnBiasType.NO_BIAS
+                    and q_head_dim in (64, 128)
+                    and q_dtype == dtypes.canonicalize_dtype(jnp.bfloat16)
+                )
+                print(f"varlen_softmax: {varlen_softmax}")
+                if varlen_softmax:
+                    softmax_shape = (q_max_seqlen, attn_heads, 1, 16)
+                    softmax_dtype = q_dtype
+                elif config.qkv_layout.is_thd():
                     softmax_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
+                    softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
                 else:
                     softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
-                softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
+                    softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
             else:
                 raise ValueError(f"Unsupported {backend=}")
         softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=softmax_dtype)
@@ -530,6 +546,20 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         _kv_segment_pos,
         config: _FusedAttnConfig,
     ):
+        """
+        Python implementation of fused attention forward. Called when the primitive
+        is executed without the custom call (e.g. fallback). Prepares sequence
+        descriptors and cu_seqlens, then dispatches to inner_primitive (FFI).
+        """
+        _debug = os.environ.get("NVTE_DEBUG_JAX_ATTN") == "1"
+        if _debug:
+            print("[JAX FusedAttn impl] FusedAttnFwd impl() called", flush=True)
+            print(
+                f"  config: qkv_layout={config.qkv_layout.name} "
+                f"is_thd={config.qkv_layout.is_thd()} mask={config.attn_mask_type.name}",
+                flush=True,
+            )
+
         assert FusedAttnFwdPrimitive.inner_primitive is not None
 
         sequence_descriptor = SequenceDescriptor(
@@ -546,9 +576,18 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 config.window_size,
                 config.max_segments_per_seq,
             )
-        )
+            )
+        if _debug:
+            jax.debug.print(
+                "[JAX FusedAttn impl] after get_seqlens_and_offsets: "
+                "q_seqlen shape={} kv_seqlen shape={}",
+                q_seqlen.shape,
+                kv_seqlen.shape,
+            )
 
         if config.qkv_layout.is_thd():
+            if _debug:
+                print("[JAX FusedAttn impl] THD branch: reshaping/filtering seqlens and offsets", flush=True)
 
             def _fix_len_take(x, condition, fill_value=-1):
                 x_shape = x.shape
@@ -600,9 +639,23 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             k_seq_offsets = _fix_len_take(
                 k_seq_offsets, k_seq_offsets >= 0, fill_value=kv_batch * kv_max_seqlen
             )
+            if _debug:
+                jax.debug.print(
+                    "[JAX FusedAttn impl] THD: q_batch={} kv_batch={} q_max_seqlen={} kv_max_seqlen={}",
+                    q_batch,
+                    kv_batch,
+                    q_max_seqlen,
+                    kv_max_seqlen,
+                )
 
         q_cu_seqlen = generate_cu_seqlen(q_seqlen.flatten())
         kv_cu_seqlen = generate_cu_seqlen(kv_seqlen.flatten())
+        if _debug:
+            jax.debug.print(
+                "[JAX FusedAttn impl] calling inner_primitive.bind: q_cu_seqlen shape={} kv_cu_seqlen shape={}",
+                q_cu_seqlen.shape,
+                kv_cu_seqlen.shape,
+            )
 
         output, softmax_aux, rng_state, _ = FusedAttnFwdPrimitive.inner_primitive.bind(
             q,
