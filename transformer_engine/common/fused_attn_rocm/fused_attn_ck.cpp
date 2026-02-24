@@ -9,6 +9,8 @@
 #include <numeric> // Required for std::accumulate
 #ifdef USE_FUSED_ATTN_CK
 #include <ck_fused_attn/ck_fused_attn.hpp>
+#include "../../ck_fused_attn/src/ck_fused_attn_utils.hpp"
+#include "fused_attn_smallseq.hpp"
 #endif // USE_FUSED_ATTN_CK
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
@@ -1828,18 +1830,76 @@ void fused_attn_ck_fwd(
   size_t max_tokens_q = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_q/d_qk;
   size_t max_tokens_kv = std::accumulate((input_K->data).shape.begin(), (input_K->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_kv/d_qk;
 
-  bool is_ragged = nvte_get_qkv_format(qkv_layout)==NVTE_QKV_Format::NVTE_THD; 
+  bool is_ragged = nvte_get_qkv_format(qkv_layout)==NVTE_QKV_Format::NVTE_THD;
+  size_t runtime_max_seqlen_kv = max_seqlen_kv;
+  bool use_small_seq = false;
+  const bool log_smallseq = (std::getenv("NVTE_LOG_CK_SMALLSEQ") != nullptr);
+  if (log_smallseq) {
+    std::cerr << "[CK small-seq] fused_attn_ck_fwd ENTRY: b=" << b << " h_q=" << h_q
+              << " max_seqlen_q=" << max_seqlen_q << " max_seqlen_kv=" << max_seqlen_kv
+              << " is_ragged=" << is_ragged << " Aux_CTX_size=" << Aux_CTX_Tensors->size << std::endl;
+  }
+#ifdef USE_FUSED_ATTN_CK
+  // THD can pass segment-level cu_seqlens (length b). Varlen kernel expects sequence-level batch;
+  // when max_seqlen_q==1, max_tokens_q == number of sequences → use as batch in varlen path.
+  if (is_ragged && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS || bias_type == NVTE_Bias_Type::NVTE_ALIBI)) {
+    const size_t b_varlen = max_tokens_q;
+    if (Aux_CTX_Tensors->size == 0) {
+      runtime_max_seqlen_kv = max_seqlen_kv;
+      use_small_seq = (max_seqlen_q == 1 && runtime_max_seqlen_kv >= 2 && runtime_max_seqlen_kv <= 16);
+      if (log_smallseq) {
+        std::cerr << "[CK small-seq] FWD shape query (size==0): skip get_runtime_max_seqlen, "
+                  << "use host max_seqlen_kv=" << max_seqlen_kv << " use_small_seq=" << use_small_seq
+                  << std::endl;
+      }
+    } else {
+      if (log_smallseq) {
+        std::cerr << "[CK small-seq] FWD THD branch: calling get_runtime_max_seqlen (b_varlen=" << b_varlen
+                  << " devPtrCuSeqlensKV=" << devPtrCuSeqlensKV
+                  << " devPtrSeqOffsetsKV=" << devPtrSeqOffsetsKV << ")" << std::endl;
+      }
+      void* max_seqlen_workspace = workspace->data.dptr;
+      bool need_free = false;
+      if (max_seqlen_workspace == nullptr) {
+        NVTE_CHECK_CUDA(hipMalloc(&max_seqlen_workspace, sizeof(uint64_t)));
+        need_free = true;
+      }
+      runtime_max_seqlen_kv = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
+          static_cast<uint64_t>(b_varlen), devPtrCuSeqlensKV, devPtrSeqOffsetsKV,
+          max_seqlen_workspace, reinterpret_cast<hipStream_t>(stream)));
+      if (need_free) {
+        NVTE_CHECK_CUDA(hipFree(max_seqlen_workspace));
+      }
+      use_small_seq = (max_seqlen_q == 1 && runtime_max_seqlen_kv >= 2 && runtime_max_seqlen_kv <= 16);
+      if (log_smallseq) {
+        std::cerr << "[CK small-seq FWD] get_runtime_max_seqlen returned " << runtime_max_seqlen_kv
+                  << " use_small_seq=" << use_small_seq << std::endl;
+      }
+      if (use_small_seq && log_smallseq) {
+        std::cerr << "[CK small-seq FWD] Dispatch: using specialized varlen kernel. "
+                  << "b_varlen=" << b_varlen << " h_q=" << h_q << " h_kv=" << h_kv
+                  << " max_seqlen_q=" << max_seqlen_q << " runtime_max_seqlen_kv=" << runtime_max_seqlen_kv
+                  << " d_qk=" << d_qk << " d_v=" << d_v << " is_training=" << is_training
+                  << " attn_scale=" << attn_scale << " dropout=" << dropout << std::endl;
+      }
+    }
+  }
+#endif
   if (Aux_CTX_Tensors->size == 0) {
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
       Aux_CTX_Tensors->size = 3;
       Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
-      if(is_ragged){
+      if (use_small_seq) {
+        output_S->data.shape = {max_tokens_q, h_q, 1, runtime_max_seqlen_kv};
+        output_S->data.dtype = QKV_type;
+      } else if(is_ragged){
         output_S->data.shape = {max_tokens_q, h_q, 1};
+        output_S->data.dtype = DType::kFloat32;
       }else{
         output_S->data.shape = {b, h_q, max_seqlen_q, 1};
+        output_S->data.dtype = DType::kFloat32;
       }
-      output_S->data.dtype = DType::kFloat32;
       Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
       output_rng_state->data.dptr = nullptr;
       output_rng_state->data.shape = {2};
@@ -1852,16 +1912,32 @@ void fused_attn_ck_fwd(
       Aux_CTX_Tensors->size = 2;
       Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
-      if(is_ragged){
+      if (use_small_seq) {
+        output_S->data.shape = {max_tokens_q, h_q, 1, runtime_max_seqlen_kv};
+        output_S->data.dtype = QKV_type;
+      } else if(is_ragged){
         output_S->data.shape = {max_tokens_q, h_q, 1};
+        output_S->data.dtype = DType::kFloat32;
       }else{
         output_S->data.shape = {b, h_q, max_seqlen_q, 1};
+        output_S->data.dtype = DType::kFloat32;
       }
-      output_S->data.dtype = DType::kFloat32;
       Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
       output_rng_state->data.dptr = nullptr;
       output_rng_state->data.shape = {2};
       output_rng_state->data.dtype = DType::kInt64;
+    }
+    if (use_small_seq) {
+      if (log_smallseq) {
+        std::cerr << "[CK small-seq FWD] Shape query: output_S shape={max_tokens_q,h_q,1,runtime_max_seqlen_kv}="
+                  << "{" << max_tokens_q << "," << h_q << ",1," << runtime_max_seqlen_kv << "}, dtype=QKV_type"
+                  << std::endl;
+      }
+      size_t small_seq_ws = fused_attn_rocm::fused_attn_smallseq_bwd_workspace_size(
+          max_tokens_q, h_q, runtime_max_seqlen_kv, QKV_type);
+      workspace->data.shape = {small_seq_ws > 8u ? small_seq_ws : 8u};
+      workspace->data.dtype = DType::kByte;
+      return;
     }
   } else if (Aux_CTX_Tensors->size == 2) {
     Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
@@ -1883,6 +1959,35 @@ void fused_attn_ck_fwd(
   bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
+
+  if (use_small_seq && (Aux_CTX_Tensors->size == 2 || Aux_CTX_Tensors->size == 3)) {
+    if (log_smallseq) {
+      std::cerr << "[CK small-seq FWD] Running specialized kernel: b_varlen=" << max_tokens_q << " h_q=" << h_q
+                << " h_kv=" << h_kv << " runtime_max_seqlen_kv=" << runtime_max_seqlen_kv
+                << " d_qk=" << d_qk << " d_v=" << d_v << " is_training=" << is_training
+                << " attn_scale=" << attn_scale << " dropout=" << dropout
+                << " Aux_CTX_Tensors->size=" << Aux_CTX_Tensors->size << std::endl;
+    }
+    fused_attn_rocm::fused_attn_smallseq_fwd(
+        max_tokens_q, h_q, h_kv, runtime_max_seqlen_kv, d_qk, d_v,
+        is_training, attn_scale, dropout,
+        devPtrQ, devPtrK, devPtrV, devPtrO, devPtrS,
+        devPtrCuSeqlensKV, devPtrSeqOffsetsKV,
+        rng_state->data.dptr,
+        reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr) + 1),
+        QKV_type, workspace->data.dptr, &workspace_size, stream);
+    if (workspace_size > 0) {
+      if (workspace->data.dptr == nullptr) {
+        workspace->data.shape = {workspace_size};
+        workspace->data.dtype = DType::kByte;
+        return;
+      }
+    } else {
+      workspace->data.shape = {1};
+      workspace->data.dtype = DType::kByte;
+    }
+    return;
+  }
   
   fused_attn_ck_fwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, bias_b, bias_h,
@@ -1967,8 +2072,79 @@ void fused_attn_ck_bwd(
   void *devPtrSeqOffsetsKV = input_cu_seqlens_kv_padded->data.dptr;
 
   size_t workspace_size = 0;
+  size_t max_tokens_q_bwd = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>()) / h_q / d_qk;
 
-  bool is_ragged = nvte_get_qkv_format(qkv_layout)==NVTE_QKV_Format::NVTE_THD; 
+  bool is_ragged = nvte_get_qkv_format(qkv_layout)==NVTE_QKV_Format::NVTE_THD;
+  size_t runtime_max_seqlen_kv_bwd = max_seqlen_kv;
+  bool use_small_seq_bwd = false;
+  const bool log_smallseq_bwd = (std::getenv("NVTE_LOG_CK_SMALLSEQ") != nullptr);
+  if (log_smallseq_bwd) {
+    std::cerr << "[CK small-seq] fused_attn_ck_bwd ENTRY: b=" << b << " h_q=" << h_q
+              << " max_seqlen_q=" << max_seqlen_q << " max_seqlen_kv=" << max_seqlen_kv
+              << " is_ragged=" << is_ragged << std::endl;
+  }
+  // Varlen path uses sequence count (max_tokens_q) as batch; see comment in fused_attn_ck_fwd.
+  if (is_ragged && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS || bias_type == NVTE_Bias_Type::NVTE_ALIBI)) {
+    const size_t b_varlen = max_tokens_q_bwd;
+    if (workspace->data.dptr == nullptr) {
+      runtime_max_seqlen_kv_bwd = max_seqlen_kv;
+      use_small_seq_bwd = (max_seqlen_q == 1 && runtime_max_seqlen_kv_bwd >= 2 && runtime_max_seqlen_kv_bwd <= 16);
+      if (log_smallseq_bwd) {
+        std::cerr << "[CK small-seq] BWD workspace query (workspace==null): skip get_runtime_max_seqlen, "
+                  << "use host max_seqlen_kv=" << max_seqlen_kv << " use_small_seq_bwd=" << use_small_seq_bwd
+                  << std::endl;
+      }
+    } else {
+      if (log_smallseq_bwd) {
+        std::cerr << "[CK small-seq] BWD THD branch: calling get_runtime_max_seqlen (b_varlen=" << b_varlen << ")" << std::endl;
+      }
+      void* max_seqlen_workspace_bwd = workspace->data.dptr;
+      runtime_max_seqlen_kv_bwd = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
+          static_cast<uint64_t>(b_varlen), devPtrCuSeqlensKV, devPtrSeqOffsetsKV,
+          max_seqlen_workspace_bwd, reinterpret_cast<hipStream_t>(stream)));
+      use_small_seq_bwd = (max_seqlen_q == 1 && runtime_max_seqlen_kv_bwd >= 2 && runtime_max_seqlen_kv_bwd <= 16);
+      if (log_smallseq_bwd) {
+        std::cerr << "[CK small-seq BWD] get_runtime_max_seqlen returned " << runtime_max_seqlen_kv_bwd
+                  << " use_small_seq_bwd=" << use_small_seq_bwd << std::endl;
+      }
+    }
+    if (use_small_seq_bwd && log_smallseq_bwd) {
+      std::cerr << "[CK small-seq BWD] Dispatch: using specialized varlen kernel. "
+                << "b_varlen=" << max_tokens_q_bwd << " h_q=" << h_q << " h_kv=" << h_kv
+                << " max_seqlen_q=" << max_seqlen_q << " runtime_max_seqlen_kv_bwd=" << runtime_max_seqlen_kv_bwd
+                << " d_qk=" << d_qk << " d_v=" << d_v
+                << " attn_scale=" << attn_scale << " dropout=" << dropout << std::endl;
+    }
+  }
+  if (use_small_seq_bwd) {
+    size_t small_seq_bwd_workspace = fused_attn_rocm::fused_attn_smallseq_bwd_workspace_size(
+        max_tokens_q_bwd, h_q, runtime_max_seqlen_kv_bwd, QKV_type);
+    if (workspace->data.dptr == nullptr) {
+      if (log_smallseq_bwd) {
+        std::cerr << "[CK small-seq BWD] Workspace query: workspace_size=" << small_seq_bwd_workspace << std::endl;
+      }
+      workspace->data.shape = {small_seq_bwd_workspace};
+      workspace->data.dtype = DType::kByte;
+      return;
+    }
+    if (log_smallseq_bwd) {
+      std::cerr << "[CK small-seq BWD] Running specialized kernel: b_varlen=" << max_tokens_q_bwd << " h_q=" << h_q
+                << " h_kv=" << h_kv << " runtime_max_seqlen_kv_bwd=" << runtime_max_seqlen_kv_bwd
+                << " d_qk=" << d_qk << " d_v=" << d_v
+                << " attn_scale=" << attn_scale << " dropout=" << dropout << std::endl;
+    }
+    fused_attn_rocm::fused_attn_smallseq_bwd(
+        max_tokens_q_bwd, h_q, h_kv, runtime_max_seqlen_kv_bwd, d_qk, d_v,
+        attn_scale, dropout,
+        devPtrQ, devPtrK, devPtrV, devPtrO, devPtrdO, devPtrSoftmaxStats,
+        devPtrdQ, devPtrdK, devPtrdV,
+        devPtrCuSeqlensKV, devPtrSeqOffsetsKV,
+        QKV_type, workspace->data.dptr, &workspace_size, stream);
+    workspace->data.shape = {workspace_size > 0 ? workspace_size : 1};
+    workspace->data.dtype = DType::kByte;
+    return;
+  }
+
   bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);

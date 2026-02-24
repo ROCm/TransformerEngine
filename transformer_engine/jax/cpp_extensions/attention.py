@@ -365,13 +365,36 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, config.max_segments_per_seq)
                 softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
             elif backend == NVTE_Fused_Attn_Backend.NVTE_CK:
-                if config.qkv_layout.is_thd():
+                if (config.qkv_layout.is_thd() and q_max_seqlen == 1 and
+                        kv_max_seqlen <= 16):
+                    softmax_shape = (*batch_shape, attn_heads, q_max_seqlen,
+                                     kv_max_seqlen)
+                    softmax_dtype = dtypes.canonicalize_dtype(q_dtype)
+                elif config.qkv_layout.is_thd():
                     softmax_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
+                    softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
                 else:
                     softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
-                softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
+                    softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
             else:
                 raise ValueError(f"Unsupported {backend=}")
+        _small_seq_ck_used = (
+            backend == NVTE_Fused_Attn_Backend.NVTE_CK
+            and config.qkv_layout.is_thd()
+            and q_max_seqlen == 1
+            and kv_max_seqlen <= 16
+        )
+        if os.environ.get("NVTE_LOG_CK_SMALLSEQ"):
+            import sys
+            print(
+                f"[CK small-seq JAX] fused_attn abstract: backend={backend!s} "
+                f"batch_shape={batch_shape} q_max_seqlen={q_max_seqlen} "
+                f"kv_max_seqlen={kv_max_seqlen} attn_heads={attn_heads} "
+                f"softmax_shape={softmax_shape} softmax_dtype={softmax_dtype} "
+                f"small_seq_path={_small_seq_ck_used}",
+                file=sys.stderr,
+                flush=True,
+            )
         softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=softmax_dtype)
 
         # JAX does not enable 64-bit int by default so we get XLA to allocate x8 memory with

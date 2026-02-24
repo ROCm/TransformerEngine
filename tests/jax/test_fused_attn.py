@@ -539,7 +539,11 @@ class FusedAttnRunner:
             return segment_ids, segment_pos, segment_pad
 
         if self.qkv_layout.is_thd():
-            self.num_segments_per_seq = 2
+            # For very small sequence lengths, use 1 segment instead of 2
+            # to avoid division by zero in segment size calculation
+            # Use the minimum of Q and KV sequence lengths to ensure both work
+            min_seqlen = min(self.max_seqlen_q, self.max_seqlen_kv)
+            self.num_segments_per_seq = 2 if min_seqlen > 1 else 1
             self.segment_ids_q, self.segment_pos_q, self.pad_q = generate_random_segment_ids(
                 self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
             )
@@ -1214,3 +1218,61 @@ def test_jax_new_rng():
     )
     runner = FusedAttnRunner(**kwargs)
     runner.test_forward()
+
+
+# ROCm CK internal small-seq (varlen unfused) branch tests.
+# Uses THD_THD_THD with s_q=1, s_kv<=16 so the small-seq path is taken.
+@pytest.mark.skipif(
+    not is_hip_extension(), reason="CK unfused smallseq backend only available on AMD hardware"
+)
+@pytest.mark.parametrize(
+    "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype",
+    [
+        pytest.param(30720, 1, 2, 16, 16, 128, 128, jnp.bfloat16,
+                     id="30720-1-2-16-16-128-128-BF16"),
+        pytest.param(30720, 1, 4, 16, 16, 128, 128, jnp.bfloat16,
+                     id="30720-1-4-16-16-128-128-BF16"),
+        pytest.param(30720, 1, 6, 16, 16, 128, 128, jnp.bfloat16,
+                     id="30720-1-6-16-16-128-128-BF16"),
+        pytest.param(30720, 1, 8, 16, 16, 128, 128, jnp.bfloat16,
+                     id="30720-1-8-16-16-128-128-BF16"),
+        pytest.param(30720, 1, 12, 16, 16, 128, 128, jnp.bfloat16,
+                     id="30720-1-12-16-16-128-128-BF16"),
+        pytest.param(30720, 1, 16, 16, 16, 128, 128, jnp.bfloat16,
+                     id="30720-1-16-16-16-128-128-BF16"),
+    ],
+)
+def test_ck_unfused_smallseq_backend(b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype):
+    """
+    Test the CK unfused small-seq (varlen) path on ROCm: s_q=1, s_kv<=16, THD layout.
+    Uses THD_THD_THD (Q,K,V all THD).
+    """
+    runner = FusedAttnRunner(
+        batch_size=b,
+        max_seqlen_q=s_q,
+        max_seqlen_kv=s_kv,
+        num_heads_q=h_q,
+        num_heads_kv=h_kv,
+        head_dim_qk=d_qk,
+        head_dim_v=d_v,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=AttnMaskType.PADDING_MASK,
+        dropout_prob=0.0,
+        use_old_rng=True,
+        dtype=dtype,
+        is_training=True,
+        qkv_layout=QKVLayout.THD_THD_THD,
+        bias_shape=None,
+        window_size=None,
+        seq_desc_format=SeqDescFormat.Seqlens,
+    )
+    runner._setup_inputs()
+    expected_backend = NVTE_Fused_Attn_Backend.NVTE_CK
+    if runner.backend != expected_backend:
+        pytest.skip(
+            f"Backend selection failed: expected {expected_backend}, got {runner.backend}. "
+            f"Config: b={b}, s_q={s_q}, s_kv={s_kv}, h_q={h_q}, h_kv={h_kv}, "
+            f"d_qk={d_qk}, d_v={d_v}, dtype={dtype}"
+        )
+    runner.test_forward()
+    runner.test_backward()
