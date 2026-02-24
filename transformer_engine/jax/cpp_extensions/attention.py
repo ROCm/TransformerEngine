@@ -9,6 +9,7 @@ import os
 import warnings
 from dataclasses import dataclass, replace
 from functools import partial, reduce
+from packaging import version
 from typing import Optional, Tuple
 
 import jax

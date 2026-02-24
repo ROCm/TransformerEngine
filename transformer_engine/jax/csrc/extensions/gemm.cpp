@@ -87,6 +87,9 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
       }
     } else {  // Swizzle for NVFP4
       NVTE_CHECK(rowwise, "NVFP4 GEMM expects rowwise for both LHS and RHS");
+#ifdef __HIP_PLATFORM_AMD__
+    }
+#else
       input.set_rowwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
       // Create tensor to hold swizzled scale factor
       TensorWrapper output(get_nvte_scaling_mode(scaling_mode));
@@ -97,6 +100,7 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
       // Set swizzled scales into the input tensor
       input.set_rowwise_scale_inv(swizzle_scale_ptr, scale_dtype, scale_shape);
     }
+#endif // #ifdef __HIP_PLATFORM_AMD__
   }
 
   return std::make_tuple(std::move(input), input_shape);
@@ -767,6 +771,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 
   size_t num_non_empty_gemms = lhs_list.size();
 
+#ifndef __HIP_PLATFORM_AMD__
   if (is_mxfp8_scaling) {
     for (int i = 0; i < num_non_empty_gemms; i++) {
       // The i-th GEMM will use the (i % num_streams)-th stream to compute,
@@ -778,6 +783,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
       nvte_swizzle_scaling_factors(rhs_swizzle_list[i], rhs_list[i], stream_i);
     }
   }
+#endif
 
   // Launch zero-out kernels before the GEMM calls to use the sync in the multi-stream GEMM
   size_t num_zero_outs = zero_out_dptr_list.size();

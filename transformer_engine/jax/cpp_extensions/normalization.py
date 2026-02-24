@@ -8,6 +8,7 @@ import os
 import warnings
 import operator
 from functools import partial, cache, reduce
+from packaging import version
 from typing import Optional, Union
 
 import jax

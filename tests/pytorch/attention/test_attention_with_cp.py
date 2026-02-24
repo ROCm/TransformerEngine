@@ -24,6 +24,7 @@ from transformer_engine.common.recipe import (
     Float8CurrentScaling,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils
+from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type
 
 _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
@@ -144,8 +145,8 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
 
 model_configs_fused_attn = {
     # test: ModelConfig(b, sq, hq, dqk)
-    "cp_1_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", return_max_logit=True),  # MHA
-    "cp_1_1": ModelConfig(2, 4096, 12, 128, return_max_logit=True),  # MHA
+    "cp_1_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", return_max_logit=not IS_HIP_EXTENSION),  # MHA
+    "cp_1_1": ModelConfig(2, 4096, 12, 128, return_max_logit=not IS_HIP_EXTENSION),  # MHA
     "cp_1_2": ModelConfig(
         2, 4096, 12, 128, attn_mask_type="causal", attn_bias_type="post_scale_bias"
     ),  # MHA
@@ -305,7 +306,7 @@ def test_cp_with_fused_attention(
         ]
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
-        qkv_dtype=dtypes[dtype] if dtype != "fp8" else torch.float8_e4m3fn,
+        qkv_dtype=dtypes[dtype] if dtype != "fp8" else get_torch_float8_e4m3_type(),
         qkv_layout="_".join([qkv_format] * 3),
         fp8=fp8,
         fp8_meta=fp8_meta,

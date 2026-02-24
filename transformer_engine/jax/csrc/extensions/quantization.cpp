@@ -177,6 +177,7 @@ Error_Type DBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
   }
 
   if (is_quantize_colwise(quantize_layout)) {
+#ifndef __HIP_PLATFORM_AMD__
     if (is_nvfp4 && use_rht) {
       if (is_quantize_2x2x(quantize_layout)) {
         // Do regular rowwise quantization without RHT
@@ -218,6 +219,7 @@ Error_Type DBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
 
       return ffi_with_cuda_error_check();
     }
+#endif // #ifndef __HIP_PLATFORM_AMD__
 
     bool const is_colwise_transposed =
         scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING || is_nvfp4;

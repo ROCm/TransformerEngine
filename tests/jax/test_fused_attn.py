@@ -1026,14 +1026,14 @@ class FusedAttnRunner:
         ),
         pytest.param(
             2,
-            512,
+            2048,
             1024,
             12,
             12,
             64,
             64,
             jnp.bfloat16,
-            id="2-512-1024-12-12-64-64-BF16-CROSS",
+            id="2-2048-1024-12-12-64-64-BF16-CROSS",
         ),
         pytest.param(
             2, 2048, 2048, 12, 6, 64, 64, jnp.bfloat16, id="2-2048-2048-12-6-64-64-BF16-GQA"
