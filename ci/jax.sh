@@ -86,6 +86,7 @@ run_test_config_mgpu() {
     if [ "$TEST_LEVEL" -le 3 ]; then
         TEST_ERROR_IGNORE="1"
     fi
+    run_default_fa 2 test_distributed_dense.py
     run $_dfa_level test_distributed_fused_attn.py $_timeout_args
     TEST_ERROR_IGNORE=""
     run_default_fa 3 test_distributed_layernorm.py
