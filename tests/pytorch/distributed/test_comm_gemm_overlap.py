@@ -12,7 +12,7 @@ import torch
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpp_extensions as tex
 
-from transformer_engine.jax.cpp_extensions.misc import is_hip_extension
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 
 if torch.cuda.device_count() < 2:
@@ -71,6 +71,8 @@ def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, aggregate, quantization
     if bulk:
         test_cmd.append("--bulk-overlap")
     else:
+        if IS_HIP_EXTENSION and not p2p:
+            pytest.skip("HIP only supports A2A operations.")
         if quantization == "fp8" and not fp8_available:
             pytest.skip(reason_for_no_fp8)
         if quantization == "mxfp8" and not mxfp8_available:
@@ -184,11 +186,13 @@ def test_bulk_overlaps(comm_type, quantization, connections):
     Test bulk overlaps with direct calls to te.cpp_extensions.gemm or te.cpp_extensions.fp8_gemm.
     """
     if connections == 8:
-        if is_hip_extension() or torch.cuda.get_device_properties(0).major != 9:
+        if torch.cuda.get_device_properties(0).major != 9:
             pytest.skip(
                 "CUDA_DEVICE_MAX_CONNECTIONS=8 test only applies to devices with compute capability"
                 " 9.0 (HOPPER ARCH)."
             )
+        if IS_HIP_EXTENSION:
+            pytest.skip("HIP Does not support bulk overlaps with 8 connections.")
         os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "8"
         _run_gemm_with_overlap(comm_type, True, False, False, False, quantization)
         os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
