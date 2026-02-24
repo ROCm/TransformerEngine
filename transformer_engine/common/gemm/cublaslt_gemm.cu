@@ -875,7 +875,8 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   if (is_empty_arr(bias) && is_empty_arr(pre_gelu_out) && is_supported_dtype() &&
 #ifdef __HIP_PLATFORM_AMD__
       true)                               {
-    ck_tile_grouped_gemm(A, B, D, num_gemms, transa, transb, workspace, accumulate, stream);
+    if (!ck_tile_grouped_gemm(A, B, D, num_gemms, transa, transb, workspace, accumulate, stream))
+        cublas_path();
 #else
       all_groups_uniform_k128(B, transb)) {
     cutlass_grouped_gemm(A, B, D, num_gemms, transa, transb, grad, workspace, accumulate,
