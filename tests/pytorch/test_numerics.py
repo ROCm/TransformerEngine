@@ -2123,7 +2123,7 @@ def test_grouped_linear_accuracy(
         atol, rtol = 1e-3, 1e-3
         if IS_HIP_EXTENSION and torch.cuda.get_device_capability() == (9, 4):
             # gfx942
-            atol, rtol = 3e-2, 3e-2
+            atol, rtol = 1e-3, 8e-3
     if use_triton:
         atol, rtol = get_tolerances(dtype)
         if dtype == torch.float32:
@@ -2939,11 +2939,7 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
             # cublas implementation should be bit-wise match
             torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
         else:
-            if IS_HIP_EXTENSION and torch.cuda.get_device_capability() == (9, 4):
-                # gfx942
-                torch.testing.assert_close(o, o_ref, rtol=2.0e-2, atol=3.0e-2)
-            else:
-                torch.testing.assert_close(o, o_ref, rtol=1.5e-2, atol=1.5e-2)
+            torch.testing.assert_close(o, o_ref, rtol=1.5e-2, atol=1.5e-2)
 
     if use_cutlass:
         os.environ.pop("NVTE_USE_CUTLASS_GROUPED_GEMM", None)
