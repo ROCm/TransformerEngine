@@ -13,12 +13,15 @@
 #include "ck_tile/ops/epilogue.hpp"
 #include "ck_tile/ops/gemm.hpp"
 
+namespace transformer_engine {
+namespace grouped_gemm {
+
 using RowMajor = ck_tile::tensor_layout::gemm::RowMajor;
 using ColMajor = ck_tile::tensor_layout::gemm::ColumnMajor;
 
-template <typename TeScalar> struct TeTypeToCkType;
-template <> struct TeTypeToCkType<transformer_engine::fp16> { using type = ck_tile::half_t; };
-template <> struct TeTypeToCkType<transformer_engine::bf16> { using type = ck_tile::bfloat16_t; };
+template <typename TEScalar> struct TETypeToCKType;
+template <> struct TETypeToCKType<transformer_engine::fp16> { using type = ck_tile::half_t; };
+template <> struct TETypeToCKType<transformer_engine::bf16> { using type = ck_tile::bfloat16_t; };
 
 // Treat TE tensors as generalized 2D matrices by flattening:
 // (D1, D2, ..., Dn) -> (D1*...*D(n-1), Dn), consistent with TE Tensor::flat_*_dim.
@@ -255,6 +258,9 @@ static inline bool dispatch_grouped(bool transA_use,
   }
 }
 
+}  // namespace grouped_gemm
+}  // namespace transformer_engine
+
 bool ck_tile_grouped_gemm(const NVTETensor* A,
                           const NVTETensor* B,
                           NVTETensor* D,
@@ -291,6 +297,7 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
 
   // Normalize similar to upstream
   // See https://github.com/NVIDIA/TransformerEngine/blob/59f6f3876767d07045152bfae07b5dd4c54e1725/transformer_engine/common/gemm/cutlass_grouped_gemm.cu#L54-L68
+  // I.e., swap A and B, as well as transa and transb.
   const transformer_engine::Tensor* const* A_use = B_te.data();
   const transformer_engine::Tensor* const* B_use = A_te.data();
   const bool transA_use = transB;
@@ -299,16 +306,16 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
   const auto a_dtype = A_use[0]->dtype();
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(a_dtype, te_type, {
-    using T = typename TeTypeToCkType<te_type>::type;
+    using T = typename transformer_engine::grouped_gemm::TETypeToCKType<te_type>::type;
 
     if (accumulate) {
       // FIXME: The accumulate path is currently disabled in nvte_multi_tensor_gemm
       // due to instability on MI325.
-      return dispatch_grouped<T, RowMajor, ck_tile::memory_operation_enum::atomic_add>(transA_use, transB_use,
+      return transformer_engine::grouped_gemm::dispatch_grouped<T, transformer_engine::grouped_gemm::RowMajor, ck_tile::memory_operation_enum::atomic_add>(transA_use, transB_use,
                                      A_use, B_use, D_te.data(), group_num,
                                      ws_ptr, ws_bytes, stream);
     } else {
-      return dispatch_grouped<T, RowMajor, ck_tile::memory_operation_enum::set>(transA_use, transB_use,
+      return transformer_engine::grouped_gemm::dispatch_grouped<T, transformer_engine::grouped_gemm::RowMajor, ck_tile::memory_operation_enum::set>(transA_use, transB_use,
                                      A_use, B_use, D_te.data(), group_num,
                                      ws_ptr, ws_bytes, stream);
     }

@@ -794,8 +794,8 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   if (num_gemms <= 0)
     return;
 #else
-    const int current_device = transformer_engine::cuda::current_device();
-    const bool is_hopper = (transformer_engine::cuda::sm_arch(current_device) == 90);
+  const int current_device = transformer_engine::cuda::current_device();
+  const bool is_hopper = (transformer_engine::cuda::sm_arch(current_device) == 90);
 #endif
   const bool use_cutlass = transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPED_GEMM", false);
   const bool warn_fallback =
@@ -825,6 +825,7 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     return true;
   };
 
+#ifndef __HIP_PLATFORM_AMD__
   auto all_groups_uniform_k128 = [&](const NVTETensor *p, bool trans) -> bool {
     int64_t ref_k = -1;
     for (size_t i = 0; i < num_gemms; i++) {
@@ -841,6 +842,7 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
 
     return true;
   };
+#endif
 
   auto is_supported_dtype = [&]() -> bool {
     auto *inputA = transformer_engine::convertNVTETensorCheck(A[0]);
