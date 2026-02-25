@@ -21,6 +21,21 @@
 #include "fused_attn_smallseq.hpp"
 #include "utils.h"
 
+// Macros to avoid repeating dispatch switch cases for max_seqlen_kv in [2, 16].
+// T, bi, hi and the pointer/scale args must be in scope where these are used.
+#define SMALLSEQ_DISPATCH_FWD_CASE(N)                                      \
+  case N:                                                                  \
+    dispatch_fwd<N, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dropout_mask, dropout, \
+                       sqr_dk_scale, O_ptr, attn_workspace, cu_kv, cu_kv_p, \
+                       hip_stream);                                        \
+    break;
+#define SMALLSEQ_DISPATCH_BWD_CASE(N)                                        \
+  case N:                                                                    \
+    dispatch_bwd<N, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dO_ptr, attn_ptr,        \
+                       dropout_mask, dropout, sqr_dk_scale, dQ_ptr, dK_ptr, \
+                       dV_ptr, workspace_ptr, cu_kv, cu_kv_p, hip_stream);   \
+    break;
+
 namespace transformer_engine {
 namespace fused_attn_rocm {
 
@@ -39,6 +54,12 @@ struct SmallSeqConfig {
   static constexpr bool enable_dropout_mask  = ENABLE_DROPOUT_MASK;
   static constexpr CausalMaskType mask_type = MASK_TYPE;
 };
+
+/* MAX_SEQ_KV and HEAD_DIM are compile-time so kernels can use fixed stack arrays
+ * (e.g. float results[max_seq_kv], T attn[max_seq_kv]) and constexpr grid/block
+ * sizes. This matches varlen_attn/attn_fwd.cpp (FmhaKernelConfig<..., MAX_SEQ_KV, HEAD_DIM>)
+ * and INTEGRATION_TASK.md: seq_q==1, max_seq_kv<=16; head_dim=128 is the only
+ * value tested in varlen_attn (main() uses TestRunner<2,16>::run<..., 128, ...>). */
 
 // ----- Forward kernels (with runtime batch_size, head_num) -----
 
@@ -763,25 +784,12 @@ void run_attn_bwd_impl(int b,
       workspace, Q, K, grad_Q, grad_K, scale, cu_seqlens_kv, cu_seqlens_kv_padded, b, head_num);
 }
 
-// ----- Public API: workspace size and dispatch -----
-
-size_t fused_attn_smallseq_fwd_workspace_size(size_t b,
-                                              size_t h_q,
-                                              size_t max_seqlen_kv,
-                                              DType dtype) {
-  (void)b;
-  (void)h_q;
-  (void)max_seqlen_kv;
-  (void)dtype;
-  return 8u;
-}
-
 size_t fused_attn_smallseq_bwd_workspace_size(size_t b,
                                               size_t h_q,
                                               size_t max_seqlen_kv,
                                               DType dtype) {
-  size_t elt_size = (dtype == DType::kBFloat16 || dtype == DType::kFloat16) ? 2u : 4u;
-  return b * h_q * 1 * max_seqlen_kv * elt_size;
+  constexpr size_t elt_size = 2u;  // BF16 and FP16 are 2 bytes
+  return b * h_q * 1 * std::min(max_seqlen_kv, size_t(16)) * elt_size;
 }
 
 template <int MAX_KV, typename T>
@@ -825,8 +833,8 @@ void fused_attn_smallseq_fwd(size_t b,
                             size_t* workspace_size,
                             cudaStream_t stream)
 {
-  if (std::getenv("NVTE_LOG_CK_SMALLSEQ")) {
-    std::cerr << "[fused_attn_smallseq_fwd] ENTRY - all params: b=" << b << " h_q=" << h_q
+  if (std::getenv("NVTE_LOG_CK_CONFIG")) {
+    std::cout << "[fused_attn_smallseq_fwd] ENTRY - all params: b=" << b << " h_q=" << h_q
               << " h_kv=" << h_kv << " max_seqlen_kv=" << max_seqlen_kv << " d_qk=" << d_qk
               << " d_v=" << d_v << " is_training=" << is_training << " attn_scale=" << attn_scale
               << " dropout=" << dropout << " qkv_dtype="
@@ -843,9 +851,6 @@ void fused_attn_smallseq_fwd(size_t b,
   (void)is_training;
   (void)rng_seed;
   (void)rng_offset;
-  NVTE_CHECK(max_seqlen_kv >= 2 && max_seqlen_kv <= 16,
-             "small-seq path requires 2 <= max_seqlen_kv <= 16.");
-  NVTE_CHECK(d_qk == 128 && d_v == 128, "small-seq path currently supports head_dim 128 only.");
 
   float sqr_dk_scale = attn_scale;
   hipStream_t hip_stream = reinterpret_cast<hipStream_t>(stream);
@@ -864,51 +869,21 @@ void fused_attn_smallseq_fwd(size_t b,
     int hi = static_cast<int>(h_q);
 
     switch (max_seqlen_kv) {
-      case 2: dispatch_fwd<2, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dropout_mask, dropout,
-                                  sqr_dk_scale, O_ptr, attn_workspace, cu_kv, cu_kv_p, hip_stream);
-        break;
-      case 3: dispatch_fwd<3, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dropout_mask, dropout,
-                                  sqr_dk_scale, O_ptr, attn_workspace, cu_kv, cu_kv_p, hip_stream);
-        break;
-      case 4: dispatch_fwd<4, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dropout_mask, dropout,
-                                  sqr_dk_scale, O_ptr, attn_workspace, cu_kv, cu_kv_p, hip_stream);
-        break;
-      case 5: dispatch_fwd<5, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dropout_mask, dropout,
-                                  sqr_dk_scale, O_ptr, attn_workspace, cu_kv, cu_kv_p, hip_stream);
-        break;
-      case 6: dispatch_fwd<6, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dropout_mask, dropout,
-                                  sqr_dk_scale, O_ptr, attn_workspace, cu_kv, cu_kv_p, hip_stream);
-        break;
-      case 7: dispatch_fwd<7, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dropout_mask, dropout,
-                                  sqr_dk_scale, O_ptr, attn_workspace, cu_kv, cu_kv_p, hip_stream);
-        break;
-      case 8: dispatch_fwd<8, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dropout_mask, dropout,
-                                  sqr_dk_scale, O_ptr, attn_workspace, cu_kv, cu_kv_p, hip_stream);
-        break;
-      case 9: dispatch_fwd<9, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dropout_mask, dropout,
-                                  sqr_dk_scale, O_ptr, attn_workspace, cu_kv, cu_kv_p, hip_stream);
-        break;
-      case 10: dispatch_fwd<10, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dropout_mask, dropout,
-                                    sqr_dk_scale, O_ptr, attn_workspace, cu_kv, cu_kv_p, hip_stream);
-        break;
-      case 11: dispatch_fwd<11, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dropout_mask, dropout,
-                                    sqr_dk_scale, O_ptr, attn_workspace, cu_kv, cu_kv_p, hip_stream);
-        break;
-      case 12: dispatch_fwd<12, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dropout_mask, dropout,
-                                    sqr_dk_scale, O_ptr, attn_workspace, cu_kv, cu_kv_p, hip_stream);
-        break;
-      case 13: dispatch_fwd<13, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dropout_mask, dropout,
-                                    sqr_dk_scale, O_ptr, attn_workspace, cu_kv, cu_kv_p, hip_stream);
-        break;
-      case 14: dispatch_fwd<14, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dropout_mask, dropout,
-                                    sqr_dk_scale, O_ptr, attn_workspace, cu_kv, cu_kv_p, hip_stream);
-        break;
-      case 15: dispatch_fwd<15, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dropout_mask, dropout,
-                                    sqr_dk_scale, O_ptr, attn_workspace, cu_kv, cu_kv_p, hip_stream);
-        break;
-      case 16: dispatch_fwd<16, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dropout_mask, dropout,
-                                    sqr_dk_scale, O_ptr, attn_workspace, cu_kv, cu_kv_p, hip_stream);
-        break;
+      SMALLSEQ_DISPATCH_FWD_CASE(2)
+      SMALLSEQ_DISPATCH_FWD_CASE(3)
+      SMALLSEQ_DISPATCH_FWD_CASE(4)
+      SMALLSEQ_DISPATCH_FWD_CASE(5)
+      SMALLSEQ_DISPATCH_FWD_CASE(6)
+      SMALLSEQ_DISPATCH_FWD_CASE(7)
+      SMALLSEQ_DISPATCH_FWD_CASE(8)
+      SMALLSEQ_DISPATCH_FWD_CASE(9)
+      SMALLSEQ_DISPATCH_FWD_CASE(10)
+      SMALLSEQ_DISPATCH_FWD_CASE(11)
+      SMALLSEQ_DISPATCH_FWD_CASE(12)
+      SMALLSEQ_DISPATCH_FWD_CASE(13)
+      SMALLSEQ_DISPATCH_FWD_CASE(14)
+      SMALLSEQ_DISPATCH_FWD_CASE(15)
+      SMALLSEQ_DISPATCH_FWD_CASE(16)
       default:
         NVTE_ERROR("Unsupported max_seqlen_kv for small-seq: max_seqlen_kv <= 16.");
     }
@@ -946,8 +921,8 @@ void fused_attn_smallseq_bwd(size_t b,
                              size_t* workspace_size,
                              cudaStream_t stream)
 {
-  if (std::getenv("NVTE_LOG_CK_SMALLSEQ")) {
-    std::cerr << "[fused_attn_smallseq_bwd] ENTRY - all params: b=" << b << " h_q=" << h_q
+  if (std::getenv(" NVTE_LOG_CK_CONFIG")) {
+    std::cout << "[fused_attn_smallseq_bwd] ENTRY - all params: b=" << b << " h_q=" << h_q
               << " h_kv=" << h_kv << " max_seqlen_kv=" << max_seqlen_kv << " d_qk=" << d_qk
               << " d_v=" << d_v << " attn_scale=" << attn_scale << " dropout=" << dropout
               << " qkv_dtype="
@@ -989,51 +964,21 @@ void fused_attn_smallseq_bwd(size_t b,
     int hi = static_cast<int>(h_q);
 
     switch (max_seqlen_kv) {
-      case 2: dispatch_bwd<2, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dO_ptr, attn_ptr, dropout_mask,
-                                  dropout, sqr_dk_scale, dQ_ptr, dK_ptr, dV_ptr, workspace_ptr,
-                                  cu_kv, cu_kv_p, hip_stream); break;
-      case 3: dispatch_bwd<3, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dO_ptr, attn_ptr, dropout_mask,
-                                  dropout, sqr_dk_scale, dQ_ptr, dK_ptr, dV_ptr, workspace_ptr,
-                                  cu_kv, cu_kv_p, hip_stream); break;
-      case 4: dispatch_bwd<4, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dO_ptr, attn_ptr, dropout_mask,
-                                  dropout, sqr_dk_scale, dQ_ptr, dK_ptr, dV_ptr, workspace_ptr,
-                                  cu_kv, cu_kv_p, hip_stream); break;
-      case 5: dispatch_bwd<5, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dO_ptr, attn_ptr, dropout_mask,
-                                  dropout, sqr_dk_scale, dQ_ptr, dK_ptr, dV_ptr, workspace_ptr,
-                                  cu_kv, cu_kv_p, hip_stream); break;
-      case 6: dispatch_bwd<6, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dO_ptr, attn_ptr, dropout_mask,
-                                  dropout, sqr_dk_scale, dQ_ptr, dK_ptr, dV_ptr, workspace_ptr,
-                                  cu_kv, cu_kv_p, hip_stream); break;
-      case 7: dispatch_bwd<7, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dO_ptr, attn_ptr, dropout_mask,
-                                  dropout, sqr_dk_scale, dQ_ptr, dK_ptr, dV_ptr, workspace_ptr,
-                                  cu_kv, cu_kv_p, hip_stream); break;
-      case 8: dispatch_bwd<8, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dO_ptr, attn_ptr, dropout_mask,
-                                  dropout, sqr_dk_scale, dQ_ptr, dK_ptr, dV_ptr, workspace_ptr,
-                                  cu_kv, cu_kv_p, hip_stream); break;
-      case 9: dispatch_bwd<9, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dO_ptr, attn_ptr, dropout_mask,
-                                  dropout, sqr_dk_scale, dQ_ptr, dK_ptr, dV_ptr, workspace_ptr,
-                                  cu_kv, cu_kv_p, hip_stream); break;
-      case 10: dispatch_bwd<10, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dO_ptr, attn_ptr, dropout_mask,
-                                   dropout, sqr_dk_scale, dQ_ptr, dK_ptr, dV_ptr, workspace_ptr,
-                                   cu_kv, cu_kv_p, hip_stream); break;
-      case 11: dispatch_bwd<11, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dO_ptr, attn_ptr, dropout_mask,
-                                   dropout, sqr_dk_scale, dQ_ptr, dK_ptr, dV_ptr, workspace_ptr,
-                                   cu_kv, cu_kv_p, hip_stream); break;
-      case 12: dispatch_bwd<12, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dO_ptr, attn_ptr, dropout_mask,
-                                   dropout, sqr_dk_scale, dQ_ptr, dK_ptr, dV_ptr, workspace_ptr,
-                                   cu_kv, cu_kv_p, hip_stream); break;
-      case 13: dispatch_bwd<13, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dO_ptr, attn_ptr, dropout_mask,
-                                   dropout, sqr_dk_scale, dQ_ptr, dK_ptr, dV_ptr, workspace_ptr,
-                                   cu_kv, cu_kv_p, hip_stream); break;
-      case 14: dispatch_bwd<14, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dO_ptr, attn_ptr, dropout_mask,
-                                   dropout, sqr_dk_scale, dQ_ptr, dK_ptr, dV_ptr, workspace_ptr,
-                                   cu_kv, cu_kv_p, hip_stream); break;
-      case 15: dispatch_bwd<15, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dO_ptr, attn_ptr, dropout_mask,
-                                   dropout, sqr_dk_scale, dQ_ptr, dK_ptr, dV_ptr, workspace_ptr,
-                                   cu_kv, cu_kv_p, hip_stream); break;
-      case 16: dispatch_bwd<16, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dO_ptr, attn_ptr, dropout_mask,
-                                    dropout, sqr_dk_scale, dQ_ptr, dK_ptr, dV_ptr, workspace_ptr,
-                                    cu_kv, cu_kv_p, hip_stream); break;
+      SMALLSEQ_DISPATCH_BWD_CASE(2)
+      SMALLSEQ_DISPATCH_BWD_CASE(3)
+      SMALLSEQ_DISPATCH_BWD_CASE(4)
+      SMALLSEQ_DISPATCH_BWD_CASE(5)
+      SMALLSEQ_DISPATCH_BWD_CASE(6)
+      SMALLSEQ_DISPATCH_BWD_CASE(7)
+      SMALLSEQ_DISPATCH_BWD_CASE(8)
+      SMALLSEQ_DISPATCH_BWD_CASE(9)
+      SMALLSEQ_DISPATCH_BWD_CASE(10)
+      SMALLSEQ_DISPATCH_BWD_CASE(11)
+      SMALLSEQ_DISPATCH_BWD_CASE(12)
+      SMALLSEQ_DISPATCH_BWD_CASE(13)
+      SMALLSEQ_DISPATCH_BWD_CASE(14)
+      SMALLSEQ_DISPATCH_BWD_CASE(15)
+      SMALLSEQ_DISPATCH_BWD_CASE(16)
       default:
         NVTE_ERROR("Unsupported max_seqlen_kv for small-seq: max_seqlen_kv <= 16.");
     }

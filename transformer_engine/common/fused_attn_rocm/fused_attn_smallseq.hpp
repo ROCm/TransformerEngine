@@ -17,14 +17,7 @@
 namespace transformer_engine {
 namespace fused_attn_rocm {
 
-/** Workspace size in bytes for small-seq forward path (launcher uses output_S; this is for any
- *  caller scratch, e.g. get_runtime_max_seqlen). Minimum 8 for atomic. */
-size_t fused_attn_smallseq_fwd_workspace_size(size_t b,
-                                             size_t h_q,
-                                             size_t max_seqlen_kv,
-                                             DType dtype);
-
-/** Workspace size in bytes for small-seq backward path (grad_attn then grad_scores). */
+/** Workspace size in bytes for small-seq backward path */
 size_t fused_attn_smallseq_bwd_workspace_size(size_t b,
                                               size_t h_q,
                                               size_t max_seqlen_kv,

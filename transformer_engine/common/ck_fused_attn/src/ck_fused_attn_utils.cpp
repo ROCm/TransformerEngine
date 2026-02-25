@@ -5,6 +5,10 @@
  ************************************************************************/
 
 #include <utility>
+#include <vector>
+#include <cstdlib>
+#include <iostream>
+#include <algorithm>
 #include "ck_fused_attn_utils.hpp"
 #include "ck_fused_attn/ck_fused_attn.hpp"
 #include "mask.hpp"
@@ -95,6 +99,30 @@ uint64_t get_runtime_max_seqlen(uint64_t b, const void* cu_seqlen_ptr, const voi
     runtime_max_seqlen_ptr);
   hipMemcpyAsync(&runtime_max_seqlen, runtime_max_seqlen_ptr, sizeof(uint64_t), hipMemcpyDeviceToHost, stream);
   hipStreamSynchronize(stream);
+
+  const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG");
+  if (env_p && std::string(env_p) == "1" && cu_seqlen_ptr != nullptr && b > 0) {
+    std::vector<int32_t> host_cu(static_cast<size_t>(b) + 1);
+    hipMemcpy(host_cu.data(), cu_seqlen_ptr, (static_cast<size_t>(b) + 1) * sizeof(int32_t), hipMemcpyDeviceToHost);
+    uint64_t host_max = 0;
+    for (uint64_t i = 0; i < b; i++) {
+      int32_t len = host_cu[i + 1] - host_cu[i];
+      uint64_t u = static_cast<uint64_t>(len);
+      if (len < 0) {
+        std::cout << "[get_runtime_max_seqlen] b=" << b << " NEGATIVE len at i=" << i
+                  << " cu[" << i << "]=" << host_cu[i] << " cu[" << (i+1) << "]=" << host_cu[i+1]
+                  << " (kernel would produce garbage uint64)" << std::endl;
+      }
+      if (u > host_max) host_max = u;
+    }
+    const size_t n = static_cast<size_t>(b) + 1;
+    std::cout << "[get_runtime_max_seqlen] b=" << b << " shape=(" << n << ",) cu_seqlen[0..4]=";
+    for (size_t i = 0; i < std::min(n, size_t(5)); i++) std::cout << host_cu[i] << " ";
+    std::cout << " ... cu_seqlen[" << (n-5) << ".." << (n-1) << "]=";
+    for (size_t i = n - std::min(n, size_t(5)); i < n; i++) std::cout << host_cu[i] << " ";
+    std::cout << " host_max_seqlen=" << host_max << " device_returned=" << runtime_max_seqlen << std::endl;
+  }
+
   return runtime_max_seqlen;
 }
 

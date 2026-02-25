@@ -168,6 +168,12 @@ hipError_t ck_attn_varlen_bwd(
   int how_v3_bf16_cvt,
   hipStream_t stream);
 
+uint64_t get_runtime_max_seqlen(uint64_t b,
+                                const void* cu_seqlen_ptr,
+                                const void* cu_seqlen_padded_ptr,
+                                void* workspace,
+                                hipStream_t stream);
+
 }//namespace ck_fused_attn
 #endif // CK_FUSED_ATTN_H
 

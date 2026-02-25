@@ -223,6 +223,7 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
   auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;              \
   auto bias_shape = std::vector<size_t>{bias_batch, bias_heads, q_max_seqlen, kv_max_seqlen}; \
   size_t num_segments = input_batch;                                                          \
+  std::cerr << "[FUSED_ATTN_IMPL_COMMON_BLOCK] input_batch=" << input_batch << std::endl;     \
   if (is_ragged) {                                                                            \
     auto cudnn_runtime_version = cudnnGetVersion();                                           \
     num_segments = input_batch * max_segments_per_seq;                                        \
@@ -509,6 +510,27 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
   nvte_tensor_pack_destroy(&aux_input_tensors);
 
   auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
+  size_t workspace_elems = product(work_shape);
+  size_t elt_size = transformer_engine::typeToSize(query_workspace_tensor.dtype());
+  size_t workspace_bytes = workspace_elems * elt_size;
+  size_t fused_small_seq_workspace = input_batch * attn_heads * 16 * 2;  // min for small-seq (bf16/fp16)
+
+  if (is_ragged && workspace_bytes < fused_small_seq_workspace) {
+    size_t min_elems = (fused_small_seq_workspace + elt_size - 1) / elt_size;
+    work_shape = std::vector<size_t>{min_elems};
+    workspace_elems = min_elems;
+    workspace_bytes = workspace_elems * elt_size;
+  }
+
+  std::cerr << "[GetFusedAttnBackwardWorkspaceSizes] input_batch=" << input_batch
+            << " is_ragged=" << is_ragged << " workspace_shape=(";
+  for (size_t i = 0; i < work_shape.size(); ++i) {
+    std::cerr << (i ? "," : "") << work_shape[i];
+  }
+  std::cerr << ") workspace_elems=" << workspace_elems << " workspace_bytes=" << workspace_bytes
+            << " b*h*16*2=" << fused_small_seq_workspace
+            << " (workspace_bytes>=b*h*16*2)=" << (workspace_bytes >= fused_small_seq_workspace)
+            << std::endl;
   return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
 
