@@ -46,12 +46,14 @@ if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or os.path.isdir(build_tools_
 
 
 from build_tools.build_ext import get_build_ext
-from build_tools.utils import ( rocm_build, copy_common_headers, copy_hipify_tools,
-                               clear_hipify_tools_copy)
+from build_tools.utils import rocm_build, copy_common_headers
 from build_tools.te_version import te_version
 from build_tools.jax import setup_jax_extension, install_requirements, test_requirements
 
 from pybind11.setup_helpers import build_ext as BuildExtension
+
+if rocm_build():
+    from build_tools.hipify.hipify import copy_hipify_tools, clear_hipify_tools_copy
 
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
 CMakeBuildExtension = get_build_ext(BuildExtension, True)
@@ -90,7 +92,8 @@ if __name__ == "__main__":
     # Extensions
     common_headers_dir = "common_headers"
     copy_common_headers(current_file_path.parent, str(current_file_path / common_headers_dir))
-    copy_hipify_tools(current_file_path.parent.parent, current_file_path)
+    if rocm_build():
+        copy_hipify_tools(current_file_path.parent.parent, current_file_path)
     ext_modules = [
         setup_jax_extension(
             "csrc", current_file_path / "csrc", current_file_path / common_headers_dir
@@ -110,4 +113,5 @@ if __name__ == "__main__":
     if any(x in sys.argv for x in (".", "sdist", "bdist_wheel")):
         shutil.rmtree(common_headers_dir)
         shutil.rmtree("build_tools")
-        clear_hipify_tools_copy(current_file_path)
+        if rocm_build():
+            clear_hipify_tools_copy(current_file_path)

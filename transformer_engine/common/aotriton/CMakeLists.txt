@@ -68,6 +68,7 @@ if(NOT DEFINED AOTRITON_PATH)
     # potential conflict with libaotriton as provided by PyTorch
     function(aotriton_build_from_source noimage)
         message(STATUS "No-image mode: ${noimage}.")
+        set(TE ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
         get_git_commit(${TE}/3rdparty/aotriton AOTRITON_SHA)
         ExternalProject_Add(aotriton_external
             LIST_SEPARATOR ","
