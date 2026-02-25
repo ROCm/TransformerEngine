@@ -19,9 +19,6 @@ namespace ck_fused_attn{
 
 bool open_ck_fused_attn_log_file(std::ofstream& log_file, const char* file_prefix, const std::string& log_dir_str) {
   // Explicitly use std::cout as a fallback
-  if (log_dir_str == "1") {
-    return false;
-  }
   std::filesystem::path log_dir(log_dir_str);
   std::ostringstream filename;
   filename << file_prefix << "_" << getpid() << "_" << std::this_thread::get_id() << ".log";
@@ -31,6 +28,28 @@ bool open_ck_fused_attn_log_file(std::ofstream& log_file, const char* file_prefi
     return false;
   }
   return true;
+}
+
+std::ostream* get_ck_log_stream() {
+  thread_local std::ofstream log_file;
+  thread_local std::ostream* log_stream = nullptr;
+  thread_local bool initialized = false;
+  if (!initialized) {
+    initialized = true;
+    if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG")) {
+      std::string log_dir_str(env_p);
+      if (!log_dir_str.empty() && log_dir_str != "0") {
+        if (log_dir_str == "1") {
+          log_stream = static_cast<std::ostream*>(&std::cout);
+        }
+        if (open_ck_fused_attn_log_file(log_file, "ck_fused_attn", log_dir_str)) {
+          log_stream = static_cast<std::ostream*>(&log_file);
+        }
+      }
+    }
+  }
+
+  return log_stream;
 }
 
 std::string get_data_type_str(DType dtype){

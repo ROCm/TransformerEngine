@@ -16,34 +16,6 @@
 
 namespace ck_fused_attn{
 
-// We want to cache and reuse the log stream so we use thread_local here.
-namespace {
-std::ostream* get_bwd_log_stream() {
-  thread_local std::ofstream log_file;
-  thread_local bool attempted = false;
-  thread_local bool opened = false;
-  thread_local bool requested = false;
-  thread_local std::string log_dir_str;
-  if (!attempted) {
-    attempted = true;
-    if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG")) {
-      log_dir_str = std::string(env_p);
-      requested = !log_dir_str.empty() && log_dir_str != "0";
-    }
-    if (requested) {
-      opened = open_ck_fused_attn_log_file(log_file, "ck_fused_attn_bwd", log_dir_str);
-    }
-  }
-  if (!requested) {
-    return nullptr;
-  }
-  if (!opened) {
-    return &std::cout;
-  }
-  return &log_file;
-}
-}  // namespace
-
 // TODO: unify with binary search in TE/common/fused_attn(rocm)/util
 // no device std::upper_bound
 // in an increasing array with given size len, search for the index that:
@@ -361,119 +333,119 @@ __global__ void dbias_reduce_b1ss(
 }
 
 // print the fmha_traits and args passed into ck apis
-void log_bwd_config(const char* func_name,
-                    const std::string data_type_str,
-                    const bool is_group_mode,
-                    const mask_enum mask_type,
-                    const bias_enum bias_type,
-                    const bool has_dbias,
-                    const bool has_dropout,
-                    const bool is_store_randval,
-                    const bool is_deterministic,
-                    const bool uses_bwd_v3,
-                    const bool is_v3_atomic_fp32,
-                    const int how_v3_bf16_cvt,
-                    const fmha_bwd_args& fmha_args){
-  if (auto* log_file = get_bwd_log_stream()) {
-    *log_file << "\n" << func_name << "\n";
+void log_bwd_config(
+  std::ostream* log_file,
+  const char* func_name,
+  const std::string data_type_str,
+  const bool is_group_mode,
+  const mask_enum mask_type,
+  const bias_enum bias_type,
+  const bool has_dbias,
+  const bool has_dropout,
+  const bool is_store_randval,
+  const bool is_deterministic,
+  const bool uses_bwd_v3,
+  const bool is_v3_atomic_fp32,
+  const int how_v3_bf16_cvt,
+  const fmha_bwd_args& fmha_args
+){
+  *log_file << "\n" << func_name << "\n";
 
-    // fmha_traits debug
-    *log_file << "\n" << "fmha_traits: " << "\n";
-    *log_file << "hdim_q: " << fmha_args.hdim_q << "\n";
-    *log_file << "hdim_v: " << fmha_args.hdim_v << "\n";
-    *log_file << "data_type: " << data_type_str << "\n";
-    *log_file << "is_group_mode: " << is_group_mode << "\n";
-    *log_file << "mask_type: " << static_cast<std::underlying_type<mask_enum>::type>(mask_type) << "\n";
-    *log_file << "bias_type: " << static_cast<std::underlying_type<bias_enum>::type>(bias_type) << "\n";
-    *log_file << "has_dbias: " << has_dbias << "\n";
-    *log_file << "has_dropout: " << has_dropout << "\n";
-    *log_file << "is_store_randval: " << is_store_randval << "\n";
-    *log_file << "is_deterministic: " << is_deterministic << "\n";
-    *log_file << "uses_bwd_v3: " << uses_bwd_v3 << "\n";
-    *log_file << "is_v3_atomic_fp32: " << is_v3_atomic_fp32 << "\n";
-    *log_file << "how_v3_bf16_cvt: " << how_v3_bf16_cvt << "\n";
+  // fmha_traits debug
+  *log_file << "\n" << "fmha_traits: " << "\n";
+  *log_file << "hdim_q: " << fmha_args.hdim_q << "\n";
+  *log_file << "hdim_v: " << fmha_args.hdim_v << "\n";
+  *log_file << "data_type: " << data_type_str << "\n";
+  *log_file << "is_group_mode: " << is_group_mode << "\n";
+  *log_file << "mask_type: " << static_cast<std::underlying_type<mask_enum>::type>(mask_type) << "\n";
+  *log_file << "bias_type: " << static_cast<std::underlying_type<bias_enum>::type>(bias_type) << "\n";
+  *log_file << "has_dbias: " << has_dbias << "\n";
+  *log_file << "has_dropout: " << has_dropout << "\n";
+  *log_file << "is_store_randval: " << is_store_randval << "\n";
+  *log_file << "is_deterministic: " << is_deterministic << "\n";
+  *log_file << "uses_bwd_v3: " << uses_bwd_v3 << "\n";
+  *log_file << "is_v3_atomic_fp32: " << is_v3_atomic_fp32 << "\n";
+  *log_file << "how_v3_bf16_cvt: " << how_v3_bf16_cvt << "\n";
 
-    // fmha_args debug
-    *log_file << "\n" << "fmha_args: " << "\n";
-    *log_file << "q_ptr: " << fmha_args.q_ptr << "\n";
-    *log_file << "k_ptr: " << fmha_args.k_ptr << "\n";
-    *log_file << "v_ptr: " << fmha_args.v_ptr << "\n";
-    *log_file << "bias_ptr: " << fmha_args.bias_ptr << "\n";
-    *log_file << "o_ptr: " << fmha_args.o_ptr << "\n";
-    *log_file << "lse_ptr: " << fmha_args.lse_ptr << "\n";
-    *log_file << "do_ptr: " << fmha_args.do_ptr << "\n";
-    *log_file << "d_ptr: " << fmha_args.d_ptr << "\n";
-    *log_file << "rand_val_ptr: " << fmha_args.rand_val_ptr << "\n";
-    *log_file << "dq_ptr: " << fmha_args.dq_ptr << "\n";
-    *log_file << "dk_ptr: " << fmha_args.dk_ptr << "\n";
-    *log_file << "dv_ptr: " << fmha_args.dv_ptr << "\n";
-    *log_file << "dbias_ptr: " << fmha_args.dbias_ptr << "\n";
-    *log_file << "dq_acc_ptr: " << fmha_args.dq_acc_ptr << "\n";
+  // fmha_args debug
+  *log_file << "\n" << "fmha_args: " << "\n";
+  *log_file << "q_ptr: " << fmha_args.q_ptr << "\n";
+  *log_file << "k_ptr: " << fmha_args.k_ptr << "\n";
+  *log_file << "v_ptr: " << fmha_args.v_ptr << "\n";
+  *log_file << "bias_ptr: " << fmha_args.bias_ptr << "\n";
+  *log_file << "o_ptr: " << fmha_args.o_ptr << "\n";
+  *log_file << "lse_ptr: " << fmha_args.lse_ptr << "\n";
+  *log_file << "do_ptr: " << fmha_args.do_ptr << "\n";
+  *log_file << "d_ptr: " << fmha_args.d_ptr << "\n";
+  *log_file << "rand_val_ptr: " << fmha_args.rand_val_ptr << "\n";
+  *log_file << "dq_ptr: " << fmha_args.dq_ptr << "\n";
+  *log_file << "dk_ptr: " << fmha_args.dk_ptr << "\n";
+  *log_file << "dv_ptr: " << fmha_args.dv_ptr << "\n";
+  *log_file << "dbias_ptr: " << fmha_args.dbias_ptr << "\n";
+  *log_file << "dq_acc_ptr: " << fmha_args.dq_acc_ptr << "\n";
 
-    *log_file << "seqstart_q_ptr: " << fmha_args.seqstart_q_ptr << "\n";
-    *log_file << "seqstart_k_ptr: " << fmha_args.seqstart_k_ptr << "\n";
-    *log_file << "seqlen_q_ptr: " << fmha_args.seqlen_q_ptr << "\n";
-    *log_file << "seqlen_k_ptr: " << fmha_args.seqlen_k_ptr << "\n";
-    *log_file << "cu_seqlen_q_ptr: " << fmha_args.cu_seqlen_q_ptr << "\n";
-    *log_file << "cu_seqlen_k_ptr: " << fmha_args.cu_seqlen_k_ptr << "\n";
+  *log_file << "seqstart_q_ptr: " << fmha_args.seqstart_q_ptr << "\n";
+  *log_file << "seqstart_k_ptr: " << fmha_args.seqstart_k_ptr << "\n";
+  *log_file << "seqlen_q_ptr: " << fmha_args.seqlen_q_ptr << "\n";
+  *log_file << "seqlen_k_ptr: " << fmha_args.seqlen_k_ptr << "\n";
+  *log_file << "cu_seqlen_q_ptr: " << fmha_args.cu_seqlen_q_ptr << "\n";
+  *log_file << "cu_seqlen_k_ptr: " << fmha_args.cu_seqlen_k_ptr << "\n";
 
-    *log_file << "seqlen_q: " << fmha_args.seqlen_q << "\n";
-    *log_file << "seqlen_k: " << fmha_args.seqlen_k << "\n";
-    *log_file << "batch: " << fmha_args.batch << "\n";
-    *log_file << "max_seqlen_q: " << fmha_args.max_seqlen_q << "\n";
-    *log_file << "max_seqlen_k: " << fmha_args.max_seqlen_k << "\n";
-    *log_file << "hdim_q: " << fmha_args.hdim_q << "\n";
-    *log_file << "hdim_v: " << fmha_args.hdim_v << "\n";
-    *log_file << "nhead_q: " << fmha_args.nhead_q << "\n";
-    *log_file << "nhead_k: " << fmha_args.nhead_k << "\n";
-    *log_file << "scale: " << fmha_args.scale << "\n";
-    *log_file << "stride_q: " << fmha_args.stride_q << "\n";
-    *log_file << "stride_k: " << fmha_args.stride_k << "\n";
-    *log_file << "stride_v: " << fmha_args.stride_v << "\n";
-    *log_file << "stride_bias: " << fmha_args.stride_bias << "\n";
-    *log_file << "stride_o: " << fmha_args.stride_o << "\n";
-    *log_file << "stride_randval: " << fmha_args.stride_randval << "\n";
-    *log_file << "stride_do: " << fmha_args.stride_do << "\n";
-    *log_file << "stride_dq_acc: " << fmha_args.stride_dq_acc << "\n";
-    *log_file << "stride_dq: " << fmha_args.stride_dq << "\n";
-    *log_file << "stride_dk: " << fmha_args.stride_dk << "\n";
-    *log_file << "stride_dv: " << fmha_args.stride_dv << "\n";
-    *log_file << "stride_dbias: " << fmha_args.stride_dbias << "\n";
-    *log_file << "nhead_stride_q: " << fmha_args.nhead_stride_q << "\n";
-    *log_file << "nhead_stride_k: " << fmha_args.nhead_stride_k << "\n";
-    *log_file << "nhead_stride_v: " << fmha_args.nhead_stride_v << "\n";
-    *log_file << "nhead_stride_bias: " << fmha_args.nhead_stride_bias << "\n";
-    *log_file << "nhead_stride_o: " << fmha_args.nhead_stride_o << "\n";
-    *log_file << "nhead_stride_randval: " << fmha_args.nhead_stride_randval << "\n";
-    *log_file << "nhead_stride_do: " << fmha_args.nhead_stride_do << "\n";
-    *log_file << "nhead_stride_lsed: " << fmha_args.nhead_stride_lsed << "\n";
-    *log_file << "nhead_stride_dq_acc: " << fmha_args.nhead_stride_dq_acc << "\n";
-    *log_file << "nhead_stride_dq: " << fmha_args.nhead_stride_dq << "\n";
-    *log_file << "nhead_stride_dk: " << fmha_args.nhead_stride_dk << "\n";
-    *log_file << "nhead_stride_dv: " << fmha_args.nhead_stride_dv << "\n";
-    *log_file << "nhead_stride_dbias: " << fmha_args.nhead_stride_dbias << "\n";
-    *log_file << "batch_stride_q: " << fmha_args.batch_stride_q << "\n";
-    *log_file << "batch_stride_k: " << fmha_args.batch_stride_k << "\n";
-    *log_file << "batch_stride_v: " << fmha_args.batch_stride_v << "\n";
-    *log_file << "batch_stride_bias: " << fmha_args.batch_stride_bias << "\n";
-    *log_file << "batch_stride_o: " << fmha_args.batch_stride_o << "\n";
-    *log_file << "batch_stride_randval: " << fmha_args.batch_stride_randval << "\n";
-    *log_file << "batch_stride_do: " << fmha_args.batch_stride_do << "\n";
-    *log_file << "batch_stride_lsed: " << fmha_args.batch_stride_lsed << "\n";
-    *log_file << "batch_stride_dq_acc: " << fmha_args.batch_stride_dq_acc << "\n";
-    *log_file << "batch_stride_dq: " << fmha_args.batch_stride_dq << "\n";
-    *log_file << "batch_stride_dk: " << fmha_args.batch_stride_dk << "\n";
-    *log_file << "batch_stride_dv: " << fmha_args.batch_stride_dv << "\n";
-    *log_file << "batch_stride_dbias: " << fmha_args.batch_stride_dbias << "\n";
-    *log_file << "window_size_left: " << fmha_args.window_size_left << "\n";
-    *log_file << "window_size_right: " << fmha_args.window_size_right << "\n";
-    *log_file << "mask_type: " << fmha_args.mask_type << "\n";
-    *log_file << "p_drop: " << fmha_args.p_drop << "\n";
-    *log_file << "p_undrop: " << fmha_args.p_undrop << "\n";
-    *log_file << "dropout_seed_ptr: " << std::get<0>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset)) << "\n";
-    *log_file << "dropout_offset_ptr: " << std::get<1>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset)) << "\n";
-  }
-
+  *log_file << "seqlen_q: " << fmha_args.seqlen_q << "\n";
+  *log_file << "seqlen_k: " << fmha_args.seqlen_k << "\n";
+  *log_file << "batch: " << fmha_args.batch << "\n";
+  *log_file << "max_seqlen_q: " << fmha_args.max_seqlen_q << "\n";
+  *log_file << "max_seqlen_k: " << fmha_args.max_seqlen_k << "\n";
+  *log_file << "hdim_q: " << fmha_args.hdim_q << "\n";
+  *log_file << "hdim_v: " << fmha_args.hdim_v << "\n";
+  *log_file << "nhead_q: " << fmha_args.nhead_q << "\n";
+  *log_file << "nhead_k: " << fmha_args.nhead_k << "\n";
+  *log_file << "scale: " << fmha_args.scale << "\n";
+  *log_file << "stride_q: " << fmha_args.stride_q << "\n";
+  *log_file << "stride_k: " << fmha_args.stride_k << "\n";
+  *log_file << "stride_v: " << fmha_args.stride_v << "\n";
+  *log_file << "stride_bias: " << fmha_args.stride_bias << "\n";
+  *log_file << "stride_o: " << fmha_args.stride_o << "\n";
+  *log_file << "stride_randval: " << fmha_args.stride_randval << "\n";
+  *log_file << "stride_do: " << fmha_args.stride_do << "\n";
+  *log_file << "stride_dq_acc: " << fmha_args.stride_dq_acc << "\n";
+  *log_file << "stride_dq: " << fmha_args.stride_dq << "\n";
+  *log_file << "stride_dk: " << fmha_args.stride_dk << "\n";
+  *log_file << "stride_dv: " << fmha_args.stride_dv << "\n";
+  *log_file << "stride_dbias: " << fmha_args.stride_dbias << "\n";
+  *log_file << "nhead_stride_q: " << fmha_args.nhead_stride_q << "\n";
+  *log_file << "nhead_stride_k: " << fmha_args.nhead_stride_k << "\n";
+  *log_file << "nhead_stride_v: " << fmha_args.nhead_stride_v << "\n";
+  *log_file << "nhead_stride_bias: " << fmha_args.nhead_stride_bias << "\n";
+  *log_file << "nhead_stride_o: " << fmha_args.nhead_stride_o << "\n";
+  *log_file << "nhead_stride_randval: " << fmha_args.nhead_stride_randval << "\n";
+  *log_file << "nhead_stride_do: " << fmha_args.nhead_stride_do << "\n";
+  *log_file << "nhead_stride_lsed: " << fmha_args.nhead_stride_lsed << "\n";
+  *log_file << "nhead_stride_dq_acc: " << fmha_args.nhead_stride_dq_acc << "\n";
+  *log_file << "nhead_stride_dq: " << fmha_args.nhead_stride_dq << "\n";
+  *log_file << "nhead_stride_dk: " << fmha_args.nhead_stride_dk << "\n";
+  *log_file << "nhead_stride_dv: " << fmha_args.nhead_stride_dv << "\n";
+  *log_file << "nhead_stride_dbias: " << fmha_args.nhead_stride_dbias << "\n";
+  *log_file << "batch_stride_q: " << fmha_args.batch_stride_q << "\n";
+  *log_file << "batch_stride_k: " << fmha_args.batch_stride_k << "\n";
+  *log_file << "batch_stride_v: " << fmha_args.batch_stride_v << "\n";
+  *log_file << "batch_stride_bias: " << fmha_args.batch_stride_bias << "\n";
+  *log_file << "batch_stride_o: " << fmha_args.batch_stride_o << "\n";
+  *log_file << "batch_stride_randval: " << fmha_args.batch_stride_randval << "\n";
+  *log_file << "batch_stride_do: " << fmha_args.batch_stride_do << "\n";
+  *log_file << "batch_stride_lsed: " << fmha_args.batch_stride_lsed << "\n";
+  *log_file << "batch_stride_dq_acc: " << fmha_args.batch_stride_dq_acc << "\n";
+  *log_file << "batch_stride_dq: " << fmha_args.batch_stride_dq << "\n";
+  *log_file << "batch_stride_dk: " << fmha_args.batch_stride_dk << "\n";
+  *log_file << "batch_stride_dv: " << fmha_args.batch_stride_dv << "\n";
+  *log_file << "batch_stride_dbias: " << fmha_args.batch_stride_dbias << "\n";
+  *log_file << "window_size_left: " << fmha_args.window_size_left << "\n";
+  *log_file << "window_size_right: " << fmha_args.window_size_right << "\n";
+  *log_file << "mask_type: " << fmha_args.mask_type << "\n";
+  *log_file << "p_drop: " << fmha_args.p_drop << "\n";
+  *log_file << "p_undrop: " << fmha_args.p_undrop << "\n";
+  *log_file << "dropout_seed_ptr: " << std::get<0>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset)) << "\n";
+  *log_file << "dropout_offset_ptr: " << std::get<1>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset)) << "\n";
 }
 
 void dump_bwd_timings(const char* dump_path, float average_runtime){
@@ -554,7 +526,7 @@ hipError_t ck_attn_bwd(
   const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
 
   // print kernel name on verbose mode
-  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, get_bwd_log_stream() != nullptr};
+  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, get_ck_log_stream() != nullptr};
 
   ck_tile::index_t shape_seqlen_q = seqlen_q;
   ck_tile::index_t shape_seqlen_k = seqlen_k;
@@ -699,8 +671,9 @@ hipError_t ck_attn_bwd(
   }();
 
   // print ck traits and args when needed
-  log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_type, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args);
-  
+  if (auto* log_file = get_ck_log_stream()) {
+    log_bwd_config(log_file, __FUNCTION__, data_type_str, is_group_mode, mask_type, bias_type, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args);
+  }
   float average_runtime = aiter::mha_bwd(fmha_args,
                                          stream_config,
                                          data_type_str,
@@ -724,7 +697,7 @@ hipError_t ck_attn_bwd(
     dim3 grid(b, s_kv, hg);
     if (d_qk == d_v) {
       dim3 block(d_qk);
-      if (auto* log_file = get_bwd_log_stream()) {
+      if (auto* log_file = get_ck_log_stream()) {
         *log_file << "\n" << "run dk_dv_reduce: " << "\n";
         *log_file << "dk_expanded_ptr: " << dk_expanded_ptr << "\n";
         *log_file << "dv_expanded_ptr: " << dv_expanded_ptr << "\n";
@@ -749,7 +722,7 @@ hipError_t ck_attn_bwd(
           stride_b_dk, stride_h_dk, stride_s_dk););
     } else {
       dim3 block_dk(d_qk);
-      if (auto* log_file = get_bwd_log_stream()) {
+      if (auto* log_file = get_ck_log_stream()) {
         *log_file << "\n" << "run dk_or_dv_reduce on dk: " << "\n";
         *log_file << "dk_expanded_ptr: " << dk_expanded_ptr << "\n";
         *log_file << "stride_b_dk_expanded: " << stride_b_dk_expanded << "\n";
@@ -770,7 +743,7 @@ hipError_t ck_attn_bwd(
           stride_b_dk, stride_h_dk, stride_s_dk););
 
       dim3 block_dv(d_v);
-      if (auto* log_file = get_bwd_log_stream()) {
+      if (auto* log_file = get_ck_log_stream()) {
         *log_file << "\n" << "run dk_or_dv_reduce on dv: " << "\n";
         *log_file << "dv_expanded_ptr: " << dv_expanded_ptr << "\n";
         *log_file << "stride_b_dv_expanded: " << stride_b_dv_expanded << "\n";
@@ -798,7 +771,7 @@ hipError_t ck_attn_bwd(
     dim3 block(THREADS_PER_BLOCK);
     dim3 grid(ceil(1.0 * s_q * s_kv/THREADS_PER_BLOCK));
     if(bias_shape==BiasShape::k11SS){
-      if (auto* log_file = get_bwd_log_stream()) {
+      if (auto* log_file = get_ck_log_stream()) {
         *log_file << "\n" << "run dbias_reduce_11SS: " << "\n";
         *log_file << "dbias_ptr: " << dbias_ptr << "\n";
         *log_file << "dbias_expanded_ptr: " << dbias_expanded_ptr << "\n";
@@ -810,7 +783,7 @@ hipError_t ck_attn_bwd(
           static_cast<CK_TILE_TYPE*>(dbias_expanded_ptr),
           static_cast<CK_TILE_TYPE*>(dbias_ptr));); 
     }else if(bias_shape==BiasShape::k1HSS){
-      if (auto* log_file = get_bwd_log_stream()) {
+      if (auto* log_file = get_ck_log_stream()) {
         *log_file << "\n" << "run dbias_reduce_1HSS: " << "\n";
         *log_file << "dbias_ptr: " << dbias_ptr << "\n";
         *log_file << "dbias_expanded_ptr: " << dbias_expanded_ptr << "\n";
@@ -822,7 +795,7 @@ hipError_t ck_attn_bwd(
           static_cast<CK_TILE_TYPE*>(dbias_expanded_ptr),
           static_cast<CK_TILE_TYPE*>(dbias_ptr));); 
     }else if(bias_shape==BiasShape::kB1SS){
-      if (auto* log_file = get_bwd_log_stream()) {
+      if (auto* log_file = get_ck_log_stream()) {
         *log_file << "\n" << "run dbias_reduce_B1SS: " << "\n";
         *log_file << "dbias_ptr: " << dbias_ptr << "\n";
         *log_file << "dbias_expanded_ptr: " << dbias_expanded_ptr << "\n";
@@ -904,7 +877,7 @@ hipError_t ck_attn_varlen_bwd(
  
   const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
   // print kernel name on verbose mode
-  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, get_bwd_log_stream() != nullptr};
+  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, get_ck_log_stream() != nullptr};
 
   std::string data_type_str = get_data_type_str(dtype);
 
@@ -1046,7 +1019,7 @@ hipError_t ck_attn_varlen_bwd(
   // lse_thd_ptr used as buffer
   if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_MAX_SEQLEN")) {
     if(std::string(env_p) == "1"){
-      if (auto* log_file = get_bwd_log_stream()) {
+      if (auto* log_file = get_ck_log_stream()) {
         *log_file
             << "attn_bwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.\n";
       }
@@ -1056,7 +1029,9 @@ hipError_t ck_attn_varlen_bwd(
   }
 
   // print ck traits and args when needed
-  log_bwd_config(__FUNCTION__, data_type_str, is_group_mode, mask_type, bias_enum::no_bias, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args);
+  if (auto* log_file = get_ck_log_stream()) {
+    log_bwd_config(log_file, __FUNCTION__, data_type_str, is_group_mode, mask_type, bias_enum::no_bias, has_dbias, has_dropout, s_randval, deterministic, uses_bwd_v3, is_v3_atomic_fp32, how_v3_bf16_cvt, fmha_args);
+  }
 
   float average_runtime = aiter::mha_bwd(fmha_args,
     stream_config,
@@ -1081,7 +1056,7 @@ hipError_t ck_attn_varlen_bwd(
     dim3 grid(max_tokens_kv, hg);
     if (d_qk == d_v) {
       dim3 block(d_qk);
-      if (auto* log_file = get_bwd_log_stream()) {
+      if (auto* log_file = get_ck_log_stream()) {
         *log_file << "\n" << "run dk_dv_reduce_thd: " << "\n";
         *log_file << "cu_seqlen_kv_ptr: " << cu_seqlen_kv_ptr << "\n";
         *log_file << "cu_seqlen_kv_padded_ptr: " << cu_seqlen_kv_padded_ptr << "\n";
@@ -1108,7 +1083,7 @@ hipError_t ck_attn_varlen_bwd(
           stride_h_dk, stride_s_dk););
     } else {
       dim3 block_dk(d_qk);
-      if (auto* log_file = get_bwd_log_stream()) {
+      if (auto* log_file = get_ck_log_stream()) {
         *log_file << "\n" << "run dk_or_dv_reduce_thd on dk: " << "\n";
         *log_file << "cu_seqlen_kv_ptr: " << cu_seqlen_kv_ptr << "\n";
         *log_file << "cu_seqlen_kv_padded_ptr: " << cu_seqlen_kv_padded_ptr << "\n";
@@ -1131,7 +1106,7 @@ hipError_t ck_attn_varlen_bwd(
           stride_h_dk, stride_s_dk););
 
       dim3 block_dv(d_v);
-      if (auto* log_file = get_bwd_log_stream()) {
+      if (auto* log_file = get_ck_log_stream()) {
         *log_file << "\n" << "run dk_or_dv_reduce_thd on dv: " << "\n";
         *log_file << "cu_seqlen_kv_ptr: " << cu_seqlen_kv_ptr << "\n";
         *log_file << "cu_seqlen_kv_padded_ptr: " << cu_seqlen_kv_padded_ptr << "\n";

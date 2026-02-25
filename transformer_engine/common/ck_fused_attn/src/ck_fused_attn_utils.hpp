@@ -57,7 +57,7 @@ std::pair<bias_enum, BiasShape> get_ck_bias_type_shape(BiasType attn_bias_type, 
 
 uint64_t get_runtime_max_seqlen(uint64_t b, const void* cu_seqlen_ptr, const void* cu_seqlen_padded_ptr, void* workspace, hipStream_t stream);
 
-bool open_ck_fused_attn_log_file(std::ofstream& log_file, const char* file_prefix, const std::string& log_dir_str);
+std::ostream* get_ck_log_stream();
 
 }//namespace ck_fused_attn
 #endif // CK_FUSED_ATTN_UTILS_H
