@@ -1,3 +1,7 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+
 set(_HIPIFY_CMAKE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
 
