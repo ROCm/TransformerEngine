@@ -97,32 +97,8 @@ else()
 endif()
 
 if(USE_ROCM)
-  set(TE ${CMAKE_CURRENT_SOURCE_DIR}/../..)
-  set(THIRDPARTY ${TE}/3rdparty)
-  list(APPEND CMAKE_MODULE_PATH "${THIRDPARTY}/hipify_torch/cmake")
-  include(Hipify)
-  message(STATUS "CMAKE_MODULE_PATH: ${CMAKE_MODULE_PATH}")
-
-  #hipify parameters should match those used in TE CMakeLists.txt
-  set(header_include_dir
-    ${TE}/transformer_engine/common/include
-    ${TE}/transformer_engine/common
-    ${TE}/transformer_engine)
-
-  set(cuda_source_dir ${PROJECT_SOURCE_DIR} )
-  message(STATUS "Run hipify on ${cuda_source_dir}")
-  hipify(CUDA_SOURCE_DIR ${cuda_source_dir} 
-    HEADER_INCLUDE_DIR ${header_include_dir}
-    IGNORES "*/pytorch/csrc/*"
-    IGNORES "*/jax/csrc/*"
-    IGNORES "*/amd_detail/*"
-    IGNORES "*/aotriton/*"
-    IGNORES "*/ck_fused_attn/*"
-    IGNORES "*/rocshmem_api/*"
-    CUSTOM_MAP_FILE "${TE}/hipify_custom_map.json"
-    NO_MATH_REPLACE
-    V2
-  )
+  include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/hipify/hipify.cmake")
+  TE_Hipify(${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
 add_subdirectory(operator)

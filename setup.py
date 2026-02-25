@@ -22,7 +22,6 @@ from build_tools.te_version import te_version
 from build_tools.utils import (
     rocm_build,
     all_files_in_dir,
-    hipify,
     cuda_archs,
     cuda_version,
     get_frameworks,
@@ -47,12 +46,9 @@ class HipifyMeta(egg_info):
 
     def run(self):
         if rocm_build():
+            from build_tools.hipify.hipify import do_hipify
             print("Running hipification of installable headers for ROCm build...")
-            common_headers_dir = current_file_path / "transformer_engine/common/include"
-            #TODO: some installable headers refer non installable headers (i.e not from common/include)
-            #so we need add extra include paths here to match hipification results with build process
-            hipify(current_file_path, common_headers_dir, all_files_in_dir(common_headers_dir),
-                   [common_headers_dir, current_file_path / "transformer_engine"])
+            do_hipify(current_file_path, current_file_path / "transformer_engine/common/include")
         super().run()
 
 CMakeBuildExtension = get_build_ext(BuildExtension)

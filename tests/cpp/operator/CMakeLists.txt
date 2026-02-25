@@ -41,7 +41,7 @@ endif()
 if(USE_CUDA)
   add_executable(test_operator ${test_cuda_sources})
 else()
-  get_hipified_list("${test_cuda_sources}" test_hip_sources)
+  TE_GetHipifiedSources("${test_cuda_sources}" ${CMAKE_CURRENT_SOURCE_DIR} test_hip_sources)
   message("${message_line}")
   message(STATUS "test_operator hipified sources: ${test_hip_sources}")
 

@@ -205,32 +205,10 @@ else()
        amd_detail/system.cpp)
 
   # process source code files
-  set(TE ${CMAKE_CURRENT_SOURCE_DIR}/../..)
-  set(THIRDPARTY ${TE}/3rdparty)
-  list(APPEND CMAKE_MODULE_PATH "${THIRDPARTY}/hipify_torch/cmake")
-  include(Hipify)
-  message(STATUS "CMAKE_MODULE_PATH: ${CMAKE_MODULE_PATH}")
+  include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/hipify/hipify.cmake")
+  TE_Hipify(${CMAKE_CURRENT_SOURCE_DIR})
+  TE_GetHipifiedSources("${transformer_engine_SOURCES}" ${CMAKE_CURRENT_SOURCE_DIR} te_hip_sources)
 
-  # Parameters for hipify here should match hipify from build_tools/utils.py
-  # Because CMake hipify doesn't support INCLUDES we explicitly add pytorch and jax to IGNORES
-  set(header_include_dir
-      ${CMAKE_CURRENT_SOURCE_DIR}/..
-      ${CMAKE_CURRENT_SOURCE_DIR}/include
-      ${CMAKE_CURRENT_SOURCE_DIR})
-  message(STATUS "Run hipify on ${CMAKE_CURRENT_SOURCE_DIR}")
-  hipify(CUDA_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}
-      HEADER_INCLUDE_DIR ${header_include_dir}
-      IGNORES "*/amd_detail/*"
-      IGNORES "*/aotriton/*"
-      IGNORES "*/ck_fused_attn/*"
-      IGNORES "*/pytorch/csrc/*"
-      IGNORES "*/jax/csrc/*"
-      IGNORES "*/rocshmem_api/*"
-      CUSTOM_MAP_FILE "${TE}/hipify_custom_map.json"
-      NO_MATH_REPLACE
-      V2
-  )
-  get_hipified_list("${transformer_engine_SOURCES}" te_hip_sources)
   message("${message_line}")
   message(STATUS "nvte hipified sources: ${te_hip_sources}")
 

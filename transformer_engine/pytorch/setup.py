@@ -47,14 +47,16 @@ if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or os.path.isdir(build_tools_
 
 
 from build_tools.build_ext import get_build_ext
-from build_tools.utils import (
-    rocm_build, copy_common_headers, copy_hipify_tools, clear_hipify_tools_copy )
+from build_tools.utils import rocm_build, copy_common_headers
 from build_tools.te_version import te_version
 from build_tools.pytorch import (
     setup_pytorch_extension,
     install_requirements,
     test_requirements,
 )
+
+if rocm_build():
+    from build_tools.hipify.hipify import copy_hipify_tools, clear_hipify_tools_copy
 
 
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
