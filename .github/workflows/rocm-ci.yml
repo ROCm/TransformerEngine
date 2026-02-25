@@ -342,7 +342,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          docker exec te-runner bash -c "$(cat <<'EOF'
+          docker exec -e HF_TOKEN="$HF_TOKEN" te-runner bash -c "$(cat <<'EOF'
           #!/usr/bin/bash
           set -ex -o pipefail
           ulimit -c 0 # Disable core dumps
