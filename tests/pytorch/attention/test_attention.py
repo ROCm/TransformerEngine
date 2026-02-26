@@ -113,10 +113,11 @@ def test_gqa_mla_thd():
     Explicitly test dk_or_dv_reduce_thd as part of TE's CK integration
     post-processing for BWD FA with native padding support.
     """
-    config = ModelConfig(8, 16, 4, 128, 128, 128, 0.0, "padding", "no_bias", head_dim_v=64)
+    # b, sq, h, dqk
+    config = ModelConfig(8, 128, 16, 128, num_gqa_groups= 4, head_dim_v=64, attn_mask_type="padding")
     qkv_layout = "thd_thd_thd"
     dtype = torch.float16
-    _, _, fused_attn_backends = _get_attention_backends(
+    _, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,
