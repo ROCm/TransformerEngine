@@ -7,9 +7,7 @@
 #ifndef CK_FUSED_ATTN_UTILS_H
 #define CK_FUSED_ATTN_UTILS_H
 
-#include<cstdlib>
 #include<fstream>
-#include<string>
 #include<hip/hip_runtime.h>
 
 //forward declaration for ck_tile enum
