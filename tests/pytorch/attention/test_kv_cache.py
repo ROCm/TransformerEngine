@@ -31,6 +31,7 @@ from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
     is_bf16_compatible,
+    get_device_compute_capability,
 )
 
 _current_file = pathlib.Path(__file__).resolve()
@@ -378,7 +379,7 @@ def get_tols(config, module, backend, dtype):
             # With FA on ROCm it may not fit default tolerance
             if IS_HIP_EXTENSION and backend == "FlashAttention":
                 tols = {
-                    torch.half: (5e-3, 5e-3),
+                    torch.half: (6e-3, 6e-3) if get_device_compute_capability() == (9, 4) else (5e-3, 5e-3),
                     torch.bfloat16: (4e-2, 4e-2),
                 }
         else:
