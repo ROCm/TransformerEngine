@@ -241,10 +241,9 @@ def test_dot_product_attention(
 
     # Skip if only unfused backend is supported
     # Double-count the CK backend since we want to compare V2/V3 kernels
-    if (
-        len(fused_attn_backends) +
-        int(IS_HIP_EXTENSION and FusedAttnBackend["CK"] in fused_attn_backends) +
-        flash_attn_supported + unfused_attn_supported
+    has_ck_backend = IS_HIP_EXTENSION and FusedAttnBackend["CK"] in fused_attn_backends
+    if not has_ck_backend and (
+        len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported
     ) < 2:
         pytest.skip("Less than two backends to compare.")
 
@@ -274,21 +273,7 @@ def test_dot_product_attention(
                 pad_between_seqs,
                 is_training,
             )
-            # We can consider the CK backend as being two, since we have V2/V3 kernels
-            if IS_HIP_EXTENSION and FusedAttnBackend["CK"] in fused_attn_backends:
-                os.environ["NVTE_CK_USES_FWD_V3"] = "0"
-                os.environ["NVTE_CK_USES_BWD_V3"] = "0"
-                fused_attn_fwd_1, fused_attn_bwd_1 = _run_dot_product_attention(
-                    dtype,
-                    config,
-                    "FusedAttention",
-                    ckpt_attn,
-                    qkv_layout,
-                    workspace_opt,
-                    pad_between_seqs,
-                    is_training,
-                )
-        elif len(fused_attn_backends) == 2:
+        if len(fused_attn_backends) == 2:
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
             os.environ["NVTE_FUSED_ATTN_CK"] = "0"
             os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "1"
@@ -302,9 +287,12 @@ def test_dot_product_attention(
                 pad_between_seqs,
                 is_training,
             )
+        if len(fused_attn_backends) == 2 or has_ck_backend:
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
             os.environ["NVTE_FUSED_ATTN_CK"] = "1"
             os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "0"
+            os.environ["NVTE_CK_USES_FWD_V3"] = "0"
+            os.environ["NVTE_CK_USES_BWD_V3"] = "0"
             fused_attn_fwd_1, fused_attn_bwd_1 = _run_dot_product_attention(
                 dtype,
                 config,
@@ -315,19 +303,19 @@ def test_dot_product_attention(
                 pad_between_seqs,
                 is_training,
             )
-            if IS_HIP_EXTENSION:
-                os.environ["NVTE_CK_USES_FWD_V3"] = "0"
-                os.environ["NVTE_CK_USES_BWD_V3"] = "0"
-                fused_attn_fwd_2, fused_attn_bwd_2 = _run_dot_product_attention(
-                    dtype,
-                    config,
-                    "FusedAttention",
-                    ckpt_attn,
-                    qkv_layout,
-                    workspace_opt,
-                    pad_between_seqs,
-                    is_training,
-                )
+        if IS_HIP_EXTENSION and len(fused_attn_backends) == 2:
+            os.environ["NVTE_CK_USES_FWD_V3"] = "1"
+            os.environ["NVTE_CK_USES_BWD_V3"] = "1"
+            fused_attn_fwd_2, fused_attn_bwd_2 = _run_dot_product_attention(
+                dtype,
+                config,
+                "FusedAttention",
+                ckpt_attn,
+                qkv_layout,
+                workspace_opt,
+                pad_between_seqs,
+                is_training,
+            )
 
 
     # FlashAttention backend
