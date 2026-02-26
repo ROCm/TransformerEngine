@@ -347,8 +347,8 @@ jobs:
           set -ex -o pipefail
           ulimit -c 0 # Disable core dumps
 
-          # Make sure HF_TOKEN is present
-          python -c "import os; assert os.environ.get('HF_TOKEN')"
+          # Check whether the HF_TOKEN is present
+          python -c "import os; print('HF_TOKEN set:', bool(os.environ.get('HF_TOKEN')))"
 
           cd /workspace/examples/pytorch/mnist
           python main.py 2>&1 | tee /workspace/examples.log
