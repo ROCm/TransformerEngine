@@ -117,9 +117,9 @@ struct Runner{
 
 template <typename T, typename ALayout, typename BLayout, typename CLayout,
           ck_tile::memory_operation_enum MemOp, typename TileCfg>
-static bool run_grouped_impl(const transformer_engine::Tensor* const* A_use,
-                             const transformer_engine::Tensor* const* B_use,
-                             transformer_engine::Tensor* const* D,
+static bool run_grouped_impl(const NVTETensor* A_use,
+                             const NVTETensor* B_use,
+                             NVTETensor* D,
                              int group_num,
                              bool transA_use,
                              bool transB_use,
@@ -140,14 +140,21 @@ static bool run_grouped_impl(const transformer_engine::Tensor* const* A_use,
   descs.reserve(group_num);
 
   for (int i = 0; i < group_num; ++i) {
-    const auto& a = data_view(*A_use[i]);
-    const auto& b = data_view(*B_use[i]);
-    const auto& d = data_view(*D[i]);
+    const transformer_engine::Tensor* const A_te =
+        transformer_engine::convertNVTETensorCheck(A_use[i]);
+    const transformer_engine::Tensor* const B_te =
+        transformer_engine::convertNVTETensorCheck(B_use[i]);
+    transformer_engine::Tensor* D_te =
+        transformer_engine::convertNVTETensorCheck(D[i]);
+
+    const auto& a = data_view(*A_te);
+    const auto& b = data_view(*B_te);
+    const auto& d = data_view(*D_te);
 
     int64_t Ad0 = 0, Ad1 = 0, Bd0 = 0, Bd1 = 0, Dd0 = 0, Dd1 = 0;
-    if (!get_flat_2d_dims(*A_use[i], Ad0, Ad1) ||
-        !get_flat_2d_dims(*B_use[i], Bd0, Bd1) ||
-        !get_flat_2d_dims(*D[i],     Dd0, Dd1)) {
+    if (!get_flat_2d_dims(*A_te, Ad0, Ad1) ||
+        !get_flat_2d_dims(*B_te, Bd0, Bd1) ||
+        !get_flat_2d_dims(*D_te, Dd0, Dd1)) {
       NVTE_ERROR("ck_tile_grouped_gemm: expected all groups to be rank>=2 (2D or higher).");
       return false;
     }
@@ -215,21 +222,17 @@ static bool run_grouped_impl(const transformer_engine::Tensor* const* A_use,
 template <typename T, typename CLayout, ck_tile::memory_operation_enum MemOp>
 static inline bool dispatch_grouped(bool transA_use,
                                     bool transB_use,
-                                    const transformer_engine::Tensor* const* A_use,
-                                    const transformer_engine::Tensor* const* B_use,
-                                    transformer_engine::Tensor* const* D,
+                                    const NVTETensor* A_use,
+                                    const NVTETensor* B_use,
+                                    NVTETensor* D,
                                     int group_num,
                                     void* workspace,
                                     size_t workspace_bytes,
                                     hipStream_t stream) {
 
-  // Select tile config like Primus-Turbo for FP16/BF16:
-  //   N%256 -> 256x256x64
-  //   N%128 -> 256x128x64
-  //   else  -> 256x128x64 padding
-  // NOTE: We assume N is uniform across groups.
   int64_t ref_d0 = 0, ref_d1 = 0;
-  if (!get_flat_2d_dims(*D[0], ref_d0, ref_d1)) {
+  transformer_engine::Tensor* D_te = transformer_engine::convertNVTETensorCheck(D[0]);
+  if (!get_flat_2d_dims(*D_te, ref_d0, ref_d1)) {
     NVTE_ERROR("ck_tile_grouped_gemm: expected rank>=2 for D[0]");
     return false;
   }
@@ -249,6 +252,11 @@ static inline bool dispatch_grouped(bool transA_use,
     });
   };
 
+  // Select tile config like Primus-Turbo for FP16/BF16:
+  //   N%256 -> 256x256x64
+  //   N%128 -> 256x128x64
+  //   else  -> 256x128x64 padding
+  // NOTE: We assume N is uniform across groups.
   if ((N % 256) == 0) {
     return run_with_tilecfg(TileCfg_256x256x64{});
   } else if ((N % 128) == 0) {
@@ -274,17 +282,6 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
   if (group_num <= 0)
     return true;
 
-  // Convert A/B/D arrays into TE Tensor arrays
-  std::vector<const transformer_engine::Tensor*> A_te(group_num);
-  std::vector<const transformer_engine::Tensor*> B_te(group_num);
-  std::vector<transformer_engine::Tensor*>       D_te(group_num);
-
-  for (int i = 0; i < group_num; ++i) {
-    A_te[i] = transformer_engine::convertNVTETensorCheck(A[i]);
-    B_te[i] = transformer_engine::convertNVTETensorCheck(B[i]);
-    D_te[i] = transformer_engine::convertNVTETensorCheck(D[i]);
-  }
-
   // Workspace pointer + bytes
   void*  ws_ptr   = nullptr;
   size_t ws_bytes = 0;
@@ -298,12 +295,12 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
   // Normalize similar to upstream
   // See https://github.com/NVIDIA/TransformerEngine/blob/59f6f3876767d07045152bfae07b5dd4c54e1725/transformer_engine/common/gemm/cutlass_grouped_gemm.cu#L54-L68
   // I.e., swap A and B, as well as transa and transb.
-  const transformer_engine::Tensor* const* A_use = B_te.data();
-  const transformer_engine::Tensor* const* B_use = A_te.data();
+  const NVTETensor* A_use = B;
+  const NVTETensor* B_use = A;
   const bool transA_use = transB;
   const bool transB_use = transA;
 
-  const auto a_dtype = A_use[0]->dtype();
+  const auto a_dtype = transformer_engine::convertNVTETensorCheck(A_use[0])->dtype();
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(a_dtype, te_type, {
     using T = typename transformer_engine::grouped_gemm::TETypeToCKType<te_type>::type;
@@ -312,11 +309,11 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
       // FIXME: The accumulate path is currently disabled in nvte_multi_tensor_gemm
       // due to instability on MI325.
       return transformer_engine::grouped_gemm::dispatch_grouped<T, transformer_engine::grouped_gemm::RowMajor, ck_tile::memory_operation_enum::atomic_add>(transA_use, transB_use,
-                                     A_use, B_use, D_te.data(), group_num,
+                                     A_use, B_use, D, group_num,
                                      ws_ptr, ws_bytes, stream);
     } else {
       return transformer_engine::grouped_gemm::dispatch_grouped<T, transformer_engine::grouped_gemm::RowMajor, ck_tile::memory_operation_enum::set>(transA_use, transB_use,
-                                     A_use, B_use, D_te.data(), group_num,
+                                     A_use, B_use, D, group_num,
                                      ws_ptr, ws_bytes, stream);
     }
   });
