@@ -71,10 +71,12 @@ class QParams:
     """Quantization parameters.
     power_2_scale: use power of 2 scale parameter
     amax_epsilon: optional minimum value of abs max
+    random_hadamard_transform: whether to apply random Hadamard transform before quantization
     """
 
     power_2_scale: bool = False
     amax_epsilon: float = 0.0
+    random_hadamard_transform: bool = False
 
 
 class Recipe:
@@ -101,6 +103,10 @@ class Recipe:
     def float8_block_scaling(self):
         """Whether the given recipe is float8 blockwise scaling."""
         return isinstance(self, Float8BlockScaling)
+
+    def mxfp4(self):
+        """Whether the given recipe is MXFP4 block scaling."""
+        return isinstance(self, MXFP4BlockScaling)
 
 
 @dataclass()
@@ -366,4 +372,53 @@ class Float8BlockScaling(Recipe):
             f"fp8_gemm_wgrad={self.fp8_gemm_wgrad}, "
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}"
+        )
+
+
+@dataclass()
+class MXFP4BlockScaling(Recipe):
+    """
+    Use the MXFP4 block scaling strategy for FP4 training on AMD ROCm (gfx950+).
+
+    Tensors are quantized to FP4 E2M1 format with per-block E8M0 scaling factors.
+    Each group of 32 consecutive values shares one E8M0 scale. An optional
+    Hadamard transform can be applied before quantization to improve quality.
+
+    The quantized data layout may be shuffled for compatibility with AITER
+    FP4 GEMM kernels (gemm_a4w4_asm).
+
+    Parameters
+    ----------
+    disable_hadamard : bool, default = from env NVTE_MXFP4_DISABLE_HADAMARD
+        Disable the 16-point Hadamard transform before FP4 quantization.
+    shuffle_for_aiter : bool, default = True
+        Shuffle weight data layout for AITER gemm_a4w4_asm kernel compatibility.
+    """
+
+    disable_hadamard: bool = os.getenv("NVTE_MXFP4_DISABLE_HADAMARD", "0") == "1"
+    shuffle_for_aiter: bool = True
+
+    fp4_format: Format = Format.E4M3
+    fp8_dpa: bool = False
+    fp8_mha: bool = False
+
+    def __post_init__(self) -> None:
+        self.fp4_quant_fwd_inp = QParams(
+            random_hadamard_transform=not self.disable_hadamard,
+        )
+        self.fp4_quant_fwd_weight = QParams(
+            random_hadamard_transform=False,
+        )
+        self.fp4_quant_bwd_grad = QParams(
+            random_hadamard_transform=not self.disable_hadamard,
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"recipe_type={self.__class__.__name__}, "
+            f"disable_hadamard={self.disable_hadamard}, "
+            f"shuffle_for_aiter={self.shuffle_for_aiter}, "
+            f"fp4_quant_fwd_inp={self.fp4_quant_fwd_inp}, "
+            f"fp4_quant_fwd_weight={self.fp4_quant_fwd_weight}, "
+            f"fp4_quant_bwd_grad={self.fp4_quant_bwd_grad}"
         )

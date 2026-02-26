@@ -173,9 +173,13 @@ class _LayerNormLinear(torch.autograd.Function):
         backward_needs_input = is_grad_enabled and weight_requires_grad
         with_input_all_gather = parallel_mode == "column" and sequence_parallel
 
-        # MXFP4 detection
-        is_mxfp4_enabled = os.environ.get('FP4', 'false').lower() in ['true', '1', 'yes']
-        
+        # MXFP4 detection: recipe-driven or env-var fallback
+        from ..tensor.mxfp4_tensor import MXFP4Quantizer as _MXFP4Q
+        is_mxfp4_enabled = (
+            os.environ.get('FP4', 'false').lower() in ['true', '1', 'yes']
+            or isinstance(input_quantizer, _MXFP4Q)
+        )
+
         # Debug print for MXFP4 (rank 0 only)
         if is_mxfp4_enabled:
             debug_mxfp4 = os.environ.get('NVTE_MXFP4_DEBUG', '0').lower() in ['true', '1', 'yes']
@@ -1610,7 +1614,17 @@ class LayerNormLinear(TransformerEngineBaseModule):
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
         elif recipe.float8_block_scaling():
             self._customize_quantizers_float8_blockwise_scaling(fwd, recipe)
-        # elif other recipes (mxfp8, etc)
+        elif recipe.mxfp4():
+            self._customize_quantizers_mxfp4(fwd, recipe)
+
+    def _customize_quantizers_mxfp4(self, fwd: bool, recipe: Recipe) -> None:
+        """Customize quantizers for MXFP4 recipe + LayerNormLinear module."""
+        if fwd:
+            for idx in range(len(self.quantizers.get("scaling_fwd", []))):
+                q = self.quantizers["scaling_fwd"][idx]
+                is_weight = idx % 3 == 1
+                if is_weight:
+                    q.shuffle_B_matrix_for_aiter = recipe.shuffle_for_aiter
 
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
@@ -1807,45 +1821,71 @@ class LayerNormLinear(TransformerEngineBaseModule):
     def _get_quantizers(self, fp8_output, fp8_grad):
         if not self.fp8:
             return [None] * 7
-        
-        # MXFP4 detection
+
         is_mxfp4_enabled = os.environ.get('FP4', 'false').lower() in ['true', '1', 'yes']
-        
+
+        # Recipe-driven MXFP4 path (Mode 1: pure MXFP4 via recipe)
+        recipe = FP8GlobalStateManager.get_fp8_recipe()
+        if recipe is not None and recipe.mxfp4():
+            input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
+            (weight_quantizer,) = self._get_weight_quantizers()
+            output_quantizer = None
+            grad_input_quantizer = None
+            grad_weight_quantizer = None
+            grad_output_quantizer = None
+            if torch.is_grad_enabled():
+                grad_output_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]
+            return (
+                input_quantizer,
+                weight_quantizer,
+                output_quantizer,
+                grad_input_quantizer,
+                grad_weight_quantizer,
+                grad_output_quantizer,
+                None,
+            )
+
+        # Env-var MXFP4 path (Mode 2: FP8+healing fallback)
+        if is_mxfp4_enabled:
+            from ..tensor.mxfp4_tensor import MXFP4Quantizer
+            input_quantizer = MXFP4Quantizer(
+                rowwise=True, columnwise=False, shuffle_B_matrix_for_aiter=False,
+            )
+            weight_quantizer = MXFP4Quantizer(
+                rowwise=True, columnwise=True, shuffle_B_matrix_for_aiter=True,
+            )
+            grad_output_quantizer = MXFP4Quantizer(
+                rowwise=True, columnwise=False,
+            )
+            grad_output_quantizer_mxfp4 = MXFP4Quantizer(
+                rowwise=True, columnwise=False,
+            )
+            return (
+                input_quantizer,
+                weight_quantizer,
+                None,
+                None,
+                None,
+                grad_output_quantizer,
+                grad_output_quantizer_mxfp4,
+            )
+
+        # Standard FP8 quantizers
         grad_input_quantizer = None
         grad_weight_quantizer = None
         grad_output_quantizer = None
         output_quantizer = None
-        grad_output_quantizer_mxfp4 = None  # ADDED for MXFP4
-
-        if is_mxfp4_enabled:
-            from ..tensor.mxfp4_tensor import MXFP4Quantizer
-            input_quantizer = MXFP4Quantizer(
-                rowwise=True, columnwise=False, shuffle_B_matrix_for_aiter=False
-            )
-            weight_quantizer = MXFP4Quantizer(
-                rowwise=True, columnwise=True, shuffle_B_matrix_for_aiter=True
-            )
-            grad_output_quantizer = MXFP4Quantizer(
-                rowwise=True, columnwise=False
-            )
-            grad_output_quantizer_mxfp4 = MXFP4Quantizer(
-                rowwise=True, columnwise=False
-            )
-            # For MXFP4, grad_weight_quantizer is not used
-            grad_weight_quantizer = None
-        else:
-            input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
-            input_quantizer.internal = True
-            (weight_quantizer,) = self._get_weight_quantizers()
-            if fp8_output:
-                output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
-            if torch.is_grad_enabled():
-                grad_output_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]
-                grad_output_quantizer.internal = True
-                if fp8_grad:
-                    grad_input_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_INPUT1]
-                    grad_weight_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_WEIGHT1]
-
+        input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
+        input_quantizer.internal = True
+        (weight_quantizer,) = self._get_weight_quantizers()
+        if fp8_output:
+            output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
+        if torch.is_grad_enabled():
+            grad_output_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]
+            grad_output_quantizer.internal = True
+            if fp8_grad:
+                grad_input_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_INPUT1]
+                grad_weight_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_WEIGHT1]
         return (
             input_quantizer,
             weight_quantizer,
@@ -1853,7 +1893,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             grad_input_quantizer,
             grad_weight_quantizer,
             grad_output_quantizer,
-            grad_output_quantizer_mxfp4,  # ADDED for MXFP4
+            None,
         )
 
     def _get_debug_quantizers(self, fp8_output, fp8_grad):

@@ -17,14 +17,14 @@ from ..utils import devices_match
 
 from ._internal.mxfp4_tensor_base import MXFP4TensorBase, _FromMXFP4Func
 from .quantized_tensor import QuantizedTensor, Quantizer
-from transformer_engine.common.recipe import Recipe
+from transformer_engine.common.recipe import Recipe, MXFP4BlockScaling
 from typing import Union
 
 MXFP4_BLOCK_SCALING_SIZE = MXFP8_BLOCK_SCALING_SIZE
 
 aten = torch.ops.aten
 import os
-use_hadamard = os.environ.get("USE_HADAMARD", "0").lower() in ("1", "true", "yes")
+_default_use_hadamard = os.environ.get("USE_HADAMARD", "0").lower() in ("1", "true", "yes")
 
 class MXFP4Quantizer(Quantizer):
     """Builder class for FP4 tensors with MX block scaling
@@ -48,10 +48,12 @@ class MXFP4Quantizer(Quantizer):
         rowwise: bool = True,
         columnwise: bool = True,
         shuffle_B_matrix_for_aiter: bool = False,
+        use_hadamard: Optional[bool] = None,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = fp4_dtype
         self.shuffle_B_matrix_for_aiter = shuffle_B_matrix_for_aiter
+        self.use_hadamard = use_hadamard if use_hadamard is not None else _default_use_hadamard
         assert self.dtype == tex.DType.kFloat4E2M1, "Only E2M1 format supported for MXFP4"
 
     def update_quantized(
@@ -99,7 +101,7 @@ class MXFP4Quantizer(Quantizer):
                 shuffle_colwise_scale=True,
                 shuffle_rowwise_fp4=self.shuffle_B_matrix_for_aiter,
                 shuffle_colwise_fp4=self.shuffle_B_matrix_for_aiter,
-                use_hadamard=use_hadamard,
+                use_hadamard=self.use_hadamard,
             )
 
 
@@ -190,11 +192,8 @@ class MXFP4Quantizer(Quantizer):
         pass
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
-        """Returns recipe class that is compatible with this quantizer
-        
-        Returns None since MXFP4 is currently used without recipes (hardcoded path).
-        """
-        return None
+        """Returns recipe class that is compatible with this quantizer."""
+        return MXFP4BlockScaling
 
 
 class MXFP4Tensor(MXFP4TensorBase, QuantizedTensor):

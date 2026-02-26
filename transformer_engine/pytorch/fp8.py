@@ -24,6 +24,7 @@ from transformer_engine.common.recipe import (
     MXFP8BlockScaling,
     Float8CurrentScaling,
     Float8BlockScaling,
+    MXFP4BlockScaling,
 )
 
 from .constants import dist_group_type
@@ -65,6 +66,16 @@ def check_mxfp8_support() -> Tuple[bool, str]:
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
         return True, ""
     return False, "Device compute capability 10.0 or higher required for MXFP8 execution."
+
+
+def check_mxfp4_support() -> Tuple[bool, str]:
+    """Return if MXFP4 support is available (ROCm gfx950+)."""
+    if IS_HIP_EXTENSION:
+        gpu_arch = get_device_compute_capability()
+        if gpu_arch == (9, 5):
+            return True, ""
+        return False, "Gfx95x is required for MXFP4 execution."
+    return False, "MXFP4 is only supported on ROCm (AMD GPUs)."
 
 
 def check_fp8_block_scaling_support() -> Tuple[bool, str]:
@@ -164,6 +175,8 @@ class FP8GlobalStateManager:
     skip_fp8_weight_update_tensor = None
     mxfp8_available = None
     reason_for_no_mxfp8 = ""
+    mxfp4_available = None
+    reason_for_no_mxfp4 = ""
     fp8_block_scaling_available = None
     reason_for_no_fp8_block_scaling = None
 
@@ -191,6 +204,8 @@ class FP8GlobalStateManager:
         cls.skip_fp8_weight_update_tensor = None
         cls.mxfp8_available = None
         cls.reason_for_no_mxfp8 = ""
+        cls.mxfp4_available = None
+        cls.reason_for_no_mxfp4 = ""
         cls.fp8_block_scaling_available = None
         cls.reason_for_no_fp8_block_scaling = ""
 
@@ -219,6 +234,13 @@ class FP8GlobalStateManager:
         if cls.mxfp8_available is None:
             cls.mxfp8_available, cls.reason_for_no_mxfp8 = check_mxfp8_support()
         return cls.mxfp8_available, cls.reason_for_no_mxfp8
+
+    @classmethod
+    def is_mxfp4_available(cls) -> Tuple[bool, str]:
+        """Return if MXFP4 support is available (ROCm gfx950+)."""
+        if cls.mxfp4_available is None:
+            cls.mxfp4_available, cls.reason_for_no_mxfp4 = check_mxfp4_support()
+        return cls.mxfp4_available, cls.reason_for_no_mxfp4
 
     @classmethod
     def is_fp8_block_scaling_available(cls) -> Tuple[bool, str]:
@@ -505,6 +527,9 @@ class FP8GlobalStateManager:
             if isinstance(fp8_recipe, Float8BlockScaling):
                 fp8_block_available, reason_for_no_fp8_block = cls.is_fp8_block_scaling_available()
                 assert fp8_block_available, reason_for_no_fp8_block
+            if isinstance(fp8_recipe, MXFP4BlockScaling):
+                mxfp4_available, reason_for_no_mxfp4 = cls.is_mxfp4_available()
+                assert mxfp4_available, reason_for_no_mxfp4
 
     @classmethod
     def fp8_autocast_exit(cls, enabled: bool, _graph: bool) -> None:
@@ -861,6 +886,8 @@ class RecipeState(abc.ABC):
             cls = Float8CurrentScalingRecipeState
         elif recipe.float8_block_scaling():
             cls = Float8BlockScalingRecipeState
+        elif recipe.mxfp4():
+            cls = MXFP4BlockScalingRecipeState
         else:
             raise ValueError(f"{recipe.__class__.__name__} is not supported")
         return cls(
@@ -1108,3 +1135,63 @@ class Float8BlockScalingRecipeState(RecipeState):
                 ]
             )
         )
+
+
+class MXFP4BlockScalingRecipeState(RecipeState):
+    """Configuration for MXFP4 quantization.
+
+    MXFP4 quantization uses per-block current scaling with E8M0 scale factors
+    and does not require amax history or delayed state.
+    """
+
+    recipe: MXFP4BlockScaling
+    mode: str
+
+    def __init__(
+        self,
+        recipe: MXFP4BlockScaling,
+        *,
+        mode: str,
+        num_quantizers: int = 1,
+        device: Optional[torch.device] = None,
+    ) -> None:
+        self.recipe = recipe
+        self.mode = mode
+        self.num_quantizers = num_quantizers
+
+    def make_quantizers(self) -> list:
+        from .tensor.mxfp4_tensor import MXFP4Quantizer
+
+        if self.mode == "forward":
+
+            def _make_quantizer(idx: int) -> MXFP4Quantizer:
+                is_weight = idx % 3 == 1
+                qparams = (
+                    self.recipe.fp4_quant_fwd_weight
+                    if is_weight
+                    else self.recipe.fp4_quant_fwd_inp
+                )
+                return MXFP4Quantizer(
+                    rowwise=True,
+                    columnwise=True,
+                    shuffle_B_matrix_for_aiter=(
+                        self.recipe.shuffle_for_aiter if is_weight else False
+                    ),
+                    use_hadamard=qparams.random_hadamard_transform,
+                )
+
+            return [_make_quantizer(idx) for idx in range(self.num_quantizers)]
+
+        if self.mode == "backward":
+            qparams = self.recipe.fp4_quant_bwd_grad
+            return [
+                MXFP4Quantizer(
+                    rowwise=True,
+                    columnwise=True,
+                    shuffle_B_matrix_for_aiter=False,
+                    use_hadamard=qparams.random_hadamard_transform,
+                )
+                for _ in range(self.num_quantizers)
+            ]
+
+        raise RuntimeError(f"Unexpected recipe mode ({self.mode})")
