@@ -1054,17 +1054,23 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.fp8_meta["num_gemms"] = num_gemms
             self.fp8_meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
 
-            # Set FP8_MAX per tensor according to recipe
-            self.fp8_meta["fp8_max_fwd"] = self.fp8_meta["recipe"].fp8_format.value.max_fwd
-            self.fp8_meta["fp8_max_bwd"] = self.fp8_meta["recipe"].fp8_format.value.max_bwd
+            recipe = self.fp8_meta["recipe"]
+            if recipe.mxfp4():
+                self.fp8_meta["fp8_max_fwd"] = recipe.fp4_format.value.max_fwd
+                self.fp8_meta["fp8_max_bwd"] = recipe.fp4_format.value.max_bwd
+            else:
+                self.fp8_meta["fp8_max_fwd"] = recipe.fp8_format.value.max_fwd
+                self.fp8_meta["fp8_max_bwd"] = recipe.fp8_format.value.max_bwd
 
             # Allocate scales and amaxes
-            self.init_fp8_meta_tensors(self.fp8_meta["recipe"])
+            self.init_fp8_meta_tensors(recipe)
             self.fp8_initialized = True
 
             self.fp8_meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
             if self.fp8_meta["recipe"].mxfp8():  
                 self.keep_fp8_weight_transpose_cache = True 
+            if self.fp8_meta["recipe"].mxfp4():
+                self.keep_fp8_weight_transpose_cache = True
 
         _current_recipe = self.fp8_meta["recipe"]
         if _original_recipe is not None and not (
