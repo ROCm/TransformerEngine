@@ -1636,14 +1636,19 @@ class Linear(TransformerEngineBaseModule):
         # Recipe-driven MXFP4 path (Mode 1: pure MXFP4 via recipe)
         recipe = FP8GlobalStateManager.get_fp8_recipe()
         if recipe is not None and recipe.mxfp4():
+            from ..tensor.mxfp4_tensor import MXFP4Quantizer as _MXFP4Q
             input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
             (weight_quantizer,) = self._get_weight_quantizers()
             output_quantizer = None
             grad_input_quantizer = None
             grad_weight_quantizer = None
             grad_output_quantizer = None
+            grad_output_quantizer_mxfp4 = None
             if torch.is_grad_enabled():
                 grad_output_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]
+                grad_output_quantizer_mxfp4 = _MXFP4Q(
+                    rowwise=True, columnwise=False,
+                )
             return (
                 input_quantizer,
                 weight_quantizer,
@@ -1651,7 +1656,7 @@ class Linear(TransformerEngineBaseModule):
                 grad_input_quantizer,
                 grad_weight_quantizer,
                 grad_output_quantizer,
-                None,
+                grad_output_quantizer_mxfp4,
             )
 
         # Env-var MXFP4 path (Mode 2: FP8+healing fallback)

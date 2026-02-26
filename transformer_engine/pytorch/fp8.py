@@ -1166,30 +1166,22 @@ class MXFP4BlockScalingRecipeState(RecipeState):
 
             def _make_quantizer(idx: int) -> MXFP4Quantizer:
                 is_weight = idx % 3 == 1
-                qparams = (
-                    self.recipe.fp4_quant_fwd_weight
-                    if is_weight
-                    else self.recipe.fp4_quant_fwd_inp
-                )
                 return MXFP4Quantizer(
                     rowwise=True,
                     columnwise=is_weight,
                     shuffle_B_matrix_for_aiter=(
                         self.recipe.shuffle_for_aiter if is_weight else False
                     ),
-                    use_hadamard=qparams.random_hadamard_transform,
                 )
 
             return [_make_quantizer(idx) for idx in range(self.num_quantizers)]
 
         if self.mode == "backward":
-            qparams = self.recipe.fp4_quant_bwd_grad
             return [
                 MXFP4Quantizer(
                     rowwise=True,
                     columnwise=False,
                     shuffle_B_matrix_for_aiter=False,
-                    use_hadamard=qparams.random_hadamard_transform,
                 )
                 for _ in range(self.num_quantizers)
             ]
