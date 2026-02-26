@@ -219,53 +219,6 @@ static bool run_grouped_impl(const NVTETensor* A_use,
   return true;
 }
 
-template <typename T, typename CLayout, ck_tile::memory_operation_enum MemOp>
-static inline bool dispatch_grouped(bool transA_use,
-                                    bool transB_use,
-                                    const NVTETensor* A_use,
-                                    const NVTETensor* B_use,
-                                    NVTETensor* D,
-                                    int group_num,
-                                    void* workspace,
-                                    size_t workspace_bytes,
-                                    hipStream_t stream) {
-
-  int64_t ref_d0 = 0, ref_d1 = 0;
-  transformer_engine::Tensor* D_te = transformer_engine::convertNVTETensorCheck(D[0]);
-  if (!get_flat_2d_dims(*D_te, ref_d0, ref_d1)) {
-    NVTE_ERROR("ck_tile_grouped_gemm: expected rank>=2 for D[0]");
-    return false;
-  }
-  const ck_tile::index_t N = static_cast<ck_tile::index_t>(ref_d1);
-
-  auto run_with_tilecfg = [&](auto tile_tag) -> bool {
-    using TileCfgSel = decltype(tile_tag);
-    TRANSFORMER_ENGINE_SWITCH_CONDITION(transA_use, kTransA, {
-      using ALayout = std::conditional_t<kTransA, ColMajor, RowMajor>;
-
-      TRANSFORMER_ENGINE_SWITCH_CONDITION(transB_use, kTransB, {
-        using BLayout = std::conditional_t<kTransB, ColMajor, RowMajor>;
-
-        return run_grouped_impl<T, ALayout, BLayout, CLayout, MemOp, TileCfgSel>(
-            A_use, B_use, D, group_num, kTransA, kTransB, workspace, workspace_bytes, stream);
-      });
-    });
-  };
-
-  // Select tile config like Primus-Turbo for FP16/BF16:
-  //   N%256 -> 256x256x64
-  //   N%128 -> 256x128x64
-  //   else  -> 256x128x64 padding
-  // NOTE: We assume N is uniform across groups.
-  if ((N % 256) == 0) {
-    return run_with_tilecfg(TileCfg_256x256x64{});
-  } else if ((N % 128) == 0) {
-    return run_with_tilecfg(TileCfg_256x128x64{});
-  } else {
-    return run_with_tilecfg(TileCfg_256x128x64_padding{});
-  }
-}
-
 }  // namespace grouped_gemm
 }  // namespace transformer_engine
 
@@ -282,14 +235,16 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
   if (group_num <= 0)
     return true;
 
+  using namespace transformer_engine;
+  using namespace transformer_engine::grouped_gemm;
+
   // Workspace pointer + bytes
   void*  ws_ptr   = nullptr;
   size_t ws_bytes = 0;
   if (workspace) {
-    auto* ws_te = transformer_engine::convertNVTETensorCheck(*workspace);
+    auto* ws_te = convertNVTETensorCheck(*workspace);
     ws_ptr   = ws_te->data.dptr;
-    ws_bytes = ws_te->data.numel() *
-               transformer_engine::typeToSize(ws_te->data.dtype);
+    ws_bytes = ws_te->data.numel() * typeToSize(ws_te->data.dtype);
   }
 
   // Normalize similar to upstream
@@ -300,21 +255,53 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
   const bool transA_use = transB;
   const bool transB_use = transA;
 
-  const auto a_dtype = transformer_engine::convertNVTETensorCheck(A_use[0])->dtype();
+  const auto a_dtype = convertNVTETensorCheck(A_use[0])->dtype();
+
+  // Get N from D[0] (assume uniform N across groups)
+  int64_t ref_d0 = 0, ref_d1 = 0;
+  Tensor* D0_te = convertNVTETensorCheck(D[0]);
+  if (!get_flat_2d_dims(*D0_te, ref_d0, ref_d1)) {
+    NVTE_ERROR("ck_tile_grouped_gemm: expected rank>=2 for D[0]");
+    return false;
+  }
+  const ck_tile::index_t N = static_cast<ck_tile::index_t>(ref_d1);
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(a_dtype, te_type, {
-    using T = typename transformer_engine::grouped_gemm::TETypeToCKType<te_type>::type;
+    using T = typename TETypeToCKType<te_type>::type;
 
-    if (accumulate) {
-      // FIXME: The accumulate path is currently disabled in nvte_multi_tensor_gemm
-      // due to instability on MI325.
-      return transformer_engine::grouped_gemm::dispatch_grouped<T, transformer_engine::grouped_gemm::RowMajor, ck_tile::memory_operation_enum::atomic_add>(transA_use, transB_use,
-                                     A_use, B_use, D, group_num,
-                                     ws_ptr, ws_bytes, stream);
+    auto run_with_tilecfg = [&](auto tile_tag) -> bool {
+      using TileCfgSel = decltype(tile_tag);
+
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(transA_use, kTransA, {
+        using ALayout = std::conditional_t<kTransA, ColMajor, RowMajor>;
+
+        TRANSFORMER_ENGINE_SWITCH_CONDITION(transB_use, kTransB, {
+          using BLayout = std::conditional_t<kTransB, ColMajor, RowMajor>;
+
+          if (accumulate) {
+            return run_grouped_impl<T, ALayout, BLayout, RowMajor,
+                                  ck_tile::memory_operation_enum::atomic_add, TileCfgSel>(
+                A_use, B_use, D, group_num, kTransA, kTransB, ws_ptr, ws_bytes, stream);
+          } else {
+            return run_grouped_impl<T, ALayout, BLayout, RowMajor,
+                                  ck_tile::memory_operation_enum::set, TileCfgSel>(
+                A_use, B_use, D, group_num, kTransA, kTransB, ws_ptr, ws_bytes, stream);
+          }
+        });
+      });
+    };
+
+    // Select tile config like Primus-Turbo for FP16/BF16:
+    //   N%256 -> 256x256x64
+    //   N%128 -> 256x128x64
+    //   else  -> 256x128x64 padding
+    // NOTE: We assume N is uniform across groups.
+    if ((N % 256) == 0) {
+      return run_with_tilecfg(TileCfg_256x256x64{});
+    } else if ((N % 128) == 0) {
+      return run_with_tilecfg(TileCfg_256x128x64{});
     } else {
-      return transformer_engine::grouped_gemm::dispatch_grouped<T, transformer_engine::grouped_gemm::RowMajor, ck_tile::memory_operation_enum::set>(transA_use, transB_use,
-                                     A_use, B_use, D, group_num,
-                                     ws_ptr, ws_bytes, stream);
+      return run_with_tilecfg(TileCfg_256x128x64_padding{});
     }
   });
 }
