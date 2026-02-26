@@ -1173,7 +1173,7 @@ class MXFP4BlockScalingRecipeState(RecipeState):
                 )
                 return MXFP4Quantizer(
                     rowwise=True,
-                    columnwise=True,
+                    columnwise=is_weight,
                     shuffle_B_matrix_for_aiter=(
                         self.recipe.shuffle_for_aiter if is_weight else False
                     ),
@@ -1187,7 +1187,7 @@ class MXFP4BlockScalingRecipeState(RecipeState):
             return [
                 MXFP4Quantizer(
                     rowwise=True,
-                    columnwise=True,
+                    columnwise=False,
                     shuffle_B_matrix_for_aiter=False,
                     use_hadamard=qparams.random_hadamard_transform,
                 )
