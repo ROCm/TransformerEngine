@@ -40,10 +40,10 @@ std::ostream* get_ck_log_stream() {
       std::string log_dir_str(env_p);
       if (!log_dir_str.empty() && log_dir_str != "0") {
         if (log_dir_str == "1") {
-          log_stream = static_cast<std::ostream*>(&std::cout);
+          log_stream = &std::cout;
         }
-        if (open_ck_fused_attn_log_file(log_file, "ck_fused_attn", log_dir_str)) {
-          log_stream = static_cast<std::ostream*>(&log_file);
+        else if (open_ck_fused_attn_log_file(log_file, "ck_fused_attn", log_dir_str)) {
+          log_stream = &log_file;
         }
       }
     }
