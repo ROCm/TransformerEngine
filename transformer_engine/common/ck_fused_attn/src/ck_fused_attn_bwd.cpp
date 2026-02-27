@@ -4,7 +4,6 @@
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
-#include <fstream>
 #include <iostream>
 #include <cstdlib>
 #include <stdexcept>
