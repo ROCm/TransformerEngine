@@ -339,11 +339,16 @@ jobs:
       - name: Run Examples
         id: examples-tests
         continue-on-error: true
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          docker exec te-runner bash -c "$(cat <<'EOF'
+          docker exec -e HF_TOKEN="$HF_TOKEN" te-runner bash -c "$(cat <<'EOF'
           #!/usr/bin/bash
           set -ex -o pipefail
           ulimit -c 0 # Disable core dumps
+
+          # Check whether the HF_TOKEN is present
+          python -c "import os; print('HF_TOKEN set:', bool(os.environ.get('HF_TOKEN')))"
 
           cd /workspace/examples/pytorch/mnist
           python main.py 2>&1 | tee /workspace/examples.log

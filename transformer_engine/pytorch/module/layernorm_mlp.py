@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -83,8 +83,7 @@ from ..export import is_in_onnx_export_mode, assert_warmed_up
 from ...debug.pytorch.debug_state import TEDebugState
 
 if IS_HIP_EXTENSION:
-    from ..triton_kernels.layernorm import te_layernorm_bwd_triton
-    from ..triton_kernels.rmsnorm import te_rmsnorm_bwd_triton
+    from ..triton_kernels.norms_common import te_layernorm_bwd_triton, te_rmsnorm_bwd_triton
 
 __all__ = ["LayerNormMLP"]
 
