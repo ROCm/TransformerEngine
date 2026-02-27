@@ -1301,8 +1301,7 @@ def test_transformer_layer(
                 RoPE,
                 is_training,
             )
-        elif len(fused_attn_backends) == 2:
-            os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
+        elif IS_HIP_EXTENSION and len(fused_attn_backends) == 2:
             os.environ["NVTE_FUSED_ATTN_CK"] = "1"
             os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "0"
             fused_attn_fwd, fused_attn_bwd = _run_transformer_layer(
@@ -1316,7 +1315,6 @@ def test_transformer_layer(
                 RoPE,
                 is_training,
             )
-            os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
             os.environ["NVTE_FUSED_ATTN_CK"] = "0"
             os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "1"
             fused_attn_fwd_1, fused_attn_bwd_1 = _run_transformer_layer(
