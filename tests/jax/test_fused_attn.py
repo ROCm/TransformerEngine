@@ -1262,8 +1262,9 @@ def test_jax_new_rng():
 @pytest.fixture
 def ck_smallseq_env(monkeypatch):
     """Enable CK small-seq path and disable XLA GPU graphs for these tests."""
+    if "xla_gpu_graph_level=0" not in os.environ.get("XLA_FLAGS", ""):
+        pytest.skip("Run with XLA_FLAGS='--xla_gpu_graph_level=0' pytest ...")
     monkeypatch.setenv("NVTE_FUSED_ATTN_CK_SMALLSEQ", "1")
-    monkeypatch.setenv("XLA_FLAGS", "--xla_gpu_graph_level=0")
     yield
 
 @pytest.mark.parametrize("dtype", [jnp.bfloat16, jnp.float16], ids=["BF16", "FP16"])
