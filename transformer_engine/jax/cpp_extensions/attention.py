@@ -372,10 +372,14 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                         softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
                     else:
                         batch_size = reduce(operator.mul, batch_shape)
-                        old_ck_softmax_size = (batch_size * attn_heads * q_max_seqlen * 1)
-                        possible_ck_smallseq_softmax_size = (batch_size * attn_heads * 
-                                                             q_max_seqlen * min(kv_max_seqlen, 16) * 2) # 2 bytes for bf16/fp16
-                        if old_ck_softmax_size >= possible_ck_smallseq_softmax_size:
+                        ck_standard_softmax_aux_size = (
+                            batch_size * attn_heads * q_max_seqlen * 1
+                        )
+                        ck_smallseq_softmax_aux_size = (
+                            batch_size * attn_heads * q_max_seqlen
+                            * min(kv_max_seqlen, 16) * 2
+                        )  # 2 bytes for bf16/fp16
+                        if ck_standard_softmax_aux_size >= ck_smallseq_softmax_aux_size:
                             softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
                             softmax_dtype = dtypes.canonicalize_dtype(q_dtype)
                         else:
@@ -388,9 +392,11 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 raise ValueError(f"Unsupported {backend=}")
 
         if os.environ.get("NVTE_LOG_CK_CONFIG"):
-            print(
-                "attn_fwd(ck small-seq JAX abstract): "
-                f"batch_shape: {batch_shape}, softmax_shape: {softmax_shape}, softmax_dtype: {softmax_dtype}"
+            jax.debug.print(
+                "attn_fwd(ck small-seq JAX abstract): batch_shape: {}, softmax_shape: {}, softmax_dtype: {}",
+                batch_shape,
+                softmax_shape,
+                softmax_dtype,
             )
         
         softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=softmax_dtype)

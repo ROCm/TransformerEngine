@@ -849,18 +849,11 @@ void fused_attn_smallseq_fwd(size_t b,
               << (qkv_dtype == DType::kBFloat16 ? "BF16" : qkv_dtype == DType::kFloat16 ? "FP16" : "?")
               << std::endl;
   }
-  (void)h_kv;
-  (void)d_qk;
-  (void)d_v;
-  (void)is_training;
-  (void)rng_seed;
-  (void)rng_offset;
 
   float sqr_dk_scale = attn_scale;
   hipStream_t hip_stream = reinterpret_cast<hipStream_t>(stream);
 
-  if (qkv_dtype == DType::kBFloat16) {
-    using T = hip_bfloat16;
+  TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(qkv_dtype, T,
     const T* Q_ptr         = static_cast<const T*>(devPtrQ);
     const T* K_ptr         = static_cast<const T*>(devPtrK);
     const T* V_ptr         = static_cast<const T*>(devPtrV);
@@ -891,46 +884,8 @@ void fused_attn_smallseq_fwd(size_t b,
       default:
         NVTE_ERROR("Unsupported max_seqlen_kv for small-seq: max_seqlen_kv <= 16.");
     }
-  } else if (qkv_dtype == DType::kFloat16) {
-    using T = __half;
-    const T* Q_ptr         = static_cast<const T*>(devPtrQ);
-    const T* K_ptr         = static_cast<const T*>(devPtrK);
-    const T* V_ptr         = static_cast<const T*>(devPtrV);
-    T* O_ptr               = static_cast<T*>(devPtrO);
-    T* attn_workspace      = static_cast<T*>(attn_weights_buffer);
-    const int* cu_kv       = static_cast<const int*>(devPtrCuSeqlensKV);
-    const int* cu_kv_p     = static_cast<const int*>(devPtrSeqOffsetsKV);
-    const T* dropout_mask = nullptr;
-    int bi = static_cast<int>(b);
-    int hi = static_cast<int>(h_q);
+  );
 
-    switch (max_seqlen_kv) {
-      SMALLSEQ_DISPATCH_FWD_CASE(2)
-      SMALLSEQ_DISPATCH_FWD_CASE(3)
-      SMALLSEQ_DISPATCH_FWD_CASE(4)
-      SMALLSEQ_DISPATCH_FWD_CASE(5)
-      SMALLSEQ_DISPATCH_FWD_CASE(6)
-      SMALLSEQ_DISPATCH_FWD_CASE(7)
-      SMALLSEQ_DISPATCH_FWD_CASE(8)
-      SMALLSEQ_DISPATCH_FWD_CASE(9)
-      SMALLSEQ_DISPATCH_FWD_CASE(10)
-      SMALLSEQ_DISPATCH_FWD_CASE(11)
-      SMALLSEQ_DISPATCH_FWD_CASE(12)
-      SMALLSEQ_DISPATCH_FWD_CASE(13)
-      SMALLSEQ_DISPATCH_FWD_CASE(14)
-      SMALLSEQ_DISPATCH_FWD_CASE(15)
-      SMALLSEQ_DISPATCH_FWD_CASE(16)
-      default:
-        NVTE_ERROR("Unsupported max_seqlen_kv for small-seq: max_seqlen_kv <= 16.");
-    }
-  } else {
-    NVTE_ERROR("small-seq path supports only BF16 and FP16.");
-  }
-
-  if (workspace_size) {
-    size_t bwd_ws = fused_attn_smallseq_bwd_workspace_size(b, h_q, max_seqlen_kv, qkv_dtype);
-    *workspace_size = (bwd_ws > 8u) ? bwd_ws : 8u;
-  }
 }
 
 void fused_attn_smallseq_bwd(size_t b,
@@ -957,7 +912,8 @@ void fused_attn_smallseq_bwd(size_t b,
                              size_t* workspace_size,
                              cudaStream_t stream)
 {
-  if (std::getenv("NVTE_FUSED_ATTN_CK_SMALLSEQ")) {
+  const char* nvte_smallseq = std::getenv("NVTE_LOG_CK_CONFIG");
+  if (nvte_smallseq && std::string(nvte_smallseq) == "1") {
     std::cout << std::endl << "attn_bwd(ck small-seq kernel): ";
     std::cout << "b: " << b << ", ";
     std::cout << "h_q: " << h_q << ", ";
@@ -971,15 +927,11 @@ void fused_attn_smallseq_bwd(size_t b,
               << (qkv_dtype == DType::kBFloat16 ? "BF16" : qkv_dtype == DType::kFloat16 ? "FP16" : "?")
               << std::endl;
   }
-  (void)h_kv;
-  (void)d_qk;
-  (void)d_v;
 
   float sqr_dk_scale = attn_scale;
   hipStream_t hip_stream = reinterpret_cast<hipStream_t>(stream);
 
-  if (qkv_dtype == DType::kBFloat16) {
-    using T = hip_bfloat16;
+  TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(qkv_dtype, T,
     const T* Q_ptr      = static_cast<const T*>(devPtrQ);
     const T* K_ptr      = static_cast<const T*>(devPtrK);
     const T* V_ptr      = static_cast<const T*>(devPtrV);
@@ -1015,49 +967,7 @@ void fused_attn_smallseq_bwd(size_t b,
       default:
         NVTE_ERROR("Unsupported max_seqlen_kv for small-seq: max_seqlen_kv <= 16.");
     }
-  } else if (qkv_dtype == DType::kFloat16) {
-    using T = __half;
-    const T* Q_ptr      = static_cast<const T*>(devPtrQ);
-    const T* K_ptr      = static_cast<const T*>(devPtrK);
-    const T* V_ptr      = static_cast<const T*>(devPtrV);
-    const T* O_ptr      = static_cast<const T*>(devPtrO);
-    const T* dO_ptr     = static_cast<const T*>(devPtrdO);
-    const T* attn_ptr   = static_cast<const T*>(attn_weights);
-    T* dQ_ptr           = static_cast<T*>(devPtrdQ);
-    T* dK_ptr           = static_cast<T*>(devPtrdK);
-    T* dV_ptr           = static_cast<T*>(devPtrdV);
-    T* workspace_ptr   = static_cast<T*>(workspace);
-    const int* cu_kv    = static_cast<const int*>(devPtrCuSeqlensKV);
-    const int* cu_kv_p  = static_cast<const int*>(devPtrSeqOffsetsKV);
-    const T* dropout_mask = nullptr;
-    int bi = static_cast<int>(b);
-    int hi = static_cast<int>(h_q);
-
-    switch (max_seqlen_kv) {
-      SMALLSEQ_DISPATCH_BWD_CASE(2)
-      SMALLSEQ_DISPATCH_BWD_CASE(3)
-      SMALLSEQ_DISPATCH_BWD_CASE(4)
-      SMALLSEQ_DISPATCH_BWD_CASE(5)
-      SMALLSEQ_DISPATCH_BWD_CASE(6)
-      SMALLSEQ_DISPATCH_BWD_CASE(7)
-      SMALLSEQ_DISPATCH_BWD_CASE(8)
-      SMALLSEQ_DISPATCH_BWD_CASE(9)
-      SMALLSEQ_DISPATCH_BWD_CASE(10)
-      SMALLSEQ_DISPATCH_BWD_CASE(11)
-      SMALLSEQ_DISPATCH_BWD_CASE(12)
-      SMALLSEQ_DISPATCH_BWD_CASE(13)
-      SMALLSEQ_DISPATCH_BWD_CASE(14)
-      SMALLSEQ_DISPATCH_BWD_CASE(15)
-      SMALLSEQ_DISPATCH_BWD_CASE(16)
-      default:
-        NVTE_ERROR("Unsupported max_seqlen_kv for small-seq: max_seqlen_kv <= 16.");
-    }
-  } else {
-    NVTE_ERROR("small-seq path supports only BF16 and FP16.");
-  }
-
-  if (workspace_size)
-    *workspace_size = fused_attn_smallseq_bwd_workspace_size(b, h_q, max_seqlen_kv, qkv_dtype);
+  );
 }
 
 }  // namespace fused_attn_rocm
