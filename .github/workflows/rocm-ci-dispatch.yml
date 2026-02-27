@@ -1,10 +1,13 @@
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+
 name: PR Automatic CI
 
 on:
   pull_request:
     branches:
       - 'dev'
-      - 'release_v1.**_rocm'
       - 'release_v2.**_rocm'
     types: [ labeled, unlabeled, synchronize, reopened ]
 
@@ -44,7 +47,7 @@ jobs:
 
             // Check if the removed level was higher than the current level
             const currentLevel = level ? Number(level) : 0;
-            const removedWasHighest = removedLevel > 0 && removedLevel > currentLevel;
+            const removedWasHighest = removedLevel > currentLevel;
 
             // Set outputs for use in later jobs
             core.setOutput('test_level', level);
@@ -63,6 +66,9 @@ jobs:
           CURRENT_LEVEL: ${{ needs.determine_level.outputs.test_level }}
         with:
           script: |
+            // Nothing to cancel if newly re-opened
+            if (action === 'reopened'){return;}
+
             // Cancel other runs for the same PR that are queued or
             // in progress and have a lower CI level
             const prNumber = context.payload.pull_request.number;
@@ -93,8 +99,13 @@ jobs:
             const toCancel = runs.data.workflow_runs.filter(run => {
               const prMatch = (run.pull_requests || []).some(pr => pr.number === prNumber);
               const active = run.status === 'queued' || run.status === 'in_progress';
+              // In general, don't cancel yourself or inactive/irrelevant PRs
+              if (run.id === currentRunId || !(prMatch && active)) {
+                return false;
+              }
+              // Always cancel others when updating commits
               if (action === 'synchronize') {
-                return prMatch && active && run.id !== currentRunId;
+                return true;
               }
               // For labeled/unlabeled actions, compare the CI levels
               const title = run.display_title || '';
@@ -102,12 +113,10 @@ jobs:
               const runLevel = match ? Number(match[1]) : 0;
               // If a label was added, cancel runs with a lower level than the added label
               if (action === 'labeled') {
-                const isLowerThanAdded = runLevel > 0 && runLevel < addedLevel;
-                return prMatch && active && isLowerThanAdded && run.id !== currentRunId;
+                return runLevel < addedLevel;
               }
               // If a label was removed, cancel runs with a lower level than the current level
-              const isLower = runLevel > 0 && runLevel < currentLevel;
-              return prMatch && active && isLower && run.id !== currentRunId;
+              return runLevel < currentLevel;
             });
 
             // Cancel the identified runs

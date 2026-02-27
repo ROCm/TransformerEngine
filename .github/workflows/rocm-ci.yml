@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-name: Test and Build Branch
+name: Build and Test Branch
 
 on:
   push:
