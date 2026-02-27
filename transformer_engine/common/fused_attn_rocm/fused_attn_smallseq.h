@@ -4,7 +4,7 @@
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
-/*! \file fused_attn_smallseq.hpp
+/*! \file fused_attn_smallseq.h
  *  \brief Unfused small-seq (varlen) attention for ROCm: seq_q=1, max_seqlen_kv<=16, THD only.
  */
 

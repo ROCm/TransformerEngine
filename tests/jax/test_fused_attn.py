@@ -329,7 +329,7 @@ class FusedAttnRunner:
     # generating zero-length ragged tensors. This setting adjusts the test to avoid the zero-length cases.
     def _get_max_segments_per_sequence(self):
         if self.qkv_layout.is_thd():
-            if 90400 <= get_cudnn_version() < 90500:
+            if 90400 <= get_cudnn_version() < 90500 or self.max_seqlen_q == 1:
                 return self.num_segments_per_seq
             else:
                 # +1 for testing runtime_segments < max_segments
@@ -539,30 +539,58 @@ class FusedAttnRunner:
             return segment_ids, segment_pos, segment_pad
 
         if self.qkv_layout.is_thd():
-            # For very small sequence lengths, use 1 segment to avoid max_segment_size=0 in
-            # generate_random_segment_ids (which would cause rng.integers(1, 1) to fail).
-            min_seqlen = min(self.max_seqlen_q, self.max_seqlen_kv)
-            self.num_segments_per_seq = 2 if min_seqlen > 1 else 1
-            self.segment_ids_q, self.segment_pos_q, self.pad_q = generate_random_segment_ids(
-                self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
-            )
-            self.seqlens_q, self.offsets_q = get_seqlens_and_offsets(self.segment_ids_q)
-            # TODO(rewang): record only self attention and find the reason of cross attention
-            if self.qkv_layout == QKVLayout.T3HD or self.max_seqlen_q == self.max_seqlen_kv:
-                self.segment_ids_kv = self.segment_ids_q
-                self.segment_pos_kv = self.segment_pos_q
-                self.pad_kv = self.pad_q
-            else:
-                # Force kv_len >= q_len for swa, otherwise, cuDNN kernels don't support
-                min_segment_len = None if self.window_size is None else self.seqlens_q
-                self.segment_ids_kv, self.segment_pos_kv, self.pad_kv = generate_random_segment_ids(
-                    self.batch_size,
-                    self.max_seqlen_kv,
-                    self.num_segments_per_seq,
-                    seed=2024,
-                    min_segment_len=min_segment_len,
+            if self.max_seqlen_q == 1:
+                self.num_segments_per_seq = 1
+                # Q: deterministic — one segment of length 1 per batch -> cu_seqlen [0,1,2,...,batch_size]
+                self.segment_ids_q = jnp.ones((self.batch_size, self.max_seqlen_q), dtype=jnp.int32)
+                self.segment_pos_q = jnp.zeros((self.batch_size, self.max_seqlen_q), dtype=jnp.int32)
+                self.pad_q = jnp.zeros((self.batch_size, self.max_seqlen_q), dtype=jnp.int32)
+                self.seqlens_q = jnp.ones((self.batch_size, 1), dtype=jnp.int32)
+                self.offsets_q = jnp.concatenate(
+                    [
+                        jnp.arange(self.batch_size, dtype=jnp.int32)[:, None],
+                        jnp.full((self.batch_size, 1), -1, dtype=jnp.int32),
+                    ],
+                    axis=1,
                 )
-            self.seqlens_kv, self.offsets_kv = get_seqlens_and_offsets(self.segment_ids_kv)
+
+                # KV: one segment per batch (num_segments_per_seq=1) to match smallseq kernel
+                # expectations (batch_size == max_tokens_q, cu_seqlens of size batch_size+1).
+                min_segment_len = None if self.window_size is None else self.seqlens_q
+                self.segment_ids_kv, self.segment_pos_kv, self.pad_kv = (
+                    generate_random_segment_ids(
+                        self.batch_size,
+                        self.max_seqlen_kv,
+                        self.num_segments_per_seq,  # 1 for s_q=1 path
+                        seed=2024,
+                        min_segment_len=min_segment_len,
+                    )
+                )
+                self.seqlens_kv, self.offsets_kv = get_seqlens_and_offsets(
+                    self.segment_ids_kv
+                )
+            else:
+                self.num_segments_per_seq = 2
+                self.segment_ids_q, self.segment_pos_q, self.pad_q = generate_random_segment_ids(
+                    self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
+                )
+                self.seqlens_q, self.offsets_q = get_seqlens_and_offsets(self.segment_ids_q)
+                # TODO(rewang): record only self attention and find the reason of cross attention
+                if self.qkv_layout == QKVLayout.T3HD or self.max_seqlen_q == self.max_seqlen_kv:
+                    self.segment_ids_kv = self.segment_ids_q
+                    self.segment_pos_kv = self.segment_pos_q
+                    self.pad_kv = self.pad_q
+                else:
+                    # Force kv_len >= q_len for swa, otherwise, cuDNN kernels don't support
+                    min_segment_len = None if self.window_size is None else self.seqlens_q
+                    self.segment_ids_kv, self.segment_pos_kv, self.pad_kv = generate_random_segment_ids(
+                        self.batch_size,
+                        self.max_seqlen_kv,
+                        self.num_segments_per_seq,
+                        seed=2024,
+                        min_segment_len=min_segment_len,
+                    )
+                self.seqlens_kv, self.offsets_kv = get_seqlens_and_offsets(self.segment_ids_kv)
         else:
             self.num_segments_per_seq = 1
             self.segment_ids_q, self.pad_q = gen_valid(
@@ -1229,16 +1257,16 @@ def test_jax_new_rng():
     [
         pytest.param(30720, 1, 2, 16, 16, 128, 128, jnp.bfloat16,
                      id="30720-1-2-16-16-128-128-BF16"),
-        # pytest.param(30720, 1, 4, 16, 16, 128, 128, jnp.bfloat16,
-        #              id="30720-1-4-16-16-128-128-BF16"),
-        # pytest.param(30720, 1, 6, 16, 16, 128, 128, jnp.bfloat16,
-        #              id="30720-1-6-16-16-128-128-BF16"),
-        # pytest.param(30720, 1, 8, 16, 16, 128, 128, jnp.bfloat16,
-        #              id="30720-1-8-16-16-128-128-BF16"),
-        # pytest.param(30720, 1, 12, 16, 16, 128, 128, jnp.bfloat16,
-        #              id="30720-1-12-16-16-128-128-BF16"),
-        # pytest.param(30720, 1, 16, 16, 16, 128, 128, jnp.bfloat16,
-        #              id="30720-1-16-16-16-128-128-BF16"),
+        pytest.param(30720, 1, 4, 16, 16, 128, 128, jnp.bfloat16,
+                     id="30720-1-4-16-16-128-128-BF16"),
+        pytest.param(30720, 1, 6, 16, 16, 128, 128, jnp.bfloat16,
+                     id="30720-1-6-16-16-128-128-BF16"),
+        pytest.param(30720, 1, 8, 16, 16, 128, 128, jnp.bfloat16,
+                     id="30720-1-8-16-16-128-128-BF16"),
+        pytest.param(30720, 1, 12, 16, 16, 128, 128, jnp.bfloat16,
+                     id="30720-1-12-16-16-128-128-BF16"),
+        pytest.param(30720, 1, 16, 16, 16, 128, 128, jnp.bfloat16,
+                     id="30720-1-16-16-16-128-128-BF16"),
     ],
 )
 def test_ck_unfused_smallseq_backend(b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype):
@@ -1267,11 +1295,5 @@ def test_ck_unfused_smallseq_backend(b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype):
     )
     runner._setup_inputs()
     expected_backend = NVTE_Fused_Attn_Backend.NVTE_CK
-    if runner.backend != expected_backend:
-        pytest.skip(
-            f"Backend selection failed: expected {expected_backend}, got {runner.backend}. "
-            f"Config: b={b}, s_q={s_q}, s_kv={s_kv}, h_q={h_q}, h_kv={h_kv}, "
-            f"d_qk={d_qk}, d_v={d_v}, dtype={dtype}"
-        )
     runner.test_forward()
-    # runner.test_backward()
+    runner.test_backward()

@@ -9,7 +9,7 @@
 #include <numeric> // Required for std::accumulate
 #ifdef USE_FUSED_ATTN_CK
 #include <ck_fused_attn/ck_fused_attn.hpp>
-#include "fused_attn_smallseq.hpp"
+#include "fused_attn_smallseq.h"
 #endif // USE_FUSED_ATTN_CK
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
@@ -619,19 +619,18 @@ void fused_attn_ck_fwd_impl(
     void* max_seqlen_workspace = workspace;
     
     size_t runtime_max_seqlen_q = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
-        static_cast<uint64_t>(b), devPtrCuSeqlensQ, nullptr,
-        max_seqlen_workspace, reinterpret_cast<hipStream_t>(stream)));
+        static_cast<uint64_t>(b), devPtrCuSeqlensQ, nullptr, max_seqlen_workspace, stream));
     size_t runtime_max_seqlen_kv = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
-        static_cast<uint64_t>(b), devPtrCuSeqlensKV, nullptr,
-        max_seqlen_workspace, reinterpret_cast<hipStream_t>(stream)));
+        static_cast<uint64_t>(b), devPtrCuSeqlensKV, nullptr, max_seqlen_workspace, stream));
 
-    if (nvte_log_ck_config) {
-      std::cout << std::endl << "[CK small-seq] fused_attn_ck_fwd_impl: is_ragged=1 b=" << b
-                << " runtime_max_seqlen_q=" << runtime_max_seqlen_q
-                << " runtime_max_seqlen_kv=" << runtime_max_seqlen_kv << std::endl;
+    if (std::getenv("NVTE_LOG_CK_CONFIG")) {
+      std::cout << std::endl << "attn_fwd(ck small-seq): ";
+      std::cout << "b: " << b << ", ";
+      std::cout << "runtime_max_seqlen_q: " << runtime_max_seqlen_q << ", ";
+      std::cout << "runtime_max_seqlen_kv: " << runtime_max_seqlen_kv << std::endl;
     }
 
-    if (runtime_max_seqlen_kv >= 2 && runtime_max_seqlen_kv <= 16) {
+    if (runtime_max_seqlen_q==1 && runtime_max_seqlen_kv >= 2 && runtime_max_seqlen_kv <= 16) {
       fused_attn_rocm::fused_attn_smallseq_fwd(
           b, h, hg, runtime_max_seqlen_kv, d_qk, d_v,
           is_training, scaling_factor, dropout_probability,
@@ -946,22 +945,24 @@ void fused_attn_ck_bwd_impl(
   void* workspace_next = workspace;
 
   if (is_ragged) {
-    void* max_seqlen_workspace_bwd = workspace;
-    // When s_q == 1 use 1 for runtime_max_seqlen_q (Q cu_seqlens layout may differ in JAX THD).
-    size_t runtime_max_seqlen_q_bwd = (s_q == 1) ? 1u : static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
-        static_cast<uint64_t>(b), devPtrCuSeqlensQ, nullptr,
-        max_seqlen_workspace_bwd, reinterpret_cast<hipStream_t>(stream)));
-    size_t runtime_max_seqlen_kv_bwd = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
-        static_cast<uint64_t>(b), devPtrCuSeqlensKV, nullptr,
-        max_seqlen_workspace_bwd, reinterpret_cast<hipStream_t>(stream)));
-    if (nvte_log_ck_config) {
-      std::cout << std::endl << "[CK small-seq] fused_attn_ck_bwd_impl: is_ragged=1 runtime_max_seqlen_q="
-                << runtime_max_seqlen_q_bwd << " runtime_max_seqlen_kv=" << runtime_max_seqlen_kv_bwd << std::endl;
+    void* max_seqlen_workspace = workspace;
+
+    size_t runtime_max_seqlen_q = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
+      b, devPtrCuSeqlensQ, nullptr, max_seqlen_workspace, stream));
+    size_t runtime_max_seqlen_kv = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
+      b, devPtrCuSeqlensKV, nullptr, max_seqlen_workspace, stream));
+    
+    if (std::getenv("NVTE_LOG_CK_CONFIG")) {
+      std::cout << std::endl << "attn_bwd(ck small-seq): ";
+      std::cout << "b: " << b << ", ";
+      std::cout << "runtime_max_seqlen_q: " << runtime_max_seqlen_q << ", ";
+      std::cout << "runtime_max_seqlen_kv: " << runtime_max_seqlen_kv << std::endl;
     }
-    if (runtime_max_seqlen_q_bwd == 1 && runtime_max_seqlen_kv_bwd >= 2 && runtime_max_seqlen_kv_bwd <= 16) {
+
+    if (runtime_max_seqlen_q == 1 && runtime_max_seqlen_kv >= 2 && runtime_max_seqlen_kv <= 16) {
       
       fused_attn_rocm::fused_attn_smallseq_bwd(
-          b, h, hg, runtime_max_seqlen_kv_bwd, d_qk, d_v,
+          b, h, hg, runtime_max_seqlen_kv, d_qk, d_v,
           scaling_factor, dropout_probability,
           devPtrQ, devPtrK, devPtrV, devPtrO, devPtrdO, devPtrSoftmaxAux,
           devPtrdQ, devPtrdK, devPtrdV,

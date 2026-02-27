@@ -393,14 +393,11 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 raise ValueError(f"Unsupported {backend=}")
 
         if os.environ.get("NVTE_LOG_CK_CONFIG"):
-            import sys
-            msg = (
-                f"[CK small-seq JAX] fused_attn abstract: backend={backend!s} "
-                f"batch_shape={batch_shape} q_max_seqlen={q_max_seqlen} "
-                f"kv_max_seqlen={kv_max_seqlen} attn_heads={attn_heads} "
-                f"softmax_shape={softmax_shape} softmax_dtype={softmax_dtype} "
+            print(
+                "attn_fwd(ck small-seq JAX abstract): "
+                f"batch_shape: {batch_shape}, softmax_shape: {softmax_shape}, softmax_dtype: {softmax_dtype}"
             )
-            print(msg, file=sys.stderr, flush=True)
+        
         softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=softmax_dtype)
 
         # JAX does not enable 64-bit int by default so we get XLA to allocate x8 memory with

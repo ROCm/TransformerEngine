@@ -18,7 +18,7 @@
 
 #include "../common.h"
 #include "../util/cuda_runtime.h"
-#include "fused_attn_smallseq.hpp"
+#include "fused_attn_smallseq.h"
 #include "utils.h"
 
 // Macros to avoid repeating dispatch switch cases for max_seqlen_kv in [2, 16].
@@ -833,17 +833,20 @@ void fused_attn_smallseq_fwd(size_t b,
                             size_t* workspace_size,
                             cudaStream_t stream)
 {
-  if (std::getenv("NVTE_LOG_CK_CONFIG")) {
-    std::cout << "[fused_attn_smallseq_fwd] ENTRY - all params: b=" << b << " h_q=" << h_q
-              << " h_kv=" << h_kv << " max_seqlen_kv=" << max_seqlen_kv << " d_qk=" << d_qk
-              << " d_v=" << d_v << " is_training=" << is_training << " attn_scale=" << attn_scale
-              << " dropout=" << dropout << " qkv_dtype="
+  if (std::getenv("NVTE_FUSED_ATTN_CK_SMALLSEQ")) {
+    std::cout << std::endl << "attn_fwd(ck small-seq kernel): ";
+    std::cout << "b: " << b << ", ";
+    std::cout << "h_q: " << h_q << ", ";
+    std::cout << "h_kv: " << h_kv << ", ";
+    std::cout << "max_seqlen_kv: " << max_seqlen_kv << ", ";
+    std::cout << "d_qk: " << d_qk << ", ";
+    std::cout << "d_v: " << d_v << ", ";
+    std::cout << "is_training: " << is_training << ", ";
+    std::cout << "attn_scale: " << attn_scale << ", ";
+    std::cout << "dropout: " << dropout << ", ";
+    std::cout << "qkv_dtype: "
               << (qkv_dtype == DType::kBFloat16 ? "BF16" : qkv_dtype == DType::kFloat16 ? "FP16" : "?")
-              << " devPtrQ=" << devPtrQ << " devPtrK=" << devPtrK << " devPtrV=" << devPtrV
-              << " devPtrO=" << devPtrO << " attn_weights_buffer=" << attn_weights_buffer
-              << " devPtrCuSeqlensKV=" << devPtrCuSeqlensKV
-              << " devPtrSeqOffsetsKV=" << devPtrSeqOffsetsKV << " workspace=" << workspace
-              << " stream=" << stream << std::endl;
+              << std::endl;
   }
   (void)h_kv;
   (void)d_qk;
@@ -921,18 +924,19 @@ void fused_attn_smallseq_bwd(size_t b,
                              size_t* workspace_size,
                              cudaStream_t stream)
 {
-  if (std::getenv(" NVTE_LOG_CK_CONFIG")) {
-    std::cout << "[fused_attn_smallseq_bwd] ENTRY - all params: b=" << b << " h_q=" << h_q
-              << " h_kv=" << h_kv << " max_seqlen_kv=" << max_seqlen_kv << " d_qk=" << d_qk
-              << " d_v=" << d_v << " attn_scale=" << attn_scale << " dropout=" << dropout
-              << " qkv_dtype="
+  if (std::getenv("NVTE_FUSED_ATTN_CK_SMALLSEQ")) {
+    std::cout << std::endl << "attn_bwd(ck small-seq kernel): ";
+    std::cout << "b: " << b << ", ";
+    std::cout << "h_q: " << h_q << ", ";
+    std::cout << "h_kv: " << h_kv << ", ";
+    std::cout << "max_seqlen_kv: " << max_seqlen_kv << ", ";
+    std::cout << "d_qk: " << d_qk << ", ";
+    std::cout << "d_v: " << d_v << ", ";
+    std::cout << "attn_scale: " << attn_scale << ", ";
+    std::cout << "dropout: " << dropout << ", ";
+    std::cout << "qkv_dtype: "
               << (qkv_dtype == DType::kBFloat16 ? "BF16" : qkv_dtype == DType::kFloat16 ? "FP16" : "?")
-              << " devPtrQ=" << devPtrQ << " devPtrK=" << devPtrK << " devPtrV=" << devPtrV
-              << " devPtrO=" << devPtrO << " devPtrdO=" << devPtrdO << " attn_weights=" << attn_weights
-              << " devPtrdQ=" << devPtrdQ << " devPtrdK=" << devPtrdK << " devPtrdV=" << devPtrdV
-              << " devPtrCuSeqlensKV=" << devPtrCuSeqlensKV
-              << " devPtrSeqOffsetsKV=" << devPtrSeqOffsetsKV << " workspace=" << workspace
-              << " stream=" << stream << std::endl;
+              << std::endl;
   }
   (void)h_kv;
   (void)d_qk;

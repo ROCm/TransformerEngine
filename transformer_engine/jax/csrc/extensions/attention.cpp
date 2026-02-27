@@ -223,7 +223,6 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
   auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;              \
   auto bias_shape = std::vector<size_t>{bias_batch, bias_heads, q_max_seqlen, kv_max_seqlen}; \
   size_t num_segments = input_batch;                                                          \
-  std::cerr << "[FUSED_ATTN_IMPL_COMMON_BLOCK] input_batch=" << input_batch << std::endl;     \
   if (is_ragged) {                                                                            \
     auto cudnn_runtime_version = cudnnGetVersion();                                           \
     num_segments = input_batch * max_segments_per_seq;                                        \
@@ -522,15 +521,16 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     workspace_bytes = workspace_elems * elt_size;
   }
 
-  std::cerr << "[GetFusedAttnBackwardWorkspaceSizes] input_batch=" << input_batch
-            << " is_ragged=" << is_ragged << " workspace_shape=(";
-  for (size_t i = 0; i < work_shape.size(); ++i) {
-    std::cerr << (i ? "," : "") << work_shape[i];
+  if (std::getenv("NVTE_LOG_CK_CONFIG")) {
+    std::cout << std::endl << "attn_bwd(ck small-seq workspace size): ";
+    std::cout << "input_batch: " << input_batch << ", ";
+    std::cout << "is_ragged: " << is_ragged << ", ";
+    std::cout << "workspace_elems: " << workspace_elems << ", ";
+    std::cout << "workspace_bytes: " << workspace_bytes << ", ";
+    std::cout << "small_seq_min_bytes: " << fused_small_seq_workspace << ", ";
+    std::cout << "workspace_bytes >= fused_small_seq_workspace: " << (workspace_bytes >= fused_small_seq_workspace ? "true" : "false")
+              << std::endl;
   }
-  std::cerr << ") workspace_elems=" << workspace_elems << " workspace_bytes=" << workspace_bytes
-            << " b*h*16*2=" << fused_small_seq_workspace
-            << " (workspace_bytes>=b*h*16*2)=" << (workspace_bytes >= fused_small_seq_workspace)
-            << std::endl;
   return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
 
