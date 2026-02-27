@@ -8,7 +8,7 @@ on:
   pull_request:
     branches:
       - 'dev'
-      - 'release_v2.**_rocm'
+      - 'release_v2.*_rocm'
     types: [ labeled, unlabeled, synchronize, reopened ]
 
 permissions:
@@ -20,24 +20,29 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       test_level: ${{ steps.set_level.outputs.test_level }}
-      has_level: ${{ steps.set_level.outputs.has_level }}
-      removed_level: ${{ steps.set_level.outputs.removed_level }}
-      removed_was_highest: ${{ steps.set_level.outputs.removed_was_highest }}
+      current_level: ${{ steps.set_level.outputs.current_level }}
+      should_cancel_others: ${{ steps.set_level.outputs.should_cancel_others }}
     steps:
-      - name: Determine CI level from labels
+      - name: Determine CI dispatch from labels
         id: set_level
         uses: actions/github-script@v7
         with:
           script: |
+            const parseLevelLabel = (labelName) => {
+              const label = (labelName || '').toLowerCase();
+              if (label === 'ci-level 3') return 3;
+              if (label === 'ci-level 2') return 2;
+              if (label === 'ci-level 1') return 1;
+              return 0;
+            };
+
             const labels = (context.payload.pull_request.labels || [])
               .map(label => label.name.toLowerCase());
+            const action = context.payload.action;
 
-            // Determine if a CI level label was removed and what level it was   
-            const removedLabel = (context.payload.label?.name || '').toLowerCase();
-            let removedLevel = 0;
-            if (removedLabel === 'ci-level 3') removedLevel = 3;
-            else if (removedLabel === 'ci-level 2') removedLevel = 2;
-            else if (removedLabel === 'ci-level 1') removedLevel = 1;
+            // Determine if a CI level label was removed or added, and what level it was
+            const addedLevel = action === 'labeled' ? parseLevelLabel(context.payload.label?.name) : 0;
+            const removedLevel = action === 'unlabeled' ? parseLevelLabel(context.payload.label?.name) : 0;
 
             // Determine the current highest CI level from remaining labels
             let level = '';
@@ -49,25 +54,76 @@ jobs:
             const currentLevel = level ? Number(level) : 0;
             const removedWasHighest = removedLevel > currentLevel;
 
-            // Set outputs for use in later jobs
-            core.setOutput('test_level', level);
-            core.setOutput('has_level', level ? 'true' : 'false');
-            core.setOutput('removed_level', String(removedLevel));
-            core.setOutput('removed_was_highest', removedWasHighest ? 'true' : 'false');
+            let requires_dispatch = currentLevel > 0;
+            if (action === 'labeled') {
+              // Only dispatch when a CI-level label was added.
+              requires_dispatch &&= addedLevel > 0;
+            } else if (action === 'unlabeled') {
+              // Only dispatch downgrade when the removed label was the highest.
+              requires_dispatch &&= removedWasHighest;
+            }
+            // For unlabeling, check if we should dispatch based on whether the removed
+            // level was highest, and its tests were already completed.
+            const prNumber = context.payload.pull_request.number;
+            const headSha = context.payload.pull_request.head.sha;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            if (action === 'unlabeled' && requires_dispatch) {
+              const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+                owner,
+                repo,
+                workflow_id: 'rocm-ci-dispatch.yml',
+                event: 'pull_request',
+                per_page: 100,
+              });
+
+              const removedLevelAlreadyCompleted = runs.some(run => {
+                const prMatch = (run.pull_requests || []).some(pr => pr.number === prNumber);
+                const sameSha = run.head_sha === headSha;
+                const completed = run.status === 'completed';
+                const title = run.display_title || '';
+                const match = title.match(/CI Level (\d+)/i);
+                const runLevel = match ? Number(match[1]) : 0;
+                return prMatch && sameSha && completed && runLevel === removedLevel;
+              });
+
+              if (removedLevelAlreadyCompleted) {
+                requires_dispatch = false;
+              }
+            }
+            let test_level = requires_dispatch ? level : '';
+            core.setOutput('test_level', test_level);
+            core.setOutput('current_level', String(currentLevel));
+            const shouldCancelOthers = (test_level !== '') || (action === 'unlabeled' && removedWasHighest);
+            core.setOutput('should_cancel_others', shouldCancelOthers ? 'true' : 'false');
 
   cancel_others:
-    if: ${{ needs.determine_level.outputs.has_level == 'true' }}
+    # Run this job if we might need to cancel running workflows, which happens when:
+    #   - We determined that we need to dispatch a workflow
+    #   - The highest CI-level label was removed
+    if: ${{ needs.determine_level.outputs.should_cancel_others == 'true' }}
     needs: determine_level
     runs-on: ubuntu-latest
     steps:
       - name: Cancel queued/in-progress runs
         uses: actions/github-script@v7
         env:
-          CURRENT_LEVEL: ${{ needs.determine_level.outputs.test_level }}
+          CURRENT_LEVEL: ${{ needs.determine_level.outputs.current_level }}
         with:
           script: |
-            // Nothing to cancel if newly re-opened
-            if (action === 'reopened'){return;}
+            const action = context.payload.action;
+            if (action === 'reopened') {
+              return;
+            }
+
+            const parseLevelLabel = (labelName) => {
+              const label = (labelName || '').toLowerCase();
+              if (label === 'ci-level 3') return 3;
+              if (label === 'ci-level 2') return 2;
+              if (label === 'ci-level 1') return 1;
+              return 0;
+            };
 
             // Cancel other runs for the same PR that are queued or
             // in progress and have a lower CI level
@@ -76,14 +132,9 @@ jobs:
             const repo = context.repo.repo;
             const currentRunId = context.runId;
             const currentLevel = Number(process.env.CURRENT_LEVEL || 0);
-            const action = context.payload.action;
-            
             // If a label was added, determine its level to compare against other runs
-            const addedLabel = (context.payload.label?.name || '').toLowerCase();
-            let addedLevel = 0;
-            if (addedLabel === 'ci-level 3') addedLevel = 3;
-            else if (addedLabel === 'ci-level 2') addedLevel = 2;
-            else if (addedLabel === 'ci-level 1') addedLevel = 1;
+            const addedLevel = action === 'labeled' ? parseLevelLabel(context.payload.label?.name) : 0;
+            const removedLevel = action === 'unlabeled' ? parseLevelLabel(context.payload.label?.name) : 0;
 
             // Fetch all workflow runs for this workflow and PR
             const runs = await github.rest.actions.listWorkflowRuns({
@@ -115,6 +166,10 @@ jobs:
               if (action === 'labeled') {
                 return runLevel < addedLevel;
               }
+              // If last CI label was removed, cancel all active CI-level runs.
+              if (action === 'unlabeled' && currentLevel === 0 && removedLevel > 0) {
+                return runLevel > 0;
+              }
               // If a label was removed, cancel runs with a lower level than the current level
               return runLevel < currentLevel;
             });
@@ -130,13 +185,13 @@ jobs:
             }
 
   dispatch:
-    # Run this job if there is a valid level to test (has_level == true),
-    # and any of the following are true:
-    # - A level label was added 
-    # - A commit was pushed
-    # - The PR was reopened
-    # - The highest level label was removed
-    if: ${{ needs.determine_level.outputs.has_level == 'true' && ((github.event.action != 'unlabeled') || (github.event.action == 'unlabeled' && needs.determine_level.outputs.removed_was_highest == 'true')) }}
+    # Run this job if there is a valid level to test, which requires
+    # that any of the following are true:
+    # - A ci-level label was added
+    # - A commit was pushed with existing ci-level label(s)
+    # - The PR was reopened with existing ci-level label(s)
+    # - The highest ci-level label was removed with remaining ci-level label(s)
+    if: ${{ needs.determine_level.outputs.test_level != '' }}
     needs: [determine_level, cancel_others]
     name: CI Level ${{ needs.determine_level.outputs.test_level }}
     uses: ./.github/workflows/rocm-ci.yml
