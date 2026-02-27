@@ -59,11 +59,12 @@ jobs:
               // Only dispatch when a CI-level label was added.
               requires_dispatch &&= addedLevel > 0;
             } else if (action === 'unlabeled') {
-              // Only dispatch downgrade when the removed label was the highest.
+              // Only dispatch downgrade when the removed label was the highest,
+              // and the now-highest level (if any) does not have a completed run.
               requires_dispatch &&= removedWasHighest;
             }
-            // For unlabeling, check if we should dispatch based on whether the removed
-            // level was highest, and its tests were already completed.
+            // For unlabeling, only dispatch downgrade if the removed level was highest
+            // and the now-highest remaining level is not already satisfied for this commit.
             const prNumber = context.payload.pull_request.number;
             const headSha = context.payload.pull_request.head.sha;
             const owner = context.repo.owner;
@@ -78,17 +79,17 @@ jobs:
                 per_page: 100,
               });
 
-              const removedLevelAlreadyCompleted = runs.some(run => {
+              const nextHighestAlreadyCompleted = runs.some(run => {
                 const prMatch = (run.pull_requests || []).some(pr => pr.number === prNumber);
                 const sameSha = run.head_sha === headSha;
                 const completed = run.status === 'completed';
                 const title = run.display_title || '';
                 const match = title.match(/CI Level (\d+)/i);
                 const runLevel = match ? Number(match[1]) : 0;
-                return prMatch && sameSha && completed && runLevel === removedLevel;
+                return prMatch && sameSha && completed && runLevel >= currentLevel;
               });
 
-              if (removedLevelAlreadyCompleted) {
+              if (nextHighestAlreadyCompleted) {
                 requires_dispatch = false;
               }
             }
