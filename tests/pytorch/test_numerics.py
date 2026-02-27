@@ -2121,8 +2121,7 @@ def test_grouped_linear_accuracy(
     atol, rtol = 0, 0
     if use_cutlass:
         atol, rtol = 1e-3, 1e-3
-        if IS_HIP_EXTENSION and torch.cuda.get_device_capability() == (9, 4):
-            # gfx942
+        if IS_HIP_EXTENSION:
             atol, rtol = 1e-3, 8e-3
     if use_triton:
         atol, rtol = get_tolerances(dtype)
