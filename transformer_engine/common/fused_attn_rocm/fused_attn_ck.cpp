@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
@@ -615,9 +615,10 @@ void fused_attn_ck_fwd_impl(
   // denote the next available section of workspace from upstream
   void* workspace_next = workspace;
 
-  if (is_ragged) {
+  const char* nvte_smallseq = std::getenv("NVTE_FUSED_ATTN_CK_SMALLSEQ");
+  if (is_ragged && nvte_smallseq && std::string(nvte_smallseq) == "1") {
     void* max_seqlen_workspace = workspace;
-    
+
     size_t runtime_max_seqlen_q = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
         static_cast<uint64_t>(b), devPtrCuSeqlensQ, nullptr, max_seqlen_workspace, stream));
     size_t runtime_max_seqlen_kv = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
@@ -630,7 +631,7 @@ void fused_attn_ck_fwd_impl(
       std::cout << "runtime_max_seqlen_kv: " << runtime_max_seqlen_kv << std::endl;
     }
 
-    if (runtime_max_seqlen_q==1 && runtime_max_seqlen_kv >= 2 && runtime_max_seqlen_kv <= 16) {
+    if (runtime_max_seqlen_q == 1 && runtime_max_seqlen_kv >= 2 && runtime_max_seqlen_kv <= 16) {
       fused_attn_rocm::fused_attn_smallseq_fwd(
           b, h, hg, runtime_max_seqlen_kv, d_qk, d_v,
           is_training, scaling_factor, dropout_probability,
@@ -944,7 +945,8 @@ void fused_attn_ck_bwd_impl(
   // denote the next available section of workspace from upstream
   void* workspace_next = workspace;
 
-  if (is_ragged) {
+  const char* nvte_smallseq = std::getenv("NVTE_FUSED_ATTN_CK_SMALLSEQ");
+  if (is_ragged && nvte_smallseq && std::string(nvte_smallseq) == "1") {
     void* max_seqlen_workspace = workspace;
 
     size_t runtime_max_seqlen_q = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(

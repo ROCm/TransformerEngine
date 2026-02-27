@@ -1,11 +1,11 @@
 /*************************************************************************
- * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
 /*! \file fused_attn_smallseq.h
- *  \brief Unfused small-seq (varlen) attention for ROCm: seq_q=1, max_seqlen_kv<=16, THD only.
+ *  \brief Small-seq (varlen) attention for ROCm: seq_q=1, max_seqlen_kv<=16, THD only.
  */
 
 #ifndef TRANSFORMER_ENGINE_FUSED_ATTN_ROCM_FUSED_ATTN_SMALLSEQ_H_

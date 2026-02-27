@@ -366,26 +366,21 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
             elif backend == NVTE_Fused_Attn_Backend.NVTE_CK:
                 if config.qkv_layout.is_thd():
-                    batch_size = reduce(operator.mul, batch_shape)
-                    old_ck_softmax_aux_size = (
-                        batch_size * attn_heads * q_max_seqlen * jnp.dtype(jnp.float32).itemsize
-                    )
-                    possible_special_cross_attn_softmax_aux_size = (
-                        batch_size * attn_heads * q_max_seqlen
-                        * min(kv_max_seqlen, 16) * 2
-                    )  # 2 bytes for bf16/fp16
-                    if (old_ck_softmax_aux_size
-                            >= possible_special_cross_attn_softmax_aux_size):
+                    # THD only: check env; run small-seq logic only when enabled
+                    if os.environ.get("NVTE_FUSED_ATTN_CK_SMALLSEQ", "0") != "1":
                         softmax_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
                         softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
                     else:
-                        softmax_shape = (
-                            *batch_shape,
-                            attn_heads,
-                            q_max_seqlen,
-                            min(kv_max_seqlen, 16),
-                        )
-                        softmax_dtype = dtypes.canonicalize_dtype(q_dtype)
+                        batch_size = reduce(operator.mul, batch_shape)
+                        old_ck_softmax_size = (batch_size * attn_heads * q_max_seqlen * 1)
+                        possible_ck_smallseq_softmax_size = (batch_size * attn_heads * 
+                                                             q_max_seqlen * min(kv_max_seqlen, 16) * 2) # 2 bytes for bf16/fp16
+                        if old_ck_softmax_size >= possible_ck_smallseq_softmax_size:
+                            softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
+                            softmax_dtype = dtypes.canonicalize_dtype(q_dtype)
+                        else:
+                            softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, min(kv_max_seqlen, 16))
+                            softmax_dtype = dtypes.canonicalize_dtype(q_dtype)
                 else:
                     softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
                     softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from math import sqrt
 from typing import Tuple, Optional, Dict
+import os
 import random
 
 import jax
@@ -329,7 +330,12 @@ class FusedAttnRunner:
     # generating zero-length ragged tensors. This setting adjusts the test to avoid the zero-length cases.
     def _get_max_segments_per_sequence(self):
         if self.qkv_layout.is_thd():
-            if 90400 <= get_cudnn_version() < 90500 or self.max_seqlen_q == 1:
+            if (
+                90400 <= get_cudnn_version() < 90500
+                or ( self.max_seqlen_q == 1 and 
+                    is_hip_extension() and 
+                    os.environ.get("NVTE_FUSED_ATTN_CK_SMALLSEQ", "0") == "1")
+            ):
                 return self.num_segments_per_seq
             else:
                 # +1 for testing runtime_segments < max_segments
@@ -539,7 +545,7 @@ class FusedAttnRunner:
             return segment_ids, segment_pos, segment_pad
 
         if self.qkv_layout.is_thd():
-            if self.max_seqlen_q == 1:
+            if self.max_seqlen_q == 1 and is_hip_extension() and os.environ.get("NVTE_FUSED_ATTN_CK_SMALLSEQ", "0") == "1":
                 self.num_segments_per_seq = 1
                 # Q: deterministic — one segment of length 1 per batch -> cu_seqlen [0,1,2,...,batch_size]
                 self.segment_ids_q = jnp.ones((self.batch_size, self.max_seqlen_q), dtype=jnp.int32)
@@ -555,7 +561,6 @@ class FusedAttnRunner:
                 )
 
                 # KV: one segment per batch (num_segments_per_seq=1) to match smallseq kernel
-                # expectations (batch_size == max_tokens_q, cu_seqlens of size batch_size+1).
                 min_segment_len = None if self.window_size is None else self.seqlens_q
                 self.segment_ids_kv, self.segment_pos_kv, self.pad_kv = (
                     generate_random_segment_ids(
@@ -1247,26 +1252,43 @@ def test_jax_new_rng():
     runner.test_forward()
 
 
-# ROCm CK internal small-seq (varlen unfused) branch tests.
+# ROCm CK small-seq varlen tests.
 # Uses THD_THD_THD with s_q=1, s_kv<=16 so the small-seq path is taken.
+# Run only when NVTE_FUSED_ATTN_CK_SMALLSEQ=1.
+@pytest.mark.skipif(
+    os.environ.get("NVTE_FUSED_ATTN_CK_SMALLSEQ", "0") != "1",
+    reason="CK unfused smallseq tests require NVTE_FUSED_ATTN_CK_SMALLSEQ=1",
+)
 @pytest.mark.skipif(
     not is_hip_extension(), reason="CK unfused smallseq backend only available on AMD hardware"
 )
 @pytest.mark.parametrize(
     "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype",
     [
-        pytest.param(30720, 1, 2, 16, 16, 128, 128, jnp.bfloat16,
-                     id="30720-1-2-16-16-128-128-BF16"),
-        pytest.param(30720, 1, 4, 16, 16, 128, 128, jnp.bfloat16,
-                     id="30720-1-4-16-16-128-128-BF16"),
-        pytest.param(30720, 1, 6, 16, 16, 128, 128, jnp.bfloat16,
-                     id="30720-1-6-16-16-128-128-BF16"),
-        pytest.param(30720, 1, 8, 16, 16, 128, 128, jnp.bfloat16,
-                     id="30720-1-8-16-16-128-128-BF16"),
-        pytest.param(30720, 1, 12, 16, 16, 128, 128, jnp.bfloat16,
-                     id="30720-1-12-16-16-128-128-BF16"),
-        pytest.param(30720, 1, 16, 16, 16, 128, 128, jnp.bfloat16,
-                     id="30720-1-16-16-16-128-128-BF16"),
+        pytest.param(4000, 1, 2, 16, 16, 128, 128, jnp.bfloat16,
+                     id="4000-1-2-16-16-128-128-BF16"),
+        pytest.param(4000, 1, 4, 16, 16, 128, 128, jnp.bfloat16,
+                     id="4000-1-4-16-16-128-128-BF16"),
+        pytest.param(4000, 1, 6, 16, 16, 128, 128, jnp.bfloat16,
+                     id="4000-1-6-16-16-128-128-BF16"),
+        pytest.param(4000, 1, 8, 16, 16, 128, 128, jnp.bfloat16,
+                     id="4000-1-8-16-16-128-128-BF16"),
+        pytest.param(4000, 1, 12, 16, 16, 128, 128, jnp.bfloat16,
+                     id="4000-1-12-16-16-128-128-BF16"),
+        pytest.param(4000, 1, 16, 16, 16, 128, 128, jnp.bfloat16,
+                     id="4000-1-16-16-16-128-128-BF16"),
+        pytest.param(4000, 1, 2, 16, 16, 128, 128, jnp.float16,
+                     id="4000-1-2-16-16-128-128-FP16"),
+        pytest.param(4000, 1, 4, 16, 16, 128, 128, jnp.float16,
+                     id="4000-1-4-16-16-128-128-FP16"),
+        pytest.param(4000, 1, 6, 16, 16, 128, 128, jnp.float16,
+                     id="4000-1-6-16-16-128-128-FP16"),
+        pytest.param(4000, 1, 8, 16, 16, 128, 128, jnp.float16,
+                     id="4000-1-8-16-16-128-128-FP16"),
+        pytest.param(4000, 1, 12, 16, 16, 128, 128, jnp.float16,
+                     id="4000-1-12-16-16-128-128-FP16"),
+        pytest.param(4000, 1, 16, 16, 16, 128, 128, jnp.float16,
+                     id="4000-1-16-16-16-128-128-FP16"),
     ],
 )
 def test_ck_unfused_smallseq_backend(b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype):

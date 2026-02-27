@@ -509,27 +509,32 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
   nvte_tensor_pack_destroy(&aux_input_tensors);
 
   auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
-  size_t workspace_elems = product(work_shape);
-  size_t elt_size = transformer_engine::typeToSize(query_workspace_tensor.dtype());
-  size_t workspace_bytes = workspace_elems * elt_size;
-  size_t fused_small_seq_workspace = input_batch * attn_heads * 16 * 2;  // min for small-seq (bf16/fp16)
+  
+  const char* nvte_smallseq = std::getenv("NVTE_FUSED_ATTN_CK_SMALLSEQ");
+  if (nvte_smallseq && std::string(nvte_smallseq) == "1") {
+    size_t workspace_elems = product(work_shape);
+    size_t elt_size = transformer_engine::typeToSize(query_workspace_tensor.dtype());
+    size_t workspace_bytes = workspace_elems * elt_size;
+    size_t fused_small_seq_workspace = input_batch * attn_heads * 16 * 2;  // min for small-seq (bf16/fp16)
 
-  if (is_ragged && workspace_bytes < fused_small_seq_workspace) {
-    size_t min_elems = (fused_small_seq_workspace + elt_size - 1) / elt_size;
-    work_shape = std::vector<size_t>{min_elems};
-    workspace_elems = min_elems;
-    workspace_bytes = workspace_elems * elt_size;
-  }
+    if (is_ragged && workspace_bytes < fused_small_seq_workspace) {
+      size_t min_elems = (fused_small_seq_workspace + elt_size - 1) / elt_size;
+      work_shape = std::vector<size_t>{min_elems};
+      workspace_elems = min_elems;
+      workspace_bytes = workspace_elems * elt_size;
+    }
 
-  if (std::getenv("NVTE_LOG_CK_CONFIG")) {
-    std::cout << std::endl << "attn_bwd(ck small-seq workspace size): ";
-    std::cout << "input_batch: " << input_batch << ", ";
-    std::cout << "is_ragged: " << is_ragged << ", ";
-    std::cout << "workspace_elems: " << workspace_elems << ", ";
-    std::cout << "workspace_bytes: " << workspace_bytes << ", ";
-    std::cout << "small_seq_min_bytes: " << fused_small_seq_workspace << ", ";
-    std::cout << "workspace_bytes >= fused_small_seq_workspace: " << (workspace_bytes >= fused_small_seq_workspace ? "true" : "false")
-              << std::endl;
+    const char* nvte_log_ck_config = std::getenv("NVTE_LOG_CK_CONFIG");
+    if (nvte_log_ck_config && std::string(nvte_log_ck_config) == "1") {
+      std::cout << std::endl << "attn_bwd(ck small-seq workspace size): ";
+      std::cout << "input_batch: " << input_batch << ", ";
+      std::cout << "is_ragged: " << is_ragged << ", ";
+      std::cout << "workspace_elems: " << workspace_elems << ", ";
+      std::cout << "workspace_bytes: " << workspace_bytes << ", ";
+      std::cout << "small_seq_min_bytes: " << fused_small_seq_workspace << ", ";
+      std::cout << "workspace_bytes >= fused_small_seq_workspace: " << (workspace_bytes >= fused_small_seq_workspace ? "true" : "false")
+                << std::endl;
+    }
   }
   return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }

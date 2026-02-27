@@ -1,16 +1,16 @@
 /*************************************************************************
- * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
 /*! \file fused_attn_smallseq.cpp
  *  \brief Unfused small-seq (varlen) attention: seq_q=1, max_seqlen_kv<=16, THD only.
- *  Ported from varlen_attn/attn_fwd.cpp and attn_bwd.cpp with runtime b, head_num.
  */
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_bfloat16.h>
+#include <hip/hip_fp16.h>
 
 #include <cstdint>
 #include <cstdlib>
@@ -106,30 +106,30 @@ __global__ void compute_scores_kernel(const T* Q,
     for (int i = 0; i < seq_kv; i++)
       results[i] = 0.0f;
     for (int dim_offset = 0; dim_offset < head_dim; dim_offset += block_k) {
-      if constexpr (std::is_same<T, hip_bfloat16>::value) {
+      if constexpr (std::is_same<T, hip_bfloat16>::value || std::is_same<T, __half>::value) {
         for (int k = 0; k < block_k / 8; k++) {
           ls_dwordx4_tmp_var = *((uint4*)&Q_ptr[dim_offset + k * 8]);
-          fetch_Q[k * 8 + 0] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.x)[0];
-          fetch_Q[k * 8 + 1] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.x)[1];
-          fetch_Q[k * 8 + 2] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.y)[0];
-          fetch_Q[k * 8 + 3] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.y)[1];
-          fetch_Q[k * 8 + 4] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.z)[0];
-          fetch_Q[k * 8 + 5] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.z)[1];
-          fetch_Q[k * 8 + 6] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.w)[0];
-          fetch_Q[k * 8 + 7] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.w)[1];
+          fetch_Q[k * 8 + 0] = ((T*)&ls_dwordx4_tmp_var.x)[0];
+          fetch_Q[k * 8 + 1] = ((T*)&ls_dwordx4_tmp_var.x)[1];
+          fetch_Q[k * 8 + 2] = ((T*)&ls_dwordx4_tmp_var.y)[0];
+          fetch_Q[k * 8 + 3] = ((T*)&ls_dwordx4_tmp_var.y)[1];
+          fetch_Q[k * 8 + 4] = ((T*)&ls_dwordx4_tmp_var.z)[0];
+          fetch_Q[k * 8 + 5] = ((T*)&ls_dwordx4_tmp_var.z)[1];
+          fetch_Q[k * 8 + 6] = ((T*)&ls_dwordx4_tmp_var.w)[0];
+          fetch_Q[k * 8 + 7] = ((T*)&ls_dwordx4_tmp_var.w)[1];
         }
         for (int kv_idx = 0; kv_idx < seq_kv; kv_idx++) {
           for (int k = 0; k < block_k / 8; k++) {
             ls_dwordx4_tmp_var =
                 *((uint4*)&K_ptr[kv_idx * head_num * head_dim + dim_offset + k * 8]);
-            fetch_K[k * 8 + 0] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.x)[0];
-            fetch_K[k * 8 + 1] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.x)[1];
-            fetch_K[k * 8 + 2] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.y)[0];
-            fetch_K[k * 8 + 3] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.y)[1];
-            fetch_K[k * 8 + 4] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.z)[0];
-            fetch_K[k * 8 + 5] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.z)[1];
-            fetch_K[k * 8 + 6] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.w)[0];
-            fetch_K[k * 8 + 7] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.w)[1];
+            fetch_K[k * 8 + 0] = ((T*)&ls_dwordx4_tmp_var.x)[0];
+            fetch_K[k * 8 + 1] = ((T*)&ls_dwordx4_tmp_var.x)[1];
+            fetch_K[k * 8 + 2] = ((T*)&ls_dwordx4_tmp_var.y)[0];
+            fetch_K[k * 8 + 3] = ((T*)&ls_dwordx4_tmp_var.y)[1];
+            fetch_K[k * 8 + 4] = ((T*)&ls_dwordx4_tmp_var.z)[0];
+            fetch_K[k * 8 + 5] = ((T*)&ls_dwordx4_tmp_var.z)[1];
+            fetch_K[k * 8 + 6] = ((T*)&ls_dwordx4_tmp_var.w)[0];
+            fetch_K[k * 8 + 7] = ((T*)&ls_dwordx4_tmp_var.w)[1];
           }
 #pragma unroll
           for (int k = 0; k < block_k; k++)
@@ -502,30 +502,30 @@ __global__ void compute_grad_attn_kernel(const T* grad_O,
       results[i] = 0.0f;
 
     for (int dim_offset = 0; dim_offset < head_dim; dim_offset += block_k) {
-      if constexpr (std::is_same<T, hip_bfloat16>::value) {
+      if constexpr (std::is_same<T, hip_bfloat16>::value || std::is_same<T, __half>::value) {
         for (int k = 0; k < block_k / 8; k++) {
           ls_dwordx4_tmp_var      = *((uint4*)&grad_O_ptr[dim_offset + k * 8]);
-          fetch_grad_O[k * 8 + 0] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.x)[0];
-          fetch_grad_O[k * 8 + 1] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.x)[1];
-          fetch_grad_O[k * 8 + 2] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.y)[0];
-          fetch_grad_O[k * 8 + 3] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.y)[1];
-          fetch_grad_O[k * 8 + 4] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.z)[0];
-          fetch_grad_O[k * 8 + 5] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.z)[1];
-          fetch_grad_O[k * 8 + 6] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.w)[0];
-          fetch_grad_O[k * 8 + 7] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.w)[1];
+          fetch_grad_O[k * 8 + 0] = ((T*)&ls_dwordx4_tmp_var.x)[0];
+          fetch_grad_O[k * 8 + 1] = ((T*)&ls_dwordx4_tmp_var.x)[1];
+          fetch_grad_O[k * 8 + 2] = ((T*)&ls_dwordx4_tmp_var.y)[0];
+          fetch_grad_O[k * 8 + 3] = ((T*)&ls_dwordx4_tmp_var.y)[1];
+          fetch_grad_O[k * 8 + 4] = ((T*)&ls_dwordx4_tmp_var.z)[0];
+          fetch_grad_O[k * 8 + 5] = ((T*)&ls_dwordx4_tmp_var.z)[1];
+          fetch_grad_O[k * 8 + 6] = ((T*)&ls_dwordx4_tmp_var.w)[0];
+          fetch_grad_O[k * 8 + 7] = ((T*)&ls_dwordx4_tmp_var.w)[1];
         }
         for (int kv_idx = 0; kv_idx < seq_kv; kv_idx++) {
           for (int k = 0; k < block_k / 8; k++) {
             ls_dwordx4_tmp_var =
                 *((uint4*)&V_base[kv_idx * V_stride + dim_offset + k * 8]);
-            fetch_V[k * 8 + 0] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.x)[0];
-            fetch_V[k * 8 + 1] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.x)[1];
-            fetch_V[k * 8 + 2] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.y)[0];
-            fetch_V[k * 8 + 3] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.y)[1];
-            fetch_V[k * 8 + 4] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.z)[0];
-            fetch_V[k * 8 + 5] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.z)[1];
-            fetch_V[k * 8 + 6] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.w)[0];
-            fetch_V[k * 8 + 7] = ((hip_bfloat16*)&ls_dwordx4_tmp_var.w)[1];
+            fetch_V[k * 8 + 0] = ((T*)&ls_dwordx4_tmp_var.x)[0];
+            fetch_V[k * 8 + 1] = ((T*)&ls_dwordx4_tmp_var.x)[1];
+            fetch_V[k * 8 + 2] = ((T*)&ls_dwordx4_tmp_var.y)[0];
+            fetch_V[k * 8 + 3] = ((T*)&ls_dwordx4_tmp_var.y)[1];
+            fetch_V[k * 8 + 4] = ((T*)&ls_dwordx4_tmp_var.z)[0];
+            fetch_V[k * 8 + 5] = ((T*)&ls_dwordx4_tmp_var.z)[1];
+            fetch_V[k * 8 + 6] = ((T*)&ls_dwordx4_tmp_var.w)[0];
+            fetch_V[k * 8 + 7] = ((T*)&ls_dwordx4_tmp_var.w)[1];
           }
 #pragma unroll
           for (int k = 0; k < block_k; k++)
@@ -708,7 +708,7 @@ __global__ void compute_grad_qk_kernel(const T* grad_scores,
                                   head_dim +
                               thread_head_offset + i * dwordx4_load_elt];
       for (int b = 0; b < dwordx4_load_elt; b++)
-        grad_Q_ptr[b] = ((T*)&store_dwordx4_tmp_var[i])[b] * scale;
+        grad_Q_ptr[b] = ((T*)&store_dwordx4_tmp_var[i])[b] * T(scale);
     }
 #pragma unroll
     for (int i = 0; i < block_k / dwordx4_load_elt; i++) {
@@ -833,8 +833,9 @@ void fused_attn_smallseq_fwd(size_t b,
                             size_t* workspace_size,
                             cudaStream_t stream)
 {
-  if (std::getenv("NVTE_FUSED_ATTN_CK_SMALLSEQ")) {
-    std::cout << std::endl << "attn_fwd(ck small-seq kernel): ";
+  const char* nvte_smallseq = std::getenv("NVTE_LOG_CK_CONFIG");
+  if (nvte_smallseq && std::string(nvte_smallseq) == "1") {
+    std::cout << std::endl << "attn_fwd(small-seq kernel): ";
     std::cout << "b: " << b << ", ";
     std::cout << "h_q: " << h_q << ", ";
     std::cout << "h_kv: " << h_kv << ", ";
@@ -890,8 +891,40 @@ void fused_attn_smallseq_fwd(size_t b,
       default:
         NVTE_ERROR("Unsupported max_seqlen_kv for small-seq: max_seqlen_kv <= 16.");
     }
+  } else if (qkv_dtype == DType::kFloat16) {
+    using T = __half;
+    const T* Q_ptr         = static_cast<const T*>(devPtrQ);
+    const T* K_ptr         = static_cast<const T*>(devPtrK);
+    const T* V_ptr         = static_cast<const T*>(devPtrV);
+    T* O_ptr               = static_cast<T*>(devPtrO);
+    T* attn_workspace      = static_cast<T*>(attn_weights_buffer);
+    const int* cu_kv       = static_cast<const int*>(devPtrCuSeqlensKV);
+    const int* cu_kv_p     = static_cast<const int*>(devPtrSeqOffsetsKV);
+    const T* dropout_mask = nullptr;
+    int bi = static_cast<int>(b);
+    int hi = static_cast<int>(h_q);
+
+    switch (max_seqlen_kv) {
+      SMALLSEQ_DISPATCH_FWD_CASE(2)
+      SMALLSEQ_DISPATCH_FWD_CASE(3)
+      SMALLSEQ_DISPATCH_FWD_CASE(4)
+      SMALLSEQ_DISPATCH_FWD_CASE(5)
+      SMALLSEQ_DISPATCH_FWD_CASE(6)
+      SMALLSEQ_DISPATCH_FWD_CASE(7)
+      SMALLSEQ_DISPATCH_FWD_CASE(8)
+      SMALLSEQ_DISPATCH_FWD_CASE(9)
+      SMALLSEQ_DISPATCH_FWD_CASE(10)
+      SMALLSEQ_DISPATCH_FWD_CASE(11)
+      SMALLSEQ_DISPATCH_FWD_CASE(12)
+      SMALLSEQ_DISPATCH_FWD_CASE(13)
+      SMALLSEQ_DISPATCH_FWD_CASE(14)
+      SMALLSEQ_DISPATCH_FWD_CASE(15)
+      SMALLSEQ_DISPATCH_FWD_CASE(16)
+      default:
+        NVTE_ERROR("Unsupported max_seqlen_kv for small-seq: max_seqlen_kv <= 16.");
+    }
   } else {
-    NVTE_ERROR("small-seq path supports only BF16 (and optionally FP16).");
+    NVTE_ERROR("small-seq path supports only BF16 and FP16.");
   }
 
   if (workspace_size) {
@@ -941,10 +974,6 @@ void fused_attn_smallseq_bwd(size_t b,
   (void)h_kv;
   (void)d_qk;
   (void)d_v;
-  NVTE_CHECK(max_seqlen_kv >= 2 && max_seqlen_kv <= 16,
-             "small-seq path requires 2 <= max_seqlen_kv <= 16.");
-  NVTE_CHECK(d_qk == 128 && d_v == 128, "small-seq path currently supports head_dim 128 only.");
-  NVTE_CHECK(workspace != nullptr, "small-seq bwd requires workspace.");
 
   float sqr_dk_scale = attn_scale;
   hipStream_t hip_stream = reinterpret_cast<hipStream_t>(stream);
@@ -986,8 +1015,45 @@ void fused_attn_smallseq_bwd(size_t b,
       default:
         NVTE_ERROR("Unsupported max_seqlen_kv for small-seq: max_seqlen_kv <= 16.");
     }
+  } else if (qkv_dtype == DType::kFloat16) {
+    using T = __half;
+    const T* Q_ptr      = static_cast<const T*>(devPtrQ);
+    const T* K_ptr      = static_cast<const T*>(devPtrK);
+    const T* V_ptr      = static_cast<const T*>(devPtrV);
+    const T* O_ptr      = static_cast<const T*>(devPtrO);
+    const T* dO_ptr     = static_cast<const T*>(devPtrdO);
+    const T* attn_ptr   = static_cast<const T*>(attn_weights);
+    T* dQ_ptr           = static_cast<T*>(devPtrdQ);
+    T* dK_ptr           = static_cast<T*>(devPtrdK);
+    T* dV_ptr           = static_cast<T*>(devPtrdV);
+    T* workspace_ptr   = static_cast<T*>(workspace);
+    const int* cu_kv    = static_cast<const int*>(devPtrCuSeqlensKV);
+    const int* cu_kv_p  = static_cast<const int*>(devPtrSeqOffsetsKV);
+    const T* dropout_mask = nullptr;
+    int bi = static_cast<int>(b);
+    int hi = static_cast<int>(h_q);
+
+    switch (max_seqlen_kv) {
+      SMALLSEQ_DISPATCH_BWD_CASE(2)
+      SMALLSEQ_DISPATCH_BWD_CASE(3)
+      SMALLSEQ_DISPATCH_BWD_CASE(4)
+      SMALLSEQ_DISPATCH_BWD_CASE(5)
+      SMALLSEQ_DISPATCH_BWD_CASE(6)
+      SMALLSEQ_DISPATCH_BWD_CASE(7)
+      SMALLSEQ_DISPATCH_BWD_CASE(8)
+      SMALLSEQ_DISPATCH_BWD_CASE(9)
+      SMALLSEQ_DISPATCH_BWD_CASE(10)
+      SMALLSEQ_DISPATCH_BWD_CASE(11)
+      SMALLSEQ_DISPATCH_BWD_CASE(12)
+      SMALLSEQ_DISPATCH_BWD_CASE(13)
+      SMALLSEQ_DISPATCH_BWD_CASE(14)
+      SMALLSEQ_DISPATCH_BWD_CASE(15)
+      SMALLSEQ_DISPATCH_BWD_CASE(16)
+      default:
+        NVTE_ERROR("Unsupported max_seqlen_kv for small-seq: max_seqlen_kv <= 16.");
+    }
   } else {
-    NVTE_ERROR("small-seq path supports only BF16 (and optionally FP16).");
+    NVTE_ERROR("small-seq path supports only BF16 and FP16.");
   }
 
   if (workspace_size)
