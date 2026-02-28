@@ -383,7 +383,7 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
             if build_rocm_version:
                 build_rocm_version = build_rocm_version[0].split(":")[1].strip().split('.')[:2]
             # Strict by default. Set NVTE_ALLOW_ROCM_MISMATCH=1 to bypass.
-            allow_rocm_mismatch = os.getenv("NVTE_ALLOW_ROCM_MISMATCH", "0").lower() in ("1", "true", "yes")
+            allow_rocm_mismatch = os.getenv("NVTE_ALLOW_ROCM_MISMATCH", "0").strip().lower() in ("1", "true", "yes")
             mismatch_detected = rocm_version != build_rocm_version
             if allow_rocm_mismatch and mismatch_detected:
                 _logger.warning(
