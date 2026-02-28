@@ -385,7 +385,11 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
             # Strict by default. Set NVTE_ALLOW_ROCM_MISMATCH=1 to bypass.
             allow_rocm_mismatch = os.getenv("NVTE_ALLOW_ROCM_MISMATCH", "0").lower() in ("1", "true", "yes")
             if not allow_rocm_mismatch:
-                assert (rocm_version == build_rocm_version), f"ROCm {'.'.join(rocm_version)} is detected but the library is built for {'.'.join(build_rocm_version)}"
+                assert rocm_version == build_rocm_version, (
+                    f"ROCm {'.'.join(rocm_version)} is detected but the library is built for "
+                    f"{'.'.join(build_rocm_version)}. Set NVTE_ALLOW_ROCM_MISMATCH=1 to bypass "
+                    "this check at your own risk."
+                )
         except FileNotFoundError:
             pass
 
