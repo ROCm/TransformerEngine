@@ -1,0 +1,13 @@
+config_id,layout,dtype,batch_size,seqlen_q,seqlen_kv,nheads,dim,gqa_ratio,causal,te_total_fwd_ms,te_total_bwd_ms,ck_total_fwd_ms,ck_total_bwd_ms
+config_1,THD_THD_THD,bf16,4000,1,2,16,128,1.0,false,0.0593,0.2651,0.0472,0.2812
+config_2,THD_THD_THD,bf16,4000,1,4,16,128,1.0,false,0.0731,0.3882,0.0819,0.4817
+config_3,THD_THD_THD,bf16,4000,1,6,16,128,1.0,false,0.0981,0.5369,0.113,0.6813
+config_4,THD_THD_THD,bf16,4000,1,8,16,128,1.0,false,0.1321,0.7059,0.1367,0.805
+config_5,THD_THD_THD,bf16,4000,1,12,16,128,1.0,false,0.2198,0.8625,0.1805,0.7456
+config_6,THD_THD_THD,bf16,4000,1,16,16,128,1.0,false,0.2604,1.0985,0.184,0.7392
+config_7,THD_THD_THD,fp16,4000,1,2,16,128,1.0,false,0.0521,0.2008,0.0397,0.1857
+config_8,THD_THD_THD,fp16,4000,1,4,16,128,1.0,false,0.0617,0.303,0.0659,0.3461
+config_9,THD_THD_THD,fp16,4000,1,6,16,128,1.0,false,0.0793,0.4451,0.0848,0.5663
+config_10,THD_THD_THD,fp16,4000,1,8,16,128,1.0,false,0.1018,0.6148,0.0932,0.7069
+config_11,THD_THD_THD,fp16,4000,1,12,16,128,1.0,false,0.1355,0.7409,0.095,0.6536
+config_12,THD_THD_THD,fp16,4000,1,16,16,128,1.0,false,0.1608,0.9313,0.0969,0.6379

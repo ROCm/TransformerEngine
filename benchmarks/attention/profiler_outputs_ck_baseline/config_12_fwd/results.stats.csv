@@ -1,0 +1,5 @@
+"Name","Calls","TotalDurationNs","AverageNs","Percentage"
+"void compute_output_kernel<__half, FmhaKernelConfig<4000, 16, 1, 16, 128, 256, false, (CausalMaskType)0>, 2, 8>(__half const*, __half const*, __half*, int const*, int const*) [clone .kd]",103,6670062,64757,66.78813249000164
+"void compute_scores_kernel<__half, FmhaKernelConfig<4000, 16, 1, 16, 128, 256, false, (CausalMaskType)0>, 1>(__half const*, __half const*, __half*, float, int const*, int const*) [clone .kd]",103,2723186,26438,27.267588721501784
+"void apply_mask_and_softmax_kernel<__half, FmhaKernelConfig<4000, 16, 1, 16, 128, 256, false, (CausalMaskType)0> >(__half*, __half const*, float, int const*) [clone .kd]",103,584115,5671,5.848813700591886
+"__amd_rocclr_copyBuffer.kd",2,9534,4767,0.0954650879046815

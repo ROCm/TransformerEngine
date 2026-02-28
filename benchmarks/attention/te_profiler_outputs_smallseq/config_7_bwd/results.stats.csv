@@ -1,0 +1,64 @@
+"Name","Calls","TotalDurationNs","AverageNs","Percentage"
+"void transformer_engine::fused_attn_rocm::compute_grad_qk_kernel<__half, transformer_engine::fused_attn_rocm::SmallSeqConfig<2, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 4, 16>(__half const*, __half const*, __half const*, __half*, __half*, float, int const*, int const*, int, int) [clone .kd]",40,2972223,74305,11.39094372943403
+"void transformer_engine::fused_attn_rocm::compute_grad_attn_kernel<__half, transformer_engine::fused_attn_rocm::SmallSeqConfig<2, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 16>(__half const*, __half const*, __half*, int const*, int const*, int, int) [clone .kd]",40,2967018,74175,11.37099574366321
+"__amd_rocclr_fillBufferAligned.kd",369,2121154,5748,8.129250683903566
+"void transformer_engine::fused_attn_rocm::compute_grad_v_kernel<__half, transformer_engine::fused_attn_rocm::SmallSeqConfig<2, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 16, 16>(__half const*, __half const*, __half*, int const*, int const*, int, int) [clone .kd]",40,1865012,46625,7.147595165880628
+"void transformer_engine::fused_attn_rocm::compute_output_kernel<__half, transformer_engine::fused_attn_rocm::SmallSeqConfig<2, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 2, 8>(__half const*, __half const*, __half*, int const*, int const*, int, int) [clone .kd]",40,1400520,35013,5.367445347117947
+"input_reduce_reduce_window_fusion_2.kd",80,1381811,17272,5.295743739858337
+"__amd_rocclr_copyBuffer.kd",193,1162367,6022,4.454732060801307
+"loop_reduce_window_fusion_14.kd",120,1057135,8809,4.051433993820532
+"ck_fused_attn::get_runtime_max_seqlen_kernel(unsigned long, int const*, int const*, unsigned long*) [clone .kd]",160,954248,5964,3.6571230597182525
+"input_reduce_reduce_window_fusion.kd",40,953298,23832,3.653482216974299
+"input_reduce_reduce_window_fusion_3.kd",40,645718,16142,2.4746923104634755
+"void transformer_engine::fused_attn_rocm::compute_scores_kernel<__half, transformer_engine::fused_attn_rocm::SmallSeqConfig<2, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 1>(__half const*, __half const*, __half*, float, int const*, int const*, int, int) [clone .kd]",40,506271,12656,1.9402664177096722
+"loop_reduce_window_fusion_13.kd",120,496094,4134,1.9012634107568125
+"input_scatter_fusion_2.kd",81,445624,5501,1.7078388494017138
+"loop_reduce_window_fusion_4.kd",80,435611,5445,1.6694643668804416
+"loop_reduce_window_fusion_12.kd",80,423342,5291,1.6224438409587911
+"loop_reduce_window_fusion_3.kd",80,353528,4419,1.3548840564047022
+"loop_reduce_window_fusion_11.kd",80,343672,4295,1.3171112710526942
+"loop_slice_fusion_1.kd",120,327370,2728,1.2546344095664483
+"loop_broadcast_fusion_4.kd",40,320115,8002,1.226829868400781
+"loop_reduce_window_fusion_16.kd",80,315835,3947,1.210426913722758
+"input_reduce_fusion.kd",40,274566,6864,1.0522648724593624
+"input_concatenate_fusion_1.kd",40,271646,6791,1.0410740716042626
+"input_scatter_fusion_3.kd",40,269880,6747,1.034305936566555
+"loop_remainder_fusion_1.kd",40,255099,6377,0.9776582559366815
+"input_concatenate_fusion.kd",42,243038,5786,0.9314348829526545
+"loop_broadcast_fusion_1.kd",40,233310,5832,0.8941526532545685
+"void transformer_engine::fused_attn_rocm::softmax_backward_kernel<__half, transformer_engine::fused_attn_rocm::SmallSeqConfig<2, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0> >(__half const*, __half const*, __half*, float, int const*, int, int) [clone .kd]",40,226333,5658,0.8674135376497631
+"input_reduce_fusion_1.kd",40,210757,5268,0.8077190465131074
+"loop_compare_fusion_1.kd",40,200738,5018,0.7693215691955577
+"void transformer_engine::fused_attn_rocm::apply_mask_and_softmax_kernel<__half, transformer_engine::fused_attn_rocm::SmallSeqConfig<2, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0> >(__half*, __half const*, float, int const*, int, int) [clone .kd]",40,178144,4453,0.6827308313461997
+"loop_convert_fusion.kd",40,177422,4435,0.6799637908607948
+"loop_reduce_window_fusion_2.kd",40,163605,4090,0.6270106074995229
+"input_scatter_fusion.kd",41,161760,3945,0.6199397076441602
+"loop_select_fusion.kd",42,161280,3840,0.6181001239419519
+"loop_broadcast_fusion.kd",40,146498,3662,0.5614486108460323
+"loop_select_fusion_4.kd",40,144217,3605,0.552706755794497
+"loop_remainder_fusion.kd",40,137966,3449,0.5287500105392816
+"loop_select_fusion_1.kd",40,123341,3083,0.47270019461262586
+"loop_broadcast_fusion_2.kd",40,123261,3081,0.47239359732892444
+"loop_compare_fusion.kd",40,117814,2945,0.45151815477490775
+"loop_maximum_fusion.kd",3,117497,39165,0.4503032630382411
+"loop_select_fusion_3.kd",40,117492,2937,0.4502841007080098
+"loop_compare_fusion_2.kd",40,114724,2868,0.43967583469194255
+"loop_compare_fusion_3.kd",40,109962,2749,0.4214256313796188
+"loop_select_fusion_2.kd",40,108523,2713,0.4159107127390405
+"transformer_engine::fused_attn_rocm::populate_rng_state_kernel(long*, long const*, long) [clone .kd]",40,82602,2065,0.31656936035375194
+"loop_broadcast_fusion_3.kd",40,79437,1985,0.3044396053173167
+"wrapped_broadcast.kd",6,26281,4380,0.10072104016194469
+"loop_xor_fusion.kd",3,10616,3538,0.04068545954717114
+"loop_subtract_fusion.kd",2,10095,5047,0.038688744737066
+"loop_not_fusion.kd",1,6329,6329,0.024255677606824243
+"wrapped_transpose.kd",1,6170,6170,0.02364631550546778
+"wrapped_slice_4.kd",1,5408,5408,0.020725976378212278
+"loop_broadcast_maximum_fusion.kd",1,5048,5048,0.019346288601556134
+"wrapped_concatenate.kd",1,4487,4487,0.017196275149600312
+"wrapped_iota.kd",1,4367,4367,0.016736379224048265
+"loop_transpose_fusion.kd",1,4366,4366,0.016732546758002
+"input_scatter_fusion_1.kd",1,3084,3084,0.011819325286687622
+"wrapped_slice.kd",1,2043,2043,0.00782972813252361
+"wrapped_slice_1.kd",1,1963,1963,0.0075231308488222445
+"wrapped_slice_2.kd",1,1963,1963,0.0075231308488222445
+"wrapped_slice_3.kd",1,1762,1762,0.006752805173522565

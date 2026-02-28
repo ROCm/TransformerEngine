@@ -1,0 +1,68 @@
+"Name","Calls","TotalDurationNs","AverageNs","Percentage"
+"void transformer_engine::fused_attn_rocm::compute_grad_attn_kernel<hip_bfloat16, transformer_engine::fused_attn_rocm::SmallSeqConfig<4, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 16>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, int const*, int const*, int, int) [clone .kd]",40,6034654,150866,16.692233849061193
+"void transformer_engine::fused_attn_rocm::compute_grad_qk_kernel<hip_bfloat16, transformer_engine::fused_attn_rocm::SmallSeqConfig<4, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 4, 16>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, hip_bfloat16*, float, int const*, int const*, int, int) [clone .kd]",40,4786920,119673,13.240922852701745
+"void transformer_engine::fused_attn_rocm::compute_grad_v_kernel<hip_bfloat16, transformer_engine::fused_attn_rocm::SmallSeqConfig<4, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 16, 16>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, int const*, int const*, int, int) [clone .kd]",40,4473215,111830,12.37319502280135
+"__amd_rocclr_fillBufferAligned.kd",369,2612091,7078,7.225208571531706
+"void transformer_engine::fused_attn_rocm::compute_output_kernel<hip_bfloat16, transformer_engine::fused_attn_rocm::SmallSeqConfig<4, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 2, 8>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, int const*, int const*, int, int) [clone .kd]",40,1956836,48920,5.412731884257409
+"__amd_rocclr_copyBuffer.kd",194,1110932,5726,3.0729080299227176
+"input_reduce_reduce_window_fusion_2.kd",40,996721,24918,2.7569931953464306
+"ck_fused_attn::get_runtime_max_seqlen_kernel(unsigned long, int const*, int const*, unsigned long*) [clone .kd]",160,986144,6163,2.727736545765275
+"void transformer_engine::fused_attn_rocm::compute_scores_kernel<hip_bfloat16, transformer_engine::fused_attn_rocm::SmallSeqConfig<4, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 1>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, float, int const*, int const*, int, int) [clone .kd]",40,752922,18823,2.082629773654438
+"input_reduce_reduce_window_fusion_1.kd",40,684337,17108,1.8929193348226738
+"input_reduce_reduce_window_fusion_3.kd",40,640510,16012,1.7716910866243838
+"loop_reduce_window_fusion_16.kd",120,611314,5094,1.690933107880749
+"loop_reduce_window_fusion_15.kd",120,557663,4647,1.5425310556278804
+"loop_slice_fusion_1.kd",120,547579,4563,1.5146380751630628
+"loop_reduce_window_fusion_4.kd",80,408649,5108,1.1303489264148379
+"input_reduce_reduce_window_fusion.kd",40,389696,9742,1.0779237321715132
+"loop_convert_fusion.kd",43,387709,9016,1.0724275647594155
+"loop_reduce_window_fusion_8.kd",40,379888,9497,1.0507941851267957
+"loop_reduce_window_fusion_18.kd",80,377727,4721,1.044816722732461
+"loop_reduce_window_fusion_14.kd",80,376560,4707,1.0415887270757334
+"loop_reduce_window_fusion_3.kd",80,371711,4646,1.0281760870247714
+"loop_broadcast_fusion_5.kd",40,329130,8228,0.9103943534693969
+"input_reduce_fusion.kd",40,276489,6912,0.7647860249639963
+"loop_remainder_fusion_1.kd",40,269718,6742,0.7460570116034965
+"input_scatter_fusion_3.kd",42,257342,6127,0.7118242144761083
+"input_concatenate_fusion_1.kd",40,249606,6240,0.6904259502083745
+"input_scatter_fusion_1.kd",41,248089,6050,0.68622983246094
+"loop_compare_fusion.kd",40,235871,5896,0.6524340733059281
+"void transformer_engine::fused_attn_rocm::softmax_backward_kernel<hip_bfloat16, transformer_engine::fused_attn_rocm::SmallSeqConfig<4, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0> >(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, float, int const*, int, int) [clone .kd]",40,231385,5784,0.6400255141661848
+"input_reduce_fusion_2.kd",40,226173,5654,0.6256087932040042
+"void transformer_engine::fused_attn_rocm::apply_mask_and_softmax_kernel<hip_bfloat16, transformer_engine::fused_attn_rocm::SmallSeqConfig<4, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0> >(hip_bfloat16*, hip_bfloat16 const*, float, int const*, int, int) [clone .kd]",40,214514,5362,0.5933592633310066
+"loop_reduce_window_fusion_6.kd",40,210148,5253,0.5812826317652199
+"input_concatenate_fusion.kd",42,204503,4869,0.5656682054736794
+"loop_select_fusion.kd",42,202773,4827,0.560882916282472
+"input_scatter_fusion.kd",41,198852,4850,0.5500371828034409
+"loop_broadcast_fusion.kd",41,197179,4809,0.545409559209863
+"loop_broadcast_fusion_3.kd",40,196293,4907,0.542958827288817
+"loop_select_fusion_4.kd",40,195137,4878,0.5397612583263686
+"loop_remainder_fusion.kd",40,194772,4869,0.5387516452889174
+"loop_broadcast_fusion_2.kd",40,193125,4828,0.5341959393363633
+"loop_compare_fusion_2.kd",40,192771,4819,0.5332167529931915
+"loop_reduce_window_fusion_2.kd",40,191126,4778,0.5286665791668701
+"input_scatter_fusion_2.kd",40,187079,4676,0.5174723217351845
+"loop_select_fusion_2.kd",40,185515,4637,0.5131461990212839
+"loop_select_fusion_3.kd",40,184594,4614,0.5105986548911672
+"input_reduce_fusion_1.kd",40,180148,4503,0.49830073827607607
+"loop_compare_fusion_1.kd",40,179429,4485,0.4963119388954529
+"loop_reduce_window_fusion_5.kd",40,167293,4182,0.4627429969159779
+"loop_reduce_window_fusion_7.kd",40,165444,4136,0.45762854621393034
+"loop_broadcast_fusion_1.kd",40,163963,4099,0.453532006738683
+"transformer_engine::fused_attn_rocm::populate_rng_state_kernel(long*, long const*, long) [clone .kd]",40,160117,4002,0.44289372799337473
+"loop_select_fusion_5.kd",40,144576,3614,0.3999063411028819
+"loop_select_fusion_1.kd",40,118416,2960,0.3275461299803485
+"loop_broadcast_fusion_4.kd",40,73430,1835,0.20311201463026105
+"wrapped_broadcast.kd",6,24557,4092,0.06792621194709683
+"wrapped_subtract.kd",3,13179,4393,0.03645394580978088
+"loop_xor_fusion.kd",3,10616,3538,0.029364526042691696
+"loop_broadcast_maximum_fusion.kd",1,6810,6810,0.018836889822035647
+"loop_not_fusion.kd",1,4808,4808,0.01329923146319345
+"wrapped_concatenate.kd",1,4687,4687,0.01296453782612057
+"wrapped_slice_4.kd",1,4207,4207,0.01163682753029427
+"wrapped_iota.kd",1,4127,4127,0.011415542480989886
+"wrapped_transpose.kd",1,3164,3164,0.008751823699988368
+"wrapped_slice_3.kd",1,1963,1963,0.005429781897306311
+"wrapped_slice_1.kd",1,1883,1883,0.005208496848001927
+"wrapped_slice.kd",1,1843,1843,0.005097854323349736
+"wrapped_slice_2.kd",1,1843,1843,0.005097854323349736

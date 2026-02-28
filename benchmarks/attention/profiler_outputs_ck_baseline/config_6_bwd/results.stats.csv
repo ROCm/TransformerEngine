@@ -1,0 +1,6 @@
+"Name","Calls","TotalDurationNs","AverageNs","Percentage"
+"void compute_grad_attn_kernel<hip_bfloat16, FmhaKernelConfig<4000, 16, 1, 16, 128, 256, false, (CausalMaskType)0>, 16>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, int const*, int const*) [clone .kd]",103,29453134,285952,38.68136505447372
+"void compute_grad_qk_kernel<hip_bfloat16, FmhaKernelConfig<4000, 16, 1, 16, 128, 256, false, (CausalMaskType)0>, 4, 16>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, hip_bfloat16*, float, int const*, int const*) [clone .kd]",103,27778285,269692,36.48175378118375
+"void compute_grad_v_kernel<hip_bfloat16, FmhaKernelConfig<4000, 16, 1, 16, 128, 256, false, (CausalMaskType)0>, 16, 16>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, int const*, int const*) [clone .kd]",103,18161062,176320,23.851270598196123
+"void softmax_backward_kernel<hip_bfloat16, FmhaKernelConfig<4000, 16, 1, 16, 128, 256, false, (CausalMaskType)0> >(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, float, int const*) [clone .kd]",103,742141,7205,0.9746679909476588
+"__amd_rocclr_copyBuffer.kd",2,8332,4166,0.010942575198750498

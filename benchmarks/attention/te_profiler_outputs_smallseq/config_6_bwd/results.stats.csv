@@ -1,0 +1,80 @@
+"Name","Calls","TotalDurationNs","AverageNs","Percentage"
+"void transformer_engine::fused_attn_rocm::compute_grad_attn_kernel<hip_bfloat16, transformer_engine::fused_attn_rocm::SmallSeqConfig<16, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 16>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, int const*, int const*, int, int) [clone .kd]",40,16478465,411961,21.753658714158483
+"void transformer_engine::fused_attn_rocm::compute_grad_qk_kernel<hip_bfloat16, transformer_engine::fused_attn_rocm::SmallSeqConfig<16, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 4, 16>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, hip_bfloat16*, float, int const*, int const*, int, int) [clone .kd]",40,15918760,397969,21.01477729828582
+"void transformer_engine::fused_attn_rocm::compute_grad_v_kernel<hip_bfloat16, transformer_engine::fused_attn_rocm::SmallSeqConfig<16, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 16, 16>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, int const*, int const*, int, int) [clone .kd]",40,11182148,279553,14.761850165243537
+"void transformer_engine::fused_attn_rocm::compute_output_kernel<hip_bfloat16, transformer_engine::fused_attn_rocm::SmallSeqConfig<16, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 2, 8>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, int const*, int const*, int, int) [clone .kd]",40,8238849,205971,10.876323088557454
+"__amd_rocclr_fillBufferAligned.kd",369,5039694,13657,6.653033720057798
+"void transformer_engine::fused_attn_rocm::compute_scores_kernel<hip_bfloat16, transformer_engine::fused_attn_rocm::SmallSeqConfig<16, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 1>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, float, int const*, int const*, int, int) [clone .kd]",40,1729690,43242,2.2834096465473444
+"loop_slice_fusion_5.kd",240,1129840,4707,1.4915317513861164
+"__amd_rocclr_copyBuffer.kd",194,1077727,5555,1.4227359978635072
+"ck_fused_attn::get_runtime_max_seqlen_kernel(unsigned long, int const*, int const*, unsigned long*) [clone .kd]",160,1035980,6474,1.3676246758841861
+"loop_convert_fusion.kd",43,930929,21649,1.2289440644570258
+"input_reduce_reduce_window_fusion.kd",40,691305,17282,0.9126100663739815
+"input_reduce_reduce_window_fusion_1.kd",40,638994,15974,0.8435529277997061
+"void transformer_engine::fused_attn_rocm::apply_mask_and_softmax_kernel<hip_bfloat16, transformer_engine::fused_attn_rocm::SmallSeqConfig<16, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0> >(hip_bfloat16*, hip_bfloat16 const*, float, int const*, int, int) [clone .kd]",40,447869,11196,0.5912437459831025
+"input_scatter_fusion_2.kd",42,444663,10587,0.587011420348549
+"loop_reduce_window_fusion_11.kd",80,410124,5126,0.5414155703510936
+"loop_reduce_window_fusion_12.kd",80,399391,4992,0.5272466523736568
+"input_scatter_fusion.kd",41,396068,9660,0.522859871935846
+"loop_reduce_window_fusion_8.kd",40,394267,9856,0.5204823240669032
+"loop_reduce_window_fusion_15.kd",80,380288,4753,0.5020282753939703
+"loop_reduce_window_fusion_3.kd",80,373916,4673,0.493616429185806
+"void transformer_engine::fused_attn_rocm::softmax_backward_kernel<hip_bfloat16, transformer_engine::fused_attn_rocm::SmallSeqConfig<16, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0> >(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, float, int const*, int, int) [clone .kd]",40,362135,9053,0.4780640186116718
+"input_reduce_fusion.kd",40,353282,8832,0.46637693849853956
+"loop_broadcast_fusion_5.kd",40,330176,8254,0.4358740950450173
+"input_concatenate_fusion.kd",43,255501,5941,0.33729364689770597
+"input_scatter_fusion_3.kd",40,254734,6368,0.3362811098541306
+"loop_reduce_window_fusion_13.kd",40,245566,6139,0.32417818988607505
+"loop_slice_fusion_1.kd",40,244884,6122,0.3232778635970029
+"loop_remainder_fusion_1.kd",40,236513,5912,0.3122270844682296
+"input_concatenate_fusion_1.kd",40,236354,5908,0.3120171843509826
+"input_compare_reduce_fusion_1.kd",40,234030,5850,0.30894921031021455
+"loop_remainder_fusion.kd",40,230984,5774,0.3049281049194317
+"input_scatter_fusion_1.kd",41,220970,5389,0.29170835791243904
+"loop_broadcast_fusion_2.kd",40,214719,5367,0.28345624701362626
+"input_reduce_fusion_3.kd",40,212997,5324,0.28118298914004514
+"loop_reduce_window_fusion_6.kd",40,210074,5251,0.27732425931166094
+"loop_reduce_window_fusion_1.kd",40,206785,5169,0.2729823631756515
+"loop_broadcast_fusion.kd",41,200175,4882,0.26425632685487843
+"loop_reduce_window_fusion_2.kd",40,199459,4986,0.263311116264005
+"loop_select_fusion.kd",41,198375,4838,0.26188009911245913
+"loop_reduce_window_fusion_7.kd",40,198175,4954,0.2616160738077459
+"loop_broadcast_fusion_1.kd",40,196411,4910,0.259287370620175
+"loop_select_fusion_4.kd",40,195807,4895,0.25849001419994094
+"input_compare_reduce_fusion.kd",40,195567,4889,0.25817318383428506
+"loop_compare_fusion.kd",40,194409,4860,0.2566444773199953
+"loop_reduce_window_fusion_4.kd",40,193570,4839,0.2555368911667232
+"loop_select_fusion_5.kd",40,192364,4809,0.2539448185793023
+"loop_broadcast_fusion_3.kd",40,192331,4808,0.2539012544040246
+"loop_slice_fusion.kd",40,192288,4807,0.25384448896351125
+"transformer_engine::fused_attn_rocm::populate_rng_state_kernel(long*, long const*, long) [clone .kd]",40,192245,4806,0.2537877235229979
+"loop_select_fusion_3.kd",40,192202,4805,0.2537309580824845
+"loop_select_fusion_2.kd",40,191569,4789,0.2528953179930671
+"loop_broadcast_fusion_4.kd",40,190922,4773,0.25204119613231973
+"loop_compare_fusion_1.kd",40,190402,4760,0.2513547303400653
+"loop_select_fusion_1.kd",40,188802,4720,0.2492425279023592
+"input_reduce_fusion_1.kd",40,186316,4657,0.24596069336477347
+"loop_slice_fusion_8.kd",40,186000,4650,0.24554353338332652
+"loop_reduce_window_fusion_5.kd",40,185837,4645,0.2453283527599852
+"input_reduce_fusion_2.kd",40,183675,4591,0.24247423921603495
+"wrapped_broadcast.kd",6,25958,4326,0.03426784429873328
+"wrapped_subtract.kd",3,12498,4166,0.016498941291531264
+"loop_xor_fusion.kd",3,8933,2977,0.011792690235017505
+"input_transpose_fusion_2.kd",1,8452,8452,0.011157709377182128
+"loop_transpose_fusion_1.kd",2,7412,3706,0.009784777792673205
+"loop_multiply_fusion.kd",2,7330,3665,0.009676527417740772
+"input_maximum_transpose_fusion.kd",1,7090,7090,0.009359697052084866
+"loop_broadcast_maximum_fusion.kd",1,6209,6209,0.00819666558482298
+"loop_not_fusion.kd",1,4887,4887,0.00645145832066837
+"wrapped_concatenate.kd",1,4687,4687,0.006187433015955115
+"wrapped_slice_4.kd",1,4407,4407,0.005817797589356559
+"loop_multiply_fusion_1.kd",2,4086,2043,0.005394036975291786
+"wrapped_iota.kd",1,3805,3805,0.005023081422169663
+"wrapped_transpose.kd",1,3485,3485,0.004600640934628457
+"input_transpose_fusion.kd",1,3084,3084,0.004071270198678382
+"loop_multiply_fusion_2.kd",2,2926,1463,0.003862690207954911
+"wrapped_slice.kd",1,1923,1923,0.0025386033048179404
+"wrapped_slice_2.kd",1,1923,1923,0.0025386033048179404
+"wrapped_slice_3.kd",1,1922,1922,0.002537283178294374
+"input_transpose_fusion_1.kd",1,1883,1883,0.0024857982438752893
+"wrapped_slice_1.kd",1,1843,1843,0.0024329931829326387

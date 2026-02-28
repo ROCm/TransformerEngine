@@ -1,0 +1,13 @@
+config_id,layout,dtype,batch_size,seqlen_q,seqlen_kv,nheads,dim,gqa_ratio,causal,total_fwd_ms,total_bwd_ms
+config_1,THD_THD_THD,bf16,4000,1,2,16,128,1.0,false,0.0593,0.2651
+config_2,THD_THD_THD,bf16,4000,1,4,16,128,1.0,false,0.0731,0.3882
+config_3,THD_THD_THD,bf16,4000,1,6,16,128,1.0,false,0.0981,0.5369
+config_4,THD_THD_THD,bf16,4000,1,8,16,128,1.0,false,0.1321,0.7059
+config_5,THD_THD_THD,bf16,4000,1,12,16,128,1.0,false,0.2198,0.8625
+config_6,THD_THD_THD,bf16,4000,1,16,16,128,1.0,false,0.2604,1.0985
+config_7,THD_THD_THD,fp16,4000,1,2,16,128,1.0,false,0.0521,0.2008
+config_8,THD_THD_THD,fp16,4000,1,4,16,128,1.0,false,0.0617,0.303
+config_9,THD_THD_THD,fp16,4000,1,6,16,128,1.0,false,0.0793,0.4451
+config_10,THD_THD_THD,fp16,4000,1,8,16,128,1.0,false,0.1018,0.6148
+config_11,THD_THD_THD,fp16,4000,1,12,16,128,1.0,false,0.1355,0.7409
+config_12,THD_THD_THD,fp16,4000,1,16,16,128,1.0,false,0.1608,0.9313

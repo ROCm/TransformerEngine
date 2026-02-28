@@ -1,0 +1,63 @@
+"Name","Calls","TotalDurationNs","AverageNs","Percentage"
+"void transformer_engine::fused_attn_rocm::compute_grad_qk_kernel<hip_bfloat16, transformer_engine::fused_attn_rocm::SmallSeqConfig<2, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 4, 16>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, hip_bfloat16*, float, int const*, int const*, int, int) [clone .kd]",40,3884373,97109,13.184270123691132
+"void transformer_engine::fused_attn_rocm::compute_grad_attn_kernel<hip_bfloat16, transformer_engine::fused_attn_rocm::SmallSeqConfig<2, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 16>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, int const*, int const*, int, int) [clone .kd]",40,3263215,81580,11.075946628112376
+"void transformer_engine::fused_attn_rocm::compute_grad_v_kernel<hip_bfloat16, transformer_engine::fused_attn_rocm::SmallSeqConfig<2, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 16, 16>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, int const*, int const*, int, int) [clone .kd]",40,3227281,80682,10.953980080969577
+"__amd_rocclr_fillBufferAligned.kd",369,2172672,5888,7.374444868754947
+"void transformer_engine::fused_attn_rocm::compute_output_kernel<hip_bfloat16, transformer_engine::fused_attn_rocm::SmallSeqConfig<2, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 2, 8>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, int const*, int const*, int, int) [clone .kd]",40,1646969,41174,5.590113045617776
+"input_reduce_reduce_window_fusion_2.kd",80,1387254,17340,4.708592986865838
+"__amd_rocclr_copyBuffer.kd",193,1064618,5516,3.6135075829596706
+"loop_reduce_window_fusion_14.kd",120,1042356,8686,3.5379462963649972
+"ck_fused_attn::get_runtime_max_seqlen_kernel(unsigned long, int const*, int const*, unsigned long*) [clone .kd]",160,1004535,6278,3.4095749272024265
+"input_reduce_reduce_window_fusion.kd",40,938270,23456,3.184659436402137
+"input_reduce_reduce_window_fusion_3.kd",40,642074,16051,2.179316212783597
+"loop_reduce_window_fusion_13.kd",120,589804,4915,2.0019023034177006
+"void transformer_engine::fused_attn_rocm::compute_scores_kernel<hip_bfloat16, transformer_engine::fused_attn_rocm::SmallSeqConfig<2, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 1>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, float, int const*, int const*, int, int) [clone .kd]",40,531312,13282,1.803369791716342
+"input_scatter_fusion_2.kd",81,427234,5274,1.450110085211965
+"loop_reduce_window_fusion_4.kd",80,426312,5328,1.4469806491217536
+"loop_reduce_window_fusion_12.kd",80,410685,5133,1.3939397621567475
+"loop_reduce_window_fusion_11.kd",80,376722,4709,1.2786631483477953
+"loop_slice_fusion_1.kd",120,342303,2852,1.1618387874052891
+"loop_reduce_window_fusion_3.kd",80,341517,4268,1.1591709601092954
+"loop_broadcast_fusion_4.kd",40,332695,8317,1.129227483766729
+"loop_reduce_window_fusion_16.kd",80,309857,3873,1.0517111481612509
+"loop_convert_fusion.kd",43,298923,6951,1.014599158779068
+"input_concatenate_fusion_1.kd",40,295440,7386,1.0027772217918587
+"input_scatter_fusion_3.kd",40,279374,6984,0.9482462887925763
+"input_reduce_fusion.kd",40,273888,6847,0.9296258046375867
+"loop_remainder_fusion_1.kd",40,253898,6347,0.861776100252198
+"loop_broadcast_fusion_1.kd",40,244246,6106,0.8290154525919792
+"void transformer_engine::fused_attn_rocm::softmax_backward_kernel<hip_bfloat16, transformer_engine::fused_attn_rocm::SmallSeqConfig<2, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0> >(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, float, int const*, int, int) [clone .kd]",40,230864,5771,0.7835945049138765
+"input_reduce_fusion_1.kd",40,222134,5553,0.7539632933438694
+"input_concatenate_fusion.kd",42,220248,5244,0.7475618655064085
+"loop_compare_fusion_1.kd",40,220047,5501,0.746879634862013
+"loop_select_fusion.kd",42,202302,4816,0.6866498697635277
+"loop_select_fusion_4.kd",40,196331,4908,0.666383207187982
+"void transformer_engine::fused_attn_rocm::apply_mask_and_softmax_kernel<hip_bfloat16, transformer_engine::fused_attn_rocm::SmallSeqConfig<2, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0> >(hip_bfloat16*, hip_bfloat16 const*, float, int const*, int, int) [clone .kd]",40,194132,4853,0.6589194002873583
+"loop_compare_fusion_2.kd",40,188724,4718,0.6405636623525818
+"loop_select_fusion_2.kd",40,186358,4658,0.632533027006117
+"loop_compare_fusion.kd",40,184676,4616,0.6268240123599828
+"loop_reduce_window_fusion_2.kd",40,167169,4179,0.5674020626513784
+"input_scatter_fusion.kd",41,166363,4057,0.5646663517091761
+"loop_broadcast_fusion_2.kd",40,159804,3995,0.5424039099351009
+"loop_broadcast_fusion.kd",40,146016,3650,0.4956049242389658
+"transformer_engine::fused_attn_rocm::populate_rng_state_kernel(long*, long const*, long) [clone .kd]",40,132033,3300,0.4481440729922979
+"loop_remainder_fusion.kd",40,130314,3257,0.4423094736006779
+"loop_select_fusion_1.kd",40,123547,3088,0.41934104190603433
+"loop_select_fusion_3.kd",40,107598,2689,0.3652072282370715
+"loop_compare_fusion_3.kd",40,107042,2676,0.3633200628724754
+"loop_broadcast_fusion_3.kd",40,81198,2029,0.27560081524186075
+"wrapped_broadcast.kd",6,23276,3879,0.07900298745744416
+"wrapped_subtract.kd",3,13300,4433,0.04514262472864785
+"loop_xor_fusion.kd",3,9294,3098,0.031545530393086704
+"loop_not_fusion.kd",1,5207,5207,0.017673507290381155
+"loop_broadcast_maximum_fusion.kd",1,4968,4968,0.016862297718189662
+"loop_transpose_fusion.kd",1,4486,4486,0.015226301844564982
+"wrapped_concatenate.kd",1,4246,4246,0.014411698090063067
+"wrapped_slice_4.kd",1,4046,4046,0.013732861627978135
+"wrapped_iota.kd",1,4006,4006,0.01359709433556115
+"input_scatter_fusion_1.kd",1,3285,3285,0.011149888889744978
+"wrapped_transpose.kd",1,3204,3204,0.01087496012260058
+"wrapped_slice_2.kd",1,2083,2083,0.007070081752614547
+"wrapped_slice_1.kd",1,2043,2043,0.006934314460197561
+"wrapped_slice.kd",1,2003,2003,0.006798547167780575
+"wrapped_slice_3.kd",1,2003,2003,0.006798547167780575

@@ -1,0 +1,69 @@
+"Name","Calls","TotalDurationNs","AverageNs","Percentage"
+"void transformer_engine::fused_attn_rocm::compute_grad_attn_kernel<__half, transformer_engine::fused_attn_rocm::SmallSeqConfig<4, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 16>(__half const*, __half const*, __half*, int const*, int const*, int, int) [clone .kd]",40,5588270,139706,17.622401897425988
+"void transformer_engine::fused_attn_rocm::compute_grad_qk_kernel<__half, transformer_engine::fused_attn_rocm::SmallSeqConfig<4, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 4, 16>(__half const*, __half const*, __half const*, __half*, __half*, float, int const*, int const*, int, int) [clone .kd]",40,4195158,104878,13.229274945412769
+"__amd_rocclr_fillBufferAligned.kd",369,2602194,7052,8.205922133875157
+"void transformer_engine::fused_attn_rocm::compute_grad_v_kernel<__half, transformer_engine::fused_attn_rocm::SmallSeqConfig<4, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 16, 16>(__half const*, __half const*, __half*, int const*, int const*, int, int) [clone .kd]",40,2104931,52623,6.637821731654123
+"void transformer_engine::fused_attn_rocm::compute_output_kernel<__half, transformer_engine::fused_attn_rocm::SmallSeqConfig<4, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 2, 8>(__half const*, __half const*, __half*, int const*, int const*, int, int) [clone .kd]",40,1442179,36054,4.547857914171634
+"__amd_rocclr_copyBuffer.kd",194,1085569,5595,3.423301523617655
+"input_reduce_reduce_window_fusion_2.kd",40,993272,24831,3.1322463620154553
+"ck_fused_attn::get_runtime_max_seqlen_kernel(unsigned long, int const*, int const*, unsigned long*) [clone .kd]",160,952939,5955,3.00505774447749
+"void transformer_engine::fused_attn_rocm::compute_scores_kernel<__half, transformer_engine::fused_attn_rocm::SmallSeqConfig<4, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0>, 1>(__half const*, __half const*, __half*, float, int const*, int const*, int, int) [clone .kd]",40,821178,20529,2.5895543245627857
+"input_reduce_reduce_window_fusion_1.kd",40,685458,17136,2.1615663451847933
+"input_reduce_reduce_window_fusion_3.kd",40,635667,15891,2.0045522759156387
+"loop_reduce_window_fusion_16.kd",120,606827,5056,1.9136064070292453
+"loop_reduce_window_fusion_15.kd",120,561957,4682,1.7721105284948324
+"loop_reduce_window_fusion_4.kd",80,413691,5171,1.3045592040735423
+"input_reduce_reduce_window_fusion.kd",40,385054,9626,1.2142534881477571
+"loop_reduce_window_fusion_14.kd",80,379767,4747,1.1975811300062051
+"loop_reduce_window_fusion_3.kd",80,372801,4660,1.1756141077224804
+"loop_reduce_window_fusion_8.kd",40,351444,8786,1.1082656014185033
+"loop_broadcast_fusion_5.kd",40,324885,8122,1.0245127813160857
+"loop_reduce_window_fusion_18.kd",80,315187,3939,0.9939304984984629
+"loop_slice_fusion_1.kd",120,310264,2585,0.9784060008380012
+"input_concatenate_fusion_1.kd",40,291433,7285,0.9190231417187338
+"input_scatter_fusion_3.kd",42,283427,6748,0.8937765180604652
+"input_reduce_fusion.kd",40,282781,7069,0.8917393810528157
+"loop_remainder_fusion_1.kd",40,278897,6972,0.8794913313040379
+"loop_compare_fusion.kd",40,233749,5843,0.7371187900945064
+"void transformer_engine::fused_attn_rocm::softmax_backward_kernel<__half, transformer_engine::fused_attn_rocm::SmallSeqConfig<4, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0> >(__half const*, __half const*, __half*, float, int const*, int, int) [clone .kd]",40,232548,5813,0.7333314811994801
+"input_scatter_fusion_1.kd",41,229740,5603,0.7244765574882114
+"input_reduce_fusion_2.kd",40,218162,5454,0.6879657644935282
+"loop_reduce_window_fusion_6.kd",40,212838,5320,0.6711767282261509
+"loop_maximum_fusion.kd",3,206346,68782,0.650704447338132
+"input_concatenate_fusion.kd",42,204823,4876,0.6459017234021411
+"void transformer_engine::fused_attn_rocm::apply_mask_and_softmax_kernel<__half, transformer_engine::fused_attn_rocm::SmallSeqConfig<4, 128, 256, false, (transformer_engine::fused_attn_rocm::CausalMaskType)0> >(__half*, __half const*, float, int const*, int, int) [clone .kd]",40,204629,5115,0.6452899516072743
+"loop_broadcast_fusion.kd",41,197933,4827,0.6241743642957871
+"input_scatter_fusion.kd",41,195130,4759,0.615335207898819
+"loop_select_fusion_4.kd",40,195046,4876,0.6150703170185674
+"loop_broadcast_fusion_2.kd",40,193767,4844,0.6110370380204503
+"loop_select_fusion.kd",42,193372,4604,0.6097914201906955
+"loop_remainder_fusion.kd",40,192844,4821,0.6081263918005425
+"loop_broadcast_fusion_1.kd",40,191085,4777,0.6025794506295589
+"loop_reduce_window_fusion_2.kd",40,190322,4758,0.6001733584672733
+"input_scatter_fusion_2.kd",40,188679,4716,0.5949922189880658
+"loop_select_fusion_2.kd",40,186519,4662,0.5881807392101667
+"input_reduce_fusion_1.kd",40,176101,4402,0.5553279631332441
+"loop_convert_fusion.kd",40,175941,4398,0.554823409075622
+"loop_reduce_window_fusion_5.kd",40,168811,4220,0.5323392188828346
+"loop_compare_fusion_2.kd",40,165163,4129,0.5208353863690496
+"loop_reduce_window_fusion_7.kd",40,160002,4000,0.5045603645478749
+"transformer_engine::fused_attn_rocm::populate_rng_state_kernel(long*, long const*, long) [clone .kd]",40,154510,3862,0.48724154651999446
+"loop_broadcast_fusion_3.kd",40,141332,3533,0.44568521294908975
+"loop_select_fusion_5.kd",40,138767,3469,0.4375965807128346
+"loop_select_fusion_3.kd",40,119857,2996,0.37796459802761617
+"loop_select_fusion_1.kd",40,113848,2846,0.35901543970104416
+"loop_compare_fusion_1.kd",40,110931,2773,0.34981678853802023
+"loop_broadcast_fusion_4.kd",40,72429,1810,0.22840216149696901
+"wrapped_broadcast.kd",6,23594,3932,0.07440280272210699
+"loop_xor_fusion.kd",3,12779,4259,0.04029810188970947
+"loop_broadcast_maximum_fusion.kd",1,8292,8292,0.026148514036268167
+"loop_convert_subtract_fusion.kd",2,6168,3084,0.01945055892133406
+"loop_not_fusion.kd",1,5448,5448,0.017180065662034366
+"wrapped_iota.kd",1,4527,4527,0.014275726367846839
+"wrapped_concatenate.kd",1,4487,4487,0.0141495878534413
+"wrapped_slice_4.kd",1,4366,4366,0.013768018847364545
+"wrapped_transpose.kd",1,3044,3044,0.009599140946261492
+"wrapped_slice_1.kd",1,2043,2043,0.006442524623262887
+"wrapped_slice_2.kd",1,2043,2043,0.006442524623262887
+"wrapped_slice_3.kd",1,2003,2003,0.006316386108857349
+"wrapped_slice.kd",1,1923,1923,0.0060641090800462715
