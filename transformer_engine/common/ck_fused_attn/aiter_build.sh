@@ -60,6 +60,7 @@ if [[ -z "${RANLIB_BIN}" ]]; then
 fi
 
 # Create static archives for both forward and backward passes
+batch_size=${AITER_ARCHIVE_BATCH_SIZE:-400}
 for lib in fwd bwd; do
   src_obj_dir="${AITER_DIR}/aiter/jit/build/libmha_${lib}/build"
   out_archive="${AITER_TEST_DIR}/libmha_${lib}.a"
@@ -75,9 +76,23 @@ for lib in fwd bwd; do
     exit 1
   fi
 
+  total_objs=${#obj_files[@]}
+
   rm -f "${out_archive}"
-  for obj in "${obj_files[@]}"; do
-    "${AR_BIN}" q "${out_archive}" "${obj}"
+  idx=0
+  while [[ ${idx} -lt ${total_objs} ]]; do
+    remaining=$((total_objs - idx))
+    current_batch_size=${batch_size}
+    if [[ ${remaining} -lt ${batch_size} ]]; then
+      current_batch_size=${remaining}
+    fi
+
+    chunk=("${obj_files[@]:idx:current_batch_size}")
+    "${AR_BIN}" q "${out_archive}" "${chunk[@]}"
+
+    idx=$((idx + current_batch_size))
+    percent=$((idx * 100 / total_objs))
+    echo -ne "[AITER-BUILD] [${lib}] archiving objects: ${idx}/${total_objs} (${percent}%)\r"
   done
   if [[ -n "${RANLIB_BIN}" ]]; then
     "${RANLIB_BIN}" "${out_archive}"
