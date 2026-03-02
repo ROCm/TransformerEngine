@@ -36,7 +36,7 @@
 
 #define MAX_THREADS 1024
 
-#if !defined(__HIP_PLATFORM_AMD__) && defined(__HIP_PLATFORM_NVIDIA__)
+#ifndef __HIP_PLATFORM_AMD__
 #define ATOMIC_CONSUMER(chunk)                                             \
   if (counters) {                                                          \
     if (threadIdx.x == 0 && blockIdx.x == 0) {                             \
@@ -87,7 +87,7 @@
   printf("[%s:%s:%d] " message "\n", FILENAME(__FILE__), __FUNCTION__, __LINE__, __VA_ARGS__)
 
 // Report and error on timeout
-#define CHECK_TIMEOUT(t, timeout) (((uint64_t)clock64() - (t)) > timeout)
+#define CHECK_TIMEOUT(t, timeout) ((clock64() - (t)) > timeout)
 
 template <int RANKS>
 __global__ void __launch_bounds__(MAX_THREADS)
@@ -2376,7 +2376,7 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
 
   if (!(comm->launch_mode & NVTE_LAUNCH_GPU)) return;
   if (comm->push == 0) {
-    kuserbuffers_pullsend<<<1, 1, 0, stream>>>(comm->myrank, peer, &(comm->send_id[peer * NVTE_MAX_RINGS + ring_id]),
+    kuserbuffers_pullsend<<<1, 1, 0, stream>>>(comm->myrank, peer, &(comm->send_id[peer * NVTE_ROCM_MAX_RINGS + ring_id]),
                                                reinterpret_cast<int *>(flagptr));
     NVTE_CHECK_CUDA(cudaGetLastError());
   } else {
@@ -2389,7 +2389,7 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
       // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_end_ptr));
     }
     SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
-    int *arg1 = &comm->send_id[peer * NVTE_MAX_RINGS + ring_id], *arg2 = reinterpret_cast<int *>(flagptr);
+    int *arg1 = &comm->send_id[peer * NVTE_ROCM_MAX_RINGS + ring_id], *arg2 = reinterpret_cast<int *>(flagptr);
     int4 *arg3 = reinterpret_cast<int4 *>(srcptr), *arg4 = reinterpret_cast<int4 *>(dstptr);
     int arg5 = signalonly ? 0 : bytes / 16;
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),
@@ -2573,12 +2573,12 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
 
     kuserbuffers_pullrecv<<<signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, 0, stream>>>(
         comm->myrank, peer, comm->nvrank, peerlocal,
-        &(comm->recv_id[(peer * NVTE_MAX_REGIONS + dsthandler) * NVTE_MAX_RINGS + ring_id]), reinterpret_cast<int *>(flagptr),
+        &(comm->recv_id[(peer * NVTE_MAX_REGIONS + dsthandler) * NVTE_ROCM_MAX_RINGS + ring_id]), reinterpret_cast<int *>(flagptr),
         reinterpret_cast<int4 *>(srcptr), reinterpret_cast<int4 *>(dstptr),
         signalonly ? 0 : bytes / 16, comm->ub_timeout);
     NVTE_CHECK_CUDA(cudaGetLastError());
     if (!signalonly) {
-      kuserbuffers_inc<<<1, 1, 0, stream>>>(&(comm->recv_id[(peer * NVTE_MAX_REGIONS + dsthandler) * NVTE_MAX_RINGS + ring_id]));
+      kuserbuffers_inc<<<1, 1, 0, stream>>>(&(comm->recv_id[(peer * NVTE_MAX_REGIONS + dsthandler) * NVTE_ROCM_MAX_RINGS + ring_id]));
       NVTE_CHECK_CUDA(cudaGetLastError());
     }
     if (comm->use_ce) {
@@ -2587,7 +2587,7 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
   } else {
     kuserbuffers_pushrecv<<<1, 1, 0, stream>>>(
         comm->myrank, peer, comm->nvrank, peerlocal,
-        &comm->recv_id[(peer * NVTE_MAX_REGIONS + dsthandler) * NVTE_MAX_RINGS + ring_id], reinterpret_cast<int *>(flagptr),
+        &comm->recv_id[(peer * NVTE_MAX_REGIONS + dsthandler) * NVTE_ROCM_MAX_RINGS + ring_id], reinterpret_cast<int *>(flagptr),
         signalonly || comm->sms, comm->ub_timeout,
         reinterpret_cast<int *>(0 ?  // temporary disable
                                     GET_RECV_PTR_BY_INDEX(peer, comm, dsthandler, 1)

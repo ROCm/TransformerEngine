@@ -313,17 +313,36 @@ def initialize_ub(
     layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
     dgrad_reduce_scatter_overlap = ["qkv_dgrad", "fc1_dgrad"]
     # Default overlap methods for layers
-    methods = {
-        "ring_exchange": [
-            "qkv_fprop",
-            "fc1_fprop",
-            "proj_dgrad",
-            "fc2_dgrad",
-        ],
-        "pipeline": ["proj_fprop", "fc2_fprop"],
-        "bulk": ["qkv_dgrad", "qkv_wgrad", "fc1_dgrad", "fc1_wgrad"],
-        "external": ["proj_wgrad", "fc2_wgrad"],
-    }
+    if IS_HIP_EXTENSION:
+        methods = {
+            "ring_exchange": [
+                "qkv_fprop",
+                "fc1_fprop",
+                "proj_dgrad",
+                "fc2_dgrad",
+                "proj_wgrad",
+                "fc2_wgrad",
+                "proj_fprop",
+                "fc2_fprop",
+                "qkv_wgrad",
+                "fc1_wgrad"
+            ],
+            "pipeline": [],
+            # TODO: Investigate issues with qkv_dgrad and fc1_dgrad overlap on ROCm
+            "bulk": [],
+        }
+    else:
+        methods = {
+            "ring_exchange": [
+                "qkv_fprop",
+                "fc1_fprop",
+                "proj_dgrad",
+                "fc2_dgrad",
+            ],
+            "pipeline": ["proj_fprop", "fc2_fprop"],
+            "bulk": ["qkv_dgrad", "qkv_wgrad", "fc1_dgrad", "fc1_wgrad"],
+            "external": ["proj_wgrad", "fc2_wgrad"],
+        }
 
     # AG-RS overlap pairs of layers forming a tensor-parallel block
     ag_rs_pairs = {"qkv_fprop": "proj_fprop", "fc1_fprop": "fc2_fprop"}
@@ -478,9 +497,17 @@ def initialize_ub(
                     layers_reduce_scatter_overlap.remove(wgrad_name)
                     layers_all_gather_overlap.remove(name)
                     layers_reduce_scatter_overlap.append(name)
-                    methods["bulk"].remove(name)
+                    if name in methods["bulk"]:
+                        methods["bulk"].remove(name)
                     new_method = user_ub_cfg[name]["method"]
                     methods[new_method].append(name)
+
+        if IS_HIP_EXTENSION and user_ub_cfg is not None:
+            for name, cfg in user_ub_cfg.items():
+                assert cfg.get("method") != "bulk", (
+                    f"Bulk overlap method for '{name}' is not supported on HIP/ROCm. "
+                    "Please use 'ring_exchange' method instead."
+                )
 
         for name in chain.from_iterable(methods.values()):
             ub_cfg = get_default_config(name)

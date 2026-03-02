@@ -359,12 +359,12 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
   register_user_buffer_collective(&((*comm)->gpu_ptrs), LOCALSIZE, *comm, true);
   NVTE_CHECK_CUDA(
-      cudaMalloc(reinterpret_cast<void **>(&(*comm)->send_id), (*comm)->nranks * NVTE_MAX_RINGS * sizeof(int)));
+      cudaMalloc(reinterpret_cast<void **>(&(*comm)->send_id), (*comm)->nranks * NVTE_ROCM_MAX_RINGS * sizeof(int)));
   NVTE_CHECK_CUDA(cudaMalloc(reinterpret_cast<void **>(&(*comm)->recv_id),
-                             NVTE_MAX_REGIONS * (*comm)->nranks * NVTE_MAX_RINGS * sizeof(int)));
-  NVTE_CHECK_CUDA(cudaMemset((*comm)->send_id, 0, (*comm)->nranks * NVTE_MAX_RINGS * sizeof(int)));
+                             NVTE_MAX_REGIONS * (*comm)->nranks * NVTE_ROCM_MAX_RINGS * sizeof(int)));
+  NVTE_CHECK_CUDA(cudaMemset((*comm)->send_id, 0, (*comm)->nranks * NVTE_ROCM_MAX_RINGS * sizeof(int)));
   NVTE_CHECK_CUDA(
-      cudaMemset((*comm)->recv_id, 0, NVTE_MAX_REGIONS * (*comm)->nranks * NVTE_MAX_RINGS * sizeof(int)));
+      cudaMemset((*comm)->recv_id, 0, NVTE_MAX_REGIONS * (*comm)->nranks * NVTE_ROCM_MAX_RINGS * sizeof(int)));
   (*comm)->sms = 16;
   (*comm)->threads = 1024;
 
@@ -725,5 +725,4 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
   comm->mem_ptr[hndl] = *gpubuff;
 
   return comm->free_region++;
-  printf("***** Returning *****\n");
 }

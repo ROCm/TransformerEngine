@@ -281,6 +281,9 @@ class CommOverlapP2PBase : public CommOverlapCore {
   cudaStream_t _stream_recv;
   cudaEvent_t _stop_send, _stop_recv, l_stop_recv[7];
 
+  uint64_t _ag_signal_base = 0;
+  uint64_t _rs_signal_base = 0;
+
  private:
   void initialize(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
                   CommOverlapType comm_type, bool aggregate);

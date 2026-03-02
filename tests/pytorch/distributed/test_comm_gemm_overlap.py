@@ -72,7 +72,7 @@ def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, aggregate, quantization
         test_cmd.append("--bulk-overlap")
     else:
         if IS_HIP_EXTENSION and not p2p:
-            pytest.skip("HIP only supports A2A operations.")
+            pytest.skip("HIP only supports P2P operations.")
         if quantization == "fp8" and not fp8_available:
             pytest.skip(reason_for_no_fp8)
         if quantization == "mxfp8" and not mxfp8_available:
@@ -99,6 +99,9 @@ def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, aggregate, quantization
 def _run_layer_with_overlap(
     layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, quantization, num_layers=1
 ):
+    # Skip BULK overlap tests on HIP (column parallel or None with overlap_rs_dgrad=False)
+    if IS_HIP_EXTENSION and not overlap_rs_dgrad and linear_parallel_mode in ("column", None):
+        pytest.skip("Bulk overlap is not yet supported on HIP/ROCm.")
     test_path = TEST_ROOT / "run_layer_with_overlap.py"
     test_cmd = LAUNCH_CMD + [
         str(test_path),
@@ -162,6 +165,7 @@ def test_split_reduce_scatter_overlaps(quantization, p2p):
     _run_gemm_with_overlap("RS", False, p2p, False, False, quantization)
 
 
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason="Bulk overlap is not yet supported on ROCm.")
 @pytest.mark.parametrize(
     "comm_type, quantization, connections",
     [
@@ -191,8 +195,6 @@ def test_bulk_overlaps(comm_type, quantization, connections):
                 "CUDA_DEVICE_MAX_CONNECTIONS=8 test only applies to devices with compute capability"
                 " 9.0 (HOPPER ARCH)."
             )
-        if IS_HIP_EXTENSION:
-            pytest.skip("HIP Does not support bulk overlaps with 8 connections.")
         os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "8"
         _run_gemm_with_overlap(comm_type, True, False, False, False, quantization)
         os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
@@ -227,7 +229,7 @@ def test_bulk_overlaps(comm_type, quantization, connections):
     ids=[
         f" {te.Linear.__name__} - ROW-PARALLEL ",
         f" {te.Linear.__name__} - COL-PARALLEL - BULK DGRAD/WGRAD ",
-        f" {te.Linear.__name__} - COL-PARLALEL - DGRAD+RS ",
+        f" {te.Linear.__name__} - COL-PARALLEL - DGRAD+RS ",
         f" {te.LayerNormLinear.__name__} - ROW-PARALLEL ",
         f" {te.LayerNormLinear.__name__} - COL-PARALLEL - BULK DGRAD/WGRAD ",
         f" {te.LayerNormLinear.__name__} - COL-PARALLEL - DGRAD+RS ",

@@ -206,6 +206,7 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
   NVTE_DIM_CHECK(chunk_height > 0 && chunk_width > 0, "Attempted to get empty tensor chunk");
   NVTE_DIM_CHECK(chunk_height <= height && chunk_width <= width,
                  "Attempted to get out-of-bounds tensor chunk");
+#ifndef __HIP_PLATFORM_AMD__
   if (scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING) {
     // MXFP8 scale-inverses are padded to a 2D matrix with dims that
     // are divisible by 128. UB doesn't handle this padding yet.
@@ -214,6 +215,7 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
     NVTE_DIM_CHECK(chunk_height % 128 == 0 && chunk_width % 128 == 0,
                    "Userbuffers requires MXFP8 tensor chunk dims that are divisible by 128");
   }
+#endif
 #undef NVTE_DIM_CHECK
 
   // Construct tensor chunk
@@ -726,12 +728,12 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
     NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _comm_priority));
     _stream_send.push_back(std::move(stream));
   }
-  for (int i = 0; i < 7; i++) {
+  for (int i = 0; i < NVTE_ROCM_MAX_RINGS; i++) {
     cudaStream_t stream;
     NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _comm_priority));
     l_stream_send.push_back(std::move(stream));
   }
-  for (int i = 0; i < 7; i++) {
+  for (int i = 0; i < NVTE_ROCM_MAX_RINGS; i++) {
     cudaStream_t stream;
     NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _comm_priority));
     l_stream_recv.push_back(std::move(stream));
@@ -740,7 +742,7 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
       cudaStreamCreateWithPriority(&_stream_recv, cudaStreamNonBlocking, _comm_priority));
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_send, 0));
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_recv, 0));
-  for (int i = 0; i < 7; i++) {
+  for (int i = 0; i < NVTE_ROCM_MAX_RINGS; i++) {
     NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&l_stop_recv[i], 0));
   }
 }
@@ -752,7 +754,7 @@ CommOverlapP2PBase::~CommOverlapP2PBase() {
   for (size_t i = 0; i < _stream_send.size(); i++) {
     cudaStreamDestroy(_stream_send[i]);
   }
-  for (int i = 0; i < 7; i++) {
+  for (int i = 0; i < NVTE_ROCM_MAX_RINGS; i++) {
     cudaStreamDestroy(l_stream_recv[i]);
     cudaStreamDestroy(l_stream_send[i]);
     cudaEventDestroy(l_stop_recv[i]);

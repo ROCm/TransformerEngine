@@ -37,7 +37,10 @@ using ExtBarrierOp = std::function<void(ExtComm)>;
 #define NVTE_LAUNCH_GPU 1
 #define NVTE_LAUNCH_CPU 2
 #define NVTE_MAX_NVLINK 32
-#define NVTE_MAX_RINGS 7
+
+#define NVTE_ROCM_MAX_TP_SIZE 8
+// Maximum # of rings possible for ring_exchange
+#define NVTE_ROCM_MAX_RINGS (NVTE_ROCM_MAX_TP_SIZE - 1)
 
 #define NVTE_UB_MEM_UC_CONTIG 1
 #define NVTE_UB_MEM_MC_CREATED 2
@@ -75,7 +78,7 @@ using ExtBarrierOp = std::function<void(ExtComm)>;
   ((reinterpret_cast<char *>((comm)->peer_ptr[0][(peerlocal)])) +                           \
    ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV + (comm)->myrank * NVTE_MAX_REGIONS + (dsth) + \
      (index) * NVTE_MAX_NVLINK * NVTE_MAX_REGIONS) *                                        \
-    sizeof(int)))
+    sizeof(uint64_t)))
 
 // Index corresponds to the type of flag:
 // 0 - Receive index counter
@@ -85,7 +88,7 @@ using ExtBarrierOp = std::function<void(ExtComm)>;
   ((reinterpret_cast<char *>((comm)->mem_ptr[0])) +                                      \
    ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV + (recv_peer) * NVTE_MAX_REGIONS + (dsth) + \
      (index) * NVTE_MAX_NVLINK * NVTE_MAX_REGIONS) *                                     \
-    sizeof(int)))
+    sizeof(uint64_t)))
 #endif // #ifdef __HIP_PLATFORM_AMD__
 
 typedef struct ub_request {

@@ -305,6 +305,9 @@ void CommOverlapP2PBase::rocm_split_overlap_ag(const TensorWrapper &A, bool tran
     NVTE_CHECK(B_copy.element_size() == _ubuf.element_size());
   }
 
+  const uint64_t ag_signal_base = _ag_signal_base + _tp_size;
+  uint64_t signal_val;
+
   auto get_slice_info = [&](int ring) -> std::pair<size_t, int> {
     size_t offset = ring * base_slice_bytes;
     int size = base_slice_bytes;
@@ -403,7 +406,6 @@ void CommOverlapP2PBase::rocm_split_overlap_ag(const TensorWrapper &A, bool tran
         int prev_rank = prev[r * _tp_size + _tp_id];
 
         size_t send_off = get_slice_offset(curr_chunk_id, r);
-        size_t recv_off = get_slice_offset(next_recv_chunk_id, r);
 
         auto [_, slice_bytes] = get_slice_info(r);
 
@@ -416,18 +418,16 @@ void CommOverlapP2PBase::rocm_split_overlap_ag(const TensorWrapper &A, bool tran
           void *flagptr = GET_SEND_PTR_BY_INDEX(peerlocal, _ub_comm, _ub_reg, r);
           void *srcptr  = reinterpret_cast<char *>(_ub_comm->mem_ptr[_ub_reg]) + send_off;
           void *dstptr  = reinterpret_cast<char *>(_ub_comm->peer_ptr[_ub_reg][peerlocal]) + send_off;
-          
+
           NVTE_CHECK_CUDA(cudaMemcpyAsync(dstptr, srcptr, slice_bytes, cudaMemcpyDeviceToDevice, l_stream_send[r]));
-          uint32_t signal_val = step + 1;
-          hipStreamWriteValue32(l_stream_send[r], flagptr, signal_val, 0);
+          signal_val = ag_signal_base + step + 1;
+          hipStreamWriteValue64(l_stream_send[r], flagptr, signal_val, 0);
         }
 
         {
-          int peerlocal = prev_rank % _ub_comm->nvsize;
           void *flagptr = GET_RECV_PTR_BY_INDEX(prev_rank, _ub_comm, _ub_reg, r);
-
-          uint32_t signal_val = step + 1;
-          hipStreamWaitValue32(l_stream_recv[r], flagptr, signal_val, hipStreamWaitValueGte, 0xFFFFFFFF);
+          signal_val = ag_signal_base + step + 1;
+          hipStreamWaitValue64(l_stream_recv[r], flagptr, signal_val, hipStreamWaitValueGte, 0xFFFFFFFFFFFFFFFF);
         }
         
         NVTE_CHECK_CUDA(cudaEventRecord(get_event(next_recv_chunk_id, r), l_stream_recv[r]));
@@ -438,6 +438,8 @@ void CommOverlapP2PBase::rocm_split_overlap_ag(const TensorWrapper &A, bool tran
       launch_slice_gemm(r, step);
     }
   }
+
+  _ag_signal_base = signal_val;
 
   if (B_copy.numel() > 0) {
     for (int r = 0; r < num_rings; r++) {
@@ -479,172 +481,93 @@ void CommOverlapP2PBase::rocm_split_overlap_rs(const TensorWrapper &A, bool tran
   _ub_comm->sms = _num_comm_sm;
   _ub_comm->cga_size = _cga_size;
 
-  // GEMM dimensions
   const size_t m = transa ? A.size(0) : A.size(1);
   const size_t k = transa ? A.size(1) : A.size(0);
   const size_t n_chunk = _ubufs[0].size(0);
   const int comm_bytes = _ubufs[0].bytes();
 
-  size_t workspace_size_chunk = workspace.numel() / _stream_compute.size();
+  const size_t input_chunk_size = n_chunk * k;
+  const size_t workspace_size_chunk = workspace.numel() / _stream_compute.size();
 
-  const int max_rings = (_tp_size == 4) ? 2 :
-                        (_tp_size == 6) ? 4 :
-                         _tp_size - 1;
+  const uint64_t rs_signal_base = _rs_signal_base + _tp_size;
+  int64_t signal_val;
 
-  const int num_rings = std::min({
-                                  transformer_engine::getenv<int>("GPU_MAX_HW_QUEUES", 4),
-                                  _tp_size - 1,
-                                  max_rings
-                                });
-
-  const int *next, *prev;
-  switch (_tp_size) {
-    case 8:
-      next = reinterpret_cast<const int *>(tp_next_8);
-      prev = reinterpret_cast<const int *>(tp_prev_8);
-      break;
-    case 4:
-      next = reinterpret_cast<const int *>(tp_next_4);
-      prev = reinterpret_cast<const int *>(tp_prev_4);
-      break;
-    case 2:
-      return this->split_overlap_rs(A, transa, B, transb, D, bias, pre_gelu_out, workspace, grad,
-                                    accumulate, use_split_accumulator, rs_output, stream_main);
-    default:
-      NVTE_ERROR("ROCm supports TP sizes of 2, 4, 8 only.");
-  }
-
-  const int alignment        = 256;
-  const int base_slice_bytes = (comm_bytes / num_rings) & ~(alignment - 1);
-  const int total_base_bytes = base_slice_bytes * num_rings;
-  const int remainder_bytes  = comm_bytes - total_base_bytes;
-
-  const size_t base_n_slice = n_chunk / num_rings;
-  const size_t remainder_n  = n_chunk - base_n_slice * num_rings;
-
-  auto get_slice_info = [&](int ring) -> std::pair<size_t, int> {
-    size_t offset = ring * base_slice_bytes;
-    int size = base_slice_bytes;
-    if (ring == num_rings - 1)
-      size += remainder_bytes;
-    return {offset, size};
-  };
-
-  auto get_slice_n = [&](int ring) -> size_t {
-    return base_n_slice + (ring == num_rings - 1 ? remainder_n : 0);
-  };
-
-  auto get_chunk_id = [&](int ring, int step) {
-    int owner = _tp_id;
-    for (int s = 0; s < step; ++s)
-      owner = prev[ring * _tp_size + owner];
-    return owner;
-  };
-
+  // Catch up all streams to main
   NVTE_CHECK_CUDA(cudaEventRecord(_start_compute, stream_main));
-  for (int r = 0; r < num_rings; r++) {
-    NVTE_CHECK_CUDA(cudaStreamWaitEvent(l_stream_send[r], _start_compute, 0));
-    NVTE_CHECK_CUDA(cudaStreamWaitEvent(l_stream_recv[r], _start_compute, 0));
-    NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[r], _start_compute, 0));
-  }
+  for (size_t i = 0; i < l_stream_send.size(); i++)
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(l_stream_send[i], _start_compute, 0));
+  for (size_t i = 0; i < l_stream_recv.size(); i++)
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(l_stream_recv[i], _start_compute, 0));
+  for (size_t i = 0; i < _stream_compute.size(); i++)
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[i], _start_compute, 0));
 
-  for (auto &s : _stream_compute)
-    NVTE_CHECK_CUDA(cudaStreamWaitEvent(s, _start_compute, 0));
+  for (int i = 0; i < _tp_size; i++) {
+    int stream_id = i % _stream_compute.size();
+    int input_b_chunk_id = (_tp_id + i + 1) % _tp_size;
 
-  const int total_slices = _tp_size * num_rings;
-  std::vector<cudaEvent_t> slice_events(total_slices);
+    auto input_b_chunk = get_tensor_chunk(B, input_b_chunk_id * input_chunk_size, {n_chunk, k});
+    auto output_chunk = get_buffer_chunk_by_id(D, i);
+    auto workspace_chunk = get_tensor_chunk(workspace, stream_id * workspace_size_chunk, {workspace_size_chunk});
 
-  for (auto &e : slice_events)
-    NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&e, cudaEventDisableTiming));
-
-  auto get_event = [&](int chunk, int ring) {
-    return slice_events[chunk * num_rings + ring];
-  };
-
-  for (int r = 0; r < num_rings; ++r)
-    NVTE_CHECK_CUDA(cudaEventRecord(get_event(_tp_id, r), stream_main));
-
-  auto get_slice_offset = [&](int chunk, int ring) {
-    auto [ring_offset, _] = get_slice_info(ring);
-    return chunk * comm_bytes + ring_offset;
-  };
-
-  auto launch_slice_gemm = [&](int chunk_id, int ring_id, int step) {
-    size_t n_slice = get_slice_n(ring_id);
-
-    size_t b_elem_offset = chunk_id * n_chunk * k;
-    size_t d_elem_offset = chunk_id * n_chunk * m;
-
-    for (int r = 0; r < ring_id; ++r) {
-      b_elem_offset += get_slice_n(r) * k;
-      d_elem_offset += get_slice_n(r) * m;
-    }
-
-    auto input_b_slice = get_tensor_chunk(B, b_elem_offset, transb ? std::vector<size_t>{k, n_slice} : std::vector<size_t>{n_slice, k});
-    auto output_slice = get_tensor_chunk(D, d_elem_offset, {n_slice, m}); // D acts as the accumulation buffer
-    auto workspace_chunk = get_tensor_chunk(workspace, ring_id * workspace_size_chunk, {workspace_size_chunk});
-
-    nvte_cublas_gemm(A.data(), input_b_slice.data(), output_slice.data(), bias.data(),
+    nvte_cublas_gemm(A.data(), input_b_chunk.data(), output_chunk.data(), bias.data(),
                      pre_gelu_out.data(), transa, transb, grad, workspace_chunk.data(),
-                     accumulate, use_split_accumulator, _math_sms,
-                     _stream_compute[ring_id]);
-    NVTE_CHECK_CUDA(cudaEventRecord(get_event(chunk_id, ring_id), _stream_compute[ring_id]));
-  };
+                     accumulate, use_split_accumulator, _math_sms, _stream_compute[stream_id]);
 
-  for (int step = 0; step < _tp_size; ++step) {
-    for (int r = 0; r < num_rings; ++r) {
-      int curr_chunk = get_chunk_id(r, step);
-      launch_slice_gemm(curr_chunk, r, step);
-    }
+    if (i > 0) {
+      // Each step uses its own send/recv stream — fully parallel since each
+      // send goes to a unique destination rank (the chunk owner)
+      int comm_stream_id = i - 1;
+      int prev_stream_id = (i - 1) % _stream_compute.size();
 
-    if (step > 0) {
-      int prev_step = step - 1;
-      
-      for (int r = 0; r < num_rings; ++r) {
-        int chunk_to_send = get_chunk_id(r, prev_step);
-        
-        NVTE_CHECK_CUDA(cudaStreamWaitEvent(l_stream_send[r], get_event(chunk_to_send, r), 0));
+      const int send_offset = comm_bytes * (i - 1);
+      const int recv_offset = comm_bytes * (i - 1 + _tp_size);
+      const int send_rank = (_tp_id + i) % _tp_size + _rank_round_tp;
+      const int recv_rank = (_tp_size + _tp_id - i) % _tp_size + _rank_round_tp;
+      signal_val = rs_signal_base + i;
 
-        size_t send_off = get_slice_offset(chunk_to_send, r);
-        auto [_, slice_bytes] = get_slice_info(r);
-        
-        int next_rank = next[r * _tp_size + _tp_id];
-        int prev_rank = prev[r * _tp_size + _tp_id];
-        
-        {
-          int peerlocal = next_rank % _ub_comm->nvsize;
-          void *srcptr = reinterpret_cast<char *>(_ub_comm->mem_ptr[_ub_reg]) + send_off;
-          void *dstptr = reinterpret_cast<char *>(_ub_comm->peer_ptr[_ub_reg][peerlocal]) + send_off;
-          void *flagptr = GET_SEND_PTR_BY_INDEX(peerlocal, _ub_comm, _ub_reg, r);
+      // Wait for GEMM of previous chunk before sending
+      NVTE_CHECK_CUDA(cudaEventRecord(_start_comm, _stream_compute[prev_stream_id]));
+      NVTE_CHECK_CUDA(cudaStreamWaitEvent(l_stream_send[comm_stream_id], _start_comm, 0));
 
-          NVTE_CHECK_CUDA(cudaMemcpyAsync(dstptr, srcptr, slice_bytes, cudaMemcpyDeviceToDevice, l_stream_send[r]));
-          uint32_t signal_val = prev_step + 1; // Use step count as signal
-          hipStreamWriteValue32(l_stream_send[r], flagptr, signal_val, 0);
-        }
+      // Send partial to chunk owner
+      {
+        int peerlocal = send_rank % _ub_comm->nvsize;
+        void *srcptr  = reinterpret_cast<char *>(_ub_comm->mem_ptr[_ub_reg]) + send_offset;
+        void *dstptr  = reinterpret_cast<char *>(_ub_comm->peer_ptr[_ub_reg][peerlocal]) + recv_offset;
+        void *flagptr = GET_SEND_PTR_BY_INDEX(peerlocal, _ub_comm, _ub_reg, comm_stream_id);
 
-        {
-          int peerlocal = prev_rank % _ub_comm->nvsize;
-          void *flagptr = GET_RECV_PTR_BY_INDEX(prev_rank, _ub_comm, _ub_reg, r);
-          uint32_t signal_val = prev_step + 1;
-          hipStreamWaitValue32(l_stream_recv[r], flagptr, signal_val, hipStreamWaitValueGte, 0xFFFFFFFF);
-        }
+        NVTE_CHECK_CUDA(cudaMemcpyAsync(dstptr, srcptr, comm_bytes,
+                                        cudaMemcpyDeviceToDevice, l_stream_send[comm_stream_id]));
+        hipStreamWriteValue64(l_stream_send[comm_stream_id], flagptr, signal_val, 0);
+      }
+
+      // Wait for incoming partial from chunk contributor
+      {
+        void *flagptr = GET_RECV_PTR_BY_INDEX(recv_rank, _ub_comm, _ub_reg, comm_stream_id);
+        hipStreamWaitValue64(l_stream_recv[comm_stream_id], flagptr, signal_val,
+                             hipStreamWaitValueGte, 0xFFFFFFFFFFFFFFFF);
       }
     }
   }
+
+  _rs_signal_base = signal_val;
+
+  // Sync all streams back to main
   for (size_t i = 0; i < _stream_compute.size(); i++) {
     NVTE_CHECK_CUDA(cudaEventRecord(_stop_compute, _stream_compute[i]));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_compute, 0));
   }
-  for (int r = 0; r < num_rings; r++) {
-      NVTE_CHECK_CUDA(cudaEventRecord(_stop_send, l_stream_send[r]));
-      NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_send, 0));
-      NVTE_CHECK_CUDA(cudaEventRecord(_stop_recv, l_stream_recv[r]));
-      NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_recv, 0));
+  for (int i = 0; i < _tp_size - 1; i++) {
+    NVTE_CHECK_CUDA(cudaEventRecord(_stop_send, l_stream_send[i]));
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_send, 0));
+    NVTE_CHECK_CUDA(cudaEventRecord(_stop_recv, l_stream_recv[i]));
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_recv, 0));
   }
 
-  // Reduce GEMM output chunks
+  // Reduce: received partials live at _ubufs[_tp_size-1] through _ubufs[2*_tp_size-2]
+  // plus local partial at _ubufs[_tp_size-1], matching single ring layout exactly
   char *reduce_buf_ptr = reinterpret_cast<char *>(_ubufs[_tp_size - 1].dptr());
-  char *rs_output_ptr = reinterpret_cast<char *>(rs_output.dptr());
+  char *rs_output_ptr  = reinterpret_cast<char *>(rs_output.dptr());
 
   if (_ubuf.element_size() == 1 && rs_output.element_size() == 2) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
@@ -656,9 +579,6 @@ void CommOverlapP2PBase::rocm_split_overlap_rs(const TensorWrapper &A, bool tran
   }
 
   _ub_comm->sms = ori_sms;
-  
-  // Cleanup events
-  for (auto &e : slice_events) NVTE_CHECK_CUDA(cudaEventDestroy(e));
-}  // rocm_split_overlap_rs
+}
 
 } // namespace transformer_engine
