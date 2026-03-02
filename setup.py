@@ -79,6 +79,10 @@ def setup_common_extension() -> CMakeExtension:
             ck_path = Path(os.getenv("NVTE_CK_FUSED_ATTN_PATH"))
             cmake_flags.append(f"-DAITER_MHA_PATH={ck_path}")
 
+        if os.getenv("NVTE_AITER_STATIC_LINK") is not None:
+            aiter_static_link = "ON" if int(os.getenv("NVTE_AITER_STATIC_LINK", "0")) else "OFF"
+            cmake_flags.append(f"-DNVTE_AITER_STATIC_LINK={aiter_static_link}")
+
         if int(os.getenv("NVTE_FUSED_ATTN_AOTRITON", "1"))==0 or int(os.getenv("NVTE_FUSED_ATTN", "1"))==0:
             cmake_flags.append("-DUSE_FUSED_ATTN_AOTRITON=OFF")
         elif os.getenv("NVTE_FUSED_ATTN_AOTRITON") or os.getenv("NVTE_FUSED_ATTN"):

@@ -32,7 +32,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${AITER_DIR}" || -z "${AITER_TEST_DIR}" || -z "${GPU_ARCHS_VAL}" ]]; then
-  echo "[AITER-PREBUILT] --aiter-dir, --aiter-test-dir, and --gpu-archs are required." >&2
+  echo "[AITER-BUILD] --aiter-dir, --aiter-test-dir, and --gpu-archs are required." >&2
   exit 1
 fi
 
@@ -41,4 +41,48 @@ AITER_LOG_MORE=1 \
 CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT="${CK_TILE_BF16_DEFAULT}" \
 GPU_ARCHS="${GPU_ARCHS_VAL}" \
 python3 "${AITER_TEST_DIR}/compile.py"
+
+# Generate static archives from the built object files only if NVTE_AITER_STATIC_LINK=1
+if [[ "${NVTE_AITER_STATIC_LINK:-0}" -ne 1 ]]; then
+  exit 0
+fi
+
+# Check for ar and ranlib
+AR_BIN="${AR:-$(command -v ar || true)}"
+RANLIB_BIN="${RANLIB:-$(command -v ranlib || true)}"
+if [[ -z "${AR_BIN}" ]]; then
+  echo "[AITER-BUILD] Could not find ar for static archive generation." >&2
+  exit 1
+fi
+if [[ -z "${RANLIB_BIN}" ]]; then
+  echo "[AITER-BUILD] Could not find ranlib for static archive generation." >&2
+  exit 1
+fi
+
+# Create static archives for both forward and backward passes
+for lib in fwd bwd; do
+  src_obj_dir="${AITER_DIR}/aiter/jit/build/libmha_${lib}/build"
+  out_archive="${AITER_TEST_DIR}/libmha_${lib}.a"
+
+  if [[ ! -d "${src_obj_dir}" ]]; then
+    echo "[AITER-BUILD] Missing object directory: ${src_obj_dir}" >&2
+    exit 1
+  fi
+
+  mapfile -d '' obj_files < <(find "${src_obj_dir}" -type f -name '*.o' -print0)
+  if [[ ${#obj_files[@]} -eq 0 ]]; then
+    echo "[AITER-BUILD] No object files found under ${src_obj_dir}" >&2
+    exit 1
+  fi
+
+  rm -f "${out_archive}"
+  for obj in "${obj_files[@]}"; do
+    "${AR_BIN}" q "${out_archive}" "${obj}"
+  done
+  if [[ -n "${RANLIB_BIN}" ]]; then
+    "${RANLIB_BIN}" "${out_archive}"
+  fi
+
+  echo "[AITER-BUILD] Created static archive: ${out_archive} (${#obj_files[@]} objects)"
+done
 

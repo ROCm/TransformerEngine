@@ -45,6 +45,9 @@ function(cache_local_aiter_build SOURCE_DIR)
   file(MAKE_DIRECTORY "${EXTRACT_DIR}")
   message(STATUS "[AITER-PREBUILT] Caching locally built libs to ${EXTRACT_DIR}")
   file(COPY "${SOURCE_DIR}/libmha_fwd.so" "${SOURCE_DIR}/libmha_bwd.so" DESTINATION "${EXTRACT_DIR}")
+  if(NVTE_AITER_STATIC_LINK)
+    file(COPY "${SOURCE_DIR}/libmha_fwd.a" "${SOURCE_DIR}/libmha_bwd.a" DESTINATION "${EXTRACT_DIR}")
+  endif()
 endfunction()
 
 # Download prebuilt tgz file
