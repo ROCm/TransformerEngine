@@ -261,6 +261,12 @@ Note that when using `THD` format tensors with CK Fused Attention, one should pa
 to indicate that there is no padding between sequences. Otherwise, passing proper tensors will indicate padding between sequences. This is the case
 for both the `FusedAttention` and `DotProductAttention` modules.
 
+Certain settings can be enabled to potentially optimize workloads depending on the nature of the inputs and expected outputs:
+
+* NVTE_CK_RUNTIME_NUM_SEGMENTS - by default 0, if set to 1 then the JAX integration will calculate the number of segments at runtime. Enabling this requires also disabling the GPU graph by setting `XLA_FLAGS="--xla_gpu_graph_level=0"`.
+* NVTE_CK_RUNTIME_MAX_SEQLEN - by default 0, if set to 1 then the max sequence length will be calculated at runtime. This can result in speedups in cases where there are many zero-length sequences. Enabling this while using the JAX integration requires also disabling the GPU graph by setting `XLA_FLAGS="--xla_gpu_graph_level=0"`.
+* NVTE_CK_ZERO_OUT_PAD - by default 1, if set to 0 then the output of the FA forward pass will not be initialized to zero, meaning invalid regions (representing padding) may take nonzero values. Only used if input has padding.
+
 AITER FA v3 Kernels
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 ROCm TE supports flash-attention v3 fwd/bwd kernels on gfx942 and gfx950 using AITER backend.
