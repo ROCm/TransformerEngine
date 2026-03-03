@@ -617,18 +617,24 @@ void fused_attn_ck_fwd_impl(
 
   const char* nvte_smallseq = std::getenv("NVTE_FUSED_ATTN_CK_SMALLSEQ");
   if (is_ragged && nvte_smallseq && std::string(nvte_smallseq) == "1") {
-    void* max_seqlen_workspace = workspace;
-
+    void* max_seqlen_workspace = workspace_next;
     size_t runtime_max_seqlen_q = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
         static_cast<uint64_t>(b), devPtrCuSeqlensQ, nullptr, max_seqlen_workspace, stream));
     size_t runtime_max_seqlen_kv = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
         static_cast<uint64_t>(b), devPtrCuSeqlensKV, nullptr, max_seqlen_workspace, stream));
+    workspace_next = static_cast<void*>(static_cast<int8_t*>(workspace_next) + sizeof(uint64_t));
 
-    if (std::getenv("NVTE_LOG_CK_CONFIG")) {
+    if (nvte_log_ck_config) {
       std::cout << std::endl << "attn_fwd(ck small-seq): ";
       std::cout << "b: " << b << ", ";
       std::cout << "runtime_max_seqlen_q: " << runtime_max_seqlen_q << ", ";
-      std::cout << "runtime_max_seqlen_kv: " << runtime_max_seqlen_kv << std::endl;
+      std::cout << "runtime_max_seqlen_kv: " << runtime_max_seqlen_kv << ", ";
+      std::cout << "flow: "
+                << (runtime_max_seqlen_q == 1 && runtime_max_seqlen_kv >= 2 &&
+                            runtime_max_seqlen_kv <= 16
+                        ? "ck-smallseq"
+                        : "regular ck/aiter")
+                << std::endl;
     }
 
     if (runtime_max_seqlen_q == 1 && runtime_max_seqlen_kv >= 2 && runtime_max_seqlen_kv <= 16) {
@@ -947,22 +953,27 @@ void fused_attn_ck_bwd_impl(
 
   const char* nvte_smallseq = std::getenv("NVTE_FUSED_ATTN_CK_SMALLSEQ");
   if (is_ragged && nvte_smallseq && std::string(nvte_smallseq) == "1") {
-    void* max_seqlen_workspace = workspace;
-
+    void* max_seqlen_workspace = workspace_next;
     size_t runtime_max_seqlen_q = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
       b, devPtrCuSeqlensQ, nullptr, max_seqlen_workspace, stream));
     size_t runtime_max_seqlen_kv = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
       b, devPtrCuSeqlensKV, nullptr, max_seqlen_workspace, stream));
-    
-    if (std::getenv("NVTE_LOG_CK_CONFIG")) {
+    workspace_next = static_cast<void*>(static_cast<int8_t*>(workspace_next) + sizeof(uint64_t));
+
+    if (nvte_log_ck_config) {
       std::cout << std::endl << "attn_bwd(ck small-seq): ";
       std::cout << "b: " << b << ", ";
       std::cout << "runtime_max_seqlen_q: " << runtime_max_seqlen_q << ", ";
-      std::cout << "runtime_max_seqlen_kv: " << runtime_max_seqlen_kv << std::endl;
+      std::cout << "runtime_max_seqlen_kv: " << runtime_max_seqlen_kv << ", ";
+      std::cout << "flow: "
+                << (runtime_max_seqlen_q == 1 && runtime_max_seqlen_kv >= 2 &&
+                            runtime_max_seqlen_kv <= 16
+                        ? "ck-smallseq"
+                        : "regular ck/aiter")
+                << std::endl;
     }
 
     if (runtime_max_seqlen_q == 1 && runtime_max_seqlen_kv >= 2 && runtime_max_seqlen_kv <= 16) {
-      
       fused_attn_rocm::fused_attn_smallseq_bwd(
           b, h, hg, runtime_max_seqlen_kv, d_qk, d_v,
           scaling_factor, dropout_probability,
@@ -1887,7 +1898,6 @@ void fused_attn_ck_fwd(
   size_t max_tokens_kv = std::accumulate((input_K->data).shape.begin(), (input_K->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_kv/d_qk;
 
   bool is_ragged = nvte_get_qkv_format(qkv_layout)==NVTE_QKV_Format::NVTE_THD;
-
   if (Aux_CTX_Tensors->size == 0) {
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
       Aux_CTX_Tensors->size = 3;
@@ -1942,7 +1952,6 @@ void fused_attn_ck_fwd(
   bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
-
   fused_attn_ck_fwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, bias_b, bias_h,
     max_tokens_q, max_tokens_kv,

@@ -1255,15 +1255,11 @@ def test_jax_new_rng():
 
 
 # ROCm CK small-seq varlen tests.
-@pytest.mark.skipif(
-    not is_hip_extension(), reason="CK unfused smallseq backend only available on AMD hardware"
-)
-
 @pytest.fixture
 def ck_smallseq_env(monkeypatch):
     """Enable CK small-seq path and disable XLA GPU graphs for these tests."""
     if "xla_gpu_graph_level=0" not in os.environ.get("XLA_FLAGS", ""):
-        pytest.skip("Run with XLA_FLAGS='--xla_gpu_graph_level=0' pytest ...")
+        pytest.skip("Test must be run with XLA_FLAGS='--xla_gpu_graph_level=0'")
     monkeypatch.setenv("NVTE_FUSED_ATTN_CK_SMALLSEQ", "1")
     yield
 
@@ -1280,6 +1276,9 @@ def ck_smallseq_env(monkeypatch):
         pytest.param(2048, 2, 4, 16, 16, 128, 128, id="seqpack-2048-2-4-16-16-128-128"),
         pytest.param(2, 4096, 8192, 16, 16, 128, 128, id="seqpack-2-4096-8192-16-16-128-128"),
     ],
+)
+@pytest.mark.skipif(
+    not is_hip_extension(), reason="CK unfused smallseq backend only available on AMD hardware"
 )
 def test_ck_unfused_smallseq_backend(
     ck_smallseq_env, b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype

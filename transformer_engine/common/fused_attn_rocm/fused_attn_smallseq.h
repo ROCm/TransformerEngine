@@ -11,8 +11,7 @@
 #ifndef TRANSFORMER_ENGINE_FUSED_ATTN_ROCM_FUSED_ATTN_SMALLSEQ_H_
 #define TRANSFORMER_ENGINE_FUSED_ATTN_ROCM_FUSED_ATTN_SMALLSEQ_H_
 
-#include "../common.h"
-#include "transformer_engine/fused_attn.h"
+#include <transformer_engine/transformer_engine.h>
 
 namespace transformer_engine {
 namespace fused_attn_rocm {

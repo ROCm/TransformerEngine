@@ -391,7 +391,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             else:
                 raise ValueError(f"Unsupported {backend=}")
 
-        if os.environ.get("NVTE_LOG_CK_CONFIG"):
+        if os.environ.get("NVTE_LOG_CK_CONFIG", "0") == "1":
             jax.debug.print(
                 "attn_fwd(ck small-seq JAX abstract): batch_shape: {}, softmax_shape: {}, softmax_dtype: {}",
                 batch_shape,

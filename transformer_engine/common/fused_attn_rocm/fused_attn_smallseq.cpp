@@ -27,13 +27,13 @@
   case N:                                                                  \
     dispatch_fwd<N, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dropout_mask, dropout, \
                        sqr_dk_scale, O_ptr, attn_workspace, cu_kv, cu_kv_p, \
-                       hip_stream);                                        \
+                       stream);                                            \
     break;
 #define SMALLSEQ_DISPATCH_BWD_CASE(N)                                        \
   case N:                                                                    \
     dispatch_bwd<N, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dO_ptr, attn_ptr,        \
                        dropout_mask, dropout, sqr_dk_scale, dQ_ptr, dK_ptr, \
-                       dV_ptr, workspace_ptr, cu_kv, cu_kv_p, hip_stream);   \
+                       dV_ptr, workspace_ptr, cu_kv, cu_kv_p, stream);       \
     break;
 
 namespace transformer_engine {
@@ -851,7 +851,6 @@ void fused_attn_smallseq_fwd(size_t b,
   }
 
   float sqr_dk_scale = attn_scale;
-  hipStream_t hip_stream = reinterpret_cast<hipStream_t>(stream);
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(qkv_dtype, T,
     const T* Q_ptr         = static_cast<const T*>(devPtrQ);
@@ -929,7 +928,6 @@ void fused_attn_smallseq_bwd(size_t b,
   }
 
   float sqr_dk_scale = attn_scale;
-  hipStream_t hip_stream = reinterpret_cast<hipStream_t>(stream);
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(qkv_dtype, T,
     const T* Q_ptr      = static_cast<const T*>(devPtrQ);
