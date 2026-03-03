@@ -1786,11 +1786,14 @@ class TestGroupedDense:
 
     @pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16])
     @pytest_parametrize_wrapper("layout", ["NN"])
-    def test_grouped_gemm_fp16(self, dtype, input_shape, layout):
+    @pytest_parametrize_wrapper("use_async_d2h_group_size", [True, False])
+    def test_grouped_gemm_fp16(self, dtype, input_shape, layout, use_async_d2h_group_size):
         lhs, rhs, group_sizes, contracting_dims, _ = self._generate_grouped_dense_input(
             dtype, input_shape, layout
         )
-        if not is_hip_extension():
+        if use_async_d2h_group_size:
+            if is_hip_extension():
+                pytest.skip("ROCm does not support use_async_d2h_group_sizes yet.")
             num_gemms = input_shape[0]
             _ = jax.jit(tex.grouped_gemm_copy_group_sizes, static_argnames=("num_gemms",))(
                 group_sizes,
@@ -1806,7 +1809,7 @@ class TestGroupedDense:
             rhs,
             group_sizes,
             contracting_dims,
-            use_async_d2h_group_sizes=not is_hip_extension(),
+            use_async_d2h_group_sizes=use_async_d2h_group_size,
         )
 
         self._assert_grouped_gemm_output(prim_out, group_sizes, ref_out, dtype)
