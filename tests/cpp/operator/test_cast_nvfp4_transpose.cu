@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -6,7 +8,9 @@
 
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
+#ifndef __HIP_PLATFORM_AMD__
 #include <cuda_fp4.h>
+#endif
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 
@@ -31,9 +35,13 @@ enum ActivationType {
 };
 
 double2 cvt_fp4x2_to_double2(fp4e2m1x2 fp4_pair) {
+#ifdef __HIP_PLATFORM_AMD__
+    const __half2_raw raw_truncated_to_fp4e2m1_pair =
+        __hip_cvt_fp4x2_to_halfraw2(*reinterpret_cast<__hip_fp4x2_storage_t*>(&fp4_pair), __HIP_E2M1);
+#else
     const __half2_raw raw_truncated_to_fp4e2m1_pair =
         __nv_cvt_fp4x2_to_halfraw2(*reinterpret_cast<__nv_fp4x2_storage_t*>(&fp4_pair), __NV_E2M1);
-
+#endif
     const __half2 truncated_to_fp4e2m1_pair(raw_truncated_to_fp4e2m1_pair);
     const double truncated_to_fp4e2m1_x = static_cast<double>(truncated_to_fp4e2m1_pair.x);
     const double truncated_to_fp4e2m1_y = static_cast<double>(truncated_to_fp4e2m1_pair.y);
@@ -631,14 +639,24 @@ void performTest(float (*OP)(const float),
     const fp8e4m3* ref_scales_t_ptr = ref_scales_t.get();
 
     size_t scale_mismatches_num = 0;
+#ifdef __HIP_PLATFORM_AMD__
+    std::vector<size_t> mismatches_scales_indices;
+#endif
+
     compare_scaling_factors<fp8e4m3>("scales", output.rowwise_cpu_scale_inv_ptr<fp8e4m3>(),
                                       ref_scales.get(),
                                       unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
+#ifdef __HIP_PLATFORM_AMD__
+                                      mismatches_scales_indices,
+#endif
                                       scale_mismatches_num);
 
     compare_scaling_factors<fp8e4m3>("scales_t", output.columnwise_cpu_scale_inv_ptr<fp8e4m3>(),
                                       ref_scales_t.get(),
                                       unpadded_blocks_Y_t, unpadded_blocks_X_t, scales_stride_t,
+#ifdef __HIP_PLATFORM_AMD__
+                                      mismatches_scales_indices,
+#endif
                                       scale_mismatches_num);
 }
 
@@ -675,9 +693,9 @@ class FusedCastTransposeNVFP4TestSuite : public ::testing::TestWithParam
 
 TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
     // Skip tests for pre-Blackwell architectures
-    if (getDeviceComputeCapability() < blackwellComputeCapability) {
-        GTEST_SKIP();
-    }
+    // if (getDeviceComputeCapability() < blackwellComputeCapability) {
+    //     GTEST_SKIP();
+    // }
 
     using namespace transformer_engine;
     using namespace test;

@@ -11,6 +11,7 @@ list(APPEND test_cuda_sources
             test_cast_dbias_dgelu.cu
             test_cast_gated_swiglu.cu
             test_cast_mxfp8_gated_swiglu.cu
+            test_cast_nvfp4_transpose.cu
             test_qdq.cu
             test_cast_mxfp8.cu
             test_dequantize_mxfp8.cu
@@ -32,7 +33,6 @@ list(APPEND test_cuda_sources
 	          ../test_common.cu)
 if(USE_CUDA)
   list(APPEND test_cuda_sources
-              test_cast_nvfp4_transpose.cu
               test_cast_float8blockwise.cu
               test_swizzle.cu)
 else()
