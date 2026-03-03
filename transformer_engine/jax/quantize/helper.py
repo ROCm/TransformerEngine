@@ -134,6 +134,8 @@ def _check_block_scaling_fp8_support(gpu_arch) -> Tuple[bool, str]:
 
 def _check_fp4_support(gpu_arch) -> Tuple[bool, str]:
     """Check if FP4 is supported for the given GPU architecture."""
+    if is_hip_extension():
+        return False, "FP4 not yet supported for ROCm"
     if gpu_arch < 100:  # pre-blackwell
         return False, "Device compute capability 10.0 or higher required for NVFP4 execution."
     if get_cublasLt_version() < 120800:

@@ -516,7 +516,7 @@ void Float8CurrentScalingQuantizer::quantize_impl(const TensorWrapper& input, Te
 
   // Compute amax
   if (compute_amax) {
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
     at::Tensor ws = allocate_amax_workspace(input);
     TensorWrapper tw = makeTransformerEngineTensor(ws);
     NVTE_SCOPED_GIL_RELEASE({
@@ -1143,7 +1143,7 @@ std::vector<size_t> MXFP8Quantizer::get_scale_shape(const std::vector<size_t>& s
   return scale_shape;
 }
 
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef USE_ROCM
 NVFP4Quantizer::NVFP4Quantizer(const py::handle& quantizer) : Quantizer(quantizer) {
   this->dtype = quantizer.attr("dtype").cast<DType>();
   this->with_rht = quantizer.attr("with_rht").cast<bool>();

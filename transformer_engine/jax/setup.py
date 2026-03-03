@@ -122,7 +122,10 @@ if __name__ == "__main__":
     # us to detect CUDA version dynamically during compilation and
     # choose the correct wheel for te core lib.
     __version__ = te_version()
-    te_core = f"transformer_engine_cu{get_cuda_major_version()}=={__version__}"
+    if not rocm_build():
+        te_core = f"transformer_engine_cu{get_cuda_major_version()}=={__version__}"
+    else:
+        te_core = f"transformer_engine_rocm=={__version__}"
     install_requires = install_requirements() + [te_core]
 
     # Configure package

@@ -282,6 +282,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     int64_t window_size_right, bool return_max_logit, bool cuda_graph) {
   using namespace transformer_engine;
   
+  NVTE_CHECK(!(return_max_logit || cuda_graph), "ROCm does not support return_max_logit and cuda_graph for fused_attn yet.");
   // by default, fused attn is enabled
   bool nvte_fused_attn = true;
   if (const char* env_p = std::getenv("NVTE_FUSED_ATTN") ) {

@@ -387,6 +387,7 @@ class FusedAttnRunner:
             get_device_compute_capability(0) >= 100
             and self.dropout_prob == 0.1
             and self.attn_bias_type is not AttnBiasType.NO_BIAS
+            and not is_hip_extension()
         ):
             pytest.skip(
                 "For sm100+, bprop kernel support for dropout + determinism (bias) is not supported"

@@ -100,9 +100,9 @@ def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
         return dict(rtol=1.3e-6, atol=1e-5)
     if dtype == torch.float64:
         return dict(rtol=1e-7, atol=1e-7)
-    if dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
+    if dtype in torch_float8_e4m3_type:
         return dict(rtol=0.125, atol=0.0675)  # epsilon = 0.0625
-    if dtype in (torch.float8_e5m2, torch.float8_e5m2fnuz):
+    if dtype in torch_float8_e5m2_type:
         return dict(rtol=0.25, atol=0.125)  # epsilon = 0.125
     raise ValueError(f"Unsupported dtype ({dtype})")
 

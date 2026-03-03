@@ -219,6 +219,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
         softmax_type: str = "vanilla",
         return_max_logit: Optional[bool] = False,
     ) -> None:
+        if IS_HIP_EXTENSION:
+            assert not return_max_logit, "ROCm does not support return_max_logit yet."
         super().__init__()
 
         self.softmax_scale = softmax_scale
@@ -1676,6 +1678,8 @@ class FusedAttention(torch.nn.Module):
         softmax_type: str = "vanilla",
         return_max_logit: Optional[bool] = False,
     ) -> None:
+        if IS_HIP_EXTENSION:
+            assert not return_max_logit, "ROCm does not support return_max_logit yet."
         super().__init__()
 
         self.softmax_scale = softmax_scale

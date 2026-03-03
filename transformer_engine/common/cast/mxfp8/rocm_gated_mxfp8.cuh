@@ -122,16 +122,16 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
     // Initiate bulk tensor copy
     if constexpr (IS_DGATED) {
-      copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_grad_sh[0], grad_ptr, chunk_it_offset_x, chunk_it_offset_y,
+      transformer_engine::rocm::copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_grad_sh[0], grad_ptr, chunk_it_offset_x, chunk_it_offset_y,
                         cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
     }
 
     // Act
-    copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_act_sh[0], input_act, chunk_it_offset_x, chunk_it_offset_y,
+    transformer_engine::rocm::copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_act_sh[0], input_act, chunk_it_offset_x, chunk_it_offset_y,
                       2*cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
     
     // Gate
-    copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_gate_sh[0], input_gate, chunk_it_offset_x, chunk_it_offset_y,
+    transformer_engine::rocm::copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_gate_sh[0], input_gate, chunk_it_offset_x, chunk_it_offset_y,
                       2*cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
 
     __syncthreads();
@@ -356,19 +356,19 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     __syncthreads();
 
     if constexpr (USE_ROWWISE_SCALING) {
-      ptx::bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_act_rowwise_sh[0], output_act_rowwise, chunk_it_offset_x,
+      transformer_engine::rocm::bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_act_rowwise_sh[0], output_act_rowwise, chunk_it_offset_x,
                                       chunk_it_offset_y, output_cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
       if constexpr (IS_DGATED) {
-      ptx::bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_gate_rowwise_sh[0], output_gate_rowwise, chunk_it_offset_x,
+      transformer_engine::rocm::bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_gate_rowwise_sh[0], output_gate_rowwise, chunk_it_offset_x,
                                       chunk_it_offset_y, output_cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
       }
     }
     
     if constexpr (USE_COLWISE_SCALING) {
-      ptx::bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_act_colwise_sh[0], output_act_colwise, chunk_it_offset_x,
+      transformer_engine::rocm::bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_act_colwise_sh[0], output_act_colwise, chunk_it_offset_x,
                                       chunk_it_offset_y, output_cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
       if constexpr (IS_DGATED) {
-      ptx::bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_gate_colwise_sh[0], output_gate_colwise, chunk_it_offset_x,
+      transformer_engine::rocm::bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_gate_colwise_sh[0], output_gate_colwise, chunk_it_offset_x,
                                       chunk_it_offset_y, output_cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
       }
     }

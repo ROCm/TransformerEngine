@@ -5,7 +5,7 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef USE_ROCM
 #include <cuda_runtime.h>
 
 #include <iostream>
@@ -101,4 +101,4 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
 
 }  // namespace jax
 }  // namespace transformer_engine
-#endif // #ifndef __HIP_PLATFORM_AMD__
+#endif // #ifndef USE_ROCM

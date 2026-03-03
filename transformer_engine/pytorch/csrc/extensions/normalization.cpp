@@ -120,7 +120,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     auto fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
     NVTE_CHECK(fp8_quantizer_cpp != nullptr, "Could not cast to FP8 current scaling quantizer");
     impl = Impl::FUSED_NORM_AMAX_FP8;
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
   }
 #else
   } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
@@ -152,7 +152,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
           fp8_quantizer_cpp->create_unquantized_tensor_with_amax(shape, out_dtype);
       kernel_out_nvte = &unquantized_out_nvte;
     } break;
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef USE_ROCM
     case Impl::FUSED_NORM_AMAX_NVFP4: {
       auto nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
       std::tie(unquantized_out_nvte, unquantized_out) =
@@ -197,7 +197,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
       fp8_quantizer_cpp->quantize_with_amax(unquantized_out_nvte, out_nvte);
     } break;
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef USE_ROCM
     case Impl::FUSED_NORM_AMAX_NVFP4: {
       auto nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
       nvfp4_quantizer_cpp->quantize_with_amax(unquantized_out_nvte, out_nvte);
@@ -352,7 +352,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     auto fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
     NVTE_CHECK(fp8_quantizer_cpp != nullptr, "Could not cast to FP8 current scaling quantizer");
     impl = Impl::FUSED_NORM_AMAX_FP8;
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
   }
 #else
   } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
@@ -384,7 +384,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
           fp8_quantizer_cpp->create_unquantized_tensor_with_amax(shape, out_dtype);
       kernel_out_nvte = &unquantized_out_nvte;
     } break;
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef USE_ROCM
     case Impl::FUSED_NORM_AMAX_NVFP4: {
       auto nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
       std::tie(unquantized_out_nvte, unquantized_out) =
@@ -427,7 +427,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
       fp8_quantizer_cpp->quantize_with_amax(unquantized_out_nvte, out_nvte);
     } break;
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef USE_ROCM
     case Impl::FUSED_NORM_AMAX_NVFP4: {
       auto nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
       nvfp4_quantizer_cpp->quantize_with_amax(unquantized_out_nvte, out_nvte);

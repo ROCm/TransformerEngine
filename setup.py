@@ -13,7 +13,6 @@ import subprocess
 import time
 from pathlib import Path
 from typing import List, Tuple
-import subprocess
 
 import setuptools
 from setuptools.command.egg_info import egg_info
@@ -240,7 +239,7 @@ if __name__ == "__main__":
         assert bool(
             int(os.getenv("NVTE_RELEASE_BUILD", "0"))
         ), "NVTE_RELEASE_BUILD env must be set for metapackage build."
-        te_cuda_vers = "rocm" if rocm_build() else "cu12"
+        te_cuda_vers = "cu12"
         ext_modules = []
         cmdclass = {}
         package_data = {}
@@ -253,7 +252,7 @@ if __name__ == "__main__":
             "pytorch": [f"transformer_engine_torch=={__version__}"],
             "jax": [f"transformer_engine_jax=={__version__}"],
         } if not rocm_build() else {
-            "core": [f"transformer_engine_{te_cuda_vers}=={__version__}"],
+            "core": [f"transformer_engine_rocm=={__version__}"],
             "pytorch": [f"transformer_engine_torch=={__version__}"],
             "jax": [f"transformer_engine_jax=={__version__}"],
         }
@@ -303,7 +302,7 @@ if __name__ == "__main__":
         long_description=long_description,
         long_description_content_type="text/x-rst",
         ext_modules=ext_modules,
-        cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist} if not rocm_build() else {"egg_info": HipifyMeta, "build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist},
+        cmdclass={"egg_info": HipifyMeta, "build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist},
         python_requires=f">={min_python_version_str()}",
         classifiers=["Programming Language :: Python :: 3"],
         install_requires=install_requires,

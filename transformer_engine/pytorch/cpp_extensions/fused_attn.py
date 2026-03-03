@@ -264,6 +264,10 @@ def fused_attn_fwd(
     max_logit: if return_max_logit = True, shape [h] and same data type as O; otherwise None
     """
 
+    if IS_HIP_EXTENSION:
+        assert not return_max_logit, "ROCm does not support return_max_logit yet."
+        assert not cuda_graph, "ROCm does not support cuda_graph."
+
     if attn_scale is None:
         d = q.size(-1)
         attn_scale = 1.0 / math.sqrt(d)

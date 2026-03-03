@@ -26,6 +26,8 @@
 #include "../../utils.cuh"
 #include "../core/common.cuh"
 
+#include "./rocm_vectorized_2d.cuh"
+
 namespace transformer_engine {
 namespace dispatch {
 namespace mxfp8 {

@@ -319,6 +319,8 @@ class DotProductAttention(TransformerEngineBaseModule):
         softmax_type: str = "vanilla",
         return_max_logit: Optional[bool] = False,
     ) -> None:
+        if IS_HIP_EXTENSION:
+            assert not return_max_logit, "ROCm does not support return_max_logit yet."
         super().__init__()
 
         self.logger = logging.getLogger("DotProductAttention")

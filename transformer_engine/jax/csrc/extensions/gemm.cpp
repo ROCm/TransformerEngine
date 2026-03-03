@@ -86,10 +86,11 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
         input.set_columnwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
       }
     } else {  // Swizzle for NVFP4
-      NVTE_CHECK(rowwise, "NVFP4 GEMM expects rowwise for both LHS and RHS");
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
+      NVTE_ERROR("ROCm TE does not support NVFP4 yet.");
     }
 #else
+      NVTE_CHECK(rowwise, "NVFP4 GEMM expects rowwise for both LHS and RHS");
       input.set_rowwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
       // Create tensor to hold swizzled scale factor
       TensorWrapper output(get_nvte_scaling_mode(scaling_mode));
@@ -100,7 +101,7 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
       // Set swizzled scales into the input tensor
       input.set_rowwise_scale_inv(swizzle_scale_ptr, scale_dtype, scale_shape);
     }
-#endif // #ifdef __HIP_PLATFORM_AMD__
+#endif // #ifdef USE_ROCM
   }
 
   return std::make_tuple(std::move(input), input_shape);
@@ -285,7 +286,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
   } else {
 #ifdef USE_ROCM
     //TODO: better assert
-    std::cerr<<"ROCm TE jax does not integrate userbuffer for now"<<std::endl;
+    NVTE_ERROR("ROCm TE jax does not integrate userbuffer for now");
 #else
     std::vector<size_t> buffer_shape{0, 0};
     DType buffer_dtype = out_dtype;
@@ -771,7 +772,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 
   size_t num_non_empty_gemms = lhs_list.size();
 
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef USE_ROCM
   if (is_mxfp8_scaling) {
     for (int i = 0; i < num_non_empty_gemms; i++) {
       // The i-th GEMM will use the (i % num_streams)-th stream to compute,

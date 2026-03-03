@@ -482,7 +482,7 @@ def get_attention_backend(
         fp8_recipe = fp8_meta["recipe"]
         if fp8_meta.get("local_recipes", None) is not None:
             fp8_recipe = fp8_meta["local_recipes"][0]
-        if use_fused_attention and fp8_recipe.float8_current_scaling():
+        if use_fused_attention and fp8_recipe.float8_current_scaling() and not IS_HIP_EXTENSION:
             if device_compute_capability < (10, 0):
                 logger.debug("Disabling FusedAttention for FP8 current scaling on arch < sm100")
                 use_fused_attention = False
@@ -502,7 +502,7 @@ def get_attention_backend(
                         )
                         use_fused_attention = False
 
-        if device_compute_capability == (12, 0):
+        if device_compute_capability == (12, 0) and not IS_HIP_EXTENSION:
             if use_flash_attention:
                 logger.debug(
                     "Disabling FlashAttention as FP8 is not supported"
@@ -599,6 +599,7 @@ def get_attention_backend(
             device_compute_capability == (12, 0)
             and (head_dim_qk > 128 or head_dim_qk % 8 != 0)
             and is_training
+            and not IS_HIP_EXTENSION
         ):
             if use_fused_attention:
                 logger.debug(
@@ -679,7 +680,7 @@ def get_attention_backend(
                     "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
                 )
             use_flash_attention = False
-        if device_compute_capability == (12, 0):
+        if device_compute_capability == (12, 0) and not IS_HIP_EXTENSION:
             if use_fused_attention:
                 logger.debug(
                     "Disabling FusedAttention as qkv_format = thd is"
