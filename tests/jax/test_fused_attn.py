@@ -423,6 +423,57 @@ class FusedAttnRunner:
                     "the F16_arbitrary_seqlen backend."
                 )
 
+    def _setup_thd_segments_ck_smallseq(self, generate_random_segment_ids):
+        """
+        Build THD segment descriptors for the CK small-seq path (NVTE_FUSED_ATTN_CK_SMALLSEQ=1).
+
+        Uses num_segments_per_seq = max_seqlen_q for both Q and KV. For Q: if max_seqlen_q == 1,
+        uses a fixed layout (one token per batch, cu_seqlens [0,1,...,batch_size]); otherwise
+        generates random segments. For KV: always generates random segments.
+        """
+        num_segments_per_seq = self.max_seqlen_q
+        if self.max_seqlen_q == 1:
+            # Q: deterministic - one segment of length 1 per batch -> cu_seqlen [0,1,2,...,batch_size]
+            segment_ids_q = jnp.ones((self.batch_size, self.max_seqlen_q), dtype=jnp.int32)
+            segment_pos_q = jnp.zeros((self.batch_size, self.max_seqlen_q), dtype=jnp.int32)
+            pad_q = jnp.zeros((self.batch_size, self.max_seqlen_q), dtype=jnp.int32)
+            seqlens_q = jnp.ones((self.batch_size, 1), dtype=jnp.int32)
+            offsets_q = jnp.concatenate(
+                [
+                    jnp.arange(self.batch_size, dtype=jnp.int32)[:, None],
+                    jnp.full((self.batch_size, 1), -1, dtype=jnp.int32),
+                ],
+                axis=1,
+            )
+        else:
+            segment_ids_q, segment_pos_q, pad_q = generate_random_segment_ids(
+                self.batch_size, self.max_seqlen_q, num_segments_per_seq, seed=42
+            )
+            seqlens_q, offsets_q = get_seqlens_and_offsets(segment_ids_q)
+
+        min_segment_len = None if self.window_size is None else seqlens_q
+        segment_ids_kv, segment_pos_kv, pad_kv = generate_random_segment_ids(
+            self.batch_size,
+            self.max_seqlen_kv,
+            num_segments_per_seq,
+            seed=2024,
+            min_segment_len=min_segment_len,
+        )
+        seqlens_kv, offsets_kv = get_seqlens_and_offsets(segment_ids_kv)
+        return (
+            num_segments_per_seq,
+            segment_ids_q,
+            segment_pos_q,
+            pad_q,
+            seqlens_q,
+            offsets_q,
+            segment_ids_kv,
+            segment_pos_kv,
+            pad_kv,
+            seqlens_kv,
+            offsets_kv,
+        )
+
     def _setup_inputs(self):
         self._check_configs()
 
@@ -544,40 +595,22 @@ class FusedAttnRunner:
             return segment_ids, segment_pos, segment_pad
 
         if self.qkv_layout.is_thd():
-            if self.max_seqlen_q == 1 and is_hip_extension() and os.environ.get("NVTE_FUSED_ATTN_CK_SMALLSEQ", "0") == "1":
-                self.num_segments_per_seq = 1
-                # Q: deterministic — one segment of length 1 per batch -> cu_seqlen [0,1,2,...,batch_size]
-                self.segment_ids_q = jnp.ones((self.batch_size, self.max_seqlen_q), dtype=jnp.int32)
-                self.segment_pos_q = jnp.zeros((self.batch_size, self.max_seqlen_q), dtype=jnp.int32)
-                self.pad_q = jnp.zeros((self.batch_size, self.max_seqlen_q), dtype=jnp.int32)
-                self.seqlens_q = jnp.ones((self.batch_size, 1), dtype=jnp.int32)
-                self.offsets_q = jnp.concatenate(
-                    [
-                        jnp.arange(self.batch_size, dtype=jnp.int32)[:, None],
-                        jnp.full((self.batch_size, 1), -1, dtype=jnp.int32),
-                    ],
-                    axis=1,
-                )
-
-                # KV: one segment per batch (num_segments_per_seq=1) to match smallseq kernel
-                min_segment_len = None if self.window_size is None else self.seqlens_q
-                self.segment_ids_kv, self.segment_pos_kv, self.pad_kv = (
-                    generate_random_segment_ids(
-                        self.batch_size,
-                        self.max_seqlen_kv,
-                        self.num_segments_per_seq,  # 1 for s_q=1 path
-                        seed=2024,
-                        min_segment_len=min_segment_len,
-                    )
-                )
-                self.seqlens_kv, self.offsets_kv = get_seqlens_and_offsets(
-                    self.segment_ids_kv
-                )
+            if is_hip_extension() and os.environ.get("NVTE_FUSED_ATTN_CK_SMALLSEQ", "0") == "1":
+                (
+                    self.num_segments_per_seq,
+                    self.segment_ids_q,
+                    self.segment_pos_q,
+                    self.pad_q,
+                    self.seqlens_q,
+                    self.offsets_q,
+                    self.segment_ids_kv,
+                    self.segment_pos_kv,
+                    self.pad_kv,
+                    self.seqlens_kv,
+                    self.offsets_kv,
+                ) = self._setup_thd_segments_ck_smallseq(generate_random_segment_ids)
             else:
-                if is_hip_extension() and os.environ.get("NVTE_FUSED_ATTN_CK_SMALLSEQ", "0") == "1":
-                    self.num_segments_per_seq = self.max_seqlen_q
-                else:
-                    self.num_segments_per_seq = 2
+                self.num_segments_per_seq = 2
                 self.segment_ids_q, self.segment_pos_q, self.pad_q = generate_random_segment_ids(
                     self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
                 )
