@@ -18,10 +18,30 @@ class _FormatHelper(NamedTuple):
     """
     Stores max FP8 values for fprop and bprop a `Format`.
     """
-
     max_fwd: float
     max_bwd: float
 
+class _FormatHelperFP8(NamedTuple):
+    """
+    Stores max FP8 values for fprop and bprop a `Format`.
+    """
+    fwd: tuple
+    bwd: tuple
+
+    @property
+    def max_fwd(self) -> float: 
+        return self.fwd[is_fp8_fnuz()]
+
+    @property
+    def max_bwd(self) -> float:
+        return self.bwd[is_fp8_fnuz()]
+
+class _FormatMaxVals(Enum):
+    """
+    Tuples of FP8 (OCP, FNUZ) values for different formats.
+    """
+    E4M3 = (448, 240)
+    E5M2 = (57344, 57344)
 
 class Format(Enum):
     """
@@ -40,15 +60,10 @@ class Format(Enum):
             FP8 tensors in the forward pass are in e4m3 format,
             FP8 tensors in the backward pass are in e5m2 format
     """
-
     E2M1 = _FormatHelper(max_fwd=6, max_bwd=6)
-    if te_rocm_build:
-        max_e4m3_val = 240 if is_fp8_fnuz() else 448
-        E4M3 = _FormatHelper(max_fwd=max_e4m3_val, max_bwd=max_e4m3_val)
-    else:
-        E4M3 = _FormatHelper(max_fwd=448, max_bwd=448)
-    E5M2 = _FormatHelper(max_fwd=57344, max_bwd=57344)
-    HYBRID = _FormatHelper(max_fwd=E4M3.max_fwd, max_bwd=E5M2.max_bwd)
+    E4M3 = _FormatHelperFP8(fwd=_FormatMaxVals.E4M3.value, bwd=_FormatMaxVals.E4M3.value)
+    E5M2 = _FormatHelperFP8(fwd=_FormatMaxVals.E5M2.value, bwd=_FormatMaxVals.E5M2.value)
+    HYBRID = _FormatHelperFP8(fwd=E4M3.fwd, bwd=E5M2.bwd)
 
 
 @dataclass(frozen=True)
