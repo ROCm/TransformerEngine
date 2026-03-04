@@ -150,6 +150,11 @@ hipError_t _ck_attn_fwd_impl(
   right = window_size_right;
   mask_enum mask_type = static_cast<mask_enum>(attn_mask_type);
   
+  bool ck_log_config = false;
+  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
+    if (env_p != nullptr && std::string(env_p) == "1")
+      ck_log_config = true;
+  }
   const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
   // print kernel name on verbose mode
   ck_tile::stream_config stream_config{stream, dump_path!=nullptr, get_ck_log_stream() != nullptr};
