@@ -240,7 +240,8 @@ class MXFP4Tensor(MXFP4TensorBase, QuantizedTensor):
         return (
             f"MXFP4Tensor(fp4_dtype={self._fp4_dtype}, "
             f"shape={self.shape}, "
-            f"rowwise_data_shape={self._rowwise_data.shape if self._rowwise_data is not None else None})"
+            f"rowwise_data_shape={self._rowwise_data.shape if self._rowwise_data is not None else None}), "
+            f"rowwise_scale_inv_shape={self._rowwise_scale_inv.shape if self._rowwise_scale_inv is not None else None}), "
         )
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:

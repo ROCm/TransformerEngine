@@ -451,6 +451,52 @@ def _dequantize_mxfp8_triton(
 #### cast_transpose_mxfp4
 ##########################################
 
+
+@triton.jit
+def _mxfp4_quantize_32x32_block(
+    x_block,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """
+    Quantize a 32x32 float32 block to packed FP4 (E2M1) with per-row E8M0 scales.
+
+    Args:
+        x_block: [BLOCK_SIZE, BLOCK_SIZE] float32 tensor
+    Returns:
+        packed: [BLOCK_SIZE, BLOCK_SIZE // 2] uint8 (2 FP4 values per byte)
+        scale_uint8: [BLOCK_SIZE, 1] uint8 E8M0 scale per row
+    """
+    amax_row = tl.max(tl.abs(x_block), axis=1, keep_dims=True)
+    amax_u32 = amax_row.to(tl.uint32, bitcast=True)
+    amax_u32 = (amax_u32 + 0x200000) & 0xFF800000
+    amax_rounded = amax_u32.to(tl.float32, bitcast=True)
+
+    scale_unbiased = tl.log2(tl.maximum(amax_rounded, 1e-45)).floor() - 2
+    scale_unbiased = tl.clamp(scale_unbiased, min=-127.0, max=127.0)
+    quant_scale = tl.exp2(-scale_unbiased)
+
+    qx = x_block * quant_scale
+    bs = (scale_unbiased + 127.0).to(tl.uint8)
+    bs = tl.where(amax_row == 0.0, 127, bs)
+
+    abs_qx = tl.abs(qx)
+    sign = (qx < 0.0).to(tl.uint8)
+    idx = tl.zeros([BLOCK_SIZE, BLOCK_SIZE], dtype=tl.uint8)
+    idx = tl.where(abs_qx >= 0.25, 1, idx)
+    idx = tl.where(abs_qx >= 0.75, 2, idx)
+    idx = tl.where(abs_qx >= 1.25, 3, idx)
+    idx = tl.where(abs_qx >= 1.75, 4, idx)
+    idx = tl.where(abs_qx >= 2.5, 5, idx)
+    idx = tl.where(abs_qx >= 3.5, 6, idx)
+    idx = tl.where(abs_qx >= 5.0, 7, idx)
+
+    e2m1 = (sign << 3) | idx
+    pairs = tl.reshape(e2m1, [BLOCK_SIZE, BLOCK_SIZE // 2, 2])
+    vals_even, vals_odd = tl.split(pairs)
+    packed = vals_even | (vals_odd << 4)
+    return packed, bs
+
+
 @triton.jit
 def _cast_transpose_triton_mxfp4(
     x_ptr,
@@ -537,47 +583,7 @@ def _cast_transpose_triton_mxfp4(
 
             # ---------- Rowwise path ----------
             if USE_ROWWISE:
-                # For each row in the current tile (base_m + row0), process the elements in [base_n : base_n + 31].
-                # Compute one E8M0 scale per row (32 elements).
-                amax_row = tl.max(tl.abs(x_chunk), axis=1, keep_dims=True)
-                
-                # FIX 1: Use tl.uint32 (not tl.int32) to match HIP kernel
-                amax_u32 = amax_row.to(tl.uint32, bitcast=True)
-                amax_u32 = (amax_u32 + 0x200000) & 0xFF800000
-                amax_rounded = amax_u32.to(tl.float32, bitcast=True)
-                
-                scale_unbiased_row = tl.log2(tl.maximum(amax_rounded, 1e-45)).floor() - 2
-                scale_unbiased_row = tl.clamp(scale_unbiased_row, min=-127.0, max=127.0)
-                quant_scale_row = tl.exp2(-scale_unbiased_row)
-
-                qx_row = x_chunk * quant_scale_row
-                bs_row = (scale_unbiased_row + 127.0).to(tl.uint8)
-                
-                bs_row = tl.where(amax_row == 0.0, 127, bs_row)
-
-                # FIX 3: Use lookup table for FP4 encoding
-                abs_qx_row = tl.abs(qx_row)
-                sign_row = (qx_row < 0.0).to(tl.uint8)
-                
-                # Nearest-neighbor quantization to E2M1 values
-                # E2M1 representable values: {0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0}
-                idx_row = tl.zeros([MXFP4_BLOCK_SIZE, MXFP4_BLOCK_SIZE], dtype=tl.uint8)
-                idx_row = tl.where(abs_qx_row >= 0.25, 1, idx_row)  # → 0.5
-                idx_row = tl.where(abs_qx_row >= 0.75, 2, idx_row)  # → 1.0
-                idx_row = tl.where(abs_qx_row >= 1.25, 3, idx_row)  # → 1.5
-                idx_row = tl.where(abs_qx_row >= 1.75, 4, idx_row)  # → 2.0
-                idx_row = tl.where(abs_qx_row >= 2.5,  5, idx_row)  # → 3.0
-                idx_row = tl.where(abs_qx_row >= 3.5,  6, idx_row)  # → 4.0
-                idx_row = tl.where(abs_qx_row >= 5.0,  7, idx_row)  # → 6.0
-                
-                e2m1_row = (sign_row << 3) | idx_row
-
-                # Pack columns (C0,C1) -> byte0, (C2,C3) -> byte1, etc.
-                row_pairs = tl.reshape(
-                    e2m1_row, [MXFP4_BLOCK_SIZE, MXFP4_BLOCK_SIZE // 2, 2]
-                )
-                vals_even, vals_odd = tl.split(row_pairs)
-                packed_row = vals_even | (vals_odd << 4)
+                packed_row, bs_row = _mxfp4_quantize_32x32_block(x_chunk, MXFP4_BLOCK_SIZE)
 
                 row_out_rows = offs_m
                 row_out_cols = (
@@ -652,45 +658,10 @@ def _cast_transpose_triton_mxfp4(
 
             # ---------- Columnwise path ----------
             if USE_COLWISE:
-                # Treat columns as rows by transposing to reuse the same per-row logic.
-                x_col = tl.trans(x_chunk)
-                amax_col = tl.max(tl.abs(x_col), axis=1, keep_dims=True)
-                
-                amax_u32 = amax_col.to(tl.uint32, bitcast=True)
-                amax_u32 = (amax_u32 + 0x200000) & 0xFF800000
-                amax_rounded = amax_u32.to(tl.float32, bitcast=True)
-                
-                scale_unbiased_col = tl.log2(tl.maximum(amax_rounded, 1e-45)).floor() - 2
-                scale_unbiased_col = tl.clamp(scale_unbiased_col, min=-127.0, max=127.0)
-                quant_scale_col = tl.exp2(-scale_unbiased_col)
-
-                qx_col = x_col * quant_scale_col
-                bs_col = (scale_unbiased_col + 127.0).to(tl.uint8)
-                
-                # Explicit zero-block handling (amax_col has shape [MXFP4_BLOCK_SIZE, 1])
-                bs_col = tl.where(amax_col == 0.0, 127, bs_col)
-
-                # Use lookup table for FP4 encoding
-                abs_qx_col = tl.abs(qx_col)
-                sign_col = (qx_col < 0.0).to(tl.uint8)
-                
-                idx_col = tl.zeros([MXFP4_BLOCK_SIZE, MXFP4_BLOCK_SIZE], dtype=tl.uint8)
-                idx_col = tl.where(abs_qx_col >= 0.25, 1, idx_col)
-                idx_col = tl.where(abs_qx_col >= 0.75, 2, idx_col)
-                idx_col = tl.where(abs_qx_col >= 1.25, 3, idx_col)
-                idx_col = tl.where(abs_qx_col >= 1.75, 4, idx_col)
-                idx_col = tl.where(abs_qx_col >= 2.5,  5, idx_col)
-                idx_col = tl.where(abs_qx_col >= 3.5,  6, idx_col)
-                idx_col = tl.where(abs_qx_col >= 5.0,  7, idx_col)
-                
-                e2m1_col = (sign_col << 3) | idx_col
-
-                # After transpose, each row in x_col is one column from the original tile.
-                col_pairs = tl.reshape(
-                    e2m1_col, [MXFP4_BLOCK_SIZE, MXFP4_BLOCK_SIZE // 2, 2]
+                # Transpose so each column of x_chunk becomes a row; then same per-row quantize.
+                packed_col, bs_col = _mxfp4_quantize_32x32_block(
+                    tl.trans(x_chunk), MXFP4_BLOCK_SIZE
                 )
-                vals_even, vals_odd = tl.split(col_pairs)
-                packed_col = vals_even | (vals_odd << 4)  # [cols, row_pairs]
 
                 col_indices = (
                     base_n + chunk_n * MXFP4_BLOCK_SIZE + tl.arange(0, MXFP4_BLOCK_SIZE)

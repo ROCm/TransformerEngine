@@ -267,8 +267,7 @@ def test_quantize_mxfp4_standard(shape, in_dtype, rowwise, columnwise):
         columnwise=columnwise,
     )
     
-    out = quantizer.make_empty(input_tensor.shape, dtype=in_dtype)
-    quantized_out = te_quantize_triton(input_tensor, quantizer=quantizer, output=out)
+    quantized_out = te_quantize_triton(input_tensor, quantizer=quantizer)
     
     M = math.prod(input_tensor.shape[:-1])
     K = input_tensor.shape[-1]
@@ -334,8 +333,7 @@ def test_quantize_mxfp4_edge_cases(edge_case):
         input_tensor = torch.full(shape, 3e38, dtype=torch.bfloat16, device='cuda')
     
     quantizer = MXFP4Quantizer(rowwise=True, columnwise=False)
-    out = quantizer.make_empty(input_tensor.shape, dtype=torch.bfloat16)
-    quantized_out = te_quantize_triton(input_tensor, quantizer=quantizer, output=out)
+    quantized_out = te_quantize_triton(input_tensor, quantizer=quantizer)
     
     ref_data, ref_scale = mxfp4_quantize_cpu(input_tensor, axis='row')
     num_blocks = K // MXFP4_BLOCK_SCALING_SIZE
