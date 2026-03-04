@@ -11,7 +11,7 @@ import warnings
 from ..utils import is_non_tn_fp8_gemm_supported
 
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
-from .cast_transpose import te_cast_transpose_mxfp8_triton, te_cast_transpose_noop_triton, te_dequantize_mxfp8_triton
+from .cast_transpose import te_cast_transpose_mxfp4_triton, te_cast_transpose_mxfp8_triton, te_cast_transpose_noop_triton, te_dequantize_mxfp8_triton
 import transformer_engine_torch as tex
 from ..tensor.quantized_tensor import QuantizedTensor, Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
@@ -121,8 +121,7 @@ def te_quantize_triton(
     elif isinstance(out, MXFP8TensorBase):
         te_cast_transpose_mxfp8_triton(input_tensor, out)
     elif isinstance(out, MXFP4TensorBase):
-        # MXFP4 uses AITER quantization directly - bypass C++ tex.quantize
-        out = quantizer.update_quantized(input_tensor, out, noop_flag=noop_flag)
+        te_cast_transpose_mxfp4_triton(input_tensor,out)
     else:
         raise NotImplementedError(f"Not implemented for tensor type: '{type(out).__name__}'")
 

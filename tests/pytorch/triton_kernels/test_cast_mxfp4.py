@@ -268,8 +268,7 @@ def test_quantize_mxfp4_standard(shape, in_dtype, rowwise, columnwise):
         shuffle_B_matrix_for_aiter=False
     )
     
-    out = quantizer.make_empty(input_tensor.shape, dtype=in_dtype)
-    quantized_out = te_quantize_triton(input_tensor, quantizer=quantizer, output=out)
+    quantized_out = te_quantize_triton(input_tensor, quantizer=quantizer)
     
     M = math.prod(input_tensor.shape[:-1])
     K = input_tensor.shape[-1]
@@ -286,7 +285,7 @@ def test_quantize_mxfp4_standard(shape, in_dtype, rowwise, columnwise):
         )
         
         compare_e8m0_scales(
-            quantized_out._rowwise_scale.view(torch.uint8)[:M, :num_blocks],
+            quantized_out._rowwise_scale_inv.view(torch.uint8)[:M, :num_blocks],
             ref_scale[:M, :num_blocks],
             msg=f"Rowwise E8M0 ({shape}, {in_dtype})",
             max_diff=1,
@@ -306,7 +305,7 @@ def test_quantize_mxfp4_standard(shape, in_dtype, rowwise, columnwise):
         )
         
         compare_e8m0_scales(
-            quantized_out._columnwise_scale.view(torch.uint8)[:K, :num_blocks],
+            quantized_out._columnwise_scale_inv.view(torch.uint8)[:K, :num_blocks],
             ref_scale[:K, :num_blocks],
             msg=f"Columnwise E8M0 ({shape}, {in_dtype})",
             max_diff=1,
@@ -335,14 +334,13 @@ def test_quantize_mxfp4_edge_cases(edge_case):
         input_tensor = torch.full(shape, 3e38, dtype=torch.bfloat16, device='cuda')
     
     quantizer = MXFP4Quantizer(rowwise=True, columnwise=False)
-    out = quantizer.make_empty(input_tensor.shape, dtype=torch.bfloat16)
-    quantized_out = te_quantize_triton(input_tensor, quantizer=quantizer, output=out)
+    quantized_out = te_quantize_triton(input_tensor, quantizer=quantizer)
     
     ref_data, ref_scale = mxfp4_quantize_cpu(input_tensor, axis='row')
     num_blocks = K // MXFP4_BLOCK_SCALING_SIZE
     
     if edge_case == "all_zeros":
-        scales = quantized_out._rowwise_scale.view(torch.uint8)[:M, :num_blocks]
+        scales = quantized_out._rowwise_scale_inv.view(torch.uint8)[:M, :num_blocks]
         assert torch.all(scales == 127), (
             f"Zero blocks should have scale=127, got: {scales.unique()}"
         )
@@ -358,7 +356,7 @@ def test_quantize_mxfp4_edge_cases(edge_case):
         )
         
         compare_e8m0_scales(
-            quantized_out._rowwise_scale.view(torch.uint8)[:M, :num_blocks],
+            quantized_out._rowwise_scale_inv.view(torch.uint8)[:M, :num_blocks],
             ref_scale[:M, :num_blocks],
             msg=f"Edge case scales: {edge_case}",
             max_diff=1,

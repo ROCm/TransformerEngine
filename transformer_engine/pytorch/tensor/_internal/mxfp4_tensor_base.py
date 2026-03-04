@@ -67,20 +67,18 @@ class MXFP4TensorBase(QuantizedTensorBase):
     _columnwise_data: Optional[torch.Tensor]  # [K, M/2] uint8 (transposed)
     _quantizer: Optional[Quantizer]
     _fp4_dtype: TE_DType
-    _rowwise_scale: torch.Tensor  # [M, K/32] uint8 E8M0
-    _columnwise_scale: torch.Tensor  # [K, M/32] uint8 E8M0
-    _original_shape: Optional[Tuple[int, ...]]  # Original shape before reshape (for 3D inputs)
+    _rowwise_scale_inv: torch.Tensor  # [M, K/32] uint8 E8M0
+    _columnwise_scale_inv: torch.Tensor  # [K, M/32] uint8 E8M0
 
     def __new__(
         cls,
-        *args,
         rowwise_data: Optional[torch.Tensor],
-        rowwise_scale: torch.Tensor,
+        rowwise_scale_inv: torch.Tensor,
         columnwise_data: Optional[torch.Tensor],
-        columnwise_scale: torch.Tensor,
+        columnwise_scale_inv: torch.Tensor,
         fp4_dtype: TE_DType,
         quantizer: Optional[Quantizer] = None,
-        original_shape: Optional[Tuple[int, ...]] = None,
+        *args,
         **kwargs,
     ):
         instance = super().__new__(cls, *args, **kwargs)
@@ -88,9 +86,8 @@ class MXFP4TensorBase(QuantizedTensorBase):
         instance._columnwise_data = columnwise_data
         instance._quantizer = quantizer
         instance._fp4_dtype = fp4_dtype
-        instance._rowwise_scale = rowwise_scale
-        instance._columnwise_scale = columnwise_scale
-        instance._original_shape = original_shape
+        instance._rowwise_scale_inv = rowwise_scale_inv
+        instance._columnwise_scale_inv = columnwise_scale_inv
 
         return instance
 
@@ -99,8 +96,8 @@ class MXFP4TensorBase(QuantizedTensorBase):
         for t in (
             self._rowwise_data,
             self._columnwise_data,
-            self._rowwise_scale,
-            self._columnwise_scale,
+            self._rowwise_scale_inv,
+            self._columnwise_scale_inv,
         ):
             if t is not None:
                 t.data = _empty_tensor()
@@ -109,9 +106,9 @@ class MXFP4TensorBase(QuantizedTensorBase):
         """Get this tensor's metadata."""
         return {
             "rowwise_data": self._rowwise_data,
-            "rowwise_scale": self._rowwise_scale,
+            "rowwise_scale_inv": self._rowwise_scale_inv,
             "columnwise_data": self._columnwise_data,
-            "columnwise_scale": self._columnwise_scale,
+            "columnwise_scale_inv": self._columnwise_scale_inv,
             "fp4_dtype": self._fp4_dtype,
             "quantizer": self._quantizer,
         }
@@ -121,13 +118,13 @@ class MXFP4TensorBase(QuantizedTensorBase):
         tensors = [
             self._rowwise_data,
             self._columnwise_data,
-            self._rowwise_scale,
-            self._columnwise_scale,
+            self._rowwise_scale_inv,
+            self._columnwise_scale_inv,
         ]
         self._rowwise_data = None
         self._columnwise_data = None
-        self._rowwise_scale = None
-        self._columnwise_scale = None
+        self._rowwise_scale_inv = None
+        self._columnwise_scale_inv = None
         return tensors, self
 
     def restore_from_saved(
@@ -136,8 +133,8 @@ class MXFP4TensorBase(QuantizedTensorBase):
         """Restore the tensor base data from the saved tensors list."""
         self._rowwise_data = tensors[0]
         self._columnwise_data = tensors[1]
-        self._rowwise_scale = tensors[2]
-        self._columnwise_scale = tensors[3]
+        self._rowwise_scale_inv = tensors[2]
+        self._columnwise_scale_inv = tensors[3]
         return tensors[4:]
 
     def get_data_tensors(self):
@@ -167,7 +164,7 @@ class MXFP4TensorBase(QuantizedTensorBase):
             "MXFP4TensorBase("
             f"fp4_dtype={self._fp4_dtype}, "
             f"rowwise_data_shape={self._rowwise_data.shape if self._rowwise_data is not None else None}, "
-            f"rowwise_scale_shape={self._rowwise_scale.shape if self._rowwise_scale is not None else None}"
+            f"rowwise_scale_inv_shape={self._rowwise_scale_inv.shape if self._rowwise_scale_inv is not None else None}"
             ")"
         )
 
@@ -193,13 +190,13 @@ class MXFP4TensorBase(QuantizedTensorBase):
                 raise RuntimeError(
                     "Requested row-wise usage, but MXFP4Tensor is missing row-scaled FP4 data"
                 )
-            if self._rowwise_scale is None:
+            if self._rowwise_scale_inv is None:
                 raise RuntimeError(
                     "Requested row-wise usage, but MXFP4Tensor is missing row-scaled scales"
                 )
         else:
             self._rowwise_data = None
-            self._rowwise_scale = None
+            self._rowwise_scale_inv = None
 
         # Update column-scaled data
         if columnwise_usage:
@@ -207,10 +204,10 @@ class MXFP4TensorBase(QuantizedTensorBase):
                 raise RuntimeError(
                     "Requested column-wise usage, but MXFP4Tensor is missing column-scaled FP4 data"
                 )
-            if self._columnwise_scale is None:
+            if self._columnwise_scale_inv is None:
                 raise RuntimeError(
                     "Requested column-wise usage, but MXFP4Tensor is missing column-scaled scales"
                 )
         else:
             self._columnwise_data = None
-            self._columnwise_scale = None
+            self._columnwise_scale_inv = None
