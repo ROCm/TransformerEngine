@@ -69,6 +69,7 @@ run_test_config(){
     run_default_fa 1 attention/test_kv_cache.py
     run_default_fa 1 triton_kernels/test_cast.py
     run_default_fa 1 triton_kernels/test_cast_mxfp8.py
+    run_default_fa 1 triton_kernels/test_cast_mxfp4.py
     run_default_fa 1 triton_kernels/test_grouped_gemm.py
     run_default_fa 1 triton_kernels/test_utils.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 triton_kernels/test_norms.py
