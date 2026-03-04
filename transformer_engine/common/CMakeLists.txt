@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -8,7 +8,6 @@ cmake_minimum_required(VERSION 3.21)
 
 option(USE_ROCM "Use ROCm" ON)
 option(USE_FUSED_ATTN_AOTRITON "Use aotriton backend" ON)
-option(USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS "Build AOTriton GPU kernels" OFF)
 option(USE_FUSED_ATTN_CK "Use ck backend" ON)
 set(USE_CUDA OFF)
 
@@ -203,6 +202,7 @@ else()
        fused_attn_rocm/fused_attn_ck.cpp
        fused_attn_rocm/utils.cpp
        gemm/rocm_gemm.cu
+       gemm/ck_grouped_gemm.cpp
        amd_detail/system.cpp)
 
   # process source code files
@@ -251,6 +251,9 @@ if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
 else()
   message(FATAL_ERROR "cutlass gemm/cutlass_grouped_gemm.cu kernel required sm 90a")
 endif()
+else()
+  set(CK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/aiter/3rdparty/composable_kernel)
+  target_include_directories(transformer_engine PRIVATE ${CK_ROOT}/include)
 endif() #USE_CUDA
 
 # Configure dependencies

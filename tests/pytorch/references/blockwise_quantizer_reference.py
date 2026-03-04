@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -8,6 +10,7 @@ import torch
 from typing import Optional, Protocol, Tuple
 from references.quantize_scale_calc import scale_from_amax_tensor
 
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 @dataclasses.dataclass()
 class QuantizeResult:
@@ -36,6 +39,8 @@ class CuBLASScaleMunger:
         def _pad_inner_to_align(s: torch.Tensor, transpose: bool) -> torch.Tensor:
             if transpose:
                 s = s.transpose(-1, -2).contiguous()
+            if IS_HIP_EXTENSION: # HIP does not use scale padding 
+                return s
             M, K = s.shape
             if K % 4 == 0:
                 return s
