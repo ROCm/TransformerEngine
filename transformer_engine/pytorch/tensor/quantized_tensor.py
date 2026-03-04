@@ -86,61 +86,6 @@ class QuantizedTensorBase:
             self._quantizer = quantizer
 
 
-class QuantizedTensorBase:
-    r"""Base class for all *TensorBase classes.
-
-    This class (and its subclasses) are optimization for when
-    the full QuantizedTensor is not needed (when it is fully
-    contained inside torch.autograd function and not visible to
-    PyTorch's autograd).
-
-    When creating a new tensor type X one should create both
-    XTensorBase class inheriting from QuantizedTensorBase and
-    XTensor inheriting from XTensorBase and QuantizedTensor.
-    XTensorBase should contain all data members needed to
-    implement the functionality of the tensor, while
-    XTensor should only implement the functionality needed
-    to behave like regular torch.Tensor (liek __torch_dispatch__)."""
-
-    def update_usage(
-        self,
-        rowwise_usage: Optional[bool] = None,
-        columnwise_usage: Optional[bool] = None,
-    ):
-        r"""
-        Generate or remove quantized data based on provided usage.
-
-        Parameters
-        ----------
-        rowwise_usage : Optional[bool[, default = `None`
-                        Whether to create or keep the data needed for using the tensor
-                        in rowwise fashion (e.g. as B argument in TN GEMM). Leaving it as `None`
-                        preserves the original value in the tensor.
-        columnwise_usage : Optional[bool], default = `None`
-                           Whether to create or keep the data needed for using the tensor
-                           in columnwise fashion (e.g. as A argument in TN GEMM). Leaving it as
-                           `None` preserves the original value in the tensor.
-
-        """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} class does not implement update_usage function"
-        )
-
-    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], QuantizedTensorBase]:
-        """Prepare the tensor base for saving for backward"""
-        raise NotImplementedError(
-            f"{self.__class__.__name__} class does not implement prepare_for_saving function"
-        )
-
-    def restore_from_saved(
-        self, tensors: list[Optional[torch.Tensor]]
-    ) -> list[Optional[torch.Tensor]]:
-        """Restore the tensor base data from the saved tensors list"""
-        raise NotImplementedError(
-            f"{self.__class__.__name__} class does not implement restore_from_saved function"
-        )
-
-
 def prepare_for_saving(
     *tensors: Union[torch.Tensor, QuantizedTensorBase],
 ) -> Tuple[

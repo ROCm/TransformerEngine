@@ -27,10 +27,28 @@ from test_common import fill_uniform
 # ============================================================================
 # CPU Reference Implementation
 # ============================================================================
+def shuffle_scales(scales: torch.Tensor):
+    scales_shuffled = scales.clone()
+    sm, sn = scales_shuffled.shape
+    scales_shuffled = scales_shuffled.view(sm // 32, 2, 16, sn // 8, 2, 4, 1)
+    scales_shuffled = scales_shuffled.permute(0, 3, 5, 2, 4, 1, 6).contiguous()
+    scales_shuffled = scales_shuffled.view(sm // 32, sn * 32)
+    return scales_shuffled
+
+def un_shuffle_scales(scales_shuffled: torch.Tensor):
+    scales = scales_shuffled.clone()
+    sm, sn = scales.shape
+    scales = scales.view(sm * 32, sn // 32)
+    sm, sn = scales.shape
+    scales = scales.view(sm // 32, sn // 8, 4, 16, 2, 2, 1)
+    scales = scales.permute(0, 5, 3, 1, 4, 2, 6).contiguous()
+    scales = scales.view(sm, sn)
+    return scales
 
 def mxfp4_quantize_cpu(
     input_tensor: torch.Tensor, 
-    axis: str = 'row'
+    axis: str = 'row',
+    SHUFFLE: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     CPU reference for MXFP4 quantization matching HIP kernel.
@@ -62,7 +80,7 @@ def mxfp4_quantize_cpu(
     BLOCK_SIZE = 32
     assert N % BLOCK_SIZE == 0, f"N={N} must be divisible by {BLOCK_SIZE}"
     
-    num_blocks = N // BLOCK_SIZE
+    num_blocks = math.ceil(N / BLOCK_SIZE)
     
     # Reshape to blocks: [M, num_blocks, BLOCK_SIZE]
     data_blocks = data.reshape(M, num_blocks, BLOCK_SIZE)
@@ -118,17 +136,21 @@ def mxfp4_quantize_cpu(
     fp4_odd = fp4_flat[:, 1::2]
     fp4_packed = ((fp4_odd << 4) | fp4_even).astype(np.uint8)
     
-    # === Pad scales to match Triton kernel dimensions ===
-    def cdiv(a, b): 
-        return (a + b - 1) // b
-    
-    scale_M_pad = cdiv(M, 256) * 256
-    scale_N_pad = cdiv(num_blocks, 8) * 8
-    scales_padded = np.full((scale_M_pad, scale_N_pad), 127, dtype=np.uint8)
-    scales_padded[:M, :num_blocks] = scales
-    
     fp4_packed_torch = torch.from_numpy(fp4_packed).to(input_tensor.device)
-    scales_torch = torch.from_numpy(scales_padded).to(input_tensor.device)
+    scales_torch = torch.from_numpy(scales).to(input_tensor.device)
+    
+    if SHUFFLE:
+        scales_pad = scales_torch
+        scaleM = (M + 255) // 256 * 256
+        scaleN_valid = (N + 31) // 32
+        scaleN = (scaleN_valid + 7) // 8 * 8
+        scales_pad = torch.empty(
+            (scaleM, scaleN), dtype=scales_pad.dtype, device=scales_pad.device
+        )
+        scales_pad[:M, :scaleN_valid] = scales_torch[:M, :scaleN_valid]
+        scales_pad = shuffle_scales(scales_pad)
+        scales_pad = scales_pad.view(scales_pad.shape[0] * 32, -1)
+        scales_torch = scales_pad
     
     return fp4_packed_torch, scales_torch
 
@@ -253,19 +275,22 @@ def compare_e8m0_scales(
     torch.bfloat16,
     torch.float32,
 ])
-@pytest.mark.parametrize(("rowwise", "columnwise"), [
-    (True, False),
-    (False, True),
-    (True, True),
+@pytest.mark.parametrize(("rowwise", "columnwise", "shuffle_B_matrix_for_aiter"), [
+    (True, False, False),
+    (False, True, False),
+    (True, True, False),
+    (True, False, True),
+    (False, True, True),
+    (True, True, True),
 ])
-def test_quantize_mxfp4_standard(shape, in_dtype, rowwise, columnwise):
+def test_quantize_mxfp4_standard(shape, in_dtype, rowwise, columnwise, shuffle_B_matrix_for_aiter):
     """Standard MXFP4 quantization with statistical validation."""
     input_tensor = fill_uniform(shape, dtype=in_dtype)
     
     quantizer = MXFP4Quantizer(
         rowwise=rowwise,
         columnwise=columnwise,
-        shuffle_B_matrix_for_aiter=False
+        shuffle_B_matrix_for_aiter=shuffle_B_matrix_for_aiter
     )
     
     quantized_out = te_quantize_triton(input_tensor, quantizer=quantizer)
@@ -274,8 +299,8 @@ def test_quantize_mxfp4_standard(shape, in_dtype, rowwise, columnwise):
     K = input_tensor.shape[-1]
     
     if rowwise:
-        ref_data, ref_scale = mxfp4_quantize_cpu(input_tensor, axis='row')
-        num_blocks = K // MXFP4_BLOCK_SCALING_SIZE
+        ref_data, ref_scale = mxfp4_quantize_cpu(input_tensor, axis='row', SHUFFLE=shuffle_B_matrix_for_aiter)
+        num_blocks = math.ceil(K / MXFP4_BLOCK_SCALING_SIZE)
         
         compare_fp4_data_nibblewise(
             quantized_out._rowwise_data.view(torch.uint8),
@@ -283,10 +308,19 @@ def test_quantize_mxfp4_standard(shape, in_dtype, rowwise, columnwise):
             msg=f"Rowwise FP4 ({shape}, {in_dtype})",
             max_mismatch_rate=0.05,
         )
+        y1_scales_triton = quantized_out._rowwise_scale_inv.view(torch.uint8)
+        y1_scales_torch = ref_scale
+        if shuffle_B_matrix_for_aiter:
+            y1_scales_triton = un_shuffle_scales(
+                y1_scales_triton.view(y1_scales_triton.shape[0] // 32, -1)
+            )
+            y1_scales_torch = un_shuffle_scales(
+                y1_scales_torch.view(y1_scales_torch.shape[0] // 32, -1)
+            )
         
         compare_e8m0_scales(
-            quantized_out._rowwise_scale_inv.view(torch.uint8)[:M, :num_blocks],
-            ref_scale[:M, :num_blocks],
+            y1_scales_triton[:M, :num_blocks],
+            y1_scales_torch[:M, :num_blocks],
             msg=f"Rowwise E8M0 ({shape}, {in_dtype})",
             max_diff=1,
             max_mismatch_rate=1e-4,  # 0.01% mismatch rate: allows up to 0.01% of scales to differ by >±1
@@ -294,8 +328,8 @@ def test_quantize_mxfp4_standard(shape, in_dtype, rowwise, columnwise):
         )
     
     if columnwise:
-        ref_data, ref_scale = mxfp4_quantize_cpu(input_tensor, axis='col')
-        num_blocks = M // MXFP4_BLOCK_SCALING_SIZE
+        ref_data, ref_scale = mxfp4_quantize_cpu(input_tensor, axis='col', SHUFFLE=shuffle_B_matrix_for_aiter)
+        num_blocks = math.ceil(M / MXFP4_BLOCK_SCALING_SIZE)
         
         compare_fp4_data_nibblewise(
             quantized_out._columnwise_data.view(torch.uint8),
@@ -304,9 +338,18 @@ def test_quantize_mxfp4_standard(shape, in_dtype, rowwise, columnwise):
             max_mismatch_rate=0.05,
         )
         
+        y1_scales_triton = quantized_out._columnwise_scale_inv.view(torch.uint8)
+        y1_scales_torch = ref_scale
+        if shuffle_B_matrix_for_aiter:
+            y1_scales_triton = un_shuffle_scales(
+                y1_scales_triton.view(y1_scales_triton.shape[0] // 32, -1)
+            )
+            y1_scales_torch = un_shuffle_scales(
+                y1_scales_torch.view(y1_scales_torch.shape[0] // 32, -1)
+            )
         compare_e8m0_scales(
-            quantized_out._columnwise_scale_inv.view(torch.uint8)[:K, :num_blocks],
-            ref_scale[:K, :num_blocks],
+            y1_scales_triton[:K, :num_blocks],
+            y1_scales_torch[:K, :num_blocks],
             msg=f"Columnwise E8M0 ({shape}, {in_dtype})",
             max_diff=1,
             max_mismatch_rate=1e-4,  # 0.01% mismatch rate: allows up to 0.01% of scales to differ by >±1
@@ -336,8 +379,8 @@ def test_quantize_mxfp4_edge_cases(edge_case):
     quantizer = MXFP4Quantizer(rowwise=True, columnwise=False)
     quantized_out = te_quantize_triton(input_tensor, quantizer=quantizer)
     
-    ref_data, ref_scale = mxfp4_quantize_cpu(input_tensor, axis='row')
-    num_blocks = K // MXFP4_BLOCK_SCALING_SIZE
+    ref_data, ref_scale = mxfp4_quantize_cpu(input_tensor, axis='row', SHUFFLE=False)
+    num_blocks = math.ceil(K / MXFP4_BLOCK_SCALING_SIZE)
     
     if edge_case == "all_zeros":
         scales = quantized_out._rowwise_scale_inv.view(torch.uint8)[:M, :num_blocks]
