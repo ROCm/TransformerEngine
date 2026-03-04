@@ -16,8 +16,6 @@ import numpy as np
 import os
 from typing import Tuple
 
-os.environ["NVTE_USE_CAST_TRANSPOSE_TRITON"] = "1"
-
 from transformer_engine.pytorch.tensor.mxfp4_tensor import (
     MXFP4Quantizer, 
     MXFP4_BLOCK_SCALING_SIZE
