@@ -26,7 +26,7 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
                  Tensor *rsigma, Tensor *workspace, const int multiprocessorCount,
                  const bool zero_centered_gamma, cudaStream_t stream) {
   if (is_fp8_dtype(z->data.dtype) && !is_delayed_tensor_scaling(z->scaling_mode) &&
-      !is_mxfp_scaling(z->scaling_mode)) {
+      !is_mxfp8_scaling(z->scaling_mode)) {
     NVTE_ERROR("Not implemented scaling mode: " + to_string(z->scaling_mode) + ".");
   }
 

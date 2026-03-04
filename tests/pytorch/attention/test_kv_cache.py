@@ -31,6 +31,7 @@ from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
     is_bf16_compatible,
+    get_device_compute_capability,
 )
 
 _current_file = pathlib.Path(__file__).resolve()
@@ -375,6 +376,12 @@ def get_tols(config, module, backend, dtype):
                 torch.half: (5e-3, 5e-3),
                 torch.bfloat16: (3.5e-2, 3.5e-2),
             }
+            # With FA on ROCm it may not fit default tolerance
+            if IS_HIP_EXTENSION and backend == "FlashAttention":
+                tols = {
+                    torch.half: (6e-3, 6e-3) if get_device_compute_capability() == (9, 4) else (5e-3, 5e-3),
+                    torch.bfloat16: (4e-2, 4e-2),
+                }
         else:
             if backend == "UnfusedAttention":
                 tols = {
@@ -389,7 +396,7 @@ def get_tols(config, module, backend, dtype):
             # With FA on ROCm it may not fit default tolerance
             if IS_HIP_EXTENSION and backend == "FlashAttention":
                 tols = {
-                    torch.half: (1e-2, 1e-2),
+                    torch.half: (1.2e-2, 1.2e-2),
                     torch.bfloat16: (1e-1, 1e-1),
                 }
     if module == "DotProductAttention":
@@ -483,7 +490,6 @@ def test_kv_cache(dtype, model, qkv_format, is_paged, backend, module, is_cuda_g
         config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,
-        window_size=config.window_size,
         pad_between_seqs=False,
         is_training=False,
         fp8=is_fp8,

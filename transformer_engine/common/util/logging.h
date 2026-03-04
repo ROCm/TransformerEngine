@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -17,6 +17,10 @@
 #include <cudnn.h>
 #endif // __HIP_PLATFORM_AMD__
 #include <nvrtc.h>
+
+#ifndef __HIP_PLATFORM_AMD__
+#include "nccl.h"
+#endif // !__HIP_PLATFORM_AMD__
 
 #ifdef NVTE_WITH_CUBLASMP
 #include <cublasmp.h>
@@ -120,5 +124,15 @@
   } while (false)
 
 #endif  // NVTE_WITH_CUBLASMP
+
+#ifndef __HIP_PLATFORM_AMD__
+#define NVTE_CHECK_NCCL(expr)                                                 \
+  do {                                                                        \
+    const ncclResult_t status_NVTE_CHECK_NCCL = (expr);                       \
+    if (status_NVTE_CHECK_NCCL != ncclSuccess) {                              \
+      NVTE_ERROR("NCCL Error: ", ncclGetErrorString(status_NVTE_CHECK_NCCL)); \
+    }                                                                         \
+  } while (false)
+#endif // !__HIP_PLATFORM_AMD__
 
 #endif  // TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_

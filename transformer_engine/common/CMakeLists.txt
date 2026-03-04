@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -120,6 +120,30 @@ endif()
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
+if(USE_CUDA)
+  # NVIDIA MathDX include directory (from Python package install location)
+  if(NOT DEFINED MATHDX_INCLUDE_DIR)
+    execute_process(
+      COMMAND ${Python_EXECUTABLE} -m pip show nvidia-mathdx
+      OUTPUT_VARIABLE _PIP_SHOW_MATHDX
+      ERROR_VARIABLE _PIP_SHOW_MATHDX_ERR
+      RESULT_VARIABLE _PIP_SHOW_MATHDX_RES
+      OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT _PIP_SHOW_MATHDX_RES EQUAL 0)
+      message(FATAL_ERROR "Failed to query 'nvidia-mathdx' with pip (using ${Python_EXECUTABLE}): ${_PIP_SHOW_MATHDX_ERR}")
+    endif()
+    string(REGEX MATCH "Location: ([^\n\r]+)" _MATHDX_LOC_MATCH "${_PIP_SHOW_MATHDX}")
+    if(NOT _MATHDX_LOC_MATCH)
+      message(FATAL_ERROR "Could not parse installation location for 'nvidia-mathdx'. Output was:\n${_PIP_SHOW_MATHDX}")
+    endif()
+    set(MATHDX_LOCATION "${CMAKE_MATCH_1}")
+    set(MATHDX_INCLUDE_DIR "${MATHDX_LOCATION}/nvidia/mathdx/include")
+  endif()
+  if(NOT EXISTS "${MATHDX_INCLUDE_DIR}")
+    message(FATAL_ERROR "MATHDX include directory not found at ${MATHDX_INCLUDE_DIR}. Set MATHDX_INCLUDE_DIR or ensure 'nvidia-mathdx' is installed for ${Python_EXECUTABLE}.")
+  endif()
+endif()
+
 # Configure Transformer Engine library
 include_directories(${PROJECT_SOURCE_DIR}/..)
 set(transformer_engine_SOURCES)
@@ -145,6 +169,7 @@ list(APPEND transformer_engine_SOURCES
      fused_attn/kv_cache.cu
      activation/relu.cu
      activation/swiglu.cu
+     gemm/config.cpp
      gemm/cublaslt_gemm.cu
      normalization/common.cpp
      normalization/layernorm/ln_api.cpp
@@ -178,6 +203,7 @@ list(APPEND transformer_engine_SOURCES
      cudnn_utils.cpp
      transpose/quantize_transpose_square_blockwise.cu
      transpose/quantize_transpose_vector_blockwise.cu
+     transpose/quantize_transpose_vector_blockwise_fp4.cu
      fused_attn/fused_attn_f16_max512_seqlen.cu
      fused_attn/fused_attn_f16_arbitrary_seqlen.cu
      fused_attn/fused_attn_fp8.cu
@@ -185,6 +211,9 @@ list(APPEND transformer_engine_SOURCES
      fused_attn/utils.cu
      gemm/cutlass_grouped_gemm.cu
      util/cuda_nvml.cpp
+     recipe/nvfp4.cu
+     hadamard_transform/hadamard_transform.cu
+     hadamard_transform/hadamard_transform_cast_fusion.cu
      comm_gemm_overlap/userbuffers/ipcsocket.cc
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp
      comm_gemm_overlap/userbuffers/userbuffers.cu
@@ -261,7 +290,8 @@ target_link_libraries(transformer_engine PUBLIC
                       CUDNN::cudnn_all)
 
 target_include_directories(transformer_engine PRIVATE
-                          ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+                           ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+target_include_directories(transformer_engine PRIVATE ${MATHDX_INCLUDE_DIR})
 target_include_directories(transformer_engine SYSTEM PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/cccl)
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")

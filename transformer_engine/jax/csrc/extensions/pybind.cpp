@@ -1,12 +1,16 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved. 
+ * Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved. 
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
 #include "../extensions.h"
+#ifndef USE_ROCM
+#include "cgemm_helper.h"
+#endif
+#include "common/util/cuda_runtime.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -22,8 +26,12 @@ pybind11::dict Registrations() {
   pybind11::dict dict;
 
   // Activation
-  dict["te_act_lu_ffi"] = EncapsulateFFI(ActLuHandler);
-  dict["te_dact_dbias_quantize_ffi"] = EncapsulateFFI(DActLuDBiasQuantizeHandler);
+  dict["te_act_lu_ffi"] =
+      pybind11::dict(pybind11::arg("initialize") = EncapsulateFFI(ActLuInitializeHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(ActLuHandler));
+  dict["te_dact_dbias_quantize_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") = EncapsulateFFI(DActLuDBiasQuantizeInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(DActLuDBiasQuantizeHandler));
 
   // Quantization
   dict["te_dbias_quantize_ffi"] = EncapsulateFFI(DBiasQuantizeHandler);
@@ -45,9 +53,11 @@ pybind11::dict Registrations() {
   // Normalization
   dict["te_norm_forward_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+                     pybind11::arg("initialize") = EncapsulateFFI(NormForwardInitializeHandler),
                      pybind11::arg("execute") = EncapsulateFFI(NormForwardHandler));
   dict["te_norm_backward_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+                     pybind11::arg("initialize") = EncapsulateFFI(NormBackwardInitializeHandler),
                      pybind11::arg("execute") = EncapsulateFFI(NormBackwardHandler));
 
   // Attention
@@ -60,7 +70,7 @@ pybind11::dict Registrations() {
 
   // GEMM
   dict["te_gemm_ffi"] =
-      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CollectiveGemmInitHandler),
                      pybind11::arg("execute") = EncapsulateFFI(GemmHandler));
 
   // Grouped GEMM
@@ -102,6 +112,20 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
   m.def("is_non_nt_fp8_gemm_supported", &nvte_is_non_tn_fp8_gemm_supported);
+#ifndef USE_ROCM
+  m.def("initialize_cgemm_communicator", &InitializeCgemmCommunicator);
+  m.def("get_cgemm_num_max_streams", &GetCgemmNumMaxStreams);
+#else
+  // ROCm stub functions for collective GEMM communicator
+  // These are no-ops since collective GEMM is not supported on ROCm
+  m.def("initialize_cgemm_communicator",
+        [](int, int, int, int, int, int, int, int, bool, bool) {
+          // No-op for ROCm - collective GEMM not supported
+        },
+        "Initialize collective GEMM communicator (no-op on ROCm)");
+  m.def("get_cgemm_num_max_streams", []() { return 0; },
+        "Get collective GEMM max streams (returns 0 on ROCm)");
+#endif
 
   pybind11::enum_<DType>(m, "DType", pybind11::module_local())
       .value("kByte", DType::kByte)
@@ -183,6 +207,15 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("ROWWISE", transformer_engine::jax::QuantizeLayout::ROWWISE)
       .value("COLWISE", transformer_engine::jax::QuantizeLayout::COLWISE)
       .value("ROWWISE_COLWISE", transformer_engine::jax::QuantizeLayout::ROWWISE_COLWISE)
+      .export_values();
+
+  // Export JAXX_Collective_Op enum for both CUDA and ROCm
+  // Note: Collective GEMM operations (ALL_GATHER, REDUCE_SCATTER) are only supported on CUDA
+  // On ROCm, only NONE is functional - others will raise runtime errors
+  pybind11::enum_<JAXX_Collective_Op>(m, "JAXX_Collective_Op", pybind11::module_local())
+      .value("NONE", JAXX_Collective_Op::NONE)
+      .value("ALL_GATHER", JAXX_Collective_Op::ALL_GATHER)
+      .value("REDUCE_SCATTER", JAXX_Collective_Op::REDUCE_SCATTER)
       .export_values();
 }
 

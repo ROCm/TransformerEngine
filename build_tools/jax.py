@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -100,11 +100,18 @@ def setup_jax_extension(
     # Define TE/JAX as a Pybind11Extension
     from pybind11.setup_helpers import Pybind11Extension
 
+    # Note: Collective GEMM operations are not supported on ROCm yet
+    if rocm_build():
+        comm_libraries = []
+    else:
+        comm_libraries = ["nccl"]
+
     return Pybind11Extension(
         "transformer_engine_jax",
         sources=[str(path) for path in sources],
         include_dirs=[str(path) for path in include_dirs],
         extra_compile_args=cxx_flags,
+        libraries=comm_libraries,
     )
 
 

@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -14,7 +14,7 @@ from packaging import version
 
 import jax
 import jax.numpy as jnp
-from jax import dtypes, lax
+from jax import dtypes, lax, ffi
 from jax.sharding import PartitionSpec, NamedSharding
 if version.parse(jax.__version__) >= version.parse("0.5.0"):
     from jax.experimental.custom_partitioning import SdyShardingRule
@@ -51,12 +51,6 @@ from ..sharding import (
     num_of_devices,
     with_sharding_constraint,
 )
-
-
-if version.parse(jax.__version__) >= version.parse("0.5.0"):
-    from jax import ffi  # pylint: disable=ungrouped-imports
-else:
-    from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
 
 __all__ = [

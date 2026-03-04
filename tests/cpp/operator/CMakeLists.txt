@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -32,7 +32,8 @@ list(APPEND test_cuda_sources
 	          ../test_common.cu)
 if(USE_CUDA)
   list(APPEND test_cuda_sources
-              test_cast_float8blockwise.cu)
+              test_cast_float8blockwise.cu
+              test_cast_nvfp4_transpose.cu)
 else()
   list(APPEND test_cuda_sources
               test_cublaslt_gemm.cu)
@@ -70,6 +71,13 @@ else()
   add_executable(test_operator ${test_hip_sources})
 endif()
 
+# Add profiling and debug flags for CUDA compilation
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -lineinfo")                   # Generate line info for device code  
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -g")                          # Add debug symbols for host code
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --ptxas-options=-v")          # Add info about registers usage
+# Note: Using -lineinfo instead of -G to avoid conflicts and get line mapping
+
+# Find required packages
 find_package(OpenMP REQUIRED)
 if(USE_CUDA)
   list(APPEND test_operator_LINKER_LIBS CUDA::cudart GTest::gtest_main ${TE_LIB} CUDA::nvrtc CUDNN::cudnn)

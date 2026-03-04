@@ -1,4 +1,4 @@
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -46,7 +46,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [linux-mi325-8, linux-mi355-8]
+        runner: [linux-te-mi325-8, linux-te-mi355-8]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

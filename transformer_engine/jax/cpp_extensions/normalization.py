@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -13,9 +13,10 @@ from packaging import version
 
 import jax
 import jax.numpy as jnp
-from jax import dtypes
+from jax import dtypes, ffi
 if version.parse(jax.__version__) >= version.parse("0.5.0"):
     from jax.experimental.custom_partitioning import SdyShardingRule
+from jax.experimental.custom_partitioning import SdyShardingRule
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec
 from .misc import is_hip_extension
@@ -32,7 +33,7 @@ from .misc import (
     NamedSharding,
     get_cudnn_version,
 )
-from .quantization import _quantize_dbias_impl
+from .quantization import _quantize_dbias_impl, AmaxScope
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 from ..quantize import ScaledTensor, ScaledTensorFactory, NoScaleTensor
 from ..quantize import (
@@ -41,11 +42,6 @@ from ..quantize import (
     DelayedScaleQuantizer,
     ScalingMode,
 )
-
-if version.parse(jax.__version__) >= version.parse("0.5.0"):
-    from jax import ffi  # pylint: disable=ungrouped-imports
-else:
-    from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
 
 __all__ = [
@@ -593,9 +589,9 @@ class NormFwdPrimitive(BasePrimitive):
             result_types,
         )
 
-        prefix = "NormFwdPrimitive_"
+        prefix = "NormFwd_"
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
-            len(value_types[0].shape), unique_var=prefix + "x", flatten_axis=-1
+            value_types[0].shape, unique_var=prefix + "x", flatten_axis=-1
         )
         x_axes = scale_rules.input_spec
 
@@ -616,6 +612,7 @@ class NormFwdPrimitive(BasePrimitive):
                 mu,
                 rsigma,
             ),
+            **scale_rules.factor_sizes,
         )
 
 
@@ -892,6 +889,7 @@ def layernorm_fwd(
     zero_centered_gamma: bool,
     epsilon: float,
     quantizer: Optional[Quantizer],
+    amax_scope: AmaxScope = AmaxScope.LOCAL,
 ) -> tuple[Union[jnp.ndarray, ScaledTensor], jnp.ndarray, jnp.ndarray]:
     """Layer normalization forward pass with optional quantization.
 
@@ -905,6 +903,7 @@ def layernorm_fwd(
         zero_centered_gamma: If True, gamma is zero-centered.
         epsilon: Small constant for numerical stability.
         quantizer: Optional quantizer for FP8 quantization of the output.
+        amax_scope: Indicate the scope to run amax calculation. This only works when using current-scaling. Default is AmaxScope.LOCAL.
 
     Returns:
         A tuple containing:
@@ -964,7 +963,13 @@ def layernorm_fwd(
             epsilon=epsilon,
             quantizer=None,
         )
-        out, _ = _quantize_dbias_impl(out, is_dbias=False, quantizer=quantizer, dq_dtype=x.dtype)
+        out, _ = _quantize_dbias_impl(
+            out,
+            is_dbias=False,
+            quantizer=quantizer,
+            dq_dtype=x.dtype,
+            amax_scope=amax_scope,
+        )
         return out, mu, rsigma
 
     is_2x2x = quantizer.is_2x2x()
@@ -1094,6 +1099,7 @@ def rmsnorm_fwd(
     zero_centered_gamma: bool,
     epsilon: float,
     quantizer: Optional[Quantizer],
+    amax_scope: AmaxScope = AmaxScope.LOCAL,
 ) -> tuple[Union[jnp.ndarray, ScaledTensor], jnp.ndarray]:
     """Root mean square normalization forward pass with optional quantization.
 
@@ -1105,6 +1111,7 @@ def rmsnorm_fwd(
         zero_centered_gamma: If True, gamma is zero-centered.
         epsilon: Small constant for numerical stability.
         quantizer: Optional quantizer for FP8 quantization of the output.
+        amax_scope: Indicate the scope to run amax calculation. This only works when using current-scaling. Default is AmaxScope.LOCAL.
 
     Returns:
         A tuple containing:
@@ -1165,7 +1172,11 @@ def rmsnorm_fwd(
             quantizer=None,
         )
         out, _ = _quantize_dbias_impl(
-            out.data, is_dbias=False, quantizer=quantizer, dq_dtype=x.dtype
+            out.data,
+            is_dbias=False,
+            quantizer=quantizer,
+            dq_dtype=x.dtype,
+            amax_scope=amax_scope,
         )
         return out, rsigma
 
@@ -1290,6 +1301,7 @@ def normalization_fwd(
     epsilon: float,
     norm_type: str,
     quantizer: Optional[Quantizer],
+    amax_scope: AmaxScope = AmaxScope.LOCAL,
 ):
     """Common wrapper for normalization forward pass.
 
@@ -1306,6 +1318,7 @@ def normalization_fwd(
             - 'layernorm': Layer normalization
             - 'rmsnorm': Root mean square normalization
         quantizer: Optional quantizer for FP8 quantization of the output.
+        amax_scope: Indicate the scope to run amax calculation. This only works when using current-scaling. Default is AmaxScope.LOCAL.
 
     Returns:
         A tuple containing:
@@ -1323,12 +1336,27 @@ def normalization_fwd(
         zero_centered_gamma is not supported if norm_type is 'rmsnorm'.
     """
     if norm_type == "layernorm":
-        output, mu, rsigma = layernorm_fwd(x, gamma, beta, zero_centered_gamma, epsilon, quantizer)
+        output, mu, rsigma = layernorm_fwd(
+            x,
+            gamma,
+            beta,
+            zero_centered_gamma,
+            epsilon,
+            quantizer,
+            amax_scope=amax_scope,
+        )
     elif norm_type == "rmsnorm":
         assert (
             not zero_centered_gamma
         ), "zero_centered_gamma is not supported if norm_type is 'rmsnorm'"
-        output, rsigma = rmsnorm_fwd(x, gamma, zero_centered_gamma, epsilon, quantizer)
+        output, rsigma = rmsnorm_fwd(
+            x,
+            gamma,
+            zero_centered_gamma,
+            epsilon,
+            quantizer,
+            amax_scope=amax_scope,
+        )
         mu = None
     else:
         raise ValueError(f"{norm_type=} is not supported.")

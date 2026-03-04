@@ -1,0 +1,35 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+
+## TE CI Dockerfile
+ARG BASE_DOCKER=registry-sc-harbor.amd.com/framework/compute-rocm-rel-7.2:57_ubuntu22.04_py3.11_pytorch_release-2.8_08d38866
+FROM $BASE_DOCKER
+WORKDIR /
+
+# Build arguments
+ARG FA_VERSION=v2.8.1
+ARG ROCM_VERSION=7.2
+ARG JAX_VERSION=0.8.0
+ARG PYTHON_VERSION=311
+
+RUN pip install setuptools wheel
+RUN pip install ipython pytest fire pydantic pybind11 ninja pandas
+RUN apt-get update && apt-get install -y vim
+
+# Install flash-attention
+ENV GPU_ARCHS=gfx950;gfx942
+RUN git clone --branch ${FA_VERSION} --depth 1 https://github.com/Dao-AILab/flash-attention.git \
+    && cd flash-attention \
+    && FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE && FLASH_ATTENTION_SKIP_CK_BUILD=FALSE python setup.py install \
+    && cd ..
+
+# Install JAX
+RUN ROCM_MAJOR=$(echo "${ROCM_VERSION}" | cut -d. -f1) && pip install \
+    https://repo.radeon.com/rocm/manylinux/rocm-rel-${ROCM_VERSION}/jax_rocm${ROCM_MAJOR}_pjrt-${JAX_VERSION}%2Brocm${ROCM_VERSION}.0-py3-none-manylinux_2_28_x86_64.whl \
+    https://repo.radeon.com/rocm/manylinux/rocm-rel-${ROCM_VERSION}/jax_rocm${ROCM_MAJOR}_plugin-${JAX_VERSION}%2Brocm${ROCM_VERSION}.0-cp${PYTHON_VERSION}-cp${PYTHON_VERSION}-manylinux_2_28_x86_64.whl \
+    jax==${JAX_VERSION} \
+    https://repo.radeon.com/rocm/manylinux/rocm-rel-${ROCM_VERSION}/jaxlib-${JAX_VERSION}%2Brocm${ROCM_VERSION}.0-cp${PYTHON_VERSION}-cp${PYTHON_VERSION}-manylinux_2_27_x86_64.whl
+
+WORKDIR /workspace/
+CMD ["/bin/bash"]
