@@ -7,8 +7,7 @@
 #ifndef CK_FUSED_ATTN_UTILS_H
 #define CK_FUSED_ATTN_UTILS_H
 
-#include<iostream>
-#include<cstdint>
+#include<fstream>
 #include<hip/hip_runtime.h>
 #include "ck_tile/host.hpp"
 
@@ -60,8 +59,8 @@ uint64_t get_runtime_max_seqlen(uint64_t b, const void* cu_seqlen_ptr, const voi
 // This helper merely standardizes the logging to make it a bit easier to parse
 // through it at a glance while guaranteeing uniformity.
 template<typename T>
-void log_value(const char* label, const T& value) {
-    std::cout << label << ": " << value << "\n";
+void log_value(std::ostream* log_file, const char* label, const T& value) {
+    (*log_file) << label << ": " << value << "\n";
 }
 
 ck_tile::index_t get_batch_stride_bias(
@@ -78,6 +77,7 @@ ck_tile::index_t get_nhead_stride_bias(
   ck_tile::index_t max_seqlen_k,
   bool is_group_mode
 );
+std::ostream* get_ck_log_stream();
 
 }//namespace ck_fused_attn
 #endif // CK_FUSED_ATTN_UTILS_H
