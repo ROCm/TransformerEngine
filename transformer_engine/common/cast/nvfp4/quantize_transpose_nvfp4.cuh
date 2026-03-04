@@ -12,7 +12,9 @@
 #define TRANSFORMER_ENGINE_QUANTIZE_TRANSPOSE_NVFP4_CUH_
 
 #include <cuda.h>
+#ifndef __HIP_PLATFORM_AMD__
 #include <cudaTypedefs.h>
+#endif
 #include <cuda_runtime.h>
 #include <transformer_engine/transformer_engine.h>
 

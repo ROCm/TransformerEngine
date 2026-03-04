@@ -13,14 +13,22 @@
 #include <cudaTypedefs.h>
 #define FP4_TYPE_SUPPORTED (CUDA_VERSION >= 12080)
 #else
+#ifdef __HIPCC__
+#define FP4_TYPE_SUPPORTED true
+#else
 #define FP4_TYPE_SUPPORTED false
+#endif
 #endif //#ifndef __HIP_PLATFORM_AMD__
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
 #if FP4_TYPE_SUPPORTED
+#ifndef __HIP_PLATFORM_AMD__
 #include <cuda_fp4.h>
+#else
+#include <hip/hip_fp4.h>
+#endif
 #endif
 
 #include <cuda_runtime_api.h>
@@ -361,6 +369,11 @@ using fp4e2m1x4 = __nv_fp4x4_e2m1;
 using bf16 = hip_bfloat16;
 using fp8e4m3 = te_hip_fp8_e4m3;
 using fp8e5m2 = te_hip_fp8_e5m2;
+#if FP4_TYPE_SUPPORTED
+using fp4e2m1 = __hip_fp4_e2m1;
+using fp4e2m1x2 = __hip_fp4x2_e2m1;
+using fp4e2m1x4 = __hip_fp4x4_e2m1;
+#endif //FP4_TYPE_SUPPORTED
 #endif //__HIP_PLATFORM_AMD__
 
 using e8m0_t = uint8_t;
@@ -384,6 +397,9 @@ TRANSFORMER_ENGINE_TYPE_NAME(half)
 TRANSFORMER_ENGINE_TYPE_NAME(hip_bfloat16)
 TRANSFORMER_ENGINE_TYPE_NAME(te_hip_fp8_e4m3)
 TRANSFORMER_ENGINE_TYPE_NAME(te_hip_fp8_e5m2)
+#if FP4_TYPE_SUPPORTED
+TRANSFORMER_ENGINE_TYPE_NAME(__hip_fp4_e2m1)
+#endif
 #else
 TRANSFORMER_ENGINE_TYPE_NAME(nv_bfloat16)
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e4m3)
@@ -644,7 +660,7 @@ struct TypeInfo {
   switch (dtype) {                                                             \
     using namespace transformer_engine;                                        \
     case DType::kFloat4E2M1: {                                                 \
-      using type = __nv_fp4x2_storage_t;                                       \
+      using type = __hip_fp4x2_storage_t;                                       \
       { __VA_ARGS__ }                                                          \
     } break;                                                                   \
     default:                                                                   \

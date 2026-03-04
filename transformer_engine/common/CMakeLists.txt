@@ -257,6 +257,7 @@ else()
         gemm/rocm_gemm.cu
         amd_detail/system.cpp)
     list(APPEND transformer_engine_cuda_sources
+        transpose/quantize_transpose_vector_blockwise_fp4.cu
         fused_attn_rocm/fused_attn_aotriton.cpp
         fused_attn_rocm/fused_attn_ck.cpp
         fused_attn_rocm/utils.cpp)

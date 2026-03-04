@@ -5,13 +5,17 @@
  ************************************************************************/
 
 #include <cuda.h>
+#ifndef __HIP_PLATFORM_AMD__
 #include <cudaTypedefs.h>
 #include <cuda_bf16.h>
+#endif
 #include <cuda_runtime.h>
 
 #include <algorithm>
 #include <cfloat>
+#ifndef __HIP_PLATFORM_AMD__
 #include <cuda/barrier>
+#endif
 #include <utility>
 
 #include "common/common.h"
@@ -23,7 +27,7 @@
 
 namespace transformer_engine {
 
-#if CUDA_VERSION >= 12080
+// #if CUDA_VERSION >= 12080
 namespace quantize_transpose_nvfp4 {
 namespace {
 
@@ -155,12 +159,26 @@ static_assert(kNumThreadsLoad <= kThreadsPerWarp, "kNumThreadsLoad must be <= kT
 static_assert(kNumThreadsStore <= kThreadsPerWarp, "kNumThreadsStore must be <= kThreadsPerWarp");
 
 // for 2D block scaling, we need to reduce amax in warp
+#ifdef __HIP_PLATFORM_AMD__
+static __device__ constexpr uint64_t WARP_REDUCE_AMAX_GROUP_MASKS[8] = {
+    0x0101010101010101ULL, 0x0202020202020202ULL,
+    0x0404040404040404ULL, 0x0808080808080808ULL,
+    0x1010101010101010ULL, 0x2020202020202020ULL,
+    0x4040404040404040ULL, 0x8080808080808080ULL};
+#else
 static __device__ constexpr unsigned int WARP_REDUCE_AMAX_GROUP_MASKS[8] = {
-    0x01010101, 0x02020202, 0x04040404, 0x08080808, 0x10101010, 0x20202020, 0x40404040, 0x80808080};
+    0x01010101, 0x02020202, 0x04040404, 0x08080808,
+    0x10101010, 0x20202020, 0x40404040, 0x80808080};
+#endif
 
 // max for every group_size elements in warp
 template <int group_size, int shfl_down_stride>
-__device__ __forceinline__ float groupMax(float val, unsigned int groupMask) {
+__device__ __forceinline__ float groupMax(float val, 
+#ifdef __HIP_PLATFORM_AMD__
+                                          uint64_t groupMask) {
+#else
+                                          unsigned int groupMask) {
+#endif
   for (int offset = group_size / 2; offset > 0; offset /= 2) {
     val = max(val, __shfl_down_sync(groupMask, val, offset * shfl_down_stride));
   }
@@ -189,7 +207,7 @@ __device__ __forceinline__ float ComputeOutputFP4(IType input, float encode_scal
 }
 
 __device__ __forceinline__ float ComputeGlobalEncodeScaleFP4(const float global_amax) {
-  constexpr float fp8_max = TypeExtrema<fp8e4m3>::max;
+  const float fp8_max = TypeExtrema<fp8e4m3>::max;
   constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;
   float global_encode_scale = fp8_max * fp4_max / global_amax;
   // If scale is infinity, return max value of float32
@@ -257,56 +275,56 @@ __device__ __forceinline__ size_t scale_factor_swizzled_offset(size_t row_idx, s
   return ((rb * cbg_cnt + cbg) * kRowsPerBaseBlockCol + d3) * 16 + d4 * kColsPerBaseBlockCol + d5;
 }
 
-__device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_stochastic_rounding(
+__device__ __forceinline__ __hip_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_stochastic_rounding(
     const float2 in01, const float2 in23, const uint32_t rbits) {
-  constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
-  if constexpr (has_rs) {
-    uint16_t out_4x;
-    asm volatile(
-        "{\n"
-        "cvt.rs.satfinite.e2m1x4.f32 %0, {%3, %4, %1, %2}, %5; \n\t"
-        "}"
-        : "=h"(out_4x)
-        : "f"(in01.y), "f"(in01.x), "f"(in23.y), "f"(in23.x), "r"(rbits));
-    return *reinterpret_cast<__nv_fp4x4_e2m1*>(&out_4x);
-  } else {
+  // constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
+  // if constexpr (has_rs) {
+  //   uint16_t out_4x;
+  //   asm volatile(
+  //       "{\n"
+  //       "cvt.rs.satfinite.e2m1x4.f32 %0, {%3, %4, %1, %2}, %5; \n\t"
+  //       "}"
+  //       : "=h"(out_4x)
+  //       : "f"(in01.y), "f"(in01.x), "f"(in23.y), "f"(in23.x), "r"(rbits));
+  //   return *reinterpret_cast<__hip_fp4x4_e2m1*>(&out_4x);
+  // } else {
     NVTE_DEVICE_ERROR(
         "FP4 cvt.rs PTX instructions are architecture-specific. "
         "Try recompiling with sm_XXXa instead of sm_XXX.");
     uint16_t dummy = 0;
-    return *reinterpret_cast<__nv_fp4x4_e2m1*>(&dummy);
-  }
+    return *reinterpret_cast<__hip_fp4x4_e2m1*>(&dummy);
+  // }
 }
 
-__device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_rn(const float2 in01,
+__device__ __forceinline__ __hip_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_rn(const float2 in01,
                                                                       const float2 in23,
                                                                       const uint32_t rbits) {
-  constexpr bool has_fp4 = ARCH_BLACKWELL_FAMILY;
-  if constexpr (has_fp4) {
-    // NOTE: rbits unused for rn.
-    uint32_t out_4x;  // Only need 16 bit. Using 32 bit container for packing.
-    asm volatile(
-        "{\n"
-        ".reg.b8 f0; \n\t"
-        ".reg.b8 f1; \n\t"
-        "cvt.rn.satfinite.e2m1x2.f32 f0, %1, %2;\n\t"
-        "cvt.rn.satfinite.e2m1x2.f32 f1, %3, %4;\n\t"
-        "mov.b32 %0, {f0, f1, f0, f1};\n\t"
-        "}"
-        : "=r"(out_4x)
-        : "f"(in01.y), "f"(in01.x), "f"(in23.y), "f"(in23.x));
-    return reinterpret_cast<__nv_fp4x4_e2m1*>(&out_4x)[0];
-  } else {
+  // constexpr bool has_fp4 = ARCH_BLACKWELL_FAMILY;
+  // if constexpr (has_fp4) {
+  //   // NOTE: rbits unused for rn.
+  //   uint32_t out_4x;  // Only need 16 bit. Using 32 bit container for packing.
+  //   asm volatile(
+  //       "{\n"
+  //       ".reg.b8 f0; \n\t"
+  //       ".reg.b8 f1; \n\t"
+  //       "cvt.rn.satfinite.e2m1x2.f32 f0, %1, %2;\n\t"
+  //       "cvt.rn.satfinite.e2m1x2.f32 f1, %3, %4;\n\t"
+  //       "mov.b32 %0, {f0, f1, f0, f1};\n\t"
+  //       "}"
+  //       : "=r"(out_4x)
+  //       : "f"(in01.y), "f"(in01.x), "f"(in23.y), "f"(in23.x));
+  //   return reinterpret_cast<__hip_fp4x4_e2m1*>(&out_4x)[0];
+  // } else {
     NVTE_DEVICE_ERROR(
         "FP4 cvt PTX instructions are architecture-specific. "
         "Try recompiling with sm_XXXa instead of sm_XXX.");
     uint16_t dummy = 0;
-    return *reinterpret_cast<__nv_fp4x4_e2m1*>(&dummy);
-  }
+    return *reinterpret_cast<__hip_fp4x4_e2m1*>(&dummy);
+  // }
 }
 
 template <bool kApplyStochasticRounding>
-__device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x(const float2 in01, const float2 in23,
+__device__ __forceinline__ __hip_fp4x4_e2m1 cvt_fp32_to_fp4_4x(const float2 in01, const float2 in23,
                                                               const uint32_t rbits) {
   if constexpr (kApplyStochasticRounding) {
     return cvt_fp32_to_fp4_4x_with_stochastic_rounding(in01, in23, rbits);
@@ -540,11 +558,11 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
         f2_b.x = ComputeOutputFP4<IType, ScaleType>(smem_vec[i + 1].data.elt[0], encode_scale);
         f2_b.y = ComputeOutputFP4<IType, ScaleType>(smem_vec[i + 1].data.elt[1], encode_scale);
         const uint32_t rbits = kApplyStochasticRounding ? get_rbits(rng, random_uint4, rnd_idx) : 0;
-        // Convert to __nv_fp4x4_e2m1
-        __nv_fp4x4_e2m1 out_4x = cvt_fp32_to_fp4_4x<kApplyStochasticRounding>(f2_a, f2_b, rbits);
+        // Convert to __hip_fp4x4_e2m1
+        __hip_fp4x4_e2m1 out_4x = cvt_fp32_to_fp4_4x<kApplyStochasticRounding>(f2_a, f2_b, rbits);
 
-        output_vec.data.elt[i] = reinterpret_cast<__nv_fp4x2_storage_t*>(&out_4x)[0];
-        output_vec.data.elt[i + 1] = reinterpret_cast<__nv_fp4x2_storage_t*>(&out_4x)[1];
+        output_vec.data.elt[i] = reinterpret_cast<__hip_fp4x2_storage_t*>(&out_4x)[0];
+        output_vec.data.elt[i + 1] = reinterpret_cast<__hip_fp4x2_storage_t*>(&out_4x)[1];
       }
       // Step 2.7: Store output_c
       if constexpr (kAligned) {
@@ -668,11 +686,11 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
                                                       encode_scale);
           const uint32_t rbits =
               kApplyStochasticRounding ? get_rbits(rng, random_uint4, rnd_idx) : 0;
-          // Convert to __nv_fp4x4_e2m1
-          __nv_fp4x4_e2m1 out_4x = cvt_fp32_to_fp4_4x<kApplyStochasticRounding>(f2_a, f2_b, rbits);
+          // Convert to __hip_fp4x4_e2m1
+          __hip_fp4x4_e2m1 out_4x = cvt_fp32_to_fp4_4x<kApplyStochasticRounding>(f2_a, f2_b, rbits);
 
-          output_vec.data.elt[i] = reinterpret_cast<__nv_fp4x2_storage_t*>(&out_4x)[0];
-          output_vec.data.elt[i + 1] = reinterpret_cast<__nv_fp4x2_storage_t*>(&out_4x)[1];
+          output_vec.data.elt[i] = reinterpret_cast<__hip_fp4x2_storage_t*>(&out_4x)[0];
+          output_vec.data.elt[i + 1] = reinterpret_cast<__hip_fp4x2_storage_t*>(&out_4x)[1];
         }
         // Step 3.7: Store output_t
         if constexpr (kAligned) {
@@ -697,7 +715,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
 
 }  // namespace
 }  // namespace quantize_transpose_nvfp4
-#endif  // CUDA_VERSION >= 12080
+// #endif  // CUDA_VERSION >= 12080
 
 namespace detail {
 
@@ -709,7 +727,7 @@ void quantize_transpose_vector_blockwise_fp4(
     const NVTETensor rng_state_tensor, const bool use_2d_quantization,
     const SimpleTensor& noop_tensor, cudaStream_t stream) {
   NVTE_API_CALL(quantize_transpose_vector_blockwise_fp4);
-#if CUDA_VERSION >= 12080
+// #if CUDA_VERSION >= 12080
 
   // pow 2 scale is for MXFP4 since it's using E8M0 scaling
   // raise error if pow2_scale is true
@@ -830,9 +848,9 @@ void quantize_transpose_vector_blockwise_fp4(
       )                                            // InputType
 
   NVTE_CHECK_CUDA(cudaGetLastError());
-#else
-  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
-#endif  // CUDA_VERSION >= 12080
+// #else
+//   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
+// #endif  // CUDA_VERSION >= 12080
 }
 
 }  // namespace detail
