@@ -20,8 +20,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       test_level: ${{ steps.set_level.outputs.test_level }}
-      current_level: ${{ steps.set_level.outputs.current_level }}
-      should_cancel_others: ${{ steps.set_level.outputs.should_cancel_others }}
     steps:
       - name: Determine CI dispatch from labels
         id: set_level
@@ -37,87 +35,107 @@ jobs:
             };
 
             const labels = (context.payload.pull_request.labels || [])
-              .map(label => label.name.toLowerCase());
+              .map(label => parseLevelLabel(label.name));
             const action = context.payload.action;
+            const currentLevel = labels.length ? Math.max(...labels) : 0;
 
-            // Determine if a CI level label was removed or added, and what level it was
+            // Determine if a CI level label was added, and what level it was.
             const addedLevel = action === 'labeled' ? parseLevelLabel(context.payload.label?.name) : 0;
-            const removedLevel = action === 'unlabeled' ? parseLevelLabel(context.payload.label?.name) : 0;
 
-            // Determine the current highest CI level from remaining labels
-            let level = '';
-            if (labels.includes('ci-level 3')) level = '3';
-            else if (labels.includes('ci-level 2')) level = '2';
-            else if (labels.includes('ci-level 1')) level = '1';
+            core.info(`Dispatch debug: action=${action}, addedLabel=${context.payload.label?.name || ''}, addedLevel=${addedLevel}, currentLevel=${currentLevel}, labels=[${labels.join(',')}]`);
 
-            // Check if the removed level was higher than the current level
-            const currentLevel = level ? Number(level) : 0;
-            const removedWasHighest = removedLevel > currentLevel;
-
-            let requires_dispatch = currentLevel > 0;
+            let requiresDispatch = false;
             if (action === 'labeled') {
-              // Only dispatch when a CI-level label was added.
-              requires_dispatch &&= addedLevel > 0;
-            } else if (action === 'unlabeled') {
-              // Only dispatch downgrade when the removed label was the highest,
-              // and the now-highest level (if any) does not have a completed run.
-              requires_dispatch &&= removedWasHighest;
-            }
-            // For unlabeling, only dispatch downgrade if the removed level was highest
-            // and the now-highest remaining level is not already satisfied for this commit.
-            const prNumber = context.payload.pull_request.number;
-            const headSha = context.payload.pull_request.head.sha;
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
+              // Only dispatch when the added CI-level label is now the highest level.
+              // Adding a lower-level label should not trigger a new run.
+              requiresDispatch = addedLevel > 0 && addedLevel === currentLevel;
+              core.info(`Dispatch debug: initial labeled decision requiresDispatch=${requiresDispatch}`);
 
-            if (action === 'unlabeled' && requires_dispatch) {
-              const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
-                owner,
-                repo,
-                workflow_id: 'rocm-ci-dispatch.yml',
-                event: 'pull_request',
-                per_page: 100,
-              });
+              // If an existing run for this PR/commit already satisfies the newly
+              // added level (same or higher), reuse it and do not dispatch again.
+              if (requiresDispatch) {
+                const prNumber = context.payload.pull_request.number;
+                const headSha = context.payload.pull_request.head.sha;
+                const owner = context.repo.owner;
+                const repo = context.repo.repo;
 
-              const nextHighestAlreadyCompleted = runs.some(run => {
-                const prMatch = (run.pull_requests || []).some(pr => pr.number === prNumber);
-                const sameSha = run.head_sha === headSha;
-                const completed = run.status === 'completed';
-                const title = run.display_title || '';
-                const match = title.match(/CI Level (\d+)/i);
-                const runLevel = match ? Number(match[1]) : 0;
-                return prMatch && sameSha && completed && runLevel >= currentLevel;
-              });
+                core.info(`Dispatch debug: checking existing runs for PR #${prNumber}, headSha=${headSha}`);
 
-              if (nextHighestAlreadyCompleted) {
-                requires_dispatch = false;
+                const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+                  owner,
+                  repo,
+                  workflow_id: 'rocm-ci-dispatch.yml',
+                  per_page: 100,
+                });
+
+                core.info(`Dispatch debug: total workflow runs fetched=${runs.length}`);
+
+                const candidateRuns = runs.filter(run => {
+                  const prMatch = (run.pull_requests || []).some(pr => pr.number === prNumber);
+                  const sameSha = run.head_sha === headSha;
+                  const sameHeadRef = run.head_branch === context.payload.pull_request.head.ref;
+                  const activeOrDone =
+                    run.status === 'queued' ||
+                    run.status === 'in_progress' ||
+                    run.status === 'requested' ||
+                    run.status === 'waiting' ||
+                    run.status === 'pending' ||
+                    run.status === 'completed';
+                  return (prMatch || sameHeadRef) && sameSha && activeOrDone;
+                });
+
+                core.info(`Dispatch debug: candidate runs matching PR/ref+sha=${candidateRuns.length}`);
+
+                let satisfiesAddedLevel = false;
+                for (const run of candidateRuns) {
+                  let detectedLevel = 0;
+
+                  // Inspect called-workflow job names, which include level.
+                  const jobsResp = await github.rest.actions.listJobsForWorkflowRun({
+                    owner,
+                    repo,
+                    run_id: run.id,
+                    per_page: 100,
+                  });
+
+                  for (const job of jobsResp.data.jobs || []) {
+                    const m = (job.name || '').match(/(?:CI\s+)?Level\s*(\d+)/i);
+                    if (m) {
+                      detectedLevel = Math.max(detectedLevel, Number(m[1]));
+                    }
+                    core.info(`Dispatch debug: run_id=${run.id}, job_id=${job.id}, job_name=${job.name}, detectedLevel=${detectedLevel}`);
+                  }
+
+                  core.info(
+                    `Dispatch debug: run_id=${run.id}, status=${run.status}, head_branch=${run.head_branch}, detectedLevel=${detectedLevel}, threshold=${addedLevel}`
+                  );
+
+                  if (detectedLevel >= addedLevel) {
+                    satisfiesAddedLevel = true;
+                    core.info(`Dispatch debug: run_id=${run.id} satisfies added level; skipping new dispatch`);
+                    break;
+                  }
+                }
+
+                if (satisfiesAddedLevel) {
+                  requiresDispatch = false;
+                }
+                core.info(`Dispatch debug: post-existing-run check requiresDispatch=${requiresDispatch}`);
               }
+            } else if (action === 'synchronize' || action === 'reopened') {
+              requiresDispatch = currentLevel > 0;
             }
-            let test_level = requires_dispatch ? level : '';
-            core.setOutput('test_level', test_level);
-            core.setOutput('current_level', String(currentLevel));
-            const shouldCancelOthers = (test_level !== '') || (action === 'unlabeled' && removedWasHighest);
-            core.setOutput('should_cancel_others', shouldCancelOthers ? 'true' : 'false');
+            core.info(`Dispatch debug: final requiresDispatch=${requiresDispatch}, output test_level=${requiresDispatch ? String(currentLevel) : ''}`);
+            core.setOutput('test_level', requiresDispatch ? String(currentLevel) : '');
 
-  cancel_others:
-    # Run this job if we might need to cancel running workflows, which happens when:
-    #   - We determined that we need to dispatch a workflow
-    #   - The highest CI-level label was removed
-    if: ${{ needs.determine_level.outputs.should_cancel_others == 'true' }}
-    needs: determine_level
+  maybe_cancel_all:
+    if: ${{ github.event.action == 'unlabeled' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Cancel queued/in-progress runs
+      - name: Cancel all active CI test runs for this PR if there are no remaining CI-level labels
         uses: actions/github-script@v7
-        env:
-          CURRENT_LEVEL: ${{ needs.determine_level.outputs.current_level }}
         with:
           script: |
-            const action = context.payload.action;
-            if (action === 'reopened') {
-              return;
-            }
-
             const parseLevelLabel = (labelName) => {
               const label = (labelName || '').toLowerCase();
               if (label === 'ci-level 3') return 3;
@@ -126,58 +144,44 @@ jobs:
               return 0;
             };
 
-            // Cancel other runs for the same PR that are queued or
-            // in progress and have a lower CI level
-            const prNumber = context.payload.pull_request.number;
+            const removedLabelLevel = parseLevelLabel(context.payload.label?.name);
+            if (removedLabelLevel === 0) {
+              core.info('Cancel debug: removed label is not a ci-level label; skipping.');
+              return;
+            }
+
+            const remainingMaxLevel = Math.max(
+              0,
+              ...(context.payload.pull_request.labels || []).map(l => parseLevelLabel(l.name))
+            );
+
+            if (remainingMaxLevel > 0) {
+              core.info(`Cancel debug: ci-level labels still present (max=${remainingMaxLevel}); skipping full cancel.`);
+              return;
+            }
+
             const owner = context.repo.owner;
             const repo = context.repo.repo;
+            const prNumber = context.payload.pull_request.number;
             const currentRunId = context.runId;
-            const currentLevel = Number(process.env.CURRENT_LEVEL || 0);
-            // If a label was added, determine its level to compare against other runs
-            const addedLevel = action === 'labeled' ? parseLevelLabel(context.payload.label?.name) : 0;
-            const removedLevel = action === 'unlabeled' ? parseLevelLabel(context.payload.label?.name) : 0;
 
-            // Fetch all workflow runs for this workflow and PR
-            const runs = await github.rest.actions.listWorkflowRuns({
+            const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
               owner,
               repo,
-              workflow_id: 'rocm-ci-dispatch.yml',
-              event: 'pull_request',
+              workflow_id: 'rocm-ci.yml',
               per_page: 100,
             });
 
-            // Filter runs to find those that are for the same PR,
-            // are queued or in progress, and have a lower CI level
-            const toCancel = runs.data.workflow_runs.filter(run => {
+            const toCancel = runs.filter(run => {
               const prMatch = (run.pull_requests || []).some(pr => pr.number === prNumber);
-              const active = run.status === 'queued' || run.status === 'in_progress';
-              // In general, don't cancel yourself or inactive/irrelevant PRs
-              if (run.id === currentRunId || !(prMatch && active)) {
-                return false;
-              }
-              // Always cancel others when updating commits
-              if (action === 'synchronize') {
-                return true;
-              }
-              // For labeled/unlabeled actions, compare the CI levels
-              const title = run.display_title || '';
-              const match = title.match(/CI Level (\d+)/i);
-              const runLevel = match ? Number(match[1]) : 0;
-              // If a label was added, cancel runs with a lower level than the added label
-              if (action === 'labeled') {
-                return runLevel < addedLevel;
-              }
-              // If last CI label was removed, cancel all active CI-level runs.
-              if (action === 'unlabeled' && currentLevel === 0 && removedLevel > 0) {
-                return runLevel > 0;
-              }
-              // If a label was removed, cancel runs with a lower level than the current level
-              return runLevel < currentLevel;
+              const active = run.status === 'queued' || run.status === 'in_progress' || run.status === 'requested' || run.status === 'waiting' || run.status === 'pending';
+              return prMatch && active && run.id !== currentRunId;
             });
 
-            // Cancel the identified runs
+            core.info(`Cancel debug: found ${toCancel.length} active rocm-ci runs for PR #${prNumber}`);
+
             for (const run of toCancel) {
-              core.info(`Canceling dispatch run ${run.id} for PR #${prNumber}`);
+              core.info(`Canceling run ${run.id} (${run.name || 'rocm-ci'})`);
               await github.rest.actions.cancelWorkflowRun({
                 owner,
                 repo,
@@ -188,12 +192,11 @@ jobs:
   dispatch:
     # Run this job if there is a valid level to test, which requires
     # that any of the following are true:
-    # - A ci-level label was added
+    # - A ci-level label higher than any existing ci-level label(s) was added
     # - A commit was pushed with existing ci-level label(s)
     # - The PR was reopened with existing ci-level label(s)
-    # - The highest ci-level label was removed with remaining ci-level label(s)
     if: ${{ needs.determine_level.outputs.test_level != '' }}
-    needs: [determine_level, cancel_others]
+    needs: determine_level
     name: CI Level ${{ needs.determine_level.outputs.test_level }}
     uses: ./.github/workflows/rocm-ci.yml
     with:

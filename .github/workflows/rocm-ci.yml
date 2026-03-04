@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 name: Build and Test Branch
+run-name: CI Level ${{ inputs.test_level || '1' }}
 
 on:
   push:
@@ -42,7 +43,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_call' }}
+  cancel-in-progress: true
 
 jobs:
   build_and_test:
