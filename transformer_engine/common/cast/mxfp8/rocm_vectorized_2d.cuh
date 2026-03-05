@@ -8,7 +8,7 @@
 
 #include "../../util/vectorized_pointwise.h"
 
-namespace transformer_engine::rocm {
+namespace transformer_engine {
 // These 2d copy functions replace TMA tensormap async copies for AMD GPUs.
 template <typename T, int N_VEC, bool ALIGNED_ACCESS>
 __device__ inline void copy_2d_to_shared(T *sh_ptr_base, const T *g_ptr, size_t g_start_col,
@@ -78,4 +78,4 @@ __device__ inline void bulk_tensor_2d_shared_to_global(const T *sh_ptr_base, T *
     }
   }
 }
-} // namespace transformer_engine::rocm
+} // namespace transformer_engine

@@ -26,7 +26,9 @@
 #include "../../utils.cuh"
 #include "../core/common.cuh"
 
+#ifdef __HIP_PLATFORM_AMD__
 #include "./rocm_vectorized_2d.cuh"
+#endif
 
 namespace transformer_engine {
 namespace dispatch {

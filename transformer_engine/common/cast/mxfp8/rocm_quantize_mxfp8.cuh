@@ -143,11 +143,11 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
       const int chunk_it_offset_x = chunk_offset_X;
       const size_t row_base = chunk_it_offset_y;
       if constexpr (IS_DACT) {
-        transformer_engine::rocm::copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&act_in_sh[0][0], act_input_ptr, 
+        copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&act_in_sh[0][0], act_input_ptr, 
                           chunk_it_offset_x, chunk_it_offset_y, cols, 
                           MXFP8_SHMEM_DIM_Y, MXFP8_SHMEM_DIM_X, rows, cols);
       }
-      transformer_engine::rocm::copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_sh[0][0], input_ptr, chunk_it_offset_x, 
+      copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_sh[0][0], input_ptr, chunk_it_offset_x, 
                         chunk_it_offset_y, cols, MXFP8_SHMEM_DIM_Y,
                         MXFP8_SHMEM_DIM_X, rows, cols);
       __syncthreads();
@@ -290,12 +290,12 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
       __syncthreads();
 
       if constexpr (USE_ROWWISE_SCALING) {
-        transformer_engine::rocm::bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_rowwise_sh[0][0], output_rowwise, chunk_it_offset_x,
+        bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_rowwise_sh[0][0], output_rowwise, chunk_it_offset_x,
                                         chunk_it_offset_y, cols, MXFP8_SHMEM_DIM_Y,
                                         MXFP8_SHMEM_DIM_X, rows, cols);
       }
       if constexpr (USE_COLWISE_SCALING) {
-        transformer_engine::rocm::bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_colwise_sh[0][0], output_colwise, chunk_it_offset_x,
+        bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_colwise_sh[0][0], output_colwise, chunk_it_offset_x,
                                         chunk_it_offset_y, cols, MXFP8_SHMEM_DIM_Y,
                                         MXFP8_SHMEM_DIM_X, rows, cols);
       }

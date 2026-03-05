@@ -21,9 +21,6 @@
 #endif  // CUDA_VERSION >= 12080
 
 #include "common/utils.cuh"
-#ifdef __HIP_PLATFORM_AMD__
-#include "../util/vectorized_pointwise.h"
-#endif //#ifndef __HIP_PLATFORM_AMD__
 
 namespace transformer_engine {
 

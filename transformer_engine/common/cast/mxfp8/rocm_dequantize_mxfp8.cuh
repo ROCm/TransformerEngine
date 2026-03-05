@@ -67,7 +67,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     const int chunk_it_offset_y = chunk_offset_Y + iter * BUFFER_DIM_Y;
     const int chunk_it_offset_x = chunk_offset_X;
 
-    transformer_engine::rocm::copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_sh[0][0], input_ptr, chunk_it_offset_x, 
+    copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_sh[0][0], input_ptr, chunk_it_offset_x, 
                       chunk_it_offset_y, cols, SHMEM_DIM_Y,
                       SHMEM_DIM_X, rows, cols);
     __syncthreads();
@@ -108,7 +108,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
     __syncthreads();
 
-    transformer_engine::rocm::bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_sh[0][0], output_ptr, chunk_it_offset_x,
+    bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_sh[0][0], output_ptr, chunk_it_offset_x,
                                     chunk_it_offset_y, cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
 
     __syncthreads();

@@ -239,7 +239,6 @@ if __name__ == "__main__":
         assert bool(
             int(os.getenv("NVTE_RELEASE_BUILD", "0"))
         ), "NVTE_RELEASE_BUILD env must be set for metapackage build."
-        te_cuda_vers = "cu12"
         ext_modules = []
         cmdclass = {}
         package_data = {}
