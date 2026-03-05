@@ -52,24 +52,28 @@ else()
       message(STATUS " [AITER-PREBUILT] Building aiter from source.")
 
       if(NOT Python_EXECUTABLE)
-        find_package(Python COMPONENTS Interpreter REQUIRED)
+        find_package(Python COMPONENTS Interpreter QUIET)
       endif()
 
-      execute_process(
-        COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/check_aiter_mha_args.py --mode both --te-dir "${CMAKE_CURRENT_LIST_DIR}/../../.."
-        RESULT_VARIABLE AITER_ARG_CHECK_RESULT
-        OUTPUT_VARIABLE AITER_ARG_CHECK_OUTPUT
-        ERROR_VARIABLE AITER_ARG_CHECK_ERROR
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_STRIP_TRAILING_WHITESPACE
-      )
+      if(Python_EXECUTABLE)
+        execute_process(
+          COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/check_aiter_mha_args.py --mode both --te-dir "${CMAKE_CURRENT_LIST_DIR}/../../.."
+          RESULT_VARIABLE AITER_ARG_CHECK_RESULT
+          OUTPUT_VARIABLE AITER_ARG_CHECK_OUTPUT
+          ERROR_VARIABLE AITER_ARG_CHECK_ERROR
+          OUTPUT_STRIP_TRAILING_WHITESPACE
+          ERROR_STRIP_TRAILING_WHITESPACE
+        )
 
-      if(NOT AITER_ARG_CHECK_RESULT EQUAL 0)
-        message(FATAL_ERROR
-                "AITER API validation failed in check_aiter_mha_args.py.\n"
-                "${AITER_ARG_CHECK_OUTPUT}\n${AITER_ARG_CHECK_ERROR}")
+        if(NOT AITER_ARG_CHECK_RESULT EQUAL 0)
+          message(FATAL_ERROR
+                  "AITER API validation failed in check_aiter_mha_args.py.\n"
+                  "${AITER_ARG_CHECK_OUTPUT}\n${AITER_ARG_CHECK_ERROR}")
+        endif()
+        message(STATUS "AITER API validation passed via check_aiter_mha_args.py")
+      else()
+        message(WARNING "Python interpreter not found; skipping AITER API validation check_aiter_mha_args.py")
       endif()
-      message(STATUS "AITER API validation passed via check_aiter_mha_args.py")
 
       execute_process(
         COMMAND bash ${CMAKE_CURRENT_LIST_DIR}/aiter_build.sh
