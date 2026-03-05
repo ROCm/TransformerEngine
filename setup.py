@@ -8,11 +8,9 @@
 
 from importlib import metadata
 import os
-import sys
 import time
 from pathlib import Path
 from typing import List, Tuple
-import subprocess
 
 import setuptools
 from setuptools.command.egg_info import egg_info

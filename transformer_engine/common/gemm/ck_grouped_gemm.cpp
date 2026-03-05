@@ -110,7 +110,7 @@ struct Runner{
           Partitioner::MPerBlock, Partitioner::NPerBlock,
           TileCfg::M_Warp, TileCfg::N_Warp,
           TileCfg::M_Warp_Tile, TileCfg::N_Warp_Tile, TileCfg::K_Warp_Tile,
-        Problem::TransposeC>>;
+          Problem::TransposeC>>;
 
   using Kernel = ck_tile::GroupedGemmKernel<Partitioner, Pipeline, Epilogue>;
 };

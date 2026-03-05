@@ -50,6 +50,27 @@ else()
     # If not downloaded, Fallback: Build from source
     if(NOT AITER_PREBUILT_DOWNLOAD_SUCCESS)
       message(STATUS " [AITER-PREBUILT] Building aiter from source.")
+
+      if(NOT Python_EXECUTABLE)
+        find_package(Python COMPONENTS Interpreter REQUIRED)
+      endif()
+
+      execute_process(
+        COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/check_aiter_mha_args.py --mode both --te-dir "${CMAKE_CURRENT_LIST_DIR}/../../.."
+        RESULT_VARIABLE AITER_ARG_CHECK_RESULT
+        OUTPUT_VARIABLE AITER_ARG_CHECK_OUTPUT
+        ERROR_VARIABLE AITER_ARG_CHECK_ERROR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_STRIP_TRAILING_WHITESPACE
+      )
+
+      if(NOT AITER_ARG_CHECK_RESULT EQUAL 0)
+        message(FATAL_ERROR
+                "AITER API validation failed in check_aiter_mha_args.py.\n"
+                "${AITER_ARG_CHECK_OUTPUT}\n${AITER_ARG_CHECK_ERROR}")
+      endif()
+      message(STATUS "AITER API validation passed via check_aiter_mha_args.py")
+
       execute_process(
         COMMAND bash ${CMAKE_CURRENT_LIST_DIR}/aiter_build.sh
                 --aiter-dir ${__AITER_SOURCE_DIR}
@@ -104,27 +125,6 @@ if(NOT EXISTS "${AITER_INCLUDE_DIR}")
           "Try running 'git submodule update --init --recursive' "
           "within the Transformer Engine source.")
 endif()
-
-if(NOT Python_EXECUTABLE)
-  find_package(Python COMPONENTS Interpreter REQUIRED)
-endif()
-
-execute_process(
-  COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/check_aiter_mha_args.py --mode both --te-dir "${CMAKE_CURRENT_LIST_DIR}/../../.."
-  RESULT_VARIABLE AITER_ARG_CHECK_RESULT
-  OUTPUT_VARIABLE AITER_ARG_CHECK_OUTPUT
-  ERROR_VARIABLE AITER_ARG_CHECK_ERROR
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-  ERROR_STRIP_TRAILING_WHITESPACE
-)
-
-if(NOT AITER_ARG_CHECK_RESULT EQUAL 0)
-  message(FATAL_ERROR
-          "AITER API validation failed in check_aiter_mha_args.py.\n"
-          "${AITER_ARG_CHECK_OUTPUT}\n${AITER_ARG_CHECK_ERROR}")
-endif()
-
-message(STATUS "AITER API validation passed via check_aiter_mha_args.py")
 
 target_include_directories(ck_fused_attn PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(ck_fused_attn PRIVATE ${CK_INCLUDE_DIR} ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha)
