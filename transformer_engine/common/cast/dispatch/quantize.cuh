@@ -121,8 +121,17 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
 #endif
         auto &global_amax = (output_tensor->amax.dptr != nullptr) ? output_tensor->amax
                                                                   : output_tensor->columnwise_amax;
+
+        // If amax was not explicitly set, fall back to the scale field which
+        // holds the same value when set via set_scale().
+        NVTE_CHECK(global_amax.dptr != nullptr || output_tensor->scale.dptr != nullptr,
+                  "NVFP4 quantization requires global_amax (output_tensor->amax) "
+                  "or scale to be set. Call output.set_scale(amax_value) before quantizing.");
+        const SimpleTensor& effective_amax =
+            (global_amax.dptr != nullptr) ? global_amax : output_tensor->scale;
+
         quantize_transpose_vector_blockwise_fp4(
-            /*input=*/input_tensor->data, /*global_amax=*/global_amax,
+            /*input=*/input_tensor->data, /*global_amax=*/effective_amax,
             /*scale_inv=*/output_tensor->scale_inv,
             /*scale_inv_t=*/output_tensor->columnwise_scale_inv,
             /*output=*/output_tensor->data, /*output_t=*/output_tensor->columnwise_data,

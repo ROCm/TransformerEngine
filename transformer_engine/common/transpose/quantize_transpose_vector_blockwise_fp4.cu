@@ -167,13 +167,12 @@ static __device__ constexpr uint64_t WARP_REDUCE_AMAX_GROUP_MASKS[8] = {
     0x4040404040404040ULL, 0x8080808080808080ULL};
 #else
 static __device__ constexpr unsigned int WARP_REDUCE_AMAX_GROUP_MASKS[8] = {
-    0x01010101, 0x02020202, 0x04040404, 0x08080808,
-    0x10101010, 0x20202020, 0x40404040, 0x80808080};
+    0x01010101, 0x02020202, 0x04040404, 0x08080808, 0x10101010, 0x20202020, 0x40404040, 0x80808080};
 #endif
 
 // max for every group_size elements in warp
 template <int group_size, int shfl_down_stride>
-__device__ __forceinline__ float groupMax(float val, 
+__device__ __forceinline__ float groupMax(float val,
 #ifdef __HIP_PLATFORM_AMD__
                                           uint64_t groupMask) {
 #else
@@ -299,28 +298,43 @@ __device__ __forceinline__ __hip_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_stochastic_r
 __device__ __forceinline__ __hip_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_rn(const float2 in01,
                                                                       const float2 in23,
                                                                       const uint32_t rbits) {
-  // constexpr bool has_fp4 = ARCH_BLACKWELL_FAMILY;
-  // if constexpr (has_fp4) {
-  //   // NOTE: rbits unused for rn.
-  //   uint32_t out_4x;  // Only need 16 bit. Using 32 bit container for packing.
-  //   asm volatile(
-  //       "{\n"
-  //       ".reg.b8 f0; \n\t"
-  //       ".reg.b8 f1; \n\t"
-  //       "cvt.rn.satfinite.e2m1x2.f32 f0, %1, %2;\n\t"
-  //       "cvt.rn.satfinite.e2m1x2.f32 f1, %3, %4;\n\t"
-  //       "mov.b32 %0, {f0, f1, f0, f1};\n\t"
-  //       "}"
-  //       : "=r"(out_4x)
-  //       : "f"(in01.y), "f"(in01.x), "f"(in23.y), "f"(in23.x));
-  //   return reinterpret_cast<__hip_fp4x4_e2m1*>(&out_4x)[0];
-  // } else {
+#ifdef __HIP_PLATFORM_AMD__
+  const __hip_fp4_storage_t q0 = __hip_cvt_float_to_fp4(in01.x, __HIP_E2M1, hipRoundNearest);
+  const __hip_fp4_storage_t q1 = __hip_cvt_float_to_fp4(in01.y, __HIP_E2M1, hipRoundNearest);
+  const __hip_fp4_storage_t q2 = __hip_cvt_float_to_fp4(in23.x, __HIP_E2M1, hipRoundNearest);
+  const __hip_fp4_storage_t q3 = __hip_cvt_float_to_fp4(in23.y, __HIP_E2M1, hipRoundNearest);
+
+  uint16_t packed = static_cast<uint16_t>(
+        (q0 & 0xFu)
+      | ((q1 & 0xFu) << 4)
+      | ((q2 & 0xFu) << 8)
+      | ((q3 & 0xFu) << 12));
+
+  return *reinterpret_cast<__hip_fp4x4_e2m1*>(&packed);
+#else
+  constexpr bool has_fp4 = ARCH_BLACKWELL_FAMILY;
+  if constexpr (has_fp4) {
+    // NOTE: rbits unused for rn.
+    uint32_t out_4x;  // Only need 16 bit. Using 32 bit container for packing.
+    asm volatile(
+        "{\n"
+        ".reg.b8 f0; \n\t"
+        ".reg.b8 f1; \n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 f0, %1, %2;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 f1, %3, %4;\n\t"
+        "mov.b32 %0, {f0, f1, f0, f1};\n\t"
+        "}"
+        : "=r"(out_4x)
+        : "f"(in01.y), "f"(in01.x), "f"(in23.y), "f"(in23.x));
+    return reinterpret_cast<__hip_fp4x4_e2m1*>(&out_4x)[0];
+  } else {
     NVTE_DEVICE_ERROR(
         "FP4 cvt PTX instructions are architecture-specific. "
         "Try recompiling with sm_XXXa instead of sm_XXX.");
     uint16_t dummy = 0;
     return *reinterpret_cast<__hip_fp4x4_e2m1*>(&dummy);
-  // }
+  }
+  #endif
 }
 
 template <bool kApplyStochasticRounding>
