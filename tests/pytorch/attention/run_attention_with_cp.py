@@ -455,7 +455,6 @@ def run_dpa_with_cp(
     for tensor in tensors[4:]:
         assert torch.all(~torch.isnan(tensor))
         assert torch.all(~torch.isinf(tensor))
-        i += 1
     out, dq, dk, dv, out_, dq_, dk_, dv_ = tensors
 
     ############  compare results between CP and no-CP ############

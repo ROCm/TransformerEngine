@@ -41,7 +41,7 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
     impl = Impl::FULLY_FUSED;
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
     impl = Impl::FUSED_ACTIVATION_AMAX_FP8;
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
   }
 #else
   } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
@@ -105,7 +105,7 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
         fp8_quantizer_cpp->quantize_with_amax(temp_nvte, out_nvte);
       }
       break;
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef USE_ROCM
     case Impl::FUSED_ACTIVATION_AMAX_NVFP4:
       // Compute activation and amax in high precision, then quantize to NVFP4
       {
@@ -159,7 +159,7 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
     impl = Impl::FULLY_FUSED;
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
     impl = Impl::FUSED_ACTIVATION_AMAX_FP8;
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
   }
 #else
   } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
@@ -223,7 +223,7 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
         fp8_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte);
       }
       break;
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef USE_ROCM
     case Impl::FUSED_ACTIVATION_AMAX_NVFP4:
       // Compute activation and amax in high precision, then quantize to NVFP4
       {

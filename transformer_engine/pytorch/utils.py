@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -21,6 +21,8 @@ from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 __all__ = ["get_device_compute_capability", "get_cudnn_version", "is_bf16_available"]
 
+if IS_HIP_EXTENSION:
+    __all__.extend(["is_mi200", "is_mi308", "is_fp8_fnuz"])
 
 def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     """Check if any of the given tensors require gradient."""

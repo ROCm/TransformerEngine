@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -7,6 +9,7 @@
 #ifndef TRANSFORMER_ENGINE_JAX_CGEMM_HELPER_H_
 #define TRANSFORMER_ENGINE_JAX_CGEMM_HELPER_H_
 
+#ifndef USE_ROCM
 #include <unistd.h>
 
 #include <chrono>
@@ -186,4 +189,5 @@ int GetCgemmNumMaxStreams();
 }  // namespace jax
 }  // namespace transformer_engine
 
+#endif // #ifndef USE_ROCM
 #endif  // TRANSFORMER_ENGINE_JAX_CGEMM_HELPER_H_

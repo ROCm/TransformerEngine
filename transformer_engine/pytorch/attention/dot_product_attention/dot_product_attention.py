@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -60,6 +62,8 @@ from transformer_engine.pytorch.attention.dot_product_attention.backends import 
     FusedAttention,
     FlashAttention,
 )
+
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 
 # Setup Attention Logging
@@ -319,6 +323,8 @@ class DotProductAttention(TransformerEngineBaseModule):
         softmax_type: str = "vanilla",
         return_max_logit: Optional[bool] = False,
     ) -> None:
+        if IS_HIP_EXTENSION:
+            assert not return_max_logit, "ROCm does not support return_max_logit yet."
         super().__init__()
 
         self.logger = logging.getLogger("DotProductAttention")

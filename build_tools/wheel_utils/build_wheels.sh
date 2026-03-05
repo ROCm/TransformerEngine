@@ -67,7 +67,7 @@ if $BUILD_COMMON ; then
                 #hipify expects python in PATH, also ninja may be installed to python bindir
                 test -n "$PYBINDIR" && PATH="$PYBINDIR:$PATH" || true
         else
-                TE_CUDA_VERS="cu12"
+                TE_CUDA_VERS="cu${CUDA_MAJOR}"
                 PYBINDIR=/opt/python/cp38-cp38/bin/
         fi
 
@@ -75,12 +75,12 @@ if $BUILD_COMMON ; then
         ${PYBINDIR}python setup.py bdist_wheel --verbose --python-tag=py3 --plat-name=$PLATFORM 2>&1 | tee /wheelhouse/logs/common.txt
 
         if [ "$ROCM_BUILD" = "1" ]; then
-                # Repack the wheel for cuda specific package, i.e. cu12.
+                # Repack the wheel for specific rocm package.
                 ${PYBINDIR}wheel unpack dist/*
                 # From python 3.10 to 3.11, the package name delimiter in metadata got changed from - (hyphen) to _ (underscore).
-                sed -i "s/Name: transformer-engine/Name: transformer-engine-${TE_CUDA_VERS}/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
-                sed -i "s/Name: transformer_engine/Name: transformer_engine_${TE_CUDA_VERS}/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
-                mv "${WHL_BASE}/${WHL_BASE}.dist-info" "${WHL_BASE}/transformer_engine_${TE_CUDA_VERS}-${VERSION}.dist-info"
+                sed -i "s/Name: transformer-engine/Name: transformer-engine-rocm/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
+                sed -i "s/Name: transformer_engine/Name: transformer_engine_rocm/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
+                mv "${WHL_BASE}/${WHL_BASE}.dist-info" "${WHL_BASE}/transformer_engine_rocm-${VERSION}.dist-info"
                 ${PYBINDIR}wheel pack ${WHL_BASE}
         else
                 # Repack the wheel for specific cuda version.

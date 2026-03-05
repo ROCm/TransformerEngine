@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -151,7 +151,7 @@ std::vector<py::object> dact_dbias(
     impl = Impl::FUSED_DACT_DBIAS_QUANTIZE;
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer_py.ptr())) {
     impl = Impl::FUSED_DACT_AMAX_FP8;
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
   }
 #else
   } else if (detail::IsNVFP4Quantizers(quantizer_py.ptr())) {
@@ -224,7 +224,7 @@ std::vector<py::object> dact_dbias(
         fp8_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte);
         break;
       }
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef USE_ROCM
     case Impl::FUSED_DACT_AMAX_NVFP4:
       // Fused dact-amax kernel, unfused dbias and NVFP4 quantize
       {

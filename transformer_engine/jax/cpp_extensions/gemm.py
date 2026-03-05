@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -285,7 +285,8 @@ def collective_gemm_bootstrap(
         and before any collective GEMM operations. Each process should call
         this function with its own unique process_id.
     """
-
+    if is_hip_extension():
+        assert 0, "collective_gemm_bootstrap is not supported for ROCm yet."
     assert (
         num_devices_per_process == 1 and jax.local_device_count() == 1
     ), "Only single device per process is supported at the moment!"

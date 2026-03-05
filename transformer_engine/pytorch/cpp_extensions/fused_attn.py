@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -263,6 +263,10 @@ def fused_attn_fwd(
                     [seed, offset], dtype uint64
     max_logit: if return_max_logit = True, shape [h] and same data type as O; otherwise None
     """
+
+    if IS_HIP_EXTENSION:
+        assert not return_max_logit, "ROCm does not support return_max_logit yet."
+        assert not cuda_graph, "ROCm does not support cuda_graph."
 
     if attn_scale is None:
         d = q.size(-1)

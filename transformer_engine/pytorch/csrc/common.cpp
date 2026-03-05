@@ -12,7 +12,7 @@
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
 
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
 #include "common/common.h"
 #endif
 
@@ -312,7 +312,7 @@ size_t roundup(const size_t value, const size_t multiple) {
   return ((value + multiple - 1) / multiple) * multiple;
 }
 
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
 
 inline bool nvte_use_atomic_amax() {
   const char *env_p = std::getenv("NVTE_USE_ATOMIC_AMAX");
