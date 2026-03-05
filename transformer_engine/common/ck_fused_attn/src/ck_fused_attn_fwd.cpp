@@ -155,7 +155,7 @@ hipError_t ck_attn_fwd(
   ck_tile::index_t hdim_q = d_qk;
   ck_tile::index_t nhead_k = hg;
   ck_tile::index_t hdim_v = d_v;
-  ck_tile::index_t max_seqlen_q = s_q;
+  ck_tile::index_t max_seqlen_q = s_kv;
   ck_tile::index_t max_seqlen_k = s_kv;
   float scale_s = scaling_factor;
   float logits_soft_cap = 0.f;
