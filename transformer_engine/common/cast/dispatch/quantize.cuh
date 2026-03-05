@@ -91,7 +91,6 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
           dummy_workspace_tensor, stream);
       break;
     }
-// #ifndef __HIP_PLATFORM_AMD__
     case NVTE_NVFP4_1D_SCALING: {
       NVTE_CHECK(!IS_ACT, "IS_ACT is not supported by FWD NVTE_NVFP4_1D_SCALING");
 

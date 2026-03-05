@@ -49,6 +49,7 @@ double2 cvt_fp4x2_to_double2(fp4e2m1x2 fp4_pair) {
 #else
     const __half2_raw raw_truncated_to_fp4e2m1_pair =
         __nv_cvt_fp4x2_to_halfraw2(*reinterpret_cast<__nv_fp4x2_storage_t*>(&fp4_pair), __NV_E2M1);
+
     const __half2 truncated_to_fp4e2m1_pair(raw_truncated_to_fp4e2m1_pair);
     const double truncated_to_fp4e2m1_x = static_cast<double>(truncated_to_fp4e2m1_pair.x);
     const double truncated_to_fp4e2m1_y = static_cast<double>(truncated_to_fp4e2m1_pair.y);
@@ -700,10 +701,12 @@ class FusedCastTransposeNVFP4TestSuite : public ::testing::TestWithParam
                 transformer_engine::DType>> {};
 
 TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
+#ifndef __HIP_PLATFORM_AMD__
     // Skip tests for pre-Blackwell architectures
-    // if (getDeviceComputeCapability() < blackwellComputeCapability) {
-    //     GTEST_SKIP();
-    // }
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+#endif
 
     using namespace transformer_engine;
     using namespace test;

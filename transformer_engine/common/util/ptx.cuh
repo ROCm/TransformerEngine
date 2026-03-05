@@ -527,86 +527,96 @@ __device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out, const Tx2 &in01, cons
 __device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding(
     const uint64_t in_4x, const float2 scale, const uint32_t rbits) {
   uint16_t out_4x = 0;
-  // constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
-  // if constexpr (has_rs) {
-  //   asm volatile(
-  //       "{\n"
-  //       ".reg.b64 v01; \n\t"
-  //       ".reg.b64 v23; \n\t"
-  //       ".reg.b16 v0_bf16; \n\t"
-  //       ".reg.b16 v1_bf16; \n\t"
-  //       ".reg.b16 v2_bf16; \n\t"
-  //       ".reg.b16 v3_bf16; \n\t"
-  //       ".reg.b32 v0; \n\t"
-  //       ".reg.b32 v1; \n\t"
-  //       ".reg.b32 v2; \n\t"
-  //       ".reg.b32 v3; \n\t"
-  //       "mov.b64 {v0_bf16, v1_bf16, v2_bf16, v3_bf16} , %1; \n\t"
-  //       "cvt.f32.bf16 v0, v0_bf16; \n\t"
-  //       "cvt.f32.bf16 v1, v1_bf16; \n\t"
-  //       "cvt.f32.bf16 v2, v2_bf16; \n\t"
-  //       "cvt.f32.bf16 v3, v3_bf16; \n\t"
-  //       "mov.b64 v01, {v0, v1}; \n\t"
-  //       "mov.b64 v23, {v2, v3}; \n\t"
-  //       "mul.f32x2 v01, v01, %2; \n\t"  // mind the shuffled elements order
-  //       "mul.f32x2 v23, v23, %2; \n\t"  // mind the shuffled elements order
-  //       "mov.b64 {v1, v0}, v01; \n\t"
-  //       "mov.b64 {v3, v2}, v23; \n\t"
-  //       "cvt.rs.satfinite.e2m1x4.f32 %0, {v2, v3, v0, v1}, %3; \n\t"  // mind the shuffled elements order
-  //       "}"
-  //       : "=h"(out_4x)
-  //       : "l"(in_4x), "l"(reinterpret_cast<const uint64_t &>(scale)), "r"(rbits));
-  // } else {
+#ifndef __HIP_PLATFORM_AMD__
+  constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
+  if constexpr (has_rs) {
+    asm volatile(
+        "{\n"
+        ".reg.b64 v01; \n\t"
+        ".reg.b64 v23; \n\t"
+        ".reg.b16 v0_bf16; \n\t"
+        ".reg.b16 v1_bf16; \n\t"
+        ".reg.b16 v2_bf16; \n\t"
+        ".reg.b16 v3_bf16; \n\t"
+        ".reg.b32 v0; \n\t"
+        ".reg.b32 v1; \n\t"
+        ".reg.b32 v2; \n\t"
+        ".reg.b32 v3; \n\t"
+        "mov.b64 {v0_bf16, v1_bf16, v2_bf16, v3_bf16} , %1; \n\t"
+        "cvt.f32.bf16 v0, v0_bf16; \n\t"
+        "cvt.f32.bf16 v1, v1_bf16; \n\t"
+        "cvt.f32.bf16 v2, v2_bf16; \n\t"
+        "cvt.f32.bf16 v3, v3_bf16; \n\t"
+        "mov.b64 v01, {v0, v1}; \n\t"
+        "mov.b64 v23, {v2, v3}; \n\t"
+        "mul.f32x2 v01, v01, %2; \n\t"  // mind the shuffled elements order
+        "mul.f32x2 v23, v23, %2; \n\t"  // mind the shuffled elements order
+        "mov.b64 {v1, v0}, v01; \n\t"
+        "mov.b64 {v3, v2}, v23; \n\t"
+        "cvt.rs.satfinite.e2m1x4.f32 %0, {v2, v3, v0, v1}, %3; \n\t"  // mind the shuffled elements order
+        "}"
+        : "=h"(out_4x)
+        : "l"(in_4x), "l"(reinterpret_cast<const uint64_t &>(scale)), "r"(rbits));
+  } else {
+#endif
     NVTE_DEVICE_ERROR(
         "FP4 cvt PTX instructions are architecture-specific. "
         "Try recompiling with sm_XXXa instead of sm_XXX.");
-  // }
+#ifndef __HIP_PLATFORM_AMD__
+  }
+#endif
   return *reinterpret_cast<fp4e2m1x4 *>(&out_4x);
 }
 
 __device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_rn(const uint64_t in_4x,
                                                                     const float2 scale,
                                                                     const uint32_t rbits) {
-  // constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
+#ifndef __HIP_PLATFORM_AMD__ 
+  constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
+#endif
   uint32_t out_4x = 0;  // Only need 16 bit. Using 32 bit container for packing.
-  // if constexpr (is_blackwell) {
-  //   // NOTE: rbits unused for rn.
-  //   asm volatile(
-  //       "{\n"
-  //       ".reg.b64 v01; \n\t"
-  //       ".reg.b64 v23; \n\t"
-  //       ".reg.b16 v0_bf16; \n\t"
-  //       ".reg.b16 v1_bf16; \n\t"
-  //       ".reg.b16 v2_bf16; \n\t"
-  //       ".reg.b16 v3_bf16; \n\t"
-  //       ".reg.b32 v0; \n\t"
-  //       ".reg.b32 v1; \n\t"
-  //       ".reg.b32 v2; \n\t"
-  //       ".reg.b32 v3; \n\t"
-  //       ".reg.b8 f0; \n\t"
-  //       ".reg.b8 f1; \n\t"
-  //       "mov.b64 {v0_bf16, v1_bf16, v2_bf16, v3_bf16} , %1; \n\t"
-  //       "cvt.f32.bf16 v0, v0_bf16; \n\t"
-  //       "cvt.f32.bf16 v1, v1_bf16; \n\t"
-  //       "cvt.f32.bf16 v2, v2_bf16; \n\t"
-  //       "cvt.f32.bf16 v3, v3_bf16; \n\t"
-  //       "mov.b64 v01, {v0, v1}; \n\t"
-  //       "mov.b64 v23, {v2, v3}; \n\t"
-  //       "mul.f32x2 v01, v01, %2; \n\t"  // mind the shuffled elements order
-  //       "mul.f32x2 v23, v23, %2; \n\t"  // mind the shuffled elements order
-  //       "mov.b64 {v1, v0}, v01; \n\t"
-  //       "mov.b64 {v3, v2}, v23; \n\t"
-  //       "cvt.rn.satfinite.e2m1x2.f32 f0, v0, v1;\n\t"
-  //       "cvt.rn.satfinite.e2m1x2.f32 f1, v2, v3;\n\t"
-  //       "mov.b32 %0, {f0, f1, f0, f1};\n\t"
-  //       "}"
-  //       : "=r"(out_4x)
-  //       : "l"(in_4x), "l"(reinterpret_cast<const uint64_t &>(scale)));
-  // } else {
+#ifndef __HIP_PLATFORM_AMD__
+  if constexpr (is_blackwell) {
+    // NOTE: rbits unused for rn.
+    asm volatile(
+        "{\n"
+        ".reg.b64 v01; \n\t"
+        ".reg.b64 v23; \n\t"
+        ".reg.b16 v0_bf16; \n\t"
+        ".reg.b16 v1_bf16; \n\t"
+        ".reg.b16 v2_bf16; \n\t"
+        ".reg.b16 v3_bf16; \n\t"
+        ".reg.b32 v0; \n\t"
+        ".reg.b32 v1; \n\t"
+        ".reg.b32 v2; \n\t"
+        ".reg.b32 v3; \n\t"
+        ".reg.b8 f0; \n\t"
+        ".reg.b8 f1; \n\t"
+        "mov.b64 {v0_bf16, v1_bf16, v2_bf16, v3_bf16} , %1; \n\t"
+        "cvt.f32.bf16 v0, v0_bf16; \n\t"
+        "cvt.f32.bf16 v1, v1_bf16; \n\t"
+        "cvt.f32.bf16 v2, v2_bf16; \n\t"
+        "cvt.f32.bf16 v3, v3_bf16; \n\t"
+        "mov.b64 v01, {v0, v1}; \n\t"
+        "mov.b64 v23, {v2, v3}; \n\t"
+        "mul.f32x2 v01, v01, %2; \n\t"  // mind the shuffled elements order
+        "mul.f32x2 v23, v23, %2; \n\t"  // mind the shuffled elements order
+        "mov.b64 {v1, v0}, v01; \n\t"
+        "mov.b64 {v3, v2}, v23; \n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 f0, v0, v1;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 f1, v2, v3;\n\t"
+        "mov.b32 %0, {f0, f1, f0, f1};\n\t"
+        "}"
+        : "=r"(out_4x)
+        : "l"(in_4x), "l"(reinterpret_cast<const uint64_t &>(scale)));
+  } else {
+#endif
     NVTE_DEVICE_ERROR(
         "FP4 cvt PTX instructions are architecture-specific. "
         "Try recompiling with sm_XXXa instead of sm_XXX.");
-  // }
+#ifndef __HIP_PLATFORM_AMD__
+  }
+#endif
   return reinterpret_cast<fp4e2m1x4 *>(&out_4x)[0];
 }
 
@@ -624,35 +634,39 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x(const uint64_t in_4x
 __device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_stochastic_rounding(
     const float2 in01, const float2 in23, const float2 scale, const uint32_t rbits) {
   uint16_t out_4x = 0;
-  // constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
-  // if constexpr (has_rs) {
-  //   asm volatile(
-  //       "{\n"
-  //       ".reg.b64 v01; \n\t"
-  //       ".reg.b64 v23; \n\t"
-  //       ".reg.b32 v0; \n\t"
-  //       ".reg.b32 v1; \n\t"
-  //       ".reg.b32 v2; \n\t"
-  //       ".reg.b32 v3; \n\t"
-  //       "mov.b64 {v0, v1} , %1; \n\t"
-  //       "mov.b64 {v2, v3} , %2; \n\t"
-  //       "mov.b64 v01, {v0, v1}; \n\t"
-  //       "mov.b64 v23, {v2, v3}; \n\t"
-  //       "mul.f32x2 v01, v01, %3; \n\t"  // mind the shuffled elements order
-  //       "mul.f32x2 v23, v23, %3; \n\t"  // mind the shuffled elements order
-  //       "mov.b64 {v1, v0}, v01; \n\t"
-  //       "mov.b64 {v3, v2}, v23; \n\t"
-  //       "cvt.rs.satfinite.e2m1x4.f32 %0, {v2, v3, v0, v1}, %4; \n\t"  // mind the shuffled elements order
-  //       "}"
-  //       : "=h"(out_4x)
-  //       : "l"(reinterpret_cast<const uint64_t &>(in01)),
-  //         "l"(reinterpret_cast<const uint64_t &>(in23)),
-  //         "l"(reinterpret_cast<const uint64_t &>(scale)), "r"(rbits));
-  // } else {
+#ifndef __HIP_PLATFORM_AMD__
+  constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
+  if constexpr (has_rs) {
+    asm volatile(
+        "{\n"
+        ".reg.b64 v01; \n\t"
+        ".reg.b64 v23; \n\t"
+        ".reg.b32 v0; \n\t"
+        ".reg.b32 v1; \n\t"
+        ".reg.b32 v2; \n\t"
+        ".reg.b32 v3; \n\t"
+        "mov.b64 {v0, v1} , %1; \n\t"
+        "mov.b64 {v2, v3} , %2; \n\t"
+        "mov.b64 v01, {v0, v1}; \n\t"
+        "mov.b64 v23, {v2, v3}; \n\t"
+        "mul.f32x2 v01, v01, %3; \n\t"  // mind the shuffled elements order
+        "mul.f32x2 v23, v23, %3; \n\t"  // mind the shuffled elements order
+        "mov.b64 {v1, v0}, v01; \n\t"
+        "mov.b64 {v3, v2}, v23; \n\t"
+        "cvt.rs.satfinite.e2m1x4.f32 %0, {v2, v3, v0, v1}, %4; \n\t"  // mind the shuffled elements order
+        "}"
+        : "=h"(out_4x)
+        : "l"(reinterpret_cast<const uint64_t &>(in01)),
+          "l"(reinterpret_cast<const uint64_t &>(in23)),
+          "l"(reinterpret_cast<const uint64_t &>(scale)), "r"(rbits));
+  } else {
+#endif
     NVTE_DEVICE_ERROR(
         "FP4 cvt PTX instructions are architecture-specific. "
         "Try recompiling with sm_XXXa instead of sm_XXX.");
-  // }
+#ifndef __HIP_PLATFORM_AMD__
+  }
+#endif
   return *reinterpret_cast<fp4e2m1x4 *>(&out_4x);
 }
 
@@ -660,41 +674,47 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_rn(const float2
                                                                     const float2 in23,
                                                                     const float2 scale,
                                                                     const uint32_t rbits) {
-  // constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
+#ifndef __HIP_PLATFORM_AMD__
+  constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
+#endif
   uint32_t out_4x = 0;  // Only need 16 bit. Using 32 bit container for packing.
-  // if constexpr (is_blackwell) {
-  //   // NOTE: rbits unused for rn.
-  //   asm volatile(
-  //       "{\n"
-  //       ".reg.b64 v01; \n\t"
-  //       ".reg.b64 v23; \n\t"
-  //       ".reg.b32 v0; \n\t"
-  //       ".reg.b32 v1; \n\t"
-  //       ".reg.b32 v2; \n\t"
-  //       ".reg.b32 v3; \n\t"
-  //       ".reg.b8 f0; \n\t"
-  //       ".reg.b8 f1; \n\t"
-  //       "mov.b64 {v0, v1} , %1; \n\t"
-  //       "mov.b64 {v2, v3} , %2; \n\t"
-  //       "mov.b64 v01, {v0, v1}; \n\t"
-  //       "mov.b64 v23, {v2, v3}; \n\t"
-  //       "mul.f32x2 v01, v01, %3; \n\t"  // mind the shuffled elements order
-  //       "mul.f32x2 v23, v23, %3; \n\t"  // mind the shuffled elements order
-  //       "mov.b64 {v1, v0}, v01; \n\t"
-  //       "mov.b64 {v3, v2}, v23; \n\t"
-  //       "cvt.rn.satfinite.e2m1x2.f32 f0, v0, v1;\n\t"
-  //       "cvt.rn.satfinite.e2m1x2.f32 f1, v2, v3;\n\t"
-  //       "mov.b32 %0, {f0, f1, f0, f1};\n\t"
-  //       "}"
-  //       : "=r"(out_4x)
-  //       : "l"(reinterpret_cast<const uint64_t &>(in01)),
-  //         "l"(reinterpret_cast<const uint64_t &>(in23)),
-  //         "l"(reinterpret_cast<const uint64_t &>(scale)));
-  // } else {
+#ifndef __HIP_PLATFORM_AMD__
+  if constexpr (is_blackwell) {
+    // NOTE: rbits unused for rn.
+    asm volatile(
+        "{\n"
+        ".reg.b64 v01; \n\t"
+        ".reg.b64 v23; \n\t"
+        ".reg.b32 v0; \n\t"
+        ".reg.b32 v1; \n\t"
+        ".reg.b32 v2; \n\t"
+        ".reg.b32 v3; \n\t"
+        ".reg.b8 f0; \n\t"
+        ".reg.b8 f1; \n\t"
+        "mov.b64 {v0, v1} , %1; \n\t"
+        "mov.b64 {v2, v3} , %2; \n\t"
+        "mov.b64 v01, {v0, v1}; \n\t"
+        "mov.b64 v23, {v2, v3}; \n\t"
+        "mul.f32x2 v01, v01, %3; \n\t"  // mind the shuffled elements order
+        "mul.f32x2 v23, v23, %3; \n\t"  // mind the shuffled elements order
+        "mov.b64 {v1, v0}, v01; \n\t"
+        "mov.b64 {v3, v2}, v23; \n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 f0, v0, v1;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 f1, v2, v3;\n\t"
+        "mov.b32 %0, {f0, f1, f0, f1};\n\t"
+        "}"
+        : "=r"(out_4x)
+        : "l"(reinterpret_cast<const uint64_t &>(in01)),
+          "l"(reinterpret_cast<const uint64_t &>(in23)),
+          "l"(reinterpret_cast<const uint64_t &>(scale)));
+  } else {
+#endif
     NVTE_DEVICE_ERROR(
         "FP4 cvt PTX instructions are architecture-specific. "
         "Try recompiling with sm_XXXa instead of sm_XXX.");
-  // }
+#ifndef __HIP_PLATFORM_AMD__
+  }
+#endif
   return reinterpret_cast<fp4e2m1x4 *>(&out_4x)[0];
 }
 
