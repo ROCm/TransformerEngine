@@ -14,7 +14,7 @@
 #define FP4_TYPE_SUPPORTED (CUDA_VERSION >= 12080)
 #else
 #ifdef __HIPCC__
-#define FP4_TYPE_SUPPORTED true
+#define FP4_TYPE_SUPPORTED __gfx950__
 #else
 #define FP4_TYPE_SUPPORTED false
 #endif
