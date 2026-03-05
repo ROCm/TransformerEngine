@@ -285,8 +285,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                         out_.data() /*D*/, workspace_.data(), config, stream);
   } else {
 #ifdef USE_ROCM
-    //TODO: better assert
-    NVTE_ERROR("ROCm TE jax does not integrate userbuffer for now");
+    NVTE_ERROR("ROCm TE JAX does not support comm-comp overlap yet.");
 #else
     std::vector<size_t> buffer_shape{0, 0};
     DType buffer_dtype = out_dtype;

@@ -67,7 +67,7 @@ if $BUILD_COMMON ; then
                 #hipify expects python in PATH, also ninja may be installed to python bindir
                 test -n "$PYBINDIR" && PATH="$PYBINDIR:$PATH" || true
         else
-                TE_CUDA_VERS="${CUDA_MAJOR}"
+                TE_CUDA_VERS="cu${CUDA_MAJOR}"
                 PYBINDIR=/opt/python/cp38-cp38/bin/
         fi
 
