@@ -10,7 +10,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Flo
 from transformer_engine.pytorch.triton_kernels.common import te_dtype_to_torch_dtype
 import transformer_engine_torch as tex
 from test_common import te_compare_results, fill_uniform, get_tolerances
-from transformer_engine.pytorch.fp8 import autocast
+from transformer_engine.pytorch.quantization import autocast
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type, get_torch_float8_e5m2_type
 

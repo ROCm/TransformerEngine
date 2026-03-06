@@ -26,7 +26,7 @@ import jax.numpy as jnp
 from transformer_engine_jax import JAXX_Scaling_Mode
 from .misc import QuantizeLayout
 from .device_utils import is_fp8_gemm_with_all_layouts_supported
-from ..util import is_hip_extension
+from ..util import is_hip_extension, get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
 
 
 __all__ = [
@@ -1038,7 +1038,7 @@ class ScalingMode(Enum):
             ScalingMode.CURRENT_TENSOR_SCALING,
             ScalingMode.MXFP8_1D_SCALING,
         ):
-            return {jnp.float8_e5m2, jnp.float8_e4m3fn}
+            return {get_jnp_float8_e5m2_type(), get_jnp_float8_e4m3_type()}
         if self in (ScalingMode.NVFP4_1D_SCALING, ScalingMode.NVFP4_2D_SCALING):
             return {jnp.float4_e2m1fn}
         if self == ScalingMode.NO_SCALING:

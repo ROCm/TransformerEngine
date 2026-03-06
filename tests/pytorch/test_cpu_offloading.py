@@ -630,13 +630,6 @@ class TestTELayers:
                 "Fused attention + cuda graphs is temporarily broken, not because of cpu offloading"
             )
 
-        if (IS_HIP_EXTENSION
-            and backend == "FusedAttention"
-            and not use_cuda_graphs
-            and layer_type in ("multihead_attention", "transformer_layer")
-           ):
-           pytest.skip("No dot product attention backend is available for the provided inputs")
-
         os.environ["NVTE_FLASH_ATTN"] = "0"
         os.environ["NVTE_FUSED_ATTN"] = "0"
         os.environ["NVTE_UNFUSED_ATTN"] = "0"

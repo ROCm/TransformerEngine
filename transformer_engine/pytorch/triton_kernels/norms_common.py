@@ -12,7 +12,7 @@ from transformer_engine.pytorch.triton_kernels.common import (
     te_dtype_to_torch_dtype,
     te_dtype_to_triton_dtype,
 )
-from ..tensor.quantized_tensor import Quantizer
+from ..quantized_tensor import Quantizer
 from .utils import num_programs, block_size, use_blocked, make_ln_out
 from .common import get_fp8_max
 from .rmsnorm import (

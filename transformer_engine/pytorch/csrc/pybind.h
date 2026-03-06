@@ -110,7 +110,7 @@ constexpr std::array custom_types_converters = {
                     CreateQuantizer<MXFP8Quantizer>),
     std::make_tuple(IsFloat8BlockwiseQTensor, IsFloat8BlockwiseQuantizers,
                     NVTETensorFromFloat8BlockwiseQTensor, CreateQuantizer<Float8BlockQuantizer>),
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
 };
 #else
     std::make_tuple(IsNVFP4Tensor, IsNVFP4Quantizers, NVTETensorFromNVFP4Tensor,

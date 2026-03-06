@@ -451,7 +451,6 @@ def run_dpa_with_cp(
             tensors_to_deq[i] = tensor.dequantize()
         if not fp8_bwd:
             tensors[0], tensors[4] = tensors_to_deq
-    i = 0
     for tensor in tensors[4:]:
         assert torch.all(~torch.isnan(tensor))
         assert torch.all(~torch.isinf(tensor))
