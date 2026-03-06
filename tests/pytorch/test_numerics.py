@@ -10,6 +10,7 @@ from typing import Dict, List, Tuple, Optional
 import pytest
 import random
 
+from triton_kernels.test_common import get_tolerances
 import torch
 import torch.nn as nn
 from torch.nn import Parameter
@@ -185,7 +186,7 @@ if nvfp4_available:
 
 use_cutlass_grouped_gemm = [False]
 # Only enable cutlass grouped gemm on Hopper
-if torch.cuda.get_device_capability() == (9, 0):
+if torch.cuda.get_device_capability() == (9, 0) or IS_HIP_EXTENSION:
     use_cutlass_grouped_gemm.append(True)
 
 
@@ -1405,7 +1406,7 @@ def test_linear_accuracy_delay_wgrad_compute(dtype, bs, model, bias, fuse_wgrad_
 
     if IS_HIP_EXTENSION:
         if dtype not in (torch.float32,) and fuse_wgrad_accumulation and bias:
-            pytest.skip(f"Rocm does not support fused wgrad accumulation for {dtype}.")
+            pytest.skip(f"ROCm does not support fused wgrad accumulation for {dtype}.")
 
     te_linear_ref = Linear(
         config.hidden_size,
@@ -1703,7 +1704,7 @@ def test_layernorm_linear_accuracy_delay_wgrad_compute(
 ):
     if IS_HIP_EXTENSION:
         if dtype not in (torch.float32,) and fuse_wgrad_accumulation and bias:
-            pytest.skip(f"Rocm does not support fused wgrad accumulation for {dtype}.")
+            pytest.skip(f"ROCm does not support fused wgrad accumulation for {dtype}.")
     config = model_configs[model]
 
     ln_linear_ref = LayerNormLinear(
@@ -1917,7 +1918,7 @@ def test_layernorm_mlp_accuracy_delay_wgrad_compute(
 
     if IS_HIP_EXTENSION:
         if dtype not in (torch.float32,) and fuse_wgrad_accumulation and bias:
-            pytest.skip(f"Rocm does not support fused wgrad accumulation for {dtype}.")
+            pytest.skip(f"ROCm does not support fused wgrad accumulation for {dtype}.")
 
     ln_mlp = LayerNormMLP(
         hidden_size=config.hidden_size,
@@ -2045,6 +2046,7 @@ def _test_grouped_linear_accuracy(
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("delay_wgrad_compute", all_boolean)
+@pytest.mark.parametrize("use_triton", all_boolean)
 def test_grouped_linear_accuracy(
     dtype,
     num_gemms,
@@ -2055,14 +2057,18 @@ def test_grouped_linear_accuracy(
     fuse_wgrad_accumulation,
     bias,
     delay_wgrad_compute,
+    use_triton,
     parallel_mode=None,
     use_cutlass=False,
 ):
+
     fp8 = recipe is not None
+    if not IS_HIP_EXTENSION and use_triton:
+        pytest.skip("Triton grouped gemm is only supported on HIP.")
 
     if IS_HIP_EXTENSION:
         if dtype not in (torch.float32,) and fuse_wgrad_accumulation and not fp8:
-            pytest.skip(f"Rocm does not support fused wgrad accumulation for {dtype}.")
+            pytest.skip(f"ROCm does not support fused wgrad accumulation for {dtype}.")
     if fp8 and fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
 
@@ -2075,7 +2081,9 @@ def test_grouped_linear_accuracy(
             pytest.skip(
                 f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
             )
-
+    if use_triton:
+        os.environ["NVTE_USE_GROUPED_GEMM_TRITON"] = "1"
+        
     with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = GroupedLinear(
             num_gemms,
@@ -2138,16 +2146,25 @@ def test_grouped_linear_accuracy(
         delay_wgrad_compute,
     )
 
+    if use_triton:
+        os.environ.pop("NVTE_USE_GROUPED_GEMM_TRITON", None)
+
+    atol, rtol = 0, 0
+    if use_cutlass:
+        atol, rtol = 1e-3, 1e-3
+        if IS_HIP_EXTENSION:
+            atol, rtol = 1e-3, 8e-3
+    if use_triton:
+        atol, rtol = get_tolerances(dtype)
+        if dtype == torch.float32:
+            atol = 2.6e-6
+            rtol = 5e-2
     for o, o_ref in zip(outputs, outputs_ref):
-        if use_cutlass:
-            torch.testing.assert_close(o, o_ref, rtol=1e-3, atol=1e-3)
-        else:
-            # cuBLAS implementation should be bit-wise match
-            torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+        torch.testing.assert_close(o, o_ref, rtol=rtol, atol=atol)
 
 
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() != (9, 0),
+    torch.cuda.get_device_capability() != (9, 0) and not IS_HIP_EXTENSION,
     reason="Only enable CUTLASS grouped gemm on Hopper",
 )
 @pytest.mark.parametrize("dtype", param_types, ids=str)
@@ -2175,6 +2192,7 @@ def test_grouped_linear_accuracy_cutlass(
         fuse_wgrad_accumulation,
         False,
         delay_wgrad_compute,
+        False,
         None,
         use_cutlass=True,
     )
@@ -2298,6 +2316,7 @@ def test_grouped_linear_accuracy_single_gemm(recipe):
         fuse_wgrad_accumulation=True,
         bias=True,
         delay_wgrad_compute=False,
+        use_triton=False,
     )
 
 

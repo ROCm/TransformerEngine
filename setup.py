@@ -259,7 +259,10 @@ if __name__ == "__main__":
         install_requires, test_requires = setup_requirements()
         ext_modules = [setup_common_extension()]
         cmdclass = {"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist}
-        package_data = {"": ["VERSION.txt"]}
+        package_data = {
+            "": ["VERSION.txt"],
+            "transformer_engine.pytorch.triton_kernels.gmm": ["configs/*.json"],
+        }
         include_package_data = True
         extras_require = {"test": test_requires}
 

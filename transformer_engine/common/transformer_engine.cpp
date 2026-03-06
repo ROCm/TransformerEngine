@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2023-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -102,8 +102,13 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
     }
   } else {
     if (t.scaling_mode == NVTE_MXFP8_1D_SCALING) {
+#ifndef __HIP_PLATFORM_AMD__
       // Need (4, 128) alignment even for e8 scaling factor
       auto block_alignment = std::vector<size_t>{128ul, 4ul};
+#else
+      // HIP does not use scale padding
+      auto block_alignment = std::vector<size_t>{1ul, 1ul};
+#endif
       size_t expected_x, expected_y, alignment;
       const size_t block_size_rowwise = 32;
       const size_t block_size_colwise = 32;

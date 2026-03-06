@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: MIT
 
 cmake_minimum_required(VERSION 3.21)
@@ -8,19 +8,16 @@ project(aotriton LANGUAGES CXX)
 # The AOTriton C++ runtime will be built from {TE}/3rdparty/aotriton
 # Hence there is no need to add multiple ROCM version here
 
+if(DEFINED ENV{AOTRITON_PATH})
+    set(AOTRITON_PATH $ENV{AOTRITON_PATH})
+endif()
+
 set(__AOTRITON_INSTALL_DIR "${CMAKE_CURRENT_BINARY_DIR}/aotriton")
 set(__AOTRITON_SUFFIX "_TEprivate")
 
 if(NOT DEFINED AOTRITON_PATH)
-    # If AOTRITON_PATH is not provided, we proceed to build the runtime
-    # ourselves and either build or download the GPU kernels
-    if(USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS)
-        set(AOTRITON_NOIMAGE_MODE OFF)
-    else()
-        set(AOTRITON_NOIMAGE_MODE ON)
-    endif()
 
-    set(__AOTRITON_VER "0.11.1b")
+    set(__AOTRITON_VER "0.11.2b")
     set(__AOTRITON_IMAGE_LIST
         "amd-gfx942"
         "amd-gfx950"
@@ -66,8 +63,7 @@ if(NOT DEFINED AOTRITON_PATH)
 
     # Build the AOTriton runtime from source with custom suffix to avoid
     # potential conflict with libaotriton as provided by PyTorch
-    function(aotriton_build_from_source noimage)
-        message(STATUS "No-image mode: ${noimage}.")
+    function(aotriton_build_from_source)
         get_git_commit(${TE}/3rdparty/aotriton AOTRITON_SHA)
         ExternalProject_Add(aotriton_external
             LIST_SEPARATOR ","
@@ -78,7 +74,7 @@ if(NOT DEFINED AOTRITON_PATH)
             -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
             -DAOTRITON_NO_PYTHON=ON
             -DAOTRITON_NAME_SUFFIX=${__AOTRITON_SUFFIX}
-            -DAOTRITON_NOIMAGE_MODE=${noimage}
+            -DAOTRITON_NOIMAGE_MODE=ON
             -DTE_AOTRITON_COMMIT_SHA1=${AOTRITON_SHA}
             -DCMAKE_PROJECT_INCLUDE=${CMAKE_CURRENT_LIST_DIR}/aotriton_custom.cmake
             BUILD_BYPRODUCTS "${__AOTRITON_INSTALL_DIR}/lib/libaotriton${__AOTRITON_SUFFIX}_v2.so"
@@ -97,7 +93,7 @@ if(NOT DEFINED AOTRITON_PATH)
     add_library(aotriton INTERFACE)
     message(STATUS "Building AOTriton from source.")
     string(REPLACE ";" "," ARCH_LIST_COMMA_STR "${CMAKE_HIP_ARCHITECTURES}")
-    aotriton_build_from_source(${AOTRITON_NOIMAGE_MODE})
+    aotriton_build_from_source()
 
     # Download GPU kernels if needed
     if(NOT USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS)
@@ -121,8 +117,9 @@ if(NOT DEFINED AOTRITON_PATH)
 else()
     # Use aotriton built during initial TE building/installation
     # When only need rebuild TE library itself
+    message(STATUS "Using existing AOTriton lib at $ENV{AOTRITON_PATH}")
     unset(AOTRITON_LIB CACHE)
-    find_library(AOTRITON_LIB NAMES aotriton aotriton${__AOTRITON_SUFFIX}_v2 PATHS ${AOTRITON_PATH}/lib REQUIRED NO_DEFAULT_PATH)
+    find_library(AOTRITON_LIB NAMES aotriton aotriton${__AOTRITON_SUFFIX}_v2 PATHS ${AOTRITON_PATH} REQUIRED NO_DEFAULT_PATH)
     add_library( aotriton SHARED IMPORTED )
     set_target_properties( aotriton PROPERTIES IMPORTED_LOCATION ${AOTRITON_LIB} )
     target_include_directories(aotriton INTERFACE ${AOTRITON_PATH}/include)

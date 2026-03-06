@@ -30,6 +30,8 @@
 #include "./config.h"
 #ifndef __HIP_PLATFORM_AMD__
 #include "./cutlass_grouped_gemm.cuh"
+#else
+#include "ck_grouped_gemm.h"
 #endif
 
 #ifndef __HIP_PLATFORM_AMD__
@@ -1077,11 +1079,12 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   NVTE_API_CALL(nvte_multi_tensor_gemm);
 
 #ifdef __HIP_PLATFORM_AMD__
-    multi_stream_cublas_gemm(A, B, D, bias, pre_gelu_out, num_gemms, transa, transb, grad,
-                             workspace, accumulate, use_split_accumulator, math_sm_count, stream);
+  if (num_gemms <= 0)
+    return;
 #else
   const int current_device = transformer_engine::cuda::current_device();
   const bool is_hopper = (transformer_engine::cuda::sm_arch(current_device) == 90);
+#endif
   const bool use_cutlass = transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPED_GEMM", false);
   const bool warn_fallback =
       transformer_engine::getenv<bool>("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", false);
@@ -1091,8 +1094,13 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
                              workspace, accumulate, use_split_accumulator, math_sm_count, stream);
   };
 
+#ifdef __HIP_PLATFORM_AMD__
+  // FIXME: The accumulate path is currently disabled due to instability on MI325.
+  if (!use_cutlass || num_gemms == 1 || accumulate == true) {
+#else
   // Currently only support cutlass group gemm on Hopper Arch
   if (!(is_hopper && use_cutlass)) {
+#endif
     cublas_path();
     return;
   }
@@ -1105,6 +1113,7 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     return true;
   };
 
+#ifndef __HIP_PLATFORM_AMD__
   auto all_groups_uniform_k128 = [&](const NVTETensor *p, bool trans) -> bool {
     int64_t ref_k = -1;
     for (size_t i = 0; i < num_gemms; i++) {
@@ -1121,17 +1130,27 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
 
     return true;
   };
+#endif
 
   auto is_supported_dtype = [&]() -> bool {
     auto *inputA = transformer_engine::convertNVTETensorCheck(A[0]);
     auto *inputB = transformer_engine::convertNVTETensorCheck(B[0]);
     auto *OutputD = transformer_engine::convertNVTETensorCheck(D[0]);
+#ifdef __HIP_PLATFORM_AMD__
+    auto A_dt = inputA->data.dtype;
+    auto B_dt = inputB->data.dtype;
+    auto D_dt = OutputD->data.dtype;
+    return (A_dt == B_dt) && (A_dt == D_dt) &&
+           (A_dt == transformer_engine::DType::kFloat16 ||
+            A_dt == transformer_engine::DType::kBFloat16);
+#else
     auto A_type = get_cuda_dtype(inputA->data.dtype);
     auto B_type = get_cuda_dtype(inputB->data.dtype);
     auto D_type = get_cuda_dtype(OutputD->data.dtype);
 
     return (A_type == B_type) && (A_type == D_type) &&
            ((A_type == CUDA_R_16BF) || (A_type == CUDA_R_16F));
+#endif
   };
 
   // CUTLASS Grouped GEMM fast path (SM90/TMA)
@@ -1144,14 +1163,23 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   //
   // Otherwise, fall back to cuBLAS.
   if (is_empty_arr(bias) && is_empty_arr(pre_gelu_out) && is_supported_dtype() &&
+#ifdef __HIP_PLATFORM_AMD__
+      true)                               {
+    if (!ck_tile_grouped_gemm(A, B, D, num_gemms, transa, transb, workspace, accumulate, stream)) {
+        if (warn_fallback) {
+          NVTE_WARN("Fallback to cuBLAS grouped GEMM.");
+        }
+        cublas_path();
+    }
+#else
       all_groups_uniform_k128(B, transb)) {
     cutlass_grouped_gemm(A, B, D, num_gemms, transa, transb, grad, workspace, accumulate,
                          current_device, math_sm_count, stream);
+#endif
   } else {
     if (warn_fallback) {
       NVTE_WARN("Fallback to cuBLAS grouped GEMM.");
     }
     cublas_path();
   }
-#endif  // __HIP_PLATFORM_AMD__
 }

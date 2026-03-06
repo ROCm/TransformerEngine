@@ -61,7 +61,7 @@ Execute the following commands to install ROCm Transformer Engine from source on
 
   cd TransformerEngine
   export NVTE_FRAMEWORK=pytorch,jax #optionally set framework, currently only support pytorch and jax; if not set will try to detect installed frameworks
-  export NVTE_ROCM_ARCH=gfx942,gfx950 # gfx942 for support of MI300/MI325, and gfx950 for support of MI350
+  export NVTE_ROCM_ARCH="gfx942;gfx950" # gfx942 for support of MI300/MI325, and gfx950 for support of MI350
 
   # Build Platform Selection (optional)
   # Note: Useful when both ROCm and CUDA platforms are present in the Docker
@@ -353,6 +353,19 @@ If needed (e.g., for debugging or performance comparisons), you can restore the
 legacy single-stage atomic kernel by setting:
 
     NVTE_USE_ATOMIC_AMAX=1
+
+Grouped GEMM using CK_Tile
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Transformer Engine provides a CK_Tile–based implementation of grouped GEMM
+as an alternative to the hipBlasLt-based default grouped GEMM implementation.
+This will provide performance improvements in most supported cases.
+
+You can enable the CK_Tile-based backend using the same environment variables as in the
+upstream CUTLASS implementation:
+
+    NVTE_USE_CUTLASS_GROUPED_GEMM=1             # Enable CK_Tile-based grouped GEMM
+    NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK=1   # Print a warning if falling back to hipBlasLt backend (e.g., due to an unsupported config)
 
 
 Transformer Engine

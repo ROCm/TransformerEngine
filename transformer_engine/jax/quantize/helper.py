@@ -120,6 +120,8 @@ def _check_block_scaling_fp8_support(gpu_arch) -> Tuple[bool, str]:
         A tuple of (bool, str) indicating support and any error message
     """
     if is_hip_extension():
+        if gpu_arch >= 95:
+            return True, ""
         return False, "FP8 block scaled gemm not yet supported for ROCm"
     if gpu_arch < 99:  # pre-blackwell
         return False, "Device compute capability 9.9 or higher required for MXFP8 execution."

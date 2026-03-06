@@ -213,7 +213,8 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
           const e8m0_t biased_exponent =
               ptx::float_to_e8m0(subwarp_amax * Quantized_Limits<OType>::max_norm_rcp);
           // Only single thread writes the computed scaling factor
-          if (tid_rowwise_X % THREADS_PER_SCALE_X_ROWWISE == 0) {
+          const bool col_out_of_bounds = dbias_rowwise_offset_X >= cols;
+          if (tid_rowwise_X % THREADS_PER_SCALE_X_ROWWISE == 0 && !(row_out_of_bounds || col_out_of_bounds)) {
             const int global_scales_offset_Y =
                 iteration_scale_rowwise_offset_Y + stage_offset_Y + tid_rowwise_Y;
             const int global_scales_offset_X =
@@ -277,7 +278,10 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
         const int global_scales_offset_X = scales_colwise_chunk_offset_X + tid_colwise_X;
         const int scale_idx =
             global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
-        scales_colwise[scale_idx] = biased_exponent;
+        const bool row_out_of_bounds = row_base >= rows;
+        if (!(row_out_of_bounds || col_out_of_bounds)) {
+          scales_colwise[scale_idx] = biased_exponent;
+        }
 
         const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
 #pragma unroll

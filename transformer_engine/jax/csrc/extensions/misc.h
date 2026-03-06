@@ -107,8 +107,20 @@ static NVTEScalingMode get_nvte_scaling_mode(const JAXX_Scaling_Mode &mode) {
 struct BLOCK_SIZE {
   size_t x;
   size_t y;
+<<<<<<< HEAD
   constexpr BLOCK_SIZE(int _x, int _y) : x(_x), y(_y) {}
 };
+=======
+} MXFP8_BLOCK_SIZE{1, 32};
+constexpr struct Alignment {
+  size_t x;
+  size_t y;
+#ifndef __HIP_PLATFORM_AMD__
+} MXFP8_ALIGNMENT{128, 4};
+#else
+} MXFP8_ALIGNMENT{1, 1};
+#endif
+>>>>>>> origin/dev
 
 constexpr BLOCK_SIZE MXFP8_BLOCK_SIZE{1, 32};
 constexpr BLOCK_SIZE NVFP4_BLOCK_SIZE{1, 16};
