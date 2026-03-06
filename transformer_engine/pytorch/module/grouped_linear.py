@@ -146,13 +146,10 @@ class _GroupedLinear(torch.autograd.Function):
             inputmats = [cast_if_needed(inp_view, activation_dtype)]
         else:
             inputmats = torch.split(cast_if_needed(inp_view, activation_dtype), m_splits)
-<<<<<<< HEAD
 
         if cpu_offloading:
             start_offload(*inputmats)
 
-=======
->>>>>>> origin/dev
         # Initialize weights
         weights_fp8: list
         if fp8:
@@ -392,17 +389,9 @@ class _GroupedLinear(torch.autograd.Function):
                     dtype=ctx.activation_dtype,
                     device=ctx.device,
                 )
-<<<<<<< HEAD
-                # Make sure weights are available in column-wise format
-                # for dgrad computation.
-                for weight in weights:
-                    if isinstance(weight, QuantizedTensorStorage):
-                        weight.update_usage(columnwise_usage=True)
-                general_grouped_gemm(
-=======
 
                 for weight, quantizer in zip(weights, ctx.weight_quantizers):
-                    if quantizer is not None and isinstance(weight, QuantizedTensorBase):
+                    if quantizer is not None and isinstance(weight, QuantizedTensorStorage):
                         weight.update_usage(
                             rowwise_usage=quantizer.rowwise_usage,
                             columnwise_usage=quantizer.columnwise_usage,
@@ -414,7 +403,6 @@ class _GroupedLinear(torch.autograd.Function):
                     general_grouped_gemm_func = general_grouped_gemm
                     kwargs = {}
                 general_grouped_gemm_func(
->>>>>>> origin/dev
                     weights,
                     grad_output,
                     [dgrad],

@@ -350,27 +350,15 @@ target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
 if (USE_CUDA)
-<<<<<<< HEAD
 # CUTLASS kernels require SM90a and cause hang in debug build
 set_property(
   SOURCE gemm/cutlass_grouped_gemm.cu
   APPEND
   PROPERTY
   COMPILE_OPTIONS "--generate-code=arch=compute_90a,code=sm_90a;-g0")
-=======
-if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
-  set_source_files_properties(
-    "gemm/cutlass_grouped_gemm.cu"
-    PROPERTIES
-    COMPILE_FLAGS
-    "-gencode arch=compute_90a,code=sm_90a")
-else()
-  message(FATAL_ERROR "cutlass gemm/cutlass_grouped_gemm.cu kernel required sm 90a")
-endif()
 else()
   set(CK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/aiter/3rdparty/composable_kernel)
   target_include_directories(transformer_engine PRIVATE ${CK_ROOT}/include)
->>>>>>> origin/dev
 endif() #USE_CUDA
 
 # Configure dependencies

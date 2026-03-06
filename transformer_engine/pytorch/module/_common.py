@@ -26,6 +26,7 @@ if IS_HIP_EXTENSION:
         te_rmsnorm_fwd_triton,
         te_rmsnorm_bwd_triton
     )
+    import os
 
 def _get_normalization_func(normalization: str, forward: bool):
     use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ) and IS_HIP_EXTENSION

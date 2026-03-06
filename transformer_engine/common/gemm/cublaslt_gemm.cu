@@ -27,6 +27,7 @@
 #include "../util/handle_manager.h"
 #include "../util/logging.h"
 #include "../util/multi_stream.h"
+#include "../util/system.h"
 #include "./config.h"
 #ifndef __HIP_PLATFORM_AMD__
 #include "./cutlass_grouped_gemm.cuh"
