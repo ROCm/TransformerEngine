@@ -34,14 +34,8 @@ enum NVTEDType {
   kNVTEFloat8E4M3 = 7,  /*!< 8-bit float (E4M3) */
   kNVTEFloat8E5M2 = 8,  /*!< 8-bit float (E5M2) */
   kNVTEFloat8E8M0 = 9,  /*!< 8-bit float (E8M0) */
-#ifndef __HIP_PLATFORM_AMD__
   kNVTEFloat4E2M1 = 10, /*!< 4-bit float (E2M1) */
   kNVTENumTypes         /*!< Number of supported types */
-#else
-  //switch the order since rocm platform does not support e2m1
-  kNVTENumTypes = 10,   /*!< Number of supported types */
-  kNVTEFloat4E2M1 = 11  /*!< 4-bit float (E2M1) */
-#endif // #ifndef __HIP_PLATFORM_AMD__
 };
 
 /*! \struct NVTEShape
