@@ -12,6 +12,30 @@ set(__AITER_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/aiter")
 set(__AITER_TEST_DIR "${__AITER_SOURCE_DIR}/op_tests/cpp/mha")
 set(__CK_SOURCE_DIR "${__AITER_SOURCE_DIR}/3rdparty/composable_kernel")
 
+if(NOT Python_EXECUTABLE)
+  find_package(Python COMPONENTS Interpreter QUIET)
+endif()
+
+if(Python_EXECUTABLE)
+  execute_process(
+    COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/check_aiter_mha_args.py --mode both --te-dir "${CMAKE_CURRENT_LIST_DIR}/../../.."
+    RESULT_VARIABLE AITER_ARG_CHECK_RESULT
+    OUTPUT_VARIABLE AITER_ARG_CHECK_OUTPUT
+    ERROR_VARIABLE AITER_ARG_CHECK_ERROR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_STRIP_TRAILING_WHITESPACE
+  )
+
+  if(NOT AITER_ARG_CHECK_RESULT EQUAL 0)
+    message(FATAL_ERROR
+            "AITER API validation failed in check_aiter_mha_args.py.\n"
+            "${AITER_ARG_CHECK_OUTPUT}\n${AITER_ARG_CHECK_ERROR}")
+  endif()
+  message(STATUS "AITER API validation passed via check_aiter_mha_args.py")
+else()
+  message(WARNING "Python interpreter not found; skipping AITER API validation.")
+endif()
+
 # so far, there are only gfx942 and gfx950 v3 kernels
 SET(V3_ASM_ARCHS_SUPPORTED "gfx942;gfx950")
 
@@ -50,31 +74,6 @@ else()
     # If not downloaded, Fallback: Build from source
     if(NOT AITER_PREBUILT_DOWNLOAD_SUCCESS)
       message(STATUS " [AITER-PREBUILT] Building aiter from source.")
-
-      if(NOT Python_EXECUTABLE)
-        find_package(Python COMPONENTS Interpreter QUIET)
-      endif()
-
-      if(Python_EXECUTABLE)
-        execute_process(
-          COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/check_aiter_mha_args.py --mode both --te-dir "${CMAKE_CURRENT_LIST_DIR}/../../.."
-          RESULT_VARIABLE AITER_ARG_CHECK_RESULT
-          OUTPUT_VARIABLE AITER_ARG_CHECK_OUTPUT
-          ERROR_VARIABLE AITER_ARG_CHECK_ERROR
-          OUTPUT_STRIP_TRAILING_WHITESPACE
-          ERROR_STRIP_TRAILING_WHITESPACE
-        )
-
-        if(NOT AITER_ARG_CHECK_RESULT EQUAL 0)
-          message(FATAL_ERROR
-                  "AITER API validation failed in check_aiter_mha_args.py.\n"
-                  "${AITER_ARG_CHECK_OUTPUT}\n${AITER_ARG_CHECK_ERROR}")
-        endif()
-        message(STATUS "AITER API validation passed via check_aiter_mha_args.py")
-      else()
-        message(WARNING "Python interpreter not found; skipping AITER API validation check_aiter_mha_args.py")
-      endif()
-
       execute_process(
         COMMAND bash ${CMAKE_CURRENT_LIST_DIR}/aiter_build.sh
                 --aiter-dir ${__AITER_SOURCE_DIR}
