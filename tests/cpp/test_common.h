@@ -21,7 +21,7 @@
 #include <cuda_fp4.h>
 #endif //FP4_TYPE_SUPPORTED
 #else
-#define FP4_TYPE_SUPPORTED __gfx950__
+#define FP4_TYPE_SUPPORTED (true)
 #include <hip/hip_bfloat16.h>
 #include "amd_detail/hip_float8.h"
 #include <hip/hip_fp4.h>
