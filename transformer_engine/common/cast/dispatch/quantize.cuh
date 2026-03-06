@@ -251,7 +251,6 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
           stream);
       break;
     }
-#ifndef __HIP_PLATFORM_AMD__
     case NVTE_NVFP4_1D_SCALING: {
       NVTE_CHECK((!IS_DBIAS && !IS_DACT),
                  "IS_DBIAS and IS_DACT are not supported by BWD NVTE_NVFP4_1D_SCALING");
@@ -269,6 +268,7 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
                                   (cols % 32 == 0) && output_tensor->has_data();
 
       // Launch NVFP4 quantize kernel
+#ifndef __HIP_PLATFORM_AMD__
       if (use_optimized_kernel) {
         if (quant_config_cpp.nvfp4_2d_quantization) {
           nvfp4::quantize_transpose</*use_2d_quantization=*/true>(
@@ -278,6 +278,7 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
               *grad_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
         }
       } else {
+#endif
         auto &global_amax = (output_tensor->amax.dptr != nullptr) ? output_tensor->amax
                                                                   : output_tensor->columnwise_amax;
         quantize_transpose_vector_blockwise_fp4(
@@ -292,9 +293,12 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
             /*noop_tensor=*/noop_tensor->data, /*stream=*/stream);
+#ifndef __HIP_PLATFORM_AMD__
       }
+#endif
       break;
     }
+#ifndef __HIP_PLATFORM_AMD__
     case NVTE_BLOCK_SCALING_2D: {
       // TODO(kwyss): IS_BIAS, IS_DACT, ParamOP, OP parameters support.
       NVTE_CHECK((!IS_DBIAS && !IS_DACT),
