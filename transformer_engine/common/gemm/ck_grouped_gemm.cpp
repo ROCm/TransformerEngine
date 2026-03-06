@@ -131,7 +131,8 @@ static bool run_grouped_impl(const NVTETensor* A_use,
 
   const size_t needed = Kernel::GetWorkSpaceSize(group_num);
   if (!workspace || workspace_bytes < needed) {
-    NVTE_ERROR("ck_tile_grouped_gemm: insufficient workspace. Needed bytes=", needed);
+    NVTE_WARN("ck_tile_grouped_gemm: insufficient workspace for CK path. Needed bytes=", needed,
+              ", available bytes=", workspace_bytes, ". Falling back.");
     return false;
   }
 
@@ -197,7 +198,8 @@ static bool run_grouped_impl(const NVTETensor* A_use,
   const dim3 grids = Kernel::GridSize(descs);
   auto kargs = Kernel::MakeKargs(descs);
   if (!Kernel::IsSupportedArgument(kargs)) {
-    NVTE_ERROR("ck_tile_grouped_gemm: CK_Tile kernel arguments not supported for this config.");
+    NVTE_WARN("ck_tile_grouped_gemm: CK_Tile kernel arguments not supported for this config. "
+              "Falling back.");
     return false;
   }
 
@@ -234,6 +236,12 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
 {
   if (group_num <= 0)
     return true;
+
+  // The current CK grouped GEMM path uses CShuffleEpilogueProblem without an explicit
+  // memory-operation template argument, so D accumulation semantics are not guaranteed.
+  // Fall back for accumulate=true to preserve numerics.
+  if (accumulate)
+    return false;
 
   using namespace transformer_engine;
   using namespace transformer_engine::grouped_gemm;
