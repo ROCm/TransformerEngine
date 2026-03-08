@@ -6,15 +6,19 @@
 # Helper to build aiter libs
 # Options:
 #   --aiter-dir <path>            Path to aiter root (required)
-#   --aiter-test-dir <path>       Path to aiter test dir containing compile.py (required)
+#   --aiter-test-dir <path>       Path to aiter test dir containing compile.py, default: <aiter-dir>/op_tests/cpp/mha
+#   --install-dir <path>          Path to install dir for built libs
 #   --gpu-archs <list>            GPU arches (required)
 #   --ck-tile-bf16 <val>          CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT, default: 3
+#   --verbose                     Enable verbose logging
 set -euo pipefail
 
 AITER_DIR=""
 AITER_TEST_DIR=""
 GPU_ARCHS_VAL=""
 CK_TILE_BF16_DEFAULT="${CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT:-3}"
+AITER_LOG_MORE=0
+INSTALL_DIR=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -22,23 +26,39 @@ while [[ $# -gt 0 ]]; do
       AITER_DIR="$2"; shift 2;;
     --aiter-test-dir)
       AITER_TEST_DIR="$2"; shift 2;;
+    --install-dir)
+      INSTALL_DIR="$2"; shift 2;;
     --gpu-archs)
       GPU_ARCHS_VAL="$2"; shift 2;;
     --ck-tile-bf16)
       CK_TILE_BF16_DEFAULT="$2"; shift 2;;
+    --verbose)
+      AITER_LOG_MORE=1; shift;;
     *)
       echo "Unknown option: $1" >&2; exit 1;;
   esac
 done
 
-if [[ -z "${AITER_DIR}" || -z "${AITER_TEST_DIR}" || -z "${GPU_ARCHS_VAL}" ]]; then
-  echo "[AITER-PREBUILT] --aiter-dir, --aiter-test-dir, and --gpu-archs are required." >&2
+if [ -z "${AITER_DIR}" -o -z "${GPU_ARCHS_VAL}" ]; then
+  echo "[AITER-BUILD] --aiter-dir, --aiter-test-dir, and --gpu-archs are required." >&2
   exit 1
 fi
 
+if [ -z "${AITER_TEST_DIR}" ]; then
+  AITER_TEST_DIR="${AITER_DIR}/op_tests/cpp/mha"
+fi
+
+if [ ${AITER_LOG_MORE} -eq 1 ]; then
+  echo "[AITER-BUILD] AITER_DIR: ${AITER_DIR} TEST_DIR: ${AITER_TEST_DIR} GPU_ARCHS: ${GPU_ARCHS_VAL} CK_TILE_BF16_DEFAULT: ${CK_TILE_BF16_DEFAULT} INSTALL_DIR: ${INSTALL_DIR}"
+fi
+
 rm -rf "${AITER_DIR}/aiter/jit/build"
-AITER_LOG_MORE=1 \
+AITER_LOG_MORE=${AITER_LOG_MORE} \
 CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT="${CK_TILE_BF16_DEFAULT}" \
 GPU_ARCHS="${GPU_ARCHS_VAL}" \
 python3 "${AITER_TEST_DIR}/compile.py"
 
+if [ -n "${INSTALL_DIR}" ]; then
+  mkdir -p "${INSTALL_DIR}"
+  cp "${AITER_TEST_DIR}/libmha_fwd.so" "${AITER_TEST_DIR}/libmha_bwd.so" "${INSTALL_DIR}/"
+fi

@@ -9,7 +9,6 @@ project(ck_fused_attn LANGUAGES HIP CXX)
 set(AITER_MHA_INSTALL_PREFIX "transformer_engine" CACHE STRING "aiter mha shared lib install prefix in TE")
 
 set(__AITER_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/aiter")
-set(__AITER_TEST_DIR "${__AITER_SOURCE_DIR}/op_tests/cpp/mha")
 set(__CK_SOURCE_DIR "${__AITER_SOURCE_DIR}/3rdparty/composable_kernel")
 
 # so far, there are only gfx942 and gfx950 v3 kernels
@@ -32,37 +31,28 @@ message(STATUS "AITER V3_ASM_ARCHS: ${V3_ASM_ARCHS}")
 list(JOIN V3_ASM_ARCHS ";" V3_ASM_ARCHS_STR)
 
 if(DEFINED AITER_MHA_PATH)
-  message(STATUS "[AITER-PREBUILT] Using AITER_MHA_PATH=${AITER_MHA_PATH}")
+  message(STATUS "[AITER-BUILD] Using AITER_MHA_PATH=${AITER_MHA_PATH}")
   # use pre-built libmha_fwd.so libmha_bwd.so
   set(__AITER_MHA_PATH ${AITER_MHA_PATH})
 else()
-  set(AITER_CACHE_VALID FALSE)
-  set(AITER_PREBUILT_DOWNLOAD_SUCCESS FALSE)
+  set(__AITER_MHA_PATH "")
   include("${CMAKE_CURRENT_LIST_DIR}/aiter_prebuilt.cmake")
+  get_prebuilt_aiter(__AITER_MHA_PATH)
 
-  # If cached path already exists and is valid
-  is_aiter_cache_valid(AITER_CACHE_VALID)
-
-  if(NOT AITER_CACHE_VALID)
-    # Try downloading prebuilt files if NVTE_AITER_PREBUILT_BASE_URL is set.
-    download_aiter_prebuilt(AITER_PREBUILT_DOWNLOAD_SUCCESS)
-    
-    # If not downloaded, Fallback: Build from source
-    if(NOT AITER_PREBUILT_DOWNLOAD_SUCCESS)
-      message(STATUS " [AITER-PREBUILT] Building aiter from source.")
-      execute_process(
-        COMMAND bash ${CMAKE_CURRENT_LIST_DIR}/aiter_build.sh
-                --aiter-dir ${__AITER_SOURCE_DIR}
-                --aiter-test-dir ${__AITER_TEST_DIR}
-                --gpu-archs "${V3_ASM_ARCHS_STR}"
-                --ck-tile-bf16 ${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT}
-      )
-      # libmha_fwd.so and libmha_bwd.so will be under 3rdparty/aiter/op_tests/cpp/mha 
-      cache_local_aiter_build(${__AITER_TEST_DIR})
-    endif()
+  if(__AITER_MHA_PATH STREQUAL "")
+    # If not available, fallback: Build from source
+    message(STATUS "[AITER-BUILD] Building aiter from source.")
+    get_default_aiter_cache_dir(__AITER_MHA_PATH)
+    execute_process(
+      COMMAND bash ${CMAKE_CURRENT_LIST_DIR}/aiter_build.sh
+              --aiter-dir ${__AITER_SOURCE_DIR}
+              --install-dir ${__AITER_MHA_PATH}
+              --gpu-archs "${V3_ASM_ARCHS_STR}"
+              --ck-tile-bf16 ${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT}
+    )
+  else()
+    message(STATUS "[AITER-BUILD] Using pre-built AITER from ${__AITER_MHA_PATH}")
   endif()
-  set(__AITER_MHA_PATH "${EXTRACT_DIR}")
-  message(STATUS "[AITER-PREBUILT] Using __AITER_MHA_PATH=${__AITER_MHA_PATH}")
 endif()
 
 set(ck_fused_attn_SOURCES)
