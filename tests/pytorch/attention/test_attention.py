@@ -148,7 +148,6 @@ def test_gqa_mla_thd():
     test_dot_product_attention(dtype, {"layout_1": config}, "layout_1", False, False, qkv_layout, False, True)
 
 
-
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
 def test_dot_product_mem_calc():
     """Non-regression test for memory workspace calculation integer overflow issue."""

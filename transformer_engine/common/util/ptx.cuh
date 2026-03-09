@@ -536,7 +536,7 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_stochastic_roun
 __device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_rn(const uint64_t in_4x,
                                                                     const float2 scale,
                                                                     const uint32_t rbits) {
-#ifndef __HIP_PLATFORM_AMD__ 
+#ifndef __HIP_PLATFORM_AMD__
   constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
 #endif
   uint32_t out_4x = 0;  // Only need 16 bit. Using 32 bit container for packing.
