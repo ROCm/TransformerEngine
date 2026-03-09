@@ -259,7 +259,8 @@ else()
     list(APPEND transformer_engine_cuda_sources
         fused_attn_rocm/fused_attn_aotriton.cpp
         fused_attn_rocm/fused_attn_ck.cpp
-        fused_attn_rocm/utils.cpp)
+        fused_attn_rocm/utils.cpp
+        transpose/quantize_transpose_vector_blockwise_fp4.cu)
 endif()
 
 
