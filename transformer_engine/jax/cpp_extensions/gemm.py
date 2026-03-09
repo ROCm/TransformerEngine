@@ -20,8 +20,6 @@ from jax import dtypes
 from jax.sharding import NamedSharding, PartitionSpec
 from jax.experimental.custom_partitioning import SdyShardingRule
 
-from ..util import is_hip_extension, get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
-
 from transformer_engine_jax import (
     get_num_compute_streams,
     JAXX_Collective_Op,
@@ -29,14 +27,11 @@ from transformer_engine_jax import (
     #initialize_cgemm_communicator,
     #get_cgemm_num_max_streams,
 )
-if not is_hip_extension():
-    from transformer_engine_jax import (
-        initialize_cgemm_communicator,
-        get_cgemm_num_max_streams,
-    )
 
 from .base import BasePrimitive, register_primitive
 from .quantization import grouped_quantize
+
+from ..util import is_hip_extension, get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
 
 from ..quantize import (
     AbstractBaseTensor,
