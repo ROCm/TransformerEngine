@@ -242,6 +242,10 @@ class Tensor {
     }
   }
 
+  void *amax_dptr() const {
+    return tensor_.amax();
+  }
+
   float scale() const {
     if(scale_cpu_data_) {
       NVTE_CHECK((tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING)
@@ -255,7 +259,7 @@ class Tensor {
   }
 
   template <typename T>
-  T *rowwise_cpu_scale_inv_ptr(){
+  T *rowwise_cpu_scale_inv_ptr() const {
     if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING){
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
     } else if (tensor_.scaling_mode() == NVTE_BLOCK_SCALING_1D || tensor_.scaling_mode() == NVTE_BLOCK_SCALING_2D) {
@@ -270,7 +274,7 @@ class Tensor {
   }
 
   template <typename T>
-  T *columnwise_cpu_scale_inv_ptr(){
+  T *columnwise_cpu_scale_inv_ptr() const {
     if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING){
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
     } else if (tensor_.scaling_mode() == NVTE_BLOCK_SCALING_1D || tensor_.scaling_mode() == NVTE_BLOCK_SCALING_2D) {
@@ -284,7 +288,7 @@ class Tensor {
     return reinterpret_cast<T*>(columnwise_scale_inv_cpu_data_.get());
   }
 
-  float rowwise_scale_inv(){
+  float rowwise_scale_inv() const {
     if(rowwise_scale_inv_cpu_data_) {
       float scale_inv = rowwise_cpu_scale_inv_ptr<float>()[0];
       return scale_inv;
@@ -313,6 +317,16 @@ class Tensor {
 
   std::mt19937& gen() { return gen_; }
 
+  void *rowwise_scale_inv_dptr() const {
+    NVTE_CHECK(rowwise_, "Tensor does not have rowwise data!");
+    return tensor_.scale_inv();  // rowwise scale_inv backing storage
+  }
+
+  void *columnwise_scale_inv_dptr() const {
+    NVTE_CHECK(columnwise_, "Tensor does not have columnwise data!");
+    return tensor_.get_columnwise_scale_inv().data_ptr;
+  }
+
  private:
   TensorWrapper tensor_;
   std::unique_ptr<unsigned char[]> cpu_data_rowwise_;
@@ -331,10 +345,17 @@ constexpr uint32_t FP32_EXPONENT_BIAS = 127;
 constexpr uint32_t FP32_MANTISSA_BITS = 23;
 
 // [128,4] rowwise and [4,128] colwise alignment requirement
+#ifdef __HIP_PLATFORM_AMD__
+constexpr size_t scale_tensor_alignment_X_rowwise = 1;
+constexpr size_t scale_tensor_alignment_Y_rowwise = 1;
+constexpr size_t scale_tensor_alignment_X_colwise = 1;
+constexpr size_t scale_tensor_alignment_Y_colwise = 1;
+#else
 constexpr size_t scale_tensor_alignment_Y_rowwise = 128;
 constexpr size_t scale_tensor_alignment_X_rowwise = 4;
 constexpr size_t scale_tensor_alignment_Y_colwise = 4;
 constexpr size_t scale_tensor_alignment_X_colwise = 128;
+#endif
 
 inline size_t divide_round_up(const size_t N, const size_t M) {
     return (N - 1 + M) / M;

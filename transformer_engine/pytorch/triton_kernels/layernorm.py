@@ -3,25 +3,9 @@
 
 
 from itertools import product
-import os
 
-import torch
-
-from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
-from ..constants import TE_DType
-from ..tensor.mxfp8_tensor import MXFP8Quantizer
-from ..quantized_tensor import Quantizer
-from ..triton_kernels.cast import te_quantize_triton
 import triton
 import triton.language as tl
-import warnings
-import transformer_engine_torch as tex
-from .common import (
-    get_fp8_max,
-    te_dtype_to_torch_dtype,
-    te_dtype_to_triton_dtype,
-)
-from .norm_common import make_ln_out
 
 def get_autotune_config(full_tuning_space=False):
     if full_tuning_space:
@@ -36,20 +20,20 @@ def get_autotune_config(full_tuning_space=False):
 
 @triton.jit
 def _layernorm_fwd_triton_impl(
-    x_ptr,
-    y_ptr,
-    w_ptr,
+    input_ptr,
+    output_ptr,
+    g_ptr,
     b_ptr,
     mean_ptr,
-    rstd_ptr,
-    scale_ptr,
-    amax_ptr,
-    scale_inv_ptr,
-    x_row_stride,
-    y_row_stride,
+    rsigma_ptr,
+    input_row_stride,
+    output_row_stride,
     n_rows,
     n_cols,
-    eps,
+    epsilon,
+    q_amax_ptr,
+    q_scale_ptr,
+    scale_inv_ptr,
     out_transpose_ptr,
     out_transpose_stride,
     ZERO_CENTERED_GAMMA: tl.constexpr,
@@ -81,12 +65,12 @@ def _layernorm_fwd_triton_impl(
         start_row = pid
 
     if IS_FP8:
-        scale = tl.load(scale_ptr)
+        scale = tl.load(q_scale_ptr)
         amax = 0.0
 
     for row_idx in range(start_row, start_row + rows_per_tile):
-        x_ptr_start = x_ptr + (row_idx * x_row_stride)
-        y_ptr_start = y_ptr + (row_idx * y_row_stride)
+        x_ptr_start = input_ptr + (row_idx * input_row_stride)
+        y_ptr_start = output_ptr + (row_idx * output_row_stride)
 
         n_cols_blks = tl.cdiv(n_cols, BLOCK_SIZE) - 1
 
@@ -118,16 +102,16 @@ def _layernorm_fwd_triton_impl(
         _var += x_block * x_block
 
         var = tl.sum(_var, axis=0) / n_cols
-        rstd = tl.rsqrt(var + eps)
+        rstd = tl.rsqrt(var + epsilon)
 
         # Write mean / rstd
         tl.store(mean_ptr + row_idx, mean)
-        tl.store(rstd_ptr + row_idx, rstd)
+        tl.store(rsigma_ptr + row_idx, rstd)
 
         # Normalize and store
         for blk_idx in range(0, n_cols_blks):
             cols = blk_idx * BLOCK_SIZE + col_offsets
-            w_block = tl.load(w_ptr + cols).to(tl.float32)
+            w_block = tl.load(g_ptr + cols).to(tl.float32)
             b_block = tl.load(b_ptr + cols).to(tl.float32)
             x_block = tl.load(x_ptr_start + cols).to(tl.float32)
             if ZERO_CENTERED_GAMMA:
@@ -139,7 +123,7 @@ def _layernorm_fwd_triton_impl(
                 amax = amax_temp if amax_temp > amax else amax
                 y_block = y_block * scale
                 y_block = tl.clamp(y_block, -FP8_MAX, FP8_MAX)
-            y_block = y_block.to(y_ptr.type.element_ty)
+            y_block = y_block.to(output_ptr.type.element_ty)
             tl.store(y_ptr_start + cols, y_block)
             if MAKE_TRANSPOSE:
                 output_t_ptrs = out_transpose_ptr + cols * out_transpose_stride + row_idx
@@ -148,7 +132,7 @@ def _layernorm_fwd_triton_impl(
         # For last iteration, do masked load and store
         cols = n_cols_blks * BLOCK_SIZE + col_offsets
         mask = cols < n_cols
-        w_block = tl.load(w_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+        w_block = tl.load(g_ptr + cols, mask=mask, other=0.0).to(tl.float32)
         b_block = tl.load(b_ptr + cols, mask=mask, other=0.0).to(tl.float32)
         x_block = tl.load(x_ptr_start + cols, mask=mask, other=0.0).to(tl.float32)
         if ZERO_CENTERED_GAMMA:
@@ -160,20 +144,20 @@ def _layernorm_fwd_triton_impl(
             amax = amax_temp if amax_temp > amax else amax
             y_block = y_block * scale
             y_block = tl.clamp(y_block, -FP8_MAX, FP8_MAX)
-        y_block = y_block.to(y_ptr.type.element_ty)
+        y_block = y_block.to(output_ptr.type.element_ty)
         tl.store(y_ptr_start + cols, y_block, mask=mask)
         if MAKE_TRANSPOSE:
             output_t_ptrs = out_transpose_ptr + cols * out_transpose_stride + row_idx
             tl.store(output_t_ptrs, y_block, mask=mask)
 
     if IS_FP8:
+        if pid == 0:
+            scale_inv = tl.fdiv(1.0, scale)
+            tl.store(scale_inv_ptr, scale_inv)
         if APPLY_ATOMIC:
-            if pid == 0:
-                scale_inv = tl.fdiv(1.0, scale)
-                tl.store(scale_inv_ptr, scale_inv)
-            tl.atomic_max(amax_ptr, amax, sem="relaxed")
+            tl.atomic_max(q_amax_ptr, amax, sem="relaxed")
         else:
-            tl.store(amax_ptr + pid, amax)
+            tl.store(q_amax_ptr + pid, amax)
 
 autotune_dec = triton.autotune(configs=get_autotune_config(), key=["n_rows", "n_cols"], use_cuda_graph=True)
 _layernorm_fwd_triton = autotune_dec(_layernorm_fwd_triton_impl)
@@ -182,8 +166,6 @@ _layernorm_fwd_triton = autotune_dec(_layernorm_fwd_triton_impl)
 def _layernorm_fwd_reduce_triton(
     amax_input_ptr,
     amax_output_ptr,
-    scale_ptr,
-    scale_inv_ptr,
     n_rows,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -199,12 +181,6 @@ def _layernorm_fwd_reduce_triton(
     amax = tl.max(_amax, axis=-1)
 
     tl.atomic_max(amax_output_ptr, amax, sem="relaxed")
-
-    if pid == 0:
-        scale = tl.load(scale_ptr)
-        scale_inv = tl.fdiv(1.0, scale)
-        tl.store(scale_inv_ptr, scale_inv)
-
 
 @triton.jit
 def _layernorm_bwd_dx_fused_triton(
@@ -455,215 +431,3 @@ def _layernorm_bwd_dwdb_triton_v2(
     sum_db = tl.sum(db, axis=0)
     tl.store(FINAL_DW + cols, sum_dw.to(FINAL_DW.type.element_ty), mask=cols < N)
     tl.store(FINAL_DB + cols, sum_db.to(FINAL_DB.type.element_ty), mask=cols < N)
-
-def te_layernorm_fwd_triton(input: torch.Tensor,
-                            weight: torch.Tensor,
-                            bias: torch.Tensor,
-                            eps: float,
-                            ln_out: torch.Tensor, 
-                            quantizer: Quantizer, 
-                            otype: tex.DType,
-                            sm_margin: int,
-                            zero_centered_gamma: bool,
-                            autotune: bool = True,):
-    if sm_margin is not None and sm_margin > 0:
-        warnings.warn(
-            '"sm_margin" is not supported in the Triton based forward layer-norm kernel. '
-            + f"sm_margin={sm_margin} will be ignored."
-        )
-    device = input.device
-    M, N = input.shape
-
-    IS_MXFP8 = isinstance(quantizer, MXFP8Quantizer)
-    MAKE_TRANSPOSE = False
-
-    # Create empty tensors for mu and rsigma
-    mu = torch.empty((M,), dtype=torch.float32, device=device)
-    rsigma = torch.empty((M,), dtype=torch.float32, device=device)
-    torch_out_dtype = (
-        otype if isinstance(otype, torch.dtype)
-        else te_dtype_to_torch_dtype(otype)
-    )
-    # Create ln_out
-    ln_out = make_ln_out(ln_out, quantizer=quantizer, input_shape=input.shape, out_dtype=torch_out_dtype)
-    # To update the amax ptr directly with atomic max
-    APPLY_ATOMIC = M < 512
-
-    # MXFP8/fp8_current_scaling requires unfused quantization. 
-    IS_FP8 = isinstance(quantizer, Float8Quantizer)
-    IS_FP8_CURRENT_SCALING = isinstance(quantizer, Float8CurrentScalingQuantizer)
-
-    amax_temp = torch.empty((M,), dtype=torch.float32, device=device) if IS_FP8 else None
-
-    max_fused_size = 16384 // input.element_size()
-    BLOCK_SIZE = min(max_fused_size, triton.next_power_of_2(N))
-
-    out_transpose_ptr = None
-    out_transpose_stride = None
-
-    # Create necessary values for fp8 if needed
-    if IS_FP8:
-        scale = quantizer.scale
-        amax_out = quantizer.amax
-        scale_inv = ln_out._scale_inv
-        cast_out = ln_out._data
-        MAKE_TRANSPOSE = quantizer.columnwise_usage
-        if MAKE_TRANSPOSE:
-            tl_dtype = te_dtype_to_triton_dtype(quantizer.dtype)
-            if ln_out._transpose_invalid:
-                ln_out._transpose = torch.empty((ln_out._data.shape[1], ln_out._data.shape[0]), dtype=ln_out._data.dtype, device=device)
-                ln_out._transpose_invalid = False
-            out_transpose_ptr = triton.reinterpret(ln_out._transpose, tl_dtype)
-            out_transpose_stride = ln_out._transpose.stride(0)
-    else:
-        scale = None
-        amax_out = None
-        scale_inv = None
-        cast_out = ln_out
-    
-    kernel = _layernorm_fwd_triton if autotune else _layernorm_fwd_triton_impl
-    kernel[(M,)](
-        input,
-        triton.reinterpret(cast_out, te_dtype_to_triton_dtype(ln_out._fp8_dtype)) if IS_FP8 else cast_out,
-        weight,
-        bias,
-        mu,
-        rsigma,
-        scale,
-        amax_out if APPLY_ATOMIC else amax_temp,
-        scale_inv,
-        input.stride(0),
-        cast_out.stride(0),
-        M,
-        N,
-        eps,
-        out_transpose_ptr,
-        out_transpose_stride,
-        ZERO_CENTERED_GAMMA=zero_centered_gamma,
-        BLOCK_SIZE=BLOCK_SIZE,
-        IS_FP8=IS_FP8,
-        APPLY_ATOMIC=APPLY_ATOMIC,
-        # TODO: Improve performance with persistent kernel
-        # Persistent kernel currently lags behind non persistent version
-        # It also lags behind TE implementation in a few cases
-        PERSISTENT=False,
-        FP8_MAX=get_fp8_max(quantizer.dtype) if IS_FP8 else None,
-        MAKE_TRANSPOSE=MAKE_TRANSPOSE
-    )
-
-    # For MXFP8, we do regular layernorm and then quantize it separately
-    if IS_MXFP8 or IS_FP8_CURRENT_SCALING:
-        ln_out = te_quantize_triton(ln_out, quantizer)
-    
-    # Reduce and find amax if "not APPLY_ATOMIC" is True.
-    if IS_FP8 and not APPLY_ATOMIC:
-        _layernorm_fwd_reduce_triton[(triton.cdiv(M, 256),)](
-            amax_temp,
-            amax_out,
-            scale,
-            scale_inv,
-            M,
-            256,
-        )
-    return ln_out, mu, rsigma
-
-# drop in replacement for transformer_engine::pytorch::layernorm_bwd
-# TODO: Add support for `sm_margin > 0`.
-def te_layernorm_bwd_triton(
-    dz: torch.Tensor, 
-    x: torch.Tensor, 
-    mu: torch.Tensor, 
-    rsigma: torch.Tensor, 
-    gamma: torch.Tensor, 
-    sm_margin: int, 
-    zero_centered_gamma: bool
-):
-    if sm_margin is not None and sm_margin > 0:
-        warnings.warn(
-            '"sm_margin" is not supported in the Triton based backward layer-norm kernel. '
-            + f"sm_margin={sm_margin} will be ignored."
-        )
-    M, N = x.shape
-    # calculate dw and db separately when M is small
-    IGNORE_DW_DB_IN_FUSED = M <= 512
-    tile_num = max(min(256, M // 4), 1)
-    if M <= 512 and M * N < 64 * 1024 * 1024:
-        tile_num = M
-    elif M >= 8192:
-        tile_num = 2048
-    max_fused_size = 32768 // x.element_size()
-    next_power = triton.next_power_of_2(N)
-    BLOCK_SIZE = min(max_fused_size, next_power)
-    # For cases with small M and large N, decrease block size to help with occupancy and register spill
-    if tile_num == M:
-        if tile_num > 256:
-            BLOCK_SIZE = min(BLOCK_SIZE, 2048)
-        else:
-            BLOCK_SIZE = min(BLOCK_SIZE, 4096)
-    USE_BLOCKED = N > BLOCK_SIZE
-    num_warps = min(max(BLOCK_SIZE // 256, 1), 8)
-
-    dx = torch.empty_like(x)
-    if not IGNORE_DW_DB_IN_FUSED:
-        _dgamma = torch.zeros((tile_num, N), dtype=torch.float32, device=gamma.device)
-        _dbeta = torch.zeros((tile_num, N), dtype=torch.float32, device=gamma.device)
-    else:
-        _dgamma = None
-        _dbeta = None
-    dgamma = torch.zeros((N,), dtype=gamma.dtype, device=gamma.device)
-    dbeta = torch.zeros((N,), dtype=gamma.dtype, device=gamma.device)
-    grid_bwd = (tile_num,)
-    _layernorm_bwd_dx_fused_triton[grid_bwd](
-        dx,
-        dz,
-        _dgamma,
-        _dbeta,
-        x,
-        gamma,
-        mu,
-        rsigma,
-        x.stride(0),
-        N,
-        ZERO_CENTERED_GAMMA=zero_centered_gamma,
-        NUM_ROWS=M,
-        BLOCK_SIZE_N=BLOCK_SIZE,
-        USE_BLOCKED=USE_BLOCKED,
-        num_warps=num_warps,
-        IGNORE_DW_DB=IGNORE_DW_DB_IN_FUSED,
-    )
-    grid_reduce = lambda meta: (triton.cdiv(N, meta["BLOCK_SIZE_N"]),)
-    if not IGNORE_DW_DB_IN_FUSED:
-        dwdb_block_n = max(16, N // 256)
-        dwdb_block_n = triton.next_power_of_2(dwdb_block_n)
-        dwdb_block_m = (64 * 128) // dwdb_block_n
-        dwdb_block_m = min(triton.next_power_of_2(tile_num), dwdb_block_m)
-        _layernorm_bwd_dwdb_triton[grid_reduce](
-            _dgamma,
-            _dbeta,
-            dgamma,
-            dbeta,
-            min(tile_num, M),
-            N,
-            BLOCK_SIZE_M=dwdb_block_m,
-            BLOCK_SIZE_N=dwdb_block_n,
-        )
-    else:
-        dwdb_block_n = max(16, N // 256)
-        dwdb_block_n = triton.next_power_of_2(dwdb_block_n)
-        dwdb_block_m = (64 * 128) // dwdb_block_n
-        dwdb_block_m = min(triton.next_power_of_2(M), dwdb_block_m)
-        _layernorm_bwd_dwdb_triton_v2[grid_reduce](
-            x,
-            dz,
-            mu,
-            rsigma,
-            x.stride(0),
-            dgamma,
-            dbeta,
-            M,
-            N,
-            BLOCK_SIZE_M=dwdb_block_m,
-            BLOCK_SIZE_N=dwdb_block_n,
-        )
-
-    return dx, dgamma, dbeta

@@ -26,6 +26,8 @@ from transformer_engine_jax import (
     get_num_compute_streams,
     JAXX_Collective_Op,
     get_device_compute_capability,
+    #initialize_cgemm_communicator,
+    #get_cgemm_num_max_streams,
 )
 if not is_hip_extension():
     from transformer_engine_jax import (
@@ -684,9 +686,9 @@ class GemmPrimitive(BasePrimitive):
                 rhs_scale_inv, scaling_mode, rhs.shape, not rhs_transposed, rhs_flatten_axis
             )
         # Only perform JAX-based swizzle for MXFP8, NVFP4 swizzle will go though nvte kernel
-        if scaling_mode.is_mxfp8_scaling:
-            lhs_scale_inv = swizzled_scale(lhs_scale_inv, lhs_flatten_axis, lhs_transposed)
-            rhs_scale_inv = swizzled_scale(rhs_scale_inv, rhs_flatten_axis, not rhs_transposed)
+        if scaling_mode.is_mxfp8_scaling and not is_hip_extension():
+                lhs_scale_inv = swizzled_scale(lhs_scale_inv, lhs_flatten_axis, lhs_transposed)
+                rhs_scale_inv = swizzled_scale(rhs_scale_inv, rhs_flatten_axis, not rhs_transposed)
 
         # Alter lhs blocks so that CGEMM RS outputs correctly
         if (

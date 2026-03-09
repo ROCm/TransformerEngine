@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -17,6 +19,8 @@ from .storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStora
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
 from ..utils import devices_match, round_up_to_nearest_multiple
+
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 aten = torch.ops.aten
 
@@ -142,11 +146,17 @@ class Float8BlockQuantizer(Quantizer):
         if self.block_scaling_dim == 2:
             if columnwise:
                 outer = math.ceil(K / self.block_len)
-                inner = round_up_to_nearest_multiple(math.ceil(M / self.block_len), 4)
+                if IS_HIP_EXTENSION:
+                    inner = math.ceil(M / self.block_len)
+                else:
+                    inner = round_up_to_nearest_multiple(math.ceil(M / self.block_len), 4)
                 return (outer, inner)
             # rowwise
             outer = math.ceil(M / self.block_len)
-            inner = round_up_to_nearest_multiple(math.ceil(K / self.block_len), 4)
+            if IS_HIP_EXTENSION:
+                inner = math.ceil(K / self.block_len)
+            else:
+                inner = round_up_to_nearest_multiple(math.ceil(K / self.block_len), 4)
             return (outer, inner)
         # 1D 1x128 quantization block scaling
         # CuBLAS requries 1x128 scaling factor to be padded and transposed
@@ -154,7 +164,7 @@ class Float8BlockQuantizer(Quantizer):
         if columnwise:
             columnwise_compact = self.all_gather_usage
             outer = math.ceil(M / self.block_len)
-            inner = round_up_to_nearest_multiple(K, 4) if not columnwise_compact else K
+            inner = round_up_to_nearest_multiple(K, 4) if not IS_HIP_EXTENSION or not columnwise_compact else K
             # GEMM READY case: scaling factor is [outer, inner], already transposed here for CuBLAS
             # for COMPACT case, since we apply 1x128 scaling here without transposing columnwise data, scaling factor is also [outer, inner]
             # so no need to swap inner outer here
@@ -162,7 +172,7 @@ class Float8BlockQuantizer(Quantizer):
         # rowwise
         rowwise_compact = self.all_gather_usage
         outer = math.ceil(K / self.block_len)
-        inner = round_up_to_nearest_multiple(M, 4) if not rowwise_compact else M
+        inner = round_up_to_nearest_multiple(M, 4) if not IS_HIP_EXTENSION or not rowwise_compact else M
         # GEMM READY case: scaling factor is [outer, inner], already transposed here for CuBLAS need
         # for COMPACT case, since we apply 128x1 scaling, scaling block applies to inner dim, so we need to swap outer and inner here
         return (outer, inner) if not rowwise_compact else (inner, outer)

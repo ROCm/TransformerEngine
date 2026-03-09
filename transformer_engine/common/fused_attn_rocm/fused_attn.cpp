@@ -500,6 +500,7 @@ void nvte_fused_attn_bwd_qkvpacked(
     fused_attn_aotriton_bwd_qkvpacked(
       b, h, max_seqlen, d,
       attn_scale, dropout, 
+      window_size_left, window_size_right,
       qkv_layout, bias_type, attn_mask_type,
       input_QKV, input_O, input_dO, output_S,
       output_dQKV,
@@ -692,6 +693,7 @@ void nvte_fused_attn_bwd_kvpacked(
     fused_attn_aotriton_bwd_kvpacked(
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
       attn_scale, dropout, 
+      window_size_left, window_size_right,
       qkv_layout, bias_type, attn_mask_type,
       input_Q, input_KV, input_O, input_dO, 
       output_S,
@@ -877,6 +879,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
     fused_attn_aotriton_bwd(
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk,
       attn_scale, dropout, 
+      window_size_left, window_size_right,
       qkv_layout, bias_type, attn_mask_type,
       input_Q, input_K, input_V, input_O, input_dO,
       output_S,

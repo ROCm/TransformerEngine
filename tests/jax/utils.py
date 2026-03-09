@@ -11,6 +11,7 @@ import math
 import operator
 from typing import Any, Callable, Dict, Tuple, Sequence, Union, Iterable, Optional, NewType
 from contextlib import contextmanager
+from packaging import version
 
 import jax
 import jax.numpy as jnp
@@ -28,6 +29,7 @@ from transformer_engine.jax.attention import (
 )
 from transformer_engine.jax.quantize.helper import DType as TEDType
 from transformer_engine.jax.util import get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
+from transformer_engine.jax.cpp_extensions.misc import is_hip_extension
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
@@ -48,6 +50,99 @@ def is_devices_enough(required):
     """
     return len(jax.devices()) >= required
 
+
+def _check_mxfp8_gemm_support(with_jax_gemm, m, n, k, use_bias=False):
+    if not is_hip_extension():
+        return
+
+    if not with_jax_gemm:
+        if (m % 16 != 0) or (n % 16 != 0) or (k % 128 != 0):
+            pytest.skip(
+                f"Input shape {(m, k)} x {(k, n)} is not supported by hipblaslt MXFP8 GEMM."
+            )
+        if use_bias:
+            pytest.skip("hipblaslt GEMM does not yet support MXFP8 with bias.")
+    else:
+        jax_version = version.parse(jax.__version__)
+        if jax_version < version.parse("0.8.2"):
+            pytest.skip(
+                "MXFP8 support for JAX GEMM is added in version 0.8.2, "
+                f"but the current detected version is {jax_version}."
+            )
+        if k < 64:
+            pytest.skip(
+                f"Input shape {(m, k)} x {(k, n)} with K={k} is not supported by "
+                f"ROCm jax.nn.scaled_matmul. K must be at least 64."
+            )
+
+def _check_mxfp8_layernorm_mlp_support(
+    batch_size,
+    intermediate_size,
+    activation_size,
+    hidden_in,
+    hidden_out,
+    n_tp_shards=1,
+    use_bias=False,
+    with_jax_gemm=False,
+):
+    # Check input shape compatibility with MXFP8 GEMMs
+    # FWD 1
+    m = batch_size
+    k = hidden_in // n_tp_shards # Account for TP sharding
+    n = activation_size
+    _check_mxfp8_gemm_support(
+        with_jax_gemm,
+        m, n, k,
+        use_bias
+    )
+    # FWD 2
+    k = intermediate_size // n_tp_shards  # Account for TP sharding
+    n = hidden_out
+    _check_mxfp8_gemm_support(
+        with_jax_gemm,
+        m, n, k,
+        use_bias
+    )
+
+def _check_mxfp8_layernorm_mlp_grad_support(
+    batch_size,
+    intermediate_size,
+    activation_size,
+    hidden_in,
+    hidden_out,
+    n_tp_shards=1,
+    use_bias=False,
+    with_jax_gemm=False,
+):
+    # Check forwards
+    _check_mxfp8_layernorm_mlp_support(
+        batch_size,
+        intermediate_size,
+        activation_size,
+        hidden_in,
+        hidden_out,
+        n_tp_shards,
+        use_bias,
+        with_jax_gemm,
+    )
+    # BWD 1
+    m = batch_size
+    k = hidden_out // n_tp_shards  # Account for TP sharding
+    n = intermediate_size
+    _check_mxfp8_gemm_support(
+        with_jax_gemm,
+        m, n, k,
+        use_bias
+    )
+    # BWD 2
+    m = intermediate_size
+    k = batch_size // n_tp_shards  # Account for TP sharding
+    n = hidden_out
+    _check_mxfp8_gemm_support(
+        with_jax_gemm,
+        m, n, k,
+        use_bias
+    )
 
 def _generate_drop_path_shape(shape: Sequence[int], batch_dim: int) -> Sequence[int]:
     # Generate broadcast dims for drop_path.

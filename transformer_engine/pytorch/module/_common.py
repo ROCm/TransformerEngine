@@ -20,8 +20,12 @@ from ..export import is_in_onnx_export_mode
 from ..utils import get_default_init_method
 
 if IS_HIP_EXTENSION:
-    from ..triton_kernels.layernorm import te_layernorm_fwd_triton, te_layernorm_bwd_triton
-    from ..triton_kernels.rmsnorm import te_rmsnorm_bwd_triton, te_rmsnorm_fwd_triton
+    from ..triton_kernels.norms_common import (
+        te_layernorm_fwd_triton,
+        te_layernorm_bwd_triton,
+        te_rmsnorm_fwd_triton,
+        te_rmsnorm_bwd_triton
+    )
     import os
 
 def _get_normalization_func(normalization: str, forward: bool):

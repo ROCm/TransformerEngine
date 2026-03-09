@@ -113,7 +113,11 @@ struct BLOCK_SIZE {
 constexpr BLOCK_SIZE MXFP8_BLOCK_SIZE{1, 32};
 constexpr BLOCK_SIZE NVFP4_BLOCK_SIZE{1, 16};
 
+#ifdef __HIP_PLATFORM_AMD__
+constexpr BLOCK_SIZE BLOCK_SCALE_ALIGNMENT{1, 1};
+#else
 constexpr BLOCK_SIZE BLOCK_SCALE_ALIGNMENT{128, 4};
+#endif
 
 std::vector<size_t> get_block_scale_shape(JAXX_Scaling_Mode scaling_mode, size_t M, size_t N,
                                           bool is_colwise);

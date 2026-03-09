@@ -84,7 +84,7 @@ def setup_jax_extension(
     if rocm_build() and not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         current_file_path = Path(__file__).parent.resolve()
         base_dir = current_file_path.parent
-        sources = hipify(base_dir, csrc_source_files, sources, include_dirs[1:])
+        sources = hipify(base_dir, csrc_source_files, sources, include_dirs)
 
     # Compile flags
     cxx_flags = ["-O3"]

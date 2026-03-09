@@ -8,7 +8,6 @@ cmake_minimum_required(VERSION 3.21)
 
 option(USE_ROCM "Use ROCm" ON)
 option(USE_FUSED_ATTN_AOTRITON "Use aotriton backend" ON)
-option(USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS "Build AOTriton GPU kernels" OFF)
 option(USE_FUSED_ATTN_CK "Use ck backend" ON)
 set(USE_CUDA OFF)
 
@@ -255,9 +254,9 @@ else()
     list(APPEND transformer_engine_cpp_sources
         fused_attn_rocm/fused_attn.cpp
         gemm/rocm_gemm.cu
+        gemm/ck_grouped_gemm.cpp
         amd_detail/system.cpp)
     list(APPEND transformer_engine_cuda_sources
-        transpose/quantize_transpose_vector_blockwise_fp4.cu
         fused_attn_rocm/fused_attn_aotriton.cpp
         fused_attn_rocm/fused_attn_ck.cpp
         fused_attn_rocm/utils.cpp)
@@ -357,6 +356,9 @@ set_property(
   APPEND
   PROPERTY
   COMPILE_OPTIONS "--generate-code=arch=compute_90a,code=sm_90a;-g0")
+else()
+  set(CK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/aiter/3rdparty/composable_kernel)
+  target_include_directories(transformer_engine PRIVATE ${CK_ROOT}/include)
 endif() #USE_CUDA
 
 # Configure dependencies
