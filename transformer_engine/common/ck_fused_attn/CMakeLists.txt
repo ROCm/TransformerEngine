@@ -50,9 +50,43 @@ else()
     
     # If not downloaded, Fallback: Build from source
     if(NOT AITER_PREBUILT_DOWNLOAD_SUCCESS)
+      # Generate aiter_embedded_hsa.h and pass it into AITER compile.py via env vars.
+      # This avoids invasive changes in AITER's JIT build system.
+      set(AITER_HSA_DIR "${__AITER_SOURCE_DIR}/hsa")
+      set(AITER_EMBEDDED_HSA_HEADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/aiter_embedded_hsa")
+      set(AITER_EMBEDDED_HSA_HEADER "${AITER_EMBEDDED_HSA_HEADER_DIR}/aiter_embedded_hsa.h")
+
+      set(AITER_EMBEDDED_HSA_SUBDIRS)
+      foreach(ARCH IN LISTS V3_ASM_ARCHS)
+        list(APPEND AITER_EMBEDDED_HSA_SUBDIRS
+             "${ARCH}/fmha_v3_bwd"
+             "${ARCH}/fmha_v3_fwd")
+      endforeach()
+
+      set(AITER_BUILD_ENV_ARGS)
+      if(AITER_EMBEDDED_HSA_SUBDIRS)
+        execute_process(
+          COMMAND python3 "${CMAKE_CURRENT_LIST_DIR}/generate_aiter_embedded_hsa.py"
+                  --hsa-dir ${AITER_HSA_DIR}
+                  --output ${AITER_EMBEDDED_HSA_HEADER}
+                  --subdirs ${AITER_EMBEDDED_HSA_SUBDIRS}
+          RESULT_VARIABLE AITER_MAKE_HSA_RET
+        )
+        if(AITER_MAKE_HSA_RET AND NOT AITER_MAKE_HSA_RET EQUAL 0)
+          message(FATAL_ERROR "Failed to generate aiter_embedded_hsa.h")
+        endif()
+        list(APPEND AITER_BUILD_ENV_ARGS
+             AITER_EMBEDDED_HSA_HEADER=aiter_embedded_hsa.h
+             AITER_EMBEDDED_HSA_INCLUDE_DIR=${AITER_EMBEDDED_HSA_HEADER_DIR})
+      else()
+        message(STATUS "[AITER-PREBUILT] No supported V3 ASM arch selected; skipping embedded HSA generation.")
+      endif()
+
       message(STATUS " [AITER-BUILD] Building aiter from source.")
       execute_process(
-        COMMAND bash ${CMAKE_CURRENT_LIST_DIR}/aiter_build.sh
+        COMMAND ${CMAKE_COMMAND} -E env
+                ${AITER_BUILD_ENV_ARGS}
+                bash ${CMAKE_CURRENT_LIST_DIR}/aiter_build.sh
                 --aiter-dir ${__AITER_SOURCE_DIR}
                 --aiter-test-dir ${__AITER_TEST_DIR}
                 --gpu-archs "${V3_ASM_ARCHS_STR}"
