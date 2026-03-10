@@ -134,6 +134,7 @@ class FlashAttentionUtils:
 (4) mkdir -p $python_path/flash_attn_3
 (5) cp flash_attn_interface.py $python_path/flash_attn_3/flash_attn_interface.py"""
     v3_warning_printed = False
+    use_aiter_triton = False #ROCm
 
     @staticmethod
     def set_flash_attention_version():
