@@ -45,7 +45,15 @@ else()
 
   if(NOT AITER_CACHE_VALID)
     # Try downloading prebuilt files if NVTE_AITER_PREBUILT_BASE_URL is set.
+    set(AITER_DOWNLOAD_CACHE_VALID FALSE)
     download_aiter_prebuilt(AITER_PREBUILT_DOWNLOAD_SUCCESS)
+    is_aiter_cache_valid(AITER_DOWNLOAD_CACHE_VALID)
+    if(NOT AITER_DOWNLOAD_CACHE_VALID)
+      message(STATUS "[AITER-PREBUILT] Prebuilt downloaded cache invalid.")
+      set(AITER_PREBUILT_DOWNLOAD_SUCCESS FALSE)
+    else()
+      message(STATUS "[AITER-PREBUILT] Using downloaded prebuilt libraries.")
+    endif()
     
     # If not downloaded, Fallback: Build from source
     if(NOT AITER_PREBUILT_DOWNLOAD_SUCCESS)
