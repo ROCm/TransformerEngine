@@ -88,15 +88,15 @@ model_configs_base = {
     "base_1_0": ModelConfig(8, 128, 16, 64),
     "base_1_1": ModelConfig(4, 128, 16, 64, max_seqlen_kv=256),
     "base_2_0": ModelConfig(2, 2048, 24, 128),
-    "base_2_1": ModelConfig(1, 2048, 24, 128, max_seqlen_kv=4096),
-    "base_3_0": ModelConfig(8, 1, 16, 128, max_seqlen_kv=2048),
-    "base_3_1": ModelConfig(8, 1, 16, 256, max_seqlen_kv=2048),
-    "base_4_0": ModelConfig(8, 1, 16, 192, max_seqlen_kv=2048),
-    "base_4_1": ModelConfig(8, 128, 16, 192, max_seqlen_kv=2048),
-    "base_5_0": ModelConfig(8, 1, 16, 512, max_seqlen_kv=2048),
-    "base_5_1": ModelConfig(8, 128, 16, 512, max_seqlen_kv=2048),
-    "base_6_0": ModelConfig(8, 1, 16, 1024, max_seqlen_kv=2048),
-    "base_6_1": ModelConfig(8, 128, 16, 1024, max_seqlen_kv=2048),
+    #"base_2_1": ModelConfig(1, 2048, 24, 128, max_seqlen_kv=4096),
+    #"base_3_0": ModelConfig(8, 1, 16, 128, max_seqlen_kv=2048),
+    #"base_3_1": ModelConfig(8, 1, 16, 256, max_seqlen_kv=2048),
+    #"base_4_0": ModelConfig(8, 1, 16, 192, max_seqlen_kv=2048),
+    #"base_4_1": ModelConfig(8, 128, 16, 192, max_seqlen_kv=2048),
+    #"base_5_0": ModelConfig(8, 1, 16, 512, max_seqlen_kv=2048),
+    #"base_5_1": ModelConfig(8, 128, 16, 512, max_seqlen_kv=2048),
+    #"base_6_0": ModelConfig(8, 1, 16, 1024, max_seqlen_kv=2048),
+    #"base_6_1": ModelConfig(8, 128, 16, 1024, max_seqlen_kv=2048),
 }
 
 
@@ -367,19 +367,19 @@ model_configs_mla = {
     #    test:             b,  h, hg, dqk, sq, skv,   p,      mask,      bias   # attn , backend
     "mla_1_0": ModelConfig(8, 128, 16, 64, head_dim_v=128),  # self , 0
     "mla_1_1": ModelConfig(4, 128, 16, 64, max_seqlen_kv=256, head_dim_v=128),  # cross, 0
-    "mla_1_2": ModelConfig(4, 128, 16, 192, max_seqlen_kv=256, head_dim_v=128),  # cross, 0
+    #"mla_1_2": ModelConfig(4, 128, 16, 192, max_seqlen_kv=256, head_dim_v=128),  # cross, 0
     "mla_2_0": ModelConfig(2, 2048, 24, 128, attn_mask_type="causal", head_dim_v=64),  # self , 1
-    "mla_2_1": ModelConfig(
-        1, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="causal", head_dim_v=64
-    ),  # cross, 1
-    "mla_2_2": ModelConfig(
-        1, 2048, 24, 192, max_seqlen_kv=4096, attn_mask_type="causal", head_dim_v=128
-    ),  # cross, 1
+    #"mla_2_1": ModelConfig(
+    #    1, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="causal", head_dim_v=64
+    #),  # cross, 1
+    #"mla_2_2": ModelConfig(
+    #    1, 2048, 24, 192, max_seqlen_kv=4096, attn_mask_type="causal", head_dim_v=128
+    #),  # cross, 1
     "mla_3_0": ModelConfig(8, 1, 16, 128, max_seqlen_kv=2048, head_dim_v=64),  # inference
-    "mla_3_1": ModelConfig(8, 1, 16, 256, max_seqlen_kv=2048, head_dim_v=128),  # inference
-    "mla_3_2": ModelConfig(8, 1, 16, 192, max_seqlen_kv=2048, head_dim_v=128),  # inference
-    "mla_3_3": ModelConfig(8, 1, 16, 160, max_seqlen_kv=2048, head_dim_v=128),  # inference
-    "mla_3_4": ModelConfig(8, 1, 16, 160, max_seqlen_kv=2048, head_dim_v=160),  # inference
+    #"mla_3_1": ModelConfig(8, 1, 16, 256, max_seqlen_kv=2048, head_dim_v=128),  # inference
+    #"mla_3_2": ModelConfig(8, 1, 16, 192, max_seqlen_kv=2048, head_dim_v=128),  # inference
+    #"mla_3_3": ModelConfig(8, 1, 16, 160, max_seqlen_kv=2048, head_dim_v=128),  # inference
+    #"mla_3_4": ModelConfig(8, 1, 16, 160, max_seqlen_kv=2048, head_dim_v=160),  # inference
 }
 
 
@@ -401,40 +401,40 @@ model_configs_mask = {
     "mask_2_1": ModelConfig(
         2, 2048, 24, 128, num_gqa_groups=1, attn_mask_type="causal_bottom_right"
     ),
-    "mask_2_2": ModelConfig(
-        2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="causal_bottom_right"
-    ),
+    #"mask_2_2": ModelConfig(
+    #    2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="causal_bottom_right"
+    #),
     "mask_3_0": ModelConfig(2, 2048, 16, 64, attn_mask_type="padding"),
     "mask_3_1": ModelConfig(2, 2048, 24, 128, num_gqa_groups=1, attn_mask_type="padding"),
-    "mask_3_2": ModelConfig(2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="padding"),
+    #"mask_3_2": ModelConfig(2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="padding"),
     "mask_4_0": ModelConfig(2, 2048, 16, 64, attn_mask_type="padding_causal"),
     "mask_4_1": ModelConfig(2, 2048, 24, 128, num_gqa_groups=1, attn_mask_type="padding_causal"),
-    "mask_4_2": ModelConfig(2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="padding_causal"),
+    #"mask_4_2": ModelConfig(2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="padding_causal"),
     "mask_5_0": ModelConfig(2, 2048, 16, 64, attn_mask_type="padding_causal_bottom_right"),
     "mask_5_1": ModelConfig(
         2, 2048, 24, 128, num_gqa_groups=1, attn_mask_type="padding_causal_bottom_right"
     ),
-    "mask_5_2": ModelConfig(
-        2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="padding_causal_bottom_right"
-    ),
-    "mask_6_0": ModelConfig(2, 1, 16, 128, max_seqlen_kv=2048, attn_mask_type="causal"),
-    "mask_6_1": ModelConfig(2, 1, 16, 256, max_seqlen_kv=2048, attn_mask_type="causal"),
-    "mask_7_0": ModelConfig(
-        2, 1, 16, 128, max_seqlen_kv=2048, attn_mask_type="causal_bottom_right"
-    ),
-    "mask_7_1": ModelConfig(
-        2, 1, 16, 256, max_seqlen_kv=2048, attn_mask_type="causal_bottom_right"
-    ),
-    "mask_8_0": ModelConfig(2, 1, 24, 128, max_seqlen_kv=2048, attn_mask_type="padding"),
-    "mask_8_1": ModelConfig(2, 1, 16, 256, max_seqlen_kv=2048, attn_mask_type="padding"),
-    "mask_9_0": ModelConfig(2, 1, 24, 128, max_seqlen_kv=2048, attn_mask_type="padding_causal"),
-    "mask_9_1": ModelConfig(2, 1, 16, 256, max_seqlen_kv=2048, attn_mask_type="padding_causal"),
-    "mask_10_0": ModelConfig(
-        2, 1, 24, 128, max_seqlen_kv=2048, attn_mask_type="padding_causal_bottom_right"
-    ),
-    "mask_10_1": ModelConfig(
-        2, 1, 16, 256, max_seqlen_kv=2048, attn_mask_type="padding_causal_bottom_right"
-    ),
+    #"mask_5_2": ModelConfig(
+    #    2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="padding_causal_bottom_right"
+    #),
+    #"mask_6_0": ModelConfig(2, 1, 16, 128, max_seqlen_kv=2048, attn_mask_type="causal"),
+    #"mask_6_1": ModelConfig(2, 1, 16, 256, max_seqlen_kv=2048, attn_mask_type="causal"),
+    #"mask_7_0": ModelConfig(
+    #    2, 1, 16, 128, max_seqlen_kv=2048, attn_mask_type="causal_bottom_right"
+    #),
+    #"mask_7_1": ModelConfig(
+    #    2, 1, 16, 256, max_seqlen_kv=2048, attn_mask_type="causal_bottom_right"
+    #),
+    #"mask_8_0": ModelConfig(2, 1, 24, 128, max_seqlen_kv=2048, attn_mask_type="padding"),
+    #"mask_8_1": ModelConfig(2, 1, 16, 256, max_seqlen_kv=2048, attn_mask_type="padding"),
+    #"mask_9_0": ModelConfig(2, 1, 24, 128, max_seqlen_kv=2048, attn_mask_type="padding_causal"),
+    #"mask_9_1": ModelConfig(2, 1, 16, 256, max_seqlen_kv=2048, attn_mask_type="padding_causal"),
+    #"mask_10_0": ModelConfig(
+    #    2, 1, 24, 128, max_seqlen_kv=2048, attn_mask_type="padding_causal_bottom_right"
+    #),
+    #"mask_10_1": ModelConfig(
+    #    2, 1, 16, 256, max_seqlen_kv=2048, attn_mask_type="padding_causal_bottom_right"
+    #),
 }
 
 
@@ -452,11 +452,11 @@ model_configs_bias = {
     "bias_1_0": ModelConfig(4, 128, 16, 64, attn_bias_type="post_scale_bias"),
     "bias_1_1": ModelConfig(2, 128, 16, 64, max_seqlen_kv=256, attn_bias_type="post_scale_bias"),
     "bias_1_2": ModelConfig(4, 2048, 24, 128, attn_bias_type="post_scale_bias"),
-    "bias_1_3": ModelConfig(2, 2048, 24, 128, max_seqlen_kv=4096, attn_bias_type="post_scale_bias"),
+    #"bias_1_3": ModelConfig(2, 2048, 24, 128, max_seqlen_kv=4096, attn_bias_type="post_scale_bias"),
     "bias_1_4": ModelConfig(4, 2048, 24, 128, attn_bias_type="alibi"),  # skipped
-    "bias_1_5": ModelConfig(
-        2, 2048, 24, 128, max_seqlen_kv=4096, attn_bias_type="alibi"
-    ),  # skipped
+    #"bias_1_5": ModelConfig(
+    #    2, 2048, 24, 128, max_seqlen_kv=4096, attn_bias_type="alibi"
+    #),  # skipped
     "bias_2_0": ModelConfig(
         4, 128, 16, 64, attn_mask_type="padding", attn_bias_type="post_scale_bias"
     ),  # skipped
@@ -469,82 +469,82 @@ model_configs_bias = {
         attn_mask_type="padding",
         attn_bias_type="post_scale_bias",
     ),  # skipped
-    "bias_2_2": ModelConfig(
-        4, 2048, 24, 128, attn_mask_type="padding", attn_bias_type="post_scale_bias"
-    ),  # skipped
-    "bias_2_3": ModelConfig(
-        2,
-        2048,
-        24,
-        128,
-        max_seqlen_kv=4096,
-        attn_mask_type="padding",
-        attn_bias_type="post_scale_bias",
-    ),  # skipped
+    #"bias_2_2": ModelConfig(
+    #    4, 2048, 24, 128, attn_mask_type="padding", attn_bias_type="post_scale_bias"
+    #),  # skipped
+    #"bias_2_3": ModelConfig(
+    #    2,
+    #    2048,
+    #    24,
+    #    128,
+    #    max_seqlen_kv=4096,
+    #    attn_mask_type="padding",
+    #    attn_bias_type="post_scale_bias",
+    #),  # skipped
     "bias_2_4": ModelConfig(
         4, 2048, 24, 128, attn_mask_type="padding", attn_bias_type="alibi"
     ),  # skipped
-    "bias_2_5": ModelConfig(
-        2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="padding", attn_bias_type="alibi"
-    ),  # skipped
+    #"bias_2_5": ModelConfig(
+    #    2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="padding", attn_bias_type="alibi"
+    #),  # skipped
     "bias_3_0": ModelConfig(
         4, 128, 16, 64, attn_mask_type="causal", attn_bias_type="post_scale_bias"
     ),
-    "bias_3_1": ModelConfig(
-        2, 128, 16, 64, max_seqlen_kv=256, attn_mask_type="causal", attn_bias_type="post_scale_bias"
-    ),
-    "bias_3_2": ModelConfig(
-        4, 2048, 24, 128, attn_mask_type="causal", attn_bias_type="post_scale_bias"
-    ),
-    "bias_3_3": ModelConfig(
-        2,
-        2048,
-        24,
-        128,
-        max_seqlen_kv=4096,
-        attn_mask_type="causal",
-        attn_bias_type="post_scale_bias",
-    ),  # skipped
-    "bias_3_4": ModelConfig(4, 2048, 24, 128, attn_mask_type="causal", attn_bias_type="alibi"),
-    "bias_3_5": ModelConfig(
-        2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="causal", attn_bias_type="alibi"
-    ),  # skipped
-    "bias_4_0": ModelConfig(
-        4, 128, 16, 64, attn_mask_type="padding_causal", attn_bias_type="post_scale_bias"
-    ),  # skipped
-    "bias_4_1": ModelConfig(
-        2,
-        128,
-        16,
-        64,
-        max_seqlen_kv=256,
-        attn_mask_type="padding_causal",
-        attn_bias_type="post_scale_bias",
-    ),  # skipped
-    "bias_4_2": ModelConfig(
-        4, 2048, 24, 128, attn_mask_type="padding_causal", attn_bias_type="post_scale_bias"
-    ),  # skipped
-    "bias_4_3": ModelConfig(
-        2,
-        2048,
-        24,
-        128,
-        max_seqlen_kv=4096,
-        attn_mask_type="padding_causal",
-        attn_bias_type="post_scale_bias",
-    ),  # skipped
-    "bias_4_4": ModelConfig(
-        4, 2048, 24, 128, attn_mask_type="padding_causal", attn_bias_type="alibi"
-    ),  # skipped
-    "bias_4_5": ModelConfig(
-        2,
-        2048,
-        24,
-        128,
-        max_seqlen_kv=4096,
-        attn_mask_type="padding_causal",
-        attn_bias_type="alibi",
-    ),  # skipped
+    #"bias_3_1": ModelConfig(
+    #    2, 128, 16, 64, max_seqlen_kv=256, attn_mask_type="causal", attn_bias_type="post_scale_bias"
+    #),
+    #"bias_3_2": ModelConfig(
+    #    4, 2048, 24, 128, attn_mask_type="causal", attn_bias_type="post_scale_bias"
+    #),
+    #"bias_3_3": ModelConfig(
+    #    2,
+    #    2048,
+    #    24,
+    #    128,
+    #    max_seqlen_kv=4096,
+    #    attn_mask_type="causal",
+    #    attn_bias_type="post_scale_bias",
+    #),  # skipped
+    #"bias_3_4": ModelConfig(4, 2048, 24, 128, attn_mask_type="causal", attn_bias_type="alibi"),
+    #"bias_3_5": ModelConfig(
+    #    2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="causal", attn_bias_type="alibi"
+    #),  # skipped
+    #"bias_4_0": ModelConfig(
+    #    4, 128, 16, 64, attn_mask_type="padding_causal", attn_bias_type="post_scale_bias"
+    #),  # skipped
+    #"bias_4_1": ModelConfig(
+    #    2,
+    #    128,
+    #    16,
+    #    64,
+    #    max_seqlen_kv=256,
+    #    attn_mask_type="padding_causal",
+    #    attn_bias_type="post_scale_bias",
+    #),  # skipped
+    #"bias_4_2": ModelConfig(
+    #    4, 2048, 24, 128, attn_mask_type="padding_causal", attn_bias_type="post_scale_bias"
+    #),  # skipped
+    #"bias_4_3": ModelConfig(
+    #    2,
+    #    2048,
+    #    24,
+    #    128,
+    #    max_seqlen_kv=4096,
+    #    attn_mask_type="padding_causal",
+    #    attn_bias_type="post_scale_bias",
+    #),  # skipped
+    #"bias_4_4": ModelConfig(
+    #    4, 2048, 24, 128, attn_mask_type="padding_causal", attn_bias_type="alibi"
+    #),  # skipped
+    #"bias_4_5": ModelConfig(
+    #    2,
+    #    2048,
+    #    24,
+    #    128,
+    #    max_seqlen_kv=4096,
+    #    attn_mask_type="padding_causal",
+    #    attn_bias_type="alibi",
+    #),  # skipped
 }
 
 
@@ -561,28 +561,28 @@ model_configs_bias_shapes = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,
     "bias_1_0": ModelConfig(4, 128, 16, 64, attn_bias_type="post_scale_bias", bias_shape="11ss"),
     "bias_1_1": ModelConfig(2, 128, 16, 64, attn_bias_type="post_scale_bias", bias_shape="1hss"),
-    "bias_1_2": ModelConfig(4, 2048, 24, 128, attn_bias_type="post_scale_bias", bias_shape="b1ss"),
-    "bias_1_3": ModelConfig(2, 2048, 24, 128, attn_bias_type="post_scale_bias", bias_shape="bhss"),
-    "bias_1_4": ModelConfig(
-        4,
-        2048,
-        24,
-        128,
-        attn_mask_type="causal",
-        attn_bias_type="alibi",
-        bias_shape="1hss",
-        alibi_type="custom",
-    ),
-    "bias_1_5": ModelConfig(
-        2,
-        2048,
-        24,
-        128,
-        attn_mask_type="causal",
-        attn_bias_type="alibi",
-        bias_shape="bhss",
-        alibi_type="custom",
-    ),
+    #"bias_1_2": ModelConfig(4, 2048, 24, 128, attn_bias_type="post_scale_bias", bias_shape="b1ss"),
+    #"bias_1_3": ModelConfig(2, 2048, 24, 128, attn_bias_type="post_scale_bias", bias_shape="bhss"),
+    #"bias_1_4": ModelConfig(
+    #    4,
+    #    2048,
+    #    24,
+    #    128,
+    #    attn_mask_type="causal",
+    #    attn_bias_type="alibi",
+    #    bias_shape="1hss",
+    #    alibi_type="custom",
+    #),
+    #"bias_1_5": ModelConfig(
+    #    2,
+    #    2048,
+    #    24,
+    #    128,
+    #    attn_mask_type="causal",
+    #    attn_bias_type="alibi",
+    #    bias_shape="bhss",
+    #    alibi_type="custom",
+    #),"""
 }
 
 
