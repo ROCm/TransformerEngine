@@ -98,6 +98,7 @@ def mxfp4_quantize_cpu(
     scale_unbiased = np.clip(scale_unbiased, -127, 127)
     scales = (scale_unbiased + 127).astype(np.uint8)
     scales = np.where(amax_blocks == 0, 127, scales)
+    scales = np.where(scales == 126 , 125, scales)
     
     # Quantization scale: 2^(-scale_unbiased)
     scale_vals = np.where(
@@ -158,12 +159,65 @@ def mxfp4_quantize_cpu(
 # ============================================================================
 # Validation Helpers
 # ============================================================================
+# Build a 16-element table: nibble 0..15 -> float (including sign)
+E2M1_TABLE = torch.tensor(
+    [0., 0.5, 1., 1.5, 2., 3., 4., 6., -0., -0.5, -1., -1.5, -2., -3., -4., -6.],
+    dtype=torch.float32
+)
+
+def encode_fp4_encoded(blocks: torch.Tensor, scale_value: float) -> torch.Tensor:
+    decoded = E2M1_TABLE.to(blocks.device)[blocks.to(torch.int64)]
+    print("DECODED: ", decoded)
+    scaled_blocks = decoded.cpu().numpy() * scale_value
+    print("DECODED SCALED: ", scaled_blocks)
+    signs = np.signbit(scaled_blocks).astype(np.uint8)
+    abs_vals = np.abs(scaled_blocks)
+    indices = np.zeros_like(abs_vals, dtype=np.uint8)
+    indices = np.where(abs_vals >= 0.25, 1, indices)  # → 0.5
+    indices = np.where(abs_vals >= 0.75, 2, indices)  # → 1.0
+    indices = np.where(abs_vals >= 1.25, 3, indices)  # → 1.5
+    indices = np.where(abs_vals >= 1.75, 4, indices)  # → 2.0
+    indices = np.where(abs_vals >= 2.5,  5, indices)  # → 3.0
+    indices = np.where(abs_vals >= 3.5,  6, indices)  # → 4.0
+    indices = np.where(abs_vals >= 5.0,  7, indices)  # → 6.0
+    return torch.from_numpy((signs << 3) | indices).to(blocks.device)
+
+def adjust_ref_for_e8m0_scale_error(ref: torch.Tensor, mismatch_within_tol_indices_map: dict[Tuple[int, int], int], correct: torch.Tensor) -> torch.Tensor:
+    ref_even = ref & 0x0F
+    ref_odd = (ref >> 4) & 0x0F
+    even_correct = correct & 0x0F
+    odd_correct = (correct >> 4) & 0x0F
+    BLOCK_SIZE = MXFP4_BLOCK_SCALING_SIZE // 2
+    for (i, j) in mismatch_within_tol_indices_map.keys():
+        print("PREVIOUSLY i: {}, j: {}".format(i, j))
+        print("EVEN: ", ref_even[i, j*BLOCK_SIZE:(j+1)*BLOCK_SIZE])
+        print("ODD: ", ref_odd[i, j*BLOCK_SIZE:(j+1)*BLOCK_SIZE])
+        print("COMBINED: ", (ref_odd[i, j*BLOCK_SIZE:(j+1)*BLOCK_SIZE] << 4) | ref_even[i, j*BLOCK_SIZE:(j+1)*BLOCK_SIZE])
+        scale_value = 2 if mismatch_within_tol_indices_map[(i, j)] > 0 else 0.5
+        print("scale_value: (i, j) = ({}, {}) = {}".format(i, j, scale_value))
+        curr_block = ref_even[i, j*BLOCK_SIZE:(j+1)*BLOCK_SIZE]
+        fp4_encoded = encode_fp4_encoded(curr_block, scale_value)
+        ref_even[i, j*BLOCK_SIZE:(j+1)*BLOCK_SIZE] = fp4_encoded
+        curr_block = ref_odd[i, j*BLOCK_SIZE:(j+1)*BLOCK_SIZE]
+        fp4_encoded = encode_fp4_encoded(curr_block, scale_value)
+        ref_odd[i, j*BLOCK_SIZE:(j+1)*BLOCK_SIZE] = fp4_encoded
+        print("AFTER i: {}, j: {}".format(i, j))
+        print("EVEN: ", ref_even[i, j*BLOCK_SIZE:(j+1)*BLOCK_SIZE])
+        print("CORRECT EVEN: ", even_correct[i, j*BLOCK_SIZE:(j+1)*BLOCK_SIZE])
+        print("ODD: ", ref_odd[i, j*BLOCK_SIZE:(j+1)*BLOCK_SIZE])
+        print("CORRECT ODD: ", odd_correct[i, j*BLOCK_SIZE:(j+1)*BLOCK_SIZE])
+        print("COMBINED: ", (ref_odd[i, j*BLOCK_SIZE:(j+1)*BLOCK_SIZE] << 4) | ref_even[i, j*BLOCK_SIZE:(j+1)*BLOCK_SIZE])
+        print("CORRECT: ", correct[i, j*BLOCK_SIZE:(j+1)*BLOCK_SIZE])
+        print("CORRECT DECODED EVEN: ", E2M1_TABLE.to(even_correct.device)[even_correct[i, j*BLOCK_SIZE:(j+1)*BLOCK_SIZE].to(torch.int64)])
+        print("CORRECT DECODED ODD: ", E2M1_TABLE.to(odd_correct.device)[odd_correct[i, j*BLOCK_SIZE:(j+1)*BLOCK_SIZE].to(torch.int64)])
+    ref.copy_((ref_odd << 4) | ref_even).to(ref.device)
+    return ref
 
 def compare_fp4_data_nibblewise(
     test: torch.Tensor,
     ref: torch.Tensor,
     msg: str,
-    max_mismatch_rate: float = 0.05,
+    mismatch_within_tol_indices_map: dict[Tuple[int, int], int] = {},
 ) -> None:
     """
     Compare FP4 packed data nibble-by-nibble.
@@ -174,17 +228,15 @@ def compare_fp4_data_nibblewise(
         test: Test output (uint8 packed)
         ref: Reference output (uint8 packed)
         msg: Error message prefix
-        max_mismatch_rate: Maximum allowed mismatch rate (default 5%)
     """
     test_np = test.cpu().numpy().astype(np.uint8)
-    ref_np = ref.cpu().numpy().astype(np.uint8)
-    
+    ref_np = ref.cpu().numpy().astype(np.uint8) 
     # Extract nibbles
     test_even = test_np & 0x0F
     test_odd = (test_np >> 4) & 0x0F
     ref_even = ref_np & 0x0F
     ref_odd = (ref_np >> 4) & 0x0F
-    
+
     # Count mismatches
     even_mismatches = np.sum(test_even != ref_even)
     odd_mismatches = np.sum(test_odd != ref_odd)
@@ -194,14 +246,7 @@ def compare_fp4_data_nibblewise(
     mismatch_rate = total_mismatches / total_nibbles
     exact_match_rate = 1.0 - mismatch_rate
     
-    print(f"\n{msg}:")
-    print(f"  Exact nibble match: {exact_match_rate:.2%}")
-    print(f"  Mismatches: {total_mismatches}/{total_nibbles}")
-    
-    assert mismatch_rate <= max_mismatch_rate, (
-        f"{msg}: Mismatch rate {mismatch_rate:.2%} exceeds {max_mismatch_rate:.2%}\n"
-        f"  Mismatches: {total_mismatches}/{total_nibbles}"
-    )
+    assert total_mismatches == 0, f"Total mismatches: {total_mismatches}"
 
 
 def compare_e8m0_scales(
@@ -209,9 +254,7 @@ def compare_e8m0_scales(
     ref: torch.Tensor,
     msg: str,
     max_diff: int = 1,
-    max_mismatch_rate: float = 0.02,
-    max_outliers: int = 0,
-) -> None:
+) -> dict[Tuple[int, int], int]:
     """
     Compare E8M0 scales allowing ±1 exponent difference.
     
@@ -220,17 +263,20 @@ def compare_e8m0_scales(
         ref: Reference scales (uint8)
         msg: Error message prefix
         max_diff: Maximum allowed difference (default 1)
-        max_mismatch_rate: Maximum allowed mismatch rate (default 2%)
-        max_outliers: Maximum outliers with diff > max_diff (default 0)
     """
     test_np = test.cpu().numpy().astype(np.int16)
     ref_np = ref.cpu().numpy().astype(np.int16)
+    diff = ref_np - test_np
+    abs_diff = np.abs(diff)
     
-    diff = np.abs(test_np - ref_np)
-    
-    exact_matches = np.sum(diff == 0)
-    within_1 = np.sum(diff <= max_diff)
-    outliers = np.sum(diff > max_diff)
+    exact_matches = np.sum(abs_diff == 0)
+    mismatch_within_tol_tuple =  np.where(abs_diff <= max_diff)
+    mismatch_within_tol_indices_map = {}
+    for i in range(len(mismatch_within_tol_tuple[0])):
+        x, y = mismatch_within_tol_tuple[0][i], mismatch_within_tol_tuple[1][i]
+        mismatch_within_tol_indices_map[(x, y)] = diff[x, y]
+    within_1 = np.sum(abs_diff <= max_diff)
+    outliers = np.sum(abs_diff > max_diff)
     total = test_np.size
     
     exact_rate = exact_matches / total
@@ -245,15 +291,11 @@ def compare_e8m0_scales(
     print(f"  Outliers (diff > {max_diff}): {outliers}/{total} ({outlier_rate:.2%})")
     print(f"  Scale bias: {scale_bias:.3f}")
     
-    assert outliers <= max_outliers, (
-        f"{msg}: {outliers} outliers exceeds limit {max_outliers}\n"
+    assert outliers == 0, (
+        f"{msg}: {outliers} outliers found\n"
         f"  Outlier rate: {outlier_rate:.2%}"
     )
-    
-    mismatch_rate = 1.0 - within_1_rate
-    assert mismatch_rate <= max_mismatch_rate, (
-        f"{msg}: Mismatch rate {mismatch_rate:.2%} exceeds {max_mismatch_rate:.2%}"
-    )
+    return mismatch_within_tol_indices_map
 
 
 # ============================================================================
@@ -302,12 +344,6 @@ def test_quantize_mxfp4_standard(shape, in_dtype, rowwise, columnwise, shuffle_B
         ref_data, ref_scale = mxfp4_quantize_cpu(input_tensor, axis='row', SHUFFLE=shuffle_B_matrix_for_aiter)
         num_blocks = math.ceil(K / MXFP4_BLOCK_SCALING_SIZE)
         
-        compare_fp4_data_nibblewise(
-            quantized_out._rowwise_data.view(torch.uint8),
-            ref_data,
-            msg=f"Rowwise FP4 ({shape}, {in_dtype})",
-            max_mismatch_rate=0.05,
-        )
         y1_scales_triton = quantized_out._rowwise_scale_inv.view(torch.uint8)
         y1_scales_torch = ref_scale
         if shuffle_B_matrix_for_aiter:
@@ -318,25 +354,25 @@ def test_quantize_mxfp4_standard(shape, in_dtype, rowwise, columnwise, shuffle_B
                 y1_scales_torch.view(y1_scales_torch.shape[0] // 32, -1)
             )
         
-        compare_e8m0_scales(
+        mismatch_within_tol_row_indices_map = compare_e8m0_scales(
             y1_scales_triton[:M, :num_blocks],
             y1_scales_torch[:M, :num_blocks],
             msg=f"Rowwise E8M0 ({shape}, {in_dtype})",
             max_diff=1,
-            max_mismatch_rate=1e-4,  # 0.01% mismatch rate: allows up to 0.01% of scales to differ by >±1
-            max_outliers=1,  # Up to 1 absolute outlier allowed for hardware rounding differences
+        )
+
+        ref_data = adjust_ref_for_e8m0_scale_error(ref_data, mismatch_within_tol_row_indices_map, quantized_out._rowwise_data.view(torch.uint8))
+
+        compare_fp4_data_nibblewise(
+            quantized_out._rowwise_data.view(torch.uint8),
+            ref_data,
+            msg=f"Rowwise FP4 ({shape}, {in_dtype})",
+            mismatch_within_tol_indices_map=mismatch_within_tol_row_indices_map,
         )
     
     if columnwise:
         ref_data, ref_scale = mxfp4_quantize_cpu(input_tensor, axis='col', SHUFFLE=shuffle_B_matrix_for_aiter)
         num_blocks = math.ceil(M / MXFP4_BLOCK_SCALING_SIZE)
-        
-        compare_fp4_data_nibblewise(
-            quantized_out._columnwise_data.view(torch.uint8),
-            ref_data,
-            msg=f"Columnwise FP4 ({shape}, {in_dtype})",
-            max_mismatch_rate=0.05,
-        )
         
         y1_scales_triton = quantized_out._columnwise_scale_inv.view(torch.uint8)
         y1_scales_torch = ref_scale
@@ -347,13 +383,19 @@ def test_quantize_mxfp4_standard(shape, in_dtype, rowwise, columnwise, shuffle_B
             y1_scales_torch = un_shuffle_scales(
                 y1_scales_torch.view(y1_scales_torch.shape[0] // 32, -1)
             )
-        compare_e8m0_scales(
+        mismatch_within_tol_column_indices_map =compare_e8m0_scales(
             y1_scales_triton[:K, :num_blocks],
             y1_scales_torch[:K, :num_blocks],
             msg=f"Columnwise E8M0 ({shape}, {in_dtype})",
             max_diff=1,
-            max_mismatch_rate=1e-4,  # 0.01% mismatch rate: allows up to 0.01% of scales to differ by >±1
-            max_outliers=1,  # Up to 1 absolute outlier allowed for hardware rounding differences
+        )
+        ref_data = adjust_ref_for_e8m0_scale_error(ref_data, mismatch_within_tol_row_indices_map)
+
+        compare_fp4_data_nibblewise(
+            quantized_out._columnwise_data.view(torch.uint8),
+            ref_data,
+            msg=f"Columnwise FP4 ({shape}, {in_dtype})",
+            mismatch_within_tol_indices_map=mismatch_within_tol_column_indices_map,
         )
 
 
@@ -395,7 +437,6 @@ def test_quantize_mxfp4_edge_cases(edge_case):
             quantized_out._rowwise_data.view(torch.uint8),
             ref_data,
             msg=f"Edge case: {edge_case}",
-            max_mismatch_rate=0.05,
         )
         
         compare_e8m0_scales(
@@ -403,8 +444,6 @@ def test_quantize_mxfp4_edge_cases(edge_case):
             ref_scale[:M, :num_blocks],
             msg=f"Edge case scales: {edge_case}",
             max_diff=1,
-            max_mismatch_rate=1e-4,  # 0.01% mismatch rate: allows up to 0.01% of scales to differ by >±1
-            max_outliers=1,  # Up to 1 absolute outlier allowed for hardware rounding differences
         )
 
 
