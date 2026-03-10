@@ -59,9 +59,7 @@ else()
       # Generate the embedded HSA header and pass it into AITER compile.py via env vars.
       # This avoids needing to set AITER_ASM_DIR (thread-unsafe).
       set(AITER_HSA_DIR "${__AITER_SOURCE_DIR}/hsa")
-      set(AITER_EMBEDDED_HSA_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/aiter_embedded_hsa")
-      set(AITER_EMBEDDED_HSA_HEADER "aiter_embedded_hsa.h")
-      set(AITER_EMBEDDED_HSA_HEADER_PATH "${AITER_EMBEDDED_HSA_INCLUDE_DIR}/${AITER_EMBEDDED_HSA_HEADER}")
+      set(AITER_EMBEDDED_HSA_HEADER_PATH "${CMAKE_CURRENT_BINARY_DIR}/aiter_embedded_hsa/aiter_embedded_hsa.h")
 
       set(AITER_EMBEDDED_HSA_SUBDIRS)
       foreach(ARCH IN LISTS V3_ASM_ARCHS)
@@ -80,7 +78,7 @@ else()
           RESULT_VARIABLE AITER_MAKE_HSA_RET
         )
         if(AITER_MAKE_HSA_RET AND NOT AITER_MAKE_HSA_RET EQUAL 0)
-          message(FATAL_ERROR "Failed to generate ${AITER_EMBEDDED_HSA_HEADER}")
+          message(FATAL_ERROR "Failed to generate aiter_embedded_hsa.h")
         endif()
         list(APPEND AITER_BUILD_ENV_ARGS AITER_EMBEDDED_HSA_HEADER_PATH=${AITER_EMBEDDED_HSA_HEADER_PATH})
       else()
