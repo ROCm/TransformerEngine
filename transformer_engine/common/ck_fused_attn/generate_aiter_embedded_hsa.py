@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
 # Generate aiter_embedded_hsa.h with embedded binary .co files for AITER HSA kernels.
 
 import argparse

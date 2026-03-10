@@ -49,11 +49,12 @@ else()
     
     # If not downloaded, Fallback: Build from source
     if(NOT AITER_PREBUILT_DOWNLOAD_SUCCESS)
-      # Generate aiter_embedded_hsa.h and pass it into AITER compile.py via env vars.
-      # This avoids invasive changes in AITER's JIT build system.
+      # Generate the embedded HSA header and pass it into AITER compile.py via env vars.
+      # This avoids needing to set AITER_ASM_DIR (thread-unsafe).
       set(AITER_HSA_DIR "${__AITER_SOURCE_DIR}/hsa")
       set(AITER_EMBEDDED_HSA_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/aiter_embedded_hsa")
       set(AITER_EMBEDDED_HSA_HEADER "aiter_embedded_hsa.h")
+      set(AITER_EMBEDDED_HSA_HEADER_PATH "${AITER_EMBEDDED_HSA_INCLUDE_DIR}/${AITER_EMBEDDED_HSA_HEADER}")
 
       set(AITER_EMBEDDED_HSA_SUBDIRS)
       foreach(ARCH IN LISTS V3_ASM_ARCHS)
@@ -67,16 +68,14 @@ else()
         execute_process(
           COMMAND python3 "${CMAKE_CURRENT_LIST_DIR}/generate_aiter_embedded_hsa.py"
                   --hsa-dir ${AITER_HSA_DIR}
-                  --output "${AITER_EMBEDDED_HSA_INCLUDE_DIR}/${AITER_EMBEDDED_HSA_HEADER}"
+                  --output ${AITER_EMBEDDED_HSA_HEADER_PATH}
                   --subdirs ${AITER_EMBEDDED_HSA_SUBDIRS}
           RESULT_VARIABLE AITER_MAKE_HSA_RET
         )
         if(AITER_MAKE_HSA_RET AND NOT AITER_MAKE_HSA_RET EQUAL 0)
-          message(FATAL_ERROR "Failed to generate aiter_embedded_hsa.h")
+          message(FATAL_ERROR "Failed to generate ${AITER_EMBEDDED_HSA_HEADER}")
         endif()
-        list(APPEND AITER_BUILD_ENV_ARGS
-             AITER_EMBEDDED_HSA_HEADER=${AITER_EMBEDDED_HSA_HEADER}
-             AITER_EMBEDDED_HSA_INCLUDE_DIR=${AITER_EMBEDDED_HSA_INCLUDE_DIR})
+        list(APPEND AITER_BUILD_ENV_ARGS AITER_EMBEDDED_HSA_HEADER_PATH=${AITER_EMBEDDED_HSA_HEADER_PATH})
       else()
         message(STATUS "[AITER-BUILD] No supported V3 ASM arch selected; skipping embedded HSA generation.")
       endif()
