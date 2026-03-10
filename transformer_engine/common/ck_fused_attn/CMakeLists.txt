@@ -52,8 +52,8 @@ else()
       # Generate aiter_embedded_hsa.h and pass it into AITER compile.py via env vars.
       # This avoids invasive changes in AITER's JIT build system.
       set(AITER_HSA_DIR "${__AITER_SOURCE_DIR}/hsa")
-      set(AITER_EMBEDDED_HSA_HEADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/aiter_embedded_hsa")
-      set(AITER_EMBEDDED_HSA_HEADER "${AITER_EMBEDDED_HSA_HEADER_DIR}/aiter_embedded_hsa.h")
+      set(AITER_EMBEDDED_HSA_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/aiter_embedded_hsa")
+      set(AITER_EMBEDDED_HSA_HEADER "${AITER_EMBEDDED_HSA_INCLUDE_DIR}/aiter_embedded_hsa.h")
 
       set(AITER_EMBEDDED_HSA_SUBDIRS)
       foreach(ARCH IN LISTS V3_ASM_ARCHS)
@@ -76,7 +76,7 @@ else()
         endif()
         list(APPEND AITER_BUILD_ENV_ARGS
              AITER_EMBEDDED_HSA_HEADER=aiter_embedded_hsa.h
-             AITER_EMBEDDED_HSA_INCLUDE_DIR=${AITER_EMBEDDED_HSA_HEADER_DIR})
+             AITER_EMBEDDED_HSA_INCLUDE_DIR=${AITER_EMBEDDED_HSA_INCLUDE_DIR})
       else()
         message(STATUS "[AITER-BUILD] No supported V3 ASM arch selected; skipping embedded HSA generation.")
       endif()
@@ -90,8 +90,12 @@ else()
                 --aiter-test-dir ${__AITER_TEST_DIR}
                 --gpu-archs "${V3_ASM_ARCHS_STR}"
                 --ck-tile-bf16 ${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT}
+        RESULT_VARIABLE AITER_BUILD_RET
       )
-      # libmha_fwd.so and libmha_bwd.so will be under 3rdparty/aiter/op_tests/cpp/mha 
+      if(AITER_BUILD_RET AND NOT AITER_BUILD_RET EQUAL 0)
+        message(FATAL_ERROR "[AITER-BUILD] aiter_build.sh failed")
+      endif()
+      # libmha_fwd.a and libmha_bwd.a will be under 3rdparty/aiter/op_tests/cpp/mha
       cache_local_aiter_build(${__AITER_TEST_DIR})
     endif()
   endif()
