@@ -44,7 +44,7 @@ def generate_embedded_hsa_header(
     for subdir in subdirs:
         pattern_dir = hsa_dir / subdir
         if pattern_dir.exists():
-            for co_file in sorted(pattern_dir.glob("*.co")):
+            for co_file in sorted(pattern_dir.glob("**/*.co")):
                 # Key format: hsa/gfx942/fmha_v3_bwd/xxx.co
                 # Use as_posix() to ensure forward slashes on all platforms
                 rel_path = co_file.relative_to(hsa_dir).as_posix()

@@ -78,7 +78,7 @@ else()
              AITER_EMBEDDED_HSA_HEADER=aiter_embedded_hsa.h
              AITER_EMBEDDED_HSA_INCLUDE_DIR=${AITER_EMBEDDED_HSA_HEADER_DIR})
       else()
-        message(STATUS "[AITER-PREBUILT] No supported V3 ASM arch selected; skipping embedded HSA generation.")
+        message(STATUS "[AITER-BUILD] No supported V3 ASM arch selected; skipping embedded HSA generation.")
       endif()
 
       message(STATUS " [AITER-BUILD] Building aiter from source.")
