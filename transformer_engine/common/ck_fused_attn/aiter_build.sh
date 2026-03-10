@@ -36,11 +36,11 @@ if [[ -z "${AITER_DIR}" || -z "${AITER_TEST_DIR}" || -z "${GPU_ARCHS_VAL}" ]]; t
   exit 1
 fi
 
-# rm -rf "${AITER_DIR}/aiter/jit/build"
-# AITER_LOG_MORE=1 \
-# CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT="${CK_TILE_BF16_DEFAULT}" \
-# GPU_ARCHS="${GPU_ARCHS_VAL}" \
-# python3 "${AITER_TEST_DIR}/compile.py"
+rm -rf "${AITER_DIR}/aiter/jit/build"
+AITER_LOG_MORE=1 \
+CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT="${CK_TILE_BF16_DEFAULT}" \
+GPU_ARCHS="${GPU_ARCHS_VAL}" \
+python3 "${AITER_TEST_DIR}/compile.py"
 
 # Generate static archives from the built object files only if NVTE_AITER_STATIC_LINK=1
 if [[ "${NVTE_AITER_STATIC_LINK:-1}" -ne 1 ]]; then
