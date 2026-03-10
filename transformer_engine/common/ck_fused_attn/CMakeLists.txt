@@ -7,7 +7,6 @@ project(ck_fused_attn LANGUAGES HIP CXX)
 
 
 set(AITER_MHA_INSTALL_PREFIX "transformer_engine" CACHE STRING "aiter mha shared lib install prefix in TE")
-option(AITER_STATIC_LINK "Statically link AITER MHA libs into ck_fused_attn" OFF)
 
 set(__AITER_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/aiter")
 set(__AITER_TEST_DIR "${__AITER_SOURCE_DIR}/op_tests/cpp/mha")
@@ -143,28 +142,15 @@ endif()
 target_include_directories(ck_fused_attn PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(ck_fused_attn PRIVATE ${CK_INCLUDE_DIR} ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha)
 target_include_directories(ck_fused_attn PRIVATE ${AITER_INCLUDE_DIR})
+target_link_options(ck_fused_attn PRIVATE -Wl,--exclude-libs,ALL)
 
+set(__AITER_MHA_FWD_LIB "${__AITER_MHA_PATH}/libmha_fwd.a")
+set(__AITER_MHA_BWD_LIB "${__AITER_MHA_PATH}/libmha_bwd.a")
 find_package(hip)
-list(APPEND ck_fused_attn_LINKER_LIBS hip::host hip::device roctx64)
-
-if(AITER_STATIC_LINK)
-  set(_AITER_LIB_EXT "a")
-  target_link_options(ck_fused_attn PRIVATE -Wl,--exclude-libs,ALL)
-  message(STATUS "Statically linking AITER MHA libs into ck_fused_attn")
-else()
-  set(_AITER_LIB_EXT "so")
-  message(STATUS "Using dynamic AITER MHA libs for ck_fused_attn")
-endif()
-
-set(__AITER_MHA_FWD_LIB "${__AITER_MHA_PATH}/libmha_fwd.${_AITER_LIB_EXT}")
-set(__AITER_MHA_BWD_LIB "${__AITER_MHA_PATH}/libmha_bwd.${_AITER_LIB_EXT}")
-list(APPEND ck_fused_attn_LINKER_LIBS ${__AITER_MHA_FWD_LIB} ${__AITER_MHA_BWD_LIB})
+list(APPEND ck_fused_attn_LINKER_LIBS hip::host hip::device roctx64 ${__AITER_MHA_FWD_LIB} ${__AITER_MHA_BWD_LIB})
 
 target_link_libraries(ck_fused_attn PUBLIC ${ck_fused_attn_LINKER_LIBS})
 target_compile_options(ck_fused_attn PRIVATE ${CK_FUSED_ATTN_COMPILE_OPTIONS})
 set_target_properties(ck_fused_attn PROPERTIES INSTALL_RPATH "$ORIGIN")
 
-if(NOT AITER_STATIC_LINK)
-  install(FILES ${__AITER_MHA_PATH}/libmha_fwd.so ${__AITER_MHA_PATH}/libmha_bwd.so DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib)
-endif()
 install(TARGETS ck_fused_attn DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib)
