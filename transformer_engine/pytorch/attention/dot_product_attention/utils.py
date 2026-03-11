@@ -19,6 +19,7 @@ import numpy as np
 from packaging.version import Version as PkgVersion
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine_torch as tex
@@ -27,6 +28,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     QKVLayout,
     AttnBiasType,
     AttnMaskType,
+    SoftmaxType,
     FusedAttnBackend,
     META_QKV,
     META_DQKV,
@@ -34,18 +36,22 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     META_DO,
     META_S,
     META_DP,
-    META_O_CP,
-    META_DQKV_CP,
 )
 from transformer_engine.pytorch.attention.inference import InferenceParams
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.fp8 import get_fp8_te_dtype
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8Tensor,
+    Float8Quantizer,
+    Float8CurrentScalingQuantizer,
+)
+from transformer_engine.pytorch.quantization import get_fp8_te_dtype
 from transformer_engine.pytorch.constants import TE_DType
 
 
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     get_cudnn_version,
+    SplitAlongDim,
+    combine_tensors,
 )
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
@@ -56,6 +62,9 @@ _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 # NVTE_DEBUG_LEVEL = 0/1/2 # enables more and more verbose debug mode, default = 0
 _NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
 _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
+# print quantizer info for a particular layer on a particular rank
+_print_layer = int(os.getenv("NVTE_PRINT_LAYER_NUMBER", "1"))
+_print_rank = int(os.getenv("NVTE_PRINT_RANK", "0"))
 
 _cu_seqlens_cache = {}
 
@@ -209,16 +218,24 @@ class AttentionParams:
         Attention dropout.
     context_parallel: bool, default = `False`
         Whether context parallelism is used or not.
+    cp_comm_type: str, default = "p2p"
+        The communication type of context parallelism.
     deterministic: bool, default = `False`
         Whether to run `DotProductAttention` with determinism or not.
     is_training: bool, default = `True`
         Whether in training mode (`True`) or inference mode (`False`)
     fp8: bool, default = `False`
-        Whether `DotProductAttention` is in an `fp8_autocast` region.
+        Whether `DotProductAttention` is in an `autocast` region.
     fp8_meta: Optional[Dict[str Any]], default = `None`
         The FP8 metadata tensor of `DotProductAttention`.
     inference_params: Optional[InferenceParams], default = `None`
         Inference-related parameters. See InferenceParams for details.
+    softmax_type: str, default = "vanilla"
+        The type of softmax operation. See DotProductAttention for details.
+    return_max_logit: bool, default = `False`
+        Whether to output max_logit.
+    cuda_graph: bool, default = `False`
+        Whether support for cuda graph capture is needed or not.
     """
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
@@ -240,11 +257,15 @@ class AttentionParams:
     pad_between_seqs: bool = False
     attention_dropout: float = 0.0
     context_parallel: bool = False
+    cp_comm_type: str = "p2p"
     deterministic: bool = False
     is_training: bool = True
     fp8: bool = False
     fp8_meta: Union[Dict[str, Any], None] = None
     inference_params: Optional[InferenceParams] = None
+    softmax_type: str = "vanilla"
+    return_max_logit: bool = False
+    cuda_graph: bool = False
 
     def __eq__(self, other):
         """
@@ -313,11 +334,15 @@ def get_attention_backend(
     pad_between_seqs = attention_params.pad_between_seqs
     attention_dropout = attention_params.attention_dropout
     context_parallel = attention_params.context_parallel
+    cp_comm_type = attention_params.cp_comm_type
     deterministic = attention_params.deterministic
     is_training = attention_params.is_training
     fp8 = attention_params.fp8
     fp8_meta = attention_params.fp8_meta
     inference_params = attention_params.inference_params
+    softmax_type = attention_params.softmax_type
+    return_max_logit = attention_params.return_max_logit
+    cuda_graph = attention_params.cuda_graph
 
     # Run config
     logger = logging.getLogger("DotProductAttention")
@@ -346,8 +371,31 @@ def get_attention_backend(
         field.name: getattr(attention_params, field.name) for field in fields(attention_params)
     }
     run_config.update(attention_params_dict)
+    # Add FP8 environment variables to config
     if fp8:
+        # all FP8 recipes: 1: (FP8 fwd, FP8 bwd), 0: (FP8 fwd, F16 bwd)
         run_config["NVTE_FP8_DPA_BWD"] = int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
+        # Float8CurrentScaling: 1: use F16 O in bwd, 0: use FP8 O in bwd
+        run_config["NVTE_DPA_FP8CS_O_in_F16"] = int(os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1"))
+        # switch recipe to "F16", "DelayedScaling", or "Float8CurrentScaling"
+        _dpa_fp8_recipe = os.getenv("NVTE_DPA_FP8_RECIPE", "")
+        run_config["NVTE_DPA_FP8_RECIPE"] = _dpa_fp8_recipe
+        if _dpa_fp8_recipe != "":
+            # config new recipe if switched
+            run_config["NVTE_DPA_FP8_FORMAT"] = os.getenv("NVTE_DPA_FP8_FORMAT", "HYBRID")
+            run_config["NVTE_DPA_FP8DS_AMAX_ALGO"] = os.getenv(
+                "NVTE_DPA_FP8DS_AMAX_ALGO", "most_recent"
+            )
+            run_config["NVTE_DPA_FP8DS_AMAX_HISTLEN"] = int(
+                os.getenv("NVTE_DPA_FP8DS_AMAX_HISTLEN", "1")
+            )
+            run_config["NVTE_DPA_FP8DS_REDUCE_AMAX"] = int(
+                os.getenv("NVTE_DPA_FP8DS_REDUCE_AMAX", "1")
+            )
+        # UnfusedDotProductAttention: 1: allow FP8 emulation, 0: do not allow
+        run_config["NVTE_UnfusedDPA_Emulate_FP8"] = int(
+            os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0")
+        )
     logger.debug("Running with config=%s", run_config)
 
     # The following sections check if `FlashAttention` supports the provided attention params,
@@ -427,8 +475,60 @@ def get_attention_backend(
                 logger.debug("Disabling FlashAttention 3 for FP8 training")
             use_flash_attention_3 = False
         if use_unfused_attention:
-            logger.debug("Disabling UnfusedDotProductAttention for FP8 attention")
+            allow_emulation = os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1"
+            if not allow_emulation:
+                logger.debug("Disabling UnfusedDotProductAttention for FP8 attention")
+                use_unfused_attention = False
+        fp8_recipe = fp8_meta["recipe"]
+        if fp8_meta.get("local_recipes", None) is not None:
+            fp8_recipe = fp8_meta["local_recipes"][0]
+        if use_fused_attention and fp8_recipe.float8_current_scaling() and not IS_HIP_EXTENSION:
+            if device_compute_capability < (10, 0):
+                logger.debug("Disabling FusedAttention for FP8 current scaling on arch < sm100")
+                use_fused_attention = False
+            # TODO(cyanguwa): Modify the min cuDNN version supporting FP8 current scaling
+            # determinism for Blackwell
+            else:
+                if cudnn_version < (9, 14, 0):
+                    logger.debug(
+                        "Disabling FusedAttention for FP8 current scaling with cuDNN < 9.14.0"
+                    )
+                    use_fused_attention = False
+                else:
+                    if deterministic and cudnn_version < (9, 18, 0):
+                        logger.debug(
+                            "Disabling FusedAttention for FP8 current scaling requiring determinism"
+                            " with cuDNN < 9.18.0"
+                        )
+                        use_fused_attention = False
+
+        if device_compute_capability == (12, 0) and not IS_HIP_EXTENSION:
+            if use_flash_attention:
+                logger.debug(
+                    "Disabling FlashAttention as FP8 is not supported"
+                    " for compute capability = sm120"
+                )
+            if use_fused_attention:
+                logger.debug(
+                    "Disabling FusedAttention as FP8 is not supported"
+                    " for compute capability = sm120"
+                )
+            use_flash_attention = False
+            use_fused_attention = False
+
+    # Filter: Return max_logit
+    if return_max_logit:
+        if use_flash_attention:
+            use_flash_attention = False
+            logger.debug("Disabling FlashAttention for max_logit")
+        if use_fused_attention and qkv_format == "thd":
+            use_fused_attention = False
+            logger.debug("Disabling FusedAttention for max_logit with qkv_format = thd")
+        if fp8 and fp8_meta["recipe"].fp8_dpa:
+            use_flash_attention = False
+            use_fused_attention = False
             use_unfused_attention = False
+            logger.debug("Disabling all backends for max_logit with FP8 attention")
 
     # Filter: KV cache
     # backend  | precision      |    KV cache     | architecture | qkv_format    | page_size
@@ -495,6 +595,21 @@ def get_attention_backend(
                 qkv_layout,
             )
             use_fused_attention = False
+        if (
+            device_compute_capability == (12, 0)
+            and (head_dim_qk > 128 or head_dim_qk % 8 != 0)
+            and is_training
+            and not IS_HIP_EXTENSION
+        ):
+            if use_fused_attention:
+                logger.debug(
+                    "Disabling FusedAttention as MLA for backward pass is not supported for compute"
+                    " capability = sm120 for a head_dim_qk > 128 or head_dim_qk %%8 != 0. Found:"
+                    " head_dim_qk = %s",
+                    head_dim_qk,
+                )
+            use_fused_attention = False
+
     if use_flash_attention_2 and (
         head_dim_qk > 256
         or head_dim_qk % 8 != 0
@@ -565,11 +680,63 @@ def get_attention_backend(
                     "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
                 )
             use_flash_attention = False
+        if device_compute_capability == (12, 0) and not IS_HIP_EXTENSION:
+            if use_fused_attention:
+                logger.debug(
+                    "Disabling FusedAttention as qkv_format = thd is"
+                    " not supported for compute capability = sm120"
+                )
+            use_fused_attention = False
 
     # Filter: Dropout
     if attention_dropout != 0.0 and use_flash_attention_3:
         logger.debug("Disabling FlashAttention 3 for dropout")
         use_flash_attention_3 = False
+
+    # Filter: Softmax type
+    # context_parallel | softmax_type | supported backends
+    # ----------------------------------------------------------------------------------------------------
+    # no               | vanilla      | All
+    # no               | off-by-one   | FusedAttention, UnfusedDotProductAttention
+    # no               | learnable    | FusedAttention, UnfusedDotProductAttention
+    # yes              | vanilla      | FusedAttention, FlashAttention
+    # yes              | off-by-one   | FusedAttention
+    # yes              | learnable    | FusedAttention
+    if softmax_type != "vanilla":
+        logger.debug("Disabling FlashAttention for softmax_type = %s", softmax_type)
+        use_flash_attention = False
+        if fp8 and fp8_meta["recipe"].fp8_dpa:
+            logger.debug("Disabling FusedAttention for softmax_type = %s in FP8", softmax_type)
+            use_fused_attention = False
+            logger.debug(
+                "Disabling UnfusedDotProductAttention for softmax_type = %s in FP8", softmax_type
+            )
+            use_unfused_attention = False
+        if qkv_format == "thd":
+            logger.debug(
+                "Disabling FusedAttention for softmax_type = %s and qkv_format = thd", softmax_type
+            )
+            use_fused_attention = False
+            logger.debug(
+                "Disabling UnfusedDotProductAttention for softmax_type = %s and qkv_format = thd",
+                softmax_type,
+            )
+            use_unfused_attention = False
+        if context_parallel:
+            logger.debug(
+                "Disabling UnfusedDotProductAttention for context parallelism with softmax_type"
+                " = %s",
+                softmax_type,
+            )
+            use_unfused_attention = False
+            if cp_comm_type != "a2a":
+                logger.debug(
+                    "Disabling FusedAttention for context parallelism with softmax_type = %s and"
+                    " cp_comm_type = %s",
+                    softmax_type,
+                    cp_comm_type,
+                )
+                use_fused_attention = False
 
     # Filter: Context parallelism
     # qkv_format | attn_mask_type              | attn_bias_type           | supported backends
@@ -814,6 +981,7 @@ def get_attention_backend(
             QKVLayout[qkv_layout],
             AttnBiasType[fu_core_attention_bias_type],
             AttnMaskType[attn_mask_type],
+            SoftmaxType[softmax_type],
             attention_dropout,
             num_heads,
             num_gqa_groups,
@@ -823,6 +991,8 @@ def get_attention_backend(
             head_dim_v,
             window_size[0],
             window_size[1],
+            return_max_logit,
+            cuda_graph,
         )
         if fused_attention_backend == FusedAttnBackend["No_Backend"]:
             logger.debug("Disabling FusedAttention as no backend supports the provided input")
@@ -893,7 +1063,7 @@ def get_attention_backend(
             logger.debug("Disabling FusedAttention for determinism reasons with post_scale_bias")
             use_fused_attention = False
             fused_attention_backend = None
-        if is_training and device_compute_capability >= (10, 0) and cudnn_version <= (9, 14, 0):
+        if is_training and device_compute_capability >= (10, 0):
             logger.debug("Disabling FusedAttention for determinism reasons on Blackwell")
             use_fused_attention = False
             fused_attention_backend = None
@@ -1567,6 +1737,78 @@ class UnpackTensor(torch.autograd.Function):
         return None, None, _pack_tensor(indices, grad_output)
 
 
+class ConvertTHDtoBSHD(torch.autograd.Function):
+    """
+    Convert a tensor from qkv_format = thd to qkv_format = bshd.
+    """
+
+    @staticmethod
+    def forward(ctx, thd_tensor, cu_seqlens, max_seqlen):
+        # pylint: disable=missing-function-docstring
+        batch_size = cu_seqlens.shape[0] - 1
+        if not thd_tensor.is_contiguous():
+            thd_tensor = thd_tensor.contiguous()
+        bshd_tensor = tex.convert_thd_to_bshd(
+            thd_tensor,
+            cu_seqlens,
+            batch_size,
+            max_seqlen,
+        )
+        ctx.save_for_backward(cu_seqlens)
+        ctx.num_tokens = thd_tensor.shape[0]
+        return bshd_tensor
+
+    @staticmethod
+    def backward(ctx, bshd_tensor):
+        # pylint: disable=missing-function-docstring
+        (cu_seqlens,) = ctx.saved_tensors
+        if not bshd_tensor.is_contiguous():
+            bshd_tensor = bshd_tensor.contiguous()
+        thd_tensor = tex.convert_bshd_to_thd(
+            bshd_tensor,
+            cu_seqlens,
+            ctx.num_tokens,
+        )
+        return thd_tensor, None, None
+
+
+class ConvertBSHDtoTHD(torch.autograd.Function):
+    """
+    Convert a tensor from qkv_format = bshd to qkv_format = thd.
+    """
+
+    @staticmethod
+    def forward(ctx, bshd_tensor, cu_seqlens):
+        # pylint: disable=missing-function-docstring
+        num_tokens = cu_seqlens[-1]
+        max_seqlen = bshd_tensor.shape[1]
+        if not bshd_tensor.is_contiguous():
+            bshd_tensor = bshd_tensor.contiguous()
+        thd_tensor = tex.convert_bshd_to_thd(
+            bshd_tensor,
+            cu_seqlens,
+            num_tokens,
+        )
+        ctx.save_for_backward(cu_seqlens)
+        ctx.max_seqlen = max_seqlen
+        return thd_tensor
+
+    @staticmethod
+    def backward(ctx, thd_tensor):
+        # pylint: disable=missing-function-docstring
+        (cu_seqlens,) = ctx.saved_tensors
+        batch_size = cu_seqlens.shape[0] - 1
+        if not thd_tensor.is_contiguous():
+            thd_tensor = thd_tensor.contiguous()
+        bshd_tensor = tex.convert_thd_to_bshd(
+            thd_tensor,
+            cu_seqlens,
+            batch_size,
+            ctx.max_seqlen,
+        )
+        return bshd_tensor, None
+
+
 def get_qkv_format(
     qkv_layout: str = "bshd_bshd_bshd",
     inference_params: InferenceParams = None,
@@ -1836,11 +2078,10 @@ def check_set_window_size(
     return window_size
 
 
-def get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False):
+def get_attention_quantizers(fp8, quantizers):
     """Get the list of quantizers used in attention from the quantizers list."""
     if not fp8:
-        num_of_nones = 8 if cp_specific_quantizers else 6
-        return [None] * num_of_nones
+        return [None] * 6
     QKV_quantizer = quantizers["scaling_fwd"][META_QKV]
     QKV_quantizer.internal = True
     QKV_quantizer.set_usage(rowwise=True, columnwise=False)
@@ -1849,6 +2090,7 @@ def get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False):
     S_quantizer = quantizers["scaling_fwd"][META_S]
     S_quantizer.internal = True
     S_quantizer.set_usage(rowwise=True, columnwise=False)
+
     dQKV_quantizer = quantizers["scaling_bwd"][META_DQKV]
     dQKV_quantizer.interal = True
     dQKV_quantizer.set_usage(rowwise=True, columnwise=False)
@@ -1858,22 +2100,158 @@ def get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False):
     dP_quantizer = quantizers["scaling_bwd"][META_DP]
     dP_quantizer.set_usage(rowwise=True, columnwise=False)
     dP_quantizer.interal = True
-    dQKV_CP_quantizer = quantizers["scaling_bwd"][META_DQKV_CP]
-    dQKV_CP_quantizer.set_usage(rowwise=True, columnwise=False)
-    dQKV_CP_quantizer.internal = True
-    O_CP_quantizer = quantizers["scaling_fwd"][META_O_CP]
-    O_CP_quantizer.set_usage(rowwise=True, columnwise=False)
-
-    if cp_specific_quantizers:
-        return (
-            QKV_quantizer,
-            O_quantizer,
-            O_CP_quantizer,
-            S_quantizer,
-            dQKV_quantizer,
-            dQKV_CP_quantizer,
-            dO_quantizer,
-            dP_quantizer,
-        )
 
     return QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer
+
+
+def print_quantizers(
+    label,
+    layer_number,
+    QKV_quantizer,
+    O_quantizer,
+    S_quantizer,
+    dQKV_quantizer,
+    dO_quantizer,
+    dP_quantizer,
+):
+    """Print the type and scale/amax of attention quantizers"""
+    _to_print = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL == 2
+    if (
+        _to_print
+        and _print_layer == layer_number
+        and (
+            not dist.is_initialized() or (dist.is_initialized() and dist.get_rank() == _print_rank)
+        )
+    ):
+        names = [
+            "QKV_quantizer",
+            "S_quantizer",
+            "O_quantizer",
+            "dO_quantizer",
+            "dP_quantizer",
+            "dQKV_quantizer",
+        ]
+        quantizers = [
+            QKV_quantizer,
+            S_quantizer,
+            O_quantizer,
+            dO_quantizer,
+            dP_quantizer,
+            dQKV_quantizer,
+        ]
+        if "forward" in label:
+            names = names[:3]
+            quantizers = quantizers[:3]
+        if "backward" in label:
+            names = names[3:]
+            quantizers = quantizers[3:]
+        for i, q in enumerate(quantizers):
+            type_str = ""
+            if q is None:
+                type_str = "None"
+            elif isinstance(q, Float8Quantizer):
+                type_str = "DS"
+            elif isinstance(q, Float8CurrentScalingQuantizer):
+                type_str = "CS"
+            print(
+                f"{label} >> {names[i]:14s}: {type_str}, {q.scale.item():.4e} x"
+                f" {q.amax.item():.4e} = {q.scale.item()*q.amax.item():.4e}"
+            )
+
+
+def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
+    """Combine q,k,v based on qkv_layout and quantize them together"""
+    # 1: qkv packed, 2: kv packed, 3: qkv separate
+    qkv_layout = qkv_layout.replace("paged_kv_", "")
+    qkv_group = len(qkv_layout.split("_"))
+    src_nominal_dtype = q.dtype
+    match qkv_group:
+        case 1:
+            dim = qkv_layout.find("3")
+            qkv = combine_tensors([q, k, v], dim)
+            qkv_fp8 = qkv_quantizer(qkv)
+            q_data, k_data, v_data = SplitAlongDim.apply(qkv_fp8._data, dim, [1, 1, 1], True)
+        case 2:
+            dim = qkv_layout.split("_")[1].find("2")
+            kv = combine_tensors([k, v], dim)
+            tensors = [q, kv]
+            num_tensors = len(tensors)
+            shapes = [x.shape for x in tensors]
+            numels = [x.numel() for x in tensors]
+            numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
+            qkv = torch.cat([x.view(-1) for x in tensors], dim=0)
+            qkv_fp8 = qkv_quantizer(qkv)
+            q_data, kv_data = [
+                qkv_fp8._data[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)
+            ]
+            k_data, v_data = SplitAlongDim.apply(kv_data, dim, [1, 1], True)
+        case 3:
+            tensors = [q, k, v]
+            num_tensors = len(tensors)
+            shapes = [x.shape for x in tensors]
+            numels = [x.numel() for x in tensors]
+            numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
+            qkv = torch.cat([x.view(-1) for x in tensors], dim=0)
+            qkv_fp8 = qkv_quantizer(qkv)
+            q_data, k_data, v_data = [
+                qkv_fp8._data[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)
+            ]
+        case _:
+            raise RuntimeError("Invalid qkv_layout " + qkv_layout)
+
+    q_fp8, k_fp8, v_fp8 = [
+        Float8Tensor.make_like(qkv_fp8, data=x, dtype=src_nominal_dtype)
+        for x in [q_data, k_data, v_data]
+    ]
+
+    return q_fp8, k_fp8, v_fp8
+
+
+def combine_and_dequantize(
+    qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=None, des_nominal_dtype=None
+):
+    """Combine q,k,v based on qkv_layout and dequantize them together"""
+    # 1: qkv packed, 2: kv packed, 3: qkv separate
+    qkv_layout = qkv_layout.replace("paged_kv_", "")
+    qkv_group = len(qkv_layout.split("_"))
+    if all(isinstance(x, Float8Tensor) for x in [q_fp8, k_fp8, v_fp8]):
+        src_nominal_dtype = q_fp8.dtype
+    else:
+        assert src_nominal_dtype is not None, "The nominal dtype of input tensors is required!"
+    if des_nominal_dtype is None:
+        des_nominal_dtype = src_nominal_dtype
+
+    q_data, k_data, v_data = [x._data for x in [q_fp8, k_fp8, v_fp8]]
+    match qkv_group:
+        case 1:
+            dim = qkv_layout.find("3")
+            qkv_data = combine_tensors([q_data, k_data, v_data], dim)
+            qkv_fp8 = Float8Tensor.make_like(q_fp8, data=qkv_data)
+            qkv = qkv_fp8.dequantize(dtype=des_nominal_dtype)
+            q, k, v = SplitAlongDim.apply(qkv, dim, [1, 1, 1], True)
+        case 2:
+            dim = qkv_layout.split("_")[1].find("2")
+            kv_data = combine_tensors([k_data, v_data], dim)
+            tensors = [q_data, kv_data]
+            num_tensors = len(tensors)
+            shapes = [x.shape for x in tensors]
+            numels = [x.numel() for x in tensors]
+            numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
+            qkv_data = torch.cat([x.reshape(-1) for x in tensors], dim=0)
+            qkv_fp8 = Float8Tensor.make_like(q_fp8, data=qkv_data, dtype=src_nominal_dtype)
+            qkv = qkv_fp8.dequantize(dtype=des_nominal_dtype)
+            q, kv = [qkv[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)]
+            k, v = SplitAlongDim.apply(kv, dim, [1, 1], True)
+        case 3:
+            tensors = [q_data, k_data, v_data]
+            num_tensors = len(tensors)
+            shapes = [x.shape for x in tensors]
+            numels = [x.numel() for x in tensors]
+            numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
+            qkv_data = torch.cat([x.contiguous().reshape(-1) for x in tensors], dim=0)
+            qkv_fp8 = Float8Tensor.make_like(q_fp8, data=qkv_data, dtype=src_nominal_dtype)
+            qkv = qkv_fp8.dequantize(dtype=des_nominal_dtype)
+            q, k, v = [qkv[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)]
+        case _:
+            raise RuntimeError("Invalid qkv_layout " + qkv_layout)
+    return q, k, v

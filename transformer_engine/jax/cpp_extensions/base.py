@@ -9,22 +9,16 @@ import re
 import warnings
 from abc import ABCMeta, abstractmethod
 from functools import partial
-from packaging import version
 
 from jax.extend import core
 from jax.interpreters import xla, mlir
 from jax.experimental.custom_partitioning import custom_partitioning
 from jax._src.interpreters import batching
 from jax._src import dispatch
+from jax import ffi
 
 from .misc import is_hip_extension
-import jax
 import transformer_engine_jax
-
-if version.parse(jax.__version__) >= version.parse("0.5.0"):
-    from jax import ffi  # pylint: disable=ungrouped-imports
-else:
-    from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
 
 class BasePrimitive(metaclass=ABCMeta):
@@ -182,7 +176,7 @@ class BasePrimitive(metaclass=ABCMeta):
 _primitive_registry = {}
 
 
-def register_primitive(cls):
+def register_primitive(cls, outer_only=False):
     """
     Register a JAX primitive and add it to the internal registry.
     """
@@ -195,13 +189,14 @@ def register_primitive(cls):
     def name_of_wrapper_p():
         return cls.name + "_wrapper"
 
-    inner_p = core.Primitive(cls.name)
-    dispatch.prim_requires_devices_during_lowering.add(inner_p)
-    inner_p.multiple_results = cls.multiple_results
-    inner_p.def_impl(partial(xla.apply_primitive, inner_p))
-    inner_p.def_abstract_eval(cls.abstract)
-    mlir.register_lowering(inner_p, cls.lowering, platform="rocm" if is_hip_extension() else "cuda")
-    cls.inner_primitive = inner_p
+    if not outer_only:
+        inner_p = core.Primitive(cls.name)
+        dispatch.prim_requires_devices_during_lowering.add(inner_p)
+        inner_p.multiple_results = cls.multiple_results
+        inner_p.def_impl(partial(xla.apply_primitive, inner_p))
+        inner_p.def_abstract_eval(cls.abstract)
+        mlir.register_lowering(inner_p, cls.lowering, platform="rocm" if is_hip_extension() else "cuda")
+        cls.inner_primitive = inner_p
 
     outer_p = core.Primitive(name_of_wrapper_p())
     dispatch.prim_requires_devices_during_lowering.add(outer_p)
@@ -210,16 +205,11 @@ def register_primitive(cls):
     outer_p.def_abstract_eval(cls.outer_abstract)
     batching.primitive_batchers[outer_p] = cls.batcher
     outer_p_lower = custom_partitioning(cls.impl, static_argnums=cls.impl_static_args)
-    if version.parse(jax.__version__) >= version.parse("0.5.0"):
-        outer_p_lower.def_partition(
-            infer_sharding_from_operands=cls.infer_sharding_from_operands,
-            partition=cls.partition,
-            sharding_rule=cls.shardy_sharding_rule,
-        )
-    else:
-        outer_p_lower.def_partition(
-        infer_sharding_from_operands=cls.infer_sharding_from_operands, partition=cls.partition
-        )
+    outer_p_lower.def_partition(
+        infer_sharding_from_operands=cls.infer_sharding_from_operands,
+        partition=cls.partition,
+        sharding_rule=cls.shardy_sharding_rule,
+    )
     mlir.register_lowering(
         outer_p, mlir.lower_fun(outer_p_lower, multiple_results=cls.multiple_results)
     )
@@ -234,7 +224,7 @@ def manage_primitives(enable_names=None, disable_names=None, disable_all_first=F
     """
     Helper function to manage primitive states by name without modifying environment variables.
     Allows enabling specific primitives, disabling specific primitives, or disabling all primitives.
-    This helper is used in the get_quantize_config().initialize() methods.
+    This helper is used in the get_quantize_config_with_recipe().initialize() methods.
 
     Args:
         enable_names: List of strings, each representing the name of a primitive class to enable. Defaults to None.
