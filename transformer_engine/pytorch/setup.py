@@ -56,6 +56,9 @@ from build_tools.pytorch import (
     test_requirements,
 )
 
+if rocm_build():
+    from build_tools.hipify.hipify import copy_hipify_tools, clear_hipify_tools_copy
+
 
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
 CMakeBuildExtension = get_build_ext(BuildExtension, True)
