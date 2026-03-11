@@ -38,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [linux-mi325-8, linux-mi355-8]
+        runner: [linux-te-mi325-8, linux-te-mi355-8]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
