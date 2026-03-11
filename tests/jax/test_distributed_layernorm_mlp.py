@@ -217,11 +217,11 @@ class TestDistributedLayernormMLP:
             is_hip_extension()
             and (not with_jax_gemm)
             and use_bias
-            and (fp8_recipe is None)
+            and (quantization_recipe is None)
             and (dtype == jnp.bfloat16)
         ):
             pytest.xfail("Skip known failure case.")
-        if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
+        if isinstance(quantization_recipe, recipe.MXFP8BlockScaling):
             _check_mxfp8_layernorm_mlp_grad_support(
                 input_shape[0]*input_shape[1],
                 INTERMEDIATE,
@@ -410,7 +410,7 @@ class TestDistributedLayernormMLP:
         use_shardy,
         with_jax_gemm,
     ):
-        if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
+        if isinstance(quantization_recipe, recipe.MXFP8BlockScaling):
             _check_mxfp8_layernorm_mlp_support(
                 input_shape[0]*input_shape[1],
                 INTERMEDIATE,

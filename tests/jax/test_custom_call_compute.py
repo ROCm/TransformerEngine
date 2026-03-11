@@ -1450,22 +1450,24 @@ class TestDense:
         assert_allclose(primitive_w_grad, ref_w_grad, dtype=jnp.bfloat16)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
-    @pytest_parametrize_wrapper("m,n,k", TEST_SHAPES)
-    @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
+    @pytest_parametrize_wrapper("m,n,k", [(64, 128, 128), (128, 256, 256)])
+    @pytest_parametrize_wrapper("recipe", supported_recipes)
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     @pytest_parametrize_wrapper("use_bias", [False, True] if is_hip_extension() else [True])
-    def test_dense_grad_fp8(self, m, n, k, scaling_mode, with_jax_gemm, use_bias):
+    def test_dense_grad_fp8_and_fp4(self, m, n, k, recipe, with_jax_gemm, use_bias):
         data_layout = "NN"
         x, w, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)
 
         key = jax.random.PRNGKey(1)
         bias = jax.random.uniform(key, n, dtype=jnp.bfloat16) if use_bias else None
 
-        if scaling_mode.is_1d_block_scaling():
+        if recipe.__class__.__name__ == "MXFP8BlockScaling":
             # Check for first GEMM
             _check_mxfp8_gemm_support(with_jax_gemm, m, n, k, use_bias)
             # Check for second GEMM
             _check_mxfp8_gemm_support(with_jax_gemm, m, k, n, use_bias)
+            # Check for third GEMM
+            _check_mxfp8_gemm_support(with_jax_gemm, k, n, m, use_bias)
 
 
         def primitive_func(x, w, bias, contracting_dims, quantizer_set):
@@ -1530,7 +1532,7 @@ def _ref_jax_norm_impl(x, gamma, beta, norm_type, zero_centered_gamma, eps, quan
 
 class TestFusedDense:
     @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
-    @pytest.mark.parametrize("m,n,k", [(64, 128, 128)])
+    @pytest.mark.parametrize("m,n,k", [(64, 128, 128), (128, 256, 256)])
     @pytest_parametrize_wrapper("recipe", supported_recipes)
     @pytest.mark.parametrize("norm_type", ["layernorm", "rmsnorm"])
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
@@ -1538,11 +1540,13 @@ class TestFusedDense:
         """
         Test layernorm_dense VJP Rule
         """
-        if scaling_mode.is_1d_block_scaling():
+        if recipe.__class__.__name__ == "MXFP8BlockScaling":
             # Check for fwd GEMM
             _check_mxfp8_gemm_support(with_jax_gemm, m, n, k)
-            # Check for bwd GEMM
+            # Check for first bwd GEMM
             _check_mxfp8_gemm_support(with_jax_gemm, m, k, n)
+            # Check for second bwd GEMM
+            _check_mxfp8_gemm_support(with_jax_gemm, k, n, m)
         # zero_centered_gamma is already tested in TestNorm
         zero_centered_gamma = False
         eps = 1e-6
@@ -1614,7 +1618,7 @@ class TestFusedDense:
             assert_allclose(prim_beta_grad, ref_beta_grad, dtype=quantizer_set.dgrad.q_dtype)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
-    @pytest.mark.parametrize("m,n,k", [(64, 128, 128)])
+    @pytest.mark.parametrize("m,n,k", [(64, 128, 128), (128, 256, 256)])
     @pytest.mark.parametrize("activation_type", [("gelu",), ("gelu", "linear")])
     @pytest_parametrize_wrapper("recipe", supported_recipes)
     @pytest.mark.parametrize("norm_type", ["layernorm", "rmsnorm"])
@@ -1626,11 +1630,13 @@ class TestFusedDense:
         """
         Test layernorm_mlp VJP Rule
         """
-        if scaling_mode.is_1d_block_scaling():
+        if recipe.__class__.__name__ == "MXFP8BlockScaling":
             # Check for first GEMM
             _check_mxfp8_gemm_support(with_jax_gemm, m, n, k, use_bias)
             # Check for second GEMM
             _check_mxfp8_gemm_support(with_jax_gemm, m, k, n, use_bias)
+            # Check for third GEMM
+            _check_mxfp8_gemm_support(with_jax_gemm, k, n, m, use_bias)
 
         # zero_centered_gamma is already tested in TestNorm
         zero_centered_gamma = False

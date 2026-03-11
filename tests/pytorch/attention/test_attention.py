@@ -121,7 +121,7 @@ model_configs_base = {
 
 
 param_types = [torch.float16]
-if is_bf16_compatible():  # bf16 requires sm_80 or higher
+if is_bf16_available():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 param_types_lean = [torch.bfloat16]
 
@@ -139,7 +139,6 @@ def test_gqa_mla_thd():
         config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,
-        window_size=config.window_size,
         pad_between_seqs=True,
     )
     if FusedAttnBackend["CK"] not in fused_attn_backends:
@@ -153,7 +152,7 @@ def test_dot_product_mem_calc():
     """Non-regression test for memory workspace calculation integer overflow issue."""
     ckpt_attn = False
     pad_between_seqs = False
-    if not is_bf16_compatible():
+    if not is_bf16_available():
         pytest.skip("This test requires bf16 support.")
     dtype = torch.bfloat16
     # b, sq, q, dqk
@@ -164,7 +163,6 @@ def test_dot_product_mem_calc():
         config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,
-        window_size=config.window_size,
         pad_between_seqs=pad_between_seqs,
         is_training=is_training,
     )
@@ -173,7 +171,7 @@ def test_dot_product_mem_calc():
 
     os.environ["NVTE_FUSED_ATTN_CK"] = "1"
     os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "0"
-    _, _ = _run_dot_product_attention(
+    _run_dot_product_attention(
         dtype,
         config,
         "FusedAttention",
@@ -328,7 +326,7 @@ def test_dot_product_attention(
             os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "0"
             os.environ["NVTE_CK_USES_FWD_V3"] = "0"
             os.environ["NVTE_CK_USES_BWD_V3"] = "0"
-            fused_attn_fwd_2, fused_attn_bwd_2 = _run_dot_product_attention(
+            fused_attn_fwd_2, _, fused_attn_bwd_2 = _run_dot_product_attention(
                 dtype,
                 config,
                 "FusedAttention",

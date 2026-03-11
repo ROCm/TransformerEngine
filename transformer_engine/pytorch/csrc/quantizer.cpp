@@ -859,7 +859,7 @@ std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size
       NVTE_CHECK(data_format == Float8BlockScaleTensorFormat::GEMM_READY,
                  "2D scaling is always GEMM_READY for now.");
       sinv0 = (m_dim + kBlockLen - 1) / kBlockLen;
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
       sinv1 = (k_dim + kBlockLen - 1) / kBlockLen;
 #else
       sinv1 = roundup((k_dim + kBlockLen - 1) / kBlockLen, 4);
@@ -869,7 +869,7 @@ std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size
       bool rowwise_compact = data_format == Float8BlockScaleTensorFormat::COMPACT;
       // default rowwise scaling factor shape already transpose the scaling factor so it's GEMM_READY
       sinv0 = (k_dim + kBlockLen - 1) / kBlockLen;
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
       sinv1 = m_dim;
 #else
       sinv1 = rowwise_compact ? m_dim : roundup(m_dim, 4);
@@ -894,7 +894,7 @@ std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size
       NVTE_CHECK(data_format == Float8BlockScaleTensorFormat::GEMM_READY,
                  "2D scaling is always GEMM_READY for now.");
       sinv0 = (k_dim + kBlockLen - 1) / kBlockLen;
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
       sinv1 = (m_dim + kBlockLen - 1) / kBlockLen;
 #else
       sinv1 = roundup((m_dim + kBlockLen - 1) / kBlockLen, 4);
@@ -903,7 +903,7 @@ std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size
       // 1D scaling can be GEMM_READY or COMPACT
       bool columnwise_compact = data_format == Float8BlockScaleTensorFormat::COMPACT;
       sinv0 = (m_dim + kBlockLen - 1) / kBlockLen;
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
       sinv1 = k_dim;
 #else
       sinv1 = columnwise_compact ? k_dim : roundup(k_dim, 4);
@@ -1140,7 +1140,7 @@ std::vector<size_t> MXFP8Quantizer::get_scale_shape(const std::vector<size_t>& s
   NVTE_CHECK(last_dim % MXFP8_BLOCK_SIZE == 0 && (numel / last_dim) % MXFP8_BLOCK_SIZE == 0,
              "MXFP8 requires tensor dims that are divisible by ", MXFP8_BLOCK_SIZE,
              " (got shape=", shape, ")");
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_ROCM
   return !columnwise 
          ? std::vector<size_t>{numel / last_dim, last_dim / MXFP8_BLOCK_SIZE} 
          : std::vector<size_t>{numel / last_dim / MXFP8_BLOCK_SIZE, last_dim};
