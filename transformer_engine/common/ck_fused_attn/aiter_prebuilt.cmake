@@ -45,7 +45,8 @@ endfunction()
 # It checks cache validity first, if invalid, tries to download.
 function(get_prebuilt_aiter PREBUILT_DIR_VAR)
   set(RESULT FALSE)
-  foreach(ROCM_VER_PARAM IN LISTS ROCM_VER ROCM_VER_MAJOR)
+  #TODO: remove ROCM_VER from the check once the change is integrated to all features modifying AITER
+  foreach(ROCM_VER_PARAM IN LISTS ROCM_VER_MAJOR ROCM_VER)
     is_aiter_cache_valid("${ROCM_VER_PARAM}" RESULT)
     if(RESULT)
       get_aiter_cache_key("${ROCM_VER_PARAM}" _UNUSED CACHE_DIR)
@@ -54,11 +55,12 @@ function(get_prebuilt_aiter PREBUILT_DIR_VAR)
     endif()
   endforeach()
   
-  # Cache is invalid/outdated - clean it and some build files
+  # Cache is invalid/outdated - clean it and some build files that depend on AITER libs path
   file(REMOVE_RECURSE "${AITER_CACHE_ROOT}")
   file(REMOVE_RECURSE "${CMAKE_BINARY_DIR}/_deps")
 
-  foreach(ROCM_VER_PARAM IN LISTS ROCM_VER ROCM_VER_MAJOR)
+  #TODO: remove ROCM_VER from the check once the change is integrated to all features modifying AITER
+  foreach(ROCM_VER_PARAM IN LISTS ROCM_VER_MAJOR ROCM_VER)
     download_aiter_prebuilt("${ROCM_VER_PARAM}" RESULT)
     if(RESULT)
       get_aiter_cache_key("${ROCM_VER_PARAM}" _UNUSED CACHE_DIR)
