@@ -15,7 +15,7 @@ from .cast_transpose import te_cast_transpose_mxfp4_triton, te_cast_transpose_mx
 import transformer_engine_torch as tex
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
-from ..tensor.storage.mxfp4_tensor_base import MXFP4TensorBase
+from ..tensor.storage.mxfp4_tensor_storage import MXFP4TensorStorage
 
 @functools.lru_cache(maxsize=None)
 def _empty_tensor() -> torch.Tensor:
@@ -120,7 +120,7 @@ def te_quantize_triton(
                 out = tex.quantize(input_tensor, quantizer, out, noop_flag)
     elif isinstance(out, MXFP8TensorStorage):
         te_cast_transpose_mxfp8_triton(input_tensor, out)
-    elif isinstance(out, MXFP4TensorBase):
+    elif isinstance(out, MXFP4TensorStorage):
         te_cast_transpose_mxfp4_triton(input_tensor,out)
     else:
         raise NotImplementedError(f"Not implemented for tensor type: '{type(out).__name__}'")

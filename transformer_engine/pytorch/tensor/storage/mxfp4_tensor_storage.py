@@ -9,8 +9,8 @@ import torch
 
 from transformer_engine_torch import DType as TE_DType
 
-from ..quantized_tensor import QuantizedTensorBase
-from ..quantized_tensor import Quantizer
+from ...quantized_tensor import QuantizedTensorStorage, Quantizer
+
 from ...utils import _empty_tensor
 
 
@@ -20,7 +20,7 @@ class _FromMXFP4Func(torch.autograd.Function):
     @staticmethod
     def forward(
         _ctx: Optional[torch.autograd.function.FunctionCtx],  # unused
-        tensor: MXFP4TensorBase,
+        tensor: MXFP4TensorStorage,
         dtype: torch.dtype,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
@@ -49,7 +49,7 @@ class _FromMXFP4Func(torch.autograd.Function):
         return grad, None
 
 
-class MXFP4TensorBase(QuantizedTensorBase):
+class MXFP4TensorStorage(QuantizedTensorStorage):
     """Mixin class that holds data attributes of MXFP4Tensor.
 
     MXFP4Tensor inherits from the PyTorch tensor class and this mixin
@@ -113,7 +113,7 @@ class MXFP4TensorBase(QuantizedTensorBase):
             "quantizer": self._quantizer,
         }
 
-    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], MXFP4TensorBase]:
+    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], MXFP4TensorStorage]:
         """Prepare the tensor base for saving for backward"""
         tensors = [
             self._rowwise_data,
@@ -161,7 +161,7 @@ class MXFP4TensorBase(QuantizedTensorBase):
 
     def __repr__(self):
         return (
-            "MXFP4TensorBase("
+            "MXFP4TensorStorage("
             f"fp4_dtype={self._fp4_dtype}, "
             f"rowwise_data_shape={self._rowwise_data.shape if self._rowwise_data is not None else None}, "
             f"rowwise_scale_inv_shape={self._rowwise_scale_inv.shape if self._rowwise_scale_inv is not None else None}"
@@ -174,7 +174,7 @@ class MXFP4TensorBase(QuantizedTensorBase):
         columnwise_usage: Optional[bool] = None,
     ):
         """
-        Update the usage of the MXFP4TensorBase.
+        Update the usage of the MXFP4TensorStorage.
     
         """
 

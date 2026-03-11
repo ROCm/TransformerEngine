@@ -18,8 +18,9 @@ from transformer_engine.common.recipe import MXFP4BlockScaling, Recipe
 from ..constants import MXFP8_BLOCK_SCALING_SIZE  # MXFP4 uses same block size
 from ..utils import devices_match, round_up_to_nearest_multiple
 
-from .storage.mxfp4_tensor_base import MXFP4TensorBase, _FromMXFP4Func
-from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
+from .storage.mxfp4_tensor_storage import MXFP4TensorStorage, _FromMXFP4Func
+from ..quantized_tensor import QuantizedTensor, Quantizer
+from ._quantization_helpers import _IdentityFunc
 
 MXFP4_BLOCK_SCALING_SIZE = MXFP8_BLOCK_SCALING_SIZE
 
@@ -188,7 +189,7 @@ class MXFP4Quantizer(Quantizer):
         return MXFP4BlockScaling
 
 
-class MXFP4Tensor(MXFP4TensorBase, QuantizedTensor):
+class MXFP4Tensor(MXFP4TensorStorage, QuantizedTensor):
     """Experimental tensor class with FP4 data
 
     The tensor presents as having a standard, higher-precision dtype,
@@ -212,7 +213,7 @@ class MXFP4Tensor(MXFP4TensorBase, QuantizedTensor):
 
     """
 
-    # NOTE: We reorder the *args so that we can instantiate a MXFP4TensorBase with positional args,
+    # NOTE: We reorder the *args so that we can instantiate a MXFP4TensorStorage with positional args,
     # which significantly reduces the Pybind11 overhead when calling the constructor from C++.
     def __new__(
         cls,
