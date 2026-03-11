@@ -380,7 +380,9 @@ jobs:
         run: |
           set -ex
 
-          # Restore PR checkout no matter how this step exits
+          # Restore PR checkout no matter how this step exits,
+          # in case a later step needs to access the PR code.
+          # Note that the PR code is *not* recompiled.
           trap 'git checkout ${{ github.sha }} && git submodule update --init --recursive' EXIT
 
           # Benchmark PR branch (already built)
@@ -390,7 +392,7 @@ jobs:
           cd /workspace
 
           mkdir -p perf_results/pr
-          for bench in benchmarks/benchmark_*.py; do
+          for bench in benchmarks/microbenchmarks/benchmark_*.py; do
             name=$(basename "$bench" .py)
             echo "=== Running $name (PR) ==="
             python "$bench"
@@ -399,7 +401,7 @@ jobs:
 
           # Stash benchmark scripts so they survive the base branch checkout
           mkdir -p .perf_stash
-          cp benchmarks/benchmark_*.py benchmarks/compare_results.py .perf_stash/
+          cp benchmarks/microbenchmarks/benchmark_*.py benchmarks/microbenchmarks/compare_results.py .perf_stash/
           OUTER
           )"
 
