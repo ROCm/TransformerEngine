@@ -858,6 +858,21 @@ struct TypeInfo {
     }                                                               \
   }
 
+#define TRANSFORMER_ENGINE_CHUNK_DIM_SWITCH(use_large, CHUNK_Y, CHUNK_X, THREADS, ...) \
+  [&] {                                                                                \
+    if (use_large) {                                                                   \
+      constexpr size_t CHUNK_Y = 128;                                                  \
+      constexpr size_t CHUNK_X = 128;                                                  \
+      constexpr size_t THREADS = 256;                                                  \
+      { __VA_ARGS__ }                                                                  \
+    } else {                                                                           \
+      constexpr size_t CHUNK_Y = 64;                                                   \
+      constexpr size_t CHUNK_X = 64;                                                   \
+      constexpr size_t THREADS = 128;                                                  \
+      { __VA_ARGS__ }                                                                  \
+    }                                                                                  \
+  }()
+
 #define TRANSFORMER_ENGINE_SWITCH_CONDITION(CONDITION, FLAG, ...) \
   if (CONDITION) {                                                \
     constexpr bool FLAG = true;                                   \
