@@ -176,6 +176,26 @@ class NVFP4Quantizer(Quantizer):
 
         return dst
 
+    def copy(self) -> NVFP4Quantizer:
+        """Create shallow copy"""
+
+        quantizer = NVFP4Quantizer(
+            fp4_dtype=self.dtype,
+            rowwise=self.rowwise_usage,
+            columnwise=self.columnwise_usage,
+            with_amax_reduction=self.with_amax_reduction,
+            amax_reduction_group=self.amax_reduction_group,
+            with_rht=self.with_rht,
+            with_post_rht_amax=self.with_post_rht_amax,
+            with_2d_quantization=self.with_2d_quantization,
+            stochastic_rounding=self.stochastic_rounding,
+        )
+        quantizer.internal = self.internal
+        quantizer.rht_matrix = self.rht_matrix
+        quantizer.rht_matrix_random_sign_mask_t = self.rht_matrix_random_sign_mask_t
+
+        return quantizer
+
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
         return tex.quantize(tensor, self)
@@ -360,26 +380,26 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
 
     Parameters
     ----------
-    rowwise_data: torch.Tensor
+    rowwise_data : torch.Tensor
         Raw FP4 data in a uint8 tensor (rowwise layout).
-    rowwise_scale_inv: torch.Tensor
+    rowwise_scale_inv : torch.Tensor
         Reciprocal of the scaling factor applied when
         casting to FP4, i.e. the scaling factor that must
         be applied when casting from FP4 to higher
         precision (rowwise).
-    columnwise_data: torch.Tensor, optional
+    columnwise_data : torch.Tensor, optional
         Raw FP4 data in a uint8 tensor (columnwise layout).
-    columnwise_scale_inv: torch.Tensor, optional
+    columnwise_scale_inv : torch.Tensor, optional
         Reciprocal of the scaling factor for columnwise FP4 data.
-    amax_rowwise: torch.Tensor, optional
+    amax_rowwise : torch.Tensor, optional
         Rowwise amax tracking tensor.
-    amax_columnwise: torch.Tensor, optional
+    amax_columnwise : torch.Tensor, optional
         Columnwise amax tracking tensor.
-    fp4_dtype: TE_DType
+    fp4_dtype : TE_DType
         The FP4 data type used for quantization.
-    quantizer: Quantizer
+    quantizer : Quantizer
         The quantizer instance used for this tensor.
-    dtype: torch.dtype, default = torch.float32
+    dtype : torch.dtype, default = torch.float32
         Nominal tensor datatype, used in dequantize.
     """
 

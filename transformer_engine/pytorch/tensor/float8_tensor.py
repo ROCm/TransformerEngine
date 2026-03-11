@@ -74,6 +74,20 @@ class Float8Quantizer(Quantizer):
         self.amax = amax
         self.dtype = fp8_dtype
 
+    def copy(self) -> Float8Quantizer:
+        """Create shallow copy"""
+
+        quantizer = Float8Quantizer(
+            scale=self.scale,
+            amax=self.amax,
+            fp8_dtype=self.dtype,
+            rowwise=self.rowwise_usage,
+            columnwise=self.columnwise_usage,
+        )
+        quantizer.internal = self.internal
+
+        return quantizer
+
     def update_quantized(
         self,
         src: torch.Tensor,
@@ -264,16 +278,42 @@ class Float8CurrentScalingQuantizer(Quantizer):
         amax_reduction_group: Optional[dist_group_type] = None,
         force_pow_2_scales: bool = False,
         amax_epsilon: float = 0.0,
+        scale: Optional[torch.Tensor] = None,
+        amax: Optional[torch.Tensor] = None,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        self.scale = torch.empty(1, dtype=torch.float32, device=device)
-        self.amax = torch.empty(1, dtype=torch.float32, device=device)
+        if scale is None:
+            scale = torch.empty(1, dtype=torch.float32, device=device)
+        if amax is None:
+            amax = torch.empty(1, dtype=torch.float32, device=device)
+        self.scale = scale
+        self.amax = amax
         self.dtype = fp8_dtype
         self.use_existing_amax = use_existing_amax
         self.with_amax_reduction = with_amax_reduction
         self.amax_reduction_group = amax_reduction_group
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
+
+    def copy(self) -> Float8CurrentScalingQuantizer:
+        """Create shallow copy"""
+
+        quantizer = Float8CurrentScalingQuantizer(
+            fp8_dtype=self.dtype,
+            device=0,
+            rowwise=self.rowwise_usage,
+            columnwise=self.columnwise_usage,
+            with_amax_reduction=self.with_amax_reduction,
+            amax_reduction_group=self.amax_reduction_group,
+            use_existing_amax=self.use_existing_amax,
+            force_pow_2_scales=self.force_pow_2_scales,
+            amax_epsilon=self.amax_epsilon,
+            scale=self.scale,
+            amax=self.amax,
+        )
+        quantizer.internal = self.internal
+
+        return quantizer
 
     def update_quantized(
         self,
@@ -443,23 +483,23 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
 
     Parameters
     ----------
-    shape: int or iterable of int
+    shape : int or iterable of int
         Tensor dimensions.
-    dtype: torch.dtype
+    dtype : torch.dtype
         Nominal tensor datatype.
-    requires_grad: bool, optional = False
+    requires_grad : bool, optional = False
         Whether to compute gradients for this tensor.
-    data: torch.Tensor
+    data : torch.Tensor
         Raw FP8 data in a uint8 tensor
-    fp8_scale_inv: torch.Tensor
+    fp8_scale_inv : torch.Tensor
         Reciprocal of the scaling factor applied when casting to FP8,
         i.e. the scaling factor that must be applied when casting from
         FP8 to higher precision.
-    fp8_dtype: transformer_engine_torch.DType
+    fp8_dtype : transformer_engine_torch.DType
         FP8 format.
-    data_transpose: torch.Tensor, optional
+    data_transpose : torch.Tensor, optional
         FP8 transpose data in a uint8 tensor
-    quantizer: Float8Quantizer, Float8CurrentScalingQuantizer, optional
+    quantizer : Float8Quantizer, Float8CurrentScalingQuantizer, optional
         Builder class for FP8 tensors
 
     """

@@ -316,7 +316,7 @@ class OperationFuser:
 
     Parameters
     ----------
-    ops: list of FusibleOperation
+    ops : list of FusibleOperation
         Pipeline of operations
 
     """

@@ -53,6 +53,18 @@ class MXFP8Quantizer(Quantizer):
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = fp8_dtype
 
+    def copy(self) -> MXFP8Quantizer:
+        """Create shallow copy"""
+
+        quantizer = MXFP8Quantizer(
+            fp8_dtype=self.dtype,
+            rowwise=self.rowwise_usage,
+            columnwise=self.columnwise_usage,
+        )
+        quantizer.internal = self.internal
+
+        return quantizer
+
     def update_quantized(
         self,
         src: torch.Tensor,
@@ -153,6 +165,16 @@ class MXFP8Quantizer(Quantizer):
         if self.columnwise_usage:
             columnwise_data = torch.empty(
                 shape, dtype=torch.uint8, device=device, pin_memory=pin_memory
+<<<<<<< HEAD
+=======
+            )
+            columnwise_scale_inv = torch.empty(
+                round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
+                round_up_to_nearest_multiple(shape[-1], 128),
+                dtype=torch.uint8,
+                device=device,
+                pin_memory=pin_memory,
+>>>>>>> upstream/release_v2.10
             )
             # ROCm TE does not implement fuse padding zeros so use zero tensor here
             if IS_HIP_EXTENSION:
@@ -231,16 +253,16 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
     Parameters
     ----------
-    data: torch.Tensor
+    data : torch.Tensor
           Raw FP8 data in a uint8 tensor
-    fp8_dtype: transformer_engine_torch.DType, default = kFloat8E4M3
+    fp8_dtype : transformer_engine_torch.DType, default = kFloat8E4M3
                FP8 format.
-    fp8_scale_inv: torch.Tensor
+    fp8_scale_inv : torch.Tensor
                    Reciprocal of the scaling factor applied when
                    casting to FP8, i.e. the scaling factor that must
                    be applied when casting from FP8 to higher
                    precision.
-    dtype: torch.dtype, default = torch.float32
+    dtype : torch.dtype, default = torch.float32
            Nominal tensor datatype.
 
     """

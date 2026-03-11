@@ -19,11 +19,10 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
-from transformer_engine.pytorch import torch_version
+from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.tensor.utils import is_custom
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
-    get_workspace,
     _ub_communicators,
     get_ub,
     TransformerEngineBaseModule,
@@ -48,6 +47,7 @@ from ..utils import (
     clear_tensor_data,
     requires_grad,
     needs_quantized_gemm,
+    get_nvtx_range_context,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -180,6 +180,7 @@ class _LayerNormMLP(torch.autograd.Function):
         fc1_bias: torch.Tensor,
         fc2_weight: torch.Tensor,
         fc2_bias: torch.Tensor,
+<<<<<<< HEAD
         eps: float,
         is_first_microbatch: Union[bool, None],
         fp8: bool,
@@ -228,8 +229,62 @@ class _LayerNormMLP(torch.autograd.Function):
         debug: Optional[bool] = False,
         keep_fp8_weight_transpose_cache: bool = True,
         use_fsdp2: bool = False,
+=======
+        non_tensor_args: Tuple,
+>>>>>>> upstream/release_v2.10
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # pylint: disable=missing-function-docstring
+
+        # Reduce number of arguments to autograd function in order
+        # to reduce CPU overhead due to pytorch arg checking.
+        (
+            eps,
+            is_first_microbatch,
+            fp8,
+            fp8_calibration,
+            wgrad_store,
+            fuse_wgrad_accumulation,
+            fc1_input_quantizer,
+            fc1_weight_quantizer,
+            fc1_output_quantizer,
+            fc1_grad_input_quantizer,
+            fc1_grad_weight_quantizer,
+            fc1_grad_output_quantizer,
+            fc2_input_quantizer,
+            fc2_weight_quantizer,
+            fc2_output_quantizer,
+            fc2_grad_input_quantizer,
+            fc2_grad_weight_quantizer,
+            fc2_grad_output_quantizer,
+            cpu_offloading,
+            tp_group,
+            tp_size,
+            sequence_parallel,
+            tensor_parallel,
+            activation_dtype,
+            return_layernorm_output,
+            return_layernorm_output_gathered,
+            bias_gelu_fusion,
+            set_parallel_mode,
+            is_grad_enabled,
+            fwd_ln_sm_margin,
+            bwd_ln_sm_margin,
+            zero_centered_gamma,
+            activation,
+            activation_params,
+            normalization,
+            ub_overlap_ag,
+            ub_overlap_rs,
+            ub_overlap_rs_dgrad,
+            ub_bulk_wgrad,
+            ub_bulk_dgrad,
+            gemm_gelu_fusion,
+            fsdp_group,
+            module,
+            skip_fp8_weight_update,
+            symmetric_ar_type,
+            debug,
+        ) = non_tensor_args
 
         # Make sure input dimensions are compatible
         in_features, inp_shape = ln_weight.numel(), inp.shape
@@ -449,7 +504,6 @@ class _LayerNormMLP(torch.autograd.Function):
         fc1_outputs = general_gemm(
             fc1_weight_final,
             ln_out_total,
-            get_workspace(),
             quantization_params=(
                 fc2_input_quantizer
                 if gemm_gelu_fusion
@@ -536,7 +590,6 @@ class _LayerNormMLP(torch.autograd.Function):
         gemm_out, *_, reduce_scatter_out = general_gemm(
             fc2_weight_final,
             act_out,
-            get_workspace(),
             out_dtype=activation_dtype,
             bias=fc2_bias,
             quantization_params=fc2_output_quantizer,
@@ -734,7 +787,7 @@ class _LayerNormMLP(torch.autograd.Function):
         ctx, *grad_outputs: Tuple[torch.Tensor, ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
-        with torch.cuda.nvtx.range("_LayerNormMLP_backward"):
+        with get_nvtx_range_context("_LayerNormMLP_backward"):
             saved_tensors = ctx.saved_tensors
             (  # pylint: disable=unbalanced-tuple-unpacking
                 inputmat,
@@ -904,7 +957,6 @@ class _LayerNormMLP(torch.autograd.Function):
             gemm_output, *_ = general_gemm(
                 fc2_weight,
                 grad_output,
-                get_workspace(),
                 layout="NN",
                 grad=True,
                 quantization_params=(
@@ -1001,7 +1053,6 @@ class _LayerNormMLP(torch.autograd.Function):
 
                 # Arguments to include in wgrad GEMM closure
                 fc2_wgrad_gemm_kwargs = {
-                    "workspace": get_workspace(),
                     "out_dtype": (
                         origin_fc2_weight.main_grad.dtype
                         if ctx.fuse_wgrad_accumulation
@@ -1172,7 +1223,6 @@ class _LayerNormMLP(torch.autograd.Function):
             gemm_out, *_, reduce_scatter_out = general_gemm(
                 fc1_weight,
                 dact,
-                get_workspace(),
                 out=gemm_out,
                 out_dtype=ctx.activation_dtype,
                 quantization_params=ctx.fc1_grad_input_quantizer,
@@ -1254,7 +1304,6 @@ class _LayerNormMLP(torch.autograd.Function):
 
                 # Arguments to include in wgrad GEMM closure
                 fc1_wgrad_gemm_kwargs = {
-                    "workspace": get_workspace(),
                     "out_dtype": (
                         origin_fc1_weight.main_grad.dtype
                         if ctx.fuse_wgrad_accumulation
@@ -1442,6 +1491,7 @@ class _LayerNormMLP(torch.autograd.Function):
             fc1_bias_grad if fc1_bias is not None else None,
             fc2_wgrad,  # pylint: disable=possibly-used-before-assignment
             fc2_bias_grad,
+<<<<<<< HEAD
             None,  # eps
             None,  # is_first_microbatch
             None,  # fp8
@@ -1490,6 +1540,9 @@ class _LayerNormMLP(torch.autograd.Function):
             None,  # debug
             None,  # keep_fp8_weight_transpose_cache
             None,  # use_fsdp2
+=======
+            None,
+>>>>>>> upstream/release_v2.10
         )
 
 
@@ -1506,38 +1559,38 @@ class LayerNormMLP(TransformerEngineBaseModule):
                      intermediate size to which input samples are projected.
     eps : float, default = 1e-5
          a value added to the denominator of layer normalization for numerical stability.
-    bias : bool, default = `True`
-          if set to `False`, the FC1 and FC2 layers will not learn an additive bias.
+    bias : bool, default = True
+          if set to ``False``, the FC1 and FC2 layers will not learn an additive bias.
     normalization : { 'LayerNorm', 'RMSNorm' }, default = 'LayerNorm'
                    type of normalization applied.
     activation : str, default = 'gelu'
           activation function used.
-          Options: 'gelu', 'geglu', 'qgelu', 'qgeglu', 'relu', 'reglu', 'srelu', 'sreglu',
-                   'silu', 'swiglu', and 'clamped_swiglu'.
-    activation_params : dict, default = `None`
+          Options: ``'gelu'``, ``'geglu'``, ``'qgelu'``, ``'qgeglu'``, ``'relu'``, ``'reglu'``, ``'srelu'``, ``'sreglu'``,
+          ``'silu'``, ``'swiglu'``, and ``'clamped_swiglu'``.
+    activation_params : dict, default = None
                         Additional parameters for the activation function.
-                        At the moment, only used for 'clamped_swiglu' activation which
-                        supports 'limit' and 'alpha' parameters.
-    init_method : Callable, default = `None`
-                 used for initializing FC1 weights in the following way: `init_method(weight)`.
-                 When set to `None`, defaults to `torch.nn.init.normal_(mean=0.0, std=0.023)`.
-    output_layer_init_method : Callable, default = `None`
+                        At the moment, only used for ``'clamped_swiglu'`` activation which
+                        supports ``'limit'`` and ``'alpha'`` parameters.
+    init_method : Callable, default = None
+                 used for initializing FC1 weights in the following way: ``init_method(weight)``.
+                 When set to ``None``, defaults to ``torch.nn.init.normal_(mean=0.0, std=0.023)``.
+    output_layer_init_method : Callable, default = None
                               used for initializing FC2 weights in the following way:
-                              `output_layer_init_method(weight)`. When set to `None`, defaults to
-                              `torch.nn.init.normal_(mean=0.0, std=0.023)`.
-    return_layernorm_output : bool, default = `False`
-                             if set to `True`, output of layernorm is returned from the forward
+                              ``output_layer_init_method(weight)``. When set to ``None``, defaults to
+                              ``torch.nn.init.normal_(mean=0.0, std=0.023)``.
+    return_layernorm_output : bool, default = False
+                             if set to ``True``, output of layernorm is returned from the :meth:`forward` method
                              together with the output of the linear transformation.
                              Example use case: residual connection for transformer module
                              is taken post layernorm.
-    return_layernorm_output_gathered : bool, default = `False`
-                             if set to `True`, output of layernorm is returned after the all
-                             gather operation. Ignored if return_layernorm_output is False.
+    return_layernorm_output_gathered : bool, default = False
+                             if set to ``True``, output of layernorm is returned after the all
+                             gather operation. Ignored if ``return_layernorm_output`` is False.
                              Example use case: with sequence parallel, input to residual connection
                              for transformer module (e.g. LoRA) will need to be gathered.
                              Returning layernorm output gathered will prevent a redundant gather.
-    zero_centered_gamma : bool, default = 'False'
-                         if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
+    zero_centered_gamma : bool, default = False
+                         if set to ``True``, gamma parameter in LayerNorm is initialized to 0 and
                          the LayerNorm formula changes to
 
                          .. math::
@@ -1547,61 +1600,62 @@ class LayerNormMLP(TransformerEngineBaseModule):
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
-    name: str, default = `None`
+    name : str, default = None
         name of the module, currently used for debugging purposes.
 
     Parallelism parameters
     ----------------------
-    set_parallel_mode : bool, default = `False`
-                      if set to `True`, FC1 is used as Column Parallel and FC2 is used as Row
+    set_parallel_mode : bool, default = False
+                      if set to ``True``, FC1 is used as Column Parallel and FC2 is used as Row
                       Parallel as described `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
-    sequence_parallel : bool, default = `False`
-                       if set to `True`, uses sequence parallelism.
-    tp_group : ProcessGroup, default = `None`
+    sequence_parallel : bool, default = False
+                       if set to ``True``, uses sequence parallelism.
+    tp_group : ProcessGroup, default = None
               tensor parallel process group.
     tp_size : int, default = 1
              used as TP (tensor parallel) world size when TP groups are not formed during
              initialization. In this case, users must call the
-             `set_tensor_parallel_group(tp_group)` method on the initialized module before the
+             ``set_tensor_parallel_group(tp_group)`` method on the initialized module before the
              forward pass to supply the tensor parallel group needed for tensor and sequence
              parallel collectives.
 
     Optimization parameters
     -----------------------
-    fuse_wgrad_accumulation : bool, default = 'False'
-                             if set to `True`, enables fusing of creation and accumulation of
+    fuse_wgrad_accumulation : bool, default = False
+                             if set to ``True``, enables fusing of creation and accumulation of
                              the weight gradient. When enabled, it is assumed that the weights
-                             have an additional `main_grad` attribute (used instead of the
-                             regular `grad`) which is a pre-allocated buffer of the correct
+                             have an additional ``main_grad`` attribute (used instead of the
+                             regular ``grad``) which is a pre-allocated buffer of the correct
                              size to accumulate gradients in. This argument along with
-                             weight tensor having attribute 'overwrite_main_grad' set to True
-                             will overwrite `main_grad` instead of accumulating.
-    return_bias : bool, default = `False`
-                 when set to `True`, this module will not apply the additive bias for FC2, but
+                             weight tensor having attribute ``'overwrite_main_grad'`` set to True
+                             will overwrite ``main_grad`` instead of accumulating.
+    return_bias : bool, default = False
+                 when set to ``True``, this module will not apply the additive bias for FC2, but
                  instead return the bias value during the forward pass together with the
                  output of the linear transformation :math:`y = xA^T`. This is useful when
                  the bias addition can be fused to subsequent operations.
-    params_dtype : torch.dtype, default = `torch.get_default_dtype()`
+    params_dtype : torch.dtype, default = torch.get_default_dtype()
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
-    seq_length: int
+    seq_length : int
                sequence length of input samples. Needed for JIT Warmup, a technique where jit fused
                functions are warmed up before training to ensure same kernels are used for forward
                propogation and activation recompute phase.
-    micro_batch_size: int
+    micro_batch_size : int
                      batch size per training step. Needed for JIT Warmup, a technique where jit
                      fused functions are warmed up before training to ensure same kernels are
                      used for forward propogation and activation recompute phase.
-    delay_wgrad_compute : bool, default = `False`
-                         Whether or not to delay weight gradient computation. If set to `True`,
-                         it's the user's responsibility to call `module.backward_dw` to compute
+    delay_wgrad_compute : bool, default = False
+                         Whether or not to delay weight gradient computation. If set to ``True``,
+                         it's the user's responsibility to call :meth:`backward_dw` to compute
                          weight gradients.
     symmetric_ar_type : {None, 'multimem_all_reduce', 'two_shot', 'one_shot'}, default = None
                    Type of symmetric memory all-reduce to use during the forward pass.
                    This can help in latency bound communication situations.
-                   Requires PyTorch version 2.7.0 or higher. When set to None, standard all-reduce
+                   Requires PyTorch version 2.7.0 or higher. When set to ``None``, standard all-reduce
                    is used.
+<<<<<<< HEAD
     keep_fp8_weight_transpose_cache: bool, default = `True`
                 Controls whether to cache the FP8 weight transpose buffer during training.
 
@@ -1616,6 +1670,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 reduced efficiency of PyTorch's caching allocator.
 
                 Use this setting to balance memory usage and performance based on your training configuration.
+=======
+    checkpoint : bool, default = False
+                whether to use selective activation checkpointing, where activations are not saved for bwd,
+                and instead are recomputed (skipping fc2, as it is not needed for backward). Trades compute
+                for memory. default is false, in which activations are saved in fwd. not supported for onnx forward
+>>>>>>> upstream/release_v2.10
     """
 
     def __init__(
@@ -1889,8 +1949,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
+        is_grad_enabled = torch.is_grad_enabled()
+
         if is_in_onnx_export_mode():
-            return self.onnx_forward(inp)
+            return self.onnx_forward(inp, is_grad_enabled)
 
         debug = self.is_debug_iter()
 
@@ -1906,19 +1968,17 @@ class LayerNormMLP(TransformerEngineBaseModule):
             if get_ub("fc2_fprop", FP8GlobalStateManager.is_fp8_enabled()).is_fp8_ubuf():
                 fp8_output = True
 
-        with torch.cuda.device(
-            getattr(self, list(self.named_parameters())[0][0]).device
-        ), self.prepare_forward(inp, num_gemms=2) as inp:
+        with self.prepare_forward(inp, num_gemms=2) as inp:
 
             quantizers = (
-                self._get_quantizers(fp8_output)
+                self._get_quantizers(fp8_output, is_grad_enabled)
                 if not debug
-                else self._get_debug_quantizers(fp8_output)
+                else self._get_debug_quantizers(fp8_output, is_grad_enabled)
             )
             if debug:
                 if self.no_debug_features_active(quantizers):
                     debug = False
-                    quantizers = self._get_quantizers(fp8_output)
+                    quantizers = self._get_quantizers(fp8_output, is_grad_enabled)
 
             # Get quantizers
             (
@@ -1951,20 +2011,14 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 and self.bias_gelu_nvfusion and not use_reentrant_activation_recompute() ):
                 self.bias_gelu_nvfusion = False
 
-            if torch.is_grad_enabled():
+            if is_grad_enabled:
                 fwd_fn = _LayerNormMLP.apply
-                args = []
+                autograd_ctx = []
             else:
                 fwd_fn = _LayerNormMLP.forward
-                args = [None]
-            args += (
-                inp,
-                self.layer_norm_weight,
-                self.layer_norm_bias,
-                fc1_weight,
-                fc1_bias,
-                fc2_weight,
-                fc2_bias if self.apply_bias and not self.gemm_bias_unfused_add else None,
+                autograd_ctx = [None]
+
+            non_tensor_args = (
                 self.eps,
                 is_first_microbatch,
                 self.fp8,
@@ -1993,8 +2047,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.return_layernorm_output_gathered,
                 self.bias_gelu_nvfusion and not self.fp8 and not debug,
                 self.set_parallel_mode,
-                torch.is_grad_enabled(),
-                self.fwd_ln_sm_margin if torch.is_grad_enabled() else self.inf_ln_sm_margin,
+                is_grad_enabled,
+                self.fwd_ln_sm_margin if is_grad_enabled else self.inf_ln_sm_margin,
                 self.bwd_ln_sm_margin,
                 self.zero_centered_gamma,
                 self.activation,
@@ -2014,7 +2068,17 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.keep_fp8_weight_transpose_cache,
                 self.use_fsdp2
             )
-            out = fwd_fn(*args)
+            out = fwd_fn(
+                *autograd_ctx,
+                inp,
+                self.layer_norm_weight,
+                self.layer_norm_bias,
+                fc1_weight,
+                fc1_bias,
+                fc2_weight,
+                fc2_bias if self.apply_bias and not self.gemm_bias_unfused_add else None,
+                non_tensor_args,
+            )
 
         if self.return_layernorm_output:
             out, ln_out = out
@@ -2030,7 +2094,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             return out, ln_out
         return out
 
-    def _get_quantizers(self, fp8_output):
+    def _get_quantizers(self, fp8_output, is_grad_enabled):
         (
             fc1_input_quantizer,
             fc1_output_quantizer,
@@ -2060,7 +2124,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 fc2_output_quantizer = self.quantizers["scaling_fwd"][
                     tex.FP8FwdTensors.GEMM2_OUTPUT
                 ]
-            if torch.is_grad_enabled():
+            if is_grad_enabled:
                 fc2_grad_output_quantizer = self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT2
                 ]
@@ -2085,9 +2149,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc2_grad_output_quantizer,
         )
 
-    def onnx_forward(self, inp: torch.Tensor) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
+    def onnx_forward(
+        self, inp: torch.Tensor, is_grad_enabled: bool
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
-        ONNX-compatible version of the forward function that provides numerical equivalence
+        ONNX-compatible version of the :meth:`forward` method that provides numerical equivalence
         while only using operations that have defined ONNX symbolic translations.
         This simplified implementation is designed specifically for inference scenarios.
         """
@@ -2102,7 +2168,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc2_weight_quantizer,
             output_quantizer,
             *_,
-        ) = self._get_quantizers(False)
+        ) = self._get_quantizers(False, is_grad_enabled)
         inp_dtype = inp.dtype
 
         fc1_weight, fc2_weight = self._get_weight_tensors()
@@ -2187,10 +2253,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
             return fc2_out, fc2_bias.to(inp_dtype)
         return fc2_out
 
-    def _get_debug_quantizers(self, fp8_output):
+    def _get_debug_quantizers(self, fp8_output, is_grad_enabled):
         from ...debug.pytorch.debug_quantization import DebugQuantizer
 
-        base_quantizers = list(self._get_quantizers(fp8_output))
+        base_quantizers = list(self._get_quantizers(fp8_output, is_grad_enabled))
         assert TEDebugState.debug_enabled
 
         def make_debug(prefix, offset):
@@ -2337,7 +2403,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         """
         if not self.need_backward_dw():
             return
-        with torch.cuda.nvtx.range("_LayerNormMLP_wgrad"):
+        with get_nvtx_range_context("_LayerNormMLP_wgrad"):
             (fc2_wgrad, fc2_bias_grad_, *_), tensor_list_fc2 = self.wgrad_store.pop()
             if self.use_bias and self.fc1_bias.grad is None:
                 (fc1_wgrad, fc1_bias_grad, *_), _ = self.wgrad_store.pop()
