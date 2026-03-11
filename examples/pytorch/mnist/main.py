@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -54,12 +54,8 @@ def train(args, model, device, train_loader, optimizer, epoch, use_amp, use_fp8)
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
-        if use_amp:
-            with autocast(device_type='cuda', dtype=torch.float16):
-                output = model(data)
-        else:
-            with te.fp8_autocast(enabled=use_fp8):
-                output = model(data)
+        with te.autocast(enabled=use_fp8):
+            output = model(data)
         loss = F.nll_loss(output, target)
         loss.backward()
         optimizer.step()
@@ -82,7 +78,7 @@ def calibrate(model, device, test_loader, fp8):
     with torch.no_grad():
         for data, target in test_loader:
             data, target = data.to(device), target.to(device)
-            with te.fp8_autocast(enabled=fp8, calibrating=True):
+            with te.autocast(enabled=fp8, calibrating=True):
                 output = model(data)
 
 
@@ -94,12 +90,8 @@ def test(model, device, test_loader, use_amp, use_fp8):
     with torch.no_grad():
         for data, target in test_loader:
             data, target = data.to(device), target.to(device)
-            if use_amp:
-                with autocast(device_type='cuda', dtype=torch.float16):
-                    output = model(data)
-            else:
-                with te.fp8_autocast(enabled=use_fp8):
-                    output = model(data)
+            with te.autocast(enabled=use_fp8):
+                output = model(data)
             test_loss += F.nll_loss(output, target, reduction="sum").item()  # sum up batch loss
             pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
             correct += pred.eq(target.view_as(pred)).sum().item()

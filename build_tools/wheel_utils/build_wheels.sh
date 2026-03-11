@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -11,8 +11,10 @@ BUILD_METAPACKAGE=${2:-true}
 BUILD_COMMON=${3:-true}
 BUILD_PYTORCH=${4:-true}
 BUILD_JAX=${5:-true}
+CUDA_MAJOR=${6:-12}
 
 export NVTE_RELEASE_BUILD=1
+export PIP_CONSTRAINT=""
 export TARGET_BRANCH=${TARGET_BRANCH:-}
 mkdir -p /wheelhouse/logs
 
@@ -41,14 +43,9 @@ else
 fi
 
 if [ "$ROCM_BUILD" = "1" ]; then
-        ${PYBINDIR}pip install setuptools wheel
-fi
-
-# Install deps
-if [ "$ROCM_BUILD" = "1" ]; then
-  ${PYBINDIR}pip install pybind11[global] ninja
+  ${PYBINDIR}pip install pybind11[global] ninja setuptools wheel
 else
-  ${PYBINDIR}pip install cmake pybind11[global] ninja
+  /opt/python/cp310-cp310/bin/pip install cmake pybind11[global] ninja setuptools wheel
 fi
 
 if $BUILD_METAPACKAGE ; then
@@ -70,20 +67,30 @@ if $BUILD_COMMON ; then
                 #hipify expects python in PATH, also ninja may be installed to python bindir
                 test -n "$PYBINDIR" && PATH="$PYBINDIR:$PATH" || true
         else
-                TE_CUDA_VERS="cu12"
+                TE_CUDA_VERS="cu${CUDA_MAJOR}"
                 PYBINDIR=/opt/python/cp38-cp38/bin/
         fi
 
         # Create the wheel.
         ${PYBINDIR}python setup.py bdist_wheel --verbose --python-tag=py3 --plat-name=$PLATFORM 2>&1 | tee /wheelhouse/logs/common.txt
 
-        # Repack the wheel for cuda specific package, i.e. cu12.
-        ${PYBINDIR}wheel unpack dist/*
-        # From python 3.10 to 3.11, the package name delimiter in metadata got changed from - (hyphen) to _ (underscore).
-        sed -i "s/Name: transformer-engine/Name: transformer-engine-${TE_CUDA_VERS}/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
-        sed -i "s/Name: transformer_engine/Name: transformer_engine_${TE_CUDA_VERS}/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
-        mv "${WHL_BASE}/${WHL_BASE}.dist-info" "${WHL_BASE}/transformer_engine_${TE_CUDA_VERS}-${VERSION}.dist-info"
-        ${PYBINDIR}wheel pack ${WHL_BASE}
+        if [ "$ROCM_BUILD" = "1" ]; then
+                # Repack the wheel for specific rocm package.
+                ${PYBINDIR}wheel unpack dist/*
+                # From python 3.10 to 3.11, the package name delimiter in metadata got changed from - (hyphen) to _ (underscore).
+                sed -i "s/Name: transformer-engine/Name: transformer-engine-rocm/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
+                sed -i "s/Name: transformer_engine/Name: transformer_engine_rocm/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
+                mv "${WHL_BASE}/${WHL_BASE}.dist-info" "${WHL_BASE}/transformer_engine_rocm-${VERSION}.dist-info"
+                ${PYBINDIR}wheel pack ${WHL_BASE}
+        else
+                # Repack the wheel for specific cuda version.
+                /opt/python/cp310-cp310/bin/wheel unpack dist/*
+                # From python 3.10 to 3.11, the package name delimiter in metadata got changed from - (hyphen) to _ (underscore).
+                sed -i "s/Name: transformer-engine/Name: transformer-engine-cu${CUDA_MAJOR}/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
+                sed -i "s/Name: transformer_engine/Name: transformer_engine_cu${CUDA_MAJOR}/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
+                mv "${WHL_BASE}/${WHL_BASE}.dist-info" "${WHL_BASE}/transformer_engine_cu${CUDA_MAJOR}-${VERSION}.dist-info"
+                /opt/python/cp310-cp310/bin/wheel pack ${WHL_BASE}
+        fi
 
         # Rename the wheel to make it python version agnostic.
         whl_name=$(basename dist/*)
@@ -94,25 +101,25 @@ if $BUILD_COMMON ; then
 fi
 
 if $BUILD_PYTORCH ; then
-  cd /TransformerEngine/transformer_engine/pytorch
-  if [ "$ROCM_BUILD" = "1" ]; then
-    ${PYBINDIR}pip install torch --index-url https://download.pytorch.org/whl/rocm6.3
-  else
-    PYBINDIR=/opt/python/cp38-cp38/bin/
-    ${PYBINDIR}pip install torch
-  fi
-  ${PYBINDIR}python setup.py sdist 2>&1 | tee /wheelhouse/logs/torch.txt
-  cp dist/* /wheelhouse/
+        cd /TransformerEngine/transformer_engine/pytorch
+        if [ "$ROCM_BUILD" = "1" ]; then
+                ${PYBINDIR}pip install torch --index-url https://download.pytorch.org/whl/rocm6.3
+        else
+                PYBINDIR=/opt/python/cp310-cp310/bin/
+                ${PYBINDIR}pip install torch
+        fi
+        ${PYBINDIR}python setup.py sdist 2>&1 | tee /wheelhouse/logs/torch.txt
+        cp dist/* /wheelhouse/
 fi
 
 if $BUILD_JAX ; then
-  cd /TransformerEngine/transformer_engine/jax
-  if [ "$ROCM_BUILD" = "1" ]; then
-    ${PYBINDIR}pip install jax
-  else
-    PYBINDIR=/opt/python/cp310-cp310/bin/
-    ${PYBINDIR}pip install "jax[cuda12_local]" jaxlib
-  fi
-  ${PYBINDIR}python setup.py sdist 2>&1 | tee /wheelhouse/logs/jax.txt
-  cp dist/* /wheelhouse/
+        cd /TransformerEngine/transformer_engine/jax
+        if [ "$ROCM_BUILD" = "1" ]; then
+                ${PYBINDIR}pip install jax
+        else
+                PYBINDIR=/opt/python/cp310-cp310/bin/
+                ${PYBINDIR}pip install "jax[cuda12_local]" jaxlib
+        fi
+        ${PYBINDIR}python setup.py sdist 2>&1 | tee /wheelhouse/logs/jax.txt
+        cp dist/* /wheelhouse/
 fi
