@@ -506,11 +506,11 @@ jobs:
             gh api "repos/${GH_REPO}/issues/comments/${COMMENT_ID}" --jq .body \
               > /tmp/perf_existing.md
 
-            python3 -c "
+            python3 - "$SECTION_START" "$SECTION_END" << 'PYEOF'
+            import sys
             existing = open('/tmp/perf_existing.md').read()
             section = open('/tmp/perf_section.md').read()
-            start = '${SECTION_START}'
-            end = '${SECTION_END}'
+            start, end = sys.argv[1], sys.argv[2]
             if start in existing:
                 i = existing.index(start)
                 j = existing.index(end) + len(end)
@@ -518,7 +518,7 @@ jobs:
             else:
                 result = existing.rstrip() + '\n\n' + section
             open('/tmp/perf_comment.md', 'w').write(result)
-            "
+            PYEOF
 
             gh api "repos/${GH_REPO}/issues/comments/${COMMENT_ID}" \
               --method PATCH --field body=@/tmp/perf_comment.md
