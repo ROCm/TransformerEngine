@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -50,6 +50,13 @@ __global__ void amax_final_reduce(const float* __restrict__ block_amax,
 }
 
 #endif
+
+__launch_bounds__(1) __global__ void zero_amax_kernel(float *amax_ptr, const float *noop_ptr) {
+  if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
+    return;
+  }
+  *amax_ptr = 0;
+}
 
 template <int nvec, bool aligned, typename InputType>
 __launch_bounds__(amax_kernel_threads) __global__
@@ -118,7 +125,8 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N,
 #endif
                         const float *noop_ptr, cudaStream_t stream) {
   // Zero out amax so we can update with atomic max
-  NVTE_CHECK_CUDA(cudaMemsetAsync(amax, 0, sizeof(float), stream));
+  zero_amax_kernel<<<1, 1, 0, stream>>>(amax, noop_ptr);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 
   // Return immediately if tensor is empty
   if (N == 0) {
@@ -220,15 +228,17 @@ void compute_amax_impl(const NVTETensor input_, const NVTETensor output_, cudaSt
   // Check output tensor
   NVTE_CHECK(output_ != nullptr, "Invalid output tensor (got NULL)");
   auto &output = *convertNVTETensorCheck(output_);
-  NVTE_CHECK(output.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
-             "Output tensor for amax computation must be FP8 tensor with per-tensor scaling, "
+  NVTE_CHECK(output.scaling_mode == NVTE_DELAYED_TENSOR_SCALING ||
+                 output.scaling_mode == NVTE_NVFP4_1D_SCALING,
+             "Output tensor for amax computation must be FP8 tensor with per-tensor scaling or "
+             "NVFP4 1D scaling, "
              "but got scaling_mode=",
              to_string(output.scaling_mode));
   NVTE_CHECK(output.amax.numel() == 1,
              "Output tensor for amax computation has invalid amax tensor "
              "(expected 1 entry, got shape=",
              output.amax.shape, ")");
-  NVTE_CHECK(output.amax.dptr != nullptr,
+  NVTE_CHECK(output.amax.dptr != nullptr || output.columnwise_amax.dptr != nullptr,
              "Output tensor for amax computation has amax tensor without data");
   NVTE_CHECK(output.amax.dtype == DType::kFloat32,
              "Output tensor for amax computation has invalid amax tensor  "
@@ -264,14 +274,16 @@ void compute_amax_impl(const NVTETensor input_, const NVTETensor output_, cudaSt
   }
 
   // Compute amax
+  float *amax_ptr = reinterpret_cast<float *>(
+      (output.amax.dptr != nullptr) ? output.amax.dptr : output.columnwise_amax.dptr);
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.data.dtype, IType, constexpr int nvec = 32 / sizeof(IType);
-      launch_amax_kernel<nvec>(reinterpret_cast<const IType *>(input.data.dptr),
-                               reinterpret_cast<float *>(output.amax.dptr), input.data.numel(),
+      launch_amax_kernel<nvec>(
+          reinterpret_cast<const IType *>(input.data.dptr), amax_ptr, input.data.numel(),
 #ifdef __HIP_PLATFORM_AMD__
-                               block_amax, block_capacity,
+          block_amax, block_capacity,
 #endif
-                               noop_ptr, stream););  // NOLINT(*)
+          noop_ptr, stream););  // NOLINT(*)
 }
 
 }  // anonymous namespace

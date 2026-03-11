@@ -23,16 +23,18 @@ list(APPEND test_cuda_sources
             test_act.cu
             test_normalization.cu
             test_normalization_mxfp8.cu
+            test_memset.cu
             test_multi_cast_transpose.cu
             test_multi_padding.cu
             test_multi_unpadding.cu
             test_causal_softmax.cu
-            test_swizzle.cu
             test_swap_first_dims.cu
 	          ../test_common.cu)
 if(USE_CUDA)
   list(APPEND test_cuda_sources
-              test_cast_float8blockwise.cu)
+              test_cast_nvfp4_transpose.cu
+              test_cast_float8blockwise.cu
+              test_swizzle.cu)
 else()
   list(APPEND test_cuda_sources
               test_cublaslt_gemm.cu)
@@ -41,35 +43,14 @@ endif()
 if(USE_CUDA)
   add_executable(test_operator ${test_cuda_sources})
 else()
+  TE_GetHipifiedSources("${test_cuda_sources}" ${CMAKE_CURRENT_SOURCE_DIR} test_hip_sources)
   message("${message_line}")
-  message(STATUS "CMAKE_CURRENT_SOURCE_DIR: ${CMAKE_CURRENT_SOURCE_DIR}")
-  message(STATUS "PROJECT_SOURCE_DIR: ${PROJECT_SOURCE_DIR}")
-
-  set(TE ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
-  set(THIRDPARTY ${TE}/3rdparty)
-  list(APPEND CMAKE_MODULE_PATH "${THIRDPARTY}/hipify_torch/cmake")
-  include(Hipify)
-  message(STATUS "CMAKE_MODULE_PATH: ${CMAKE_MODULE_PATH}")
-
-  file(REAL_PATH ../../../transformer_engine/common/include header_include_dir1)
-  file(REAL_PATH ../../../transformer_engine/common header_include_dir2)
-  set(header_include_dir ${header_include_dir1} ${header_include_dir2})
-
-  message(STATUS "CUDA_SOURCE_DIR: ${PROJECT_SOURCE_DIR}")
-  message(STATUS "HEADER_INCLUDE_DIR: ${header_include_dir}")
-  set(cuda_source_dir ${PROJECT_SOURCE_DIR} )
-  hipify(CUDA_SOURCE_DIR ${cuda_source_dir} 
-    HEADER_INCLUDE_DIR ${header_include_dir}
-    CUSTOM_MAP_FILE "${TE}/hipify_custom_map.json"
-    NO_MATH_REPLACE
-  )
-  get_hipified_list("${test_cuda_sources}" test_hip_sources)
-  message("${message_line}")
-  message(STATUS "nvte tests hipified sources: ${test_hip_sources}")
+  message(STATUS "test_operator hipified sources: ${test_hip_sources}")
 
   add_executable(test_operator ${test_hip_sources})
 endif()
 
+# Find required packages
 find_package(OpenMP REQUIRED)
 if(USE_CUDA)
   list(APPEND test_operator_LINKER_LIBS CUDA::cudart GTest::gtest_main ${TE_LIB} CUDA::nvrtc CUDNN::cudnn)

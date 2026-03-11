@@ -51,7 +51,8 @@ run_test_config(){
     run_default_fa 1 test_deferred_init.py
     run_default_fa 1 test_float8tensor.py
     run_default_fa 1 test_float8_current_scaling_exact.py
-    test $_fus_attn = auto -o $_fus_attn = ck -o $_fus_attn = aotriton && NVTE_FLASH_ATTN=0 run 1 test_cpu_offloading.py
+    test $_fus_attn = auto -o $_fus_attn = ck && run 1 test_cpu_offloading.py
+    test $_fus_attn = auto -o $_fus_attn = ck -o $_fus_attn = aotriton && NVTE_FLASH_ATTN=0 NVTE_CPU_OFFLOAD_V1=1 run 3 test_cpu_offloading_v1.py
     run_default_fa 1 test_fused_rope.py
     run_default_fa 1 test_fused_router.py
     run_default_fa 1 test_fusible_ops.py

@@ -6,18 +6,18 @@
 
 """Internal function used by multiple modules."""
 
-import os
-from typing import Any, List, Optional, Tuple, Union, Callable
-from dataclasses import dataclass
 
+import dataclasses
 import queue
+from typing import Any, Callable, List, Optional, Tuple, Union
+
 import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
-from ..utils import get_default_init_method
 from ..export import is_in_onnx_export_mode
+from ..utils import get_default_init_method
 
 if IS_HIP_EXTENSION:
     from ..triton_kernels.norms_common import (
@@ -26,6 +26,7 @@ if IS_HIP_EXTENSION:
         te_rmsnorm_fwd_triton,
         te_rmsnorm_bwd_triton
     )
+    import os
 
 def _get_normalization_func(normalization: str, forward: bool):
     use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
@@ -192,7 +193,7 @@ def noop_cat(
     return _NoopCatFunc.apply(dim, *tensors)
 
 
-@dataclass
+@dataclasses.dataclass
 class _ParameterInitMeta:
     """
     Stores essential metadata needed to support deferred parameter initialization.
