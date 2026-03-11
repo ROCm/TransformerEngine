@@ -380,6 +380,13 @@ jobs:
         run: |
           set -ex
 
+          # Map runner names to display names
+          case "${RUNNER_NAME}" in
+            linux-te-mi325-8) DISPLAY_NAME="MI325" ;;
+            linux-te-mi355-8) DISPLAY_NAME="MI355" ;;
+            *)                DISPLAY_NAME="${RUNNER_NAME}" ;;
+          esac
+
           # Restore PR checkout no matter how this step exits,
           # in case a later step needs to access the PR code.
           # Note that the PR code is *not* recompiled.
@@ -436,43 +443,86 @@ jobs:
           done
 
           # Compare and build report
-          FAIL=0
-          {
-            echo "## Performance Report (\`${{ matrix.runner }}\`)"
-            echo ""
-            for pr_csv in perf_results/pr/benchmark_*.csv; do
-              name=$(basename "$pr_csv" .csv)
-              base_csv="perf_results/base/${name}.csv"
-              [ -f "$base_csv" ] || continue
-              echo "### ${name}"
-              echo '```'
-              python .perf_stash/compare_results.py "$base_csv" "$pr_csv" || FAIL=1
-              echo '```'
-              echo ""
-            done
-          } > perf_results/report.md
-          cat perf_results/report.md
-          # exit $FAIL
+          mkdir -p perf_results/reports
+          SUMMARY="perf_results/reports/summary.md"
+          DETAILS="perf_results/reports/details.md"
+          : > "$SUMMARY"
+          : > "$DETAILS"
+
+          for pr_csv in perf_results/pr/benchmark_*.csv; do
+            name=$(basename "$pr_csv" .csv)
+            base_csv="perf_results/base/${name}.csv"
+            [ -f "$base_csv" ] || continue
+            echo "========== Comparing: $name =========="
+            python .perf_stash/compare_results.py "$base_csv" "$pr_csv" \
+              --bench-name "$name" \
+              --summary-file "$SUMMARY" \
+              >> "$DETAILS"
+          done
           OUTER
           )"
 
-          # Post report as PR comment
-          REPORT="perf_results/report.md"
+          # Assemble this runner's section
+          SUMMARY="perf_results/reports/summary.md"
+          DETAILS="perf_results/reports/details.md"
+          [ -f "$SUMMARY" ] || exit 0
 
-          MARKER="<!-- perf-regression-${RUNNER_NAME} -->"
-          BODY="${MARKER}"$'\n'"$(cat "$REPORT")"
+          SECTION_START="<!-- perf-section:${RUNNER_NAME} -->"
+          SECTION_END="<!-- /perf-section:${RUNNER_NAME} -->"
 
-          # Find and update existing comment, or create new one
-          EXISTING=$(gh api "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" \
-            --paginate --jq ".[] | select(.body | contains(\"${MARKER}\")) | .id" | head -1)
+          SECTION=$(cat <<EOF
+          ${SECTION_START}
+          ### ${DISPLAY_NAME}
 
-          if [ -n "$EXISTING" ]; then
-            gh api "repos/${GH_REPO}/issues/comments/${EXISTING}" \
-              --method PATCH --field body="$BODY"
+          | Benchmark | Median | Min | Max |
+          |---|---|---|---|
+          $(cat "$SUMMARY")
+
+          $(cat "$DETAILS")
+          ${SECTION_END}
+          EOF
+          )
+
+          echo "$SECTION" > /tmp/perf_section.md
+
+          # Post or update the single shared PR comment
+          COMMENT_MARKER="<!-- perf-regression-report -->"
+
+          COMMENT_ID=$(gh api "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" \
+            --paginate --jq ".[] | select(.body | contains(\"${COMMENT_MARKER}\")) | .id" \
+            | head -1)
+
+          if [ -n "$COMMENT_ID" ]; then
+            gh api "repos/${GH_REPO}/issues/comments/${COMMENT_ID}" --jq .body \
+              > /tmp/perf_existing.md
+
+            python -c "
+            existing = open('/tmp/perf_existing.md').read()
+            section = open('/tmp/perf_section.md').read()
+            start = '${SECTION_START}'
+            end = '${SECTION_END}'
+            if start in existing:
+                i = existing.index(start)
+                j = existing.index(end) + len(end)
+                result = existing[:i] + section + existing[j:]
+            else:
+                result = existing.rstrip() + '\n\n' + section
+            open('/tmp/perf_comment.md', 'w').write(result)
+            "
+
+            gh api "repos/${GH_REPO}/issues/comments/${COMMENT_ID}" \
+              --method PATCH --field body=@/tmp/perf_comment.md
           else
-            gh pr comment "$PR_NUMBER" --repo "$GH_REPO" --body "$BODY"
-          fi
+            {
+              echo "${COMMENT_MARKER}"
+              echo "## Performance Regression Report"
+              echo ""
+              cat /tmp/perf_section.md
+            } > /tmp/perf_comment.md
 
+            gh pr comment "$PR_NUMBER" --repo "$GH_REPO" \
+              --body-file /tmp/perf_comment.md
+          fi
       # - name: Check Test Failure Status
       #   if: always()
       #   run: |
