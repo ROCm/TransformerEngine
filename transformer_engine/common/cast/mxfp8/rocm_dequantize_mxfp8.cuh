@@ -6,6 +6,7 @@
 
 #pragma once
 // drop-in rocm replacement for mxfp8 dequantize kernel
+//#include "hip/hip_runtime.h" //dummy include to prevent hipification adding this header
 
 constexpr size_t CHUNK_DIM_Y = 128;
 constexpr size_t CHUNK_DIM_X = 128;
