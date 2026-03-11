@@ -10,12 +10,12 @@ import warnings
 
 from ..utils import is_non_tn_fp8_gemm_supported
 
-from ..tensor._internal.float8_tensor_base import Float8TensorBase
+from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from .cast_transpose import te_cast_transpose_mxfp4_triton, te_cast_transpose_mxfp8_triton, te_cast_transpose_noop_triton, te_dequantize_mxfp8_triton
 import transformer_engine_torch as tex
-from ..tensor.quantized_tensor import QuantizedTensor, Quantizer
-from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from ..tensor._internal.mxfp4_tensor_base import MXFP4TensorBase
+from ..quantized_tensor import QuantizedTensor, Quantizer
+from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
+from ..tensor.storage.mxfp4_tensor_base import MXFP4TensorBase
 
 @functools.lru_cache(maxsize=None)
 def _empty_tensor() -> torch.Tensor:
@@ -73,7 +73,7 @@ def te_quantize_triton(
             _setup_conditional_transpose_storage(out)
         else:
             out = quantizer.make_empty(input_tensor.shape, dtype=fake_tensor_type)
-            if isinstance(out, Float8TensorBase):
+            if isinstance(out, Float8TensorStorage):
                 _setup_conditional_transpose_storage(out)
     else:
         # Create a QuantizedTensor from the provided output tensor
@@ -83,11 +83,11 @@ def te_quantize_triton(
     if noop_flag is None:
         noop_flag = _empty_tensor()
     # if it's mxfp8, we'll check if both rowwise and columnwise data are none
-    if (isinstance(out, MXFP8TensorBase) and out._rowwise_data is None and out._columnwise_data is None) or (not isinstance(out, MXFP8TensorBase) and out.size().numel() == 0):
+    if (isinstance(out, MXFP8TensorStorage) and out._rowwise_data is None and out._columnwise_data is None) or (not isinstance(out, MXFP8TensorStorage) and out.size().numel() == 0):
         # Return empty output if the quantized tensor has no elements
         return out
     
-    if isinstance(out, Float8TensorBase):
+    if isinstance(out, Float8TensorStorage):
         if input_tensor.nelement() > 0:
             if not out._transpose_invalid:
                 quantizer = out._get_quantizer()
@@ -118,7 +118,7 @@ def te_quantize_triton(
             else:
                 out.remove_caches() #Make sure to remove transpose if it is marked as invalid
                 out = tex.quantize(input_tensor, quantizer, out, noop_flag)
-    elif isinstance(out, MXFP8TensorBase):
+    elif isinstance(out, MXFP8TensorStorage):
         te_cast_transpose_mxfp8_triton(input_tensor, out)
     elif isinstance(out, MXFP4TensorBase):
         te_cast_transpose_mxfp4_triton(input_tensor,out)
@@ -128,9 +128,9 @@ def te_quantize_triton(
     return out
 
 def te_dequantize_triton(input, dtype: tex.DType):
-    if isinstance(input, MXFP8TensorBase):
+    if isinstance(input, MXFP8TensorStorage):
         return te_dequantize_mxfp8_triton(input, dtype)
-    elif isinstance(input, Float8TensorBase):
+    elif isinstance(input, Float8TensorStorage):
         return tex.dequantize(input, dtype)
     else:
         raise NotImplementedError(f"Not implemented for tensor type: '{type(input).__name__}'")

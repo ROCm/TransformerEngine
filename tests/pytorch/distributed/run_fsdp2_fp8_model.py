@@ -18,7 +18,7 @@ from torch.distributed import DeviceMesh
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import init_device_mesh
 from transformer_engine.pytorch import torch_version
-from transformer_engine.pytorch.fp8 import fp8_model_init
+from transformer_engine.pytorch.quantization import quantized_model_init
 from torch.nn.parallel import DistributedDataParallel as DDP
 from pathlib import Path
 
@@ -171,7 +171,7 @@ def _train(args):
         torch.cuda.memory._record_memory_history(enabled='all', context='all', stacks='all')
     if args.fp8_init:
         # Build the model with the specified context
-        with fp8_model_init(enabled = True):
+        with quantized_model_init(enabled=True):
             model = SimpleNet(args.input_size, args.hidden_size, args.output_size, use_fsdp2=args.use_fsdp2)
     else:
         model = SimpleNet(args.input_size, args.hidden_size, args.output_size, use_fsdp2=args.use_fsdp2)

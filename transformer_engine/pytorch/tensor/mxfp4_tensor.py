@@ -18,7 +18,7 @@ from transformer_engine.common.recipe import MXFP4BlockScaling, Recipe
 from ..constants import MXFP8_BLOCK_SCALING_SIZE  # MXFP4 uses same block size
 from ..utils import devices_match, round_up_to_nearest_multiple
 
-from ._internal.mxfp4_tensor_base import MXFP4TensorBase, _FromMXFP4Func
+from .storage.mxfp4_tensor_base import MXFP4TensorBase, _FromMXFP4Func
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
 
 MXFP4_BLOCK_SCALING_SIZE = MXFP8_BLOCK_SCALING_SIZE
