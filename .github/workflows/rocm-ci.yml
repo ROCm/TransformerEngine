@@ -382,9 +382,9 @@ jobs:
 
           # Map runner names to display names
           case "${RUNNER_NAME}" in
-            linux-te-mi325-8) DISPLAY_NAME="MI325" ;;
-            linux-te-mi355-8) DISPLAY_NAME="MI355" ;;
-            *)                DISPLAY_NAME="${RUNNER_NAME}" ;;
+            linux-te-mi325*) DISPLAY_NAME="MI325" ;;
+            linux-te-mi355*) DISPLAY_NAME="MI355" ;;
+            *)               DISPLAY_NAME="${RUNNER_NAME}" ;;
           esac
 
           # Restore PR checkout no matter how this step exits,
@@ -467,14 +467,14 @@ jobs:
           DETAILS="perf_results/reports/details.md"
           [ -f "$SUMMARY" ] || exit 0
 
-          SECTION_START="<!-- perf-section:${RUNNER_NAME} -->"
-          SECTION_END="<!-- /perf-section:${RUNNER_NAME} -->"
+          SECTION_START="<!-- perf-section:${DISPLAY_NAME} -->"
+          SECTION_END="<!-- /perf-section:${DISPLAY_NAME} -->"
 
           SECTION=$(cat <<EOF
           ${SECTION_START}
           ### ${DISPLAY_NAME}
 
-          | Benchmark | Median | Min | Max |
+          | Benchmark suite | Median speedup | Min speedup | Max speedup |
           |---|---|---|---|
           $(cat "$SUMMARY")
 
@@ -485,7 +485,17 @@ jobs:
 
           echo "$SECTION" > /tmp/perf_section.md
 
-          # Post or update the single shared PR comment
+          echo ""
+          echo "========== Performance Report =========="
+          cat /tmp/perf_section.md
+          echo "========================================"
+
+          # Post or update the single shared PR comment (skip under nektos act)
+          if [ -n "${ACT:-}" ]; then
+            echo "Running under nektos act, skipping PR comment."
+            exit 0
+          fi
+
           COMMENT_MARKER="<!-- perf-regression-report -->"
 
           COMMENT_ID=$(gh api "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" \
@@ -496,7 +506,7 @@ jobs:
             gh api "repos/${GH_REPO}/issues/comments/${COMMENT_ID}" --jq .body \
               > /tmp/perf_existing.md
 
-            python -c "
+            python3 -c "
             existing = open('/tmp/perf_existing.md').read()
             section = open('/tmp/perf_section.md').read()
             start = '${SECTION_START}'
@@ -515,7 +525,7 @@ jobs:
           else
             {
               echo "${COMMENT_MARKER}"
-              echo "## Performance Regression Report"
+              echo "## Performance Report"
               echo ""
               cat /tmp/perf_section.md
             } > /tmp/perf_comment.md
@@ -523,6 +533,7 @@ jobs:
             gh pr comment "$PR_NUMBER" --repo "$GH_REPO" \
               --body-file /tmp/perf_comment.md
           fi
+
       # - name: Check Test Failure Status
       #   if: always()
       #   run: |
