@@ -777,7 +777,7 @@ def test_gpt_full_activation_recompute(
             and not use_reentrant
             and recipe.float8_per_tensor_scaling()
             ):
-            pytest.skip("hipBLASLt does not provide suitable algorithms on GFX950 for this config.")
+            pytest.skip("hipBLASLt does not provide suitable algorithms on gfx950 for this config.")
     if fp8 and recipe.nvfp4():
         if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
             pytest.skip(
@@ -3030,7 +3030,7 @@ def test_fp8gemm_with_unfused_quantization(N, datatype, input_quantizer, out_qua
         if isinstance(input_quantizer, MXFP8Quantizer):
             N = math.ceil(N / 128) * 128 #hipBlasLt supports K which is multiple of 128 for MXFP8
         if not is_mxfp8_needed and isinstance(out_quantizer, Float8Quantizer):
-            pytest.skip("hipBLASLt does not provide suitable algorithms on GFX950 for this config.")
+            pytest.skip("hipBLASLt does not provide suitable algorithms on gfx950 for this config.")
     inp_fp8 = input_quantizer(torch.randn(N, N, device="cuda", dtype=datatype))
     weight_fp8 = input_quantizer(torch.randn(N, N, device="cuda", dtype=datatype))
     outp_type = torch.float32

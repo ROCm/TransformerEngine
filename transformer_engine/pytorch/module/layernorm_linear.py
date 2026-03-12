@@ -105,50 +105,7 @@ class _LayerNormLinear(torch.autograd.Function):
         ln_bias: Union[torch.Tensor, None],
         weight: torch.Tensor,
         bias: torch.Tensor,
-<<<<<<< HEAD
-        eps: float,
-        is_first_microbatch: Union[bool, None],
-        fp8: bool,
-        fp8_calibration: bool,
-        wgrad_store: WeightGradStore,
-        fuse_wgrad_accumulation: bool,
-        input_quantizer: Optional[Quantizer],
-        weight_quantizer: Optional[Quantizer],
-        output_quantizer: Optional[Quantizer],
-        grad_input_quantizer: Optional[Quantizer],
-        grad_weight_quantizer: Optional[Quantizer],
-        grad_output_quantizer: Optional[Quantizer],
-        cpu_offloading: bool,
-        tp_group: Union[dist_group_type, None],
-        tp_size: int,
-        sequence_parallel: bool,
-        tensor_parallel: bool,
-        activation_dtype: torch.dtype,
-        parallel_mode: Union[str, None],
-        return_layernorm_output: bool,
-        return_layernorm_output_gathered: bool,
-        is_grad_enabled: bool,
-        fwd_ln_sm_margin: int,
-        bwd_ln_sm_margin: int,
-        zero_centered_gamma: bool,
-        normalization: str,
-        ub_overlap_ag_fprop: bool,
-        ub_overlap_rs_fprop: bool,
-        ub_overlap_ag_dgrad: bool,
-        ub_overlap_rs_dgrad: bool,
-        ub_bulk_wgrad: bool,
-        ub_bulk_dgrad: bool,
-        ub_name: str,
-        fsdp_group: Union[dist_group_type, None],
-        module: torch.nn.Module,
-        skip_fp8_weight_update: bool,
-        symmetric_ar_type: str,
-        debug: Optional[bool] = False,
-        keep_fp8_weight_transpose_cache: bool = True,
-        use_fsdp2: bool = False,
-=======
         non_tensor_args: Tuple,
->>>>>>> upstream/release_v2.10
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # pylint: disable=missing-function-docstring
 
@@ -193,6 +150,8 @@ class _LayerNormLinear(torch.autograd.Function):
             skip_fp8_weight_update,
             symmetric_ar_type,
             debug,
+            keep_fp8_weight_transpose_cache,
+            use_fsdp2,
         ) = non_tensor_args
 
         # NVTX label for profiling
@@ -1105,50 +1064,7 @@ class _LayerNormLinear(torch.autograd.Function):
             dbeta,
             wgrad,
             grad_bias,
-<<<<<<< HEAD
-            None,  # eps
-            None,  # is_first_microbatch
-            None,  # fp8
-            None,  # fp8_calibration
-            None,  # wgrad_store
-            None,  # fuse_wgrad_accumulation
-            None,  # input_quantizer
-            None,  # weight_quantizer
-            None,  # output_quantizer
-            None,  # grad_input_quantizer
-            None,  # grad_weight_quantizer
-            None,  # grad_output_quantizer
-            None,  # cpu_offloading
-            None,  # tp_group
-            None,  # tp_size
-            None,  # sequence_parallel
-            None,  # tensor_parallel
-            None,  # activation_dtype
-            None,  # parallel_mode
-            None,  # return_layernorm_output
-            None,  # return_layernorm_output_gathered
-            None,  # is_grad_enabled
-            None,  # fwd_ln_sm_margin
-            None,  # bwd_ln_sm_margin
-            None,  # zero_centered_gamma
-            None,  # normalization
-            None,  # ub_overlap_ag_fprop
-            None,  # ub_overlap_rs_fprop
-            None,  # ub_overlap_ag_dgrad
-            None,  # ub_overlap_rs_dgrad
-            None,  # ub_bulk_dgrad
-            None,  # ub_bulk_wgrad
-            None,  # ub_name
-            None,  # fsdp_group
-            None,  # debug
-            None,  # module
-            None,  # skip_fp8_weight_update
-            None,  # symmetric_ar_type
-            None,  # keep_fp8_weight_transpose_cache
-            None, # use_fsdp2
-=======
             None,
->>>>>>> upstream/release_v2.10
         )
 
 

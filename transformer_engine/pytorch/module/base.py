@@ -51,15 +51,11 @@ if IS_HIP_EXTENSION:
     from ..triton_kernels.cast import te_quantize_triton
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
-<<<<<<< HEAD
-from ..utils import get_device_compute_capability, is_non_tn_fp8_gemm_supported, torch_get_autocast_gpu_dtype
-=======
 from ..utils import (
     is_non_tn_fp8_gemm_supported,
     torch_get_autocast_gpu_dtype,
     get_nvtx_range_context,
 )
->>>>>>> upstream/release_v2.10
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ...common.recipe import DelayedScaling, Recipe
 from ...debug.pytorch.debug_state import TEDebugState
@@ -86,44 +82,6 @@ class UserBufferQuantizationMode(Enum):
     FP8 = "fp8"
 
 
-<<<<<<< HEAD
-def get_cublas_workspace_size_bytes() -> None:
-    """Return workspace size needed for current architecture"""
-    if IS_HIP_EXTENSION:
-        """Return 64 MiB for gfx50x, 32 MiB for all other architectures."""
-        if get_device_compute_capability() == (9, 5):
-            return 67_108_864
-        return 33_554_432        
-    """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
-    if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
-        # 32 MiB for NVFP4 GEMM, plus additional 1024 B for alignment and misc scales
-        return 32 * 1024 * 1024 + 1024
-    return 4_194_304
-
-
-def get_workspace() -> torch.Tensor:
-    """Returns workspace for cublas."""
-    global _cublas_workspace
-    if _cublas_workspace is None:
-        _cublas_workspace = torch.empty(
-            get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda"
-        )
-    return _cublas_workspace
-
-
-def get_multi_stream_cublas_workspace() -> List[torch.Tensor]:
-    """Returns workspace for multi-stream cublas."""
-    global _multi_stream_cublas_workspace
-    if not _multi_stream_cublas_workspace:
-        for _ in range(tex.get_num_cublas_streams()):
-            _multi_stream_cublas_workspace.append(
-                torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda")
-            )
-    return _multi_stream_cublas_workspace
-
-
-=======
->>>>>>> upstream/release_v2.10
 def get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor:
     """Returns a dummy tensor of given shape."""
     assert len(shape) == 2

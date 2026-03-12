@@ -964,11 +964,7 @@ def _all_gather_fp8(
         init_columnwise_usage = quantizer.columnwise_usage
         quantizer.set_usage(rowwise=True, columnwise=init_columnwise_usage)
         out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
-<<<<<<< HEAD
-        quantizer.set_usage(rowwise=init_rowwise_usage, columnwise=init_columnwise_usage) 
-=======
         quantizer.set_usage(rowwise=init_rowwise_usage, columnwise=init_columnwise_usage)
->>>>>>> upstream/release_v2.10
     elif isinstance(inp, Float8Tensor):
         out = inp.make_like(inp, shape=out_shape)
         out._data = torch.empty(

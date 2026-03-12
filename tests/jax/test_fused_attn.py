@@ -485,18 +485,13 @@ class FusedAttnRunner:
         self.cp_size = self.mesh.shape.get(self.mesh_resource.cp_resource, 1)
         self.tp_size = self.mesh.shape.get(self.mesh_resource.tpsp_resource, 1)
 
-<<<<<<< HEAD
         # only support new-style RNGs on AMD hardware since they will crash otherwise
         if is_hip_extension() and not self.use_old_rng:
             key = jax.random.key(0)
         else:
             key = jax.random.PRNGKey(0)
 
-        q_key, k_key, v_key, bias_key, dropout_key = jax.random.split(key, 5)
-=======
-        key = jax.random.PRNGKey(0)
         q_key, k_key, v_key, bias_key, dropout_key, softmax_key = jax.random.split(key, 6)
->>>>>>> upstream/release_v2.10
 
         q_shape = (self.batch_size, self.max_seqlen_q, self.num_heads_q, self.head_dim_qk)
         k_shape = (self.batch_size, self.max_seqlen_kv, self.num_heads_kv, self.head_dim_qk)
@@ -777,17 +772,6 @@ class FusedAttnRunner:
             self.bias_pspec = PartitionSpec()
         self.bias_sharding = NamedSharding(self.mesh, self.bias_pspec)
 
-<<<<<<< HEAD
-        # New-style RNG fix is only applied for AMD GPUs
-        if is_hip_extension():
-            if self.dropout_rng is not None and jnp.issubdtype(self.dropout_rng.dtype, jax.dtypes.prng_key):
-                self.dropout_rng_pspec = PartitionSpec()
-            else:
-                self.dropout_rng_pspec = PartitionSpec(None,)
-        else:
-            self.dropout_rng_pspec = PartitionSpec(None,)
-
-=======
         # Softmax offset sharding (1, num_heads, 1, 1)
         # Use the same logic as HEAD_AXES: tpsp_resource if enabled, else tp_resource
         head_resource = (
@@ -798,10 +782,17 @@ class FusedAttnRunner:
         self.softmax_offset_pspec = PartitionSpec(None, head_resource, None, None)
         self.softmax_offset_sharding = NamedSharding(self.mesh, self.softmax_offset_pspec)
 
-        self.dropout_rng_pspec = PartitionSpec(
-            None,
-        )
->>>>>>> upstream/release_v2.10
+        # New-style RNG fix is only applied for AMD GPUs
+        if is_hip_extension():
+            if self.dropout_rng is not None and jnp.issubdtype(self.dropout_rng.dtype, jax.dtypes.prng_key):
+                self.dropout_rng_pspec = PartitionSpec()
+            else:
+                self.dropout_rng_pspec = PartitionSpec(None,)
+        else:
+            self.dropout_rng_pspec = PartitionSpec(
+                None,
+            )
+
         self.dropout_rng_sharding = NamedSharding(self.mesh, self.dropout_rng_pspec)
 
         self.logit_scale_pspec = PartitionSpec(None, None, self.mesh_resource.cp_resource, None)
@@ -1323,6 +1314,7 @@ def test_jax_new_rng():
         head_dim_v = 64,
         attn_bias_type = AttnBiasType.NO_BIAS,
         attn_mask_type = AttnMaskType.NO_MASK,
+        softmax_type = AttnSoftmaxType.VANILLA_SOFTMAX,
         dropout_prob = 0.1,
         use_old_rng = False,
         dtype = jnp.bfloat16,

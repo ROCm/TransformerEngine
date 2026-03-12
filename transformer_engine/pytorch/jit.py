@@ -10,12 +10,8 @@ from functools import wraps
 from typing import Callable, Optional, Tuple
 import torch
 
-<<<<<<< HEAD
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
-from . import torch_version
-=======
 from .torch_version import torch_version
->>>>>>> upstream/release_v2.10
 from .export import is_in_onnx_export_mode
 from .utils import gpu_autocast_ctx
 

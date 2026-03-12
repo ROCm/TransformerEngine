@@ -69,37 +69,11 @@ class _GroupedLinear(torch.autograd.Function):
     def forward(
         ctx,
         inp: torch.Tensor,
-<<<<<<< HEAD
-        m_splits: List[int],
-        use_bias: bool,
-        is_first_microbatch: Union[bool, None],
-        fp8: bool,
-        fp8_calibration: bool,
-        wgrad_store: WeightGradStore,
-        input_quantizers: List[Quantizer],
-        weight_quantizers: List[Quantizer],
-        output_quantizers: List[Quantizer],
-        grad_output_quantizers: List[Quantizer],
-        fuse_wgrad_accumulation: bool,
-        cpu_offloading: bool,
-        sequence_parallel: bool,
-        activation_dtype: torch.dtype,
-        is_grad_enabled: bool,
-        module,
-        skip_fp8_weight_update,
-        save_original_input,
-        m_splits_tensor: Optional[torch.Tensor], # Optional GPU tensor for triton kernel
-=======
         non_tensor_args: Tuple,
->>>>>>> upstream/release_v2.10
         *weights_and_biases,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
 
-<<<<<<< HEAD
-        # Check if Triton kernel should be used
-        use_grouped_gemm_triton = IS_HIP_EXTENSION and os.getenv("NVTE_USE_GROUPED_GEMM_TRITON", "0") == "1" and not fp8 and not fuse_wgrad_accumulation
-=======
         # Reduce number of arguments to autograd function in order
         # to reduce CPU overhead due to pytorch arg checking.
         (
@@ -121,9 +95,12 @@ class _GroupedLinear(torch.autograd.Function):
             module,
             skip_fp8_weight_update,
             save_original_input,
+            m_splits_tensor,
         ) = non_tensor_args
 
->>>>>>> upstream/release_v2.10
+        # Check if Triton kernel should be used
+        use_grouped_gemm_triton = IS_HIP_EXTENSION and os.getenv("NVTE_USE_GROUPED_GEMM_TRITON", "0") == "1" and not fp8 and not fuse_wgrad_accumulation
+
         num_gemms = len(m_splits)
         weights = weights_and_biases[:num_gemms]
         biases = weights_and_biases[num_gemms:]
@@ -568,27 +545,6 @@ class _GroupedLinear(torch.autograd.Function):
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             None,
-<<<<<<< HEAD
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-=======
->>>>>>> upstream/release_v2.10
             *wgrad_list,
             *grad_biases,
         )
@@ -909,12 +865,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 self,
                 None,  # skip_fp8_weight_update
                 self.save_original_input,
-<<<<<<< HEAD
                 m_splits_tensor,
-                *weight_tensors,
-                *bias_tensors,
-=======
->>>>>>> upstream/release_v2.10
             )
             out = linear_fn(*autograd_ctx, inp, non_tensor_args, *weight_tensors, *bias_tensors)
 

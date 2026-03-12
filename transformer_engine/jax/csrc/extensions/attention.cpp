@@ -89,9 +89,6 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
       bias_aux_data.dtype = static_cast<NVTEDType>(dtype);
       nvte_set_tensor_param(&bias_aux, kNVTERowwiseData, &bias_aux_data);
     }
-<<<<<<< HEAD
-#ifndef USE_ROCM
-=======
 
     // include softmax_offset if provided
     if (softmax_offset_buf != nullptr) {
@@ -110,7 +107,7 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
 
     // Set final size
     tensor_pack->size = size;
->>>>>>> upstream/release_v2.10
+#ifndef USE_ROCM
   }
 #endif
   nvte_set_tensor_param(&softmax_aux, kNVTERowwiseData, &softmax_aux_data);

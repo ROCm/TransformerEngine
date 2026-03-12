@@ -93,45 +93,7 @@ class _Linear(torch.autograd.Function):
         weight: torch.Tensor,
         inp: torch.Tensor,
         bias: Optional[torch.Tensor],
-<<<<<<< HEAD
-        is_first_microbatch: Union[bool, None],
-        fp8: bool,
-        fp8_calibration: bool,
-        wgrad_store: WeightGradStore,
-        input_quantizer: Optional[Quantizer],
-        weight_quantizer: Optional[Quantizer],
-        output_quantizer: Optional[Quantizer],
-        grad_input_quantizer: Optional[Quantizer],
-        grad_weight_quantizer: Optional[Quantizer],
-        grad_output_quantizer: Optional[Quantizer],
-        fuse_wgrad_accumulation: bool,
-        cpu_offloading: bool,
-        tp_group: Union[dist_group_type, None],
-        tp_size: int,
-        sequence_parallel: bool,
-        tensor_parallel: bool,
-        activation_dtype: torch.dtype,
-        parallel_mode: Union[str, None],
-        is_grad_enabled: bool,
-        ub_overlap_rs_fprop: bool,
-        ub_overlap_ag_dgrad: bool,
-        ub_overlap_ag_fprop: bool,
-        ub_overlap_rs_dgrad: bool,
-        ub_bulk_dgrad: bool,
-        ub_bulk_wgrad: bool,
-        ub_name: str,
-        fp8_output: bool,  # pylint: disable=unused-argument
-        fsdp_group: Union[dist_group_type, None],
-        module: torch.nn.Module,
-        skip_fp8_weight_update: bool,
-        symmetric_ar_type: str,
-        save_original_input: bool = False,
-        debug: Optional[bool] = False,
-        keep_fp8_weight_transpose_cache: bool = True,
-        use_fsdp2: bool = False,
-=======
         non_tensor_args: Tuple,
->>>>>>> upstream/release_v2.10
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
 
@@ -169,6 +131,8 @@ class _Linear(torch.autograd.Function):
             symmetric_ar_type,
             save_original_input,
             debug,
+            keep_fp8_weight_transpose_cache,
+            use_fsdp2
         ) = non_tensor_args
 
         # NVTX label for profiling
@@ -1036,45 +1000,7 @@ class _Linear(torch.autograd.Function):
             wgrad,
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             grad_bias,
-<<<<<<< HEAD
-            None,  # is_first_microbatch
-            None,  # fp8
-            None,  # fp8_calibration
-            None,  # wgrad_store
-            None,  # input_quantizer
-            None,  # weight_quantizer
-            None,  # output_quantizer
-            None,  # grad_input_quantizer
-            None,  # grad_weight_quantizer
-            None,  # grad_output_quantizer
-            None,  # fuse_wgrad_accumulation
-            None,  # cpu_offloading
-            None,  # tp_group
-            None,  # tp_size
-            None,  # sequence_parallel
-            None,  # tensor_parallel
-            None,  # activation_dtype
-            None,  # parallel_mode
-            None,  # is_grad_enabled
-            None,  # ub_overlap_rs_fprop
-            None,  # ub_overlap_ag_dgrad
-            None,  # ub_overlap_ag_fprop
-            None,  # ub_overlap_rs_dgrad
-            None,  # ub_bulk_dgrad
-            None,  # ub_bulk_wgrad
-            None,  # ub_name
-            None,  # fp8_output
-            None,  # fsdp_group
-            None,  # module
-            None,  # skip_fp8_weight_update
-            None,  # symmetric_ar_type
-            None,  # save_original_input
-            None,  # debug
-            None,  # keep_fp8_weight_transpose_cache
-            None,  # use_fsdp2
-=======
             None,
->>>>>>> upstream/release_v2.10
         )
 
 
@@ -1158,7 +1084,6 @@ class Linear(TransformerEngineBaseModule):
                    This can help in latency bound communication situations.
                    Requires PyTorch version 2.7.0 or higher. When set to ``None``, standard all-reduce
                    is used.
-<<<<<<< HEAD
     keep_fp8_weight_transpose_cache: bool, default = `True`
                 Controls whether to cache the FP8 weight transpose buffer during training.
 
@@ -1173,12 +1098,8 @@ class Linear(TransformerEngineBaseModule):
                 reduced efficiency of PyTorch's caching allocator.
 
                 Use this setting to balance memory usage and performance based on your training configuration.
-    save_original_input : bool, default = `False`
-                       If set to `True`, always saves the original input tensor rather than the
-=======
     save_original_input : bool, default = False
                        If set to ``True``, always saves the original input tensor rather than the
->>>>>>> upstream/release_v2.10
                        cast tensor. In some scenarios, the input tensor is used by multiple modules,
                        and saving the original input tensor may reduce the memory usage.
                        Cannot work with FP8 DelayedScaling recipe.

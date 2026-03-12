@@ -21,7 +21,6 @@ def general_grouped_gemm_triton(
     B: List[torch.Tensor],
     out: List[torch.Tensor],
     out_dtype: torch.dtype,
-    workspaces: List[torch.Tensor],
     layout: str = "TN",
     m_splits: List[int] = None,
     gelu: bool = False,
@@ -47,7 +46,6 @@ def general_grouped_gemm_triton(
         B: Right-hand side matrices (inputs for forward, grad_outputs for backward)
         out: Output matrices (pre-allocated)
         out_dtype: Output dtype
-        workspace: Workspace tensor (unused, for compatibility)
         single_output: Whether to produce single concatenated output
         m_splits: List of token counts per expert
         bias: List of bias tensors (optional)
@@ -64,9 +62,11 @@ def general_grouped_gemm_triton(
     assert m_splits is not None, "m_splits required for Triton kernel"
     assert len(out) > 0, "Output tensor(s) must be pre-allocated and passed in C list"
     m_splits_tensor = kwargs.get("m_splits_tensor", None)
+
     # Determine operation type
     is_dgrad = (layout == "NN" and grad)
     is_wgrad = (layout == "NT" and grad)
+
     # Triton kernel needs GPU tensor
     if m_splits_tensor is None:
         m_splits_tensor = torch.tensor(m_splits, dtype=torch.int32, device=out[0].device)
