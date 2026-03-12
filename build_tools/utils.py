@@ -471,34 +471,6 @@ def copy_common_headers(
         new_path.parent.mkdir(exist_ok=True, parents=True)
         shutil.copy(path, new_path)
 
-def copy_hipify_tools(
-    src_dir: Union[Path, str],
-    dst_dir: Union[Path, str],
-) -> None:
-    """Copy necessary hipify tools from library root
-    src_dir should be the root or Transformer Engine repository.
-    """
-    if rocm_build() and bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
-        hipify_dir = src_dir / "3rdparty" / "hipify_torch"
-        hipify_copy = dst_dir / "3rdparty" / "hipify_torch"
-        if hipify_copy.exists():
-            shutil.rmtree(hipify_copy)
-        shutil.copytree(hipify_dir, hipify_copy)
-        shutil.copy(src_dir / "hipify_custom_map.json", dst_dir / "hipify_custom_map.json")
-
-
-def clear_hipify_tools_copy(
-    dst_dir: Union[Path, str],
-) -> None:
-    """Clear temporary copies of hipify tools
-    """
-    hipify_copy = dst_dir / "3rdparty"
-    if hipify_copy.exists():
-        shutil.rmtree(hipify_copy)
-    map_copy = dst_dir / "hipify_custom_map.json"
-    if map_copy.exists():
-        map_copy.unlink()
-
 
 def install_and_import(package):
     """Install a package via pip (if not already installed) and import into globals."""
@@ -521,50 +493,3 @@ def uninstall_te_wheel_packages():
             "transformer_engine_jax",
         ]
     )
-
-def detect_hipify_v2():
-    try:
-        from torch.utils.hipify import __version__
-        from packaging.version import Version
-        if Version(__version__) >= Version("2.0.0"):
-            return True
-    except Exception as e:
-        print("failed to detect pytorch hipify version, defaulting to version 1.0.0 behavior")
-        print(e)
-    return False
-
-def hipify(base_dir, src_dir, sources, include_dirs):
-    cwd = os.getcwd()
-    if detect_hipify_v2():
-        hipify_module = importlib.import_module("3rdparty.hipify_torch.hipify_torch.v2.hipify_python")
-    else:
-        hipify_module = importlib.import_module("3rdparty.hipify_torch.hipify_torch.hipify_python")
-    do_hipify = hipify_module.hipify
-
-    hipify_result = do_hipify(
-        project_directory=src_dir,
-        output_directory=src_dir,
-        includes=["*"],
-        ignores=["*/amd_detail/*", "*/aotriton/*", "*/ck_fused_attn/*"],
-        header_include_dirs=[d for d in include_dirs if Path(d).is_relative_to(base_dir)],
-        custom_map_list=base_dir / "hipify_custom_map.json",
-        extra_files=[],
-        is_pytorch_extension=True,
-        hipify_extra_files_only=False,
-        show_detailed=False,
-        no_math_replace=True)
-
-    # Because hipify output_directory == project_directory
-    # Original sources list may contain previous hipifying results that ends up with duplicated entries
-    # Keep unique entries only
-    hipified_sources = set()
-    for fname in sources:
-        fname = os.path.abspath(str(fname))
-        if fname in hipify_result:
-            file_result = hipify_result[fname]
-            if file_result.hipified_path is not None:
-                fname = hipify_result[fname].hipified_path
-        # setup() arguments must *always* be /-separated paths relative to the setup.py directory,
-        # *never* absolute paths
-        hipified_sources.add(os.path.relpath(fname, cwd))
-    return list(hipified_sources)

@@ -6,6 +6,7 @@
 
 #pragma once
 // drop-in rocm replacement for mxfp8 gated quantize kernel
+//#include "hip/hip_runtime.h" //dummy include to prevent hipification adding this header
 
 constexpr size_t ALIGNMENT_SIZE = 128;
 // TODO: Identify optimal chunk/thread size for MI350+

@@ -96,5 +96,10 @@ else()
   find_package(hip REQUIRED)
 endif()
 
+if(USE_ROCM)
+  include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/hipify/hipify.cmake")
+  TE_Hipify(${CMAKE_CURRENT_SOURCE_DIR})
+endif()
+
 add_subdirectory(operator)
 add_subdirectory(util)
