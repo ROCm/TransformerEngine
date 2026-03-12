@@ -248,7 +248,7 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument(
         "--debug",
         action="store_true",
-        default=False,
+        default=True,
         help="Print out additional debug information.",
     )
     parser.add_argument(
@@ -388,7 +388,7 @@ def _train(opts):
             " layers. Use --num-heads or --head-dim for other cases."
         )
 
-    def dist_print(msg, src=None, end="\n", debug=False, error=False):
+    def dist_print(msg, src=None, end="\n", debug=True, error=False):
         if debug and not opts.debug:
             return
         stream = sys.stderr if error else sys.stdout
@@ -439,6 +439,8 @@ def _train(opts):
     ]
     if opts.first_last_layers_bf16 and opts.fp8:
         quantization_modes.append(te.module.base.UserBufferQuantizationMode.NONE)
+    
+    dist_print(f"Before initialize_ub, opts: {opts}")
 
     te.module.base.initialize_ub(
         [opts.seq_length * opts.batch_size, opts.num_heads * opts.head_dim],
@@ -563,8 +565,8 @@ def _train(opts):
         # Now validate accuracy
         if not bool(numerics_failed.item()):
             for i, (test_g, ref_g) in enumerate(zip(test_grads, ref_grads)):
-                rtol = 0.125 if opts.fp8 else 0.025 if not IS_HIP_EXTENSION else 5e-2
-                atol = 0.0625 if opts.fp8 else 0.00125 if not IS_HIP_EXTENSION else 1e-2
+                rtol = 0.125 if opts.fp8 else 0.025
+                atol = 0.0625 if opts.fp8 else 0.00125
                 grad_failed, grad_info = _compare_tensors(names[i], test_g, ref_g, rtol, atol)
                 dist_print(grad_info, src=WORLD_RANK, error=grad_failed)
                 numerics_failed[0] = int(grad_failed)

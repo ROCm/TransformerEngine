@@ -378,7 +378,7 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
   NVTE_CHECK_CUDA(cudaMemset((*comm)->flags_baseptr, 0, 2 * GPU_PAGE_SIZE));
   (*comm)->flags = reinterpret_cast<int *>(
 #ifdef __HIP_PLATFORM_AMD__
-      (reinterpret_cast<uintptr_t>((*comm)->flags) + GPU_PAGE_SIZE - 1) & GPU_PAGE_MASK);
+      (reinterpret_cast<uintptr_t>((*comm)->flags_baseptr) + GPU_PAGE_SIZE - 1) & GPU_PAGE_MASK);
 #else
       ((CUdeviceptr)(*comm)->flags_baseptr + GPU_PAGE_SIZE - 1) & GPU_PAGE_MASK);
 #endif

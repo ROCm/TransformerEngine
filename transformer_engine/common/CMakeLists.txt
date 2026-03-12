@@ -173,7 +173,10 @@ set(transformer_engine_cuda_arch_specific_sources)
 
 # Source files in both cuda and rocm
 list(APPEND transformer_engine_cpp_sources
-     transformer_engine.cpp
+     transformer_engine.cpp 
+     comm_gemm_overlap/userbuffers/ipcsocket.cc
+     comm_gemm_overlap/userbuffers/userbuffers-host.cpp
+     comm_gemm_overlap/comm_gemm_overlap.cpp
      gemm/config.cpp
      normalization/common.cpp
      normalization/layernorm/ln_api.cpp
@@ -231,10 +234,7 @@ if(USE_CUDA)
     list(APPEND transformer_engine_cpp_sources
         cudnn_utils.cpp
         fused_attn/fused_attn.cpp
-        util/cuda_nvml.cpp
-        comm_gemm_overlap/userbuffers/ipcsocket.cc
-        comm_gemm_overlap/userbuffers/userbuffers-host.cpp
-        comm_gemm_overlap/comm_gemm_overlap.cpp)
+        util/cuda_nvml.cpp)
     list(APPEND transformer_engine_cuda_sources
         transpose/quantize_transpose_vector_blockwise.cu
         fused_attn/fused_attn_f16_max512_seqlen.cu
@@ -252,6 +252,7 @@ if(USE_CUDA)
 else()
 #ROCm specific source codes
     list(APPEND transformer_engine_cpp_sources
+        comm_gemm_overlap/rocm_comm_gemm_overlap.cpp
         fused_attn_rocm/fused_attn.cpp
         gemm/rocm_gemm.cu
         gemm/ck_grouped_gemm.cpp

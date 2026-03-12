@@ -17,7 +17,6 @@
 
 #include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
 
-#define NVTE_COMM_OVERLAP_MAX_STREAMS 7
 
 namespace transformer_engine {
 
@@ -39,7 +38,7 @@ enum class CommOverlapAlgo {
   ATOMIC_GEMM_RS = 5,
   ATOMIC_GEMM_AG_P2P = 6,
   ATOMIC_GEMM_RS_P2P = 7,
-  EXTERNAL_BULK_OVERLAP_AG = 8
+  EXTERNAL_BULK_OVERLAP_AG = 8,
 };
 
 class CommOverlapCore {
@@ -195,7 +194,7 @@ class CommOverlapBase : public CommOverlapCore {
   CommOverlapBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype, int myrank,
                   int numranks, int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
                   ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle, int num_splits = 3,
-                  int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
+                  int num_max_streams = NVTE_ROCM_MAX_RINGS, int comm_cga_size = 2,
                   int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 16,
                   bool set_sm_margin = true, bool atomic_gemm = false,
                   bool rs_overlap_first_gemm = false);
@@ -262,7 +261,7 @@ class CommOverlapBase : public CommOverlapCore {
                         TensorWrapper &workspace, bool grad, bool accumulate,
                         bool use_split_accumulator, TensorWrapper &rs_output,
                         cudaStream_t stream_main) override {
-    NVTE_ERROR("Operation not supported.");                      
+    NVTE_ERROR("Operation not supported.");
                         }
 };  // CommOverlapBase
 
@@ -288,17 +287,13 @@ class CommOverlapP2PBase : public CommOverlapCore {
   void initialize(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
                   CommOverlapType comm_type, bool aggregate);
 
- private:
-  void initialize(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
-                  CommOverlapType comm_type, bool aggregate);
-
  public:
   CommOverlapP2PBase() {}  // dummy constructor for exposing type to Python
 
   CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype, int myrank,
                      int numranks, int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
                      ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle,
-                     CommOverlapType comm_type, int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS,
+                     CommOverlapType comm_type, int num_max_streams = NVTE_ROCM_MAX_RINGS,
                      int comm_cga_size = 1, int gemm_priority = 0, int comm_priority = 0,
                      int num_comm_sm = 1, bool set_sm_margin = false, bool use_ce = true,
                      bool atomic_gemm = false, bool aggregate = false);
@@ -359,7 +354,7 @@ class CommOverlapP2PBase : public CommOverlapCore {
                         cudaStream_t stream_main) override;
   /*
   ** ROCm Multiring ReduceScatter + GEMM
-  */  
+  */
   void rocm_split_overlap_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
                         TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
                         TensorWrapper &workspace, bool grad, bool accumulate,
@@ -368,7 +363,7 @@ class CommOverlapP2PBase : public CommOverlapCore {
 
   /*
   ** ROCm Multiring AllGather + GEMM
-  */ 
+  */
   void rocm_split_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
                         TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
                         TensorWrapper &workspace, bool grad, bool accumulate,

@@ -7,17 +7,15 @@
  ************************************************************************/
 
 #include <cuda.h>
+#include <cuda_runtime.h>
+#include <cuda_fp8.h>
 
 #ifdef __HIP_PLATFORM_AMD__
-#include <hip/hip_runtime.h>
 #include <hip/hip_bfloat16.h>
-#include "amd_detail/hip_float8.h"
 #define half_dtype hip_bfloat16 
 #define __nv_fp8_e5m2 te_hip_fp8_e5m2
 #define __nv_fp8_e4m3 te_hip_fp8_e4m3
 #else
-#include <cuda_fp8.h>
-#include <cuda_runtime.h>
 
 #if __CUDA_ARCH__ >= 800
 #define half_dtype nv_bfloat16
@@ -54,7 +52,7 @@
       while (0 != (atomicCAS(((unsigned int *)counters) + chunk, 0, 0))) { \
       }                                                                    \
       ((unsigned int *)counters)[chunk] = 1;                               \
-      __threadfence();                                                     \
+      __threadfence_system();                                                     \
     }                                                                      \
     if (blockIdx.x == 0) __syncthreads();                                  \
   }
@@ -157,7 +155,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
   }
 
   __syncthreads();
-  if (threadIdx.x == 0) __threadfence();
+  if (threadIdx.x == 0) __threadfence_system();
   __syncthreads();
 
   if (threadIdx.x < RANKS) {
@@ -237,7 +235,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     userptr[myrank][lineoffset + line] = sum;
   }
   __syncthreads();
-  if (threadIdx.x == 0) __threadfence();
+  if (threadIdx.x == 0) __threadfence_system();
   __syncthreads();
 
   if (threadIdx.x < RANKS) {
@@ -502,7 +500,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
   }
 
   __syncthreads();
-  if (threadIdx.x == 0) __threadfence();
+  if (threadIdx.x == 0) __threadfence_system();
   __syncthreads();
 
   if (threadIdx.x < RANKS) {
@@ -733,7 +731,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
   }
 
   __syncthreads();
-  if (threadIdx.x == 0) __threadfence();
+  if (threadIdx.x == 0) __threadfence_system();
   __syncthreads();
 
   __shared__ int lastSM;
@@ -1053,7 +1051,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
 #ifndef __HIP_PLATFORM_AMD__
       asm volatile("fence.sc.gpu;\n");
 #else
-      __threadfence();
+      __threadfence_system();
 #endif
     }
   }
@@ -1148,7 +1146,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
 #ifndef __HIP_PLATFORM_AMD__
         asm volatile("fence.sc.gpu;\n");
 #else
-        __threadfence();
+        __threadfence_system();
 #endif
       }
     }
@@ -1362,7 +1360,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
   }
 
   __syncthreads();
-  if (threadIdx.x == 0) __threadfence();
+  if (threadIdx.x == 0) __threadfence_system();
   __syncthreads();
 
   __shared__ int lastSM;
@@ -2098,7 +2096,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     }
     __syncthreads();
     if (threadIdx.x) return;
-    __threadfence();
+    __threadfence_system();
     atomicAdd_system(flagptr,
                      1);  // otherwise need local SM sync before sending flag
   } else {                // 0 bytes and 1 SM only
@@ -2160,7 +2158,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     }
     __syncthreads();
     if (threadIdx.x) return;
-    __threadfence();
+    __threadfence_system();
     atomicAdd_system(send_flagptr,
                      1);  // otherwise need local SM sync before sending flag
   } else {                // 0 bytes and 1 SM only
@@ -2218,7 +2216,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     }
     __syncthreads();
     if (threadIdx.x) return;
-    __threadfence();
+    __threadfence_system();
     atomicAdd_system(send_flagptr,
                      1);  // otherwise need local SM sync before sending flag
   } else {                // 0 bytes and 1 SM only
@@ -2248,7 +2246,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
 #ifndef __HIP_PLATFORM_AMD__
       asm volatile("fence.sc.gpu;\n");
 #else
-      __threadfence();
+      __threadfence_system();
 #endif
     }
   }
@@ -2289,7 +2287,7 @@ __global__ void __launch_bounds__(MAX_THREADS) kuserbuffers_pushsendrecv_multiat
       }
       __syncthreads();
       if (!threadIdx.x) {
-        __threadfence();
+        __threadfence_system();
         atomicAdd_system(send_flagptr,
                          1);  // otherwise need local SM sync before sending flag
       }
@@ -2323,7 +2321,7 @@ __global__ void __launch_bounds__(MAX_THREADS) kuserbuffers_pushsendrecv_multiat
 #ifndef __HIP_PLATFORM_AMD__
         asm volatile("fence.sc.gpu;\n");
 #else
-        __threadfence();
+        __threadfence_system();
 #endif
       }
     }
@@ -2638,7 +2636,7 @@ static __global__ void producer_kernel(void *atomic_ptr, int chunk_i) {
 #ifndef __HIP_PLATFORM_AMD__
   asm volatile("fence.sc.gpu;\n");
 #else
-  __threadfence();
+  __threadfence_system();
 #endif
 }
 
@@ -2652,7 +2650,7 @@ static __global__ void consumer_kernel(void *atomic_ptr, int chunk_i) {
 #ifndef __HIP_PLATFORM_AMD__
     asm volatile("fence.sc.gpu;\n");
 #else
-    __threadfence();
+    __threadfence_system();
 #endif
   }
 }
@@ -2668,7 +2666,7 @@ static __global__ void consumer_batch_kernel(void *atomic_ptr, int first_chunk_i
 #ifndef __HIP_PLATFORM_AMD__
       asm volatile("fence.sc.gpu;\n");
 #else
-      __threadfence();
+      __threadfence_system();
 #endif
     }
   }

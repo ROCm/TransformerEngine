@@ -793,38 +793,6 @@ void CommOverlapP2PBase::copy_into_buffer(cudaStream_t stream, const TensorWrapp
                                   cudaMemcpyDeviceToDevice, stream));
 }
 
-void CommOverlapP2PBase::copy_into_buffer(cudaStream_t stream, const TensorWrapper &source,
-                                          bool local_chunk, bool rowwise) {
-  // Check element size
-  const size_t element_size = source.element_size();
-  NVTE_CHECK(_ubuf.element_size() == element_size,
-             "Tried to copy data into a Userbuffers buffer but dtypes are not compatible ",
-             "(source dtype has ", element_size, " bytes, UB dtype has ", _ubuf.element_size(),
-             " bytes)");
-
-  // Input data
-  const size_t source_size = source.numel();
-  const void *src_ptr = (rowwise) ? source.dptr() : source.columnwise_dptr();
-
-  // Userbuffers data
-  void *dst_ptr;
-  if (local_chunk) {
-    NVTE_CHECK(_ubufs[_tp_id].numel() == source_size,
-               "Tried to copy an invalid tensor into a local chunk of a Userbuffers buffer ",
-               "(source_size=", source_size, ", local_ubuf_size=", _ubufs[_tp_id].numel(), ")");
-    dst_ptr = _ubufs[_tp_id].dptr();
-  } else {
-    NVTE_CHECK(_ubuf.numel() == source_size,
-               "Tried to copy an invalid tensor into a Userbuffers buffer ",
-               "(source_size=", source_size, ", ubuf_size=", _ubuf.numel(), ")");
-    dst_ptr = _ubuf.dptr();
-  }
-
-  // Copy data
-  NVTE_CHECK_CUDA(cudaMemcpyAsync(dst_ptr, src_ptr, source_size * element_size,
-                                  cudaMemcpyDeviceToDevice, stream));
-}
-
 TensorWrapper CommOverlapP2PBase::get_buffer_chunk_by_id(const TensorWrapper &source,
                                                          size_t chunk_id) {
   // Start with a chunk of the source tensor

@@ -100,8 +100,8 @@ def _run_layer_with_overlap(
     layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, quantization, num_layers=1
 ):
     # Skip BULK overlap tests on HIP (column parallel or None with overlap_rs_dgrad=False)
-    if IS_HIP_EXTENSION and not overlap_rs_dgrad and linear_parallel_mode in ("column", None):
-        pytest.skip("Bulk overlap is not yet supported on HIP/ROCm.")
+    #if IS_HIP_EXTENSION and not overlap_rs_dgrad and linear_parallel_mode in ("column", None):
+    #    pytest.skip("Bulk overlap is not yet supported on HIP/ROCm.")
     test_path = TEST_ROOT / "run_layer_with_overlap.py"
     test_cmd = LAUNCH_CMD + [
         str(test_path),
@@ -131,6 +131,7 @@ def _run_layer_with_overlap(
     os.environ["NVTE_TORCH_COMPILE"] = "0"
     os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
 
+    print("test_cmd: ", test_cmd)
     result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
 
     os.unsetenv("PYTORCH_JIT")
@@ -165,7 +166,7 @@ def test_split_reduce_scatter_overlaps(quantization, p2p):
     _run_gemm_with_overlap("RS", False, p2p, False, False, quantization)
 
 
-@pytest.mark.skipif(IS_HIP_EXTENSION, reason="Bulk overlap is not yet supported on ROCm.")
+#@pytest.mark.skipif(IS_HIP_EXTENSION, reason="Bulk overlap is not yet supported on ROCm.")
 @pytest.mark.parametrize(
     "comm_type, quantization, connections",
     [
