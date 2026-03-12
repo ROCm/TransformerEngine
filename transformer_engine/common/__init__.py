@@ -141,7 +141,7 @@ def get_te_core_package_info() -> Tuple[bool, str, str]:
     
     te_core_packages = ("transformer-engine-cu12", "transformer-engine-cu13")
     if te_rocm_build:
-        te_core_packages = ("transformer-engine-rocm")
+        te_core_packages = ("transformer-engine-rocm",)
     for package in te_core_packages:
         if _is_package_installed(package):
             return True, package, version(package)

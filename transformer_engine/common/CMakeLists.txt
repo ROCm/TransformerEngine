@@ -565,9 +565,11 @@ if (USE_ROCM)
   file(READ "${ROCM_PATH}/.info/version" ROCM_VER)
   string(STRIP "${ROCM_VER}" ROCM_VER)
   string(REGEX MATCH "^[0-9]+\\.[0-9]+" ROCM_VER "${ROCM_VER}")
+  get_git_commit("${TE}" TE_COMMIT_ID)
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/build_info.txt"
     "ROCM_VERSION: ${ROCM_VER}\n"
     "GPU_TARGETS: ${CMAKE_HIP_ARCHITECTURES}\n"
+    "COMMIT_ID: ${TE_COMMIT_ID}\n"
   )
   install(FILES "${CMAKE_CURRENT_BINARY_DIR}/build_info.txt" DESTINATION "transformer_engine/")
 endif()
