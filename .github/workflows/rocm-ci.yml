@@ -506,19 +506,15 @@ jobs:
             gh api "repos/${GH_REPO}/issues/comments/${COMMENT_ID}" --jq .body \
               > /tmp/perf_existing.md
 
-            python3 -c "
-            import sys
-            existing = open('/tmp/perf_existing.md').read()
-            section = open('/tmp/perf_section.md').read()
-            start, end = sys.argv[1], sys.argv[2]
-            if start in existing:
-                i = existing.index(start)
-                j = existing.index(end) + len(end)
-                result = existing[:i] + section + existing[j:]
-            else:
-                result = existing.rstrip() + '\n\n' + section
-            open('/tmp/perf_comment.md', 'w').write(result)
-            " "$SECTION_START" "$SECTION_END"
+            if grep -qF "$SECTION_START" /tmp/perf_existing.md; then
+              awk -v start="$SECTION_START" -v end="$SECTION_END" -v sf="/tmp/perf_section.md" '
+                $0 ~ start { skip=1; while((getline l < sf)>0) print l; next }
+                $0 ~ end   { skip=0; next }
+                !skip       { print }
+              ' /tmp/perf_existing.md > /tmp/perf_comment.md
+            else
+              { cat /tmp/perf_existing.md; echo ""; cat /tmp/perf_section.md; } > /tmp/perf_comment.md
+            fi
 
             gh api "repos/${GH_REPO}/issues/comments/${COMMENT_ID}" \
               --method PATCH --field body=@/tmp/perf_comment.md
