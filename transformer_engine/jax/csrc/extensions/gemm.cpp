@@ -22,8 +22,8 @@
 #include "common/util/cuda_runtime.h"
 #include "common/util/string.h"
 #include "common/util/system.h"
-#include "cuda_runtime.h"
 #ifndef USE_ROCM
+#include "cuda_runtime.h"
 #include "nccl.h"
 #endif //#ifndef USE_ROCM
 #include "transformer_engine/swizzle.h"

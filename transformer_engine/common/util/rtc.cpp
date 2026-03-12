@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2023-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -187,7 +187,7 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
 #ifdef __HIP_PLATFORM_AMD__
   constexpr int num_headers = 3;
   const char* headers[num_headers] = {string_code_utils_cuh, string_code_util_math_h, string_code_amd_detail_hip_float8_h};
-  const char* include_names[num_headers] = {"utils_hip.cuh", "util/math.h", "amd_detail/hip_float8.h"};
+  const char* include_names[num_headers] = {"utils_hip.cuh", "util/math.h", "common/amd_detail/hip_float8.h"};
 #else
   constexpr int num_headers = 2;
   constexpr const char* headers[num_headers] = {string_code_utils_cuh, string_code_util_math_h};
