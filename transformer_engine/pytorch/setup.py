@@ -115,6 +115,10 @@ class CachedWheelsCommand(_bdist_wheel):
     """
 
     def run(self):
+        if rocm_build():
+            print("ROCm build detected, building from source...")
+            return super().run()
+
         if FORCE_BUILD:
             super().run()
 
