@@ -176,7 +176,12 @@ class TransformerLayer(torch.nn.Module):
     activation : str, default = 'gelu'
           Type of activation used in MLP block.
           Options are: 'gelu', 'geglu', 'qgelu', 'qgeglu', 'relu', 'reglu', 'srelu', 'sreglu',
-                       'silu', and 'swiglu'.
+                       'silu', 'swiglu', and 'clamped_swiglu'.
+    activation_params : Optional[dict], default = `None`
+                        Additional parameters for the activation function.
+                        At the moment, only used for 'clamped_swiglu' activation which
+                        supports 'limit' and 'alpha' parameters. You can set these as
+                        `activation_params={'limit': 7.0, 'alpha': 1.702}`.
     device : Union[torch.device, str], default = "cuda"
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
@@ -191,6 +196,17 @@ class TransformerLayer(torch.nn.Module):
                          and `DotProductAttention` modules.
     name: str, default = `None`
         name of the module, currently used for debugging purposes.
+    softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
+                 softmax type as described in this paper:
+                 `Efficient Streaming Language Models with Attention Sinks
+                 <https://arxiv.org/pdf/2309.17453v3>`_.
+                 For a given attention score S = Q*K^T, of shape [b, h, s_q, s_kv],
+                 'vanilla': S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1),
+                 'off-by-one': S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)), and
+                 'learnable': S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)),
+                 where alpha is a learnable parameter in shape [h].
+                 'off-by-one' and 'learnable' softmax types are also called sink attention
+                 ('zero sink' and 'learnable sink').
 
     Parallelism parameters
     ----------------------
@@ -299,6 +315,7 @@ class TransformerLayer(torch.nn.Module):
         ub_bulk_wgrad: bool = True,
         bias: bool = True,
         activation: str = "gelu",
+        activation_params: Optional[dict] = None,
         normalization: str = "LayerNorm",
         device: Union[torch.device, str] = "cuda",
         attn_input_format: str = "sbhd",
@@ -306,6 +323,7 @@ class TransformerLayer(torch.nn.Module):
         qk_norm_type: Optional[str] = None,
         qk_norm_eps: float = 1e-6,
         qk_norm_before_rope: bool = False,
+        softmax_type: str = "vanilla",
     ) -> None:
         super().__init__()
 
@@ -362,6 +380,7 @@ class TransformerLayer(torch.nn.Module):
         self.get_rng_state_tracker = get_rng_state_tracker
 
         self.attn_input_format = attn_input_format
+        self.softmax_type = softmax_type
 
         self.name = name
 
@@ -397,6 +416,7 @@ class TransformerLayer(torch.nn.Module):
             "qkv_format": self.attn_input_format,
             "seq_length": seq_length,
             "micro_batch_size": micro_batch_size,
+            "softmax_type": self.softmax_type,
         }
 
         self.self_attention = MultiheadAttention(
@@ -461,6 +481,7 @@ class TransformerLayer(torch.nn.Module):
             ub_overlap_rs=ub_overlap_rs,
             ub_overlap_ag=ub_overlap_ag,
             activation=activation,
+            activation_params=activation_params,
             normalization=normalization,
             device=device,
             name=name + ".layernorm_mlp" if name is not None else None,

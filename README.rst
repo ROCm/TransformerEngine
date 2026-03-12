@@ -61,7 +61,7 @@ Execute the following commands to install ROCm Transformer Engine from source on
 
   cd TransformerEngine
   export NVTE_FRAMEWORK=pytorch,jax #optionally set framework, currently only support pytorch and jax; if not set will try to detect installed frameworks
-  export NVTE_ROCM_ARCH=gfx942,gfx950 # gfx942 for support of MI300/MI325, and gfx950 for support of MI350
+  export NVTE_ROCM_ARCH="gfx942;gfx950" # gfx942 for support of MI300/MI325, and gfx950 for support of MI350
 
   # Build Platform Selection (optional)
   # Note: Useful when both ROCm and CUDA platforms are present in the Docker
@@ -354,6 +354,19 @@ legacy single-stage atomic kernel by setting:
 
     NVTE_USE_ATOMIC_AMAX=1
 
+Grouped GEMM using CK_Tile
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Transformer Engine provides a CK_Tile–based implementation of grouped GEMM
+as an alternative to the hipBlasLt-based default grouped GEMM implementation.
+This will provide performance improvements in most supported cases.
+
+You can enable the CK_Tile-based backend using the same environment variables as in the
+upstream CUTLASS implementation:
+
+    NVTE_USE_CUTLASS_GROUPED_GEMM=1             # Enable CK_Tile-based grouped GEMM
+    NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK=1   # Print a warning if falling back to hipBlasLt backend (e.g., due to an unsupported config)
+
 
 Transformer Engine
 ******************
@@ -362,6 +375,14 @@ Transformer Engine
 
 Latest News
 ===========
+
+* [09/2025] `Pretraining Large Language Models with NVFP4 <https://www.arxiv.org/pdf/2509.25149>`_
+* [09/2025] `Native FP8 Mixed Precision Training for Ling 2.0, Open Sourced! <https://huggingface.co/blog/im0qianqian/ling-mini-2-fp8-mixed-precision-training-solution>`_
+* [09/2025] `Faster Training Throughput in FP8 Precision with NVIDIA NeMo <https://developer.nvidia.com/blog/faster-training-throughput-in-fp8-precision-with-nvidia-nemo/>`_
+* [08/2025] `How we built DeepL's next-generation LLMs with FP8 for training and inference <https://www.deepl.com/en/blog/tech/next-generation-llm-fp8-training>`_
+* [08/2025] `NVFP4 Trains with Precision of 16-bit and Speed and Efficiency of 4-bit <https://developer.nvidia.com/blog/nvfp4-trains-with-precision-of-16-bit-and-speed-and-efficiency-of-4-bit/>`_
+* [06/2025] `Floating Point 8: An Introduction to Efficient, Lower-Precision AI Training <https://developer.nvidia.com/blog/floating-point-8-an-introduction-to-efficient-lower-precision-ai-training/>`_
+* [05/2025] `Advanced Optimization Strategies for LLM Training on NVIDIA Grace Hopper <https://developer.nvidia.com/blog/advanced-optimization-strategies-for-llm-training-on-nvidia-grace-hopper/>`_
 * [03/2025] `Stable and Scalable FP8 Deep Learning Training on Blackwell | GTC 2025 <https://www.nvidia.com/en-us/on-demand/session/gtc25-s72778/>`_
 * [03/2025] `Measure and Improve AI Workload Performance with NVIDIA DGX Cloud Benchmarking <https://developer.nvidia.com/blog/measure-and-improve-ai-workload-performance-with-nvidia-dgx-cloud-benchmarking/>`_
 
@@ -436,7 +457,7 @@ PyTorch
   fp8_recipe = recipe.DelayedScaling(margin=0, fp8_format=recipe.Format.E4M3)
 
   # Enable autocasting for the forward pass
-  with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+  with te.autocast(enabled=True, recipe=fp8_recipe):
       out = model(inp)
 
   loss = out.sum()
@@ -471,7 +492,7 @@ Flax
   fp8_recipe = recipe.DelayedScaling(margin=0, fp8_format=recipe.Format.HYBRID)
 
   # Enable autocasting for the forward pass
-  with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+  with te.autocast(enabled=True, recipe=fp8_recipe):
       model = te_flax.DenseGeneral(features=HIDDEN)
 
       def loss_fn(params, other_vars, inp):
@@ -547,7 +568,7 @@ pip Installation
 **Prerequisites for pip installation:**
 
 * A compatible C++ compiler
-* CUDA Toolkit with cuDNN and NVCC (NVIDIA CUDA Compiler) installed
+* CUDA Toolkit with cuDNN and NVCC (NVIDIA CUDA Compiler) if installing from source.
 
 To install the latest stable version with pip:
 

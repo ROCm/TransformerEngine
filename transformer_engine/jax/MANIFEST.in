@@ -2,4 +2,3 @@ recursive-include build_tools *.*
 recursive-include common_headers *.*
 recursive-include csrc *.*
 recursive-include 3rdparty *.*
-include hipify_custom_map.json
