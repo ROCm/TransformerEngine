@@ -7,22 +7,19 @@ import torch
 import triton
 import triton.language as tl
 
-from transformer_engine.pytorch.gemm_triton import te_gemm_triton, torch_to_te_dtype
+from transformer_engine.pytorch.gemm_triton import te_gemm_triton, torch_to_te_dtype, _get_fp8_dtypes
 
 
-TORCH_HAS_FP8E5B16 = hasattr(torch, 'float8_e5m2fnuz')
-TORCH_HAS_FP8E4B8 = hasattr(torch, 'float8_e4m3fnuz')
+fp8_e4m3_dtype, fp8_e5m2_dtype = _get_fp8_dtypes()
 tl_to_torch_types = {
     tl.float16: torch.float16,
     tl.bfloat16: torch.bfloat16,
     tl.float32: torch.float32,
     tl.int8: torch.int8,
     tl.int32: torch.int32,
+    tl.float8e4b8: fp8_e4m3_dtype,
+    tl.float8e5b16: fp8_e5m2_dtype,
 }
-if TORCH_HAS_FP8E5B16:
-    tl_to_torch_types[tl.float8e5b16] = torch.float8_e5m2fnuz
-if TORCH_HAS_FP8E4B8:
-    tl_to_torch_types[tl.float8e4b8] = torch.float8_e4m3fnuz
 
 name_to_tl_types = {
     'int8': tl.int8,
@@ -57,8 +54,7 @@ def gen_input(M, N, ty_name, needTrans, seed, device='cuda'):
     if d_type == tl.float8e4b8:
         raw_data += torch.sign(raw_data)
 
-    if (d_type == tl.float8e4b8 and TORCH_HAS_FP8E4B8) or \
-            (d_type == tl.float8e5b16 and TORCH_HAS_FP8E5B16) or not d_type.is_fp8():
+    if d_type in tl_to_torch_types:
         input = raw_data.to(tl_to_torch_types[d_type])
         input_f16 = input.to(torch.float16)
     else:
