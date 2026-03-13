@@ -181,12 +181,21 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 
     scale_inv_meta ret_rowwise, ret_colwise;
 
-    size_t scale_dim_Y = DIVUP_TO_MULTIPLE(first_dim, scale_tensor_alignment_Y_rowwise);
-    size_t scale_dim_X = DIVUP_TO_MULTIPLE(DIVUP(last_dim, 16lu), scale_tensor_alignment_X_rowwise);
+#ifdef __HIP_PLATFORM_AMD__
+    // NVFP4 requires [128,4] padding on AMD regardless of MXFP8 alignment constants
+    constexpr size_t nvfp4_align_Y = 128;
+    constexpr size_t nvfp4_align_X = 4;
+#else
+    constexpr size_t nvfp4_align_Y = scale_tensor_alignment_Y_rowwise;
+    constexpr size_t nvfp4_align_X = scale_tensor_alignment_X_rowwise;
+#endif
+
+    size_t scale_dim_Y = DIVUP_TO_MULTIPLE(first_dim, nvfp4_align_Y);
+    size_t scale_dim_X = DIVUP_TO_MULTIPLE(DIVUP(last_dim, 16lu), nvfp4_align_X);
     ret_rowwise.shape = {scale_dim_Y, scale_dim_X};
 
-    size_t scale_dim_Y_t = DIVUP_TO_MULTIPLE(last_dim, scale_tensor_alignment_Y_rowwise);
-    size_t scale_dim_X_t = DIVUP_TO_MULTIPLE(DIVUP(first_dim, 16lu), scale_tensor_alignment_X_rowwise);
+    size_t scale_dim_Y_t = DIVUP_TO_MULTIPLE(last_dim, nvfp4_align_Y);
+    size_t scale_dim_X_t = DIVUP_TO_MULTIPLE(DIVUP(first_dim, 16lu), nvfp4_align_X);
     ret_colwise.shape = {scale_dim_Y_t, scale_dim_X_t};
 
     ret_rowwise.type = DType::kFloat8E4M3;
@@ -1223,14 +1232,8 @@ std::array<size_t, 4> get_scale_tensor_dims(const size_t rows,
     // NVFP4 scales (block_size=16) still require [128,4] padding for kernel indexing.
 #ifdef __HIP_PLATFORM_AMD__
     const bool needs_padding = (block_size_cols == 16 || block_size_rows == 16);
-    const size_t alignment_Y = needs_padding
-                               ? (is_rowwise ? scale_tensor_alignment_Y_rowwise
-                                             : scale_tensor_alignment_Y_colwise)
-                               : 1;
-    const size_t alignment_X = needs_padding
-                               ? (is_rowwise ? scale_tensor_alignment_X_rowwise
-                                             : scale_tensor_alignment_X_colwise)
-                               : 1;
+    const size_t alignment_Y = needs_padding ? (is_rowwise ? 128 : 4) : 1;
+    const size_t alignment_X = needs_padding ? (is_rowwise ? 4 : 128) : 1;
 #else
     const size_t alignment_Y = is_rowwise
                                ? scale_tensor_alignment_Y_rowwise
