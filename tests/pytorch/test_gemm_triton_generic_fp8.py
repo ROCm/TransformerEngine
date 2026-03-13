@@ -15,7 +15,7 @@ import os
 os.environ['NVTE_USE_GEMM_TRITON'] = '1'
 
 from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
+from transformer_engine.pytorch import Float8Tensor
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 import transformer_engine_torch as tex
 
