@@ -7,7 +7,7 @@
 """
 Compare two CSVs from the same benchmark (base branch vs PR branch).
 
-Auto-detects metric columns (containing "TFLOPS") and key columns.
+Auto-detects metric columns (containing "TFLOPS"/ "GB/s") and key columns.
 Outputs a markdown <details> block to stdout with per-config results,
 and optionally appends a summary table row to --summary-file.
 
@@ -25,7 +25,7 @@ SKIP_COLS = {"TestID", "Label"}
 
 
 def auto_detect_columns(df):
-    metric_cols = [c for c in df.columns if "TFLOPS" in c]
+    metric_cols = [c for c in df.columns if "TFLOPS" in c or "GB/s" in c]
     key_cols = [
         c for c in df.columns
         if c not in metric_cols and c not in SKIP_COLS
