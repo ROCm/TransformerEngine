@@ -18,7 +18,7 @@ def test_mxfp8_imports():
     try:
         from transformer_engine.pytorch.gemm_triton import te_generic_gemm_triton
         from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
-        from transformer_engine.pytorch.tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
+        from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
         print("✓ Successfully imported MXFP8 classes")
     except ImportError as e:
         pytest.fail(f"Import failed: {e}")

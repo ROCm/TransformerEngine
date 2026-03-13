@@ -54,19 +54,15 @@ def torch_to_te_dtype(dtype):
     return torch_to_TE_dtypes[dtype]
 
 def te_to_torch_dtype(dtype):
+    e4m3_dtype, e5m2_dtype = _get_fp8_dtypes()
     te_dtype_to_torch_dtype = {
             tex.DType.kByte : torch.int8,
             tex.DType.kInt32 : torch.int32,
             tex.DType.kFloat32 : torch.float32,
             tex.DType.kFloat16 : torch.float16,
             tex.DType.kBFloat16 : torch.bfloat16,
-            #tex.DType.kFloat8E4M3: torch.float8_e4m3fnuz,
-            #tex.DType.kFloat8E5M2: torch.float8_e5m2fnuz,
-            # Currently, TE does not use Pytorch's fp8 data types
-            # Instead it has its own Float8Tensor, which uses
-            # torch.uint8 as its data type
-            tex.DType.kFloat8E4M3: torch.uint8,
-            tex.DType.kFloat8E5M2: torch.uint8,
+            tex.DType.kFloat8E4M3: e4m3_dtype,
+            tex.DType.kFloat8E5M2: e5m2_dtype,
             }
     return te_dtype_to_torch_dtype[dtype]
 
@@ -188,16 +184,16 @@ class Float8TensorWrapper:
 
     def __init__(self, tensor):
         """
-        Create wrapper from Float8Tensor, Float8TensorBase, or regular tensor.
+        Create wrapper from Float8Tensor, Float8TensorStorage, or regular tensor.
 
         Args:
-            tensor: Input tensor (Float8Tensor, Float8TensorBase, or torch.Tensor)
+            tensor: Input tensor (Float8Tensor, Float8TensorStorage, or torch.Tensor)
         """
         # Import here to avoid circular dependency
         try:
             from transformer_engine.pytorch.float8_tensor import Float8Tensor
-            from transformer_engine.pytorch.tensor._internal.float8_tensor_base import Float8TensorBase
-            is_fp8_tensor = isinstance(tensor, (Float8Tensor, Float8TensorBase))
+            from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
+            is_fp8_tensor = isinstance(tensor, (Float8Tensor, Float8TensorStorage))
         except ImportError:
             is_fp8_tensor = False
 
@@ -228,7 +224,7 @@ class Float8TensorWrapper:
             self._fp8_dtype = tensor._fp8_dtype
             self._scale_inv = tensor._scale_inv
 
-            # Nominal dtype (may not exist for Float8TensorBase)
+            # Nominal dtype (may not exist for Float8TensorStorage)
             self._nominal_dtype = getattr(tensor, 'dtype', None)
 
             # Compute logical size (in rowwise format)
@@ -324,16 +320,16 @@ class MXFP8TensorWrapper:
 
     def __init__(self, tensor):
         """
-        Create wrapper from MXFP8Tensor or MXFP8TensorBase.
+        Create wrapper from MXFP8Tensor or MXFP8TensorStorage.
 
         Args:
-            tensor: Input tensor (MXFP8Tensor, MXFP8TensorBase, or regular tensor)
+            tensor: Input tensor (MXFP8Tensor, MXFP8TensorStorage, or regular tensor)
         """
         # Import here to avoid circular dependency
         try:
             from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
-            from transformer_engine.pytorch.tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-            is_mxfp8_tensor = isinstance(tensor, (MXFP8Tensor, MXFP8TensorBase))
+            from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
+            is_mxfp8_tensor = isinstance(tensor, (MXFP8Tensor, MXFP8TensorStorage))
         except ImportError:
             is_mxfp8_tensor = False
 
@@ -453,15 +449,17 @@ def te_generic_gemm_triton(A,
                             comm_overlap,
                             comm_type,
                             extra_output,
-                            bulk_overlap):
+                            bulk_overlap,
+                            alpha=1.0,
+                            beta=0.0):
 
     # Wrap inputs to handle Float8Tensor and MXFP8Tensor uniformly
     # Try MXFP8 first, then Float8, then regular
     try:
         from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
-        from transformer_engine.pytorch.tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-        is_mxfp8_a = isinstance(A, (MXFP8Tensor, MXFP8TensorBase))
-        is_mxfp8_b = isinstance(B, (MXFP8Tensor, MXFP8TensorBase))
+        from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
+        is_mxfp8_a = isinstance(A, (MXFP8Tensor, MXFP8TensorStorage))
+        is_mxfp8_b = isinstance(B, (MXFP8Tensor, MXFP8TensorStorage))
     except ImportError:
         is_mxfp8_a = False
         is_mxfp8_b = False
@@ -571,7 +569,7 @@ def te_generic_gemm_triton(A,
         B_data = reinterpret_as_fp8_tensor(B_data, b_fp8_dtype)
 
     # Compute dimensions using wrapper sizes
-    # Wrapper handles Float8TensorBase which doesn't have .shape attribute
+    # Wrapper handles Float8TensorStorage which doesn't have .shape attribute
     #
     # BLAS column-major interpretation:
     # PyTorch tensors are row-major in memory, but BLAS interprets them as column-major.
@@ -688,7 +686,7 @@ def te_generic_gemm_triton(A,
             # Regular FP8 input: use nominal dtype if available
             if A_wrapper.nominal_dtype is None:
                 raise RuntimeError(
-                    "FP8 input detected (Float8TensorBase without nominal dtype) but output_dtype "
+                    "FP8 input detected (Float8TensorStorage without nominal dtype) but output_dtype "
                     "parameter is not provided. Please explicitly provide the output_dtype parameter "
                     "to general_gemm()."
                 )
