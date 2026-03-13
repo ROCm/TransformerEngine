@@ -573,7 +573,7 @@ void fused_attn_ck_fwd_impl(
   void* workspace_next = workspace;
 
   const char* nvte_smallseq = std::getenv("NVTE_FUSED_ATTN_CK_SMALLSEQ");
-  if (is_ragged && nvte_smallseq && std::string(nvte_smallseq) == "1") {
+  if (is_ragged && s_q!=s_kv && nvte_smallseq && std::string(nvte_smallseq) == "1") {
     void* max_seqlen_workspace = workspace_next;
     size_t runtime_max_seqlen_q = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
         static_cast<uint64_t>(b), devPtrCuSeqlensQ, nullptr, max_seqlen_workspace, stream));
@@ -904,7 +904,7 @@ void fused_attn_ck_bwd_impl(
   void* workspace_next = workspace;
 
   const char* nvte_smallseq = std::getenv("NVTE_FUSED_ATTN_CK_SMALLSEQ");
-  if (is_ragged && nvte_smallseq && std::string(nvte_smallseq) == "1") {
+  if (is_ragged && s_q!=s_kv && nvte_smallseq && std::string(nvte_smallseq) == "1") {
     void* max_seqlen_workspace = workspace_next;
     size_t runtime_max_seqlen_q = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
       b, devPtrCuSeqlensQ, nullptr, max_seqlen_workspace, stream));

@@ -516,7 +516,7 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
   auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
 
   const char* nvte_smallseq = std::getenv("NVTE_FUSED_ATTN_CK_SMALLSEQ");
-  if (is_ragged && nvte_smallseq && std::string(nvte_smallseq) == "1") {
+  if (is_ragged && q_max_seqlen!=kv_max_seqlen && nvte_smallseq && std::string(nvte_smallseq) == "1") {
     size_t workspace_elems = product(work_shape);
     size_t elt_size = transformer_engine::typeToSize(query_workspace_tensor.dtype());
     size_t workspace_bytes = workspace_elems * elt_size;
