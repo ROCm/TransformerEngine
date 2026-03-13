@@ -371,7 +371,7 @@ jobs:
           EOF
           )"
 
-      - name: "Performance regression check"
+      - name: Performance regression check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -470,9 +470,12 @@ jobs:
           SECTION_START="<!-- perf-section:${DISPLAY_NAME} -->"
           SECTION_END="<!-- /perf-section:${DISPLAY_NAME} -->"
 
+          CI_TRIGGERED_AT="$(TZ='America/Chicago' date -d '${{ github.event.pull_request.updated_at }}' '+%Y-%m-%d %H:%M:%S %Z')"
+
           SECTION=$(cat <<EOF
           ${SECTION_START}
           ### ${DISPLAY_NAME}
+          <sub>PR commit: ${{ github.sha }} | Base: \`${{ github.base_ref }}\` | ${CI_TRIGGERED_AT}</sub>
 
           | Benchmark suite | Median speedup | Min speedup | Max speedup |
           |---|---|---|---|
