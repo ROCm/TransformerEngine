@@ -1,7 +1,7 @@
 ..
     This file was modified to include portability information to AMDGPU.
 
-    Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
+    Copyright (c) 2023-2026, Advanced Micro Devices, Inc. All rights reserved.
 
     Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
