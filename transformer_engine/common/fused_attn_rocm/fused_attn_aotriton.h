@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
@@ -23,6 +23,7 @@ bool is_aotriton_backend_supported(
   NVTE_QKV_Layout qkv_layout,
   NVTE_Bias_Type bias_type,
   NVTE_Mask_Type attn_mask_type,
+  NVTE_Softmax_Type softmax_type,
   float dropout,
   size_t num_attn_heads, size_t num_gqa_groups,
   size_t max_seqlen_q, size_t max_seqlen_kv,
@@ -47,6 +48,7 @@ void fused_attn_aotriton_fwd_qkvpacked(
 void fused_attn_aotriton_bwd_qkvpacked(
   size_t b, size_t h, size_t max_seqlen, size_t d,
   float attn_scale, float dropout, 
+  int32_t window_size_left, int32_t window_size_right,
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   const Tensor* input_QKV, const Tensor* input_O, const Tensor* input_dO,
   const Tensor* output_S,
@@ -72,6 +74,7 @@ void fused_attn_aotriton_fwd_kvpacked(
 void fused_attn_aotriton_bwd_kvpacked(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
   float attn_scale, float dropout, 
+  int32_t window_size_left, int32_t window_size_right,
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   const Tensor* input_Q, const Tensor* input_KV, const Tensor* input_O, const Tensor* input_dO,
   const Tensor* output_S,
@@ -98,6 +101,7 @@ void fused_attn_aotriton_fwd(
 void fused_attn_aotriton_bwd(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
   float attn_scale, float dropout, 
+  int32_t window_size_left, int32_t window_size_right,
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V, const Tensor* input_O, const Tensor* input_dO, 
   const Tensor* output_S,

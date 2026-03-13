@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # See LICENSE for license information.
 
 import os
@@ -8,7 +8,7 @@ import pytest
 import subprocess
 from pathlib import Path
 from transformer_engine.pytorch import torch_version
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 import torch
 from run_fsdp2_fp8_model import SimpleNet
 
@@ -17,20 +17,15 @@ mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available(
 
 NUM_PROCS: int = torch.cuda.device_count()
 
-def assert_allclose(
-    l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float, rtol: float = None
-) -> bool:
-    """Ensures two lists are equal."""
+def assertEqual(
+    l1: List[torch.Tensor], l2: List[torch.Tensor]) -> bool:
+    """Ensures two lists are exactly equal."""
     assert len(l1) == len(l2), "Unequal number of outputs."
     for i, (t1, t2) in enumerate(zip(l1, l2)):
-        tols = dict(atol=atol)
-        if rtol is not None:
-            tols["rtol"] = rtol
-        result = torch.allclose(t1, t2, **tols)
+        result = torch.allclose(t1, t2, atol=0, rtol=0)
         if not result:
             diff = torch.abs(t1 - t2)
-            tol = atol + (rtol * torch.abs(t2))
-            exceed_mask = diff > tol
+            exceed_mask = diff > 0
             if exceed_mask.any():
                 indices = torch.nonzero(exceed_mask, as_tuple=True)
                 max_diff = diff[exceed_mask].max()
@@ -64,7 +59,7 @@ def _run_test(fp_init, recipe):
     for idx, (te_output_no_cache, te_output_cache) in enumerate(zip(output_fsdp, output_dp)):
     
         print(f"Comparing FSDP {te_output_no_cache[0]}, DDP {te_output_cache[0]} at index {idx}...")
-        assert_allclose(te_output_no_cache[1], te_output_cache[1], atol=0, rtol=0)
+        assertEqual(te_output_no_cache[1], te_output_cache[1]) # expects exact match
         print(f"Tensor at index {idx} passed comparison.")
 
 

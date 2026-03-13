@@ -18,7 +18,9 @@ from subprocess import CalledProcessError
 from typing import List, Optional, Type
 
 import setuptools
+from setuptools.command.sdist import sdist as _sdist
 
+from .te_version import te_version, is_local_version_used, version_file
 from .utils import (
     rocm_build,
     rocm_path,
@@ -60,6 +62,7 @@ class CMakeExtension(setuptools.Extension):
             build_dir,
             f"-DPython_EXECUTABLE={sys.executable}",
             f"-DPython_INCLUDE_DIR={sysconfig.get_path('include')}",
+            f"-DPython_SITEARCH={sysconfig.get_path('platlib')}",
             f"-DCMAKE_BUILD_TYPE={build_type}",
             f"-DCMAKE_INSTALL_PREFIX={install_dir}",
         ]
@@ -226,3 +229,15 @@ def get_build_ext(
             super().build_extensions()
 
     return _CMakeBuildExtension
+
+
+class SdistWithLocalVersion(_sdist):
+    """
+    Override sdist to modify the *staged* copy of VERSION.txt.
+    """
+    def make_release_tree(self, base_dir, files):
+        # First let setuptools stage the files into base_dir
+        super().make_release_tree(base_dir, files)
+
+        if is_local_version_used():
+            version_file(base_dir).write_text(te_version() + "\n", encoding="utf-8")

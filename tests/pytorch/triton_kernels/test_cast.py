@@ -1,4 +1,4 @@
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
 import pytest
@@ -10,7 +10,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Flo
 from transformer_engine.pytorch.triton_kernels.common import te_dtype_to_torch_dtype
 import transformer_engine_torch as tex
 from test_common import te_compare_results, fill_uniform, get_tolerances
-from transformer_engine.pytorch.fp8 import fp8_autocast
+from transformer_engine.pytorch.quantization import autocast
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type, get_torch_float8_e5m2_type
 
@@ -43,7 +43,7 @@ def test_quantize(scaling, shape, in_dtype, out_dtype):
         triton_quantizer = Float8CurrentScalingQuantizer(fp8_dtype=out_dtype, device="cuda")
         tex_quantizer = Float8CurrentScalingQuantizer(fp8_dtype=out_dtype, device="cuda")
 
-        with fp8_autocast(enabled=True, fp8_recipe=recipe.Float8CurrentScaling()):
+        with autocast(enabled=True, recipe=recipe.Float8CurrentScaling()):
             quantized_out_triton = te_quantize_triton(input_tensor, quantizer=triton_quantizer)
             quantized_out_tex    = tex.quantize(input_tensor, tex_quantizer)
 
@@ -187,13 +187,13 @@ def test_amax_atomic_vs_two_stage(shape, in_dtype, out_dtype):
         # atomic amax
         os.environ[env_key] = "1"
 
-        with fp8_autocast(enabled=True, fp8_recipe=recipe.Float8CurrentScaling()):
+        with autocast(enabled=True, recipe=recipe.Float8CurrentScaling()):
             out_atomic = te_quantize_triton(input_tensor, quantizer=quantizer_atomic)
 
         # 2-stage amax
         os.environ[env_key] = "0"
 
-        with fp8_autocast(enabled=True, fp8_recipe=recipe.Float8CurrentScaling()):
+        with autocast(enabled=True, recipe=recipe.Float8CurrentScaling()):
             out_2stage = te_quantize_triton(input_tensor, quantizer=quantizer_2stage)
 
         te_compare_results(

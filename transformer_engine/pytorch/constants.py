@@ -100,3 +100,5 @@ GemmParallelModes = ("row", "column", None)
 dist_group_type = torch.distributed.ProcessGroup
 
 MXFP8_BLOCK_SCALING_SIZE = 32
+
+NVFP4_BLOCK_SCALING_SIZE = 16

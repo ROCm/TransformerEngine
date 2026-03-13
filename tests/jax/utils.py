@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -64,10 +64,15 @@ def _check_mxfp8_gemm_support(with_jax_gemm, m, n, k, use_bias=False):
             pytest.skip("hipblaslt GEMM does not yet support MXFP8 with bias.")
     else:
         jax_version = version.parse(jax.__version__)
-        if jax_version < version.parse("0.8.0"):
+        if jax_version < version.parse("0.8.2"):
             pytest.skip(
-                "MXFP8 support for JAX GEMM is added in version 0.8.0, "
+                "MXFP8 support for JAX GEMM is added in version 0.8.2, "
                 f"but the current detected version is {jax_version}."
+            )
+        if k < 64:
+            pytest.skip(
+                f"Input shape {(m, k)} x {(k, n)} with K={k} is not supported by "
+                f"ROCm jax.nn.scaled_matmul. K must be at least 64."
             )
 
 def _check_mxfp8_layernorm_mlp_support(
@@ -457,9 +462,9 @@ class MlpBlock(nn.Module):
 
     transpose_batch_sequence: bool
     intermediate_dim: int = 2048
-    activations: Sequence[Union[str, Callable]] = ("relu",)
+    activations: Sequence[Union[str, Callable]] = ("gelu",)
     kernel_init: Initializer = None
-    intermediate_dropout_rate: float = 0.1
+    intermediate_dropout_rate: float = 0.0
     intermediate_dropout_dims: Sequence[int] = ()
     use_bias: bool = False
     dtype: Any = jnp.float32
@@ -1128,14 +1133,14 @@ class EncoderLayer(nn.Module):
     hidden_dropout: float = 0.1
     hidden_dropout_dims: Sequence[int] = ()
     attention_dropout: float = 0.1
-    intermediate_dropout: float = 0.1
+    intermediate_dropout: float = 0.0
     intermediate_dropout_dims: Sequence[int] = ()
     transpose_batch_sequence: bool = True
     float32_attention_logits: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
     mlp_dim: int = 2048
-    mlp_activations: Sequence[str] = ("relu",)
+    mlp_activations: Sequence[str] = ("gelu",)
     use_bias: bool = False
     dtype: Any = jnp.float32
     apply_residual_connection_post_layernorm: bool = False
@@ -1292,14 +1297,14 @@ class DecoderLayer(nn.Module):
     hidden_dropout: float = 0.1
     hidden_dropout_dims: Sequence[int] = ()
     attention_dropout: float = 0.1
-    intermediate_dropout: float = 0.1
+    intermediate_dropout: float = 0.0
     intermediate_dropout_dims: Sequence[int] = ()
     transpose_batch_sequence: bool = True
     float32_attention_logits: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
     mlp_dim: int = 2048
-    mlp_activations: Sequence[str] = ("relu",)
+    mlp_activations: Sequence[str] = ("gelu",)
     use_bias: bool = False
     dtype: Any = jnp.float32
     apply_residual_connection_post_layernorm: bool = False
@@ -1637,6 +1642,12 @@ def dtype_tols(
         rtol = eps_relaxed
     if atol is None:
         atol = max(ulp, eps_relaxed)
+
+    # Manually set tols for nvfp4
+    if dtype == jnp.float4_e2m1fn:
+        atol = 0.05
+        rtol = 0.1
+
     return {"rtol": rtol, "atol": atol}
 
 

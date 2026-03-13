@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -13,11 +13,7 @@ import setuptools
 from .utils import (
     rocm_build,
     rocm_path,
-    hipify,
-)
-from .utils import (
     all_files_in_dir,
-    cuda_archs,
     cuda_version,
     get_cuda_include_dirs,
     debug_build_enabled,
@@ -27,12 +23,12 @@ from typing import List
 
 def install_requirements() -> List[str]:
     """Install dependencies for TE/PyTorch extensions."""
-    return ["torch>=2.1", "einops", "onnxscript==0.3.1", "onnx"]
+    return ["torch>=2.1", "einops", "onnxscript", "onnx"]
 
 
 def test_requirements() -> List[str]:
     """Test dependencies for TE/JAX extensions."""
-    return ["numpy", "torchvision", "transformers"]
+    return ["numpy", "torchvision", "transformers", "torchao==0.13"]
 
 
 def setup_pytorch_extension(
@@ -63,9 +59,9 @@ def setup_pytorch_extension(
     # If NVTE_RELEASE_BUILD is set, we assume not building but sources packaging
     # and we do not hipify the sources
     if rocm_build() and not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
-        current_file_path = Path(__file__).parent.resolve()
-        base_dir = current_file_path.parent
-        sources = hipify(base_dir, csrc_source_files, sources, include_dirs[1:])
+        from .hipify.hipify import hipify_sources as hipify
+        base_dir = Path(__file__).parent.parent.resolve()
+        sources = hipify(base_dir, csrc_source_files, common_header_files, sources, base_dir)
 
     # Compiler flags
     cxx_flags = ["-O3", "-fvisibility=hidden"]

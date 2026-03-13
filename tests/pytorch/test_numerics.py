@@ -10,26 +10,24 @@ from typing import Dict, List, Tuple, Optional
 import pytest
 import random
 
+from triton_kernels.test_common import get_tolerances
 import torch
 import torch.nn as nn
 from torch.nn import Parameter
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
-from transformer_engine.pytorch.fp8 import (
-    FP8GlobalStateManager,
-    fp8_autocast,
-    fp8_model_init,
-)
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
     attention_mask_func,
-    is_bf16_compatible,
 )
 if IS_HIP_EXTENSION:
     from transformer_engine.pytorch.utils import is_mi200, is_mi308
 
 from transformer_engine.pytorch import (
+    autocast,
+    quantized_model_init,
     DotProductAttention,
     LayerNormLinear,
     LayerNormMLP,
@@ -41,29 +39,31 @@ from transformer_engine.pytorch import (
     LayerNorm,
     Fp8Padding,
     Fp8Unpadding,
-)
-from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils as fa_utils
-from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
-from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
-from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
-from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
+    MXFP8Quantizer,
+    get_device_compute_capability,
+    is_fp8_available,
+    is_mxfp8_available,
+    is_fp8_block_scaling_available,
+    is_bf16_available,
+    is_nvfp4_available,
 )
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils as fa_utils
+from transformer_engine.pytorch import checkpoint as te_checkpoint
+from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
-from transformer_engine.pytorch.utils import get_device_compute_capability
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
-from utils import ModelConfig, reset_rng_states, get_available_attention_backends
+from utils import ModelConfig, reset_rng_states
 if IS_HIP_EXTENSION:
     from utils import EnvVarCleaner
 
-
 # Only run FP8 tests on supported devices.
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
-fp8_block_scaling_available, _ = FP8GlobalStateManager.is_fp8_block_scaling_available()
+fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available(return_reason=True)
+fp8_block_scaling_available = is_fp8_block_scaling_available()
+nvfp4_available = is_nvfp4_available()
 
 sm_80plus = get_device_compute_capability() >= (8, 0)
 
@@ -97,7 +97,7 @@ module_inference = ["TransformerLayer", "MultiheadAttention"]
 input_formats_inference = ["sbhd", "bshd"]
 
 param_types = [torch.float32, torch.float16]
-if is_bf16_compatible():  # bf16 requires sm_80 or higher
+if is_bf16_available():  # bf16 requires sm_80 or higher
     param_types.append(torch.bfloat16)
 
 batch_sizes = [1, 2]
@@ -136,6 +136,43 @@ if NVTE_TEST_NVINSPECT_ENABLED:
     )
 
 
+def nvfp4_rht_and_2d_quantization():
+    nvfp4_recipe = recipe.NVFP4BlockScaling()
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams(
+        random_hadamard_transform=True, fp4_2d_quantization=False
+    )
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams(
+        random_hadamard_transform=False, fp4_2d_quantization=True
+    )
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams(
+        random_hadamard_transform=True, fp4_2d_quantization=False
+    )
+    return nvfp4_recipe
+
+
+def check_rht_usage(recipe: recipe.Recipe) -> bool:
+    # if using RHT, we can only support bf16
+    # check fp4_quant_fwd_inp, fp4_quant_fwd_weight, fp4_quant_bwd_grad
+    if recipe.nvfp4():
+        if (
+            recipe.fp4_quant_fwd_inp.random_hadamard_transform
+            or recipe.fp4_quant_fwd_weight.random_hadamard_transform
+            or recipe.fp4_quant_bwd_grad.random_hadamard_transform
+        ):
+            return True
+    return False
+
+
+def get_nvfp4_inp_supported_dtypes(recipe: recipe.Recipe, dtype: torch.dtype) -> bool:
+    supported_input_dtypes = []
+    if recipe.nvfp4():
+        supported_input_dtypes.append(torch.bfloat16)
+        # if not using RHT, we can add fp32 as well
+    if not check_rht_usage(recipe):
+        supported_input_dtypes.append(torch.float32)
+    return supported_input_dtypes
+
+
 fp8_recipes = []
 if mxfp8_available:
     fp8_recipes.append(recipe.MXFP8BlockScaling())
@@ -144,30 +181,13 @@ if fp8_block_scaling_available:
 if fp8_available:
     fp8_recipes.append(recipe.Float8CurrentScaling())
     fp8_recipes.append(recipe.DelayedScaling())
+if nvfp4_available:
+    fp8_recipes.append(nvfp4_rht_and_2d_quantization())
 
 use_cutlass_grouped_gemm = [False]
 # Only enable cutlass grouped gemm on Hopper
-if torch.cuda.get_device_capability() == (9, 0):
+if torch.cuda.get_device_capability() == (9, 0) or IS_HIP_EXTENSION:
     use_cutlass_grouped_gemm.append(True)
-
-
-def is_fused_attn_available(
-    config: ModelConfig,
-    dtype: torch.dtype,
-    qkv_layout="bshd_bshd_bshd",
-    is_training=True,
-    deterministic=False,
-):
-    _, _, fused_attn_backends = get_available_attention_backends(
-        config,
-        qkv_dtype=dtype,
-        qkv_layout=qkv_layout,
-        is_training=is_training,
-        deterministic=deterministic,
-    )
-    if IS_HIP_EXTENSION:
-        return fused_attn_backends != []
-    return FusedAttnBackend["F16_arbitrary_seqlen"] in fused_attn_backends
 
 
 def get_causal_attn_mask(sq: int) -> torch.Tensor:
@@ -583,7 +603,7 @@ def _test_e2e_selective_recompute(
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         block = TransformerLayer(
             config.hidden_size,
             4 * config.hidden_size,
@@ -610,7 +630,7 @@ def _test_e2e_selective_recompute(
     te_inp_hidden_states.retain_grad()
     te_inp_attn_mask = get_causal_attn_mask(config.max_seqlen_q)
 
-    with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
+    with autocast(enabled=fp8, recipe=recipe):
         te_out = block(
             te_inp_hidden_states,
             attention_mask=te_inp_attn_mask,
@@ -636,6 +656,11 @@ def _test_e2e_selective_recompute(
 def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, recipe, fp8_model_params):
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
+    if fp8 and recipe.nvfp4():
+        if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
+            pytest.skip(
+                f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
+            )
 
     config = model_configs[model]
 
@@ -673,7 +698,7 @@ def _test_e2e_full_recompute(
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         block = TransformerLayer(
             config.hidden_size,
             4 * config.hidden_size,
@@ -701,7 +726,7 @@ def _test_e2e_full_recompute(
         te_inp_hidden_states.retain_grad()
     te_inp_attn_mask = get_causal_attn_mask(config.max_seqlen_q)
 
-    with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
+    with autocast(enabled=fp8, recipe=recipe):
         if recompute:
             te_out = te_checkpoint(
                 block,
@@ -754,6 +779,11 @@ def test_gpt_full_activation_recompute(
             and recipe.float8_per_tensor_scaling()
             ):
             pytest.skip("hipBLASLt does not provide suitable algorithms on GFX950 for this config.")
+    if fp8 and recipe.nvfp4():
+        if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
+            pytest.skip(
+                f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
+            )
 
     config = model_configs[model]
     torch.compiler.reset() # avoid cache size limit overflow
@@ -905,9 +935,6 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
 @pytest.mark.parametrize("model", ["126m"])
 def test_gpt_checkpointing(dtype, bs, model):
     config = model_configs[model]
-    if not is_fused_attn_available(config, dtype, deterministic=True):
-        pytest.skip("No attention backend available.")
-
     outputs = _test_e2e_checkpointing(bs, dtype, config, checkpoint=False)
     outputs_checkpoint = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
 
@@ -960,10 +987,6 @@ def _test_e2e_gpt_accuracy(block, bs, dtype, config):
 @pytest.mark.parametrize("parallel_attention_mlp", all_boolean)
 def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
     config = model_configs[model]
-    if not is_fused_attn_available(
-        config, dtype, qkv_layout="sb3hd", is_training=True, deterministic=True
-    ):
-        pytest.skip("No attention backend available.")
 
     te_gpt = TransformerLayer(
         hidden_size=config.hidden_size,
@@ -1075,10 +1098,6 @@ def _test_mha_accuracy(block, bs, dtype, config, mask_type, te=True):
 @pytest.mark.parametrize("mask_type", mask_types)
 def test_mha_accuracy(dtype, bs, model, mask_type):
     config = model_configs[model]
-    if not is_fused_attn_available(
-        config, dtype, qkv_layout="sb3hd", is_training=True, deterministic=True
-    ):
-        pytest.skip("No attention backend available.")
 
     te_mha = MultiheadAttention(
         config.hidden_size,
@@ -1146,7 +1165,7 @@ def _test_granular_accuracy(block, bs, dtype, config, delay_wgrad_compute=False,
     )
     inp_hidden_states.retain_grad()
 
-    with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
+    with autocast(enabled=fp8, recipe=recipe):
         out = block(inp_hidden_states)
         if isinstance(out, (List, Tuple)):
             out = out[0]
@@ -1178,7 +1197,7 @@ def _test_granular_accuracy_with_fp8(block, bs, dtype, config):
     )
     inp_hidden_states.retain_grad()
 
-    with fp8_autocast(enabled=True):
+    with autocast(enabled=True):
         out = block(inp_hidden_states)
         loss = out.sum()
         loss.backward()
@@ -1339,10 +1358,11 @@ def test_fp8_linear_without_transpose_cache_accuracy(dtype, bs, model, fp8_model
         module = LayerNormLinear
 
     config = model_configs[model]
-    with fp8_model_init(enabled=fp8_model_params):    
+    with quantized_model_init(enabled=fp8_model_params):    
         layer = module(
             config.hidden_size,
             4 * config.hidden_size,
+            config.eps,
             bias=True,
             params_dtype=dtype,
             device="cuda",
@@ -1353,6 +1373,7 @@ def test_fp8_linear_without_transpose_cache_accuracy(dtype, bs, model, fp8_model
         ref_layer = module(
             config.hidden_size,
             4 * config.hidden_size,
+            config.eps,
             bias=True,
             params_dtype=dtype,
             device="cuda",
@@ -1385,7 +1406,7 @@ def test_linear_accuracy_delay_wgrad_compute(dtype, bs, model, bias, fuse_wgrad_
 
     if IS_HIP_EXTENSION:
         if dtype not in (torch.float32,) and fuse_wgrad_accumulation and bias:
-            pytest.skip(f"Rocm does not support fused wgrad accumulation for {dtype}.")
+            pytest.skip(f"ROCm does not support fused wgrad accumulation for {dtype}.")
 
     te_linear_ref = Linear(
         config.hidden_size,
@@ -1443,7 +1464,13 @@ def test_linear_accuracy_save_original_input(dtype, model, recipe):
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    if recipe is not None and recipe.nvfp4():
+        if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
+            pytest.skip(
+                f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
+            )
+
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         te_linear_ref = Linear(
             config.hidden_size,
             4 * config.hidden_size,
@@ -1677,7 +1704,7 @@ def test_layernorm_linear_accuracy_delay_wgrad_compute(
 ):
     if IS_HIP_EXTENSION:
         if dtype not in (torch.float32,) and fuse_wgrad_accumulation and bias:
-            pytest.skip(f"Rocm does not support fused wgrad accumulation for {dtype}.")
+            pytest.skip(f"ROCm does not support fused wgrad accumulation for {dtype}.")
     config = model_configs[model]
 
     ln_linear_ref = LayerNormLinear(
@@ -1891,7 +1918,7 @@ def test_layernorm_mlp_accuracy_delay_wgrad_compute(
 
     if IS_HIP_EXTENSION:
         if dtype not in (torch.float32,) and fuse_wgrad_accumulation and bias:
-            pytest.skip(f"Rocm does not support fused wgrad accumulation for {dtype}.")
+            pytest.skip(f"ROCm does not support fused wgrad accumulation for {dtype}.")
 
     ln_mlp = LayerNormMLP(
         hidden_size=config.hidden_size,
@@ -1967,8 +1994,8 @@ def _test_grouped_linear_accuracy(
         split_size = 1
         if fp8:
             split_size = 16
-            if recipe.mxfp8():
-                split_size = 128
+            if recipe.mxfp8() or recipe.nvfp4():
+                split_size = 32
         m = config.max_seqlen_q // split_size
         dist = torch.sort(torch.randint(0, m, (num_gemms - 2,))).values.tolist()
         dist.append(dist[-1])  # Manually add a zero
@@ -1978,7 +2005,7 @@ def _test_grouped_linear_accuracy(
     else:
         m_splits = torch.tensor([config.max_seqlen_q])
 
-    with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
+    with autocast(enabled=fp8, recipe=recipe):
         if isinstance(block, GroupedLinear):
             m_splits = m_splits * bs
             out = block(inp_hidden_states, m_splits.tolist())
@@ -2019,6 +2046,7 @@ def _test_grouped_linear_accuracy(
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("delay_wgrad_compute", all_boolean)
+@pytest.mark.parametrize("use_triton", all_boolean)
 def test_grouped_linear_accuracy(
     dtype,
     num_gemms,
@@ -2029,14 +2057,18 @@ def test_grouped_linear_accuracy(
     fuse_wgrad_accumulation,
     bias,
     delay_wgrad_compute,
+    use_triton,
     parallel_mode=None,
     use_cutlass=False,
 ):
+
     fp8 = recipe is not None
+    if not IS_HIP_EXTENSION and use_triton:
+        pytest.skip("Triton grouped gemm is only supported on HIP.")
 
     if IS_HIP_EXTENSION:
         if dtype not in (torch.float32,) and fuse_wgrad_accumulation and not fp8:
-            pytest.skip(f"Rocm does not support fused wgrad accumulation for {dtype}.")
+            pytest.skip(f"ROCm does not support fused wgrad accumulation for {dtype}.")
     if fp8 and fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
 
@@ -2044,7 +2076,15 @@ def test_grouped_linear_accuracy(
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    if recipe is not None and recipe.nvfp4():
+        if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
+            pytest.skip(
+                f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
+            )
+    if use_triton:
+        os.environ["NVTE_USE_GROUPED_GEMM_TRITON"] = "1"
+        
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = GroupedLinear(
             num_gemms,
             config.hidden_size,
@@ -2106,16 +2146,25 @@ def test_grouped_linear_accuracy(
         delay_wgrad_compute,
     )
 
+    if use_triton:
+        os.environ.pop("NVTE_USE_GROUPED_GEMM_TRITON", None)
+
+    atol, rtol = 0, 0
+    if use_cutlass:
+        atol, rtol = 1e-3, 1e-3
+        if IS_HIP_EXTENSION:
+            atol, rtol = 1e-3, 8e-3
+    if use_triton:
+        atol, rtol = get_tolerances(dtype)
+        if dtype == torch.float32:
+            atol = 2.6e-6
+            rtol = 5e-2
     for o, o_ref in zip(outputs, outputs_ref):
-        if use_cutlass:
-            torch.testing.assert_close(o, o_ref, rtol=1e-3, atol=1e-3)
-        else:
-            # cuBLAS implementation should be bit-wise match
-            torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+        torch.testing.assert_close(o, o_ref, rtol=rtol, atol=atol)
 
 
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() != (9, 0),
+    torch.cuda.get_device_capability() != (9, 0) and not IS_HIP_EXTENSION,
     reason="Only enable CUTLASS grouped gemm on Hopper",
 )
 @pytest.mark.parametrize("dtype", param_types, ids=str)
@@ -2143,6 +2192,7 @@ def test_grouped_linear_accuracy_cutlass(
         fuse_wgrad_accumulation,
         False,
         delay_wgrad_compute,
+        False,
         None,
         use_cutlass=True,
     )
@@ -2180,7 +2230,13 @@ def test_grouped_linear_accuracy_save_original_input(
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    if recipe is not None and recipe.nvfp4():
+        if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
+            pytest.skip(
+                f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
+            )
+
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = GroupedLinear(
             num_gemms,
             config.hidden_size,
@@ -2260,6 +2316,7 @@ def test_grouped_linear_accuracy_single_gemm(recipe):
         fuse_wgrad_accumulation=True,
         bias=True,
         delay_wgrad_compute=False,
+        use_triton=False,
     )
 
 
@@ -2267,7 +2324,7 @@ def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, r
 
     def _pad_tensor_for_fp8(hidden_states, tokens_per_expert):
         align_size = 16
-        if recipe.mxfp8():
+        if recipe.mxfp8() or recipe.nvfp4():
             align_size = 32
         padded_tokens_per_expert = [
             (num_tokens + align_size - 1) // align_size * align_size
@@ -2334,7 +2391,7 @@ def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, r
 
     m_splits = _generate_random_numbers(num_gemms, config.max_seqlen_q * bs)
 
-    with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
+    with autocast(enabled=fp8, recipe=recipe):
         if isinstance(block, TorchGroupedLinearWithPadding):
             out = block(inp_hidden_states, m_splits)
         else:
@@ -2382,7 +2439,13 @@ def test_padding_grouped_linear_accuracy(
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    if recipe is not None and recipe.nvfp4():
+        if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
+            pytest.skip(
+                f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
+            )
+
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = TorchGroupedLinearWithPadding(
             num_gemms,
             config.hidden_size,
@@ -2393,7 +2456,7 @@ def test_padding_grouped_linear_accuracy(
             fp8=fp8,
         ).eval()
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         ref_grouped_linear = GroupedLinear(
             num_gemms,
             config.hidden_size,
@@ -2453,7 +2516,13 @@ def test_padding_grouped_linear_accuracy_save_original_input(
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    if recipe is not None and recipe.nvfp4():
+        if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
+            pytest.skip(
+                f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
+            )
+
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = TorchGroupedLinearWithPadding(
             num_gemms,
             config.hidden_size,
@@ -2464,7 +2533,7 @@ def test_padding_grouped_linear_accuracy_save_original_input(
             fp8=fp8,
         ).eval()
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         ref_grouped_linear = GroupedLinear(
             num_gemms,
             config.hidden_size,
@@ -2620,7 +2689,7 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params, recipe):
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    with fp8_model_init(enabled=fp8_model_params, recipe=recipe):
+    with quantized_model_init(enabled=fp8_model_params, recipe=recipe):
         block = TransformerLayer(
             config.hidden_size,
             4 * config.hidden_size,
@@ -2647,7 +2716,7 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params, recipe):
     te_inp_hidden_states.retain_grad()
     te_inp_attn_mask = get_causal_attn_mask(config.max_seqlen_q)
 
-    with fp8_autocast(enabled=True, fp8_recipe=recipe):
+    with autocast(enabled=True, recipe=recipe):
         te_out = block(te_inp_hidden_states, attention_mask=te_inp_attn_mask)
     loss = te_out.sum()
     loss.backward()
@@ -2667,6 +2736,12 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params, recipe):
 def test_gpt_fp8_parameters(dtype, bs, model, recipe):
     if NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
+
+    if recipe.nvfp4():
+        if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
+            pytest.skip(
+                f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
+            )
 
     config = model_configs[model]
 
