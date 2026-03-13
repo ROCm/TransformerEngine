@@ -11,10 +11,11 @@ import warnings
 from ..utils import is_non_tn_fp8_gemm_supported
 
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
-from .cast_transpose import te_cast_transpose_mxfp8_triton, te_cast_transpose_noop_triton, te_dequantize_mxfp8_triton
+from .cast_transpose import te_cast_transpose_mxfp4_triton, te_cast_transpose_mxfp8_triton, te_cast_transpose_noop_triton, te_dequantize_mxfp8_triton
 import transformer_engine_torch as tex
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
+from ..tensor.storage.mxfp4_tensor_storage import MXFP4TensorStorage
 
 @functools.lru_cache(maxsize=None)
 def _empty_tensor() -> torch.Tensor:
@@ -119,6 +120,8 @@ def te_quantize_triton(
                 out = tex.quantize(input_tensor, quantizer, out, noop_flag)
     elif isinstance(out, MXFP8TensorStorage):
         te_cast_transpose_mxfp8_triton(input_tensor, out)
+    elif isinstance(out, MXFP4TensorStorage):
+        te_cast_transpose_mxfp4_triton(input_tensor,out)
     else:
         raise NotImplementedError(f"Not implemented for tensor type: '{type(out).__name__}'")
 
@@ -131,4 +134,3 @@ def te_dequantize_triton(input, dtype: tex.DType):
         return tex.dequantize(input, dtype)
     else:
         raise NotImplementedError(f"Not implemented for tensor type: '{type(input).__name__}'")
-

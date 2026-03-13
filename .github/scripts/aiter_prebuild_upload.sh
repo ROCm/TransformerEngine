@@ -13,7 +13,7 @@ set -euo pipefail
 # Derive ROCm version and aiter commit -> cache key
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ROCM_PATH="${ROCM_PATH:-/opt/rocm}"
-ROCM_VER="$(head -n1 "${ROCM_PATH}/.info/version" | sed -n 's/^\([0-9]\+\.[0-9]\+\).*/\1/p')"
+ROCM_VER=`head -n1 "${ROCM_PATH}/.info/version" | cut -d. -f1`
 
 AITER_DIR="${ROOT_DIR}/3rdparty/aiter"
 GIT_CONFIG_GLOBAL="$(mktemp /tmp/gitconfig.XXXXXX)"
@@ -49,11 +49,8 @@ if [[ "${1:-}" == "--build" ]]; then
   echo "[AITER-PREBUILT] Building aiter libs for ${GPU_ARCHS} ..."
   bash "${ROOT_DIR}/transformer_engine/common/ck_fused_attn/aiter_build.sh" \
     --aiter-dir "${ROOT_DIR}/3rdparty/aiter" \
-    --aiter-test-dir "${ROOT_DIR}/3rdparty/aiter/op_tests/cpp/mha" \
+    --install-dir "${EXTRACT_DIR}" \
     --gpu-archs "${GPU_ARCHS}"
-  mkdir -p "${EXTRACT_DIR}"
-  cp "${ROOT_DIR}/3rdparty/aiter/op_tests/cpp/mha/libmha_fwd.so" "${EXTRACT_DIR}/"
-  cp "${ROOT_DIR}/3rdparty/aiter/op_tests/cpp/mha/libmha_bwd.so" "${EXTRACT_DIR}/"
 fi
 
 # Ensure built libs exist
