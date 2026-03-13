@@ -46,7 +46,7 @@ if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or os.path.isdir(build_tools_
     shutil.copytree(build_tools_dir, build_tools_copy)
 
 
-from build_tools.build_ext import get_build_ext
+from build_tools.build_ext import get_build_ext, SdistWithLocalVersion
 from build_tools.utils import rocm_build
 from build_tools.utils import copy_common_headers, min_python_version_str
 from build_tools.te_version import te_version
@@ -115,6 +115,10 @@ class CachedWheelsCommand(_bdist_wheel):
     """
 
     def run(self):
+        if rocm_build():
+            print("ROCm build detected, building from source...")
+            return super().run()
+
         if FORCE_BUILD:
             super().run()
 
@@ -173,7 +177,8 @@ if __name__ == "__main__":
         version=__version__,
         description="Transformer acceleration library - Torch Lib",
         ext_modules=ext_modules,
-        cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": CachedWheelsCommand},
+        cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": CachedWheelsCommand,
+                  "sdist": SdistWithLocalVersion},
         python_requires=f">={min_python_version_str()}",
         install_requires=install_requires,
         tests_require=test_requirements(),

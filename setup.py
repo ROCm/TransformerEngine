@@ -287,9 +287,14 @@ if __name__ == "__main__":
                     )
                 )
 
+    PACKAGE_NAME="transformer_engine"
+    if rocm_build() and bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
+        if not bool(int(os.getenv("NVTE_BUILD_METAPACKAGE", "0"))):
+            PACKAGE_NAME="transformer_engine_rocm"
+
     # Configure package
     setuptools.setup(
-        name="transformer_engine",
+        name=PACKAGE_NAME,
         version=__version__,
         packages=setuptools.find_packages(
             include=[
