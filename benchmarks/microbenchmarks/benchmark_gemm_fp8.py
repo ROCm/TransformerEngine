@@ -24,7 +24,7 @@ Sources for model configs:
   https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/blob/main/config.json
   https://huggingface.co/Qwen/Qwen2.5-72B-Instruct/blob/main/config.json
 
-Output: benchmark_fp8_gemm.csv (written to cwd)
+Output: benchmark_gemm_fp8.csv (written to cwd)
 """
 
 import torch
@@ -173,6 +173,6 @@ if __name__ == "__main__":
 
     results = pd.DataFrame(rows, columns=columns)
 
-    out_csv = "benchmark_fp8_gemm.csv"
+    out_csv = "benchmark_gemm_fp8.csv"
     results.to_csv(out_csv, index=False)
     print(f"\nResults saved to {out_csv}")
