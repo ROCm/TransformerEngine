@@ -47,7 +47,7 @@ if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or os.path.isdir(build_tools_
 
 
 from build_tools.build_ext import get_build_ext, SdistWithLocalVersion
-from build_tools.utils import rocm_build
+from build_tools.utils import rocm_build, rocm_version
 from build_tools.utils import copy_common_headers, min_python_version_str
 from build_tools.te_version import te_version
 from build_tools.pytorch import (
@@ -169,7 +169,7 @@ if __name__ == "__main__":
         te_core = f"transformer_engine_cu{cuda_major_version}=={__version__}"
         install_requires = install_requirements() + [te_core]
     else:
-        te_core = f"transformer_engine_rocm=={__version__}"
+        te_core = f"transformer_engine_rocm{rocm_version()[0]}=={__version__}"
     install_requires = install_requirements() + [te_core]
 
     # Configure package
