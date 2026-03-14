@@ -1,6 +1,6 @@
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -40,6 +40,7 @@ class _FormatMaxVals(Enum):
     """
     Tuples of FP8 (OCP, FNUZ) values for different formats.
     """
+    E2M1 = (6, 6)
     E4M3 = (448, 240)
     E5M2 = (57344, 57344)
 
@@ -534,3 +535,53 @@ class CustomRecipe(Recipe):
 
     def __repr__(self) -> str:
         return f"recipe_type={self.__class__.__name__}, qfactory={self.qfactory}"
+
+@dataclass()
+class MXFP4BlockScaling(Recipe):
+    """
+    Use the MXFP4 scaling factor strategy.
+
+    In this strategy, tensors are scaled in blockwise fashion. Each group
+    of 32 (same as MXFP8) consecutive values is scaled together using
+    their own scaling factor. The type of the scaling factor is E8M0
+    (8 bits of exponent, 0 bits of mantissa), equivalent to scaling
+    by a power of 2. FP4 (E2M1) values are stored two per byte,
+    with a single uint8 holding two 4-bit elements.
+
+    Since the scaling happens in a particular direction (either rowwise
+    or columnwise), in this recipe the quantized tensor and its transpose
+    are not numerically equivalent. Due to this, when Transformer Engine
+    needs both the MXFP4 tensor and its transpose (e.g. to calculate both
+    forward and backward pass), during the quantization both versions are
+    computed from the high precision input to avoid double quantization
+    errors.
+
+    Unlike MXFP8, the columnwise (transpose) FP4 data is stored in transposed
+    layout: buffer shape is (K, M/2) for logical (M, K), i.e. N×M rather
+    than M×N. Rowwise remains (M, K/2).
+
+    Parameters
+    ----------
+    fp4_format : {Format.E2M1}, default = Format.E2M1
+             FP4 data format.
+    """
+
+    margin: int = 0
+    fp4_format: Format = Format.E2M1
+    fp8_dpa: bool = False
+    fp8_mha: bool = False
+
+    @property
+    def fp8_format(self) -> Format:
+        """Alias for fp4_format for compatibility with code that expects recipe.fp8_format."""
+        return self.fp4_format
+
+    def __post_init__(self) -> None:
+        assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for MXFP4 scaling."
+
+    def __repr__(self) -> str:
+        return (
+            f"recipe_type={self.__class__.__name__}, "
+            f"margin={self.margin}, "
+            f"fp4_format={str(self.fp4_format).split('.')[1]}"
+        )
