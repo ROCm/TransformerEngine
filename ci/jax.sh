@@ -82,13 +82,8 @@ run_test_config_mgpu() {
     fi
 
     run_default_fa 2 test_distributed_dense.py
-    # Do not fail automated CI if test_distributed_fused_attn is hung
-    # If the script runs w/o TEST_LEVEL the test error will be honored
-    if [ "$TEST_LEVEL" -le 3 ]; then
-        TEST_ERROR_IGNORE="1"
-    fi
-    run $_dfa_level test_distributed_fused_attn.py $_timeout_args
-    TEST_ERROR_IGNORE=""
+    # RCCL_MSCCL_ENABLE=0 is to avoid hangs in some distributed tests (ROCM-1719)
+    RCCL_MSCCL_ENABLE=0 run $_dfa_level test_distributed_fused_attn.py $_timeout_args
     run_default_fa 3 test_distributed_layernorm.py
     run_default_fa 2 test_distributed_layernorm_mlp.py $_timeout_args
     run_default_fa 3 test_distributed_softmax.py
