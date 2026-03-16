@@ -1,4 +1,4 @@
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -18,41 +18,72 @@ endif()
 file(READ "${ROCM_PATH}/.info/version" ROCM_VER_CONTENT)
 string(STRIP "${ROCM_VER_CONTENT}" ROCM_VER_CONTENT)
 string(REGEX MATCH "^[0-9]+\\.[0-9]+" ROCM_VER "${ROCM_VER_CONTENT}")
+string(REGEX MATCH "^[0-9]+" ROCM_VER_MAJOR "${ROCM_VER}")
 
 # AITER commit
 get_git_commit("${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/aiter" AITER_SHA)
 
 # Cache key & local paths
-set(KEY "rocm-${ROCM_VER}_aiter-${AITER_SHA}")
-set(CACHE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../build/aiter-prebuilts")
-set(EXTRACT_DIR "${CACHE_ROOT}/${KEY}")
+set(AITER_CACHE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../build/aiter-prebuilts")
+
+function(get_aiter_cache_key ROCM_VER_PARAM KEY_VAR CACHE_DIR_VAR)
+  set(_KEY "rocm-${ROCM_VER_PARAM}_aiter-${AITER_SHA}")
+  set(${KEY_VAR} ${_KEY} PARENT_SCOPE)
+  set(${CACHE_DIR_VAR} "${AITER_CACHE_ROOT}/${_KEY}" PARENT_SCOPE)
+endfunction()
 
 # Validate existing cache path
-function(is_aiter_cache_valid CACHE_VALID)
+function(is_aiter_cache_valid ROCM_VER_PARAM CACHE_VALID)
+  get_aiter_cache_key("${ROCM_VER_PARAM}" KEY EXTRACT_DIR)
   if(EXISTS "${EXTRACT_DIR}/libmha_fwd.so" AND EXISTS "${EXTRACT_DIR}/libmha_bwd.so")
     set(${CACHE_VALID} TRUE PARENT_SCOPE)
     message(STATUS "[AITER-PREBUILT] Found Cached build files at ${EXTRACT_DIR}")
-    return()
   endif()
+endfunction()
 
-  # Cache is invalid/outdated - clean it
-  file(REMOVE_RECURSE "${CACHE_ROOT}")
+# Main function to get prebuilt aiter libs. 
+# It checks cache validity first, if invalid, tries to download.
+function(get_prebuilt_aiter PREBUILT_DIR_VAR)
+  set(RESULT FALSE)
+  #TODO: remove ROCM_VER from the check once the change is integrated to all features modifying AITER
+  foreach(ROCM_VER_PARAM IN LISTS ROCM_VER_MAJOR ROCM_VER)
+    is_aiter_cache_valid("${ROCM_VER_PARAM}" RESULT)
+    if(RESULT)
+      get_aiter_cache_key("${ROCM_VER_PARAM}" _UNUSED CACHE_DIR)
+      set(${PREBUILT_DIR_VAR} "${CACHE_DIR}" PARENT_SCOPE)
+      return()
+    endif()
+  endforeach()
+  
+  # Cache is invalid/outdated - clean it and some build files that depend on AITER libs path
+  file(REMOVE_RECURSE "${AITER_CACHE_ROOT}")
   file(REMOVE_RECURSE "${CMAKE_BINARY_DIR}/_deps")
+
+  #TODO: remove ROCM_VER from the check once the change is integrated to all features modifying AITER
+  foreach(ROCM_VER_PARAM IN LISTS ROCM_VER_MAJOR ROCM_VER)
+    download_aiter_prebuilt("${ROCM_VER_PARAM}" RESULT)
+    if(RESULT)
+      get_aiter_cache_key("${ROCM_VER_PARAM}" _UNUSED CACHE_DIR)
+      set(${PREBUILT_DIR_VAR} "${CACHE_DIR}" PARENT_SCOPE)
+      return()
+    endif()
+  endforeach()
 endfunction()
 
 # Cache locally built libs
-function(cache_local_aiter_build SOURCE_DIR)
-  file(MAKE_DIRECTORY "${EXTRACT_DIR}")
-  message(STATUS "[AITER-PREBUILT] Caching locally built libs to ${EXTRACT_DIR}")
-  file(COPY "${SOURCE_DIR}/libmha_fwd.so" "${SOURCE_DIR}/libmha_bwd.so" DESTINATION "${EXTRACT_DIR}")
+function(get_default_aiter_cache_dir CACHE_DIR_VAR)
+  #Use only ROCM major version for local cache key to maximize cache reuse across minor versions
+  get_aiter_cache_key("${ROCM_VER_MAJOR}" _UNUSED EXTRACT_DIR)
+  set(${CACHE_DIR_VAR} "${EXTRACT_DIR}" PARENT_SCOPE)
 endfunction()
 
 # Download prebuilt tgz file
-function(download_aiter_prebuilt DOWNLOAD_SUCCESS)
+function(download_aiter_prebuilt ROCM_VER_PARAM DOWNLOAD_SUCCESS)
   if(NOT DEFINED ENV{NVTE_AITER_PREBUILT_BASE_URL} OR "$ENV{NVTE_AITER_PREBUILT_BASE_URL}" STREQUAL "")
     return()
   endif()
 
+  get_aiter_cache_key("${ROCM_VER_PARAM}" KEY EXTRACT_DIR)
   set(FILE_URL "$ENV{NVTE_AITER_PREBUILT_BASE_URL}/${KEY}.tar.gz")
   message(STATUS "[AITER-PREBUILT] NVTE_AITER_PREBUILT_BASE_URL is set - Attempting to download ${KEY}.tar.gz ...")
 
@@ -60,13 +91,12 @@ function(download_aiter_prebuilt DOWNLOAD_SUCCESS)
   file(DOWNLOAD "${FILE_URL}.sha256" "/tmp/aiter_prebuilt_sha256.txt" STATUS sha_status LOG sha_log)
   list(GET sha_status 0 sha_code)
   if(NOT sha_code EQUAL 0)
-    message(WARNING " [AITER-PREBUILT] Prebuild file with Key=${KEY} not available in the NVTE_AITER_PREBUILT_BASE_URL provided.")
+    message(STATUS " [AITER-PREBUILT] File with Key=${KEY} is not available at the NVTE_AITER_PREBUILT_BASE_URL provided.")
     return()
   endif()
   file(READ "/tmp/aiter_prebuilt_sha256.txt" AITER_SHA_CONTENT)
   string(STRIP "${AITER_SHA_CONTENT}" AITER_SHA_CONTENT)
   
-  file(MAKE_DIRECTORY "${CACHE_ROOT}")
   FetchContent_Declare(
     aiter_prebuilt
     URL "${FILE_URL}"
@@ -76,49 +106,6 @@ function(download_aiter_prebuilt DOWNLOAD_SUCCESS)
 
   # Download & extract prebuilt files
   FetchContent_MakeAvailable(aiter_prebuilt)
-  message(STATUS "[AITER-PREBUILT] Successfully downloaded.")
+  message(STATUS "[AITER-PREBUILT] Successfully downloaded to ${EXTRACT_DIR}")
   set(${DOWNLOAD_SUCCESS} TRUE PARENT_SCOPE)
 endfunction()
-
-# Create prebuilt tgz file to upload
-function(create_upload_files)
-  # Locate .so files
-  if (NOT EXISTS  "${EXTRACT_DIR}/libmha_fwd.so")
-    message(FATAL_ERROR "[AITER-PREBUILT] Missing libmha_fwd.so")
-  endif()
-  if (NOT EXISTS  "${EXTRACT_DIR}/libmha_bwd.so")
-    message(FATAL_ERROR "[AITER-PREBUILT] Missing libmha_bwd.so")
-  endif()
-
-  # Output paths
-  set(OUTPUT_TGZ "/tmp/${KEY}.tar.gz")
-  set(OUTPUT_SHA "/tmp/${KEY}.tar.gz.sha256")
-
-  message(STATUS "[AITER-PREBUILT] Creating prebuilt files...")
-  # Create archive
-  file(ARCHIVE_CREATE
-       OUTPUT "${OUTPUT_TGZ}"
-       PATHS "${KEY}"
-       WORKING_DIRECTORY "${CACHE_ROOT}"
-       FORMAT "gnutar"
-       COMPRESSION "GZip")
-
-  # Compute SHA256
-  file(SHA256 "${OUTPUT_TGZ}" ARCHIVE_HASH)
-  file(WRITE "${OUTPUT_SHA}" "${ARCHIVE_HASH}")
-  message(STATUS "[AITER-PREBUILT] tgz and sha256 files generated successfully:")
-  message(STATUS "  ${OUTPUT_TGZ}")
-  message(STATUS "  ${OUTPUT_SHA}")
-endfunction()
-
-# ------------------------------------------------------
-# Script-mode entry point (to create upload files)
-# Usage: cmake -DACTION=upload -P /path/to/aiter_prebuilt.cmake
-# ------------------------------------------------------
-if (CMAKE_SCRIPT_MODE_FILE)
-  if (DEFINED ACTION AND ACTION STREQUAL "upload")
-    create_upload_files()
-  else()
-    message(FATAL_ERROR "[AITER-PREBUILT] Invalid ACTION=${ACTION}. Use upload.")
-  endif()
-endif()

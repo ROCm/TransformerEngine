@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -94,6 +94,11 @@ if(USE_CUDA)
 else()
   set(GPU_TARGETS ${CMAKE_HIP_ARCHITECTURES})
   find_package(hip REQUIRED)
+endif()
+
+if(USE_ROCM)
+  include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/hipify/hipify.cmake")
+  TE_Hipify(${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
 add_subdirectory(operator)

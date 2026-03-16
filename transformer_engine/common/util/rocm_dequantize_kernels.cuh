@@ -7,19 +7,18 @@
 #pragma once
 
 #include <cfloat>
-#include <cuda.h>
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 #include <limits>
 
-#include "common.h"
+#include "../common.h"
 #include "math.h"
 #include "ptx.cuh"
 #include "rocm_vectorized_2d.cuh"
 #include "transformer_engine/activation.h"
 #include "transformer_engine/cast.h"
-#include "transpose/cast_transpose.h"
+#include "../transpose/cast_transpose.h"
 #include "transformer_engine/transpose.h"
-#include "utils.cuh"
+#include "../utils.cuh"
 #include "vectorized_pointwise.h"
 
 namespace transformer_engine {
