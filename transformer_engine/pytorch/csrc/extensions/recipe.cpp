@@ -1,6 +1,9 @@
 /*************************************************************************
+<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+=======
+>>>>>>> 99df88
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -24,8 +27,8 @@ void compute_amax(const at::Tensor& tensor, at::Tensor& amax) {
   TORCH_CHECK(amax.numel() == 1, "amax must have exactly one element");
   auto* amax_ptr = amax.data_ptr<float>();
   TensorWrapper fake_te_output(
-      nullptr, te_input.shape(),
-      DType::kFloat8E4M3,  // It doesn't matter because we only compute amax.
+      /*dptr=*/nullptr, te_input.shape(),
+      DType::kFloat32,  // It doesn't matter because we only compute amax.
       amax_ptr);
 
 #ifdef USE_ROCM

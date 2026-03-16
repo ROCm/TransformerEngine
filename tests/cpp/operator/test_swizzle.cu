@@ -1,6 +1,9 @@
 /*************************************************************************
+<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+=======
+>>>>>>> 99df88
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -87,6 +90,7 @@ void performTestSwizzle1D(const int num_tiles_M, const int num_tiles_K, bool row
   std::vector<int> scaling_mode = {SF_MODE_X, SF_MODE_Y, 0};
   Tensor input("input", data_shape, dtype, rowwise, columnwise, NVTE_MXFP8_1D_SCALING);
   Tensor output("output", data_shape, dtype, rowwise, columnwise, NVTE_MXFP8_1D_SCALING);
+  output.set_with_gemm_swizzled_scales(true);
 
   fillUniform(&input);
 

@@ -1,6 +1,9 @@
 /*************************************************************************
+<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+=======
+>>>>>>> 99df88
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -31,9 +34,9 @@ inline void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t 
 
   switch (input.scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
-      NVTE_CHECK(is_fp8_dtype(input.data.dtype), "Input must have FP8 type.");
-      NVTE_CHECK(!is_fp8_dtype(output->data.dtype), "Output must be in higher precision.");
-      NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
+      NVTE_CHECK(is_fp8_dtype(input.dtype()), "Input must have FP8 type.");
+      NVTE_CHECK(!is_fp8_dtype(output->dtype()), "Output must be in higher precision.");
+      NVTE_CHECK(output->shape() == input.shape(), "Input and output shapes need to match.");
       fp8::dequantize(input, output, stream);
       break;
     }

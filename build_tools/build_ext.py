@@ -1,5 +1,8 @@
+<<<<<<< HEAD
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+=======
+>>>>>>> 99df88
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -67,6 +70,12 @@ class CMakeExtension(setuptools.Extension):
             f"-DCMAKE_BUILD_TYPE={build_type}",
             f"-DCMAKE_INSTALL_PREFIX={install_dir}",
         ]
+        if bool(int(os.getenv("NVTE_USE_CCACHE", "0"))):
+            ccache_bin = os.getenv("NVTE_CCACHE_BIN", "ccache")
+            configure_command += [
+                f"-DCMAKE_CXX_COMPILER_LAUNCHER={ccache_bin}",
+                f"-DCMAKE_CUDA_COMPILER_LAUNCHER={ccache_bin}",
+            ]
         configure_command += self.cmake_flags
 
         import pybind11

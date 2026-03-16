@@ -1,5 +1,8 @@
+<<<<<<< HEAD
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+=======
+>>>>>>> 99df88
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -10,12 +13,13 @@ import functools
 import math
 import os
 from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
+from contextlib import nullcontext
 import numpy as np
 import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
-from . import torch_version
 from .quantized_tensor import Quantizer
+from .torch_version import torch_version
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 
@@ -624,6 +628,24 @@ def _nvtx_enabled() -> bool:
 _nvtx_range_messages: list[str] = []
 
 
+def get_nvtx_range_context(msg: str):
+    """Get NVTX context manager to tag module forward and backward passes.
+
+    Set `NVTE_NVTX_ENABLED=1` in the environment to enable NVTX
+    context manager for module level profiling tags.
+
+    Parameters
+    ----------
+    msg : str
+        Message to associate with profiling context.
+
+    """
+
+    if _nvtx_enabled():
+        return torch.cuda.nvtx.range(msg)
+    return nullcontext()
+
+
 def nvtx_range_push(msg: str) -> None:
     """Push NVTX range onto stack, if NVTX range profiling is enabled
 
@@ -632,7 +654,7 @@ def nvtx_range_push(msg: str) -> None:
 
     Parameters
     ----------
-    msg: str
+    msg : str
         Message to associate with range
 
     """
@@ -650,7 +672,7 @@ def nvtx_range_pop(msg: Optional[str] = None) -> None:
 
     Parameters
     ----------
-    msg: str, optional
+    msg : str, optional
         Message associated with range
 
     """

@@ -1,5 +1,8 @@
+<<<<<<< HEAD
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+=======
+>>>>>>> 99df88
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -39,9 +42,9 @@ from ..sharding import (
 from ..quantize import ScaledTensor, ScaledTensorFactory, NoScaleTensor
 from ..quantize import (
     Quantizer,
-    QuantizeLayout,
     DelayedScaleQuantizer,
     ScalingMode,
+    QuantizeLayout,
 )
 
 

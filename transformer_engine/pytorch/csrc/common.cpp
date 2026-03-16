@@ -1,6 +1,9 @@
 /*************************************************************************
+<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+=======
+>>>>>>> 99df88
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -307,11 +310,12 @@ std::vector<size_t> convertShape(const NVTEShape& shape) {
   return std::vector<size_t>(shape.data, shape.data + shape.ndim);
 }
 
-size_t roundup(const size_t value, const size_t multiple) {
+size_t roundup(size_t value, size_t multiple) {
   assert(multiple > 0);
   return ((value + multiple - 1) / multiple) * multiple;
 }
 
+<<<<<<< HEAD
 #ifdef USE_ROCM
 
 inline bool nvte_use_atomic_amax() {
@@ -334,6 +338,9 @@ at::Tensor allocate_amax_workspace(const TensorWrapper& input_tensor) {
 }
 
 #endif
+=======
+size_t ceildiv(size_t numer, size_t denom) { return (numer + denom - 1) / denom; }
+>>>>>>> 99df88
 
 void philox_unpack(at::PhiloxCudaState arg, int64_t* rng_state_ptr) {
   NVTE_SCOPED_GIL_RELEASE({

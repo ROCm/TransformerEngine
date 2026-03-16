@@ -1,6 +1,9 @@
 /*************************************************************************
+<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2023-2026, Advanced Micro Devices, Inc. All rights reserved.
+=======
+>>>>>>> 99df88
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -300,6 +303,10 @@ class Tensor {
 
   void set_tensor_amax_nullptr(){
     tensor_.set_amax(nullptr, DType::kFloat32, tensor_.defaultShape);
+  }
+
+  void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales){
+    tensor_.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   }
 
   void to_cpu() const;

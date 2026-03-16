@@ -1,6 +1,9 @@
 /*************************************************************************
+<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+=======
+>>>>>>> 99df88
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -165,12 +168,21 @@ void nvte_rmsnorm_bwd_add(const NVTETensor dz, const NVTETensor x, const NVTETen
                           NVTETensor dgamma, NVTETensor workspace, const int multiprocessorCount,
                           const bool zero_centered_gamma, cudaStream_t stream);
 
+<<<<<<< HEAD
 #ifndef __HIP_PLATFORM_AMD__
 /*! \brief Helper to enable cuDNN backend for normalization
+=======
+/*! \brief Set whether to enable cuDNN backend for normalization forward.
+>>>>>>> 99df88
  *
- *  \param[in]     bool              Enable if True
+ *  \param[in]  enable  Whether to enable cuDNN backend.
  */
 void nvte_enable_cudnn_norm_fwd(bool enable);
+
+/*! \brief Set whether to enable cuDNN backend for normalization backward.
+ *
+ *  \param[in]  enable  Whether to enable cuDNN backend.
+ */
 void nvte_enable_cudnn_norm_bwd(bool enable);
 
 /*! \brief Control whether norm computes `gamma += 1.0` for zero-centered gamma
@@ -179,12 +191,15 @@ void nvte_enable_cudnn_norm_bwd(bool enable);
  *  Currently this only applies to the CuDNN backend. If CuDNN is not used,
  *  this setting has no effect.
  *
- *  \param[in]     bool              Enable if True
+ *  \param[in]  enable  Whether to enable zero-centered gamma.
  */
 void nvte_enable_zero_centered_gamma_in_weight_dtype(bool enable);
 #endif
 
+#ifdef __cplusplus
+/*! \brief Normalization function type */
 enum class NVTE_Norm_Type { LayerNorm, RMSNorm };
+#endif
 
 #ifdef __cplusplus
 }  // extern "C"

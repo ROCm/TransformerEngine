@@ -1,5 +1,8 @@
+<<<<<<< HEAD
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+=======
+>>>>>>> 99df88
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -32,7 +35,6 @@ from transformer_engine.pytorch.quantization import (
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.utils import is_fp8_fnuz
 from transformer_engine.common.recipe import DelayedScaling, Float8BlockScaling, MXFP8BlockScaling
-import transformer_engine_torch as tex
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)

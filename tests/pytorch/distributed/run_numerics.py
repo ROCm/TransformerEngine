@@ -1,7 +1,10 @@
 #!/usr/bin/python3
 
+<<<<<<< HEAD
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+=======
+>>>>>>> 99df88
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -44,8 +47,9 @@ WORLD_RANK, WORLD_SIZE = None, None
 NCCL_WORLD = None
 LOSS_FN = nn.MSELoss()
 QUANTIZATION = None
+NVTE_TEST_NVINSPECT_ENABLED = int(os.environ.get("NVTE_TEST_NVINSPECT_ENABLED") or "0")
 
-if os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", False):
+if NVTE_TEST_NVINSPECT_ENABLED:
     # The numerics of all the layers should work the same,
     # when debug=True. I fed them with dummy feature
     # to prevent switching off debug, which can happen if
@@ -767,6 +771,8 @@ def test_linear():
     for kwargs in kwargs_list:
         if kwargs.get("save_original_input", False) and QUANTIZATION == "fp8":
             continue
+        if kwargs.get("delay_wgrad_compute", False) and NVTE_TEST_NVINSPECT_ENABLED:
+            continue
         for parallel_mode in ["column", "row"]:
             for sequence_parallel in [False, True]:
                 _test_linear(parallel_mode, sequence_parallel, **kwargs)
@@ -946,6 +952,8 @@ def test_layernorm_linear():
     ]
 
     for kwargs in kwargs_list:
+        if kwargs.get("delay_wgrad_compute", False) and NVTE_TEST_NVINSPECT_ENABLED:
+            continue
         for parallel_mode in ["column"]:
             for sequence_parallel in [False, True]:
                 _test_layernorm_linear(parallel_mode, sequence_parallel, **kwargs)
@@ -1052,9 +1060,12 @@ def test_layernorm_mlp():
         {"return_bias": True},
         {"return_layernorm_output": True},
         {"delay_wgrad_compute": True},
+        {"checkpoint": True},
     ]
 
     for kwargs in kwargs_list:
+        if kwargs.get("delay_wgrad_compute", False) and NVTE_TEST_NVINSPECT_ENABLED:
+            continue
         for set_parallel_mode in [True]:
             for sequence_parallel in [False, True]:
                 _test_layernorm_mlp(set_parallel_mode, sequence_parallel, **kwargs)

@@ -1,6 +1,9 @@
 /*************************************************************************
+<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+=======
+>>>>>>> 99df88
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -14,34 +17,50 @@
 #include <torch/extension.h>
 
 #include <optional>
+#include <tuple>
+#include <vector>
 
 #include "transformer_engine/transformer_engine.h"
 
-/*! \brief Swizzle the scaling factor of the input tensor.
- *
- * The returned swizzled scaling factor tensor should be kept alive during the GEMM.
- */
-std::optional<at::Tensor> swizzle_scaling_factors(transformer_engine::TensorWrapper &input,
-                                                  bool rowwise);
+namespace transformer_engine {
+namespace pytorch {
 
-/*! \brief Swizzle the scaling factor of the input tensors.
+/*! \brief Convert tensor block scales into GEMM swizzled format.
  *
- * The returned swizzled scaling factor tensors should be kept alive during the GEMMs.
+ *  The returned swizzled scales should be kept alive during the GEMM.
  */
-std::optional<at::Tensor> multi_tensor_swizzle_scaling_factors(
-    std::vector<transformer_engine::TensorWrapper> &inputs, bool rowwise);
+std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_for_gemm(
+    TensorWrapper& tensor, bool rowwise_usage, bool columnwise_usage);
+
+/*! \brief Convert multiple tensor block scales into GEMM swizzled format.
+ *
+ *  The returned swizzled scales should be kept alive during the GEMMs.
+ */
+std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(std::vector<TensorWrapper>& tensors,
+                                                               bool rowwise_usage,
+                                                               bool columnwise_usage);
 
 /*! \brief Convert a block scaling tensor to an mxfp8 tensor in-place.
  *
- * If rowwise==false, the columnwise data will be reinterpreted as rowwise data to avoid
- * transposing it in memory. Due to differences in how block scaling and mxfp8 store data,
- * this requires the calling code to treat the output tensor as having been tranposed in this case.
+ *  If rowwise==false, the columnwise data will be reinterpreted as
+ *  rowwise data to avoid transposing it in memory. Due to differences
+ *  in how block scaling and mxfp8 store data, this requires the
+ *  calling code to treat the output tensor as having been transposed
+ *  in this case.
  *
- * Returns the swizzled scaling factor of the converted mxfp8 tensor.
- * The returned swizzled scaling factor tensor should be kept alive during the GEMM.
+ *  Returns the swizzled scaling factor of the converted mxfp8 tensor.
+ *  The returned swizzled scaling factor tensor should be kept alive
+ *  during the GEMM.
  */
+<<<<<<< HEAD
 at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapper &input,
                                                  bool rowwise);
 #endif  //!USE_ROCM
+=======
+at::Tensor convert_block_scaling_to_mxfp8_tensor(TensorWrapper& input, bool rowwise);
+
+}  // namespace pytorch
+}  // namespace transformer_engine
+>>>>>>> 99df88
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_UTIL_H_

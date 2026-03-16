@@ -1,5 +1,8 @@
+<<<<<<< HEAD
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+=======
+>>>>>>> 99df88
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -119,7 +122,7 @@ def multidim_transpose(shape, static_axis_boundary=-1, transpose_axis=-1):
         transpose. Note, transpose_axis should be greater than static_axis_boundary
 
     examples:
-        X in shape (dim0, dim1, dim2, dim3, dim4)
+        X of shape (dim0, dim1, dim2, dim3, dim4)
 
         static_axis_boundary == -1, transpose_axis == 2
             Xt = (dim2, dim3, dim4, dim0, dim1)
