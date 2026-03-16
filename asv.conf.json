@@ -1,0 +1,16 @@
+{
+    "version": 1,
+    "project": "TransformerEngine",
+    "project_url": "https://github.com/ROCm/TransformerEngine",
+    "repo": ".",
+    "branches": ["dev"],
+    "environment_type": "existing",
+    "install_command": [],
+    "build_command": [],
+    "benchmark_dir": "benchmarks/asv",
+    "results_dir": "benchmarks/.asv/results",
+    "html_dir": "benchmarks/.asv/html",
+    "install_timeout": 600,
+    "benchmark_timeout": 1200,
+    "launch_method": "spawn"
+}
