@@ -1,7 +1,7 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -150,6 +150,10 @@ void nvte_fp8_block_scaling_partial_cast(const NVTETensor inp, NVTETensor out,
                                          size_t scale_stride_h, size_t scale_stride_w,
                                          size_t start_offset, size_t block_len,
                                          const NVTEDType out_dtype, cudaStream_t stream);
+
+void nvte_nvfp4_compute_per_tensor_scale(const NVTETensor inpA, const bool use_rowwise_amax_A,
+                                         const NVTETensor inpB, const bool use_rowwise_amax_B,
+                                         float alpha_in, NVTETensor alpha_out, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

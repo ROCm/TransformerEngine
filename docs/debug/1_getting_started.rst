@@ -1,5 +1,5 @@
 ..
-    Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
     See LICENSE for license information.
 
@@ -69,7 +69,7 @@ Let's look at a simple example of training a Transformer layer using Transformer
     for epoch in range(5):
         transformer_layer.train()
         optimizer.zero_grad()
-        with te.fp8_autocast(enabled=True):
+        with te.autocast(enabled=True):
             output = transformer_layer(dummy_input)
         loss = criterion(output, dummy_target)
         loss.backward()
