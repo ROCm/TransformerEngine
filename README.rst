@@ -1,11 +1,8 @@
 ..
-<<<<<<< HEAD
     This file was modified to include portability information to AMDGPU.
 
     Copyright (c) 2023-2026, Advanced Micro Devices, Inc. All rights reserved.
 
-=======
->>>>>>> 99df88
     Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
     See LICENSE for license information.
