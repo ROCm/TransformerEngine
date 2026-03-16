@@ -22,7 +22,6 @@ from build_tools.te_version import te_version
 from build_tools.utils import (
     rocm_build,
     all_files_in_dir,
-    hipify,
     cuda_archs,
     cuda_version,
     get_frameworks,
@@ -47,9 +46,9 @@ class HipifyMeta(egg_info):
 
     def run(self):
         if rocm_build():
+            from build_tools.hipify.hipify import do_hipify
             print("Running hipification of installable headers for ROCm build...")
-            common_headers_dir = current_file_path / "transformer_engine/common/include"
-            hipify(current_file_path, common_headers_dir, all_files_in_dir(common_headers_dir), [])
+            do_hipify(current_file_path, current_file_path / "transformer_engine/common/include")
         super().run()
 
 CMakeBuildExtension = get_build_ext(BuildExtension)
@@ -225,9 +224,14 @@ if __name__ == "__main__":
                     )
                 )
 
+    PACKAGE_NAME="transformer_engine"
+    if rocm_build() and bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
+        if not bool(int(os.getenv("NVTE_BUILD_METAPACKAGE", "0"))):
+            PACKAGE_NAME="transformer_engine_rocm"
+
     # Configure package
     setuptools.setup(
-        name="transformer_engine",
+        name=PACKAGE_NAME,
         version=__version__,
         packages=setuptools.find_packages(
             include=[
