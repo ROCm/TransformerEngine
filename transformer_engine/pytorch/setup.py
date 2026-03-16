@@ -46,8 +46,8 @@ if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or os.path.isdir(build_tools_
     shutil.copytree(build_tools_dir, build_tools_copy)
 
 
-from build_tools.utils import rocm_build, copy_hipify_tools, clear_hipify_tools_copy
 from build_tools.build_ext import get_build_ext, SdistWithLocalVersion
+from build_tools.utils import rocm_build
 from build_tools.utils import copy_common_headers, min_python_version_str
 from build_tools.te_version import te_version
 from build_tools.pytorch import (
@@ -123,14 +123,11 @@ class CachedWheelsCommand(_bdist_wheel):
     """
 
     def run(self):
-<<<<<<< HEAD
         """Acts a proxy before _bdist_wheel.run() and downloads a prebuilt wheel if available."""
-=======
         if rocm_build():
             print("ROCm build detected, building from source...")
             return super().run()
 
->>>>>>> 3ffb1616 (Support release wheels with local version (#444))
         if FORCE_BUILD:
             super().run()
             return

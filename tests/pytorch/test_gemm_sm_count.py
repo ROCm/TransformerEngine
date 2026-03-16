@@ -6,7 +6,6 @@ import torch
 from typing import Dict
 
 from transformer_engine.pytorch.cpp_extensions import general_gemm
-from transformer_engine.pytorch.module.base import get_workspace
 import logging
 
 
@@ -40,7 +39,7 @@ def test_gemm_sm_count():
     datatype = torch.float32
     A = torch.randn((K, M), device="cuda", dtype=datatype)
     B = torch.randn((N, K), device="cuda", dtype=datatype)
-    gemm_parameters = {'A': A, 'B': B, 'layout': "NN", 'workspace': get_workspace()}
+    gemm_parameters = {'A': A, 'B': B, 'layout': "NN"}
   
     with torch.cuda.stream(torch.cuda.Stream()):
         full_timing = _run_gemm_timing("Full", gemm_parameters)

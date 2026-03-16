@@ -14,7 +14,6 @@ import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from transformer_engine.pytorch.cpp_extensions import general_gemm
-from transformer_engine.pytorch.module.base import get_workspace
 
 
 storage_fname = "te_algo"
@@ -107,7 +106,7 @@ def run_gemm():
     N = 32
     datatype = torch.float16    
     inp = torch.randn((N, N), device="cuda", dtype=datatype)
-    _, _, _, _ = general_gemm(A=inp, B=inp, out_dtype=datatype, workspace=get_workspace())
+    _, _, _, _ = general_gemm(A=inp, B=inp, out_dtype=datatype)
 
 
 if __name__ == "__main__":

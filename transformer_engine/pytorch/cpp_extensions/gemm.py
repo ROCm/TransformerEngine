@@ -26,6 +26,8 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 __all__ = [
     "general_gemm",
     "general_grouped_gemm",
+    "get_cublas_workspace",
+    "get_tensor_device",
 ]
 
 
