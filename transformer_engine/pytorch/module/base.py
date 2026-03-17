@@ -1,4 +1,3 @@
-import time, random
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
@@ -290,15 +289,18 @@ def initialize_ub(
                 flush=True,
             )
 
-    # Allocate cuBLAS workspace with expanded size for chunking in overlapping GEMM calls
+    # Allocate cuBLAS workspace with expanded size for chunking in overlapping GEMM calls.
+    # The workspace must have enough copies for max(num_max_streams, tp_size) compute streams,
+    # since CommOverlapCore creates that many streams and divides the workspace among them.
+    num_workspace_copies = max(_NUM_MAX_UB_STREAMS, tp_size)
     global _cublas_workspace
     if _cublas_workspace is None:
-        _cublas_workspace = get_workspace().repeat(_NUM_MAX_UB_STREAMS)
-    elif _cublas_workspace.numel() != get_cublas_workspace_size_bytes() * _NUM_MAX_UB_STREAMS:
+        _cublas_workspace = get_workspace().repeat((num_workspace_copies if IS_HIP_EXTENSION else _NUM_MAX_UB_STREAMS))
+    elif _cublas_workspace.numel() != get_cublas_workspace_size_bytes() * (num_workspace_copies if IS_HIP_EXTENSION else _NUM_MAX_UB_STREAMS):
         # This ensures we don't do `.repeat()` on an already expanded workspace
         _cublas_workspace = torch.empty(
             get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda"
-        ).repeat(_NUM_MAX_UB_STREAMS)
+        ).repeat((num_workspace_copies if IS_HIP_EXTENSION else _NUM_MAX_UB_STREAMS))
 
     # Default buffer precision: AllGather buffers use fp8 when using fp8 recipe
     layers_all_gather_overlap = [
@@ -325,8 +327,8 @@ def initialize_ub(
                 "fc2_wgrad",
                 "proj_fprop",
                 "fc2_fprop",
-                #"qkv_dgrad",
-                #"fc1_dgrad",
+                "qkv_dgrad",
+                "fc1_dgrad",
                 "qkv_wgrad",
                 "fc1_wgrad"
             ],
@@ -485,12 +487,9 @@ def initialize_ub(
                 comm_priority=comm_priority,
                 rs_overlap_first_gemm=pipeline_rs_overlap_first_gemm,
             )
-        time.sleep(random.uniform(0,1))
         _ub_communicators[(name, quantization_mode)] = ub_obj
 
-    WORLD_RANK = int(os.getenv("RANK", "0"))
     for quantization_mode, user_ub_cfg in zip(quantization_modes, ub_cfgs):
-        print(f"[rank{WORLD_RANK}] at the beginning of for-loop, user_ub_cfg: {user_ub_cfg}")
         if user_ub_cfg is not None:
             for name in dgrad_reduce_scatter_overlap:
                 if (
@@ -515,7 +514,6 @@ def initialize_ub(
                     "Please use 'ring_exchange' method instead."
                 )
 
-        print(f"[rank{WORLD_RANK}] before add_ub for-loop, methods: {methods}")
         for name in chain.from_iterable(methods.values()):
             ub_cfg = get_default_config(name)
             if user_ub_cfg is not None and name in user_ub_cfg:
@@ -524,7 +522,6 @@ def initialize_ub(
                 )
                 ub_cfg.update(user_ub_cfg[name])
                 ub_cfg["fp8_buf"] = fp8_buf
-            print(f"[rank{WORLD_RANK}] before add_ub, ub_cfg: {ub_cfg}")
             add_ub(name, quantization_mode, **ub_cfg)
 
 

@@ -52,7 +52,7 @@
       while (0 != (atomicCAS(((unsigned int *)counters) + chunk, 0, 0))) { \
       }                                                                    \
       ((unsigned int *)counters)[chunk] = 1;                               \
-      __threadfence_system();                                                     \
+      __threadfence_system();                                              \
     }                                                                      \
     if (blockIdx.x == 0) __syncthreads();                                  \
   }

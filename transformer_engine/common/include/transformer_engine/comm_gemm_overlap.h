@@ -17,6 +17,8 @@
 
 #include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
 
+#define NVTE_COMM_OVERLAP_MAX_STREAMS 3
+
 
 namespace transformer_engine {
 
