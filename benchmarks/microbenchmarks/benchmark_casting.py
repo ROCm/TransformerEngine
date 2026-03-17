@@ -11,7 +11,7 @@ Benchmarks quantization (BF16 -> FP8) and dequantization (FP8 -> BF16) for
 both E4M3 (activations/weights) and E5M2 (gradients) formats.
 
 Shapes are (M, hidden_size) matching the activation tensors from models:
-  - Llama 3   8B, 70B, 405B
+  - Llama 3.1 8B, 70B, 405B
   - Qwen 2.5  7B, 72B
 
 These casts are memory-bound; we report GB/s (input + output bytes).
@@ -28,15 +28,13 @@ Output: benchmark_casting.csv (written to cwd)
 
 import torch
 import torch.utils.benchmark as benchmark
+import transformer_engine
+import transformer_engine_torch as tex
+from transformer_engine.pytorch import Float8Quantizer
 
 
-# Detect FP8 dtypes (ROCm vs CUDA)
-if hasattr(torch, "float8_e4m3fnuz"):
-    FP8_E4M3 = torch.float8_e4m3fnuz
-    FP8_E5M2 = torch.float8_e5m2fnuz
-else:
-    FP8_E4M3 = torch.float8_e4m3fn
-    FP8_E5M2 = torch.float8_e5m2
+TE_FP8_E4M3 = tex.DType.kFloat8E4M3
+TE_FP8_E5M2 = tex.DType.kFloat8E5M2
 
 # Sequence / batch-token sizes to sweep
 M_SIZE_LIST = [1024, 2048, 4096, 8192]
@@ -50,50 +48,54 @@ MODEL_HIDDEN_SIZES = [
     ("Qwen2.5-72B", 8192),
 ]
 
-# (cast_name, src_dtype, dst_dtype)
 CAST_CONFIGS = [
-    ("BF16-to-FP8-E4M3", torch.bfloat16, FP8_E4M3),
-    ("FP8-E4M3-to-BF16", FP8_E4M3,       torch.bfloat16),
-    ("BF16-to-FP8-E5M2", torch.bfloat16, FP8_E5M2),
-    ("FP8-E5M2-to-BF16", FP8_E5M2,       torch.bfloat16),
+    # (name, direction, fp8_dtype)
+    ("BF16-to-FP8-E4M3", "quantize",   TE_FP8_E4M3),
+    ("FP8-E4M3-to-BF16", "dequantize", TE_FP8_E4M3),
+    ("BF16-to-FP8-E5M2", "quantize",   TE_FP8_E5M2),
+    ("FP8-E5M2-to-BF16", "dequantize", TE_FP8_E5M2),
 ]
 
 
 def _generate_cast_test_cases():
     test_cases = []
     for model_name, hidden in MODEL_HIDDEN_SIZES:
-        for cast_name, src_dtype, dst_dtype in CAST_CONFIGS:
+        for cast_name, direction, fp8_dtype in CAST_CONFIGS:
             for M in M_SIZE_LIST:
                 test_cases.append({
                     "Case": f"{model_name}/{cast_name}",
                     "M": M,
                     "hidden_size": hidden,
-                    "src_dtype": src_dtype,
-                    "dst_dtype": dst_dtype,
+                    "direction": direction,
+                    "fp8_dtype": fp8_dtype,
                     "dtype_str": cast_name,
                 })
     return test_cases
 
 
-def bench_cast(M, hidden_size, src_dtype, dst_dtype):
+def bench_cast(M, hidden_size, direction, fp8_dtype):
     device = "cuda"
 
-    # For FP8 source, create via cast from randn
-    if src_dtype in (FP8_E4M3, FP8_E5M2):
-        x = torch.randn(M, hidden_size, dtype=torch.bfloat16, device=device).to(src_dtype)
-    else:
-        x = torch.randn(M, hidden_size, dtype=src_dtype, device=device)
-
-    cast_func = lambda: x.to(dst_dtype)
-
-    # Sanity check
-    cast_func()
-
-    # Total bytes moved: read input + write output
     numel = M * hidden_size
-    src_bytes = numel * x.element_size()
-    dst_bytes = numel * cast_func().element_size()
-    total_bytes = src_bytes + dst_bytes
+    scale = torch.ones(1, dtype=torch.float32, device=device)
+    amax = torch.zeros(1, dtype=torch.float32, device=device)
+    quantizer = Float8Quantizer(scale, amax, fp8_dtype)
+
+    if direction == "quantize":
+        x = torch.randn(M, hidden_size, dtype=torch.bfloat16, device=device)
+        cast_func = lambda: quantizer(x)
+
+        # BF16 read (2 bytes) + FP8 write (1 byte)
+        total_bytes = numel * (2 + 1)
+    else:
+        x = torch.randn(M, hidden_size, dtype=torch.bfloat16, device=device)
+        fp8_tensor = quantizer(x)
+        cast_func = lambda: fp8_tensor.dequantize()
+
+        # FP8 read (1 byte) + BF16 write (2 bytes)
+        total_bytes = numel * (1 + 2)
+
+    cast_func()
 
     # Warmup
     for _ in range(20):
@@ -131,7 +133,7 @@ if __name__ == "__main__":
     print(f"WARMUP: {c['Case']} M={c['M']} hidden={c['hidden_size']}")
     print(f"{'='*60}")
     bench_cast(M=c["M"], hidden_size=c["hidden_size"],
-               src_dtype=c["src_dtype"], dst_dtype=c["dst_dtype"])
+               direction=c["direction"], fp8_dtype=c["fp8_dtype"])
 
     for case in test_cases:
         print(f"\n{'='*60}")
@@ -141,8 +143,8 @@ if __name__ == "__main__":
             metrics = bench_cast(
                 M=case["M"],
                 hidden_size=case["hidden_size"],
-                src_dtype=case["src_dtype"],
-                dst_dtype=case["dst_dtype"],
+                direction=case["direction"],
+                fp8_dtype=case["fp8_dtype"],
             )
             row = {
                 "Case": case["Case"],
