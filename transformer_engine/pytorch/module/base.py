@@ -499,13 +499,17 @@ def initialize_ub(
                 ):
                     wgrad_name = name.replace("dgrad", "wgrad")
                     assert wgrad_name not in user_ub_cfg
-                    layers_reduce_scatter_overlap.remove(wgrad_name)
-                    layers_all_gather_overlap.remove(name)
-                    layers_reduce_scatter_overlap.append(name)
+                    if wgrad_name in layers_reduce_scatter_overlap:
+                        layers_reduce_scatter_overlap.remove(wgrad_name)
+                    if name in layers_all_gather_overlap:
+                        layers_all_gather_overlap.remove(name)
+                    if name not in layers_reduce_scatter_overlap:
+                        layers_reduce_scatter_overlap.append(name)
                     if name in methods["bulk"]:
                         methods["bulk"].remove(name)
                     new_method = user_ub_cfg[name]["method"]
-                    methods[new_method].append(name)
+                    if name not in methods[new_method]:
+                        methods[new_method].append(name)
 
         if IS_HIP_EXTENSION and user_ub_cfg is not None:
             for name, cfg in user_ub_cfg.items():
