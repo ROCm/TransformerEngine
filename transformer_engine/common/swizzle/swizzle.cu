@@ -384,30 +384,6 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
     return;
   }
 
-<<<<<<< HEAD
-  CheckInputTensor(*input, "scaling_factor_input");
-  CheckInputTensor(*output, "scaling_factor_output");
-
-  auto& scaling_mode = input->scaling_mode;
-  NVTE_CHECK(scaling_mode == NVTE_MXFP8_1D_SCALING || scaling_mode == NVTE_NVFP4_1D_SCALING,
-             "Unsupported scaling mode for swizzling.");
-
-  bool nvfp4 = scaling_mode == NVTE_NVFP4_1D_SCALING;
-
-  // 1D block scaling, row-wise or colum-wise
-
-  int m, k;
-  if (input->has_data()) {
-    m = input->scale_inv.shape[0];
-    k = input->scale_inv.shape[1];
-  } else {
-    if (nvfp4) {
-      m = input->columnwise_scale_inv.shape[0];
-      k = input->columnwise_scale_inv.shape[1];
-    } else {
-      m = input->columnwise_scale_inv.shape[1];
-      k = input->columnwise_scale_inv.shape[0];
-=======
   // Deduce tensor dims
   int m{0}, k{0};
   switch (scaling_mode) {
@@ -425,7 +401,6 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
         k = input->columnwise_scale_inv.shape[0];
       }
       break;
->>>>>>> 99df88
     }
     case NVTE_NVFP4_1D_SCALING: {
       if (has_rowwise_scale_inv) {

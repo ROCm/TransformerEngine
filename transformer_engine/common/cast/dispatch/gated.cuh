@@ -59,9 +59,7 @@ void quantize_gated_fwd_helper(const NVTETensor nvte_input, NVTETensor nvte_outp
       } else {
         fp8::cast_gated_fwd<ParamOP, ActOP>(input, output, p, stream);
       }
-<<<<<<< HEAD
 #endif //#ifdef __HIP_PLATFORM_AMD__
-=======
       if (is_fp8_dtype(output->dtype()) && output->has_columnwise_data()) {
         // FP8 kernel only populates row-wise data, so perform
         // transpose separately if needed
@@ -76,7 +74,6 @@ void quantize_gated_fwd_helper(const NVTETensor nvte_input, NVTETensor nvte_outp
         transpose_out.data.dtype = output->data.dtype;
         detail::transpose(transpose_in, /*noop=*/dummy, &transpose_out, stream);
       }
->>>>>>> 99df88
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
@@ -158,9 +155,7 @@ void quantize_gated_bwd_helper(const NVTETensor nvte_grad, const NVTETensor nvte
       } else {
         fp8::cast_gated_bwd<ParamOP, ActOP, DActOP>(gated_input, grad, output, p, stream);
       }
-<<<<<<< HEAD
 #endif  //#ifdef __HIP_PLATFORM_AMD__
-=======
       if (is_fp8_dtype(output->dtype()) && output->has_columnwise_data()) {
         // FP8 kernel only populates row-wise data, so perform
         // transpose separately if needed
@@ -175,7 +170,6 @@ void quantize_gated_bwd_helper(const NVTETensor nvte_grad, const NVTETensor nvte
         transpose_out.data.dtype = output->data.dtype;
         detail::transpose(transpose_in, /*noop=*/dummy, &transpose_out, stream);
       }
->>>>>>> 99df88
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {

@@ -25,7 +25,9 @@
 #include "../../util/ptx.cuh"
 #include "../../utils.cuh"
 #include "../core/common.cuh"
+#ifndef __HIP_PLATFORM_AMD__
 #include "specialized/quantize_mxfp8.cuh"
+#endif //#ifndef __HIP_PLATFORM_AMD__
 #include "swizzle.cuh"
 
 #ifdef __HIP_PLATFORM_AMD__
@@ -592,7 +594,6 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
   const size_t rows = input.flat_first_dim();
   const size_t cols = input.flat_last_dim();
 
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_AMD__
   constexpr size_t CHUNK_DIM_Y = MXFP8_CHUNK_DIM_Y;
   constexpr size_t CHUNK_DIM_X = MXFP8_CHUNK_DIM_X;
@@ -600,9 +601,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
 #else
   constexpr bool CAST_DBIAS_ONLY = IS_DBIAS && (!IS_DACT) && (!IS_ACT);
 
-=======
   // Tensor chunk handled by each CUDA block
->>>>>>> 99df88
   constexpr size_t CHUNK_DIM_Y = CAST_DBIAS_ONLY ? 128 : 64;
   constexpr size_t CHUNK_DIM_X = CAST_DBIAS_ONLY ? 128 : 64;
 
@@ -621,6 +620,11 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
   const size_t block_size = THREADS_PER_CHUNK;
 
   const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
+#ifdef __HIP_PLATFORM_AMD__
+  // TODO: rocm TE should not need swizzle
+  // ensure upstream does not pass swizzle=true down here
+  NVTE_CHECK(with_gemm_swizzled_scales != true, "ROCm TE does not support swizzling for gemm");
+#endif
 
   const size_t scale_stride_rowwise = use_rowwise_scaling ? output->scale_inv.shape[1] : 1;
   const size_t scale_stride_colwise =
@@ -666,40 +670,32 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
           output->dtype(), OType,
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               with_gemm_swizzled_scales, WITH_GEMM_SWIZZLED_SCALES,
-
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_AMD__
-          TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
-            (use_colwise_scaling ? 32 : 1), SCALE_DIM_Y,
-            TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
-              (use_rowwise_scaling ? 32 : 1), SCALE_DIM_X,
-                TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                  !(cols % (32 * sizeof(IType))), IS_ALIGNED,
-                  quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
-                                      SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>
-                    <<<grid, block_size, 0, stream>>>(
-                      reinterpret_cast<const IType *>(input.data.dptr), 
-                      (IS_DACT) ? reinterpret_cast<const IType *>(act_input->data.dptr) : nullptr,
-                      reinterpret_cast<OType *>(output->data.dptr),
-                      reinterpret_cast<OType *>(output->columnwise_data.dptr),
-                      scales_rowwise_ptr, scales_colwise_ptr,
-                      reinterpret_cast<const float *>(noop->data.dptr), workspace_ptr, amax_ptr,
-                      rows, cols, scale_stride_rowwise, scale_stride_colwise);
-                  NVTE_CHECK_CUDA(cudaGetLastError());
-          )));  // NOLINT(*)
+              TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+                (use_colwise_scaling ? 32 : 1), SCALE_DIM_Y,
+                TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+                  (use_rowwise_scaling ? 32 : 1), SCALE_DIM_X,
+                    TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                      !(cols % (32 * sizeof(IType))), IS_ALIGNED,
+                      quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                                          SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>
+                        <<<grid, block_size, 0, stream>>>(
+                          reinterpret_cast<const IType *>(input.data.dptr), 
+                          (IS_DACT) ? reinterpret_cast<const IType *>(act_input->data.dptr) : nullptr,
+                          reinterpret_cast<OType *>(output->data.dptr),
+                          reinterpret_cast<OType *>(output->columnwise_data.dptr),
+                          scales_rowwise_ptr, scales_colwise_ptr,
+                          reinterpret_cast<const float *>(noop->data.dptr), workspace_ptr, amax_ptr,
+                          rows, cols, scale_stride_rowwise, scale_stride_colwise);
+                      NVTE_CHECK_CUDA(cudaGetLastError());
+              )));  // NOLINT(*)
 #else // #ifdef __HIP_PLATFORM_AMD__
-          alignas(64) CUtensorMap tensor_map_input{};
-          alignas(64) CUtensorMap tensor_map_act_input{};
-          alignas(64) CUtensorMap tensor_map_output_rowwise{};
-          alignas(64) CUtensorMap tensor_map_output_colwise{};
-=======
               if (specialized::hasSpec<IS_DBIAS, IS_DACT, IS_ACT, IType, OType>() &&
                   !WITH_GEMM_SWIZZLED_SCALES) {
                 switch (scaling_type) {
                   case ScalingType::ROWWISE: {
                     using traits = specialized::CastTraits<IType, OType, true, false>;
                     auto kernel = specialized::quantize_mxfp8_kernel_cast_only<traits>;
->>>>>>> 99df88
 
                     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                          traits::smem);
@@ -785,22 +781,10 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                                      BUFF_DIM_Y, BUFF_DIM_X, cols, 0, output_type_bit_size);
               }
 
-<<<<<<< HEAD
-              kernel<<<grid, block_size, dshmem_size, stream>>>(
-                  tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                  tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
-                  workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise);
-              NVTE_CHECK_CUDA(cudaGetLastError());
-              break;
-            }
-          }
-#endif // #ifdef __HIP_PLATFORM_AMD__
-=======
               if (use_colwise_scaling) {
                 create_2D_tensor_map(tensor_map_output_colwise, output->columnwise_data, rows, cols,
                                      BUFF_DIM_Y, BUFF_DIM_X, cols, 0, output_type_bit_size);
               }
->>>>>>> 99df88
 
               constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
               constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
@@ -886,6 +870,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                   break;
                 }
               }
+#endif // #ifdef __HIP_PLATFORM_AMD__
 
               if constexpr (IS_DBIAS) {
                 common::reduce_dbias<IType>(workspace_ptr, dbias, dbias_rows, dbias_cols, stream);

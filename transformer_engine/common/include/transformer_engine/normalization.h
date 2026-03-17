@@ -165,12 +165,8 @@ void nvte_rmsnorm_bwd_add(const NVTETensor dz, const NVTETensor x, const NVTETen
                           NVTETensor dgamma, NVTETensor workspace, const int multiprocessorCount,
                           const bool zero_centered_gamma, cudaStream_t stream);
 
-<<<<<<< HEAD
 #ifndef __HIP_PLATFORM_AMD__
-/*! \brief Helper to enable cuDNN backend for normalization
-=======
 /*! \brief Set whether to enable cuDNN backend for normalization forward.
->>>>>>> 99df88
  *
  *  \param[in]  enable  Whether to enable cuDNN backend.
  */
