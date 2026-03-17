@@ -222,7 +222,8 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      cast/cast.cu
      activation/gelu.cu
      activation/relu.cu
-     activation/swiglu.cu)
+     activation/swiglu.cu
+     transpose/quantize_transpose_vector_blockwise_fp4.cu)
 
 if(USE_CUDA)
 #NV specific source codes
@@ -246,7 +247,6 @@ if(USE_CUDA)
     list(APPEND transformer_engine_cuda_arch_specific_sources
         gemm/cutlass_grouped_gemm.cu
         transpose/quantize_transpose_square_blockwise.cu
-        transpose/quantize_transpose_vector_blockwise_fp4.cu
         hadamard_transform/hadamard_transform.cu
         hadamard_transform/hadamard_transform_cast_fusion.cu)
 else()
@@ -259,8 +259,7 @@ else()
     list(APPEND transformer_engine_cuda_sources
         fused_attn_rocm/fused_attn_aotriton.cpp
         fused_attn_rocm/fused_attn_ck.cpp
-        fused_attn_rocm/utils.cpp
-        transpose/quantize_transpose_vector_blockwise_fp4.cu)
+        fused_attn_rocm/utils.cpp)
 endif()
 
 

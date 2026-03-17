@@ -213,7 +213,8 @@ __device__ __forceinline__ float ComputeOutputFP4(IType input, float encode_scal
 }
 
 __device__ __forceinline__ float ComputeGlobalEncodeScaleFP4(const float global_amax) {
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && !defined(__HIP_DEVICE_COMPILE__)
+  // On AMD host, TypeExtrema<fp8e4m3>::max is non-constexpr (runtime FNUZ detection)
   const float fp8_max = TypeExtrema<fp8e4m3>::max;
 #else
   constexpr float fp8_max = TypeExtrema<fp8e4m3>::max;
@@ -299,6 +300,9 @@ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_stochastic_ro
         : "f"(in01.y), "f"(in01.x), "f"(in23.y), "f"(in23.x), "r"(rbits));
     return *reinterpret_cast<__nv_fp4x4_e2m1*>(&out_4x);
   } else {
+#else
+    NVTE_DEVICE_ERROR(
+        "cvt_fp32_to_fp4_4x_with_stochastic_rounding is not support on AMDGPU.");
 #endif
     NVTE_DEVICE_ERROR(
         "FP4 cvt.rs PTX instructions are architecture-specific. "
