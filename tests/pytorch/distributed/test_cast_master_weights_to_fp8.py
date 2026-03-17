@@ -717,7 +717,9 @@ def run_parallel_tests() -> None:
 @pytest.mark.parametrize("world_size", [2])
 def test_cast_master_weights_to_fp8(world_size: int) -> None:
     """Launch parallel job that runs parallel tests"""
-    python_exe = pathlib.Path(sys.executable).resolve()
+    # Use executable as-is; do not resolve() or a venv symlink may point to system
+    # Python which does not have torch/site-packages.
+    python_exe = pathlib.Path(sys.executable)
     current_file = pathlib.Path(__file__).resolve()
     command = [
         python_exe,
