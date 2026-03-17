@@ -122,10 +122,6 @@ class _GroupedLinear(torch.autograd.Function):
             if weight_quantizers[0] is not None and not isinstance(
                 weights[0], QuantizedTensorStorage
             ):
-            # No need to set the quantizer states if weight is already quantized
-            if weight_quantizers[0] is not None and not isinstance(
-                weights[0], QuantizedTensorStorage
-            ):
                 for weight_quantizer in weight_quantizers:
                     weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
             elif isinstance(weights[0], QuantizedTensorStorage):
