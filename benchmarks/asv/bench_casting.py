@@ -5,17 +5,13 @@
 ###############################################################################
 """FP8 casting micro-benchmarks.
 
-Memory-bound quantization/dequantization between BF16 and FP8 formats.
+Memory-bound quantization/dequantization between BF16 and FP8 formats
+using Transformer Engine's quantized tensor infrastructure.
 """
 
 import torch
-
-if hasattr(torch, "float8_e4m3fnuz"):
-    FP8_E4M3 = torch.float8_e4m3fnuz
-    FP8_E5M2 = torch.float8_e5m2fnuz
-else:
-    FP8_E4M3 = torch.float8_e4m3fn
-    FP8_E5M2 = torch.float8_e5m2
+from transformer_engine.pytorch import Float8CurrentScalingQuantizer
+from transformer_engine_torch import DType as TE_DType
 
 HIDDEN_SIZES = {
     "Llama3-8B": 4096,
@@ -26,10 +22,10 @@ HIDDEN_SIZES = {
 }
 
 CAST_CONFIGS = {
-    "BF16_to_E4M3": (torch.bfloat16, FP8_E4M3),
-    "E4M3_to_BF16": (FP8_E4M3, torch.bfloat16),
-    "BF16_to_E5M2": (torch.bfloat16, FP8_E5M2),
-    "E5M2_to_BF16": (FP8_E5M2, torch.bfloat16),
+    "BF16_to_E4M3": ("quantize", TE_DType.kFloat8E4M3),
+    "E4M3_to_BF16": ("dequantize", TE_DType.kFloat8E4M3),
+    "BF16_to_E5M2": ("quantize", TE_DType.kFloat8E5M2),
+    "E5M2_to_BF16": ("dequantize", TE_DType.kFloat8E5M2),
 }
 
 
@@ -40,12 +36,24 @@ class BenchCasting:
 
     def setup(self, M, model, cast):
         hidden = HIDDEN_SIZES[model]
-        src_dtype, self.dst_dtype = CAST_CONFIGS[cast]
-        if src_dtype in (FP8_E4M3, FP8_E5M2):
-            self.x = torch.randn(M, hidden, dtype=torch.bfloat16, device="cuda").to(src_dtype)
+        direction, fp8_dtype = CAST_CONFIGS[cast]
+        self.direction = direction
+        quantizer = Float8CurrentScalingQuantizer(
+            fp8_dtype=fp8_dtype,
+            device=torch.device("cuda"),
+            rowwise=True,
+            columnwise=False,
+        )
+        if direction == "dequantize":
+            bf16_tensor = torch.randn(M, hidden, dtype=torch.bfloat16, device="cuda")
+            self.x = quantizer.quantize(bf16_tensor)
         else:
-            self.x = torch.randn(M, hidden, dtype=src_dtype, device="cuda")
+            self.x = torch.randn(M, hidden, dtype=torch.bfloat16, device="cuda")
+            self.quantizer = quantizer
 
     def time_cast(self, M, model, cast):
-        self.x.to(self.dst_dtype)
+        if self.direction == "quantize":
+            self.quantizer.quantize(self.x)
+        else:
+            self.x.dequantize(dtype=torch.bfloat16)
         torch.cuda.synchronize()
