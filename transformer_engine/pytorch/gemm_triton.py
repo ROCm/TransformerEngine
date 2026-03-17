@@ -561,6 +561,23 @@ def te_generic_gemm_triton(A,
 
         input_mxfp8 = False
 
+    # Mixed FP8 types (e.g. A=e4m3, B=e5m2) are not supported due to a Triton
+    # compiler bug: when the MFMA layout is transposed, operand B is packed using
+    # A's element type, and the instruction's format encoding doesn't account for
+    # the operand swap. This produces silently wrong results for all MFMA variants.
+    # Fixed upstream in triton-lang/triton PR #9567 (commit eaaa75cf5, 2026-02-27).
+    # Not yet included in any pytorch-triton-rocm release as of PyTorch 2.11.
+    # Expected in PyTorch 2.12+ once the Triton pin is bumped.
+    # TODO: Remove this guard once pytorch-triton-rocm includes the fix.
+    if (a_fp8_dtype is not None and b_fp8_dtype is not None
+            and a_fp8_dtype != b_fp8_dtype):
+        raise ValueError(
+            f"Mixed FP8 types (A={a_fp8_dtype}, B={b_fp8_dtype}) are not supported "
+            f"in the Triton GEMM backend due to a Triton compiler bug "
+            f"(triton-lang/triton#9567). Use the same FP8 format for both operands, "
+            f"or disable the Triton backend (unset NVTE_USE_GEMM_TRITON)."
+        )
+
     # Reinterpret uint8 as native FP8 types for Triton
     # The FP8 tensor data is stored as torch.uint8 but Triton needs torch.float8_e4m3fnuz
     if a_fp8_dtype is not None:
@@ -1158,7 +1175,7 @@ def mxfp8_matmul(a, a_scale, b, b_scale, c, M, N, K, a_fp8_dtype, b_fp8_dtype):
     key=['M', 'N', 'K'],
     # Ran into stream capture error when using cuda_graph, thus disabled.
     #use_cuda_graph=True,
-    
+
 )
 @triton.heuristics({
     'EVEN_K': lambda args: args['K'] % args['BLOCK_SIZE_K'] == 0,
