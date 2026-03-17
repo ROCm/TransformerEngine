@@ -52,7 +52,6 @@ def is_devices_enough(required):
     return len(jax.devices()) >= required
 
 
-<<<<<<< HEAD
 def _check_mxfp8_gemm_support(with_jax_gemm, m, n, k, use_bias=False):
     if not is_hip_extension():
         return
@@ -145,14 +144,13 @@ def _check_mxfp8_layernorm_mlp_grad_support(
         m, n, k,
         use_bias
     )
-=======
+
 def is_devices_equal(required):
     """
     Check if the available GPUs is exactly equal
     """
     return len(jax.devices()) == required
 
->>>>>>> 99df88
 
 def _generate_drop_path_shape(shape: Sequence[int], batch_dim: int) -> Sequence[int]:
     # Generate broadcast dims for drop_path.
