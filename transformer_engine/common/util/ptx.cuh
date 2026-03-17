@@ -460,15 +460,9 @@ static_assert(sizeof(fp8e4m3x2) == 2);
 static_assert(sizeof(fp8e5m2x2) == 2);
 
 #if FP4_TYPE_SUPPORTED
-#ifndef __HIP_PLATFORM_AMD__
 using fp4e2m1 = __nv_fp4_e2m1;
 using fp4e2m1x2 = __nv_fp4x2_e2m1;
 using fp4e2m1x4 = __nv_fp4x4_e2m1;
-#else
-using fp4e2m1 = __hip_fp4_e2m1;
-using fp4e2m1x2 = __hip_fp4x2_e2m1;
-using fp4e2m1x4 = __hip_fp4x4_e2m1;
-#endif
 static_assert(sizeof(fp4e2m1x2) == 1);
 static_assert(sizeof(fp4e2m1x4) == 2);
 

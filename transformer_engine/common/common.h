@@ -24,11 +24,7 @@
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
 #if FP4_TYPE_SUPPORTED
-#ifndef __HIP_PLATFORM_AMD__
 #include <cuda_fp4.h>
-#else
-#include <hip/hip_fp4.h>
-#endif
 #endif
 
 #include <cuda_runtime_api.h>
@@ -656,9 +652,6 @@ struct TypeInfo {
   }
 
 // Add a pack_size argument to select the packed type for FP4
-#ifdef __HIP_PLATFORM_AMD__
-#define __nv_fp4x2_storage_t __hip_fp4x2_storage_t
-#endif
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FP4x2_ONLY(dtype, pack_size, type, ...) \
   switch (dtype) {                                                             \
     using namespace transformer_engine;                                        \

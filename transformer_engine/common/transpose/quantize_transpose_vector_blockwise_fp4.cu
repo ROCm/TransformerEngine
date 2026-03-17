@@ -7,17 +7,13 @@
  ************************************************************************/
 
 #include <cuda.h>
-#ifndef __HIP_PLATFORM_AMD__
 #include <cudaTypedefs.h>
 #include <cuda_bf16.h>
-#endif
 #include <cuda_runtime.h>
 
 #include <algorithm>
 #include <cfloat>
-#ifndef __HIP_PLATFORM_AMD__
 #include <cuda/barrier>
-#endif
 #include <utility>
 
 #include "common/common.h"
@@ -28,11 +24,6 @@
 #include "common/utils.cuh"
 
 namespace transformer_engine {
-
-#ifdef __HIP_PLATFORM_AMD__
-#define __nv_fp4x4_e2m1 __hip_fp4x4_e2m1
-#define __nv_fp4x2_storage_t __hip_fp4x2_storage_t
-#endif
 
 #if defined(__HIP_PLATFORM_AMD__) || CUDA_VERSION >= 12080
 namespace quantize_transpose_nvfp4 {
@@ -301,8 +292,8 @@ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_stochastic_ro
     return *reinterpret_cast<__nv_fp4x4_e2m1*>(&out_4x);
   } else {
     NVTE_DEVICE_ERROR(
-      "FP4 cvt.rs PTX instructions are architecture-specific. "
-      "Try recompiling with sm_XXXa instead of sm_XXX.");
+        "FP4 cvt.rs PTX instructions are architecture-specific. "
+        "Try recompiling with sm_XXXa instead of sm_XXX.");
 #else
     NVTE_DEVICE_ERROR(
         "cvt_fp32_to_fp4_4x_with_stochastic_rounding is not supported on AMDGPU.");

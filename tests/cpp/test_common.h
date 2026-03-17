@@ -74,15 +74,9 @@ using fp8e5m2 = te_hip_fp8_e5m2;
 #endif //USE_ROCM
 using fp8e8m0 = uint8_t;
 #if FP4_TYPE_SUPPORTED
-#ifndef USE_ROCM
 using fp4e2m1 = __nv_fp4_e2m1;
 using fp4e2m1x2 = __nv_fp4x2_e2m1;
 using fp4e2m1x4 = __nv_fp4x4_e2m1;
-#else
-using fp4e2m1 = __hip_fp4_e2m1;
-using fp4e2m1x2 = __hip_fp4x2_e2m1;
-using fp4e2m1x4 = __hip_fp4x4_e2m1;
-#endif //USE_ROCM
 #endif
 
 template <typename T>

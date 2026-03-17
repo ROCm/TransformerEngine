@@ -8,9 +8,7 @@
 
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
-#ifndef __HIP_PLATFORM_AMD__
 #include <cuda_fp4.h>
-#endif
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 
