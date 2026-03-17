@@ -93,6 +93,7 @@ run_test_config_mgpu(){
     #run in parallel on CI and it affects timing
     run_default_fa 1 test_gemm_sm_count.py
     run_default_fa 3 test_sanity_import.py
+    run_default_fa 3 distributed/test_cast_master_weights_to_fp8.py
     run_default_fa 2 distributed/test_fusible_ops.py
     run_default_fa 2 distributed/test_numerics.py
     run_default_fa 1 distributed/test_torch_fsdp2.py
