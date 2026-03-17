@@ -489,9 +489,6 @@ void fused_multi_row_padding(at::Tensor input, at::Tensor output,
 void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
                                std::vector<size_t> input_row_list,
                                std::vector<size_t> unpadded_input_row_list);
-<<<<<<< HEAD
-#ifndef USE_ROCM
-=======
 
 /***************************************************************************************************
  * Scale swizzling for GEMM
@@ -499,7 +496,7 @@ void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
 
 void inplace_swizzle_scale_for_gemm(py::handle &tensor);
 
->>>>>>> 99df88
+#ifndef USE_ROCM
 /***************************************************************************************************
  * NVSHMEM APIs
  **************************************************************************************************/

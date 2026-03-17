@@ -312,7 +312,6 @@ size_t roundup(size_t value, size_t multiple) {
   return ((value + multiple - 1) / multiple) * multiple;
 }
 
-<<<<<<< HEAD
 #ifdef USE_ROCM
 
 inline bool nvte_use_atomic_amax() {
@@ -335,9 +334,8 @@ at::Tensor allocate_amax_workspace(const TensorWrapper& input_tensor) {
 }
 
 #endif
-=======
+
 size_t ceildiv(size_t numer, size_t denom) { return (numer + denom - 1) / denom; }
->>>>>>> 99df88
 
 void philox_unpack(at::PhiloxCudaState arg, int64_t* rng_state_ptr) {
   NVTE_SCOPED_GIL_RELEASE({
