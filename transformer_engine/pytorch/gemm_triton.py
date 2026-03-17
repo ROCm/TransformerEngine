@@ -465,6 +465,18 @@ def te_generic_gemm_triton(A,
         is_mxfp8_b = False
 
     if is_mxfp8_a or is_mxfp8_b:
+        # MXFP8 Triton GEMM requires PyTorch >= 2.10 which ships a Triton version
+        # with the tl.dot_scaled() RHS scale layout bug fix.
+        # Earlier versions silently produce wrong results for non-uniform B scales.
+        from transformer_engine.pytorch import torch_version
+        if torch_version() < (2, 10):
+            raise RuntimeError(
+                f"Triton MXFP8 GEMM requires PyTorch >= 2.10 (found {torch_version()}). "
+                "Earlier versions contain a Triton compiler bug in tl.dot_scaled() that "
+                "produces incorrect results for the RHS scale operand. "
+                "Set NVTE_USE_GEMM_TRITON=0 to use the C++ GEMM backend instead."
+            )
+
         # Use MXFP8TensorWrapper
         A_wrapper = MXFP8TensorWrapper(A)
         B_wrapper = MXFP8TensorWrapper(B)
@@ -974,7 +986,7 @@ def mxfp8_matmul_kernel(
     stride_cm, stride_cn,
     # Scale strides
     stride_a_scale_m, stride_a_scale_k,
-    stride_b_scale_k, stride_b_scale_n,
+    stride_b_scale_n, stride_b_scale_k,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -1069,15 +1081,15 @@ def mxfp8_matmul_kernel(
         a_scale_mask = mask_a_scale_m[:, None] & mask_a_scale_k[None, :]
         a_scale_e8m0 = tl.load(a_scale_ptrs, mask=a_scale_mask, other=127)
 
-        # With reversed selection, B now has columnwise scales [K//32, N]
-        # For tl.dot_scaled we need [BLOCK_SIZE_K//32, BLOCK_SIZE_N]
+        # B scale layout: [N, K//32] (new dot_scaled API -- "Do NOT transpose rhs_scale")
+        # For tl.dot_scaled we need [BLOCK_SIZE_N, BLOCK_SIZE_K//32]
         offs_b_scale_k = k_block_start + tl.arange(0, BLOCK_SIZE_K // VEC_SIZE)
-        b_scale_ptrs = b_scale_ptr + (offs_b_scale_k[:, None] * stride_b_scale_k +
-                                       offs_bn[None, :] * stride_b_scale_n)
+        b_scale_ptrs = b_scale_ptr + (offs_bn[:, None] * stride_b_scale_n +
+                                       offs_b_scale_k[None, :] * stride_b_scale_k)
 
-        mask_b_scale_k = offs_b_scale_k < (K // VEC_SIZE)
         mask_b_scale_n = offs_bn < N
-        b_scale_mask = mask_b_scale_k[:, None] & mask_b_scale_n[None, :]
+        mask_b_scale_k = offs_b_scale_k < (K // VEC_SIZE)
+        b_scale_mask = mask_b_scale_n[:, None] & mask_b_scale_k[None, :]
         b_scale_e8m0 = tl.load(b_scale_ptrs, mask=b_scale_mask, other=127)
 
         # Block-scaled matmul using tl.dot_scaled
@@ -1085,7 +1097,8 @@ def mxfp8_matmul_kernel(
         # a: [BLOCK_SIZE_M, BLOCK_SIZE_K] FP8
         # a_scale_e8m0: [BLOCK_SIZE_M, BLOCK_SIZE_K // VEC_SIZE] uint8 (E8M0)
         # b: [BLOCK_SIZE_K, BLOCK_SIZE_N] FP8 (already in correct layout, no transpose needed)
-        # b_scale_e8m0: [BLOCK_SIZE_K // VEC_SIZE, BLOCK_SIZE_N] uint8 (E8M0)
+        # b_scale_e8m0: [BLOCK_SIZE_N, BLOCK_SIZE_K // VEC_SIZE] uint8 (E8M0)
+        #   Note: rhs_scale uses [N, K//32] layout (NOT transposed) per new dot_scaled API
         accumulator = tl.dot_scaled(
             a,                # [BLOCK_SIZE_M, BLOCK_SIZE_K]
             a_scale_e8m0,     # [BLOCK_SIZE_M, BLOCK_SIZE_K // VEC_SIZE] E8M0
@@ -1118,7 +1131,8 @@ def mxfp8_matmul(a, a_scale, b, b_scale, c, M, N, K, a_fp8_dtype, b_fp8_dtype):
         a: FP8 data tensor [M, K] (uint8)
         a_scale: E8M0 scale tensor [M, K//32] (uint8)
         b: FP8 data tensor [K, N] (uint8)
-        b_scale: E8M0 scale tensor [K//32, N] (uint8)
+        b_scale: E8M0 scale tensor [K//32, N] (uint8) -- will be transposed
+                 to [N, K//32] internally for the new dot_scaled API
         c: Output tensor [M, N] (fp32/bf16/fp16)
         M, N, K: Matrix dimensions
         a_fp8_dtype: FP8 dtype for A (tex.DType.kFloat8E4M3 or kFloat8E5M2)
@@ -1127,6 +1141,10 @@ def mxfp8_matmul(a, a_scale, b, b_scale, c, M, N, K, a_fp8_dtype, b_fp8_dtype):
     # Validate that a_scale and b_scale exist
     if a_scale is None or b_scale is None:
         raise RuntimeError("MXFP8 matmul requires both a_scale and b_scale to be provided")
+
+    # Transpose b_scale from [K//32, N] to [N, K//32] for new dot_scaled API
+    # The new API expects rhs_scale in [N, K//32] layout (NOT transposed)
+    b_scale = b_scale.T.contiguous()
 
     # Validate BLOCK_SIZE_K will be multiple of VEC_SIZE (32)
     # This is enforced by the autotune configs
