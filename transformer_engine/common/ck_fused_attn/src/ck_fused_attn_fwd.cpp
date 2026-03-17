@@ -1,10 +1,9 @@
 /*************************************************************************
- * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
-#include <fstream>
 #include <iostream>
 #include <cstdlib>
 #include <stdexcept>
@@ -17,107 +16,103 @@
 namespace ck_fused_attn{
 
 // print the fmha traits and args when calling ck apis
-void log_fwd_config(const char* func_name,
-                    const std::string data_type_str,
-                    const bool is_group_mode,
-                    const bool has_logits_soft_cap,
-                    const mask_enum mask_type,
-                    const bias_enum bias_type,
-                    const bool has_lse,
-                    const bool has_dropout,
-                    const bool is_v_rowmajor,
-                    const bool do_fp8_static_quant,
-                    const bool uses_fwd_v3,
-                    const bool how_v3_bf16_cvt,
-                    const fmha_fwd_args& fmha_args){
-  bool ck_fused_attn_log_config = false;
-  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      ck_fused_attn_log_config = true;
-  }
-  if (ck_fused_attn_log_config) {
-    std::cout<<std::endl<<func_name<<std::endl;
+void log_fwd_config(
+  std::ostream* log_file,
+  const char* func_name,
+  const std::string data_type_str,
+  const bool is_group_mode,
+  const bool has_logits_soft_cap,
+  const mask_enum mask_type,
+  const bias_enum bias_type,
+  const bool has_lse,
+  const bool has_dropout,
+  const bool is_v_rowmajor,
+  const bool do_fp8_static_quant,
+  const bool uses_fwd_v3,
+  const bool how_v3_bf16_cvt,
+  const fmha_fwd_args& fmha_args
+){
+  *log_file << "\n" << func_name << "\n";
 
-    // debug fmha_traits
-    std::cout<<std::endl<<"fmha_traits: "<<std::endl;
-    std::cout<<"hdim_q: "<<fmha_args.hdim_q<<std::endl;
-    std::cout<<"hdim_v: "<<fmha_args.hdim_v<<std::endl;
-    std::cout<<"data_type: "<<data_type_str<<std::endl;
-    std::cout<<"is_group_mode: "<<is_group_mode<<std::endl;
-    std::cout<<"is_v_rowmajor: "<<is_v_rowmajor<<std::endl;
-    std::cout<<"has_logits_soft_cap: "<<has_logits_soft_cap<<std::endl;
-    std::cout<<"mask_type: "<<static_cast<std::underlying_type<mask_enum>::type>(mask_type)<<std::endl;
-    std::cout<<"bias_type: "<<static_cast<std::underlying_type<bias_enum>::type>(bias_type)<<std::endl;
-    std::cout<<"has_lse: "<<has_lse<<std::endl;
-    std::cout<<"has_dropout: "<<has_dropout<<std::endl;
-    std::cout<<"do_fp8_static_quant: "<<do_fp8_static_quant<<std::endl;
-    std::cout<<"skip_min_seqlen_q: "<<(fmha_args.min_seqlen_q != 0)<<std::endl;
-    std::cout<<"uses_fwd_v3: "<<uses_fwd_v3<<std::endl;
-    std::cout<<"how_v3_bf16_cvt: "<<how_v3_bf16_cvt<<std::endl;
+  // debug fmha_traits
+  *log_file << "\n" << "fmha_traits: " << "\n";
+  *log_file << "hdim_q: " << fmha_args.hdim_q << "\n";
+  *log_file << "hdim_v: " << fmha_args.hdim_v << "\n";
+  *log_file << "data_type: " << data_type_str << "\n";
+  *log_file << "is_group_mode: " << is_group_mode << "\n";
+  *log_file << "is_v_rowmajor: " << is_v_rowmajor << "\n";
+  *log_file << "has_logits_soft_cap: " << has_logits_soft_cap << "\n";
+  *log_file << "mask_type: " << static_cast<std::underlying_type<mask_enum>::type>(mask_type) << "\n";
+  *log_file << "bias_type: " << static_cast<std::underlying_type<bias_enum>::type>(bias_type) << "\n";
+  *log_file << "has_lse: " << has_lse << "\n";
+  *log_file << "has_dropout: " << has_dropout << "\n";
+  *log_file << "do_fp8_static_quant: " << do_fp8_static_quant << "\n";
+  *log_file << "skip_min_seqlen_q: " << (fmha_args.min_seqlen_q != 0) << "\n";
+  *log_file << "uses_fwd_v3: " << uses_fwd_v3 << "\n";
+  *log_file << "how_v3_bf16_cvt: " << how_v3_bf16_cvt << "\n";
 
-    // debug fmha_args
-    std::cout<<std::endl<<"fmha_args: "<<std::endl;
+  // debug fmha_args
+  *log_file << "\n" << "fmha_args: " << "\n";
 
-    std::cout<<"q_ptr: "<<fmha_args.q_ptr<<std::endl;
-    std::cout<<"k_ptr: "<<fmha_args.k_ptr<<std::endl;
-    std::cout<<"v_ptr: "<<fmha_args.v_ptr<<std::endl;
-    std::cout<<"bias_ptr: "<<fmha_args.bias_ptr<<std::endl;
-    std::cout<<"rand_val_ptr: "<<fmha_args.rand_val_ptr<<std::endl;
-    std::cout<<"lse_ptr: "<<fmha_args.lse_ptr<<std::endl;
-    std::cout<<"o_ptr: "<<fmha_args.o_ptr<<std::endl;
+  *log_file << "q_ptr: " << fmha_args.q_ptr << "\n";
+  *log_file << "k_ptr: " << fmha_args.k_ptr << "\n";
+  *log_file << "v_ptr: " << fmha_args.v_ptr << "\n";
+  *log_file << "bias_ptr: " << fmha_args.bias_ptr << "\n";
+  *log_file << "rand_val_ptr: " << fmha_args.rand_val_ptr << "\n";
+  *log_file << "lse_ptr: " << fmha_args.lse_ptr << "\n";
+  *log_file << "o_ptr: " << fmha_args.o_ptr << "\n";
 
-    std::cout<<"seqstart_q_ptr: "<<fmha_args.seqstart_q_ptr<<std::endl;
-    std::cout<<"seqstart_k_ptr: "<<fmha_args.seqstart_k_ptr<<std::endl;
-    std::cout<<"seqlen_q_ptr: "<<fmha_args.seqlen_q_ptr<<std::endl;
-    std::cout<<"seqlen_k_ptr: "<<fmha_args.seqlen_k_ptr<<std::endl;
-    std::cout<<"cu_seqlen_q_ptr: "<<fmha_args.cu_seqlen_q_ptr<<std::endl;
-    std::cout<<"cu_seqlen_k_ptr: "<<fmha_args.cu_seqlen_k_ptr<<std::endl;
+  *log_file << "seqstart_q_ptr: " << fmha_args.seqstart_q_ptr << "\n";
+  *log_file << "seqstart_k_ptr: " << fmha_args.seqstart_k_ptr << "\n";
+  *log_file << "seqlen_q_ptr: " << fmha_args.seqlen_q_ptr << "\n";
+  *log_file << "seqlen_k_ptr: " << fmha_args.seqlen_k_ptr << "\n";
+  *log_file << "cu_seqlen_q_ptr: " << fmha_args.cu_seqlen_q_ptr << "\n";
+  *log_file << "cu_seqlen_k_ptr: " << fmha_args.cu_seqlen_k_ptr << "\n";
 
-    std::cout<<"seqlen_q: "<<fmha_args.seqlen_q<<std::endl;
-    std::cout<<"seqlen_k: "<<fmha_args.seqlen_k<<std::endl;
-    std::cout<<"batch: "<<fmha_args.batch<<std::endl;
-    std::cout<<"max_seqlen_q: "<<fmha_args.max_seqlen_q<<std::endl;
-    std::cout<<"hdim_q: "<<fmha_args.hdim_q<<std::endl;
-    std::cout<<"hdim_v: "<<fmha_args.hdim_v<<std::endl;
-    std::cout<<"nhead_q: "<<fmha_args.nhead_q<<std::endl;
-    std::cout<<"nhead_k: "<<fmha_args.nhead_k<<std::endl;
+  *log_file << "seqlen_q: " << fmha_args.seqlen_q << "\n";
+  *log_file << "seqlen_k: " << fmha_args.seqlen_k << "\n";
+  *log_file << "batch: " << fmha_args.batch << "\n";
+  *log_file << "max_seqlen_q: " << fmha_args.max_seqlen_q << "\n";
+  *log_file << "hdim_q: " << fmha_args.hdim_q << "\n";
+  *log_file << "hdim_v: " << fmha_args.hdim_v << "\n";
+  *log_file << "nhead_q: " << fmha_args.nhead_q << "\n";
+  *log_file << "nhead_k: " << fmha_args.nhead_k << "\n";
 
-    std::cout<<"scale_s: "<<fmha_args.scale_s<<std::endl;
+  *log_file << "scale_s: " << fmha_args.scale_s << "\n";
 
-    std::cout<<"logits_soft_cap: "<<fmha_args.logits_soft_cap<<std::endl;
+  *log_file << "logits_soft_cap: " << fmha_args.logits_soft_cap << "\n";
 
-    std::cout<<"stride_q: "<<fmha_args.stride_q<<std::endl;
-    std::cout<<"stride_k: "<<fmha_args.stride_k<<std::endl;
-    std::cout<<"stride_v: "<<fmha_args.stride_v<<std::endl;
-    std::cout<<"stride_bias: "<<fmha_args.stride_bias<<std::endl;
-    std::cout<<"stride_randval: "<<fmha_args.stride_randval<<std::endl;
-    std::cout<<"stride_o: "<<fmha_args.stride_o<<std::endl;
-    std::cout<<"nhead_stride_q: "<<fmha_args.nhead_stride_q<<std::endl;
-    std::cout<<"nhead_stride_k: "<<fmha_args.nhead_stride_k<<std::endl;
-    std::cout<<"nhead_stride_v: "<<fmha_args.nhead_stride_v<<std::endl;
-    std::cout<<"nhead_stride_bias: "<<fmha_args.nhead_stride_bias<<std::endl;
-    std::cout<<"nhead_stride_randval: "<<fmha_args.nhead_stride_randval<<std::endl;
-    std::cout<<"nhead_stride_lse: "<<fmha_args.nhead_stride_lse<<std::endl;
-    std::cout<<"nhead_stride_o: "<<fmha_args.nhead_stride_o<<std::endl;
-    std::cout<<"batch_stride_q: "<<fmha_args.batch_stride_q<<std::endl;
-    std::cout<<"batch_stride_k: "<<fmha_args.batch_stride_k<<std::endl;
-    std::cout<<"batch_stride_v: "<<fmha_args.batch_stride_v<<std::endl;
-    std::cout<<"batch_stride_bias: "<<fmha_args.batch_stride_bias<<std::endl;
-    std::cout<<"batch_stride_randval: "<<fmha_args.batch_stride_randval<<std::endl;
-    std::cout<<"batch_stride_lse: "<<fmha_args.batch_stride_lse<<std::endl;
-    std::cout<<"batch_stride_o: "<<fmha_args.batch_stride_o<<std::endl;
+  *log_file << "stride_q: " << fmha_args.stride_q << "\n";
+  *log_file << "stride_k: " << fmha_args.stride_k << "\n";
+  *log_file << "stride_v: " << fmha_args.stride_v << "\n";
+  *log_file << "stride_bias: " << fmha_args.stride_bias << "\n";
+  *log_file << "stride_randval: " << fmha_args.stride_randval << "\n";
+  *log_file << "stride_o: " << fmha_args.stride_o << "\n";
+  *log_file << "nhead_stride_q: " << fmha_args.nhead_stride_q << "\n";
+  *log_file << "nhead_stride_k: " << fmha_args.nhead_stride_k << "\n";
+  *log_file << "nhead_stride_v: " << fmha_args.nhead_stride_v << "\n";
+  *log_file << "nhead_stride_bias: " << fmha_args.nhead_stride_bias << "\n";
+  *log_file << "nhead_stride_randval: " << fmha_args.nhead_stride_randval << "\n";
+  *log_file << "nhead_stride_lse: " << fmha_args.nhead_stride_lse << "\n";
+  *log_file << "nhead_stride_o: " << fmha_args.nhead_stride_o << "\n";
+  *log_file << "batch_stride_q: " << fmha_args.batch_stride_q << "\n";
+  *log_file << "batch_stride_k: " << fmha_args.batch_stride_k << "\n";
+  *log_file << "batch_stride_v: " << fmha_args.batch_stride_v << "\n";
+  *log_file << "batch_stride_bias: " << fmha_args.batch_stride_bias << "\n";
+  *log_file << "batch_stride_randval: " << fmha_args.batch_stride_randval << "\n";
+  *log_file << "batch_stride_lse: " << fmha_args.batch_stride_lse << "\n";
+  *log_file << "batch_stride_o: " << fmha_args.batch_stride_o << "\n";
 
-    std::cout<<"window_size_left: "<<fmha_args.window_size_left<<std::endl;
-    std::cout<<"window_size_right: "<<fmha_args.window_size_right<<std::endl;
-    std::cout<<"mask_type: "<<fmha_args.mask_type<<std::endl;
-    std::cout<<"min_seqlen_q: "<<fmha_args.min_seqlen_q<<std::endl;
+  *log_file << "window_size_left: " << fmha_args.window_size_left << "\n";
+  *log_file << "window_size_right: " << fmha_args.window_size_right << "\n";
+  *log_file << "mask_type: " << fmha_args.mask_type << "\n";
+  *log_file << "min_seqlen_q: " << fmha_args.min_seqlen_q << "\n";
 
-    std::cout<<"p_drop: "<<fmha_args.p_drop<<std::endl;
-    std::cout<<"s_randval: "<<fmha_args.s_randval<<std::endl;
+  *log_file << "p_drop: " << fmha_args.p_drop << "\n";
+  *log_file << "s_randval: " << fmha_args.s_randval << "\n";
 
-    std::cout<<"dropout_seed_ptr: "<<std::get<0>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset))<<std::endl;
-    std::cout<<"dropout_offset_ptr: "<<std::get<1>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset))<<std::endl;
-  }
+  *log_file << "dropout_seed_ptr: " << std::get<0>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset)) << "\n";
+  *log_file << "dropout_offset_ptr: " << std::get<1>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset)) << "\n";
 }
 
 void dump_fwd_timings(const char* dump_path, float average_runtime){
@@ -179,14 +174,9 @@ hipError_t ck_attn_fwd(
   right = window_size_right;
   mask_enum mask_type = static_cast<mask_enum>(attn_mask_type);
   
-  bool ck_fused_attn_log_config = false;
-  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      ck_fused_attn_log_config = true;
-  }
   const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
   // print kernel name on verbose mode
-  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, ck_fused_attn_log_config};
+  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, get_ck_log_stream() != nullptr};
 
   std::string data_type_str = get_data_type_str(dtype);
 
@@ -277,7 +267,9 @@ hipError_t ck_attn_fwd(
   }();
   
   // print ck traits and args when needed
-  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, how_v3_bf16_cvt, fmha_args);
+  if (auto* log_file = get_ck_log_stream()) {
+    log_fwd_config(log_file, __FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, how_v3_bf16_cvt, fmha_args);
+  }
 
   float average_runtime = aiter::mha_fwd(fmha_args,
                                          stream_config,
@@ -354,14 +346,9 @@ hipError_t ck_attn_varlen_fwd(
   
   bias_enum bias_type = bias_enum::no_bias;
   
-  bool ck_fused_attn_log_config = false;
-  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      ck_fused_attn_log_config = true;
-  }
   const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
   // print kernel name on verbose mode
-  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, ck_fused_attn_log_config};
+  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, get_ck_log_stream() != nullptr};
 
 
   std::string data_type_str = get_data_type_str(dtype);
@@ -457,14 +444,17 @@ hipError_t ck_attn_varlen_fwd(
   // lse_thd_ptr used as buffer
   if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_MAX_SEQLEN")){
     if(std::string(env_p) == "1"){
-      if(ck_fused_attn_log_config){
-        std::cout << "attn_fwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.";
+      if (auto* log_file = get_ck_log_stream()) {
+        *log_file
+            << "attn_fwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.\n";
       }
       fmha_args.max_seqlen_q = get_runtime_max_seqlen(b, cu_seqlen_q_ptr, cu_seqlen_q_padded_ptr, lse_thd_ptr, stream);
     }
   }
   // print ck traits and args when needed
-  log_fwd_config(__FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, how_v3_bf16_cvt, fmha_args);
+  if (auto* log_file = get_ck_log_stream()) {
+    log_fwd_config(log_file, __FUNCTION__, data_type_str, is_group_mode, has_logits_soft_cap, mask_type, bias_type, has_lse, has_dropout, is_v_rowmajor, do_fp8_static_quant, uses_fwd_v3, how_v3_bf16_cvt, fmha_args);
+  }
 
   float average_runtime = aiter::mha_fwd(
     fmha_args,

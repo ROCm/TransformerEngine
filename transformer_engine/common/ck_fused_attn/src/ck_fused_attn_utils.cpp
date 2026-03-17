@@ -1,10 +1,14 @@
 /*************************************************************************
- * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
 #include <utility>
+#include <filesystem>
+#include <sstream>
+#include <thread>
+#include <unistd.h>
 #include "ck_fused_attn_utils.hpp"
 #include "ck_fused_attn/ck_fused_attn.hpp"
 #include "mask.hpp"
@@ -12,6 +16,41 @@
 
 
 namespace ck_fused_attn{
+
+bool open_ck_fused_attn_log_file(std::ofstream& log_file, const char* file_prefix, const std::string& log_dir_str) {
+  // Explicitly use std::cout as a fallback
+  std::filesystem::path log_dir(log_dir_str);
+  std::ostringstream filename;
+  filename << file_prefix << "_" << getpid() << "_" << std::this_thread::get_id() << ".log";
+  log_file.open(log_dir / filename.str(), std::ios_base::app);
+  if (!log_file.is_open()) {
+    std::cerr << "Failed to open log file: " << (log_dir / filename.str()) << "\n";
+    return false;
+  }
+  return true;
+}
+
+std::ostream* get_ck_log_stream() {
+  thread_local std::ofstream log_file;
+  thread_local std::ostream* log_stream = nullptr;
+  thread_local bool initialized = false;
+  if (!initialized) {
+    initialized = true;
+    if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG")) {
+      std::string log_dir_str(env_p);
+      if (!log_dir_str.empty() && log_dir_str != "0") {
+        if (log_dir_str == "1") {
+          log_stream = &std::cout;
+        }
+        else if (open_ck_fused_attn_log_file(log_file, "ck_fused_attn", log_dir_str)) {
+          log_stream = &log_file;
+        }
+      }
+    }
+  }
+
+  return log_stream;
+}
 
 std::string get_data_type_str(DType dtype){
   std::string data_type_str;

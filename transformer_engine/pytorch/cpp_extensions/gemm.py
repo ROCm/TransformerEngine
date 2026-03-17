@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -11,9 +11,11 @@ import transformer_engine_torch as tex
 from ..constants import TE_DType
 from ..utils import get_sm_count, _empty_tensor
 
-from ..tensor.quantized_tensor import Quantizer
-from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
-from ..tensor._internal.mxfp4_tensor_base import MXFP4TensorBase
+from ..quantized_tensor import Quantizer
+from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
+from ..tensor.storage.mxfp4_tensor_storage import MXFP4TensorStorage
+from ..tensor.utils import is_custom
+from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 
 __all__ = [
@@ -78,6 +80,24 @@ def general_gemm(
         if not out.is_contiguous():
             raise ValueError("Output tensor is not contiguous.")
 
+    # If A or B are custom tensors -> dispatch to quantizers's qgemm implementation
+    if is_custom(A) or is_custom(B):
+        return custom_gemm(
+            A,
+            B,
+            workspace,
+            out_dtype,
+            quantization_params,
+            gelu,
+            gelu_in,
+            accumulate,
+            layout,
+            out,
+            bias,
+            use_split_accumulator,
+            grad,
+        )
+
     debug_quantizer = None
     if isinstance(quantization_params, DebugQuantizer):
         debug_quantizer = quantization_params
@@ -89,10 +109,9 @@ def general_gemm(
     bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]
 
     # MXFP4 GEMM detection and routing
-    # Check if both inputs are MXFP4 tensors - route to FP4 handler
-    if isinstance(A, MXFP4TensorBase) and isinstance(B, MXFP4TensorBase):
+    if isinstance(A, MXFP4TensorStorage) and isinstance(B, MXFP4TensorStorage):
         from ..module.fp4_handler_gemm import fp4_gemm_layout
-        
+
         result = fp4_gemm_layout(
             A, B,
             layout=layout,
@@ -102,13 +121,11 @@ def general_gemm(
             grad=grad,
             accumulate=accumulate,
         )
-        # Return format: (out, bias_grad, gelu_input, extra_output)
-        # MXFP4 GEMM doesn't support gelu or extra_output, and bias_grad is handled separately
         return result, None, None, None
 
-    if isinstance(A, Float8BlockwiseQTensorBase) or isinstance(B, Float8BlockwiseQTensorBase):
+    if isinstance(A, Float8BlockwiseQTensorStorage) or isinstance(B, Float8BlockwiseQTensorStorage):
         # There is not use_split_accumulator == False
-        # implementation for Float8BlockwiseQTensorBase GEMM
+        # implementation for Float8BlockwiseQTensorStorage GEMM
         use_split_accumulator = True
 
         # Check that data format is supported

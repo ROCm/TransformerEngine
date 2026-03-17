@@ -1,5 +1,5 @@
 ..
-    Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
     See LICENSE for license information.
 
@@ -30,6 +30,7 @@ Modules
 
 
 .. autoapifunction:: transformer_engine.jax.fp8_autocast
+.. autoapifunction:: transformer_engine.jax.autocast
 .. autoapifunction:: transformer_engine.jax.update_collections
 
 
