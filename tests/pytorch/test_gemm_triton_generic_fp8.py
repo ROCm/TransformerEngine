@@ -38,7 +38,7 @@ def create_fp8_tensor(tensor: torch.Tensor, fp8_dtype: tex.DType, scale: float =
 @pytest.mark.parametrize("fp8_format", [
     (tex.DType.kFloat8E4M3, tex.DType.kFloat8E4M3),  # Both E4M3
     (tex.DType.kFloat8E5M2, tex.DType.kFloat8E5M2),  # Both E5M2
-    # Mixed formats (E4M3+E5M2) have known issues in the Triton kernel - skip for now
+    # Mixed formats (E4M3+E5M2) disabled: Triton compiler bug (triton-lang/triton#9567)
 ])
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
 def test_generic_gemm_triton_fp8(M, K, N, fp8_format, layout):
