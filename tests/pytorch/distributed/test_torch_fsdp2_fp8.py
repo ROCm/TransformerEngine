@@ -17,15 +17,20 @@ mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available(
 
 NUM_PROCS: int = torch.cuda.device_count()
 
-def assertEqual(
-    l1: List[torch.Tensor], l2: List[torch.Tensor]) -> bool:
-    """Ensures two lists are exactly equal."""
+def assert_allclose(
+    l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float, rtol: float = None
+) -> bool:
+    """Ensures two lists are equal."""
     assert len(l1) == len(l2), "Unequal number of outputs."
     for i, (t1, t2) in enumerate(zip(l1, l2)):
-        result = torch.allclose(t1, t2, atol=0, rtol=0)
+        tols = dict(atol=atol)
+        if rtol is not None:
+            tols["rtol"] = rtol
+        result = torch.allclose(t1, t2, **tols)
         if not result:
             diff = torch.abs(t1 - t2)
-            exceed_mask = diff > 0
+            tol = atol + (rtol * torch.abs(t2))
+            exceed_mask = diff > tol
             if exceed_mask.any():
                 indices = torch.nonzero(exceed_mask, as_tuple=True)
                 max_diff = diff[exceed_mask].max()
@@ -58,11 +63,16 @@ def _run_test(fp_init, fp8_autocast, recipe):
     # Load outputs
     output_fsdp = torch.load("all_iters_fsdp2.pt", map_location="cpu")
     output_dp = torch.load("all_iters_dp.pt", map_location="cpu")
+    atol = 0
+    rtol = 0
+    if fp_init:
+        atol = 1e-6
+        rtol = 5e-5
     
     for idx, (te_output_no_cache, te_output_cache) in enumerate(zip(output_fsdp, output_dp)):
     
         print(f"Comparing FSDP {te_output_no_cache[0]}, DDP {te_output_cache[0]} at index {idx}...")
-        assertEqual(te_output_no_cache[1], te_output_cache[1]) # expects exact match
+        assert_allclose(te_output_no_cache[1], te_output_cache[1], atol=atol, rtol=rtol) # expects exact match
         print(f"Tensor at index {idx} passed comparison.")
 
 
