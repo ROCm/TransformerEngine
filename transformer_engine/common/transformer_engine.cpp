@@ -723,7 +723,11 @@ void nvte_destroy_quantization_config(NVTEQuantizationConfig config) {
   }
 }
 
+
 int nvte_is_non_tn_fp8_gemm_supported() {
+#ifdef __HIP_PLATFORM_AMD__
+  return 0; // Disabled for performance reasons
+#endif
   int num_devices = transformer_engine::cuda::num_devices();
   static std::vector<int> cache(num_devices, -1);
   static std::vector<std::once_flag> flags(num_devices);
