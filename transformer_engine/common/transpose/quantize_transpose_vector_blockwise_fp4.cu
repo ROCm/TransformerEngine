@@ -300,13 +300,13 @@ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_stochastic_ro
         : "f"(in01.y), "f"(in01.x), "f"(in23.y), "f"(in23.x), "r"(rbits));
     return *reinterpret_cast<__nv_fp4x4_e2m1*>(&out_4x);
   } else {
+    NVTE_DEVICE_ERROR(
+      "FP4 cvt.rs PTX instructions are architecture-specific. "
+      "Try recompiling with sm_XXXa instead of sm_XXX.");
 #else
     NVTE_DEVICE_ERROR(
-        "cvt_fp32_to_fp4_4x_with_stochastic_rounding is not support on AMDGPU.");
+        "cvt_fp32_to_fp4_4x_with_stochastic_rounding is not supported on AMDGPU.");
 #endif
-    NVTE_DEVICE_ERROR(
-        "FP4 cvt.rs PTX instructions are architecture-specific. "
-        "Try recompiling with sm_XXXa instead of sm_XXX.");
     uint16_t dummy = 0;
     return *reinterpret_cast<__nv_fp4x4_e2m1*>(&dummy);
 #ifndef __HIP_PLATFORM_AMD__
