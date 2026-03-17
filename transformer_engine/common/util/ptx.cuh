@@ -517,12 +517,13 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_stochastic_roun
         : "=h"(out_4x)
         : "l"(in_4x), "l"(reinterpret_cast<const uint64_t &>(scale)), "r"(rbits));
   } else {
-#endif
     NVTE_DEVICE_ERROR(
         "FP4 cvt PTX instructions are architecture-specific. "
         "Try recompiling with sm_XXXa instead of sm_XXX.");
-#ifndef __HIP_PLATFORM_AMD__
   }
+#else
+  NVTE_DEVICE_ERROR(
+      "mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding is not supported on AMDGPU.");
 #endif
   return *reinterpret_cast<fp4e2m1x4 *>(&out_4x);
 }
@@ -569,12 +570,13 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_rn(const uint64
         : "=r"(out_4x)
         : "l"(in_4x), "l"(reinterpret_cast<const uint64_t &>(scale)));
   } else {
-#endif
     NVTE_DEVICE_ERROR(
         "FP4 cvt PTX instructions are architecture-specific. "
         "Try recompiling with sm_XXXa instead of sm_XXX.");
-#ifndef __HIP_PLATFORM_AMD__
   }
+#else
+  NVTE_DEVICE_ERROR(
+      "mul_cvt_bf16_to_fp4_4x_with_rn is not supported on AMDGPU.");
 #endif
   return reinterpret_cast<fp4e2m1x4 *>(&out_4x)[0];
 }
@@ -619,12 +621,13 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_stochastic_roun
           "l"(reinterpret_cast<const uint64_t &>(in23)),
           "l"(reinterpret_cast<const uint64_t &>(scale)), "r"(rbits));
   } else {
-#endif
     NVTE_DEVICE_ERROR(
         "FP4 cvt PTX instructions are architecture-specific. "
         "Try recompiling with sm_XXXa instead of sm_XXX.");
-#ifndef __HIP_PLATFORM_AMD__
   }
+#else
+  NVTE_DEVICE_ERROR(
+      "mul_cvt_fp32_to_fp4_4x_with_stochastic_rounding is not supported on AMDGPU.");
 #endif
   return *reinterpret_cast<fp4e2m1x4 *>(&out_4x);
 }
@@ -667,12 +670,13 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_rn(const float2
           "l"(reinterpret_cast<const uint64_t &>(in23)),
           "l"(reinterpret_cast<const uint64_t &>(scale)));
   } else {
-#endif
     NVTE_DEVICE_ERROR(
         "FP4 cvt PTX instructions are architecture-specific. "
         "Try recompiling with sm_XXXa instead of sm_XXX.");
-#ifndef __HIP_PLATFORM_AMD__
   }
+#else
+  NVTE_DEVICE_ERROR(
+      "mul_cvt_fp32_to_fp4_4x_with_rn is not supported on AMDGPU.");
 #endif
   return reinterpret_cast<fp4e2m1x4 *>(&out_4x)[0];
 }
