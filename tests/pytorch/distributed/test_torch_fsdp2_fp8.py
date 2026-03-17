@@ -65,7 +65,13 @@ def _run_test(fp_init, fp8_autocast, recipe):
     output_dp = torch.load("all_iters_dp.pt", map_location="cpu")
     atol = 0
     rtol = 0
-    if fp_init:
+    # Use relaxed tolerance when FSDP2 and DDP are not guaranteed to be bit-identical:
+    # - fp8_init=True (FP8 weights, FP32 compute): AllGather(FP8)->Dequantize->GEMM vs Dequantize->GEMM
+    #   differs in dequantization context/order and can yield O(1e-11) differences.
+    # - fp32 (no FP8): gradient reduction order (all-reduce vs reduce-scatter) differs, so float
+    #   non-associativity produces last-bit differences in the reduced gradient and updated weights.
+    # When fp8_autocast=True, both paths use the same FP8 GEMM with no dequantization, so 0 tol is used.
+    if fp_init or (not fp_init and not fp8_autocast):
         atol = 1e-6
         rtol = 5e-5
     
