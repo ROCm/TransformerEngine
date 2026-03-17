@@ -21,6 +21,7 @@ import torch
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
+from torch.distributed.tensor import DTensor
 
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe

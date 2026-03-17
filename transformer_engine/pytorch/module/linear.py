@@ -255,6 +255,8 @@ class _Linear(torch.autograd.Function):
             # Configure quantizer
             # No need to set the quantizer states if weight is already quantized
             if weight_quantizer is not None and not isinstance(weight, QuantizedTensor):
+            # No need to set the quantizer states if weight is already quantized
+            if weight_quantizer is not None and not isinstance(weight, QuantizedTensor):
                 columnwise_usage = is_grad_enabled and inp.requires_grad and keep_fp8_weight_transpose_cache
                 if not columnwise_usage and keep_fp8_weight_transpose_cache:
                     columnwise_usage = (

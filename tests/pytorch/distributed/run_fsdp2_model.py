@@ -22,13 +22,22 @@ from transformer_engine.pytorch import torch_version
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor
 import torch.nn.functional as F
 from torch import nn, optim
 from torch.distributed import DeviceMesh
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import init_device_mesh
 from transformer_engine.pytorch import QuantizedTensor
+from transformer_engine.pytorch import QuantizedTensor
 from contextlib import nullcontext
+
+LOCAL_RANK = None
+
+
+def dist_print(msg):
+    if LOCAL_RANK == 0:
+        print(msg)
 
 LOCAL_RANK = None
 
