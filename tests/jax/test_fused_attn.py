@@ -1144,7 +1144,7 @@ class FusedAttnRunner:
         ),
         pytest.param(
             2,
-            2048,
+            512,
             1024,
             12,
             12,
@@ -1152,7 +1152,7 @@ class FusedAttnRunner:
             64,
             jnp.bfloat16,
             QKVLayout.THD_T2HD,
-            id="2-2048-1024-12-12-64-64-BF16-CROSS-RAGGED_KV_PACKED",
+            id="2-512-1024-12-12-64-64-BF16-CROSS-RAGGED_KV_PACKED",
         ),
         # large data size + bf16 + cross attn + diff hidden v dim + qkv separate
         pytest.param(
