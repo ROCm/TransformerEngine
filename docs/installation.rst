@@ -68,7 +68,7 @@ Installing the common library and frameworks extensions as extras for TE Python 
 
 .. code-block:: bash
 
-  pip install ./transformer_engine-2.4.0-py3-none-any.whl[rocm7,pytorch,jax] --no-build-isolation
+  pip install ./transformer_engine-2.4.0-py3-none-any.whl[rocm7,rocm_pytorch,rocm_jax] --no-build-isolation
 
 It is not recommended to install TE Python metapackage using just package name transformer_engine because of possible installing of the NVIDIA GPU version. It is recommended to use either transformer_engine_rocm7 or wheel file name to make sure the correct common library is installed.
 
