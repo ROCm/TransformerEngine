@@ -16,7 +16,7 @@ jobs:
     runs-on: linux-te-mi325-8
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.ref }}
           submodules: recursive
