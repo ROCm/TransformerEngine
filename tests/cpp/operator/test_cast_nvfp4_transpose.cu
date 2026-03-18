@@ -586,8 +586,14 @@ void performTest(float (*OP)(const float),
 
 #ifndef __HIP_PLATFORM_AMD__
     bool use_2d_quantization = false;
+    for (bool use_stochastic_rounding : {false}) {
 #else
     // Test both 1D and 2D quantization paths on AMDGPU
+    hipDeviceProp_t prop;
+    hipGetDeviceProperties(&prop, 0);
+    const bool is_gfx950 = std::string(prop.gcnArchName).find("gfx950") != std::string::npos;
+    for (bool use_stochastic_rounding : (is_gfx950 ? std::vector<bool>{false, true}
+                                                   : std::vector<bool>{false})) {
     for (bool use_2d_quantization : {false, true}) {
 #endif
 
@@ -611,7 +617,11 @@ void performTest(float (*OP)(const float),
     rng_state.rowwise_cpu_dptr<int64_t>()[0] = 123;  // rng_seed
     rng_state.rowwise_cpu_dptr<int64_t>()[1] = 321;  // rng_sequence
     rng_state.from_cpu();
+#ifdef __HIP_PLATFORM_AMD__
+    quant_config.set_stochastic_rounding(use_stochastic_rounding);
+#else
     quant_config.set_stochastic_rounding(false);
+#endif
     quant_config.set_rng_state(rng_state.data());
 
     // Set 2D quantization based on compile-time flag
@@ -673,6 +683,9 @@ void performTest(float (*OP)(const float),
 #endif
                                       scale_mismatches_num);
 #ifdef __HIP_PLATFORM_AMD__
+    }
+    }
+#else
     }
 #endif
 }
