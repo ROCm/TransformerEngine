@@ -52,9 +52,9 @@ from ..quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 from ...debug.pytorch.debug_state import TEDebugState
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 if IS_HIP_EXTENSION:
     from transformer_engine.pytorch.triton_kernels.grouped_gemm import general_grouped_gemm_triton

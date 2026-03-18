@@ -1154,20 +1154,8 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   }
 
   // Choose implementation for allocating and populating tensors
-  enum class AllocationMethod {
-    UNFUSED,
-    BULK_FP8_BLOCKWISE,
-    BULK_MXFP8,
-#ifndef USE_ROCM
-    BULK_NVFP4,
-#endif
-  };
-  enum class QuantizationMethod {
-    UNFUSED,
-#ifndef USE_ROCM
-    FUSED_NVFP4,
-#endif
-  };
+  enum class AllocationMethod { UNFUSED, BULK_FP8_BLOCKWISE, BULK_MXFP8, BULK_NVFP4 };
+  enum class QuantizationMethod { UNFUSED, FUSED_NVFP4 };
   AllocationMethod allocation_method = AllocationMethod::UNFUSED;
   QuantizationMethod quantization_method = QuantizationMethod::UNFUSED;
   if (!disable_bulk_allocation) {

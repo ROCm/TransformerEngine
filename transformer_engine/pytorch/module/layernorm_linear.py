@@ -31,7 +31,6 @@ from .base import (
     _2X_ACC_WGRAD,
 )
 from ..quantization import FP8GlobalStateManager
-from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ..utils import (
     assert_dim_for_fp8_exec,
     assert_dim_for_all_gather,
@@ -69,6 +68,7 @@ from ..quantized_tensor import (
     restore_from_saved,
 )
 from ...debug.pytorch.debug_state import TEDebugState
+from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..cpu_offload import (
     is_cpu_offload_enabled,

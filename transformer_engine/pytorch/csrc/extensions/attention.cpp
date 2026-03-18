@@ -4,14 +4,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifdef USE_ROCM
-#include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
-using DeviceGuard = c10::hip::HIPGuardMasqueradingAsCUDA;
-#else
-#include <c10/cuda/CUDAGuard.h>
-using DeviceGuard = c10::cuda::CUDAGuard;
-#endif
-
 #include "../extensions.h"
 #include "common.h"
 #include "pybind.h"
