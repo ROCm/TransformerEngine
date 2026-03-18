@@ -22,14 +22,13 @@ def assert_allclose(
 ) -> bool:
     """Ensures two lists are equal."""
     assert len(l1) == len(l2), "Unequal number of outputs."
+    tols = dict(atol=atol)
+    tols["rtol"] = rtol if rtol is not None else 0
+    tol = tols["atol"] + (tols["rtol"] * torch.abs(l2))
     for i, (t1, t2) in enumerate(zip(l1, l2)):
-        tols = dict(atol=atol)
-        if rtol is not None:
-            tols["rtol"] = rtol
         result = torch.allclose(t1, t2, **tols)
         if not result:
             diff = torch.abs(t1 - t2)
-            tol = atol + (rtol * torch.abs(t2))
             exceed_mask = diff > tol
             if exceed_mask.any():
                 indices = torch.nonzero(exceed_mask, as_tuple=True)
