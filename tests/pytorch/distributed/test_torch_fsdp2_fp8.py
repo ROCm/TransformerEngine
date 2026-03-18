@@ -29,18 +29,27 @@ def assert_allclose(
         result = torch.allclose(t1, t2, **tols)
         if not result:
             diff = torch.abs(t1 - t2)
-            exceed_mask = diff > tol
-            if exceed_mask.any():
-                indices = torch.nonzero(exceed_mask, as_tuple=True)
-                max_diff = diff[exceed_mask].max()
-                max_idx = (diff[exceed_mask] == max_diff).nonzero(as_tuple=True)[0][0]
-                max_location = [idx[max_idx].item() for idx in indices]
+            if diff.dim() == 0:
+                max_diff = diff
+                max_location = []
                 msg = (
-                    f"Outputs not close enough in tensor at idx={i}. "
-                    f"Maximum difference at location {max_location} "
-                    f"with {t1[exceed_mask][max_idx].item()} vs {t2[exceed_mask][max_idx].item()} "
-                    f"(diff {max_diff.item()})."
+                    f"Outputs not close enough in scalar tensor at idx={i}. "
+                    f"Difference: {max_diff.item()}."
                 )
+            else:
+                exceed_mask = diff > tol
+                
+                if exceed_mask.any():
+                    indices = torch.nonzero(exceed_mask, as_tuple=True)
+                    max_diff = diff[exceed_mask].max()
+                    max_idx = (diff[exceed_mask] == max_diff).nonzero(as_tuple=True)[0][0]
+                    max_location = [idx[max_idx].item() for idx in indices]
+                    msg = (
+                        f"Outputs not close enough in tensor at idx={i}. "
+                        f"Maximum difference at location {max_location} "
+                        f"with {t1[exceed_mask][max_idx].item()} vs {t2[exceed_mask][max_idx].item()} "
+                        f"(diff {max_diff.item()})."
+                    )
             raise AssertionError(msg)
 
 def _run_test(fp_init, fp8_autocast, recipe):
@@ -65,11 +74,17 @@ def _run_test(fp_init, fp8_autocast, recipe):
     atol = 0
     rtol = 0
     # Use relaxed tolerance when FSDP2 and DDP are not guaranteed to be bit-identical:
-    # - fp8_init=True (FP8 weights, FP32 compute): AllGather(FP8)->Dequantize->GEMM vs Dequantize->GEMM
-    #   differs in dequantization context/order and can yield O(1e-11) differences.
-    # - fp32 (no FP8): gradient reduction order (all-reduce vs reduce-scatter) differs, so float
-    #   non-associativity produces last-bit differences in the reduced gradient and updated weights.
-    # When fp8_autocast=True, both paths use the same FP8 GEMM with no dequantization, so 0 tol is used.
+    #
+    # - fp8_init=True: After each optimizer step, FP8 weights are re-quantized from
+    #   FP32 master weights. Hence we use a relaxed tolerance.
+    #
+    # - No FP8 (fp8_init=False, fp8_autocast=False): gradient reduction order differs
+    #   (all-reduce vs reduce-scatter), so float non-associativity produces last-bit
+    #   differences in the reduced gradients and updated weights. Hence we use a relaxed tolerance.
+    #
+    # When fp8_autocast=True and fp8_init=False, FP8 quantization happens after the
+    # FSDP2 AllGather reconstructs the full weight, so both paths compute identical
+    # scales and produce bit-identical FP8 GEMMs — strict tolerance (0) is used.
     if fp_init or (not fp_init and not fp8_autocast):
         atol = 1e-6
         rtol = 5e-5

@@ -193,11 +193,8 @@ def _train(args):
         )
         prof.start()
         
-    if args.fp8_init:
-        # Build the model with the specified context
-        with quantized_model_init(enabled=True, recipe=fp8_recipe):
-            model = SimpleNet(args.input_size, args.hidden_size, args.output_size, use_fsdp2=args.use_fsdp2)
-    else:
+    # Build the model with the specified context
+    with quantized_model_init(enabled=args.fp8_init, recipe=fp8_recipe):
         model = SimpleNet(args.input_size, args.hidden_size, args.output_size, use_fsdp2=args.use_fsdp2)
     # Move the model to the correct device
     if not args.memory_profile and not args.profile:
@@ -261,10 +258,7 @@ def _train(args):
 
         # Zero the parameter gradients
         optimizer.zero_grad()
-        if args.fp8_autocast:
-            with te.autocast(enabled=True, recipe=fp8_recipe):
-                output = model(input_data)
-        else:
+        with te.autocast(enabled=args.fp8_autocast, recipe=fp8_recipe):
             output = model(input_data)
         target = torch.randn(args.batch_size, args.output_size).to(device)
         loss = F.mse_loss(output, target)
