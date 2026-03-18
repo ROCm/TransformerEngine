@@ -6,14 +6,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifdef USE_ROCM
-#include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
-using DeviceGuard = c10::hip::HIPGuardMasqueradingAsCUDA;
-#else
-#include <c10/cuda/CUDAGuard.h>
-using DeviceGuard = c10::cuda::CUDAGuard;
-#endif
-
 #include "../extensions.h"
 #include "common/util/system.h"
 #include "pybind.h"
@@ -77,7 +69,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   // Ensure that cuDNN handle is created on the correct device,
   // overriding torch.cuda.set_device calls from user side.
   // Assumes all tensors passed are on the same device.
-  DeviceGuard device_guard(input.cast<at::Tensor>().device());
+  at::cuda::CUDAGuard device_guard(input.cast<at::Tensor>().device());
 
   // Input and param tensors
   auto none = py::none();
@@ -327,7 +319,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   // Ensure that cuDNN handle is created on the correct device,
   // overriding torch.cuda.set_device calls from user side.
   // Assumes all tensors passed are on the same device.
-  DeviceGuard device_guard(input.cast<at::Tensor>().device());
+  at::cuda::CUDAGuard device_guard(input.cast<at::Tensor>().device());
 
   // Input and param tensors
   auto none = py::none();

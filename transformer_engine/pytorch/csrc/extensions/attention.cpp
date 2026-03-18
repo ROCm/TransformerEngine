@@ -111,7 +111,7 @@ std::vector<py::object> fused_attn_fwd(
   // Ensure that cuDNN handle is created on the correct device,
   // overriding torch.cuda.set_device calls from user side.
   // Assumes all tensors passed are on the same device.
-  DeviceGuard device_guard(cu_seqlens_q.device());
+  at::cuda::CUDAGuard device_guard(cu_seqlens_q.device());
 
   auto none = py::none();
 
