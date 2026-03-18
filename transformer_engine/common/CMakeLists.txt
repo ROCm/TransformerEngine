@@ -6,6 +6,15 @@
 
 cmake_minimum_required(VERSION 3.21)
 
+# Configure git to trust this repository and its submodules.
+# This avoids "dubious ownership" errors when building inside Docker
+# containers where the repo owner UID differs from the build user.
+# Using GIT_CONFIG env vars ensures coverage for all git invocations,
+# including those in ExternalProject_Add child processes.
+set(ENV{GIT_CONFIG_COUNT} 1)
+set(ENV{GIT_CONFIG_KEY_0} "safe.directory")
+set(ENV{GIT_CONFIG_VALUE_0} "*")
+
 option(USE_ROCM "Use ROCm" ON)
 option(USE_FUSED_ATTN_AOTRITON "Use aotriton backend" ON)
 option(USE_FUSED_ATTN_CK "Use ck backend" ON)
@@ -215,7 +224,9 @@ list(APPEND transformer_engine_cuda_sources
      fused_router/fused_topk_with_score_function.cu
      recipe/current_scaling.cu
      recipe/delayed_scaling.cu
-     recipe/fp8_block_scaling.cu)
+     recipe/fp8_block_scaling.cu
+     swizzle/swizzle.cu
+     swizzle/swizzle_block_scaling.cu)
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
      activation/gelu.cu
@@ -241,8 +252,6 @@ if(USE_CUDA)
         fused_attn/fused_attn_f16_arbitrary_seqlen.cu
         fused_attn/fused_attn_fp8.cu
         fused_attn/utils.cu
-        swizzle/swizzle.cu
-        swizzle/swizzle_block_scaling.cu
         recipe/nvfp4.cu
         comm_gemm_overlap/userbuffers/userbuffers.cu)
     list(APPEND transformer_engine_cuda_arch_specific_sources
@@ -427,9 +436,7 @@ else()
   function(get_git_commit REPO_DIR COMMIT_ID_VAR)
     file(REAL_PATH "${REPO_DIR}" REPO_DIR)
     execute_process(
-      COMMAND sh -c "export GIT_CONFIG_GLOBAL=$(mktemp /tmp/gitconfig.XXXXXX);
-      git config --global --add safe.directory ${REPO_DIR} && git -C ${REPO_DIR} rev-parse HEAD;
-      rm $GIT_CONFIG_GLOBAL"
+      COMMAND git -C ${REPO_DIR} rev-parse HEAD
       OUTPUT_VARIABLE ${COMMIT_ID_VAR}
       OUTPUT_STRIP_TRAILING_WHITESPACE
     )

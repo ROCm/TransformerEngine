@@ -203,6 +203,7 @@ def git_check_submodules() -> None:
             text=True,
         ).splitlines()
 
+        needs_init = False
         for submodule in submodules:
             # '-' start is for an uninitialized submodule.
             # ' ' start is for a submodule on the correct commit.
@@ -216,11 +217,14 @@ def git_check_submodules() -> None:
                 "run `git submodule update --init --recursive` to checkout the correct"
                 " submodule commits."
             )
+            if submodule[0] == "-":
+                needs_init = True
 
-        subprocess.check_call(
-            ["git", "submodule", "update", "--init", "--recursive"],
-            cwd=str(current_file_path),
-        )
+        if needs_init:
+            subprocess.check_call(
+                ["git", "submodule", "update", "--init", "--recursive"],
+                cwd=str(current_file_path),
+            )
     except subprocess.CalledProcessError:
         return
 
