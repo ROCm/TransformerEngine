@@ -14,8 +14,8 @@
         "__nv_fp4x2_e2m1" : "__hip_fp4x2_e2m1",
         "__nv_fp4x4_e2m1" : "__hip_fp4x4_e2m1",
         "__nv_fp4x2_storage_t" : "__hip_fp4x2_storage_t",
-        "<cudaTypedefs.h>" : "<hip/hip_version.h>",
-        "<cuda/barrier>" : "<hip/hip_version.h>"
+        "#include <cudaTypedefs.h>" : "",
+        "#include <cuda/barrier>" : ""
  }
 }
 
