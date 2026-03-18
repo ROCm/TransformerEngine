@@ -586,9 +586,9 @@ void performTest(float (*OP)(const float),
 
 #ifndef __HIP_PLATFORM_AMD__
     bool use_2d_quantization = false;
-    for (bool use_stochastic_rounding : {false}) {
 #else
-    // Test both 1D and 2D quantization paths on AMDGPU
+    // Test both 1D and 2D quantization paths on AMDGPU,
+    // as well as stochastic rounding.
     hipDeviceProp_t prop;
     hipGetDeviceProperties(&prop, 0);
     const bool is_gfx950 = std::string(prop.gcnArchName).find("gfx950") != std::string::npos;
@@ -684,8 +684,6 @@ void performTest(float (*OP)(const float),
                                       scale_mismatches_num);
 #ifdef __HIP_PLATFORM_AMD__
     }
-    }
-#else
     }
 #endif
 }
