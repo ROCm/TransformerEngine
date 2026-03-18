@@ -804,8 +804,10 @@ class FusedAttnRunner:
         self.softmax_offset_pspec = PartitionSpec(None, head_resource, None, None)
         self.softmax_offset_sharding = NamedSharding(self.mesh, self.softmax_offset_pspec)
 
+        self.dropout_rng_pspec = PartitionSpec(
+            None,
+        )
         # New-style RNG fix is only applied for AMD GPUs
-        self.dropout_rng_pspec = PartitionSpec(None,)
         if (
             is_hip_extension() and
             self.dropout_rng is not None and
