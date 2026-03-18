@@ -17,6 +17,11 @@
 namespace transformer_engine {
 namespace {
 constexpr uint32_t WARP_SIZE = 32;
+#ifdef __HIP_PLATFORM_AMD__
+using warp_mask_t = uint64_t;
+#else
+using warp_mask_t = uint32_t;
+#endif
 }  // namespace
 namespace swizzle_kernel_1d {
 constexpr uint32_t WARPS_X_PER_TB = 2;  // configurable
@@ -36,7 +41,7 @@ constexpr uint32_t WARPS_Y_PER_TB = 2;  // configurable
 //   lane3.row = 0x03070b0f
 uint32_t __device__ __forceinline__ transpose_4x4_byte_matrix(const uint32_t row,
                                                               const uint32_t lane,
-                                                              const uint32_t active_mask) {
+                                                              const warp_mask_t active_mask) {
   using cu = const uint32_t;
 
   // Threads operate in groups of 4, and each thread stores 4 bytes at a time.
@@ -118,7 +123,7 @@ void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
                               (((sf.z >> 23) & 0xFF) << 16) | (((sf.w >> 23) & 0xFF) << 24);
 
   // partially swizzle the scaling factors
-  constexpr uint32_t ACTIVE_MASK = 0xFFFFFFFF;  // no divergent branches
+  constexpr warp_mask_t ACTIVE_MASK = ~warp_mask_t(0);  // no divergent branches
   const uint32_t lane_load_idx = (lane % 4) * 8 + (lane / 4);
   packed_exponents = __shfl_sync(ACTIVE_MASK, packed_exponents, lane_load_idx);
 

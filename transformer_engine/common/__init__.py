@@ -390,7 +390,7 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
             _CUBLAS_LIB_CTYPES = _load_cuda_library_from_python("cublas", strict=True)
             _CUDART_LIB_CTYPES = _load_cuda_library_from_python("cudart", strict=True)
             _CUDNN_ALL_LIB_CTYPES = _load_cuda_library_from_python("cudnn", strict=True)
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, RuntimeError, subprocess.CalledProcessError):
         pass
     finally:
         _TE_LIB_CTYPES = _load_core_library()
