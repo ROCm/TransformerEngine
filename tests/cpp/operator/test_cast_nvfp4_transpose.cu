@@ -32,10 +32,12 @@ enum ActivationType {
     SReLU
 };
 
+#ifdef __HIP_PLATFORM_AMD__
 static constexpr float E2M1_LUT[16] = {
      0.0f,  0.5f,  1.0f,  1.5f,  2.0f,  3.0f,  4.0f,  6.0f,
     -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f,
 };
+#endif
 
 double2 cvt_fp4x2_to_double2(fp4e2m1x2 fp4_pair) {
 #ifdef __HIP_PLATFORM_AMD__
@@ -582,7 +584,12 @@ void performTest(float (*OP)(const float),
     // Set 2nd stage NVFP4 scaling factor
     output.set_scale(amax);
 
+#ifndef __HIP_PLATFORM_AMD__
     bool use_2d_quantization = false;
+#else
+    // Test both 1D and 2D quantization paths on AMDGPU
+    for (bool use_2d_quantization : {false, true}) {
+#endif
 
     compute_ref<InputType>(OP,
                            input.rowwise_cpu_dptr<InputType>(),
@@ -665,6 +672,9 @@ void performTest(float (*OP)(const float),
                                       mismatches_scales_indices,
 #endif
                                       scale_mismatches_num);
+#ifdef __HIP_PLATFORM_AMD__
+    }
+#endif
 }
 
 std::vector<std::vector<size_t>> tensor_dims = {

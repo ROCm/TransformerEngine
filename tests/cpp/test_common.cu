@@ -1232,8 +1232,8 @@ std::array<size_t, 4> get_scale_tensor_dims(const size_t rows,
     // NVFP4 scales (block_size=16) still require [128,4] padding for kernel indexing.
 #ifdef __HIP_PLATFORM_AMD__
     const bool needs_padding = (block_size_cols == 16 || block_size_rows == 16);
-    const size_t alignment_Y = needs_padding ? (is_rowwise ? 128 : 4) : 1;
-    const size_t alignment_X = needs_padding ? (is_rowwise ? 4 : 128) : 1;
+    const size_t alignment_Y = needs_padding ? (is_rowwise ? nvfp4_scale_tensor_alignment_Y_rowwise : nvfp4_scale_tensor_alignment_Y_colwise) : 1;
+    const size_t alignment_X = needs_padding ? (is_rowwise ? nvfp4_scale_tensor_alignment_X_rowwise : nvfp4_scale_tensor_alignment_X_colwise) : 1;
 #else
     const size_t alignment_Y = is_rowwise
                                ? scale_tensor_alignment_Y_rowwise
