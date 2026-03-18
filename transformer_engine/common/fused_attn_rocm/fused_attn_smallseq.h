@@ -16,16 +16,17 @@
 namespace transformer_engine {
 namespace fused_attn_rocm {
 
-/** Workspace size in bytes for small-seq backward path */
-size_t fused_attn_smallseq_bwd_workspace_size(size_t b,
+/** Workspace size in bytes for small-seq backward path.
+ *  Uses total_padded_q (not b) so memory scales with actual Q slots. */
+size_t fused_attn_smallseq_bwd_workspace_size(size_t total_padded_q,
                                               size_t h_q,
                                               size_t max_seqlen_kv,
                                               DType dtype);
 
 /** Forward: Q,K,V -> O; attention weights written to attn_weights_buffer (same as output_S).
  *  attn_weights_buffer is also used as internal workspace (scores then overwritten by attn
- *  weights). No separate workspace required for the launcher; caller may use workspace for
- *  get_runtime_max_seqlen (8 bytes). */
+ *  weights). Layout uses total_padded_q; empty Q segments are supported.
+ *  Caller must build devPtrPaddedQToBatch on device (padded_q_to_batch[slot] = batch_idx). */
 void fused_attn_smallseq_fwd(size_t b,
                              size_t h_q,
                              size_t h_kv,
@@ -40,6 +41,10 @@ void fused_attn_smallseq_fwd(size_t b,
                              const void* devPtrV,
                              void* devPtrO,
                              void* attn_weights_buffer,
+                             const void* devPtrCuSeqlensQ,
+                             const void* devPtrCuSeqlensQPadded,
+                             int total_padded_q,
+                             const int* devPtrPaddedQToBatch,
                              const void* devPtrCuSeqlensKV,
                              const void* devPtrSeqOffsetsKV,
                              const void* rng_seed,
@@ -50,7 +55,7 @@ void fused_attn_smallseq_fwd(size_t b,
                              cudaStream_t stream);
 
 /** Backward: dO, O, attn_weights -> dQ, dK, dV. attn_weights is the buffer from forward
- *  (output_S). workspace must be at least fused_attn_smallseq_bwd_workspace_size. */
+ *  (output_S). workspace must be at least fused_attn_smallseq_bwd_workspace_size(total_padded_q,...). */
 void fused_attn_smallseq_bwd(size_t b,
                              size_t h_q,
                              size_t h_kv,
@@ -68,6 +73,10 @@ void fused_attn_smallseq_bwd(size_t b,
                              void* devPtrdQ,
                              void* devPtrdK,
                              void* devPtrdV,
+                             const void* devPtrCuSeqlensQ,
+                             const void* devPtrCuSeqlensQPadded,
+                             int total_padded_q,
+                             const int* devPtrPaddedQToBatch,
                              const void* devPtrCuSeqlensKV,
                              const void* devPtrSeqOffsetsKV,
                              DType qkv_dtype,

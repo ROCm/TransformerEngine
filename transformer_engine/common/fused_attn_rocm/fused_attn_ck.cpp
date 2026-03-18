@@ -19,6 +19,17 @@
 namespace transformer_engine {
 namespace fused_attn_rocm {
 
+__global__ void build_padded_q_to_batch_kernel(const int* cu_seqlens_q_padded,
+                                               int bs,
+                                               int* padded_q_to_batch) {
+  int b = blockIdx.x * blockDim.x + threadIdx.x;
+  if (b >= bs) return;
+  int start = cu_seqlens_q_padded[b];
+  int end   = cu_seqlens_q_padded[b + 1];
+  if (end > start)
+    padded_q_to_batch[start] = b;
+}
+
 // check the fused attn config to see whether it's ck backend supported
 // single filtering followed by joint filtering
 bool is_ck_backend_supported(
@@ -638,13 +649,25 @@ void fused_attn_ck_fwd_impl(
     }
 
     if (runtime_max_seqlen_q == 1 && runtime_max_seqlen_kv >= 2 && runtime_max_seqlen_kv <= 16) {
+      int total_padded_q = static_cast<int>(max_tokens_q);
+      int* devPtrPaddedQToBatch = static_cast<int*>(workspace_next);
+      workspace_next = static_cast<void*>(static_cast<int8_t*>(workspace_next) +
+                                          total_padded_q * sizeof(int));
+      constexpr int block = 256;
+      dim3 grid((b + block - 1) / block);
+      build_padded_q_to_batch_kernel<<<grid, block, 0, stream>>>(
+          static_cast<const int*>(devPtrSeqOffsetsQ), static_cast<int>(b), devPtrPaddedQToBatch);
+      void* smallseq_workspace = workspace_next;  
+      
       fused_attn_rocm::fused_attn_smallseq_fwd(
           b, h, hg, runtime_max_seqlen_kv, d_qk, d_v,
           is_training, scaling_factor, dropout_probability,
           devPtrQ, devPtrK, devPtrV, devPtrO, devPtrSoftmaxAux,
+          devPtrCuSeqlensQ, devPtrSeqOffsetsQ,
+          total_padded_q, devPtrPaddedQToBatch,
           devPtrCuSeqlensKV, devPtrSeqOffsetsKV,
           devPtrDropoutSeed, devPtrDropoutOffset,
-          dtype, workspace, workspace_size, stream);
+          dtype, smallseq_workspace, workspace_size, stream);
       return;
     }
   }
@@ -974,13 +997,26 @@ void fused_attn_ck_bwd_impl(
     }
 
     if (runtime_max_seqlen_q == 1 && runtime_max_seqlen_kv >= 2 && runtime_max_seqlen_kv <= 16) {
+      int total_padded_q = static_cast<int>(max_tokens_q);
+      int* devPtrPaddedQToBatch = static_cast<int*>(workspace_next);
+      workspace_next = static_cast<void*>(static_cast<int8_t*>(workspace_next) +
+                                          total_padded_q * sizeof(int));
+      void* smallseq_workspace = workspace_next;
+
+      constexpr int block = 256;
+      dim3 grid((b + block - 1) / block);
+      build_padded_q_to_batch_kernel<<<grid, block, 0, stream>>>(
+          static_cast<const int*>(devPtrSeqOffsetsQ), static_cast<int>(b), devPtrPaddedQToBatch);
+
       fused_attn_rocm::fused_attn_smallseq_bwd(
           b, h, hg, runtime_max_seqlen_kv, d_qk, d_v,
           scaling_factor, dropout_probability,
           devPtrQ, devPtrK, devPtrV, devPtrO, devPtrdO, devPtrSoftmaxAux,
           devPtrdQ, devPtrdK, devPtrdV,
+          devPtrCuSeqlensQ, devPtrSeqOffsetsQ,
+          total_padded_q, devPtrPaddedQToBatch,
           devPtrCuSeqlensKV, devPtrSeqOffsetsKV,
-          dtype, workspace, workspace_size, stream);
+          dtype, smallseq_workspace, workspace_size, stream);
       return;
     }
   }
