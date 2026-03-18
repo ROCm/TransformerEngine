@@ -373,7 +373,7 @@ def initialize_ub(
             "is_reduce_scatter": is_reduce_scatter,
             "num_sm": 1 if method == "ring_exchange" else 16,
             "cga_size": 1 if method == "ring_exchange" else 2,
-            "set_sm_margin": not method == "ring_exchange" and not IS_HIP_EXTENSION,
+            "set_sm_margin": not method == "ring_exchange" and not IS_HIP_EXTENSION, # Default set to False for HIP for performance
             "num_splits": tp_size if method == "ring_exchange" else 4,
             "aggregate": False,
             "atomic_gemm": False,
