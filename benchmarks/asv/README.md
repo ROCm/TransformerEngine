@@ -13,7 +13,36 @@ ASV is configured with `environment_type: "existing"` (in `asv.conf.json` at the
 meaning it uses the current Python environment directly — it does not create virtualenvs or
 attempt to build TE itself.
 
-## Local usage
+## Helper script
+
+A convenience wrapper (`benchmarks/asv/run_benchmarks.sh`) is provided for common tasks.
+It can be run from anywhere — it automatically `cd`s to the repo root. Available benchmark
+suites are discovered dynamically from `bench_*.py` files.
+
+```bash
+bash benchmarks/asv/run_benchmarks.sh <command> [options]
+```
+
+| Command | Description |
+|---|---|
+| `setup [name]` | Register machine with ASV (defaults to `hostname`) |
+| `run [suite]` | Run all benchmarks, or a single suite (e.g. `bench_casting`) |
+| `quick [suite]` | Smoke test — single iteration, results not saved |
+| `compare [ref] [new]` | Compare two commits (defaults to `HEAD~1` vs `HEAD`) |
+| `view` | Generate HTML dashboard and serve on `localhost:8080` |
+| `list` | List available benchmark suites |
+
+Examples:
+
+```bash
+bash benchmarks/asv/run_benchmarks.sh setup mi325
+bash benchmarks/asv/run_benchmarks.sh run bench_casting
+bash benchmarks/asv/run_benchmarks.sh quick
+bash benchmarks/asv/run_benchmarks.sh compare HEAD~3 HEAD
+bash benchmarks/asv/run_benchmarks.sh view
+```
+
+## Local usage (manual ASV commands)
 
 All commands are run from the **repository root** (where `asv.conf.json` lives).
 
