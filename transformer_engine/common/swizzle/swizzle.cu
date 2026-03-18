@@ -25,9 +25,9 @@ namespace {
 #endif
 
 constexpr int MXFP8_BLOCK_SIZE = 32;
-#ifndef __HIP_PLATFORM_AMD__
 constexpr int NVFP4_BLOCK_SIZE = 16;
 
+#ifndef __HIP_PLATFORM_AMD__
 constexpr __device__ __host__ int TB_DIM = 32;
 constexpr __device__ __host__ int NEW_SF_TILE_DIM_K = 16;
 constexpr __device__ __host__ int N_SF_PER_TD_PER_TILE = 4;
