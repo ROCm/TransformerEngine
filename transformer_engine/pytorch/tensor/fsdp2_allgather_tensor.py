@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 # Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # See LICENSE for license information.
+
 from __future__ import annotations
 from typing import Any, Optional, Tuple
 import torch
@@ -122,8 +123,8 @@ class FSDPAGTensor(torch.Tensor):
 
     # Must return (list_of_tensors_to_all_gather, user_metadata)
     def fsdp_pre_all_gather(self, mesh, orig_size, contiguous_orig_stride, module, mp_policy):
-        """Functions FSDP2 calls before all-gather of the
-        weights for both forward and backward passes.
+        """
+        Functions FSDP2 calls before all-gather of the weights for both forward and backward passes.
         Args:
             mesh (torch.distributed.DeviceMesh): DeviceMesh used by FSDP2
             to shard the weights.
@@ -176,8 +177,8 @@ class FSDPAGTensor(torch.Tensor):
         *,
         out: Optional[torch.Tensor] = None,
     ):
-        """Functions FSDP2 calls after all-gather of the
-        weights for both forward and backward passes.
+        """
+        Functions FSDP2 calls after all-gather of the weights for both forward and backward passes.
         Args:
             all_gather_outputs (Tuple[torch.Tensor, ...]): sharded_tensors sent out in fsdp_pre_all_gather from each rank
             are all-gathered and received here as a tuple.
@@ -219,7 +220,8 @@ class FSDPAGTensor(torch.Tensor):
         return out, all_gather_outputs
 
     def __reduce_ex__(self, protocol: int) -> tuple:
-        """Custom pickling - unwrap to inner tensor
+        """
+        Custom pickling - unwrap to inner tensor
         
         During checkpointing, save just the underlying high-precision tensor.
         FSDPAGTensor is a transient wrapper for FSDP2 communication - when the

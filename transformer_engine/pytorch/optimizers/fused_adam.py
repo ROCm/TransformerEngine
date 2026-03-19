@@ -13,8 +13,11 @@ from typing import Optional
 import warnings
 
 import torch
+from torch.distributed._tensor import DTensor
+from transformer_engine.pytorch.tensor.fsdp2_allgather_tensor import FSDPAGTensor
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
+from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
 from .multi_tensor_apply import multi_tensor_applier
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from transformer_engine.pytorch.utils import is_fp8_fnuz
@@ -375,10 +378,21 @@ class FusedAdam(torch.optim.Optimizer):
             store_param_remainders (bool): Store only trailing remainder bits.
         """
         dtype = self.name_to_dtype_map[state_name]
+        # (Upstream fix https://github.com/NVIDIA/TransformerEngine/commit/139c863f92420271bbae2cbce49d9b170b7d03f9) 
+        # Extract local tensor from DTensor (e.g. from FSDP2) to avoid
+        # QuantizedTensor.__torch_dispatch__ ignoring the dtype kwarg in
+        # torch.empty_like, and to ensure optimizer states are plain tensors.
+        local_param = param._local_tensor if isinstance(param, DTensor) else param
+        # ROCm fix: FSDPAGTensor is a wrapper around a plain tensor, so we need to extract the underlying tensor.
+        local_param = local_param._data if isinstance(local_param, FSDPAGTensor) else local_param
+        # Handle QuantizedTensor by dequantizing first
+        param_for_empty = (
+            local_param.dequantize() if isinstance(local_param, QuantizedTensor) else local_param
+        )
         if store_param_remainders:
-            data = torch.zeros_like(param, dtype=torch.int16)
+            data = torch.zeros_like(param_for_empty, dtype=torch.int16)
         else:
-            data = torch.empty_like(param, dtype=dtype)
+            data = torch.empty_like(param_for_empty, dtype=dtype)
         if zero_buffer:
             data.zero_()
 
@@ -419,7 +433,17 @@ class FusedAdam(torch.optim.Optimizer):
                 store_param_remainders=store_param_remainders,
             )
             if not store_param_remainders:
-                self.set_scaled_state(param, "master_param", param.clone().detach().float())
+                # (Upstream fix https://github.com/NVIDIA/TransformerEngine/commit/139c863f92420271bbae2cbce49d9b170b7d03f9)
+                #Extract local tensor from DTensor and dequantize QuantizedTensor
+                # to get a plain float32 copy for the master weight.
+                local_param = param._local_tensor if isinstance(param, DTensor) else param
+                # ROCm fix: FSDPAGTensor is a wrapper around a plain tensor, so we need to extract the underlying tensor.
+                local_param = local_param._data if isinstance(local_param, FSDPAGTensor) else local_param
+                if isinstance(local_param, QuantizedTensor):
+                    master = local_param.dequantize(dtype=torch.float32).clone().detach()
+                else:
+                    master = local_param.clone().detach().float()
+                self.set_scaled_state(param, "master_param", master)
 
     def state_dict(self):
         """Override the state_dict() of pytorch. Before returning the state_dict, cast all

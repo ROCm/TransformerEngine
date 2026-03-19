@@ -87,10 +87,10 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument("--output-size", type=int, default=2048, help="Output size for the model")
     parser.add_argument("--batch-size", type=int, default=2048, help="Output size for the model")
     parser.add_argument(
-        "--fp8-init", action="store_true", default=False, help="Initialize primary weights in FP8."
+        "--quantized-init", action="store_true", default=False, help="Initialize primary weights in FP8 via quantized_model_init."
     )
     parser.add_argument(
-        "--fp8-autocast", action="store_true", default=False, help="Enable FP8 autocast."
+        "--autocast", action="store_true", default=False, help="Enable te.autocast for FP8 compute."
     )
     parser.add_argument(
         "--iter", type=int, default=10, help="Number of iterations for forward pass"
@@ -194,7 +194,7 @@ def _train(args):
         prof.start()
         
     # Build the model with the specified context
-    with quantized_model_init(enabled=args.fp8_init, recipe=fp8_recipe):
+    with quantized_model_init(enabled=args.quantized_init, recipe=fp8_recipe):
         model = SimpleNet(args.input_size, args.hidden_size, args.output_size, use_fsdp2=args.use_fsdp2)
     # Move the model to the correct device
     if not args.memory_profile and not args.profile:
@@ -236,7 +236,7 @@ def _train(args):
     else:
         model = DDP(model, device_ids=[LOCAL_RANK])
 
-    if args.fp8_init:
+    if args.quantized_init:
         optimizer =  te.optimizers.FusedAdam(model.parameters(), lr=1e-3, master_weights=True, use_decoupled_grad=True)
     else:
         optimizer =  te.optimizers.FusedAdam(model.parameters(), lr=1e-3)
@@ -258,7 +258,7 @@ def _train(args):
 
         # Zero the parameter gradients
         optimizer.zero_grad()
-        with te.autocast(enabled=args.fp8_autocast, recipe=fp8_recipe):
+        with te.autocast(enabled=args.autocast, recipe=fp8_recipe):
             output = model(input_data)
         target = torch.randn(args.batch_size, args.output_size).to(device)
         loss = F.mse_loss(output, target)

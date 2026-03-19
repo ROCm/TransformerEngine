@@ -52,17 +52,17 @@ def assert_allclose(
                     )
             raise AssertionError(msg)
 
-def _run_test(fp_init, fp8_autocast, recipe):
+def _run_test(quantized_init, autocast, recipe):
     test_dir = Path(__file__).parent.resolve()
     fsdp_script = test_dir / "run_fsdp2_fp8_model.py"
     
     test_cmd = ["torchrun", f"--nproc_per_node={NUM_PROCS}", "--master-port=29501", str(fsdp_script)]
 
-    if fp_init:
-        test_cmd += ["--fp8-init"]
-    if fp8_autocast:
-        test_cmd += ["--fp8-autocast"]
-    if fp8_autocast or fp_init:
+    if quantized_init:
+        test_cmd += ["--quantized-init"]
+    if autocast:
+        test_cmd += ["--autocast"]
+    if autocast or quantized_init:
         test_cmd += ["--recipe", recipe]
     
     subprocess.run(test_cmd + ['--use-fsdp2','--gradients-save-file', 'all_iters_fsdp2.pt'], env=os.environ, check=True)
@@ -75,24 +75,24 @@ def _run_test(fp_init, fp8_autocast, recipe):
     rtol = 0
     # Use relaxed tolerance when FSDP2 and DDP are not guaranteed to be bit-identical:
     #
-    # - fp8_init=True: After each optimizer step, FP8 weights are re-quantized from
-    #   FP32 master weights. Hence we use a relaxed tolerance.
+    # - quantized_init=True: After each optimizer step, FP8 weights are re-quantized
+    #   from FP32 master weights. Hence we use a relaxed tolerance.
     #
-    # - No FP8 (fp8_init=False, fp8_autocast=False): gradient reduction order differs
+    # - No FP8 (quantized_init=False, autocast=False): gradient reduction order differs
     #   (all-reduce vs reduce-scatter), so float non-associativity produces last-bit
     #   differences in the reduced gradients and updated weights. Hence we use a relaxed tolerance.
     #
-    # When fp8_autocast=True and fp8_init=False, FP8 quantization happens after the
+    # When autocast=True and quantized_init=False, FP8 quantization happens after the
     # FSDP2 AllGather reconstructs the full weight, so both paths compute identical
     # scales and produce bit-identical FP8 GEMMs — strict tolerance (0) is used.
-    if fp_init or (not fp_init and not fp8_autocast):
+    if quantized_init or (not quantized_init and not autocast):
         atol = 1e-6
         rtol = 5e-5
     
     for idx, (te_output_no_cache, te_output_cache) in enumerate(zip(output_fsdp, output_dp)):
     
         print(f"Comparing FSDP {te_output_no_cache[0]}, DDP {te_output_cache[0]} at index {idx}...")
-        assert_allclose(te_output_no_cache[1], te_output_cache[1], atol=atol, rtol=rtol) # expects exact match
+        assert_allclose(te_output_no_cache[1], te_output_cache[1], atol=atol, rtol=rtol)
         print(f"Tensor at index {idx} passed comparison.")
 
 
@@ -106,11 +106,11 @@ def cleanup_artifacts():
 # Define test cases explicitly
 test_cases = []
 # All FP8 enabled cases (all recipes)
-for fp8_init in [True, False]:
-    for fp8_autocast in [True, False]:
-        if fp8_init or fp8_autocast:
+for quantized_init in [True, False]:
+    for autocast in [True, False]:
+        if quantized_init or autocast:
             for recipe in ["delayed", "current", "mxfp8"]:
-                test_cases.append((fp8_init, fp8_autocast, recipe))
+                test_cases.append((quantized_init, autocast, recipe))
 # FP8 disabled case (only once)
 test_cases.append((False, False, "delayed"))
 
@@ -118,9 +118,9 @@ test_cases.append((False, False, "delayed"))
 @pytest.mark.skipif(NUM_PROCS < 4, reason="Requires 4+ GPUs")
 @pytest.mark.skipif(NUM_PROCS % 2 != 0, reason="Requires even number of GPUs")
 @pytest.mark.skipif(not torch_version() >= (2, 4, 0), reason="Requires PyTorch 2.4.0+")
-@pytest.mark.parametrize("fp8_init,fp8_autocast,recipe", test_cases)
+@pytest.mark.parametrize("quantized_init, autocast, recipe", test_cases)
 @pytest.mark.usefixtures("cleanup_artifacts")
-def test_distributed(fp8_init, fp8_autocast, recipe):
+def test_distributed(quantized_init, autocast, recipe):
 
     batch_size = 2048
     input_size = 2048
@@ -140,12 +140,12 @@ def test_distributed(fp8_init, fp8_autocast, recipe):
     if torch.cuda.device_count() < 4:
         pytest.skip("FSDP2 test requires at least 4 GPUs")
 
-    if fp8_init and not fp8_available:
+    if quantized_init and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if recipe == "mxfp8" and not mxfp8_available:  
         pytest.skip(reason_for_no_mxfp8)
 
-    _run_test(fp8_init, fp8_autocast, recipe)
+    _run_test(quantized_init, autocast, recipe)
 
 
 def test_dummy() -> None:
