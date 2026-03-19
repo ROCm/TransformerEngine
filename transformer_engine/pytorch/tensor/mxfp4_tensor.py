@@ -9,10 +9,11 @@ import math
 from typing import Optional, Tuple, Union
 
 import torch
-from ..triton_kernels.cast import te_quantize_triton
 
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
+
+_HAS_HIP_MXFP4 = hasattr(tex, "cast_transpose_mxfp4_fused_shuffle")
 
 from transformer_engine.common.recipe import MXFP4BlockScaling, Recipe
 from ..constants import MXFP8_BLOCK_SCALING_SIZE  # MXFP4 uses same block size
@@ -42,7 +43,8 @@ class MXFP4Quantizer(Quantizer):
 
     High-precision tensors (e.g. in FP32 or BF16) are quantized to FP4 by
     dividing them into groups of 32 elements, each scaled and cast
-    separately using AITER's per_1x32_f4_quant_hip kernel.
+    separately. On ROCm (gfx950), uses the fused HIP cast-transpose kernel
+    with optional Hadamard transform and AITER-compatible shuffled layout.
 
     The quantization produces:
     - FP4 data: [M, K/2] uint8 (2 FP4 values packed per byte)
@@ -59,10 +61,12 @@ class MXFP4Quantizer(Quantizer):
         rowwise: bool = True,
         columnwise: bool = True,
         shuffle_B_matrix_for_aiter: bool = False,
+        use_hadamard: bool = False,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = fp4_dtype
         self.shuffle_B_matrix_for_aiter = shuffle_B_matrix_for_aiter
+        self.use_hadamard = use_hadamard
         assert self.dtype == tex.DType.kFloat4E2M1, "Only E2M1 format supported for MXFP4"
 
     def update_quantized(
@@ -75,17 +79,35 @@ class MXFP4Quantizer(Quantizer):
 
         assert isinstance(dst, MXFP4Tensor), f"Cannot store quantized MXFP4 in {type(dst)} type."
 
-        # Make sure input is in expected format
         if not devices_match(src.device, dst.device):
             src = src.to(device=dst.device)
         if not src.is_contiguous():
             src = src.contiguous()
 
-        te_quantize_triton(src, self, dst, noop_flag)
+        if _HAS_HIP_MXFP4:
+            if src.dtype != torch.bfloat16:
+                src = src.to(torch.bfloat16)
+            if src.dim() > 2:
+                src = src.view(-1, src.shape[-1])
 
-        # Update FP4 dtype
+            with torch._C._DisableTorchDispatch():
+                tex.cast_transpose_mxfp4_fused_shuffle(
+                    src,
+                    dst._rowwise_data.view(torch.uint8) if dst._rowwise_data is not None else None,
+                    dst._rowwise_scale_inv.view(torch.uint8) if dst._rowwise_scale_inv is not None else None,
+                    dst._columnwise_data.view(torch.uint8) if dst._columnwise_data is not None else None,
+                    dst._columnwise_scale_inv.view(torch.uint8) if dst._columnwise_scale_inv is not None else None,
+                    shuffle_rowwise_scale=True,
+                    shuffle_colwise_scale=True,
+                    shuffle_rowwise_fp4=self.shuffle_B_matrix_for_aiter,
+                    shuffle_colwise_fp4=self.shuffle_B_matrix_for_aiter,
+                    use_hadamard=self.use_hadamard,
+                )
+        else:
+            from ..triton_kernels.cast import te_quantize_triton
+            te_quantize_triton(src, self, dst, noop_flag)
+
         dst._fp4_dtype = self.dtype
-
         return dst
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:

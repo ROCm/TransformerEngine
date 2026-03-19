@@ -44,6 +44,14 @@ __all__ = [
     "restore_from_saved",
 ]
 
+# Import MXFP4 tensor classes if available
+try:
+    from .mxfp4_tensor import MXFP4Tensor, MXFP4Quantizer
+    from ._internal.mxfp4_tensor_base import MXFP4TensorBase
+    __all__.extend(["MXFP4Tensor", "MXFP4Quantizer", "MXFP4TensorBase"])
+except ImportError:
+    pass
+
 
 def _make_module_cast_func(dtype):
     """Make module cast function that can handle QuantizedTensor"""
@@ -90,4 +98,12 @@ def get_all_tensor_types():
         NVFP4Tensor,
         NVFP4TensorStorage,
     ]
+
+    try:
+        from transformer_engine.pytorch.tensor.mxfp4_tensor import MXFP4Tensor
+        from transformer_engine.pytorch.tensor._internal.mxfp4_tensor_base import MXFP4TensorBase
+        all_tensor_types.extend([MXFP4Tensor, MXFP4TensorBase])
+    except ImportError:
+        pass
+
     return all_tensor_types
