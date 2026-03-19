@@ -306,7 +306,7 @@ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_stochastic_ro
         "FP4 cvt.rs PTX instructions are architecture-specific. "
         "Try recompiling with sm_XXXa instead of sm_XXX.");
 #else
-#ifdef ARCH_HAS_STOCHASTIC_ROUNDING
+#if ARCH_HAS_STOCHASTIC_ROUNDING
   // opsel=1 always writes to byte 1, result read from fp4x2[1]
   union { uint32_t ui32; __hip_fp4x2_storage_t fp4x2[4]; } u{0};
   __amd_floatx2_storage_t packed01{in01.x, in01.y};
