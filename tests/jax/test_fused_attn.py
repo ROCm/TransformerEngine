@@ -467,6 +467,16 @@ class FusedAttnRunner:
         if is_hip_extension():
             if self.backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
                 pytest.skip("Unsupported inputs combination or device compute capability.")
+            elif (
+                self.backend == NVTE_Fused_Attn_Backend.NVTE_CK
+                and self.window_size is not None
+                and self.max_seqlen_q != self.max_seqlen_kv
+                and not self.attn_mask_type.is_causal()
+            ):
+                pytest.skip(
+                    "CK does not support sliding window attention with cross-attention"
+                    " and non-causal masks"
+                )
         else:
             if self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
                 pytest.skip("Unsupported inputs combination or device compute capability.")
@@ -1483,6 +1493,7 @@ def test_jax_new_rng():
         head_dim_v = 64,
         attn_bias_type = AttnBiasType.NO_BIAS,
         attn_mask_type = AttnMaskType.NO_MASK,
+        softmax_type = AttnSoftmaxType.VANILLA_SOFTMAX,
         dropout_prob = 0.1,
         use_old_rng = False,
         dtype = jnp.bfloat16,
