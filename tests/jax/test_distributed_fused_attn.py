@@ -554,6 +554,8 @@ class TestDistributedContextParallelSelfAttn:
     ):
         if not qkv_layout.is_thd():
             pytest.skip("Only THD layout is supported for CP + AG + Striped attention")
+        if is_hip_extension():
+            pytest.skip("THD + ALL_GATHER + Striped attention is not yet supported on ROCm")
         self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
