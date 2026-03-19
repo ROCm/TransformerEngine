@@ -1228,9 +1228,10 @@ std::array<size_t, 4> get_scale_tensor_dims(const size_t rows,
     const bool is_rowwise = (block_size_rows == 1)
                             && ((block_size_cols == 32) || (block_size_cols == 16));
 
-    // On AMD, MXFP8 scales (block_size=32) are passed unpadded to hipBLASlt.
-    // NVFP4 scales (block_size=16) still require [128,4] padding for kernel indexing.
 #ifdef __HIP_PLATFORM_AMD__
+    // On AMD, MXFP8 scales (block_size=32) are allocated unpadded to match
+    // TE's internal allocation (which avoids padding for hipBLASlt compatibility).
+    // NVFP4 scales (block_size=16) still require [128,4] padding for kernel indexing.
     const bool needs_padding = (block_size_cols == 16 || block_size_rows == 16);
     const size_t alignment_Y = needs_padding ? (is_rowwise ? nvfp4_scale_tensor_alignment_Y_rowwise : nvfp4_scale_tensor_alignment_Y_colwise) : 1;
     const size_t alignment_X = needs_padding ? (is_rowwise ? nvfp4_scale_tensor_alignment_X_rowwise : nvfp4_scale_tensor_alignment_X_colwise) : 1;

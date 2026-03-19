@@ -126,6 +126,15 @@ constexpr bool is_supported_arch() {
 #define ARCH_HAS_STOCHASTIC_ROUNDING \
   NVTE_CUDA_ARCH_MATCHES(ptx::ArchSpecific<100>, ptx::ArchSpecific<103>)
 
+#else
+
+// Native FP4 stochastic rounding is available on gfx950 and later.
+#if defined(__gfx950__)
+#define ARCH_HAS_STOCHASTIC_ROUNDING (true)
+#else
+#define ARCH_HAS_STOCHASTIC_ROUNDING (false)
+#endif
+
 #endif //#ifndef __HIP_PLATFORM_AMD__
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-init

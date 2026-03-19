@@ -306,7 +306,7 @@ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_stochastic_ro
         "FP4 cvt.rs PTX instructions are architecture-specific. "
         "Try recompiling with sm_XXXa instead of sm_XXX.");
 #else
-#ifdef __gfx950__
+#ifdef ARCH_HAS_STOCHASTIC_ROUNDING
   // opsel=1 always writes to byte 1, result read from fp4x2[1]
   union { uint32_t ui32; __hip_fp4x2_storage_t fp4x2[4]; } u{0};
   __amd_floatx2_storage_t packed01{in01.x, in01.y};
@@ -318,7 +318,7 @@ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_stochastic_ro
   return static_cast<fp4x4_storage_t>(lo | (static_cast<fp4x4_storage_t>(hi) << 8));
 #else
   NVTE_DEVICE_ERROR("FP4 stochastic rounding on AMDGPU requires gfx950 or later.");
-#endif // __gfx950__
+#endif // ARCH_HAS_STOCHASTIC_ROUNDING
 #endif // !__HIP_PLATFORM_AMD__
     uint16_t dummy = 0;
 #ifdef __HIP_PLATFORM_AMD__
