@@ -30,13 +30,15 @@ case "${1:-}" in
         asv machine --yes --machine "$MACHINE"
         ;;
     run)
-        CMD=(asv run --python=same --launch-method spawn)
+        CMD=(asv run --python=same --launch-method spawn
+             --set-commit-hash "$(git rev-parse HEAD)")
         [[ -n "${2:-}" ]] && CMD+=(--bench "$2")
         echo "Running: ${CMD[*]}"
         "${CMD[@]}"
         ;;
     quick)
-        CMD=(asv run --python=same --launch-method spawn --quick)
+        CMD=(asv run --python=same --launch-method spawn --quick
+             --set-commit-hash "$(git rev-parse HEAD)")
         [[ -n "${2:-}" ]] && CMD+=(--bench "$2")
         echo "Running (quick): ${CMD[*]}"
         "${CMD[@]}"

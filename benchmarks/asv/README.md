@@ -11,7 +11,8 @@ a framework for benchmarking Python packages over their lifetime.
 
 ASV is configured with `environment_type: "existing"` (in `asv.conf.json` at the repo root),
 meaning it uses the current Python environment directly — it does not create virtualenvs or
-attempt to build TE itself.
+attempt to build TE itself. The config sets `branches: ["HEAD", "dev"]` so that `asv publish`
+accepts results from both the currently checked-out branch and `dev` (for CI history).
 
 ## Helper script
 
@@ -26,7 +27,7 @@ bash benchmarks/asv/run_benchmarks.sh <command> [options]
 | Command | Description |
 |---|---|
 | `setup [name]` | Register machine with ASV (defaults to `hostname`) |
-| `run [suite]` | Run all benchmarks, or a single suite (e.g. `bench_casting`) |
+| `run [suite]` | Run benchmarks for the current commit (optionally a single suite) |
 | `quick [suite]` | Smoke test — single iteration, results not saved |
 | `compare [ref] [new]` | Compare two commits (defaults to `HEAD~1` vs `HEAD`) |
 | `view` | Generate HTML dashboard and serve on `localhost:8080` |
@@ -59,16 +60,18 @@ the name must be consistent across runs for historical comparison.
 ### Run all benchmarks
 
 ```bash
-asv run --python=same --launch-method spawn
+asv run --python=same --launch-method spawn --set-commit-hash $(git rev-parse HEAD)
 ```
 
 - `--python=same` — use the current interpreter (required with `environment_type: "existing"`)
 - `--launch-method spawn` — required for CUDA (fork causes "Cannot re-initialize CUDA in forked subprocess")
+- `--set-commit-hash` — **required** with `environment_type: "existing"`. Without it, ASV
+  runs benchmarks but silently discards results. The helper script sets this automatically.
 
 ### Run a single suite
 
 ```bash
-asv run --python=same --launch-method spawn --bench bench_casting
+asv run --python=same --launch-method spawn --set-commit-hash $(git rev-parse HEAD) --bench bench_casting
 ```
 
 The `--bench` argument accepts a regex that matches benchmark file or class names.
@@ -76,7 +79,7 @@ The `--bench` argument accepts a regex that matches benchmark file or class name
 ### Quick smoke test
 
 ```bash
-asv run --python=same --launch-method spawn --quick --bench bench_casting
+asv run --python=same --launch-method spawn --quick --set-commit-hash $(git rev-parse HEAD) --bench bench_casting
 ```
 
 `--quick` runs each benchmark only once with no statistical analysis. Useful for verifying
