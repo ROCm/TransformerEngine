@@ -3,7 +3,7 @@
     "project": "TransformerEngine",
     "project_url": "https://github.com/ROCm/TransformerEngine",
     "repo": ".",
-    "branches": ["HEAD", "dev"],
+    "branches": ["HEAD"],
     "environment_type": "existing",
     "install_command": [],
     "build_command": [],

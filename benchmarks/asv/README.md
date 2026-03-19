@@ -11,8 +11,9 @@ a framework for benchmarking Python packages over their lifetime.
 
 ASV is configured with `environment_type: "existing"` (in `asv.conf.json` at the repo root),
 meaning it uses the current Python environment directly — it does not create virtualenvs or
-attempt to build TE itself. The config sets `branches: ["HEAD", "dev"]` so that `asv publish`
-accepts results from both the currently checked-out branch and `dev` (for CI history).
+attempt to build TE itself. The config sets `branches: ["HEAD"]` so that `asv publish` accepts results from
+whichever branch is currently checked out — this works for both local development
+and CI (where `HEAD` points to `dev`).
 
 ## Helper script
 
@@ -29,6 +30,7 @@ bash benchmarks/asv/run_benchmarks.sh <command> [options]
 | `setup [name]` | Register machine with ASV (defaults to `hostname`) |
 | `run [suite]` | Run benchmarks for the current commit (optionally a single suite) |
 | `quick [suite]` | Smoke test — single iteration, results not saved |
+| `direct suite [method]` | Fast in-process run — no subprocesses, no ASV overhead |
 | `compare [ref] [new]` | Compare two commits (defaults to `HEAD~1` vs `HEAD`) |
 | `view` | Generate HTML dashboard and serve on `localhost:8080` |
 | `list` | List available benchmark suites |
@@ -39,6 +41,8 @@ Examples:
 bash benchmarks/asv/run_benchmarks.sh setup mi325
 bash benchmarks/asv/run_benchmarks.sh run bench_casting
 bash benchmarks/asv/run_benchmarks.sh quick
+bash benchmarks/asv/run_benchmarks.sh direct bench_casting
+bash benchmarks/asv/run_benchmarks.sh direct bench_gemm time_forward
 bash benchmarks/asv/run_benchmarks.sh compare HEAD~3 HEAD
 bash benchmarks/asv/run_benchmarks.sh view
 ```

@@ -16,6 +16,8 @@ Commands:
   setup                 Register this machine with ASV
   run [SUITE]           Run all benchmarks, or a single suite (e.g. bench_casting)
   quick [SUITE]         Smoke-test run (single iteration, results not saved)
+  direct [-w W] [-n N] SUITE [METHOD]
+                      Fast in-process run (no subprocesses, no ASV overhead)
   compare [REF] [NEW]   Compare two commits (default: HEAD~1 vs HEAD)
   view                  Generate HTML dashboard and open preview server
   list                  List available benchmark suites
@@ -42,6 +44,15 @@ case "${1:-}" in
         [[ -n "${2:-}" ]] && CMD+=(--bench "$2")
         echo "Running (quick): ${CMD[*]}"
         "${CMD[@]}"
+        ;;
+    direct)
+        shift
+        if [[ $# -eq 0 ]]; then
+            echo "Usage: $0 direct [options] SUITE [METHOD]"
+            echo "Options: -w WARMUP  -n ITERS"
+            exit 1
+        fi
+        python "$BENCH_DIR/direct_run.py" "$@"
         ;;
     compare)
         REF="${2:-HEAD~1}"
