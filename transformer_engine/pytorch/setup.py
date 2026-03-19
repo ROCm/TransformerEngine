@@ -123,14 +123,11 @@ class CachedWheelsCommand(_bdist_wheel):
     """
 
     def run(self):
-<<<<<<< HEAD
+        """Acts a proxy before _bdist_wheel.run() and downloads a prebuilt wheel if available."""
         if rocm_build():
             print("ROCm build detected, building from source...")
             return super().run()
 
-=======
-        """Acts a proxy before _bdist_wheel.run() and downloads a prebuilt wheel if available."""
->>>>>>> 99df88
         if FORCE_BUILD:
             super().run()
             return

@@ -52,16 +52,13 @@ from ..quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
-<<<<<<< HEAD
+from ...debug.pytorch.debug_quantization import DebugQuantizer
+from ...debug.pytorch.debug_state import TEDebugState
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 if IS_HIP_EXTENSION:
     from transformer_engine.pytorch.triton_kernels.grouped_gemm import general_grouped_gemm_triton
     import os
-=======
-from ...debug.pytorch.debug_quantization import DebugQuantizer
-from ...debug.pytorch.debug_state import TEDebugState
->>>>>>> 99df88
 
 __all__ = ["GroupedLinear"]
 
@@ -76,37 +73,11 @@ class _GroupedLinear(torch.autograd.Function):
     def forward(
         ctx,
         inp: torch.Tensor,
-<<<<<<< HEAD
-        m_splits: List[int],
-        use_bias: bool,
-        is_first_microbatch: Union[bool, None],
-        fp8: bool,
-        fp8_calibration: bool,
-        wgrad_store: WeightGradStore,
-        input_quantizers: List[Quantizer],
-        weight_quantizers: List[Quantizer],
-        output_quantizers: List[Quantizer],
-        grad_output_quantizers: List[Quantizer],
-        fuse_wgrad_accumulation: bool,
-        cpu_offloading: bool,
-        sequence_parallel: bool,
-        activation_dtype: torch.dtype,
-        is_grad_enabled: bool,
-        module,
-        skip_fp8_weight_update,
-        save_original_input,
-        m_splits_tensor: Optional[torch.Tensor], # Optional GPU tensor for triton kernel
-=======
         non_tensor_args: Tuple,
->>>>>>> 99df88
         *weights_and_biases,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
 
-<<<<<<< HEAD
-        # Check if Triton kernel should be used
-        use_grouped_gemm_triton = IS_HIP_EXTENSION and os.getenv("NVTE_USE_GROUPED_GEMM_TRITON", "0") == "1" and not fp8 and not fuse_wgrad_accumulation
-=======
         # Reduce number of arguments to autograd function in order
         # to reduce CPU overhead due to pytorch arg checking.
         (
@@ -131,9 +102,12 @@ class _GroupedLinear(torch.autograd.Function):
             skip_fp8_weight_update,
             save_original_input,
             debug,
+            m_splits_tensor,
         ) = non_tensor_args
 
->>>>>>> 99df88
+        # Check if Triton kernel should be used
+        use_grouped_gemm_triton = IS_HIP_EXTENSION and os.getenv("NVTE_USE_GROUPED_GEMM_TRITON", "0") == "1" and not fp8 and not fuse_wgrad_accumulation
+
         num_gemms = len(m_splits)
         weights = weights_and_biases[:num_gemms]
         biases = weights_and_biases[num_gemms:]
@@ -179,12 +153,6 @@ class _GroupedLinear(torch.autograd.Function):
             )
         inp_view = inp.reshape(-1, in_features)
         inputmats: list
-<<<<<<< HEAD
-        if fp8:
-            inputmats = tex.split_quantize(inp_view, m_splits, input_quantizers)
-        elif use_grouped_gemm_triton:
-            inputmats = [cast_if_needed(inp_view, activation_dtype)]
-=======
         if fp8 and not debug:
             # Disable bulk allocation when CPU offloading is active: offloading skips small
             # tensors (like scales), but bulk allocation shares storage across all tensors,
@@ -196,7 +164,8 @@ class _GroupedLinear(torch.autograd.Function):
             inputmats = DebugQuantizer.multi_tensor_quantize(
                 inp_view, input_quantizers, m_splits, activation_dtype
             )
->>>>>>> 99df88
+        elif use_grouped_gemm_triton:
+            inputmats = [cast_if_needed(inp_view, activation_dtype)]
         else:
             inputmats = torch.split(cast_if_needed(inp_view, activation_dtype), m_splits)
 
@@ -243,18 +212,13 @@ class _GroupedLinear(torch.autograd.Function):
                 use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
 
         # Perform GEMM
-<<<<<<< HEAD
         if use_grouped_gemm_triton:
             general_grouped_gemm_func = general_grouped_gemm_triton
             kwargs = {"m_splits_tensor": m_splits_tensor}
         else:
             general_grouped_gemm_func = general_grouped_gemm
             kwargs = {}
-        # Prepare m_splits for each backend
-        _ = general_grouped_gemm_func(
-=======
-        general_grouped_gemm(
->>>>>>> 99df88
+        general_grouped_gemm_func(
             weights_fp8,
             inputmats,
             [out],
@@ -528,7 +492,6 @@ class _GroupedLinear(torch.autograd.Function):
                             inp_view, ctx.input_quantizers, ctx.m_splits, ctx.activation_dtype
                         )
                     else:
-<<<<<<< HEAD
                         if not ctx.use_grouped_gemm_triton:
                             inputmats = torch.split(
                                 cast_if_needed(inp_view, ctx.activation_dtype), ctx.m_splits
@@ -544,14 +507,7 @@ class _GroupedLinear(torch.autograd.Function):
                     kwargs = {}
                 grouped_gemm_wgrad = functools.partial(
                     general_grouped_gemm_func,
-=======
-                        inputmats = torch.split(
-                            cast_if_needed(inp_view, ctx.activation_dtype), ctx.m_splits
-                        )
-                grouped_gemm_wgrad = functools.partial(
-                    general_grouped_gemm,
                     quantization_params=ctx.grad_weight_quantizers,
->>>>>>> 99df88
                     out_dtype=ctx.activation_dtype,
                     layout="NT",
                     grad=True,
@@ -623,27 +579,6 @@ class _GroupedLinear(torch.autograd.Function):
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             None,
-<<<<<<< HEAD
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-=======
->>>>>>> 99df88
             *wgrad_list,
             *grad_biases,
         )
@@ -960,13 +895,8 @@ class GroupedLinear(TransformerEngineBaseModule):
                 self,
                 None,  # skip_fp8_weight_update
                 self.save_original_input,
-<<<<<<< HEAD
-                m_splits_tensor,
-                *weight_tensors,
-                *bias_tensors,
-=======
                 debug,
->>>>>>> 99df88
+                m_splits_tensor,
             )
             out = linear_fn(*autograd_ctx, inp, non_tensor_args, *weight_tensors, *bias_tensors)
 

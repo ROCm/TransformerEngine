@@ -182,58 +182,7 @@ class _LayerNormMLP(torch.autograd.Function):
         fc1_bias: torch.Tensor,
         fc2_weight: torch.Tensor,
         fc2_bias: torch.Tensor,
-<<<<<<< HEAD
-        eps: float,
-        is_first_microbatch: Union[bool, None],
-        fp8: bool,
-        fp8_calibration: bool,
-        wgrad_store: WeightGradStore,
-        fuse_wgrad_accumulation: bool,
-        fc1_input_quantizer: Optional[Quantizer],
-        fc1_weight_quantizer: Optional[Quantizer],
-        fc1_output_quantizer: Optional[Quantizer],
-        fc1_grad_input_quantizer: Optional[Quantizer],
-        fc1_grad_weight_quantizer: Optional[Quantizer],
-        fc1_grad_output_quantizer: Optional[Quantizer],
-        fc2_input_quantizer: Optional[Quantizer],
-        fc2_weight_quantizer: Optional[Quantizer],
-        fc2_output_quantizer: Optional[Quantizer],
-        fc2_grad_input_quantizer: Optional[Quantizer],
-        fc2_grad_weight_quantizer: Optional[Quantizer],
-        fc2_grad_output_quantizer: Optional[Quantizer],
-        cpu_offloading: bool,
-        tp_group: Union[dist_group_type, None],
-        tp_size: int,
-        sequence_parallel: bool,
-        tensor_parallel: bool,
-        activation_dtype: torch.dtype,
-        return_layernorm_output: bool,
-        return_layernorm_output_gathered: bool,
-        bias_gelu_fusion: bool,
-        set_parallel_mode: bool,
-        is_grad_enabled: bool,
-        fwd_ln_sm_margin: int,
-        bwd_ln_sm_margin: int,
-        zero_centered_gamma: bool,
-        activation: str,
-        activation_params: Optional[dict],
-        normalization: str,
-        ub_overlap_ag: bool,
-        ub_overlap_rs: bool,
-        ub_overlap_rs_dgrad: bool,
-        ub_bulk_wgrad: bool,
-        ub_bulk_dgrad: bool,
-        gemm_gelu_fusion: bool,
-        fsdp_group: Union[dist_group_type, None],
-        module: torch.nn.Module,
-        skip_fp8_weight_update: bool,
-        symmetric_ar_type: str,
-        debug: Optional[bool] = False,
-        keep_fp8_weight_transpose_cache: bool = True,
-        use_fsdp2: bool = False,
-=======
         non_tensor_args: Tuple,
->>>>>>> 99df88
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # pylint: disable=missing-function-docstring
 
@@ -287,6 +236,8 @@ class _LayerNormMLP(torch.autograd.Function):
             symmetric_ar_type,
             checkpoint,
             debug,
+            keep_fp8_weight_transpose_cache,
+            use_fsdp2,
             recompute_for_bwd,
         ) = non_tensor_args
 
@@ -380,6 +331,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 "symmetric_ar_type": symmetric_ar_type,
                 "checkpoint": checkpoint,
                 "debug": debug,
+                "keep_fp8_weight_transpose_cache": keep_fp8_weight_transpose_cache,
+                "use_fsdp2": use_fsdp2,
                 "recompute_for_bwd": True,  # set this to true for recomputation phase
             }
         # Make sure input dimensions are compatible
@@ -680,29 +633,6 @@ class _LayerNormMLP(torch.autograd.Function):
         # otherwise we compute fc2
         if not (is_recomputation and checkpoint):
 
-<<<<<<< HEAD
-        # ------------------------------------------------------
-        # FC2 GEMM
-        # ------------------------------------------------------
-        if IS_HIP_EXTENSION and fp8 and not keep_fp8_weight_transpose_cache:
-            assert fc2_weight_final._transpose is None or fc2_weight_final._transpose.numel() == 0, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
-
-        gemm_out, *_, reduce_scatter_out = general_gemm(
-            fc2_weight_final,
-            act_out,
-            get_workspace(),
-            out_dtype=activation_dtype,
-            bias=fc2_bias,
-            quantization_params=fc2_output_quantizer,
-            use_split_accumulator=use_split_accumulator,
-            ub=ub_obj_fc2out,
-            ub_type=tex.CommOverlapType.RS if ub_overlap_rs else None,
-            extra_output=reduce_scatter_out,
-        )
-        # ------------------------------------------------------
-        # Finished FC2 GEMM...
-        # ------------------------------------------------------
-=======
             # if we get to this point, we know this is not bwd recomputation
             # so we must be in the fwd
             # now is_grad_enabled can be true or false
@@ -713,28 +643,12 @@ class _LayerNormMLP(torch.autograd.Function):
                 checkpoint or not is_grad_enabled
             ):  # we can safely get rid of these if this is the case
                 clear_tensor_data(fc1_out)
->>>>>>> 99df88
 
             if not fp8 and fp8_calibration:
 
                 if fc2_weight_quantizer is not None:
                     fc2_weight_quantizer.calibrate(fc2_weight)
 
-<<<<<<< HEAD
-        # Cache state for backward pass
-        if is_grad_enabled:
-            # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
-            if inp.requires_grad and keep_fp8_weight_transpose_cache and not use_fsdp2:
-                if isinstance(fc1_weight_final, QuantizedTensorStorage):
-                    fc1_weight_final.update_usage(columnwise_usage=True)
-                if isinstance(fc2_weight_final, QuantizedTensorStorage):
-                    fc2_weight_final.update_usage(columnwise_usage=True)
-
-            if cpu_offloading:
-                mark_activation_offload(
-                    inputmat, mu, rsigma, ln_out, fc1_out, fc1_out_without_bias, act_out
-                )
-=======
             # Configure Userbuffers reduce-scatter if needed
             ub_obj_fc2out = None
             reduce_scatter_out = None
@@ -744,11 +658,13 @@ class _LayerNormMLP(torch.autograd.Function):
                 dim_size[0] //= tp_world_size
                 dim_size[-1] = fc2_weight.size(0)
                 reduce_scatter_out = torch.empty(dim_size, dtype=activation_dtype, device=device)
->>>>>>> 99df88
 
             # ------------------------------------------------------
             # FC2 GEMM
             # ------------------------------------------------------
+            if IS_HIP_EXTENSION and fp8 and not keep_fp8_weight_transpose_cache:
+                assert fc2_weight_final._transpose is None or fc2_weight_final._transpose.numel() == 0, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
+
             gemm_out, *_, reduce_scatter_out = general_gemm(
                 fc2_weight_final,
                 act_out,
@@ -785,6 +701,20 @@ class _LayerNormMLP(torch.autograd.Function):
             else:
                 fc2_out = gemm_out
             fc2_out = fc2_out.view(-1, *inp_shape[1:-1], fc2_out.shape[-1])
+
+        # Cache state for backward pass
+        if is_grad_enabled:
+            # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
+            if inp.requires_grad and keep_fp8_weight_transpose_cache and not use_fsdp2:
+                if isinstance(fc1_weight_final, QuantizedTensorStorage):
+                    fc1_weight_final.update_usage(columnwise_usage=True)
+                if isinstance(fc2_weight_final, QuantizedTensorStorage):
+                    fc2_weight_final.update_usage(columnwise_usage=True)
+
+            if cpu_offloading:
+                mark_activation_offload(
+                    inputmat, mu, rsigma, ln_out, fc1_out, fc1_out_without_bias, act_out
+                )
 
         # now saving stuff for bwd:
         # if we are using checkpointing, this information will be saved in the bwd recomputation stage, so can skip it in fwd
@@ -1764,58 +1694,7 @@ class _LayerNormMLP(torch.autograd.Function):
             fc1_bias_grad if fc1_bias is not None else None,
             fc2_wgrad,  # pylint: disable=possibly-used-before-assignment
             fc2_bias_grad,
-<<<<<<< HEAD
-            None,  # eps
-            None,  # is_first_microbatch
-            None,  # fp8
-            None,  # fp8_calibration
-            None,  # wgrad_store
-            None,  # fuse_wgrad_accumulation
-            None,  # fc1_input_quantizer,
-            None,  # fc1_weight_quantizer,
-            None,  # fc1_output_quantizer,
-            None,  # fc1_grad_input_quantizer,
-            None,  # fc1_grad_weight_quantizer,
-            None,  # fc1_grad_output_quantizer,
-            None,  # fc2_input_quantizer,
-            None,  # fc2_weight_quantizer,
-            None,  # fc2_output_quantizer,
-            None,  # fc2_grad_input_quantizer,
-            None,  # fc2_grad_weight_quantizer,
-            None,  # fc2_grad_output_quantizer,
-            None,  # cpu_offloading
-            None,  # tp_group
-            None,  # tp_size
-            None,  # sequence_parallel
-            None,  # tensor_parallel
-            None,  # activation_dtype
-            None,  # return_layernorm_output
-            None,  # return_layernorm_output_gathered
-            None,  # bias_gelu_fusion
-            None,  # set_parallel_mode
-            None,  # is_grad_enabled
-            None,  # fwd_ln_sm_margin
-            None,  # bwd_ln_sm_margin
-            None,  # zero_centered_gamma
-            None,  # activation
-            None,  # activation_params
-            None,  # normalization
-            None,  # ub_overlap_ag
-            None,  # ub_overlap_rs
-            None,  # ub_overlap_rs_dgrad
-            None,  # ub_bulk_dgrad
-            None,  # ub_bulk_wgrad
-            None,  # gemm_gelu_fusion
-            None,  # fsdp_group
-            None,  # module
-            None,  # skip_fp8_weight_update
-            None,  # symmetric_ar_type
-            None,  # debug
-            None,  # keep_fp8_weight_transpose_cache
-            None,  # use_fsdp2
-=======
             None,
->>>>>>> 99df88
         )
 
 
@@ -1928,27 +1807,24 @@ class LayerNormMLP(TransformerEngineBaseModule):
                    This can help in latency bound communication situations.
                    Requires PyTorch version 2.7.0 or higher. When set to ``None``, standard all-reduce
                    is used.
-<<<<<<< HEAD
     keep_fp8_weight_transpose_cache: bool, default = `True`
                 Controls whether to cache the FP8 weight transpose buffer during training.
 
-                - If set to `True` (default), the FP8 weight transpose buffer is cached to avoid recomputation, 
+                - If set to `True` (default), the FP8 weight transpose buffer is cached to avoid recomputation,
                 which can improve performance but significantly increases memory usage.
-                - If set to `False`, the buffer is not cached and the FP8 weight transpose is recomputed as needed. 
+                - If set to `False`, the buffer is not cached and the FP8 weight transpose is recomputed as needed.
                 This reduces memory consumption, especially during checkpoint loading and runtime.
 
-                **Recommendation**: Set this to `False` when using Fully Sharded Data Parallel (FSDP) training. 
-                Caching FP8 weight transposes can double memory usage for modules such as `Linear`, 
-                `LayerNormLinear`, and `LayerNormMLP`, which may lead to excessive memory pressure and 
+                **Recommendation**: Set this to `False` when using Fully Sharded Data Parallel (FSDP) training.
+                Caching FP8 weight transposes can double memory usage for modules such as `Linear`,
+                `LayerNormLinear`, and `LayerNormMLP`, which may lead to excessive memory pressure and
                 reduced efficiency of PyTorch's caching allocator.
 
                 Use this setting to balance memory usage and performance based on your training configuration.
-=======
     checkpoint : bool, default = False
                 whether to use selective activation checkpointing, where activations are not saved for bwd,
                 and instead are recomputed (skipping fc2, as it is not needed for backward). Trades compute
                 for memory. default is false, in which activations are saved in fwd. not supported for onnx forward
->>>>>>> 99df88
     """
 
     def __init__(
@@ -1984,12 +1860,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
         ub_bulk_wgrad: bool = False,
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
-<<<<<<< HEAD
-        keep_fp8_weight_transpose_cache: bool = True,
-        use_fsdp2: bool = False
-=======
         checkpoint: bool = False,
->>>>>>> 99df88
+        keep_fp8_weight_transpose_cache: bool = True,
+        use_fsdp2: bool = False,
     ) -> None:
         super().__init__()
 
@@ -2010,13 +1883,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.set_parallel_mode = set_parallel_mode
         self.zero_centered_gamma = zero_centered_gamma
         self.symmetric_ar_type = symmetric_ar_type
-<<<<<<< HEAD
+        self.checkpoint = checkpoint
         self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache if IS_HIP_EXTENSION else True
         self.use_fsdp2 = use_fsdp2 if IS_HIP_EXTENSION else False
-=======
-        self.checkpoint = checkpoint
 
->>>>>>> 99df88
         # GEMM-GELU fusion is currently only supported with split GEMM-AG overlap
         self.gemm_gelu_fusion = (
             bool(int(os.getenv("NVTE_GEMM_GELU_FUSION", "0")))
@@ -2336,8 +2206,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.ub_overlap_ag,
                 self.ub_overlap_rs,
                 self.ub_overlap_rs_dgrad,
-                self.ub_bulk_dgrad,
                 self.ub_bulk_wgrad,
+                self.ub_bulk_dgrad,
                 self.gemm_gelu_fusion and not debug,
                 self.fsdp_group,
                 self,
@@ -2346,7 +2216,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.checkpoint,
                 debug,
                 self.keep_fp8_weight_transpose_cache,
-                self.use_fsdp2
+                self.use_fsdp2,
             )
             out = fwd_fn(
                 *autograd_ctx,

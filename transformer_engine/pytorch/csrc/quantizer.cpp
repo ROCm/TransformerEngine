@@ -827,37 +827,20 @@ std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size
     size_t sinv0 = 0;
     size_t sinv1 = 0;
     if (block_scaling_dim == 2) {
-<<<<<<< HEAD
-      // 2D scaling is always GEMM_READY for now
-      NVTE_CHECK(data_format == Float8BlockScaleTensorFormat::GEMM_READY,
-                 "2D scaling is always GEMM_READY for now.");
-      sinv0 = (m_dim + kBlockLen - 1) / kBlockLen;
-#ifdef USE_ROCM
-      sinv1 = (k_dim + kBlockLen - 1) / kBlockLen;
-#else
-      sinv1 = roundup((k_dim + kBlockLen - 1) / kBlockLen, 4);
-#endif
-=======
       sinv0 = ceildiv(m_dim, kBlockLen);
+#ifdef USE_ROCM
+      sinv1 = ceildiv(k_dim, kBlockLen);
+#else
       sinv1 = roundup(ceildiv(k_dim, kBlockLen), 4);
->>>>>>> 99df88
+#endif
     } else if (block_scaling_dim == 1) {
       // default rowwise scaling factor shape already transpose the scaling factor so it's GEMM_READY
-<<<<<<< HEAD
-      sinv0 = (k_dim + kBlockLen - 1) / kBlockLen;
+      sinv0 = ceildiv(k_dim, kBlockLen);
 #ifdef USE_ROCM
       sinv1 = m_dim;
 #else
-      sinv1 = rowwise_compact ? m_dim : roundup(m_dim, 4);
-#endif
-      // if the rowwise format is compact, the scaling factor is not be transposed
-      if (rowwise_compact) {
-        std::swap(sinv0, sinv1);
-      }
-=======
-      sinv0 = ceildiv(k_dim, kBlockLen);
       sinv1 = roundup(m_dim, 4);
->>>>>>> 99df88
+#endif
     } else {
       NVTE_ERROR(
           "Unsupported block_scaling_dim in create_tensor rowwise."
@@ -870,35 +853,19 @@ std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size
     size_t sinv0 = 0;
     size_t sinv1 = 0;
     if (block_scaling_dim == 2) {
-<<<<<<< HEAD
-      // 2D scaling is always GEMM_READY for now
-      NVTE_CHECK(data_format == Float8BlockScaleTensorFormat::GEMM_READY,
-                 "2D scaling is always GEMM_READY for now.");
-      sinv0 = (k_dim + kBlockLen - 1) / kBlockLen;
+      sinv0 = ceildiv(k_dim, kBlockLen);
 #ifdef USE_ROCM
-      sinv1 = (m_dim + kBlockLen - 1) / kBlockLen;
+      sinv1 = ceildiv(m_dim, kBlockLen);
 #else
-      sinv1 = roundup((m_dim + kBlockLen - 1) / kBlockLen, 4);
+      sinv1 = roundup(ceildiv(m_dim, kBlockLen), 4);
 #endif
     } else if (block_scaling_dim == 1) {
-      // 1D scaling can be GEMM_READY or COMPACT
-      bool columnwise_compact = data_format == Float8BlockScaleTensorFormat::COMPACT;
-      sinv0 = (m_dim + kBlockLen - 1) / kBlockLen;
+      sinv0 = ceildiv(m_dim, kBlockLen);
 #ifdef USE_ROCM
       sinv1 = k_dim;
 #else
-      sinv1 = columnwise_compact ? k_dim : roundup(k_dim, 4);
-#endif
-      // GEMM READY case: scaling factor is [sinv0, sinv1], already transposed here for CuBLAS
-      // for COMPACT case, since we apply 128x1 scaling here without transposing columnwise data, scaling factor is also [sinv0, sinv1]
-      // so no need to swap sinv0 and sinv1 here
-=======
-      sinv0 = ceildiv(k_dim, kBlockLen);
-      sinv1 = roundup(ceildiv(m_dim, kBlockLen), 4);
-    } else if (block_scaling_dim == 1) {
-      sinv0 = ceildiv(m_dim, kBlockLen);
       sinv1 = roundup(k_dim, 4);
->>>>>>> 99df88
+#endif
     } else {
       NVTE_ERROR(
           "Unsupported block_scaling_dim in create_tensor columnwise."

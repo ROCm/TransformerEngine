@@ -718,7 +718,6 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
 
   return retval;
 }
-#endif // #ifndef USE_ROCM
 
 // Owns all allocations/wrappers backing quant_config_list[*].set_rng_state(...).
 struct StochasticRngStateResources {
@@ -1100,6 +1099,7 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
     }
   });
 }
+#endif  // #ifndef USE_ROCM
 
 }  // namespace
 
@@ -1169,12 +1169,14 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
                              return detail::IsMXFP8Quantizers(quantizer.ptr());
                            })) {
       allocation_method = AllocationMethod::BULK_MXFP8;
+#ifndef USE_ROCM
     } else if (std::all_of(quantizer_list.begin(), quantizer_list.end(),
                            [](const py::handle &quantizer) -> bool {
                              return detail::IsNVFP4Quantizers(quantizer.ptr());
                            })) {
       allocation_method = AllocationMethod::BULK_NVFP4;
       quantization_method = QuantizationMethod::FUSED_NVFP4;
+#endif
     }
   }
 
@@ -1200,16 +1202,11 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       }
       std::tie(output_py_list, output_cpp_list) =
           bulk_allocate_mxfp8_tensors(split_shapes, quantizer_list, mxfp8_quantizers);
-<<<<<<< HEAD
-#ifndef USE_ROCM
-    } else if (is_nvfp4) {
-      // NVFP4: construct output tensors with bulk allocations
-=======
       break;
     }
+#ifndef USE_ROCM
     case AllocationMethod::BULK_NVFP4: {
       // Bulk allocation for NVFP4 tensors
->>>>>>> 99df88
       std::vector<NVFP4Quantizer *> nvfp4_quantizers;
       for (auto &quantizer : quantizer_cpp_list) {
         nvfp4_quantizers.push_back(static_cast<NVFP4Quantizer *>(quantizer.get()));
@@ -1217,17 +1214,13 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       bool contiguous_data_and_scale;
       std::tie(output_py_list, output_cpp_list, contiguous_data_and_scale) =
           bulk_allocate_nvfp4_tensors(split_shapes, quantizer_list, nvfp4_quantizers);
-<<<<<<< HEAD
-#endif
-    } else {
-      NVTE_CHECK(false, "Expected either FP8 block-scaling or MXFP8 quantizer");
-=======
       if (!contiguous_data_and_scale) {
         // Avoid fused quantize kernel if data is not contiguous
         quantization_method = QuantizationMethod::UNFUSED;
       }
       break;
     }
+#endif
     default: {
       // Allocate output tensors individually
       for (size_t i = 0; i < num_splits; ++i) {
@@ -1236,12 +1229,12 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
         output_cpp_list.emplace_back(std::move(output_cpp));
         output_py_list.emplace_back(std::move(output_py));
       }
->>>>>>> 99df88
     }
   }
 
   // Quantize into output tensors
   switch (quantization_method) {
+#ifndef USE_ROCM
     case QuantizationMethod::FUSED_NVFP4: {
       // Fused NVFP4 quantize kernel
       auto input_nvte = makeTransformerEngineTensor(input_dptr, input_shape, input_dtype);
@@ -1253,6 +1246,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
                                 nvfp4_quantizers);
       break;
     }
+#endif
     default:
       // General multi-tensor quantization
       multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list, output_cpp_list);

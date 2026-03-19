@@ -159,53 +159,27 @@ class Float8BlockQuantizer(Quantizer):
             scale_dim0 = (dim0 + self.block_len - 1) // self.block_len
             scale_dim1 = (dim1 + self.block_len - 1) // self.block_len
             if columnwise:
-<<<<<<< HEAD
-                outer = math.ceil(K / self.block_len)
                 if IS_HIP_EXTENSION:
-                    inner = math.ceil(M / self.block_len)
-                else:
-                    inner = round_up_to_nearest_multiple(math.ceil(M / self.block_len), 4)
-                return (outer, inner)
-            # rowwise
-            outer = math.ceil(M / self.block_len)
-            if IS_HIP_EXTENSION:
-                inner = math.ceil(K / self.block_len)
-            else:
-                inner = round_up_to_nearest_multiple(math.ceil(K / self.block_len), 4)
-            return (outer, inner)
-        # 1D 1x128 quantization block scaling
-        # CuBLAS requries 1x128 scaling factor to be padded and transposed
-        assert self.block_scaling_dim == 1, "Only 1D or 2D blocks supported"
-        if columnwise:
-            columnwise_compact = self.all_gather_usage
-            outer = math.ceil(M / self.block_len)
-            inner = round_up_to_nearest_multiple(K, 4) if not IS_HIP_EXTENSION or not columnwise_compact else K
-            # GEMM READY case: scaling factor is [outer, inner], already transposed here for CuBLAS
-            # for COMPACT case, since we apply 1x128 scaling here without transposing columnwise data, scaling factor is also [outer, inner]
-            # so no need to swap inner outer here
-            return (outer, inner)
-        # rowwise
-        rowwise_compact = self.all_gather_usage
-        outer = math.ceil(K / self.block_len)
-        inner = round_up_to_nearest_multiple(M, 4) if not IS_HIP_EXTENSION or not rowwise_compact else M
-        # GEMM READY case: scaling factor is [outer, inner], already transposed here for CuBLAS need
-        # for COMPACT case, since we apply 128x1 scaling, scaling block applies to inner dim, so we need to swap outer and inner here
-        return (outer, inner) if not rowwise_compact else (inner, outer)
-=======
+                    return (scale_dim1, scale_dim0)
                 return (scale_dim1, round_up_to_nearest_multiple(scale_dim0, 4))
+            if IS_HIP_EXTENSION:
+                return (scale_dim0, scale_dim1)
             return (scale_dim0, round_up_to_nearest_multiple(scale_dim1, 4))
 
         # 1x128 block scaling
         if columnwise:
-            return (
-                (dim0 + self.block_len - 1) // self.block_len,
-                round_up_to_nearest_multiple(dim1, 4),
-            )
-        return (
-            (dim1 + self.block_len - 1) // self.block_len,
-            round_up_to_nearest_multiple(dim0, 4),
-        )
->>>>>>> 99df88
+            outer = (dim0 + self.block_len - 1) // self.block_len
+            if IS_HIP_EXTENSION:
+                inner = dim1
+            else:
+                inner = round_up_to_nearest_multiple(dim1, 4)
+            return (outer, inner)
+        outer = (dim1 + self.block_len - 1) // self.block_len
+        if IS_HIP_EXTENSION:
+            inner = dim0
+        else:
+            inner = round_up_to_nearest_multiple(dim0, 4)
+        return (outer, inner)
 
     def get_columnwise_shape(self, shape: Iterable[int]) -> Tuple[int, ...]:
         """Column-wise data shape
