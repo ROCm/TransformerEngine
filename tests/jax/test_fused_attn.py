@@ -495,18 +495,13 @@ class FusedAttnRunner:
         self.cp_size = self.mesh.shape.get(self.mesh_resource.cp_resource, 1)
         self.tp_size = self.mesh.shape.get(self.mesh_resource.tpsp_resource, 1)
 
-<<<<<<< HEAD
         # only support new-style RNGs on AMD hardware since they will crash otherwise
         if is_hip_extension() and not self.use_old_rng:
             key = jax.random.key(0)
         else:
             key = jax.random.PRNGKey(0)
 
-        q_key, k_key, v_key, bias_key, dropout_key = jax.random.split(key, 5)
-=======
-        key = jax.random.PRNGKey(0)
         q_key, k_key, v_key, bias_key, dropout_key, softmax_key = jax.random.split(key, 6)
->>>>>>> 99df88
 
         q_shape = (self.batch_size, self.max_seqlen_q, self.num_heads_q, self.head_dim_qk)
         k_shape = (self.batch_size, self.max_seqlen_kv, self.num_heads_kv, self.head_dim_qk)
@@ -799,17 +794,6 @@ class FusedAttnRunner:
             self.bias_pspec = PartitionSpec()
         self.bias_sharding = NamedSharding(self.mesh, self.bias_pspec)
 
-<<<<<<< HEAD
-        # New-style RNG fix is only applied for AMD GPUs
-        if is_hip_extension():
-            if self.dropout_rng is not None and jnp.issubdtype(self.dropout_rng.dtype, jax.dtypes.prng_key):
-                self.dropout_rng_pspec = PartitionSpec()
-            else:
-                self.dropout_rng_pspec = PartitionSpec(None,)
-        else:
-            self.dropout_rng_pspec = PartitionSpec(None,)
-
-=======
         # Softmax offset sharding (1, num_heads, 1, 1)
         # Use the same logic as HEAD_AXES: tpsp_resource if enabled, else tp_resource
         head_resource = (
@@ -823,7 +807,14 @@ class FusedAttnRunner:
         self.dropout_rng_pspec = PartitionSpec(
             None,
         )
->>>>>>> 99df88
+        # New-style RNG fix is only applied for AMD GPUs
+        if (
+            is_hip_extension() and
+            self.dropout_rng is not None and
+            jnp.issubdtype(self.dropout_rng.dtype, jax.dtypes.prng_key)
+        ):
+            self.dropout_rng_pspec = PartitionSpec()
+
         self.dropout_rng_sharding = NamedSharding(self.mesh, self.dropout_rng_pspec)
 
         self.logit_scale_pspec = PartitionSpec(None, None, self.mesh_resource.cp_resource, None)
@@ -1153,19 +1144,15 @@ class FusedAttnRunner:
         ),
         pytest.param(
             2,
-            2048,
+            512,
             1024,
             12,
             12,
             64,
             64,
             jnp.bfloat16,
-<<<<<<< HEAD
-            id="2-2048-1024-12-12-64-64-BF16-CROSS",
-=======
             QKVLayout.THD_T2HD,
             id="2-512-1024-12-12-64-64-BF16-CROSS-RAGGED_KV_PACKED",
->>>>>>> 99df88
         ),
         # large data size + bf16 + cross attn + diff hidden v dim + qkv separate
         pytest.param(
@@ -1293,10 +1280,28 @@ class FusedAttnRunner:
             id="2-1024-2048-12-6-128-64-FP16-CROSS-GQA-RAGGED_SEPARATE",
         ),
         pytest.param(
-            10, 4096, 4096, 16, 16, 192, 128, jnp.float16, id="10-4096-4096-16-16-192-128-FP16-MLA",
+            10,
+            4096,
+            4096,
+            16,
+            16,
+            192,
+            128,
+            jnp.float16,
+            QKVLayout.BSHD_BSHD_BSHD,
+            id="10-4096-4096-16-16-192-128-FP16-MLA",
         ),
         pytest.param(
-            10, 4096, 4096, 16, 16, 192, 128, jnp.bfloat16, id="10-4096-4096-16-16-192-128-BF16-MLA",
+            10,
+            4096,
+            4096,
+            16,
+            16,
+            192,
+            128,
+            jnp.bfloat16,
+            QKVLayout.BSHD_BSHD_BSHD,
+            id="10-4096-4096-16-16-192-128-BF16-MLA",
         ),
     ],
 )
