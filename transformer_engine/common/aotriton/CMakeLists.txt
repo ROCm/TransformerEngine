@@ -50,7 +50,6 @@ if(NOT DEFINED AOTRITON_PATH)
             URL_HASH SHA256=${__AOTRITON_IMAGE_SHA256}
             DOWNLOAD_DIR ${__AOTRITON_DOWNLOAD_DIR}
             SOURCE_DIR ${__AOTRITON_EXTRACT_DIR}
-            TIMEOUT 30
             CONFIGURE_COMMAND ""
             BUILD_COMMAND ""
             INSTALL_COMMAND ${CMAKE_COMMAND} -E copy_directory
@@ -70,8 +69,6 @@ if(NOT DEFINED AOTRITON_PATH)
         ExternalProject_Add(aotriton_external
             LIST_SEPARATOR ","
             SOURCE_DIR ${TE}/3rdparty/aotriton
-            DOWNLOAD_COMMAND ""
-            UPDATE_COMMAND ""
             CMAKE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${__AOTRITON_INSTALL_DIR}
             -DAOTRITON_TARGET_ARCH=${ARCH_LIST_COMMA_STR}
             -DGPU_TARGETS=${ARCH_LIST_COMMA_STR}

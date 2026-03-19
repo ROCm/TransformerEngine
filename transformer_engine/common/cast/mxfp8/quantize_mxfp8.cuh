@@ -27,8 +27,8 @@
 #include "../core/common.cuh"
 #ifndef __HIP_PLATFORM_AMD__
 #include "specialized/quantize_mxfp8.cuh"
-#endif //#ifndef __HIP_PLATFORM_AMD__
 #include "swizzle.cuh"
+#endif //#ifndef __HIP_PLATFORM_AMD__
 
 #ifdef __HIP_PLATFORM_AMD__
 #include "./rocm_vectorized_2d.cuh"

@@ -9,7 +9,7 @@
         "cudaFuncSetAttribute(" : "hipFuncSetAttribute((const void*)",
         "__nv_bfloat162":"__hip_bfloat162",
         "cuda::getCurrentCUDAStream" : "hip::getCurrentHIPStreamMasqueradingAsCUDA",
-        "at::cuda::CUDAGuard" : "c10::hip::HIPGuardMasqueradingAsCUDA"
+        "at::cuda::CUDAGuard" : "at::hip::HIPGuardMasqueradingAsCUDA"
  }
 }
 
