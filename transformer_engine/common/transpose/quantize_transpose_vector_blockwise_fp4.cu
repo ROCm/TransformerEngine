@@ -471,8 +471,13 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
   __syncthreads();
 
   const int kNumThreadsReduce = kScaleBlockDim / kNVecOut;
+#ifdef __HIP_PLATFORM_AMD__
+  const float global_encode_scale =
+      (kIsE8Scaling || global_amax == nullptr) ? 1.0f : ComputeGlobalEncodeScaleFP4(global_amax[0]);
+#else
   const float global_encode_scale =
       kIsE8Scaling ? 1.0f : ComputeGlobalEncodeScaleFP4(global_amax[0]);
+#endif
   const float global_decode_scale = 1.0 / global_encode_scale;
 
   // Step 2: Cast and store to output_c
