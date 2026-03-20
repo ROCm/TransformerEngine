@@ -26,13 +26,6 @@
 namespace transformer_engine {
 
 #if defined(__HIP_PLATFORM_AMD__) || CUDA_VERSION >= 12080
-
-#ifdef __HIP_PLATFORM_AMD__
-using fp4x4_storage_t = __hip_fp4x4_storage_t;
-#else
-using fp4x4_storage_t = __nv_fp4x4_e2m1;
-#endif
-
 namespace quantize_transpose_nvfp4 {
 namespace {
 
@@ -285,7 +278,7 @@ __device__ __forceinline__ size_t scale_factor_swizzled_offset(size_t row_idx, s
 }
 
 #ifdef __HIP_PLATFORM_AMD__
-__device__ __forceinline__ fp4x4_storage_t cvt_fp32_to_fp4_4x_with_stochastic_rounding(
+__device__ __forceinline__ __hip_fp4x4_storage_t cvt_fp32_to_fp4_4x_with_stochastic_rounding(
 #else
 __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_stochastic_rounding(
 #endif
@@ -315,14 +308,14 @@ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_stochastic_ro
   const __hip_fp4x2_storage_t lo = u.fp4x2[1];
   u.ui32 = __builtin_amdgcn_cvt_scalef32_sr_pk_fp4_f32(u.ui32, packed23, rbits, 1.0f, 1);
   const __hip_fp4x2_storage_t hi = u.fp4x2[1];
-  return static_cast<fp4x4_storage_t>(lo | (static_cast<fp4x4_storage_t>(hi) << 8));
+  return static_cast<__hip_fp4x4_storage_t>(lo | (static_cast<__hip_fp4x4_storage_t>(hi) << 8));
 #else
   NVTE_DEVICE_ERROR("FP4 stochastic rounding on AMDGPU requires gfx950 or later.");
 #endif // ARCH_HAS_STOCHASTIC_ROUNDING
 #endif // !__HIP_PLATFORM_AMD__
     uint16_t dummy = 0;
 #ifdef __HIP_PLATFORM_AMD__
-    return *reinterpret_cast<fp4x4_storage_t*>(&dummy);
+    return *reinterpret_cast<__hip_fp4x4_storage_t*>(&dummy);
 #else
     return *reinterpret_cast<__nv_fp4x4_e2m1*>(&dummy);
 #endif
@@ -332,7 +325,7 @@ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_stochastic_ro
 }
 
 #ifdef __HIP_PLATFORM_AMD__
-__device__ __forceinline__ fp4x4_storage_t cvt_fp32_to_fp4_4x_with_rn(const float2 in01,
+__device__ __forceinline__ __hip_fp4x4_storage_t cvt_fp32_to_fp4_4x_with_rn(const float2 in01,
 #else
 __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_rn(const float2 in01,
 #endif
@@ -344,7 +337,7 @@ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_rn(const floa
   const __hip_fp4_storage_t q2 = __hip_cvt_float_to_fp4(in23.x, __HIP_E2M1, hipRoundNearest);
   const __hip_fp4_storage_t q3 = __hip_cvt_float_to_fp4(in23.y, __HIP_E2M1, hipRoundNearest);
 
-  return static_cast<fp4x4_storage_t>(
+  return static_cast<__hip_fp4x4_storage_t>(
         (q0 & 0xFu)
       | ((q1 & 0xFu) << 4)
       | ((q2 & 0xFu) << 8)
@@ -377,7 +370,7 @@ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_rn(const floa
 
 template <bool kApplyStochasticRounding>
 #ifdef __HIP_PLATFORM_AMD__
-__device__ __forceinline__ fp4x4_storage_t cvt_fp32_to_fp4_4x(const float2 in01, const float2 in23,
+__device__ __forceinline__ __hip_fp4x4_storage_t cvt_fp32_to_fp4_4x(const float2 in01, const float2 in23,
 #else
 __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x(const float2 in01, const float2 in23,
 #endif
@@ -616,7 +609,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
         const uint32_t rbits = kApplyStochasticRounding ? get_rbits(rng, random_uint4, rnd_idx) : 0;
         // Convert to __nv_fp4x4_e2m1
 #ifdef __HIP_PLATFORM_AMD__
-        fp4x4_storage_t out_4x = cvt_fp32_to_fp4_4x<kApplyStochasticRounding>(f2_a, f2_b, rbits);
+        __hip_fp4x4_storage_t out_4x = cvt_fp32_to_fp4_4x<kApplyStochasticRounding>(f2_a, f2_b, rbits);
         output_vec.data.elt[i] = static_cast<__hip_fp4x2_storage_t>(out_4x & 0xFF);
         output_vec.data.elt[i + 1] = static_cast<__hip_fp4x2_storage_t>((out_4x >> 8) & 0xFF);
 #else
@@ -750,7 +743,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
               kApplyStochasticRounding ? get_rbits(rng, random_uint4, rnd_idx) : 0;
           // Convert to __nv_fp4x4_e2m1
 #ifdef __HIP_PLATFORM_AMD__
-          fp4x4_storage_t out_4x = cvt_fp32_to_fp4_4x<kApplyStochasticRounding>(f2_a, f2_b, rbits);
+          __hip_fp4x4_storage_t out_4x = cvt_fp32_to_fp4_4x<kApplyStochasticRounding>(f2_a, f2_b, rbits);
           output_vec.data.elt[i] = static_cast<__hip_fp4x2_storage_t>(out_4x & 0xFF);
           output_vec.data.elt[i + 1] = static_cast<__hip_fp4x2_storage_t>((out_4x >> 8) & 0xFF);
 #else
