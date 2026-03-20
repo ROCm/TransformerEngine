@@ -9,7 +9,7 @@ a framework for benchmarking Python packages over their lifetime.
 - A ROCm or CUDA GPU must be available.
 - Install ASV: `pip install asv`
 
-ASV is configured with `environment_type: "existing"` (in `asv.conf.json` at the repo root),
+ASV is configured with `environment_type: "existing"` (in `benchmarks/asv/asv.conf.json`),
 meaning it uses the current Python environment directly — it does not create virtualenvs or
 attempt to build TE itself. The config sets `branches: ["HEAD"]` so that `asv publish` accepts results from
 whichever branch is currently checked out — this works for both local development
@@ -28,33 +28,40 @@ bash benchmarks/asv/run_benchmarks.sh <command> [options]
 | Command | Description |
 |---|---|
 | `setup [name]` | Register machine with ASV (defaults to `hostname`) |
-| `run [suite]` | Run benchmarks for the current commit (optionally a single suite) |
-| `quick [suite]` | Smoke test — single iteration, results not saved |
-| `direct suite [method]` | Fast in-process run — no subprocesses, no ASV overhead |
+| `run [suite] [method]` | Run benchmarks in-process (fast, saves ASV-compatible results) |
+| `run --asv [suite]` | Run benchmarks via ASV (subprocess isolation per benchmark) |
+| `quick [suite]` | Smoke test via ASV — single iteration, results not saved |
 | `compare [ref] [new]` | Compare two commits (defaults to `HEAD~1` vs `HEAD`) |
 | `view` | Generate HTML dashboard and serve on `localhost:8080` |
 | `list` | List available benchmark suites |
+
+The default `run` command executes benchmarks directly in-process, avoiding the
+significant subprocess-per-benchmark overhead that ASV imposes. Results are saved in
+ASV-compatible format and can be viewed with `view`. Use `run --asv` when you need
+ASV's subprocess isolation (e.g. for CI or statistical rigor).
 
 Examples:
 
 ```bash
 bash benchmarks/asv/run_benchmarks.sh setup mi325
-bash benchmarks/asv/run_benchmarks.sh run bench_casting
-bash benchmarks/asv/run_benchmarks.sh quick
-bash benchmarks/asv/run_benchmarks.sh direct bench_casting
-bash benchmarks/asv/run_benchmarks.sh direct bench_gemm time_forward
+bash benchmarks/asv/run_benchmarks.sh run                           # all suites
+bash benchmarks/asv/run_benchmarks.sh run bench_casting             # one suite
+bash benchmarks/asv/run_benchmarks.sh run bench_gemm time_forward   # one method
+bash benchmarks/asv/run_benchmarks.sh run -w 5 -n 20 bench_casting  # custom iterations
+bash benchmarks/asv/run_benchmarks.sh run --asv bench_casting       # via ASV subprocesses
 bash benchmarks/asv/run_benchmarks.sh compare HEAD~3 HEAD
 bash benchmarks/asv/run_benchmarks.sh view
 ```
 
 ## Local usage (manual ASV commands)
 
-All commands are run from the **repository root** (where `asv.conf.json` lives).
+All manual `asv` commands require `--config` with an **absolute path** to the config file
+and should be run from the **repository root**. ASV does not resolve relative `--config` paths.
 
 ### Register your machine
 
 ```bash
-asv machine --yes --machine my-machine-name
+asv machine --config $(pwd)/benchmarks/asv/asv.conf.json --yes --machine my-machine-name
 ```
 
 This creates a machine profile in `benchmarks/.asv/results/my-machine-name/machine.json`.
@@ -64,7 +71,7 @@ the name must be consistent across runs for historical comparison.
 ### Run all benchmarks
 
 ```bash
-asv run --python=same --launch-method spawn --set-commit-hash $(git rev-parse HEAD)
+asv run --config $(pwd)/benchmarks/asv/asv.conf.json --python=same --launch-method spawn --set-commit-hash $(git rev-parse HEAD)
 ```
 
 - `--python=same` — use the current interpreter (required with `environment_type: "existing"`)
@@ -75,7 +82,7 @@ asv run --python=same --launch-method spawn --set-commit-hash $(git rev-parse HE
 ### Run a single suite
 
 ```bash
-asv run --python=same --launch-method spawn --set-commit-hash $(git rev-parse HEAD) --bench bench_casting
+asv run --config $(pwd)/benchmarks/asv/asv.conf.json --python=same --launch-method spawn --set-commit-hash $(git rev-parse HEAD) --bench bench_casting
 ```
 
 The `--bench` argument accepts a regex that matches benchmark file or class names.
@@ -83,7 +90,7 @@ The `--bench` argument accepts a regex that matches benchmark file or class name
 ### Quick smoke test
 
 ```bash
-asv run --python=same --launch-method spawn --quick --set-commit-hash $(git rev-parse HEAD) --bench bench_casting
+asv run --config $(pwd)/benchmarks/asv/asv.conf.json --python=same --launch-method spawn --quick --set-commit-hash $(git rev-parse HEAD) --bench bench_casting
 ```
 
 `--quick` runs each benchmark only once with no statistical analysis. Useful for verifying
@@ -92,7 +99,7 @@ benchmarks work, but note that results are **not saved to disk** in quick mode.
 ### Compare two commits
 
 ```bash
-asv continuous --python=same --launch-method spawn HEAD~1 HEAD
+asv continuous --config $(pwd)/benchmarks/asv/asv.conf.json --python=same --launch-method spawn HEAD~1 HEAD
 ```
 
 This checks out each commit, runs benchmarks on both, and reports regressions.
@@ -101,8 +108,8 @@ Note: this only works if the benchmark files exist on both commits.
 ### Generate an HTML dashboard
 
 ```bash
-asv publish
-asv preview
+asv publish --config $(pwd)/benchmarks/asv/asv.conf.json
+asv preview --config $(pwd)/benchmarks/asv/asv.conf.json
 ```
 
 `asv publish` generates static HTML from stored results into `benchmarks/.asv/html/`.

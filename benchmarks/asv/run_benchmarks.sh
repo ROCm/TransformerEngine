@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Helper script for common ASV benchmark tasks.
-# Run from the repository root (where asv.conf.json lives).
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
 BENCH_DIR="benchmarks/asv"
+ASV_CONF="$(pwd)/$BENCH_DIR/asv.conf.json"
 mapfile -t SUITES < <(find "$BENCH_DIR" -maxdepth 1 -name 'bench_*.py' -printf '%f\n' | sed 's/\.py$//' | sort)
 
 usage() {
@@ -14,10 +14,10 @@ Usage: bash benchmarks/asv/run_benchmarks.sh <command> [options]
 
 Commands:
   setup                 Register this machine with ASV
-  run [SUITE]           Run all benchmarks, or a single suite (e.g. bench_casting)
-  quick [SUITE]         Smoke-test run (single iteration, results not saved)
-  direct [-w W] [-n N] SUITE [METHOD]
-                      Fast in-process run (no subprocesses, no ASV overhead)
+  run [-w W] [-n N] [SUITE] [METHOD]
+                        Run benchmarks in-process (fast, saves ASV-compatible results)
+  run --asv [SUITE]     Run benchmarks via ASV (subprocess isolation per benchmark)
+  quick [SUITE]         Smoke-test via ASV (single iteration, results not saved)
   compare [REF] [NEW]   Compare two commits (default: HEAD~1 vs HEAD)
   view                  Generate HTML dashboard and open preview server
   list                  List available benchmark suites
@@ -29,41 +29,51 @@ case "${1:-}" in
     setup)
         MACHINE="${2:-$(hostname)}"
         echo "Registering machine as: $MACHINE"
-        asv machine --yes --machine "$MACHINE"
+        asv machine --yes --machine "$MACHINE" --config "$ASV_CONF"
         ;;
     run)
-        CMD=(asv run --python=same --launch-method spawn
-             --set-commit-hash "$(git rev-parse HEAD)")
-        [[ -n "${2:-}" ]] && CMD+=(--bench "$2")
-        echo "Running: ${CMD[*]}"
-        "${CMD[@]}"
+        shift
+        if [[ "${1:-}" == "--asv" ]]; then
+            shift
+            CMD=(asv run --config "$ASV_CONF" --python=same --launch-method spawn
+                 --set-commit-hash "$(git rev-parse HEAD)")
+            [[ -n "${1:-}" ]] && CMD+=(--bench "$1")
+            echo "Running (asv): ${CMD[*]}"
+            "${CMD[@]}"
+        else
+            # Default: fast in-process run
+            ARGS=()
+            while [[ $# -gt 0 ]]; do
+                ARGS+=("$1")
+                shift
+            done
+            if [[ ${#ARGS[@]} -eq 0 ]]; then
+                # Run all suites
+                for s in "${SUITES[@]}"; do
+                    python "$BENCH_DIR/direct_run.py" "$s"
+                done
+            else
+                python "$BENCH_DIR/direct_run.py" "${ARGS[@]}"
+            fi
+        fi
         ;;
     quick)
-        CMD=(asv run --python=same --launch-method spawn --quick
+        CMD=(asv run --config "$ASV_CONF" --python=same --launch-method spawn --quick
              --set-commit-hash "$(git rev-parse HEAD)")
         [[ -n "${2:-}" ]] && CMD+=(--bench "$2")
         echo "Running (quick): ${CMD[*]}"
         "${CMD[@]}"
         ;;
-    direct)
-        shift
-        if [[ $# -eq 0 ]]; then
-            echo "Usage: $0 direct [options] SUITE [METHOD]"
-            echo "Options: -w WARMUP  -n ITERS"
-            exit 1
-        fi
-        python "$BENCH_DIR/direct_run.py" "$@"
-        ;;
     compare)
         REF="${2:-HEAD~1}"
         NEW="${3:-HEAD}"
         echo "Comparing $REF vs $NEW"
-        asv continuous --python=same --launch-method spawn "$REF" "$NEW"
+        asv continuous --config "$ASV_CONF" --python=same --launch-method spawn "$REF" "$NEW"
         ;;
     view)
-        asv publish
+        asv publish --config "$ASV_CONF"
         echo "Starting preview server at http://localhost:8080"
-        asv preview
+        asv preview --config "$ASV_CONF"
         ;;
     list)
         echo "Available benchmark suites:"
