@@ -1,8 +1,6 @@
 ..
     This file was modified to include portability information to AMDGPU.
-
     Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
-
     Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
     See LICENSE for license information.
@@ -14,43 +12,38 @@ Prerequisites
 -------------
 1. `AMD Instinct GPU <https://www.amd.com/en/products/accelerators/instinct.html>`__. Other GPUs are not supported while they can still work.
 2. Linux x86_64
-3. `ROCm stack <https://rocm.docs.amd.com/projects/install-on-linux/en/latest/index.html>`__
-  3.1. For ROCm TheRock (ROCm 7.11 and newer), install amdrocm-core-sdk* package
+3. `ROCm stack <https://rocm.docs.amd.com/projects/install-on-linux/en/latest/index.html>`__. For ROCm TheRock (ROCm 7.11 and newer), install amdrocm-core-sdk* package
 
 Additional Prerequisites
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
-1. [For PyTorch support] `https://rocm.docs.amd.com/projects/install-on-linux/en/develop/install/3rd-party/pytorch-install.html`__
-2. [For JAX support] `https://rocm.docs.amd.com/projects/install-on-linux/en/develop/install/3rd-party/jax-install.html`__
+1. [For PyTorch support] `Pytorch <https://rocm.docs.amd.com/projects/install-on-linux/en/develop/install/3rd-party/pytorch-install.html>`__
+2. [For JAX support] `JAX <https://rocm.docs.amd.com/projects/install-on-linux/en/develop/install/3rd-party/jax-install.html>`__
 
-if HIP compiler complains it cannot detect the platform set `HIP_PLATFORM=amd` in the environment.
-if ROCm is installed in a non-standard location, set `ROCM_PATH` to the root of the ROCm installation in the environment, e.g. `ROCM_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel` and additonally set the following environment variables:
+If HIP compiler complains it cannot detect the platform set `HIP_PLATFORM=amd` in the environment.
+If ROCm is installed in a non-standard location, set `ROCM_PATH` to the root of the ROCm installation in the environment, e.g. `ROCM_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel` and additionally set the following environment variables:
 
-- `HIP_DEVICE_LIB_PATH=$ROCM_PATH/llvm/amdgcn/bitcode/`
-- `CMAKE_PREFIX_PATH=$ROCM_PATH/lib/cmake/``
+- HIP_DEVICE_LIB_PATH=$ROCM_PATH/llvm/amdgcn/bitcode/
+- CMAKE_PREFIX_PATH=$ROCM_PATH/lib/cmake/
 
 pip - from wheels
 -----------------
 
-Transformer Engine for ROCm 7.0 and newer can be installed from manylinux wheels published at `https://repo.radeon.com/rocm/manylinux`. For example, the wheels for ROCm 7.2 are at `https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/`. Four files related to Transformer Engine can be found there:
+Transformer Engine for ROCm 7.0 and newer can be installed from `Manylinux wheels <https://repo.radeon.com/rocm/manylinux>`__. Four files related to Transformer Engine can be found there:
 
 - transformer_engine-\*-py3-none-any.whl - the main TE pure Python metapackage.
 - transformer_engine_rocm-\*-py3-none-manylinux_2_28_x86_64.whl - the core library package.
 - transformer_engine_jax-\*.tar.gz - source tarball (sdist) for the JAX extension.
 - transformer_engine_torch-\*.tar.gz - source tarball (sdist) for the Pytorch extension.
 
-Below are the example commands to download and install the wheels. They install both Pytorch and JAX extensions on the system where both frameworks are installed.
+Below are the example commands to download and install the wheels published with ROCm 7.2. They install both Pytorch and JAX extensions on the system where both frameworks are installed.
 
 .. code-block:: bash
 
-  wget https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/transformer_engine_rocm-2.4.0-py3-none-manylinux_2_28_x86_64.whl
-  wget https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/transformer_engine-2.4.0-py3-none-any.whl
-  wget https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/transformer_engine_jax-2.4.0.tar.gz
-  wget https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/transformer_engine_torch-2.4.0.tar.gz
-
+  wget -r -l1 -nd -A 'transformer_engine*' https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/
   pip install ./transformer_engine* --no-build-isolation
 
-Starting from version 2.10 core library wheel can be installed by itself or as an extenstion for TE Python metapackage.
+Starting from version 2.10, core library wheel can be installed by itself or as an extension for TE Python metapackage.
 
 Example of installing ROCm core library wheel without any framework extensions:
 
@@ -58,7 +51,7 @@ Example of installing ROCm core library wheel without any framework extensions:
 
   pip install transformer_engine_rocm7-2.10.0-py3-none-manylinux_2_28_x86_64.whl
 
-Additionaly install framework extensions using ROCm package name and pip extras syntax.
+Additionally install framework extensions using ROCm package name and pip extras syntax.
 
 .. code-block:: bash
 
@@ -68,7 +61,7 @@ Installing the common library and frameworks extensions as extras for TE Python 
 
 .. code-block:: bash
 
-  pip install ./transformer_engine-2.4.0-py3-none-any.whl[rocm7,rocm_pytorch,rocm_jax] --no-build-isolation
+  pip install ./transformer_engine-2.10.0-py3-none-any.whl[rocm7,rocm_pytorch,rocm_jax] --no-build-isolation
 
 It is not recommended to install TE Python metapackage using just package name transformer_engine because of possible installing of the NVIDIA GPU version. It is recommended to use either transformer_engine_rocm7 or wheel file name to make sure the correct common library is installed.
 
@@ -84,22 +77,18 @@ Execute the following commands to install Transformer Engine from source:
 
   cd TransformerEngine
   export NVTE_FRAMEWORK=pytorch,jax     # Optionally set framework(s)
-  export NVTE_ROCM_ARCH="gfx942;gfx950" # Optionally set target GPU achs; gfx942 for MI300/MI325, and gfx950 for MI350
+  export NVTE_ROCM_ARCH="gfx942;gfx950" # Optionally set target GPU architectures; gfx942 for MI300/MI325, and gfx950 for MI350
   export NVTE_USE_ROCM=1                # Optionally force building for ROCm, useful when both ROCm and CUDA build environments are installed. If set to 0, it will force building for CUDA.
   pip3 install --no-build-isolation .   # Build and install
 
-Or instead of immediate istall, create wheel file for later installation:
+Or instead of immediate installation, create wheel file to install it later:
 
 .. code-block:: bash
 
   pip wheel . --no-build-isolation
   pip3 install ./transformer_engine-*.whl
 
-If the Git repository has already been cloned, make sure to also clone the submodules:
-
-.. code-block:: bash
-
-  git submodule update --init --recursive
+If the Git repository has already been cloned, make sure the submodules do not have any local changes, otherwise the build will try to reset them unless `NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD=1` is set.
 
 Extra dependencies for testing can be installed by setting the "test" option:
 
@@ -121,8 +110,8 @@ switching between installing from source and installing from wheels. Here is the
 
 .. code-block:: bash
 
-  # The package name pattern might be transformer_engine or transformer-engine depending on setuptools version
-  pip list | grep transformer.engine | xargs pip uninstall -y
+  # The package name pattern might be transformer_engine or transformer-engine depending on Setuptools version
+  pip list | grep transformer.engine | cut -f' ' -d1 | xargs pip uninstall -y
 
 
 Installation on NVIDIA GPUs
