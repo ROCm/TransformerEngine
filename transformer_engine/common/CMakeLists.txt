@@ -427,7 +427,9 @@ else()
   function(get_git_commit REPO_DIR COMMIT_ID_VAR)
     file(REAL_PATH "${REPO_DIR}" REPO_DIR)
     execute_process(
-      COMMAND git -C ${REPO_DIR} rev-parse HEAD
+      COMMAND sh -c "export GIT_CONFIG_GLOBAL=$(mktemp /tmp/gitconfig.XXXXXX);
+      git config --global --add safe.directory ${REPO_DIR} && git -C ${REPO_DIR} rev-parse HEAD;
+      rm $GIT_CONFIG_GLOBAL"
       OUTPUT_VARIABLE ${COMMIT_ID_VAR}
       OUTPUT_STRIP_TRAILING_WHITESPACE
     )
