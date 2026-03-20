@@ -183,8 +183,8 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 
 #ifdef __HIP_PLATFORM_AMD__
     // NVFP4 requires [128,4] padding on AMD regardless of MXFP8 alignment constants
-    constexpr size_t nvfp4_align_Y = 128;
-    constexpr size_t nvfp4_align_X = 4;
+    constexpr size_t nvfp4_align_Y = nvfp4_scale_tensor_alignment_Y_rowwise;
+    constexpr size_t nvfp4_align_X = nvfp4_scale_tensor_alignment_X_rowwise;
 #else
     constexpr size_t nvfp4_align_Y = scale_tensor_alignment_Y_rowwise;
     constexpr size_t nvfp4_align_X = scale_tensor_alignment_X_rowwise;
