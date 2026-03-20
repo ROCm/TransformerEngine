@@ -12,7 +12,7 @@
 #include <vector>
 #include <array>
 #include <random>
-#include <cudaTypedefs.h>
+
 #ifndef USE_ROCM
 #define FP4_TYPE_SUPPORTED (CUDA_VERSION >= 12080)
 #else
@@ -20,7 +20,6 @@
 #endif
 
 #include <cuda_bf16.h>
-#include <cuda_fp16.h>
 #include <cuda_fp8.h>
 #if FP4_TYPE_SUPPORTED
 #include <cuda_fp4.h>

@@ -683,8 +683,8 @@ void performTest(float (*OP)(const float),
 #endif
                                       scale_mismatches_num);
 #ifdef __HIP_PLATFORM_AMD__
-    }
-    }
+    } // for (bool use_2d_quantization : {false, true}) {
+    } // for (bool use_stochastic_rounding : (is_gfx950 ? std::vector<bool>{false, true} : std::vector<bool>{false})) {
 #endif
 }
 
