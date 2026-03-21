@@ -354,6 +354,7 @@ class FusedAttnRunner:
             )
 
         if (
+            not is_hip_extension() and
             get_device_compute_capability(0) == 100
             and self.dropout_prob == 0.1
             and self.attn_bias_type is not AttnBiasType.NO_BIAS

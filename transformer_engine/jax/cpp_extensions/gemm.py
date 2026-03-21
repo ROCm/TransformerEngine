@@ -67,6 +67,9 @@ def get_cublas_workspace_size_bytes() -> None:
         """Return 64 MiB for gfx50x, 32 MiB for all other architectures."""
         if tex.get_device_compute_capability(0) == 95:
             return 67_108_864
+        """TODO: Check WS size requirements for GFX1250"""
+        if tex.get_device_compute_capability(0) == 125:
+            return 67_108_864
         return 33_554_432
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
     if tex.get_device_compute_capability(0) >= 90:

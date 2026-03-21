@@ -748,13 +748,13 @@ def test_gpt_full_activation_recompute(
 ):
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
-    if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5):
+    if IS_HIP_EXTENSION and get_device_compute_capability() in ((9, 5), (12, 5)):
         if (dtype == torch.bfloat16
             and not fp8
             and not use_reentrant
             and recipe.float8_per_tensor_scaling()
             ):
-            pytest.skip("hipBLASLt does not provide suitable algorithms on GFX950 for this config.")
+            pytest.skip("hipBLASLt does not provide suitable algorithms for this config.")
 
     config = model_configs[model]
     torch.compiler.reset() # avoid cache size limit overflow
@@ -2836,7 +2836,7 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
             max_seqlen_kv=config.max_seqlen_kv,
         )
 
-        if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5):
+        if IS_HIP_EXTENSION and get_device_compute_capability() in ((9, 5), (12, 5)):
             tols_thd = dtype_tols(dtype)
             # On gfx950 the results for THD are different
             # that results in lower final result precision
@@ -2972,11 +2972,11 @@ def test_fp8gemm_with_unfused_quantization(N, datatype, input_quantizer, out_qua
         pytest.skip(reason_for_no_fp8)
     if is_mxfp8_needed and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5):
+    if IS_HIP_EXTENSION and get_device_compute_capability() in ((9, 5), (12, 5)):
         if isinstance(input_quantizer, MXFP8Quantizer):
             N = math.ceil(N / 128) * 128 #hipBlasLt supports K which is multiple of 128 for MXFP8
         if not is_mxfp8_needed and isinstance(out_quantizer, Float8Quantizer):
-            pytest.skip("hipBLASLt does not provide suitable algorithms on GFX950 for this config.")
+            pytest.skip("hipBLASLt does not provide suitable algorithms for this config.")
     inp_fp8 = input_quantizer(torch.randn(N, N, device="cuda", dtype=datatype))
     weight_fp8 = input_quantizer(torch.randn(N, N, device="cuda", dtype=datatype))
     outp_type = torch.float32

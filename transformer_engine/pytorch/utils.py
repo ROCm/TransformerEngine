@@ -466,7 +466,7 @@ get_torch_float8_e5m2_type = lambda: torch.float8_e5m2fnuz if is_fp8_fnuz() else
 def is_bf16_compatible() -> None:
     if IS_HIP_EXTENSION:
         # only MI200 and newer machines support bf16
-        if get_device_compute_capability() in [(9, 4), (9, 5)] or is_mi200():
+        if get_device_compute_capability() in ((9, 4), (9, 5), (12, 5)) or is_mi200():
             return True
         else:
             return False

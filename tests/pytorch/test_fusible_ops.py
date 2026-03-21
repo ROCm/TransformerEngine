@@ -973,7 +973,7 @@ class TestBasicOps:
         quantized_grad_input: bool,
     ) -> None:
         """GEMM with FP8 inputs and outputs"""
-        if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5):
+        if IS_HIP_EXTENSION and get_device_compute_capability() in ((9, 5), (12, 5)):
             if (
                 quantization
                 and quantization.startswith("fp8")
@@ -981,7 +981,7 @@ class TestBasicOps:
                 and (quantized_grad_input or quantized_output)
             ):
                 pytest.skip(
-                    "hipBLASLt does not provide suitable algorithms on gfx950 for this config."
+                    "hipBLASLt does not provide suitable algorithms for this config."
                 )
         if quantization is None:
             pytest.skip("Skipping case without quantization")
