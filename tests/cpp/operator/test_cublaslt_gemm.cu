@@ -383,14 +383,14 @@ void performTest(const TestParams& params) {
 
   if (has_fp8)
   {
-    bool fp8_supported = (prop.major == 9 && prop.minor >= 4);
+    bool fp8_supported = (prop.major == 9 && prop.minor >= 4) || prop.major >= 12;
     if (!fp8_supported) {
       GTEST_SKIP() << "FP8 is not supported in current config";
     }
 
     if (use_mxfp8)
     {
-      bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5);
+      bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5) || prop.major >= 12;
       if (!mxfp8_supported) {
         GTEST_SKIP() << "MXFP8 is not supported in current config";
       }
@@ -490,6 +490,10 @@ void performTest(const TestParams& params) {
   if (prop.major == 9 && prop.minor == 5) {
     workspace_size = 67108864;
   }
+  //TODO: gfx1250 requirements
+  if (prop.major == 12) {
+    workspace_size = 67108864;
+  }
 #endif
   Tensor Workspace("Workspace", TShape{ workspace_size }, DType::kByte);
 
@@ -574,7 +578,7 @@ void performDqTest(const TestParams &params) {
   cudaDeviceProp prop;
   (void)cudaGetDeviceProperties(&prop, 0);
 
-  bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5);
+  bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5) || prop.major >= 12;
   if (!mxfp8_supported) {
     GTEST_SKIP() << "MXFP8 is not supported in current config";
   }
