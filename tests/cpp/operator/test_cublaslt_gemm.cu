@@ -394,6 +394,9 @@ void performTest(const TestParams& params) {
       if (!mxfp8_supported) {
         GTEST_SKIP() << "MXFP8 is not supported in current config";
       }
+      if (isFp8Type(dtype)){
+        GTEST_SKIP() << "MXFP8 with float8 output is not supported";
+      }
       if (params.use_bias) {
         GTEST_SKIP() << "MXFP8 GEMM with bias is not supported";
       }
