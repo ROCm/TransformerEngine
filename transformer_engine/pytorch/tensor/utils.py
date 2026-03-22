@@ -482,6 +482,7 @@ def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Ten
         if isinstance(model_weight, Float8Tensor):
             # Delayed scaling and per-tensor current scaling: if backend does not support
             # non-transposed FP8 GEMM, pre-create the transpose.
+            # ROCm: add check for columnwise_usage from the quantizer since keep_fp8_weight_transpose_cache can be false.
             if model_weight._quantizer.columnwise_usage and not is_non_tn_fp8_gemm_supported():
                 model_weight._create_transpose()
         elif isinstance(model_weight, Float8BlockwiseQTensor):

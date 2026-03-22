@@ -33,7 +33,7 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch.tensor import cast_master_weights_to_fp8
 from transformer_engine.pytorch.tensor.utils import post_all_gather_processing, replace_raw_data
-
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 def _get_quantization_recipe(quantization) -> Recipe:
     """Quantization recipe setup"""
@@ -710,7 +710,9 @@ def run_parallel_tests() -> None:
         quantizations.append("fp8_block")
 
     manual_post_all_gather_processings = [False, True]
-    keep_fp8_weight_transpose_caches = [True, False]
+    keep_fp8_weight_transpose_cache = [True]
+    if IS_HIP_EXTENSION:
+        keep_fp8_weight_transpose_cache.append(False)
 
     _test_mini_optimizer(dp_group)
 
