@@ -154,6 +154,7 @@ for _fus_attn in auto flash ck aotriton unfused; do
     if [ $_fus_attn = "ck" -o  $_fus_attn = "aotriton" ]; then
         continue #NPI does not support FusedAttn
     fi
+    _DEFAULT_FUSED_ATTN="unfused"
 
     if [ -n "$TEST_JOBS_MODE" ]; then
         test -n "$TEST_SGPU" && run_test_job "$_fus_attn"
