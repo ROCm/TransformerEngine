@@ -17,7 +17,6 @@ Commands:
   run [-w W] [-n N] [SUITE] [METHOD]
                         Run benchmarks in-process (fast, saves ASV-compatible results)
   run --asv [SUITE]     Run benchmarks via ASV (subprocess isolation per benchmark)
-  quick [SUITE]         Smoke-test via ASV (single iteration, results not saved)
   compare [REF] [NEW]   Compare two commits (default: HEAD~1 vs HEAD)
   view                  Generate HTML dashboard and open preview server
   list                  List available benchmark suites
@@ -56,13 +55,6 @@ case "${1:-}" in
                 python "$BENCH_DIR/driver.py" "${ARGS[@]}"
             fi
         fi
-        ;;
-    quick)
-        CMD=(asv run --config "$ASV_CONF" --python=same --launch-method spawn --quick
-             --set-commit-hash "$(git rev-parse HEAD)")
-        [[ -n "${2:-}" ]] && CMD+=(--bench "$2")
-        echo "Running (quick): ${CMD[*]}"
-        "${CMD[@]}"
         ;;
     compare)
         REF="${2:-HEAD~1}"

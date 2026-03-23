@@ -4,18 +4,11 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-"""Run ASV benchmark classes directly in-process, bypassing subprocess overhead.
-
-Results are saved in ASV-compatible format so they can be viewed with
-``asv publish && asv preview``.
+"""ASV benchmark driver — runs bench classes in-process and saves ASV-compatible results.
 
 Usage:
-    python benchmarks/asv/driver.py [options] <suite> [method_filter]
-
-Examples:
-    python benchmarks/asv/driver.py bench_casting
-    python benchmarks/asv/driver.py bench_gemm time_forward
-    python benchmarks/asv/driver.py -w 5 -n 20 bench_casting
+    python driver.py <suite> [method_filter] [-w W] [-n N] [--no-save]
+    python bench_gemm.py [method_filter] [-w W] [-n N] [--no-save]
 """
 
 import argparse
@@ -286,12 +279,23 @@ def run_class(suite_name, cls, class_name, method_filter=None, warmup=3, iters=7
     return all_results
 
 
-def _parse_args(with_suite=False):
+def run_as_main(caller_file=None):
+    """Run benchmarks from a bench file or from the command line.
+
+    When called with a file path (from a bench file's ``__main__`` block),
+    the suite is derived from the filename.  When called without arguments
+    (i.e. ``python driver.py bench_gemm``), the suite is taken from argv.
+
+    Usage from a bench file::
+
+        if __name__ == "__main__":
+            from driver import run_as_main
+            run_as_main(__file__)
+    """
     parser = argparse.ArgumentParser(
         description="Run ASV benchmarks directly in-process (no subprocess overhead).")
-    if with_suite:
-        parser.add_argument("suite", nargs="?", default=None,
-                            help="Benchmark module name (e.g. bench_casting)")
+    if caller_file is None:
+        parser.add_argument("suite", help="Benchmark module name (e.g. bench_casting)")
     parser.add_argument("method_filter", nargs="?", default=None,
                         help="Only run time_* methods containing this string")
     parser.add_argument("-w", "--warmup", type=int, default=3,
@@ -300,57 +304,32 @@ def _parse_args(with_suite=False):
                         help="Number of timed iterations (default: 7)")
     parser.add_argument("--no-save", action="store_true",
                         help="Skip saving results to ASV format")
-    return parser.parse_args()
+    args = parser.parse_args()
 
+    if caller_file is not None:
+        script_dir = os.path.dirname(os.path.abspath(caller_file))
+        suite_name = os.path.splitext(os.path.basename(caller_file))[0]
+    else:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        suite_name = args.suite
 
-def _run_module(mod, suite_name, method_filter=None, warmup=3, iters=7, no_save=False):
-    """Run all Bench* classes in a module and optionally save results."""
+    os.chdir(script_dir)
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+
+    mod = importlib.import_module(suite_name)
+
     all_results = {}
     for name in sorted(dir(mod)):
         obj = getattr(mod, name)
         if isinstance(obj, type) and name.startswith("Bench"):
             results = run_class(
-                suite_name, obj, name, method_filter, warmup, iters)
+                suite_name, obj, name, args.method_filter, args.warmup, args.iters)
             all_results.update(results)
 
-    if all_results and not no_save:
+    if all_results and not args.no_save:
         save_asv_results(all_results)
 
 
-def run_as_main(caller_file):
-    """Entry point for bench files run directly (e.g. ``python bench_gemm.py``).
-
-    Call from a bench file's ``__main__`` block::
-
-        if __name__ == "__main__":
-            from driver import run_as_main
-            run_as_main(__file__)
-    """
-    script_dir = os.path.dirname(os.path.abspath(caller_file))
-    os.chdir(script_dir)
-    if script_dir not in sys.path:
-        sys.path.insert(0, script_dir)
-
-    suite_name = os.path.splitext(os.path.basename(caller_file))[0]
-    mod = importlib.import_module(suite_name)
-
-    args = _parse_args()
-    _run_module(mod, suite_name, args.method_filter, args.warmup, args.iters, args.no_save)
-
-
-def main():
-    args = _parse_args(with_suite=True)
-    if not args.suite:
-        print("error: suite argument is required when running driver.py directly",
-              file=sys.stderr)
-        sys.exit(1)
-
-    mod = importlib.import_module(args.suite)
-    _run_module(mod, args.suite, args.method_filter, args.warmup, args.iters, args.no_save)
-
-
 if __name__ == "__main__":
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    os.chdir(script_dir)
-    sys.path.insert(0, ".")
-    main()
+    run_as_main()

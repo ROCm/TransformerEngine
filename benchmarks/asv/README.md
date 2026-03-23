@@ -15,11 +15,24 @@ attempt to build TE itself. The config sets `branches: ["HEAD"]` so that `asv pu
 whichever branch is currently checked out — this works for both local development
 and CI (where `HEAD` points to `dev`).
 
-## Helper script
+## Running benchmarks
 
-A convenience wrapper (`benchmarks/asv/run_benchmarks.sh`) is provided for common tasks.
-It can be run from anywhere — it automatically `cd`s to the repo root. Available benchmark
-suites are discovered dynamically from `bench_*.py` files.
+### Direct execution (recommended for development)
+
+Each `bench_*.py` file is directly executable. Results are saved in ASV-compatible
+format by default.
+
+```bash
+cd benchmarks/asv
+python bench_gemm.py                        # run all methods in the suite
+python bench_gemm.py time_forward           # filter to a specific method
+python bench_gemm.py -w 5 -n 20             # custom warmup/iteration counts
+python bench_casting.py --no-save           # skip saving results
+```
+
+### Helper script
+
+`run_benchmarks.sh` wraps common tasks and can be run from anywhere.
 
 ```bash
 bash benchmarks/asv/run_benchmarks.sh <command> [options]
@@ -29,91 +42,32 @@ bash benchmarks/asv/run_benchmarks.sh <command> [options]
 |---|---|
 | `setup [name]` | Register machine with ASV (defaults to `hostname`) |
 | `run [suite] [method]` | Run benchmarks in-process (fast, saves ASV-compatible results) |
-| `run --asv [suite]` | Run benchmarks via ASV (subprocess isolation per benchmark) |
-| `quick [suite]` | Smoke test via ASV — single iteration, results not saved |
+| `run --asv [suite]` | Run via ASV subprocess isolation (for CI or statistical rigor) |
 | `compare [ref] [new]` | Compare two commits (defaults to `HEAD~1` vs `HEAD`) |
 | `view` | Generate HTML dashboard and serve on `localhost:8080` |
 | `list` | List available benchmark suites |
 
-The default `run` command executes benchmarks directly in-process, avoiding the
-significant subprocess-per-benchmark overhead that ASV imposes. Results are saved in
-ASV-compatible format and can be viewed with `view`. Use `run --asv` when you need
-ASV's subprocess isolation (e.g. for CI or statistical rigor).
+### Manual ASV commands
 
-Examples:
+All `asv` commands require `--config` with an **absolute path** and should be run
+from the **repo root**. The common flags are:
 
 ```bash
-bash benchmarks/asv/run_benchmarks.sh setup mi325
-bash benchmarks/asv/run_benchmarks.sh run                           # all suites
-bash benchmarks/asv/run_benchmarks.sh run bench_casting             # one suite
-bash benchmarks/asv/run_benchmarks.sh run bench_gemm time_forward   # one method
-bash benchmarks/asv/run_benchmarks.sh run -w 5 -n 20 bench_casting  # custom iterations
-bash benchmarks/asv/run_benchmarks.sh run --asv bench_casting       # via ASV subprocesses
-bash benchmarks/asv/run_benchmarks.sh compare HEAD~3 HEAD
-bash benchmarks/asv/run_benchmarks.sh view
-```
-
-## Local usage (manual ASV commands)
-
-All manual `asv` commands require `--config` with an **absolute path** to the config file
-and should be run from the **repository root**. ASV does not resolve relative `--config` paths.
-
-### Register your machine
-
-```bash
-asv machine --config $(pwd)/benchmarks/asv/asv.conf.json --yes --machine my-machine-name
-```
-
-This creates a machine profile in `benchmarks/.asv/results/my-machine-name/machine.json`.
-Use a descriptive name (e.g., `mi325`, `mi300x-dev`) — results are stored per machine, so
-the name must be consistent across runs for historical comparison.
-
-### Run all benchmarks
-
-```bash
-asv run --config $(pwd)/benchmarks/asv/asv.conf.json --python=same --launch-method spawn --set-commit-hash $(git rev-parse HEAD)
+ASV="asv --config $(pwd)/benchmarks/asv/asv.conf.json"
+COMMON="--python=same --launch-method spawn --set-commit-hash $(git rev-parse HEAD)"
 ```
 
 - `--python=same` — use the current interpreter (required with `environment_type: "existing"`)
-- `--launch-method spawn` — required for CUDA (fork causes "Cannot re-initialize CUDA in forked subprocess")
-- `--set-commit-hash` — **required** with `environment_type: "existing"`. Without it, ASV
-  runs benchmarks but silently discards results. The helper script sets this automatically.
-
-### Run a single suite
+- `--launch-method spawn` — required for CUDA/ROCm (fork causes reinitialization errors)
+- `--set-commit-hash` — **required** with `environment_type: "existing"`, otherwise ASV silently discards results
 
 ```bash
-asv run --config $(pwd)/benchmarks/asv/asv.conf.json --python=same --launch-method spawn --set-commit-hash $(git rev-parse HEAD) --bench bench_casting
+$ASV machine --yes --machine mi325                  # register machine
+$ASV run $COMMON                                    # run all benchmarks
+$ASV run $COMMON --bench bench_casting              # single suite (regex match)
+$ASV continuous $COMMON HEAD~1 HEAD                 # compare two commits
+$ASV publish && $ASV preview                        # HTML dashboard on localhost:8080
 ```
-
-The `--bench` argument accepts a regex that matches benchmark file or class names.
-
-### Quick smoke test
-
-```bash
-asv run --config $(pwd)/benchmarks/asv/asv.conf.json --python=same --launch-method spawn --quick --set-commit-hash $(git rev-parse HEAD) --bench bench_casting
-```
-
-`--quick` runs each benchmark only once with no statistical analysis. Useful for verifying
-benchmarks work, but note that results are **not saved to disk** in quick mode.
-
-### Compare two commits
-
-```bash
-asv continuous --config $(pwd)/benchmarks/asv/asv.conf.json --python=same --launch-method spawn HEAD~1 HEAD
-```
-
-This checks out each commit, runs benchmarks on both, and reports regressions.
-Note: this only works if the benchmark files exist on both commits.
-
-### Generate an HTML dashboard
-
-```bash
-asv publish --config $(pwd)/benchmarks/asv/asv.conf.json
-asv preview --config $(pwd)/benchmarks/asv/asv.conf.json
-```
-
-`asv publish` generates static HTML from stored results into `benchmarks/.asv/html/`.
-`asv preview` serves it locally on `http://localhost:8080`.
 
 ## How results are stored
 
@@ -132,64 +86,6 @@ benchmarks/.asv/results/
 
 Each commit JSON contains the wall-clock timings for every benchmark + parameter combination
 run on that machine. The `benchmarks/.asv/` directory is in `.gitignore`.
-
-### CI results (Artifactory)
-
-In CI, benchmarks run **only on pushes to `dev`** (not on PRs). This builds a historical
-record of performance on the main branch.
-
-The CI pipeline (`.github/workflows/rocm-ci.yml`) follows this flow:
-
-1. **Restore** — Download `results.tar.gz` from Artifactory for the current runner
-2. **Benchmark** — Run `asv run`, which appends a new `{commit}.json` to the results directory
-3. **Upload** — Tar up the results directory and upload back to Artifactory
-
-Results are stored per machine at:
-```
-https://compute-artifactory.amd.com:5000/artifactory/rocm-generic-local/te-ci/asv-results/
-  linux-te-mi325-8/results.tar.gz
-  linux-te-mi355-8/results.tar.gz
-```
-
-Each tarball contains the full ASV results directory for that machine, accumulating
-a new commit JSON on every push to `dev`. ASV machine names map to hardware:
-`mi325` for MI325X runners, `mi355` for MI355X runners.
-
-### Downloading CI results locally
-
-To inspect CI results on your local machine (requires Artifactory access):
-
-```bash
-# Download results for a specific machine
-curl -sf -H "X-JFrog-Art-Api:${ARTIFACTORY_API_KEY}" \
-  -o results.tar.gz \
-  "https://compute-artifactory.amd.com:5000/artifactory/rocm-generic-local/te-ci/asv-results/linux-te-mi325-8/results.tar.gz"
-
-# Extract into your local ASV results directory
-mkdir -p benchmarks/.asv/results
-tar xzf results.tar.gz -C benchmarks/.asv/results/
-
-# Generate and view the dashboard
-asv publish
-asv preview
-```
-
-This can also be provided statically via github pages.
-
-## Running benchmark scripts directly
-
-Each `bench_*.py` file can be executed directly, without the helper script or ASV:
-
-```bash
-cd benchmarks/asv
-python bench_gemm.py                        # run all methods in the suite
-python bench_gemm.py time_forward           # filter to a specific method
-python bench_gemm.py -w 5 -n 20            # custom warmup/iteration counts
-python bench_casting.py --no-save           # skip saving results to ASV format
-```
-
-This is equivalent to `run_benchmarks.sh run bench_gemm` but requires no wrapper.
-Results are saved in ASV-compatible format by default (viewable with `asv publish && asv preview`).
 
 ## Writing new benchmarks
 
@@ -222,8 +118,7 @@ if __name__ == "__main__":
 ```
 
 Key rules:
-- Method names starting with `time_` are automatically timed by ASV.
+- Method names starting with `time_` are automatically timed.
 - Always call `torch.cuda.synchronize()` at the end of `time_*` methods.
 - Clear `.grad` attributes in backward benchmarks to prevent memory accumulation.
-- ASV runs each `time_*` method in a **separate subprocess** — no shared state between methods.
 - The `params` list defines a cross-product; keep the matrix size reasonable.
