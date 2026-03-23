@@ -22,18 +22,18 @@
 #include "utils.h"
 
 // Macros to avoid repeating dispatch switch cases for max_seqlen_kv in [2, 16].
-// T, bi, hi and the pointer/scale args must be in scope where these are used.
+// T, bi, hi, d_qk and the pointer/scale args must be in scope where these are used.
 #define SMALLSEQ_DISPATCH_FWD_CASE(N)                                      \
   case N:                                                                  \
     dispatch_fwd<N, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dropout_mask, dropout, \
                        sqr_dk_scale, O_ptr, attn_workspace, cu_kv, cu_kv_p, \
-                       stream);                                            \
+                       d_qk, stream);                                      \
     break;
 #define SMALLSEQ_DISPATCH_BWD_CASE(N)                                        \
   case N:                                                                    \
     dispatch_bwd<N, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dO_ptr, attn_ptr,        \
                        dropout_mask, dropout, sqr_dk_scale, dQ_ptr, dK_ptr, \
-                       dV_ptr, workspace_ptr, cu_kv, cu_kv_p, stream);       \
+                       dV_ptr, workspace_ptr, cu_kv, cu_kv_p, d_qk, stream); \
     break;
 
 namespace transformer_engine {
@@ -58,8 +58,7 @@ struct SmallSeqConfig {
 /* MAX_SEQ_KV and HEAD_DIM are compile-time so kernels can use fixed stack arrays
  * (e.g. float results[max_seq_kv], T attn[max_seq_kv]) and constexpr grid/block
  * sizes. This matches varlen_attn/attn_fwd.cpp (FmhaKernelConfig<..., MAX_SEQ_KV, HEAD_DIM>)
- * and INTEGRATION_TASK.md: seq_q==1, max_seq_kv<=16; head_dim=128 is the only
- * value tested in varlen_attn (main() uses TestRunner<2,16>::run<..., 128, ...>). */
+ * Dispatch supports head_dim 128, 256, 512 (d_qk == d_v). Varlen_attn tests */
 
 // ----- Forward kernels (with runtime batch_size, head_num) -----
 
@@ -795,19 +794,51 @@ size_t fused_attn_smallseq_bwd_workspace_size(size_t b,
 template <int MAX_KV, typename T>
 static void dispatch_fwd(int b, int h_q, const T* Q, const T* K, const T* V, const T* dropout_mask,
                         float dropout, float scale, T* O, T* workspace, const int* cu_kv,
-                        const int* cu_kv_p, hipStream_t stream) {
-  run_attn_fwd_impl<T, SmallSeqConfig<MAX_KV, 128>>(
-      b, h_q, Q, K, V, dropout_mask, dropout, scale, O, workspace, cu_kv, cu_kv_p, stream);
+                        const int* cu_kv_p, size_t d_qk, hipStream_t stream) {
+  switch (d_qk) {
+    case 128:
+      run_attn_fwd_impl<T, SmallSeqConfig<MAX_KV, 128>>(
+          b, h_q, Q, K, V, dropout_mask, dropout, scale, O, workspace, cu_kv, cu_kv_p, stream);
+      break;
+    case 256:
+      run_attn_fwd_impl<T, SmallSeqConfig<MAX_KV, 256>>(
+          b, h_q, Q, K, V, dropout_mask, dropout, scale, O, workspace, cu_kv, cu_kv_p, stream);
+      break;
+    case 512:
+      run_attn_fwd_impl<T, SmallSeqConfig<MAX_KV, 512>>(
+          b, h_q, Q, K, V, dropout_mask, dropout, scale, O, workspace, cu_kv, cu_kv_p, stream);
+      break;
+    default:
+      NVTE_ERROR("Unsupported head dimension (d_qk) for small-seq attention: must be 128, 256, or "
+                 "512.");
+  }
 }
 
 template <int MAX_KV, typename T>
 static void dispatch_bwd(int b, int h_q, const T* Q, const T* K, const T* V, const T* grad_O,
                         const T* attn_weights, const T* dropout_mask, float dropout, float scale,
                         T* grad_Q, T* grad_K, T* grad_V, T* workspace, const int* cu_kv,
-                        const int* cu_kv_p, hipStream_t stream) {
-  run_attn_bwd_impl<T, SmallSeqConfig<MAX_KV, 128>>(
-      b, h_q, Q, K, V, grad_O, attn_weights, dropout_mask, dropout, scale,
-      grad_Q, grad_K, grad_V, workspace, cu_kv, cu_kv_p, stream);
+                        const int* cu_kv_p, size_t d_qk, hipStream_t stream) {
+  switch (d_qk) {
+    case 128:
+      run_attn_bwd_impl<T, SmallSeqConfig<MAX_KV, 128>>(
+          b, h_q, Q, K, V, grad_O, attn_weights, dropout_mask, dropout, scale,
+          grad_Q, grad_K, grad_V, workspace, cu_kv, cu_kv_p, stream);
+      break;
+    case 256:
+      run_attn_bwd_impl<T, SmallSeqConfig<MAX_KV, 256>>(
+          b, h_q, Q, K, V, grad_O, attn_weights, dropout_mask, dropout, scale,
+          grad_Q, grad_K, grad_V, workspace, cu_kv, cu_kv_p, stream);
+      break;
+    case 512:
+      run_attn_bwd_impl<T, SmallSeqConfig<MAX_KV, 512>>(
+          b, h_q, Q, K, V, grad_O, attn_weights, dropout_mask, dropout, scale,
+          grad_Q, grad_K, grad_V, workspace, cu_kv, cu_kv_p, stream);
+      break;
+    default:
+      NVTE_ERROR("Unsupported head dimension (d_qk) for small-seq attention: must be 128, 256, or "
+                 "512.");
+  }
 }
 
 void fused_attn_smallseq_fwd(size_t b,
@@ -849,6 +880,11 @@ void fused_attn_smallseq_fwd(size_t b,
               << (qkv_dtype == DType::kBFloat16 ? "BF16" : qkv_dtype == DType::kFloat16 ? "FP16" : "?")
               << std::endl;
   }
+
+  NVTE_CHECK(d_qk == d_v,
+             "Small-seq attention requires matching Q/K and V head sizes (d_qk == d_v).");
+  NVTE_CHECK(d_qk == 128 || d_qk == 256 || d_qk == 512,
+             "Small-seq attention supports head dimension (d_qk) 128, 256, or 512 only.");
 
   float sqr_dk_scale = attn_scale;
 
@@ -926,6 +962,11 @@ void fused_attn_smallseq_bwd(size_t b,
               << (qkv_dtype == DType::kBFloat16 ? "BF16" : qkv_dtype == DType::kFloat16 ? "FP16" : "?")
               << std::endl;
   }
+
+  NVTE_CHECK(d_qk == d_v,
+             "Small-seq attention requires matching Q/K and V head sizes (d_qk == d_v).");
+  NVTE_CHECK(d_qk == 128 || d_qk == 256 || d_qk == 512,
+             "Small-seq attention supports head dimension (d_qk) 128, 256, or 512 only.");
 
   float sqr_dk_scale = attn_scale;
 
