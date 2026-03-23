@@ -65,5 +65,5 @@ class BenchGroupedGemm:
         torch.cuda.synchronize()
 
 if __name__ == "__main__":
-    from direct_run import run_as_main
+    from driver import run_as_main
     run_as_main(__file__)

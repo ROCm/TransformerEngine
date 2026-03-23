@@ -176,11 +176,27 @@ asv preview
 
 This can also be provided statically via github pages.
 
+## Running benchmark scripts directly
+
+Each `bench_*.py` file can be executed directly, without the helper script or ASV:
+
+```bash
+cd benchmarks/asv
+python bench_gemm.py                        # run all methods in the suite
+python bench_gemm.py time_forward           # filter to a specific method
+python bench_gemm.py -w 5 -n 20            # custom warmup/iteration counts
+python bench_casting.py --no-save           # skip saving results to ASV format
+```
+
+This is equivalent to `run_benchmarks.sh run bench_gemm` but requires no wrapper.
+Results are saved in ASV-compatible format by default (viewable with `asv publish && asv preview`).
+
 ## Writing new benchmarks
 
 Create a new file in `benchmarks/asv/` following the naming convention `bench_<name>.py`.
 
 ```python
+#!/usr/bin/env python3
 import torch
 import transformer_engine.pytorch as te
 
@@ -199,6 +215,10 @@ class BenchSomething:
         # MUST call torch.cuda.synchronize() to ensure GPU work completes.
         self.module(self.x)
         torch.cuda.synchronize()
+
+if __name__ == "__main__":
+    from driver import run_as_main
+    run_as_main(__file__)
 ```
 
 Key rules:

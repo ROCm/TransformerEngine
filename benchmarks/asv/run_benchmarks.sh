@@ -50,10 +50,10 @@ case "${1:-}" in
             if [[ ${#ARGS[@]} -eq 0 ]]; then
                 # Run all suites
                 for s in "${SUITES[@]}"; do
-                    python "$BENCH_DIR/direct_run.py" "$s"
+                    python "$BENCH_DIR/driver.py" "$s"
                 done
             else
-                python "$BENCH_DIR/direct_run.py" "${ARGS[@]}"
+                python "$BENCH_DIR/driver.py" "${ARGS[@]}"
             fi
         fi
         ;;

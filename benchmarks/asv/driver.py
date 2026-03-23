@@ -10,12 +10,12 @@ Results are saved in ASV-compatible format so they can be viewed with
 ``asv publish && asv preview``.
 
 Usage:
-    python benchmarks/asv/direct_run.py [options] <suite> [method_filter]
+    python benchmarks/asv/driver.py [options] <suite> [method_filter]
 
 Examples:
-    python benchmarks/asv/direct_run.py bench_casting
-    python benchmarks/asv/direct_run.py bench_gemm time_forward
-    python benchmarks/asv/direct_run.py -w 5 -n 20 bench_casting
+    python benchmarks/asv/driver.py bench_casting
+    python benchmarks/asv/driver.py bench_gemm time_forward
+    python benchmarks/asv/driver.py -w 5 -n 20 bench_casting
 """
 
 import argparse
@@ -323,7 +323,7 @@ def run_as_main(caller_file):
     Call from a bench file's ``__main__`` block::
 
         if __name__ == "__main__":
-            from direct_run import run_as_main
+            from driver import run_as_main
             run_as_main(__file__)
     """
     script_dir = os.path.dirname(os.path.abspath(caller_file))
@@ -341,7 +341,7 @@ def run_as_main(caller_file):
 def main():
     args = _parse_args(with_suite=True)
     if not args.suite:
-        print("error: suite argument is required when running direct_run.py directly",
+        print("error: suite argument is required when running driver.py directly",
               file=sys.stderr)
         sys.exit(1)
 
