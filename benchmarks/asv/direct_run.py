@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 """Run ASV benchmark classes directly in-process, bypassing subprocess overhead.
 
 Results are saved in ASV-compatible format so they can be viewed with
@@ -281,10 +286,12 @@ def run_class(suite_name, cls, class_name, method_filter=None, warmup=3, iters=7
     return all_results
 
 
-def main():
+def _parse_args(with_suite=False):
     parser = argparse.ArgumentParser(
         description="Run ASV benchmarks directly in-process (no subprocess overhead).")
-    parser.add_argument("suite", help="Benchmark module name (e.g. bench_casting)")
+    if with_suite:
+        parser.add_argument("suite", nargs="?", default=None,
+                            help="Benchmark module name (e.g. bench_casting)")
     parser.add_argument("method_filter", nargs="?", default=None,
                         help="Only run time_* methods containing this string")
     parser.add_argument("-w", "--warmup", type=int, default=3,
@@ -293,21 +300,53 @@ def main():
                         help="Number of timed iterations (default: 7)")
     parser.add_argument("--no-save", action="store_true",
                         help="Skip saving results to ASV format")
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    mod = importlib.import_module(args.suite)
 
+def _run_module(mod, suite_name, method_filter=None, warmup=3, iters=7, no_save=False):
+    """Run all Bench* classes in a module and optionally save results."""
     all_results = {}
     for name in sorted(dir(mod)):
         obj = getattr(mod, name)
         if isinstance(obj, type) and name.startswith("Bench"):
             results = run_class(
-                args.suite, obj, name,
-                args.method_filter, args.warmup, args.iters)
+                suite_name, obj, name, method_filter, warmup, iters)
             all_results.update(results)
 
-    if all_results and not args.no_save:
+    if all_results and not no_save:
         save_asv_results(all_results)
+
+
+def run_as_main(caller_file):
+    """Entry point for bench files run directly (e.g. ``python bench_gemm.py``).
+
+    Call from a bench file's ``__main__`` block::
+
+        if __name__ == "__main__":
+            from direct_run import run_as_main
+            run_as_main(__file__)
+    """
+    script_dir = os.path.dirname(os.path.abspath(caller_file))
+    os.chdir(script_dir)
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+
+    suite_name = os.path.splitext(os.path.basename(caller_file))[0]
+    mod = importlib.import_module(suite_name)
+
+    args = _parse_args()
+    _run_module(mod, suite_name, args.method_filter, args.warmup, args.iters, args.no_save)
+
+
+def main():
+    args = _parse_args(with_suite=True)
+    if not args.suite:
+        print("error: suite argument is required when running direct_run.py directly",
+              file=sys.stderr)
+        sys.exit(1)
+
+    mod = importlib.import_module(args.suite)
+    _run_module(mod, args.suite, args.method_filter, args.warmup, args.iters, args.no_save)
 
 
 if __name__ == "__main__":

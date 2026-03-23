@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 ###############################################################################
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
@@ -54,3 +55,7 @@ class BenchAttention:
         out.backward(self.grad_out)
         self.q.grad = self.k.grad = self.v.grad = None
         torch.cuda.synchronize()
+
+if __name__ == "__main__":
+    from direct_run import run_as_main
+    run_as_main(__file__)

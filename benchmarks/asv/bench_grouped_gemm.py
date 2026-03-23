@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 ###############################################################################
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
@@ -62,3 +63,7 @@ class BenchGroupedGemm:
         for p in self.module.parameters():
             p.grad = None
         torch.cuda.synchronize()
+
+if __name__ == "__main__":
+    from direct_run import run_as_main
+    run_as_main(__file__)
