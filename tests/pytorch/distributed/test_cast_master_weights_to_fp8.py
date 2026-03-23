@@ -710,9 +710,9 @@ def run_parallel_tests() -> None:
         quantizations.append("fp8_block")
 
     manual_post_all_gather_processings = [False, True]
-    keep_fp8_weight_transpose_cache = [True]
+    keep_fp8_weight_transpose_caches = [True]
     if IS_HIP_EXTENSION:
-        keep_fp8_weight_transpose_cache.append(False)
+        keep_fp8_weight_transpose_caches.append(False)
 
     _test_mini_optimizer(dp_group)
 
