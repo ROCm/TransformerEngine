@@ -330,7 +330,11 @@ def _compare_tensors(name, test, ref, rtol, atol):
             )
         if abs_err <= atol:
             numerics_info += f" abs. error = {abs_err} (tol = {atol})"
+    rel_diffs = diff / torch.clamp(torch.abs(ref.flatten()), min=1e-5)
+    failed_mask = (diff > atol) & (rel_diffs > rtol)
 
+    num_actually_failing = failed_mask.sum().item()
+    numerics_info += f"\nElements violating both atol and rtol: {num_actually_failing} out of"
     return numerics_failed, numerics_info
 
 
@@ -563,7 +567,7 @@ def _train(opts):
         # Now validate accuracy
         if not bool(numerics_failed.item()):
             for i, (test_g, ref_g) in enumerate(zip(test_grads, ref_grads)):
-                rtol = 0.125 if opts.fp8 else 0.025 if not IS_HIP_EXTENSION else 5e-2
+                rtol = 0.125 if opts.fp8 else 0.025 if not IS_HIP_EXTENSION else 3e-2
                 atol = 0.0625 if opts.fp8 else 0.00125 if not IS_HIP_EXTENSION else 1e-2
                 grad_failed, grad_info = _compare_tensors(names[i], test_g, ref_g, rtol, atol)
                 dist_print(grad_info, src=WORLD_RANK, error=grad_failed)

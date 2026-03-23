@@ -38,9 +38,13 @@ using ExtBarrierOp = std::function<void(ExtComm)>;
 #define NVTE_LAUNCH_CPU 2
 #define NVTE_MAX_NVLINK 32
 
+#ifdef __HIP_PLATFORM_AMD__
 #define NVTE_ROCM_MAX_TP_SIZE 8
 // Maximum # of rings possible for ring_exchange
 #define NVTE_ROCM_MAX_RINGS (NVTE_ROCM_MAX_TP_SIZE - 1)
+#else
+#define NVTE_ROCM_MAX_RINGS 1
+#endif
 
 #define NVTE_UB_MEM_UC_CONTIG 1
 #define NVTE_UB_MEM_MC_CREATED 2
@@ -69,7 +73,7 @@ using ExtBarrierOp = std::function<void(ExtComm)>;
 #define NVTE_HF_NVREDUCEDONE (userbuffers_op_types + 3)
 #define NVTE_MAX_SHARP 16
 
-#ifdef __HIP_PLATFORM_AMD__ // Moved to header for visibility
+#ifdef __HIP_PLATFORM_AMD__ // Moved from userbuffers.cu for visibility
 // Index corresponds to the type of flag:
 // 0 - Send index counter
 // 1 - CE start index counter

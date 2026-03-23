@@ -23,12 +23,6 @@
 #define HALF_BYTES 2
 #define UB_MAX_SM 32
 
-#ifdef __HIP_PLATFORM_AMD__
-#define half_dtype hip_bfloat16
-#define __nv_fp8_e5m2 te_hip_fp8_e5m2
-#define __nv_fp8_e4m3 te_hip_fp8_e4m3
-#endif
-
 using namespace std::placeholders;
 
 namespace transformer_engine {

@@ -13,8 +13,6 @@
 #ifdef __HIP_PLATFORM_AMD__
 #include <hip/hip_bfloat16.h>
 #define half_dtype hip_bfloat16 
-#define __nv_fp8_e5m2 te_hip_fp8_e5m2
-#define __nv_fp8_e4m3 te_hip_fp8_e4m3
 #else
 
 #if __CUDA_ARCH__ >= 800
@@ -2339,7 +2337,7 @@ __global__ void __launch_bounds__(MAX_THREADS) kuserbuffers_pushsendrecv_multiat
 // Return TRUE if two ranks share the same NV domain
 #define INTRANODE(peer) ((peer / comm->nvsize) == (comm->myrank / comm->nvsize))
 
-#ifndef __HIP_PLATFORM_AMD__ // Moved to header for visibility
+#ifndef __HIP_PLATFORM_AMD__ // Moved to userbuffers.h for visibility
 // Index corresponds to the type of flag:
 // 0 - Send index counter
 // 1 - CE start index counter
